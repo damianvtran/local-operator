@@ -9,5 +9,8 @@
   "cli.exec_runtime.model_returned": "[dim]đã quay lại {selector}[/dim]",
   "cli.exec_runtime.compacting": "[dim]đang nén ngữ cảnh…[/dim]",
   "cli.exec_runtime.error": "Lỗi: {sentence}",
-  "cli.exec_runtime.aborted": "[red]đã hủy bỏ[/red]"
+  "cli.exec_runtime.aborted": "[red]đã hủy bỏ[/red]",
+  "cli.exec_runtime.temporary_agent_shell_refused": "cuộc trò chuyện tạm thời do bạn tự bắt đầu; không thể bắt đầu từ shell của tác nhân",
+  "cli.exec_runtime.temporary_conflicts_resume": "--temporary bắt đầu cuộc trò chuyện mới, nên không thể kết hợp với --resume",
+  "cli.exec_runtime.temporary_conflicts_workstream": "--temporary không thể kết hợp với --workstream: workstream được giữ lại"
 }

@@ -34,6 +34,7 @@ import type {
 	SlashCommand,
 	SubagentDetail,
 	TagsResponse,
+	TemporaryInfo,
 	TranscriptEntry,
 } from "./types";
 
@@ -415,7 +416,10 @@ export function resumeSession(
     A caller with a directory in hand passes ``cwd``; nothing else about the
     request changes, so both callers share one route and one response shape. */
 export function startSession(
-	input: { cwd?: string; provider?: string; model_id?: string } = {},
+	/* `temporary` is sent ONLY by a caller that saw `features.temporary_chats`
+	   (lib/temporary): an older relay's start body is strict, so an ungated
+	   key would be a refusal rather than a quietly retained chat. */
+	input: { cwd?: string; provider?: string; model_id?: string; temporary?: boolean } = {},
 ): Promise<{ ok: boolean; pid: number; session_id: string }> {
 	return request("/api/sessions/start", {
 		method: "POST",
@@ -527,6 +531,24 @@ export function setSessionPin(
 		method: "POST",
 		headers: { "content-type": "application/json" },
 		body: JSON.stringify({ pinned }),
+	});
+}
+
+/** Mark or keep a chat (contract §2.3, `POST /api/sessions/{id}/temporary`).
+
+    DESIRED STATE, like the pin: the body names the state wanted, so a retry
+    after a dropped response lands on the same one. The reply is the mark the
+    daemon READ BACK (`null` = kept). Refusals: 409 `session_pinned`,
+    `session_in_project`, `session_not_user`; 404 `session_not_found` /
+    `session_temporary_deleted`. */
+export function setSessionTemporary(
+	sessionId: string,
+	temporary: boolean,
+): Promise<{ session_id: string; temporary: TemporaryInfo | null }> {
+	return request(`/api/sessions/${encodeURIComponent(sessionId)}/temporary`, {
+		method: "POST",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify({ temporary }),
 	});
 }
 

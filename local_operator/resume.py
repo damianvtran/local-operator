@@ -1858,6 +1858,7 @@ def recent_sessions(
     *,
     revalidate: bool = False,
     include_archived: bool = False,
+    include_temporary: bool = False,
 ) -> list[tuple[str, float]]:
     """``(id, mtime)`` for the USER's resumable sessions, newest first.
 
@@ -1972,8 +1973,12 @@ def recent_sessions(
     """
     return [
         (name, mtime)
-        for name, mtime, _origin, _archived in _recent_sessions_with_origin(
-            config_dir, limit, revalidate=revalidate, include_archived=include_archived
+        for name, mtime, _origin, _archived, _temporary in _recent_sessions_with_origin(
+            config_dir,
+            limit,
+            revalidate=revalidate,
+            include_archived=include_archived,
+            include_temporary=include_temporary,
         )
     ]
 
@@ -1985,7 +1990,8 @@ def _recent_sessions_with_origin(
     revalidate: bool = False,
     strict: bool = False,
     include_archived: bool = False,
-) -> list[tuple[str, float, str, bool]]:
+    include_temporary: bool = False,
+) -> list[tuple[str, float, str, bool, bool]]:
     """:func:`recent_sessions`, plus the ``origin`` this scan already parsed.
 
     The scan reads and parses every marker that exists in order to decide
@@ -2020,6 +2026,7 @@ def _recent_sessions_with_origin(
         revalidate=revalidate,
         strict=strict,
         include_archived=include_archived,
+        include_temporary=include_temporary,
     )[0]
 
 
@@ -2079,6 +2086,13 @@ def _scanned_entries(scan: Iterable[os.DirEntry[str]]) -> Iterator[os.DirEntry[s
         yield entry
 
 
+def _temporary_mark_present(path: str) -> bool:
+    """``session.temporary.is_marked_path``, imported lazily (stdlib-only module)."""
+    from local_operator.session.temporary import is_marked_path
+
+    return is_marked_path(path)
+
+
 def _scan_sessions(
     config_dir: Path,
     limit: int | None = None,
@@ -2086,7 +2100,8 @@ def _scan_sessions(
     revalidate: bool = False,
     strict: bool = False,
     include_archived: bool = False,
-) -> tuple[list[tuple[str, float, str, bool]], set[str]]:
+    include_temporary: bool = False,
+) -> tuple[list[tuple[str, float, str, bool, bool]], set[str]]:
     """The one store scan: ``(rows, hidden_names)``.
 
     ``revalidate=True`` forces this scan to re-read every marker instead of
@@ -2134,6 +2149,14 @@ def _scan_sessions(
     Split from :func:`_recent_sessions_with_origin` rather than widening its
     return type because that shape is pinned by the CLI's recovery listing and
     by every other caller, none of which has any use for the second value.
+
+    ``include_temporary`` is the same kind of predicate for TEMPORARY chats
+    (``session/temporary.py``), checked beside the archive gate: off by
+    default, so a temporary chat is left out of every history listing, and the
+    row's fifth element is the scan's own verdict. A temporary chat is the
+    user's own, so like an archived one it never lands in ``hidden_names``.
+    ``session.cleanup._picker_rows`` passes ``True``: its view of the store is
+    a deletion authority and must not change because of this feature.
 
     ``include_archived`` is THE archive predicate for every listing in this
     codebase, and that is the whole design: the picker, the sidebar catalogue,
@@ -2198,7 +2221,7 @@ def _scan_sessions(
         else:
             revalidate = scans_so_far % REVALIDATE_EVERY == 0
 
-    rows: list[tuple[str, float, str, bool]] = []
+    rows: list[tuple[str, float, str, bool, bool]] = []
     # THE ARCHIVE INDEX, READ LAZILY AND MEMOISED, on the first candidate that
     # reaches the archive decision below. Not read up front, and that is a
     # syscall budget rather than a style choice: the poll's per-directory cost
@@ -2445,10 +2468,16 @@ def _scan_sessions(
             is_archived = entry.name in archived
             if is_archived and not include_archived:
                 continue
+            # A TEMPORARY CHAT IS NOT OFFERED either, unless asked for: one
+            # failed ``stat`` per user row in the common case, and the mark is
+            # parsed only when the file exists (``temporary.is_marked_path``).
+            is_temporary = _temporary_mark_present(entry.path)
+            if is_temporary and not include_temporary:
+                continue
             activity = session_activity_path(entry.path)
             if activity is None:
                 continue
-            rows.append((entry.name, activity, origin, is_archived))
+            rows.append((entry.name, activity, origin, is_archived, is_temporary))
     merged = {
         name: entry for name, entry in cached.items() if name in seen and isinstance(entry, dict)
     }
@@ -2790,6 +2819,10 @@ class SessionRow(NamedTuple):
     #: 2, R2-m2), so a missing ``remote_attention`` is not an acknowledgement:
     #: the origin's forwarder settles nothing on such a row.
     remote_attention_unknown: bool = False
+    #: Whether this is a TEMPORARY chat (``session/temporary.py``), as the scan
+    #: read it. Only ever ``True`` on a listing that asked for temporary rows
+    #: (``include_temporary``); appended last and defaulted, the file's rule.
+    temporary: bool = False
 
     @property
     def is_remote(self) -> bool:
@@ -4356,6 +4389,7 @@ def recent_session_rows(
     *,
     strict: bool = False,
     include_archived: bool = False,
+    include_temporary: bool = False,
 ) -> list[SessionRow]:
     """:class:`SessionRow` per resumable session, newest first.
 
@@ -4419,8 +4453,12 @@ def recent_session_rows(
     """
     rows: list[SessionRow] = []
     seen_ids: set[str] = set()
-    for session_id, mtime, origin, archived in _recent_sessions_with_origin(
-        config_dir, limit, strict=strict, include_archived=include_archived
+    for session_id, mtime, origin, archived, temporary in _recent_sessions_with_origin(
+        config_dir,
+        limit,
+        strict=strict,
+        include_archived=include_archived,
+        include_temporary=include_temporary,
     ):
         seen_ids.add(session_id)
         session_dir = config_dir / "sessions" / session_id
@@ -4444,6 +4482,7 @@ def recent_session_rows(
                 opened_by=(
                     workstream_opened_by(session_dir) if origin == ORIGIN_AGENT_WORKSTREAM else None
                 ),
+                temporary=temporary,
             )
         )
     if limit is None:

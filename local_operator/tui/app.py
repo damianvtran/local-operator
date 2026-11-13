@@ -1713,6 +1713,10 @@ def _retiring_notice_text(error: BaseException) -> str:
 #: dozen rows is the cheaper of those two costs. The band is only repainted
 #: when the count actually CHANGES.
 JOB_POLL_INTERVAL_S = 1.0
+#: How often a TEMPORARY chat's band segment re-reads its state. The countdown
+#: is shown in whole minutes over its last five, so a 30 s tick keeps it within
+#: half a minute of the pass; a kept chat skips the read entirely.
+TEMPORARY_BAND_TICK_S = 30.0
 
 #: How often the terminal asks whether this machine's connector parked itself.
 #:
@@ -5145,8 +5149,18 @@ class OperatorApp(App[None]):
         resume_factory: Callable[[str | None], Awaitable[SessionProtocol]] | None = None,
         on_config_changed: Callable[[], None] | None = None,
         warm_session_imports: bool = True,
+        start_temporary: bool = False,
     ) -> None:
         super().__init__()
+        # TEMPORARY CHATS (``tui/temporary_chat.py``). ``_temporary_pending``
+        # holds the first prompt for the NEXT session bound (``lop --temporary``
+        # and ``/new temporary [prompt]``): the mark needs the session's id,
+        # which only exists once the viewer binds. ``_temporary_confirm_at``
+        # is the 30 s window ``/temporary on`` waits for its repeat, and
+        # ``_temporary_flag`` is the bound chat's state for the band/composer.
+        self._temporary_pending: tuple[str] | None = ("",) if start_temporary else None
+        self._temporary_confirm_at = 0.0
+        self._temporary_flag = False
         self._interaction = SessionInteraction(None)
         self._interactions: dict[int, SessionInteraction] = {}
         self._event_sources: dict[EventController, SessionInteraction] = {}
@@ -6913,6 +6927,7 @@ class OperatorApp(App[None]):
         # The count has no event to hang off (see JOB_POLL_INTERVAL_S).
         self.set_interval(JOB_POLL_INTERVAL_S, self._poll_subagents)
         self.set_interval(1.0, self._poll_completion_attention)
+        self.set_interval(TEMPORARY_BAND_TICK_S, self._tick_temporary_band)
         self.set_interval(TERMINAL_LIFECYCLE_CHECK_S, self._check_terminal_frontend)
         # Prime the reader observation while mount still owns a known-live
         # driver. A tty can EOF before the first interval tick, and requiring a
@@ -11923,6 +11938,9 @@ class OperatorApp(App[None]):
             entries = load_catalog(
                 root,
                 include_subagents=self._session_sidebar.show_subagents,
+                # Temporary chats live in the sidebar's own `Temporary · N`
+                # group (``_unpinned_rank`` files them at rank -1).
+                include_temporary=True,
                 pinned_hidden_ids=tuple(read_pins(root)),
             )
             # `/tags on` is persisted, so a shortcut pressed while the drawer
@@ -12002,8 +12020,16 @@ class OperatorApp(App[None]):
             try:
                 from local_operator.paths import config_dir
                 from local_operator.tui.sidebar_pins import read_pins, toggle_pin
+                from local_operator.tui.temporary_chat import pin_refusal_sentence
 
                 root = config_dir()
+                # A pin is a promise to keep; a temporary chat cannot hold one
+                # until it is kept. (A temporary chat is never pinned, so this
+                # can only ever refuse the PIN direction of the toggle.)
+                refused = await asyncio.to_thread(pin_refusal_sentence, root, target)
+                if refused:
+                    self._system_notice(refused, "warning")
+                    return
                 # `toggle_pin` writes a file, so it is worker-thread work — the
                 # same shape `_switch_session_cold` uses. The UI thread must
                 # not do I/O.
@@ -12252,6 +12278,9 @@ class OperatorApp(App[None]):
             entries = load_catalog(
                 root,
                 include_subagents=self._session_sidebar.show_subagents,
+                # Temporary chats live in the sidebar's own `Temporary · N`
+                # group (``_unpinned_rank`` files them at rank -1).
+                include_temporary=True,
                 pinned_hidden_ids=tuple(pins),
             )
             # THE PEER TIER (``mesh-ui.md`` §1.3, review round 4 MINOR 3): the
@@ -12862,6 +12891,7 @@ class OperatorApp(App[None]):
         # The count has no event to hang off (see JOB_POLL_INTERVAL_S).
         self.set_interval(JOB_POLL_INTERVAL_S, self._poll_subagents)
         self.set_interval(1.0, self._poll_completion_attention)
+        self.set_interval(TEMPORARY_BAND_TICK_S, self._tick_temporary_band)
         self.set_interval(TERMINAL_LIFECYCLE_CHECK_S, self._check_terminal_frontend)
         # Prime the reader observation while mount still owns a known-live
         # driver. A tty can EOF before the first interval tick, and requiring a
@@ -14466,9 +14496,12 @@ class OperatorApp(App[None]):
             self._park_unadopted_session(built)
             raise
         except Exception as error:  # TUI-012: construction error path
+            # ``lop --temporary`` armed the mark for THIS boot's session only.
+            self._temporary_pending = None
             self._on_boot_failed(error)
             return
         if navigation_generation != self._sidebar_navigation.generation:
+            self._temporary_pending = None
             if session is not self._session:
                 await session.dispose()
             return
@@ -14773,6 +14806,19 @@ class OperatorApp(App[None]):
             sentence = self._rehome_stranded_session(queued)
             if sentence:
                 self._notice(sentence, "note")
+        # A PENDING TEMPORARY MARK lands on the first session bound after it was
+        # asked for, here at the one writer of ``self._session`` — after the
+        # refresh, so the notice and any first prompt follow the rebuilt ledger.
+        # Every other bind re-reads the bound chat's mark for the band.
+        if session is not None:
+            pending = getattr(self, "_temporary_pending", None)
+            if pending is not None:
+                self._temporary_pending = None
+                self.call_after_refresh(
+                    self._apply_pending_temporary, session.session_id, pending[0]
+                )
+            else:
+                self.call_after_refresh(self._sync_temporary_flag)
 
     def _restore_search_spend(self, session: Any) -> None:
         """Seed a RESUMED conversation's search spend into the search ledger.
@@ -17629,7 +17675,11 @@ class OperatorApp(App[None]):
             self._status.update(model_label=welcome_mod.MODEL_SETUP, model_name="", streaming=False)
 
     async def _reload_session(
-        self, *, keep_context: bool = False, preserve_outgoing: bool = False
+        self,
+        *,
+        keep_context: bool = False,
+        preserve_outgoing: bool = False,
+        temporary: tuple[str] | None = None,
     ) -> None:
         """Dispose the current session, boot its replacement, and rebuild the
         ledger from what that replacement ACTUALLY holds.
@@ -17656,6 +17706,13 @@ class OperatorApp(App[None]):
         # Explicit reload replaces this workflow source. Sidebar navigation
         # never calls this path and therefore never retires its loops.
         navigation_generation = self._sidebar_navigation.generation
+        # A PENDING TEMPORARY MARK BELONGS TO ONE TRANSITION (review R1-M1).
+        # Whatever was armed before this swap (a ``lop --temporary`` boot that
+        # never bound, say) is superseded by it; this swap's own request is
+        # re-armed only immediately before it adopts the session IT built, so a
+        # failed construction, a sidebar click that supersedes it, or any other
+        # path that returns early can never leave the mark for the next chat.
+        self._temporary_pending = None
         self._interaction.retired = True
         self._retire_attach_behind(self._interaction)
         previous_id = self._conversation_id()
@@ -17954,7 +18011,12 @@ class OperatorApp(App[None]):
                         await session.dispose()
                     return
                 carried_spend = self._reset_ledger_for_swap()
-                self._adopt_session(session)
+                self._temporary_pending = temporary
+                try:
+                    self._adopt_session(session)
+                finally:
+                    # Consumed by the bind inside the adopt; never outlives it.
+                    self._temporary_pending = None
                 # Reload retired the outgoing turn before adopting a fresh
                 # interaction context. Its late unowned fallback must not give
                 # that new context a failed outcome before its first start.
@@ -20350,6 +20412,14 @@ class OperatorApp(App[None]):
             if pieces[0].casefold() == "remote":
                 self._cmd_new_remote(pieces[1] if len(pieces) > 1 else "", notice)
                 return
+            # ``/new temporary [prompt]`` — a fresh TEMPORARY chat. The word is
+            # reserved in the single-word form, like ``remote``; the mark and the
+            # optional first prompt land once the new session binds.
+            if pieces[0].casefold() == "temporary":
+                self._start_new_local_session(
+                    notice, temporary=(pieces[1] if len(pieces) > 1 else "",)
+                )
+                return
         self._start_new_local_session(notice)
 
     def _cmd_new_remote(self, tail: str, notice: NoticeFn) -> None:
@@ -20506,7 +20576,9 @@ class OperatorApp(App[None]):
             "warning",
         )
 
-    def _start_new_local_session(self, notice: NoticeFn) -> None:
+    def _start_new_local_session(
+        self, notice: NoticeFn, *, temporary: tuple[str] | None = None
+    ) -> None:
         if self._resume_factory is None:
             self._system_notice("new session unavailable: no session-capable launcher", "warning")
             return
@@ -20556,7 +20628,9 @@ class OperatorApp(App[None]):
         # than to this call site.
         self._reload_config_for_new_session(notice)
         notice("starting a new session…")
-        self._run_session_transition(self._reload_session())
+        # ``temporary`` rides WITH this one transition (review R1-M1): it is
+        # armed for the bind only when this reload adopts the session it built.
+        self._run_session_transition(self._reload_session(temporary=temporary))
 
     def _reload_config_for_new_session(self, notice: NoticeFn) -> None:
         """Adopt on-disk config for the session `/new` is about to build.
@@ -29499,6 +29573,11 @@ class OperatorApp(App[None]):
             # on the light one, under the 4.5:1 a call to action needs.
             return SETUP_PLACEHOLDER
         del connection  # see the docstring: one resting string across connection states
+        if getattr(self, "_temporary_flag", False):
+            from local_operator.i18n.keys import tui_composer as _tc
+            from local_operator.i18n.text import tr
+
+            return str(tr("tui.composer")(_tc.temporary_placeholder()))
         return editor.resting_placeholder
 
     def _drawable_questions(self, row: AskRow) -> list[Any] | None:
@@ -44889,8 +44968,10 @@ class OperatorApp(App[None]):
         # THIS machine's store and sessions, and an OLDER owner still advertises
         # the command ``authoritative_session`` — this pullback is what keeps
         # that stale advertisement from routing the command to another machine.
+        # `/temporary` joins on `/archive`'s argument: the mark it writes is
+        # `config_dir()/sessions/<id>/temporary.json`, this machine's store.
         _LOCAL_WORK_SLASHES = frozenset(
-            {"/archive", "/unarchive", "/delete", "/project", "/tag", "/tags"}
+            {"/archive", "/unarchive", "/delete", "/project", "/tag", "/tags", "/temporary"}
         )
 
         if command == "/model" and arg.strip().casefold() == "saved":
@@ -45185,6 +45266,8 @@ class OperatorApp(App[None]):
             self._cmd_effort(arg, notice)
         elif command == "/fast":
             self._cmd_fast(arg, notice)
+        elif command == "/temporary":
+            self._cmd_temporary(arg, notice)
         elif command in {"/saver", "/radient"}:
             if command == "/radient":
                 word, _, rest = arg.partition(" ")
@@ -47643,6 +47726,133 @@ class OperatorApp(App[None]):
         # already the receipt, so skip the repaint rather than raise.
         if self._status is not None:
             self._status.update(saver=_saver_label(self._session))
+
+    def _apply_pending_temporary(self, session_id: str, prompt: str) -> None:
+        """Mark the just-bound session temporary, then send its first prompt."""
+        from local_operator.paths import config_dir
+        from local_operator.session.retention import session_activity
+        from local_operator.tui import temporary_chat
+
+        # THE BACKSTOP (review R1-M1): a pending mark is for a FRESH chat, and
+        # a fresh chat has no conversation rows until its queued prompt is
+        # sent. Landing on one that does would make an existing conversation
+        # deletable without the confirmation ``/temporary on`` asks for, so it
+        # is never applied there, whatever path armed it.
+        directory = config_dir() / "sessions" / session_id
+        if session_id and session_activity(directory) is not None:
+            logger.warning(
+                "temporary: pending mark not applied to %s (it has messages)", session_id
+            )
+            # Said, and the prompt put back (review r2 M-1): the refused-mark
+            # branch below does both, and this refusal is no less one.
+            self._system_notice(temporary_chat.refused_sentence(session_id), "warning")
+            self._sync_temporary_flag()
+            if prompt.strip():
+                self._keep_quick_send_draft(prompt.strip())
+            return
+        ok, sentence = temporary_chat.apply(config_dir(), session_id, True)
+        self._system_notice(sentence, "note" if ok else "warning")
+        self._sync_temporary_flag()
+        if prompt.strip():
+            if ok:
+                self._submit_prompt(prompt.strip())
+            else:
+                # Refused: the typed prompt goes back into the composer rather
+                # than vanishing behind the warning (review R1-n2).
+                self._keep_quick_send_draft(prompt.strip())
+
+    def _tick_temporary_band(self) -> None:
+        """Re-read a temporary chat's band state so its countdown moves.
+
+        Only while the bound chat IS temporary: a kept chat pays nothing.
+        """
+        if self._temporary_flag:
+            self._sync_temporary_flag()
+
+    def _sync_temporary_flag(self) -> None:
+        """Re-read the bound chat's mark; repaint the band word and the placeholder."""
+        from local_operator.paths import config_dir
+        from local_operator.tui import temporary_chat
+
+        session = self._session
+        try:
+            word, alarm = (
+                temporary_chat.band_state(config_dir(), getattr(session, "session_id", ""))
+                if session
+                else ("", False)
+            )
+        except Exception:  # noqa: BLE001 — an unreadable mark reads as kept
+            logger.debug("temporary band state unreadable", exc_info=True)
+            word, alarm = "", False
+        flag = bool(word)
+        self._temporary_flag = flag
+        try:
+            if self._status is not None:
+                self._status.update(temporary=word, temporary_alarm=alarm)
+        except Exception:  # noqa: BLE001 — before the band mounts
+            logger.debug("temporary band segment not painted", exc_info=True)
+        try:
+            editor = self.query_one(Editor)
+            editor.placeholder = self._composer_placeholder_for(editor)
+        except Exception:  # noqa: BLE001 — before the composer mounts
+            pass
+
+    def _cmd_temporary(self, arg: str, notice: NoticeFn) -> None:
+        """``/temporary`` — toggle; ``/temporary on|off|status`` — set or report it.
+
+        ``/fast``'s grammar. ``off`` (Keep) takes effect at once. ``on`` on a
+        chat that already has messages first prints what is deleted and what
+        is kept and waits for ``/temporary on`` again within 30 s — the
+        terminal's form of the desktop's "Make temporary…" dialog.
+        """
+        del notice  # receipts go through the system notice, like `/fast`
+        from local_operator.paths import config_dir
+        from local_operator.tui import temporary_chat
+
+        session = self._session
+        if session is None:
+            self._system_notice("session is still starting…", "warning")
+            return
+        root = config_dir()
+        session_id = session.session_id
+        wanted = temporary_chat.parse(arg)
+        if wanted is None:
+            self._system_notice(temporary_chat.usage_hint(), "warning")
+            return
+        if wanted == "status":
+            self._system_notice(temporary_chat.status_sentence(root, session_id))
+            return
+        current = temporary_chat.is_temporary(root, session_id)
+        target = (not current) if wanted == "toggle" else wanted == "on"
+        if target == current:
+            self._system_notice(temporary_chat.status_sentence(root, session_id))
+            return
+        if target and self._has_conversation_rows():
+            now = time.monotonic()
+            if now - self._temporary_confirm_at > temporary_chat.CONFIRM_WINDOW_S:
+                from local_operator.i18n.keys import tui_notices as _tn
+                from local_operator.i18n.text import tr
+
+                self._temporary_confirm_at = now
+                self._system_notice(str(tr("tui.notices")(_tn.temporary_confirm())), "warning")
+                return
+        self._temporary_confirm_at = 0.0
+        ok, sentence = temporary_chat.apply(root, session_id, target)
+        self._system_notice(sentence, "note" if ok else "warning")
+        self._sync_temporary_flag()
+
+    def _has_conversation_rows(self) -> bool:
+        """Whether the bound conversation already has messages on disk."""
+        session = self._session
+        if session is None:
+            return False
+        try:
+            from local_operator.paths import config_dir
+            from local_operator.session.retention import session_activity
+
+            return session_activity(config_dir() / "sessions" / session.session_id) is not None
+        except Exception:  # noqa: BLE001 — unknown: ask, the careful direction
+            return True
 
     def _cmd_fast(self, arg: str, notice: NoticeFn) -> None:
         """``/fast`` — toggle fast mode; ``/fast on|off|status`` — set or report it.
@@ -53919,6 +54129,13 @@ class OperatorApp(App[None]):
             picker.set_choices(self._saver_argument_choices(message.command))
             picker.set_notice("")
             return
+        if message.command == "temporary":
+            # Same defect class as `/saver` (U1) and QA round 2's Q6: with no
+            # branch here the list fell through to the `/login` rows, `on`
+            # fuzzy-matched a provider, and Enter ran `/temporary <provider>`.
+            picker.set_choices(self._temporary_argument_choices())
+            picker.set_notice("")
+            return
         if message.command == "aida":
             # THE RESERVED WORDS, not the provider fall-through (UX round 1,
             # U1). The fall-through is the provider vocabulary and is wrong for
@@ -54014,6 +54231,21 @@ class OperatorApp(App[None]):
                 )
             ]
         return [ArgumentChoice(name=word, description=described[word]) for word in words]
+
+    def _temporary_argument_choices(self) -> list[ArgumentChoice]:
+        """The words ``/temporary`` parses, as bare tokens.
+
+        TOKENS ONLY, no description: the words are technical identifiers, and
+        a describing line here would be new copy outside the audited catalogue
+        (the `/saver` rows' English descriptions are not keyed). ``status``
+        sorts first for `/saver`'s reason: a stray Enter on an open list then
+        reports instead of marking a chat for deletion.
+        """
+        return [
+            ArgumentChoice("status", "", aliases=("show",)),
+            ArgumentChoice("on", "", aliases=("yes", "enable")),
+            ArgumentChoice("off", "", aliases=("no", "disable", "keep")),
+        ]
 
     def on_refresh_argument_choices(self, message: RefreshArgumentChoices) -> None:
         """Refill an open argument list whose rows depend on a sub-slot.
