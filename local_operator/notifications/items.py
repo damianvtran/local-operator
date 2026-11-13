@@ -19,12 +19,15 @@ module writes the ask log.
 
 Import-light by design: the asks store and the project registry are imported
 inside the functions that need them, so the desktop feed's count read never
-pays for the project registry.
+pays for the project registry. The registry, once built, is reused process-wide
+(:func:`shared_project_registry`); open asks are read ONCE per request and the
+rows handed to every helper that needs them.
 """
 
 from __future__ import annotations
 
 import logging
+import threading
 from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
@@ -159,12 +162,61 @@ class SessionFacts:
         }
 
 
-class ProjectFacts:
-    """``projects_for_session`` over ONE registry snapshot per request (§2.2)."""
+#: Process-wide ``ProjectRegistry`` per config dir, with the lock that
+#: serializes reads of it. WHY: building a registry parses every
+#: ``projects/*.json`` (902 rows here: 1.6-2.3 s), and every list, detail and
+#: count request used to build a fresh one through :class:`ProjectFacts`, so
+#: opening the inbox or clicking between items paid that parse each time.
+#:
+#: FRESHNESS (the invariant this reuse rests on): the registry refreshes itself
+#: on read — at once when ``projects/``'s mtime moves (every publish is
+#: temp-write + ``os.replace``, which changes the directory), else after its
+#: ``refresh_interval`` (5 s) — and its stat-keyed row cache re-parses only the
+#: files whose (mtime, ctime, size, inode) moved. So a reused registry answers
+#: what a new one would, minus at most one interval for an in-place rewrite
+#: that never touches the directory (no core writer does that).
+#:
+#: THREADS: routes run these reads in worker threads and the registry's
+#: refresh swaps several attributes, so every read goes through the paired
+#: lock. Bounded because tests and multi-root callers each mint a key.
+_SHARED_REGISTRIES: dict[str, tuple[Any, threading.Lock]] = {}
+_SHARED_REGISTRIES_LOCK = threading.Lock()
+_SHARED_REGISTRIES_MAX = 8
 
-    def __init__(self, config_dir: Path | str) -> None:
+
+def shared_project_registry(config_dir: Path | str) -> tuple[Any, threading.Lock]:
+    """The process-wide registry for ``config_dir`` and its read lock.
+
+    Built on first use and kept; a construction failure raises to the caller
+    and is NOT cached, so a store repaired later is picked up by the next read.
+    """
+    key = str(Path(config_dir))
+    with _SHARED_REGISTRIES_LOCK:
+        entry = _SHARED_REGISTRIES.get(key)
+        if entry is None:
+            from local_operator.projects import ProjectRegistry
+
+            entry = (ProjectRegistry(Path(config_dir)), threading.Lock())
+            while len(_SHARED_REGISTRIES) >= _SHARED_REGISTRIES_MAX:
+                _SHARED_REGISTRIES.pop(next(iter(_SHARED_REGISTRIES)))
+            _SHARED_REGISTRIES[key] = entry
+        return entry
+
+
+class ProjectFacts:
+    """``projects_for_session`` per request, over the SHARED registry (§2.2).
+
+    The per-session answer is memoized for this request only (a list page names
+    the same session many times); the registry behind it is the process-wide
+    one from :func:`shared_project_registry`, never built per request.
+    ``registry`` lets a caller (or a test) pass its own instance; a lock is
+    then not taken, because a private registry is not shared across threads.
+    """
+
+    def __init__(self, config_dir: Path | str, registry: Any = None) -> None:
         self.config_dir = Path(config_dir)
-        self._registry: Any = None
+        self._registry: Any = registry
+        self._lock: threading.Lock | None = None
         self._failed = False
         self._cache: dict[str, list[dict[str, Any]]] = {}
 
@@ -175,10 +227,13 @@ class ProjectFacts:
         if not self._failed:
             try:
                 if self._registry is None:
-                    from local_operator.projects import ProjectRegistry
-
-                    self._registry = ProjectRegistry(self.config_dir)
-                for project in self._registry.projects_for_session(session_id):
+                    self._registry, self._lock = shared_project_registry(self.config_dir)
+                if self._lock is not None:
+                    with self._lock:
+                        projects = self._registry.projects_for_session(session_id)
+                else:
+                    projects = self._registry.projects_for_session(session_id)
+                for project in projects:
                     rows.append(
                         {
                             "key": project.name,
@@ -330,9 +385,17 @@ def waiting_items(
     *,
     session_id: str | None = None,
     lapsed_visible_ms: int | None = None,
+    asks: Sequence[Mapping[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
-    """Every open ask as an item, newest first (not paged: §2.1)."""
-    rows = open_asks(config_dir, lapsed_visible_ms=lapsed_visible_ms)
+    """Every open ask as an item, newest first (not paged: §2.1).
+
+    ``asks``: the request's own :func:`open_asks` read, when the caller already
+    has it — the index read costs ~100 ms on a real ask queue, and one list
+    request used to pay it twice.
+    """
+    rows = list(
+        asks if asks is not None else open_asks(config_dir, lapsed_visible_ms=lapsed_visible_ms)
+    )
     if session_id:
         rows = [row for row in rows if str(row.get("session_id") or "") == session_id]
     refs = [ask_ref(str(r.get("session_id") or ""), str(r.get("ask_id") or "")) for r in rows]
@@ -350,15 +413,24 @@ def unread_waiting_count(config_dir: Path | str, store: NotificationStore) -> in
     return _waiting_counts(open_asks(config_dir), store)[1]
 
 
-def counts(config_dir: Path | str, store: NotificationStore | None = None) -> dict[str, int]:
+def counts(
+    config_dir: Path | str,
+    store: NotificationStore | None = None,
+    *,
+    asks: Sequence[Mapping[str, Any]] | None = None,
+) -> dict[str, int]:
     """Total pending asks and their unread subset have different meanings.
 
     The group keeps every pending ask; the badge sums unread_count and
-    waiting_unread_count. Reading an ask never settles it.
+    waiting_unread_count. Reading an ask never settles it. ``asks`` reuses a
+    caller's own :func:`open_asks` read (same default window) instead of a
+    second index read in the same request.
     """
     store = store or NotificationStore(config_dir)
     unread, high_water = store.counts()
-    waiting, waiting_unread = _waiting_counts(open_asks(config_dir), store)
+    waiting, waiting_unread = _waiting_counts(
+        asks if asks is not None else open_asks(config_dir), store
+    )
     return {
         "unread_count": unread,
         "waiting_count": waiting,
@@ -401,8 +473,14 @@ def list_page(
     limit: int = LIST_LIMIT_DEFAULT,
     lapsed_visible_ms: int | None = None,
     through_seq: int | None = None,
+    include_session_counts: bool = False,
 ) -> dict[str, Any]:
-    """``GET /v1/desktop/notifications`` (§5.2), as a plain dict."""
+    """``GET /v1/desktop/notifications`` (§5.2), as a plain dict.
+
+    ``include_session_counts`` adds ``session_counts`` (see
+    :meth:`NotificationStore.session_counts`), taken under this answer's own
+    ``high_water`` so it describes the same snapshot as the page.
+    """
     store = NotificationStore(config_dir)
     sessions = SessionFacts(config_dir)
     projects = ProjectFacts(config_dir)
@@ -424,10 +502,10 @@ def list_page(
             through_seq=high_water,
         )
         items = [notify_item(row, sessions, projects) for row in rows]
-    waiting_count, waiting_unread = _waiting_counts(
-        open_asks(config_dir, lapsed_visible_ms=lapsed_visible_ms),
-        store,
-    )
+    # ONE open-asks read per request: the badge figures and the waiting group
+    # below are both derived from it (it used to be read twice per page one).
+    asks = open_asks(config_dir, lapsed_visible_ms=lapsed_visible_ms)
+    waiting_count, waiting_unread = _waiting_counts(asks, store)
     answer: dict[str, Any] = {
         "items": items,
         "next_cursor": next_cursor,
@@ -438,6 +516,8 @@ def list_page(
         "waiting_unread_count": waiting_unread,
         "high_water": high_water,
     }
+    if include_session_counts:
+        answer["session_counts"] = store.session_counts(through_seq=high_water)
     # ``waiting`` rides the FIRST page only (no cursor): asks are not paged, so
     # a second page repeating them would double-render the pinned group. Not
     # under ``state=dismissed`` (an open ask cannot be dismissed through the
@@ -451,6 +531,7 @@ def list_page(
             projects,
             session_id=session_id,
             lapsed_visible_ms=lapsed_visible_ms,
+            asks=asks,
         )
         if priority and priority != ASK_PRIORITY:
             waiting = []
@@ -569,6 +650,7 @@ def apply_patch(
     changed: list[str] = []
     skipped: list[dict[str, str]] = []
     notify_ids: list[tuple[str, int]] | None = None
+    asks: list[dict[str, Any]] | None = None
     bulk = ids is None
     if bulk:
         if observed is None or through_seq is None:
@@ -595,9 +677,11 @@ def apply_patch(
     if ids is not None:
         notify_ids = []
         ask_refs: list[str] = []
+        # Read once and reused by the badge below: the reel never writes the
+        # ask log, so this patch cannot change the open set it read.
+        asks = open_asks(config_dir)
         open_refs = {
-            ask_ref(str(r.get("session_id") or ""), str(r.get("ask_id") or ""))
-            for r in open_asks(config_dir)
+            ask_ref(str(r.get("session_id") or ""), str(r.get("ask_id") or "")) for r in asks
         }
         for entry in ids:
             item_id = str(entry.get("id") or "")
@@ -626,7 +710,7 @@ def apply_patch(
         )
         changed.extend(result.changed)
         skipped.extend(result.skipped)
-    badge = counts(config_dir, store)
+    badge = counts(config_dir, store, asks=asks)
     return {
         **badge,
         "changed": changed,

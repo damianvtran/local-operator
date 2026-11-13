@@ -9404,6 +9404,7 @@ def build_app(daemon: MobileDaemon):
                 limit=query.limit,
                 lapsed_visible_ms=window,
                 through_seq=query.through_seq,
+                include_session_counts=query.include_session_counts,
             )
         except ValueError:
             return JSONResponse({"error": "invalid cursor"}, status_code=422)

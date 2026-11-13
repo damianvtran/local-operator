@@ -40,6 +40,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import secrets
 import sqlite3
 import time
@@ -148,6 +149,29 @@ INPUT_EVIDENCE_MS = 120_000
 
 #: The ref prefix for an open ask's reel-side read mark.
 ASK_REF_PREFIX = "ask:"
+
+#: The owner-scoped pseudo-session the credential-repair writer files under
+#: (``network/credentials/repair_inbox.py`` re-exports it as ``SESSION_ID``).
+#: Defined HERE, in the stdlib-only store, so the route's id grammar and the
+#: writer cannot drift apart and the route never imports the network stack.
+NETWORK_CREDENTIALS_SESSION_ID = "network-credentials"
+
+#: Every NON-conversation session id a core writer files inbox rows under. The
+#: inbox is keyed by session, and most writers name a real conversation (12 hex,
+#: the session store's own id), but a core subsystem with no conversation of its
+#: own files under a fixed pseudo-session. The desktop routes used to admit only
+#: the 12-hex shape, so every per-session gesture on such a row ("Dismiss all
+#: from this conversation", the list's session filter, the scope counts) was a
+#: 422 the app showed as "Invalid desktop operation". This is an ALLOWLIST, not a
+#: widening to arbitrary strings: a new pseudo-session must be added here (and
+#: to the app's ``NOTIFICATION_PSEUDO_SESSION_IDS``) by the writer that mints it.
+PSEUDO_SESSION_IDS: tuple[str, ...] = (NETWORK_CREDENTIALS_SESSION_ID,)
+
+#: The ONE session-id grammar every notifications route validates with: a real
+#: conversation id or one of :data:`PSEUDO_SESSION_IDS`, anchored both ends.
+SESSION_ID_PATTERN = (
+    r"^(?:[a-f0-9]{12}|" + "|".join(re.escape(sid) for sid in PSEUDO_SESSION_IDS) + r")$"
+)
 
 _T = TypeVar("_T")
 
@@ -1099,6 +1123,40 @@ class NotificationStore:
             return int(unread), (int(row[0]) - 1 if row is not None else 0)
 
         return self._read(body, (0, 0), "counts")
+
+    def session_counts(self, *, through_seq: int | None = None) -> dict[str, dict[str, int]]:
+        """Per session: undismissed notify rows and their unread subset, ONE query.
+
+        WHY: the app's "Dismiss all from this conversation" header and confirm
+        need, per conversation, the number of rows that gesture would clear. It
+        used to page the WHOLE store 100 rows at a time to count them (6-9 s on
+        a ~1k-row inbox). This is the same rule in one grouped read over the
+        ``items_session`` index: every undismissed row, regardless of the
+        page's state/priority filters, bounded by ``through_seq`` so the figure
+        is taken at the same snapshot as the list response's ``high_water``
+        (rows re-stamped after it are outside what the response authorizes).
+        A session appears only when it has at least one undismissed row. Open
+        asks are not rows here and are never counted: the reel never dismisses
+        one (§2.3).
+        """
+        sql = (
+            "SELECT session_id, COUNT(*), "
+            "COALESCE(SUM(CASE WHEN read_rev < revision THEN 1 ELSE 0 END), 0) "
+            "FROM items WHERE dismissed_at IS NULL"
+        )
+        params: list[Any] = []
+        if through_seq is not None:
+            sql += " AND seq <= ?"
+            params.append(through_seq)
+        sql += " GROUP BY session_id"
+
+        def body(conn: sqlite3.Connection) -> dict[str, dict[str, int]]:
+            return {
+                str(sid): {"undismissed": int(total), "unread": int(unread)}
+                for sid, total, unread in conn.execute(sql, params)
+            }
+
+        return self._read(body, {}, "session_counts")
 
     def ref_states(self, refs: Sequence[str]) -> dict[str, dict[str, Any]]:
         """Reel-side read marks for refs this store does not own (open asks)."""
