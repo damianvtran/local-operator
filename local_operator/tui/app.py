@@ -25604,6 +25604,8 @@ class OperatorApp(App[None]):
             # below, or the `finally` (bound, or cancelled by a swap).
             reported = False
             cancelled = False
+            retry_refresh = False
+            retry_refresh_from = None
             try:
                 # BACKGROUND envelope. Nobody is waiting on this engage and it
                 # is silent on failure, so it can afford to outlast an owner
@@ -25629,6 +25631,29 @@ class OperatorApp(App[None]):
                 # so the silence here stays the default it is documented to be.
                 logger.debug("runtime engage failed (%s)", reason, exc_info=True)
                 self._warm_engage_started = False
+                # ONE BOUNDED RETRY for the refresh-triggered engage. Nothing
+                # else re-arms it: the refresh is nobody's keystroke, so a quick
+                # failure here (the retiring owner's record vanishing under the
+                # engage) used to leave the viewer cold until the user typed. The
+                # retry runs under its own reason, which this arm does not retry
+                # again, so it is at most one extra engage. Only for the CURRENT
+                # binding (a swap must not revive an outgoing session's engage)
+                # and only without a paint-first attempt, whose row owns the
+                # failure story. Run from the ``finally`` so the band is not
+                # cleared after the retry raised it.
+                if (
+                    reason == "refresh"
+                    and attempt is None
+                    and binding_token
+                    == (
+                        self._binding_epoch,
+                        str(getattr(self._session, "session_id", "") or ""),
+                    )
+                ):
+                    retry_refresh_from = self._refreshed_from
+                    retry_refresh = True
+                    self._refreshed_from = None
+                    return
                 # Same reason as the skip above: nothing bound, so there is no
                 # change to name and the pending stamp must not outlive it.
                 self._refreshed_from = None
@@ -25650,6 +25675,10 @@ class OperatorApp(App[None]):
                 return
             finally:
                 self._set_starting(False)
+                if retry_refresh:
+                    # Restore the pending announcement for the retry to resolve.
+                    self._refreshed_from = retry_refresh_from
+                    self._start_runtime_engage(reason="refresh-retry")
                 if attempt is not None and not reported:
                     # Bound, or cancelled by a swap. A cancelled carrier is not a
                     # failure of the attach: it steps off, and the engage a switch
