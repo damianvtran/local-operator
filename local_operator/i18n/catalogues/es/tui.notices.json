@@ -30,5 +30,15 @@
   "tui.notices.effort_default_changed": "el esfuerzo de razonamiento por defecto cambió para las sesiones nuevas ({effort}); /model saved lo adopta aquí",
   "tui.notices.effort_default_changed_headline": "Esfuerzo por defecto cambiado",
   "tui.notices.model_switch_queued": "cambio a {model} en cola — se aplicará en el siguiente paso",
-  "tui.notices.model_switch_refused": "No se aplicó {model}: {reason}"
+  "tui.notices.model_switch_refused": "No se aplicó {model}: {reason}",
+  "tui.notices.temporary_on": "chat temporal: fuera del historial y eliminado tras {minutes} minutos de inactividad — /temporary off lo conserva",
+  "tui.notices.temporary_off": "conservado: este chat ya no es temporal y se queda en tu historial",
+  "tui.notices.temporary_status_on": "chat temporal — {deletes_in} (/temporary off lo conserva)",
+  "tui.notices.temporary_status_off": "este chat se conserva en tu historial (no es temporal)",
+  "tui.notices.temporary_confirm": "¿hacer temporal este chat? Sus mensajes, los archivos de su scratchpad y su memoria de sesión se eliminan tras quedar inactivo; lo que hayas guardado en otro sitio se conserva. Vuelve a escribir /temporary on en 30 segundos para confirmar.",
+  "tui.notices.temporary_refused_pinned": "este chat está fijado, así que no puede volverse temporal — desfíjalo primero",
+  "tui.notices.temporary_refused_project": "este chat está vinculado a un proyecto, así que no puede volverse temporal — desvincúlalo primero",
+  "tui.notices.temporary_deleted": "el chat temporal {session_id} se eliminó tras quedar inactivo. Inicia uno nuevo: lop --temporary",
+  "tui.notices.temporary_new_hint": "/new temporary [mensaje] inicia un chat temporal que queda fuera del historial y se elimina al quedar inactivo",
+  "tui.notices.temporary_refused": "este chat no puede volverse temporal: {reason}"
 }

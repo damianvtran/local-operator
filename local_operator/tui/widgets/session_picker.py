@@ -3254,6 +3254,10 @@ class SessionPickerScreen(ModalScreen[str | None]):
     #:   REMOTE row for the inbox forwarder
     #:   (`notifications/remote_attention`). No picker pixel paints them; the
     #:   same move-when-rendered rule applies.
+    #: * `temporary` is the scan's temporary-chat verdict. The resume picker
+    #:   never asks for temporary rows (``include_temporary`` defaults off), so
+    #:   every row it holds carries ``False`` and the field cannot differ
+    #:   between two ticks of this screen.
     _SIGNATURE_EXCLUDED = (
         "mtime",
         "created_at",
@@ -3266,6 +3270,7 @@ class SessionPickerScreen(ModalScreen[str | None]):
         "remote_attention",
         "remote_notices",
         "remote_attention_unknown",
+        "temporary",
     )
 
     # BIDIRECTIONAL, and that is the whole point of it. The previous form

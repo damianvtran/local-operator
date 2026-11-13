@@ -91,6 +91,7 @@ from local_operator.harness.approval import (
 from local_operator.harness.redaction import report_shape_hits
 from local_operator.harness.secret_sinks import refusal_text as _secret_sink_refusal
 from local_operator.harness.secret_sinks import scan_command as _scan_secret_sinks
+from local_operator.harness.secret_sinks import steer_text as _secret_sink_steer
 from local_operator.harness.subagent import (
     configured_effort_tiers,
     describe_effort_tiers,
@@ -3813,6 +3814,178 @@ def _stream_redaction_values(store: Any, credential_env: dict[str, str]) -> list
 _REDACTION_SEAM_BROKEN: list[str] = ["\x00redaction-seam-broken\x00"]
 
 
+#: The shortest line or field of a multi-line secret registered as its own
+#: mask. Shorter strings (`}`, `true`, `[`) are structure and would mask
+#: ordinary output for the rest of the session; a line under this that still
+#: carries letters or digits is what makes a line-selecting print unprovable.
+_SECRET_FRAGMENT_MIN_LEN = 8
+
+#: `KEY=VALUE` / `KEY: VALUE` and `"key": "value"` fields inside a multi-line
+#: secret (`.env` bundles, service-account JSON): the VALUE half is registered
+#: alone so `jq`-less greps of one field and re-quoted dumps of the line still
+#: hit a mask (QA round 1, Q1: `private_key_id` in `export -p`).
+_SECRET_FIELD_RES = (
+    re.compile(
+        r"^\s*(?:export\s+)?[A-Za-z_][A-Za-z0-9_.-]*\s*[=:]\s*"
+        r"['\"]?(?P<v>[^'\"\r\n]+?)['\"]?\s*,?\s*$"
+    ),
+    re.compile(r'"[^"\\]*"\s*:\s*"(?P<v>(?:[^"\\]|\\.)*)"'),
+)
+
+
+def _secret_fragments(text: str) -> tuple[list[str], bool]:
+    """The line and field fragments of a multi-line value, and whether it has a
+    short line carrying letters or digits (one no fragment can mask)."""
+    fragments: list[str] = []
+    short_line = False
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if len(stripped) >= _SECRET_FRAGMENT_MIN_LEN:
+            fragments.append(stripped)
+        elif any(ch.isalnum() for ch in stripped):
+            short_line = True
+        for pattern in _SECRET_FIELD_RES:
+            for match in pattern.finditer(line):
+                field = match.group("v").strip()
+                if len(field) >= _SECRET_FRAGMENT_MIN_LEN:
+                    fragments.append(field)
+    return fragments, short_line
+
+
+def _preregister_printed_secrets(scan: Any, command: str, context: ToolContext | None) -> str:
+    """Register every spelling of every secret this command reads, BEFORE it runs.
+
+    Returns ``""`` when the call may run masked, else the reason it may not
+    (the caller refuses, as before this change, with the reason appended).
+
+    Why the bash warn path needs this on top of :func:`secret_redaction_live`:
+    the live seam only scrubs values it has been TOLD about, and the telling is
+    the broker's notice to this session (``secrets/session.py``). That notice
+    is not guaranteed: ``access.retrieve_secret`` deliberately degrades to an
+    UNNOTIFIED local decrypt when no broker is reachable (keyfile tier, a
+    broker that died), and then the child prints a value nothing scrubs.
+    Reading each named value here and registering it makes the mask
+    independent of the broker for exactly the call that is about to print it.
+
+    The invariant (``harness/secret_sinks.py``, above ``BLOCKING_LABELS``):
+    every byte of output derived from a secret must fall inside a registered
+    mask string. The scan proves the PRINTER keeps the value whole; this
+    function holds the value, so it proves the rest or refuses:
+
+    * the whole value is registered, and ``credential_forms`` derives its
+      escaped spellings (`declare -p`, xtrace, `repr`, JSON) from it;
+    * a MULTI-LINE value also registers each line and each `KEY=VALUE` /
+      `"key": "value"` field of 8+ characters (agent review round 1, R4), so
+      `head -n 2` or `env | sort` print only masked lines;
+    * a line-selecting print of a value with a SHORT line that carries
+      letters or digits is refused: that line cannot be registered safely;
+    * a re-quoting printer (`export -p`, `declare -p`, `set -x`) of a value
+      outside printable ASCII is refused: shells print it in ANSI-C `$'…'`
+      quoting whose escapes differ by version (Q1);
+    * text that points `lop` at another store (`HOME=…`,
+      `LOCAL_OPERATOR_CONFIG_DIR=…`, read from the lexer's tokens, R9/O3) is
+      refused: the value read here would not be the one printed.
+
+    Also refused: a source whose name is not a literal (`"$k"` in a loop), no
+    store, an unreadable or missing secret, or an empty value.
+    ``read_for_copy`` is used because this read is not a USE (no ``last_used``
+    touch); the child's own ``get`` audits the use. When the child never
+    fetches (`false && lop secret get K`) this read leaves no audit record:
+    accepted for now and tracked in the PR thread (R10, deferred).
+    """
+    store = getattr(context, "variables", None) if context is not None else None
+    register = getattr(store, "register_redaction", None)
+    if not callable(register):
+        return "this session has no redaction store to register the value with"
+    if getattr(scan, "alternate_store", False):
+        return (
+            "the command points `lop` at another store (`HOME=` or "
+            "`LOCAL_OPERATOR_CONFIG_DIR=`), so the value it prints cannot be read and "
+            "masked in advance; drop the override"
+        )
+    # Every source the text fetches, plus any name a finding attributes; an
+    # unattributed finding (a read-back of a file names no secret) can only
+    # print what the sources fetched, so it adds nothing to register.
+    names = list(
+        dict.fromkeys([*scan.sources, *(f.secret_name for f in scan.findings if f.secret_name)])
+    )
+    if not names:
+        return "no stored secret name could be read off the command"
+    try:
+        from local_operator.secrets.access import open_store
+
+        secret_store = open_store()
+        values: list[str] = []
+        for name in names:
+            # `read_for_copy` validates the name: `"$k"` or `?` raises here.
+            _record, value = secret_store.read_for_copy(name)
+            text = value.decode("utf-8", errors="replace")
+            if not text.strip():
+                return f"`{name}` is empty or could not be read"
+            values.append(text)
+    except Exception:  # noqa: BLE001 — any doubt keeps the pre-existing refusal
+        logger.debug("secret sink: could not pre-register a printed secret", exc_info=True)
+        return "the named secret could not be read to register its mask"
+    # Decide everything BEFORE registering anything: a refused call should not
+    # leave fragments of a value it never printed in the session's mask list.
+    to_register: list[str] = []
+    for text in values:
+        stripped = text.strip()
+        to_register.append(stripped)
+        if getattr(scan, "requoted", False) and not all(" " <= ch <= "~" for ch in stripped):
+            return (
+                "`export -p`/`declare -p`/`set -x` print a multi-line or non-ASCII value in "
+                "`$'…'` quoting the mask cannot match; print the one variable instead "
+                '(`printf %s "$NAME"`) or check it with `| wc -c`'
+            )
+        if "\n" in stripped:
+            fragments, short_line = _secret_fragments(stripped)
+            if short_line and getattr(scan, "line_selected", False):
+                return (
+                    "a line filter (`head`/`tail`/`sort`/`uniq`/…) would print lines of a "
+                    "multi-line value, and one of its lines is too short to mask; print the "
+                    "whole value, or check it with `| wc -c`"
+                )
+            to_register.extend(fragments)
+    for item in to_register:
+        register(item)
+    return ""
+
+
+def secret_redaction_live(context: ToolContext | None) -> bool:
+    """Is the whole redaction chain live for a value a child fetches mid-call?
+
+    The single predicate the secret-sink scan's warn/refuse split hangs on
+    (``bash`` here, ``eval`` in ``tools/eval.py``). A VERBATIM print of a
+    stored value is allowed to RUN, with a steer, only when every one of these
+    holds, because each is a link the masking depends on:
+
+    * the session has a variable store exposing ``redaction_values`` — the
+      seam through which the broker announces a value a child fetched, and the
+      list the live pipe filter, the peek buffer and the final result scrub;
+    * that seam can actually be read now (not :data:`_REDACTION_SEAM_BROKEN`);
+    * the platform can run the broker at all (peer authentication on darwin
+      and linux); elsewhere a child's ``lop secret get`` is never announced.
+
+    A bare ``ToolContext`` without a store (unit-test fixtures, third-party
+    embedders) fails the first test and keeps the pre-existing refusal, which
+    is the safe default: no mask means the raw value would reach the provider
+    and only a rotation could undo it.
+    """
+    store = getattr(context, "variables", None) if context is not None else None
+    if not callable(getattr(store, "redaction_values", None)):
+        return False
+    if _stream_redaction_values(store, {}) is _REDACTION_SEAM_BROKEN:
+        return False
+    # Imported here: `secrets.peer` is light, but this keeps the bash module's
+    # import graph unchanged for callers that never touch a secret.
+    from local_operator.secrets.peer import PEER_AUTHENTICATION_SUPPORTED
+
+    return bool(PEER_AUTHENTICATION_SUPPORTED)
+
+
 def _shape_containment_sink(
     store: Any,
 ) -> Callable[[Sequence[ShapeHit]], None] | None:
@@ -4320,13 +4493,33 @@ async def execute_bash(
     # The source is the store: a command that never names `lop secret` is
     # untouched, so ordinary work — and the session-credential flow, which rides
     # the child's environment and is the mask's business — is unaffected.
+    #
+    # Refuse vs. warn: operators reported the blanket refusal blocked routine
+    # secret work (rotation, verification, reading back a rotated file). A
+    # VERBATIM print (`echo "$v"`, `lop secret get K`, `set -x`) runs when the
+    # redaction chain is live — the stream, peek and result all show
+    # `[redacted]` — and the result carries one steering line instead. What
+    # stays refused is what the mask cannot see: a re-spelled value (`| rev`,
+    # `| base64`, `${v:0:8}`), an inline interpreter, unclassifiable text, and
+    # every print on a host with no live mask (``scan.refused`` there).
     scan = _scan_secret_sinks(params.command)
+    secret_steer: str | None = None
     if scan.refused:
-        return _error(
-            tool_call_id,
-            "bash",
-            _secret_sink_refusal(scan, text=params.command, tool_name="bash"),
-        )
+        prereg_refusal = ""
+        if not scan.blocking and secret_redaction_live(context):
+            # Off the event loop: opening the store may wait on the broker.
+            prereg_refusal = await asyncio.to_thread(
+                _preregister_printed_secrets, scan, params.command, context
+            )
+        if scan.blocking or not secret_redaction_live(context) or prereg_refusal:
+            return _error(
+                tool_call_id,
+                "bash",
+                _secret_sink_refusal(
+                    scan, text=params.command, tool_name="bash", note=prereg_refusal
+                ),
+            )
+        secret_steer = _secret_sink_steer(scan)
     # The pad cap, BEFORE the child exists. A shell cannot be refused after the
     # fact like ``write`` can, and once a pad is over its cap every creating
     # command made it worse — so a command that would create a path under an
@@ -5601,6 +5794,12 @@ async def execute_bash(
         0,
     )
     insert_at = head_index + 1
+    # The secret-sink steer ranks FIRST: it is about a stored value this very
+    # call printed (masked), which is the most specific thing the model can
+    # learn from the result; the shape-based credential notice follows it.
+    if secret_steer:
+        parts.insert(insert_at, secret_steer)
+        insert_at += 1
     if notice:
         parts.insert(insert_at, notice)
         insert_at += 1

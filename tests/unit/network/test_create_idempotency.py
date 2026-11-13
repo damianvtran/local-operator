@@ -58,8 +58,9 @@ class _Wire:
     to ``"unknown_op"`` plays an owner older than this build.
 
     ``net_definitions`` frames — the probe ``push_to_peer`` opens a create with —
-    are recorded in ``definition_frames`` and answered by the owner's real
-    handler, so the reply carries the ``phase`` key the wire's does. What phase
+    are recorded in ``definition_frames`` and the complete ``all_frames`` stream,
+    and answered by the owner's real handler in an ``ack``. The reply carries the
+    ``phase`` key the wire's does. What phase
     those frames may carry is asserted in the TEST BODY, never here:
     ``push_to_peer`` swallows anything this ``request`` raises
     (``definitions.py:1777-1778``), so an assert in this class cannot fail a test.
@@ -70,14 +71,19 @@ class _Wire:
         self.drop = drop_create_replies
         self.lookup = "ok"
         self.sent: list[dict[str, Any]] = []
+        self.all_frames: list[dict[str, Any]] = []
         self.definition_frames: list[dict[str, Any]] = []
+        self.definition_replies: list[dict[str, Any]] = []
         self._definitions = definitions.make_handler(owner)
 
     def request(self, frame: dict[str, Any], timeout: float | None = None) -> dict[str, Any] | None:
+        self.all_frames.append(dict(frame))
         op = frame["op"]
         if op == "net_definitions":
             self.definition_frames.append(dict(frame))
-            return {"op": "reply", "detail": self._definitions(_owner_link(), frame)}
+            reply = {"op": "ack", "detail": self._definitions(_owner_link(), frame)}
+            self.definition_replies.append(reply)
+            return reply
         self.sent.append(dict(frame))
         if op == "net_session_create_lookup" and self.lookup == "unknown_op":
             return {"op": "error", "code": "unknown_op", "message": "not an operation"}
@@ -125,12 +131,24 @@ def test_a_dropped_create_reply_reports_the_id_and_a_retry_returns_the_same_one(
     # The definitions probe is a state READ; the write phase is ``apply``. Asserted
     # here, off the swallowing path: see the ``_Wire`` docstring.
     assert _phases(wire) == ["state"], wire.definition_frames
+    assert [reply["op"] for reply in wire.definition_replies] == ["ack"]
+    assert wire.definition_replies[0]["detail"]["phase"] == "state"
     # Settled by the lookup, not reported as unreachable.
     assert first["create_unconfirmed"] is True, first
     minted = first["session_id"]
     assert _sessions(owner) == [minted]
     assert "lost" in first["detail"] and minted in first["detail"], first
     key = first["create_key"]
+    # The mandatory preflight predates this cell (24b6de4c86). The original
+    # assertion in 6ccc448f63 omitted it; 18318597a only edits later cells/copy.
+    assert [f["op"] for f in wire.all_frames] == [
+        "net_definitions",
+        "net_session_create",
+        "net_session_create_lookup",
+    ]
+    assert wire.all_frames[0]["phase"] == "state"
+    create_frames = [f for f in wire.all_frames if f["op"].startswith("net_session_create")]
+    assert [f["create_key"] for f in create_frames] == [key, key]
     assert [f["op"] for f in wire.sent] == [
         "net_session_create",
         "net_session_create_lookup",
@@ -139,9 +157,16 @@ def test_a_dropped_create_reply_reports_the_id_and_a_retry_returns_the_same_one(
 
     retry = requester._ctl_peer_create({"peer": "node-2", "create_key": key})  # noqa: SLF001
     assert _phases(wire) == ["state", "state"], wire.definition_frames
+    assert [reply["op"] for reply in wire.definition_replies] == ["ack", "ack"]
     assert retry["session_id"] == minted, retry
     assert retry["replayed"] is True, retry
     assert _sessions(owner) == [minted], "a retry with the same key made a second session"
+    assert [f["op"] for f in wire.sent] == [
+        "net_session_create",
+        "net_session_create_lookup",
+        "net_session_create",
+    ]
+    assert [f["create_key"] for f in wire.sent] == [key, key, key]
 
 
 def test_without_a_key_two_creates_are_two_sessions(

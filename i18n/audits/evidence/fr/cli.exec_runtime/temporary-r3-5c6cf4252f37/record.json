@@ -1,0 +1,55 @@
+{
+  "schema": 1,
+  "audit_id": "temporary-r3-5c6cf4252f37",
+  "audit_kind": "independent semantic audit of the temporary-chat delta; unchanged keys carried by byte proof",
+  "locale": "fr",
+  "namespace": "cli.exec_runtime",
+  "status": "passed",
+  "verdict": "passed",
+  "audit_task": "i18n-inpr-core",
+  "pr": "damianvtran/local-operator#3832",
+  "audited_revision": "367fbb857",
+  "catalogue_state": "catalogue bytes identical at 4f6f57986 (hashes recomputed from the shipped files)",
+  "scope": "all 3 key(s) the PR changed or added in cli.exec_runtime, read against i18n/glossary.md and i18n/style-guides/fr.md; the other 11 key(s) are byte-identical to origin/main 27bfbdb21, whose last ledger row was passed and fresh",
+  "keys_audited": [
+    "cli.exec_runtime.temporary_agent_shell_refused",
+    "cli.exec_runtime.temporary_conflicts_resume",
+    "cli.exec_runtime.temporary_conflicts_workstream"
+  ],
+  "keys_total": 14,
+  "mechanical_checks": [
+    "placeholder parity",
+    "CLDR plural categories",
+    "vi NFC",
+    "no manual bidi controls",
+    "no ASCII ellipsis",
+    "fr U+202F before :;?!",
+    "maxCells via rich.cells.cell_len"
+  ],
+  "translator": {
+    "agent": "core-backend coder cf2843d74957; round-1 remediation coder 1c07b39051ed (lopdev coder role) — relayed from PR #3832 i18n audit comments 6811281029/6812645445, not independently verified",
+    "model": "anthropic/claude-opus-5-5",
+    "fallback": "none reported in the relayed source",
+    "date": "2026-11-11..2026-11-12 (git: 09839b6de, 75606914f, eaff8c7a9)"
+  },
+  "auditor": {
+    "agent": "independent i18n auditor (lopdev reviewer role, task i18n-inpr-core, session 5c6cf4252f37; independent of the translators and of the round-1/2 auditors 506f24a144fa/2d1500d56d0e, whose artifacts were not read)",
+    "session": "5c6cf4252f37",
+    "model": "anthropic/claude-opus-5-5",
+    "fallback": "none observed in this session",
+    "date": "2026-11-12",
+    "result": "passed",
+    "findings": 0,
+    "unresolved_blocker_major": 0,
+    "minor": 0,
+    "nit": 1
+  },
+  "findings_note": "I3-6 NIT (deferred in PR thread): temporary_agent_shell_refused 'se lance par vous-même' is awkward; e.g. 'seul vous pouvez lancer une conversation temporaire ; …'.",
+  "report": "https://github.com/damianvtran/local-operator/pull/3832#issuecomment-6813468699",
+  "source_sha256": "e47bae986fe2fe440e6a1a9b4dcdb0a73a4539bc1d95a092f1977564443e2d96",
+  "target_sha256": "2a4ed1f7cc1d506d21049f15fa02e32302a1382823bb199d1e01679b4bd87c32",
+  "input_paths": {
+    "en": "local_operator/i18n/catalogues/en/cli.exec_runtime.json",
+    "target": "local_operator/i18n/catalogues/fr/cli.exec_runtime.json"
+  }
+}

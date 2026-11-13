@@ -89,6 +89,7 @@ def _entry_owners() -> dict[str, str]:
         STOP_MARKER_NAME,
         TURN_JOURNAL_NAME,
     )
+    from local_operator.session.temporary import MARK_NAME as TEMPORARY_MARK_NAME
     from local_operator.session_lease import LEASE_NAME, MIRROR_NAME, RECOVERY_LOCK_NAME
     from local_operator.tools.eval import KERNEL_MARKER_NAME
     from local_operator.wakes.lock import WAKE_LOCK_NAME
@@ -118,6 +119,9 @@ def _entry_owners() -> dict[str, str]:
         RUN_RECORD_NAME: "session.runtime.journal",
         INBOX_NAME: "session.runtime.inbox",
         FORK_BOUNDARY_NAME: "fork",
+        # The temporary-chat mark travels: a moved temporary chat must still be
+        # deleted on its new device, not silently retained there.
+        TEMPORARY_MARK_NAME: "session.temporary",
         DESKTOP_MARKER_NAME: "session.retention",
         MESH_STAMP_NAME: "session.placement",
         LIVE_MARKER_NAME: "session.retention",
@@ -288,6 +292,15 @@ _PATH_SHAPED = re.compile(r"^(?!\.\.?(?:/|$))[A-Za-z0-9._-]+(?:/(?!\.\.?(?:/|$))
 #: the way the import list was. Every module with at least one candidate appears here, so
 #: "a module I did not think about" is itself a failing state.
 _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
+    "local_operator/session/temporary.py": (
+        3,
+        "``TOMBSTONES_NAME`` ('.temporary-tombstones.json'), ``STATE_NAME`` "
+        "('.temporary-state.json') and ``CHANGES_NAME`` ('.temporary-changed', the "
+        "empty change stamp a mark or Keep touches) are STORE-level records beside the "
+        "session directories (sessions/<file>), written on this device, never an entry "
+        "of a session directory. The per-session mark (``MARK_NAME``) is in "
+        "sync.COPY_SET_NAMES and travels.",
+    ),
     "local_operator/harness/bridge_egress.py": (
         1,
         "``BRIDGE_TOOL_NAME`` ('bridge') is the Team Bridge TOOL's registered name, "
@@ -897,13 +910,15 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
     "local_operator/secrets/legacy_env.py": (1, "the legacy credentials file at the store root"),
     "local_operator/secrets/protocol.py": (2, "the secret broker's socket and lock"),
     "local_operator/session/cleanup.py": (
-        5,
+        6,
         "the cleanup log, the value-hold index and the last-cleanup record (all at the "
         "sessions root), the store marker that gates removal, and ``HANDED_AWAY_DIRNAME`` "
         "— the ``<config>/network/handed-away/`` quarantine a committed mesh move renames "
-        "its directory into. That last one is a CONFIG-LEVEL directory: it is where a "
+        "its directory into. That one is a CONFIG-LEVEL directory: it is where a "
         "session tree goes to stop being one, so it can never be an entry of a session "
-        "directory, and none of the five is a file a session directory holds",
+        "directory. ``TEMPORARY_LOCK_NAME`` is the temporary-chat sweep's cross-process "
+        "lock, beside the delegated sweep's at the config root. None of the six is a file "
+        "a session directory holds",
     ),
     "local_operator/session/delegated_retention.py": (
         5,

@@ -87,5 +87,12 @@
   "wire.errors.desktop.sort_unknown": "sort debe ser uno de {sorts}.",
   "wire.errors.desktop.start_after_end": "El inicio debe preceder al fin",
   "wire.errors.desktop.unknown_command": "Comando desconocido",
-  "wire.errors.desktop.unknown_provider": "Proveedor desconocido"
+  "wire.errors.desktop.unknown_provider": "Proveedor desconocido",
+  "wire.errors.desktop.session_in_project": "la conversación {session_id} está vinculada a un proyecto; desvincúlala primero",
+  "wire.errors.desktop.session_pinned": "la conversación {session_id} está fijada; desfíjala primero",
+  "wire.errors.desktop.session_temporary": "la conversación {session_id} es un chat temporal; consérvala primero",
+  "wire.errors.desktop.session_temporary_deleted": "este chat temporal se eliminó tras quedar inactivo",
+  "wire.errors.desktop.temporary_mark_failed": "no se pudo marcar la conversación {session_id} como temporal, así que no se cambió nada",
+  "wire.errors.desktop.temporary_not_user": "la conversación {session_id} no la iniciaste tú, así que no puede volverse temporal",
+  "wire.errors.desktop.temporary_peer_unsupported": "todavía no se puede iniciar un chat temporal en otro dispositivo"
 }
