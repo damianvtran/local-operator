@@ -442,6 +442,26 @@ def _tree_read(target: Target, prot: _Protected, session_id: str) -> str | None:
         and provenance.tracked_script(target.script, state_roots=roots)
     ):
         return None
+    # Incident 2026-11-13 (0.102.2): ``python3 -c`` printing lines of four logs
+    # in the caller's child's pad. A tracked script must be handed a FILE (it
+    # could write into a directory it is given); an inline program proven
+    # unable to write anything (``Target.read_only_code``) may be handed the
+    # pad directory too — it joins file names onto it and only reads.
+    #
+    # Deliberately READS only. A parent DELETING its descendant's scratchpad
+    # keeps ``_high_reason``'s HIGH (destroying ops never come through here):
+    # the harness, not the child, creates that directory, so no ledger row
+    # vouches for it; the child may still be running and writing there; and
+    # its pad holds the child's working evidence the parent's report cites.
+    # What a subagent itself creates (``mkdir``, worktrees) is already LOW for
+    # the parent through the creation ledger written under every ancestor.
+    if (
+        target.read_only_code
+        and not target.as_output
+        and os.path.lexists(path)
+        and not os.path.islink(path)
+    ):
+        return None
     owner = _pad_owner(os.path.realpath(path), roots) or ""
     return f" (session {owner} is this session's {relations.get(owner, '')} in one task tree)"
 
