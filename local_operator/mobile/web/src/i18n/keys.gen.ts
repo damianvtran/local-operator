@@ -1364,6 +1364,8 @@ export type MessageParams = {
   "wire.settings.network_credentials_github_repositories.placeholder": undefined;
   "wire.settings.network_credentials_grant_ttl_s.help": undefined;
   "wire.settings.network_credentials_grant_ttl_s.label": undefined;
+  "wire.settings.network_credentials_offline_hold_s.help": undefined;
+  "wire.settings.network_credentials_offline_hold_s.label": undefined;
   "wire.settings.network_listen_address.help": undefined;
   "wire.settings.network_listen_address.label": undefined;
   "wire.settings.network_max_handshakes.help": undefined;

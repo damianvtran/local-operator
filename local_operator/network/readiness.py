@@ -1577,12 +1577,30 @@ def selected_model_row(
             (f"sign in to {provider} on {peer_label}, or choose another model",),
         ),
     }
-    if state not in readings and state != "held_offline":
+    # A HELD GRANT is access the owner lent BEFORE it became unreachable, served
+    # from the borrower's memory until the offline hold ends (up to an hour since
+    # 2026-11-13). Reading it as a fresh resolve ("the next request verifies the
+    # owner again") was wrong for that whole hour (design review m1), so it says
+    # what it is and when it stops. The end is the receipt's
+    # ``last_grant_expires_at`` (the hold end, ``effective.note_resolution``),
+    # rendered in UTC because the reader may sit in another time zone.
+    held_until = fact.get("last_grant_expires_at")
+    until = (
+        time.strftime(" until %H:%M UTC", time.gmtime(held_until))
+        if isinstance(held_until, (int, float)) and not isinstance(held_until, bool)
+        else ""
+    )
+    readings["held_offline"] = (
+        f"{peer_label} is using {provider} access {owner} lent before it went "
+        f"offline{until}; nothing is refreshed until {owner} is back",
+        (
+            f"continue on {peer_label}; reconnect {owner} before then, or sign in to "
+            f"{provider} on {peer_label} to stop depending on it",
+        ),
+    )
+    if state not in readings:
         state = "pending"
-    # A held grant is borrowed access the owner lent (``held_offline``): the same
-    # reading as a resolved borrow, whose "the next request verifies the owner again"
-    # is exactly what the client does. Its own CODE stays on the row below.
-    detail, remedies = readings["effective_borrow" if state == "held_offline" else state]
+    detail, remedies = readings[state]
     if state == "expired" and observer_is_admin and getattr(member, "role", "") == "admin":
         import shlex
 

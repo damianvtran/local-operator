@@ -409,6 +409,8 @@
   "wire.settings.network_credentials_github_repositories.placeholder": "damianvtran/scratch, damianvtran/sandbox",
   "wire.settings.network_credentials_grant_ttl_s.help": "The longest a device may use a login it borrowed from its owner before asking again, and so how long a revoked or offline owner's login keeps working elsewhere. Never longer than the token itself.",
   "wire.settings.network_credentials_grant_ttl_s.label": "Borrowed login lifetime (s)",
+  "wire.settings.network_credentials_offline_hold_s.help": "While the device that owns a login is unreachable (asleep, offline), how long another device keeps using the login it already borrowed. Never longer than the token itself; the owner's and this device's values both apply, and the shorter wins.",
+  "wire.settings.network_credentials_offline_hold_s.label": "Borrowed login hold while owner is away (s)",
   "wire.settings.network_listen_address.help": "127.0.0.1 = dial-only; 0.0.0.0 = all; or one address.",
   "wire.settings.network_listen_address.label": "Listen address",
   "wire.settings.network_max_handshakes.help": "Unauthenticated connections this relay will hold at once. A pairing holds one for the seconds until the code is typed; anything past the cap is dropped at accept, with no reply frame.",

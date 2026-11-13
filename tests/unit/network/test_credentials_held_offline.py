@@ -116,6 +116,16 @@ def _readiness_row(claim: Any) -> dict[str, Any]:
     )
 
 
+def _hold_end(grant: Grant, cap_s: float) -> float:
+    """The borrower-side hold end (ms) for a ``cap_s`` ``offline_hold_s``.
+
+    Measured from the receipt stamp ``GrantCache.put`` set, which is a few ms after
+    ``_bounded`` capped ``grant_expires_at_ms`` — so it is never earlier.
+    """
+    assert grant.received_wall, "the grant was never stamped on receipt"
+    return max(grant.grant_expires_at_ms, grant.received_wall * 1000 + cap_s * 1000)
+
+
 @pytest.fixture
 def borrowed(mesh: Any) -> tuple[MeshCredentialClient, Grant]:  # noqa: F811
     _share(mesh)
@@ -173,10 +183,16 @@ def test_the_held_grant_serves_while_the_owner_is_away_and_the_owner_wins_on_ret
 def test_the_lease_is_not_extended_past_its_end(
     mesh: Any, monkeypatch: pytest.MonkeyPatch  # noqa: F811
 ) -> None:
-    """A3: the owner stays away past the grant's lease -> refused, owner_unavailable."""
-    # The BORROWER's own cap (``_bounded``) is the lease the hold honours; 2 s here.
+    """A3: the owner stays away past the hold -> refused, owner_unavailable.
+
+    Since the 2026-11-13 offline hold the end is the HOLD's, not the grant's: the
+    borrower's own ``offline_hold_s`` caps it from receipt (here 2 s, the floor
+    ``grant_ttl_s`` allows), whatever longer hold the owner stated.
+    """
     (mesh.b.root / "config.yml").write_text(
-        yaml.safe_dump({"values": {"network": {"credentials": {"grant_ttl_s": 2.0}}}}),
+        yaml.safe_dump(
+            {"values": {"network": {"credentials": {"grant_ttl_s": 2.0, "offline_hold_s": 2.0}}}}
+        ),
         encoding="utf-8",
     )
     _share(mesh)
@@ -187,7 +203,7 @@ def test_the_lease_is_not_extended_past_its_end(
     _stop_owner(mesh)
     if time.time() * 1000 < grant.grant_expires_at_ms - 200:
         assert isinstance(client.request_grant_sync(STUB_PROVIDER, session_id="sess-1"), Grant)
-    assert net_fixtures.wait_for(lambda: time.time() * 1000 > grant.grant_expires_at_ms + 50)
+    assert net_fixtures.wait_for(lambda: time.time() * 1000 > _hold_end(grant, 2.0) + 50)
     lapsed = client.request_grant_sync(STUB_PROVIDER, session_id="sess-1")
     assert isinstance(lapsed, BrokerError) and lapsed.code == "owner_offline", lapsed
     access = _state(mesh, client)
@@ -337,7 +353,9 @@ async def test_the_served_session_band_stays_ok_while_held_and_blocks_at_lease_e
     from tests.unit.session.runtime.test_serving import _AccessSession
 
     (mesh.b.root / "config.yml").write_text(
-        yaml.safe_dump({"values": {"network": {"credentials": {"grant_ttl_s": 3.0}}}}),
+        yaml.safe_dump(
+            {"values": {"network": {"credentials": {"grant_ttl_s": 3.0, "offline_hold_s": 3.0}}}}
+        ),
         encoding="utf-8",
     )
     effective._receipts.clear()
@@ -363,7 +381,7 @@ async def test_the_served_session_band_stays_ok_while_held_and_blocks_at_lease_e
         band = _band(session)
         assert (band.effective_state, band.state) == ("effective_borrow", "ok"), band
         assert len(mesh.idp.posts) == posts
-        assert net_fixtures.wait_for(lambda: time.time() * 1000 > grant.grant_expires_at_ms + 50)
+        assert net_fixtures.wait_for(lambda: time.time() * 1000 > _hold_end(grant, 3.0) + 50)
         lapsed = client.request_grant_sync(STUB_PROVIDER, session_id="sess-1")
         assert isinstance(lapsed, BrokerError) and lapsed.code == "owner_offline", lapsed
         await _settle(handle)

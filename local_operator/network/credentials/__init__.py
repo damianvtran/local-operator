@@ -50,6 +50,26 @@ logger = logging.getLogger(__name__)
 #: whether it moves (design Q3).
 GRANT_TTL_S = 900.0
 
+#: ``network.credentials.offline_hold_s``: how long a borrower may keep serving a
+#: grant it already holds while the OWNER IS UNREACHABLE, measured from when the
+#: borrower received it. A separate promise from ``grant_ttl_s``, used only while
+#: the owner cannot be asked: an owner laptop in clamshell sleep (incident
+#: 2026-11-13, 24 min) used to strand every node at the 15-minute grant end.
+#:
+#: Approved by the operator 2026-11-13 (C5, ask a-e0c9: "Yes, hold up to 1
+#: hour"). The owner stamps ``hold_until_ms = min(token expiry, now + this)`` on
+#: each grant; the borrower caps it again at ``received + this`` on its own wall
+#: AND sleep-inclusive clocks. Cost: a node cut off from an AWAKE owner keeps a
+#: revoked model login for up to this long (was ``grant_ttl_s``). No refresh or
+#: mint authority moves; the held bearer is the one the owner already sent.
+OFFLINE_HOLD_S = 3600.0
+
+#: The hold's ceiling whatever ``config.yml`` says. Six hours is past the longest
+#: measured owner sleep (325 min) yet bounded, so a typo cannot turn "while the
+#: owner sleeps" into "forever"; the floor is ``grant_ttl_s`` because a hold
+#: shorter than the grant would shrink the pre-existing ``held_offline`` window.
+OFFLINE_HOLD_MAX_S = 6 * 3600.0
+
 #: The borrow rung's own ceiling, deliberately far below classification's 1.5 s
 #: per-call deadline. A local control-socket grant is microseconds to tens of ms
 #: when the owner answers; when the owner is asleep the client says so quickly.
@@ -72,6 +92,26 @@ def grant_ttl_s(root: Path | None = None) -> float:
     from local_operator.network import store
 
     return float(store.read_config(("network", "credentials", "grant_ttl_s"), GRANT_TTL_S, root))
+
+
+def offline_hold_s(root: Path | None = None) -> float:
+    """``network.credentials.offline_hold_s``, clamped to ``[grant_ttl_s, 6 h]``.
+
+    Read on BOTH sides: the owner states the hold on the grant, the borrower caps
+    it with its own value, so either device can only make the window shorter. A
+    garbled value reads as the default rather than raising: a credential path
+    must not fail a turn because of a config typo.
+    """
+    from local_operator.network import store
+
+    raw = store.read_config(("network", "credentials", "offline_hold_s"), OFFLINE_HOLD_S, root)
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        value = OFFLINE_HOLD_S
+    if value != value:  # NaN compares false everywhere; it would disable the cap
+        value = OFFLINE_HOLD_S
+    return min(max(value, grant_ttl_s(root)), OFFLINE_HOLD_MAX_S)
 
 
 def build_auth_store(config_dir: Path | None = None, *, db_path: str | Path | None = None) -> Any:

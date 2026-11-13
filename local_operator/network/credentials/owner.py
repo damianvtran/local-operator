@@ -1441,6 +1441,7 @@ class MeshCredentialBroker:
             kind="bearer" if kind in ("oauth", "mcp-oauth") else "api_key",
             token_expires_at_ms=token_exp_ms,
             grant_expires_at_ms=grant_exp,
+            hold_until_ms=_offline_hold_until_ms(self.root, now_ms, token_exp_ms, grant_exp),
             credential_ref=CredentialRef(
                 owner_device=self.self_device,
                 owner_device_name=self.self_device_name,
@@ -1699,6 +1700,11 @@ class MeshCredentialBroker:
             kind="bearer",
             token_expires_at_ms=minted.expires_at_ms,
             grant_expires_at_ms=grant_exp,
+            # Stated for the github arm too, though PR-A's borrower does not hold
+            # github yet: the window-end self-revoke must move first (design §4.3).
+            hold_until_ms=_offline_hold_until_ms(
+                self.root, now_ms, minted.expires_at_ms, grant_exp
+            ),
             credential_ref=CredentialRef(
                 owner_device=self.self_device,
                 owner_device_name=self.self_device_name,
@@ -1753,6 +1759,7 @@ class MeshCredentialBroker:
             kind="bearer",
             token_expires_at_ms=0,
             grant_expires_at_ms=now_ms + ttl_ms,
+            hold_until_ms=_offline_hold_until_ms(self.root, now_ms, 0, now_ms + ttl_ms),
             credential_ref=CredentialRef(
                 owner_device=self.self_device,
                 owner_device_name=self.self_device_name,
@@ -3578,6 +3585,24 @@ def _grant_ttl_s(root: Path | None) -> float:
     from local_operator.network.credentials import grant_ttl_s
 
     return float(grant_ttl_s(root))
+
+
+def _offline_hold_until_ms(
+    root: Path | None, now_ms: int, token_exp_ms: int, grant_exp_ms: int
+) -> int:
+    """The owner's stated offline hold: ``min(token expiry, now + offline_hold_s)``.
+
+    WHY THE OWNER STATES IT: only the owner knows the token's real expiry, and only
+    the owner's operator approved how long its logins may be used unasked (C5,
+    2026-11-13). Never below ``grant_exp_ms``, so a stated hold can only extend
+    the pre-existing ``held_offline`` window, never shrink it. ``token_exp_ms = 0``
+    (a static key, a PAT) has no known end, so the hold alone bounds it.
+    """
+    from local_operator.network.credentials import offline_hold_s
+
+    ceiling = now_ms + int(offline_hold_s(root) * 1000)
+    hold = min(token_exp_ms, ceiling) if token_exp_ms else ceiling
+    return max(hold, grant_exp_ms)
 
 
 def _token_arm_narrowing(root: Path | None) -> dict[str, Any]:

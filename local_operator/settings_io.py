@@ -5604,6 +5604,22 @@ SETTINGS: tuple[Setting, ...] = (
         help=(_t(_ws.network_credentials_grant_ttl_s_help())),
         synonyms=("auth", "expiry"),
     ),
+    # The offline hold (credentials/__init__.py ``OFFLINE_HOLD_S``; C5, approved by
+    # the operator 2026-11-13). Read on the owner (stated on each grant) and on the
+    # borrower (its own cap); the reader clamps to [grant_ttl_s, 6 h], so the
+    # registry's bounds mirror that ceiling and the grant TTL's own floor.
+    Setting(
+        key="network.credentials.offline_hold_s",
+        path=("network", "credentials", "offline_hold_s"),
+        section="network",
+        label=_t(_ws.network_credentials_offline_hold_s_label()),
+        kind=Kind.FLOAT,
+        default=3600.0,
+        minimum=60.0,
+        maximum=21600.0,
+        help=(_t(_ws.network_credentials_offline_hold_s_help())),
+        synonyms=("auth", "expiry", "sleep", "lease"),
+    ),
     # The github adapter's allow-list (github.py's ``REPOSITORIES_PATH``; the same
     # key is read by the owner — the mint narrows to it and REFUSES when empty —
     # and by the borrower's git helper as its use-time backstop). Empty is a
