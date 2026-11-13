@@ -3485,6 +3485,9 @@ def revoke_lent_on_panic(server: Any, network_id: str) -> int:
     raises: the panic's own latch and broadcast must not depend on GitHub answering.
     """
     broker = getattr(server, _BROKER_ATTR, None)
+    # An EMPTY ``network_id`` revokes this relay's broker network on purpose: an
+    # incident whose scope is unknown fails closed (revoke), never open. Only a
+    # NAMED other network is left alone. Review #3920 n2.
     if broker is None or (network_id and broker.network_id != network_id):
         return 0
     try:

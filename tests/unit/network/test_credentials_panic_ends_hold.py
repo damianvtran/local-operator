@@ -21,6 +21,7 @@ Synthetic ids only; isolated roots come from the fixtures.
 
 from __future__ import annotations
 
+import dataclasses
 from types import SimpleNamespace
 from typing import Any
 
@@ -29,6 +30,7 @@ import pytest
 from local_operator.network import relay, store
 from local_operator.network.credentials import github as github_mod
 from local_operator.network.credentials import owner as owner_mod
+from local_operator.network.credentials.mcp_bearer import BrokeredBearerAuth
 from local_operator.network.credentials.types import BrokerError, Grant
 from tests.unit.network import conftest as net_fixtures
 from tests.unit.network.test_credentials_github import (  # noqa: F401 — fixtures by import
@@ -95,6 +97,63 @@ def test_a_panicked_network_serves_no_held_grant(mesh: Any, borrowed: Any) -> No
     assert grant.access_token not in repr(again)
 
 
+def _cache_github(client: Any, grant: Grant, monkeypatch: pytest.MonkeyPatch) -> Grant:
+    """A live GitHub slot on the borrower; ``should_borrow`` forced (no GitHub share)."""
+    gh = dataclasses.replace(grant, access_token="ghs_SYNTHETIC_panic")
+    client.grants.put(github_mod.GITHUB_KEY, "sess-gh", gh)
+    monkeypatch.setattr(type(client), "should_borrow", lambda self, key: True)
+    return gh
+
+
+def test_an_active_network_still_serves_the_cached_github_grant(
+    mesh: Any, borrowed: Any, monkeypatch: pytest.MonkeyPatch  # noqa: F811
+) -> None:
+    """Control for the GitHub gate: active trust keeps today's no-dial reuse."""
+    client, grant = borrowed
+    gh = _cache_github(client, grant, monkeypatch)
+    _stop_owner(mesh)
+    served = client.request_grant_sync(github_mod.GITHUB_KEY, session_id="sess-gh")
+    assert isinstance(served, Grant) and served.access_token == gh.access_token
+
+
+def test_a_panicked_network_serves_no_cached_github_grant(
+    mesh: Any, borrowed: Any, monkeypatch: pytest.MonkeyPatch  # noqa: F811
+) -> None:
+    """Review M1 / QA Q-R1-1: the github gate read the cache past the trust fence.
+
+    RED on 85e3519c: the same ``ghs_`` grant came back after the panic (and with
+    the owner away nobody had revoked it at GitHub).
+    """
+    client, grant = borrowed
+    gh = _cache_github(client, grant, monkeypatch)
+    _stop_owner(mesh)
+    _set_trust(mesh, "untrusted")
+    refused = client.request_grant_sync(github_mod.GITHUB_KEY, session_id="sess-gh")
+    assert isinstance(refused, BrokerError), f"served {type(refused).__name__} after panic"
+    assert gh.access_token not in repr(refused)
+    assert client.grants.peek(github_mod.GITHUB_KEY, "sess-gh") is None
+
+
+def test_a_panicked_network_serves_no_cached_mcp_bearer(
+    mesh: Any, borrowed: Any  # noqa: F811
+) -> None:
+    """Review M1: ``_live_bearer`` is MCP's first read per request and had no check.
+
+    An MCP OAuth bearer has no issuer revoke, so before the fix it was served for
+    up to ``grant_ttl_s - REASK_MARGIN`` after the panic (RED on 85e3519c:
+    ``'mcp_SYNTHETIC_panic'``).
+    """
+    client, grant = borrowed
+    key = "mcp:panic.example"
+    client.grants.put(key, "", dataclasses.replace(grant, access_token="mcp_SYNTHETIC_panic"))
+    auth = BrokeredBearerAuth(url="https://panic.example/mcp", key=key, client=client)
+    assert auth._live_bearer() == "mcp_SYNTHETIC_panic"  # control: trusted, served
+    _stop_owner(mesh)
+    _set_trust(mesh, "untrusted")
+    assert auth._live_bearer() == ""
+    assert client.grants.peek(key, "") is None
+
+
 def test_both_panic_paths_ask_the_owner_to_revoke(
     mesh: Any, monkeypatch: pytest.MonkeyPatch  # noqa: F811
 ) -> None:
@@ -144,3 +203,17 @@ def test_a_relay_that_never_brokered_revokes_nothing() -> None:
     server = SimpleNamespace()
     assert owner_mod.revoke_lent_on_panic(server, "n_gh") == 0
     assert not hasattr(server, owner_mod._BROKER_ATTR)
+
+
+def test_a_revoke_thread_that_cannot_start_never_raises_into_the_panic(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review n1: at interpreter shutdown ``Thread.start`` raises; the hook must not."""
+
+    def refuse(self: Any) -> None:
+        raise RuntimeError("can't create new thread at interpreter shutdown")
+
+    monkeypatch.setattr(relay.threading.Thread, "start", refuse)
+    server = SimpleNamespace()
+    thread = relay.RelayServer._revoke_lent_on_panic(server, "n_gh")  # type: ignore[arg-type]
+    assert not thread.is_alive()

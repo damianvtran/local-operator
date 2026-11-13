@@ -870,7 +870,7 @@ class MeshCredentialClient:
             from local_operator.network.credentials.github import is_github_key
 
             if is_github_key(key):
-                cached = self.grants.get(key, session_id)
+                cached = self.live_grant(key, session_id)
                 if cached is not None:
                     return cached
             else:
@@ -1074,6 +1074,48 @@ class MeshCredentialClient:
             return restriction or "not_a_holder", stamp
         return "", stamp
 
+    def live_grant(self, key: str, session_id: str) -> Grant | BrokerError | None:
+        """The cached grant for ``(key, session_id)`` IF this device may still serve it.
+
+        THE ONE DOOR FOR EVERY NO-DIAL CACHE SERVE (PR #3920 review M1 / QA
+        Q-R1-1). A panic (raised here or received) only latches ``record.trust``;
+        nothing tells an in-process :class:`GrantCache` about it, so a serve that
+        read the cache directly — the ``github`` gate in :meth:`request_grant_sync`,
+        MCP's ``BrokeredBearerAuth._live_bearer`` — kept handing out a live bearer
+        for up to the grant's expiry after the panic. Every cached-grant read that
+        may hand a bearer to a caller goes through here; a new one must too.
+
+        Returns ``None`` when nothing usable is cached (the caller dials, as
+        before), the grant when the slot is live AND :meth:`_self_membership_active`
+        holds, and otherwise the persistent network deny
+        (:meth:`_invalidate_membership_scope`, which drops every slot this device
+        borrowed) as a :class:`BrokerError`.
+
+        The store read happens only on a cache hit, so a miss costs nothing new.
+        The no-dial paths keep their own later checks (``_hold_admission`` inside
+        the policy transaction for the provider hot read and the hold); this is
+        the fence that must hold BEFORE anything is served. PR #3922 (offline
+        lease) adds a trust check in ``_hold_admission``: it should route its cache
+        read through this helper rather than add a parallel one — keep the name.
+        """
+        from local_operator.network.credentials.effective import note_resolution
+        from local_operator.network.credentials.held_policy import PolicyUnknown
+
+        cached = self.grants.get(key, session_id)
+        if cached is None:
+            return None
+        if self._self_membership_active():
+            return cached
+        try:
+            lost = self._invalidate_membership_scope(key)
+        except PolicyUnknown:
+            # The persistent deny could not be written; the in-process slots
+            # still go, so this process serves nothing either way (fail closed).
+            self.grants.drop_borrowed(self.self_device)
+            lost = self._policy_error(key, "not_a_holder")
+        note_resolution(self.root, key, lost)
+        return lost
+
     def _serve_cached(
         self, key: str, session_id: str, *, model_id: str, selection: dict[str, Any]
     ) -> Grant | BrokerError | None:
@@ -1117,7 +1159,9 @@ class MeshCredentialClient:
 
         if is_mcp_key(key) or is_device_bound_provider(key):
             return None
-        held = self.grants.get(key, session_id)
+        held = self.live_grant(key, session_id)
+        if isinstance(held, BrokerError):
+            return held
         reuse = self.grants.reuse_stamp(key, session_id)
         if held is None or reuse is None:
             return None

@@ -14129,7 +14129,14 @@ class RelayServer:
             name="mesh-panic-revoke",
             daemon=True,
         )
-        thread.start()
+        try:
+            thread.start()
+        except RuntimeError:
+            # Interpreter shutdown refuses new threads. The panic's latch and
+            # broadcast already ran; this hook promises never to raise into them
+            # (the received path is on a link reader). Each token's own hour still
+            # bounds it. Review #3920 n1.
+            logger.warning("mesh panic: could not start the lent-token revoke", exc_info=True)
         return thread
 
     @staticmethod
