@@ -901,6 +901,33 @@ class _AttemptOutcome:
     latency_ms: float
 
 
+@dataclass
+class _DialFlight:
+    """One in-flight dial to a ``(device_id, network_id)``, shared by every caller.
+
+    WHY SINGLE-FLIGHT (2026-11-13, lop-remote-node-2): every surface that needs a
+    peer — the 1 s redial tick, a listing probe, each viewer stream open, a
+    credential broker call — used to check :meth:`RelayServer._link_for` and then
+    dial on its own. Against a peer that had gone silent for 120 s that meant
+    several handshakes landing on a node that was already starving, each one, once
+    it succeeded, fanning out member pulls, link-up hooks and stream re-opens; the
+    Mac's log showed two links to the one peer idling out 5 s apart. A handshake is
+    the most expensive thing to ask of a struggling peer, so concurrent callers now
+    wait on ONE dial's answer instead of starting their own.
+
+    ``bounded`` records whether the leader dialled under a listing deadline (each
+    connect capped at :data:`PROBE_CONNECT_TIMEOUT_S`): a waiter with no deadline is
+    a real session op owed the full handshake budget, so it dials for itself rather
+    than inherit a failure the leader's short cap produced.
+    """
+
+    bounded: bool
+    done: threading.Event = field(default_factory=threading.Event)
+    #: Set by the leader before ``done``; ``None`` if the leader raised, in which
+    #: case a waiter dials for itself rather than invent a reason.
+    result: tuple["PeerLink | None", str, list[CandidateAttempt]] | None = None
+
+
 def probe_candidates(
     endpoints: Sequence[str],
     *,
@@ -4865,6 +4892,9 @@ class PeerLink:
         self.peer_addr = ""
         self.opened_at = time.time()
         self.last_frame_at = time.time()
+        #: When the writer last sent a keepalive ``ping``. The cadence is measured from
+        #: the LATER of this and ``last_frame_at`` — see ``_write_loop``.
+        self.last_ping_sent_at = 0.0
         self.frames_in = 0
         #: When this link last ANSWERED a member-table pull (`net_member_list`).
         #: Zero means "never", and it is the whole of the due-gate in
@@ -5121,7 +5151,7 @@ class PeerLink:
             except OSError:
                 pass
 
-    def _log_link_error(self, side: str, exc: BaseException) -> None:
+    def _log_link_error(self, side: str, exc: BaseException, *, trace: bool = False) -> None:
         """Say WHY a link died, ONCE, with the cause that actually ended it.
 
         THE AUDIT ROW CARRIES ONLY ``cause=error``, and that was the whole record of
@@ -5151,6 +5181,9 @@ class PeerLink:
             side,
             type(exc).__name__,
             exc,
+            # An UNEXPECTED exception (``trace``) is a bug, not a network event, and
+            # its type and message alone do not say where it came from.
+            exc_info=exc if trace else None,
         )
 
     def _handle(self, frame: dict[str, Any]) -> None:
@@ -5227,14 +5260,44 @@ class PeerLink:
                     continue
                 # Keepalive on an idle link; the reader enforces the other half
                 # (``link_idle_s`` without a frame closes it).
-                if time.time() - self.last_frame_at > self.settings.keepalive_s:
-                    record = self.server.peer_record()
-                    self._write(wire.keepalive_frame(record.pid if record else 0))
+                #
+                # ONE PING PER ``keepalive_s``, measured from the later of the last
+                # frame RECEIVED and the last ping SENT. Measuring from the last frame
+                # received alone (the old rule) meant that once a peer went quiet for
+                # ``keepalive_s`` every 0.5 s wake pinged again, because sending never
+                # moves that clock: on 2026-11-13 lop-remote-node-2 went silent for
+                # 120 s and this Mac pushed 180-270 frames into each silent link
+                # (frames_out 273/194/218 against frames_in 43/17/9), all of which a
+                # recovering node then had to decrypt and ack. A silent peer now gets
+                # at most ``link_idle_s / keepalive_s`` pings before the idle close.
+                now = time.time()
+                if now - max(self.last_frame_at, self.last_ping_sent_at) > (
+                    self.settings.keepalive_s
+                ):
+                    self.last_ping_sent_at = now
+                    # ``os.getpid()``, not ``server.peer_record().pid``: the record
+                    # is built by listing and parsing every network file on disk,
+                    # and its pid IS ``os.getpid()``. That scan ran per ping — 2/s
+                    # per silent link in the same episode — on exactly the host
+                    # that is short of I/O.
+                    self._write(wire.keepalive_frame(os.getpid()))
                 self._wake.wait(timeout=0.5)
                 self._wake.clear()
         except (OSError, wire.LinkCryptoError) as exc:
             if not self._closed.is_set():
                 self._log_link_error("writer", exc)
+            self.close("error", flush_s=0.0)
+        except Exception as exc:  # noqa: BLE001 — a dead writer must not stay silent
+            # ANY OTHER EXCEPTION (a ``codec.seal`` of a frame that is not JSON, a
+            # bug in a frame builder) used to end this thread with nothing but
+            # threading's stderr hook, leaving a HALF-DEAD link: still in the table,
+            # still ``alive``, its reader answering, nothing ever written again — so
+            # requests queued into it until the PEER idled it out 120 s later. That
+            # is one of the shapes the 2026-11-13 node2 silence could take. Close
+            # it now, with the traceback, so a fresh link (or an honest
+            # "unreachable") replaces it immediately.
+            if not self._closed.is_set():
+                self._log_link_error("writer", exc, trace=True)
             self.close("error", flush_s=0.0)
 
     def _drain(self) -> bool:
@@ -5728,6 +5791,9 @@ class RelayServer:
         self._refusal_rows = redial.RefusalCoalescer()
         self.links: dict[str, PeerLink] = {}
         self._links_lock = threading.RLock()
+        #: In-flight dials keyed by ``(device_id, network_id)`` (see ``_DialFlight``).
+        self._dial_flights: dict[tuple[str, str | None], _DialFlight] = {}
+        self._dial_flights_lock = threading.Lock()
         self._listener: socket.socket | None = None
         self._control: socket.socket | None = None
         self._control_key = wire.b64u(os.urandom(32))
@@ -7720,8 +7786,11 @@ class RelayServer:
             return "untrusted"
         return ""
 
-    def _admit_link(self, link: PeerLink) -> str:
+    def _admit_link(self, link: PeerLink, *, outbound: bool = False) -> str:
         """Put ``link`` in the table and start it; return ``""``, or why it was refused.
+
+        ``outbound`` (a link THIS device dialled) applies the dialler's half of the
+        duplicate-link fence: see the comment at the fence below.
 
         THE ONE WAY INTO ``links``, and why it is one way: the refusal (see
         :meth:`_refusal_reason`) and the insert have to happen in the SAME critical
@@ -7740,8 +7809,25 @@ class RelayServer:
         answer every other refusal on this transport gives — an open port that
         explains itself is an oracle — and the record of why is this device's own.
         """
+        displaced: PeerLink | None = None
         with self._links_lock:
             refusal = self._refusal_reason(link.network_id)
+            if not refusal and outbound:
+                # THE DIALLER'S DUPLICATE FENCE. Only ``register_link`` (the
+                # listener) ever replaced a link, so two dials racing to one peer
+                # left this device holding TWO links to it — seen 2026-11-13 as two
+                # ``link_idle`` rows for lop-remote-node-2 5 s apart, each with its
+                # own reader, writer and keepalive aimed at a node that was already
+                # silent. Single-flight in ``_ensure_link_with_probe`` removes the
+                # common race; this catches every other dial path.
+                #
+                # NEWEST WINS, as in ``register_link``, and it has to: the listener
+                # at the far end has just run that fence for this same handshake
+                # and evicted ITS copy of the older link (``net_bye`` + close), so
+                # keeping the older one here would leave both ends with none.
+                # Decided under the same lock as the insert so two admissions
+                # cannot each see the other as "no link yet".
+                displaced = self._link_for(link.device_id, network_id=link.network_id)
             if not refusal:
                 self.links[link.link_id] = link
                 # Publish the connected transition BEFORE starting the reader and
@@ -7759,6 +7845,12 @@ class RelayServer:
         if refusal:
             _close_quietly(link.sock)
         else:
+            if displaced is not None:
+                # Outside the lock: ``close`` waits on the writer's flush and then
+                # runs ``link_closed``, which finds the new link and so records no
+                # loss for the device.
+                displaced.send({"op": "net_bye", "reason": "replaced"})
+                displaced.close("replaced")
             # A LINK IS UP: the redial schedule for this device resets, and its
             # surfaces stop saying "reconnecting" (``redial.RedialTracker``).
             self.note_link_activity(link, force=True)
@@ -12137,7 +12229,75 @@ class RelayServer:
         probe_timeout_s: float | None = None,
         network_id: str | None = None,
     ) -> tuple["PeerLink | None", str, list[CandidateAttempt]]:
+        """``_dial_link_with_probe``, SINGLE-FLIGHT per ``(device_id, network_id)``.
+
+        The first caller for a key dials; every caller that arrives while that dial
+        is in flight waits for its answer within ITS OWN deadline instead of starting
+        a second handshake (why: :class:`_DialFlight`). A waiter whose deadline runs
+        out first answers :data:`NOT_ATTEMPTED_REASON` — true of it, since this
+        caller never got to dial. A waiter is returned a COPY of the attempts so no
+        two callers share one mutable list.
+        """
+        found = self._link_for(device_id)
+        if found is not None:
+            return found, "", []
+        flights = getattr(self, "_dial_flights", None)
+        if flights is None:
+            # A reduced stand-in server (unit tests build these from a namespace)
+            # has no registry and no bound method: call the body uncoalesced.
+            return RelayServer._dial_link_with_probe(
+                self, device_id, probe_timeout_s=probe_timeout_s, network_id=network_id
+            )
+        key = (device_id, network_id)
+        deadline = None if probe_timeout_s is None else time.monotonic() + probe_timeout_s
+        while True:
+            with self._dial_flights_lock:
+                flight = flights.get(key)
+                leader = flight is None
+                if flight is None:
+                    flight = _DialFlight(bounded=probe_timeout_s is not None)
+                    flights[key] = flight
+            if leader:
+                remaining = None if deadline is None else max(0.0, deadline - time.monotonic())
+                try:
+                    flight.result = self._dial_link_with_probe(
+                        device_id, probe_timeout_s=remaining, network_id=network_id
+                    )
+                    return flight.result
+                finally:
+                    # Unregister BEFORE waking the waiters, so a waiter that decides
+                    # to dial for itself starts a new flight rather than re-joining
+                    # this finished one.
+                    with self._dial_flights_lock:
+                        if flights.get(key) is flight:
+                            del flights[key]
+                    flight.done.set()
+            remaining = None if deadline is None else deadline - time.monotonic()
+            if (remaining is not None and remaining <= 0) or not flight.done.wait(remaining):
+                return None, NOT_ATTEMPTED_REASON, []
+            result = flight.result
+            if result is not None and result[0] is not None:
+                return result[0], "", list(result[2])
+            if result is not None and not (flight.bounded and deadline is None):
+                return None, result[1], list(result[2])
+            # The leader raised, or failed under a listing's per-connect cap this
+            # unbounded caller was never subject to: dial for ourselves — unless a
+            # link arrived meanwhile (an inbound one, say).
+            found = self._link_for(device_id)
+            if found is not None:
+                return found, "", []
+
+    def _dial_link_with_probe(
+        self,
+        device_id: str,
+        *,
+        probe_timeout_s: float | None = None,
+        network_id: str | None = None,
+    ) -> tuple["PeerLink | None", str, list[CandidateAttempt]]:
         """``_ensure_link`` plus WHY it failed, for a surface that must say so.
+
+        Call through :meth:`_ensure_link_with_probe`, which coalesces concurrent
+        dials to one peer; calling this directly starts a handshake unconditionally.
 
         A listing that reports ``reachable: false`` with no reason is the
         dead-instrument failure this repo warns about: it cannot be told from
@@ -13245,7 +13405,7 @@ class RelayServer:
                 reader=reader,
             )
             link.peer_addr = host
-            refusal = self._admit_link(link)
+            refusal = self._admit_link(link, outbound=True)
             if refusal:
                 return None, refusal
             # The listener's endpoints arrive in its ``welcome``; they are how this
