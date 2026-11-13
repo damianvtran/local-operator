@@ -3868,14 +3868,18 @@ def _cmd_credential(args: argparse.Namespace) -> int:
             # which happened — a queued notice, an already-wiped copy, or no RECORDED copy —
             # and carries the ceiling after EVERY one of them (design review round 1, D1: the
             # state that claims the most used to be the only one without it).
-            copied, wiped = _copy_ledger_state(record.network_id, device, key)
+            copied, wiped, unacknowledged = _copy_ledger_state(record.network_id, device, key)
             payload["copy"] = {
                 "confirmed": copied,
                 "wiped": wiped,
-                "wipe": "done" if (copied and wiped) else ("queued" if copied else "none"),
+                "wipe": "done" if wiped else ("queued" if copied or unacknowledged else "none"),
             }
+            if unacknowledged:
+                payload["copy"]["unacknowledged"] = True
             lines.extend(
-                messages_mod.render_copy_revoke_notice(name, key, copied=copied, wiped=wiped)
+                messages_mod.render_copy_revoke_notice(
+                    name, key, copied=copied, wiped=wiped, unacknowledged=unacknowledged
+                )
             )
             lines.extend(messages_mod.COPY_CEILING_LINES)
             return _emit(args, payload, lines)
@@ -3885,13 +3889,17 @@ def _cmd_credential(args: argparse.Namespace) -> int:
         # exactly the case where the remedy matters most. Read from the entry the
         # revoke just wrote, so the receipt describes what was actually lent.
         static = str(entry_json.get("kind") or "") == "api-key-static"
-        copied, wiped = _copy_ledger_state(record.network_id, device, key)
-        if copied:
+        copied, wiped, unacknowledged = _copy_ledger_state(record.network_id, device, key)
+        if copied or unacknowledged:
             # The class-4 copy half, same vocabulary as class 2's (§4.3: the
             # receipt says which happened).
             payload["copy"] = {"confirmed": copied, "wiped": wiped}
+            if unacknowledged:
+                payload["copy"]["unacknowledged"] = True
             lines.extend(
-                messages_mod.render_copy_revoke_notice(name, key, copied=copied, wiped=wiped)
+                messages_mod.render_copy_revoke_notice(
+                    name, key, copied=copied, wiped=wiped, unacknowledged=unacknowledged
+                )
             )
         if github_mod.is_github_key(key):
             # THE M1-RESTATED COPY, to match the mechanism (mint-revoke at the
@@ -3931,8 +3939,8 @@ def _cmd_credential(args: argparse.Namespace) -> int:
     return _emit(args, payload, lines)
 
 
-def _copy_ledger_state(network_id: str, device: str, key: str) -> tuple[bool, bool]:
-    """``(confirmed, wiped)`` for one member's copy of ``key``, from the ledger.
+def _copy_ledger_state(network_id: str, device: str, key: str) -> tuple[bool, bool, bool]:
+    """``(confirmed, wiped, unacknowledged)`` for one member's copy of ``key``.
 
     The same document the listing's segments read, so the receipt and the
     listing cannot disagree about whether a copy is outstanding. An unreadable
@@ -3944,31 +3952,38 @@ def _copy_ledger_state(network_id: str, device: str, key: str) -> tuple[bool, bo
     try:
         state = SyncState.load(network_id)
     except Exception:  # noqa: BLE001 — an unreadable ledger confirms nothing
-        return False, False
+        return False, False, False
+    # Prefer the newest open copy, including a re-copy after a confirmed wipe.
+    # A dispatch is evidence of sending, NEVER evidence of confirmed delivery.
+    for row in state.open_copies(device):
+        if row["key"] == key:
+            pending = bool(row["unacknowledged"])
+            return not pending, False, pending
     row = state.ack_for(device, key)
     if not isinstance(row, dict):
-        return False, False
-    return True, bool(row.get("wiped"))
+        return False, False, False
+    return True, bool(row.get("wiped")), False
 
 
-def _unconfirmed_copies(network_id: str, device: str) -> int:
-    """How many ledger rows for ``device`` are still NOT ``wiped``.
+def _unconfirmed_copies(network_id: str, device: str) -> tuple[int, int]:
+    """``(open, unacknowledged)`` copy counts when the relay cannot run endings.
 
     The removal receipt's count when there is no relay to run the ending
     exchange (review round 1, Q1): every open row is a copy nothing confirmed
     deleted, so the receipt names the open state instead of a clean sweep. The
     same read ``_copy_ledger_state`` makes, summed over the member instead of
-    one key; an unreadable ledger counts zero rows and the receipt stays as it
-    was rather than inventing copies.
+    one key; an unreadable ledger derives neither count rather than inventing
+    copies. The second count preserves uncertainty about delivery, not deletion.
     """
     from local_operator.network.credentials.sync import SyncState
 
     try:
         state = SyncState.load(network_id)
     except Exception:  # noqa: BLE001 — an unreadable ledger confirms nothing
-        return 0
-    # Sent-but-unacknowledged copies are open too (``SyncState.dispatched``).
-    return len(state.open_copies(device))
+        return 0, 0
+    # The offline receipt must retain delivery uncertainty, just like the relay.
+    rows = state.open_copies(device)
+    return len(rows), sum(bool(row["unacknowledged"]) for row in rows)
 
 
 def _canonical_credential_key(raw: str) -> str:
@@ -4474,7 +4489,7 @@ def _cmd_member_rm(args: argparse.Namespace) -> int:
     # THE COPIES THIS PATH CANNOT CONTACT (review round 1, Q1): with no relay there
     # is no link, so nothing is confirmed deleted — but the receipt must still say
     # what the ledger shows, or a removal with live copies reads as a clean sweep.
-    copies = _unconfirmed_copies(record.network_id, device_id)
+    copies, unacknowledged = _unconfirmed_copies(record.network_id, device_id)
     outcome = imported.remove_member(record, state, device_id=device_id, by=record.self_device_id)
     for member in record.active_members():
         if member.device_id == record.self_device_id:
@@ -4511,12 +4526,16 @@ def _cmd_member_rm(args: argparse.Namespace) -> int:
             "copies": copies,
             "wiped": 0,
             "timed_out": 0,
+            "unacknowledged": unacknowledged,
         },
         [
             f"removed {args.device} from {record.name}; epoch is now {outcome.epoch}",
             "the relay is not running, so the rotation is queued for delivery",
             *messages_mod.render_removal_endings(
-                _member_name(record, device_id) or args.device, copies=copies, wiped=0
+                _member_name(record, device_id) or args.device,
+                copies=copies,
+                wiped=0,
+                unacknowledged=unacknowledged,
             ),
         ],
     )
