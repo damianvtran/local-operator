@@ -25,11 +25,11 @@ from typing import Any
 
 import pytest
 
-from local_operator.harness.types import Message
+from local_operator.harness.types import CustomMessage, Message
 from local_operator.network import relay
 from local_operator.session.history_window import display_window
 from local_operator.session.peer_rows import clear_cache
-from local_operator.session.transcript import Transcript
+from local_operator.session.transcript import Transcript, TranscriptEntry, _entry_to_message
 from tests.unit.network.test_relay_e2e import devices  # noqa: F401 — fixtures
 from tests.unit.network.test_remote_viewer import _open, _user_texts, _wait
 from tests.unit.network.test_session_plane import (
@@ -155,6 +155,30 @@ def test_a_custom_row_with_bulk_outside_details_is_bounded_not_refused(
     cut = relay.bounded_history_entry(stringy, budget // 4)
     assert MARKER_WORDS in cut["payload"]["content"]
     assert "extra_blob" not in cut["payload"]
+
+
+@pytest.mark.asyncio
+async def test_a_bounded_stored_custom_message_still_decodes_as_custom(tmp_path: Path) -> None:
+    """R2-1: a REAL stored ``CustomMessage`` row is ``type: "message"`` with
+    ``payload.kind: "custom"`` and its id on the envelope only. Dropping
+    ``kind`` made the decoder read it as a plain message, fail, and drop it —
+    the oversized row vanished instead of showing the marker."""
+    transcript = Transcript(tmp_path)
+    await transcript.append_message(
+        CustomMessage(custom_type="hub_message", details={"body": "x" * 600_000})
+    )
+    stored = transcript.entries()[-1]
+    raw = {"id": stored.id, "ts": stored.ts, "type": stored.type, "payload": stored.payload}
+    assert raw["type"] == "message" and raw["payload"].get("kind") == "custom"
+
+    cut = relay.bounded_history_entry(raw, 16 * 1024)
+
+    assert len(json.dumps(cut)) < 16 * 1024
+    assert cut["payload"]["kind"] == "custom"
+    decoded = _entry_to_message(TranscriptEntry(**cut))
+    assert isinstance(decoded, CustomMessage), decoded
+    assert decoded.id == stored.id and decoded.custom_type == "hub_message"
+    assert MARKER_WORDS in decoded.details["truncated"]
 
 
 # --- the owner's display window ----------------------------------------------

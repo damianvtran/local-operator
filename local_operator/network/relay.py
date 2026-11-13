@@ -4344,7 +4344,7 @@ def bounded_history_entry(entry: Any, max_bytes: int) -> Any:
     becomes a text preview plus the same marker the live view uses
     (``history_window.TRUNCATED_ENTRY_MARKER``) — one sentence for one condition,
     whichever path served the row. Any other payload (a ``CustomMessage``) keeps
-    only its identity — ``custom_type``, ``attribution``, ``id`` — and carries
+    only its identity — ``kind``, ``custom_type``, ``attribution``, ``id`` — and carries
     the marker in ``details`` (and in ``content`` when that was a string). Never
     mutates ``entry``.
     """
@@ -4397,8 +4397,15 @@ def bounded_history_entry(entry: Any, max_bytes: int) -> Any:
         # sit in a list ``content`` or any extra key. Keeping those would leave
         # the row oversized and surface as the misleading "metadata is too
         # large" refusal; only identity is needed to render and page past it.
+        # ``kind`` IS part of that identity: a stored ``CustomMessage`` row is
+        # ``type: "message"`` with ``payload.kind: "custom"``, and both readers
+        # (``transcript._entry_to_message`` and the desktop reducer) default a
+        # missing kind to a plain message — the row then fails to decode and
+        # vanishes instead of showing the marker (R2-1).
         cut = {
-            key: payload[key] for key in ("custom_type", "attribution", "id") if key in payload
+            key: payload[key]
+            for key in ("kind", "custom_type", "attribution", "id")
+            if key in payload
         }
         cut["details"] = {"truncated": marker}
         if isinstance(payload.get("content"), str):
