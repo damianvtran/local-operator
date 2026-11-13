@@ -25,6 +25,7 @@ import io
 import sys
 import zipfile
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -166,6 +167,25 @@ def test_a_bundle_that_could_not_run_is_refused_rather_than_packaged(tmp_path: P
     (app2 / "Contents" / "embedded.provisionprofile").unlink()
     with pytest.raises(SystemExit, match="embedded.provisionprofile"):
         make_macos_wheel.retag(_toy_wheel(tmp_path), app2, tmp_path)
+
+
+def test_every_member_including_record_uses_maximum_lossless_deflate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Retagging must not undo slimming or leave the large RECORD uncompressed."""
+    pure, app = _toy_wheel(tmp_path), _fake_app(tmp_path)
+    compressor = getattr(zipfile, "_get_compressor")
+    calls: list[tuple[int, int | None]] = []
+
+    def observed(compression: int, compresslevel: int | None = None) -> Any:
+        calls.append((compression, compresslevel))
+        return compressor(compression, compresslevel)
+
+    monkeypatch.setattr(zipfile, "_get_compressor", observed)
+    wheel = make_macos_wheel.retag(pure, app, tmp_path)
+    with zipfile.ZipFile(wheel) as archive:
+        assert calls == [(zipfile.ZIP_DEFLATED, 9)] * len(archive.infolist())
+        assert all(info.compress_type == zipfile.ZIP_DEFLATED for info in archive.infolist())
 
 
 def test_the_pure_wheel_is_left_alone(tmp_path: Path) -> None:
