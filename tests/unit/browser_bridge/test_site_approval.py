@@ -466,3 +466,32 @@ def test_the_terminal_labels_a_site_ask_as_its_own_kind() -> None:
     assert _is_site_ask_row(site) and _is_bridge_ask_row(site)
     assert not _is_site_ask_row(bridge)
     assert not _is_site_ask_row(SimpleNamespace(questions=[{"id": "q0"}]))
+
+
+@pytest.mark.asyncio
+async def test_the_runtime_op_routes_a_site_question_to_the_site_door(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The runtime's ``bridge_decide`` op takes the ``site:v1:`` door AHEAD of
+    the Team Bridge door, which refuses outright on a session with no bridge
+    runtime ("agent messages are not active") — a node's usual state."""
+    import asyncio
+
+    from local_operator.session.runtime.serving import ServingSessionHandle
+
+    session, ask_id, question_id = await _session_with_site_ask(tmp_path, monkeypatch)
+    seen: list[tuple[str, str, str]] = []
+
+    async def site_decide(a: str, q: str, w: str) -> dict[str, Any]:
+        seen.append((a, q, w))
+        return {"ok": False, "error": "refused by the browser", "code": "bad_signature"}
+
+    monkeypatch.setattr(session, "site_decide", site_decide)
+    handle = ServingSessionHandle(session, asyncio.get_running_loop(), cwd=str(tmp_path))
+    with pytest.raises(ValueError, match="refused by the browser"):
+        await handle.bridge_decide(ask_id, question_id, "approve")
+    assert seen == [(ask_id, question_id, "approve")]
+    # A non-site question still takes the Team Bridge door, and its refusal.
+    with pytest.raises(ValueError, match="agent messages are not active"):
+        await handle.bridge_decide(ask_id, "bmsg_1", "approve")
+    await session.dispose()
