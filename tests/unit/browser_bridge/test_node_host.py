@@ -821,6 +821,90 @@ def test_setup_after_uninstall_reads_installed_again(paths: Path) -> None:
     assert fact["host"] == "node" and fact["paired"] and fact["unit_active"]
 
 
+def _owned_after_cut_off(node: FakeNode) -> None:
+    """The record proves the install, so uninstall plans removals (not a refusal)."""
+    record = json.loads(node.env.record_path.read_text(encoding="utf-8"))
+    assert record["chrome"], record
+    assert record["history"][-1]["note"].startswith("checkpoint")
+    plan = node_host.uninstall(node_host.Options(dry_run=True), node.env)
+    assert plan.refusal is None, plan.refusal
+    assert "chrome" in {step.id for step in plan.steps}
+
+
+def test_a_run_cut_off_after_chrome_still_owns_it(paths: Path) -> None:
+    """R2-1/U13: the record was written only at the end, so a first install
+    killed after Chrome landed left none; a re-run found Chrome in place and
+    never re-added `chrome`, and uninstall refused lop's own browser."""
+    node = FakeNode(paths, provisioned=False)
+    node_host._write_private(node.env.signing_key, PEM)  # noqa: SLF001
+    install_daemon = node.env.install_daemon
+
+    def killed() -> Mapping[str, Any]:
+        # A kill (SIGKILL cannot be caught; SystemExit unwinds just as far
+        # without reaching the final write) at the first step after fonts.
+        raise SystemExit(137)
+
+    node.env.install_daemon = killed
+    options = node_host.Options(extension_dir=node.extension_dist, authorised_by="x")
+    with pytest.raises(SystemExit):
+        node_host.setup(options, node.env)
+    assert any(r.startswith(node_host.CHROME_PACKAGE) for r in node.rpms)
+    _owned_after_cut_off(node)
+    # The re-run finds every root step in place and still keeps ownership.
+    node.env.install_daemon = install_daemon
+    again = node_host.setup(options, node.env)
+    assert again.ok, [s.as_json() for s in again.steps]
+    assert _states(again)["chrome"] == node_host.STATE_IN_PLACE
+    record = json.loads(node.env.record_path.read_text(encoding="utf-8"))
+    assert record["chrome"]["package"].startswith(node_host.CHROME_PACKAGE)
+    assert "note" not in record["history"][-1]
+    done = node_host.uninstall(node_host.Options(authorised_by="x"), node.env)
+    assert done.ok, (done.refusal, [s.as_json() for s in done.steps])
+    assert not any(r.startswith(node_host.CHROME_PACKAGE) for r in node.rpms)
+
+
+def test_a_run_cut_off_inside_the_chrome_step_still_owns_it(paths: Path) -> None:
+    """R2-1: the rpm lands inside the root transaction; a kill before
+    `apply_chrome` returns must not orphan it either."""
+    node = FakeNode(paths, provisioned=False)
+    node_host._write_private(node.env.signing_key, PEM)  # noqa: SLF001
+    runner = node.env.runner
+
+    def run(argv: list[str], *, input_text: str | None = None) -> Any:
+        if argv[:1] == [node_host.CHROME_BINARY]:
+            raise SystemExit(137)
+        return runner(argv, input_text=input_text)
+
+    node.env.runner = run
+    with pytest.raises(SystemExit):
+        node_host.setup(
+            node_host.Options(extension_dir=node.extension_dist, authorised_by="x"), node.env
+        )
+    assert any(r.startswith(node_host.CHROME_PACKAGE) for r in node.rpms)
+    record = json.loads(node.env.record_path.read_text(encoding="utf-8"))
+    assert record["chrome"]["install_started_at"]
+    _owned_after_cut_off(node)
+
+
+def test_sudo_refusal_remedy_prints_after_the_rows(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], paths: Path
+) -> None:
+    """U16: the remedy printed above 15 `not run (refused)` rows scrolled off."""
+    node = FakeNode(paths, provisioned=False)
+    node.sudo_ok = False
+    monkeypatch.setattr(node_host, "default_env", lambda: node.env)
+    code, out = _cli(
+        monkeypatch,
+        capsys,
+        ["setup", "--node", "--authorised-by", "x", "--extension-dir", str(node.extension_dist)],
+    )
+    assert code == 1
+    lines = [line for line in out.splitlines() if line.strip()]
+    last_row = max(i for i, line in enumerate(lines) if "not run (refused)" in line)
+    assert "sudo -v" in lines[-1] and last_row < len(lines) - 1
+    assert out.count("sudo -v") == 1
+
+
 def test_local_rpm_install_re_verifies_the_signature(paths: Path) -> None:
     """R1-4: dnf's `localpkg_gpgcheck` is 0 by default, so a file swapped after
     `rpm -K` would install unchecked; the install now re-verifies it."""
@@ -941,8 +1025,10 @@ def test_cli_streams_human_rows_and_keeps_json_a_single_document(
 
 
 def test_sigterm_mid_pairing_still_removes_the_code(paths: Path) -> None:
-    """U2: SIGTERM (an agent's command timeout) skipped the `finally` that takes
-    the pairing code back out of the policy."""
+    """U2: SIGTERM (Ctrl-C/SIGHUP alike; `timeout(1)`, a harness) skipped the
+    `finally` that takes the pairing code back out of the policy. lop's own
+    `bash` timeout is SIGKILL, which no handler catches: the guide's 900 s
+    advice covers that case (round 2, R2-2)."""
     import os
     import signal
 

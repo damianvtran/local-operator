@@ -1119,11 +1119,15 @@ class _Plan:
             }
 
     def _group_sharers(self, group: str) -> list[str]:
-        """Accounts other than this one in ``group`` (listed members or primary gid).
+        """Accounts other than this one in ``group``: listed members plus LOCAL
+        accounts whose primary gid it is.
 
-        Fails CLOSED: a group that cannot be read is treated as shared, because
-        the alternative is writing a secret for an audience nobody checked
-        (round 1, R1-7).
+        A group entry that cannot be read is treated as shared, because the
+        alternative is writing a secret for an audience nobody checked (round
+        1, R1-7). Not fully closed: ``getent passwd`` lists directory
+        (sssd/LDAP) accounts only when enumeration is on, so such an account
+        with this primary gid goes unseen. Fine for the AL2023 nodes in scope,
+        whose accounts are local (round 2, R2-4).
         """
         entry = self.env.run("getent", "group", group)
         fields = entry.stdout.strip().split(":")
@@ -1443,13 +1447,22 @@ def _unwind_on_signals() -> Iterator[None]:
 
     WHY: Python's default SIGTERM/SIGHUP action kills the process WITHOUT
     unwinding, so ``apply_pairing``'s ``finally`` — the one that takes the
-    pairing code back out of Chrome's policy — never ran when an agent's
-    command timeout fired mid-pairing (round 1, U2). Raising ``SystemExit(128 +
-    signum)`` unwinds through every ``finally`` and still exits with the
-    conventional killed-by-signal code. A second signal during that cleanup is
-    ignored so the cleanup itself is not cut short (SIGKILL still works). A
-    signal the caller IGNORES (a background job's SIGINT) stays ignored, and
-    off the main thread, where handlers cannot be installed, nothing changes.
+    pairing code back out of Chrome's policy — never ran when the run was
+    stopped mid-pairing (round 1, U2). Raising ``SystemExit(128 + signum)``
+    unwinds through every ``finally`` and still exits with the conventional
+    killed-by-signal code. A second signal during that cleanup is ignored so
+    the cleanup itself is not cut short. A signal the caller IGNORES (a
+    background job's SIGINT) stays ignored, and off the main thread, where
+    handlers cannot be installed, nothing changes.
+
+    COVERS Ctrl-C, an SSH hangup, ``timeout(1)`` and harnesses that send
+    SIGTERM. It does NOT cover SIGKILL, which no handler can catch — and that
+    is what lop's own ``bash`` tool sends to the whole process group when a
+    command times out, is aborted or a background job is cancelled (round 2,
+    R2-2). After a SIGKILL mid-pairing the code stays in the policy until the
+    next setup run rewrites it or the daemon expires the code. The real
+    mitigation for agents is the guide's advice to give the command a timeout
+    of at least 900 s or run it in the background.
     """
     if threading.current_thread() is not threading.main_thread():
         yield
@@ -1575,6 +1588,14 @@ def _run_plan(
                 on_step,
             )
             continue
+        if step.id == "chrome":
+            # Claim the install BEFORE it starts: the rpm lands inside a root
+            # dnf transaction that a kill can interrupt after the package is
+            # in place but before `apply_chrome` returns. Without this marker
+            # such a run left a Chrome that `uninstall --node` (keyed on the
+            # record's `chrome` entry) refused as "not lop's" (round 2, R2-1).
+            plan.updates.setdefault("chrome", {})["install_started_at"] = env.now()
+            _write_record(env, record, plan.updates, options, applied, outcome, complete=False)
         try:
             detail = step.apply()
         except (StepError, OSError, ValueError, KeyError, subprocess.SubprocessError) as error:
@@ -1583,6 +1604,14 @@ def _run_plan(
             _emit(outcome, StepResult(step.id, step.privileged, STATE_FAILED, str(error)), on_step)
             continue
         applied.append(step.id)
+        # Checkpoint after EVERY applied step. The record used to be written
+        # only at the end, so a run cut off later (SIGKILL from a command
+        # timeout cannot be caught) left Chrome installed with no record, a
+        # re-run found every root step in place and never re-added `chrome`,
+        # and uninstall refused the browser lop itself installed (round 2,
+        # R2-1). The final write below starts again from the record read at
+        # the start, so a completed run replaces these checkpoints entirely.
+        _write_record(env, record, plan.updates, options, applied, outcome, complete=False)
         _emit(outcome, StepResult(step.id, step.privileged, STATE_APPLIED, detail), on_step)
     outcome.paired = plan._paired()  # noqa: SLF001 - same module
     _write_record(env, record, plan.updates, options, applied, outcome)
@@ -1599,8 +1628,16 @@ def _write_record(
     options: Options,
     applied: list[str],
     outcome: Outcome,
+    *,
+    complete: bool = True,
 ) -> None:
     """Merge this run into node-host.json, keeping the spike's schema-1 fields.
+
+    ``complete=False`` is a mid-run checkpoint (round 2, R2-1): its history
+    entry says the run had not finished, and ``paired`` is claimed only if this
+    run's own pairing step landed, since an earlier step (a new extension) may
+    have voided a prior pairing. Each write is atomic (``_write_private``), so
+    a kill between checkpoints leaves the previous one intact.
 
     ``authorised_by`` names who authorised the CURRENT install state (the run
     that last changed something); every run, including no-ops, is appended to
@@ -1613,28 +1650,32 @@ def _write_record(
             merged[key] = {**merged[key], **value}
         else:
             merged[key] = value
-    if applied or not record:
+    # A checkpoint is written only once this run changes something (or is
+    # about to install Chrome), so it counts as a change like `applied` does.
+    changing = bool(applied) or not complete
+    if changing or not record:
         merged["recorded_at"] = env.now()
         merged["authorised_by"] = options.authorised_by
-    if applied:
+    if changing:
         # A setup that changed something is an install again: an earlier
         # uninstall's marker would otherwise read as "not installed" forever,
         # and the readiness remedy (run setup) could not clear it (round 1, R1-3).
         merged.pop("uninstalled_at", None)
-    merged["paired"] = bool(outcome.paired)
+    merged["paired"] = bool(outcome.paired if complete else updates.get("paired"))
     merged.setdefault("mode", "headless (--headless=new); xvfb not needed")
     merged.setdefault("sandbox", "on; no --no-sandbox, no remote-debugging port")
     prior = merged.get("history")
     history: list[Any] = list(prior) if isinstance(prior, list) else []
-    history.append(
-        {
-            "at": env.now(),
-            "mode": outcome.mode,
-            "authorised_by": options.authorised_by,
-            "applied": applied,
-            "ok": outcome.ok,
-        }
-    )
+    entry: dict[str, Any] = {
+        "at": env.now(),
+        "mode": outcome.mode,
+        "authorised_by": options.authorised_by,
+        "applied": list(applied),
+        "ok": outcome.ok if complete else False,
+    }
+    if not complete:
+        entry["note"] = "checkpoint: the run had not finished when this was written"
+    history.append(entry)
     merged["history"] = history[-50:]
     _write_private(env.record_path, json.dumps(merged, indent=2) + "\n")
 
@@ -1642,8 +1683,11 @@ def _write_record(
 def _owns_install(record: Mapping[str, Any] | None) -> bool:
     """Whether the record proves lop installed a Chrome here that is still there.
 
-    ``chrome`` is written by ``apply_chrome`` only; ``uninstalled_at`` by a
-    SUCCESSFUL uninstall only (a partial one can be re-run to finish).
+    ``chrome`` is written by setup's ``signing_key``, ``chrome`` and
+    ``versionlock`` steps, and checkpointed as each lands, so a run cut off at
+    any later point still proves the install (round 2, R2-1);
+    ``uninstalled_at`` is written by a SUCCESSFUL uninstall only (a partial one
+    can be re-run to finish).
     """
     if not isinstance(record, Mapping) or record.get("uninstalled_at"):
         return False

@@ -3923,7 +3923,11 @@ def _render_node_tail(
     # `record` is set only when the record was written this run (round 1, U4b).
     if payload.get("record") and not dry_run:
         print(_bnt(_bn.record(path=str(payload["record"]))))
-    if payload.get("ok") or refusal:
+    if isinstance(refusal, Mapping):
+        # Last, so the terminal ends on the remedy, not on a row (round 2, U16).
+        print(_node_refusal_line(refusal, uninstalling=uninstalling))
+        return
+    if payload.get("ok"):
         return
     if dry_run:
         print(_bnt(_bn.dry_run_would_fail()))
@@ -3977,8 +3981,9 @@ def _browser_node_command(args: argparse.Namespace) -> int:
             return
         if not streamed:
             streamed = True
-            if outcome.refusal:
-                print(_node_refusal_line(outcome.refusal, uninstalling=uninstalling))
+            # A refusal that still lists rows (sudo would prompt) prints AFTER
+            # them, in `_render_node_tail`: printed here its remedy scrolled
+            # off above 15 `not run (refused)` rows (round 2, U16).
             if uninstalling:
                 heading = (
                     _bn.heading_uninstall_dry_run if options.dry_run else _bn.heading_uninstall

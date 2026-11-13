@@ -975,6 +975,11 @@ def test_headless_node_gets_the_node_managed_browser_note(monkeypatch) -> None:
     assert "no site can be opened" in inventory
     assert "900" in inventory and "background" in inventory
     assert "naming this node" in inventory
+    # Round 2 (U14): the operator's standing instruction for visual testing
+    # counts too, quoted with its date; (U18) no "signed decision" jargon.
+    assert "standing operator instruction" in inventory
+    assert "visual or end-to-end testing" in inventory
+    assert "signed decision" not in inventory
     # The note still strips cleanly as a note (prompt-section split).
     assert split_inventory_sections(inventory)["notes"].startswith("This session has NO browser")
 

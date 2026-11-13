@@ -354,22 +354,28 @@ def node_approval_unavailable(origin: str) -> str:
     The extension host's approval copy sends the operator to the extension
     popup, which nobody can reach in a node-managed headless Chrome: setup →
     new session → `open` → "approve it in the popup" was a dead end that looked
-    like progress (PR #3935 round 1, U1). Until operator-signed approvals land,
-    the honest answer is that this build cannot approve a site on a node.
+    like progress (PR #3935 round 1, U1). The honest answer is that this build
+    cannot approve a site on a node — not even the operator can, so the copy
+    must not read as "ask the operator to unblock it" (round 2, U18).
     English by design: tool results are model-facing, like every sibling here.
     """
     return (
-        f"site {origin or '(unknown origin)'} is not allowed, and per-site approval on a "
-        "headless node needs the operator's signed decision, which is not available on "
-        "this build: nothing on this node can present an approval prompt, so do not "
-        "raise an access request and do not work around it with another browser. Ask "
-        "the operator: tell them which site you needed and why, and stop "
-        "the browser part of the task (guide://browser 'Headless nodes')."
+        f"site {origin or '(unknown origin)'} is not allowed, and this build cannot open "
+        "sites on a headless node yet: nothing on this node can show an approval prompt, "
+        "and a later update adds operator approval from their own device. Do not raise "
+        "an access request and do not work around it with another browser. Tell the "
+        "operator which site you needed and why (it cannot be approved on a node in this "
+        "build), and stop the browser part of the task (guide://browser 'Headless nodes')."
     )
 
 
 def _on_headless_node() -> bool:
-    """Read once per process (``node_host.headless_node_once``); never raises."""
+    """Read once per process (``node_host.headless_node_once``); never raises.
+
+    The first call runs ``loginctl`` synchronously (Linux only, 5 s cap) inside
+    the async tool path; being cached, a host that joins a mesh after this
+    process started keeps the user-machine copy until restart (round 2, R2-5).
+    """
     try:
         from local_operator.browser_bridge import node_host
 

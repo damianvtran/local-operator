@@ -383,21 +383,40 @@ lop browser uninstall --node --authorised-by '<who, when>'
 ```
 
 **Getting the authorisation.** It is the operator's to give, never yours to
-write. Ask them (`ask`, or `hub` to your delegator when no interface is
-attached), naming the node and what changes: sudo, Google's Chrome rpm and
-repository, fonts, a user unit and a Chrome policy file. What counts is an
-explicit instruction naming THIS node (quote it); a standing general
-instruction such as "install a browser when needed" is not enough. Record who
-and when, in their words, e.g. `--authorised-by '<operator>, 2026-11-13, via ask:
-"yes, set up the browser on <node>"'`.
+write. Either of these counts:
+
+- an explicit instruction naming THIS node; or
+- a standing operator instruction that agents on the mesh's nodes may install
+  the node-managed browser when visual or end-to-end testing needs one — and
+  your task genuinely needs a browser for that.
+
+Quote the instruction and its date in `--authorised-by`, e.g.
+`--authorised-by '<operator>, 2026-11-13, via ask: "yes, set up the browser on
+<node>"'` or `--authorised-by '<operator>, standing instruction of <date>:
+"<their words>"'`. Without either, ask them (`ask`, or `hub` to your delegator
+when no interface is attached), naming the node and what changes: sudo,
+Google's Chrome rpm and repository, fonts, a user unit and a Chrome policy
+file. A standing instruction never applies on a user's own machine (setup
+refuses there anyway), and it covers the install only: per-site approvals stay
+the operator's.
 
 **How long it takes.** A fresh install runs for several minutes (a ~110 MB
 download, then bounded waits of up to 120 s each for the extension to load
 and pair). Run it with a timeout of at least 900 s (`bash` with
 `timeout: 900`) or in the background (`background: true`); each step's row
 prints as it completes (`--json`: one final document on stdout, progress lines
-on stderr), so a cut-off run still shows what landed. A re-run on a provisioned
+on stderr), so a cut-off run still shows what landed. The install record is
+updated after every step that lands, so after a cut-off run either re-run
+setup to finish or `uninstall --node` to back out. A re-run on a provisioned
 node takes seconds.
+
+**Why the timeout matters.** Ctrl-C, a hangup or SIGTERM unwind cleanly: setup
+takes the pairing code back out of Chrome's policy on the way out. lop's own
+`bash` tool does not send those — when a command times out, is aborted or a
+background job is cancelled, it kills the whole process group outright
+(SIGKILL), which no cleanup survives. A run killed that way mid-pairing leaves
+the pairing code in the policy until the next setup run or until the code
+expires. The 900 s timeout (or `background: true`) is what prevents that.
 
 Re-running on a provisioned node reports every step "already in place" and
 changes nothing. Privileged steps run through `sudo -n` (rows tagged `(root)`);
@@ -433,11 +452,12 @@ daemon still checks the code — no extension id is trusted automatically.
 
 - **No site can be opened yet.** Per-site approvals stay default-deny and are
   the operator's decision, and on a user's machine they are granted in the
-  extension popup — which nobody can reach in a headless Chrome. Until
-  operator-signed approvals land, every `open` on a node returns
+  extension popup — which nobody can reach in a headless Chrome. This build
+  cannot open sites on a headless node yet (a later update adds operator
+  approval from their own device), so every `open` on a node returns
   `origin_not_allowed` and `request_access` queues nothing: tell the operator
-  which site you needed and stop the browser part of the task; never work
-  around it.
+  which site you needed and why, and stop the browser part of the task; never
+  work around it.
 - **Node-side boundaries are advisory where sudo is passwordless.** On a node
   whose account has NOPASSWD sudo, the policy file's root ownership and the
   unit's limits are audited, not enforced against that account: anything

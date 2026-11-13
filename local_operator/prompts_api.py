@@ -521,21 +521,26 @@ _NO_BROWSER_NOTE = (
 #: model to wonder why a working install does not show up.
 #:
 #: Round 1 (PR #3935) added three clauses, each closing a dead end measured in
-#: review: the authorisation must be an explicit instruction naming this node
-#: (U3 — "the operator's authorisation" was never defined, so an agent would
-#: stall or author it itself); a fresh install runs for minutes, longer than a
-#: default `bash` timeout (U2); and no site can be opened yet, because per-site
-#: approval needs an operator decision a headless Chrome cannot present (U1).
+#: review: what counts as the operator's authorisation (U3 — it was never
+#: defined, so an agent would stall or author it itself); a fresh install runs
+#: for minutes, longer than a default `bash` timeout (U2); and no site can be
+#: opened yet, because a headless Chrome cannot present an approval (U1).
+#: Round 2 (U14): the operator asked for agents to "be able to install a
+#: browser when needed for visual testing", so a STANDING instruction to that
+#: effect counts as well as one naming this node — quoted with its date, since
+#: the install record is the audit trail.
 _NO_BROWSER_NODE_NOTE = (
     "\n\nThis session has NO browser tool. This is a headless node: its only "
     "sanctioned browser is the node-managed one — `lop browser setup --node` "
     "(guide://browser 'Headless nodes'), run only with the operator's "
-    "authorisation: an explicit instruction naming this node, recorded with who "
-    "and when in `--authorised-by` (a standing general instruction is not "
-    "enough). A fresh install takes minutes: run it with a timeout of at least "
-    "900 s or in the background. A session started before setup never gets the "
-    "tool, so start a new one after; even then no site can be opened yet (per-site "
-    "approval on a node needs the operator's signed decision, not in this build). "
+    "authorisation: an explicit instruction naming this node, or a standing "
+    "operator instruction that agents on the mesh's nodes may install the "
+    "node-managed browser when visual or end-to-end testing needs one; quote it "
+    "and its date in `--authorised-by '<who, when>'`. A fresh install takes "
+    "minutes: run it with a timeout of at least 900 s or in the background. A "
+    "session started before setup never gets the tool, so start a new one after; "
+    "even then no site can be opened yet (this build cannot open sites on a "
+    "headless node; a later update adds operator approval from their device). "
     "Never install or script any other browser engine (playwright, puppeteer, a "
     "downloaded Chromium)."
 )
