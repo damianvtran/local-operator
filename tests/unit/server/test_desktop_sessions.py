@@ -1040,7 +1040,10 @@ async def test_durable_attachment_is_readable_without_starting_an_owner(tmp_path
     (session / "desktop.json").write_text(json.dumps({"version": 1, "cwd": str(tmp_path)}))
 
     pool = DesktopSessions(tmp_path)
-    data, mime_type = await pool.attachment("0123456789ab", ref.digest)
+    attachment = await pool.attachment("0123456789ab", ref.digest)
+    # This cold local-store fixture must return bytes, not a peer streaming handle.
+    assert isinstance(attachment, tuple)
+    data, mime_type = attachment
     assert data == raw and mime_type == "image/png"
     assert pool.bridges == {}
 
@@ -1126,7 +1129,9 @@ async def test_attachment_refuses_a_subagent_origin_session(tmp_path):
     pool = DesktopSessions(tmp_path)
 
     # The marker is the only difference, so the user session must still serve.
-    data, _ = await pool.attachment("0123456789ab", ref.digest)
+    attachment = await pool.attachment("0123456789ab", ref.digest)
+    assert isinstance(attachment, tuple)
+    data, _ = attachment
     assert data == raw and users.is_dir()
     with pytest.raises(KeyError):
         await pool.attachment("abcdef012345", ref.digest)
@@ -3916,9 +3921,9 @@ async def test_child_attachment_serves_bytes_for_a_contained_child(tmp_path):
     )
     assert ref is not None
 
-    data, mime_type = await DesktopSessions(tmp_path).child_attachment(
-        PARENT_ID, CHILD_ID, ref.digest
-    )
+    attachment = await DesktopSessions(tmp_path).child_attachment(PARENT_ID, CHILD_ID, ref.digest)
+    assert isinstance(attachment, tuple)
+    data, mime_type = attachment
 
     assert data == raw and mime_type == "image/png"
     with pytest.raises(KeyError):

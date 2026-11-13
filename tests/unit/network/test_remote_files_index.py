@@ -146,12 +146,16 @@ async def viewer(
 
 
 async def _page(client: AsyncClient, **params: Any) -> dict[str, Any]:
+    page: dict[str, Any] | None = None
     for _attempt in range(40):
         response = await client.get(URL, params=params)
         assert response.status_code == 200, response.text
         page = response.json()["result"]
+        assert isinstance(page, dict)
         if page["state"] != "building":
             return page
+    # Keep the final-page diagnostic, and prove the poll actually made a request.
+    assert page is not None
     raise AssertionError(f"the peer index never finished building: {page}")
 
 
