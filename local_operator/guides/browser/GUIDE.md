@@ -43,6 +43,12 @@ this project deliberately does not ship. If the extension truly cannot be set
 up and no cmux panel exists, say a rendered screenshot is unavailable and why —
 do not build a second browser stack.
 
+**One narrow exception: a headless mesh node** (no desktop, no user browser, no
+screen) may carry the *node-managed* browser that `lop browser setup --node`
+installs, with the operator's authorisation — see "Headless nodes: the
+node-managed browser" below. It is the only sanctioned browser on a node; the
+"never" above still applies to everything else there.
+
 ## Focus safety — never steal the user's focus
 
 The agent often browses in the background while the user works in another
@@ -354,6 +360,78 @@ flow. `lop browser pair --reset` revokes every pairing first.
 Re-run `lop browser status`; you want `extension connected: yes` and
 `paired: yes`. The `browser` tool now appears — use it. From here on the user
 does nothing: pairing persists across restarts, so future sessions just work.
+
+## Headless nodes: the node-managed browser
+
+**Why a node differs.** The rule above protects a USER's machine: their
+browser, their logins, their screen. A headless mesh node has none of those —
+no desktop, no user browser, no screen, no logins to protect — so sessions
+offloaded there simply had no `browser` tool, and visual, end-to-end or
+screenshot work could not run there. The node-managed browser fills that gap
+without weakening the rule: it is ONE supervised, pinned browser, installed by
+a reviewed command, never a per-task download.
+
+**The command** (on the node; it needs the operator's authorisation, recorded
+verbatim in the install record):
+
+```sh
+lop browser setup --node --dry-run                     # every step, nothing changed
+lop browser setup --node --authorised-by '<who, when>' # install (idempotent)
+lop browser setup --node --repair --authorised-by '<who, when>'  # re-apply what drifted
+lop browser setup --node --upgrade --authorised-by '<who, when>' # the only path that moves the pin
+lop browser uninstall --node --authorised-by '<who, when>'
+```
+
+Re-running on a provisioned node reports every step "already in place" and
+changes nothing. Privileged steps run through `sudo -n`; when sudo would
+prompt, setup refuses and names the steps that need root. It also refuses on a
+user's machine (the desktop app's discovery record or a graphical session),
+off Linux x86_64, on a non-dnf/rpm distribution, and on a device that is not in
+a mesh network.
+
+**What it installs.** Google Chrome from Google's signed rpm repository (key
+fingerprint checked before import, `rpm -K` on the downloaded package, sha256
+recorded), pinned with `dnf versionlock`; fonts for ordinary pages; the bridge
+daemon (`lop browser install`); the Local Operator extension, packed to a CRX
+with the node's own persistent key (so its id never changes) and
+force-installed by Chrome policy; and a user unit running Chrome
+`--headless=new` under `MemoryMax=2G`, sandbox on, **no remote-debugging port**,
+talking only to the daemon on 127.0.0.1. The extension comes from the newest
+GitHub Release that carries it (checked against the release asset's sha256
+digest), or from `--extension-dir` for a built tree. Everything lands in
+`<config_dir>/browser/node-host.json`.
+
+**Pairing without a popup.** Nobody can type a code into a headless Chrome, so
+setup mints one through the daemon's own route (the one `lop browser pair`
+uses) and delivers it through Chrome managed policy, readable only by this
+extension; the extension submits it exactly as the popup would, and setup
+removes it from the policy the moment the daemon reports `paired: yes`. The
+daemon still checks the code — no extension id is trusted automatically.
+
+**What it does not change.**
+
+- **Per-site approvals stay default-deny** and are the operator's decision;
+  today, approvals on a node need the operator — see "Per-site permissions".
+  The approval is granted in the extension's own UI, which nobody can reach in
+  a headless Chrome, so until operator-signed approvals land an `open` on a
+  node returns `origin_not_allowed`: say so and stop, never work around it.
+- **Nobody signs in by hand there.** The node's Chrome has no user cookies and
+  no one at its screen; for a login, type credentials with `secret_ref` only.
+- **Fidelity is a server's, not a designer's laptop**: fonts are Linux fonts,
+  there is no GPU, and the window is headless. Fine for E2E flows and
+  regressions; say so when a pixel-exact comparison matters.
+- **Memory is capped.** Chrome's unit is capped at 2 GB and carries a raised
+  OOM score, so under pressure Chrome is reclaimed before the rest of the node;
+  a tab that dies that way reports `tab_closed` — re-open it rather than
+  retrying the action.
+- **A session started before setup never gets the tool**: the tool list is
+  fixed when a session starts. Start a new session after setup.
+
+**Checking from anywhere:** `lop network ready` carries a `browser` row per
+peer — `ok` (Chrome, extension, paired), `warn` with the setup remedy when it
+is not installed, `warn` with the `--repair` remedy when it is installed but
+unusable, `n/a` where a user's own browser host serves the device. The row
+never holds the onboarding verdict.
 
 ## What to ask the user for
 

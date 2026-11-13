@@ -116,6 +116,12 @@ CAPABILITY_CUSTOM_INSTRUCTIONS = "custom_instructions"
 #: peer. Informational (non-gating): the cadence repairs it within a minute, and
 #: the create path pushes first.
 CAPABILITY_SKILLS = "skills"
+#: (m) the node-managed browser: would a session offloaded to this peer get a
+#: ``browser`` tool? Added 2026-11-13: sessions on headless nodes had none and
+#: nothing said so until a visual/E2E lane failed there. ``n/a`` where a user's
+#: desktop app or extension serves the device (the node-managed browser is for
+#: headless nodes only — guide://browser "Headless nodes").
+CAPABILITY_BROWSER = "browser"
 
 #: The class a readiness row carries (F8 ruling, 2026-10-04). "The device is
 #: onboarded" and "the equipment on it is set up" are DIFFERENT questions:
@@ -169,6 +175,10 @@ NON_GATING_EQUIPMENT: frozenset[str] = frozenset(
         # A missing skill is a sync in flight or a skill that cannot travel; the
         # row names which, and nothing about onboarding depends on it.
         CAPABILITY_SKILLS,
+        # A node without a browser IS onboarded; visual/E2E work is the point of
+        # use, and installing one needs the operator's authorisation, so the row
+        # names the gap and the authorised remedy rather than gating.
+        CAPABILITY_BROWSER,
     }
 )
 
@@ -187,6 +197,7 @@ PEER_SIDE_CHECKS: tuple[str, ...] = (
     CAPABILITY_TOOLING,
     CAPABILITY_RESILIENCE,
     CAPABILITY_SERVE_DAEMON,
+    CAPABILITY_BROWSER,
 )
 
 #: Failure codes. OK rows carry no code; a code is a machine token for a
@@ -1771,6 +1782,10 @@ def collect_peer_facts(
         # this device's own). An older viewer ignores it; an older peer omits it
         # and the model-credential row then reads byte-for-byte as before.
         "failover": _failover_fact(root, model),
+        # ADDITIVE ON THE WIRE (2026-11-13): an older viewer ignores it; this
+        # build reads its ABSENCE (an older peer) as ``peer_too_old`` on the
+        # browser row, never as "no browser".
+        "browser": browser_fact(),
     }
 
 
@@ -3989,6 +4004,153 @@ def tooling_row(member: Any, facts: Mapping[str, Any], *, peer_label: str) -> di
     )
 
 
+def browser_fact() -> dict[str, Any]:
+    """This device's browser hosting, as facts (see ``node_host.browser_fact``).
+
+    Lazy import and a defensive wrapper: the readiness op must answer even if the
+    browser module cannot load, and an unreadable fact says ``unknown``.
+    """
+    try:
+        from local_operator.browser_bridge.node_host import browser_fact as _fact
+
+        return _fact()
+    except Exception as error:  # noqa: BLE001 - a fact that cannot be read says so
+        return {"host": "unknown", "error": str(error)[:200]}
+
+
+def browser_row(member: Any, facts: Mapping[str, Any], *, peer_label: str) -> dict[str, Any]:
+    """(l) Would a session offloaded to this peer get a ``browser`` tool?
+
+    Non-gating equipment (``NON_GATING_EQUIPMENT``). Four readings:
+
+    * ``n/a`` — a user's desktop app or extension serves this device; the
+      node-managed browser is never installed on a user's machine;
+    * ``ok`` — the node-managed Chrome unit is active, the bridge daemon healthy
+      and the extension paired;
+    * ``warn`` not installed — the remedy names the command AND that it needs
+      the operator's authorisation (installing software on a node is theirs to
+      decide, so the row never reads as an instruction to go and do it);
+    * ``warn`` installed but unusable (unit down, daemon down, unpaired) — the
+      remedy is ``--repair``, which re-applies only what is no longer in place.
+    """
+    fact = facts.get("browser")
+    if not isinstance(fact, Mapping):
+        return _peer_too_old_rows_for(member, CAPABILITY_BROWSER)
+    host = str(fact.get("host") or "")
+    if host == "user":
+        return _capability_row(
+            device_id=member.device_id,
+            device_name=peer_label,
+            capability=CAPABILITY_BROWSER,
+            ok=True,
+            detail=(
+                f"n/a: a user's browser host (desktop app or extension) serves {peer_label}; "
+                "the node-managed browser is for headless nodes only"
+            ),
+            source=SOURCE_PEER,
+            observed={"not_applicable": True, "host": "user"},
+        )
+    if host == "unsupported_platform":
+        return _capability_row(
+            device_id=member.device_id,
+            device_name=peer_label,
+            capability=CAPABILITY_BROWSER,
+            ok=True,
+            detail=(
+                f"n/a: {peer_label} is not Linux; the node-managed browser is for headless "
+                "Linux nodes, and other devices use the extension or the desktop app"
+            ),
+            source=SOURCE_PEER,
+            observed={"not_applicable": True, "host": host},
+        )
+    if host == "node":
+        unit_active = bool(fact.get("unit_active"))
+        daemon_healthy = bool(fact.get("daemon_healthy"))
+        paired = bool(fact.get("paired"))
+        observed = {
+            "host": "node",
+            "unit_active": unit_active,
+            "unit_state": str(fact.get("unit_state") or ""),
+            "daemon_healthy": daemon_healthy,
+            "paired": paired,
+        }
+        chrome = str(fact.get("chrome_version") or "").removeprefix("Google ").strip()
+        extension = str(fact.get("extension_version") or "")
+        if unit_active and daemon_healthy and paired:
+            return _capability_row(
+                device_id=member.device_id,
+                device_name=peer_label,
+                capability=CAPABILITY_BROWSER,
+                ok=True,
+                detail=(
+                    f"{chrome or 'Chrome'} (node-managed, headless), extension {extension} paired"
+                ),
+                source=SOURCE_PEER,
+                observed=observed,
+            )
+        problems: list[str] = []
+        if not unit_active:
+            problems.append(f"its Chrome unit is {observed['unit_state'] or 'not active'}")
+        if not daemon_healthy:
+            problems.append("its browser bridge daemon is not answering")
+        if not paired:
+            problems.append("its extension is not paired")
+        return _capability_row(
+            device_id=member.device_id,
+            device_name=peer_label,
+            capability=CAPABILITY_BROWSER,
+            ok=False,
+            code=CODE_UNUSABLE,
+            detail=(
+                f"{peer_label} has the node-managed browser installed but unusable: "
+                + "; ".join(problems)
+                + ": sessions there have no browser tool"
+            ),
+            remedies=[
+                f"on {peer_label}: `lop browser setup --node --repair --authorised-by '<who>'`"
+            ],
+            source=SOURCE_PEER,
+            observed=observed,
+        )
+    if host == "none":
+        return _capability_row(
+            device_id=member.device_id,
+            device_name=peer_label,
+            capability=CAPABILITY_BROWSER,
+            ok=False,
+            code=CODE_NOT_INSTALLED,
+            detail=f"sessions on {peer_label} have no browser tool",
+            remedies=[
+                f"on {peer_label}: `lop browser setup --node --authorised-by '<who>'` "
+                "(operator authorisation required; guide://browser 'Headless nodes')"
+            ],
+            source=SOURCE_PEER,
+            observed={"host": "none"},
+        )
+    return _capability_row(
+        device_id=member.device_id,
+        device_name=peer_label,
+        capability=CAPABILITY_BROWSER,
+        ok=False,
+        code=CODE_UNKNOWN,
+        detail=(
+            f"{peer_label} could not read its browser hosting "
+            f"({fact.get('error') or 'no answer'})"
+        ),
+        remedies=[f"on {peer_label}: run `lop browser setup --node --dry-run` and re-check"],
+        source=SOURCE_PEER,
+        observed={"host": host or "unknown"},
+    )
+
+
+def _peer_too_old_rows_for(member: Any, capability: str) -> dict[str, Any]:
+    """The ``peer_too_old`` row for ONE capability a peer's answer lacked."""
+    for row in _peer_too_old_rows(member):
+        if row["capability"] == capability:
+            return row
+    raise ValueError(capability)  # pragma: no cover - capability is in PEER_SIDE_CHECKS
+
+
 def _holder_names(placement: Mapping[str, Any]) -> list[str]:
     names: list[str] = []
     for row in placement.get("holders") or []:
@@ -6023,6 +6185,7 @@ def _peer_checks(
         )
         selected_row.update(row)
     rows.append(tooling_row(member, facts, peer_label=peer_label))
+    rows.append(browser_row(member, facts, peer_label=peer_label))
     rows.append(resilience_row(member, facts, peer_label=peer_label))
     instructions_row = custom_instructions_row(
         member,
@@ -6215,7 +6378,7 @@ def row_state(row: Mapping[str, Any]) -> str:
     """
     observed = row.get("observed")
     observed = observed if isinstance(observed, Mapping) else {}
-    if observed.get("out_of_scope"):
+    if observed.get("out_of_scope") or observed.get("not_applicable"):
         return ROW_STATE_NOT_APPLICABLE
     if row.get("ok"):
         return ROW_STATE_OK

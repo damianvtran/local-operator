@@ -564,6 +564,7 @@ def test_repository_row_is_inserted_after_git_identity_only() -> None:
         readiness.CAPABILITY_TOOLING,
         readiness.CAPABILITY_RESILIENCE,
         readiness.CAPABILITY_SERVE_DAEMON,
+        readiness.CAPABILITY_BROWSER,
     )
 
 
