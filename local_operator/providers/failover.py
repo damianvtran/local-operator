@@ -3576,7 +3576,10 @@ def _pinned_exhaustion_error(
         cause = "every route that could serve it failed"
     else:
         status = f" HTTP {reported.status}" if reported.status else ""
-        cause = f"{reported.kind or 'failure'}{status}: {reported.message}"
+        # Every arm closes the cause with its own period; a provider message that
+        # already ends in one rendered ".." (agent review round 1, F3).
+        message = reported.message.rstrip().rstrip(".")
+        cause = f"{reported.kind or 'failure'}{status}: {message}"
     if strict:
         notes: list[str] = []
         if same_family_available:
@@ -4341,10 +4344,15 @@ async def _stream_with_failover_events(
     pinned_strict = False
     pinned_blocked: list[str] = []
     pinned_family_available = False
+    # Whether a chain is CONFIGURED for the primary, independent of what the
+    # pin policy filters out of it: the borrowed-quota tail may only say "no
+    # fallback is configured" when that is literally true (review round 1, F2).
+    chain_configured = False
     if retry.enabled and retry.model_fallback:
         if pinned and pin_selector is not None:
             pinned_strict = retry.pinned_fallback != PINNED_FALLBACK_CROSS_FAMILY
         chain = resolve_chain(primary_selector, retry.fallback_chains)
+        chain_configured = bool(chain)
         if chain:
             candidates = expand_fallback_targets(
                 primary_selector, chain, primary_effort=request.model.reasoning_effort
@@ -4744,14 +4752,12 @@ async def _stream_with_failover_events(
                     # reported frame sent the user off to configure a key they
                     # already had -- the reported `No API key configured for
                     # provider 'openai'` on an account signed in via OAuth.
+                    # A borrowed quota refusal is recorded WITHOUT its "what
+                    # next" tail: the error the turn ends on is chosen later
+                    # (the primary outranks every hop), so a tail written here
+                    # could promise a hop that has since failed. The walk's
+                    # end adds it once, from the final state.
                     missing = _no_credential_error(auth, provider)
-                    if getattr(missing, BORROWED_QUOTA_ATTR, False):
-                        _say_borrowed_quota_next_step(
-                            missing,
-                            auth,
-                            next_target=pending[0] if pending else None,
-                            chain_configured=any(t != primary_target for t in full_targets),
-                        )
                     record(missing, primary=is_primary, target=target)
                     # A borrowed quota refusal states the owner's reset; a fallback
                     # hop that is benched below waits it out like a local 429's
@@ -5506,6 +5512,12 @@ async def _stream_with_failover_events(
         await _abortable_sleep(delay_ms, signal)
         pending = revisit
 
+    fallback_off = (
+        "retry.enabled"
+        if not retry.enabled
+        else "retry.modelFallback" if not retry.model_fallback else None
+    )
+    hops_tried = tuple(dict.fromkeys(t.selector for t in full_targets if t != primary_target))
     if pinned and pin_selector is not None:
         # A pinned child that ends the walk without serving fails LEGIBLY,
         # never with a bare provider error: under strict the refusal says the
@@ -5519,19 +5531,23 @@ async def _stream_with_failover_events(
             pinned_blocked,
             pinned_family_available,
             strict=pinned_strict,
-            hops_tried=tuple(
-                dict.fromkeys(t.selector for t in full_targets if t != primary_target)
-            ),
-            fallback_off=(
-                "retry.enabled"
-                if not retry.enabled
-                else "retry.modelFallback" if not retry.model_fallback else None
-            ),
+            hops_tried=hops_tried,
+            fallback_off=fallback_off,
         )
         if reported is not None:
             raise error from reported
         raise error
     if reported is not None:
+        # The pinned branch above needs no tail: its own copy already says
+        # which hops were tried, declined or switched off.
+        if getattr(reported, BORROWED_QUOTA_ATTR, False):
+            _say_borrowed_quota_outcome(
+                reported,
+                auth,
+                hops_tried=hops_tried,
+                fallback_off=fallback_off,
+                chain_configured=chain_configured,
+            )
         raise reported
     raise ProviderError(None, f"Failover exhausted for '{primary_selector}'", retryable=False)
 
@@ -6040,27 +6056,42 @@ VERBATIM_MESSAGE_ATTR = "lo_verbatim_message"
 
 #: Set on the ``quota`` error :func:`_no_credential_error` builds from a BORROWED
 #: login's ``quota_blocked`` refusal, so the walk can finish its sentence with what
-#: the turn does next (:func:`_say_borrowed_quota_next_step`).
+#: the turn did (:func:`_say_borrowed_quota_outcome`).
 BORROWED_QUOTA_ATTR = "lo_borrowed_quota"
 
 
-def _say_borrowed_quota_next_step(
+def _say_borrowed_quota_outcome(
     error: ProviderError,
     auth: FailoverAuthStore,
     *,
-    next_target: "FallbackTarget | None",
+    hops_tried: Sequence[str],
+    fallback_off: str | None,
     chain_configured: bool,
 ) -> None:
-    """Append what THIS turn does after a borrowed login's quota refusal.
+    """Append what THIS turn did after a borrowed login's quota refusal ended it.
 
     The broker's sentence can only say what the owner answered; the walk is the one
     place that knows the borrower's own chain. The 2026-11-12 incident on
     ``lop-remote-node-2`` is why this is said at all: the old copy promised "the
     usual failover… is already running" while the remote's chain was empty and the
-    turn stopped. So the tail names the next hop when one is queued, and otherwise
-    says plainly that the device the turn runs on has no fallback configured (chains
-    are per device, not synced) or none left. ``auth.device_label`` is duck-typed
-    like the store's other hooks; a store without it reads "this device".
+    turn stopped.
+
+    Called ONCE, on the error the walk actually raises, never when the refusal is
+    recorded: the reported error is picked after the whole walk (the primary's
+    outranks every hop's), so a "trying <hop>" tail written at record time
+    survived as the final word after that hop had failed too (agent review round
+    1, F1). By then the turn has stopped, so every arm states the end state:
+
+    - fallback switched off (``retry.enabled`` / ``retry.modelFallback``) — say so
+      and name the switch, since a configured chain is never expanded then;
+    - hops tried — none of them served this turn;
+    - no chain configured for this model — the only case that may point at
+      ``retry.fallbackChains`` (chains are per device, not synced);
+    - anything else (e.g. a pin policy filtered every hop) — only that no fallback
+      model served, which is true whatever the cause (review round 1, F2).
+
+    ``auth.device_label`` is duck-typed like the store's other hooks; a store
+    without it reads "this device".
     """
     label_for = getattr(auth, "device_label", None)
     try:
@@ -6068,15 +6099,20 @@ def _say_borrowed_quota_next_step(
     except Exception:  # noqa: BLE001 - copy must never mask the real failure
         device = ""
     device = device if isinstance(device, str) and device else "this device"
-    if next_target is not None:
-        tail = f"Trying the next model in your fallback chain ({next_target.selector})."
-    elif chain_configured:
-        tail = f"No model in the fallback chain on {device} is left to try."
-    else:
+    if fallback_off is not None:
+        tail = f"Fallback is switched off on {device} ({fallback_off}), so the turn stops here."
+    elif hops_tried:
+        tail = (
+            f"No model in the fallback chain on {device} served this turn"
+            f" ({', '.join(hops_tried)})."
+        )
+    elif not chain_configured:
         tail = (
             f"No fallback is configured on {device} "
             "(retry.fallbackChains), so the turn stops here."
         )
+    else:
+        tail = "No fallback model served this turn."
     error.message = f"{error.message} {tail}"
 
 

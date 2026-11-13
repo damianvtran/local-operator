@@ -25,6 +25,7 @@ from __future__ import annotations
 import time
 from typing import Any
 
+import httpx
 import pytest
 
 from local_operator.providers.failover import ProviderError, classify_provider_error
@@ -158,15 +159,12 @@ async def test_an_exhausted_borrowed_rate_limit_is_a_quota_error_not_unknown(
 
 
 @pytest.mark.asyncio
-async def test_a_borrowed_rate_limit_names_the_hop_it_moves_on_to(
-    borrowed: Any, caplog: pytest.LogCaptureFixture
-) -> None:
-    """A chain is configured: each visit's sentence says what the turn does next.
+async def test_a_borrowed_rate_limit_ends_on_the_hops_it_tried(borrowed: Any) -> None:
+    """A chain is configured and its hop cannot serve: the end state, not a promise.
 
-    The hop cannot serve here (the borrower holds no ``openai`` login). The first
-    visit names the hop it moves on to; the loop-back sweep revisits the primary
-    (a quota refusal is recoverable) and, with nothing queued after it, the error
-    the turn ends on says the chain is spent, never a failover elsewhere.
+    The hop cannot serve here (the borrower holds no ``openai`` login). The loop-back
+    sweep revisits the primary (a quota refusal is recoverable), so the error the
+    turn ends on says which hops were tried and that none served.
     """
     _rest_every_owner_row(borrowed)
     stub = StubProvider("never-served")
@@ -176,13 +174,139 @@ async def test_a_borrowed_rate_limit_names_the_hop_it_moves_on_to(
 
     text = str(raised.value)
     assert stub.seen == [], stub.seen
-    assert text.endswith("No model in the fallback chain on this device is left to try."), text
+    assert text.endswith(
+        f"No model in the fallback chain on this device served this turn "
+        f"({LOCAL_PROVIDER}/gpt-6.1-sol)."
+    ), text
+    assert "Trying the next model" not in text, text
     assert raised.value.kind == "quota", raised.value.kind
-    logged = [record.getMessage() for record in caplog.records]
-    first_visit = [line for line in logged if "Trying the next model" in line]
-    assert first_visit and first_visit[0].endswith(
-        f"Trying the next model in your fallback chain ({LOCAL_PROVIDER}/gpt-6.1-sol)."
-    ), logged
+
+
+class _ShortRateLimit:
+    """The hop's own key answers ``429 retry-after: 1`` on every request."""
+
+    def __init__(self) -> None:
+        self.seen: list[str] = []
+
+    def __call__(self, request: httpx.Request) -> httpx.Response:
+        self.seen.append(request.headers.get("authorization", "").removeprefix("Bearer "))
+        return httpx.Response(
+            429,
+            headers={"retry-after": "1"},
+            json={"error": {"message": "slow down", "type": "rate_limit"}},
+        )
+
+
+@pytest.mark.asyncio
+async def test_the_final_error_never_promises_a_hop_that_already_failed(
+    borrowed: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Agent review round 1, F1: the reviewer's repro.
+
+    The hop has a local key that answers a short 429, so it is ``recoverable`` and the
+    loop-back sweep revisits the primary with the hop still queued after it. The tail
+    used to be written when the primary's refusal was RECORDED, so that second visit
+    wrote "Trying the next model … (hop)"; the hop then failed again, and because the
+    primary outranks every hop that sentence became the turn's last word.
+    """
+    _rest_every_owner_row(borrowed)
+    local = borrowed.store._local  # noqa: SLF001 — the borrower's own login table
+
+    async def get_api_key(provider: str, *_a: Any, **_k: Any) -> str | None:
+        return LOCAL_KEY if provider == LOCAL_PROVIDER else None
+
+    monkeypatch.setattr(local, "get_api_key", get_api_key)
+    stub = _ShortRateLimit()
+
+    with pytest.raises(ProviderError) as raised:
+        await _turn(borrowed.store, stub, _settings(f"{LOCAL_PROVIDER}/gpt-6.1-sol"))
+
+    text = str(raised.value)
+    # The hop really was asked (more than once: the sweep revisits it).
+    assert len(stub.seen) >= 2 and set(stub.seen) == {LOCAL_KEY}, stub.seen
+    assert raised.value.kind == "quota", (raised.value.kind, text)
+    assert "Trying the next model" not in text, text
+    assert text.endswith(
+        f"No model in the fallback chain on this device served this turn "
+        f"({LOCAL_PROVIDER}/gpt-6.1-sol)."
+    ), text
+    # Exactly one tail, however many times the primary was visited.
+    assert text.count("this turn") == 1, text
+
+
+@pytest.mark.asyncio
+async def test_a_switched_off_fallback_is_not_called_unconfigured(borrowed: Any) -> None:
+    """Review round 1, F2: a chain exists but ``retry.modelFallback`` is off."""
+    _rest_every_owner_row(borrowed)
+    settings = _settings(f"{LOCAL_PROVIDER}/gpt-6.1-sol")
+    settings["retry"]["modelFallback"] = False
+
+    with pytest.raises(ProviderError) as raised:
+        await _turn(borrowed.store, StubProvider("never-served"), settings)
+
+    text = str(raised.value)
+    assert "retry.fallbackChains" not in text, text
+    assert text.endswith(
+        "Fallback is switched off on this device (retry.modelFallback), "
+        "so the turn stops here."
+    ), text
+
+
+def test_a_tail_never_claims_unconfigured_when_a_chain_exists() -> None:
+    """Review round 1, F2: a chain whose hops a pin policy filtered out entirely."""
+    from local_operator.providers.failover import (
+        BORROWED_QUOTA_ATTR,
+        _say_borrowed_quota_outcome,
+    )
+
+    error = ProviderError(None, "'x' on mac is rate-limited for another 5 min.", kind="quota")
+    setattr(error, BORROWED_QUOTA_ATTR, True)
+    _say_borrowed_quota_outcome(
+        error, object(), hops_tried=(), fallback_off=None, chain_configured=True
+    )
+    assert error.message.endswith("No fallback model served this turn."), error.message
+    assert "retry.fallbackChains" not in error.message, error.message
+
+
+def test_the_pinned_cause_has_one_period() -> None:
+    """Review round 1, F3: a cause ending in "." rendered "..", every arm."""
+    from local_operator.providers.failover import _pinned_exhaustion_error
+
+    reported = ProviderError(None, "'x' on mac is rate-limited for another 5 min.", kind="quota")
+    for strict, hops, off in (
+        (True, (), None),
+        (False, (), "retry.enabled"),
+        (False, (), None),
+        (False, ("a/b",), None),
+    ):
+        text = str(
+            _pinned_exhaustion_error(
+                "x/m", reported, (), False, strict=strict, hops_tried=hops, fallback_off=off
+            )
+        )
+        assert ".." not in text, text
+        assert "for another 5 min." in text, text
+
+
+@pytest.mark.asyncio
+async def test_the_incident_card_labels_a_borrowed_quota_rate_limit(borrowed: Any) -> None:
+    """QA round 1, Q1: the REAL turn-ending ``str(error)`` through the incident path.
+
+    ``AgentEndEvent.error`` is ``str(exc)``; the session hands it to
+    ``format_incident_message``, whose classifier is text-only. The borrowed sentence
+    is verbatim ("… is rate-limited …", no "rate limit or quota exceeded:" label), so
+    without the hyphenated marker the operator's card read ``unknown:``.
+    """
+    from local_operator.incidents import classify_incident, format_incident_message
+
+    _rest_every_owner_row(borrowed)
+    with pytest.raises(ProviderError) as raised:
+        await _turn(borrowed.store, StubProvider("never-served"), _settings())
+
+    raw = str(raised.value)
+    assert classify_incident(raw, STUB_PROVIDER, "claude-opus-5-5").category == "rate-limit"
+    card = format_incident_message(raw, STUB_PROVIDER, "claude-opus-5-5")
+    assert "rate-limit:" in card and "unknown:" not in card, card
 
 
 def test_the_quota_sentence_claims_no_failover_it_cannot_see() -> None:
