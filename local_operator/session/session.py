@@ -15206,8 +15206,9 @@ class Session:
         1. ``hub_pull`` keeps its own ladder, untouched.
         2. A CLEAN LOCAL agent -- this run and every ancestor run read no
            untrusted input (:meth:`profile_lineage`) -- creates, updates or
-           reverts an account agent/team ITSELF: no owner text, no card. The
-           backup/revert receipt and the transaction audit record it. This
+           reverts an account agent/team, or creates/updates a managed skill,
+           ITSELF: no owner text, no card. The backup/revert receipt (a skill's
+           previous bytes in ``hub/backups``) and the audit record it. This
            holds for a row linked to an org hub too: this write changes the
            LOCAL account copy and never publishes, nor enables or grants any
            push. A link's EXISTING user-set ``auto_push`` may later publish
@@ -15234,9 +15235,13 @@ class Session:
             # can be granted by it.
             return await self._authorize_hub_pull(intent)
         run_ms = int(self._run_started_at * 1000)
+        # Skills are in this rung too (create/update only: the skill tool has
+        # no revert, and ``remove_paths`` is a ``delete`` that keeps its card).
+        # Its writes stay LOCAL like the agent/team rows: the skill tool never
+        # publishes, and a hub-linked skill's edit is an unpublished local change.
         if (
             intent.operation in {"create", "update", "revert"}
-            and intent.kind in {"agent", "team"}
+            and intent.kind in {"agent", "team", "skill"}
             and not self.profile_lineage()[1]
         ):
             # ``local-agent:`` (not ``owner-prompt:``) so the audit trail says
@@ -15262,7 +15267,18 @@ class Session:
             from local_operator import profile_proposals
             from local_operator.harness.types import ProposedProfileWrite
 
-            registry = self.agent_registry if intent.kind == "agent" else self.team_registry
+            # A skill proposal has no registry of its own: it lives in the same
+            # config root the agent/team ones do, the root ``profile_proposal``
+            # and ``decide_profile_proposal`` read (``agent or team`` registry).
+            registry = (
+                self.agent_registry
+                if intent.kind == "agent"
+                else (
+                    self.team_registry
+                    if intent.kind == "team"
+                    else self.agent_registry or self.team_registry
+                )
+            )
             if registry is None:
                 return None
             record = profile_proposals.file(
@@ -15293,7 +15309,10 @@ class Session:
                     profile_proposals.summary_line(item)
                     for item in profile_proposals.summarize_changes(
                         profile_proposals.changes(
-                            record.get("before"), record["after"], record.get("fields") or []
+                            record.get("before"),
+                            record["after"],
+                            record.get("fields") or [],
+                            record["kind"],
                         )
                     )
                 ),
@@ -15313,7 +15332,7 @@ class Session:
         # has no structured before/after, and counts parsed from its prose
         # summary mis-counted — PR #3777 R3-1), then — after a blank line —
         # the change content clipped to SAVE_DETAIL_MAX_CHARS: a direct save
-        # has no review page (skills have no proposal path), so the card is
+        # has no review page (e.g. a skill delete), so the card is
         # the only place the approver can read what they approve (R2-2).
         # Proposal cards stay 3 lines with structured counts.
         changed = profile_proposals.save_changes_line(
