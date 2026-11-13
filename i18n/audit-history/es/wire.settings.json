@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "es",
   "namespace": "wire.settings",
-  "history_sha256": "89ca768ff86a128bb6f55da0292769db6a93eab5b7e181bf5dcab287eacf0d9d",
+  "history_sha256": "88bb65bebbd1e02466b24f4f97be8c8eb939cedbafdd33cc883ee3b785978197",
   "entries": [
     {
       "locale": "es",
@@ -240,6 +240,31 @@
       },
       "status": "passed",
       "note": "Round 3 evidence binding 2026-11-12, reviewer 5c6cf4252f37 (anthropic/claude-opus-5-5, no fallback): same audit and verdict as the preceding row, re-appended so the cg1 byte pin moves to a committed record. Source ffb9cf937f10d7298f9178f18286c2ac7669e578d595f30b4074a830b9667c13 and target c8d58a331c959c35b163aeb419038073b304588af5a1f124a0fe15c0a9dce42a recomputed from the shipped files at 4f6f57986. Evidence: i18n/audits/evidence/es/wire.settings/temporary-r3-5c6cf4252f37/record.json"
+    },
+    {
+      "locale": "es",
+      "namespace": "wire.settings",
+      "source_sha256": "2baf6804bc41b53ac92db5e10ad4ade04a8f0ce7ceed3702af6be1ab42aa4b24",
+      "translator": {
+        "agent": "i18n-translator subagent, job d5aeddae9573 under manager session 79bddc262663 (commit 1c956878e5d3) — relayed by the manager, not independently verified; es label fix e2ea7efff2f6 by i18n-translator job 17c3e25545b7 (same model, no fallback, relayed)",
+        "model": "anthropic/claude-opus-5-5",
+        "fallback": "none (as relayed by the manager)",
+        "date": "2026-11-13"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (lopdev team), session d25b77f53a23",
+        "session": "d25b77f53a23",
+        "model": "anthropic/claude-opus-5-5",
+        "fallback": "none observed in this session",
+        "date": "2026-11-13",
+        "result": "passed",
+        "findings": 1,
+        "unresolved_blocker_major": 0,
+        "minor": 0,
+        "nit": 0
+      },
+      "status": "passed",
+      "note": "#3922 r1 2026-11-13 i18n-auditor d25b77f53a23 (anthropic/claude-opus-5-5, no fallback): 2 new offline_hold keys passed, 0 open blocker/major; findings I-es-1. Rest byte-identical to f1e8d6410. Evidence: i18n/audits/evidence/es/wire.settings/oh3922r1/record.json"
     }
   ]
 }
