@@ -244,11 +244,14 @@ def test_no_other_enum_choice_changes_its_collapsed_text(
     """The other 169 ENUM choices keep reading their stored word, in every locale.
 
     V2-1's restriction: the label swap-in is for the ONE choice whose label
-    names a combination (``delivery.busy_default=both``). Every other choice
-    paints exactly what it painted before — notably the four rows whose
-    English label differs from the stored word (``12h`` → ``12-hour``,
+    names a combination (``delivery.busy_default=both``). Every other choice's
+    collapsed cell keeps reading the stored word itself, notably the rows whose
+    English LABEL says more than that word: ``12h`` → ``12-hour``,
     ``cross-family`` → ``allow cross-vendor``, ``switch`` → ``this terminal``,
-    ``7d`` → ``7 days``), whose restyle is a design decision this fix must not
+    ``7d`` → ``7 days``. The four ``session.cleanup.temporary.idle_minutes``
+    presets origin/main brought read the same way, label over word: ``15`` →
+    ``15 minutes``, ``30`` → ``30 minutes``, ``120`` → ``2 hours``, ``1440`` →
+    ``24 hours``. Restyling any of them is a design decision this fix must not
     make on its own.
 
     Expected values are derived HERE from the ENGLISH source label — the
