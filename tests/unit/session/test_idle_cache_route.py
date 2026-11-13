@@ -90,8 +90,12 @@ def clock_session(tmp_path, monkeypatch):
 
 def fire_delay(session: Session) -> float:
     """Exact deadline arithmetic, independent of event-loop execution speed."""
+    # Every caller has reported usage; a missing figure must fail loudly here
+    # rather than be defaulted, since the missing-usage case asserts no timer.
+    gate_tokens = session._idle_gate_tokens()
+    assert gate_tokens is not None, "fire_delay needs reported usage"
     decision, expiry, _ = session._idle_inputs(
-        session._compaction_settings, compaction_api, session._idle_gate_tokens()
+        session._compaction_settings, compaction_api, gate_tokens
     )
     assert decision.due, decision.reason
     return (compaction_api.idle_fire_at_ms(expiry, 30.0) - int(NOW * 1000)) / 1000
