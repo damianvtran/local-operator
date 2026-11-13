@@ -475,10 +475,24 @@ async def test_an_unreachable_gateway_resets_the_public_stream():
 # -- 3. end to end through the real gateway -----------------------------------
 
 
-def free_port() -> int:
-    with closing(socket.socket()) as probe:
-        probe.bind(("127.0.0.1", 0))
-        return probe.getsockname()[1]
+def bound_socket() -> tuple[socket.socket, int]:
+    """A loopback socket already bound to an ephemeral port, and that port.
+
+    The servers in this section are handed the socket itself (uvicorn's
+    ``serve(sockets=[...])``) instead of a port number. Picking a port by
+    binding to 0, closing the probe and letting uvicorn bind the number later
+    left a window in which another xdist worker could take the port: main
+    run 43143140065 died in uvicorn's startup with ``[Errno 98] address
+    already in use`` and ``SystemExit: 3``. Holding the bound socket from pick
+    to serve closes that window instead of retrying around it.
+    """
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        sock.bind(("127.0.0.1", 0))
+    except BaseException:
+        sock.close()
+        raise
+    return sock, sock.getsockname()[1]
 
 
 def harness_app():
@@ -517,20 +531,26 @@ def harness_app():
 
 
 @contextlib.asynccontextmanager
-async def serving(app, port):
+async def serving(app, sock: socket.socket):
     import uvicorn
 
+    port = sock.getsockname()[1]
     server = uvicorn.Server(
         uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning", lifespan="off")
     )
-    task = asyncio.create_task(server.serve())
-    while not server.started:
-        await asyncio.sleep(0.01)
+    # The already-bound socket, never the bare port: see ``bound_socket``.
+    task = asyncio.create_task(server.serve(sockets=[sock]))
     try:
+        while not server.started:
+            await asyncio.sleep(0.01)
         yield
     finally:
         server.should_exit = True
-        await task
+        try:
+            await task
+        finally:
+            # uvicorn closes it on a clean shutdown; this covers the rest.
+            sock.close()
 
 
 @pytest.mark.asyncio
@@ -549,7 +569,8 @@ async def test_end_to_end_http_sse_websocket_and_upload_through_the_real_gateway
 
     key = make_signing_key()
     connection = make_connection(key)
-    gateway_port, harness_port = free_port(), free_port()
+    gateway_sock, gateway_port = bound_socket()
+    harness_sock, harness_port = bound_socket()
     connection["gateway_port"] = connection["tunnel"]["gateway_port"] = gateway_port
     connection["tunnel"]["harnesses"][0]["port"] = harness_port
     tunnel_id, version = connection["tunnel"]["id"], connection["tunnel"]["version"]
@@ -570,8 +591,8 @@ async def test_end_to_end_http_sse_websocket_and_upload_through_the_real_gateway
             cloudflared_running=lambda: False,
         )
         async with (
-            serving(harness_app(), harness_port),
-            serving(gateway.app(), gateway_port),
+            serving(harness_app(), harness_sock),
+            serving(gateway.app(), gateway_sock),
             running(connector),
         ):
             await relay.wait_sessions(1)
@@ -982,9 +1003,10 @@ async def test_a_pooled_relay_stream_still_serves_after_uvicorns_default_keep_al
         return PlainTextResponse(f"{request.method} {len(await request.body())}")
 
     app = Starlette(routes=[Route("/api/echo", echo, methods=["GET", "POST"])])
-    port = free_port()
+    sock, port = bound_socket()
     server = uvicorn.Server(gateway_server_config(app, port))
-    serve = asyncio.create_task(server.serve())
+    # The already-bound socket, never the bare port: see ``bound_socket``.
+    serve = asyncio.create_task(server.serve(sockets=[sock]))
     log: list[str] = []
     try:
         while not server.started:
@@ -1007,7 +1029,10 @@ async def test_a_pooled_relay_stream_still_serves_after_uvicorns_default_keep_al
         assert not [line for line in log if "reset by this device" in line]
     finally:
         server.should_exit = True
-        await serve
+        try:
+            await serve
+        finally:
+            sock.close()
 
 
 @pytest.mark.asyncio
@@ -1042,3 +1067,104 @@ def test_the_reset_log_counts_what_it_suppressed():
         "relay stream reset by this device: first",
         "relay stream reset by this device: fourth (+2 more in the previous 0.05 s)",
     ]
+
+
+# -- 2026-11-11: an abnormal drop, an empty refresh error ------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("failure", "expected"),
+    [
+        # `str(TimeoutError())` is "", which is what the service log printed.
+        (TimeoutError(), "relay token refresh failed: TimeoutError (no message)"),
+        (httpx.ReadTimeout(""), "relay token refresh failed: ReadTimeout (no message)"),
+    ],
+)
+async def test_a_refresh_failure_names_its_type_even_when_its_text_is_empty(
+    monkeypatch, failure, expected
+):
+    monkeypatch.setattr(relay_connector, "backoff_delay", lambda _attempt: 0.0)
+    log: list[str] = []
+    server, port = await echo_gateway()
+    async with server, FakeRelay({"tok": Claims(TUNNEL, 7)}) as relay:
+
+        async def refresh():
+            raise failure
+
+        # Already expired, so the first dial must call /connect (C1.6).
+        connector = make_connector(
+            relay, grant_for(relay, "tok", expires_in=0), port, refresh=refresh, log=log
+        )
+        async with running(connector):
+            for _ in range(200):
+                if any(line.startswith("relay token refresh failed") for line in log):
+                    break
+                await asyncio.sleep(0.01)
+    refresh_lines = [line for line in log if line.startswith("relay token refresh failed")]
+    assert refresh_lines and refresh_lines[0] == expected
+
+
+def test_a_wrapped_refresh_failure_names_the_chain_by_type_only():
+    from local_operator.providers.auth_store import AuthStoreBusyError
+
+    inner = AuthStoreBusyError("Timed out acquiring AuthStore bootstrap process guard")
+    outer = ValueError("This computer's credential store was busy.")
+    outer.__cause__ = inner
+    assert relay_connector.describe_failure(outer) == (
+        "ValueError: This computer's credential store was busy. <- AuthStoreBusyError"
+    )
+    # An inner link's text never reaches the log: it may be third-party prose.
+    secret = RuntimeError("https://example.invalid/?token=do-not-log")
+    wrapper = ValueError("x")
+    wrapper.__cause__ = secret
+    assert "example.invalid" not in relay_connector.describe_failure(wrapper)
+
+
+@pytest.mark.asyncio
+async def test_an_abnormal_drop_redials_with_a_still_valid_token_without_connect(monkeypatch):
+    """C1.6 token reuse: a 1006 drop with >= 60 s left on the token redials at once
+    with that token; `/connect` is not called first."""
+    monkeypatch.setattr(relay_connector, "backoff_delay", lambda _attempt: 0.0)
+    calls = 0
+    server, port = await echo_gateway()
+    async with server, FakeRelay({"tok": Claims(TUNNEL, 7)}) as relay:
+
+        async def refresh():
+            nonlocal calls
+            calls += 1
+            return grant_for(relay, "tok")
+
+        connector = make_connector(relay, grant_for(relay, "tok"), port, refresh=refresh)
+        async with running(connector):
+            first = await relay.wait_sessions(1)
+            await until_connected(connector)
+            # No close frame: the TCP connection just dies, as at 18:59:10.
+            first.ws.transport.abort()
+            second = await relay.wait_sessions(2)
+            assert second.epoch == first.epoch + 1
+            await until_connected(connector)
+    assert calls == 0
+
+
+@pytest.mark.asyncio
+async def test_an_abnormal_drop_with_an_expiring_token_calls_connect_first(monkeypatch):
+    """The other side of the same rule: under 60 s left, /connect gates the redial."""
+    monkeypatch.setattr(relay_connector, "backoff_delay", lambda _attempt: 0.0)
+    calls = 0
+    server, port = await echo_gateway()
+    async with server, FakeRelay({"tok": Claims(TUNNEL, 7)}) as relay:
+
+        async def refresh():
+            nonlocal calls
+            calls += 1
+            return grant_for(relay, "tok")
+
+        connector = make_connector(relay, grant_for(relay, "tok"), port, refresh=refresh)
+        async with running(connector):
+            first = await relay.wait_sessions(1)
+            await until_connected(connector)
+            connector.grant = grant_for(relay, "tok", expires_in=30)
+            first.ws.transport.abort()
+            await relay.wait_sessions(2)
+    assert calls == 1

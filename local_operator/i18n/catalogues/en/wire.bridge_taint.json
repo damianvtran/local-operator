@@ -1,0 +1,10 @@
+{
+  "wire.bridge_taint.card_notice": "This conversation includes a message from a teammate's agent (Agent messages). Check what this sends and where before you allow it.",
+  "wire.bridge_taint.card_options_off": "Allow all and auto are off in this conversation. To turn auto on, type /approvals auto in the terminal, or use /new for a fresh conversation.",
+  "wire.bridge_taint.full_request": "Full request: {request}",
+  "wire.bridge_taint.grant_suspended": "Auto approval is paused in this conversation because it now includes a message from a teammate's agent (Agent messages). Tool calls that can send data out or change things will ask you first. To go back to auto, type /approvals auto in the terminal.",
+  "wire.bridge_taint.ack_refused": "Auto approval is still off. This conversation includes a message from a teammate's agent (Agent messages), so auto can't be turned on from here. You can still approve each request from its card. To turn auto on, type /approvals auto in the terminal, or use /new for a fresh conversation.",
+  "wire.bridge_taint.card_notice_other_session": "This conversation includes content from another session or device, which may contain a message from a teammate's agent. Check what this sends and where before you allow it.",
+  "wire.bridge_taint.grant_suspended_other_session": "Auto approval is paused in this conversation because it now includes content from another session or device, which may contain a message from a teammate's agent. Tool calls that can send data out or change things will ask you first. To go back to auto, type /approvals auto in the terminal.",
+  "wire.bridge_taint.ack_refused_other_session": "Auto approval is still off. This conversation includes content from another session or device, which may contain a message from a teammate's agent, so auto can't be turned on from here. You can still approve each request from its card. To turn auto on, type /approvals auto in the terminal, or use /new for a fresh conversation."
+}

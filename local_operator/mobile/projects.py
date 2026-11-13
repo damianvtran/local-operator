@@ -65,6 +65,7 @@ from local_operator.projects import (
     ProjectRegistry,
     ProjectRegistryLockTimeout,
     ProjectSchemaGuardError,
+    TemporarySessionError,
     build_project_view,
     closed_with_open_milestones,
     readable_error,
@@ -181,6 +182,17 @@ def _reader_error(exc: Exception) -> str:
 
 def _refusal(exc: Exception) -> ProjectRouteError:
     """Map one store refusal to the refusal the client can act on."""
+    if isinstance(exc, TemporarySessionError):
+        # The desktop route's mapping: 409 ``session_temporary`` with the keyed
+        # sentence (UI remedy: Keep and link).
+        from local_operator.i18n.keys import wire_errors_desktop as _wd
+        from local_operator.i18n.text import tr
+
+        return ProjectRouteError(
+            409,
+            "session_temporary",
+            str(tr("wire.errors.desktop")(_wd.session_temporary(session_id=exc.session_id))),
+        )
     if isinstance(exc, ProjectNameConflictError):
         # The name is taken (case-insensitive): a STATE conflict, not a
         # malformed value — the client's move is to pick another name or open

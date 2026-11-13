@@ -1638,7 +1638,10 @@ class MeshCredentialBroker:
                 ),
             )
             refusal = self._github_designation_refusal(
-                designated, limit=github_app.MAX_DESIGNATED_REPOSITORIES, common=common
+                designated,
+                limit=github_app.MAX_DESIGNATED_REPOSITORIES,
+                common=common,
+                allow_explicit_clear=True,
             )
             if refusal is not None:
                 return refusal
@@ -1752,7 +1755,7 @@ class MeshCredentialBroker:
             # THE DELIVERY (§3.4): the allow-list this mint was narrowed to
             # travels WITH the bearer, so the borrower materialises the same
             # bound the token carries (github.remember_delivered_repositories).
-            narrowing=github_app.grant_narrowing(repositories),
+            narrowing=_app_arm_narrowing(self.root, repositories),
             grant_id=f"g_{os.urandom(8).hex()}",
         )
         lender.register(
@@ -1766,7 +1769,12 @@ class MeshCredentialBroker:
         return grant
 
     def _github_designation_refusal(
-        self, designated: Any, *, limit: int, common: dict[str, Any]
+        self,
+        designated: Any,
+        *,
+        limit: int,
+        common: dict[str, Any],
+        allow_explicit_clear: bool = False,
     ) -> Any:
         """The refusal for a designation that cannot be lent, or ``None``.
 
@@ -1777,6 +1785,16 @@ class MeshCredentialBroker:
         would lend for a different set than the one the operator was shown.
         """
         if not designated.repositories:
+            # Token arms retain #3841's explicit refuse-all delivery after a
+            # previously lent hand-picked list is cleared. Do not confuse that
+            # with all opt-outs (listed is nonempty), or let an App mint an
+            # installation-wide token: only token arms opt into this branch.
+            if (
+                allow_explicit_clear
+                and designated.origin == github_app.ORIGIN_EXPLICIT
+                and not designated.listed
+            ):
+                return None
             return BrokerError(
                 code=github_app.CODE_REPOSITORIES_UNSET,
                 message=designated.refusal(),
@@ -1837,8 +1855,10 @@ class MeshCredentialBroker:
             identity={},
             # §3.4's bound for the token arms is the helper's allow-list ALONE,
             # so it must reach the helper's device too (see _serve_github_app's
-            # note on the delivery; read fresh per serve, like the token).
-            narrowing=github_app.grant_narrowing(repositories),
+            # note on delivery). Use the resolved enumeration/opt-out result,
+            # not a second config-only list, with #3841's digest/generation and
+            # explicit-clear bookkeeping preserved.
+            narrowing=_token_arm_narrowing(self.root, repositories),
             grant_id=f"g_{os.urandom(8).hex()}",
         )
 
@@ -3642,3 +3662,30 @@ def _grant_ttl_s(root: Path | None) -> float:
     from local_operator.network.credentials import grant_ttl_s
 
     return float(grant_ttl_s(root))
+
+
+def _token_arm_narrowing(
+    root: Path | None, repositories: Sequence[str] | None = None
+) -> dict[str, Any]:
+    """Deliver the resolved list without losing explicit-clear ordering semantics."""
+    from local_operator.network.credentials import github as github_app
+
+    configured, explicit = github_app.owner_designation(root)
+    if repositories is None:
+        return github_app.grant_narrowing(configured, explicit=explicit)
+    return github_app.grant_narrowing(repositories, explicit=True)
+
+
+def _app_arm_narrowing(root: Path | None, repositories: Any) -> dict[str, Any]:
+    """The App arm's delivery: the list this mint was narrowed to, always explicit.
+
+    Also marks the owner as having lent a designation, so a later clear on this
+    owner reaches token-arm borrowers too if the source ladder moves off the App.
+    """
+    from local_operator.network.credentials import github as github_app
+
+    # Only a hand-picked designation creates the legacy clear marker. Marking
+    # an enumerated default would misread its next unset config as a clear and
+    # disable automatic lending immediately after its first successful serve.
+    github_app.owner_designation(root)
+    return github_app.grant_narrowing(repositories, explicit=True)

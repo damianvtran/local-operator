@@ -5016,7 +5016,9 @@ async def test_a_flip_that_lands_mid_poll_is_served_when_the_poll_completes(monk
     release = threading.Event()
     reads: list[bool] = []
 
-    def parked_load(root, *, include_subagents=False, pinned_hidden_ids=()):
+    def parked_load(
+        root, *, include_subagents=False, include_temporary=False, pinned_hidden_ids=()
+    ):
         reads.append(include_subagents)
         entered.set()
         release.wait(timeout=15)

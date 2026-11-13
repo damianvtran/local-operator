@@ -75,7 +75,27 @@ async def amain(port: int = DEFAULT_PORT) -> int:
     # runs this instance as a read-only observer (list + durable routes only)
     # — the mode benchmark and diagnostic daemons use.
     dial = os.environ.get("LO_MOBILE_NO_DIAL", "").strip().lower() not in ("1", "true", "yes")
-    daemon = MobileDaemon(port=port, password=password, dial_registrants=dial)
+    # Push/ack-sync S7: arm the cloud push lane only when this machine has a
+    # Radient tunnel — its login is the credential and its id the `computer`
+    # handle (agent-server docs/SESSION-PUSH.md §1, §4.3). No tunnel → `None`,
+    # which is exactly the pre-S7 daemon. An observer (no-dial) daemon never
+    # arms it: a second process emitting for the same computer would double
+    # every push and race the production daemon's worker cursors.
+    from local_operator.mobile.push_transport import build_push_lane
+    from local_operator.paths import config_dir as _push_config_dir
+
+    push_lane = build_push_lane(_push_config_dir()) if dial else None
+    if push_lane is not None:
+        logger.info("mobile push armed for tunnel %s", push_lane.transport.computer)
+    # The factory lets the scan arm the lane when `lop tunnel create` runs after
+    # this daemon started; an observer gets none, for the reason above.
+    daemon = MobileDaemon(
+        port=port,
+        password=password,
+        dial_registrants=dial,
+        push_lane=push_lane,
+        push_lane_factory=(lambda: build_push_lane(_push_config_dir())) if dial else None,
+    )
     # Follow ``display.*`` writes made by other processes (design review round 1
     # on #1746, D1/D2): the daemon's durable folds read the process-cached
     # display flags, and without this subscriber a running daemon keeps the

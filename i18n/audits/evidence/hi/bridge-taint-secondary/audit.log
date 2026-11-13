@@ -1,0 +1,18 @@
+locale hi
+en sha256 330a111628350378ede70f1ec5d9a432239d59716b5ee1b0e668de39696ef4d9
+context sha256 bdc6e370fc801cc9aaaf9e70e837b4ac14e9ace9990bcecda28fd1f1d94f31cd
+target sha256 32702f7c55b9943fae16e8f5f83a04c39a4ba953347e32230f5b6275c7b9162e
+key_count en/target 8 8 order_equal True
+nfc_all True
+bidi_or_zero_width none
+ascii_apostrophes none
+token '{request}' count_equal_en True
+token '/approvals auto' count_equal_en True
+token '/new' count_equal_en True
+title 'एजेंट संदेश' byte_contained_in ['wire.bridge_taint.card_notice', 'wire.bridge_taint.grant_suspended', 'wire.bridge_taint.ack_refused']
+quoted_spans ['Allow all']
+unbalanced_parens none
+unbalanced_quotes none
+u202f 0 u00a0 0
+space_before_punct none
+sentence_terminators en/target (en ".", target locale terminator) {'wire.bridge_taint.card_notice': (2, 2), 'wire.bridge_taint.card_options_off': (2, 2), 'wire.bridge_taint.full_request': (0, 0), 'wire.bridge_taint.grant_suspended': (3, 3), 'wire.bridge_taint.ack_refused': (4, 4), 'wire.bridge_taint.card_notice_other_session': (2, 2), 'wire.bridge_taint.grant_suspended_other_session': (3, 3), 'wire.bridge_taint.ack_refused_other_session': (4, 4)}

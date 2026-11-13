@@ -344,6 +344,50 @@ def test_an_unset_designation_mints_the_app_narrowed_to_the_installation_list(
     assert len(api.forge.revoked) == 1 and api.forge.revoked[0] not in api.forge.tokens
 
 
+@pytest.mark.parametrize("arm", ["token", "app"])
+def test_enumerated_defaults_keep_serving_and_carry_ordered_delivery(
+    env: _Env, api: _FakeGithubApi, app_keypair: tuple[str, str], arm: str
+) -> None:
+    """The #3841 clear marker belongs to explicit lists, not automatic defaults.
+
+    A merge that marks every nonempty App mint would refuse its own next borrow;
+    a config-only token delivery would lose the enumerated list and its digest.
+    """
+    expected = ["acme/one", "acme/two"]
+    if arm == "token":
+        _token_arm(env, api, [_repo(name) for name in expected])
+    else:
+        _seed_app_key(env.root, app_keypair[0])
+        api.forge.installation_repos = [_repo(name) for name in expected]
+    with _broker(env, api) as broker:
+        first = _granted(broker)
+        second = _granted(broker)
+    assert github_mod.designation_for(env.root) == ((), False)
+    for detail in (first, second):
+        delivered = cred_types.Grant.from_detail(detail).narrowing
+        assert delivered["repositories"] == expected
+        assert delivered["digest"] == github_mod.designation_digest(expected)
+        assert int(delivered["generation"]) > 0
+    assert int(second["narrowing"]["generation"]) >= int(first["narrowing"]["generation"])
+
+
+def test_an_explicit_app_clear_never_reverts_to_the_enumerated_installation(
+    env: _Env, api: _FakeGithubApi, app_keypair: tuple[str, str]
+) -> None:
+    """Deleting a delivered override stays refuse-all; no empty/wide App mint."""
+    _seed_app_key(env.root, app_keypair[0])
+    api.forge.installation_repos = [_repo("acme/one"), _repo("acme/two")]
+    _config(env.root, repositories=["acme/one"])
+    with _broker(env, api) as broker:
+        assert _granted(broker)["narrowing"]["repositories"] == ["acme/one"]
+        before = len(api.forge.mints)
+        _config(env.root)
+        refused = _refused(broker)
+    assert refused["code"] == github_mod.CODE_REPOSITORIES_UNSET
+    assert len(api.forge.mints) == before
+    assert api.forge.gets == []
+
+
 def test_the_token_arm_lends_only_what_the_login_can_push_to_across_pages(
     env: _Env, api: _FakeGithubApi
 ) -> None:

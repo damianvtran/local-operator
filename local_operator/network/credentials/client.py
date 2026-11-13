@@ -566,6 +566,26 @@ class MeshCredentialClient:
             granted = self.state.last_grant_from(device)
             if granted:
                 stamps.append(granted)
+        seen = self.owner_seen_at(device)
+        if seen is not None:
+            stamps.append(seen)
+        if not stamps:
+            return None
+        return max(0.0, time.time() - max(stamps))
+
+    def owner_seen_at(self, device: str) -> float | None:
+        """When this device's relay last saw a LINK frame from ``device``, or ``None``.
+
+        ``member.last_seen_at`` across this device's networks: the relay writes it
+        when it admits the owner's link (forced) and, throttled, as frames arrive
+        (``RelayServer.note_link_activity``). Deliberately WITHOUT the last grant
+        :meth:`owner_last_seen_s` also counts: a turn waiting for the owner
+        (``store._OwnerWait``) makes no grants, so only a link frame can mean "the
+        owner is back". File reads only; never a dial.
+        """
+        if not device:
+            return None
+        stamps: list[float] = []
         try:
             from local_operator.network import store
 
@@ -574,10 +594,8 @@ class MeshCredentialClient:
                 if member is not None and member.last_seen_at:
                     stamps.append(float(member.last_seen_at))
         except Exception:  # noqa: BLE001 — a missing observation is not a failure
-            pass
-        if not stamps:
             return None
-        return max(0.0, time.time() - max(stamps))
+        return max(stamps) if stamps else None
 
     # -- refusal cache ------------------------------------------------------
 
@@ -2789,6 +2807,10 @@ class MeshCredentialClient:
             )
             dropped.append(key)
         return dropped
+
+    def self_membership_active(self) -> bool:
+        """Public read of :meth:`_self_membership_active`, for the owner-wait hint."""
+        return self._self_membership_active()
 
     def _self_membership_active(self) -> bool:
         """Whether this device is still a live member of its network.

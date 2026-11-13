@@ -829,6 +829,9 @@ def test_the_registry_states_which_commands_offer_values() -> None:
         # offers on/off/status for a user who would rather name the resulting
         # state than flip into it.
         "fast": ArgumentMode.OPTIONAL,
+        # OPTIONAL like `/fast`: bare `/temporary` TOGGLES this chat's mark,
+        # and the space offers on/off/status (``session/temporary.py``).
+        "temporary": ArgumentMode.OPTIONAL,
         # REQUIRED where `/fast` is OPTIONAL: the registry declares `/radient`
         # as ArgumentShape.SUBCOMMAND over the single closed word `saver`, so
         # bare `/radient` has nothing to run — the list IS the command, which is

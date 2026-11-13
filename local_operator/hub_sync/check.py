@@ -140,6 +140,34 @@ def _served_by(client: Any) -> str | None:
         return None
 
 
+def _detail_read_auth(tenant: str | None) -> dict[str, bool]:
+    """Credential keywords for a team/agent DETAIL read of a link in ``tenant``.
+
+    An organization link (a tenant) is readable only as an entitled member, so
+    it sends this client's bearer. A PUBLIC link (no tenant) must send NO
+    credential at all: ``with_credential=False`` alone only drops the bearer,
+    and ``requests`` would still attach an ambient ``~/.netrc`` entry for the
+    hub's host as HTTP Basic auth. A public read that authenticates leaks the
+    person's netrc secret to the hub on every update check, and its answer is
+    then a signed-in answer mistaken for what the public is served -- the same
+    hazard the legacy public-scope probe closed in #3813. ``credential_free``
+    removes that header and refuses redirects (a followed redirect re-reads
+    netrc for the target). A refused redirect on a team surfaces as an ordinary
+    ``unavailable`` row; on an agent it is a failed detail read, which falls to
+    the zip download -- and the public arm of that fallback is credential-free
+    and redirect-refusing too (``check_hub_agents``). Public SKILL reads get
+    the same guarantee from ``_fetch_skill``.
+
+    One helper for both kinds and for the re-read after a scope repair (which
+    runs these same checks on the now tenant-free row), so no public detail
+    read can drift back to the leaky shape.
+    """
+
+    if tenant:
+        return {"with_credential": True}
+    return {"with_credential": False, "credential_free": True}
+
+
 def _trusted_validator(record: prov.BaselineRecord) -> str | None:
     """The If-None-Match validator to send, or None when B cannot stand in for it.
 
@@ -464,7 +492,7 @@ def check_hub_agents(
         # NEVER borrowed from a later read (that is the same hazard again).
         detail_payload: Mapping[str, Any] | None = None
         try:
-            fetched = client.get_agent(hub_id, **{"with_credential": bool(tenant)})
+            fetched = client.get_agent(hub_id, **_detail_read_auth(tenant))
         except Exception:  # noqa: BLE001 - the zip fallback below is the report
             fetched = None
         if isinstance(fetched, Mapping):
@@ -487,7 +515,15 @@ def check_hub_agents(
                         client, hub_id, with_credential=True, timeout=REQUEST_TIMEOUT_S
                     )
                 else:
-                    text, desc = fetcher(client, hub_id, timeout=REQUEST_TIMEOUT_S)
+                    # The public arm of the zip fallback is held to the same
+                    # rule as the detail read (``_detail_read_auth``): no
+                    # credential, not even netrc's, and no redirect. It runs
+                    # exactly when that read failed or lacked instructions --
+                    # a refused 3xx included -- so leaving it ambient would
+                    # move the leak here rather than close it.
+                    text, desc = fetcher(
+                        client, hub_id, timeout=REQUEST_TIMEOUT_S, credential_free=True
+                    )
             except Exception as error:  # noqa: BLE001 - classified below
                 reason, detail = _failure_reason(error, kind="agent", hub_id=hub_id)
                 reason, subclass = _split_reason(reason)
@@ -797,9 +833,10 @@ def check_hub_teams(
             continue
         try:
             # Public baselines select the anonymous client. Optional-auth detail
-            # reads must explicitly omit credentials rather than demanding a key.
+            # reads must explicitly omit credentials rather than demanding a key,
+            # and a public read must carry none at all -- not even netrc's.
             document = client.get_team(
-                record.hub_id, timeout=REQUEST_TIMEOUT_S, with_credential=bool(tenant)
+                record.hub_id, timeout=REQUEST_TIMEOUT_S, **_detail_read_auth(tenant)
             )
         except Exception as error:  # noqa: BLE001
             reason, detail = _failure_reason(error, kind="team", hub_id=record.hub_id)
@@ -1230,11 +1267,25 @@ def _fetch_skill(
     revision). The client turns a match into ``NotModified`` -- HTTP 304, no
     body -- and this seam passes that through untouched: translating it here
     would hide the one fact the caller needs, that the row did not move.
+
+    The anonymous client is the one ``client_for_tenant`` returns for a PUBLIC
+    link, and its read is ``credential_free`` -- no ambient ``~/.netrc`` Basic
+    auth either -- for the reason ``_detail_read_auth`` gives for teams and
+    agents. Keyed on the client (not a tenant) so this seam keeps its
+    signature for injected fetchers.
     """
 
     send_bearer = bool(getattr(client, "api_key", None))
+    if send_bearer:
+        return client.get_skill(
+            skill_id, timeout=timeout, if_none_match=if_none_match, with_credential=True
+        )
     return client.get_skill(
-        skill_id, timeout=timeout, if_none_match=if_none_match, **{"with_credential": send_bearer}
+        skill_id,
+        timeout=timeout,
+        if_none_match=if_none_match,
+        with_credential=False,
+        credential_free=True,
     )
 
 
