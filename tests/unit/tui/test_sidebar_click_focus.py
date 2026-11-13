@@ -83,9 +83,7 @@ async def _open_list(pilot: Any, app: OperatorApp, *session_ids: str) -> Any:
     # a late one writes the store's (empty) list over the seed below. Wait on the
     # worker, not on a count of pauses. Never pass an empty list:
     # wait_for_complete([]) waits on every worker.
-    while pending := [
-        w for w in app.workers if w.group == "sidebar-catalog" and not w.is_finished
-    ]:
+    while pending := [w for w in app.workers if w.group == "sidebar-catalog" and not w.is_finished]:
         await asyncio.wait_for(app.workers.wait_for_complete(pending), BOOT_DEADLOCK_GUARD_S)
     sidebar.current_id = session_ids[0]
     sidebar.cursor_id = session_ids[0]
