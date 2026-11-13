@@ -3,9 +3,11 @@
 THE INCIDENT (2026-11-13): the owner, a laptop, went into clamshell sleep for
 24 minutes. Every node's borrowed model login lapsed at the 15-minute grant end
 because nobody was awake to renew it. The operator approved (C5, ask a-e0c9,
-"Yes, hold up to 1 hour"): the OWNER states ``hold_until_ms = min(token expiry,
-now + offline_hold_s)`` on each grant, and the node serves the grant it already
-holds until then while the owner is unreachable, capped on its own clocks.
+"Yes, hold up to 1 hour", raised the same day to 24 hours so remote work survives
+a laptop closed overnight while the owner reconnects daily): the OWNER states
+``hold_until_ms = min(token expiry, now + offline_hold_s)`` on each grant, and the
+node serves the grant it already holds until then while the owner is unreachable,
+capped on its own clocks.
 
 Every bound is pinned here with a real negative: an older owner (no field) gets
 no extension; a hostile owner's number is capped by the borrower's receipt; the
@@ -70,13 +72,15 @@ def _write_config(root: Any, **credentials: float) -> None:
     )
 
 
-def test_offline_hold_defaults_to_the_approved_hour_and_is_clamped(tmp_path: Any) -> None:
-    assert OFFLINE_HOLD_S == 3600.0
-    assert offline_hold_s(tmp_path) == 3600.0
+def test_offline_hold_defaults_to_the_approved_day_and_is_clamped(tmp_path: Any) -> None:
+    assert OFFLINE_HOLD_S == 86400.0
+    assert offline_hold_s(tmp_path) == 86400.0
+    # The operator's 24 h is also the ceiling: nothing configures past a day.
+    assert OFFLINE_HOLD_MAX_S == 86400.0
     # Never shorter than the grant (that would shrink the pre-existing window)...
     _write_config(tmp_path, grant_ttl_s=900.0, offline_hold_s=10.0)
     assert offline_hold_s(tmp_path) == 900.0
-    # ...never past the six-hour ceiling, and a garbled value is the default.
+    # ...never past the 24-hour ceiling, and a garbled value is the default.
     _write_config(tmp_path, offline_hold_s=10**9)
     assert offline_hold_s(tmp_path) == OFFLINE_HOLD_MAX_S
     (tmp_path / "config.yml").write_text(
@@ -89,16 +93,21 @@ def test_offline_hold_defaults_to_the_approved_hour_and_is_clamped(tmp_path: Any
 def test_the_owner_states_min_token_expiry_and_hold_never_below_the_grant(tmp_path: Any) -> None:
     now = 1_000_000_000_000
     hour = 3_600_000
-    # Model OAuth with a 3 h token: the hold is the hour.
-    assert owner_mod._offline_hold_until_ms(tmp_path, now, now + 3 * hour, now + 900_000) == (
-        now + hour
+    day = 24 * hour
+    # Model OAuth with a 10-day token (OpenAI): the hold is the day.
+    assert owner_mod._offline_hold_until_ms(tmp_path, now, now + 240 * hour, now + 900_000) == (
+        now + day
+    )
+    # Anthropic OAuth (~8 h token): the token's own expiry ends the hold first.
+    assert owner_mod._offline_hold_until_ms(tmp_path, now, now + 8 * hour, now + 900_000) == (
+        now + 8 * hour
     )
     # A GitHub App token lives an hour on its own: the hold is its expiry.
     assert owner_mod._offline_hold_until_ms(tmp_path, now, now + 50 * 60_000, now + 900_000) == (
         now + 50 * 60_000
     )
     # A PAT / static key (no known expiry): the hold alone bounds it.
-    assert owner_mod._offline_hold_until_ms(tmp_path, now, 0, now + 900_000) == now + hour
+    assert owner_mod._offline_hold_until_ms(tmp_path, now, 0, now + 900_000) == now + day
     # A token about to expire: never below the grant end the owner already promised.
     assert owner_mod._offline_hold_until_ms(tmp_path, now, now + 1000, now + 1000) == now + 1000
 
@@ -166,6 +175,59 @@ def test_hold_end_formula_bounds() -> None:
     assert _grant(grant_expires_at_ms=grant_exp, hold_until_ms=hour).hold_end_ms(cap, boot + 1) == (
         grant_exp
     )
+
+
+def test_a_daily_owner_contact_restarts_the_day(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The operator's "logging in each day" half, at the real 24 h numbers.
+
+    The window is anchored on the RECEIPT of the grant being held, and every grant
+    the owner sends is a new object stamped on arrival, so an owner contact the
+    borrower asks through restarts it. Owner away 20 h: served. Owner back, a
+    fresh grant. Away another 20 h (40 h after the FIRST grant): still served,
+    because the day is counted from the second. Away 25 h with no contact: over,
+    on the wall clock and on the sleep-inclusive clock alike.
+    """
+    from local_operator.network.credentials import client as client_mod
+
+    clock = {"wall": 1_000_000.0, "boot": 500.0}
+    monkeypatch.setattr(client_mod.time, "time", lambda: clock["wall"])
+    monkeypatch.setattr(client_mod, "_sleep_inclusive_clock", lambda: clock["boot"])
+    hour = 3600.0
+    cap = OFFLINE_HOLD_S
+
+    def advance(seconds: float) -> None:
+        clock["wall"] += seconds
+        clock["boot"] += seconds
+
+    def owner_grant() -> Grant:
+        # What the owner states for a static key: its hold is now + the day.
+        now_ms = int(clock["wall"] * 1000)
+        grant_exp = now_ms + 900_000
+        return _grant(
+            grant_expires_at_ms=grant_exp,
+            hold_until_ms=owner_mod._offline_hold_until_ms(None, now_ms, 0, grant_exp),
+        )
+
+    def held_end(cache: GrantCache) -> int:
+        held = cache.peek("p", "s")
+        assert held is not None
+        return held.hold_end_ms(cap, clock["boot"])
+
+    cache = GrantCache()
+    cache.put("p", "s", owner_grant())
+    advance(20 * hour)
+    assert clock["wall"] * 1000 < held_end(cache), "20 h into the first day was refused"
+    # The owner wakes: the borrower's ask returns a NEW grant, stamped now.
+    cache.put("p", "s", owner_grant())
+    advance(20 * hour)
+    assert clock["wall"] * 1000 < held_end(cache), (
+        "40 h after the first grant, 20 h after the reconnect: the reconnect did not "
+        "restart the window"
+    )
+    # 25 h without any owner contact: the hold is over.
+    advance(5 * hour)
+    end = held_end(cache)
+    assert end == 0 or clock["wall"] * 1000 >= end, "served past the operator's 24 h"
 
 
 def test_grant_cache_stamps_receipt_once_and_still_has_no_serializer() -> None:
@@ -261,6 +323,51 @@ def test_an_outage_past_the_grant_is_served_and_past_the_hold_lapses_honestly(
     assert grant.access_token not in raw
     for state_file in mesh.b.root.rglob("placement.state.json"):
         assert grant.access_token not in state_file.read_text(encoding="utf-8")
+
+
+def test_an_owner_reconnect_restarts_the_hold_on_the_real_path(
+    mesh: Any, short_hold: Any, monkeypatch: pytest.MonkeyPatch  # noqa: F811
+) -> None:
+    """The daily-reconnect promise over two real relays, scaled to a 5 s hold.
+
+    Away most of a hold -> back -> away again past where the FIRST grant's hold
+    would have ended: still served, because the reconnect's fresh grant restarted
+    the window. Then away past the new hold with no contact: refused with the
+    honest owner-away copy, never a claim that the login was revoked.
+    """
+    from tests.unit.network.test_credentials_held_offline import _restart_owner
+
+    client, first = short_hold
+    _stop_owner(mesh)
+    assert net_fixtures.wait_for(lambda: time.time() * 1000 > first.grant_expires_at_ms + 100)
+    held = client.request_grant_sync(STUB_PROVIDER, session_id="sess-1", model_id="stub-model")
+    assert isinstance(held, Grant) and held.held_offline, held
+    first_end = held.held_until_ms
+
+    owner = _restart_owner(mesh, monkeypatch)
+    try:
+        fresh = client.request_grant_sync(STUB_PROVIDER, session_id="sess-1", model_id="stub-model")
+        assert isinstance(fresh, Grant) and not fresh.held_offline, fresh
+        assert fresh.grant_id != first.grant_id, "the reconnect served the old grant"
+    finally:
+        owner.stop()
+    b_links = mesh.b.links
+    assert net_fixtures.wait_for(lambda: not any(link.alive for link in b_links.values()))
+
+    # Past the FIRST grant's hold end: only a restarted window serves this.
+    assert net_fixtures.wait_for(lambda: time.time() * 1000 > first_end + 200, timeout_s=15.0)
+    again = client.request_grant_sync(STUB_PROVIDER, session_id="sess-1", model_id="stub-model")
+    assert isinstance(again, Grant), f"the reconnect did not restart the hold: {again}"
+    assert again.held_offline and again.grant_id == fresh.grant_id
+    assert again.held_until_ms > first_end
+
+    # No further contact: the restarted window ends honestly.
+    assert net_fixtures.wait_for(
+        lambda: time.time() * 1000 > again.held_until_ms + 100, timeout_s=15.0
+    )
+    lapsed = client.request_grant_sync(STUB_PROVIDER, session_id="sess-1", model_id="stub-model")
+    assert isinstance(lapsed, BrokerError) and lapsed.code == "owner_offline", lapsed
+    assert "owns it and was last seen" in lapsed.message, lapsed.message
 
 
 def test_an_older_owner_that_states_no_hold_gets_no_extension(

@@ -1596,9 +1596,9 @@ def selected_model_row(
         ),
     }
     # A HELD GRANT is access the owner lent BEFORE it became unreachable, served
-    # from the borrower's memory until the offline hold ends (up to an hour since
+    # from the borrower's memory until the offline hold ends (up to 24 hours since
     # 2026-11-13). Reading it as a fresh resolve ("the next request verifies the
-    # owner again") was wrong for that whole hour (design review m1), so it says
+    # owner again") was wrong for that whole window (design review m1), so it says
     # what it is and when it stops. The end is the receipt's
     # ``last_grant_expires_at`` (the hold end, ``effective.note_resolution``),
     # rendered in UTC because the reader may sit in another time zone.

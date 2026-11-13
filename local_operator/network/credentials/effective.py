@@ -175,7 +175,7 @@ def note_held_dropped(root: Path | None, provider: str) -> None:
     """A held grant was just dropped (the provider refused it): its hold is over NOW.
 
     Without this the next refusal's receipt copies ``last_grant_expires_at`` from
-    the held receipt (the hold end, up to an hour away), so a reader keyed on "the
+    the held receipt (the hold end, up to a day away), so a reader keyed on "the
     lease has not ended yet" (#3722's owner-away wait) would believe access is
     still coming and fail fast instead of waiting for the owner (design review m2).
     Only a ``held_offline`` receipt moves; a live borrow keeps its own evidence.

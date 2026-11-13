@@ -5606,7 +5606,7 @@ SETTINGS: tuple[Setting, ...] = (
     ),
     # The offline hold (credentials/__init__.py ``OFFLINE_HOLD_S``; C5, approved by
     # the operator 2026-11-13). Read on the owner (stated on each grant) and on the
-    # borrower (its own cap); the reader clamps to [grant_ttl_s, 6 h]. The minimum is
+    # borrower (its own cap); the reader clamps to [grant_ttl_s, 24 h]. The minimum is
     # the default grant TTL (900 s) rather than the TTL row's own 60 s floor (review
     # R1-m3): a value below it was accepted and then silently read as the TTL, so the
     # page offered a setting that did nothing. A TTL raised above 900 s still floors
@@ -5617,9 +5617,9 @@ SETTINGS: tuple[Setting, ...] = (
         section="network",
         label=_t(_ws.network_credentials_offline_hold_s_label()),
         kind=Kind.FLOAT,
-        default=3600.0,
+        default=86400.0,
         minimum=900.0,
-        maximum=21600.0,
+        maximum=86400.0,
         help=(_t(_ws.network_credentials_offline_hold_s_help())),
         synonyms=("auth", "expiry", "sleep", "lease"),
     ),

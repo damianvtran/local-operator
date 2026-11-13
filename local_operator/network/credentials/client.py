@@ -1401,7 +1401,7 @@ class MeshCredentialClient:
 
         A HELD LOGIN THE PROVIDER IS RESTING still answers ``quota_blocked``
         (``resting`` is the caller's cooldown read for this model): a held bearer
-        the provider just 429'd would otherwise be re-served for up to an hour, and
+        the provider just 429'd would otherwise be re-served for up to a day, and
         the synced failover chain (#3900) moves on only on a quota refusal. The slot
         is kept, because the rest can end inside the hold.
 
