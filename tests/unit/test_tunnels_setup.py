@@ -853,3 +853,94 @@ async def test_repoint_text_names_the_state_and_its_command(rig, monkeypatch):
     tui_text = setup.text(plan, surface="tui", include_receipts=False)
     assert REPOINT_REMEDY in tui_text, "the TUI token rewrites must not mangle this copy"
     assert f"\nRun /mobile enable --credential-id {fresh}" in tui_text
+
+
+# --- a 503 that still created the tunnel, then a 409 on the retry -------------
+#
+# Field report (macOS, lop 0.96.5, still on 0.102.4): POST /v1/tunnels answered
+# 503 but the cloud had already created the record; the retry with the same
+# Idempotency-Key answered 409, and `setup apply` stopped forever at
+# failure_stage=reservation reservation_outcome=unconfirmed. The pending
+# `create.json` intent carries the device id this machine generated, so the
+# record the 409 conflicts with is identifiable in the owner-pinned list.
+
+
+def _lost_create_rig(rig, monkeypatch, *, listed):
+    from local_operator.tunnels import cli
+    from local_operator.tunnels.errors import RequestFailed
+
+    quote, record, calls = rig
+    posts = []
+
+    async def request(self, method, path="", **kwargs):
+        calls.append((method, path))
+        if path == "/billing":
+            return quote
+        if method == "POST":
+            posts.append(kwargs.get("idempotency_key"))
+            status = 503 if len(posts) == 1 else 409
+            raise RequestFailed(f"Radient tunnel request failed (HTTP {status}).", status=status)
+        if method == "GET" and path == "":
+            intent = json.loads((config.directory() / "create.json").read_text())
+            return {"tunnels": listed(intent["payload"])}
+        return record
+
+    monkeypatch.setattr(setup.RadientTunnels, "request", request)
+    monkeypatch.setattr(cli, "credential_id", lambda value=None: 17)
+    real_dispatch = cli.dispatch
+
+    async def dispatch(args):
+        if args.tunnel_command == "create":
+            return await real_dispatch(args)
+        return "synthetic install"
+
+    monkeypatch.setattr(cli, "dispatch", dispatch)
+    return posts
+
+
+@pytest.mark.asyncio
+async def test_a_409_after_a_lost_503_create_adopts_the_record_it_conflicts_with(rig, monkeypatch):
+    record = rig[1]
+
+    def listed(payload):
+        other = {**record, "id": "someone-else", "device_id": "another-device"}
+        mine = {**record, "device_id": payload["device_id"], "name": payload["name"]}
+        return [other, mine]
+
+    posts = _lost_create_rig(rig, monkeypatch, listed=listed)
+    first = await setup.apply()
+    assert first["failure_stage"] == "reservation"
+    assert first["reservation_outcome"] == "unconfirmed"
+    second = await setup.apply()
+    assert posts[0] == posts[1], "the retry must reuse the original idempotency key"
+    assert second["reservation_outcome"] == "saved"
+    assert second.get("failure_stage") != "reservation"
+    saved = config.load()
+    assert saved["tunnel_id"] == "synthetic" and saved["credential_id"] == 17
+    assert (
+        saved["device_id"]
+        == json.loads((config.directory() / "create.json").read_text())["payload"]["device_id"]
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_409_with_no_matching_record_stays_a_reservation_failure(rig, monkeypatch):
+    from local_operator.tunnels import cli
+
+    record = rig[1]
+    _lost_create_rig(
+        rig, monkeypatch, listed=lambda payload: [{**record, "device_id": "another-device"}]
+    )
+    await setup.apply()
+    second = await setup.apply()
+    assert second["failure_stage"] == "reservation"
+    assert second["reservation_outcome"] == "unconfirmed"
+    assert not (config.directory() / "config.json").exists()
+    # The command itself names the conflict instead of a bare HTTP status.
+    parser = argparse.ArgumentParser()
+    add_parser(parser.add_subparsers())
+    intent = json.loads((config.directory() / "create.json").read_text())
+    args = parser.parse_args(["tunnel", "create", "--name", intent["payload"]["name"]])
+    with pytest.raises(ValueError, match="already exists") as failure:
+        await cli.dispatch(args)
+    assert "HTTP 409" not in str(failure.value)

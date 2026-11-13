@@ -30,6 +30,7 @@ from starlette.websockets import WebSocket, WebSocketDisconnect
 
 from local_operator.mobile.auth import COOKIE_NAME, sign_cookie
 from local_operator.tunnels.config import validate_connection
+from local_operator.tunnels.request_log import RequestLog, note_reason
 
 MAX_BODY_BYTES = 10 * 1024 * 1024
 MAX_STREAM_SECONDS = 60
@@ -148,6 +149,14 @@ AUTHORIZATION_DEFERRED = "authorization_deferred"
 #: lock deadline, so no request was sent at all. Both clear by themselves.
 CONTROL_PLANE_TIMEOUT = "control_plane_timeout"
 CREDENTIAL_STORE_BUSY = "credential_store_busy"
+#: Radient ANSWERED, with a 5xx: the control plane is up enough to reply and
+#: failing on its side. It used to fall through to `REFUSED` (a field report on
+#: 0.96.5: a 503 from `/v1/tunnels` read as "authorization refused", which sends
+#: the operator to sign in again for a fault that is neither their login nor
+#: their network). Transient: the connector keeps its existing retry cadence (the
+#: poller's next pass, and the supervisor's documented 10 s restart floor on a
+#: cold start), so no new timing is introduced for it.
+SERVER_UNAVAILABLE = "server_unavailable"
 NOT_AUTHORIZED = "tunnel_not_authorized"
 LEASE_PENDING = "authorization_lease_pending"
 # The connector's own terminal states, not relay refusals: the connector exited
@@ -198,6 +207,11 @@ RELAY_DETAIL = {
         "This computer's request to Radient to renew the relay authorization timed "
         "out (that computer may be heavily loaded, or its connection slow). It "
         "reauthorizes by itself once a request completes."
+    ),
+    SERVER_UNAVAILABLE: (
+        "Radient answered this computer's relay authorization check with a temporary "
+        "server error. Nothing is wrong with the login or this computer; it "
+        "reauthorizes by itself once Radient recovers."
     ),
     CREDENTIAL_STORE_BUSY: (
         "The computer running this tunnel could not open its own credential store in "
@@ -283,6 +297,12 @@ TERMINAL_DETAIL = {
         "It retries every 10 seconds and reauthorizes by itself once a request "
         "completes; no local command is needed."
     ),
+    SERVER_UNAVAILABLE: (
+        "Radient answered the connector's authorization check with a temporary server "
+        "error (HTTP 5xx), so the login and this computer are not at fault. It retries "
+        "every 10 seconds and reauthorizes by itself once Radient recovers; no local "
+        "command is needed."
+    ),
     CREDENTIAL_STORE_BUSY: (
         "The local credential store was busy: another Local Operator process held it "
         "past its lock deadline, so the connector could not read its sign-in and sent "
@@ -359,6 +379,7 @@ TERMINAL_REMEDY = {
     # Self-clearing like `UNREACHABLE`, so they name the check, not a repair.
     CONTROL_PLANE_TIMEOUT: "lop tunnel status",
     CREDENTIAL_STORE_BUSY: "lop tunnel status",
+    SERVER_UNAVAILABLE: "lop tunnel status",
     REFUSED: "lop login radient",
     NOT_AUTHORIZED: "lop tunnel connect",
     LEASE_PENDING: "lop tunnel status",
@@ -396,6 +417,7 @@ REASON_LABEL = {
     UNREACHABLE: "control plane unreachable",
     CONTROL_PLANE_TIMEOUT: "request to Radient timed out",
     CREDENTIAL_STORE_BUSY: "local credential store busy",
+    SERVER_UNAVAILABLE: "Radient server error",
     REFUSED: "authorization refused",
     AUTHORIZATION_DEFERRED: "sign-in refresh deferred",
     NOT_AUTHORIZED: "not authorized",
@@ -721,11 +743,13 @@ class Gateway:
                 payload.update(self.refusal())
             return JSONResponse(payload)
         if self.revoked or time.monotonic() >= self.authorized_until:
+            note_reason(request.scope, self.refusal_reason())
             return JSONResponse(
                 self.unavailable_body(), status_code=503, headers=self.refusal_headers()
             )
         harness = self.harness(host)
         if harness is None:
+            note_reason(request.scope, "unknown_host")
             return JSONResponse({"error": "unknown tunnel host"}, status_code=404)
         expected_origin = "https://" + host
         origin = request.headers.get("origin")
@@ -745,13 +769,16 @@ class Gateway:
             )
             or (request.method not in {"GET", "HEAD", "OPTIONS"} and origin != expected_origin)
         ):
+            note_reason(request.scope, "cross_origin")
             return JSONResponse({"error": "same-origin request required"}, status_code=403)
         body = bytearray()
         async for chunk in request.stream():
             body.extend(chunk)
             if len(body) > MAX_BODY_BYTES:
+                note_reason(request.scope, "body_too_large")
                 return JSONResponse({"error": "request exceeds 10 MiB"}, status_code=413)
         if request.method in {"GET", "HEAD"} and body:
+            note_reason(request.scope, "unexpected_body")
             return JSONResponse({"error": "GET/HEAD bodies are not supported"}, status_code=400)
         try:
             await self.verifier.verify(
@@ -763,6 +790,7 @@ class Gateway:
                 body=bytes(body),
             )
         except (ValueError, KeyError, TypeError, jwt.PyJWTError, httpx.HTTPError):
+            note_reason(request.scope, "origin_proof_invalid")
             return JSONResponse(
                 {"error": "valid Radient origin assertion required"}, status_code=401
             )
@@ -771,6 +799,7 @@ class Gateway:
         # recheck after consuming/verifying its body, immediately before any
         # harness request or local side effect begins.
         if self.revoked or time.monotonic() >= self.authorized_until:
+            note_reason(request.scope, self.refusal_reason())
             return JSONResponse(
                 self.unavailable_body(), status_code=503, headers=self.refusal_headers()
             )
@@ -785,6 +814,7 @@ class Gateway:
         try:
             headers = self.headers(request.headers, host, harness)
         except ValueError:
+            note_reason(request.scope, "mobile_relay_not_installed")
             return JSONResponse({"error": "mobile relay is not installed"}, status_code=503)
         target = httpx.URL(
             scheme="http",
@@ -801,7 +831,11 @@ class Gateway:
                 stream=True,
                 follow_redirects=False,
             )
-        except httpx.HTTPError:
+        except httpx.HTTPError as failure:
+            # The class name only (never its text: httpx echoes the URL). It is
+            # the split the field report needed: a harness that refused the
+            # connection is down, one that timed out is up and stuck.
+            note_reason(request.scope, f"harness_{type(failure).__name__}")
             return JSONResponse({"error": "local harness unavailable"}, status_code=502)
         response_headers = {k: v for k, v in upstream.headers.items() if k in _RESPONSE_HEADERS}
         location = upstream.headers.get("location")
@@ -817,6 +851,7 @@ class Gateway:
                 response_headers["location"] = location
             else:
                 await upstream.aclose()
+                note_reason(request.scope, "unsafe_redirect")
                 return JSONResponse({"error": "unsafe harness redirect"}, status_code=502)
         response_headers["cache-control"] = "no-store"
         response_headers["referrer-policy"] = "same-origin"
@@ -971,3 +1006,14 @@ class Gateway:
                 WebSocketRoute("/{path:path}", self.websocket),
             ]
         )
+
+    def logged_app(self, log: RequestLog) -> Any:
+        """`app()` wrapped in the bounded request log (`tunnels/request_log.py`).
+
+        A separate entry point so the bare app — what tests and the import-graph
+        pin construct — is unchanged, and only the supervised connector writes
+        a log file. The loopback health probe is skipped: `lop tunnel status`
+        and the desktop poll hit it, and they would crowd the phone's requests
+        out of the bounded tail the status surfaces read.
+        """
+        return log.middleware(self.app(), skip=frozenset({"/_lop_tunnel/health"}))

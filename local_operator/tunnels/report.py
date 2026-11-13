@@ -41,6 +41,7 @@ Two rules the code below keeps, both of them lessons from that incident:
 from __future__ import annotations
 
 import asyncio
+import datetime
 import time
 from contextlib import closing
 from typing import Any
@@ -154,6 +155,8 @@ async def probe(value: dict[str, Any]) -> dict[str, Any]:
     detail = ""
     transport = ""
     cloudflared = False
+    listening = False
+    last: dict[str, Any] | None = None
     try:
         async with httpx.AsyncClient(trust_env=False) as client:
             reply = await client.get(
@@ -181,18 +184,44 @@ async def probe(value: dict[str, Any]) -> dict[str, Any]:
                 # own sentence rather than saying nothing.
                 reason = str(payload.get("reason") or "")
                 detail = gateway.terminal_detail(reason, str(payload.get("detail") or ""))
-    except (httpx.HTTPError, ValueError):
-        # A stopped connector and a gateway that is not there are also
-        # different jobs: the first is this process, the second is the unit.
+    except httpx.ConnectError:
+        # REFUSED: nothing is listening on the port. Only here can a missing or
+        # dead unit be the explanation — but a connector in its retry loop also
+        # leaves the port closed between attempts (it exits and the supervisor
+        # restarts it 10 s later), so the connector's own last recorded exit wins
+        # over the install advice when there is one (field report: a Radient 503
+        # read here as "run lop tunnel install" while the real cause sat in
+        # service.log).
+        last = last_connector_failure()
+        if last is not None:
+            reason = last["reason"]
+            detail = gateway.terminal_detail(reason, "")
+        else:
+            detail = (
+                "The local relay gateway is not answering on "
+                f"127.0.0.1:{value['gateway_port']}; run lop tunnel install to restore it"
+            )
+    except (httpx.HTTPError, ValueError) as failure:
+        # The port ACCEPTED the connection, so the unit is there: install advice
+        # would send the operator to repair something that is running. Say what
+        # was actually observed (timed out, or an answer that is not a health
+        # payload) — the exception's own text is not used, because httpx echoes
+        # the request URL.
+        listening = True
+        observed = "timed out" if isinstance(failure, httpx.TimeoutException) else "was unreadable"
         detail = (
-            "The local relay gateway is not answering on "
-            f"127.0.0.1:{value['gateway_port']}; run lop tunnel install to restore it"
+            f"The local relay gateway is listening on 127.0.0.1:{value['gateway_port']}, "
+            f"but its health answer {observed}; reinstalling will not help."
         )
+        last = last_connector_failure()
+        if last is not None:
+            reason = last["reason"]
+            detail += " " + gateway.terminal_detail(reason, "")
     if connected:
         word = "connected"
     elif healthy:
         word = "connecting"
-    elif served:
+    elif served or listening:
         # The gateway answered and is refusing to serve. That is not a stopped
         # connector — cloudflared may still hold the edge connection — and
         # "stopped" beside a sentence promising it clears itself would
@@ -210,7 +239,60 @@ async def probe(value: dict[str, Any]) -> dict[str, Any]:
     if transport:
         result["transport"] = transport
         result["cloudflared"] = cloudflared
+    if last is not None:
+        # Additive: the code and when it was written, so `--json` readers and
+        # the CLI can show the connector's own last exit beside the state.
+        result["last_error"] = last
     return result
+
+
+#: How much of `service.log`'s TAIL is read for the connector's last exit line.
+#: Bounded because the launchd log is only truncated by `lop tunnel install`, so
+#: on a long-lived machine it can be large, and `status` must stay a cheap read.
+#: A retry line is ~200 bytes and the connector writes at most one per restart
+#: (the supervisor's 10 s floor), so 64 KiB holds the last ~300 lines — far more
+#: than the one line this needs, and still ~0.1 ms to read.
+LOG_TAIL_BYTES = 64 * 1024
+
+#: The ONE line shape this reads: `service.main`'s retrying exit, which is this
+#: package's own literal (`connector stopped reason=<code>…`), never an upstream
+#: body. Parks are not read here — they live in `state.json`.
+_RETRY_MARKER = " local_operator.tunnels.service: connector stopped reason="
+
+
+def last_connector_failure() -> dict[str, Any] | None:
+    """The connector's most recent retrying exit from `service.log`, if any.
+
+    `state.json` deliberately records only PARKS (see `tunnels/state.py`), so a
+    connector cycling on a transient fault — the field report's Radient 503 —
+    leaves its cause only in the log its supervisor captures. This reads that
+    cause back as a reason CODE (this package's vocabulary) plus the line's own
+    timestamp; the free text after the code is not returned, so nothing beyond
+    the fixed vocabulary reaches a status surface.
+    """
+    log = config.directory() / "service.log"
+    try:
+        with log.open("rb") as handle:
+            handle.seek(0, 2)
+            size = handle.tell()
+            handle.seek(max(0, size - LOG_TAIL_BYTES))
+            tail = handle.read(LOG_TAIL_BYTES).decode("utf-8", "replace")
+    except OSError:
+        return None
+    for line in reversed(tail.splitlines()):
+        stamp, marker, rest = line.partition(_RETRY_MARKER)
+        if not marker:
+            continue
+        code = rest.split(":", 1)[0].split(";", 1)[0].strip()
+        if not code or not all(c.isalnum() or c == "_" for c in code):
+            return None
+        at: int | None
+        try:
+            at = int(datetime.datetime.fromisoformat(stamp.strip()).timestamp())
+        except ValueError:
+            at = None
+        return {"reason": code, "at": at}
+    return None
 
 
 async def connector_state(value: dict[str, Any], *, reachable: bool = True) -> dict[str, Any]:

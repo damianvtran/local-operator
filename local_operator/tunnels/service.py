@@ -36,6 +36,7 @@ from local_operator.tunnels.errors import (
     LocalPrerequisite,
     LoginRequired,
     ReenrolmentRequired,
+    RequestFailed,
 )
 from local_operator.tunnels.gateway import (
     AUTHORIZATION_DEFERRED,
@@ -45,6 +46,7 @@ from local_operator.tunnels.gateway import (
     LOGIN_REQUIRED,
     REENROLMENT_REQUIRED,
     REFUSED,
+    SERVER_UNAVAILABLE,
     TERMINAL_DETAIL,
     UNREACHABLE,
     Gateway,
@@ -54,6 +56,7 @@ from local_operator.tunnels.relay.connector import (
     RelayGrant,
     parse_grant,
 )
+from local_operator.tunnels.request_log import REQUEST_LOG_NAME, RequestLog
 
 POLL_SECONDS = 10
 
@@ -452,6 +455,21 @@ def _is_a_deferred_refresh(failure: BaseException) -> bool:
     return any(isinstance(link, RefreshUnconfirmedError) for link in _failure_chain(failure))
 
 
+def _is_a_server_error(failure: BaseException) -> bool:
+    """Whether Radient answered with a 5xx anywhere in the failure's chain.
+
+    A 5xx is the control plane failing on ITS side: it says nothing about the
+    login, so it must never fall through to the `REFUSED` fallback (a field
+    report: a 503 from `/v1/tunnels` printed "authorization refused" and sent the
+    operator to sign in again). Read off the chain for the same reason as
+    `_is_a_dead_login`: a raise site may wrap `RequestFailed`, and the status the
+    client recorded is the fact, not the wrapper's prose.
+    """
+    return any(
+        isinstance(link, RequestFailed) and link.status >= 500 for link in _failure_chain(failure)
+    )
+
+
 def authorization_failure_reason(failure: BaseException) -> str:
     """Name why the poller could not renew the relay authorization lease.
 
@@ -483,6 +501,8 @@ def authorization_failure_reason(failure: BaseException) -> str:
         # fault whatever it is chained to, and BEFORE the `REFUSED` fallback, which
         # would blame the login for a wait.
         return AUTHORIZATION_DEFERRED
+    if _is_a_server_error(failure):
+        return SERVER_UNAVAILABLE
     return REFUSED
 
 
@@ -536,6 +556,13 @@ def classify_failure(failure: BaseException) -> Failure:
         # asymmetry. It is named all the same, because "transient" without a cause
         # is the flat refusal that sent a working machine to a sign-in page.
         return Failure("transient", AUTHORIZATION_DEFERRED, TERMINAL_DETAIL[AUTHORIZATION_DEFERRED])
+    if _is_a_server_error(failure) and not isinstance(
+        failure, (LocalPrerequisite, ReenrolmentRequired)
+    ):
+        # Transient, on the supervisor's existing 10 s floor: Radient's own outage
+        # clears without anyone on this machine acting, and naming it keeps the
+        # retry line from blaming the login (see `_is_a_server_error`).
+        return Failure("transient", SERVER_UNAVAILABLE, TERMINAL_DETAIL[SERVER_UNAVAILABLE])
     if isinstance(failure, LocalPrerequisite):
         # The sentence is the failure's own, and that is safe: every ValueError
         # this package raises is a fixed module literal (see `main`), and these
@@ -725,6 +752,7 @@ async def run() -> int:
     gateway: Gateway | None = None
     relay: RelayConnector | None = None
     relay_task: asyncio.Task[None] | None = None
+    request_log: RequestLog | None = None
     restart = False
     try:
         # Proxy configuration and environment credentials are not forwarded to
@@ -855,7 +883,13 @@ async def run() -> int:
                     ready_file.unlink(missing_ok=True)
                     token_file.unlink(missing_ok=True)
 
-            server = uvicorn.Server(gateway_server_config(gateway.app(), value["gateway_port"]))
+            # Every relayed request, bounded and redacted, beside service.log, so
+            # "the phone says Not answering" can be checked against what reached
+            # this computer (`tunnels/request_log.py`; read by `lop tunnel status`).
+            request_log = RequestLog(config.directory() / REQUEST_LOG_NAME)
+            server = uvicorn.Server(
+                gateway_server_config(gateway.logged_app(request_log), value["gateway_port"])
+            )
             stop = asyncio.Event()
             loop = asyncio.get_running_loop()
             # ONE helper for every server boot path: `add_signal_handler` is
@@ -992,6 +1026,8 @@ async def run() -> int:
             await serve_task
         if child is not None and child.returncode is None:
             await _terminate(child)
+        if request_log is not None:
+            request_log.close()
         listener.close()
         token_file.unlink(missing_ok=True)
         ready_file.unlink(missing_ok=True)

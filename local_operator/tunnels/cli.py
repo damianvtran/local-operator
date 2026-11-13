@@ -19,13 +19,17 @@ import httpx
 
 from local_operator import launchd
 from local_operator.providers.auth_store import self_clearing_window
-from local_operator.tunnels import config, gateway, report, state
+from local_operator.tunnels import config, gateway, report, request_log, state
 from local_operator.tunnels.api import (
     RadientTunnels,
     credential_id,
     usable_credential_id,
 )
-from local_operator.tunnels.errors import LocalPrerequisite, RecordNotFound
+from local_operator.tunnels.errors import (
+    LocalPrerequisite,
+    RecordNotFound,
+    RequestFailed,
+)
 from local_operator.tunnels.service import (
     authorization_failure_reason,
     cloudflared_binary,
@@ -170,6 +174,16 @@ def _status_text(
         # the docstring: a paragraph welded to the state is what buried the
         # command four rows down.
         lines.append(f"  {connector['detail']}")
+    last_error = connector.get("last_error")
+    if isinstance(last_error, dict) and last_error.get("reason"):
+        # The connector's own last retrying exit, from service.log: shown so the
+        # cause is on this screen rather than only in a log file (field report:
+        # an upstream 503 visible only in service.log).
+        at = _stamp(last_error.get("at"))
+        lines.append(
+            f"Last connector exit: {gateway.reason_label(str(last_error['reason']))}"
+            f"{f' (at {at})' if at else ''}"
+        )
     transport = connector.get("transport")
     if transport:
         # `relay` / `cloudflare` are protocol identifiers, like the state words
@@ -284,6 +298,7 @@ def _status_text(
         # login that cannot help them.
         lines.append("Login: could not be checked (a refresh could not reach Radient).")
     lines.extend(_summary(record, source, stopped=stopped).splitlines())
+    lines.extend(request_log.render(payload.get("requests") or {}))
     return "\n".join(lines)
 
 
@@ -397,6 +412,47 @@ async def _missing_record_message(api: RadientTunnels, old: dict[str, Any]) -> s
         "account that owns the tunnel, sign in to that account and re-point this "
         "device with lop tunnel configure --credential-id <that login's id>."
     )
+
+
+async def _adopt_conflicting_create(api: RadientTunnels, pending: dict[str, Any]) -> dict[str, Any]:
+    """The record a 409 on a pending create conflicts with, when it is provably ours.
+
+    Why this exists (field report on 0.96.5, still present on 0.102.4): the
+    control plane answered the first `POST /v1/tunnels` with a 503 AFTER it had
+    created the record, so the retry with the SAME `Idempotency-Key` from
+    `create.json` answered 409 — and nothing ever saved `config.json`, leaving
+    `lop tunnel setup apply` stuck at `reservation_outcome=unconfirmed` forever.
+
+    The proof that the conflicting record is this machine's own reservation is
+    the `device_id`: it is a UUID this machine generated and persisted in the
+    pending intent before the first POST, and the list read is owner-pinned to
+    the same login, so a match cannot be another device's or another account's
+    tunnel. The name is checked as well so a reused device id under a renamed
+    pending request is not silently adopted. Exactly one match, or nothing: an
+    ambiguous list must not pick a tunnel to bind (and bill) on a guess.
+
+    A 409 with no matching record stays a failure, with a sentence that names
+    the conflict rather than a bare status, because "HTTP 409" gives the
+    operator nothing to act on.
+    """
+    records = await api.request("GET")
+    if isinstance(records, dict):
+        records = records.get("tunnels", [])
+    matches = [
+        record
+        for record in (records if isinstance(records, list) else [])
+        if isinstance(record, dict)
+        and isinstance(record.get("id"), str)
+        and record.get("device_id") == pending.get("device_id")
+        and record.get("name", pending.get("name")) == pending.get("name")
+    ]
+    if len(matches) != 1:
+        raise ValueError(
+            "Radient says a tunnel for this request already exists, but this login's "
+            "tunnel list has no single matching record. Check lop tunnel list, then "
+            "connect it with lop tunnel connect --tunnel-id <id>."
+        )
+    return matches[0]
 
 
 def _prepare_mobile(value: dict[str, Any]) -> None:
@@ -545,7 +601,12 @@ async def dispatch(args: argparse.Namespace) -> str:
                     raise ValueError(
                         "A different create request is pending; retry its original arguments."
                     )
-                record = await api.request("POST", body=payload, idempotency_key=intent["key"])
+                try:
+                    record = await api.request("POST", body=payload, idempotency_key=intent["key"])
+                except RequestFailed as failure:
+                    if failure.status != 409:
+                        raise
+                    record = await _adopt_conflicting_create(api, intent["payload"])
             elif action == "connect":
                 identifier = args.tunnel_id or old.get("tunnel_id")
                 if not identifier:
@@ -656,6 +717,13 @@ async def dispatch(args: argparse.Namespace) -> str:
             cloud_reason=cloud_reason,
             connector=connector,
             login=login,
+        )
+        # Additive: the connector's recent relayed requests and their status
+        # classes, read from the bounded file the gateway writes. This is the
+        # evidence for "the phone says Not answering while this Mac looks fine":
+        # an empty list while the phone is retrying means nothing reached here.
+        payload["requests"] = request_log.read_tail(
+            config.directory() / request_log.REQUEST_LOG_NAME
         )
         if getattr(args, "json", False):
             return json.dumps(payload, allow_nan=False)

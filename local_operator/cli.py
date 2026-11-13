@@ -10895,6 +10895,10 @@ def mobile_command(args: argparse.Namespace) -> int:
         gate = "closed" if result["gate_closed"] else "OPEN (this is a boundary failure)"
         print(f"auth gate:    {gate}")
         print(f"log:          {result['log']}")
+        from local_operator.tunnels.request_log import render as render_requests
+
+        for row in render_requests(result.get("requests") or {}):
+            print(row)
         sessions = result.get("sessions", [])
         assert isinstance(sessions, list)
         print(f"sessions:     {len(sessions)}")
