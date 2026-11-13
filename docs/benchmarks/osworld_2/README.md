@@ -172,7 +172,7 @@ One episode owns one EC2 instance for its lifetime.
 | --- | --- | --- |
 | Region | `us-east-1` (infra `AWS_REGION`) | the release AMI exists only there |
 | AMI | `ami-01017272139e01feb` | release pin, `provider_images.aws` |
-| Instance type | `t3.xlarge` unless the task overrides it | `provisioning._DEFAULT_INSTANCE_TYPE` |
+| Instance type | **Disclosed deviation.** Adapter default `t3.xlarge` unless the task overrides it; upstream OSWorld-V2.1's default is `t3.2xlarge` (`desktop_env/providers/aws/manager.py:17` at 3d778a3); the 2026-11 campaign runs `m5.2xlarge` via `AWS_INSTANCE_TYPE` — the same 8 vCPU / 32 GiB as `t3.2xlarge`, but non-burstable, the documented workaround for CPU-credit exhaustion (below) | `provisioning._DEFAULT_INSTANCE_TYPE`, infra `AWS_INSTANCE_TYPE` |
 | Root volume | gp3, 4000 IOPS, 1000 MB/s; **40 GiB** — a floor, raised only if the AMI's own block-device mapping is larger. The release AMI declares 30 GiB, so the request is 40 | `providers/aws.py` |
 | Screen | 1920x1080, headless, `action_space="pyautogui"` | `providers/aws.py` |
 | Subnet / SG | operator-supplied via infra `AWS_SUBNET_ID`, `AWS_SECURITY_GROUP_ID` | not created by the adapter |
@@ -379,7 +379,8 @@ filling on a clock rather than on workload:
 > **INERT** — the guest's root filesystem measured **30,993,747,968 bytes** in
 > both a 40 GiB and a 120 GiB volume, because the adapter builds
 > `DesktopEnv(...)` without `volume_size=`, so upstream's `expand_guest_volume`
-> never runs.
+> never runs. (Fixed 2026-11-12: the preparation step `grow-root-filesystem`
+> now does upstream's grow whenever a volume size is requested — see below.)
 
 The measured consumer is **snapd**, inside the guest:
 
@@ -432,19 +433,53 @@ carries no `growpart` and `apt-get install cloud-guest-utils` cannot run on a
 disk with no free space" — is now the measured END state of every run, at every
 volume size. Do not read a longer run as the volume buying room.
 
-The value is still accepted (validated at `prepare`, stamped into the evidence
-manifest when set) and setting it is harmless. What it is not is a lever for
-this failure. The one-line change that would make it a lever — passing
-`volume_size=` to the `DesktopEnv` construction — is NOT made here: it changes
-the guest's hardware contract inside the benchmark, and the reclamation below
-addresses the cause instead. See "Growing the partition is deliberately not
-done".
+**Since 2026-11-12 the filesystem IS grown when a volume size is requested**,
+because that is upstream's own contract in the pinned release (OSWorld-V2.1 @
+3d778a3): `DesktopEnv(volume_size=N)` both sizes the EBS volume and runs
+`expand_guest_volume` (`growpart` + `resize2fs`, installing `cloud-guest-utils`
+first), while `volume_size=None` leaves the AMI's 29.5G filesystem inside the
+40 GiB default untouched. See "Growing the root filesystem" below.
+
+**Which size is requested follows upstream's precedence exactly: the task's own
+`volume_size` wins, and `AWS_ROOT_VOLUME_SIZE` only fills tasks that declare
+none.** That is upstream's run-level `--volume_size` ("Default root volume size
+in GB for tasks without their own volume_size";
+`scripts/python/run_multienv_gpt_response_api.py:430-432` resolves
+`example.get("volume_size")` first). An earlier revision let the override beat a
+task's pin; that changed nothing the agent could use while the filesystem never
+grew, and would grant disk upstream never does now that it grows.
+
+**The faithful configuration sets no `AWS_ROOT_VOLUME_SIZE` at all.** Upstream's
+documented run passes no `--volume_size` (its default is `None`), so 18 of
+v2.1's 108 tasks get their own declared size (32–100 GiB) and the other 90 run
+on the AMI's ~29 GiB filesystem with ~2.2 GB free, ungrown.
+
+**Disclosure — the 2026-11 campaign.** Its earlier arms set
+`AWS_ROOT_VOLUME_SIZE=120` globally. That was **inert**: the filesystem never
+grew — every `t33v-*` `guest-preparation.json` reads `filesystem_bytes`
+30,993,747,968 inside `disk_bytes` 128,849,018,880. For the 90 tasks that
+declare no `volume_size` that matched upstream's ungrown ~29 GiB filesystem.
+It did **not** match for tasks that declare one: upstream sizes and grows
+those, but the earlier arms left them ungrown too. Three such tasks ran in
+arms main29, main30, main32 and main33 — task_030 (declares 50 GiB),
+task_047 (60 GiB) and task_048 (64 GiB) — on the ~29 GiB filesystem
+(`t33v-t048` reads the same 30,993,747,968 bytes against its 64 GiB pin).
+Those episodes ran with **less** disk than upstream provides; that is a
+short-disk deviation that can only have cost them, never helped them, and their
+scores should be read with it. From this change on the override is **live**: setting it
+grants the non-declaring tasks extra disk upstream's documented run does not
+give, and a run that sets it must disclose that as a deviation. The campaign
+launchers stop setting it from the next arm on. Each episode's
+`guest-preparation.json` records `requested_volume_gb` and
+`volume_size_source` (`task` | `override` | `null`), and the manifest stamps
+`aws_root_volume_size_override`, so an override-granted grow is identifiable
+per episode.
 
 It is infra rather than a task field for the same reason as the instance type:
 task files are **content-hash verified**, so editing `volume_size` invalidates
-the digest that makes a score reproducible. For the same reason it **beats a
-task's own pinned `volume_size`** — the task author sized a volume against the
-workload they could see, not against a recorder filling the disk on a clock.
+the digest that makes a score reproducible. Unlike the instance type, it does
+**not** beat a task's own pinned `volume_size` (above). A malformed value is
+still rejected even on a task whose pin wins.
 
 Validation runs in two places, deliberately:
 
@@ -677,13 +712,53 @@ future change could cross without noticing:
   `observation_content_id`, and a content-addressed observation id must be a
   function of what the model saw, not of the guest's filesystem.
 
-**Growing the partition is deliberately not done.** `growpart` is absent, and
-the in-place `sfdisk` alternative rewrites the root partition table where a
-wrong start sector destroys the guest. A hygiene step that can fail *hard* is
-exactly what this must not be. The disk-vs-filesystem geometry is **reported**
-instead, read-only — and that pair of numbers is what made the
-`AWS_ROOT_VOLUME_SIZE` claim above checkable from any bundle: 30,993,747,968 in
-a 40 GiB volume says the override never reached the filesystem.
+**Growing the root filesystem — only when a volume size was requested.** The
+step `grow-root-filesystem` runs after the snapd reclamation (the hold and clear
+must not wait behind `apt-get`), mirrors upstream's `_expand_linux_guest_volume`
+(root source/fstype from `findmnt`, disk and partition from `lsblk` and
+`/sys/class/block`, `cloud-guest-utils` installed when `growpart` is missing,
+then `resize2fs` / `xfs_growfs` / `btrfs resize`), and runs with the
+same candidate passwords as every privileged step, but **authenticated first**
+(v2.1's own `sudo_cmd`: `sudo -n -v`, then each candidate through `sudo -S -v`)
+and then run **once** under the rung that validated — so a failed grow is never
+replayed (v2.1: "Do not replay partition writes") and never reported as the next
+candidate's `incorrect password`. (The reclamation steps keep the shared ladder,
+which advances on any non-zero exit; that is pre-existing and has never fired
+on the campaign AMI — every record reads `escalation=agentless>supplied`.) The
+fstype and its resize tool are validated **before** apt or `growpart` touch
+anything, as v2.1 does. It is idempotent (`growpart` `NOCHANGE` is success; a
+filesystem within 2 GiB of its disk is recorded as `skipped` without a send),
+and it is **skipped** (`reclamation blocked; episode will be refused`) when the
+reclamation already failed, since that episode is refused anyway.
+
+Its ceiling is 180 s, outside the reclamation budget. **That number is
+unmeasured** — no grown guest on this AMI had been timed when it was set — so
+the step records its own `duration_s`, and the first live grown episodes supply
+the distribution to re-fit it against.
+
+**Advisory here, strict upstream.** v2.1's script runs under
+`set -euo pipefail` (an `apt-get` or `growpart` failure fails `DesktopEnv`
+construction), and `verify_linux_guest_volume` raises when the mounted
+filesystem is under 95 % of the requested size. This adapter never refuses an
+episode over a failed or short grow: the only effect of that difference is an
+agent with **less** disk than upstream would give it, never more, and a held
+guest runs a full episode at 2.2 GB free. It is recorded instead: a failed grow
+carries a one-line `grow=<reason>`, and `grow_target_met` applies v2.1's own
+95 % test (`filesystem_bytes_after`, or `filesystem_bytes` when no grow was
+needed, against `requested_volume_gb`), so a short-grown episode is
+identifiable. `sfdisk` is still never called directly. The report carries
+`root_grow_requested`, `requested_volume_gb`, `volume_size_source`,
+`filesystem_bytes_after` and `grow_target_met`.
+
+**The snapd hold is retried while the control server cannot answer it.** Two of
+84 campaign records show `hold-snap-auto-refresh` `unreachable / HTTPError`
+between an `ok` abort and an `ok` clear — the server was up and answered
+non-2xx — and one of them (t33v-t054) refused its episode. The hold and its
+fallback are idempotent, so an `unreachable` send is re-sent on the provider's
+recovery cadence (up to 4 sends within 90 s, and only while the budget still
+funds the steps after it); the step is recorded once with `attempts`, and a hold
+that never lands still blocks. `unreachable` details now carry the HTTP status
+(`HTTPError status=500`) so the next such record says whether the guest answered.
 
 ### Guest X-display leak: upstream's fix applied at episode start (deviation from the stock AMI)
 

@@ -265,7 +265,9 @@ def test_every_privileged_step_is_one_privileged_shell_reached_by_the_ladder() -
         assert "*" not in _unquoted(script)
 
 
-def _install_fake_sudo(bin_dir: Path, *, password: str, marker: Path) -> None:
+def _install_fake_sudo(
+    bin_dir: Path, *, password: str, marker: Path, nopasswd: bool = False
+) -> None:
     """A ``sudo`` that regains access the way root would, in both modes.
 
     ``-n`` -- the escalation ladder's first rung -- is always refused, which is
@@ -277,15 +279,28 @@ def _install_fake_sudo(bin_dir: Path, *, password: str, marker: Path) -> None:
     exactly as sudo's.
     """
 
+    # The options both ladders use: ``-n`` (refused unless ``nopasswd``, as on
+    # a guest with no NOPASSWD rule and no cached credential), ``-S`` (read
+    # the password from stdin), ``-v`` (validate only, run nothing), ``-k``
+    # (ignore cached credentials -- this stub caches none) and ``-p ''``.
     script = f"""#!/bin/bash
-if [ "$1" = "-n" ]; then
+nonint=0; validate=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -n) nonint=1; shift;; -S|-k) shift;; -v) validate=1; shift;;
+    -p) shift 2;; --) shift; break;; *) break;;
+  esac
+done
+if [ $nonint = 1 ] && [ {"1" if nopasswd else "0"} = 0 ]; then
   echo 'sudo: a password is required' >&2; exit 1
 fi
-[ "$1" = "-S" ] && shift
-IFS= read -r pw
-if [ "$pw" != {guest_disk._shell_quote(password)} ]; then
-  echo 'sudo: 1 incorrect password attempt' >&2; exit 1
+if [ $nonint = 0 ]; then
+  IFS= read -r pw
+  if [ "$pw" != {guest_disk._shell_quote(password)} ]; then
+    echo 'sudo: 1 incorrect password attempt' >&2; exit 1
+  fi
 fi
+[ $validate = 1 ] && exit 0
 chmod -R u+rwx {guest_disk._shell_quote(str(marker))}
 "$@"
 rc=$?
@@ -1022,3 +1037,691 @@ def test_a_report_is_produced_on_every_path(free: int | None) -> None:
     assert report.reason in {"above-threshold", "below-threshold", "unmeasured"}
     assert report.steps
     json.loads(report.to_json_bytes())
+
+
+# ----------------------------------------------------------------------
+# The snapd hold, retried while the control server cannot answer it
+# ----------------------------------------------------------------------
+#
+# The measured case is t33v-t054-20261112-090503: ``abort`` ok, then
+# ``hold-snap-auto-refresh`` AND its fallback ``unreachable / HTTPError``, then
+# ``clear`` ok -- the control server was up on both sides, so the hold was lost
+# to a non-2xx answer rather than a dead guest, and one transient answer
+# refused a whole episode. These tests pin that a transient answer is re-sent
+# on a bounded cadence, and that a hold which never lands still blocks.
+
+
+def _server_error(status: int = 500) -> Exception:
+    """What ``requests`` raises for a non-2xx answer: the measured ``HTTPError``."""
+
+    import requests
+
+    response = requests.Response()
+    response.status_code = status
+    return requests.HTTPError("500 Server Error for url: http://203.0.113.9/x", response=response)
+
+
+class _Flaky:
+    """Raise ``error`` for the first ``failures`` calls, then answer ``reply``."""
+
+    def __init__(self, failures: int, error: Exception, reply: CommandResult) -> None:
+        self.calls = 0
+        self._failures = failures
+        self._error = error
+        self._reply = reply
+
+    def __call__(self, _guest: _Guest) -> CommandResult:
+        self.calls += 1
+        if self.calls <= self._failures:
+            raise self._error
+        return self._reply
+
+
+class _SleepingClock(_Clock):
+    """A virtual clock whose ``sleep`` advances it, recording every wait."""
+
+    def __init__(self, step: float = 0.0) -> None:
+        super().__init__(step)
+        self.slept: list[float] = []
+
+    def sleep(self, seconds: float) -> None:
+        self.slept.append(seconds)
+        self.now += seconds
+
+
+def _prepare_with(
+    guest: _Guest, clock: _SleepingClock | None = None, **kwargs: Any
+) -> guest_disk.GuestDiskReport:
+    clock = clock or _SleepingClock()
+    return prepare_guest_disk(guest, client_password="pw", clock=clock, sleep=clock.sleep, **kwargs)
+
+
+def _step(report: guest_disk.GuestDiskReport, name: str) -> guest_disk.StepOutcome:
+    matches = [step for step in report.steps if step.name == name]
+    assert len(matches) == 1, f"{name}: {[s.name for s in report.steps]}"
+    return matches[0]
+
+
+def test_the_measured_t33v_hold_failure_is_retried_and_no_longer_refuses() -> None:
+    """RED on the old code: one 500 on the hold refused the episode.
+
+    The fallback is not needed once the retried hold lands, and the record
+    says the hold took two sends -- a retried step must never read as clean.
+    """
+
+    flaky = _Flaky(1, _server_error(), CommandResult(0, "", ""))
+    guest = _Guest(free_bytes=TIGHT_FREE, script={"snap refresh --hold": flaky})
+    clock = _SleepingClock()
+
+    report = _prepare_with(guest, clock)
+
+    hold = _step(report, "hold-snap-auto-refresh")
+    assert hold.status == "ok"
+    assert hold.attempts == 2
+    assert flaky.calls == 2
+    assert report.blocking_steps() == ()
+    assert not guest.ran("refresh.hold="), "the fallback is for a hold that did not land"
+    assert clock.slept == [guest_disk.DEFAULT_RETRY_DELAYS_S[0]]
+    assert _status(report, "clear-snapd-download-scratch") == "ok"
+
+
+def test_a_hold_retried_on_the_injected_cadence_records_the_status_code() -> None:
+    """The waits are the caller's cadence; the record names the HTTP status.
+
+    ``HTTPError`` alone could not separate "the server answered 500" from
+    "nothing answered", which is the question the t33v record left open. The
+    status is value-free; the message (it echoes the URL) never lands.
+    """
+
+    flaky = _Flaky(3, _server_error(503), CommandResult(1, "", "still failing"))
+    guest = _Guest(free_bytes=TIGHT_FREE, script={"snap refresh --hold": flaky})
+    clock = _SleepingClock()
+
+    report = _prepare_with(guest, clock, retry_delays=(0.5, 0.5, 1.0, 1.0, 2.0))
+
+    hold = _step(report, "hold-snap-auto-refresh")
+    # The fourth send answered with an exit status: a real answer, recorded as
+    # ``failed`` -- and the fallback then ran, as for an old snapd.
+    assert (hold.status, hold.attempts, hold.returncode) == ("failed", 4, 1)
+    assert clock.slept[:3] == [0.5, 0.5, 1.0]
+    assert guest.ran("refresh.hold=")
+    unreachable = _Guest(free_bytes=TIGHT_FREE, script={"snap refresh --hold": _server_error(503)})
+    report = _prepare_with(unreachable)
+    hold = _step(report, "hold-snap-auto-refresh")
+    assert hold.detail == "HTTPError status=503"
+    assert "203.0.113.9" not in report.to_json_bytes().decode()
+
+
+def test_a_hold_that_never_answers_is_bounded_and_still_blocks() -> None:
+    """Retrying is not dropping: an unanswered hold stays a blocker.
+
+    Both the hold and its fallback are re-sent at most ``HOLD_RETRY_ATTEMPTS``
+    times, and the clear still runs afterwards -- a retry loop that starved
+    the step that actually frees the space would be worse than no retry.
+    """
+
+    guest = _Guest(
+        free_bytes=TIGHT_FREE,
+        script={"snap refresh --hold": _server_error(), "refresh.hold=": _server_error()},
+    )
+
+    report = _prepare_with(guest)
+
+    hold = _step(report, "hold-snap-auto-refresh")
+    fallback = _step(report, "hold-snap-auto-refresh-fallback")
+    assert (hold.status, hold.attempts) == ("unreachable", guest_disk.HOLD_RETRY_ATTEMPTS)
+    assert (fallback.status, fallback.attempts) == (
+        "unreachable",
+        guest_disk.HOLD_RETRY_ATTEMPTS,
+    )
+    assert [step.name for step in report.blocking_steps()] == ["hold-snap-auto-refresh"]
+    assert _status(report, "clear-snapd-download-scratch") == "ok"
+
+
+def test_hold_retries_stop_before_they_could_starve_the_clear() -> None:
+    """Each send costing a full command timeout ends the retrying early.
+
+    The measured hold failure spent ~60 s per send (a guest-side timeout
+    answered 500). Each send here costs a full ``COMMAND_TIMEOUT_S`` of virtual
+    time, so the retries must stop while the budget can still fund BOTH the
+    fallback and the clear -- the clear is what returns the space, and a
+    retry that skipped it would trade a recorded hold failure for a guest
+    that is never reclaimed at all.
+    """
+
+    clock = _SleepingClock()
+
+    def slow_500(_guest: _Guest) -> CommandResult:
+        clock.now += COMMAND_TIMEOUT_S
+        raise _server_error()
+
+    guest = _Guest(
+        free_bytes=TIGHT_FREE,
+        script={"snap refresh --hold": slow_500, "refresh.hold=": slow_500},
+    )
+
+    report = _prepare_with(guest, clock)
+
+    hold = _step(report, "hold-snap-auto-refresh")
+    fallback = _step(report, "hold-snap-auto-refresh-fallback")
+    assert hold.status == fallback.status == "unreachable"
+    # 270 s budget: hold 0-60, retry 60-120 (~210 s left funds it plus the
+    # fallback and clear), then fallback 120-180 with no retry (~90 s left
+    # funds only the clear), then the clear.
+    assert (hold.attempts, fallback.attempts) == (2, 1)
+    assert _status(report, "clear-snapd-download-scratch") == "ok"
+    assert [s.name for s in report.blocking_steps()] == ["hold-snap-auto-refresh"]
+
+
+def test_a_hold_that_answered_with_an_exit_status_is_not_retried() -> None:
+    """An old snapd's unknown flag is an answer, so it goes to the fallback."""
+
+    guest = _Guest(
+        free_bytes=TIGHT_FREE,
+        script={"snap refresh --hold": CommandResult(64, "", "unknown flag `hold'")},
+    )
+    clock = _SleepingClock()
+
+    report = _prepare_with(guest, clock)
+
+    assert _step(report, "hold-snap-auto-refresh").attempts == 1
+    assert clock.slept == []
+    assert _status(report, "hold-snap-auto-refresh-fallback") == "ok"
+    assert report.blocking_steps() == ()
+
+
+# ----------------------------------------------------------------------
+# Growing the root filesystem into the volume -- upstream's volume_size gate
+# ----------------------------------------------------------------------
+
+# The campaign geometry: the AMI's filesystem inside a 120 GiB volume.
+_FS_BYTES = 30_993_747_968
+_VOLUME_120 = 128_849_018_880
+
+
+def _growable_guest(*, grown: int = _VOLUME_120 - 600_000_000, **kwargs: Any) -> _Guest:
+    """A guest whose geometry reads 29 GiB-in-120 GiB until the grow step runs."""
+
+    state = {"grown": False}
+
+    def geometry(_guest: _Guest) -> CommandResult:
+        size = grown if state["grown"] else _FS_BYTES
+        return CommandResult(0, f"{size}\n{_VOLUME_120}\n", "")
+
+    def grow(_guest: _Guest) -> CommandResult:
+        state["grown"] = True
+        return CommandResult(0, "escalation=supplied\ngrow=grown fs=ext4 resize_rc=0", "")
+
+    script: dict[str, Any] = {"--output=size": geometry, "growpart": grow}
+    script.update(kwargs.pop("script", {}))
+    kwargs.setdefault("free_bytes", TIGHT_FREE)
+    return _Guest(script=script, **kwargs)
+
+
+def test_no_volume_size_requested_means_no_grow_exactly_as_upstream() -> None:
+    """``volume_size=None`` upstream never calls ``expand_guest_volume``."""
+
+    guest = _growable_guest()
+
+    report = _prepare_with(guest)
+
+    assert not guest.ran("growpart")
+    assert guest_disk.GROW_STEP_NAME not in [step.name for step in report.steps]
+    payload = json.loads(report.to_json_bytes())
+    assert payload["root_grow_requested"] is False
+    assert payload["filesystem_bytes_after"] is None
+
+
+def test_a_requested_volume_size_grows_the_filesystem_after_the_reclamation() -> None:
+    """RED on the old code: the 120 GiB volume kept a 29 GiB filesystem.
+
+    The grow runs AFTER abort/hold/clear (they stop the fill; apt must not
+    delay them) and is measured again, so the record proves what it achieved.
+    """
+
+    guest = _growable_guest()
+
+    report = _prepare_with(guest, requested_volume_gb=120)
+
+    names = [step.name for step in report.steps]
+    assert names.index(guest_disk.GROW_STEP_NAME) > names.index("clear-snapd-download-scratch")
+    assert names.index("measure-geometry-after") > names.index(guest_disk.GROW_STEP_NAME)
+    assert _status(report, guest_disk.GROW_STEP_NAME) == "ok"
+    assert report.filesystem_bytes == _FS_BYTES
+    assert report.filesystem_bytes_after == _VOLUME_120 - 600_000_000
+    assert report.blocking_steps() == ()
+    payload = json.loads(report.to_json_bytes())
+    assert payload["root_grow_requested"] is True
+    # Privileged through the same ladder as every other step.
+    grow_command = next(command for command in guest.commands if "growpart" in command)
+    assert "sudo -n bash -c" in grow_command
+
+
+def test_the_grow_step_runs_on_its_own_ceiling_outside_the_reclamation_budget() -> None:
+    """A reclamation that used its whole budget must not starve the grow."""
+
+    guest = _growable_guest()
+    clock = _SleepingClock(step=TOTAL_BUDGET_S / 6)
+
+    report = _prepare_with(guest, clock, requested_volume_gb=120)
+
+    assert _status(report, guest_disk.GROW_STEP_NAME) == "ok"
+    grow_index = next(i for i, command in enumerate(guest.commands) if "growpart" in command)
+    assert COMMAND_TIMEOUT_S < guest.timeouts[grow_index] <= guest_disk.GROW_TIMEOUT_S
+
+
+def test_a_filesystem_that_already_spans_the_volume_is_not_grown_again() -> None:
+    """Idempotent before anything is sent: nothing to grow is a skip, recorded."""
+
+    guest = _Guest(
+        free_bytes=TIGHT_FREE,
+        script={"--output=size": CommandResult(0, f"{_VOLUME_120 - 10**8}\n{_VOLUME_120}\n", "")},
+    )
+
+    report = _prepare_with(guest, requested_volume_gb=120)
+
+    assert not guest.ran("growpart")
+    grow = _step(report, guest_disk.GROW_STEP_NAME)
+    assert (grow.status, grow.attempts) == ("skipped", 0)
+    assert report.blocking_steps() == ()
+
+
+def test_a_roomy_guest_is_still_grown_when_a_volume_size_was_requested() -> None:
+    """Upstream grows on the request, not on free space; so does this."""
+
+    guest = _growable_guest(free_bytes=ROOMY_FREE)
+
+    report = _prepare_with(guest, requested_volume_gb=120)
+
+    assert report.reclamation_attempted is False
+    assert not guest.ran("snap refresh")
+    assert _status(report, guest_disk.GROW_STEP_NAME) == "ok"
+    assert _status(report, "measure-free-after") == "ok"
+
+
+@pytest.mark.parametrize(
+    "reply",
+    [
+        CommandResult(4, "escalation=supplied\ngrow=no-growpart install=failed", ""),
+        ConnectionError("refused"),
+    ],
+)
+def test_a_failed_grow_is_recorded_but_never_refuses_the_episode(reply: Any) -> None:
+    """Advisory: upstream tolerates a failed growpart, and a held guest runs.
+
+    The gap stays visible -- the step's own status plus the after-geometry
+    still reading the AMI's filesystem size.
+    """
+
+    guest = _growable_guest(script={"growpart": reply})
+
+    report = _prepare_with(guest, requested_volume_gb=120)
+
+    assert _status(report, guest_disk.GROW_STEP_NAME) in {"failed", "unreachable"}
+    assert report.blocking_steps() == ()
+    assert report.filesystem_bytes_after == _FS_BYTES
+
+
+def _fake_root_guest(tmp_path: Path, *, has_growpart: bool, growpart_says: str = "") -> Path:
+    """A PATH with stub disk tools, logging each call to ``calls.log``."""
+
+    import shutil
+
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    log = tmp_path / "calls.log"
+    for tool in ("readlink", "head", "cat", "chmod"):
+        found = shutil.which(tool, path="/usr/bin:/bin")
+        assert found, tool
+        (bin_dir / tool).symlink_to(found)
+
+    def stub(name: str, body: str) -> None:
+        (bin_dir / name).write_text(f'#!/bin/bash\necho "{name} $*" >> {log}\n{body}\n')
+        (bin_dir / name).chmod(0o755)
+
+    stub(
+        "findmnt",
+        'case "$*" in *SOURCE*) echo /dev/nvme0n1p1;; *FSTYPE*) echo ext4;; esac',
+    )
+    stub("lsblk", 'case "$*" in *PKNAME*) echo nvme0n1;; *PARTN*) echo 1;; esac')
+    stub("resize2fs", "exit 0")
+    growpart_body = f'echo "{growpart_says}"; exit 1' if "NOCHANGE" in growpart_says else "exit 0"
+    if has_growpart:
+        stub("growpart", growpart_body)
+    # ``apt-get install`` makes ``growpart`` appear, as the real package does.
+    stub(
+        "apt-get",
+        'case "$*" in *install*cloud-guest-utils*) '
+        f'printf "#!/bin/bash\\necho growpart \\$* >> {log}\\nexit 0\\n" > {bin_dir}/growpart; '
+        f"chmod 755 {bin_dir}/growpart;; esac",
+    )
+    return bin_dir
+
+
+def _run_grow(bin_dir: Path) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["/bin/bash", "-c", guest_disk._GROW_ROOT_FRAGMENT],
+        capture_output=True,
+        text=True,
+        env={"PATH": str(bin_dir)},
+        check=False,
+    )
+
+
+def test_the_grow_fragment_grows_partition_then_filesystem_through_a_real_shell(
+    tmp_path: Path,
+) -> None:
+    """Upstream's discovery and resize, executed: disk, partition, device."""
+
+    bin_dir = _fake_root_guest(tmp_path, has_growpart=True)
+
+    completed = _run_grow(bin_dir)
+
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    assert "grow=grown fs=ext4 resize_rc=0 growpart_installed=0" in completed.stdout
+    calls = (tmp_path / "calls.log").read_text().splitlines()
+    assert "growpart /dev/nvme0n1 1" in calls
+    assert "resize2fs /dev/nvme0n1p1" in calls
+    assert calls.index("growpart /dev/nvme0n1 1") < calls.index("resize2fs /dev/nvme0n1p1")
+    assert not any(call.startswith("apt-get") for call in calls)
+
+
+def test_the_grow_fragment_installs_growpart_the_way_upstream_does(tmp_path: Path) -> None:
+    """The AMI ships no ``growpart``; ``cloud-guest-utils`` is upstream's fix."""
+
+    bin_dir = _fake_root_guest(tmp_path, has_growpart=False)
+
+    completed = _run_grow(bin_dir)
+
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    assert "growpart_installed=1" in completed.stdout
+    calls = (tmp_path / "calls.log").read_text()
+    assert "cloud-guest-utils" in calls
+    assert "DPkg::Lock::Timeout=60" in calls
+    assert "growpart /dev/nvme0n1 1" in calls
+
+
+def test_the_grow_fragment_is_idempotent_on_an_already_grown_partition(tmp_path: Path) -> None:
+    """``growpart`` NOCHANGE is success, so a second run changes nothing."""
+
+    bin_dir = _fake_root_guest(
+        tmp_path,
+        has_growpart=True,
+        growpart_says="NOCHANGE: partition 1 is size 251656159. it cannot be grown",
+    )
+
+    completed = _run_grow(bin_dir)
+
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    assert "grow=nochange fs=ext4 resize_rc=0" in completed.stdout
+
+
+def test_the_grow_fragment_reports_which_link_broke(tmp_path: Path) -> None:
+    """No ``growpart`` and an install that did not provide one: exit 4, named."""
+
+    bin_dir = _fake_root_guest(tmp_path, has_growpart=False)
+    (bin_dir / "apt-get").write_text("#!/bin/bash\nexit 100\n")
+
+    completed = _run_grow(bin_dir)
+
+    assert completed.returncode == 4
+    assert "grow=no-growpart install=failed" in completed.stdout
+
+
+def test_the_grow_fragment_validates_the_filesystem_before_touching_the_partition(
+    tmp_path: Path,
+) -> None:
+    """N1: an unsupported fs exits 6 with neither apt nor ``growpart`` run.
+
+    v2.1 validates the resize handler first; RED on the previous fragment,
+    which ran ``growpart`` and only then found no resize arm for the fstype.
+    """
+
+    bin_dir = _fake_root_guest(tmp_path, has_growpart=True)
+    (bin_dir / "findmnt").write_text(
+        '#!/bin/bash\ncase "$*" in *SOURCE*) echo /dev/nvme0n1p1;; *FSTYPE*) echo vfat;; esac\n'
+    )
+
+    completed = _run_grow(bin_dir)
+
+    assert completed.returncode == 6
+    assert "grow=unsupported-fs fs=vfat" in completed.stdout
+    log = tmp_path / "calls.log"
+    calls = log.read_text() if log.exists() else ""
+    assert "growpart" not in calls
+    assert "apt-get" not in calls
+
+
+def test_the_grow_fragment_refuses_when_the_resize_tool_is_missing(tmp_path: Path) -> None:
+    """v2.1's ``tool_available "$RESIZE_TOOL"`` check, also before the partition."""
+
+    bin_dir = _fake_root_guest(tmp_path, has_growpart=True)
+    (bin_dir / "resize2fs").unlink()
+
+    completed = _run_grow(bin_dir)
+
+    assert completed.returncode == 6
+    assert "grow=no-resize-tool tool=resize2fs" in completed.stdout
+    log = tmp_path / "calls.log"
+    assert "growpart" not in (log.read_text() if log.exists() else "")
+
+
+# ----------------------------------------------------------------------
+# The grow's escalation: authenticate first, run the fragment once
+# ----------------------------------------------------------------------
+
+
+def _counting_fragment(counter: Path, *, rc: int, says: str) -> str:
+    """A fragment that records each run, then exits like a failed grow."""
+
+    return f"echo run >> {guest_disk._shell_quote(str(counter))}; echo {says}; exit {rc}"
+
+
+def _fake_sudo_guest(tmp_path: Path, *, password: str, nopasswd: bool = False) -> Path:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    guard = tmp_path / "guard"
+    guard.mkdir()
+    _install_fake_sudo(bin_dir, password=password, marker=guard, nopasswd=nopasswd)
+    return bin_dir
+
+
+def test_a_failed_grow_is_not_replayed_or_reported_as_an_auth_failure(tmp_path: Path) -> None:
+    """F3/Q2, reproduced: the supplied value is an upstream default.
+
+    That opens the ladder's third rung, and the shared ladder re-ran a failed
+    grow under it -- whose ``sudo: 1 incorrect password attempt`` then replaced
+    the grow's own reason in the record. Authenticating first runs the fragment
+    once, under the rung that validated, and keeps ITS output.
+    """
+
+    first, second = guest_disk._UPSTREAM_DEFAULT_PASSWORDS
+    bin_dir = _fake_sudo_guest(tmp_path, password=second)
+    counter = tmp_path / "runs"
+    fragment = _counting_fragment(counter, rc=4, says="grow=no-growpart install=failed")
+
+    completed = _run_in_fake_guest(
+        guest_disk.authenticated_escalation_script(fragment, second), bin_dir
+    )
+
+    assert completed.returncode == 4
+    assert counter.read_text().splitlines() == ["run"]
+    assert "grow=no-growpart install=failed" in completed.stdout
+    assert "incorrect password" not in completed.stdout
+    assert completed.stdout.splitlines()[0] == "escalation=agentless>supplied"
+    assert second not in completed.stdout and first not in completed.stdout
+
+    # RED control: the shared ladder, same guest and fragment, masks the reason.
+    counter.unlink()
+    shared = _run_in_fake_guest(guest_disk.escalation_script(fragment, second), bin_dir)
+    assert "grow=no-growpart" not in shared.stdout
+    assert "incorrect password" in shared.stdout
+
+
+def test_a_failed_grow_runs_once_on_a_nopasswd_guest(tmp_path: Path) -> None:
+    """F3(b): the shared ladder ran a failed ``growpart`` twice here."""
+
+    bin_dir = _fake_sudo_guest(tmp_path, password="unused", nopasswd=True)
+    counter = tmp_path / "runs"
+    fragment = _counting_fragment(counter, rc=5, says="grow=growpart-failed rc=2")
+
+    completed = _run_in_fake_guest(
+        guest_disk.authenticated_escalation_script(fragment, "password"), bin_dir
+    )
+
+    assert completed.returncode == 5
+    assert counter.read_text().splitlines() == ["run"]
+    assert completed.stdout.splitlines()[0] == "escalation=agentless"
+    assert "grow=growpart-failed rc=2" in completed.stdout
+
+
+def test_the_grow_escalation_falls_through_to_a_default_that_validates(tmp_path: Path) -> None:
+    """The ladder's reach is unchanged: the measured stale-default case still opens."""
+
+    first, second = guest_disk._UPSTREAM_DEFAULT_PASSWORDS
+    bin_dir = _fake_sudo_guest(tmp_path, password=first)
+    counter = tmp_path / "runs"
+
+    completed = _run_in_fake_guest(
+        guest_disk.authenticated_escalation_script(
+            _counting_fragment(counter, rc=0, says="grow=grown"), second
+        ),
+        bin_dir,
+    )
+
+    assert completed.returncode == 0
+    assert counter.read_text().splitlines() == ["run"]
+    assert completed.stdout.splitlines()[0] == "escalation=agentless>supplied>upstream-default"
+
+
+def test_the_grow_never_runs_when_no_candidate_authenticates(tmp_path: Path) -> None:
+    """An auth failure reads as one, and nothing privileged was attempted."""
+
+    bin_dir = _fake_sudo_guest(tmp_path, password="none-of-them")
+    counter = tmp_path / "runs"
+
+    completed = _run_in_fake_guest(
+        guest_disk.authenticated_escalation_script(
+            _counting_fragment(counter, rc=0, says="grow=grown"), "password"
+        ),
+        bin_dir,
+    )
+
+    assert completed.returncode == 1
+    assert not counter.exists()
+    assert "no candidate authenticated; fragment not run" in completed.stdout
+    assert "escalation=agentless>supplied>upstream-default" in completed.stdout
+
+
+def test_each_grow_candidate_appears_once_and_only_on_stdin() -> None:
+    first, second = guest_disk._UPSTREAM_DEFAULT_PASSWORDS
+    script = guest_disk.authenticated_escalation_script("echo INNER", second)
+
+    assert script.count(f"'{second}'") == 1
+    assert script.count(f"'{first}'") == 1
+    # Validation only ever pipes into ``sudo -S ... -v``; the one run re-feeds
+    # the validated value with ``-k`` so sudo, not the fragment, consumes it.
+    assert script.count("| sudo -S -p '' -v") == 2
+    assert script.count("| sudo -S -k -p '' bash -c") == 1
+    assert "| sudo -n" not in script
+
+
+def test_the_grow_step_uses_the_auth_first_escalation() -> None:
+    guest = _growable_guest()
+
+    _prepare_with(guest, requested_volume_gb=120)
+
+    grow_command = next(command for command in guest.commands if "growpart" in command)
+    assert "sudo -n -v" in grow_command
+    assert "fragment not run" in grow_command
+    # The reclamation steps keep the shared ladder (pre-existing behaviour).
+    hold = next(command for command in guest.commands if "--hold=forever" in command)
+    assert "sudo -n -v" not in hold
+
+
+# ----------------------------------------------------------------------
+# What the record says about the grow: source, target, duration, skip
+# ----------------------------------------------------------------------
+
+
+def test_the_record_carries_the_requested_size_its_source_and_the_v21_target() -> None:
+    """F1(c)/F2: which size, from where, and did the fs reach 95 % of it."""
+
+    guest = _growable_guest()
+
+    report = _prepare_with(guest, requested_volume_gb=120, volume_source="override")
+
+    payload = json.loads(report.to_json_bytes())
+    assert payload["requested_volume_gb"] == 120
+    assert payload["volume_size_source"] == "override"
+    # 128,249,018,880 B >= 0.95 x 120 GiB (122,406,567,936 B).
+    assert payload["grow_target_met"] is True
+
+
+def test_a_short_grow_is_identifiable_by_grow_target_met() -> None:
+    """v2.1 raises under 95 %; this records False and still runs the episode."""
+
+    guest = _growable_guest(grown=_FS_BYTES + 10 * 1024**3)
+
+    report = _prepare_with(guest, requested_volume_gb=120, volume_source="task")
+
+    payload = json.loads(report.to_json_bytes())
+    assert payload["grow_target_met"] is False
+    assert payload["volume_size_source"] == "task"
+    assert report.blocking_steps() == ()
+
+
+def test_grow_target_met_is_none_when_nothing_was_requested() -> None:
+    payload = json.loads(_prepare_with(_growable_guest()).to_json_bytes())
+
+    assert payload["requested_volume_gb"] is None
+    assert payload["volume_size_source"] is None
+    assert payload["grow_target_met"] is None
+
+
+def test_an_already_spanning_filesystem_is_judged_as_it_stood() -> None:
+    """No grow needed: the 95 % test reads the starting filesystem size."""
+
+    guest = _Guest(
+        free_bytes=TIGHT_FREE,
+        script={"--output=size": CommandResult(0, f"{_VOLUME_120 - 10**8}\n{_VOLUME_120}\n", "")},
+    )
+
+    report = _prepare_with(guest, requested_volume_gb=120, volume_source="task")
+
+    assert report.grow_target_met is True
+
+
+def test_the_grow_step_records_its_duration_and_no_other_step_does() -> None:
+    """F4: the 180 s cap is unmeasured; the record is what will measure it."""
+
+    guest = _growable_guest()
+
+    payload = json.loads(
+        _prepare_with(guest, _SleepingClock(step=1.0), requested_volume_gb=120).to_json_bytes()
+    )
+
+    steps = {step["name"]: step for step in payload["steps"]}
+    assert steps[guest_disk.GROW_STEP_NAME]["duration_s"] > 0
+    assert all(
+        "duration_s" not in step for name, step in steps.items() if name != "grow-root-filesystem"
+    )
+
+
+def test_the_grow_is_skipped_when_the_episode_will_be_refused() -> None:
+    """F5/Q3: a blocked reclamation is refused; growing first only delays it."""
+
+    guest = _growable_guest(
+        script={
+            "snap refresh --hold": ConnectionError("refused"),
+            "refresh.hold=": ConnectionError("refused"),
+        }
+    )
+
+    report = _prepare_with(guest, requested_volume_gb=120, volume_source="task")
+
+    assert report.blocking_steps() != ()
+    assert not guest.ran("growpart")
+    grow = _step(report, guest_disk.GROW_STEP_NAME)
+    assert (grow.status, grow.attempts) == ("skipped", 0)
+    assert "reclamation blocked" in grow.detail

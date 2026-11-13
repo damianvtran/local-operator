@@ -203,12 +203,13 @@ def test_proxy_flag_comes_from_the_task() -> None:
 # not the x11grab recorder the revision before that named). The adapter now
 # reclaims that space itself at episode start (``guest_disk``).
 #
-# This knob is INERT as the adapter stands: the guest's root filesystem measured
-# 30,993,747,968 bytes in both a 40 GiB and a 120 GiB volume, because
-# ``DesktopEnv(...)`` is constructed without ``volume_size=`` so upstream's
-# ``expand_guest_volume`` never runs. It is still validated and still stamped
-# into the sealed manifest (see ``DISCLOSED_INFRA_METADATA_KEYS``), which is what
-# these tests cover; it is not what fixes the disk.
+# This knob is LIVE since PR #3867: the requested size grows the guest's root
+# filesystem, a task's own ``volume_size`` wins, and the override only sizes
+# tasks that declare none (upstream's precedence). Before #3867 it was inert --
+# the filesystem measured 30,993,747,968 bytes in both a 40 GiB and a 120 GiB
+# volume. It is validated and stamped into the sealed manifest (see
+# ``DISCLOSED_INFRA_METADATA_KEYS``); these tests cover that resolution and the
+# precedence, not the grow itself (``test_guest_disk``).
 
 
 def _with_volume_size(value: str) -> tuple[ScopedInfraValue, ...]:
@@ -223,29 +224,44 @@ def test_a_root_volume_override_replaces_the_launch_time_default() -> None:
         descriptor, episode_id="ep-1", infra_values=_with_volume_size("120")
     )
     assert plan.volume_gb == 120
+    # A default filling a task that declares none: the disclosed-deviation case.
+    assert plan.volume_source == "override"
 
 
-def test_a_root_volume_override_beats_a_task_pinned_volume_size() -> None:
-    # The precedence decision, asserted rather than assumed, and deliberately
-    # the same rule AWS_INSTANCE_TYPE uses: an override a task pin could veto
-    # would fail on exactly the tasks that run long enough to hit the wall.
+def test_a_task_pinned_volume_size_beats_the_root_volume_override() -> None:
+    # Upstream's precedence (OSWorld-V2.1 @ 3d778a3,
+    # run_multienv_gpt_response_api.py:430-432): ``example.get("volume_size")``
+    # first, the run-level ``--volume_size`` only when that is None. RED on the
+    # previous rule, which returned 250 here -- and since the filesystem is now
+    # grown into the volume, 250 would be disk upstream never grants this task.
     descriptor = taskfile.load_static(fixtures.CUSTOM_INSTANCE.encode(), module_name="tasks/t.py")
     assert descriptor.volume_size == 100
     plan = provisioning.resolve(
         descriptor, episode_id="ep-1", infra_values=_with_volume_size("250")
     )
-    assert plan.volume_gb == 250
+    assert plan.volume_gb == 100
+    assert plan.volume_source == "task"
+
+
+def test_a_malformed_override_is_rejected_even_when_the_task_pin_wins() -> None:
+    # The pin decides the size, but a typo in the knob is still the operator's
+    # to fix now -- not on the next task that happens to read it.
+    descriptor = taskfile.load_static(fixtures.CUSTOM_INSTANCE.encode(), module_name="tasks/t.py")
+    with pytest.raises(provisioning.ProvisioningError, match="AWS_ROOT_VOLUME_SIZE"):
+        provisioning.resolve(descriptor, episode_id="ep-1", infra_values=_with_volume_size("4_0"))
 
 
 def test_a_task_pinned_volume_size_still_wins_without_an_override() -> None:
     # The override is opt-in: absent it, the task's own pin is untouched.
-    assert _resolve(fixtures.CUSTOM_INSTANCE).volume_gb == 100
+    plan = _resolve(fixtures.CUSTOM_INSTANCE)
+    assert (plan.volume_gb, plan.volume_source) == (100, "task")
 
 
 def test_volume_stays_none_without_an_override_or_a_task_pin() -> None:
     # Omitting the knob must reproduce today's behaviour EXACTLY -- None, so
     # OSWorld's own launch-time resolution from the AMI's BDM still runs.
-    assert _resolve(fixtures.PLAIN).volume_gb is None
+    plan = _resolve(fixtures.PLAIN)
+    assert (plan.volume_gb, plan.volume_source) == (None, None)
 
 
 @pytest.mark.parametrize(
