@@ -20,14 +20,17 @@ module writes the ask log.
 Import-light by design: the asks store and the project registry are imported
 inside the functions that need them, so the desktop feed's count read never
 pays for the project registry. The registry, once built, is reused process-wide
-(:func:`shared_project_registry`); open asks are read ONCE per request and the
-rows handed to every helper that needs them.
+and refreshed off the request thread (:func:`shared_project_registry`); open
+asks are read ONCE per request and the rows handed to every helper that needs
+them.
 """
 
 from __future__ import annotations
 
 import logging
+import os
 import threading
+import time
 from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
@@ -162,30 +165,151 @@ class SessionFacts:
         }
 
 
-#: Process-wide ``ProjectRegistry`` per config dir, with the lock that
-#: serializes reads of it. WHY: building a registry parses every
-#: ``projects/*.json`` (902 rows here: 1.6-2.3 s), and every list, detail and
-#: count request used to build a fresh one through :class:`ProjectFacts`, so
-#: opening the inbox or clicking between items paid that parse each time.
+#: Process-wide project snapshot per config dir. WHY: building a
+#: ``ProjectRegistry`` parses every ``projects/*.json`` (902 rows here:
+#: 1.6-2.3 s), and every list, detail and count request used to build a fresh
+#: one through :class:`ProjectFacts`, so opening the inbox or clicking between
+#: items paid that parse each time.
 #:
-#: FRESHNESS (the invariant this reuse rests on): the registry refreshes itself
-#: on read — at once when ``projects/``'s mtime moves (every publish is
-#: temp-write + ``os.replace``, which changes the directory), else after its
-#: ``refresh_interval`` (5 s) — and its stat-keyed row cache re-parses only the
-#: files whose (mtime, ctime, size, inode) moved. So a reused registry answers
-#: what a new one would, minus at most one interval for an in-place rewrite
-#: that never touches the directory (no core writer does that).
+#: SERVE THE SNAPSHOT, REFRESH OFF THE REQUEST THREAD (PR #3921 QA round 1,
+#: Q1). Reusing the registry was not enough on its own: its own
+#: ``_refresh_if_needed`` re-stats every row file on the first read after its
+#: 5 s interval, so a detail clicked after reading the previous one for >5 s
+#: paid 126-324 ms on the request thread (90-100 ms of it the re-stat alone,
+#: measured on a 905-file copy). A request now reads an immutable tuple of
+#: ``Project`` rows with no lock and no re-stat; one daemon refresher per
+#: config dir re-reads the store and swaps the tuple in. The ONLY scan a
+#: request ever waits on is the first build, when no snapshot exists yet (and
+#: ``lop serve`` warms that at startup: :func:`warm_shared_project_registry`).
 #:
-#: THREADS: routes run these reads in worker threads and the registry's
-#: refresh swaps several attributes, so every read goes through the paired
-#: lock. Bounded because tests and multi-root callers each mint a key.
-_SHARED_REGISTRIES: dict[str, tuple[Any, threading.Lock]] = {}
+#: STALENESS BOUND (the invariant this rests on). The refresher wakes every
+#: ``_REFRESH_TICK_S`` and, while the inbox is in use (a read within
+#: ``_ACTIVE_WINDOW_S``), reloads when ``projects/``'s mtime moved (every core
+#: publish is temp-write + ``os.replace``, which moves it) or the registry's
+#: own interval elapsed (an in-place rewrite never moves the directory; no core
+#: writer does one). A read that itself sees the directory moved or the
+#: interval elapsed wakes the refresher at once. So, while reads are active, a
+#: publish is served within ``_REFRESH_TICK_S`` + one refresh, and an in-place
+#: rewrite within the 5 s interval + ``_REFRESH_TICK_S`` + one refresh. After
+#: ``_ACTIVE_WINDOW_S`` of no reads the refresher stops scanning (no standing
+#: cost on an idle daemon); the first read after that serves the last
+#: snapshot ONCE while it wakes the refresh, and the reads after it are fresh.
+#: The rows are related-project CONTEXT on an inbox item, never the item, so
+#: one stale answer bounded like this is the trade for a click that never pays
+#: a re-stat.
+#:
+#: A ``Project`` is never mutated by a reload (``ProjectRegistry._load``
+#: replaces its dicts), so a reader holding an old tuple holds valid rows.
+_REFRESH_TICK_S = 1.0
+_ACTIVE_WINDOW_S = 60.0
+
+
+class SharedProjectRegistry:
+    """One config dir's project snapshot, refreshed by a single-flight thread.
+
+    Built synchronously (the one scan a caller may wait on); a construction
+    failure raises and is not cached by :func:`shared_project_registry`.
+    :meth:`close` stops the refresher (eviction, tests).
+    """
+
+    def __init__(self, config_dir: Path | str) -> None:
+        from local_operator.projects import ProjectRegistry
+
+        self.config_dir = Path(config_dir)
+        self._projects_dir = self.config_dir / "projects"
+        dir_mtime = self._dir_mtime()
+        self._registry = ProjectRegistry(self.config_dir)
+        self._interval = float(getattr(self._registry, "_refresh_interval", 5.0))
+        #: ``(rows, dir_mtime_ns taken BEFORE the load, monotonic load time)``,
+        #: replaced whole so a reader never sees it torn. The mtime is read
+        #: before the load so a publish that lands DURING a load still reads
+        #: as "moved" afterwards and triggers the next one.
+        self._snapshot: tuple[tuple[Any, ...], int | None, float] = (
+            tuple(self._registry.list_projects()),
+            dir_mtime,
+            time.monotonic(),
+        )
+        self._last_read = time.monotonic()
+        self._wake = threading.Event()
+        self._stop = threading.Event()
+        #: Counts completed background reloads (tests wait on it; it is also
+        #: how a reader can tell a refresh happened without timing it).
+        self.refreshes = 0
+        self._thread = threading.Thread(
+            target=self._run, name="lop-inbox-projects-refresh", daemon=True
+        )
+        self._thread.start()
+
+    def _dir_mtime(self) -> int | None:
+        try:
+            return os.stat(self._projects_dir).st_mtime_ns
+        except OSError:
+            return None
+
+    def _due(self, now: float) -> bool:
+        _rows, dir_mtime, loaded_at = self._snapshot
+        if now - loaded_at > self._interval:
+            return True
+        return self._dir_mtime() != dir_mtime
+
+    def projects_for_session(self, session_id: str) -> list[Any]:
+        """The snapshot's rows linked to ``session_id`` — never a scan.
+
+        Same membership and order as ``ProjectRegistry.projects_for_session``
+        (``sessions`` or ``coordination_sessions``, by casefolded name). The
+        staleness probe is ONE ``stat`` of the directory.
+        """
+        now = time.monotonic()
+        self._last_read = now
+        rows = self._snapshot[0]
+        if self._due(now):
+            self._wake.set()
+        return sorted(
+            (p for p in rows if session_id in p.sessions or session_id in p.coordination_sessions),
+            key=lambda project: project.name.casefold(),
+        )
+
+    def _reload(self) -> None:
+        dir_mtime = self._dir_mtime()
+        # ``refresh`` is the registry's forced reload; its stat-keyed row cache
+        # re-parses only files whose (mtime, ctime, size, inode) moved.
+        self._registry.refresh()
+        self._snapshot = (tuple(self._registry.list_projects()), dir_mtime, time.monotonic())
+        self.refreshes += 1
+
+    def _run(self) -> None:
+        while not self._stop.is_set():
+            woken = self._wake.wait(_REFRESH_TICK_S)
+            if self._stop.is_set():
+                return
+            self._wake.clear()
+            now = time.monotonic()
+            # Idle daemon: no standing scan. A woken read already proved use.
+            if not woken and now - self._last_read > _ACTIVE_WINDOW_S:
+                continue
+            # Single-flight: only this thread reloads, and only when the
+            # snapshot is actually behind (a burst of reads sets the event
+            # many times but costs one reload).
+            if not self._due(now):
+                continue
+            try:
+                self._reload()
+            except Exception:  # noqa: BLE001 — keep serving the last snapshot
+                logger.debug("notifications: project refresh failed", exc_info=True)
+
+    def close(self) -> None:
+        self._stop.set()
+        self._wake.set()
+
+
+_SHARED_REGISTRIES: dict[str, SharedProjectRegistry] = {}
 _SHARED_REGISTRIES_LOCK = threading.Lock()
+#: Bounded because tests and multi-root callers each mint a key.
 _SHARED_REGISTRIES_MAX = 8
 
 
-def shared_project_registry(config_dir: Path | str) -> tuple[Any, threading.Lock]:
-    """The process-wide registry for ``config_dir`` and its read lock.
+def shared_project_registry(config_dir: Path | str) -> SharedProjectRegistry:
+    """The process-wide project snapshot for ``config_dir``.
 
     Built on first use and kept; a construction failure raises to the caller
     and is NOT cached, so a store repaired later is picked up by the next read.
@@ -194,29 +318,48 @@ def shared_project_registry(config_dir: Path | str) -> tuple[Any, threading.Lock
     with _SHARED_REGISTRIES_LOCK:
         entry = _SHARED_REGISTRIES.get(key)
         if entry is None:
-            from local_operator.projects import ProjectRegistry
-
-            entry = (ProjectRegistry(Path(config_dir)), threading.Lock())
+            entry = SharedProjectRegistry(config_dir)
             while len(_SHARED_REGISTRIES) >= _SHARED_REGISTRIES_MAX:
-                _SHARED_REGISTRIES.pop(next(iter(_SHARED_REGISTRIES)))
+                _SHARED_REGISTRIES.pop(next(iter(_SHARED_REGISTRIES))).close()
             _SHARED_REGISTRIES[key] = entry
         return entry
 
 
+def warm_shared_project_registry(config_dir: Path | str) -> threading.Thread:
+    """Build ``config_dir``'s snapshot in a daemon thread (``lop serve`` startup).
+
+    WHY (PR #3921 review R1-1 / QA Q2): the first inbox request after a server
+    start otherwise pays the whole cold parse (2.9 s measured) inside the click
+    that opened Notifications. Fire-and-forget: startup never waits on it, and
+    a failure is only logged — it is not cached, so the first request retries
+    the build lazily, exactly as it would without the warm.
+    """
+
+    def _warm() -> None:
+        try:
+            shared_project_registry(config_dir)
+        except Exception:  # noqa: BLE001 — a warm-up must never be the failure
+            logger.debug("notifications: project registry warm failed", exc_info=True)
+
+    thread = threading.Thread(target=_warm, name="lop-inbox-projects-warm", daemon=True)
+    thread.start()
+    return thread
+
+
 class ProjectFacts:
-    """``projects_for_session`` per request, over the SHARED registry (§2.2).
+    """``projects_for_session`` per request, over the SHARED snapshot (§2.2).
 
     The per-session answer is memoized for this request only (a list page names
-    the same session many times); the registry behind it is the process-wide
-    one from :func:`shared_project_registry`, never built per request.
-    ``registry`` lets a caller (or a test) pass its own instance; a lock is
-    then not taken, because a private registry is not shared across threads.
+    the same session many times); the rows behind it come from the
+    process-wide :func:`shared_project_registry`, never built per request.
+    ``registry`` lets a caller (or a test) pass its own ``ProjectRegistry``,
+    which is then read directly (a private registry is not shared across
+    threads).
     """
 
     def __init__(self, config_dir: Path | str, registry: Any = None) -> None:
         self.config_dir = Path(config_dir)
         self._registry: Any = registry
-        self._lock: threading.Lock | None = None
         self._failed = False
         self._cache: dict[str, list[dict[str, Any]]] = {}
 
@@ -227,12 +370,8 @@ class ProjectFacts:
         if not self._failed:
             try:
                 if self._registry is None:
-                    self._registry, self._lock = shared_project_registry(self.config_dir)
-                if self._lock is not None:
-                    with self._lock:
-                        projects = self._registry.projects_for_session(session_id)
-                else:
-                    projects = self._registry.projects_for_session(session_id)
+                    self._registry = shared_project_registry(self.config_dir)
+                projects = self._registry.projects_for_session(session_id)
                 for project in projects:
                     rows.append(
                         {

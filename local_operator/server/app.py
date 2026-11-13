@@ -225,6 +225,19 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     except Exception:  # noqa: BLE001 — indexing must never be the failure
         logger.debug("library indexer unavailable at startup", exc_info=True)
 
+    # THE INBOX PROJECT SNAPSHOT, warmed with the same rule as the warms above.
+    # The Notifications list/detail read related projects from one shared
+    # snapshot whose first build parses every ``projects/*.json`` (2.9 s
+    # measured on 905 rows); without this the click that opens Notifications
+    # right after a boot pays it. Fire-and-forget; a failure is logged and the
+    # first request retries the build lazily (failures are never cached).
+    try:
+        from local_operator.notifications.items import warm_shared_project_registry
+
+        warm_shared_project_registry(config_dir)
+    except Exception:  # noqa: BLE001 — a warm-up must never be the failure
+        logger.debug("inbox project warm unavailable at startup", exc_info=True)
+
     # Honour LOCAL_OPERATOR_HOME and create it at the point of use, matching the
     # CLI session path. The literal ``~/local-operator-home`` here ignored the
     # override, so a relocated home still had a stray workspace created in the

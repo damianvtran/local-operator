@@ -13,6 +13,7 @@ Cold-path throughout, ``tmp_path`` config roots, a synthetic bearer.
 
 from __future__ import annotations
 
+import threading
 import time
 from pathlib import Path
 
@@ -45,6 +46,24 @@ def client(tmp_path: Path, monkeypatch):
     with TestClient(app, headers={"Host": "127.0.0.1:1111"}) as test_client:
         monkeypatch.setattr(app.state, "config_manager", ConfigManager(tmp_path))
         yield test_client
+
+
+@pytest.fixture(autouse=True)
+def _close_shared_registries():
+    """Stop every refresher thread a test started, so none outlives its root."""
+    yield
+    with inbox._SHARED_REGISTRIES_LOCK:
+        entries = list(inbox._SHARED_REGISTRIES.values())
+        inbox._SHARED_REGISTRIES.clear()
+    for entry in entries:
+        entry.close()
+
+
+def _wait_for(predicate, *, within: float) -> None:
+    deadline = time.monotonic() + within
+    while not predicate():
+        assert time.monotonic() < deadline, "condition not met in time"
+        time.sleep(0.02)
 
 
 def _open_ask(root: Path, session_id: str = SID, ask_id: str = "ask_1") -> None:
@@ -100,12 +119,14 @@ def test_the_project_registry_is_built_once_across_requests_and_sees_a_new_link(
     assert built == 1, built
 
     # A peer process links the session: a SEPARATE registry instance publishes
-    # (temp-write + os.replace), which moves projects/'s mtime. The shared one
-    # must answer with the link on the very next request, inside the 5 s
-    # refresh interval, without being rebuilt.
+    # (temp-write + os.replace), which moves projects/'s mtime. The shared
+    # snapshot must pick the link up from its background refresh, inside the
+    # 5 s interval, without being rebuilt.
     writer = projects.ProjectRegistry(tmp_path)
     writer.create_project(projects.ProjectEdit(name="perf-proj", title="Perf"), sessions=[SID])
     built_after_writer = built
+    shared = inbox.shared_project_registry(tmp_path)
+    _wait_for(lambda: shared.projects_for_session(SID), within=4.0)
     page = inbox.list_page(tmp_path, state="all")
     assert page["items"][0]["projects"] == [
         {"key": "perf-proj", "name": "Perf", "status": "active"}
@@ -134,6 +155,110 @@ def test_a_failed_registry_build_is_not_cached(tmp_path: Path, monkeypatch) -> N
     assert inbox.list_page(tmp_path, state="all")["items"][0]["projects"] == []
     inbox.list_page(tmp_path, state="all")
     assert calls == 2
+
+
+def test_a_read_after_the_interval_serves_the_snapshot_and_refreshes_off_thread(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """QA round 1, Q1: the post-interval re-stat must not run on the request.
+
+    The registry's reload is made slow (0.6 s) and records its thread. A read
+    after the interval must return the CURRENT snapshot well before that reload
+    could finish, the reload must run on the refresher thread, and the change
+    it picks up must then be served.
+    """
+    from local_operator import projects
+
+    shared = inbox.shared_project_registry(tmp_path)
+    assert shared.projects_for_session(SID) == []
+    # An in-place-equivalent change the directory mtime alone would also
+    # catch; the interval is what is under test, so expire it explicitly.
+    projects.ProjectRegistry(tmp_path).create_project(
+        projects.ProjectEdit(name="late-proj", title="Late"), sessions=[SID]
+    )
+    reload_threads: list[int] = []
+    started = threading.Event()
+    real_refresh = projects.ProjectRegistry.refresh
+
+    def slow_refresh(self) -> None:
+        reload_threads.append(threading.get_ident())
+        started.set()
+        time.sleep(0.6)
+        real_refresh(self)
+
+    monkeypatch.setattr(projects.ProjectRegistry, "refresh", slow_refresh)
+    rows, dir_mtime, _loaded = shared._snapshot
+    shared._snapshot = (rows, dir_mtime, time.monotonic() - 3600)
+
+    t0 = time.monotonic()
+    served = shared.projects_for_session(SID)
+    elapsed = time.monotonic() - t0
+    assert served == [], "the read serves the snapshot it already has"
+    assert elapsed < 0.3, f"the read waited on a reload ({elapsed:.3f} s)"
+    assert started.wait(2.0), "the read woke the background refresher"
+    assert reload_threads and threading.get_ident() not in reload_threads
+    _wait_for(lambda: shared.projects_for_session(SID), within=4.0)
+    assert [p.name for p in shared.projects_for_session(SID)] == ["late-proj"]
+
+
+def test_an_idle_refresher_does_not_scan(tmp_path: Path, monkeypatch) -> None:
+    """No reads in the active window: the daemon's refresher costs nothing."""
+    from local_operator import projects
+
+    shared = inbox.shared_project_registry(tmp_path)
+    calls: list[int] = []
+    monkeypatch.setattr(projects.ProjectRegistry, "refresh", lambda self: calls.append(1))
+    monkeypatch.setattr(inbox, "_REFRESH_TICK_S", 0.05)
+    shared._last_read = time.monotonic() - 3600
+    rows, dir_mtime, _loaded = shared._snapshot
+    shared._snapshot = (rows, dir_mtime, time.monotonic() - 3600)
+    # Longer than the tick the refresher is already sleeping (1 s) plus
+    # several at the patched rate, all with the snapshot "due".
+    time.sleep(1.4)
+    assert calls == []
+
+
+def test_server_startup_warms_the_registry_without_blocking(tmp_path: Path, monkeypatch) -> None:
+    """Review R1-1 / QA Q2: ``lop serve`` builds the snapshot off the startup path."""
+    release = threading.Event()
+    real_init = inbox.SharedProjectRegistry.__init__
+
+    def gated_init(self, config_dir):
+        assert release.wait(5.0)
+        real_init(self, config_dir)
+
+    monkeypatch.setattr(inbox.SharedProjectRegistry, "__init__", gated_init)
+    t0 = time.monotonic()
+    thread = inbox.warm_shared_project_registry(tmp_path)
+    assert time.monotonic() - t0 < 0.2, "the warm must not wait on the build"
+    assert thread.is_alive() and thread.daemon
+    release.set()
+    thread.join(5.0)
+    assert str(Path(tmp_path)) in inbox._SHARED_REGISTRIES
+
+
+def test_a_failed_warm_is_not_cached(tmp_path: Path, monkeypatch) -> None:
+    def failing_init(self, config_dir):
+        raise OSError("transient")
+
+    monkeypatch.setattr(inbox.SharedProjectRegistry, "__init__", failing_init)
+    inbox.warm_shared_project_registry(tmp_path).join(5.0)
+    assert str(Path(tmp_path)) not in inbox._SHARED_REGISTRIES
+
+
+def test_the_server_lifespan_starts_the_warm(tmp_path: Path, monkeypatch) -> None:
+    from fastapi.testclient import TestClient
+
+    from local_operator.server.app import app
+
+    warmed: list[Path] = []
+    monkeypatch.setattr(inbox, "warm_shared_project_registry", lambda root: warmed.append(root))
+    monkeypatch.setenv("LOCAL_OPERATOR_DESKTOP_TOKEN", SYNTHETIC_TOKEN)
+    with TestClient(app, headers={"Host": "127.0.0.1:1111"}):
+        # The same root the notifications routes read (``_config_dir``), so
+        # the warmed snapshot is the one the first request finds.
+        served_root = Path(app.state.config_manager.config_dir)
+    assert warmed == [served_root] or [Path(w) for w in warmed] == [served_root]
 
 
 # ---------------------------------------------------------------------------
