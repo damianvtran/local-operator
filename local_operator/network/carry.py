@@ -216,6 +216,67 @@ def _home_relative_tail(recorded: str) -> str:
     return ""
 
 
+def translate_host_path(recorded: str, *, home: str = "") -> str:
+    """Map another host's absolute path onto THIS host, or ``""`` when it cannot.
+
+    The same rule :func:`rewrite_host_cwd` applies to the marker, minus its
+    always-succeeding fallback (the caller owns that choice): a path that exists
+    here is kept; else the same trailing component under this user's home; else
+    the tail below the other device's home, when that exists here — and a path
+    that IS the other device's home maps to this home (``/Users/damian`` →
+    ``/home/ec2-user``, the 2026-11-13 move). Relative or empty input is returned
+    unchanged: a relative cwd was resolved by its writer. Never raises.
+    """
+    value = str(recorded or "")
+    if not value or not os.path.isabs(value) or os.path.exists(value):
+        return value
+    home = home or os.path.expanduser("~")
+    parts = [part for part in value.split("/") if part]
+    if len(parts) == 2 and parts[0] in ("home", "Users"):
+        return home
+    same_basename = os.path.join(home, os.path.basename(value.rstrip("/")))
+    if os.path.exists(same_basename):
+        return same_basename
+    tail = _home_relative_tail(value)
+    if tail and os.path.exists(os.path.join(home, tail)):
+        return os.path.join(home, tail)
+    return ""
+
+
+def translate_monitor_cwds(
+    specs: Sequence[Mapping[str, Any]], *, session_cwd: str, home: str = ""
+) -> tuple[list[dict[str, Any]], dict[str, int]]:
+    """Rewrite each carried monitor's ``cwd`` for THIS host.
+
+    WHY (2026-11-13 move, Mac → lop-remote-node-2): three ``gh pr view`` monitors
+    travelled in the transcript with ``cwd=/Users/damian`` and every first check on
+    the node failed with "cannot start the command in '/Users/damian'" — the move
+    translated the SESSION's cwd (``carry.cwd``) but not the monitors', which each
+    capture their own absolute cwd at arm (``monitors/arm._captured_cwd``).
+
+    A cwd that :func:`translate_host_path` can map is mapped; one it cannot is
+    re-armed at ``session_cwd`` (the session's destination cwd) and COUNTED, so the
+    receipt can say so rather than leaving a monitor that fails every tick.
+    Returns ``(rows, {"translated": n, "fallback": n})``; rows whose cwd already
+    fits are returned unchanged, so a second pass is a no-op.
+    """
+    rows: list[dict[str, Any]] = []
+    counts = {"translated": 0, "fallback": 0}
+    for raw in specs:
+        row = dict(raw)
+        cwd = row.get("cwd")
+        if isinstance(cwd, str) and cwd and os.path.isabs(cwd) and not os.path.exists(cwd):
+            mapped = translate_host_path(cwd, home=home)
+            if mapped:
+                counts["translated"] += 1
+            else:
+                mapped = session_cwd
+                counts["fallback"] += 1
+            row["cwd"] = mapped
+        rows.append(row)
+    return rows, counts
+
+
 def _write_marker(marker: Path, document: Mapping[str, Any]) -> None:
     """Write ``desktop.json`` atomically, owner-only.
 
@@ -396,9 +457,15 @@ def rebuild_indexes(
     try:
         details = latest_custom_details(directory, MONITOR_SCHEDULES_CUSTOM_TYPE) or {}
         specs = [row for row in details.get("monitors") or () if isinstance(row, Mapping)]
-        rows = _monitor_index_rows(specs)
         existing = monitor_store.read_entry(root, session_id)
         cwd = resolve_cwd(directory, existing)
+        # The index names the cwd each check runs in; the transcript keeps the
+        # source host's value (never edited — see ``rewrite_host_cwd``) and the
+        # session re-applies this same translation when it loads the specs.
+        specs, cwd_counts = translate_monitor_cwds(specs, session_cwd=cwd)
+        if cwd_counts["translated"] or cwd_counts["fallback"]:
+            report["monitor_cwds"] = cwd_counts
+        rows = _monitor_index_rows(specs)
         if existing is not None and _rows_equal(existing.get("monitors"), rows):
             report["monitors"] = len(rows)
         else:
@@ -631,3 +698,138 @@ def monitor_count(config_dir: Path, session_id: str) -> int:
         return 0
     rows = (entry or {}).get("monitors")
     return len(rows) if isinstance(rows, list) else 0
+
+
+#: Bounds on what a move carries of the session's projects. The prepare answer
+#: is one wire frame, and a project row's history is soft-bounded at
+#: ``projects.UPDATES_MAX`` (500) entries of up to ``PROGRESS_MAX`` characters,
+#: so the newest entries are carried and the count is stated in the receipt.
+CARRIED_PROJECTS_MAX = 8
+CARRIED_UPDATES_MAX = 100
+
+
+def linked_project_rows(config_dir: Path, session_id: str) -> list[dict[str, Any]]:
+    """The SOURCE half of the project carry: rows this session is linked to.
+
+    WHY: the project store is per-device (``<config>/projects/<id>.json``), so a
+    moved session's linked project did not exist on the destination (2026-11-13,
+    ``secret-guardrails-relax``: "no project named" on lop-remote-node-2). Rows are
+    serialized as stored (minus attachment files, which stay here) with the newest
+    :data:`CARRIED_UPDATES_MAX` history entries. Never raises: a project store that
+    cannot be read must not refuse a move.
+    """
+    try:
+        from local_operator.projects import ProjectRegistry
+
+        registry = ProjectRegistry(Path(config_dir))
+        projects = registry.projects_for_session(session_id)
+    except Exception:  # noqa: BLE001 — see the docstring
+        logger.warning("carry: could not read projects linked to %s", session_id, exc_info=True)
+        return []
+    rows: list[dict[str, Any]] = []
+    for project in projects[:CARRIED_PROJECTS_MAX]:
+        row = project.model_dump(mode="json", by_alias=True)
+        updates = list(row.get("updates") or [])
+        # Counted before they are dropped so the destination's receipt can say
+        # the history arrived without its files (``Project`` ignores the key).
+        row["attachments_not_carried"] = sum(
+            len(entry.get("attachments") or []) for entry in updates
+        )
+        row["updates"] = [dict(entry, attachments=[]) for entry in updates][-CARRIED_UPDATES_MAX:]
+        rows.append(row)
+    return rows
+
+
+def adopt_projects(config_dir: Path, session_id: str, rows: Any) -> dict[str, Any]:
+    """The DESTINATION half: merge carried rows into this device's project store.
+
+    Returns the receipt block ``{"created": [names], "merged": [names],
+    "failed": [names], "attachments": "not carried"}`` (keys present only when
+    non-empty), or ``{}`` when nothing was carried. A row that cannot merge (for
+    example one written by a newer build) is named under ``failed`` rather than
+    failing the promote of a verified copy.
+    """
+    if not isinstance(rows, list) or not rows:
+        return {}
+    from local_operator.projects import ProjectRegistry
+
+    registry = ProjectRegistry(Path(config_dir))
+    report: dict[str, list[str]] = {"created": [], "merged": [], "failed": []}
+    attachments_dropped = False
+    for row in rows[:CARRIED_PROJECTS_MAX]:
+        if not isinstance(row, Mapping):
+            continue
+        name = str(row.get("name") or "")
+        attachments_dropped = attachments_dropped or bool(row.get("attachments_not_carried"))
+        try:
+            _project, action = registry.adopt_carried(row, session_id)
+        except Exception:  # noqa: BLE001 — named in the receipt, never a failed promote
+            logger.warning("carry: could not adopt project %r for %s", name, exc_info=True)
+            report["failed"].append(name)
+            continue
+        report["created" if action == "created" else "merged"].append(name)
+    block: dict[str, Any] = {key: value for key, value in report.items() if value}
+    if block and attachments_dropped:
+        block["attachments"] = "not carried"
+    return block
+
+
+def attachment_resolution(config_dir: Path, session_dir: Path) -> dict[str, Any]:
+    """Whether the moved session's team/agent resolves on THIS device.
+
+    WHY (2026-11-13): the moved session's prompt on lop-remote-node-2 carried its
+    skills but not the lopdev team brief, and nothing said so. ``attachment.json``
+    travels in the copy set and the session re-attaches from it by NAME at open
+    (``Session._restore_attachment``), so the brief appears exactly when this
+    device's registries resolve that name — which the source's definitions push
+    (``mobility._push_move_definitions``, now on the queued path too) is meant to
+    guarantee. This reads the same registries at the promote and reports the
+    answer, so a brief that will NOT be there is named on the receipt rather than
+    discovered from a prompt. ``{}`` when the session has no team or agent.
+    Never raises.
+    """
+    try:
+        from local_operator.resume import read_session_attachment
+
+        stored = read_session_attachment(Path(session_dir))
+    except Exception:  # noqa: BLE001 — see the docstring
+        return {}
+    if stored is None or not (stored.team or stored.agent):
+        return {}
+    block: dict[str, Any] = {}
+    missing: list[str] = []
+    if stored.team:
+        try:
+            from local_operator.teams import TeamRegistry
+
+            resolved = TeamRegistry(Path(config_dir)).get_team_by_name(stored.team) is not None
+        except Exception:  # noqa: BLE001 — unreadable registry reads as unresolved
+            logger.warning("carry: could not resolve team %r", stored.team, exc_info=True)
+            resolved = False
+        block["name"] = stored.team
+        block["resolved"] = resolved
+        if not resolved:
+            missing.append(f"team {stored.team!r}")
+    if stored.agent:
+        try:
+            from local_operator.agent_profiles import resolve_profile_or_specialist
+            from local_operator.agents import AgentRegistry
+
+            kind = resolve_profile_or_specialist(
+                stored.agent, registry=AgentRegistry(Path(config_dir))
+            )[0]
+            agent_resolved = kind is not None
+        except Exception:  # noqa: BLE001 — unreadable registry reads as unresolved
+            logger.warning("carry: could not resolve agent %r", stored.agent, exc_info=True)
+            agent_resolved = False
+        block["agent"] = stored.agent
+        block["agent_resolved"] = agent_resolved
+        if not agent_resolved:
+            missing.append(f"agent {stored.agent!r}")
+    if missing:
+        block["notice"] = (
+            f"{' and '.join(missing)} {'is' if len(missing) == 1 else 'are'} not defined on "
+            "this device, so the conversation opens without that brief; send it with "
+            "`lop network definitions push` from the device that has it, then reopen"
+        )
+    return block

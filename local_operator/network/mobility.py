@@ -1632,6 +1632,9 @@ def _destination_move(
     #: with no cwd anywhere — see ``_source_prepare``'s ``cwd`` and
     #: ``carry.rewrite_host_cwd``.
     source_cwd = ""
+    #: The project rows the source linked this session to (``carry.linked_project_rows``);
+    #: ``[]`` from an older peer. Carried into ``ready.json`` and merged at the promote.
+    carried_projects: list[Any] = []
     attempts = 0
     while True:
         try:
@@ -1769,6 +1772,8 @@ def _destination_move(
         stash_raw = str(prepared.get("session_roles_stash") or "")
         roles_stash = Path(stash_raw) if stash_raw else None
         source_cwd = str(prepared.get("cwd") or "")
+        raw_projects = prepared.get("projects")
+        carried_projects = raw_projects if isinstance(raw_projects, list) else []
         note("prepared")
         break
 
@@ -2011,6 +2016,10 @@ def _destination_move(
         # with no ``desktop.json`` (a TUI-created one) has nowhere else to carry —
         # and ``_promote`` turns it into this host's marker.
         ready["source_cwd"] = source_cwd
+    if carried_projects and not keep:
+        # Outside every digest like ``source_cwd``. A ``--keep`` copy mints a NEW id,
+        # which no carried row links, so only a real move carries projects.
+        ready["projects"] = carried_projects
     (staging / "ready.json").write_text(json.dumps(ready, sort_keys=True), encoding="utf-8")
     if not keep:
         # From HERE the id is in transit on this device too, so an engage here
@@ -2745,9 +2754,11 @@ def _promote(server: "RelayServer", staging: Path, target_id: str) -> _PromoteOu
     except Exception:  # noqa: BLE001 — a mapping this could not compute must not fail a promote
         logger.warning("mobility: could not map %s's cwd for this host", target_id, exc_info=True)
 
+    monitor_cwds: dict[str, int] = {}
     try:
         report = carry.rebuild_indexes(server.root, target_id)
         wakes = int(report.get("wakes") or 0)
+        monitor_cwds = dict(report.get("monitor_cwds") or {})
         logger.info("mobility: rebuilt derived state for %s: %s", target_id, report)
     except Exception:  # noqa: BLE001 — the indexes self-heal; a promote must not fail here
         logger.warning("mobility: could not rebuild derived state for %s", target_id, exc_info=True)
@@ -2773,6 +2784,23 @@ def _promote(server: "RelayServer", staging: Path, target_id: str) -> _PromoteOu
         carried = dict(carry_block or {})
         carried["cwd"] = cwd_report
         carry_block = carried
+    if monitor_cwds:
+        # Each carried monitor's own cwd, mapped by the same rule (2026-11-13: three
+        # monitors kept the Mac's /Users/damian and failed their first check on the
+        # node). ``fallback`` counts the ones re-armed at the session's cwd here.
+        carry_block = {**(carry_block or {}), "monitor_cwds": monitor_cwds}
+    try:
+        projects_block = carry.adopt_projects(
+            server.root, target_id, ready_doc.get("projects") or []
+        )
+    except Exception:  # noqa: BLE001 — a project merge must not fail a verified promote
+        logger.warning("mobility: could not adopt %s's projects", target_id, exc_info=True)
+        projects_block = {}
+    if projects_block:
+        carry_block = {**(carry_block or {}), "projects": projects_block}
+    team_block = carry.attachment_resolution(server.root, target)
+    if team_block:
+        carry_block = {**(carry_block or {}), "team": team_block}
     return _PromoteOutcome(ok=True, carry=carry_block)
 
 
@@ -4351,6 +4379,15 @@ def _source_prepare(
     }
     if source_cwd:
         answer["cwd"] = source_cwd
+    # THE SESSION'S LINKED PROJECTS TRAVEL WITH IT (2026-11-13: a session moved to
+    # lop-remote-node-2 found "no project named secret-guardrails-relax" there — the
+    # project store is per-device). Additive: an older destination ignores the key.
+    # The rows are read, never removed: other sessions here may still link them.
+    from local_operator.network import carry as _carry
+
+    linked_projects = _carry.linked_project_rows(server.root, session_id)
+    if linked_projects:
+        answer["projects"] = linked_projects
     return answer
 
 

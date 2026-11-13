@@ -30607,7 +30607,23 @@ class Session:
         if not details:
             return
         monitors: list[MonitorSpec] = []
-        for raw in details.get("monitors", []):
+        raw_rows = [row for row in details.get("monitors", []) if isinstance(row, dict)]
+        try:
+            # A MOVED SESSION'S MONITORS RUN WHERE THEY NOW ARE (2026-11-13: three
+            # monitors carried Mac → Linux kept ``cwd=/Users/damian`` and failed
+            # every first check). The transcript keeps the source host's value —
+            # the move verified it byte-for-byte — so the translation is applied
+            # here, at load, with the promote's own rule (``network/carry.py``);
+            # an untranslatable cwd re-arms at this session's cwd. A no-op for a
+            # session that never moved: every existing cwd is kept as-is.
+            from local_operator.network.carry import translate_monitor_cwds
+
+            raw_rows, _counts = translate_monitor_cwds(
+                raw_rows, session_cwd=os.path.abspath(self._cwd)
+            )
+        except Exception:  # noqa: BLE001 — a load must not fail over a path mapping
+            logger.debug("monitor cwd translation failed", exc_info=True)
+        for raw in raw_rows:
             try:
                 monitors.append(MonitorSpec.model_validate(raw))
             except Exception:

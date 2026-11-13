@@ -3008,6 +3008,68 @@ class ProjectRegistry:
             candidate.updated_at = _utc_now()
             return self._save_project_locked(candidate, stored=current), True
 
+    def adopt_carried(self, row: Mapping[str, Any], session_id: str) -> tuple[Project, str]:
+        """Merge a project row carried by a mesh move into THIS store.
+
+        WHY (2026-11-13 move, Mac → lop-remote-node-2): the moved session was
+        linked to ``secret-guardrails-relax``, but the store is per-device, so on
+        the node its ``project`` calls answered "no project named". The move now
+        carries every project the session is linked to and this merges each one.
+
+        Rules: a row NAMED the same here (case-insensitive) is MERGED — the moved
+        session is linked, the progress history is unioned on ``(at, text, by)``
+        in time order, and the newer progress line wins; every other field keeps
+        this device's value. Otherwise the row is CREATED under its own id (a
+        fresh id if that one is taken). Attachments are NOT carried: their files
+        live in the source's store, so carried history entries arrive without
+        them (the caller states that). The source row is never touched — other
+        sessions may still link it there. Returns ``(project, "merged"|"created"
+        |"unchanged")``.
+        """
+        session_id = _validate_sessions([session_id])[0]
+        incoming = dict(row)
+        incoming["sessions"] = [session_id]
+        incoming["coordination_sessions"] = []
+        incoming["updates"] = [
+            {**dict(entry), "attachments": []}
+            for entry in (row.get("updates") or [])
+            if isinstance(entry, Mapping)
+        ]
+        carried = Project.model_validate(incoming)
+        with self._persistence_lock():
+            self._load()
+            current = self._find_cached_project_by_name(carried.name) or self._find_on_disk_by_name(
+                carried.name
+            )
+            if current is None:
+                candidate = carried.model_copy(deep=True)
+                if (self.projects_dir / f"{candidate.id}.json").exists():
+                    candidate.id = uuid.uuid4().hex
+                candidate.updated_at = _utc_now()
+                return self._save_project_locked(candidate), "created"
+            candidate = current.model_copy(deep=True)
+            changed = False
+            if session_id not in candidate.sessions and session_id not in (
+                candidate.coordination_sessions
+            ):
+                if len(candidate.sessions) + len(candidate.coordination_sessions) < SESSIONS_MAX:
+                    candidate.sessions = [*candidate.sessions, session_id]
+                    changed = True
+            seen = {(e.at, e.text, e.by) for e in candidate.updates}
+            extra = [e for e in carried.updates if (e.at, e.text, e.by) not in seen]
+            if extra:
+                candidate.updates = sorted([*candidate.updates, *extra], key=lambda e: e.at)
+                changed = True
+            if (carried.progress_updated_at or 0) > (candidate.progress_updated_at or 0):
+                candidate.progress = carried.progress
+                candidate.progress_updated_at = carried.progress_updated_at
+                candidate.progress_reported_by = carried.progress_reported_by
+                changed = True
+            if not changed:
+                return current, "unchanged"
+            candidate.updated_at = _utc_now()
+            return self._save_project_locked(candidate, stored=current), "merged"
+
     def set_milestone(self, project_id: str, fields: MilestoneEdit) -> tuple[Project, str]:
         """Add, update or remove one milestone by name. Returns ``(project, action)``.
 
