@@ -179,13 +179,15 @@ def slim_wheel(wheel: Path) -> tuple[int, int]:
                 out = zipfile.ZipInfo(info.filename, date_time=info.date_time)
                 out.external_attr = info.external_attr
                 out.compress_type = zipfile.ZIP_DEFLATED
-                dst.writestr(out, data)
+                # Spend build CPU, not PyPI quota: DEFLATE is lossless and leaves
+                # every verified module and runtime resource byte-identical.
+                dst.writestr(out, data, compresslevel=9)
             # RECORD last, as wheel builders write it, with the source entry's metadata.
             source_record = next(i for i in infos if i.filename == record_name)
             out = zipfile.ZipInfo(record_name, date_time=source_record.date_time)
             out.external_attr = source_record.external_attr
             out.compress_type = zipfile.ZIP_DEFLATED
-            dst.writestr(out, record)
+            dst.writestr(out, record, compresslevel=9)
         # mkstemp creates 0600 and os.replace keeps the temp file's mode, so without
         # this a slimmed wheel would be owner-only (measured: -rw------- after vs
         # -rw-r--r-- before). Keep the source wheel's permission bits.
