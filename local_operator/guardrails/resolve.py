@@ -37,6 +37,7 @@ import fnmatch
 import itertools
 import os
 import re
+import sys
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 
@@ -1543,8 +1544,31 @@ _INTERPRETER_DELETE_RE = re.compile(
 #: other import — ``os``, ``shutil``, ``subprocess``, ``base64``, ``pickle``,
 #: ``importlib``, ``ctypes`` — makes the program unprovable, so it keeps the
 #: backstop's HIGH. An allowlist, not a denylist: a module we forgot to list
-#: costs a judge call, never a silent LOW. ``operator`` is deliberately absent:
-#: ``methodcaller("unlink")`` calls a method by a NAME held in a string.
+#: costs a judge call, never a silent LOW.
+#:
+#: THE CLASS TO KEEP OUT (review r1 M1, PR #3918): any stdlib call that
+#: resolves an attribute, import or callable from a STRING defeats the AST
+#: walk, which only sees ``ast.Attribute`` names. ``string.Formatter()
+#: .get_field("0.unlink", (p,), {})[0]()`` deleted real files at LOW;
+#: ``operator.methodcaller``/``attrgetter``, ``functools.update_wrapper``
+#: (getattr/setattr over ``assigned=``), ``pkgutil.resolve_name``, ``pickle``,
+#: ``logging.config`` and ``importlib`` are the same shape. Each entry, and
+#: why it is here:
+#:
+#: - ``pathlib``: the read itself (``read_text``, ``iterdir``, ``glob``); its
+#:   mutators are in ``_PY_DENIED_ATTRS``, its re-exported ``os``/``operator``
+#:   are refused by ``_py_attr_denied``.
+#: - ``json``, ``re``: parse what was read. Callbacks (``object_hook``,
+#:   ``re.sub(repl)``) call a callable the program already holds; nothing
+#:   looks a name up. ``json.tool`` (``main()`` writes ``argv[2]``) is refused.
+#: - ``glob``, ``fnmatch``: list files to read.
+#: - ``collections``, ``itertools``: count/group lines (``namedtuple``
+#:   validates field names as identifiers before its internal ``exec``).
+#: - ``textwrap``, ``pprint``, ``datetime``, ``math``: format output. ``pprint``
+#:   writes only to a ``stream=`` object, and nothing writable is reachable.
+#:
+#: Dropped in round 1: ``string`` (M1), ``functools`` (``update_wrapper``),
+#: ``statistics`` and ``difflib`` (no read needs them; less surface).
 _PY_READ_MODULES = frozenset(
     {
         "pathlib",
@@ -1552,18 +1576,22 @@ _PY_READ_MODULES = frozenset(
         "re",
         "collections",
         "itertools",
-        "functools",
         "math",
-        "statistics",
         "textwrap",
         "datetime",
         "fnmatch",
         "glob",
-        "difflib",
         "pprint",
-        "string",
     }
 )
+#: Dotted imports allowed beyond the top-level names: ``import json.tool``
+#: would load a CLI whose ``main()`` writes the file named in ``argv``.
+_PY_READ_SUBMODULES = frozenset({"collections.abc"})
+#: Stdlib module names an attribute MAY carry: harmless modules a read
+#: commonly names as an attribute (``p.stat()``, ``dt.time()``,
+#: ``collections.abc``) plus the allow-list itself. Every other stdlib module
+#: name is refused as an attribute (``_py_attr_denied``).
+_PY_HARMLESS_MODULE_ATTRS = _PY_READ_MODULES | {"stat", "time", "abc"}
 #: Builtins that run text as code, reach arbitrary objects by name, or reach
 #: the import machinery: the program could do anything they are handed.
 _PY_DENIED_NAMES = frozenset(
@@ -1636,8 +1664,33 @@ _PY_DENIED_ATTRS = frozenset(
         "posix",
         "nt",
         "importlib",
+        # ``json.tool`` / ``from json import tool``: a CLI whose ``main()``
+        # writes the output file named in ``sys.argv`` (review r1 audit).
+        "tool",
+        "main",
+        # ``string.Formatter().get_field``: getattr by a string (M1).
+        "get_field",
     }
 )
+
+
+def _py_attr_denied(name: str) -> bool:
+    """May ``name`` NOT be used as an attribute (or ``from X import name``)?
+
+    Beyond ``_PY_DENIED_ATTRS`` and private names: an allow-listed module
+    re-exports the modules it imports (``pathlib.operator``, ``glob.operator``,
+    ``re.functools``, ``json.codecs``, ``glob.contextlib``), and those reach
+    calls that resolve attributes by a string (``operator.methodcaller(
+    "unlink")``). Refusing every stdlib module name as an attribute closes
+    that whole route without listing each re-export, which changes per Python
+    version. ``sys.stdlib_module_names`` is the GUARD's interpreter; a module
+    a newer target adds is the residual gap, kept small by the allow-list.
+    """
+    if name in _PY_DENIED_ATTRS or name.startswith("_"):
+        return True
+    return name in sys.stdlib_module_names and name not in _PY_HARMLESS_MODULE_ATTRS
+
+
 _PY_READ_MODES = frozenset({"r", "rb", "rt", "br", "tr"})
 
 
@@ -1701,20 +1754,32 @@ def python_code_read_only(code: str) -> bool:
         if isinstance(node, ast.Name) and node.id in ("open", "print") and id(node) not in callees:
             return False
         if isinstance(node, ast.Import):
-            if any(a.name.split(".")[0] not in _PY_READ_MODULES for a in node.names):
+            # Exact names only: a dotted import loads a submodule the
+            # allow-list never vetted (``import json.tool``).
+            if any(
+                a.name not in _PY_READ_MODULES and a.name not in _PY_READ_SUBMODULES
+                for a in node.names
+            ):
                 return False
         elif isinstance(node, ast.ImportFrom):
-            if node.level or (node.module or "").split(".")[0] not in _PY_READ_MODULES:
+            module = node.module or ""
+            if node.level or (module not in _PY_READ_MODULES and module not in _PY_READ_SUBMODULES):
                 return False
-            if any(a.name == "*" or a.name.startswith("_") for a in node.names):
+            if any(a.name == "*" for a in node.names):
                 return False
-            if any(a.name in _PY_DENIED_ATTRS for a in node.names):
-                return False  # ``from glob import os``
+            if any(_py_attr_denied(a.name) for a in node.names):
+                return False  # ``from glob import os``, ``from json import tool``
         elif isinstance(node, ast.Name):
             if node.id in _PY_DENIED_NAMES or node.id.startswith("__"):
                 return False
         elif isinstance(node, ast.Attribute):
-            if node.attr in _PY_DENIED_ATTRS or node.attr.startswith("_"):
+            if _py_attr_denied(node.attr):
+                return False
+        elif isinstance(node, ast.MatchClass):
+            # ``case Path(unlink=u): u()`` binds ``getattr(subject, "unlink")``:
+            # keyword patterns are attribute lookups held as plain strings,
+            # never ``ast.Attribute`` nodes (review r1 audit).
+            if any(_py_attr_denied(a) for a in node.kwd_attrs):
                 return False
         elif isinstance(node, ast.Call):
             if isinstance(node.func, ast.Name) and node.func.id == "open":
@@ -1734,9 +1799,37 @@ def python_code_read_only(code: str) -> bool:
 #: Interpreter flags that change nothing the read-only proof relies on. Any
 #: other flag before ``-c`` (``-X``, ``-W``, ``-m``…) makes it unprovable.
 _PY_SAFE_FLAGS = frozenset({"-I", "-E", "-s", "-S", "-B", "-u", "-q", "-P", "-b", "-bb"})
-#: Environment that makes ``python`` import code from somewhere else at
-#: start-up (``sitecustomize`` on ``PYTHONPATH``) or change what it runs.
-_PY_STARTUP_ENV = ("PYTHONPATH", "PYTHONHOME", "PYTHONSTARTUP", "PYTHONUSERBASE", "PYTHONINSPECT")
+#: Environment that makes ``python`` import or run code from somewhere else
+#: at start-up, write a file, or change which interpreter/stdlib runs:
+#: ``PYTHONPATH``/``PYTHONHOME``/``PYTHONPLATLIBDIR``/``PYTHONUSERBASE``
+#: (where ``site``/stdlib/``sitecustomize`` load from), ``PYTHONSTARTUP``/
+#: ``PYTHONINSPECT`` (run a file / go interactive), ``PYTHONWARNINGS``
+#: (``error::mod.Cls`` imports ``mod`` at start-up; review r1 m1),
+#: ``PYTHONBREAKPOINT`` (imports a callable by name), ``PYTHON_PRESITE``
+#: (imports a module before ``site``), ``PYTHONEXECUTABLE`` (macOS
+#: ``sys.executable``), ``PYTHONCASEOK`` (case-insensitive import: shadowing),
+#: ``PYTHONPYCACHEPREFIX`` (writes bytecode there), ``PYTHONIOENCODING``
+#: (codec looked up by name), ``PYTHONSAFEPATH`` (alters ``sys.path``; harmless
+#: when set, refused to keep the proof's assumptions fixed). Harmless knobs an
+#: operator commonly exports (``PYTHONUNBUFFERED``, ``PYTHONDONTWRITEBYTECODE``,
+#: ``PYTHONUTF8``) are deliberately not here: refusing them would re-break the
+#: incident read for no safety gain.
+_PY_STARTUP_ENV = (
+    "PYTHONPATH",
+    "PYTHONHOME",
+    "PYTHONPLATLIBDIR",
+    "PYTHONUSERBASE",
+    "PYTHONSTARTUP",
+    "PYTHONINSPECT",
+    "PYTHONWARNINGS",
+    "PYTHONBREAKPOINT",
+    "PYTHON_PRESITE",
+    "PYTHONEXECUTABLE",
+    "PYTHONCASEOK",
+    "PYTHONPYCACHEPREFIX",
+    "PYTHONIOENCODING",
+    "PYTHONSAFEPATH",
+)
 #: A cwd entry ``python -c`` would import before the stdlib (``sys.path[0]``
 #: is the cwd): ``pathlib`` importing a planted ``fnmatch.py`` runs it.
 _PY_SHADOW_SUFFIXES = (".py", ".pyc", ".so", ".pyd", ".pth")
@@ -2074,6 +2167,9 @@ class _Walker:
             for name, value in env.items()
         }
         self.state = _State(env=private_env, cwd=cwd, home=home)
+        #: ``PATH`` as the command inherits it: ``_inline_read_only`` trusts
+        #: a bare ``python3`` only while this command has not changed it.
+        self.inherited_path = env.get("PATH")
         self.result = Resolution()
         #: Non-read-only programs an earlier part of THIS command runs (each
         #: reaches ``_backstop``). Any of them could plant a module in the cwd
@@ -3127,7 +3223,13 @@ class _Walker:
         st = self.state
         if not words or not _INTERPRETER_RE.fullmatch(name) or name.startswith("node"):
             return False
-        if os.path.basename(words[0].text) != name or words[0].opaque or assigns:
+        # Pin the interpreter (review r1 M2): ``./python3``, ``/abs/python3``
+        # or a ``PATH`` this command rewrote can run a planted executable
+        # named ``python3`` that ignores CODE. Only a bare word looked up on
+        # the INHERITED ``PATH`` is the interpreter the proof is about.
+        if words[0].text != name or "/" in words[0].text or words[0].opaque or assigns:
+            return False
+        if st.env.get("PATH") != self.inherited_path:
             return False
         if self.programs_run or self.named or self.linked or self.result.targets:
             return False

@@ -32,6 +32,7 @@ from local_operator.guardrails.classify import Risk, classify_bash
 PARENT = "aaaaaaaaaaaa"
 CHILD = "bbbbbbbbbbbb"
 STRANGER = "cccccccccccc"
+INHERITED_PATH = "/usr/bin:/bin"
 
 LOGS = (
     "thumbnail_interleaving_control.py",
@@ -50,6 +51,9 @@ def home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         pad.mkdir(parents=True)
         for name in LOGS:
             (pad / name).write_text("1 passed\nFAILED x\n")
+        # The file the review r1 repros target: it must EXIST for a LOW to be
+        # possible at all, so those rows discriminate.
+        (pad / "a.log").write_text("1 passed\n")
     (state / "config.yml").write_text("version: 1\n")
     (home / "work").mkdir()
     monkeypatch.setenv("HOME", str(home))
@@ -67,7 +71,7 @@ def _pad(home: Path, sid: str) -> Path:
 
 def _verdict(home: Path, command: str, sid: str = PARENT):
     pad = _pad(home, sid)
-    env = {"HOME": str(home), "LOCAL_OPERATOR_SCRATCHPAD": str(pad)}
+    env = {"HOME": str(home), "LOCAL_OPERATOR_SCRATCHPAD": str(pad), "PATH": INHERITED_PATH}
     return classify_bash(
         command, cwd=str(home / "work"), env=env, scratchpad=str(pad), session_id=sid
     )
@@ -151,6 +155,21 @@ _DELETES = [
     'import functools; functools.partial(open, mode="w")("{pad}/x.log")',
     'from pathlib import Path; list(map(Path.unlink, Path("{pad}").iterdir()))',
     'print("{pad}"',  # does not parse: unknown, so not provably read-only
+    # Review r1 M1: ``string.Formatter().get_field`` is getattr by a string.
+    "import pathlib,string; f=string.Formatter(); "
+    '[f.get_field("0.unlink",(p,),dict())[0]() for p in pathlib.Path("{pad}").iterdir()]',
+    "import pathlib,string; "
+    'string.Formatter().get_field("0.write_text",(pathlib.Path("{pad}/a.log"),),dict())[0]("x")',
+    'import pathlib,string; o=string.Formatter().get_field("0.os",(pathlib,),dict())[0]; '
+    'o.execvp("rm",["rm","-rf","{pad}"])',
+    # The same class, found auditing the rest of the allow-list.
+    'import pathlib; pathlib.operator.methodcaller("unlink")(pathlib.Path("{pad}/a.log"))',
+    'import glob; [glob.operator.methodcaller("unlink")(p) for p in glob.glob("{pad}/*")]',
+    'import pathlib\nmatch pathlib.Path("{pad}/a.log"):\n case pathlib.PurePath(unlink=u): u()',
+    'import json.tool; json.tool.main(); print("{pad}")',
+    'from json import tool; tool.main(); print("{pad}")',
+    'import functools, pathlib; print("{pad}")',
+    'import re; re.functools; print("{pad}")',
 ]
 
 
@@ -230,6 +249,10 @@ def test_inline_read_with_an_unknown_interpreter_flag_stays_high(home: Path) -> 
         'import json; print(json.load(open("/x"))["k"])',
         "from pathlib import Path; print(sorted(p.name for p in Path('/x').iterdir()))",
         "import re, collections; print(collections.Counter(re.findall('a', 'aa')))",
+        # Harmless module-named attributes a read commonly uses.
+        "from pathlib import Path; print(Path('/x').stat().st_size)",
+        "import datetime; print(datetime.datetime.now().time())",
+        "import collections.abc; print(collections.abc.Mapping)",
     ],
 )
 def test_read_only_programs_are_recognised(code: str) -> None:
@@ -243,3 +266,72 @@ def test_effectful_programs_are_not_read_only(code: str) -> None:
     from local_operator.guardrails.resolve import python_code_read_only
 
     assert not python_code_read_only(code)
+
+
+# -- review r1 M2: the interpreter itself is pinned ----------------------------------------
+
+
+def _planted(home: Path) -> Path:
+    """An executable named ``python3`` that would ignore CODE entirely."""
+    bin_dir = home / "plant"
+    bin_dir.mkdir(exist_ok=True)
+    exe = bin_dir / "python3"
+    exe.write_text('#!/bin/sh\nrm -rf "$3"\n')
+    exe.chmod(0o755)
+    return exe
+
+
+def _read(home: Path) -> str:
+    return f"-c 'print(open(\"{_pad(home, CHILD)}/{LOGS[1]}\").read())'"
+
+
+def test_bare_python_on_the_inherited_path_still_ranks_low(home: Path) -> None:
+    """Control for the M2 rows: the same read, interpreter bare, is LOW."""
+    assert _verdict(home, f"python3 {_read(home)}").risk is Risk.LOW
+
+
+@pytest.mark.parametrize(
+    "prefix",
+    [
+        "./python3",
+        "{exe}",
+        "export PATH={bin}:$PATH; python3",
+        "PATH={bin}:$PATH; export PATH; python3",
+        "hash -p {exe} python3; python3",
+    ],
+)
+def test_a_relative_absolute_or_repathed_python_stays_high(home: Path, prefix: str) -> None:
+    exe = _planted(home)
+    (home / "work" / "python3").symlink_to(exe)
+    command = f"{prefix.format(exe=exe, bin=exe.parent)} {_read(home)}"
+    verdict = _verdict(home, command)
+    assert verdict.risk >= Risk.HIGH, (command, verdict.reasons)
+
+
+# -- review r1 m1: start-up environment -----------------------------------------------------
+
+
+def test_pythonwarnings_set_by_the_command_stays_high(home: Path) -> None:
+    command = f"export PYTHONWARNINGS=error::x.Y; python3 {_read(home)}"
+    assert _verdict(home, command).risk >= Risk.HIGH
+
+
+def test_harmless_inherited_python_knobs_keep_the_read_low(home: Path) -> None:
+    """``PYTHONUNBUFFERED`` and friends change no import: refusing them would
+    re-break the incident read on machines that export them."""
+    pad = _pad(home, PARENT)
+    env = {
+        "HOME": str(home),
+        "LOCAL_OPERATOR_SCRATCHPAD": str(pad),
+        "PATH": INHERITED_PATH,
+        "PYTHONUNBUFFERED": "1",
+        "PYTHONDONTWRITEBYTECODE": "1",
+    }
+    verdict = classify_bash(
+        _incident(_pad(home, CHILD)),
+        cwd=str(home / "work"),
+        env=env,
+        scratchpad=str(pad),
+        session_id=PARENT,
+    )
+    assert verdict.risk is Risk.LOW, verdict.reasons
