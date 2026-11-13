@@ -87,7 +87,15 @@ async def amain(port: int = DEFAULT_PORT) -> int:
     push_lane = build_push_lane(_push_config_dir()) if dial else None
     if push_lane is not None:
         logger.info("mobile push armed for tunnel %s", push_lane.transport.computer)
-    daemon = MobileDaemon(port=port, password=password, dial_registrants=dial, push_lane=push_lane)
+    # The factory lets the scan arm the lane when `lop tunnel create` runs after
+    # this daemon started; an observer gets none, for the reason above.
+    daemon = MobileDaemon(
+        port=port,
+        password=password,
+        dial_registrants=dial,
+        push_lane=push_lane,
+        push_lane_factory=(lambda: build_push_lane(_push_config_dir())) if dial else None,
+    )
     # Follow ``display.*`` writes made by other processes (design review round 1
     # on #1746, D1/D2): the daemon's durable folds read the process-cached
     # display flags, and without this subscriber a running daemon keeps the
