@@ -25,7 +25,7 @@ USAGE
         --out /tmp/tb-eval-baseline --max-usd 12
 
     # Control A against a REAL hub (the shipped client, sends proved by peer read-back).
-    # The runbook is docs/evidence/team-bridge-hub-arm.md; leak counts stay per arm.
+    # The runbook is evals/team_bridge_moderation/HUB_ARM.md; leak counts stay per arm.
     python scripts/eval_bridge_moderation.py --arm hub --hub-state /tmp/tb-rig-state.json \\
         --model radient/anthropic/claude-opus-5-5 --max-usd 3 --out /tmp/tb-hub-arm
 
@@ -212,7 +212,7 @@ def _build_parser() -> argparse.ArgumentParser:
         metavar="PATH",
         help=(
             "the rig's published state file (url, tenant, tokens, accounts, endpoints). "
-            "Required by --arm hub: see docs/evidence/team-bridge-hub-arm.md"
+            "Required by --arm hub: see evals/team_bridge_moderation/HUB_ARM.md"
         ),
     )
     parser.add_argument(

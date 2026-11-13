@@ -35,20 +35,17 @@ def _seed_omp() -> Path:
     return root
 
 
-async def _settle(pilot, predicate, *, turns: int = 200) -> None:
-    for _ in range(turns):
-        if predicate():
-            return
-        await pilot.pause()
-    raise AssertionError("condition did not settle")
-
-
 async def _open_import(pilot) -> HarnessImportView:
     app = pilot.app
     app._run_slash_command("/import")
     await pilot.pause()
     view = app.query_one(HarnessImportView)
-    await _settle(pilot, lambda: view._state == "sources")
+    await settle(
+        pilot,
+        lambda: view._state == "sources",
+        what="harness-import view reached _state == 'sources'",
+        workers=("harness-import",),
+    )
     await pilot.pause()
     return view
 
@@ -102,17 +99,39 @@ async def test_sessions_require_selection_preview_and_confirmation() -> None:
         view = await _open_omp(pilot)
         # No selection: Enter is refused, not a silent import.
         await pilot.press("enter")
-        await _settle(pilot, lambda: view._state == "empty")
+        await settle(
+            pilot,
+            lambda: view._state == "empty",
+            what="harness-import view reached _state == 'empty'",
+            workers=("harness-import",),
+        )
         assert "Select at least one session" in _plain(view._body_text)
         await pilot.press("escape")
-        await _settle(pilot, lambda: view._state == "sessions")
+        await settle(
+            pilot,
+            lambda: view._state == "sessions",
+            what="harness-import view reached _state == 'sessions'",
+        )
         await pilot.press("space")
         await pilot.press("enter")
-        await _settle(pilot, lambda: view._state == "preview")
+        await settle(
+            pilot,
+            lambda: view._state == "preview",
+            what="harness-import view reached _state == 'preview'",
+            workers=("harness-import",),
+        )
         assert "Nothing has been imported" in _plain(view._body_text)
         await pilot.press("enter")
-        await _settle(pilot, lambda: view._state in ("progress", "result"))
-        await _settle(pilot, lambda: view._state == "result")
+        await settle(
+            pilot,
+            lambda: view._state in ("progress", "result"),
+            what="harness-import view reached _state in ('progress', 'result')",
+        )
+        await settle(
+            pilot,
+            lambda: view._state == "result",
+            what="harness-import view reached _state == 'result'",
+        )
         result_text = _plain(view._body_text)
         assert "Result" in result_text
         assert "imported" in result_text
@@ -129,15 +148,28 @@ async def test_import_status_and_cancel_use_the_shared_job_registry() -> None:
         view = await _open_omp(pilot)
         await pilot.press("space")
         await pilot.press("enter")
-        await _settle(pilot, lambda: view._state == "preview")
+        await settle(
+            pilot,
+            lambda: view._state == "preview",
+            what="harness-import view reached _state == 'preview'",
+            workers=("harness-import",),
+        )
         await pilot.press("enter")
         # The fixture is tiny, so the import can finish before the next pause.
         # Cancel only if the page is still in flight; either way it must settle
         # through the shared registry rather than crash.
-        await _settle(pilot, lambda: view._state in ("progress", "result"))
+        await settle(
+            pilot,
+            lambda: view._state in ("progress", "result"),
+            what="harness-import view reached _state in ('progress', 'result')",
+        )
         if view._state == "progress":
             await pilot.press("c")
-        await _settle(pilot, lambda: view._state == "result")
+        await settle(
+            pilot,
+            lambda: view._state == "result",
+            what="harness-import view reached _state == 'result'",
+        )
         assert view._job is not None
 
 
@@ -190,13 +222,22 @@ async def test_cancel_in_the_queued_window_ends_cancelled_with_no_rows() -> None
         view = await _open_omp(pilot)
         await pilot.press("space")
         await pilot.press("enter")
-        await _settle(pilot, lambda: view._state == "preview")
+        await settle(
+            pilot,
+            lambda: view._state == "preview",
+            what="harness-import view reached _state == 'preview'",
+            workers=("harness-import",),
+        )
         # ``_start`` schedules the service task; cancel before the event loop
         # gives it a turn, which is the queued window a route/tool cancel must
         # preserve.
         view._start()
         view._cancel()
-        await _settle(pilot, lambda: view._state == "result")
+        await settle(
+            pilot,
+            lambda: view._state == "result",
+            what="harness-import view reached _state == 'result'",
+        )
         assert view._job is not None
         assert view._job.progress.state == "cancelled"
         assert view._job.result is not None
@@ -213,7 +254,11 @@ async def test_status_without_a_job_is_an_explicit_error(monkeypatch) -> None:
         app._run_slash_command("/import status")
         await pilot.pause()
         view = app.query_one(HarnessImportView)
-        await _settle(pilot, lambda: view._state == "error")
+        await settle(
+            pilot,
+            lambda: view._state == "error",
+            what="harness-import view reached _state == 'error'",
+        )
         assert "No import job found" in _plain(view._body_text)
 
 
@@ -301,15 +346,28 @@ async def test_cancel_command_reattaches_and_arms_the_poll(monkeypatch) -> None:
         view = await _open_omp(pilot)
         await pilot.press("space")
         await pilot.press("enter")
-        await _settle(pilot, lambda: view._state == "preview")
+        await settle(
+            pilot,
+            lambda: view._state == "preview",
+            what="harness-import view reached _state == 'preview'",
+            workers=("harness-import",),
+        )
         await pilot.press("enter")
-        await _settle(pilot, lambda: view._state == "progress")
+        await settle(
+            pilot,
+            lambda: view._state == "progress",
+            what="harness-import view reached _state == 'progress'",
+        )
         app._close_import_view()
         await pilot.pause()
         app._run_slash_command("/import cancel")
         await pilot.pause()
         view = app.query_one(HarnessImportView)
-        await _settle(pilot, lambda: view._state == "result")
+        await settle(
+            pilot,
+            lambda: view._state == "result",
+            what="harness-import view reached _state == 'result'",
+        )
         assert view._job is not None
         assert view._job.progress.state == "cancelled"
         assert "cancelled" in _plain(view._body_text)
@@ -387,14 +445,20 @@ async def test_source_and_session_rows_are_clickable() -> None:
         for index, source in enumerate(("claude", "codex", "omp")):
             click_line(leading + index * 2)
             await pilot.pause()
-            await _settle(
+            await settle(
                 pilot,
                 lambda: view._state in ("sessions", "empty"),
+                what=f"harness-import view opened the {source} source",
+                workers=("harness-import",),
             )
             assert view._source == source
             if source != "omp":
                 await pilot.press("escape")
-                await _settle(pilot, lambda: view._state == "sources")
+                await settle(
+                    pilot,
+                    lambda: view._state == "sources",
+                    what="harness-import view reached _state == 'sources'",
+                )
 
         # Session title, meta and cwd lines all resolve to their own row.
         for line, expected in ((leading, 0), (leading + 4, 1), (leading + 5, 1)):

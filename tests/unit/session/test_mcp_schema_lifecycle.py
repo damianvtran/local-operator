@@ -367,3 +367,64 @@ async def test_a_child_publishes_only_the_parents_live_set_and_resolves_demoted_
     assert restricted._resolve_tool_outside_inventory(SMALL_NAME) is None
     await restricted.dispose()
     await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_an_invalid_call_to_a_deferred_mcp_tool_hints_a_tool_doc_that_serves_its_schema(
+    tmp_path, monkeypatch
+) -> None:
+    """Q1 (#3749 follow-up): the loop's invalid-argument hint must lead somewhere.
+
+    A deferred MCP tool is dispatchable through the fallback resolver but absent
+    from ``session._tools``, so ``read tool://<name>`` used to answer ``Unknown
+    tool``. It must now render the schema — and, because the array is the
+    prompt-cache prefix, neither the invalid call nor the doc read may publish
+    the schema: every request of both turns carries no MCP tool.
+    """
+    executed: list[str] = []
+    manager = _manager(executed)
+    hooks_box: dict[str, Any] = {}
+    docs: list[str | None] = []
+
+    async def read_execute(tool_call_id, args, signal, on_update, context):
+        url = args.get("path", "")
+        if url.startswith("mcp://"):
+            text = hooks_box["hooks"].mcp_resolver(url)
+        else:
+            text = session._skill_resolver(url)
+            docs.append(text)
+        return ToolResult(
+            tool_call_id=tool_call_id, tool_name="read", content=[TextContent(text=text or "")]
+        )
+
+    read_tool = _tool("read", executed, execute=read_execute)
+    read_tool.parameters = {"type": "object", "properties": {"path": {"type": "string"}}}
+    stream = ScriptedStream(
+        [
+            _call("read", f'{{"path": "mcp://{SERVER}/{SMALL}"}}'),
+            # ``q`` is a string in the schema: an integer fails validation.
+            _call(SMALL_NAME, '{"q": 5}', call_id="c2"),
+            _call("read", f'{{"path": "tool://{SMALL_NAME}"}}', call_id="c3"),
+            _text("done"),
+            _text("again"),
+        ]
+    )
+    session = _session(tmp_path, stream, [read_tool])
+    hooks_box["hooks"] = await _wire(session, manager, monkeypatch)
+
+    await session.prompt("look at the logs")
+    await session.prompt("next")
+
+    fault = _results(session)["c2"]
+    assert f"read tool://{SMALL_NAME}" in fault
+    assert SMALL_NAME not in executed  # the invalid call never ran
+    assert docs and docs[0] is not None
+    assert docs[0].startswith(f"# Tool: `{SMALL_NAME}`")
+    assert "Unknown tool" not in docs[0]
+    assert "`q`" in docs[0]  # the input schema's parameter is rendered
+    assert "does not add it to the list" in docs[0]
+    # Nothing published: not the invalid call, not the doc read, either turn.
+    assert [_sent(stream, i) for i in range(len(stream.requests))] == [[]] * len(stream.requests)
+    assert SMALL_NAME not in session._activated_tools
+    assert SMALL_NAME not in session._deferred_now()
+    await session.dispose()

@@ -1,6 +1,6 @@
 """The registry's wire, asserted against the frozen fixture contract.
 
-Push/ack-sync S3 (ADR 0006 §3.1/§4 @ ``b03aeb15``). ``fixtures/push/`` is the
+Push/ack-sync S3 (ADR 0006 §3.1/§4 @ ``b03aeb15``). ``tests/fixtures/push/`` is the
 contract the app and the cloud build against, so these cells drive the **real**
 routes and builders and compare their answers to the FILED literals — the same
 equality guard as the payload suite, applied to the half of the freeze this repo
@@ -43,7 +43,7 @@ from local_operator.mobile.push_devices import (
 )
 from local_operator.paths import config_dir
 
-FIXTURES = Path(__file__).resolve().parents[3] / "fixtures" / "push"
+FIXTURES = Path(__file__).resolve().parents[2] / "fixtures" / "push"
 
 _TYPES: dict[str, type] = {
     "str": str,
@@ -462,3 +462,26 @@ def test_no_registry_fixture_is_silently_unguarded(name: str) -> None:
     assert (
         "same_as" in fixture or "body_required" in fixture
     ), f"{name} declares no deny list and no exact-set body: nothing guards this shape"
+
+
+def test_the_cloud_routes_and_accept_envelope_are_pinned() -> None:
+    """S7's cloud literals (agent-server docs/SESSION-PUSH.md §1).
+
+    The three routes the transport posts to. The 202's ``{msg, result}``
+    envelope is asserted through the real transport in
+    ``test_push_transport.py`` (an accept with it, a refusal without it), not
+    restated here as a literal the test builds itself (review round 1, R5).
+    """
+    from local_operator.mobile.push_credentials import (
+        REPORT_EMIT_ROUTE,
+        REPORT_HEARTBEAT_ROUTE,
+        REPORT_REGISTER_ROUTE,
+    )
+    from local_operator.mobile.push_payload import EMIT_ROUTE, IDEMPOTENCY_HEADER
+
+    assert EMIT_ROUTE == REPORT_EMIT_ROUTE == "/v1/tunnels/{tunnel_id}/push/events"
+    assert REPORT_REGISTER_ROUTE == "/v1/push/register"
+    assert REPORT_HEARTBEAT_ROUTE == "/v1/push/credentials"
+    assert IDEMPOTENCY_HEADER == "Idempotency-Key"
+    for name in ("emit-completion.json", "emit-attention.json", "emit-digest.json"):
+        assert _fixture(name)["route"] == EMIT_ROUTE

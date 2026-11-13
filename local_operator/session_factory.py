@@ -989,6 +989,17 @@ def saved_tool_approval_is_auto(root: Path | None = None) -> bool:
         return False
 
 
+def _bridge_notice_prefix(bridge_latched: bool) -> str:
+    # No session reaches this gate (it is built before one exists), so it
+    # cannot read the latch's source kind and keeps the ``agent_message``
+    # wording -- the stronger of the two, never a looser one.
+    if not bridge_latched:
+        return ""
+    from local_operator.harness.bridge_egress import bridge_card_notice
+
+    return bridge_card_notice() + "\n"
+
+
 def _make_request_approval(yolo: bool) -> Callable[[str, str], Awaitable[bool]]:
     """Build the tool-approval gate.
 
@@ -1010,7 +1021,17 @@ def _make_request_approval(yolo: bool) -> Callable[[str, str], Awaitable[bool]]:
     """
     if yolo:
 
-        async def auto_approve(tool_name: str, description: str) -> bool:
+        async def auto_approve(
+            tool_name: str,
+            description: str,
+            *,
+            taint_raised: bool = False,
+            bridge_latched: bool = False,
+        ) -> bool:
+            # The Team Bridge flags are accepted and deliberately NOT honoured
+            # here: --yolo in a latched session is the operator's recorded
+            # accepted risk (team-bridge-egress.md: "Status"). S-38 is closed for
+            # ask mode only; accepted risk in auto/yolo.
             # --yolo approves tool calls, never an account profile save: that
             # card must reach a person (``never_auto_approved``), so it takes
             # the interactive path — a y/N on a tty, a typed refusal without.
@@ -1022,7 +1043,13 @@ def _make_request_approval(yolo: bool) -> Callable[[str, str], Awaitable[bool]]:
 
         return auto_approve
 
-    async def prompt_approval(tool_name: str, description: str) -> bool:
+    async def prompt_approval(
+        tool_name: str,
+        description: str,
+        *,
+        taint_raised: bool = False,
+        bridge_latched: bool = False,
+    ) -> bool:
         # ``sys.stdin`` is checked for ``None`` BEFORE ``isatty()`` is called
         # because a launcher or daemoniser may start the process with fd 0
         # CLOSED, and Python leaves ``sys.stdin`` as ``None`` for that shape
@@ -1083,7 +1110,10 @@ def _make_request_approval(yolo: bool) -> Callable[[str, str], Awaitable[bool]]:
             # to block on human input anyway.
             answer = await asyncio.to_thread(
                 input,
-                "Allow tool '{}' ({})? [y/N] ".format(
+                "{}Allow tool '{}' ({})? [y/N] ".format(
+                    # The y/N prompt has no allow-all to suppress; it carries
+                    # the same latched-session notice every card does (S-46).
+                    _bridge_notice_prefix(bridge_latched),
                     sanitize_prompt_line(tool_name, limit=120),
                     sanitize_prompt_line(description),
                 ),
@@ -4543,6 +4573,11 @@ def reset_store_maintenance_for_tests() -> None:
     release it before reset. The daemon flag is the final process-exit boundary,
     while this event prevents a not-yet-started test pass from entering a later
     test's temporary store.
+
+    ``_start_store_maintenance`` also starts the process-wide temporary-chat
+    sweeper, so it is stopped here too: left running, it keeps sweeping an
+    earlier test's store every cadence and its idempotence guard makes a later
+    ``start_temporary_sweeper`` in the same worker report False.
     """
     global _STORE_MAINTENANCE_THREAD, _STORE_MAINTENANCE_STOP, _STORE_MAINTENANCE_DONE
     stop_event = _STORE_MAINTENANCE_STOP
@@ -4551,6 +4586,9 @@ def reset_store_maintenance_for_tests() -> None:
     _STORE_MAINTENANCE_THREAD = None
     _STORE_MAINTENANCE_STOP = None
     _STORE_MAINTENANCE_DONE = None
+    from local_operator.session.cleanup import stop_temporary_sweeper
+
+    stop_temporary_sweeper()
 
 
 async def await_store_maintenance_for_tests() -> None:
@@ -4926,6 +4964,15 @@ def _start_store_maintenance(
     separate runtime processes sharing this config root.
     """
     global _STORE_MAINTENANCE_THREAD, _STORE_MAINTENANCE_STOP, _STORE_MAINTENANCE_DONE
+    # The temporary-chat sweeper is its own thread (idempotent per process),
+    # NOT part of this one-shot worker: temporary chats expire on a 60 s
+    # cadence whatever the delegated sweep's switch or period says.
+    try:
+        from local_operator.session.cleanup import start_temporary_sweeper
+
+        start_temporary_sweeper(config_manager, config_dir, actor="session-runtime")
+    except Exception:  # noqa: BLE001 — housekeeping never fails session start
+        logger.debug("temporary sweeper could not start", exc_info=True)
     if _STORE_MAINTENANCE_THREAD is not None:
         return
     try:
@@ -5118,6 +5165,28 @@ async def _prepare(
             created_here=fresh_directory,
             delegated_workstream=bool(getattr(args, "workstream", False)),
         )
+
+        # A TEMPORARY CHAT (`lop exec --temporary`), marked HERE for the same
+        # reason the stamp above is: this is where the directory is born. Only
+        # on a fresh directory — never adopting an existing conversation — and
+        # VERIFIED: the user asked for deletion, so a mark that did not read
+        # back fails the run before its first turn rather than silently
+        # retaining the chat.
+        if fresh_directory and getattr(args, "temporary", False):
+            from local_operator.session.temporary import write_mark
+
+            marked = write_mark(transcript_dir.parent.parent, transcript_dir.name, True, by="exec")
+            if not marked.ok:
+                from local_operator.i18n.keys import wire_errors_desktop as _wd
+                from local_operator.i18n.text import tr
+
+                raise RuntimeError(
+                    str(
+                        tr("wire.errors.desktop")(
+                            _wd.temporary_mark_failed(session_id=transcript_dir.name)
+                        )
+                    )
+                )
 
         # Stamp the store as ours. The cleanup policy refuses to remove
         # anything from an unmarked ``sessions/`` directory, and this is the
@@ -5728,7 +5797,8 @@ def _accepted_kwargs(callee: Callable[..., Any], **candidates: Any) -> dict[str,
 # used "recently" survives such a boundary. Eight runs covers a typical
 # multi-turn work burst on one task (investigate, fix, verify, report) while
 # still letting a tool from an earlier, finished task go; a wrong guess costs
-# little because a demoted tool stays callable and its URL re-shows the schema.
+# little because a demoted tool stays callable, and re-reading its URL adds it
+# back to the tool list at the next turn.
 MCP_DEMOTE_AFTER_IDLE_RUNS = 8
 
 
@@ -6092,7 +6162,10 @@ async def wire_mcp_into_session(
         not been called within ``MCP_DEMOTE_AFTER_IDLE_RUNS`` runs moves to the
         DEFERRED set. Demoted is not unresolvable: the deferred fallback
         resolver keeps serving the name, so a later call still runs — never
-        ``Tool not found`` — and re-reading the tool's URL shows its schema.
+        ``Tool not found`` — and, since only over-cap schemas are ever
+        published (so only they are demoted), re-reading the tool's URL goes
+        through the over-cap publish path and adds it back to the tool list at
+        the next turn rather than showing the schema inline.
 
         Returns whether anything moved, so the session forces a republish only
         when the array actually changed.

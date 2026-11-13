@@ -88,6 +88,8 @@ from local_operator.network import dial as session_dial
 from local_operator.network import projection, redial, store, wire
 from local_operator.network.audit import CAUSES, AuditEvent, AuditLog
 from local_operator.network.authorizer import Authorizer, NetworkState
+from local_operator.network.create_keys import CreateKeyIndex
+from local_operator.network.create_keys import normalize_key as normalize_create_key
 from local_operator.network.credentials.repair import repair_checks
 from local_operator.network.credentials.sync import sync_checks
 from local_operator.network.handshake import (
@@ -496,6 +498,7 @@ SLICE_PEER_OPS: frozenset[str] = frozenset(
     {
         "net_session_move",
         "net_sync",
+        "net_file_get",
         "net_broker",
         "net_session_lifecycle",
         "net_session_receipt",
@@ -510,6 +513,10 @@ SLICE_PEER_OPS: frozenset[str] = frozenset(
         # One peer's own relay recovery; the member answers before its
         # supervisor replaces the process, and the origin verifies on reconnect.
         "net_restart",
+        # The remote peek (network/peek.py): the owner runs the local peek's
+        # readers on its own journal. Slow by registration — a deep search may
+        # take seconds and must not hold the link reader.
+        "net_session_peek",
     }
 )
 
@@ -519,6 +526,7 @@ SLICE_LOCAL_OPS: frozenset[str] = frozenset(
     {
         "session_move",
         "session_sync",
+        "session_file_pull",
         "session_lifecycle",
         "session_receipt",
         "credential_grant",
@@ -541,6 +549,8 @@ SLICE_LOCAL_OPS: frozenset[str] = frozenset(
         # ``net_update``).
         "peer_update",
         "peer_restart",
+        # The remote peek's local half (``net_session_peek`` is the peer half).
+        "peer_session_peek",
     }
 )
 
@@ -551,6 +561,9 @@ SLICE_LOCAL_OPS: frozenset[str] = frozenset(
 SLICE_MODULES: tuple[str, ...] = (
     "local_operator.network.mobility",
     "local_operator.network.sync",
+    # The single-file pull. After ``sync`` because it reuses that module's chunk
+    # framing and containment primitives; it starts no thread of its own.
+    "local_operator.network.files",
     "local_operator.network.credentials",
     "local_operator.network.definitions",
     "local_operator.network.readiness",
@@ -570,6 +583,8 @@ SLICE_MODULES: tuple[str, ...] = (
     # thread — and it opens no record by itself: the trigger that does is
     # S3b's, so this slice ships inert in production by construction.
     "local_operator.network.rollouts",
+    # The remote peek: one slow peer op plus its local half, no threads.
+    "local_operator.network.peek",
 )
 
 #: Which link, if any, THIS thread is currently serving a request for.
@@ -1560,14 +1575,17 @@ def adopt_members(
     rows: Sequence[Any],
     *,
     sender_device_id: str = "",
+    allow_new: bool = True,
 ) -> tuple[bool, list[str]]:
     """Take a peer's member rows into this device's record. Returns (changed, added).
 
-    THE SAME TRUST DECISION THE JOIN ALREADY MAKES, made again where it is needed.
-    A joiner adopts the inviter's full member list verbatim when it pairs
-    (``network/cli.py:_persist_join``); this is that list, read again from a member
-    that holds it — not a second source of truth. The wire has exactly one
-    membership read (``net_member_list``, §6.4) and this is its merge.
+    The authenticated supplier, not a row's ``added_by`` or claimed role,
+    determines who may assert it. Resolve standing ONCE from the receiver's
+    pre-merge record: otherwise an early row could authorise a later forgery.
+    A joined member may assert its own bounded standing; only an active admin
+    may introduce another device. Unknown rows arrive only in receiver-initiated
+    pulls (``allow_new``), never in unsolicited change notifications. No new
+    wire field is needed: the link already authenticates the answering peer.
 
     THE RULES, and each one is a refusal to guess:
 
@@ -1575,9 +1593,13 @@ def adopt_members(
       never revived. Removal is the epoch path's decision (§8.1) and a peer's
       stale snapshot must not be able to undo it — the frame that carries a
       removal is a rotation, and it is the only one that can.
+    * The receiver's OWN row is never taken from a peer: this device is the
+      authority on itself, and every table carries that row, so it is skipped
+      silently rather than refused.
     * A row this device already holds keeps its LOCAL role, capabilities and
       public key. Authority is not something a peer gets to assert about a third
-      device; the row's own declaration is the only thing a peer can relay.
+      device; the row's own declaration (its endpoints) is the only thing a peer
+      can relay, and ANY active supplier may relay it (``_adopt_relayed_metadata``).
     * ONE EXCEPTION TO THAT, and it is a name: a row's ``name`` is applied from the
       frame only when the frame's SENDER is the device that row names. A name is
       the device's own statement about itself (design §3.1), the link's
@@ -1585,10 +1607,9 @@ def adopt_members(
       table may therefore rename anybody — including the rotating device, whose
       statement signs ids and the new key only. Empty and identical names are
       ignored, so this rule never erases a name and never marks a no-op changed.
-    * A row this device does NOT hold is adopted as the frame carries it, exactly
-      as an admission frame's rows are, because without it the member is invisible
-      to every surface here — listings, dialling, and the authoriser that has to
-      recognise its frames.
+    * An unknown row is adopted only from an authorised supplier in a pull.
+      Existing receiver-local authority is never overwritten by a table answer;
+      explicit grants remain receiver-local (``set_member_capabilities``).
     * A row that names one of OUR OWN rows as its past self is a ROTATION CLAIM, and
       it is the one case where this merge moves a row rather than adding one:
       the superseded row is retired, and the claim is believed only where the row
@@ -1602,6 +1623,12 @@ def adopt_members(
     """
     changed = False
     added: list[str] = []
+    sender = record.member(sender_device_id)
+    if sender is None or not sender.active:
+        return False, []
+    sender_caps = frozenset(sender.capabilities)
+    sender_role = sender.role
+    sender_is_admin = "admin" in sender_caps
     for row in rows:
         if not isinstance(row, dict):
             continue
@@ -1612,8 +1639,53 @@ def adopt_members(
         device_id = incoming.device_id
         if not device_id or device_id in record.removed_ids:
             continue
+        # THIS DEVICE IS THE AUTHORITY ON ITS OWN ROW. Every peer's table carries
+        # a row for the receiver, so this is routine, never a refusal: skip it
+        # silently, before any standing check, rather than logging one per pull.
+        if record.self_device_id and device_id == record.self_device_id:
+            continue
         existing = record.member(device_id)
+        # A table is not admission evidence. In particular, copied ``added_by``
+        # metadata cannot let a reader mint a third identity or promote itself.
+        # Keep the refusal free of supplier identity: no caller attribution leaks.
+        own_assertion = device_id == sender_device_id
+        if not own_assertion and not sender_is_admin:
+            # A signed key rotation is still the supplier speaking for itself,
+            # not a third-device grant. The predecessor's key must cover the hop.
+            proven, predecessors = _rotation_retirements(
+                record, incoming, survivor=existing or incoming
+            )
+            own_assertion = proven and any(row is sender for row in predecessors)
+            if not own_assertion:
+                # ENDPOINT RELAY SURVIVES THE STANDING CHECK for a member this
+                # device already holds: a relayed table is how a peer learns a
+                # moved device's address when it cannot reach that device itself,
+                # and in the default topology most suppliers are not admins.
+                # Taking it from a non-admin grants nothing: only the declaring
+                # device's metadata moves (never role, key, capabilities,
+                # ``previous_ids`` retirements or provenance), and a wrong relayed
+                # endpoint is harmless because every link authenticates the
+                # device's key in the handshake before anything is trusted.
+                if existing is not None:
+                    if _adopt_relayed_metadata(existing, incoming, sender_device_id):
+                        changed = True
+                    continue
+                logger.warning("Refused member row: third-device assertion requires admin standing")
+                continue
+        # A peer does not learn a receiver-local capability revoke. On an
+        # existing owned row its stale capability declaration is ignored below,
+        # not a reason to discard the endpoint/name that keeps it reachable.
+        # New identities (including signed successors) still need bounded claims;
+        # a role promotion is refused in either case. Standing stays pre-merge.
+        if own_assertion and (
+            incoming.role != sender_role
+            or (existing is None and not set(incoming.capabilities) <= sender_caps)
+        ):
+            logger.warning("Refused member row: self assertion exceeds admitted standing")
+            continue
         if existing is None:
+            if not allow_new:
+                continue
             adopt, retired = _rotation_retirements(record, incoming, survivor=incoming)
             if not adopt:
                 continue
@@ -1634,21 +1706,8 @@ def adopt_members(
             added.append(device_id)
             changed = True
             continue
-        # The address list is the declaring device's OWN answer, relayed: it is
-        # the only thing a third party can pass on that this device cannot see for
-        # itself, and the row it lands on is the only place `_ensure_link` dials.
-        if incoming.endpoints and list(existing.endpoints) != list(incoming.endpoints):
-            existing.endpoints = list(incoming.endpoints)
+        if _adopt_relayed_metadata(existing, incoming, sender_device_id):
             changed = True
-        # RULE N1 (naming design §3.3): the name is applied only from the device the
-        # row NAMES. ``sender_device_id`` is the link's authenticated peer id, so no
-        # signature or wire op is needed for a cosmetic label — and a third device,
-        # including one relaying somebody else's table, cannot rename a device here.
-        if sender_device_id and incoming.device_id == sender_device_id and incoming.name:
-            accepted = _accepted_name(incoming.name, existing.name, source=sender_device_id)
-            if accepted != existing.name:
-                existing.name = accepted
-                changed = True
         # THE SAME RETIREMENT RUNS HERE, against the row this record already holds as
         # the successor: a record that learned the rotated row before it had the
         # proof (or from a build without one) still retires the row the proof covers
@@ -1658,6 +1717,37 @@ def adopt_members(
             _retire_superseded_rows(record, retired, survivor=existing)
             changed = True
     return changed, added
+
+
+def _adopt_relayed_metadata(
+    existing: MemberRecord, incoming: MemberRecord, sender_device_id: str
+) -> bool:
+    """Apply a peer row's relayable metadata to a row this device holds. Returns changed.
+
+    THE ONE METADATA PATH for an existing row, whatever the supplier's standing:
+    the supplier's own row, a row from an admin, and a known third device's row
+    relayed by a read/drive member all land here, so they cannot drift apart.
+    It moves ``endpoints`` and (rule N1) the supplier's own ``name`` and nothing
+    else — authority fields stay receiver-local (``SYNC_DIGEST_LOCAL_FIELDS``),
+    and rotation retirements are the caller's decision because they need standing.
+    """
+    changed = False
+    # The address list is the declaring device's OWN answer, relayed: it is
+    # the only thing a third party can pass on that this device cannot see for
+    # itself, and the row it lands on is the only place `_ensure_link` dials.
+    if incoming.endpoints and list(existing.endpoints) != list(incoming.endpoints):
+        existing.endpoints = list(incoming.endpoints)
+        changed = True
+    # RULE N1 (naming design §3.3): the name is applied only from the device the
+    # row NAMES. ``sender_device_id`` is the link's authenticated peer id, so no
+    # signature or wire op is needed for a cosmetic label — and a third device,
+    # including one relaying somebody else's table, cannot rename a device here.
+    if sender_device_id and incoming.device_id == sender_device_id and incoming.name:
+        accepted = _accepted_name(incoming.name, existing.name, source=sender_device_id)
+        if accepted != existing.name:
+            existing.name = accepted
+            changed = True
+    return changed
 
 
 def _own_relay_listen(root: Path | None) -> dict[str, Any]:
@@ -4252,16 +4342,96 @@ def session_history_reply_bytes(req: Any, detail: dict[str, Any]) -> int:
     )
 
 
+def bounded_history_entry(entry: Any, max_bytes: int) -> Any:
+    """One stored-journal row cut to fit ``max_bytes``, with its identity kept.
+
+    The wire row is ``{id, ts, type, payload, …}``; everything but ``payload`` is
+    small coordinates and is kept verbatim, so ``before_id`` paging and dedupe by
+    id are unaffected. A message payload keeps its role, id, timestamp and the
+    tool-call/tool-result identity the renderer pairs cards by, and its body
+    becomes a text preview plus the same marker the live view uses
+    (``history_window.TRUNCATED_ENTRY_MARKER``) — one sentence for one condition,
+    whichever path served the row. Any other payload (a ``CustomMessage``) keeps
+    only its identity — ``kind``, ``custom_type``, ``attribution``, ``id`` — and carries
+    the marker in ``details`` (and in ``content`` when that was a string). Never
+    mutates ``entry``.
+    """
+    from local_operator.session.history_window import (
+        TRUNCATED_ENTRY_MARKER,
+        _text_prefix_within,
+    )
+
+    if not isinstance(entry, dict) or not isinstance(entry.get("payload"), dict):
+        return entry
+    payload = entry["payload"]
+    size = len(json.dumps(entry, separators=(",", ":"), ensure_ascii=False).encode("utf-8"))
+    marker = TRUNCATED_ENTRY_MARKER.format(size=size)
+    if "role" in payload:
+        text = "".join(
+            str(block.get("text") or "")
+            for block in payload.get("content") or []
+            # The journal encoder omits a block's DEFAULT ``type`` ("text"),
+            # so an absent type is a text block too.
+            if isinstance(block, dict) and block.get("type", "text") == "text"
+        )
+        preview = _text_prefix_within(text, max(0, max_bytes // 2))
+        kept = {
+            key: payload[key]
+            for key in (
+                "role",
+                "id",
+                "timestamp",
+                "tool_call_id",
+                "tool_name",
+                "is_error",
+                "stop_reason",
+            )
+            if key in payload
+        }
+        kept["content"] = [
+            {"type": "text", "text": f"{preview}\n\n{marker}" if preview else marker}
+        ]
+        calls = payload.get("tool_calls")
+        if isinstance(calls, list):
+            kept["tool_calls"] = [
+                {"id": call.get("id"), "name": call.get("name"), "arguments": {}}
+                for call in calls
+                if isinstance(call, dict)
+            ]
+        cut = kept
+    else:
+        # AN ALLOW-LIST, like the role branch above, not "everything but
+        # details": a ``CustomMessage`` is ``extra="allow"``, so its bulk can
+        # sit in a list ``content`` or any extra key. Keeping those would leave
+        # the row oversized and surface as the misleading "metadata is too
+        # large" refusal; only identity is needed to render and page past it.
+        # ``kind`` IS part of that identity: a stored ``CustomMessage`` row is
+        # ``type: "message"`` with ``payload.kind: "custom"``, and both readers
+        # (``transcript._entry_to_message`` and the desktop reducer) default a
+        # missing kind to a plain message — the row then fails to decode and
+        # vanishes instead of showing the marker (R2-1).
+        cut = {
+            key: payload[key]
+            for key in ("kind", "custom_type", "attribution", "id")
+            if key in payload
+        }
+        cut["details"] = {"truncated": marker}
+        if isinstance(payload.get("content"), str):
+            cut["content"] = marker
+    return {**entry, "payload": cut}
+
+
 def fit_session_history_reply(req: Any, detail: dict[str, Any]) -> dict[str, Any]:
     """``detail`` cut to as many of its entries as fit ONE link record (R1-1).
 
     Keeps the NEWEST rows: the page is the TAIL of the requested window, so the
     rows dropped are its oldest and the reader reaches them with the same
     ``before_id`` cursor it pages with — a partial page with ``has_more: True``
-    and no gap. If not even the newest single row fits, this raises a NAMED
-    per-op refusal (``page_too_large``): the reader cannot be served rows this
-    frame physically cannot carry, and the one answer that must never come back
-    is a torn-down link.
+    and no gap. If not even the newest single row fits, that row is served in
+    a bounded, marked form (:func:`bounded_history_entry`) rather than refusing
+    the page; only metadata that cannot fit raises the NAMED per-op refusal
+    (``page_too_large``), and the one answer that must never come back is a
+    torn-down link.
 
     A page that already fits — every ordinary page — is returned untouched.
     """
@@ -4274,31 +4444,46 @@ def fit_session_history_reply(req: Any, detail: dict[str, Any]) -> dict[str, Any
         raise MeshRefusal(
             "page_too_large", "this page's metadata is too large to serve over the mesh"
         )
-    # Trimming means older rows are being left behind, and ``has_more`` must say
-    # so rather than let the reader believe it reached the end of the window.
-    bounded = {**detail, "has_more": True}
-    if (
-        session_history_reply_bytes(req, {**bounded, "entries": entries[-1:]})
-        > SESSION_HISTORY_REPLY_BUDGET_BYTES
-    ):
-        raise MeshRefusal(
-            "page_too_large",
-            "this conversation has a single entry too large to serve over the mesh; "
-            "open it on the device that holds it",
-        )
-    # MONOTONE in the rows kept, so the largest fitting suffix is found in
-    # O(log limit) serializations rather than one per row.
+    # HONEST ``has_more``: true when older rows are left behind (the reader pages
+    # back for them with the same ``before_id`` cursor) or the window already had
+    # more. Truncating the newest row in place drops NO row, so a page that keeps
+    # every entry must not claim more — a reader would page back into nothing.
+    # Each candidate is sized WITH the value it would ship, so the reply measured
+    # is byte-for-byte the reply sent (``true``/``false`` differ by one byte).
+    already_more = bool(detail.get("has_more"))
+
+    def candidate(kept: int) -> dict[str, Any]:
+        return {
+            **detail,
+            "has_more": already_more or kept < len(entries),
+            "entries": entries[-kept:],
+        }
+
+    if session_history_reply_bytes(req, candidate(1)) > SESSION_HISTORY_REPLY_BUDGET_BYTES:
+        # ONE ROW LARGER THAN THE RECORD used to refuse the WHOLE page, so a
+        # conversation whose newest entry was a huge paste or tool result could
+        # not be read from any other device at all. The row is served instead
+        # in a bounded, explicitly marked form (identity kept, body cut — see
+        # ``bounded_history_entry``): the reader still pages from its id, so
+        # the window stays gap-free, and the marker names the remedy.
+        entries[-1] = bounded_history_entry(entries[-1], SESSION_HISTORY_REPLY_BUDGET_BYTES // 4)
+        if session_history_reply_bytes(req, candidate(1)) > SESSION_HISTORY_REPLY_BUDGET_BYTES:
+            # Only the envelope can still be too large here (the bounded row
+            # is ≤ budget/4), which is the metadata refusal above in another hat.
+            raise MeshRefusal(
+                "page_too_large", "this page's metadata is too large to serve over the mesh"
+            )
+    # MONOTONE in the rows kept (a row outweighs the one-byte ``has_more``
+    # flip), so the largest fitting suffix is found in O(log limit)
+    # serializations rather than one per row.
     low, high = 1, len(entries)
     while low < high:
         mid = (low + high + 1) // 2
-        if (
-            session_history_reply_bytes(req, {**bounded, "entries": entries[-mid:]})
-            <= SESSION_HISTORY_REPLY_BUDGET_BYTES
-        ):
+        if session_history_reply_bytes(req, candidate(mid)) <= SESSION_HISTORY_REPLY_BUDGET_BYTES:
             low = mid
         else:
             high = mid - 1
-    return {**bounded, "entries": entries[-low:]}
+    return candidate(low)
 
 
 #: How long the OWNING relay waits for a created session's first turn to settle
@@ -5448,6 +5633,21 @@ def warm_open_frame_strip_now() -> None:
         logger.debug("open-frame strip warm failed", exc_info=True)
 
 
+#: How long a requester waits for ``net_session_create_lookup`` after a create's
+#: reply was lost. A read of one in-memory/JSON index on the owner; the bound is
+#: the link round trip, not work — and the device just failed to answer once.
+CREATE_LOOKUP_TIMEOUT_S = 10.0
+
+
+class _PeerNoReply(MeshRefusal):
+    """A peer op whose request was sent and whose reply never arrived.
+
+    Same ``peer_unreachable`` code as before for every existing reader; its own
+    type so a caller whose op may have ACTED on the far side (a create) can tell
+    "no answer" from "never asked".
+    """
+
+
 class RelayServer:
     """The listener, the links, the dispatch, and the loopback control surface."""
 
@@ -5620,6 +5820,9 @@ class RelayServer:
             "net_forward": self._op_forward,
             "net_stream": self._op_stream,
             "net_session_create": self._op_session_create,
+            # The read-only half of create idempotency: "did my key make a
+            # session?", asked once by a requester that lost the create's reply.
+            "net_session_create_lookup": self._op_session_create_lookup,
             "net_session_engage": self._op_session_engage,
             "net_session_stop": self._op_session_stop,
             # The stored-journal read beside them: same session plane, same
@@ -5668,8 +5871,16 @@ class RelayServer:
         #: out on its next timer (the definitions syncer's first-contact nudge).
         self._slice_link_up_hooks: list[tuple[str, Callable[[PeerLink], Any]]] = []
         self._slow_lock = threading.Lock()
+        #: ``(requester, create_key) -> session id`` for creates made HERE at a
+        #: peer's request; see ``network/create_keys.py`` for why.
+        self._create_keys = CreateKeyIndex(self.root)
         self._slow_pool: ThreadPoolExecutor | None = None
         self._slow_slots: threading.BoundedSemaphore | None = None
+        #: Devices with a peer-regex peek in flight here (``network.peek.
+        #: peer_regex_device``, PR #3831 QA Q5): at most one each, so one
+        #: member's burst of bad patterns cannot take the shared slow lane.
+        self._peer_regex_lock = threading.Lock()
+        self._peer_regex_inflight: set[str] = set()
         #: The create lane (``SESSION_CREATE_WORKERS``), under the same lock.
         self._create_pool: ThreadPoolExecutor | None = None
         self._create_slots: threading.BoundedSemaphore | None = None
@@ -6568,7 +6779,9 @@ class RelayServer:
             link.member_snapshot_sequence = sequence
         return ""
 
-    def _adopt_member_rows(self, link: PeerLink, rows: list[Any]) -> bool:
+    def _adopt_member_rows(
+        self, link: PeerLink, rows: list[Any], *, allow_new: bool = True
+    ) -> bool:
         """Use the SAME authority-preserving merge for answers and change pushes."""
         # THE MERGE IS A READ-MODIFY-WRITE of the member table, so it reads inside
         # the lock: ``adopt_members`` merges INTO the record it is handed, so a
@@ -6576,7 +6789,9 @@ class RelayServer:
         # be merged away — reverted on disk, with the higher sequence ``save``
         # stamps hiding it.
         with store.mutate(link.network_id, self.root) as record:
-            changed, added = adopt_members(record, rows, sender_device_id=link.device_id)
+            changed, added = adopt_members(
+                record, rows, sender_device_id=link.device_id, allow_new=allow_new
+            )
             link.member_pull_added = list(added)
             if not changed:
                 return False
@@ -8062,8 +8277,34 @@ class RelayServer:
         """
         req = frame.get("req")
         op = granted.action
+        # ONE PEER REGEX PER DEVICE, decided before a slot or a worker is taken
+        # (PR #3831 QA Q5): a cap inside the handler would already hold the
+        # worker it is meant to protect. Released when the WORKER finishes, not
+        # when the overdue answer leaves — the worker is what was being spent.
+        from local_operator.network import peek as net_peek
+
+        regex_device = net_peek.peer_regex_device(link, frame)
+        if regex_device is not None:
+            with self._peer_regex_lock:
+                busy = regex_device in self._peer_regex_inflight
+                if not busy:
+                    self._peer_regex_inflight.add(regex_device)
+            if busy:
+                return wire.refusal_frame(
+                    req,
+                    net_peek.PEER_REGEX_BUSY_SENTENCE.format(
+                        owner=self._own_label(), budget=net_peek.PEER_REGEX_BUDGET_S
+                    ),
+                )
+
+        def _release_regex() -> None:
+            if regex_device is not None:
+                with self._peer_regex_lock:
+                    self._peer_regex_inflight.discard(regex_device)
+
         pool, slots = self._slow_executor(op)
         if not slots.acquire(blocking=False):
+            _release_regex()
             return wire.refusal_frame(
                 req,
                 f"this device is already running {SLOW_OP_MAX_PENDING} long operations "
@@ -8114,6 +8355,7 @@ class RelayServer:
             finally:
                 timer.cancel()
                 slots.release()
+                _release_regex()
 
         try:
             timer.start()
@@ -8122,6 +8364,7 @@ class RelayServer:
             # The pool refuses new work once ``stop`` has shut it down.
             timer.cancel()
             slots.release()
+            _release_regex()
             return wire.refusal_frame(req, f"this device's relay is stopping; {op} was not started")
         return None
 
@@ -8538,8 +8781,29 @@ class RelayServer:
                 "name": self._own_label(),
             },
             "generated_at": time.time(),
-            "sessions": self.local_session_rows(),
+            "sessions": self._rows_for_viewer(link),
         }
+
+    def _rows_for_viewer(self, link: PeerLink) -> list[dict[str, Any]]:
+        """The catalogue rows as THIS link's viewer may see them.
+
+        ``local_session_rows`` stays viewer-blind (the federated listing, the
+        row lookups and the local surfaces call it); only the PEER catalogue op
+        knows who is asking, so the origin-only completion/notice fields are
+        added here (``notifications/remote_attention``). Both conditions are the
+        authenticated link's: the viewer advertised ``REMOTE_ATTENTION_V1`` (an
+        older viewer gets the exact rows it always did), and the per-row origin
+        match on ``link.device_id`` happens inside the stamp — so one member can
+        never read another member's completions by asking.
+        """
+        rows = self.local_session_rows()
+        if wire.REMOTE_ATTENTION_V1 in link.capabilities:
+            from local_operator.notifications.remote_attention import (
+                stamp_rows_for_viewer,
+            )
+
+            stamp_rows_for_viewer(self.root, rows, str(link.device_id or ""))
+        return rows
 
     def local_session_rows(self) -> list[dict[str, Any]]:
         """This device's rows: every LIVE session, then every stored one.
@@ -8915,7 +9179,19 @@ class RelayServer:
             with link.member_table_lock:
                 if sequence <= link.member_snapshot_sequence:
                     return None  # Already applied, or overtaken by a newer pull/push.
-                changed = self._adopt_member_rows(link, rows)
+                # A push can refresh known rows, but only a solicited answer may
+                # introduce identities. Leave its sequence unsettled so the next
+                # pull actually obtains those rows instead of accepting a digest.
+                has_unknown = any(
+                    isinstance(row, dict) and record.member(str(row.get("device_id", ""))) is None
+                    for row in rows
+                )
+                changed = self._adopt_member_rows(link, rows, allow_new=False)
+                if has_unknown:
+                    link.member_push_unverified = True
+                    link.member_pull_interval_s = MEMBERSHIP_PULL_MIN_INTERVAL_S
+                    self._membership_wake.set()
+                    return None
                 link.member_snapshot_sequence = sequence
                 # Record revisions also advance for liveness/metadata. A late
                 # snapshot that changes no mergeable row must not undo an equal
@@ -9287,6 +9563,7 @@ class RelayServer:
         for other in victims:
             other.send({"op": "net_bye", "reason": "untrusted"})
             other.close("we-closed")
+        self._revoke_lent_on_panic(record.network_id)
         # ``None`` rather than the frame above: the dispatcher's own ack would be a
         # second reply with the same ``req``, queued after the link is closed so it
         # can never be written, and a duplicate reply on the wire is the shape the
@@ -9461,6 +9738,50 @@ class RelayServer:
             }
         return {"op": "ack", "req": outer_req, "detail": {"frame": reply}}
 
+    def _create_replay_reply(self, session_id: str, create_key: str) -> dict[str, Any]:
+        """The answer to a create whose key already made ``session_id`` here.
+
+        Deliberately NOT the original reply: that one carried the first turn's
+        admission, which this side does not re-run (re-running it is the duplicate
+        this exists to prevent). ``replayed`` says so; ``admitted`` is False because
+        THIS request admitted nothing — the session's own record says how far its
+        first turn got.
+        """
+        return {
+            "session_id": session_id,
+            "admitted": False,
+            "duplicate": False,
+            "replayed": True,
+            "create_key": create_key,
+            "detail": (
+                f"this request already created {session_id} here; nothing new was created "
+                "and its first prompt was not sent again"
+            ),
+            "record": self._row_for(session_id),
+        }
+
+    def _op_session_create_lookup(self, link: PeerLink, frame: dict[str, Any]) -> dict[str, Any]:
+        """Did the requester's ``create_key`` make a session here? Read-only.
+
+        Its own op rather than a flag on ``net_session_create`` for the one reason
+        that matters: an owner older than this build IGNORES unknown fields, so a
+        "lookup only" flag on a create frame would be read by that owner as a
+        create — the exact duplicate this guards against. An unknown OP is refused
+        by name instead, which the requester reads as "cannot tell".
+        """
+        create_key = normalize_create_key(frame.get("create_key"))
+        if not create_key:
+            raise MeshRefusal("bad_request", "a create lookup names a well-formed create_key")
+        state, session_id = self._create_keys.lookup(link.device_id, create_key)
+        if state == "created" and not (self.root / "sessions" / session_id).is_dir():
+            state, session_id = "unknown", ""
+        return {
+            "create_key": create_key,
+            "state": state,
+            "session_id": session_id,
+            "record": self._row_for(session_id) if session_id else None,
+        }
+
     def _op_session_create(self, link: PeerLink, frame: dict[str, Any]) -> dict[str, Any]:
         """Create a session ON this device, at another device's request (R8, §5.3).
 
@@ -9607,68 +9928,112 @@ class RelayServer:
                 },
             }
 
-        session_id = new_session_id()
-        session_dir = self.root / "sessions" / session_id
-        # THE WORKING DIRECTORY IS VALIDATED HERE, BY THE DEVICE THAT CAN SEE IT (QA
-        # round 1, Q9). The field names a path on THIS device's disk — that is what
-        # makes it answerable at all, and this device is the only party that can stat
-        # it. It used to be dropped entirely: the desktop's hint promised "Must exist
-        # on <peer>", the create answered 200, and the conversation started in the
-        # peer's HOME directory instead — for an agent that runs commands, the wrong
-        # place, and nothing said so. Refused BEFORE anything is written (the id is
-        # minted but no directory exists yet), so a refused create leaves nothing here
-        # to clean up.
-        cwd = _resolve_peer_cwd(str(frame.get("cwd") or ""), owner=self._own_label())
-        stamp = MeshStamp(
-            session_id=session_id,
-            network_id=link.network_id,
-            home_device=self.identity.device_id,
-            placement=SessionPlacement(
-                # `peer` rather than `local`: this device runs it, but it is here
-                # because ANOTHER device asked for it, and the placement field's
-                # job is to say how the session came to be where it is (§5.1).
-                mode="peer",
+        # ONE REQUEST, AT MOST ONE SESSION (``network/create_keys.py``). A requester
+        # that lost this create's reply may send the SAME frame again; the key it
+        # minted turns that replay into "here is the session you already have"
+        # instead of a second session running the same first prompt. Checked AFTER
+        # every refusal above (so a refused create reserves nothing) and BEFORE the
+        # mint (so a replay mints nothing). Namespaced by the sending device: a key
+        # is never a way to read another member's sessions.
+        if frame.get("images") and not str(frame.get("prompt") or ""):
+            # Images with no text are not a turn. Refused rather than silently
+            # dropped, because a create that discarded them would look like it had
+            # started something. HERE, above the reservation and the mint (review
+            # round 1, R1-m4): it depends on the frame alone, and raised after the
+            # bind it left the key pointing at a session the requester was told
+            # was refused — a keyed retry then answered ``replayed`` for it.
+            raise MeshRefusal("protocol_error", "a create frame carried images but no prompt text")
+        create_key = normalize_create_key(frame.get("create_key"))
+        if create_key:
+            reserved, existing = self._create_keys.reserve(link.device_id, create_key)
+            if reserved == "existing":
+                if existing and (self.root / "sessions" / existing).is_dir():
+                    return self._create_replay_reply(existing, create_key)
+                raise MeshRefusal(
+                    "create_replayed",
+                    f"this create request already made {existing or 'a session'} here, and "
+                    "it no longer exists; send the create again as a new request",
+                )
+            if reserved == "pending":
+                raise MeshRefusal(
+                    "create_in_progress",
+                    "this create request is still being carried out here; nothing new was "
+                    "created — that device's session list shows it once it lands",
+                )
+        try:
+            session_id = new_session_id()
+            session_dir = self.root / "sessions" / session_id
+            # THE WORKING DIRECTORY IS VALIDATED HERE, BY THE DEVICE THAT CAN SEE IT (QA
+            # round 1, Q9). The field names a path on THIS device's disk — that is what
+            # makes it answerable at all, and this device is the only party that can stat
+            # it. It used to be dropped entirely: the desktop's hint promised "Must exist
+            # on <peer>", the create answered 200, and the conversation started in the
+            # peer's HOME directory instead — for an agent that runs commands, the wrong
+            # place, and nothing said so. Refused BEFORE anything is written (the id is
+            # minted but no directory exists yet), so a refused create leaves nothing here
+            # to clean up.
+            cwd = _resolve_peer_cwd(str(frame.get("cwd") or ""), owner=self._own_label())
+            stamp = MeshStamp(
+                session_id=session_id,
                 network_id=link.network_id,
                 home_device=self.identity.device_id,
-                policy="pinned",
-                stamp_revision=1,
-            ),
-            origin={
-                "kind": str(frame.get("origin") or "user"),
-                "source_device": link.device_id,
-                "source_session_id": "",
-            },
-            # CARRIED AUTO AUTHORITY (§6 defect 2): the accepted grant travels ON
-            # THE SESSION, so the runtime this create engages — and every runtime a
-            # later move engages — applies full-auto at construction. The field is
-            # the CARRY, never the authority: the runtime re-checks this device's
-            # grant at every engage (``serving._carried_auto_authority``), which is
-            # what makes a revocation effective at the next engage.
-            unattended=unattended,
-        )
-        try:
-            # CLAIM BEFORE mkdir, then RELEASE — and the release is not an
-            # afterthought. ``claim_session`` writes the CLAIMING process's pid
-            # into ``.session.pid``, which is the transcript lease: in
-            # ``fork_session`` the claimer and the owner are the same process, so
-            # the marker is superseded by the spawned runtime's own claim a moment
-            # later. Here the claimer is the RELAY, which owns no session at all
-            # (R1) — and a lease naming the relay's live pid is exactly the state
-            # ``launch`` reads as "somebody is constructing this right now", so the
-            # runtime we then spawn waits out the whole engage deadline and the
-            # create fails on a claim its own relay wrote. The claim exists for the
-            # mkdir window (so a retention sweep never sees an unclaimed
-            # directory); the ownership statement is the stamp, and the lease
-            # belongs to whoever runs the session.
-            claim_session(session_dir)
-            session_dir.mkdir(parents=True, exist_ok=True)
-            ensure_session_created_at(session_dir, time.time())
-            write_stamp(self.root, stamp)
-            release_session(session_dir)
-        except OSError as exc:
-            raise MeshRefusal(
-                "session_create_failed", f"the session directory could not be created: {exc}"
-            ) from exc
+                placement=SessionPlacement(
+                    # `peer` rather than `local`: this device runs it, but it is here
+                    # because ANOTHER device asked for it, and the placement field's
+                    # job is to say how the session came to be where it is (§5.1).
+                    mode="peer",
+                    network_id=link.network_id,
+                    home_device=self.identity.device_id,
+                    policy="pinned",
+                    stamp_revision=1,
+                ),
+                origin={
+                    "kind": str(frame.get("origin") or "user"),
+                    "source_device": link.device_id,
+                    "source_session_id": "",
+                },
+                # CARRIED AUTO AUTHORITY (§6 defect 2): the accepted grant travels ON
+                # THE SESSION, so the runtime this create engages — and every runtime a
+                # later move engages — applies full-auto at construction. The field is
+                # the CARRY, never the authority: the runtime re-checks this device's
+                # grant at every engage (``serving._carried_auto_authority``), which is
+                # what makes a revocation effective at the next engage.
+                unattended=unattended,
+            )
+            try:
+                # CLAIM BEFORE mkdir, then RELEASE — and the release is not an
+                # afterthought. ``claim_session`` writes the CLAIMING process's pid
+                # into ``.session.pid``, which is the transcript lease: in
+                # ``fork_session`` the claimer and the owner are the same process, so
+                # the marker is superseded by the spawned runtime's own claim a moment
+                # later. Here the claimer is the RELAY, which owns no session at all
+                # (R1) — and a lease naming the relay's live pid is exactly the state
+                # ``launch`` reads as "somebody is constructing this right now", so the
+                # runtime we then spawn waits out the whole engage deadline and the
+                # create fails on a claim its own relay wrote. The claim exists for the
+                # mkdir window (so a retention sweep never sees an unclaimed
+                # directory); the ownership statement is the stamp, and the lease
+                # belongs to whoever runs the session.
+                claim_session(session_dir)
+                session_dir.mkdir(parents=True, exist_ok=True)
+                ensure_session_created_at(session_dir, time.time())
+                write_stamp(self.root, stamp)
+                release_session(session_dir)
+            except OSError as exc:
+                raise MeshRefusal(
+                    "session_create_failed", f"the session directory could not be created: {exc}"
+                ) from exc
+        except BaseException:
+            # Nothing reached the disk (every raise above is before or AT the mkdir),
+            # so the key is free again: a corrected retry may use it.
+            if create_key:
+                self._create_keys.release(link.device_id, create_key)
+            raise
+        if create_key:
+            # BOUND THE MOMENT THE DIRECTORY EXISTS, before the engage and the first
+            # turn — those are the slow steps whose reply is the one that gets lost,
+            # and a lookup during them must already find this id.
+            self._create_keys.bind(link.device_id, create_key, session_id)
 
         name = str(frame.get("name") or "")
         # THE ATTACHMENT IS HOW A PROFILE REACHES THE RUNNING SESSION, and it is the
@@ -9781,13 +10146,7 @@ class RelayServer:
             ),
         }
         if not prompt:
-            if frame.get("images"):
-                # Images with no text are not a turn. Refused rather than silently
-                # dropped, because a create that discarded them would look like it had
-                # started something.
-                raise MeshRefusal(
-                    "protocol_error", "a create frame carried images but no prompt text"
-                )
+            # (Images without a prompt were refused above the reservation.)
             # ANSWER THE CREATE, THEN WARM IT (QA round 1, Q4b). A warm-up is a spawned
             # runtime plus its discovery record, measured at 15.9-22.1 s on LOOPBACK on
             # a loaded host, while the desktop's own window for this call is 20 s: the
@@ -11352,6 +11711,14 @@ class RelayServer:
                     "model_id": str(model.get("model_id")),
                     **({"effort": level} if level else {}),
                     "offered_only": True,
+                    # DELIBERATELY NO ``defer_ok`` (PR #3697 review R1-M1). A
+                    # runtime acks every ``defer_ok`` switch ``queued`` BEFORE
+                    # the switch body runs, so the ``offered_only`` admission
+                    # below (``model_unknown``, a provider with no credential)
+                    # would be decided after this receipt was written and the
+                    # create would report a model it never got. A just-created
+                    # session is idle, so the synchronous answer costs nothing
+                    # and is the only one that can carry the refusal.
                 },
                 timeout_s=self.settings.op_wait_s,
             )
@@ -13368,7 +13735,7 @@ class RelayServer:
         endings = (
             engine.deliver_removal_endings(device_id)
             if engine is not None
-            else {"copies": 0, "wiped": 0, "timed_out": 0}
+            else {"copies": 0, "wiped": 0, "timed_out": 0, "unacknowledged": 0}
         )
         with store.mutate(resolved.network_id, self.root) as record:
             outcome = remove_member(
@@ -13398,6 +13765,7 @@ class RelayServer:
             "copies": int(endings.get("copies") or 0),
             "wiped": int(endings.get("wiped") or 0),
             "timed_out": int(endings.get("timed_out") or 0),
+            "unacknowledged": int(endings.get("unacknowledged") or 0),
         }
 
     def _ctl_member_caps(self, frame: dict[str, Any]) -> dict[str, Any]:
@@ -13828,6 +14196,7 @@ class RelayServer:
         self._audit_incident_delivery("panic", reports)
         for link in victims:
             link.close("we-closed")
+        self._revoke_lent_on_panic(resolved.network_id)
         tally = self._incident_tally(reports)
         return {
             "network_id": resolved.network_id,
@@ -13836,6 +14205,34 @@ class RelayServer:
             **tally,
             "peers": reports,
         }
+
+    def _revoke_lent_on_panic(self, network_id: str) -> threading.Thread:
+        """DELETE the GitHub tokens this owner lent in ``network_id``, off-thread.
+
+        BOTH panic paths call this after their trust latch (lease review M1): the
+        latch closes links, but a minted GitHub token keeps working on its holder
+        for up to its hour unless the issuer revokes it. ON ITS OWN THREAD because
+        the received-panic handler runs on the link's reader thread, which must stay
+        short, and the raised panic's receipt must not wait on GitHub's API. The
+        thread is returned so a test can join it; callers ignore it.
+        """
+        from local_operator.network.credentials import owner as owner_mod
+
+        thread = threading.Thread(
+            target=owner_mod.revoke_lent_on_panic,
+            args=(self, network_id),
+            name="mesh-panic-revoke",
+            daemon=True,
+        )
+        try:
+            thread.start()
+        except RuntimeError:
+            # Interpreter shutdown refuses new threads. The panic's latch and
+            # broadcast already ran; this hook promises never to raise into them
+            # (the received path is on a link reader). Each token's own hour still
+            # bounds it. Review #3920 n1.
+            logger.warning("mesh panic: could not start the lent-token revoke", exc_info=True)
+        return thread
 
     @staticmethod
     def _incident_fields(frame: dict[str, Any]) -> dict[str, Any]:
@@ -13952,7 +14349,12 @@ class RelayServer:
             timeout=(engage_hop_bound_s(self.settings.op_wait_s) if timeout is None else timeout),
         )
         if reply is None:
-            raise MeshRefusal(
+            # A SUBCLASS, SAME CODE: every caller that only knew ``peer_unreachable``
+            # still reads it, while the one caller for whom "the request went out
+            # and no answer came back" means something different from "it was
+            # never asked" (a create: the far side may have ACTED) can tell them
+            # apart. See ``_ctl_peer_create``.
+            raise _PeerNoReply(
                 "peer_unreachable",
                 f"{peer} stopped answering before it replied",
             )
@@ -13963,6 +14365,84 @@ class RelayServer:
             )
         detail = reply.get("detail")
         return detail if isinstance(detail, dict) else {"value": detail}
+
+    def _settle_lost_create(self, peer: str, create_key: str) -> dict[str, Any]:
+        """A create's request went out and its reply never came back: find out.
+
+        The owner may have created the session (observed live 2026-11-11, where
+        "stopped answering before it replied" was printed for a session that
+        existed), so "unreachable" is the one answer this must never give. Asks
+        the owner ONCE, by the key the create carried, on a short read-sized
+        bound: a device that just failed to answer is not given another full
+        create budget.
+
+        Returns the detail of a confirmed create (the id, marked
+        ``create_unconfirmed`` because the create's own reply — and with it the
+        first turn's admission — was lost). Raises ``create_unconfirmed`` in every
+        case where the owner cannot be shown to hold the session, with a sentence
+        that says it MAY exist and how to check, and how to retry without making
+        a second one.
+        """
+        label = self._peer_label(peer)
+        # BOTH REAL SPELLINGS (review round 1, R1-n1 / QA Q2): this sentence
+        # reaches an agent through the ``sessions`` tool and a person through the
+        # CLI, and the earlier ``sessions list peer=`` was neither one's syntax.
+        listing = f"`sessions op=list peer={peer}` (CLI: `lop network sessions --peer {peer}`)"
+        check = f"check {listing} before creating again"
+        retry = (
+            f"a retry that sends create key {create_key} — "
+            f"`lop network sessions --peer {peer} --create --create-key {create_key}` with "
+            "the same options — returns that session instead of making a second one"
+        )
+        try:
+            found = self._local_peer_call(
+                "net_session_create_lookup",
+                peer,
+                timeout=CREATE_LOOKUP_TIMEOUT_S,
+                create_key=create_key,
+            )
+        except MeshRefusal as refusal:
+            # An older owner answers ``unknown_op`` (and ignored the key, so a
+            # retry WOULD duplicate there); a dead link answers nothing. Either
+            # way nothing is known, and the sentence says exactly that.
+            logging.getLogger(__name__).info(
+                "create lookup on %s failed: %s %s",
+                peer,
+                refusal.code,
+                refusal.sentence,
+            )
+            raise MeshRefusal(
+                "create_unconfirmed",
+                f"{label} stopped answering before it replied to the create, and could "
+                f"not be asked whether it made the session — it may have been created; {check}",
+            ) from None
+        state = str(found.get("state") or "")
+        session_id = str(found.get("session_id") or "")
+        if state == "created" and session_id:
+            return {
+                "session_id": session_id,
+                "admitted": False,
+                "duplicate": False,
+                "create_unconfirmed": True,
+                "create_key": create_key,
+                "detail": (
+                    f"{label} created {session_id}, but its reply to the create was lost, so "
+                    "whether the first prompt was admitted is unknown — "
+                    f"{listing} shows how far it got"
+                ),
+                "record": found.get("record"),
+            }
+        if state == "pending":
+            raise MeshRefusal(
+                "create_unconfirmed",
+                f"{label} is still creating the session (its reply was lost) — it may "
+                f"appear shortly; {check}. {retry}",
+            )
+        raise MeshRefusal(
+            "create_unconfirmed",
+            f"{label} stopped answering before it replied to the create and holds no "
+            f"session for it yet — it may still have been created; {check}. {retry}",
+        )
 
     def _ctl_peer_create(self, frame: dict[str, Any]) -> dict[str, Any]:
         """Create a session on a peer, CARRYING WHO THE SESSION IS.
@@ -14065,6 +14545,30 @@ class RelayServer:
         push_reason = ""
         expect: dict[str, Any] = {}
         reconciliation: dict[str, Any] = {}
+        # A PEER THAT KEPT ITS OWN CUSTOM INSTRUCTIONS IS SAID ON THE RECEIPT (review
+        # round 1, R1-2), with the remedy, because the session about to run there
+        # will not carry this device's standing rules. Informational only: it never
+        # refuses the create (a node's own instructions are a legitimate state).
+        instructions_notice = ""
+        if not named:
+            # AN UNNAMED SESSION STILL RUNS UNDER THE OPERATOR'S CUSTOM INSTRUCTIONS,
+            # so the push that a named create does below happens here too, narrowed
+            # to no agents and no teams: what it carries is the operator-instructions
+            # singleton (``definitions.local_bundle``), and only when the peer's copy
+            # differs. Best effort: the cadence carries it anyway, and a create must
+            # not fail on a refresh the user never asked for.
+            from local_operator.network import definitions
+
+            try:
+                instructions_notice = _instructions_notice_of(
+                    definitions.push_to_peer(
+                        self, self._resolve_peer(peer), names={"agents": [], "teams": []}
+                    )
+                )
+            except Exception:  # noqa: BLE001 — see above
+                logger.debug(
+                    "relay: instructions push before an unnamed create failed", exc_info=True
+                )
         if named:
             from local_operator.network import definitions
 
@@ -14092,6 +14596,7 @@ class RelayServer:
                 target,
                 names={"agents": wanted, "teams": [team] if team else []},
             )
+            instructions_notice = _instructions_notice_of(pushed)
             unreconciled = definitions.create_refusal(pushed, peer_label=self._peer_label(target))
             if unreconciled:
                 # THE DIVERGENT COPY LIVES ON THAT DEVICE, and the sentence says so:
@@ -14162,8 +14667,17 @@ class RelayServer:
                 fields[key] = value
         if expect:
             fields["expect"] = expect
+        # THE CREATE KEY (``network/create_keys.py``): minted here unless the caller
+        # brought one (a retry of a create whose reply was lost brings the key it
+        # was told), so the owner can answer a replay with the session it already
+        # made, and this side can ask about a lost reply instead of guessing.
+        create_key = normalize_create_key(frame.get("create_key")) or uuid.uuid4().hex
+        fields["create_key"] = create_key
         try:
-            detail = self._local_peer_call("net_session_create", peer, **fields)
+            try:
+                detail = self._local_peer_call("net_session_create", peer, **fields)
+            except _PeerNoReply:
+                detail = self._settle_lost_create(peer, create_key)
         except MeshRefusal as refusal:
             if push_reason:
                 # APPENDED ON ``push_reason`` ALONE, and it used to be gated on the
@@ -14177,6 +14691,8 @@ class RelayServer:
                 # half); ``message`` is the wire frame's name for it, not the exception's.
                 raise MeshRefusal(refusal.code, f"{refusal.sentence} ({push_reason})") from None
             raise
+        if instructions_notice:
+            detail = {**detail, "custom_instructions_notice": instructions_notice}
         if reconciliation:
             return {**detail, "definitions": reconciliation}
         return detail
@@ -15077,6 +15593,14 @@ class RelayServer:
     # -- pair phase, listener-side helpers ---------------------------------
 
 
+def _instructions_notice_of(pushed: Any) -> str:
+    """The push's kept-own-instructions sentence (``definitions.push_to_peer``), or ``""``."""
+    if not isinstance(pushed, Mapping):
+        return ""
+    report = pushed.get("operator_instructions")
+    return str(report.get("notice") or "") if isinstance(report, Mapping) else ""
+
+
 def _has_terminal() -> bool:
     """Whether THIS process can ask a human a question directly.
 
@@ -15096,6 +15620,7 @@ def _owning_document(op: str) -> str:
     owners = {
         "net_forward": "mesh-session-mobility.md",
         "net_sync": "mesh-session-mobility.md (R22)",
+        "net_file_get": "mesh-file-transfer.md (S1)",
         "net_broker": "mesh-credentials.md",
         "net_session_lifecycle": "mesh-session-mobility.md",
         "net_session_receipt": "mesh-session-mobility.md",
@@ -15106,6 +15631,7 @@ def _owning_document(op: str) -> str:
         # sentence, not "this relay does not know the action".
         "session_move": "mesh-session-mobility.md",
         "session_sync": "mesh-session-mobility.md (R22)",
+        "session_file_pull": "mesh-file-transfer.md (S1)",
         "session_lifecycle": "mesh-session-mobility.md",
         "session_receipt": "mesh-session-mobility.md",
         "credential_grant": "mesh-credentials.md",
@@ -15572,6 +16098,37 @@ DELIBERATE_STOP_MARKER = "relay-stop-requested.json"
 #: failure this exists to stop.
 RELAY_OOM_SCORE_ADJUST = -500
 
+#: The relay unit's ``OOMPolicy``: when the kernel OOM-kills ANY process in the
+#: unit's cgroup, keep the unit running instead of stopping it.
+#:
+#: WHY (2026-11-11, the Linux node, 23:31–23:33Z): systemd's default is ``stop``
+#: (``DefaultOOMPolicy``), and it applies to every process in the cgroup, not only
+#: the main one. The relay's session runtimes and their tool children live in
+#: that cgroup (``KillMode=process`` keeps them there across restarts, by design),
+#: so a remote session's desktop rig — Electron, xvfb and a ``node`` build at
+#: 4.4–6.9 GB — tripping a GLOBAL OOM stopped the RELAY five times in 2½ minutes.
+#: The user journal shows the pairs: "A process of this unit has been killed by
+#: the OOM killer" → "Failed with result 'oom-kill'" → "Scheduled restart job,
+#: restart counter is at 1…5". The kernel's victim each time was ``node-22``
+#: (``oom_score_adj`` 300), never the relay: :data:`RELAY_OOM_SCORE_ADJUST`
+#: protected the PROCESS and the default policy took down the UNIT anyway, so
+#: the node was off the mesh and a session on it read "the relay is not running".
+#:
+#: WHY ``continue`` IS SAFE HERE: the kernel has already killed exactly the one
+#: process it chose; ``continue`` only stops systemd from ALSO stopping the
+#: unit's main process. Every other process keeps running either way (under
+#: ``KillMode=process`` a stop kills only the main process), so ``stop`` bought
+#: no memory back — it only cost the relay's restart window. If the relay itself
+#: is the victim, its own exit still restarts it through ``Restart=always``. Not
+#: ``kill``: that would SIGKILL every session runtime in the cgroup.
+#:
+#: VERSIONS: ``OOMPolicy=`` exists from systemd 243. An older manager logs
+#: "Unknown key name 'OOMPolicy'… ignoring" and loads the unit; it also predates
+#: systemd's OOM tracking, so it never stopped a unit for a child's OOM in the
+#: first place. The render therefore stays unconditional (and deterministic, which
+#: ``refresh_unit_if_stale``'s content comparison needs).
+RELAY_OOM_POLICY = "continue"
+
 
 def log_path() -> Path:
     return log_dir() / "network.log"
@@ -15618,6 +16175,45 @@ def plist_path() -> Path:
 def systemd_path() -> Path:
     """``~/.config/systemd/user/<unit>`` for the CURRENT home (redirectable)."""
     return supervisors.systemd_unit_path(SYSTEMD_UNIT)
+
+
+def installed_unit_oom_policy() -> dict[str, Any]:
+    """What the INSTALLED relay unit says ``OOMPolicy`` is, read from disk.
+
+    The readiness fact behind the resilience row's ``relay_oom_policy`` warning
+    (:data:`RELAY_OOM_POLICY` has the incident). Read from the unit file and its
+    ``<unit>.d/*.conf`` drop-ins in systemd's order (lexical, last assignment
+    wins), not from ``systemctl show``: the readiness answer is built on every
+    ``net_readiness`` and must not wait on the user manager, and a unit the
+    update path rewrote is ``daemon-reload``ed in the same step, so disk and
+    manager agree after any refresh this code performs. ``oom_policy`` is
+    ``None`` when no line sets it — the manager's default (``stop``).
+
+    ``{"supervisor": None}`` off Linux or without systemctl (launchd has no
+    such policy), ``installed: False`` with no unit, ``readable: False`` when
+    the files could not be read: an unknown is never reported as a gap.
+    """
+    if not (sys.platform.startswith("linux") and is_supported()):
+        return {"supervisor": None}
+    try:
+        unit = systemd_path()
+        if not unit.exists():
+            return {"supervisor": "systemd", "installed": False}
+        dropins = unit.parent / f"{unit.name}.d"
+        files = [unit, *sorted(dropins.glob("*.conf"))] if dropins.is_dir() else [unit]
+        policy: str | None = None
+        for path in files:
+            section = ""
+            for raw in path.read_text(encoding="utf-8", errors="replace").splitlines():
+                line = raw.strip()
+                if line.startswith("[") and line.endswith("]"):
+                    section = line
+                elif section == "[Service]" and line.partition("=")[0].strip() == "OOMPolicy":
+                    # An empty assignment resets to the default, as systemd reads it.
+                    policy = line.partition("=")[2].strip() or None
+    except OSError:
+        return {"supervisor": "systemd", "installed": True, "readable": False}
+    return {"supervisor": "systemd", "installed": True, "readable": True, "oom_policy": policy}
 
 
 def deliberate_stop_marker_path(root: Path | None = None) -> Path:
@@ -15875,6 +16471,9 @@ def render_systemd(port: int = DEFAULT_PORT) -> str:
         # differs from this render, so existing installs gain the line on their
         # next update without a reinstall.
         oom_score_adjust=RELAY_OOM_SCORE_ADJUST,
+        # See RELAY_OOM_POLICY: a session child's OOM kill must not stop the
+        # relay. Existing installs gain the line the same way as the two above.
+        oom_policy=RELAY_OOM_POLICY,
         post_lines=[
             f"Environment={supervisors.quoted(f'{CONFIG_DIR_ENV}={config_dir()}')}",
             *supervisors.output_redirect_lines(log_path()),

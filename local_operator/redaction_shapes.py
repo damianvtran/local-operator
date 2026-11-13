@@ -120,17 +120,64 @@ import functools
 import json
 import re
 import urllib.parse
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, replace
 from typing import (
+    Any,
     Callable,
     Iterable,
+    Iterator,
+    Literal,
     Mapping,
     Match,
+    NamedTuple,
     Optional,
     Pattern,
     Sequence,
     Union,
 )
+
+#: How far a session redactor may act on the text it is handed right now.
+#:
+#: ``"full"`` (the default, every tool result's text): exact values, then the
+#: shape pass, and every shape hit is REGISTERED as a value to scrub for the rest
+#: of the session.
+#:
+#: ``"uncontained"``: the same masking, but nothing is registered. For a COPY of
+#: content the session already scanned — a result's ``details`` (PR #3789 review
+#: R1). A shape match that appears only there must mask that copy in place and
+#: nothing else: registered, a details-only false positive (``kubectl logs -p
+#: <pod-uuid>`` beside a ``psql`` word) masked the same UUID in every later,
+#: unrelated result. This is the stance the plan and indirect-name rules
+#: already take. Anything that also reached the content was registered there.
+#:
+#: ``"values"``: only the exact values the session already holds. For an
+#: IDENTIFIER-shaped string (no whitespace, ``=`` or ``:``) whose reader matches
+#: it exactly: shapes misfire on ids and model names, but a value the session
+#: already knows is a credential carries no false-positive risk (review R3).
+#:
+#: A ContextVar rather than a parameter because the loop holds only an opaque
+#: ``redact(text)`` callable; it rides into the ``to_thread`` worker with the
+#: context copy, like ``harness.redaction.tool_source``.
+RedactionScope = Literal["full", "uncontained", "values"]
+_REDACTION_SCOPE: ContextVar[RedactionScope] = ContextVar("redaction_scope", default="full")
+
+
+def current_redaction_scope() -> RedactionScope:
+    """The :data:`RedactionScope` the caller published, ``"full"`` by default."""
+    return _REDACTION_SCOPE.get()
+
+
+@contextmanager
+def redaction_scope(scope: RedactionScope) -> Iterator[None]:
+    """Publish ``scope`` for the redactor calls made inside the block."""
+    token = _REDACTION_SCOPE.set(scope)
+    try:
+        yield
+    finally:
+        _REDACTION_SCOPE.reset(token)
+
 
 REDACTION_MARKER = "[redacted]"
 """What a credential is replaced with in anything about to be surfaced.
@@ -672,6 +719,64 @@ def _name_segments(name: str) -> list[str]:
     return [part for part in _SPLIT_NAME.split(name.strip("_.-").lower()) if part]
 
 
+#: Trailing ENVIRONMENT qualifiers a deployment appends to a credential name
+#: (``MINERVA_API_KEY_PROD``, ``API_KEY_STAGING``, ``DB_PASSWORD_2``). The tail
+#: rule below reads the LAST segment, so a qualifier there hid the credential
+#: word entirely and the value was published (2026-11 follow-up to PR #3756: a
+#: ``…_API_KEY_PROD`` Secret key name went unjudged). Stripping them is the
+#: whole change — the name still has to END in a credential word once they are
+#: gone, so ``PROD_REGION`` or ``TEST_URL`` gain nothing. Deliberately an
+#: explicit list, not "any short segment": ``…_KEY_ID`` must stay judged as
+#: written, and ``id`` is a qualifier word elsewhere in this module.
+#:
+#: ONLY the ``_`` spelling, the environment-variable one (measured, FP pass on
+#: the 200 most recent sessions): a hyphenated ``minerva-nexus/secrets-prod`` is
+#: a Secret/store RESOURCE name, not a variable, and stripping its ``-prod`` made
+#: the prose after it (``secrets-prod: fail``) a "credential value".
+_ENV_QUALIFIER_SUFFIX = re.compile(
+    r"(?:_(?:prod|production|dev|staging|stg|qa|test|live|sandbox|[0-9]+))+$", re.IGNORECASE
+)
+
+#: Compound names whose last segment is a CONTAINER word (``json``/``url``), so
+#: the tail rule cannot see them, yet whose whole spelling names a credential.
+#: Precise on purpose (operator, 2026-11: "most precise set of changes"): a
+#: generic ``*_JSON`` or ``*_URL`` is configuration, and only these spellings
+#: are measured credential carriers — a Google service-account key file
+#: (``GOOGLE_SERVICE_ACCOUNT_JSON``, ``GOOGLE_APPLICATION_CREDENTIALS_JSON``) and
+#: a chat incoming-webhook URL, whose PATH is the bearer secret
+#: (``SANCTIONS_GOVERNANCE_SLACK_WEBHOOK_URL``).
+_CREDENTIAL_JSON_PREFIXES = (("service", "account"), ("credentials",), ("credential",))
+_WEBHOOK_VENDOR_SEGMENTS = frozenset({"slack", "discord", "teams", "msteams"})
+
+
+def _qualified_segments(name: str) -> list[str]:
+    """``name``'s segments without trailing ``_``-joined environment qualifiers.
+
+    The whole name is kept when it is nothing but qualifiers, so ``PROD`` or
+    ``_2`` is judged as itself (and is not a credential word).
+    """
+    bare = name.strip("_.-")
+    return _name_segments(_ENV_QUALIFIER_SUFFIX.sub("", bare) or bare)
+
+
+def _is_compound_credential_name(segments: list[str]) -> bool:
+    """``…_SERVICE_ACCOUNT_JSON``, ``…_CREDENTIALS_JSON``, ``…_SLACK_WEBHOOK_URL``."""
+    if len(segments) < 2:
+        return False
+    if segments[-1] == "json":
+        head = segments[:-1]
+        return any(tuple(head[-len(prefix) :]) == prefix for prefix in _CREDENTIAL_JSON_PREFIXES)
+    if segments[-1] == "url" and segments[-2] == "webhook":
+        return any(segment in _WEBHOOK_VENDOR_SEGMENTS for segment in segments[:-2])
+    return False
+
+
+def is_webhook_credential_name(name: str) -> bool:
+    """Whether ``name`` is a chat incoming-webhook URL name (its URL is the secret)."""
+    segments = _qualified_segments(name)
+    return len(segments) > 2 and segments[-1] == "url" and _is_compound_credential_name(segments)
+
+
 def is_credential_name(name: str) -> bool:
     """Whether an identifier ENDS in a credential word, at a segment boundary.
 
@@ -680,21 +785,31 @@ def is_credential_name(name: str) -> bool:
     segment), ``keyboard_layout`` is not (it does not END in one), and
     ``num_tokens`` is not a credential either — it is rejected as a count, which
     is the separate judgement :func:`is_count_shaped` makes.
+
+    Trailing environment qualifiers are stripped first (``API_KEY_PROD`` is
+    ``API_KEY``; see :data:`_ENV_QUALIFIER_SUFFIX`), and a short list of
+    compound credential names ending in ``json``/``url`` is recognised (see
+    :data:`_CREDENTIAL_JSON_PREFIXES`). The NAME is only ever a reason to judge
+    the VALUE beside it: no rule masks a name itself.
     """
     lowered = name.strip("_.-").lower()
     if not lowered:
         return False
     if lowered in _RUN_TOGETHER_NAMES:
         return True
-    segments = _name_segments(lowered)
+    segments = _qualified_segments(lowered)
     if not segments:
         return False
+    if len(segments) == 1 and segments[0] in _RUN_TOGETHER_NAMES:
+        return True  # ``PGPASSWORD_PROD``
     tail = segments[-1]
     if tail in _CRED_NAME_FORMS:
         return True
     # A trailing pair split apart by the separator: ``client-key-data`` is
     # kubeconfig's private key, spelled in three segments.
-    return len(segments) > 1 and segments[-2] + tail in _CRED_NAME_FORMS
+    if len(segments) > 1 and segments[-2] + tail in _CRED_NAME_FORMS:
+        return True
+    return _is_compound_credential_name(segments)
 
 
 def is_count_shaped(name: str) -> bool:
@@ -1117,11 +1232,17 @@ def is_strong_credential_name(name: str) -> bool:
     depend on digits (an expression, a quoted path, a bare filesystem path, a
     credential-less URL, a value that repeats its own name) apply to both.
     """
-    segments = _name_segments(name)
+    segments = _qualified_segments(name)
     if not segments:
         return False
-    lowered = name.lower()
+    # Judged on the name WITHOUT its environment qualifiers, the same reading
+    # :func:`is_credential_name` takes: ``API_KEY_PROD`` is as strong as ``API_KEY``.
+    lowered = "_".join(segments)
     if any(word in lowered for word in _STRONG_CRED_WORDS):
+        return True
+    if _is_compound_credential_name(segments):
+        # A service-account key file or a webhook URL is a credential under ANY
+        # value spelling; the weak-name digit proof would release a hook path.
         return True
     squashed = lowered.replace("_", "").replace("-", "")
     if squashed.endswith(("key", "keys", "keydata", "keystore")):
@@ -2043,6 +2164,10 @@ def _value_is_not_a_credential(value: str, *, name: str, strong: bool) -> bool:
     # auth"`` is a claim NAME; the value proves itself the same way a ``*_URL``
     # name's does — userinfo password or credential-shaped query parameter.
     if _URL_LIKE.match(value):
+        # ...except an incoming-webhook URL, whose PATH is the bearer secret: the
+        # name already says so, and no userinfo or query parameter ever will.
+        if is_webhook_credential_name(name):
+            return False
         return not _url_contains_credential(value)
     # A dotted attribute path is a REFERENCE to a credential, not one:
     # ``key="providers.anthropic.cache_ttl_1h_min_context_tokens"``. Digits in a
@@ -2936,6 +3061,30 @@ def _query_value_prefix(run: str) -> str:
     return _QUERY_VALUE_STOP.split(run, maxsplit=1)[0]
 
 
+#: A client word (the ``client-inline-password`` alternation) or ``kubectl``,
+#: as a command word. Used to decide which of them OWNS a ``-p`` flag.
+_CLIENT_OR_KUBECTL_WORD = re.compile(
+    r"(?i)(?<![A-Za-z0-9_.\-])(mysql|mysqldump|psql|pg_dump|pg_restore|mongo|mongosh|"
+    r"clickhouse-client|redis-cli|influx|kubectl)(?=[ \t])"
+)
+
+
+def _client_inline_password_guard(match: Match[str]) -> bool:
+    """Refuse a ``-p`` that belongs to ``kubectl``, not to the database client.
+
+    ``kubectl logs -p`` means "previous container", and its argument is a pod
+    name. The rule's 200-character gap let a client word earlier on the line (a
+    ``psql`` in a wake message, then ``kubectl logs -p`` and a pod) claim the
+    flag. The flag belongs to the LAST command word before it, so a ``kubectl``
+    there releases it, while a client named after the ``kubectl`` (``kubectl
+    exec … -- mysql …``) still owns its flag. PR #3789 review R4.
+    """
+    words = _CLIENT_OR_KUBECTL_WORD.findall(match.group(1))
+    if match.group(1).rstrip()[-2:] not in ("-p", "-P") or not words:
+        return True
+    return words[-1].lower() != "kubectl"
+
+
 def _assignment_value_guard(match: Match[str]) -> bool:
     """The checks both spellings of the named-assignment rule share.
 
@@ -3041,6 +3190,37 @@ def _assignment_guard(match: Match[str]) -> bool:
     return _assignment_value_guard(match)
 
 
+#: Field names whose quoted value may be an IDENTIFIER: the NAME of a setting
+#: or variable in a ``{"key": …, "value": …}`` / ``{"name": …}`` record. ``key``
+#: ends in a credential word, so the quoted rule masked ``"key": "setting_1042"``
+#: (2,900 of 3,000 rows in PR #3789 QA's fixture) because its four digits put it
+#: past the word-shaped release (``_WORD_SHAPED_MAX_DIGITS``): a name redacted,
+#: which the redaction policy forbids. The credential in such a record sits
+#: under ``value`` and is judged by the indirect-name rule through this name.
+_IDENTIFIER_FIELD_NAMES = frozenset({"key", "name"})
+
+#: A word-led compound NAME: a 2+-letter word, then segments that are each ALL
+#: letters or ALL digits (``setting_1042``, ``release-20261111``, ``app.v.2``).
+#: The per-segment purity is the discriminator against an opaque value under a
+#: bare ``key``, which the corpus pins as masked (``test_a_weak_name_still_
+#: masks_an_opaque_value``): a UUID starts with a hex run that mixes digits and
+#: letters, a hex/base64 key carries no separator, and a random token's
+#: segments mix both.
+_IDENTIFIER_FIELD_VALUE = re.compile(r"[A-Za-z]{2,}(?:[_.\-](?:[A-Za-z]+|[0-9]+))+")
+
+
+def _is_identifier_field_value(match: Match[str]) -> bool:
+    """Whether a quoted ``"key"``/``"name"`` field holds a word-led NAME."""
+    if match.group("name").lower() not in _IDENTIFIER_FIELD_NAMES:
+        return False
+    value = match.group(4)
+    return (
+        len(value) <= 64
+        and _VENDOR_PATTERN.search(value) is None
+        and _IDENTIFIER_FIELD_VALUE.fullmatch(value) is not None
+    )
+
+
 def _assignment_guard_quoted(match: Match[str]) -> bool:
     """The guard of the QUOTED spelling: group 3 is the delimiter, not a refusal.
 
@@ -3049,6 +3229,8 @@ def _assignment_guard_quoted(match: Match[str]) -> bool:
     rule has a non-empty group 3 by construction, so the shared body is the whole
     of the judgement.
     """
+    if _is_identifier_field_value(match):
+        return False
     return _assignment_value_guard(match)
 
 
@@ -4511,10 +4693,16 @@ CREDENTIAL_SHAPES: tuple[Shape, ...] = (
             r"(?i)((?<![A-Za-z0-9_.\-])(?:mysql|mysqldump|psql|pg_dump|pg_restore|"
             r"mongo|mongosh|clickhouse-client|redis-cli|influx)"
             r"(?=[ \t])"
-            r"[^\n]{0,200}?\s-(?:p|a)(?:\s+)?)(\S{2,})"
+            # ``-p`` followed by an all-digit or UUID-shaped run is a PORT
+            # (psql/pg_dump/pg_restore/redis-cli ``-p 5432``, mysql ``-P``
+            # under ``(?i)``) or a resource id, never a password: the lazy gap
+            # moves on to the next ``-p`` instead (PR #3789 review R4).
+            r"[^\n]{0,200}?\s-(?:a|p(?!\s*(?:\d+|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-"
+            r"[0-9a-f]{4}-[0-9a-f]{12})(?!\S)))(?:\s+)?)(\S{2,})"
         ),
-        r"\1" + REDACTION_MARKER,
+        None,
         2,
+        guard=_client_inline_password_guard,
     ),
     # ``.npmrc``: its registry key with an ``_authToken`` entry.
     Shape(
@@ -4692,6 +4880,16 @@ CREDENTIAL_SHAPES: tuple[Shape, ...] = (
     Shape(
         "slack-token",
         re.compile(r"\bxox[baprs]-[A-Za-z0-9-]{10,}\b"),
+        REDACTION_MARKER,
+    ),
+    Shape(
+        "minerva-api-key",
+        # Minerva application keys (auth-svc ``application_key_format.go``): one of
+        # four exact display prefixes, then ``base64.RawURLEncoding`` of 32 random
+        # bytes (43 chars) or, when the RNG fails, a UUID (36). The 32-char floor
+        # covers both and keeps the bare prefix readable where docs and code name
+        # it (``"mrva-live-"``, ``mrva-unknown``) — the prefix is not the secret.
+        re.compile(r"\bmrva-(?:qa-)?(?:live|dev)-[A-Za-z0-9_\-]{32,}(?![A-Za-z0-9_\-])"),
         REDACTION_MARKER,
     ),
 )
@@ -4932,6 +5130,1875 @@ def shape_report(hits: Sequence[ShapeHit]) -> ShapeReport:
     )
 
 
+# --- recognised credential STRUCTURES and ENCODED credentials -----------------
+#
+# WHY THIS EXISTS (2026-11, `kubectl get secret internal-jobs-sc -o yaml`): an
+# agent dumped a Kubernetes Secret and the transcript kept a Mongo Atlas DSN
+# password and a GCP service-account key. Every rule in the table above reads
+# PLAINTEXT, and a Secret's ``data:`` values are base64 — so the DSN and the key
+# went through as opaque base64 that no rule could see into. The same blind spot
+# covered a URL-encoded DSN (``mongodb%2Bsrv%3A%2F%2F`` then the userinfo with
+# ``%3A`` and ``%40``), a JSON-escaped one (``:\/\/`` for ``://``) and the 40-hex
+# ``private_key_id`` beside a service-account key's (already masked) PEM.
+#
+# THE CONSTRAINT (operator, binding): close exactly that class and nothing more.
+# So this section recognises STRUCTURES and DECODINGS, never "looks random":
+#
+# * a Kubernetes ``kind: Secret`` object's ``data``/``stringData`` VALUES — the
+#   one place where every value is a secret by the object's own declaration. Key
+#   names stay readable (they are how the agent learns what the Secret holds),
+#   and a ``ConfigMap``'s identical-looking block is never touched;
+# * a base64 / hex / %xx / JSON-escaped token that DECODES to text an existing
+#   rule already masks. The decoded text has to carry real credential evidence
+#   (a DSN's ``user:password@``, a PEM block, a docker ``auth``...) — a token that
+#   merely decodes is left alone, so digests, git SHAs, image layers and
+#   base64 of ordinary text keep their bytes;
+# * ``private_key_id`` inside service-account JSON.
+#
+# There is deliberately no entropy or keyword heuristic here (see the note on
+# :data:`CREDENTIAL_SHAPES` and docs/security/redaction-policy.md): such a rule
+# cannot tell a credential from a build id. The false-positive gate for this
+# section was measured on real session transcripts before it shipped (PR body).
+
+#: Labels for hits produced here. Only ``data:`` (base64) values become hits a
+#: session may REGISTER for exact-value masking; a ``stringData`` value is plain
+#: text (``production``, ``info``) and registering it would mask that word in
+#: every later result, so it is masked in place and never promoted. Of the
+#: three, only :data:`GCP_KEY_ID_LABEL` joins :data:`_ARGUMENT_EVIDENCE_LABELS`:
+#: the structure rules do not run on arguments at all (see
+#: :func:`_scrub_all_with_hits`), and an encoded credential is judged there by
+#: the decoded text's own labels.
+K8S_SECRET_DATA_LABEL = "k8s-secret-data"
+ENCODED_CREDENTIAL_LABEL = "encoded-credential"
+GCP_KEY_ID_LABEL = "gcp-service-account-key-id"
+
+#: How deep an encoded token may nest inside another (a docker config's ``auth``
+#: is base64 inside a Secret's base64 ``.dockerconfigjson``: two levels). A
+#: third level has no real-world spelling we know of and only costs time.
+_DECODE_MAX_DEPTH = 2
+#: Per-call work bounds for the decode pass, so a multi-megabyte result cannot
+#: turn the pass into a stall. Sized above the measured maximum: over 1,511,507
+#: unique transcript strings from the 200 most recent sessions on the author's
+#: machine (2026-11-10), the most base64 candidates in one text was 6,925, so the
+#: caps bind only on pathological
+#: input — where the pass stops decoding (fails OPEN for that remainder) rather
+#: than holding the result path hostage. The Kubernetes rules are not capped.
+_DECODE_MAX_CANDIDATES = 20000
+_DECODE_MAX_BYTES = 4 * 1024 * 1024
+#: A token shorter than this cannot decode to a credential the table recognises
+#: (the shortest, ``a://u:pw@h``, is 10 bytes = 16 base64 characters).
+_DECODE_MIN_TOKEN = 16
+
+_B64_TOKEN_RE = re.compile(
+    r"(?<![A-Za-z0-9+/_=-])[A-Za-z0-9+/_-]{"
+    + str(_DECODE_MIN_TOKEN)
+    + r",}={0,2}(?![A-Za-z0-9+/_=-])"
+)
+_HEX_TOKEN_RE = re.compile(r"[0-9A-Fa-f]+")
+#: A run of URL characters carrying at least one %xx escape. ``=``, ``&``, ``?``
+#: and quotes END a run, so a query parameter's value is one run and its name and
+#: the rest of the URL stay readable.
+#:
+#: Both run patterns start ONLY at a run boundary (the lookbehind) and never
+#: backtrack inside a run (possessive quantifiers): without that, a search
+#: restarted at every character of a long unbroken run and rescanned it, which
+#: measured 8.8 s on one 442,791-character transcript string.
+_PCT_RUN_RE = re.compile(
+    r"(?<![A-Za-z0-9._~+:/@%-])[A-Za-z0-9._~+:/@-]*+" r"(?:%[0-9A-Fa-f]{2}[A-Za-z0-9._~+:/@-]*+)++"
+)
+#: A run of JSON string content carrying at least one ``\/`` or ``\uXXXX`` escape.
+_JSON_ESCAPED_RUN_RE = re.compile(
+    r"(?<![^\s\"'])(?=[^\s\"'\\]*+(?:\\[^/u\s][^\s\"'\\]*+)*+\\(?:/|u[0-9A-Fa-f]{4}))"
+    r"(?:[^\s\"'\\]|\\(?:u[0-9A-Fa-f]{4}|[\\/bfnrt]))*+"
+)
+
+#: ``private_key_id`` of a service-account key: 40 hex today, bounded loosely.
+#: Optional backslashes cover the same JSON carried as an escaped string.
+_SA_KEY_ID_RE = re.compile(r'(\\?"private_key_id\\?"[ \t]*:[ \t]*\\?")([0-9A-Fa-f]{16,64})(?=\\?")')
+_SA_CONTEXT_MARKERS = ("service_account", "client_email", 'private_key"', 'private_key\\"')
+
+
+def _printable_text(raw: bytes) -> Optional[str]:
+    """``raw`` as text when it IS text; ``None`` for binary (the common case)."""
+    try:
+        decoded = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+    stripped = decoded.replace("\n", "").replace("\r", "").replace("\t", "")
+    if not stripped or not stripped.isprintable():
+        return None
+    return decoded
+
+
+#: Base64 of ASCII text starts every 4-character group with a sextet below 32
+#: (the group's first byte is < 0x80), i.e. one of these characters. Checking
+#: the group leads is a slice and a set test, and it rejects a random digest or
+#: an image in a few groups. Measured on a 9,000-line sha256/sha512 listing
+#: (18,000 candidates, loaded machine): the whole decode pass took 2.55 s without
+#: this check and 0.30 s with it (~140 µs -> ~17 µs per candidate). A credential the
+#: table recognises is ASCII, so nothing this pass is for is filtered out.
+_B64_ASCII_LEADS = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdef")
+#: Hex of printable ASCII: every byte's high nibble is 2-7.
+_HEX_ASCII_LEADS = frozenset("234567")
+
+
+def _decode_b64_token(token: str) -> Optional[str]:
+    if not _B64_ASCII_LEADS.issuperset(token[::4]):
+        return None
+    body = token.rstrip("=")
+    if len(body) % 4 == 1:
+        return None  # not a length any base64 encoder emits
+    padded = body + "=" * (-len(body) % 4)
+    try:
+        if "-" in body or "_" in body:
+            if "+" in body or "/" in body:
+                return None  # mixed alphabets: not base64 of anything
+            raw = base64.urlsafe_b64decode(padded)
+        else:
+            raw = base64.b64decode(padded, validate=True)
+    except ValueError:
+        return None
+    return _printable_text(raw)
+
+
+def _decode_hex_token(token: str) -> Optional[str]:
+    if len(token) < 2 * 10 or len(token) % 2 or not _HEX_ASCII_LEADS.issuperset(token[::2]):
+        return None
+    if not _HEX_TOKEN_RE.fullmatch(token):
+        return None
+    try:
+        return _printable_text(bytes.fromhex(token))
+    except ValueError:  # pragma: no cover - fullmatch above guarantees hex
+        return None
+
+
+def _decode_json_run(run: str) -> Optional[str]:
+    try:
+        decoded = json.loads('"' + run + '"')
+    except ValueError:
+        return None
+    return decoded if isinstance(decoded, str) else None
+
+
+class _DecodeBudget:
+    """The per-call bound on the decode pass (see :data:`_DECODE_MAX_CANDIDATES`)."""
+
+    __slots__ = ("candidates", "bytes")
+
+    def __init__(self) -> None:
+        self.candidates = _DECODE_MAX_CANDIDATES
+        self.bytes = _DECODE_MAX_BYTES
+
+    def take(self, size: int) -> bool:
+        if self.candidates <= 0 or self.bytes < size:
+            return False
+        self.candidates -= 1
+        self.bytes -= size
+        return True
+
+
+def _decoded_carries_credential(
+    decoded: str,
+    reject: "Callable[[str, str, Match[str]], bool] | None",
+    depth: int,
+    budget: _DecodeBudget,
+) -> bool:
+    """Whether the full pass MASKS something in ``decoded`` — i.e. it holds a credential.
+
+    Counted in markers rather than read as "the text changed": the table also
+    normalises an already-masked spelling (closing a partial ``[redacted``), and a
+    hex-encoded snippet of code that merely CONTAINS the marker was masked whole
+    on that difference in the false-positive measurement (session da52de3240bb).
+    """
+    scrubbed, _ = _scrub_all_with_hits(decoded, reject, depth + 1, budget)
+    return scrubbed.count(REDACTION_MARKER) > decoded.count(REDACTION_MARKER)
+
+
+def _scrub_encoded_credentials(
+    text: str,
+    hits: list[ShapeHit],
+    reject: "Callable[[str, str, Match[str]], bool] | None",
+    depth: int,
+    budget: _DecodeBudget,
+) -> str:
+    """Mask a base64/hex/%xx/JSON-escaped token whose DECODING carries a credential.
+
+    The WHOLE token goes: an encoding has no readable "user" or "host" part to
+    keep, and a half-masked base64 token decodes to a half-masked credential.
+    A %xx / JSON-escaped run whose RAW spelling the table already masks is left to
+    the table, which keeps a DSN's user and host readable; this pass only takes
+    what the table could not see.
+    """
+    if depth >= _DECODE_MAX_DEPTH:
+        return text
+
+    def _replace(
+        pattern: Pattern[str], decode: "Callable[[str], Optional[str]]", raw_check: bool
+    ) -> None:
+        nonlocal text
+        pieces: list[str] = []
+        cursor = 0
+        for match in pattern.finditer(text):
+            token = match.group(0)
+            if not budget.take(len(token)):
+                break
+            decoded = decode(token)
+            if decoded is None or decoded == token:
+                continue
+            if not _decoded_carries_credential(decoded, reject, depth, budget):
+                continue
+            if raw_check and _scrub_table_with_hits(token, reject)[0] != token:
+                continue  # the table masks this spelling itself, more precisely
+            pieces.append(text[cursor : match.start()])
+            pieces.append(REDACTION_MARKER)
+            cursor = match.end()
+            hits.append(ShapeHit(ENCODED_CREDENTIAL_LABEL, token, window=token))
+        if pieces:
+            pieces.append(text[cursor:])
+            text = "".join(pieces)
+
+    def _b64_or_hex(token: str) -> Optional[str]:
+        return _decode_b64_token(token) or _decode_hex_token(token)
+
+    _replace(_B64_TOKEN_RE, _b64_or_hex, raw_check=False)
+    if "%" in text:
+        _replace(_PCT_RUN_RE, urllib.parse.unquote, raw_check=True)
+    if "\\/" in text or "\\u" in text:
+        _replace(_JSON_ESCAPED_RUN_RE, _decode_json_run, raw_check=True)
+    return text
+
+
+#: A JSON string token on one line; the escaped-JSON pass below reads only the
+#: ones carrying ``\\"`` (JSON inside a JSON string).
+_JSON_STRING_TOKEN_RE = re.compile(r'"(?:[^"\\\n]|\\.)*+"')
+
+
+def _scrub_escaped_json_strings(
+    text: str,
+    hits: list[ShapeHit],
+    reject: "Callable[[str, str, Match[str]], bool] | None",
+    depth: int,
+    budget: _DecodeBudget,
+) -> str:
+    """Run the whole pass INSIDE a JSON string that itself holds JSON (QA round 1, Q5).
+
+    ``aws secretsmanager get-secret-value`` prints ``"SecretString":
+    "{\\"password\\":\\"…\\"}"``: the key-name rules match ``"password": "…"``,
+    and in the escaped spelling every quote is ``\\"``, so nothing matched. The
+    string is decoded, the EXISTING rules run on it (no new keywords), and only
+    a string they mask is re-encoded — every other token keeps its bytes.
+    """
+    if depth >= _DECODE_MAX_DEPTH or '\\"' not in text:
+        return text
+    pieces: list[str] = []
+    cursor = 0
+    for match in _JSON_STRING_TOKEN_RE.finditer(text):
+        token = match.group(0)
+        # Only a string that IS JSON (``{…}``/``[…]``). A shell command or code
+        # inside a tool call's raw arguments also carries ``\\"``, and the
+        # measurement found 428 such strings the rules would newly rewrite —
+        # ``-u "$USER:$PASS"`` references, prose — none a credential. Checked
+        # on the raw token, before the budget, so those strings cost nothing.
+        if '\\"' not in token or token[1:-1].lstrip()[:1] not in ("{", "["):
+            continue
+        if not budget.take(len(token)):
+            break
+        inner = _decode_json_run(token[1:-1])
+        if inner is None:
+            continue
+        scrubbed, found = _scrub_all_with_hits(inner, reject, depth + 1, budget)
+        if scrubbed.count(REDACTION_MARKER) <= inner.count(REDACTION_MARKER):
+            continue
+        pieces.append(text[cursor : match.start()])
+        pieces.append(json.dumps(scrubbed, ensure_ascii=False))
+        cursor = match.end()
+        hits.extend(found)
+    if not pieces:
+        return text
+    pieces.append(text[cursor:])
+    return "".join(pieces)
+
+
+def _scrub_service_account_key_id(text: str, hits: list[ShapeHit]) -> str:
+    """Mask ``private_key_id`` in service-account JSON; keep ``client_email``/``project_id``.
+
+    The PEM ``private_key`` was already masked by the table; the id beside it is
+    the handle that names WHICH key leaked to anyone holding the project, so it is
+    masked too. ``client_email`` and ``project_id`` are identifiers the agent
+    needs and stay (operator: identifiers are never redacted).
+    """
+    if "private_key_id" not in text or not any(m in text for m in _SA_CONTEXT_MARKERS):
+        return text
+
+    def _mask(match: Match[str]) -> str:
+        hits.append(ShapeHit(GCP_KEY_ID_LABEL, match.group(2), window=match.group(0)))
+        return match.group(1) + REDACTION_MARKER
+
+    return _SA_KEY_ID_RE.sub(_mask, text)
+
+
+# --- Kubernetes Secret objects ---------------------------------------------------
+#
+# Both rules below produce SPANS rather than a rewritten text, so the live
+# stream can run them over already-released text plus the new release and apply
+# only what lands in the new part (:func:`scrub_credential_structures_in_context`,
+# round-1 review R1/Q3): a Secret's ``kind`` line and its ``data:`` block often
+# arrive in different reads, and a rule that needs both in one string missed
+# every key order but kubectl's.
+
+_K8S_DATA_KEYS = frozenset({"data", "stringData"})
+#: The ``read`` tool's line-number gutter (``  9| ``), right-aligned to ONE width
+#: per result. A Secret manifest read as a file carries it on every line, and the
+#: YAML rule used to see `` 9| stringData:`` as no key at all (QA round 1, Q4).
+#: Each line is read after its gutter; the width is constant within a result,
+#: so indentation still compares as in the file.
+_READ_GUTTER_RE = re.compile(r"[ ]*+[0-9]++\| ")
+_K8S_YAML_KIND_SECRET_RE = re.compile(
+    r"^(?:[ ]*+[0-9]++\| )?[ \t]*+(?:-[ \t]++)?kind:[ \t]*+[\"']?Secret[\"']?[ \t]*+$",
+    re.MULTILINE,
+)
+_K8S_JSON_KIND_SECRET_RE = re.compile(r'\\?"kind\\?"\s*:\s*\\?"Secret\\?"')
+#: One YAML mapping line (after any gutter): indent, optional list-item dash,
+#: key, optional value. Every quantifier is possessive: the lazy key and value
+#: of the first version backtracked over a whitespace run at every position,
+#: and one 200,000-space line under ``kind: Secret`` did not finish in 118 s
+#: (round-1 review, R3). The key cannot contain ``:``, so possessive is exact.
+_YAML_KEY_LINE_RE = re.compile(
+    r"(?P<indent>[ \t]*+)(?P<dash>-[ \t]++)?(?P<key>[^\s:#\"'][^:]*+|\"[^\"]*+\"|'[^']*+')"
+    r"[ \t]*+:(?:[ \t]++(?P<value>.*+))?$"
+)
+_YAML_BLOCK_SCALAR_RE = re.compile(r"^[|>][+-]?[0-9]?$")
+_JSON_TOKEN_RE = re.compile(r'"(?:[^"\\\n]|\\.)*"|[{}\[\]:,]')
+#: A whole-value environment/command reference (``${SENTRY_DSN}``, ``$(cat f)``).
+_WHOLE_REFERENCE_RE = re.compile(r"\$\{[^}\s]*\}|\$\([^)\n]*\)")
+
+#: ``(start, end, replacement, hits)``: one rewrite of the text a rule scanned,
+#: with the hits that rewrite is evidence for — reported only if it is applied.
+_Span = tuple[int, int, str, list[ShapeHit]]
+
+
+class _YamlKey(NamedTuple):
+    indent: int  # after the gutter
+    column: int  # the key's own column (indent + list dash)
+    key: str
+    value: str  # trailing blanks dropped
+    value_start: int  # offset of ``value`` in the line, gutter included
+
+
+def _gutter_width(line: str) -> int:
+    match = _READ_GUTTER_RE.match(line)
+    return match.end() if match is not None else 0
+
+
+def _yaml_content(line: str) -> str:
+    """``line`` without its read gutter and line terminator."""
+    body = line.rstrip("\r\n")
+    return body[_gutter_width(body) :]
+
+
+def _yaml_key(line: str) -> Optional[_YamlKey]:
+    """The YAML key on ``line`` (gutter tolerated), else ``None``."""
+    body = line.rstrip("\r\n")
+    match = _YAML_KEY_LINE_RE.match(body, _gutter_width(body))
+    if match is None:
+        return None
+    indent = len(match.group("indent"))
+    raw_value = match.group("value") or ""
+    value = raw_value.rstrip(" \t")
+    return _YamlKey(
+        indent,
+        indent + len(match.group("dash") or ""),
+        match.group("key").strip("\"'"),
+        value,
+        match.start("value") if match.group("value") is not None else len(body),
+    )
+
+
+def _line_indent(line: str) -> int:
+    return len(line) - len(line.lstrip(" \t"))
+
+
+def _is_template_value(value: str) -> bool:
+    """A Helm/Go template or a shell/env reference, not a value (round-1 review, R2).
+
+    A chart's ``templates/secret.yaml`` spells its data as ``{{ .Values.x | b64enc }}``;
+    masking that showed an agent ``[redacted]`` where the code is, and an ``edit``
+    built from the read could not match or wrote the marker back into the chart.
+    """
+    bare = value.strip().strip("\"'")
+    return "{{" in bare or _WHOLE_REFERENCE_RE.fullmatch(bare) is not None
+
+
+def _yaml_mapping_is_secret(
+    contents: list[str], parsed: list[Optional[_YamlKey]], header: int, column: int
+) -> bool:
+    """Whether the mapping that owns line ``header`` (keys at ``column``) has ``kind: Secret``.
+
+    BOUNDED TO THAT ONE OBJECT (QA round 1, Q1/Q2). The first version walked
+    along the column until a ``---`` or a parent, so in ``cat cm.yaml secret.yaml``
+    (no separator) the Secret's ``kind`` claimed the ConfigMap's ``data:`` and
+    masked its package names and image ids; and it re-walked the whole run once
+    per header, which made 2,000 concatenated ConfigMaps take over 600 s. An
+    object ends at its ``apiVersion`` line (every manifest and every kubectl
+    order prints it first) or at a key repeated at the same column (a second
+    object with no separator), so each scan covers its own object only and the
+    whole rule is linear in the text.
+    """
+
+    def _is_secret_kind(entry: _YamlKey) -> bool:
+        return entry.value.strip("\"'") == "Secret"
+
+    first = parsed[header]
+    seen = {first.key} if first is not None else set()
+    # The header line itself may open the item (``- data:``): then upward is a
+    # previous item and must not be read.
+    if first is not None and first.indent < first.column:
+        upward: range = range(0)
+    else:
+        upward = range(header - 1, -1, -1)
+    for index in upward:
+        content = contents[index]
+        if not content.strip() or content.lstrip().startswith("#"):
+            continue
+        if content.startswith("---"):
+            break
+        entry = parsed[index]
+        if entry is None:
+            if _line_indent(content) < column:
+                break
+            continue
+        if entry.column == column:
+            if entry.key == "kind":
+                return _is_secret_kind(entry)
+            if entry.key in seen:
+                break  # the previous object, concatenated without ``---``
+            seen.add(entry.key)
+            if entry.key == "apiVersion" or entry.indent < column:
+                break  # this object's first line, or the ``- key:`` that opens the item
+            continue
+        if entry.indent < column:
+            break  # a parent
+    for index in range(header + 1, len(contents)):
+        content = contents[index]
+        if not content.strip() or content.lstrip().startswith("#"):
+            continue
+        if content.startswith("---"):
+            break
+        if _line_indent(content) > column:
+            continue
+        entry = parsed[index]
+        if entry is None or entry.column != column or entry.indent < column:
+            break  # a parent, a new list item, or not a mapping line
+        if entry.key == "kind":
+            return _is_secret_kind(entry)
+        if entry.key in seen or entry.key == "apiVersion":
+            break  # the next object
+        seen.add(entry.key)
+    return False
+
+
+def _k8s_secret_yaml_spans(text: str) -> list[_Span]:
+    """Spans masking ``data``/``stringData`` values of every YAML ``kind: Secret`` object."""
+    if not _K8S_YAML_KIND_SECRET_RE.search(text):
+        return []
+    lines = text.splitlines(keepends=True)
+    contents = [_yaml_content(line) for line in lines]
+    parsed = [_yaml_key(line) for line in lines]
+    offsets: list[int] = []
+    position = 0
+    for line in lines:
+        offsets.append(position)
+        position += len(line)
+    spans: list[_Span] = []
+    for header, entry in enumerate(parsed):
+        if entry is None or entry.key not in _K8S_DATA_KEYS or entry.value:
+            continue
+        column = entry.column
+        if not _yaml_mapping_is_secret(contents, parsed, header, column):
+            continue
+        child_column: Optional[int] = None
+        for index in range(header + 1, len(lines)):
+            content = contents[index]
+            if not content.strip():
+                continue
+            indent = _line_indent(content)
+            if indent <= column:
+                break
+            child = parsed[index]
+            if child_column is None:
+                child_column = indent
+            if indent == child_column and child is not None:
+                value = child.value
+                if (
+                    value
+                    and not _YAML_BLOCK_SCALAR_RE.match(value)
+                    and value != REDACTION_MARKER
+                    and not _is_template_value(value)
+                ):
+                    start = offsets[index] + child.value_start
+                    found = (
+                        [ShapeHit(K8S_SECRET_DATA_LABEL, value.strip("\"'"), window=value)]
+                        if entry.key == "data"
+                        else []
+                    )
+                    spans.append((start, start + len(value), REDACTION_MARKER, found))
+            elif indent > child_column:
+                # Continuation of a block scalar (``key: |``) or a folded value:
+                # the value's own text, so the whole line goes.
+                stripped = content.strip()
+                if stripped != REDACTION_MARKER and "{{" not in stripped:
+                    body = lines[index].rstrip("\r\n")
+                    start = offsets[index] + len(body) - len(content.lstrip(" \t"))
+                    end = offsets[index] + len(body.rstrip(" \t"))
+                    spans.append((start, end, REDACTION_MARKER, []))
+    return spans
+
+
+def _k8s_secret_json_spans(text: str) -> list[_Span]:
+    """Spans masking ``data``/``stringData`` string values of every JSON ``"kind": "Secret"``.
+
+    A small token walk rather than :func:`json.loads`: tool output wraps the JSON in
+    other text (a ``List``, a log prefix, a YAML ``last-applied-configuration``
+    annotation), and the rewrite must keep every other byte as it was. A JSON
+    STRING that itself carries an escaped Secret (``-o json``'s annotation) is
+    decoded, walked and re-encoded.
+
+    An object still OPEN when the text ends is judged on what it has shown: the
+    live stream releases a Secret's ``data`` and ``kind`` before its closing
+    brace (the hold waits for ``kind``, not for the end), so frames are settled
+    at the end of the scan as well as on pop.
+    """
+    if not _K8S_JSON_KIND_SECRET_RE.search(text):
+        return []
+    replacements: list[_Span] = []
+    # frame: [type, key, expecting_value, is_secret, value_spans, is_data_block]
+    stack: list[list[Any]] = []
+
+    def _settle(frame: list[Any], parent: Optional[list[Any]]) -> None:
+        if frame[0] != "o":
+            return
+        if frame[5] and parent is not None:
+            parent[4].extend(frame[4])
+        elif frame[3]:
+            replacements.extend(frame[4])
+
+    for match in _JSON_TOKEN_RE.finditer(text):
+        token = match.group(0)
+        top = stack[-1] if stack else None
+        if token == "{":
+            # The data block's KEY (``data``/``stringData``), or "" for any other object.
+            is_data = (
+                top[1]
+                if top is not None and top[0] == "o" and top[2] and top[1] in _K8S_DATA_KEYS
+                else ""
+            )
+            stack.append(["o", None, False, False, [], is_data])
+        elif token == "[":
+            stack.append(["a", None, False, False, [], ""])
+        elif token in "}]":
+            if not stack:
+                continue
+            frame = stack.pop()
+            parent = stack[-1] if stack else None
+            _settle(frame, parent)
+            if parent is not None and parent[0] == "o":
+                parent[2] = False
+        elif token == ":":
+            if top is not None and top[0] == "o":
+                top[2] = True
+        elif token == ",":
+            if top is not None and top[0] == "o":
+                top[2] = False
+        else:  # a string
+            if top is not None and top[0] == "o" and not top[2]:
+                top[1] = token[1:-1]
+                continue
+            if top is not None and top[0] == "o" and top[5]:
+                value = token[1:-1]
+                if value and value != REDACTION_MARKER and not _is_template_value(value):
+                    found = (
+                        [ShapeHit(K8S_SECRET_DATA_LABEL, value, window=value)]
+                        if top[5] == "data"
+                        else []
+                    )
+                    top[4].append((match.start() + 1, match.end() - 1, REDACTION_MARKER, found))
+            elif top is not None and top[0] == "o" and top[1] == "kind" and token == '"Secret"':
+                top[3] = True
+            elif '\\"Secret\\"' in token and "kind" in token:
+                inner = _decode_json_run(token[1:-1])
+                if inner is not None:
+                    inner_hits: list[ShapeHit] = []
+                    scrubbed = _apply_spans(inner, _k8s_secret_json_spans(inner), 0, inner_hits)
+                    if scrubbed != inner:
+                        replacements.append(
+                            (
+                                match.start(),
+                                match.end(),
+                                json.dumps(scrubbed, ensure_ascii=False),
+                                inner_hits,
+                            )
+                        )
+    while stack:
+        frame = stack.pop()
+        _settle(frame, stack[-1] if stack else None)
+    return replacements
+
+
+def _apply_spans(text: str, spans: list[_Span], floor: int, hits: list[ShapeHit]) -> str:
+    """``text[floor:]`` with every non-overlapping span at or after ``floor`` applied.
+
+    ``floor`` is where the caller's own text begins inside a longer scanned text
+    (the live stream's lookbehind): a span before it is already published and
+    cannot be rewritten, so it is skipped rather than half-applied.
+    """
+    if not spans:
+        return text[floor:]
+    pieces: list[str] = []
+    cursor = floor
+    for start, end, new, found in sorted(spans, key=lambda span: (span[0], span[1])):
+        if start < cursor:
+            continue
+        pieces.append(text[cursor:start])
+        pieces.append(new)
+        hits.extend(found)
+        cursor = end
+    pieces.append(text[cursor:])
+    return "".join(pieces)
+
+
+# --- Kubernetes Secret printed as a Go map ---------------------------------------
+#
+# WHY (2026-11 post-mortem, the literal incident output): ``kubectl get secret X
+# -o go-template='{{index .data "K" | base64decode}}'`` on a missing key fails
+# with ``raw data was: {JSON}`` (masked by the JSON rule) and then ``object given
+# to template engine was: map[apiVersion:v1 data:map[K1:<b64> K2:<b64>] kind:Secret
+# metadata:map[…]]`` — Go's ``fmt`` rendering of the object, which no JSON/YAML
+# rule reads. Keys are sorted, so ``kind:Secret`` comes AFTER ``data:``; entries
+# are space-separated ``key:value``. Only a ``data:map[``/``stringData:map[``
+# whose OWN enclosing map says ``kind:Secret`` is masked (values only, keys kept):
+# a ConfigMap's ``data:map[`` is left alone.
+
+_GOMAP_DATA_RE = re.compile(r"(?<![\w.-])(data|stringData):map\[")
+_GOMAP_ENTRY_RE = re.compile(r"(?:(?<=\[)|(?<= ))([A-Za-z0-9_.-]+):")
+
+
+#: One token stream per line: brackets, and a ``kind:Secret`` entry (preceded
+#: by a space or its map's ``[``, followed by a space or its map's ``]``).
+_GOMAP_TOKEN_RE = re.compile(r"[\[\]]|(?<=[ \[])kind:Secret(?=[ \]])")
+
+
+def _gomap_line_brackets(
+    text: str, start: int, end: int
+) -> tuple[dict[int, int], dict[int, int], set[int]]:
+    """Bracket structure of the line ``text[start:end]`` in ONE pass.
+
+    Returns ``(close_of, parent_of, secret)``: the ``]`` pairing each ``[``
+    (unclosed ones are absent), the ``[`` directly enclosing each ``[``, and
+    the ``[`` offsets whose OWN level holds ``kind:Secret``.
+
+    WHY one stack pass (round-3 review R3-1): the first cut walked forward to
+    the close and back to the owner for every ``data:map[`` and re-walked the
+    owner for ``kind:Secret`` per sibling, so crafted input such as
+    ``map[kind:Secret `` + ``data:map[a:b] ``*n took 18 s at 54 KB and an
+    unclosed ``data:map[ ``*n never finished at 200 KB — on the path of every
+    tool result. Pairing once makes every lookup O(1); a stray ``]`` with
+    nothing open is ignored, as the backward walk ignored it.
+    """
+    close_of: dict[int, int] = {}
+    parent_of: dict[int, int] = {}
+    secret: set[int] = set()
+    stack: list[int] = []
+    for token in _GOMAP_TOKEN_RE.finditer(text, start, end):
+        char = token.group(0)
+        if char == "[":
+            if stack:
+                parent_of[token.start()] = stack[-1]
+            stack.append(token.start())
+        elif char == "]":
+            if stack:
+                close_of[stack.pop()] = token.start()
+        elif stack:
+            secret.add(stack[-1])
+    return close_of, parent_of, secret
+
+
+def _k8s_secret_gomap_spans(text: str) -> list[_Span]:
+    if "map[" not in text or "kind:Secret" not in text:
+        return []
+    spans: list[_Span] = []
+    # fmt prints a map on one line, so the structure is computed once per line
+    # holding a ``data:map[`` and reused by every match on it.
+    line_start = line_end = -1
+    close_of: dict[int, int] = {}
+    parent_of: dict[int, int] = {}
+    secret: set[int] = set()
+    #: End of the last masked data map: a ``data:map[`` nested inside it is
+    #: already covered by that map's values, and re-reading its body per nesting
+    #: level would make a crafted ``data:map[kind:Secret data:map[`` chain quadratic.
+    covered = -1
+    for match in _GOMAP_DATA_RE.finditer(text):
+        if match.start() < covered:
+            continue
+        if match.start() >= line_end:
+            line_start = text.rfind("\n", 0, match.start()) + 1
+            line_end = text.find("\n", match.start())
+            if line_end < 0:
+                line_end = len(text)
+            close_of, parent_of, secret = _gomap_line_brackets(text, line_start, line_end)
+        body = match.end()
+        close = close_of.get(body - 1, -1)
+        owner_bracket = parent_of.get(body - 1, -1)
+        if close < 0 or owner_bracket < 0 or not text.endswith("map", 0, owner_bracket):
+            continue
+        if owner_bracket not in close_of or owner_bracket not in secret:
+            continue
+        covered = close
+        keys = list(_GOMAP_ENTRY_RE.finditer(text, body, close))
+        for index, key in enumerate(keys):
+            value_end = keys[index + 1].start() - 1 if index + 1 < len(keys) else close
+            value = text[key.end() : value_end]
+            if value and value != REDACTION_MARKER:
+                found = (
+                    [ShapeHit(K8S_SECRET_DATA_LABEL, value, window=value)]
+                    if match.group(1) == "data"
+                    else []
+                )
+                spans.append((key.end(), value_end, REDACTION_MARKER, found))
+    return spans
+
+
+def _scrub_k8s_secret_gomap(text: str, hits: list[ShapeHit]) -> str:
+    return _apply_spans(text, _k8s_secret_gomap_spans(text), 0, hits)
+
+
+def _scrub_k8s_secret_yaml(text: str, hits: list[ShapeHit]) -> str:
+    return _apply_spans(text, _k8s_secret_yaml_spans(text), 0, hits)
+
+
+def _scrub_k8s_secret_json(text: str, hits: list[ShapeHit]) -> str:
+    return _apply_spans(text, _k8s_secret_json_spans(text), 0, hits)
+
+
+def scrub_credential_structures_in_context(context: str, text: str) -> tuple[str, list[ShapeHit]]:
+    """Mask Secret ``data`` in ``text``, reading ``context`` (released earlier) as lookbehind.
+
+    The live stream's half of the structure rules (round-1 review R1, QA Q3).
+    A manifest prints ``kind: Secret`` long before ``data:``; ``-o json`` prints
+    the object's opening brace in an earlier read than its ``"data"``. Scanning
+    ``context + text`` lets the rule see the owning object, and only spans
+    inside ``text`` are applied — the context is already on screen.
+    """
+    if not text or ("Secret" not in text and "Secret" not in context):
+        return text, []
+    combined = context + text
+    spans = (
+        _k8s_secret_json_spans(combined)
+        + _k8s_secret_yaml_spans(combined)
+        + _k8s_secret_gomap_spans(combined)
+    )
+    hits: list[ShapeHit] = []
+    return _apply_spans(combined, spans, len(context), hits), hits
+
+
+# --- Terraform plan JSON ---------------------------------------------------------
+#
+# WHY (2026-11, second incident): an agent read Terraform Cloud's
+# ``/api/v2/plans/<id>/json-output`` — the full ``terraform show -json`` plan,
+# where values the configuration marks ``sensitive`` are printed in clear (the
+# ``json-output-redacted`` endpoint nulls them). The plan DECLARES which values
+# are sensitive (``before_sensitive``/``after_sensitive``, ``sensitive_values``,
+# a variable's ``sensitive: true``), so this masks exactly those paths and
+# nothing else: keys, resource addresses, types and names stay readable, and
+# every other value is left to the ordinary rules. A text that does not parse as
+# one whole plan object (truncated, partial) is not guessed at — the plaintext
+# rules still run over it.
+
+#: Larger texts are not parsed (memory and time); the plaintext rules still run.
+_TF_PLAN_MAX_CHARS = 32 * 1024 * 1024
+_TF_PLAN_ANCHORS = ('"resource_changes"', '"planned_values"', '"prior_state"', '"variables"')
+_TF_PLAN_MARKERS = ('"after_sensitive"', '"before_sensitive"', '"sensitive_values"', '"sensitive"')
+
+
+def _tf_mask(value: Any, mask: Any) -> tuple[Any, bool]:
+    """``value`` with every leaf ``mask`` marks ``true`` replaced by the marker.
+
+    ``mask`` mirrors ``value``'s shape (Terraform's sensitivity encoding): ``true``
+    masks the whole subtree, an object or list recurses, anything else keeps it.
+    A ``null`` value stays ``null`` — there is nothing to hide, and the marker
+    would claim there was.
+    """
+    if mask is True:
+        if value is None:
+            return value, False
+        return REDACTION_MARKER, True
+    if isinstance(mask, dict) and isinstance(value, dict):
+        changed = False
+        out = dict(value)
+        for key, sub in mask.items():
+            if key in out:
+                out[key], did = _tf_mask(out[key], sub)
+                changed = changed or did
+        return out, changed
+    if isinstance(mask, list) and isinstance(value, list):
+        changed = False
+        out_list = list(value)
+        for index, sub in enumerate(mask[: len(out_list)]):
+            out_list[index], did = _tf_mask(out_list[index], sub)
+            changed = changed or did
+        return out_list, changed
+    return value, False
+
+
+def _tf_mask_change(change: Any) -> bool:
+    if not isinstance(change, dict):
+        return False
+    changed = False
+    for side in ("before", "after"):
+        if side in change:
+            change[side], did = _tf_mask(change[side], change.get(side + "_sensitive"))
+            changed = changed or did
+    return changed
+
+
+def _tf_mask_module(module: Any) -> bool:
+    """``planned_values``/``prior_state.values`` modules: ``values`` by ``sensitive_values``."""
+    if not isinstance(module, dict):
+        return False
+    changed = False
+    for resource in module.get("resources") or ():
+        if isinstance(resource, dict) and "values" in resource:
+            resource["values"], did = _tf_mask(resource["values"], resource.get("sensitive_values"))
+            changed = changed or did
+    for child in module.get("child_modules") or ():
+        changed = _tf_mask_module(child) or changed
+    return changed
+
+
+def _tf_mask_outputs(outputs: Any) -> bool:
+    changed = False
+    if isinstance(outputs, dict):
+        for output in outputs.values():
+            if isinstance(output, dict) and output.get("sensitive") is True:
+                if output.get("value") is not None:
+                    output["value"] = REDACTION_MARKER
+                    changed = True
+    return changed
+
+
+def _tf_mask_plan(plan: dict[str, Any]) -> bool:
+    changed = False
+    for key in ("resource_changes", "resource_drift"):
+        for entry in plan.get(key) or ():
+            if isinstance(entry, dict):
+                changed = _tf_mask_change(entry.get("change")) or changed
+    output_changes = plan.get("output_changes")
+    if isinstance(output_changes, dict):
+        for change in output_changes.values():
+            changed = _tf_mask_change(change) or changed
+    planned = plan.get("planned_values")
+    if isinstance(planned, dict):
+        changed = _tf_mask_module(planned.get("root_module")) or changed
+        changed = _tf_mask_outputs(planned.get("outputs")) or changed
+    prior = plan.get("prior_state")
+    if isinstance(prior, dict) and isinstance(prior.get("values"), dict):
+        changed = _tf_mask_module(prior["values"].get("root_module")) or changed
+        changed = _tf_mask_outputs(prior["values"].get("outputs")) or changed
+    # Input variables carry no sensitivity of their own in the plan: the
+    # configuration's declaration (``sensitive = true``) is where it lives.
+    variables = plan.get("variables")
+    configuration = plan.get("configuration")
+    root = configuration.get("root_module") if isinstance(configuration, dict) else None
+    declared = root.get("variables") if isinstance(root, dict) else None
+    if isinstance(variables, dict) and isinstance(declared, dict):
+        for name, declaration in declared.items():
+            entry = variables.get(name)
+            if (
+                isinstance(declaration, dict)
+                and declaration.get("sensitive") is True
+                and isinstance(entry, dict)
+                and entry.get("value") is not None
+            ):
+                entry["value"] = REDACTION_MARKER
+                changed = True
+    # A variable set marked sensitive in HCP Terraform is NOT declared sensitive
+    # in the configuration, so the plan prints it in clear with no marker at all
+    # (2026-11-09 exposure: ``AWS_ACCESS_KEY``/``AWS_SECRET_KEY`` in a saved plan
+    # JSON). The variable's NAME is the one signal left, judged by the same
+    # ``is_credential_name`` every other surface uses: no new keyword list, and
+    # ``region``/``bucket`` stay readable.
+    if isinstance(variables, dict):
+        for name, entry in variables.items():
+            if (
+                isinstance(name, str)
+                and isinstance(entry, dict)
+                and entry.get("value") not in (None, "", REDACTION_MARKER)
+                and is_credential_name(name)
+            ):
+                entry["value"] = REDACTION_MARKER
+                changed = True
+    return changed
+
+
+_JSON_INDENT_RE = re.compile(r"\n([ \t]+)\S")
+
+
+def _render_like(plan: dict[str, Any], original: str) -> str:
+    """``plan`` re-serialised in ``original``'s layout (round-1 review, N2).
+
+    The plan is masked as parsed data, so it has to be re-rendered; matching the
+    original's indent (jq's 2, a 4-space ``json.tool``, tabs) and its compact
+    separators (``terraform show -json`` prints no spaces) keeps the rewrite to
+    the masked values plus whatever whitespace :func:`json.dumps` normalises
+    INSIDE a line (key order and string escapes are preserved, ``ensure_ascii``
+    is off). A byte-exact in-place rewrite would need a span-tracking JSON
+    parser for a rule that fires a few times a month.
+    """
+    if "\n" not in original:
+        compact = '": ' not in original and ", " not in original
+        return json.dumps(plan, ensure_ascii=False, separators=(",", ":") if compact else None)
+    match = _JSON_INDENT_RE.search(original)
+    indent: Union[int, str] = 2
+    if match is not None:
+        unit = match.group(1)
+        indent = unit if "\t" in unit else len(unit)
+    return json.dumps(plan, ensure_ascii=False, indent=indent)
+
+
+def _scrub_terraform_plan_json(text: str) -> str:
+    """Mask the values a Terraform plan JSON marks sensitive; see the section note.
+
+    A plan read through the ``read`` tool carries its line-number gutter on
+    every line, which no JSON parser accepts, so a pretty plan read as a file
+    was never masked (2026-11-09 exposure). The gutter is stripped for the
+    parse and put back on the same lines afterwards — the same tolerance the
+    Secret YAML rule has (round-1 QA Q4).
+    """
+    if len(text) > _TF_PLAN_MAX_CHARS or not any(a in text for a in _TF_PLAN_ANCHORS):
+        return text
+    # ``"variables"`` counts as a marker: a credential-named variable needs no
+    # sensitivity marker to be masked (see ``_tf_mask_plan``).
+    if not any(m in text for m in _TF_PLAN_MARKERS) and '"variables"' not in text:
+        return text
+    if "| " in text and _READ_GUTTER_RE.match(text, text.find("\n") + 1):
+        guttered = _scrub_guttered_plan(text)
+        if guttered is not None:
+            return guttered
+    return _scrub_plain_terraform_plan_json(text)
+
+
+def _scrub_guttered_plan(text: str) -> Optional[str]:
+    """The plan rule over ``read``-gutter lines, gutters restored; ``None`` if unchanged."""
+    lines = text.splitlines(keepends=True)
+    gutters = [line[: _gutter_width(line)] for line in lines]
+    if sum(1 for gutter in gutters if gutter) < 2:
+        return None
+    stripped_lines = [line[len(gutter) :] for line, gutter in zip(lines, gutters)]
+    stripped = "".join(stripped_lines)
+    masked = _scrub_plain_terraform_plan_json(stripped)
+    if masked == stripped:
+        return None
+    new_lines = masked.splitlines(keepends=True)
+    # Same line count: the mask rewrote lines in place, so the zip IS the
+    # alignment and the line diff below would only spend its budget proving it
+    # (PR #3789 review R5).
+    if len(new_lines) == len(lines):
+        return "".join(gutter + line for gutter, line in zip(gutters, new_lines))
+    blocks = _changed_line_blocks(stripped_lines, new_lines)
+    if blocks is not None:
+        laid = _lay_blocks(lines, new_lines, blocks)
+        return "".join(gutter + line for gutter, line in zip(gutters, laid))
+    # Fallback past the diff budget (see ``_DIFF_MAX_EDITS``). The re-render
+    # changed the line count (a masked multi-line value collapses to one
+    # marker; a source-inline array expands). Every line keeps its ORIGINAL
+    # gutter and the output keeps the original line count (round-3 review
+    # R3-3). Unchanged lines are aligned from both ends; the changed middle is
+    # laid onto the original middle's slots — padded with empty lines when it
+    # shrank, its overflow joined onto the last slot when it grew.
+    lead = 0
+    limit = min(len(new_lines), len(lines))
+    while lead < limit and new_lines[lead] == stripped_lines[lead]:
+        lead += 1
+    tail = 0
+    while (
+        tail < limit - lead
+        and new_lines[len(new_lines) - 1 - tail] == stripped_lines[len(lines) - 1 - tail]
+    ):
+        tail += 1
+    middle = new_lines[lead : len(new_lines) - tail]
+    slots = len(lines) - tail - lead
+    if slots <= 0:
+        return None  # nothing to lay the change onto; leave it to the plain rules
+    middle = [line.rstrip("\r\n") for line in middle]
+    if len(middle) > slots:
+        middle = middle[: slots - 1] + [" ".join(line.strip() for line in middle[slots - 1 :])]
+    else:
+        middle = middle + [""] * (slots - len(middle))
+    # Each slot keeps its original line ending (the last line may have none).
+    middle = [
+        line + lines[lead + index][len(lines[lead + index].rstrip("\r\n")) :]
+        for index, line in enumerate(middle)
+    ]
+    laid = new_lines[:lead] + middle + new_lines[len(new_lines) - tail :]
+    return "".join(gutter + line for gutter, line in zip(gutters, laid))
+
+
+#: Edit budget for :func:`_changed_line_blocks`. Masking a plan changes only the
+#: lines of its masked values (a 3-line list collapsing to one marker line is 4
+#: edits), so a real plan read sits far below this; past it the cost (O(D²)
+#: steps, D² trace entries) is not worth paying and the coarser two-ended
+#: alignment above is used instead — the behaviour before this budget existed.
+_DIFF_MAX_EDITS = 1000
+
+
+def _changed_line_blocks(
+    old: list[str], new: list[str]
+) -> Optional[list[tuple[int, int, int, int]]]:
+    """The non-equal ``(i1, i2, j1, j2)`` blocks between two line lists, or ``None``.
+
+    WHY (PR #3756 QA Q11): the two-ended alignment treated EVERYTHING between the
+    first and last changed line as one block, so with two masked multi-line
+    values the unchanged lines between them slid up by the first block's shrink
+    and a range ``read`` or a line-numbered ``edit`` landed on the wrong line.
+    Each block is laid onto its OWN original lines here, so every unchanged line
+    keeps its original line number. Myers' O((N+M)·D) diff over the middle left
+    after trimming the common prefix and suffix; ``None`` past
+    :data:`_DIFF_MAX_EDITS`.
+    """
+    lead = 0
+    limit = min(len(old), len(new))
+    while lead < limit and old[lead] == new[lead]:
+        lead += 1
+    tail = 0
+    while tail < limit - lead and old[len(old) - 1 - tail] == new[len(new) - 1 - tail]:
+        tail += 1
+    a, b = old[lead : len(old) - tail], new[lead : len(new) - tail]
+    n, m = len(a), len(b)
+    if n + m == 0:
+        return []
+    span = _DIFF_MAX_EDITS + 1
+    frontier = [0] * (2 * span + 1)  # furthest x on diagonal k, at index k + span
+    trace: list[list[int]] = []
+    found = False
+    for d in range(_DIFF_MAX_EDITS + 1):
+        trace.append(frontier[span - d - 1 : span + d + 2])
+        for k in range(-d, d + 1, 2):
+            if k == -d or (k != d and frontier[span + k - 1] < frontier[span + k + 1]):
+                x = frontier[span + k + 1]
+            else:
+                x = frontier[span + k - 1] + 1
+            y = x - k
+            while x < n and y < m and a[x] == b[y]:
+                x += 1
+                y += 1
+            frontier[span + k] = x
+            if x >= n and y >= m:
+                found = True
+                break
+        if found:
+            break
+    if not found:
+        return None
+    # Walk back through the trace collecting the matched (equal) line pairs.
+    pairs: list[tuple[int, int]] = []
+    x, y = n, m
+    for d in range(len(trace) - 1, -1, -1):
+        saved = trace[d]  # frontier before step d, diagonals -d-1 .. d+1
+        k = x - y
+        at = lambda diagonal: saved[diagonal + d + 1]  # noqa: E731 - local index shim
+        if k == -d or (k != d and at(k - 1) < at(k + 1)):
+            previous_k = k + 1
+        else:
+            previous_k = k - 1
+        previous_x = at(previous_k) if d > 0 else 0
+        previous_y = previous_x - previous_k if d > 0 else 0
+        while x > previous_x and y > previous_y:
+            x -= 1
+            y -= 1
+            pairs.append((x, y))
+        x, y = previous_x, previous_y
+    pairs.reverse()
+    blocks: list[tuple[int, int, int, int]] = []
+    i = j = 0
+    for pi, pj in pairs + [(n, m)]:
+        if pi > i or pj > j:
+            blocks.append((lead + i, lead + pi, lead + j, lead + pj))
+        i, j = pi + 1, pj + 1
+    return blocks
+
+
+def _lay_blocks(
+    lines: list[str], new_lines: list[str], blocks: list[tuple[int, int, int, int]]
+) -> list[str]:
+    """``new_lines`` laid onto ``lines``' slots: one output line per original line.
+
+    Equal lines map one-to-one. A changed block takes its own original slots —
+    padded with empty lines when it shrank, its overflow joined onto its last
+    slot when it grew, and joined onto the line before it when it has no slot at
+    all (a pure insertion). Each slot keeps its original line ending.
+    """
+
+    def ending(index: int) -> str:
+        return lines[index][len(lines[index].rstrip("\r\n")) :]
+
+    laid = list(lines)
+    leading = ""  # a pure insertion before line 1, joined onto it at the end
+    i = j = 0
+    for i1, i2, j1, j2 in blocks + [(len(lines), len(lines), len(new_lines), len(new_lines))]:
+        while i < i1:
+            laid[i] = new_lines[j].rstrip("\r\n") + ending(i)
+            i += 1
+            j += 1
+        chunk = [line.rstrip("\r\n") for line in new_lines[j1:j2]]
+        slots = i2 - i1
+        if slots == 0:
+            if chunk:
+                joined = " ".join(line.strip() for line in chunk)
+                if i1 > 0:
+                    laid[i1 - 1] = laid[i1 - 1].rstrip("\r\n") + " " + joined + ending(i1 - 1)
+                else:
+                    leading = joined + " "
+        else:
+            if len(chunk) > slots:
+                chunk = chunk[: slots - 1] + [" ".join(line.strip() for line in chunk[slots - 1 :])]
+            else:
+                chunk = chunk + [""] * (slots - len(chunk))
+            for offset, line in enumerate(chunk):
+                laid[i1 + offset] = line + ending(i1 + offset)
+        i, j = i2, j2
+    if leading and laid:
+        laid[0] = leading + laid[0]
+    return laid
+
+
+def _scrub_plain_terraform_plan_json(text: str) -> str:
+    start = text.find("{")
+    while start >= 0:
+        try:
+            plan, end = json.JSONDecoder().raw_decode(text, start)
+        except (ValueError, RecursionError):
+            # RecursionError: a 100k-deep ``[[[…`` next to a plan anchor reached the
+            # settled result path as an exception (round-1 review, R4).
+            plan, end = None, -1
+        if isinstance(plan, dict) and any(
+            key in plan for key in ("resource_changes", "planned_values", "prior_state")
+        ):
+            try:
+                masked = _tf_mask_plan(plan)
+            except RecursionError:
+                masked = False
+            if masked:
+                # Keep going: ``for ws in …; do terraform show -json …; done``
+                # prints several plans, and each is judged on its own (round-3
+                # review R3-4 — the first cut returned after the first plan).
+                rendered = _render_like(plan, text[start:end])
+                text = text[:start] + rendered + text[end:]
+                end = start + len(rendered)
+        if end > start:
+            start = text.find("{", end)  # a whole object that is not a plan: skip it
+        else:
+            # Not parseable from here (truncated or not JSON): only a LATER
+            # top-level ``{`` can start a plan; do not guess at this one.
+            next_line = text.find("\n{", start)
+            start = next_line + 1 if next_line >= 0 else -1
+    return text
+
+
+# --- a credential NAME held one step away from its VALUE ---------------------------
+#
+# WHY (2026-11 follow-up to PR #3756): every name-driven rule reads ``NAME = VALUE``
+# or ``"NAME": "VALUE"``, so a value whose name sits in a SIBLING field or in the
+# PARENT key was published whole:
+#
+# * ``{"key": "AWS_SECRET_KEY", "value": "<secret>"}`` — HCP Terraform's vars API
+#   (``data[].attributes.{key,value}``), GitLab's CI variables API, and every
+#   generic key/value array (``{"name": "DB_PASSWORD", "value": …}``, Kubernetes
+#   ``env:`` entries in YAML);
+# * ``{"AWS_SECRET_KEY": {"value": "<secret>"}}`` — the Terraform-variables shape
+#   outside a plan (the plan rule above only reads a whole plan object).
+#
+# The fix applies the EXISTING judgement (:func:`is_credential_name`, the count
+# guard, and the same value proof the assignment rule uses) to that one-step-away
+# name, and masks the VALUE only — keys, names and every other field stay
+# readable (operator constraint: names are never redacted). Like the plan rule
+# the mask is in place and NOT registered: the value proof is the assignment
+# rule's, but a value judged through a sibling field has less context than an
+# ``=`` binding, and a session-wide registration would multiply any miss.
+
+_INDIRECT_NAME_FIELDS = frozenset({"key", "name"})
+_INDIRECT_NAME_SHAPE = re.compile(r"[A-Za-z_][A-Za-z0-9_.\-]{0,127}")
+#: Live-stream lookbehind for this rule (see :func:`scrub_indirect_names_in_context`).
+_INDIRECT_CONTEXT_CHARS = 4096
+#: How many lines either side of a YAML ``value:`` its sibling name may sit. A COST
+#: bound, not a reach: without it a log of ``value: N`` lines at one column walked
+#: the whole text per line (20,000 lines: 58 s, measured). The spellings this rule
+#: exists for put the name on the adjacent line (k8s ``env``, GitLab/HCP
+#: variables: 1 line; with ``variable_type``/``protected`` beside it, 2-4).
+_INDIRECT_YAML_WINDOW = 64
+_INDIRECT_VALUE_FIELD = "value"
+_INDIRECT_JSON_HINT = re.compile(r'"value"\s*:\s*"')
+
+
+def _indirect_value_is_credential(name: Optional[str], value: str) -> bool:
+    """Whether ``value``, named ``name`` one step away, is masked (see the section note)."""
+    # The assignment rule's own value floor: below it a value is a word or a
+    # flag (``"x"``, ``"true"``), and masking it hides data while protecting nothing.
+    if not name or len(value) < _ASSIGNED_VALUE_MIN_CHARS or REDACTION_MARKER in value:
+        return False
+    # The assignment rule's own value CLASS (``_ASSIGNED_VALUE`` and the quoted
+    # group are runs of non-whitespace): a value with a space is prose — a form
+    # label (``In Progress Review``), a description (``Please set via env
+    # var``), a passphrase example — and ``NAME=<it>`` never masks it. Without
+    # this the sibling spelling masked what the direct one keeps (PR #3789
+    # review R2).
+    if any(char.isspace() for char in value):
+        return False
+    # The name must be a VARIABLE name: every spelling this rule exists for (HCP
+    # and GitLab variables, ``env:`` entries) holds an identifier. A path such as
+    # ``opensearch/opensearch-admin-credentials`` names a Secret RESOURCE, and the
+    # ``value`` beside it in the FP pass was a sentinel phrase, not a credential.
+    if not _INDIRECT_NAME_SHAPE.fullmatch(name):
+        return False
+    if not is_credential_name(name) or is_count_shaped(name):
+        return False
+    if _is_template_value(value):
+        return False
+    # A URL's credential is the DSN/URL rules' (they mask the password and keep
+    # user and host readable, and register it); masking the whole URL here would
+    # take that back. A chat webhook's URL IS the secret, so it stays this rule's.
+    if _URL_LIKE.match(value) and not is_webhook_credential_name(name):
+        return False
+    return not _value_is_not_a_credential(
+        _value_before_an_escape(value), name=name, strong=is_strong_credential_name(name)
+    )
+
+
+def _indirect_name_json_spans(text: str) -> list[_Span]:
+    """Spans masking a JSON ``"value"`` string named by its sibling ``key``/``name``
+    field or, when it has no such sibling, by its parent object's key.
+
+    The same token walk as :func:`_k8s_secret_json_spans`, for the same reasons:
+    the JSON may sit inside other text (a ``read`` gutter, a log prefix) and every
+    other byte must stay as it was. Field order is free: a sibling seen after the
+    value still names it, because the judgement is made when the object closes.
+    """
+    if not _INDIRECT_JSON_HINT.search(text):
+        return []
+    spans: list[_Span] = []
+    # frame: [type, key, expecting_value, sibling_name, value_span, parent_key]
+    stack: list[list[Any]] = []
+    for match in _JSON_TOKEN_RE.finditer(text):
+        token = match.group(0)
+        top = stack[-1] if stack else None
+        if token == "{":
+            parent = top[1] if top is not None and top[0] == "o" and top[2] else None
+            stack.append(["o", None, False, None, None, parent])
+        elif token == "[":
+            stack.append(["a", None, False, None, None, None])
+        elif token in "}]":
+            if not stack:
+                continue
+            frame = stack.pop()
+            if frame[0] == "o" and frame[4] is not None:
+                name = frame[3] if frame[3] is not None else frame[5]
+                start, end, value = frame[4]
+                if _indirect_value_is_credential(name, value):
+                    spans.append((start, end, REDACTION_MARKER, []))
+            parent_frame = stack[-1] if stack else None
+            if parent_frame is not None and parent_frame[0] == "o":
+                parent_frame[2] = False
+        elif token == ":":
+            if top is not None and top[0] == "o":
+                top[2] = True
+        elif token == ",":
+            if top is not None and top[0] == "o":
+                top[2] = False
+        elif top is not None and top[0] == "o":
+            if not top[2]:
+                top[1] = token[1:-1]
+            elif top[1] in _INDIRECT_NAME_FIELDS:
+                top[3] = token[1:-1]
+            elif top[1] == _INDIRECT_VALUE_FIELD:
+                top[4] = (match.start() + 1, match.end() - 1, token[1:-1])
+    return spans
+
+
+def _yaml_scalar_span(line: str, key: _YamlKey) -> Optional[tuple[int, int]]:
+    """``(start, end)`` of a plain or quoted scalar value inside ``line``, else ``None``."""
+    raw = key.value
+    if not raw or _YAML_BLOCK_SCALAR_RE.match(raw) or raw[0] in "{[&*!|>":
+        return None
+    start = key.value_start
+    if raw[0] in "\"'":
+        close = raw.find(raw[0], 1)
+        if close <= 1:
+            return None
+        return start + 1, start + close
+    comment = raw.find(" #")
+    inner = raw[:comment].rstrip(" \t") if comment >= 0 else raw
+    return (start, start + len(inner)) if inner else None
+
+
+def _indirect_name_yaml_spans(text: str) -> list[_Span]:
+    """The YAML spelling: ``- key: NAME`` / ``name: NAME`` beside ``value: V``, or
+    ``NAME:`` whose child mapping holds ``value: V`` (read gutter tolerated)."""
+    if "value:" not in text:
+        return []
+    lines = text.splitlines(keepends=True)
+    offsets: list[int] = []
+    position = 0
+    for line in lines:
+        offsets.append(position)
+        position += len(line)
+    parsed = [_yaml_key(line) if ":" in line else None for line in lines]
+    indents = [
+        _line_indent(content) if content.strip() and not content.lstrip().startswith("#") else None
+        for content in (_yaml_content(line) for line in lines)
+    ]
+    spans: list[_Span] = []
+    for index, key in enumerate(parsed):
+        if key is None or key.key != _INDIRECT_VALUE_FIELD or not key.value:
+            continue
+        column = key.column
+        sibling: Optional[str] = None
+        parent: Optional[str] = None
+        if key.indent == column:  # not itself a list item's first line: look up
+            for above in range(index - 1, max(-1, index - 1 - _INDIRECT_YAML_WINDOW), -1):
+                indent, other = indents[above], parsed[above]
+                if indent is None:
+                    continue
+                if other is None:
+                    if indent < column:
+                        break
+                    continue
+                if other.column > column:
+                    continue
+                if other.column == column:
+                    if other.key == _INDIRECT_VALUE_FIELD:
+                        break  # another record's ``value``: one mapping has one
+                    if other.key in _INDIRECT_NAME_FIELDS and sibling is None:
+                        sibling = other.value.strip("\"'")
+                    if other.indent < column:
+                        break  # the ``- `` line that opens this list item
+                    continue
+                if not other.value:
+                    parent = other.key
+                break
+        for below in range(index + 1, min(len(lines), index + 1 + _INDIRECT_YAML_WINDOW)):
+            indent, other = indents[below], parsed[below]
+            if indent is None:
+                continue
+            if indent < column:
+                break  # the parent's level, or the next ``- `` item
+            if other is not None and other.column == column and other.key == _INDIRECT_VALUE_FIELD:
+                break  # another record's ``value``
+            if (
+                other is not None
+                and other.indent == column
+                and other.key in _INDIRECT_NAME_FIELDS
+                and sibling is None
+            ):
+                sibling = other.value.strip("\"'")
+        span = _yaml_scalar_span(lines[index].rstrip("\r\n"), key)
+        if span is None:
+            continue
+        value = lines[index][span[0] : span[1]]
+        if _indirect_value_is_credential(sibling if sibling is not None else parent, value):
+            base = offsets[index]
+            spans.append((base + span[0], base + span[1], REDACTION_MARKER, []))
+    return spans
+
+
+def scrub_indirect_names_in_context(context: str, text: str) -> str:
+    """The live stream's half of the indirect-name rule: ``context`` is lookbehind.
+
+    A pipe releases at line boundaries, so ``"key": "DB_PASSWORD",`` can go out in
+    one release and its ``"value"`` line in the next; the whole-text rule would then
+    see a value with no name beside it and the spill file (written from the
+    released stream) kept it, readable through ``read spill://…?q=``. Only spans
+    inside ``text`` are applied — the context is already on screen. A name printed
+    AFTER its value in a later release is the known residual: the value has left.
+    """
+    # The name is ONE step away — a sibling field or the parent key, a few lines
+    # up — so a short tail of the lookbehind is enough, and it keeps a stream that
+    # releases line by line linear (the full 256 KiB lookbehind re-walked per
+    # release would be quadratic). Cut back to a line start so YAML indents hold.
+    if len(context) > _INDIRECT_CONTEXT_CHARS:
+        context = context[-_INDIRECT_CONTEXT_CHARS:]
+        newline = context.find("\n")
+        context = context[newline + 1 :] if newline >= 0 else ""
+    combined = context + text
+    spans = _indirect_name_json_spans(combined) + _indirect_name_yaml_spans(combined)
+    if not spans:
+        return text
+    return _apply_spans(combined, spans, len(context), [])
+
+
+def _scrub_indirect_credential_names(text: str, hits: list[ShapeHit]) -> str:
+    spans = _indirect_name_json_spans(text) + _indirect_name_yaml_spans(text)
+    return _apply_spans(text, spans, 0, hits) if spans else text
+
+
+def _scrub_credential_structures(text: str, hits: list[ShapeHit]) -> str:
+    # Terraform plan values are masked in place and never registered: a
+    # sensitive attribute is often a short ordinary word or number, and
+    # promoting it would mask that word in every later result.
+    text = _scrub_terraform_plan_json(text)
+    text = _scrub_indirect_credential_names(text, hits)
+    if "Secret" in text:
+        text = _scrub_k8s_secret_json(text, hits)
+        text = _scrub_k8s_secret_yaml(text, hits)
+        text = _scrub_k8s_secret_gomap(text, hits)
+    return _scrub_service_account_key_id(text, hits)
+
+
+# --- the live stream: holding and lookbehind for the structure rules ------------
+#
+# WHY (round-1 review R1, QA Q3): the structure rules need the whole object, and
+# a pipe releases at every newline. The first version held a ``data:`` block only
+# until its next sibling line, which covered kubectl's sorted YAML and nothing
+# else: a manifest (``kind`` first, ``data`` last), ``-o json`` split across reads
+# (the opening brace went out earlier; the ``},`` closing ``data`` counted as a
+# sibling), and any Terraform plan over the 8 KiB cap all painted live — into
+# the card, ``jobs`` peek and the checkpoint's ``output_tail``. The guard below
+# keeps three things per stream:
+#
+# * a LOOKBEHIND of already-released text, so a release holding a ``data:``
+#   block is judged with its object's ``kind`` and opening brace in view
+#   (:func:`scrub_credential_structures_in_context`);
+# * a HOLD on a ``data:``/``stringData:`` block until its object's ``kind`` line
+#   or the object's end has arrived — only once ``apiVersion`` has appeared,
+#   which every Kubernetes object prints and ordinary JSON ``"data"`` rarely does;
+# * a HOLD on a Terraform plan object (``{"format_version": …,
+#   "terraform_version": …, "variables"``, or ``planned_values``/
+#   ``resource_changes``/``prior_state`` third) until its closing brace, so the
+#   whole-plan rule sees one parseable plan.
+#
+# The data hold is bounded by :data:`STRUCTURE_HOLD_LIMIT`. Past it the block is
+# WITHHELD — dropped with a one-line notice — rather than released unchecked: a
+# value painted live cannot be taken back, and no real Secret is that large (the
+# API server caps one at 1 MiB). Output with no ``apiVersion`` and no plan
+# opener is released exactly as before.
+#
+# The PLAN hold is different (round-2 review R2-1, QA Q8), because a plan has no
+# size cap and the stream sink IS the settled result: withholding a 6 MiB plan
+# left the agent a 164-char notice where base kept a 2 MiB head + 2 MiB tail
+# (``_BashOutput``), including for already-redacted plans and for
+# ``terraform show -json`` STATE, which the plan rule never masks. So:
+#
+# * the opener requires the third key to be one the plan rule acts on, so state
+#   JSON (``"values"`` third — Terraform marshals ``jsonplan.Plan`` and
+#   ``jsonstate.State`` in struct order) is never held at all;
+# * a held plan is PARKED in this guard (:meth:`StructureStreamGuard.park`) and
+#   each later read scans only its own bytes. Kept in the redactor's
+#   ``pending`` it was re-joined and re-searched on every read (``-----BEGIN``,
+#   ``apiVersion``), quadratic in the plan: 4.92 MiB took 2.54 s and 12.3 MiB
+#   11.48 s;
+# * at its closing brace the WHOLE plan is released in one piece, so the
+#   settled rule masks it before the sink's head/tail cut — the result keeps
+#   base's shape with sensitive values masked. Only the live view waits;
+# * past :data:`STREAM_PLAN_HOLD_LIMIT` (the settled rule's own parse bound)
+#   nothing could mask it anyway, so the held bytes are released to the
+#   ordinary rules — base behaviour — with a one-line notice. Never dropped.
+
+#: Already-released characters kept as lookbehind (cut back to a line start).
+_STRUCTURE_CONTEXT_CHARS = 256 * 1024
+#: The most one held data block may grow before it is withheld (see above).
+STRUCTURE_HOLD_LIMIT = 4 * 1024 * 1024
+#: The most one parked plan may grow before it is released unchecked. Equal to
+#: the settled rule's parse bound: a larger plan is not masked by it either, so
+#: holding longer would only delay the same bytes.
+#: Measured 2026-11-10 (64 KiB reads into the real ``_BashOutput`` sink, one
+#: sensitive value, 3 runs each, median / max): 4.97 MiB 1.49 / 2.83 s, 134 MB
+#: peak RSS; 9.97 MiB 3.37 / 3.66 s, 217 MB; 19.97 MiB 8.71 / 8.74 s, 350 MB
+#: (peak includes the probe's own fixture). Unguarded control at 15.24 MiB:
+#: 4.36 s median. Linear at ~0.43 s/MiB, so the bound costs ~14 s of live
+#: silence at worst — only for a plan nobody can read whole anyway.
+STREAM_PLAN_HOLD_LIMIT = _TF_PLAN_MAX_CHARS
+# "output withheld", not "live output withheld": the sink is the settled result,
+# so the block is gone from both (round-2 QA nit).
+_WITHHELD_SECRET_BLOCK = (
+    "[output withheld: a Kubernetes data block over 4 MiB cannot be checked "
+    "for Secret values while streaming; select keys with jsonpath]\n"
+)
+# Never recommends ``json-output-redacted``: past this bound nothing is known
+# about the plan's sensitivity, and an agent may already be reading that
+# endpoint (round-2 review R2-1 (c)).
+_UNCHECKED_PLAN = (
+    "[a Terraform plan JSON over 32 MiB was too large to check for sensitive "
+    "values; select fields with jq, e.g. `.resource_changes[].address`]\n"
+)
+
+_SECRET_DATA_HEADER_RE = re.compile(
+    r"^(?P<indent>[ \t]*)(?P<dash>-[ \t]+)?\"?(?:data|stringData)\"?[ \t]*:[ \t]*\{?[ \t]*\r?$",
+    re.MULTILINE,
+)
+_STREAM_KEY_RE = re.compile(r"(?:-[ \t]+)?\"?([A-Za-z_][\w.-]*+)\"?[ \t]*:")
+_JSON_CLOSERS = frozenset({"}", "},", "]", "],"})
+_TF_PLAN_OPEN_RE = re.compile(
+    r'\{[ \t\r\n]*"format_version"[ \t]*:[ \t]*"[^"\n]*"[ \t\r\n]*,[ \t\r\n]*"terraform_version"'
+    r'[ \t]*:[ \t]*"[^"\n]*"[ \t\r\n]*,[ \t\r\n]*'
+    r'"(?:variables|planned_values|resource_changes|prior_state)"'
+)
+_TF_PLAN_HEAD = '{"format_version":"'
+_TF_PLAN_NEXT = ',"terraform_version":"'
+#: The keys the plan rule acts on that may follow ``terraform_version`` (the
+#: same set as ``_TF_PLAN_ANCHORS``, which the opener regex spells out).
+_TF_PLAN_THIRD = tuple("," + anchor for anchor in _TF_PLAN_ANCHORS)
+_JSON_PLAIN_RUN_RE = re.compile(r'[^"{}]*+')
+_JSON_STRING_RUN_RE = re.compile(r'(?:[^"\\]|\\.)*+')
+
+
+def _could_open_a_plan(fragment: str) -> bool:
+    """Whether ``fragment`` (from a line-start ``{``) may still become a plan opener."""
+    rest = "".join(fragment.split())
+    # Two ``"key":"<version>"`` pairs, then a third key the plan rule acts on.
+    for literal in (_TF_PLAN_HEAD, _TF_PLAN_NEXT):
+        if len(rest) <= len(literal):
+            return literal.startswith(rest)
+        if not rest.startswith(literal):
+            return False
+        rest = rest[len(literal) :]
+        quote = rest.find('"')
+        if quote < 0:
+            return len(rest) <= 32  # still inside the version string
+        rest = rest[quote + 1 :]
+    return any(third.startswith(rest) for third in _TF_PLAN_THIRD)
+
+
+def _json_scan(text: str, pos: int, depth: int, state: int) -> tuple[int, int, int, int]:
+    """Advance a brace counter over ``text``: ``(end, pos, depth, state)``.
+
+    ``end`` is the offset just past the brace that closes the object, or -1 while
+    it is open (then ``pos`` is ``len(text)``); ``state`` is 0 outside a string,
+    1 inside one, 2 inside one right after a backslash that ended the read. One
+    step per string or brace, never a rescan — a 4 MiB plan is read once.
+    """
+    size = len(text)
+    while pos < size:
+        if state:
+            if state == 2:
+                pos += 1  # the escaped character the previous read ended before
+            pos = _JSON_STRING_RUN_RE.match(text, pos).end()  # type: ignore[union-attr]
+            if pos >= size:
+                return -1, size, depth, 1
+            if text[pos] != '"':  # a backslash, last in the read
+                return -1, size, depth, 2
+            state = 0
+            pos += 1
+            continue
+        pos = _JSON_PLAIN_RUN_RE.match(text, pos).end()  # type: ignore[union-attr]
+        if pos >= size:
+            break
+        char = text[pos]
+        pos += 1
+        if char == '"':
+            state = 1
+        elif char == "{":
+            depth += 1
+        else:
+            depth -= 1
+            if depth <= 0:
+                return pos, pos, 0, 0
+    return -1, size, depth, state
+
+
+def _data_block_resolution(text: str, column: int, pos: int, limit: int) -> tuple[bool, int]:
+    """Scan whole lines from ``pos`` (ending before ``limit``) for a data block's resolution.
+
+    Resolved at the owning object's ``kind``/``apiVersion`` line, at a line left
+    of the block (the object ended), at ``---``, or at a non-key line in the
+    block's column. A JSON closer at the column is the ``},`` of the block
+    itself, and any other sibling key leaves the object open. Returns
+    ``(resolved, offset)``: the resolving line's start, or where to resume.
+    """
+    while True:
+        line_end = text.find("\n", pos)
+        if line_end < 0 or line_end >= limit:
+            return False, pos
+        line = text[pos:line_end]
+        stripped = line.strip()
+        if stripped:
+            if line.startswith("---"):
+                return True, pos
+            indent = _line_indent(line)
+            if indent < column:
+                return True, pos
+            if indent == column and stripped not in _JSON_CLOSERS:
+                key = _STREAM_KEY_RE.match(stripped)
+                if key is None or key.group(1) in ("kind", "apiVersion"):
+                    return True, pos
+        pos = line_end + 1
+
+
+class StructureStreamGuard:
+    """Per-stream state for the structure rules on a live pipe (see the section note).
+
+    Used by ``tools/builtin._PipeRedactor``: :meth:`discard` first (a withheld
+    structure still streaming), then :meth:`hold` on the release point, then
+    :meth:`scrub_release` on the released text. Offsets are relative to the
+    text of the current read, and :meth:`hold` rebases them on the cut it returns.
+    """
+
+    __slots__ = (
+        "context",
+        "_plan",
+        "_plan_search",
+        "_data",
+        "_data_search",
+        "_drop",
+        "_notice",
+        "_parked",
+        "_parked_chars",
+    )
+
+    def __init__(self) -> None:
+        self.context = ""
+        #: ``[start, scan, depth, in_string, end]`` of a held plan (``end`` -1 while open).
+        self._plan: Optional[list[Any]] = None
+        self._plan_search = 0
+        #: ``[start, column, scan, search_after]`` of the first unresolved data block.
+        self._data: Optional[list[int]] = None
+        self._data_search = 0
+        #: A data block being withheld from offset ``start``:
+        #: ``("data", [start, column, unfinished_line, resume_offset])``.
+        #: Bytes before ``start`` are not part of it and are kept.
+        self._drop: Optional[tuple[str, list[Any]]] = None
+        #: The one-line notice owed for a structure just withheld or released unchecked.
+        self._notice = ""
+        #: The bytes of an open plan moved out of the redactor's ``pending`` (see
+        #: :meth:`park`); while non-empty, ``self._plan`` holds the scan state.
+        self._parked: list[str] = []
+        self._parked_chars = 0
+
+    @property
+    def parked(self) -> bool:
+        """Whether an open plan is parked here (the live view is waiting on it)."""
+        return bool(self._parked)
+
+    @property
+    def parked_chars(self) -> int:
+        return self._parked_chars
+
+    @property
+    def withholding(self) -> bool:
+        return self._drop is not None
+
+    def withheld_notice(self) -> str:
+        """The notice for a structure withheld since the last call, once; else ``""``."""
+        notice, self._notice = self._notice, ""
+        return notice
+
+    def discard(self, text: str, *, final: bool) -> str:
+        """``text`` without the withheld structure's bytes (all of them on ``final``)."""
+        if self._drop is None:
+            return text
+        _, state = self._drop
+        start = state[0]
+        keep = text[:start]
+        if final:
+            self._drop = None
+            return keep
+        # The block is judged line by line, so its unfinished last line is kept
+        # here (never in ``pending``, where a cap could release it) — capped,
+        # since only a line's head decides whether it resolves the block.
+        rest = state[2] + text[start:]
+        resolved, pos = _data_block_resolution(rest, state[1], state[3], len(rest))
+        if resolved:
+            self._drop = None
+            return keep + rest[pos:]
+        tail = rest[pos:]
+        self._drop = ("data", [start, state[1], tail[:4096] if len(tail) > 65536 else tail, 0])
+        return keep
+
+    def hold(self, text: str, cut: int, *, final: bool) -> int:
+        """The cut, moved back before a structure that is still open; rebases state on it."""
+        if final:
+            self._plan = self._data = None
+            self._plan_search = self._data_search = 0
+            return cut
+        cut, plan_start = self._hold_plan(text, cut)
+        if self._drop is None:
+            cut = self._hold_data(text, cut, plan_start)
+            cut = self._hold_gomap_line(text, cut)
+        self._rebase(cut)
+        return cut
+
+    @staticmethod
+    def _hold_gomap_line(text: str, cut: int) -> int:
+        """Never cut inside a line holding a Go-map ``data:map[`` (see that rule).
+
+        ``fmt`` prints the whole object on ONE line, and ``kind:Secret`` sorts
+        after ``data:``, so the 8 KiB cap splitting a long line released the data
+        before the rule could see the kind. Bounded like the data hold; a line
+        past it is released as before.
+        """
+        if cut <= 0 or cut >= len(text) or text[cut - 1] == "\n":
+            return cut
+        line_start = text.rfind("\n", 0, cut) + 1
+        if len(text) - line_start > STRUCTURE_HOLD_LIMIT:
+            return cut
+        if text.find("map[", line_start, cut) < 0:
+            return cut
+        if _GOMAP_DATA_RE.search(text, line_start, cut) is None:
+            return cut
+        return line_start
+
+    def _hold_plan(self, text: str, cut: int) -> tuple[int, int]:
+        # A loop, not recursion: one read can carry hundreds of small plans.
+        while True:
+            held = self._hold_plan_once(text, cut)
+            if held[1] >= 0:
+                return held
+            cut = held[0]
+
+    def _hold_plan_once(self, text: str, cut: int) -> tuple[int, int]:
+        """One step of :meth:`_hold_plan`; ``(cut, -1)`` asks it to look again."""
+        if self._plan is None and '"terraform_version"' in text:
+            match = _TF_PLAN_OPEN_RE.search(text, self._plan_search)
+            if match is not None:
+                self._plan = [match.start(), match.start(), 0, 0, -1]
+        if self._plan is None:
+            # A pretty plan's ``{`` line can arrive a read before its
+            # ``"format_version"``; once released, no later read can parse the plan.
+            # Never inside a plan just released (``_plan_search`` is its end).
+            brace = text.rfind("{", max(self._plan_search, cut - 160), cut)
+            if brace >= 0 and (brace == 0 or text[brace - 1] == "\n"):
+                if _could_open_a_plan(text[brace:cut]):
+                    return brace, len(text)
+            return cut, len(text)
+        start, scan, depth, in_string, end = self._plan
+        if end < 0:
+            end, scan, depth, in_string = _json_scan(text, scan, depth, in_string)
+            self._plan = [start, scan, depth, in_string, end]
+        if end >= 0:
+            if cut <= start:
+                return cut, start
+            # The plan is whole: release it whole (a cut inside it moves to its
+            # end — the only place this guard releases MORE than it was offered).
+            self._plan = None
+            self._plan_search = end
+            # Re-arm at once (round-3 review R3-4): a second plan right behind
+            # this one in the same read would otherwise ride out inside the
+            # release before any later read could hold it. The search starts
+            # past this plan, so the loop ends after the last plan.
+            return max(cut, end), -1
+        return min(cut, start), start
+
+    def park(self, pending: str) -> str:
+        """Move an open plan out of ``pending``; return what stays there.
+
+        Called right after the release, once offsets are rebased on the cut, so
+        ``self._plan[0]`` is the plan's brace in ``pending`` and the scan has
+        reached ``pending``'s end. Bytes before the brace stay in ``pending``:
+        they are older than the plan and must still go out first.
+        """
+        if self._plan is None or self._plan[4] >= 0 or self._parked:
+            return pending
+        start = self._plan[0]
+        self._parked = [pending[start:]]
+        self._parked_chars = len(pending) - start
+        return pending[:start]
+
+    def absorb(self, pending: str, text: str, *, final: bool) -> Optional[str]:
+        """Feed a read into the parked plan: ``None`` while it is open, else the whole text.
+
+        Each read is scanned once, from where the last one stopped, so holding a
+        plan costs linear time in it (see the section note). The returned text is
+        ``pending`` + plan + the read, with the plan's state set so :meth:`hold`
+        releases it whole; past the bound or at end of stream it is returned
+        with no plan state, for the ordinary rules.
+        """
+        assert self._plan is not None
+        _, _, depth, in_string, _ = self._plan
+        end = -1
+        if not final:
+            end, _, depth, in_string = _json_scan(text, 0, depth, in_string)
+        if end < 0 and not final and self._parked_chars + len(text) <= STREAM_PLAN_HOLD_LIMIT:
+            self._parked.append(text)
+            self._parked_chars += len(text)
+            self._plan[2], self._plan[3] = depth, in_string
+            return None
+        start = len(pending)
+        whole = pending + "".join(self._parked) + text
+        if end >= 0:
+            plan_end = start + self._parked_chars + end
+            self._plan = [start, plan_end, 0, 0, plan_end]
+        else:
+            # Over the bound, or the stream ended inside the plan: no rule can
+            # parse it, so it goes to the plaintext rules (base behaviour), and
+            # the opener is skipped so it is not held again.
+            self._plan = None
+            self._plan_search = start + 1
+            if not final:
+                self._notice = _UNCHECKED_PLAN
+        self._parked = []
+        self._parked_chars = 0
+        return whole
+
+    def _hold_data(self, text: str, cut: int, plan_start: int) -> int:
+        limit = min(cut, plan_start)
+        if self._data is None and "apiVersion" not in text and "apiVersion" not in self.context:
+            self._data_search = max(0, text.rfind("\n", 0, limit) + 1)
+            return cut
+        while True:
+            if self._data is None:
+                match = _SECRET_DATA_HEADER_RE.search(text, self._data_search, limit)
+                if match is None:
+                    self._data_search = max(self._data_search, text.rfind("\n", 0, limit) + 1)
+                    return cut
+                column = len(match.group("indent")) + len(match.group("dash") or "")
+                self._data = [match.start(), column, match.end() + 1, match.end()]
+            start, column, scan, after = self._data
+            resolved, scan = _data_block_resolution(text, column, scan, cut)
+            if resolved:
+                # Later headers are looked for from just after THIS header: a
+                # ``stringData:`` sibling inside the same object needs its own hold.
+                self._data = None
+                self._data_search = after
+                continue
+            self._data[2] = scan
+            if len(text) - start > STRUCTURE_HOLD_LIMIT:
+                self._data = None
+                # Resume after the lines already judged (never the header itself:
+                # a ``- data:`` header sits left of its own column).
+                self._drop = ("data", [start, column, "", scan - start])
+                self._notice = _WITHHELD_SECRET_BLOCK
+            return min(cut, start)
+
+    def _rebase(self, cut: int) -> None:
+        if self._plan is not None:
+            self._plan[0] -= cut
+            self._plan[1] -= cut
+            if self._plan[4] >= 0:
+                self._plan[4] -= cut
+        if self._data is not None:
+            self._data = [
+                self._data[0] - cut,
+                self._data[1],
+                self._data[2] - cut,
+                self._data[3] - cut,
+            ]
+        self._plan_search = max(0, self._plan_search - cut)
+        self._data_search = max(0, self._data_search - cut)
+        if self._drop is not None:
+            self._drop[1][0] -= cut  # the cut never passes a withheld structure's start
+
+    def scrub_release(self, ready: str) -> tuple[str, list[ShapeHit]]:
+        """Mask Secret data in ``ready`` with the lookbehind in view; extend the lookbehind."""
+        hits: list[ShapeHit] = []
+        if ready and _SECRET_DATA_HEADER_RE.search(ready):
+            ready, hits = scrub_credential_structures_in_context(self.context, ready)
+        if ready and ("value" in ready):
+            ready = scrub_indirect_names_in_context(self.context, ready)
+        context = self.context + ready
+        if len(context) > _STRUCTURE_CONTEXT_CHARS:
+            context = context[-_STRUCTURE_CONTEXT_CHARS:]
+            newline = context.find("\n")
+            context = context[newline + 1 :] if newline >= 0 else ""
+        self.context = context
+        return ready, hits
+
+
 def scrub_shapes_with_hits(
     text: str, *, reject: "Callable[[str, str, Match[str]], bool] | None" = None
 ) -> tuple[str, list[ShapeHit]]:
@@ -4955,6 +7022,45 @@ def scrub_shapes_with_hits(
     separator tell them apart (:func:`_is_typed_credential_assignment`). A hook that
     sees the value alone has to choose one reading for both.
     """
+    return _scrub_all_with_hits(text, reject, 0, _DecodeBudget())
+
+
+def _scrub_all_with_hits(
+    text: str,
+    reject: "Callable[[str, str, Match[str]], bool] | None",
+    depth: int,
+    budget: "_DecodeBudget",
+) -> tuple[str, list[ShapeHit]]:
+    """Structures, then encodings, then the table — the whole pass, at a decode depth.
+
+    The structure and decode passes run BEFORE the anchor gate because what they
+    find carries no anchor by construction: base64 of a DSN has no ``://``.
+
+    The Kubernetes Secret and Terraform plan rules are skipped under a ``reject``
+    hook. That hook is a caller saying "this text is CODE or a guard's probe, mask only on spelling
+    evidence" (:func:`scrub_shapes_for_arguments`, the team-bridge guard): a
+    Secret manifest an agent writes may carry a non-credential value (``info``)
+    that must not be rewritten in its own replayed program. The decode pass still
+    runs there — a token decoding to a credential IS spelling evidence — with the
+    same hook applied to the decoded text.
+    """
+    if not text:
+        return text, []
+    found: list[ShapeHit] = []
+    if reject is None:
+        text = _scrub_credential_structures(text, found)
+    else:
+        text = _scrub_service_account_key_id(text, found)
+    text = _scrub_escaped_json_strings(text, found, reject, depth, budget)
+    text = _scrub_encoded_credentials(text, found, reject, depth, budget)
+    scrubbed, hits = _scrub_table_with_hits(text, reject)
+    return scrubbed, found + hits
+
+
+def _scrub_table_with_hits(
+    text: str, reject: "Callable[[str, str, Match[str]], bool] | None"
+) -> tuple[str, list[ShapeHit]]:
+    """The shape TABLE pass of :func:`scrub_shapes_with_hits` (anchor-gated)."""
     hits: list[ShapeHit] = []
     if not text or not has_shape_anchor(text):
         # Nothing in here can match any rule — see :data:`_SHAPE_ANCHORS`.
@@ -5977,6 +8083,12 @@ _SHAPE_ANCHORS: tuple[str, ...] = (
     "redis-cli",
     "influx",
     "hooks.slack.com",
+    # The compound credential NAMES of ``_is_compound_credential_name`` that carry
+    # none of the words above (``\u2026_CREDENTIALS_JSON`` is gated by ``credential``).
+    "account_json",
+    "account-json",
+    "webhook",
+    "mrva-",  # minerva-api-key
     # Bare issuer tokens, whose rules have no name to anchor on. Each group
     # names the rule it gates; a prefix added to one of those patterns without a
     # line here is the defect `_VENDOR_ANCHORS` was derived to make impossible
@@ -6212,6 +8324,7 @@ _ARGUMENT_EVIDENCE_LABELS = frozenset(
         "dsn-password-plain",
         "dsn-password-truncated",
         "gcp-service-account-key",
+        "gcp-service-account-key-id",
         "gcp-service-account-value",
         "gcp-service-account-value-open",
         "github-pat",
@@ -6725,6 +8838,7 @@ def credential_forms(value: str) -> tuple[str, ...]:
         json.dumps(value, ensure_ascii=False)[1:-1],
     ]
     forms += [separator.join(value) for separator in _SEPARATOR_RUN_SEPARATORS]
+    forms += _requoted_forms(value)
     # De-duplicated first: an alphanumeric value's URL-safe spelling IS its
     # standard one and its percent-encoded spelling IS itself, so without the
     # dedupe a plain value pays several whole-text searches for spellings it has
@@ -6732,6 +8846,35 @@ def credential_forms(value: str) -> tuple[str, ...]:
     # is deterministic for ties.
     unique = dict.fromkeys(form for form in forms if form)
     return tuple(sorted(unique, key=len, reverse=True))
+
+
+def _requoted_forms(value: str) -> list[str]:
+    """The spellings shells and Python print a value in when they RE-QUOTE it.
+
+    Why: the bash and eval tools let a verbatim print of a stored value run
+    masked (``harness/secret_sinks.py``), and `export -p`, `declare -p`,
+    `set -x` xtrace and `repr()` print the value escaped whenever it holds a
+    quote, `$`, a backslash or a backtick — most generated passwords and
+    every JSON secret. The exact value no longer matched, so the whole value
+    reached the result (QA round 1, Q1). Measured on this host for a
+    printable-ASCII value: bash 3.2 and 5 `declare -p`/`export -p` (and
+    `sh`'s `export -p`) use the double-quote escaping below, bash/zsh xtrace
+    and zsh `export -p` the `'\\''` splice, dash the `'"'"'` splice, and
+    `repr` its own. Only the INNER text is listed: the delimiters are not the
+    value. A value with a newline, a tab or non-ASCII bytes gets ANSI-C
+    `$'…'` quoting that differs between shell versions; that case is not
+    enumerated here, and the bash tool refuses a re-quoting printer of such a
+    value instead (``tools/builtin.py`` ``_preregister_printed_secrets``).
+    """
+    double_quoted = (
+        value.replace("\\", "\\\\").replace('"', '\\"').replace("$", "\\$").replace("`", "\\`")
+    )
+    return [
+        double_quoted,
+        value.replace("'", "'\\''"),
+        value.replace("'", "'\"'\"'"),
+        repr(value)[1:-1],
+    ]
 
 
 def longest_redaction_form(values: Iterable[Optional[str]]) -> int:
@@ -7320,15 +9463,47 @@ DUMP_SHAPES: tuple[DumpShape, ...] = (
         # secret rendered as yaml/json, or a describe. The one-key jsonpath form
         # is in ``excluded`` because it is the safer form this table recommends.
         re.compile(
-            r"(?i)\bkubectl\s+(?:"
-            r"get\s+secrets?\b[^\n]*?\s-o\s*(?:yaml|json|wide)\b"
-            r"|get\s+secrets\b"
-            r"|describe\s+secrets?\b"
-            r")"
+            # Global flags may sit between ``kubectl`` and the verb of a VALUE
+            # dump (``kubectl --context prod -n jobs get secret X -o json``) —
+            # the false-positive measurement found 20 such real dumps the old
+            # spelling missed. ``-oyaml``, ``-o json``, ``--output=yaml`` and
+            # ``--output json`` are one flag to kubectl.
+            r"(?i)\bkubectl(?:\s+-[^\s]+(?:\s+[^\s-][^\s]*)?)*?\s+"
+            r"get\s+secrets?\b[^\n]*?\s(?:-o\s*|--output(?:=|\s+))(?:yaml|json|wide)\b"
+            # The name-listing spellings keep their original, flag-free reach:
+            # through global flags they fired on name listings (``get secrets |
+            # head``) that print no value, measured as six steers with no dump.
+            r"|\bkubectl\s+(?:get\s+secrets\b|describe\s+secrets?\b)"
         ),
-        "select one key inside the command that needs it: "
-        "`kubectl get secret NAME -o jsonpath='{.data.KEY}' | base64 -d`",
-        excluded=re.compile(r"(?i)-o\s*(?:jsonpath|go-template|custom-columns)"),
+        # A steer, never a block (operator, 2026-11): the agent learns what a
+        # Secret holds from its KEY NAMES, and a value goes straight into the
+        # command that consumes it rather than through the transcript.
+        "list key names: `kubectl get secret NAME -o jsonpath='{.data}' | jq 'keys'`; "
+        "pipe one key into its consumer, never echo it: "
+        "`kubectl get secret NAME -o jsonpath='{.data.KEY}' | base64 -d | <consumer>`",
+        excluded=re.compile(
+            r"(?i)(?:-o\s*|--output(?:=|\s+))(?:jsonpath|go-template|custom-columns)"
+        ),
+    ),
+    DumpShape(
+        "kubectl-secret-decode",
+        # 2026-11 post-mortem: ``-o go-template='{{index .data "K" |
+        # base64decode}}'`` (or ``-o jsonpath='{.data.K}' | base64 -d``) at the
+        # END of the pipeline prints the decoded value into the transcript — and
+        # on a missing key kubectl dumps the whole object. Fires only when nothing
+        # consumes the output: a further ``|`` or a ``>`` redirect (other than
+        # stderr into stdout / ``/dev/null``) is the safe form and stays quiet.
+        re.compile(
+            r"(?i)\bkubectl\b[^\n;|]*?\bget\s+secrets?\b[^\n;|]*?"
+            r"(?:-o\s*|--output(?:=|\s+))"
+            r"(?:go-template(?:=|\s+)(?:'[^'\n]*\bbase64decode\b[^'\n]*'"
+            r"|\"[^\"\n]*\bbase64decode\b[^\"\n]*\")"
+            r"|(?:jsonpath|go-template)\S*(?:\s+[^\s|;&>]+)*?\s*\|\s*base64\s+(?:-d|--decode|-D)\b)"
+            r"(?:\s+[^\s|;&>]+)*?"
+            r"(?:\s+(?:[0-9]?>&[0-9]|2>\s*/dev/null))*\s*(?=$|;|&&|\|\||\n)"
+        ),
+        "check the key exists first: `kubectl get secret NAME -o jsonpath='{.data}' | "
+        "jq 'keys'`; pipe the decoded value into its consumer, never to the terminal",
     ),
     DumpShape(
         "docker-inspect",
@@ -7352,6 +9527,33 @@ DUMP_SHAPES: tuple[DumpShape, ...] = (
         excluded=re.compile(r"(?i)--(?:services|images|hash|volumes|profiles|networks|list)\b"),
     ),
     DumpShape(
+        # Ahead of ``aws-credentials-read``, which also matches it: a stored
+        # secret's VALUE is better steered to its name or to its consumer than
+        # to a temporary credential (operator, 2026-11).
+        "aws-secret-value",
+        # Fires only when the value reaches the terminal (round-3 QA Q9: 55 of 62
+        # real fires already redirected, piped or captured it, one session got
+        # 51 identical notices). Same quiet rule as ``kubectl-secret-decode``: a
+        # further ``|``, a ``>`` redirect (other than stderr into stdout or
+        # ``/dev/null``) or a ``$( )`` capture is the safe form this hint
+        # recommends. ``)`` is not an argument character, so a capture never
+        # reaches the end-of-command lookahead.
+        # Global options may precede the service (``aws --region X --profile P
+        # secretsmanager …``), the same allowance the kubectl rules make; a
+        # backtick capture is a capture like ``$( )`` (#3756 deferred N4-1), so
+        # the backtick is not an argument character either.
+        re.compile(
+            r"(?i)\baws(?:\s+--?[A-Za-z][\w-]*(?:=[^\s|;&>)`]*|\s+[^\s|;&>)`-][^\s|;&>)`]*)?)*?"
+            r"\s+secretsmanager\s+get-secret-value\b"
+            r"(?:\s+[^\s|;&>)`]+)*?"
+            r"(?:\s+(?:[0-9]?>&[0-9]|2>\s*/dev/null))*\s*(?=$|;|&&|\|\||\n)"
+        ),
+        "check it exists by name: `aws secretsmanager describe-secret --secret-id NAME`; "
+        "pipe the value straight into its consumer, never echo it: "
+        "`$(aws secretsmanager get-secret-value --secret-id NAME --query SecretString "
+        "--output text)`",
+    ),
+    DumpShape(
         "aws-credentials-read",
         # The token-ISSUING reads, plus reading the stored credential itself.
         # ``aws sts get-caller-identity`` is deliberately NOT here: it prints an
@@ -7359,7 +9561,9 @@ DUMP_SHAPES: tuple[DumpShape, ...] = (
         # the safer-form column for it would be noise.
         re.compile(
             r"(?i)\baws\s+(?:configure\s+(?:list|get)(?:\s|$)|"
-            r"secretsmanager\s+get-secret-value|"
+            # ``secretsmanager get-secret-value`` is ``aws-secret-value``'s alone:
+            # left here it would steer the redirected/captured safe form that
+            # rule deliberately keeps quiet (round-3 QA Q9).
             r"sts\s+get-(?:session|federation|delegation)-token|"
             r"iam\s+list-access-keys|"
             r"configure\s+export-credentials)\b"
@@ -7398,6 +9602,26 @@ DUMP_SHAPES: tuple[DumpShape, ...] = (
         "heroku-config",
         re.compile(r"(?i)\bheroku\s+config(?::get)?\b"),
         "read one key: `heroku config:get KEY -a APP`",
+    ),
+    DumpShape(
+        # Terraform Cloud/Enterprise's full plan JSON prints values the
+        # configuration marks sensitive; ``json-output-redacted`` nulls them.
+        "terraform-plan-json",
+        re.compile(r"(?i)/plans/[^/\s'\"]+/json-output(?![-\w])"),
+        "read `/api/v2/plans/<id>/json-output-redacted`, which nulls sensitive values",
+    ),
+    DumpShape(
+        # ``terraform show -json`` prints sensitive values in clear; the human
+        # view prints ``(sensitive value)`` instead.
+        "terraform-show-json",
+        re.compile(r"(?i)\bterraform\s+show\b[^\n|;&]*?\s-json\b"),
+        "use the human view, which masks sensitive values: `terraform show PLANFILE`, "
+        "or `jq` to the key paths you need",
+        # Stdout thrown away (``>/dev/null``, checking only for warnings) prints
+        # nothing: measured as all three real fires before this exclusion.
+        excluded=re.compile(
+            r"(?i)\bterraform\s+show\b[^\n|;&]*?\s-json\b[^\n|;]*?(?<!2)1?>\s*/dev/null"
+        ),
     ),
     DumpShape(
         "terraform-output",
@@ -7455,6 +9679,47 @@ DUMP_SHAPES: tuple[DumpShape, ...] = (
         # noise the operator learns to skip.
         excluded=re.compile(r"(?i)\.env\.(?:example|sample|template|dist|example\.[a-z]+)\b"),
     ),
+    # A third-party secret CLI printing a raw value to this result: `op read`
+    # and `security find-generic-password -w` emit the secret on stdout, and
+    # unlike `lop secret get` nothing registers it with the mask, so only a
+    # recognised SHAPE would hide it. Steer, never block (operators asked that
+    # secret work stay autonomous): the piped/captured spellings are the
+    # sanctioned consumer forms and do not fire — the segment after the verb
+    # must reach the end of its command with no `|` or `>`, and `$(op read …)`
+    # is not a command position here.
+    DumpShape(
+        "secret-cli-read",
+        re.compile(
+            r"(?i)(?:^|[;&]\s*|\(\s+)"
+            r"(?:op\s+read\b|security\s+find-(?:generic|internet)-password\b[^;&|>\n]*\s-w\b)"
+            r"[^;&|>\n]*(?=$|[;&\n])"
+        ),
+        "pipe the value into the command that needs it, e.g. "
+        "`op read op://vault/item/field | docker login --password-stdin`, or capture it "
+        "with `$(op read …)` inside that command",
+        excluded=re.compile(r"(?i)\bop\s+read\b[^;&|\n]*\s(?:--out-file|-o)\s"),
+    ),
+    # Staging or committing a credential FILE by name: the classic irreversible
+    # mistake (a pushed secret has to be rotated). A steer, not a refusal: a
+    # repo may legitimately track an encrypted or example file, and a new block
+    # would need a new mechanism nobody asked for. Only an unquoted path
+    # argument counts, so `git commit -m "drop .env"` (a message) stays quiet;
+    # `.env.example`/`.sample`/`.template`/`.dist` and `*.pub` are not secrets.
+    # `*.env` counts as well as `.env`: `prod.env`/`f.env` are the same file.
+    DumpShape(
+        "git-add-credential-file",
+        re.compile(
+            r"(?i)\bgit\s+(?:add|commit)\b(?:\s+[^\s'\";&|]+)*?\s+(?:[^\s'\";&|]*/)?"
+            r"(?:[^\s'\";&|/]*\.env(?:\.(?!example\b|sample\b|template\b|dist\b)[\w-]+)?"
+            r"|[^\s'\";&|/]*\.(?:pem|p12|pfx|key)"
+            r"|id_(?:rsa|ed25519|ecdsa|dsa)"
+            r"|[^\s'\";&|/]*service-account[^\s'\";&|/]*\.json"
+            r"|credentials(?:\.json)?|\.netrc|\.npmrc)"
+            r"(?=$|[\s;&|)])"
+        ),
+        "keep credential files out of git: add the file to `.gitignore`, unstage it "
+        "with `git rm --cached FILE`, and rotate any value that was ever pushed",
+    ),
 )
 
 #: A pipeline that prints only NAMES is the form the notice itself recommends,
@@ -7479,19 +9744,25 @@ _BRIEF_ADVICE: dict[str, str] = {
     "environment-dump": "print names, not values: `env | cut -d= -f1`",
     "named-variable-dump": "use it in place: `$(lop secret get NAME)`",
     "kubectl-exec-env": "print names in the pod: `env | cut -d= -f1`",
-    "kubectl-secret-read": "select one key: `-o jsonpath='{.data.KEY}'`",
+    "kubectl-secret-read": "keys only: `-o jsonpath='{.data}' | jq keys`; never echo",
+    "kubectl-secret-decode": "pipe the decoded value to its consumer; check `jq keys`",
     "docker-inspect": "select a field: `--format '{{.State.Status}}'`",
     "docker-exec-env": "print names only: `env | cut -d= -f1`",
     "docker-compose-config": "read one part: `compose config --services`",
+    "aws-secret-value": "name only: `describe-secret`; pipe the value, never echo",
     "aws-credentials-read": "prefer `aws sso login` and a scoped role",
     "gcloud-token": "use: `$(gcloud auth print-access-token)`",
     "github-auth-token": "use it in place: `$(gh auth token)`",
     "gitlab-auth-token": "drop `-t`: `glab auth status`",
     "vault-read": "select one field: `-field=KEY`",
     "heroku-config": "read one key: `heroku config:get KEY -a APP`",
+    "terraform-plan-json": "read `/json-output-redacted` instead",
+    "terraform-show-json": "human view masks: `terraform show PLANFILE`",
     "terraform-output": "read one output: `terraform output <name>`",
     "npm-token-list": "revoke unused tokens: `npm token revoke <id>`",
     "credential-file-read": "read one field: `grep -c .`, `jq .field`",
+    "secret-cli-read": "pipe it: `op read … | cmd --password-stdin`",
+    "git-add-credential-file": "keep it out: .gitignore, `git rm --cached`",
 }
 
 
@@ -7505,18 +9776,24 @@ _BRIEF_LABEL: dict[str, str] = {
     "named-variable-dump": "variable",
     "kubectl-exec-env": "k8s env",
     "kubectl-secret-read": "k8s secret",
+    "kubectl-secret-decode": "k8s decode",
     "docker-inspect": "docker",
     "docker-exec-env": "docker env",
     "docker-compose-config": "compose",
+    "aws-secret-value": "aws secret",
     "aws-credentials-read": "aws",
     "gcloud-token": "gcloud",
     "github-auth-token": "gh",
     "gitlab-auth-token": "glab",
     "vault-read": "vault",
     "heroku-config": "heroku",
+    "terraform-plan-json": "tf plan",
+    "terraform-show-json": "tf plan",
     "terraform-output": "terraform",
     "npm-token-list": "npm",
     "credential-file-read": "file",
+    "secret-cli-read": "secret cli",
+    "git-add-credential-file": "git",
 }
 
 
@@ -7545,6 +9822,21 @@ def credential_dump_notice(command: str) -> Optional[str]:
     return None
 
 
+#: A ``jq`` program whose LAST step is ``keys``: it prints key names, never
+#: values — the very form the kubectl steer recommends, so steering it is noise
+#: (measured: four real ``… -o json | jq -r '.data | keys[]'`` commands). An
+#: optional stderr redirect may sit before the pipe.
+#: The program may not print anything else first (round-1 review, R5): a comma
+#: (``'.data.PASSWORD, keys'``) emits a value before the keys, and a path into
+#: one entry (``.data.KEY``, ``.data["KEY"]``) is a value however it ends.
+_KEYS_ONLY_PIPELINE = re.compile(
+    r"^(?:\s*2>\S+)?\s*\|\s*(?:\S*/)?jq\s+(?:-[A-Za-z]+\s+)*"
+    r"(['\"])(?![^'\"\n]*(?:,|\.(?:data|stringData)\s*(?:\.[\w\"]|\[\s*[\\\"\w])))"
+    r"[^'\"\n]*\bkeys(?:\[\])?\s*\1(?=\s*(?:$|[|;&)\n]))"
+)
+
+
 def _is_name_only_pipeline(command: str, match: Match[str]) -> bool:
     """Whether the dump is piped straight into a names-only extractor."""
-    return bool(_NAME_ONLY_PIPELINE.match(command[match.end() :]))
+    rest = command[match.end() :]
+    return bool(_NAME_ONLY_PIPELINE.match(rest) or _KEYS_ONLY_PIPELINE.match(rest))

@@ -145,3 +145,59 @@ def validate_connection(result: dict[str, Any]) -> dict[str, Any]:
             raise ValueError("Invalid or duplicate tunnel hostname.")
         hosts.add(hostname)
     return result
+
+
+#: The operator's kill switch: `tunnel.transport: cloudflare` in config.yml keeps
+#: this device on the cloudflared-only path even when `/connect` offers the AWS
+#: relay. Read from config.yml rather than the tunnel's own config.json because
+#: `lop tunnel connect` rewrites config.json wholesale, and a kill switch that a
+#: routine re-enrolment silently drops is not one.
+TRANSPORT_KEY = "tunnel.transport"
+TRANSPORT_CLOUDFLARE = "cloudflare"
+TRANSPORT_RELAY = "relay"
+
+
+def transport_override() -> str | None:
+    """``"cloudflare"`` when the operator pinned cloudflared, else ``None`` (auto).
+
+    Read-only through `read_config_values`, never a `ConfigManager`: building a
+    manager writes a default config.yml when none exists, and the tunnel unit
+    must not create the operator's config as a side effect of starting. Both the
+    flat dotted key (how the settings writer stores nested keys) and a nested
+    ``tunnel: {transport: ...}`` mapping are honoured, so a hand edit in either
+    shape works. Any other value is ignored: an unknown word must not be able to
+    switch a device OFF the path that is serving it today.
+    """
+    from local_operator.config import read_config_values
+
+    values = read_config_values(config_dir()) or {}
+    chosen = values.get(TRANSPORT_KEY)
+    nested = values.get("tunnel")
+    if chosen is None and isinstance(nested, dict):
+        chosen = nested.get("transport")
+    if isinstance(chosen, str) and chosen.strip().lower() == TRANSPORT_CLOUDFLARE:
+        return TRANSPORT_CLOUDFLARE
+    return None
+
+
+def _relay_marker() -> Path:
+    return directory() / "relay-offered"
+
+
+def relay_offered() -> bool:
+    """Whether the last `/connect` this device ran offered a usable relay.
+
+    Setup, `lop tunnel install` and the desktop setup route decide whether
+    cloudflared is a hard prerequisite WITHOUT calling `/connect` themselves (it
+    mints credentials). The tunnel service is the one caller that does, so it
+    leaves this marker for them; the kill switch outranks it.
+    """
+    return transport_override() is None and _relay_marker().exists()
+
+
+def record_relay_offer(offered: bool) -> None:
+    marker = _relay_marker()
+    if offered:
+        private_write(marker, "1\n")
+    else:
+        marker.unlink(missing_ok=True)

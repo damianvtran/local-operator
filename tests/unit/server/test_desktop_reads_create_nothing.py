@@ -205,6 +205,9 @@ def test_the_other_read_routes_do_not_create_the_run_plane_either(tmp_path, monk
         "/v1/desktop/peers",
         "/v1/desktop/runtimes",
         "/v1/desktop/sessions",
+        # The temporary-chat listing reads the mark, the pass state and the
+        # window; it must create none of them (contract §2.2).
+        "/v1/desktop/sessions?include_temporary=true",
         "/v1/desktop/sessions/aaaaaaaaaaaa",
     )
 

@@ -311,7 +311,19 @@ MEASURED_TOKENS: dict[str, int] = {
     # backup_id) shortened to win back the start-context budget the deferred
     # ``skill``/``profile_proposal`` inventory entries cost; the full
     # action_class/kind rationale stays in this tool's notes. Same printed table.
-    "agent": 1471,
+    # RE-MEASURED (proposal ask summary): 1471 -> 1500 (+29), the notes line
+    # telling the agent to ask with a 1-3 line summary + proposal id, never
+    # the full instructions (a pasted brief filled the ask card).
+    # RE-MEASURED (agent/team autonomy + lossless edits, 2026-11): 1471 -> 1562
+    # (+91). The ``edits``/``base_revision``/``replace`` params (and the shared
+    # ``TextEdit`` item) plus the notes line on clean-local autonomy and
+    # lossless editing; the scope paragraph's confirmation clauses were cut to
+    # pay part of it. ``team`` gains the same params/notes (1500 -> 1574).
+    # RE-MEASURED (merge of main #3777 + paged show, PR #3804 round 1):
+    # 1562 -> 1632 (+70): main's summary-plus-id ask clause folded into the
+    # notes line, the ``field``/``part`` show params, and the notes line now
+    # naming paged reads; ``team`` the same params plus ``project`` (1646).
+    "agent": 1632,
     # RE-MEASURED (ask/notify dedupe, asks/dedupe.py): 1079 -> 1078. The
     # restraint now says "decide, never for FYI" and "asking notifies: never
     # also `notify` it"; trims elsewhere in the same paragraph pay for it so
@@ -321,7 +333,11 @@ MEASURED_TOKENS: dict[str, int] = {
     # yourself", "subagent" and "approved that action", which test_ask_tool.py
     # pins as the last-resort and irreversible-trigger contract; restoring them
     # costs +5, measured by this test's print on both LOP_ASK_NONBLOCKING arms.
-    "ask": 1083,
+    # 1083 -> 1112 (+29, multi-select recommendation set): `recommended` is
+    # now `int | list[int]` (an extra `array` arm in the schema) and the notes
+    # drop the false "preselected" and say a multi-select may recommend several.
+    # `recommended_all` is derived and hidden (SkipJsonSchema), so it costs 0.
+    "ask": 1112,
     "ask_withdraw": 452,
     # 295 -> 308 (highlights deliverables, #3392): the new ``deliver`` parameter
     # ("Files to show.") -- re-measured via this test's own print; bash is the only
@@ -426,7 +442,17 @@ MEASURED_TOKENS: dict[str, int] = {
     # the non-retryable detail). Net -7 chars, so the doc is now 8177. The
     # untrusted rule is deliberately NOT duplicated into the opt-in notes: the
     # wire carries it every turn, and that duplication is what would not fit.
-    "bridge": 1986,
+    # 1986 -> 1991 (+5, withheld-body delay, PR #3874 round 2): the
+    # `channel_history` blurb now says what `delay: transient` and
+    # `receiver_last_active_s` mean — the text an agent actually reads, which
+    # the round-1 draft put in an unserved docstring (QA Q-1). It is paid for by
+    # tightening take_up/ack/send/dm/channels/channel_create/channel_post (net
+    # -127 chars); the rendered doc was 8,171 chars against the 8,192 cap.
+    # MERGE with main (2026-11-13): main's wire description moved this to 1988
+    # on its own ("Peers, not gatekeepers", +7 chars). Re-measured on the
+    # merged tree: 8,178 chars, 1993 tokens — 14 chars of headroom, so the
+    # delay clause needs no further trim.
+    "bridge": 1993,
     # Re-measured with this test's canonical isolated renderer: the read-only
     # inspect_ownership operation adds 19 opt-in tokens, not wire prompt cost.
     # 1327 -> 1424 (2026-10-16): the browser `type` secret_ref convention adds
@@ -508,7 +534,7 @@ MEASURED_TOKENS: dict[str, int] = {
     # (8,190 chars, per main's own note). This branch's net delta over that is
     # +7 tokens: the `setvalue` row and its `selector`/`text` help, less the
     # prose trims listed above. Rendered: 8,091 chars against the 8,192 cap.
-    "browser": 2121,
+    "browser": 2143,
     # NEW (code-requests PR1b): the ``code_requests`` doc — relation and lane
     # vocabulary, the freshness rule and the data-not-instructions framing.
     # 475 tokens is the deliberate cost of the reference detail staying OFF the
@@ -690,7 +716,9 @@ MEASURED_TOKENS: dict[str, int] = {
     "project_delete": 91,
     # NEW (profile proposals, PR #3704): the deferred list/show/apply/reject
     # tool for Agents proposals; 116 tokens through this test's printed table.
-    "profile_proposal": 116,
+    # RE-MEASURED (proposal ask summary): 116 -> 131 (+15), the description's
+    # "ask with a short summary plus the proposal id" sentence.
+    "profile_proposal": 131,
     "read": 345,
     # NEW (redaction policy, PR #2796): the sanctioned public-copy reader.
     # 237 tokens measured through this test's own table; deliberately small —
@@ -714,7 +742,7 @@ MEASURED_TOKENS: dict[str, int] = {
     "skill": 427,
     # Advertised surface re-measured: explicit repeat + confirmed-reuse detail
     # costs +86 opt-in tokens; 3182 chars remains below the 8192-char soft cap.
-    "send": 779,
+    "send": 796,
     # Spawn's tags field/description deliberately adds 21 reference tokens.
     # RE-MEASURED 2026-10-23 (session self-identity): the description gains one
     # sentence pointing at the listing's `(this session)` marker, so the doc
@@ -740,7 +768,13 @@ MEASURED_TOKENS: dict[str, int] = {
     # -> `cwd`, UX round 1 U6) and pays for the own-session clause in the
     # opening sentence with it. Nothing else moved; the field schema did not
     # change, so `tool_schemas` and `scripts/bench_context_budget.py` stand.
-    "sessions": 867,
+    # RE-MEASURED for the explicit-peer listing fix (PR #3897): 867 -> 868.
+    # `peer` on `list` now SELECTS one remote device instead of narrowing the
+    # remote half of a federated listing, so the `peer`/`scope` descriptions
+    # and the reference's mesh sentence say "selects only that device" and the
+    # `include_stored` refusal names `peer` beside `scope='remote'`. Net +1
+    # token; well inside the soft cap. Nothing else moved.
+    "sessions": 868,
     # NEW (wave 4 slice A, 2026-10-10): the ``setting`` doc — the key
     # vocabulary, the op split and the validation-by-registry contract. 191
     # tokens is the deliberate cost of the reference detail staying off the
@@ -786,7 +820,13 @@ MEASURED_TOKENS: dict[str, int] = {
     # per-slot ``saver`` member field; the same printed table as ``agent``.
     # RE-MEASURED (profile proposals, PR #3704): 1464 -> 1500 (+36), the same
     # Agents-proposal notes line as ``agent``.
-    "team": 1500,
+    # RE-MEASURED (proposal ask summary): 1500 -> 1529 (+29), the same
+    # summary-plus-id notes line as ``agent``.
+    # RE-MEASURED (agent/team autonomy + lossless edits, 2026-11): 1500 -> 1574
+    # (+74), the same params and notes line as ``agent``.
+    # RE-MEASURED (merge of main #3777 + paged show, PR #3804 round 1):
+    # 1574 -> 1646 (+72), the same params and notes line as ``agent``.
+    "team": 1646,
     "team_delete": 86,
     "todo": 536,
     # NEW (video phase, 2026-10-10): the ``video_status`` doc — the cold-safe
@@ -841,7 +881,13 @@ MEASURED_TOKENS: dict[str, int] = {
 #: Agents-proposal notes line as the canonical arm; ``task`` stays 764.
 #: RE-MEASURED (PR #3704 context-budget trim): agent 1527 -> 1500, the same
 #: -27 field-description trim as the canonical arm; ``task`` stays 764.
-TIER_ARM_TOKENS: dict[str, int] = {"agent": 1500, "task": 764}
+#: RE-MEASURED (proposal ask summary): agent 1500 -> 1529, the same +29
+#: summary-plus-id notes line as the canonical arm; ``task`` stays 764.
+#: RE-MEASURED (agent/team autonomy + lossless edits, 2026-11): agent
+#: 1500 -> 1591, the same +91 params/notes as the canonical arm; ``task`` 764.
+#: RE-MEASURED (merge of main #3777 + paged show, PR #3804 round 1): agent
+#: 1591 -> 1661, the same +70 as the canonical arm; ``task`` stays 764.
+TIER_ARM_TOKENS: dict[str, int] = {"agent": 1661, "task": 764}
 
 
 async def _noop_execute(*_args: Any, **_kwargs: Any) -> ToolResult:
@@ -1151,6 +1197,22 @@ def test_docs_stay_within_the_soft_cap_and_the_token_ledger_is_current(
             "updating MEASURED_TOKENS in this file:\n\n"
             f"MEASURED_TOKENS = {json.dumps(current, indent=4, sort_keys=True)}"
         )
+
+
+def test_the_bridge_doc_explains_the_withheld_body_fields(
+    default_surface: list[AgentTool],
+) -> None:
+    """The fields an agent reads must mean something where the agent reads them.
+
+    A peer agent refused to act on a ``body: null`` row, and the round-1 draft
+    explained ``delay`` in a docstring no reader is served (QA Q-1): the text
+    below is what ``read tool://bridge`` actually returns.
+    """
+
+    doc = render_tool_doc(next(tool for tool in default_surface if tool.name == "bridge"))
+
+    for field in ("delay", "transient", "receiver_last_active_s"):
+        assert field in doc, f"the bridge doc does not explain {field}"
 
 
 def test_the_tier_configured_arm_is_pinned_too(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1595,3 +1657,52 @@ def test_read_description_advertises_the_tool_scheme() -> None:
     address from the tool it would read the doc with."""
     description = builtin.build_read_tool().description
     assert "tool://" in description
+
+
+def test_a_fallback_resolved_tool_serves_its_doc_without_the_read_hook() -> None:
+    """A deferred MCP tool's doc is served from ``fallback``, never published.
+
+    The loop's invalid-argument hint names ``tool://<name>`` for any tool absent
+    from the published array, including a deferred MCP tool the session
+    dispatches through its fallback resolver. That read must render the schema
+    (not ``Unknown tool``) and must NOT reach ``on_tool_read``, the hook that
+    publishes deferred schemas — the array is the prompt-cache prefix.
+    """
+    held = _tool("read")
+    outside = _tool(
+        "mcp__x_y",
+        description="y on x",
+        parameters={"type": "object", "properties": {"q": {"type": "string"}}},
+    )
+    hooked: list[str] = []
+
+    def hook(name: str) -> str | None:
+        hooked.append(name)
+        return "published"
+
+    resolver = make_tool_doc_resolver(
+        lambda: [held],
+        on_tool_read=hook,
+        fallback=lambda name: outside if name == outside.name else None,
+    )
+
+    doc = resolver("tool://mcp__x_y")
+    assert doc is not None
+    assert doc.startswith("# Tool: `mcp__x_y`")
+    assert "`q`" in doc
+    assert "does not add it to the list" in doc
+    assert "published" not in doc
+    assert hooked == []
+    # A name neither holds is still the actionable miss, not a fallback crash.
+    miss = resolver("tool://mcp__x_z")
+    assert miss is not None and miss.startswith("Unknown tool: mcp__x_z")
+    # An inventory hit still wins over the fallback and still runs the hook.
+    assert resolver("tool://read") is not None
+    assert hooked == ["read"]
+
+    def boom(name: str) -> AgentTool | None:
+        raise RuntimeError("resolver down")
+
+    # A raising fallback is a miss: the resolver contract is "never raises".
+    broken = make_tool_doc_resolver(lambda: [held], fallback=boom)
+    assert (broken("tool://mcp__x_y") or "").startswith("Unknown tool: mcp__x_y")

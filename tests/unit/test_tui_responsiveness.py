@@ -1749,6 +1749,94 @@ async def test_dispose_during_deferred_wiring_cancels_cleanly(
 # --- End-to-end per symptom: the real OperatorApp under a lag monitor ----------
 
 
+#: Independent boot windows S1 measures. A product regression that blocks the loop
+#: at boot blocks EVERY boot; a scheduler/VM hiccup lands in one. See
+#: :func:`assert_stall_persists_across_windows`.
+S1_BOOT_WINDOWS = 2
+
+
+def assert_stall_persists_across_windows(
+    windows: list[tuple[float, float]],
+    *,
+    cpu_ceiling_ms: float = 500.0,
+    wall_ceiling_ms: float = 2000.0,
+) -> None:
+    """Fail a boot only for a stall every independent window shows.
+
+    ``windows`` is one ``(worst_cpu_ms, worst_wall_ms)`` per fresh boot. WHY not
+    one window against a fixed ceiling: the S1 cell once failed a green tree
+    with ONE 719.6 ms CPU interval (run 43104439149, shard test (3.13, 4)) where
+    the same boot reads 6-18 ms of loop CPU locally, cold or warm, with and
+    without coverage tracing (measured 2026-11-11 by booting the cell's app three
+    times in one process). Loop-thread CPU on a hosted VM includes time the
+    hypervisor took the vCPU away -- the guest cannot tell it from work -- and
+    no portable numeric bound separates that from a real stall (see AGENTS.md
+    "If you must measure, measure CPU"). What separates them is persistence: a
+    boot that blocks the loop blocks it every time, a host hiccup does not repeat
+    on the next boot. So the ceilings apply to the BEST window, and a hard cap
+    -- the same caps the noise-scaled bounds never exceed, below the 5 s
+    freeze the cell exists to catch -- applies to the WORST one, so a single
+    enormous stall still fails alone.
+
+    This is a statistical discriminator, not a proof: the chance of a false red
+    falls from the hiccup rate to roughly its square, and a regression that
+    stalls only SOME boots slips through at the best-window ceiling. That trade
+    is deliberate and named here rather than hidden in a bumped constant.
+    """
+    assert windows, "no boot window was measured"
+    best_cpu = min(cpu for cpu, _ in windows)
+    best_wall = min(wall for _, wall in windows)
+    worst_cpu = max(cpu for cpu, _ in windows)
+    worst_wall = max(wall for _, wall in windows)
+    readings = [(round(cpu, 1), round(wall, 1)) for cpu, wall in windows]
+    assert worst_cpu < NOISE_CPU_CAP_MS, (
+        f"a boot window consumed {worst_cpu:.0f} ms of loop CPU (hard cap "
+        f"{NOISE_CPU_CAP_MS:.0f} ms); (cpu, wall) per window: {readings}"
+    )
+    assert worst_wall < NOISE_WALL_CAP_MS, (
+        f"a boot window stalled the loop {worst_wall:.0f} ms of wall time (hard cap "
+        f"{NOISE_WALL_CAP_MS:.0f} ms); (cpu, wall) per window: {readings}"
+    )
+    assert best_cpu < cpu_ceiling_ms, (
+        f"every one of {len(windows)} boot windows stalled the loop for at least "
+        f"{best_cpu:.0f} ms of CPU (ceiling {cpu_ceiling_ms:.0f} ms) -- a persistent stall, "
+        f"not a hiccup; (cpu, wall) per window: {readings}"
+    )
+    assert best_wall < wall_ceiling_ms, (
+        f"every one of {len(windows)} boot windows stalled the loop for at least "
+        f"{best_wall:.0f} ms of wall time (ceiling {wall_ceiling_ms:.0f} ms) -- a persistent "
+        f"stall, not a hiccup; (cpu, wall) per window: {readings}"
+    )
+
+
+@pytest.mark.parametrize(
+    "windows",
+    [
+        [(719.6, 760.0), (18.0, 90.0)],  # CI run 43104439149: one hiccup, one clean boot
+        [(18.0, 90.0), (719.6, 760.0)],  # ... and the order does not matter
+        [(499.0, 1999.0), (7.0, 40.0)],  # inside the ceilings
+    ],
+)
+def test_a_single_hiccup_does_not_fail_the_boot_cell(windows: list[tuple[float, float]]) -> None:
+    assert_stall_persists_across_windows(windows)
+
+
+@pytest.mark.parametrize(
+    "windows",
+    [
+        [(720.0, 760.0), (650.0, 700.0)],  # persistent: every boot stalls
+        [(20.0, 3000.0), (30.0, 2500.0)],  # persistent wall stall above the 2 s bar
+        [(1800.0, 1900.0), (10.0, 20.0)],  # one window over the hard CPU cap
+        [(20.0, 5200.0), (10.0, 20.0)],  # the canonical 5 s freeze, in one window only
+    ],
+)
+def test_a_persistent_or_enormous_boot_stall_still_fails(
+    windows: list[tuple[float, float]],
+) -> None:
+    with pytest.raises(AssertionError):
+        assert_stall_persists_across_windows(windows)
+
+
 @pytest.mark.asyncio
 async def test_s1_boot_paints_and_stays_responsive_over_the_first_seconds() -> None:
     """S1: over the app's first 3 s, no loop stall above the loaded bar, and
@@ -1759,27 +1847,36 @@ async def test_s1_boot_paints_and_stays_responsive_over_the_first_seconds() -> N
     bar (500 ms CPU / 2 s wall) is the right one here: boot recorded 321 ms
     of healthy Textual-layout CPU on CI, and the reconnect/connect tests are
     the ones that assert the strict 50 ms CPU bar against the parse regression.
+
+    Measured over :data:`S1_BOOT_WINDOWS` independent boots and judged by
+    :func:`assert_stall_persists_across_windows`: a stall must repeat to fail the
+    cell (one 719.6 ms CPU interval on CI is not the regression this guards).
     """
     from local_operator.tui.app import OperatorApp
     from tests.unit.tui.test_app_pilot import FakeSession, _factory
 
-    session = FakeSession()
-    app = OperatorApp(lambda: _factory(session))
-    async with app.run_test(size=(100, 30)) as pilot:
-        await pilot.pause()
-        recorder = StallRecorder()
-        await recorder.start()
-        # The boot window: adoption, splash, the first timers. Two seconds
-        # covers several 1 Hz ticks and the update check's call_after_refresh.
-        deadline = time.perf_counter() + 2.0
-        while time.perf_counter() < deadline:
-            await pilot.pause(0.05)
-        await recorder.stop()
-        recorder.assert_no_stall_loaded()
-        # The band has the model label: the boot did not wait on it.
-        assert session.adopted or app._status is not None
-        label = app._status._model_label if app._status is not None else ""
-        assert label, "the model label never landed on the band"
+    windows: list[tuple[float, float]] = []
+    for _ in range(S1_BOOT_WINDOWS):
+        session = FakeSession()
+        app = OperatorApp(lambda session=session: _factory(session))
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            recorder = StallRecorder()
+            await recorder.start()
+            # The boot window: adoption, splash, the first timers. Two seconds
+            # covers several 1 Hz ticks and the update check's call_after_refresh.
+            deadline = time.perf_counter() + 2.0
+            while time.perf_counter() < deadline:
+                await pilot.pause(0.05)
+            await recorder.stop()
+            windows.append(
+                (max(recorder.cpu_stalls, default=0.0), max(recorder.wall_stalls, default=0.0))
+            )
+            # The band has the model label: the boot did not wait on it.
+            assert session.adopted or app._status is not None
+            label = app._status._model_label if app._status is not None else ""
+            assert label, "the model label never landed on the band"
+    assert_stall_persists_across_windows(windows)
 
 
 @pytest.mark.asyncio
@@ -2363,7 +2460,37 @@ def test_s2_gc_attribution_is_reported_on_failure_and_in_the_pass_summary() -> N
     assert "at most" in message
     assert "at least" in message
     assert "upper bound" in message
-    assert "648" not in message  # the message reports THIS run, not history
+    # The message reports THIS run's measurement, not history. Asserted
+    # positively: a negative substring guard against a historical figure ("648")
+    # is itself flaky, because a real forced gen-2 pass over a loaded CI worker's
+    # heap can legitimately measure 648.0 ms (main run 43372640233, shard 4).
+    assert f"{turn.gc.total_ms:.1f} ms of loop-thread GC" in message
+
+
+def test_s2_gc_failure_note_reports_a_run_that_matches_a_historical_figure() -> None:
+    """A real measurement equal to an old reading must not read as "history".
+
+    Deterministic reproduction of the main-branch flake: a leg whose gen-2 pass
+    measured exactly 648.0 ms (the figure an earlier incident recorded) is a
+    legitimate reading of THIS run and must appear in the failure message.
+    """
+    recorder = StallRecorder()
+    try:
+        leg = GcLeg(
+            label="turn",
+            collections={2: 1},
+            cpu_ms={2: 648.0},
+            count_at_open=(339, 3, 14),
+            count_at_close=(9, 0, 0),
+        )
+        control = LegPeak(cpu_ms=5.0, wall_ms=5.0, gc=None)
+        with pytest.raises(AssertionError) as failure:
+            recorder.assert_turn_delta_loaded(
+                control=control, turn=LegPeak(cpu_ms=650.0, wall_ms=5.0, gc=leg)
+            )
+    finally:
+        recorder.gc_attribution.detach()
+    assert "648.0 ms of loop-thread GC" in str(failure.value)
 
 
 def test_s2_gc_attribution_costs_nothing_measurable_when_nothing_collects() -> None:

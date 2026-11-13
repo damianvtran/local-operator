@@ -85,6 +85,7 @@ from local_operator.providers.documents import (
     fallback_document_text,
 )
 from local_operator.providers.failover import ProviderError
+from local_operator.providers.image_rejection import stream_with_rejected_image_retry
 from local_operator.providers.replay import (
     REASONING_ECHO_PLACEHOLDER,
     credential_scope,
@@ -3673,6 +3674,21 @@ class OpenAICompatClient:
         api_key: str | None,
         oauth_access: "OAuthAccess | None" = None,
     ) -> AsyncIterator[StreamEvent]:
+        # A provider refusing ONE image must not end the turn: the wrapper
+        # swaps that image for a constant note and resends once, and keeps
+        # the swap for every later request (``providers/image_rejection.py``).
+        async for event in stream_with_rejected_image_retry(
+            request, lambda req, sent: self._stream_once(req, api_key, oauth_access, sent)
+        ):
+            yield event
+
+    async def _stream_once(
+        self,
+        request: ChatRequest,
+        api_key: str | None,
+        oauth_access: "OAuthAccess | None",
+        sent: dict[str, Any],
+    ) -> AsyncIterator[StreamEvent]:
         codex_responses = self._codex_responses_mode(oauth_access)
         if codex_responses or self._public_responses_mode(request, oauth_access):
             async for event in self._stream_responses(
@@ -3754,6 +3770,9 @@ class OpenAICompatClient:
         headers.update(self._grok_conv_headers(request, url))
         headers.update(self._radient_correlation_headers(request, url))
         body = self._build_body(request, scope=scope)
+        # The body as POSTED, so a refusal's JSON path is walked over exactly
+        # what the provider indexed (see ``stream_with_rejected_image_retry``).
+        sent["body"] = body
         envelope = _StreamOutputEnvelope(
             int(
                 body.get("max_completion_tokens")
@@ -5672,6 +5691,21 @@ class AnthropicClient:
         api_key: str | None,
         oauth_access: "OAuthAccess | None" = None,
     ) -> AsyncIterator[StreamEvent]:
+        # A provider refusing ONE image must not end the turn: the wrapper
+        # swaps that image for a constant note and resends once, and keeps
+        # the swap for every later request (``providers/image_rejection.py``).
+        async for event in stream_with_rejected_image_retry(
+            request, lambda req, sent: self._stream_once(req, api_key, oauth_access, sent)
+        ):
+            yield event
+
+    async def _stream_once(
+        self,
+        request: ChatRequest,
+        api_key: str | None,
+        oauth_access: "OAuthAccess | None",
+        sent: dict[str, Any],
+    ) -> AsyncIterator[StreamEvent]:
         url = f"{self._base_url}/v1/messages"
         stop_reason = "stop"
         # Stamped at construction, before the request goes out: the ``Usage`` is
@@ -5690,6 +5724,8 @@ class AnthropicClient:
         # replay gate in ``_build_body`` compare.
         scope = credential_scope(api_key, oauth_access)
         body = self._build_body(request, oauth=oauth, account=overage_account, scope=scope)
+        # As posted, for the per-image refusal retry (see the OpenAI client).
+        sent["body"] = body
         # The response's content array, by block index, for native replay (see
         # ``_ANTHROPIC_NATIVE_PROTOCOL``). Text and tool_use are kept beside
         # thinking so the replay preserves the provider's exact block order

@@ -15,5 +15,20 @@
   "relay.session.directory.path_placeholder": "or type another path…",
   "relay.session.model.sheet_title": "model",
   "relay.session.model.filter_placeholder": "filter models",
-  "relay.session.model.loading": "loading…"
+  "relay.session.model.loading": "loading…",
+  "relay.session.model.queued": "change queued — applies at the next step",
+  "relay.session.model.refused": "{model} was not applied: {reason}",
+  "relay.session.temporary_toggle": "Temporary session",
+  "relay.session.temporary_subtitle": "Temporary · {status}",
+  "relay.session.temporary_keep": "Keep session",
+  "relay.session.temporary_make": "Make session temporary…",
+  "relay.session.temporary_make_confirm": "Make temporary",
+  "relay.session.temporary_confirm_title": "Make this session temporary?",
+  "relay.session.temporary_confirm_body": "It leaves your session list now and is deleted after it goes quiet. Files it changed on your computer are kept.",
+  "relay.session.temporary_deleted_title": "This temporary session was deleted",
+  "relay.session.temporary_deleted_detail": "It was deleted after it went quiet and can’t be reopened. Files it changed on your computer are still there.",
+  "relay.session.temporary_new": "New temporary session",
+  "relay.session.back_to_chats": "Back to sessions",
+  "relay.session.keep_and_pin": "Keep and pin",
+  "relay.session.keep_and_link": "Keep and link"
 }

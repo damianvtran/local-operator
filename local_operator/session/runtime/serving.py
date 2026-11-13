@@ -114,7 +114,11 @@ from local_operator.session.approval_policy import (
 # one window and start one toward the literal goal `--stop` in another.
 from local_operator.session.goal_loop import LOOP_CLEAR_ARGS, LOOP_STOP_ARGS
 from local_operator.session.runtime.inbox import SOURCE_PEER, SOURCE_USER
-from local_operator.session.runtime.server import AckDetail, SessionHandle
+from local_operator.session.runtime.server import (
+    _SWITCH_SLASH_COMMANDS,
+    AckDetail,
+    SessionHandle,
+)
 from local_operator.session.runtime.server import audio_blocks as _audio_blocks
 from local_operator.session.runtime.server import document_blocks as _document_blocks
 from local_operator.session.runtime.server import (
@@ -812,6 +816,94 @@ def _on_session_loop(method: _F) -> _F:
     return cast(_F, marshalled)
 
 
+#: The routed slash commands whose outcome is a SETTINGS result: exactly the
+#: switch lane's slash set, imported rather than restated so the commands that
+#: can be acked ``queued`` and the ones that publish an outcome cannot drift.
+_SETTINGS_SLASH_COMMANDS = _SWITCH_SLASH_COMMANDS
+
+#: The longest ``message`` a published settings outcome carries. WHY a clip:
+#: ``settings_results`` is bounded in ENTRIES by the switch kinds above (one
+#: overwritten slot each), but its free text is ``str(exc)`` or a slash
+#: result's text, and both can echo caller input (a model id off the wire) or
+#: a multi-line listing. The attach frame's class guard
+#: (``tests/unit/session/test_attach_frame_size.py``) classifies the field as
+#: bounded on the strength of this clip, and pays for its worst case (every
+#: kind refused at this length) out of that guard's free-text pool. 300 holds
+#: the owner's one-sentence outcomes whole — ``model_unknown_refusal`` is 26
+#: characters of prose plus the provider and model id, the effort refusal 46
+#: plus the model id — while a pasted listing is cut. ``message`` is advisory (logs, clients with
+#: no translation of ``code``): ``code`` and ``ok`` carry the outcome, and a
+#: slash caller still gets the full text on its own reply.
+SETTINGS_RESULT_MESSAGE_CHARS = 300
+
+
+def _settings_refusal_code(error: BaseException) -> str:
+    """The stable token a ``settings_result`` refusal carries in ``code``.
+
+    ``ModelSelectionRefused`` already owns a wire-contract code (the desktop's
+    422 body returns it verbatim), so it is reused rather than re-classified;
+    any other ``ValueError`` is a validation refusal (an effort the model has no
+    rung for), and anything else is a failure of the owner, not of the request.
+    """
+    code = getattr(error, "code", None)
+    if isinstance(code, str) and code:
+        return code
+    return "invalid" if isinstance(error, ValueError) else "failed"
+
+
+def _records_settings_result(method: _F) -> _F:
+    """Publish the switch's outcome as ``settings_result`` when it was identified.
+
+    WHY A WRAPPER. A switch sent with ``defer_ok`` is acked ``queued`` by the
+    runtime's control lane before this body has even started (see
+    ``server.py``'s ``_run_deferrable_switch``), and that ack suppresses the
+    body's own reply \u2014 so the outcome needs a channel that is not the reply.
+    It goes on the session's state (``FrontendSessionState.settings_result``),
+    which every attached viewer already receives. Written by a decorator so the
+    three switch bodies (``set_model``, ``set_model_effort``, ``set_effort``)
+    keep their bodies and their refusal sentences byte-for-byte.
+
+    The ``request_id`` keyword is consumed HERE and never reaches the body, and
+    nothing is written without one: an unidentified switch keeps exactly the
+    behaviour it had. Applied INSIDE ``_on_session_loop`` so the write happens
+    on the session's loop, the only thread that may mutate its state store.
+
+    The wrapper advertises ``request_id`` in ``__signature__`` because the wire
+    dispatch decides whether to pass it with ``_accepts_kw`` (a signature
+    probe): a handle without this wrapper \u2014 the TUI host, test doubles, an
+    older owner \u2014 keeps the narrow call.
+    """
+
+    # The per-kind slot (``settings_results``) a body writes: ``set_effort``
+    # moves only the level; the model bodies (with or without a level) are a
+    # model switch, which is what the user picked.
+    kind = "effort" if method.__name__ == "set_effort" else "model"
+
+    @functools.wraps(method)
+    async def recorded(
+        self: "ServingSessionHandle", *args: Any, request_id: str | None = None, **kwargs: Any
+    ) -> Any:
+        if not request_id:
+            return await method(self, *args, **kwargs)
+        try:
+            receipt = await method(self, *args, **kwargs)
+        except Exception as exc:
+            self._publish_settings_result(
+                request_id,
+                kind=kind,
+                ok=False,
+                code=_settings_refusal_code(exc),
+                message=str(exc),
+            )
+            raise
+        self._publish_settings_result(
+            request_id, kind=kind, ok=True, code="applied", message=str(receipt)
+        )
+        return receipt
+
+    return cast(_F, recorded)
+
+
 def _fork_entry_target(args: str) -> str | None:
     """The transcript entry a routed ``/fork`` was asked to cut through, if any.
 
@@ -1056,6 +1148,10 @@ class ServingSessionHandle(SessionHandle):
         # ``config.yml`` change (:meth:`follow_config`) move it without
         # reconstructing the handle.
         self._auto_approve = auto_approve
+        #: Whether the conversation's live ``auto`` was chosen while it already
+        #: held Team Bridge content (team-bridge-egress.md: "Grants"). Only such a grant keeps
+        #: covering calls in a latched session; persisted beside the record.
+        self._approve_granted_while_latched = False
         #: The FILE's ``tool_approval_mode`` as last known, independent of the
         #: live gate (which an explicit conversation choice may override). The
         #: pending-gate projection publishes it beside the mode so a viewer can
@@ -1397,6 +1493,10 @@ class ServingSessionHandle(SessionHandle):
         # and disposal reaps it (``SupplementRunner.cancel``). Scheduling is a no-op when
         # the feature is disabled.
         self._supplements.schedule_sweep(loop)
+        # Settled background music joins its producing turn's highlights (the runner's
+        # ``on_music_settled``). Owner-only, like ``_maybe_supplement``: a follower must
+        # never write a supplement row.
+        session.music_settled_listener = self._on_music_settled
         # Same shape as ``on_turn_settled``: the session flips the record's
         # ``started`` bit the first time a real turn runs (see
         # ``_run_turn_pipeline``), and the registrant owns the publish.
@@ -1470,16 +1570,35 @@ class ServingSessionHandle(SessionHandle):
     # -- gates -----------------------------------------------------------------
 
     def _install_gates(self) -> None:
-        async def approval_gate(tool_name: str, description: str) -> bool:
+        async def approval_gate(
+            tool_name: str,
+            description: str,
+            *,
+            taint_raised: bool = False,
+            bridge_latched: bool = False,
+        ) -> bool:
             # Full-auto: the owner's saved default is to approve every tier,
             # exactly as the TUI adopts ``tool_approval_mode: auto`` at boot
             # (see OperatorApp._load_approvals_default). Answer inline so the
             # turn never stalls on a card no front end would present. An
             # account profile save is the exception: auto-approve is not
             # consent to rewriting account-wide agents (``never_auto_approved``).
-            from local_operator.harness.approval import never_auto_approved
+            #
+            # Team Bridge (team-bridge-egress.md: "Grants"): a SESSION auto granted before the
+            # conversation latched no longer covers calls after it -- the call
+            # falls through to the card. Global auto is untouched: closed for
+            # ask mode; accepted risk in auto/yolo. The session's own
+            # latch is consulted too, so a card whose raiser passed no flag (a
+            # profile save, an ``@path`` read) is still person-only.
+            from local_operator.harness.bridge_egress import (
+                bridge_card_notice,
+                session_grant_covers,
+            )
 
-            if self._auto_approve and not never_auto_approved(tool_name):
+            latched = bool(bridge_latched) or self._session_bridge_latched()
+            if session_grant_covers(
+                self._approval_grant(), title=tool_name, bridge_latched=latched
+            ):
                 return True
             if self._gates_closed_for_exit:
                 # Leaving on a signal: nobody will be asked before the exit, and
@@ -1498,7 +1617,15 @@ class ServingSessionHandle(SessionHandle):
                     request_id=request_id,
                     kind="approval",
                     title=tool_name,
-                    detail=description,
+                    # The notice line rides the detail so every surface shows
+                    # it, an older desktop build included (S-46).
+                    detail=(
+                        f"{bridge_card_notice(self._session)}\n{description}"
+                        if latched
+                        else description
+                    ),
+                    taint_raised=bool(taint_raised),
+                    bridge_latched=latched,
                 )
             )
             self._notify()
@@ -1646,7 +1773,81 @@ class ServingSessionHandle(SessionHandle):
         # the harness will await, rather than a re-implementation of it.
         self._approval_gate = approval_gate
         self._session.set_approval_handler(approval_gate)
+        self._watch_bridge_latch()
         self._install_ask_surface(ask_gate)
+
+    # -- Team Bridge taint (team-bridge-egress.md: "Grants", "bridge_ack")
+    # ---------------------------------
+
+    def _session_bridge_latched(self) -> bool:
+        """Whether this handle's session holds Team Bridge content. Fail-closed."""
+        try:
+            return bool(getattr(self._session, "bridge_latched", False))
+        except Exception:  # noqa: BLE001 - §3.6: an error deriving taint means tainted
+            logger.warning("bridge latch read failed; treating as latched", exc_info=True)
+            return True
+
+    def _approval_grant(self) -> Any:
+        """The auto this gate runs under, with its scope (team-bridge-egress.md: "Grants").
+
+        ``session`` whenever the conversation holds its own choice (a typed
+        ``/approvals``, a desktop "Set auto", a record read back on resume);
+        ``global`` only when the gate follows the machine default or a run pin.
+        Derived from the same attributes the mode is, so no assignment line
+        can move one without the other.
+        """
+        from local_operator.harness.bridge_egress import ApprovalGrant
+
+        explicit = getattr(self, "_explicit_approvals_mode", None)
+        pinned = bool(getattr(self, "_approval_pinned", False))
+        scope = "session" if explicit is not None and not pinned else "global"
+        return ApprovalGrant(
+            auto=bool(getattr(self, "_auto_approve", False)),
+            scope=scope,
+            granted_while_latched=bool(getattr(self, "_approve_granted_while_latched", False)),
+        )
+
+    def _bridge_grant_suspended(self) -> bool:
+        """Whether a live session auto is void because the session latched."""
+        from local_operator.harness.bridge_egress import session_grant_covers
+
+        grant = self._approval_grant()
+        if not grant.auto or grant.scope != "session":
+            return False
+        return not session_grant_covers(
+            grant, title="", bridge_latched=self._session_bridge_latched()
+        )
+
+    def _watch_bridge_latch(self) -> None:
+        """Announce, once, that a pre-latch session auto stopped covering calls."""
+        latch = getattr(self._session, "bridge_taint_latch", None)
+        if latch is None:
+            return
+
+        def announce() -> None:
+            from local_operator.harness.bridge_egress import (
+                bridge_card_notice,
+                grant_suspended_notice,
+            )
+
+            # Cards parked while the session was clean are re-published as
+            # latched cards (security r7 lead on #3796): every attached viewer,
+            # desktop and phone rebuilds its card from these fields, so without
+            # this a stale card kept offering its S/G escapes after the latch.
+            # The owner's press-time checks stay the guarantee; this is what
+            # the viewers see.
+            relatched = False
+            try:
+                relatched = self._fold.latch_pending(bridge_card_notice(latch))
+            except Exception:  # noqa: BLE001 - the gate still enforces; logged at warning
+                logger.warning("could not re-publish parked cards as latched", exc_info=True)
+            if self._bridge_grant_suspended():
+                self._emit_notice(grant_suspended_notice(latch), "warning", headline="Approvals")
+                self._notify()
+            elif relatched:
+                self._notify()
+
+        latch.on_latched.append(announce)
 
     def _install_ask_surface(self, handler: "_AskGateFn | None" = None) -> None:
         """Install the queued-ask surface — the ask half of ``_install_gates``.
@@ -1776,6 +1977,13 @@ class ServingSessionHandle(SessionHandle):
             return
         self._explicit_approvals_mode = override
         self._auto_approve = override == "auto"
+        # Absent/unreadable reads False: a pre-latch (or pre-S1) record is void
+        # once the session latches (team-bridge-egress.md: "Grants").
+        from local_operator.session.approval_policy import read_granted_while_latched
+
+        self._approve_granted_while_latched = override == "auto" and read_granted_while_latched(
+            directory
+        )
 
     def follow_config(self, watcher: Any) -> None:
         """Subscribe the gate to ``tool_approval_mode`` changes on ``watcher``.
@@ -2218,6 +2426,12 @@ class ServingSessionHandle(SessionHandle):
                     return True
             except Exception:  # noqa: BLE001 — uncertainty must fail closed
                 return True
+        # A parked wake is owed work: its deadline task is already a session
+        # background task (tracked below), and the batch is the keep-alive
+        # signal even before that read. Exiting under it would destroy a
+        # reminder the operator is still due.
+        if getattr(session, "_parked_wakes", None):
+            return True
         if any(not task.done() for task in self._background_tasks):
             return True
         return False
@@ -3330,6 +3544,24 @@ class ServingSessionHandle(SessionHandle):
         except Exception:  # noqa: BLE001 — uncertainty must not pin the runtime
             return None
         due = [s.next_due_at for s in schedules if isinstance(s.next_due_at, int)]
+        # A parked wake is a fired occurrence the pump already retired from the
+        # scheduler: without this leg the warmth signal reads None and the
+        # runtime can exit under a reminder the operator is still owed. Its
+        # earliest delivery is the parked batch's quiet-window end, capped at
+        # first_park + D — the same target the deadline task sleeps to.
+        parked = getattr(self._session, "_parked_wakes", None)
+        if parked:
+            import time as _time
+
+            from local_operator.session import session as _session_mod
+
+            first_park = getattr(self._session, "_parked_wakes_first_park", None) or _time.time()
+            last_end = getattr(self._session, "_last_operator_turn_end", None)
+            quiet_target = (
+                first_park if last_end is None else last_end + _session_mod.WAKE_OPERATOR_QUIET_S
+            )
+            cap_target = first_park + _session_mod.WAKE_PARK_CAP_S
+            due.append(int(min(quiet_target, cap_target) * 1000))
         return min(due) if due else None
 
     def next_monitor_due_at(self) -> int | None:
@@ -3744,7 +3976,13 @@ class ServingSessionHandle(SessionHandle):
         await self._session.record_shell(command, result)
 
     @_on_session_loop
-    async def history_page(self, before: str, anchor: str = "") -> dict[str, Any]:
+    async def history_page(
+        self, before: str, anchor: str = "", *, bound_oversized: bool = False
+    ) -> dict[str, Any]:
+        # Only a non-local viewer asks for the bounded form; a session class
+        # that predates the keyword is called exactly as before.
+        if bound_oversized:
+            return self._session.history_page(before, anchor, bound_oversized=True)
         return self._session.history_page(before, anchor)
 
     @property
@@ -4613,6 +4851,12 @@ class ServingSessionHandle(SessionHandle):
             )
         except Exception:  # noqa: BLE001 — the event path never fails on the judge
             logger.debug("goal judge trigger failed", exc_info=True)
+
+    async def _on_music_settled(self, receipt: Mapping[str, Any]) -> None:
+        from local_operator.session.goal_judge import owns_the_session
+
+        if owns_the_session(self._session):
+            await self._supplements.on_music_settled(receipt)
 
     def _maybe_supplement(self, event: AgentEndEvent) -> None:
         """Schedule a turn supplement off a turn's end (docs/design/turn-supplements.md §2.1).
@@ -6021,7 +6265,10 @@ class ServingSessionHandle(SessionHandle):
         return "cancelling at the next tool boundary"
 
     @_on_session_loop
-    async def set_model(self, provider: str, model_id: str) -> str:
+    @_records_settings_result
+    async def set_model(
+        self, provider: str, model_id: str, *, request_id: str | None = None
+    ) -> str:
         """Switch the owner onto ``provider``/``model_id`` at the model's own level.
 
         The two-argument call every host and test double already makes; the
@@ -6031,6 +6278,7 @@ class ServingSessionHandle(SessionHandle):
         return await self.set_model_effort(provider, model_id, None)
 
     @_on_session_loop
+    @_records_settings_result
     async def set_model_effort(
         self,
         provider: str,
@@ -6038,6 +6286,7 @@ class ServingSessionHandle(SessionHandle):
         effort: str | None,
         *,
         offered_only: bool = False,
+        request_id: str | None = None,
     ) -> str:
         """Switch the owner onto ``provider``/``model_id`` AT ``effort``.
 
@@ -6846,7 +7095,8 @@ class ServingSessionHandle(SessionHandle):
             logger.warning("the remote model switch's audit card was not recorded", exc_info=True)
 
     @_on_session_loop
-    async def set_effort(self, effort: str) -> str:
+    @_records_settings_result
+    async def set_effort(self, effort: str, *, request_id: str | None = None) -> str:
         self._check_loop_thread()
         spec = self._session.model
         if effort not in spec.reasoning_efforts:
@@ -8163,6 +8413,12 @@ class ServingSessionHandle(SessionHandle):
                     # session-ask card over a global-auto file would otherwise
                     # have to invent "global Ask" (the U4 defect).
                     payload["approval_global_mode"] = global_mode
+                    if self._bridge_grant_suspended():
+                        # The EFFECTIVE mode (team-bridge-egress.md: "Grants"): the conversation's
+                        # auto predates its Team Bridge content, so this gate
+                        # asks. Claiming auto here would contradict the card.
+                        payload["approval_mode"] = "ask"
+                        payload["approval_suspended"] = "bridge"
                 else:
                     payload["approval_mode"] = ""
                     payload["approval_provenance"] = ""
@@ -8178,6 +8434,46 @@ class ServingSessionHandle(SessionHandle):
             store.mutate(pending_gate=payload)
         except Exception:  # noqa: BLE001 — a card is never worth failing a gate
             logger.debug("could not publish the pending gate", exc_info=True)
+
+    def _publish_settings_result(
+        self, request_id: str, *, kind: str, ok: bool, code: str, message: str
+    ) -> None:
+        """Write one switch outcome onto the session state (see ``_records_settings_result``).
+
+        Never raises: the switch has already landed or been refused by the time
+        this runs, and a projection hiccup must not turn an applied switch into
+        a reported failure. ``store.mutate`` is the same publication path
+        ``pending_gate`` uses, so the field rides the next state push.
+        """
+        result = {
+            "request_id": request_id,
+            "ok": ok,
+            "code": code,
+            "message": message[:SETTINGS_RESULT_MESSAGE_CHARS],
+        }
+        # Two independent publications, each guarded on its own so a hiccup on
+        # one cannot hide the outcome from the other's viewers: the phone reads
+        # the projection (R1-M2), the TUI and desktop read the state store.
+        try:
+            self._fold.set_settings_result(kind, result)
+            self._notify()
+        except Exception:  # noqa: BLE001 — the outcome is advisory; the switch stands
+            logger.debug("could not project the settings result", exc_info=True)
+        try:
+            store = getattr(self._session, "_frontend_state_store", None)
+            if store is None:
+                return
+            # The handle keeps the per-kind map itself rather than reading it
+            # back: ``store.state`` deep-copies the whole session per call and
+            # the field is not on ``read_field``'s copy-free list. ``setdefault``
+            # because test doubles build this handle with ``__new__``.
+            per_kind: dict[str, dict[str, Any]] = self.__dict__.setdefault(
+                "_settings_results_by_kind", {}
+            )
+            per_kind[kind] = result
+            store.mutate(settings_result=result, settings_results=dict(per_kind))
+        except Exception:  # noqa: BLE001 — the outcome is advisory; the switch stands
+            logger.debug("could not publish the settings result", exc_info=True)
 
     def _refresh_ask_projection(self) -> None:
         """Install the session's ask fold into the phone projection (§4, N2).
@@ -8566,6 +8862,10 @@ class ServingSessionHandle(SessionHandle):
         #: connection can answer it, and the verbs that need it are chosen
         #: several frames below.
         capabilities: frozenset[str] | None = None,
+        #: Team Bridge capability marker (team-bridge-egress.md: "bridge_ack"); see
+        #: ``_approvals_slash``.
+        bridge_ack: bool = False,
+        request_id: str | None = None,
     ) -> dict[str, Any]:
         """Run one shared slash command against the session and answer as data.
 
@@ -8597,12 +8897,62 @@ class ServingSessionHandle(SessionHandle):
         renders itself (``SLASH_ACTION_RECEIPTS``); ``None`` means it declared
         nothing, which is what every client built before the field looks like
         on the wire. See :meth:`_complete_unconsumed_action`.
+
+        ``request_id`` identifies a SETTINGS switch (``/model``, ``/effort``,
+        ``/fast`` — the switch lane's slash commands) sent with ``defer_ok``:
+        its outcome is published as ``settings_result`` exactly as the
+        ``set_model``/``set_effort`` ops publish theirs (see
+        ``_records_settings_result``), because a queued ack suppressed the
+        reply that would otherwise have carried it. Ignored for any other
+        command, which never rides the deferred lane.
         """
         from local_operator.session.frontend_state import SlashResult
 
-        result = await self._slash_result(
-            command, args, SlashResult, locality, may_loosen, capabilities
-        )
+        settings_request: str | None = None
+        settings_kind = ""
+        # Only a slash WITH arguments is a switch: bare ``/model`` or
+        # ``/effort`` answers a listing, and publishing that as ``applied``
+        # would tell a viewer a change landed that nobody made (R1-m3).
+        if request_id and args.strip():
+            from local_operator.slash_commands import primary_slash_name
+
+            settings_kind = primary_slash_name(command.strip().lower())
+            if settings_kind in _SETTINGS_SLASH_COMMANDS:
+                settings_request = request_id
+        try:
+            # ``bridge_ack`` is forwarded to the SAME call that applies the
+            # command, so ``_approvals_slash`` reads the latch when it runs, not
+            # when the frame arrived: a slash that waited on its chain cannot
+            # carry a pre-latch view of the session into a post-latch grant.
+            result = await self._slash_result(
+                command,
+                args,
+                SlashResult,
+                locality,
+                may_loosen,
+                capabilities,
+                bridge_ack=bridge_ack,
+            )
+        except Exception as exc:
+            if settings_request is not None:
+                self._publish_settings_result(
+                    settings_request,
+                    kind=settings_kind,
+                    ok=False,
+                    code=_settings_refusal_code(exc),
+                    message=str(exc),
+                )
+            raise
+        if settings_request is not None:
+            ok = result.kind != "error"
+            data_code = result.data.get("code") if isinstance(result.data, dict) else None
+            self._publish_settings_result(
+                settings_request,
+                kind=settings_kind,
+                ok=ok,
+                code=("applied" if ok else (str(data_code) if data_code else "failed")),
+                message=str(result.text or ""),
+            )
         result = await self._complete_unconsumed_action(result, images, consumers)
         return result.model_dump(mode="json")
 
@@ -8773,6 +9123,8 @@ class ServingSessionHandle(SessionHandle):
         locality: str | None = None,
         may_loosen: bool | None = None,
         capabilities: frozenset[str] | None = None,
+        *,
+        bridge_ack: bool = False,
     ) -> Any:
         """Dispatch one routed slash command. Mirrors ``OperatorApp._slash_result``.
 
@@ -9019,7 +9371,9 @@ class ServingSessionHandle(SessionHandle):
             # connection that CAN loosen, and no gate can see it: pyright sets no
             # ``reportUnreachable`` and flake8 has no unreachable check, so CI stays
             # green either way. The dead line is gone; this argument is not.
-            return self._approvals_slash(session, args, SlashResult, may_loosen=may_loosen)
+            return self._approvals_slash(
+                session, args, SlashResult, may_loosen=may_loosen, bridge_ack=bridge_ack
+            )
         if command == "language":
             # The terminal's funnel, served: one `settings_io.write_setting`
             # against the `language` key; the receipt keeps the terminal's
@@ -11045,7 +11399,13 @@ class ServingSessionHandle(SessionHandle):
         )
 
     def _approvals_slash(
-        self, session: Any, arg: str, SlashResult: Any, *, may_loosen: bool | None = None
+        self,
+        session: Any,
+        arg: str,
+        SlashResult: Any,
+        *,
+        may_loosen: bool | None = None,
+        bridge_ack: bool = False,
     ) -> Any:
         """Report or switch the gate the RUNTIME's tools actually consult.
 
@@ -11095,6 +11455,25 @@ class ServingSessionHandle(SessionHandle):
             # locality rule and is documented in full on
             # :meth:`_approvals_default_slash`, together with why the operator
             # on a phone or an attached pane is the same owner the desktop is.
+            #
+            # A LOOSENING DEFAULT NEEDS ``bridge_ack`` WHILE LATCHED (security r7
+            # lead on #3796, team-bridge-egress.md: "bridge_ack"). Global auto
+            # covers a latched session's cards by design (accepted auto/yolo
+            # risk), so an unmarked routed ``default auto`` -- a viewer card
+            # parked before the latch still offers ``G``, which sends exactly
+            # this -- would turn the next egress call into one nobody is asked
+            # about. Same refusal as the session ``auto`` arm below, and it is
+            # checked here, before the facade write, so a refusal writes nothing.
+            # A typed command (the TUI marks it) or an acked desktop frame passes.
+            # Judged by what the form RESOLVES to through the table the TUI owner
+            # shares (security r1 S-1 on #3849), so both owner hosts refuse the
+            # same set; the bare form also lands in the unknown-word arm below.
+            from local_operator.harness.approval import approvals_default_may_loosen
+
+            if approvals_default_may_loosen(argument[len("default") :]) and not bridge_ack:
+                refusal = self._bridge_ack_refusal(SlashResult)
+                if refusal is not None:
+                    return refusal
             return self._approvals_default_slash(argument, SlashResult)
         if not argument:
             live = "auto" if self._auto_approve else "ask"
@@ -11198,14 +11577,34 @@ class ServingSessionHandle(SessionHandle):
                 text=f"unknown approval mode {argument!r} — use ask or auto",
                 style="warning",
             )
+        latched = self._session_bridge_latched()
+        if wanted_auto and latched and not bridge_ack:
+            # Version skew, closed in core (team-bridge-egress.md: "bridge_ack"): desktop "Set
+            # auto" and
+            # the ``/approvals`` picker send the same owner command, so an older
+            # build's card escape would re-loosen a latched session in one
+            # press. Only a frame carrying ``bridge_ack`` (sent by a build that
+            # rendered the latched sentence, from the picker) or a typed command
+            # the TUI marks may make a post-latch session grant. Same receipt
+            # shape as the unattributed-loosening refusal.
+            refusal = self._bridge_ack_refusal(SlashResult, latched=latched)
+            if refusal is not None:
+                return refusal
         self._auto_approve = wanted_auto
+        # Stamped only for a grant made while ALREADY latched: that is the
+        # deliberate post-latch loosening, which keeps covering calls and
+        # survives resume. Every other grant is void once the session latches.
+        self._approve_granted_while_latched = bool(wanted_auto and latched)
         # A human typed the mode in this session, so the FILE no longer moves
         # this gate in either direction (see :meth:`_on_config_change`). The MODE
         # is recorded, not merely the fact of a choice (review round 2, R6) —
         # and since 2026-10-23 it is recorded with the CONVERSATION too, so the
         # choice survives a resume instead of living in this handle's memory.
         self._explicit_approvals_mode = "auto" if wanted_auto else "ask"
-        saved_failure = self._persist_approval_override("auto" if wanted_auto else "ask")
+        saved_failure = self._persist_approval_override(
+            "auto" if wanted_auto else "ask",
+            granted_while_latched=self._approve_granted_while_latched,
+        )
         self._notify()
         # "(this session)" on the LIVE half, matching the app's own receipt word
         # for word (UX round 1, U5): the two hosts answer the same gesture, and
@@ -11250,7 +11649,11 @@ class ServingSessionHandle(SessionHandle):
         )
 
     def _persist_approval_override(
-        self, mode: str | None, *, had_record: bool = True
+        self,
+        mode: str | None,
+        *,
+        had_record: bool = True,
+        granted_while_latched: bool = False,
     ) -> str | None:
         """Record (or clear) this conversation's choice; return a failure clause.
 
@@ -11285,7 +11688,7 @@ class ServingSessionHandle(SessionHandle):
         if directory is None:
             return None
         try:
-            _write_approval_override(directory, mode)
+            _write_approval_override(directory, mode, granted_while_latched=granted_while_latched)
         except Exception as error:  # noqa: BLE001 — surfaced in the receipt, never fatal
             logger.warning(
                 "could not save %s beside the transcript",
@@ -11304,6 +11707,32 @@ class ServingSessionHandle(SessionHandle):
                 f"({error.__class__.__name__})"
             )
         return None
+
+    def _bridge_ack_refusal(self, SlashResult: Any, *, latched: bool | None = None) -> Any:
+        """The receipt refusing an unacknowledged loosening while latched, or ``None``.
+
+        One receipt for both loosening spellings (session ``auto`` and
+        ``default auto``) so a client keys on one ``approval_reason`` and the
+        copy stays the kind-selected ``ack_refused`` text. Writes nothing.
+        ``latched`` lets a caller that already read the latch reuse it; absent,
+        it is read here (fail-closed).
+        """
+        if latched is None:
+            latched = self._session_bridge_latched()
+        if not latched:
+            return None
+        from local_operator.harness.bridge_egress import ack_refused_notice
+
+        return SlashResult(
+            kind="notice",
+            text=ack_refused_notice(self._session),
+            style="warning",
+            data={
+                "approval_mode": "auto" if self._auto_approve else "ask",
+                "ok": False,
+                "approval_reason": "bridge_latched",
+            },
+        )
 
     def _approvals_default_slash(self, argument: str, SlashResult: Any) -> Any:
         """Persist the machine-wide default from this control connection.
@@ -11338,10 +11767,11 @@ class ServingSessionHandle(SessionHandle):
         # depends on server state — it reads a bare ``default`` as ordinary. Rather
         # than let an unclassifiable frame reach a loosening sink, the mode is
         # named; the seam stays exact and the receipt teaches the two spellings.
-        if word in ("ask", "on", "prompt"):
-            mode = "ask"
-        elif word in ("auto", "off", "yolo"):
-            mode = "auto"
+        from local_operator.harness.approval import approvals_default_target
+
+        target = approvals_default_target(word, current_auto=None)
+        if target is not None:
+            mode = "auto" if target else "ask"
         else:
             return SlashResult(
                 kind="notice",

@@ -1,3 +1,4 @@
+import type { SettingsResultWire } from "./lib/settings-defer";
 import type { SupplementBeat } from "./lib/supplement";
 
 /**
@@ -325,8 +326,15 @@ export interface AskQuestion {
 	    question this is `0`). Reading a per-option boolean instead would have
 	    been dead code against a real runtime: the harness `AskOption` model
 	    serialises `{label, description}` and has no such field. `null`/absent
-	    means no recommendation was stated. */
+	    means no recommendation was stated. A multi-select may recommend several
+	    rows: `recommended` is still the first (`0`) and `recommended_all` lists
+	    the whole set (`[0..k-1]`, only when k >= 2) — read both through
+	    `recommendedRows` in `lib/asks.ts`. */
 	recommended?: number | null;
+	/** Every recommended row, `[0..k-1]`; present only for a set of two or more
+	    (`asks/queue._question_shape` omits it otherwise, and older runtimes never
+	    send it, so an absent key means "just `recommended`"). */
+	recommended_all?: number[] | null;
 	/** The credential case: the answer is a masked paste field, and the answer
 	    map holds the KEY the runtime stored, never the value (§4). */
 	secret: boolean;
@@ -544,6 +552,10 @@ export interface SpendChannels {
 export interface SessionProjection {
 	/** Absent on old owners; raw entry metadata alone never enables this. */
 	peer_cycles?: 1;
+	/** The temporary mark on the session events frame, when the relay sends
+	    it there (contract §2.3). Absent means "not said here": the screen then
+	    reads the list row's field, which the same relay always carries. */
+	temporary?: TemporaryInfo | null;
 	attention?: CompletionAttention;
 	session_id: string;
 	pid: number;
@@ -658,6 +670,11 @@ export interface SessionProjection {
 	 * (`lib/supplement.ts`, `beatLive`): 0 means a disk rebuild.
 	 */
 	supplements?: Record<string, SupplementBeat>;
+	/** The latest identified settings outcome per kind (`model`/`effort`/`fast`),
+	    each keyed by the `request_id` a deferred pick sent. Absent on an older
+	    owner and on a projection with no identified switch yet — both read as
+	    "no outcome". Reconciled by `lib/settings-defer.ts` (PR #3697 R1-M2). */
+	settings_results?: Record<string, SettingsResultWire>;
 }
 
 /** The opener of an agent workstream, mirroring the desktop contract
@@ -705,9 +722,40 @@ export interface SessionTagsResponse {
 	primary: string | null;
 }
 
+/** Why the temporary pass is holding a temporary chat's clock (closed enum,
+    frozen wire, contract §2.2). The client keys its copy off these codes. */
+export const TEMPORARY_HOLD_CODES = [
+	"running",
+	"on_screen",
+	"open_ask",
+	"armed_wake",
+	"armed_monitor",
+	"unread_mail",
+	"operator_hold",
+	"unseen_result",
+	"unsaved_files",
+	"linked",
+	"cannot_verify",
+] as const;
+export type TemporaryHoldCode = (typeof TEMPORARY_HOLD_CODES)[number];
+
+/** A temporary chat's state (contract §2.3, frozen). `deletes_at` is null
+    while the pass holds the chat; `hold` names why. Epoch seconds. */
+export interface TemporaryInfo {
+	marked_at: number;
+	idle_minutes: number;
+	deletes_at: number | null;
+	hold: TemporaryHoldCode | null;
+}
+
 export interface SessionSummary {
 	session_id: string;
 	section: "active" | "previous";
+	/** ALWAYS PRESENT on a relay with `features.temporary_chats`: `null` is
+	    the explicit "not temporary", the object the mark (contract §2.3). An
+	    older relay omits it; a reader gates on the capability, never on this
+	    key's presence (`lib/temporary.ts`). */
+	temporary?: TemporaryInfo | null;
 	/** True when this conversation is in the shared durable pin store
 	    (`sidebar-pins.json`) — the SAME pin the terminal's F10 and the desktop
 	    app's row action read and write, so the phone's ★ Pinned section and
@@ -805,6 +853,12 @@ export interface SessionSummary {
 	mtime: number;
 	/** Immutable conversation birth; absent on older daemons, never activity. */
 	created_at?: number;
+	/** Epoch seconds (same unit as `created_at`) of the person's own last
+	    message — the Running section's order clock, as on the desktop sidebar,
+	    which never moves while a reply streams. `null` when unknown: no user
+	    message yet, or a row that is not running (only running rows pay the
+	    transcript read). Absent on older daemons; fall back to `created_at`. */
+	last_user_at?: number | null;
 	/** Latest outcome; only unseen non-streaming outcomes affect list priority. */
 	completion_kind?: string;
 }
@@ -989,8 +1043,11 @@ export type CommandOp =
 			expand_skills?: boolean;
 		}
 	| { op: "abort" }
-	| { op: "set_model"; provider: string; model_id: string }
-	| { op: "set_effort"; effort: string }
+	/* `defer_ok` + `request_id` (both optional): a busy session answers
+	   `detail: "queued"` at once instead of holding the request for a whole
+	   turn step; the change applies at the next step (QUEUED_DETAIL). */
+	| { op: "set_model"; provider: string; model_id: string; defer_ok?: boolean; request_id?: string }
+	| { op: "set_effort"; effort: string; defer_ok?: boolean; request_id?: string }
 	| { op: "slash"; command: string; args: string }
 	/* `slash_result` is the ROUTED slash op — the one the runtime's authority seam
 	   was built for, and the one the desktop backend and the TUI's attached pane

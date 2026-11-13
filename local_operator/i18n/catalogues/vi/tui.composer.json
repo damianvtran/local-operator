@@ -1,3 +1,4 @@
 {
-  "tui.composer.placeholder_default": "Nhắn tin cho Local Operator…"
+  "tui.composer.placeholder_default": "Nhắn tin cho Local Operator…",
+  "tui.composer.temporary_placeholder": "Tin nhắn (cuộc trò chuyện tạm thời — không được giữ lại)…"
 }

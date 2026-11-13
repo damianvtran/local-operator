@@ -40,6 +40,7 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    PrivateAttr,
     SerializationInfo,
     SerializerFunctionWrapHandler,
     TypeAdapter,
@@ -1338,6 +1339,13 @@ _FRONTEND_LOCAL_SLASHES = {
     # write. v2 is single-machine; serving the owner's project view over the
     # control protocol is a follow-up.
     "project",
+    # `/temporary on|off|status` writes and reads THIS machine's
+    # `config_dir()/sessions/<id>/temporary.json`, the per-session sidecar the
+    # sidebar, the band and this machine's sweeper read -- the `/archive`
+    # argument, one file over. Routed to the runtime it fell through to the
+    # owner's generic "reads this machine's configuration" refusal (core QA
+    # round 1, Q1), so the command did nothing on every attached viewer.
+    "temporary",
     # The tag store is THIS machine's: `config_dir()/tags` holds the registry and
     # the per-session assignment files the sidebar's bucket map reads, exactly
     # the argument `/archive` makes about `archived-sessions.json`. Routed to the
@@ -1719,6 +1727,36 @@ class McpServerState(BaseModel):
     tool_count: int | None = None
 
 
+class SettingsResultState(BaseModel):
+    """The landed outcome of ONE identified settings switch (model/effort/fast).
+
+    WHY IT EXISTS. A switch frame sent with ``defer_ok`` is ALWAYS answered
+    ``queued`` before it lands: the runtime's control lane acks before the
+    switch body runs, idle or busy (``server._run_deferrable_switch``), so the
+    reply can never carry the outcome. This field is where the
+    outcome goes instead, on the ordinary state push, so every viewer (desktop,
+    TUI, phone) learns the same result whether or not the socket that asked is
+    still open.
+
+    Written ONLY for a switch that carried a ``request_id``: an unidentified
+    switch is answered by its own reply as it always was, and a field naming no
+    request would give a client nothing to correlate. Last writer wins — a
+    client matches ``request_id`` against the one it sent and ignores the rest.
+
+    ``code`` is a stable machine token (``applied``, or the refusal's class such
+    as ``model_unknown``/``invalid``) for a client to localise; ``message`` is
+    the owner's English sentence, kept for logs and for clients without a
+    translation of ``code``.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    request_id: str
+    ok: bool
+    code: str = ""
+    message: str = ""
+
+
 class PendingGateState(BaseModel):
     model_config = ConfigDict(extra="allow")
 
@@ -1759,6 +1797,10 @@ class PendingGateState(BaseModel):
     #: The machine default the mode outranks; ``""`` when not stated. See
     #: ``mobile.types.PendingRequest`` for why it is not derivable.
     approval_global_mode: str = ""
+    #: Team Bridge flags (``mobile.types.PendingRequest``): a latched card is
+    #: person-only on every client path.
+    taint_raised: bool = False
+    bridge_latched: bool = False
 
 
 class PendingAskState(BaseModel):
@@ -3904,6 +3946,19 @@ class FrontendSessionState(BaseModel):
     mcp_startup: dict[str, Any] | None = None
     loop: dict[str, Any] | None = None
     pending_gate: PendingGateState | None = None
+    #: The outcome of the last identified settings switch — see
+    #: :class:`SettingsResultState`. ``None`` until a switch with a
+    #: ``request_id`` lands; a viewer that predates it ignores the field.
+    settings_result: SettingsResultState | None = None
+    #: The latest identified outcome PER KIND (``model``/``effort``/``fast``).
+    #: ``settings_result`` alone is last-writer-wins across kinds, so a viewer
+    #: that redials (or misses a push) after a model refusal and an effort
+    #: success saw only the effort and lost the refusal (PR #3697 review
+    #: R1-m2). Per kind is the natural bound: settings are last-wins, so an
+    #: older outcome of the same kind is moot once a newer one lands. Kept
+    #: BESIDE ``settings_result`` (not replacing it) because the desktop's
+    #: durable-intent bridge already reads that field.
+    settings_results: dict[str, SettingsResultState] = Field(default_factory=dict)
     #: The session's queued asks, newest first with the OPEN ones in front, and
     #: how many of them are still OUTSTANDING — ``open`` asks, the ones still
     #: waiting on the user (the rule lives in ``asks.store.OUTSTANDING_STATUSES``).
@@ -4284,6 +4339,12 @@ class FrontendSync(BaseModel):
     snapshot: FrontendSessionState
     live_cursor: str | None = None
     display_history: DisplayHistoryWindow | None = None
+    #: The SAME cut's bounded page (``history_window.bounded_display_message``),
+    #: present only when ``display_history`` escalated to ``full_required``. A
+    #: PRIVATE attribute so it never serializes: the runtime swaps it into the
+    #: frame only for a non-local viewer, which cannot perform the local replay
+    #: ``full_required`` asks for; a local viewer's frame is unchanged.
+    _peer_display_history: DisplayHistoryWindow | None = PrivateAttr(default=None)
 
 
 class FrontendUpdate(BaseModel):

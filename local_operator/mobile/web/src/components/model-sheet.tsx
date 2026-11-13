@@ -1,7 +1,11 @@
 /**
  * Model sheet: the server's ranked /api/models, filtered, current model marked.
  * Choosing POSTs set_model; the next projection repaint shows the truth, so
- * there is no local optimistic state.
+ * there is no local optimistic state. A `queued` answer (a current runtime
+ * acks every deferred pick that way, before the switch runs) closes the sheet
+ * too, and hands the pick to `lib/settings-defer`'s per-session store: the
+ * composer shows "queued" while a turn runs and the refusal if the session
+ * later rejects it — after this sheet is gone (PR #3697 review R1-M2).
  *
  * ONE FLAT LIST, IN THE SERVER'S ORDER. This used to group by provider, which
  * silently re-sorted the payload: the daemon ranks direct-connected providers
@@ -12,6 +16,12 @@
  */
 import { useEffect, useMemo, useState } from "react";
 import { getModels, sendCommand } from "../api";
+import {
+	QUEUED_DETAIL,
+	deferredSettingsFields,
+	settleSettingsPick,
+	trackSettingsPick,
+} from "../lib/settings-defer";
 import { cn } from "../lib/cn";
 import { filterModels } from "../lib/model-filter";
 import { messageRuntime } from "../store";
@@ -93,14 +103,27 @@ export function ModelSheet({
 	);
 
 	const choose = async (m: ModelEntry) => {
+		const fields = deferredSettingsFields();
+		/* Tracked BEFORE sending: the outcome can ride a repaint that lands
+		   before this await resumes, and an untracked id would be ignored. */
+		trackSettingsPick(pid, {
+			requestId: fields.request_id,
+			kind: "model",
+			label: `${m.provider}/${m.model_id}`,
+		});
 		try {
-			await sendCommand(pid, {
+			const receipt = await sendCommand(pid, {
 				op: "set_model",
 				provider: m.provider,
 				model_id: m.model_id,
+				...fields,
 			});
+			/* Anything but `queued` is an older runtime answering on landing:
+			   its reply WAS the outcome, so nothing is left to wait for. */
+			if (receipt.detail !== QUEUED_DETAIL) settleSettingsPick(pid, fields.request_id);
 			onClose();
 		} catch (e) {
+			settleSettingsPick(pid, fields.request_id);
 			setError(String((e as Error).message ?? e));
 		}
 	};

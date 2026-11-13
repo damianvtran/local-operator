@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from contextlib import closing
 from typing import Any
 
@@ -12,11 +13,72 @@ from local_operator.providers.account_successor import (
 )
 from local_operator.providers.auth_store import (
     AuthStore,
+    AuthStoreBusyError,
     AuthStoreError,
     CredentialInvalidError,
 )
 from local_operator.tunnels.config import DEFAULT_API_URL
-from local_operator.tunnels.errors import LoginRequired, RecordNotFound
+from local_operator.tunnels.errors import LoginRequired, RecordNotFound, RequestFailed
+
+#: Pauses before re-opening the store after `AuthStoreBusyError`. Why retry at
+#: all: the bootstrap guard is held only while another `lop` process opens the
+#: same database (milliseconds when the machine is idle), so the contention is
+#: over long before the tunnel supervisor's 10 s restart floor would bring the
+#: unit back — on 2026-11-11 one such timeout at cold start cost a 15 s outage
+#: (one observation, n=1; no distribution exists yet). Why so short and so few:
+#: each attempt already waits the store's own 5 s guard deadline, so two extra
+#: tries bound the added wait at ~1.5 s of sleep plus 10 s of guard, still
+#: inside the poller's 10 s cadence plus one attempt, and a store that stays
+#: busy that long surfaces as "local credential store busy" rather than hanging.
+STORE_BUSY_RETRY_DELAYS: tuple[float, ...] = (0.5, 1.0)
+
+
+async def _open_store_on_thread() -> AuthStore:
+    """`AuthStore()` on a worker thread, closed if nobody is left to receive it.
+
+    Cancelling the awaiting task (connector shutdown, a `wait_for` around
+    `/connect`) cannot stop the worker thread: the constructor finishes anyway
+    and its open sqlite connection would be dropped on the floor until GC
+    (round 1, R1-2). Shielding the thread's future keeps it observable after the
+    cancellation, so the store it eventually returns is closed here instead.
+    """
+    opening = asyncio.ensure_future(asyncio.to_thread(AuthStore))
+    try:
+        return await asyncio.shield(opening)
+    except asyncio.CancelledError:
+        opening.add_done_callback(_close_orphaned_store)
+        raise
+
+
+def _close_orphaned_store(opening: asyncio.Future[AuthStore]) -> None:
+    if opening.cancelled() or opening.exception() is not None:
+        return
+    opening.result().close()
+
+
+async def _open_store() -> AuthStore:
+    """`AuthStore()`, retried briefly while another process holds its bootstrap guard.
+
+    Opened on a worker thread: the guard wait is a blocking sleep of up to its 5 s
+    deadline, and on the event loop it froze the relay connector's pings and
+    stream pipes for that long (measured: one contended open held the loop
+    5.0 s). The store's connection is `check_same_thread=False` behind its own
+    mutex, so using it back on the loop thread is safe.
+    """
+    for delay in STORE_BUSY_RETRY_DELAYS:
+        try:
+            return await _open_store_on_thread()
+        except AuthStoreBusyError:
+            await asyncio.sleep(delay)
+    try:
+        return await _open_store_on_thread()
+    except AuthStoreBusyError as failure:
+        # A ValueError, chained, like every other failure `request` reports: the
+        # poller and `service.main` catch ValueError, and a bare AuthStoreError
+        # used to escape both — killing the poller task (a unit restart) or
+        # crashing a cold start with a traceback (the 2026-11-11 16:58 outage).
+        # `service.authorization_failure_reason` reads the busy type off the chain.
+        raise ValueError("This computer's credential store was busy.") from failure
 
 
 def credential_id(selected: int | None = None) -> int:
@@ -126,8 +188,32 @@ class RadientTunnels:
         *,
         body: dict[str, Any] | None = None,
         idempotency_key: str | None = None,
+        api_path: str | None = None,
     ) -> Any:
-        with closing(AuthStore()) as store:
+        """One owner-authenticated call to the Radient control plane.
+
+        ``path`` is relative to ``/v1/tunnels`` (every tunnel command's family).
+        ``api_path`` instead names an ABSOLUTE API path (``/v1/push/register``,
+        ``/v1/push/credentials``) for the mobile push lane, which authenticates
+        with this same pinned login but lives outside the tunnel family
+        (agent-server ``docs/SESSION-PUSH.md`` §4.1). It is a path, never a URL:
+        the bearer may only ever go to :data:`DEFAULT_API_URL`, so there is
+        deliberately no host override here or in the environment — tests inject
+        the ``httpx`` client instead.
+
+        An ``api_path`` call is STATUS-ONLY on success: the push routes' callers
+        act on 2xx alone (the cloud owns the device row, the machine keeps
+        nothing from the answer), and §3.4 spells their bodies without the API
+        envelope, so a 2xx returns ``result`` when the envelope is present and
+        the bare body (or ``None`` for an empty one) otherwise. The tunnel family
+        keeps its strict envelope check below.
+        """
+        # Concatenated onto the host, so a value not starting with "/v1/" could
+        # re-point the bearer: "@evil.example/x" parses as userinfo + a foreign
+        # host. Refused before the credential is even read.
+        if api_path is not None and not api_path.startswith("/v1/"):
+            raise ValueError("Radient API path must start with /v1/.")
+        with closing(await _open_store()) as store:
             row = store.get_credential(self.selected)
             if row is None or row.provider != "radient" or row.credential_type != "oauth":
                 # LoginRequired, not ValueError: no retry can conjure a credential
@@ -171,7 +257,7 @@ class RadientTunnels:
             headers["Idempotency-Key"] = idempotency_key
         response = await self.client.request(
             method,
-            DEFAULT_API_URL + "/v1/tunnels" + path,
+            DEFAULT_API_URL + (api_path if api_path is not None else "/v1/tunnels" + path),
             json=body,
             headers=headers,
             timeout=30,
@@ -187,7 +273,18 @@ class RadientTunnels:
             # selected login meet — see `errors.RecordNotFound`).
             if response.status_code == 404:
                 raise RecordNotFound("Radient has no record of this tunnel for the selected login.")
-            raise ValueError(f"Radient tunnel request failed (HTTP {response.status_code}).")
+            raise RequestFailed(
+                f"Radient tunnel request failed (HTTP {response.status_code}).",
+                status=response.status_code,
+            )
+        if api_path is not None:
+            try:
+                answer = response.json()
+            except ValueError:
+                return None
+            if isinstance(answer, dict) and "result" in answer:
+                return answer["result"]
+            return answer
         envelope = response.json()
         if not isinstance(envelope, dict) or "result" not in envelope:
             raise ValueError("Radient returned an invalid tunnel response.")

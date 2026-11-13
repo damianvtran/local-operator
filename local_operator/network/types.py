@@ -355,11 +355,18 @@ NET_OPS: tuple[str, ...] = (
     "net_forward",
     "net_stream",
     "net_sync",
+    # One file out of one session this device owns, by digest-framed chunks
+    # (network/files.py; docs/design/mesh-file-transfer.md S1).
+    "net_file_get",
     "net_broker",
     "net_session_lifecycle",
     "net_session_receipt",
     "net_session_move",
     "net_session_create",
+    # The create's idempotency read (``network/create_keys.py``): a requester that
+    # lost a create's reply asks whether its own key made a session. Peer-scope,
+    # names no session id, and answers only keys the ASKING device sent.
+    "net_session_create_lookup",
     "net_session_engage",
     "net_session_stop",
     # THE OWNER'S OWN STORED JOURNAL, read over the relay (mesh-cold-read-
@@ -373,6 +380,12 @@ NET_OPS: tuple[str, ...] = (
     # authoriser's session-scope rule decides ownership at the chokepoint: a
     # session this device does not hold is a REFUSAL, never an empty page.
     "net_session_history",
+    # THE REMOTE PEEK (network/peek.py): the owner runs the local peek's bounded
+    # readers (session/peek.py) on its own journal — head, cursors, search,
+    # digest, stored sessions. Same shape as ``net_session_history``: names a
+    # ``session_id`` (so the session-scope chokepoint decides ownership),
+    # capability ``view``, starts nothing.
+    "net_session_peek",
     # AGENT AND TEAM DEFINITIONS (definitions.py). A peer-scope op of its own
     # rather than part of a session op: a definition is install-wide
     # configuration with no owner device, and a create that named one had
@@ -466,6 +479,9 @@ LOCAL_OPS: tuple[str, ...] = (
     # journal. A local name, so it may never appear in ``OP_CAPABILITY`` — the
     # peer-scope half is the ``net_session_history`` row.
     "peer_session_history",
+    # The remote peek's local half (network/peek.py); ``net_session_peek`` is
+    # the peer-scope half, so this name may never appear in ``OP_CAPABILITY``.
+    "peer_session_peek",
     # The readiness report (readiness.py): a VIEWER asks its own relay whether
     # one peer (or every peer) can complete work offloaded to it — the link's
     # own reachability, then the peer's install facts. A local op by the
@@ -495,6 +511,9 @@ LOCAL_OPS: tuple[str, ...] = (
     # control-handler comment gives the rule).
     "session_move",
     "session_sync",
+    # ``lop network files pull``: ask THIS device's relay to pull one file from a
+    # peer's session. Local for the family's reason: the link lives in the relay.
+    "session_file_pull",
     "session_lifecycle",
     "session_receipt",
     # The credential broker's leg 1 (runtime → its own relay, §2.3).
@@ -655,6 +674,11 @@ OP_CAPABILITY: dict[str, str | None] = {
     # so a read-only member may open a stream and may not prompt through it.
     "net_stream": "view",
     "net_sync": "view",
+    # ``view`` WIDENS NOTHING: ``net_sync`` above already serves this session's whole
+    # ``scratchpad/`` tree and its referenced attachments to any view member, so one
+    # file out of that same set is a narrower read of bytes the role already reads
+    # (mesh-file-transfer.md, Decision 2). A drive-only pull is a one-row narrowing.
+    "net_file_get": "view",
     "net_broker": "broker_credential",
     "net_session_lifecycle": "delete",
     # ``view``, the same row the stream plane's ``acknowledge_attention`` carries
@@ -669,6 +693,9 @@ OP_CAPABILITY: dict[str, str | None] = {
     # (it admits one), warming a cold one is a read, and the kill switch is its
     # own capability.
     "net_session_create": "prompt",
+    # ``prompt``, the create's own row: only a member that may create may ask what
+    # its create made, and the answer is scoped to keys that member sent.
+    "net_session_create_lookup": "prompt",
     "net_session_engage": "view",
     "net_session_stop": "stop",
     # ``view``, and the conservative end of the choice for the same reason the
@@ -678,6 +705,10 @@ OP_CAPABILITY: dict[str, str | None] = {
     # — and it writes nothing on either device, so ``prompt`` (which would let a
     # viewer start a turn) is broader than the act needs.
     "net_session_history": "view",
+    # ``view`` for the reason the row above records: a peek reads the same
+    # journal bytes ``net_session_history`` already serves, through bounded
+    # readers, and writes nothing on either device.
+    "net_session_peek": "view",
     # ``admin``, and the conservative choice is deliberate. Installing a
     # definition writes DURABLE, install-wide state on the receiving device and
     # changes what every FUTURE session there resolves by name — which is

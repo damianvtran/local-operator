@@ -116,6 +116,14 @@
   "wire.settings.compaction_enabled.choice.true.description": "自动压缩",
   "wire.settings.compaction_enabled.help": "上下文占满时对较早历史做摘要。",
   "wire.settings.compaction_enabled.label": "压缩",
+  "wire.settings.compaction_idle_enabled.choice.false.description": "空闲时从不压缩",
+  "wire.settings.compaction_idle_enabled.choice.true.description": "在缓存过期前压缩空闲会话",
+  "wire.settings.compaction_idle_enabled.help": "空闲会话的提示词缓存即将过期前，如顾问同意则进行压缩。",
+  "wire.settings.compaction_idle_enabled.label": "空闲压缩",
+  "wire.settings.compaction_idle_min_growth_tokens.help": "自上次压缩或空闲压缩被拒绝以来需新增的上下文量；上限为压缩阈值的25%。",
+  "wire.settings.compaction_idle_min_growth_tokens.label": "空闲最小增长（token）",
+  "wire.settings.compaction_idle_threshold_tokens.help": "上下文达到此大小才会进行空闲压缩；设为0则关闭。上限为压缩阈值的60%。",
+  "wire.settings.compaction_idle_threshold_tokens.label": "空闲阈值（token）",
   "wire.settings.compaction_keep_recent_tokens.help": "每次压缩时原样保留的近期历史。",
   "wire.settings.compaction_keep_recent_tokens.label": "保留最近token",
   "wire.settings.compaction_mid_turn_enabled.choice.false.description": "仅在回合之间",
@@ -849,5 +857,11 @@
   "wire.settings.web_search_timeout_seconds.help": "每个提供商的请求超时。读取时钳制在1-120之间。",
   "wire.settings.web_search_timeout_seconds.label": "超时（秒）",
   "wire.settings.web_tools.description": "是否提供search与fetch工具并允许运行。",
-  "wire.settings.web_tools.title": "网页工具"
+  "wire.settings.web_tools.title": "网页工具",
+  "wire.settings.session_cleanup_temporary_idle_minutes.choice.15m.label": "15分钟",
+  "wire.settings.session_cleanup_temporary_idle_minutes.choice.30m.label": "30分钟",
+  "wire.settings.session_cleanup_temporary_idle_minutes.choice.2h.label": "2小时",
+  "wire.settings.session_cleanup_temporary_idle_minutes.choice.24h.label": "24小时",
+  "wire.settings.session_cleanup_temporary_idle_minutes.label": "临时对话的删除时间",
+  "wire.settings.session_cleanup_temporary_idle_minutes.help": "临时对话闲置多久后被删除。显示在屏幕上、有任务在运行或有未回答的问题时，不计为闲置。"
 }
