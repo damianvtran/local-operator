@@ -15,7 +15,10 @@ always the state its filename claims):
     list         EXPANDED onto the list of the three, with a timed-out row
                  collapsed to one settled line behind its `timed out` chip
     card         EXPANDED onto one ask's picker
-    card-command the same picker with a suggested terminal command (`$ …`)
+    card-command the same picker with a suggested terminal command (`$ …`);
+                 ROW `long` swaps in a command wider than the card (cut with
+                 `…`), and ROW `reveal` the same long command after `ctrl+e`
+                 (wrapped in full, round 1 D3)
     card-timeout the picker of an ask that timed out UNDER it (the title flips
                  and the card goes read-only: no answer keys, `esc` only)
     list-late    the list with one ask answered after its deadline: it is absent
@@ -527,8 +530,10 @@ async def main() -> None:
     if len(sys.argv) > 3:
         mode = sys.argv[3]
     reveal = False
+    long_command = False
     if len(sys.argv) > 4:
         reveal = sys.argv[4].strip() in {"1", "reveal", "open", "true"}
+        long_command = reveal or sys.argv[4].strip() == "long"
 
     session = _AnswerableSession()
     app = OperatorApp(lambda: _factory(session))
@@ -739,13 +744,23 @@ async def main() -> None:
             row["questions"] = [
                 dict(
                     row["questions"][0],
-                    command="cd ~/src/app && make migrate-backfill",
+                    command=(
+                        "cd ~/src/app && DATABASE_URL=postgres://localhost/app "
+                        "BATCH_SIZE=500 make migrate-backfill "
+                        "ARGS='--since 2026-01-01 --dry-run --verbose' && echo done"
+                        if long_command
+                        else "cd ~/src/app && make migrate-backfill"
+                    ),
                     command_target="agent",
                 )
             ]
             app._sync_ask_surface(ask_rows([row]))
             await pilot.pause()
             app._expand_asks()
+            if reveal:
+                for _ in range(4):
+                    await pilot.pause()
+                await pilot.press("ctrl+e")
         elif mode in {"response", "response-open", "timeout", "late"}:
             details = {"timeout": TIMEOUT, "late": LATE}.get(mode, RESPONSE)
             kind = "timeout" if mode == "timeout" else "response"

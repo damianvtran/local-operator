@@ -1990,6 +1990,14 @@ ASK_COMMAND_MAX_CHARS = 500
 #: some terminals and renderers treat as a newline.
 _ASK_COMMAND_REFUSED_CATEGORIES = frozenset({"Cc", "Cf", "Zl", "Zp"})
 
+#: ``Zs`` (space separators) is refused too, except the plain ASCII space. A
+#: NO-BREAK SPACE, an en/em space or an ideographic space reads as a word break
+#: in the dialog, but the shell does not split on it: ``echo<U+00A0>hi`` runs
+#: as one word and fails with "command not found". Same class as ``Cf`` — the
+#: bytes the user reads are not the bytes that run — so the same rule names the
+#: code point back to the model instead (round 1, Q3).
+_ASK_COMMAND_ALLOWED_SPACE = " "
+
 
 def ask_command_problem(command: str) -> str | None:
     """Why ``command`` (already stripped) cannot ride an ask, or ``None``.
@@ -2007,7 +2015,10 @@ def ask_command_problem(command: str) -> str | None:
     if len(command) > ASK_COMMAND_MAX_CHARS:
         return f"command is longer than {ASK_COMMAND_MAX_CHARS} characters"
     for char in command:
-        if unicodedata.category(char) in _ASK_COMMAND_REFUSED_CATEGORIES:
+        category = unicodedata.category(char)
+        if category in _ASK_COMMAND_REFUSED_CATEGORIES or (
+            category == "Zs" and char != _ASK_COMMAND_ALLOWED_SPACE
+        ):
             return (
                 f"command must be one plain line: U+{ord(char):04X} "
                 f"({unicodedata.name(char, 'control character')}) is not allowed"
@@ -2093,6 +2104,18 @@ class AskQuestion(BaseModel):
             "own computer). One-click run is offered only on the right device."
         ),
     )
+
+    @field_validator("command", mode="before")
+    @classmethod
+    def _strip_command(cls, value: object) -> object:
+        # Strip BEFORE the `max_length` constraint runs, so the cap is measured
+        # on the command the user will see — the same order the queue path
+        # (`asks/queue._carried_command`) uses. As a plain (after) validator the
+        # strip ran too late: `" " + "x" * 500` was refused by pydantic's
+        # length check though the stripped command is exactly at the cap
+        # (round 1, n1/Q2). `max_length` stays on the Field so the published
+        # schema's `maxLength` hint, and the ledgers measuring it, are unchanged.
+        return value.strip() if isinstance(value, str) else value
 
     @field_validator("command")
     @classmethod

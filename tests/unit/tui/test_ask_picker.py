@@ -8186,7 +8186,7 @@ async def test_the_remote_hint_sheds_whole_clauses_rather_than_truncating() -> N
 
 
 # ---------------------------------------------------------------------------
-# A question's suggested terminal command (``AskQuestion.command``): one dim
+# A question's suggested terminal command (``AskQuestion.command``): a `muted`
 # ``$ <command>`` line under the question, display only, absent without one.
 
 
@@ -8211,7 +8211,7 @@ async def test_a_question_without_a_command_draws_no_command_line() -> None:
     app, card = await _real_app_card((100, 30), [_question()])
     async with app.run_test(size=(100, 30)) as pilot:
         await _show(app, pilot, card)
-        assert card._layout().command_line == ""
+        assert card._layout().command_lines == ()
         assert not any(row.strip().startswith("$ ") for row in card.render_lines_for_test())
 
 
@@ -8221,7 +8221,7 @@ async def test_a_command_wider_than_the_card_is_cut_with_the_card_mark() -> None
     app, card = await _real_app_card((60, 30), [_command_question(long)])
     async with app.run_test(size=(60, 30)) as pilot:
         await _show(app, pilot, card)
-        line = card._layout().command_line
+        (line,) = card._layout().command_lines
         assert line.startswith("$ git clone ") and line.endswith("…"), line
         assert cell_len(line) <= card._layout().width
 
@@ -8252,4 +8252,104 @@ async def test_a_command_line_never_turns_a_fitting_list_into_a_windowed_one(
         if size in {(100, 29), (100, 30)}:
             # The boundary the defect was measured at: the command is drawn AND
             # the list still fits.
-            assert layout.command_line == "$ glab auth login", size
+            assert layout.command_lines == ("$ glab auth login",), size
+
+
+@pytest.mark.asyncio
+async def test_the_command_line_is_drawn_at_muted_not_dim() -> None:
+    """D1 (design round 1): the exact text of a shell command was painted at
+    `dim`, 3.43:1 on the card — below AA for text the user retypes. `muted`."""
+    app, card = await _real_app_card((100, 30), [_command_question("glab auth login")])
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _show(app, pilot, card)
+        line = next(
+            line for line in card._card_text().split("\n") if line.plain.strip().startswith("$ ")
+        )
+        column = line.plain.index("$ glab")
+        colour = _style_at(line, column + 2).color
+        assert colour is not None and colour.triplet is not None
+        assert colour.triplet.hex == theme_mod.semantic_color("muted"), colour
+        assert colour.triplet.hex != theme_mod.semantic_color("dim"), colour
+
+
+@pytest.mark.parametrize("size", [(80, 24), (100, 22), (100, 24)])
+@pytest.mark.asyncio
+async def test_a_list_that_windows_anyway_keeps_the_command(size: tuple[int, int]) -> None:
+    """D2/Q1 (round 1): at 80x24 (Terminal.app's default) and 100x22 the command
+    was dropped — the frame byte-identical to a question without one — though
+    the list windowed regardless. The command now takes one row from the
+    scrolled list (the rest stays a scroll or a `1-9` away); this line is the
+    only place the TUI shows it."""
+    app, plain = await _real_app_card(size, [_question()])
+    async with app.run_test(size=size) as pilot:
+        await _show(app, pilot, plain)
+        plain_layout = plain._layout()
+    # The precondition this test is about: the plain list windows here.
+    assert plain_layout.show_position, size
+    app, card = await _real_app_card(size, [_command_question("glab auth login")])
+    async with app.run_test(size=size) as pilot:
+        await _show(app, pilot, card)
+        layout = card._layout()
+        assert layout.command_lines == ("$ glab auth login",), size
+        assert layout.show_position, size
+        # The first option row is never what it costs.
+        assert layout.body_line_budget >= 1, size
+        assert layout.body_line_budget == plain_layout.body_line_budget - 1, size
+        rows = [row.strip() for row in card.render_lines_for_test()]
+        assert "$ glab auth login" in rows, rows
+
+
+@pytest.mark.parametrize("size", [(100, 29), (100, 30)])
+@pytest.mark.asyncio
+async def test_spacers_yield_only_when_that_makes_the_list_fit(size: tuple[int, int]) -> None:
+    """n2 (code review round 1): the spacers used to yield whenever the list
+    overflowed, even where giving them back (and the command) could not make
+    it fit. A list with tall descriptions windows regardless here, so the
+    command card keeps the plain card's spacers and its command."""
+    tall = _question(labels=("A", "B", "C"), descriptions=("x " * 80, "y " * 80, "z " * 80))
+    app, plain = await _real_app_card(size, [tall])
+    async with app.run_test(size=size) as pilot:
+        await _show(app, pilot, plain)
+        plain_layout = plain._layout()
+    assert plain_layout.show_position, size
+    assert plain_layout.space_above and plain_layout.space_below, size
+    command = tall.model_copy(update={"command": "glab auth login", "command_target": "agent"})
+    app, card = await _real_app_card(size, [command])
+    async with app.run_test(size=size) as pilot:
+        await _show(app, pilot, card)
+        layout = card._layout()
+        assert layout.command_lines == ("$ glab auth login",), size
+        assert layout.space_above and layout.space_below, size
+        assert layout.show_position, size
+
+
+@pytest.mark.asyncio
+async def test_ctrl_e_wraps_a_long_command_in_full() -> None:
+    """D3 (design round 1): a command wider than the card was cut with `…` and
+    `ctrl+e` — the card's "show me everything" gesture — did not reveal the
+    rest, so it could not be read (or retyped) from the picker at all."""
+    long = (
+        "cd ~/src/app && DATABASE_URL=postgres://localhost/app BATCH_SIZE=500 "
+        "make migrate-backfill ARGS='--since 2026-01-01 --dry-run --verbose' && echo done"
+    )
+    app, card = await _real_app_card((100, 30), [_command_question(long)])
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _show(app, pilot, card)
+        (cut,) = card._layout().command_lines
+        assert cut.endswith("…"), cut
+        # The footer offers the reveal BECAUSE of the cut command.
+        assert ("^e", "more") == card._reveal_hint()
+        await pilot.press("ctrl+e")
+        await _until(pilot, lambda: card.state.revealed)
+        layout = card._layout()
+        assert len(layout.command_lines) >= 2, layout.command_lines
+        assert layout.command_lines[0].startswith("$ ")
+        assert all(row.startswith("  ") for row in layout.command_lines[1:])
+        assert " ".join(row[2:] for row in layout.command_lines) == long
+        assert all(cell_len(row) <= layout.width for row in layout.command_lines)
+        # Every option is still on the card: the reveal never windows the list.
+        assert not layout.show_position
+        rows = card.render_lines_for_test()
+        for row in layout.command_lines:
+            assert any(row.strip() in line for line in rows), (row, rows)
+        await _until(pilot, lambda: "^e less" in _painted_footer(app))

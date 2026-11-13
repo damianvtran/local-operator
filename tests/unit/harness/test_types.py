@@ -670,6 +670,59 @@ def test_a_command_over_500_characters_is_refused_and_500_is_accepted():
         _cmd_question(command="x" * 501)
 
 
+def test_the_length_cap_is_measured_after_the_strip():
+    # n1/Q2: the cap counts the command the user sees. `max_length` used to run
+    # before the strip, so surrounding whitespace refused an at-cap command.
+    padded = "  " + "x" * 500 + "  "
+    assert _cmd_question(command=padded).command == "x" * 500
+    with pytest.raises(ValidationError, match="at most 500 characters"):
+        _cmd_question(command="  " + "x" * 501 + "  ")
+
+
+@pytest.mark.parametrize(
+    ("command", "fragment"),
+    [
+        ("echo\u00a0hi", "U+00A0"),  # NO-BREAK SPACE
+        ("echo\u2003hi", "U+2003"),  # EM SPACE
+        ("echo\u3000hi", "U+3000"),  # IDEOGRAPHIC SPACE
+        ("echo\u202fhi", "U+202F"),  # NARROW NO-BREAK SPACE
+    ],
+)
+def test_non_ascii_space_separators_are_refused_by_code_point(command, fragment):
+    # Q3: reads as a word break, but the shell runs `echo<NBSP>hi` as ONE word.
+    with pytest.raises(ValidationError) as caught:
+        _cmd_question(command=command)
+    text = str(caught.value)
+    assert "command must be one plain line" in text
+    assert fragment in text
+    # The plain ASCII space stays allowed.
+    assert _cmd_question(command="echo hi").command == "echo hi"
+
+
+@pytest.mark.parametrize(
+    "command",
+    ["  " + "x" * 500 + "  ", "  " + "x" * 501, "echo\u00a0hi", "echo hi", "  ls  "],
+)
+def test_the_model_path_and_the_queue_path_agree(command):
+    # One rule, two doors: the tool's validator and the queue's plain-mapping
+    # path (`_carried_command`) must keep or refuse the same commands.
+    from local_operator.asks.queue import _question_shape
+
+    try:
+        model_kept: str | None = _cmd_question(command=command).command
+    except ValidationError:
+        model_kept = None
+    shaped = _question_shape(
+        {
+            "id": "signin",
+            "question": "Sign in to GitLab first?",
+            "options": [{"label": "Done"}, {"label": "Skip"}],
+            "command": command,
+        }
+    )
+    assert shaped.get("command") == model_kept
+
+
 def test_a_command_target_without_a_command_is_refused():
     with pytest.raises(ValidationError, match="command_target only applies with a command"):
         _cmd_question(command_target="user")

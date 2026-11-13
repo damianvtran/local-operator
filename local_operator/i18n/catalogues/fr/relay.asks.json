@@ -80,5 +80,5 @@
   "relay.asks.card.command.label": "Commande suggérée",
   "relay.asks.card.command.copy": "Copier",
   "relay.asks.card.command.copied": "Copié",
-  "relay.asks.card.command.copy_failed": "Copie impossible — la commande est sélectionnée ; copiez-la depuis là"
+  "relay.asks.card.command.copy_failed": "Copie impossible — la commande est sélectionnée ; copiez-la depuis là"
 }
