@@ -37,6 +37,7 @@ why a brokered failure is reported to the owner rather than repaired here, and w
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import dataclasses
 import logging
 import time
@@ -48,6 +49,7 @@ from local_operator.network.credentials.client import MeshCredentialClient, key_
 from local_operator.network.credentials.types import (
     BrokerError,
     Grant,
+    is_device_bound_provider,
     is_mcp_key,
     is_synthetic_credential_id,
     synthetic_credential_id,
@@ -758,6 +760,73 @@ class MeshAwareAuthStore:
         except Exception:  # noqa: BLE001 — diagnosis must never mask the real failure
             return None
         return refusal.message if isinstance(held, BrokerError) else None
+
+    def owner_wait_hint(self, provider: str) -> "_OwnerWait | None":
+        """A waiter for the turn's driver when ``provider``'s owner is AWAY, else ``None``.
+
+        PR-D (Root 0): READ BY THE FAILOVER DRIVER, after a resolve came back empty, to
+        decide whether its loop-back sweep may wait for the owner instead of firing at
+        once. All of these must hold, and each one is why it is safe:
+
+        * T1: this process's last answer for the key was SILENCE
+          (``owner_offline``/``owner_unreachable``, the client's holdable set). Any
+          owner ANSWER fails fast, exactly as today.
+        * T2: a provider key, and not MCP, GitHub or device-bound. Those families have
+          their own refresh and mint paths, the same exclusions ``_held_or`` makes.
+        * T3: this process held a lease from THIS owner and it has ended. A process the
+          owner never leased (or one restarted since: receipts are memory-only) may be
+          looking at a set-up problem, and failing fast with the remedy is honest there.
+        * T4: no non-transport refusal is on record for the key (``_held_or``'s fence).
+        * T5: still a holder and still an active member.
+
+        The waiter holds no bearer and no grant, and nothing it does dials.
+        """
+        from local_operator.network import credentials as credentials_pkg
+        from local_operator.network.credentials.client import _HOLDABLE_REFUSALS
+        from local_operator.network.credentials.effective import effective_access
+        from local_operator.network.credentials.github import is_github_key
+
+        key = key_for(provider=provider)
+        refusal = self._refusals.get(key)
+        mesh = self._mesh
+        if refusal is None or refusal.code not in _HOLDABLE_REFUSALS or mesh is None:
+            return None
+        if key != provider or is_mcp_key(key) or is_device_bound_provider(key):
+            return None
+        if is_github_key(key):
+            return None
+        # Duck-typed like the rest of this seam: a source without the reads cannot
+        # be waited on, so it keeps today's fail-fast.
+        seen_at = getattr(mesh, "owner_seen_at", None)
+        if not callable(seen_at) or not callable(getattr(mesh, "self_membership_active", None)):
+            return None
+        owner = refusal.owner_device or mesh.owner_of(key)
+        try:
+            if not _still_borrowing(mesh, key, owner):
+                return None
+            access = effective_access(provider, root=self.config_dir, mesh=mesh)
+            now = time.time()
+            if (
+                access.state != "owner_unavailable"
+                or access.owner != owner
+                or access.last_grant_expires_at is None
+                or access.last_grant_expires_at > now
+            ):
+                return None
+            seen = seen_at(owner)
+            baseline = float(seen) if isinstance(seen, (int, float)) else None
+        except Exception:  # noqa: BLE001 — a hint that cannot be proven is no hint
+            return None
+        return _OwnerWait(
+            mesh=mesh,
+            key=key,
+            owner=owner,
+            owner_label=refusal.owner_device_name or mesh.owner_label(key),
+            baseline_seen_at=baseline,
+            heard_at=now,
+            bound_s=credentials_pkg.owner_wait_s(self.config_dir),
+            poll_s=credentials_pkg.OWNER_WAIT_POLL_S,
+        )
 
     def no_credential_reason(self, provider: str) -> str | None:
         """The broker's sentence for why ``provider`` has no bearer, or ``None``.
@@ -1540,3 +1609,59 @@ def mcp_provider_label(key: str) -> str:
     working.
     """
     return "mcp-oauth"
+
+
+def _still_borrowing(mesh: Any, key: str, owner: str) -> bool:
+    """T4 + T5 of :meth:`MeshAwareAuthStore.owner_wait_hint`, re-read on every poll."""
+    if not mesh.should_borrow(key) or not mesh.self_membership_active():
+        return False
+    return not mesh.state.held_policy_refusal(key, owner)
+
+
+@dataclasses.dataclass
+class _OwnerWait:
+    """One turn's wait for an absent owner (PR-D). Keyless: no bearer, no grant.
+
+    :meth:`poll` is file reads only (the member table, placement, observations),
+    run off the event loop by the driver. It never dials, never touches the grant
+    cache, and never moves a lease; the driver's single loop-back sweep is the only
+    ask that follows it.
+    """
+
+    mesh: Any
+    key: str
+    owner: str
+    owner_label: str
+    baseline_seen_at: float | None
+    heard_at: float
+    bound_s: float
+    poll_s: float
+
+    def poll(self) -> str:
+        """``returned``, ``ineligible`` (sweep now: the real answer is waiting) or ``waiting``."""
+        try:
+            if not _still_borrowing(self.mesh, self.key, self.owner):
+                return "ineligible"
+            seen = self.mesh.owner_seen_at(self.owner)
+        except Exception:  # noqa: BLE001 — an unreadable proof ends the wait, never extends it
+            return "ineligible"
+        # STRICTLY AFTER THE SILENCE WAS HEARD, not merely after the stamp read then:
+        # the relay also force-writes the LAST frame time when a link closes, and a
+        # throttled stamp can lag that by up to ``LAST_SEEN_PERSIST_S``, so a close
+        # landing after the refusal could otherwise read as a return. A frame newer
+        # than the moment the owner was found silent is the owner speaking again.
+        floor = max(self.baseline_seen_at or 0.0, self.heard_at)
+        return "returned" if seen is not None and seen > floor else "waiting"
+
+    def expired_reason(self, waited_s: float) -> str:
+        """The owner-offline sentence, saying how long this turn waited."""
+        from local_operator.network.credentials.messages import (
+            render_owner_wait_expired,
+        )
+
+        last_seen: float | None = None
+        with contextlib.suppress(Exception):
+            last_seen = self.mesh.owner_last_seen_s(self.owner)
+        return render_owner_wait_expired(
+            self.key, self.owner_label, waited_s, last_seen, f"lop login {self.key}"
+        )
