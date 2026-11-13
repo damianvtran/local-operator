@@ -19348,31 +19348,51 @@ class Session:
 
             sync = subscription.sync
             try:
-                window = capture_window(
-                    self._transcript,
-                    conversation_id=sync.snapshot.session_id,
-                    owner_epoch=sync.epoch,
-                    through_id=sync.live_cursor,
-                    durable_seed_tools=frozenset(
+                capture_args: dict[str, Any] = {
+                    "conversation_id": sync.snapshot.session_id,
+                    "owner_epoch": sync.epoch,
+                    "through_id": sync.live_cursor,
+                    "durable_seed_tools": frozenset(
                         str(event.get("tool_call_id", ""))
                         for event in sync.snapshot.live_events
                         if event.get("type") == "tool_execution_end"
                     ),
-                )
-                window.durable_seed_ids = [
+                }
+                window = capture_window(self._transcript, **capture_args)
+                durable_seed_ids = [
                     str(event["message"]["id"])
                     for event in sync.snapshot.live_events
                     if isinstance(event.get("message"), dict)
                     and self._transcript.has_entry(str(event["message"].get("id", "")))
                 ]
+                window.durable_seed_ids = durable_seed_ids
                 sync.display_history = window
+                if window.status == "full_required":
+                    # THE PEER VIEWER'S PAGE FOR THE SAME CUT, captured here on
+                    # the loop that owns the transcript and only when the exact
+                    # page escalated (rare, and the cost of one more bounded
+                    # read). The runtime serves it to a non-local connection
+                    # instead of a ``full_required`` that viewer cannot act on;
+                    # see ``history_window.PEER_BOUNDED_MIN_MESSAGE_BYTES``.
+                    bounded = capture_window(
+                        self._transcript, **capture_args, bound_oversized=True
+                    ).model_copy(update={"durable_seed_ids": list(durable_seed_ids)})
+                    if bounded.status == "ok":
+                        sync._peer_display_history = bounded
             except BaseException:
                 subscription.unsubscribe()
                 raise
         return subscription
 
-    def history_page(self, before: str, anchor: str = ""):  # type: ignore[no-untyped-def]
-        """Authenticated reads reuse the resident replay at the signed sync cut."""
+    def history_page(  # type: ignore[no-untyped-def]
+        self, before: str, anchor: str = "", *, bound_oversized: bool = False
+    ):
+        """Authenticated reads reuse the resident replay at the signed sync cut.
+
+        ``bound_oversized`` is the runtime's answer for a NON-LOCAL viewer: an
+        older group too large for one page rides bounded and marked rather than
+        escalating to a local replay that viewer cannot perform.
+        """
         from local_operator.session.history_window import display_window
 
         state = self.frontend_state
@@ -19383,6 +19403,7 @@ class Session:
             through_id=state.history_cursor,
             before=before,
             anchor=anchor,
+            bound_oversized=bound_oversized,
         ).model_dump(mode="json")
 
     def refresh_frontend_state(self) -> None:
