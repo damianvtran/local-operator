@@ -17,8 +17,8 @@ fork would move the guard rails off the code that runs.
 
 WHY THIS EXISTS
 ---------------
-CI runs the unit suite as six parallel shards under a 38-minute cap (20 when
-this was written; raised on 2026-09-28). The
+CI runs the unit suite as six parallel shards under a 45-minute cap (20 when
+this was written; raised on 2026-09-28, 2026-10-28 and 2026-11-13). The
 split used to be positional -- ``sorted(glob('tests/unit/**/test_*.py'))``
 then ``i % 5`` -- which balances the NUMBER of files and ignores what they
 cost. Per-file cost in this suite spans four orders of magnitude (a pure

@@ -1,7 +1,8 @@
 # CI unit duration weights
 
-The unit matrix has **six** shards and retains its **38-minute** job timeout,
-coverage commands, complete file selection, serial-control receipts and watchdogs.
+The unit matrix has **six** shards and a **45-minute** job timeout (38 when
+these weights were committed; raised on 2026-11-13 by the formula recorded above
+`timeout-minutes` in `.github/workflows/full-suite.yml`), coverage commands, complete file selection, serial-control receipts and watchdogs.
 Only scheduling weights and the number of partitions change. More shards spend
 additional fleet capacity; six is authorized here, not a claim that any timeout
 margin has been demonstrated.
@@ -165,3 +166,11 @@ three complete post-change CI runs before assessing a ten-minute ceiling margin;
 if six shards are insufficient, report evidence for a seventh-shard decision
 rather than raising the timeout or dropping selected tests. No extra full CI
 workflow is dispatched to manufacture those observations.
+
+The 2026-11-13 raise to 45 minutes is the recorded exception to that rule, taken
+on the operator's routing after shard 0 was cut at 38:16 with every test green
+(job 132063792182). It buys runner headroom only. Shard 0's ordinary pytest step
+was the heaviest shard on 3.12 (p50 34.0, p90 36.2 minutes over 28 green jobs),
+while the serial controls took 12 to 15 seconds. So the durable fix is
+regenerating these weights (308 of 2319 unit files were unmeasured on that date),
+not a further raise.
