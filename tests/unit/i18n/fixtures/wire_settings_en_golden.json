@@ -192,6 +192,8 @@
  "wire.settings.desktop_launch_command.help": "Empty = discover the app (local-operator-ui, then the macOS app). {session} is the session id.",
  "wire.settings.desktop_launch_command.label": "launch command",
  "wire.settings.desktop_launch_command.placeholder": "local-operator-ui --open-session {session}",
+ "wire.settings.desktop_remote_files_cache_bytes.help": "Disk space for copies of files from conversations held on other devices, so they open fast here. Oldest copies are removed first. 0 keeps nothing after showing it.",
+ "wire.settings.desktop_remote_files_cache_bytes.label": "remote files cache (bytes)",
  "wire.settings.detail_length.help": "Deprecated. Superseded by the compaction engine.",
  "wire.settings.detail_length.label": "Detail length",
  "wire.settings.display_comfortable_rows.choice.false.description": "compact, more history",

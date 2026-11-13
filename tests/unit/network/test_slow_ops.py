@@ -20,6 +20,7 @@ import pytest
 from local_operator.network import (
     credentials,
     definitions,
+    file_index,
     mcpdefs,
     meshupdate,
     mobility,
@@ -436,6 +437,9 @@ def test_the_shipped_slices_route_their_ops_through_the_hook(root: Path) -> None
             # The single-file pull (network/files.py; mesh-file-transfer.md S1): a
             # ``stat`` hashes up to 256 MiB, so it must not run on a link's reader.
             "net_file_get",
+            # The owner-side Files index scans disk too; files.install registers
+            # its own deadline through the same hook, never on the link reader.
+            "net_session_files",
             # The one CORE op on the lane (relay.py, not a slice): a create holds its
             # first turn for up to ``FIRST_TURN_WAIT_S``, which inline stalled the
             # whole link (#3547 review MAJOR-1/2).
@@ -445,6 +449,7 @@ def test_the_shipped_slices_route_their_ops_through_the_hook(root: Path) -> None
             server.settings.op_wait_s
         )
         assert server.slow_op_deadline("net_sync") == sync.SYNC_OP_DEADLINE_S
+        assert server.slow_op_deadline("net_session_files") == file_index.INDEX_OP_DEADLINE_S
         assert server.slow_op_deadline("net_definitions") == definitions.DEFINITIONS_OP_DEADLINE_S
         # NIT (agent review round 1): the MCP slice joined the slow set but was
         # the one deadline nothing asserted — the 60 s constant could decay
