@@ -9563,6 +9563,7 @@ class RelayServer:
         for other in victims:
             other.send({"op": "net_bye", "reason": "untrusted"})
             other.close("we-closed")
+        self._revoke_lent_on_panic(record.network_id)
         # ``None`` rather than the frame above: the dispatcher's own ack would be a
         # second reply with the same ``req``, queued after the link is closed so it
         # can never be written, and a duplicate reply on the wire is the shape the
@@ -14195,6 +14196,7 @@ class RelayServer:
         self._audit_incident_delivery("panic", reports)
         for link in victims:
             link.close("we-closed")
+        self._revoke_lent_on_panic(resolved.network_id)
         tally = self._incident_tally(reports)
         return {
             "network_id": resolved.network_id,
@@ -14203,6 +14205,34 @@ class RelayServer:
             **tally,
             "peers": reports,
         }
+
+    def _revoke_lent_on_panic(self, network_id: str) -> threading.Thread:
+        """DELETE the GitHub tokens this owner lent in ``network_id``, off-thread.
+
+        BOTH panic paths call this after their trust latch (lease review M1): the
+        latch closes links, but a minted GitHub token keeps working on its holder
+        for up to its hour unless the issuer revokes it. ON ITS OWN THREAD because
+        the received-panic handler runs on the link's reader thread, which must stay
+        short, and the raised panic's receipt must not wait on GitHub's API. The
+        thread is returned so a test can join it; callers ignore it.
+        """
+        from local_operator.network.credentials import owner as owner_mod
+
+        thread = threading.Thread(
+            target=owner_mod.revoke_lent_on_panic,
+            args=(self, network_id),
+            name="mesh-panic-revoke",
+            daemon=True,
+        )
+        try:
+            thread.start()
+        except RuntimeError:
+            # Interpreter shutdown refuses new threads. The panic's latch and
+            # broadcast already ran; this hook promises never to raise into them
+            # (the received path is on a link reader). Each token's own hour still
+            # bounds it. Review #3920 n1.
+            logger.warning("mesh panic: could not start the lent-token revoke", exc_info=True)
+        return thread
 
     @staticmethod
     def _incident_fields(frame: dict[str, Any]) -> dict[str, Any]:
