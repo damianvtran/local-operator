@@ -328,6 +328,8 @@ async def test_a_resident_bridge_never_re_spawns_a_reaped_chat(api) -> None:
     _session(root, MINE)
     bridge.remote = SimpleNamespace(is_cold=True, engage_in_flight=False, warm_runtime=warm_runtime)
     bridge._schedule_warm()
+    # The live chat must have scheduled a warm; a None here is the bug, not a skip.
+    assert bridge.warm_task is not None
     await bridge.warm_task
     bridge.remote = None
     assert spawned == [MINE]

@@ -433,7 +433,8 @@ def test_a_keyed_start_marks_before_spawning_and_a_replay_never_re_marks(
     seen_marked: list[bool] = []
 
     async def fake_spawn(cwd, *, resume=None, **_kwargs):  # noqa: ANN001, ANN202
-        seen_marked.append(temporary.is_marked(cfg, resume))
+        # A spawn without a resume id records False, so the ``[True]`` check fails loudly.
+        seen_marked.append(resume is not None and temporary.is_marked(cfg, resume))
         return 4243
 
     async def recover(_sid):  # noqa: ANN001, ANN202

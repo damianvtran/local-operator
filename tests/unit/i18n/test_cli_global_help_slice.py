@@ -458,9 +458,7 @@ def _root_calls(module):
         ):
             # A post-BASE root flag is not BASE protocol; subtracting exactly
             # its call keeps the frozen BASE hash comparable.
-            if any(
-                kw.arg == "help" and ast.dump(kw.value) in added_shapes for kw in node.keywords
-            ):
+            if any(kw.arg == "help" and ast.dump(kw.value) in added_shapes for kw in node.keywords):
                 continue
             result.append(node)
     return sorted(result, key=lambda node: (node.lineno, node.col_offset))
