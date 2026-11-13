@@ -103,7 +103,7 @@ class _Rig:
             await self.gate.wait()
             return self.boot
 
-        async def resume_factory(_sid: str) -> Any:
+        async def resume_factory(_sid: str | None) -> Any:
             if live:
                 raise AssertionError("takeover not expected on the live path")
             return self.viewer
@@ -122,8 +122,7 @@ class _Rig:
             lambda root, sid: (_record(), 90909),
         )
         monkeypatch.setattr("local_operator.session.attached.AttachedSession.connect", connect)
-        self.app = OperatorApp(factory)
-        self.app._resume_factory = resume_factory
+        self.app = OperatorApp(factory, resume_factory=resume_factory)
 
         async def no_retirement(_s: Any) -> None:
             return None
