@@ -352,8 +352,8 @@ def operator_fact() -> dict[str, Any]:
     }
 
 
-def _can_sign_here() -> bool:
-    """Whether THIS host holds the private half, probed without prompting.
+def _can_sign_here(expected_key_id: str | None = None) -> bool:
+    """Whether THIS host holds the ANCHOR's private half, probed without prompting.
 
     The probe is the operator module's own signer lookup (the anchor names the
     backend), and it is the ONLY sound question to ask: a keychain query from
@@ -362,6 +362,14 @@ def _can_sign_here() -> bool:
     that has one. ``False`` on every failure — a broken agent is "cannot sign
     NOW", which is the fact this answer is for — and the signer is closed
     immediately, because a probe must leave nothing running.
+
+    "A signer loads" is NOT the question (PR #3905 review r2, M3): a second Mac
+    that ran ``lop operator init`` holds ITS OWN operator key, and counting that
+    as authority made it author routing for the fleet and refuse the head's.
+    The loaded key must be the one the anchor pins: ``expected_key_id`` when the
+    caller already holds the anchor, else the installed anchor's own key id. With
+    no usable anchor and no expectation there is nothing to compare against, so
+    any loadable key answers (the pre-anchor "has a key at all" reading).
     """
     try:
         from local_operator.operator.keychain import choose_backend
@@ -369,15 +377,25 @@ def _can_sign_here() -> bool:
         from local_operator.paths import config_dir
 
         loaded = load_anchor()
-        backend_name = loaded.anchor.backend if loaded.usable and loaded.anchor else "auto"
+        anchor = loaded.anchor if loaded.usable else None
+        backend_name = anchor.backend if anchor else "auto"
+        if expected_key_id is None and anchor is not None:
+            expected_key_id = str(anchor.key_id or "")
         signer: Any = choose_backend(backend_name, config_root=config_dir()).load()
         if signer is None:
             return False
         try:
-            signer.close()
-        except Exception:  # noqa: BLE001 — closing a probe is best-effort
-            pass
-        return True
+            held = str(getattr(getattr(signer, "handle", None), "key_id", "") or "")
+        finally:
+            try:
+                signer.close()
+            except Exception:  # noqa: BLE001 — closing a probe is best-effort
+                pass
+        if expected_key_id is None:
+            return True
+        # An empty expectation (an anchor without a key id) matches nothing: fail
+        # closed rather than let any key stand in for an unnamed one.
+        return bool(expected_key_id) and held == expected_key_id
     except Exception:  # noqa: BLE001 — see above: "cannot sign", not a crash
         return False
 

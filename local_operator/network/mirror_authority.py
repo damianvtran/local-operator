@@ -87,7 +87,10 @@ def _probe_host(root: Path) -> Authority:
         level, loaded = authority_level_load()
         if level not in INSTALLED_LEVELS or not loaded.anchor:
             return Authority()
-        return Authority(key_id=str(loaded.anchor.key_id or ""), signs=_can_sign_here())
+        key_id = str(loaded.anchor.key_id or "")
+        # The key this host can load must be THE ANCHOR's (review r2, M3): another
+        # Mac's own operator key is a verify-only node here, not a second authority.
+        return Authority(key_id=key_id, signs=_can_sign_here(expected_key_id=key_id))
     except Exception:  # noqa: BLE001 — no authority is a fact here, not a crash
         logger.debug("mirror authority: could not read the operator anchor", exc_info=True)
         return Authority()

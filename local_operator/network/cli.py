@@ -11608,6 +11608,25 @@ def _cmd_definitions(args: argparse.Namespace) -> int:
         lines.append("failover routing: config.yml could not be read")
     if not lines:
         lines = ["no agent or team definitions on this device"]
+    # Routing authority (review r2, m3), after the empty-state line so a bare
+    # device still says it has no definitions: the one fact that explains a node staying
+    # primary-only — it holds no anchor (the head will not send to it), or it holds
+    # one verify-only (it accepts the operator's chain), or it signs for it (it is
+    # the operator's device and keeps its own). From ``mirror_authority.state_fact``.
+    authority = routing.get("authority")
+    if isinstance(authority, dict):
+        key_id = str(authority.get("key_id") or "")
+        if not key_id:
+            lines.append(
+                "routing authority: no operator anchor (the operator's failover routing "
+                "is not accepted here)"
+            )
+        elif authority.get("signs"):
+            lines.append(f"routing authority: signs for {key_id} (this device sends routing)")
+        else:
+            lines.append(
+                f"routing authority: verify-only under {key_id} (accepts that operator's routing)"
+            )
     return _emit(
         args,
         {

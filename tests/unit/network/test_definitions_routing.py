@@ -581,3 +581,196 @@ def test_q1_the_failover_sentence_starts_its_own_sentence() -> None:
     ended = {"detail": "node is served by its own login."}
     readiness._attach_failover(ended, {"failover": fact}, server=server)  # noqa: SLF001
     assert ended["detail"].startswith("node is served by its own login. Fails over to: "), ended
+
+
+# ---------------------------------------------------------------------------
+# Review round 2 regressions (PR #3905): M3 a foreign signer is not authority,
+# m3 the state text names routing authority.
+# ---------------------------------------------------------------------------
+
+#: The anchor every host below has installed, and a second Mac's OWN operator key.
+ANCHOR_KEY = "k_" + "a" * 16
+OWN_KEY = "k_" + "b" * 16
+
+
+class _ProbeSigner:
+    def __init__(self, key_id: str) -> None:
+        self.handle = SimpleNamespace(key_id=key_id)
+        self.closed = False
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def _host_with_signer(monkeypatch: pytest.MonkeyPatch, signer_key: str | None) -> list[Any]:
+    """Install ``ANCHOR_KEY`` as this host's anchor and make ``signer_key`` loadable.
+
+    Patches the operator module's own seams (the anchor load and the keychain
+    backend) so the REAL ``_probe_host`` / ``_can_sign_here`` run end to end
+    without touching this machine's keychain or ``/Library`` anchor.
+    """
+    from local_operator import operator as operator_mod
+    from local_operator.operator import keychain, trust
+
+    loaded = SimpleNamespace(
+        usable=True,
+        exists=True,
+        root_owned=True,
+        anchor=SimpleNamespace(key_id=ANCHOR_KEY, backend="file-only", presence=False),
+    )
+    monkeypatch.setattr(trust, "load_anchor", lambda *a, **k: loaded)
+    monkeypatch.setattr(
+        operator_mod, "authority_level_load", lambda **k: ("operator-file-only", loaded)
+    )
+    made: list[Any] = []
+
+    def _load() -> Any:
+        if signer_key is None:
+            return None
+        signer = _ProbeSigner(signer_key)
+        made.append(signer)
+        return signer
+
+    monkeypatch.setattr(keychain, "choose_backend", lambda *a, **k: SimpleNamespace(load=_load))
+    mirror_authority.reset_cache()
+    return made
+
+
+@pytest.mark.parametrize(
+    ("signer_key", "signs"),
+    [(OWN_KEY, False), (ANCHOR_KEY, True), (None, False)],
+)
+def test_r4_only_the_anchors_own_key_signs_here(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, signer_key: str | None, signs: bool
+) -> None:
+    """M3 / R4: another Mac's own operator key is verify-only under the anchor."""
+    from local_operator import operator as operator_mod
+    from local_operator.network import readiness
+
+    made = _host_with_signer(monkeypatch, signer_key)
+    authority = mirror_authority._probe_host(tmp_path)  # noqa: SLF001 — the real probe
+    assert authority == mirror_authority.Authority(key_id=ANCHOR_KEY, signs=signs)
+    assert all(s.closed for s in made), "a probe must leave nothing open"
+
+    # readiness reads the same answer: a foreign key is "verify-only", not "signs".
+    monkeypatch.setattr(
+        operator_mod, "operator_authority_report", lambda: {"level": "operator-file-only"}
+    )
+    assert readiness.operator_fact()["verify_only"] is (not signs)
+
+
+def _with_probed(monkeypatch: pytest.MonkeyPatch, probed: dict[str, mirror_authority.Authority]):
+    table = mirror_authority._resolve  # noqa: SLF001 — the autouse fixture's table
+
+    def _resolve(root: Path) -> mirror_authority.Authority:
+        return probed.get(Path(root).name) or table(root)
+
+    monkeypatch.setattr(mirror_authority, "_resolve", _resolve)
+    mirror_authority.reset_cache()
+
+
+def test_r4_a_node_with_its_own_key_accepts_the_heads_row_and_sends_nothing(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    head = _head(tmp_path, monkeypatch)
+    node3, node4 = _root(tmp_path, "node3"), _root(tmp_path, "node4")
+    _host_with_signer(monkeypatch, OWN_KEY)
+    probed = mirror_authority._probe_host(node3)  # noqa: SLF001
+    assert probed == mirror_authority.Authority(key_id=ANCHOR_KEY, signs=False)
+    # Head and the other node share node3's anchor, so the comparison is real.
+    _with_probed(
+        monkeypatch,
+        {
+            "node3": probed,
+            "head": mirror_authority.Authority(key_id=ANCHOR_KEY, signs=True),
+            "node4": mirror_authority.Authority(key_id=ANCHOR_KEY, signs=False),
+        },
+    )
+    _write_retry(node3, {"fallbackChains": {"openai/*": ["deepseek/deepseek-flash"]}})
+
+    assert _push(head, _PeerLink(node3))[routing_sync.ROUTING_KIND]["outcome"] == "installed"
+    assert _retry(node3)["fallbackChains"]["default"] == HEAD_CHAIN
+
+    result, link = _push_from(node3, node4, OTHER_DEVICE)
+    assert result[routing_sync.ROUTING_KIND]["outcome"] == "not_authority", result
+    assert link.applies() == []
+    assert read_config_values(node4) == {}
+
+
+def test_r5_a_node_with_its_own_key_does_not_flap_across_ticks(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    """M3 / R5: alternating head and node3 ticks converge once and then stay put."""
+    head = _head(tmp_path, monkeypatch)
+    node3, node4 = _root(tmp_path, "node3"), _root(tmp_path, "node4")
+    _host_with_signer(monkeypatch, OWN_KEY)
+    _with_probed(
+        monkeypatch,
+        {
+            "node3": mirror_authority._probe_host(node3),  # noqa: SLF001
+            "head": mirror_authority.Authority(key_id=ANCHOR_KEY, signs=True),
+            "node4": mirror_authority.Authority(key_id=ANCHOR_KEY, signs=False),
+        },
+    )
+    _write_retry(node3, {"fallbackChains": {"openai/*": ["deepseek/deepseek-flash"]}})
+    head_before = _retry(head)
+    to3, to4 = _PeerLink(node3), _PeerLink(node4)
+
+    outcomes = []
+    for _tick in range(3):
+        outcomes.append(_push(head, to3)[routing_sync.ROUTING_KIND]["outcome"])
+        from_3, link = _push_from(node3, node4, OTHER_DEVICE)
+        assert from_3[routing_sync.ROUTING_KIND]["outcome"] == "not_authority", from_3
+        assert link.applies() == []
+        back, back_link = _push_from(node3, head, OTHER_DEVICE)
+        assert back[routing_sync.ROUTING_KIND]["outcome"] == "not_authority", back
+        assert back_link.applies() == []
+        outcomes.append(_push(head, to4)[routing_sync.ROUTING_KIND]["outcome"])
+        assert _retry(node3)["fallbackChains"]["default"] == HEAD_CHAIN
+        assert _retry(node4)["fallbackChains"] == {"default": HEAD_CHAIN}
+        assert _retry(head) == head_before
+
+    assert outcomes == ["installed", "installed"] + ["in_sync"] * 4, outcomes
+
+
+@pytest.mark.parametrize(
+    ("authority", "line"),
+    [
+        (
+            mirror_authority.Authority(),
+            "routing authority: no operator anchor (the operator's failover routing "
+            "is not accepted here)",
+        ),
+        (
+            mirror_authority.Authority(key_id=ANCHOR_KEY, signs=True),
+            f"routing authority: signs for {ANCHOR_KEY} (this device sends routing)",
+        ),
+        (
+            mirror_authority.Authority(key_id=ANCHOR_KEY, signs=False),
+            f"routing authority: verify-only under {ANCHOR_KEY} (accepts that operator's routing)",
+        ),
+    ],
+)
+def test_m3_definitions_state_names_routing_authority(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    authority: mirror_authority.Authority,
+    line: str,
+) -> None:
+    """m3: ``lop network definitions state`` says why a node stays primary-only."""
+    import argparse
+
+    from local_operator.network import cli as network_cli
+
+    node = _root(tmp_path, "node")
+    monkeypatch.setattr(mirror_authority, "_resolve", lambda _root: authority)
+    mirror_authority.reset_cache()
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(node))
+
+    args = argparse.Namespace(definitions_command="state", json=False)
+    assert network_cli._cmd_definitions(args) == 0  # noqa: SLF001
+    text = capsys.readouterr().out.splitlines()
+    assert line in text, text
+    # A bare device still says it has nothing, before the authority line.
+    assert text[0] == "no agent or team definitions on this device", text
