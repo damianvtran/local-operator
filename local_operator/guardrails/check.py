@@ -855,9 +855,12 @@ def evidence_write_verdict(
     return None
 
 
-def _scope_eligible(case: DeleteCase, verdict: Verdict, ctx: CallContext) -> frozenset[str]:
-    """Fresh negative gates only; these facts grant neither consent nor completion."""
+def _scope_eligible(
+    case: DeleteCase, verdict: Verdict, ctx: CallContext
+) -> dict[str, tuple[str, str | None, tuple[int, ...]]]:
+    """Snapshot eligible identities; freshness alone cannot preserve completion."""
     from local_operator.guardrails.provenance import (
+        _git,
         _running_owners,
         worktree_activity,
         worktree_state,
@@ -869,7 +872,7 @@ def _scope_eligible(case: DeleteCase, verdict: Verdict, ctx: CallContext) -> fro
         or not case.paths
         or not any(w.label == "operator, direct" and not w.ask_id for w in case.operator.words)
     ):
-        return frozenset()
+        return {}
     # All operands, not just HIGH ones: no parent/glob/symlink/mixed-target scope.
     for ranked in verdict.targets:
         t = ranked.target
@@ -887,19 +890,33 @@ def _scope_eligible(case: DeleteCase, verdict: Verdict, ctx: CallContext) -> fro
             or t.path not in case.paths
             or t.op not in ("delete", "worktree-remove")
         ):
-            return frozenset()
+            return {}
+    identities = {}
     for path in case.paths:
         if worktree_state(path) != "clean":
-            return frozenset()
+            return {}
         try:
             if _running_owners(path, ctx.session_id, strict=True):
-                return frozenset()
+                return {}
         except Exception:  # noqa: BLE001 — incomplete owner inventory is not idle
-            return frozenset()
+            return {}
         activity = worktree_activity(path, ctx.session_id)
         if activity.pr_state != "none" or activity.owners_running:
-            return frozenset()
-    return frozenset(case.paths)
+            return {}
+        identity = _git(["rev-parse", "--absolute-git-dir", "--git-common-dir", "HEAD"], path)
+        if not identity:
+            return {}
+        try:
+            # Detect replacement even at the same path/HEAD/branch/registration.
+            stamps = tuple(
+                n
+                for p in (path, os.path.join(path, ".git"), identity.splitlines()[0])
+                for n in (os.stat(p).st_dev, os.stat(p).st_ino)
+            )
+        except OSError:
+            return {}
+        identities[path] = (identity, activity.branch, stamps)
+    return identities
 
 
 async def _dangerous_delete(
@@ -956,7 +973,7 @@ async def _dangerous_delete(
         )
         outcome.warnings.append(f"Guardrail {DANGEROUS_DELETE_RULE}: allowed — {proven}.")
         return outcome
-    eligible = _scope_eligible(case, verdict, ctx) if forked_judge else frozenset()
+    eligible = _scope_eligible(case, verdict, ctx) if forked_judge else {}
     result = await run_judge(
         JudgeBrief(
             tool="bash",
@@ -989,10 +1006,17 @@ async def _dangerous_delete(
         # (see ``guardrails/evidence.py``). A forked judge read the whole
         # session, injected text included, so an uncited or unverifiable
         # ALLOW is a block.
+        # The awaited judge decided completion for the OLD tree and trusted
+        # words. Recheck gates and identity; a newly clean replacement is not it.
+        fresh = build_delete_case(verdict, ctx) if eligible else case
+        current = _scope_eligible(fresh, verdict, ctx) if eligible else {}
+        stable = frozenset(p for p in eligible if p in current and eligible[p] == current[p])
+        if fresh.operator_words != case.operator_words or fresh.excluded != case.excluded:
+            stable = frozenset()
         basis, missing = case.verify(
             result.answer,
             forked=bool(forked_judge) and not result.context_free,
-            scope_eligible=eligible,
+            scope_eligible=stable,
         )
         if missing:
             # Live ask a-1d54 (2026-11-11): the paths sat only in the picked

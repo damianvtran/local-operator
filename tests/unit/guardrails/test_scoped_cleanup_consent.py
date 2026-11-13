@@ -158,14 +158,24 @@ def fixture(tmp_path, monkeypatch):
 
 
 async def guard(
-    fixture, answer="ALLOW scope=o1", *, forked=True, text=None, command=None, peer=False
+    fixture,
+    answer="ALLOW scope=o1",
+    *,
+    forked=True,
+    text=None,
+    command=None,
+    peer=False,
+    mutate=None,
 ):
     home, repo, wt = fixture
     text = text or "I give full approval to delete completed worktrees"
     rows = [Message.user(text)] if not peer else []
     ctx = CallContext(
         cwd=str(repo),
-        env={"HOME": str(home), "LOCAL_OPERATOR_CONFIG_DIR": str(home / ".local-operator")},
+        env={
+            "HOME": str(home),
+            "LOCAL_OPERATOR_CONFIG_DIR": str(home / ".local-operator"),
+        },
         scratchpad=None,
         session_id="aaaaaaaaaaaa",
         operator=prov.operator_brief(rows, session_id="aaaaaaaaaaaa"),
@@ -174,6 +184,8 @@ async def guard(
 
     async def provider(system, prompt):
         prompts.append((system, prompt))
+        if mutate:
+            mutate(ctx)
         return answer
 
     outcome = await check_tool_call(
@@ -187,6 +199,69 @@ async def guard(
     assert outcome is not None
     assert wt.is_dir(), "guard-only proof must never execute deletion"
     return outcome, prompts
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "change",
+    ["dirty", "live", "open", "head", "branch", "registration", "revoked", "held"],
+)
+async def test_scope_rechecks_changes_during_await(fixture, monkeypatch, change):
+    home, repo, wt = fixture
+
+    def mutate(ctx):
+        if change == "dirty":
+            (wt / "tracked").write_text("unfinished during judge")
+        elif change == "live":
+            record = SessionRecord(
+                pid=os.getpid(),
+                kind="exec",
+                session_id="bbbbbbbbbbbb",
+                conversation_name="synthetic owner",
+                cwd=str(wt),
+                model_label="fixture",
+                control_port=0,
+                control_key="synthetic-not-a-secret",
+            )
+            (registry.run_dir() / "synthetic.json").write_text(json.dumps(asdict(record)))
+        elif change == "open":
+            monkeypatch.setattr(
+                prov, "_gh_prs", lambda *_: [prov.ForgeChange(1, "open", "2026-11-12")]
+            )
+        elif change == "head":
+            git(
+                wt,
+                "-c",
+                "user.name=Fixture",
+                "-c",
+                "user.email=fixture@example.invalid",
+                "commit",
+                "--allow-empty",
+                "-qm",
+                "new unfinished work",
+            )
+            assert prov.worktree_state(str(wt)) == "clean"
+        elif change == "branch":
+            git(wt, "switch", "-qc", "unrelated")
+        elif change == "registration":
+            old = Path(git(wt, "rev-parse", "--absolute-git-dir"))
+            new = old.with_name("replacement-registration")
+            old.rename(new)
+            (wt / ".git").write_text(f"gitdir: {new}\n")
+            assert prov.worktree_state(str(wt)) == "clean"
+        elif change == "revoked":
+            ctx.operator.words.append(OperatorWords("operator, direct", "Stop; leave this tree"))
+        elif change == "held":
+            Path(git(wt, "rev-parse", "--absolute-git-dir"), "locked").write_text("held")
+
+    outcome, prompts = await guard(fixture, mutate=mutate)
+    assert str(wt) in prompts[0][1], "judge must see the initially eligible tree"
+    assert outcome.blocked, (change, outcome.warnings)
+    assert not any("Completed-worktree cleanup authorized" in w for w in outcome.warnings)
+    assert wt.is_dir()
+    if change == "dirty":
+        assert (wt / "tracked").read_text() == "unfinished during judge"
+    print(f"DURING-JUDGE {change}: blocked={outcome.blocked}; tree_present={wt.is_dir()}")
 
 
 @pytest.mark.asyncio
@@ -367,7 +442,10 @@ async def test_two_exact_completed_trees_share_one_scope(fixture):
     "instruction,reason",
     [
         ("Look at completed worktrees", "inspection is not consent"),
-        ('Someone wrote "I approve deleting completed worktrees"', "quotation is not consent"),
+        (
+            'Someone wrote "I approve deleting completed worktrees"',
+            "quotation is not consent",
+        ),
         ("Delete completed worktrees in repo B only", "location mismatch"),
         ("Delete completed worktrees, but keep done", "exclusion"),
         ("Stop; leave this tree", "revoked"),
