@@ -78,13 +78,16 @@ EMBEDDED_WORD = "un" + PLAIN_WORD + "ally"
 def _store_that_has_scrubbed_the_word(tmp_path: Path) -> Any:
     """A real ``VariableStore`` that REGISTERED the word the way production does.
 
-    Through the shape pass (``PASSWORD=<word>``), never ``register_redaction`` by hand: the
-    over-match this class pins only exists on the registration path the store really takes.
+    Through the broker's §6 sink (``register_redaction``), the path a ``lop secret get``
+    retrieval takes. It used to be the shape pass (``PASSWORD=<word>``), but since
+    2026-11-13 an ordinary word a rule matched is masked in place and never promoted
+    (``redaction_shapes.is_ordinary_word_value``); a word the session KNOWS is a secret is
+    the remaining way one reaches the exact-value pass, and is what this class pins.
     """
     from local_operator.variables import VariableStore
 
     store = VariableStore(cwd=str(tmp_path))
-    store.redact_with_report(f"PASSWORD={PLAIN_WORD}")
+    store.register_redaction(PLAIN_WORD)
     assert PLAIN_WORD in store.redaction_values(), "premise: the word is a registered value"
     return store
 
@@ -382,14 +385,19 @@ class TestPlainWordOnDisk:
         assert MARKER_BYTES not in disk
 
 
-# --- the net under the fix: edit/write say so when they put the marker on disk --------
+# --- the net under the fix: edit/write REFUSE to put a new marker on disk ------------
 
 
-class TestMarkerIntroductionNote:
-    """``edit``/``write`` append a non-blocking note when they INTRODUCE the marker."""
+class TestMarkerIntroductionRefusal:
+    """``edit``/``write`` refuse content that INTRODUCES the marker (2026-11-13).
+
+    It was a non-blocking note; minervaai core-svc d20e5acb showed a note is read past
+    (see ``tools.builtin._marker_introduced``). Only an INCREASE counts, so a file that
+    already documents the marker stays editable.
+    """
 
     @pytest.mark.asyncio
-    async def test_edit_that_introduces_the_marker_is_flagged_but_still_applied(
+    async def test_edit_that_introduces_the_marker_is_refused_and_nothing_written(
         self, tmp_path: Path
     ) -> None:
         src = tmp_path / "a.py"
@@ -402,14 +410,15 @@ class TestMarkerIntroductionNote:
             ),
         )
         events = await _drive(model)
-        # Never scrubbed, never refused: the bytes are exactly what the model wrote.
-        assert src.read_bytes().count(MARKER_BYTES) == 1
-        text = _result_text(_results(events)[-1])
-        assert "redaction marker" in text
-        assert "not source" in text
+        assert src.read_bytes() == b"x = 1\n"
+        result = _results(events)[-1]
+        text = _result_text(result)
+        assert result.is_error
+        assert "Refused" in text and "unavailable to you" in text
+        assert "lop secret get" in text
 
     @pytest.mark.asyncio
-    async def test_write_that_introduces_the_marker_is_flagged(self, tmp_path: Path) -> None:
+    async def test_write_that_introduces_the_marker_is_refused(self, tmp_path: Path) -> None:
         src = tmp_path / "a.md"
         src.write_text("# t\n")
         target = tmp_path / "b.md"
@@ -421,8 +430,55 @@ class TestMarkerIntroductionNote:
             ),
         )
         events = await _drive(model)
-        assert target.read_bytes().count(MARKER_BYTES) == 1
-        assert "not source" in _result_text(_results(events)[-1])
+        assert not target.exists(), "a refused write must not create the file"
+        result = _results(events)[-1]
+        assert result.is_error
+        assert "unavailable to you" in _result_text(result)
+
+    @pytest.mark.asyncio
+    async def test_the_header_name_round_trip_is_closed_end_to_end(self, tmp_path: Path) -> None:
+        """The exact incident, with a synthetic eight-letter word (minervaai d20e5acb).
+
+        A session that once saw ``token: <word>`` must still show the agent the full
+        header name later, so an agent copying it writes the real 32-byte header; and
+        were the word ever masked (a REAL secret that happens to be that word), the copy
+        that carries the marker is refused rather than written as a 34-byte header.
+        """
+        from local_operator.variables import VariableStore
+
+        word = "quorb" + "ish"  # synthetic, eight lowercase letters like the real one
+        header = f"x-alert-disposition-{word}-key"
+        assert len(header) == 32
+        rig = tmp_path / "rig.py"
+        rig.write_text(f'HEADER = "{header}"\n')
+        out = tmp_path / "copy.py"
+
+        def copy_header(seen: str):
+            copied = re.search(r'HEADER = "([^"]+)"', seen)
+            assert copied is not None, seen
+            return "write", {"path": str(out), "content": f'H = "{copied.group(1)}"\n'}
+
+        # Direction 1: the shape pass saw the word as a value once; it is masked there,
+        # NOT promoted, so the header reaches the model and the disk intact.
+        store = VariableStore(cwd=str(tmp_path))
+        first, _ = store.redact_with_report("token: " + word)
+        assert word not in first, "premise: the rule masked the occurrence in place"
+        model = _MechanicalModel(rig, copy_header)
+        await _drive(model, redact=lambda text: store.redact_with_report(text)[0])
+        assert header in model.seen_by_model
+        assert out.read_bytes() == f'H = "{header}"\n'.encode()
+        assert len(header.encode()) == 32
+
+        # Direction 2: a known secret equal to the word still masks the segment (fail
+        # toward masking for real secrets); the writer refuses the marker-bearing copy.
+        out.unlink()
+        secret_store = VariableStore(cwd=str(tmp_path))
+        secret_store.register_redaction(word)
+        model = _MechanicalModel(rig, copy_header)
+        events = await _drive(model, redact=lambda text: secret_store.redact_with_report(text)[0])
+        assert header not in model.seen_by_model
+        assert not out.exists(), "the 34-byte placeholder header reached disk"
+        assert _results(events)[-1].is_error
 
     @pytest.mark.asyncio
     async def test_silent_when_the_file_already_held_the_marker(self, tmp_path: Path) -> None:
@@ -437,12 +493,12 @@ class TestMarkerIntroductionNote:
             ),
         )
         events = await _drive(model)
-        assert src.read_bytes().count(MARKER_BYTES) == 1
-        assert "redaction marker" not in _result_text(_results(events)[-1])
+        assert src.read_bytes() == f"The mask is {REDACTION_MARKER}.\n\ndone\n".encode()
+        assert not _results(events)[-1].is_error
 
     @pytest.mark.asyncio
     async def test_counts_not_membership(self, tmp_path: Path) -> None:
-        """A file that had ONE marker and gains a SECOND is flagged for the second."""
+        """A file that had ONE marker and would gain a SECOND is refused for the second."""
         src = tmp_path / "doc.md"
         src.write_text(f"The mask is {REDACTION_MARKER}.\n\nTODO\n")
         model = _MechanicalModel(
@@ -453,8 +509,8 @@ class TestMarkerIntroductionNote:
             ),
         )
         events = await _drive(model)
-        assert src.read_bytes().count(MARKER_BYTES) == 2
-        assert "put 1 redaction marker" in _result_text(_results(events)[-1])
+        assert src.read_bytes().count(MARKER_BYTES) == 1
+        assert "would add 1" in _result_text(_results(events)[-1])
 
     @pytest.mark.asyncio
     async def test_write_over_a_file_that_already_had_the_marker_is_silent(
@@ -470,23 +526,56 @@ class TestMarkerIntroductionNote:
             ),
         )
         events = await _drive(model)
-        assert "redaction marker" not in _result_text(_results(events)[-1])
+        assert not _results(events)[-1].is_error
+        assert src.read_bytes() == f"The mask is still {REDACTION_MARKER}.\n".encode()
+
+
+class TestBashMarkerWriteSteer:
+    """``bash`` is steered, never blocked, when a command writes the marker to a file."""
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            f"echo 'H = \"{REDACTION_MARKER}\"' > rig.py",
+            f"printf '%s' {REDACTION_MARKER} >> rig.py",
+            f"cat > rig.py <<'EOF'\nH = {REDACTION_MARKER}\nEOF",
+            f"echo {REDACTION_MARKER} | tee rig.py",
+            f"sed -i '' 's/x/{REDACTION_MARKER}/' rig.py",
+            f"python3 -c 'open(\"r\",\"w\").write(\"{REDACTION_MARKER}\")'",
+        ],
+    )
+    def test_a_file_write_with_the_marker_is_steered(self, command: str) -> None:
+        from local_operator.tools.builtin import _bash_marker_write_steer
+
+        steer = _bash_marker_write_steer(command)
+        assert steer is not None and "mask" in steer
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            f"grep -rn -F '{REDACTION_MARKER}' src 2>&1",
+            f"echo {REDACTION_MARKER}",
+            "echo hi > out.txt",
+            f"rg -c {REDACTION_MARKER} . 2>/dev/null",
+        ],
+    )
+    def test_reads_and_markerless_writes_are_silent(self, command: str) -> None:
+        from local_operator.tools.builtin import _bash_marker_write_steer
+
+        assert _bash_marker_write_steer(command) is None
 
     @pytest.mark.asyncio
-    async def test_the_note_does_not_leak_into_the_persisted_details(self, tmp_path: Path) -> None:
-        src = tmp_path / "a.py"
-        src.write_text("x = 1\n")
-        model = _MechanicalModel(
-            src,
-            lambda seen: (
-                "edit",
-                {"path": str(src), "old_text": "x = 1", "new_text": f"x = {REDACTION_MARKER}"},
-            ),
+    async def test_the_real_bash_tool_runs_the_command_and_carries_the_steer(
+        self, tmp_path: Path
+    ) -> None:
+        from local_operator.tools.builtin import execute_bash
+
+        target = tmp_path / "rig.txt"
+        result = await execute_bash(
+            "b1", {"command": f"printf '%s' '{REDACTION_MARKER}' > '{target}'"}
         )
-        events = await _drive(model)
-        details = (_results(events)[-1].provider_payload or {}).get("details") or {}
-        assert details.get("path"), "premise: the file tools' details are persisted"
-        assert not any(key.startswith("_") for key in details), details
+        assert target.read_bytes() == MARKER_BYTES, "bash must never be blocked"
+        assert "mask for text hidden from your view" in _result_text(result)
 
 
 # --- DISPLAY: real secrets stay scrubbed -----------------------------------------------
@@ -1512,6 +1601,9 @@ async def test_q3_actual_write_durable_provider_and_fork_no_longer_publish_body_
     pem, prefix = _q3_pem()
     body = "Public reference ${PUBLIC_FIXTURE_REF}; literal [redacted].\n" + pem
     target = tmp_path / "synthetic-q3.md"
+    # Seeded with one marker: since 2026-11-13 a write that ADDS the marker is refused
+    # (``_marker_introduced_refusal``), and this fixture's literal is deliberate text.
+    target.write_text(f"seed {REDACTION_MARKER}\n")
     raw_results: list[Any] = []
     requests: list[Any] = []
     original = build_write_tool()

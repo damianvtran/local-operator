@@ -5800,6 +5800,11 @@ async def execute_bash(
     if secret_steer:
         parts.insert(insert_at, secret_steer)
         insert_at += 1
+    # A marker written to disk by the shell: steered, never refused (see the helper).
+    marker_steer = _bash_marker_write_steer(params.command)
+    if marker_steer:
+        parts.insert(insert_at, marker_steer)
+        insert_at += 1
     if notice:
         parts.insert(insert_at, notice)
         insert_at += 1
@@ -11154,9 +11159,6 @@ async def execute_edit(
     # (see ``_scratchpad_address``).
     where = f"{url} -> {path}" if is_scratchpad else str(path)
     text = f"Edited {where}: {len(hunks)} hunk(s), {total_replacements} replacement(s) applied."
-    introduced = details.pop(_MARKER_INTRODUCED_KEY, 0)
-    if introduced:
-        text = f"{text}\n{_marker_introduced_note(introduced)}"
     pad_advisory = details.pop(_SCRATCHPAD_ADVISORY_KEY, None)
     if pad_advisory:
         text = f"{text}\n{pad_advisory}"
@@ -11360,6 +11362,11 @@ def _edit_file_result_locked(
             current != original,
         )
 
+    # Refused BEFORE anything is written: see ``_marker_introduced_refusal``.
+    introduced = _marker_introduced(original, current)
+    if introduced:
+        return _marker_introduced_refusal(introduced, "edit")
+
     pad_advisory: str | None = None
     if current != original:
         if scratch_root is not None:
@@ -11378,11 +11385,6 @@ def _edit_file_result_locked(
         # The worker thread already returns ``details``; this private, popped key
         # carries the receipt line without changing that transaction's shape.
         details[_SCRATCHPAD_ADVISORY_KEY] = pad_advisory
-    introduced = _marker_introduced(original, current)
-    if introduced:
-        # Carried in ``details`` (the file tools' existing structured channel) so the
-        # thread function keeps its return shape; ``execute_edit`` turns it into the note.
-        details[_MARKER_INTRODUCED_KEY] = introduced
     return total_replacements, details
 
 
@@ -11493,11 +11495,6 @@ DIFF_TRUNCATED_ROWS_KEY = "diff_truncated_rows"
 #: Context lines the rendered diff shows around each change. Named because the
 #: widening re-renders hunks and must grow from the SAME gap difflib proved.
 _DIFF_CONTEXT_LINES = 2
-
-#: Scratch key on the edit/write ``details`` dict carrying the marker-introduction count
-#: from the worker thread to the coroutine that words the receipt. Popped before the
-#: result is built, so it never reaches the persisted details or a renderer.
-_MARKER_INTRODUCED_KEY = "_redaction_marker_introduced"
 
 #: The same one-way worker-to-receipt channel for a pad's soft crossing line.
 #: It is popped before rendering, so the structured diff remains unchanged.
@@ -12188,8 +12185,18 @@ def _marker_introduced(before: str, after: str) -> int:
     A COUNT comparison, not a membership test, because a file may legitimately contain
     the marker already (this module's own tests, a transcript fixture, documentation of
     the redactor) and an edit that merely leaves it in place, or removes one, introduced
-    nothing. The result is advisory only: the caller appends a note and never refuses or
-    rewrites, because a document that is ABOUT the marker is a legitimate write.
+    nothing.
+
+    **A refusal since 2026-11-13, no longer a note** (minervaai core-svc d20e5acb). The
+    advisory note did not stop the next corruption: an ordinary word promoted to a
+    session-wide mask showed the agent ``x-alert-disposition-<marker>-key``, the agent
+    wrote that header name into a test rig, the note was read past, and the rig sent a
+    34-byte header where the server expects 32 — a 401 nobody could trace to a mask.
+    Writing a NEW marker is corruption in every case the harness can see: the text
+    behind it is unavailable to the writer by construction. A file that already holds
+    the marker (docs, fixtures) stays editable because only the INCREASE counts, and a
+    deliberate new literal can be spelled without the literal
+    (:data:`REDACTION_MARKER`, a concatenation), which the refusal says.
 
     **Net-zero swaps are invisible, by construction.** An edit that removes one marker
     and adds another (a fixture's legitimate marker replaced by a copied mask) leaves the
@@ -12200,19 +12207,60 @@ def _marker_introduced(before: str, after: str) -> int:
     return max(0, after.count(REDACTION_MARKER) - before.count(REDACTION_MARKER))
 
 
-def _marker_introduced_note(count: int) -> str:
-    """The line appended to an edit/write receipt when it put the marker into a file.
+def _marker_introduced_refusal(count: int, tool_name: str) -> str:
+    """The error an edit/write returns instead of putting NEW markers into a file.
 
     Phrased for the model that wrote it: it cannot tell the mask from source text, which
-    is the whole defect. It is told what the string is, that the intended text is
-    unknown to the harness, and what to do; nothing is claimed about WHICH symbol it was
-    because the harness cannot know (the real text is exactly what the mask hid).
+    is the whole defect. It is told that the text behind the marker is UNAVAILABLE to it
+    (so it stops trying to reconstruct it from what it saw), how to reference a real
+    secret without its bytes, how to move ordinary text without reading it, and how to
+    write the literal on purpose. Nothing is claimed about WHICH text was hidden: the
+    harness cannot know, the real text is exactly what the mask hid.
     """
     return (
-        f"Note: this write put {count} redaction marker(s) ({REDACTION_MARKER}) into the file. "
-        "That string is the harness's mask for text it hid from you, not source: if you meant "
-        "to write the original text, recover it (git diff, the original file) and edit it "
-        "back; if the marker is intentional (docs, a fixture), ignore this note."
+        f"Refused: this {tool_name} would add {count} {REDACTION_MARKER} marker(s) the file "
+        f"does not already contain; nothing was written. {REDACTION_MARKER} is the harness's "
+        "mask for text hidden from your view — the original is unavailable to you, and "
+        "writing the marker corrupts the file (a header name, identifier or key mangled). "
+        "If the hidden text is a secret, reference it instead of writing it: an environment "
+        "variable, or `lop secret get NAME` / the secret store at run time. If it is ordinary "
+        "text (a header name, identifier, word), copy the exact bytes from the original "
+        "source with a command that never shows them to you (e.g. sed/cp from the file "
+        "that has them). If the marker is deliberate (docs or tests about redaction), "
+        "spell it without the literal, e.g. REDACTION_MARKER or '[red' + 'acted]'."
+    )
+
+
+#: A shell construct that WRITES a file: a redirect (not a fd dup such as ``2>&1``),
+#: ``tee``, an in-place ``sed``/``perl``, or a Python ``.write``/``write_text`` call.
+_BASH_FILE_WRITE = re.compile(
+    r"(?:^|[^<>&0-9])>{1,2}(?!&)\s*[^\s&|;]"
+    r"|\btee\b"
+    r"|\bsed\s+(?:-[A-Za-z]*i\b|--in-place)"
+    r"|\bperl\s+-[A-Za-z]*i"
+    r"|\.write(?:_text|_bytes)?\("
+)
+
+
+def _bash_marker_write_steer(command: str) -> str | None:
+    """One steering line when a ``bash`` command writes the redaction marker into a file.
+
+    The ``write``/``edit`` refusal (:func:`_marker_introduced_refusal`) cannot see a
+    shell redirect, and ``bash`` is never BLOCKED for it: the operator's rule is
+    steer-don't-block for the shell, where a literal marker in a command is also how a
+    redaction test or a grep for the marker is written. So the command runs and the
+    result says what the marker is. A heuristic on the command TEXT, deliberately
+    cheap: it needs the literal marker AND a file-writing construct, so a ``grep``
+    for the marker and an ``echo`` to the terminal stay silent.
+    """
+    if REDACTION_MARKER not in command or _BASH_FILE_WRITE.search(command) is None:
+        return None
+    return (
+        f"Note: this command writes the literal {REDACTION_MARKER} into a file. That string is "
+        "the harness's mask for text hidden from your view, not source: if you copied it from "
+        "output, the file now holds the marker where the original text belongs — reference "
+        "a secret via env/`lop secret get`, or copy ordinary text from its source with "
+        "sed/cp. Ignore this if the marker is deliberate."
     )
 
 
@@ -12274,7 +12322,10 @@ async def execute_write(
     # megabyte-scale CPU (difflib is pure Python) at exactly the moment a
     # concurrent sibling tool is also settling. On the loop that read as the
     # intermittent whole-screen freeze; off it, the frame keeps animating.
-    existed, details = await asyncio.to_thread(_write_file_result, path, params.content)
+    written = await asyncio.to_thread(_write_file_result, path, params.content)
+    if isinstance(written, str):
+        return _error(tool_call_id, "write", written)
+    existed, details = written
     verb = "Overwrote" if existed else "Created"
     # ``_write_file_result_locked`` creates parents, so a nested scratchpad file
     # (``scratchpad://runs/deep.csv``) needs no special case here.
@@ -12295,9 +12346,6 @@ async def execute_write(
         " — kept for this session (survives restarts)" if is_scratchpad and not existed else ""
     )
     text = f"{verb} {where} ({len(params.content)} chars){lifetime}."
-    introduced = details.pop(_MARKER_INTRODUCED_KEY, 0)
-    if introduced:
-        text = f"{text}\n{_marker_introduced_note(introduced)}"
     if pad_advisory:
         text = f"{text}\n{pad_advisory}"
     # Appended, never substituted: the nudge rides the receipt the caller already
@@ -12311,13 +12359,16 @@ async def execute_write(
     )
 
 
-def _write_file_result(path: Path, content: str) -> tuple[bool, dict[str, Any]]:
-    """Serialize one overwrite transaction across parent/child AgentLoops."""
+def _write_file_result(path: Path, content: str) -> tuple[bool, dict[str, Any]] | str:
+    """Serialize one overwrite transaction across parent/child AgentLoops.
+
+    A string is the refusal the tool returns (nothing was written).
+    """
     with _file_transaction(path):
         return _write_file_result_locked(path, content)
 
 
-def _write_file_result_locked(path: Path, content: str) -> tuple[bool, dict[str, Any]]:
+def _write_file_result_locked(path: Path, content: str) -> tuple[bool, dict[str, Any]] | str:
     """The filesystem half of ``write``: read prior, write new, diff both.
 
     Synchronous by design — ``asyncio.to_thread`` is the only caller, and
@@ -12333,12 +12384,14 @@ def _write_file_result_locked(path: Path, content: str) -> tuple[bool, dict[str,
             # Binary or unreadable prior content: we still write, we just
             # cannot report a meaningful diff for it.
             previous = ""
+    # Judged against the bytes on disk BEFORE the write, under the same file lock,
+    # so a file that already documents the marker can still be rewritten.
+    introduced = _marker_introduced(previous, content)
+    if introduced:
+        return _marker_introduced_refusal(introduced, "write")
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content, encoding="utf-8")
     details = _with_diff_source(_diff_details(str(path), previous, content), previous, content)
-    introduced = _marker_introduced(previous, content)
-    if introduced:
-        details[_MARKER_INTRODUCED_KEY] = introduced
     return existed, details
 
 
