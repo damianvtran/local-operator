@@ -366,8 +366,8 @@ def operator_fact() -> dict[str, Any]:
     }
 
 
-def _can_sign_here() -> bool:
-    """Whether THIS host holds the private half, probed without prompting.
+def _can_sign_here(expected_key_id: str | None = None) -> bool:
+    """Whether THIS host holds the ANCHOR's private half, probed without prompting.
 
     The probe is the operator module's own signer lookup (the anchor names the
     backend), and it is the ONLY sound question to ask: a keychain query from
@@ -376,6 +376,14 @@ def _can_sign_here() -> bool:
     that has one. ``False`` on every failure — a broken agent is "cannot sign
     NOW", which is the fact this answer is for — and the signer is closed
     immediately, because a probe must leave nothing running.
+
+    "A signer loads" is NOT the question (PR #3905 review r2, M3): a second Mac
+    that ran ``lop operator init`` holds ITS OWN operator key, and counting that
+    as authority made it author routing for the fleet and refuse the head's.
+    The loaded key must be the one the anchor pins: ``expected_key_id`` when the
+    caller already holds the anchor, else the installed anchor's own key id. With
+    no usable anchor and no expectation there is nothing to compare against, so
+    any loadable key answers (the pre-anchor "has a key at all" reading).
     """
     try:
         from local_operator.operator.keychain import choose_backend
@@ -383,15 +391,25 @@ def _can_sign_here() -> bool:
         from local_operator.paths import config_dir
 
         loaded = load_anchor()
-        backend_name = loaded.anchor.backend if loaded.usable and loaded.anchor else "auto"
+        anchor = loaded.anchor if loaded.usable else None
+        backend_name = anchor.backend if anchor else "auto"
+        if expected_key_id is None and anchor is not None:
+            expected_key_id = str(anchor.key_id or "")
         signer: Any = choose_backend(backend_name, config_root=config_dir()).load()
         if signer is None:
             return False
         try:
-            signer.close()
-        except Exception:  # noqa: BLE001 — closing a probe is best-effort
-            pass
-        return True
+            held = str(getattr(getattr(signer, "handle", None), "key_id", "") or "")
+        finally:
+            try:
+                signer.close()
+            except Exception:  # noqa: BLE001 — closing a probe is best-effort
+                pass
+        if expected_key_id is None:
+            return True
+        # An empty expectation (an anchor without a key id) matches nothing: fail
+        # closed rather than let any key stand in for an unnamed one.
+        return bool(expected_key_id) and held == expected_key_id
     except Exception:  # noqa: BLE001 — see above: "cannot sign", not a crash
         return False
 
@@ -1730,6 +1748,11 @@ def collect_peer_facts(
         # ADDITIVE ON THE WIRE: an older viewer ignores it, and an older peer's
         # answer lacks it, which this build reads as "nothing to report" (no row).
         "custom_instructions": custom_instructions_fact(root),
+        # ADDITIVE ON THE WIRE: the fallback chain this device's default would
+        # actually walk, and whose it is (mirrored from the operator's device or
+        # this device's own). An older viewer ignores it; an older peer omits it
+        # and the model-credential row then reads byte-for-byte as before.
+        "failover": _failover_fact(root, model),
     }
 
 
@@ -1840,6 +1863,16 @@ def skills_row(
     )
 
 
+def _failover_fact(root: Path, model: Mapping[str, Any]) -> dict[str, Any] | None:
+    from local_operator.network import routing_sync
+
+    return routing_sync.failover_fact(
+        root,
+        hosting=str(model.get("hosting") or ""),
+        model_name=str(model.get("model_name") or ""),
+    )
+
+
 def custom_instructions_fact(root: Path) -> dict[str, Any] | None:
     """Whose custom instructions this device holds, and the last revision it refused.
 
@@ -1907,6 +1940,50 @@ def custom_instructions_row(
         source=SOURCE_PEER,
         observed={"status": str(fact.get("status") or ""), "origin": origin},
     )
+
+
+def _attach_failover(row: dict[str, Any], facts: Mapping[str, Any], *, server: Any) -> None:
+    """Name the peer's effective fallback chain on its model-credential row.
+
+    WHY ON THIS ROW: "can the default be served" and "what happens when it is
+    rate-limited" are one question for an operator handing a node work — a node
+    whose chain is primary-only ends a turn on the first borrowed 429. Riding the
+    existing row (sentence + ``observed.failover``) instead of a new capability
+    keeps enrollment's closed capability set (``enrollment.public_report``)
+    untouched. Absent fact (an older peer) leaves the row exactly as it was.
+    """
+    fact = facts.get("failover")
+    if not isinstance(fact, Mapping):
+        return
+    from local_operator.network import routing_sync
+
+    origin = str(fact.get("origin") or "")
+    self_id = str(getattr(getattr(server, "identity", None), "device_id", "") or "")
+    label = ""
+    if origin:
+        label = (
+            _self_label(server)
+            if origin == self_id
+            else str(server._member_name(origin) or "")  # noqa: SLF001 — the mesh's own name
+        )
+    # The sentence only when the peer HAS routing to name: a bare peer's row keeps
+    # its existing words (its empty chain is still in ``observed``), so a viewer
+    # reading an unconfigured fleet sees no new prose on every row.
+    if fact.get("hops") or fact.get("model_fallback") is False:
+        sentence = routing_sync.failover_sentence(fact, origin_label=label)
+        detail = str(row.get("detail") or "")
+        # Q-1: a detail that does not already end a sentence gets one, or the
+        # failover sentence runs on from it ("... is refused Fails over to: ...").
+        if detail and not detail.rstrip().endswith((".", "!", "?")):
+            detail = detail.rstrip() + "."
+        row["detail"] = f"{detail} {sentence}".strip()
+    observed = dict(row.get("observed") or {})
+    observed["failover"] = {
+        key: fact.get(key)
+        for key in ("chain_key", "hops", "source", "origin", "model_fallback")
+        if key in fact
+    }
+    row["observed"] = observed
 
 
 #: The RAM below which a swapless member is reported as a resilience risk. 4 GB
@@ -5899,7 +5976,9 @@ def _peer_checks(
             own_device_id=str(getattr(getattr(server, "identity", None), "device_id", "") or ""),
         )
     )
-    rows.append(model_credential_row(member, facts, viewer=viewer, peer_label=peer_label))
+    credential_row = model_credential_row(member, facts, viewer=viewer, peer_label=peer_label)
+    _attach_failover(credential_row, facts, server=server)
+    rows.append(credential_row)
     switch_row = model_switch_row(
         member,
         facts,

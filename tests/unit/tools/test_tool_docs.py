@@ -768,7 +768,13 @@ MEASURED_TOKENS: dict[str, int] = {
     # -> `cwd`, UX round 1 U6) and pays for the own-session clause in the
     # opening sentence with it. Nothing else moved; the field schema did not
     # change, so `tool_schemas` and `scripts/bench_context_budget.py` stand.
-    "sessions": 867,
+    # RE-MEASURED for the explicit-peer listing fix (PR #3897): 867 -> 868.
+    # `peer` on `list` now SELECTS one remote device instead of narrowing the
+    # remote half of a federated listing, so the `peer`/`scope` descriptions
+    # and the reference's mesh sentence say "selects only that device" and the
+    # `include_stored` refusal names `peer` beside `scope='remote'`. Net +1
+    # token; well inside the soft cap. Nothing else moved.
+    "sessions": 868,
     # NEW (wave 4 slice A, 2026-10-10): the ``setting`` doc — the key
     # vocabulary, the op split and the validation-by-registry contract. 191
     # tokens is the deliberate cost of the reference detail staying off the
