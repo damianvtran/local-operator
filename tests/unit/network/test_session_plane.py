@@ -4143,6 +4143,31 @@ class _StreamClient:
             pass
 
 
+def _settle(client: _StreamClient) -> None:
+    """Read until the owner stops pushing, so THIS connection is past its bind.
+
+    The runtime refuses every non-priority op while a connection's canonical sync
+    is still pending — "this viewer is still connecting to the session; the
+    request was not run — retry once the interface has connected" — and the flag
+    clears in the BIND TASK's ``finally`` (``server.py``), i.e. when the OWNER
+    finishes its own work. A raw viewer that sends a gated frame the instant the
+    welcome lands is racing that task. ``test_stream_op_gate.py`` did exactly that
+    and passed by luck until it failed under load (measured), which is a flake
+    wearing a security test; the pass-through test below raced it the same way with
+    a ``prompt`` and lost once in a full CI run (PR #3885's gate, job 132034534860).
+    It lives beside :class:`_StreamClient` so both files share one copy. The real
+    client does not race it either — its dial sends its own ``frontend_sync`` and
+    waits for the answer — so waiting is the faithful shape rather than a
+    workaround.
+
+    Bounded, and it returns on the first quiet interval: the pushes stop when the
+    bind is done, and an idle fake session has nothing else to say.
+    """
+    for _ in range(20):
+        if client.recv(timeout=0.5) is None:
+            return
+
+
 def test_the_stream_is_a_pass_through_and_quitting_it_leaves_the_peer_running(
     peer_pair: Devices, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -4185,6 +4210,11 @@ def test_the_stream_is_a_pass_through_and_quitting_it_leaves_the_peer_running(
         welcome = client.recv()
         assert welcome is not None and welcome["op"] == "welcome", welcome
         assert welcome["data"]["session_id"] == SESSION
+        # The welcome is sent BEFORE the owner's bind task finishes, and until it
+        # does the runtime refuses a ``prompt`` ("this viewer is still connecting
+        # ..."). Sending it the instant the welcome lands raced that task and lost
+        # under CI load; wait for the bind exactly as the real client does.
+        _settle(client)
 
         client.send(
             {
