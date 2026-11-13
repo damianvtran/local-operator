@@ -1589,3 +1589,21 @@ def test_a_malformed_create_key_is_refused_before_anything_is_dialled(
     assert _run(["sessions", "--peer", PEER, "--create", "--create-key", truncated]) == 2
     assert "is not a create key this device sent" in capsys.readouterr().err
     assert dialled == []
+
+
+def test_an_agent_asked_create_is_stamped_agent_origin(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Operator rule 2026-11-13: who asked for a ``--create`` rides the frame.
+
+    The owner stamps it as ``origin.kind`` and never forwards an agent-created
+    session's ``notify`` items to the operator (``notifications/remote_attention``).
+    The spawn tool passes ``--origin agent``; a bare CLI run reads the ``bash``
+    tool's marker; the operator's own terminal is ``user``.
+    """
+    from local_operator.agent_shell import AGENT_SHELL_ENV
+
+    monkeypatch.delenv(AGENT_SHELL_ENV, raising=False)
+    assert net_cli._create_origin(argparse.Namespace(origin="")) == "user"
+    assert net_cli._create_origin(argparse.Namespace(origin="agent")) == "agent"
+    monkeypatch.setenv(AGENT_SHELL_ENV, "1")
+    assert net_cli._create_origin(argparse.Namespace(origin="")) == "agent"
+    assert net_cli._create_origin(argparse.Namespace(origin="user")) == "user", "explicit wins"

@@ -20416,7 +20416,10 @@ def _mesh_create_argv(peer: str, params: SessionsParams) -> tuple[list[str], str
     """The ``--create`` spelling for a remote spawn; ``(argv, error)`` for the
     ``model`` split — ``<provider>/<model-id>``, the grammar ``send`` documents —
     because the CLI takes hosting and model as two flags."""
-    argv = ["network", "sessions", "--json", "--peer", peer, "--create"]
+    # ``--origin agent``: an agent asked for this session, so the owner never
+    # forwards its ``notify`` items to the operator (2026-11-13; the CLI's
+    # ``_create_origin`` and ``notifications/remote_attention``).
+    argv = ["network", "sessions", "--json", "--peer", peer, "--create", "--origin", "agent"]
     argv += ["--prompt", str(params.prompt or "")]
     name = str(params.name or "").strip()
     if name:

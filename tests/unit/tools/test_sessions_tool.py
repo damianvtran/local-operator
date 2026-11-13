@@ -2873,6 +2873,8 @@ async def test_remote_ops_map_to_the_pilot_argv_and_bounds(
                 "--peer",
                 PEER,
                 "--create",
+                "--origin",
+                "agent",
                 "--prompt",
                 "go",
                 "--hosting",

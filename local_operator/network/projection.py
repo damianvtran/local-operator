@@ -249,8 +249,8 @@ def _attention_block(value: Any) -> tuple[str, str] | None:
 NOTICES_MAX = 8
 
 
-def _notices_block(value: Any) -> tuple[tuple[str, int, str, str], ...] | None:
-    """``notices: [{key, revision, priority, title}, ...]`` as tuples, else no claim.
+def _notices_block(value: Any) -> tuple[tuple[str, int, str, str, int], ...] | None:
+    """``notices: [{key, revision, priority, title, at}, ...]`` as tuples, else no claim.
 
     Each entry follows :func:`_notice_block`'s refusal rule; a malformed entry is
     dropped on its own, so one bad item cannot hide the others beside it. An
@@ -265,12 +265,15 @@ def _notices_block(value: Any) -> tuple[tuple[str, int, str, str], ...] | None:
     return parsed or None
 
 
-def _notice_block(value: Any) -> tuple[str, int, str, str] | None:
-    """One ``{key, revision, priority, title}`` notice as a tuple, else no claim.
+def _notice_block(value: Any) -> tuple[str, int, str, str, int] | None:
+    """One ``{key, revision, priority, title, at}`` notice as a tuple, else no claim.
 
     Same refusal rule as :func:`_attention_block`; the revision must be a real
     positive integer (a bool is not one) because it is the episode identity the
-    origin dedupes on.
+    origin dedupes on. ``at`` (the owner item's own time, epoch ms; added
+    2026-11-13) is OPTIONAL: an older owner sends none and it reads as ``0`` —
+    "cannot prove it is new" — which the origin's no-backfill rule refuses
+    (``notifications/remote_attention``), never a refused block.
     """
     if not isinstance(value, dict):
         return None
@@ -280,7 +283,15 @@ def _notice_block(value: Any) -> tuple[str, int, str, str] | None:
     if isinstance(revision, bool) or not isinstance(revision, int) or revision < 1:
         return None
     priority = value.get("priority")
-    return key[:256], revision, (priority if isinstance(priority, str) else "normal"), title[:200]
+    at = value.get("at")
+    at_ms = at if isinstance(at, int) and not isinstance(at, bool) and at > 0 else 0
+    return (
+        key[:256],
+        revision,
+        (priority if isinstance(priority, str) else "normal"),
+        title[:200],
+        at_ms,
+    )
 
 
 def _binding_name(binding: Any, key: str) -> str:
@@ -374,7 +385,7 @@ class PeerRow:
     #: The origin-only completion/notice facts (``notifications/remote_attention``),
     #: parsed by :func:`_attention_block`/:func:`_notices_block`. ``None`` is no claim.
     attention: tuple[str, str] | None = None
-    notices: tuple[tuple[str, int, str, str], ...] | None = None
+    notices: tuple[tuple[str, int, str, str, int], ...] | None = None
     #: ``attention_unknown: true`` — the owner's completion read failed, so a
     #: missing ``attention`` says nothing (R2-m2). Only a real ``True`` counts.
     attention_unknown: bool = False
