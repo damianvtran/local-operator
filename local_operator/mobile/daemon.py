@@ -70,6 +70,7 @@ if TYPE_CHECKING:
     from starlette.responses import JSONResponse, Response
 
     from local_operator.mobile.attach_client import AttachClient
+    from local_operator.mobile.push_transport import PushLane
     from local_operator.mobile.push_worker import PushWorker
     from local_operator.providers.auth_store import StoredCredential
     from local_operator.skills.discovery import Skill
@@ -4139,6 +4140,7 @@ class MobileDaemon:
         password: str | None = None,
         dial_registrants: bool = True,
         push_worker: PushWorker | None = None,
+        push_lane: PushLane | None = None,
     ) -> None:
         self.port = port
         self.password = password
@@ -4163,6 +4165,14 @@ class MobileDaemon:
         # product constructs a worker, and the seam is how a deployment — or a
         # test — arms one. ``_scan_once`` ticks it when it is set.
         self.push_worker = push_worker
+        # S7: the armed cloud lane (``push_transport.build_push_lane``), built by
+        # ``service.amain`` only when this machine has a Radient tunnel. It
+        # brings its own worker, which wins over a bare injected one, and it is
+        # what the heartbeat and the register forward reach. ``None`` keeps the
+        # pre-S7 behaviour exactly (ADR §2.4).
+        self.push_lane = push_lane
+        if push_lane is not None:
+            self.push_worker = push_lane.worker
         # Stamp the build THIS process loaded, before any lazy import can meet a
         # replaced tree: every later comparison in ``_log_import_failure`` is
         # against this value.
@@ -5017,6 +5027,19 @@ class MobileDaemon:
                 )
             except Exception:  # noqa: BLE001 — a push fault must not cost the tick
                 logger.warning("push worker tick failed", exc_info=True)
+        # The 15-minute credentials heartbeat (ADR §3.2 literal 3), after the
+        # worker so an emit that just carried the block resets its clock first.
+        # Same off-loop thread and the same bound as the tick: it is one HTTP
+        # call at most, and ``PushLane.heartbeat`` never raises and spaces its
+        # own retries after a failure.
+        push_lane = self.push_lane
+        if push_lane is not None:
+            try:
+                await asyncio.wait_for(
+                    asyncio.to_thread(push_lane.heartbeat), timeout=PUSH_TICK_TIMEOUT_S
+                )
+            except Exception:  # noqa: BLE001 — a push fault must not cost the tick
+                logger.warning("push heartbeat failed", exc_info=True)
 
     async def _refresh_notifications_if_changed(self) -> None:
         """Wake the list stream when the INBOX store moved.
@@ -10671,12 +10694,52 @@ def build_app(daemon: MobileDaemon):
 
         config = config_dir()
         await _note_device_credential(request, config)
-        return await _push_call(
+        response = await _push_call(
             mobile_push_devices.register,
             config,
             body,
             credential_expires_at=presented_cookie_expiry(request),
         )
+        await _forward_registration(body, response)
+        return response
+
+    async def _forward_registration(body: object, response: Response) -> None:
+        """S7's register forward (ADR §3.2 literal 1), scheduled, never awaited.
+
+        Only after the LOCAL register succeeded — a refused or malformed body
+        was already answered and must not reach the cloud — and only on an
+        armed lane. The token is read from the validated request body and handed
+        to the forward task; it is still never written on this machine (ADR §4).
+        The app's response does not wait on the cloud (SESSION-PUSH §4.5).
+        """
+        lane = daemon.push_lane
+        if lane is None or response.status_code != 200 or not isinstance(body, dict):
+            return
+        try:
+            local = json.loads(bytes(response.body))
+        except ValueError:
+            return
+        if not isinstance(local, dict):
+            return
+        device = {
+            "device_id": local.get("device_id"),
+            "platform": body.get("platform"),
+            "environment": body.get("environment"),
+            "app_version": body.get("app_version"),
+            "push_token": body.get("token"),
+            "registered_at": local.get("registered_at"),
+        }
+        # Off the loop (review round 1 on #3875, R1): ``register_rows`` takes
+        # ``PushLane.lock`` and re-reads the registry file, and this route runs
+        # on the daemon's event loop — a lock wait here would stall every
+        # mobile stream, not just this register. The heartbeat no longer holds
+        # that lock across its HTTP call either, so the wait is a local read.
+        try:
+            rows = await asyncio.to_thread(lane.register_rows)
+        except Exception:  # noqa: BLE001 — a report fault must not cost the forward
+            logger.warning("push register: credential block unavailable", exc_info=True)
+            rows = []
+        lane.transport.schedule_register_forward(device, rows)
 
     async def api_push_devices(request: Request) -> Response:
         """The devices registered for this computer — what Settings renders."""
