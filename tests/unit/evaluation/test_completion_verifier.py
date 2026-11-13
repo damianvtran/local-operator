@@ -829,6 +829,7 @@ async def test_cancelling_the_verifier_mid_inspect_keeps_the_session_usable(
         transcript=Transcript(tmp_path / "sess"),
         system_blocks_provider=lambda: ["stable"],
     )
+
     # This test pins an ORDERING, not durations: the wall cuts the verifier
     # WHILE its guest read is mid-RPC, and the arm awaits that read before the
     # worker resumes. A real 1 s wall plus a 1.5 s release timer raced the
