@@ -45,6 +45,7 @@ from local_operator.tools.search_guard import (
     _MAX_PEEL_DEPTH,
     _SHELL_C_WORDS,
     _WRAPPER_LONG_VALUE_FLAGS,
+    _WRAPPER_OWN_LONG_VALUE_FLAGS,
     _WRAPPER_VALUE_FLAGS,
     WRAPPER_WORDS,
     _unquote,
@@ -948,6 +949,14 @@ class Target:
     #: The mention sits in a word the command names as an OUTPUT (``-o``,
     #: ``--out*``, ``--write*``, glued or as the next word): never a read.
     as_output: bool = False
+    #: The program may run code this check cannot see on the mention (a
+    #: ``sed`` with ``e``/``s///e``/``-f``, ``_sed_executes``): never a read,
+    #: so ``classify._tree_read`` gives it no lineage credit (QA Q2, #3906).
+    executes: bool = False
+    #: The mention is the value of an environment assignment, inline
+    #: (``A=<p> cmd``) or an ``env`` operand (``env A=<p> cmd``): that NAME.
+    #: Told to the judge, never a ranking input (PR #3906 round 1, case C).
+    assigned: str | None = None
 
 
 @dataclass(frozen=True)
@@ -1477,7 +1486,11 @@ def _peel_wrappers(words: list[Expanded]) -> tuple[list[Expanded], bool]:
         while rest:
             t = rest[0].text
             if t.startswith("-") and t != "-":
-                takes = (len(t) == 2 and t[1] in value_flags) or t in _WRAPPER_LONG_VALUE_FLAGS
+                takes = (
+                    (len(t) == 2 and t[1] in value_flags)
+                    or t in _WRAPPER_LONG_VALUE_FLAGS
+                    or t in _WRAPPER_OWN_LONG_VALUE_FLAGS.get(name, ())
+                )
                 rest = rest[2:] if takes else rest[1:]
                 continue
             if _DURATION_RE.match(t) or (_ASSIGN_RE.match(t) and name == "env"):
@@ -2045,7 +2058,13 @@ def _cwd_shadows_imports(cwd: str) -> bool:
 
 
 def _in_place_edit(name: str, args: list[Expanded]) -> bool:
-    """``sed -i``/``--in-place``, or perl with ``i`` in a short cluster (``-pi``)."""
+    """``sed -i``/``-I``/``--in-place``, or perl with ``i`` in a short cluster (``-pi``).
+
+    BSD sed's ``-I`` (review F1 on PR #3906) edits in place exactly like
+    ``-i`` (suffix glued or as the next word), so it is a write too; without
+    it ``sed -I '' 's/a/b/' <file>`` fell through to an unmodelled mention.
+    """
+    in_place = "iI" if name in ("sed", "gsed") else "i"
     for w in args:
         t = w.text
         if t.startswith("--in-place"):
@@ -2055,8 +2074,46 @@ def _in_place_edit(name: str, args: list[Expanded]) -> bool:
             # — but only BEFORE the first script letter (R4-2): in
             # ``-e's/in/out/'`` everything after ``e`` is the script text.
             flags, _script = _split_cluster(name, t[1:])
-            if "i" in flags:
+            if any(ch in flags for ch in in_place):
                 return True
+    return False
+
+
+#: ``env``'s short options that take a value (GNU ``-u``/``-C``/``-a``, BSD
+#: ``-u``/``-P``/``-L``/``-U``), and the long ones.
+_ENV_VALUE_LETTERS = "uCaPLU"
+_ENV_LONG_VALUE_FLAGS = frozenset({"--unset", "--chdir", "--argv0"})
+
+
+def _env_splits(args: list[Expanded]) -> bool:
+    """Does ``env args…`` carry ``-S``/``--split-string`` in its option prefix?
+
+    WHY (review on PR #3906): the check used to look at the first two words
+    only, so ``env -u FOO -S 'rm -rf …'`` hid its command string behind a
+    valued flag and the split command was dropped (LOW). Every option word up
+    to the first operand or ``--`` is scanned, valued flags skip their value,
+    and ``S`` anywhere in a short cluster (``-iS``) counts.
+    """
+    i = 0
+    while i < len(args):
+        t = args[i].text
+        i += 1
+        if t == "--" or t == "-" or not t.startswith("-"):
+            return False
+        if t.startswith("--"):
+            key, eq, _value = t.partition("=")
+            if key == "--split-string":
+                return True
+            if key in _ENV_LONG_VALUE_FLAGS and not eq:
+                i += 1
+            continue
+        for k, ch in enumerate(t[1:], start=1):
+            if ch == "S":
+                return True
+            if ch in _ENV_VALUE_LETTERS:
+                if k == len(t) - 1:
+                    i += 1  # the value is the next word
+                break  # otherwise the rest of the word is the value
     return False
 
 
@@ -2618,9 +2675,7 @@ class _Walker:
                 if not w.text.startswith("-"):
                     st.env[w.text] = OPAQUE_MARK
             return
-        if name == "env" and any(
-            w.text in ("-S", "--split-string") or w.text.startswith("-S") for w in words[1:3]
-        ):
+        if name == "env" and _env_splits(words[1:]):
             # S6: ``env -S 'cmd …'`` runs its argument as a command line.
             joined = " ".join(w.text for w in words[1:])
             if _DELETE_WORD_RE.search(joined):
@@ -2642,7 +2697,10 @@ class _Walker:
             exempt = self._touch(name, args) | _read_inputs(name, args)
             # The program word too: after ``env``/``xargs`` peeling a path can
             # BE the program (``xargs -Q <path>``).
-            self._backstop(name, unpeeled, raw_assigns, exempt)
+            executes = name in ("sed", "gsed") and _sed_executes(args)
+            self._backstop(
+                name, unpeeled, raw_assigns, exempt, executes, len(unpeeled) - len(words)
+            )
         if name in _SHELL_C_WORDS:
             self._shell(
                 args,
@@ -3445,7 +3503,13 @@ class _Walker:
         return python_code_read_only(code.text)
 
     def _backstop(
-        self, name: str, args: list[Expanded], assigns: list[str], exempt: set[int]
+        self,
+        name: str,
+        args: list[Expanded],
+        assigns: list[str],
+        exempt: set[int],
+        executes: bool = False,
+        prefix: int = 0,
     ) -> None:
         """THE INVARIANT (review R5): a non-read-only call that MENTIONS
         protected state ranks at least HIGH.
@@ -3469,10 +3533,20 @@ class _Walker:
         self.programs_run += 1
         outputs = _output_word_ids(args)
         words = [w for w in args if id(w) not in exempt]
-        texts = [(w.text, id(w) in outputs) for w in words] + [
-            (a.split("=", 1)[1], False) for a in assigns if "=" in a
-        ]
-        for text, as_output in texts:
+        # ``prefix``: how many leading words are wrappers (``env -u X A=…``)
+        # before the program, so an ``A=…`` among them is an assignment, as
+        # is a shell inline one. Recorded on the Target (``assigned``) so the
+        # judge is told the path only arrives as an environment value.
+        lead = {id(w) for w in args[:prefix]}
+        texts = [
+            (
+                w.text,
+                id(w) in outputs,
+                (m.group(1) if id(w) in lead and (m := _ASSIGN_RE.match(w.text)) else None),
+            )
+            for w in words
+        ] + [(a.split("=", 1)[1], False, a.split("=", 1)[0]) for a in assigns if "=" in a]
+        for text, as_output, assigned in texts:
             for raw in _MENTION_RE.findall(text):
                 if OPAQUE_MARK in raw or TEMP_MARK in raw:
                     continue  # an opaque part: the word itself is added below
@@ -3499,6 +3573,8 @@ class _Walker:
                             script=script,
                             read_only_code=read_only_code and not as_output,
                             as_output=as_output,
+                            executes=executes,
+                            assigned=assigned,
                         )
                     )
             if st.cwd is None:
@@ -4227,6 +4303,22 @@ def _sed_read_only(argv: list[str]) -> bool:
     return _flags_known(words, _SED_READ_FLAGS)
 
 
+def _sed_executes(words: list[Expanded]) -> bool:
+    """May this ``sed`` run code this check cannot see (``e``, ``s///e``, ``-f``)?
+
+    WHY (QA Q2 on PR #3906): a sed that is not provably read-only reaches the
+    backstop, and its FILE operands then looked like plain reads, so from a
+    lineage caller ``sed 's/x/rm -rf ~/e' <parent file>`` or ``sed -f ~/x
+    <parent file>`` earned ``classify._tree_read``'s read credit. Such a sed is
+    an executor, not a reader: the caller marks its mentions ``executes`` and
+    they get no lineage credit. Crude like ``_sed_read_only``: ANY ``e`` in the
+    script counts (``/needle/p`` included), which costs a judge call, never a
+    missed ``e`` command; a script in a file (``-f``/``--file``) is unknowable.
+    """
+    script = _sed_script_text(words)
+    return script is None or "e" in script
+
+
 def _identify_read_only(argv: list[str]) -> bool:
     return not any(a.lstrip("+-").startswith("write") or _MAGICK_CODER_RE.match(a) for a in argv)
 
@@ -4540,7 +4632,7 @@ _MV_FLAGS = _Flags(
 )
 _TEE_FLAGS = _Flags("aip", frozenset({"--append", "--ignore-interrupts"}))
 _SED_FLAGS = _Flags(
-    "nEreisuz",
+    "nEreiIsuz",
     frozenset(
         {
             "--quiet",

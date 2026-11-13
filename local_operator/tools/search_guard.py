@@ -190,9 +190,16 @@ _WRAPPER_LONG_VALUE_FLAGS = frozenset(
         "--max-chars",
         "--delimiter",
         "--arg-file",
-        "--unset",
     }
 )
+
+#: Long value flags only ONE wrapper takes. ``env --unset NAME`` (field report
+#: 2026-11-12) lives here, not in the shared table above: shared, it made
+#: ``sudo --unset rm -rf ~/work`` peel ``rm`` away as a flag value (review F2
+#: on PR #3906), though sudo rejects ``--unset``.
+_WRAPPER_OWN_LONG_VALUE_FLAGS: dict[str, frozenset[str]] = {
+    "env": frozenset({"--unset"}),
+}
 
 #: Shells whose ``-c`` argument is a command string. Their inner text is parsed
 #: with the SAME rules, recursively — the wrapper an agent reaches for to make a
@@ -656,8 +663,10 @@ def _peel(segment: str) -> tuple[str | None, str]:
                 return None, ""
             spelling = _unquote(token)
             if spelling.startswith("-") and spelling != "-":
-                takes_value = (len(spelling) == 2 and spelling[1] in value_flags) or (
-                    spelling in _WRAPPER_LONG_VALUE_FLAGS
+                takes_value = (
+                    (len(spelling) == 2 and spelling[1] in value_flags)
+                    or spelling in _WRAPPER_LONG_VALUE_FLAGS
+                    or spelling in _WRAPPER_OWN_LONG_VALUE_FLAGS.get(literal, ())
                 )
                 rest = after.lstrip()
                 if takes_value:

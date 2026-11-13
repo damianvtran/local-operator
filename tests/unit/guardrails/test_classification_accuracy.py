@@ -976,24 +976,58 @@ def test_case_b_sibling_pages_frozen_files_with_sed_but_cannot_run_them(home: Pa
     assert _tree_verdict(home, run, SIBLING, home / "work").risk is Risk.HIGH
 
 
-def test_case_c_parent_runs_descendants_files_under_env_unset(home: Path) -> None:
-    """Case C's exact shape: LOW for the launcher, HIGH for a stranger."""
-    _tree(home)
+def _case_c(home: Path, scratch_value: str | None) -> str:
     child, grandchild = _pad(home, CHILD), _pad(home, GRANDCHILD)
     (child / "consent-native-supervisor.mjs").write_text("// synthetic\n")
     (grandchild / "audit.json").write_text("{}\n")
     stage = _staged_manifest(home, PARENT).parent.parent
-    command = (
-        f"set +e\nenv -u NODE_OPTIONS LOCAL_OPERATOR_SCRATCHPAD={child} PYTHONPATH={home}/work "
+    assign = f"LOCAL_OPERATOR_SCRATCHPAD={scratch_value} " if scratch_value else ""
+    return (
+        f"set +e\nenv -u NODE_OPTIONS {assign}PYTHONPATH={home}/work "
         f"python3 {home}/work/run_bounded.py --contract=command-status --timeout 170 -- "
         f"node {child}/consent-native-supervisor.mjs --manifest {stage}/bundle/manifest.json "
         f"--binding-audit {grandchild}/audit.json 2>&1 | tee {stage}/native-run.log\n"
         'rc=${PIPESTATUS[0]}\nexit "$rc"'
     )
-    parent = _tree_verdict(home, command, PARENT, home / "work")
-    assert parent.risk is Risk.LOW, parent.reasons
-    assert not any("NODE_OPTIONS" in r for r in parent.reasons)
-    assert _tree_verdict(home, command, STRANGER, home / "work").risk is Risk.HIGH
+
+
+def test_case_c_parent_runs_descendants_files_under_env_unset(home: Path) -> None:
+    """Case C's files are LOW; the child's pad ROOT in an assignment is HIGH.
+
+    As filed (transcript a7450d93932d), the launcher also set
+    ``LOCAL_OPERATOR_SCRATCHPAD=<child pad ROOT>``. A pad root handed to opaque
+    code is the QA-M1 wipe shape, so that one mention stays HIGH by design
+    (PR #3906 round 1; no carve-out keyed on a variable name) and the judge
+    gets its provenance (next test). The files it runs and reads stay LOW.
+    """
+    _tree(home)
+    child = _pad(home, CHILD)
+    as_filed = _tree_verdict(home, _case_c(home, str(child)), PARENT, home / "work")
+    assert as_filed.risk is Risk.HIGH, as_filed.reasons
+    assert [t.target.path for t in as_filed.flagged_targets] == [str(child)]
+    assert not any("NODE_OPTIONS" in r for r in as_filed.reasons)
+    for value in (None, str(child / "consent-native-supervisor.mjs")):
+        verdict = _tree_verdict(home, _case_c(home, value), PARENT, home / "work")
+        assert verdict.risk is Risk.LOW, (value, verdict.reasons)
+    assert _tree_verdict(home, _case_c(home, None), STRANGER, home / "work").risk is Risk.HIGH
+
+
+@pytest.mark.asyncio
+async def test_case_c_judge_is_told_the_root_assignment_provenance(home: Path) -> None:
+    """The judge receives proved facts: whose root, how it arrived, no delete op."""
+    _tree(home)
+    judge = _RecordingJudge()
+    command = _case_c(home, str(_pad(home, CHILD)))
+    outcome = await _check(home, command, PARENT, [], judge)
+    assert outcome.blocked and len(judge.prompts) == 1
+    prompt = judge.prompts[0]
+    for fact in (
+        f"session {CHILD} is this session's descendant in one task tree",
+        "the path is that session's scratchpad root",
+        "it reaches this call only as the inline env assignment LOCAL_OPERATOR_SCRATCHPAD=…",
+        "no recognised delete or write op names it",
+    ):
+        assert fact in prompt, (fact, prompt)
 
 
 @pytest.mark.parametrize(
@@ -1025,7 +1059,8 @@ def test_env_unset_value_is_not_the_program() -> None:
     )
 
     assert "u" in _WRAPPER_VALUE_FLAGS["env"]
-    assert "--unset" in _WRAPPER_LONG_VALUE_FLAGS
+    # Env-only (review F2 on PR #3906): never a value flag of sudo/nice/timeout.
+    assert "--unset" not in _WRAPPER_LONG_VALUE_FLAGS
     resolution = resolve_command(
         "env -u NODE_OPTIONS node /x/.local-operator/sessions/s/scratchpad/a.mjs",
         cwd="/tmp",
@@ -1043,6 +1078,112 @@ def test_subagent_ancestors_follows_parent_links_only(home: Path) -> None:
     assert prov.subagent_ancestors(PARENT, state_root=state) == []
     assert prov.task_tree_root(GRANDCHILD, state_root=state) == PARENT
     assert prov.task_tree_root(PARENT, state_root=state) == PARENT
+
+
+# -- 8b. PR #3906 round 1: the lineage credit is a FILE read credit ----------------------
+
+_OPAQUE_RMSYNC = (
+    'node -e \'const f=require("fs");f["rm"+"Sync"](process.argv[1],{recursive:true})\''
+)
+_OPAQUE_RMTREE = 'python3 -c \'import shutil as s,sys;getattr(s,"rm"+"tree")(sys.argv[1])\''
+
+
+@pytest.mark.parametrize(
+    ("reader", "owner", "program", "sub"),
+    [
+        (CHILD, PARENT, _OPAQUE_RMSYNC, ""),  # QA M1: the parent's pad ROOT
+        (CHILD, PARENT, _OPAQUE_RMSYNC, "ui1888-native-stage-ehzeemcn"),  # M2: a dir
+        (PARENT, CHILD, _OPAQUE_RMTREE, ""),  # M6: a child's pad root
+        (PARENT, CHILD, "node ~/x", ""),  # D7: opaque script file, pad root
+        (GRANDCHILD, PARENT, "node ~/x", "ui1888-native-stage-ehzeemcn/bundle"),
+    ],
+)
+def test_opaque_program_on_a_lineage_directory_stays_high(
+    home: Path, reader: str, owner: str, program: str, sub: str
+) -> None:
+    """QA Q1: opaque code handed a lineage pad ROOT or DIRECTORY keeps the HIGH."""
+    _tree(home)
+    _staged_manifest(home, owner)
+    target = _pad(home, owner) / sub if sub else _pad(home, owner)
+    verdict = _tree_verdict(home, f"{program} {target}", reader, home / "work")
+    assert verdict.risk is Risk.HIGH, verdict.reasons
+
+
+def test_opaque_program_on_a_lineage_regular_file_is_low(home: Path) -> None:
+    """The three field shapes pass regular files only, so they keep the credit."""
+    _tree(home)
+    manifest = _staged_manifest(home, PARENT)
+    for program in (_OPAQUE_RMSYNC, "node ~/x"):
+        verdict = _tree_verdict(home, f"{program} {manifest}", CHILD, home / "work")
+        assert verdict.risk is Risk.LOW, (program, verdict.reasons)
+
+
+def test_lineage_symlink_or_missing_path_gets_no_credit(home: Path) -> None:
+    """A link (even to a lineage file) or a missing path is not a pinned file."""
+    _tree(home)
+    manifest = _staged_manifest(home, PARENT)
+    link = _pad(home, PARENT) / "m-link.json"
+    link.symlink_to(manifest)
+    for target in (link, _pad(home, PARENT) / "missing.json"):
+        verdict = _tree_verdict(home, f"node -e 'x' {target}", CHILD, home / "work")
+        assert verdict.risk is Risk.HIGH, (target, verdict.reasons)
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        "sed -n 's/x/rm -rf ~/e' {f}",  # QA B8: the ``s`` flag ``e``
+        "sed '1e rm -rf ~/work' {f}",  # the ``e`` command
+        "sed -f ~/x {f}",  # QA B9: script in a file
+        "sed --file=$HOME/x {f}",
+        "sed -nf ~/x {f}",
+    ],
+)
+def test_executing_sed_on_a_lineage_file_gets_no_read_credit(home: Path, script: str) -> None:
+    """QA Q2: a sed that runs code is an executor, not a reader."""
+    _tree(home)
+    manifest = _staged_manifest(home, CHILD)
+    verdict = _tree_verdict(home, script.format(f=manifest), PARENT, home / "work")
+    assert verdict.risk is Risk.HIGH, verdict.reasons
+
+
+def test_bsd_sed_capital_i_is_an_in_place_write(home: Path) -> None:
+    """Review F1: BSD ``sed -I`` edits in place, suffix or not, like ``-i``."""
+    _tree(home)
+    manifest = _staged_manifest(home, PARENT)
+    for flags in ("-I ''", "-I.bak", "-nI ''"):
+        command = f"sed {flags} 's/a/b/' {manifest}"
+        verdict = _tree_verdict(home, command, CHILD, home / "work")
+        assert verdict.risk is Risk.HIGH, (flags, verdict.reasons)
+        assert any(
+            t.op == "overwrite"
+            for t in resolve_command(
+                command, cwd=str(home / "work"), env={"HOME": str(home)}, home=str(home)
+            ).targets
+        ), flags
+
+
+def test_unset_is_an_env_only_long_value_flag(home: Path) -> None:
+    """Review F2: ``sudo --unset rm -rf X`` still ranks the ``rm``."""
+    (home / "work" / "keep.txt").write_text("x\n")
+    plain = _verdict(home, f"sudo rm -rf {home}/work").risk
+    assert plain is not Risk.LOW
+    assert _verdict(home, f"sudo --unset rm -rf {home}/work").risk is plain
+    assert _verdict(home, f"env --unset FOO rm -rf {home}/work").risk is plain
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "env -u FOO -S 'rm -rf ~/.local-operator'",
+        "env --unset FOO -S 'rm -rf ~/.local-operator'",
+        "env -i -u FOO --split-string='rm -rf ~/.local-operator'",
+        "env -iS 'rm -rf ~/.local-operator'",
+    ],
+)
+def test_env_split_string_after_other_options_is_not_dropped(home: Path, command: str) -> None:
+    """``-S`` anywhere in env's option prefix runs a command line: never LOW."""
+    assert _verdict(home, command).risk is not Risk.LOW
 
 
 def test_tracked_script_with_uncommitted_edits_is_high(home: Path) -> None:
