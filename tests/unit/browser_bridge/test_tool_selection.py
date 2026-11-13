@@ -544,7 +544,7 @@ async def test_request_access_on_a_headless_node_queues_no_invisible_prompt(monk
         "t", {"action": "request_access", "url": "https://example.com"}, None, None, context
     )
     assert calls == []
-    assert result.details["state"] == "unavailable_on_node"
+    assert result.details is not None and result.details["state"] == "unavailable_on_node"
     assert "cannot open sites on a headless node" in result.text
     assert "popup" not in result.text
 
