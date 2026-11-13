@@ -101,6 +101,32 @@ def render_retry_after(ms: float | int | None) -> str:
     return f"{max(1, int(seconds / 60.0 + 0.5))} min"
 
 
+def render_waited(seconds: float) -> str:
+    """``1 s`` / ``7 min 30 s``: how long a turn ACTUALLY waited, never rounded up.
+
+    The forward twin (:func:`render_retry_after`) rounds to the nearest 5 s with a
+    5 s floor, which is right for a hint and wrong for a past fact: a 1.5 s wait
+    must not read as five seconds. Minutes keep their seconds (floored) so the
+    default 450 s bound reads as itself, not as "7 min".
+    """
+    whole = max(1, int(max(0.0, float(seconds))))
+    if whole < 60:
+        return f"{whole} s"
+    minutes, rest = divmod(whole, 60)
+    return f"{minutes} min {rest} s" if rest else f"{minutes} min"
+
+
+def render_owner_wait_expired(
+    label: str, owner: str, waited_s: float, last_seen_s: float | None, login: str
+) -> str:
+    """The ``owner_offline`` sentence for a turn that waited its bound (PR-D)."""
+    return (
+        f"No credential for '{label}' is reachable: this turn waited {render_waited(waited_s)} "
+        f"for {owner}, which owns it and was last seen {render_last_seen(last_seen_s)}. "
+        f"Bring {owner} online and send again, or run '{login}' here to use your own account."
+    )
+
+
 def render_broker_error(
     error: BrokerError,
     *,

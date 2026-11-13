@@ -586,6 +586,26 @@ class MeshCredentialClient:
             granted = self.state.last_grant_from(device)
             if granted:
                 stamps.append(granted)
+        seen = self.owner_seen_at(device)
+        if seen is not None:
+            stamps.append(seen)
+        if not stamps:
+            return None
+        return max(0.0, time.time() - max(stamps))
+
+    def owner_seen_at(self, device: str) -> float | None:
+        """When this device's relay last saw a LINK frame from ``device``, or ``None``.
+
+        ``member.last_seen_at`` across this device's networks: the relay writes it
+        when it admits the owner's link (forced) and, throttled, as frames arrive
+        (``RelayServer.note_link_activity``). Deliberately WITHOUT the last grant
+        :meth:`owner_last_seen_s` also counts: a turn waiting for the owner
+        (``store._OwnerWait``) makes no grants, so only a link frame can mean "the
+        owner is back". File reads only; never a dial.
+        """
+        if not device:
+            return None
+        stamps: list[float] = []
         try:
             from local_operator.network import store
 
@@ -594,10 +614,8 @@ class MeshCredentialClient:
                 if member is not None and member.last_seen_at:
                     stamps.append(float(member.last_seen_at))
         except Exception:  # noqa: BLE001 — a missing observation is not a failure
-            pass
-        if not stamps:
             return None
-        return max(0.0, time.time() - max(stamps))
+        return max(stamps) if stamps else None
 
     # -- refusal cache ------------------------------------------------------
 
@@ -898,7 +916,7 @@ class MeshCredentialClient:
             from local_operator.network.credentials.github import is_github_key
 
             if is_github_key(key):
-                cached = self.grants.get(key, session_id)
+                cached = self.live_grant(key, session_id)
                 if cached is not None:
                     return cached
             else:
@@ -1115,6 +1133,48 @@ class MeshCredentialClient:
             return restriction or "not_a_holder", stamp
         return "", stamp
 
+    def live_grant(self, key: str, session_id: str) -> Grant | BrokerError | None:
+        """The cached grant for ``(key, session_id)`` IF this device may still serve it.
+
+        THE ONE DOOR FOR EVERY NO-DIAL CACHE SERVE (PR #3920 review M1 / QA
+        Q-R1-1). A panic (raised here or received) only latches ``record.trust``;
+        nothing tells an in-process :class:`GrantCache` about it, so a serve that
+        read the cache directly — the ``github`` gate in :meth:`request_grant_sync`,
+        MCP's ``BrokeredBearerAuth._live_bearer`` — kept handing out a live bearer
+        for up to the grant's expiry after the panic. Every cached-grant read that
+        may hand a bearer to a caller goes through here; a new one must too.
+
+        Returns ``None`` when nothing usable is cached (the caller dials, as
+        before), the grant when the slot is live AND :meth:`_self_membership_active`
+        holds, and otherwise the persistent network deny
+        (:meth:`_invalidate_membership_scope`, which drops every slot this device
+        borrowed) as a :class:`BrokerError`.
+
+        The store read happens only on a cache hit, so a miss costs nothing new.
+        The no-dial paths keep their own later checks (``_hold_admission`` inside
+        the policy transaction for the provider hot read and the hold); this is
+        the fence that must hold BEFORE anything is served. PR #3922 (offline
+        lease) adds a trust check in ``_hold_admission``: it should route its cache
+        read through this helper rather than add a parallel one — keep the name.
+        """
+        from local_operator.network.credentials.effective import note_resolution
+        from local_operator.network.credentials.held_policy import PolicyUnknown
+
+        cached = self.grants.get(key, session_id)
+        if cached is None:
+            return None
+        if self._self_membership_active():
+            return cached
+        try:
+            lost = self._invalidate_membership_scope(key)
+        except PolicyUnknown:
+            # The persistent deny could not be written; the in-process slots
+            # still go, so this process serves nothing either way (fail closed).
+            self.grants.drop_borrowed(self.self_device)
+            lost = self._policy_error(key, "not_a_holder")
+        note_resolution(self.root, key, lost)
+        return lost
+
     def _serve_cached(
         self, key: str, session_id: str, *, model_id: str, selection: dict[str, Any]
     ) -> Grant | BrokerError | None:
@@ -1158,7 +1218,9 @@ class MeshCredentialClient:
 
         if is_mcp_key(key) or is_device_bound_provider(key):
             return None
-        held = self.grants.get(key, session_id)
+        held = self.live_grant(key, session_id)
+        if isinstance(held, BrokerError):
+            return held
         reuse = self.grants.reuse_stamp(key, session_id)
         if held is None or reuse is None:
             return None
@@ -3085,12 +3147,28 @@ class MeshCredentialClient:
             dropped.append(key)
         return dropped
 
+    def self_membership_active(self) -> bool:
+        """Public read of :meth:`_self_membership_active`, for the owner-wait hint."""
+        return self._self_membership_active()
+
     def _self_membership_active(self) -> bool:
         """Whether this device is still a live member of its network.
 
         No record, an unreadable store, a missing self row or an inactive one all
         answer ``False``: the question is permission to keep using a bearer, and
         every failure mode of the proof must fail closed.
+
+        A network this device no longer TRUSTS answers ``False`` too. ``lop network
+        panic`` (raised here, or received from a peer) only latches
+        ``record.trust = "untrusted"``; it never touches membership, so a check on
+        ``member.active`` alone let the owner-unreachable hold keep serving the held
+        bearer until its own expiry — and after a panic the owner IS unreachable,
+        because the latch closes every link. Anything but exactly ``"active"``
+        (``untrusted``, an unknown future state) fails closed: the panic's promise
+        is that this network's credentials stop now, and re-trusting
+        (``lop network trust --active``) brings fresh grants via the online path
+        rather than resurrecting the held ones (the deny this verdict triggers is
+        persistent by design).
         """
         if not self.network_id:
             return True
@@ -3100,6 +3178,8 @@ class MeshCredentialClient:
             for record in store.list_networks(self.root):
                 if record.network_id != self.network_id:
                     continue
+                if record.trust != "active":
+                    return False
                 member = record.self_member()
                 return bool(member is not None and member.active)
             return False

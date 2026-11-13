@@ -466,6 +466,13 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "``sessions/``, never an entry inside one: the copy set must not carry it, no "
         "retention/cleanup path may walk it, and its only removal path is the user's",
     ),
+    "local_operator/network/routing_sync.py": (
+        1,
+        "``CHAIN_PREFIX`` ('fallbackChains.') prefixes a dotted settings KEY -- one "
+        "routing unit per ``retry.fallbackChains`` key, mirrored between devices by the "
+        "definitions sync -- never a path in a session directory, so nothing under it "
+        "is a session entry to copy or exclude.",
+    ),
     "local_operator/session/cold_metadata.py": (
         1,
         "``CACHE_DIRNAME`` ('cold_replay'): the segment under the DEVICE cache root "
