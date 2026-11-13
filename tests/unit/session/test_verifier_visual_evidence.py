@@ -436,15 +436,54 @@ async def test_late_inspection_requires_actual_image_delivery(
     from local_operator.harness import subagent
     from local_operator.harness.verifier import VerifierLimits
 
+    # The capped variant pins an ORDERING, not a duration: the wall fires after
+    # the child's answer exists (late image already on the wire) but before its
+    # job settles, so the verdict must be rescued from that answer. A real 1 s
+    # wall raced the child's own startup instead -- at load 30-60 the first
+    # provider request alone arrived 0.38-1.01 s after launch, so the wall
+    # often cancelled the child before the late inspection was ever requested
+    # (`[0]`, even `[]`) and the INCONCLUSIVE rows passed their status check by
+    # coincidence. Here the wall "elapses" exactly when the child reports
+    # completion: the verifier's settled event wakes once while still unset,
+    # which is the branch a timer expiry takes (`first_of` returns, settle
+    # unset, no overshoot -> "wall"). The real timer arithmetic stays covered by
+    # test_verify_completion.py::test_wall_cap_cancels_a_slow_child.
+    wall_elapsed = asyncio.Event()
     if capped:
         finish = subagent._finish_child_browser
 
         async def delayed(child, comms, job_id, status, *, parent_session=None):
             if status == "completed":
+                wall_elapsed.set()
                 await asyncio.sleep(30)
             return await finish(child, comms, job_id, status, parent_session=parent_session)
 
         monkeypatch.setattr(subagent, "_finish_child_browser", delayed)
+
+    class SettledOrWall:
+        """The job's real settled event; its first wait also ends at the wall."""
+
+        def __init__(self, real: asyncio.Event) -> None:
+            self._real = real
+            self._armed = True
+
+        def is_set(self) -> bool:
+            return self._real.is_set()
+
+        async def wait(self) -> bool:
+            if not self._armed:
+                return await self._real.wait()
+            self._armed = False
+            waiters = [
+                asyncio.ensure_future(self._real.wait()),
+                asyncio.ensure_future(wall_elapsed.wait()),
+            ]
+            try:
+                await asyncio.wait(waiters, return_when=asyncio.FIRST_COMPLETED)
+            finally:
+                for waiter in waiters:
+                    waiter.cancel()
+            return self._real.is_set()
 
     captured = []
     requests = []
@@ -517,6 +556,13 @@ async def test_late_inspection_requires_actual_image_delivery(
             (VerifierEvidenceItem("late", ImageContent(data="YnJva2Vu") if corrupt else image()),)
         )
         parent = make_parent(tmp_path, WireTree(lambda _: []))
+        if capped:
+            real_settled_event = parent.jobs.settled_event
+            monkeypatch.setattr(
+                parent.jobs,
+                "settled_event",
+                lambda job_id: SettledOrWall(real_settled_event(job_id)),
+            )
         parent._model = parent.model.model_copy(
             update={"supports_images": supports, "supports_images_stated": True}
         )
@@ -526,7 +572,9 @@ async def test_late_inspection_requires_actual_image_delivery(
                 claim="done",
                 typed_evidence=VerifierEvidence(),
                 host_tools=[inspector.tool()],
-                limits=VerifierLimits(wall_s=1 if capped else 10),
+                # A ceiling, not the ordering under test: the capped rows end at
+                # `wall_elapsed` above and finish in ~1 s even at load 60.
+                limits=VerifierLimits(wall_s=60 if capped else 10),
             )
             assert result.status == expected, result
             image_counts = [
