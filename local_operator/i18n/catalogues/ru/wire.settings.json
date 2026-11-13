@@ -409,6 +409,8 @@
   "wire.settings.network_credentials_github_repositories.placeholder": "damianvtran/scratch, damianvtran/sandbox",
   "wire.settings.network_credentials_grant_ttl_s.help": "Максимальный срок, в течение которого устройство может пользоваться логином, заимствованным у владельца, прежде чем запросит его заново; то есть как долго логин отозванного или офлайн-владельца продолжает работать в другом месте. Никогда не дольше самого токена.",
   "wire.settings.network_credentials_grant_ttl_s.label": "Срок жизни заимствованного логина (сек)",
+  "wire.settings.network_credentials_offline_hold_s.help": "Сколько времени другое устройство продолжает пользоваться уже заимствованным логином, пока устройство-владелец недоступно (в спящем режиме или офлайн). Никогда не дольше самого токена; действуют оба значения — владельца и этого устройства, — и выигрывает меньшее.",
+  "wire.settings.network_credentials_offline_hold_s.label": "Удержание логина в отсутствие владельца (сек)",
   "wire.settings.network_listen_address.help": "127.0.0.1 — только исходящие; 0.0.0.0 — все; или один адрес.",
   "wire.settings.network_listen_address.label": "Адрес прослушивания",
   "wire.settings.network_max_handshakes.help": "Неаутентифицированные соединения, которые ретранслятор держит одновременно. Сопряжение занимает одно на секунды до ввода кода; всё сверх лимита отбрасывается при приёме, без ответного кадра.",

@@ -409,6 +409,8 @@
   "wire.settings.network_credentials_github_repositories.placeholder": "damianvtran/scratch, damianvtran/sandbox",
   "wire.settings.network_credentials_grant_ttl_s.help": "कोई डिवाइस मालिक से उधार लिया लॉगिन दोबारा माँगने से पहले अधिकतम कितनी देर इस्तेमाल कर सकता है, और इसी से तय होता है कि रद्द या ऑफ़लाइन मालिक का लॉगिन कहीं और कितनी देर चलता रहता है। टोकन से कभी ज़्यादा नहीं।",
   "wire.settings.network_credentials_grant_ttl_s.label": "उधार लॉगिन की आयु (s)",
+  "wire.settings.network_credentials_offline_hold_s.help": "जब किसी लॉगिन का मालिक डिवाइस पहुँच से बाहर हो (स्लीप में या ऑफ़लाइन), तब कोई दूसरा डिवाइस पहले से उधार लिया लॉगिन कितनी देर इस्तेमाल करता रह सकता है। टोकन से कभी ज़्यादा नहीं; मालिक और इस डिवाइस, दोनों के मान लागू होते हैं, और जो छोटा हो वही चलता है।",
+  "wire.settings.network_credentials_offline_hold_s.label": "मालिक के दूर रहने पर उधार लॉगिन की मोहलत (s)",
   "wire.settings.network_listen_address.help": "127.0.0.1 = सिर्फ़ डायल; 0.0.0.0 = सब; या एक पता।",
   "wire.settings.network_listen_address.label": "सुनने का पता",
   "wire.settings.network_max_handshakes.help": "यह रिले एक बार में कितने अप्रमाणित कनेक्शन रखेगा। पेयरिंग कोड टाइप होने तक के सेकंडों भर एक कनेक्शन रोकती है; सीमा से ऊपर का हर कनेक्शन accept पर ही गिरा दिया जाता है, बिना कोई reply फ़्रेम।",
