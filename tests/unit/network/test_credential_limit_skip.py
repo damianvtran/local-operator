@@ -229,7 +229,9 @@ def _borrower_root(tmp_path: Path, owner_root: Path) -> Path:
 class _NoLocalLogins:
     """The borrower has no login of its own: every serve is a borrow."""
 
-    async def get_api_key(self, *_a: Any, **_k: Any) -> None:
+    # ``str | None`` (not ``None``) so subclasses that do hold a key override it
+    # with a compatible signature.
+    async def get_api_key(self, *_a: Any, **_k: Any) -> str | None:
         return None
 
     async def get_oauth_access(self, *_a: Any, **_k: Any) -> None:
@@ -715,7 +717,10 @@ class _LocalFallbackKey(_NoLocalLogins):
 
     FALLBACK_PROVIDER = "openai"
 
-    async def get_api_key(self, provider: str, *_a: Any, **_k: Any) -> str | None:
+    async def get_api_key(self, *args: Any, **kwargs: Any) -> str | None:
+        # Same open signature as the base; the store's first positional is the
+        # provider/credential id (``auth_store.get_api_key(provider)``).
+        provider = args[0] if args else kwargs.get("provider")
         return "local-fallback-key" if provider == self.FALLBACK_PROVIDER else None
 
 

@@ -292,7 +292,10 @@ def _classify(
     out: dict[str, dict[str, str]] = {}
     for unit, value in disk.items():
         rec = recorded.get(unit)
-        if _rec_matches(rec, value):
+        # ``_rec_matches`` already answers False for a missing record; the explicit
+        # ``is not None`` only lets the type checker see that ``rec`` is a mapping on
+        # the mirror branch. Behaviour is unchanged.
+        if rec is not None and _rec_matches(rec, value):
             out[unit] = {"source": "mirror", "origin": str(rec.get("origin") or "")}
         elif _is_default(unit, value, defaults):
             out[unit] = {"source": "default", "origin": ""}

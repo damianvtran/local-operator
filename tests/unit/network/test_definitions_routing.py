@@ -401,14 +401,16 @@ def test_the_model_credential_row_names_the_chain_only_when_there_is_one() -> No
     from local_operator.network import readiness
 
     server = NS(identity=NS(device_id=HEAD_DEVICE), _member_name=lambda _d: "node")
-    bare_row = {"detail": "node is served by its own login"}
+    # ``dict[str, Any]`` like ``_attach_failover``'s ``row``: it adds a nested
+    # ``observed`` mapping, so a ``dict[str, str]`` inference would be wrong.
+    bare_row: dict[str, Any] = {"detail": "node is served by its own login"}
     readiness._attach_failover(  # noqa: SLF001
         bare_row, {"failover": {"hops": [], "model_fallback": True}}, server=server
     )
     assert bare_row["detail"] == "node is served by its own login"
     assert bare_row["observed"]["failover"]["hops"] == []
 
-    row = {"detail": "node is served by its own login"}
+    row: dict[str, Any] = {"detail": "node is served by its own login"}
     fact = {"hops": HEAD_CHAIN, "source": "mirror", "origin": OTHER_DEVICE, "model_fallback": True}
     readiness._attach_failover(row, {"failover": fact}, server=server)  # noqa: SLF001
     assert row["detail"].endswith(" (mirrored from node)."), row
