@@ -1,8 +1,8 @@
 {
-  "tunnel.status.create.conflict_unmatched": "Radient cho biết đã có một đường hầm cho yêu cầu này, nhưng danh sách đường hầm của lần đăng nhập này không có bản ghi khớp duy nhất. Hãy kiểm tra lop tunnel list, rồi kết nối bằng lop tunnel connect --tunnel-id <id>.",
-  "tunnel.status.gateway.listening_http_status": "Có chương trình đang lắng nghe trên cổng chuyển tiếp 127.0.0.1:{port}, nhưng nó trả lời kiểm tra tình trạng bằng HTTP {status}: có thể một chương trình khác đang chiếm cổng, hoặc cổng chuyển tiếp đang gặp sự cố. Cài đặt lại sẽ không giúp được.",
-  "tunnel.status.gateway.listening_timed_out": "Cổng chuyển tiếp cục bộ đang lắng nghe trên 127.0.0.1:{port}, nhưng phản hồi kiểm tra tình trạng đã hết thời gian chờ; cài đặt lại sẽ không giúp được.",
-  "tunnel.status.gateway.listening_unreadable": "Cổng chuyển tiếp cục bộ đang lắng nghe trên 127.0.0.1:{port}, nhưng không đọc được phản hồi kiểm tra tình trạng; cài đặt lại sẽ không giúp được.",
+  "tunnel.status.create.conflict_unmatched": "Radient cho biết đã có một tunnel cho yêu cầu này, nhưng danh sách tunnel của lần đăng nhập này không có bản ghi khớp duy nhất. Hãy kiểm tra lop tunnel list, rồi kết nối bằng lop tunnel connect --tunnel-id <id>.",
+  "tunnel.status.gateway.listening_http_status": "Có chương trình đang lắng nghe trên cổng 127.0.0.1:{port} của gateway chuyển tiếp, nhưng nó trả lời kiểm tra tình trạng bằng HTTP {status}: có thể một chương trình khác đang chiếm cổng, hoặc gateway đang gặp sự cố. Cài đặt lại sẽ không giúp được.",
+  "tunnel.status.gateway.listening_timed_out": "Gateway chuyển tiếp cục bộ đang lắng nghe trên 127.0.0.1:{port}, nhưng phản hồi kiểm tra tình trạng đã hết thời gian chờ; cài đặt lại sẽ không giúp được.",
+  "tunnel.status.gateway.listening_unreadable": "Gateway chuyển tiếp cục bộ đang lắng nghe trên 127.0.0.1:{port}, nhưng không đọc được phản hồi kiểm tra tình trạng; cài đặt lại sẽ không giúp được.",
   "tunnel.status.last_exit.at": "Lần dừng gần nhất của trình kết nối: {label} (lúc {at})",
   "tunnel.status.last_exit.plain": "Lần dừng gần nhất của trình kết nối: {label}",
   "tunnel.status.login.deferred_retried": "Đăng nhập: làm mới bị hoãn — sẽ tự động thử lại.",

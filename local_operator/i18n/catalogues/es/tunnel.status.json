@@ -3,13 +3,13 @@
   "tunnel.status.gateway.listening_http_status": "Algo escucha en el puerto de la pasarela de relé 127.0.0.1:{port}, pero respondió a la comprobación de estado con HTTP {status}: puede que otro programa ocupe el puerto o que la pasarela no esté funcionando bien. Reinstalar no servirá de nada.",
   "tunnel.status.gateway.listening_timed_out": "La pasarela de relé local escucha en 127.0.0.1:{port}, pero su respuesta de estado agotó el tiempo de espera; reinstalar no servirá de nada.",
   "tunnel.status.gateway.listening_unreadable": "La pasarela de relé local escucha en 127.0.0.1:{port}, pero su respuesta de estado no se pudo leer; reinstalar no servirá de nada.",
-  "tunnel.status.last_exit.at": "Última salida del conector: {label} (a las {at})",
-  "tunnel.status.last_exit.plain": "Última salida del conector: {label}",
+  "tunnel.status.last_exit.at": "Última detención del conector: {label} ({at})",
+  "tunnel.status.last_exit.plain": "Última detención del conector: {label}",
   "tunnel.status.login.deferred_retried": "Inicio de sesión: actualización aplazada — se reintentará automáticamente.",
   "tunnel.status.login.unchecked": "Inicio de sesión: no se pudo comprobar (una actualización no pudo contactar con Radient).",
   "tunnel.status.requests.heading": "Solicitudes (últimas {window}): {tally}",
   "tunnel.status.requests.no_response": "sin respuesta",
   "tunnel.status.server_unavailable.label": "Error del servidor de Radient",
-  "tunnel.status.server_unavailable.relay": "Radient respondió a la comprobación de autorización del relé de este equipo con un error temporal del servidor. No hay ningún problema con el inicio de sesión ni con este equipo; se vuelve a autorizar solo cuando Radient se recupere.",
-  "tunnel.status.server_unavailable.terminal": "Radient respondió a la comprobación de autorización del conector con un error temporal del servidor (HTTP 5xx), así que ni el inicio de sesión ni este equipo tienen la culpa. Reintenta cada 10 segundos y se vuelve a autorizar solo cuando Radient se recupere; no hace falta ningún comando local."
+  "tunnel.status.server_unavailable.relay": "Radient respondió a la comprobación de autorización del relé de este equipo con un error temporal del servidor. No hay ningún problema con el inicio de sesión ni con este equipo; volverá a autorizarse automáticamente en cuanto Radient se recupere.",
+  "tunnel.status.server_unavailable.terminal": "Radient respondió a la comprobación de autorización del conector con un error temporal del servidor (HTTP 5xx), así que ni el inicio de sesión ni este equipo tienen la culpa. Reintenta cada 10 segundos y volverá a autorizarse automáticamente en cuanto Radient se recupere; no hace falta ningún comando local."
 }
