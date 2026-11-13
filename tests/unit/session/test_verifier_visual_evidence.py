@@ -19,9 +19,7 @@ from local_operator.harness.verifier_evidence import (
 )
 from local_operator.providers.clients import OpenAICompatClient
 from tests.unit.session.test_launch_subagent import MODEL
-from tests.unit.session.test_verify_completion import (
-    TreeStream,
-)
+from tests.unit.session.test_verify_completion import TreeStream
 from tests.unit.session.test_verify_completion import config_dir as _config_dir
 from tests.unit.session.test_verify_completion import make_parent, text_turn, tool_turn
 
@@ -517,8 +515,7 @@ async def test_late_inspection_requires_actual_image_delivery(
         ]
         return httpx.Response(
             200,
-            text="".join("data: " + json.dumps(c) + "\n\n" for c in chunks)
-            + "data: [DONE]\n\n",
+            text="".join("data: " + json.dumps(c) + "\n\n" for c in chunks) + "data: [DONE]\n\n",
             headers={"content-type": "text/event-stream"},
         )
 
