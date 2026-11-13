@@ -48,6 +48,7 @@ import os
 import re
 import sys
 import time
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
@@ -531,6 +532,16 @@ def add_parser(
         "--all-peers", action="store_true", help="list every peer's sessions, merged"
     )
     net_sessions.add_argument("--create", action="store_true", help="create a session on --peer")
+    # IDEMPOTENCY FOR A RETRY (``network/create_keys.py``). Every create carries a
+    # key the relay mints; this flag lets a retry of a create whose reply was LOST
+    # send the key it was told, so the owner answers with the session it already
+    # made instead of creating a second one.
+    net_sessions.add_argument(
+        "--create-key",
+        default="",
+        metavar="KEY",
+        help="with --create: retry a create whose reply was lost, without duplicating it",
+    )
     net_sessions.add_argument("--engage", metavar="SESSION", default="", help="warm that session")
     net_sessions.add_argument("--stop", metavar="SESSION", default="", help="stop that session")
     # THE THREE LIFECYCLE ACTS RUN ON THE OWNER (design §8). They are flags on this
@@ -592,6 +603,26 @@ def add_parser(
         default="",
         help="deliver a turn to that session on its device, and wait for the outcome",
     )
+    # THE MAILBOX SPELLING OF ``--send`` (PR #3827 A1): what the agent ``send
+    # peer=`` tool runs. ``--send`` alone drives a TURN (``prompt``) and waits for
+    # it, which a busy owner parks behind its running turn; ``--mailbox`` delivers
+    # a ``peer_message`` instead, exactly as a local ``lop send`` does, and answers
+    # on mailbox admission. ``--no-wake``/``--now`` are that path's two modes.
+    net_sessions.add_argument(
+        "--mailbox",
+        action="store_true",
+        help="with --send: deliver as a peer message to its mailbox, not as a turn",
+    )
+    net_sessions.add_argument(
+        "--no-wake",
+        action="store_true",
+        help="with --send --mailbox: a quiet drop that does not wake an idle session",
+    )
+    net_sessions.add_argument(
+        "--now",
+        action="store_true",
+        help="with --send --mailbox: steer it into the running turn at the next tool call",
+    )
     net_sessions.add_argument(
         "--steer",
         metavar="SESSION",
@@ -624,6 +655,31 @@ def add_parser(
         default=None,
         metavar="N",
         help=f"with --peek: how many of the newest steps to show (default {_PEEK_DEFAULT_STEPS})",
+    )
+    # THE LOCAL PEEK'S OTHER WINDOWS, served by the OWNER from its own journal
+    # (``net_session_peek``; ``network/peek.py``). They exist so a coordinator
+    # can read a remote session's ORIGINAL request (``--head``), page
+    # (``--before-id``/``--around-id``), search (``--query``/``--regex``) and
+    # fold (``--digest``) exactly as ``sessions op='peek'`` does locally — and
+    # they work on a STORED session too, because the owner reads its disk and
+    # starts nothing. Same names and the same validation as the tool.
+    net_sessions.add_argument(
+        "--head", type=int, default=None, metavar="N", help="with --peek: the first N steps"
+    )
+    net_sessions.add_argument(
+        "--before-id", default=None, metavar="ID", help="with --peek: the steps before that entry"
+    )
+    net_sessions.add_argument(
+        "--around-id", default=None, metavar="ID", help="with --peek: the steps around that entry"
+    )
+    net_sessions.add_argument(
+        "--query", default=None, metavar="TEXT", help="with --peek: window around the newest match"
+    )
+    net_sessions.add_argument(
+        "--regex", action="store_true", default=None, help="with --peek --query: match as a regex"
+    )
+    net_sessions.add_argument(
+        "--digest", action="store_true", default=None, help="with --peek: a <=10-line fold"
     )
     # REMAINDER, so the payload is what the user typed rather than what the
     # parser makes of it: with ``nargs="*"`` every word matching a declared
@@ -3312,7 +3368,89 @@ def _cmd_credential_refresh(args: argparse.Namespace) -> int:
         )
     # A grant contains access material. Emit a new allowlisted receipt, never
     # the broker detail or a redacted copy whose future fields could leak.
-    return _emit(args, {"ok": True, "credential_name": key}, [key])
+    payload: dict[str, Any] = {"ok": True, "credential_name": key}
+    lines = [key]
+    from local_operator.network.credentials.github import is_github_key
+
+    if is_github_key(key):
+        delivery = _apply_refreshed_narrowing(detail)
+        payload["narrowing"] = delivery
+        lines.extend(_narrowing_lines(delivery))
+    return _emit(args, payload, lines)
+
+
+def _apply_refreshed_narrowing(detail: dict[str, Any]) -> dict[str, Any]:
+    """Apply a refreshed github grant's narrowing here and say what it did.
+
+    THE FIELD FINDING THIS EXISTS FOR: refresh re-minted on the owner and then
+    dropped the grant, so a widened designation never reached this device's
+    allow-list and a push to the new repo still died at ``could not read
+    Username``. The receipt carries only the LIST and its bookkeeping — never
+    the grant — and says whether anything changed.
+
+    ``applies`` is when the change governs git: ``now`` for every arm here,
+    because the force-refresh just re-minted (App: the token is narrowed
+    server-side to the list it was minted for) or re-read (PAT/gh) at the owner,
+    and the helper reads the list at use time. ``not_delivered`` is an owner
+    that sent no designation (never set, or a build older than the field): this
+    device's standing list is untouched. ``after_next_mint`` is a delivery
+    older than one already applied here — nothing was written.
+    """
+    from local_operator.network.credentials import github as github_app
+    from local_operator.network.credentials.client import MeshCredentialClient
+
+    try:
+        client = MeshCredentialClient.for_this_device(None)
+    except Exception:  # noqa: BLE001 — attribution only; the delivery still applies
+        client = None
+    result = github_app.apply_grant_narrowing(detail, client=client, root=None)
+    if not result:
+        return {
+            "delivered": False,
+            "applies": "not_delivered",
+            "repositories": list(github_app.repositories_for(None)),
+            "changed": False,
+        }
+    if result.get("error"):
+        # A REFUSED delivery: report the list this device actually holds, not the
+        # rejected one the result carries (QA Q-1 — a digest mismatch printed the
+        # delivered list as "still" in force).
+        applies = "not_applied"
+        repositories = list(github_app.repositories_for(None))
+    else:
+        applies = "after_next_mint" if result.get("stale") else "now"
+        repositories = list(result.get("repositories") or [])
+    receipt: dict[str, Any] = {
+        "delivered": True,
+        "repositories": repositories,
+        "changed": bool(result.get("changed")),
+        "applies": applies,
+    }
+    for field in ("previous", "digest", "generation", "error", "owner_unknown"):
+        if result.get(field) not in (None, ""):
+            receipt[field] = result[field]
+    return receipt
+
+
+def _narrowing_lines(delivery: dict[str, Any]) -> list[str]:
+    repositories = (
+        ", ".join(delivery.get("repositories") or []) or "none (refuses every repository)"
+    )
+    if not delivery.get("delivered"):
+        return [f"repositories: {repositories} (the owner sent no designation; unchanged here)"]
+    if delivery.get("error"):
+        return [f"repositories: not applied ({delivery['error']}); still {repositories}"]
+    if delivery.get("applies") == "after_next_mint":
+        # Matches the JSON's ``after_next_mint`` (review R1-5). On refresh this is
+        # reachable only when the owner's generation went backwards.
+        return [
+            f"repositories: {repositories} (not applied: this delivery is older than "
+            "the one already here; applies after the next mint)"
+        ]
+    state = "changed" if delivery.get("changed") else "unchanged"
+    if delivery.get("owner_unknown"):
+        state += "; the owner was not named, so delivery order was not recorded"
+    return [f"repositories: {repositories} ({state})"]
 
 
 #: The CLI's wait for the share push: one dial plus the holder's 10 s answer budget
@@ -3829,8 +3967,8 @@ def _unconfirmed_copies(network_id: str, device: str) -> int:
         state = SyncState.load(network_id)
     except Exception:  # noqa: BLE001 — an unreadable ledger confirms nothing
         return 0
-    rows = state.acks.get(device) or {}
-    return sum(1 for row in rows.values() if isinstance(row, dict) and not row.get("wiped"))
+    # Sent-but-unacknowledged copies are open too (``SyncState.dispatched``).
+    return len(state.open_copies(device))
 
 
 def _canonical_credential_key(raw: str) -> str:
@@ -4316,6 +4454,7 @@ def _cmd_member_rm(args: argparse.Namespace) -> int:
             copies=int(live.get("copies") or 0),
             wiped=int(live.get("wiped") or 0),
             timed_out=int(live.get("timed_out") or 0),
+            unacknowledged=int(live.get("unacknowledged") or 0),
         )
         return _emit(
             args,
@@ -7101,7 +7240,152 @@ def _pilot_dial_refusal(
     )
 
 
-def _cmd_pilot(args: argparse.Namespace, *, verb: str, session_id: str) -> int:
+#: The ``--peek`` flags that only the owner's journal read can serve, in the
+#: tool's field names (``sessions`` op='peek').
+_PEEK_JOURNAL_FIELDS = ("head", "before_id", "around_id", "query", "regex", "digest")
+
+
+def _peek_journal_fields(args: argparse.Namespace) -> dict[str, Any]:
+    """The journal-window flags the caller actually named (``None`` = absent)."""
+
+    return {
+        name: getattr(args, name)
+        for name in _PEEK_JOURNAL_FIELDS
+        if getattr(args, name, None) is not None
+    }
+
+
+def _peek_journal_refusal(journal: dict[str, Any], steps: int | None) -> str:
+    """The tool's own refusal for this combination, or ``""``.
+
+    The peer-regex bounds (length cap, nested-quantifier pre-check, a pattern
+    that does not compile) are checked here too, so they refuse as usage
+    errors (rc 2) before a hop, like every other malformed window (QA Q4) —
+    the owner still enforces them, and the match timeout, on its side.
+    """
+
+    from local_operator.session.peek import (
+        WirePeekRequest,
+        compile_peek_pattern,
+        peek_validation_error,
+    )
+
+    given = set(journal) | ({"steps"} if steps is not None else set())
+    request = WirePeekRequest(
+        steps=steps,
+        head=journal.get("head"),
+        before_id=journal.get("before_id"),
+        around_id=journal.get("around_id"),
+        query=journal.get("query"),
+        regex=bool(journal.get("regex")),
+        digest=bool(journal.get("digest")),
+        given=frozenset(given),
+    )
+    refusal = peek_validation_error(request, given)
+    if refusal:
+        return refusal
+    compiled = compile_peek_pattern(request, remote=True)
+    return compiled if isinstance(compiled, str) else ""
+
+
+def _peek_journal_call(
+    peer: str, session_id: str, request: dict[str, Any]
+) -> tuple[dict[str, Any] | None, str]:
+    """Ask this device's relay for the owner's journal window: ``(answer, "")``,
+    or ``(None, reason)`` when either relay's build predates the op.
+
+    Every OTHER refusal propagates: an unreachable peer, an unknown session or
+    an over-budget request is the answer, and falling back to the display tail
+    there would hide it.
+    """
+    from local_operator.network import peek as net_peek
+    from local_operator.network.relay import SLOW_REPLY_MARGIN_S
+    from local_operator.network.types import MeshRefusal
+
+    try:
+        answer = _relay_answer(
+            "peer_session_peek",
+            # The owner's search may take its whole deadline; this side waits
+            # out the relay's own margin past it plus one more for the hop home.
+            timeout=net_peek.SESSION_PEEK_DEADLINE_S + 2 * SLOW_REPLY_MARGIN_S,
+            peer=peer,
+            session_id=session_id,
+            **request,
+        )
+    except MeshRefusal as exc:
+        if exc.code in net_peek.OLD_RELAY_CODES:
+            return None, (
+                "this device's relay runs an older build without the remote peek; "
+                "restart it on the current build to read journals remotely"
+            )
+        raise
+    if answer.get("unsupported"):
+        # The reason is PEER-supplied and printed to the operator, so it goes
+        # through the shared gloss: the relay's own sentence passes unchanged,
+        # a machine token from another build is said in words.
+        from local_operator.resume import peer_reason_words
+
+        # The read sits inside the gloss call on purpose: test_reason_surfaces.py
+        # recognises a glossed read only as the gloss's argument.
+        if not answer.get("reason"):
+            return None, "that device cannot serve a journal peek"
+        return None, peer_reason_words(str(answer.get("reason") or ""))
+    return answer, ""
+
+
+def _peek_journal_receipt(
+    answer: dict[str, Any], session_id: str, device: str
+) -> tuple[dict[str, Any], list[str]]:
+    """Render the owner's journal window with the LOCAL peek's own renderer.
+
+    ``_peek_body`` is the function ``sessions op='peek'`` prints locally, fed
+    the window the owner's readers produced — so the two outputs cannot drift.
+    """
+    from local_operator.session.peek import _peek_body, window_from_wire
+
+    mode = str(answer.get("mode") or "")
+    name = str(answer.get("name") or f"session {session_id}")
+    payload: dict[str, Any] = {
+        "ok": True,
+        "verb": "peek",
+        "source": "journal",
+        "session_id": session_id,
+        "peer": device,
+        "mode": mode,
+        "name": name,
+        # The windows the caller named, as the owner read them: the tool's
+        # renderer needs the anchor/query words for the header.
+        "request": answer.get("request") if isinstance(answer.get("request"), dict) else {},
+    }
+    if mode == "digest":
+        raw_digest = answer.get("digest")
+        digest: dict[str, Any] = raw_digest if isinstance(raw_digest, dict) else {}
+        payload["digest"] = digest
+        return payload, [str(digest.get("text") or "")]
+    window = window_from_wire(answer.get("window") or {})
+    payload["window"] = answer.get("window") or {}
+    if window.miss:
+        return payload, [window.miss]
+    raw_request = answer.get("request")
+    request: dict[str, Any] = raw_request if isinstance(raw_request, dict) else {}
+    text = _peek_body(
+        name,
+        session_id,
+        mode,
+        window,
+        anchor=str(request.get("before_id") or request.get("around_id") or ""),
+        query=str(request.get("query") or "").strip(),
+    )
+    return payload, text.splitlines()
+
+
+def _cmd_pilot(
+    args: argparse.Namespace,
+    *,
+    verb: str,
+    session_id: str,
+    journal: dict[str, Any] | None = None,
+) -> int:
     """``--send``/``--steer``/``--slash``/``--peek``: one act on a session that is not here.
 
     WHY THIS DOES NOT GO THROUGH ``_relay_answer``. Every other verb in this file
@@ -7147,6 +7431,15 @@ def _cmd_pilot(args: argparse.Namespace, *, verb: str, session_id: str) -> int:
             file=sys.stderr,
         )
         return 2
+    mailbox: _MailboxMode | None = None
+    if verb == "send" and bool(getattr(args, "mailbox", False)):
+        mailbox = _MailboxMode(
+            wake=not bool(getattr(args, "no_wake", False)),
+            now=bool(getattr(args, "now", False)),
+        )
+    elif getattr(args, "no_wake", False) or getattr(args, "now", False):
+        print("--no-wake and --now go with --send --mailbox", file=sys.stderr)
+        return 2
     steps = getattr(args, "steps", None)
     # The RANGE was validated where the flag was read (``_cmd_sessions``); this
     # is only the default, for every verb — the driving acts merely ignore it.
@@ -7170,6 +7463,9 @@ def _cmd_pilot(args: argparse.Namespace, *, verb: str, session_id: str) -> int:
                     text=text,
                     config_dir=Path(config_dir()),
                     steps=int(steps),
+                    journal=journal,
+                    steps_named=getattr(args, "steps", None) is not None,
+                    mailbox=mailbox,
                 ),
                 # ONE bound around the whole act, at the number its parts add up
                 # to — the sum of the rungs alone is not a bound on the act,
@@ -7196,6 +7492,9 @@ async def _pilot_act(
     text: str,
     config_dir: Path,
     steps: int = _PEEK_DEFAULT_STEPS,
+    journal: dict[str, Any] | None = None,
+    steps_named: bool = False,
+    mailbox: "_MailboxMode | None" = None,
 ) -> tuple[dict[str, Any], list[str]]:
     """Open the target on the peer as its viewer, perform ONE act, report it.
 
@@ -7232,13 +7531,7 @@ async def _pilot_act(
         # The peer's name, the reason in words and the diagnosing command, all
         # composed in the one place that owns "a peer row becomes a viewer".
         raise MeshRefusal("peer_unreachable", unreachable_peer_sentence(session_id, row))
-    if verb == "peek" and not str(getattr(row, "live_state", "") or ""):
-        # THE LIVE-ONLY GATE (design §8.3, locked 2026-10-06): the row state is
-        # read BEFORE the viewer exists, so a stored session refuses HERE —
-        # never opened, never bound, never warmed. A read must not start a
-        # runtime on a device nobody is watching, and the sentence names the
-        # exact call that does warm it (an agent's next action IS the resume).
-        raise MeshRefusal("session_stored", _stored_peek_sentence(session_id, peer))
+    live = bool(str(getattr(row, "live_state", "") or ""))
 
     # THE DEVICE THE WORK HAPPENS ON, from the row and never from the string typed.
     # ``--peer`` names where a conversation lives, but it is not what ROUTES this
@@ -7257,6 +7550,37 @@ async def _pilot_act(
     device_id = str(getattr(row, "owner_device", "") or "")
     device = str(getattr(row, "owner_device_name", "") or device_id or peer)
     named = "" if peer in (device, device_id) else peer
+
+    fallback = ""
+    if verb == "peek" and (journal or not live):
+        # THE OWNER'S JOURNAL READ (``net_session_peek``): every journal window,
+        # and the ONLY read a stored session has — the owner answers from its
+        # own disk and starts nothing, so §8.3's "a read must never start a
+        # runtime" still holds without refusing the read. A LIVE plain tail
+        # keeps the display-window read below (it names each reply's serving
+        # model, which the journal read does not), so its output is unchanged.
+        request = dict(journal or {})
+        if steps_named:
+            request["steps"] = steps
+        answer, fallback = await asyncio.to_thread(
+            _peek_journal_call, device_id or peer, session_id, request
+        )
+        if answer is not None:
+            payload, lines = _peek_journal_receipt(answer, session_id, device)
+            if named:
+                payload["peer_named"] = named
+                lines.append(
+                    f"you named {named}; {session_id} is held by {device}, which is where this ran"
+                )
+            return payload, lines
+        if not live:
+            # THE OLD LIVE-ONLY GATE, now only for an owner too old to read its
+            # journal for us: the row state is read BEFORE any viewer exists, so
+            # a stored session is never opened, bound or warmed. The sentence
+            # names the warm-up route AND why the journal read was not possible.
+            raise MeshRefusal(
+                "session_stored", f"{_stored_peek_sentence(session_id, peer)} ({fallback})"
+            )
 
     async def _never() -> Any:
         # A remote viewer never takes over: a remote owner sets ``_can_go_cold``,
@@ -7335,6 +7659,18 @@ async def _pilot_act(
             # driving acts, because the rows come from the same synced display
             # window an attached terminal paints.
             payload, lines = await _pilot_peek(viewer, session_id, device, steps)
+            if fallback:
+                # DEGRADED, AND SAID SO: the caller asked for a journal window
+                # the owner cannot serve, so this is the live-display tail with
+                # the reason and the dropped flags named — never a tail passed
+                # off as the window that was asked for.
+                dropped = ", ".join(f"--{name.replace('_', '-')}" for name in journal or {})
+                note = f"showing the newest steps instead of {dropped}: {fallback}"
+                payload["fallback"] = fallback
+                payload["note"] = note
+                lines.insert(0, f"note: {note}")
+        elif verb == "send" and mailbox is not None:
+            payload, lines = await _pilot_mailbox(viewer, session_id, device, text, mailbox)
         elif verb == "send":
             payload, lines = await _pilot_send(viewer, session_id, device, text)
         elif verb == "steer":
@@ -7366,31 +7702,201 @@ async def _pilot_act(
     return payload, lines
 
 
+class _MailboxMode:
+    """How a ``--send --mailbox`` lands: the local ``send`` tool's two switches.
+
+    ``now`` is the ``steer`` mode (read at the next tool-call boundary of the
+    running turn); otherwise ``mailbox``, where ``wake`` decides whether an idle
+    session starts a turn for it or simply finds it next time.
+    """
+
+    __slots__ = ("wake", "now")
+
+    def __init__(self, *, wake: bool, now: bool) -> None:
+        self.wake = wake
+        self.now = now
+
+
+#: The advisory sender fields that mean something on ANOTHER device. ``pid`` and
+#: ``cwd`` name this machine's process and directory; the owner drops them for a
+#: relayed card anyway (``server._stamp_peer_sender``), so they are not sent.
+_MESH_SENDER_FIELDS = ("session_id", "conversation_name", "model_label")
+
+
+async def _pilot_mailbox(
+    viewer: Any, session_id: str, peer: str, text: str, mode: _MailboxMode
+) -> tuple[dict[str, Any], list[str]]:
+    """Deliver ``text`` to the peer session's MAILBOX — local ``send`` parity.
+
+    WHY NOT A TURN (PR #3827 A1): ``_pilot_send``'s ``prompt`` is parked behind a
+    busy owner's running turn, unacknowledged and in memory only. A
+    ``peer_message`` is what a local ``lop send`` delivers: a row read at the
+    next tool-call boundary, honouring wake/steer, and acknowledged at mailbox
+    admission — so "delivered" here means the row exists there.
+
+    The sending SESSION is advisory (read off this machine's registry by
+    ancestry: the tool's own session, or nothing from a plain shell). The
+    sending DEVICE is never claimed: the owner stamps it from the link.
+
+    AN OWNER WITHOUT THE MAILBOX (``MESH_PEER_MESSAGE_CAPABILITY`` absent) gets
+    today's prompt path for a plain send, with ``fallback: "prompt"`` and that
+    path's honest receipt. A quiet drop or a steer cannot be expressed as a turn
+    — a turn always wakes — so those are refused rather than silently changed.
+    """
+    from local_operator.mobile.peer_send import (
+        mint_peer_message_id,
+        peer_sender_identity_async,
+    )
+    from local_operator.network.types import MeshRefusal
+
+    if not viewer.owner_takes_mesh_peer_message():
+        if mode.now or not mode.wake:
+            asked = "a steer (now)" if mode.now else "a quiet drop (no wake)"
+            raise MeshRefusal(
+                "mailbox_unsupported",
+                f"{peer}'s build cannot take a mesh peer message, so {asked} cannot be "
+                f"delivered to {session_id} there; a plain send would run as a turn "
+                "instead — send without that switch, or update that device first",
+            )
+        payload, lines = await _pilot_send(viewer, session_id, peer, text)
+        payload["fallback"] = "prompt"
+        return payload, [*lines, prompt_fallback_line(peer)]
+
+    identity = await peer_sender_identity_async(os.getpid())
+    sender = {key: identity[key] for key in _MESH_SENDER_FIELDS if identity.get(key)}
+    message_id = mint_peer_message_id()
+    wire_mode = "steer" if mode.now else "mailbox"
+    payload: dict[str, Any] = {
+        "session_id": session_id,
+        "peer": peer,
+        "verb": "send",
+        "delivery_path": "mailbox",
+        "mode": wire_mode,
+        "wake": bool(mode.wake),
+        "message_id": message_id,
+    }
+    try:
+        reply = await asyncio.wait_for(
+            viewer.send_peer_message(
+                text, mode=wire_mode, wake=bool(mode.wake), sender=sender, message_id=message_id
+            ),
+            timeout=PILOT_REPLY_TIMEOUT_S,
+        )
+    except TimeoutError as exc:
+        # NOT CONFIRMED IS NOT DELIVERED: the owner's loop did not answer the
+        # admission in time, which is a failure the caller must see.
+        raise MeshRefusal(
+            "session_unreachable",
+            f"{session_id} on {peer} was too busy to confirm the message within "
+            f"{PILOT_REPLY_TIMEOUT_S:.0f}s (id {message_id}); it is not confirmed "
+            f"delivered — check `lop network sessions --peer {peer} --peek {session_id}` "
+            "before you retry",
+        ) from exc
+    except ConnectionError as exc:
+        raise MeshRefusal("session_unreachable", str(exc)) from exc
+    except RuntimeError as exc:
+        # The owner's own refusal (unengaged window, retiring runtime, …).
+        raise MeshRefusal("message_refused", f"{peer} refused the message: {exc}") from exc
+    delivery = reply.get("delivery") if isinstance(reply.get("delivery"), dict) else {}
+    duplicate = bool(delivery.get("duplicate"))
+    payload.update(
+        ok=True,
+        outcome="duplicate" if duplicate else "delivered",
+        delivery=delivery,
+        receipt=str(reply.get("detail") or "").strip(),
+    )
+    return payload, mailbox_receipt_lines(payload)
+
+
+def mailbox_receipt_lines(payload: dict[str, Any]) -> list[str]:
+    """The sentences for a ``--send --mailbox`` receipt that DELIVERED.
+
+    One builder for the CLI and the agent tool (``tool._pilot_receipt_lines``),
+    so "delivered" is worded once and always names the mode actually used.
+    """
+    session_id = str(payload.get("session_id") or "")
+    peer = str(payload.get("peer") or "")
+    message_id = str(payload.get("message_id") or "")
+    if payload.get("outcome") == "duplicate":
+        head = f"{session_id} on {peer} already had this message (id {message_id})."
+    elif payload.get("mode") == "steer":
+        head = (
+            f"delivered to {session_id} on {peer} as a steer (id {message_id}): its running "
+            "turn reads it at the next tool call."
+        )
+    elif payload.get("wake"):
+        head = (
+            f"delivered to {session_id}'s mailbox on {peer} (id {message_id}): it reads it at "
+            "the next tool call, or wakes for it if idle."
+        )
+    else:
+        head = (
+            f"delivered to {session_id}'s mailbox on {peer} (id {message_id}), quietly: an idle "
+            "session reads it on its next turn."
+        )
+    lines = [head]
+    because = str(payload.get("receipt") or "")
+    if because:
+        lines.append(f"{peer}: {because}")
+    return lines
+
+
+#: The receipt for a prompt-path send whose wait ended before the owner admitted
+#: it (PR #3827 A1). Shared by the CLI and the agent tool.
+def queued_behind_turn_lines(session_id: str, peer: str) -> list[str]:
+    return [
+        f"{session_id} on {peer} is busy: the message is queued behind its running "
+        "turn and was NOT delivered yet.",
+        f"After {PILOT_TURN_TIMEOUT_S:.0f}s it is still waiting in that runtime's "
+        "memory, and is lost if the runtime stops first. Check "
+        f"`lop --resume {session_id}` before sending it again.",
+    ]
+
+
+#: The note a mailbox send carries when the owner was too old and it ran as a turn.
+def prompt_fallback_line(peer: str) -> str:
+    return f"({peer}'s build has no mesh mailbox, so this was sent as a turn.)"
+
+
 async def _pilot_send(
     viewer: Any, session_id: str, peer: str, text: str
 ) -> tuple[dict[str, Any], list[str]]:
-    """Deliver a turn and wait for the owner's terminal outcome.
+    """Deliver a TURN (a ``prompt`` frame) and wait for the owner's terminal outcome.
 
-    ``prompt_and_wait`` rather than ``prompt`` for exactly the reason its own
-    docstring gives: ``prompt`` returns on durable ADMISSION, which a shell
-    caller cannot tell from completion. It also routes the frame to the owner's
-    ``steer`` op when the peer is already streaming — the reconciliation the
-    composer makes, kept here rather than re-decided, so a message sent into a
-    live turn is delivered rather than refused for a race the client owns.
+    ``prompt_and_wait`` sends a plain ``prompt`` (``send_command(streaming=False)``)
+    and correlates the owner's events on the id it carries. It does NOT steer: a
+    BUSY owner parks the prompt in its in-memory prompt queue and acks only when
+    the running turn ends, and a runtime disposed meanwhile loses it (PR #3827
+    A1, from a live trace). So stopping the wait proves nothing by itself, and
+    the timeout below asks the window whether the row exists before saying which
+    of the two it was. The agent ``send peer=`` tool takes ``_pilot_mailbox``
+    instead; this path serves ``sessions resume peer= prompt=``, a shell's
+    ``--send`` and an owner too old for the mailbox.
     """
     from local_operator.session.errors import RuntimeRetiring
 
     payload: dict[str, Any] = {"session_id": session_id, "peer": peer, "verb": "send"}
+    # OUR id on the user row, so a stopped wait can tell admitted from parked.
+    message_id = str(uuid.uuid4())
     try:
-        await asyncio.wait_for(viewer.prompt_and_wait(text), timeout=PILOT_TURN_TIMEOUT_S)
+        await asyncio.wait_for(
+            viewer.prompt_and_wait(text, message_id=message_id), timeout=PILOT_TURN_TIMEOUT_S
+        )
     except TimeoutError:
-        payload.update(ok=False, outcome="running", code="turn_running")
-        return payload, [
-            f"{session_id} on {peer} took the turn and is still running it.",
-            "It was admitted there, so the work is happening — this command simply "
-            f"stopped waiting at {PILOT_TURN_TIMEOUT_S:.0f}s. Open it to watch it: "
-            f"`lop --resume {session_id}`",
-        ]
+        holds = getattr(viewer, "holds_message", None)
+        if callable(holds) and holds(message_id):
+            payload.update(ok=False, outcome="running", code="turn_running")
+            return payload, [
+                f"{session_id} on {peer} took the turn and is still running it.",
+                "Its message row is there, so the work is happening — this command "
+                f"stopped waiting at {PILOT_TURN_TIMEOUT_S:.0f}s. Open it to watch it: "
+                f"`lop --resume {session_id}`",
+            ]
+        # NOT ADMITTED: parked behind the turn already running there (or the
+        # owner never answered). Never reported as delivered — it is in that
+        # runtime's memory only, and a runtime that goes away first loses it.
+        payload.update(ok=False, outcome="queued", code="queued_behind_turn")
+        return payload, queued_behind_turn_lines(session_id, peer)
     except RuntimeRetiring as exc:
         payload.update(ok=False, outcome="queued", code="runtime_retiring", error=str(exc))
         return payload, [
@@ -7745,20 +8251,27 @@ def _cmd_sessions(args: argparse.Namespace) -> int:
     # ``--steps`` IS THE SAME CLASS as ``--force`` above: it means one thing —
     # how much of a ``--peek`` window to show — so a caller who passes it beside
     # anything else (or alone) has asked for a read this command is not
-    # performing. Its range is checked against ``comms.PEEK_MAX_STEPS`` — the
-    # SAME ceiling ``hub``'s peek and the sessions tool refuse with — read here
-    # rather than copied, so the surfaces cannot come to disagree about "too
-    # many".
+    # performing.
     peek = str(getattr(args, "peek", "") or "")
     steps = getattr(args, "steps", None)
     if steps is not None and not peek:
         print("--steps applies to --peek only", file=sys.stderr)
         return 2
-    if peek and steps is not None:
-        from local_operator.harness.comms import PEEK_MAX_STEPS
-
-        if not 1 <= steps <= PEEK_MAX_STEPS:
-            print(f"--steps takes 1..{PEEK_MAX_STEPS} (asked for {steps})", file=sys.stderr)
+    # The journal windows are the same class: each describes a peek, so naming
+    # one without ``--peek`` is refused, and their combinations — ``--steps``'s
+    # range included (PR #3831 QA Q4: it used to answer in a CLI-only sentence)
+    # — are judged by the SAME validator the sessions tool and the owner apply
+    # (``session.peek.peek_validation_error``): one sentence for "over budget"
+    # on every surface, and every such refusal is a usage error (rc 2).
+    journal = _peek_journal_fields(args)
+    if journal and not peek:
+        named_flags = ", ".join(f"--{name.replace('_', '-')}" for name in journal)
+        print(f"{named_flags} applies to --peek only", file=sys.stderr)
+        return 2
+    if peek and (journal or steps is not None):
+        refusal = _peek_journal_refusal(journal, steps)
+        if refusal:
+            print(refusal, file=sys.stderr)
             return 2
 
     # THE PILOT ACTS ARE DECIDED FIRST, and that ordering is the point: they are
@@ -7819,7 +8332,7 @@ def _cmd_sessions(args: argparse.Namespace) -> int:
                 file=sys.stderr,
             )
             return 2
-        return _cmd_pilot(args, verb=verb, session_id=target)
+        return _cmd_pilot(args, verb=verb, session_id=target, journal=journal)
 
     # ARCHIVE, RESTORE AND DELETE: routed to the OWNER, never replicated (§8.1).
     # The guards, the confirmation semantics and the retention interaction stay in
@@ -7930,6 +8443,23 @@ def _cmd_sessions(args: argparse.Namespace) -> int:
             raise MeshRefusal(
                 "peer_required", "--create needs --peer: the peer mints the session id"
             )
+        typed_key = str(getattr(args, "create_key", "") or "").strip()
+        if typed_key:
+            from local_operator.network.create_keys import normalize_key
+
+            if not normalize_key(typed_key):
+                # A KEY THE CALLER NAMED ON PURPOSE IS NEVER SILENTLY REPLACED
+                # (review round 1, R1-m3 / QA Q1): the relay mints a fresh key for
+                # a malformed one, so a truncated copy-paste would create a SECOND
+                # session and re-send the first prompt — the duplicate the flag
+                # exists to prevent. Refused before anything is dialled.
+                print(
+                    f"--create-key {typed_key!r} is not a create key this device sent; "
+                    "copy the key from the create receipt whole, or drop the flag to "
+                    "make a new session",
+                    file=sys.stderr,
+                )
+                return 2
         # ``--yolo`` IS FORWARDED, NOT JUDGED HERE, and that is the granted model
         # (design §2 OQ4): the device that would RUN the session decides, checking
         # ITS member row for us — a fact this side does not hold, so a check here
@@ -8041,6 +8571,10 @@ def _cmd_sessions(args: argparse.Namespace) -> int:
                 agent_id=agent_id,
                 team=team,
                 effort=effort,
+                # ONE KEY FOR BOTH ATTEMPTS when the caller named one: the yolo
+                # fallback's first attempt was refused above the owner's mint,
+                # which reserves nothing, so the key is still free for the second.
+                create_key=str(getattr(args, "create_key", "") or ""),
                 timeout=120.0,  # a spawn plus its first turn's admission
             )
 
@@ -8079,6 +8613,13 @@ def _cmd_sessions(args: argparse.Namespace) -> int:
         # moment ago and have already scrolled past. The machine-readable
         # ``admitted`` key is unchanged — a ``--json`` consumer branches on it.
         lines = [f"session: {minted or '-'}", f"created on {peer}"]
+        if (detail.get("create_unconfirmed") or detail.get("replayed")) and not prompt:
+            # THE CREATE'S OWN REPLY WAS NOT THE ANSWER: either it was lost and the
+            # owner confirmed the id by key, or this was a retry the owner matched
+            # to the session it had already made. Either way the first turn's fate
+            # is not something this receipt saw, and the sentence says so. (With a
+            # prompt, the prompt branch below prints this same sentence.)
+            lines.append(str(detail.get("detail") or ""))
         if unattended_notice:
             # THE FALLBACK IS SAID OUT LOUD. The same sentence rides the payload
             # (``**detail`` below carries ``unattended_notice``), so a ``--json``

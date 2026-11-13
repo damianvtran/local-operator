@@ -5303,6 +5303,14 @@ class OperatorApp(App[None]):
         #: is deliberate: the alternative is a park that began before the
         #: restart staying silent forever (design note §2).
         self._remote_park_episodes: dict[tuple[str, str], str] = {}
+        #: The completion/notice forwarder (``notifications/remote_attention``),
+        #: fed by the same two park callers. Its root is resolved once here, as
+        #: the park rows' writer resolves ``config_dir()`` per call: an app
+        #: never changes config root mid-run.
+        from local_operator.notifications.remote_attention import RemoteAttentionWatcher
+        from local_operator.paths import config_dir as _attention_root
+
+        self._remote_attention = RemoteAttentionWatcher(_attention_root())
         #: `(device id, session id) -> the toast OWNER OBJECT` for episodes
         #: whose card was raised. Kept because `Toast.withdraw` retires by
         #: identity (`remote_park_notice_owner`): the object shown is the only
@@ -31256,16 +31264,25 @@ class OperatorApp(App[None]):
     def _watch_bridge_latch(self, session: Any, source: SessionInteraction) -> None:
         """Announce once, in this pane, that a pre-latch session auto stopped covering calls.
 
-        Only a session this app hosts has a local latch; a viewer's owner
-        announces through its own notice stream.
+        A session this app hosts has the real latch; a viewer facade has a
+        MIRROR of the owner's (``mirror=True``), which only redraws parked
+        cards -- the owner announces through its own notice stream.
+
+        Installed once PER LATCH, not once per source: a source's session is
+        replaced on takeover (viewer facade -> hosted ``Session``), and the new
+        session's real latch must get its own watcher.
         """
         latch = getattr(session, "bridge_taint_latch", None)
-        if latch is None or getattr(source, "_bridge_watch_installed", False):
+        if latch is None or getattr(source, "_bridge_watch_latch", None) is latch:
             return
-        source._bridge_watch_installed = True  # type: ignore[attr-defined]
+        source._bridge_watch_latch = latch  # type: ignore[attr-defined]
 
         def announce() -> None:
-            suspended = self._draft_grant_suspended(source)
+            # A viewer's MIRROR latch (``AttachedSession.bridge_taint_latch``)
+            # fires only to redraw parked cards: the owner already announced
+            # the suspension on its own notice stream, so a second notice here
+            # would say it twice.
+            suspended = not getattr(latch, "mirror", False) and self._draft_grant_suspended(source)
             from local_operator.harness.bridge_egress import grant_suspended_notice
 
             def paint() -> None:
@@ -31303,6 +31320,18 @@ class OperatorApp(App[None]):
                 enter(bridge_card_notice(source.session))
             except Exception:  # noqa: BLE001 - the setters still refuse; logged
                 logger.warning("could not re-render a parked card as latched", exc_info=True)
+                continue
+            # Followers (an attached pane, the desktop, the phone) were sent
+            # this card while it was clean; re-publish it latched on the same
+            # request id so they redraw it as Allow/Deny too (security r7 lead
+            # on #3796). Only a card this app projected carries that id.
+            handle = self._mobile_handle
+            relatch = getattr(handle, "note_approval_relatched", None)
+            if callable(relatch):
+                try:
+                    relatch(card)
+                except Exception:  # noqa: BLE001 - the owner still refuses; logged
+                    logger.warning("could not re-publish a parked card as latched", exc_info=True)
 
     def _card_setting_refused_while_latched(
         self, source: SessionInteraction
@@ -38783,6 +38812,12 @@ class OperatorApp(App[None]):
         Never raises: a notice is chrome, and both callers run where a raise
         would be reported as a failed catalog or a failed poll.
         """
+        # FINISHED TURNS AND NOTIFY ITEMS ride the same rows (remote-session
+        # parity): the shared watcher ``lop serve`` also hosts, so the head gets
+        # them whether or not a TUI is open. Edge-only writes like the park rows
+        # below, idempotent against serve's copy by the store's episode digest;
+        # ``observe`` never raises.
+        self._remote_attention.observe(rows, [peer.device_id for peer in unanswered])
         try:
             from local_operator.session.peer_rows import park_edges
 
@@ -59712,15 +59747,15 @@ class OperatorApp(App[None]):
             # connection cannot authorise: `may_loosen` is the seam's answer,
             # and writing the machine default to `auto` from here would hand a
             # read-only viewer the loosening it was refused.
-            if mode in ("ask", "on", "prompt"):
-                wanted_default = False
-            elif mode in ("auto", "off", "yolo"):
-                wanted_default = True
-            elif not mode:
-                # Bare `default` keeps the mode this session is in, the app's
-                # own reading of the same frame (`_cmd_approvals`).
-                wanted_default = self._approve_all
-            else:
+            from local_operator.harness.approval import approvals_default_target
+
+            # Bare `default` keeps the mode this session is in, the app's own
+            # reading of the same frame (`_cmd_approvals`). The table is shared
+            # with the owner's latched refusal (`TuiSessionHandle.
+            # _bridge_ack_refusal`), which must refuse every form this resolves
+            # to auto (security r1 S-1 on #3849).
+            wanted_default = approvals_default_target(mode, current_auto=self._approve_all)
+            if wanted_default is None:
                 return SlashResult(
                     kind="notice",
                     text=f"unknown approval default {mode!r} — use /approvals default "

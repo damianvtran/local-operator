@@ -353,6 +353,21 @@ class CreationRecord:
         when = time.strftime("%Y-%m-%d %H:%M", time.localtime(self.created_at))
         return f"created by this session ({self.kind}, {when})"
 
+    def ledger_fact(self) -> str:
+        """The full row for a judge brief: who, what, when and the creating command.
+
+        WHY (live case 2026-11-11, session 316765a40496): the judge read only
+        transcript evidence, which compaction had dropped for day-old
+        creations, and concluded "no evidence shows this session created it"
+        while this row sat in the ledger. The command is agent-authored, so the
+        brief fences it as data like every other target fact.
+        """
+        when = time.strftime("%Y-%m-%d %H:%M", time.localtime(self.created_at))
+        return (
+            f"ledger: created by {self.creator} (this session or its subagent), "
+            f"kind {self.kind}, at {when}, via `{self.command[:200]}`"
+        )
+
 
 _SCHEMA = (
     "CREATE TABLE IF NOT EXISTS created ("
@@ -811,6 +826,12 @@ _REGENERABLE = frozenset(
         ".eggs",
         ".cache",
         ".DS_Store",
+        # Added 2026-11-11 from the operator's finished local-operator-mobile
+        # worktrees (session 316765a40496): Expo's per-project state and a
+        # pnpm content-addressed store, both rebuilt by ``expo start`` /
+        # ``pnpm install``, made merged, change-free trees read ``dirty``.
+        ".expo",
+        ".pnpm-store",
     }
 )
 #: Basename patterns with the same standing as :data:`_REGENERABLE`:
@@ -945,8 +966,15 @@ def _only_regenerable(directory: str) -> bool:
     return True
 
 
-def worktree_state(path: str) -> str:
+def worktree_state(path: str, *, own: bool = False) -> str:
     """The removal-relevant state of a worktree path.
+
+    ``own``: the caller proved (creation ledger) that this session or its
+    subagent created the tree. Then IGNORED entries never make it dirty —
+    ``git worktree remove`` deletes them itself, and its creator made them
+    (operator escalation 2026-11-11: refusing on ignored ``.expo/`` drove
+    agents to ``--force`` and then ``rm -rf``). Tracked and untracked changes,
+    a lock, a live cwd and an unreferenced detached HEAD still count.
 
     One of ``clean``, ``dirty``, ``locked``, ``stale-initializing`` (locked
     "initializing" for over an hour, otherwise clean), ``busy`` (a live process
@@ -1048,7 +1076,7 @@ def worktree_state(path: str) -> str:
     if any(ln and not ln.startswith("!! ") for ln in ignored.splitlines()):
         return "dirty"  # a tracked change or an untracked (``??``) entry
     for line in ignored.splitlines():
-        if not line.startswith("!! "):
+        if own or not line.startswith("!! "):
             continue
         entry = line[3:].strip().strip('"').rstrip("/")
         name = os.path.basename(entry)
@@ -1073,6 +1101,41 @@ def worktree_state(path: str) -> str:
         if not (refs or "").strip():
             return "dirty"
     return "stale-initializing" if stale_initializing else "clean"
+
+
+#: How many dirty entries a judge brief or refusal reason shows per worktree.
+_MAX_DIRTY_SHOWN = 8
+
+
+def worktree_changes(path: str) -> list[str] | None:
+    """The tracked and untracked (non-ignored) ``git status`` entries of a tree.
+
+    The exact lines a judge needs to tell "unfinished work" from "finished"
+    (operator escalation 2026-11-11: a brief saying only ``dirty`` gave it
+    nothing to weigh). Ignored entries are left out on purpose: git's own
+    ``worktree remove`` deletes those. ``None`` = git could not answer.
+    """
+    out = _git(
+        ["status", "--porcelain", "--untracked-files=normal"],
+        os.path.realpath(path),
+        timeout=_WORKTREE_STATUS_TIMEOUT_S,
+    )
+    if out is None:
+        return None
+    lines = [ln.rstrip() for ln in out.splitlines() if ln.strip()]
+    if len(lines) > _MAX_DIRTY_SHOWN:
+        lines = [*lines[:_MAX_DIRTY_SHOWN], f"… and {len(lines) - _MAX_DIRTY_SHOWN} more"]
+    return lines
+
+
+def describe_changes(path: str) -> str:
+    """``worktree_changes`` as one fact phrase."""
+    changes = worktree_changes(path)
+    if changes is None:
+        return "uncommitted changes: unknown (git status failed)"
+    if not changes:
+        return "uncommitted changes: none"
+    return "uncommitted changes: " + ", ".join(changes)
 
 
 #: Bound on each ``gh pr list`` that :func:`worktree_activity` runs (one, or

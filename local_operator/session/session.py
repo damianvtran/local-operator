@@ -11066,7 +11066,7 @@ class Session:
                     # not abort the receive; absent beats guessed.
                     account_display = ""
             from local_operator.harness.message_types import (
-                BRIDGE_CONFIG_REQUEST_RULE,
+                BRIDGE_RECEIVER_RULES,
                 BRIDGE_UNTRUSTED_CLAUSE,
             )
 
@@ -11078,10 +11078,35 @@ class Session:
                 # wrap, ahead of the body, so the model reads the content as
                 # data — never as instructions from a colleague's agent.
                 f"{BRIDGE_UNTRUSTED_CLAUSE}\n"
-                # B5: a teammate's config suggestion is relayed, never applied.
-                f"{BRIDGE_CONFIG_REQUEST_RULE}\n"
+                # B5 + peer default: coordinate as peers; a teammate's config
+                # suggestion is relayed, never applied.
+                f"{BRIDGE_RECEIVER_RULES}\n"
                 f"{Session._neutralize_bridge_tag(text)}\n"
                 "</team-bridge-message>"
+            )
+        elif sender.get("mesh_device_id"):
+            # A MESH PEER WROTE THIS (``send peer=``, PR #3827 A1). Its pid names
+            # a process on another machine, so the envelope names what a REPLY
+            # needs instead: the sending session and the device, the latter
+            # stamped by this owner from the authenticated link
+            # (``server._stamp_peer_sender``) — never taken from the frame.
+            device = str(sender.get("mesh_device_name") or sender.get("mesh_device_id"))
+            from_session = str(sender.get("session_id") or "")
+            wrapped = (
+                f"<peer-session-message "
+                f"from_session={from_session!r} "
+                f"device={device!r} "
+                f"conversation={conversation!r} "
+                f"model={model_label!r}>\n"
+                f"{text}\n"
+                "</peer-session-message>\n"
+                # The exact reply call, because the local reply habit (target= /
+                # pid=) cannot reach another device.
+                + (
+                    f"(Reply with send peer={device!r} session={from_session!r}.)"
+                    if from_session
+                    else f"(It came from device {device!r}; reply with send peer={device!r}.)"
+                )
             )
         else:
             wrapped = (
@@ -18347,13 +18372,35 @@ class Session:
             agent_id=self._agent_id or "",
         )
         self._run_notified = True
+        forwarded = ""
+        if outcome.action in ("created", "updated", "revived"):
+            # A session ANOTHER device placed here: the row is in THIS device's
+            # inbox and reaches the operator only when the origin forwards it
+            # (``notifications/remote_attention``), so a bare "Notified" would
+            # tell the model the operator was told. Empty for every local session.
+            #
+            # READ BEFORE THE BANNER ROUTE, never after it: ``_route_item_banner``
+            # spawns the held-banner task, and its hold must start only once this
+            # tool call has returned (the in-view receipt that may cancel it
+            # needs the call's result row on screen). Any await between that
+            # spawn and the return yields the loop, so a slow disk read here
+            # would let the task finish inside the call and flip
+            # ``_run_notified_banner`` early (PR #3830 CI race).
+            from local_operator.notifications.remote_attention import (
+                forwarded_notice_sentence,
+            )
+
+            forwarded = await asyncio.to_thread(
+                forwarded_notice_sentence, root, self.session_id, key
+            )
         # THE BANNER, decided here because this is the only place that knows
         # the write's action, revision and priority. Best-effort: a banner is
         # chrome and the item is already durable, so a delivery failure leaves
         # an unread row rather than failing the tool call the model made.
+        # Nothing may await after this call before the return (see above).
         if raise_banner and outcome.priority == "high":
             await self._route_item_banner(root, store, outcome, title=title, body=body)
-        return _notify_sentence(outcome)
+        return _notify_sentence(outcome) + forwarded
 
     def _notification_owner(self) -> "Session | None":
         """The session whose inbox an item raised for THIS one belongs in.

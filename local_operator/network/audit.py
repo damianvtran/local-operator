@@ -608,7 +608,11 @@ DETAIL_KEYS: dict[str, frozenset[str]] = {
     # The narrowing's delivery (the github adapter's §3.4 bound): `repositories`
     # is the LIST APPLIED (a config value, never material); a refused delivery
     # carries the machine reason instead.
-    "credential.narrowing_applied": frozenset({"credential_key", "act", "sub", "repositories"}),
+    # `digest`/`generation` name WHICH owner designation landed (authoritative
+    # deliveries only), so out-of-order rows can be read in owner order.
+    "credential.narrowing_applied": frozenset(
+        {"credential_key", "act", "sub", "repositories", "digest", "generation"}
+    ),
     "credential.narrowing_refused": frozenset({"credential_key", "act", "sub", "reason"}),
     # `rows` is the deleted-row count on the member's own store — never the rows
     # themselves — so an incident review can tell a confirmed wipe from a notice

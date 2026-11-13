@@ -447,8 +447,12 @@ MEASURED_TOKENS: dict[str, int] = {
     # `receiver_last_active_s` mean — the text an agent actually reads, which
     # the round-1 draft put in an unserved docstring (QA Q-1). It is paid for by
     # tightening take_up/ack/send/dm/channels/channel_create/channel_post (net
-    # -127 chars); the rendered doc is 8,171 chars against the 8,192 cap.
-    "bridge": 1991,
+    # -127 chars); the rendered doc was 8,171 chars against the 8,192 cap.
+    # MERGE with main (2026-11-13): main's wire description moved this to 1988
+    # on its own ("Peers, not gatekeepers", +7 chars). Re-measured on the
+    # merged tree: 8,178 chars, 1993 tokens — 14 chars of headroom, so the
+    # delay clause needs no further trim.
+    "bridge": 1993,
     # Re-measured with this test's canonical isolated renderer: the read-only
     # inspect_ownership operation adds 19 opt-in tokens, not wire prompt cost.
     # 1327 -> 1424 (2026-10-16): the browser `type` secret_ref convention adds
@@ -738,7 +742,7 @@ MEASURED_TOKENS: dict[str, int] = {
     "skill": 427,
     # Advertised surface re-measured: explicit repeat + confirmed-reuse detail
     # costs +86 opt-in tokens; 3182 chars remains below the 8192-char soft cap.
-    "send": 779,
+    "send": 796,
     # Spawn's tags field/description deliberately adds 21 reference tokens.
     # RE-MEASURED 2026-10-23 (session self-identity): the description gains one
     # sentence pointing at the listing's `(this session)` marker, so the doc

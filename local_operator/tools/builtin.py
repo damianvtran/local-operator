@@ -66,16 +66,7 @@ from collections.abc import Awaitable, Callable, Iterable, Iterator, Mapping, Se
 from contextvars import ContextVar
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import (
-    TYPE_CHECKING,
-    Any,
-    BinaryIO,
-    Literal,
-    NamedTuple,
-    cast,
-    get_args,
-    get_origin,
-)
+from typing import Any, BinaryIO, Literal, NamedTuple, cast, get_args, get_origin
 from urllib.parse import parse_qsl, quote, urlparse, urlsplit, urlunsplit
 
 from pydantic import (
@@ -225,13 +216,6 @@ from local_operator.tools.spill import (
 from local_operator.tools.tool_docs import register_tool_doc_renderer
 
 logger = logging.getLogger(__name__)
-
-if TYPE_CHECKING:
-    # Annotation-only, deliberately: the peek helpers below speak in transcript
-    # entries, but this module must not import the transcript module at import
-    # time — its dependency weight belongs to the session stack, and every
-    # function that touches it imports it inside its own body.
-    from local_operator.session.transcript import TranscriptEntry
 
 # ---------------------------------------------------------------------------
 # Shared limits and helpers
@@ -16184,7 +16168,7 @@ class SendParams(BaseModel):
         default="",
         description=(
             "Message a session on ANOTHER device over the mesh (a peer name or id); "
-            "drives a turn there and returns the owner's reply."
+            "delivered to its mailbox there, like a local send."
         ),
     )
 
@@ -16463,17 +16447,50 @@ def _role_words(context: "ToolContext | None") -> "dict[str, tuple[str, ...]]":
     return role_word_set(registry)
 
 
-#: The fields that mean one thing on THIS machine's loopback/registrant
-#: substrate and nothing on the mesh — refused, never dropped, beside `peer`
-#: (design §3B).
-_MESH_LOCAL_ONLY_MODES = ("wake", "now", "patience", "model")
+#: The fields that mean one thing on THIS machine and nothing on the mesh —
+#: refused, never dropped, beside `peer` (design §3B). ``wake`` and ``now`` left
+#: this list when a mesh send became a mailbox delivery (PR #3827 A1): the owner
+#: honours both exactly as a local send's target does. ``patience`` arms a wait
+#: on this machine's reply ledger, which a mesh reply does not write; ``model``
+#: is its own act.
+_MESH_LOCAL_ONLY_MODES = ("patience", "model")
 
 
-def _mesh_send_argv(peer: str, address: str, text: str) -> list[str]:
+def _mesh_send_argv(
+    peer: str,
+    address: str,
+    text: str,
+    *,
+    mailbox: bool = False,
+    wake: bool = True,
+    now: bool = False,
+) -> list[str]:
     """The one spelling of a mesh send (design §3A): ``--json`` BEFORE the act —
     a trailing one would be delivered to the peer as payload — and the text
-    ALWAYS after ``--``, where it is DATA the CLI takes as-is to end of line."""
-    return ["network", "sessions", "--json", "--peer", peer, "--send", address, "--", text]
+    ALWAYS after ``--``, where it is DATA the CLI takes as-is to end of line.
+
+    ``mailbox`` is the ``send peer=`` spelling (a ``peer_message``, local-send
+    parity); without it ``--send`` drives a turn, which ``sessions resume peer=
+    prompt=`` still wants."""
+    flags: list[str] = []
+    if mailbox:
+        flags.append("--mailbox")
+        if now:
+            flags.append("--now")
+        elif not wake:
+            flags.append("--no-wake")
+    return [
+        "network",
+        "sessions",
+        "--json",
+        "--peer",
+        peer,
+        "--send",
+        address,
+        *flags,
+        "--",
+        text,
+    ]
 
 
 async def _execute_send_peer(
@@ -16481,13 +16498,16 @@ async def _execute_send_peer(
 ) -> ToolResult:
     """``send(peer=…)``: drive a turn in a session on ANOTHER device.
 
-    NOT THE LOOPBACK MAILBOX (design §8.1/§8.2, locked): the local path spools to
-    a registrant on this machine; this one runs the SAME pilot act the CLI drives
-    (``lop network sessions --peer P --send <id-or-name> -- <text>``), where the
-    owner admits the turn through its own prompt admission
-    (``viewer.prompt_and_wait``) and answers with a receipt carrying its reply —
-    no new wire op, no second writer, and the CLI keeps every bound and refusal.
-    This function builds the argv, relays refusals, and renders the outcome.
+    THE OWNER'S MAILBOX, OVER THE MESH (PR #3827 A1): this runs the pilot act
+    ``lop network sessions --peer P --send <id-or-name> --mailbox -- <text>``,
+    which delivers a ``peer_message`` frame — the op a local ``send`` delivers —
+    so a busy owner reads it at its next tool-call boundary instead of parking a
+    ``prompt`` behind its running turn, ``wake``/``now`` mean what they mean
+    locally, and the answer comes at mailbox admission. The owner stamps the
+    sending device from the authenticated link, so the receiver can reply with
+    ``send peer=``. An owner too old for that falls back to the turn path, whose
+    timeout is reported as NOT delivered. This function builds the argv, relays
+    refusals, and renders the outcome.
     """
     peer = params.peer.strip()
     given = params.model_fields_set
@@ -16498,9 +16518,9 @@ async def _execute_send_peer(
             tool_call_id,
             "send",
             f"{spelled} {'is a local-only mode' if len(refused) == 1 else 'are local-only modes'}"
-            " — the loopback mailbox and the model switch act on THIS machine. With "
-            "`peer` the send drives a turn on that device and returns the owner's "
-            "reply: drop `wake`/`now`/`patience`/`model` for a peer send.",
+            " — a patience wait and the model switch act on THIS machine. With "
+            "`peer` the message goes to that session's mailbox on its device: drop "
+            "`patience`/`model` for a peer send.",
         )
 
     if params.message is None or not params.message.strip():
@@ -16536,7 +16556,9 @@ async def _execute_send_peer(
         )
 
     timeout = _mesh_pilot_timeout_s()
-    argv = _mesh_send_argv(peer, address, params.message)
+    argv = _mesh_send_argv(
+        peer, address, params.message, mailbox=True, wake=bool(params.wake), now=bool(params.now)
+    )
     try:
         code, payload, stderr = await _mesh_cli_json(argv, timeout, context)
     except (asyncio.TimeoutError, TimeoutError):
@@ -16574,12 +16596,32 @@ async def _execute_send_peer(
     for key in ("code", "error", "peer_named"):
         if payload.get(key):
             details[key] = payload[key]
-    if payload.get("ok") is False:
-        # ``running``/``queued``/``failed``/``lost`` are the owner's honest
-        # NON-completions — the same states the CLI exits non-zero for, so a
-        # delivery is never read as a completion.
+    if _mesh_send_failed(payload):
+        # ``queued``/``failed``/``lost`` are the owner's honest NON-completions:
+        # not delivered yet (parked behind its running turn), no turn ran, it
+        # failed, or nobody knows. See ``_mesh_send_failed``.
         return _error(tool_call_id, "send", text, details=details)
     return _text(tool_call_id, "send", text, details=details)
+
+
+def _mesh_send_failed(payload: Mapping[str, Any]) -> bool:
+    """Is a pilot ``send`` receipt a failure the TOOL result must flag?
+
+    Only on the TURN path (``sessions resume peer= prompt=``, or an owner too old
+    for the mailbox). ``running`` there is reported ONLY when the owner's user row
+    for our message id is in the window (``network.cli._pilot_send``): admitted,
+    and still working when the CLI stopped waiting. That is a delivered message,
+    so success with ``details.outcome == "running"``. A wait that ended BEFORE
+    admission is ``queued`` (``code == "queued_behind_turn"``): the prompt is
+    parked in that runtime's memory behind its running turn and lost if it stops
+    first — NOT delivered, so an error (PR #3827 A1: an earlier revision called
+    every timeout ``running``, which would have told agents a parked message had
+    landed). The CLI keeps its non-zero exit for ``running``: a shell script
+    waiting for a reply still must not read admission as completion.
+    """
+    if payload.get("ok") is not False:
+        return False
+    return str(payload.get("outcome") or "") != "running"
 
 
 # A pathological attention turn must not retain every unique payload forever.
@@ -17454,14 +17496,15 @@ _SESSIONS_OP_DOCS: dict[str, _SessionsOpDoc] = {
     ),
     "peek": _SessionsOpDoc(
         summary="read a bounded transcript window (tail/head/cursor/search) or a"
-        " `digest` fold. With `peer`, a tail window (`steps`) read where the session"
-        " LIVES — live sessions only; `query`/`regex`/`digest` stay local.",
+        " `digest` fold. With `peer`, every window is read where the session LIVES,"
+        " from its owner's journal — stored sessions too; an owner on an older build"
+        " answers the newest `steps` of a live session instead, with the reason named.",
         example="sessions(op='peek', session='a1b2c3d4e5f6', steps=12)",
         refusals=(
             "one window at a time (`steps`/`head`/`before_id`/`around_id` are"
             " mutually exclusive); `digest` folds the newest rows alone; `regex`"
-            " needs `query`; with `peer`, `head`/`before_id`/`around_id`/`query`/"
-            " `regex`/`digest` read THIS device's transcript and are refused.",
+            " needs `query`; with `peer`, a `regex` is length-capped and"
+            " may not nest quantifiers (it runs on the owner).",
             # The step bound is DERIVED from ``comms.PEEK_MAX_STEPS`` by the
             # renderer (agent review round 1, M3) — a surface whose selling
             # point is "everything enumerable is generated" must not keep the
@@ -17595,68 +17638,16 @@ register_tool_doc_renderer("sessions", render_sessions_reference)
 
 
 def _sessions_peek_validation_error(params: SessionsParams, given: set[str]) -> str | None:
-    """``peek``'s window rules (design §3.2): one window, and windows that fit.
+    """``peek``'s window rules — ONE validator for the local tool and a mesh owner.
 
-    The window selectors are mutually exclusive because each names a DIFFERENT
-    place to read from; two at once describe no window this tool could honour,
-    and honouring one silently is the substitution the transcript reader's own
-    ``validate_page_request`` exists to refuse one level down. ``digest`` is a
-    different READ (a fold of the newest rows), so a window beside it would be
-    dropped on the floor, and a search beside it would fight over what the
-    window means — both refused for the reason the op table refuses stray
-    fields at all: a misspelled intent must not be silently ignored.
+    The body lives in ``session/peek.py`` (``peek_validation_error``) because a
+    remote peek's OWNER validates the same request against the same budgets
+    (``PEEK_MAX_STEPS``; the readers' page and scan caps), and two copies of the
+    sentences would let "over budget" read differently on the two paths.
     """
-    from local_operator.harness.comms import PEEK_MAX_STEPS
+    from local_operator.session.peek import peek_validation_error
 
-    windows = [field for field in _SESSIONS_PEEK_WINDOW_FIELDS if field in given]
-    if len(windows) > 1:
-        spelled = ", ".join(f"`{field}`" for field in windows)
-        return (
-            "peek reads one window at a time: pass at most one of `steps`, `head`, "
-            f"`before_id`, `around_id` (got {spelled})."
-        )
-    for field in ("steps", "head"):
-        value = getattr(params, field)
-        if field in given and (value is None or value < 1):
-            return f"`{field}` needs a count of at least 1."
-        if value is not None and value > PEEK_MAX_STEPS:
-            return (
-                f"`{field}={value}` is too many for one peek (max {PEEK_MAX_STEPS}); "
-                "page through with `before_id` instead."
-            )
-    for field in ("before_id", "around_id"):
-        if field in given and not str(getattr(params, field) or "").strip():
-            return f"`{field}` needs the entry id an earlier peek returned."
-
-    query = str(params.query or "").strip()
-    # Hoisted ABOVE the digest branch (round-1 review, R-1): `digest=true
-    # regex=true` was the one regex-without-query shape that validated clean
-    # and then dropped the flag on the floor. `regex` selects how `query`
-    # matches, so it needs one wherever it appears.
-    if params.regex and not query:
-        return "`regex` needs `query`: it selects how the query matches."
-    if params.digest:
-        if windows:
-            spelled = ", ".join(f"`{field}`" for field in windows)
-            return f"`digest` folds the newest rows on its own; drop {spelled}."
-        if query:
-            return (
-                "`digest` and `query` are different reads — digest folds the tail, "
-                "`query` locates one step. Pass one."
-            )
-        return None
-    # Derived from the shared tuple, so a fifth window field lands in this
-    # refusal by construction; `steps` is the one that SURVIVES beside a query
-    # (it sizes the match window).
-    non_steps = [
-        field for field in _SESSIONS_PEEK_WINDOW_FIELDS if field in given and field != "steps"
-    ]
-    if query and non_steps:
-        return (
-            "`query` locates one step, so the window is `steps=N` around the match "
-            "(default 12): drop `head`/`before_id`/`around_id` or drop `query`."
-        )
-    return None
+    return peek_validation_error(params, given)
 
 
 def _sessions_validation_error(params: SessionsParams) -> str | None:
@@ -17822,23 +17813,9 @@ def _sessions_validation_error(params: SessionsParams) -> str | None:
                 "drop it, or use `scope='all'`.",
             )
 
-    if op == "peek" and peer:
-        # v1 remote peek is a TAIL WINDOW only (design §3C): the other reads walk
-        # THIS device's transcript, so they are refused with the local route named
-        # rather than silently searching the wrong store.
-        local_only = sorted(
-            name
-            for name in ("head", "before_id", "around_id", "query", "regex", "digest")
-            if name in given
-        )
-        if local_only:
-            spelled = ", ".join(f"`{name}`" for name in local_only)
-            return _sessions_stray_field_refusal(
-                op,
-                "with `peer`, peek reads the newest `steps` rows where the session "
-                f"LIVES; {spelled} {'reads' if len(local_only) == 1 else 'read'} THIS "
-                "device's transcript — drop it, or drop `peer` for the local read.",
-            )
+    # A REMOTE peek takes every local window (head/cursors/query/regex/digest):
+    # the OWNER runs the same readers on its own journal (``net_session_peek``,
+    # ``network/peek.py``), so the validation below is the one both ends apply.
 
     if op == "peek":
         refusal = _sessions_peek_validation_error(params, given)
@@ -19325,636 +19302,65 @@ async def _sessions_stop(
 # ---------------------------------------------------------------------------
 
 
-#: Steps a peek shows when the caller names no count (design §8.2). The hard
-#: ceiling is ``comms.PEEK_MAX_STEPS`` (50, imported where it is used) — the
-#: same number ``hub``'s peek refuses with, so both peeks turn an absurd count
-#: into the same legible refusal instead of two private ideas of "too many".
-_PEEK_DEFAULT_STEPS = 12
-
-
-#: How many ROWS one page read asks for while hunting ``need`` steps. A step is
-#: one message row; a page also carries the bookkeeping rows (checkpoints, todo
-#: snapshots, spend records) that render as nothing, so the ask is a multiple
-#: of the step count and the walk reads another page only when density is worse
-#: than that. Both terms are deliberate: too small and a dense tail pays a
-#: second page read; too large and the first read stops being "the chunk that
-#: carries the window" that ``read_transcript_page`` prices at.
-#: ``_PEEK_MAX_PAGES`` bounds the walk itself: the ordinary cost is ONE read,
-#: and a journal whose tail is a wall of bookkeeping rows still terminates —
-#: the footer's cursor is then the honest continuation point.
-_PEEK_MAX_PAGES = 4
-
-
-#: Byte depth the backward needle search may scan before it returns the honest
-#: miss (design §8.1). It is the SAME 16 MiB window the reader gives its cursor
-#: locator (``transcript._PAGE_LOCATE_WINDOW_BYTES``), so "deep" means one
-#: thing in the reader and in the search that rides it; a test pins the two
-#: numbers equal so they cannot drift apart silently.
-_PEEK_SCAN_BYTES = 16 << 20
-
-
-#: Rows a digest reads from the tail (design §8.3's "~40 entries").
-_PEEK_DIGEST_ROWS = 40
-
-
-def _peek_page_rows(need: int) -> int:
-    """Entries per page read for a ``need``-step walk — see the constants."""
-    return min(400, max(48, need * 4))
-
-
-def _peek_short_id(entry_id: str) -> str:
-    """First 8 chars of an entry id, for HEADERS only.
-
-    Never for the footer's cursors: those must be pasted back verbatim, and a
-    truncated cursor is the one suggestion this surface must not make.
-    """
-    return entry_id[:8] + "…" if len(entry_id) > 8 else entry_id
-
-
-class _PeekWindow(NamedTuple):
-    """One rendered step window — or the honest miss that answered a search.
-
-    ``steps`` is oldest→newest and numbered 1..N WITHIN THE WINDOW: operator
-    journals are not small (262 MB measured), so there is no counted total to
-    number against — cursor ids and booleans, not absolute indices (design
-    §8.2/§14.3). ``miss`` is the search's sentence when the needle was not
-    found inside the scan budget; a window with steps and a miss never occurs.
-    The cursor fields carry ENTRY ids (not step ids): stable across compaction,
-    which byte offsets are not, and exclusive/inclusive exactly as
-    ``read_transcript_page`` documents them.
-    """
-
-    steps: list[Any]
-    has_older: bool = False
-    has_newer: bool | None = None
-    before_cursor: str | None = None
-    after_cursor: str | None = None
-    scanned_bytes: int | None = None
-    match_id: str | None = None
-    match_step: int | None = None
-    miss: str = ""
-    note: str = ""
-
-
-class _PeekDigest(NamedTuple):
-    """The fold ``peek digest=true`` returns, already rendered."""
-
-    text: str
-    steps_seen: int
-    tool_calls: int
-    has_older: bool
-
-
-def _peek_message_entries(entries: Sequence[TranscriptEntry]) -> list[TranscriptEntry]:
-    """The entries that RENDER as steps — the renderer's own filter.
-
-    ``_render_transcript_steps`` numbers only the rows it renders, so any step
-    arithmetic must count with the SAME predicate; keeping it in one place is
-    what stops the walk's window from disagreeing with the renderer's count.
-    Since round 1 of #3098 that predicate also refuses the account-change
-    notice (``harness/comms.py`` ``is_peek_step_entry``: its sentence names the
-    account, and peek lands in model context), so this function must drop it
-    too — otherwise the window would reserve a slot for a step that is never
-    rendered and every cursor computed from these rows would sit one step off.
-    """
-
-    from local_operator.harness.comms import is_peek_step_entry
-
-    return [entry for entry in entries if is_peek_step_entry(entry)]
-
-
-def _peek_window(
-    entries: list[TranscriptEntry],
-    *,
-    need: int,
-    has_older: bool,
-    has_newer: bool | None,
-    match_id: str | None = None,
-    scanned_bytes: int | None = None,
-    note: str = "",
-) -> _PeekWindow:
-    """Assemble the SHOWN window from chronological entries — the last ``need``
-    steps, which is the newest end for every walk this tool runs (tail reads,
-    ``before_id`` pages, and search windows all page backward from a newer
-    edge; the head read passes its own prefix where the same final slice lands
-    on the same rows because it IS the prefix).
-
-    ``has_older`` is true when the reader's stop page says rows follow below
-    the page OR when anything was read below the oldest SHOWN step — a
-    bookkeeping row under the window is still a row the reader has not seen
-    (design §8.2: a ``False`` must be a fact, never just "the window ran out").
-    """
-
-    from local_operator.harness.comms import PeekStep, _render_transcript_steps
-
-    message_entries = _peek_message_entries(entries)
-    shown_messages = message_entries[-need:]
-    oldest_shown: TranscriptEntry | None = shown_messages[0] if shown_messages else None
-    older_row_below = False
-    if oldest_shown is not None:
-        for entry in entries:
-            if entry is oldest_shown:
-                break
-            older_row_below = True
-    steps = _render_transcript_steps(entries)
-    shown = steps[-need:] if len(steps) > need else steps
-    # Renumber 1..N within the window: the renderer numbers every row it was
-    # given, so a window that dropped older steps would otherwise start at 5.
-    # The same slice re-bases ``match_step`` (computed against the SHOWN
-    # messages below), keeping the marker pointed at the step it names.
-    if shown and shown[0].index != 1:
-        offset = shown[0].index - 1
-        shown = [
-            PeekStep(step.index - offset, step.kind, step.heading, step.body) for step in shown
-        ]
-    match_step = None
-    if match_id is not None:
-        for position, entry in enumerate(shown_messages, start=1):
-            if entry.id == match_id:
-                match_step = position
-                break
-    # The cursors page from the SHOWN steps, never from rows the walk read past
-    # while hunting for them: a `before_id` cursor into a row the caller never
-    # saw makes the next page SKIP everything between the two (a dense 48-row
-    # page would skip 36 message rows). The reader's cursor is exclusive, so
-    # "oldest shown entry" continues exactly where the window stopped — no
-    # gap, no repeat. Only an empty window falls back to the read rows, and
-    # then only for the has_older case, where there is nothing to continue from.
-    if shown_messages:
-        before_cursor: str | None = shown_messages[0].id
-        after_cursor: str | None = shown_messages[-1].id
-    else:
-        before_cursor = entries[0].id if entries else None
-        after_cursor = entries[-1].id if entries else None
-    return _PeekWindow(
-        steps=shown,
-        has_older=has_older or older_row_below,
-        has_newer=has_newer,
-        before_cursor=before_cursor,
-        after_cursor=after_cursor,
-        scanned_bytes=scanned_bytes,
-        match_id=match_id,
-        match_step=match_step,
-        note=note,
-    )
-
-
-def _walk_steps(directory: Path, *, cursor: str | None, need: int) -> _PeekWindow | str:
-    """Collect up to ``need`` steps walking backward from ``cursor`` (or EOF).
-
-    Reads with ``read_transcript_page`` — the page reader the desktop uses and
-    the one whose cost contract ("the tail page costs the chunk that carries
-    it") this walk keeps — one page at a time until ``need`` message rows are
-    collected, the journal's start is reached, or ``_PEEK_MAX_PAGES`` reads are
-    spent. ``before_id`` is the reader's exclusive cursor, so consecutive pages
-    can neither repeat nor skip a row.
-
-    Returns the rendered window, or the sentence for a caller-named cursor that
-    names nothing: the reader answers that case by reconciling to the current
-    TAIL, and this tool refuses instead — a tail under a caller's cursor is the
-    silent substitution the reader's own ``validate_page_request`` refuses one
-    level down, and the caller may then re-ask with an id a real read returned.
-    """
-
-    from local_operator.session.transcript import read_transcript_page
-
-    collected: list[TranscriptEntry] = []
-    read_cursor = cursor
-    stop_page = None
-    pages = 0
-    while True:
-        page = read_transcript_page(directory, before_id=read_cursor, limit=_peek_page_rows(need))
-        if read_cursor is not None and page.reconciled:
-            return (
-                f"no transcript entry with id {read_cursor!r} — entry ids are stable "
-                "across compaction, but a replaced journal drops old ones; use an id "
-                "an earlier peek returned, or read the tail."
-            )
-        collected = list(page.entries) + collected
-        stop_page = page
-        pages += 1
-        if len(_peek_message_entries(collected)) >= need or not page.has_more:
-            break
-        if pages >= _PEEK_MAX_PAGES or not page.entries:
-            break
-        read_cursor = page.entries[0].id
-    assert stop_page is not None  # the loop body always runs at least once
-    return _peek_window(
-        collected,
-        need=need,
-        # The stop page's ``has_more`` is the reader's own answer to "older rows
-        # exist"; ``_peek_window`` adds the bookkeeping rows read below the
-        # window. ``has_newer``: the tail read starts at the file's end, so
-        # nothing is newer (False is a fact here, not a bound); a ``before_id``
-        # window has every row above it newer BY CONSTRUCTION — the cursor row
-        # itself (the reader's own docstring makes the same two claims).
-        has_older=bool(stop_page.has_more),
-        has_newer=False if cursor is None else True,
-        note=(
-            "the bounded walk stopped before it collected every requested step; "
-            "continue with `before_id` below"
-            if (
-                pages >= _PEEK_MAX_PAGES
-                and stop_page.has_more
-                and len(_peek_message_entries(collected)) < need
-            )
-            else ""
-        ),
-    )
-
-
-def _peek_head(directory: Path, *, need: int) -> _PeekWindow:
-    """First ``need`` steps, read forward from byte zero and STOPPING.
-
-    The transcript module's forward walker is a generator exactly so the
-    caller's stop is the bound: this consumes rows until it holds ``need``
-    message rows (or the journal ends, or ``_PEEK_SCAN_BYTES`` of rows have
-    been read — the search's own honest cap, said out loud in the footer).
-    A head read must not parse a whole journal to answer "how did this start"
-    (design §8.2/§11.8); one lookahead row beyond the window answers
-    ``has_newer`` the way the anchored page's lookahead answers it.
-    """
-
-    from local_operator.session import compression
-    from local_operator.session.transcript import (
-        TranscriptEntry,
-        _iter_complete_lines_forward,
-    )
-
-    # A seekable, whole transcript whichever form it is on disk in: the plain
-    # journal, or the archive decompressed into compression's bounded cache. A
-    # peek is a READ, so it must never be answered from the plain name alone.
-    path = compression.transcript_for_read(directory)
-    if path is None:
-        raise FileNotFoundError(f"{directory} holds no transcript")
-    entries: list[TranscriptEntry] = []
-    scanned = 0
-    capped = False
-    with path.open("rb") as handle:
-        handle.seek(0, os.SEEK_END)
-        end_of_file = handle.tell()
-        walker = _iter_complete_lines_forward(handle, 0, end_of_file=end_of_file)
-        for raw in walker:
-            scanned += len(raw) + 1
-            entry = TranscriptEntry.from_json(raw.decode("utf-8", errors="replace"))
-            if entry is not None:
-                entries.append(entry)
-            if len(_peek_message_entries(entries)) >= need:
-                break
-            if scanned >= _PEEK_SCAN_BYTES:
-                capped = True
-                break
-        # One lookahead beyond the window answers ``has_newer``; blank lines are
-        # not rows, so skip them rather than counting a torn journal's noise.
-        has_newer = any(raw.strip() for raw in walker)
-    return _peek_window(
-        entries,
-        need=need,
-        has_older=False,  # the walk began at byte zero; nothing precedes it
-        has_newer=has_newer,
-        scanned_bytes=scanned,
-        note=(
-            f"the read stopped at the {_PEEK_SCAN_BYTES >> 20} MiB scan bound before "
-            "collecting every requested step"
-            if capped
-            else ""
-        ),
-    )
-
-
-def _peek_around(
-    directory: Path, *, anchor: str, need: int, mark: str | None = None
-) -> _PeekWindow | str:
-    """The anchored window around one entry id — the shape a cursor call and a
-    search hit share (design §8.1: a match renders through the anchored page).
-
-    One page read: ``before`` older rows, the anchor, ``after`` newer rows, with
-    the reader's own one-row-lookahead booleans for both edges — so "older"/
-    "newer" are facts, not window lengths. ``mark`` is the entry a search hit on
-    (the anchor itself, in that call): it picks the ``← match`` marker and, when
-    the matched row is not a message row, deliberately marks NO step — the
-    match is then named by id in the footer only.
-    """
-
-    from local_operator.session.transcript import read_transcript_page
-
-    before = need // 2
-    after = max(0, need - before - 1)
-    page = read_transcript_page(directory, around_id=anchor, before=before, after=after, limit=need)
-    if page.reconciled and not page.entries:
-        return (
-            f"no transcript entry with id {anchor!r} — entry ids are stable across "
-            "compaction, but a replaced journal drops old ones; use an id an earlier "
-            "peek returned."
-        )
-    entries = list(page.entries)
-    return _peek_window(
-        entries,
-        need=need,
-        has_older=bool(page.has_more),
-        has_newer=page.has_newer,
-        match_id=mark,
-    )
-
-
-def _peek_search(
-    directory: Path, *, needle: str, pattern: re.Pattern[str] | None, need: int
-) -> _PeekWindow | str:
-    """Locate a needle walking backward from EOF, then window around the hit.
-
-    The walk decodes rows newest-first and tests each row's text (a literal
-    substring when ``pattern`` is ``None``, else the pre-compiled
-    ``pattern.search`` — the design's own two modes); it stops at the first
-    hit or once the row walk has crossed `_PEEK_SCAN_BYTES` (row-granular —
-    see the counter's comment for the one-row caveat). The budget is the
-    point: the reader's docstring measured what a deep walk costs on a 262 MB
-    journal, so this never scans one silently — a miss is reported honestly,
-    with the pointer the caller needs to widen from a known position. The
-    window itself is the same anchored read ``around_id`` runs, so a hit and a
-    cursor call render one shape.
-
-    ``str`` return: an anchor that vanished between the walk and the window
-    read (a compaction between the two reads, reported as the miss it is).
-    """
-
-    from local_operator.harness.comms import is_peek_step_entry
-    from local_operator.session import compression
-    from local_operator.session.transcript import (
-        TranscriptEntry,
-        _iter_complete_lines_backward,
-    )
-
-    # Same resolution as ``_peek_head``: the seekable source, archive included.
-    path = compression.transcript_for_read(directory)
-    if path is None:
-        raise FileNotFoundError(f"{directory} holds no transcript")
-    scanned = 0
-    hit_id = ""
-    budget_stop = False
-    with path.open("rb") as handle:
-        handle.seek(0, os.SEEK_END)
-        end_of_file = handle.tell()
-        for _chunk_start, lines in _iter_complete_lines_backward(handle, end_of_file):
-            for raw in lines:
-                if not raw.strip():
-                    continue
-                # Depth is counted ROW by ROW — the bytes walked past, newline
-                # included — not per chunk read, because a chunk-granular
-                # count breaks on any journal smaller than one chunk. Caveat,
-                # deliberate: the budget is checked BEFORE the next row is
-                # added, so the row that crosses it is still walked and
-                # counted — `scanned_bytes` can overshoot `_PEEK_SCAN_BYTES`
-                # by up to ONE row's length (transcript.py measures rows of
-                # tens of MB; the miss test tolerates +2,000 for its ~950-byte
-                # rows). Under that, a hit reports its true depth and a miss
-                # reports the budget.
-                if scanned >= _PEEK_SCAN_BYTES:
-                    budget_stop = True
-                    break
-                scanned += len(raw) + 1
-                text = raw.decode("utf-8", errors="replace")
-                # A REFUSED ROW CANNOT MATCH (QA round 1, Q1). The step filter is
-                # what keeps the account label out of a peek — and testing the raw
-                # JSON first made the FILTER itself an oracle: a query for a
-                # substring of a label this surface will never print answered
-                # yes/no, and 513 of those rebuilt an email. So the row is parsed
-                # and gated BEFORE the needle is tested, and a refused row can
-                # neither match nor become an anchor. The cost is one parse per
-                # row already inside the byte budget, which is the same decode
-                # this loop was doing anyway.
-                entry = TranscriptEntry.from_json(text)
-                if entry is None or not is_peek_step_entry(entry):
-                    continue
-                if pattern is None:
-                    found = needle in text
-                else:
-                    found = pattern.search(text) is not None
-                if found:
-                    hit_id = entry.id
-                    break
-            if hit_id or budget_stop:
-                break
-    if not hit_id:
-        if end_of_file == 0:
-            return _PeekWindow(
-                steps=[],
-                scanned_bytes=0,
-                miss=f"no match for {needle!r}: this transcript is empty.",
-            )
-        whole = not budget_stop
-        where = "this transcript" if whole else f"the last {scanned:,} bytes of this transcript"
-        return _PeekWindow(
-            steps=[],
-            scanned_bytes=scanned,
-            miss=(
-                f"no match for {needle!r} in {where} — the search is bounded on "
-                "purpose and never scans an operator-size journal silently; widen "
-                "it by starting from a known entry id with `peek around_id=<id>`."
-            ),
-        )
-    window = _peek_around(directory, anchor=hit_id, need=need, mark=hit_id)
-    if isinstance(window, str):
-        return window  # the anchor vanished between the walk and the window read
-    return window._replace(scanned_bytes=scanned)
-
-
-def _peek_live_state(record: Any) -> str:
-    """``stored``, or ``live`` plus the record's own busy/pending words.
-
-    Reads the SAME fields the listings paint (``SessionRecord.busy``,
-    ``.pending``), so the digest's state line cannot drift from the sidebar's.
-    """
-
-    if record is None:
-        return "stored"
-    bits: list[str] = []
-    if getattr(record, "busy", False):
-        bits.append("busy")
-    pending = getattr(record, "pending", None)
-    if pending:
-        bits.append(f"pending {pending}")
-    return "live" + (f", {', '.join(bits)}" if bits else "")
-
-
-def _fold_line(text: str, limit: int) -> str:
-    """One digest line: the first non-empty line, collapsed, clipped to ``limit``.
-
-    "The newest assistant line" is taken literally — a multi-line message
-    contributes its opening line, not a paragraph folded into a run-on where
-    the assistant's prose and its tool-call list run together. Head-only with
-    an ellipsis: the full step is one `peek steps=` away, and a fold that kept
-    head AND tail per line would print more of the transcript than the digest
-    exists to avoid.
-    """
-
-    flat = ""
-    for raw in text.splitlines():
-        flat = " ".join(raw.split())
-        if flat:
-            break
-    return flat if len(flat) <= limit else flat[: limit - 1] + "…"
-
-
-def _peek_digest_fold(steps: list[Any], *, has_older: bool, live_state: str) -> _PeekDigest:
-    """Fold a tail window of steps to ≤10 lines (design §8.3).
-
-    The LINE COUNT is an invariant, not a hope: the header, the newest ask and
-    the newest assistant line each take one line, and the tool tail keeps the
-    last calls that fit the remaining budget (never more than eight). Counts
-    are per kind as §8.3 pins them; other kinds (hub traffic, system notes)
-    are counted in the total and folded into one "+N more" only when present.
-    """
-
-    counts = {"user": 0, "assistant": 0, "tool": 0}
-    others = 0
-    for step in steps:
-        if step.kind in counts:
-            counts[step.kind] += 1
-        else:
-            others += 1
-    parts = [f"user {counts['user']}", f"assistant {counts['assistant']}", f"tool {counts['tool']}"]
-    if others:
-        parts.append(f"+{others} more")
-    older = "more above" if has_older else "whole transcript"
-    lines = [f"digest: {len(steps)} steps seen ({', '.join(parts)}) — {live_state}; {older}"]
-
-    ask = next((step for step in reversed(steps) if step.kind == "user"), None)
-    if ask is not None:
-        lines.append(f"ask: {_fold_line(ask.body, 80) or ask.heading}")
-    reply = next((step for step in reversed(steps) if step.kind == "assistant"), None)
-    if reply is not None:
-        lines.append(f"assistant: {_fold_line(reply.body, 120) or reply.heading}")
-
-    calls = [step for step in steps if step.kind == "tool"][-8:]
-    room = max(0, 10 - len(lines))
-    for step in calls[-min(8, room) :] if room else []:
-        base, _, rest = step.heading.partition(" result")
-        label = base + (" (error)" if "error" in rest else "")
-        summary = _fold_line(step.body, 60)
-        lines.append(f"tool: {label} · {summary}" if summary else f"tool: {label}")
-    return _PeekDigest(
-        text="\n".join(lines),
-        steps_seen=len(steps),
-        tool_calls=counts["tool"],
-        has_older=has_older,
-    )
-
-
-def _peek_digest(directory: Path, *, live_state: str) -> _PeekDigest:
-    """Read the tail window and fold it — the same bounded reader as `steps`."""
-
-    from local_operator.harness.comms import _render_transcript_steps
-    from local_operator.session.transcript import read_transcript_page
-
-    page = read_transcript_page(directory, limit=_PEEK_DIGEST_ROWS)
-    return _peek_digest_fold(
-        _render_transcript_steps(list(page.entries)),
-        has_older=bool(page.has_more),
-        live_state=live_state,
-    )
-
-
-def _peek_body(
-    name: str,
-    session_id: str,
-    mode: str,
-    window: _PeekWindow,
-    *,
-    anchor: str = "",
-    query: str = "",
-) -> str:
-    """One window's text: header, steps, and the footer's continuation hints.
-
-    The shape mirrors ``hub``'s peek (``_hub_peek``: header, numbered steps with
-    indented bodies, one parenthesized footer) with the two deviations §8.2
-    names: no counted total — step numbers are window-relative — and hints that
-    are cursor ids. Footer cursors are printed in FULL: they are meant to be
-    pasted back, and a truncated id names nothing.
-    """
-
-    phrase = {
-        "tail": "from the tail",
-        "head": "from the start",
-        "before": f"immediately before {_peek_short_id(anchor)}",
-        "around": f"centred on {_peek_short_id(anchor)}",
-        "search": f"around the match for {_fold_line(query, 40)!r}",
-    }.get(mode, mode)
-    if not window.steps:
-        if mode == "tail":
-            return f'"{name}" ({session_id}) — no steps yet: the transcript has no ' "message rows."
-        return f'"{name}" ({session_id}) — no steps {phrase}.'
-    lines = [f'"{name}" ({session_id}) — {len(window.steps)} step(s) {phrase}:']
-    for step in window.steps:
-        marker = "  ← match" if step.index == window.match_step else ""
-        lines.append(f"{step.index:>4}  {step.heading}{marker}")
-        if step.body:
-            for body_line in step.body.splitlines():
-                lines.append(f"      {body_line}")
-    hints: list[str] = []
-    if window.match_id:
-        hints.append(f"match {window.match_id}")
-    if window.scanned_bytes is not None:
-        hints.append(f"scanned {window.scanned_bytes:,} bytes")
-    if window.has_older and window.before_cursor:
-        hints.append(f"before_id={window.before_cursor} for earlier")
-    if window.has_newer and window.after_cursor and mode in ("head", "around", "search"):
-        hints.append(f"around_id={window.after_cursor} for later")
-    if window.note:
-        hints.append(window.note)
-    if hints:
-        lines.append("(" + "; ".join(hints) + ")")
-    return "\n".join(lines)
-
-
-def _peek_read(
-    directory: Path,
-    params: SessionsParams,
-    *,
-    need: int,
-    pattern: re.Pattern[str] | None,
-) -> tuple[_PeekWindow | str, str]:
-    """Run the one read the request describes; return ``(window|refusal, mode)``.
-
-    The order is the design's two-level location: a ``query`` locates a step
-    (the store-level search stays `list`'s job — this addresses ONE session),
-    and the window selectors are the rest. Validation has already refused
-    combinations; this only picks the single remaining one. ``pattern`` is the
-    request's compiled regex (``None`` = literal mode), compiled by the caller
-    so a malformed one was classified as a fault before the thread started.
-    """
-
-    query = str(params.query or "").strip()
-    if query:
-        return _peek_search(directory, needle=query, pattern=pattern, need=need), "search"
-    if params.head is not None:
-        return _peek_head(directory, need=need), "head"
-    if params.before_id is not None:
-        return _walk_steps(directory, cursor=params.before_id, need=need), "before"
-    if params.around_id is not None:
-        return _peek_around(directory, anchor=params.around_id, need=need), "around"
-    return _walk_steps(directory, cursor=None, need=need), "tail"
+# The readers moved to ``session/peek.py`` so a mesh OWNER can answer a remote
+# peek with the same code (``network/peek.py``'s ``net_session_peek``). They are
+# re-bound here under their old names because this module's peek op and its
+# tests still address them as ``builtin._peek_*``.
+from local_operator.session.peek import (  # noqa: E402,F401 — see the comment above
+    _PEEK_DEFAULT_STEPS,
+    _PEEK_DIGEST_ROWS,
+    _PEEK_MAX_PAGES,
+    _PEEK_SCAN_BYTES,
+    _fold_line,
+    _peek_around,
+    _peek_body,
+    _peek_digest,
+    _peek_digest_fold,
+    _peek_head,
+    _peek_live_state,
+    _peek_message_entries,
+    _peek_page_rows,
+    _peek_read,
+    _peek_search,
+    _peek_short_id,
+    _peek_window,
+    _PeekDigest,
+    _PeekWindow,
+    _walk_steps,
+)
 
 
 async def _sessions_peek_mesh(
     tool_call_id: str, params: SessionsParams, context: ToolContext | None
 ) -> ToolResult:
-    """``peek`` on `peer`: the tail window, read where the session lives (v1).
+    """``peek`` on `peer`: the same windows as a local peek, read by the OWNER.
 
-    One read flag on the pilot family serves this (design §3C): the newest
-    ``steps`` rows of the conversation's synced display window, each clipped, as
-    its owner holds them — the same rows an attached terminal paints. It is LIVE
-    sessions only: a stored one is REFUSED by the CLI BEFORE any bind (a read
-    must never start a runtime on a device nobody is watching), and that refusal
-    comes back verbatim, already naming the warm-up (`--engage`, or ``sessions``
-    op='resume'). ``head``/``before_id``/``around_id``/``query``/``regex``/
-    ``digest`` are THIS device's reads and are refused by validation, not here.
+    Every window the local op takes (``steps``/``head``/``before_id``/
+    ``around_id``/``query``/``regex``/``digest``) rides ``lop network sessions
+    --peek`` to the owner, which runs ``session/peek.py``'s readers on its own
+    journal (``net_session_peek``) and returns the window as DATA; it is rendered
+    here by ``_peek_body``, the local op's own renderer, so a remote peek reads
+    exactly like the local one on that device. Stored sessions are readable: the
+    owner reads its disk and starts nothing.
+
+    DEGRADED, AND SAID SO: an owner whose build predates the op answers the
+    live-display tail (the v1 read) and the payload's ``note`` names why and
+    which windows were dropped — it leads the text, never hidden in details.
     """
     peer = str(params.peer or "").strip()
     address = str(params.session or params.target or "").strip()
+    if params.regex:
+        # The OWNER refuses these too; checking here saves a hop and answers in
+        # the same argument class a malformed local regex gets.
+        from local_operator.session.peek import compile_peek_pattern
+
+        compiled = compile_peek_pattern(params, remote=True)
+        if isinstance(compiled, str):
+            return _invalid_arguments(tool_call_id, "sessions", compiled)
     early, payload = await _mesh_op(
         tool_call_id,
         "sessions",
-        _mesh_peek_argv(peer, address, params.steps),
+        _mesh_peek_argv(peer, address, params),
         _mesh_pilot_timeout_s(),
         context,
     )
@@ -19964,6 +19370,8 @@ async def _sessions_peek_mesh(
     if refusal:
         return _error(tool_call_id, "sessions", refusal, details={"mesh": payload})
     session_id = str(payload.get("session_id") or address)
+    if payload.get("source") == "journal":
+        return _sessions_peek_mesh_journal(tool_call_id, payload, session_id, peer, context)
     rows = [row for row in payload.get("rows") or [] if isinstance(row, dict)]
     details: dict[str, Any] = {
         "op": "peek",
@@ -19974,6 +19382,8 @@ async def _sessions_peek_mesh(
         "has_older": bool(payload.get("has_older")),
         "mesh": payload,
     }
+    if payload.get("fallback"):
+        details["fallback"] = payload["fallback"]
     if not rows:
         text = (
             f"{identifier_text(context, session_id)} on {peer}: no steps with text "
@@ -19990,6 +19400,8 @@ async def _sessions_peek_mesh(
         for index, row in enumerate(rows, start=1):
             lines.append(f"{index}. {row.get('role') or '?'}: {row.get('text') or ''}")
         text = "\n".join(lines)
+    if payload.get("note"):
+        text = f"note: {payload['note']}\n{text}"
     text, spill = spill_truncate(text, "sessions", context)
     if spill:
         details.update(spill)
@@ -19998,6 +19410,79 @@ async def _sessions_peek_mesh(
     # S-60, fail closed: no mesh peer reports its session's Team Bridge latch
     # today, so any peeked rows count as a teammate's agent message.
     return _text(tool_call_id, "sessions", text, details=stamp_details(details, bool(rows)))
+
+
+def _sessions_peek_mesh_journal(
+    tool_call_id: str,
+    payload: dict[str, Any],
+    session_id: str,
+    peer: str,
+    context: ToolContext | None,
+) -> ToolResult:
+    """Render an owner's journal window exactly as the local op renders its own.
+
+    The details carry the SAME keys the local op reports (``mode``,
+    ``steps_shown``, ``has_older``/``has_newer``, ``scanned_bytes``,
+    ``match_id``; the digest's counts) plus ``peer``, so a caller that switches
+    on them reads one shape whichever device the session lives on.
+    """
+    from local_operator.session.peek import window_from_wire
+
+    mode = str(payload.get("mode") or "")
+    name = str(payload.get("name") or f"session {session_id}")
+    details: dict[str, Any] = {"op": "peek", "mode": mode, "session_id": session_id, "peer": peer}
+    # Whether the owner handed back any of the session's own content: the
+    # S-60 stamp below keys on it, as the tail renderer keys on ``rows``.
+    peeked: bool
+    if mode == "digest":
+        raw_digest = payload.get("digest")
+        digest: dict[str, Any] = raw_digest if isinstance(raw_digest, dict) else {}
+        details.update(
+            steps_seen=digest.get("steps_seen"),
+            tool_calls=digest.get("tool_calls"),
+            has_older=digest.get("has_older"),
+        )
+        text = str(digest.get("text") or "")
+        # Fail closed: only an owner's explicit "zero steps" counts as empty.
+        peeked = digest.get("steps_seen") != 0
+    else:
+        window = window_from_wire(payload.get("window") or {})
+        details.update(
+            steps_shown=len(window.steps),
+            has_older=window.has_older,
+            has_newer=window.has_newer,
+        )
+        if window.scanned_bytes is not None:
+            details["scanned_bytes"] = window.scanned_bytes
+        if window.match_id:
+            details["match_id"] = window.match_id
+        # A miss is this harness's own sentence about an empty window; any
+        # step the owner returned is transcript content.
+        peeked = bool(window.steps)
+        if window.miss:
+            text = window.miss
+        else:
+            raw_request = payload.get("request")
+            request: dict[str, Any] = raw_request if isinstance(raw_request, dict) else {}
+            # Identifier fields: the header quotes the title and id, as locally.
+            text = _peek_body(
+                identifier_text(context, name),
+                identifier_text(context, session_id),
+                mode,
+                window,
+                anchor=str(request.get("before_id") or request.get("around_id") or ""),
+                query=str(request.get("query") or "").strip(),
+            )
+    text, spill = spill_truncate(text, "sessions", context)
+    if spill:
+        details.update(spill)
+    from local_operator.harness.bridge_egress import stamp_details
+
+    # S-60, fail closed, as for the tail above: no mesh peer reports its
+    # session's Team Bridge latch today, so any peeked step counts as a
+    # teammate's agent message. This is the one deliberate difference from a
+    # local peek's details, which judges the target journal's own latch.
+    return _text(tool_call_id, "sessions", text, details=stamp_details(details, peeked))
 
 
 async def _sessions_peek(
@@ -20346,11 +19831,23 @@ def _mesh_stop_argv(peer: str, address: str) -> list[str]:
     return ["network", "sessions", "--json", "--peer", peer, "--stop", address]
 
 
-def _mesh_peek_argv(peer: str, address: str, steps: int | None) -> list[str]:
-    """``--peek [--steps N]``: the tail window, read where the session lives."""
+def _mesh_peek_argv(peer: str, address: str, params: SessionsParams) -> list[str]:
+    """``--peek`` plus every window the caller NAMED, in the CLI's flag spelling.
+
+    Only named fields ride (``model_fields_set``), so validation on the owner
+    judges the same "what did the caller ask for" the local op does.
+    """
     argv = ["network", "sessions", "--json", "--peer", peer, "--peek", address]
-    if steps is not None:
-        argv += ["--steps", str(steps)]
+    given = params.model_fields_set
+    for field in ("steps", "head", "before_id", "around_id", "query"):
+        value = getattr(params, field)
+        if field in given and value is not None:
+            # ``--flag=value``, one token: a query that starts with ``-`` would
+            # otherwise be parsed as the next option.
+            argv.append(f"--{field.replace('_', '-')}={value}")
+    for field in ("regex", "digest"):
+        if field in given and getattr(params, field):
+            argv.append(f"--{field}")
     return argv
 
 
@@ -20745,7 +20242,13 @@ async def _sessions_spawn_mesh(
     if minted:
         head += f" (session {identifier_text(context, minted)})"
     lines = [head]
-    if str(params.prompt or ""):
+    if payload.get("create_unconfirmed") or payload.get("replayed"):
+        # The create's own reply was lost (confirmed by key) or this was a retry
+        # the owner matched to the session it already made: the first prompt's
+        # admission was not observed by THIS call, so "not admitted" would be a
+        # claim nobody saw. The owner/relay sentence says what is known.
+        lines.append(str(payload.get("detail") or ""))
+    elif str(params.prompt or ""):
         admitted = bool(payload.get("admitted"))
         lines.append("the prompt was admitted there" if admitted else "the prompt was not admitted")
     notice = str(payload.get("unattended_notice") or "")
@@ -20808,7 +20311,9 @@ async def _sessions_resume_mesh(
             from local_operator.harness.bridge_egress import BRIDGE_TAINT_DETAILS_KEY
 
             details[BRIDGE_TAINT_DETAILS_KEY] = True
-        if payload.get("ok") is False:
+        # The same pilot-send receipt as ``send peer=``, so the same rule: an
+        # admitted turn still running there is a delivery, not a failure.
+        if _mesh_send_failed(payload):
             return _error(tool_call_id, "sessions", text, details=details)
         return _text(tool_call_id, "sessions", text, details=details)
 
@@ -30042,7 +29547,12 @@ async def _execute_browser(
     # computed from the SAME readings as the decision above (empty when nothing
     # was demoted).
     demotion = _bridge_demotion_hint(bridge_liveness) + _ui_demotion_hint(ui_liveness)
-    if not cmux_available and not bridge_available and not ui_available:
+    state = _browser_state(context)
+    # Discovery chooses a NEW host, not whether an existing capability may reach
+    # its pinned transport. Its bounded pre-delivery recovery must get a chance
+    # even when every discovery probe failed; never hop to an unrelated host.
+    held_host = _host_of_surface(state.surface_id)
+    if not held_host and not cmux_available and not bridge_available and not ui_available:
         # A bridge daemon that is UP but has no browser attached is not an
         # unconfigured host: "run 'lop browser status' and 'lop browser install'
         # to set up the bridge" sends a user with an installed, paired bridge to
@@ -30082,8 +29592,6 @@ async def _execute_browser(
         refusal = _browser_secret_ref(tool_call_id, params, context)
         if refusal is not None:
             return refusal
-    state = _browser_state(context)
-
     if action in OWNERSHIP_BROWSER_ACTIONS:
         # Reachable ONLY when the ownership lane in `execute_browser` did not run,
         # which means no host here can own a surface: either this session has no
@@ -30321,9 +29829,12 @@ async def _execute_browser(
     if action == "tabs":
         # Discovery works without an owned surface (its point is finding out
         # what is open), but cmux keeps no multi-surface registry, so a
-        # cmux-pinned session degrades exactly like scroll/logs.
+        # cmux-pinned session degrades exactly like scroll/logs. Discovery only
+        # selects an unpinned host: a held capability must reach its own client.
         pinned = _host_of_surface(state.surface_id)
-        if state.surface_id.startswith("surface:") or not (ui_available or bridge_available):
+        if state.surface_id.startswith("surface:") or (
+            not pinned and not (ui_available or bridge_available)
+        ):
             return _error(
                 tool_call_id,
                 "browser",

@@ -182,6 +182,8 @@ LINK_CAPABILITIES: tuple[str, ...] = (
     # which a complete viewer must never mistake for a complete result. Named
     # here so the tuple, the ask condition and the tests read ONE spelling.
     "peer-journal-source-v1",
+    # The remote peek (``network/peek.py``): see SESSION_PEEK_V1 below.
+    "session-peek-v1",
     # Conditional member-table pull; see MEMBER_LIST_DIGEST_V1 below for why.
     "member-list-digest-v1",
     # Change-only member tables permit a long anti-entropy interval, without
@@ -189,8 +191,19 @@ LINK_CAPABILITIES: tuple[str, ...] = (
     "member-list-push-v1",
     # The single-file pull (``files.py``'s ``net_file_get``); see MESH_FILE_V1.
     "mesh-file-v1",
+    # Origin-only completion/notice fields on catalogue rows; see
+    # REMOTE_ATTENTION_V1 below.
+    "remote-attention-v1",
 )
 MESH_NET_V1 = "mesh-net-v1"
+#: Catalogue rows carry ``attention``/``notices`` (and ``attention_unknown`` when
+#: the owner's completion read failed) for the session's ORIGIN
+#: (``notifications/remote_attention``). An owner stamps them only on a link
+#: whose viewer advertised this, so an older viewer — which would parse the keys
+#: as nothing, or forbid them on a strict model — receives the exact row shape it
+#: always did. Named here so the tuple above, the owner's condition and the tests
+#: read ONE spelling of the string.
+REMOTE_ATTENTION_V1 = "remote-attention-v1"
 #: The complete peer-source stored-read capability (``relay.py``'s source
 #: purposes). The runtime-record half of the same promise lives in
 #: ``session/runtime/types.PEER_JOURNAL_SOURCE_CAPABILITY`` — one string, two
@@ -209,6 +222,13 @@ PEER_READINESS_V1 = "peer-readiness-v1"
 #: did not ask to make. Named here so the tuple above, the push's ask condition
 #: and the tests read ONE spelling of the string.
 MCP_DEFS_V1 = "mcp-defs-v1"
+#: The remote peek's capability (``network/peek.py``: ``net_session_peek``).
+#: Advertised by every build that can answer a peek from its own journal with
+#: the local readers; a viewer's relay checks it BEFORE asking, and a peer
+#: without it is answered ``unsupported`` so the caller falls back to the
+#: live-display tail and names why, instead of composing a not-implemented
+#: refusal on the far side.
+SESSION_PEEK_V1 = "session-peek-v1"
 MEMORY_SYNC_V1 = "memory-sync-v1"
 #: The 512-content-token memory item cap (``memory.ITEM_TOKENS``). Advertised by
 #: every build whose ``validate_fact`` accepts it. A peer WITHOUT it still refuses a
