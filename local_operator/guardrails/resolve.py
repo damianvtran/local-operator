@@ -1490,6 +1490,9 @@ def _peel_wrappers(words: list[Expanded]) -> tuple[list[Expanded], bool]:
                     (len(t) == 2 and t[1] in value_flags)
                     or t in _WRAPPER_LONG_VALUE_FLAGS
                     or t in _WRAPPER_OWN_LONG_VALUE_FLAGS.get(name, ())
+                    # env clusters too (``-iC /tmp``), with the rule
+                    # ``_env_split`` uses, so both agree on the program word.
+                    or (name == "env" and _env_takes_next_word(t))
                 )
                 rest = rest[2:] if takes else rest[1:]
                 continue
@@ -2080,9 +2083,69 @@ def _in_place_edit(name: str, args: list[Expanded]) -> bool:
 
 
 #: ``env``'s short options that take a value (GNU ``-u``/``-C``/``-a``, BSD
-#: ``-u``/``-P``/``-L``/``-U``), and the long ones.
-_ENV_VALUE_LETTERS = "uCaPLU"
-_ENV_LONG_VALUE_FLAGS = frozenset({"--unset", "--chdir", "--argv0"})
+#: ``-u``/``-P``/``-L``/``-U``), and the long ones. ONE table, owned by
+#: ``search_guard`` and read by both ``_peel_wrappers`` and ``_env_split``: a
+#: private copy here once let ``-C <dir>`` skip its value in the ``-S`` finder
+#: while the peel took ``<dir>`` for the program (QA Q-3-1 on PR #3906).
+_ENV_VALUE_LETTERS = _WRAPPER_VALUE_FLAGS["env"]
+_ENV_LONG_VALUE_FLAGS = _WRAPPER_OWN_LONG_VALUE_FLAGS["env"]
+#: How many ``env -S "env -S '…'"`` layers are spliced before failing closed.
+_MAX_ENV_SPLIT_DEPTH = 4
+
+
+def _env_split_words(text: str) -> str:
+    """Rewrite env's ``-S`` word separator ``\\_`` as a space, outside single quotes.
+
+    env splits its ``-S`` value with its own grammar, not the shell's:
+    ``env -S 'rm\\_-rf\\_x'`` runs ``rm -rf x``, while ``scan()`` read the
+    whole thing as one word named ``rm\\_-rf\\_x`` (review R3-1 on PR #3906).
+    Inside double quotes env makes ``\\_`` a literal space, which is the same
+    thing once ``scan()`` honours the quotes; inside single quotes it stays
+    literal.
+
+    This, plus ``scan()``, only APPROXIMATES env's ``-S`` rules (review R3-2):
+    ``\\c`` truncation is not modelled and ``;``/``&&``/``|`` are split as
+    shell operators where env passes them on as literal words. Each of those
+    over-ranks (more programs and targets than env would run), never under.
+    """
+    out: list[str] = []
+    quote = ""
+    i = 0
+    while i < len(text):
+        ch = text[i]
+        if quote == "'":
+            if ch == "'":
+                quote = ""
+            out.append(ch)
+            i += 1
+            continue
+        if ch == "\\" and i + 1 < len(text):
+            if text[i + 1] == "_":
+                out.append(" ")
+            else:
+                out.append(text[i : i + 2])
+            i += 2
+            continue
+        if ch in "'\"":
+            quote = "" if quote == ch else (quote or ch)
+        out.append(ch)
+        i += 1
+    return "".join(out)
+
+
+def _env_takes_next_word(t: str) -> bool:
+    """Does env option word ``t`` take the NEXT word as its value?
+
+    A short cluster takes it when its first valued letter ends the word
+    (``-C``, ``-iC``); anything after that letter is a glued value
+    (``-C/tmp``). Long options take it only without ``=``.
+    """
+    if t.startswith("--"):
+        return "=" not in t and t in _ENV_LONG_VALUE_FLAGS
+    for k, ch in enumerate(t[1:], start=1):
+        if ch in _ENV_VALUE_LETTERS:
+            return k == len(t) - 1
+    return False
 
 
 def _env_split(
@@ -2129,7 +2192,7 @@ def _env_split(
                 value_word = args[i] if i < len(args) else None
                 return before, value_word, args[i + 1 :]
             if ch in _ENV_VALUE_LETTERS:
-                if k == len(t) - 1:
+                if _env_takes_next_word(t):
                     i += 1  # the value is the next word
                 break  # otherwise the rest of the word is the value
     return None
@@ -2612,6 +2675,62 @@ class _Walker:
                     self._restore(groups.pop())
 
     # -- one segment ---------------------------------------------------------
+    def _splice_env_split(
+        self,
+        words: list[Expanded],
+        split: tuple[list[Expanded], Expanded | None, list[Expanded]],
+    ) -> list[Expanded]:
+        """Replace ``env``'s ``-S`` value with the words env will run.
+
+        Three rules, all from review R3-1 on PR #3906:
+
+        * The raw ``-S`` text is scanned for a delete word FIRST, every layer,
+          whatever the splice makes of it. That is round 2's floor: a splice
+          that mis-splits (env's grammar is not the shell's) can lower a
+          mention, never this reason.
+        * env's own separator ``\\_`` is honoured (``_env_split_words``).
+        * A spliced ``env … -S …`` is spliced again, up to
+          ``_MAX_ENV_SPLIT_DEPTH`` layers; deeper nesting fails closed as an
+          opaque command string, since a bounded walk is the only kind the
+          model cannot stretch.
+
+        ``$VAR``/``${VAR}`` and ``~`` are expanded shell-style: env expands
+        ``${VAR}`` itself and leaves ``~`` alone, so this pins nothing it should
+        not and can only over-rank.
+        """
+        head = [words[0]]
+        inner = words[1:]
+        for _depth in range(_MAX_ENV_SPLIT_DEPTH):
+            before, value, after = split
+            raw = value.text if value is not None else " ".join(w.text for w in inner)
+            if _DELETE_WORD_RE.search(raw):
+                self.result.opaque_reasons.append("env -S runs a command string")
+            if value is None or value.opaque:
+                # Unknowable value: fall through to the peel and the backstop.
+                return [*head, *inner]
+            split_words, split_redirects = scan(_env_split_words(value.text))
+            spliced: list[Expanded] = []
+            for raw_word in split_words:
+                spliced.extend(expand_all(raw_word, self.state.env, self.state.home))
+            # env passes ``>``/``|`` through as literal words; keep the
+            # operands visible rather than drop them.
+            for _op, raw_word in split_redirects:
+                spliced.extend(expand_all(raw_word, self.state.env, self.state.home))
+            head = [*head, *before]
+            inner = [*spliced, *after]
+            nested = (
+                _env_split(inner[1:])
+                if inner and os.path.basename(inner[0].text) == "env"
+                else None
+            )
+            if nested is None:
+                return [*head, *inner]
+            head = [*head, inner[0]]
+            inner = inner[1:]
+            split = nested
+        self.result.opaque_reasons.append("env -S nested too deep to resolve")
+        return [*head, *inner]
+
     def _segment(
         self,
         text: str,
@@ -2703,25 +2822,7 @@ class _Walker:
             # ranked. Returning early here once dropped non-delete commands
             # (``env -i -u A -S 'node x <stranger pad>'``) to LOW. Tilde and
             # ``${VAR}`` are expanded shell-style, which can only over-rank.
-            before, value, after = split
-            spliced: list[Expanded] | None = None
-            if value is not None and not value.opaque:
-                split_words, split_redirects = scan(value.text)
-                spliced = []
-                for raw in split_words:
-                    spliced.extend(expand_all(raw, st.env, st.home))
-                # env passes ``>``/``|`` through as literal words; keep the
-                # operands visible rather than drop them.
-                for _op, raw in split_redirects:
-                    spliced.extend(expand_all(raw, st.env, st.home))
-            if spliced is None:
-                # Unknowable value: fall through to the peel and the backstop,
-                # flagging a delete word so it never stays LOW.
-                joined = " ".join(w.text for w in words[1:])
-                if _DELETE_WORD_RE.search(joined):
-                    self.result.opaque_reasons.append("env -S runs a command string")
-            else:
-                words = [words[0], *before, *spliced, *after]
+            words = self._splice_env_split(words, split)
         # Kept for the backstop: a wrapper's own flags can carry a path
         # (``env -Q<path>``, ``xargs -a <path>``) that peeling would hide.
         unpeeled = words

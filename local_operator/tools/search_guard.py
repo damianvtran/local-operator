@@ -172,7 +172,13 @@ _WRAPPER_VALUE_FLAGS: dict[str, frozenset[str]] = {
     # program (field report 2026-11-12: ``env -u NODE_OPTIONS … python
     # run_bounded.py -- node <pad>/x.mjs`` was ranked as paths "handed to
     # NODE_OPTIONS", so the real program's read-only inputs hit the backstop).
-    "env": frozenset({"u"}),
+    #
+    # Every valued short flag of GNU env (``-u``/``-C``/``-a``) and BSD env
+    # (``-u``/``-P``/``-L``/``-U``), not just ``-u``: with ``-C`` missing,
+    # ``env -C /tmp rm -rf ~`` read ``/tmp`` as the program and the ``rm``
+    # vanished (QA Q-3-1 on PR #3906). ``resolve._env_split`` reads this same
+    # entry, so the wrapper peel and the ``-S`` finder cannot drift apart.
+    "env": frozenset({"u", "C", "a", "P", "L", "U"}),
 }
 
 #: The same, spelled long and with a space rather than an ``=``.
@@ -198,7 +204,9 @@ _WRAPPER_LONG_VALUE_FLAGS = frozenset(
 #: ``sudo --unset rm -rf ~/work`` peel ``rm`` away as a flag value (review F2
 #: on PR #3906), though sudo rejects ``--unset``.
 _WRAPPER_OWN_LONG_VALUE_FLAGS: dict[str, frozenset[str]] = {
-    "env": frozenset({"--unset"}),
+    # ``--chdir`` is also in the shared table (sudo takes it); listed here too so
+    # this entry is env's complete long-option vocabulary for ``_env_split``.
+    "env": frozenset({"--unset", "--chdir", "--argv0"}),
 }
 
 #: Shells whose ``-c`` argument is a command string. Their inner text is parsed

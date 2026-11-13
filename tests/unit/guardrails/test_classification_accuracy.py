@@ -24,6 +24,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import shlex
 import time
 from pathlib import Path
 from typing import Any
@@ -1222,6 +1223,78 @@ def test_env_split_string_is_resolved_as_the_real_command(
     text = command.format(stranger=_pad(home, STRANGER), own=own)
     verdict = _verdict(home, text)
     assert verdict.risk is expected, verdict.reasons
+
+
+@pytest.mark.parametrize(
+    ("command", "expected"),
+    [
+        # R3-1: env's ``\_`` separator, which the shell tokeniser kept as one word.
+        ("env -S 'rm\\_-rf\\_${{HOME}}'", Risk.CRITICAL),
+        ("env -S 'rm\\_-rf\\_{stranger}'", Risk.HIGH),
+        ("env -u A -S 'rm\\_-rf\\_{stranger}'", Risk.HIGH),
+        ("env -S 'rm\\_{stranger}/n.txt'", Risk.HIGH),
+        # R3-1: a nested ``env -S`` is split again.
+        ("env -S \"env -S 'rm -rf \\${{HOME}}'\"", Risk.CRITICAL),
+        ("env -S \"env -S 'rm -rf ~/'\"", Risk.CRITICAL),
+        # R3-1 / Q-3-1: ``-C <dir>`` before ``-S``.
+        ("env -C /tmp -S 'rm -rf ~/'", Risk.CRITICAL),
+        ("env -C /tmp -S 'rm -rf {lineage}'", Risk.HIGH),
+        # Unchanged: a split read of one's own file.
+        ("env -u FOO -S 'cat {own}'", Risk.LOW),
+    ],
+)
+def test_env_split_string_keeps_its_raw_delete_floor(
+    home: Path, command: str, expected: Risk
+) -> None:
+    """Review R3-1 / QA Q-3-1: env's ``-S`` grammar is not the shell's.
+
+    The round-2 splice skipped the raw delete-word check, then mis-split
+    ``\\_`` and nested ``-S``, so real deletes of ``$HOME`` ranked LOW.
+    """
+    _child_of(home, CHILD, PARENT)
+    lineage = _pad(home, CHILD) / "x.mjs"
+    lineage.parent.mkdir(parents=True, exist_ok=True)
+    lineage.write_text("x\n")
+    own = _pad(home, PARENT) / "notes.txt"
+    own.write_text("x\n")
+    text = command.format(stranger=_pad(home, STRANGER), own=own, lineage=lineage)
+    verdict = _verdict(home, text)
+    assert verdict.risk is expected, (text, verdict.reasons)
+
+
+@pytest.mark.parametrize(("layers", "expected"), [(4, Risk.LOW), (5, Risk.HIGH)])
+def test_env_split_string_nesting_past_the_cap_fails_closed(
+    home: Path, layers: int, expected: Risk
+) -> None:
+    """Review R3-1: nested ``env -S`` is spliced to a bounded depth, then opaque."""
+    own = _pad(home, PARENT) / "notes.txt"
+    own.write_text("x\n")
+    command = f"cat {own}"
+    for _ in range(layers):
+        command = f"env -S {shlex.quote(command)}"
+    verdict = _verdict(home, command)
+    assert verdict.risk is expected, (command, verdict.reasons)
+
+
+@pytest.mark.parametrize(
+    ("command", "expected"),
+    [
+        ("env -C /tmp rm -rf ~", Risk.CRITICAL),
+        ('env -C /tmp rm -rf "$HOME"', Risk.CRITICAL),
+        ("env -iC /tmp rm -rf ~", Risk.CRITICAL),
+        ("env -a foo rm -rf ~/x", Risk.HIGH),
+        ("env -P /bin rm -rf ~", Risk.CRITICAL),
+        ("env --argv0 foo rm -rf ~", Risk.CRITICAL),
+    ],
+)
+def test_env_value_flags_never_become_the_program(home: Path, command: str, expected: Risk) -> None:
+    """QA Q-3-1: the wrapper peel shares ``-S``'s env value-flag table."""
+    from local_operator.guardrails.resolve import _ENV_VALUE_LETTERS
+    from local_operator.tools.search_guard import _WRAPPER_VALUE_FLAGS
+
+    assert _ENV_VALUE_LETTERS is _WRAPPER_VALUE_FLAGS["env"]
+    verdict = _verdict(home, command)
+    assert verdict.risk is expected, (command, verdict.reasons)
 
 
 def test_tracked_script_with_uncommitted_edits_is_high(home: Path) -> None:
