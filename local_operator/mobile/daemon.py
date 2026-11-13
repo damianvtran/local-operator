@@ -11436,6 +11436,11 @@ def build_app(daemon: MobileDaemon):
             # subresource it might try to load; keeping the disposition inline
             # preserves the phone's image preview (an <img> never executes it).
             headers["Content-Security-Policy"] = "sandbox; default-src 'none'"
+        if getattr(ref, "remote", False):
+            # Another device's file, already typed by ``mobile.library._as_served``:
+            # the phone opens it top-level on this origin (``target=_blank``), so it
+            # is sandboxed whatever its type (#3872 R3-1).
+            headers["Content-Security-Policy"] = "sandbox; default-src 'none'"
         if download:
             headers["Cache-Control"] = "no-store"
         else:

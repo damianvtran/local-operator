@@ -73,6 +73,18 @@ _FS_MODULES = frozenset({"os", "shutil", "pathlib"})
 #: count with a reason, and a removed one fails as stale.
 _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
     (
+        "local_operator/remote_files/cache.py::evict",
+        "os.unlink",
+        "Removes only 32-hex digest blobs/sidecars relative to a held cache/remote-files "
+        "directory fd, opened no-follow from the config root; never sessions or attachments.",
+    ),
+    (
+        "local_operator/server/utils/remote_session_files.py::land",
+        "<path>.unlink",
+        "Removes only this call's fixed-prefix, random O_EXCL-created download temp FILE; "
+        "creation failure never enters cleanup, and unlink rejects directories.",
+    ),
+    (
         "local_operator/definition_transaction.py::_durable_json",
         "os.replace",
         "Publishes the O_EXCL-created regular JSON temp file; "

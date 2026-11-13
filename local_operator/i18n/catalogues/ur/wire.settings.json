@@ -161,6 +161,8 @@
   "wire.settings.desktop_launch_command.help": "خالی = ایپ تلاش کریں (local-operator-ui، پھر macOS ایپ)۔ '{'session'}' سیشن id ہے۔",
   "wire.settings.desktop_launch_command.label": "لانچ کمانڈ",
   "wire.settings.desktop_launch_command.placeholder": "local-operator-ui --open-session '{'session'}'",
+  "wire.settings.desktop_remote_files_cache_bytes.help": "دوسری ڈیوائسز پر موجود گفتگوؤں کی فائلوں کی کاپیوں کے لیے ڈسک کی جگہ، تاکہ وہ یہاں جلدی کھلیں۔ سب سے پرانی کاپیاں پہلے ہٹائی جاتی ہیں۔ 0 دکھانے کے بعد کچھ نہیں رکھتا۔",
+  "wire.settings.desktop_remote_files_cache_bytes.label": "ریموٹ فائلوں کا کیش (بائٹس)",
   "wire.settings.detail_length.help": "فرسودہ۔ کمپریشن انجن نے بدل دیا ہے۔",
   "wire.settings.detail_length.label": "تفصیل کی لمبائی",
   "wire.settings.display_comfortable_rows.choice.false.description": "تنگ، مزید تاریخچہ",

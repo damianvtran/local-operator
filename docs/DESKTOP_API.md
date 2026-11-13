@@ -802,6 +802,8 @@ readings.
 | GET `.../{id}/user-attachments` | — | `{state:ready\|unsupported\|unavailable,items,truncated}` — every document and picture the USER attached, oldest first, metadata only (`session_attachments`); see §"The user-attachment inventory" |
 | POST `.../{id}/user-attachments/{digest}/materialise` | — | `{path,name,size_bytes,created}`; copies a user attachment's retained bytes to `<session scratchpad>/generated/` so open/reveal/copy-path have a real, correctly named file (`session_attachments`) |
 | POST `.../{id}/files/{file_id}/materialise` | — | `{path,name,size_bytes,created}`; copies a digest-only artifact to `<session scratchpad>/generated/` (`session_files`) |
+| GET `.../{id}/files/{file_id}/content` | optional `Range` | raw bytes (200, or 206 for a `Range`) of one row of a PEER's conversation, fetched from the owner on miss and streamed; local sessions answer 404 (`remote_files`); see §"Remote files" |
+| POST `.../{id}/files/{file_id}/download` | — | `{path,name,bytes,sha256,created,origin_device}`; lands one row of a PEER's conversation on THIS device (`remote_files`); see §"Remote files" |
 | POST `.../{id}/messages` | `{request_id,text,images?,mode?:prompt|steer}` | `{status:admitted,command_id,duplicate,detail,replayed?}` |
 | POST `.../{id}/commands` | `{request_id,command,args?,images?}` | `{command,result:SlashResult,replayed?}` |
 | POST `.../{id}/answers` | `{epoch,request_id,value,question_index}` OR `{epoch,request_id,approved}` OR `{ask_id,answers,images?}` / `{ask_id,decline:true}` | runtime receipt; stale runtime/request/question409. A **queued ask** is answered by `ask_id` with NO epoch check (an ask outlives the owner that queued it), and the refusal is the ask's own sentence (expired / already answered by `<surface>` / already declined) as a `409`. **`dismiss`** (`features.ask_dismiss >= 1`): `{ask_id,dismiss:true,reason?}` with `reason` one of `answered_in_chat` \| `moot` (default `moot`) puts an OPEN ask away — the fourth body shape, and the same epoch-free queued-ask door. It carries no `answers`/`decline`/`revise`/`images` (a body that does is a `422`), it is accepted while the agent is RUNNING (mid-turn the receipt reaches the model at the runner's next boundary; an idle live session holds it with no turn), and it **boots nothing**: a session with no live owner is settled by the no-boot door, and only an owner that is present is dialled. `200 {detail:"dismissed"}`; the ask's own sentence as a `409` (already answered / already dismissed / relayed / team-bridge / not in this session's queue). `dismiss:false` is the same statement as omitting it; `reason` without `dismiss` is a `422`. A relayed or team-bridge OPEN ask stays refused — it is settled where its own model reads it. A body with neither answers nor `decline:true` is a `422`: `decline:false` is not a way to answer with nothing **`images`** (`features.ask_attachments >= 1`): at most 8 `{question_id,data_b64,mime_type}` objects, valid only beside `answers` (never with `decline`, `revise` or a gate body); every `question_id` must be a key of `answers`; the whole body is capped at 900,000 B. A violation of those shapes is the route's generic `422` (`The request has invalid fields.` — the validator's own sentence is not surfaced, so a client pre-gates the shapes). An owner runtime that predates image answers refuses the answer in words (`this session's runtime predates image answers; update the runtime or send the answer as text`, a `409`) and records **nothing** — the text is not kept without its pictures; a secret question refuses images. The images are stored once and the ask row publishes REFS only (`attachments: {question_id:[{attachment,mime_type,bytes}]}`, `null`/absent when none); the model receives them in question order. Revisions stay text-only |
@@ -2392,8 +2394,9 @@ DIFFERENT query or garbage is `422 session_files_bad_cursor`; a cursor from an o
 
 **Answer**: `state` is `ready`, `building` (a cold scan of a very large journal is still
 running in the background: partial rows are real, poll again; `scan.covered_bytes` of
-`scan.total_bytes` shows progress) or `unsupported` (a peer's conversation: its journal is not
-on this disk; no backend rows are available). `revision` is monotone per session while the
+`scan.total_bytes` shows progress) or `unsupported` (a peer's conversation on a backend
+without `remote_files`, or an owner that predates the peer index — then
+`unsupported_reason: "peer_update_required"` and `device_name`; see §"Remote files"). `revision` is monotone per session while the
 journal only grows and changes whenever the index changes. `total` counts rows matching every
 filter; `counts` is the per-kind census BEFORE the `kind` filter so chips can show every
 count. A draft id answers an empty `ready` page (not a 404); an unknown id is the shared 404; a
@@ -2456,7 +2459,8 @@ open/reveal/copy-path action may be offered for it. **Metadata only:** bytes sta
 `…/attachments/{digest}`; there is no second transport. User rows only, and never a
 harness-injected row (`provider_payload.harness_injected`).
 
-States: `ready` (complete), `unsupported` (a peer's conversation), `unavailable` (an archive
+States: `ready` (complete), `unsupported` (a peer's conversation without `remote_files`, or
+an owner that predates the peer index), `unavailable` (an archive
 this host cannot decode). `truncated: true` past 2000 items. Admission is the file index's
 (404 unknown id, 409 silent peer, empty `ready` for a draft). Absent key: the renderer
 aggregates loaded rows and must not call the route.
@@ -2470,6 +2474,65 @@ session_files_file_not_found` (also for a `materialisable: false` row — the fi
 answers the same for a denied path, which it never lists — checked before any byte is read,
 so nothing is written), `410 session_files_artifact_missing`, `409
 session_files_unsafe_destination`.
+
+### Remote files (`remote_files: 1`)
+
+docs/design/remote-files-parity.md. A conversation another device holds answers the same
+routes as a local one:
+
+- **Transcript bytes** (`…/attachments/{digest}`, `…/waveform`, `…/supplements/{digest}/document`,
+  and `…/children/{child_id}/attachments/{digest}` for a remote subagent) look in this device's
+  store, then the session's replica, then the bounded remote cache
+  (`<config>/cache/remote-files/`), and only then pull once from the owner (S1's
+  `net_file_get`, so the owner's view-role confinement applies to every byte). A peer's bytes
+  are streamed with `Accept-Ranges: bytes` (206 for a `Range`); a local conversation's answer
+  is unchanged.
+- **Statuses** (retryable and permanent differ by STATUS, which always reaches the renderer):
+
+  | Status | `code` | Meaning |
+  |---|---|---|
+  | 200 / 206 | — | bytes |
+  | 504 | `attachment_owner_unreachable` | the owner (or this device's relay) is not answering; retry |
+  | 504 + `Retry-After: 2` | `attachment_fetch_pending` | still transferring after 20 s; the pull continues and a retry joins it |
+  | 409 | `attachment_peer_outdated` | the owner predates mesh file transfer; `lop network update <device>` |
+  | 409 | `attachment_on_peer` | the owner refused (not referenced, view revoked, …); permanent |
+
+  Never 503 (reads as the desktop plane closing).
+- **Files and user attachments** (`…/files`, `…/user-attachments`) are the OWNER's own index,
+  paginated with its opaque cursors and revisions, paths in display form (`~/…` or
+  cwd-relative). Each row/item adds `remote: true`, `origin_device: {id, name}` (from this
+  device's catalogue, never the owner), and `remote_read: {kind: "attachment"|"path"} | null`
+  or `remote_unreadable: "not_referenced"|"outside_session_files"|"missing"|"too_large"|"sensitive"`.
+  The listing adds `remote: true`, `unsupported_reason` and `device_name`. Readability is
+  advisory: every byte is re-checked by the owner. Workspace files are never readable from
+  another device (`outside_session_files`); credential-shaped files are never listed. An
+  unreachable owner is 504 `session_files_owner_unreachable`; a page over one link record is
+  trimmed and `next_cursor` continues where it stopped.
+- **`GET …/files/{file_id}/content`** (peer only) streams one readable row (statuses above;
+  409 `session_files_remote_unreadable` with `params.reason` for an unreadable row). Passive
+  types are served as themselves, anything else as `application/octet-stream`, with `nosniff`
+  and `Content-Security-Policy: sandbox`.
+- **`POST …/files/{file_id}/download`** (peer only) lands the row in `~/Downloads` (or
+  `<config>/downloads` when that is not a folder): sanitised name, never overwrites (a
+  same-bytes file is reused with `created: false`, else `name (1).ext` … `name (99).ext`, then
+  409 `session_files_download_exhausted`), streamed copy verified against the content address
+  before a no-replace publish (409 `session_files_download_mismatch` lands nothing), 409
+  `session_files_sensitive_name` for a credential-shaped name.
+- **Cache budget**: `desktop.remote_files_cache_bytes` (LIVE, default 1 GiB; `0` keeps
+  nothing after serving and turns precache off), LRU by last use.
+- **Library**: peer sessions' files enter the same index (metadata only, refreshed every
+  5 min while this device is in a network, per session only when its catalogue `mtime`
+  moved). A row whose every occurrence is a peer's carries `remote: {device_id,
+  device_name}` and `ref.path: null` (a peer's path never resolves on this disk); a digest
+  this device also holds is ONE local asset. List, detail and thumbnail never contact the
+  owner (no bytes yet → the designed thumbnail 404); only `…/content` fetches, with the
+  statuses above. A session gone from two answered catalogue reads is dropped; an
+  unreachable device's rows are kept.
+- **Precache**: the catalogue poll prepares the image/audio/video files (each at most
+  32 MiB) of ACTIVE remote sessions — reachable, unarchived, moved within 2 h, plus the last
+  8 opened here; at most 16 per pass, each re-listed at most once a minute and only when it
+  moved. Opening a remote session's files prepares it at once. One precache pull per owner
+  at a time, so an on-screen request is never queued behind it; a pass stops at the budget.
 
 ### Verification
 
@@ -3534,6 +3597,7 @@ something alive or ready until then.
 | `supplements` | 1 | `features.supplements: 1` — the turn-supplement ("Highlights") contract is in the build: the `supplement_progress` event family, the `supplement_v1` journal row, the `supplements-v1` attach capability and the document assembler. It is a BUILD fact, NOT the attach gate: live events and the history projection reach a viewer only under the two-half `supplements-v1` gate (the owner's own capability string ANDed with the viewer's declaration — `auth["supplements"] = true`, or `?supplements=1` on the desktop live path). See [Turn supplements](#turn-supplements-the-supplement_v1-row-and-the-supplement_progress-event) | the renderer draws nothing supplement-shaped and is never refused for it: a viewer that does not declare is not sent a `supplement_progress` event or a supplement projection, and rows are journaled either way. It must NOT gate any existing surface on this key |
 | `profile_scope` | 1 | `scope: "global" \| "session"` on the rows of `GET /v1/desktop/profiles`, `GET /v1/desktop/profiles/{name}`, `GET /v1/desktop/teams`, `GET /v1/desktop/teams/{name}` and the `agent`/`team` rows of `GET /v1/desktop/sessions/{id}/command-entities` | the renderer paints no scope badge and sends no session id to a picker route; the fields are additive, so an older reader parses the same payload it did before |
 | `profile_promote` | 1 | `POST /v1/desktop/sessions/{session_id}/promote` — copy one CONVERSATION-scoped role or team into the account. Body `{request_id, kind: "agent" \| "team", name, as_name?, confirm_replace?, dry_run?}`; a confirmed call answers the new ACCOUNT detail row (`GET /v1/desktop/profiles/{name}` / `/teams/{name}` shape) plus an additive `promoted` object naming what was created, expanded and replaced; a `dry_run` answers `{dry_run: true, promoted}` with the same plan and writes nothing | the renderer offers no "use in all conversations" action on conversation-scoped rows and calls nothing. On a backend that does not advertise the key the session rows are still rendered, only without that action — do not send a `session_id` to any profile route to approximate it |
+| `remote_files` | 1 | a PEER's conversation answers like a local one: transcript bytes fetched on miss (504 retryable, 409 permanent), `…/files` and `…/user-attachments` listed by the owner with `remote`/`origin_device`/`remote_read`/`remote_unreadable`, plus the peer-only `…/files/{file_id}/content` and `POST …/files/{file_id}/download`; see §"Remote files" | a peer's Files panel is `state: "unsupported"` and transcript bytes of a peer answer 409 `attachment_on_peer`, as before |
 | `session_files` | 1 | `GET /v1/desktop/sessions/{id}/files` and `POST …/files/{file_id}/materialise` — the authoritative per-session file inventory (written, edited, command outputs, screenshots, downloads, generated images/videos, subagent files, Highlights callouts), and the `details.artifacts` list the image/video tools now write | the Files view builds from its own transcript scan exactly as today, and the renderer MUST NOT call the route (an older backend answers 404). A 404 from a backend that DID advertise the key is a broken backend: treat it as definitive "unsupported" for the session |
 
 `profile_scope` STATES A ROW'S STORE, not a caller's permission. `GET /v1/desktop/profiles`,

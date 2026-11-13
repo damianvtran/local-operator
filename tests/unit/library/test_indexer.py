@@ -189,6 +189,10 @@ def test_thumbnails_are_keyed_by_content_and_width_and_invalidate(tmp_path, monk
     image.write_bytes(b"png-bytes")
     session(root, SESSION, write_rows("w1", 1.0, image))
     indexer.rebuild_now(root)
+    # This cell owns the fake decoder and foreground generation after a synchronous
+    # rebuild. A service read must not start a worker that can legitimately regenerate
+    # between the stale check and saved.clear(), erasing that work from our log.
+    monkeypatch.setattr(service, "ensure_started", lambda _root: None)
     asset_id = service.list_assets(root, service.Query())["rows"][0]["id"]
     store = LibraryStore(root)
 

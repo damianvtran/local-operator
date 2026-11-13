@@ -103,6 +103,9 @@ from local_operator.server.utils.desktop_sessions import (
     DesktopSessions,
     DraftAlreadyMaterialised,
     LegacySubscriberDuringMove,
+    PeerAttachmentFile,
+    PeerAttachmentOutdated,
+    PeerAttachmentRetryable,
     PeerAttachmentUnavailable,
     PeerSessionUnreachable,
     SessionDeletionRefused,
@@ -2241,13 +2244,41 @@ async def errors(request: Request, copy: StoreRefusalCopy | None = None) -> Asyn
         raise HTTPException(
             409, _wd.desktop_refusal(error=str(error)).envelope(code=error.code)
         ) from None
+    except PeerAttachmentRetryable as error:
+        # 504, NEVER 503 OR 409 (remote files parity §1): the renderer reads an
+        # undeclared 503 under /v1/desktop/ as the plane closing, and a 409 as
+        # permanent; only the STATUS reaches it for a non-plane code, so the
+        # retryable answer has to differ by status. ``pending`` means the pull is
+        # still running and a retry after ``Retry-After`` joins it.
+        message = (
+            _wd.attachment_fetch_pending(device=error.device)
+            if error.pending
+            else _wd.attachment_owner_unreachable(device=error.device)
+        )
+        raise HTTPException(
+            504,
+            message.envelope(code=error.code),
+            headers={"Retry-After": "2"} if error.pending else None,
+        ) from None
+    except PeerAttachmentOutdated as error:
+        raise HTTPException(
+            409,
+            _wd.attachment_peer_outdated(device=error.device, peer=error.peer).envelope(
+                code=error.code
+            ),
+        ) from None
     except PeerAttachmentUnavailable as error:
         # The bytes are on the device that holds the conversation, and this
         # device's content-addressed store is what the route reads. 409 rather
         # than 404 for the same reason as above: the image exists, and the reader
-        # is told where it is instead of being told it does not.
+        # is told where it is instead of being told it does not. The sentence
+        # carries the OWNER's reason (#3872 Q1-1); the code stays, so the
+        # renderer's handling does not change.
         raise HTTPException(
-            409, _wd.desktop_refusal(error=str(error)).envelope(code=error.code)
+            409,
+            _wd.attachment_owner_refused(reason=error.reason, device=error.device).envelope(
+                code=error.code
+            ),
         ) from None
     except SessionStoreUnavailable as error:
         # The catalogue refused to answer, most often because the store's
@@ -4058,6 +4089,28 @@ async def child_trajectory_release(session_id: str, child_id: str, request: Requ
         return reply(await host(request).unload_child_trajectory(session_id, child_id))
 
 
+def _peer_file_response(result: PeerAttachmentFile, request: Request) -> Response:
+    """A peer session's blob, STREAMED from its open fd, with ``Range`` (206).
+
+    The local branch keeps its whole-body ``Response`` (unchanged bytes for local
+    sessions); a peer's file may be a 32 MiB video landed in the remote cache, so
+    it is never buffered (remote files parity §1, I1-3). Same mime allowlist and
+    ``nosniff`` as the local answer.
+    """
+    from local_operator.server.utils import byte_range
+
+    return byte_range.handle_response(
+        result.handle,
+        media_type=(
+            result.mime_type
+            if result.mime_type in ATTACHMENT_SERVABLE_MIME_TYPES
+            else ATTACHMENT_FALLBACK_MIME
+        ),
+        headers={"X-Content-Type-Options": "nosniff"},
+        range_header=request.headers.get("range"),
+    )
+
+
 @router.get(
     "/v1/desktop/sessions/{session_id}/children/{child_id}/attachments/{digest}",
     # Same declaration as the parent's route, and for the same reason: the
@@ -4085,7 +4138,10 @@ async def child_attachment(
     that is not the named session's, which ``_contained_child_dir`` refuses.
     """
     async with errors(request):
-        data, mime_type = await host(request).child_attachment(session_id, child_id, digest)
+        result = await host(request).child_attachment(session_id, child_id, digest)
+    if isinstance(result, PeerAttachmentFile):
+        return _peer_file_response(result, request)
+    data, mime_type = result
     return Response(
         content=data,
         media_type=(
@@ -4187,7 +4243,10 @@ async def attachment(session_id: str, digest: AttachmentDigest, request: Request
       but the two values are not a matched pair.
     """
     async with errors(request):
-        data, mime_type = await host(request).attachment(session_id, digest)
+        result = await host(request).attachment(session_id, digest)
+    if isinstance(result, PeerAttachmentFile):
+        return _peer_file_response(result, request)
+    data, mime_type = result
     return Response(
         content=data,
         media_type=(

@@ -70,6 +70,22 @@ def aside_unavailable() -> Msg:
     return Msg("wire.errors.desktop.aside_unavailable", {})
 
 
+def attachment_fetch_pending(*, device: str) -> Msg:
+    return Msg("wire.errors.desktop.attachment_fetch_pending", {"device": device})
+
+
+def attachment_owner_refused(*, reason: str, device: str) -> Msg:
+    return Msg("wire.errors.desktop.attachment_owner_refused", {"reason": reason, "device": device})
+
+
+def attachment_owner_unreachable(*, device: str) -> Msg:
+    return Msg("wire.errors.desktop.attachment_owner_unreachable", {"device": device})
+
+
+def attachment_peer_outdated(*, device: str, peer: str) -> Msg:
+    return Msg("wire.errors.desktop.attachment_peer_outdated", {"device": device, "peer": peer})
+
+
 def claim_authorization_required() -> Msg:
     return Msg("wire.errors.desktop.claim_authorization_required", {})
 
@@ -305,6 +321,17 @@ def session_files_bad_filter(*, field: str, value: str) -> Msg:
     return Msg("wire.errors.desktop.session_files_bad_filter", {"field": field, "value": value})
 
 
+def session_files_download_exhausted(*, name: str, folder: str) -> Msg:
+    return Msg(
+        "wire.errors.desktop.session_files_download_exhausted",
+        {"name": name, "folder": folder},
+    )
+
+
+def session_files_download_mismatch(*, device: str) -> Msg:
+    return Msg("wire.errors.desktop.session_files_download_mismatch", {"device": device})
+
+
 def session_files_file_not_found() -> Msg:
     return Msg("wire.errors.desktop.session_files_file_not_found", {})
 
@@ -315,6 +342,21 @@ def session_files_materialise_failed(*, reason: str) -> Msg:
 
 def session_files_not_an_artifact() -> Msg:
     return Msg("wire.errors.desktop.session_files_not_an_artifact", {})
+
+
+def session_files_owner_unreachable(*, device: str) -> Msg:
+    return Msg("wire.errors.desktop.session_files_owner_unreachable", {"device": device})
+
+
+def session_files_remote_unreadable(*, reason: str, device: str) -> Msg:
+    return Msg(
+        "wire.errors.desktop.session_files_remote_unreadable",
+        {"reason": reason, "device": device},
+    )
+
+
+def session_files_sensitive_name(*, name: str) -> Msg:
+    return Msg("wire.errors.desktop.session_files_sensitive_name", {"name": name})
 
 
 def session_in_project(*, session_id: str) -> Msg:

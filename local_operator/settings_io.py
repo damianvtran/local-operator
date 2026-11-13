@@ -5370,6 +5370,23 @@ SETTINGS: tuple[Setting, ...] = (
         validate_value=_validate_desktop_launch_command,
     ),
     Setting(
+        # The viewer's bounded cache of a PEER session's bytes
+        # (``remote_files/cache.py``, docs/design/remote-files-parity.md §4). LIVE:
+        # read from config.yml on every eviction pass, so an edit applies at the
+        # next landing. The literal mirrors ``remote_files.cache
+        # .REMOTE_FILES_CACHE_BYTES`` (settings_io stays off that import path);
+        # ``_consumer_defaults`` in tests/unit/test_settings_io.py guards the pair.
+        key="desktop.remote_files_cache_bytes",
+        path=("desktop", "remote_files_cache_bytes"),
+        section="desktop",
+        label=_t(_ws.desktop_remote_files_cache_bytes_label()),
+        kind=Kind.INT,
+        default=1024 * 1024 * 1024,
+        help=_t(_ws.desktop_remote_files_cache_bytes_help()),
+        minimum=0,
+        maximum=1024 * 1024 * 1024 * 1024,
+    ),
+    Setting(
         key="static.roots",
         path=("static", "roots"),
         section="static",

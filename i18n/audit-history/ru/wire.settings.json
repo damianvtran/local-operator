@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "ru",
   "namespace": "wire.settings",
-  "history_sha256": "0cb2be65925db5acf637cdcd0fef55e9b638b3c91d806443dfd0de113b95c52a",
+  "history_sha256": "d540e19c3414197b71eba48b2b133cd091a86df750a5e3d44c7904a3127729c2",
   "entries": [
     {
       "locale": "ru",
@@ -240,6 +240,85 @@
       },
       "status": "passed",
       "note": "Round 3 evidence binding 2026-11-12, reviewer 5c6cf4252f37 (anthropic/claude-opus-5-5, no fallback): same audit and verdict as the preceding row, re-appended so the cg1 byte pin moves to a committed record. Source ffb9cf937f10d7298f9178f18286c2ac7669e578d595f30b4074a830b9667c13 and target 16511425274597c2dc269f72a88336bd95bef83699372e8c1a9a8358c6a7979d recomputed from the shipped files at 4f6f57986. Evidence: i18n/audits/evidence/ru/wire.settings/temporary-r3-5c6cf4252f37/record.json"
+    },
+    {
+      "locale": "ru",
+      "namespace": "wire.settings",
+      "source_sha256": "5ddafb0e761c12afdcaaa7743ddb584927bdc874bf7eecefb34009574d4a7152",
+      "target_sha256": "bed64171e738b3e192beb4c7e76189866822a05639119021131dd9ddcc90e182",
+      "translator": {
+        "agent": "coder (PR #3872 core implementer, lopdev)",
+        "session": "f4c08c15c058",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-12"
+      },
+      "auditor": {
+        "agent": "i18n auditor (lopdev reviewer role, task core-r1-i18n-copy; independent of the PR #3872 coder/translator)",
+        "session": "a3fade2429f4",
+        "model": "anthropic/claude-opus-5-5",
+        "fallback": "none observed in this session",
+        "date": "2026-11-12",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "PR #3872 r1 audit a3fade2429f4 (claude-opus-5-5, no fallback): 2 added keys, 0 finding(s). Target bed64171e738. Evidence: i18n/audits/evidence/ru/wire.settings/rfp-a3fade2429f4/record.json"
+    },
+    {
+      "locale": "ru",
+      "namespace": "wire.settings",
+      "source_sha256": "20259ccabe0c6deaf984d4d86667c86ac29cf016d9e161da94c53de611a9ddc4",
+      "target_sha256": "9427751044d1422284fce834f54a6bd1cb07fd07704191fb84d4764edbd01d9f",
+      "translator": {
+        "agent": "coder (PR #3872 core implementer, lopdev)",
+        "session": "f4c08c15c058",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-12"
+      },
+      "composition_translators": [
+        {
+          "side": "feature",
+          "provenance": {
+            "agent": "coder (PR #3872 core implementer, lopdev)",
+            "session": "f4c08c15c058",
+            "model": "anthropic/claude-opus-5-5",
+            "date": "2026-11-12"
+          },
+          "additional": []
+        },
+        {
+          "side": "main",
+          "provenance": {
+            "agent": "core-backend coder cf2843d74957; round-1 remediation coder 1c07b39051ed (lopdev coder role) — relayed from PR #3832 i18n audit comments 6811281029/6812645445, not independently verified",
+            "model": "anthropic/claude-opus-5-5",
+            "fallback": "none reported in the relayed source",
+            "date": "2026-11-11..2026-11-12 (git: 09839b6de, 75606914f, eaff8c7a9)"
+          },
+          "additional": []
+        }
+      ],
+      "auditor": {
+        "agent": "independent i18n compatibility auditor (lopdev reviewer, resumed existing core i18n stream)",
+        "session": "187b766ab67d",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-13",
+        "fallback": "none during this resumed audit",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "composition_audit": {
+        "source_head": "84892ed59f03b85ca52e8c3ea63d55d0f4abd713",
+        "common_base": "4d113fc6c23b3fbb2afa426c0c6747ee0c399467",
+        "parent_revisions": [
+          "145a2ac1ad7846b1ebcaafb8661f6db865d2de1f",
+          "9a98146e1a1e5a518f67371203d30ea6ccf18e11"
+        ],
+        "evidence": "i18n/audits/evidence/ru/wire.settings/merged-compat-187b766ab67d-84892ed59/record.json"
+      },
+      "note": "Genuine independent merged-source semantic/context compatibility audit, 2026-11-13, 187b766ab67d, openai/gpt-6.1-sol, no fallback in this audit. Exact disjoint parent key/value composition; 2 feature + 6 upstream keys semantically read; unchanged keys carried by current-byte parent evidence. Historical provenance preserved as reported, not relabelled. Evidence: i18n/audits/evidence/ru/wire.settings/merged-compat-187b766ab67d-84892ed59/record.json"
     }
   ]
 }

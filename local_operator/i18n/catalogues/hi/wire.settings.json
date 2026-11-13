@@ -161,6 +161,8 @@
   "wire.settings.desktop_launch_command.help": "खाली = ऐप खोजें (पहले local-operator-ui, फिर macOS ऐप)। '{'session'}' सत्र id है।",
   "wire.settings.desktop_launch_command.label": "लॉन्च कमांड",
   "wire.settings.desktop_launch_command.placeholder": "local-operator-ui --open-session '{'session'}'",
+  "wire.settings.desktop_remote_files_cache_bytes.help": "दूसरे डिवाइस पर रखी बातचीत की फ़ाइलों की कॉपियों के लिए डिस्क जगह, ताकि वे यहाँ जल्दी खुलें। सबसे पुरानी कॉपियाँ पहले हटती हैं। 0 का मतलब है दिखाने के बाद कुछ नहीं रखा जाता।",
+  "wire.settings.desktop_remote_files_cache_bytes.label": "रिमोट फ़ाइल कैश (बाइट)",
   "wire.settings.detail_length.help": "अप्रचलित। संपीडन इंजन इसे बदल चुका है।",
   "wire.settings.detail_length.label": "विवरण की लंबाई",
   "wire.settings.display_comfortable_rows.choice.false.description": "सघन, ज़्यादा इतिहास",

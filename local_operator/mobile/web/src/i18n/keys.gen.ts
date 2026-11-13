@@ -589,6 +589,10 @@ export type MessageParams = {
   "wire.errors.desktop.aside_request_reused": undefined;
   "wire.errors.desktop.aside_still_running": undefined;
   "wire.errors.desktop.aside_unavailable": undefined;
+  "wire.errors.desktop.attachment_fetch_pending": { "device": string };
+  "wire.errors.desktop.attachment_owner_refused": { "reason": string; "device": string };
+  "wire.errors.desktop.attachment_owner_unreachable": { "device": string };
+  "wire.errors.desktop.attachment_peer_outdated": { "device": string; "peer": string };
   "wire.errors.desktop.claim_authorization_required": undefined;
   "wire.errors.desktop.claim_body_not_object": undefined;
   "wire.errors.desktop.claim_key_unpublished": undefined;
@@ -647,9 +651,14 @@ export type MessageParams = {
   "wire.errors.desktop.session_files_artifact_missing": undefined;
   "wire.errors.desktop.session_files_bad_cursor": undefined;
   "wire.errors.desktop.session_files_bad_filter": { "field": string; "value": string };
+  "wire.errors.desktop.session_files_download_exhausted": { "name": string; "folder": string };
+  "wire.errors.desktop.session_files_download_mismatch": { "device": string };
   "wire.errors.desktop.session_files_file_not_found": undefined;
   "wire.errors.desktop.session_files_materialise_failed": { "reason": string };
   "wire.errors.desktop.session_files_not_an_artifact": undefined;
+  "wire.errors.desktop.session_files_owner_unreachable": { "device": string };
+  "wire.errors.desktop.session_files_remote_unreadable": { "reason": string; "device": string };
+  "wire.errors.desktop.session_files_sensitive_name": { "name": string };
   "wire.errors.desktop.session_in_project": { "session_id": string };
   "wire.errors.desktop.session_is_remote_open": { "session_id": string; "label": string };
   "wire.errors.desktop.session_is_remote_write": { "noun": string; "session_id": string; "label": string };
@@ -1116,6 +1125,8 @@ export type MessageParams = {
   "wire.settings.desktop_launch_command.help": undefined;
   "wire.settings.desktop_launch_command.label": undefined;
   "wire.settings.desktop_launch_command.placeholder": undefined;
+  "wire.settings.desktop_remote_files_cache_bytes.help": undefined;
+  "wire.settings.desktop_remote_files_cache_bytes.label": undefined;
   "wire.settings.detail_length.help": undefined;
   "wire.settings.detail_length.label": undefined;
   "wire.settings.display_comfortable_rows.choice.false.description": undefined;

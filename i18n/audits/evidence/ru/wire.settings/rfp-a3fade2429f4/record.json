@@ -1,0 +1,64 @@
+{
+  "schema": 1,
+  "locale": "ru",
+  "namespace": "wire.settings",
+  "pr": "damianvtran/local-operator#3872",
+  "worktree": "/home/ec2-user/local-operator/.worktrees/remote-files-parity",
+  "head": "9a6ef566184f4fd1bc373b14694841b0bf3b3a31",
+  "merge_base": "89678ffc7",
+  "audit_date": "2026-11-12",
+  "key_count": 2,
+  "input_hashes": {
+    "en": "5ddafb0e761c12afdcaaa7743ddb584927bdc874bf7eecefb34009574d4a7152",
+    "target_at_head": "bed64171e738b3e192beb4c7e76189866822a05639119021131dd9ddcc90e182",
+    "target_bound": "bed64171e738b3e192beb4c7e76189866822a05639119021131dd9ddcc90e182",
+    "base_target": "fc7804692fdbc37212fe64459348e9551794067dd2bd82a189513db49ec58232"
+  },
+  "translator": {
+    "agent": "coder (PR #3872 core implementer, lopdev)",
+    "session": "f4c08c15c058",
+    "model": "anthropic/claude-opus-5-5",
+    "date": "2026-11-12"
+  },
+  "auditor": {
+    "agent": "i18n auditor (lopdev reviewer role, task core-r1-i18n-copy; independent of the PR #3872 coder/translator)",
+    "session": "a3fade2429f4",
+    "model": "anthropic/claude-opus-5-5",
+    "fallback": "none observed in this session",
+    "date": "2026-11-12",
+    "independence": "different agent instance from the PR #3872 coder that translated",
+    "result": "passed",
+    "findings": 0,
+    "unresolved_blocker_major": 0
+  },
+  "audit_kind": "delta audit of added keys + mechanical carry of unchanged keys",
+  "audited_keys": [
+    "wire.settings.desktop_remote_files_cache_bytes.label",
+    "wire.settings.desktop_remote_files_cache_bytes.help"
+  ],
+  "carry_proof": {
+    "unchanged_keys_byte_identical_to_merge_base": true,
+    "base_ledger_row_status": "passed",
+    "base_ledger_source_sha256_equals_base_en": true,
+    "base_ledger_row_names_base_target_sha": true
+  },
+  "verified": [
+    "key set equals en",
+    "placeholder names equal en per message and per select arm (reason arms identical, other present)",
+    "no bidi control characters",
+    "NFC",
+    "commands and 256 MiB / 99 figures byte-identical",
+    "glossary §2 and locale style guide terms checked against existing catalogue usage"
+  ],
+  "findings": [],
+  "corrections_resolved_in_target_bound": false,
+  "section": "A",
+  "not_verified": "native-speaker review; rendered desktop/phone width; Urdu RTL rendering (string-level bidi rules only)",
+  "en_findings_not_in_this_row": "I1-1/I1-2/I1-3/I1-5 propose en edits; if any en edit lands in this namespace, this row's source_sha256 is stale and a round-2 audit replaces it",
+  "bound_by": {
+    "note": "translator placeholders filled by round-2 auditor 187b766ab67d from the manager roster (job 485ea7afeea9 = session f4c08c15c058, model_label anthropic/claude-opus-5-5); auditor block and verdict unchanged from round 1",
+    "re_verified_at": "14d8601fd1e63b335edc689c137f2c3ae6bf216f",
+    "target_sha256_at_head": "bed64171e738b3e192beb4c7e76189866822a05639119021131dd9ddcc90e182",
+    "source_sha256_at_head": "5ddafb0e761c12afdcaaa7743ddb584927bdc874bf7eecefb34009574d4a7152"
+  }
+}
