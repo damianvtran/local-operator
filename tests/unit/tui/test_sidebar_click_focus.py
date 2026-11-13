@@ -22,6 +22,7 @@ keyboard. Frames for the visual side live on the PR, not in the tree.
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 import pytest
@@ -32,6 +33,7 @@ from local_operator.session.catalog import CatalogEntry
 from local_operator.tui.app import COMPOSER_FOCUSED_CLASS, OperatorApp
 from local_operator.tui.widgets.editor import Editor
 from local_operator.tui.widgets.session_sidebar import PIN_CELL_WIDTH
+from tests.unit.tui.conftest import BOOT_DEADLOCK_GUARD_S
 
 from .test_app_pilot import FakeSession, _factory
 from .test_session_sidebar import _chip_span, _click_footer_cell
@@ -76,6 +78,15 @@ async def _open_list(pilot: Any, app: OperatorApp, *session_ids: str) -> Any:
     spinner = sidebar._timer
     if spinner is not None:
         spinner.pause()
+    # Opening the panel starts a `sidebar-catalog` worker that reads the session
+    # store off-thread; pausing the timer doesn't stop a read already running, and
+    # a late one writes the store's (empty) list over the seed below. Wait on the
+    # worker, not on a count of pauses. Never pass an empty list:
+    # wait_for_complete([]) waits on every worker.
+    while pending := [
+        w for w in app.workers if w.group == "sidebar-catalog" and not w.is_finished
+    ]:
+        await asyncio.wait_for(app.workers.wait_for_complete(pending), BOOT_DEADLOCK_GUARD_S)
     sidebar.current_id = session_ids[0]
     sidebar.cursor_id = session_ids[0]
     sidebar.set_entries(_catalog(*session_ids))
