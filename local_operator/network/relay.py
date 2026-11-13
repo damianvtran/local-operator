@@ -15931,6 +15931,37 @@ DELIBERATE_STOP_MARKER = "relay-stop-requested.json"
 #: failure this exists to stop.
 RELAY_OOM_SCORE_ADJUST = -500
 
+#: The relay unit's ``OOMPolicy``: when the kernel OOM-kills ANY process in the
+#: unit's cgroup, keep the unit running instead of stopping it.
+#:
+#: WHY (2026-11-11, the Linux node, 23:31–23:33Z): systemd's default is ``stop``
+#: (``DefaultOOMPolicy``), and it applies to every process in the cgroup, not only
+#: the main one. The relay's session runtimes and their tool children live in
+#: that cgroup (``KillMode=process`` keeps them there across restarts, by design),
+#: so a remote session's desktop rig — Electron, xvfb and a ``node`` build at
+#: 4.4–6.9 GB — tripping a GLOBAL OOM stopped the RELAY five times in 2½ minutes.
+#: The user journal shows the pairs: "A process of this unit has been killed by
+#: the OOM killer" → "Failed with result 'oom-kill'" → "Scheduled restart job,
+#: restart counter is at 1…5". The kernel's victim each time was ``node-22``
+#: (``oom_score_adj`` 300), never the relay: :data:`RELAY_OOM_SCORE_ADJUST`
+#: protected the PROCESS and the default policy took down the UNIT anyway, so
+#: the node was off the mesh and a session on it read "the relay is not running".
+#:
+#: WHY ``continue`` IS SAFE HERE: the kernel has already killed exactly the one
+#: process it chose; ``continue`` only stops systemd from ALSO stopping the
+#: unit's main process. Every other process keeps running either way (under
+#: ``KillMode=process`` a stop kills only the main process), so ``stop`` bought
+#: no memory back — it only cost the relay's restart window. If the relay itself
+#: is the victim, its own exit still restarts it through ``Restart=always``. Not
+#: ``kill``: that would SIGKILL every session runtime in the cgroup.
+#:
+#: VERSIONS: ``OOMPolicy=`` exists from systemd 243. An older manager logs
+#: "Unknown key name 'OOMPolicy'… ignoring" and loads the unit; it also predates
+#: systemd's OOM tracking, so it never stopped a unit for a child's OOM in the
+#: first place. The render therefore stays unconditional (and deterministic, which
+#: ``refresh_unit_if_stale``'s content comparison needs).
+RELAY_OOM_POLICY = "continue"
+
 
 def log_path() -> Path:
     return log_dir() / "network.log"
@@ -15977,6 +16008,45 @@ def plist_path() -> Path:
 def systemd_path() -> Path:
     """``~/.config/systemd/user/<unit>`` for the CURRENT home (redirectable)."""
     return supervisors.systemd_unit_path(SYSTEMD_UNIT)
+
+
+def installed_unit_oom_policy() -> dict[str, Any]:
+    """What the INSTALLED relay unit says ``OOMPolicy`` is, read from disk.
+
+    The readiness fact behind the resilience row's ``relay_oom_policy`` warning
+    (:data:`RELAY_OOM_POLICY` has the incident). Read from the unit file and its
+    ``<unit>.d/*.conf`` drop-ins in systemd's order (lexical, last assignment
+    wins), not from ``systemctl show``: the readiness answer is built on every
+    ``net_readiness`` and must not wait on the user manager, and a unit the
+    update path rewrote is ``daemon-reload``ed in the same step, so disk and
+    manager agree after any refresh this code performs. ``oom_policy`` is
+    ``None`` when no line sets it — the manager's default (``stop``).
+
+    ``{"supervisor": None}`` off Linux or without systemctl (launchd has no
+    such policy), ``installed: False`` with no unit, ``readable: False`` when
+    the files could not be read: an unknown is never reported as a gap.
+    """
+    if not (sys.platform.startswith("linux") and is_supported()):
+        return {"supervisor": None}
+    try:
+        unit = systemd_path()
+        if not unit.exists():
+            return {"supervisor": "systemd", "installed": False}
+        dropins = unit.parent / f"{unit.name}.d"
+        files = [unit, *sorted(dropins.glob("*.conf"))] if dropins.is_dir() else [unit]
+        policy: str | None = None
+        for path in files:
+            section = ""
+            for raw in path.read_text(encoding="utf-8", errors="replace").splitlines():
+                line = raw.strip()
+                if line.startswith("[") and line.endswith("]"):
+                    section = line
+                elif section == "[Service]" and line.partition("=")[0].strip() == "OOMPolicy":
+                    # An empty assignment resets to the default, as systemd reads it.
+                    policy = line.partition("=")[2].strip() or None
+    except OSError:
+        return {"supervisor": "systemd", "installed": True, "readable": False}
+    return {"supervisor": "systemd", "installed": True, "readable": True, "oom_policy": policy}
 
 
 def deliberate_stop_marker_path(root: Path | None = None) -> Path:
@@ -16234,6 +16304,9 @@ def render_systemd(port: int = DEFAULT_PORT) -> str:
         # differs from this render, so existing installs gain the line on their
         # next update without a reinstall.
         oom_score_adjust=RELAY_OOM_SCORE_ADJUST,
+        # See RELAY_OOM_POLICY: a session child's OOM kill must not stop the
+        # relay. Existing installs gain the line the same way as the two above.
+        oom_policy=RELAY_OOM_POLICY,
         post_lines=[
             f"Environment={supervisors.quoted(f'{CONFIG_DIR_ENV}={config_dir()}')}",
             *supervisors.output_redirect_lines(log_path()),
