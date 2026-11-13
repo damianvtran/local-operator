@@ -5145,10 +5145,14 @@ class Session:
         #: across read-only turns (a read refreshes, it does not change, the
         #: lifetime). ``None`` until a usage reports a 5m/1h write split.
         self._idle_cache_ttl_s: float | None = None
-        #: Epoch ms of the latest assistant ``message_start``, which the loop
-        #: yields BEFORE building the request — a lower bound on when the
-        #: provider last read (and so refreshed) the cached prefix, which makes
-        #: ``E = anchor + TTL`` err early, the safe direction.
+        self._idle_cache_route: tuple[str, str] | None = None
+        self._idle_cache_generation = 0
+        self._idle_request_started_ms = 0
+        self._idle_usage_message_id: str | None = None
+        #: Start of the request whose usage established this serving cache
+        #: clock. ``message_start`` precedes dispatch, so expiry errs early.
+        #: The pending request start above survives route invalidation, but
+        #: cannot establish a warm cache until that request reports usage.
         self._idle_cache_anchor_ms = 0
         # --- Asynchronous compaction pass (advisor-triggered path only) ------
         #
@@ -7915,9 +7919,7 @@ class Session:
         # the parked advisor on the new model as a full cache WRITE of the
         # context, the one cost the feature must never buy (PR #3753 review
         # R1). Forget both; the next turn end re-arms from fresh usage.
-        self._cancel_idle_compaction()
-        self._idle_cache_ttl_s = None
-        self._idle_cache_anchor_ms = 0
+        self._reset_idle_cache_clock()
         if explicit:
             # The user chose: from here a ``hosting``/``model_name`` edit on
             # disk keeps its hands off this session (see
@@ -15960,8 +15962,23 @@ class Session:
                 self._last_usage = message.usage
                 if message.usage.context_tokens:
                     self._context_tokens_hint = int(message.usage.context_tokens)
-                # Idle compaction's cache clock: sticky, so a read-only turn
-                # keeps the lifetime the prefix was written with.
+                # Re-scans may find a previous route's last usage when the
+                # new request reported none. It cannot warm the new namespace
+                # or borrow this request's start merely by being read again.
+                if message.id == self._idle_usage_message_id:
+                    return
+                self._idle_usage_message_id = message.id
+                # The wire stamp, not the selected model, owns this cache:
+                # fallback/recovery can report usage before the display route
+                # settles. Read-only usage is sticky ONLY in that namespace.
+                route = (
+                    message.usage.provider or self.effective_model.provider,
+                    message.usage.model_id or self.effective_model.model_id,
+                )
+                if route != self._idle_cache_route:
+                    self._reset_idle_cache_clock()
+                    self._idle_cache_route = route
+                self._idle_cache_anchor_ms = self._idle_request_started_ms
                 written_ttl = _idle_cache_ttl_from_usage(message.usage)
                 if written_ttl is not None:
                     self._idle_cache_ttl_s = written_ttl
@@ -19573,6 +19590,7 @@ class Session:
         model display from.
         """
         if target is None:
+            self._invalidate_idle_cache_route(self._model)
             self._active_fallback = None
             self._active_route = None
             self._active_route_reason = None
@@ -19610,6 +19628,7 @@ class Session:
             # the fallback still serves, the display just cannot follow it.
             logger.warning("could not resolve fallback spec for %r", target.selector)
             return
+        self._invalidate_idle_cache_route(spec)
         self._active_fallback = spec
         self._active_route = (selector, target_effort)
         self._active_route_reason = reason
@@ -19791,7 +19810,7 @@ class Session:
             and event.message.role == "assistant"
         ):
             # Idle compaction's cache anchor; see ``_idle_cache_anchor_ms``.
-            self._idle_cache_anchor_ms = int(time.time() * 1000)
+            self._idle_request_started_ms = int(time.time() * 1000)
         if isinstance(event, MessageEndEvent):
             self._note_usage([event.message])
             # The provider-cache clock the prune sweeps read
@@ -26515,10 +26534,11 @@ class Session:
         # costs one forgone idle pass — the same outcome as idle compaction off.
         runnable = self._wake.armed_schedules
         next_wake = min((row.next_due_at for row in runnable), default=None)
-        ttl_s = self._idle_cache_ttl_s or compaction_api.fallback_cache_ttl_s(
-            self.effective_model.provider
+        provider = (
+            self._idle_cache_route[0] if self._idle_cache_route else self.effective_model.provider
         )
-        anchor = self._idle_cache_anchor_ms or self._last_provider_request_ms
+        ttl_s = self._idle_cache_ttl_s or compaction_api.fallback_cache_ttl_s(provider)
+        anchor = self._idle_cache_anchor_ms
         expiry = int(anchor + ttl_s * 1000)
         decision = compaction_api.idle_compaction_due(
             enabled=bool(settings.enabled) and bool(getattr(settings, "idle_enabled", False)),
@@ -26572,7 +26592,9 @@ class Session:
             logger.debug("idle compaction arm failed", exc_info=True)
             return
         generation = self._generation
-        self._idle_timer = loop.call_later(delay_s, self._on_idle_timer, generation)
+        self._idle_timer = loop.call_later(
+            delay_s, self._on_idle_timer, generation, self._idle_cache_generation
+        )
         logger.debug(
             "idle compaction armed in %.0fs (context=%d growth=%d/%d wake_pending=%s)",
             delay_s,
@@ -26602,6 +26624,24 @@ class Session:
         reply = max(0, int(usage.output_tokens or 0) - int(usage.reasoning_tokens or 0))
         return int(usage.context_tokens) + reply
 
+    def _reset_idle_cache_clock(self) -> None:
+        """A cache namespace change cannot inherit a warm deadline or TTL.
+
+        Keep the current request's start separately: recovery is announced
+        AFTER its usage, whereas fallback may be announced BEFORE it. The
+        usage hook can therefore adopt the actual serving clock in either
+        order without borrowing the previous route's lifetime.
+        """
+        self._cancel_idle_compaction()
+        self._idle_cache_generation += 1
+        self._idle_cache_route = None
+        self._idle_cache_ttl_s = None
+        self._idle_cache_anchor_ms = 0
+
+    def _invalidate_idle_cache_route(self, model: ModelSpec) -> None:
+        if self._idle_cache_route != (model.provider, model.model_id):
+            self._reset_idle_cache_clock()
+
     def _cancel_idle_compaction(self) -> None:
         """Drop the armed timer, and an idle pass that has not taken the lock.
 
@@ -26619,10 +26659,14 @@ class Session:
             task.cancel()
             self._idle_task = None
 
-    def _on_idle_timer(self, generation: int) -> None:
-        self._idle_timer = None
+    def _on_idle_timer(self, generation: int, cache_generation: int | None = None) -> None:
+        # A queued callback from the previous route must not clear the new
+        # route's timer (nor spend an advisor call in its cold namespace).
+        if cache_generation is not None and cache_generation != self._idle_cache_generation:
+            return
         if self._disposed or generation != self._generation:
             return
+        self._idle_timer = None
         self._idle_task = self._spawn_background(self._run_idle_compaction(generation))
 
     def _idle_may_proceed(self, generation: int) -> bool:
