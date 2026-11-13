@@ -583,6 +583,7 @@ def counted_host_tools(
     on_call: Callable[[int], None],
     on_exhausted: Callable[[], None],
     refuse_when: Callable[[], str | None] | None = None,
+    on_result: Callable[[Any], Any] | None = None,
 ) -> tuple[tuple["AgentTool", ...], Callable[[], int]]:
     """Wrap host tools so every call counts against ``limit``.
 
@@ -622,7 +623,8 @@ def counted_host_tools(
                 )
             count += 1
             on_call(count)
-            return await inner(tool_call_id, args, signal, on_update, context)
+            result = await inner(tool_call_id, args, signal, on_update, context)
+            return on_result(result) if on_result is not None else result
 
         return tool.model_copy(update={"execute": execute})
 

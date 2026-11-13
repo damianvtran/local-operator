@@ -146,6 +146,7 @@ from local_operator.harness.types import (
     AgentEndEvent,
     AgentEvent,
     AgentTool,
+    ImageContent,
     Message,
     MessageEndEvent,
     MessageStartEvent,
@@ -1071,6 +1072,10 @@ class ChildSurface:
     readonly_shell: bool = False
     on_assistant_message: Callable[[str, tuple[str, ...], str | None], None] | None = None
     tool_gate: Callable[[], str | None] | None = None
+    # Harness evidence is real multimodal content, not base64 embedded in prose.
+    # Empty by default so ordinary delegated turns retain their existing path.
+    initial_images: tuple[ImageContent, ...] = ()
+    require_images: bool = False
 
     @property
     def host_tool_names(self) -> frozenset[str]:
@@ -2357,6 +2362,8 @@ def _make_runner(
                 profile_lineage=profile_lineage,
                 surface=surface,
             )
+            if surface is not None and surface.require_images:
+                child._required_image_evidence = True
             try:
                 interval = float(os.environ.get("LOCAL_OPERATOR_SUBAGENT_WIP_INTERVAL_S", "30"))
                 if not math.isfinite(interval) or interval <= 0:
@@ -2579,9 +2586,19 @@ def _make_runner(
                 # The raw launch task and the role-expanded child prompt are two
                 # views of one turn. Persist the job-derived correlation id so
                 # projections render that durable row once without text matching.
-                await child.prompt(
-                    effective_resume + effective_prompt, message_id=f"subagent-launch:{job_id}"
-                )
+                if surface is not None and surface.initial_images:
+                    await child.prompt(
+                        effective_resume + effective_prompt,
+                        message_id=f"subagent-launch:{job_id}",
+                        images=list(surface.initial_images),
+                    )
+                else:
+                    # Keep ordinary child launches byte-for-byte compatible:
+                    # no optional media argument and no decode on that path.
+                    await child.prompt(
+                        effective_resume + effective_prompt,
+                        message_id=f"subagent-launch:{job_id}",
+                    )
             finally:
                 bridge.cancel()
                 with contextlib.suppress(BaseException):

@@ -4451,6 +4451,7 @@ async def run_session_episode(
                     handle=handle,
                     record=record,
                     config=config.completion_verifier,
+                    artifact_root=config.artifact_root,
                     wall_remaining=(
                         None
                         if max_wall_s is None
@@ -5292,6 +5293,7 @@ def _arm_completion_verifier(
     record: RecordSink,
     config: Any,
     wall_remaining: Callable[[], float | None] | None,
+    artifact_root: Path | None = None,
 ) -> dict[str, Any]:
     """Wire the completion verifier into this episode; return its state.
 
@@ -5366,10 +5368,48 @@ def _arm_completion_verifier(
         # to settle by this one (taken earlier, so no later than that).
         inspector.begin(time.monotonic() + float(config.wall_s) + CANCEL_JOIN_S)
         try:
+            from local_operator.evaluation.evidence.projection import frame_images
+            from local_operator.harness.verifier_evidence import (
+                VerifierEvidence,
+                VerifierEvidenceItem,
+            )
+
+            # Use the published observation only: no task/evaluator metadata and
+            # no remote file reader. A missing root cannot silently lose frames.
+            typed = None
+            if artifact_root is not None:
+                try:
+                    images = frame_images(artifact_root, pending.frames)
+                    typed = VerifierEvidence(
+                        items=tuple(
+                            VerifierEvidenceItem(f"frame:{frame.frame_id}", image)
+                            for frame, image in zip(pending.frames, images, strict=True)
+                        )
+                        + (
+                            (
+                                VerifierEvidenceItem(
+                                    "observation:text", TextContent(text=observation_text)
+                                ),
+                            )
+                            if observation_text
+                            else ()
+                        ),
+                        required_modalities=frozenset({"image"}) if pending.frames else frozenset(),
+                    )
+                except Exception as error:  # unreadable evidence is not task success
+                    record.write(
+                        "verifier_evidence_unavailable",
+                        {"round": round_, "error": type(error).__name__},
+                    )
+                    # The generic missing-required-media refusal still flows
+                    # through the normal verdict/state recording below.
+                    typed = VerifierEvidence(required_modalities=frozenset({"image"}))
+            inspector.evidence = typed
             verdict = await handle.session.verify_completion(
                 request=bridge.instruction,
                 claim=f"status: {claim.status}\nreason: {claim.reason}",
                 observation=observation_text,
+                **({"typed_evidence": typed} if typed is not None else {}),
                 host_tools=[inspector.tool()],
                 limits=config.limits(),
                 on_started=started,

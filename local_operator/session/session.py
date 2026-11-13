@@ -382,6 +382,7 @@ if TYPE_CHECKING:
     # constructed here.
     from local_operator.harness.types import DurableWriteIntent
     from local_operator.harness.verifier import VerifierLimits, VerifierVerdict
+    from local_operator.harness.verifier_evidence import VerifierEvidence
     from local_operator.mcp.manager import McpManager
 
     # Type-only: the contract itself is built by the host that installs it
@@ -4538,6 +4539,9 @@ class Session:
         #: offending block is IN the history, so an un-degraded retry sends it
         #: again, and the session is otherwise unusable for good.
         self._images_rejected = False
+        # Harness-selected required media is opt-in, never inferred from a
+        # mutable role name. Ordinary sessions keep their text degradation.
+        self._required_image_evidence = False
         #: Whether the strip above was caused by SIZE rather than by a refused
         #: block. The two causes share one flag because they have the same
         #: effect on the render, but they do NOT have the same lifetime: a
@@ -5910,7 +5914,29 @@ class Session:
         # so a pass that skipped them would leave the original 400 live there;
         # the empty case is short-circuited before any decode, so only blocks
         # that carry something are decoded.
+        # Required-media callers must not turn a transport repair into a false
+        # text-only success. Ordinary sessions keep their existing degradation.
+        required_media = getattr(self, "_required_image_evidence", False) and not keep_images
+        required_count = (
+            sum(
+                isinstance(block, ImageContent) for message in rendered for block in message.content
+            )
+            if required_media
+            else 0
+        )
+        # Typed verification can acquire images from a counted inspection after
+        # a text-only start. Admit pixels at every model-facing projection, not
+        # just when the initial envelope happened to contain an image.
+        required_images = required_media and bool(required_count)
+        if required_images and (
+            self._images_rejected
+            or not self._model.supports_images
+            or not self._model.supports_images_stated
+        ):
+            raise ValueError("required image evidence cannot be served by the current model")
         rendered, missing_media = _without_unresolvable_frames(rendered)
+        if required_images and missing_media:
+            raise ValueError("required image evidence is missing or corrupt")
         if missing_media:
             self._announce_missing_media_once(missing_media)
         # THE AUDIO STRIP, ABOVE THE IMAGE EARLY RETURNS for the same reason
@@ -5937,6 +5963,15 @@ class Session:
             self._announce_text_only_omission_once(rendered)
             return _without_images(rendered, model_incapable=True)
         rendered = _rebound_history_images(rendered)
+        if required_images:
+            from local_operator.harness.verifier_evidence import validate_required_image
+
+            # Let the existing oversize repair bound the pixels first. Only
+            # then demand positively decodable media instead of opaque bytes.
+            for message in rendered:
+                for block in message.content:
+                    if isinstance(block, ImageContent):
+                        validate_required_image(block)
         # LAST, so it measures what will actually be sent: the rebound pass
         # above can shrink a block, and resizing or shedding a frame that
         # would have fit is content lost for nothing. This is the transport
@@ -5946,13 +5981,27 @@ class Session:
         # full fidelity until no protected rung fits, then descends the same
         # ladder as the last thing sacrificed; only a walk that cannot fit
         # drops any.
-        rendered, downscaled, shed, rung = _fit_frames_to_budget(
-            rendered, budget=self._wire_bytes_budget()
-        )
+        wire_budget = self._wire_bytes_budget()
+        rendered, downscaled, shed, rung = _fit_frames_to_budget(rendered, budget=wire_budget)
         if downscaled:
             self._announce_frames_downscaled_once(downscaled, rung)
         if shed:
             self._announce_frames_shed_once(shed)
+        if (
+            required_images
+            and sum(
+                isinstance(block, ImageContent) for message in rendered for block in message.content
+            )
+            != required_count
+        ):
+            raise ValueError("required image evidence could not fit the request")
+        if required_images and wire_budget > 0:
+            from local_operator.compaction.api import estimate_wire_bytes
+
+            # User-supplied media is protected by the ordinary fitting policy;
+            # an unchanged image count alone does not prove it actually fit.
+            if estimate_wire_bytes(rendered) > wire_budget:
+                raise ValueError("required image evidence exceeds the request byte budget")
         return rendered
 
     def _render_for_request(self, messages: list[AgentMessage]) -> list[Message]:
@@ -21263,6 +21312,13 @@ class Session:
                     # transforms after these bytes have crossed the boundary.
                     raise RuntimeError("bridge body authority changed before dispatch")
                 request = request.model_copy()
+                if getattr(self, "_required_image_evidence", False):
+                    request.required_image_count = sum(
+                        isinstance(block, ImageContent)
+                        for message in request.messages
+                        for block in message.content
+                    )
+                    request.validate_required_images()
                 request._codex_turn_state = codex_turn_state
                 inner = base_stream_fn(request, stream_signal)
                 # The context this request was built from, taken before any
@@ -22863,6 +22919,7 @@ class Session:
         on_started: "Callable[[dict[str, Any]], None] | None" = None,
         label: str = "Verify completion",
         evidence: str | None = None,
+        typed_evidence: "VerifierEvidence | None" = None,
     ) -> "VerifierVerdict":
         """Run the harness completion verifier against a claimed-finished task.
 
@@ -22914,6 +22971,7 @@ class Session:
             CANCEL_JOIN_S,
             REQUEST_BUDGET_REFUSAL,
             VERIFIER_ROLE,
+            VerdictStatus,
             VerifierLimits,
             VerifierVerdict,
             build_verifier_prompt,
@@ -22924,9 +22982,26 @@ class Session:
             verifier_ceiling,
             verifier_profile,
         )
+        from local_operator.harness.verifier_evidence import (
+            VerifierEvidence,
+            assess_completion,
+        )
 
+        # Receipts belong to this invocation: reusing an SDK evidence envelope
+        # must not make a prior check's inspections available to a fresh child.
+        if typed_evidence is not None:
+            typed_evidence = VerifierEvidence(
+                typed_evidence.items, typed_evidence.required_modalities
+            )
         limits = limits or VerifierLimits()
         started = time.monotonic()
+
+        def decode(text: str | None) -> tuple[VerdictStatus, str]:
+            return (
+                assess_completion(text, typed_evidence)
+                if typed_evidence is not None
+                else parse_verdict(text)
+            )
 
         def refused(reason: str) -> VerifierVerdict:
             return VerifierVerdict(
@@ -22936,6 +23011,12 @@ class Session:
                 wall_s=time.monotonic() - started,
             )
 
+        if (
+            typed_evidence is not None
+            and "image" in typed_evidence.required_modalities
+            and not typed_evidence.images
+        ):
+            return refused("required image evidence is unavailable")
         if self._disposed or self._owned_work_closing:
             return refused("this session is shutting down")
         # The same admission every child pays (``_launch_subagent``): a verifier
@@ -23028,6 +23109,7 @@ class Session:
             on_call=lambda _count: None,
             on_exhausted=lambda: hit("commands"),
             refuse_when=request_budget_spent,
+            on_result=typed_evidence.record_result if typed_evidence is not None else None,
         )
         # ``readonly_shell`` confines this launch's ``bash`` by the launch
         # itself, never by the ``verifier`` name (an operator's registry role
@@ -23036,6 +23118,8 @@ class Session:
             # Grounding: a remote target channel withdraws the local tools.
             ceiling=verifier_ceiling(host_names),
             host_tools=wrapped,
+            initial_images=typed_evidence.images if typed_evidence is not None else (),
+            require_images=typed_evidence is not None,
             readonly_shell=True,
             on_assistant_message=on_message,
             # The child's own tools (read/grep/bash) get the same cue on the
@@ -23060,6 +23144,8 @@ class Session:
             evidence=evidence,
             target_tools=tuple(sorted(host_names)),
         )
+        if typed_evidence is not None:
+            prompt += "\n" + typed_evidence.prompt()
         try:
             try:
                 job_id = run_subagent(
@@ -23140,7 +23226,7 @@ class Session:
             # whose verdict line is still the answer -- the live t31v episode
             # discarded a ``VERDICT: PASS`` exactly here.
             if status_text == "completed" and job is not None:
-                verdict_status, findings = parse_verdict(job.result_text)
+                verdict_status, findings = decode(job.result_text)
                 return VerifierVerdict(
                     status=verdict_status, findings=findings, ended_by="verdict", **common
                 )
@@ -23148,8 +23234,12 @@ class Session:
             # error left, and a failed check is INCONCLUSIVE, never a pass
             # (M1). The rescue is for a job a cap cancelled after it answered.
             rescued = (
-                find_verdict(state["answer"])
-                if status_text not in ("failed", "interrupted")
+                (
+                    decode(state["answer"])
+                    if typed_evidence is not None
+                    else find_verdict(state["answer"])
+                )
+                if state["answer"] and status_text not in ("failed", "interrupted")
                 else None
             )
             if rescued is not None:

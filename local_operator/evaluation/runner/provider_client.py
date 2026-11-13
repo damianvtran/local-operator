@@ -24,7 +24,6 @@ is documented on :meth:`_ContextBuilder.build`.
 from __future__ import annotations
 
 import ast
-import base64
 import difflib
 import json
 import logging
@@ -45,8 +44,8 @@ from local_operator.evaluation.action_surface import (
     ActionAdmissionError,
     ActionSurface,
 )
-from local_operator.evaluation.adapters.supervisor import verify_artifact
 from local_operator.evaluation.evidence.models import RouteIdentity
+from local_operator.evaluation.evidence.projection import frame_images
 from local_operator.evaluation.protocol import (
     MAX_BATCH_SIZE,
     ActionBatch,
@@ -2541,18 +2540,7 @@ class _ContextBuilder:
         come to disagree -- the property is "one reader", not "two calls that
         look alike today".
         """
-        from local_operator.harness.types import ImageContent
-
-        content: list[Any] = []
-        for frame in observation.frames:
-            data = verify_artifact(self._artifact_root, frame.artifact)
-            content.append(
-                ImageContent(
-                    data=base64.b64encode(data).decode("ascii"),
-                    mime_type=frame.artifact.media_type,
-                )
-            )
-        return content
+        return list(frame_images(self._artifact_root, observation.frames))
 
     def append_challenge(self, reply: str, challenge: str, observation: Observation) -> None:
         """Fold a completion challenge into the history, frames included.

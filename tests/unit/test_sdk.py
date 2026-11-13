@@ -1083,6 +1083,8 @@ def test_public_surface_is_pinned() -> None:
         "SessionSpecError",
         "SteerErrand",
         "ViewerSessionProtocol",
+        "VerifierEvidence",
+        "VerifierEvidenceItem",
         "WakeErrand",
         "WarmErrand",
         "decode_output",

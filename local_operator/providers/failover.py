@@ -4808,6 +4808,9 @@ async def _stream_with_failover_events(
             sent_monotonic = time.monotonic()
             successful_terminal = False
             failed_terminal = False
+            # A violated caller invariant is not a provider outage: do not
+            # rotate credentials, silently change models, or retry it.
+            current_request.validate_required_images()
             try:
                 turn_state = current_request._codex_turn_state
                 if turn_state is not None:
