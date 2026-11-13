@@ -853,6 +853,12 @@ export interface SessionSummary {
 	mtime: number;
 	/** Immutable conversation birth; absent on older daemons, never activity. */
 	created_at?: number;
+	/** Epoch seconds (same unit as `created_at`) of the person's own last
+	    message — the Running section's order clock, as on the desktop sidebar,
+	    which never moves while a reply streams. `null` when unknown: no user
+	    message yet, or a row that is not running (only running rows pay the
+	    transcript read). Absent on older daemons; fall back to `created_at`. */
+	last_user_at?: number | null;
 	/** Latest outcome; only unseen non-streaming outcomes affect list priority. */
 	completion_kind?: string;
 }

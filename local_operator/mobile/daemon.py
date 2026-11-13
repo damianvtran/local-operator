@@ -966,6 +966,12 @@ class SessionTable:
         #: OFF the loop beside ``_avatar_fields``: the model, effort and cwd a row
         #: shows when no runtime is attached (see ``_DurableIdentity``).
         self._durable_identities: dict[str, _DurableIdentity] = {}
+        #: ``{session_id: epoch seconds}`` of the person's own last message, for
+        #: the RUNNING rows only, resolved OFF the loop by ``summaries``' build
+        #: just before each merge (``_read_last_user_times``). A row absent from
+        #: it carries ``last_user_at: None``. See ``_buys_last_user`` for which
+        #: rows pay the transcript read and why the rest do not.
+        self._last_user_times: dict[str, float] = {}
         #: The sidebar's durable pinned session ids, newest pin first, read by
         #: ``_merge_summaries``. Kept as table state rather than read per row so
         #: a pin change made in the terminal reaches the phone through exactly
@@ -1287,6 +1293,17 @@ class SessionTable:
             # one store walk only when something really changed); the merge
             # below is then in-memory for tags like it is for pins.
             tags = await asyncio.to_thread(self.tags_snapshot)
+            # The RUNNING clock, read off the loop like the tags above. The
+            # candidate ids are taken HERE, on the loop, so the worker thread
+            # never iterates ``self.entries`` while a dial mutates it.
+            self._last_user_times = await asyncio.to_thread(
+                _read_last_user_times,
+                [
+                    entry.record.session_id
+                    for entry in self.entries.values()
+                    if _buys_last_user(entry)
+                ],
+            )
             out = self._merge_summaries(rows, tags)
             # The rows and the aggregate leave the build TOGETHER and are
             # published by the caller in ONE assignment (review round 1,
@@ -1751,6 +1768,21 @@ class SessionTable:
                     # cannot disagree about a row's birth (see the resolution
                     # note above).
                     "created_at": created_at,
+                    # THE PERSON'S OWN LAST MESSAGE, epoch seconds (the same
+                    # unit as ``created_at``/``mtime``), so the phone's drawer
+                    # can order RUNNING rows the way the desktop sidebar does
+                    # (``chat-list-sections.ts``: ``last_user_at``, falling back
+                    # to ``created_at``). ``mtime`` cannot serve: it moves on
+                    # every streamed reply and re-sorts the section under the
+                    # thumb (``session/last_user.py`` has the measurement).
+                    # ALWAYS PRESENT; ``None`` is "unknown" -- no user message
+                    # yet, an unreadable transcript, or a row that is not
+                    # running and so never paid the read -- and the client's
+                    # fallback runs on it, never a minted epoch. Only a live,
+                    # non-ended entry can carry a value (``_buys_last_user``).
+                    "last_user_at": (
+                        self._last_user_times.get(session_id) if entry is not None else None
+                    ),
                     "completion_kind": attention.get("kind") or "",
                     # Shared completion receipts, not transcript activity or
                     # heartbeat freshness, decide whether an outcome is unread.
@@ -2400,6 +2432,48 @@ def _read_durable_identity(directory: Path, *, journal_readable: bool = True) ->
         if isinstance(entry.get("cwd"), str):
             cwd = entry["cwd"]
     return _DurableIdentity(selector=selector, cwd=cwd, effort=effort)
+
+
+def _buys_last_user(entry: SessionEntry) -> bool:
+    """Whether this live entry's row pays a ``last_user_at`` transcript read.
+
+    RUNNING ROWS ONLY, mirroring the two sibling listings
+    (``server/utils/desktop_sessions.py``: ``entry.running``;
+    ``network/relay.py``: busy, wedged or a pending gate): the value orders the
+    Running section and nothing else, and a cold read can walk up to
+    ``last_user.COLD_SCAN_CAP_BYTES`` of transcript, so paying it for every
+    idle resident runtime would buy a number no reader consumes. "Running" here
+    is what the phone itself can see: the record says busy or holds a gate, or
+    the live projection is streaming or waiting on an approval. An ended entry
+    never pays -- its row is not live.
+    """
+    if entry.ended:
+        return False
+    record = entry.record
+    if record.busy or record.pending:
+        return True
+    projection = entry.projection
+    return bool(projection and (projection.streaming or projection.pending))
+
+
+def _read_last_user_times(session_ids: list[str]) -> dict[str, float]:
+    """``{session_id: last_user_at}`` for ``session_ids``; unknowns are omitted.
+
+    Blocking (a memoised transcript tail read per id), so the listing build
+    calls it through ``asyncio.to_thread``. ``last_user_at`` never raises and
+    answers ``None`` for a transcript with no user message, which the row then
+    reports as ``None`` by absence from this map.
+    """
+    from local_operator.paths import config_dir
+    from local_operator.session.last_user import last_user_at
+
+    root = config_dir() / "sessions"
+    out: dict[str, float] = {}
+    for session_id in dict.fromkeys(session_ids):
+        value = last_user_at(root / session_id)
+        if value is not None:
+            out[session_id] = value
+    return out
 
 
 def _live_generation_is_user_facing(session_id: str) -> bool:
