@@ -1446,45 +1446,63 @@ def _glab_mrs(repo: str, branch: str) -> list[ForgeChange] | None:
         return None
 
 
-def _running_owners(real: str, session_id: str) -> tuple[str, ...]:
+def _running_owners(real: str, session_id: str, *, strict: bool = False) -> tuple[str, ...]:
     """Running sessions (not the caller) that own the worktree at ``real``.
 
     Owner = the session the creation ledger attributes the ``git worktree
     add`` to (``kind='worktree'`` row for this exact path), or any live/wedged
     session whose recorded cwd is inside the tree. The CALLER is excluded: a
     session removing its own worktree is the owner acting, not a conflict.
-    Read fresh on every call (no cache). Unreadable ledger or registry → no
-    owner known from that source; the other in-use checks still apply.
+    Read fresh on every call (no cache). Default: unreadable sources name no
+    owner. ``strict`` requires current-generation attribution and a complete
+    registry, raising on missing/unreadable facts rather than claiming idle.
     """
     creators: set[str] = set()
     try:
         conn = _connect(ledger_path(), create=False)
         if conn is not None:
             try:
+                st = os.stat(real) if strict else None
+                generation = (st.st_dev, st.st_ino, creation_stamp(st)) if st else ()
                 creators = {
                     str(r[0])
                     for r in conn.execute(
-                        "SELECT DISTINCT creator FROM created WHERE path=? AND kind='worktree'",
-                        (real,),
+                        "SELECT DISTINCT creator FROM created WHERE path=? AND kind='worktree'"
+                        + (" AND dev=? AND ino=? AND stamp=?" if strict else ""),
+                        (real, *generation),
                     )
                 }
             finally:
                 conn.close()
     except (sqlite3.Error, OSError):
+        if strict:
+            raise
         logger.debug("guardrail ledger unreadable", exc_info=True)
+    # No attributed creator is unknown ownership, not proof of an idle tree.
+    if strict and not creators:
+        raise OSError("worktree owner attribution unavailable")
     running: list[str] = []
     try:
         from local_operator.session.runtime import registry
 
         # reap=False: a guard check must never move another session's record.
-        for rec, state in registry.scan(None, reap=False):
+        records = (
+            registry.scan(None, reap=False, strict=True)
+            if strict
+            else registry.scan(None, reap=False)
+        )
+        for rec, state in records:
             sid = str(getattr(rec, "session_id", "") or "")
+            if strict and (not sid or not os.path.isabs(str(getattr(rec, "cwd", "") or ""))):
+                raise OSError("session owner record incomplete")
             if state not in ("live", "wedged") or not sid or sid == session_id:
                 continue
             cwd = os.path.realpath(str(getattr(rec, "cwd", "") or "/nonexistent-cwd"))
             if sid in creators or cwd == real or cwd.startswith(real + os.sep):
                 running.append(sid)
     except Exception:  # noqa: BLE001 — an unreadable registry names no owner
+        if strict:
+            raise
         logger.debug("session registry unreadable", exc_info=True)
     return tuple(dict.fromkeys(running))
 

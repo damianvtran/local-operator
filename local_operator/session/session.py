@@ -29110,8 +29110,10 @@ class Session:
         without a real creating call. Any fork failure falls back to the
         context-free errand.
         """
+        from local_operator.guardrails.judge import ContextFreeAnswer
+
         if not getattr(self._context, "messages", None):
-            return await self._guard_judge(system, prompt)
+            return ContextFreeAnswer(await self._guard_judge(system, prompt))
         try:
             return await self.complete_aside(
                 [Message.user(f"{system}\n\n{prompt}")], aside_instruction=False
@@ -29120,7 +29122,7 @@ class Session:
             raise
         except Exception:  # noqa: BLE001 — the context-free judge is the fallback
             logger.warning("guardrail forked judge failed; using the context-free judge")
-            return await self._guard_judge(system, prompt)
+            return ContextFreeAnswer(await self._guard_judge(system, prompt))
 
     def _errand_request(self, model: ModelSpec, system: str, prompt: str) -> ChatRequest:
         """The errand's request shape, in ONE place.
