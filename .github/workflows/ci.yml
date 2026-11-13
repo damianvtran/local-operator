@@ -1,1270 +1,205 @@
-name: Pre-release CI Testing
-
-on:
-  push:
-    branches:
-      # ONLY `main` here, deliberately.
-      #
-      # `dev-*` used to be in this list as well, which double-billed every
-      # feature branch: a `dev-*` branch with an open PR fired a `push` run AND
-      # a `pull_request` run for the SAME commit, two identical sets of jobs
-      # whose results nobody read twice. At one point 29 of the SHAs in the
-      # queue were running both. The `pull_request` trigger below already
-      # covers feature branches, so dropping `dev-*` here halves the per-commit
-      # cost without reducing what is actually tested.
-      #
-      # A `dev-*` branch with NO open PR now gets no CI until the PR is opened.
-      # That is the intended trade: CI exists to gate review and merge, and an
-      # un-PR'd branch is gating nothing. Use `workflow_dispatch` to run it by
-      # hand if you need a pre-PR signal.
-      - main
-  # PULL REQUESTS TOO. Without this a feature branch received NO CI until it
-  # was already merged, which let a broken `pip install .` and an import that
-  # fails on the declared minimum Python both reach review looking green.
-  # Every gate below is worthless on a branch it never runs on.
-  pull_request:
-  workflow_dispatch:
-
-# One in-flight run per ref. A review cycle force-pushes repeatedly, and
-# without this every superseded push kept its full job set queued to completion
-# against a 20-job account-wide concurrency cap — 56% of the active queue was
-# once running against commits their own branch had already moved past, while
-# the newest commit (the only one anybody was waiting on) sat behind them.
-#
-# `github.workflow` is in the key so this workflow never cancels a sibling
-# workflow's run on the same ref (the release/publish line in particular).
-#
-# `github.ref` is the right granularity: for a `pull_request` event it is the
-# PR's merge ref, so successive pushes to one PR supersede each other while
-# two different PRs never collide.
-#
-# A push to `main` is never cancelled BY A LATER MERGE, and the SHA in the
-# group key is how that is achieved. A push to `main` is a merge whose result
-# is the release signal and the record for that commit, so every one of those
-# runs must complete.
-#
-# The precise guarantee: no `main` run is cancelled or evicted by a run on a
-# DIFFERENT commit. Two runs on the SAME `main` commit — a re-run, or a
-# `workflow_dispatch` at a commit already building — do share a group and the
-# later one supersedes the earlier. That is acceptable because the survivor is
-# on the identical SHA and, not being a `pull_request`, runs the same full
-# both-leg matrix: the CI record is replaced by an equivalent one rather than
-# lost, which is also what a GitHub re-run does by design.
-#
-# `cancel-in-progress: false` alone would NOT deliver that. A concurrency group
-# permits one run in progress and, by default, only ONE run pending: when a
-# third arrives the waiting one is cancelled. With `main` merging faster than
-# this workflow's ~23 min duration (four merges inside 27 minutes was observed
-# while writing this), run A executes, B waits, C arrives and evicts B — and B
-# is then a commit on `main` that no CI ever reported on.
-#
-# Adding `github.sha` for `main` gives every merge commit its OWN group, so
-# `main` runs never contend and none can be cancelled or evicted. Feature
-# branches keep a per-ref group, so successive pushes to one PR still supersede
-# each other, which is where the throughput saving comes from.
-#
-# Why not `queue: max` (the documented way to hold up to 100 pending runs):
-# GitHub rejects `queue: max` combined with a `cancel-in-progress` that can
-# evaluate true, and this workflow needs cancellation on feature branches.
-# Tried, and it failed the run at plan time with:
-#   "The combination of 'queue: max' and 'cancel-in-progress: true'
-#    is not allowed"
-# A unique group per `main` commit reaches the same guarantee with keys that
-# have been supported all along, and it does not queue `main` runs behind each
-# other — they simply run.
-#
-# The unit suites (`test`, `coverage-report`, `tui-e2e`) no longer run in this
-# workflow at all: they moved to `.github/workflows/full-suite.yml` (push to
-# `main`, nightly, dispatch), which has its own one-running-plus-newest-pending
-# group. Every `main` run here still completes for the kept jobs, which carry
-# the packaging and cross-platform signal for that commit.
+# SCRATCH DRAFT ONLY. Never merge this diagnostic branch. E01 owns publication/dispatch.
+# Replaces ONLY .github/workflows/ci.yml on the dedicated diagnostic branch.
+name: DIAGNOSTIC ONLY — gate 43265391359 Python 3.13.18
+'on':
+  workflow_dispatch: {}
+permissions:
+  contents: read
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.ref == 'refs/heads/main' && github.sha || 'shared' }}
-  cancel-in-progress: true
-
+  group: diagnostic-43265391359-${{ github.ref }}
+  cancel-in-progress: false
 jobs:
-  # Classifies this diff and exposes one flag per job. The classifier
-  # (`scripts/ci_scope.py`) is the SINGLE SOURCE OF TRUTH for both this job and
-  # `make check-changed`, so the local gate and CI cannot drift into two
-  # different opinions about which gates a diff needs.
-  #
-  # WHY THIS JOB CAN NEVER BE GATED ON THE EVENT: every heavy job now `needs:`
-  # it, and a `needs:` on a skipped job skips the dependent too — an
-  # `if: pull_request` here would skip the ENTIRE workflow on `push` to `main`.
-  # The event is handled inside the module, which returns every flag TRUE for
-  # anything but a `pull_request`.
-  #
-  # Reads the diff as `git diff HEAD^1 HEAD` — the RECOMPUTED
-  # refs/pull/N/merge's first parent — NOT `github.event.pull_request.base.sha`,
-  # for the reason measured in version-bump-guard below: a frozen base goes
-  # stale the moment `main` moves and sweeps in commits this PR never wrote.
-  # NOT `github.event.before` (zero SHA on a new branch, unreachable after a
-  # force push).
-  #
-  # Runs the classifier from the BASE revision, never from the PR's copy: a PR
-  # that edits the classifier must not be able to disarm the gates that classify
-  # it. A base copy that is absent is not an error — fall back to the checked-in
-  # copy in `--all` mode and warn.
-  #
-  # `--root "$GITHUB_WORKSPACE"` is passed EXPLICITLY, and that is not
-  # decoration: the base copy is run from `$RUNNER_TEMP`, so a module that
-  # inferred its repository from `__file__` would look for the checkout one
-  # level above itself, `git diff` would exit 128, and the fail-open branch
-  # would set every flag true on every pull request — the gate would be correct
-  # and never engage. The module now also resolves its root from the git top
-  # level of the invocation directory, so the two fixes are independent: this
-  # flag keeps the workflow from depending on that resolution being right.
-  #
-  # The flags are strings 'true'/'false', and every gate reads `!= 'false'`
-  # rather than `== 'true'`. That is load-bearing: an output that was never
-  # written is EMPTY, `'' == 'true'` is false, and a classifier that died would
-  # therefore produce a fully green PR that ran nothing. `!= 'false'` runs
-  # everything it cannot prove is unnecessary.
-  changes:
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    outputs:
-      lint: ${{ steps.classify.outputs.lint }}
-      types: ${{ steps.classify.outputs.types }}
-      budget: ${{ steps.classify.outputs.budget }}
-      unit: ${{ steps.classify.outputs.unit }}
-      packaging: ${{ steps.classify.outputs.packaging }}
-      tui: ${{ steps.classify.outputs.tui }}
-      windows: ${{ steps.classify.outputs.windows }}
-      xplat: ${{ steps.classify.outputs.xplat }}
-      audit: ${{ steps.classify.outputs.audit }}
-      cli: ${{ steps.classify.outputs.cli }}
-      server: ${{ steps.classify.outputs.server }}
-      i18n: ${{ steps.classify.outputs.i18n }}
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          # HEAD^1 must be present. Two commits is the whole requirement, as in
-          # version-bump-guard.
-          fetch-depth: 2
-
-      - name: Set up Python
-        uses: actions/setup-python@v7
-        with:
-          python-version: "3.12"
-
-      - name: Classify the change
-        id: classify
-        # No `pip install`: the classifier imports stdlib only, so a broken
-        # dependency resolution can never decide what runs. Same argument as
-        # version-bump-guard's "a guard that needs an install is a guard that
-        # goes red for reasons unrelated to versions".
-        run: |
-          set -uo pipefail
-          base="$(git rev-parse HEAD^1 2>/dev/null || true)"
-          if [ -n "$base" ] && git cat-file -e "$base:scripts/ci_scope.py" 2>/dev/null; then
-            git show "$base:scripts/ci_scope.py" > "$RUNNER_TEMP/ci_scope.py"
-            python "$RUNNER_TEMP/ci_scope.py" \
-              --event "$GITHUB_EVENT_NAME" --base "$base" \
-              --root "$GITHUB_WORKSPACE" \
-              --github-output "$GITHUB_OUTPUT" --summary "$GITHUB_STEP_SUMMARY"
-          else
-            echo "::warning title=Change classification unavailable::no classifier at the base commit, so this diff cannot be classified. Running every job rather than guessing."
-            python scripts/ci_scope.py --all --root "$GITHUB_WORKSPACE" \
-              --summary "$GITHUB_STEP_SUMMARY" --github-output "$GITHUB_OUTPUT"
-          fi
-
-  # A feature PR must never carry a version bump. Releases are cut as ONE
-  # deliberate `chore(release):` PR per window by that window's owner, so a
-  # bump riding a feature diff silently consumes a version number that is
-  # never tagged, never built and never published.
-  #
-  # This is not hypothetical and it is why the check is machine-checked rather
-  # than left to review. Two feature PRs (#701, #706) each smuggled a bump, so
-  # `main` advertised 0.50.2 while the newest tag, GitHub Release and PyPI
-  # artifact were all still 0.50.0: 0.50.1 and 0.50.2 were burned, and anyone
-  # reading pyproject.toml got a version PyPI had never heard of. The v0.50.3
-  # window had to skip both numbers, because two artifacts believing they are
-  # the same version is unrecoverable once published.
-  #
-  # AGENTS.md already stated the rule AND told reviewers to treat a version
-  # change in a feature PR as a finding. Both review rounds passed anyway. The
-  # defect was that the rule existed only in prose, so it depended on each
-  # reviewer remembering to look; this job is that rule with teeth.
-  #
-  # PR-only: a `push` run on `main` has no PR title to read, and by then the
-  # commit is already in. The release PR is exempted by its conventional-commit
-  # title, which is the same string the release procedure already requires.
-  version-bump-guard:
-    if: github.event_name == 'pull_request'
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          # Two commits is all the diff below needs, but the checkout is the
-          # `refs/pull/N/merge` commit, so HEAD^1 (the base side) and HEAD^2
-          # (the PR side) must both be present.
-          fetch-depth: 2
-
-      - name: Reject a version bump outside a release PR
-        env:
-          # Read through the environment rather than interpolated into the
-          # script: a PR title is attacker-controlled text, and inlining it
-          # directly would let a crafted title inject shell.
-          PR_TITLE: ${{ github.event.pull_request.title }}
-        run: |
-          set -euo pipefail
-          # `HEAD^1 HEAD` and NOT a three-dot diff against
-          # `github.event.pull_request.base.sha`. Actions checks out the
-          # RECOMPUTED `refs/pull/N/merge`, whose first parent is the base
-          # branch as of this run, while `base.sha` is frozen when the event
-          # fires. Once `main` moves, the frozen SHA becomes an ancestor of
-          # HEAD, `merge-base` returns it unchanged, and the three-dot form
-          # silently degrades to two-dot — sweeping in every version bump
-          # `main` itself landed in the meantime and failing an innocent PR
-          # for a diff it never wrote. Measured on the six PRs before this
-          # one, `base.sha` was already stale for four of them (#700, #704,
-          # #706, #708), and it goes stale precisely during the busy release
-          # window this guard exists to protect. The first person failed by a
-          # version diff they did not write is the person who disables the
-          # guard.
-          #
-          # The merge commit's own diff against its base parent is exactly
-          # "what this PR would introduce", which is the question being asked.
-          diff=$(git diff HEAD^1 HEAD -- pyproject.toml)
-          # Not `|| true` on the grep: that discards git's exit status too, so
-          # a failed diff would report "no version change" and the guard would
-          # fail OPEN on a head that carries a real bump. grep's own "no
-          # match" is exit 1 and must stay non-fatal, so the two are separated.
-          changed=$(printf '%s\n' "$diff" | { grep -E '^[+-]version[[:space:]]*=' || true; })
-          if [ -z "$changed" ]; then
-            # A release PR that changes NOTHING is the mirror-image failure,
-            # and it is the more dangerous direction. The feature-PR case below
-            # burns a number nobody released; this one ships the PREVIOUS
-            # release's CODE under a new number, so
-            # `pip install local-operator==X.Y.Z` delivers the version before
-            # it, and the tag, the Release and PyPI all agree with each other
-            # about the wrong tree.
-            #
-            # It was nearly shipped as v0.50.4. The owner amended the bump onto
-            # a DETACHED HEAD, so the branch ref never followed the amend, and
-            # every signal said it had worked: `push --force-with-lease`
-            # reported success (honestly — nothing needed overwriting, so the
-            # lease was never violated), the retitle and un-draft applied
-            # because PR metadata is independent of the ref, CI went green, and
-            # THIS JOB PASSED through the early exit below. Four green signals
-            # on a broken state, because each answered a question about a
-            # different object than the one being released.
-            case "$PR_TITLE" in
-              'chore(release): bump version to '*)
-                echo "::error file=pyproject.toml::A release PR must actually change the version."
-                echo "This PR is titled '$PR_TITLE' but its diff does not touch"
-                echo "the version line in pyproject.toml, so the release would carry"
-                echo "the previous version's code under a new number."
-                echo
-                echo "The usual cause is an amend made on a detached HEAD: the branch"
-                echo "ref never moved, and --force-with-lease still reports success"
-                echo "because nothing needed overwriting. Check what the FORGE has,"
-                echo "not what your local clone has:"
-                echo "  gh pr view <n> --json headRefOid --jq .headRefOid"
-                echo "  git show <that-sha>:pyproject.toml | grep '^version'"
-                exit 1
-                ;;
-            esac
-            echo "No version change in pyproject.toml."
-            exit 0
-          fi
-          case "$PR_TITLE" in
-            'chore(release):'*)
-              echo "Release PR, version change allowed:"
-              echo "$changed"
-              # The new version must sort ABOVE the highest existing release
-              # tag. A published version cannot be corrected: PyPI refuses to
-              # reuse a filename even after a yank, and a number that sorts
-              # below what a source installer already holds means
-              # `pip install -U` silently declines to move them onto the real
-              # release. Numbers consumed by an unreleased in-PR bump are
-              # skipped, never reused.
-              #
-              # The tag comes from `ls-remote`, NOT `git describe`, and that is
-              # load-bearing rather than a preference. `actions/checkout@v7`
-              # passes `--no-tags` unless `fetch-tags: true` (its default is
-              # false — v7.0.1 still declares `fetch-tags: false` and
-              # `fetch-depth: 1`, so the v4-to-v7 bump above changed none of
-              # what follows), so this shallow checkout carries ZERO tags and
-              # `git describe` exits 128 on every real run — a first draft of
-              # this check used it and was dead code that passed a backward
-              # bump green. `fetch-tags: true` does not fix it either: at
-              # depth 2 the tag object arrives but is not REACHABLE in the
-              # truncated history, so `describe` still fails whenever the base
-              # has moved past the tag, which is the normal state during a
-              # release window. `ls-remote` asks the forge instead of the local
-              # object store, in one network call, and needs no history at all.
-              #
-              # It is therefore the highest tag REPO-WIDE rather than the
-              # newest reachable one. That is the stricter reading and the
-              # right one here: a release must be forward of everything ever
-              # published, not merely of its own ancestry.
-              new=$(printf '%s\n' "$changed" \
-                | sed -n 's/^+version[[:space:]]*=[[:space:]]*["'"'"']\{0,1\}\([0-9][^"'"'"' 	]*\).*/\1/p')
-              if [ -z "$new" ]; then
-                echo "::error file=pyproject.toml::Could not parse the new version."
-                echo "The diff adds a version line this job cannot read:"
-                printf '%s\n' "$changed"
-                echo "Expected: version = \"X.Y.Z\". Fix the line, or update this"
-                echo "job if the project's version syntax has genuinely changed;"
-                echo "an unparsable version must never pass unchecked."
-                exit 1
-              fi
-              last=$(git ls-remote --tags --refs origin 'v[0-9]*' \
-                | sed 's#.*refs/tags/v##' | sort -V | tail -1)
-              if [ -n "$last" ]; then
-                highest=$(printf '%s\n%s\n' "$new" "$last" | sort -V | tail -1)
-                if [ "$new" = "$last" ] || [ "$highest" != "$new" ]; then
-                  echo "::error file=pyproject.toml::Release version must be above the highest tag."
-                  echo "New version '$new' does not sort above the highest release tag 'v$last'."
-                  echo "A published version cannot be corrected, so pick the next unused"
-                  echo "number above v$last rather than reusing or rewinding one."
-                  exit 1
-                fi
-                echo "Version $new sorts above the highest release tag v$last."
-              else
-                echo "No release tags found on the remote; skipping the ordering check."
-              fi
-              ;;
-            *)
-              echo "::error file=pyproject.toml::A feature PR must not change the project version."
-              echo "This PR changes the version line in pyproject.toml:"
-              echo "$changed"
-              echo
-              echo "Versions are bumped only by a dedicated release PR whose title"
-              echo "starts with 'chore(release):', cut by the release window owner."
-              echo "Drop the bump from this branch; pyproject.toml stays at the last"
-              echo "released version on every feature branch."
-              exit 1
-              ;;
-          esac
-
-  lint:
-    # Every gate below is `needs: [changes]` plus `!cancelled() && <flag> != 'false'`.
-    # `!cancelled()` is required rather than decorative: GitHub applies an
-    # implicit `success()` to any `if:` containing no status-check function,
-    # and a SKIPPED dependency skips its dependents — so without it, a job this
-    # diff deliberately skips would still run (or, worse, skip) its own
-    # dependents. The `!= 'false'` comparison is the fail-open half: only the
-    # literal string `false` skips, so an output that was never written runs
-    # the job.
-    needs: [changes]
-    if: >-
-      !cancelled() &&
-      needs.changes.outputs.lint != 'false'
-    runs-on: ubuntu-latest
-    # Generous against the ~30 s this takes; it exists so a wedged install step
-    # cannot hold a concurrency slot for the 360-minute GitHub default.
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@v7
-
-      - name: Set up Python
-        uses: actions/setup-python@v7
-        with:
-          python-version: "3.12"
-          # The pip cache is why this job does not pay a cold dependency
-          # install on every run. `cache-dependency-path` is load-bearing: the
-          # default key hashes no lockfile here (there is none), so without it
-          # the cache would be keyed on nothing and never hit.
-          cache: pip
-          cache-dependency-path: pyproject.toml
-
-      - name: Install dependencies
-        id: lint_install
-        run: |
-          python -m pip install --upgrade pip
-          pip install flake8==7.4.1 black==26.1.0 isort==5.13.2
-
-      - name: Run flake8
-        run: flake8 .
-
-      # BOTH FORMATTERS RUN once the tools are installed, whatever an earlier check
-      # said. With the default `success()` a flake8 or Black failure skipped isort
-      # (PR #2783 head ed2dfa64: Black failed and isort never ran, so its result was
-      # unknown and a second push was needed to learn it). The gate is the install
-      # step's outcome, not `always()`: a failed install must still block them, and
-      # a cancelled run must not start them. Each step still fails the job on its
-      # own (no `continue-on-error`), and `--diff` puts the actual rewrite in the
-      # log, so one failed run reports every formatter's whole answer.
-      - name: Run black
-        if: >-
-          !cancelled() &&
-          steps.lint_install.outcome == 'success'
-        run: black --check --diff .
-
-      - name: Run isort
-        if: >-
-          !cancelled() &&
-          steps.lint_install.outcome == 'success'
-        run: isort --check --diff .
-
-  # The i18n gate: the committed `Intl` tables and per-key modules must match
-  # their generator (blocking), and the string ratchet + catalogue parity run
-  # from check.py — blocking for the enforced scope and catalogue problems,
-  # advisory (visible in the log, exit 0) everywhere else until an extraction
-  # slice activates its area (RFC §9: P1 ships advisory). Both scripts are
-  # stdlib-only and the generator needs only the runner's Node, so
-  # this job installs NOTHING — it cannot fail (or go slow) for install
-  # reasons, which makes it the cheapest real gate in this workflow.
-  i18n:
-    needs: [changes]
-    if: >-
-      !cancelled() &&
-      needs.changes.outputs.i18n != 'false'
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          fetch-depth: 2
-
-      - name: Set up Python
-        uses: actions/setup-python@v7
-        with:
-          python-version: "3.12"
-
-      - name: Set up Node
-        uses: actions/setup-node@v7
-        with:
-          # The emitter calls `Intl` on the same Node major the mobile-web
-          # workflow uses, so the generated tables and the TS surfaces are
-          # anchored to one `Intl`.
-          node-version: '24'
-
-      - name: Generated artifacts are current
-        run: python scripts/i18n/generate.py --check
-
-      - name: Ratchet and catalogue parity
-        run: python scripts/i18n/check.py
-
-  # ---------------------------------------------------------------------------
-  # Packaging smoke: install the BUILT wheel and start it.
-  #
-  # WHY THIS EXISTS. v0.77.0 reached PyPI unstartable on Python 3.14:
-  # `import local_operator.server.app` raised `TypeError: 'function' object is
-  # not subscriptable` because PEP 649 deferred an annotation that named `dict`
-  # inside a class body which also defined `def dict(...)`. The source tree was
-  # green: `server-sanity` below does `pip install -e`, on 3.12 only, and the
-  # publish workflow built and uploaded the wheel without ever installing it.
-  # `lop --version` also passed on the broken artifact, because it reads
-  # installed metadata without importing the server stack. So the first honest
-  # run of the artifact was a user's install. This job builds the wheel once
-  # and runs `scripts/smoke_wheel.py` against it: a throwaway venv, an import
-  # from the installed location, and a real `lop serve` + `/health` check that
-  # reports `install_kind == "pip"`.
-  #
-  # THE BUILD IS DELIBERATELY ONCE. The wheel is `py3-none-any`, so every
-  # interpreter installs byte-identical code; rebuilding per version would test
-  # the builder three times and the artifact zero extra times. PR builds omit
-  # the pnpm mobile bundle (cheap, and the bundle is not what this regression
-  # class is about); the publish gate in publish.yml installs the exact release
-  # artifact, which does include it.
-  #
-  # Gate: the `packaging` flag, which is NOT `unit`. `unit` answers "must the
-  # test suite run", and it is true for a tests-only diff; this job answers
-  # "must the wheel be rebuilt", and `tests/` is not in that wheel (the
-  # manifest's `packages.find` includes `local_operator*`). Sharing `unit` put
-  # these four jobs on every test-only PR whose diff could not reach them.
-  # `scripts/ci_scope.py` owns the predicate and the argument for its safety.
-  packaging-smoke-build:
-    needs: [changes]
-    if: >-
-      !cancelled() &&
-      needs.changes.outputs.packaging != 'false'
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@v7
-
-      - name: Set up Python
-        uses: actions/setup-python@v7
-        with:
-          python-version: "3.12"
-
-      - name: Build the wheel
-        run: |
-          python -m pip install --upgrade pip
-          python -m pip install build
-          python -m build --wheel --outdir dist/packaging-smoke
-
-      # The release ships a comment-stripped wheel (scripts/slim_wheel.py, for
-      # PyPI's 10 GB project cap), so the smoke legs must install that exact
-      # shape, and a PR whose code the slimmer cannot verify must fail here
-      # rather than at release time. The size guard runs at --budget-mib 17.5, not
-      # the release's 18: this wheel lacks the phone bundle and the key-agent helper
-      # (~0.37 MiB together), so the plain budget would first go red in the release's
-      # keyagent-macos job, after the tag exists (see scripts/check_dist_size.py).
-      - name: Slim the wheel and check its size budget
-        run: |
-          python scripts/slim_wheel.py dist/packaging-smoke/local_operator-*-py3-none-any.whl
-          python scripts/check_dist_size.py --budget-mib 17.5 dist/packaging-smoke
-
-      - uses: actions/upload-artifact@v7
-        with:
-          name: packaging-smoke-wheel
-          path: dist/packaging-smoke/*.whl
-
-  packaging-smoke:
-    needs: [changes, packaging-smoke-build]
-    if: >-
-      !cancelled() &&
-      needs.changes.outputs.packaging != 'false' &&
-      needs.packaging-smoke-build.result == 'success'
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    strategy:
-      fail-fast: false
-      # ONE AT A TIME, on 2026-10-19. These three legs are cheap (a wheel
-      # install and a server start, MEASURED at 44-52 s each in run
-      # 39316047502 and 44 s locally) and they are NOT on any
-      # critical path, so running them three at a time bought nothing and
-      # cost three pending jobs per run. Under a saturated account-wide pool a
-      # PENDING job is the expensive kind: it is what a release gate's jobs
-      # queue behind. These legs each also hold a runner slot while they
-      # install, so a run that starts all three at once is three slots of
-      # contention for a check whose own deadline is generous.
-      #
-      # The three interpreter classes are still all covered, and `fail-fast:
-      # false` still reports each class separately: the COVERAGE is unchanged,
-      # only the ORDER in which the three legs are scheduled.
-      max-parallel: 1
-      matrix:
-        # Each entry is a DIFFERENT failure class, not a hunch:
-        #   3.12 - the `requires-python` floor and the PR-path `guards`
-        #          interpreter (the 3.12+3.13 unit matrix now lives in
-        #          full-suite.yml); it is also the
-        #          version the source-tree sanity jobs run on.
-        #   3.13 - a declared classifier and an existing push-to-main leg, so
-        #          the artifact is checked where the package says it works.
-        #   3.14 - the deferred-annotation (PEP 649) interpreter class that
-        #          shipped v0.77.0 broken while every 3.12/3.13 run was green.
-        # One server start per version; no full test suite per version, and no
-        # rebuild per version (the wheel is py3-none-any).
-        python-version: ["3.12", "3.13", "3.14"]
-    steps:
-      - uses: actions/checkout@v7
-
-      - name: Set up Python
-        uses: actions/setup-python@v7
-        with:
-          python-version: ${{ matrix.python-version }}
-
-      - uses: actions/download-artifact@v8
-        with:
-          name: packaging-smoke-wheel
-          path: dist/packaging-smoke
-
-      - name: Install and start the built wheel
-        run: python scripts/smoke_wheel.py --wheel dist/packaging-smoke/local_operator-*.whl
-
-  # The source-tree half of the same interpreter class. `packaging-smoke` above
-  # proves the BUILT artifact starts on 3.14; this job proves the tree the next
-  # tag is cut from can be installed and imported on 3.14 first. That is a
-  # different check: an editable install resolves the checkout, so it catches a
-  # PEP 649 spelling error at pull-request time without waiting for a build.
-  #
-  # `lop serve --help` is the second assertion: on v0.77.0 the console script
-  # itself worked (it reads metadata without importing the server stack) while
-  # `import local_operator.server.app` did not, so importing alone is the
-  # signal that matters and --help only guards the entry point stays wired.
-  source-import-314:
-    needs: [changes]
-    if: >-
-      !cancelled() &&
-      needs.changes.outputs.unit != 'false'
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@v7
-
-      - name: Set up Python 3.14
-        uses: actions/setup-python@v7
-        with:
-          python-version: "3.14"
-          cache: pip
-          cache-dependency-path: pyproject.toml
-
-      - name: Install the server extra
-        run: |
-          python -m pip install --upgrade pip
-          pip install -e ".[server]"
-
-      - name: Import the server app on 3.14
-        run: python -c "import local_operator.server.app"
-
-      - name: The console script still resolves serve
-        run: lop serve --help
-
-  type-check:
-    needs: [changes]
-    if: >-
-      !cancelled() &&
-      needs.changes.outputs.types != 'false'
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    # pyright's version is the pin in pyproject.toml's dev extra. Do NOT
-    # set PYRIGHT_PYTHON_FORCE_VERSION: that env var makes the wrapper
-    # ignore the bundled analyzer and download whatever npm currently
-    # calls latest, which is how this job drifted onto 1.1.413 while the
-    # package (and every local run) stayed on 1.1.411. Bump the pin, not
-    # an env override.
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          # This job reads tracked files but never pushes or fetches again.
-          # Do not leave checkout credentials available to offline controls.
-          persist-credentials: false
-
-      - name: Set up Python
-        uses: actions/setup-python@v7
-        with:
-          python-version: "3.12"
-          cache: pip
-          cache-dependency-path: |
-            pyproject.toml
-            benchmarks/harness_cost/reviews/requirements.txt
-
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -e ".[dev]"
-
-      # The benchmark is a separately pinned analysis kit, not an application
-      # runtime dependency. Whole-tree type checking still reads its modules,
-      # so this job needs the real optional scientific packages rather than
-      # import ignores, fake stubs, or inflated application dependencies.
-      - name: Install standalone benchmark analysis dependencies
-        run: python -m pip install -r benchmarks/harness_cost/reviews/requirements.txt
-
-      # Node's default V8 old-space cap is ~4 GB; pyright's whole-tree analyzer
-      # OOMed at heap 3885 MB on the 16 GB ubuntu-latest runner (run
-      # 36521602567, job 109266609131). Give node 6 GB of
-      # old-space headroom. Orthogonal to the version-pin comment above (unchanged).
-      - name: Run pyright
-        env:
-          NODE_OPTIONS: "--max-old-space-size=6144"
-        run: pyright
-
-      # These are standalone, zero-spend benchmark controls. An empty HOME and
-      # allowlisted environment prevent a test from inheriting CI credentials;
-      # no model, native harness, Docker, fixture download or login is invoked.
-      - name: Verify benchmark analysis and offline guards
-        shell: bash
-        run: |
-          set -euo pipefail
-          ISO=$(mktemp -d "$RUNNER_TEMP/harness-cost.XXXXXX")
-          trap 'rm -rf "$ISO"' EXIT
-          PYTHON=$(command -v python)
-          offline_python() {
-            env -i HOME="$ISO" TMPDIR="$ISO" PATH="$PATH" \
-              LOCAL_OPERATOR_CONFIG_DIR="$ISO/.local-operator" LOCAL_OPERATOR_SCRATCHPAD="$ISO" \
-              MPLCONFIGDIR="$ISO/mpl" PYTHONDONTWRITEBYTECODE=1 \
-              GIT_CONFIG_SYSTEM=/dev/null GIT_TERMINAL_PROMPT=0 \
-              "$PYTHON" "$@"
-          }
-          cd benchmarks/harness_cost
-          offline_python publication.py verify
-          offline_python -m unittest -q test_kit
-          offline_python regenerate.py --out "$ISO/generated"
-          cd experimental
-          offline_python -m unittest -q test_cache_namespace test_cache_forwarder \
-            test_adapters test_runner_v2 test_bridge_sse test_cache_bridge.PluginBoundaryTests test_clone_path
-          cd coding
-          offline_python -m unittest -q test_guard test_driver_safety test_guard_asgi test_adapters
-
-      - name: Verify browser extension protocol sync
-        # Main CI owns this too: a Python-only protocol edit must fail even if
-        # the paths-gated extension workflow does not run.
-        run: python -m local_operator.browser_bridge.gen_ts --check
-        
-  context-budget:
-    needs: [changes]
-    if: >-
-      !cancelled() &&
-      needs.changes.outputs.budget != 'false'
-    # Guards the start-of-session context contract in docs/REWRITE.md. It
-    # builds the real tool surface and renders the real prompt blocks, then
-    # fails when a fresh session's start context exceeds the ratchet in
-    # scripts/bench_context_budget.py.
-    #
-    # Its own job, deliberately, and NOT gated on `test`: this is the only
-    # thing that notices context creeping upward, and a flaky unit run must
-    # not disarm it. It needs no API key and no secrets, so it runs on forks
-    # too. Cheap — an import and some string building, no model call.
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@v7
-
-      - name: Set up Python
-        uses: actions/setup-python@v7
-        with:
-          python-version: "3.12"
-          cache: pip
-          cache-dependency-path: pyproject.toml
-
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -e ".[all]"
-
-      - name: Check start-of-session context budget
-        run: python scripts/bench_context_budget.py --verbose
-
-      # The SUBAGENT arm: children are ~93% of sessions and carry their own
-      # deferral set (tools/deferral.py), so they get their own ratchet.
-      - name: Check subagent start context budget
-        run: python scripts/bench_context_budget.py --verbose --kind child
-
-  filesystem-boundaries-windows:
-    needs: [changes]
-    if: >-
-      !cancelled() &&
-      needs.changes.outputs.windows != 'false'
-    # Canonical containment must use native Windows drive/junction semantics,
-    # not a POSIX test with os.name mocked. Keep this bounded to the HTTP/import
-    # contract rather than claiming the complete interactive suite is portable.
-    runs-on: windows-latest
+  diagnostic_original_merge:
+    name: Diagnostic original merge — two serial nodes (NOT full gate)
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/diag/gate-43265391359-py31318' &&
+      github.repository == 'damianvtran/local-operator'
+    runs-on: ubuntu-26.04
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v7
-        with:
-          python-version: "3.12"
-          cache: pip
-          cache-dependency-path: pyproject.toml
-      - name: Install dependencies
-        run: python -m pip install -e ".[dev]"
-      - name: Verify native filesystem boundaries
-        shell: pwsh
-        run: |
-          $env:HOME = Join-Path $env:RUNNER_TEMP "lop-boundary-home"
-          $env:USERPROFILE = $env:HOME
-          $env:LOCAL_OPERATOR_CONFIG_DIR = Join-Path $env:HOME ".local-operator"
-          New-Item -ItemType Directory -Force $env:HOME | Out-Null
-          python -m pytest tests/unit/test_agent_import_boundary.py tests/unit/server/test_edit_workspace_boundary.py tests/unit/network/test_credentials_private_paths.py::test_missing_root_creates_only_leaf_and_missing_parent_refuses tests/unit/network/test_credentials_private_paths.py::test_public_writer_preserves_existing_root_and_ancestors tests/unit/network/test_credentials_private_paths.py::test_two_process_lock_retains_inode_and_actual_timeout -n0 -q
-
-      # The Team Bridge receiver is cross-platform (Task Scheduler on Windows),
-      # and its Windows arm has properties a POSIX host cannot answer: the
-      # `msvcrt` lock that replaced `fcntl` for the connector singleton and the
-      # cross-process sync lock, and the `pythonw.exe` (no console window)
-      # choice for the logon task. The file's native cells run only here; the
-      # rest of it is the per-platform lifecycle against the schtasks/systemctl
-      # SEAMS (no real schtasks is ever called — the package conftest makes the
-      # seam a hard failure), so this job also proves the module imports and
-      # behaves on Windows. Its own sandbox, for the reason the step above has.
-      - name: Verify the Team Bridge receiver's Windows arm
-        shell: pwsh
-        run: |
-          $env:HOME = Join-Path $env:RUNNER_TEMP "lop-receiver-home"
-          $env:USERPROFILE = $env:HOME
-          $env:LOCAL_OPERATOR_CONFIG_DIR = Join-Path $env:HOME ".local-operator"
-          New-Item -ItemType Directory -Force $env:HOME | Out-Null
-          python -m pytest tests/unit/team_bridge/test_connector_platforms.py -n0 -q
-
-  # The cross-platform probe battery (`scripts/xplat_probe.py`), one leg per OS.
-  #
-  # WHY THIS IS NOT COVERED BY THE UNIT MATRIX: the suite runs on Linux and the
-  # interactive surface is exercised on macOS, so a mechanism that is silently
-  # POSIX-only -- or silently macOS-only -- passes every other gate in this
-  # file. The failure class it targets is the SILENT one: not an `ImportError`
-  # at startup, which somebody would notice, but a code path that reports
-  # success and does nothing on this platform (the measured baseline was
-  # `wake.install` and `mobile.install` both FAILing on Linux -- "no supervisor
-  # installer for this platform" and "install needs macOS launchd" -- while
-  # `mobile.status` still answered, i.e. the portal looked present and could not
-  # be installed).
-  #
-  # The battery is stdlib-only, self-driving and isolated (it re-homes HOME and
-  # the config root into a scratch sandbox, and strips inherited `CMUX_*`), so
-  # these legs need no pytest, no fixtures, no secrets and no network -- and
-  # therefore run on fork pull requests. It exits non-zero when any probe
-  # FAILed, which is what makes this a gate rather than a report: the matrix it
-  # prints is the failure message.
-  #
-  # Two jobs rather than one `os:` matrix, because they share no step bodies:
-  # the Windows leg is PowerShell end to end (see below) and carries the longer
-  # ceiling. `fail-fast` is therefore not in play here -- neither leg can cancel
-  # the other.
-  #
-  # WHAT THIS CANNOT COVER, and why it is a separate rig: one GitHub runner is
-  # one Ubuntu LTS, while `lop`'s Linux mechanisms (a user systemd instance,
-  # `notify-send`, `xdg-open`, the terminal it was launched from) are exactly
-  # what a distro changes. Other distributions are read through
-  # `scripts/xplat_linux_matrix.sh`, which builds containers locally -- a
-  # container cannot be a GitHub runner. Windows is the reverse case: a Windows
-  # container needs a Windows kernel underneath it and cannot run on a macOS or
-  # Linux host at all, so Windows validation is this real Windows runner and
-  # never an emulation container.
-  xplat-probe-linux:
-    needs: [changes]
-    if: >-
-      !cancelled() &&
-      needs.changes.outputs.xplat != 'false'
-    runs-on: ubuntu-latest
-    # The battery bounds each probe itself (60-600 s, a timed-out probe is a
-    # reported FAIL, not a hang) and is then bounded AGAIN, in aggregate, by the
-    # `--budget` below -- so this ceiling only has to cover install and queue
-    # time above that budget. It has to be ABOVE the budget: the per-probe
-    # timeouts sum to ~64 minutes, and a battery that runs out of budget returns
-    # a partial matrix with the unreached probes marked `SKIP not run`, while a
-    # job killed at its own ceiling prints no matrix and uploads nothing at all.
-    timeout-minutes: 25
-    steps:
-      - uses: actions/checkout@v7
-
-      - name: Set up Python
-        uses: actions/setup-python@v7
-        with:
-          python-version: "3.12"
-          cache: pip
-          cache-dependency-path: pyproject.toml
-
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -e ".[dev]"
-
-      - name: Run the cross-platform probe battery
-        # The console script is deliberately not used: the probes invoke the
-        # entry point through the interpreter so a host with the package
-        # present but no installed shim is still measurable (the same reason the
-        # battery's own `_cli_argv` exists), and this line is the reading the
-        # `--json` artifact records.
-        #
-        # `--budget 1200`: the battery stops STARTING probes once 20 minutes of
-        # wall clock are gone, marks the rest `SKIP not run`, and still writes
-        # the matrix -- 5 minutes under the job ceiling for install and setup.
-        # Without it the per-probe timeouts sum to ~64 minutes, so three probes
-        # hanging to their own documented bound would spend the whole ceiling
-        # and produce no evidence at all.
-        run: python scripts/xplat_probe.py --json xplat-ubuntu.json --budget 1200
-
-      - name: Upload the probe matrix
-        # `always()`: the JSON is most worth having on the run that FAILed. The
-        # reason it is actually there is `_write_matrix`'s call site -- the
-        # battery rewrites the artifact after EVERY probe, so a run that is
-        # killed part-way (a job timeout, a crash out of the loop) still uploads
-        # the reads that completed rather than an empty set.
-        if: always()
-        uses: actions/upload-artifact@v7
-        with:
-          name: xplat-probe-linux
-          path: xplat-ubuntu.json
-          retention-days: 7
-
-  xplat-probe-windows:
-    needs: [changes]
-    if: >-
-      !cancelled() &&
-      needs.changes.outputs.xplat != 'false'
-    # Native Windows, not a container and not a simulated `os.name`: the probes
-    # that matter here are the ones where Windows differs in substance
-    # (`os.startfile`, `socket.SO_EXCLUSIVEADDRUSE`, `signal.SIGBREAK` via
-    # `CTRL_BREAK_EVENT`, `%USERPROFILE%` rather than `$HOME`, no module-level
-    # `fcntl`/`pty`, a non-POSIX file lock). A POSIX host with `os.name` patched
-    # cannot answer any of them.
-    runs-on: windows-latest
-    # Longer than the Linux leg on purpose: the same battery on a slower runner
-    # with slower installs, and --budget 2400 (40 minutes) against this ceiling.
-    timeout-minutes: 45
-    steps:
-      - uses: actions/checkout@v7
-
-      - name: Set up Python
-        uses: actions/setup-python@v7
-        with:
-          python-version: "3.12"
-          cache: pip
-          cache-dependency-path: pyproject.toml
-
-      - name: Install dependencies
-        shell: pwsh
-        run: |
-          python -m pip install --upgrade pip
-          pip install -e ".[dev]"
-
-      - name: Run the cross-platform probe battery
-        shell: pwsh
-        run: |
-          # Same sandbox shape as `filesystem-boundaries-windows`, and for the
-          # same reason: a probe that reads the runner's real profile is
-          # measuring the machine, not the code. `USERPROFILE` is not decoration
-          # -- it, not `HOME`, is what `os.path.expanduser` consults on Windows,
-          # so a sandbox that sets only `HOME` leaves the real profile live.
-          #
-          # `--budget 2400` is the aggregate bound this leg's ceiling sits above:
-          # the per-probe timeouts sum to ~64 minutes, and this runner is the
-          # slow one, so the battery returns a partial matrix (unreached probes
-          # `SKIP not run`) rather than letting the job die at 45 minutes with
-          # nothing uploaded. See the Linux leg for the same reasoning.
-          $env:HOME = Join-Path $env:RUNNER_TEMP "lop-xplat-home"
-          $env:USERPROFILE = $env:HOME
-          $env:LOCAL_OPERATOR_CONFIG_DIR = Join-Path $env:HOME ".local-operator"
-          New-Item -ItemType Directory -Force $env:HOME | Out-Null
-          python scripts/xplat_probe.py --json xplat-windows.json --budget 2400
-
-      - name: Upload the probe matrix
-        if: always()
-        uses: actions/upload-artifact@v7
-        with:
-          name: xplat-probe-windows
-          path: xplat-windows.json
-          retention-days: 7
-
-  # The tree-wide guard/contract tests, the ONE slice of the unit suite that
-  # stays on pull requests. The unit suites moved to full-suite.yml (main only);
-  # a PR now carries targeted local evidence from `scripts/affected_tests.py`,
-  # and a path-based selection misses by construction exactly these tests: they
-  # scan the whole tree (or a workflow/packaging manifest), so a change
-  # ANYWHERE can break them. The 2026-11 flaky sweep measured the class — the
-  # undeclared-mutating-call regressions PR CI caught came only through
-  # `test_sync_copy_set.py` and `test_no_session_deletion.py`.
-  #
-  # The list is read from `scripts/affected_tests.py --guards` (GUARD_TESTS),
-  # never spelled here, so the local helper and this job cannot drift; a
-  # hygiene test asserts this job runs that command.
-  #
-  # Gated on `unit`, the same flag the moved `test` matrix used: a docs-only
-  # diff cannot break a tree scan of Python sources.
-  guards:
-    needs: [changes]
-    if: >-
-      !cancelled() &&
-      needs.changes.outputs.unit != 'false'
-    runs-on: ubuntu-latest
-    # The guard run measured n=3 locally at median 114 s / max 158 s (984
-    # tests, loaded 14-core host; GUARD_TESTS has the samples). 15 minutes
-    # covers that max ~5x plus checkout and the `.[dev]` install, and stays
-    # far below the 38-minute shard ceiling it replaces on the PR path.
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@v7
-
-      - name: Set up Python 3.12
-        uses: actions/setup-python@v7
-        with:
-          python-version: "3.12"
-          cache: pip
-          cache-dependency-path: pyproject.toml
-
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -e ".[dev]"
-
-      - name: Run the guard tests
-        # `env -u NO_COLOR TERM=xterm-256color`: the suite's documented
-        # terminal (AGENTS.md, "TUI tests need a colour-capable terminal").
-        # `mapfile` + an emptiness check: an empty list would make pytest
-        # collect its whole `testpaths`, the exact full run this job replaces.
-        run: |
-          set -euo pipefail
-          mapfile -t guards < <(python scripts/affected_tests.py --guards)
-          [ "${#guards[@]}" -gt 0 ] || { echo "GUARD_TESTS is empty"; exit 1; }
-          env -u NO_COLOR TERM=xterm-256color python -m pytest -q "${guards[@]}"
-
-  pip-audit:
-    needs: [changes]
-    if: >-
-      !cancelled() &&
-      needs.changes.outputs.audit != 'false'
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@v7
-      - name: Install package
-        run: python -m pip install .
-      - uses: pypa/gh-action-pip-audit@v1.1.0
-        with:
-          inputs: .
-  cli-sanity:
-    runs-on: ubuntu-latest
-    # Live-LLM job: needs a real OpenRouter key. Fork pull requests do not get
-    # repository secrets, so without the fork half of this condition every
-    # external contributor sees a permanently red check they cannot fix. The
-    # fork clause is PRESERVED by ANDing the scope flag onto it, not replaced by
-    # it — a rewrite that dropped it would restore exactly that permanent red.
-    if: >-
-      !cancelled() &&
-      (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) &&
-      needs.changes.outputs.cli != 'false' &&
-      needs.lint.result == 'success' &&
-      needs.type-check.result == 'success' &&
-      needs.guards.result == 'success' &&
-      needs.pip-audit.result == 'success'
-    # The `.result == 'success'` clauses restore what the implicit `success()`
-    # used to provide: a FAILED cheaper gate still blocks this one. A
-    # deliberately SKIPPED one does not, which is the point of the change — and
-    # `pip-audit` can only be skipped on a diff where `audit` is false, which
-    # also makes `cli` false, so this job is skipped by its own flag first. No
-    # PERMISSIVE_DEPS pair is needed (see scripts/ci_scope.py).
-    needs:
-      - changes
-      - lint
-      - type-check
-      # `guards` replaced `test` (moved to full-suite.yml): same `unit` flag,
-      # so the strict clause above keeps A4's implication true.
-      - guards
-      - pip-audit
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@v7
-      - name: Set Up Python 3.12
-        uses: actions/setup-python@v7
-        with:
-          python-version: "3.12"
-          cache: pip
-          cache-dependency-path: pyproject.toml
-      # Deliberately the bare default install, with no extras: this job is the
-      # regression guard that the core agent still runs on the lean dependency
-      # set. Do not add extras here to fix a failure — fix the lazy import.
-      - name: Install Package
-        run: |
-          python -m pip install --upgrade pip
-          pip install -e .
-      - name: Run CLI Sanity Test
-        env:
-          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
-        run: |
-          # Run CLI to create test file
-          # --yolo: the sanity run is sandboxed CI; the rewritten harness denies
-          # approval-gated tools (write) without a tty unless auto-approved.
-          #
-          # MODEL CHOICE: these live-LLM jobs assert that a small, cheap model
-          # can still drive the agent end to end, so the model has to emit real
-          # structured tool calls rather than describe them.
-          #
-          # SERVING CAPACITY IS PART OF THE CHOICE, not just price and
-          # tool-calling. The previous pick (qwen/qwen3.7-flash) tool-called
-          # perfectly and still made this job intermittently red: OpenRouter
-          # lists exactly ONE endpoint for it (Alibaba), so when that single
-          # upstream saturates the job dies with
-          #   HTTP 429 ... Alibaba returned error: qwen/qwen3.7-flash is
-          #   temporarily rate-limited upstream
-          # and test.txt is never written. Observed on runs 34188298919 and
-          # 34184908064 (cli-sanity, main) and 34189747430 attempt 1
-          # (server-sanity, /v1/chat 500s), all of which passed on retry --
-          # which is the signature of upstream capacity, not of a defect in the
-          # PR under test. Retrying is not the fix; a model whose serving is not
-          # one shared bottleneck is.
-          #
-          # openai/gpt-oss-20b is served by 14 providers on OpenRouter (9 of
-          # them tool-capable: CoreWeave, DeepInfra, Fireworks, Groq, Parasail,
-          # Darkbloom, ...), so a saturated provider degrades to another one
-          # instead of 429ing the run. Measured locally against these exact
-          # commands: 10/10 on the --yolo write task, 5/5 on the --json
-          # streaming contract, p50 4.0s (vs 7.8s for qwen), and ~$0.00034 per
-          # run at 11.1k prompt / 67 completion tokens -- cheaper per run than
-          # the model it replaces (~$0.00046) at the same $0.030/$0.130 per
-          # Mtok. Rejected: google/gemini-2.5-flash-lite (2/10 -- mid-stream
-          # finish_reason 'error'), amazon/nova-micro-v1 and openai/gpt-5-nano
-          # (both clean but fewer providers and dearer per run).
-          #
-          # If this starts failing, FIRST separate the two failure modes: a
-          # 429/5xx naming one upstream provider is capacity (re-check how many
-          # endpoints OpenRouter still lists for this model), while tool-call
-          # markup appearing as assistant TEXT is a model regression -- the
-          # shape that made deepseek/deepseek-v4-flash-0731 write nothing at
-          # 0/5. Re-measure candidates before swapping; a model that cannot
-          # tool-call makes these jobs permanently red and teaches everyone to
-          # ignore them. Any replacement must support `tools`, be served by
-          # more than one provider, and be verified against both the --yolo
-          # write task and the --json streaming contract.
-          local-operator --hosting openrouter --model openai/gpt-oss-20b exec --yolo "create a file called test.txt with the text 'hello world' in it" || exit 1
-
-          # Check if file exists and contains correct text
-          if [ ! -f test.txt ]; then
-            echo "test.txt was not created"
-            exit 1
-          fi
-
-          if ! grep -q "hello world" test.txt; then
-            echo "test.txt does not contain expected text"
-            cat test.txt
-            exit 1
-          fi
-
-          echo "CLI sanity test passed successfully"
-
-      # The `exec --json` event stream is a CONTRACT with the TUI, the server
-      # websocket and any external consumer, and stdout is its data channel.
-      # This gate exists because the checker previously lived in the repo
-      # unwired: a working detector sitting beside the defect it detects proves
-      # nothing. `--json` is the point — the job above deliberately runs
-      # without it, so only this step can catch prose on stdout.
-      - name: Run Streaming Contract Check
-        env:
-          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
-        run: |
-          local-operator --hosting openrouter --model openai/gpt-oss-20b \
-            --yolo exec --json "create a file called contract.txt containing ok" \
-            > run.jsonl 2> run.err || exit 1
-          python scripts/check_streaming_contract.py run.jsonl || {
-            echo "--- stdout that failed the contract ---"; cat run.jsonl; exit 1; }
-
-      # The error paths are the ones that regressed historically: a missing key
-      # or a bad model printed a coloured banner to stdout, so a consumer broke
-      # at exactly the moment it needed to read the failure. Assert stdout is
-      # EMPTY (or JSON) while the diagnosis lands on stderr.
-      - name: Assert Error Paths Keep stdout Clean
-        run: |
-          set +e
-          env -u OPENROUTER_API_KEY local-operator --hosting openrouter \
-            --model openai/gpt-oss-20b exec --json "hi" > err_out.jsonl 2> err_err.txt
+    - name: Initialize diagnostic receipts (not a gate)
+      shell: bash
+      env:
+        RECIPE_MANIFEST_B64: ewogICJhY3Rpb25zIjogewogICAgImNoZWNrb3V0IjogIjNkM2M0MmU1YWFjNWJhODA1ODI1ZGE3NjQxMGMxODEyNzNiYTkwYjEiLAogICAgInNldHVwX3B5dGhvbiI6ICI2ZDRmZDIyYjIwNDY1Y2NjMGY3MzU0NDc2NTg4ZThkZjdjOWNhMGUwIiwKICAgICJ1cGxvYWRfYXJ0aWZhY3QiOiAiY2Y0MzBlMDMwZGRiYjViMGFiZjkzZDIyOTYyZjQ3NTJmMzY0NmNkOSIKICB9LAogICJhY3R1YWxfbW9kZWwiOiAib3BlbmFpL2dwdC02LjEtc29sIiwKICAiYXV0aG9yX3Nlc3Npb24iOiAiMzYyMzEwNjFhZTdkIiwKICAiZGVwZW5kZW5jaWVzIjogewogICAgImFydGlmYWN0X3BvbGljeSI6ICJSYXcgcGlwIHJlcG9ydC9sb2cgc3RheSBvdXRzaWRlIHVwbG9hZCByb290OyB1cGxvYWRlZCByZXBvcnQgYWxsb3dsaXN0cyBkaXN0cmlidXRpb24gbmFtZS92ZXJzaW9uIGFuZCBhcmNoaXZlIGhhc2hlcyBvbmx5LCBvbWl0cyBhbGwgZG93bmxvYWQgVVJMczsgdXBsb2FkZWQgcGlwIGxvZyByZW1vdmVzIFVSTHMgYW5kIGJlYXJlciBtYXRlcmlhbC4iLAogICAgImNvbmZsaWN0c19vYnNlcnZlZF9pbl9sb2ciOiBmYWxzZSwKICAgICJjb25zdHJhaW50c19zaGEyNTYiOiAiMzNiMmVjZTRiMDZjNWMzZjRkNDRkNzNiYmVkMjhkM2NkMDExZDNkMDcyZDVhMTIyMzZmNjIwNDEzYzE2MWVmMSIsCiAgICAiY291bnQiOiAxMDUsCiAgICAiaW5zdGFsbF9yZWNpcGUiOiAicHl0aG9uIC1tIHBpcCBpbnN0YWxsIHBpcD09MjYuMzsgcHl0aG9uIC1tIHBpcCBpbnN0YWxsIC0tY29uc3RyYWludCBvYnNlcnZlZC1jaS1jb25zdHJhaW50cy50eHQgLS1yZXBvcnQgcGlwLXJlcG9ydC5qc29uIC1lIC5bZGV2XSIsCiAgICAibG9ja19sZXZlbCI6ICJPYnNlcnZlZCBpbnN0YWxsZWQgZGlzdHJpYnV0aW9uIHZlcnNpb25zLCBOT1QgYSBjb21wbGV0ZSBhcnRpZmFjdC9oYXNoIG9yIGJ1aWxkLWVudmlyb25tZW50IGxvY2siLAogICAgIm1ldGFkYXRhX3ZlcmlmaWNhdGlvbiI6ICJSZXF1aXJlIGFsbCAxMDUgb2JzZXJ2ZWQgaW5zdGFsbGVkIHZlcnNpb25zIGFmdGVyIGNvbnN0cmFpbmVkIGluc3RhbGw7IHBpcCBjaGVjayBtdXN0IHBhc3M7IGFueSBtaXNtYXRjaCBibG9ja3MgYm90aCBub2Rlcy4iLAogICAgIm9ic2VydmVkX2luc3RhbGxlZF92ZXJzaW9ucyI6IHsKICAgICAgImFubm90YXRlZC1kb2MiOiAiMC4wLjYiLAogICAgICAiYW5ub3RhdGVkLXR5cGVzIjogIjAuOC4wIiwKICAgICAgImFueWlvIjogIjQuMTYuMCIsCiAgICAgICJhcHNjaGVkdWxlciI6ICIzLjExLjMiLAogICAgICAiYXR0cnMiOiAiMjYuMS4wIiwKICAgICAgImJlYXV0aWZ1bHNvdXA0IjogIjQuMTUuMCIsCiAgICAgICJib29sZWFuLXB5IjogIjUuMCIsCiAgICAgICJib3RvMyI6ICIxLjQ0LjEiLAogICAgICAiYm90b2NvcmUiOiAiMS40NC4xIiwKICAgICAgImNhY2hlY29udHJvbCI6ICIwLjE0LjQiLAogICAgICAiY2VydGlmaSI6ICIyMDI2LjEwLjIzIiwKICAgICAgImNmZmkiOiAiMi4xLjEiLAogICAgICAiY2hhcnNldC1ub3JtYWxpemVyIjogIjMuNS4yIiwKICAgICAgImNsaWNrIjogIjguNS4xIiwKICAgICAgImNvdmVyYWdlIjogIjcuMTcuMyIsCiAgICAgICJjcnlwdG9ncmFwaHkiOiAiNTAuMC4yIiwKICAgICAgImN5Y2xvbmVkeC1weXRob24tbGliIjogIjExLjEyLjAiLAogICAgICAiZGVmdXNlZHhtbCI6ICIwLjcuMSIsCiAgICAgICJkaWxsIjogIjAuNC4xIiwKICAgICAgImV4ZWNuZXQiOiAiMi4xLjIiLAogICAgICAiZmFzdGFwaSI6ICIwLjE2Mi41IiwKICAgICAgImZpbGVsb2NrIjogIjQuMi4xMCIsCiAgICAgICJmbGFrZTgiOiAiNy40LjEiLAogICAgICAiaDExIjogIjAuMTYuMCIsCiAgICAgICJodHRwY29yZSI6ICIxLjAuOSIsCiAgICAgICJodHRwY29yZTIiOiAiMi4xNi4wIiwKICAgICAgImh0dHB4IjogIjAuMjguMSIsCiAgICAgICJodHRweDIiOiAiMi4xNi4wIiwKICAgICAgImlkbmEiOiAiMy4yMCIsCiAgICAgICJpbmljb25maWciOiAiMi4zLjEiLAogICAgICAiamVkaSI6ICIwLjIwLjEiLAogICAgICAiamluamEyIjogIjMuMS42IiwKICAgICAgImptZXNwYXRoIjogIjEuMS4wIiwKICAgICAgImpzb25zY2hlbWEiOiAiNC4yNi4wIiwKICAgICAgImpzb25zY2hlbWEtc3BlY2lmaWNhdGlvbnMiOiAiMjAyNS45LjEiLAogICAgICAibGljZW5zZS1leHByZXNzaW9uIjogIjMwLjQuNCIsCiAgICAgICJsaW5raWZ5LWl0LXB5IjogIjIuMi4wIiwKICAgICAgImxvY2FsLW9wZXJhdG9yIjogIjAuMTAyLjEiLAogICAgICAibWFya2Rvd24taXQtcHkiOiAiNC4zLjAiLAogICAgICAibWFya2Rvd25pZnkiOiAiMS4yLjMiLAogICAgICAibWFya3Vwc2FmZSI6ICIzLjAuNCIsCiAgICAgICJtY2NhYmUiOiAiMC43LjAiLAogICAgICAibWNwIjogIjIuMy4wIiwKICAgICAgIm1jcC10eXBlcyI6ICIyLjMuMCIsCiAgICAgICJtZGl0LXB5LXBsdWdpbnMiOiAiMC43LjAiLAogICAgICAibWR1cmwiOiAiMC4xLjIiLAogICAgICAibWluaWF1ZGlvIjogIjEuNzMiLAogICAgICAibXNncGFjayI6ICIxLjIuNCIsCiAgICAgICJub2RlZW52IjogIjEuMTIuMCIsCiAgICAgICJvcGVudGVsZW1ldHJ5LWFwaSI6ICIxLjQ1LjIiLAogICAgICAicGFja2FnZXVybC1weXRob24iOiAiMC4xNy42IiwKICAgICAgInBhY2thZ2luZyI6ICIyNi4zIiwKICAgICAgInBhcnNvIjogIjAuOC43IiwKICAgICAgInBpbGxvdyI6ICIxMy4wLjAiLAogICAgICAicGlsbG93LWhlaWYiOiAiMS44LjEiLAogICAgICAicGlwIjogIjI2LjMiLAogICAgICAicGlwLWFwaSI6ICIwLjAuMzUiLAogICAgICAicGlwLWF1ZGl0IjogIjIuMTAuMSIsCiAgICAgICJwaXAtcmVxdWlyZW1lbnRzLXBhcnNlciI6ICIzMi4wLjEiLAogICAgICAicGxhdGZvcm1kaXJzIjogIjQuMTQuNSIsCiAgICAgICJwbHVnZ3kiOiAiMS43LjAiLAogICAgICAicHktc2VyaWFsaXphYmxlIjogIjIuMi4wIiwKICAgICAgInB5Y29kZXN0eWxlIjogIjIuMTUuMCIsCiAgICAgICJweWNwYXJzZXIiOiAiMy4xMiIsCiAgICAgICJweWRhbnRpYyI6ICIyLjE0LjMiLAogICAgICAicHlkYW50aWMtY29yZSI6ICIyLjUwLjQiLAogICAgICAicHlmbGFrZXMiOiAiNC4wLjMiLAogICAgICAicHlnbWVudHMiOiAiMi4yMS4wIiwKICAgICAgInB5and0IjogIjIuMTUuMSIsCiAgICAgICJweXBhcnNpbmciOiAiMy4zLjMiLAogICAgICAicHlwZGYiOiAiNy4wLjEiLAogICAgICAicHlyaWdodCI6ICIxLjEuNDE0IiwKICAgICAgInB5dGVzdCI6ICI4LjQuMiIsCiAgICAgICJweXRlc3QtYXN5bmNpbyI6ICIxLjUuMCIsCiAgICAgICJweXRlc3QtY292IjogIjcuMS4wIiwKICAgICAgInB5dGVzdC10ZXh0dWFsLXNuYXBzaG90IjogIjEuMS4wIiwKICAgICAgInB5dGVzdC14ZGlzdCI6ICIzLjguMCIsCiAgICAgICJweXRob24tZGF0ZXV0aWwiOiAiMi45LjAucG9zdDAiLAogICAgICAicHl0aG9uLWRvdGVudiI6ICIxLjIuNCIsCiAgICAgICJweXRob24tbXVsdGlwYXJ0IjogIjAuMC4zMyIsCiAgICAgICJweXlhbWwiOiAiNi4wLjMiLAogICAgICAicmVmZXJlbmNpbmciOiAiMC4zNy4wIiwKICAgICAgInJlZ2V4IjogIjIwMjYuMTEuOSIsCiAgICAgICJyZXF1ZXN0cyI6ICIyLjM0LjIiLAogICAgICAicmljaCI6ICIxNS4wLjAiLAogICAgICAicnBkcy1weSI6ICIyMDI2LjkuMSIsCiAgICAgICJzM3RyYW5zZmVyIjogIjAuMTkuMyIsCiAgICAgICJzaXgiOiAiMS4xNy4wIiwKICAgICAgInNvcnRlZGNvbnRhaW5lcnMiOiAiMi40LjAiLAogICAgICAic291cHNpZXZlIjogIjQuMSIsCiAgICAgICJzc2Utc3RhcmxldHRlIjogIjMuNy4wIiwKICAgICAgInN0YXJsZXR0ZSI6ICIxLjEwLjAiLAogICAgICAic3lydXB5IjogIjQuOC4wIiwKICAgICAgInRleHR1YWwiOiAiOC4yLjgiLAogICAgICAidGlrdG9rZW4iOiAiMC4xNC4wIiwKICAgICAgInRvbWxpIjogIjIuNS4wIiwKICAgICAgInRvbWxpLXciOiAiMS4yLjAiLAogICAgICAidHJ1c3RzdG9yZSI6ICIwLjEwLjUiLAogICAgICAidHlwaW5nLWV4dGVuc2lvbnMiOiAiNC4xNi4wIiwKICAgICAgInR5cGluZy1pbnNwZWN0aW9uIjogIjAuNC41IiwKICAgICAgInR6bG9jYWwiOiAiNS40LjUiLAogICAgICAidXJsbGliMyI6ICIyLjguMCIsCiAgICAgICJ1dmljb3JuIjogIjAuNTQuMCIsCiAgICAgICJ3YXRjaGRvZyI6ICI3LjEuMCIsCiAgICAgICJ3ZWJzb2NrZXRzIjogIjE3LjQiCiAgICB9LAogICAgInJlc29sdmVyX2V4ZWN1dGVkX2Zvcl90aGlzX3ByZXBhcmF0aW9uIjogZmFsc2UsCiAgICAic2FtZV9vcmlnaW5hbF9lZGl0YWJsZV9idWlsZF9wcm9jZWR1cmUiOiB0cnVlLAogICAgInVua25vd25zIjogWwogICAgICAiT3JpZ2luYWwgaXNvbGF0ZWQgc2V0dXB0b29scy93aGVlbCBidWlsZC1lbnZpcm9ubWVudCB2ZXJzaW9ucyB3ZXJlIG5vdCBwcmludGVkIGluIHRoZSBmYWlsaW5nIGpvYiBsb2cuIE9yaWdpbmFsIHB5cHJvamVjdCByZXF1aXJlcyBzZXR1cHRvb2xzPj02MS4wLjAgYW5kIHdoZWVsLiBEbyBub3QgaW52ZW50IGV4YWN0IGhpc3RvcmljYWwgcGlucy4iLAogICAgICAiT3JpZ2luYWwgd2hlZWwvc2Rpc3QgaGFzaGVzIGFuZCBpbmRleCBzbmFwc2hvdCBhcmUgbm90IGZ1bGx5IHJlY29yZGVkOyBwYWNrYWdlIGF2YWlsYWJpbGl0eSBhbmQgcmVzb2x2ZXIvYnVpbGQgY29tcGF0aWJpbGl0eSBhcmUgVU5WRVJJRklFRCB1bnRpbCBhbiBFMDEtYXV0aG9yaXplZCBob3N0ZWQgc2V0dXAuIiwKICAgICAgInVidW50dS0yNi4wNCBwcmVzZXJ2ZXMgT1MgZmFtaWx5LCBub3QgdGhlIGV4YWN0IG9yaWdpbmFsIGhvc3RlZCBpbWFnZSByZXZpc2lvbi4gQ2FwdHVyZSBJbWFnZU9TL0ltYWdlVmVyc2lvbjsgYSBzZXJpYWwgcmVwbGF5IGlzIG5vdCBvcmlnaW5hbCBzdWl0ZS1sb2FkL29yZGVyIHJlcGxheS4iCiAgICBdCiAgfSwKICAiZGlzcGF0Y2hfb3duZXJfc2Vzc2lvbiI6ICJlMDFmYmRjOTUxZjkiLAogICJldmlkZW5jZV9zb3VyY2VzIjogewogICAgIm1ldGFkYXRhX3JlY29uc3RydWN0aW9uX29ubHkiOiB0cnVlLAogICAgIm9yaWdpbmFsX3dvcmtmbG93X3JlZiI6ICJiNDc0MGE0M2IwZDM4NjZlNzcwNzg1NDJhMWZiODkwMGEzMzVlZjhjOi5naXRodWIvd29ya2Zsb3dzL2Z1bGwtc3VpdGUueW1sIiwKICAgICJyYXdfam9iX2xvZ19zaGEyNTYiOiAiMWQ2YWVmOGEyMTZlMGQ5NDMyNzJlNDc2YmM1ZGQyYmExNWYxNzg3YmU1YWU4ZWEzNjAxNGI1ZGQwNWM5MDQxMSIKICB9LAogICJtYW5hZ2VyX3Nlc3Npb24iOiAiY2QxZDhmNmQxZDFkIiwKICAibm9kZXMiOiB7CiAgICAiYmFja2dyb3VuZGF0dGFjaCI6ICJ0ZXN0cy91bml0L3R1aS90ZXN0X2JhY2tncm91bmRfY29tcGxldGlvbl9ub3RpZnkucHk6OnRlc3RfYV9ub25fY29tcGxldGVfc2Vzc2lvbl9zYXlzX2l0c19zdGF0ZV9yYXRoZXJfdGhhbl9pdHNfbGFzdF9yZXBseVtlcnJvci1TdG9wcGVkIHdpdGggYW4gZXJyb3JdIiwKICAgICJydW5uZXJleGl0IjogInRlc3RzL3VuaXQvc2NyaXB0cy90ZXN0X3J1bl9ib3VuZGVkX2luY2lkZW50X3NoYXBlLnB5Ojp0ZXN0X3RoZV9pbmNpZGVudF9zaGFwZV9pc19yZWNsYWltZWRfYW5kX3RoZV9yZWNvcmRfc2hvd3NfdGhlX3BpbiIKICB9LAogICJvcmlnaW5hbCI6IHsKICAgICJiYXNlIjogImI0NzQwYTQzYjBkMzg2NmU3NzA3ODU0MmExZmI4OTAwYTMzNWVmOGMiLAogICAgImdpdCI6ICIyLjU2LjAiLAogICAgImpvYl9pZCI6IDEzMTM3OTc5NTA0OCwKICAgICJwcl9oZWFkIjogImJlNmI0NmMzYTA5OTlkOWIzYWRmMmE1Y2U2ZWQ3OWEwNTFhMzAwM2MiLAogICAgInB5dGhvbiI6ICIzLjEzLjE4IiwKICAgICJydW5faWQiOiA0MzI2NTM5MTM1OSwKICAgICJydW5uZXJfaW1hZ2UiOiAidWJ1bnR1LTI2LjA0IiwKICAgICJydW5uZXJfaW1hZ2VfdmVyc2lvbiI6ICIyMDI2MTEwMS4xODYuMSIsCiAgICAidGVzdGVkX2NvbW1pdCI6ICIyZjI3OTMyOGQ3NDQ1MTgzZDc1MzNhNWFkNGQwNDE3NzgzOWVjZDU2IiwKICAgICJ0ZXN0ZWRfdHJlZSI6ICIxY2VkYTVkZjcyZDBhM2FjYmEzMzVjMzkyODJlOTNiZWZkODFkN2E0IiwKICAgICJ1cmwiOiAiaHR0cHM6Ly9naXRodWIuY29tL2RhbWlhbnZ0cmFuL2xvY2FsLW9wZXJhdG9yL2FjdGlvbnMvcnVucy80MzI2NTM5MTM1OS9qb2IvMTMxMzc5Nzk1MDQ4IgogIH0sCiAgInB1YmxpY2F0aW9uIjogewogICAgImJyYW5jaF9wYXJlbnQiOiAiYjQ3NDBhNDNiMGQzODY2ZTc3MDc4NTQyYTFmYjg5MDBhMzM1ZWY4YyIsCiAgICAiZGlhZ25vc3RpY19icmFuY2giOiAiZGlhZy9nYXRlLTQzMjY1MzkxMzU5LXB5MzEzMTgiLAogICAgImRpc3BhdGNoZWQiOiBmYWxzZSwKICAgICJldmVudCI6ICJ3b3JrZmxvd19kaXNwYXRjaCIsCiAgICAiaW5wdXRzIjoge30sCiAgICAibmV2ZXJfbWVyZ2UiOiB0cnVlLAogICAgIm5vdF9wcm9kdWN0X3ByIjogdHJ1ZSwKICAgICJvbmx5X2NoYW5nZWRfcmVwb3NpdG9yeV9wYXRoIjogIi5naXRodWIvd29ya2Zsb3dzL2NpLnltbCIsCiAgICAicHVibGlzaGVkIjogZmFsc2UsCiAgICAicmVnaXN0ZXJlZF93b3JrZmxvd19pZCI6IDE0MzQ4MjU4OSwKICAgICJyZWdpc3RlcmVkX3dvcmtmbG93X3BhdGgiOiAiLmdpdGh1Yi93b3JrZmxvd3MvY2kueW1sIgogIH0sCiAgInB1YmxpY2F0aW9uX3ByZXJlcXVpc2l0ZXMiOiBbCiAgICAiSW5kZXBlbmRlbnQgc3RhdGljIHJldmlldyBvZiB0aGlzIGV4YWN0IHJlY2lwZSBhbmQgY29udGVudHMgZGlmZi4iLAogICAgIkUwMSBvd25zIHB1YmxpY2F0aW9uL2Rpc3BhdGNoIGFuZCBtdXN0IGV4cGxpY2l0bHkgYWNjZXB0L3Jlc29sdmUgdGhlIGRvY3VtZW50ZWQgbm9uLWhhc2gtbG9ja2VkIGJ1aWxkL2hvc3QtaW1hZ2UgbGltaXRhdGlvbnM7IG5vIGNsYWltIG9mIGFuIGV4YWN0IGhpc3RvcmljYWwgZW52aXJvbm1lbnQuIiwKICAgICJVc2UgdGhlIHNpbmdsZSBhbHJlYWR5IGFsbG9jYXRlZCBsYW5lOyBubyBkdXBsaWNhdGUgZGlhZ25vc3RpYyBicmFuY2gvcnVuLiIsCiAgICAiTm8gcHVibGljYXRpb24sIFBSLCBwdXNoLCBkaXNwYXRjaCBvciB0ZXN0cyBhcmUgYXV0aG9yaXplZCBieSB0aGlzIHNjcmF0Y2ggcHJlcGFyYXRpb24gYWxvbmUuIgogIF0sCiAgInJ1bnRpbWUiOiB7CiAgICAiZGlmZmVyZW5jZXNfZnJvbV9vcmlnaW5hbCI6ICJPbmx5IHR3byBzZXJpYWwgc2luZ2xlLW5vZGUgaW52b2NhdGlvbnMgKC1uMCksIG5vdCBvcmlnaW5hbCA0LXdvcmtlciBzaGFyZC9mdWxsLXN1aXRlL29yZGVyL2xvYWQ7IG9yaWdpbmFsIGNvdmVyYWdlIGZsYWdzIGFuZCBjb2xsZWN0aW9uLW9yZGVyIHBsdWdpbiByZXRhaW5lZC4iLAogICAgImZ1bGxfZ2F0ZSI6IGZhbHNlLAogICAgImpvYl90aW1lb3V0X21pbnV0ZXMiOiAxNSwKICAgICJqb2JzIjogMSwKICAgICJuYXRpdmVfdmFsaWRhdGlvbiI6IGZhbHNlLAogICAgInBlcl9ub2RlX3Rlcm1fZ3JhY2Vfc2Vjb25kcyI6IDUsCiAgICAicGVyX25vZGVfdGltZW91dF9zZWNvbmRzIjogMTIwLAogICAgInB5dGVzdF93b3JrZXJzIjogMCwKICAgICJyZXBlYXRfY291bnRfcGVyX25vZGUiOiAxLAogICAgInJldGFpbmVkX29yaWdpbmFsX3B5dGVzdF9pbnN0cnVtZW50YXRpb24iOiBbCiAgICAgICItcCB0ZXN0cy5jaV9vcmRlcl9vd25lZF9maXJzdCIsCiAgICAgICItLWNvdiIsCiAgICAgICItLWNvdi1mYWlsLXVuZGVyPTAiLAogICAgICAiLS1jb3YtcmVwb3J0PSIKICAgIF0sCiAgICAic2VyaWFsIjogdHJ1ZQogIH0sCiAgInNjaGVtYSI6ICJob3N0ZWQtZGlhZ25vc3RpYy1yZWNpcGUvdjEiLAogICJzb3VyY2UiOiB7CiAgICAiYXV0aG9yX2FuZF9jb21taXR0ZXIiOiAiZnVsbC1zdWl0ZSBnYXRlIDxmdWxsLXN1aXRlLWdhdGVAaW52YWxpZD4iLAogICAgImF1dGhvcl9hbmRfY29tbWl0dGVyX2Vwb2NoIjogMTc5NDUwOTk1MSwKICAgICJibG9iX2Jhc2lzIjogIlRoZXNlIHJlbGV2YW50IHBhdGhzIGluaGVyaXQgdGhlIGJhc2UgYmxvYnMgYmVjYXVzZSB0aGUgUFIgaW1wbGVtZW50YXRpb24gcGF0Y2ggZG9lcyBub3QgY2hhbmdlIHRoZW07IGV4YWN0IGZ1bGwgbWVyZ2UvdHJlZSBhc3NlcnRpb25zIGFyZSBhdXRob3JpdGF0aXZlLiIsCiAgICAiZGlyZWN0X3JlbW90ZV9jb21taXRfbG9va3VwIjogIkdpdEh1YiBnaXQvY29tbWl0cyBlbmRwb2ludCByZXR1cm5lZCA0MDQ7IGNvbW1pdCBpcyBlcGhlbWVyYWwiLAogICAgImV4cGVjdGVkX3JlbGV2YW50X2dhdGVfYmxvYnMiOiB7CiAgICAgICJjb25mdGVzdC5weSI6IHsKICAgICAgICAiYnl0ZXMiOiAxMDgwODYsCiAgICAgICAgImdpdF9ibG9iIjogImYxZWM0MzM2YjkwMGIxNTkwYjQ3NGZhMjc4MmI5YmUyZWIyZWZlMjgiLAogICAgICAgICJzaGEyNTYiOiAiOWQwNmIyOTgzYTBjMmE1NTljOTE0YzgyMTNhYTQwOGRiZjhkODYzOTc5NGE0NzY2ODM3MmU1YmM0ZGFkZWE2YiIKICAgICAgfSwKICAgICAgImxvY2FsX29wZXJhdG9yL2FpZGEvb25ib2FyZGluZy5weSI6IHsKICAgICAgICAiYnl0ZXMiOiA0OTg5MiwKICAgICAgICAiZ2l0X2Jsb2IiOiAiZWRhYTNjNGUzODA5NDJmZWEyMGM4MTQ5MDNiYWI1YjQzYzdhMmExMCIsCiAgICAgICAgInNoYTI1NiI6ICJiMTYzM2IxYTE0OGE5ZjBlOWU5OTQ1ZmQzNmZmOWQxOWUwMmFkMTM0YTlkYjA1OGM5MjUzNTMwYzk0NDY4YTY2IgogICAgICB9LAogICAgICAibG9jYWxfb3BlcmF0b3IvYm91bmRlZF9jb250cmFjdC5weSI6IHsKICAgICAgICAiYnl0ZXMiOiAzODMyOSwKICAgICAgICAiZ2l0X2Jsb2IiOiAiY2ZkOTZmMzIwY2VhNTE1NDNkODhkNDZlZGYxMjUwOGIyYzlhMGI4YiIsCiAgICAgICAgInNoYTI1NiI6ICJkMDk0MDUzZTEyM2FlNWQzMTNmNmIzYmVjOWQxMGVjMjA5MjZhYTdlNDNiNTlmZGY1ODUzMTkzNGY1NjQ3YmVhIgogICAgICB9LAogICAgICAibG9jYWxfb3BlcmF0b3IvbWVtb3J5X2d1YXJkLnB5IjogewogICAgICAgICJieXRlcyI6IDg2NTUwLAogICAgICAgICJnaXRfYmxvYiI6ICI2ZmUxNzBlMzg5ZjYzODQ0Yjc0N2Q1ZWM5ZWYyNjU5NzU1OGYzM2ZjIiwKICAgICAgICAic2hhMjU2IjogIjhjYjIxMTI2NjYwZTM4OWIwZDUzNGZhYTNjOTA1YTJkYzBmMTc5YTJmNmEzMDQ1NzE0NDk4ZmEzODU1NWY2MDkiCiAgICAgIH0sCiAgICAgICJsb2NhbF9vcGVyYXRvci9vd25lZF9wcm9jZXNzX2dyb3VwLnB5IjogewogICAgICAgICJieXRlcyI6IDk1OTM2LAogICAgICAgICJnaXRfYmxvYiI6ICI4Y2U3ZTc3NzhmYjg1NmYwODk0N2EwNGY1MWE0Zjc1NmRkYzRjOTQyIiwKICAgICAgICAic2hhMjU2IjogIjkwMjIzOTlhY2EzNTcyNjUxM2Q4Mzk5YTcyOTk4ZWI5YzZhZDEwNGRlNzFmMDdmMDA3OWQ5MmYxZmNlMDU1NDMiCiAgICAgIH0sCiAgICAgICJsb2NhbF9vcGVyYXRvci90dWkvYXBwLnB5IjogewogICAgICAgICJieXRlcyI6IDM2NzA5NzYsCiAgICAgICAgImdpdF9ibG9iIjogIjE0NWRjNmI2YWYzZmUzYzc1ZDE3NzgzMTJiMDk4YjQxZDM0MGQwZWIiLAogICAgICAgICJzaGEyNTYiOiAiMTY2ZmRlZWNmYmViZDQ4YzE0MzU5ZTJhNWY5YTIzNzYwMDI3ZDA0ZmQxZWQ5YTczNjcyNmEwYmFhZGZmYmUxYSIKICAgICAgfSwKICAgICAgInNjcmlwdHMvcnVuX2JvdW5kZWQucHkiOiB7CiAgICAgICAgImJ5dGVzIjogNjY0NzIsCiAgICAgICAgImdpdF9ibG9iIjogImM1MjFmZjgxOWMzMjZkNjdhNmQwMjFiYzkwYjE2YTYyYmQxNTQxMDIiLAogICAgICAgICJzaGEyNTYiOiAiNmQxNDA5MDllYmUxNDVmZDdiNDVjNjgxOWM5YjRiZThhYjA5MmNmMTU0OTJkMmNiOWY5NzVjMmQ4MDg5OGIwNiIKICAgICAgfSwKICAgICAgInRlc3RzL2NvbmZ0ZXN0LnB5IjogewogICAgICAgICJieXRlcyI6IDEzNDc1MywKICAgICAgICAiZ2l0X2Jsb2IiOiAiNWM3OTFhMjU0MzFmMjZhN2U4MjI3ZjQ2MDAwMGQ4ZjNlYzc3Y2Y0YyIsCiAgICAgICAgInNoYTI1NiI6ICI2ZDdlOTM2MWVkYmE4N2EyZDg2YTc4OGY3MjVmZTU1OGQ0ZDVmYjkxNDZkYTMwYTkzODAyNzRhMGQ3ZTE2MDJjIgogICAgICB9LAogICAgICAidGVzdHMvdW5pdC9zY3JpcHRzL3Rlc3RfcnVuX2JvdW5kZWQucHkiOiB7CiAgICAgICAgImJ5dGVzIjogMzcwMjcsCiAgICAgICAgImdpdF9ibG9iIjogImVmMTQ4NTRjOWRkYzVhMGM0MzJhZDNhYzkyMmE4MmI1MzRkOGIxMDQiLAogICAgICAgICJzaGEyNTYiOiAiZmUwMDE1N2FhNWE1NGM3YWI3MmM5MzRmNDk2YTU3YWYwNWNmYTgwNjhmNzk1MGJmNjU5YWI0Yzg0ZDFmOGU4MyIKICAgICAgfSwKICAgICAgInRlc3RzL3VuaXQvc2NyaXB0cy90ZXN0X3J1bl9ib3VuZGVkX2luY2lkZW50X3NoYXBlLnB5IjogewogICAgICAgICJieXRlcyI6IDY2NDIsCiAgICAgICAgImdpdF9ibG9iIjogIjcyOWY5ZTQ0OWFmZDdkZTViNGM4MGY3YmYyMWJlN2RiNTg2ZTYxNzkiLAogICAgICAgICJzaGEyNTYiOiAiNzUwMTQ5ZjhhYTFjNTZiM2NiZTE3ZWM1OGYxY2IxMWQyMTcxNzhhNTU2OTU2NmRmYzlmMzQ5NDMxODVmMDBhMyIKICAgICAgfSwKICAgICAgInRlc3RzL3VuaXQvdHVpL3Rlc3RfYXBwX3BpbG90LnB5IjogewogICAgICAgICJieXRlcyI6IDY5MzQxMiwKICAgICAgICAiZ2l0X2Jsb2IiOiAiYzMxYWE3NWNkMWNjOGVlM2Y0MTU5MjRjMjIyMzY0YjIwZDk5NzhkZCIsCiAgICAgICAgInNoYTI1NiI6ICJlNjA2MDk1ZDk5MmZmMWY1Mjg0NmU3YTU4YmEwYjY0NzBiNmFhNGQ1NWY4MTEzZGJjODFmNDA1M2U0ZTFkZDAwIgogICAgICB9LAogICAgICAidGVzdHMvdW5pdC90dWkvdGVzdF9iYWNrZ3JvdW5kX2NvbXBsZXRpb25fbm90aWZ5LnB5IjogewogICAgICAgICJieXRlcyI6IDExNTA0MywKICAgICAgICAiZ2l0X2Jsb2IiOiAiNGY5ZGZmMWVkYjY4MDA3ZjcyYTJkN2JkYmNiNDhlZWNmMDMxYTFmNSIsCiAgICAgICAgInNoYTI1NiI6ICJhODk3ZTQyNjNlMDI2YjFhNTI2ZWU1N2FlNjY3NGI0NzNmYzVhODUwYWQ5YWJmYTYyNWI4ZjY3M2ZhNGRjNTY5IgogICAgICB9CiAgICB9LAogICAgInJhd19jb21taXRfc2hhMjU2IjogIjMyNWRhOTMwYjFjZDI4ODY0MDNjOGU0ZGU5MmE4ZmRmNDg4NGY0YjkzNmQ1ODIzZGNiZGQzODUzYmViMTkyZjciLAogICAgInJhd19jb21taXRfdGV4dCI6ICJ0cmVlIDFjZWRhNWRmNzJkMGEzYWNiYTMzNWMzOTI4MmU5M2JlZmQ4MWQ3YTRcbnBhcmVudCBiNDc0MGE0M2IwZDM4NjZlNzcwNzg1NDJhMWZiODkwMGEzMzVlZjhjXG5wYXJlbnQgYmU2YjQ2YzNhMDk5OWQ5YjNhZGYyYTVjZTZlZDc5YTA1MWEzMDAzY1xuYXV0aG9yIGZ1bGwtc3VpdGUgZ2F0ZSA8ZnVsbC1zdWl0ZS1nYXRlQGludmFsaWQ+IDE3OTQ1MDk5NTEgKzAwMDBcbmNvbW1pdHRlciBmdWxsLXN1aXRlIGdhdGUgPGZ1bGwtc3VpdGUtZ2F0ZUBpbnZhbGlkPiAxNzk0NTA5OTUxICswMDAwXG5cbmZ1bGwtc3VpdGUgZ2F0ZTogbWVyZ2UgYmU2YjQ2YzNhMDk5OWQ5YjNhZGYyYTVjZTZlZDc5YTA1MWEzMDAzYyBpbnRvIGI0NzQwYTQzYjBkMzg2NmU3NzA3ODU0MmExZmI4OTAwYTMzNWVmOGNcbiIsCiAgICAicmVjb25zdHJ1Y3Rpb24iOiAiTWVyZ2UgZXhhY3QgaW1tdXRhYmxlIHBhcmVudHMgd2l0aCBvcmlnaW5hbCBpZGVudGl0eS9tZXNzYWdlL2RhdGVzOyByZXF1aXJlIEVYQUNUIG9yaWdpbmFsIGNvbW1pdCBhbmQgdHJlZSBoYXNoZXMgYmVmb3JlIFB5dGhvbiBzZXR1cC9pbnN0YWxsL3Rlc3RzIiwKICAgICJzY29wZSI6ICJGdWxsIG9yaWdpbmFsIHRlc3RlZCBtZXJnZSB0cmVlLCBubyBvdmVybGF5cyBhbmQgbm8gY2hlcnJ5LXBpY2tzIiwKICAgICJ0aW1lem9uZSI6ICIrMDAwMCIKICB9LAogICJzdGF0dXMiOiAiRFJBRlRfUEVORElOR19JTkRFUEVOREVOVF9SRVZJRVdfQU5EX0UwMV9QVUJMSUNBVElPTl9ERUNJU0lPTiIKfQo=
+        CI_CONSTRAINTS_B64: YW5ub3RhdGVkLWRvYz09MC4wLjYKYW5ub3RhdGVkLXR5cGVzPT0wLjguMAphbnlpbz09NC4xNi4wCmFwc2NoZWR1bGVyPT0zLjExLjMKYXR0cnM9PTI2LjEuMApiZWF1dGlmdWxzb3VwND09NC4xNS4wCmJvb2xlYW4tcHk9PTUuMApib3RvMz09MS40NC4xCmJvdG9jb3JlPT0xLjQ0LjEKY2FjaGVjb250cm9sPT0wLjE0LjQKY2VydGlmaT09MjAyNi4xMC4yMwpjZmZpPT0yLjEuMQpjaGFyc2V0LW5vcm1hbGl6ZXI9PTMuNS4yCmNsaWNrPT04LjUuMQpjb3ZlcmFnZT09Ny4xNy4zCmNyeXB0b2dyYXBoeT09NTAuMC4yCmN5Y2xvbmVkeC1weXRob24tbGliPT0xMS4xMi4wCmRlZnVzZWR4bWw9PTAuNy4xCmRpbGw9PTAuNC4xCmV4ZWNuZXQ9PTIuMS4yCmZhc3RhcGk9PTAuMTYyLjUKZmlsZWxvY2s9PTQuMi4xMApmbGFrZTg9PTcuNC4xCmgxMT09MC4xNi4wCmh0dHBjb3JlPT0xLjAuOQpodHRwY29yZTI9PTIuMTYuMApodHRweD09MC4yOC4xCmh0dHB4Mj09Mi4xNi4wCmlkbmE9PTMuMjAKaW5pY29uZmlnPT0yLjMuMQpqZWRpPT0wLjIwLjEKamluamEyPT0zLjEuNgpqbWVzcGF0aD09MS4xLjAKanNvbnNjaGVtYT09NC4yNi4wCmpzb25zY2hlbWEtc3BlY2lmaWNhdGlvbnM9PTIwMjUuOS4xCmxpY2Vuc2UtZXhwcmVzc2lvbj09MzAuNC40CmxpbmtpZnktaXQtcHk9PTIuMi4wCmxvY2FsLW9wZXJhdG9yPT0wLjEwMi4xCm1hcmtkb3duLWl0LXB5PT00LjMuMAptYXJrZG93bmlmeT09MS4yLjMKbWFya3Vwc2FmZT09My4wLjQKbWNjYWJlPT0wLjcuMAptY3A9PTIuMy4wCm1jcC10eXBlcz09Mi4zLjAKbWRpdC1weS1wbHVnaW5zPT0wLjcuMAptZHVybD09MC4xLjIKbWluaWF1ZGlvPT0xLjczCm1zZ3BhY2s9PTEuMi40Cm5vZGVlbnY9PTEuMTIuMApvcGVudGVsZW1ldHJ5LWFwaT09MS40NS4yCnBhY2thZ2V1cmwtcHl0aG9uPT0wLjE3LjYKcGFja2FnaW5nPT0yNi4zCnBhcnNvPT0wLjguNwpwaWxsb3c9PTEzLjAuMApwaWxsb3ctaGVpZj09MS44LjEKcGlwPT0yNi4zCnBpcC1hcGk9PTAuMC4zNQpwaXAtYXVkaXQ9PTIuMTAuMQpwaXAtcmVxdWlyZW1lbnRzLXBhcnNlcj09MzIuMC4xCnBsYXRmb3JtZGlycz09NC4xNC41CnBsdWdneT09MS43LjAKcHktc2VyaWFsaXphYmxlPT0yLjIuMApweWNvZGVzdHlsZT09Mi4xNS4wCnB5Y3BhcnNlcj09My4xMgpweWRhbnRpYz09Mi4xNC4zCnB5ZGFudGljLWNvcmU9PTIuNTAuNApweWZsYWtlcz09NC4wLjMKcHlnbWVudHM9PTIuMjEuMApweWp3dD09Mi4xNS4xCnB5cGFyc2luZz09My4zLjMKcHlwZGY9PTcuMC4xCnB5cmlnaHQ9PTEuMS40MTQKcHl0ZXN0PT04LjQuMgpweXRlc3QtYXN5bmNpbz09MS41LjAKcHl0ZXN0LWNvdj09Ny4xLjAKcHl0ZXN0LXRleHR1YWwtc25hcHNob3Q9PTEuMS4wCnB5dGVzdC14ZGlzdD09My44LjAKcHl0aG9uLWRhdGV1dGlsPT0yLjkuMC5wb3N0MApweXRob24tZG90ZW52PT0xLjIuNApweXRob24tbXVsdGlwYXJ0PT0wLjAuMzMKcHl5YW1sPT02LjAuMwpyZWZlcmVuY2luZz09MC4zNy4wCnJlZ2V4PT0yMDI2LjExLjkKcmVxdWVzdHM9PTIuMzQuMgpyaWNoPT0xNS4wLjAKcnBkcy1weT09MjAyNi45LjEKczN0cmFuc2Zlcj09MC4xOS4zCnNpeD09MS4xNy4wCnNvcnRlZGNvbnRhaW5lcnM9PTIuNC4wCnNvdXBzaWV2ZT09NC4xCnNzZS1zdGFybGV0dGU9PTMuNy4wCnN0YXJsZXR0ZT09MS4xMC4wCnN5cnVweT09NC44LjAKdGV4dHVhbD09OC4yLjgKdGlrdG9rZW49PTAuMTQuMAp0b21saT09Mi41LjAKdG9tbGktdz09MS4yLjAKdHJ1c3RzdG9yZT09MC4xMC41CnR5cGluZy1leHRlbnNpb25zPT00LjE2LjAKdHlwaW5nLWluc3BlY3Rpb249PTAuNC41CnR6bG9jYWw9PTUuNC41CnVybGxpYjM9PTIuOC4wCnV2aWNvcm49PTAuNTQuMAp3YXRjaGRvZz09Ny4xLjAKd2Vic29ja2V0cz09MTcuNAo=
+      run: |
+        set -euo pipefail
+        E="$RUNNER_TEMP/g432-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+        mkdir -p "$E"
+        echo "E=$E" >> "$GITHUB_ENV"
+        python3 - <<'PY'
+        import base64, os, pathlib
+        root=pathlib.Path(os.environ['RUNNER_TEMP'])/('g432-'+os.environ['GITHUB_RUN_ID']+'-'+os.environ['GITHUB_RUN_ATTEMPT'])
+        for key,name in [('RECIPE_MANIFEST_B64','source-manifest.json'),('CI_CONSTRAINTS_B64','observed-ci-constraints.txt')]:
+            (root/name).write_bytes(base64.b64decode(os.environ[key]))
+        PY
+        printf 'ImageOS=%s\nImageVersion=%s\nRunnerOS=%s\n' "${ImageOS:-unknown}" "${ImageVersion:-unknown}" "$RUNNER_OS" > "$E/runner-image.txt"
+    - name: Checkout immutable original merge parent
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      with:
+        ref: b4740a43b0d3866e77078542a1fb8900a335ef8c
+        fetch-depth: 0
+        persist-credentials: false
+    - name: Reconstruct and check out EXACT original ephemeral merge
+      shell: bash
+      run: |
+        set -euo pipefail
+        test "$(git rev-parse HEAD)" = b4740a43b0d3866e77078542a1fb8900a335ef8c
+        git cat-file -e be6b46c3a0999d9b3adf2a5ce6ed79a051a3003c^{commit}
+        env GIT_AUTHOR_DATE='1794509951 +0000' GIT_COMMITTER_DATE='1794509951 +0000' \
+          git -c user.name='full-suite gate' -c user.email='full-suite-gate@invalid' \
+          merge --no-ff --no-edit --quiet -m 'full-suite gate: merge be6b46c3a0999d9b3adf2a5ce6ed79a051a3003c into b4740a43b0d3866e77078542a1fb8900a335ef8c' be6b46c3a0999d9b3adf2a5ce6ed79a051a3003c
+        test "$(git rev-parse HEAD)" = 2f279328d7445183d7533a5ad4d04177839ecd56
+        test "$(git rev-parse HEAD^{tree})" = 1ceda5df72d0a3acba335c39282e93befd81d7a4
+        test "$(git rev-parse HEAD^1)" = b4740a43b0d3866e77078542a1fb8900a335ef8c
+        test "$(git rev-parse HEAD^2)" = be6b46c3a0999d9b3adf2a5ce6ed79a051a3003c
+        git checkout --quiet --detach 2f279328d7445183d7533a5ad4d04177839ecd56
+        git diff --exit-code
+        git diff --cached --exit-code
+        git ls-tree -r --full-tree HEAD > "$E/full-source-tree.txt"
+        git cat-file commit 2f279328d7445183d7533a5ad4d04177839ecd56 > "$E/exact-commit.txt"
+        printf 'commit=%s\ntree=%s\n' "$(git rev-parse HEAD)" "$(git rev-parse HEAD^{tree})" > "$E/source-identity.txt"
+    - name: Set up exact original Python 3.13.18
+      uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
+      with:
+        python-version: 3.13.18
+        cache: pip
+        cache-dependency-path: pyproject.toml
+    - name: Install and verify observed original CI version constraints
+      id: deps
+      shell: bash
+      timeout-minutes: 5
+      run: |
+        set -euo pipefail
+        python - <<'PY'
+        import sys
+        assert sys.version_info[:3] == (3,13,18), sys.version
+        PY
+        PRIVATE_PIP_DIR="$RUNNER_TEMP/private-g432-pip-${{ github.run_id }}-${{ github.run_attempt }}"
+        mkdir -p "$PRIVATE_PIP_DIR"
+        export PRIVATE_PIP_DIR
+        set +e
+        (
           set -e
-          if [ -s err_out.jsonl ]; then
-            # `|| [ -n "$line" ]`: bash read returns non-zero at EOF on an
-            # UNTERMINATED final line, so without this the loop body never runs
-            # for it and the gate passes on exactly the shape it exists to
-            # catch — a diagnostic written with end='' or a stream truncated
-            # mid-write by a signal.
-            while IFS= read -r line || [ -n "$line" ]; do
-              [ -z "$line" ] && continue
-              echo "$line" | python -c 'import json,sys; json.loads(sys.stdin.read())' || {
-                echo "non-JSON on stdout from a failing exec --json run:"; echo "$line"; exit 1; }
-            done < err_out.jsonl
-          fi
-          test -s err_err.txt || { echo "expected a diagnostic on stderr"; exit 1; }
-          echo "error-path stdout is clean"
-
-  server-sanity:
-    needs: [changes, lint, type-check, guards, pip-audit]
-    if: >-
-      !cancelled() &&
-      (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) &&
-      needs.changes.outputs.server != 'false' &&
-      needs.lint.result == 'success' &&
-      needs.type-check.result == 'success' &&
-      needs.guards.result == 'success' &&
-      needs.pip-audit.result == 'success'
-    runs-on: ubuntu-latest
-    # Live-LLM job — same fork-secret gate as cli-sanity, preserved the same way.
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@v7
-      - name: Set Up Python 3.12
-        uses: actions/setup-python@v7
-        with:
-          python-version: "3.12"
-          cache: pip
-          cache-dependency-path: pyproject.toml
-      - name: Install Package in Editable Mode
-        run: |
-          python -m pip install --upgrade pip
-          pip install -e ".[server]"
-      - name: Start Server and Check Functionality
-        env:
-          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
-        run: |
-          # Start the server in the background
-          local-operator serve --port 8080 &
-          SERVER_PID=$!
-
-          # Wait for server to start up and check health (timeout after 30s)
-          for i in {1..30}; do
-            RESPONSE=$(curl -s http://localhost:8080/health || true)
-            if echo "$RESPONSE" | grep -i '"status":200' > /dev/null && echo "$RESPONSE" | grep -i '"message":"ok"' > /dev/null; then
-              echo "Server is healthy after $i seconds"
-              break
-            fi
-            if [ $i -eq 30 ]; then
-              echo "Server failed to become healthy after 30 seconds. Last response:"
-              echo "$RESPONSE"
-              kill $SERVER_PID
-              exit 1
-            fi
-            sleep 1
-          done
-
-          # Test chat endpoint with OpenRouter model
-          RESPONSE=$(curl -s -X POST http://localhost:8080/v1/chat \
-            -H "Content-Type: application/json" \
-            -d '{
-              "prompt": "create a file called test.txt with the text '\''hello world'\'' in it",
-              "hosting": "openrouter",
-              "model": "openai/gpt-oss-20b",
-              "context": [],
-              "options": {
-                "temperature": 0.7,
-                "top_p": 0.9
-              }
-            }')
-
-          # Check if file exists and contains correct text
-          if [ ! -f test.txt ]; then
-            echo "test.txt was not created"
-            kill $SERVER_PID
-            exit 1
-          fi
-
-          if ! grep -q "hello world" test.txt; then
-            echo "test.txt does not contain expected text"
-            cat test.txt
-            kill $SERVER_PID
-            exit 1
-          fi
-
-          echo "Server sanity test passed successfully"
-
-          # Clean up
-          kill $SERVER_PID
-
-  # THE SINGLE REQUIRED CHECK. Branch protection names one stable check,
-  # `CI Gate`, instead of every job: jobs come and go (this change removed
-  # three) and a required check that no longer exists blocks every PR forever,
-  # while one that is merely renamed silently stops gating.
-  #
-  # `if: always()` so it reports even when a needed job failed; it fails when
-  # any needed job FAILED or was CANCELLED. SKIPPED passes: a skip is the
-  # classifier's deliberate verdict for this diff (`changes`), and the
-  # version-bump guard skips by design on push. `needs` must list every job in
-  # this workflow (a hygiene test enforces it), or a new job would not gate.
-  ci-gate:
-    name: CI Gate
-    if: always()
-    needs:
-      - changes
-      - version-bump-guard
-      - lint
-      - i18n
-      - packaging-smoke-build
-      - packaging-smoke
-      - source-import-314
-      - type-check
-      - context-budget
-      - filesystem-boundaries-windows
-      - xplat-probe-linux
-      - xplat-probe-windows
-      - guards
-      - pip-audit
-      - cli-sanity
-      - server-sanity
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    steps:
-      # FAIL CLOSED: an ALLOWLIST of passing results, never a denylist of bad
-      # ones. A need passes only when its result is exactly `success` or
-      # `skipped` (skipped stays a pass: path-filtered jobs legitimately skip on
-      # a docs-only head). Anything else -- failure, cancelled, an empty/null
-      # result, or a value GitHub invents later -- fails the gate and names the
-      # job and its result. The old denylist (`failure`/`cancelled` only) let
-      # GitHub's 2026-11-11 Actions incident (20:48-21:29Z) report this check
-      # SUCCESS over jobs that never ran: their result was `abandoned`
-      # (PR #3804: `CI Gate` job 130798073631, `Merge gate (full suite)` job
-      # 130788458667). tests/unit/test_ci_hygiene.py runs this exact step
-      # script against such a NEEDS payload.
-      - name: Fail unless every needed job succeeded or was skipped
-        env:
-          NEEDS: ${{ toJSON(needs) }}
-        run: |
-          set -euo pipefail
-          echo "$NEEDS" | jq -r 'to_entries[] | "\(.key): \(.value.result)"'
-          bad="$(echo "$NEEDS" | jq -r 'to_entries[] | select(.value.result != "success" and .value.result != "skipped") | "\(.key)=\(.value.result)"')"
-          if [ -n "$bad" ]; then
-            echo "::error title=CI Gate::needed jobs not success or skipped: $(echo "$bad" | tr '\n' ' ')"
-            exit 1
-          fi
+          python -m pip install pip==26.3
+          python -m pip install --constraint "$E/observed-ci-constraints.txt" --report "$PRIVATE_PIP_DIR/report.json" -e ".[dev]"
+          python -m pip check
+        ) 2>&1 | tee "$PRIVATE_PIP_DIR/install.log"
+        install_rc=${PIPESTATUS[0]}
+        set -e
+        python - <<'PY'
+        import json, os, pathlib, re
+        root=pathlib.Path(os.environ['E']); private=pathlib.Path(os.environ['PRIVATE_PIP_DIR'])
+        text=(private/'install.log').read_text(errors='replace')
+        text=re.sub(r'https?://[^\s\x1b]+','[URL OMITTED]',text)
+        text=re.sub(r'(?i)bearer\s+[^\s]+','Bearer [REDACTED]',text)
+        (root/'pip-install-sanitized.log').write_text(text)
+        report=private/'report.json'
+        if report.exists():
+            original=json.loads(report.read_text()); rows=[]
+            for item in original.get('install',[]):
+                metadata=item.get('metadata',{}); archive=item.get('download_info',{}).get('archive_info',{})
+                rows.append({'name':metadata.get('name'),'version':metadata.get('version'),'archive_hashes':archive.get('hashes',{})})
+            (root/'pip-artifact-provenance.json').write_text(json.dumps({'schema':'sanitized-pip-provenance/v1','distributions':rows},indent=2)+'\n')
+        PY
+        if [ "$install_rc" -ne 0 ]; then exit "$install_rc"; fi
+        python - <<'PY'
+        import importlib.metadata as md, json, os, pathlib, sys
+        root=pathlib.Path(os.environ['E']); m=json.loads((root/'source-manifest.json').read_text())
+        wrong={}
+        for name,want in m['dependencies']['observed_installed_versions'].items():
+            try: got=md.version(name)
+            except md.PackageNotFoundError: got=None
+            if got != want: wrong[name]={'want':want,'got':got}
+        (root/'dependency-verification.json').write_text(json.dumps({'python':sys.version,'mismatches':wrong},indent=2)+'\n')
+        (root/'installed-distributions.json').write_text(json.dumps(sorted([{'name':d.metadata['Name'],'version':d.version} for d in md.distributions()],key=lambda d:d['name'].lower()),indent=2)+'\n')
+        if wrong: raise SystemExit('Observed CI dependency mismatch; no fallback: '+str(wrong))
+        import local_operator
+        assert pathlib.Path(local_operator.__file__).resolve()==(pathlib.Path.cwd()/'local_operator/__init__.py').resolve(), local_operator.__file__
+        PY
+    - name: 'Single serial node: runnerexit (120 seconds)'
+      id: runnerexit
+      continue-on-error: true
+      shell: bash
+      timeout-minutes: 3
+      run: |
+        set -uo pipefail
+        D="$E/runnerexit"
+        mkdir -p "$D/home" "$D/runtime"
+        chmod 700 "$D/runtime"
+        PY="$(command -v python)"
+        set +e
+        timeout --signal=TERM --kill-after=5s 120s env -i \
+          HOME="$D/home" LOCAL_OPERATOR_CONFIG_DIR="$D/home/.local-operator" \
+          LOCAL_OPERATOR_SCRATCHPAD="$D/receipts" XDG_RUNTIME_DIR="$D/runtime" \
+          PATH="$PATH" TERM=xterm-256color CI=true PYTHONNOUSERSITE=1 \
+          PYTHONDONTWRITEBYTECODE=1 LOCAL_OPERATOR_NO_NOTIFICATIONS=1 COVERAGE_FILE="$D/.coverage" \
+          "$PY" -B -m pytest 'tests/unit/scripts/test_run_bounded_incident_shape.py::test_the_incident_shape_is_reclaimed_and_the_record_shows_the_pin' \
+          -n0 -q -p no:cacheprovider -p tests.ci_order_owned_first \
+          --cov --cov-fail-under=0 --cov-report= -o tmp_path_retention_policy=all \
+          --basetemp="$D/tmp" --junitxml="$D/junit.xml" 2>&1 | tee "$D/pytest.log"
+        rc=${PIPESTATUS[0]}
+        printf '%s\n' "$rc" > "$D/exit-code.txt"
+        exit "$rc"
+    - name: 'Single serial node: backgroundattach (120 seconds)'
+      id: backgroundattach
+      continue-on-error: true
+      shell: bash
+      timeout-minutes: 3
+      run: |
+        set -uo pipefail
+        D="$E/backgroundattach"
+        mkdir -p "$D/home" "$D/runtime"
+        chmod 700 "$D/runtime"
+        PY="$(command -v python)"
+        set +e
+        timeout --signal=TERM --kill-after=5s 120s env -i \
+          HOME="$D/home" LOCAL_OPERATOR_CONFIG_DIR="$D/home/.local-operator" \
+          LOCAL_OPERATOR_SCRATCHPAD="$D/receipts" XDG_RUNTIME_DIR="$D/runtime" \
+          PATH="$PATH" TERM=xterm-256color CI=true PYTHONNOUSERSITE=1 \
+          PYTHONDONTWRITEBYTECODE=1 LOCAL_OPERATOR_NO_NOTIFICATIONS=1 COVERAGE_FILE="$D/.coverage" \
+          "$PY" -B -m pytest 'tests/unit/tui/test_background_completion_notify.py::test_a_non_complete_session_says_its_state_rather_than_its_last_reply[error-Stopped with an error]' \
+          -n0 -q -p no:cacheprovider -p tests.ci_order_owned_first \
+          --cov --cov-fail-under=0 --cov-report= -o tmp_path_retention_policy=all \
+          --basetemp="$D/tmp" --junitxml="$D/junit.xml" 2>&1 | tee "$D/pytest.log"
+        rc=${PIPESTATUS[0]}
+        printf '%s\n' "$rc" > "$D/exit-code.txt"
+        exit "$rc"
+    - name: Record honest single-node outcomes (not a merge gate)
+      if: always()
+      shell: bash
+      run: |
+        set -euo pipefail
+        python - <<'PY'
+        import json, os, pathlib, xml.etree.ElementTree as ET
+        root=pathlib.Path(os.environ['E']); result={}; ok=True
+        for lane in ('runnerexit','backgroundattach'):
+            folder=root/lane; rcfile=folder/'exit-code.txt'; junit=folder/'junit.xml'
+            row={'executed':rcfile.exists(),'exit_code':int(rcfile.read_text()) if rcfile.exists() else None,'junit_exists':junit.exists()}
+            if junit.exists():
+                cases=list(ET.parse(junit).getroot().iter('testcase'))
+                row.update(testcase_count=len(cases),skipped=sum(len(c.findall('skipped')) for c in cases),failures=sum(len(c.findall('failure'))+len(c.findall('error')) for c in cases))
+            passed=row['exit_code']==0 and row.get('testcase_count')==1 and row.get('skipped')==0 and row.get('failures')==0
+            row['target_pass']=passed; result[lane]=row; ok=ok and passed
+        (root/'summary.json').write_text(json.dumps(result,indent=2)+'\n')
+        print(json.dumps(result,indent=2))
+        if not ok: raise SystemExit('Diagnostic target failed, was skipped, or did not run; inspect artifacts. NOT a full gate.')
+        PY
+        git diff --exit-code
+        git diff --cached --exit-code
+    - name: Upload bounded diagnostic evidence
+      if: always()
+      uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+      with:
+        name: diagnostic-43265391359-py31318-${{ github.run_id }}-${{ github.run_attempt }}
+        retention-days: 7
+        if-no-files-found: error
+        path: |-
+          ${{ env.E }}/*.json
+          ${{ env.E }}/*.txt
+          ${{ env.E }}/*.log
+          ${{ env.E }}/*/pytest.log
+          ${{ env.E }}/*/exit-code.txt
+          ${{ env.E }}/*/junit.xml
+          ${{ env.E }}/**/run-bounded-runs/*.json
+          ${{ env.E }}/**/*.exit.json
+          ${{ env.E }}/**/*.spawn.json
