@@ -8224,3 +8224,32 @@ async def test_a_command_wider_than_the_card_is_cut_with_the_card_mark() -> None
         line = card._layout().command_line
         assert line.startswith("$ git clone ") and line.endswith("…"), line
         assert cell_len(line) <= card._layout().width
+
+
+@pytest.mark.parametrize("size", [(100, 29), (100, 30), (100, 26), (80, 24), (100, 40)])
+@pytest.mark.asyncio
+async def test_a_command_line_never_turns_a_fitting_list_into_a_windowed_one(
+    size: tuple[int, int],
+) -> None:
+    """The command is bought below every answer: where the plain card shows its
+    whole list, the command card must too (spacers and then the command yield).
+
+    Measured before the yield existed: at 100x30 in the capture app (100x29
+    in this harness, the height where the plain list first fits) the command
+    line scrolled the `Other` row off a list that fitted without it
+    (`showing 1–2 of 3`).
+    """
+    app, plain = await _real_app_card(size, [_question()])
+    async with app.run_test(size=size) as pilot:
+        await _show(app, pilot, plain)
+        plain_windows = plain._layout().show_position
+    app, card = await _real_app_card(size, [_command_question("glab auth login")])
+    async with app.run_test(size=size) as pilot:
+        await _show(app, pilot, card)
+        layout = card._layout()
+        if not plain_windows:
+            assert not layout.show_position, (size, card.render_lines_for_test())
+        if size in {(100, 29), (100, 30)}:
+            # The boundary the defect was measured at: the command is drawn AND
+            # the list still fits.
+            assert layout.command_line == "$ glab auth login", size

@@ -2393,6 +2393,35 @@ class AskPickerScreen(Container):
         space_below = remaining - 1 >= 0
         if space_below:
             remaining -= 1
+        if command_line:
+            # 8b. The command line must never turn a list that FITS into one
+            # that windows (measured: at 100x30 the plain card shows all three
+            # rows, and an unconditional command line scrolled `Other` off).
+            # So when the list overflows the viewport, the spacers — rhythm and
+            # nothing else — give their rows back first; if it still overflows
+            # by exactly the line the command took, the command yields too (the
+            # full text is still in the ask's tool call). A list that windows
+            # regardless keeps the command: the scroll was coming anyway, and
+            # this line is the only place the TUI shows it. Only a question
+            # WITH a command reaches this branch, so every other frame is
+            # unchanged.
+            needed = len(
+                self._build_line_list(
+                    range(self.row_count), width, revealed=reveal, selected=self.state.selected
+                )[0]
+            )
+            for spacer in ("below", "above"):
+                if needed <= (1 + extra) + remaining:
+                    break
+                if spacer == "below" and space_below:
+                    space_below = False
+                    remaining += 1
+                elif spacer == "above" and space_above:
+                    space_above = False
+                    remaining += 1
+            if (1 + extra) + remaining < needed <= (1 + extra) + remaining + 1:
+                command_line = ""
+                remaining += 1
         # 9. The option list is a fixed-height LINE VIEWPORT, not a row window.
         # ``body_line_budget`` is the label rows step 3+7 bought PLUS whatever
         # ``remaining`` the chrome left — the full height the viewport draws
