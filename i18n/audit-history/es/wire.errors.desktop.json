@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "es",
   "namespace": "wire.errors.desktop",
-  "history_sha256": "5a9e9c43c6ca656ab80d6961b2be62639bc81cc4063670362eafb6f24c4d02eb",
+  "history_sha256": "d0b6820844060afdb5cca2925ee877e216fc3a4c54d41341823e335f542249c2",
   "entries": [
     {
       "locale": "es",
@@ -125,6 +125,77 @@
         "comment": "damianvtran/local-operator#3872 issuecomment-6830034892"
       },
       "note": "PR #3872 r2 audit 187b766ab67d (claude-opus-5-5, no fallback) at 14d8601fd: 6 en-changed/new key(s) retranslated + 0 I1-4 correction(s) verified (second independent read) + 9 PR-added key(s) re-read; 0 finding(s), 0 blocker/major. Target 5a3021c1d6c7. Evidence: i18n/audits/evidence/es/wire.errors.desktop/rfp-187b766ab67d/record.json"
+    },
+    {
+      "locale": "es",
+      "namespace": "wire.errors.desktop",
+      "source_sha256": "4f1d9434665a49780e47c62d120f0c36c89ac6a316d70a7482906b0df44afd38",
+      "target_sha256": "147c9e88c7bbcda8d97da750df470281bdfd43f7518101d8a5244571fc4ff346",
+      "translator": {
+        "agent": "coder (PR #3872 core round-1 remediation, lopdev, job b449e9fdc5b7)",
+        "session": "e06b4314cec3",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-12",
+        "provenance_source": "self-reported served model, no fallback: PR #3872 issuecomment-6831178771"
+      },
+      "composition_translators": [
+        {
+          "side": "feature",
+          "provenance": {
+            "agent": "coder (PR #3872 core round-1 remediation, lopdev, job b449e9fdc5b7)",
+            "session": "e06b4314cec3",
+            "model": "anthropic/claude-opus-5-5",
+            "date": "2026-11-12",
+            "provenance_source": "self-reported served model, no fallback: PR #3872 issuecomment-6831178771"
+          },
+          "additional": [
+            {
+              "agent": "coder (PR #3872 core implementer, lopdev, job 485ea7afeea9)",
+              "session": "f4c08c15c058",
+              "model": "anthropic/claude-opus-5-5",
+              "date": "2026-11-12",
+              "provenance_source": "manager ce618964c88e subagent-roster.v1.json record 485ea7afeea9 (model_label)"
+            },
+            {
+              "agent": "round-1 i18n auditor (I1-4 corrected values)",
+              "session": "a3fade2429f4",
+              "model": "anthropic/claude-opus-5-5",
+              "date": "2026-11-12"
+            }
+          ]
+        },
+        {
+          "side": "main",
+          "provenance": {
+            "agent": "core-backend coder cf2843d74957; round-1 remediation coder 1c07b39051ed (lopdev coder role) — relayed from PR #3832 i18n audit comments 6811281029/6812645445, not independently verified",
+            "model": "anthropic/claude-opus-5-5",
+            "fallback": "none reported in the relayed source",
+            "date": "2026-11-11..2026-11-12 (git: 09839b6de, 75606914f, eaff8c7a9)"
+          },
+          "additional": []
+        }
+      ],
+      "auditor": {
+        "agent": "independent i18n compatibility auditor (lopdev reviewer, resumed existing core i18n stream)",
+        "session": "187b766ab67d",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-13",
+        "fallback": "none during this resumed audit",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "composition_audit": {
+        "source_head": "84892ed59f03b85ca52e8c3ea63d55d0f4abd713",
+        "common_base": "4d113fc6c23b3fbb2afa426c0c6747ee0c399467",
+        "parent_revisions": [
+          "145a2ac1ad7846b1ebcaafb8661f6db865d2de1f",
+          "9a98146e1a1e5a518f67371203d30ea6ccf18e11"
+        ],
+        "evidence": "i18n/audits/evidence/es/wire.errors.desktop/merged-compat-187b766ab67d-84892ed59/record.json"
+      },
+      "note": "Genuine independent merged-source semantic/context compatibility audit, 2026-11-13, 187b766ab67d, openai/gpt-6.1-sol, no fallback in this audit. Exact disjoint parent key/value composition; 9 feature + 7 upstream keys semantically read; unchanged keys carried by current-byte parent evidence. Historical provenance preserved as reported, not relabelled. Evidence: i18n/audits/evidence/es/wire.errors.desktop/merged-compat-187b766ab67d-84892ed59/record.json"
     }
   ]
 }

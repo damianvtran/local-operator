@@ -1,0 +1,174 @@
+{
+  "schema": 1,
+  "audit_id": "merged-compat-187b766ab67d-84892ed59",
+  "audit_kind": "independent semantic/context compatibility audit of exact parent-keywise composition; no new translation",
+  "locale": "zh-CN",
+  "namespace": "wire.errors.desktop",
+  "source_head": "84892ed59f03b85ca52e8c3ea63d55d0f4abd713",
+  "common_base": "4d113fc6c23b3fbb2afa426c0c6747ee0c399467",
+  "parents": [
+    {
+      "side": "feature",
+      "revision": "145a2ac1ad7846b1ebcaafb8661f6db865d2de1f",
+      "source_sha256": "32c48d06ac2670b076f2915584de4bfbe8363cf923b622ce934305d1f72474e3",
+      "target_sha256": "ae344b6ed159ebc9b682c60b2c1d1f3c684a389b50bfbc9cabd8c6dee17dc9e2",
+      "evidence": "i18n/audits/evidence/zh-CN/wire.errors.desktop/rfp-187b766ab67d/record.json",
+      "evidence_sha256": "e839a136777d6c1e22c39d5ee7d931349c774866bb8b340c060455b6fe7f92bb",
+      "receipt": {
+        "locale": "zh-CN",
+        "namespace": "wire.errors.desktop",
+        "source_sha256": "32c48d06ac2670b076f2915584de4bfbe8363cf923b622ce934305d1f72474e3",
+        "target_sha256": "ae344b6ed159ebc9b682c60b2c1d1f3c684a389b50bfbc9cabd8c6dee17dc9e2",
+        "translator": {
+          "agent": "coder (PR #3872 core round-1 remediation, lopdev, job b449e9fdc5b7)",
+          "session": "e06b4314cec3",
+          "model": "anthropic/claude-opus-5-5",
+          "date": "2026-11-12",
+          "provenance_source": "self-reported served model, no fallback: PR #3872 issuecomment-6831178771"
+        },
+        "translators_other": [
+          {
+            "agent": "coder (PR #3872 core implementer, lopdev, job 485ea7afeea9)",
+            "session": "f4c08c15c058",
+            "model": "anthropic/claude-opus-5-5",
+            "date": "2026-11-12",
+            "provenance_source": "manager ce618964c88e subagent-roster.v1.json record 485ea7afeea9 (model_label)"
+          },
+          {
+            "agent": "round-1 i18n auditor (I1-4 corrected values)",
+            "session": "a3fade2429f4",
+            "model": "anthropic/claude-opus-5-5",
+            "date": "2026-11-12"
+          }
+        ],
+        "auditor": {
+          "agent": "i18n auditor (lopdev reviewer role, task core-r2-i18n-audit, job 52eba838ea60; independent of translators f4c08c15c058/e06b4314cec3 and of round-1 auditor a3fade2429f4)",
+          "session": "187b766ab67d",
+          "model": "anthropic/claude-opus-5-5",
+          "fallback": "none observed in this session",
+          "date": "2026-11-12",
+          "result": "passed",
+          "unresolved_blocker_major": 0,
+          "findings": 0
+        },
+        "status": "passed",
+        "prior_audit": {
+          "agent": "round-1 i18n auditor",
+          "session": "a3fade2429f4",
+          "model": "anthropic/claude-opus-5-5",
+          "date": "2026-11-12",
+          "result": "passed",
+          "comment": "damianvtran/local-operator#3872 issuecomment-6830034892"
+        },
+        "note": "PR #3872 r2 audit 187b766ab67d (claude-opus-5-5, no fallback) at 14d8601fd: 6 en-changed/new key(s) retranslated + 8 I1-4 correction(s) verified (second independent read) + 9 PR-added key(s) re-read; 0 finding(s), 0 blocker/major. Target ae344b6ed159. Evidence: i18n/audits/evidence/zh-CN/wire.errors.desktop/rfp-187b766ab67d/record.json"
+      },
+      "delta_keys": [
+        "wire.errors.desktop.attachment_fetch_pending",
+        "wire.errors.desktop.attachment_owner_refused",
+        "wire.errors.desktop.attachment_owner_unreachable",
+        "wire.errors.desktop.attachment_peer_outdated",
+        "wire.errors.desktop.session_files_download_exhausted",
+        "wire.errors.desktop.session_files_download_mismatch",
+        "wire.errors.desktop.session_files_owner_unreachable",
+        "wire.errors.desktop.session_files_remote_unreadable",
+        "wire.errors.desktop.session_files_sensitive_name"
+      ]
+    },
+    {
+      "side": "main",
+      "revision": "9a98146e1a1e5a518f67371203d30ea6ccf18e11",
+      "source_sha256": "89b985aeb9162091001a659257fa589dca2d8650836b32dc129bca62e6d279b1",
+      "target_sha256": "f3096ee734f35316aef31893cc7df545ca21d999b6e5caef1a4ae6c1232c6d2e",
+      "evidence": "i18n/audits/evidence/zh-CN/wire.errors.desktop/temporary-r3-5c6cf4252f37/record.json",
+      "evidence_sha256": "e5f05205cb3916ef49e2a8370787e82328ad43e1bfddcbacc85845c07d60c142",
+      "receipt": {
+        "locale": "zh-CN",
+        "namespace": "wire.errors.desktop",
+        "source_sha256": "89b985aeb9162091001a659257fa589dca2d8650836b32dc129bca62e6d279b1",
+        "translator": {
+          "agent": "core-backend coder cf2843d74957; round-1 remediation coder 1c07b39051ed (lopdev coder role) — relayed from PR #3832 i18n audit comments 6811281029/6812645445, not independently verified",
+          "model": "anthropic/claude-opus-5-5",
+          "fallback": "none reported in the relayed source",
+          "date": "2026-11-11..2026-11-12 (git: 09839b6de, 75606914f, eaff8c7a9)"
+        },
+        "auditor": {
+          "agent": "independent i18n auditor (lopdev reviewer role, task i18n-inpr-core, session 5c6cf4252f37; independent of the translators and of the round-1/2 auditors 506f24a144fa/2d1500d56d0e, whose artifacts were not read)",
+          "session": "5c6cf4252f37",
+          "model": "anthropic/claude-opus-5-5",
+          "fallback": "none observed in this session",
+          "date": "2026-11-12",
+          "result": "passed",
+          "findings": 0,
+          "unresolved_blocker_major": 0,
+          "minor": 0,
+          "nit": 0
+        },
+        "status": "passed",
+        "note": "Round 3 evidence binding 2026-11-12, reviewer 5c6cf4252f37 (anthropic/claude-opus-5-5, no fallback): same audit and verdict as the preceding row, re-appended so the cg1 byte pin moves to a committed record. Source 89b985aeb9162091001a659257fa589dca2d8650836b32dc129bca62e6d279b1 and target f3096ee734f35316aef31893cc7df545ca21d999b6e5caef1a4ae6c1232c6d2e recomputed from the shipped files at 4f6f57986. Evidence: i18n/audits/evidence/zh-CN/wire.errors.desktop/temporary-r3-5c6cf4252f37/record.json"
+      },
+      "delta_keys": [
+        "wire.errors.desktop.session_in_project",
+        "wire.errors.desktop.session_pinned",
+        "wire.errors.desktop.session_temporary",
+        "wire.errors.desktop.session_temporary_deleted",
+        "wire.errors.desktop.temporary_mark_failed",
+        "wire.errors.desktop.temporary_not_user",
+        "wire.errors.desktop.temporary_peer_unsupported"
+      ]
+    }
+  ],
+  "source_sha256": "4f1d9434665a49780e47c62d120f0c36c89ac6a316d70a7482906b0df44afd38",
+  "target_sha256": "3636ffbb86caa961c054402f20c6ddba3ca6091cbdacd33882a9d5dfe25edbdd",
+  "source_path": "local_operator/i18n/catalogues/en/wire.errors.desktop.json",
+  "target_path": "local_operator/i18n/catalogues/zh-CN/wire.errors.desktop.json",
+  "context_path": "local_operator/i18n/catalogues/en/wire.errors.desktop.context.json",
+  "context_sha256": "7634efc7746920b6c2a3b458b348ef8f190aee23ba126b03adecc7131fa5d3a1",
+  "auditor": {
+    "agent": "independent i18n compatibility auditor (lopdev reviewer, resumed existing core i18n stream)",
+    "session": "187b766ab67d",
+    "model": "openai/gpt-6.1-sol",
+    "date": "2026-11-13",
+    "fallback": "none during this resumed audit",
+    "result": "passed",
+    "findings": 0,
+    "unresolved_blocker_major": 0
+  },
+  "status": "passed",
+  "semantic_compatibility": "Remote file/device refusal and retry clauses are independent of temporary-chat lifecycle refusal clauses. session_id in new lifecycle errors is a conversation id; device/peer/name/folder/reason in the retained remote-file keys keep their existing meanings. The temporary-chat errors restrict marking/deletion/pinning/project association, not file-transfer access. No shared key or select/context is changed.",
+  "independence": "same independent auditor stream, not either translator or source-convergence coder",
+  "keys_semantically_read": [
+    "wire.errors.desktop.attachment_fetch_pending",
+    "wire.errors.desktop.attachment_owner_refused",
+    "wire.errors.desktop.attachment_owner_unreachable",
+    "wire.errors.desktop.attachment_peer_outdated",
+    "wire.errors.desktop.session_files_download_exhausted",
+    "wire.errors.desktop.session_files_download_mismatch",
+    "wire.errors.desktop.session_files_owner_unreachable",
+    "wire.errors.desktop.session_files_remote_unreadable",
+    "wire.errors.desktop.session_files_sensitive_name",
+    "wire.errors.desktop.session_in_project",
+    "wire.errors.desktop.session_pinned",
+    "wire.errors.desktop.session_temporary",
+    "wire.errors.desktop.session_temporary_deleted",
+    "wire.errors.desktop.temporary_mark_failed",
+    "wire.errors.desktop.temporary_not_user",
+    "wire.errors.desktop.temporary_peer_unsupported"
+  ],
+  "keys_total": 105,
+  "unchanged_keys_carried": 89,
+  "proofs": [
+    "all 16 catalogue maps and 2 English context maps equal exact disjoint parent key/value unions",
+    "all changed keys are additions; no shared key/value/context changed",
+    "every added key covered by reachable, fresh parent evidence; 28 evidence records opened and byte hashes checked",
+    "all historical receipts preserved canonically, main prefix + exact feature suffix; original evidence bytes unchanged",
+    "whole-namespace parser/argument/select-per-arm checks, NFC/no manual bidi controls; added-key code spans and figures preserved"
+  ],
+  "provenance_warning": "Historical parent provenance is preserved as reported, not retrospectively certified. Earlier artifacts in this resumed stream report anthropic/claude-opus-5-5; current served model is openai/gpt-6.1-sol. No historical identity fields or results rewritten. This is a new audit at the merged whole-source hash, not an inherited hash relabel.",
+  "not_claimed": [
+    "new translation",
+    "native-speaker verification",
+    "new rendered/native/RTL visual validation",
+    "whole-product code/QA review"
+  ],
+  "findings": []
+}

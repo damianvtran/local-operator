@@ -1,0 +1,134 @@
+{
+  "schema": 1,
+  "audit_id": "merged-compat-187b766ab67d-84892ed59",
+  "audit_kind": "independent semantic/context compatibility audit of exact parent-keywise composition; no new translation",
+  "locale": "zh-CN",
+  "namespace": "wire.settings",
+  "source_head": "84892ed59f03b85ca52e8c3ea63d55d0f4abd713",
+  "common_base": "4d113fc6c23b3fbb2afa426c0c6747ee0c399467",
+  "parents": [
+    {
+      "side": "feature",
+      "revision": "145a2ac1ad7846b1ebcaafb8661f6db865d2de1f",
+      "source_sha256": "5ddafb0e761c12afdcaaa7743ddb584927bdc874bf7eecefb34009574d4a7152",
+      "target_sha256": "c126d5b3717652b6e273ddfbdb45d59abbf16a3c582cb876ce034dcd18260bc2",
+      "evidence": "i18n/audits/evidence/zh-CN/wire.settings/rfp-a3fade2429f4/record.json",
+      "evidence_sha256": "ba1c1ed3b25c9eece7d9fa31cefcf66068387147ab1ff6ea82f7be864d71ba5e",
+      "receipt": {
+        "locale": "zh-CN",
+        "namespace": "wire.settings",
+        "source_sha256": "5ddafb0e761c12afdcaaa7743ddb584927bdc874bf7eecefb34009574d4a7152",
+        "target_sha256": "c126d5b3717652b6e273ddfbdb45d59abbf16a3c582cb876ce034dcd18260bc2",
+        "translator": {
+          "agent": "coder (PR #3872 core implementer, lopdev)",
+          "session": "f4c08c15c058",
+          "model": "anthropic/claude-opus-5-5",
+          "date": "2026-11-12"
+        },
+        "auditor": {
+          "agent": "i18n auditor (lopdev reviewer role, task core-r1-i18n-copy; independent of the PR #3872 coder/translator)",
+          "session": "a3fade2429f4",
+          "model": "anthropic/claude-opus-5-5",
+          "fallback": "none observed in this session",
+          "date": "2026-11-12",
+          "result": "passed",
+          "findings": 0,
+          "unresolved_blocker_major": 0
+        },
+        "status": "passed",
+        "note": "PR #3872 r1 audit a3fade2429f4 (claude-opus-5-5, no fallback): 2 added keys, 0 finding(s). Target c126d5b37176. Evidence: i18n/audits/evidence/zh-CN/wire.settings/rfp-a3fade2429f4/record.json"
+      },
+      "delta_keys": [
+        "wire.settings.desktop_remote_files_cache_bytes.help",
+        "wire.settings.desktop_remote_files_cache_bytes.label"
+      ]
+    },
+    {
+      "side": "main",
+      "revision": "9a98146e1a1e5a518f67371203d30ea6ccf18e11",
+      "source_sha256": "ffb9cf937f10d7298f9178f18286c2ac7669e578d595f30b4074a830b9667c13",
+      "target_sha256": "8fb98eb783d03fc6f4c4bb2387054d4857457d29b052801d558b54baa1ff90ad",
+      "evidence": "i18n/audits/evidence/zh-CN/wire.settings/temporary-r3-5c6cf4252f37/record.json",
+      "evidence_sha256": "f90c96cf505d355746654ae349636db7cdf22dbe445927b742f4e14ea0b9db77",
+      "receipt": {
+        "locale": "zh-CN",
+        "namespace": "wire.settings",
+        "source_sha256": "ffb9cf937f10d7298f9178f18286c2ac7669e578d595f30b4074a830b9667c13",
+        "translator": {
+          "agent": "core-backend coder cf2843d74957; round-1 remediation coder 1c07b39051ed (lopdev coder role) — relayed from PR #3832 i18n audit comments 6811281029/6812645445, not independently verified",
+          "model": "anthropic/claude-opus-5-5",
+          "fallback": "none reported in the relayed source",
+          "date": "2026-11-11..2026-11-12 (git: 09839b6de, 75606914f, eaff8c7a9)"
+        },
+        "auditor": {
+          "agent": "independent i18n auditor (lopdev reviewer role, task i18n-inpr-core, session 5c6cf4252f37; independent of the translators and of the round-1/2 auditors 506f24a144fa/2d1500d56d0e, whose artifacts were not read)",
+          "session": "5c6cf4252f37",
+          "model": "anthropic/claude-opus-5-5",
+          "fallback": "none observed in this session",
+          "date": "2026-11-12",
+          "result": "passed",
+          "findings": 0,
+          "unresolved_blocker_major": 0,
+          "minor": 0,
+          "nit": 0
+        },
+        "status": "passed",
+        "note": "Round 3 evidence binding 2026-11-12, reviewer 5c6cf4252f37 (anthropic/claude-opus-5-5, no fallback): same audit and verdict as the preceding row, re-appended so the cg1 byte pin moves to a committed record. Source ffb9cf937f10d7298f9178f18286c2ac7669e578d595f30b4074a830b9667c13 and target 8fb98eb783d03fc6f4c4bb2387054d4857457d29b052801d558b54baa1ff90ad recomputed from the shipped files at 4f6f57986. Evidence: i18n/audits/evidence/zh-CN/wire.settings/temporary-r3-5c6cf4252f37/record.json"
+      },
+      "delta_keys": [
+        "wire.settings.session_cleanup_temporary_idle_minutes.choice.15m.label",
+        "wire.settings.session_cleanup_temporary_idle_minutes.choice.24h.label",
+        "wire.settings.session_cleanup_temporary_idle_minutes.choice.2h.label",
+        "wire.settings.session_cleanup_temporary_idle_minutes.choice.30m.label",
+        "wire.settings.session_cleanup_temporary_idle_minutes.help",
+        "wire.settings.session_cleanup_temporary_idle_minutes.label"
+      ]
+    }
+  ],
+  "source_sha256": "20259ccabe0c6deaf984d4d86667c86ac29cf016d9e161da94c53de611a9ddc4",
+  "target_sha256": "774986cb9f360e43265577223a11d06415c4ee0e01a1bed1b897857268d51fe7",
+  "source_path": "local_operator/i18n/catalogues/en/wire.settings.json",
+  "target_path": "local_operator/i18n/catalogues/zh-CN/wire.settings.json",
+  "context_path": "local_operator/i18n/catalogues/en/wire.settings.context.json",
+  "context_sha256": "c059d93a54699fa40303866de980c2841284b2328b1f253dd67d2d7e45ea6ff8",
+  "auditor": {
+    "agent": "independent i18n compatibility auditor (lopdev reviewer, resumed existing core i18n stream)",
+    "session": "187b766ab67d",
+    "model": "openai/gpt-6.1-sol",
+    "date": "2026-11-13",
+    "fallback": "none during this resumed audit",
+    "result": "passed",
+    "findings": 0,
+    "unresolved_blocker_major": 0
+  },
+  "status": "passed",
+  "semantic_compatibility": "Cache budget controls stored copies of remote assets; temporary-chat idle duration controls deletion of conversations. Help explicitly limits deletion to temporary chats and excludes on-screen/active/question time. Neither setting changes the meaning or placeholder context of the other. Locale terms, 15/30 minutes and 2/24 hours retain the same referents. No source/target/context rewrite.",
+  "independence": "same independent auditor stream, not either translator or source-convergence coder",
+  "keys_semantically_read": [
+    "wire.settings.desktop_remote_files_cache_bytes.help",
+    "wire.settings.desktop_remote_files_cache_bytes.label",
+    "wire.settings.session_cleanup_temporary_idle_minutes.choice.15m.label",
+    "wire.settings.session_cleanup_temporary_idle_minutes.choice.24h.label",
+    "wire.settings.session_cleanup_temporary_idle_minutes.choice.2h.label",
+    "wire.settings.session_cleanup_temporary_idle_minutes.choice.30m.label",
+    "wire.settings.session_cleanup_temporary_idle_minutes.help",
+    "wire.settings.session_cleanup_temporary_idle_minutes.label"
+  ],
+  "keys_total": 867,
+  "unchanged_keys_carried": 859,
+  "proofs": [
+    "all 16 catalogue maps and 2 English context maps equal exact disjoint parent key/value unions",
+    "all changed keys are additions; no shared key/value/context changed",
+    "every added key covered by reachable, fresh parent evidence; 28 evidence records opened and byte hashes checked",
+    "all historical receipts preserved canonically, main prefix + exact feature suffix; original evidence bytes unchanged",
+    "whole-namespace parser/argument/select-per-arm checks, NFC/no manual bidi controls; added-key code spans and figures preserved"
+  ],
+  "provenance_warning": "Historical parent provenance is preserved as reported, not retrospectively certified. Earlier artifacts in this resumed stream report anthropic/claude-opus-5-5; current served model is openai/gpt-6.1-sol. No historical identity fields or results rewritten. This is a new audit at the merged whole-source hash, not an inherited hash relabel.",
+  "not_claimed": [
+    "new translation",
+    "native-speaker verification",
+    "new rendered/native/RTL visual validation",
+    "whole-product code/QA review"
+  ],
+  "findings": []
+}

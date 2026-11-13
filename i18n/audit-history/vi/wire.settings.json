@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "vi",
   "namespace": "wire.settings",
-  "history_sha256": "b4841b13ae79c3aa17105035504bda5665dfab0564df2ef6d5e20fa6b3c0e91c",
+  "history_sha256": "767d8c9885ffb0d905a3f3347c53bbbd7c18356ef289e014826494f2e0415677",
   "entries": [
     {
       "locale": "vi",
@@ -296,6 +296,77 @@
         "result": "passed",
         "scope": "the 1 auditor-corrected value(s) (I1-4) in local_operator/i18n/catalogues/vi/wire.settings.json, read against en, glossary.md and the vi style guide"
       }
+    },
+    {
+      "locale": "vi",
+      "namespace": "wire.settings",
+      "source_sha256": "20259ccabe0c6deaf984d4d86667c86ac29cf016d9e161da94c53de611a9ddc4",
+      "target_sha256": "2872286b45a862254d5b65b5c819a99d73abaa06060ef51dcfba5813ac5b7e18",
+      "translator": {
+        "agent": "coder (PR #3872 core implementer, lopdev, job 485ea7afeea9)",
+        "session": "f4c08c15c058",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-12",
+        "provenance_source": "manager ce618964c88e subagent-roster.v1.json record 485ea7afeea9 (model_label)"
+      },
+      "composition_translators": [
+        {
+          "side": "feature",
+          "provenance": {
+            "agent": "coder (PR #3872 core implementer, lopdev, job 485ea7afeea9)",
+            "session": "f4c08c15c058",
+            "model": "anthropic/claude-opus-5-5",
+            "date": "2026-11-12",
+            "provenance_source": "manager ce618964c88e subagent-roster.v1.json record 485ea7afeea9 (model_label)"
+          },
+          "additional": [
+            {
+              "agent": "round-1 i18n auditor (I1-4 corrected values)",
+              "session": "a3fade2429f4",
+              "model": "anthropic/claude-opus-5-5",
+              "date": "2026-11-12"
+            },
+            {
+              "agent": "coder (PR #3872 core round-1 remediation, lopdev, job b449e9fdc5b7)",
+              "session": "e06b4314cec3",
+              "model": "anthropic/claude-opus-5-5",
+              "date": "2026-11-12",
+              "provenance_source": "self-reported served model, no fallback: PR #3872 issuecomment-6831178771"
+            }
+          ]
+        },
+        {
+          "side": "main",
+          "provenance": {
+            "agent": "core-backend coder cf2843d74957; round-1 remediation coder 1c07b39051ed (lopdev coder role) — relayed from PR #3832 i18n audit comments 6811281029/6812645445, not independently verified",
+            "model": "anthropic/claude-opus-5-5",
+            "fallback": "none reported in the relayed source",
+            "date": "2026-11-11..2026-11-12 (git: 09839b6de, 75606914f, eaff8c7a9)"
+          },
+          "additional": []
+        }
+      ],
+      "auditor": {
+        "agent": "independent i18n compatibility auditor (lopdev reviewer, resumed existing core i18n stream)",
+        "session": "187b766ab67d",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-13",
+        "fallback": "none during this resumed audit",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "composition_audit": {
+        "source_head": "84892ed59f03b85ca52e8c3ea63d55d0f4abd713",
+        "common_base": "4d113fc6c23b3fbb2afa426c0c6747ee0c399467",
+        "parent_revisions": [
+          "145a2ac1ad7846b1ebcaafb8661f6db865d2de1f",
+          "9a98146e1a1e5a518f67371203d30ea6ccf18e11"
+        ],
+        "evidence": "i18n/audits/evidence/vi/wire.settings/merged-compat-187b766ab67d-84892ed59/record.json"
+      },
+      "note": "Genuine independent merged-source semantic/context compatibility audit, 2026-11-13, 187b766ab67d, openai/gpt-6.1-sol, no fallback in this audit. Exact disjoint parent key/value composition; 2 feature + 6 upstream keys semantically read; unchanged keys carried by current-byte parent evidence. Historical provenance preserved as reported, not relabelled. Evidence: i18n/audits/evidence/vi/wire.settings/merged-compat-187b766ab67d-84892ed59/record.json"
     }
   ]
 }
