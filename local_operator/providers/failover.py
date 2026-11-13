@@ -4745,7 +4745,21 @@ async def _stream_with_failover_events(
                     # already had -- the reported `No API key configured for
                     # provider 'openai'` on an account signed in via OAuth.
                     missing = _no_credential_error(auth, provider)
+                    if getattr(missing, BORROWED_QUOTA_ATTR, False):
+                        _say_borrowed_quota_next_step(
+                            missing,
+                            auth,
+                            next_target=pending[0] if pending else None,
+                            chain_configured=any(t != primary_target for t in full_targets),
+                        )
                     record(missing, primary=is_primary, target=target)
+                    # A borrowed quota refusal states the owner's reset; a fallback
+                    # hop that is benched below waits it out like a local 429's
+                    # advertised reset, instead of re-asking a resting pool each
+                    # message. Errors without one leave the bench floor as it was.
+                    target_retry_after_ms = max(
+                        target_retry_after_ms, missing.retry_after_ms or 0
+                    )
                     if missing.retryable:
                         # Retryable means blocked-not-absent: backoffs expire on
                         # their own (and other processes release credentials),
@@ -6013,13 +6027,57 @@ def _mark_prewire_refusal(error: ProviderError) -> ProviderError:
 
 #: Set on a :class:`ProviderError` whose message is a complete sentence for a person
 #: and must render WITHOUT the kind label, while keeping its ``kind`` for ranking.
-#: Only :func:`_borrowed_refresh_refusal` sets it (#3616 design D6): the label is
+#: Set by :func:`_borrowed_refresh_refusal` (#3616 design D6) and by the borrowed
+#: quota arm of :func:`_no_credential_error` (the owner's sentence already says it
+#: is rate-limited, so a kind label in front would only stutter): the label is
 #: what the display layers key their LOCAL auth hint on (``is_rendered_auth_error``
 #: -> ``append_auth_recovery``, TUI and headless alike), and that hint ("To fix:
 #: /login <provider> … here") contradicts a sentence whose remedy is on ANOTHER
 #: device. Verbatim also makes the first failing turn read exactly like the later
 #: turns, which reach the same sentence through ``_no_credential_error``.
 VERBATIM_MESSAGE_ATTR = "lo_verbatim_message"
+
+
+#: Set on the ``quota`` error :func:`_no_credential_error` builds from a BORROWED
+#: login's ``quota_blocked`` refusal, so the walk can finish its sentence with what
+#: the turn does next (:func:`_say_borrowed_quota_next_step`).
+BORROWED_QUOTA_ATTR = "lo_borrowed_quota"
+
+
+def _say_borrowed_quota_next_step(
+    error: ProviderError,
+    auth: FailoverAuthStore,
+    *,
+    next_target: "FallbackTarget | None",
+    chain_configured: bool,
+) -> None:
+    """Append what THIS turn does after a borrowed login's quota refusal.
+
+    The broker's sentence can only say what the owner answered; the walk is the one
+    place that knows the borrower's own chain. The 2026-11-12 incident on
+    ``lop-remote-node-2`` is why this is said at all: the old copy promised "the
+    usual failover… is already running" while the remote's chain was empty and the
+    turn stopped. So the tail names the next hop when one is queued, and otherwise
+    says plainly that the device the turn runs on has no fallback configured (chains
+    are per device, not synced) or none left. ``auth.device_label`` is duck-typed
+    like the store's other hooks; a store without it reads "this device".
+    """
+    label_for = getattr(auth, "device_label", None)
+    try:
+        device = label_for() if callable(label_for) else ""
+    except Exception:  # noqa: BLE001 - copy must never mask the real failure
+        device = ""
+    device = device if isinstance(device, str) and device else "this device"
+    if next_target is not None:
+        tail = f"Trying the next model in your fallback chain ({next_target.selector})."
+    elif chain_configured:
+        tail = f"No model in the fallback chain on {device} is left to try."
+    else:
+        tail = (
+            f"No fallback is configured on {device} "
+            "(retry.fallbackChains), so the turn stops here."
+        )
+    error.message = f"{error.message} {tail}"
 
 
 def _borrowed_refresh_refusal(auth: FailoverAuthStore, provider: str) -> ProviderError | None:
@@ -6083,6 +6141,29 @@ def _no_credential_error(auth: FailoverAuthStore, provider: str) -> ProviderErro
         except Exception:  # noqa: BLE001 - diagnosis must never mask the real failure
             reason = None
         if isinstance(reason, str) and reason:
+            # A BORROWED LOGIN'S QUOTA IS A QUOTA (2026-11-12, lop-remote-node-2): the
+            # owner refused ``quota_blocked``, which is the same fact as a local
+            # account resting, so it carries ``kind="quota"`` and the owner's reset
+            # like one. Labelled ``unknown`` it read as an unclassified fault in every
+            # display ("unknown: … is rate-limited"). Verbatim keeps the broker's
+            # sentence free of a "rate limit or quota exceeded:" stutter; the walk
+            # still advances to the next target below, as for any empty resolve.
+            limit_for = getattr(auth, "no_credential_limit", None)
+            try:
+                limit_ms = limit_for(provider) if callable(limit_for) else None
+            except Exception:  # noqa: BLE001 - diagnosis must never mask the real failure
+                limit_ms = None
+            if isinstance(limit_ms, int) and not isinstance(limit_ms, bool):
+                limited = ProviderError(
+                    None,
+                    reason,
+                    retryable=True,
+                    kind="quota",
+                    retry_after_ms=limit_ms or None,
+                )
+                setattr(limited, VERBATIM_MESSAGE_ATTR, True)
+                setattr(limited, BORROWED_QUOTA_ATTR, True)
+                return _mark_prewire_refusal(limited)
             # Kind ``unknown`` with no status renders the sentence verbatim (see
             # ``ProviderError.__str__``): it is already written for a person, and a
             # "rate limit or quota exceeded:" label in front would be the lie this
