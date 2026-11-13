@@ -26,10 +26,11 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+import pytest
 import yaml
 
 from local_operator.config import read_config_values
-from local_operator.network import definitions, routing_sync
+from local_operator.network import definitions, mirror_authority, routing_sync
 
 HEAD_DEVICE = "d_" + "a" * 32
 NODE_DEVICE = "d_" + "b" * 32
@@ -42,6 +43,35 @@ HEAD_CHAIN = [
     "deepseek/deepseek-flash",
     "auto",
 ]
+
+
+#: The synthetic operator anchor every root here is enrolled under.
+OP_KEY = "k_" + "0" * 16
+#: Roots (by directory name) that hold the anchor's PRIVATE half: the operator's
+#: device. Every other root is a node holding the anchor verify-only, except
+#: ``FOREIGN_ROOTS`` (another operator's anchor) and ``UNANCHORED_ROOTS`` (none).
+SIGNING_ROOTS = {"head"}
+FOREIGN_ROOTS = {"foreign"}
+UNANCHORED_ROOTS = {"unanchored"}
+
+
+@pytest.fixture(autouse=True)
+def _operator_anchor(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Resolve each config root's operator authority from its name (M1).
+
+    The real probe reads the HOST's anchor, which a test running head and nodes in
+    one process cannot tell apart (and must never read off this machine).
+    """
+
+    def _resolve(root: Path) -> mirror_authority.Authority:
+        name = Path(root).name
+        if name in UNANCHORED_ROOTS:
+            return mirror_authority.Authority()
+        key = "k_" + "f" * 16 if name in FOREIGN_ROOTS else OP_KEY
+        return mirror_authority.Authority(key_id=key, signs=name in SIGNING_ROOTS)
+
+    monkeypatch.setattr(mirror_authority, "_resolve", _resolve)
+    mirror_authority.reset_cache()
 
 
 def _root(tmp_path: Path, name: str) -> Path:
@@ -288,18 +318,27 @@ def test_credential_shaped_routing_is_withheld_and_refused(
     )
 
 
-def test_a_mirror_from_another_device_is_not_taken_over(tmp_path: Path) -> None:
+def test_a_mirror_from_another_device_is_replaced_by_the_authoritys(tmp_path: Path) -> None:
+    """M1 / R3 tail: a mirror some other origin left is not the operator's intent."""
     node = _root(tmp_path, "node")
     index: dict[str, Any] = {}
+    stray = ["deepseek/deepseek-flash"]
     first = routing_sync.apply_routing_locked(
-        node, {"units": {"fallbackChains.default": HEAD_CHAIN}}, HEAD_DEVICE, index
+        node, {"authority": OP_KEY, "units": {"fallbackChains.default": stray}}, OTHER_DEVICE, index
     )
     assert first["outcome"] == "installed", first
     second = routing_sync.apply_routing_locked(
-        node, {"units": {"fallbackChains.default": ["auto"]}}, OTHER_DEVICE, index
+        node,
+        {"authority": OP_KEY, "units": {"fallbackChains.default": HEAD_CHAIN}},
+        HEAD_DEVICE,
+        index,
     )
-    assert [entry["unit"] for entry in second["kept"]] == ["fallbackChains.default"], second
+    assert second["updated"] == ["fallbackChains.default"], second
+    assert not second["kept"], second
     assert _retry(node)["fallbackChains"] == {"default": HEAD_CHAIN}
+    definitions.write_index(node, index)
+    unit = routing_sync.routing_state(node)["units"]["fallbackChains.default"]
+    assert unit == {"source": "mirror", "origin": HEAD_DEVICE}, unit
 
 
 def test_an_unknown_or_unusable_unit_is_refused_whole(tmp_path: Path) -> None:
@@ -309,7 +348,9 @@ def test_an_unknown_or_unusable_unit_is_refused_whole(tmp_path: Path) -> None:
         {"usageReservePercent": 400},
         {"fallbackChains.default": "not-a-list"},
     ):
-        result = routing_sync.apply_routing_locked(node, {"units": units}, HEAD_DEVICE, {})
+        result = routing_sync.apply_routing_locked(
+            node, {"authority": OP_KEY, "units": units}, HEAD_DEVICE, {}
+        )
         assert result["outcome"] == "refused", (units, result)
     assert read_config_values(node) == {}
 
@@ -376,3 +417,167 @@ def test_the_model_credential_row_names_the_chain_only_when_there_is_one() -> No
     legacy = {"detail": "unchanged"}
     readiness._attach_failover(legacy, {}, server=server)  # noqa: SLF001
     assert legacy == {"detail": "unchanged"}
+
+
+# ---------------------------------------------------------------------------
+# Review round 1 regressions (PR #3905): M1 direction, M2 lost mirror, m1, m2, Q-1.
+# ---------------------------------------------------------------------------
+
+
+def _push_from(sender: Path, receiver: Path, origin: str) -> tuple[dict[str, Any], _PeerLink]:
+    link = _PeerLink(receiver, origin=origin)
+    result = definitions.push_to_peer(_Server(sender, link), NODE_DEVICE)  # type: ignore[arg-type]
+    return result, link
+
+
+def test_r2_a_nodes_own_routing_never_reaches_the_head(tmp_path: Path, monkeypatch: Any) -> None:
+    """M1 / R2: the node's override stays on the node, by both ends' rule."""
+    head = _head(tmp_path, monkeypatch)
+    before = _retry(head)
+    node = _root(tmp_path, "node")
+    _write_retry(
+        node,
+        {"usageReservePercent": 40, "fallbackChains": {"[redacted]/*": ["openai/gpt-6.1-sol"]}},
+    )
+
+    # Sender side: the node does not sign for the operator, so it sends nothing.
+    result, link = _push_from(node, head, NODE_DEVICE)
+    assert result[routing_sync.ROUTING_KIND]["outcome"] == "not_authority", result
+    assert all(routing_sync.ROUTING_KIND not in f["bundle"] for f in link.applies())
+
+    # Receiver side: a forged row claiming the operator's anchor is refused by the
+    # head, which signs for that anchor itself.
+    row = routing_sync.local_row(node)
+    assert row is not None and row["units"], row
+    forged = routing_sync.apply_routing_locked(head, {**row, "authority": OP_KEY}, NODE_DEVICE, {})
+    assert forged["outcome"] == "refused", forged
+    assert _retry(head) == before
+
+
+def test_r3_a_node_never_authors_for_a_third_device(tmp_path: Path, monkeypatch: Any) -> None:
+    """M1 / R3: node2's chain does not reach node3, and the head's lands there."""
+    head = _head(tmp_path, monkeypatch)
+    node2, node3 = _root(tmp_path, "node2"), _root(tmp_path, "node3")
+    _write_retry(node2, {"fallbackChains": {"default": ["deepseek/deepseek-flash"]}})
+
+    result, link = _push_from(node2, node3, OTHER_DEVICE)
+    assert result[routing_sync.ROUTING_KIND]["outcome"] == "not_authority", result
+    assert link.applies() == []
+    # A row without the operator's claim (what node2 could hand-craft) is refused.
+    row = routing_sync.local_row(node2)
+    unclaimed = routing_sync.apply_routing_locked(node3, row, OTHER_DEVICE, {})
+    assert unclaimed["outcome"] == "refused", unclaimed
+    assert read_config_values(node3) == {}
+
+    assert _push(head, _PeerLink(node3))[routing_sync.ROUTING_KIND]["outcome"] == "installed"
+    assert _retry(node3)["fallbackChains"] == {"default": HEAD_CHAIN}
+
+
+def test_only_a_node_under_the_same_operator_is_sent_or_accepts(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    head = _head(tmp_path, monkeypatch)
+    for name in ("foreign", "unanchored"):
+        peer = _root(tmp_path, name)
+        link = _PeerLink(peer)
+        result = _push(head, link)
+        assert result[routing_sync.ROUTING_KIND]["outcome"] == "not_authority", (name, result)
+        assert link.applies() == []
+        claimed = routing_sync.apply_routing_locked(
+            peer,
+            {"authority": OP_KEY, "units": {"fallbackChains.default": HEAD_CHAIN}},
+            HEAD_DEVICE,
+            {},
+        )
+        assert claimed["outcome"] == "refused", (name, claimed)
+        assert read_config_values(peer) == {}
+
+
+def test_r1_a_lost_mirror_is_re_offered_and_re_installed(tmp_path: Path, monkeypatch: Any) -> None:
+    """M2 / R1: deleting the installed chain on the node is not ``in_sync``."""
+    head = _head(tmp_path, monkeypatch)
+    node = _root(tmp_path, "node")
+    link = _PeerLink(node)
+    assert _push(head, link)[routing_sync.ROUTING_KIND]["outcome"] == "installed"
+    assert _push(head, link)[routing_sync.ROUTING_KIND] == {"outcome": "in_sync"}
+
+    retry = _retry(node)
+    retry.pop("fallbackChains")
+    _write_retry(node, retry)
+    assert HEAD_DEVICE not in routing_sync.routing_state(node)["offered"]
+
+    link.frames.clear()
+    again = _push(head, link)
+    assert again[routing_sync.ROUTING_KIND]["outcome"] in ("installed", "updated"), again
+    assert "fallbackChains.default" in again[routing_sync.ROUTING_KIND]["installed"], again
+    assert _retry(node)["fallbackChains"] == {"default": HEAD_CHAIN}
+    assert _push(head, link)[routing_sync.ROUTING_KIND] == {"outcome": "in_sync"}
+
+
+def test_m1_a_nodes_own_invalid_scalar_does_not_block_the_chain(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    head = _head(tmp_path, monkeypatch)
+    node = _root(tmp_path, "node")
+    _write_retry(node, {"usageReservePercent": "abc"})
+
+    report = _push(head, _PeerLink(node))[routing_sync.ROUTING_KIND]
+
+    assert "fallbackChains.default" in report["installed"], report
+    assert [k["unit"] for k in report["kept"]] == ["usageReservePercent"], report
+    assert _retry(node)["usageReservePercent"] == "abc"
+
+
+def test_m2_a_crash_between_index_and_config_never_turns_a_mirror_local(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    from local_operator import settings_io
+
+    node = _root(tmp_path, "node")
+    row = {"authority": OP_KEY, "units": {"fallbackChains.default": HEAD_CHAIN}}
+    index = definitions.read_index(node)
+    assert (
+        routing_sync.apply_routing_locked(node, row, HEAD_DEVICE, index)["outcome"] == "installed"
+    )
+    definitions.write_index(node, index)
+
+    # Crash AFTER the config write, before the caller's final index write: the
+    # caller's index is simply never written.
+    changed = ["openai/gpt-6.1-sol", "auto"]
+    routing_sync.apply_routing_locked(
+        node,
+        {**row, "units": {"fallbackChains.default": changed}},
+        HEAD_DEVICE,
+        definitions.read_index(node),
+    )
+    assert _retry(node)["fallbackChains"] == {"default": changed}
+    unit = routing_sync.routing_state(node)["units"]["fallbackChains.default"]
+    assert unit == {"source": "mirror", "origin": HEAD_DEVICE}, unit
+    assert routing_sync.local_row(node)["units"] == {}  # type: ignore[index]
+
+    # Crash BEFORE the config write: the old value is still the mirror.
+    def _boom(*_a: Any, **_k: Any) -> None:
+        raise OSError("disk full")
+
+    monkeypatch.setattr(settings_io, "_store", _boom)
+    with pytest.raises(OSError):
+        routing_sync.apply_routing_locked(node, row, HEAD_DEVICE, definitions.read_index(node))
+    assert _retry(node)["fallbackChains"] == {"default": changed}
+    unit = routing_sync.routing_state(node)["units"]["fallbackChains.default"]
+    assert unit == {"source": "mirror", "origin": HEAD_DEVICE}, unit
+    assert routing_sync.local_row(node)["units"] == {}  # type: ignore[index]
+
+
+def test_q1_the_failover_sentence_starts_its_own_sentence() -> None:
+    from types import SimpleNamespace as NS
+
+    from local_operator.network import readiness
+
+    server = NS(identity=NS(device_id=HEAD_DEVICE), _member_name=lambda _d: "node")
+    fact = {"hops": HEAD_CHAIN, "source": "mirror", "origin": OTHER_DEVICE, "model_fallback": True}
+    row = {"detail": "a create there without --model is refused"}
+    readiness._attach_failover(row, {"failover": fact}, server=server)  # noqa: SLF001
+    assert row["detail"].startswith("a create there without --model is refused. Fails over to: ")
+    ended = {"detail": "node is served by its own login."}
+    readiness._attach_failover(ended, {"failover": fact}, server=server)  # noqa: SLF001
+    assert ended["detail"].startswith("node is served by its own login. Fails over to: "), ended

@@ -1830,6 +1830,10 @@ def _attach_failover(row: dict[str, Any], facts: Mapping[str, Any], *, server: A
     if fact.get("hops") or fact.get("model_fallback") is False:
         sentence = routing_sync.failover_sentence(fact, origin_label=label)
         detail = str(row.get("detail") or "")
+        # Q-1: a detail that does not already end a sentence gets one, or the
+        # failover sentence runs on from it ("... is refused Fails over to: ...").
+        if detail and not detail.rstrip().endswith((".", "!", "?")):
+            detail = detail.rstrip() + "."
         row["detail"] = f"{detail} {sentence}".strip()
     observed = dict(row.get("observed") or {})
     observed["failover"] = {

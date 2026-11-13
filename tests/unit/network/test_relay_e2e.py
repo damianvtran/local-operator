@@ -2348,6 +2348,16 @@ def test_the_cadence_mirrors_the_heads_failover_chain_onto_a_real_peer(
     (server_b.root / "config.yml").write_text(
         yaml.safe_dump({"values": {"retry": {"maxRetries": 4}}}), encoding="utf-8"
     )
+    # One synthetic operator anchor: device A holds its private half (the
+    # operator's Mac), device B holds it verify-only (a node). Never the host's.
+    from local_operator.network import mirror_authority
+
+    monkeypatch.setattr(
+        mirror_authority,
+        "_resolve",
+        lambda root: mirror_authority.Authority(key_id="k_op", signs=root == server_a.root),
+    )
+    mirror_authority.reset_cache()
     fresh_a = _fresh_relay(server_a)
 
     outcomes = definitions.DefinitionsSyncer(fresh_a).tick()

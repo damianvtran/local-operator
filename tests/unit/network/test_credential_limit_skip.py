@@ -739,7 +739,7 @@ class _EveryOwnerRowSpent(StubProvider):
 
 @pytest.mark.asyncio
 async def test_a_mirrored_chain_moves_a_borrowed_quota_block_to_the_next_hop(
-    borrowed: Any,
+    borrowed: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The operator's chain, mirrored onto the node, is what the remote turn walks.
 
@@ -786,10 +786,17 @@ async def test_a_mirrored_chain_moves_a_borrowed_quota_block_to_the_next_hop(
     assert isinstance(before[-1], ProviderError) and before[-1].status == 429, before
     assert "local-fallback-key" not in stub_before.seen, stub_before.seen
 
+    # The node holds the operator's anchor verify-only; the head signs for it.
+    from local_operator.network import mirror_authority
+
+    monkeypatch.setattr(
+        mirror_authority, "_resolve", lambda _root: mirror_authority.Authority(key_id="k_op")
+    )
+    mirror_authority.reset_cache()
     index: dict[str, Any] = {}
     applied = routing_sync.apply_routing_locked(
         borrowed.root,
-        {"units": {"fallbackChains.default": chain}},
+        {"authority": "k_op", "units": {"fallbackChains.default": chain}},
         OWNER_DEVICE,
         index,
     )

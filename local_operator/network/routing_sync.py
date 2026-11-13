@@ -37,21 +37,37 @@ CONFLICT POLICY (the operator-instructions policy, applied per unit):
   value equal to the default carries no intent this code can tell apart from a
   generated config file, and treating it as "the node's own" would defeat the
   whole sync on every node whose ``config.yml`` was written with defaults;
-* the node holds an untouched mirror from the SAME origin → update;
-* anything else (the node's own value, an edited mirror, a mirror from another
-  device) → kept, and recorded so the sender stops re-offering THIS revision and
-  ``lop network definitions state``/readiness can say why the node routes
-  differently;
+* the node holds an untouched mirror → update. A mirror from another origin is
+  REPLACED: only the operator's device authors (below), so a mirror some other
+  device left is never the operator's intent;
+* anything else (the node's own value, an edited mirror) → kept, and recorded so
+  the sender stops re-offering THIS revision and ``lop network definitions
+  state``/readiness can say why the node routes differently;
 * a unit the origin no longer sends → an untouched mirror of it is REMOVED (the
   operator deleted that chain on the head), an edited one is left and forgotten
   (it is the node's own now).
 
-The direction is the definitions sync's: every device sends the units it AUTHORED
-(never a mirror, so a node cannot hand the head's chain to a third device as its
-own), to every paired member, on the syncer's link-up nudge, its cadence (a
-config change moves the bundle digest) and after a relay restart (the link comes
-up again). Writes go through the settings registry's own writer under the config
-write lock, so a concurrent ``/settings`` save is never clobbered.
+DIRECTION: ONE WAY, from the operator's device (review round 1, M1). Only a device
+that signs for the operator anchor sends, and only to a peer holding that same
+anchor verify-only. Only such a peer installs, and only from a sender claiming
+that anchor. The predicate lives in ``mirror_authority``. A node's own or edited
+value therefore stays on the node, never reaches the head or a third device. The
+authority sends the units it AUTHORED (never a mirror) to every paired member, on
+the syncer's link-up nudge, its cadence (a config change moves the bundle digest)
+and after a relay restart (the link comes up again). Writes go through the
+settings registry's own writer under the config write lock, so a concurrent
+``/settings`` save is never clobbered.
+
+SETTLED MEANS STILL HELD (review round 1, M2): a node records the full unit set of
+the last row it settled per origin. The marker holds only while every one of those
+units is still that origin's mirror, or the node's own value. A mirror lost later
+(hand removal, a regenerated config, a ``/settings`` reset) withdraws it, and the
+next tick re-offers.
+
+CRASH ORDER (review round 1, m2): the provenance index is written BEFORE the
+config, with each changing record carrying both its old and new digest (``also``).
+A crash between the two writes leaves either value recognised as the mirror, so a
+mirror never comes back as ``local``.
 
 WIRE: additive. A receiver advertises support by carrying ``routing`` in its
 ``net_definitions`` state reply; a sender only sends the ``routing`` bundle key to
@@ -253,6 +269,22 @@ def _recorded(index: Mapping[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]
     )
 
 
+def _rec_matches(rec: Mapping[str, Any] | None, value: Any) -> bool:
+    """Whether ``value`` is the mirror ``rec`` recorded.
+
+    ``also`` is the pre-write record's other digest (see CRASH ORDER above). It is
+    present only between the index write and the config write, or after a crash
+    between them.
+    """
+    if rec is None:
+        return False
+    digest = _digest(value)
+    if str(rec.get("digest") or "") == digest:
+        return True
+    also = rec.get("also")
+    return isinstance(also, list) and digest in [str(item) for item in also]
+
+
 def _classify(
     disk: Mapping[str, Any], recorded: Mapping[str, Any], defaults: Mapping[str, Any]
 ) -> dict[str, dict[str, str]]:
@@ -260,7 +292,7 @@ def _classify(
     out: dict[str, dict[str, str]] = {}
     for unit, value in disk.items():
         rec = recorded.get(unit)
-        if rec is not None and str(rec.get("digest") or "") == _digest(value):
+        if _rec_matches(rec, value):
             out[unit] = {"source": "mirror", "origin": str(rec.get("origin") or "")}
         elif _is_default(unit, value, defaults):
             out[unit] = {"source": "default", "origin": ""}
@@ -276,25 +308,55 @@ def routing_state(root: Path) -> dict[str, Any]:
     """What this device holds, for the peer's ``state`` reply and the CLI.
 
     ``offered`` maps an origin device to the digest of the last row it sent that
-    this device fully settled — installed, or kept its own for units it STILL
-    owns. A unit it has since given up (cleared, reset to default) withdraws the
-    marker, so the origin's next tick re-offers and the mirror lands: without
-    that, clearing a local override would never let the operator's value in.
+    this device STILL holds settled. Every unit of that row must still be the
+    origin's mirror, or the node's own value. A unit lost since (a mirror deleted
+    or regenerated away, an own value cleared or reset to default) withdraws the
+    marker, so the origin's next tick re-offers and the mirror lands again.
+    Without that, a node that lost its chain would read ``in_sync`` and stay
+    primary-only (M2). An offer recorded without its unit set (this PR's first
+    head) is not settled, which costs one re-send.
+
+    ``authority`` is what the sender needs to know whether it may author here
+    (``mirror_authority.state_fact``).
     """
+    from local_operator.network import mirror_authority
     from local_operator.network.definitions import read_index
 
     disk = _disk_units(root)
     recorded, offered = _recorded(read_index(root))
+    authority = mirror_authority.state_fact(root)
     if disk is None:
-        return {"supported": 1, "status": "unreadable", "units": {}, "offered": {}}
+        return {
+            "supported": 1,
+            "status": "unreadable",
+            "units": {},
+            "offered": {},
+            "authority": authority,
+        }
     classes = _classify(disk, recorded, _defaults())
     settled: dict[str, str] = {}
     for origin, offer in offered.items():
-        kept = offer.get("kept")
-        kept_units = [str(u) for u in kept] if isinstance(kept, list) else []
-        if all(classes.get(u, {}).get("source") in ("local", "edited") for u in kept_units):
+        units = offer.get("units")
+        if not isinstance(units, list):
+            continue
+        if all(_still_settled(classes.get(str(u)), origin) for u in units):
             settled[origin] = str(offer.get("digest") or "")
-    return {"supported": 1, "status": "ok", "units": classes, "offered": settled}
+    return {
+        "supported": 1,
+        "status": "ok",
+        "units": classes,
+        "offered": settled,
+        "authority": authority,
+    }
+
+
+def _still_settled(cls: Mapping[str, str] | None, origin: str) -> bool:
+    if cls is None:
+        return False
+    source = cls.get("source")
+    if source == "mirror":
+        return cls.get("origin") == origin
+    return source in ("local", "edited")
 
 
 def local_row(root: Path) -> dict[str, Any] | None:
@@ -344,12 +406,22 @@ def withheld_shape(row: Mapping[str, Any]) -> str:
 
 
 def to_send(
-    row: Mapping[str, Any] | None, remote: Mapping[str, Any], *, origin: str
+    row: Mapping[str, Any] | None, remote: Mapping[str, Any], *, origin: str, root: Path
 ) -> tuple[dict[str, Any] | None, dict[str, Any]]:
-    """``(row to send or None, report)`` for one peer, from its ``state`` reply."""
+    """``(row to send or None, report)`` for one peer, from its ``state`` reply.
+
+    The returned row carries ``authority`` (the anchor key id this device signs
+    for) OUTSIDE the digested units, so the receiver's settled digest still
+    matches ``_digest(row)`` here.
+    """
+    from local_operator.network import mirror_authority
+
     remote_in = remote.get(ROUTING_KIND)
     if not isinstance(remote_in, Mapping):
         return None, {"outcome": "unsupported"}
+    allowed, why = mirror_authority.may_send_to(root, remote_in.get("authority"))
+    if not allowed:
+        return None, {"outcome": "not_authority", "reason": why}
     if row is None:
         return None, {"outcome": "none", "reason": "this device's config could not be read"}
     label = withheld_shape(row)
@@ -367,7 +439,7 @@ def to_send(
         # apply frame it does not expect (a device with no routing of its own is
         # the common case, not an event).
         return None, {"outcome": "none"}
-    return dict(row), {"outcome": "sent"}
+    return {**dict(row), "authority": mirror_authority.claim(root)}, {"outcome": "sent"}
 
 
 def _holds_mirror_from(remote_in: Mapping[str, Any], origin: str) -> bool:
@@ -428,6 +500,8 @@ def apply_routing_locked(
     from local_operator import settings_io
     from local_operator.config import CONFIG_FILE_NAME, ConfigManager
     from local_operator.config_writer import config_write_lock
+    from local_operator.network import mirror_authority
+    from local_operator.network.definitions import write_index
 
     try:
         incoming = _validate_incoming(raw_row)
@@ -435,6 +509,11 @@ def apply_routing_locked(
         return {"outcome": "refused", "reason": str(exc)}
     if not origin:
         return {"outcome": "refused", "reason": "the sending device is not known"}
+    # M1: only this node's operator-authority device authors its routing. Checked
+    # before any disk read, so a refused row costs nothing and writes nothing.
+    accepted, why = mirror_authority.accepts_from(root, raw_row.get("authority"))
+    if not accepted:
+        return {"outcome": "refused", "reason": why}
     row_digest = _digest({"kind": ROUTING_KIND, "name": ROUTING_KIND, "units": incoming})
     # Same guard as the tier lane: constructing a manager on a malformed file
     # would rename it aside before the writer could refuse.
@@ -461,6 +540,8 @@ def apply_routing_locked(
         drop: dict[tuple[str, ...], str] = {}
         reason = f"mirrored failover routing from {origin}"
         new_records = dict(recorded)
+        #: unit -> the digest it held before this apply, for the pre-write index.
+        replaced: dict[str, str] = {}
 
         def _set(unit: str, value: Any) -> None:
             if unit.startswith(CHAIN_PREFIX):
@@ -480,22 +561,19 @@ def apply_routing_locked(
         for unit, value in incoming.items():
             current = disk.get(unit)
             rec = recorded.get(unit)
+            untouched_mirror = current is not None and _rec_matches(rec, current)
             rec_origin = str(rec.get("origin") or "") if rec is not None else ""
-            untouched_mirror = (
-                rec is not None
-                and current is not None
-                and (str(rec.get("digest") or "") == _digest(current))
-            )
             if current is None or _is_default(unit, current, defaults):
                 _set(unit, value)
                 installed.append(unit)
-            elif untouched_mirror and rec_origin == origin:
-                if current != value:
+            elif untouched_mirror:
+                # Same origin: the operator changed it. Another origin: a mirror
+                # nothing authoritative wrote (M1), so the authority's value
+                # replaces it rather than being kept out by it.
+                if current != value or rec_origin != origin:
                     _set(unit, value)
                     updated.append(unit)
-            elif untouched_mirror:
-                kept.append({"unit": unit, "reason": f"it holds a mirror from {rec_origin}"})
-                continue
+                    replaced[unit] = _digest(current)
             else:
                 kept.append({"unit": unit, "reason": "this device set its own value"})
                 continue
@@ -504,7 +582,7 @@ def apply_routing_locked(
             if str(rec.get("origin") or "") != origin or unit in incoming:
                 continue
             current = disk.get(unit)
-            if current is not None and str(rec.get("digest") or "") == _digest(current):
+            if current is not None and _rec_matches(rec, current):
                 # The operator deleted this unit on the origin: follow it.
                 _unset(unit)
                 removed.append(unit)
@@ -516,17 +594,36 @@ def apply_routing_locked(
             else:
                 section.pop("fallbackChains", None)
             values = manager.get_config().values
-            for key in SCALAR_KEYS:
-                setting = next((s for s in settings_io.SETTINGS if s.key == f"retry.{key}"), None)
-                if setting is not None and key in section:
-                    problem = settings_io.validate(setting, section[key], values)
+            # m1: only the scalars THIS apply writes. A node's own pre-existing
+            # value, valid or not, is not this apply's to judge, and refusing on
+            # it would block every chain on every tick.
+            for unit in (*installed, *updated):
+                if unit not in SCALAR_KEYS:
+                    continue
+                setting = next((s for s in settings_io.SETTINGS if s.key == f"retry.{unit}"), None)
+                if setting is not None:
+                    problem = settings_io.validate(setting, section[unit], values)
                     if problem is not None:
-                        return {"outcome": "refused", "reason": f"retry.{key}: {problem}"}
+                        return {"outcome": "refused", "reason": f"retry.{unit}: {problem}"}
+            # m2: index BEFORE config. Each changing unit's record names both
+            # digests, and a removed unit keeps its record, so a crash between the
+            # two writes leaves whichever value is on disk recognised as the
+            # mirror (never re-read as the node's own ``local``).
+            pre_records = dict(new_records)
+            for unit, old_digest in replaced.items():
+                pre_records[unit] = {**pre_records[unit], "also": [old_digest]}
+            for unit in removed:
+                pre_records[unit] = recorded[unit]
+            index[ROUTING_INDEX_KEY] = {"units": pre_records, "offered": offered}
+            write_index(root, index)
             settings_io._store(manager, ("retry",), section, drop=drop)  # noqa: SLF001
     if installed or updated or removed:
         settings_io._invalidate_caches()  # noqa: SLF001 — same post-write step as write_setting
     offered[origin] = {
         "digest": row_digest,
+        # M2: the WHOLE unit set, so ``routing_state`` can tell a lost mirror
+        # from a settled one.
+        "units": sorted(incoming),
         "kept": [entry["unit"] for entry in kept],
         "at": time.time(),
     }

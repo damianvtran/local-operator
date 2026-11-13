@@ -1853,6 +1853,7 @@ def push_to_peer(
         routing_sync.local_row(server.root),
         remote,
         origin=str(bundle.get("origin_device") or ""),
+        root=server.root,
     )
     peer_label = _peer_sentence(server, device_id)
     if (
