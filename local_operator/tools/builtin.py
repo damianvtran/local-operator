@@ -19922,6 +19922,9 @@ def _sessions_open_env(context: object | None) -> dict[str, str]:
     injections: dict[str, str] = dict(NON_INTERACTIVE_ENV)
     injections.update(may_delegate_env_injection(context))
     injections.update(scratchpad_env_injection(ensure_scratchpad_dir(scratchpad_dir_of(context))))
+    # The spawned CLI is a DIFFERENT session, so it gets the clear arm only, never
+    # the caller's id (#3436 review R1-1): the same helper with no session.
+    injections.update(session_id_env_injection(None))
     parent = {
         name: value
         for name, value in os.environ.items()
