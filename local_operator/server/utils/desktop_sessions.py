@@ -418,6 +418,57 @@ async def _no_takeover() -> None:
     raise RuntimeError("Desktop viewers cannot own a runtime")
 
 
+class _OpenFrameSteps:
+    """Per-step ``open_trace`` marks for the open-frame page (``a.hist.<step>``).
+
+    WHY: ``a.snap.history`` measures the whole frame read, and on the operator's
+    desktop it ran >10x past ``OPEN_FRAME_SNAPSHOT_BUDGET_S`` while its own
+    ``page.read`` rows were small, so the overrun lives in a later await. Each
+    call marks the time since the previous one, so the top-level ``a.hist.*``
+    rows sum to the read. ``_frame_source`` keeps its own instance, so its
+    ``frame_source.*`` rows are a split INSIDE whichever top-level step called it
+    (``pages`` or ``frame_source``), not additional time: never add them in.
+    Inert (one module-level ``None`` check) unless ``LOP_OPEN_TRACE`` is set.
+    """
+
+    __slots__ = ("_last", "_session_id")
+
+    def __init__(self, session_id: str) -> None:
+        self._session_id = session_id
+        self._last = time.monotonic()
+
+    def __call__(self, name: str, **fields: object) -> None:
+        if not open_trace.enabled():
+            return
+        now = time.monotonic()
+        open_trace.mark(
+            f"a.hist.{name}", (now - self._last) * 1000, session=self._session_id, **fields
+        )
+        self._last = now
+
+
+def _log_abandoned_proof_read(task: asyncio.Future[Any]) -> None:
+    """Retrieve, and log at debug, the outcome of a bounded proof-join read.
+
+    WHY: ``_with_peer_cycle_records`` stops waiting for its ``discover_records``
+    worker hop at the first frame's deadline (or when the request is cancelled),
+    but deliberately never cancels it mid-I/O. Such an abandoned read has no
+    other awaiter, so without this its failure would vanish -- or surface only as
+    asyncio's "Task exception was never retrieved" at garbage collection, with
+    no request context. A read that is awaited normally re-raises to its caller
+    and is retrieved there too; logging it here once more at debug is harmless.
+    """
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is not None:
+        logger.debug(
+            "Display-only proof join read failed (abandoned at the open-frame deadline "
+            "or by a cancelled request; the frame answered 'unavailable')",
+            exc_info=exc,
+        )
+
+
 def _never_retiring() -> bool:
     """The default admission probe: a host with no retirement watching it.
 
@@ -4013,6 +4064,12 @@ class DesktopSessionBridge:
                 # the strip re-validates against THIS session; the viewer's
                 # declaration is the only input.
                 diff_bindings=diff_bindings,
+                # ONLY A CALLER-SUPPLIED DEADLINE bounds the display-only proof
+                # join: that is the snapshot's first frame. A standalone
+                # ``/history`` page keeps waiting for the join, because it is
+                # the follow-up read the degraded first frame's ``unavailable``
+                # partition points the reader at.
+                paint_deadline=deadline,
                 deadline=(
                     deadline
                     if deadline is not None
@@ -4102,6 +4159,7 @@ class DesktopSessionBridge:
         order_ids: list[str] | None = None,
         supplements: bool = False,
         diff_bindings: bool = False,
+        paint_deadline: float | None = None,
     ) -> dict[str, Any]:
         """The paint-only, run-aligned page of ``docs/DESKTOP_API.md`` §"The open frame".
 
@@ -4207,7 +4265,7 @@ class DesktopSessionBridge:
             # window, not a tail cut, so the only honest reading of ``head_cut``
             # here is "a cap dropped rows from this window".
             answer["head_cut"] = result.capped
-            answer = await self._with_peer_cycle_records(answer, [page])
+            answer = await self._with_peer_cycle_records(answer, [page], deadline=paint_deadline)
             if journal_order and facts is not None and index_read_model.apply_order(answer, facts):
                 return answer
             return (
@@ -4221,6 +4279,10 @@ class DesktopSessionBridge:
         has_more = False
         cursor_missing = False
         cursor = before_id
+        # OPT-IN STEP MARKS (``LOP_OPEN_TRACE``): the desktop trace showed
+        # ``a.snap.history`` ~1.4 s past its own ``page.read`` rows, and only a
+        # per-step split can say which await spends it. Inert when unset.
+        step = _OpenFrameSteps(self.session_id)
         index: Any = None
         # Per attempt: (rows prepended, that page's ``has_more``), so a late index
         # can replay where the index-backed read stops (``late_index_stop``).
@@ -4348,6 +4410,7 @@ class DesktopSessionBridge:
             cursor = str(collected[0].get("id") or "")
             if not cursor:
                 break
+        step("pages", pages=len(order_pages), rows=len(collected))
         if index is None:
             index = await self._frame_source(deadline, order_pages)
             if tail_read and not index_at_first_page:
@@ -4375,9 +4438,11 @@ class DesktopSessionBridge:
         # extra rows — measured on the S3 fixture, serving the overshoot was 231
         # rows and 264 KB against 100 rows and 114 KB — so the hunt that failed is
         # not paid for, and ``runs`` carries that run's true size instead.
+        step("frame_source", index=type(index).__name__)
         index, facts = await self._resolve_frame_source(
             index, collected, order_pages, order_ids or [], tail_read, deadline
         )
+        step("resolve", facts=facts is not None)
         kept, reached = align_page(
             collected,
             limit,
@@ -4425,14 +4490,16 @@ class DesktopSessionBridge:
         # page's oldest run from the rows it holds), which makes the false answer
         # worse than no answer.
         answer["head_cut"] = (not reached or result.capped) and answer["has_more"]
-        answer = await self._with_peer_cycle_records(answer, order_pages)
+        step("build", entries=len(answer.get("entries") or ()))
+        answer = await self._with_peer_cycle_records(answer, order_pages, deadline=paint_deadline)
+        step("peer_cycle", records="peer_cycle_display_records" in answer)
         if journal_order and facts is not None and index_read_model.apply_order(answer, facts):
+            step("journal_order", source="facts")
             return answer
-        return (
-            await self._journal_order_page(answer, order_pages, order_ids or [])
-            if journal_order
-            else answer
-        )
+        if journal_order:
+            answer = await self._journal_order_page(answer, order_pages, order_ids or [])
+            step("journal_order", source="page", state=answer.get("journal_order_state"))
+        return answer
 
     @staticmethod
     def _wire_rows(entries: Any, *, copy: bool = True) -> list[dict[str, Any]]:
@@ -4482,12 +4549,16 @@ class DesktopSessionBridge:
                 resident.sig.get("mtime"),
             )
             return resident if source == expected else None
+        step = _OpenFrameSteps(self.session_id)
         projected = await asyncio.to_thread(
             index_read_model.summary, self.root, self.session_id, source
         )
+        step("frame_source.summary", state=projected.state)
         if projected.state == "ready":
             return projected.value
-        return await self._frame_index(deadline)
+        index = await self._frame_index(deadline)
+        step("frame_source.index_wait", found=index is not None)
+        return index
 
     async def _resolve_frame_source(
         self,
@@ -4964,7 +5035,7 @@ class DesktopSessionBridge:
             )
 
     async def _with_peer_cycle_records(
-        self, answer: dict[str, Any], pages: list[Any]
+        self, answer: dict[str, Any], pages: list[Any], *, deadline: float | None = None
     ) -> dict[str, Any]:
         """Join display-only proof for this selected page, never model context.
 
@@ -4991,6 +5062,19 @@ class DesktopSessionBridge:
         called here, so a cold 1.5-2.5 s cache parse can no longer sit on the
         event loop. The byte budget and both overflow/refusal shapes are
         unchanged.
+
+        ``deadline`` BOUNDS THE ARCHIVE READ ON THE FIRST FRAME (the snapshot's
+        ``OPEN_FRAME_SNAPSHOT_BUDGET_S``, measured from the request). This join
+        was the one await after the page read with no bound at all, so a
+        snapshot whose other facts had already degraded to ``building`` could
+        still sit on this display-only worker hop (seen once at 183 ms of a
+        291 ms ``a.snap.history`` under synthetic backward-paging load; PR
+        evidence). Past the deadline the answer is the SAME explicit
+        ``unavailable`` partition a cold index gives -- the key is present, so
+        "no proof yet" stays distinguishable from "owes none" -- and the
+        standalone ``/history`` read (``deadline=None``) still waits and carries
+        the records. The discarded read is a pure file read: it is left to
+        finish and its exception retrieved, never cancelled mid-I/O.
         """
         from local_operator.harness.peer_cycle_display import (
             candidate_record_ids,
@@ -5041,16 +5125,34 @@ class DesktopSessionBridge:
         else:
             baseline = len(json.dumps(answer, ensure_ascii=False).encode())
             budget = max(0, min(512 * 1024, OPEN_FRAME_MAX_BYTES - baseline - 256))
-            # The archive read itself is bounded (<=512 ids, byte-capped) but
-            # still file I/O, so it leaves the event loop.
-            records = await asyncio.to_thread(
-                discover_records,
-                self.root / "sessions" / self.session_id,
-                messages,
-                self.session_id,
-                max_bytes=budget,
-                index=index,
-            )
+            no_proof_yet = {"records": [], "remaining": [], "unavailable": candidates, "bytes": 0}
+            remaining_s = None if deadline is None else deadline - time.monotonic()
+            if remaining_s is not None and remaining_s <= 0:
+                # Spent before the join began: starting a read only to discard
+                # it would queue one more worker hop ahead of the next page.
+                records = no_proof_yet
+            else:
+                # The archive read itself is bounded (<=512 ids, byte-capped) but
+                # still file I/O, so it leaves the event loop.
+                read = asyncio.ensure_future(
+                    asyncio.to_thread(
+                        discover_records,
+                        self.root / "sessions" / self.session_id,
+                        messages,
+                        self.session_id,
+                        max_bytes=budget,
+                        index=index,
+                    )
+                )
+                # Attached BEFORE the wait, not in the timeout branch: a request
+                # cancelled mid-wait (the viewer navigated away) abandons the read
+                # too, and either way nobody else retrieves its exception.
+                read.add_done_callback(_log_abandoned_proof_read)
+                done, _pending = await asyncio.wait({read}, timeout=remaining_s)
+                if read in done:
+                    records = read.result()
+                else:
+                    records = no_proof_yet
             if records is None:
                 return answer
         candidate = {**answer, "peer_cycle_display_records": records}

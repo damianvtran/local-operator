@@ -2775,6 +2775,21 @@ class SessionRow(NamedTuple):
     #: answer to one question. Appended last and defaulted, the file's rule.
     team: str = ""
     agent: str = ""
+    #: ``(completion token, outcome kind)`` of the owner's newest UNACKNOWLEDGED
+    #: completion, present only on a REMOTE row whose session THIS device
+    #: started (the owner stamps it for the origin alone; ``notifications/
+    #: remote_attention``). Tuples rather than dicts so the row stays hashable.
+    #: ``None`` is no claim — every local row, every other member's row, and
+    #: every row from an owner that predates ``wire.REMOTE_ATTENTION_V1``.
+    remote_attention: tuple[str, str] | None = None
+    #: ``(key, revision, priority, title)`` of each of the owner's newest unread
+    #: ``notify`` items for that session (newest first, bounded by
+    #: ``remote_attention.NOTICES_ON_WIRE``), under the same origin-only rule.
+    remote_notices: tuple[tuple[str, int, str, str], ...] | None = None
+    #: The owner could NOT read its completion store for this row (review round
+    #: 2, R2-m2), so a missing ``remote_attention`` is not an acknowledgement:
+    #: the origin's forwarder settles nothing on such a row.
+    remote_attention_unknown: bool = False
 
     @property
     def is_remote(self) -> bool:

@@ -78,6 +78,16 @@ class _FakeViewer:
             }
         )
         self._rows = rows or []
+        #: The mesh mailbox (PR #3827 A1): whether this owner advertised
+        #: ``MESH_PEER_MESSAGE_CAPABILITY``, what its ``peer_message`` answers,
+        #: and the frames it was handed.
+        self.mailbox = False
+        self.mailbox_error: Exception | None = None
+        self.mailbox_sleep_s = 0.0
+        self.peer_messages: list[dict[str, Any]] = []
+        #: Ids of rows the window holds (``holds_message``): an ADMITTED prompt.
+        self.admitted_ids: set[str] = set()
+        self.admit_on_send = False
         self.bound = False
         self.disposed = False
         self.prompts: list[str] = []
@@ -100,6 +110,8 @@ class _FakeViewer:
 
     async def prompt_and_wait(self, text: str, images: Any = None, **kwargs: Any) -> None:
         self.waited.append(text)
+        if self.admit_on_send and kwargs.get("message_id"):
+            self.admitted_ids.add(str(kwargs["message_id"]))
         if self.send_sleep_s:
             await asyncio.sleep(self.send_sleep_s)
         if self.send_error is not None:
@@ -111,6 +123,24 @@ class _FakeViewer:
 
     def display_history_window(self) -> list[Any]:
         return self._rows
+
+    def holds_message(self, message_id: str) -> bool:
+        return message_id in self.admitted_ids
+
+    def owner_takes_mesh_peer_message(self) -> bool:
+        return self.mailbox
+
+    async def send_peer_message(self, text: str, **kwargs: Any) -> dict[str, Any]:
+        self.peer_messages.append({"text": text, **kwargs})
+        if self.mailbox_sleep_s:
+            await asyncio.sleep(self.mailbox_sleep_s)
+        if self.mailbox_error is not None:
+            raise self.mailbox_error
+        return {
+            "op": "ack",
+            "detail": "delivered (mailbox)",
+            "delivery": {"message_id": kwargs.get("message_id"), "duplicate": False},
+        }
 
 
 class _Message:
@@ -513,8 +543,10 @@ def test_send_reports_a_turn_that_outlived_the_bound_as_still_running(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """ADMISSION IS NOT COMPLETION: at the bound the verb says the turn is still
-    running THERE and names the session, rather than claiming an outcome nobody saw."""
+    running THERE and names the session, rather than claiming an outcome nobody saw.
+    ``running`` needs the owner's row for OUR id in the window (PR #3827 A1)."""
     viewer = _FakeViewer(send_sleep_s=30.0)
+    viewer.admit_on_send = True
     _patch(monkeypatch, viewer, _remote_row())
     monkeypatch.setattr(net_cli, "PILOT_TURN_TIMEOUT_S", 0.05)
     assert _run(["sessions", "--json", "--peer", PEER, "--send", SESSION, "hi"]) == 1
@@ -522,6 +554,102 @@ def test_send_reports_a_turn_that_outlived_the_bound_as_still_running(
     assert payload["outcome"] == "running"
     assert payload["code"] == "turn_running"
     assert viewer.disposed, "the boundary is a report, not a leak"
+
+
+def test_send_parked_behind_a_busy_owner_is_queued_not_delivered(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """PR #3827 A1: a busy owner parks a ``prompt`` behind its running turn and does
+    not ack it, so a wait that ends with NO row for our id is ``queued`` — not
+    delivered, lost if that runtime stops — never the ``running`` success."""
+    viewer = _FakeViewer(send_sleep_s=30.0)
+    _patch(monkeypatch, viewer, _remote_row())
+    monkeypatch.setattr(net_cli, "PILOT_TURN_TIMEOUT_S", 0.05)
+    assert _run(["sessions", "--json", "--peer", PEER, "--send", SESSION, "hi"]) == 1
+    payload = ok(capsys.readouterr().out)
+    assert payload["ok"] is False
+    assert payload["outcome"] == "queued"
+    assert payload["code"] == "queued_behind_turn"
+
+
+# ---------------------------------------------------------------------------
+# --send --mailbox (the agent ``send peer=`` path, PR #3827 A1)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("flags", "mode", "wake"),
+    [([], "mailbox", True), (["--no-wake"], "mailbox", False), (["--now"], "steer", True)],
+)
+def test_mailbox_send_delivers_a_peer_message_not_a_turn(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    flags: list[str],
+    mode: str,
+    wake: bool,
+) -> None:
+    viewer = _FakeViewer()
+    viewer.mailbox = True
+    _patch(monkeypatch, viewer, _remote_row())
+    argv = ["sessions", "--json", "--peer", PEER, "--send", SESSION, "--mailbox", *flags, "hi"]
+    assert _run(argv) == 0
+    payload = ok(capsys.readouterr().out)
+    assert payload["ok"] is True and payload["outcome"] == "delivered"
+    assert payload["mode"] == mode and payload["wake"] is wake
+    assert viewer.waited == [] and viewer.prompts == [], "no turn was driven"
+    (sent,) = viewer.peer_messages
+    assert sent["text"] == "hi" and sent["mode"] == mode and sent["wake"] is wake
+    assert str(sent["message_id"]).startswith("peer-")
+    # The device is the OWNER's to stamp; the requester never claims one.
+    assert not any(key.startswith("mesh_device") for key in sent["sender"])
+    assert "pid" not in sent["sender"] and "cwd" not in sent["sender"]
+
+
+def test_mailbox_send_to_an_old_owner_falls_back_to_a_turn(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    viewer = _FakeViewer(rows=[_Message("assistant", "the reply")])
+    _patch(monkeypatch, viewer, _remote_row())
+    assert _run(["sessions", "--json", "--peer", PEER, "--send", SESSION, "--mailbox", "hi"]) == 0
+    payload = ok(capsys.readouterr().out)
+    assert payload["fallback"] == "prompt" and payload["outcome"] == "finished"
+    assert viewer.waited == ["hi"] and viewer.peer_messages == []
+
+
+@pytest.mark.parametrize("flag", ["--no-wake", "--now"])
+def test_a_quiet_or_steer_send_to_an_old_owner_is_refused_not_run_as_a_turn(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], flag: str
+) -> None:
+    viewer = _FakeViewer()
+    _patch(monkeypatch, viewer, _remote_row())
+    argv = ["sessions", "--json", "--peer", PEER, "--send", SESSION, "--mailbox", flag, "hi"]
+    assert _run(argv) == 1
+    payload = ok(capsys.readouterr().out)
+    assert payload["code"] == "mailbox_unsupported"
+    assert viewer.waited == [] and viewer.peer_messages == []
+
+
+def test_a_mailbox_send_the_owner_cannot_confirm_is_a_failure(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    viewer = _FakeViewer()
+    viewer.mailbox = True
+    viewer.mailbox_sleep_s = 30.0
+    _patch(monkeypatch, viewer, _remote_row())
+    monkeypatch.setattr(net_cli, "PILOT_REPLY_TIMEOUT_S", 0.05)
+    assert _run(["sessions", "--json", "--peer", PEER, "--send", SESSION, "--mailbox", "hi"]) == 1
+    payload = ok(capsys.readouterr().out)
+    assert payload["code"] == "session_unreachable"
+    assert "too busy to confirm" in payload["message"] and "not confirmed" in payload["message"]
+
+
+def test_no_wake_without_mailbox_is_a_usage_error(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    viewer = _FakeViewer()
+    opened = _patch(monkeypatch, viewer, _remote_row())
+    assert _run(["sessions", "--peer", PEER, "--send", SESSION, "--no-wake", "hi"]) == 2
+    assert opened.calls == 0
 
 
 # ---------------------------------------------------------------------------
@@ -1448,3 +1576,16 @@ def test_the_peek_bound_carries_no_spawn_and_no_turn() -> None:
     # And the TUI's child budget still outlasts it, so a composer shows THIS
     # verb's own answer rather than a timeout about a call that was working.
     assert net_cli.PILOT_PEEK_TIMEOUT_S < tui_mod.PILOT_CALL_TIMEOUT_S
+
+
+def test_a_malformed_create_key_is_refused_before_anything_is_dialled(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """R1-m3 / QA Q1: the relay mints a fresh key for a malformed one, so a typo'd
+    ``--create-key`` would make a SECOND session. The CLI refuses it first."""
+    dialled: list[Any] = []
+    monkeypatch.setattr(net_cli, "_relay_answer", lambda *a, **k: dialled.append(a) or {})
+    truncated = "a" * 31 + "!"
+    assert _run(["sessions", "--peer", PEER, "--create", "--create-key", truncated]) == 2
+    assert "is not a create key this device sent" in capsys.readouterr().err
+    assert dialled == []
