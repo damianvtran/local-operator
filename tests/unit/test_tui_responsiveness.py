@@ -1970,9 +1970,7 @@ async def test_fixed_cpu_breach_persistence_rule_with_synthetic_windows() -> Non
     await assert_fixed_cpu_breach_persists(window)
     assert len(calls) == 2, "a breach is re-measured once, and a clean retry passes"
 
-    window, calls = scripted(
-        [FixedCpuCeilingBreach("535.0 ms"), FixedCpuCeilingBreach("804.0 ms")]
-    )
+    window, calls = scripted([FixedCpuCeilingBreach("535.0 ms"), FixedCpuCeilingBreach("804.0 ms")])
     with pytest.raises(FixedCpuCeilingBreach) as both:
         await assert_fixed_cpu_breach_persists(window)
     assert len(calls) == 2
