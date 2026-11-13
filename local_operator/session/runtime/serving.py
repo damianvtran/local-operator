@@ -1963,7 +1963,10 @@ class ServingSessionHandle(SessionHandle):
         if not callable(setter):
             return
         try:
-            setter("ask" if open_now else None)
+            if open_now:
+                setter("ask", queued=True)
+            else:
+                setter(None)
         except Exception:  # noqa: BLE001 -- a listing fact is never worth a turn
             logger.debug("ask: could not publish the queued-ask pending state", exc_info=True)
 
@@ -7982,7 +7985,10 @@ class ServingSessionHandle(SessionHandle):
             # An open QUEUED ask still owes the operator an answer after the
             # gate settles: hand the claim back to it rather than clearing a
             # fact that is still true (``_sync_queued_ask_pending``).
-            setter("ask" if getattr(self, "_queued_asks_open", False) else None)
+            if getattr(self, "_queued_asks_open", False):
+                setter("ask", queued=True)
+            else:
+                setter(None)
         except Exception:  # noqa: BLE001
             logger.debug("could not clear the pending state", exc_info=True)
 

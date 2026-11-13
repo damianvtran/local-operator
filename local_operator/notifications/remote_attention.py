@@ -147,11 +147,6 @@ AGENT_ORIGIN_KIND = "agent"
 #: and :func:`settle_unlisted_ask_items` finds it by this infix.
 ASK_NOTICE_PREFIX = "remote-ask:"
 
-#: An open ask's priority on the wire: the inbox's own ask priority
-#: (``notifications.items.ASK_PRIORITY``) — the agent is waiting on a person,
-#: so the origin row is ``high`` and banners once through the item ladder.
-ASK_NOTICE_PRIORITY = "high"
-
 #: How many notices one row carries for its origin, newest first (review round 1,
 #: M2: carrying only the newest lost every earlier unread notice, ``high`` ones
 #: included). WHY 8: the owner's inbox is never read on the node, so its unread
@@ -265,7 +260,15 @@ def stamp_rows_for_viewer(
             continue
         # Open asks FIRST: a question the agent is waiting on outranks an
         # informational notice for the bounded slots (``NOTICES_ON_WIRE``).
-        notices = open_ask_notices(Path(root), session_id)
+        asks = open_ask_notices(Path(root), session_id)
+        if asks is None:
+            # A FAILED ASK READ IS NOT "NO OPEN ASKS" (PR #3934 review R1-2),
+            # the ``attention_unknown`` rule: the origin retires a forwarded ask
+            # by its absence, so a missing ask here must say "unknown" or an
+            # EIO would dismiss a question that is still owed — for good, since
+            # the row's revision never changes and re-raising it is a no-op.
+            row["asks_unknown"] = True
+        notices = list(asks or [])
         if store is not None:
             notices += _newest_notices(store, session_id)
         if notices:
@@ -308,8 +311,11 @@ def _newest_notices(store: Any, session_id: str) -> list[dict[str, Any]]:
     return out
 
 
-def open_ask_notices(root: Path, session_id: str) -> list[dict[str, Any]]:
+def open_ask_notices(root: Path, session_id: str) -> list[dict[str, Any]] | None:
     """``session_id``'s OPEN queued asks as ``notices`` wire blocks, oldest first.
+
+    ``None`` — not ``[]`` — when the ask log could not be read: the caller
+    stamps ``asks_unknown`` so the origin settles nothing on that listing.
 
     WHY (2026-11-13). A queued ask is not a ``NotificationStore`` row on the
     device it was asked on — the local inbox merges open asks from the ask
@@ -331,19 +337,31 @@ def open_ask_notices(root: Path, session_id: str) -> list[dict[str, Any]]:
     wire op (or the signed ``bridge_decide`` for a mirrored ask) — never here.
     Generic on purpose: any open ask in the queue (a browser-site question
     included) reaches the origin through this one function. Never raises.
+
+    The title is the local inbox's own (``items.ask_item``: the first question,
+    excerpted to the store's 120-char cap) and so is the priority: the wire
+    sizing under ``NOTICES_ON_WIRE`` assumes bounded titles (review R1-4).
     """
     try:
         from local_operator.asks import store as ask_store
-        from local_operator.notifications.items import first_question
+        from local_operator.notifications.items import (
+            ASK_PRIORITY,
+            excerpt,
+            first_question,
+        )
 
-        events = ask_store.read_events(ask_store.session_dir(root, session_id))
+        events = ask_store.read_events(ask_store.session_dir(root, session_id), strict=True)
+    except Exception:  # noqa: BLE001 — unknown, never "none" (R1-2)
+        logger.debug("remote attention: ask read failed for %s", session_id, exc_info=True)
+        return None
+    try:
         if not events:
             return []
         records = ask_store.fold(events, ask_store.now_ms(), session_id=session_id)
         out: list[dict[str, Any]] = []
         for record in ask_store.outstanding_asks(records):
             ask_id = str(record.get("ask_id") or "")
-            title = first_question(record)
+            title = excerpt(first_question(record), 120)
             if not ask_id or not title:
                 continue
             out.append(
@@ -352,14 +370,14 @@ def open_ask_notices(root: Path, session_id: str) -> list[dict[str, Any]]:
                     # An ask's question does not change once queued (a
                     # revision rewrites the ANSWER), so one episode per ask.
                     "revision": 1,
-                    "priority": ASK_NOTICE_PRIORITY,
+                    "priority": ASK_PRIORITY,
                     "title": title,
                 }
             )
         return out[:NOTICES_ON_WIRE]
-    except Exception:  # noqa: BLE001 — a listing without asks is still a listing
-        logger.debug("remote attention: ask read failed for %s", session_id, exc_info=True)
-        return []
+    except Exception:  # noqa: BLE001 — a listing whose asks did not fold says "unknown"
+        logger.debug("remote attention: ask fold failed for %s", session_id, exc_info=True)
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -489,9 +507,12 @@ def settle_unlisted_ask_items(
     rather than read for that reason.
 
     Absence is trusted only when it can mean that: the session IS in this
-    listing (a silent device or a deleted session settles nothing), its
-    ``notices`` list is NOT full (a full list may have cut the ask off its
-    tail), and the listing's read started after the row was last written
+    listing (a silent device or a deleted session settles nothing), the owner
+    could read its ask log (``asks_unknown``, R1-2), its ``notices`` list is
+    not full OF ASKS (asks are stamped first, so a full list that still carries
+    any non-ask claim proves every open ask fit — and a busy session's list is
+    full on every read, its notifies never being read on the node; R1-1), and
+    the listing's read started after the row was last written
     (``listed_at_ms``; the done settle's Q3 rule — a cached listing older than
     the row predates the ask rather than answering it). ``None`` settles
     nothing. Returns how many rows were dismissed. Never raises.
@@ -505,8 +526,12 @@ def settle_unlisted_ask_items(
             session_id = str(getattr(row, "id", "") or "")
             if not device_id or not session_id:
                 continue
+            if getattr(row, "remote_asks_unknown", False):
+                continue
             claims = tuple(getattr(row, "remote_notices", None) or ())
-            if len(claims) >= NOTICES_ON_WIRE:
+            if len(claims) >= NOTICES_ON_WIRE and all(
+                claim and str(claim[0]).startswith(ASK_NOTICE_PREFIX) for claim in claims
+            ):
                 continue
             listed[(device_id, session_id)] = {str(claim[0]) for claim in claims if claim}
         if not listed:

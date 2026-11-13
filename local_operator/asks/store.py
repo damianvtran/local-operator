@@ -356,14 +356,22 @@ def append_event(session_directory: Path | str, event: Mapping[str, Any]) -> boo
         os.close(fd)
 
 
-def read_events(session_directory: Path | str) -> list[dict[str, Any]]:
-    """Every readable event, in write order. A torn final line is skipped."""
+def read_events(session_directory: Path | str, *, strict: bool = False) -> list[dict[str, Any]]:
+    """Every readable event, in write order. A torn final line is skipped.
+
+    ``strict`` re-raises an unreadable log (any ``OSError`` but a missing file)
+    instead of answering ``[]``: a caller that settles something on "no open
+    asks" (the mesh ask forwarder, ``remote_attention.open_ask_notices``) must
+    not read a failed read as that answer (PR #3934 review R1-2).
+    """
     path = asks_log_path(session_directory)
     try:
         raw = path.read_bytes()
     except FileNotFoundError:
         return []
     except OSError:
+        if strict:
+            raise
         logger.warning("ask log unreadable at %s", path, exc_info=True)
         return []
     events: list[dict[str, Any]] = []

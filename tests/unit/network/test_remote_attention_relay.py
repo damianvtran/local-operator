@@ -222,6 +222,80 @@ def test_an_open_queued_ask_crosses_and_its_answer_retires_the_origin_row(
     assert item is not None and item["dismissed_at"], "the answered ask still asks on the origin"
 
 
+def test_a_queued_ask_claim_crosses_as_queued_and_never_parks_a_member(
+    pair: Devices, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """PR #3934 Q1: a member that did not start the session is not paged.
+
+    The owner's live record says ``pending="ask"`` for an open QUEUED ask; that
+    reaches every member's listing (the "needs" badge), and before the
+    ``pending_queued`` fact every member's TUI also turned it into a high park
+    row. Over the wire, through the production parse and row builder.
+    """
+    import subprocess
+    import sys
+
+    from local_operator.session.runtime import registry
+    from local_operator.session.runtime.types import SessionRecord
+
+    server_a, server_b, _host, _port = pair
+    owner = server_a.identity.device_id
+    _record, link = _live_link(pair, monkeypatch)
+    # Started by a THIRD device: this viewer (B) is not its origin.
+    _own_session(server_a, "d_someone_else")
+    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(600)"])
+
+    class _Peer:
+        device_id = owner
+        name = "lop-remote-node-2"
+        network_id = "n_test"
+        reachable = True
+        reason = ""
+
+    def _parks(row: dict[str, Any]) -> list[str]:
+        class _Catalog:
+            def peers(self) -> list[Any]:
+                return [_Peer()]
+
+            def rows(self) -> list[Any]:
+                return [PeerRow.from_json(row, device_id=owner)]
+
+        rows = peer_rows.peer_session_rows(None, ttl_s=0, catalog=_Catalog())
+        edges, _ = peer_rows.park_edges({}, rows)
+        return [edge.kind for edge in edges]
+
+    def _publish(**fields: Any) -> None:
+        registry.publish(
+            SessionRecord(
+                pid=child.pid,
+                kind="tui",
+                session_id=SID,
+                conversation_name="node work",
+                cwd=str(server_a.root),
+                model_label="test/model",
+                control_port=0,
+                control_key="",
+                **fields,
+            ),
+            server_a.root,
+        )
+
+    try:
+        _publish(pending="ask", pending_queued=True)
+        row = _catalog_row(link)
+        assert row["pending"] == "ask" and row.get("pending_queued") is True
+        assert _parks(row) == [], "a queued ask paged a member that did not start it"
+        # A BLOCKING gate on the same session is still a park everywhere.
+        _publish(pending="ask")
+        row = _catalog_row(link)
+        assert "pending_queued" not in row
+        assert _parks(row) == ["ask"]
+    finally:
+        link.close("test")
+        child.kill()
+        child.wait()
+
+
 def ra_now() -> int:
     from local_operator.notifications.store import now_ms
 

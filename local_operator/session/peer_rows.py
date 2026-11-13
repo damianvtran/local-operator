@@ -469,10 +469,14 @@ def park_edges(
         kind = str(row.pending or "")
         if not kind or not row.live_state:
             continue
-        if kind == "ask" and _carries_forwarded_ask(row):
-            # A QUEUED ask's ``pending`` (``_sync_queued_ask_pending``) whose
-            # questions already arrive one row each through the notice
-            # forwarder: a park row too would be two inbox rows for one ask.
+        if getattr(row, "pending_queued", False):
+            # The ask QUEUE's claim (``_sync_queued_ask_pending``), not a parked
+            # gate: a listing fact for the "needs" badge, never a park (PR #3934
+            # Q1). A park here paged EVERY member with a TUI for a question on
+            # a session it did not start; the origin is told instead by the
+            # forwarded ``remote-ask:`` rows, one per ask. Keyed on the owner's
+            # flag rather than on the forwarded notices so a BLOCKING gate that
+            # parks beside open queued asks still parks (R1-3).
             continue
         key = (str(row.owner_device or ""), row.id)
         current[key] = kind
@@ -490,20 +494,6 @@ def park_edges(
             state[key] = kind
     edges = tuple(fresh[key] for key, kind in current.items() if previous.get(key) != kind)
     return edges, state
-
-
-#: ``remote_attention.ASK_NOTICE_PREFIX``, spelled here rather than imported so
-#: this module keeps no import edge into the notifications package (the
-#: projection's ``NOTICES_MAX`` rule); a test pins the two equal.
-FORWARDED_ASK_PREFIX = "remote-ask:"
-
-
-def _carries_forwarded_ask(row: SessionRow) -> bool:
-    """Whether the owner forwarded at least one open ask on this row's notices."""
-    return any(
-        claim and str(claim[0]).startswith(FORWARDED_ASK_PREFIX)
-        for claim in (row.remote_notices or ())
-    )
 
 
 class RemoteNotice(NamedTuple):
@@ -791,6 +781,8 @@ def _read(
                 remote_attention=getattr(peer_row, "attention", None),
                 remote_notices=getattr(peer_row, "notices", None),
                 remote_attention_unknown=bool(getattr(peer_row, "attention_unknown", False)),
+                pending_queued=bool(getattr(peer_row, "pending_queued", False)),
+                remote_asks_unknown=bool(getattr(peer_row, "asks_unknown", False)),
             )
         )
     # THE PEERS THAT DID NOT ANSWER, and the exclusion is by DEVICE rather than

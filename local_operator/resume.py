@@ -2823,6 +2823,13 @@ class SessionRow(NamedTuple):
     #: read it. Only ever ``True`` on a listing that asked for temporary rows
     #: (``include_temporary``); appended last and defaulted, the file's rule.
     temporary: bool = False
+    #: A REMOTE row's ``pending`` is the owner's ask-QUEUE claim rather than a
+    #: parked gate (``PeerRow.pending_queued``): ``peer_rows.park_edges`` raises
+    #: no park row for it (PR #3934 Q1). Appended last and defaulted.
+    pending_queued: bool = False
+    #: The owner could not read this session's ask log (``PeerRow.asks_unknown``),
+    #: so the origin retires no forwarded ask on this row (PR #3934 R1-2).
+    remote_asks_unknown: bool = False
 
     @property
     def is_remote(self) -> bool:

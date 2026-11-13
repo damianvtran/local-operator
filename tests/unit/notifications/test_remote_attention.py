@@ -1007,9 +1007,15 @@ def test_ask_absence_settles_nothing_it_cannot_vouch_for(root: Path) -> None:
     watcher.observe([_row(notices=None)], listed_at_ms=0)
     # The device did not answer: no row for the session at all.
     watcher.observe([], [NODE], listed_at_ms=_later())
-    # A full list may have cut the ask off its tail.
-    full = tuple(("n%d" % i, 1, "normal", "FYI %d" % i) for i in range(ra.NOTICES_ON_WIRE))
+    # A list full of OTHER asks may have cut this one off its tail (asks are
+    # stamped first, so only an all-ask full list can hide one; R1-1).
+    full = tuple(
+        (f"remote-ask:o{i}", 1, "high", "Other %d?" % i) for i in range(ra.NOTICES_ON_WIRE)
+    )
     watcher.observe([_row(notices=full)], listed_at_ms=_later())
+    # The owner could not read its ask log: absence says nothing (R1-2).
+    unknown = _row(notices=None)._replace(remote_asks_unknown=True)
+    watcher.observe([unknown], listed_at_ms=_later())
     # Unknown listing age.
     ra.settle_unlisted_ask_items(root, [_row(notices=None)], listed_at_ms=None)
     ask_rows = [r for r in _items(root) if r["key"].endswith(":remote-ask:k7")]
@@ -1032,22 +1038,110 @@ def test_ask_an_agent_notify_cannot_squat_the_ask_namespace(tmp_path: Path) -> N
     assert [block["key"] for block in rows[0]["notices"]] == ["deploy"]
 
 
-def test_ask_a_forwarded_ask_is_not_also_a_park_row() -> None:
-    """The queued ask's ``pending="ask"`` would otherwise ALSO raise a park row."""
-    assert peer_rows.FORWARDED_ASK_PREFIX == ra.ASK_NOTICE_PREFIX
-    parked = SessionRow(
-        SID,
-        0.0,
-        "n",
-        live_state="idle",
-        locality="remote",
-        owner_device=NODE,
-        pending="ask",
-        remote_notices=(_ask_claim(),),
+def test_r1_1_an_answered_ask_retires_under_a_full_list_of_plain_notices(root: Path) -> None:
+    """R1-1: 8 unread notifies on the node must not pin the answered ask forever.
+
+    The owner's notify items are never read on the node, so a busy session's
+    listing is full on every read. Asks are stamped FIRST, so a full list that
+    still carries a non-ask claim proves every open ask fit: the missing one was
+    answered.
+    """
+    watcher = ra.RemoteAttentionWatcher(root)
+    plain = tuple((f"m{i}", 1, "normal", "FYI %d" % i) for i in range(ra.NOTICES_ON_WIRE))
+    watcher.observe(
+        [_row(notices=(_ask_claim(),) + plain[: ra.NOTICES_ON_WIRE - 1])], listed_at_ms=now_ms()
     )
-    edges, state = peer_rows.park_edges({}, [parked])
+    watcher.observe([_row(notices=plain)], listed_at_ms=_later())
+    row = NotificationStore(root).get_by_key(SID, ra.notice_key(NODE, SID, "remote-ask:k7"))
+    assert row is not None and row["dismissed_at"], "the answered ask still asks on the origin"
+
+
+def test_r1_2_a_failed_ask_read_is_unknown_and_settles_nothing(tmp_path: Path) -> None:
+    """R1-2: an unreadable ask log is NOT "no open asks" (the attention_unknown rule)."""
+    from local_operator.asks import store as ask_store
+
+    owner = _owner(tmp_path)
+    # A directory where the log should be: ``read_bytes`` raises an OSError.
+    ask_store.asks_log_path(ask_store.session_dir(owner, SID)).mkdir(parents=True)
+    rows = [_catalog_row()]
+    ra.stamp_rows_for_viewer(owner, rows, HEAD)
+    assert rows[0].get("asks_unknown") is True
+    assert [block["key"] for block in rows[0]["notices"]] == ["deploy"]
+    # The origin's parse carries the flag onto the row the settle reads.
+    parsed = PeerRow.from_json({**rows[0], "state": "live"}, device_id=NODE)
+    assert parsed.asks_unknown is True
+
+    head = tmp_path / "head"
+    watcher = ra.RemoteAttentionWatcher(head)
+    watcher.observe([_row(notices=(_ask_claim(),))], listed_at_ms=now_ms())
+    unknown = _row(notice=("deploy", 1, "high", "Deploy finished"))._replace(
+        remote_asks_unknown=True
+    )
+    watcher.observe([unknown], listed_at_ms=_later())
+    row = NotificationStore(head).get_by_key(SID, ra.notice_key(NODE, SID, "remote-ask:k7"))
+    assert row is not None and not row["dismissed_at"], "a still-open ask was retired"
+
+
+def test_r1_4_the_forwarded_title_is_capped_like_the_local_inbox(tmp_path: Path) -> None:
+    """R1-4/R1-5: the wire title is the inbox's own excerpt, the priority its own."""
+    from local_operator.notifications import items
+
+    owner = _owner(tmp_path)
+    _queue_ask(owner, "k7", "Why? " * 200)
+    [block] = ra.open_ask_notices(owner, SID)
+    assert len(block["title"]) <= 120
+    assert block["title"] == items.excerpt(
+        items.first_question({"questions": [{"question": "Why? " * 200}]}), 120
+    )
+    assert block["priority"] == items.ASK_PRIORITY
+
+
+def _parked(**fields: Any) -> SessionRow:
+    return SessionRow(
+        SID, 0.0, "n", live_state="idle", locality="remote", owner_device=NODE, **fields
+    )
+
+
+def test_q1_a_queued_ask_is_never_a_park_row() -> None:
+    """Q1: a queued ask's ``pending`` is a listing fact, not a park, on EVERY member.
+
+    Before the queue claimed ``pending`` only blocking gates reached
+    ``park_edges``; a queued ask on a session this device did not start (a third
+    device's, or one the node started itself) must not page this device. The
+    origin is told through the forwarded ``remote-ask:`` rows instead.
+    """
+    third_device = _parked(pending="ask", pending_queued=True)
+    forwarded = third_device._replace(remote_notices=(_ask_claim(),))
+    edges, state = peer_rows.park_edges({}, [third_device, forwarded._replace(id="other")])
     assert edges == () and state == {}
-    # A BLOCKING ask (no forwarded ask on the row) is still a park.
-    blocking = parked._replace(remote_notices=None)
-    edges, _ = peer_rows.park_edges({}, [blocking])
+
+
+def test_r1_3_a_blocking_gate_still_parks_beside_a_queued_ask() -> None:
+    """R1-3: a parked gate keeps its park row even while a queued ask is forwarded."""
+    gate = _parked(pending="ask", remote_notices=(_ask_claim(),))
+    edges, _ = peer_rows.park_edges({}, [gate])
     assert [edge.kind for edge in edges] == ["ask"]
+    approval = _parked(pending="approval", remote_notices=(_ask_claim(),))
+    edges, _ = peer_rows.park_edges({}, [approval])
+    assert [edge.kind for edge in edges] == ["approval"]
+
+
+def test_q2_the_notify_tool_refuses_a_remote_ask_key() -> None:
+    """Q2: the ask namespace is refused at the tool, not merely kept off the wire."""
+    import json
+    from types import SimpleNamespace
+
+    from local_operator.tools import builtin
+
+    async def door(**_kwargs: Any) -> str:
+        raise AssertionError("a reserved key reached the inbox")
+
+    result = asyncio.run(
+        builtin.execute_notify(  # type: ignore[call-arg]
+            "call-1",
+            {"title": "Answer me?", "key": f"{ra.ASK_NOTICE_PREFIX}zz"},
+            context=SimpleNamespace(notify_inbox=door),
+        )
+    )
+    text = json.dumps(getattr(result, "content", str(result)), default=str)
+    assert "reserved" in text and ra.ASK_NOTICE_PREFIX in text

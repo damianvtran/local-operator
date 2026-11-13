@@ -39,12 +39,14 @@ class _Server:
     def __init__(self, attached: int = 0) -> None:
         self._attached = attached
         self.pending: list[str | None] = []
+        self.queued: list[bool] = []
 
     def attach_clients(self) -> int:
         return self._attached
 
-    def set_record_pending(self, pending: str | None) -> None:
+    def set_record_pending(self, pending: str | None, *, queued: bool = False) -> None:
         self.pending.append(pending)
+        self.queued.append(queued)
 
 
 def _handle(
@@ -587,3 +589,20 @@ def test_the_ask_fold_sink_drives_the_claim(monkeypatch) -> None:
     handle._ask_state_changed([], 0)
 
     assert handle._registrant.pending == ["ask", None]
+
+
+def test_only_the_queues_claim_is_marked_queued(monkeypatch) -> None:
+    """PR #3934 R1-3/Q1: a peer parks on a blocking gate, never on the queue's claim."""
+    handle = _handle(monkeypatch, attached=1)
+
+    handle._sync_queued_ask_pending(1)
+    handle._announce_pending("ask", "ask", "Which branch?")
+    handle._announce_settled()
+    handle._sync_queued_ask_pending(0)
+
+    assert list(zip(handle._registrant.pending, handle._registrant.queued)) == [
+        ("ask", True),
+        ("ask", False),
+        ("ask", True),
+        (None, False),
+    ]
