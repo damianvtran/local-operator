@@ -4035,8 +4035,23 @@ def browser_row(member: Any, facts: Mapping[str, Any], *, peer_label: str) -> di
     """
     fact = facts.get("browser")
     if not isinstance(fact, Mapping):
-        return _peer_too_old_rows_for(member, CAPABILITY_BROWSER)
+        # Worded like the neighbouring rows for a missing fact (tooling,
+        # operator_authority): every 0.102.x peer DOES answer readiness and
+        # simply predates this one check, so "predates readiness reporting"
+        # was untrue of it (round 1, U6). The update remedy stays.
+        return _capability_row(
+            device_id=member.device_id,
+            device_name=peer_label,
+            capability=CAPABILITY_BROWSER,
+            ok=False,
+            code=CODE_UNKNOWN,
+            detail="the peer's answer did not carry this check",
+            remedies=[f"update lop on {peer_label}, then re-check"],
+            source=SOURCE_UNKNOWN,
+        )
     host = str(fact.get("host") or "")
+    # Every n/a detail below states WHY without repeating "n/a": the state
+    # column already prints it (round 1, U10).
     if host == "user":
         return _capability_row(
             device_id=member.device_id,
@@ -4044,22 +4059,32 @@ def browser_row(member: Any, facts: Mapping[str, Any], *, peer_label: str) -> di
             capability=CAPABILITY_BROWSER,
             ok=True,
             detail=(
-                f"n/a: a user's browser host (desktop app or extension) serves {peer_label}; "
+                f"a user's browser host (desktop app or extension) serves {peer_label}; "
                 "the node-managed browser is for headless nodes only"
             ),
             source=SOURCE_PEER,
             observed={"not_applicable": True, "host": "user"},
         )
-    if host == "unsupported_platform":
+    if host in ("unsupported_platform", "unsupported_distro"):
+        # A host setup would refuse reads n/a, never "not installed": that
+        # row's remedy is the very command that refuses (round 1, R1-6).
+        if host == "unsupported_distro":
+            detail = (
+                f"the node-managed browser needs a dnf/rpm distribution, and {peer_label} "
+                "is not one"
+            )
+        else:
+            platform_name = _safe_text(str(fact.get("platform") or "not Linux x86_64"), limit=60)
+            detail = (
+                f"the node-managed browser supports Linux x86_64 only, and {peer_label} is "
+                f"{platform_name}; other devices use the extension or the desktop app"
+            )
         return _capability_row(
             device_id=member.device_id,
             device_name=peer_label,
             capability=CAPABILITY_BROWSER,
             ok=True,
-            detail=(
-                f"n/a: {peer_label} is not Linux; the node-managed browser is for headless "
-                "Linux nodes, and other devices use the extension or the desktop app"
-            ),
+            detail=detail,
             source=SOURCE_PEER,
             observed={"not_applicable": True, "host": host},
         )
@@ -4107,7 +4132,8 @@ def browser_row(member: Any, facts: Mapping[str, Any], *, peer_label: str) -> di
                 + ": sessions there have no browser tool"
             ),
             remedies=[
-                f"on {peer_label}: `lop browser setup --node --repair --authorised-by '<who>'`"
+                f"on {peer_label}: "
+                "`lop browser setup --node --repair --authorised-by '<who, when>'`"
             ],
             source=SOURCE_PEER,
             observed=observed,
@@ -4121,7 +4147,7 @@ def browser_row(member: Any, facts: Mapping[str, Any], *, peer_label: str) -> di
             code=CODE_NOT_INSTALLED,
             detail=f"sessions on {peer_label} have no browser tool",
             remedies=[
-                f"on {peer_label}: `lop browser setup --node --authorised-by '<who>'` "
+                f"on {peer_label}: `lop browser setup --node --authorised-by '<who, when>'` "
                 "(operator authorisation required; guide://browser 'Headless nodes')"
             ],
             source=SOURCE_PEER,

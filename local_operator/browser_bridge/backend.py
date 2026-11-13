@@ -348,6 +348,36 @@ def _origin(value: str) -> str:
     return f"{parsed.scheme}://{parsed.netloc}" if parsed.scheme and parsed.netloc else value
 
 
+def node_approval_unavailable(origin: str) -> str:
+    """Model-facing: why a site cannot be opened on a HEADLESS NODE, and what to do.
+
+    The extension host's approval copy sends the operator to the extension
+    popup, which nobody can reach in a node-managed headless Chrome: setup →
+    new session → `open` → "approve it in the popup" was a dead end that looked
+    like progress (PR #3935 round 1, U1). Until operator-signed approvals land,
+    the honest answer is that this build cannot approve a site on a node.
+    English by design: tool results are model-facing, like every sibling here.
+    """
+    return (
+        f"site {origin or '(unknown origin)'} is not allowed, and per-site approval on a "
+        "headless node needs the operator's signed decision, which is not available on "
+        "this build: nothing on this node can present an approval prompt, so do not "
+        "raise an access request and do not work around it with another browser. Ask "
+        "the operator: tell them which site you needed and why, and stop "
+        "the browser part of the task (guide://browser 'Headless nodes')."
+    )
+
+
+def _on_headless_node() -> bool:
+    """Read once per process (``node_host.headless_node_once``); never raises."""
+    try:
+        from local_operator.browser_bridge import node_host
+
+        return bool(node_host.headless_node_once())
+    except Exception:  # noqa: BLE001 - copy selection must never break an error path
+        return False
+
+
 #: Where an approval decision lands, per host, for the sites that name it.
 _APPROVAL_SURFACE = {
     HOST_EXTENSION: "the Local Operator extension popup",
@@ -638,6 +668,10 @@ def format_error(
         # bearing, not politeness.
         origin = str(error.data.get("origin") or _origin(str(error.data.get("url", ""))))
         url = str(error.data.get("url") or origin)
+        # A node's managed Chrome is served by the EXTENSION host; the desktop
+        # app's host never runs on a node.
+        if host == HOST_EXTENSION and _on_headless_node():
+            return node_approval_unavailable(origin)
         return (
             f"site {origin or '(unknown origin)'} is not allowed yet. Call browser "
             f"action='request_access' url={url} to raise the approval prompt, then NOTIFY "

@@ -520,6 +520,28 @@ async def test_request_access_works_without_a_surface(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
+async def test_request_access_on_a_headless_node_queues_no_invisible_prompt(monkeypatch) -> None:
+    """U1 (PR #3935 round 1): a node's prompt would sit in a popup nobody can
+    reach; the tool answers with the node sentence and never calls the bridge."""
+    from local_operator.browser_bridge import node_host
+
+    monkeypatch.setattr(builtin, "cmux_browser_available", lambda: False)
+    monkeypatch.setattr(builtin, "bridge_browser_available", lambda: True)
+    monkeypatch.setattr(node_host, "headless_node_once", lambda: True)
+
+    async def fake_call(*_args, **_kwargs):
+        raise AssertionError("no approval prompt may be queued on a headless node")
+
+    monkeypatch.setattr(builtin, "_bridge_call", fake_call)
+    context = ToolContext(browser=BrowserSurface())
+    result = await builtin.execute_browser(
+        "t", {"action": "request_access", "url": "https://example.com"}, None, None, context
+    )
+    assert "headless node" in result.text
+    assert "popup" not in result.text
+
+
+@pytest.mark.asyncio
 async def test_request_access_reports_already_allowed(monkeypatch) -> None:
     monkeypatch.setattr(builtin, "cmux_browser_available", lambda: False)
     monkeypatch.setattr(builtin, "bridge_browser_available", lambda: True)

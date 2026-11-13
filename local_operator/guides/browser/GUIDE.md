@@ -382,12 +382,33 @@ lop browser setup --node --upgrade --authorised-by '<who, when>' # the only path
 lop browser uninstall --node --authorised-by '<who, when>'
 ```
 
+**Getting the authorisation.** It is the operator's to give, never yours to
+write. Ask them (`ask`, or `hub` to your delegator when no interface is
+attached), naming the node and what changes: sudo, Google's Chrome rpm and
+repository, fonts, a user unit and a Chrome policy file. What counts is an
+explicit instruction naming THIS node (quote it); a standing general
+instruction such as "install a browser when needed" is not enough. Record who
+and when, in their words, e.g. `--authorised-by '<operator>, 2026-11-13, via ask:
+"yes, set up the browser on <node>"'`.
+
+**How long it takes.** A fresh install runs for several minutes (a ~110 MB
+download, then bounded waits of up to 120 s each for the extension to load
+and pair). Run it with a timeout of at least 900 s (`bash` with
+`timeout: 900`) or in the background (`background: true`); each step's row
+prints as it completes (`--json`: one final document on stdout, progress lines
+on stderr), so a cut-off run still shows what landed. A re-run on a provisioned
+node takes seconds.
+
 Re-running on a provisioned node reports every step "already in place" and
-changes nothing. Privileged steps run through `sudo -n`; when sudo would
-prompt, setup refuses and names the steps that need root. It also refuses on a
-user's machine (the desktop app's discovery record or a graphical session),
-off Linux x86_64, on a non-dnf/rpm distribution, and on a device that is not in
-a mesh network.
+changes nothing. Privileged steps run through `sudo -n` (rows tagged `(root)`);
+when sudo would prompt, setup refuses before changing anything and names the
+steps that need root, and `--dry-run` already reports them as `would fail`. It
+also refuses on a user's machine (the desktop app's discovery record or a
+graphical session), off Linux x86_64, on a non-dnf/rpm distribution, and on a
+device that is not in a mesh network. `uninstall --node` runs the same host
+checks and removes only what the install record says setup installed; it keeps
+the extension signing key, Google's key, the fonts, the bridge daemon and the
+record.
 
 **What it installs.** Google Chrome from Google's signed rpm repository (key
 fingerprint checked before import, `rpm -K` on the downloaded package, sha256
@@ -410,11 +431,18 @@ daemon still checks the code — no extension id is trusted automatically.
 
 **What it does not change.**
 
-- **Per-site approvals stay default-deny** and are the operator's decision;
-  today, approvals on a node need the operator — see "Per-site permissions".
-  The approval is granted in the extension's own UI, which nobody can reach in
-  a headless Chrome, so until operator-signed approvals land an `open` on a
-  node returns `origin_not_allowed`: say so and stop, never work around it.
+- **No site can be opened yet.** Per-site approvals stay default-deny and are
+  the operator's decision, and on a user's machine they are granted in the
+  extension popup — which nobody can reach in a headless Chrome. Until
+  operator-signed approvals land, every `open` on a node returns
+  `origin_not_allowed` and `request_access` queues nothing: tell the operator
+  which site you needed and stop the browser part of the task; never work
+  around it.
+- **Node-side boundaries are advisory where sudo is passwordless.** On a node
+  whose account has NOPASSWD sudo, the policy file's root ownership and the
+  unit's limits are audited, not enforced against that account: anything
+  running as it could rewrite them. They guard against mistakes, not against
+  the account itself.
 - **Nobody signs in by hand there.** The node's Chrome has no user cookies and
   no one at its screen; for a login, type credentials with `secret_ref` only.
 - **Fidelity is a server's, not a designer's laptop**: fonts are Linux fonts,

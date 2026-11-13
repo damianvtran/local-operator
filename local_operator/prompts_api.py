@@ -519,13 +519,25 @@ _NO_BROWSER_NOTE = (
 #: createIf-gated at session construction, so a session that predates the setup
 #: never gets it — the note says to start a new one rather than leaving the
 #: model to wonder why a working install does not show up.
+#:
+#: Round 1 (PR #3935) added three clauses, each closing a dead end measured in
+#: review: the authorisation must be an explicit instruction naming this node
+#: (U3 — "the operator's authorisation" was never defined, so an agent would
+#: stall or author it itself); a fresh install runs for minutes, longer than a
+#: default `bash` timeout (U2); and no site can be opened yet, because per-site
+#: approval needs an operator decision a headless Chrome cannot present (U1).
 _NO_BROWSER_NODE_NOTE = (
     "\n\nThis session has NO browser tool. This is a headless node: its only "
     "sanctioned browser is the node-managed one — `lop browser setup --node` "
     "(guide://browser 'Headless nodes'), run only with the operator's "
-    "authorisation; a session started before setup never gets the tool, so start "
-    "a new one after. Never install or script any other browser engine "
-    "(playwright, puppeteer, a downloaded Chromium)."
+    "authorisation: an explicit instruction naming this node, recorded with who "
+    "and when in `--authorised-by` (a standing general instruction is not "
+    "enough). A fresh install takes minutes: run it with a timeout of at least "
+    "900 s or in the background. A session started before setup never gets the "
+    "tool, so start a new one after; even then no site can be opened yet (per-site "
+    "approval on a node needs the operator's signed decision, not in this build). "
+    "Never install or script any other browser engine (playwright, puppeteer, a "
+    "downloaded Chromium)."
 )
 
 

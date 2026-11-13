@@ -10,6 +10,10 @@ from __future__ import annotations
 from ..messages import Msg
 
 
+def dry_run_would_fail() -> Msg:
+    return Msg("cli.browser_node.dry_run_would_fail", {})
+
+
 def failed_tail() -> Msg:
     return Msg("cli.browser_node.failed_tail", {})
 
@@ -74,6 +78,10 @@ def paired_yes() -> Msg:
     return Msg("cli.browser_node.paired_yes", {})
 
 
+def purge_with_node() -> Msg:
+    return Msg("cli.browser_node.purge_with_node", {})
+
+
 def record(*, path: str) -> Msg:
     return Msg("cli.browser_node.record", {"path": path})
 
@@ -94,6 +102,10 @@ def refuse_not_member() -> Msg:
     return Msg("cli.browser_node.refuse_not_member", {})
 
 
+def refuse_nothing_to_uninstall(*, path: str) -> Msg:
+    return Msg("cli.browser_node.refuse_nothing_to_uninstall", {"path": path})
+
+
 def refuse_platform(*, system: str, machine: str) -> Msg:
     return Msg("cli.browser_node.refuse_platform", {"system": system, "machine": machine})
 
@@ -102,8 +114,20 @@ def refuse_sudo(*, steps: str) -> Msg:
     return Msg("cli.browser_node.refuse_sudo", {"steps": steps})
 
 
+def refuse_uninstall_authorisation() -> Msg:
+    return Msg("cli.browser_node.refuse_uninstall_authorisation", {})
+
+
 def refuse_user_machine(*, reason: str) -> Msg:
     return Msg("cli.browser_node.refuse_user_machine", {"reason": reason})
+
+
+def setup_needs_node() -> Msg:
+    return Msg("cli.browser_node.setup_needs_node", {})
+
+
+def step_already_absent(*, step: str) -> Msg:
+    return Msg("cli.browser_node.step_already_absent", {"step": step})
 
 
 def step_applied(*, step: str, detail: str) -> Msg:
@@ -118,9 +142,41 @@ def step_in_place(*, step: str, detail: str) -> Msg:
     return Msg("cli.browser_node.step_in_place", {"step": step, "detail": detail})
 
 
+def step_not_run(*, step: str) -> Msg:
+    return Msg("cli.browser_node.step_not_run", {"step": step})
+
+
+def step_removed(*, step: str) -> Msg:
+    return Msg("cli.browser_node.step_removed", {"step": step})
+
+
+def step_root(*, step: str) -> Msg:
+    return Msg("cli.browser_node.step_root", {"step": step})
+
+
 def step_skipped(*, step: str) -> Msg:
     return Msg("cli.browser_node.step_skipped", {"step": step})
 
 
 def step_would_apply(*, step: str, detail: str) -> Msg:
     return Msg("cli.browser_node.step_would_apply", {"step": step, "detail": detail})
+
+
+def step_would_fail(*, step: str, detail: str) -> Msg:
+    return Msg("cli.browser_node.step_would_fail", {"step": step, "detail": detail})
+
+
+def step_would_remove(*, step: str) -> Msg:
+    return Msg("cli.browser_node.step_would_remove", {"step": step})
+
+
+def stopped_unchanged() -> Msg:
+    return Msg("cli.browser_node.stopped_unchanged", {})
+
+
+def uninstall_flags_need_node() -> Msg:
+    return Msg("cli.browser_node.uninstall_flags_need_node", {})
+
+
+def uninstall_kept() -> Msg:
+    return Msg("cli.browser_node.uninstall_kept", {})

@@ -63,6 +63,9 @@ class FakeNode:
         self.pairs_on_code = True
         self.codes_minted = 0
         self.policy_writes: list[dict[str, Any]] = []
+        self.dnf_setopts: list[str] = []
+        self.group_members = ""
+        self.extra_passwd = ""
         self.policy_path = tmp / "etc" / "policies" / "local-operator.json"
         self.repo_path = tmp / "etc" / "google-chrome.repo"
         self.env = node_host.NodeEnv(
@@ -165,7 +168,14 @@ class FakeNode:
         extension_id = node_host.extension_id_for_key(PEM.encode())
         self.paired_ids.add(extension_id)
         self.fresh_install = False
-        record = {"schema": 1, "authorised_by": "test", **plan.updates}
+        # What apply_chrome records on a real node: the ownership proof
+        # uninstall requires before it removes anything (round 1, R1-2).
+        record = {
+            "schema": 1,
+            "authorised_by": "test",
+            "chrome": {"version": "Google Chrome 157.0.8103.78"},
+            **plan.updates,
+        }
         node_host._write_private(self.env.record_path, json.dumps(record))  # noqa: SLF001
         self.calls.clear()
         self.policy_writes.clear()
@@ -220,6 +230,11 @@ class FakeNode:
             return _done()
         if head == "id":
             return _done("ec2-user\n")
+        if head == "getent" and argv[1] == "group":
+            # A private primary group by default (AL2023's shape: `ec2-user:x:1000:`).
+            return _done(f"{argv[2]}:x:1000:{self.group_members}\n")
+        if head == "getent" and argv[1] == "passwd":
+            return _done("ec2-user:x:1000:1000::/home/ec2-user:/bin/bash\n" + self.extra_passwd)
         if head == "loginctl":
             return _done("Linger=yes\n" if self.linger else "Linger=no\n")
         if head == "systemctl":
@@ -239,6 +254,8 @@ class FakeNode:
         raise AssertionError(f"unexpected command {argv}")
 
     def _dnf(self, args: list[str]) -> subprocess.CompletedProcess[str]:
+        self.dnf_setopts.extend(a for a in args if a.startswith("--setopt="))
+        args = [a for a in args if not a.startswith("--setopt=")]
         if args[:2] == ["versionlock", "list"]:
             return _done("google-chrome-stable-0:157.0.8103.78-1.*\n" if self.locked else "")
         if args[:2] == ["versionlock", "add"]:
@@ -452,7 +469,7 @@ def test_fresh_node_installs_pairs_and_records(paths: Path) -> None:
     # The package was verified before it was installed, from the downloaded file.
     order = [" ".join(c) for c in node.calls]
     k = next(i for i, c in enumerate(order) if c.startswith("rpm -K"))
-    i = next(i for i, c in enumerate(order) if "dnf -y install" in c and c.endswith(".rpm"))
+    i = next(i for i, c in enumerate(order) if " install " in c and c.endswith(".rpm"))
     assert k < i
     # The code went in as 0640 root:<user's group>, and came OUT again.
     secret = [w for w in node.policy_writes if "3rdparty" in w["content"]]
@@ -699,3 +716,381 @@ def test_cli_bare_setup_is_a_usage_error(
 ) -> None:
     code, _out = _cli(monkeypatch, capsys, ["setup"])
     assert code == 2
+
+
+# --- round 1 remediation (PR #3935): each test names the finding it pins -------
+
+
+def test_cli_uninstall_node_flags_without_node_are_a_usage_error(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """R1-1: `--dry-run` on the plain route used to run a REAL (even --purge) uninstall."""
+    from local_operator.browser_bridge import install as browser_install
+
+    ran: list[bool] = []
+    monkeypatch.setattr(
+        browser_install, "uninstall", lambda purge=False: ran.append(purge) or {"ok": True}
+    )
+    for extra in (["--dry-run", "--purge"], ["--authorised-by", "x"], ["--json"]):
+        code, out = _cli(monkeypatch, capsys, ["uninstall", *extra])
+        assert code == 2, extra
+        assert "--node" in out
+    assert ran == []
+
+
+def test_cli_purge_with_node_is_a_usage_error(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], paths: Path
+) -> None:
+    """U12: `--purge` was silently ignored with `--node`."""
+    node = FakeNode(paths, provisioned=True)
+    monkeypatch.setattr(node_host, "default_env", lambda: node.env)
+    code, out = _cli(monkeypatch, capsys, ["uninstall", "--node", "--purge", "--dry-run"])
+    assert code == 2
+    assert "--purge" in out
+    assert node.calls == []
+
+
+@pytest.mark.parametrize(
+    ("override", "code"),
+    [
+        ({"system": lambda: "darwin"}, node_host.REFUSE_PLATFORM),
+        (
+            {"which": lambda name: None if name == "dnf" else f"/usr/bin/{name}"},
+            node_host.REFUSE_DISTRO,
+        ),
+        ({"user_machine_reason": lambda: "the desktop app's discovery record exists"}, None),
+    ],
+)
+def test_uninstall_runs_the_host_preflight(
+    paths: Path, override: dict[str, Any], code: str | None
+) -> None:
+    """R1-2/Q1: uninstall refused nothing, and off dnf it crashed in `_locked()`."""
+    node = FakeNode(paths, provisioned=True)
+    for name, value in override.items():
+        setattr(node.env, name, value)
+    for options in (
+        node_host.Options(dry_run=True),
+        node_host.Options(authorised_by="Operator (test)"),
+    ):
+        outcome = node_host.uninstall(options, node.env)
+        assert not outcome.ok
+        assert outcome.refusal is not None
+        assert outcome.refusal["code"] == (code or node_host.REFUSE_USER_MACHINE)
+        assert outcome.steps == []
+    assert _mutations(node.calls) == []
+    assert any(r.startswith(node_host.CHROME_PACKAGE) for r in node.rpms)
+
+
+def test_uninstall_never_removes_a_chrome_lop_did_not_install(paths: Path) -> None:
+    """R1-2/Q1: with no node record (or one without a `chrome` entry), a Chrome and
+    repo file the person installed themselves must survive."""
+    node = FakeNode(paths, provisioned=False)
+    node.rpms.add(node_host.CHROME_PACKAGE + "-150.0-1.x86_64")
+    node.repo_path.parent.mkdir(parents=True, exist_ok=True)
+    node.repo_path.write_text("[theirs]\n", encoding="utf-8")
+    outcome = node_host.uninstall(node_host.Options(authorised_by="Operator (test)"), node.env)
+    assert outcome.refusal is not None
+    assert outcome.refusal["code"] == node_host.REFUSE_NOT_INSTALLED
+    assert outcome.refusal["args"]["path"] == str(node.env.record_path)
+    # A record that never carried an install is no ownership proof either.
+    node_host._write_private(node.env.record_path, json.dumps({"schema": 1}))  # noqa: SLF001
+    again = node_host.uninstall(node_host.Options(authorised_by="Operator (test)"), node.env)
+    assert again.refusal is not None and again.refusal["code"] == node_host.REFUSE_NOT_INSTALLED
+    assert _mutations(node.calls) == []
+    assert node.repo_path.exists()
+    assert any(r.startswith(node_host.CHROME_PACKAGE) for r in node.rpms)
+
+
+def test_setup_after_uninstall_reads_installed_again(paths: Path) -> None:
+    """R1-3: `uninstalled_at` survived a reinstall, so readiness said "not installed"."""
+    node = FakeNode(paths, provisioned=True)
+    done = node_host.uninstall(node_host.Options(authorised_by="Operator (test)"), node.env)
+    assert done.ok
+    assert node_host.browser_fact(node.env) == {"host": "none"}
+    # A second uninstall has nothing of lop's left to remove.
+    twice = node_host.uninstall(node_host.Options(authorised_by="Operator (test)"), node.env)
+    assert twice.refusal is not None and twice.refusal["code"] == node_host.REFUSE_NOT_INSTALLED
+    again = node_host.setup(
+        node_host.Options(extension_dir=node.extension_dist, authorised_by="Operator (test)"),
+        node.env,
+    )
+    assert again.ok, [s.as_json() for s in again.steps]
+    record = json.loads(node.env.record_path.read_text(encoding="utf-8"))
+    assert "uninstalled_at" not in record
+    fact = node_host.browser_fact(node.env)
+    assert fact["host"] == "node" and fact["paired"] and fact["unit_active"]
+
+
+def test_local_rpm_install_re_verifies_the_signature(paths: Path) -> None:
+    """R1-4: dnf's `localpkg_gpgcheck` is 0 by default, so a file swapped after
+    `rpm -K` would install unchecked; the install now re-verifies it."""
+    node = FakeNode(paths, provisioned=False)
+    node_host._write_private(node.env.signing_key, PEM)  # noqa: SLF001
+    outcome = node_host.setup(
+        node_host.Options(extension_dir=node.extension_dist, authorised_by="x"), node.env
+    )
+    assert outcome.ok
+    install = next(c for c in node.calls if c[-1].endswith(".rpm") and "install" in c)
+    assert "--setopt=localpkg_gpgcheck=1" in install
+
+
+@pytest.mark.parametrize(
+    "listing",
+    [
+        # An extra key appended to Google's: the pin matches, but rpm --import
+        # would import both.
+        "pub:-:4096:1:X:1:::-:::scESC::::::23::0:\n"
+        f"fpr:::::::::{node_host.SIGNING_KEY_FINGERPRINT}:\n"
+        "pub:-:4096:1:Y:1:::-:::scESC::::::23::0:\n"
+        "fpr:::::::::1111111111111111111111111111111111111111:\n",
+        # The pin only as a SUBKEY fingerprint under some other primary.
+        "pub:-:4096:1:Y:1:::-:::scESC::::::23::0:\n"
+        "fpr:::::::::1111111111111111111111111111111111111111:\n"
+        "sub:-:4096:1:Z:1::::::s::::::23:\n"
+        f"fpr:::::::::{node_host.SIGNING_KEY_FINGERPRINT}:\n",
+    ],
+)
+def test_signing_key_must_be_exactly_the_pinned_primary(paths: Path, listing: str) -> None:
+    """R1-5: any `fpr:` row matching the pin used to pass."""
+    node = FakeNode(paths, provisioned=False)
+    original = node.run
+
+    def run(
+        argv: Sequence[str], *, input_text: str | None = None
+    ) -> subprocess.CompletedProcess[str]:
+        if list(argv)[:1] == ["gpg"]:
+            return _done(listing)
+        return original(argv, input_text=input_text)
+
+    node.env.runner = run
+    plan = node_host._Plan(node.env, node_host.Options(), None)  # noqa: SLF001
+    with pytest.raises(node_host.StepError, match="does not carry the expected key"):
+        plan.apply_key()
+    assert not any("--import" in c for c in node.calls)
+
+
+@pytest.mark.parametrize(
+    ("override", "host"),
+    [
+        ({"machine": lambda: "aarch64"}, "unsupported_platform"),
+        (
+            {"which": lambda name: None if name == "dnf" else f"/usr/bin/{name}"},
+            "unsupported_distro",
+        ),
+    ],
+)
+def test_browser_fact_reads_unsupported_nodes_as_such(
+    paths: Path, override: dict[str, Any], host: str
+) -> None:
+    """R1-6: a Debian or aarch64 node read "not installed", whose remedy refuses."""
+    node = FakeNode(paths, provisioned=False)
+    for name, value in override.items():
+        setattr(node.env, name, value)
+    assert node_host.browser_fact(node.env)["host"] == host
+
+
+def test_pairing_refuses_to_share_the_code_with_a_shared_primary_group(paths: Path) -> None:
+    """R1-7: the code-bearing policy is 0640 root:<primary group>; a shared group
+    would let its other members read the code."""
+    node = FakeNode(paths, provisioned=True)
+    node.paired_ids.clear()
+    node.group_members = "alice"
+    outcome = node_host.setup(node_host.Options(repair=True, authorised_by="x"), node.env)
+    assert _states(outcome)["pairing"] == node_host.STATE_FAILED
+    assert "alice" in outcome.steps[-1].detail
+    assert not any("3rdparty" in w["content"] for w in node.policy_writes)
+    # Another account whose PRIMARY gid is the same group counts too.
+    node.group_members = ""
+    node.extra_passwd = "bob:x:1001:1000::/home/bob:/bin/bash\n"
+    outcome = node_host.setup(node_host.Options(repair=True, authorised_by="x"), node.env)
+    assert "bob" in outcome.steps[-1].detail
+    assert not any("3rdparty" in w["content"] for w in node.policy_writes)
+
+
+def test_each_step_is_reported_as_it_completes(paths: Path) -> None:
+    """U2: setup printed nothing until it returned (a fresh node can take minutes)."""
+    node = FakeNode(paths, provisioned=False)
+    node_host._write_private(node.env.signing_key, PEM)  # noqa: SLF001
+    seen: list[tuple[str, int]] = []
+    outcome = node_host.setup(
+        node_host.Options(extension_dir=node.extension_dist, authorised_by="x"),
+        node.env,
+        on_step=lambda step, _outcome: seen.append((step.id, len(node.calls))),
+    )
+    assert [step_id for step_id, _ in seen] == [s.id for s in outcome.steps]
+    # Streamed WHILE running: the calls made after each report keep growing.
+    assert [n for _, n in seen] == sorted(n for _, n in seen) and seen[0][1] < seen[-1][1]
+
+
+def test_cli_streams_human_rows_and_keeps_json_a_single_document(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], paths: Path
+) -> None:
+    """U2: human rows print as each step ends; `--json` keeps stdout ONE document
+    and streams progress as JSON lines on stderr."""
+    node = FakeNode(paths, provisioned=True)
+    monkeypatch.setattr(node_host, "default_env", lambda: node.env)
+    monkeypatch.setattr("sys.argv", ["lop", "browser", "setup", "--node", "--dry-run", "--json"])
+    from local_operator import cli
+
+    assert cli.main() == 0
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    progress = [json.loads(line) for line in captured.err.splitlines() if line.startswith("{")]
+    assert [p["step"]["id"] for p in progress] == [s["id"] for s in payload["steps"]]
+    assert {p["event"] for p in progress} == {"step"}
+
+
+def test_sigterm_mid_pairing_still_removes_the_code(paths: Path) -> None:
+    """U2: SIGTERM (an agent's command timeout) skipped the `finally` that takes
+    the pairing code back out of the policy."""
+    import os
+    import signal
+
+    node = FakeNode(paths, provisioned=True)
+    node.paired_ids.clear()
+    node.pairs_on_code = False
+    tick = node.env.sleep
+
+    def sleep(seconds: float) -> None:
+        policy = json.loads(node.policy_path.read_text(encoding="utf-8"))
+        if "3rdparty" in policy:
+            os.kill(os.getpid(), signal.SIGTERM)
+        tick(seconds)
+
+    node.env.sleep = sleep
+    before = signal.getsignal(signal.SIGTERM)
+    with pytest.raises(SystemExit) as excinfo:
+        node_host.setup(node_host.Options(repair=True, authorised_by="x"), node.env)
+    assert excinfo.value.code == 128 + signal.SIGTERM
+    assert any("3rdparty" in w["content"] for w in node.policy_writes)
+    assert "3rdparty" not in json.loads(node.policy_path.read_text(encoding="utf-8"))
+    # The previous handler is back once setup returns.
+    assert signal.getsignal(signal.SIGTERM) == before
+
+
+def test_sudo_refusal_rows_read_not_run_and_no_record_is_claimed(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], paths: Path
+) -> None:
+    """U4b/c, Q4: pending rows said "an earlier step failed", a `Record:` line
+    named a file that was never written, and the remedy named no command."""
+    node = FakeNode(paths, provisioned=False)
+    node.sudo_ok = False
+    monkeypatch.setattr(node_host, "default_env", lambda: node.env)
+    code, out = _cli(
+        monkeypatch,
+        capsys,
+        ["setup", "--node", "--authorised-by", "x", "--extension-dir", str(node.extension_dist)],
+    )
+    assert code == 1
+    assert "not run (refused)" in out
+    assert "earlier step failed" not in out
+    assert "Record:" not in out
+    assert not node.env.record_path.exists()
+    assert "sudo -v" in out
+
+
+def test_cli_uninstall_refusal_says_removing(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], paths: Path
+) -> None:
+    """U4a, Q2: the uninstall refusal printed the setup sentence ("installing")."""
+    node = FakeNode(paths, provisioned=True)
+    monkeypatch.setattr(node_host, "default_env", lambda: node.env)
+    code, out = _cli(monkeypatch, capsys, ["uninstall", "--node"])
+    assert code == 1
+    assert out.startswith("Refused: removing the node browser")
+    assert "installing" not in out
+
+
+def test_dry_run_predicts_the_sudo_refusal(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], paths: Path
+) -> None:
+    """U5a/b: the dry-run exited 0 with every row "would apply" where apply would
+    refuse, and never said which steps run as root."""
+    node = FakeNode(paths, provisioned=False)
+    node.sudo_ok = False
+    outcome = node_host.setup(
+        node_host.Options(dry_run=True, extension_dir=node.extension_dist), node.env
+    )
+    assert not outcome.ok
+    states = _states(outcome)
+    assert states["chrome"] == node_host.STATE_WOULD_FAIL
+    assert states["profile_dir"] == node_host.STATE_WOULD_APPLY
+    assert _mutations(node.calls) == []
+    monkeypatch.setattr(node_host, "default_env", lambda: node.env)
+    code, out = _cli(
+        monkeypatch,
+        capsys,
+        ["setup", "--node", "--dry-run", "--extension-dir", str(node.extension_dist)],
+    )
+    assert code == 1
+    assert "  chrome (root): would fail — " in out
+    assert "  profile_dir: would apply — " in out
+
+
+def test_upgrade_never_offers_to_downgrade_the_extension(paths: Path) -> None:
+    """U5c: `--upgrade --dry-run` offered the newest RELEASE (older than installed)."""
+    node = FakeNode(paths, provisioned=True)
+    old = node.extension_dist.parent / "old"
+    old.mkdir()
+    (old / "manifest.json").write_text(json.dumps({"version": "0.1.26"}), encoding="utf-8")
+    plan = node_host._Plan(
+        node.env, node_host.Options(upgrade=True), node_host.read_record(node.env)
+    )  # noqa: SLF001
+    monkeypatch_release = ("0.1.26", old, "GitHub Release v0.101.6")
+    release = lambda: monkeypatch_release  # noqa: E731
+    plan._release_extension = release  # type: ignore[method-assign]  # noqa: SLF001
+    check = plan.check_extension()
+    assert check.in_place, check.detail
+    assert "0.1.26" in check.detail and EXTENSION_VERSION in check.detail
+
+
+def test_a_certain_failure_stops_apply_before_anything_changes(paths: Path) -> None:
+    """U5c: an extension that predates managed pairing failed only AFTER Chrome
+    and the other root steps had been installed."""
+    node = FakeNode(paths, provisioned=False)
+    (node.extension_dist / "manifest.json").write_text(
+        json.dumps({"version": "0.1.26"}), encoding="utf-8"
+    )
+    dry = node_host.setup(
+        node_host.Options(dry_run=True, extension_dir=node.extension_dist), node.env
+    )
+    assert not dry.ok and _states(dry)["extension"] == node_host.STATE_WOULD_FAIL
+    outcome = node_host.setup(
+        node_host.Options(extension_dir=node.extension_dist, authorised_by="x"), node.env
+    )
+    assert not outcome.ok
+    assert _states(outcome)["extension"] == node_host.STATE_FAILED
+    assert _states(outcome)["chrome"] == node_host.STATE_NOT_RUN
+    assert _mutations(node.calls) == []
+
+
+def test_cli_bare_setup_says_it_needs_node(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """U8/Q3: the usage line named neither `setup` nor `--node`."""
+    code, out = _cli(monkeypatch, capsys, ["setup"])
+    assert code == 2
+    assert "--node" in out and "lop browser install" in out
+
+
+def test_cli_uninstall_rows_say_remove_and_name_what_is_kept(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], paths: Path
+) -> None:
+    """U12: rows read "would apply — would remove"; nothing said what stays."""
+    node = FakeNode(paths, provisioned=True)
+    monkeypatch.setattr(node_host, "default_env", lambda: node.env)
+    code, out = _cli(monkeypatch, capsys, ["uninstall", "--node", "--dry-run"])
+    assert code == 0
+    assert "  chrome (root): would remove" in out
+    assert "would apply" not in out
+    assert "Kept:" in out
+
+
+def test_paired_line_says_no_site_opens_yet(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], paths: Path
+) -> None:
+    """U1: success read as "ready", but no site can be approved on a node yet."""
+    node = FakeNode(paths, provisioned=True)
+    monkeypatch.setattr(node_host, "default_env", lambda: node.env)
+    _code, out = _cli(monkeypatch, capsys, ["setup", "--node", "--dry-run"])
+    assert "no site can be opened" in out.splitlines()[-1]

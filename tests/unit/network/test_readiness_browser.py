@@ -52,7 +52,7 @@ def test_not_installed_warns_with_the_authorised_setup_remedy() -> None:
     assert row["code"] == readiness.CODE_NOT_INSTALLED
     assert row["detail"] == f"sessions on {LABEL} have no browser tool"
     (remedy,) = row["remedies"]
-    assert f"on {LABEL}: `lop browser setup --node --authorised-by '<who>'`" in remedy
+    assert f"on {LABEL}: `lop browser setup --node --authorised-by '<who, when>'`" in remedy
     assert "operator authorisation required" in remedy
     assert "Headless nodes" in remedy
 
@@ -74,23 +74,42 @@ def test_installed_but_unusable_warns_with_the_repair_remedy(
     assert clause in row["detail"]
     assert row["detail"].endswith("sessions there have no browser tool")
     assert row["remedies"] == [
-        f"on {LABEL}: `lop browser setup --node --repair --authorised-by '<who>'`"
+        f"on {LABEL}: `lop browser setup --node --repair --authorised-by '<who, when>'`"
     ]
 
 
-@pytest.mark.parametrize("fact", [{"host": "user"}, {"host": "unsupported_platform"}])
-def test_user_hosts_and_other_platforms_are_not_applicable(fact: dict[str, Any]) -> None:
+@pytest.mark.parametrize(
+    ("fact", "clause"),
+    [
+        ({"host": "user"}, "a user's browser host"),
+        ({"host": "unsupported_platform", "platform": "darwin"}, "darwin"),
+        # R1-6: a Linux node setup would refuse reads n/a, never "run setup".
+        ({"host": "unsupported_platform", "platform": "linux aarch64"}, "linux aarch64"),
+        ({"host": "unsupported_distro"}, "dnf/rpm"),
+    ],
+)
+def test_user_hosts_and_unsupported_nodes_are_not_applicable(
+    fact: dict[str, Any], clause: str
+) -> None:
     row = _row(fact)
     assert row["state"] == "n/a"
     assert row["ok"] is True
-    assert row["detail"].startswith("n/a:")
+    assert clause in row["detail"]
+    # U10: the state column already says n/a; the detail must not repeat it.
+    assert not row["detail"].startswith("n/a")
     assert row["remedies"] == []
 
 
-def test_an_older_peer_reads_peer_too_old_not_no_browser() -> None:
+def test_an_older_peer_reads_like_its_neighbouring_rows() -> None:
+    """U6: "predates readiness reporting" was untrue of every 0.102.x peer, which
+    answers readiness and simply lacks this one fact."""
     row = _row(None)
-    assert row["code"] == readiness.CODE_PEER_TOO_OLD
     assert row["capability"] == readiness.CAPABILITY_BROWSER
+    assert row["code"] == readiness.CODE_UNKNOWN
+    assert row["detail"] == "the peer's answer did not carry this check"
+    assert "predates" not in row["detail"]
+    (remedy,) = row["remedies"]
+    assert remedy.startswith(f"update lop on {LABEL}")
 
 
 def test_an_unreadable_fact_is_unknown() -> None:

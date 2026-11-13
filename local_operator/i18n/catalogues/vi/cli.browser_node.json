@@ -17,7 +17,7 @@
   "cli.browser_node.refuse_authorisation": "Bị từ chối: cài trình duyệt lên một node cần người vận hành ủy quyền. Chạy lại với --authorised-by '<ai đã ủy quyền, và khi nào>'; nội dung được ghi nguyên văn.",
   "cli.browser_node.paired_yes": "Đã ghép nối: có. Phiên mới trên node này có công cụ browser; các phiên đang chạy từ trước thì không.",
   "cli.browser_node.paired_no": "Đã ghép nối: không.",
-  "cli.browser_node.record": "Hồ sơ thiết lập: {path}",
+  "cli.browser_node.record": "Biên bản thiết lập: {path}",
   "cli.browser_node.failed_tail": "Quá trình thiết lập dừng ở bước thất bại. Hãy sửa lỗi, rồi chạy `lop browser setup --node --repair --authorised-by '<who>'`.",
   "cli.browser_node.help_setup": "Thiết lập trình duyệt do node quản lý trên một node mesh không màn hình",
   "cli.browser_node.help_node": "Cài Chrome headless do node quản lý (chỉ cho node mesh không màn hình)",

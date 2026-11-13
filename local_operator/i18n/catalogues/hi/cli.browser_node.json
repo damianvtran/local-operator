@@ -27,5 +27,5 @@
   "cli.browser_node.help_extension_dir": "नवीनतम GitHub Release फ़ाइल के बजाय यह बिल्ड की गई एक्सटेंशन डायरेक्टरी पैक करें",
   "cli.browser_node.help_json": "परिणाम JSON के रूप में छापें",
   "cli.browser_node.help_authorised_by": "किसने अनुमति दी, और कब; जस का तस दर्ज किया जाता है (--dry-run के अलावा अनिवार्य)",
-  "cli.browser_node.help_uninstall_node": "नोड-प्रबंधित ब्राउज़र हटाएँ (यूनिट, पॉलिसी, वर्ज़न लॉक, Chrome पैकेज)"
+  "cli.browser_node.help_uninstall_node": "नोड-प्रबंधित ब्राउज़र हटाएँ (यूनिट, नीति, संस्करण लॉक, Chrome पैकेज)"
 }

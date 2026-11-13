@@ -360,12 +360,14 @@ rather than failing the device.
 
 - **browser** — would a session on the node get a `browser` tool? Same
   non-gating shape as `tooling`. `warn` not installed: the remedy is `lop
-  browser setup --node --authorised-by '<who>'` ON the node, which installs the
-  node-managed headless browser and so needs the operator's authorisation;
-  `warn` installed but unusable (Chrome unit down, daemon down, unpaired): `lop
-  browser setup --node --repair`; `n/a` where a user's own browser host (desktop
-  app or extension) serves the device. Details: `guide://browser` "Headless
-  nodes". Sessions started before setup keep their old tool list.
+  browser setup --node --authorised-by '<who, when>'` ON the node, which
+  installs the node-managed headless browser and so needs the operator's
+  authorisation; `warn` installed but unusable (Chrome unit down, daemon down,
+  unpaired): `lop browser setup --node --repair --authorised-by '<who, when>'`;
+  `n/a` where a user's own browser host (desktop app or extension) serves the
+  device, or where the node-managed browser is unsupported (not Linux x86_64,
+  not dnf/rpm). Details: `guide://browser` "Headless nodes". Sessions started
+  before setup keep their old tool list.
 
 Bring the node's DEFINITIONS and MCP SERVERS across deliberately when a create
 will not: `lop network definitions push --peer <id>` (or `--all-peers`) and

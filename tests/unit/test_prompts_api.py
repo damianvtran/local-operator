@@ -970,6 +970,11 @@ def test_headless_node_gets_the_node_managed_browser_note(monkeypatch) -> None:
     assert "Never install or script any other browser engine" in inventory
     assert "playwright" in inventory
     assert "no browser host is connected on this host" not in inventory
+    # Round 1 (U1, U2, U3): the note says no site opens yet, how long setup
+    # runs, and what counts as the operator's authorisation.
+    assert "no site can be opened" in inventory
+    assert "900" in inventory and "background" in inventory
+    assert "naming this node" in inventory
     # The note still strips cleanly as a note (prompt-section split).
     assert split_inventory_sections(inventory)["notes"].startswith("This session has NO browser")
 

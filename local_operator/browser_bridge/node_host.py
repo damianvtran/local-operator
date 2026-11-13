@@ -60,19 +60,22 @@ from __future__ import annotations
 
 import contextlib
 import datetime as _dt
+import functools
 import getpass
 import hashlib
 import json
 import os
 import platform
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import urllib.request
 import zipfile
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -140,6 +143,14 @@ STATE_WOULD_APPLY = "would_apply"
 STATE_APPLIED = "applied"
 STATE_FAILED = "failed"
 STATE_SKIPPED = "skipped"
+#: A step a refusal stopped before it ran (sudo would prompt, or another step
+#: was certain to fail). Distinct from ``skipped``, which follows a REAL failure:
+#: "skipped, because an earlier step failed" was wrong when nothing had run.
+STATE_NOT_RUN = "not_run"
+#: Dry-run only: apply is certain to refuse or fail this step as things stand
+#: (sudo would prompt, an extension that predates managed pairing). The dry-run
+#: is what an operator reads BEFORE authorising, so it must predict that.
+STATE_WOULD_FAIL = "would_fail"
 
 REFUSE_PLATFORM = "unsupported_platform"
 REFUSE_DISTRO = "unsupported_distro"
@@ -147,6 +158,9 @@ REFUSE_USER_MACHINE = "user_machine"
 REFUSE_NOT_MEMBER = "not_mesh_member"
 REFUSE_SUDO = "sudo_would_prompt"
 REFUSE_NO_RECORD = "nothing_to_repair"
+#: uninstall with no record of a lop install: what is there (a Chrome, Google's
+#: repo file) is someone else's, and uninstall removes only what setup put there.
+REFUSE_NOT_INSTALLED = "nothing_to_uninstall"
 REFUSE_AUTHORISATION = "authorisation_required"
 
 
@@ -356,6 +370,10 @@ class Options:
 class Check:
     in_place: bool
     detail: str = ""
+    #: Apply is CERTAIN to fail this step as things stand. Setup then stops
+    #: before changing anything (rather than failing after Chrome and the
+    #: other root steps landed), and the dry-run reports it as ``would_fail``.
+    fails: bool = False
 
 
 @dataclass
@@ -448,6 +466,23 @@ def _sha256(data: bytes) -> str:
 
 def _file_sha256(path: Path) -> str:
     return _sha256(path.read_bytes())
+
+
+def _primary_fingerprints(listing: str) -> list[str]:
+    """Each primary key's fingerprint in ``gpg --with-colons --show-keys`` output.
+
+    A primary key is a ``pub`` record; ITS fingerprint is the ``fpr`` record
+    directly after it. Every ``fpr`` after a ``sub`` belongs to a subkey and is
+    deliberately not counted.
+    """
+    found: list[str] = []
+    previous = ""
+    for line in listing.splitlines():
+        fields = line.split(":")
+        if fields[0] == "fpr" and previous == "pub" and len(fields) > 9:
+            found.append(fields[9])
+        previous = fields[0]
+    return found
 
 
 # --- renderers (pure; their output IS the idempotency check) -------------------
@@ -638,14 +673,16 @@ class _Plan:
                 ),
                 "gpg --show-keys",
             )
-            fingerprints = [
-                line.split(":")[9] for line in listing.splitlines() if line.startswith("fpr:")
-            ]
-            if SIGNING_KEY_FINGERPRINT not in fingerprints:
+            primaries = _primary_fingerprints(listing)
+            # EXACTLY one primary key, and it is the pin. `rpm --import` imports
+            # every key in the file, so "the pin appears somewhere" (a subkey
+            # row, or Google's key with another appended) is not enough
+            # (round 1, R1-5).
+            if primaries != [SIGNING_KEY_FINGERPRINT]:
                 raise StepError(
                     f"{SIGNING_KEY_URL} does not carry the expected key "
-                    f"{SIGNING_KEY_FINGERPRINT} "
-                    f"(found {', '.join(fingerprints) or 'none'}); refused"
+                    f"{SIGNING_KEY_FINGERPRINT} as its only primary key "
+                    f"(primary keys found: {', '.join(primaries) or 'none'}); refused"
                 )
             self._require(self.env.sudo("rpm", "--import", str(key_file)), "rpm --import")
         self.updates.setdefault("chrome", {})["signing_key"] = {
@@ -705,7 +742,16 @@ class _Plan:
             if "digests signatures OK" not in verdict:
                 raise StepError(f"rpm -K did not verify {rpm.name}: {verdict.strip()[:200]}")
             digest = _file_sha256(rpm)
-            self._require(self.env.sudo("dnf", "-y", "install", str(rpm)), "dnf install chrome")
+            # `--setopt=localpkg_gpgcheck=1`: dnf does NOT verify a local file's
+            # signature by default (measured on this node's dnf 4.14:
+            # localpkg_gpgcheck=0), and the staging dir is user-owned, so a
+            # same-uid process could swap the file between `rpm -K` and this
+            # install. Re-verifying inside the root transaction closes that gap;
+            # `rpm -K` stays for the recorded verdict (round 1, R1-4).
+            self._require(
+                self.env.sudo("dnf", "-y", "--setopt=localpkg_gpgcheck=1", "install", str(rpm)),
+                "dnf install chrome",
+            )
         version = self.env.run(CHROME_BINARY, "--version").stdout.strip()
         chrome = self.updates.setdefault("chrome", {})
         chrome.update(
@@ -821,10 +867,27 @@ class _Plan:
             return self._extension_source
         recorded = self._recorded_extension()
         version = str(recorded.get("version") or "")
+        kept = str(recorded.get("source") or "recorded")
         if version and not self.options.upgrade and self._crx_path(version).is_file():
-            self._extension_source = (version, None, str(recorded.get("source") or "recorded"))
+            self._extension_source = (version, None, kept)
             return self._extension_source
-        self._extension_source = self._release_extension()
+        release = self._release_extension()
+        if (
+            version
+            and self._crx_path(version).is_file()
+            and _version_tuple(release[0]) <= _version_tuple(version)
+        ):
+            # `--upgrade` moves FORWARD only. The newest GitHub Release can lag
+            # an install packed from `--extension-dir` (measured: release 0.1.26
+            # vs installed 0.1.27), and offering it was a downgrade the dry-run
+            # presented as an upgrade (round 1, U5c).
+            self._extension_source = (
+                version,
+                None,
+                f"{kept}; the newest release ({release[0]}, {release[2]}) is not newer, so kept",
+            )
+            return self._extension_source
+        self._extension_source = release
         return self._extension_source
 
     def _release_extension(self) -> tuple[str, Path | None, str]:
@@ -873,11 +936,14 @@ class _Plan:
         except (OSError, ValueError, KeyError, StepError) as error:
             return Check(False, f"extension source unavailable: {error}")
         if _version_tuple(version) < _version_tuple(MANAGED_PAIRING_MIN_EXTENSION_VERSION):
+            # Certain: apply_extension raises for exactly this, so setup stops
+            # before Chrome or any root step changes (round 1, U5c).
             return Check(
                 False,
                 f"extension {version} ({provenance}) predates managed pairing "
                 f"({MANAGED_PAIRING_MIN_EXTENSION_VERSION}); "
                 "pass --extension-dir with a newer build",
+                fails=True,
             )
         crx = self._crx_path(version)
         recorded = self._recorded_extension()
@@ -1029,8 +1095,19 @@ class _Plan:
     def _write_policy(self, policy: Mapping[str, Any], *, secret: bool = False) -> None:
         text = json.dumps(policy, indent=2) + "\n"
         # 0640 root:<user's group> while a code is in it: Chrome (running as
-        # this user) can read it, other local accounts cannot.
+        # this user) can read it, other local accounts cannot — PROVIDED the
+        # group is private. A shared primary group (`users`) would hand the
+        # code to its other members for the pairing window, so that case is
+        # refused rather than written (0600 root would keep Chrome out too).
         group = self.env.run("id", "-gn").stdout.strip() if secret else "root"
+        if secret:
+            sharers = self._group_sharers(group)
+            if sharers:
+                raise StepError(
+                    f"the pairing code would be readable by group {group!r}, which "
+                    f"{', '.join(sharers)} also belong to; refused. Run setup from an "
+                    "account whose primary group is private"
+                )
         self._sudo_install_file(
             text, POLICY_PATH, "0640" if secret else "0644", group=group or "root"
         )
@@ -1040,6 +1117,26 @@ class _Plan:
                 "sha256": _sha256(text.encode()),
                 "content": dict(policy),
             }
+
+    def _group_sharers(self, group: str) -> list[str]:
+        """Accounts other than this one in ``group`` (listed members or primary gid).
+
+        Fails CLOSED: a group that cannot be read is treated as shared, because
+        the alternative is writing a secret for an audience nobody checked
+        (round 1, R1-7).
+        """
+        entry = self.env.run("getent", "group", group)
+        fields = entry.stdout.strip().split(":")
+        if entry.returncode != 0 or len(fields) < 4:
+            return [f"(unreadable group entry for {group!r})"]
+        gid = fields[2]
+        others = {name for name in fields[3].split(",") if name and name != self.env.user}
+        accounts = self.env.run("getent", "passwd")
+        for line in accounts.stdout.splitlines():
+            parts = line.split(":")
+            if len(parts) >= 4 and parts[3] == gid and parts[0] != self.env.user:
+                others.add(parts[0])
+        return sorted(others)
 
     def check_profile(self) -> Check:
         path = self.env.profile_dir
@@ -1256,9 +1353,15 @@ def _live_paired(status: Mapping[str, Any], extension_id: str) -> bool:
 # --- entry points ---------------------------------------------------------------
 
 
-def _preflight(
-    env: NodeEnv, options: Options, record: dict[str, Any] | None
-) -> dict[str, Any] | None:
+#: The removal remedy users read on a refused uninstall/authorisation, and the
+#: placeholder every command example uses: ONE spelling (round 1, U11).
+AUTHORISED_BY_HINT = "'<who, when>'"
+
+
+def _host_refusal(env: NodeEnv, *, user_check: bool = True) -> dict[str, Any] | None:
+    """Platform, distribution and user-machine refusals: shared by setup,
+    uninstall and :func:`browser_fact`, so all three agree on which hosts the
+    node-managed browser exists for (round 1, R1-2 / R1-6)."""
     remedy_user = "use the browser extension or the desktop app instead (guide://browser)"
     if env.system() != "linux" or env.machine() not in ("x86_64", "amd64"):
         return _refusal(
@@ -1276,7 +1379,7 @@ def _preflight(
             "(Amazon Linux 2023, Fedora, RHEL family)",
             "run it on a supported node, or install a browser there by hand outside Local Operator",
         )
-    reason = env.user_machine_reason()
+    reason = env.user_machine_reason() if user_check else ""
     if reason:
         return _refusal(
             REFUSE_USER_MACHINE,
@@ -1285,6 +1388,15 @@ def _preflight(
             "or the desktop app (guide://browser); never install the node-managed one there",
             reason=reason,
         )
+    return None
+
+
+def _preflight(
+    env: NodeEnv, options: Options, record: dict[str, Any] | None
+) -> dict[str, Any] | None:
+    refusal = _host_refusal(env)
+    if refusal:
+        return refusal
     if not env.mesh_member():
         return _refusal(
             REFUSE_NOT_MEMBER,
@@ -1295,25 +1407,82 @@ def _preflight(
         return _refusal(
             REFUSE_NO_RECORD,
             f"nothing to repair: {env.record_path} does not exist",
-            "run `lop browser setup --node --authorised-by '<who>'` to install it",
+            f"run `lop browser setup --node --authorised-by {AUTHORISED_BY_HINT}` to install it",
             path=str(env.record_path),
         )
     if not options.dry_run and not options.authorised_by.strip():
         return _refusal(
             REFUSE_AUTHORISATION,
             "installing a browser on a node needs the operator's authorisation, recorded verbatim",
-            "re-run with --authorised-by '<who authorised it, and when>'",
+            f"re-run with --authorised-by {AUTHORISED_BY_HINT}",
         )
     return None
 
 
-def setup(options: Options, env: NodeEnv | None = None) -> Outcome:
+#: Called with each step's result the moment it is known, and the outcome so
+#: far (whose ``refusal`` is already set when a refusal produced the rows).
+OnStep = Callable[["StepResult", "Outcome"], None]
+
+
+def _emit(outcome: Outcome, result: StepResult, on_step: OnStep | None) -> None:
+    """Record a step and report it NOW.
+
+    A fresh install runs for minutes (a ~110 MB rpm, two bounded 120 s waits),
+    and its caller is usually an agent's shell call with a timeout: printing
+    only at the end meant a killed call left no trace of which steps landed
+    (round 1, U2). The CLI streams through this.
+    """
+    outcome.steps.append(result)
+    if on_step is not None:
+        on_step(result, outcome)
+
+
+@contextlib.contextmanager
+def _unwind_on_signals() -> Iterator[None]:
+    """Turn SIGTERM/SIGINT/SIGHUP into an exception for the duration of a run.
+
+    WHY: Python's default SIGTERM/SIGHUP action kills the process WITHOUT
+    unwinding, so ``apply_pairing``'s ``finally`` — the one that takes the
+    pairing code back out of Chrome's policy — never ran when an agent's
+    command timeout fired mid-pairing (round 1, U2). Raising ``SystemExit(128 +
+    signum)`` unwinds through every ``finally`` and still exits with the
+    conventional killed-by-signal code. A second signal during that cleanup is
+    ignored so the cleanup itself is not cut short (SIGKILL still works). A
+    signal the caller IGNORES (a background job's SIGINT) stays ignored, and
+    off the main thread, where handlers cannot be installed, nothing changes.
+    """
+    if threading.current_thread() is not threading.main_thread():
+        yield
+        return
+    fired: list[int] = []
+
+    def _handler(signum: int, _frame: object) -> None:
+        if fired:
+            return
+        fired.append(signum)
+        raise SystemExit(128 + signum)
+
+    previous: dict[int, Any] = {}
+    for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+        current = signal.getsignal(sig)
+        if current is signal.SIG_IGN:
+            continue
+        previous[sig] = signal.signal(sig, _handler)
+    try:
+        yield
+    finally:
+        for sig, handler in previous.items():
+            signal.signal(sig, handler)
+
+
+def setup(
+    options: Options, env: NodeEnv | None = None, *, on_step: OnStep | None = None
+) -> Outcome:
     env = env or default_env()
     record = read_record(env)
     outcome = Outcome(
         mode="dry_run" if options.dry_run else ("repair" if options.repair else "apply")
     )
-    outcome.record_path = str(env.record_path)
     refusal = _preflight(env, options, record)
     if refusal:
         outcome.ok = False
@@ -1321,66 +1490,105 @@ def setup(options: Options, env: NodeEnv | None = None) -> Outcome:
         return outcome
     plan = _Plan(env, options, record)
     try:
-        return _run_plan(env, options, record, plan, outcome)
+        with _unwind_on_signals():
+            return _run_plan(env, options, record, plan, outcome, on_step)
     finally:
         for path in plan.scratch:
             shutil.rmtree(path, ignore_errors=True)
 
 
+def _sudo_refusal(pending_privileged: list[str]) -> dict[str, Any]:
+    return _refusal(
+        REFUSE_SUDO,
+        f"{len(pending_privileged)} step(s) need root "
+        f"({', '.join(pending_privileged)}) and `sudo -n` would prompt",
+        "run it from an account with non-interactive sudo; at an interactive terminal, run "
+        "`sudo -v` first and then this command again in the same terminal "
+        "(guide://browser 'Headless nodes')",
+        steps=", ".join(pending_privileged),
+    )
+
+
 def _run_plan(
-    env: NodeEnv, options: Options, record: dict[str, Any] | None, plan: _Plan, outcome: Outcome
+    env: NodeEnv,
+    options: Options,
+    record: dict[str, Any] | None,
+    plan: _Plan,
+    outcome: Outcome,
+    on_step: OnStep | None = None,
 ) -> Outcome:
     steps = plan.steps()
     checks = [(step, step.check()) for step in steps]
     pending_privileged = [
         step.id for step, check in checks if not check.in_place and step.privileged
     ]
+    # Probed in the dry-run too (read-only: `sudo -n true`): the dry-run is
+    # what the operator reads before authorising, and it used to exit 0 with
+    # every row "would apply" where apply would refuse (round 1, U5a).
+    sudo_blocked = bool(pending_privileged) and env.sudo("true").returncode != 0
+    certain = any(not check.in_place and check.fails for _step, check in checks)
     if options.dry_run:
         for step, check in checks:
-            state = STATE_IN_PLACE if check.in_place else STATE_WOULD_APPLY
-            outcome.steps.append(StepResult(step.id, step.privileged, state, check.detail))
+            if check.in_place:
+                state, detail = STATE_IN_PLACE, check.detail
+            elif check.fails:
+                state, detail = STATE_WOULD_FAIL, check.detail
+            elif sudo_blocked and step.privileged:
+                state = STATE_WOULD_FAIL
+                detail = f"needs root and `sudo -n` would prompt ({check.detail})"
+            else:
+                state, detail = STATE_WOULD_APPLY, check.detail
+            _emit(outcome, StepResult(step.id, step.privileged, state, detail), on_step)
+        outcome.ok = not (sudo_blocked or certain)
         outcome.paired = plan._paired()  # noqa: SLF001 - same module
         return outcome
-    if pending_privileged and env.sudo("true").returncode != 0:
+    if sudo_blocked or certain:
+        # Stop BEFORE any change: a refusal (sudo) or a step certain to fail
+        # (an extension without managed pairing) used to surface only after
+        # Chrome and the other root steps had already been installed (U5c).
+        # Nothing ran, so nothing is recorded either (round 1, U4b).
         outcome.ok = False
-        outcome.refusal = _refusal(
-            REFUSE_SUDO,
-            f"{len(pending_privileged)} step(s) need root "
-            f"({', '.join(pending_privileged)}) and `sudo -n` would prompt",
-            "run it from an account with non-interactive sudo, or have an administrator apply "
-            "those steps (guide://browser 'Headless nodes')",
-            steps=", ".join(pending_privileged),
-        )
-        outcome.steps = [
-            StepResult(
-                s.id, s.privileged, STATE_IN_PLACE if c.in_place else STATE_SKIPPED, c.detail
-            )
-            for s, c in checks
-        ]
+        if sudo_blocked:
+            outcome.refusal = _sudo_refusal(pending_privileged)
+        for step, check in checks:
+            if check.in_place:
+                result = StepResult(step.id, step.privileged, STATE_IN_PLACE, check.detail)
+            elif check.fails:
+                result = StepResult(step.id, step.privileged, STATE_FAILED, check.detail)
+            else:
+                result = StepResult(step.id, step.privileged, STATE_NOT_RUN, check.detail)
+            _emit(outcome, result, on_step)
         return outcome
     failed = False
     applied: list[str] = []
     for step, _initial in checks:
         if failed:
-            outcome.steps.append(StepResult(step.id, step.privileged, STATE_SKIPPED))
+            _emit(outcome, StepResult(step.id, step.privileged, STATE_SKIPPED), on_step)
             continue
         # Re-check at apply time: an earlier step (a new CRX, a restarted
         # unit) can change a later step's answer.
         check = step.check()
         if check.in_place:
-            outcome.steps.append(StepResult(step.id, step.privileged, STATE_IN_PLACE, check.detail))
+            _emit(
+                outcome,
+                StepResult(step.id, step.privileged, STATE_IN_PLACE, check.detail),
+                on_step,
+            )
             continue
         try:
             detail = step.apply()
         except (StepError, OSError, ValueError, KeyError, subprocess.SubprocessError) as error:
             failed = True
             outcome.ok = False
-            outcome.steps.append(StepResult(step.id, step.privileged, STATE_FAILED, str(error)))
+            _emit(outcome, StepResult(step.id, step.privileged, STATE_FAILED, str(error)), on_step)
             continue
         applied.append(step.id)
-        outcome.steps.append(StepResult(step.id, step.privileged, STATE_APPLIED, detail))
+        _emit(outcome, StepResult(step.id, step.privileged, STATE_APPLIED, detail), on_step)
     outcome.paired = plan._paired()  # noqa: SLF001 - same module
     _write_record(env, record, plan.updates, options, applied, outcome)
+    # Set only once written: the CLI prints `Record:` from it, and a path for a
+    # file that was never written read as an audit trail that did not exist.
+    outcome.record_path = str(env.record_path)
     return outcome
 
 
@@ -1408,6 +1616,11 @@ def _write_record(
     if applied or not record:
         merged["recorded_at"] = env.now()
         merged["authorised_by"] = options.authorised_by
+    if applied:
+        # A setup that changed something is an install again: an earlier
+        # uninstall's marker would otherwise read as "not installed" forever,
+        # and the readiness remedy (run setup) could not clear it (round 1, R1-3).
+        merged.pop("uninstalled_at", None)
     merged["paired"] = bool(outcome.paired)
     merged.setdefault("mode", "headless (--headless=new); xvfb not needed")
     merged.setdefault("sandbox", "on; no --no-sandbox, no remote-debugging port")
@@ -1426,26 +1639,55 @@ def _write_record(
     _write_private(env.record_path, json.dumps(merged, indent=2) + "\n")
 
 
-def uninstall(options: Options, env: NodeEnv | None = None) -> Outcome:
+def _owns_install(record: Mapping[str, Any] | None) -> bool:
+    """Whether the record proves lop installed a Chrome here that is still there.
+
+    ``chrome`` is written by ``apply_chrome`` only; ``uninstalled_at`` by a
+    SUCCESSFUL uninstall only (a partial one can be re-run to finish).
+    """
+    if not isinstance(record, Mapping) or record.get("uninstalled_at"):
+        return False
+    chrome = record.get("chrome")
+    return isinstance(chrome, Mapping) and bool(chrome)
+
+
+def uninstall(
+    options: Options, env: NodeEnv | None = None, *, on_step: OnStep | None = None
+) -> Outcome:
     """Remove what setup installed that would keep running or updating.
 
     Removes the Chrome unit, the policy, the version lock, the package and the
     repo file. KEEPS the extension signing key (a reinstall must get the same
-    extension id), the imported Google key and the fonts (inert, shared), and
-    the record (marked uninstalled, for the audit trail).
+    extension id), the imported Google key and the fonts (inert, shared), the
+    bridge daemon, and the record (marked uninstalled, for the audit trail).
+
+    OWNERSHIP FIRST (round 1, R1-2): the presence probes below match ANY
+    ``google-chrome-stable`` and ANY ``google-chrome.repo``, so without the
+    same host checks as setup and a record proving lop installed it, this
+    removed a person's own Chrome on a Fedora desktop. It now refuses there.
     """
     env = env or default_env()
     record = read_record(env)
     outcome = Outcome(mode="uninstall_dry_run" if options.dry_run else "uninstall")
-    outcome.record_path = str(env.record_path)
-    if not options.dry_run and not options.authorised_by.strip():
-        outcome.ok = False
-        outcome.refusal = _refusal(
+    refusal = _host_refusal(env)
+    if refusal is None and not _owns_install(record):
+        refusal = _refusal(
+            REFUSE_NOT_INSTALLED,
+            f"{env.record_path} records no node-managed browser installed by lop, so there is "
+            "nothing of lop's to remove; a browser installed some other way is not lop's to remove",
+            "nothing to do",
+            path=str(env.record_path),
+        )
+    if refusal is None and not options.dry_run and not options.authorised_by.strip():
+        refusal = _refusal(
             REFUSE_AUTHORISATION,
             "removing the node-managed browser needs the operator's authorisation, "
             "recorded verbatim",
-            "re-run with --authorised-by '<who authorised it, and when>'",
+            f"re-run with --authorised-by {AUTHORISED_BY_HINT}",
         )
+    if refusal is not None:
+        outcome.ok = False
+        outcome.refusal = refusal
         return outcome
     plan = _Plan(env, options, record)
 
@@ -1458,7 +1700,10 @@ def uninstall(options: Options, env: NodeEnv | None = None) -> Outcome:
         plan._require(env.sudo(*argv), " ".join(argv))  # noqa: SLF001 - same module
 
     def _locked() -> bool:
-        listed = env.run("dnf", "versionlock", "list")
+        try:
+            listed = env.run("dnf", "versionlock", "list")
+        except (OSError, subprocess.SubprocessError):
+            return False
         return listed.returncode == 0 and f"{CHROME_PACKAGE}-" in listed.stdout
 
     # Order matters: stop Chrome before its package goes, drop the policy that
@@ -1488,33 +1733,45 @@ def uninstall(options: Options, env: NodeEnv | None = None) -> Outcome:
     ]
     pending = list(actions)
     needs_root = [name for name, privileged, present, _r in pending if privileged and present()]
-    if not options.dry_run and needs_root:
-        if env.sudo("true").returncode != 0:
-            outcome.ok = False
-            outcome.refusal = _refusal(
-                REFUSE_SUDO,
-                f"{', '.join(needs_root)} need root to remove and `sudo -n` would prompt",
-                "run it from an account with non-interactive sudo",
-                steps=", ".join(needs_root),
-            )
-            return outcome
+    sudo_blocked = bool(needs_root) and env.sudo("true").returncode != 0
+    if sudo_blocked and not options.dry_run:
+        outcome.ok = False
+        outcome.refusal = _refusal(
+            REFUSE_SUDO,
+            f"{', '.join(needs_root)} need root to remove and `sudo -n` would prompt",
+            "run it from an account with non-interactive sudo; at an interactive terminal, run "
+            "`sudo -v` first and then this command again in the same terminal",
+            steps=", ".join(needs_root),
+        )
+        return outcome
     for name, privileged, present, remove in pending:
         if not present():
-            outcome.steps.append(StepResult(name, privileged, STATE_IN_PLACE, "already absent"))
+            _emit(outcome, StepResult(name, privileged, STATE_IN_PLACE, "already absent"), on_step)
             continue
         if options.dry_run:
-            outcome.steps.append(StepResult(name, privileged, STATE_WOULD_APPLY, "would remove"))
+            # The dry-run predicts the sudo refusal, as setup's does (U5a).
+            if sudo_blocked and privileged:
+                outcome.ok = False
+                result = StepResult(
+                    name, privileged, STATE_WOULD_FAIL, "needs root and `sudo -n` would prompt"
+                )
+            else:
+                result = StepResult(name, privileged, STATE_WOULD_APPLY, "would remove")
+            _emit(outcome, result, on_step)
             continue
         try:
             remove()
         except (StepError, OSError) as error:
             outcome.ok = False
-            outcome.steps.append(StepResult(name, privileged, STATE_FAILED, str(error)))
+            _emit(outcome, StepResult(name, privileged, STATE_FAILED, str(error)), on_step)
             continue
-        outcome.steps.append(StepResult(name, privileged, STATE_APPLIED, "removed"))
+        _emit(outcome, StepResult(name, privileged, STATE_APPLIED, "removed"), on_step)
     if not options.dry_run and record is not None:
         record = dict(record)
-        record["uninstalled_at"] = env.now()
+        if outcome.ok:
+            # Only a COMPLETE removal ends lop's ownership: a partial one keeps
+            # the record live so the same command can finish the job.
+            record["uninstalled_at"] = env.now()
         record["paired"] = False
         prior = record.get("history")
         history: list[Any] = list(prior) if isinstance(prior, list) else []
@@ -1528,6 +1785,7 @@ def uninstall(options: Options, env: NodeEnv | None = None) -> Outcome:
         )
         record["history"] = history[-50:]
         _write_private(env.record_path, json.dumps(record, indent=2) + "\n")
+        outcome.record_path = str(env.record_path)
     return outcome
 
 
@@ -1548,6 +1806,17 @@ def is_headless_node() -> bool:
         return _mesh_member()
     except Exception:  # noqa: BLE001
         return False
+
+
+@functools.lru_cache(maxsize=1)
+def headless_node_once() -> bool:
+    """:func:`is_headless_node`, read ONCE per process.
+
+    For the browser tool's approval copy (round 1, U1): its probe runs
+    ``loginctl`` and reads mesh state, too slow to repeat per tool call, and
+    node-ness does not change under a running process. Tests monkeypatch this.
+    """
+    return is_headless_node()
 
 
 def browser_fact(env: NodeEnv | None = None) -> dict[str, Any]:
@@ -1576,6 +1845,15 @@ def browser_fact(env: NodeEnv | None = None) -> dict[str, Any]:
             # (an SSH'd-into workstation, say): not this feature's concern.
             if status.get("paired"):
                 return {"host": "user"}
+            # A node setup would refuse (aarch64, Debian) is n/a, not "not
+            # installed": that row's remedy is the very command that refuses
+            # (round 1, R1-6). Same checks as setup, minus the user-machine
+            # one already answered above.
+            refusal = _host_refusal(env, user_check=False)
+            if refusal is not None and refusal["code"] == REFUSE_PLATFORM:
+                return {"host": "unsupported_platform", "platform": f"linux {env.machine()}"}
+            if refusal is not None:
+                return {"host": "unsupported_distro"}
             return {"host": "none"}
         chrome_value = record.get("chrome")
         extension_value = record.get("extension")

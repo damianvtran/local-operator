@@ -26430,6 +26430,21 @@ async def _bridge_access(
     notify = _notify_channel(context)
     delegated = _delegated_here(context)
     if action == "request_access":
+        from local_operator.browser_bridge import backend as _bridge_backend
+
+        # `host` is the handle spelling here (`bridge`/`ui`); a node's managed
+        # Chrome is always the bridge (extension) host.
+        if host != HOST_UI_PREFIX and _bridge_backend._on_headless_node():  # noqa: SLF001
+            # On a headless node the prompt would queue in an extension popup
+            # nobody can reach, and its text tells the model to send the
+            # operator there (PR #3935 round 1, U1). Answer instead of queueing.
+            node_origin = _bridge_backend._origin(url)  # noqa: SLF001
+            return _text(
+                tool_call_id,
+                "browser",
+                _bridge_backend.node_approval_unavailable(node_origin),
+                details={"origin": node_origin, "state": "unavailable_on_node"},
+            )
         result, problem = await _bridge_call(
             tool_call_id, "request_access", {"url": url, **identity}, client=client
         )
