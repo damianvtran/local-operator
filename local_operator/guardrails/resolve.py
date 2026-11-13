@@ -37,7 +37,6 @@ import fnmatch
 import itertools
 import os
 import re
-import sys
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 
@@ -1538,181 +1537,316 @@ _INTERPRETER_DELETE_RE = re.compile(
 )
 
 
-#: Modules a provably read-only ``python -c`` may import. Each exposes no
-#: call that writes, deletes or runs a program WITHOUT going through a name
-#: ``_PY_DENIED_ATTRS`` refuses (``os``/``sys`` re-exports, ``open``…). Any
-#: other import — ``os``, ``shutil``, ``subprocess``, ``base64``, ``pickle``,
-#: ``importlib``, ``ctypes`` — makes the program unprovable, so it keeps the
-#: backstop's HIGH. An allowlist, not a denylist: a module we forgot to list
-#: costs a judge call, never a silent LOW.
+#: WHY AN ALLOW-LIST OVER THE WHOLE AST (review r1 M1 + r2 M3, PR #3918):
+#: two rounds of a DENY-list over Python's attribute graph each found a new
+#: route to ``getattr`` by a string — ``string.Formatter().get_field("0.unlink"
+#: …)``, ``pathlib.operator.methodcaller("unlink")``, then a generator's
+#: ``gi_frame.f_builtins["getattr"](p, "un"+"link")()`` — and every one deleted
+#: real files at LOW. The attribute graph is open-ended, so a deny-list can
+#: never be shown complete. :func:`python_code_read_only` therefore admits a
+#: program only when EVERY node type, module, name, attribute, keyword and
+#: subscript is on one of the lists below; anything not listed fails closed to
+#: the backstop's HIGH (a judge call, never a silent LOW). A read the lists do
+#: not cover costs a judge call — widen a list only with a reason here.
 #:
-#: THE CLASS TO KEEP OUT (review r1 M1, PR #3918): any stdlib call that
-#: resolves an attribute, import or callable from a STRING defeats the AST
-#: walk, which only sees ``ast.Attribute`` names. ``string.Formatter()
-#: .get_field("0.unlink", (p,), {})[0]()`` deleted real files at LOW;
-#: ``operator.methodcaller``/``attrgetter``, ``functools.update_wrapper``
-#: (getattr/setattr over ``assigned=``), ``pkgutil.resolve_name``, ``pickle``,
-#: ``logging.config`` and ``importlib`` are the same shape. Each entry, and
-#: why it is here:
-#:
-#: - ``pathlib``: the read itself (``read_text``, ``iterdir``, ``glob``); its
-#:   mutators are in ``_PY_DENIED_ATTRS``, its re-exported ``os``/``operator``
-#:   are refused by ``_py_attr_denied``.
-#: - ``json``, ``re``: parse what was read. Callbacks (``object_hook``,
-#:   ``re.sub(repl)``) call a callable the program already holds; nothing
-#:   looks a name up. ``json.tool`` (``main()`` writes ``argv[2]``) is refused.
-#: - ``glob``, ``fnmatch``: list files to read.
-#: - ``collections``, ``itertools``: count/group lines (``namedtuple``
-#:   validates field names as identifiers before its internal ``exec``).
-#: - ``textwrap``, ``pprint``, ``datetime``, ``math``: format output. ``pprint``
-#:   writes only to a ``stream=`` object, and nothing writable is reachable.
-#:
-#: Dropped in round 1: ``string`` (M1), ``functools`` (``update_wrapper``),
-#: ``statistics`` and ``difflib`` (no read needs them; less surface).
+#: Statement and expression node types, by ``type(node).__name__`` (so
+#: ``ast`` stays a lazy import). Deliberately absent: ``Lambda``,
+#: ``FunctionDef``/``ClassDef`` (a body can run on attribute access or
+#: decorate), ``Match`` (class patterns are ``getattr`` by string),
+#: ``NamedExpr``, ``With``, ``Try``, ``While``, ``Await``/``Yield``,
+#: ``Global``/``Nonlocal``, ``Starred``, ``Delete``, ``Pow`` and the
+#: bit operators (nothing a read needs). ``GeneratorExp`` stays: the incident
+#: itself joins one, and the M3 route was the generator's ``gi_frame``
+#: ATTRIBUTE, which the attribute allow-list never admits — without that a
+#: generator is just a lazy list comprehension.
+_PY_ALLOWED_NODES = frozenset(
+    {
+        # statements
+        "Module",
+        "Expr",
+        "Assign",
+        "AugAssign",
+        "For",
+        "If",
+        "Pass",
+        "Break",
+        "Continue",
+        "Import",
+        "ImportFrom",
+        "alias",
+        # expressions
+        "BoolOp",
+        "BinOp",
+        "UnaryOp",
+        "Compare",
+        "IfExp",
+        "Call",
+        "keyword",
+        "Attribute",
+        "Subscript",
+        "Slice",
+        "Name",
+        "Constant",
+        "List",
+        "Tuple",
+        "Dict",
+        "Set",
+        "JoinedStr",
+        "FormattedValue",
+        "ListComp",
+        "SetComp",
+        "DictComp",
+        "GeneratorExp",
+        "comprehension",
+        # contexts and operators (``Del`` and ``Pow``/bit ops are absent)
+        "Load",
+        "Store",
+        "And",
+        "Or",
+        "Add",
+        "Sub",
+        "Mult",
+        "Div",
+        "FloorDiv",
+        "Mod",
+        "USub",
+        "UAdd",
+        "Not",
+        "Eq",
+        "NotEq",
+        "Lt",
+        "LtE",
+        "Gt",
+        "GtE",
+        "In",
+        "NotIn",
+        "Is",
+        "IsNot",
+    }
+)
+#: Modules a read may import, by exact name (a dotted ``import json.tool``
+#: loads a CLI whose ``main()`` writes ``argv[2]``, so dotted names fail).
+#: The module object is harmless only because the attribute allow-list below
+#: limits what can be taken off it: no module-valued attribute is listed, so
+#: re-exports (``pathlib.os``, ``glob.operator``) are unreachable. ``string``,
+#: ``functools``, ``operator``, ``itertools`` (callable-taking helpers) and
+#: ``pprint`` (``pprint(obj, stream)`` writes to a positional stream) are out.
 _PY_READ_MODULES = frozenset(
-    {
-        "pathlib",
-        "json",
-        "re",
-        "collections",
-        "itertools",
-        "math",
-        "textwrap",
-        "datetime",
-        "fnmatch",
-        "glob",
-        "pprint",
-    }
+    {"pathlib", "json", "re", "glob", "fnmatch", "collections", "datetime"}
 )
-#: Dotted imports allowed beyond the top-level names: ``import json.tool``
-#: would load a CLI whose ``main()`` writes the file named in ``argv``.
-_PY_READ_SUBMODULES = frozenset({"collections.abc"})
-#: Stdlib module names an attribute MAY carry: harmless modules a read
-#: commonly names as an attribute (``p.stat()``, ``dt.time()``,
-#: ``collections.abc``) plus the allow-list itself. Every other stdlib module
-#: name is refused as an attribute (``_py_attr_denied``).
-_PY_HARMLESS_MODULE_ATTRS = _PY_READ_MODULES | {"stat", "time", "abc"}
-#: Builtins that run text as code, reach arbitrary objects by name, or reach
-#: the import machinery: the program could do anything they are handed.
-_PY_DENIED_NAMES = frozenset(
+#: Builtins a read may name. None takes a callable it later calls through a
+#: positional argument, so a held callable can only run by a direct call the
+#: walk sees. ``open`` is admitted only as a callee with a literal read mode
+#: (:func:`_py_open_read_only`). Absent on purpose: ``getattr``/``exec``/
+#: ``eval``/``compile``/``__import__``/``vars``/``globals``/``type``,
+#: ``map``/``filter``/``iter``/``next`` (callables or protocol reach),
+#: ``isinstance`` (no read needs it), ``input``/``breakpoint``/``help``.
+_PY_ALLOWED_BUILTINS = frozenset(
     {
-        "exec",
-        "eval",
-        "compile",
-        "__import__",
-        "getattr",
-        "setattr",
-        "delattr",
-        "globals",
-        "locals",
-        "vars",
-        "breakpoint",
-        "input",
-        "help",
-        "memoryview",
-        "type",
-        "object",
-        "super",
-    }
-)
-#: Attribute names that write, delete, rename, change modes, spawn, or hand
-#: back a module able to (``pathlib.os``, ``glob.os``). ``open`` is refused as
-#: an ATTRIBUTE (``Path.open(mode)``); the builtin ``open`` is checked for its
-#: mode instead (``_py_open_read_only``). Includes Python 3.14's ``Path.copy``/
-#: ``move`` family. Dunder/private attributes are refused separately.
-_PY_DENIED_ATTRS = frozenset(
-    {
+        "print",
         "open",
-        "write",
-        "writelines",
-        "write_text",
-        "write_bytes",
-        "unlink",
-        "rmdir",
-        "rmtree",
-        "remove",
-        "removedirs",
-        "rename",
-        "renames",
-        "replace",
-        "touch",
-        "mkdir",
-        "makedirs",
-        "chmod",
-        "lchmod",
-        "chown",
-        "lchown",
-        "symlink_to",
-        "hardlink_to",
-        "link_to",
-        "copy",
-        "copy_into",
-        "copyfile",
-        "copytree",
-        "move",
-        "move_into",
-        "truncate",
-        "system",
-        "popen",
-        "dump",
-        "os",
-        "sys",
-        "shutil",
-        "subprocess",
-        "builtins",
-        "io",
-        "posix",
-        "nt",
-        "importlib",
-        # ``json.tool`` / ``from json import tool``: a CLI whose ``main()``
-        # writes the output file named in ``sys.argv`` (review r1 audit).
-        "tool",
-        "main",
-        # ``string.Formatter().get_field``: getattr by a string (M1).
-        "get_field",
+        "len",
+        "sorted",
+        "reversed",
+        "min",
+        "max",
+        "sum",
+        "any",
+        "all",
+        "enumerate",
+        "zip",
+        "range",
+        "str",
+        "int",
+        "float",
+        "bool",
+        "bytes",
+        "list",
+        "dict",
+        "set",
+        "tuple",
+        "repr",
+        "abs",
+        "round",
     }
 )
-
-
-def _py_attr_denied(name: str) -> bool:
-    """May ``name`` NOT be used as an attribute (or ``from X import name``)?
-
-    Beyond ``_PY_DENIED_ATTRS`` and private names: an allow-listed module
-    re-exports the modules it imports (``pathlib.operator``, ``glob.operator``,
-    ``re.functools``, ``json.codecs``, ``glob.contextlib``), and those reach
-    calls that resolve attributes by a string (``operator.methodcaller(
-    "unlink")``). Refusing every stdlib module name as an attribute closes
-    that whole route without listing each re-export, which changes per Python
-    version. ``sys.stdlib_module_names`` is the GUARD's interpreter; a module
-    a newer target adds is the residual gap, kept small by the allow-list.
-    """
-    if name in _PY_DENIED_ATTRS or name.startswith("_"):
-        return True
-    return name in sys.stdlib_module_names and name not in _PY_HARMLESS_MODULE_ATTRS
-
-
+#: Every attribute name a read may use, on ANY object: the check is untyped,
+#: so each name must be harmless on every object reachable from the modules
+#: and builtins above. Notably absent: ``replace`` (``Path.replace`` RENAMES;
+#: untyped, so ``str.replace`` goes too), ``get`` (``b.get("getattr")`` once a
+#: dict of builtins is in hand), ``format``/``format_map`` (attribute walks by
+#: string), ``open``/``write*``/``unlink``/``rename``/``touch``/``mkdir``/
+#: ``chmod``/``copy``/``move``, every dunder, ``gi_frame``/``f_builtins``-
+#: style introspection, and any name that hands back a module able to act.
+#: Checked transitively on CPython 3.12 and 3.14: the only modules reachable
+#: through these names are the allowed ones plus ``glob.stat`` (the ``stat``
+#: module: constants and pure mode predicates). ``stat`` itself is there for
+#: ``Path.stat()`` (``os.stat``: metadata only). ``sub``/``subn`` are
+#: further limited in :func:`python_code_read_only` to a literal replacement.
+_PY_ALLOWED_ATTRS = frozenset(
+    {
+        # pathlib
+        "Path",
+        "PurePath",
+        "read_text",
+        "read_bytes",
+        "iterdir",
+        "glob",
+        "rglob",
+        "exists",
+        "is_file",
+        "is_dir",
+        "is_symlink",
+        "stat",
+        "st_size",
+        "st_mtime",
+        "name",
+        "suffix",
+        "suffixes",
+        "stem",
+        "parent",
+        "parents",
+        "parts",
+        "as_posix",
+        "joinpath",
+        "relative_to",
+        "with_suffix",
+        "with_name",
+        "resolve",
+        # file object from a read-mode ``open``
+        "read",
+        "readline",
+        "readlines",
+        # str / bytes
+        "splitlines",
+        "split",
+        "rsplit",
+        "strip",
+        "lstrip",
+        "rstrip",
+        "join",
+        "startswith",
+        "endswith",
+        "lower",
+        "upper",
+        "count",
+        "find",
+        "rfind",
+        "index",
+        "partition",
+        "rpartition",
+        "isdigit",
+        "isspace",
+        "decode",
+        "encode",
+        # containers (in-memory only)
+        "keys",
+        "values",
+        "items",
+        "append",
+        "extend",
+        "add",
+        # json (keyword hooks are refused by the keyword allow-list)
+        "loads",
+        "load",
+        "dumps",
+        # re
+        "compile",
+        "search",
+        "match",
+        "fullmatch",
+        "findall",
+        "finditer",
+        "sub",
+        "subn",
+        "escape",
+        "group",
+        "groups",
+        "start",
+        "end",
+        "span",
+        "IGNORECASE",
+        "MULTILINE",
+        "DOTALL",
+        "I",
+        "M",
+        "S",
+        # glob / fnmatch
+        "iglob",
+        "fnmatch",
+        "filter",
+        # collections
+        "Counter",
+        "most_common",
+        # datetime
+        "datetime",
+        "date",
+        "time",
+        "now",
+        "fromtimestamp",
+        "isoformat",
+        "strftime",
+    }
+)
+#: Keyword arguments a call may pass. ``key=``, ``default=``, ``object_hook=``,
+#: ``cls=``, ``opener=`` take callables; ``file=``/``stream=`` take a writer.
+#: ``mode=`` is admitted only for builtin ``open`` with a literal read mode.
+_PY_ALLOWED_KEYWORDS = frozenset(
+    {
+        "encoding",
+        "errors",
+        "reverse",
+        "sep",
+        "end",
+        "flush",
+        "maxsplit",
+        "flags",
+        "count",
+        "indent",
+        "sort_keys",
+        "ensure_ascii",
+        "recursive",
+        "start",
+        "mode",
+    }
+)
 _PY_READ_MODES = frozenset({"r", "rb", "rt", "br", "tr"})
 
 
 def _py_open_read_only(call: object) -> bool:
-    """Is a builtin ``open(...)`` call literally a read? Mode positional or ``mode=``."""
+    """Is a builtin ``open(...)`` call literally a read?
+
+    At most ``file, mode`` positionally: ``opener`` is ``open``'s eighth
+    positional parameter and can do anything with the path.
+    """
     import ast
 
     assert isinstance(call, ast.Call)
+    if len(call.args) > 2:
+        return False
     mode: ast.expr | None = call.args[1] if len(call.args) > 1 else None
     for kw in call.keywords:
-        if kw.arg is None:
-            return False  # ``open(p, **kw)``: the mode is unknowable
         if kw.arg == "mode":
             mode = kw.value
-        elif kw.arg == "opener":
-            return False  # an opener can do anything with the path
     if mode is None:
         return True
     return (
         isinstance(mode, ast.Constant)
         and isinstance(mode.value, str)
         and mode.value in _PY_READ_MODES
+    )
+
+
+def _py_small_int(node: object) -> bool:
+    """A literal int, optionally negated (``x[0]``, ``x[-2500:]``)."""
+    import ast
+
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.USub, ast.UAdd)):
+        node = node.operand
+    return (
+        isinstance(node, ast.Constant)
+        and isinstance(node.value, int)
+        and not isinstance(node.value, bool)
     )
 
 
@@ -1726,14 +1860,25 @@ def python_code_read_only(code: str) -> bool:
     told a print loop from ``shutil.rmtree``.
 
     CONSTRAINT: guardrails only get more precise, never looser for a real
-    delete, so this proves, it does not guess. ``True`` only when the code
-    parses and uses nothing outside a small read-only vocabulary: imports from
-    ``_PY_READ_MODULES`` only, no name in ``_PY_DENIED_NAMES`` (``exec``,
-    ``eval``, ``getattr``, ``__import__``…), no attribute in
-    ``_PY_DENIED_ATTRS`` or starting with ``_`` (``__class__`` walks to
-    ``object.__subclasses__``), builtin ``open`` only with a literal read mode,
-    no ``global``/``nonlocal`` rebinding of builtins. Anything else — a parse
-    error, an unknown import, a decoded string fed to anything — is ``False``
+    delete, so this proves, it does not guess — by CONSTRUCTION (see
+    ``_PY_ALLOWED_NODES``): every node type, import, name, attribute, keyword
+    and subscript must be on an allow-list. Consequences the lists alone do
+    not express, each enforced below:
+
+    - a ``Name`` is loaded only if it is an allowed builtin, an imported
+      name, or bound by this program; binding a builtin or imported name
+      (``print = …``) is refused, so a callee name means what the list says;
+    - a call's callee is an allowed builtin, an imported name, or an allowed
+      attribute — never a local variable or a subscript, so a callable taken
+      as a value (``s = re.sub``) cannot dodge the per-call checks;
+    - no ``*``/``**`` anywhere; keywords only from ``_PY_ALLOWED_KEYWORDS``;
+    - subscripts only by a literal int or int slice (``b["getattr"]`` is out);
+    - builtin ``open`` only as a callee with a literal read mode;
+    - ``sub``/``subn`` only with literal leading arguments, so the
+      replacement is a string, never a callable;
+    - no dunder or ``_``-prefixed name or alias.
+
+    Anything else — a parse error, an unlisted node or name — is ``False``
     and keeps the conservative ranking (a judge call, never a LOW).
     """
     import ast
@@ -1742,57 +1887,86 @@ def python_code_read_only(code: str) -> bool:
         tree = ast.parse(code)
     except (SyntaxError, ValueError):
         return False
-    # ``open`` is allowed only as the callee of a call whose mode we read; as a
-    # value (``o = open``, ``map(open, …)``, ``partial(open, mode="w")``) it
-    # can be called later with any mode.
-    callees = {
-        id(n.func)
-        for n in ast.walk(tree)
-        if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
-    }
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Name) and node.id in ("open", "print") and id(node) not in callees:
-            return False
+    nodes = list(ast.walk(tree))
+    if any(type(n).__name__ not in _PY_ALLOWED_NODES for n in nodes):
+        return False
+    imported: set[str] = set()
+    bound: set[str] = set()
+    for node in nodes:
         if isinstance(node, ast.Import):
-            # Exact names only: a dotted import loads a submodule the
-            # allow-list never vetted (``import json.tool``).
-            if any(
-                a.name not in _PY_READ_MODULES and a.name not in _PY_READ_SUBMODULES
-                for a in node.names
-            ):
-                return False
+            for a in node.names:
+                if a.name not in _PY_READ_MODULES:
+                    return False
+                imported.add(a.asname or a.name)
         elif isinstance(node, ast.ImportFrom):
-            module = node.module or ""
-            if node.level or (module not in _PY_READ_MODULES and module not in _PY_READ_SUBMODULES):
+            if node.level or node.module not in _PY_READ_MODULES:
                 return False
-            if any(a.name == "*" for a in node.names):
+            for a in node.names:
+                if a.name not in _PY_ALLOWED_ATTRS:
+                    return False  # also ``*``
+                imported.add(a.asname or a.name)
+        elif isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store):
+            bound.add(node.id)
+    if any(n.startswith("_") for n in imported | bound):
+        return False
+    # Rebinding a builtin or an import would let a later call by that name
+    # run whatever was bound; an import shadowing a builtin likewise.
+    if bound & (imported | _PY_ALLOWED_BUILTINS) or imported & _PY_ALLOWED_BUILTINS:
+        return False
+    callees = {id(n.func) for n in nodes if isinstance(n, ast.Call)}
+    known = _PY_ALLOWED_BUILTINS | imported | bound
+    for node in nodes:
+        if isinstance(node, ast.Name):
+            if node.id not in known:
                 return False
-            if any(_py_attr_denied(a.name) for a in node.names):
-                return False  # ``from glob import os``, ``from json import tool``
-        elif isinstance(node, ast.Name):
-            if node.id in _PY_DENIED_NAMES or node.id.startswith("__"):
-                return False
+            if node.id == "open" and id(node) not in callees:
+                return False  # ``o = open`` can be called later with any mode
         elif isinstance(node, ast.Attribute):
-            if _py_attr_denied(node.attr):
+            if node.attr not in _PY_ALLOWED_ATTRS or not isinstance(node.ctx, ast.Load):
                 return False
-        elif isinstance(node, ast.MatchClass):
-            # ``case Path(unlink=u): u()`` binds ``getattr(subject, "unlink")``:
-            # keyword patterns are attribute lookups held as plain strings,
-            # never ``ast.Attribute`` nodes (review r1 audit).
-            if any(_py_attr_denied(a) for a in node.kwd_attrs):
+        elif isinstance(node, ast.Subscript):
+            if not isinstance(node.ctx, ast.Load):
                 return False
+            index = node.slice
+            if isinstance(index, ast.Slice):
+                parts = (index.lower, index.upper, index.step)
+                if any(p is not None and not _py_small_int(p) for p in parts):
+                    return False
+            elif not _py_small_int(index):
+                return False
+        elif isinstance(node, ast.Dict):
+            if any(k is None for k in node.keys):
+                return False  # ``{**d}``
+        elif isinstance(node, ast.comprehension):
+            if node.is_async:
+                return False
+        elif isinstance(node, ast.FormattedValue):
+            pass  # its spec is a JoinedStr whose parts this walk checks too
         elif isinstance(node, ast.Call):
-            if isinstance(node.func, ast.Name) and node.func.id == "open":
+            func = node.func
+            if isinstance(func, ast.Name):
+                if func.id not in _PY_ALLOWED_BUILTINS and func.id not in imported:
+                    return False
+                callee = func.id
+            elif isinstance(func, ast.Attribute):
+                callee = func.attr
+            else:
+                return False
+            if any(kw.arg not in _PY_ALLOWED_KEYWORDS for kw in node.keywords):
+                return False  # also ``**kw`` (``arg is None``)
+            if callee == "open" and isinstance(func, ast.Name):
                 if not _py_open_read_only(node):
                     return False
-            elif isinstance(node.func, ast.Name) and node.func.id == "print":
-                # ``print(..., file=f)`` writes to whatever ``f`` is.
-                if any(kw.arg in (None, "file") for kw in node.keywords):
+            elif any(kw.arg == "mode" for kw in node.keywords):
+                return False
+            if callee in ("sub", "subn"):
+                # ``re.sub(p, repl, s)`` / ``rx.sub(repl, s)``: untyped, so
+                # every argument before the subject must be a literal string.
+                if not node.args or any(
+                    not (isinstance(a, ast.Constant) and isinstance(a.value, str))
+                    for a in node.args[:-1]
+                ):
                     return False
-        elif isinstance(node, (ast.Global, ast.Nonlocal)):
-            return False
-        elif isinstance(node, ast.alias) and node.asname and node.asname.startswith("_"):
-            return False
     return True
 
 

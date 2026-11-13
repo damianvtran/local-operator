@@ -196,8 +196,11 @@ three routes the checkpoint can verify. Everything CRITICAL is still refused.
   to the context-free judge, which can let a read through. One task tree
   (parent, subagent, sibling) reads each other's scratchpad at LOW through a
   git-tracked script handed a file, or a bare `python3 -c` whose code is
-  provably read-only (stdlib reading modules only; no `open` for writing, no
-  `unlink`/`rename`/`write_*`, `exec`/`eval`/`getattr` or `os`/`shutil`); a
+  provably read-only — built only from an allow-list of syntax, reading
+  modules (`pathlib`, `json`, `re`, `glob`…), builtins and read-only method
+  names, with literal-int subscripts and `open` only in a read mode; anything
+  outside the lists (a `def`, `lambda`, string-key subscript, `os`) keeps the
+  normal ranking; a
   delete or write of a teammate's scratchpad stays HIGH. That HIGH is a
   backstop over the writer list: any command that is not strictly read-only
   and mentions those trees anywhere — an operand, a glued flag value, a path

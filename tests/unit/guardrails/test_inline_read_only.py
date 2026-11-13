@@ -170,6 +170,34 @@ _DELETES = [
     'from json import tool; tool.main(); print("{pad}")',
     'import functools, pathlib; print("{pad}")',
     'import re; re.functools; print("{pad}")',
+    # Review r2 M3: a generator/coroutine frame reaches the builtins dict, and
+    # a string subscript or a string-built name never shows the AST a denied
+    # name. Real files were deleted at LOW by the first form.
+    "import pathlib; b=(x for x in [1]).gi_frame.f_builtins; "
+    '[b["getattr"](p,"un"+"link")() for p in pathlib.Path("{pad}").iterdir()]',
+    'import pathlib; m=(x for x in [1]).gi_frame.f_globals["__builtins__"]; '
+    '[m.getattr(p,"un"+"link")() for p in pathlib.Path("{pad}").iterdir()]',
+    'b=(x for x in [1]).gi_frame.f_builtins; b["ex"+"ec"](bytes([112]).decode()); print("{pad}")',
+    "import pathlib\nasync def a():\n yield 1\nb=a().ag_frame.f_builtins\n"
+    '[b["getattr"](p,"unlink")() for p in pathlib.Path("{pad}").iterdir()]',
+    "import pathlib\nasync def c(): pass\nb=c().cr_frame.f_builtins\n"
+    '[b["getattr"](p,"unlink")() for p in pathlib.Path("{pad}").iterdir()]',
+    # The allow-list's own edges: string keys, ``get``, ``exec`` as a dict
+    # key, ``Path.replace`` (a rename), a callable ``re.sub`` replacement
+    # (direct or via a held reference), and constructs outside the node list.
+    'import json; print(json.loads("1")["k"], "{pad}")',
+    'import json; print(json.loads("1").get("k"), "{pad}")',
+    'd={{"exec": 1}}; print(d["exec"], "{pad}")',
+    'from pathlib import Path; Path("{pad}/a.log").replace("{pad}/b.log")',
+    'import re; print(re.sub("a", print, "{pad}"))',
+    'import re; s=re.sub; print(s("a", "b", "{pad}"))',
+    'print(sorted(["{pad}"], key=print))',
+    'f=lambda: 1; print(f(), "{pad}")',
+    'def f(): pass\nprint("{pad}")',
+    'print((n:=1), "{pad}")',
+    'print = len; print("{pad}")',
+    'print(*["{pad}"])',
+    'print(open("{pad}/a.log", "r", -1, None, None, None, True, print))',
 ]
 
 
@@ -246,13 +274,14 @@ def test_inline_read_with_an_unknown_interpreter_flag_stays_high(home: Path) -> 
         'print(open("/x").read())',
         'print(open("/x", "r").read())',
         'print(open("/x", mode="rb").read())',
-        'import json; print(json.load(open("/x"))["k"])',
+        'import json; print(json.load(open("/x")))',
         "from pathlib import Path; print(sorted(p.name for p in Path('/x').iterdir()))",
         "import re, collections; print(collections.Counter(re.findall('a', 'aa')))",
         # Harmless module-named attributes a read commonly uses.
         "from pathlib import Path; print(Path('/x').stat().st_size)",
         "import datetime; print(datetime.datetime.now().time())",
-        "import collections.abc; print(collections.abc.Mapping)",
+        'import re; print([x for x in open("/x").read().splitlines() if re.search("a", x)][-3:])',
+        "print(f'{len(open(\"/x\").read()):>8} lines')",
     ],
 )
 def test_read_only_programs_are_recognised(code: str) -> None:
@@ -335,3 +364,30 @@ def test_harmless_inherited_python_knobs_keep_the_read_low(home: Path) -> None:
         session_id=PARENT,
     )
     assert verdict.risk is Risk.LOW, verdict.reasons
+
+
+# -- review r2: legitimate read variants under the allow-list --------------------------------
+
+
+@pytest.mark.parametrize(
+    "code",
+    [
+        # The pattern is built so the mentioned word is the pad itself: a
+        # literal ``<pad>/*.log`` word is a glob the backstop ranks on its
+        # own (not this analyser).
+        'import glob; [print(open(p).read()[-200:]) for p in glob.glob("{pad}" + "/*.log")]',
+        "from pathlib import Path; "
+        '[print(p.name, p.read_text()[:80]) for p in Path("{pad}").glob("*.log")]',
+        "import json; from pathlib import Path; "
+        'print(json.loads(Path("{pad}/a.json").read_text()))',
+        "import re; from pathlib import Path\n"
+        'for line in Path("{pad}/a.log").read_text().splitlines():\n'
+        ' if re.search("passed|FAILED", line): print(line)',
+    ],
+)
+def test_legitimate_reads_of_a_childs_pad_rank_low(home: Path, code: str) -> None:
+    pad = _pad(home, CHILD)
+    (pad / "a.json").write_text("[1, 2]")
+    command = f"python3 -c '{code.format(pad=pad)}'"
+    verdict = _verdict(home, command, sid=PARENT)
+    assert verdict.risk is Risk.LOW, (code, verdict.reasons)
