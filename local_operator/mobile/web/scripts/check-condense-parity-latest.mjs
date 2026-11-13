@@ -24,12 +24,13 @@
  *    desktop model changes and its generator is re-run, this fails until the relay
  *    re-copies the fixture - which is the re-port trigger the design names.
  *
- * WHY `--latest` IS ADVISORY WHEN THE SIBLING IS ABSENT. This repository's CI checks
- * out one repository; a cross-repo comparison there would either fail forever or be
- * deleted. So a missing checkout prints a NAMED notice and exits 0, while a present
- * checkout that DISAGREES exits 1. `--require-sibling` turns the absence into a
- * failure, for a lane that genuinely has both trees (a developer machine, or a job
- * that checks both out).
+ * WHY `--latest` IS ADVISORY WHEN THE SIBLING IS ABSENT. A local checkout need not
+ * have the desktop sibling. A missing sibling prints a NAMED notice and exits 0;
+ * a present checkout that DISAGREES exits 1. `--require-sibling` makes absence fail
+ * closed in the independent freshness workflow, which downloads desktop main.
+ * Required branch CI instead runs check-condense-parity-pinned.mjs against the
+ * declared immutable revision: newer UI main is visible drift, not a moving
+ * prerequisite for validating unchanged branch bytes.
  *
  * USAGE
  *   node scripts/check-condense-parity-latest.mjs                  # self-consistency
