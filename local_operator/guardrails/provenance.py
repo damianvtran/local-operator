@@ -897,16 +897,37 @@ _CWD_INVENTORY_TIMEOUT_S = 20.0
 #: the owning-session check (``worktree_activity``) reads the session
 #: registry fresh on every call. Failures are never cached.
 _CWD_INVENTORY_TTL_S = 30.0
-_cwd_inventory_cache: tuple[float, tuple[str, ...]] | None = None
 
 
-def _cwd_inventory() -> tuple[str, ...] | None:
-    """Realpaths of every cwd this uid's processes hold, or ``None`` if unknown.
+class CwdInventory(NamedTuple):
+    """One process-cwd inventory: the cwds it could read and the pids it could not.
+
+    ``hidden`` WHY (2026-11-14, found by QA on PR #3975): on Linux the kernel
+    refuses ``readlink /proc/<pid>/cwd`` (EACCES) for a same-uid process that
+    is non-dumpable — ``(sd-pam)``, the systemd user-session helper, is one on
+    every host with a systemd user session, and ``ssh-agent`` makes itself
+    one. That single refusal used to void the whole inventory (``None``), so
+    every caller read "unknown" on such hosts. A hidden pid is now reported
+    instead, and it still counts as "might be inside" (see
+    :func:`_live_cwd_inside`): no caller deletes on its account.
+    """
+
+    cwds: tuple[str, ...]
+    hidden: tuple[int, ...] = ()
+
+
+_cwd_inventory_cache: tuple[float, CwdInventory] | None = None
+
+
+def _cwd_inventory() -> CwdInventory | None:
+    """Every cwd this uid's processes hold, or ``None`` if there is no inventory.
 
     lsof's cwd inventory is read-only and avoids probing process command lines
     (which may carry secrets). Linux exposes the same data under /proc. A
-    disappearing process no longer owns a cwd; other inspection errors give
-    ``None``. A success is cached for :data:`_CWD_INVENTORY_TTL_S`.
+    disappearing process no longer owns a cwd; a same-uid process whose cwd the
+    kernel will not reveal is listed in ``hidden`` rather than voiding the
+    inventory. Other inspection errors give ``None``. A success is cached for
+    :data:`_CWD_INVENTORY_TTL_S`.
     """
     global _cwd_inventory_cache
     now = time.monotonic()
@@ -914,6 +935,7 @@ def _cwd_inventory() -> tuple[str, ...] | None:
     if cached is not None and now - cached[0] < _CWD_INVENTORY_TTL_S:
         return cached[1]
     paths: list[str] = []
+    hidden: list[int] = []
     if os.path.isdir("/proc/self"):
         try:
             for entry in os.scandir("/proc"):
@@ -923,8 +945,10 @@ def _cwd_inventory() -> tuple[str, ...] | None:
                     if entry.stat().st_uid != os.getuid():
                         continue
                     paths.append(os.readlink(os.path.join(entry.path, "cwd")))
-                except FileNotFoundError:
-                    continue
+                except (FileNotFoundError, ProcessLookupError):
+                    continue  # exited mid-scan: it holds no cwd any more
+                except PermissionError:
+                    hidden.append(int(entry.name))
         except OSError:
             return None
     else:
@@ -943,7 +967,7 @@ def _cwd_inventory() -> tuple[str, ...] | None:
         paths = [line[1:] for line in proc.stdout.splitlines() if line.startswith("n/")]
         if not paths:
             return None  # this process alone holds a cwd: an empty list is a failed read
-    inventory = tuple(os.path.realpath(p) for p in paths)
+    inventory = CwdInventory(tuple(os.path.realpath(p) for p in paths), tuple(hidden))
     _cwd_inventory_cache = (now, inventory)
     return inventory
 
@@ -954,11 +978,19 @@ def _live_cwd_inside(real: str) -> bool | None:
     Reads :func:`_cwd_inventory` (bounded, cached per process). ``None`` —
     timeout or an unreadable inventory — fails closed in ``worktree_state``.
     This protects ordinary clean removals as well as abandoned adds.
+
+    A hidden pid (cwd unreadable) might be inside, so it also answers ``None``.
+    Every caller treats ``None`` like ``True`` (``busy`` / never delete): PR
+    #3980 rounds 1-3 found no sound way to prove such a process outside a tree.
     """
     inventory = _cwd_inventory()
     if inventory is None:
         return None
-    return any(cwd == real or cwd.startswith(real + os.sep) for cwd in inventory)
+    if any(cwd == real or cwd.startswith(real + os.sep) for cwd in inventory.cwds):
+        return True
+    if inventory.hidden:
+        return None
+    return False
 
 
 def _only_regenerable(directory: str) -> bool:

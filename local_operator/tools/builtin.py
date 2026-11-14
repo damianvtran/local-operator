@@ -4965,7 +4965,9 @@ async def execute_bash(
     stderr_task = asyncio.create_task(_pump(process.stderr, stderr_chunks))
     readers = (stdout_task, stderr_task)
 
-    settle_started: list[bool] = []
+    # The one settle thread a stop path started (see _kill); the result tail
+    # waits on it so its notice reaches the agent in this result.
+    settle_started: list[interrupted_worktree_add.SettleThread | None] = []
 
     def _kill() -> None:
         # Kill the whole session group so children (sh -c spawns) die too.
@@ -4984,9 +4986,9 @@ async def execute_bash(
         # a daemon thread so no stop path waits. Once per call: several stop
         # paths can reach _kill for the same command.
         if not settle_started:
-            settle_started.append(True)
+            settle_started.append(None)
             with contextlib.suppress(Exception):
-                interrupted_worktree_add.settle_in_background(
+                settle_started[0] = interrupted_worktree_add.settle_in_background(
                     params.command, cwd=cwd, env=env, spawned_at=spawned_at, pgid=spawned_pgid
                 )
 
@@ -5682,6 +5684,18 @@ async def execute_bash(
         with contextlib.suppress(BaseException):
             await abort_waiter
 
+    # A killed `git worktree add` whose half-made tree the settle could only
+    # unlock (a process cwd it could not check) is the agent's to remove, so
+    # the settle's notice must ride THIS result, not a log line nobody reads.
+    # The settle runs on a daemon thread (`_kill` cannot block), so wait for
+    # it here, off the loop and bounded (NOTICE_WAIT_S); a settle still
+    # running past that just finishes without a notice.
+    worktree_notice: str | None = None
+    settle_thread = settle_started[0] if settle_started else None
+    if settle_thread is not None:
+        with contextlib.suppress(Exception):
+            worktree_notice = await asyncio.to_thread(settle_thread.notice)
+
     if aborted:
         partial = await asyncio.to_thread(_bash_partial_summary, stdout_chunks, stderr_chunks)
         # The missing-tool advisory is carried onto the ABORT path too (QA round
@@ -5705,7 +5719,8 @@ async def execute_bash(
             # of ``execute_bash`` had this one unredacted.
             f"{_redact_tool_text(params.command, context)}\n"
             f"{_redact_tool_text(partial, context)}"
-            + (f"\n{aborted_missing}" if aborted_missing else ""),
+            + (f"\n{aborted_missing}" if aborted_missing else "")
+            + (f"\n{worktree_notice}" if worktree_notice else ""),
             details={FAULT_KEY: FAULT_ABORTED},
         )
 
@@ -5740,6 +5755,10 @@ async def execute_bash(
         footer = ""
 
     parts = [f"exit code: {return_code}", _bash_output_summary(stdout, stderr)]
+    if worktree_notice:
+        # Under the exit code, not last: the tool card keeps the HEAD of a
+        # result, and this line is an instruction the agent must act on.
+        parts.insert(1, worktree_notice)
     if timed_out:
         parts.insert(0, f"TIMEOUT after {params.timeout}s (process killed)")
     if pad_exceeded:
