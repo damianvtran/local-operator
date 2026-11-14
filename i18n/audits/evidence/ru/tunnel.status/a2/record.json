@@ -1,0 +1,78 @@
+{
+ "schema": 1,
+ "audit_id": "a2",
+ "audit_kind": "independent_translation_audit",
+ "locale": "ru",
+ "namespace": "tunnel.status",
+ "round": 2,
+ "audit_date": "2026-11-14",
+ "key_count": 21,
+ "keys_audited": 21,
+ "keys_new_in_scope": 8,
+ "new_keys": [
+  "tunnel.status.tunnel_inactive.label",
+  "tunnel.status.tunnel_inactive.detail",
+  "tunnel.status.tunnel_disabled.label",
+  "tunnel.status.tunnel_disabled.detail",
+  "tunnel.status.billing_inactive.label",
+  "tunnel.status.billing_inactive.detail",
+  "tunnel.status.billing_lapsed.label",
+  "tunnel.status.billing_lapsed.detail"
+ ],
+ "source_audit_revision": "1fce7ecb1f5fb587e7b91ef2f9c7fe658521e0d0",
+ "scope": "1fce7ecb1f5f^..1fce7ecb1f5f",
+ "prior_audits_on_disk": [
+  "i18n/audits/evidence/ru/tunnel.status/a1/record.json"
+ ],
+ "pr": "not yet opened (branch fix/tunnel-remedies-auto-up)",
+ "translator": {
+  "agent": "i18n-translator subagent, Local Operator session 7af08d89b259 (values in commit 1fce7ecb1f5f; English source drafted by coder session b0300e2c2c7f)",
+  "model": "anthropic/claude-opus-5-5 (as stated by the coordinator brief; not independently verified)",
+  "date": "2026-11-14"
+ },
+ "auditor": {
+  "agent": "i18n-auditor, independent `task` subagent on node lop-remote-node-2, session 110287e9c4f3; not the translator (7af08d89b259) nor the English-drafting coder (b0300e2c2c7f); did not edit any value",
+  "session": "110287e9c4f3",
+  "model": "anthropic/claude-opus-5-5",
+  "independent_from_translator_session": true,
+  "actual_model_source": "harness system prompt of session 110287e9c4f3 (`Model: anthropic/claude-opus-5-5`); no provider fallback disclosed during the audit"
+ },
+ "input_hashes": {
+  "en": {
+   "path": "local_operator/i18n/catalogues/en/tunnel.status.json",
+   "sha256": "b368acfb0cdee89c8de5a210fc9956251701a9f3f73c88b1096611d0c1f9063f"
+  },
+  "context": {
+   "path": "local_operator/i18n/catalogues/en/tunnel.status.context.json",
+   "sha256": "a9821f16689aae33c2eee4d2734bf5d508bc9b93037699883f78677d636d98a8"
+  },
+  "target": {
+   "path": "local_operator/i18n/catalogues/ru/tunnel.status.json",
+   "sha256": "f302c30cebd43ee0e43263b7ec4f22f28d3dd55de0275790cc282be3cf48c9c0"
+  },
+  "glossary": {
+   "path": "i18n/glossary.md",
+   "sha256": "a576d5a4b2718ba79a70a42600e3b6233ea28d716b1e2d996a208ac8dd7fabdb"
+  },
+  "style_guide": {
+   "path": "i18n/style-guides/ru.md",
+   "sha256": "f20e1cafaf70578c17ce072c71725628808d228e4be5604329f8da30386f1fb5"
+  }
+ },
+ "artifacts": {
+  "report.md": "4d4c79f560adf3c2772d3bcf994d10c0e1726857483012917caa559d60a66bfc",
+  "audit.log": "f3f4a227d04a75901906f6210b3bb7db77c589d029e24f34b86b1eb87cd1fc6a"
+ },
+ "audit_notes_not_execution_log": "report.md is reasoning; audit.log is the captured stdout of the commands it lists (git rev-parse, sha256sum, check.py --catalogues-only, ledger.py history-sha, the mech() check in audit_gen.py). dryrun.log is the captured ledger.py append --dry-run output.",
+ "current_report_verdict": {
+  "status": "passed",
+  "unresolved_blocker_major_count": 0,
+  "finding_ids": [
+   "RU-01"
+  ],
+  "finding_severities": {
+   "RU-01": "minor"
+  }
+ },
+ "staged_not_committed": true
+}

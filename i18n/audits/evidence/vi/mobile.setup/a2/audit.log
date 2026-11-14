@@ -1,0 +1,46 @@
+$ git rev-parse HEAD
+7c0fc7bf22aade04f78c367c906374b73a1914d7
+exit=0
+$ git status --short -- local_operator/i18n/catalogues/en/mobile.setup.json local_operator/i18n/catalogues/en/mobile.setup.context.json local_operator/i18n/catalogues/vi/mobile.setup.json
+ M local_operator/i18n/catalogues/en/mobile.setup.context.json
+ M local_operator/i18n/catalogues/en/mobile.setup.json
+ M local_operator/i18n/catalogues/vi/mobile.setup.json
+exit=0
+$ git diff --stat HEAD -- local_operator/i18n/catalogues/en/mobile.setup.json local_operator/i18n/catalogues/en/mobile.setup.context.json local_operator/i18n/catalogues/vi/mobile.setup.json
+ .../i18n/catalogues/en/mobile.setup.context.json   | 40 ++++++++++++++++++++++
+ .../i18n/catalogues/en/mobile.setup.json           | 18 +++++++---
+ .../i18n/catalogues/vi/mobile.setup.json           | 18 +++++++---
+ 3 files changed, 66 insertions(+), 10 deletions(-)
+exit=0
+$ PYTHONPATH=$PWD .venv/bin/python scripts/i18n/check.py --catalogues-only
+check.py: catalogue checks: 0 problem(s)
+exit=0
+$ .venv/bin/python $LOCAL_OPERATOR_SCRATCHPAD/audit-vi-zh/mech.py $PWD vi mobile.setup
+en mobile.setup sha256 0d245737d539f4d2fe54cf3a2c2174b0aa64820d2eb387e94ea16f65d1b487d7 keys 94
+context mobile.setup sha256 b1c0c11a269077507f7d22256f3874d7f5fd1a363f5c13f412014de70c7f038f
+vi mobile.setup sha256 2f449bf4a9beb90a5b4b36ff4cf49f38bd358b20858d9d23c5b6646b0d2cc2df keys 94 valid_json OK
+missing keys: none | extra keys: none
+whole-namespace mechanical: OK
+scope mobile.setup.disabled: cells=164 forbidden=none placeholders=[]
+scope mobile.setup.billing_lapsed: cells=173 forbidden=none placeholders=[]
+scope mobile.setup.reconnect: cells=134 forbidden=none placeholders=[]
+scope mobile.setup.network: cells=163 forbidden=none placeholders=[]
+scope mobile.setup.title_reconnect: cells=39 forbidden=none placeholders=[]
+scope mobile.setup.title_billing_lapsed: cells=45 forbidden=none placeholders=[]
+scope mobile.setup.title_disabled: cells=56 forbidden=none placeholders=[]
+scope mobile.setup.title_network: cells=33 forbidden=none placeholders=[]
+scope mobile.setup.title_radient_unavailable: cells=36 forbidden=none placeholders=[]
+scope mobile.setup.title_reconnecting: cells=36 forbidden=none placeholders=[]
+scope mobile.setup.action_add_credit: cells=49 forbidden=none placeholders=['{url}']
+scope mobile.setup.action_open_console: cells=64 forbidden=none placeholders=['{url}']
+exit=0
+$ .venv/bin/python scripts/i18n/ledger.py history-sha --locale vi --namespace mobile.setup
+0a4df2d794b9e584f277022511e024b809201c2a56341a87a201340a8aa5c693
+exit=0
+$ jq -c '.entries[-1] | {round, status, source_sha256, keys_audited, evidence}' i18n/audit-history/vi/mobile.setup.json
+{"round":"a1","status":"passed","source_sha256":"6883f92e94dfcec4be0af6041a0531c974fbf18294f7094a132cc555a2ad2065","keys_audited":86,"evidence":"i18n/audits/evidence/vi/mobile.setup/a1/record.json"}
+exit=0
+$ sha256sum i18n/glossary.md i18n/style-guides/vi.md
+a576d5a4b2718ba79a70a42600e3b6233ea28d716b1e2d996a208ac8dd7fabdb  i18n/glossary.md
+f550e01392de0a313d5efd626fcc7dbdd1c86df64c2324bac37eebc7ff06e6e9  i18n/style-guides/vi.md
+exit=0
