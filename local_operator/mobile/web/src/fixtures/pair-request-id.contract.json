@@ -1,0 +1,11 @@
+{
+  "note": "The pairing filing's client-minted request id, pinned on BOTH ends so they cannot drift again (PR #3949 QA Q48-1: the PWA sent 32 bare hex chars, the computer requires approvals.new_request_id's shape, and every terminal-free pairing was refused 422 approval_invalid while both suites stayed green). Read by the PWA (src/lib/pair-request-id.contract.test.ts: its generator must turn each sample's bytes into that sample's id and every fresh id must match the pattern) and by Python (tests/unit/mobile/test_pairing_e2e.py: the same bytes through network.wire.crockford give the same ids, approvals.new_request_id matches the pattern, each PWA-built id files 201 through the real relay, and each refused shape is refused 422). Shape: 'req_' + lowercase Crockford base32 of 8 random bytes, unpadded (13 chars). Changing it is a protocol change on both ends.",
+  "pattern": "^req_[0-9a-hjkmnp-tv-z]{13}$",
+  "samples": [
+    { "bytes_hex": "0000000000000000", "request_id": "req_0000000000000" },
+    { "bytes_hex": "0123456789abcdef", "request_id": "req_04hmasw9nf6yy" },
+    { "bytes_hex": "8a1c5e0f93d27b46", "request_id": "req_h8e5w3wkt9xmc" },
+    { "bytes_hex": "ffffffffffffffff", "request_id": "req_zzzzzzzzzzzzy" }
+  ],
+  "refused": ["d0c9f6d065f15ad1c001ebd47bfa3d4d"]
+}

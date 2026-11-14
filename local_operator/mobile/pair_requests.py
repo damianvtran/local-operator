@@ -89,22 +89,62 @@ def _claim(body: Mapping[str, Any], *, now: float) -> dict[str, Any]:
     }
 
 
-def _route() -> tuple[dict[str, str], str]:
-    """The configured route is server evidence; an ``account`` body field never is.
+#: The gateway-owned header carrying the Radient edge's verified assertion for THIS
+#: filing (pairing design v2 §1 item 1). The gateway sets it only on
+#: ``POST /api/pair/request`` to the local-operator relay, from the proof it has just
+#: verified; an inbound copy from a phone never crosses (``gateway.headers`` copies an
+#: allowlist that does not name it). The daemon RE-VERIFIES it rather than trusting the
+#: hop, so a forged or replayed value can only fall back to the custom route.
+ASSERTION_HEADER = "x-lop-radient-assertion"
+#: The exact request the assertion must authorise: the reveal post itself.
+FILING_TARGET = "/api/pair/request"
+_RELAY_HARNESS_ID = "local-operator"
 
-    Radient's gateway authenticates the owner before injecting the ordinary relay
-    cookie. The relay cannot distinguish that cookie from a custom-password cookie,
-    so this is an ATTRIBUTION HINT, not an authentication claim or authority grant.
+
+async def attested_route(
+    assertion: str | None, *, host: str, body: bytes
+) -> tuple[dict[str, str], str]:
+    """``(via, surface)`` for one filing, from the edge's assertion or nothing.
+
+    Success re-runs the gateway's own verifier (``OriginVerifier``) against the pinned
+    ``origin_auth`` in ``tunnels/config.json``: RS256 under a pinned key, ``iss``,
+    ``aud`` = the public host, ``sub`` = the configured owner account, ``tunnel_id``,
+    ``version``, harness, method ``POST``, target :data:`FILING_TARGET`,
+    ``body_sha256`` of THESE bytes, a lifetime of at most thirty seconds, and ``exp``.
+    The ``jti`` was already consumed by the gateway, so a fresh verifier instance is
+    used and its replay cache is irrelevant here. Then the route is
+    ``{route: radient, account, attested: edge-v1}`` and the card may be confirmed.
+
+    ANY failure -- no header, no tunnel config, a forged or stale token, a body that
+    does not hash to the claim -- answers ``{route: custom}``, never a refusal: the
+    filing still lands and the desktop simply asks for the typed code (design v2 §1's
+    table). The assertion itself is never stored (``pair_op``'s "never in this record").
     """
-    try:
-        from local_operator.tunnels import config
+    if assertion:
+        try:
+            from local_operator.tunnels import config
+            from local_operator.tunnels.gateway import OriginVerifier
 
-        connection = config.load()
-        account = connection.get("origin_auth", {}).get("owner_account_id")
-        if isinstance(account, str) and account:
-            return {"route": "radient", "account": account}, "radient-relay"
-    except (OSError, ValueError, TypeError, KeyError):
-        pass
+            connection = config.load()
+            access = connection["origin_auth"]
+            claims = await OriginVerifier(access, None).verify(  # type: ignore[arg-type]
+                assertion,
+                host=host.lower(),
+                harness_id=_RELAY_HARNESS_ID,
+                method="POST",
+                target=FILING_TARGET,
+                body=body,
+            )
+            account = claims.get("sub")
+            if isinstance(account, str) and account and account == access.get("owner_account_id"):
+                from local_operator.operator import pair_op
+
+                return (
+                    {"route": "radient", "account": account, "attested": pair_op.ATTESTED_EDGE_V1},
+                    "radient-relay",
+                )
+        except Exception:  # noqa: BLE001 - every verification failure is "not attested"
+            pass
     return {"route": "custom"}, "phone"
 
 
@@ -127,7 +167,21 @@ def _existing_retry(
     return None
 
 
-def _budget(root: Path, now: float) -> None:
+class PairRefusal(MeshRefusal):
+    """A filing refusal with keyless extras the phone keys on (design v2 §2.2, N2).
+
+    ``extras`` are additive JSON fields beside ``{error, code}``: ``same_key`` (and,
+    only then, the pending ``request_id``) on ``pair_request_pending``, and
+    ``retry_after_s`` on ``pair_filing_rate_limited``. Nothing in them names another
+    phone's request.
+    """
+
+    def __init__(self, code: str, sentence: str, **extras: Any) -> None:
+        super().__init__(code, sentence)
+        self.extras = extras
+
+
+def _budget(root: Path, now: float, *, spki: str = "") -> None:
     records = approvals.list_records(root=root, now=now)
     live = [
         row
@@ -137,26 +191,44 @@ def _budget(root: Path, now: float) -> None:
         and row.get("state") != approvals.STATE_FAILED
     ]
     if live:
-        raise _refuse(
+        # U6: tell the phone whether the pending request is ITS OWN (same key), so it can
+        # resume or withdraw it; another phone's request id is never disclosed.
+        pending = live[0]
+        device = pending.get("device")
+        same_key = bool(spki) and isinstance(device, Mapping) and device.get("spki") == spki
+        extras: dict[str, Any] = {"same_key": same_key}
+        if same_key:
+            extras["request_id"] = str(pending.get("request_id") or "")
+        raise PairRefusal(
             "pair_request_pending",
             "A phone pairing request is already waiting on this computer. "
             "Finish or withdraw it first.",
+            **extras,
         )
-    recent = sum(
-        1
+    recent = sorted(
+        float(row.get("created_at") or 0.0)
         for row in records
         if row.get("kind") == approvals.KIND_OPERATOR_DEVICE_PAIR
         and 0 <= now - float(row.get("created_at") or 0.0) < FILING_WINDOW_S
     )
-    if recent >= FILING_LIMIT:
-        raise _refuse(
+    if len(recent) >= FILING_LIMIT:
+        # When the OLDEST filing in the window ages out, one slot frees (N2: the phone
+        # shows m:ss). Derived from the existing window, not a new number.
+        retry_after = max(1, int(recent[-FILING_LIMIT] + FILING_WINDOW_S - now + 0.999))
+        raise PairRefusal(
             "pair_filing_rate_limited",
             "This computer accepted five pairing requests in ten minutes. "
             "Wait before filing another.",
+            retry_after_s=retry_after,
         )
 
 
-async def file_request(body: Mapping[str, Any], root: Path) -> dict[str, Any]:
+async def file_request(
+    body: Mapping[str, Any],
+    root: Path,
+    *,
+    route: tuple[dict[str, str], str] | None = None,
+) -> dict[str, Any]:
     """Claim a SAS nonce, or reveal a commitment and file ONE typed approval record."""
     if "np" not in body:
         return _claim(body, now=time.time())
@@ -202,7 +274,14 @@ async def file_request(body: Mapping[str, Any], root: Path) -> dict[str, Any]:
                 "approval_anchor_unavailable",
                 "This computer has no operator key for phone pairing.",
             )
-        via, surface = _route()
+        # A retry keeps the route its record was filed with: the record is digest-bound,
+        # and a phone that retries over a different network (attested the first time,
+        # not the second) must get its own request back, not a conflict.
+        if existing is not None:
+            via = dict(existing["what"][pair_op.OP]["via"])
+            surface = str(existing["requested_by"]["surface"])
+        else:
+            via, surface = route if route is not None else ({"route": "custom"}, "phone")
         device_id = devices.new_device_id(spki)
         request = {
             "kind": approvals.KIND_OPERATOR_DEVICE_PAIR,
@@ -231,13 +310,125 @@ async def file_request(body: Mapping[str, Any], root: Path) -> dict[str, Any]:
             "expires_at": now + CLAIM_TTL_S,
         }
         if existing is None:
-            _budget(root, now)
+            _budget(root, now, spki=body["spki"])
         # THE ONLY WRITE THIS ROUTE CAN MAKE. create_request supplies the envelope,
         # immutable digest and pair_op.require_filing_shape (which re-derives the
         # device id/fingerprint and validates every nested SAS/anchor/route key).
         record = approvals.create_request(**request, root=root)
         _CLAIMS.pop(commit, None)
         return record
+
+
+# ---------------------------------------------------------------------------
+# The phone's other three questions (design v2 §2.2). None of them decides anything.
+# ---------------------------------------------------------------------------
+
+#: The domain label of the phone's withdraw signature. Its own label, so a signature
+#: made for any other purpose (an operator proof, a future pairing step) can never be
+#: replayed as a withdrawal -- and a replayed withdrawal names its own request id.
+WITHDRAW_LABEL = b"lop-pair-withdraw-v1"
+
+
+def availability() -> dict[str, Any]:
+    """``{available, reason}``: can this computer issue a phone certificate at all?
+
+    ``no_operator_authority`` when no usable operator anchor is installed (the same
+    host predicate the relay and the pairing receipt use), ``unsupported`` when this
+    build does not advertise ``features.phone_pairing``. The phone offers pairing only
+    on ``ok``, so no claim is made against a computer that could never finish it.
+    """
+    try:
+        from local_operator.server.features import static_feature_flags
+
+        supported = bool(static_feature_flags().get("phone_pairing"))
+    except Exception:  # noqa: BLE001 - an unreadable feature map is "not supported"
+        supported = False
+    if not supported:
+        return {"available": False, "reason": "unsupported"}
+    from local_operator.operator import operator_authority_unusable
+
+    if operator_authority_unusable():
+        return {"available": False, "reason": "no_operator_authority"}
+    return {"available": True, "reason": "ok"}
+
+
+def _pair_record(request_id: str, root: Path) -> dict[str, Any] | None:
+    if not isinstance(request_id, str) or not request_id or len(request_id) > 128:
+        return None
+    record = approvals._find_by_request_id(request_id, root)
+    if record is None or record.get("kind") != approvals.KIND_OPERATOR_DEVICE_PAIR:
+        return None
+    return record
+
+
+def request_status(request_id: str, root: Path) -> dict[str, Any] | None:
+    """``{state, reason, mode, device_id, expires_at}`` for the phone's own request."""
+    from local_operator.operator import pair_op
+
+    record = _pair_record(request_id, root)
+    if record is None:
+        return None
+    now = time.time()
+    view = approvals.presented(record, now)
+    device = view.get("device")
+    return {
+        "state": str(view.get("state") or ""),
+        "reason": pair_op.progress(record, now),
+        "mode": pair_op.mode(record),
+        "device_id": str(device.get("device_id") or "") if isinstance(device, Mapping) else "",
+        "expires_at": view.get("expires_at"),
+    }
+
+
+def withdraw_request(request_id: str, body: Mapping[str, Any], root: Path) -> dict[str, Any]:
+    """The phone's Cancel: verify its key's signature, then withdraw as the requester.
+
+    THE KEY IS THE REQUESTER (U6). The relay cookie is shared by every phone, so it
+    cannot say which phone filed a card; the record's ``device.spki`` can. The body is
+    exactly ``{sig}``: hex DER ECDSA-P256-SHA256 over ``WITHDRAW_LABEL || request_id``,
+    verified against the record's own key BEFORE anything is written. Then the store's
+    write-once ``withdraw`` runs with the record's own identity keys.
+
+    Idempotent: ``withdrawn`` or ``expired`` answers 200 with that state. Once the
+    person has decided (code matched or codes confirmed, a signature or a run under
+    way) it is ``approval_in_progress`` -- the phone stays on "Confirming" -- and a
+    wrong key is ``pair_withdraw_forbidden`` with nothing written.
+    """
+    from local_operator.operator import devices, pair_op
+    from local_operator.operator.verify import verify_signature
+
+    record = _pair_record(request_id, root)
+    if record is None:
+        raise _refuse("unknown_request", pair_op._copy("refusal_unknown_request"))
+    if set(body) != {"sig"} or not isinstance(body.get("sig"), str) or len(body["sig"]) > 512:
+        raise _refuse("pair_withdraw_invalid", pair_op._copy("refusal_withdraw_invalid"))
+    try:
+        signature = bytes.fromhex(body["sig"])
+    except ValueError:
+        signature = b""
+    device = record.get("device")
+    spki = devices.decode_spki(device.get("spki")) if isinstance(device, Mapping) else None
+    message = WITHDRAW_LABEL + request_id.encode("utf-8")
+    if spki is None or not verify_signature(spki=spki, message=message, signature=signature):
+        raise _refuse("pair_withdraw_forbidden", pair_op._copy("refusal_withdraw_forbidden"))
+    view = approvals.presented(record, time.time())
+    state = str(view.get("state") or "")
+    if state in (approvals.STATE_WITHDRAWN, approvals.STATE_EXPIRED):
+        return {"state": state}
+    if state != approvals.STATE_REQUESTED or pair_op.progress(record) != pair_op.REASON_WAITING:
+        raise _refuse("approval_in_progress", pair_op._copy("refusal_in_progress"))
+    try:
+        settled = approvals.withdraw(
+            str(record["approval_id"]), requested_by=dict(record["requested_by"]), root=root
+        )
+    except MeshRefusal as exc:
+        if exc.code == "approval_expired":
+            return {"state": approvals.STATE_EXPIRED}
+        if exc.code == "approval_withdraw_conflict":
+            # A decision landed between our read and the store's lock: same answer as above.
+            raise _refuse("approval_in_progress", pair_op._copy("refusal_in_progress")) from exc
+        raise
+    return {"state": str(settled.get("state") or approvals.STATE_WITHDRAWN)}
 
 
 def _clear_for_tests() -> None:

@@ -1,0 +1,16 @@
+{
+  "operator.pairing.gesture.mac": "آپ کا Mac، Touch ID یا اپنا لاگ اِن پاس ورڈ مانگے گا — یہ آپ کا Mac تصدیق کر رہا ہے، یہ آپ کا Radient پاس ورڈ نہیں۔",
+  "operator.pairing.gesture.windows": "Windows آپ سے اس کی اجازت مانگے گا — یہ Windows تصدیق کر رہا ہے، یہ آپ کا Radient پاس ورڈ نہیں۔",
+  "operator.pairing.gesture.other": "آپ کا کمپیوٹر اپنا پاس ورڈ مانگے گا — یہ آپ کا کمپیوٹر تصدیق کر رہا ہے، یہ آپ کا Radient پاس ورڈ نہیں۔",
+  "operator.pairing.prompt.confirm": "اس کمپیوٹر پر ایک فون کی تصدیق کے لیے Local Operator کو آپ کی اجازت درکار ہے۔",
+  "operator.pairing.prompt.remove": "اس کمپیوٹر سے ایک فون ہٹانے کے لیے Local Operator کو آپ کی اجازت درکار ہے۔",
+  "operator.pairing.prompt.setup": "اس کمپیوٹر پر فون سے منظوریاں آن کرنے کے لیے Local Operator کو آپ کی اجازت درکار ہے۔",
+  "operator.pairing.refusal.confirm_needs_code": "اس فون نے آپ کے Radient اکاؤنٹ کے ذریعے درخواست نہیں کی، اس لیے یہ کمپیوٹر کوڈ ملا کر اس کی تصدیق نہیں کر سکتا۔ کچھ منظور نہیں ہوا؛ اس کے بجائے فون پر دکھائے گئے چھ ہندسے ٹائپ کریں۔",
+  "operator.pairing.refusal.request_changed": "جوڑنے کا یہ کارڈ دکھائے جانے کے بعد بدل گیا۔ کچھ منظور نہیں ہوا؛ اسے دوبارہ دیکھیں۔",
+  "operator.pairing.refusal.unknown_request": "اس شناخت کے ساتھ جوڑنے کی کوئی درخواست موجود نہیں۔",
+  "operator.pairing.refusal.withdraw_invalid": "درخواست واپس لینے کے لیے صرف فون کا دستخط درکار ہے، اور کچھ نہیں۔",
+  "operator.pairing.refusal.withdraw_forbidden": "یہ دستخط اُس فون کا نہیں جس نے جڑنے کی درخواست کی تھی۔ کچھ واپس نہیں لیا گیا۔",
+  "operator.pairing.refusal.in_progress": "آپ کا کمپیوٹر پہلے ہی اس جوڑنے کی تصدیق کر رہا ہے، اس لیے اب اسے فون سے منسوخ نہیں کیا جا سکتا۔ اس کے بجائے کمپیوٹر پر اسے مسترد کریں۔",
+  "operator.pairing.refusal.bad_device_id": "یہ ایسی ڈیوائس شناخت نہیں جو یہ کمپیوٹر جاری کرتا ہو۔",
+  "operator.pairing.revoke.unfinished": "یہ فون اب یہاں منظوری نہیں دے سکتا اور نہ ہی اطلاعات پا سکتا ہے، لیکن آپریٹر کی ڈیوائس فہرست سے اسے ہٹانے کا عمل مکمل نہیں ہوا۔ ہٹانا مکمل کرنے کے لیے وہی کمانڈ دوبارہ چلائیں۔"
+}

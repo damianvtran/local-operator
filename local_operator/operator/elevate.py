@@ -48,8 +48,38 @@ def _without_sudo(command: list[list[str]]) -> list[list[str]]:
     return [argv[1:] if argv and argv[0] == "sudo" else argv for argv in command]
 
 
-def _macos_prompt(command: list[list[str]]) -> list[str]:
+#: WHY the OS is asking (pairing design v2 §2.4, D1). Three fixed purposes, never free
+#: text: the prompt is the agent-proof boundary, so its sentence must not be something a
+#: caller can word. A revoke used to show "confirm a phone", which is the opposite of
+#: what the person was doing. C3 (operator-authority setup) adds the third caller; this
+#: signature (a keyword with the historical default) is the minimal one both share.
+PURPOSE_CONFIRM = "confirm"
+PURPOSE_REMOVE = "remove"
+PURPOSE_SETUP = "setup"
+
+
+def _purpose_prompt(purpose: str) -> str | None:
+    """The keyed dialog sentence for ``purpose`` (``operator.pairing.prompt.*``)."""
+    from local_operator.i18n.keys import operator_pairing as copy
+    from local_operator.i18n.text import tr
+
+    message = {
+        PURPOSE_CONFIRM: copy.prompt_confirm,
+        PURPOSE_REMOVE: copy.prompt_remove,
+        PURPOSE_SETUP: copy.prompt_setup,
+    }.get(purpose)
+    return tr("operator.pairing")(message()) if message is not None else None
+
+
+def _macos_prompt(command: list[list[str]], purpose: str = PURPOSE_CONFIRM) -> list[str]:
     from local_operator.operator import format_install_commands
+
+    prompt = _purpose_prompt(purpose)
+    if prompt is None:
+        raise ValueError(f"unknown elevation purpose: {purpose!r}")
+    # The sentence sits inside an AppleScript string literal below; a translation is data,
+    # so it gets the same escaping as the script rather than trusting the catalogue.
+    prompt = prompt.replace("\\", "\\\\").replace('"', '\\"')
 
     script = format_install_commands(_without_sudo(command))
     # The script is a shell-quoted argv, then an AppleScript string literal. Both
@@ -58,8 +88,7 @@ def _macos_prompt(command: list[list[str]]) -> list[str]:
     return [
         "osascript",
         "-e",
-        f'do shell script "{quoted}" with administrator privileges '
-        'with prompt "Local Operator needs your approval to confirm a phone on this computer."',
+        f'do shell script "{quoted}" with administrator privileges with prompt "{prompt}"',
     ]
 
 
@@ -135,8 +164,14 @@ def prompt_refusal(*, windows: bool | None = None) -> str | None:
 _OSASCRIPT_USER_CANCELED = "(-128)"
 
 
-def run_elevated(command: list[list[str]], *, windows: bool | None = None) -> ElevationResult:
-    """Launch the platform's in-person admin gesture, without a shell wrapper."""
+def run_elevated(
+    command: list[list[str]], *, windows: bool | None = None, purpose: str = PURPOSE_CONFIRM
+) -> ElevationResult:
+    """Launch the platform's in-person admin gesture, without a shell wrapper.
+
+    ``purpose`` picks one of the fixed prompt sentences (macOS shows it in the dialog);
+    other platforms' launchers have no prompt text to set.
+    """
     is_windows = trust._on_windows() if windows is None else windows
     refusal = prompt_refusal(windows=is_windows)
     if refusal is not None:
@@ -149,7 +184,7 @@ def run_elevated(command: list[list[str]], *, windows: bool | None = None) -> El
         # running it here (unlike onboarding) raises UAC and waits for its result.
         argv = command[0]
     elif sys.platform == "darwin":
-        argv = _macos_prompt(command)
+        argv = _macos_prompt(command, purpose)
     elif shutil.which("pkexec") is not None:
         from local_operator.operator import format_install_commands
 
@@ -202,17 +237,26 @@ def confirm_card_copy(*, windows: bool | None = None) -> tuple[str, str, str]:
         "trusted on any computer that joins this one later. Computers that joined "
         "earlier keep their own list."
     )
+    # D13 (design v2 A2): name the Touch ID step and say whose password it is, so a person
+    # who signed in with Radient does not type their Radient password into the OS prompt.
+    from local_operator.i18n.keys import operator_pairing as copy
+    from local_operator.i18n.text import tr
+
+    _t = tr("operator.pairing")
     if is_windows:
-        gesture = "Windows will ask you to allow this."
+        gesture = _t(copy.gesture_windows())
     elif sys.platform == "darwin":
-        gesture = "Your Mac will ask for your admin password."
+        gesture = _t(copy.gesture_mac())
     else:
-        gesture = "Your computer will ask for your password."
+        gesture = _t(copy.gesture_other())
     return title, body, gesture
 
 
 __all__ = [
     "NO_LAUNCHER_REFUSAL",
+    "PURPOSE_CONFIRM",
+    "PURPOSE_REMOVE",
+    "PURPOSE_SETUP",
     "ElevationResult",
     "confirm_card_copy",
     "prompt_refusal",
