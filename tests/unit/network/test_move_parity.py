@@ -15,7 +15,7 @@ from __future__ import annotations
 import json
 import threading
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -301,13 +301,16 @@ class TestTeamResolution:
             teams.TeamRegistry, "get_team_by_name", lambda self, name, **kw: object()
         )
 
+        # The exception takes a COUNT, never a message: its text crosses the
+        # transport, so it names how many definitions are unreadable, not which.
         def incomplete(self: Any) -> None:
-            raise ProfileRegistryUnavailable("agent rows were skipped as corrupt")
+            raise ProfileRegistryUnavailable(count=2)
 
         monkeypatch.setattr(agents.AgentRegistry, "require_complete_metadata", incomplete)
         block = carry.attachment_resolution(tmp_path, self._session(tmp_path, "lopdev"))
         assert block["resolved"] is True and block["applied"] is False
-        assert "skipped as corrupt" in block["notice"]
+        assert "team brief is not applied yet" in block["notice"]
+        assert "2 agent definitions could not be read" in block["notice"]
 
     def test_a_stored_agent_beside_a_team_is_not_named_missing(self, tmp_path: Path) -> None:
         """Review r1 N1: a team owns the agent slot, so the stored agent is superseded."""
@@ -360,7 +363,8 @@ class TestTeamResolution:
         class _Server:
             root = tmp_path
 
-        mq._drive_copy(_Server(), SID)  # noqa: SLF001
+        # Only ``root`` is read before the stubbed transport stops the drive.
+        mq._drive_copy(cast(Any, _Server()), SID)  # noqa: SLF001
         assert order[:2] == [f"push:{SID}:d_b", "invite:invite"]
 
 
@@ -525,7 +529,7 @@ class TestMovedSessionReappliesItsTeamBrief:
         from datetime import datetime, timezone
 
         from local_operator.agents import AgentRegistry
-        from local_operator.harness.types import StreamEndEvent, StreamTextDelta
+        from local_operator.harness.types import StreamEndEvent, StreamEvent, StreamTextDelta
         from local_operator.network import definitions
         from local_operator.prompts_api import build_system_blocks
         from local_operator.resume import write_session_attachment
@@ -553,7 +557,7 @@ class TestMovedSessionReappliesItsTeamBrief:
             )
 
         setattr(provider, "append_only_state", True)
-        reply = [StreamTextDelta(delta="ok"), StreamEndEvent(stop_reason="stop")]
+        reply: list[StreamEvent] = [StreamTextDelta(delta="ok"), StreamEndEvent(stop_reason="stop")]
         stream = ScriptedStream([reply, reply])
         teams = TeamRegistry(dest)
         session = Session(
@@ -634,7 +638,7 @@ async def _answered_session(dest: Path, *, team: str = "", agent: str = "") -> t
     """A session on ``dest`` whose attachment names definitions this device lacks,
     answered once (so the late adoption is closed, as for every moved session)."""
     from local_operator.agents import AgentRegistry
-    from local_operator.harness.types import StreamEndEvent, StreamTextDelta
+    from local_operator.harness.types import StreamEndEvent, StreamEvent, StreamTextDelta
     from local_operator.prompts_api import build_system_blocks
     from local_operator.resume import write_session_attachment
     from local_operator.session.goal import GoalState
@@ -659,7 +663,7 @@ async def _answered_session(dest: Path, *, team: str = "", agent: str = "") -> t
         )
 
     provider.append_only_state = True  # type: ignore[attr-defined]
-    reply = [StreamTextDelta(delta="ok"), StreamEndEvent(stop_reason="stop")]
+    reply: list[StreamEvent] = [StreamTextDelta(delta="ok"), StreamEndEvent(stop_reason="stop")]
     stream = ScriptedStream([reply, reply, reply])
     session = Session(
         model=MODEL,
