@@ -383,6 +383,50 @@ async def test_the_health_payload_says_reconnecting_while_the_run_holds_the_lock
     assert json.dumps(during)
 
 
+@pytest.mark.asyncio
+async def test_an_unenrolled_machine_gets_no_remedy(tmp_path, monkeypatch):
+    """CI round 5: no `config.json` and no `create.json` means nothing to fix.
+
+    main 6f79d9a3's contract: `tunnel_remedy` on `GET /v1/auth/status` is null
+    for a machine with no tunnel; the setup offer (UI #1910) serves it instead.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    payload = await report.local_payload(reachable=False)
+    assert payload["configured"] is False
+    assert payload["remedy"] is None
+
+
+@pytest.mark.asyncio
+async def test_an_enrolled_tunnel_whose_login_is_signed_out_gets_sign_in(tmp_path, monkeypatch):
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    _configure()
+    monkeypatch.setattr(
+        report,
+        "connector_state",
+        AsyncMock(return_value={"state": "stopped", "reason": "", "remedy": None}),
+    )
+    monkeypatch.setattr(
+        report,
+        "login_verdict",
+        AsyncMock(return_value={"credential_id": 17, "state": gateway.LOGIN_REQUIRED}),
+    )
+    payload = await report.local_payload(reachable=False)
+    assert payload["configured"] is True
+    assert payload["remedy"]["kind"] == "sign_in"
+
+
+@pytest.mark.asyncio
+async def test_an_interrupted_create_alone_still_counts_as_enrolled(tmp_path, monkeypatch):
+    """`create.json` without `config.json`: a person asked, so they get the step."""
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    config.directory().mkdir(parents=True, exist_ok=True)
+    (config.directory() / "create.json").write_text("{}")
+    payload = await report.local_payload(reachable=False)
+    assert payload["configured"] is False
+    # No Radient login in this sandbox, so the step is the sign-in setup needs.
+    assert payload["remedy"] == {"kind": "sign_in", "command": "lop login radient", "url": None}
+
+
 def test_the_journal_liveness_probe_never_signals_on_windows(monkeypatch):
     # `os.kill(pid, 0)` is TerminateProcess on Windows: a liveness probe that
     # calls it kills the setup run it asks about (xplat `static.posix_attributes`

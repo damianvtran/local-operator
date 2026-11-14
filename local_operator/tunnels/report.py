@@ -663,7 +663,11 @@ def _retrying_remedy(connector: dict[str, Any]) -> dict[str, Any] | None:
 
 
 def unconfigured_remedy() -> dict[str, Any]:
-    """What a machine with NO tunnel is offered: set phone access up, or sign in.
+    """What a machine with an INTERRUPTED create (no tunnel yet) is offered.
+
+    Only reached when `create.json` records a setup that did not finish, or a
+    `config.json` exists but cannot be read (`local_payload`); a machine with
+    neither record gets no remedy at all.
 
     `run` when a Radient login is already on this device (the desktop renders its
     "Set up phone access" card from it and posts the setup route), `sign_in` when
@@ -729,6 +733,22 @@ async def local_payload(*, reachable: bool = True) -> dict[str, Any]:
     try:
         value = config.load()
     except ValueError:
+        # NO REMEDY WHEN NOTHING IS ENROLLED (main 6f79d9a3's contract, kept on
+        # #3945 by the lopdev manager): with no tunnel there is nothing to sign
+        # in FOR, and this payload is also `tunnel_remedy` on
+        # `GET /v1/auth/status`, whose consumers read a non-null remedy as "your
+        # remote access is broken". A machine that never asked for phone access
+        # is served by the setup OFFER instead — the desktop card from
+        # `tunnel.setup.read` (`configured: false`, local-operator-ui #1910) and
+        # the TUI's one-line `/mobile enable` note — never by a remedy here.
+        #
+        # "Enrolled" is `install.phone_access_wanted()`, the ONE notion the
+        # post-sign-in run already uses: `config.json` OR `create.json`, so an
+        # interrupted create (reservation intent, no configuration yet) still
+        # gets its next step. Imported here, not at module scope: only this
+        # branch needs it (measured 5 ms / 10 modules, paid once per process).
+        from local_operator.tunnels.install import phone_access_wanted
+
         return {
             "configured": False,
             "tunnel_id": None,
@@ -744,10 +764,9 @@ async def local_payload(*, reachable: bool = True) -> dict[str, Any]:
                 "remedy": None,
             },
             "login": {"credential_id": None, "state": "unknown"},
-            # Not null: a machine with no tunnel has one obvious next step, and
-            # "nothing to do" is how a teammate ended up at a phone that could
-            # not connect with no idea why.
-            "remedy": unconfigured_remedy(),
+            # Only for an interrupted create: that person already asked for phone
+            # access, so "nothing to do" would strand a half-made tunnel.
+            "remedy": unconfigured_remedy() if phone_access_wanted() else None,
         }
     stored = value.get("record")
     assembled = payload(

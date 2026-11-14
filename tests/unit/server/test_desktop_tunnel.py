@@ -141,10 +141,13 @@ async def test_a_machine_with_no_tunnel_says_so_instead_of_stopped(desktop) -> N
     assert result["configured"] is False
     assert result["connector"]["state"] == "not configured"
     assert result["login"]["state"] == "unknown"
-    # Not null any more: a machine with no tunnel has one obvious next step. No
-    # Radient login in this fixture, so it is the sign-in (with one, `run`:
-    # the desktop's "Set up phone access" card).
-    assert result["remedy"] == {"kind": "sign_in", "command": "lop login radient", "url": None}
+    # Nothing is enrolled, so there is nothing to sign in for and no remedy (main
+    # 6f79d9a3's contract, kept on #3945): the setup OFFER, read from
+    # `tunnel.setup.read`, is what serves this machine (UI #1910).
+    assert result["remedy"] is None
+    status = (await client.get("/v1/auth/status")).json()["result"]
+    assert status["radient_login"]["state"] == "unknown"
+    assert status["tunnel_remedy"] is None
 
 
 async def test_a_deliberately_stopped_tunnel_is_not_reported_as_parked(desktop) -> None:
