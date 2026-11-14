@@ -1,0 +1,17 @@
+Source-only verification; no task/service execution
+UTC 2026-11-14T08:59:11Z
+test_hash_negative_control (test_reconstruction.ReconstructionTests.test_hash_negative_control) ... ok
+test_image_never_downloaded (test_reconstruction.ReconstructionTests.test_image_never_downloaded) ... ok
+test_path_escape_rejected_without_network (test_reconstruction.ReconstructionTests.test_path_escape_rejected_without_network) ... ok
+test_privacy_scanner_negative_control (test_reconstruction.ReconstructionTests.test_privacy_scanner_negative_control) ... ok
+test_proposed_host_lock_retains_dependency_edges (test_reconstruction.ReconstructionTests.test_proposed_host_lock_retains_dependency_edges) ... ok
+test_static_verification_real_command_and_dispatch_refusal (test_reconstruction.ReconstructionTests.test_static_verification_real_command_and_dispatch_refusal) ... ok
+
+----------------------------------------------------------------------
+Ran 6 tests in 2.256s
+
+OK
+{"errors": [], "file_statuses": {"exact_match": 380, "mismatch": 1, "not_downloaded_non_source": 26}, "historical_checks": 37, "kind": "static-source-verification", "metadata_receipt_rows_checked": 22, "privacy_pattern_hits": [], "runtime_qualified": false}
+{"errors": ["campaign incomplete: exact recovery gate refuses dispatch"], "file_statuses": {"exact_match": 380, "mismatch": 1, "not_downloaded_non_source": 26}, "historical_checks": 37, "kind": "static-source-verification", "metadata_receipt_rows_checked": 22, "privacy_pattern_hits": [], "runtime_qualified": false}
+Incomplete campaign gate exit=1 (expected 1)
+Authored-file git diff --cached --check: exit 0; immutable upstream payloads/metadata excluded.

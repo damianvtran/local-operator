@@ -1,0 +1,39 @@
+{
+  "campaign_id": "reconstruction-20261114-source-v1",
+  "status": "DRAFT-BLOCKED-UNPINNED-INPUTS",
+  "historical_source_commit": "2078250d8e990ee0840b4d045964ed8a68871d08",
+  "host_services": {
+    "source_root": "../../experimental",
+    "lock": "host-services.requirements.lock",
+    "lock_origin": "proposed slice of Hermes historical source uv.lock, not deleted host environment",
+    "python_family": "CPython 3.14",
+    "python_build_sha256": null,
+    "installer_version": null,
+    "installer_sha256": null,
+    "qualified": false
+  },
+  "linux_toolchain": {
+    "platform": "linux/amd64",
+    "mount": "/opt/bench",
+    "base_digest": null,
+    "os_package_lock": null,
+    "python_build_sha256": null,
+    "node_build_sha256": null,
+    "package_manager_sha256": null,
+    "compiler_build_tools_lock": null,
+    "distribution_metadata": "distribution-pins.partial.json",
+    "dependency_closure_complete": false,
+    "qualified": false
+  },
+  "harnesses": {
+    "claude-code": {"version": "2.1.274", "source_revision": null, "artifact_metadata": ["claude-code", "claude-linux-x64"], "original_installed_tree_recovered": false},
+    "codex-best": {"version": "0.147.0", "source_revision": null, "artifact_metadata": ["codex-best", "codex-linux-x64"], "original_installed_tree_recovered": false},
+    "local-operator": {"version": "500883ef-v0.94.22", "source_revision": "500883ef56ca504325ffd80c5b90bf2435d00e3f", "artifact_metadata": ["lop-pyproject"], "dependency_lock": null, "original_installed_tree_recovered": false},
+    "omp": {"version": "18.11.2", "source_revision": null, "artifact_metadata": ["omp"], "dependency_lock": null, "original_installed_tree_recovered": false},
+    "opencode": {"version": "2.0.27", "source_revision": null, "artifact_metadata": [], "dependency_lock": null, "exact_artifact_available": false, "original_installed_tree_recovered": false},
+    "hermes": {"version": "0.22.6", "source_revision": "f0d94882e89ab8d4098b5bb2f166adfb9ee0a0ab", "artifact_metadata": ["hermes-pyproject", "hermes-uv-lock"], "target_extras_selected": false, "original_installed_tree_recovered": false},
+    "dsh": {"version": "0.2.0-rc.2", "source_revision": null, "artifact_metadata": ["dsh"], "dependency_lock": null, "original_installed_tree_recovered": false}
+  },
+  "paid_dispatch_authorized": false,
+  "budget": {"lane_usd": 100, "trial_usd": 5, "programme_usd": 800, "prior_actual_spend_usd": null, "current_authorized_spend_usd": 0}
+}

@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:local-operator:benchmark:reconstruction-20261114-source-v1:evidence",
+  "title": "New campaign evidence receipt; not historical trial recovery",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["campaign_id", "sequence", "previous_receipt_sha256", "recorded_at", "kind", "origin", "source_commit", "artifact", "qualification"],
+  "properties": {
+    "campaign_id": {"const": "reconstruction-20261114-source-v1"},
+    "sequence": {"type": "integer", "minimum": 0},
+    "previous_receipt_sha256": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"},
+    "recorded_at": {"type": "string", "format": "date-time"},
+    "kind": {"enum": ["source", "dependency-lock", "build", "negative-control", "oracle", "runtime", "wire", "cost", "trial"]},
+    "origin": {"enum": ["newly-collected", "historical-reference-only"]},
+    "source_commit": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "artifact": {
+      "type": "object", "additionalProperties": false,
+      "required": ["relative_path", "sha256", "bytes", "privacy_scan"],
+      "properties": {
+        "relative_path": {"type": "string", "pattern": "^(?!/)(?!.*\\.\\.).+$"},
+        "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "bytes": {"type": "integer", "minimum": 0},
+        "privacy_scan": {"enum": ["passed", "blocked"]}
+      }
+    },
+    "qualification": {"enum": ["source-only", "unqualified", "qualified", "failed"]},
+    "trial_id": {"type": ["string", "null"], "pattern": "^reconstruction-20261114-source-v1-"},
+    "harness": {"enum": ["claude-code", "codex-best", "local-operator", "omp", "opencode", "hermes", "dsh"]},
+    "task": {"type": "string"},
+    "command_redacted": {"type": "string"},
+    "exit_code": {"type": "integer"},
+    "cost_usd": {"type": ["number", "null"], "minimum": 0},
+    "notes": {"type": "string"}
+  },
+  "allOf": [
+    {"if": {"properties": {"origin": {"const": "historical-reference-only"}}}, "then": {"properties": {"qualification": {"const": "unqualified"}}}},
+    {"if": {"properties": {"kind": {"const": "trial"}}}, "then": {"required": ["trial_id", "harness", "task"], "properties": {"trial_id": {"type": "string"}}}}
+  ]
+}

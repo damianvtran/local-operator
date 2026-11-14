@@ -1,0 +1,450 @@
+{
+  "campaign_id": "reconstruction-20261114-source-v1",
+  "derived_count": 30,
+  "historical_exact_recovery": false,
+  "historical_expected_sha256": "97aac6092add53b8c65232f69e0d373eb94fb39c072b63eadef752707c020459",
+  "note": "This is a new derivation, never the missing frozen subset bytes.",
+  "surviving_actual_sha256": "d240bd359aa8efd97fc03f563719cde6d55636f92fcb715cc195afcafdcfadee",
+  "surviving_count": 21,
+  "tasks": [
+    {
+      "historical_metadata": {
+        "hub_tag_full_size_bytes": 95724176,
+        "image": "alexgshaw/git-leak-recovery:20251031",
+        "image_digest": "sha256:62160e522a4238b8bcd522411ea97b5b200f811e5899d34947e66809bef7e586",
+        "name": "git-leak-recovery",
+        "task8": "git-leak",
+        "task_checksum": "45308cc1d3e5c665486621c50d95a4789861f41066e85e572eb7ccddb7932720"
+      },
+      "image_digest": "sha256:62160e522a4238b8bcd522411ea97b5b200f811e5899d34947e66809bef7e586",
+      "missing_fields": [],
+      "name": "git-leak-recovery",
+      "selection": "dev",
+      "source": "surviving subset"
+    },
+    {
+      "historical_metadata": {
+        "hub_tag_full_size_bytes": 133922796,
+        "image": "alexgshaw/vulnerable-secret:20251031",
+        "image_digest": "sha256:61ebb40454dd103aa2f7e71ad6dafd91cf2b301e6bb07e69d5b472412d1ee15b",
+        "name": "vulnerable-secret",
+        "task8": "vulnerab",
+        "task_checksum": "08ff9cb3cd416576bed330e9b92191ce0acbf5322f64714b6955ea6638361256"
+      },
+      "image_digest": "sha256:61ebb40454dd103aa2f7e71ad6dafd91cf2b301e6bb07e69d5b472412d1ee15b",
+      "missing_fields": [],
+      "name": "vulnerable-secret",
+      "selection": "dev",
+      "source": "surviving subset"
+    },
+    {
+      "historical_metadata": {
+        "hub_tag_full_size_bytes": 62185367,
+        "image": "alexgshaw/password-recovery:20251031",
+        "image_digest": "sha256:15fcd84bf3b06270ee148211cc6da6599b13ec2f41ac1d0894cf75c2225872ee",
+        "name": "password-recovery",
+        "task8": "password",
+        "task_checksum": "a8b12d116b3a8e03e946f0db92b77e789cfa26ecb49a56be5723ff47a03a532d"
+      },
+      "image_digest": "sha256:15fcd84bf3b06270ee148211cc6da6599b13ec2f41ac1d0894cf75c2225872ee",
+      "missing_fields": [],
+      "name": "password-recovery",
+      "selection": "held-out",
+      "source": "surviving subset"
+    },
+    {
+      "historical_metadata": {
+        "hub_tag_full_size_bytes": 29724629,
+        "image": "alexgshaw/dna-insert:20251031",
+        "image_digest": "sha256:4dd8760694e355de85ecf03605cb487ccdb33322f6afad513d2920829baa33b2",
+        "name": "dna-insert",
+        "task8": "dna-inse",
+        "task_checksum": "8ee918b8953bf437bf764153a84080475e1c2dfa18d0209cc4b19fee12ccce3c"
+      },
+      "image_digest": "sha256:4dd8760694e355de85ecf03605cb487ccdb33322f6afad513d2920829baa33b2",
+      "missing_fields": [],
+      "name": "dna-insert",
+      "selection": "held-out",
+      "source": "surviving subset"
+    },
+    {
+      "historical_metadata": {
+        "hub_tag_full_size_bytes": 150821673,
+        "image": "alexgshaw/feal-linear-cryptanalysis:20251031",
+        "image_digest": "sha256:ea78749a8422c6228d26c8753f45906a6a2df089906764b7e3c3e27e8f718ee7",
+        "name": "feal-linear-cryptanalysis",
+        "task8": "feal-lin",
+        "task_checksum": "d0b41813a535b13144fc12f12242e1aa9b2ae6088d13afbd5276c8240eec403d"
+      },
+      "image_digest": "sha256:ea78749a8422c6228d26c8753f45906a6a2df089906764b7e3c3e27e8f718ee7",
+      "missing_fields": [],
+      "name": "feal-linear-cryptanalysis",
+      "selection": "held-out",
+      "source": "surviving subset"
+    },
+    {
+      "historical_metadata": {
+        "hub_tag_full_size_bytes": 29724813,
+        "image": "alexgshaw/dna-assembly:20251031",
+        "image_digest": "sha256:d1adf6835f1dd91205ba70e452c699d0aea601010038e5617f370716efb50569",
+        "name": "dna-assembly",
+        "task8": "dna-asse",
+        "task_checksum": "e2acbc34aa5f20bbe3b10d2d297cdec9e6f2086c94a70068f2325e7bb7ab1212"
+      },
+      "image_digest": "sha256:d1adf6835f1dd91205ba70e452c699d0aea601010038e5617f370716efb50569",
+      "missing_fields": [],
+      "name": "dna-assembly",
+      "selection": "held-out",
+      "source": "surviving subset"
+    },
+    {
+      "historical_metadata": {
+        "hub_tag_full_size_bytes": 44180314,
+        "image": "alexgshaw/schemelike-metacircular-eval:20251031",
+        "image_digest": "sha256:b485be38bf80d56c1a4cd9da95bbf7ec129dc03f6786b86c0525518a96f6d1db",
+        "name": "schemelike-metacircular-eval",
+        "task8": "schemeli",
+        "task_checksum": "e4525988ae20585b6b90a2f1af2fcc9d18d6363d3cfcdd7be5305199428883d2"
+      },
+      "image_digest": "sha256:b485be38bf80d56c1a4cd9da95bbf7ec129dc03f6786b86c0525518a96f6d1db",
+      "missing_fields": [],
+      "name": "schemelike-metacircular-eval",
+      "selection": "held-out",
+      "source": "surviving subset"
+    },
+    {
+      "historical_metadata": {
+        "hub_tag_full_size_bytes": 73308403,
+        "image": "alexgshaw/large-scale-text-editing:20251031",
+        "image_digest": "sha256:719adca3f1388220546ce6a155eee56eff3c4fe318183100320606a210f6b59c",
+        "name": "large-scale-text-editing",
+        "task8": "large-sc",
+        "task_checksum": "e2851ab29f9dc799ae4ba2ad8f7495ccd1625476a3954dde8cec09771e41208a"
+      },
+      "image_digest": "sha256:719adca3f1388220546ce6a155eee56eff3c4fe318183100320606a210f6b59c",
+      "missing_fields": [],
+      "name": "large-scale-text-editing",
+      "selection": "held-out",
+      "source": "surviving subset"
+    },
+    {
+      "historical_metadata": {
+        "hub_tag_full_size_bytes": 29723240,
+        "image": "alexgshaw/torch-pipeline-parallelism:20251031",
+        "image_digest": "sha256:3cb7b39d86f1704b20e668851da0b08b34b3270c01d583f136d65190984a8d1b",
+        "name": "torch-pipeline-parallelism",
+        "task8": "torch-pi",
+        "task_checksum": "31e565558cd22598a3c2069f771d9d0eee26fb843b77f7b03e00ad4c336fbce9"
+      },
+      "image_digest": "sha256:3cb7b39d86f1704b20e668851da0b08b34b3270c01d583f136d65190984a8d1b",
+      "missing_fields": [],
+      "name": "torch-pipeline-parallelism",
+      "selection": "held-out",
+      "source": "surviving subset"
+    },
+    {
+      "historical_metadata": {
+        "hub_tag_full_size_bytes": 149127889,
+        "image": "alexgshaw/circuit-fibsqrt:20251031",
+        "image_digest": "sha256:29783439f529eaed2145592f15af7a2281161528860392a382c825489030ae3a",
+        "name": "circuit-fibsqrt",
+        "task8": "circuit-",
+        "task_checksum": "dc4c18df98c940d9ec11336861e07f7f5ca2a13b9e8e0f95e886c20f3d61bc0d"
+      },
+      "image_digest": "sha256:29783439f529eaed2145592f15af7a2281161528860392a382c825489030ae3a",
+      "missing_fields": [],
+      "name": "circuit-fibsqrt",
+      "selection": "held-out",
+      "source": "surviving subset"
+    },
+    {
+      "historical_metadata": {
+        "hub_tag_full_size_bytes": 62277092,
+        "image": "alexgshaw/headless-terminal:20251031",
+        "image_digest": "sha256:eb7e209672bf6cef2785fafd9e13509b10626c327bcc2b37f5bf40ca83eaf3aa",
+        "name": "headless-terminal",
+        "task8": "headless",
+        "task_checksum": "d1324ce5d4734d79b4569b569d2aa826dbfce6eadc6ac406f137d21446ac8d1a"
+      },
+      "image_digest": "sha256:eb7e209672bf6cef2785fafd9e13509b10626c327bcc2b37f5bf40ca83eaf3aa",
+      "missing_fields": [],
+      "name": "headless-terminal",
+      "selection": "held-out",
+      "source": "surviving subset"
+    },
+    {
+      "historical_metadata": {
+        "hub_tag_full_size_bytes": 51790066,
+        "image": "alexgshaw/financial-document-processor:20251031",
+        "image_digest": "sha256:ef6c9cfaaf14cdd200163008a188d5baa9f626f3bfb8d3e7d6f30c08518e6251",
+        "name": "financial-document-processor",
+        "task8": "financia",
+        "task_checksum": "312889565426c3a4ed49c11531586aa8b7ba947b1507a846347280f44185cdba"
+      },
+      "image_digest": "sha256:ef6c9cfaaf14cdd200163008a188d5baa9f626f3bfb8d3e7d6f30c08518e6251",
+      "missing_fields": [],
+      "name": "financial-document-processor",
+      "selection": "held-out",
+      "source": "surviving subset"
+    },
+    {
+      "historical_metadata": {
+        "hub_tag_full_size_bytes": 44164493,
+        "image": "alexgshaw/kv-store-grpc:20251031",
+        "image_digest": "sha256:3399400800dcb207634daa42bc1b052e831e285cc9d221eea66c47bc0fc79791",
+        "name": "kv-store-grpc",
+        "task8": "kv-store",
+        "task_checksum": "901a4dd5c3078d5155043875a0d07f3583f462c73f919b52855c025e680b1edd"
+      },
+      "image_digest": "sha256:3399400800dcb207634daa42bc1b052e831e285cc9d221eea66c47bc0fc79791",
+      "missing_fields": [],
+      "name": "kv-store-grpc",
+      "selection": "held-out",
+      "source": "surviving subset"
+    },
+    {
+      "historical_metadata": {
+        "hub_tag_full_size_bytes": 190685882,
+        "image": "alexgshaw/fix-code-vulnerability:20251031",
+        "image_digest": "sha256:cac325252991f823713b2d0441502972901dd782bd67f66c03d9b1e410dac5c0",
+        "name": "fix-code-vulnerability",
+        "task8": "fix-code",
+        "task_checksum": "80d707a96acfd0e19af96f0f0c8f44deefdbf167538fefbc0d1dc6391392090a"
+      },
+      "image_digest": "sha256:cac325252991f823713b2d0441502972901dd782bd67f66c03d9b1e410dac5c0",
+      "missing_fields": [],
+      "name": "fix-code-vulnerability",
+      "selection": "held-out",
+      "source": "surviving subset"
+    },
+    {
+      "historical_metadata": {
+        "hub_tag_full_size_bytes": 67277698,
+        "image": "alexgshaw/nginx-request-logging:20251031",
+        "image_digest": "sha256:693e64431a0dbf45952e8b91a298d54fd60247e501c6623fb8fa3ebc07fc3d3d",
+        "name": "nginx-request-logging",
+        "task8": "nginx-re",
+        "task_checksum": "913305d8f286ff121b30e4893217142190b27f12952343f22c0999dd2a4d725e"
+      },
+      "image_digest": "sha256:693e64431a0dbf45952e8b91a298d54fd60247e501c6623fb8fa3ebc07fc3d3d",
+      "missing_fields": [],
+      "name": "nginx-request-logging",
+      "selection": "held-out",
+      "source": "surviving subset"
+    },
+    {
+      "historical_metadata": {
+        "hub_tag_full_size_bytes": 61140540,
+        "image": "alexgshaw/build-pmars:20251031",
+        "image_digest": "sha256:57a82706f7491e0b2d1ff7e927e97ae5339892dd09c47ac43290b4ba1f5abc6f",
+        "name": "build-pmars",
+        "task8": "build-pm",
+        "task_checksum": "d8b362b978357ecfe110604103166aeb7c1379bf97da88fd66ea200db54c6a37"
+      },
+      "image_digest": "sha256:57a82706f7491e0b2d1ff7e927e97ae5339892dd09c47ac43290b4ba1f5abc6f",
+      "missing_fields": [],
+      "name": "build-pmars",
+      "selection": "held-out",
+      "source": "surviving subset"
+    },
+    {
+      "historical_metadata": {
+        "hub_tag_full_size_bytes": 131843285,
+        "image": "alexgshaw/overfull-hbox:20260403",
+        "image_digest": "sha256:7dca952bb6736194a736b5110945f48842eafa8551e24468f1dddeed0daee799",
+        "name": "overfull-hbox",
+        "task8": "overfull",
+        "task_checksum": "e615e59bebd52c82c6143c646aec4df7e57d2349665320295c2802532e2d283e"
+      },
+      "image_digest": "sha256:7dca952bb6736194a736b5110945f48842eafa8551e24468f1dddeed0daee799",
+      "missing_fields": [],
+      "name": "overfull-hbox",
+      "selection": "held-out",
+      "source": "surviving subset"
+    },
+    {
+      "historical_metadata": {
+        "hub_tag_full_size_bytes": 29725003,
+        "image": "alexgshaw/sparql-university:20251031",
+        "image_digest": "sha256:92fa4304e51167f9fb4466144eba33ef9272a7df0ac1cab9fc3986bccd1ab708",
+        "name": "sparql-university",
+        "task8": "sparql-u",
+        "task_checksum": "9c12586c19816f24b248cb8843f317cfef98804c8a6f4fe3717133db79ffca25"
+      },
+      "image_digest": "sha256:92fa4304e51167f9fb4466144eba33ef9272a7df0ac1cab9fc3986bccd1ab708",
+      "missing_fields": [],
+      "name": "sparql-university",
+      "selection": "held-out",
+      "source": "surviving subset"
+    },
+    {
+      "historical_metadata": {
+        "hub_tag_full_size_bytes": 84686418,
+        "image": "alexgshaw/largest-eigenval:20251031",
+        "image_digest": "sha256:cb9e3e3b09d0783f3bbcfeec8d77bc32d3791204fb2be6650b19be4fbc082b2e",
+        "name": "largest-eigenval",
+        "task8": "largest-",
+        "task_checksum": "40a3fe4b82d167abbf65fe4a3d86be67c1f06ed141b5cf7662b6b2391dc06313"
+      },
+      "image_digest": "sha256:cb9e3e3b09d0783f3bbcfeec8d77bc32d3791204fb2be6650b19be4fbc082b2e",
+      "missing_fields": [],
+      "name": "largest-eigenval",
+      "selection": "held-out",
+      "source": "surviving subset"
+    },
+    {
+      "historical_metadata": {
+        "hub_tag_full_size_bytes": 189544020,
+        "image": "alexgshaw/make-doom-for-mips:20251031",
+        "image_digest": "sha256:80a9459f1b94b692ea8346f68e6b864f6c4d984fbdf6ffd68ad332308300c2ec",
+        "name": "make-doom-for-mips",
+        "task8": "make-doo",
+        "task_checksum": "8ecf7ffa820c3c76e07d06ad5042fb5661f3371c24f6c0ee710c36596b802549"
+      },
+      "image_digest": "sha256:80a9459f1b94b692ea8346f68e6b864f6c4d984fbdf6ffd68ad332308300c2ec",
+      "missing_fields": [],
+      "name": "make-doom-for-mips",
+      "selection": "held-out",
+      "source": "surviving subset"
+    },
+    {
+      "historical_metadata": {
+        "hub_tag_full_size_bytes": 41697404,
+        "image": "alexgshaw/extract-moves-from-video:20260403",
+        "image_digest": "sha256:74ef87375ce2b6332ca9fe0180eb541b64cf4ef4188edd5b1be22c272e5a5b4b",
+        "name": "extract-moves-from-video",
+        "task8": "extract-",
+        "task_checksum": "5d0d37ba5e80cba32a14cf34d1252fff3ca9483d967b4ca6c96a7f4230f63c7b"
+      },
+      "image_digest": "sha256:74ef87375ce2b6332ca9fe0180eb541b64cf4ef4188edd5b1be22c272e5a5b4b",
+      "missing_fields": [],
+      "name": "extract-moves-from-video",
+      "selection": "held-out",
+      "source": "surviving subset"
+    },
+    {
+      "historical_metadata": null,
+      "image_digest": null,
+      "missing_fields": [
+        "task8",
+        "image tag",
+        "hub_tag_full_size_bytes",
+        "task_checksum",
+        "image_digest"
+      ],
+      "name": "llm-inference-batching-scheduler",
+      "selection": "held-out",
+      "source": "prereg task list; optional public-provenance image binding"
+    },
+    {
+      "historical_metadata": null,
+      "image_digest": null,
+      "missing_fields": [
+        "task8",
+        "image tag",
+        "hub_tag_full_size_bytes",
+        "task_checksum",
+        "image_digest"
+      ],
+      "name": "merge-diff-arc-agi-task",
+      "selection": "held-out",
+      "source": "prereg task list; optional public-provenance image binding"
+    },
+    {
+      "historical_metadata": null,
+      "image_digest": "sha256:56c197739db2db79562384581fcc9d3d71e6c171bf052104b1a7ee0282e7c3cf",
+      "missing_fields": [
+        "task8",
+        "image tag",
+        "hub_tag_full_size_bytes",
+        "task_checksum"
+      ],
+      "name": "tune-mjcf",
+      "selection": "held-out",
+      "source": "prereg task list; optional public-provenance image binding"
+    },
+    {
+      "historical_metadata": null,
+      "image_digest": null,
+      "missing_fields": [
+        "task8",
+        "image tag",
+        "hub_tag_full_size_bytes",
+        "task_checksum",
+        "image_digest"
+      ],
+      "name": "build-pov-ray",
+      "selection": "held-out",
+      "source": "prereg task list; optional public-provenance image binding"
+    },
+    {
+      "historical_metadata": null,
+      "image_digest": null,
+      "missing_fields": [
+        "task8",
+        "image tag",
+        "hub_tag_full_size_bytes",
+        "task_checksum",
+        "image_digest"
+      ],
+      "name": "adaptive-rejection-sampler",
+      "selection": "held-out",
+      "source": "prereg task list; optional public-provenance image binding"
+    },
+    {
+      "historical_metadata": null,
+      "image_digest": "sha256:4b5234da5bb0d67f3b0bf8db40a2883c07a5219f62b64c2bf9ff1ac84cd0f672",
+      "missing_fields": [
+        "task8",
+        "image tag",
+        "hub_tag_full_size_bytes",
+        "task_checksum"
+      ],
+      "name": "sanitize-git-repo",
+      "selection": "held-out",
+      "source": "prereg task list; optional public-provenance image binding"
+    },
+    {
+      "historical_metadata": null,
+      "image_digest": null,
+      "missing_fields": [
+        "task8",
+        "image tag",
+        "hub_tag_full_size_bytes",
+        "task_checksum",
+        "image_digest"
+      ],
+      "name": "regex-log",
+      "selection": "held-out",
+      "source": "prereg task list; optional public-provenance image binding"
+    },
+    {
+      "historical_metadata": null,
+      "image_digest": null,
+      "missing_fields": [
+        "task8",
+        "image tag",
+        "hub_tag_full_size_bytes",
+        "task_checksum",
+        "image_digest"
+      ],
+      "name": "pytorch-model-cli",
+      "selection": "held-out",
+      "source": "prereg task list; optional public-provenance image binding"
+    },
+    {
+      "historical_metadata": null,
+      "image_digest": null,
+      "missing_fields": [
+        "task8",
+        "image tag",
+        "hub_tag_full_size_bytes",
+        "task_checksum",
+        "image_digest"
+      ],
+      "name": "code-from-image",
+      "selection": "held-out",
+      "source": "prereg task list; optional public-provenance image binding"
+    }
+  ]
+}

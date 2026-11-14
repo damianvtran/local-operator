@@ -1,0 +1,521 @@
+{
+  "campaign_id": "reconstruction-20261114-source-v1",
+  "files": 407,
+  "receipt": "source-receipt-20261114T084934148805Z.jsonl",
+  "tasks": [
+    {
+      "complete_exact": true,
+      "counts": {
+        "exact_match": 8
+      },
+      "gaps": [],
+      "source_commit": "7131e4375048a0e408a8fb404b5f499d726b695b",
+      "task": "password-recovery"
+    },
+    {
+      "complete_exact": true,
+      "counts": {
+        "exact_match": 8
+      },
+      "gaps": [],
+      "source_commit": "7131e4375048a0e408a8fb404b5f499d726b695b",
+      "task": "dna-insert"
+    },
+    {
+      "complete_exact": true,
+      "counts": {
+        "exact_match": 10
+      },
+      "gaps": [],
+      "source_commit": "7131e4375048a0e408a8fb404b5f499d726b695b",
+      "task": "feal-linear-cryptanalysis"
+    },
+    {
+      "complete_exact": true,
+      "counts": {
+        "exact_match": 8
+      },
+      "gaps": [],
+      "source_commit": "7131e4375048a0e408a8fb404b5f499d726b695b",
+      "task": "dna-assembly"
+    },
+    {
+      "complete_exact": true,
+      "counts": {
+        "exact_match": 138
+      },
+      "gaps": [],
+      "source_commit": "7131e4375048a0e408a8fb404b5f499d726b695b",
+      "task": "schemelike-metacircular-eval"
+    },
+    {
+      "complete_exact": true,
+      "counts": {
+        "exact_match": 11
+      },
+      "gaps": [],
+      "source_commit": "7131e4375048a0e408a8fb404b5f499d726b695b",
+      "task": "large-scale-text-editing"
+    },
+    {
+      "complete_exact": true,
+      "counts": {
+        "exact_match": 7
+      },
+      "gaps": [],
+      "source_commit": "7131e4375048a0e408a8fb404b5f499d726b695b",
+      "task": "torch-pipeline-parallelism"
+    },
+    {
+      "complete_exact": true,
+      "counts": {
+        "exact_match": 11
+      },
+      "gaps": [],
+      "source_commit": "7131e4375048a0e408a8fb404b5f499d726b695b",
+      "task": "circuit-fibsqrt"
+    },
+    {
+      "complete_exact": true,
+      "counts": {
+        "exact_match": 9
+      },
+      "gaps": [],
+      "source_commit": "7131e4375048a0e408a8fb404b5f499d726b695b",
+      "task": "headless-terminal"
+    },
+    {
+      "complete_exact": false,
+      "counts": {
+        "exact_match": 8,
+        "not_downloaded_non_source": 17
+      },
+      "gaps": [
+        {
+          "expected_sha256": "d5fc89cdc92240baa7fc6506237e3841af88880a6f57fa6e3f60b925e605fd22",
+          "file": "environment/documents/1t2tala7.jpg",
+          "observed_sha256": null,
+          "source_commit": "7131e4375048a0e408a8fb404b5f499d726b695b",
+          "status": "not_downloaded_non_source",
+          "task": "financial-document-processor",
+          "url": "https://raw.githubusercontent.com/harbor-framework/terminal-bench-2-1/7131e4375048a0e408a8fb404b5f499d726b695b/tasks/financial-document-processor/environment/documents/1t2tala7.jpg"
+        },
+        {
+          "expected_sha256": "bc95a144939b7f21abd832019625a3f2c182a7abe8d57f9bd25e7c6f5d6b3ba5",
+          "file": "environment/documents/41ibljh7.pdf",
+          "observed_sha256": null,
+          "source_commit": "7131e4375048a0e408a8fb404b5f499d726b695b",
+          "status": "not_downloaded_non_source",
+          "task": "financial-document-processor",
+          "url": "https://raw.githubusercontent.com/harbor-framework/terminal-bench-2-1/7131e4375048a0e408a8fb404b5f499d726b695b/tasks/financial-document-processor/environment/documents/41ibljh7.pdf"
+        },
+        {
+          "expected_sha256": "2c8607b9c75907077e23f45ce7bc75335a4a46e9f9aab5ee0d901b86b63e7a8e",
+          "file": "environment/documents/53lc58dr.jpg",
+          "observed_sha256": null,
+          "source_commit": "7131e4375048a0e408a8fb404b5f499d726b695b",
+          "status": "not_downloaded_non_source",
+          "task": "financial-document-processor",
+          "url": "https://raw.githubusercontent.com/harbor-framework/terminal-bench-2-1/7131e4375048a0e408a8fb404b5f499d726b695b/tasks/financial-document-processor/environment/documents/53lc58dr.jpg"
+        },
+        {
+          "expected_sha256": "0b3873d45510867d3063637d01f8e9255c4be96586b1f6b06682a208877d441c",
+          "file": "environment/documents/5lxo6qji.pdf",
+          "observed_sha256": null,
+          "source_commit": "7131e4375048a0e408a8fb404b5f499d726b695b",
+          "status": "not_downloaded_non_source",
+          "task": "financial-document-processor",
+          "url": "https://raw.githubusercontent.com/harbor-framework/terminal-bench-2-1/7131e4375048a0e408a8fb404b5f499d726b695b/tasks/financial-document-processor/environment/documents/5lxo6qji.pdf"
+        },
+        {
+          "expected_sha256": "56238d4d934c433c24e53d0674f0530e11024f284e8ffcb3bb0bcc0d58850740",
+          "file": "environment/documents/8mdd4v30.jpg",
+          "observed_sha256": null,
+          "source_commit": "7131e4375048a0e408a8fb404b5f499d726b695b",
+          "status": "not_downloaded_non_source",
+          "task": "financial-document-processor",
+          "url": "https://raw.githubusercontent.com/harbor-framework/terminal-bench-2-1/7131e4375048a0e408a8fb404b5f499d726b695b/tasks/financial-document-processor/environment/documents/8mdd4v30.jpg"
+        },
+        {
+          "expected_sha256": "d46a7397df8e7903ddef31b76c1633c4989f09b8c301e0cf87dab00cd08a4663",
+          "file": "environment/documents/9t84azyt.pdf",
+          "observed_sha256": null,
+          "source_commit": "7131e4375048a0e408a8fb404b5f499d726b695b",
+          "status": "not_downloaded_non_source",
+          "task": "financial-document-processor",
+          "url": "https://raw.githubusercontent.com/harbor-framework/terminal-bench-2-1/7131e4375048a0e408a8fb404b5f499d726b695b/tasks/financial-document-processor/environment/documents/9t84azyt.pdf"
+        },
+        {
+          "expected_sha256": "570adcb1be1800cca727420b543e9c68bb7607ebaddf80524c7380560e549434",
+          "file": "environment/documents/c11ertj5.pdf",
+          "observed_sha256": null,
+          "source_commit": "7131e4375048a0e408a8fb404b5f499d726b695b",
+          "status": "not_downloaded_non_source",
+          "task": "financial-document-processor",
+          "url": "https://raw.githubusercontent.com/harbor-framework/terminal-bench-2-1/7131e4375048a0e408a8fb404b5f499d726b695b/tasks/financial-document-processor/environment/documents/c11ertj5.pdf"
+        },
+        {
+          "expected_sha256": "ad8f14ad77a98d0926a68d17e5ce822c2f9d3a355ccf4a6b1ded5327c31cbb87",
+          "file": "environment/documents/dbdw2pcn.pdf",
+          "observed_sha256": null,
+          "source_commit": "7131e4375048a0e408a8fb404b5f499d726b695b",
+          "status": "not_downloaded_non_source",
+          "task": "financial-document-processor",
+          "url": "https://raw.githubusercontent.com/harbor-framework/terminal-bench-2-1/7131e4375048a0e408a8fb404b5f499d726b695b/tasks/financial-document-processor/environment/documents/dbdw2pcn.pdf"
+        },
+        {
+          "expected_sha256": "807a6b0b942eb2ce406db3c57a833bba539e165017c81e2b1a0a98104d213677",
+          "file": "environment/documents/g0fn9xuy.jpg",
+          "observed_sha256": null,
+          "source_commit": "7131e4375048a0e408a8fb404b5f499d726b695b",
+          "status": "not_downloaded_non_source",
+          "task": "financial-document-processor",
+          "url": "https://raw.githubusercontent.com/harbor-framework/terminal-bench-2-1/7131e4375048a0e408a8fb404b5f499d726b695b/tasks/financial-document-processor/environment/documents/g0fn9xuy.jpg"
+        },
+        {
+          "expected_sha256": "c212aa5440b23e4b5e97af3c271685769b1050edd73a1ee461acce2c5998eb3c",
+          "file": "environment/documents/hv3a3zmf.jpg",
+          "observed_sha256": null,
+          "source_commit": "7131e4375048a0e408a8fb404b5f499d726b695b",
+          "status": "not_downloaded_non_source",
+          "task": "financial-document-processor",
+          "url": "https://raw.githubusercontent.com/harbor-framework/terminal-bench-2-1/7131e4375048a0e408a8fb404b5f499d726b695b/tasks/financial-document-processor/environment/documents/hv3a3zmf.jpg"
+        },
+        {
+          "expected_sha256": "a51b4a78c278c1b755e674511729d8514681b94094a4130c457ed71c533a0083",
+          "file": "environment/documents/jxepq85j.jpg",
+          "observed_sha256": null,
+          "source_commit": "7131e4375048a0e408a8fb404b5f499d726b695b",
+          "status": "not_downloaded_non_source",
+          "task": "financial-document-processor",
+          "url": "https://raw.githubusercontent.com/harbor-framework/terminal-bench-2-1/7131e4375048a0e408a8fb404b5f499d726b695b/tasks/financial-document-processor/environment/documents/jxepq85j.jpg"
+        },
+        {
+          "expected_sha256": "badb1930a086c35b1484463098cbfb7823beb21abae71a9fe95bf90807fa9e41",
+          "file": "environment/documents/pbhsahxt.jpg",
+          "observed_sha256": null,
+          "source_commit": "7131e4375048a0e408a8fb404b5f499d726b695b",
+          "status": "not_downloaded_non_source",
+          "task": "financial-document-processor",
+          "url": "https://raw.githubusercontent.com/harbor-framework/terminal-bench-2-1/7131e4375048a0e408a8fb404b5f499d726b695b/tasks/financial-document-processor/environment/documents/pbhsahxt.jpg"
+        },
+        {
+          "expected_sha256": "53d8335a156bd0b18bd1808693cc805c39e013d9768fd7eb7497f22e18b1c5cb",
+          "file": "environment/documents/sg65kxvf.jpg",
+          "observed_sha256": null,
+          "source_commit": "7131e4375048a0e408a8fb404b5f499d726b695b",
+          "status": "not_downloaded_non_source",
+          "task": "financial-document-processor",
+          "url": "https://raw.githubusercontent.com/harbor-framework/terminal-bench-2-1/7131e4375048a0e408a8fb404b5f499d726b695b/tasks/financial-document-processor/environment/documents/sg65kxvf.jpg"
+        },
+        {
+          "expected_sha256": "ad3359faf1126b33fc587098ed3f5b722734eeb4364794eea66e10112014f25a",
+          "file": "environment/documents/ujv6oh9s.jpg",
+          "observed_sha256": null,
+          "source_commit": "7131e4375048a0e408a8fb404b5f499d726b695b",
+          "status": "not_downloaded_non_source",
+          "task": "financial-document-processor",
+          "url": "https://raw.githubusercontent.com/harbor-framework/terminal-bench-2-1/7131e4375048a0e408a8fb404b5f499d726b695b/tasks/financial-document-processor/environment/documents/ujv6oh9s.jpg"
+        },
+        {
+          "expected_sha256": "5ee01b997176b9124302899471651ce4d4b160f292caf79f2250e2e8324e3480",
+          "file": "environment/documents/wnnhj7xv.pdf",
+          "observed_sha256": null,
+          "source_commit": "7131e4375048a0e408a8fb404b5f499d726b695b",
+          "status": "not_downloaded_non_source",
+          "task": "financial-document-processor",
+          "url": "https://raw.githubusercontent.com/harbor-framework/terminal-bench-2-1/7131e4375048a0e408a8fb404b5f499d726b695b/tasks/financial-document-processor/environment/documents/wnnhj7xv.pdf"
+        },
+        {
+          "expected_sha256": "e0b8a2c7078efe82d7657f5023f01ff5498d59cca54a74ef2b6983bc979a1c54",
+          "file": "environment/documents/xaji0y6d.jpg",
+          "observed_sha256": null,
+          "source_commit": "7131e4375048a0e408a8fb404b5f499d726b695b",
+          "status": "not_downloaded_non_source",
+          "task": "financial-document-processor",
+          "url": "https://raw.githubusercontent.com/harbor-framework/terminal-bench-2-1/7131e4375048a0e408a8fb404b5f499d726b695b/tasks/financial-document-processor/environment/documents/xaji0y6d.jpg"
+        },
+        {
+          "expected_sha256": "862f7d313f1233f3e44a89610a4015d861dc771ad2ba8028ad56e2d4fd37ac71",
+          "file": "environment/documents/zbikcidk.jpg",
+          "observed_sha256": null,
+          "source_commit": "7131e4375048a0e408a8fb404b5f499d726b695b",
+          "status": "not_downloaded_non_source",
+          "task": "financial-document-processor",
+          "url": "https://raw.githubusercontent.com/harbor-framework/terminal-bench-2-1/7131e4375048a0e408a8fb404b5f499d726b695b/tasks/financial-document-processor/environment/documents/zbikcidk.jpg"
+        }
+      ],
+      "source_commit": "7131e4375048a0e408a8fb404b5f499d726b695b",
+      "task": "financial-document-processor"
+    },
+    {
+      "complete_exact": true,
+      "counts": {
+        "exact_match": 7
+      },
+      "gaps": [],
+      "source_commit": "7131e4375048a0e408a8fb404b5f499d726b695b",
+      "task": "kv-store-grpc"
+    },
+    {
+      "complete_exact": true,
+      "counts": {
+        "exact_match": 7
+      },
+      "gaps": [],
+      "source_commit": "7131e4375048a0e408a8fb404b5f499d726b695b",
+      "task": "fix-code-vulnerability"
+    },
+    {
+      "complete_exact": true,
+      "counts": {
+        "exact_match": 7
+      },
+      "gaps": [],
+      "source_commit": "7131e4375048a0e408a8fb404b5f499d726b695b",
+      "task": "nginx-request-logging"
+    },
+    {
+      "complete_exact": true,
+      "counts": {
+        "exact_match": 9
+      },
+      "gaps": [],
+      "source_commit": "7131e4375048a0e408a8fb404b5f499d726b695b",
+      "task": "build-pmars"
+    },
+    {
+      "complete_exact": true,
+      "counts": {
+        "exact_match": 14
+      },
+      "gaps": [],
+      "source_commit": "7131e4375048a0e408a8fb404b5f499d726b695b",
+      "task": "overfull-hbox"
+    },
+    {
+      "complete_exact": true,
+      "counts": {
+        "exact_match": 9
+      },
+      "gaps": [],
+      "source_commit": "7131e4375048a0e408a8fb404b5f499d726b695b",
+      "task": "sparql-university"
+    },
+    {
+      "complete_exact": true,
+      "counts": {
+        "exact_match": 9
+      },
+      "gaps": [],
+      "source_commit": "7131e4375048a0e408a8fb404b5f499d726b695b",
+      "task": "largest-eigenval"
+    },
+    {
+      "complete_exact": false,
+      "counts": {
+        "exact_match": 9,
+        "not_downloaded_non_source": 1
+      },
+      "gaps": [
+        {
+          "expected_sha256": "d1909be8f3266a72686c3945029a553b82e5b46acd624eda65f3fdd5eb339574",
+          "file": "tests/reference.jpg",
+          "observed_sha256": null,
+          "source_commit": "7131e4375048a0e408a8fb404b5f499d726b695b",
+          "status": "not_downloaded_non_source",
+          "task": "make-doom-for-mips",
+          "url": "https://raw.githubusercontent.com/harbor-framework/terminal-bench-2-1/7131e4375048a0e408a8fb404b5f499d726b695b/tasks/make-doom-for-mips/tests/reference.jpg"
+        }
+      ],
+      "source_commit": "7131e4375048a0e408a8fb404b5f499d726b695b",
+      "task": "make-doom-for-mips"
+    },
+    {
+      "complete_exact": false,
+      "counts": {
+        "exact_match": 7,
+        "not_downloaded_non_source": 1
+      },
+      "gaps": [
+        {
+          "expected_sha256": "15e9a9e946fc1ae7adb28f3770f30249c471180e6bddc132c9f65b4c9a4f2be7",
+          "file": "environment/task-deps/video.mp4",
+          "observed_sha256": null,
+          "source_commit": "7131e4375048a0e408a8fb404b5f499d726b695b",
+          "status": "not_downloaded_non_source",
+          "task": "extract-moves-from-video",
+          "url": "https://raw.githubusercontent.com/harbor-framework/terminal-bench-2-1/7131e4375048a0e408a8fb404b5f499d726b695b/tasks/extract-moves-from-video/environment/task-deps/video.mp4"
+        }
+      ],
+      "source_commit": "7131e4375048a0e408a8fb404b5f499d726b695b",
+      "task": "extract-moves-from-video"
+    },
+    {
+      "complete_exact": true,
+      "counts": {
+        "exact_match": 14
+      },
+      "gaps": [],
+      "source_commit": "7131e4375048a0e408a8fb404b5f499d726b695b",
+      "task": "llm-inference-batching-scheduler"
+    },
+    {
+      "complete_exact": false,
+      "counts": {
+        "exact_match": 9,
+        "not_downloaded_non_source": 2
+      },
+      "gaps": [
+        {
+          "expected_sha256": "a759f9b6ffc1a2eee50778d72a1899ad7d724becab84fa30e7aac71ee9e443a5",
+          "file": "environment/task-deps/bundle1.bundle",
+          "observed_sha256": null,
+          "source_commit": "7131e4375048a0e408a8fb404b5f499d726b695b",
+          "status": "not_downloaded_non_source",
+          "task": "merge-diff-arc-agi-task",
+          "url": "https://raw.githubusercontent.com/harbor-framework/terminal-bench-2-1/7131e4375048a0e408a8fb404b5f499d726b695b/tasks/merge-diff-arc-agi-task/environment/task-deps/bundle1.bundle"
+        },
+        {
+          "expected_sha256": "75e3e3916a01c980a03715de67b16c729e03661d94a694b5f4223d229bd6593a",
+          "file": "environment/task-deps/bundle2.bundle",
+          "observed_sha256": null,
+          "source_commit": "7131e4375048a0e408a8fb404b5f499d726b695b",
+          "status": "not_downloaded_non_source",
+          "task": "merge-diff-arc-agi-task",
+          "url": "https://raw.githubusercontent.com/harbor-framework/terminal-bench-2-1/7131e4375048a0e408a8fb404b5f499d726b695b/tasks/merge-diff-arc-agi-task/environment/task-deps/bundle2.bundle"
+        }
+      ],
+      "source_commit": "7131e4375048a0e408a8fb404b5f499d726b695b",
+      "task": "merge-diff-arc-agi-task"
+    },
+    {
+      "complete_exact": true,
+      "counts": {
+        "exact_match": 10
+      },
+      "gaps": [],
+      "source_commit": "7131e4375048a0e408a8fb404b5f499d726b695b",
+      "task": "tune-mjcf"
+    },
+    {
+      "complete_exact": false,
+      "counts": {
+        "exact_match": 8,
+        "not_downloaded_non_source": 1
+      },
+      "gaps": [
+        {
+          "expected_sha256": "bb084f430bbc9d5b623a656920670dc06cee6d9132a9d550be4a1b99e41ab9e0",
+          "file": "tests/reference_illum1.png",
+          "observed_sha256": null,
+          "source_commit": "7131e4375048a0e408a8fb404b5f499d726b695b",
+          "status": "not_downloaded_non_source",
+          "task": "build-pov-ray",
+          "url": "https://raw.githubusercontent.com/harbor-framework/terminal-bench-2-1/7131e4375048a0e408a8fb404b5f499d726b695b/tasks/build-pov-ray/tests/reference_illum1.png"
+        }
+      ],
+      "source_commit": "7131e4375048a0e408a8fb404b5f499d726b695b",
+      "task": "build-pov-ray"
+    },
+    {
+      "complete_exact": false,
+      "counts": {
+        "exact_match": 7,
+        "not_downloaded_non_source": 1
+      },
+      "gaps": [
+        {
+          "expected_sha256": "7fc9bf1347bb97da8dede04b2c58638f225070913e222d76627068aebd1b1df2",
+          "file": "environment/protected.tar.gz.enc",
+          "observed_sha256": null,
+          "source_commit": "7131e4375048a0e408a8fb404b5f499d726b695b",
+          "status": "not_downloaded_non_source",
+          "task": "adaptive-rejection-sampler",
+          "url": "https://raw.githubusercontent.com/harbor-framework/terminal-bench-2-1/7131e4375048a0e408a8fb404b5f499d726b695b/tasks/adaptive-rejection-sampler/environment/protected.tar.gz.enc"
+        }
+      ],
+      "source_commit": "7131e4375048a0e408a8fb404b5f499d726b695b",
+      "task": "adaptive-rejection-sampler"
+    },
+    {
+      "complete_exact": false,
+      "counts": {
+        "exact_match": 10,
+        "mismatch": 1
+      },
+      "gaps": [
+        {
+          "bytes": 2712,
+          "expected_sha256": "57e4904177acac5807b51f7c32444bde1968ba0445855fa4333d9eb73865b59e",
+          "file": "tests/test_outputs.py",
+          "observed_sha256": "8b3c1094b4628f80fc402c867c21ab5a373f529ad5ae54e49a0a8ac3eb7aae5d",
+          "source_commit": "7131e4375048a0e408a8fb404b5f499d726b695b",
+          "status": "mismatch",
+          "task": "sanitize-git-repo",
+          "url": "https://raw.githubusercontent.com/harbor-framework/terminal-bench-2-1/7131e4375048a0e408a8fb404b5f499d726b695b/tasks/sanitize-git-repo/tests/test_outputs.py"
+        }
+      ],
+      "source_commit": "7131e4375048a0e408a8fb404b5f499d726b695b",
+      "task": "sanitize-git-repo"
+    },
+    {
+      "complete_exact": true,
+      "counts": {
+        "exact_match": 7
+      },
+      "gaps": [],
+      "source_commit": "7131e4375048a0e408a8fb404b5f499d726b695b",
+      "task": "regex-log"
+    },
+    {
+      "complete_exact": false,
+      "counts": {
+        "exact_match": 12,
+        "not_downloaded_non_source": 2
+      },
+      "gaps": [
+        {
+          "expected_sha256": "f4d5dfefe463939996541404340e7099d5957b56e1df3760d13b5d2de754db53",
+          "file": "environment/task-deps/image.png",
+          "observed_sha256": null,
+          "source_commit": "7131e4375048a0e408a8fb404b5f499d726b695b",
+          "status": "not_downloaded_non_source",
+          "task": "pytorch-model-cli",
+          "url": "https://raw.githubusercontent.com/harbor-framework/terminal-bench-2-1/7131e4375048a0e408a8fb404b5f499d726b695b/tasks/pytorch-model-cli/environment/task-deps/image.png"
+        },
+        {
+          "expected_sha256": "a32103eef09936e586b1a7dc7e64d279500a38ff30fdd6df2167e28eb954eee6",
+          "file": "environment/task-deps/model.pth",
+          "observed_sha256": null,
+          "source_commit": "7131e4375048a0e408a8fb404b5f499d726b695b",
+          "status": "not_downloaded_non_source",
+          "task": "pytorch-model-cli",
+          "url": "https://raw.githubusercontent.com/harbor-framework/terminal-bench-2-1/7131e4375048a0e408a8fb404b5f499d726b695b/tasks/pytorch-model-cli/environment/task-deps/model.pth"
+        }
+      ],
+      "source_commit": "7131e4375048a0e408a8fb404b5f499d726b695b",
+      "task": "pytorch-model-cli"
+    },
+    {
+      "complete_exact": false,
+      "counts": {
+        "exact_match": 7,
+        "not_downloaded_non_source": 1
+      },
+      "gaps": [
+        {
+          "expected_sha256": "f4d0330407b363a9ef03d563e5c2ffd24aa76345f997613741f9fc0935354305",
+          "file": "environment/code.png",
+          "observed_sha256": null,
+          "source_commit": "7131e4375048a0e408a8fb404b5f499d726b695b",
+          "status": "not_downloaded_non_source",
+          "task": "code-from-image",
+          "url": "https://raw.githubusercontent.com/harbor-framework/terminal-bench-2-1/7131e4375048a0e408a8fb404b5f499d726b695b/tasks/code-from-image/environment/code.png"
+        }
+      ],
+      "source_commit": "7131e4375048a0e408a8fb404b5f499d726b695b",
+      "task": "code-from-image"
+    }
+  ]
+}
