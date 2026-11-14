@@ -290,6 +290,42 @@ def encode(record: Mapping[str, Any]) -> dict[str, Any]:
     return {"format": FORMAT, "version": VERSION, "record": checked(record)}
 
 
+#: Readiness capabilities a ready report may carry as equipment WARNINGS (never
+#: positive admission evidence). ONE closed set, read by both
+#: :func:`ready_evidence` (which rows a verify step accepts) and
+#: :func:`public_report` (which warnings a receipt may publish). They were two
+#: hand-kept copies; when the node-managed ``browser`` row joined every peer's
+#: report, the first copy lacking it rejected EVERY ready report and signed
+#: desktop onboarding failed with "enrollment authority is invalid". A new
+#: peer-side row in ``readiness.PEER_SIDE_CHECKS`` must be added here.
+WARNING_CAPABILITIES: frozenset[str] = frozenset(
+    {
+        "git_identity",
+        "repository",
+        "model_credential",
+        "mcp_servers",
+        "mcp_credential",
+        "tooling",
+        "resilience",
+        # Local recovery authority rides the same ready report; it is evidence
+        # about the viewer's grant, never positive peer equipment evidence.
+        "peer_restart",
+        # Non-gating equipment like resilience (readiness.NON_GATING_EQUIPMENT):
+        # a peer row the verify step must accept and report as a warning.
+        "serve_daemon",
+        # The node-managed browser (readiness.CAPABILITY_BROWSER), also
+        # non-gating: a node without a browser is onboarded.
+        "browser",
+        "selected_model_credential",
+        # Non-gating equipment (readiness.CAPABILITY_SKILLS, PR #3839): the
+        # mesh skill sync appends one per peer to every ready report, so verify
+        # must know it or every enrollment from that build ends ``failed``. It
+        # is appended by ``_peer_checks`` but is not in ``PEER_SIDE_CHECKS``.
+        "skills",
+    }
+)
+
+
 def ready_evidence(report: Any, *, device_id: str, network_id: str) -> list[dict[str, str]]:
     """Closed known-producer evidence, NOT filtering an empty set of failures.
 
@@ -307,28 +343,7 @@ def ready_evidence(report: Any, *, device_id: str, network_id: str) -> list[dict
     )
     rows = _array(report.get("checks"))
     require(isinstance(rows, list) and bool(rows))
-    allowed = {
-        "build",
-        "operator_authority",
-        "git_identity",
-        "repository",
-        "model_credential",
-        "mcp_servers",
-        "mcp_credential",
-        "tooling",
-        "resilience",
-        # Local recovery authority rides the same ready report; it is evidence
-        # about the viewer's grant, never positive peer equipment evidence.
-        "peer_restart",
-        # Non-gating equipment like resilience (readiness.NON_GATING_EQUIPMENT):
-        # a peer row the verify step must accept and report as a warning.
-        "serve_daemon",
-        "selected_model_credential",
-        # Non-gating equipment (readiness.CAPABILITY_SKILLS, PR #3839): the
-        # mesh skill sync appends one per peer to every ready report, so verify
-        # must know it or every enrollment from that build ends ``failed``.
-        "skills",
-    }
+    allowed = {"build", "operator_authority", *WARNING_CAPABILITIES}
     required: set[str] = set()
     warnings: list[dict[str, str]] = []
     for row in rows:
@@ -413,22 +428,7 @@ def public_report(data: Mapping[str, Any]) -> dict[str, Any]:
     for row in rows:
         require(
             isinstance(row, dict)
-            and row.get("capability")
-            in {
-                "git_identity",
-                "repository",
-                "model_credential",
-                "mcp_servers",
-                "mcp_credential",
-                "tooling",
-                "resilience",
-                "peer_restart",
-                "serve_daemon",
-                "selected_model_credential",
-                # Mirrors ready_evidence's allowlist: a not-yet-synced skills
-                # row is a warning the terminal receipt must carry, not refuse.
-                "skills",
-            }
+            and row.get("capability") in WARNING_CAPABILITIES
             and row.get("code", "") in codes
         )
         public.append({"capability": row["capability"], "code": row.get("code", "")})

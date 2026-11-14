@@ -1287,6 +1287,14 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "``run/browser`` and its bridge record ``bridge.json``",
     ),
     "local_operator/browser_bridge/gen_ts.py": (1, "the generated protocol bundle's name"),
+    "local_operator/browser_bridge/node_host.py": (
+        2,
+        "neither is a path: ``EXTENSION_ASSET_PREFIX`` is a GitHub release asset-name "
+        "prefix and ``REFUSE_NO_RECORD`` a refusal code. The module's real paths (the "
+        "node record, profile and extension dirs under ``<config>/browser/``, the "
+        "systemd unit, ``/etc`` repo and policy files) are node-local machine state "
+        "built at runtime or absolute, never an entry of a session directory",
+    ),
     "local_operator/browser_bridge/daemon.py": (
         2,
         "the daemon's pairing record (``browser/pairing.json``) and the pending file beside "
