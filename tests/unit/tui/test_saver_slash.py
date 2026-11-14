@@ -91,6 +91,17 @@ async def _typed(pilot, app: OperatorApp, text: str) -> str:
     await pilot.press("enter")
     for _ in range(40):
         await pilot.pause()
+    # WAIT ON THE EVENT, NOT THE CLOCK. `/saver` runs as a worker (group "saver")
+    # that awaits a journal write and only THEN repaints the band
+    # (`OperatorApp._saver_command`). Forty `pause()` yields count loop turns, not
+    # completion: on a loaded CI runner the write outlasted them and a caller read
+    # the band before the repaint (`⊖ saver` still painted right after
+    # `/saver inherit`). Awaiting the group's workers is the real completion; the
+    # trailing pause lets the repaint it scheduled reach the screen.
+    pending = [w for w in app.workers if w.group == "saver"]
+    if pending:
+        await app.workers.wait_for_complete(pending)
+        await pilot.pause()
     return received[-1] if received else ""
 
 

@@ -479,6 +479,15 @@ async def test_a_live_fork_outranks_the_liveness_term(tmp_path, monkeypatch):
         session.has_pending_fork = lambda: True  # type: ignore[method-assign]
         app._interaction.session = session
 
+        # THE CADENCE IS A WALL-CLOCK GATE (`LivenessProbe.due`), and the app's own
+        # `set_interval` tick (or a mount-time probe) may have stamped
+        # `_liveness_probe_last` during the awaits above on a slow runner -- then
+        # this call is a no-op, no worker runs, and the row keeps whatever an
+        # earlier paint left (CI saw `No owner`, with no fork prefix). Every sibling
+        # test here resets the stamp before asking for a probe; this one did not, so
+        # it passed only when no tick had landed. Resetting makes the probe owed by
+        # construction.
+        app._liveness_probe_last = None
         app._probe_foreground_liveness()
         await _drain(app, pilot)
 
