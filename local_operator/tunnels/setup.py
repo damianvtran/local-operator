@@ -550,7 +550,7 @@ async def observe(selected: int | None = None, *, resume_stopped: bool = False) 
             # `configure --enable` could flip it back, but the owner turned it off
             # where they manage it, and an automatic run (the post-sign-in hook)
             # must never override that choice. The console is the remedy.
-            return _plan("disabled", _t(ms.disabled()), url=None, **fields)
+            return _plan("disabled", _t(_disabled_copy(fields)), url=None, **fields)
     if (
         fields["activation_required"]
         and quote.get("active") is True
@@ -563,7 +563,7 @@ async def observe(selected: int | None = None, *, resume_stopped: bool = False) 
         # Active-but-ineligible WITH credit (a re-acceptance after a price change)
         # is not lapsed: it falls through to the quote step below (#3945 round 1,
         # R4), the same rule `service.refine_inactive` applies.
-        return _plan("billing_lapsed", _t(ms.billing_lapsed()), **fields)
+        return _plan("billing_lapsed", _t(_billing_lapsed_copy(fields)), **fields)
     # An interrupted create reuses its reservation rather than treating renewal
     # as a new enrollment. It still needs a fresh valid account and quote.
     if not fields["positive_balance"] and not pending:
@@ -596,6 +596,30 @@ async def observe(selected: int | None = None, *, resume_stopped: bool = False) 
         # step so the surfaces can say "Reconnect" rather than "Set up".
         return _plan("reconnect", _t(ms.reconnect()), ready=True, apply_command=command, **fields)
     return _plan("apply", _t(ms.apply(command=command)), ready=True, **fields)
+
+
+def _billing_lapsed_copy(plan: dict[str, Any]) -> Msg:
+    """Lapsed-credit copy that stays true for a blocked resume.
+
+    The ordinary sentence promises phone access "reconnects by itself": true for
+    a running tunnel, whose connector retries once credit lands. A resume
+    (``resuming``: a click or `/mobile enable` on a deliberately STOPPED tunnel)
+    that billing blocks keeps the stop on purpose (`_apply` never lifts it for a
+    plan that is not ready), so nothing reconnects until the person turns phone
+    access back on again (#3958 QA round 1, Q1). Shared by the CLI/TUI sentence
+    and the desktop's `_PLAIN_REMEDY`, so the surfaces cannot disagree.
+    """
+    return ms.billing_lapsed_resume() if plan.get("resuming") else ms.billing_lapsed()
+
+
+def _disabled_copy(plan: dict[str, Any]) -> Msg:
+    """Console-switch copy that stays true for a blocked resume.
+
+    Same reason as `_billing_lapsed_copy`: a stopped tunnel stays stopped after
+    the console switch is turned back on, so the copy must not promise that it
+    reconnects by itself.
+    """
+    return ms.disabled_resume() if plan.get("resuming") else ms.disabled()
 
 
 def _unreadable_step(failure: BaseException) -> tuple[str, str]:
@@ -949,8 +973,8 @@ _PLAIN_REMEDY: dict[str, Callable[[dict[str, Any]], Msg]] = {
     "verification": lambda _p: ms.verification_plain(),
     "failed": lambda _p: ms.failed_plain(),
     "reconnect": lambda _p: ms.reconnect(),
-    "billing_lapsed": lambda _p: ms.billing_lapsed(),
-    "disabled": lambda _p: ms.disabled(),
+    "billing_lapsed": _billing_lapsed_copy,
+    "disabled": _disabled_copy,
     "network": lambda _p: ms.network(),
     "radient_unavailable": lambda _p: ms.radient_unavailable(),
     "reconnecting": lambda _p: ms.reconnecting(),
@@ -958,6 +982,10 @@ _PLAIN_REMEDY: dict[str, Callable[[dict[str, Any]], Msg]] = {
 
 #: A shell command in a sentence: the `lop` CLI by name, or anything quoted as
 #: code. Slash commands (`/mobile enable`) are the TUI's own input, not a shell.
+#: Deliberately narrow: other shell shapes (`brew install cloudflared`, the
+#: supervisor's hand-run connector) are kept off the TUI by the `specific`
+#: overrides in `text`, not by this pattern, so a new step whose CLI sentence
+#: names such a command needs its own plain entry there (#3958 review, R4).
 _SHELL_COMMAND = re.compile(r"(?<![\w/.-])lop\s+[a-z]|`")
 
 
@@ -1049,7 +1077,6 @@ def text(plan: dict[str, Any], *, surface: str = "cli", include_receipts: bool =
         specific = {
             "supervisor": ms.supervisor_tui,
             "cloudflared": ms.cloudflared_tui,
-            "mobile_bundle": ms.mobile_bundle_tui,
             "verification": ms.verification_tui,
             "complete": ms.complete_tui,
             # Plain copy where the CLI sentence's command has no slash twin that
