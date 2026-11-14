@@ -897,6 +897,18 @@ async def test_ultra_compact_row_shows_the_stale_notice_in_a_three_line_body(
     async with app.run_test(size=(60, 20)) as pilot:
         await _boot(pilot, app)
         view = await _open_review(pilot, app)
+        # _open_review returns at the cached-ready frame, not at the last paint.
+        # The three-line geometry (`_ultra_compact`) is read from the MEASURED
+        # body, so a paint that ran before the layout pass renders the wider
+        # four-line row (lane summary, truncated identity) with no notice, and
+        # its corrective repaint is queued behind call_after_refresh. CI
+        # (PR #3969 gate, job 132435331816) asserted on that first frame. Join
+        # the review worker, then the after-refresh FIFO, exactly as the anchor
+        # test above does, so the assertions below read the settled frame.
+        workers = [worker for worker in app.workers if worker.group == "review"]
+        if workers:
+            await asyncio.wait_for(app.workers.wait_for_complete(workers), BOOT_DEADLOCK_GUARD_S)
+        await asyncio.wait_for(view.wait_for_refresh(), BOOT_DEADLOCK_GUARD_S)
         assert view._narrow is True
         assert view._body.size.height == 3
 
