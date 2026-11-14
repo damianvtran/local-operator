@@ -48,7 +48,7 @@ into HIGH — a judge decision, never a pass. Rules only ADD restriction.
 - **LOW** — everything else: this session's scratchpad, deep paths, `/tmp`. Runs
   unexamined. A target derived from a secret is refused even with an approved
   override: consent cannot be shown for a secret you should never see.
-  Also LOW: a HIGH path this session (or a subagent it launched) recorded
+  Also LOW: a HIGH path this session's family (see below) recorded
   creating, and `git worktree remove <path>` of a clean linked worktree.
 
 ## Cleaning up what you made
@@ -62,6 +62,28 @@ three routes the checkpoint can verify. Everything CRITICAL is still refused.
   `<config_dir>/guardrails/created.sqlite`, keyed by session id + realpath +
   inode, written under the creator and every ancestor session, so a parent may
   delete what its subagents made. Overwriting or deleting the ledger is CRITICAL.
+  A creation inside a loop is recorded for every loop value, including
+  `for r in a b; do (cd $r; git worktree add .worktrees/x); done`; a loop whose
+  later cwds cannot be named (a `cd $r` outside a subshell with relative
+  values, a value that is not a directory) records nothing for them, and a
+  relative delete after such a `cd` ranks as unresolved.
+- **A session's family shares ownership.** What a session, its parents (any
+  ancestor) or its subagents (any descendant) created counts as that session's
+  own, with every own-path rule below, so a cleanup subagent may remove the
+  worktrees its parent made. Lineage comes only from the harness's own spawn
+  records (`<config_dir>/guardrails/lineage.jsonl`, `origin.json`), never from
+  message text or the environment. A parent that is running while its subagent
+  cleans up does not count as an "owning session running". Two narrower rules:
+  a sibling's or cousin's linked worktree (same subagent tree) is yours only
+  for `git worktree remove <exact path>` without `--force`, when it is clean
+  (ignored files allowed), no PR/MR is open or unreadable, and neither its
+  creator nor any other session is running in it — git refuses a dirty tree
+  and keeps the branch, so that removal loses nothing; `rm -rf`, `--force` or
+  any other delete of it stays HIGH and names the creator. And `rm -rf` or a
+  forced removal of an ANCESTOR's tree still counts its non-regenerable
+  ignored files (an ignored `.env` you did not make) as dirty, so the judge
+  sees them; a plain `git worktree remove` follows git's own rule. An
+  unrelated session's tree is never yours.
   A later delete of exactly that path, or anything inside it, ranks LOW —
   unless another session's ledger row sits at or under the target, or the
   target is or holds a git work tree or repository this session's ledger does
@@ -95,7 +117,7 @@ three routes the checkpoint can verify. Everything CRITICAL is still refused.
   unmerged, or none found), and whether an owning session is running. The newest
   PR is shown, never ranked: a merged PR does not prove nobody works in the tree.
 - **Your own worktree.** A linked worktree the ledger records for this session
-  (or a subagent it launched) is yours to remove, by `git worktree remove
+  or its family (above) is yours to remove, by `git worktree remove
   [--force] <exact path>`, `rm -rf <exact path>`, or a glob or ancestor that
   reaches only your own trees (up to 16 per command; their checks run in
   parallel under one deadline, and any past either bound goes to the judge). It ranks LOW, with no judge call, only when it is

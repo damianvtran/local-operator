@@ -998,6 +998,10 @@ class _State:
     #: ``set -P`` / ``set -o physical``: every later ``cd`` resolves ``..``
     #: physically, as ``cd -P`` does (review R2-MINOR-2).
     physical: bool = False
+    #: The cwd of every LATER iteration of the enclosing ``for`` after a
+    #: ``cd $VAR`` (``cwd`` holds the first). See ``_Walker._cwd_fan_for``.
+    #: Read ONLY to record creations, never to rank a delete.
+    cwd_fan: tuple[str, ...] = ()
 
 
 def kernel_path(raw: str | None) -> str | None:
@@ -1575,6 +1579,25 @@ def _peel_wrappers(words: list[Expanded]) -> tuple[list[Expanded], bool]:
     return words, stdin_fed
 
 
+#: A reserved word in command position directly followed by a subshell.
+_KEYWORD_SUBSHELL_RE = re.compile(r"^(?:(?:then|do|else|elif|if|while|until|!)\s+)+(?=\((?!\())")
+
+
+def _peel_subshell_keyword(text: str) -> str:
+    """``do (cd $r`` -> ``(cd $r``: the subshell a loop or branch body opens.
+
+    FIELD CASE (2026-11-14): in ``for r in a b; do (cd $r; git worktree add
+    x); done`` the piece ``do (cd $r`` starts with ``do``, so neither the
+    subshell save in ``walk`` nor ``_strip_grouping`` saw its ``(``; the
+    segment's program read as ``(cd``, the ``cd`` was dropped, and the
+    creation resolved against the loop's OUTER cwd — a path the command
+    never made. Peeling the keyword lets the ``(`` open a real subshell
+    scope and the ``cd`` move the cwd inside it. ``((`` is arithmetic and
+    is left alone.
+    """
+    return _KEYWORD_SUBSHELL_RE.sub("", text)
+
+
 def _strip_grouping(text: str) -> str:
     """Drop subshell/group delimiters the splitter leaves on a segment's edges.
 
@@ -1582,7 +1605,7 @@ def _strip_grouping(text: str) -> str:
     ``rm y )``, while the ``)`` closing a ``$(…)`` inside the segment is
     balanced and must stay or the substitution reads as broken.
     """
-    text = text.strip()
+    text = _peel_subshell_keyword(text.strip())
     while text[:1] in ("(", "{") and text[:2] != "((":
         text = text[1:].lstrip()
     while text[-1:] in (")", "}") and (
@@ -2425,6 +2448,51 @@ def _command_word(text: str) -> str:
     return ""
 
 
+def _for_body_moves_outside_subshells(pieces: Sequence[tuple[str, bool, str]], index: int) -> bool:
+    """Whether the loop at ``pieces[index]`` moves directory OUTSIDE a subshell.
+
+    ``_Walker._cwd_fan_for`` may derive a later iteration's cwd from the
+    first one's only when every iteration starts where the first did: a
+    ``cd`` inside ``( … )`` dies with the subshell, one in the body proper
+    carries into the next iteration (``for r in a b; do cd $r; …`` runs
+    the second ``cd b`` from inside ``a``). Same extent rules as
+    :func:`_for_body_moves`, and the same fail-closed answer (``True``)
+    when the extent or the nesting cannot be followed.
+    """
+    depth = 0
+    paren = 0
+    started = False
+    for text, _flag, _op in pieces[index:]:
+        word = _command_word(text)
+        if word in _LOOP_OPENERS:
+            depth += 1
+        elif word == "done":
+            depth -= 1
+        if not started:
+            if depth != 1:
+                return True
+            started = True  # the header: its list words are data
+            continue
+        head = _peel_subshell_keyword(text.strip())
+        opens = 0
+        while head.startswith("(") and not head.startswith("(("):
+            opens += 1
+            head = head[1:].lstrip()
+        if paren + opens == 0 and _BODY_MOVES_RE.search(text):
+            return True
+        tail = head
+        closes = 0
+        while tail.endswith(")") and tail.count(")") > tail.count("("):
+            closes += 1
+            tail = tail[:-1].rstrip()
+        paren += opens - closes
+        if paren < 0:
+            return True
+        if depth <= 0:
+            return False
+    return True
+
+
 def _for_body_moves(pieces: Sequence[tuple[str, bool, str]], index: int) -> bool:
     """Whether the loop opened at ``pieces[index]`` changes directory in its body.
 
@@ -2555,6 +2623,7 @@ class _Snapshot:
     home: str
     private_cwd: bool = False
     physical: bool = False
+    cwd_fan: tuple[str, ...] = ()
 
 
 class _Walker:
@@ -2613,16 +2682,26 @@ class _Walker:
         #: Whether the ``for`` being walked changes directory anywhere in its
         #: body; set per piece by ``walk`` from :func:`_for_body_moves`.
         self.for_body_moves = False
+        #: Same, counting only moves OUTSIDE a subshell (see
+        #: :func:`_for_body_moves_outside_subshells`), and per loop variable
+        #: the facts ``_cwd_fan_for`` needs: whether the body keeps every
+        #: iteration's starting cwd, that cwd, and the subshell depth of the
+        #: ``for`` header (a fanned ``cd`` must sit in a deeper subshell).
+        self.for_body_moves_outer = True
+        self.for_fan_scope: dict[str, tuple[bool, str | None, int]] = {}
+        #: ``( … )`` subshells currently open across this walk.
+        self.subshell_depth = 0
 
     # -- state isolation (R4) ----------------------------------------------------
     def _save(self) -> _Snapshot:
         st = self.state
-        return _Snapshot(dict(st.env), st.cwd, st.home, st.private_cwd, st.physical)
+        return _Snapshot(dict(st.env), st.cwd, st.home, st.private_cwd, st.physical, st.cwd_fan)
 
     def _restore(self, snap: _Snapshot) -> None:
         self.state.env, self.state.cwd, self.state.home = snap.env, snap.cwd, snap.home
         self.state.private_cwd = snap.private_cwd
         self.state.physical = snap.physical
+        self.state.cwd_fan = snap.cwd_fan
 
     def _isolated_walk(self, command: str, depth: int) -> None:
         """Walk text that runs in a CHILD shell: its cd/assignments never leak."""
@@ -2684,9 +2763,10 @@ class _Walker:
             # segments. A subshell spans several pieces (``( cd x && rm y )``),
             # so it is tracked as a stack: state is saved at its ``(`` and
             # restored after the piece holding its unmatched ``)``.
-            stripped = text.strip()
+            stripped = _peel_subshell_keyword(text.strip())
             while stripped.startswith("(") and not stripped.startswith("(("):
                 groups.append(self._save())
+                self.subshell_depth += 1
                 stripped = stripped[1:].lstrip()
             closes = 0
             tail = stripped
@@ -2717,6 +2797,7 @@ class _Walker:
             )
             # Read by ``_for`` when this piece opens a ``for`` (review round 2 m1).
             self.for_body_moves = _for_body_moves(pieces, index)
+            self.for_body_moves_outer = _for_body_moves_outside_subshells(pieces, index)
             if isolated:
                 snap = self._save()
                 self._segment(
@@ -2744,6 +2825,10 @@ class _Walker:
             for _ in range(closes):
                 if groups:
                     self._restore(groups.pop())
+                    self.subshell_depth -= 1
+        # A subshell left open by this text (a parse this walker cannot
+        # close) must not leak its depth into the caller's walk.
+        self.subshell_depth -= len(groups)
 
     # -- one segment ---------------------------------------------------------
     def _splice_env_split(
@@ -3401,7 +3486,84 @@ class _Walker:
             st.env.pop("OLDPWD", None)
         else:
             st.env["OLDPWD"] = previous
-        st.cwd = path
+        fan = self._cwd_fan_for(operands[0] if operands else None, physical, path, previous)
+        # ``None``: a later iteration lands somewhere this walk cannot name,
+        # so the cwd is unknown from here on and a relative delete ranks as
+        # one (review of this change: ``for r in /tmp ~; do cd $r; rm -rf
+        # .local-operator; done`` read only the first iteration, LOW).
+        st.cwd_fan = fan or ()
+        st.cwd = path if fan is not None else None
+
+    def _cwd_fan_for(
+        self, w: Expanded | None, physical: bool, path: str | None, previous: str | None
+    ) -> tuple[str, ...] | None:
+        """Where a ``cd`` lands in every LATER ``for`` iteration.
+
+        ``()`` when every iteration lands where the first does (no loop
+        variable, a one-value loop, or an absolute ``cd`` ending a fan);
+        ``None`` when some later iteration lands somewhere this walk cannot
+        name — the caller then forgets the cwd, so relative deletes rank as
+        unresolvable and relative creations record nothing.
+
+        FIELD CASE (2026-11-14, subagent c40435c7fc86): ``for r in services
+        terraform-cloud-bootstrap; do (cd $r; git worktree add .worktrees/x
+        …); done`` made one worktree per repository, but the walker sees the
+        body once, with ``cwd`` at the FIRST value, so the creation ledger
+        could hold at most the first tree. Its family's later ``git worktree
+        remove`` of the others then had no row to stand on and went to the
+        judge. This carries the other iterations' cwds so ``_create`` can
+        list their creations too.
+
+        CONSTRAINTS. Only a LOGICAL cd of a literal-list loop word whose every
+        iteration resolves to an existing directory fans out; anything else
+        (physical mode, an opaque or glob word, a missing directory) gives
+        ``None`` (unknown cwd) — never a guess. A relative cd after a fanned
+        one moves every fanned cwd with it; an absolute or non-loop cd ends
+        the fan. Creation candidates from the fan are kept by
+        ``provenance.commit_creations`` only when absent before the call and
+        a directory after it, so an over-listed path is never recorded; a
+        relative delete target is ranked at the first cwd AND every fanned
+        one (``_add``), which can only raise its rank.
+        """
+        st = self.state
+        if path is None or w is None or w.opaque or w.pattern is not None:
+            return ()
+        loop_word = bool(w.refs) and any(r[0] in self.for_lists for r in w.refs)
+        if not loop_word:
+            if st.cwd_fan and not w.text.startswith(("/", "~")):
+                if physical or w.text == "-":
+                    return None
+                moved = tuple(_logical(w.text, c) for c in st.cwd_fan)
+                if not all(m is not None and os.path.isdir(m) for m in moved):
+                    return None
+                return tuple(m for m in moved if m is not None)
+            return ()
+        if physical:
+            return None
+        if not w.text.startswith("/"):
+            # A RELATIVE loop cd lands per iteration only if every iteration
+            # starts where the first did: inside a subshell opened in the
+            # body, from the loop header's own cwd, in a body that never
+            # moves outside a subshell. Anything else: no fan.
+            for root in {self.for_roots.get(r[0], r[0]) for r in w.refs if r[0] in self.for_lists}:
+                keeps, header_cwd, header_depth = self.for_fan_scope.get(root, (False, None, 0))
+                if not keeps or header_cwd != previous or self.subshell_depth <= header_depth:
+                    return None if self._iterations(w) else ()
+        iterations = self._iterations(w)
+        if iterations is None:
+            return None
+        if not iterations:
+            return ()
+        fan: list[str] = []
+        for _roots, values in iterations:
+            text = _fan_out(w, values).text
+            if OPAQUE_MARK in text:
+                return None
+            landed = _logical(text, previous)
+            if landed is None or not os.path.isdir(landed):
+                return None
+            fan.append(landed)
+        return tuple(dict.fromkeys(f for f in fan if f != path))
 
     def _private_script_target(self, text: str) -> None:
         # A consuming shell/eval has an unresolved deleting script, not ordinary
@@ -3492,6 +3654,11 @@ class _Walker:
         st.env[var] = values[0].text
         self.for_lists[var] = [v.text for v in values]
         self.for_roots[var] = var
+        self.for_fan_scope[var] = (
+            not self.for_body_moves_outer,
+            st.cwd,
+            self.subshell_depth,
+        )
 
     def _ln(self, args: list[Expanded]) -> None:
         operands, flags = _operands(args, frozenset({"-t", "--target-directory"}))
@@ -3817,15 +3984,27 @@ class _Walker:
         path, _unknown = _absolute(exp.text, base if base is not None else self.state.cwd)
         return path
 
-    def _create(self, kind: str, path: str | None) -> None:
+    def _create(self, kind: str, path: str | None, *, word: Expanded | None = None) -> None:
         if path is not None:
             self.result.created.append(Creation(kind=kind, path=path))
             self._name(path)
+        # ``word``: the RELATIVE-to-cwd word that named ``path``, passed only
+        # where the cwd is the base (not ``git -C``). Its later ``for``
+        # iterations land under ``state.cwd_fan`` (see ``_cwd_fan_for``).
+        if path is None or word is None or word.text.startswith(("/", "~")):
+            return
+        if word.refs and any(r[0] in self.for_lists for r in word.refs):
+            return  # the word itself moves with the loop: not modelled here
+        for cwd in self.state.cwd_fan:
+            other = self._literal_dir(word, cwd)
+            if other is not None and other != path:
+                self.result.created.append(Creation(kind=kind, path=other))
+                self._name(other)
 
     def _mkdir(self, args: list[Expanded]) -> None:
         operands, _flags = _operands(args, _MKDIR_VALUE_FLAGS)
         for w in operands:
-            self._create("mkdir", self._literal_dir(w))
+            self._create("mkdir", self._literal_dir(w), word=w)
 
     def _mktemp(self, args: list[Expanded]) -> None:
         operands, flags = _operands(args, _MKTEMP_VALUE_FLAGS)
@@ -3864,7 +4043,11 @@ class _Walker:
             if not operands:
                 return
             if len(operands) >= 2:
-                self._create("clone", self._literal_dir(operands[1], base))
+                self._create(
+                    "clone",
+                    self._literal_dir(operands[1], base),
+                    word=operands[1] if cwd_override is None else None,
+                )
                 return
             url = operands[0]
             if url.opaque or url.pattern is not None:
@@ -3873,7 +4056,12 @@ class _Walker:
             name = re.split(r"[/:]", url.text.rstrip("/"))[-1]
             name = name[:-4] if name.endswith(".git") else name
             if name and name not in (".", ".."):
-                self._create("clone", self._literal_dir(Expanded(text=name), base))
+                named = Expanded(text=name)
+                self._create(
+                    "clone",
+                    self._literal_dir(named, base),
+                    word=named if cwd_override is None else None,
+                )
             return
         if len(args) < 2:
             return
@@ -3881,7 +4069,11 @@ class _Walker:
         if sub == "add":
             operands, _ = _operands(args[2:], _GIT_WORKTREE_ADD_VALUE_FLAGS)
             if operands:
-                self._create("worktree", self._literal_dir(operands[0], base))
+                self._create(
+                    "worktree",
+                    self._literal_dir(operands[0], base),
+                    word=operands[0] if cwd_override is None else None,
+                )
         elif sub == "remove":
             operands, flags = _operands(args[2:])
             forced = _has_short(flags, "f") or "--force" in flags
@@ -3948,6 +4140,39 @@ class _Walker:
             extra.selected = selected
             self._unpin_relinked(extra, fanned.text)
             self.result.targets.append(extra)
+        self._add_at_fanned_cwds(exp, op, program, selected, iterations)
+
+    def _add_at_fanned_cwds(
+        self,
+        exp: Expanded,
+        op: str,
+        program: str,
+        selected: bool,
+        iterations: list[tuple[tuple[str, ...], dict[str, str]]],
+    ) -> None:
+        """Rank a RELATIVE word again at every later loop iteration's cwd.
+
+        ``for r in a b; do (cd $r; rm -rf x); done`` deletes ``a/x`` AND
+        ``b/x``; the walk sees the body once, at ``a`` (``_cwd_fan_for``).
+        Every word spelling (the word and its own loop fan-out) is ranked at
+        every fanned cwd — a superset of what bash runs, which can only
+        raise the verdict.
+        """
+        st = self.state
+        if not st.cwd_fan or exp.text.startswith(("/", "~")) or exp.opaque:
+            return
+        words = [exp] + [_fan_out(exp, values) for _roots, values in iterations]
+        saved = st.cwd
+        try:
+            for cwd in st.cwd_fan:
+                st.cwd = cwd
+                for word in words:
+                    extra = _target(word, op, program, st)
+                    extra.selected = selected
+                    self._unpin_relinked(extra, word.text)
+                    self.result.targets.append(extra)
+        finally:
+            st.cwd = saved
 
     def _unpin_relinked(self, target: Target, text: str) -> None:
         """Mark ``target`` unpinned when a component before one of its ``..``

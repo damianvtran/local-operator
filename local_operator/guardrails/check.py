@@ -242,7 +242,7 @@ SUPPORTED_DELETE_PATHS = (
     # Operator escalation 2026-11-11: the old "or ask the operator" here sent
     # agents to the operator about their OWN finished worktrees. Removing what
     # you created is yours to do; asking is only for what you did not create.
-    "Supported: for a path you created (this session or its subagents), remove it "
+    "Supported: for a path you created (this session, its parents or its subagents), remove it "
     "yourself by its exact path — `git worktree remove <exact path>` for a linked "
     "worktree (commit or push what you want to keep first), or the literal path the "
     "creating call named; never ask the operator about your own worktrees or scratch. "
@@ -807,7 +807,7 @@ def build_delete_case(verdict: Verdict, ctx: CallContext) -> DeleteCase:
                 # tells finished from unfinished work by what would be lost.
                 tree += f"; {prov.describe_changes(path)}"
         facts.append(
-            f"{path}: created by this session or its subagents: "
+            f"{path}: created by this session, its parents or its subagents: "
             + (", ".join(ids) if ids else "no history evidence")
             # Live case 2026-11-11: compaction had dropped the creating calls,
             # the ledger still had the row, and the judge was never told.
