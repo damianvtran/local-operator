@@ -301,7 +301,11 @@ def build_evidence_tool(root: str) -> AgentTool:
         return _text(
             tool_call_id,
             TOOL_NAME,
-            f"Created {written} in {root} ({size} bytes, sha256 {digest}).",
+            # A receipt lands untracked in the shared PR worktree and readers
+            # cannot commit, so superseded rounds were left as `??` after merge.
+            # Saying who commits it is what keeps the merged tree status-clean.
+            f"Created {written} in {root} ({size} bytes, sha256 {digest}). "
+            "Untracked until the PR owner commits it: name this path in your report.",
             details={"root": root, "path": written, "bytes": size, "sha256": digest},
         )
 

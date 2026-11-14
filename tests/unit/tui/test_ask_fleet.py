@@ -1234,7 +1234,16 @@ async def test_the_fleet_list_opens_from_the_sidebar_note(enabled, isolated_inde
     async with app.run_test(size=(130, 30)) as pilot:
         await _settle(pilot)
         app.action_open_fleet_asks()
-        await _settle(pilot, 6)
+        # The fleet worker reads the title catalog off-loop before mounting the
+        # list; message-pump turns alone cannot establish that it has finished.
+        from tests.unit.tui.waiting import settle
+
+        await settle(
+            pilot,
+            lambda: app._ask_scope == SCOPE_FLEET and bool(app.query(AskQueueList)),
+            what="fleet ask list mounted",
+            workers=("ask-fleet",),
+        )
         assert app._ask_scope == SCOPE_FLEET
         listing = app.query_one(AskQueueList)
         assert listing._scope == SCOPE_FLEET

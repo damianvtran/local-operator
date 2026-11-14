@@ -5029,6 +5029,11 @@ def bound_ask_rows(
             options = [dict(option) for option in raw_options]
             questions.append({**question, "options": options})
             charge += len(str(question.get("question") or ""))
+            # The suggested terminal command (`AskQuestion.command`, up to 500
+            # chars) rides the same frame, so it spends the same budget: an
+            # uncharged field would let a tail of command-bearing rows outgrow
+            # the bound this function exists to keep.
+            charge += len(str(question.get("command") or ""))
             charge += sum(
                 len(str(option.get("label") or "")) + len(str(option.get("description") or ""))
                 for option in options

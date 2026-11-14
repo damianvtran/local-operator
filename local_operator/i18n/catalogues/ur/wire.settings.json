@@ -409,6 +409,8 @@
   "wire.settings.network_credentials_github_repositories.placeholder": "damianvtran/scratch, damianvtran/sandbox",
   "wire.settings.network_credentials_grant_ttl_s.help": "ڈیوائس مالک سے لیا لاگ اِن دوبارہ پوچھنے سے پہلے زیادہ سے زیادہ کتنی دیر استعمال کرے؛ اس سے منسوخ یا آف لائن مالک کا لاگ اِن کہیں اور کتنی دیر چلے۔ ٹوکن سے زیادہ کبھی نہیں۔",
   "wire.settings.network_credentials_grant_ttl_s.label": "عارضی لاگ اِن مدت (s)",
+  "wire.settings.network_credentials_offline_hold_s.help": "جب تک لاگ اِن کی مالک ڈیوائس دستیاب نہ ہو (سلیپ موڈ یا آف لائن)، دوسری ڈیوائس پہلے سے لیا ہوا لاگ اِن کتنی دیر استعمال کرتی رہے۔ ٹوکن سے زیادہ کبھی نہیں؛ مالک اور اس ڈیوائس دونوں کی قدریں لاگو ہوتی ہیں، اور کم والی غالب رہتی ہے۔",
+  "wire.settings.network_credentials_offline_hold_s.label": "مالک کی غیر موجودگی میں عارضی لاگ اِن مہلت (s)",
   "wire.settings.network_listen_address.help": "127.0.0.1 = صرف ڈائل؛ 0.0.0.0 = سب؛ یا ایک ایڈریس۔",
   "wire.settings.network_listen_address.label": "کنکشن قبول کرنے کا ایڈریس",
   "wire.settings.network_max_handshakes.help": "غیر تصدیق شدہ کنکشنز جو ریلے ایک وقت میں رکھے۔ پیئرنگ کوڈ لکھنے کے سیکنڈز تک ایک رکھتی ہے؛ حد سے زیادہ کنکشن قبول کے وقت بغیر جوابی فریم کے حذف ہوتا ہے۔",

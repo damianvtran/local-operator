@@ -36,7 +36,7 @@
  * falls back to a plain line when the daemon said nothing usable.
  */
 import { contentDir } from "../lib/content-direction";
-import { useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { HttpError, sendCommand } from "../api";
 import { cn } from "../lib/cn";
@@ -224,6 +224,124 @@ function QuestionText({ text }: { text: string }) {
 		>
 			{text}
 		</span>
+	);
+}
+
+/** How long the Copy button reads "Copied" after a successful copy. Feedback
+    timing only (long enough to be read at a glance, short enough that a second
+    tap on a re-rendered card is not met by a stale "Copied"); nothing waits on it. */
+const COMMAND_COPIED_MS = 2000;
+
+/**
+ * The question's suggested terminal command (`AskQuestion.command`), as a
+ * monospace block with a Copy button.
+ *
+ * COPY ONLY, BY DESIGN. The phone has no terminal: the command is meant for the
+ * agent's machine or the user's computer (`command_target`), never the phone,
+ * so this card offers nothing about running it — the desktop app owns the
+ * confirmed Insert/Run flow. Showing it separately from the prose is still the
+ * point: inline code inside a capped, scrolling question is hard to select on a
+ * touch screen, and one tap here puts the exact bytes on the clipboard.
+ *
+ * `dir="ltr"` regardless of the UI locale: a shell command is LTR text, and an
+ * RTL paragraph would visually reorder its tokens (core already refuses bidi
+ * control characters in it). `break-all` + `whitespace-pre-wrap` show every
+ * character, wrapped rather than truncated, so what is copied is what was read.
+ *
+ * A clipboard write can fail (no secure context, permission denied); the block
+ * then selects the command so the platform's own copy gesture works, and says so
+ * in a `role="status"` note, so a screen-reader user hears the failure too (the
+ * button's own live region only ever announces "Copied") (code review m1).
+ *
+ * It must read as CODE, not as a field (design round 1, D5/D6): a free-text
+ * question puts an editable `bg-canvas` input right under it, so the block wears
+ * the transcript's code surface (`bg-sunken`, as `markdown.tsx`'s code blocks)
+ * and a leading `$` like the TUI's `$ <command>` line. The `$` is `aria-hidden`,
+ * `select-none` and OUTSIDE the `<code>` node: Copy writes the `command` prop
+ * and the failure fallback selects only the `<code>` node, so neither path can
+ * put the prompt mark on the clipboard.
+ */
+function CommandBlock({ command }: { command: string }) {
+	const [copyState, setCopyState] = useState<"idle" | "copied" | "failed">("idle");
+	const code = useRef<HTMLElement>(null);
+	useEffect(() => {
+		if (copyState !== "copied") return;
+		const timer = window.setTimeout(() => setCopyState("idle"), COMMAND_COPIED_MS);
+		return () => window.clearTimeout(timer);
+	}, [copyState]);
+	const copy = async () => {
+		try {
+			await navigator.clipboard.writeText(command);
+			setCopyState("copied");
+		} catch {
+			const node = code.current;
+			const selection = window.getSelection();
+			if (node && selection) {
+				const range = document.createRange();
+				range.selectNodeContents(node);
+				selection.removeAllRanges();
+				selection.addRange(range);
+			}
+			setCopyState("failed");
+		}
+	};
+	return (
+		<div
+			role="group"
+			aria-label={messageRuntime.t("relay.asks.card.command.label")}
+			data-testid="ask-command"
+			className="flex flex-col gap-1"
+		>
+			<div className="flex min-w-0 items-start gap-2 rounded-sm bg-sunken py-1 ps-3 pe-1">
+				{/* `dir="ltr"` on the row holding `$` and the command, so the mark
+				    stays at the command's start in an RTL locale too. */}
+				<div dir="ltr" className="flex min-w-0 flex-1 gap-1.5 self-center py-1.5 font-mono text-mono-sm">
+					<span aria-hidden="true" data-testid="ask-command-prompt" className="shrink-0 select-none text-ink-muted">
+						$
+					</span>
+					<code
+						ref={code}
+						dir="ltr"
+						data-testid="ask-command-text"
+						className="min-w-0 flex-1 select-text break-all whitespace-pre-wrap font-mono text-mono-sm text-ink"
+					>
+						{command}
+					</code>
+				</div>
+				<button
+					type="button"
+					data-testid="ask-command-copy"
+					onClick={() => void copy()}
+					aria-live="polite"
+					className="flex min-h-11 shrink-0 items-center rounded-sm px-3 text-body-sm text-ink-muted active:bg-elevated"
+				>
+					{/* Both labels share one grid cell, the inactive one `invisible` and
+					    `aria-hidden`, so the button is always as wide as the LONGER label
+					    in this locale (Copy→Copied is 4→6 chars in en, 8→11 in vi). A
+					    width that changed on the tap rewrapped a long command beside it,
+					    and again 2 s later (design round 1, D4) — the same "the label is
+					    the width, so it stays put" rule as Dismiss below. The visible
+					    label is the live text, so "Copied" is still announced. */}
+					<span className="grid">
+						<span data-testid="ask-command-copy-label" className="col-start-1 row-start-1">
+							{copyState === "copied"
+								? messageRuntime.t("relay.asks.card.command.copied")
+								: messageRuntime.t("relay.asks.card.command.copy")}
+						</span>
+						<span aria-hidden="true" className="invisible col-start-1 row-start-1">
+							{copyState === "copied"
+								? messageRuntime.t("relay.asks.card.command.copy")
+								: messageRuntime.t("relay.asks.card.command.copied")}
+						</span>
+					</span>
+				</button>
+			</div>
+			{copyState === "failed" ? (
+				<p role="status" className="text-meta text-ink-dim">
+					{messageRuntime.t("relay.asks.card.command.copy_failed")}
+				</p>
+			) : null}
+		</div>
 	);
 }
 
@@ -860,6 +978,9 @@ export function AskCard({
 									) : null}
 									<QuestionText text={question.question} />
 								</span>
+								{typeof question.command === "string" && question.command.trim() ? (
+									<CommandBlock command={question.command.trim()} />
+								) : null}
 								<QuestionField
 									question={question}
 									value={draft.answers[id] ?? []}

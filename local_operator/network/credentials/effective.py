@@ -8,6 +8,7 @@ not persisted: after restart the next request must verify the owner again.
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 import threading
 import time
@@ -118,6 +119,12 @@ def note_resolution(root: Path | None, provider: str, result: Grant | BrokerErro
         if result.token_expires_at_ms:
             expiry = min(expiry, result.token_expires_at_ms)
         held = bool(getattr(result, "held_offline", False))
+        held_until = int(getattr(result, "held_until_ms", 0) or 0)
+        if held and held_until:
+            # THE OFFLINE HOLD's end, not the grant's: the client serves this grant
+            # until then (``Grant.hold_end_ms``), so ``owner_unavailable`` must not
+            # be published while it is still being served.
+            expiry = held_until
         receipt = EffectiveAccess(
             "held_offline" if held else "effective_borrow",
             owner=result.credential_ref.owner_device,
@@ -161,6 +168,24 @@ def note_resolution(root: Path | None, provider: str, result: Grant | BrokerErro
         )
     with _lock:
         _receipts[key] = receipt
+    _notify(key)
+
+
+def note_held_dropped(root: Path | None, provider: str) -> None:
+    """A held grant was just dropped (the provider refused it): its hold is over NOW.
+
+    Without this the next refusal's receipt copies ``last_grant_expires_at`` from
+    the held receipt (the hold end, up to a day away), so a reader keyed on "the
+    lease has not ended yet" (#3722's owner-away wait) would believe access is
+    still coming and fail fast instead of waiting for the owner (design review m2).
+    Only a ``held_offline`` receipt moves; a live borrow keeps its own evidence.
+    """
+    key = (_root(root), provider)
+    with _lock:
+        previous = _receipts.get(key)
+        if previous is None or previous.state != "held_offline":
+            return
+        _receipts[key] = dataclasses.replace(previous, last_grant_expires_at=time.time())
     _notify(key)
 
 

@@ -52,6 +52,10 @@ export type MessageParams = {
   "relay.ask.dismiss.title": undefined;
   "relay.asks.card.choose_any": undefined;
   "relay.asks.card.cold_wait": undefined;
+  "relay.asks.card.command.copied": undefined;
+  "relay.asks.card.command.copy": undefined;
+  "relay.asks.card.command.copy_failed": undefined;
+  "relay.asks.card.command.label": undefined;
   "relay.asks.card.decline": undefined;
   "relay.asks.card.dismiss": undefined;
   "relay.asks.card.gone": undefined;
@@ -1370,6 +1374,8 @@ export type MessageParams = {
   "wire.settings.network_credentials_github_repositories.placeholder": undefined;
   "wire.settings.network_credentials_grant_ttl_s.help": undefined;
   "wire.settings.network_credentials_grant_ttl_s.label": undefined;
+  "wire.settings.network_credentials_offline_hold_s.help": undefined;
+  "wire.settings.network_credentials_offline_hold_s.label": undefined;
   "wire.settings.network_listen_address.help": undefined;
   "wire.settings.network_listen_address.label": undefined;
   "wire.settings.network_max_handshakes.help": undefined;

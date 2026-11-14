@@ -389,6 +389,14 @@ class PeerRow:
     #: ``attention_unknown: true`` — the owner's completion read failed, so a
     #: missing ``attention`` says nothing (R2-m2). Only a real ``True`` counts.
     attention_unknown: bool = False
+    #: ``asks_unknown: true`` — the owner's ASK-log read failed, so a missing
+    #: ``remote-ask:`` notice says nothing (PR #3934 R1-2). Only a real ``True``.
+    asks_unknown: bool = False
+    #: ``pending_queued: true`` — the ``pending`` claim is the ask QUEUE's
+    #: listing fact, not a parked gate (PR #3934 Q1/R1-3): a member paints the
+    #: badge but raises no park row for it. Absent (every older owner, whose
+    #: ``pending`` only ever meant a gate) reads ``False``, i.e. a gate.
+    pending_queued: bool = False
 
     @property
     def peer_block(self) -> dict[str, Any]:
@@ -520,6 +528,8 @@ class PeerRow:
             attention=_attention_block(data.get("attention")),
             notices=None if stale else _notices_block(data.get("notices")),
             attention_unknown=data.get("attention_unknown") is True,
+            asks_unknown=data.get("asks_unknown") is True,
+            pending_queued=data.get("pending_queued") is True,
         )
 
     def to_row_json(self) -> dict[str, Any]:

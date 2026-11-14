@@ -405,6 +405,11 @@ NET_OPS: tuple[str, ...] = (
     # row (``admin``, the same decision ``net_definitions`` records above) and
     # its own audit event, rather than a section inside that bundle.
     "net_mcp_defs",
+    # USER SKILLS (skillsync.py): one skill directory per apply, packaged with
+    # the hub's untrusted-safe bundle. Its own op for the reasons mcpdefs gives
+    # (different payload, size class and apply semantics) and its own
+    # capability row below.
+    "net_skills",
     "net_memory",
     # MESH ROLLING UPDATES (mesh-update-propagation.md §3; mesh-rolling-
     # updates.md §2). One peer-scope op, apply-or-answer: the origin names ONLY a
@@ -539,6 +544,9 @@ LOCAL_OPS: tuple[str, ...] = (
     # A local op for the same reason ``definitions_sync`` is one — this device's
     # own relay being told to talk outward.
     "mcp_defs_sync",
+    # The skill sync's on-demand half (``lop network skills push``), local for
+    # the ``definitions_sync`` reason: this device's relay talking outward.
+    "skills_sync",
     # The single-peer update's client half (meshupdate.py): a viewer asking ITS
     # OWN relay to ask a peer to move to this device's build. A local act by the
     # ``peer_*`` boundary rule — the peer-scope half is ``net_update``.
@@ -734,6 +742,10 @@ OP_CAPABILITY: dict[str, str | None] = {
     # conversation. A ``drive`` peer is told, in words, that the row could not
     # be sent and why — never silently dropped.
     "net_mcp_defs": "admin",
+    # ``admin``, the definitions decision: a skill is durable install-wide
+    # instruction text every FUTURE session on the receiver may load, broader
+    # than any one conversation.
+    "net_skills": "admin",
     # Memory changes durable all-scope state, shared only with peers already
     # authorised by this receiver to rewrite agents/MCP definitions.
     "net_memory": "admin",

@@ -724,7 +724,8 @@ def test_serve_command_preserves_the_address_it_was_given() -> None:
         assert kwargs == {
             "host": "localhost",
             "port": resolved_port,
-        }, "uvicorn is told the bound port"
+            "log_config": None,
+        }, "uvicorn keeps the serve-only nonblocking logging configuration"
         # And the same number is what the app publishes its record with — read
         # off the app OBJECT, which is the channel this path announces on (no
         # environment: nothing this daemon spawns may inherit its address).
@@ -756,6 +757,7 @@ def test_serve_command_still_routes_reload_through_uvicorn_run() -> None:
         port=8000,
         reload=True,
         reload_excludes=[".venv"],
+        log_config=None,
     )
 
 

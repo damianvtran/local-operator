@@ -82,6 +82,36 @@ async def _boot_settled(pilot, app: OperatorApp, session: GoalSession) -> None:
     )
 
 
+def _watch_turn_end_hook(
+    monkeypatch: pytest.MonkeyPatch, app: OperatorApp
+) -> list[tuple[bool, bool]]:
+    """Record what `_maybe_judge_goal_turn` saw on each `TurnEnded` it received.
+
+    The negative tests below assert that the judge STANDS DOWN — no call, no
+    prompt — and an assertion that something did not happen also holds when
+    the turn end never reached the guard under test. The hook drops a turn end
+    before any guard while the session is unadopted or boot's re-arm still
+    holds `judge_in_flight`, so under boot lag those tests passed without
+    exercising the stand-down at all (QA #3859, Q2). Each entry is
+    `(session adopted, judge free)` at the moment the hook ran; `[(True, True)]`
+    proves the one turn end got past both readiness early-returns, leaving the
+    guard the test names as the only thing that can have stopped the judge.
+
+    Wrapped on the instance through `monkeypatch` rather than via a product
+    hook: the app calls `self._maybe_judge_goal_turn(message)`, so the instance
+    attribute wins, and the original still runs unchanged.
+    """
+    seen: list[tuple[bool, bool]] = []
+    original = app._maybe_judge_goal_turn
+
+    def watched(message: TurnEnded) -> None:
+        seen.append((app._session is not None, not app._interaction.goal.judge_in_flight))
+        original(message)
+
+    monkeypatch.setattr(app, "_maybe_judge_goal_turn", watched)
+    return seen
+
+
 @pytest.mark.asyncio
 async def test_a_local_turn_end_judges_once_and_settles_the_goal() -> None:
     session = _armed([ACHIEVED])
@@ -120,30 +150,41 @@ async def test_a_continuation_is_admitted_once_and_then_judged() -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_follower_terminal_never_judges() -> None:
-    """§3.2: the owner judges; the watcher does not spend."""
+async def test_a_follower_terminal_never_judges(monkeypatch: pytest.MonkeyPatch) -> None:
+    """§3.2: the owner judges; the watcher does not spend.
+
+    `_boot_settled` is the right join here too, though this terminal does not own
+    the session: a follower never claims `judge_in_flight` (boot's re-arm and the
+    turn-end hook both refuse a non-owner before claiming it), so the predicate
+    reduces to adoption — the one readiness early-return the follower shares
+    with an owner.
+    """
     session = _armed()
     session.runtime_locality = "this-machine"  # type: ignore[misc]
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(100, 30)) as pilot:
-        await _settle(pilot, 2)
+        await _boot_settled(pilot, app, session)
+        seen = _watch_turn_end_hook(monkeypatch, app)
         app.post_message(TurnEnded(aborted=False, error=None))
         await _settle(pilot)
+        assert seen == [(True, True)], "the ownership guard, not boot, dropped the turn end"
         assert session.judge_calls == 0
         assert session.prompts == []
         assert session.goal_status == "active"
 
 
 @pytest.mark.asyncio
-async def test_a_running_loop_owns_the_verdict() -> None:
+async def test_a_running_loop_owns_the_verdict(monkeypatch: pytest.MonkeyPatch) -> None:
     session = _armed()
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(100, 30)) as pilot:
-        await _settle(pilot, 2)
+        await _boot_settled(pilot, app, session)
+        seen = _watch_turn_end_hook(monkeypatch, app)
         app._loop_running = True
         try:
             app.post_message(TurnEnded(aborted=False, error=None))
             await _settle(pilot)
+            assert seen == [(True, True)], "the loop guard, not boot, dropped the turn end"
             assert session.judge_calls == 0
         finally:
             app._loop_running = False
@@ -189,13 +230,15 @@ async def test_a_loop_taking_over_a_held_tui_answer_yields_to_waiting(monkeypatc
 
 
 @pytest.mark.asyncio
-async def test_an_error_turn_waits_without_judging() -> None:
+async def test_an_error_turn_waits_without_judging(monkeypatch: pytest.MonkeyPatch) -> None:
     session = _armed()
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(100, 30)) as pilot:
-        await _settle(pilot, 2)
+        await _boot_settled(pilot, app, session)
+        seen = _watch_turn_end_hook(monkeypatch, app)
         app.post_message(TurnEnded(aborted=False, error="provider exploded"))
         await _settle(pilot)
+        assert seen == [(True, True)], "the error guard, not boot, dropped the turn end"
         assert session.judge_calls == 0
         assert session.goal_judge is not None
         assert session.goal_judge["state"] == "waiting"
@@ -444,8 +487,16 @@ async def test_a_restored_continuation_re_arms_at_boot_without_a_typed_turn() ->
     session.note_goal_judge(state="continuing", verdict="continue", run=2)
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(100, 30)) as pilot:
-        await asyncio.sleep(0.2)
-        await _settle(pilot, 20)
+        # Join the re-arm itself, not a time window. Boot adopts the session and
+        # starts the re-arm worker in one synchronous stretch (`_boot_session`:
+        # `_adopt_session` ... `_rearm_goal_judge_on_boot`, no await between),
+        # and that worker owns the whole chain — judge, admitted continuation,
+        # second judge — releasing `judge_in_flight` only in its `finally`. So
+        # "adopted and judge free" is "the re-arm finished", which is exactly
+        # what `_boot_settled` waits on. The old `sleep(0.2)` + 20 pauses was a
+        # bet that boot finished inside that window, lost under >=1.0 s of
+        # re-arm or adoption lag (QA #3859, Q1); nothing here needs the clock.
+        await _boot_settled(pilot, app, session)
         assert session.judge_calls >= 1, "the restored record alone re-armed the judge"
         assert session.prompts == [goal_continuation_prompt(GOAL)]
         assert session.goal_status == "done"

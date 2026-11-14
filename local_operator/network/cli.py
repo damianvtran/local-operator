@@ -809,6 +809,31 @@ def add_parser(
     )
     definitions_state.add_argument("--json", action="store_true")
 
+    # `lop network skills`: what makes `skill://NAME` resolve on the OTHER device.
+    # The definitions/mcp pair's shape — `push` is the deliberate half of the sync
+    # the mesh-definitions cadence also performs; `state` is local and relay-free,
+    # and names every skill that will NOT travel (too large, unreadable) and why.
+    skills = actions.add_parser(
+        "skills",
+        help="Sync your user skills so a peer's sessions can load them",
+        description=(
+            "A session on another device reads the same skills a local one does only "
+            "when that device holds them. The mesh syncs this device's own skills "
+            "(~/.local-operator/skills) to every paired member each minute and before "
+            "a create; `push` does it now and reports per skill, `state` lists what "
+            "this device holds, where each copy came from, and what will not travel."
+        ),
+    )
+    skills_actions = skills.add_subparsers(dest="skills_command")
+    skills_push = skills_actions.add_parser("push", help="Send this device's skills to a peer")
+    skills_push.add_argument("--peer", default="", help="the device to send them to")
+    skills_push.add_argument("--all-peers", action="store_true", help="every linked peer")
+    skills_push.add_argument("--json", action="store_true")
+    skills_state = skills_actions.add_parser(
+        "state", help="What this device holds, what it mirrored, and what will not travel"
+    )
+    skills_state.add_argument("--json", action="store_true")
+
     # `lop network mcp`: what makes a peer able to RUN this device's MCP servers.
     # Two verbs, the definitions pair's shape and reasons — `push` is the
     # deliberate half of the sync the mesh-definitions cadence also performs, and
@@ -8550,6 +8575,8 @@ def _cmd_sessions(args: argparse.Namespace) -> int:
         explicit_yolo = bool(getattr(args, "yolo", False))
         implied_yolo = (not explicit_yolo) and saved_tool_approval_is_auto()
 
+        from local_operator.network.relay import CREATE_CLIENT_BOUND_S
+
         def _create(yolo: bool) -> dict[str, Any]:
             # ONE BUILDER FOR BOTH ATTEMPTS, so the fallback differs in nothing
             # but ``yolo``. The retry is a CHANGED BODY — a changed intent — and
@@ -8584,7 +8611,10 @@ def _cmd_sessions(args: argparse.Namespace) -> int:
                 # which reserves nothing, so the key is still free for the second.
                 create_key=str(getattr(args, "create_key", "") or ""),
                 origin=_create_origin(args),
-                timeout=120.0,  # a spawn plus its first turn's admission
+                # A spawn plus its first turn's admission, plus the relay's bounded
+                # confirm-by-key window after a lost reply: a client that gave up
+                # first would lose the id the relay was about to confirm.
+                timeout=CREATE_CLIENT_BOUND_S,
             )
 
         unattended_notice = ""
@@ -8688,6 +8718,20 @@ def _cmd_sessions(args: argparse.Namespace) -> int:
             lines.append(
                 f"no copy of {names} on this device: that device's own revision of it is "
                 "what runs there"
+            )
+        # WHAT THIS CREATE DID ABOUT SKILLS (``skillsync.push_for_create``): printed
+        # only when this create's own push did not finish cleanly — still running in
+        # the background, or failed — so a clean create's receipt is unchanged.
+        # Standing facts (an oversize skill that never travels, a skill the peer keeps
+        # as its own) would repeat on every create; they are named by `lop network
+        # skills state|push` and `lop network ready` instead, and `--json` carries
+        # the whole block here (``**detail``).
+        skills_note = detail.get("skills")
+        if isinstance(skills_note, dict) and (
+            skills_note.get("background") or not skills_note.get("ok")
+        ):
+            lines.append(
+                f"skills: {skills_note.get('message') or skills_note.get('code') or 'not synced'}"
             )
         if prompt:
             # ONE FACT, SAID ONCE (UX round 3, U21). This printed the boolean
@@ -11998,6 +12042,77 @@ def _cmd_mcp(args: argparse.Namespace) -> int:
     return _emit(args, {"ok": True, "servers": rows}, lines)
 
 
+def _cmd_skills(args: argparse.Namespace) -> int:
+    """``lop network skills push|state`` — user skills over the mesh (``skillsync.py``).
+
+    The same split as ``mcp push|state``: the cadence already carries skills, so
+    ``push`` is the deliberate, per-skill-reporting half, and ``state`` answers
+    "why is ``skill://x`` missing over there" on the side that can act, with no
+    relay needed.
+    """
+    from local_operator.network import skillsync
+    from local_operator.network.types import MeshRefusal
+    from local_operator.paths import config_dir
+
+    verb = str(getattr(args, "skills_command", None) or "state")
+    root = config_dir()
+    if verb == "push":
+        peer = str(getattr(args, "peer", "") or "")
+        if not peer and not bool(getattr(args, "all_peers", False)):
+            raise MeshRefusal(
+                "peer_required",
+                "name a device with --peer, or ask every device with --all-peers",
+            )
+        detail = _relay_answer("skills_sync", peer=peer, timeout=180.0)
+        rows = [item for item in (detail.get("peers") or []) if isinstance(item, dict)]
+        lines = [str(detail.get("message") or "")] if detail.get("message") else []
+        for item in rows:
+            # The member's NAME where the mesh knows one (QA round 1, Q-5): a raw
+            # ``d_…`` id is not what the operator typed or can recognise.
+            label = str(item.get("name") or item.get("device_id") or "?")
+            lines.append(f"{label}: {item.get('message') or item.get('code') or 'no answer'}")
+            for outcome in ("installed", "updated"):
+                for row in item.get(outcome) or []:
+                    if isinstance(row, dict):
+                        lines.append(f"  {outcome} skill {row.get('name')!r}")
+            for outcome in ("kept", "refused", "skipped"):
+                for row in item.get(outcome) or []:
+                    if isinstance(row, dict):
+                        lines.append(
+                            f"  {outcome} skill {row.get('name')!r}: "
+                            f"{row.get('reason') or outcome}"
+                        )
+        return _emit(
+            args, {"ok": bool(detail.get("ok")), "peers": rows}, lines or ["nothing to do"]
+        )
+
+    rows = skillsync.state_rows(root)
+    receipts = skillsync.read_receipts(root)
+    lines = []
+    for row in rows:
+        origin = str(row.get("origin") or "")
+        if origin:
+            source = _device_name_anywhere(origin) or origin
+            line = f"skill: {row.get('name')} (mirrored from {source}" + (
+                ", edited here)" if row.get("edited") else ")"
+            )
+        else:
+            line = f"skill: {row.get('name')} (yours)"
+        if row.get("status") != "ready" and (not origin or row.get("edited")):
+            line += f" — will not travel: {row.get('reason') or row.get('status')}"
+        lines.append(line)
+    if not lines:
+        lines = ["no user skills on this device"]
+    for device_id, receipt in sorted(receipts.items()):
+        if isinstance(receipt, dict):
+            target = str(receipt.get("name") or "") or _device_name_anywhere(device_id)
+            lines.append(
+                f"last push to {target or device_id}: "
+                f"{receipt.get('message') or receipt.get('code') or '?'}"
+            )
+    return _emit(args, {"ok": True, "skills": rows, "pushes": receipts}, lines)
+
+
 def _mcp_server_shape(server: Mapping[str, Any]) -> str:
     """The design's per-server credential shape: oauth | header-ref | env-ref | none.
 
@@ -12745,6 +12860,7 @@ _HANDLERS: dict[str, Callable[[argparse.Namespace], int]] = {
     "sessions": _cmd_sessions,
     "definitions": _cmd_definitions,
     "mcp": _cmd_mcp,
+    "skills": _cmd_skills,
     "serve": _cmd_serve,
     "start": _cmd_service("start"),
     "stop": _cmd_service("stop"),

@@ -175,9 +175,18 @@ def _bound(monkeypatch: pytest.MonkeyPatch, seconds: float) -> None:
 
 
 def _lapsed(mesh: Any) -> tuple[MeshCredentialClient, MeshAwareAuthStore, Grant]:  # noqa: F811
-    """Borrow once through the store, stop the owner, and let the lease run out."""
+    """Borrow once through the store, stop the owner, and let the lease AND hold run out.
+
+    PR #3922 added the owner-unreachable hold (default 1 h): a held grant is served
+    while the owner is away, so this wait only engages once that hold has ended.
+    The borrower's own ``offline_hold_s`` caps the hold and is clamped up to
+    ``grant_ttl_s``, so pinning it to the TTL makes "lease ran out" and "hold ran
+    out" the same moment again (measured from receipt, hence the second wait term).
+    """
     (mesh.b.root / "config.yml").write_text(
-        yaml.safe_dump({"values": {"network": {"credentials": {"grant_ttl_s": 2.0}}}}),
+        yaml.safe_dump(
+            {"values": {"network": {"credentials": {"grant_ttl_s": 2.0, "offline_hold_s": 2.0}}}}
+        ),
         encoding="utf-8",
     )
     effective._receipts.clear()
@@ -190,7 +199,8 @@ def _lapsed(mesh: Any) -> tuple[MeshCredentialClient, MeshAwareAuthStore, Grant]
     assert isinstance(grant, Grant), grant
     effective.note_resolution(mesh.b.root, STUB_PROVIDER, grant)
     _stop_owner(mesh)
-    assert net_fixtures.wait_for(lambda: time.time() * 1000 > grant.grant_expires_at_ms + 50)
+    hold_end_ms = max(grant.grant_expires_at_ms, int(grant.received_wall * 1000 + 2000))
+    assert net_fixtures.wait_for(lambda: time.time() * 1000 > hold_end_ms + 50)
     return client, store, grant
 
 
