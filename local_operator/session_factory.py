@@ -4573,6 +4573,11 @@ def reset_store_maintenance_for_tests() -> None:
     release it before reset. The daemon flag is the final process-exit boundary,
     while this event prevents a not-yet-started test pass from entering a later
     test's temporary store.
+
+    ``_start_store_maintenance`` also starts the process-wide temporary-chat
+    sweeper, so it is stopped here too: left running, it keeps sweeping an
+    earlier test's store every cadence and its idempotence guard makes a later
+    ``start_temporary_sweeper`` in the same worker report False.
     """
     global _STORE_MAINTENANCE_THREAD, _STORE_MAINTENANCE_STOP, _STORE_MAINTENANCE_DONE
     stop_event = _STORE_MAINTENANCE_STOP
@@ -4581,6 +4586,9 @@ def reset_store_maintenance_for_tests() -> None:
     _STORE_MAINTENANCE_THREAD = None
     _STORE_MAINTENANCE_STOP = None
     _STORE_MAINTENANCE_DONE = None
+    from local_operator.session.cleanup import stop_temporary_sweeper
+
+    stop_temporary_sweeper()
 
 
 async def await_store_maintenance_for_tests() -> None:
@@ -4956,6 +4964,15 @@ def _start_store_maintenance(
     separate runtime processes sharing this config root.
     """
     global _STORE_MAINTENANCE_THREAD, _STORE_MAINTENANCE_STOP, _STORE_MAINTENANCE_DONE
+    # The temporary-chat sweeper is its own thread (idempotent per process),
+    # NOT part of this one-shot worker: temporary chats expire on a 60 s
+    # cadence whatever the delegated sweep's switch or period says.
+    try:
+        from local_operator.session.cleanup import start_temporary_sweeper
+
+        start_temporary_sweeper(config_manager, config_dir, actor="session-runtime")
+    except Exception:  # noqa: BLE001 — housekeeping never fails session start
+        logger.debug("temporary sweeper could not start", exc_info=True)
     if _STORE_MAINTENANCE_THREAD is not None:
         return
     try:
@@ -5148,6 +5165,28 @@ async def _prepare(
             created_here=fresh_directory,
             delegated_workstream=bool(getattr(args, "workstream", False)),
         )
+
+        # A TEMPORARY CHAT (`lop exec --temporary`), marked HERE for the same
+        # reason the stamp above is: this is where the directory is born. Only
+        # on a fresh directory — never adopting an existing conversation — and
+        # VERIFIED: the user asked for deletion, so a mark that did not read
+        # back fails the run before its first turn rather than silently
+        # retaining the chat.
+        if fresh_directory and getattr(args, "temporary", False):
+            from local_operator.session.temporary import write_mark
+
+            marked = write_mark(transcript_dir.parent.parent, transcript_dir.name, True, by="exec")
+            if not marked.ok:
+                from local_operator.i18n.keys import wire_errors_desktop as _wd
+                from local_operator.i18n.text import tr
+
+                raise RuntimeError(
+                    str(
+                        tr("wire.errors.desktop")(
+                            _wd.temporary_mark_failed(session_id=transcript_dir.name)
+                        )
+                    )
+                )
 
         # Stamp the store as ours. The cleanup policy refuses to remove
         # anything from an unmarked ``sessions/`` directory, and this is the

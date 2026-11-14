@@ -1142,7 +1142,10 @@ class PushWorker:
             # it — including when no coalescer is wired (the block is then the
             # readiness rows alone, each a real registry fact).
             rows = self._with_readiness(rows or [], payload[SOUND_CUSTOM_FIELD])
-        if rows is None:
+        # An EMPTY block is sent as no block: the wired coalescer answers [] on
+        # the common tick where nothing is due, and ``"devices": []`` would be a
+        # second spelling of "absent" on a wire the cloud decodes strictly.
+        if not rows:
             return payload
         return emit_body(payload, rows)
 

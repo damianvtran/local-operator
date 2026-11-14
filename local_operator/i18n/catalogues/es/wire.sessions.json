@@ -1,6 +1,12 @@
 {
+  "wire.sessions.approval_park_local": "aparcar {address} si está inactiva: finaliza su runtime para liberar memoria y mantiene activos sus despertares y monitorizaciones; se rechaza mientras esté trabajando",
+  "wire.sessions.approval_park_self": "aparcar esta sesión después de este turno: finaliza su runtime para liberar memoria y mantiene activos sus despertares y monitorizaciones",
   "wire.sessions.approval_stop_local": "detener {address} si está inactiva: libera la concesión de la sesión y nunca envía señales; se rechaza mientras esté trabajando",
   "wire.sessions.approval_stop_peer": "detener {address} en {peer}: en esta compilación siempre se rechaza, no se enviará nada",
+  "wire.sessions.park_done": "«{name}» aparcada: {wakes, plural, one {# despertar} many {# de despertares} other {# despertares}} y {monitors, plural, one {# monitorización} many {# de monitorizaciones} other {# monitorizaciones}} siguen activos; el supervisor la reabre cuando uno se dispara",
+  "wire.sessions.park_self_refused_busy": "Esta sesión no puede aparcarse mientras un subagente, un trabajo en segundo plano o una pregunta abierta siga pendiente, así que no se programó nada. Apárcala cuando ese trabajo haya terminado.",
+  "wire.sessions.park_self_scheduled": "Esta sesión se aparca en cuanto termine este turno: su runtime se cierra para liberar memoria, y sus {wakes, plural, one {# despertar} many {# de despertares} other {# despertares}} y {monitors, plural, one {# monitorización} many {# de monitorizaciones} other {# monitorizaciones}} siguen activos. Se reabre cuando uno se dispara o llega un mensaje.",
+  "wire.sessions.stop_dormant_hint": "Detenerla deja sus despertares y monitorizaciones INACTIVOS hasta que se reabra la sesión. Para liberar memoria y mantenerlos activos, usa op='park' en su lugar.",
   "wire.sessions.stop_pending": "“{name}” aceptó la detención, pero seguía sin salir tras {seconds} s. No se envió ninguna señal — lee la lista de sesiones antes de reintentar.",
   "wire.sessions.stop_refused_busy": "“{name}” está trabajando ahora mismo (un turno, una aprobación, un subagente o un trabajo en segundo plano), así que no se detuvo nada y no se envió ninguna señal. Vuelve a intentarlo cuando esté inactiva.",
   "wire.sessions.stop_refused_old_owner": "“{name}” ejecuta una compilación más antigua que no puede prometer una detención limitada a sesiones inactivas, así que no se detuvo nada y no se envió ninguna señal. Reintentar no cambiará eso: pide al operador que la detenga.",

@@ -519,6 +519,21 @@ class SyncState:
         #: deleting by provenance, and nothing is owed that member for the key
         #: until a re-share re-announces it.
         self.acks: dict[str, dict[str, dict[str, Any]]] = {}
+        #: ``{device_id: {key: {"gen", "digest", "at"}}}`` — copies SENT, not yet
+        #: acknowledged. THE INVARIANT: ``owner_copy`` writes this row durably
+        #: BEFORE any ``copy``/``in_sync`` answer leaves this device, because the
+        #: member may store the value and lose its ack (a held reply, a link that
+        #: died after the apply), and a removal derived from ``acks`` alone then
+        #: owed that member nothing while it held a mesh-origin credential.
+        #:
+        #: A SEPARATE LEDGER, NOT A FAKED ACK, because the two claims differ:
+        #: an ack row says what the member HOLDS and gates announces
+        #: (``_ack_matches``); a dispatch row says only what was SENT. It never
+        #: satisfies ``_ack_matches`` (reconcile keeps running until the real ack
+        #: lands), it is settled only by an ack recorded at or past its
+        #: generation, and a removal ending treats it as an open copy whose
+        #: receipt says the delivery was never acknowledged.
+        self.dispatched: dict[str, dict[str, dict[str, Any]]] = {}
         #: ``{key: {"gen", "digest", "owner_device", "row_id", "record_id", "at"}}``.
         self.applied: dict[str, dict[str, Any]] = {}
         #: ``{key: {"mark": str, "set_at": float}}`` — the §4.2 selection marks,
@@ -545,6 +560,11 @@ class SyncState:
             "acks": {
                 device: {key: dict(row) for key, row in sorted(by_key.items())}
                 for device, by_key in sorted(self.acks.items())
+            },
+            "dispatched": {
+                device: {key: dict(row) for key, row in sorted(by_key.items())}
+                for device, by_key in sorted(self.dispatched.items())
+                if by_key
             },
             "applied": {key: dict(row) for key, row in sorted(self.applied.items())},
             "marks": {key: dict(row) for key, row in sorted(self.marks.items())},
@@ -629,6 +649,29 @@ class SyncState:
                         "digest": _bounded_digest(row.get("digest")),
                         "at": peer_int(row.get("at"), maximum=GEN_CEILING),
                         **({"wiped": True} if row.get("wiped") is True else {}),
+                    }
+        dispatched = payload.get("dispatched")
+        if isinstance(dispatched, dict):
+            for device, by_key in dispatched.items():
+                device_id = str(device or "")
+                if not device_id or not isinstance(by_key, dict):
+                    continue
+                for key, row in by_key.items():
+                    name = _bounded_key(key)
+                    if not name or not isinstance(row, dict):
+                        continue
+                    gen = peer_int(row.get("gen"), maximum=GEN_CEILING)
+                    digest = _bounded_digest(row.get("digest"))
+                    # Same corruption rule as acks. Dropping a dispatch row is the
+                    # one degraded path here that is NOT the safe direction (a
+                    # removal could then miss that copy), so only a row that
+                    # cannot be a real dispatch is dropped.
+                    if gen <= 0 or gen >= GEN_SAFE_MAX or not digest:
+                        continue
+                    state.dispatched.setdefault(device_id, {})[name] = {
+                        "gen": gen,
+                        "digest": digest,
+                        "at": peer_int(row.get("at"), maximum=GEN_CEILING),
                     }
         applied = payload.get("applied")
         if isinstance(applied, dict):
@@ -748,6 +791,73 @@ class SyncState:
             row["wiped"] = True
         by_key[key] = row
         self._dirty = True
+        # An ack recorded NOW, at or past what was sent, settles the dispatch: the
+        # member confirmed holding it (or confirmed deleting it). An older ack
+        # does not — the newer copy it was sent is still unconfirmed.
+        sent = (self.dispatched.get(device) or {}).get(key)
+        if sent is not None and int(gen) >= int(sent.get("gen") or 0):
+            self._drop_dispatch(device, key)
+
+    def dispatch_for(self, device: str, key: str) -> dict[str, Any] | None:
+        return (self.dispatched.get(device) or {}).get(key)
+
+    def record_dispatch(self, device: str, key: str, *, gen: int, digest: str, at: float) -> None:
+        """Record that a copy of ``key`` at ``gen`` was SENT to ``device``.
+
+        Never regresses: a lower generation (a reordered or legacy re-serve) keeps
+        the higher row, because the higher copy is the one a removal must end.
+        """
+        by_key = self.dispatched.setdefault(device, {})
+        existing = by_key.get(key)
+        if existing is not None and int(existing.get("gen") or 0) > int(gen):
+            return
+        by_key[key] = {"gen": int(gen), "digest": str(digest or ""), "at": float(at)}
+        self._dirty = True
+
+    def _drop_dispatch(self, device: str, key: str) -> None:
+        by_key = self.dispatched.get(device)
+        if by_key and by_key.pop(key, None) is not None:
+            if not by_key:
+                self.dispatched.pop(device, None)
+            self._dirty = True
+
+    def open_copies(self, device: str) -> list[dict[str, Any]]:
+        """Every copy ``device`` may hold that no ending has confirmed, in key order.
+
+        The union of live (un-``wiped``) ack rows and unsettled dispatch rows,
+        each at the HIGHER of the two generations (the newest copy is the one to
+        end). ``unacknowledged`` marks a copy known only from the dispatch side:
+        sent, never confirmed held — so a receipt must not call it a confirmed
+        copy, and must not call it absent either.
+        """
+        acked = self.acks.get(device) or {}
+        sent = self.dispatched.get(device) or {}
+        rows: list[dict[str, Any]] = []
+        for key in sorted(set(acked) | set(sent)):
+            live = acked.get(key)
+            if not isinstance(live, dict) or live.get("wiped"):
+                live = None
+            dispatch = sent.get(key)
+            best = live
+            if dispatch is not None and (
+                best is None or int(dispatch.get("gen") or 0) > int(best.get("gen") or 0)
+            ):
+                best = dispatch
+            if best is None:
+                continue
+            gen = int(best.get("gen") or 0)
+            digest = str(best.get("digest") or "")
+            if gen <= 0 or not digest:
+                continue
+            rows.append(
+                {
+                    "key": key,
+                    "gen": gen,
+                    "digest": digest,
+                    "unacknowledged": best is dispatch,
+                }
+            )
+        return rows
 
     # -- member-side accessors ----------------------------------------------
 
@@ -1258,7 +1368,11 @@ class SyncEngine:
             return
         try:
             with mutate(network_id, self._root) as state:
-                if state.ack_for(device_id, key) is not None:
+                # A dispatch row is a copy too: its wipe is confirmed the same way.
+                if (
+                    state.ack_for(device_id, key) is not None
+                    or state.dispatch_for(device_id, key) is not None
+                ):
                     state.record_ack(
                         device_id, key, gen=gen, digest=digest, at=time.time(), wiped=True
                     )
@@ -1432,25 +1546,31 @@ class SyncEngine:
             state = SyncState.load(network_id, root=self._root)
         except Exception:  # noqa: BLE001 — unreadable state: nothing derivable
             return {"copies": 0, "wiped": 0, "timed_out": 0}
-        rows = state.acks.get(device_id) or {}
-        pending: list[dict[str, Any]] = []
-        for key in sorted(rows):
-            row = rows[key]
-            if not isinstance(row, dict) or row.get("wiped"):
-                continue
-            gen = int(row.get("gen") or 0)
-            digest = str(row.get("digest") or "")
-            if gen > 0 and digest:
-                pending.append(
-                    {"key": key, "gen": gen, "digest": digest, "value_state": VALUE_STATE_ABSENT}
-                )
+        # ACKED AND MERELY SENT ALIKE: a copy whose ack never arrived is still on
+        # the member, and this is the last contact it will ever get.
+        open_rows = state.open_copies(device_id)
+        unacknowledged = sum(1 for row in open_rows if row["unacknowledged"])
+        pending: list[dict[str, Any]] = [
+            {
+                "key": row["key"],
+                "gen": row["gen"],
+                "digest": row["digest"],
+                "value_state": VALUE_STATE_ABSENT,
+            }
+            for row in open_rows
+        ]
         if not pending:
-            return {"copies": 0, "wiped": 0, "timed_out": 0}
+            return {"copies": 0, "wiped": 0, "timed_out": 0, "unacknowledged": 0}
         link, _reason = self._server._ensure_link_with_reason(  # noqa: SLF001 — the one dial seam
             device_id, probe_timeout_s=REMOVAL_PROBE_TIMEOUT_S
         )
         if link is None:
-            return {"copies": len(pending), "wiped": 0, "timed_out": 0}
+            return {
+                "copies": len(pending),
+                "wiped": 0,
+                "timed_out": 0,
+                "unacknowledged": unacknowledged,
+            }
         confirmed = 0
         timed_out = 0
         attempted = 0
@@ -1528,15 +1648,17 @@ class SyncEngine:
         # a lost write, and the receipt must say what the ledger will show a reader.
         try:
             after = SyncState.load(network_id, root=self._root)
-            open_now = sum(
-                1
-                for row in (after.acks.get(device_id) or {}).values()
-                if isinstance(row, dict) and not row.get("wiped")
-            )
-            wiped = max(0, len(pending) - open_now)
+            still_open = after.open_copies(device_id)
+            wiped = max(0, len(pending) - len(still_open))
+            unacknowledged = sum(1 for row in still_open if row["unacknowledged"])
         except Exception:  # noqa: BLE001 — the reply count is the best datum left
             wiped = confirmed
-        return {"copies": len(pending), "wiped": wiped, "timed_out": timed_out}
+        return {
+            "copies": len(pending),
+            "wiped": wiped,
+            "timed_out": timed_out,
+            "unacknowledged": unacknowledged,
+        }
 
     def _read_value(self, key: str, entry: Any) -> dict[str, Any] | None:
         """Read the owner's value for a copy, via the owner's own store.
@@ -2749,6 +2871,9 @@ def owner_copy(broker: Any, link: Any, frame: Mapping[str, Any]) -> dict[str, An
                 # the way an equal-digest announce already makes it adopt.
                 with mutate(str(broker.network_id), broker.root) as state:
                     current = _ensure_generation(state, key, meta)
+                    # The member says it holds these bytes: a removal must end them
+                    # even if its ack for this generation never arrives.
+                    state.record_dispatch(by, key, gen=current, digest=digest, at=time.time())
                 return {"kind": "in_sync", "key": key, "gen": current, "digest": digest}
             if legacy_equal:
                 with mutate(str(broker.network_id), broker.root) as state:
@@ -2757,6 +2882,10 @@ def owner_copy(broker: Any, link: Any, frame: Mapping[str, Any]) -> dict[str, An
                 served = _served_generation(
                     broker.root, broker.network_id, key, meta, requested=requested, held=held
                 )
+            # DURABLE BEFORE THE VALUE LEAVES (see ``SyncState.dispatched``). A write
+            # that fails raises here, so no copy is answered without its record.
+            with mutate(str(broker.network_id), broker.root) as state:
+                state.record_dispatch(by, key, gen=served, digest=digest, at=time.time())
             broker._audit(
                 "credential.copy",
                 actor=broker.self_device,
@@ -2840,7 +2969,7 @@ def owner_ack(broker: Any, link: Any, frame: Mapping[str, Any]) -> dict[str, Any
     if value_state == VALUE_STATE_ABSENT:
         if owned_here and gen > 0 and digest:
             with mutate(broker.network_id, broker.root) as state:
-                if state.ack_for(by, key) is not None:
+                if state.ack_for(by, key) is not None or state.dispatch_for(by, key) is not None:
                     state.record_ack(by, key, gen=gen, digest=digest, at=time.time(), wiped=True)
         return {"kind": "ack", "key": key, "action": "recorded"}
     if value_state != VALUE_STATE_PRESENT:

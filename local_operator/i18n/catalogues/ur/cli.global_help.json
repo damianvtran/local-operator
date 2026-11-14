@@ -15,5 +15,6 @@
   "cli.global_help.propagated_resume": "پچھلا سیشن id سے دوبارہ شروع کریں۔ تازہ ترین کے لیے بغیر id کے دیں۔",
   "cli.global_help.propagated_hosting": "اس رن کے لیے ہوسٹنگ پلیٹ فارم (مثلاً anthropic, openai, openrouter)",
   "cli.global_help.propagated_model": "اس رن کے لیے استعمال ہونے والا ماڈل",
-  "cli.global_help.propagated_run_in": "وہ ورکنگ ڈائریکٹری جس میں آپریٹر چلانا ہے"
+  "cli.global_help.propagated_run_in": "وہ ورکنگ ڈائریکٹری جس میں آپریٹر چلانا ہے",
+  "cli.global_help.temporary": "عارضی چیٹ شروع کریں: یہ ہسٹری میں شامل نہیں ہوتی اور غیر فعال رہنے کے بعد حذف ہو جاتی ہے (طے شدہ 30 منٹ)۔"
 }

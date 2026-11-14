@@ -18,7 +18,7 @@ from local_operator.providers.auth_store import (
     CredentialInvalidError,
 )
 from local_operator.tunnels.config import DEFAULT_API_URL
-from local_operator.tunnels.errors import LoginRequired, RecordNotFound
+from local_operator.tunnels.errors import LoginRequired, RecordNotFound, RequestFailed
 
 #: Pauses before re-opening the store after `AuthStoreBusyError`. Why retry at
 #: all: the bootstrap guard is held only while another `lop` process opens the
@@ -188,7 +188,31 @@ class RadientTunnels:
         *,
         body: dict[str, Any] | None = None,
         idempotency_key: str | None = None,
+        api_path: str | None = None,
     ) -> Any:
+        """One owner-authenticated call to the Radient control plane.
+
+        ``path`` is relative to ``/v1/tunnels`` (every tunnel command's family).
+        ``api_path`` instead names an ABSOLUTE API path (``/v1/push/register``,
+        ``/v1/push/credentials``) for the mobile push lane, which authenticates
+        with this same pinned login but lives outside the tunnel family
+        (agent-server ``docs/SESSION-PUSH.md`` §4.1). It is a path, never a URL:
+        the bearer may only ever go to :data:`DEFAULT_API_URL`, so there is
+        deliberately no host override here or in the environment — tests inject
+        the ``httpx`` client instead.
+
+        An ``api_path`` call is STATUS-ONLY on success: the push routes' callers
+        act on 2xx alone (the cloud owns the device row, the machine keeps
+        nothing from the answer), and §3.4 spells their bodies without the API
+        envelope, so a 2xx returns ``result`` when the envelope is present and
+        the bare body (or ``None`` for an empty one) otherwise. The tunnel family
+        keeps its strict envelope check below.
+        """
+        # Concatenated onto the host, so a value not starting with "/v1/" could
+        # re-point the bearer: "@evil.example/x" parses as userinfo + a foreign
+        # host. Refused before the credential is even read.
+        if api_path is not None and not api_path.startswith("/v1/"):
+            raise ValueError("Radient API path must start with /v1/.")
         with closing(await _open_store()) as store:
             row = store.get_credential(self.selected)
             if row is None or row.provider != "radient" or row.credential_type != "oauth":
@@ -233,7 +257,7 @@ class RadientTunnels:
             headers["Idempotency-Key"] = idempotency_key
         response = await self.client.request(
             method,
-            DEFAULT_API_URL + "/v1/tunnels" + path,
+            DEFAULT_API_URL + (api_path if api_path is not None else "/v1/tunnels" + path),
             json=body,
             headers=headers,
             timeout=30,
@@ -249,7 +273,18 @@ class RadientTunnels:
             # selected login meet — see `errors.RecordNotFound`).
             if response.status_code == 404:
                 raise RecordNotFound("Radient has no record of this tunnel for the selected login.")
-            raise ValueError(f"Radient tunnel request failed (HTTP {response.status_code}).")
+            raise RequestFailed(
+                f"Radient tunnel request failed (HTTP {response.status_code}).",
+                status=response.status_code,
+            )
+        if api_path is not None:
+            try:
+                answer = response.json()
+            except ValueError:
+                return None
+            if isinstance(answer, dict) and "result" in answer:
+                return answer["result"]
+            return answer
         envelope = response.json()
         if not isinstance(envelope, dict) or "result" not in envelope:
             raise ValueError("Radient returned an invalid tunnel response.")

@@ -35,7 +35,13 @@ into HIGH — a judge decision, never a pass. Rules only ADD restriction.
   `$HOME`, `/`, an ancestor of those, and a glob reaching such a name
   (`rm -rf ~/.local-op*`). Refused outright.
 - **HIGH** — another session's directory, any other path in the state root, a direct
-  child of `$HOME`, a repo root, `git clean` of untracked work, and **every target
+  child of `$HOME`, a repo root, `git clean` of untracked work, every linked
+  worktree a delete reaches that this session's ledger does not record — by its
+  path, a glob match (`rm -rf <repo>/.worktrees/*`, or a loop over one) or an
+  ancestor (`rm -rf <repo>/.worktrees`), however it is spelled (matched by
+  file identity, so `.WORKTREES` on a case-insensitive disk counts); a delete
+  too wide to rule a tree out (past 20,000 directory entries) is HIGH too; the judge sees each tree's state,
+  uncommitted entries, branch, PR, running owner and recorded creator — and **every target
   the resolver could not pin down** (opaque substitution, empty expansion, unknown
   cwd) — unless it lands on something already critical, as an empty expansion
   collapsing to `/` does. Goes to the judge.
@@ -75,9 +81,9 @@ three routes the checkpoint can verify. Everything CRITICAL is still refused.
   ref — AND it is idle: no running session other than yours owns it (created
   it, or has its cwd inside) and its branch has no open PR (GitHub) or MR (GitLab) on the
   repo's remote. An open PR or MR is refused outright, at any state and even with an earlier
-  answered ask: finish or close it first. A running owner, or a PR state
-  nobody could read (no GitHub or GitLab remote, `gh`/`glab` failed or timed out), goes to the
-  judge with those facts. An interrupted delete can leave a half-removed tree
+  answered ask: finish or close it first. A running owner, or (for a tree that is
+  not your own) a PR state nobody could read (no GitHub or GitLab remote, `gh`/`glab` failed
+  or timed out), goes to the judge with those facts. An interrupted delete can leave a half-removed tree
   (tracked files gone, registration still present), so treat a failed
   removal as damage to report, not a step to retry. Anything else takes the
   ordinary ranking. Prefer this to
@@ -89,14 +95,24 @@ three routes the checkpoint can verify. Everything CRITICAL is still refused.
   unmerged, or none found), and whether an owning session is running. The newest
   PR is shown, never ranked: a merged PR does not prove nobody works in the tree.
 - **Your own worktree.** A linked worktree the ledger records for this session
-  (or a subagent it launched) is yours to remove: `git worktree remove [--force]
-  <exact path>` or `rm -rf <exact path>` ranks LOW, with no judge call, when it
-  holds no tracked or untracked change and is idle (no open PR, no other
-  running session in it). Ignored entries (`.expo/`, `.pnpm-store/`, a
-  `node_modules` symlink) never count against your own tree — `git worktree
-  remove` deletes them itself. Real uncommitted work goes to the judge, whose
-  brief carries the ledger row (creator, kind, time, creating command) and the
-  exact `git status` entries; it may answer `ALLOW ledger`, which the
+  (or a subagent it launched) is yours to remove, by `git worktree remove
+  [--force] <exact path>`, `rm -rf <exact path>`, or a glob or ancestor that
+  reaches only your own trees (up to 16 per command; their checks run in
+  parallel under one deadline, and any past either bound goes to the judge). It ranks LOW, with no judge call, only when it is
+  clean — no tracked or untracked change, not locked, no live process cwd in
+  it, no repository nested in its ignored entries, HEAD on a branch or in some
+  ref, and `git status` answered — and idle: no other running session owns it
+  and no KNOWN open PR or MR. A PR state `gh`/`glab` cannot read (failed, timed
+  out) does not hold your own clean tree: removal keeps the branch, so nothing
+  is lost and neither the forge nor the judge is asked. A known open PR or MR is
+  refused outright; any other shortfall (dirty, locked, busy, `git status`
+  failed or timed out, another running session) goes to the judge. Ignored
+  entries (`.expo/`, `.pnpm-store/`, a `node_modules` symlink, an ignored `.env`
+  or local config) never count against your own tree: removing it deletes them
+  with no judge call, exactly as `git worktree remove` does — move a secret you
+  need out first. Real uncommitted work goes to the judge,
+  whose brief carries the ledger row (creator, kind, time, creating command)
+  and the exact `git status` entries; it may answer `ALLOW ledger`, which the
   checkpoint re-verifies against the ledger. Never ask the operator about your
   own worktrees or scratch; commit or push what you want to keep, then remove
   it by exact path. `ask` is for paths you did not create, and it names a path
@@ -104,6 +120,21 @@ three routes the checkpoint can verify. Everything CRITICAL is still refused.
   (`~/repo/.worktrees/{a,b}` works); a relative `.worktrees/a`, or a path only
   in an option's description, names nothing (live ask a-1d54, 2026-11-11). Another session's
   worktree, a primary checkout, `$HOME` and the state root keep their ranking.
+- **In-place edits are writes, not deletes.** `sed -i` / `perl -i` rewrite a
+  file's content and remove no path, so they rank like any write: CRITICAL on
+  the state root, `config.yml`, `secrets/` and session evidence, LOW elsewhere
+  — a tracked file in your own, another session's or a primary checkout
+  alike, and an untracked one. An in-place edit rewrites content and removes
+  no path; uncommitted edits in another tree are not protected by this rank.
+  BSD `sed -i ''` is read as an empty backup suffix, so neither the `''` nor
+  the script is a target; because GNU sed (`gsed`, Linux `sed`) reads that `''`
+  as the script, `gsed` and any `-n`/`--quiet`/`--silent` keep the GNU reading,
+  and the word after `''` still counts when it is a protected path. `$f` from
+  `for f in <glob>` is that glob, not the opaque working directory, when the
+  body never changes directory (or every word is absolute): a `cd`, `pushd`,
+  `popd` or `set -P` anywhere in the body — after the use, in a subshell, in a
+  nested loop — leaves a relative match opaque. Writes only (redirections, in-place
+  edits, copy/move destinations); a delete through such a loop keeps the judge.
 - **History evidence.** A HIGH delete goes to a judge forked from the session's
   own prefix. Before it runs, the checkpoint extracts real tool calls: this
   session's from the harness's memory, its descendants' (found by `origin.json`
@@ -175,7 +206,15 @@ three routes the checkpoint can verify. Everything CRITICAL is still refused.
   `--config-env`, `--ext-diff`, `--textconv`, `--git-dir`/`--work-tree`, a
   pager flag or a `GIT_*`/`PAGER` assignment. A path there handed to any other
   program (`python3 ana.py <transcript>`, `awk`, `sort`) ranks HIGH and goes
-  to the context-free judge, which can let a read through. That HIGH is a
+  to the context-free judge, which can let a read through. One task tree
+  (parent, subagent, sibling) reads each other's scratchpad at LOW through a
+  git-tracked script handed a file, or a bare `python3 -c` whose code is
+  provably read-only — built only from an allow-list of syntax, reading
+  modules (`pathlib`, `json`, `re`, `glob`…), builtins and read-only method
+  names, with literal-int subscripts and `open` only in a read mode; anything
+  outside the lists (a `def`, `lambda`, string-key subscript, `os`) keeps the
+  normal ranking; a
+  delete or write of a teammate's scratchpad stays HIGH. That HIGH is a
   backstop over the writer list: any command that is not strictly read-only
   and mentions those trees anywhere — an operand, a glued flag value, a path
   inside a quoted script or pager setting, or a working directory there — is

@@ -288,6 +288,21 @@ def _commit(
     return _result(config_dir, name, authored)
 
 
+def _planned(name: str, merged: Mapping[str, str]) -> dict[str, Any]:
+    """The file set a write WOULD author, validated, with nothing written.
+
+    ``plan_only`` callers (the ``skill`` tool filing a proposal from a run that
+    read untrusted input) need the exact after-image every refusal above has
+    already passed -- same CAS, page bound, mask and marker rules -- so the
+    proposal a person reviews is the write that would have happened. The
+    document is built to run its path/size/frontmatter validators too.
+    """
+    document_from_files(
+        name, ({"path": path, "content": content} for path, content in merged.items())
+    )
+    return {"name": name, "files": dict(merged)}
+
+
 def _masked_differs(mask: Callable[[str], str], text: str) -> bool:
     try:
         return mask(text) != text
@@ -343,6 +358,7 @@ def patch(
     *,
     whole_file_max_chars: int | None = None,
     mask: Callable[[str], str] | None = None,
+    plan_only: bool = False,
 ) -> dict[str, Any]:
     """Change SOME files of a managed skill and keep the rest (CAS on the folder).
 
@@ -413,6 +429,8 @@ def patch(
             raise SkillValidationError("skill-validation", f"no file to remove: {path}")
         del merged[path]
     merged.update(changed)
+    if plan_only:
+        return _planned(name, merged)
     return _commit(config_dir, storage, name, merged, expected_fingerprint)
 
 
@@ -421,6 +439,8 @@ def edit_files(
     name: str,
     edits: Iterable[Mapping[str, str]],
     expected_fingerprint: str,
+    *,
+    plan_only: bool = False,
 ) -> dict[str, Any]:
     """Exact ``old_text`` -> ``new_text`` replacements in a managed skill's files.
 
@@ -465,6 +485,8 @@ def edit_files(
     # adds a marker the file never had (review R6), whichever edit put it there.
     for path, content in merged.items():
         _refuse_new_markers(path, original[path], content)
+    if plan_only:
+        return _planned(name, merged)
     return _commit(config_dir, storage, name, merged, expected_fingerprint)
 
 

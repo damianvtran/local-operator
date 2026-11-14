@@ -4306,6 +4306,8 @@ def test_every_notice_fits_one_narrow_card_row() -> None:
         "terraform-output": "terraform output",
         "npm-token-list": "npm token list",
         "credential-file-read": "cat ~/.netrc",
+        "secret-cli-read": "op read op://vault/item/password",
+        "git-add-credential-file": "git add .env",
     }
     assert set(probes) == {shape.label for shape in DUMP_SHAPES}, "a rule has no probe"
     for label, command in probes.items():
@@ -8884,3 +8886,47 @@ def test_a_real_client_invocation_still_masks_its_inline_password(line: str) -> 
 def test_the_published_port_negatives_are_untouched_by_the_anchor(line: str) -> None:
     """``-p`` as a PORT (or a Go package flag) is not this rule's, and never was."""
     assert scrub_shapes(line) == line, f"{line!r} was rewritten"
+
+
+@pytest.mark.parametrize(
+    ("command", "label"),
+    [
+        ("op read op://vault/item/password", "secret cli"),
+        ("cd x && op read op://a/b/c", "secret cli"),
+        ("security find-generic-password -s svc -w", "secret cli"),
+        ("git add .env", "git"),
+        ("git add f.env", "git"),
+        ("git add .env.local", "git"),
+        ("git add src/app.py config/sa-service-account.json", "git"),
+        ("git add id_ed25519", "git"),
+        ("git add certs/tls.pem && git commit -m x", "git"),
+        ("git commit -m wip prod.env", "git"),
+    ],
+)
+def test_the_new_secret_task_advisories_steer(command: str, label: str) -> None:
+    """Warn-only steers for two egregious habits (never a block; see DUMP_SHAPES)."""
+    notice = credential_dump_notice(command)
+    assert notice is not None and notice.startswith(f"[credential guard] {label}:"), notice
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        # Piped or captured: the sanctioned consumer forms.
+        "op read op://v/i/p | docker login --password-stdin",
+        'docker login -p "$(op read op://v/i/p)" registry',
+        "x=$(op read op://v/i/p)",
+        "op read --out-file /tmp/k op://v/i/p",
+        "security find-generic-password -s svc -w | pbcopy",
+        "security find-generic-password -s svc",
+        # Not a credential file, or not a path argument.
+        "git add .env.example",
+        "git add prod.env.sample",
+        "git add ~/.ssh/id_ed25519.pub",
+        'git commit -m "drop .env"',
+        "git add -A",
+        "git add environment.py docs/env.md",
+    ],
+)
+def test_the_new_advisories_stay_quiet_on_the_safe_forms(command: str) -> None:
+    assert credential_dump_notice(command) is None, command

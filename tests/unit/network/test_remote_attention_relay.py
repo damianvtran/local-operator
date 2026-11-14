@@ -10,8 +10,9 @@ naming its origin.
 Pinned here, each over the wire rather than against a helper:
 
 * the origin viewer gets ``attention``/``notices`` on the session's row, and the
-  origin's watcher turns that reply into exactly one ``remote-done:`` row and
-  one ``remote-notice:`` row in ITS inbox;
+  origin's watcher turns that reply into exactly one ``remote-notice:`` row in
+  ITS inbox, at the owner item's own time — and NO ``remote-done:`` row (a
+  remote turn-end is never a notification, operator rule 2026-11-13);
 * a viewer that is NOT the session's origin gets the row without either field;
 * an OLD viewer (one that does not advertise ``remote-attention-v1``; the list
   is narrowed exactly as ``test_relay_e2e``'s old-peer cells do) gets the exact
@@ -20,6 +21,7 @@ Pinned here, each over the wire rather than against a helper:
 
 from __future__ import annotations
 
+import time
 import uuid
 from pathlib import Path
 from typing import Any
@@ -92,6 +94,11 @@ def test_the_origin_gets_both_fields_and_its_watcher_raises_the_rows(
     pair: Devices, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     server_a, server_b, _host, _port = pair
+    head = tmp_path / "head-inbox"
+    # The head first watched the owner BEFORE the notice was posted there, so the
+    # no-backfill rule lets it through.
+    ra.origin_baseline_ms(head, server_a.identity.device_id)
+    time.sleep(0.002)
     _record, link = _live_link(pair, monkeypatch)
     try:
         _own_session(server_a, server_b.identity.device_id)
@@ -123,16 +130,14 @@ def test_the_origin_gets_both_fields_and_its_watcher_raises_the_rows(
             return [PeerRow.from_json(row, device_id=owner)]
 
     monkeypatch.setattr(ra, "_deliver_async", lambda *_a, **_k: None)
-    monkeypatch.setattr(ra, "_deliver_done_banner", lambda *_a, **_k: None)
-    head = tmp_path / "head-inbox"
     rows = peer_rows.peer_session_rows(None, ttl_s=0, catalog=_Catalog())
     ra.RemoteAttentionWatcher(head).observe(rows)
     items, _ = NotificationStore(head).list_items(state="all", limit=10)
-    assert sorted(item["key"] for item in items) == sorted(
-        [ra.done_key(owner, SID), ra.notice_key(owner, SID, "release")]
-    )
-    notice = next(item for item in items if item["key"].startswith("remote-notice:"))
+    assert [item["key"] for item in items] == [ra.notice_key(owner, SID, "release")]
+    [notice] = items
     assert notice["priority"] == "high"
+    # Written at the OWNER item's time, not the sync moment.
+    assert notice["created_at"] == notice_block["at"] > 0
 
 
 def test_a_non_origin_viewer_gets_neither_field(

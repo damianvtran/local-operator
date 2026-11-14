@@ -401,7 +401,7 @@ def add_parser(
         help="capability to grant on join (repeatable; default: approve)",
     )
     approval_request.add_argument(
-        "--session", default="", help="the session id this request is filed from"
+        "--session", default=None, help="the session id this request is filed from"
     )
     approval_request.add_argument(
         "--request-id",
@@ -435,7 +435,7 @@ def add_parser(
     )
     approval_withdraw.add_argument("approval")
     approval_withdraw.add_argument(
-        "--session", default="", help="the session id this request was filed from"
+        "--session", default=None, help="the session id this request was filed from"
     )
     approval_withdraw.add_argument("--json", action="store_true")
     approval_run = approval_actions.add_parser(
@@ -541,6 +541,14 @@ def add_parser(
         default="",
         metavar="KEY",
         help="with --create: retry a create whose reply was lost, without duplicating it",
+    )
+    # WHO ASKED FOR THE CREATE (2026-11-13). Hidden: the ``sessions spawn
+    # peer=`` tool passes ``--origin agent``, and a run from an agent's shell is
+    # read as ``agent`` from its marker (``_create_origin``). The owner stamps
+    # it as ``origin.kind`` and never forwards an agent-created session's
+    # ``notify`` items to the operator (``notifications/remote_attention``).
+    net_sessions.add_argument(
+        "--origin", choices=("user", "agent"), default="", help=argparse.SUPPRESS
     )
     net_sessions.add_argument("--engage", metavar="SESSION", default="", help="warm that session")
     net_sessions.add_argument("--stop", metavar="SESSION", default="", help="stop that session")
@@ -655,6 +663,31 @@ def add_parser(
         default=None,
         metavar="N",
         help=f"with --peek: how many of the newest steps to show (default {_PEEK_DEFAULT_STEPS})",
+    )
+    # THE LOCAL PEEK'S OTHER WINDOWS, served by the OWNER from its own journal
+    # (``net_session_peek``; ``network/peek.py``). They exist so a coordinator
+    # can read a remote session's ORIGINAL request (``--head``), page
+    # (``--before-id``/``--around-id``), search (``--query``/``--regex``) and
+    # fold (``--digest``) exactly as ``sessions op='peek'`` does locally — and
+    # they work on a STORED session too, because the owner reads its disk and
+    # starts nothing. Same names and the same validation as the tool.
+    net_sessions.add_argument(
+        "--head", type=int, default=None, metavar="N", help="with --peek: the first N steps"
+    )
+    net_sessions.add_argument(
+        "--before-id", default=None, metavar="ID", help="with --peek: the steps before that entry"
+    )
+    net_sessions.add_argument(
+        "--around-id", default=None, metavar="ID", help="with --peek: the steps around that entry"
+    )
+    net_sessions.add_argument(
+        "--query", default=None, metavar="TEXT", help="with --peek: window around the newest match"
+    )
+    net_sessions.add_argument(
+        "--regex", action="store_true", default=None, help="with --peek --query: match as a regex"
+    )
+    net_sessions.add_argument(
+        "--digest", action="store_true", default=None, help="with --peek: a <=10-line fold"
     )
     # REMAINDER, so the payload is what the user typed rather than what the
     # parser makes of it: with ``nargs="*"`` every word matching a declared
@@ -3942,8 +3975,8 @@ def _unconfirmed_copies(network_id: str, device: str) -> int:
         state = SyncState.load(network_id)
     except Exception:  # noqa: BLE001 — an unreadable ledger confirms nothing
         return 0
-    rows = state.acks.get(device) or {}
-    return sum(1 for row in rows.values() if isinstance(row, dict) and not row.get("wiped"))
+    # Sent-but-unacknowledged copies are open too (``SyncState.dispatched``).
+    return len(state.open_copies(device))
 
 
 def _canonical_credential_key(raw: str) -> str:
@@ -4429,6 +4462,7 @@ def _cmd_member_rm(args: argparse.Namespace) -> int:
             copies=int(live.get("copies") or 0),
             wiped=int(live.get("wiped") or 0),
             timed_out=int(live.get("timed_out") or 0),
+            unacknowledged=int(live.get("unacknowledged") or 0),
         )
         return _emit(
             args,
@@ -7214,7 +7248,152 @@ def _pilot_dial_refusal(
     )
 
 
-def _cmd_pilot(args: argparse.Namespace, *, verb: str, session_id: str) -> int:
+#: The ``--peek`` flags that only the owner's journal read can serve, in the
+#: tool's field names (``sessions`` op='peek').
+_PEEK_JOURNAL_FIELDS = ("head", "before_id", "around_id", "query", "regex", "digest")
+
+
+def _peek_journal_fields(args: argparse.Namespace) -> dict[str, Any]:
+    """The journal-window flags the caller actually named (``None`` = absent)."""
+
+    return {
+        name: getattr(args, name)
+        for name in _PEEK_JOURNAL_FIELDS
+        if getattr(args, name, None) is not None
+    }
+
+
+def _peek_journal_refusal(journal: dict[str, Any], steps: int | None) -> str:
+    """The tool's own refusal for this combination, or ``""``.
+
+    The peer-regex bounds (length cap, nested-quantifier pre-check, a pattern
+    that does not compile) are checked here too, so they refuse as usage
+    errors (rc 2) before a hop, like every other malformed window (QA Q4) —
+    the owner still enforces them, and the match timeout, on its side.
+    """
+
+    from local_operator.session.peek import (
+        WirePeekRequest,
+        compile_peek_pattern,
+        peek_validation_error,
+    )
+
+    given = set(journal) | ({"steps"} if steps is not None else set())
+    request = WirePeekRequest(
+        steps=steps,
+        head=journal.get("head"),
+        before_id=journal.get("before_id"),
+        around_id=journal.get("around_id"),
+        query=journal.get("query"),
+        regex=bool(journal.get("regex")),
+        digest=bool(journal.get("digest")),
+        given=frozenset(given),
+    )
+    refusal = peek_validation_error(request, given)
+    if refusal:
+        return refusal
+    compiled = compile_peek_pattern(request, remote=True)
+    return compiled if isinstance(compiled, str) else ""
+
+
+def _peek_journal_call(
+    peer: str, session_id: str, request: dict[str, Any]
+) -> tuple[dict[str, Any] | None, str]:
+    """Ask this device's relay for the owner's journal window: ``(answer, "")``,
+    or ``(None, reason)`` when either relay's build predates the op.
+
+    Every OTHER refusal propagates: an unreachable peer, an unknown session or
+    an over-budget request is the answer, and falling back to the display tail
+    there would hide it.
+    """
+    from local_operator.network import peek as net_peek
+    from local_operator.network.relay import SLOW_REPLY_MARGIN_S
+    from local_operator.network.types import MeshRefusal
+
+    try:
+        answer = _relay_answer(
+            "peer_session_peek",
+            # The owner's search may take its whole deadline; this side waits
+            # out the relay's own margin past it plus one more for the hop home.
+            timeout=net_peek.SESSION_PEEK_DEADLINE_S + 2 * SLOW_REPLY_MARGIN_S,
+            peer=peer,
+            session_id=session_id,
+            **request,
+        )
+    except MeshRefusal as exc:
+        if exc.code in net_peek.OLD_RELAY_CODES:
+            return None, (
+                "this device's relay runs an older build without the remote peek; "
+                "restart it on the current build to read journals remotely"
+            )
+        raise
+    if answer.get("unsupported"):
+        # The reason is PEER-supplied and printed to the operator, so it goes
+        # through the shared gloss: the relay's own sentence passes unchanged,
+        # a machine token from another build is said in words.
+        from local_operator.resume import peer_reason_words
+
+        # The read sits inside the gloss call on purpose: test_reason_surfaces.py
+        # recognises a glossed read only as the gloss's argument.
+        if not answer.get("reason"):
+            return None, "that device cannot serve a journal peek"
+        return None, peer_reason_words(str(answer.get("reason") or ""))
+    return answer, ""
+
+
+def _peek_journal_receipt(
+    answer: dict[str, Any], session_id: str, device: str
+) -> tuple[dict[str, Any], list[str]]:
+    """Render the owner's journal window with the LOCAL peek's own renderer.
+
+    ``_peek_body`` is the function ``sessions op='peek'`` prints locally, fed
+    the window the owner's readers produced — so the two outputs cannot drift.
+    """
+    from local_operator.session.peek import _peek_body, window_from_wire
+
+    mode = str(answer.get("mode") or "")
+    name = str(answer.get("name") or f"session {session_id}")
+    payload: dict[str, Any] = {
+        "ok": True,
+        "verb": "peek",
+        "source": "journal",
+        "session_id": session_id,
+        "peer": device,
+        "mode": mode,
+        "name": name,
+        # The windows the caller named, as the owner read them: the tool's
+        # renderer needs the anchor/query words for the header.
+        "request": answer.get("request") if isinstance(answer.get("request"), dict) else {},
+    }
+    if mode == "digest":
+        raw_digest = answer.get("digest")
+        digest: dict[str, Any] = raw_digest if isinstance(raw_digest, dict) else {}
+        payload["digest"] = digest
+        return payload, [str(digest.get("text") or "")]
+    window = window_from_wire(answer.get("window") or {})
+    payload["window"] = answer.get("window") or {}
+    if window.miss:
+        return payload, [window.miss]
+    raw_request = answer.get("request")
+    request: dict[str, Any] = raw_request if isinstance(raw_request, dict) else {}
+    text = _peek_body(
+        name,
+        session_id,
+        mode,
+        window,
+        anchor=str(request.get("before_id") or request.get("around_id") or ""),
+        query=str(request.get("query") or "").strip(),
+    )
+    return payload, text.splitlines()
+
+
+def _cmd_pilot(
+    args: argparse.Namespace,
+    *,
+    verb: str,
+    session_id: str,
+    journal: dict[str, Any] | None = None,
+) -> int:
     """``--send``/``--steer``/``--slash``/``--peek``: one act on a session that is not here.
 
     WHY THIS DOES NOT GO THROUGH ``_relay_answer``. Every other verb in this file
@@ -7292,6 +7471,8 @@ def _cmd_pilot(args: argparse.Namespace, *, verb: str, session_id: str) -> int:
                     text=text,
                     config_dir=Path(config_dir()),
                     steps=int(steps),
+                    journal=journal,
+                    steps_named=getattr(args, "steps", None) is not None,
                     mailbox=mailbox,
                 ),
                 # ONE bound around the whole act, at the number its parts add up
@@ -7319,6 +7500,8 @@ async def _pilot_act(
     text: str,
     config_dir: Path,
     steps: int = _PEEK_DEFAULT_STEPS,
+    journal: dict[str, Any] | None = None,
+    steps_named: bool = False,
     mailbox: "_MailboxMode | None" = None,
 ) -> tuple[dict[str, Any], list[str]]:
     """Open the target on the peer as its viewer, perform ONE act, report it.
@@ -7356,13 +7539,7 @@ async def _pilot_act(
         # The peer's name, the reason in words and the diagnosing command, all
         # composed in the one place that owns "a peer row becomes a viewer".
         raise MeshRefusal("peer_unreachable", unreachable_peer_sentence(session_id, row))
-    if verb == "peek" and not str(getattr(row, "live_state", "") or ""):
-        # THE LIVE-ONLY GATE (design §8.3, locked 2026-10-06): the row state is
-        # read BEFORE the viewer exists, so a stored session refuses HERE —
-        # never opened, never bound, never warmed. A read must not start a
-        # runtime on a device nobody is watching, and the sentence names the
-        # exact call that does warm it (an agent's next action IS the resume).
-        raise MeshRefusal("session_stored", _stored_peek_sentence(session_id, peer))
+    live = bool(str(getattr(row, "live_state", "") or ""))
 
     # THE DEVICE THE WORK HAPPENS ON, from the row and never from the string typed.
     # ``--peer`` names where a conversation lives, but it is not what ROUTES this
@@ -7381,6 +7558,37 @@ async def _pilot_act(
     device_id = str(getattr(row, "owner_device", "") or "")
     device = str(getattr(row, "owner_device_name", "") or device_id or peer)
     named = "" if peer in (device, device_id) else peer
+
+    fallback = ""
+    if verb == "peek" and (journal or not live):
+        # THE OWNER'S JOURNAL READ (``net_session_peek``): every journal window,
+        # and the ONLY read a stored session has — the owner answers from its
+        # own disk and starts nothing, so §8.3's "a read must never start a
+        # runtime" still holds without refusing the read. A LIVE plain tail
+        # keeps the display-window read below (it names each reply's serving
+        # model, which the journal read does not), so its output is unchanged.
+        request = dict(journal or {})
+        if steps_named:
+            request["steps"] = steps
+        answer, fallback = await asyncio.to_thread(
+            _peek_journal_call, device_id or peer, session_id, request
+        )
+        if answer is not None:
+            payload, lines = _peek_journal_receipt(answer, session_id, device)
+            if named:
+                payload["peer_named"] = named
+                lines.append(
+                    f"you named {named}; {session_id} is held by {device}, which is where this ran"
+                )
+            return payload, lines
+        if not live:
+            # THE OLD LIVE-ONLY GATE, now only for an owner too old to read its
+            # journal for us: the row state is read BEFORE any viewer exists, so
+            # a stored session is never opened, bound or warmed. The sentence
+            # names the warm-up route AND why the journal read was not possible.
+            raise MeshRefusal(
+                "session_stored", f"{_stored_peek_sentence(session_id, peer)} ({fallback})"
+            )
 
     async def _never() -> Any:
         # A remote viewer never takes over: a remote owner sets ``_can_go_cold``,
@@ -7459,6 +7667,16 @@ async def _pilot_act(
             # driving acts, because the rows come from the same synced display
             # window an attached terminal paints.
             payload, lines = await _pilot_peek(viewer, session_id, device, steps)
+            if fallback:
+                # DEGRADED, AND SAID SO: the caller asked for a journal window
+                # the owner cannot serve, so this is the live-display tail with
+                # the reason and the dropped flags named — never a tail passed
+                # off as the window that was asked for.
+                dropped = ", ".join(f"--{name.replace('_', '-')}" for name in journal or {})
+                note = f"showing the newest steps instead of {dropped}: {fallback}"
+                payload["fallback"] = fallback
+                payload["note"] = note
+                lines.insert(0, f"note: {note}")
         elif verb == "send" and mailbox is not None:
             payload, lines = await _pilot_mailbox(viewer, session_id, device, text, mailbox)
         elif verb == "send":
@@ -8041,20 +8259,27 @@ def _cmd_sessions(args: argparse.Namespace) -> int:
     # ``--steps`` IS THE SAME CLASS as ``--force`` above: it means one thing —
     # how much of a ``--peek`` window to show — so a caller who passes it beside
     # anything else (or alone) has asked for a read this command is not
-    # performing. Its range is checked against ``comms.PEEK_MAX_STEPS`` — the
-    # SAME ceiling ``hub``'s peek and the sessions tool refuse with — read here
-    # rather than copied, so the surfaces cannot come to disagree about "too
-    # many".
+    # performing.
     peek = str(getattr(args, "peek", "") or "")
     steps = getattr(args, "steps", None)
     if steps is not None and not peek:
         print("--steps applies to --peek only", file=sys.stderr)
         return 2
-    if peek and steps is not None:
-        from local_operator.harness.comms import PEEK_MAX_STEPS
-
-        if not 1 <= steps <= PEEK_MAX_STEPS:
-            print(f"--steps takes 1..{PEEK_MAX_STEPS} (asked for {steps})", file=sys.stderr)
+    # The journal windows are the same class: each describes a peek, so naming
+    # one without ``--peek`` is refused, and their combinations — ``--steps``'s
+    # range included (PR #3831 QA Q4: it used to answer in a CLI-only sentence)
+    # — are judged by the SAME validator the sessions tool and the owner apply
+    # (``session.peek.peek_validation_error``): one sentence for "over budget"
+    # on every surface, and every such refusal is a usage error (rc 2).
+    journal = _peek_journal_fields(args)
+    if journal and not peek:
+        named_flags = ", ".join(f"--{name.replace('_', '-')}" for name in journal)
+        print(f"{named_flags} applies to --peek only", file=sys.stderr)
+        return 2
+    if peek and (journal or steps is not None):
+        refusal = _peek_journal_refusal(journal, steps)
+        if refusal:
+            print(refusal, file=sys.stderr)
             return 2
 
     # THE PILOT ACTS ARE DECIDED FIRST, and that ordering is the point: they are
@@ -8115,7 +8340,7 @@ def _cmd_sessions(args: argparse.Namespace) -> int:
                 file=sys.stderr,
             )
             return 2
-        return _cmd_pilot(args, verb=verb, session_id=target)
+        return _cmd_pilot(args, verb=verb, session_id=target, journal=journal)
 
     # ARCHIVE, RESTORE AND DELETE: routed to the OWNER, never replicated (§8.1).
     # The guards, the confirmation semantics and the retention interaction stay in
@@ -8358,6 +8583,7 @@ def _cmd_sessions(args: argparse.Namespace) -> int:
                 # fallback's first attempt was refused above the owner's mint,
                 # which reserves nothing, so the key is still free for the second.
                 create_key=str(getattr(args, "create_key", "") or ""),
+                origin=_create_origin(args),
                 timeout=120.0,  # a spawn plus its first turn's admission
             )
 
@@ -10883,15 +11109,39 @@ def _host_key_for_request(host: str, user: str, given: str) -> str:
     return found.host_key_fp
 
 
+def _create_origin(args: argparse.Namespace) -> str:
+    """``agent`` when an AGENT asked for this ``--create``, else ``user``.
+
+    The explicit ``--origin`` wins (the ``sessions spawn peer=`` tool passes
+    it); otherwise the ``bash`` tool's marker (``agent_shell.AGENT_SHELL_ENV``)
+    says an agent's command is running this. Like that marker it is attribution,
+    not a security boundary: what rides on it is only whether the session's
+    ``notify`` items are forwarded to the operator (operator rule 2026-11-13 —
+    a reviewer/QA/probe child reports to its parent agent, never the inbox).
+    """
+    explicit = str(getattr(args, "origin", "") or "")
+    if explicit in ("user", "agent"):
+        return explicit
+    from local_operator.agent_shell import AGENT_SHELL_ENV
+
+    return "agent" if os.environ.get(AGENT_SHELL_ENV) == "1" else "user"
+
+
 def _env_filing_session() -> str:
     """The audit-only ``LOCAL_OPERATOR_SESSION_ID`` a tool child inherits, or ``""``.
 
     For the credential request factories, whose own ``--session`` flag is the lend's
     TARGET scope and must never be read as attribution (nor this as a target).
     """
+    from local_operator.network.approvals import filing_session
     from local_operator.secrets.access import session_id
 
-    return session_id() or ""
+    # PINNED HERE, once, for every reader (#3436 review R1-3 / QA Q-1): the env is
+    # now the DEFAULT source and any same-uid process can set it, so a value not
+    # shaped like a session id (QA filed ``ctx-deadbeef`` on a device card) is no
+    # attribution at all. The next slice shows these cards inline, where free text
+    # would read as a real session.
+    return filing_session(session_id() or "")
 
 
 def _filing_session(args: argparse.Namespace) -> str:
@@ -10906,8 +11156,13 @@ def _filing_session(args: argparse.Namespace) -> str:
     lend's TARGET scope) do not read it. An explicit flag wins; an empty env is the
     legacy empty attribution, unchanged.
     """
-    explicit = str(getattr(args, "session", "") or "")
-    return explicit or _env_filing_session()
+    # ``None`` is "not given"; ``--session ""`` is an explicit EMPTY value and wins
+    # too (#3436 review R1-2), so a tool child can still withdraw a card that was
+    # filed unattributed. The explicit value is passed as typed, as it always was.
+    explicit = getattr(args, "session", None)
+    if explicit is not None:
+        return str(explicit)
+    return _env_filing_session()
 
 
 def _cmd_approvals_request(args: argparse.Namespace) -> int:
@@ -11592,8 +11847,41 @@ def _cmd_definitions(args: argparse.Namespace) -> int:
                 else ""
             )
         )
+    # Failover routing (``retry.*`` units, see ``routing_sync``): which units are a
+    # peer's mirror and which this device owns. Kept units are the answer to "why
+    # does this node fail over differently from my Mac".
+    from local_operator.network import routing_sync
+
+    routing = state.get(routing_sync.ROUTING_KIND) or {}
+    for unit, cls in sorted((routing.get("units") or {}).items()):
+        source = str(cls.get("source") or "")
+        if source == "mirror":
+            lines.append(f"failover routing {unit}: mirrored from {cls.get('origin') or '?'}")
+        elif source in ("local", "edited"):
+            lines.append(f"failover routing {unit}: yours")
+    if routing.get("status") == "unreadable":
+        lines.append("failover routing: config.yml could not be read")
     if not lines:
         lines = ["no agent or team definitions on this device"]
+    # Routing authority (review r2, m3), after the empty-state line so a bare
+    # device still says it has no definitions: the one fact that explains a node staying
+    # primary-only — it holds no anchor (the head will not send to it), or it holds
+    # one verify-only (it accepts the operator's chain), or it signs for it (it is
+    # the operator's device and keeps its own). From ``mirror_authority.state_fact``.
+    authority = routing.get("authority")
+    if isinstance(authority, dict):
+        key_id = str(authority.get("key_id") or "")
+        if not key_id:
+            lines.append(
+                "routing authority: no operator anchor (the operator's failover routing "
+                "is not accepted here)"
+            )
+        elif authority.get("signs"):
+            lines.append(f"routing authority: signs for {key_id} (this device sends routing)")
+        else:
+            lines.append(
+                f"routing authority: verify-only under {key_id} (accepts that operator's routing)"
+            )
     return _emit(
         args,
         {
@@ -11602,6 +11890,7 @@ def _cmd_definitions(args: argparse.Namespace) -> int:
             "teams": state.get("teams") or {},
             "mirrored": mirrored,
             definitions.OPERATOR_INSTRUCTIONS_KIND: instructions,
+            routing_sync.ROUTING_KIND: routing,
         },
         lines,
     )

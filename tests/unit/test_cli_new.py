@@ -1682,6 +1682,50 @@ def test_main_interactive_tty_uses_tui(
     assert seen["provider_controller"] is not None
 
 
+@pytest.mark.parametrize(
+    ("extra_argv", "expected"),
+    [([], None), (["--temporary"], True)],
+    ids=["plain-start", "temporary"],
+)
+def test_main_binds_start_temporary_only_when_asked(
+    tmp_home: Path,
+    quiet_env: None,
+    monkeypatch: pytest.MonkeyPatch,
+    extra_argv: list[str],
+    expected: bool | None,
+) -> None:
+    """``lop --temporary`` reaches ``run_tui(start_temporary=True)``; a plain
+    ``lop`` start leaves the keyword UNBOUND, so its ``run_tui`` call is the one
+    it made before temporary chats existed. Binding ``start_temporary=False``
+    on every start once made each pre-existing ``run_tui`` stand-in raise
+    TypeError and ``main()`` return 1."""
+    seen: dict[str, Any] = {}
+
+    async def fake_cold(session_id, *args, **kwargs):
+        return object()
+
+    monkeypatch.setattr(
+        "local_operator.session.attached.AttachedSession.cold", staticmethod(fake_cold)
+    )
+    fake_tui = _fake_tui_module()
+
+    async def fake_run_tui(session_factory, *args, **kwargs) -> int:
+        seen["start_temporary"] = kwargs.get("start_temporary")
+        seen["bound"] = "start_temporary" in kwargs
+        return 0
+
+    setattr(fake_tui, "run_tui", fake_run_tui)
+    monkeypatch.setitem(sys.modules, "local_operator.tui", fake_tui)
+    monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
+    monkeypatch.setattr("local_operator.cli.ConfigManager", _fake_config_manager)
+    monkeypatch.setattr("local_operator.agents.AgentRegistry", MagicMock())
+
+    with patch("sys.argv", ["program", "--hosting", "test", "--model", "m", *extra_argv]):
+        assert main() == 0
+    assert seen["start_temporary"] is expected
+    assert seen["bound"] is (expected is not None)
+
+
 def test_main_no_tui_flag_uses_headless_repl(
     tmp_home: Path, quiet_env: None, monkeypatch: pytest.MonkeyPatch, capsys
 ) -> None:

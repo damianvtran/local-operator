@@ -41,8 +41,19 @@ def _en(key: str, **params: object) -> str:
     return runtime.render_message(GOLDEN[key], params, "en")
 
 
+#: Keys the band gained AFTER the slice, kept apart from the frozen fixture so
+#: ``GOLDEN`` stays what it says -- the copy before extraction -- while the whole
+#: namespace is still pinned. ``temporary`` is the temporary-chat band word (core
+#: #3832, ``tui/temporary_chat.py``); NEW copy with no earlier literal, so the row
+#: pins the bytes it ships with, and a re-word is a diff hunk here.
+SINCE_SLICE: dict[str, str] = {
+    "tui.status.temporary": "temporary",
+}
+
+
 def test_catalogue_matches_the_pre_slice_golden() -> None:
-    assert catalogues.load_catalogue("en", "tui.status") == GOLDEN
+    assert catalogues.load_catalogue("en", "tui.status") == {**GOLDEN, **SINCE_SLICE}
+    assert not set(GOLDEN) & set(SINCE_SLICE)
 
 
 def test_every_live_constant_is_the_golden_rendering() -> None:

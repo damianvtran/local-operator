@@ -89,6 +89,7 @@ def _entry_owners() -> dict[str, str]:
         STOP_MARKER_NAME,
         TURN_JOURNAL_NAME,
     )
+    from local_operator.session.temporary import MARK_NAME as TEMPORARY_MARK_NAME
     from local_operator.session_lease import LEASE_NAME, MIRROR_NAME, RECOVERY_LOCK_NAME
     from local_operator.tools.eval import KERNEL_MARKER_NAME
     from local_operator.wakes.lock import WAKE_LOCK_NAME
@@ -118,6 +119,9 @@ def _entry_owners() -> dict[str, str]:
         RUN_RECORD_NAME: "session.runtime.journal",
         INBOX_NAME: "session.runtime.inbox",
         FORK_BOUNDARY_NAME: "fork",
+        # The temporary-chat mark travels: a moved temporary chat must still be
+        # deleted on its new device, not silently retained there.
+        TEMPORARY_MARK_NAME: "session.temporary",
         DESKTOP_MARKER_NAME: "session.retention",
         MESH_STAMP_NAME: "session.placement",
         LIVE_MARKER_NAME: "session.retention",
@@ -288,6 +292,15 @@ _PATH_SHAPED = re.compile(r"^(?!\.\.?(?:/|$))[A-Za-z0-9._-]+(?:/(?!\.\.?(?:/|$))
 #: the way the import list was. Every module with at least one candidate appears here, so
 #: "a module I did not think about" is itself a failing state.
 _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
+    "local_operator/session/temporary.py": (
+        3,
+        "``TOMBSTONES_NAME`` ('.temporary-tombstones.json'), ``STATE_NAME`` "
+        "('.temporary-state.json') and ``CHANGES_NAME`` ('.temporary-changed', the "
+        "empty change stamp a mark or Keep touches) are STORE-level records beside the "
+        "session directories (sessions/<file>), written on this device, never an entry "
+        "of a session directory. The per-session mark (``MARK_NAME``) is in "
+        "sync.COPY_SET_NAMES and travels.",
+    ),
     "local_operator/harness/bridge_egress.py": (
         1,
         "``BRIDGE_TOOL_NAME`` ('bridge') is the Team Bridge TOOL's registered name, "
@@ -417,6 +430,16 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "else. A copy that carried any of them would hand a peer a path to a host that does "
         "not exist there.",
     ),
+    "local_operator/session/runtime/control.py": (
+        2,
+        "``STOP_MARKER`` ('stopped_at') and ``PARK_MARKER`` ('parked_at') are JSON KEYS a "
+        "stop or park stamps inside a wake/monitor INDEX entry (``write_entry``'s "
+        "``preserve``), not file or directory names. The entry file is the session's own "
+        "derived index and is classified by name in the copy set; the stamp is state "
+        "INSIDE it, so nothing under either spelling is an entry of a session directory to "
+        "copy or exclude -- a copy carries the entry, keys and all, and the session's own "
+        "open-time rewrite clears the stamp.",
+    ),
     # ---- this install's CONFIG, LOG and STORE surface (outside ``sessions/``) ----
     "local_operator/server/utils/settings_intents.py": (
         1,
@@ -452,6 +475,13 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "before the commit deletes the session directory. Deliberately a sibling of "
         "``sessions/``, never an entry inside one: the copy set must not carry it, no "
         "retention/cleanup path may walk it, and its only removal path is the user's",
+    ),
+    "local_operator/network/routing_sync.py": (
+        1,
+        "``CHAIN_PREFIX`` ('fallbackChains.') prefixes a dotted settings KEY -- one "
+        "routing unit per ``retry.fallbackChains`` key, mirrored between devices by the "
+        "definitions sync -- never a path in a session directory, so nothing under it "
+        "is a session entry to copy or exclude.",
     ),
     "local_operator/session/cold_metadata.py": (
         1,
@@ -887,13 +917,15 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
     "local_operator/secrets/legacy_env.py": (1, "the legacy credentials file at the store root"),
     "local_operator/secrets/protocol.py": (2, "the secret broker's socket and lock"),
     "local_operator/session/cleanup.py": (
-        5,
+        6,
         "the cleanup log, the value-hold index and the last-cleanup record (all at the "
         "sessions root), the store marker that gates removal, and ``HANDED_AWAY_DIRNAME`` "
         "— the ``<config>/network/handed-away/`` quarantine a committed mesh move renames "
-        "its directory into. That last one is a CONFIG-LEVEL directory: it is where a "
+        "its directory into. That one is a CONFIG-LEVEL directory: it is where a "
         "session tree goes to stop being one, so it can never be an entry of a session "
-        "directory, and none of the five is a file a session directory holds",
+        "directory. ``TEMPORARY_LOCK_NAME`` is the temporary-chat sweep's cross-process "
+        "lock, beside the delegated sweep's at the config root. None of the six is a file "
+        "a session directory holds",
     ),
     "local_operator/session/delegated_retention.py": (
         5,
@@ -1382,7 +1414,7 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "and never a session directory entry, so there is nothing for the copy to carry",
     ),
     "local_operator/notifications/remote_attention.py": (
-        3,
+        4,
         "``remote-done`` and ``remote-notice`` (``DONE_PREFIX``/``NOTICE_PREFIX``) prefix "
         "a forwarded completion's/notice's row KEY in ``notifications.db``: primary "
         "keys inside SQLite, never paths on disk. "
@@ -1391,7 +1423,13 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "record of which mesh viewers collect this node's forwarded items. It is never "
         "an entry of a session directory and must not travel with one -- a moved "
         "session would carry another device's viewer list to a node those viewers "
-        "never collected from",
+        "never collected from. "
+        "``BASELINES_FILE`` ('remote-attention-baselines.json', plus its "
+        "``.remote-attention-baselines.json.lock`` flock sidecar, derived from the path "
+        "rather than a separate constant) likewise lives ONLY at the config root: the "
+        "head/origin-side per-device first-contact baselines. It is never a session "
+        "directory entry and must not travel with a moved session -- it describes this "
+        "device's view of other devices",
     ),
     "local_operator/notifications/remote_park.py": (
         1,
