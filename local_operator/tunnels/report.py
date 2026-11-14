@@ -606,8 +606,18 @@ async def _pinned_login_verdict(value: dict[str, Any]) -> dict[str, Any]:
 
 def remedy(
     value: dict[str, Any], connector: dict[str, Any], login: dict[str, Any]
-) -> dict[str, str] | None:
+) -> dict[str, Any] | None:
     """The one command that clears what was just found, when one exists.
+
+    Every remedy also carries ``kind`` — the button-shaped twin of ``command``
+    from `gateway.REMEDY_KIND`, the vocabulary the desktop setup route speaks —
+    so a graphical surface can offer the ACTION (reconnect, accept the price, add
+    credit, open the console) instead of printing a terminal command a
+    non-technical user cannot run. A connector that is RETRYING on a named cause
+    (no park) now gets a remedy too, because "the tunnel isn't active" with no
+    action is exactly the dead end the field report hit; the waiting kinds
+    (`wait_network`, `wait_radient`) carry no command, since they clear by
+    themselves.
 
     The connector's own park carries its remedy (only it knows whether the fix is
     a login, an install or a re-enrolment); nothing else has one to offer, and
@@ -654,6 +664,7 @@ def remedy(
             )
         ):
             return {
+                "kind": gateway.remedy_kind(str(connector.get("reason") or "")) or "run",
                 "command": str(parked["command"]),
                 "url": str(parked.get("url") or gateway.CONSOLE_URL),
             }
@@ -664,6 +675,7 @@ def remedy(
         # Ahead of both arms below: a newer sign-in to the same account is
         # already here, so the fix is re-pointing at it, never another sign-in.
         return {
+            "kind": gateway.REMEDY_KIND[gateway.LOGIN_SUPERSEDED],
             "command": gateway.TERMINAL_REMEDY[gateway.LOGIN_SUPERSEDED],
             "url": gateway.CONSOLE_URL,
         }
@@ -675,15 +687,66 @@ def remedy(
         # command is pinned in `gateway`'s table so every surface renders one
         # spelling of it.
         return {
+            "kind": gateway.REMEDY_KIND[gateway.OWNER_MISSING],
             "command": gateway.TERMINAL_REMEDY[gateway.OWNER_MISSING],
             "url": gateway.CONSOLE_URL,
         }
     if login.get("state") == "login_required":
         return {
+            "kind": gateway.REMEDY_KIND[gateway.LOGIN_REQUIRED],
             "command": gateway.TERMINAL_REMEDY[gateway.LOGIN_REQUIRED],
             "url": gateway.CONSOLE_URL,
         }
-    return None
+    return _retrying_remedy(connector)
+
+
+def _retrying_remedy(connector: dict[str, Any]) -> dict[str, Any] | None:
+    """The remedy for a connector that is not parked but names why it is failing.
+
+    The reason arrives from the gateway's health answer or the connector's last
+    CURRENT retrying exit (`probe`), both already this package's vocabulary.
+    Only causes with an ACTION or a reassuring wait are surfaced: `check_status`
+    kinds (a lease about to renew, a briefly busy store) stay ``None``, because
+    a callout for a state that clears in seconds is noise, and an unknown code
+    from another build is never handed a guessed button.
+    """
+    reason = str(connector.get("reason") or "")
+    kind = gateway.remedy_kind(reason)
+    if kind is None or kind == "check_status":
+        return None
+    waiting = kind in gateway.WAITING_KINDS
+    return {
+        "kind": kind,
+        # A waiting kind has nothing to run; naming `lop tunnel status` there
+        # would send a reader to "fix" a state that is recovering by itself.
+        "command": None if waiting else gateway.TERMINAL_REMEDY.get(reason),
+        "url": None if waiting else gateway.CONSOLE_URL,
+    }
+
+
+def unconfigured_remedy() -> dict[str, Any]:
+    """What a machine with NO tunnel is offered: set phone access up, or sign in.
+
+    `run` when a Radient login is already on this device (the desktop renders its
+    "Set up phone access" card from it and posts the setup route), `sign_in` when
+    there is none yet — setup cannot start without a login, and offering `run`
+    would put a button in front of a refusal. Read-only: a metadata read of the
+    credential store, never a write, so the polled routes stay side-effect free.
+    """
+    try:
+        with closing(AuthStore(read_only=True)) as store:
+            signed_in = any(
+                row.credential_type == "oauth" for row in store.list_credentials("radient")
+            )
+    except (AuthStoreError, OSError):
+        signed_in = False
+    if signed_in:
+        return {"kind": "run", "command": "lop tunnel setup", "url": None}
+    return {
+        "kind": gateway.REMEDY_KIND[gateway.LOGIN_REQUIRED],
+        "command": gateway.TERMINAL_REMEDY[gateway.LOGIN_REQUIRED],
+        "url": None,
+    }
 
 
 def payload(
@@ -743,7 +806,10 @@ async def local_payload(*, reachable: bool = True) -> dict[str, Any]:
                 "remedy": None,
             },
             "login": {"credential_id": None, "state": "unknown"},
-            "remedy": None,
+            # Not null: a machine with no tunnel has one obvious next step, and
+            # "nothing to do" is how a teammate ended up at a phone that could
+            # not connect with no idea why.
+            "remedy": unconfigured_remedy(),
         }
     stored = value.get("record")
     assembled = payload(
@@ -755,4 +821,14 @@ async def local_payload(*, reachable: bool = True) -> dict[str, Any]:
         login=await login_verdict(value),
     )
     assembled["configured"] = True
+    # The post-sign-in no-spend run, while it holds `setup.lock` (U10): said
+    # outright, so a desktop reading this mid-reconnect shows "reconnecting"
+    # rather than the stale cause that run is busy clearing. `autosetup`, not
+    # `setup`: this polled read must not load the CLI and installers.
+    from local_operator.tunnels import autosetup
+
+    reconnecting = await asyncio.to_thread(autosetup.auto_reconnecting)
+    assembled["reconnecting"] = reconnecting
+    if reconnecting and not value.get("stopped"):
+        assembled["remedy"] = {"kind": "wait_reconnect", "command": None, "url": None}
     return assembled

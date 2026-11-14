@@ -1775,6 +1775,28 @@ def remote_park_notice_owner(device_id: str, session_id: str) -> tuple[str, str,
 #: reason needs no entry to be told to the user honestly.
 TUNNEL_CARD_COMMANDS = {"lop login radient": "/login radient"}
 
+#: Shell commands whose WHOLE family maps to one in-app verb (U12): every
+#: `lop tunnel setup …` remedy (bare, `apply`, with a credential id) is what
+#: `/mobile enable` runs here, and printing the shell spelling would send a TUI
+#: user to a terminal for something this app does itself.
+TUNNEL_CARD_COMMAND_PREFIXES = (("lop tunnel setup", "/mobile enable"),)
+
+
+def tunnel_card_command(command: str) -> str:
+    """The in-app spelling of a tunnel remedy command, or the command as it stands.
+
+    Exact entries first (`TUNNEL_CARD_COMMANDS`), then the prefix families; a
+    command in neither is returned unchanged, which keeps the table's rule that
+    a new remedy needs no entry to be told honestly.
+    """
+    if command in TUNNEL_CARD_COMMANDS:
+        return TUNNEL_CARD_COMMANDS[command]
+    for prefix, verb in TUNNEL_CARD_COMMAND_PREFIXES:
+        if command == prefix or command.startswith(prefix + " "):
+            return verb
+    return command
+
+
 #: What the card calls each parked reason, as the TAIL of the line.
 #:
 #: The card leads with the COMMAND and puts the reason after it, which is the
@@ -1812,7 +1834,7 @@ def tunnel_park_card(reason: str, command: str) -> str:
     same mark, which is what makes the card findable at a glance rather than only
     readable once it has been found.
     """
-    mapped = TUNNEL_CARD_COMMANDS.get(command, command)
+    mapped = tunnel_card_command(command)
     tail = TUNNEL_CARD_REASONS.get(reason) or _park_reason_label(reason)
     if not mapped:
         return f"{ICON_APPROVALS} {tail}"
@@ -57675,6 +57697,30 @@ class OperatorApp(App[None]):
         except Exception:  # noqa: BLE001 — an unreadable state is assumed busy
             return False
 
+    async def _offer_phone_access(self, notice: Callable[..., Awaitable[None]]) -> None:
+        """One line after a Radient sign-in on a machine with NO phone access.
+
+        WHY: teammates signed in and never learned the phone app needed one more
+        step. This names the existing in-app verb (`/mobile enable`) and says a
+        price is always shown first; it creates nothing — a machine that already
+        wanted phone access is reconnected by the post-sign-in run instead
+        (`tunnels.install.auto_setup_after_login`), so the two never overlap.
+        Once per credential (`autosetup.login_offer_due`): recording it at show
+        time is the dismissal. Off the loop, since it reads the credential store.
+        A failure here must never disturb the sign-in it follows.
+        """
+        try:
+            from local_operator.i18n.keys import mobile_setup as _ms_keys
+            from local_operator.tunnels import autosetup
+
+            due = await asyncio.to_thread(autosetup.login_offer_due)
+            if due is None:
+                return
+            await asyncio.to_thread(autosetup.record_login_offer, due)
+            await notice(tr("mobile.setup")(_ms_keys.login_offer()), "note")
+        except Exception:  # noqa: BLE001 — an offer must not fail a completed sign-in
+            logger.debug("phone access offer skipped", exc_info=True)
+
     async def _login_flow(self, provider: str) -> None:
         """Run the login on the event loop, reporting into the transcript.
 
@@ -57728,6 +57774,8 @@ class OperatorApp(App[None]):
             self._providers.set_login_callbacks(self._login_callbacks)
             message = await self._providers.login(provider, signal=signal)
             await notice(message, "success")
+            if provider == "radient":
+                await self._offer_phone_access(notice)
             # Make the fresh login usable as the boot default when nothing is
             # configured yet: set hosting to this provider and model_name to its
             # default. Without this, `/login` stored the credential but left

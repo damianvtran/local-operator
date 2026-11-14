@@ -1,4 +1,8 @@
 {
+  "tunnel.status.billing_inactive.detail": "La facturación de este túnel no se ha activado, así que Radient no lo conectará. Abre la configuración del acceso telefónico en Local Operator, en el equipo donde se ejecuta, y acepta el precio mensual.",
+  "tunnel.status.billing_inactive.label": "facturación no activada",
+  "tunnel.status.billing_lapsed.detail": "La facturación de este túnel caducó porque se agotó el saldo de Radient, así que Radient no lo conectará. Añade crédito en {url}; se reconectará automáticamente en cuanto se restablezca el saldo.",
+  "tunnel.status.billing_lapsed.label": "facturación caducada",
   "tunnel.status.create.conflict_unmatched": "Radient indica que ya existe un túnel para esta solicitud, pero la lista de túneles de este inicio de sesión no tiene un único registro coincidente. Revisa lop tunnel list y conéctalo con lop tunnel connect --tunnel-id <id>.",
   "tunnel.status.gateway.listening_http_status": "Algo escucha en el puerto de la pasarela de relé 127.0.0.1:{port}, pero respondió a la comprobación de estado con HTTP {status}: puede que otro programa ocupe el puerto o que la pasarela no esté funcionando bien. Reinstalar no servirá de nada.",
   "tunnel.status.gateway.listening_timed_out": "La pasarela de relé local escucha en 127.0.0.1:{port}, pero su respuesta de estado agotó el tiempo de espera; reinstalar no servirá de nada.",
@@ -11,5 +15,9 @@
   "tunnel.status.requests.no_response": "sin respuesta",
   "tunnel.status.server_unavailable.label": "Error del servidor de Radient",
   "tunnel.status.server_unavailable.relay": "Radient respondió a la comprobación de autorización del relé de este equipo con un error temporal del servidor. No hay ningún problema con el inicio de sesión ni con este equipo; volverá a autorizarse automáticamente en cuanto Radient se recupere.",
-  "tunnel.status.server_unavailable.terminal": "Radient respondió a la comprobación de autorización del conector con un error temporal del servidor (HTTP 5xx), así que ni el inicio de sesión ni este equipo tienen la culpa. Reintenta cada 10 segundos y volverá a autorizarse automáticamente en cuanto Radient se recupere; no hace falta ningún comando local."
+  "tunnel.status.server_unavailable.terminal": "Radient respondió a la comprobación de autorización del conector con un error temporal del servidor (HTTP 5xx), así que ni el inicio de sesión ni este equipo tienen la culpa. Reintenta cada 10 segundos y volverá a autorizarse automáticamente en cuanto Radient se recupere; no hace falta ningún comando local.",
+  "tunnel.status.tunnel_disabled.detail": "Este túnel está desactivado en la consola de Radient, así que el acceso remoto seguirá desactivado hasta que vuelvas a activarlo allí: {url}. Se reconectará automáticamente en cuanto esté activado.",
+  "tunnel.status.tunnel_disabled.label": "túnel desactivado en la consola",
+  "tunnel.status.tunnel_inactive.detail": "Radient ha pausado este túnel, aunque su facturación está en regla. Reconecta el acceso telefónico en Local Operator, en el equipo donde se ejecuta; además, sigue reintentándolo por sí solo. Si continúa en pausa, revisa el túnel en {url}.",
+  "tunnel.status.tunnel_inactive.label": "túnel no activo"
 }

@@ -876,6 +876,10 @@ export type MessageParams = {
   "wire.notification_sound.volume.label": undefined;
   "wire.outcome_notices.closed": undefined;
   "wire.outcome_notices.retired": undefined;
+  "wire.phone_access.auto_setup.help": undefined;
+  "wire.phone_access.auto_setup.label": undefined;
+  "wire.phone_access.description": undefined;
+  "wire.phone_access.title": undefined;
   "wire.push_alert.attention_count": { "total": number; "count": string };
   "wire.radient_saver.command.badge": undefined;
   "wire.radient_saver.command.description": undefined;

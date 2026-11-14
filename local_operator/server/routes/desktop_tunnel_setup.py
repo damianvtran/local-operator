@@ -35,6 +35,10 @@ router = APIRouter(tags=["Desktop tunnel setup"], dependencies=[Depends(require_
 # safe drain can exceed this budget, rather than orphaning a to_thread install.
 PLAN_DEADLINE_S = 120
 RUN_DEADLINE_S = 900
+# Mirrors `tunnels.gateway.CONSOLE_URL`; a literal so this route's import stays
+# off the tunnel gateway (the boot-time import graph is pinned in
+# `tests/unit/test_import_graph.py`). `test_desktop_tunnel_setup` holds them equal.
+_CONSOLE_URL = "https://console.radienthq.com/dashboard/tunnels"
 
 
 class SetupRequest(BaseModel):
@@ -96,6 +100,17 @@ def _contract(plan: dict[str, Any], *, local: bool) -> dict[str, Any]:
         "stopped": "stopped",
         "verification": "verification",
         "failed": "failed",
+        # A suspended tunnel with billing in order: the same primary run as
+        # `apply` (an older renderer keeps showing its button), with its own
+        # step and copy so the desktop can say "Reconnect".
+        "reconnect": "none",
+        # Lapsed billing reuses `balance` so a renderer that predates the split
+        # still shows its add-credit callout; `step` carries the distinction.
+        "billing_lapsed": "balance",
+        "disabled": "disabled",
+        "network": "network",
+        "radient_unavailable": "radient_unavailable",
+        "reconnecting": "reconnecting",
     }
     blocker = blockers.get(step, "failed")
     kinds = {
@@ -117,6 +132,16 @@ def _contract(plan: dict[str, Any], *, local: bool) -> dict[str, Any]:
         "failed": "check_status",
         "stopped": "resume_explicitly",
         "none": "run",
+        # The kinds `features.tunnel_remedy_kinds` advertises, shared with
+        # `gateway.REMEDY_KIND` (the phone's 503 and `GET /v1/desktop/tunnel`):
+        # a console toggle is a link, and the two waits render no button because
+        # they recover by themselves.
+        "disabled": "open_console",
+        "network": "wait_network",
+        "radient_unavailable": "wait_radient",
+        # The post-sign-in no-spend run holds `setup.lock` (U10): no button,
+        # the desktop polls until it settles.
+        "reconnecting": "wait_reconnect",
     }
     quote = None
     if not local and plan.get("account_valid"):
@@ -156,7 +181,9 @@ def _contract(plan: dict[str, Any], *, local: bool) -> dict[str, Any]:
             "kind": kinds.get(blocker, "check_status"),
             "text": plan["remedy"],
             "command": plan.get("apply_command"),
-            "url": None,
+            # The console is the whole remedy for these two, so the link
+            # travels as data rather than only inside the sentence.
+            "url": _CONSOLE_URL if blocker in ("disabled", "balance") else None,
         },
         "source": "local" if local else "fresh",
         "in_progress": False,
@@ -189,6 +216,15 @@ def _contract(plan: dict[str, Any], *, local: bool) -> dict[str, Any]:
     return result
 
 
+def _identity_fields(plan: dict[str, Any]) -> dict[str, Any]:
+    """The identity facts a reconnecting plan keeps from the local plan it replaces."""
+    return {
+        key: plan[key]
+        for key in ("credential_id", "identity_label", "configured", "credential_choices")
+        if key in plan
+    }
+
+
 async def drain(app: Any) -> None:
     """Join setup before shutdown closes its auth/worker prerequisites."""
     operation = getattr(app.state, "tunnel_setup_task", None)
@@ -207,7 +243,12 @@ async def local_plan(
     from local_operator.tunnels import setup
 
     try:
-        result = _contract(await setup.observe_local(credential_id), local=True)
+        plan = await setup.observe_local(credential_id)
+        if await asyncio.to_thread(setup.auto_reconnecting):
+            # The background heal is visible as its own state (U10) rather than
+            # as the stale "not active" plan it is busy clearing.
+            plan = setup.reconnecting_plan(**_identity_fields(plan))
+        result = _contract(plan, local=True)
         active = getattr(request.app.state, "tunnel_setup_task", None)
         result["in_progress"] = active is not None and not active.done()
         result["progress"] = (
@@ -247,6 +288,17 @@ async def setup_action(body: SetupRequest, request: Request) -> CRUDResponse[Any
     active = getattr(request.app.state, "tunnel_setup_task", None)
     if active is not None and not active.done():
         raise _refusal(409, "setup_in_progress")
+    if await asyncio.to_thread(setup.auto_reconnecting):
+        # The unattended post-sign-in run owns `setup.lock`. Answer its state,
+        # not a 409: the person pressed a button to get phone access back, and
+        # that is exactly what is already happening (U10). Nothing is started,
+        # so the lock's single-owner guarantee is untouched.
+        return reply(
+            _contract(
+                setup.reconnecting_plan(credential_id=body.credential_id),
+                local=True,
+            )
+        )
 
     deadline = PLAN_DEADLINE_S if body.action == "plan" else RUN_DEADLINE_S
     # Ephemeral, fixed-copy progress only—not another persisted setup journal.
@@ -280,6 +332,15 @@ async def setup_action(body: SetupRequest, request: Request) -> CRUDResponse[Any
         # cannot interrupt wait_for's cancellation cleanup and leave it behind.
         return reply(await join_owned(waiter))
     except setup.SetupInProgress:
+        if await asyncio.to_thread(setup.auto_reconnecting):
+            # Lost the race to the background run between the check above and
+            # the claim: same answer as if it had been seen first.
+            return reply(
+                _contract(
+                    setup.reconnecting_plan(credential_id=body.credential_id),
+                    local=True,
+                )
+            )
         raise _refusal(409, "setup_in_progress") from None
     except setup.CorruptSetupIntent:
         raise _refusal(503, "setup_intent_corrupt") from None

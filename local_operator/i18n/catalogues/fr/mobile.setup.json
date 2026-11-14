@@ -77,5 +77,12 @@
   "mobile.setup.corrupt_intent": "La demande de configuration du téléphone enregistrée n’est pas valide. Laissez create.json inchangé et demandez à votre agent de récupérer la demande d’origine avant de réessayer. Aucune modification de configuration n’a été faite.",
   "mobile.setup.title_repoint": "L’accès téléphone doit être reconnecté à la connexion la plus récente de cet appareil",
   "mobile.setup.repoint": "Une connexion plus récente au même compte Radient se trouve déjà sur cet appareil. Reconnectez l’accès téléphone à cette connexion — même compte, même adresse de téléphone.",
-  "mobile.setup.repointed": "Accès téléphone reconnecté à la connexion la plus récente de cet appareil pour le même compte (identifiant {id})."
+  "mobile.setup.repointed": "Accès téléphone reconnecté à la connexion la plus récente de cet appareil pour le même compte (identifiant {id}).",
+  "mobile.setup.disabled": "Ce tunnel est désactivé dans la console Radient. Réactivez-le sur https://console.radienthq.com/dashboard/tunnels ; il se reconnecte de lui-même, et la configuration ne passera pas outre ce choix.",
+  "mobile.setup.billing_lapsed": "La facturation de ce tunnel est interrompue, car le solde Radient est épuisé. Ajoutez du crédit sur https://console.radienthq.com/dashboard/tunnels ; la configuration n’achète jamais de crédit, et le tunnel se reconnecte de lui-même dès que le solde est rétabli.",
+  "mobile.setup.reconnect": "Radient a suspendu ce tunnel, mais sa facturation est en règle. Reconnectez-le pour rétablir l’accès téléphone ; rien n’est facturé.",
+  "mobile.setup.network": "Cet ordinateur n’a pas pu joindre Radient (son réseau a peut-être changé ou été coupé). L’accès téléphone se reconnecte de lui-même dès que la connexion revient ; vous n’avez rien à faire.",
+  "mobile.setup.radient_unavailable": "Radient a répondu par une erreur serveur temporaire. Ni cet ordinateur ni sa connexion ne sont en cause ; l’accès téléphone se reconnecte de lui-même dès que Radient est rétabli.",
+  "mobile.setup.reconnecting": "L’accès téléphone se reconnecte en arrière-plan après votre connexion. Rien n’est facturé ; ce message disparaîtra de lui-même d’ici une à deux minutes.",
+  "mobile.setup.login_offer": "Accédez à cet ordinateur depuis l’application mobile : exécutez /mobile enable. Tout prix mensuel vous est présenté avant le début de la facturation."
 }

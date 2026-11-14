@@ -50,6 +50,10 @@ def billing_already_active() -> Msg:
     return Msg("mobile.setup.billing_already_active", {})
 
 
+def billing_lapsed() -> Msg:
+    return Msg("mobile.setup.billing_lapsed", {})
+
+
 def billing_not_activated() -> Msg:
     return Msg("mobile.setup.billing_not_activated", {})
 
@@ -102,6 +106,10 @@ def credential_ids(*, ids: str) -> Msg:
     return Msg("mobile.setup.credential_ids", {"ids": ids})
 
 
+def disabled() -> Msg:
+    return Msg("mobile.setup.disabled", {})
+
+
 def failed() -> Msg:
     return Msg("mobile.setup.failed", {})
 
@@ -138,6 +146,10 @@ def login() -> Msg:
     return Msg("mobile.setup.login", {})
 
 
+def login_offer() -> Msg:
+    return Msg("mobile.setup.login_offer", {})
+
+
 def login_tui() -> Msg:
     return Msg("mobile.setup.login_tui", {})
 
@@ -148,6 +160,10 @@ def mobile_bundle() -> Msg:
 
 def mobile_bundle_tui() -> Msg:
     return Msg("mobile.setup.mobile_bundle_tui", {})
+
+
+def network() -> Msg:
+    return Msg("mobile.setup.network", {})
 
 
 def owner_mismatch() -> Msg:
@@ -176,6 +192,18 @@ def quote_changed(*, current: str, accepted: str) -> Msg:
 
 def quote_unread() -> Msg:
     return Msg("mobile.setup.quote_unread", {})
+
+
+def radient_unavailable() -> Msg:
+    return Msg("mobile.setup.radient_unavailable", {})
+
+
+def reconnect() -> Msg:
+    return Msg("mobile.setup.reconnect", {})
+
+
+def reconnecting() -> Msg:
+    return Msg("mobile.setup.reconnecting", {})
 
 
 def repoint() -> Msg:

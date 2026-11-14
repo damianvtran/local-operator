@@ -77,5 +77,12 @@
   "mobile.setup.corrupt_intent": "已保存的手机设置请求无效。保持create.json不变，让智能体恢复原始请求后再重试。未作任何设置更改。",
   "mobile.setup.title_repoint": "手机访问需要重新连接到此设备较新的登录",
   "mobile.setup.repoint": "此设备上已有同一Radient账户的较新登录。将手机访问重新连接到该登录——同一账户、同一手机地址。",
-  "mobile.setup.repointed": "已为同一账户将手机访问重新连接到此设备较新的登录（凭据{id}）。"
+  "mobile.setup.repointed": "已为同一账户将手机访问重新连接到此设备较新的登录（凭据{id}）。",
+  "mobile.setup.disabled": "此隧道已在Radient控制台中关闭。请在https://console.radienthq.com/dashboard/tunnels重新开启；它会自动重新连接，设置不会覆盖这一选择。",
+  "mobile.setup.billing_lapsed": "由于Radient余额已用完，此隧道的计费已失效。请在https://console.radienthq.com/dashboard/tunnels充值；设置绝不会购买点数，余额恢复后隧道会自动重新连接。",
+  "mobile.setup.reconnect": "Radient已暂停此隧道，但其计费正常。重新连接即可恢复手机访问；不会产生任何费用。",
+  "mobile.setup.network": "这台电脑无法连接到Radient（网络可能已变更或断开）。连接恢复后，手机访问会自动重新连接；无需任何操作。",
+  "mobile.setup.radient_unavailable": "Radient返回了临时服务器错误。这台电脑及其登录都没有问题；Radient恢复后，手机访问会自动重新连接。",
+  "mobile.setup.reconnecting": "登录后，手机访问正在后台重新连接。不会产生任何费用；一两分钟内会自动完成。",
+  "mobile.setup.login_offer": "想用手机应用访问这台电脑？运行/mobile enable。开始计费前，任何月费都会先展示给你。"
 }

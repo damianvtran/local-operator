@@ -37,9 +37,12 @@ from local_operator.tunnels.errors import (
     LoginRequired,
     ReenrolmentRequired,
     RequestFailed,
+    TunnelInactive,
 )
 from local_operator.tunnels.gateway import (
     AUTHORIZATION_DEFERRED,
+    BILLING_INACTIVE,
+    BILLING_LAPSED,
     CONTROL_PLANE_TIMEOUT,
     CREDENTIAL_STORE_BUSY,
     LOCAL_PREREQUISITE,
@@ -48,6 +51,8 @@ from local_operator.tunnels.gateway import (
     REFUSED,
     SERVER_UNAVAILABLE,
     TERMINAL_DETAIL,
+    TUNNEL_DISABLED,
+    TUNNEL_INACTIVE,
     UNREACHABLE,
     Gateway,
     terminal_detail,
@@ -471,6 +476,79 @@ def _is_a_server_error(failure: BaseException) -> bool:
     )
 
 
+def _inactive_reason(failure: BaseException) -> str | None:
+    """The inactive-tunnel reason Radient's answer carries, or ``None``.
+
+    Radient ANSWERED, and declined to serve this tunnel: `/connect` returns 403
+    for any tunnel whose status is not `active`, and 402 is reserved for billing.
+    Before this arm both fell through to the `REFUSED` fallback, whose remedy is
+    a sign-in that can never clear a billing or console state (the field report
+    this exists for: a freshly signed-in phone saying the tunnel "isn't active").
+
+    A refined `TunnelInactive` (the cold start read `/billing` to name the cause)
+    wins over the bare status; without one, 403 is `TUNNEL_INACTIVE` and 402 is
+    `BILLING_INACTIVE`. Read off the chain like `_is_a_server_error`, and for the
+    same reason: a raise site may wrap the client's error.
+    """
+    chain = list(_failure_chain(failure))
+    for link in chain:
+        if isinstance(link, TunnelInactive):
+            return link.reason
+    for link in chain:
+        if isinstance(link, RequestFailed) and link.status in (402, 403):
+            return BILLING_INACTIVE if link.status == 402 else TUNNEL_INACTIVE
+    return None
+
+
+async def refine_inactive(
+    api: RadientTunnels,
+    value: dict[str, Any],
+    *,
+    default: str,
+    record: dict[str, Any] | None = None,
+) -> str:
+    """Name WHY Radient will not serve this tunnel, from fresh owner-pinned reads.
+
+    The status code alone cannot tell "credit ran out" from "switched off in the
+    console" from "billing never activated", and each has a different fix, so the
+    connector asks the same two endpoints `setup.observe` reads: `/billing`
+    (`active` = ever activated, `eligible` = currently paid up) and the tunnel
+    record (`enabled`). Billing is checked first because it is the cause a person
+    can act on with money, and a lapsed balance also suspends the record.
+
+    READ-ONLY and best-effort: any failure to read keeps ``default`` (the bare
+    status's reason), because a refinement that could not run must not turn a
+    known refusal into an unknown one. Never activates anything — the only
+    billing write in this package is `cli._ensure_billing`, behind an exact
+    accepted price.
+    """
+    try:
+        quote = await api.request("GET", "/billing")
+    except (ValueError, httpx.HTTPError):
+        quote = None
+    if isinstance(quote, dict):
+        if quote.get("active") is False:
+            return BILLING_INACTIVE
+        if quote.get("eligible") is not True:
+            # `active` true (or not reported) but not eligible: it WAS paid for
+            # and the balance no longer covers it. A quote that reports neither
+            # field is read as lapsed only when `active` is affirmatively true.
+            return BILLING_LAPSED if quote.get("active") is True else BILLING_INACTIVE
+    if record is None:
+        try:
+            fetched = await api.request("GET", tunnel_path(value))
+        except (ValueError, httpx.HTTPError):
+            fetched = None
+        record = fetched if isinstance(fetched, dict) else None
+    if isinstance(record, dict) and record.get("enabled") is False:
+        return TUNNEL_DISABLED
+    if isinstance(quote, dict):
+        # Billing is in order and the console has not switched it off: the
+        # tunnel is merely suspended, which a reconnect (no spend) clears.
+        return TUNNEL_INACTIVE
+    return default
+
+
 def authorization_failure_reason(failure: BaseException) -> str:
     """Name why the poller could not renew the relay authorization lease.
 
@@ -504,6 +582,9 @@ def authorization_failure_reason(failure: BaseException) -> str:
         return AUTHORIZATION_DEFERRED
     if _is_a_server_error(failure):
         return SERVER_UNAVAILABLE
+    inactive = _inactive_reason(failure)
+    if inactive is not None:
+        return inactive
     return REFUSED
 
 
@@ -571,6 +652,13 @@ def classify_failure(failure: BaseException) -> Failure:
         return Failure("terminal_config", LOCAL_PREREQUISITE, str(failure))
     if isinstance(failure, ReenrolmentRequired):
         return Failure("terminal_remote", REENROLMENT_REQUIRED, str(failure))
+    inactive = _inactive_reason(failure)
+    if inactive is not None:
+        # Transient for the reason the fallback below gives: each of these clears
+        # from OUTSIDE this process (a top-up, a console toggle, Radient lifting a
+        # suspension), and the next attempt at the 10 s floor picks it up. Named,
+        # so the retry line and the status surfaces point at the real fix.
+        return Failure("transient", inactive, terminal_detail(inactive, ""))
     # Everything else keeps today's behaviour, including a tunnel the cloud says
     # is suspended or disabled: that one RESUMES by itself at the 10-second floor
     # once the operator tops up credit or reactivates it (see the poller below),
@@ -593,7 +681,16 @@ def _retry_detail(verdict: Failure, failure: BaseException) -> str:
     # The two local causes join it: a timeout's own text is often EMPTY (the
     # builtin TimeoutError, httpcore's timeouts), which left this line ending
     # in nothing, and the busy store's text is a shared literal too.
-    if verdict.reason in (AUTHORIZATION_DEFERRED, CONTROL_PLANE_TIMEOUT, CREDENTIAL_STORE_BUSY):
+    if verdict.reason in (
+        AUTHORIZATION_DEFERRED,
+        CONTROL_PLANE_TIMEOUT,
+        CREDENTIAL_STORE_BUSY,
+        # `TunnelInactive`'s own text is a shared literal; the verdict names it.
+        TUNNEL_INACTIVE,
+        TUNNEL_DISABLED,
+        BILLING_INACTIVE,
+        BILLING_LAPSED,
+    ):
         return verdict.detail
     return str(failure)
 
@@ -762,9 +859,21 @@ async def run() -> int:
             trust_env=False, timeout=httpx.Timeout(15, read=None)
         ) as client:
             api = RadientTunnels(int(value["credential_id"]), client)
-            connection = config.validate_connection(
-                await api.request("POST", tunnel_path(value) + "/connect")
-            )
+            try:
+                connection = config.validate_connection(
+                    await api.request("POST", tunnel_path(value) + "/connect")
+                )
+            except RequestFailed as failure:
+                if failure.status not in (402, 403):
+                    raise
+                # Radient refuses `/connect` for any non-active tunnel. Name the
+                # actual blocker (billing never activated, lapsed, switched off,
+                # or merely suspended) so every surface offers the fix that
+                # clears it instead of a sign-in (see `refine_inactive`).
+                default = BILLING_INACTIVE if failure.status == 402 else TUNNEL_INACTIVE
+                raise TunnelInactive(
+                    await refine_inactive(api, value, default=default)
+                ) from failure
             if not active(connection["tunnel"]):
                 # Deliberately NOT parked. A suspended or disabled tunnel resumes
                 # by itself — the operator tops up credit or reactivates it in the
@@ -772,9 +881,12 @@ async def run() -> int:
                 # picks it up, which is what this same branch documents in the
                 # poller below. Parking would trade retry noise for a device that
                 # does not come back until someone runs a local command, and no
-                # local command is the remedy here.
-                raise ValueError(
-                    "Tunnel disabled or billing suspended. Review it in the Radient console."
+                # local command is the remedy here. Refined from the same reads
+                # the 403 arm above uses, so both paths speak one vocabulary.
+                raise TunnelInactive(
+                    await refine_inactive(
+                        api, value, default=TUNNEL_INACTIVE, record=connection["tunnel"]
+                    )
                 )
             if connection["gateway_port"] != value["gateway_port"]:
                 # ReenrolmentRequired: retrying re-sends a /connect the cloud will

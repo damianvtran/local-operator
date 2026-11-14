@@ -1,4 +1,8 @@
 {
+  "tunnel.status.billing_inactive.detail": "此隧道的计费尚未激活，因此Radient不会连接它。请在运行它的电脑上打开Local Operator的手机访问设置，并接受月费。",
+  "tunnel.status.billing_inactive.label": "计费未激活",
+  "tunnel.status.billing_lapsed.detail": "由于Radient余额已用完，此隧道的计费已失效，因此Radient不会连接它。请在{url}充值；余额恢复后会自动重新连接。",
+  "tunnel.status.billing_lapsed.label": "计费已失效",
   "tunnel.status.create.conflict_unmatched": "Radient表示此请求的隧道已存在，但当前登录账户的隧道列表中没有唯一匹配的记录。先查看lop tunnel list，然后用lop tunnel connect --tunnel-id <id>连接。",
   "tunnel.status.gateway.listening_http_status": "中继网关端口127.0.0.1:{port}上有程序在监听，但它对健康检查返回了HTTP {status}：可能有其他程序占用了该端口，或网关运行异常。重新安装无济于事。",
   "tunnel.status.gateway.listening_timed_out": "本地中继网关正在127.0.0.1:{port}上监听，但其健康检查应答超时；重新安装无济于事。",
@@ -11,5 +15,9 @@
   "tunnel.status.requests.no_response": "无响应",
   "tunnel.status.server_unavailable.label": "Radient服务器错误",
   "tunnel.status.server_unavailable.relay": "Radient对这台电脑的中继授权检查返回了临时服务器错误。登录和这台电脑都没有问题；Radient恢复后会自动重新授权。",
-  "tunnel.status.server_unavailable.terminal": "Radient对连接器的授权检查返回了临时服务器错误（HTTP 5xx），问题不在登录，也不在这台电脑。它每10秒重试一次，Radient恢复后会自动重新授权；无需执行任何本地命令。"
+  "tunnel.status.server_unavailable.terminal": "Radient对连接器的授权检查返回了临时服务器错误（HTTP 5xx），问题不在登录，也不在这台电脑。它每10秒重试一次，Radient恢复后会自动重新授权；无需执行任何本地命令。",
+  "tunnel.status.tunnel_disabled.detail": "此隧道已在Radient控制台中关闭，因此在那里重新开启之前，远程访问将保持关闭：{url}。开启后会自动重新连接。",
+  "tunnel.status.tunnel_disabled.label": "隧道已在控制台中关闭",
+  "tunnel.status.tunnel_inactive.detail": "Radient已暂停此隧道，但其计费正常。请在运行它的电脑上，于Local Operator中重新连接手机访问；它也会持续自动重试。如果仍处于暂停状态，请在{url}查看该隧道。",
+  "tunnel.status.tunnel_inactive.label": "隧道已暂停"
 }

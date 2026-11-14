@@ -193,6 +193,34 @@ OWNER_MISSING = "owner_missing"
 #: this remedy is for when it could not (a stopped tunnel brought back, a build
 #: that predates the heal wrote the login).
 LOGIN_SUPERSEDED = "login_superseded"
+#: Radient ANSWERED and declined to serve this tunnel: `/connect` returns 403 for
+#: any tunnel whose status is not `active` (and 402 is reserved for billing), and
+#: the cold start finds the same thing in an inactive `/connect` record. These
+#: used to fall through to `REFUSED`, whose remedy is a sign-in — a field report
+#: (2026-11) had a freshly signed-in teammate's phone say the tunnel "isn't
+#: active" while every surface told him to sign in again, which can never clear a
+#: billing or console state. The connector refines the cloud's answer by reading
+#: `/billing` (and the tunnel record) the way `setup.observe` does, so the code
+#: names the ACTUAL blocker and each one maps to a fix a person can take:
+#:
+#: - `TUNNEL_INACTIVE`  suspended (or unrefined 403) with billing in order →
+#:   reconnect, no spend.
+#: - `TUNNEL_DISABLED`  switched off in the Radient console → the console.
+#: - `BILLING_INACTIVE` billing was never activated (or HTTP 402) → accept the
+#:   quote in setup.
+#: - `BILLING_LAPSED`   billing was activated but is no longer eligible (credit
+#:   ran out) → add credit.
+#:
+#: All four stay TRANSIENT on the supervisor's existing 10 s floor: each clears
+#: from outside this process (a top-up, a console toggle), and the connector must
+#: pick that up by itself rather than wait parked for a local command.
+TUNNEL_INACTIVE = "tunnel_inactive"
+TUNNEL_DISABLED = "tunnel_disabled"
+BILLING_INACTIVE = "billing_inactive"
+BILLING_LAPSED = "billing_lapsed"
+#: The reasons whose copy lives in the `tunnel.status` catalogue rather than the
+#: legacy English tables below (see `_localized`).
+_INACTIVE_REASONS = (TUNNEL_INACTIVE, TUNNEL_DISABLED, BILLING_INACTIVE, BILLING_LAPSED)
 
 # What a phone is shown: self-contained, and carrying any link it needs, because
 # there is nothing to type on that surface.
@@ -395,7 +423,64 @@ TERMINAL_REMEDY = {
     # COMMAND the operator has to run is pinned in one place.
     LOCAL_PREREQUISITE: "lop tunnel install",
     REENROLMENT_REQUIRED: "lop tunnel connect",
+    # The guided setup reads fresh billing and names the one step that clears
+    # each of these (reconnect, accept the quote, add credit, or the console);
+    # never `lop login radient`, which is the misdirection these codes remove.
+    TUNNEL_INACTIVE: "lop tunnel setup",
+    TUNNEL_DISABLED: "lop tunnel setup",
+    BILLING_INACTIVE: "lop tunnel setup",
+    BILLING_LAPSED: "lop tunnel setup",
 }
+
+#: The ACTION a graphical surface offers for each reason: the `remedy.kind`
+#: vocabulary the desktop setup route already speaks (`sign_in`, `run`,
+#: `accept_quote`, `add_credit`, `restore_owner`, `check_status`, ...), extended
+#: with three kinds for states a button cannot fix:
+#:
+#: - `open_console` — the fix is a toggle in the Radient console (a link, no run).
+#: - `wait_network` — this computer could not reach Radient; it reconnects by
+#:   itself (no button). Relay backoff and the supervisor already recover from a
+#:   network change; what was missing was saying so.
+#: - `wait_radient` — Radient answered with its own error; nothing local to do.
+#:
+#: One table beside the reason codes, read by the gateway's 503 body (so a phone
+#: can render the action), `report.remedy` (`GET /v1/desktop/tunnel`) and the
+#: setup route, so a cause cannot map to two different buttons. A terminal surface
+#: keeps `TERMINAL_REMEDY`; this is its button-shaped twin.
+REMEDY_KIND = {
+    UNREACHABLE: "wait_network",
+    CONTROL_PLANE_TIMEOUT: "wait_network",
+    CREDENTIAL_STORE_BUSY: "check_status",
+    SERVER_UNAVAILABLE: "wait_radient",
+    AUTHORIZATION_DEFERRED: "wait_radient",
+    LEASE_PENDING: "check_status",
+    REFUSED: "sign_in",
+    NOT_AUTHORIZED: "open_console",
+    LOGIN_REQUIRED: "sign_in",
+    OWNER_MISSING: "restore_owner",
+    # The re-point and the local repairs are what the setup run performs, so
+    # they share its one primary action.
+    LOGIN_SUPERSEDED: "run",
+    LOCAL_PREREQUISITE: "run",
+    REENROLMENT_REQUIRED: "run",
+    TUNNEL_INACTIVE: "run",
+    TUNNEL_DISABLED: "open_console",
+    BILLING_INACTIVE: "accept_quote",
+    BILLING_LAPSED: "add_credit",
+}
+
+#: Kinds that render NO button: the state clears without anyone acting, and a
+#: control would invite a person to "fix" something that is not broken.
+WAITING_KINDS = frozenset({"wait_network", "wait_radient", "wait_reconnect"})
+
+
+def remedy_kind(reason: str) -> str | None:
+    """The `remedy.kind` for a reason code, or ``None`` for one this build lacks.
+
+    ``None`` rather than a guess: a daemon from another version naming a state
+    this build does not know must not be handed a button that may do nothing.
+    """
+    return REMEDY_KIND.get(reason)
 
 
 #: Readable forms of the reason codes, for surfaces that show a short state on
@@ -415,6 +500,11 @@ REASON_LABEL = {
     LOGIN_SUPERSEDED: "newer sign-in not in use",
     LOCAL_PREREQUISITE: "prerequisite missing",
     REENROLMENT_REQUIRED: "needs re-enrolment",
+    # English fallbacks only; the keyed `tunnel.status` copy wins (`_localized`).
+    TUNNEL_INACTIVE: "tunnel not active",
+    TUNNEL_DISABLED: "tunnel turned off in the console",
+    BILLING_INACTIVE: "billing not activated",
+    BILLING_LAPSED: "billing lapsed",
 }
 
 
@@ -463,17 +553,42 @@ def _localized(reason: str) -> tuple[str, str, str] | None:
     `terminal_detail` and `relay_detail`. Imported lazily to keep this module's
     import graph (pinned in `tests/unit/test_import_graph.py`) unchanged.
     """
-    if reason != SERVER_UNAVAILABLE:
+    if reason != SERVER_UNAVAILABLE and reason not in _INACTIVE_REASONS:
         return None
     from local_operator.i18n.keys import tunnel_status
     from local_operator.i18n.text import tr
 
     _t = tr("tunnel.status")
-    return (
-        _t(tunnel_status.server_unavailable_label()),
-        _t(tunnel_status.server_unavailable_terminal()),
-        _t(tunnel_status.server_unavailable_relay()),
-    )
+    if reason == SERVER_UNAVAILABLE:
+        return (
+            _t(tunnel_status.server_unavailable_label()),
+            _t(tunnel_status.server_unavailable_terminal()),
+            _t(tunnel_status.server_unavailable_relay()),
+        )
+    # The four inactive-tunnel causes carry ONE surface-neutral sentence each:
+    # the remedy they name (reconnect, accept the price, add credit, the
+    # console) is the same action wherever it is read, and none of them names a
+    # command — the sentence reaches the phone, the desktop and the TUI card, and
+    # a non-technical reader must never be sent to a terminal.
+    label, detail = {
+        TUNNEL_INACTIVE: (
+            tunnel_status.tunnel_inactive_label(),
+            tunnel_status.tunnel_inactive_detail(url=CONSOLE_URL),
+        ),
+        TUNNEL_DISABLED: (
+            tunnel_status.tunnel_disabled_label(),
+            tunnel_status.tunnel_disabled_detail(url=CONSOLE_URL),
+        ),
+        BILLING_INACTIVE: (
+            tunnel_status.billing_inactive_label(),
+            tunnel_status.billing_inactive_detail(),
+        ),
+        BILLING_LAPSED: (
+            tunnel_status.billing_lapsed_label(),
+            tunnel_status.billing_lapsed_detail(url=CONSOLE_URL),
+        ),
+    }[reason]
+    return (_t(label), _t(detail), _t(detail))
 
 
 # Only presentation/protocol headers cross the boundary. In particular the
@@ -681,7 +796,14 @@ class Gateway:
         terminal cannot disagree about the cause.
         """
         reason = self.refusal_reason()
-        return {"detail": relay_detail(reason), "reason": reason}
+        body = {"detail": relay_detail(reason), "reason": reason}
+        # The action a phone can render beside the sentence (additive: older
+        # phones key on `reason`/`detail` and ignore it). Omitted for a code
+        # with no mapping rather than sent as null.
+        kind = remedy_kind(reason)
+        if kind is not None:
+            body["kind"] = kind
+        return body
 
     def unavailable_body(self) -> dict[str, str]:
         """The phone-facing 503 body.

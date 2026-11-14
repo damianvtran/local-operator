@@ -1,0 +1,6 @@
+{
+  "wire.phone_access.title": "Truy cập điện thoại",
+  "wire.phone_access.description": "Cách máy tính này duy trì tunnel Radient cho ứng dụng điện thoại. Thay đổi sẽ áp dụng từ lần đăng nhập tiếp theo.",
+  "wire.phone_access.auto_setup.label": "Kết nối lại truy cập điện thoại sau khi đăng nhập",
+  "wire.phone_access.auto_setup.help": "Khi bạn đăng nhập Radient trên máy tính đã có truy cập điện thoại, tunnel của máy sẽ được kết nối lại hoặc sửa chữa ở chế độ nền. Việc này không bao giờ kích hoạt thanh toán hay tiêu tín dụng; thay vào đó, mọi mức giá hoặc khoản tín dụng còn thiếu sẽ được hiển thị cho bạn."
+}
