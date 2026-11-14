@@ -461,13 +461,21 @@ def test_an_isolated_root_elects_under_itself_and_cannot_see_another_roots_lock(
     assert a_store.calls == ["prune", "bound_wal"]
     assert a.maintenance_lock.exists()
     assert not (root_b / "run").exists(), "root B was touched by a root A sweep"
+    # Pin root A's lock path NOW. ``maintenance_lock`` is a lazy property that
+    # resolves ``config_dir()`` -- i.e. ``LOCAL_OPERATOR_CONFIG_DIR`` -- on every
+    # read, so once the env var switches to root B below, ``a.maintenance_lock``
+    # names ROOT B's file. Reading it there compared B's fresh stamp with A's
+    # and failed whenever a wall-clock second boundary fell between the two
+    # sweeps (main run 43583411834). Production never switches the env var
+    # under a live recorder; only this test does.
+    lock_a = a.maintenance_lock
 
     # Wedge root A's lock, then elect on root B. A different root's lock is not
     # this root's lock, so B must sweep and stamp its own file.
-    holder = os.open(a.maintenance_lock, os.O_RDWR)
+    holder = os.open(lock_a, os.O_RDWR)
     fcntl.flock(holder, fcntl.LOCK_EX | fcntl.LOCK_NB)
     try:
-        stamp_a = a.maintenance_lock.read_text()
+        stamp_a = lock_a.read_text()
         monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(root_b))
         b_handle, b_store = _fake()
         b = AnalyticsRecorder(store=b_handle)
@@ -475,7 +483,7 @@ def test_an_isolated_root_elects_under_itself_and_cannot_see_another_roots_lock(
         assert b._run_owned_maintenance() is True
         assert b_store.calls == ["prune", "bound_wal"]
         assert b.maintenance_lock.exists()
-        assert a.maintenance_lock.read_text() == stamp_a, "root A's stamp was rewritten"
+        assert lock_a.read_text() == stamp_a, "root A's stamp was rewritten"
     finally:
         fcntl.flock(holder, fcntl.LOCK_UN)
         os.close(holder)
