@@ -53,6 +53,13 @@ _CONFIG_FILE = "config.yml"
 _SECRETS_DIRNAME = "secrets"
 _SESSIONS_DIRNAME = "sessions"
 _DESTROYING_OPS = frozenset({"delete", "move", "clean"})
+#: The ranking reason of a permission change that unlocks a tree for removal
+#: (``resolve._unprotected_operands``). It reaches the judge verbatim as the
+#: target's "ranked because" fact, so the judge is told it is a forced removal.
+FORCED_REMOVAL_REASON = (
+    "permission escalation that unlocks write-protected files for removal "
+    "(a forced removal of protected files the session did not create)"
+)
 # Spelled here rather than imported: ``provenance`` imports this module.
 _LEDGER_DIRNAME = "guardrails"
 _LEDGER_FILENAME = "created.sqlite"
@@ -934,6 +941,13 @@ def _high_reason(path: str, target: Target, prot: _Protected, *, link: bool = Fa
         return "git clean removes untracked work"
     if any(_under(path, own) for own in prot.own_session):
         return None
+    if target.op == "unprotect":
+        # Never LOW outside the session's own directory, even where removing
+        # the same path would be (incident 2026-11-14: ``chmod -R u+w`` of a
+        # deep benchmark tree forced ``rm -rf`` past its write-protected raw
+        # data). The creation ledger still lowers it for a tree the session
+        # made (``_owned_by_session`` in ``_rank``), as it does for a delete.
+        return FORCED_REMOVAL_REASON
     if target.op not in _DESTROYING_OPS:
         # S10: overwriting a file inside the state root (outside this session's
         # own directory) rewrites the harness's data — review it.

@@ -35659,7 +35659,8 @@ class AskParams(BaseModel):
 ASK_UNANSWERED_TEXT = (
     "The user closed the question without answering, so nothing was chosen. "
     "Do not ask again: decide yourself (take your recommended option(s) where you "
-    "gave any), then say in one line what you assumed and carry on."
+    "gave any), then say in one line what you assumed and carry on. Closing it is NOT "
+    "consent: leave any delete, overwrite or irreversible option undone and report it."
 )
 
 
@@ -35902,8 +35903,10 @@ _ASK_DESCRIPTION_QUEUED = (
     "anything the ask was meant to authorise until the answer arrives — continue "
     "other work, or end the turn saying what is queued. `timeout`: 1 h (3600) is "
     "routine, 5-10 minutes when someone should answer now, up to 24 h otherwise "
-    "(floor 2 min); on a timeout notice take your own recommendation and say what "
-    "you assumed. At most 8 asks can be open at once; duplicates are refused. "
+    "(floor 2 min); on a timeout notice take your own recommendation only where it is "
+    "reversible and say what you assumed — a timeout is never consent to delete or "
+    "overwrite. At most 8 asks can be open at once; "
+    "duplicates are refused. "
     "Settle one with `ask_withdraw` the moment it stops mattering. "
     "To re-raise another session's pending ask instead, pass that one ask's "
     "`relay` ref ('<session_id>/<ask_id>'; one answer settles both). "

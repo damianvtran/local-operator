@@ -61,6 +61,7 @@ import re
 import sqlite3
 import stat
 import subprocess
+import sys
 import time
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
@@ -2130,6 +2131,13 @@ class OperatorWords:
     #: (``_approved_text``): the yes/no question the operator said yes to, or
     #: the picked options. ``DeleteCase.evidence_basis`` settles on it.
     approved: str = ""
+    #: Labels of the options the operator did NOT pick, in the questions this
+    #: answer kept. A judge's ``ask=`` citation never verifies a path only
+    #: these reach (review R2-m6, :func:`ask_citation_covers`).
+    unpicked: str = ""
+    #: The picked labels plus any typed answer: a path these name is the
+    #: operator's pick even when an unpicked option names it too.
+    picked: str = ""
 
 
 @dataclass
@@ -2227,23 +2235,24 @@ def _ask_words(record: Mapping[str, Any], session_id: str) -> OperatorWords | No
     answers = record.get("answers") or {}
     parts: list[str] = []
     approved: list[str] = []
+    picked: list[str] = []
+    unpicked: list[str] = []
     for q in questions:
         if q.get("secret"):
             continue
-        chosen = [str(v) for v in (answers.get(str(q.get("id") or "")) or [])]
-        opts = [o for o in (q.get("options") or []) if isinstance(o, Mapping)]
-        labels = [str(o.get("label") or "") for o in opts]
-        if not chosen or any(_answer_declines(v, labels) for v in chosen):
+        chosen = _kept_answer(q, answers)
+        if chosen is None:
             # Deterministic veto (review R1-MINOR-3): a declining answer is
             # never consent, whatever a judge that read the history concludes.
             continue
-        options = "; ".join(labels)
-        parts.append(
-            f"Q: {q.get('question') or ''}"
-            + (f" [options: {options}]" if options else "")
-            + f" -> operator answered: {', '.join(chosen)}"
-        )
+        opts = [o for o in (q.get("options") or []) if isinstance(o, Mapping)]
+        labels = [str(o.get("label") or "") for o in opts]
+        # The consent rendering, which the refusal side also reads for every
+        # question this answer kept (``unanswered_asks``, review R2-M3).
+        parts.append(f"{_ask_question_text(q)} -> operator answered: {', '.join(chosen)}")
         approved.extend(_approved_text(q, opts, labels, chosen))
+        picked.extend(chosen)
+        unpicked.extend(lbl for lbl in labels if lbl not in chosen)
     if not parts:
         return None
     return OperatorWords(
@@ -2252,7 +2261,122 @@ def _ask_words(record: Mapping[str, Any], session_id: str) -> OperatorWords | No
         ask_id=ask_id,
         session_id=session_id,
         approved="\n".join(approved),
+        unpicked="\n".join(unpicked),
+        picked="\n".join(picked),
     )
+
+
+def _kept_answer(q: Mapping[str, Any], answers: Mapping[str, Any]) -> list[str] | None:
+    """The operator's answer to ``q`` when it can be consent, else None.
+
+    None for a secret question, no answer, or any declining answer. The ONE
+    test both :func:`_ask_words` (consent) and :func:`unanswered_asks`
+    (refusal) apply per question, so the two never disagree on which
+    questions a trusted answer kept.
+    """
+    if q.get("secret"):
+        return None
+    chosen = [str(v) for v in (answers.get(str(q.get("id") or "")) or [])]
+    labels = [str(o.get("label") or "") for o in q.get("options") or [] if isinstance(o, Mapping)]
+    if not chosen or any(_answer_declines(v, labels) for v in chosen):
+        return None
+    return chosen
+
+
+def _ask_question_text(q: Mapping[str, Any], *, descriptions: bool = False) -> str:
+    """One question as text: the question, its option labels, optionally descriptions.
+
+    The ONE rendering consent (:func:`_ask_words`) and refusal
+    (:func:`unanswered_asks`) read. Consent reads question + labels: an
+    option's description names nothing (live ask a-1d54, review R2-M1). The
+    refusal side adds descriptions only for questions with no trusted,
+    non-declining answer (review m4/QA Q2 vs R2-M3). No closing bracket after
+    the last option: ``_PATHISH`` would keep it on a trailing glob
+    (``~/osworld/runs*]``), which then matches nothing.
+
+    The suggested terminal command (``AskQuestion.command``, PR #3926; stored
+    on the question only, never per option) rides with ``descriptions``: it
+    is the agent's proposal, like a description, not words the operator
+    approved. So it names a path on the REFUSAL side (``rm -rf ~/bench/rigs``
+    suggested, then the ask timed out: refuse, not LOW), but a trusted yes
+    never lifts a path named only there — consent reads question + labels
+    (review R2-M3), and a kept question's refusal text matches it, so such a
+    path keeps its base rank, exactly as a description-only path does.
+    """
+    options = "; ".join(
+        (
+            f"{o.get('label') or ''} ({o.get('description')})"
+            if descriptions and o.get("description")
+            else str(o.get("label") or "")
+        )
+        for o in q.get("options") or []
+        if isinstance(o, Mapping)
+    )
+    command = q.get("command")
+    suggested = (
+        f" | suggested command: {command}" if descriptions and isinstance(command, str) else ""
+    )
+    # Before the options: the text keeps ending on the last option (see above).
+    return f"Q: {q.get('question') or ''}{suggested} | options: {options}"
+
+
+def ask_citation_covers(
+    words: OperatorWords,
+    path: str,
+    *,
+    home: str,
+    cwd: str | None = None,
+    protected: Iterable[str] = (),
+) -> bool:
+    """May a judge's ``ask=<id>`` citation of ``words`` verify deleting ``path``?
+
+    The answer's text must name the path (question or labels, never a
+    description), AND the path must not be one that only an option the
+    operator did NOT pick reaches. WHY (review R2-m6, PR #3966): with
+    "Delete ~/A" picked and "Delete ~/B" not, a judge citing the ask for
+    ``~/B`` passed the verifier, which read every label. The question still
+    counts ("Delete ~/A and ~/B?" answered "Both"), unless an unpicked option
+    claims the path and no pick or typed answer names it.
+    """
+    protected = tuple(protected)
+    if not names_path(words.text, path, home=home, cwd=cwd, protected=protected):
+        return False
+    if not words.unpicked:
+        return True
+    reach = ask_reach(words.unpicked, path, home=home, cwd=cwd, protected=protected)
+    if reach is None or reach[0] not in ("exact", "under"):
+        return True
+    return names_path(words.picked, path, home=home, cwd=cwd, protected=protected)
+
+
+def ask_answer_covers(
+    words: OperatorWords,
+    path: str,
+    *,
+    home: str,
+    cwd: str | None = None,
+    protected: Iterable[str] = (),
+) -> bool:
+    """Would an ``ask=`` citation of ``words`` verify ``path`` or a dir above it?
+
+    The rank side of :func:`ask_citation_covers`: a path inside a tree the
+    operator's answer covers (``~/m/.worktrees/x/node_modules`` under an
+    answered "Delete all five" naming ``~/m/.worktrees/{x,…}``) is not lifted
+    out of its base rank by that ask. Only ancestors below ``$HOME`` count,
+    so an answer that names ``~`` covers nothing beneath it.
+    """
+    protected = tuple(protected)
+    home_real = os.path.realpath(home)
+    for spelled in dict.fromkeys([os.path.normpath(path), os.path.realpath(path)]):
+        current = spelled
+        while True:
+            if ask_citation_covers(words, current, home=home, cwd=cwd, protected=protected):
+                return True
+            parent = os.path.dirname(current)
+            if parent == current or parent in (home, home_real) or len(parent) <= len(home_real):
+                break
+            current = parent
+    return False
 
 
 def _approved_text(
@@ -2362,6 +2486,188 @@ def lineage_asks(
     return out
 
 
+@dataclass(frozen=True)
+class UnansweredAsk:
+    """An ask in the family whose end state is NOT consent for what it names.
+
+    Despite the name (kept for its callers) this is every ask that names
+    paths and is not a trusted operator answer approving them: never answered
+    (open, timed out, expired, withdrawn, dismissed), declined, or answered in
+    a way :func:`_ask_words` refuses (the agent's own ``answered_in_chat``, a
+    relay or bridge row, a declining pick such as "Keep everything").
+    """
+
+    ask_id: str
+    session_id: str
+    #: The fold's status (``timed_out``, ``answered``, ``declined``, ...).
+    status: str
+    #: Question text and option labels, plus descriptions for every question
+    #: the operator's trusted answer did not keep: wider than consent's naming
+    #: bar there on purpose, since that text is only ever matched to REFUSE.
+    #: A kept question reads exactly as consent reads it (review R2-M3).
+    text: str
+    #: Why it is not consent, for the judge fact and the refusal text.
+    label: str = ""
+    #: What a trusted operator answer approved without a judge
+    #: (``OperatorWords.approved``); a path it reaches is consented, not
+    #: blocked (:func:`ask_consents`). Empty for every non-answer.
+    approved: str = ""
+    #: ``created_at`` (ms) of the ask; :data:`ASK_ESCALATION_MAX_AGE_MS` bounds it.
+    created_at: int = 0
+    #: True when the operator never answered (open/timed out/expired/...),
+    #: False when an answer exists but does not approve the path.
+    never_answered: bool = True
+    #: The operator's trusted, non-declining answer (:func:`_ask_words`), or
+    #: None. A path that answer's text reaches but did not approve
+    #: deterministically goes to the judge, never to the refusal (review
+    #: R2-M3): only an ask with no trusted yes may refuse outright.
+    answer: OperatorWords | None = None
+
+
+#: Statuses that mean "the operator never answered".
+_UNANSWERED_LABEL = {
+    "timed_out": "TIMED OUT with no answer",
+    "expired": "expired with no answer",
+    "withdrawn": "withdrawn by the agent, never answered",
+    "dismissed": "dismissed by the user without an answer",
+    "open": "still open, not yet answered",
+}
+
+#: An ask stops lifting paths out of LOW once it is this old (review R1-M2,
+#: PR #3966). WHY 7 days: the longest ask timeout is 24 h
+#: (``asks.policy.MAX_TIMEOUT_S``) and a cleanup that follows an ask runs
+#: within hours of its notice (incident a-20fc: one hour); a week covers a
+#: session resumed after a weekend with margin, while an ask about some path
+#: last Tuesday no longer stands between a session family and ordinary work
+#: under that path forever. Only escalation is bounded: the not-consent FACT
+#: still reaches the judge for any target that ranks HIGH on its own.
+ASK_ESCALATION_MAX_AGE_MS = 7 * 24 * 3600 * 1000
+
+
+def unanswered_label(status: str) -> str:
+    return _UNANSWERED_LABEL.get(status, "never answered")
+
+
+def _not_consent_label(record: Mapping[str, Any], status: str) -> str:
+    """Why a folded ask that HAS an end state still is not consent."""
+    if status in _UNANSWERED_LABEL:
+        return _UNANSWERED_LABEL[status]
+    if status == "declined":
+        return "declined"
+    surface = str((record.get("answered_by") or {}).get("surface") or "")
+    if status in ("answered", "late") and surface not in TRUSTED_ASK_SURFACES:
+        # ``answered_in_chat`` is written by the AGENT (surface ``chat``); a
+        # relay row is another session's carriage. Neither is the operator.
+        return f"answered on the '{surface or 'unknown'}' surface, not by the operator"
+    return "answered without approving it"
+
+
+def unanswered_asks(
+    session_id: str,
+    *,
+    state_root: str | os.PathLike[str] | None = None,
+    now_ms: int | None = None,
+) -> list[UnansweredAsk]:
+    """Asks in ``session_id``'s family that the store does NOT prove as consent.
+
+    WHY (incident 2026-11-14, session 1faad822298d, ask a-20fc): an ask naming
+    rig and benchmark paths timed out unanswered, the timeout notice said
+    "proceed … use your recommended option(s)", and the session deleted them.
+    :func:`verified_ask` already refused that ask as consent, but nothing said
+    so. This lists those asks so the checkpoint can (a) tell the judge each one
+    is NOT consent and (b) refuse deterministically when such an ask is the
+    only thing pointing at a path (``check.DeleteCase.lapsed_only``).
+
+    Review R1-M1 (PR #3966): listing only never-answered STATUSES let the
+    agent's own ``ask_withdraw answered_in_chat`` after the deadline (folded
+    ``late``, surface ``chat``), a relay answer, a bare ``declined`` and a
+    trusted "Keep everything" pick drop the ask from this list, so the path
+    fell back to LOW. Now: blocks = asks naming the path − asks granting
+    consent for it. Every ask is listed unless it has no visible question;
+    a trusted answer carries its ``approved`` text, and :func:`ask_consents`
+    lifts only the paths that text reaches. Never a source of consent.
+    """
+    try:
+        from local_operator.asks import store
+        from local_operator.paths import config_dir
+
+        root = Path(state_root) if state_root is not None else config_dir()
+        lineage = session_family(session_id, state_root=root)
+        now = now_ms if now_ms is not None else store.now_ms()
+    except Exception:  # noqa: BLE001 — unreadable: nothing extra to report
+        logger.debug("guardrail: unanswered asks unreadable", exc_info=True)
+        return []
+    out: list[UnansweredAsk] = []
+    for sid in lineage or [session_id]:
+        try:
+            directory = store.session_dir(root, sid)
+            if not directory.is_dir():
+                continue
+            records = store.fold(store.read_events(directory), now)
+        except Exception:  # noqa: BLE001
+            continue
+        for record in records:
+            status = str(record.get("status") or "")
+            questions = [q for q in record.get("questions") or [] if isinstance(q, Mapping)]
+            words = _ask_words(record, sid)
+            answers = record.get("answers") or {}
+            # One parser for consent and refusal (review R2-M3): a question
+            # the operator's trusted answer kept is read exactly as consent
+            # reads it (question + labels), so a path named only in its
+            # description is neither approved nor refused (main's rank, the
+            # same as consent sees it). Every other question keeps its
+            # descriptions (review m4/QA Q2): with no trusted yes, a path
+            # named only there must still refuse.
+            parts = [
+                _ask_question_text(
+                    q, descriptions=words is None or _kept_answer(q, answers) is None
+                )
+                for q in questions
+                if not q.get("secret")
+            ]
+            if not parts:
+                continue
+            out.append(
+                UnansweredAsk(
+                    ask_id=str(record.get("ask_id") or ""),
+                    session_id=sid,
+                    status=status,
+                    text="\n".join(parts),
+                    label=(
+                        "answered by the operator with no picked label approving this path"
+                        if words is not None
+                        else _not_consent_label(record, status)
+                    ),
+                    approved=words.approved if words is not None else "",
+                    answer=words,
+                    created_at=int(record.get("created_at") or 0),
+                    never_answered=status in _UNANSWERED_LABEL,
+                )
+            )
+    return out
+
+
+def ask_consents(
+    ask: UnansweredAsk,
+    path: str,
+    *,
+    home: str,
+    cwd: str | None = None,
+    protected: Iterable[str] = (),
+) -> bool:
+    """Did the operator's trusted answer to ``ask`` approve ``path`` (equal or under)?
+
+    The approved text is the label(s) the operator picked (or the question, for
+    a bare yes to a yes/no ask). A path inside an approved tree is approved
+    (``rm -rf ~/osworld/runs-3/raw`` under an approved ``~/osworld/runs*``); a
+    path ABOVE it is not — approving ``~/x/build`` never approves ``~/x``.
+    """
+    if not ask.approved:
+        return False
+    kind = ask_reach(ask.approved, path, home=home, cwd=cwd, protected=protected)
+    return kind is not None and kind[0] in ("exact", "under")
+
+
 def _text_of(message: Any) -> str:
     text = getattr(message, "text", None)
     if isinstance(text, str):
@@ -2446,6 +2752,39 @@ def session_lineage(
             ]
         queue.extend(p for p in pointers if isinstance(p, str))
     return lineage, operator_opened
+
+
+def session_family(
+    session_id: str, *, state_root: str | os.PathLike[str] | None = None
+) -> list[str]:
+    """``session_id``, its ancestors (:func:`session_lineage`) and its descendants.
+
+    WHY descendants too (incident 2026-11-14 follow-up): an ask a subagent
+    raised and nobody answered still means "the operator has not said yes" to
+    the manager that spawned it, and the reverse. Descendants come from the
+    harness lineage registry (``read_lineage``: ``parent``/``opener`` rows),
+    followed down to a fixpoint; ``origin.json`` files are not scanned (that
+    would read every session on disk per call). Bounded at 64 sessions.
+    """
+    from local_operator.paths import config_dir
+
+    root = Path(state_root) if state_root is not None else config_dir()
+    lineage, _ = session_lineage(session_id, state_root=root)
+    family = list(lineage or [session_id])
+    registry = read_lineage(root)
+    below = {session_id}
+    grew = True
+    while grew and len(family) < 64:
+        grew = False
+        for child, row in registry.items():
+            if child in below or len(family) >= 64:
+                continue
+            if row.get("parent") in below or row.get("opener") in below:
+                below.add(child)
+                if child not in family:
+                    family.append(child)
+                grew = True
+    return family
 
 
 def task_tree_root(session_id: str, *, state_root: str | os.PathLike[str] | None = None) -> str:
@@ -2714,6 +3053,134 @@ def _path_readings(text: str) -> list[tuple[str, bool]]:
         if len(stripped) > 1:
             out.append((stripped, False))
     return out
+
+
+def ask_reaches(
+    text: str,
+    path: str,
+    *,
+    home: str,
+    cwd: str | None = None,
+    protected: Iterable[str] = (),
+) -> bool:
+    """Does an ask's ``text`` name ``path``, a path above it, or one inside it?
+
+    A boolean view of :func:`ask_reach`; see there for the rules.
+    """
+    return ask_reach(text, path, home=home, cwd=cwd, protected=protected) is not None
+
+
+def ask_reach(
+    text: str,
+    path: str,
+    *,
+    home: str,
+    cwd: str | None = None,
+    protected: Iterable[str] = (),
+) -> tuple[str, str] | None:
+    """HOW an ask's ``text`` reaches ``path``: ``(kind, named path)`` or ``None``.
+
+    WHY (incident 2026-11-14, ask a-20fc, rows 302/320/365): the session asked
+    which rig, build and benchmark trees to delete, got no answer, and removed
+    the deep ones anyway — ``~/hyperplane-cpp/build`` and the benchmark raw
+    data ranked LOW, so no check ever ran. Asking about a path is the agent's
+    own admission that removing it needs the operator; silence cannot turn it
+    back into LOW. So this match is deliberately WIDER than consent's
+    :func:`names_path`. It lifts or keeps escalation and refusals; the callers
+    that subtract consent with it (:func:`ask_consents` on the operator's
+    approved labels, :func:`ask_citation_covers` on unpicked options) can at
+    most return a target to its base rank, never below it (over-matching on
+    the refusal side fails closed):
+
+    - ``("exact", path)``: :func:`names_path` names ``path`` itself, literally
+      or by its glob (``~/osworld/runs*`` names ``~/osworld/runs-3``);
+    - ``("under", ancestor)``: it names an ancestor of ``path`` below
+      ``$HOME`` (same glob and brace-list rules). The caller needs the
+      ancestor: under a BROAD named dir (``~/workspace``) the target goes to
+      the judge instead of a deterministic refusal (review R1-M2);
+    - ``("above", named)``: ``path`` is an ancestor of a named path, or of a
+      glob's literal parent directory (``rm -rf ~/osworld`` removes every ``runs*``).
+
+    ``$HOME``, its ancestors and the protected roots are never treated as
+    "named" for the under-direction: an ask that merely mentions ``~`` or the
+    state root must not make every deep delete in the session refusable.
+
+    Case (review R1-m1): macOS volumes are case-insensitive by default, so
+    ``rm -rf ~/Workspace/Harness-Cost-Bench`` deletes the tree an ask spelled
+    ``~/workspace/harness-cost-bench``. On Darwin every spelling is compared
+    casefolded. On a case-SENSITIVE Darwin volume that can over-match two
+    distinct paths; that may lift only the escalation it added, never take a
+    target below its base rank.
+    """
+    if not text or not path:
+        return None
+    protected = tuple(protected)
+    spellings = list(dict.fromkeys([os.path.realpath(path), os.path.normpath(path)]))
+    if sys.platform == "darwin":
+        text = text.casefold()
+        home = home.casefold()
+        cwd = cwd.casefold() if cwd else cwd
+        protected = tuple(p.casefold() for p in protected)
+        spellings = list(dict.fromkeys(s.casefold() for s in spellings))
+    for spelled in spellings:
+        if names_path(text, spelled, home=home, cwd=cwd, protected=protected):
+            return ("exact", spelled)
+    home_n = os.path.normpath(home)
+    stops = {os.path.normpath(p) for p in protected} | {home_n, "/"}
+    for spelled in spellings:
+        anc = os.path.dirname(spelled)
+        while anc and anc not in stops and not home_n.startswith(anc.rstrip("/") + "/"):
+            if names_path(text, anc, home=home, cwd=cwd, protected=protected):
+                return ("under", anc)
+            parent = os.path.dirname(anc)
+            if parent == anc:
+                break
+            anc = parent
+    for word, _ in _path_readings(text):
+        expanded = _expand_word(word, home, cwd) if word else None
+        if not expanded:
+            continue
+        wild = _GLOBISH.search(expanded)
+        named = expanded if wild is None else expanded[: wild.start()].rsplit("/", 1)[0]
+        named = os.path.normpath(named or "/")
+        if any(named == s or named.startswith(s.rstrip("/") + "/") for s in spellings):
+            return ("above", named)
+    return None
+
+
+#: A named dir with more entries than this is "broad" (review R1-M2): an ask
+#: mentioning it ("~/workspace or ~/Documents?") is too wide a net to refuse
+#: everything under it without a judge. 1000 entries is far above a project
+#: tree's top level and the incident's rig/bench dirs (tens of entries) yet
+#: below a home-wide workspace or Downloads folder; the count stops at
+#: ``_BROAD_ASK_DIR_ENTRIES + 1`` so the check stays bounded.
+_BROAD_ASK_DIR_ENTRIES = 1000
+
+
+def broad_ask_dir(named: str, *, home: str) -> bool:
+    """Is ``named`` too broad for an ask about it to refuse paths UNDER it outright?
+
+    Broad: a direct child of ``$HOME`` (``~/workspace``, ``~/Documents``) or
+    any directory holding more than :data:`_BROAD_ASK_DIR_ENTRIES` entries.
+    Paths under a broad named dir still rank HIGH and reach the judge with the
+    not-consent fact; only the exact named path (or its glob matches) and
+    paths above it keep the deterministic refusal.
+    """
+    norm = os.path.normpath(named)
+    homes = {os.path.normpath(home), os.path.realpath(home)}
+    if sys.platform == "darwin":
+        norm = norm.casefold()
+        homes = {h.casefold() for h in homes}
+    if os.path.dirname(norm) in homes:
+        return True
+    try:
+        with os.scandir(named) as it:
+            for n, _ in enumerate(it, 1):
+                if n > _BROAD_ASK_DIR_ENTRIES:
+                    return True
+    except OSError:
+        return False
+    return False
 
 
 def names_path(
