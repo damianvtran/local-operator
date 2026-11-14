@@ -58,7 +58,53 @@ def _by_id(report: dict[str, Any]) -> dict[str, Any]:
     return {check["id"]: check for check in report["checks"]}
 
 
-def _seed_everything(home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+class _FakeRadient:
+    """Every HTTP call the doctor makes, answered in-process.
+
+    Patches `httpx.AsyncClient` with a mock transport, so the doctor's real
+    request code runs (URL, bearer, per-request timeout) with no socket. A
+    loopback request (the tunnel gateway's health probe) is refused like a
+    closed port; everything else is recorded and answered by ``handler``.
+    """
+
+    def __init__(self, monkeypatch: pytest.MonkeyPatch, handler=None) -> None:
+        import httpx
+
+        self.calls: list[httpx.Request] = []
+        self.handler = handler or (lambda request: httpx.Response(200, json={"result": []}))
+        real = httpx.AsyncClient
+        fake = self
+
+        async def route(request: httpx.Request) -> httpx.Response:
+            if request.url.host in ("127.0.0.1", "localhost"):
+                raise httpx.ConnectError("refused", request=request)
+            fake.calls.append(request)
+            answer = fake.handler(request)
+            if asyncio.iscoroutine(answer):
+                answer = await answer
+            return answer
+
+        def client(*args: Any, **kwargs: Any) -> Any:
+            kwargs["transport"] = httpx.MockTransport(route)
+            return real(*args, **kwargs)
+
+        monkeypatch.setattr(httpx, "AsyncClient", client)
+
+
+def _tree(root: Path) -> dict[str, str]:
+    """Every file under ``root`` with its sha256: the read-only proof."""
+    import hashlib
+
+    return {
+        str(path.relative_to(root)): hashlib.sha256(path.read_bytes()).hexdigest()
+        for path in sorted(root.rglob("*"))
+        if path.is_file()
+    }
+
+
+def _seed_everything(
+    home: Path, monkeypatch: pytest.MonkeyPatch, *, expires_in_ms: int = 3_600_000
+) -> None:
     """Secrets in every place the doctor reads near: env, config, store, logs."""
     from local_operator.providers.auth_store import AuthStore
     from local_operator.tunnels import api, config
@@ -77,7 +123,7 @@ def _seed_everything(home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
                 "api_endpoint": api.TUNNEL_HUB,
                 "access": SECRETS["access"],
                 "refresh": SECRETS["refresh"],
-                "expires": int(time.time() * 1000) + 3_600_000,
+                "expires": int(time.time() * 1000) + expires_in_ms,
             },
         )
     config.save(
@@ -109,18 +155,19 @@ def _seed_everything(home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_nothing_secret_or_personal_leaves_the_doctor(rig, monkeypatch):
     """REQUIRED: seeded secrets in env, config, store and logs never appear."""
-    from local_operator.tunnels.api import RadientTunnels
+    import httpx
 
     _seed_everything(rig, monkeypatch)
     monkeypatch.setattr(mobile_install, "health", lambda port, timeout=3.0: {"ok": True})
     monkeypatch.setattr(mobile_install, "_listening_pids", lambda port: {"999999"})
-
-    async def listing(self, method, path="", **kwargs):
-        assert method == "GET", "the doctor only ever reads the tunnel list"
-        return [{"id": "tun-1", "device_id": "dev-1", "name": SECRETS["email"]}]
-
-    monkeypatch.setattr(RadientTunnels, "request", listing)
+    radient = _FakeRadient(
+        monkeypatch,
+        lambda request: httpx.Response(
+            200, json={"result": [{"id": "tun-1", "device_id": "dev-1", "name": SECRETS["email"]}]}
+        ),
+    )
     report = _run(desktop_app="1.2.3")
+    assert [r.method for r in radient.calls] == ["GET"], "the doctor only ever reads the list"
     rendered = json.dumps(report) + doctor.text(report)
     for name, value in SECRETS.items():
         assert value not in rendered, f"{name} leaked into the doctor output"
@@ -132,6 +179,8 @@ def test_nothing_secret_or_personal_leaves_the_doctor(rig, monkeypatch):
     assert checks["logs"]["data"]["sqlite_unable_to_open"] == 1
     assert checks["login"]["data"] == {"signed_in": True}
     assert checks["tunnel_duplicates"]["data"]["count"] == 1
+    # R1-7: the portal hostname is shortened to its first label.
+    assert checks["tunnel"]["data"]["hostname"] == "abc\u2026"
 
 
 def test_a_never_installed_daemon_is_not_running_not_an_open_gate(rig):
@@ -188,35 +237,33 @@ def test_only_the_last_day_of_logs_counts(rig):
 
 
 def test_duplicate_tunnels_for_this_device_fail(rig, monkeypatch):
-    from local_operator.tunnels.api import RadientTunnels
+    import httpx
 
     _seed_everything(rig, monkeypatch)
-
-    async def listing(self, method, path="", **kwargs):
-        return {
-            "tunnels": [
-                {"id": "tun-1", "device_id": "dev-1"},
-                {"id": "tun-0", "device_id": "dev-1"},
-                {"id": "other", "device_id": "dev-2"},
-            ]
-        }
-
-    monkeypatch.setattr(RadientTunnels, "request", listing)
+    listing = {
+        "tunnels": [
+            {"id": "tun-1", "device_id": "dev-1"},
+            {"id": "tun-0", "device_id": "dev-1"},
+            {"id": "other", "device_id": "dev-2"},
+        ]
+    }
+    radient = _FakeRadient(monkeypatch, lambda r: httpx.Response(200, json={"result": listing}))
     check = _by_id(_run())["tunnel_duplicates"]
+    (request,) = radient.calls
+    assert request.headers["authorization"] == f"Bearer {SECRETS['access']}"
+    assert request.url.path == "/v1/tunnels"
     assert check["status"] == "fail" and check["data"]["count"] == 2
 
 
 def test_an_unreadable_tunnel_list_is_unchecked_not_a_guess(rig, monkeypatch):
-    from local_operator.tunnels.api import RadientTunnels
+    import httpx
 
     _seed_everything(rig, monkeypatch)
-
-    async def refused(self, method, path="", **kwargs):
-        raise ValueError("Radient tunnel request failed (HTTP 503).")
-
-    monkeypatch.setattr(RadientTunnels, "request", refused)
+    _FakeRadient(monkeypatch, lambda r: httpx.Response(503, text=SECRETS["access"]))
     check = _by_id(_run())["tunnel_duplicates"]
-    assert check["status"] == "warn" and check["data"] == {"checked": False}
+    assert check["status"] == "warn"
+    assert check["data"] == {"checked": False, "reason": "unreachable"}
+    assert SECRETS["access"] not in json.dumps(check)
 
 
 def test_a_hostile_desktop_version_header_is_dropped(rig):
@@ -330,3 +377,171 @@ def test_the_log_scan_adds_back_what_the_collapse_suppressed(rig):
     )
     logs = _by_id(_run(remote=False))["logs"]
     assert logs["data"]["emfile"] == 42  # the written copy + 41 suppressed; not the other 9
+
+
+# --- round 1 remediation: strictly read-only, bounded, a fix on every problem --------
+
+
+def test_an_expired_token_is_never_refreshed_and_the_store_is_untouched(rig, monkeypatch):
+    """R1-1 + Q1: an expired bearer makes the duplicate check "not checked".
+    No refresh POST, no list GET, and not one byte of the config tree moves."""
+    from local_operator.tunnels import report
+
+    _seed_everything(rig, monkeypatch, expires_in_ms=-3_600_000)
+
+    async def refreshing_payload(*args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("local_payload computes the login verdict, which refreshes")
+
+    monkeypatch.setattr(report, "local_payload", refreshing_payload)
+    radient = _FakeRadient(monkeypatch)
+    before = _tree(rig / ".local-operator")
+    check = _by_id(_run())["tunnel_duplicates"]
+    assert radient.calls == [], "no refresh POST and no list GET on an expired token"
+    assert check["status"] == "warn"
+    assert check["data"] == {"checked": False, "reason": "login_stale"}
+    assert check["summary"] == doctor._t(doctor._md.tunnel_list_skipped())
+    assert _tree(rig / ".local-operator") == before
+
+
+def test_a_tunnel_with_no_credential_store_creates_no_files(rig, monkeypatch):
+    """Q1's repro: a tunnel is configured but there is no auth.db. The doctor
+    used to create auth.db and its bootstrap lock; now the tree is unchanged."""
+    from local_operator.tunnels import config
+
+    config.save(
+        {
+            "tunnel_id": "tun-1",
+            "credential_id": 7,
+            "gateway_port": 4100,
+            "record": {"id": "tun-1", "status": "active", "device_id": "dev-1"},
+        }
+    )
+    radient = _FakeRadient(monkeypatch)
+    before = _tree(rig)
+    report = _run()
+    assert _tree(rig) == before, "the doctor created or changed a file"
+    assert not (rig / ".local-operator" / "auth.db").exists()
+    assert radient.calls == []
+    checks = _by_id(report)
+    assert checks["tunnel_duplicates"]["data"] == {"checked": False, "reason": "no_login"}
+
+
+def test_a_hung_radient_is_not_checked_within_the_doctors_bound(rig, monkeypatch):
+    """R1-6 + Q2: the request carries the doctor's own timeout (no 30 s client
+    default can override it), and the whole check is bounded."""
+    _seed_everything(rig, monkeypatch)
+    seen: list[dict[str, Any]] = []
+
+    async def hang(request: Any) -> Any:
+        seen.append(dict(request.extensions["timeout"]))
+        await asyncio.sleep(30)
+
+    monkeypatch.setattr(doctor, "DUPLICATE_CHECK_TIMEOUT_S", 0.3)
+    _FakeRadient(monkeypatch, hang)
+    started = time.monotonic()
+    check = _by_id(_run())["tunnel_duplicates"]
+    elapsed = time.monotonic() - started
+    assert check["data"] == {"checked": False, "reason": "timeout"}
+    assert elapsed < 5, f"the duplicate check took {elapsed:.1f}s"
+    assert seen and all(value == 0.3 for value in seen[0].values())
+
+
+def test_the_log_scan_counts_only_emfile_copies_as_emfile(rig):
+    """R1-2: an ENFILE accept record's suppressed count is not "too many open
+    files" for this process, so it is not added to the EMFILE total."""
+    stamp = time.strftime("%Y-%m-%d %H:%M:%S")
+    (rig / ".local-operator" / "logs" / "mobile.log").write_text(
+        f"{stamp},001 [ERROR] asyncio: socket.accept() out of system resource\n"
+        "socket: <asyncio.TransportSocket fd=6> [41 similar suppressed in the last 60s]\n"
+        "OSError: [Errno 24] Too many open files\n"
+        f"{stamp},002 [ERROR] asyncio: socket.accept() out of system resource\n"
+        "socket: <asyncio.TransportSocket fd=6> [50 similar suppressed in the last 60s]\n"
+        "OSError: [Errno 23] Too many open files in system\n"
+    )
+    logs = doctor.check_logs()
+    assert logs["data"]["emfile"] == 42  # 1 written + 41 suppressed; the ENFILE 50 are not
+
+
+@pytest.mark.parametrize(
+    "connector,stopped,expected,status",
+    [
+        ({"state": "parked", "reason": "login_required"}, False, "tunnel_login_needed", "fail"),
+        ({"state": "parked", "reason": "owner_missing"}, False, "tunnel_setup_again", "fail"),
+        (
+            {"state": "stopped", "reason": "control_plane_unreachable"},
+            False,
+            "tunnel_offline",
+            "warn",
+        ),
+        ({"state": "connecting", "reason": ""}, False, "tunnel_connecting", "warn"),
+        ({"state": "stopped", "reason": ""}, True, "tunnel_turned_off", "warn"),
+        ({"state": "stopped", "reason": ""}, False, "tunnel_not_running", "warn"),
+        ({"state": "parked", "reason": "some_future_reason"}, False, "tunnel_not_running", "fail"),
+        ({"state": "connected", "reason": ""}, False, "tunnel_ok", "pass"),
+    ],
+)
+def test_a_connector_state_is_a_plain_sentence_with_a_fix(
+    rig, monkeypatch, connector, stopped, expected, status
+):
+    """R1-3 + Q3: no "parked", no snake_case reason, no "(-)" in the summary;
+    the code itself stays in `data` for support."""
+    from local_operator.tunnels import config, report
+
+    config.save(
+        {"tunnel_id": "tun-1", "credential_id": 7, "gateway_port": 4100, "stopped": stopped}
+    )
+
+    async def state(value: dict[str, Any], **kwargs: Any) -> dict[str, Any]:
+        return dict(connector)
+
+    monkeypatch.setattr(report, "connector_state", state)
+    tunnel = _by_id(_run(remote=False))["tunnel"]
+    assert tunnel["status"] == status
+    assert tunnel["summary"] == doctor._t(getattr(doctor._md, expected)())
+    for code in ("parked", "connector", "(-)", connector["reason"] or "\0"):
+        assert code not in tunnel["summary"]
+    assert tunnel["data"]["connector_reason"] == connector["reason"]
+
+
+def test_at_the_file_limit_says_so(rig, monkeypatch):
+    """Q4: the fail arm has its own sentence, not "close to its limit"."""
+    monkeypatch.setattr(mobile_install, "health", lambda port, timeout=3.0: {"ok": True})
+    monkeypatch.setattr(
+        doctor, "open_files", lambda pid: {"open": 64, "soft": 64, "hard": 64, "source": "x"}
+    )
+    files = _by_id(_run(remote=False))["files"]
+    assert files["status"] == "fail"
+    assert files["summary"] == doctor._t(doctor._md.files_at_limit(open="64", limit="64"))
+
+
+def test_every_english_problem_sentence_names_a_fix_without_jargon():
+    """R1-3: the words a non-technical reader cannot act on are gone, and every
+    sentence used on a warn/fail line carries a second sentence: the fix."""
+    catalogue = json.loads(
+        (
+            Path(doctor.__file__).parents[1] / "i18n" / "catalogues" / "en" / "mobile.doctor.json"
+        ).read_text()
+    )
+    for key, text in catalogue.items():
+        for jargon in ("connector", "parked", "out-of-files", "out of files"):
+            assert jargon not in text.lower(), f"{key} says {jargon!r}"
+    problems = [
+        "daemon.not_installed", "daemon.not_running", "daemon.not_answering", "daemon.slow",
+        "daemon.gate_open", "files.near", "files.at_limit", "files.unknown", "logs.errors",
+        "tunnel.not_configured", "tunnel.login_needed", "tunnel.setup_again", "tunnel.offline",
+        "tunnel.connecting", "tunnel.turned_off", "tunnel.not_running", "tunnel.duplicates",
+        "tunnel.list_unchecked", "tunnel.list_skipped", "login.missing",
+    ]  # fmt: skip
+    for key in problems:
+        text = catalogue[f"mobile.doctor.{key}"]
+        assert text.count(". ") >= 1, f"{key} states a problem but names no fix: {text}"
+
+
+def test_status_says_not_answering_when_a_process_holds_the_port(rig, capsys, monkeypatch):
+    """R1-4 + Q5: a held-but-silent port is not "not running"."""
+    from local_operator.cli import mobile_command
+
+    monkeypatch.setattr(mobile_install, "_listening_pids", lambda port: {"4242"})
+    mobile_command(argparse.Namespace(mobile_command="status"))
+    out = capsys.readouterr().out
+    assert "auth gate:    not answering" in out

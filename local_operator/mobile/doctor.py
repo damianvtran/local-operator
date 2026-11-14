@@ -10,8 +10,15 @@ to the desktop's "Copy diagnostics" button (`GET /v1/desktop/mobile/doctor`).
 CONSTRAINTS, each load-bearing:
 
 * READ-ONLY. Nothing here starts, stops, repairs or writes anything — not the
-  daemon, not the tunnel, not the credential store (opened ``read_only``). The
-  one network read is the account's tunnel LIST (a GET), for the duplicate check.
+  daemon, not the tunnel, not the credential store. Every store open is
+  ``read_only`` (which creates no ``auth.db`` or lock file when there is none),
+  no OAuth token is ever refreshed (an expired one makes the duplicate check
+  "not checked"), and the tunnel state is read without the login verdict that
+  would refresh it. The one network read is the account's tunnel LIST (a GET,
+  bounded at `DUPLICATE_CHECK_TIMEOUT_S`), for the duplicate check.
+  * A FIX ON EVERY PROBLEM. Each warn/fail summary says what is wrong in plain
+  words and what to do about it; codes (connector reasons, skip reasons) live
+  in ``data`` only.
 * SHAREABLE. The output is meant to be pasted into a support thread, so it
   carries no token, cookie, password or email, and the home directory is
   written ``~``. Values are chosen from fixed fields, never copied from logs or
@@ -63,7 +70,10 @@ FILES_WARN_RATIO = 0.8
 #: launchd log stays a cheap read (the tail is what holds the last day anyway).
 LOG_WINDOW_S = 24 * 3600
 LOG_TAIL_BYTES = 8 * 1024 * 1024
-_EMFILE = re.compile(r"Too many open files|EMFILE|\[Errno 24\]")
+#: EMFILE only: this process's own descriptor limit. ENFILE's text ("Too many
+#: open files in system", errno 23) is the whole machine's table, a different
+#: fault with a different fix, so it is excluded rather than counted here (R1-2).
+_EMFILE = re.compile(r"Too many open files(?! in system)|\bEMFILE\b|\[Errno 24\]")
 _SQLITE_OPEN = re.compile(r"unable to open database file")
 #: asyncio's accept-failure record, and the count `mobile/log_collapse.py`
 #: appends to the copy it keeps: each suppressed copy is one more EMFILE, so
@@ -291,9 +301,12 @@ def check_files(pid: int | None, running: bool) -> dict[str, Any]:
     ratio = used / soft if soft else 1.0
     if ratio >= FILES_WARN_RATIO:
         # AT the limit is a failure (accept() is already returning EMFILE and
-        # the phone hangs); near it is a warning.
-        summary = _md.files_near(open=str(used), limit=str(soft))
-        status = FAIL if used >= soft else WARN
+        # the phone hangs); near it is a warning. Each has its own sentence
+        # (Q4): "close to its limit" under a fail at 64 of 64 understated it.
+        at_limit = used >= soft
+        args = {"open": str(used), "limit": str(soft)}
+        summary = _md.files_at_limit(**args) if at_limit else _md.files_near(**args)
+        status = FAIL if at_limit else WARN
         return _check("files", status, _t(summary), ratio=round(ratio, 3), **files)
     summary = _md.files_ok(open=str(used), limit=str(soft))
     return _check("files", PASS, _t(summary), ratio=round(ratio, 3), **files)
@@ -322,13 +335,25 @@ def _scan_log(path: Path, *, now: float) -> dict[str, int] | None:
         return None
     recent = now - modified <= LOG_WINDOW_S
     counts = {"emfile": 0, "sqlite_unable_to_open": 0}
-    accept_record = False
+    # Per-record state. A suppressed count is added back as EMFILE only when
+    # its record is the accept failure AND that record's own exception is
+    # EMFILE (R1-2): the collapse keys on the exception, so an ENFILE or
+    # ENOBUFS accept record carries a count of ITS copies, which are not
+    # "too many open files". The count is written before the traceback's
+    # final line, so it is held until the record ends.
+    accept_record = record_emfile = False
+    pending = 0
+
+    def close_record() -> None:
+        if accept_record and record_emfile:
+            counts["emfile"] += pending
+
     for line in tail.splitlines():
         stamp = _STAMP.match(line)
         if stamp:
-            # A stamped line starts a new record; only the accept failure's own
-            # record may carry a suppressed count that is an EMFILE count.
+            close_record()
             accept_record = bool(_ACCEPT_FAILURE.search(line))
+            record_emfile, pending = False, 0
             try:
                 at = datetime.datetime.fromisoformat(f"{stamp.group(1)} {stamp.group(2)}")
                 recent = now - at.timestamp() <= LOG_WINDOW_S
@@ -338,11 +363,13 @@ def _scan_log(path: Path, *, now: float) -> dict[str, int] | None:
             continue
         if _EMFILE.search(line):
             counts["emfile"] += 1
+            record_emfile = True
         collapsed = _SUPPRESSED.search(line) if accept_record else None
         if collapsed:
-            counts["emfile"] += int(collapsed.group(1))
+            pending += int(collapsed.group(1))
         if _SQLITE_OPEN.search(line):
             counts["sqlite_unable_to_open"] += 1
+    close_record()
     return counts
 
 
@@ -398,43 +425,159 @@ def check_login() -> dict[str, Any]:
 
 
 def _harness_hostname(record: dict[str, Any]) -> str | None:
+    """The phone portal's hostname, shortened to its first label plus ``…``.
+
+    The report is pasted into support threads (R1-7). The full hostname is the
+    portal's public address — password-gated, not secret, but nothing a support
+    reader needs: the first label is enough to tell two tunnels apart.
+    """
     for harness in record.get("harnesses") or []:
         if isinstance(harness, dict) and harness.get("id") == "local-operator":
             host = harness.get("hostname")
-            return host if isinstance(host, str) else None
+            if not isinstance(host, str) or not host:
+                return None
+            label, dot, _rest = host.partition(".")
+            return f"{label}…" if dot else label
     return None
 
 
-async def _tunnels_for_this_device(value: dict[str, Any]) -> int | None:
-    """How many of the account's tunnels belong to THIS device, or ``None``.
+#: The whole duplicate check's budget (R1-6). A healthy list read is one GET
+#: that QA's loopback control plane answered in milliseconds; the bound only has
+#: to stop a hung Radient from holding the CLI and the desktop's diagnostics
+#: route. It is also the request's own timeout, passed explicitly, so no
+#: client default (the tunnel family's 30 s) can override it.
+DUPLICATE_CHECK_TIMEOUT_S = 10.0
+
+#: Why the duplicate check did not run, as `data.reason` codes. The two LOGIN
+#: reasons get a sign-in sentence; the rest a connection sentence.
+_LOGIN_SKIPS = frozenset({"no_login", "login_stale"})
+
+
+def _pinned_bearer(credential: int) -> tuple[str | None, str]:
+    """The tunnel's pinned access token if it is usable AS STORED, else a reason.
+
+    READ-ONLY BY CONSTRUCTION (R1-1, Q1): ``AuthStore(read_only=True)`` creates
+    no file when ``auth.db`` is absent and opens an existing one ``mode=ro``
+    (no schema DDL, no WAL, no chmod). A token that is expired, or inside the
+    store's own refresh skew, is NOT refreshed: a refresh rotates the grant,
+    writes the row and POSTs to Radient, and a short-lived CLI that tears the
+    exchange down leaves the store's send marker armed (tunnels/report.py's
+    "BOUNDED, NOT CANCELLED"). The doctor reports "not checked" instead; the
+    running app refreshes on its own schedule.
+    """
+    from contextlib import closing
+
+    from local_operator.providers.auth_store import AuthStore, AuthStoreError
+
+    try:
+        with closing(AuthStore(read_only=True)) as store:
+            row = store.get_credential(credential)
+    except (AuthStoreError, OSError, ValueError):
+        return None, "no_login"
+    if row is None or row.provider != "radient" or row.credential_type != "oauth":
+        return None, "no_login"
+    token = row.data.get("access")
+    if not isinstance(token, str) or not token:
+        return None, "no_login"
+    if AuthStore._needs_refresh(row.data):
+        return None, "login_stale"
+    return token, ""
+
+
+async def _list_device_tunnels(value: dict[str, Any]) -> tuple[int | None, str]:
+    """How many of the account's tunnels belong to THIS device, and why not.
 
     The duplicate a 503-then-409 setup can leave behind: two cloud records for
     one computer, the phone paired to the stale one. Matched on the stored
     record's ``device_id`` (falling back to its name), through the tunnel's own
-    pinned login, with one read-only GET. Any failure is ``None`` ("not
+    pinned login, with one GET. Any failure is ``(None, reason)`` ("not
     checked"), never a guess.
+
+    Deliberately NOT `RadientTunnels.request`: that path opens the credential
+    store writable and runs `ensure_oauth_fresh_or_raise`, which refreshes an
+    expired bearer (R1-1), and it pins its own 30 s timeout (R1-6). The GET
+    below carries the same bearer, URL, no-redirect rule and envelope check.
     """
     import httpx
 
-    from local_operator.tunnels.api import RadientTunnels
+    from local_operator.tunnels import api
 
     stored = value.get("record")
     record: dict[str, Any] = stored if isinstance(stored, dict) else {}
     device, name = record.get("device_id"), record.get("name")
     credential = value.get("credential_id")
-    if not isinstance(credential, int) or not (device or name):
-        return None
+    if not isinstance(credential, int) or isinstance(credential, bool) or not (device or name):
+        return None, "incomplete"
+    # On a thread: the read-only sqlite open may wait on a busy lock, and the
+    # event loop is the desktop server's own when this runs behind the route.
+    token, skipped = await asyncio.to_thread(_pinned_bearer, credential)
+    if token is None:
+        return None, skipped
     try:
-        async with httpx.AsyncClient(trust_env=False, timeout=10) as client:
-            listed = await RadientTunnels(credential, client).request("GET")
-    except (ValueError, OSError, httpx.HTTPError):
-        return None
+        async with httpx.AsyncClient(trust_env=False) as client:
+            response = await client.get(
+                api.DEFAULT_API_URL + "/v1/tunnels",
+                headers={"Authorization": f"Bearer {token}"},
+                timeout=DUPLICATE_CHECK_TIMEOUT_S,
+                follow_redirects=False,
+            )
+    except (OSError, httpx.HTTPError):
+        return None, "unreachable"
+    # The body is never copied: a provider error body may echo the bearer.
+    if response.status_code >= 400:
+        return None, "unreachable"
+    try:
+        envelope = response.json()
+    except ValueError:
+        return None, "unreadable"
+    listed = envelope.get("result") if isinstance(envelope, dict) else None
     if isinstance(listed, dict):
         listed = listed.get("tunnels")
     if not isinstance(listed, list):
-        return None
+        return None, "unreadable"
     key, wanted = ("device_id", device) if device else ("name", name)
-    return sum(1 for item in listed if isinstance(item, dict) and item.get(key) == wanted)
+    return sum(1 for item in listed if isinstance(item, dict) and item.get(key) == wanted), ""
+
+
+async def _tunnels_for_this_device(value: dict[str, Any]) -> tuple[int | None, str]:
+    """`_list_device_tunnels` under one total bound (R1-6, Q2): ``timeout``."""
+    try:
+        return await asyncio.wait_for(_list_device_tunnels(value), DUPLICATE_CHECK_TIMEOUT_S)
+    except TimeoutError:
+        return None, "timeout"
+
+
+#: Connector reasons (`tunnels.gateway`) mapped to a plain sentence that names
+#: the fix (R1-3). The code itself stays in ``data`` for support; a reader of
+#: the summary never sees "parked" or a snake_case reason. A reason this build
+#: does not know falls to the generic "not running" sentence, never to a code.
+_REASON_COPY: dict[str, Any] = {
+    "login_required": _md.tunnel_login_needed,
+    "authorization_refused": _md.tunnel_login_needed,
+    "owner_missing": _md.tunnel_setup_again,
+    "login_superseded": _md.tunnel_setup_again,
+    "tunnel_not_authorized": _md.tunnel_setup_again,
+    "reenrolment_required": _md.tunnel_setup_again,
+    "control_plane_unreachable": _md.tunnel_offline,
+    "control_plane_timeout": _md.tunnel_offline,
+    "authorization_deferred": _md.tunnel_connecting,
+    "credential_store_busy": _md.tunnel_connecting,
+    "authorization_lease_pending": _md.tunnel_connecting,
+}
+
+
+def _connector_summary(value: dict[str, Any], state: str, reason: str) -> tuple[str, Any]:
+    """``(status, Msg)`` for a connector that is not connected."""
+    if state == "stopped" and value.get("stopped"):
+        # The operator turned it off: an ordinary choice, said with the way back.
+        return WARN, _md.tunnel_turned_off()
+    status = FAIL if state == "parked" else WARN
+    known = _REASON_COPY.get(reason)
+    if known is not None:
+        return status, known()
+    if state == "connecting":
+        return status, _md.tunnel_connecting()
+    return status, _md.tunnel_not_running()
 
 
 async def check_tunnel(*, remote: bool = True) -> list[dict[str, Any]]:
@@ -449,10 +592,13 @@ async def check_tunnel(*, remote: bool = True) -> list[dict[str, Any]]:
         return [_check("tunnel", WARN, _t(_md.tunnel_not_configured()), configured=False)]
     stored = value.get("record")
     record: dict[str, Any] = stored if isinstance(stored, dict) else {}
+    # `connector_state`, not `local_payload` (R1-1): the payload also computes
+    # the login verdict, which refreshes a due bearer (a store write and a
+    # Radient POST). The doctor only needs the connector: the park file and one
+    # loopback health probe, both reads.
     try:
-        payload = await report.local_payload()
-        connector = payload.get("connector") or {}
-    except (OSError, ValueError):
+        connector = await report.connector_state(value)
+    except (OSError, ValueError, KeyError, TypeError):
         connector = {}
     state = str(connector.get("state") or "unknown")
     reason = str(connector.get("reason") or "")
@@ -465,15 +611,16 @@ async def check_tunnel(*, remote: bool = True) -> list[dict[str, Any]]:
         "cloud_status": record.get("status"),
     }
     if state == "connected":
-        tunnel = _check("tunnel", PASS, _t(_md.tunnel_ok(state=state)), **data)
+        tunnel = _check("tunnel", PASS, _t(_md.tunnel_ok()), **data)
     else:
-        problem = _md.tunnel_problem(state=state, reason=reason or "-")
-        tunnel = _check("tunnel", FAIL if state == "parked" else WARN, _t(problem), **data)
-    count = await _tunnels_for_this_device(value) if remote else None
+        status, problem = _connector_summary(value, state, reason)
+        tunnel = _check("tunnel", status, _t(problem), **data)
+    count, skipped = await _tunnels_for_this_device(value) if remote else (None, "local_only")
     if count is None:
-        duplicates = _check(
-            "tunnel_duplicates", WARN, _t(_md.tunnel_list_unchecked()), checked=False
+        unchecked = (
+            _md.tunnel_list_skipped() if skipped in _LOGIN_SKIPS else _md.tunnel_list_unchecked()
         )
+        duplicates = _check("tunnel_duplicates", WARN, _t(unchecked), checked=False, reason=skipped)
     elif count > 1:
         duplicates = _check(
             "tunnel_duplicates",

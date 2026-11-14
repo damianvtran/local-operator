@@ -34,8 +34,16 @@ def daemon_slow(*, ms: str) -> Msg:
     return Msg("mobile.doctor.daemon.slow", {"ms": ms})
 
 
+def daemon_state_not_answering() -> Msg:
+    return Msg("mobile.doctor.daemon.state_not_answering", {})
+
+
 def daemon_state_not_running() -> Msg:
     return Msg("mobile.doctor.daemon.state_not_running", {})
+
+
+def files_at_limit(*, open: str, limit: str) -> Msg:
+    return Msg("mobile.doctor.files.at_limit", {"open": open, "limit": limit})
 
 
 def files_near(*, open: str, limit: str) -> Msg:
@@ -74,28 +82,52 @@ def logs_errors(*, emfile: str, sqlite: str) -> Msg:
     return Msg("mobile.doctor.logs.errors", {"emfile": emfile, "sqlite": sqlite})
 
 
+def tunnel_connecting() -> Msg:
+    return Msg("mobile.doctor.tunnel.connecting", {})
+
+
 def tunnel_duplicates(*, count: str) -> Msg:
     return Msg("mobile.doctor.tunnel.duplicates", {"count": count})
+
+
+def tunnel_list_skipped() -> Msg:
+    return Msg("mobile.doctor.tunnel.list_skipped", {})
 
 
 def tunnel_list_unchecked() -> Msg:
     return Msg("mobile.doctor.tunnel.list_unchecked", {})
 
 
+def tunnel_login_needed() -> Msg:
+    return Msg("mobile.doctor.tunnel.login_needed", {})
+
+
 def tunnel_not_configured() -> Msg:
     return Msg("mobile.doctor.tunnel.not_configured", {})
 
 
-def tunnel_ok(*, state: str) -> Msg:
-    return Msg("mobile.doctor.tunnel.ok", {"state": state})
+def tunnel_not_running() -> Msg:
+    return Msg("mobile.doctor.tunnel.not_running", {})
 
 
-def tunnel_problem(*, state: str, reason: str) -> Msg:
-    return Msg("mobile.doctor.tunnel.problem", {"state": state, "reason": reason})
+def tunnel_offline() -> Msg:
+    return Msg("mobile.doctor.tunnel.offline", {})
+
+
+def tunnel_ok() -> Msg:
+    return Msg("mobile.doctor.tunnel.ok", {})
+
+
+def tunnel_setup_again() -> Msg:
+    return Msg("mobile.doctor.tunnel.setup_again", {})
 
 
 def tunnel_single() -> Msg:
     return Msg("mobile.doctor.tunnel.single", {})
+
+
+def tunnel_turned_off() -> Msg:
+    return Msg("mobile.doctor.tunnel.turned_off", {})
 
 
 def versions_ok(*, lop: str, python: str, platform: str) -> Msg:

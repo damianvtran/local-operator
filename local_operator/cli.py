@@ -10941,9 +10941,20 @@ def mobile_command(args: argparse.Namespace) -> int:
         # A daemon that is not running has no gate to be open: the probe merely
         # failed to connect, and printing that as "OPEN (boundary failure)" sent
         # people hunting a security fault on a machine that was simply asleep
-        # (probe 6d779936753a, fix #2).
+        # (probe 6d779936753a, fix #2). But "not running" is only true when no
+        # process holds the port (R1-4, Q5): a daemon that holds it and does
+        # not answer — the fd-starved "Asleep / Not answering" state — has a
+        # gate nobody can read, which is the doctor's own `not answering`.
         if not result["healthy"]:
-            gate = _md_t(_md_keys.daemon_state_not_running())
+            from local_operator.mobile.doctor import daemon_pid
+
+            port = result.get("port")
+            held = isinstance(port, int) and daemon_pid(port) is not None
+            gate = _md_t(
+                _md_keys.daemon_state_not_answering()
+                if held
+                else _md_keys.daemon_state_not_running()
+            )
         else:
             gate = "closed" if result["gate_closed"] else "OPEN (this is a boundary failure)"
         print(f"auth gate:    {gate}")
