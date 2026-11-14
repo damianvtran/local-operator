@@ -479,6 +479,25 @@ class MeshCredentialBroker:
                 # unchanged: ``authorizer`` already gated this ``net_broker`` frame on
                 # the SENDER's ``broker_credential`` capability in THIS device's member
                 # row for it (types.OP_CAPABILITY), whatever its kind.
+                if str((frame or {}).get("kind") or "") in ("renewal_claim", "renewal_push"):
+                    # The renewing node's half (B1): addressed to a HOLDER, which may
+                    # own nothing. Authorised like every net_broker frame (the
+                    # sender's ``broker_credential`` capability), and each handler
+                    # checks the sender is this key's owner on the authenticated link.
+                    from local_operator.network.credentials import (
+                        renewal as renewal_mod,
+                    )
+
+                    node_handler = (
+                        renewal_mod.node_on_claim
+                        if frame.get("kind") == "renewal_claim"
+                        else renewal_mod.node_on_push
+                    )
+                    return {
+                        "op": "ack",
+                        "req": (frame or {}).get("req"),
+                        "detail": node_handler(server, link, frame),
+                    }
                 if str((frame or {}).get("kind") or "") == "lifecycle_announce":
                     from local_operator.network.credentials.lifecycle import (
                         member_lifecycle_announce,
@@ -623,6 +642,20 @@ class MeshCredentialBroker:
             # An unknown lifecycle kind is a peer newer than this build, not a fault
             # here: by name, and never through the ``internal`` else-branch below.
             detail = _lifecycle_unsupported(kind)
+        elif kind in ("refresh_take", "refresh_return") and frame.get("authority") == "device":
+            # THE AUTOMATIC LEND (design mesh-credential-renewal §B, B1): only the
+            # device-authority frames are dispatched. Slice 1's signed frames stay
+            # unrouted exactly as before — nothing in production mints one.
+            detail = self._renewal_frame(link, frame, kind)
+        elif kind in ("renewal_claim", "renewal_push"):
+            # Owner -> renewing node. A node that owns nothing reaches the same
+            # functions through ``relay_handler``'s pre-broker branch.
+            from local_operator.network.credentials import renewal as renewal_mod
+
+            handler = (
+                renewal_mod.node_on_claim if kind == "renewal_claim" else renewal_mod.node_on_push
+            )
+            detail = handler(self._server, link, frame)
         else:
             detail = BrokerError(
                 code="internal",
@@ -2730,6 +2763,34 @@ class MeshCredentialBroker:
         )
         return {"kind": "refresh_return", "act": "done", "ok": True, "epoch": epoch}
 
+    def _renewal_frame(self, link: Any, frame: dict[str, Any], kind: str) -> dict[str, Any]:
+        """A device-authority ``refresh_take`` / ``refresh_return`` (``renewal.py``)."""
+        from local_operator.network.credentials import renewal as renewal_mod
+
+        key = str(frame.get("key") or "")
+        by, refused = self._caller(link, frame, key, key)
+        if refused is not None:
+            return refused
+        if kind == "refresh_take":
+            answer = renewal_mod.owner_take(self, link, key, by)
+            if answer is None:
+                return self._refuse(
+                    link,
+                    key,
+                    key,
+                    by,
+                    "renewal_not_lent",
+                    "this login is delegated under an operator-signed statement; it is not "
+                    "lent automatically",
+                    reason="authority_signed",
+                )
+            return answer
+        if str(frame.get("act") or "") != "done":
+            return self._refuse(
+                link, key, key, by, "bad_request", "a device-authority write-back is one frame"
+            )
+        return renewal_mod.owner_return(self, link, key, by, frame)
+
     def revoke_refresh_delegation(self, key: str, *, device: str = "") -> dict[str, Any]:
         """Stop a delegation and mint the DENY statement that carries the stop.
 
@@ -3211,6 +3272,13 @@ class MeshCredentialBroker:
             from local_operator.providers.auth_store import AuthStore
 
             self._auth_store = AuthStore(config_dir=self.root)
+            # The owner relay renews its own logins to serve grants: a LENT one is
+            # claimed from the renewing node first, exactly as in a session
+            # (mesh-credential-renewal §B.3 R3). Without the fence a lent row is
+            # refused by the store (fail closed).
+            from local_operator.network.credentials.renewal import OwnerLendFence
+
+            self._auth_store.set_lend_fence(OwnerLendFence(self.root))
         return self._auth_store
 
     def _selection_policy(self) -> str:

@@ -191,6 +191,16 @@ EVENT_KINDS: frozenset[str] = frozenset(
         "credential.refresh_refused",
         "credential.refresh_revoked",
         "credential.refresh_family_moved",
+        # The automatic renewal lend (mesh-credential-renewal §B.7), owner side.
+        # Ids and counts only: the material crosses inside link records, never here.
+        "credential.renewal_lent",
+        "credential.renewal_claim",
+        "credential.renewal_returned",
+        "credential.renewed_by_peer",
+        "credential.renewal_conflict",
+        "credential.renewal_stale",
+        # ``lop logout`` of a lent login: the provider-side revoke's outcome (§D D3).
+        "credential.provider_revoked",
         "credential.finite_requested",
         "credential.finite_applied",
         # Operator-authored future-login permission (credentials/inheritance.py): the card
@@ -553,6 +563,15 @@ DETAIL_KEYS: dict[str, frozenset[str]] = {
         {"credential_key", "act", "sub", "grant_id", "epoch", "cause", "approval_id"}
     ),
     "credential.refresh_taken": frozenset({"credential_key", "act", "sub", "grant_id", "epoch"}),
+    "credential.renewal_lent": frozenset({"credential_key", "act", "sub", "epoch"}),
+    "credential.renewal_claim": frozenset({"credential_key", "act", "sub", "outcome"}),
+    "credential.renewal_returned": frozenset(
+        {"credential_key", "act", "sub", "epoch", "renewals", "last_at"}
+    ),
+    "credential.renewed_by_peer": frozenset({"credential_key", "act", "sub", "epoch", "at"}),
+    "credential.renewal_conflict": frozenset({"credential_key", "act", "sub", "epoch", "code"}),
+    "credential.renewal_stale": frozenset({"credential_key", "act", "sub", "epoch", "code"}),
+    "credential.provider_revoked": frozenset({"credential_key", "provider", "outcome"}),
     "credential.refresh_returned": frozenset({"credential_key", "act", "sub", "grant_id", "epoch"}),
     "credential.refresh_refused": frozenset({"credential_key", "act", "sub", "grant_id", "cause"}),
     "credential.refresh_revoked": frozenset({"credential_key", "act", "sub", "grant_id", "epoch"}),

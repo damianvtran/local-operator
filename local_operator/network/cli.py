@@ -3992,14 +3992,31 @@ def _cmd_credential(args: argparse.Namespace) -> int:
             if static
             else "valid at the provider until the token expires"
         )
+        # THE OFFLINE HOLD'S BOUND, NOT THE GRANT WINDOW (#3922 + #3947 M1's honesty
+        # class, carried into model and MCP keys here): a node keeps a lent grant
+        # while it cannot reach this device, and a revoke only stops a node that
+        # HEARS it. So the residual for a lost, stolen or offline node is the hold
+        # (``offline_hold_s``, 24 h by default) after its last grant — never past
+        # the token's own expiry, and with no expiry at all for a static key.
+        from local_operator.network.credentials import offline_hold_s
+
+        hold_s = int(offline_hold_s(_config_dir()))
         payload["revocation"] = {
             "new_grants": "refused now",
-            "lent_grant_max_s": ttl_s,
+            "lent_grant_max_s": hold_s,
+            "grant_window_s": ttl_s,
             "copied_bearer": copied,
         }
+        bound = (
+            f"for up to {_duration_words(hold_s)} after its last grant"
+            if static
+            else f"for up to {_duration_words(hold_s)} after its last grant, never past "
+            "the token's own expiry"
+        )
         lines.append(
-            f"new borrows by {name}: refused now; a grant already lent is dropped by "
-            f"{name} within {ttl_s} s"
+            f"new borrows by {name}: refused now; {name} drops a grant it already holds "
+            f"as soon as it hears this revoke, but if it cannot (lost, stolen or offline) "
+            f"it may keep using it {bound}"
         )
         if static:
             lines.append(

@@ -732,6 +732,17 @@ def run_logout(provider_id: str, auth_store: "AuthStore") -> int:
         return 1
     # Log out of both the alias (e.g. xai-oauth) and its storage id (xai).
     targets = {provider_id, credential_provider_id(provider_id)}
+    # A LOGIN LENT FOR RENEWAL to a node is revoked at the provider BEFORE its row
+    # goes (mesh-credential-renewal §D D3): deleting the row here cannot reach the
+    # copy the node holds. Where the provider has no revoke endpoint the lines say
+    # so — never that a revoke happened.
+    try:
+        from local_operator.network.credentials.renewal import logout_revoke_lent
+
+        for line in logout_revoke_lent(auth_store, sorted(targets), definition):
+            print(line)
+    except Exception:  # noqa: BLE001 — the logout itself must still run
+        pass
     removed = 0
     for target in sorted(targets):
         removed += auth_store.delete_credentials_for_provider(target, disabled_cause="logged-out")

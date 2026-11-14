@@ -34,6 +34,12 @@ WireFormat = Literal["openai-compat", "anthropic", "google", "mock"]
 # providers, the bare key string.
 LoginFn = Callable[..., Awaitable[str | dict[str, Any]]]
 RefreshFn = Callable[..., Awaitable[dict[str, Any]]]
+#: Revoke a stored OAuth login AT THE PROVIDER (RFC 7009 or the provider's own
+#: documented endpoint), given the stored payload; ``True`` when the provider
+#: confirmed it. Used by ``lop logout`` of a login lent for renewal to a node
+#: (mesh-credential-renewal §D D3): deleting the row here cannot end the copy a
+#: node holds, revoking the family at the provider can.
+RevokeFn = Callable[[dict[str, Any]], Awaitable[bool]]
 GetApiKeyFn = Callable[[dict[str, Any]], str]
 #: How a provider names its API key's environment variable(s).
 #:
@@ -129,6 +135,12 @@ class ProviderDefinition:
     local_setup: bool = False
     login: LoginFn | None = None
     refresh_token: RefreshFn | None = None
+    #: Optional provider-side revoke (see :data:`RevokeFn`). Implemented ONLY
+    #: against a documented endpoint and verified on a throwaway account or a
+    #: fake IdP, never an operator's real login. ``None`` (every provider today,
+    #: Anthropic and Radient included) means logout says plainly that it could
+    #: not revoke there.
+    revoke_token: RevokeFn | None = None
     get_api_key: GetApiKeyFn | None = None
     store_credentials_as: str | None = None
     callback_port: int | None = None

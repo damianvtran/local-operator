@@ -1650,6 +1650,15 @@ def selected_model_row(
             f"{provider} on {peer_label} to stop depending on it",
         ),
     )
+    # THE OWNER WAITING ON A RENEWING NODE (mesh-credential-renewal §B.3 R4, §D D2):
+    # the login is the peer's own and is lent for renewal; the node holding it did
+    # not answer the claim, so the peer will not renew it until that node hands it
+    # back. The receipt's ``owner_label`` is the NODE here.
+    readings["awaiting_handback"] = (
+        f"{peer_label} is waiting for {owner} to hand back its {provider} login; "
+        f"it comes back as soon as {owner} reconnects",
+        (f"reconnect {owner}, or sign in to {provider} again on {peer_label}",),
+    )
     if state not in readings:
         state = "pending"
     detail, remedies = readings[state]

@@ -530,6 +530,11 @@ LOCAL_OPS: tuple[str, ...] = (
     # asks THIS device's relay to hand the new placement row to its holder now —
     # local because the link to the holder lives in the relay process.
     "credential_share_push",
+    # The renewal claim and the owner's post-renewal push (mesh-credential-renewal
+    # §B.3 R3): an owner process asks THIS device's relay to talk to the renewing
+    # node — local because the link to it lives in the relay process.
+    "credential_claim",
+    "credential_lend_push",
     # The member-side repair pull (mesh-mcp-credentials.md §4): a local act by the
     # same boundary rule — this device's own relay is told to pull one copy from
     # its owner now, and the link it needs lives in that process.

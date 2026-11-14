@@ -3483,6 +3483,12 @@ class FrontendModelAccess(BaseModel):
         # Current AND released readers understand effective_borrow, not a new
         # held phase. Internal policy retains the distinction and original lease
         # timestamps; the public claim is only that this grant remains usable.
+        if value == "awaiting_handback":
+            # The OWNER waiting for a renewing node to hand back a lent login
+            # (mesh-credential-renewal R4). Released readers know no such phase;
+            # the nearest honest one is "not usable until another device answers",
+            # and ``owner_label`` carries that device's name.
+            return "owner_unavailable"
         return "effective_borrow" if value == "held_offline" else value
 
     #: Keyless borrow context, explicitly historical. A failed/expired reading
