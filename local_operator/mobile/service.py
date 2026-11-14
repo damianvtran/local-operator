@@ -41,8 +41,11 @@ async def amain(port: int = DEFAULT_PORT) -> int:
     # 256-descriptor soft limit, which a busy phone plus sessions can exhaust
     # (the "Asleep / Not answering" + sqlite "unable to open database file"
     # report). See `mobile/fdlimit.py` for the cap and why it is in-process.
-    from local_operator.mobile import fdlimit
+    from local_operator.mobile import fdlimit, log_collapse
 
+    # If the limit is reached anyway, asyncio's accept loop logs a traceback on
+    # every wakeup (~7 MB/s measured): one copy per minute plus a count instead.
+    log_collapse.install("asyncio")
     limits = fdlimit.raise_soft_limit()
     fdlimit.record(limits)
     if limits["before"] != limits["soft"]:

@@ -65,6 +65,11 @@ LOG_WINDOW_S = 24 * 3600
 LOG_TAIL_BYTES = 8 * 1024 * 1024
 _EMFILE = re.compile(r"Too many open files|EMFILE|\[Errno 24\]")
 _SQLITE_OPEN = re.compile(r"unable to open database file")
+#: asyncio's accept-failure record, and the count `mobile/log_collapse.py`
+#: appends to the copy it keeps: each suppressed copy is one more EMFILE, so
+#: the scan adds it back rather than reporting one line a minute.
+_ACCEPT_FAILURE = re.compile(r"socket\.accept\(\) out of system resource")
+_SUPPRESSED = re.compile(r"\[(\d+) similar suppressed in the last \d+s\]")
 _STAMP = re.compile(r"^(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2}:\d{2})")
 _EMAIL = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
 #: The optional desktop-app version a caller may pass; anything else is dropped.
@@ -317,9 +322,13 @@ def _scan_log(path: Path, *, now: float) -> dict[str, int] | None:
         return None
     recent = now - modified <= LOG_WINDOW_S
     counts = {"emfile": 0, "sqlite_unable_to_open": 0}
+    accept_record = False
     for line in tail.splitlines():
         stamp = _STAMP.match(line)
         if stamp:
+            # A stamped line starts a new record; only the accept failure's own
+            # record may carry a suppressed count that is an EMFILE count.
+            accept_record = bool(_ACCEPT_FAILURE.search(line))
             try:
                 at = datetime.datetime.fromisoformat(f"{stamp.group(1)} {stamp.group(2)}")
                 recent = now - at.timestamp() <= LOG_WINDOW_S
@@ -329,6 +338,9 @@ def _scan_log(path: Path, *, now: float) -> dict[str, int] | None:
             continue
         if _EMFILE.search(line):
             counts["emfile"] += 1
+        collapsed = _SUPPRESSED.search(line) if accept_record else None
+        if collapsed:
+            counts["emfile"] += int(collapsed.group(1))
         if _SQLITE_OPEN.search(line):
             counts["sqlite_unable_to_open"] += 1
     return counts

@@ -315,3 +315,18 @@ async def test_the_route_needs_the_desktop_bearer_and_serves_the_report(rig, mon
     assert result["schema"] == doctor.SCHEMA
     assert _by_id(result)["versions"]["data"]["desktop_app"] == "1.42.0"
     assert static_feature_flags()["mobile_doctor"] == 1
+
+
+def test_the_log_scan_adds_back_what_the_collapse_suppressed(rig):
+    """A collapsed accept failure is ONE written traceback plus a count; the
+    doctor reports every occurrence, not one line a minute."""
+    stamp = time.strftime("%Y-%m-%d %H:%M:%S")
+    (rig / ".local-operator" / "logs" / "mobile.log").write_text(
+        f"{stamp},001 [ERROR] asyncio: socket.accept() out of system resource\n"
+        "socket: <asyncio.TransportSocket fd=6> [41 similar suppressed in the last 60s]\n"
+        "Traceback (most recent call last):\n"
+        "OSError: [Errno 24] Too many open files\n"
+        f"{stamp},002 [INFO] other: a different record [9 similar suppressed in the last 60s]\n"
+    )
+    logs = _by_id(_run(remote=False))["logs"]
+    assert logs["data"]["emfile"] == 42  # the written copy + 41 suppressed; not the other 9
