@@ -1007,6 +1007,10 @@ class _State:
     #: known. ``_add`` then ranks a relative word at ``cwd`` AND as an
     #: unresolved target. See ``_Walker._cd``.
     cwd_later_unknown: bool = False
+    #: ``OLDPWD`` holds a cwd that was ``cwd_later_unknown`` when a later
+    #: ``cd`` left it, so ``cd -`` re-enters iteration-dependent ground even
+    #: though that ``cd`` cleared the flag (review R2-m1, PR #3964).
+    oldpwd_later_unknown: bool = False
 
 
 def kernel_path(raw: str | None) -> str | None:
@@ -2639,6 +2643,7 @@ class _Snapshot:
     physical: bool = False
     cwd_fan: tuple[str, ...] = ()
     cwd_later_unknown: bool = False
+    oldpwd_later_unknown: bool = False
 
 
 class _Walker:
@@ -2718,6 +2723,7 @@ class _Walker:
             st.physical,
             st.cwd_fan,
             st.cwd_later_unknown,
+            st.oldpwd_later_unknown,
         )
 
     def _restore(self, snap: _Snapshot) -> None:
@@ -2726,6 +2732,7 @@ class _Walker:
         self.state.physical = snap.physical
         self.state.cwd_fan = snap.cwd_fan
         self.state.cwd_later_unknown = snap.cwd_later_unknown
+        self.state.oldpwd_later_unknown = snap.oldpwd_later_unknown
 
     def _isolated_walk(self, command: str, depth: int) -> None:
         """Walk text that runs in a CHILD shell: its cd/assignments never leak."""
@@ -3503,6 +3510,7 @@ class _Walker:
             # invalidate BOTH instead of letting cd - revive a stale path.
             st.cwd = None
             st.cwd_later_unknown = False  # ``cwd`` None already covers it
+            st.oldpwd_later_unknown = False  # OLDPWD is dropped below
             st.private_cwd = private_target
             st.env.pop("OLDPWD", None)
             return
@@ -3512,6 +3520,15 @@ class _Walker:
         else:
             st.env["OLDPWD"] = previous
         word = operands[0] if operands else None
+        outer_fan = st.cwd_fan
+        # ``cd -`` / ``cd "$OLDPWD"`` returns to the cwd the previous ``cd``
+        # left; if THAT one was iteration-dependent, so is this landing
+        # (review R2-m1: ``for r in . ..; do cd $r; cd /tmp; cd -; rm …``).
+        to_oldpwd = word is not None and (
+            word.text == "-" or any(r[0] == "OLDPWD" for r in word.refs)
+        )
+        returns_to_unknown = to_oldpwd and st.oldpwd_later_unknown
+        st.oldpwd_later_unknown = st.cwd_later_unknown
         fan = self._cwd_fan_for(word, physical, path, previous)
         # ``None``: a later iteration lands somewhere this walk cannot name
         # (review of this change: ``for r in /tmp ~; do cd $r; rm -rf
@@ -3524,6 +3541,7 @@ class _Walker:
         st.cwd_fan = fan or ()
         st.cwd = path
         if fan is None:
+            st.cwd_fan = self._surviving_fan(word, physical, outer_fan, path)
             st.cwd_later_unknown = True
         elif word is None or (
             (spun := self._iterations(word)) is not None
@@ -3537,6 +3555,8 @@ class _Walker:
             st.cwd_later_unknown = False
         # Otherwise (a relative or ``cd -`` move from an already-unknown
         # later cwd) the later iterations stay unknown.
+        if returns_to_unknown:
+            st.cwd_later_unknown = True
 
     def _cwd_fan_for(
         self, w: Expanded | None, physical: bool, path: str | None, previous: str | None
@@ -3544,10 +3564,11 @@ class _Walker:
         """Where a ``cd`` lands in every LATER ``for`` iteration.
 
         ``()`` when every iteration lands where the first does (no loop
-        variable, a one-value loop, or an absolute ``cd`` ending a fan);
-        ``None`` when some later iteration lands somewhere this walk cannot
-        name — the caller then forgets the cwd, so relative deletes rank as
-        unresolvable and relative creations record nothing.
+        variable or a one-value loop with no enclosing fan, or an absolute
+        ``cd`` ending a fan); ``None`` when some later iteration lands
+        somewhere this walk cannot name — the caller keeps ``cwd`` (the
+        first iteration) and what ``_surviving_fan`` can still move, and
+        flags the rest ``cwd_later_unknown``.
 
         FIELD CASE (2026-11-14, subagent c40435c7fc86): ``for r in services
         terraform-cloud-bootstrap; do (cd $r; git worktree add .worktrees/x
@@ -3573,7 +3594,14 @@ class _Walker:
         if path is None or w is None or w.opaque or w.pattern is not None:
             return ()
         loop_word = bool(w.refs) and any(r[0] in self.for_lists for r in w.refs)
-        if not loop_word:
+        iterations = self._iterations(w) if loop_word else []
+        # A loop word with NO later iterations (a one-value list) is a literal
+        # in every iteration of every enclosing loop, so it moves an outer fan
+        # exactly as a literal does (review R2-M1, PR #3964: ``for r in a .;
+        # do for s in .; do (cd $r; cd $s; rm -rf .local-operator)`` once
+        # fell through to the inner loop's scope check, returned ``()`` and
+        # dropped the outer iteration's ``~``: LOW where base was CRITICAL).
+        if not iterations and iterations is not None:
             if st.cwd_fan and not w.text.startswith(("/", "~")):
                 if physical or w.text == "-":
                     return None
@@ -3584,7 +3612,6 @@ class _Walker:
             return ()
         if physical:
             return None
-        iterations = self._iterations(w)
         relative = not w.text.startswith("/") or any(
             not _fan_out(w, values).text.startswith("/") for _roots, values in iterations or ()
         )
@@ -3600,21 +3627,61 @@ class _Walker:
             for root in {self.for_roots.get(r[0], r[0]) for r in w.refs if r[0] in self.for_lists}:
                 keeps, header_cwd, header_depth = self.for_fan_scope.get(root, (False, None, 0))
                 if not keeps or header_cwd != previous or self.subshell_depth <= header_depth:
-                    return None if iterations else ()
+                    return None
         if iterations is None:
             return None
-        if not iterations:
-            return ()
+        # Every iteration of THIS loop runs from every cwd an enclosing fan
+        # carries too (the inner header runs once per outer iteration), so the
+        # landings are the cross product, never only ``previous``'s.
+        spellings = [w.text] + [_fan_out(w, values).text for _roots, values in iterations]
         fan: list[str] = []
-        for _roots, values in iterations:
-            text = _fan_out(w, values).text
-            if OPAQUE_MARK in text:
-                return None
-            landed = _logical(text, previous)
-            if landed is None or not os.path.isdir(landed):
-                return None
-            fan.append(landed)
+        for start in (previous, *st.cwd_fan):
+            for text in spellings:
+                if OPAQUE_MARK in text:
+                    return None
+                landed = _logical(text, start)
+                if landed is None or not os.path.isdir(landed):
+                    return None
+                fan.append(landed)
         return tuple(dict.fromkeys(f for f in fan if f != path))
+
+    def _surviving_fan(
+        self, w: Expanded | None, physical: bool, outer: tuple[str, ...], path: str | None
+    ) -> tuple[str, ...]:
+        """The enclosing fan's cwds moved by a ``cd`` whose own later
+        iterations cannot be named (``_cwd_fan_for`` returned ``None``).
+
+        The outer fan was proved per iteration (each outer iteration starts
+        the body at its fanned cwd), so the first value's move from each of
+        them is as certain as ``cwd`` is; the other values are a superset,
+        which can only raise a rank (and ``commit_creations`` drops any
+        over-listed creation). Only the later INNER iterations stay unknown,
+        which the caller flags. Before this, ``None`` discarded the outer fan:
+        a certain ``~/.local-operator`` delete fell to a judge-able HIGH
+        (review R2-M1, PR #3964). ``()`` when nothing can be moved soundly.
+        """
+        if (
+            not outer
+            or w is None
+            or physical
+            or w.opaque
+            or w.pattern is not None
+            or w.text == "-"
+            or w.text.startswith(("/", "~"))
+        ):
+            return ()
+        spellings = [w.text] + [
+            _fan_out(w, values).text for _roots, values in self._iterations(w) or ()
+        ]
+        moved: list[str] = []
+        for start in outer:
+            for text in spellings:
+                if OPAQUE_MARK in text or text.startswith("~"):
+                    continue
+                landed = _logical(text, start)
+                if landed is not None and os.path.isdir(landed):
+                    moved.append(landed)
+        return tuple(dict.fromkeys(m for m in moved if m != path))
 
     def _private_script_target(self, text: str) -> None:
         # A consuming shell/eval has an unresolved deleting script, not ordinary

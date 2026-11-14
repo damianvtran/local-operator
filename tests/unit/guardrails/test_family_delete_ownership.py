@@ -602,3 +602,70 @@ def test_grandchild_sees_an_ancestor_not_a_parent(home: Path, infra: Path) -> No
     assert verdict.risk is Risk.LOW, verdict.targets[0].reason
     assert f"ancestor session {P}" in verdict.targets[0].reason
     assert "parent session" not in verdict.targets[0].reason
+
+
+# -- round 2 remediation (PR #3964) ---------------------------------------------
+
+#: Review R2-M1: an inner loop's relative ``cd`` of a loop word, after an
+#: outer fanned ``cd``, dropped the outer iteration's cwd (``~``). Base
+#: 3bb7023 ranked every row CRITICAL; 6ea7729 ranked the first four LOW and
+#: the last HIGH. Bash (``pwd`` trace) deletes ``~/a/.local-operator`` then
+#: ``~/.local-operator`` in each.
+R2_M1_ROWS = [
+    "cd ~; for r in a .; do for s in .; do (cd $r; cd $s; rm -rf .local-operator); done; done",
+    "cd ~; for s in .; do for r in a .; do (cd $r; cd $s; rm -rf .local-operator); done; done",
+    "cd ~; for r in a .; do (cd $r; for s in .; do cd $s; done; rm -rf .local-operator); done",
+    "cd ~/a; for r in sub .; do for s in ..; do (cd $r; cd $s; rm -rf .local-operator); done; done",
+    "cd ~; for r in a .; do for s in . .; do (cd $r; cd $s; rm -rf .local-operator); done; done",
+]
+
+
+@pytest.mark.parametrize("command", R2_M1_ROWS)
+def test_inner_loop_cd_keeps_the_outer_fan(home: Path, command: str) -> None:
+    (home / "a" / "sub").mkdir(parents=True)
+    verdict = _rank(home, command, U)
+    assert verdict.risk is Risk.CRITICAL, [t.reason for t in verdict.targets]
+    paths = [
+        t.path
+        for t in resolve_command(command, cwd=str(home), env=_env(home), home=str(home)).targets
+    ]
+    assert str(home / ".local-operator") in paths
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        # Controls the reviewer measured CRITICAL on head already: a plain
+        # variable or a literal moves the outer fan the same way.
+        "cd ~/a; s=..; for r in sub .; do (cd $r; cd $s; rm -rf .local-operator); done",
+        "cd ~; for r in a .; do (cd $r; cd .; rm -rf .local-operator); done",
+    ],
+)
+def test_literal_and_plain_variable_controls_stay_critical(home: Path, command: str) -> None:
+    (home / "a" / "sub").mkdir(parents=True)
+    assert _rank(home, command, U).risk is Risk.CRITICAL
+
+
+def test_inner_loop_cd_over_ordinary_dirs_stays_low(home: Path) -> None:
+    """Over-strictness control: the outer fan is moved, not turned into an
+    unknown cwd, so a delete of ordinary build output stays LOW."""
+    for d in ("a", "b"):
+        (home / d / "build").mkdir(parents=True)
+    command = "cd ~; for r in a b; do for s in .; do (cd $r; cd $s; rm -rf build); done; done"
+    targets = resolve_command(command, cwd=str(home), env=_env(home), home=str(home)).targets
+    assert sorted(t.path for t in targets) == [str(home / "a" / "build"), str(home / "b" / "build")]
+    assert _rank(home, command, U).risk is Risk.LOW
+
+
+def test_cd_dash_after_a_clearing_cd_in_a_loop_is_unresolved(home: Path) -> None:
+    """Review R2-m1: ``cd /tmp`` clears the later-iteration flag, but ``cd -``
+    returns to iteration 2's ``~`` (bash deletes ``~/.local-operator``), not
+    iteration 1's ``~/a``. Base and 6ea7729 both ranked it LOW."""
+    (home / "a").mkdir()
+    for command in (
+        "cd ~/a; for r in . ..; do cd $r; cd /tmp; cd -; rm -rf .local-operator; done",
+        'cd ~/a; for r in . ..; do cd $r; cd /tmp; cd "$OLDPWD"; rm -rf .local-operator; done',
+    ):
+        targets = resolve_command(command, cwd=str(home), env=_env(home), home=str(home)).targets
+        assert None in [t.path for t in targets], command
+        assert _rank(home, command, U).risk >= Risk.HIGH, command
