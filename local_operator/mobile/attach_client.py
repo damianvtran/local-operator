@@ -1882,9 +1882,22 @@ class AttachClient:
             # that a future reclassification cannot turn this into a recursion.
             return None
         self._requesting_challenge = True
+        # A headless node's site card (``browser_bridge/site_approval.py``):
+        # the node mints a ``decide`` challenge for it only when told the card
+        # was checked here first (review U5), and it was only if
+        # ``asks.decision.bridge_decision_target`` verified this exact target.
+        # Unsigned and advisory — it keeps a client that never checked the card
+        # (an older build, a path around the check) from signing it.
+        marker: dict[str, Any] = {}
+        if action == "decide":
+            from local_operator.asks.decision import site_card_verified
+            from local_operator.browser_bridge.site_approval import SITE_QUESTION_PREFIX
+
+            if f"#{SITE_QUESTION_PREFIX}" in request_id and site_card_verified(request_id):
+                marker["site_card_verified"] = True
         try:
             reply = await self._request_frame(
-                "operator_challenge", action=action, request_id=request_id
+                "operator_challenge", action=action, request_id=request_id, **marker
             )
         except Exception as exc:  # noqa: BLE001 — an owner that predates the op
             # An OLDER owner answers this with its generic unknown-op error frame,

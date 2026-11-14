@@ -10717,3 +10717,143 @@ async def test_a_local_row_carries_its_agents_picture_identity(draft_api) -> Non
     Image.new("RGB", (32, 32), (1, 2, 3)).save(image, "PNG")
     meta = registry.set_agent_avatar(agent.id, image.getvalue())
     assert (await rows())["chat0000001"]["avatar_sha256"] == meta.sha256
+
+
+class _DecideRemote(_AskRemote):
+    """A viewer facade whose frame carries one signed-door ask (PR-B).
+
+    ``bridge_decide`` answers in the REAL facade's verdict shape
+    (``AttachedSession.bridge_decide`` → ``{"ok": …}``), so a route that read
+    the wrong contract would pass a refusal off as success.
+    """
+
+    def __init__(self, *, question_id: str, verdict: dict[str, Any] | None = None) -> None:
+        super().__init__()
+        self.decisions: list[tuple[str, str, str]] = []
+        self.verdict = verdict or {"ok": True}
+        self.frontend_state = SimpleNamespace(
+            epoch="epoch-current",
+            asks=[
+                SimpleNamespace(
+                    ask_id="a-site",
+                    questions=[
+                        {
+                            "id": "site-access",
+                            "question": "Allow http://127.0.0.1:8765 in the browser on node-a?",
+                            "options": [
+                                {"id": "approve", "label": "Approve"},
+                                {"id": "deny", "label": "Deny"},
+                            ],
+                            "human_required": True,
+                            "question_id": question_id,
+                        }
+                    ],
+                )
+            ],
+        )
+
+    async def bridge_decide(self, ask_id: str, question_id: str, word: str) -> dict[str, Any]:
+        self.decisions.append((ask_id, question_id, word))
+        return self.verdict
+
+
+@pytest.mark.asyncio
+async def test_a_signed_door_ask_is_decided_through_bridge_decide(answers_api) -> None:
+    """The desktop dock answers a site:v1: (or Team Bridge) ask through the signed
+    door — the plain ask_respond refuses such an ask by construction, so before
+    this route branch the operator's Approve could never land."""
+    client, app = answers_api
+    # A Team Bridge id: a ``site:v1:`` card also has to rebuild from its
+    # ``site`` block, which ``test_the_desktop_route_signs_only_a_card_it_can_rebuild``
+    # covers; this test is about the route branch itself.
+    remote = _DecideRemote(question_id="bmsg_" + "ab" * 16)
+    _install_ask_remote(app, remote)
+    result = await client.post(
+        "/v1/desktop/sessions/0123456789ab/answers",
+        json={"ask_id": "a-site", "answers": {"site-access": ["Approve"]}},
+    )
+    assert result.status_code == 200, result.text
+    assert result.json()["result"] == {"detail": "decided"}
+    assert remote.decisions == [("a-site", "bmsg_" + "ab" * 16, "approve")]
+    assert remote.calls == []
+
+
+@pytest.mark.asyncio
+async def test_a_refused_signed_decision_answers_409_with_its_sentence(answers_api) -> None:
+    client, app = answers_api
+    sentence = "The node's browser refused this answer: it was not signed by your operator key."
+    remote = _DecideRemote(question_id="bmsg_cd", verdict={"ok": False, "error": sentence})
+    _install_ask_remote(app, remote)
+    result = await client.post(
+        "/v1/desktop/sessions/0123456789ab/answers",
+        json={"ask_id": "a-site", "answers": {"site-access": ["deny"]}},
+    )
+    assert result.status_code == 409, result.text
+    assert result.json()["detail"] == sentence
+    assert remote.decisions == [("a-site", "bmsg_cd", "deny")]
+
+
+@pytest.mark.asyncio
+async def test_an_ordinary_ask_beside_a_signed_one_keeps_the_plain_door(answers_api) -> None:
+    client, app = answers_api
+    remote = _DecideRemote(question_id="site:v1:ef")
+    _install_ask_remote(app, remote)
+    result = await client.post(
+        "/v1/desktop/sessions/0123456789ab/answers",
+        json={"ask_id": "a-other", "answers": {"q0": ["yes"]}},
+    )
+    assert result.status_code == 200, result.text
+    assert remote.decisions == []
+    assert remote.calls == [("a-other", {"q0": ["yes"]}, False, False)]
+
+
+def _site_card(*, shown_origin: str, bound_origin: str) -> dict[str, Any]:
+    """A node's site card as its frame publishes it: ``site_ask_question``'s
+    own output, bound to ``bound_origin``. Only the forged variant's sentence
+    is swapped for one naming ``shown_origin``.
+
+    Built from the real builder, not by hand: the signer compares the WHOLE
+    question (review R2-1: option order, labels, ``recommended``, ``multi``),
+    so a hand-drawn copy drifts the moment the card's shape moves and the
+    genuine case is refused as a mismatch for the wrong reason.
+    """
+    from local_operator.browser_bridge.site_approval import site_ask_question
+    from local_operator.i18n.messages import render
+
+    card = site_ask_question(
+        origin=bound_origin, node_name="node-a", node_device_id="d_node", entry_id="entry-1"
+    )
+    if shown_origin != bound_origin:
+        card["question"] = render(
+            "browser.site_approval.question",
+            {"origin": shown_origin, "node": "node-a"},
+            locale="en",
+        )
+    return card
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("shown", ["http://127.0.0.1:8765", "https://evil.example"])
+async def test_the_desktop_route_signs_only_a_card_it_can_rebuild(answers_api, shown) -> None:
+    """R1-1: the card text is drawn on the node, where the agent can append an
+    ask whose words name origin A and whose digest binds origin B. The route
+    rebuilds both from the structured ``site`` block before it reaches the
+    signing door, and a mislabeled card is refused (409, typed sentence) with
+    nothing signed."""
+    client, app = answers_api
+    remote = _DecideRemote(question_id="")
+    card = _site_card(shown_origin=shown, bound_origin="https://evil.example")
+    remote.frontend_state.asks[0].questions = [card]
+    _install_ask_remote(app, remote)
+    result = await client.post(
+        "/v1/desktop/sessions/0123456789ab/answers",
+        json={"ask_id": "a-site", "answers": {"site-access": ["Approve"]}},
+    )
+    if shown == "https://evil.example":
+        assert result.status_code == 200, result.text
+        assert remote.decisions == [("a-site", card["question_id"], "approve")]
+    else:
+        assert result.status_code == 409, result.text
+        assert "did not sign" in result.json()["detail"]
+        assert remote.decisions == []
+    assert remote.calls == []

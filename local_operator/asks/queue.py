@@ -3114,6 +3114,13 @@ def _question_shape(question: Any) -> dict[str, Any]:
         # when present — an ask without it keeps the exact pre-scope shape, so
         # existing logs fold and serialize byte-identically.
         shape["bridge"] = dict(bridge)
+    site = raw.get("site")
+    if isinstance(site, Mapping):
+        # A headless node's site approval carries the inputs its ``site:v1:``
+        # question id binds, so the signer can check the card before signing
+        # (``browser_bridge/site_approval.verify_site_card``). Key added only
+        # when present, like ``bridge``: other asks keep their exact shape.
+        shape["site"] = dict(site)
     recommended_all = raw.get("recommended_all")
     if recommended_all is not None:
         # A multi-select's recommendation SET (`AskQuestion.recommended_all`),

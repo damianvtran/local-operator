@@ -15,7 +15,7 @@
   "cli.browser_node.refuse_sudo": "Refusé : ces étapes nécessitent les droits root et `sudo -n` demanderait un mot de passe : {steps}. Lancez la commande depuis un compte disposant de sudo non interactif ; ou, dans un terminal interactif, exécutez d’abord `sudo -v`, puis relancez cette commande dans le même terminal (guide://browser, « Headless nodes »).",
   "cli.browser_node.refuse_no_record": "Refusé : rien à réparer, car {path} n’existe pas. Installez le navigateur avec `lop browser setup --node --authorised-by '<who, when>'`.",
   "cli.browser_node.refuse_authorisation": "Refusé : installer un navigateur sur un nœud nécessite l’autorisation de l’opérateur. Relancez avec `--authorised-by '<who, when>'` ; le texte est enregistré tel quel.",
-  "cli.browser_node.paired_yes": "Appairé : oui. Les nouvelles sessions sur ce nœud disposent de l’outil browser (pas celles déjà en cours), mais aucun site ne peut encore y être ouvert : sur un nœud sans écran, l’approbation site par site exige une décision signée de l’opérateur, dont cette version ne dispose pas.",
+  "cli.browser_node.paired_yes": "Appairé : oui. Les nouvelles sessions sur ce nœud disposent de l’outil browser (pas celles déjà en cours). Chaque site qu’elles ouvrent nécessite l’approbation de l’opérateur, qui répond et signe sur son propre appareil.",
   "cli.browser_node.paired_no": "Appairé : non.",
   "cli.browser_node.record": "Fiche d’installation : {path}",
   "cli.browser_node.failed_tail": "La configuration s’est arrêtée à l’étape en échec. Corrigez le problème, puis lancez `lop browser setup --node --repair --authorised-by '<who, when>'`.",

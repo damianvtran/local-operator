@@ -247,7 +247,15 @@ export function clearAllAccessGrants(): Promise<boolean> {
     // Unpairing also drops the all-sites bypass: a browser that is no longer
     // trusted must not come back pre-opened when it is paired again.
     await deadline(
-      chrome.storage.local.remove(["token", "origins", "hostGrants", "siteGrants", "allowAllSites"]),
+      chrome.storage.local.remove([
+        "token",
+        "origins",
+        "hostGrants",
+        "siteGrants",
+        "allowAllSites",
+        // A node's signed denials (node-site-decisions.ts) belong to the pairing too.
+        "nodeSiteDenials",
+      ]),
       CHROME_API_DEADLINE_MS,
       "chrome.storage.local.remove(grants)",
     );
