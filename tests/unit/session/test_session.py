@@ -3269,18 +3269,38 @@ async def test_consumed_and_foreign_jobs_do_not_auto_deliver(tmp_path):
     # the result, so this synthetic busy session stays quiet. The runner must
     # still be RUNNING when the flag flips, or the manager's own settle-
     # delivery wins the race and delivers while idle.
-    async def slow_runner(job_id, signal, report_progress):
-        await asyncio.sleep(0.3)
+    #
+    # The flag must also stay up until the WHOLE settle path has run: the job
+    # task covers runner -> settle -> ``_on_job_completed``, whose streaming
+    # arm awaits an early journal write and then re-reads ``_is_streaming``
+    # ("the turn ENDED while the row was being written") and delivers as an
+    # idle arrival if it dropped meanwhile. That branch is correct for a real
+    # turn end, so a fixed sleep before the flip was a bet that the write
+    # beat it: on a loaded shard it lost and a whole wake turn landed
+    # (#3790 gate, run 43243670779, test (3.12, 1): ``assert 4 == 2``). Join
+    # the job's own task instead, gated by an event rather than a duration.
+    release = asyncio.Event()
+
+    async def gated_runner(job_id, signal, report_progress):
+        await release.wait()
         return "done"
 
-    session.jobs.register("task", "while-busy", slow_runner)
+    busy_id = session.jobs.register("task", "while-busy", gated_runner)
+    busy_task = session.jobs._tasks[busy_id]
     session._is_streaming = True
     try:
-        await asyncio.sleep(0.45)  # settles while the session is "streaming"
+        release.set()
+        await busy_task  # settles while the session is "streaming"
     finally:
         session._is_streaming = False
-    await asyncio.sleep(0.05)
+    # A delivery is a SPAWNED wake turn (``_spawn_background``), so it can land
+    # after any fixed pause; drain the spawned tasks so a wrongful delivery is
+    # in the context before the count is read, instead of after it.
+    await _drain_journal_tasks(session)
     assert len(session._context.messages) == before  # nothing delivered
+    # The streaming arm was taken (parked for a boundary), not skipped — without
+    # this the count above would also hold for a settle that never ran.
+    assert busy_id in session._deferred_job_results
     await session.dispose()
 
 
