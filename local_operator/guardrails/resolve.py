@@ -1348,6 +1348,15 @@ _OUTPUT_FLAG_RE = re.compile(r"(?:-o|-i|--out[\w-]*|--write[\w-]*|--in-?place)")
 _OUTPUT_GLUED_RE = re.compile(r"(?:-o.|-i.|--out[\w-]*=|--write[\w-]*=|--in-?place=)")
 
 
+#: CPython's long options (``Python/getopt.c``, 3.12–3.14). The valued one
+#: takes its value from the NEXT word only (getopt matches the whole word, so
+#: ``--opt=value`` is not this option and fails closed as unknown).
+_PY_VALUED_LONG_OPTS = frozenset({"--check-hash-based-pycs"})
+_PY_FLAG_LONG_OPTS = frozenset(
+    {"--help", "--help-env", "--help-xoptions", "--help-all", "--version"}
+)
+
+
 def _python_inline_code(name: str, words: list[Expanded]) -> bool:
     """Does this ``python`` run inline CODE (``-c``, glued or clustered)?
 
@@ -1366,6 +1375,16 @@ def _python_inline_code(name: str, words: list[Expanded]) -> bool:
     ``-cCODE`` or clustered ``-Ic``) means inline code; ``-m`` or the first
     non-option word (a script, ``-`` for stdin) ends the scan; ``-W``/``-X``
     take a value. An opaque word in the prefix fails closed (``True``).
+
+    ``words[0]`` must be the INTERPRETER word: callers holding a wrapped argv
+    (``env``/``command``/``nice``/``xargs python3 -c …``) slice the wrapper
+    prefix off first, or ``python3`` itself reads as a script and ends the
+    scan (convergence review m1). Long options (m2): CPython's valued one
+    (``--check-hash-based-pycs <mode>``) skips its value, so the mode is not
+    taken for a script; the flag-only ones (``--help``, ``--version`` …) are
+    stepped over; any OTHER ``--`` word fails closed (``True``) — a spelling
+    this table does not model (a ``=`` glued value, a future option) must not
+    turn ``-c`` code into a credited script file.
     """
     if not _INTERPRETER_RE.fullmatch(name) or name.startswith("node"):
         return False
@@ -1376,7 +1395,12 @@ def _python_inline_code(name: str, words: list[Expanded]) -> bool:
         text = words[i].text
         if text == "--" or text == "-" or not text.startswith("-"):
             return False
-        if not text.startswith("--"):
+        if text.startswith("--"):
+            if text in _PY_VALUED_LONG_OPTS:
+                i += 1  # the value is the next word, never the script
+            elif text not in _PY_FLAG_LONG_OPTS:
+                return True
+        else:
             flags = text[1:]
             for j, ch in enumerate(flags):
                 if ch == "c":
@@ -3721,7 +3745,10 @@ class _Walker:
         st = self.state
         script = _interpreter_script(name, args, st.cwd)
         read_only_code = self._inline_read_only(name, args, assigns)
-        unproven_code = not read_only_code and _python_inline_code(name, args)
+        # ``args[prefix]`` is the interpreter word: ``args`` is the UNPEELED
+        # argv, so without the slice a wrapper (``env python3 -c …``) hides
+        # the ``-c`` and the write earns lineage credit (review m1).
+        unproven_code = not read_only_code and _python_inline_code(name, args[prefix:])
         self.programs_run += 1
         outputs = _output_word_ids(args)
         words = [w for w in args if id(w) not in exempt]

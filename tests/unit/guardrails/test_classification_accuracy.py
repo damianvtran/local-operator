@@ -1121,6 +1121,9 @@ def test_opaque_program_on_a_lineage_regular_file_is_low(home: Path) -> None:
 
 _UNLINK = 'import pathlib; pathlib.Path("{m}").unlink()'
 _READ = 'print(open("{m}").read())'
+#: A write no upstream pass recognises (an ``unlink`` is caught as a delete
+#: before the lineage credit is consulted), so only the guard can rank it.
+_WRITE = 'import pathlib; pathlib.Path("{m}").write_text("x")'
 
 
 @pytest.mark.parametrize(
@@ -1134,6 +1137,25 @@ _READ = 'print(open("{m}").read())'
         (f"python3 -c '{_READ}'", Risk.LOW),  # #3918's proof holds
         ("python3 ~/x {m}", Risk.LOW),  # a script file: #3906's opaque credit stands
         ("python3 -m json.tool {m}", Risk.LOW),  # -m ends the option scan
+        # Convergence review m1: the scan reads the words AFTER the wrapper
+        # prefix, so a wrapped writer is still seen as inline code.
+        (f"/usr/bin/env python3 -c '{_WRITE}'", Risk.HIGH),
+        (f"env python3 -c '{_WRITE}'", Risk.HIGH),
+        (f"command python3 -c '{_WRITE}'", Risk.HIGH),
+        (f"nice python3 -c '{_WRITE}'", Risk.HIGH),
+        (f"echo x | xargs python3 -c '{_WRITE}'", Risk.HIGH),
+        # #3918 fails closed on any wrapper, so proven code behind ``env`` is
+        # not proven here either: no lineage credit (HIGH, as on main).
+        (f"env python3 -c '{_READ}'", Risk.HIGH),
+        # m2: a valued long option's value is not the script, and an unknown
+        # long option fails closed.
+        (f"python3 --check-hash-based-pycs always -c '{_WRITE}'", Risk.HIGH),
+        (f"python3 --check-hash-based-pycs=always -c '{_WRITE}'", Risk.HIGH),
+        (f"python3 --no-such-option -c '{_WRITE}'", Risk.HIGH),
+        ("python3 --check-hash-based-pycs always ~/x {m}", Risk.LOW),  # script file
+        # node keeps #3906's approved opaque credit, bare or wrapped.
+        ("node -e 'x' {m}", Risk.LOW),
+        ("env node -e 'x' {m}", Risk.LOW),
     ],
 )
 def test_unproven_python_inline_code_gets_no_lineage_credit(
