@@ -889,7 +889,12 @@ def mobile_action(
     except ValueError as exc:
         return str(exc)
     except (OSError, httpx.HTTPError):
-        # `lop login radient`: every other line this command prints names the
-        # remedy this shell can run, and this one used to be the exception
-        # (review round 2, m5).
-        return "Tunnel operation failed; check network access and lop login radient."
+        # This function only answers the TUI (`_cmd_mobile` shows its return
+        # value verbatim), so the remedy is the TUI's own `/login radient`, keyed
+        # like every other line of the card. It used to be hard-coded English
+        # naming the shell command `lop login radient`, which a TUI user cannot
+        # run where they are (#3958 review round 1, R2). The CLI's own failure
+        # line lives in `main` above and is unchanged.
+        from local_operator.i18n.keys import mobile_setup as ms
+
+        return tr("mobile.setup")(ms.operation_failed_tui())

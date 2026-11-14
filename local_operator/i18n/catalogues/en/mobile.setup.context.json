@@ -139,11 +139,6 @@
     "tone": "Plain, precise, non-alarmist",
     "note": "Account identity already masked; IDs/prices/commands stay verbatim. Subscription activation only at exact fresh monthly quote. No automatic credit purchase; completed billing/reservation is not rolled back. Provider sign-in/terms remain human. Status is read-only."
   },
-  "mobile.setup.mobile_bundle_tui": {
-    "role": "Phone setup title, progress, consent or recovery",
-    "tone": "Plain, precise, non-alarmist",
-    "note": "Account identity already masked; IDs/prices/commands stay verbatim. Subscription activation only at exact fresh monthly quote. No automatic credit purchase; completed billing/reservation is not rolled back. Provider sign-in/terms remain human. Status is read-only."
-  },
   "mobile.setup.supervisor_tui": {
     "role": "Phone setup title, progress, consent or recovery",
     "tone": "Plain, precise, non-alarmist",
@@ -168,6 +163,11 @@
     "role": "Phone setup title, progress, consent or recovery",
     "tone": "Plain, precise, non-alarmist",
     "note": "Account identity already masked; IDs/prices/commands stay verbatim. Subscription activation only at exact fresh monthly quote. No automatic credit purchase; completed billing/reservation is not rolled back. Provider sign-in/terms remain human. Status is read-only."
+  },
+  "mobile.setup.operation_failed_tui": {
+    "role": "TUI /mobile result line",
+    "tone": "Plain, precise, non-alarmist",
+    "note": "Shown in the terminal app's /mobile command when checking or turning on phone access failed because Radient could not be reached or the Radient sign-in was rejected. /login radient is the TUI's own slash command and stays verbatim; never replace it with a shell command such as lop login radient."
   },
   "mobile.setup.verification_tui": {
     "role": "Phone setup title, progress, consent or recovery",
@@ -399,10 +399,20 @@
     "tone": "Plain, actionable and cautious",
     "note": "No OAuth, purchase or service mutation implied by observation. Commands/IDs/URL stay verbatim. The tunnel's owner switched it off in the Radient web console; the only fix is the console, and setup deliberately does not re-enable it."
   },
+  "mobile.setup.disabled_resume": {
+    "role": "Mobile setup progress or blocker",
+    "tone": "Plain, actionable and cautious",
+    "note": "Plain-language remedy for the desktop setup card and the TUI's /mobile status card, which non-technical users read without a terminal. It must never name a shell command, flag or code span; setup never spends money on its own. Shown when the person tried to turn a deliberately stopped phone access back on, but phone access is switched off in the Radient console. Turning it on in the console does NOT bring it back by itself; the person must then turn it back on again here. 'the console' is the Radient console. Never promise automatic reconnection."
+  },
   "mobile.setup.billing_lapsed": {
     "role": "Mobile setup progress or blocker",
     "tone": "Plain, actionable and cautious",
     "note": "No OAuth, purchase or service mutation implied by observation. Commands/IDs/URL stay verbatim. Billing was activated before but the prepaid balance no longer covers it. The fix is adding credit, not accepting a price again."
+  },
+  "mobile.setup.billing_lapsed_resume": {
+    "role": "Mobile setup progress or blocker",
+    "tone": "Plain, actionable and cautious",
+    "note": "Plain-language remedy for the desktop setup card and the TUI's /mobile status card, which non-technical users read without a terminal. It must never name a shell command, flag or code span; setup never spends money on its own. Shown when the person tried to turn a deliberately stopped phone access back on, but the Radient balance has run out. Phone access stays off: adding credit does NOT bring it back by itself, so the person must turn it back on again here (the card's button or /mobile enable). Never promise automatic reconnection."
   },
   "mobile.setup.reconnect": {
     "role": "Mobile setup progress or blocker",

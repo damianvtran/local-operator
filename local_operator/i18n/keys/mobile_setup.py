@@ -70,6 +70,10 @@ def billing_lapsed() -> Msg:
     return Msg("mobile.setup.billing_lapsed", {})
 
 
+def billing_lapsed_resume() -> Msg:
+    return Msg("mobile.setup.billing_lapsed_resume", {})
+
+
 def billing_not_activated() -> Msg:
     return Msg("mobile.setup.billing_not_activated", {})
 
@@ -138,6 +142,10 @@ def disabled() -> Msg:
     return Msg("mobile.setup.disabled", {})
 
 
+def disabled_resume() -> Msg:
+    return Msg("mobile.setup.disabled_resume", {})
+
+
 def failed() -> Msg:
     return Msg("mobile.setup.failed", {})
 
@@ -198,12 +206,12 @@ def mobile_bundle_plain() -> Msg:
     return Msg("mobile.setup.mobile_bundle_plain", {})
 
 
-def mobile_bundle_tui() -> Msg:
-    return Msg("mobile.setup.mobile_bundle_tui", {})
-
-
 def network() -> Msg:
     return Msg("mobile.setup.network", {})
+
+
+def operation_failed_tui() -> Msg:
+    return Msg("mobile.setup.operation_failed_tui", {})
 
 
 def owner_mismatch() -> Msg:

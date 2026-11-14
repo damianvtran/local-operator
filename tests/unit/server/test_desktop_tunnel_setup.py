@@ -769,6 +769,9 @@ def _plans():
             {"credential_choices": [17, 23]},
             {"activation_required": True, "monthly_price_usd": "0.05"},
             {"accepted_price_usd": "0.04", "monthly_price_usd": "0.05"},
+            # A click on a stopped tunnel that billing/the console blocked:
+            # its own copy variants (#3958 Q1) are covered too.
+            {"resuming": True},
         ):
             yield {
                 "step": step,
@@ -804,8 +807,9 @@ def test_every_locale_keeps_the_plain_remedies_free_of_commands():
 
     root = Path(setup.__file__).resolve().parents[1] / "i18n" / "catalogues"
     codes = {
-        build({"step": step, "monthly_price_usd": "0.05"}).code
+        build({"step": step, "monthly_price_usd": "0.05", "resuming": resuming}).code
         for step, build in setup._PLAIN_REMEDY.items()
+        for resuming in (False, True)
     } | {setup._PLAIN_REMEDY["quote"]({}).code}
     locales = sorted(p.name for p in root.iterdir() if (p / "mobile.setup.json").exists())
     assert len(locales) >= 8, locales

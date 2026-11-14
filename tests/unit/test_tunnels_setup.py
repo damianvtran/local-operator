@@ -10,6 +10,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import cast
 from unittest.mock import AsyncMock
 
+import httpx
 import pytest
 
 from local_operator.providers.auth_store import AuthStore
@@ -1442,3 +1443,91 @@ def test_owner_missing_is_plain_with_a_sign_in_action_in_the_tui():
     lines = setup.text(plan, surface="tui", include_receipts=False).splitlines()
     assert "lop " not in "\n".join(lines)
     assert lines[-1] == "Sign in with /login radient, then run /mobile status."
+
+
+# --- #3958 round-1 fold-ins: blocked-resume copy, one mobile_bundle entry, keyed TUI error
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("step", ["billing_lapsed", "disabled"])
+async def test_a_blocked_resume_never_promises_an_automatic_reconnect(rig, monkeypatch, step):
+    """Q1: a resume that billing or the console blocks keeps the stop, so the
+    copy must send the person back to the button, not promise a reconnect."""
+    save(rig[1], stopped=True)
+    _unserve(rig)
+    if step == "billing_lapsed":
+        rig[0].update(eligible=False, active=True, balance_usd=0)
+    else:
+        rig[1].update(enabled=False, status="disabled")
+    dispatched = _record_dispatch(monkeypatch, rig)
+
+    plan = await setup.apply(17, resume_stopped=True)
+
+    assert plan["step"] == step and plan.get("resuming") is True, plan
+    assert config.load()["stopped"] is True and dispatched == []
+    surfaces = {
+        "cli/tui sentence": plan["remedy"],
+        "desktop": setup.plain_remedy(plan),
+        "tui card": setup.text(plan, surface="tui", include_receipts=False),
+    }
+    for surface, copy in surfaces.items():
+        assert "by itself" not in copy, (surface, copy)
+        assert "turn phone access back on here" in copy, (surface, copy)
+        assert "lop " not in copy and "`" not in copy, (surface, copy)
+    # Negative control: a running tunnel (no resume) still reconnects on its
+    # own, and keeps the sentence that says so.
+    assert "by itself" in setup.plain_remedy({**plan, "resuming": False})
+
+
+def test_the_tui_mobile_bundle_step_is_the_one_plain_sentence():
+    """R1: one `mobile_bundle` entry in the TUI table — the plain sentence."""
+    plan = setup._plan(
+        "mobile_bundle", "Prepare it with lop mobile install, then retry.", credential_id=17
+    )
+    card = setup.text(plan, surface="tui", include_receipts=False)
+    assert setup.plain_remedy(plan) in card.splitlines()
+    assert card.splitlines()[-1].startswith("The phone interface is not prepared")
+    assert "lop " not in card
+
+
+def test_no_setup_table_repeats_a_key():
+    """R1's root cause: a repeated dict-literal key silently drops the earlier
+    value (flake8 F601). Every literal table in setup.py stays unambiguous."""
+    import ast
+    from pathlib import Path
+
+    tree = ast.parse(Path(setup.__file__).read_text(encoding="utf-8"))
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Dict):
+            keys = [k.value for k in node.keys if isinstance(k, ast.Constant)]
+            repeated = {k for k in keys if keys.count(k) > 1}
+            assert not repeated, (node.lineno, repeated)
+
+
+@pytest.mark.parametrize("action", ["status", "enable"])
+@pytest.mark.parametrize("failure", [OSError("unreachable"), httpx.ConnectError("down")])
+def test_a_failed_tui_mobile_action_names_the_slash_sign_in(monkeypatch, action, failure):
+    """R2: `mobile_action` only answers the TUI, so its failure line is keyed
+    copy naming `/login radient`, never the shell's `lop login radient`."""
+    from local_operator.tunnels import cli
+
+    monkeypatch.setattr(setup, "auto_reconnecting", lambda: False)
+    monkeypatch.setattr(setup, "observe", AsyncMock(side_effect=failure))
+    monkeypatch.setattr(setup, "apply", AsyncMock(side_effect=failure))
+
+    text = cli.mobile_action(action, selected=17)
+
+    assert "sign in with /login radient" in text, text
+    assert "lop " not in text, text
+
+
+def test_the_cli_failure_line_stays_the_cli_text(monkeypatch, capsys):
+    """R2's other surface: `lop tunnel ...` keeps its own (command-free) line."""
+    from local_operator.tunnels import cli
+
+    monkeypatch.setattr(cli, "dispatch", AsyncMock(side_effect=OSError("unreachable")))
+
+    assert cli.main(argparse.Namespace(tunnel_command="status")) == 1
+    assert capsys.readouterr().err.strip() == (
+        "Tunnel operation failed; check network access and your Radient login."
+    )
