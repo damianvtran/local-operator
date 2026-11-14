@@ -46,12 +46,12 @@ from local_operator.mobile import pair_requests, push_devices
 from local_operator.mobile.daemon import MobileDaemon, build_app
 from local_operator.network import approvals as A
 from local_operator.network.credentials import desktop_approval
+from local_operator.network.wire import crockford
 from local_operator.operator import devices, pair_op
 from local_operator.operator.elevate import ElevationResult
 from local_operator.server import desktop
 from local_operator.server.routes import desktop_approvals as approval_routes
 from local_operator.server.routes import desktop_credentials as operation_routes
-from local_operator.network.wire import crockford
 from local_operator.server.utils.desktop_sessions import DesktopSessions
 from tests.unit.network.test_approvals_store import _make_key, _sign
 from tests.unit.network.test_approvals_store import root as approvals_root  # noqa: F401
