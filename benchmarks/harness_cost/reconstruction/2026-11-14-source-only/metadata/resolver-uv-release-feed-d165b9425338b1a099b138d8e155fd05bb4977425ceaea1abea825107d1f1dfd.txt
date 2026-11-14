@@ -1,0 +1,208 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+  <channel>
+    <title>PyPI recent updates for uv</title>
+    <link>https://pypi.org/project/uv/</link>
+    <description>Recent updates to the Python Package Index for uv</description>
+    <language>en</language>    <item>
+      <title>0.13.8</title>
+      <link>https://pypi.org/project/uv/0.13.8/</link>
+      <description>An extremely fast Python package and project manager, written in Rust.</description>
+<author>hey@astral.sh</author>      <pubDate>Thu, 12 Nov 2026 16:48:15 GMT</pubDate>
+    </item>    <item>
+      <title>0.13.7</title>
+      <link>https://pypi.org/project/uv/0.13.7/</link>
+      <description>An extremely fast Python package and project manager, written in Rust.</description>
+<author>hey@astral.sh</author>      <pubDate>Tue, 03 Nov 2026 02:41:43 GMT</pubDate>
+    </item>    <item>
+      <title>0.13.6</title>
+      <link>https://pypi.org/project/uv/0.13.6/</link>
+      <description>An extremely fast Python package and project manager, written in Rust.</description>
+<author>hey@astral.sh</author>      <pubDate>Tue, 27 Oct 2026 00:45:02 GMT</pubDate>
+    </item>    <item>
+      <title>0.13.5</title>
+      <link>https://pypi.org/project/uv/0.13.5/</link>
+      <description>An extremely fast Python package and project manager, written in Rust.</description>
+<author>hey@astral.sh</author>      <pubDate>Thu, 22 Oct 2026 01:31:37 GMT</pubDate>
+    </item>    <item>
+      <title>0.13.4</title>
+      <link>https://pypi.org/project/uv/0.13.4/</link>
+      <description>An extremely fast Python package and project manager, written in Rust.</description>
+<author>hey@astral.sh</author>      <pubDate>Tue, 20 Oct 2026 15:11:02 GMT</pubDate>
+    </item>    <item>
+      <title>0.13.3</title>
+      <link>https://pypi.org/project/uv/0.13.3/</link>
+      <description>An extremely fast Python package and project manager, written in Rust.</description>
+<author>hey@astral.sh</author>      <pubDate>Tue, 20 Oct 2026 01:12:41 GMT</pubDate>
+    </item>    <item>
+      <title>0.13.2</title>
+      <link>https://pypi.org/project/uv/0.13.2/</link>
+      <description>An extremely fast Python package and project manager, written in Rust.</description>
+<author>hey@astral.sh</author>      <pubDate>Mon, 19 Oct 2026 20:59:13 GMT</pubDate>
+    </item>    <item>
+      <title>0.13.1</title>
+      <link>https://pypi.org/project/uv/0.13.1/</link>
+      <description>An extremely fast Python package and project manager, written in Rust.</description>
+<author>hey@astral.sh</author>      <pubDate>Wed, 14 Oct 2026 05:12:50 GMT</pubDate>
+    </item>    <item>
+      <title>0.13.0</title>
+      <link>https://pypi.org/project/uv/0.13.0/</link>
+      <description>An extremely fast Python package and project manager, written in Rust.</description>
+<author>hey@astral.sh</author>      <pubDate>Fri, 09 Oct 2026 19:45:18 GMT</pubDate>
+    </item>    <item>
+      <title>0.12.24</title>
+      <link>https://pypi.org/project/uv/0.12.24/</link>
+      <description>An extremely fast Python package and project manager, written in Rust.</description>
+<author>hey@astral.sh</author>      <pubDate>Thu, 08 Oct 2026 19:56:54 GMT</pubDate>
+    </item>    <item>
+      <title>0.12.23</title>
+      <link>https://pypi.org/project/uv/0.12.23/</link>
+      <description>An extremely fast Python package and project manager, written in Rust.</description>
+<author>hey@astral.sh</author>      <pubDate>Sat, 03 Oct 2026 17:31:15 GMT</pubDate>
+    </item>    <item>
+      <title>0.12.22</title>
+      <link>https://pypi.org/project/uv/0.12.22/</link>
+      <description>An extremely fast Python package and project manager, written in Rust.</description>
+<author>hey@astral.sh</author>      <pubDate>Fri, 02 Oct 2026 00:16:32 GMT</pubDate>
+    </item>    <item>
+      <title>0.12.21</title>
+      <link>https://pypi.org/project/uv/0.12.21/</link>
+      <description>An extremely fast Python package and project manager, written in Rust.</description>
+<author>hey@astral.sh</author>      <pubDate>Tue, 29 Sep 2026 21:11:50 GMT</pubDate>
+    </item>    <item>
+      <title>0.12.20</title>
+      <link>https://pypi.org/project/uv/0.12.20/</link>
+      <description>An extremely fast Python package and project manager, written in Rust.</description>
+<author>hey@astral.sh</author>      <pubDate>Mon, 28 Sep 2026 23:16:06 GMT</pubDate>
+    </item>    <item>
+      <title>0.12.19</title>
+      <link>https://pypi.org/project/uv/0.12.19/</link>
+      <description>An extremely fast Python package and project manager, written in Rust.</description>
+<author>hey@astral.sh</author>      <pubDate>Fri, 25 Sep 2026 00:30:42 GMT</pubDate>
+    </item>    <item>
+      <title>0.12.18</title>
+      <link>https://pypi.org/project/uv/0.12.18/</link>
+      <description>An extremely fast Python package and project manager, written in Rust.</description>
+<author>hey@astral.sh</author>      <pubDate>Tue, 22 Sep 2026 22:58:15 GMT</pubDate>
+    </item>    <item>
+      <title>0.12.17</title>
+      <link>https://pypi.org/project/uv/0.12.17/</link>
+      <description>An extremely fast Python package and project manager, written in Rust.</description>
+<author>hey@astral.sh</author>      <pubDate>Fri, 18 Sep 2026 18:56:51 GMT</pubDate>
+    </item>    <item>
+      <title>0.12.16</title>
+      <link>https://pypi.org/project/uv/0.12.16/</link>
+      <description>An extremely fast Python package and project manager, written in Rust.</description>
+<author>hey@astral.sh</author>      <pubDate>Fri, 18 Sep 2026 00:49:53 GMT</pubDate>
+    </item>    <item>
+      <title>0.12.15</title>
+      <link>https://pypi.org/project/uv/0.12.15/</link>
+      <description>An extremely fast Python package and project manager, written in Rust.</description>
+<author>hey@astral.sh</author>      <pubDate>Tue, 15 Sep 2026 12:07:02 GMT</pubDate>
+    </item>    <item>
+      <title>0.12.14</title>
+      <link>https://pypi.org/project/uv/0.12.14/</link>
+      <description>An extremely fast Python package and project manager, written in Rust.</description>
+<author>hey@astral.sh</author>      <pubDate>Tue, 15 Sep 2026 02:16:23 GMT</pubDate>
+    </item>    <item>
+      <title>0.12.13</title>
+      <link>https://pypi.org/project/uv/0.12.13/</link>
+      <description>An extremely fast Python package and project manager, written in Rust.</description>
+<author>hey@astral.sh</author>      <pubDate>Thu, 10 Sep 2026 19:25:01 GMT</pubDate>
+    </item>    <item>
+      <title>0.12.12</title>
+      <link>https://pypi.org/project/uv/0.12.12/</link>
+      <description>An extremely fast Python package and project manager, written in Rust.</description>
+<author>hey@astral.sh</author>      <pubDate>Wed, 09 Sep 2026 16:43:29 GMT</pubDate>
+    </item>    <item>
+      <title>0.12.11</title>
+      <link>https://pypi.org/project/uv/0.12.11/</link>
+      <description>An extremely fast Python package and project manager, written in Rust.</description>
+<author>hey@astral.sh</author>      <pubDate>Tue, 08 Sep 2026 20:44:05 GMT</pubDate>
+    </item>    <item>
+      <title>0.12.10</title>
+      <link>https://pypi.org/project/uv/0.12.10/</link>
+      <description>An extremely fast Python package and project manager, written in Rust.</description>
+<author>hey@astral.sh</author>      <pubDate>Fri, 04 Sep 2026 23:13:31 GMT</pubDate>
+    </item>    <item>
+      <title>0.12.9</title>
+      <link>https://pypi.org/project/uv/0.12.9/</link>
+      <description>An extremely fast Python package and project manager, written in Rust.</description>
+<author>hey@astral.sh</author>      <pubDate>Tue, 01 Sep 2026 21:57:01 GMT</pubDate>
+    </item>    <item>
+      <title>0.12.8</title>
+      <link>https://pypi.org/project/uv/0.12.8/</link>
+      <description>An extremely fast Python package and project manager, written in Rust.</description>
+<author>hey@astral.sh</author>      <pubDate>Mon, 31 Aug 2026 22:17:24 GMT</pubDate>
+    </item>    <item>
+      <title>0.12.7</title>
+      <link>https://pypi.org/project/uv/0.12.7/</link>
+      <description>An extremely fast Python package and project manager, written in Rust.</description>
+<author>hey@astral.sh</author>      <pubDate>Thu, 27 Aug 2026 22:12:36 GMT</pubDate>
+    </item>    <item>
+      <title>0.12.6</title>
+      <link>https://pypi.org/project/uv/0.12.6/</link>
+      <description>An extremely fast Python package and project manager, written in Rust.</description>
+<author>hey@astral.sh</author>      <pubDate>Tue, 25 Aug 2026 19:38:55 GMT</pubDate>
+    </item>    <item>
+      <title>0.12.5</title>
+      <link>https://pypi.org/project/uv/0.12.5/</link>
+      <description>An extremely fast Python package and project manager, written in Rust.</description>
+<author>hey@astral.sh</author>      <pubDate>Fri, 14 Aug 2026 19:55:51 GMT</pubDate>
+    </item>    <item>
+      <title>0.12.4</title>
+      <link>https://pypi.org/project/uv/0.12.4/</link>
+      <description>An extremely fast Python package and project manager, written in Rust.</description>
+<author>hey@astral.sh</author>      <pubDate>Thu, 13 Aug 2026 21:13:42 GMT</pubDate>
+    </item>    <item>
+      <title>0.12.3</title>
+      <link>https://pypi.org/project/uv/0.12.3/</link>
+      <description>An extremely fast Python package and project manager, written in Rust.</description>
+<author>hey@astral.sh</author>      <pubDate>Fri, 07 Aug 2026 16:32:18 GMT</pubDate>
+    </item>    <item>
+      <title>0.12.2</title>
+      <link>https://pypi.org/project/uv/0.12.2/</link>
+      <description>An extremely fast Python package and project manager, written in Rust.</description>
+<author>hey@astral.sh</author>      <pubDate>Wed, 05 Aug 2026 19:20:52 GMT</pubDate>
+    </item>    <item>
+      <title>0.12.1</title>
+      <link>https://pypi.org/project/uv/0.12.1/</link>
+      <description>An extremely fast Python package and project manager, written in Rust.</description>
+<author>hey@astral.sh</author>      <pubDate>Fri, 31 Jul 2026 19:41:34 GMT</pubDate>
+    </item>    <item>
+      <title>0.12.0</title>
+      <link>https://pypi.org/project/uv/0.12.0/</link>
+      <description>An extremely fast Python package and project manager, written in Rust.</description>
+<author>hey@astral.sh</author>      <pubDate>Tue, 28 Jul 2026 18:56:27 GMT</pubDate>
+    </item>    <item>
+      <title>0.11.33</title>
+      <link>https://pypi.org/project/uv/0.11.33/</link>
+      <description>An extremely fast Python package and project manager, written in Rust.</description>
+<author>hey@astral.sh</author>      <pubDate>Tue, 28 Jul 2026 10:24:12 GMT</pubDate>
+    </item>    <item>
+      <title>0.11.32</title>
+      <link>https://pypi.org/project/uv/0.11.32/</link>
+      <description>An extremely fast Python package and project manager, written in Rust.</description>
+<author>hey@astral.sh</author>      <pubDate>Thu, 23 Jul 2026 23:05:06 GMT</pubDate>
+    </item>    <item>
+      <title>0.11.31</title>
+      <link>https://pypi.org/project/uv/0.11.31/</link>
+      <description>An extremely fast Python package and project manager, written in Rust.</description>
+<author>hey@astral.sh</author>      <pubDate>Wed, 22 Jul 2026 01:47:21 GMT</pubDate>
+    </item>    <item>
+      <title>0.11.30</title>
+      <link>https://pypi.org/project/uv/0.11.30/</link>
+      <description>An extremely fast Python package and project manager, written in Rust.</description>
+<author>hey@astral.sh</author>      <pubDate>Mon, 20 Jul 2026 17:59:31 GMT</pubDate>
+    </item>    <item>
+      <title>0.11.29</title>
+      <link>https://pypi.org/project/uv/0.11.29/</link>
+      <description>An extremely fast Python package and project manager, written in Rust.</description>
+<author>hey@astral.sh</author>      <pubDate>Wed, 15 Jul 2026 18:42:15 GMT</pubDate>
+    </item>    <item>
+      <title>0.11.28</title>
+      <link>https://pypi.org/project/uv/0.11.28/</link>
+      <description>An extremely fast Python package and project manager, written in Rust.</description>
+<author>hey@astral.sh</author>      <pubDate>Tue, 07 Jul 2026 23:11:55 GMT</pubDate>
+    </item>  </channel>
+</rss>

@@ -142,10 +142,21 @@
   },
   "paid_dispatch_authorized": false,
   "prospective_amendment": {
-    "acceptance": "PROPOSED-NOT-FROZEN",
+    "acceptance": "E1/E3 policy accepted; E2 conditional future qualification; E4 retains28/no rights assumption; NOT FROZEN",
     "applies_to_all_arms": true,
     "build_admission_requested": false,
     "document": "ENVIRONMENT-AMENDMENT.md"
+  },
+  "resolver_proposal": {
+    "admission": "RESOLVER-ADMISSION.md",
+    "daemon_socket_target_present_at_static_check": false,
+    "disk_desk": "00e6a1cd8f62",
+    "exact_command": "RESOLVER-COMMAND.md",
+    "executed": false,
+    "memory_go_pending": true,
+    "output_root_proposed_not_created": "~/benchmark-runs/reconstruction-20261114-source-v1/resolver/linux-amd64-01",
+    "pins": "resolver-pins.json",
+    "requires_local_docker_linux_vm": true
   },
   "status": "DRAFT-BLOCKED-UNPINNED-INPUTS"
 }

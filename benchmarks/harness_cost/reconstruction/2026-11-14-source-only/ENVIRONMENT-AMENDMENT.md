@@ -114,7 +114,12 @@ or obtained, stop and submit an independent, explicit sample/estimand amendment
 applying symmetrically across arms BEFORE model outcomes. No task exclusions or
 replacement sample were enacted here; no performance-conditioned selection.
 
-Acceptance state: all E1–E4 are PROPOSED only. Historical environment byte recovery
-is not possible with the missing installation/attestation artifacts; this does
-not imply the new campaign is impossible, only that it needs reviewed prospective
-identity and actual qualification. No build admission requested in this phase.
+Technical disposition after clean source-only review of a90e62405f94 (parent
+instruction, recorded before any model outcomes): E1/E3 new-environment policy
+ACCEPTED; E2 public same-version OpenCode candidate ACCEPTED CONDITIONALLY on
+future identity/CLI/wire qualification; E4 RETAINS all 28 tasks with NO sample
+amendment and NO rights assumption. This is NOT input freeze or runtime approval.
+Historical environment byte recovery is not possible with the missing installation/
+attestation artifacts. The exact next resolver-only proposal and unfulfilled disk/
+memory/daemon/artifact gates are in RESOLVER-ADMISSION.md and RESOLVER-COMMAND.md.
+No Docker/resolver/install/build admission or execution is implied by this policy.

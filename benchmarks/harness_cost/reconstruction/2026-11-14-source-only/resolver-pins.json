@@ -1,0 +1,29 @@
+{
+  "base_image": "docker.io/library/python@sha256:9bbb8720ae0a24a6ca8dd678bfdf57818fe70caf54c52a53ec01d8db43405056",
+  "base_reported_compressed_bytes": 44588823,
+  "base_tag_observed": "3.14.0-slim-bookworm",
+  "dev_extra_included": false,
+  "execution_authorized": false,
+  "historical_extras_exactly_known": false,
+  "lop_extras": [
+    "server",
+    "mcp",
+    "images",
+    "tokenizer",
+    "fetch",
+    "audio",
+    "lsp"
+  ],
+  "platform": "linux/amd64",
+  "python_declared": "CPython 3.14.0; actual interpreter identity must be checked inside pinned carrier",
+  "resolver_closure_scope": "one Linux/amd64 CPython3.14 LoP functional/runtime+shared service+Harbor+build-backend requirements closure, not all-arm installed environments",
+  "source_receipt": "metadata-receipt-20261114T095922045873Z.jsonl",
+  "status": "PROPOSED-NOT-EXECUTED",
+  "uv_version": "0.13.8",
+  "uv_wheel": {
+    "bytes": 17389450,
+    "filename": "uv-0.13.8-py3-none-manylinux_2_17_x86_64.manylinux2014_x86_64.whl",
+    "sha256": "e18a57b8b352eb7c8feb317b9f6f533c8f0ad9673fd6cf34bbe3cf1a9f6a8984",
+    "url": "https://files.pythonhosted.org/packages/c5/32/52ee34636aea1ab3f8baeeae1c3599461b8cddfb379862cc72ac61b8d91c/uv-0.13.8-py3-none-manylinux_2_17_x86_64.manylinux2014_x86_64.whl"
+  }
+}
