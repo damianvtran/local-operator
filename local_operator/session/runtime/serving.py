@@ -11377,8 +11377,8 @@ class ServingSessionHandle(SessionHandle):
         return remedy
 
     @staticmethod
-    def _uninstalled_anchor_clause() -> str:
-        """The missing-anchor remedy, or ``""`` when this host has an anchor.
+    def _uninstalled_anchor_report(live: str, saved: str) -> str | None:
+        """The whole report line for a host with no usable anchor, else ``None``.
 
         THIS REPLACES THE DELETED "retire and reopen the session here" clause, and
         it replaces it with the one thing that clause was standing in for: a
@@ -11391,12 +11391,23 @@ class ServingSessionHandle(SessionHandle):
         from local_operator.operator import operator_authority_unusable
 
         if not operator_authority_unusable():
-            return ""
-        return (
-            "; but operator authority is not installed on this machine yet: neither can run "
-            "until it is set up here — ask Local Operator to set up operator authority for "
-            "you (one approval and one admin password prompt)"
-        )
+            return None
+        # U17 (design v2 A2): the remedy names where a person turns approvals on —
+        # Settings → Phone access in the desktop app, `/mobile approvals on` in the
+        # terminal app — instead of "ask Local Operator to set up operator
+        # authority", which sent a non-technical user to a terminal-only verb.
+        #
+        # THE WHOLE LINE IS ONE KEY (design round 1 on #3950, D2/D3). It used to be
+        # a keyed clause appended to the English report, so every other locale got
+        # a sentence that switched language halfway. Only this state's line is
+        # keyed; its only caller reaches it with the session asking (`live` is
+        # "ask"), which is why the effect words are part of the message. ONE key for
+        # both mirrors so they cannot drift apart.
+        from local_operator.i18n.keys import wire_operator_setup as _ws
+        from local_operator.i18n.text import tr
+
+        report = _ws.tui_approvals_report_not_set_up(live=live, saved=saved)
+        return tr("wire.operator_setup")(report)
 
     def _approvals_slash(
         self,
@@ -11533,7 +11544,13 @@ class ServingSessionHandle(SessionHandle):
                     # capability that now exists (a pane attached to another
                     # process's runtime can loosen), so a reader with a working lever
                     # was told to retire a runtime instead of using it.
-                    remedy += self._uninstalled_anchor_clause()
+                    keyed = (
+                        None
+                        if self._auto_approve
+                        else self._uninstalled_anchor_report(live, on_disk)
+                    )
+                    if keyed is not None:
+                        return SlashResult(kind="notice", text=keyed, style="info")
                 return SlashResult(
                     kind="notice",
                     text=(

@@ -150,6 +150,16 @@ DEFERRED_NAMESPACES: dict[str, str] = {
         "bridge rows reach the phone as already-rendered text "
         '(harness/bridge_copy.py, _t = tr("wire.tool_rows.bridge"))'
     ),
+    # Deferred rather than raising the eager total ceiling: the phone-approvals
+    # setup copy (mostly the terminal-only `tui.*` report/usage lines) pushed hi
+    # past EAGER_TOTAL_MAX_BYTES, yet no client resolves one of its keys. The
+    # desktop route overrides the envelope `code` with the machine outcome token
+    # (`on`, `cancelled`, `file_only`, ...) and paints the server-rendered `text`.
+    "wire.operator_setup": (
+        "phone-approvals setup copy rendered in-process by operator/elevate.py, "
+        "tui/app.py and session/runtime/serving.py; the desktop setup route sends "
+        "server-rendered text under a machine outcome code, never a catalogue key"
+    ),
 }
 
 

@@ -109,6 +109,7 @@ def test_the_deferred_set_is_exactly_the_reviewed_one() -> None:
         "wire.slash.library",
         "wire.slash.notifications_page",
         "wire.tool_rows.bridge",
+        "wire.operator_setup",
     }, (
         "The deferred set is a reviewed policy, not a place to park a large "
         "namespace. Adding one requires updating this assertion, recording its "

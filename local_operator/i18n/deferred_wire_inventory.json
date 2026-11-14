@@ -393,6 +393,42 @@
       "references": {
         "session/catalog.py": 2
       }
+    },
+    "wire.operator_setup": {
+      "reason": "phone-approvals setup copy rendered in-process by operator/elevate.py, tui/app.py and session/runtime/serving.py; the desktop setup route sends server-rendered text under a machine outcome code, never a catalogue key",
+      "render_points": [
+        {
+          "path": "local_operator/operator/elevate.py",
+          "symbol": "_purpose_copy / no_password_prompt_refusal / confirm_card_copy",
+          "note": "OS admin prompt reason, title and refusal rendered in-process via tr(\"wire.operator_setup\") and handed to the OS dialog or printed as finished text"
+        },
+        {
+          "path": "local_operator/operator/authority_setup.py",
+          "symbol": "outcome_message / file_only_message",
+          "note": "returns the Msg for an outcome; every caller renders it in-process (tui/app.py text(), or the desktop route's envelope text under a machine outcome code)"
+        },
+        {
+          "path": "local_operator/server/routes/desktop_operator_setup.py",
+          "symbol": "_envelope / _decorate",
+          "note": "envelope code is overridden with the machine outcome token (on, cancelled, file_only, ...); the desktop paints the server-rendered text and never resolves a wire.operator_setup key"
+        },
+        {
+          "path": "local_operator/tui/app.py",
+          "symbol": "_uninstalled_anchor_report / _mobile_approvals",
+          "note": "terminal-only report, usage and outcome notices rendered in-process with tr(\"wire.operator_setup\")"
+        },
+        {
+          "path": "local_operator/session/runtime/serving.py",
+          "symbol": "_uninstalled_anchor_report",
+          "note": "the same report line rendered in-process and returned as finished text"
+        }
+      ],
+      "references": {
+        "operator/authority_setup.py": 15,
+        "operator/elevate.py": 6,
+        "session/runtime/serving.py": 2,
+        "tui/app.py": 4
+      }
     }
   }
 }
