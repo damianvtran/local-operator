@@ -130,11 +130,23 @@ def test_owner_glob_over_only_own_clean_idle_trees_stays_low(home: Path, mobile:
 
 
 def test_delete_inside_a_worktree_is_not_a_worktree_delete(home: Path, mobile: Path) -> None:
-    """A path strictly inside a tree reaches no worktree root: ordinary ranking."""
+    """A path strictly inside a tree reaches no worktree root: ordinary ranking.
+
+    Convergence with PR #3835: ``refused-connect`` is ``S``'s ledger row, so
+    for ``S2`` the delete is inside another session's created directory —
+    HIGH on that rule, naming ``S``, never on a worktree-reach reason. Its
+    creator ``S`` keeps the ordinary LOW this test was written for.
+    """
     wt = mobile / ".worktrees" / "refused-connect"
     (wt / "build").mkdir()
-    v = _rank(home, f"rm -rf {wt}/build", S2)
+    # ``build`` moved the root's ctime, the Linux stamp (``_record``'s WHY).
+    _record(home, wt)
+    v = _rank(home, f"rm -rf {wt}/build", S)
     assert v.risk is Risk.LOW, v.targets[0].reason
+    v = _rank(home, f"rm -rf {wt}/build", S2)
+    assert v.risk is Risk.HIGH, v.targets[0].reason
+    assert f"created by another session ({S}" in v.targets[0].reason
+    assert "linked worktree" not in v.targets[0].reason
 
 
 def test_rm_of_a_symlink_to_a_worktree_removes_only_the_link(home: Path, mobile: Path) -> None:
