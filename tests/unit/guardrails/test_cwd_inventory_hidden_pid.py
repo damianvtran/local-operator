@@ -89,7 +89,7 @@ def fake_proc(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]
     monkeypatch.setattr(prov, "os", fake_os)
     monkeypatch.setattr(iwa, "os", fake_os)
     monkeypatch.setattr(prov, "_cwd_inventory_cache", None)
-    marks = {HIDDEN: prov.ProcMark(start=359, switches=1, on_cpu=False, threads=1)}
+    marks = {HIDDEN: prov.ProcMark(start=359, switches=1, on_cpu=False, threads=1, runs=1)}
     monkeypatch.setattr(prov, "_proc_mark", lambda pid: marks.get(pid))
     return {"state": state, "marks": marks, "elsewhere": elsewhere}
 
@@ -175,6 +175,10 @@ def test_a_hidden_pid_that_has_not_run_since_the_spawn_lets_the_add_settle(fake_
         "multi-threaded-at-settle",
         # ...and "R" at the snapshot means it may never have switched out at all.
         "on-cpu-at-snapshot",
+        # PR #3980 round 2: switched in (and so ran) since, though its status
+        # still reads asleep with the old switch total.
+        "switched-in-since",
+        "unreadable-at-settle",
     ],
 )
 def test_a_hidden_pid_that_might_be_inside_blocks_the_settle(fake_proc, repo, case):
@@ -200,7 +204,10 @@ def test_a_hidden_pid_that_might_be_inside_blocks_the_settle(fake_proc, repo, ca
         "on-cpu": before._replace(on_cpu=True),
         "pid-reused": before._replace(start=before.start + 1),
         "multi-threaded-at-settle": before._replace(threads=2),
+        "switched-in-since": before._replace(runs=before.runs + 1),
     }.get(case, before)
+    if case == "unreadable-at-settle":
+        del marks[HIDDEN]  # _proc_mark -> None: no proof
     started = time.time() - 1
     tree = _killed_add(repo, "b")
     done = iwa.settle_after_kill(
@@ -255,8 +262,14 @@ def test_proc_mark_of_a_sleeping_process_is_stable_and_off_cpu():
 
 @needs_proc
 def test_proc_mark_sees_the_reader_itself_running():
-    mark = prov._proc_mark(os.getpid())
-    assert mark is not None and mark.on_cpu
+    # A running reader may take a tick (or a preemption) between its two
+    # schedstat reads, which rightly gives no mark: retry for a quiet pair.
+    mark = None
+    for _ in range(200):
+        mark = prov._proc_mark(os.getpid())
+        if mark is not None:
+            break
+    assert mark is not None and mark.on_cpu and mark.runs > 0
     assert prov._proc_mark(2**22 + 12345) is None  # no such pid: no mark, no proof
 
 
@@ -303,6 +316,8 @@ def _hidden_helper(threads: int) -> subprocess.Popen[str]:
         time.sleep(0.02)
         mark = prov._proc_mark(child.pid)
     assert mark is not None and not mark.on_cpu and mark.threads == threads
+    # schedstat is readable for a non-dumpable process, and counts real runs.
+    assert mark.runs > 0
     return child
 
 
@@ -345,3 +360,84 @@ def test_a_single_threaded_hidden_process_that_slept_is_still_cleared(repo):
     finally:
         child.kill()
         child.wait()
+
+
+# -- the schedstat run count (PR #3980 round 2, R2-MAJOR-1 / Q2) ---------------------
+
+_STATUS = "Name:\th\nState:\tS (sleeping)\nThreads:\t1\n" + (
+    "voluntary_ctxt_switches:\t3\nnonvoluntary_ctxt_switches:\t1\n"
+)
+_STAT = "77 (a (b) c) S " + " ".join(str(n) for n in range(4, 22)) + " 6403843 0 0\n"
+
+
+class _FakeProcFiles:
+    """``open`` for ``/proc/<pid>/{schedstat,status,stat}``, served in read order.
+
+    ``schedstat`` is a list consumed one read at a time (an exception class
+    raises), so a test can make the two reads of one mark differ.
+    """
+
+    def __init__(self, schedstat: list[Any]) -> None:
+        self.schedstat = schedstat
+        self.reads: list[str] = []
+
+    def __call__(self, path: str, *args: Any, **kwargs: Any) -> Any:
+        import io
+
+        leaf = os.path.basename(path)
+        self.reads.append(leaf)
+        if leaf == "schedstat":
+            outcome = self.schedstat.pop(0)
+            if isinstance(outcome, type) and issubclass(outcome, BaseException):
+                raise outcome(path)
+            return io.StringIO(str(outcome))
+        return io.StringIO({"status": _STATUS, "stat": _STAT}[leaf])
+
+
+def _fake_mark(monkeypatch: pytest.MonkeyPatch, *schedstat: Any) -> prov.ProcMark | None:
+    files = _FakeProcFiles(list(schedstat))
+    monkeypatch.setattr(prov, "open", files, raising=False)
+    mark = prov._proc_mark(77)
+    # status sits between the two schedstat reads; stat (start time) is last.
+    if len(files.reads) == 4:
+        assert files.reads == ["schedstat", "status", "schedstat", "stat"]
+    return mark
+
+
+def test_proc_mark_reads_the_run_count_bracketing_status(monkeypatch):
+    mark = _fake_mark(monkeypatch, "27417347 12828048 3011\n", "27417347 12828048 3011\n")
+    assert mark == prov.ProcMark(start=6403843, switches=4, on_cpu=False, threads=1, runs=3011)
+
+
+@pytest.mark.parametrize(
+    "schedstat",
+    [
+        # switched in while status was being read: status may show either side
+        ("27417347 12828048 3011\n", "27426186 12828048 3012\n"),
+        ("0 0 0\n", "0 0 0\n"),  # kernel without CONFIG_SCHED_INFO: no witness
+        (PermissionError, "1 0 1\n"),
+        ("1 0 1\n", FileNotFoundError),
+        ("garbage\n", "garbage\n"),
+    ],
+    ids=["moved-between-reads", "sched-info-off", "unreadable-first", "gone-last", "malformed"],
+)
+def test_proc_mark_without_a_stable_run_count_is_no_proof(monkeypatch, schedstat):
+    assert _fake_mark(monkeypatch, *schedstat) is None
+
+
+@pytest.mark.parametrize(
+    ("settle", "cleared"),
+    [
+        (("1 0 3011\n", "1 0 3011\n"), True),
+        # status and switch total unchanged, but switched in since: it ran.
+        (("1 0 3012\n", "1 0 3012\n"), False),
+        (("0 0 0\n", "0 0 0\n"), False),
+        ((PermissionError, PermissionError), False),
+    ],
+    ids=["unchanged", "switched-in-since", "sched-info-off", "unreadable"],
+)
+def test_cleared_requires_the_same_run_count_through_the_real_mark(monkeypatch, settle, cleared):
+    before = prov.ProcMark(start=6403843, switches=4, on_cpu=False, threads=1, runs=3011)
+    snapshot = iwa.SpawnSnapshot(absent=frozenset({"/t"}), marks={77: before})
+    monkeypatch.setattr(prov, "open", _FakeProcFiles(list(settle)), raising=False)
+    assert snapshot.cleared(77) is cleared
