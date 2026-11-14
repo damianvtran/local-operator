@@ -977,21 +977,29 @@ class ProcMark(NamedTuple):
 
     ``start`` (``/proc/<pid>/stat`` field 22, clock ticks since boot) pins the
     process identity across pid reuse; ``switches`` is the sum of its
-    voluntary and involuntary context switches; ``on_cpu`` is ``State: R``.
-    Both files stay readable for a non-dumpable process whose cwd is not.
+    voluntary and involuntary context switches; ``on_cpu`` is ``State: R``;
+    ``threads`` is ``Threads:``. Both files stay readable for a non-dumpable
+    process whose cwd is not.
+
+    ``State`` and both switch counts belong to the thread-group LEADER only,
+    while the cwd is shared by every thread (``CLONE_FS``): a mark speaks for
+    the whole process only when ``threads`` is 1 (PR #3980 round 1 reproduced
+    a worker thread ``chdir``-ing in under a parked leader's unchanged mark).
     """
 
     start: int
     switches: int
     on_cpu: bool
+    threads: int
 
 
 def _proc_mark(pid: int) -> ProcMark | None:
     """The :class:`ProcMark` of ``pid`` now; ``None`` if it cannot be read.
 
-    ORDER matters. ``status`` prints ``State`` before the switch counts, and
-    ``stat`` (the start time) is read last: a pid reused between the two reads
-    then shows a different start time, which never matches a snapshot.
+    ORDER matters. ``status`` prints ``State`` and ``Threads`` before the
+    switch counts, all from one read, and ``stat`` (the start time) is read
+    last: a pid reused between the two reads then shows a different start
+    time, which never matches a snapshot.
     """
     try:
         with open(f"/proc/{pid}/status", encoding="utf-8") as fh:
@@ -1007,7 +1015,9 @@ def _proc_mark(pid: int) -> ProcMark | None:
         switches = int(fields["voluntary_ctxt_switches"]) + int(
             fields["nonvoluntary_ctxt_switches"]
         )
-        return ProcMark(start, switches, fields["State"].startswith("R"))
+        return ProcMark(
+            start, switches, fields["State"].startswith("R"), int(fields["Threads"])
+        )
     except (OSError, ValueError, KeyError, IndexError, UnicodeError):
         return None
 
