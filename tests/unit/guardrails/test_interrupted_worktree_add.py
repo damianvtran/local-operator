@@ -128,6 +128,34 @@ def test_anything_not_provably_this_calls_add_is_untouched(repo, env, case):
     assert (repo / ".git" / "worktrees" / "c" / "locked").read_text() == reason
 
 
+def test_a_lock_written_after_the_spawn_stamp_is_never_read_as_older(repo, env):
+    # Regression (2026-11-14): with a time.time() stamp the kernel's coarser
+    # file clock made 39 of 40 locks git wrote after the spawn read as older,
+    # so the settle stranded its own lock. The marker stamp shares the file
+    # clock, so every lock written after it is admitted.
+    for n in range(10):
+        command = _cmd(repo, f"s{n}")
+        spawned_at = iwa.spawn_stamp(command)
+        tree = _add(repo, f"s{n}", killed=True)
+        assert iwa.settle_after_kill(command, cwd=None, env=env, spawned_at=spawned_at) == [
+            f"removed {tree}"
+        ]
+
+
+def test_spawn_stamp_marks_only_worktree_commands_and_falls_back(monkeypatch, tmp_path):
+    monkeypatch.setattr(iwa.tempfile, "tempdir", str(tmp_path))
+    before = time.time()
+    assert iwa.spawn_stamp("ls -la") >= before
+    assert iwa.spawn_stamp("git worktree add x") >= before - 1
+    assert list(tmp_path.iterdir()) == []  # the marker never outlives the call
+
+    def refuse(*_a, **_k):
+        raise OSError("read-only temp dir")
+
+    monkeypatch.setattr(iwa.tempfile, "mkstemp", refuse)
+    assert iwa.spawn_stamp("git worktree add x") >= before
+
+
 @pytest.mark.parametrize("live", [True, None])
 def test_a_live_or_unknown_cwd_inside_the_tree_blocks_removal(repo, env, monkeypatch, live):
     # An escaped (setsid/nohup) add would still be checking out; unknown fails closed.
