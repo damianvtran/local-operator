@@ -187,6 +187,7 @@ if TYPE_CHECKING:
     # (see ``DesktopSessionBridge._owner_connection``), and ``AttachedSession``
     # already reaches this module's graph through ``session.attached``.
     from local_operator.mobile.attach_client import AttachClient
+    from local_operator.tools.diff_archive import DiffBindingReadOptions
 
 #: The page ceiling one child read may ask for, in ONE place. The route declares
 #: it on the wire (FastAPI answers a bigger ``limit`` with 422 before the
@@ -1422,6 +1423,10 @@ class DesktopSubscription:
     #: negotiation the runtime's attach gate runs, with the query parameter as
     #: this transport's half).
     supplements: bool = False
+    #: Whether this subscriber declared ``?diff_bindings=1`` (QA F5 on #3762):
+    #: only then does its initial snapshot frame carry nested write/edit
+    #: binding rows. Default False keeps an older renderer's rows unchanged.
+    diff_bindings: bool = False
     journal_order: bool = False
     #: Whether this subscriber negotiated the COMPLETE peer-source contract
     #: (the events route's ``?peer_journal_source=1``): only then does the
@@ -3651,6 +3656,7 @@ class DesktopSessionBridge:
         order_ids: list[str] | None = None,
         peer_journal_source: bool = False,
         supplements: bool = False,
+        diff_bindings: bool = False,
     ) -> dict[str, Any]:
         # THE FRAME'S DEADLINE STARTS HERE, at the request, not at its own read:
         # everything this method does before the page (the attention glance, the
@@ -3766,6 +3772,9 @@ class DesktopSessionBridge:
                 **({"journal_order": True, "order_ids": order_ids} if journal_order else {}),
                 peer_journal_source=peer_journal_source,
                 **supplement_read_options(supplements),
+                # Only when declared, like supplements: a forwarding path that
+                # predates the flag keeps its exact call shape.
+                **cast("DiffBindingReadOptions", {"diff_bindings": True} if diff_bindings else {}),
                 # THE SNAPSHOT'S OWN BUDGET, measured from the request: the frame
                 # read may spend what REMAINS of it on facts and nothing more. See
                 # ``open_frame.OPEN_FRAME_SNAPSHOT_BUDGET_S`` for the figure and
@@ -3890,6 +3899,7 @@ class DesktopSessionBridge:
         source_read: str | None = None,
         expected_journal_generation: str | None = None,
         supplements: bool = False,
+        diff_bindings: bool = False,
         deadline: float | None = None,
     ) -> dict[str, Any]:
         """One page of the durable journal.
@@ -4051,6 +4061,10 @@ class DesktopSessionBridge:
                 journal_order=journal_order,
                 order_ids=order_ids,
                 supplements=self._can_paint_supplements(supplements),
+                # No runtime capability gate: the binding is durable host data
+                # the strip re-validates against THIS session; the viewer's
+                # declaration is the only input.
+                diff_bindings=diff_bindings,
                 # ONLY A CALLER-SUPPLIED DEADLINE bounds the display-only proof
                 # join: that is the snapshot's first frame. A standalone
                 # ``/history`` page keeps waiting for the join, because it is
@@ -4145,6 +4159,7 @@ class DesktopSessionBridge:
         journal_order: bool = False,
         order_ids: list[str] | None = None,
         supplements: bool = False,
+        diff_bindings: bool = False,
         paint_deadline: float | None = None,
     ) -> dict[str, Any]:
         """The paint-only, run-aligned page of ``docs/DESKTOP_API.md`` §"The open frame".
@@ -4187,6 +4202,9 @@ class DesktopSessionBridge:
         through one call, and splitting the parameter list per flag is how the two
         pages would come to disagree about the same rows.
         """
+        # The strip scopes binding rows to the VIEWED session id, never a row's
+        # own claim; ``None`` keeps the pre-flag allow-list exactly.
+        binding_view = self.session_id if diff_bindings else None
         directory = self.root / "sessions" / self.session_id
         if around_id is not None:
             try:
@@ -4211,7 +4229,8 @@ class DesktopSessionBridge:
             result = build_frame(
                 anchored,
                 supplements=supplements,
-                memo=StripMemo(supplements=supplements),
+                diff_bindings=binding_view,
+                memo=StripMemo(supplements=supplements, diff_bindings=binding_view),
                 index=anchored_index,
                 resolved_runs=facts.runs if facts is not None else None,
                 runs_state="building",
@@ -4276,7 +4295,7 @@ class DesktopSessionBridge:
         # strips it twice more. Safe because every row here is this request's own
         # row object built by ``_wire_rows`` (its payload may be shared with the
         # page cache, but the memo keys the request's own envelope dict).
-        strip_memo = StripMemo(supplements=supplements)
+        strip_memo = StripMemo(supplements=supplements, diff_bindings=binding_view)
         for attempt in range(OPEN_FRAME_MAX_RAW_PAGES):
             try:
                 page = await load_transcript_page(
@@ -4323,9 +4342,25 @@ class DesktopSessionBridge:
             page_rows.append((len(rows), page.has_more))
             if not collected:
                 break
-            kept, reached = align_page(collected, limit, supplements=supplements, memo=strip_memo)
-            paintable_rows = paintable(collected, supplements=supplements, memo=strip_memo)
-            if reached and len(paintable(kept, supplements=supplements, memo=strip_memo)) >= limit:
+            kept, reached = align_page(
+                collected,
+                limit,
+                supplements=supplements,
+                memo=strip_memo,
+                diff_bindings=binding_view,
+            )
+            paintable_rows = paintable(
+                collected, supplements=supplements, memo=strip_memo, diff_bindings=binding_view
+            )
+            if (
+                reached
+                and len(
+                    paintable(
+                        kept, supplements=supplements, memo=strip_memo, diff_bindings=binding_view
+                    )
+                )
+                >= limit
+            ):
                 break
             # THE INDEX IS FETCHED AFTER THE FIRST PAGE, DELIBERATELY: the page is
             # what the client asked for and it must not wait behind a scan, while
@@ -4391,6 +4426,7 @@ class DesktopSessionBridge:
                     limit=limit,
                     supplements=supplements,
                     memo=strip_memo,
+                    diff_bindings=binding_view,
                 )
                 if stop is not None and stop < len(page_rows):
                     collected = collected[-sum(rows for rows, _more in page_rows[:stop]) :]
@@ -4408,11 +4444,18 @@ class DesktopSessionBridge:
             index, collected, order_pages, order_ids or [], tail_read, deadline
         )
         step("resolve", facts=facts is not None)
-        kept, reached = align_page(collected, limit, supplements=supplements, memo=strip_memo)
+        kept, reached = align_page(
+            collected,
+            limit,
+            supplements=supplements,
+            memo=strip_memo,
+            diff_bindings=binding_view,
+        )
         result = build_frame(
             kept,
             supplements=supplements,
             memo=strip_memo,
+            diff_bindings=binding_view,
             index=index,
             resolved_runs=facts.runs if facts is not None else None,
             runs_state="building",
@@ -6526,6 +6569,7 @@ class DesktopSessionBridge:
         *,
         frontend_replace: bool = False,
         supplements: bool = False,
+        diff_bindings: bool = False,
         journal_order: bool = False,
         peer_journal_source: bool = False,
     ) -> DesktopSubscription:
@@ -6556,6 +6600,7 @@ class DesktopSessionBridge:
         sub = DesktopSubscription(
             frontend_replace=frontend_replace,
             supplements=supplements,
+            diff_bindings=diff_bindings,
             journal_order=journal_order,
             peer_journal_source=peer_journal_source,
         )
@@ -6609,6 +6654,10 @@ class DesktopSessionBridge:
                 **({"journal_order": True, "order_ids": order_ids} if journal_order else {}),
                 peer_journal_source=peer_journal_source,
                 **supplement_read_options(sub.supplements),
+                **cast(
+                    "DiffBindingReadOptions",
+                    {"diff_bindings": True} if sub.diff_bindings else {},
+                ),
             )
             if open_trace.enabled():
                 open_trace.mark(
@@ -7301,6 +7350,37 @@ def _persisted_children(
             return []
         payload = dict(entry.payload.get("details", {}))
     return list(roster_records(payload))
+
+
+def _diff_page(
+    session_dir: Path,
+    session_id: str,
+    call_id: str,
+    start: int,
+    limit: int,
+    offset: int,
+    root: Path,
+) -> dict[str, Any]:
+    """``diff_archive.load_page`` with its refusals mapped to the host's errors.
+
+    Not-found becomes ``KeyError`` (uniform 404 via ``errors()``); a bad page
+    request stays :class:`~local_operator.tools.diff_archive.DiffPageRangeError`
+    for the route to answer 422.
+    """
+    from local_operator.tools import diff_archive
+
+    try:
+        return diff_archive.load_page(
+            session_dir,
+            session_id,
+            call_id,
+            start=start,
+            limit=limit,
+            offset=offset,
+            config_root=root,
+        )
+    except diff_archive.DiffArchiveNotFound:
+        raise KeyError("Unknown tool call") from None
 
 
 def _contained_child_dir(root: Path, session_id: str, child_id: str) -> Path:
@@ -8857,6 +8937,67 @@ class DesktopSessions:
                 raise KeyError("Unknown attachment")
             data_b64, mime_type = resolved
             return base64.b64decode(data_b64), mime_type
+
+        return await asyncio.to_thread(read)
+
+    async def tool_call_diff(
+        self,
+        session_id: str,
+        call_id: str,
+        *,
+        start: int = 0,
+        limit: int = 200,
+        offset: int = 0,
+    ) -> dict[str, Any]:
+        """One page of a write/edit call's complete, source-redacted diff.
+
+        The durable read behind the tool card's "full diff" view: the inline
+        preview keeps 200 rows, and the rest lives in the redacted archive
+        (``tools/diff_archive``). Outside :meth:`session` for the same reason
+        as :meth:`attachment` -- reading a finished conversation's evidence
+        must not start a runtime. The id gate is the attachment route's (shape
+        first, then a USER conversation on this device), and membership is
+        then proved by ``diff_archive.load_page`` from this session's own
+        transcript: the call must be a persisted write/edit row and the
+        artifact header must name this session and call. Every refusal is a
+        ``KeyError`` so the route's 404 cannot tell an unknown session from a
+        foreign call. A peer's conversation has no local archive and refuses
+        the same way.
+        """
+
+        def read() -> dict[str, Any]:
+            if not SESSION_ID.fullmatch(session_id):
+                raise KeyError("Unknown session")
+            path = self.root / "sessions" / session_id
+            if not path.is_dir() or not is_user_session(path):
+                raise KeyError("Unknown session")
+            return _diff_page(path, session_id, call_id, start, limit, offset, self.root)
+
+        return await asyncio.to_thread(read)
+
+    async def child_tool_call_diff(
+        self,
+        session_id: str,
+        child_id: str,
+        call_id: str,
+        *,
+        start: int = 0,
+        limit: int = 200,
+        offset: int = 0,
+    ) -> dict[str, Any]:
+        """The child twin of :meth:`tool_call_diff`, behind the child containment proof.
+
+        The subagent reader is where the operator reported the missing rows,
+        so this is the primary door. ``_contained_child_dir`` refuses an
+        unknown parent, a child the parent never launched and a non-subagent
+        directory before the transcript is touched; the archive is then bound
+        to the CHILD'S own session id (its directory name, which is the id its
+        loop stamped on the artifact).
+        """
+
+        def read() -> dict[str, Any]:
+            child_dir = _contained_child_dir(self.root, session_id, child_id)
+            return _diff_page(child_dir, child_dir.name, call_id, start, limit, offset, self.root)
 
         return await asyncio.to_thread(read)
 

@@ -975,6 +975,10 @@ def is_agent_forwarding_call(tool_name: str, arguments: Mapping[str, Any]) -> bo
     return operation not in _FORWARDING_READ_OPS.get(tool_name, frozenset())
 
 
+#: ``(before, after, preview_rows, full)`` -- see ``ToolResult._diff_source``.
+DiffSourceCarrier = tuple[str, str, tuple[str, ...], tuple[str, ...] | str | None]
+
+
 class ToolResult(BaseModel):
     """The outcome of executing one ``ToolCall``.
 
@@ -1013,7 +1017,10 @@ class ToolResult(BaseModel):
 
     # The write/edit SOURCE EVIDENCE: the complete raw ``before``/``after``
     # file texts plus the raw rendered diff preview, as
-    # ``(before, after, preview_rows)``. While it is attached,
+    # ``(before, after, preview_rows, full)``. ``full`` is the COMPLETE raw
+    # diff the preview was cut from (``None`` when nothing was cut, the string
+    # ``"oversized"`` past the archive ceiling); the seam archives its
+    # source-redacted form (``tools/diff_archive``). While it is attached,
     # ``details['diff']`` holds only the withheld receipt. The native loop's
     # seam (``AgentLoop._settle_write_diff``) redacts each COMPLETE side once,
     # masks every preview row whose source line the redactor touched, then runs
@@ -1030,7 +1037,7 @@ class ToolResult(BaseModel):
     # event copy or deep-copied trajectory row would keep raw file text alive.
     # Only the ORIGINAL object carries it; a result that never reaches the
     # seam keeps the withheld receipt (fail-closed by construction).
-    _diff_source: tuple[str, str, tuple[str, ...]] | None = PrivateAttr(default=None)
+    _diff_source: DiffSourceCarrier | None = PrivateAttr(default=None)
 
     def __copy__(self) -> "ToolResult":
         copied = super().__copy__()
@@ -1049,7 +1056,7 @@ class ToolResult(BaseModel):
             state = {**state, "__pydantic_private__": {**private, "_diff_source": None}}
         return state
 
-    def take_diff_source(self) -> tuple[str, str, tuple[str, ...]] | None:
+    def take_diff_source(self) -> DiffSourceCarrier | None:
         """Return and CLEAR the raw source-evidence carrier (single consumption)."""
         source = self._diff_source
         self._diff_source = None
@@ -4037,6 +4044,16 @@ class LoopConfig(BaseModel):
     #: should hold to; anything that touches disk, a lock or a socket belongs on
     #: the far side of a queue, not here.
     capture_prepared_write: Callable[[ToolCall, ToolResult], None] | None = None
+    #: Durably bind a NESTED (``eval`` -> ``tool('write'|'edit')``) archived
+    #: full diff to this session as ``(outer_call_id, call_id, tool_name,
+    #: descriptor)``; returns ``True`` only once the binding is written. AWAITED
+    #: by the eval bridge before the descriptor reaches the nested end event or
+    #: the cell (see ``tools.diff_archive.NESTED_DIFF_BINDING_TYPE``): a nested
+    #: call has no tool row of its own, so this host-written journal entry is
+    #: what the diff routes prove membership with. ``None`` (a host without a
+    #: journal) or ``False`` downgrades the descriptor to ``unavailable``
+    #: rather than advertise an archive no route could serve.
+    bind_nested_diff: Callable[[str, str, str, dict[str, Any]], Awaitable[bool]] | None = None
     #: The session's divergence observer (``local_operator.divergence.
     #: DivergenceJudge``), or ``None`` for a host that does not wire one.
     #:
