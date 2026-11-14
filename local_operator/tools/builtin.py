@@ -4700,9 +4700,9 @@ async def execute_bash(
             return _error(tool_call_id, "bash", shell_write.spawn_refusal())
         shell_argv = wrapped
     spawn_options = detached_popen_kwargs()
-    # Wall clock, not monotonic: compared with the mtime of a lock git writes
-    # during this call (guardrails/interrupted_worktree_add.py).
-    spawned_at = time.time()
+    # Filesystem clock, not monotonic or wall: compared with the mtime of a
+    # lock git writes during this call (guardrails/interrupted_worktree_add.py).
+    spawned_at = interrupted_worktree_add.spawn_stamp(params.command)
     try:
         process = await asyncio.create_subprocess_exec(
             *shell_argv,

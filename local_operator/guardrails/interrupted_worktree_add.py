@@ -28,7 +28,8 @@ CONSTRAINTS (fail closed: anything unproven is left alone):
 * ``<path>/.git`` names a registration whose ``gitdir`` points back at exactly
   that path. A path that is some other tree, or no tree, is not ours to touch.
 * The registration's ``locked`` file reads exactly ``initializing`` and was
-  written at or after the call's spawn: git wrote it during THIS call, so a
+  written at or after the call's spawn, read from the filesystem clock
+  (:func:`spawn_stamp`): git wrote it during THIS call, so a
   lock on a pre-existing tree, or a reason someone chose, is never touched.
   A command passing ``--lock`` asked to keep its lock, so it is skipped.
 * The process group is gone and no live process has its cwd inside the tree,
@@ -43,6 +44,7 @@ import contextlib
 import logging
 import os
 import subprocess
+import tempfile
 import threading
 import time
 from collections.abc import Mapping
@@ -110,6 +112,42 @@ def _git(admin: str, env: Mapping[str, str], *args: str) -> bool:
     if proc.returncode != 0:
         logger.debug("interrupted worktree add: git %s: %s", args, proc.stderr.strip())
     return proc.returncode == 0
+
+
+def spawn_stamp(command: str) -> float:
+    """The ``spawned_at`` to pass :func:`settle_after_kill`, taken just before spawn.
+
+    Why the filesystem clock, not ``time.time()``: the settle compares this
+    with the mtime git gives ``locked``, and the kernel stamps files from its
+    own (coarse) clock, which can trail the wall clock. Measured on Linux
+    6.18 / xfs + tmpfs (2026-11-14), a lock git wrote 5-12 ms AFTER a
+    ``time.time()`` read was stamped EARLIER than it in 39 of 40 adds (by up
+    to 1.3 ms), so the settle took the call's own lock for an older one and
+    left it locked ``initializing``. Stamping a fresh marker file and reading
+    its mtime puts both sides on the same clock and granularity: 0 of 80 locks
+    read earlier (40 with the marker in the temp dir, 40 on the repo's own
+    filesystem), so no threshold is needed and nothing older than the spawn
+    is admitted.
+
+    Only commands that could add a worktree pay for the marker (one create,
+    stat and unlink in the temp dir). If it cannot be written, the wall clock
+    is the fallback: the settle may then skip a lock it owns, which leaves
+    exactly what the harness left before this module existed.
+    """
+    if os.name != "posix" or "worktree" not in command:
+        return time.time()
+    try:
+        fd, path = tempfile.mkstemp(prefix=".lop-spawn-stamp-")
+    except OSError:
+        return time.time()
+    try:
+        return os.fstat(fd).st_mtime
+    except OSError:
+        return time.time()
+    finally:
+        os.close(fd)
+        with contextlib.suppress(OSError):
+            os.unlink(path)
 
 
 def settle_after_kill(
