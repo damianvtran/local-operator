@@ -571,6 +571,14 @@ _MODEL_INTENT_PENDING = (
 #: slots the way an attempt-unbounded loop can, and a longer cap here would only
 #: add latency to a bind a caller is waiting on. Do not re-unify them.
 _BIND_RETRY_ATTEMPTS = 3
+#: Extra engages when ``engage`` returned OK but the registry then holds no
+#: record. ``engage_runtime`` treats a record it finds as "a runtime exists" and
+#: returns without spawning; if that record was the DYING owner's (socket closed,
+#: record not yet removed — a runtime refresh), it is gone milliseconds later and
+#: nothing is left to bind. Each re-engage re-reads the registry, so one is
+#: normally enough; two covers a second retiring owner. Bounded by count AND by
+#: the bind's remaining deadline, never open-ended.
+_BIND_REENGAGE_ATTEMPTS = 2
 _BIND_RETRY_INITIAL_S = 0.1
 _BIND_RETRY_FACTOR = 1.7
 _BIND_RETRY_DELAY_CAP_S = 0.5
@@ -4904,6 +4912,7 @@ class AttachedSession:
             return
         from local_operator.mobile.attach_client import dialable_owner_record
         from local_operator.session.runtime.launch import (
+            DEFAULT_DEADLINE_S as _ENGAGE_DEADLINE_CAP_S,
             ActionableConnectionError,
             RuntimeStartupError,
             WarmErrand,
@@ -4919,48 +4928,60 @@ class AttachedSession:
         # None.
         preempt = None if foreground else self._foreground_arrived
 
-        try:
-            # ROUTED THROUGH THE OWNER SEAM (§3.1): "is there a runtime, and whose
-            # job is it to start one?" is a question a local install answers from
-            # ``run/mobile`` and a mesh viewer answers by asking the peer. The
-            # facade does not learn which — it hands over the errand and the
-            # budgets it has always handed over.
-            await self._owner.engage(
-                cwd=self._cwd,
-                warm=WarmErrand(
-                    initial_model=self._birth_model,
-                    model_selection_override=self._model_selection_override,
-                ),
-                # The engage yields TIME, not the runtime: a candidate it
-                # spawned keeps constructing and the foreground caller's own
-                # engage finds it. See `engage_runtime`'s docstring for why a
-                # shortened deadline rather than a cancellation.
-                preempt=preempt,
-                preempt_budget_s=_BACKGROUND_YIELD_BUDGET_S,
-            )
-        except TimeoutError as error:
-            # The engage ran out of deadline — either its own 30 s or, when a
-            # foreground caller arrived, the yield budget above. Both mean the
-            # same thing to this caller (no runtime was reached in the time
-            # available), and `_ensure_bound` is documented to fail with
-            # `ConnectionError`, so a bare `TimeoutError` escaping here would
-            # reach surfaces that only catch the latter.
-            logger.debug("engage timed out for %s: %s", self._session_id, error)
-            raise ConnectionError(self._unavailable_reason()) from error
-        except RuntimeStartupError as error:
-            # engage_runtime now fails FAST once no candidate can start,
-            # carrying the child's own cause. Re-raised as ConnectionError
-            # so it takes the existing owner-unavailable path, but keeping
-            # the vetted user-facing sentence when there is one, instead of
-            # a generic timeout nobody can act on (QA Q1).
-            logger.warning("engage failed for %s: %s", self._session_id, error)
-            # The vetted sentence rides a TYPE, so a relay can echo it
-            # without having to guess from the text which messages are safe
-            # to show. Anything unvetted stays a plain ConnectionError and
-            # gets the generic sentence at the surface.
-            if error.actionable:
-                raise ActionableConnectionError(error.actionable) from error
-            raise ConnectionError(self._unavailable_reason()) from error
+        async def _engage_owner(deadline_s: float | None = None) -> None:
+            """One engage through the owner seam, failures mapped to ``ConnectionError``.
+
+            A closure so the vanished-record arm below re-engages through the
+            SAME error mapping rather than a second copy of it.
+            """
+            try:
+                # ROUTED THROUGH THE OWNER SEAM (§3.1): "is there a runtime, and whose
+                # job is it to start one?" is a question a local install answers from
+                # ``run/mobile`` and a mesh viewer answers by asking the peer. The
+                # facade does not learn which — it hands over the errand and the
+                # budgets it has always handed over.
+                await self._owner.engage(
+                    cwd=self._cwd,
+                    warm=WarmErrand(
+                        initial_model=self._birth_model,
+                        model_selection_override=self._model_selection_override,
+                    ),
+                    # The engage yields TIME, not the runtime: a candidate it
+                    # spawned keeps constructing and the foreground caller's own
+                    # engage finds it. See `engage_runtime`'s docstring for why a
+                    # shortened deadline rather than a cancellation.
+                    preempt=preempt,
+                    preempt_budget_s=_BACKGROUND_YIELD_BUDGET_S,
+                    # Only the re-engage passes one; the first engage keeps the
+                    # owner's default so its behaviour is unchanged.
+                    **({} if deadline_s is None else {"deadline_s": deadline_s}),
+                )
+            except TimeoutError as error:
+                # The engage ran out of deadline — either its own 30 s or, when a
+                # foreground caller arrived, the yield budget above. Both mean the
+                # same thing to this caller (no runtime was reached in the time
+                # available), and `_ensure_bound` is documented to fail with
+                # `ConnectionError`, so a bare `TimeoutError` escaping here would
+                # reach surfaces that only catch the latter.
+                logger.debug("engage timed out for %s: %s", self._session_id, error)
+                raise ConnectionError(self._unavailable_reason()) from error
+            except RuntimeStartupError as error:
+                # engage_runtime now fails FAST once no candidate can start,
+                # carrying the child's own cause. Re-raised as ConnectionError
+                # so it takes the existing owner-unavailable path, but keeping
+                # the vetted user-facing sentence when there is one, instead of
+                # a generic timeout nobody can act on (QA Q1).
+                logger.warning("engage failed for %s: %s", self._session_id, error)
+                # The vetted sentence rides a TYPE, so a relay can echo it
+                # without having to guess from the text which messages are safe
+                # to show. Anything unvetted stays a plain ConnectionError and
+                # gets the generic sentence at the surface.
+                if error.actionable:
+                    raise ActionableConnectionError(error.actionable) from error
+                raise ConnectionError(self._unavailable_reason()) from error
+
+        await _engage_owner()
+
         # Re-checked AFTER the engage, which is the long await here (a
         # spawn plus up to ~2 s of construction). The TUI engages at mount
         # now, so `/resume` or `/new` typed in that first second disposes
@@ -4988,6 +5009,7 @@ class AttachedSession:
 
         delay = _BIND_RETRY_INITIAL_S
         last_error: BaseException | None = None
+        reengages = 0
         for attempt in range(_BIND_RETRY_ATTEMPTS):
             # Re-checked on EVERY attempt, not once on entry. The awaits
             # below (a dial, a sync wait, a backoff sleep) are all points
@@ -5042,6 +5064,49 @@ class AttachedSession:
                 # candidate doomed to lose the race while telling the user their
                 # session has no runtime.
                 record = await asyncio.to_thread(dialable_owner_record, self._config_dir, owner)
+            # THE RECORD ``engage`` SAW CAN BE THE DYING OWNER'S: it answered "a
+            # runtime exists" without spawning, and the record was removed before
+            # the lookup above (the runtime-refresh flake: no successor was ever
+            # started). Engage AGAIN — the registry is re-read, so the dead record
+            # no longer satisfies it — bounded by a small count and what is left of
+            # this bind's deadline. Skipped when an earlier attempt produced a
+            # reason (that diagnosis wins, below). An engage that itself fails
+            # propagates unchanged through the same error mapping.
+            if record is None and last_error is None:
+                for _ in range(_BIND_REENGAGE_ATTEMPTS):
+                    remaining = _effective_deadline() - time.monotonic()
+                    if remaining <= 0:
+                        break
+                    reengages += 1
+                    try:
+                        # NOT ``wait_for(_engage_owner())``: that CANCELS
+                        # ``engage_runtime`` mid-flight, which its docstring rules
+                        # out (a cancelled engage leaks the capture tempfile and
+                        # loses the child's reason). The remaining budget rides in
+                        # as the engage's own deadline, so it expires through its
+                        # normal TimeoutError path. Capped at the default 30 s so
+                        # a generous background budget does not lengthen a
+                        # re-engage beyond the first.
+                        await _engage_owner(min(remaining, _ENGAGE_DEADLINE_CAP_S))
+                    except ConnectionError as error:
+                        # ``_engage_owner`` maps the engage's own TimeoutError to
+                        # ConnectionError, so a deadline expiry arrives as that
+                        # with the TimeoutError as its cause. Out of this bind's
+                        # budget: a candidate the engage spawned keeps
+                        # constructing for the next engage. Any other engage
+                        # failure (startup, actionable) propagates unchanged.
+                        if not isinstance(error.__cause__, TimeoutError):
+                            raise
+                        break
+                    if self._disposed:
+                        return
+                    record, owner = await asyncio.to_thread(self._owner.locate)
+                    if record is None and owner is not None:
+                        record = await asyncio.to_thread(
+                            dialable_owner_record, self._config_dir, owner
+                        )
+                    if record is not None:
+                        break
             if record is None:
                 # No record at all is not a transient the way a refused
                 # dial is — ``engage_runtime`` returned, so one existed
@@ -5070,7 +5135,8 @@ class AttachedSession:
                     if getattr(last_error, "owner_alive", False):
                         raise ConnectionError(str(last_error)) from last_error
                     raise last_error
-                raise ConnectionError("could not start a runtime for this session")
+                tried = f" (re-engaged {reengages}x, no record appeared)" if reengages else ""
+                raise ConnectionError("could not start a runtime for this session" + tried)
             try:
                 # Clamp the ATTEMPT to what is left of the budget, not just
                 # the backoff between attempts. Without this a second

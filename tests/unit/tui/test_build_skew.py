@@ -2066,3 +2066,149 @@ async def test_the_refresh_note_does_not_restate_the_version_twice(monkeypatch, 
     assert len(notices) == 1, notices
     assert "0.51.30, aaaaaaa \u2192 bbbbbbb" in notices[0], notices[0]
     assert "newer version" not in notices[0], notices[0]
+
+
+class _ColdThenBound(FakeSession):
+    """Cold viewer whose first ``_ensure_bound`` fails, like a vanished record."""
+
+    def __init__(self, failures: int) -> None:
+        super().__init__()
+        self.is_cold = True
+        self.binds = 0
+        self._failures = failures
+
+    async def _ensure_bound(self, *, foreground: bool = True) -> None:
+        self.binds += 1
+        if self.binds <= self._failures:
+            raise ConnectionError("could not start a runtime for this session")
+        self.is_cold = False
+
+
+async def _settle_engage(app, pilot, session, *, expect: int) -> None:
+    for _ in range(50):
+        await pilot.pause()
+        if session.binds >= expect and not app._warm_engage_started:
+            break
+        if session.binds >= expect and not session.is_cold:
+            break
+        await asyncio.sleep(0.02)
+    # A few more turns so an unexpected extra retry would show up.
+    for _ in range(5):
+        await pilot.pause()
+        await asyncio.sleep(0.02)
+
+
+@pytest.mark.asyncio
+async def test_a_refresh_engage_that_fails_fast_is_retried_once(monkeypatch, tmp_path) -> None:
+    """The refresh engage is nobody's keystroke, so a quick failure must not stay cold.
+
+    The runtime-refresh flake left the TUI cold after an idle refresh because
+    the speculative engage swallowed a fast failure and nothing re-armed it.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 24)) as pilot:
+        await pilot.pause()
+        session = _ColdThenBound(failures=1)
+        app._session = session
+        monkeypatch.setattr(app, "_runtime_can_start", lambda: True)
+        app._start_runtime_engage(reason="refresh")
+        await _settle_engage(app, pilot, session, expect=2)
+
+    assert session.binds == 2, "one retry after the swallowed failure"
+    assert session.is_cold is False
+
+
+@pytest.mark.asyncio
+async def test_a_refresh_engage_retries_at_most_once(monkeypatch, tmp_path) -> None:
+    """Negative control: a persistent failure is retried once, never in a loop."""
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 24)) as pilot:
+        await pilot.pause()
+        session = _ColdThenBound(failures=99)
+        app._session = session
+        monkeypatch.setattr(app, "_runtime_can_start", lambda: True)
+        app._start_runtime_engage(reason="refresh")
+        await _settle_engage(app, pilot, session, expect=2)
+
+    assert session.binds == 2
+    assert session.is_cold is True
+
+
+class _FailsThen(_ColdThenBound):
+    """Cold viewer that raises a chosen error from its first bind, with a hook."""
+
+    def __init__(self, error: Exception, on_fail=None) -> None:
+        super().__init__(failures=99)
+        self._error = error
+        self._on_fail = on_fail
+
+    async def _ensure_bound(self, *, foreground: bool = True) -> None:
+        self.binds += 1
+        if self._on_fail is not None and self.binds == 1:
+            self._on_fail()
+        raise self._error
+
+
+@pytest.mark.asyncio
+async def test_a_binding_swap_during_the_refresh_engage_is_not_retried(
+    monkeypatch, tmp_path
+) -> None:
+    """A swap between the failed engage and the retry arm must not revive the old session."""
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 24)) as pilot:
+        await pilot.pause()
+        session = _FailsThen(
+            ConnectionError("vanished"), on_fail=lambda: setattr(app, "_binding_epoch", 10_000)
+        )
+        app._session = session
+        monkeypatch.setattr(app, "_runtime_can_start", lambda: True)
+        app._start_runtime_engage(reason="refresh")
+        await _settle_engage(app, pilot, session, expect=2)
+
+    assert session.binds == 1, "the outgoing binding must not be engaged again"
+
+
+@pytest.mark.asyncio
+async def test_a_paint_first_refresh_engage_is_not_retried(monkeypatch, tmp_path) -> None:
+    """With an attach attempt the row owns the failure story; no second engage."""
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    app = OperatorApp(lambda: _factory(FakeSession()))
+
+    class _Attempt:
+        def join(self) -> None: ...
+        def landed(self) -> None: ...
+        def carrier_left(self) -> None: ...
+        def carrier_failed(self) -> bool:
+            return True
+
+    async with app.run_test(size=(100, 24)) as pilot:
+        await pilot.pause()
+        session = _FailsThen(ConnectionError("vanished"))
+        app._session = session
+        monkeypatch.setattr(app, "_runtime_can_start", lambda: True)
+        monkeypatch.setattr(app, "_attach_behind_attempt_for", lambda *_a, **_k: _Attempt())
+        app._start_runtime_engage(reason="refresh")
+        await _settle_engage(app, pilot, session, expect=2)
+
+    assert session.binds == 1
+
+
+@pytest.mark.asyncio
+async def test_an_actionable_refresh_failure_is_not_retried(monkeypatch, tmp_path) -> None:
+    """A vetted actionable reason is a definitive answer, not a vanished-record race."""
+    from local_operator.session.runtime.launch import ActionableConnectionError
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 24)) as pilot:
+        await pilot.pause()
+        session = _FailsThen(ActionableConnectionError("Your API key is missing."))
+        app._session = session
+        monkeypatch.setattr(app, "_runtime_can_start", lambda: True)
+        app._start_runtime_engage(reason="refresh")
+        await _settle_engage(app, pilot, session, expect=2)
+
+    assert session.binds == 1
