@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "hi",
   "namespace": "mobile.setup",
-  "history_sha256": "9a0be2cd635315c2562b1744e6e0035274990bb4f5fc331c08ed225bcd14e23f",
+  "history_sha256": "0d898a713274658b9e8ba0ac2a3689a22b3edbb6e1d7f1565e4c9b0f4632cd17",
   "entries": [
     {
       "locale": "hi",
@@ -96,6 +96,29 @@
       "evidence": "i18n/audits/evidence/hi/mobile.setup/a3/record.json",
       "round": "a3",
       "keys_audited": 12
+    },
+    {
+      "locale": "hi",
+      "namespace": "mobile.setup",
+      "source_sha256": "d99fe54d374c3e0548c1c1f0775b99039a85c8b3085c097a443d12872e36429b",
+      "translator": {
+        "agent": "coder subagent of host Local Operator session 25fe8dfbf610 (values committed in 139bca903 on fix/tunnel-remedy-no-commands; English source by the same coder)",
+        "model": null,
+        "date": "2026-11-14"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team), independent Local Operator session b3a764eb5573; not the translator/coder (25fe8dfbf610); edited no catalogue value",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-14",
+        "result": "passed",
+        "findings": 1,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "a4: independent hi audit by translation-auditor b3a764eb5573 (anthropic/claude-opus-5-5) of #3958 values at 139bca903: PASSED, 0 blocker/major (HI4-m1 minor, deferred to the PR thread); 3 new keys (operation_failed_tui, disabled_resume, billing_lapsed_resume), mobile_bundle_tui removal verified. Evidence: i18n/audits/evidence/hi/mobile.setup/a4/record.json",
+      "evidence": "i18n/audits/evidence/hi/mobile.setup/a4/record.json",
+      "round": "a4",
+      "keys_audited": 3
     }
   ]
 }
