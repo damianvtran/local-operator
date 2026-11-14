@@ -864,6 +864,12 @@ def mobile_action(
         if action in {"enable", "status"}:
             from local_operator.tunnels import setup
 
+            if await asyncio.to_thread(setup.auto_reconnecting):
+                # The post-sign-in run owns `setup.lock`: say so (a wait, no
+                # command) rather than the stale paused step it is clearing, or an
+                # `enable` that would only meet "setup is in progress". The desktop
+                # routes answer the same plan (U10), so the TUI cannot disagree.
+                return setup.text(setup.reconnecting_plan(), surface="tui")
             plan = (
                 await setup.apply(selected, accepted, progress=progress)
                 if action == "enable"

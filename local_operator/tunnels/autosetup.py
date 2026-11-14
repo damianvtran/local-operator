@@ -1,14 +1,16 @@
 """The post-sign-in no-spend setup run's journal, and whether it is running now.
 
-Its own module because two READ paths need the answer and neither may load
-`tunnels.setup` (the CLI, installers and mobile bundle behind it): the desktop's
-`GET /v1/desktop/tunnel` and `GET /v1/auth/status`, both polled. Only the
-standard library, `tunnels.config` and the kernel-claim helper are imported.
+Its own module because the polled READ paths need the answer and must not load
+`tunnels.setup` (the CLI, installers and mobile bundle behind it):
+`report.local_payload` (`GET /v1/desktop/tunnel`) and the desktop setup route
+(`GET`/`POST /v1/desktop/tunnel/setup`). Only the standard library,
+`tunnels.config` and the kernel-claim helper are imported.
 """
 
 from __future__ import annotations
 
 import json
+import os
 from typing import Any
 
 from local_operator.config_writer import nonblocking_file_claim
@@ -44,20 +46,65 @@ def setup_lock_held() -> bool:
 def auto_reconnecting() -> bool:
     """Whether the post-sign-in no-spend run is reconnecting this tunnel NOW.
 
-    Both facts are required: the journal says the run that holds the lock is the
-    unattended one, and the held lock says it is still alive. Read by both
-    desktop GETs (U10) so the background heal is visible instead of looking like
-    a stuck "not active" tunnel, and by the setup POST, which answers this state
-    rather than a `setup_in_progress` refusal.
+    All three facts are required (#3945 round 1, R1): the journal says the
+    unattended run wrote ``running`` (it does so only once it HOLDS
+    `setup.lock`, `setup.command`), its recorded pid is still alive, and some
+    process holds the lock. The pid check is what a crash needs: a SIGKILLed or
+    rebooted run leaves ``running`` behind, and without it the next lock holder
+    (the desktop's own run) read as "reconnecting" with no button. Read by
+    `report.local_payload` (`GET /v1/desktop/tunnel`) and the setup route
+    (U10), so the background heal is visible instead of a stale "paused" step,
+    and by the setup POST, which answers this state rather than a 409.
     """
+    journal = _read_journal()
+    return (
+        journal is not None
+        and journal.get("state") == "running"
+        and _pid_alive(journal.get("pid"))
+        and setup_lock_held()
+    )
+
+
+def _read_journal() -> dict[str, Any] | None:
     try:
         journal = json.loads((config.directory() / AUTO_JOURNAL).read_text())
     except (OSError, ValueError):
+        return None
+    return journal if isinstance(journal, dict) else None
+
+
+def _pid_alive(pid: object) -> bool:
+    """Whether ``pid`` names a live process (a journal without one is not live)."""
+    if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
         return False
-    return isinstance(journal, dict) and journal.get("state") == "running" and setup_lock_held()
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        # Exists, owned by someone else: alive. (Not expected for our own run.)
+        return True
+    except OSError:
+        return False
+    return True
 
 
-def write_journal(record: dict[str, Any]) -> None:
+def write_journal(record: dict[str, Any], *, unless_live_other: bool = False) -> None:
+    """Write the journal (best-effort).
+
+    ``unless_live_other``: skip the write while ANOTHER live pid's ``running``
+    record stands — a run that never claimed the lock (it stopped at a quote,
+    say) must not erase the claimant's state from the desktop's view.
+    """
+    if unless_live_other:
+        current = _read_journal()
+        if (
+            current is not None
+            and current.get("state") == "running"
+            and current.get("pid") != os.getpid()
+            and _pid_alive(current.get("pid"))
+        ):
+            return
     # Best-effort: the journal is a visibility aid, and failing to write it must
     # not stop the reconnect it describes.
     try:

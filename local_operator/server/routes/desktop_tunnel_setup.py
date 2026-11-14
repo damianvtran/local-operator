@@ -225,6 +225,25 @@ def _identity_fields(plan: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+async def _reconnecting_reply(credential_id: int | None) -> CRUDResponse[Any]:
+    """The POST's answer while the background reconnect holds `setup.lock`.
+
+    The identity comes from this machine's own local plan, never from the
+    request body (#3945 round 1, Q4): echoing ``credential_id: 999`` stated a
+    client value as fact. An id this device does not hold gets the answer the
+    route gives it without the lock — `observe`'s `owner_choice` — with nothing
+    echoed back.
+    """
+    from local_operator.tunnels import setup
+
+    local = await setup.observe_local(credential_id)
+    known = {c["id"] for c in local.get("credential_choices", [])}
+    if credential_id is not None and credential_id not in known:
+        refusal = setup.unknown_credential_plan(local.get("credential_choices", []))
+        return reply(_contract(refusal, local=True))
+    return reply(_contract(setup.reconnecting_plan(**_identity_fields(local)), local=True))
+
+
 async def drain(app: Any) -> None:
     """Join setup before shutdown closes its auth/worker prerequisites."""
     operation = getattr(app.state, "tunnel_setup_task", None)
@@ -293,12 +312,7 @@ async def setup_action(body: SetupRequest, request: Request) -> CRUDResponse[Any
         # not a 409: the person pressed a button to get phone access back, and
         # that is exactly what is already happening (U10). Nothing is started,
         # so the lock's single-owner guarantee is untouched.
-        return reply(
-            _contract(
-                setup.reconnecting_plan(credential_id=body.credential_id),
-                local=True,
-            )
-        )
+        return await _reconnecting_reply(body.credential_id)
 
     deadline = PLAN_DEADLINE_S if body.action == "plan" else RUN_DEADLINE_S
     # Ephemeral, fixed-copy progress only—not another persisted setup journal.
@@ -335,12 +349,7 @@ async def setup_action(body: SetupRequest, request: Request) -> CRUDResponse[Any
         if await asyncio.to_thread(setup.auto_reconnecting):
             # Lost the race to the background run between the check above and
             # the claim: same answer as if it had been seen first.
-            return reply(
-                _contract(
-                    setup.reconnecting_plan(credential_id=body.credential_id),
-                    local=True,
-                )
-            )
+            return await _reconnecting_reply(body.credential_id)
         raise _refusal(409, "setup_in_progress") from None
     except setup.CorruptSetupIntent:
         raise _refusal(503, "setup_intent_corrupt") from None

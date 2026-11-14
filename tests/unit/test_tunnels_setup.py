@@ -2,6 +2,7 @@
 
 import argparse
 import json
+import os
 import threading
 import time
 from contextlib import closing
@@ -1018,7 +1019,10 @@ async def test_lapsed_billing_is_add_credit_not_a_second_quote(rig):
     plan = await setup.observe(17)
     assert plan["step"] == "billing_lapsed"
     assert plan["ready"] is False
-    assert "Add credit" in plan["remedy"]
+    # The action line names the console and NO setup command (Q2).
+    rendered = setup.text(plan, include_receipts=False)
+    assert "Add credit in the Radient console: https://console.radienthq.com" in rendered
+    assert "lop tunnel setup" not in rendered
 
 
 @pytest.mark.asyncio
@@ -1035,7 +1039,9 @@ async def test_a_console_disabled_tunnel_points_at_the_console_and_is_not_ready(
     rig[1]["status"] = "disabled"
     plan = await setup.observe(17)
     assert plan["step"] == "disabled" and plan["ready"] is False
-    assert "console.radienthq.com" in plan["remedy"]
+    rendered = setup.text(plan, surface="tui", include_receipts=False)
+    assert "Turn phone access back on in the Radient console: https://console" in rendered
+    assert "/mobile enable" not in rendered and "lop tunnel" not in rendered
 
 
 @pytest.mark.asyncio
@@ -1137,10 +1143,175 @@ async def test_the_journal_and_a_held_lock_read_as_reconnecting(rig):
     from local_operator.tunnels import autosetup
 
     assert autosetup.auto_reconnecting() is False
-    autosetup.write_journal({"state": "running"})
+    autosetup.write_journal({"state": "running", "pid": os.getpid()})
     # The journal alone is not liveness: a crashed run leaves it behind.
     assert autosetup.auto_reconnecting() is False
     with nonblocking_file_claim(config.directory() / "setup.lock") as acquired:
         assert acquired
         assert autosetup.auto_reconnecting() is True
     assert autosetup.auto_reconnecting() is False
+
+
+# --- #3945 round-1 remediation: titles, actions and the journal ---------------
+
+_CONSOLE = "https://console.radienthq.com/dashboard/tunnels"
+
+
+@pytest.mark.parametrize(
+    "step,title,cli_action,tui_action",
+    [
+        (
+            "reconnect",
+            "Phone access is paused by Radient",
+            "Run lop tunnel setup apply --credential-id 17",
+            "Run /mobile enable --credential-id 17",
+        ),
+        (
+            "billing_lapsed",
+            "Phone access needs more Radient credit",
+            f"Add credit in the Radient console: {_CONSOLE}",
+            f"Add credit in the Radient console: {_CONSOLE}",
+        ),
+        (
+            "disabled",
+            "Phone access is turned off in the Radient console",
+            f"Turn phone access back on in the Radient console: {_CONSOLE}",
+            f"Turn phone access back on in the Radient console: {_CONSOLE}",
+        ),
+        ("network", "Phone access is waiting for the network", None, None),
+        ("radient_unavailable", "Phone access is waiting for Radient", None, None),
+        ("reconnecting", "Phone access is reconnecting", None, None),
+    ],
+)
+def test_each_new_step_has_its_own_title_and_kind_action(step, title, cli_action, tui_action):
+    """Q2: never "could not finish setup"; the action follows the kind."""
+    plan = setup._plan(step, "Remedy sentence.", credential_id=17)
+    for surface, action in (("cli", cli_action), ("tui", tui_action)):
+        lines = setup.text(plan, surface=surface, include_receipts=False).splitlines()
+        assert lines[0] == title
+        assert "could not finish setup" not in "\n".join(lines)
+        if action is None:
+            assert not any(line.startswith(("Run ", "Add credit", "Turn ")) for line in lines)
+        else:
+            assert lines[-1] == action
+        if surface == "tui":
+            assert "lop tunnel" not in "\n".join(lines)
+        if setup.STEP_REMEDY_KIND[step] in ("add_credit", "open_console"):
+            assert "setup apply" not in "\n".join(lines) and "/mobile" not in "\n".join(lines)
+
+
+def test_the_tui_status_shows_reconnecting_while_the_background_run_holds_the_lock(
+    rig, monkeypatch
+):
+    from local_operator.tunnels import cli
+
+    monkeypatch.setattr(setup, "auto_reconnecting", lambda: True)
+    observed = AsyncMock(side_effect=AssertionError("must not observe"))
+    monkeypatch.setattr(setup, "observe", observed)
+    text = cli.mobile_action("status")
+    assert text.splitlines()[0] == "Phone access is reconnecting"
+    assert "/mobile enable" not in text
+
+
+@pytest.mark.asyncio
+async def test_lapsed_with_a_positive_balance_is_the_quote_step(rig):
+    """R4: active + ineligible with credit falls through to the quote step."""
+    save(rig[1])
+    _unserve(rig)
+    rig[0].update(eligible=False, active=True, balance_usd=5, monthly_price_usd="0.05")
+    plan = await setup.observe(17)
+    assert plan["step"] == "quote"
+
+
+@pytest.mark.asyncio
+async def test_a_run_that_loses_the_lock_writes_nothing(rig, monkeypatch):
+    """R1a: the loser never overwrites a live winner's `running` with `failed`."""
+    from local_operator.tunnels import autosetup
+
+    winner = {"state": "running", "pid": os.getpid(), "started_at": 1}
+    autosetup.write_journal(winner)
+
+    async def lose(*args, **kwargs):
+        raise setup.SetupInProgress("busy")
+
+    monkeypatch.setattr(setup, "apply", lose)
+    with pytest.raises(setup.SetupInProgress):
+        await setup.command(_no_spend_args())
+    assert json.loads((config.directory() / "auto-setup.json").read_text()) == winner
+
+
+@pytest.mark.asyncio
+async def test_running_is_written_only_once_the_lock_is_held(rig, monkeypatch):
+    """R1/Q5: `running` + this pid appears under the claim, never before it."""
+    from local_operator.tunnels import autosetup
+
+    seen = {}
+
+    async def fake_apply(selected, accepted, *, progress=None, on_claim=None):
+        journal = config.directory() / "auto-setup.json"
+        seen["before"] = journal.exists()
+        assert on_claim is not None
+        on_claim()
+        seen["during"] = json.loads(journal.read_text())
+        return setup._plan("complete", "done", verified=True)
+
+    monkeypatch.setattr(setup, "apply", fake_apply)
+    await setup.command(_no_spend_args())
+    assert seen["before"] is False
+    assert seen["during"]["state"] == "running" and seen["during"]["pid"] == os.getpid()
+    final = json.loads((config.directory() / "auto-setup.json").read_text())
+    assert final["state"] == "finished" and final["step"] == "complete"
+    assert autosetup.auto_reconnecting() is False
+
+
+@pytest.mark.asyncio
+async def test_a_non_claiming_run_does_not_erase_a_live_claimant(rig, monkeypatch):
+    from local_operator.tunnels import autosetup
+
+    other = {"state": "running", "pid": os.getppid(), "started_at": 1}
+    autosetup.write_journal(other)
+
+    async def stop_at_quote(selected, accepted, *, progress=None, on_claim=None):
+        return setup._plan("quote", "accept")
+
+    monkeypatch.setattr(setup, "apply", stop_at_quote)
+    await setup.command(_no_spend_args())
+    assert json.loads((config.directory() / "auto-setup.json").read_text()) == other
+
+
+def test_a_dead_pid_is_not_reconnecting(rig):
+    """R1b: a SIGKILLed run's `running` journal plus another lock holder is not us."""
+    import subprocess
+    import sys
+
+    from local_operator.config_writer import nonblocking_file_claim
+    from local_operator.tunnels import autosetup
+
+    child = subprocess.Popen([sys.executable, "-c", "pass"])
+    child.wait()
+    autosetup.write_journal({"state": "running", "pid": child.pid})
+    with nonblocking_file_claim(config.directory() / "setup.lock") as acquired:
+        assert acquired
+        assert autosetup.auto_reconnecting() is False
+    autosetup.write_journal({"state": "running", "pid": os.getpid()})
+    with nonblocking_file_claim(config.directory() / "setup.lock") as acquired:
+        assert autosetup.auto_reconnecting() is True
+
+
+@pytest.mark.asyncio
+async def test_a_claimed_setup_run_invalidates_the_cached_inactive_cause(rig, monkeypatch):
+    """R3 invariant: a setup run clears the connector's cached cause."""
+    from local_operator.tunnels import service
+
+    cache = config.directory() / service.REFINE_CACHE
+    config.directory().mkdir(parents=True, exist_ok=True)
+    cache.write_text('{"key": "x", "reason": "billing_lapsed", "at": 0}')
+    save(rig[1])
+    rig[1]["status"] = "suspended"
+
+    async def fake_apply(*args, **kwargs):
+        return setup._plan("complete", "done", verified=True)
+
+    monkeypatch.setattr(setup, "_apply", fake_apply)
+    await setup.apply(17, None)
+    assert not cache.exists()

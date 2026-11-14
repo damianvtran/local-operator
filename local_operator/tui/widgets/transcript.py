@@ -1964,8 +1964,16 @@ class NoticeBlock(TranscriptBlock):
         "error": "danger",
     }
 
-    def __init__(self, text: str, kind: NoticeKind = "info", *, fold_width: int = 0) -> None:
+    def __init__(
+        self, text: str, kind: NoticeKind = "info", *, fold_width: int = 0, accent: str = ""
+    ) -> None:
         """``fold_width``: the width this notice is about to be given.
+
+        ``accent``: one literal token (a slash command) drawn in the inline-code
+        ink (`signal`, `markdown.code`'s token) so the ONE actionable word in a
+        muted sentence is findable (#3945 design round 1, D6). Only whole
+        occurrences inside a row are accented; a token the fold splits across
+        two rows stays plain rather than half-coloured.
 
         Same reason ``UserBlock.__init__`` documents at length — a notice wraps
         itself in ``_build``, so the hint has to be set before the rows exist or
@@ -1977,6 +1985,7 @@ class NoticeBlock(TranscriptBlock):
         super().__init__()
         self.add_class("notice-block")
         self._text = text
+        self._accent = accent
         self.notice_kind = kind
         self._token = self._KIND_TOKENS.get(kind, "dim")
         self._glyph = NOTICE_GLYPHS.get(kind, "·")
@@ -2309,7 +2318,16 @@ class NoticeBlock(TranscriptBlock):
             else:
                 line.append(indent, style=style)
                 line.append(f"{self._glyph} ", style=style)
-            line.append(row, style=style)
+            accent = getattr(self, "_accent", "")
+            if accent and accent in row:
+                code = Style(color=theme_mod.semantic_color("signal"))
+                pieces = row.split(accent)
+                for at, piece in enumerate(pieces):
+                    if at:
+                        line.append(accent, style=code)
+                    line.append(piece, style=style)
+            else:
+                line.append(row, style=style)
         return line
 
 

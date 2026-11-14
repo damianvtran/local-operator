@@ -1,0 +1,94 @@
+{
+ "schema": 1,
+ "audit_id": "a2",
+ "audit_kind": "independent_translation_audit",
+ "locale": "es",
+ "namespace": "mobile.setup",
+ "source_sha256": "0d245737d539f4d2fe54cf3a2c2174b0aa64820d2eb387e94ea16f65d1b487d7",
+ "target_sha256": "3bf4e9f634cd66f9655e59db241e28aa01db0a8c3e631ef3cdcb1a254c64644f",
+ "round": 2,
+ "audit_date": "2026-11-14",
+ "key_count": 94,
+ "keys_audited": 12,
+ "keys_new_in_scope": 8,
+ "new_keys": [
+  "mobile.setup.title_reconnect",
+  "mobile.setup.title_billing_lapsed",
+  "mobile.setup.title_disabled",
+  "mobile.setup.title_network",
+  "mobile.setup.title_radient_unavailable",
+  "mobile.setup.title_reconnecting",
+  "mobile.setup.action_add_credit",
+  "mobile.setup.action_open_console"
+ ],
+ "changed_keys": [
+  "mobile.setup.disabled",
+  "mobile.setup.billing_lapsed",
+  "mobile.setup.reconnect",
+  "mobile.setup.network"
+ ],
+ "source_audit_revision": "7c0fc7bf22aade04f78c367c906374b73a1914d7",
+ "working_tree_uncommitted": true,
+ "scope": "7c0fc7bf22aa..working-tree (git diff -- local_operator/i18n/catalogues/); unchanged keys passed in earlier rounds, not re-audited",
+ "prior_audits_on_disk": [
+  "i18n/audits/evidence/es/mobile.setup/a1/record.json",
+  "i18n/audits/evidence/es/mobile.setup/r1/record.json",
+  "i18n/audits/evidence/es/mobile.setup/w5a1/record.json"
+ ],
+ "pr": "#3945 round-1 remediation (branch fix/tunnel-remedies-auto-up)",
+ "translator": {
+  "agent": "i18n-translator subagent, Local Operator session c0c9e9803405 (uncommitted working-tree values on 7c0fc7bf2; English source drafted by coder session 889b9f67edf5)",
+  "model": "anthropic/claude-opus-5-5 (from that session's transcript metadata; not otherwise verified)",
+  "date": "2026-11-14"
+ },
+ "auditor": {
+  "agent": "i18n-auditor, independent `task` subagent (audit-es-fr-ru) on host ip-172-31-18-0, session 117e988422ff; not the translator (c0c9e9803405) nor the English-drafting coder (889b9f67edf5); did not edit any value",
+  "session": "117e988422ff",
+  "model": "anthropic/claude-opus-5-5",
+  "independent_from_translator_session": true,
+  "actual_model_source": "harness system prompt of session 117e988422ff (`Model: anthropic/claude-opus-5-5`); no provider fallback disclosed during the audit"
+ },
+ "input_hashes": {
+  "en": {
+   "path": "local_operator/i18n/catalogues/en/mobile.setup.json",
+   "sha256": "0d245737d539f4d2fe54cf3a2c2174b0aa64820d2eb387e94ea16f65d1b487d7"
+  },
+  "context": {
+   "path": "local_operator/i18n/catalogues/en/mobile.setup.context.json",
+   "sha256": "b1c0c11a269077507f7d22256f3874d7f5fd1a363f5c13f412014de70c7f038f"
+  },
+  "target": {
+   "path": "local_operator/i18n/catalogues/es/mobile.setup.json",
+   "sha256": "3bf4e9f634cd66f9655e59db241e28aa01db0a8c3e631ef3cdcb1a254c64644f"
+  },
+  "glossary": {
+   "path": "i18n/glossary.md",
+   "sha256": "a576d5a4b2718ba79a70a42600e3b6233ea28d716b1e2d996a208ac8dd7fabdb"
+  },
+  "style_guide": {
+   "path": "i18n/style-guides/es.md",
+   "sha256": "4a6f6270f028e5f5fbca7156a8f5099077f92585db94c14653482e9b188248a6"
+  }
+ },
+ "artifacts": {
+  "report.md": "38fae396b7f9fc5330d274e3280280599935514511e32ad33877d0efc95472a0",
+  "audit.log": "83d2e3763d3407686a18eb203527f25223e93fb4fba1b7e1a770798737ec4e35"
+ },
+ "reproduction_script": {
+  "path": "~/.local-operator/sessions/117e988422ff/scratchpad/audit-es-fr-ru/mech.py",
+  "sha256": "4d443df225a7ba2cc72c19134e8b7687cd75f568b5d91dfdf08e20f7c370d23c",
+  "note": "session scratch, outside the repo; its stdout is captured in audit.log"
+ },
+ "audit_notes_not_execution_log": "report.md is reasoning; audit.log is the captured stdout of the commands it lists (git rev-parse, git diff --stat, sha256sum, check.py --catalogues-only, ledger.py history-sha, mech.py). dryrun.log is the captured ledger.py append --dry-run output.",
+ "current_report_verdict": {
+  "status": "passed",
+  "unresolved_blocker_major_count": 0,
+  "finding_ids": [
+   "ES-01"
+  ],
+  "finding_severities": {
+   "ES-01": "nit"
+  }
+ },
+ "staged_not_committed": true
+}

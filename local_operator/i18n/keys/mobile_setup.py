@@ -18,6 +18,14 @@ def account_failed() -> Msg:
     return Msg("mobile.setup.account_failed", {})
 
 
+def action_add_credit(*, url: str) -> Msg:
+    return Msg("mobile.setup.action_add_credit", {"url": url})
+
+
+def action_open_console(*, url: str) -> Msg:
+    return Msg("mobile.setup.action_open_console", {"url": url})
+
+
 def activated() -> Msg:
     return Msg("mobile.setup.activated", {})
 
@@ -278,12 +286,20 @@ def title_balance() -> Msg:
     return Msg("mobile.setup.title_balance", {})
 
 
+def title_billing_lapsed() -> Msg:
+    return Msg("mobile.setup.title_billing_lapsed", {})
+
+
 def title_cloudflared() -> Msg:
     return Msg("mobile.setup.title_cloudflared", {})
 
 
 def title_complete() -> Msg:
     return Msg("mobile.setup.title_complete", {})
+
+
+def title_disabled() -> Msg:
+    return Msg("mobile.setup.title_disabled", {})
 
 
 def title_failed() -> Msg:
@@ -296,6 +312,10 @@ def title_login() -> Msg:
 
 def title_mobile_bundle() -> Msg:
     return Msg("mobile.setup.title_mobile_bundle", {})
+
+
+def title_network() -> Msg:
+    return Msg("mobile.setup.title_network", {})
 
 
 def title_owner_choice() -> Msg:
@@ -312,6 +332,18 @@ def title_quote() -> Msg:
 
 def title_quote_changed() -> Msg:
     return Msg("mobile.setup.title_quote_changed", {})
+
+
+def title_radient_unavailable() -> Msg:
+    return Msg("mobile.setup.title_radient_unavailable", {})
+
+
+def title_reconnect() -> Msg:
+    return Msg("mobile.setup.title_reconnect", {})
+
+
+def title_reconnecting() -> Msg:
+    return Msg("mobile.setup.title_reconnecting", {})
 
 
 def title_repoint() -> Msg:

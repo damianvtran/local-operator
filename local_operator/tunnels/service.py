@@ -485,19 +485,100 @@ def _inactive_reason(failure: BaseException) -> str | None:
     a sign-in that can never clear a billing or console state (the field report
     this exists for: a freshly signed-in phone saying the tunnel "isn't active").
 
-    A refined `TunnelInactive` (the cold start read `/billing` to name the cause)
-    wins over the bare status; without one, 403 is `TUNNEL_INACTIVE` and 402 is
-    `BILLING_INACTIVE`. Read off the chain like `_is_a_server_error`, and for the
-    same reason: a raise site may wrap the client's error.
+    ONLY a `TunnelInactive` counts, and only the `/connect` raise site in `run()`
+    makes one (#3945 round 1, R2). A bare 402/403 anywhere else is NOT this:
+    the poller's `GET <tunnel>` answers 200 with a non-active record for a
+    suspended tunnel (its `else` branch restarts on that), so a 403 there is an
+    authorization refusal and keeps `REFUSED`; mapping it here sent a refused
+    grant to a "billing is in order — reconnect" sentence. Read off the chain
+    like `_is_a_server_error`, because a raise site may wrap the error.
     """
-    chain = list(_failure_chain(failure))
-    for link in chain:
+    for link in _failure_chain(failure):
         if isinstance(link, TunnelInactive):
             return link.reason
-    for link in chain:
-        if isinstance(link, RequestFailed) and link.status in (402, 403):
-            return BILLING_INACTIVE if link.status == 402 else TUNNEL_INACTIVE
     return None
+
+
+#: The refined inactive cause, cached per tunnel (`tunnels/inactive-cause.json`).
+#:
+#: WHY: the connector retries forever at the supervisor's 10 s floor while a
+#: tunnel stays inactive, and every cold start used to add `GET /billing` and
+#: `GET <tunnel>` to its `/connect` — ~3 Radient calls per 10 s instead of 1,
+#: indefinitely (#3945 round 1, R3). The cause changes on a human timescale (a
+#: top-up, a console toggle), so one refinement per 5 minutes is enough.
+#:
+#: INVARIANT: the cache only ever NAMES a cause; it never decides whether to
+#: connect. `/connect` itself is still called on every attempt, so a tunnel that
+#: becomes active is picked up on the very next try whatever the cache says, and
+#: the cache is invalidated on that successful connect and when a setup run
+#: claims `setup.lock` (`invalidate_refinement`). The key includes the trigger
+#: (402, 403 or an inactive record), so a different refusal re-refines at once.
+#: Worst case: a cause that changes WHILE the tunnel stays inactive (lapsed ->
+#: switched off) is reported up to `REFINE_TTL_S` late.
+REFINE_CACHE = "inactive-cause.json"
+REFINE_TTL_S = 300
+
+
+def _refine_key(value: dict[str, Any], default: str, from_record: bool) -> str:
+    return f"{tunnel_path(value)}|{default}|{'record' if from_record else 'status'}"
+
+
+def _cached_refinement(key: str, *, now: float | None = None) -> str | None:
+    import json
+
+    try:
+        cached = json.loads((config.directory() / REFINE_CACHE).read_text())
+    except (OSError, ValueError):
+        return None
+    if not isinstance(cached, dict) or cached.get("key") != key:
+        return None
+    at = cached.get("at")
+    reason = cached.get("reason")
+    current = time.time() if now is None else now
+    if not isinstance(at, (int, float)) or not 0 <= current - at < REFINE_TTL_S:
+        return None
+    # Only this package's own vocabulary is ever returned from disk.
+    return reason if reason in _REFINABLE else None
+
+
+def _store_refinement(key: str, reason: str) -> None:
+    import json
+
+    with contextlib.suppress(OSError):
+        config.private_write(
+            config.directory() / REFINE_CACHE,
+            json.dumps({"key": key, "reason": reason, "at": int(time.time())}) + "\n",
+        )
+
+
+def invalidate_refinement() -> None:
+    """Forget the cached inactive cause (a connect succeeded, or setup ran)."""
+    with contextlib.suppress(OSError):
+        (config.directory() / REFINE_CACHE).unlink(missing_ok=True)
+
+
+_REFINABLE = frozenset({TUNNEL_INACTIVE, TUNNEL_DISABLED, BILLING_INACTIVE, BILLING_LAPSED})
+
+
+async def refine_inactive_cached(
+    api: RadientTunnels,
+    value: dict[str, Any],
+    *,
+    default: str,
+    record: dict[str, Any] | None = None,
+) -> str:
+    """`refine_inactive`, read through the per-tunnel cache above."""
+    key = _refine_key(value, default, record is not None)
+    cached = _cached_refinement(key)
+    if cached is not None:
+        return cached
+    reason = await _refine(api, value, record=record)
+    if reason is None:
+        # Not cached: the reads failed, and a blip must not pin the bare
+        # status's reason for five minutes.
+        return default
+    _store_refinement(key, reason)
+    return reason
 
 
 async def refine_inactive(
@@ -511,10 +592,17 @@ async def refine_inactive(
 
     The status code alone cannot tell "credit ran out" from "switched off in the
     console" from "billing never activated", and each has a different fix, so the
-    connector asks the same two endpoints `setup.observe` reads: `/billing`
-    (`active` = ever activated, `eligible` = currently paid up) and the tunnel
-    record (`enabled`). Billing is checked first because it is the cause a person
-    can act on with money, and a lapsed balance also suspends the record.
+    connector asks the same two endpoints `setup.observe` reads: the tunnel
+    record (`enabled`) and `/billing` (`active` = ever activated, `eligible` =
+    currently paid up, `balance_usd`).
+
+    ONE PRECEDENCE with `setup.observe` (#3945 round 1, Q3): a console
+    switch-off wins over any billing state, because it is the owner's explicit
+    choice and adding credit would not bring the tunnel back while it stands.
+    Lapsed needs all three facts `observe` checks (R4): billing active, not
+    eligible, and a balance that is not positive. Active-but-ineligible WITH
+    credit is a re-acceptance (e.g. a price change), which is the quote step,
+    so it reads as `BILLING_INACTIVE` (accept the price), not "add credit".
 
     READ-ONLY and best-effort: any failure to read keeps ``default`` (the bare
     status's reason), because a refinement that could not run must not turn a
@@ -522,18 +610,16 @@ async def refine_inactive(
     billing write in this package is `cli._ensure_billing`, behind an exact
     accepted price.
     """
-    try:
-        quote = await api.request("GET", "/billing")
-    except (ValueError, httpx.HTTPError):
-        quote = None
-    if isinstance(quote, dict):
-        if quote.get("active") is False:
-            return BILLING_INACTIVE
-        if quote.get("eligible") is not True:
-            # `active` true (or not reported) but not eligible: it WAS paid for
-            # and the balance no longer covers it. A quote that reports neither
-            # field is read as lapsed only when `active` is affirmatively true.
-            return BILLING_LAPSED if quote.get("active") is True else BILLING_INACTIVE
+    return await _refine(api, value, record=record) or default
+
+
+async def _refine(
+    api: RadientTunnels, value: dict[str, Any], *, record: dict[str, Any] | None
+) -> str | None:
+    """`refine_inactive`'s reads; ``None`` when `/billing` could not be read."""
+    # Lazy: `tunnels.cli` imports this module.
+    from local_operator.tunnels.cli import _positive_balance
+
     if record is None:
         try:
             fetched = await api.request("GET", tunnel_path(value))
@@ -542,11 +628,21 @@ async def refine_inactive(
         record = fetched if isinstance(fetched, dict) else None
     if isinstance(record, dict) and record.get("enabled") is False:
         return TUNNEL_DISABLED
-    if isinstance(quote, dict):
-        # Billing is in order and the console has not switched it off: the
-        # tunnel is merely suspended, which a reconnect (no spend) clears.
-        return TUNNEL_INACTIVE
-    return default
+    try:
+        quote = await api.request("GET", "/billing")
+    except (ValueError, httpx.HTTPError):
+        quote = None
+    if not isinstance(quote, dict):
+        return None
+    if quote.get("active") is False:
+        return BILLING_INACTIVE
+    if quote.get("eligible") is not True:
+        if quote.get("active") is True and not _positive_balance(quote):
+            return BILLING_LAPSED
+        return BILLING_INACTIVE
+    # Billing is in order and the console has not switched it off: the tunnel
+    # is merely suspended, which a reconnect (no spend) clears.
+    return TUNNEL_INACTIVE
 
 
 def authorization_failure_reason(failure: BaseException) -> str:
@@ -872,7 +968,7 @@ async def run() -> int:
                 # clears it instead of a sign-in (see `refine_inactive`).
                 default = BILLING_INACTIVE if failure.status == 402 else TUNNEL_INACTIVE
                 raise TunnelInactive(
-                    await refine_inactive(api, value, default=default)
+                    await refine_inactive_cached(api, value, default=default)
                 ) from failure
             if not active(connection["tunnel"]):
                 # Deliberately NOT parked. A suspended or disabled tunnel resumes
@@ -884,10 +980,12 @@ async def run() -> int:
                 # local command is the remedy here. Refined from the same reads
                 # the 403 arm above uses, so both paths speak one vocabulary.
                 raise TunnelInactive(
-                    await refine_inactive(
+                    await refine_inactive_cached(
                         api, value, default=TUNNEL_INACTIVE, record=connection["tunnel"]
                     )
                 )
+            # Served: a cached inactive cause is stale from here on (R3 invariant).
+            invalidate_refinement()
             if connection["gateway_port"] != value["gateway_port"]:
                 # ReenrolmentRequired: retrying re-sends a /connect the cloud will
                 # keep answering the same way, and the remedy (lop tunnel connect)

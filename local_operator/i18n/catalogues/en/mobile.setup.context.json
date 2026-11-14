@@ -428,5 +428,45 @@
     "role": "One-line TUI note after a successful Radient sign-in on a machine without phone access",
     "tone": "Plain, inviting, never pushy",
     "note": "Shown once per sign-in. /mobile enable is a slash command and stays verbatim. The money clause must survive: nothing is charged without the user first seeing the price."
+  },
+  "mobile.setup.title_reconnect": {
+    "role": "Phone setup title, progress, consent or recovery",
+    "tone": "Plain, precise, non-alarmist",
+    "note": "A suspended tunnel whose billing is fine; the next line names the reconnect command, which charges nothing."
+  },
+  "mobile.setup.title_billing_lapsed": {
+    "role": "Phone setup title, progress, consent or recovery",
+    "tone": "Plain, precise, non-alarmist",
+    "note": "Billing was activated before, but the prepaid balance ran out. The fix is adding credit in the Radient console."
+  },
+  "mobile.setup.title_disabled": {
+    "role": "Phone setup title, progress, consent or recovery",
+    "tone": "Plain, precise, non-alarmist",
+    "note": "The owner switched it off in the Radient web console; setup will not override that."
+  },
+  "mobile.setup.title_network": {
+    "role": "Phone setup title, progress, consent or recovery",
+    "tone": "Plain, precise, non-alarmist",
+    "note": "Radient could not be reached; recovery is automatic and nothing needs to be done."
+  },
+  "mobile.setup.title_radient_unavailable": {
+    "role": "Phone setup title, progress, consent or recovery",
+    "tone": "Plain, precise, non-alarmist",
+    "note": "Radient answered with a temporary server error; recovery is automatic."
+  },
+  "mobile.setup.title_reconnecting": {
+    "role": "Phone setup title, progress, consent or recovery",
+    "tone": "Plain, precise, non-alarmist",
+    "note": "The automatic no-spend reconnect after a Radient sign-in is running; nothing needs to be done."
+  },
+  "mobile.setup.action_add_credit": {
+    "role": "Mobile setup action line",
+    "tone": "Plain, actionable imperative",
+    "note": "The one action line under a lapsed-billing title. {url} is the Radient console URL and stays verbatim; no command is named."
+  },
+  "mobile.setup.action_open_console": {
+    "role": "Mobile setup action line",
+    "tone": "Plain, actionable imperative",
+    "note": "The one action line when the owner switched phone access off in the console. {url} is the Radient console URL and stays verbatim; no command is named."
   }
 }

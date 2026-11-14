@@ -1,0 +1,52 @@
+$ git rev-parse HEAD
+7c0fc7bf22aade04f78c367c906374b73a1914d7
+exit=0
+$ git diff --stat -- local_operator/i18n/catalogues/en/tunnel.status.json local_operator/i18n/catalogues/en/tunnel.status.context.json local_operator/i18n/catalogues/en/mobile.setup.json local_operator/i18n/catalogues/en/mobile.setup.context.json local_operator/i18n/catalogues/hi local_operator/i18n/catalogues/ur
+ .../i18n/catalogues/en/mobile.setup.context.json   | 40 ++++++++++++++++++++++
+ .../i18n/catalogues/en/mobile.setup.json           | 18 +++++++---
+ .../i18n/catalogues/en/tunnel.status.context.json  | 17 ++++++++-
+ .../i18n/catalogues/en/tunnel.status.json          | 13 ++++---
+ .../i18n/catalogues/hi/mobile.setup.json           | 18 +++++++---
+ .../i18n/catalogues/hi/tunnel.status.json          | 13 ++++---
+ .../i18n/catalogues/ur/mobile.setup.json           | 18 +++++++---
+ .../i18n/catalogues/ur/tunnel.status.json          | 13 ++++---
+ 8 files changed, 119 insertions(+), 31 deletions(-)
+exit=0
+$ sha256sum local_operator/i18n/catalogues/en/tunnel.status.json local_operator/i18n/catalogues/en/tunnel.status.context.json local_operator/i18n/catalogues/en/mobile.setup.json local_operator/i18n/catalogues/en/mobile.setup.context.json local_operator/i18n/catalogues/hi/tunnel.status.json local_operator/i18n/catalogues/hi/mobile.setup.json local_operator/i18n/catalogues/ur/tunnel.status.json local_operator/i18n/catalogues/ur/mobile.setup.json i18n/glossary.md i18n/style-guides/hi.md i18n/style-guides/ur.md
+e2bc8c63d3124c363252511306fd3951917ab9f93a2398c49cac8c79302aa8f9  local_operator/i18n/catalogues/en/tunnel.status.json
+78580b806d2acc2c0c84bcf2655b62ea5ae847bf206c43134762e288bba8695d  local_operator/i18n/catalogues/en/tunnel.status.context.json
+0d245737d539f4d2fe54cf3a2c2174b0aa64820d2eb387e94ea16f65d1b487d7  local_operator/i18n/catalogues/en/mobile.setup.json
+b1c0c11a269077507f7d22256f3874d7f5fd1a363f5c13f412014de70c7f038f  local_operator/i18n/catalogues/en/mobile.setup.context.json
+0889cda75b5bd52926ff634d516a61d6e9e6238daeecca351c0d52b23c08fe0e  local_operator/i18n/catalogues/hi/tunnel.status.json
+20ac35efaa73b5c33a2fc7d16a1f91e0e6a3ab39deeb15dd7c534d6cc26d39a7  local_operator/i18n/catalogues/hi/mobile.setup.json
+ec4ecfa70fc2ab0a07b631871f9e861b00ce36093cbc8d63054ff92606dd9275  local_operator/i18n/catalogues/ur/tunnel.status.json
+c838d9d3983006c4b33dd15d0294eb34f3dbee6cc7644f96bedf0ebfcce1f03c  local_operator/i18n/catalogues/ur/mobile.setup.json
+a576d5a4b2718ba79a70a42600e3b6233ea28d716b1e2d996a208ac8dd7fabdb  i18n/glossary.md
+82292dc8d13fcc93dc752457719264aed3cc20bb65ecfaba0f0e5a31f4cb40d5  i18n/style-guides/hi.md
+7276e96210fe5f23fd82a39ae4cc0c88b2c1009d3a551d914efc3f61516eddc4  i18n/style-guides/ur.md
+exit=0
+$ .venv/bin/python scripts/i18n/check.py --catalogues-only
+check.py: catalogue checks: 0 problem(s)
+exit=0
+$ .venv/bin/python $SCRATCH/audit-hiur/mech.py .
+hi tunnel.status en=e2bc8c63d3124c363252511306fd3951917ab9f93a2398c49cac8c79302aa8f9 tgt=0889cda75b5bd52926ff634d516a61d6e9e6238daeecca351c0d52b23c08fe0e keys=24 scope=8 -> OK
+   widths: tunnel_inactive.label:27c tunnel_inactive.detail:198c tunnel_disabled.detail:86c billing_lapsed.detail:104c billing_inactive.detail:103c card_paused:33c(+Mc 2) card_add_credit:40c(+Mc 5) card_open_console:29c(+Mc 3)
+ur tunnel.status en=e2bc8c63d3124c363252511306fd3951917ab9f93a2398c49cac8c79302aa8f9 tgt=ec4ecfa70fc2ab0a07b631871f9e861b00ce36093cbc8d63054ff92606dd9275 keys=24 scope=8 -> OK
+   widths: tunnel_inactive.label:42c tunnel_inactive.detail:240c tunnel_disabled.detail:110c billing_lapsed.detail:141c billing_inactive.detail:140c card_paused:39c(+Mc 0) card_add_credit:42c(+Mc 0) card_open_console:37c(+Mc 0)
+hi mobile.setup en=0d245737d539f4d2fe54cf3a2c2174b0aa64820d2eb387e94ea16f65d1b487d7 tgt=20ac35efaa73b5c33a2fc7d16a1f91e0e6a3ab39deeb15dd7c534d6cc26d39a7 keys=94 scope=12 -> OK
+   widths: disabled:97c billing_lapsed:113c reconnect:93c network:130c title_reconnect:25c title_billing_lapsed:32c title_disabled:26c title_network:25c title_radient_unavailable:27c title_reconnecting:20c action_add_credit:28c action_open_console:39c
+ur mobile.setup en=0d245737d539f4d2fe54cf3a2c2174b0aa64820d2eb387e94ea16f65d1b487d7 tgt=c838d9d3983006c4b33dd15d0294eb34f3dbee6cc7644f96bedf0ebfcce1f03c keys=94 scope=12 -> OK
+   widths: disabled:137c billing_lapsed:153c reconnect:128c network:175c title_reconnect:30c title_billing_lapsed:40c title_disabled:34c title_network:29c title_radient_unavailable:29c title_reconnecting:32c action_add_credit:40c action_open_console:49c
+exit=0
+$ .venv/bin/python scripts/i18n/ledger.py history-sha --locale hi --namespace tunnel.status
+64055c609d69335d47e56c8e05030a53fdc3bcd55ac02240216c883d0473f86b
+exit=0
+$ .venv/bin/python scripts/i18n/ledger.py history-sha --locale hi --namespace mobile.setup
+8970becfd79be4f4113f3cd1f01f2d95216065627756327e8e7e77c1a0fda932
+exit=0
+$ .venv/bin/python scripts/i18n/ledger.py history-sha --locale ur --namespace tunnel.status
+299b5a24bf49e90214ce03fcae140aa9204aad8f5d7b63897a9fe2fa5bc6fa15
+exit=0
+$ .venv/bin/python scripts/i18n/ledger.py history-sha --locale ur --namespace mobile.setup
+e6ca35afc489688709f972013cfdad26119009877adc6a572e1949e52dfd25e3
+exit=0

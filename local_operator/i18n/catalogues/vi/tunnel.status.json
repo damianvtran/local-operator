@@ -1,8 +1,11 @@
 {
-  "tunnel.status.billing_inactive.detail": "Thanh toán cho tunnel này chưa được kích hoạt, nên Radient sẽ không kết nối nó. Hãy mở phần thiết lập truy cập điện thoại trong Local Operator trên máy tính đang chạy nó và chấp nhận mức giá hằng tháng.",
+  "tunnel.status.billing_inactive.detail": "Truy cập điện thoại chưa được bật cho tài khoản Radient này. Hãy mở phần thiết lập truy cập điện thoại trong Local Operator trên máy tính đó và chấp nhận mức giá hằng tháng.",
   "tunnel.status.billing_inactive.label": "chưa kích hoạt thanh toán",
-  "tunnel.status.billing_lapsed.detail": "Thanh toán cho tunnel này đã hết hiệu lực vì số dư Radient đã cạn, nên Radient sẽ không kết nối nó. Hãy nạp tín dụng tại {url}; tunnel sẽ tự kết nối lại khi số dư được khôi phục.",
+  "tunnel.status.billing_lapsed.detail": "Số dư Radient của bạn đã hết, nên truy cập điện thoại đang tạm dừng. Hãy nạp tín dụng tại {url}; truy cập sẽ tự kết nối lại khi số dư được khôi phục.",
   "tunnel.status.billing_lapsed.label": "thanh toán đã hết hiệu lực",
+  "tunnel.status.card_add_credit": "Nạp tín dụng Radient để khôi phục truy cập",
+  "tunnel.status.card_open_console": "Bật truy cập trong bảng điều khiển Radient",
+  "tunnel.status.card_paused": "bị Radient tạm dừng",
   "tunnel.status.create.conflict_unmatched": "Radient cho biết đã có một tunnel cho yêu cầu này, nhưng danh sách tunnel của lần đăng nhập này không có bản ghi khớp duy nhất. Hãy kiểm tra lop tunnel list, rồi kết nối bằng lop tunnel connect --tunnel-id <id>.",
   "tunnel.status.gateway.listening_http_status": "Có chương trình đang lắng nghe trên cổng 127.0.0.1:{port} của gateway chuyển tiếp, nhưng nó trả lời kiểm tra tình trạng bằng HTTP {status}: có thể một chương trình khác đang chiếm cổng, hoặc gateway đang gặp sự cố. Cài đặt lại sẽ không giúp được.",
   "tunnel.status.gateway.listening_timed_out": "Gateway chuyển tiếp cục bộ đang lắng nghe trên 127.0.0.1:{port}, nhưng phản hồi kiểm tra tình trạng đã hết thời gian chờ; cài đặt lại sẽ không giúp được.",
@@ -16,8 +19,8 @@
   "tunnel.status.server_unavailable.label": "Lỗi máy chủ Radient",
   "tunnel.status.server_unavailable.relay": "Radient đã trả lời bước kiểm tra ủy quyền chuyển tiếp của máy tính này bằng một lỗi máy chủ tạm thời. Thông tin đăng nhập và máy tính này không có vấn đề gì; nó sẽ tự ủy quyền lại khi Radient hoạt động trở lại.",
   "tunnel.status.server_unavailable.terminal": "Radient đã trả lời bước kiểm tra ủy quyền của trình kết nối bằng một lỗi máy chủ tạm thời (HTTP 5xx), nên không phải lỗi của thông tin đăng nhập hay máy tính này. Trình kết nối thử lại mỗi 10 giây và tự ủy quyền lại khi Radient hoạt động trở lại; không cần chạy lệnh nào trên máy.",
-  "tunnel.status.tunnel_disabled.detail": "Tunnel này đang bị tắt trong bảng điều khiển Radient, nên truy cập từ xa sẽ tắt cho đến khi được bật lại ở đó: {url}. Tunnel sẽ tự kết nối lại khi được bật.",
+  "tunnel.status.tunnel_disabled.detail": "Truy cập điện thoại của máy tính này đang bị tắt trong bảng điều khiển Radient. Hãy bật lại tại {url}; truy cập sẽ tự kết nối lại.",
   "tunnel.status.tunnel_disabled.label": "tunnel bị tắt trong bảng điều khiển",
-  "tunnel.status.tunnel_inactive.detail": "Radient đã tạm dừng tunnel này, dù việc thanh toán vẫn ổn. Hãy kết nối lại truy cập điện thoại trong Local Operator trên máy tính đang chạy nó; nó cũng tự thử lại liên tục. Nếu tunnel vẫn bị tạm dừng, hãy kiểm tra tại {url}.",
-  "tunnel.status.tunnel_inactive.label": "tunnel không hoạt động"
+  "tunnel.status.tunnel_inactive.detail": "Radient đã tạm dừng truy cập điện thoại của máy tính này, dù việc thanh toán vẫn ổn. Hãy kết nối lại truy cập điện thoại trong Local Operator trên máy tính đang chạy nó; nó cũng tự thử lại liên tục. Nếu vẫn bị tạm dừng, hãy kiểm tra trong bảng điều khiển Radient tại {url}.",
+  "tunnel.status.tunnel_inactive.label": "bị Radient tạm dừng — đang kết nối lại"
 }

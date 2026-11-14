@@ -51,9 +51,16 @@ def test_a_4xx_still_reads_as_a_refusal(status):
 def test_a_403_or_402_names_the_inactive_tunnel_not_the_login(status, reason):
     # `/connect` answers 403 for any non-active tunnel (402 is billing): before
     # this reason they read as `REFUSED`, whose remedy is a sign-in that cannot
-    # clear billing or a console state.
-    assert authorization_failure_reason(_server_error(status)) == reason
-    assert classify_failure(_server_error(status)).reason == reason
+    # clear billing or a console state. Only the `/connect` raise site wraps the
+    # refusal in `TunnelInactive` (#3945 round 1, R2); a bare 402/403 from any
+    # other read (the poller's `GET <tunnel>`) stays an authorization refusal.
+    from local_operator.tunnels.errors import TunnelInactive
+
+    wrapped = TunnelInactive(reason)
+    wrapped.__cause__ = _server_error(status)
+    assert authorization_failure_reason(wrapped) == reason
+    assert classify_failure(wrapped).reason == reason
+    assert authorization_failure_reason(_server_error(status)) == gateway.REFUSED
 
 
 def test_the_server_unavailable_reason_has_every_surface_entry():
