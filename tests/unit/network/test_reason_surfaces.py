@@ -449,8 +449,10 @@ _DECLARED_RAW_READS: dict[tuple[str, str, str], tuple[int, str]] = {
     # outcome line, and ``state``'s recorded custom-instructions conflict — every one
     # the peer's (or, for ``state``, this device's own apply's) conflict sentence,
     # printed verbatim so a person learns why the head's copy was not installed.
+    # Two more (the subagent-tiers singleton): the push's tiers outcome line and
+    # ``state``'s recorded tiers conflict, the same two classes as the instructions.
     ("local_operator/network/cli.py", "_cmd_definitions", "reason"): (
-        3,
+        5,
         "the peer's own conflict sentence, printed verbatim",
     ),
     # The custom-instructions singleton's report: the push copies the peer's apply
@@ -458,8 +460,13 @@ _DECLARED_RAW_READS: dict[tuple[str, str, str], tuple[int, str]] = {
     # revision (``_instructions_to_send``) into its per-peer result, which the CLI
     # line above renders. Relayed, never composed from a token.
     ("local_operator/network/definitions.py", "push_to_peer", "reason"): (
+        2,
+        "the peer's custom-instructions and subagent-tiers apply sentences, relayed "
+        "into the push report",
+    ),
+    ("local_operator/network/definitions.py", "_tiers_to_send", "reason"): (
         1,
-        "the peer's custom-instructions apply sentence, relayed into the push report",
+        "the peer's recorded subagent-tiers conflict sentence, relayed into the report",
     ),
     ("local_operator/network/definitions.py", "_instructions_to_send", "reason"): (
         1,
