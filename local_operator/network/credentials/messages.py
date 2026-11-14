@@ -101,6 +101,32 @@ def render_retry_after(ms: float | int | None) -> str:
     return f"{max(1, int(seconds / 60.0 + 0.5))} min"
 
 
+def render_waited(seconds: float) -> str:
+    """``1 s`` / ``7 min 30 s``: how long a turn ACTUALLY waited, never rounded up.
+
+    The forward twin (:func:`render_retry_after`) rounds to the nearest 5 s with a
+    5 s floor, which is right for a hint and wrong for a past fact: a 1.5 s wait
+    must not read as five seconds. Minutes keep their seconds (floored) so the
+    default 450 s bound reads as itself, not as "7 min".
+    """
+    whole = max(1, int(max(0.0, float(seconds))))
+    if whole < 60:
+        return f"{whole} s"
+    minutes, rest = divmod(whole, 60)
+    return f"{minutes} min {rest} s" if rest else f"{minutes} min"
+
+
+def render_owner_wait_expired(
+    label: str, owner: str, waited_s: float, last_seen_s: float | None, login: str
+) -> str:
+    """The ``owner_offline`` sentence for a turn that waited its bound (PR-D)."""
+    return (
+        f"No credential for '{label}' is reachable: this turn waited {render_waited(waited_s)} "
+        f"for {owner}, which owns it and was last seen {render_last_seen(last_seen_s)}. "
+        f"Bring {owner} online and send again, or run '{login}' here to use your own account."
+    )
+
+
 def render_broker_error(
     error: BrokerError,
     *,
@@ -285,22 +311,24 @@ def render_broker_error(
         # ``BrokerError.retry_after_is_floor``): say the floor plainly, never as the
         # reset time.
         span = f"at least {left}" if error.retry_after_is_floor else f"another {left}"
+        # SAY ONLY WHAT THIS REFUSAL KNOWS (2026-11-12, lop-remote-node-2). The old
+        # tail, "The usual failover to another of your own logins is already
+        # running", was a promise about the TURN made from the broker, which never
+        # starts one: the turn's failover is the borrower's own fallback chain, and on
+        # a remote whose chain was empty the turn simply stopped under a sentence
+        # saying it had not. What IS known here is what was tried — the owner was
+        # asked and had no free login to lend — so that is the whole sentence; the
+        # failover driver walks the chain (classifying this as ``quota``, see
+        # ``store.no_credential_limit``) and reports what it reached.
+        tried = f"so nothing was borrowed: no login on {owner} was free to lend."
         if accounts and left:
             return (
                 f"'{label}' on {owner} is rate-limited for {span} "
-                f"({', '.join(accounts)}), so nothing was borrowed. The usual failover "
-                "to another of your own logins is already running."
+                f"({', '.join(accounts)}), {tried}"
             )
         if left:
-            return (
-                f"'{label}' on {owner} is rate-limited for {span}, so nothing "
-                "was borrowed. The usual failover to another of your own logins is "
-                "already running."
-            )
-        return (
-            f"'{label}' on {owner} is rate-limited for now, so nothing was borrowed. The "
-            "usual failover to another of your own logins is already running."
-        )
+            return f"'{label}' on {owner} is rate-limited for {span}, {tried}"
+        return f"'{label}' on {owner} is rate-limited for now, {tried}"
     if error.code == "interactive_required":
         # "can run", not "has been asked to": nothing asks the owner (review round 2, M3 —
         # the design's §4.7 ``credential_repair`` op is not built, which is what the

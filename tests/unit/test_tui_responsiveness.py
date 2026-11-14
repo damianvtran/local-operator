@@ -2460,7 +2460,37 @@ def test_s2_gc_attribution_is_reported_on_failure_and_in_the_pass_summary() -> N
     assert "at most" in message
     assert "at least" in message
     assert "upper bound" in message
-    assert "648" not in message  # the message reports THIS run, not history
+    # The message reports THIS run's measurement, not history. Asserted
+    # positively: a negative substring guard against a historical figure ("648")
+    # is itself flaky, because a real forced gen-2 pass over a loaded CI worker's
+    # heap can legitimately measure 648.0 ms (main run 43372640233, shard 4).
+    assert f"{turn.gc.total_ms:.1f} ms of loop-thread GC" in message
+
+
+def test_s2_gc_failure_note_reports_a_run_that_matches_a_historical_figure() -> None:
+    """A real measurement equal to an old reading must not read as "history".
+
+    Deterministic reproduction of the main-branch flake: a leg whose gen-2 pass
+    measured exactly 648.0 ms (the figure an earlier incident recorded) is a
+    legitimate reading of THIS run and must appear in the failure message.
+    """
+    recorder = StallRecorder()
+    try:
+        leg = GcLeg(
+            label="turn",
+            collections={2: 1},
+            cpu_ms={2: 648.0},
+            count_at_open=(339, 3, 14),
+            count_at_close=(9, 0, 0),
+        )
+        control = LegPeak(cpu_ms=5.0, wall_ms=5.0, gc=None)
+        with pytest.raises(AssertionError) as failure:
+            recorder.assert_turn_delta_loaded(
+                control=control, turn=LegPeak(cpu_ms=650.0, wall_ms=5.0, gc=leg)
+            )
+    finally:
+        recorder.gc_attribution.detach()
+    assert "648.0 ms of loop-thread GC" in str(failure.value)
 
 
 def test_s2_gc_attribution_costs_nothing_measurable_when_nothing_collects() -> None:

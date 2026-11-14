@@ -109,7 +109,14 @@ The latch follows bridge text wherever it is carried.
   the other, because a parent can write anything into a running child
   (`hub` send/steer are read-tier) and everything a child reports reaches its
   parent. A `hub` message from a latched session is stamped and latches the
-  child when it lands, even if the child is still queued.
+  child when it lands, even if the child is still queued. The link carries a
+  PULL too: a child that reads a latched session's journal (the pull rules
+  below) latches, and its parent latches with `source_kind`
+  `other_session` — the row says the content arrived through another session,
+  not as a card. A clean child (no bridge content, no pull, parent not
+  latched) never latches its parent: its `job_result` carries no bridge text,
+  so the parent stays clean after the delivery and after every commit that
+  follows it.
 - **Push to a peer.** `send`, `sessions` spawn/resume and `network` mutations
   are write-tier, so their cards carry the latch and ask in a latched session.
 - **Pull.** Any tool result that carries another session's transcript content

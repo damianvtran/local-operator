@@ -96,9 +96,47 @@ const field = () => screen.getByPlaceholderText("Ask anything…") as HTMLTextAr
 const roles = () => [...screen.getByTestId("composer-actions").querySelectorAll("[data-role]")].map((el) => el.getAttribute("data-role"));
 const sendRecordingDisc = () => screen.getByRole("button", { name: "send recording" }) as HTMLButtonElement;
 
+/* Live `window` keydown listeners (added minus removed), tracked by wrapping the real methods.
+   WHY: Enter-while-recording is handled by a window listener the composer installs in a passive
+   `useEffect(..., [dictation])`. React commits the "stop and transcribe" button to the DOM
+   BEFORE that passive effect flushes (it runs after paint on the Scheduler), so a test that
+   waits only on the button can dispatch Enter into a window with no listener yet. SUSPECTED cause
+   of one hosted failure (NOT reproduced locally; an inference, see Q-CI-MOBILE-ENTER): the one
+   Enter was dropped (DOM stayed Recording, box stayed "typed"). The `act` flush below is the
+   synchronization; the `waitFor` after it is only a guard that names the missing listener.
+   CONSTRAINT: the barrier waits on the listener itself, never on a delay, and the test still
+   dispatches exactly ONE Enter. If the product stops installing the listener the barrier times
+   out naming it, instead of passing vacuously. */
+let liveWindowKeydown: Set<EventListenerOrEventListenerObject> = new Set();
+let restoreWindowListeners: (() => void) | null = null;
+function trackWindowKeydownListeners() {
+	liveWindowKeydown = new Set();
+	const add = window.addEventListener;
+	const remove = window.removeEventListener;
+	window.addEventListener = function (this: Window, type: string, listener: EventListenerOrEventListenerObject, ...rest: unknown[]) {
+		if (type === "keydown") liveWindowKeydown.add(listener);
+		return (add as (...a: unknown[]) => void).call(this, type, listener, ...rest);
+	} as typeof window.addEventListener;
+	window.removeEventListener = function (this: Window, type: string, listener: EventListenerOrEventListenerObject, ...rest: unknown[]) {
+		if (type === "keydown") liveWindowKeydown.delete(listener);
+		return (remove as (...a: unknown[]) => void).call(this, type, listener, ...rest);
+	} as typeof window.removeEventListener;
+	restoreWindowListeners = () => { window.addEventListener = add; window.removeEventListener = remove; };
+}
+
+/** Flush passive effects, then require the recording-Enter window listener to be installed. Built into `startRecording`, so every test that records and then sends Enter gets it; no separate call is needed. */
+async function awaitRecordingEnterListenerInstalled(baseline: number) {
+	await act(async () => {});
+	await waitFor(() => {
+		if (liveWindowKeydown.size <= baseline) throw new Error("recording-Enter window keydown listener was never installed (useEffect on dictation === 'recording' did not register)");
+	});
+}
+
 async function startRecording(): Promise<FakeRecorder> {
+	const baseline = liveWindowKeydown.size;
 	fireEvent.click(screen.getByRole("button", { name: "start voice input" }));
 	await waitFor(() => expect(screen.getByRole("button", { name: "stop and transcribe" })).toBeTruthy());
+	await awaitRecordingEnterListenerInstalled(baseline);
 	const recorder = FakeRecorder.instances.at(-1)!;
 	recorder.emitChunk("audio-bytes");
 	return recorder;
@@ -116,6 +154,7 @@ function holdTranscription() {
 }
 
 beforeEach(() => {
+	trackWindowKeydownListeners();
 	FakeRecorder.instances = [];
 	/* Once-queues survive `clearAllMocks`: a test that leaves one unspent would feed the next. */
 	mockedTranscribe.mockReset();
@@ -131,6 +170,8 @@ beforeEach(() => {
 });
 afterEach(() => {
 	cleanup();
+	restoreWindowListeners?.();
+	restoreWindowListeners = null;
 	resetTurnStopForTests();
 	localStorage.clear();
 	vi.useRealTimers();

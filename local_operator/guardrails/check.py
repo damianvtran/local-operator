@@ -450,13 +450,18 @@ class _Approved:
     text: str
 
 
-def ledger_record(path: str, session_id: str, stop: tuple[str, ...]) -> Any:
+def ledger_record(
+    path: str, session_id: str, stop: tuple[str, ...], state_roots: tuple[str, ...] = ()
+) -> Any:
     """The creation-ledger row proving this session (or its subagent) made ``path``.
 
     The same bar as the classifier's ledger LOW (``classify._owned_by_session``):
     realpath AND inode generation match a row owned by this session, no other
     session's row or unrecorded repository sits inside, nothing in the state
     root, and a primary checkout only when this session cloned exactly it.
+    "The state root" is EVERY root the classifier protects (``state_roots``,
+    from ``_protected(...).state_roots``; security review N1, PR #3800), plus
+    the ledger's own, so the two bars cannot drift apart.
     Only harness-written tool-call records reach the ledger (and writing it is
     CRITICAL), so no message text — Team Bridge, peer, hub, web, file content
     — can make a path pass here.
@@ -476,13 +481,14 @@ def ledger_record(path: str, session_id: str, stop: tuple[str, ...]) -> Any:
         # prove it: resolving to the pointee let this session's row for the
         # pointed-to tree vouch for a link someone else made.
         link = prov.link_path(path)
-        if link in stop or _under(link, os.path.realpath(state_root)):
+        roots = (state_root, *state_roots)
+        if link in stop or any(_under(link, os.path.realpath(r)) for r in roots):
             return None
         return prov.owned_link(link, session_id)
     real = os.path.realpath(path)
     if real in stop:
         return None
-    if _under(real, os.path.realpath(state_root)):
+    if any(_under(real, os.path.realpath(r)) for r in (state_root, *state_roots)):
         return None
     record = prov.owned_record(real, session_id)
     if record is None:
@@ -518,6 +524,8 @@ class DeleteCase:
     cwd: str | None
     #: Whose creation ledger an ``ALLOW ledger`` citation is checked against.
     session_id: str = ""
+    #: Every protected state root (``ledger_record``'s refusal bar).
+    state_roots: tuple[str, ...] = ()
 
     def _named_by(self, path: str, words: Any) -> bool:
         from local_operator.guardrails.provenance import names_path
@@ -591,7 +599,14 @@ class DeleteCase:
             basis = [*basis[:6], f"… and {len(basis) - 6} more"]
         return "; ".join(basis)
 
-    def verify(self, answer: str, *, alone: bool = False) -> tuple[str, str]:
+    def verify(
+        self,
+        answer: str,
+        *,
+        alone: bool = False,
+        forked: bool = False,
+        scope_eligible: frozenset[str] = frozenset(),
+    ) -> tuple[str, str]:
         """``(basis, missing)``: what verified each path, and what did not verify.
 
         The answer's first line may cite ``evidence=e1,e2``, ``ask=a-1234`` and
@@ -620,6 +635,24 @@ class DeleteCase:
         by_evidence = verify_evidence(
             evidence_ids, self.paths, self.evidence, env=self.env, stop=self.stop, alone=alone
         )
+        # An ID proves the source, not semantics: only the independent prefix fork
+        # may decide completion, restrictions and holds. Never a judge-free route.
+        scope = re.fullmatch(r"ALLOW scope=o([1-9][0-9]*)", first)
+        scope_id = int(scope.group(1)) if scope else 0
+        scope_words = (
+            self.operator.words[scope_id - 1] if 0 < scope_id <= len(self.operator.words) else None
+        )
+        scoped = (
+            not alone
+            and forked
+            and not self.unverifiable
+            and not self.operator_only
+            and bool(self.paths)
+            and set(self.paths) <= scope_eligible
+            and scope_words is not None
+            and scope_words.label == "operator, direct"
+            and not scope_words.ask_id
+        )
         basis: list[str] = []
         missing: list[str] = []
         for path in self.paths:
@@ -630,7 +663,7 @@ class DeleteCase:
                 # Re-read, never trusted from the answer: the row must cover
                 # this path for THIS session (rows are written under the
                 # creator and every ancestor) with the same inode generation.
-                record = ledger_record(path, self.session_id, self.stop)
+                record = ledger_record(path, self.session_id, self.stop, self.state_roots)
                 if record is not None:
                     basis.append(f"{path} in the creation ledger ({record.creator}, {record.kind})")
                     continue
@@ -649,6 +682,12 @@ class DeleteCase:
             if words is not None:
                 where = f"ask {words.ask_id}" if words.ask_id else "the operator's message"
                 basis.append(f"{path} named by {where}")
+                continue
+            if scoped:
+                basis.append(
+                    f"{path} covered by trusted direct-user cleanup scope o{scope_id}; "
+                    "independent judge verified completion and scope"
+                )
                 continue
             missing.append(path)
         if missing:
@@ -753,7 +792,11 @@ def build_delete_case(verdict: Verdict, ctx: CallContext) -> DeleteCase:
             ),
             "",
         )
-        record = None if path in operator_only else ledger_record(path, ctx.session_id, stop)
+        record = (
+            None
+            if path in operator_only
+            else ledger_record(path, ctx.session_id, stop, tuple(prot.state_roots))
+        )
         tree = ""
         if not os.path.islink(path) and os.path.exists(os.path.join(path, ".git")):
             tree = f"; git: {prov.worktree_state(path, own=record is not None)}"
@@ -778,9 +821,19 @@ def build_delete_case(verdict: Verdict, ctx: CallContext) -> DeleteCase:
     if len(paths) > _MAX_FACTS:
         facts.append(f"… and {len(paths) - _MAX_FACTS} more paths")
     facts.extend(f"{u}: cannot be verified (unresolved, opaque or critical)" for u in unverifiable)
+    # A glob's reason is not keyed by any one match, so it is listed once,
+    # here: it carries each reached linked worktree's state, PR and creator
+    # (``classify._reached_worktrees``), the facts the judge needs to tell
+    # another session's live work from leftovers.
+    facts.extend(
+        f"{r.target.pattern}: ranked because: {r.reason}"
+        for r in verdict.flagged_targets
+        if r.target.pattern is not None and r.target.path is not None
+    )
     excluded = ", ".join(f"{n} {kind}" for kind, n in sorted(operator.excluded.items()))
     return DeleteCase(
         session_id=ctx.session_id,
+        state_roots=tuple(prot.state_roots),
         paths=[*paths, *operator_only],
         operator_only=frozenset(operator_only),
         unverifiable=unverifiable,
@@ -857,6 +910,70 @@ def evidence_write_verdict(
     return None
 
 
+def _scope_eligible(
+    case: DeleteCase, verdict: Verdict, ctx: CallContext
+) -> dict[str, tuple[str, str | None, tuple[int, ...]]]:
+    """Snapshot eligible identities; freshness alone cannot preserve completion."""
+    from local_operator.guardrails.provenance import (
+        _git,
+        _running_owners,
+        worktree_activity,
+        worktree_state,
+    )
+
+    if (
+        case.unverifiable
+        or case.operator_only
+        or not case.paths
+        or not any(w.label == "operator, direct" and not w.ask_id for w in case.operator.words)
+    ):
+        return {}
+    # All operands, not just HIGH ones: no parent/glob/symlink/mixed-target scope.
+    for ranked in verdict.targets:
+        t = ranked.target
+        if (
+            not t.path
+            or t.pattern
+            or t.opaque
+            or t.unknown_cwd
+            or t.climbs
+            or t.empty
+            or t.credential_derived
+            or t.unpinned
+            or t.landings
+            or os.path.abspath(t.raw_path or t.path) != os.path.realpath(t.raw_path or t.path)
+            or t.path not in case.paths
+            or t.op not in ("delete", "worktree-remove")
+        ):
+            return {}
+    identities = {}
+    for path in case.paths:
+        if worktree_state(path) != "clean":
+            return {}
+        try:
+            if _running_owners(path, ctx.session_id, strict=True):
+                return {}
+        except Exception:  # noqa: BLE001 — incomplete owner inventory is not idle
+            return {}
+        activity = worktree_activity(path, ctx.session_id)
+        if activity.pr_state != "none" or activity.owners_running:
+            return {}
+        identity = _git(["rev-parse", "--absolute-git-dir", "--git-common-dir", "HEAD"], path)
+        if not identity:
+            return {}
+        try:
+            # Detect replacement even at the same path/HEAD/branch/registration.
+            stamps = tuple(
+                n
+                for p in (path, os.path.join(path, ".git"), identity.splitlines()[0])
+                for n in (os.stat(p).st_dev, os.stat(p).st_ino)
+            )
+        except OSError:
+            return {}
+        identities[path] = (identity, activity.branch, stamps)
+    return identities
+
+
 async def _dangerous_delete(
     args: Mapping[str, Any],
     ctx: CallContext,
@@ -911,6 +1028,7 @@ async def _dangerous_delete(
         )
         outcome.warnings.append(f"Guardrail {DANGEROUS_DELETE_RULE}: allowed — {proven}.")
         return outcome
+    eligible = _scope_eligible(case, verdict, ctx) if forked_judge else {}
     result = await run_judge(
         JudgeBrief(
             tool="bash",
@@ -922,7 +1040,12 @@ async def _dangerous_delete(
             intent=ctx.intent,
             operator_words=case.operator_words,
             excluded=case.excluded,
-            target_facts=case.facts,
+            target_facts=(
+                *case.facts,
+                "Scoped cleanup eligibility (fresh clean/idle/no-open-PR; "
+                "owner inventory complete): "
+                f"{sorted(eligible)!r}",
+            ),
             evidence=case.evidence.describe(),
         ),
         # The fork reads the session's history, injected text included, so it
@@ -938,7 +1061,18 @@ async def _dangerous_delete(
         # (see ``guardrails/evidence.py``). A forked judge read the whole
         # session, injected text included, so an uncited or unverifiable
         # ALLOW is a block.
-        basis, missing = case.verify(result.answer)
+        # The awaited judge decided completion for the OLD tree and trusted
+        # words. Recheck gates and identity; a newly clean replacement is not it.
+        fresh = build_delete_case(verdict, ctx) if eligible else case
+        current = _scope_eligible(fresh, verdict, ctx) if eligible else {}
+        stable = frozenset(p for p in eligible if p in current and eligible[p] == current[p])
+        if fresh.operator_words != case.operator_words or fresh.excluded != case.excluded:
+            stable = frozenset()
+        basis, missing = case.verify(
+            result.answer,
+            forked=bool(forked_judge) and not result.context_free,
+            scope_eligible=stable,
+        )
         if missing:
             # Live ask a-1d54 (2026-11-11): the paths sat only in the picked
             # option's DESCRIPTION, four of five relative, so no citation could
@@ -961,6 +1095,11 @@ async def _dangerous_delete(
         outcome = GuardOutcome(
             blocked=False, rule=DANGEROUS_DELETE_RULE, risk=risk_name, destructive=True
         )
+        if "covered by trusted direct-user cleanup scope" in basis:
+            outcome.warnings.append(
+                "Completed-worktree cleanup authorized by direct-user scope; "
+                "finished/idle checks passed."
+            )
         if basis:
             outcome.warnings.append(f"Guardrail {DANGEROUS_DELETE_RULE}: allowed — {basis}.")
         return outcome

@@ -541,6 +541,14 @@ _DECLARED_RAW_READS: dict[tuple[str, str, str], tuple[int, str]] = {
     # the PROBE'S OWN machine code — compared against the producer's constants so
     # a rename cannot drift it, and never printed from this site (the renderers
     # gloss through ``doctor_detail_words``).
+    # The failover sentence (remote routing sync): reads the row's OWN detail,
+    # just built by ``model_credential_row``'s glossing renderers, and appends a
+    # sentence authored in ``routing_sync.failover_sentence``. Nothing from a
+    # peer's raw reason is echoed.
+    ("local_operator/network/readiness.py", "_attach_failover", "detail"): (
+        1,
+        "appends to this device's own rendered row detail; no peer reason is echoed",
+    ),
     ("local_operator/network/readiness.py", "_did_not_lead", "detail"): (
         1,
         "classifier input (the probe's own code, compared against the producer's "

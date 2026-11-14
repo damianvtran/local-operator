@@ -17353,19 +17353,19 @@ class SessionsParams(BaseModel):
     pid: int | None = Field(default=None, description="info/stop: exact pid.")
     # --- mesh: another device's sessions (design §3C; PR B) ------------------
     # `peer` is the device an address resolves ON for info/peek/spawn/resume/
-    # stop, and the remote half's narrowing key on `list`; `scope` is the same
+    # stop, and the exclusive device selector on `list`; `scope` is the same
     # question for `list` alone (local rows beside remote ones, or either).
     # Both sit with the ADDRESSES because they modify addressing, not content.
     peer: str | None = Field(
         default=None,
         description=(
             "Remote (mesh): the device holding the session — a name or id; on `list`, "
-            "narrows remote rows to it."
+            "selects only that device's rows."
         ),
     )
     scope: Literal["all", "local", "remote"] = Field(
         default="all",
-        description="list: which homes to show — all (default), local, or remote.",
+        description="list: all (default), local, or remote; peer selects only its device.",
     )
     prompt: str | None = Field(
         default=None,
@@ -17634,13 +17634,13 @@ _SESSIONS_OP_DOCS: dict[str, _SessionsOpDoc] = {
     "list": _SessionsOpDoc(
         summary="show what is running; `include_stored` widens the listing to"
         " stored (not running) sessions and `query` searches them. `peer`/`scope`"
-        " read the mesh: remote rows beside local ones by default, or one home"
-        " alone.",
+        " read the mesh: remote rows beside local ones by default; `peer` selects"
+        " only that remote device.",
         example="sessions(op='list', include_stored=True)",
         refusals=(
             "takes no address and no `prompt`/`name`; `query` reads THIS machine's"
             " store and is refused beside `peer`/`scope='remote'`; `include_stored`"
-            " widens only the local half and is refused beside `scope='remote'`.",
+            " widens only the local half and is refused beside `peer`/`scope='remote'`.",
         ),
     ),
     "info": _SessionsOpDoc(
@@ -18022,6 +18022,12 @@ def _sessions_validation_error(params: SessionsParams) -> str | None:
                 op,
                 "`query` searches THIS device's store, so it cannot ride a "
                 "`peer`/remote listing — drop `query`, or list with `scope='local'`.",
+            )
+        if "include_stored" in given and peer:
+            return _sessions_stray_field_refusal(
+                op,
+                "`peer` selects only that device's rows; `include_stored` widens THIS "
+                "device's listing — drop it, or drop `peer` for a local/all listing.",
             )
         if "include_stored" in given and params.scope == "remote":
             return _sessions_stray_field_refusal(
@@ -18749,7 +18755,7 @@ async def _sessions_list(
     already in hand), each remote row keeps its ``locality``/``peer`` markers,
     and the merge is keyed by ``session_id`` with the LOCAL row winning — the
     CLI's own rule ("a row this device holds is named as such"). ``scope``
-    narrows to one home; ``peer`` narrows the remote half to one device. A relay
+    narrows to one home; ``peer`` selects only that remote device. A relay
     that cannot be asked DEGRADES rather than refuses — the rows that were
     readable plus ONE note saying why the rest were not — because an empty answer
     from a listing must never read as "asked, and nothing is held". A peer that
@@ -18764,8 +18770,12 @@ async def _sessions_list(
     from local_operator.info.collect import session_rows
     from local_operator.resume import peer_reason_words
 
-    scope = params.scope
     peer = str(params.peer or "").strip()
+    # An explicit device is an address, not just a filter on a federated
+    # listing. Otherwise local rows consume the shared limit before the
+    # requested device's rows, and a failed peer can look like local success.
+    # Keep unaddressed scope='all' federation/degradation unchanged.
+    scope = "remote" if peer else params.scope
 
     local_rows: list[dict[str, Any]] = []
     if scope in ("all", "local"):
@@ -18794,7 +18804,7 @@ async def _sessions_list(
         if early is not None:
             return early
         refusal = _mesh_refusal_sentence(payload)
-        if refusal and str(payload.get("code") or "") == "relay_unavailable":
+        if refusal and not peer and str(payload.get("code") or "") == "relay_unavailable":
             # THE DEGRADE: a relay that cannot be asked is a NOTE on what was
             # readable, never an empty remote half dressed as a result.
             notes.append(f"no remote rows: {refusal}")
@@ -20104,6 +20114,9 @@ def _sessions_open_env(context: object | None) -> dict[str, str]:
     injections: dict[str, str] = dict(NON_INTERACTIVE_ENV)
     injections.update(may_delegate_env_injection(context))
     injections.update(scratchpad_env_injection(ensure_scratchpad_dir(scratchpad_dir_of(context))))
+    # The spawned CLI is a DIFFERENT session, so it gets the clear arm only, never
+    # the caller's id (#3436 review R1-1): the same helper with no session.
+    injections.update(session_id_env_injection(None))
     parent = {
         name: value
         for name, value in os.environ.items()
@@ -20236,7 +20249,10 @@ def _mesh_create_argv(peer: str, params: SessionsParams) -> tuple[list[str], str
     """The ``--create`` spelling for a remote spawn; ``(argv, error)`` for the
     ``model`` split — ``<provider>/<model-id>``, the grammar ``send`` documents —
     because the CLI takes hosting and model as two flags."""
-    argv = ["network", "sessions", "--json", "--peer", peer, "--create"]
+    # ``--origin agent``: an agent asked for this session, so the owner never
+    # forwards its ``notify`` items to the operator (2026-11-13; the CLI's
+    # ``_create_origin`` and ``notifications/remote_attention``).
+    argv = ["network", "sessions", "--json", "--peer", peer, "--create", "--origin", "agent"]
     argv += ["--prompt", str(params.prompt or "")]
     name = str(params.name or "").strip()
     if name:
