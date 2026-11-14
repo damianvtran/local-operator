@@ -679,7 +679,10 @@ def test_both_attended_boot_paths_call_the_preparation() -> None:
 
     assert "_schedule_click_preparation(app)" in inspect.getsource(tui.run_tui)
     # The call itself, off the loop — not merely the import beside it.
-    lifespan = inspect.getsource(server_app.lifespan)
+    # Follow the public logging wrapper into its actual startup implementation;
+    # checking an unreachable helper alone would miss a broken boot path.
+    assert "async with _lifespan(app)" in inspect.getsource(server_app.lifespan)
+    lifespan = inspect.getsource(server_app._lifespan)
     assert "await prepare_for_clicks_detached()" in lifespan
     # The daemon has no emulator markers because it has no emulator; letting it
     # "forget an undetectable terminal" would wipe a good memory every boot.

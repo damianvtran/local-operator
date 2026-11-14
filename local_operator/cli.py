@@ -11599,6 +11599,18 @@ def adopt_serve_socket(fd: int, host: str) -> socket.socket:
 
 
 def serve_command(host: str, port: int, reload: bool, *, listener_fd: int | None = None) -> int:
+    # Install before importing the server or uvicorn: startup diagnostics must
+    # not inherit the CLI's synchronous stderr handler. No other CLI changes.
+    from local_operator.serve_logging import configure_serve_logging
+
+    handler = configure_serve_logging()
+    try:
+        return _serve_command(host, port, reload, listener_fd=listener_fd)
+    finally:
+        handler.close()
+
+
+def _serve_command(host: str, port: int, reload: bool, *, listener_fd: int | None = None) -> int:
     """Start the FastAPI server using uvicorn.
 
     The bind address is refused unless it is loopback-only, with no override
@@ -11770,7 +11782,9 @@ def serve_command(host: str, port: int, reload: bool, *, listener_fd: int | None
         from local_operator.server import reload as serve_reload
 
         serve_reload.bind_listener_fd(asgi_app, listener.fileno())
-        config = uvicorn.Config(asgi_app, host=host, port=resolved_port)
+        # dictConfig otherwise closes ALL existing handlers (including ours)
+        # and reinstalls synchronous stderr handlers before startup can run.
+        config = uvicorn.Config(asgi_app, host=host, port=resolved_port, log_config=None)
         # Retain the Server object so a ready-successor handoff can pause/resume
         # ACCEPTORS on it without a kill: the listener socket lives in this frame
         # and the handoff runs in the lifespan's loop, so app.state is the one
@@ -11805,6 +11819,7 @@ def serve_command(host: str, port: int, reload: bool, *, listener_fd: int | None
             port=resolved_port,
             reload=reload,
             reload_excludes=[".venv"],
+            log_config=None,
         )
     return 0
 
