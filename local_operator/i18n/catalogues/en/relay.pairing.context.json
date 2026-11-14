@@ -1,0 +1,328 @@
+{
+  "relay.pairing.screen_title": {
+    "role": "pairing screen header",
+    "tone": "plain, calm, non-technical",
+    "maxCells": 24,
+    "note": "Header of the full-screen pairing route (#/pair). Imperative, short."
+  },
+  "relay.pairing.back": {
+    "role": "back button accessible label",
+    "tone": "plain, calm, non-technical",
+    "note": "aria-label of the header back arrow on the pairing screen."
+  },
+  "relay.pairing.title": {
+    "role": "pairing intro heading",
+    "tone": "plain, calm, non-technical",
+    "maxCells": 60,
+    "note": "First thing a person sees when they choose to pair the phone with their computer. Names the benefit, not the mechanism."
+  },
+  "relay.pairing.title_for_action": {
+    "role": "pairing sheet title opened from an approval",
+    "tone": "plain, calm, non-technical",
+    "maxCells": 44,
+    "note": "Sheet title when the person tapped Approve (or a run-without-asking choice) on a phone that is not paired yet. The sheet opens in place; after pairing they return to the same request. 'Approve' is the same verb as the approval card's button."
+  },
+  "relay.pairing.intro.body": {
+    "role": "pairing intro body",
+    "tone": "plain, calm, non-technical",
+    "note": "Explains the grant (this phone gains the power to approve actions) and that the computer confirms with its own (computer login) password, not a Radient password."
+  },
+  "relay.pairing.intro.pair": {
+    "role": "primary button",
+    "tone": "plain, calm, non-technical",
+    "maxCells": 24,
+    "note": "Starts the pairing request."
+  },
+  "relay.pairing.intro.not_now": {
+    "role": "secondary button",
+    "tone": "plain, calm, non-technical",
+    "maxCells": 16,
+    "note": "Dismisses the pairing sheet without doing anything."
+  },
+  "relay.pairing.checking": {
+    "role": "progress line",
+    "tone": "plain, calm, non-technical",
+    "note": "Shown while the phone asks the computer whether it can pair phones."
+  },
+  "relay.pairing.unavailable.body": {
+    "role": "not-available explanation",
+    "tone": "plain, calm, non-technical",
+    "note": "The computer cannot approve phones yet. 'Local Operator → Settings → Phone access' is the navigation path in the desktop app: translate 'Settings' and 'Phone access' exactly as the desktop app's settings labels in this locale (see the glossary); keep the arrows. Never mention terminals or commands here."
+  },
+  "relay.pairing.unavailable.waiting": {
+    "role": "not-available reassurance",
+    "tone": "plain, calm, non-technical",
+    "note": "Shown under unavailable.body: the phone re-checks every few seconds and files the request by itself once phone approvals are on. 'they' = phone approvals."
+  },
+  "relay.pairing.unsupported.body": {
+    "role": "unsupported explanation",
+    "tone": "plain, calm, non-technical",
+    "note": "The computer runs a version without terminal-free pairing."
+  },
+  "relay.pairing.retry": {
+    "role": "button",
+    "tone": "plain, calm, non-technical",
+    "maxCells": 16,
+    "note": "Retries the last step."
+  },
+  "relay.pairing.filing": {
+    "role": "progress line",
+    "tone": "plain, calm, non-technical",
+    "note": "Shown while the phone files its pairing request."
+  },
+  "relay.pairing.waiting.title": {
+    "role": "waiting heading",
+    "tone": "plain, calm, non-technical",
+    "maxCells": 44,
+    "note": "The request is waiting on the computer: the person should open the desktop app (or terminal app) there, where a pairing request appears."
+  },
+  "relay.pairing.waiting.confirm_body": {
+    "role": "waiting body, compare mode",
+    "tone": "plain, calm, non-technical",
+    "note": "Confirm mode: the computer shows the same six digits; the person compares them and approves on the computer. The code is shown above this line."
+  },
+  "relay.pairing.waiting.code_body": {
+    "role": "waiting body, typed mode",
+    "tone": "plain, calm, non-technical",
+    "note": "Code mode: the computer asks the person to type the six digits shown above this line."
+  },
+  "relay.pairing.waiting.password": {
+    "role": "waiting body, password step",
+    "tone": "plain, calm, non-technical",
+    "note": "After approving, the computer asks for its own login password (or Touch ID) to confirm. 'its own' distinguishes it from a Radient account password."
+  },
+  "relay.pairing.waiting.expires": {
+    "role": "countdown line",
+    "tone": "plain, calm, non-technical",
+    "maxCells": 24,
+    "note": "{countdown} is minutes:seconds, e.g. 4:59. Keep it as one token."
+  },
+  "relay.pairing.waiting.not_seen": {
+    "role": "delayed hint",
+    "tone": "plain, calm, non-technical",
+    "note": "Appears after about a minute without an answer."
+  },
+  "relay.pairing.waiting.cancel": {
+    "role": "button",
+    "tone": "plain, calm, non-technical",
+    "maxCells": 16,
+    "note": "Withdraws this phone's pending pairing request."
+  },
+  "relay.pairing.code.aria": {
+    "role": "accessible label of the six-digit code",
+    "tone": "plain, calm, non-technical",
+    "note": "Screen readers read {digits} digit by digit (the digits separated by spaces, e.g. '4 8 2 9 1 3')."
+  },
+  "relay.pairing.signing": {
+    "role": "status line",
+    "tone": "plain, calm, non-technical",
+    "note": "The person approved on the computer and the computer's password prompt is open. 'password' is the computer's login password."
+  },
+  "relay.pairing.failed_retryable": {
+    "role": "status line",
+    "tone": "plain, calm, non-technical",
+    "note": "The computer's password prompt was dismissed; the request is still open and can be approved again on the computer."
+  },
+  "relay.pairing.strikes_exhausted": {
+    "role": "terminal status",
+    "tone": "plain, calm, non-technical",
+    "note": "The person typed the wrong code on the computer three times; the request is closed."
+  },
+  "relay.pairing.denied": {
+    "role": "terminal status",
+    "tone": "plain, calm, non-technical",
+    "note": "Someone chose Deny on the computer."
+  },
+  "relay.pairing.expired": {
+    "role": "terminal status",
+    "tone": "plain, calm, non-technical",
+    "note": "The request window closed without an answer."
+  },
+  "relay.pairing.withdrawn": {
+    "role": "terminal status",
+    "tone": "plain, calm, non-technical",
+    "note": "This phone's request was withdrawn (by this phone's Cancel)."
+  },
+  "relay.pairing.start_again": {
+    "role": "button",
+    "tone": "plain, calm, non-technical",
+    "maxCells": 16,
+    "note": "Files a fresh pairing request after a closed one."
+  },
+  "relay.pairing.withdraw_in_progress": {
+    "role": "notice",
+    "tone": "plain, calm, non-technical",
+    "note": "Cancel was tapped too late: the computer is mid-confirmation, so the phone can't withdraw."
+  },
+  "relay.pairing.withdraw_failed": {
+    "role": "error",
+    "tone": "plain, calm, non-technical",
+    "note": "The withdraw call failed for a transport reason."
+  },
+  "relay.pairing.paired.title": {
+    "role": "success heading",
+    "tone": "plain, calm, non-technical",
+    "maxCells": 32,
+    "note": "Pairing finished."
+  },
+  "relay.pairing.paired.body": {
+    "role": "success body",
+    "tone": "plain, calm, non-technical",
+    "note": "'It' = this phone."
+  },
+  "relay.pairing.paired.not_ready": {
+    "role": "success caveat",
+    "tone": "plain, calm, non-technical",
+    "note": "Paired, but the computer has not finished setting up phone approvals, so it cannot yet verify this phone's approvals. Same navigation path wording as unavailable.body."
+  },
+  "relay.pairing.paired.home_screen": {
+    "role": "tip",
+    "tone": "plain, calm, non-technical",
+    "note": "Browsers may clear storage of sites not added to the Home Screen; adding it keeps the pairing key. Use the platform's usual name for 'Add to Home Screen' in this locale."
+  },
+  "relay.pairing.paired.done": {
+    "role": "button",
+    "tone": "plain, calm, non-technical",
+    "maxCells": 16,
+    "note": "Closes the success state."
+  },
+  "relay.pairing.return.approve": {
+    "role": "return-to-action notice",
+    "tone": "plain, calm, non-technical",
+    "note": "Shown when pairing started from an approval: the original request is still waiting and needs a fresh tap. 'Approve' is the card's button label; the phone never approves on its own."
+  },
+  "relay.pairing.return.choose": {
+    "role": "return-to-action notice",
+    "tone": "plain, calm, non-technical",
+    "note": "Shown when pairing started from the approval-mode sheet (run without asking): the choice needs a fresh tap."
+  },
+  "relay.pairing.return.gone": {
+    "role": "return-to-action notice",
+    "tone": "plain, calm, non-technical",
+    "note": "The request the person wanted to approve is gone (handled on another device, or it timed out). Pairing still succeeded."
+  },
+  "relay.pairing.return.back": {
+    "role": "button",
+    "tone": "plain, calm, non-technical",
+    "maxCells": 28,
+    "note": "Closes the sheet and returns to the request still waiting."
+  },
+  "relay.pairing.busy.same_key": {
+    "role": "busy notice",
+    "tone": "plain, calm, non-technical",
+    "note": "An earlier request from this same phone is still open on the computer."
+  },
+  "relay.pairing.busy.resume": {
+    "role": "button",
+    "tone": "plain, calm, non-technical",
+    "maxCells": 28,
+    "note": "Resumes waiting on the earlier request."
+  },
+  "relay.pairing.busy.cancel_earlier": {
+    "role": "button",
+    "tone": "plain, calm, non-technical",
+    "maxCells": 32,
+    "note": "Withdraws the earlier request so a new one can be filed."
+  },
+  "relay.pairing.busy.other": {
+    "role": "busy notice",
+    "tone": "plain, calm, non-technical",
+    "note": "A different phone's request is open on the computer; only one can be open at a time."
+  },
+  "relay.pairing.rate_limited": {
+    "role": "rate-limit notice",
+    "tone": "plain, calm, non-technical",
+    "note": "{countdown} is minutes:seconds, e.g. 1:30, counting down."
+  },
+  "relay.pairing.rate_limited_later": {
+    "role": "rate-limit notice",
+    "tone": "plain, calm, non-technical",
+    "note": "Same refusal as relay.pairing.rate_limited, shown when the computer did not say how long to wait, so no countdown is shown. 'Try again' button sits below."
+  },
+  "relay.pairing.revoked": {
+    "role": "re-pair notice",
+    "tone": "plain, calm, non-technical",
+    "note": "The computer removed (revoked) this phone. The phone has discarded its old key; pairing again files a fresh request that needs a new approval on the computer."
+  },
+  "relay.pairing.pair_again": {
+    "role": "button",
+    "tone": "plain, calm, non-technical",
+    "maxCells": 20,
+    "note": "Starts a new pairing request."
+  },
+  "relay.pairing.key_lost": {
+    "role": "re-pair notice",
+    "tone": "plain, calm, non-technical",
+    "note": "The browser evicted the phone's private key; the old pairing can no longer sign."
+  },
+  "relay.pairing.refused_signature": {
+    "role": "error",
+    "tone": "plain, calm, non-technical",
+    "note": "The computer rejected this phone's signed approval (for example the phone was removed or its pairing expired)."
+  },
+  "relay.pairing.error.network": {
+    "role": "error",
+    "tone": "plain, calm, non-technical",
+    "note": "A transport failure while pairing."
+  },
+  "relay.pairing.error.no_crypto": {
+    "role": "error",
+    "tone": "plain, calm, non-technical",
+    "note": "The browser lacks the secure key storage pairing needs."
+  },
+  "relay.pairing.terminal.header": {
+    "role": "disclosure header",
+    "tone": "plain, calm, non-technical",
+    "maxCells": 28,
+    "note": "Collapsed section with the terminal-based alternatives. The only place on these screens where commands appear."
+  },
+  "relay.pairing.terminal.turn_on_approving": {
+    "role": "terminal tip",
+    "tone": "plain, calm, non-technical",
+    "note": "{command} is a literal slash command (e.g. /mobile approvals on) and stays untranslated."
+  },
+  "relay.pairing.terminal.code_intro": {
+    "role": "terminal tip",
+    "tone": "plain, calm, non-technical",
+    "note": "{command} is a literal shell command and stays untranslated."
+  },
+  "relay.pairing.terminal.code_label": {
+    "role": "field label",
+    "tone": "plain, calm, non-technical",
+    "maxCells": 24,
+    "note": "Label of the pairing-code input."
+  },
+  "relay.pairing.terminal.code_placeholder": {
+    "role": "field placeholder",
+    "tone": "plain, calm, non-technical",
+    "maxCells": 24,
+    "note": "Placeholder of the pairing-code input."
+  },
+  "relay.pairing.terminal.name_label": {
+    "role": "field label",
+    "tone": "plain, calm, non-technical",
+    "maxCells": 32,
+    "note": "Label of the device-name input; the computer shows this name with the request."
+  },
+  "relay.pairing.terminal.submit": {
+    "role": "button",
+    "tone": "plain, calm, non-technical",
+    "maxCells": 24,
+    "note": "Claims the pasted code."
+  },
+  "relay.pairing.terminal.waiting": {
+    "role": "status line",
+    "tone": "plain, calm, non-technical",
+    "note": "{name} is the phone name the person typed."
+  },
+  "relay.pairing.terminal.no_answer": {
+    "role": "error",
+    "tone": "plain, calm, non-technical",
+    "note": "Waited ten minutes without an approval."
+  },
+  "relay.pairing.terminal.invalid_code": {
+    "role": "error",
+    "tone": "plain, calm, non-technical",
+    "note": "The pasted code was refused."
+  }
+}

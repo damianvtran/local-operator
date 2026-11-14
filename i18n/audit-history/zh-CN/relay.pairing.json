@@ -1,0 +1,29 @@
+{
+  "schema": 1,
+  "locale": "zh-CN",
+  "namespace": "relay.pairing",
+  "history_sha256": "c2d93fd994b93b8ec9d32679a1dc046281d90103f343038af1f8f72632f1190c",
+  "entries": [
+    {
+      "locale": "zh-CN",
+      "namespace": "relay.pairing",
+      "source_sha256": "d3dd6f85d0689242ec5c84b1145d47acd584856f5b25b49e18ea90c2da31fce0",
+      "translator": {
+        "agent": "coder subagent (C2a PWA slice; lop session a2980a9d3820)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-14"
+      },
+      "auditor": {
+        "agent": "i18n-auditor subagent (independent of the translator; lop session 8b4290dc2e57, delegated by lopdev manager 97e3f00bc260)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-14",
+        "result": "passed",
+        "findings": 1,
+        "unresolved_blocker_major": 0,
+        "read_route_verified": false
+      },
+      "status": "passed",
+      "note": "Independent audit of all 61 relay.pairing keys at English source sha256 d3dd6f85… (current bytes; the implementer's identity-only rename relay.pairing.terminal.approvals -> relay.pairing.terminal.turn_on_approving was verified by the auditor: substituting the old key name back reproduces the drafted 6f356b22… hash byte-for-byte, so every value is unchanged and the renamed key's translation was audited under its new name). Checked: key parity, {countdown}/{digits}/{command}/{name} preserved byte-exactly, no `lop ` command in any value, no ICU plurals in source, safety meaning (computer's own password vs Radient, nothing approved yet, removed/re-pair, wrong-code strikes), Approve/Deny label agreement with relay.asks.pending.*, Settings/Phone access path vs local-operator-ui origin/main f49d62bd2 desktop labels, maxCells with rich.cells.cell_len. Findings (0 blocker/major): minor glossary drift 'pairing code' rendered 配对代码/代码 (code.aria, terminal.code_label, waiting.confirm_body, waiting.code_body, strikes_exhausted, terminal.code_intro, terminal.invalid_code) vs the locale's established 配对码 (cli.browser.pairing_code and siblings) -> use 配对码. Desktop labels 设置/手机访问 match; 你 register, full-width punctuation and …… verified. waiting.password value 随后电脑会要求输入它自己的密码。 checked by code point (the harness display redacts it). Auditor edited no catalogue."
+    }
+  ]
+}

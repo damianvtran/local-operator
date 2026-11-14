@@ -1,0 +1,29 @@
+{
+  "schema": 1,
+  "locale": "es",
+  "namespace": "relay.pairing",
+  "history_sha256": "9236894fdef12f00cbbbbb57f94366f38727188eccdcadf414c5a9623517094b",
+  "entries": [
+    {
+      "locale": "es",
+      "namespace": "relay.pairing",
+      "source_sha256": "d3dd6f85d0689242ec5c84b1145d47acd584856f5b25b49e18ea90c2da31fce0",
+      "translator": {
+        "agent": "coder subagent (C2a PWA slice; lop session a2980a9d3820)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-14"
+      },
+      "auditor": {
+        "agent": "i18n-auditor subagent (independent of the translator; lop session 8b4290dc2e57, delegated by lopdev manager 97e3f00bc260)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-14",
+        "result": "passed",
+        "findings": 3,
+        "unresolved_blocker_major": 0,
+        "read_route_verified": false
+      },
+      "status": "passed",
+      "note": "Independent audit of all 61 relay.pairing keys at English source sha256 d3dd6f85… (current bytes; the implementer's identity-only rename relay.pairing.terminal.approvals -> relay.pairing.terminal.turn_on_approving was verified by the auditor: substituting the old key name back reproduces the drafted 6f356b22… hash byte-for-byte, so every value is unchanged and the renamed key's translation was audited under its new name). Checked: key parity, {countdown}/{digits}/{command}/{name} preserved byte-exactly, no `lop ` command in any value, no ICU plurals in source, safety meaning (computer's own password vs Radient, nothing approved yet, removed/re-pair, wrong-code strikes), Approve/Deny label agreement with relay.asks.pending.*, Settings/Phone access path vs local-operator-ui origin/main f49d62bd2 desktop labels, maxCells with rich.cells.cell_len. Findings (0 blocker/major): minor unavailable.body + paired.not_ready 'Acceso telefónico' -> 'Acceso desde el teléfono' (desktop label; 'acceso telefónico' also reads as dial-up access); minor title_for_action 46/44 cells -> 'Empareja este teléfono para aprobar aquí' (40); nit withdraw_in_progress 'Termina o cancela allí.' -> 'Termina o cancela la operación allí.' tú register consistent. Auditor edited no catalogue."
+    }
+  ]
+}
