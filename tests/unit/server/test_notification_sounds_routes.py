@@ -140,6 +140,12 @@ async def test_upload_rename_audio_delete_round_trip(desktop) -> None:
         (b"just some text\n" * 50, "text.wav", 422, "undecodable"),
         (b"SILENT", "quiet.wav", 422, "silent"),
     ],
+    # Explicit ids, because pytest derives an id from a bytes param by escaping
+    # every byte: under CI's pytest 8.4.2 the 40 MiB `too_large` body became a
+    # 41,943,145-character node id, so each `[shard stall]` header and junit
+    # row for it was ~42 MB and the 1 MiB stall-log cap cut the log there,
+    # which read as a stall in whatever test happened to precede the cut.
+    ids=["too_large", "unsupported_format", "too_long", "undecodable", "silent"],
 )
 async def test_upload_refusals_carry_their_code(desktop, raw, filename, status, code) -> None:
     client, _ = desktop

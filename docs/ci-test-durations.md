@@ -6,19 +6,91 @@ Only scheduling weights and the number of partitions change. More shards spend
 additional fleet capacity; six is authorized here, not a claim that any timeout
 margin has been demonstrated.
 
+## 2026-11-12 regeneration: the max over both Python legs
+
+**Why.** One partition serves both matrix legs, but #3284 weighed files with
+3.12 data from three PR runs of 11-01. By 11-11 shard `test (3.12, 0)` sat at the
+cap (walls 38:09 cancelled with every test passed, 34:21, 35:27; PR #3719
+diagnostic). The largest drift is `tests/unit/session/test_attach_frame_size.py`,
+weighted 1315.7 s while these six runs measured it at 1165-2170 s on 3.12 and
+1207-2491 s on 3.13 (p75 2071.1 s and 2180.8 s). 261 current files were also
+absent from the old manifest and ran at the 30.0 s fallback.
+
+**Method.** Six successful `main` full-suite runs (all twelve shard jobs of
+attempt 1 green), both legs of each. Each leg takes its own inclusive p75 of
+per-run file totals (as before); a file weighs the **max of the two legs'
+p75**, so whichever leg is slower for that file is the one the partition plans
+for. Pooling both legs into one p75 would let the faster leg dilute the slower.
+`samples_per_file` counts (run, leg) observations: 2,237 files have all 12, and
+the 22 with fewer are files that were added or removed during the window.
+
+| Run | Attempt | Event | Head | Workflow blob |
+|---|---:|---|---|---|
+| 43040596560 | 1 | push | `d756665e377df9b5500eeb348d2b5246aa487b91` | `18002e9d72f97a79f8adf5f8d1d1373ba7939391` |
+| 42978914635 | 1 | schedule | `ec4b40fa656a8000524c1234b6c8e28206f86a4b` | `ada0d8f35f1a3473e25a479f574802e9577c0cee` |
+| 42932909817 | 1 | push | `966b5954a794204e861a3a055e109bdd6c6aecb9` | `5fe5313ec8ec24d827db89da9cace528c3bfaf2b` |
+| 42862349942 | 1 | push | `e457f8424e0c32a76566ddd1bb7be5a4d5c2cabb` | `37c237dc40f124d1d97c0a8ff0320d08a7685074` |
+| 42852373405 | 1 | push | `6f2cee87a4d11d5888b2e8dd21163003456b6a76` | `37c237dc40f124d1d97c0a8ff0320d08a7685074` |
+| 42831360242 | 1 | push | `c9ad434a03b6684ef6ef73646f1a75bb75cc0846` | `37c237dc40f124d1d97c0a8ff0320d08a7685074` |
+
+**Projection, both legs, on the 2,272-file tree at `dee55f697`.** The table scores
+each manifest's LPT assignment three ways: by the manifest itself (what
+`shard_tests.py --report` prints), by each leg's measured p75, and by the worst
+single run of that leg. Values are test-minutes. The wall column turns the
+largest shard into minutes using the lowest test-seconds-per-wall-second seen in
+the ordinary pytest step across all 72 shard jobs of these runs (3.23; median
+3.41), plus the largest non-pytest job time seen (81 s). It is a projection, not
+a measurement.
+
+| Assignment | Scored by | s0 | s1 | s2 | s3 | s4 | s5 | max | wall of max | vs 38:00 |
+|---|---|--:|--:|--:|--:|--:|--:|--:|--:|--:|
+| before (#3284) | manifest | 106.3 | 106.3 | 106.3 | 106.3 | 106.3 | 106.3 | 106.3 | 34.3 | +3.7 |
+| before (#3284) | p75 3.12 | 106.6 | 83.2 | 99.3 | 101.3 | 96.7 | 96.0 | 106.6 | 34.4 | +3.6 |
+| before (#3284) | worst run 3.12 | 111.5 | 97.4 | 105.7 | 101.2 | 96.1 | 97.1 | 111.5 | 35.9 | +2.1 |
+| before (#3284) | p75 3.13 | 108.8 | 100.7 | 107.6 | 98.4 | 95.6 | 93.6 | 108.8 | 35.1 | +2.9 |
+| before (#3284) | worst run 3.13 | 112.6 | 102.2 | 108.5 | 98.3 | 97.8 | 101.2 | 112.6 | 36.2 | +1.8 |
+| after | manifest | 105.4 | 105.4 | 105.4 | 105.4 | 105.4 | 105.4 | 105.4 | 34.0 | +4.0 |
+| after | p75 3.12 | 100.0 | 94.0 | 95.1 | 97.0 | 98.2 | 98.9 | 100.0 | 32.3 | +5.7 |
+| after | worst run 3.12 | 96.0 | 94.6 | 92.6 | 93.9 | 95.2 | 95.0 | 96.0 | 31.1 | +6.9 |
+| after | p75 3.13 | 100.3 | 100.5 | 102.2 | 98.5 | 101.5 | 101.8 | 102.2 | 33.0 | +5.0 |
+| after | worst run 3.13 | 98.2 | 99.2 | 101.5 | 94.7 | 98.6 | 107.8 | 107.8 | 34.7 | +3.3 |
+
+Shard 0 holds `test_attach_frame_size.py` in both assignments. At the highest
+3.12 cost the diagnostic saw for that file (2619 s), shard 0's 3.12 p75 load
+becomes 115.7 test-min before (37.2 min projected) and 109.1 after (35.2 min).
+
+**Limits.** These numbers are in-sample: the same runs supply the weights and
+the scores. The suite is ~100 test-minutes per shard at about 3.2-3.4x
+effective concurrency, so even a perfect balance leaves six shards at about 32
+minutes. Reweighting removes the skew; it does not create more than about 4-7
+minutes of margin. If CI keeps landing near the cap after this change, the next
+lever is the per-test cost (the year-long state in `test_attach_frame_size.py`)
+or a seventh shard, not the timeout.
+
+Below: how to reproduce the committed manifest, the source contract the
+generator enforces, and the record of the #3284 (2026-11-01) regeneration this
+one replaced (its "Source selection" and projection tables describe that
+earlier input, not the committed one).
+
 ## Reproduce the committed manifest
 
-Run from the repository root with Python, the repository's existing PyYAML
-dependency and authenticated `gh` (no pytest run, dependency install or build):
+Run from the repository root with Python 3.11+ (the job-log timestamps carry
+seven fractional digits, which 3.9's `datetime.fromisoformat` rejects), the
+repository's existing PyYAML dependency and authenticated `gh` (no pytest run,
+dependency install or build). The cache holds raw junit XML, ~45 MB per run and
+leg, so point it outside a size-capped session scratchpad:
 
 ```sh
-python scripts/gen_test_durations.py --cache-dir "$LOCAL_OPERATOR_SCRATCHPAD/timing-cache" \
-  --ci-run 41295059480:1 --ci-run 41294499173:1 --ci-run 41294469202:1
+.venv/bin/python scripts/gen_test_durations.py --cache-dir /path/outside/scratchpad/timing-cache \
+  --python 3.12 --python 3.13 \
+  --ci-run 43040596560:1 --ci-run 42978914635:1 --ci-run 42932909817:1 \
+  --ci-run 42862349942:1 --ci-run 42852373405:1 --ci-run 42831360242:1
 ```
 
 The generator fetches attempt-specific jobs and downloads artifacts by immutable
-ID. It requires a completed successful CI run and the **exact** complete Python
-3.12 shard matrix declared by its immutable execution-source workflow, then binds
+ID. It requires a completed successful CI run and, for every `--python` leg
+(default 3.12 alone), the **exact** complete shard matrix declared by its
+immutable execution-source workflow, then binds
 artifact creation time to each job's execution interval. A six-shard source with
 only jobs 0–4 is incomplete, not a historical five-shard run. Missing or ambiguous
 artifacts are fatal.
@@ -83,12 +155,12 @@ Per-file testcase seconds are summed **within each run** before taking inclusive
 p75 (linear interpolation; with three samples, halfway between the two largest).
 Files absent from another run are not zero-cost observations. Each positive
 weight and the p90 fallback has a one-second floor. Unobserved current files
-still run with the fallback; the regenerated manifest has 2,011 observed files
+still run with the fallback; the #3284 manifest had 2,011 observed files
 (2,008 observed in all three runs, three in one). On the implementation tree,
 `team_bridge/test_reply_windows.py` and the new generator regression file are
 unobserved and remain selected. Source changes after this snapshot can add more.
 
-## Source selection and limitations
+## #3284 record: source selection and limitations
 
 All three inputs are complete PR runs from the same eight-minute creation window
 on 2026-11-01, not independent days or post-change observations:
@@ -108,7 +180,7 @@ initially admitted this mixed run; fresh attempt-specific API reads exposed it.
 These runs share runner/job configuration but differ slightly in test content.
 This is within-window calibration, not proof of out-of-sample wall performance.
 
-## Assignment projections — test-time, NOT wall
+## #3284 record: assignment projections — test-time, NOT wall
 
 Both rows below partition the SAME 2,013-file implementation tree with LPT. Old
 means the prior manifest with five shards; new means p75 with six. Values are
@@ -130,7 +202,7 @@ they are counted explicitly and are NOT removed from the real partition:
 | 41294499173 | 5 | 6108.8, 5446.9, 4343.1, 6153.1, 6386.3 | 4632.4, 4994.4, 4552.5, 4579.8, 4752.9, 4926.1 |
 | 41294469202 | 3 | 4141.1, 5334.7, 6085.9, 5468.7, 4232.5 | 4182.9, 4055.1, 4364.7, 4326.9, 4484.2, 3849.2 |
 
-## Actual historical wall and testcase totals (same run/job)
+## #3284 record: actual historical wall and testcase totals (same run/job)
 
 The following are the original five-shard jobs, not six-shard observations.
 Job and pytest-step walls come from the attempt-specific GitHub Jobs API

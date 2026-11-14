@@ -3,17 +3,22 @@
 Preferred unit route (gh authentication required; no tests are executed)::
 
     python scripts/gen_test_durations.py --cache-dir /path/to/timing-cache \
-        --ci-run 41295059480:1 --ci-run 41294499173:1 \
-        --ci-run 41294469202:1
+        --python 3.12 --python 3.13 \
+        --ci-run 43040596560:1 --ci-run 42978914635:1 --ci-run 42932909817:1 \
+        --ci-run 42862349942:1 --ci-run 42852373405:1 --ci-run 42831360242:1
 
 CI mode requires >=3 distinct complete successful runs of the same unit job
-(Python 3.12, Linux). It binds immutable artifact IDs to attempt-specific job
-intervals, includes shard-zero serial controls, and takes the inclusive p75 of
-per-file totals across observed runs. Missing observations are NOT zero; sample
-counts and run/head/attempt/artifact provenance are committed with the weights.
-Cancelled/partial runs and ambiguous retry artifacts are rejected, not blended.
-The November 2026 sample is three PR branches created within eight minutes, so
-this is within-window calibration, not evidence of day-to-day stability.
+(Python 3.12 by default, Linux). It binds immutable artifact IDs to
+attempt-specific job intervals, includes shard-zero serial controls, and takes
+the inclusive p75 of per-file totals across observed runs. Repeat ``--python``
+(``--python 3.12 --python 3.13``) to measure every matrix leg of the same runs:
+each leg keeps its own p75 and a file weighs the max across legs, because one
+partition serves both legs and the slower leg is the one the cap cuts off.
+Missing observations are NOT zero; sample counts and run/head/attempt/artifact
+provenance are committed with the weights. Cancelled/partial runs and ambiguous
+retry artifacts are rejected, not blended. The committed sample (2026-11-12) is
+six successful `main` full-suite runs over 11-10..11-11 (five push, one
+schedule); it is calibration over that window, not proof of later stability.
 
 JUnit testcase times are summed test-time, NOT elapsed job/pytest wall time.
 Worker imbalance, idle time, setup/teardown, and collection can affect the gap;
@@ -392,8 +397,14 @@ def _source_matrix(run: dict[str, Any], job: dict[str, Any]) -> tuple[list[int],
     return expected, {"workflow_sha": revision, "workflow_blob": source["sha"]}
 
 
-def ci_run(run_id: int, attempt: int, cache: Path) -> tuple[dict[str, float], dict[str, Any]]:
-    """Admit only an entire successful Python 3.12 shard matrix from ONE attempt.
+def ci_run(
+    run_id: int, attempt: int, cache: Path, python: str = "3.12"
+) -> tuple[dict[str, float], dict[str, Any]]:
+    """Admit only an entire successful shard matrix of ONE Python leg from ONE attempt.
+
+    `python` names the matrix leg (`test (<python>, N)` jobs and their
+    `junit-timings-<python>-N` artifacts). Both legs run the SAME partition, so a
+    leg is a second measurement of the same file list, never a different tree.
 
     Artifact names historically omitted attempts. Bind each immutable artifact
     ID to its job's execution interval instead of letting gh download merge
@@ -414,13 +425,13 @@ def ci_run(run_id: int, attempt: int, cache: Path) -> tuple[dict[str, float], di
     if run["path"] not in SHARD_WORKFLOWS:
         raise ValueError(f"not a comparable CI workflow: {run['path']}")
     shards = sorted(
-        (j for j in jobs if j["name"].startswith("test (3.12, ")),
+        (j for j in jobs if j["name"].startswith(f"test ({python}, ")),
         key=lambda j: j["name"],
     )
     if not shards:
         raise ValueError(f"run {run_id}: no unit shard jobs for source validation")
     expected, workflow_source = _source_matrix(run, shards[0])
-    if [j["name"] for j in shards] != [f"test (3.12, {s})" for s in expected] or any(
+    if [j["name"] for j in shards] != [f"test ({python}, {s})" for s in expected] or any(
         j["conclusion"] != "success" for j in shards
     ):
         raise ValueError(
@@ -430,7 +441,7 @@ def ci_run(run_id: int, attempt: int, cache: Path) -> tuple[dict[str, float], di
     paths: list[Path] = []
     sources = []
     for shard, job in enumerate(shards):
-        name = f"junit-timings-3.12-{shard}"
+        name = f"junit-timings-{python}-{shard}"
         matches = [
             a
             for a in artifacts["artifacts"]
@@ -451,8 +462,8 @@ def ci_run(run_id: int, attempt: int, cache: Path) -> tuple[dict[str, float], di
         directory = cache / f"{run_id}-{attempt}" / str(shard)
         directory.mkdir(parents=True, exist_ok=True)
         with zipfile.ZipFile(BytesIO(archive)) as zipped:
-            expected = f"junit-3.12-{shard}.xml"
-            names = [expected] + (["junit-serial-controls-3.12-0.xml"] if shard == 0 else [])
+            expected = f"junit-{python}-{shard}.xml"
+            names = [expected] + ([f"junit-serial-controls-{python}-0.xml"] if shard == 0 else [])
             for filename in names:
                 # Select exact known XML members; never extract arbitrary archive paths.
                 destination = directory / filename
@@ -466,7 +477,7 @@ def ci_run(run_id: int, attempt: int, cache: Path) -> tuple[dict[str, float], di
         "run_id": run_id,
         "attempt": attempt,
         "head": run["head_sha"],
-        "python": "3.12",
+        "python": python,
         **workflow_source,
         "shards": sources,
     }
@@ -511,6 +522,16 @@ def main(argv: list[str] | None = None) -> int:
     )
     ap.add_argument("--cache-dir", type=Path, help="directory for downloaded timing XML")
     ap.add_argument(
+        "--python",
+        action="append",
+        default=[],
+        metavar="VERSION",
+        help=(
+            "matrix leg to measure in --ci-run mode (repeatable; default 3.12). With "
+            "several, each file weighs the MAX of its per-leg p75"
+        ),
+    )
+    ap.add_argument(
         "--runs",
         type=int,
         default=1,
@@ -550,23 +571,58 @@ def main(argv: list[str] | None = None) -> int:
             ap.error("p75 requires at least three distinct complete run IDs (RUN:ATTEMPT)")
         if len({value[0] for value in identities}) != len(identities):
             ap.error("repeated run IDs would bias p75")
+        pythons = args.python or ["3.12"]
+        if len(set(pythons)) != len(pythons) or not all(
+            re.fullmatch(r"3\.\d{1,2}", value) for value in pythons
+        ):
+            ap.error("--python must name distinct matrix legs such as 3.12")
+        # One partition serves EVERY matrix leg, so a file must weigh what it
+        # costs on the leg where it is slowest, or that leg's shard is the one
+        # that runs out of time. Measured 2026-11-12: the 3.12-only manifest
+        # (#3284) weighed test_attach_frame_size.py at 1315.7 s while six main
+        # runs measured it at p75 2071 s on 3.12 and 2181 s on 3.13, and shard
+        # 3.12-0 was cancelled at the 38-minute cap with every test passed
+        # (PR #3719 diagnostic). Each leg keeps its own p75 (the legs are
+        # different populations, so pooling them would let the faster leg dilute
+        # the slower one); the max is taken per file across the legs.
         observations, provenance = [], []
-        for run_id, attempt in identities:
-            measured, source = ci_run(run_id, attempt, args.cache_dir)
-            observations.append(measured)
-            provenance.append(source)
-        manifest = build_manifest(percentile_weights(observations))
+        per_leg: list[dict[str, float]] = []
+        for python in pythons:
+            leg = []
+            for run_id, attempt in identities:
+                measured, source = ci_run(run_id, attempt, args.cache_dir, python)
+                leg.append(measured)
+                provenance.append(source)
+            observations.extend(leg)
+            per_leg.append(percentile_weights(leg))
+        weights = {
+            path: max(leg[path] for leg in per_leg if path in leg) for path in set().union(*per_leg)
+        }
+        manifest = build_manifest(weights)
         manifest["_provenance"] = {
-            "method": "p75-inclusive-per-run-file-total",
+            # The single-leg method name and shape are unchanged, so a 3.12-only
+            # regeneration still writes exactly what #3284's route wrote.
+            "method": (
+                "p75-inclusive-per-run-file-total"
+                if len(pythons) == 1
+                else "max-over-python-of-p75-inclusive-per-run-file-total"
+            ),
+            **({"pythons": pythons} if len(pythons) > 1 else {}),
             "runs": provenance,
+            # Counted over every (run, leg) observation the weight drew on.
             "samples_per_file": {
                 path: sum(path in run for run in observations)
                 for path in sorted(set().union(*observations))
             },
         }
         out.write_text(json.dumps(manifest, indent=1, sort_keys=True) + "\n")
-        print(f"wrote {out}: p75 from {len(observations)} complete CI run attempts")
+        print(
+            f"wrote {out}: p75 from {len(identities)} complete CI run attempts"
+            + (f", max over Python {', '.join(pythons)}" if len(pythons) > 1 else "")
+        )
         return 0
+    if args.python:
+        ap.error("--python applies only to --ci-run")
     if not args.junit:
         ap.error("supply --junit or at least three --ci-run values")
     paths: list[Path] = []
