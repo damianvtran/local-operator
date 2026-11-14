@@ -85,6 +85,10 @@ ENTRY_CUSTOM = "custom"
 #: ``session.retention.DESKTOP_MARKER_NAME`` — the created-session marker a copy
 #: carries, and the second source of the ``cwd`` a rebuilt index names.
 DESKTOP_MARKER_NAME = "desktop.json"
+#: Set to ``true`` in an existing ``desktop.json`` by the promote (see
+#: :func:`mark_moved_in`), so the session's own monitor load knows its carried
+#: cwds may be foreign even under this host's home path (review r2 R2-m1).
+MOVED_IN_KEY = "moved_in"
 
 #: Backward-read granularity for the transcript scan (the reference walker's
 #: chunk; kept in one place so the two readers stay comparably shaped).
@@ -216,6 +220,115 @@ def _home_relative_tail(recorded: str) -> str:
     return ""
 
 
+def translate_host_path(recorded: str, *, home: str) -> str:
+    """Map another host's absolute path onto THIS host, or ``""`` when it cannot.
+
+    The same rule :func:`rewrite_host_cwd` applies to the marker, minus its
+    always-succeeding fallback (the caller owns that choice): a path that exists
+    here is kept; else the same trailing component under this user's home; else
+    the tail below the other device's home, when that exists here — and a path
+    that IS the other device's home maps to this home (``/Users/damian`` →
+    ``/home/ec2-user``, the 2026-11-13 move). Relative or empty input is returned
+    unchanged: a relative cwd was resolved by its writer. Never raises.
+
+    ``home`` IS REQUIRED AND NEVER DEFAULTED (cwd omission census): it is the
+    DESTINATION home the caller resolved for this move. An eager fallback to the
+    process's own home would let a caller that lost the value silently map a
+    foreign path somewhere the move never chose; an empty ``home`` therefore
+    means "cannot map" (``""``) and the caller's own fallback decides.
+    """
+    value = str(recorded or "")
+    if not value or not os.path.isabs(value) or os.path.exists(value):
+        return value
+    if not home:
+        return ""
+    parts = [part for part in value.split("/") if part]
+    if len(parts) == 2 and parts[0] in ("home", "Users"):
+        return home
+    same_basename = os.path.join(home, os.path.basename(value.rstrip("/")))
+    if os.path.exists(same_basename):
+        return same_basename
+    tail = _home_relative_tail(value)
+    if tail and os.path.exists(os.path.join(home, tail)):
+        return os.path.join(home, tail)
+    return ""
+
+
+def _under(path: str, root: str) -> bool:
+    """Whether ``path`` is ``root`` or below it (string-wise; ``path`` may not exist)."""
+    path = os.path.normpath(path)
+    return path == root or path.startswith(root.rstrip("/") + "/")
+
+
+def translate_monitor_cwds(
+    specs: Sequence[Mapping[str, Any]],
+    *,
+    session_cwd: str,
+    home: str,
+    moved: bool = False,
+) -> tuple[list[dict[str, Any]], dict[str, int]]:
+    """Rewrite each carried monitor's ``cwd`` for THIS host.
+
+    WHY (2026-11-13 move, Mac → lop-remote-node-2): three ``gh pr view`` monitors
+    travelled in the transcript with ``cwd=/Users/damian`` and every first check on
+    the node failed with "cannot start the command in '/Users/damian'" — the move
+    translated the SESSION's cwd (``carry.cwd``) but not the monitors', which each
+    capture their own absolute cwd at arm (``monitors/arm._captured_cwd``).
+
+    A cwd that :func:`translate_host_path` can map is mapped; one it cannot is
+    re-armed at ``session_cwd`` (the session's destination cwd) and COUNTED, so the
+    receipt can say so rather than leaving a monitor that fails every tick.
+    Returns ``(rows, {"translated": n, "fallback": n})``; rows whose cwd already
+    fits are returned unchanged, so a second pass is a no-op.
+
+    LOCAL PATHS ARE NEVER TRANSLATED (review r1 m2). The session-load seat runs
+    this for EVERY session, moved or not, so a cwd under THIS host's own home is
+    this host's path: a missing one (a removed worktree) is a real local failure
+    that must keep failing loudly, not silently re-arm somewhere else. Only a cwd
+    outside this home — another device's ``/Users/<u>`` or ``/home/<u>`` — is
+    foreign and mapped.
+
+    ``moved=True`` lifts that skip (review r2 R2-m1): a session KNOWN to have
+    arrived by move — the promote's index rebuild, or a load whose marker
+    carries :data:`MOVED_IN_KEY` — may hold a cwd from a device that shares this
+    home path (two Macs at ``/Users/damian``), and that path is foreign even
+    though it sits under this home.
+
+    ``home`` IS REQUIRED (cwd omission census): the caller names this host's home
+    explicitly. Without it neither "is this path local?" nor "where does it map?"
+    can be answered, so an empty ``home`` returns the rows UNCHANGED — a monitor
+    that keeps failing loudly — rather than guessing the process's home and
+    re-arming somewhere the move never chose.
+    """
+    rows: list[dict[str, Any]] = []
+    counts = {"translated": 0, "fallback": 0}
+    if not home:
+        return [dict(raw) for raw in specs], counts
+    raw_home = home
+    # Both spellings: a symlinked home (macOS ``/var`` → ``/private/var``) must not
+    # make this host's own path read as foreign.
+    local_homes = {os.path.normpath(raw_home), os.path.realpath(raw_home)}
+    for raw in specs:
+        row = dict(raw)
+        cwd = row.get("cwd")
+        if (
+            isinstance(cwd, str)
+            and cwd
+            and os.path.isabs(cwd)
+            and not os.path.exists(cwd)
+            and (moved or not any(_under(cwd, local) for local in local_homes))
+        ):
+            mapped = translate_host_path(cwd, home=home)
+            if mapped:
+                counts["translated"] += 1
+            else:
+                mapped = session_cwd
+                counts["fallback"] += 1
+            row["cwd"] = mapped
+        rows.append(row)
+    return rows, counts
+
+
 def _write_marker(marker: Path, document: Mapping[str, Any]) -> None:
     """Write ``desktop.json`` atomically, owner-only.
 
@@ -321,6 +434,35 @@ def rewrite_host_cwd(
     return {"from": recorded_value, "to": mapped}
 
 
+def mark_moved_in(target: Path) -> bool:
+    """Record on an EXISTING marker that this session arrived by move.
+
+    Only an existing ``desktop.json`` is touched: creating one would change how
+    the desktop treats a TUI-created session, which a flag must not do. Without
+    the marker, the promote's index rebuild still maps the cwds (``moved=True``)
+    and only the session-load seat keeps the local-home rule. Never raises.
+    """
+    marker_path = Path(target) / DESKTOP_MARKER_NAME
+    try:
+        marker = json.loads(marker_path.read_text(encoding="utf-8"))
+        if not isinstance(marker, dict) or marker.get(MOVED_IN_KEY) is True:
+            return isinstance(marker, dict)
+        marker[MOVED_IN_KEY] = True
+        _write_marker(marker_path, marker)
+        return True
+    except (OSError, ValueError):
+        return False
+
+
+def moved_in(session_dir: Path) -> bool:
+    """Whether :func:`mark_moved_in` flagged this session's marker. Never raises."""
+    try:
+        marker = json.loads((Path(session_dir) / DESKTOP_MARKER_NAME).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    return isinstance(marker, dict) and marker.get(MOVED_IN_KEY) is True
+
+
 def _monitor_index_rows(specs: list[Any]) -> list[dict[str, Any]]:
     """The index rows for carried monitor specs, with NO counters (fresh defaults).
 
@@ -396,9 +538,17 @@ def rebuild_indexes(
     try:
         details = latest_custom_details(directory, MONITOR_SCHEDULES_CUSTOM_TYPE) or {}
         specs = [row for row in details.get("monitors") or () if isinstance(row, Mapping)]
-        rows = _monitor_index_rows(specs)
         existing = monitor_store.read_entry(root, session_id)
         cwd = resolve_cwd(directory, existing)
+        # The index names the cwd each check runs in; the transcript keeps the
+        # source host's value (never edited — see ``rewrite_host_cwd``) and the
+        # session re-applies this same translation when it loads the specs.
+        specs, cwd_counts = translate_monitor_cwds(
+            specs, session_cwd=cwd, home=os.path.expanduser("~"), moved=True
+        )
+        if cwd_counts["translated"] or cwd_counts["fallback"]:
+            report["monitor_cwds"] = cwd_counts
+        rows = _monitor_index_rows(specs)
         if existing is not None and _rows_equal(existing.get("monitors"), rows):
             report["monitors"] = len(rows)
         else:
@@ -631,3 +781,249 @@ def monitor_count(config_dir: Path, session_id: str) -> int:
         return 0
     rows = (entry or {}).get("monitors")
     return len(rows) if isinstance(rows, list) else 0
+
+
+#: Bounds on what a move carries of the session's projects. The prepare answer
+#: is one wire frame, and a project row's history is soft-bounded at
+#: ``projects.UPDATES_MAX`` (500) entries of up to ``PROGRESS_MAX`` characters,
+#: so the newest entries are carried and the count is stated in the receipt.
+CARRIED_PROJECTS_MAX = 8
+CARRIED_UPDATES_MAX = 100
+#: Receiver-side byte caps (review r1 M1). After the entry trims above, an honest
+#: row is ~100 KB at most (100 × 1000-character entries plus bounded fields), so
+#: 256 KB a row and 1 MB a carry refuse only rows no current sender produces.
+CARRIED_PROJECT_BYTES_MAX = 256 * 1024
+CARRIED_TOTAL_BYTES_MAX = 1024 * 1024
+
+
+def linked_project_rows(config_dir: Path, session_id: str) -> list[dict[str, Any]]:
+    """The SOURCE half of the project carry: rows this session is linked to.
+
+    WHY: the project store is per-device (``<config>/projects/<id>.json``), so a
+    moved session's linked project did not exist on the destination (2026-11-13,
+    ``secret-guardrails-relax``: "no project named" on lop-remote-node-2). Rows are
+    serialized as stored (minus attachment files, which stay here) with the newest
+    :data:`CARRIED_UPDATES_MAX` history entries. Never raises: a project store that
+    cannot be read must not refuse a move.
+    """
+    try:
+        from local_operator.projects import ProjectRegistry
+
+        registry = ProjectRegistry(Path(config_dir))
+        projects = registry.projects_for_session(session_id)
+    except Exception:  # noqa: BLE001 — see the docstring
+        logger.warning("carry: could not read projects linked to %s", session_id, exc_info=True)
+        return []
+    rows: list[dict[str, Any]] = []
+    for project in projects[:CARRIED_PROJECTS_MAX]:
+        row = project.model_dump(mode="json", by_alias=True)
+        updates = list(row.get("updates") or [])
+        # Counted before they are dropped so the destination's receipt can say
+        # the history arrived without its files (``Project`` ignores the key).
+        row["attachments_not_carried"] = sum(
+            len(entry.get("attachments") or []) for entry in updates
+        )
+        row["updates"] = [dict(entry, attachments=[]) for entry in updates][-CARRIED_UPDATES_MAX:]
+        rows.append(row)
+    return rows
+
+
+def adopt_projects(config_dir: Path, session_id: str, rows: Any) -> dict[str, Any]:
+    """The DESTINATION half: merge carried rows into this device's project store.
+
+    Returns the receipt block ``{"created": [names], "merged": [names],
+    "unlinked": [names], "failed": [names], "refused": [names], "truncated":
+    [names], "attachments": "not carried", "limits": "<sentence>"}`` (keys present
+    only when non-empty), or ``{}`` when nothing was carried. A row that cannot
+    merge (for example one written by a newer build) is named under ``failed``
+    rather than failing the promote of a verified copy.
+
+    RECEIVER-SIDE CAPS (review r1 M1, reproduced: one carried row of 700 × 20 KB
+    entries stored as a 14 MB project). The rows arrive from a peer, so the
+    sender's bounds in :func:`linked_project_rows` are re-applied HERE rather than
+    trusted: at most :data:`CARRIED_PROJECTS_MAX` rows, the newest
+    :data:`CARRIED_UPDATES_MAX` history entries per row with each text cut to
+    ``projects.PROGRESS_MAX`` (named under ``truncated``), and a row still larger
+    than :data:`CARRIED_PROJECT_BYTES_MAX` — or one that would take the carry past
+    :data:`CARRIED_TOTAL_BYTES_MAX` — is not adopted at all (named under
+    ``refused``). Anything trimmed or refused is stated in ``limits`` so the
+    receipt never implies the whole history arrived.
+    """
+    if not isinstance(rows, list) or not rows:
+        return {}
+    from local_operator.projects import PROGRESS_MAX, ProjectRegistry
+
+    registry = ProjectRegistry(Path(config_dir))
+    report: dict[str, list[str]] = {
+        "created": [],
+        "merged": [],
+        "unlinked": [],
+        "failed": [],
+        "refused": [],
+        "truncated": [],
+    }
+    attachments_dropped = False
+    candidates = [row for row in rows if isinstance(row, Mapping)]
+    over_count = max(0, len(candidates) - CARRIED_PROJECTS_MAX)
+    total_bytes = 0
+    for raw in candidates[:CARRIED_PROJECTS_MAX]:
+        name = str(raw.get("name") or "")
+        attachments_dropped = attachments_dropped or bool(raw.get("attachments_not_carried"))
+        entries = [entry for entry in (raw.get("updates") or []) if isinstance(entry, Mapping)]
+        kept = entries[-CARRIED_UPDATES_MAX:]
+        trimmed = len(entries) != len(kept)
+        bounded: list[dict[str, Any]] = []
+        for entry in kept:
+            text = str(entry.get("text") or "")
+            if len(text) > PROGRESS_MAX:
+                trimmed = True
+                text = text[:PROGRESS_MAX]
+            bounded.append({**dict(entry), "text": text})
+        row = {**dict(raw), "updates": bounded}
+        try:
+            size = len(json.dumps(row, default=str).encode("utf-8"))
+        except (TypeError, ValueError):
+            report["failed"].append(name)
+            continue
+        if size > CARRIED_PROJECT_BYTES_MAX or total_bytes + size > CARRIED_TOTAL_BYTES_MAX:
+            logger.warning(
+                "carry: refused project %r for %s (%d bytes after trimming)",
+                name,
+                session_id,
+                size,
+            )
+            report["refused"].append(name)
+            continue
+        total_bytes += size
+        if trimmed:
+            report["truncated"].append(name)
+        try:
+            _project, action = registry.adopt_carried(row, session_id)
+        except Exception:  # noqa: BLE001 — named in the receipt, never a failed promote
+            logger.warning("carry: could not adopt project %r for %s", name, exc_info=True)
+            report["failed"].append(name)
+            continue
+        if action == "created":
+            report["created"].append(name)
+        elif action == "unlinked":
+            report["unlinked"].append(name)
+        else:
+            report["merged"].append(name)
+    block: dict[str, Any] = {key: value for key, value in report.items() if value}
+    if block and attachments_dropped:
+        block["attachments"] = "not carried"
+    limits: list[str] = []
+    if report["truncated"]:
+        limits.append(
+            f"history kept to the newest {CARRIED_UPDATES_MAX} entries of up to "
+            f"{PROGRESS_MAX} characters for {', '.join(report['truncated'])}"
+        )
+    if report["refused"]:
+        limits.append(
+            f"{', '.join(report['refused'])} not adopted: larger than this device "
+            f"accepts ({CARRIED_PROJECT_BYTES_MAX // 1024} KB a project, "
+            f"{CARRIED_TOTAL_BYTES_MAX // 1024} KB in total)"
+        )
+    if over_count:
+        limits.append(
+            f"{over_count} more linked project{'s' if over_count != 1 else ''} not carried "
+            f"(at most {CARRIED_PROJECTS_MAX})"
+        )
+    if report["unlinked"]:
+        limits.append(
+            f"this session could not be linked to {', '.join(report['unlinked'])}: "
+            "it already holds the most linked sessions a project may"
+        )
+    if limits:
+        block["limits"] = "; ".join(limits)
+    return block
+
+
+def attachment_resolution(config_dir: Path, session_dir: Path) -> dict[str, Any]:
+    """Whether the moved session's team/agent resolves on THIS device.
+
+    WHY (2026-11-13): the moved session's prompt on lop-remote-node-2 carried its
+    skills but not the lopdev team brief, and nothing said so. ``attachment.json``
+    travels in the copy set and the session re-attaches from it by NAME at open
+    (``Session._restore_attachment``), so the brief appears exactly when this
+    device's registries resolve that name — which the source's definitions push
+    (``mobility._push_move_definitions``, now on the queued path too) is meant to
+    guarantee. This reads the same registries at the promote and reports the
+    answer, so a brief that will NOT be there is named on the receipt rather than
+    discovered from a prompt. ``{}`` when the session has no team or agent.
+    Never raises.
+    """
+    try:
+        from local_operator.resume import read_session_attachment
+
+        stored = read_session_attachment(Path(session_dir))
+    except Exception:  # noqa: BLE001 — see the docstring
+        return {}
+    if stored is None or not (stored.team or stored.agent):
+        return {}
+    block: dict[str, Any] = {}
+    missing: list[str] = []
+    if stored.team:
+        try:
+            from local_operator.teams import TeamRegistry
+
+            resolved = TeamRegistry(Path(config_dir)).get_team_by_name(stored.team) is not None
+        except Exception:  # noqa: BLE001 — unreadable registry reads as unresolved
+            logger.warning("carry: could not resolve team %r", stored.team, exc_info=True)
+            resolved = False
+        block["name"] = stored.team
+        block["resolved"] = resolved
+        if not resolved:
+            missing.append(f"team {stored.team!r}")
+    else:
+        # Review r1 N1: only when NO team is stored. A stored team owns the agent
+        # slot, so ``Session._apply_stored_attachment`` treats a stored agent beside
+        # it as superseded, never missing — naming it here would blame the wrong cause.
+        try:
+            from local_operator.agent_profiles import resolve_profile_or_specialist
+            from local_operator.agents import AgentRegistry
+
+            kind = resolve_profile_or_specialist(
+                stored.agent, registry=AgentRegistry(Path(config_dir))
+            )[0]
+            resolved = kind is not None
+        except Exception:  # noqa: BLE001 — unreadable registry reads as unresolved
+            logger.warning("carry: could not resolve agent %r", stored.agent, exc_info=True)
+            resolved = False
+        block["agent"] = stored.agent
+        block["agent_resolved"] = resolved
+        if not resolved:
+            missing.append(f"agent {stored.agent!r}")
+    # Review r1 m4: the session's restore refuses to attach anything while the
+    # profile registry is incomplete (``require_complete_metadata`` raising
+    # ``ProfileRegistryUnavailable``), even for a name that resolves. Mirror that
+    # gate, so ``applied`` is the answer the runtime's restore will actually reach.
+    gate_error = ""
+    try:
+        from local_operator.agents import AgentRegistry
+        from local_operator.session.errors import ProfileRegistryUnavailable
+
+        try:
+            AgentRegistry(Path(config_dir)).require_complete_metadata()
+        except ProfileRegistryUnavailable as error:
+            gate_error = str(error) or "the agent registry is incomplete"
+    except Exception:  # noqa: BLE001 — a gate this cannot run is not a refusal
+        logger.debug("carry: could not run the registry metadata gate", exc_info=True)
+    # ``applied``: whether the brief is in the conversation's prompt when it opens
+    # here. The runtime starts AFTER this promote (the engage does not cross the
+    # done frame), so this is the restore's own decision computed against the same
+    # registries; a runtime that opened unresolved re-resolves before each turn
+    # (``Session._reresolve_unresolved_attachment``), so a definition that arrives
+    # later is picked up without a reopen.
+    block["applied"] = bool(resolved) and not gate_error
+    if gate_error:
+        block["notice"] = (
+            f"the {'team' if stored.team else 'agent'} brief is not applied yet: {gate_error}"
+        )
+    elif missing:
+        block["notice"] = (
+            f"{missing[0]} is not defined on this device, so the conversation opens "
+            "without that brief; send it with `lop network definitions push` from the "
+            "device that has it — the conversation picks it up on its next turn"
+        )
+    return block
