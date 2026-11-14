@@ -1894,6 +1894,27 @@ def headless_node_once() -> bool:
     return is_headless_node()
 
 
+def _operator_key_held_locally() -> bool:
+    """Whether THIS node holds the private half of its operator anchor (R2-3).
+
+    Setup keeps the anchor out of managed policy when it does
+    (``site_approval.anchor_policy_fields``), but only at setup time: a key
+    file copied onto the node LATER leaves the anchor in policy while the agent
+    could sign its own approvals. The browser tool refuses to raise a card in
+    that state; this fact lets ``lop network ready`` say so too. Never raises.
+    """
+    try:
+        from local_operator.browser_bridge.site_approval import anchor_key_held_locally
+        from local_operator.operator.trust import load_anchor
+        from local_operator.paths import config_dir
+
+        loaded = load_anchor()
+        anchor = loaded.anchor if loaded.usable else None
+        return bool(anchor is not None and anchor_key_held_locally(config_dir(), anchor.key_id))
+    except Exception:  # noqa: BLE001 — an unreadable anchor is not a held key
+        return False
+
+
 def browser_fact(env: NodeEnv | None = None) -> dict[str, Any]:
     """This device's browser hosting, as facts for ``lop network ready``.
 
@@ -1952,6 +1973,7 @@ def browser_fact(env: NodeEnv | None = None) -> dict[str, Any]:
             "daemon_healthy": bool(status.get("healthy")),
             "paired": paired,
             "connected": connected,
+            "operator_key_held_locally": _operator_key_held_locally(),
         }
     except Exception as error:  # noqa: BLE001 - a fact that cannot be read says so
         return {"host": "unknown", "error": str(error)[:200]}

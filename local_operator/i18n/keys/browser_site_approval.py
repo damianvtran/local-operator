@@ -10,8 +10,16 @@ from __future__ import annotations
 from ..messages import Msg
 
 
-def card_title() -> Msg:
-    return Msg("browser.site_approval.card_title", {})
+def card_title(*, device: str) -> Msg:
+    return Msg("browser.site_approval.card_title", {"device": device})
+
+
+def card_title_lapsed() -> Msg:
+    return Msg("browser.site_approval.card_title_lapsed", {})
+
+
+def device_unconfirmed(*, name: str) -> Msg:
+    return Msg("browser.site_approval.device_unconfirmed", {"name": name})
 
 
 def option_approve() -> Msg:
@@ -42,9 +50,72 @@ def refused_no_approver() -> Msg:
     return Msg("browser.site_approval.refused_no_approver", {})
 
 
+def refused_node_name_mismatch(*, claimed: str, known: str) -> Msg:
+    return Msg(
+        "browser.site_approval.refused_node_name_mismatch",
+        {"claimed": claimed, "known": known},
+    )
+
+
+def refused_old_signer() -> Msg:
+    return Msg("browser.site_approval.refused_old_signer", {})
+
+
 def refused_unreachable() -> Msg:
     return Msg("browser.site_approval.refused_unreachable", {})
 
 
 def refused_unsigned() -> Msg:
     return Msg("browser.site_approval.refused_unsigned", {})
+
+
+def sites_allow_all() -> Msg:
+    return Msg("browser.site_approval.sites_allow_all", {})
+
+
+def sites_allowed() -> Msg:
+    return Msg("browser.site_approval.sites_allowed", {})
+
+
+def sites_bad_origin(*, origin: str) -> Msg:
+    return Msg("browser.site_approval.sites_bad_origin", {"origin": origin})
+
+
+def sites_broad() -> Msg:
+    return Msg("browser.site_approval.sites_broad", {})
+
+
+def sites_denied() -> Msg:
+    return Msg("browser.site_approval.sites_denied", {})
+
+
+def sites_help() -> Msg:
+    return Msg("browser.site_approval.sites_help", {})
+
+
+def sites_none() -> Msg:
+    return Msg("browser.site_approval.sites_none", {})
+
+
+def sites_revoke_help() -> Msg:
+    return Msg("browser.site_approval.sites_revoke_help", {})
+
+
+def sites_revoke_hint() -> Msg:
+    return Msg("browser.site_approval.sites_revoke_hint", {})
+
+
+def sites_revoke_nothing(*, origin: str) -> Msg:
+    return Msg("browser.site_approval.sites_revoke_nothing", {"origin": origin})
+
+
+def sites_revoked(*, origin: str) -> Msg:
+    return Msg("browser.site_approval.sites_revoked", {"origin": origin})
+
+
+def sites_still_broad(*, origin: str, grants: str) -> Msg:
+    return Msg("browser.site_approval.sites_still_broad", {"origin": origin, "grants": grants})
+
+
+def sites_unreachable(*, detail: str) -> Msg:
+    return Msg("browser.site_approval.sites_unreachable", {"detail": detail})

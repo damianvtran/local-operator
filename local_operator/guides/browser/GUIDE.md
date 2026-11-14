@@ -458,8 +458,11 @@ daemon still checks the code — no extension id is trusted automatically.
   permissions", "On a headless node". Setup copies the operator's public key
   from the node's root-owned operator anchor
   (`/etc/local-operator/operators/<uid>.json`) into the extension's managed
-  policy; re-run `lop browser setup --node --repair` after that anchor
-  changes. Never work around a refusal.
+  policy; re-run `lop browser setup --node --repair --authorised-by '<who,
+  when>'` after that anchor changes — or after the operator key file was
+  copied onto (or removed from) the node: setup reads that state only when it
+  runs, and `lop network ready` warns while the node holds the key. Never work
+  around a refusal.
 - **Node-side boundaries are advisory where sudo is passwordless.** On a node
   whose account has NOPASSWD sudo, the policy file's root ownership and the
   unit's limits are audited, not enforced against that account: anything
@@ -567,17 +570,30 @@ The flow keeps the same three calls; only who answers, and where, changes:
 
 1. `open` fails with `origin_not_allowed`, as above.
 2. `request_access` raises a **card for the operator** — a queued ask whose
-   text the harness writes from the origin ("Allow <origin> in the browser on
-   <node>?", Approve / Deny). Do not write your own ask for it, and do not
-   ask again for the same site: a second `request_access` for a pending
-   origin says it is already asked. The card reaches the operator's own
-   device when this session was started from that device; a session started
-   directly on the node shows the card only on the node, where nobody can
-   sign — tell the operator that if it is your case.
-3. `await_access` as above (each call ≤240 s; the request lives ~10 minutes).
-   Do other work between calls rather than sitting on it. `allowed` means the
-   operator approved **this exact origin** (scheme, host, port) — the only
-   scope a node grants. `denied` is final.
+   text the harness writes from the origin ("Allow <origin> on <node>?",
+   Deny / Approve). The card IS the notification: do not write your own ask
+   or message for it, and do not ask again for the same site — a second
+   `request_access` for a pending origin says it is already asked. The card
+   reaches the operator's own device when this session was started from that
+   device; a session started directly on the node shows the card only on the
+   node, where nobody can sign — tell the operator that if it is your case.
+3. `await_access` (each call ≤240 s; the request lives ~10 minutes). There is
+   no popup on a node: the card is on the operator's device. Do other work
+   between calls rather than sitting on it. `allowed` means the operator
+   approved **this exact origin** (scheme, host, port) — the only scope a node
+   grants. `denied` is final, and it sticks: the node remembers a signed Deny,
+   and a later `request_access` for that origin answers "the operator denied
+   this site" without raising a card. Do not ask again unless they tell you to.
+4. If `await_access` reports no live request (the card expired unanswered),
+   you may call `request_access` **once** more. If that card also expires,
+   tell the operator in chat which site you need, and stop using it.
+   `cancel_access` withdraws the request and its card together.
+
+Removing a decision: an approval lasts until someone runs `lop browser sites
+--revoke <origin>` **on the node** (`lop browser sites` lists what that
+browser allows and which sites the operator denied). Revoking a denial lets an
+agent ask about the site again. Both only ever reduce what is allowed, so they
+need no signature.
 
 What can go wrong, and what to say:
 
@@ -585,25 +601,35 @@ What can go wrong, and what to say:
   to verify against (setup ran without a usable anchor), or this machine
   holds the operator key's private half (then a signature here would not show
   a person decided). Do not retry; tell the operator, and carry on without the
-  site. The fix is theirs: install the anchor, then `lop browser setup --node
-  --repair`.
+  site. The fix is theirs: install the anchor (or remove the key file from the
+  node), then `lop browser setup --node --repair --authorised-by '<who, when>'`.
 - An answer from the node's own terminal, or from a paired phone, is refused
   (`unsigned_decision`): only an answer signed with the operator key itself
-  decides. Approving from the Local Operator app on their computer is the path.
+  decides. Approving from Local Operator (the app or `lop`) on their own
+  computer is the path, and the card says so.
+- An operator computer on a build from before signed site approvals cannot
+  answer at all: the node gives a `decide` challenge for a site card only to a
+  client that says it checked the card first (`site_card_verified`), and an
+  old build — or a phone — is told to answer from an up-to-date Local Operator
+  on the operator's computer. That marker is unsigned: it keeps honest old
+  clients from signing a card they never checked; it is not a defence against
+  someone who controls the operator's signing client.
 - The operator's computer refuses to sign a card it cannot rebuild
   (`site_card_mismatch`): its words or buttons do not match the site its id
   binds — tampering, or the two machines run different releases. Nothing was
   approved; if they say both are up to date, raise it as a security problem.
-- The request expired before the answer reached the browser: the card says
-  so; call `request_access` again and tell the operator once.
+- The request expired before the answer reached the browser: you learn it from
+  `await_access` reporting no live request — follow step 4.
 
 What is enforced where: the node's browser approves a site only for a
 signature from the operator key over that one request (its entry, origin and
 node), so a signature cannot be forged here or moved to another site. The
 operator's computer, before it signs, rebuilds the card from the site it
-binds and refuses one whose words differ, so what the operator reads is what
-the signature approves. That second check exists only in builds that carry it:
-an operator computer on an older build signs whatever card it shows. And on a
+binds — every word, button, description and default — and refuses one that
+differs, or that names the machine differently from how its own mesh knows
+it, so what the operator reads is what the signature approves. Older operator
+builds that lack that check are refused a challenge (above), so they cannot
+sign a node's card. And on a
 node whose user can run `sudo` without a password the whole boundary is
 advisory: whoever holds the node can rewrite the root-owned policy (sudo logs
 it). Never do that, never write to a session's ask log, and never try to

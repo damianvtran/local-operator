@@ -2872,6 +2872,14 @@ class ToolContext(BaseModel):
     #: :attr:`enqueue_ask`: a plain callable returning ``{"ok", "text"/"error",
     #: "details"}``, resolved once per session turn.
     withdraw_ask: Callable[..., Mapping[str, Any]] | None = None
+    #: A headless node's site cards (``browser_bridge/site_approval.py``):
+    #: ``withdraw_site_asks(origin, keep_question_id="")`` settles (``moot``)
+    #: every OPEN site card in this session for ``origin`` except the one bound
+    #: to ``keep_question_id``, and returns the ask ids it withdrew. The browser
+    #: tool calls it on ``cancel_access`` and before raising a fresh card, so a
+    #: card bound to a dead extension entry never blocks the live one (review
+    #: U3/Q1). Bound beside :attr:`withdraw_ask`, ``None`` where it is.
+    withdraw_site_asks: Callable[..., list[str]] | None = None
     #: THE ASK GATE'S DOOR (design docs/design/ask-gate.md §2.2). Async — the
     #: tool awaits one forked clearance check BEFORE the unchanged enqueue.
     #: Bound under the same two conditions as :attr:`enqueue_ask` and ``None``

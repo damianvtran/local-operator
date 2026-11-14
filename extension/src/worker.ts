@@ -1,4 +1,11 @@
-import { awaitAccess, cancelAccessCommand, requestAccess, submitSignedDecision } from "./commands/access";
+import {
+  awaitAccess,
+  cancelAccessCommand,
+  listAccess,
+  requestAccess,
+  revokeAccess,
+  submitSignedDecision,
+} from "./commands/access";
 import { close, goto, open, status, tabs } from "./commands/nav";
 import { click, typeText } from "./commands/input";
 import { readPage } from "./commands/read";
@@ -95,6 +102,11 @@ const HANDLERS: Record<
   // against the managed-policy anchor before it decides anything
   // (signed-decision.ts explains why the extension, not only the runtime).
   submit_signed_decision: submitSignedDecision,
+  // The stored per-site decisions and their removal (node-site-decisions.ts):
+  // a headless node has no Settings page, so `lop browser sites` lists and
+  // revokes through these. Removal only ever reduces what is allowed.
+  list_access: listAccess,
+  revoke_access: revokeAccess,
   // Presentation-only rename of an already-open tab's group, for a session
   // title that arrived after the tab was created. It drives no tab and reads
   // no page, so unlike every other handler it needs no surface admission.

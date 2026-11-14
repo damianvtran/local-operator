@@ -484,6 +484,14 @@ METHODS = (
     # ``applied: false`` and a ``reason`` — never a new error code, which a
     # released daemon would fail to decode.
     "submit_signed_decision",
+    # The stored per-site decisions on a headless node, and their removal
+    # (``lop browser sites [--revoke ORIGIN]``; ``extension/src/
+    # node-site-decisions.ts``). A node's Chrome has no reachable Settings page,
+    # so this is the only way to see or take back what the operator approved —
+    # or to let an agent ask again about a site they denied. Removal only ever
+    # reduces what is allowed, so neither needs the operator's signature.
+    "list_access",
+    "revoke_access",
     # Push a session title that arrived AFTER the tab was opened, so the tab
     # group stops wearing the label the session had at open time. A
     # conversation names itself asynchronously a second or two into its first
@@ -662,6 +670,9 @@ COMMAND_TIMEOUTS = {
     "cancel_access": 20.0,
     # One managed-policy read, at most 16 digests and one ECDSA verify.
     "submit_signed_decision": 20.0,
+    # One storage read (and for revoke, one write) on the shared lane.
+    "list_access": 20.0,
+    "revoke_access": 20.0,
     # retitle touches chrome.tabGroups and nothing else — no navigation, no
     # settle, no debugger. It rides the ordinary floor rather than a tighter
     # bound because the group queue it joins is shared and briefly serialises

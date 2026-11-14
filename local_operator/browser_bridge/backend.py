@@ -383,9 +383,9 @@ def node_approval_unavailable(origin: str) -> str:
         "browser extension is too old to take the operator's signed approval, so "
         "nothing on this node can present the request. Do not work around it with "
         "another browser. Tell the operator which site you needed and why, that the "
-        "node's browser needs `lop browser setup --node --repair` with a current "
-        "build, and stop the browser part of the task (guide://browser 'Headless "
-        "nodes')."
+        "node's browser needs `lop browser setup --node --repair --authorised-by "
+        "'<who, when>'` with a current build, and stop the browser part of the task "
+        "(guide://browser 'Headless nodes')."
     )
 
 

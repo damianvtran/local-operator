@@ -14282,6 +14282,42 @@ class Session:
             return {"ok": False, "error": "this session's runtime predates queued asks"}
         return queue.withdraw(ask_id, reason=reason, answers=answers, message_id=message_id, by=by)
 
+    def withdraw_site_asks(self, origin: str, keep_question_id: str = "") -> list[str]:
+        """Settle this session's OPEN site cards for ``origin`` (review U3/Q1).
+
+        A headless node's site card is bound to ONE extension entry by its
+        ``site:v1:`` question id. Once that entry is gone — ``cancel_access``,
+        or a fresh request that the extension gave a new entry — the card can
+        only be refused when answered, and while it stays open the queue's
+        identical-text rule keeps the live entry from getting a card at all.
+        So the browser tool withdraws it (``moot``: nothing is injected, the
+        operator's surfaces drop it) and raises a card bound to the live entry.
+        ``keep_question_id`` spares the card that IS bound to the live entry.
+        """
+        from local_operator.browser_bridge.site_approval import is_site_question_id
+
+        queue = self.ask_queue()
+        if queue is None:
+            return []
+        withdrawn: list[str] = []
+        for record in queue.open_records():
+            for question in record.get("questions") or ():
+                if not isinstance(question, Mapping):
+                    continue
+                question_id = str(question.get("question_id") or "")
+                site = question.get("site")
+                if (
+                    is_site_question_id(question_id)
+                    and isinstance(site, Mapping)
+                    and str(site.get("origin") or "") == origin
+                    and question_id != keep_question_id
+                ):
+                    outcome = queue.withdraw(str(record.get("ask_id") or ""), reason="moot")
+                    if outcome.get("ok"):
+                        withdrawn.append(str(record.get("ask_id") or ""))
+                    break
+        return withdrawn
+
     def abort(self, reason: str = "interrupted") -> None:
         """Abort the running turn; the engine emits an aborted agent_end.
 
@@ -22898,6 +22934,12 @@ class Session:
             # the queue is absent, which is what keeps ``ask_withdraw`` off the
             # blocking arm's tool surface.
             withdraw_ask=self._ask_withdraw_callable(),
+            # A node's stale site cards (cancelled or superseded extension
+            # entries) are settled through the same engine, so the same
+            # condition binds it.
+            withdraw_site_asks=(
+                self.withdraw_site_asks if self._ask_withdraw_callable() is not None else None
+            ),
             # THE ASK GATE'S DOOR (design docs/design/ask-gate.md §2.2): the
             # same two conditions as the two doors above, so its presence IS
             # "this ask would queue" — which is exactly the population the

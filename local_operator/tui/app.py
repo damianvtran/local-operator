@@ -30185,6 +30185,7 @@ class OperatorApp(App[None]):
         card = AskPickerScreen(
             questions,
             self._ask_settle_callback(row),
+            allow_free_text=self._ask_card_allows_free_text(row),
             widget_id=f"ask-queue-card-{row.ask_id}",
             title=self._ask_card_title(row),
             exit_hint=("esc", "collapse"),
@@ -30229,6 +30230,17 @@ class OperatorApp(App[None]):
             self._collapse_asks()
 
     @staticmethod
+    def _ask_card_allows_free_text(row: AskRow) -> bool:
+        """Whether the card offers its "Other (type your own)" row.
+
+        Not for a headless node's site card: it is a closed Approve/Deny
+        decision, a typed answer is refused downstream, and a dead-end row in a
+        security prompt costs a line at 80x24 (design D3) — the approval gate's
+        own rule. Every other ask keeps the row.
+        """
+        return not _is_site_ask_row(row)
+
+    @staticmethod
     def _ask_card_title(row: AskRow) -> str:
         """What the card says above the questions — honest about the agent.
 
@@ -30246,14 +30258,29 @@ class OperatorApp(App[None]):
         """
         from local_operator.tui.widgets.ask_queue import ASK_MARKER
 
-        if _is_site_ask_row(row) and not row.lapsed:
+        if _is_site_ask_row(row):
             # A headless node's per-site browser approval: not another member's
             # request (the bridge copy below would say so), and the answer is
             # verified by the node's browser, not merely delivered to an agent.
+            # The machine is named as THIS computer's mesh knows it, or as the
+            # node claims it, marked unconfirmed (review R2-1) — the node drew
+            # the question, the title is the signer's own words. A lapsed card
+            # has its own line: nothing was allowed, and there is no "sender"
+            # (design D4 / UX U13).
+            from local_operator.browser_bridge.site_approval import signer_node_label
             from local_operator.i18n.keys import browser_site_approval as _site_copy
             from local_operator.i18n.messages import render_resolved
 
-            return f"{ASK_MARKER} {render_resolved(_site_copy.card_title())}"
+            if row.lapsed:
+                return f"{ASK_MARKER} {render_resolved(_site_copy.card_title_lapsed())}"
+            site: Mapping[str, Any] = {}
+            for question in row.questions:
+                block = question.get("site")
+                if isinstance(block, Mapping):
+                    site = block
+                    break
+            device = signer_node_label(site)
+            return f"{ASK_MARKER} {render_resolved(_site_copy.card_title(device=device))}"
         bridge = _is_bridge_ask_row(row)
         if row.lapsed:
             # D10: a lapsed card is READ-ONLY, so the title stops promising that an

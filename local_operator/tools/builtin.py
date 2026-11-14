@@ -26406,6 +26406,69 @@ _NODE_APPROVAL_REACH = (
     "where nobody can sign — say so if that is your case."
 )
 
+#: THE CARD IS THE NOTIFICATION (review U10): the tool description's generic
+#: "request_access, NOTIFY the operator, then await_access" would otherwise make
+#: an agent add an ``ask`` of its own — a second card for one decision.
+_NODE_CARD_IS_NOTICE = "That card is the notification: do not also send an ask or a message for it."
+
+
+def _node_wait_text(url: str, origin: str) -> str:
+    """How to wait for a node site card, and the ONE bounded re-raise (review U2).
+
+    The desktop flow's popup and 15-minute re-request window do not exist on a
+    node: the entry lives 10 minutes, the card is on the operator's device, and
+    a re-raised card pings a person. So the agent may re-raise once after an
+    expiry, then must say so in chat and stop — never a card every ten minutes.
+    """
+    return (
+        f"Call action='await_access' url={url} — each call waits at most 240s — until it "
+        "returns allowed or denied; the request stays open about 10 minutes. If it "
+        "then reports no live request (expired unanswered), you may call "
+        "request_access ONCE more. If that card also expires unanswered, tell the "
+        f"operator in chat that you need {origin} on this node, and stop using it."
+    )
+
+
+def _node_access_result_text(state: str, origin: str, url: str, *, total_s: float = 0) -> str:
+    """``await_access``/``cancel_access`` on a headless node (review U2/Q3).
+
+    The desktop texts name the extension popup, a 15-minute budget and
+    ``backend='ui'`` — none of which exist on a node, so an agent following them
+    sends the operator to a surface that is not there. Every state the
+    extension reports gets its node wording here.
+    """
+    if state == "allowed":
+        return _wrap_receipt(
+            f"{origin} is allowed in this node's browser. 'open' or 'goto' the URL " "there now."
+        )
+    if state == "denied":
+        return _wrap_receipt(
+            f"the operator denied {origin} on this node. Do not ask again unless they "
+            "tell you to; continue without this site."
+        )
+    if state in ("pending", "await_timeout"):
+        waited = f" after {total_s:.0f}s" if total_s else ""
+        return _wrap_receipt(
+            f"still pending{waited}: the operator has not answered the card for "
+            f"{origin} yet. It is on their own device (the app or lop on their "
+            "computer) — there is no popup on this node.\n"
+            "- Keep calling action='await_access' — each call waits at most 240s — "
+            "while the request is open (about 10 minutes from when it was raised), "
+            "or do other work and come back.\n"
+            "- If await_access then reports no live request, you may call "
+            "request_access ONCE more; if that card also expires unanswered, tell "
+            f"the operator in chat that you need {origin} on this node, and stop.\n"
+            "AN UNANSWERED CARD IS NOT A REFUSAL."
+        )
+    if state == "cancelled":
+        return _wrap_receipt(f"your request for {origin} was withdrawn, and its card with it.")
+    return _wrap_receipt(
+        f"no live request for {origin} on this node (it expired unanswered, was "
+        "withdrawn, or was never raised). If you have not re-raised it yet, you may "
+        f"call action='request_access' url={url} ONCE more; otherwise tell the "
+        "operator in chat that you need this site, and stop using it."
+    )
+
 
 def _node_no_approver_text(origin: str, why: str) -> str:
     return _wrap_receipt(
@@ -26457,6 +26520,20 @@ async def _node_site_access(
         except Exception:  # noqa: BLE001 — the entry's own TTL is the floor
             logger.debug("node site access: cancel_access failed", exc_info=True)
 
+    if str(result.get("state") or "") == "denied":
+        # D3 "ask me once per site" (review Q4): the operator's signed Deny is
+        # kept by the node's browser, which answers a later request for the same
+        # origin without queueing anything — so no card is raised either.
+        return _text(
+            tool_call_id,
+            "browser",
+            _wrap_receipt(
+                f"the operator denied {origin} on this node; do not ask again unless "
+                "they tell you to. Continue without this site. (They can remove that "
+                f"decision with `lop browser sites --revoke {origin}` on this node.)"
+            ),
+            details={"origin": origin, "state": "denied", "approval": "signed", "sticky": True},
+        )
     details: dict[str, Any] = {"origin": origin, "approval": site_approval.APPROVAL_NO_APPROVER}
     if str(result.get("approval") or "") == site_approval.APPROVAL_NO_APPROVER:
         return _error(
@@ -26518,21 +26595,30 @@ async def _node_site_access(
         else 600
     )
     timeout_s = max(MIN_TIMEOUT_S, min(600, remaining_s))
+    # DEDUPE ONLY AGAINST A LIVE CARD (review U3/Q1). An open card for this
+    # origin bound to ANOTHER entry (cancelled, or replaced by the extension)
+    # can only be refused when answered, and its identical text would make the
+    # queue refuse the live entry's card. Settle it first; the card bound to
+    # THIS entry (the extension deduplicated onto it) is kept.
+    withdraw_site: Any = (
+        getattr(context, "withdraw_site_asks", None) if context is not None else None
+    )
+    if callable(withdraw_site):
+        try:
+            withdraw_site(origin, keep_question_id=question_id)
+        except Exception:  # noqa: BLE001 — the stale card's own timeout is the floor
+            logger.debug("node site access: withdrawing a stale card failed", exc_info=True)
     outcome = enqueue([question], timeout_s, tool_call_id=tool_call_id)
     receipt: Mapping[str, Any] = outcome if isinstance(outcome, Mapping) else {}
     ask_details = receipt.get("details")
     ask_id = str(ask_details.get("ask_id") or "") if isinstance(ask_details, Mapping) else ""
-    wait = (
-        f"Call action='await_access' url={url} — each call waits at most 240s — until it "
-        "returns allowed or denied. The request expires about 10 minutes after it was "
-        "raised; if await_access then reports no live request, call request_access again."
-    )
+    wait = _node_wait_text(url, origin)
     if not receipt.get("ok"):
         error = str(receipt.get("error") or "the ask was refused")
         if "already carries that question" in error:
-            # This origin is already on the operator's card: the extension
-            # deduplicated this session's request onto the same entry, and the
-            # queue refuses the identical question text.
+            # This origin is already on the operator's card, bound to THIS
+            # entry: any card for another entry was withdrawn above, so the
+            # identical text the queue refuses is the live card's.
             return _text(
                 tool_call_id,
                 "browser",
@@ -26543,11 +26629,18 @@ async def _node_site_access(
                 details={"origin": origin, "state": "pending", "approval": "signed"},
             )
         await _withdraw_entry()
+        # A next step, and a details code that says what happened rather than
+        # "no approver" (review U9): the queue refused this card for its own
+        # reason (a cap, a bound), which retrying in a loop will not change.
         return _error(
             tool_call_id,
             "browser",
-            _wrap_receipt(f"could not raise the operator's card for {origin}: {error}"),
-            details={**details, "state": "none"},
+            _wrap_receipt(
+                f"could not raise the operator's card for {origin}: {error}\n"
+                "The request was withdrawn. Tell the operator in chat which site you "
+                "need and why; do not retry request_access in a loop."
+            ),
+            details={**details, "approval": "card_refused", "state": "none"},
         )
     return _text(
         tool_call_id,
@@ -26556,7 +26649,8 @@ async def _node_site_access(
             f"asked the operator to allow {origin} on this node (ask {ask_id}).\n"
             "Nobody can click this headless browser: the operator approves or denies on "
             "their own device, signed with their operator key, and the browser checks "
-            f"the signature itself.\n{_NODE_APPROVAL_REACH}\n{wait}\n"
+            f"the signature itself.\n{_NODE_APPROVAL_REACH} {_NODE_CARD_IS_NOTICE}\n"
+            f"{wait}\n"
             "Do other work meanwhile; do not ask them again for the same site."
         ),
         details={
@@ -26639,9 +26733,22 @@ async def _bridge_access(
             )
         # `host` is the handle spelling here (`bridge`/`ui`); a node's managed
         # Chrome is always the bridge (extension) host.
-        if host != HOST_UI_PREFIX and _bridge_backend._on_headless_node():  # noqa: SLF001
-            # A node whose extension answered WITHOUT an ``approval`` field
-            # predates signed approvals: its entry would wait in a popup nobody
+        on_node = host != HOST_UI_PREFIX and _bridge_backend._on_headless_node()  # noqa: SLF001
+        if on_node and state_value != "pending":
+            # A CURRENT node extension answers an origin that is already allowed
+            # (or a "allow all" node) with ``{origin, state: "allowed"}`` and no
+            # ``approval`` field — that is not an old build (review R2-2 / U1 /
+            # Q2). Every non-pending state gets the node's own wording, and
+            # nothing is withdrawn.
+            return _text(
+                tool_call_id,
+                "browser",
+                _node_access_result_text(state_value, origin, url),
+                details={"origin": origin, "state": state_value},
+            )
+        if on_node:
+            # A PENDING entry without an ``approval`` field: an extension that
+            # predates signed approvals, whose entry would wait in a popup nobody
             # can reach (PR #3935 round 1, U1). Withdraw it and say why.
             try:
                 await _bridge_call(
@@ -26652,7 +26759,7 @@ async def _bridge_access(
             return _text(
                 tool_call_id,
                 "browser",
-                _bridge_backend.node_approval_unavailable(origin),
+                _wrap_receipt(_bridge_backend.node_approval_unavailable(origin)),
                 details={"origin": origin, "state": "unavailable_on_node"},
             )
         return _text(
@@ -26687,6 +26794,36 @@ async def _bridge_access(
         assert result is not None
         state_value = str(result.get("state", "none"))
         origin = str(result.get("origin", url))
+        from local_operator.browser_bridge import backend as _cancel_backend
+
+        if host != HOST_UI_PREFIX and _cancel_backend._on_headless_node():  # noqa: SLF001
+            # The node's card goes with its entry (review U3/Q1): left open it
+            # would be refused when answered, and would block a re-request's card.
+            withdraw_site: Any = (
+                getattr(context, "withdraw_site_asks", None) if context is not None else None
+            )
+            withdrawn: list[str] = []
+            if callable(withdraw_site):
+                try:
+                    returned: Any = withdraw_site(origin)
+                    withdrawn = [str(ask_id) for ask_id in (returned or ())]
+                except Exception:  # noqa: BLE001 — the ask's own timeout is the floor
+                    logger.debug("node cancel_access: withdrawing cards failed", exc_info=True)
+            return _text(
+                tool_call_id,
+                "browser",
+                _node_access_result_text(state_value, origin, url),
+                details={
+                    "origin": origin,
+                    "state": state_value,
+                    "withdrawn_asks": withdrawn,
+                    **(
+                        {"pending_count": result["pending_count"]}
+                        if "pending_count" in result
+                        else {}
+                    ),
+                },
+            )
         return _text(
             tool_call_id,
             "browser",
@@ -26711,8 +26848,19 @@ async def _bridge_access(
     budget = params.timeout_s if params.timeout_s and params.timeout_s > 0 else None
     total_s = min(budget or BROWSER_AWAIT_ACCESS_DEFAULT_S, BROWSER_AWAIT_ACCESS_MAX_S)
     deadline = time.monotonic() + total_s
+    from local_operator.browser_bridge import backend as _await_backend
+
+    # A headless node's texts name the operator's card, not a popup (U2/Q3).
+    await_on_node = host != HOST_UI_PREFIX and _await_backend._on_headless_node()  # noqa: SLF001
     while True:
         remaining_ms = int((deadline - time.monotonic()) * 1000)
+        if remaining_ms <= 0 and await_on_node:
+            return _text(
+                tool_call_id,
+                "browser",
+                _node_access_result_text("await_timeout", url, url, total_s=total_s),
+                details={"origin": url, "state": "pending"},
+            )
         if remaining_ms <= 0:
             # RENDERED BY ``_access_result_text`` rather than inline: this arm and
             # the pending one must not give contradictory next steps, and they did
@@ -26743,6 +26891,14 @@ async def _bridge_access(
             return problem
         assert result is not None
         state_value = str(result.get("state", ""))
+        if state_value != "pending" and await_on_node:
+            origin = str(result.get("origin", url))
+            return _text(
+                tool_call_id,
+                "browser",
+                _node_access_result_text(state_value, origin, url),
+                details={"origin": origin, "state": state_value},
+            )
         if state_value != "pending":
             origin = str(result.get("origin", url))
             return _text(

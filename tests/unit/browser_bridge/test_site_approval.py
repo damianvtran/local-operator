@@ -113,10 +113,21 @@ def test_the_card_question_is_code_built_and_human_required() -> None:
     assert question["question_id"] == site_approval.site_question_id(
         node_device_id="d_1", entry_id="e", origin="http://127.0.0.1:8765"
     )
-    assert [option["id"] for option in question["options"]] == ["approve", "deny"]
-    assert "http://127.0.0.1:8765" in question["question"]
-    assert "node-a" in question["question"]
+    # Deny first and nothing recommended: the card's cursor starts on Deny, so a
+    # stray Enter refuses (review R2-1).
+    assert [option["id"] for option in question["options"]] == ["deny", "approve"]
+    assert question["recommended"] is None
     assert question["secret"] is False and question["multi"] is False
+    # Design D1/D7: the first row is the whole subject, origin then node, and
+    # each appears exactly once, so a 1-row question bound at 80x24 still shows
+    # what Approve grants and where.
+    first, _, rest = question["question"].partition("\n")
+    assert first == "Allow http://127.0.0.1:8765 on node-a?"
+    assert len(first) <= 80
+    assert "http://127.0.0.1:8765" not in rest and "node-a" not in rest
+    # D2/U4: the removal the card promises exists, and D3/U5 say who answers.
+    assert "lop browser sites --revoke" in rest
+    assert "not from a phone" in rest
 
 
 def test_policy_fields_carry_the_anchor_only_when_there_is_one() -> None:
@@ -586,15 +597,19 @@ def _card(*, shown_origin: str, bound_origin: str, node: str = "node-a") -> dict
         "question": render(
             "browser.site_approval.question", {"origin": shown_origin, "node": node}, locale="en"
         ),
+        # Deny first, nothing recommended (review R2-1): the picker's cursor
+        # starts on the first row, so a stray Enter refuses.
         "options": [
+            {"id": "deny", "label": render("browser.site_approval.option_deny", {}, locale="en")},
             {
                 "id": "approve",
                 "label": render("browser.site_approval.option_approve", {}, locale="en"),
             },
-            {"id": "deny", "label": render("browser.site_approval.option_deny", {}, locale="en")},
         ],
         "multi": False,
+        "recommended": None,
         "secret": False,
+        "persist": False,
         "human_required": True,
         "question_id": site_approval.site_question_id(
             node_device_id=VECTOR["node_device_id"],
@@ -667,7 +682,7 @@ def test_the_signer_refuses_a_card_it_cannot_rebuild(mutate) -> None:
     with pytest.raises(site_approval.SiteCardMismatch) as caught:
         bridge_decision_target(_row(card), {"site-access": ["Approve"]})
     assert caught.value.code == "site_card_mismatch"
-    assert "not signed" in str(caught.value)
+    assert "did not sign" in str(caught.value)
 
 
 def test_a_card_drawn_in_another_shipped_locale_still_verifies() -> None:
@@ -682,8 +697,8 @@ def test_a_card_drawn_in_another_shipped_locale_still_verifies() -> None:
         "browser.site_approval.question", {"origin": HONEST, "node": "node-a"}, locale="fr"
     )
     card["options"] = [
-        {"id": "approve", "label": render("browser.site_approval.option_approve", {}, locale="fr")},
         {"id": "deny", "label": render("browser.site_approval.option_deny", {}, locale="fr")},
+        {"id": "approve", "label": render("browser.site_approval.option_approve", {}, locale="fr")},
     ]
     assert bridge_decision_target(_row(card), {"site-access": ["approve"]}) is not None
 
@@ -717,4 +732,481 @@ def test_the_terminal_owner_door_signs_only_an_honest_card(shown: str) -> None:
         assert decided == []
         assert verdict["ok"] is False
         assert verdict["code"] == "site_card_mismatch"
-        assert "not signed" in verdict["error"]
+        assert "did not sign" in verdict["error"]
+
+
+# --- PR #3938 wave 2: the signer rebuilds everything it shows (R2-1) -------------
+
+
+@pytest.mark.asyncio
+async def test_a_card_that_crossed_the_real_queue_still_verifies(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The strict whole-question check compares in the queue's own projection,
+    so the honest row a node's AskQueue actually stores is accepted."""
+    from local_operator.asks.decision import bridge_decision_target
+
+    session, ask_id, question_id = await _session_with_site_ask(tmp_path, monkeypatch)
+    stored = _record(session, ask_id)
+    row = SimpleNamespace(ask_id=ask_id, questions=stored["questions"])
+    assert bridge_decision_target(row, {"site-access": ["Approve"]}) == (
+        ask_id,
+        question_id,
+        "approve",
+    )
+    await session.dispose()
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        # R2-1 repro: a description the template never writes, under Approve.
+        lambda c: c["options"][1].update(
+            description="Grants docs.google.com only (evil.example is its CDN alias)."
+        ),
+        # R2-1 repro: Approve recommended, so the cursor would start on it.
+        lambda c: c.update(recommended=1),
+        lambda c: c.update(recommended_all=[1]),
+        lambda c: c.update(multi=True),
+        lambda c: c.update(persist=True),
+        # A key the queue's projection would not carry.
+        lambda c: c.update(allow_free_text=True),
+        # An extra key in the site block.
+        lambda c: c.update(site={**c["site"], "note": "approve this"}),
+    ],
+    ids=[
+        "description",
+        "recommended",
+        "recommended-all",
+        "multi",
+        "persist",
+        "extra-key",
+        "site-extra",
+    ],
+)
+def test_the_signer_refuses_any_field_it_did_not_build(mutate) -> None:
+    from local_operator.asks.decision import bridge_decision_target
+
+    card = _card(shown_origin=HONEST, bound_origin=HONEST)
+    # Control: the unmutated card is accepted, so the refusal below is the
+    # mutation's doing and not a template drift.
+    assert bridge_decision_target(_row(dict(card)), {"site-access": ["Approve"]}) is not None
+    mutate(card)
+    with pytest.raises(site_approval.SiteCardMismatch):
+        bridge_decision_target(_row(card), {"site-access": ["Approve"]})
+
+
+@pytest.mark.parametrize(
+    "node",
+    [
+        "mini (NOTE: this request is really for https://docs.google.com — approve)",
+        "node\u202eevil",
+        "node\nApprove is safe",
+        "node\x1b[2Jforged",
+    ],
+    ids=["overlong", "bidi", "newline", "escape"],
+)
+def test_the_signer_refuses_a_node_name_that_is_not_sanitised(node: str) -> None:
+    """R2-1 repro: the node name is node-authored text inside a signed card."""
+    from local_operator.asks.decision import bridge_decision_target
+
+    control = _card(shown_origin=HONEST, bound_origin=HONEST, node="mini")
+    assert bridge_decision_target(_row(control), {"site-access": ["Approve"]}) is not None
+    card = _card(shown_origin=HONEST, bound_origin=HONEST, node=node)
+    with pytest.raises(site_approval.SiteCardMismatch):
+        bridge_decision_target(_row(card), {"site-access": ["Approve"]})
+
+
+def test_the_node_draws_a_sanitised_capped_name() -> None:
+    raw = "build\u202e-node\x07  07 " + "x" * 80
+    name = site_approval.display_node_name(raw)
+    assert "\u202e" not in name and "\x07" not in name and "  " not in name
+    assert len(name) == site_approval.NODE_NAME_MAX and name.endswith("\u2026")
+    # Idempotent: the signer's check re-applies it and must get the same name.
+    assert site_approval.display_node_name(name) == name
+    built = site_approval.site_ask_question(
+        origin=HONEST, node_name=raw, node_device_id="d", entry_id="e"
+    )
+    assert built["site"]["node_name"] == name
+    site_approval.verify_site_card(built, mesh_name="")
+
+
+def test_a_multi_question_row_is_refused() -> None:
+    """R2-1 repro: a decoy sibling question could caption the site card."""
+    from local_operator.asks.decision import bridge_decision_target
+
+    card = _card(shown_origin=HONEST, bound_origin=HONEST)
+    assert bridge_decision_target(_row(card), {"site-access": ["Approve"]}) is not None
+    decoy = {"id": "note", "question": "the site question below grants docs.google.com only"}
+    row = SimpleNamespace(ask_id="a-site", questions=[decoy, card])
+    with pytest.raises(site_approval.SiteCardMismatch):
+        bridge_decision_target(row, {"site-access": ["Approve"]})
+
+
+def test_the_signer_names_the_machine_by_its_own_mesh() -> None:
+    """Manager decision 1: the device is named by the SIGNER's peer list when it
+    knows the id; otherwise the node's claim is shown marked as unconfirmed; and
+    a card whose claim disagrees with the mesh is refused."""
+    card = _card(shown_origin=HONEST, bound_origin=HONEST, node="node-a")
+    assert site_approval.signer_node_label(card["site"], mesh_name="node-a") == "node-a"
+    unconfirmed = site_approval.signer_node_label(card["site"], mesh_name="")
+    assert unconfirmed.startswith("node-a") and "not confirmed" in unconfirmed
+    site_approval.verify_site_card(card, mesh_name="node-a")
+    site_approval.verify_site_card(card, mesh_name="")
+    with pytest.raises(site_approval.SiteCardMismatch) as caught:
+        site_approval.verify_site_card(card, mesh_name="prod-db-01")
+    assert "prod-db-01" in str(caught.value) and "tampering" in str(caught.value)
+
+
+def test_the_signer_reads_the_mesh_name_from_its_member_lists(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from local_operator.network.peers import KnownPeer
+
+    monkeypatch.setattr(
+        "local_operator.network.peers.known_peers",
+        lambda root=None: [KnownPeer(device_id=VECTOR["node_device_id"], name="build-node-07")],
+    )
+    assert site_approval.mesh_device_name(VECTOR["node_device_id"]) == "build-node-07"
+    assert site_approval.mesh_device_name("d_unknown") == ""
+    card = _card(shown_origin=HONEST, bound_origin=HONEST, node="node-a")
+    with pytest.raises(site_approval.SiteCardMismatch):
+        site_approval.verify_site_card(card)
+
+
+# --- U5: an old signer fails closed --------------------------------------------------
+
+
+def test_only_a_checked_card_marks_its_challenge_request() -> None:
+    from local_operator.asks.decision import (
+        bridge_decision_target,
+        note_site_card_verified,
+        site_card_verified,
+    )
+
+    card = _card(shown_origin=HONEST, bound_origin=HONEST)
+    target = bridge_decision_target(_row(card), {"site-access": ["Approve"]})
+    assert target is not None
+    request_id = "#".join(target)
+    assert site_card_verified(request_id) is True
+    # Single-use: one checked card buys one challenge.
+    assert site_card_verified(request_id) is False
+    # A target nobody checked is never marked.
+    assert site_card_verified(f"a-other#{card['question_id']}#approve") is False
+    note_site_card_verified("a", "site:v1:x", "deny")
+    assert site_card_verified("a#site:v1:x#deny") is True
+
+
+@pytest.mark.asyncio
+async def test_the_attach_client_asks_with_the_marker_only_for_a_checked_card(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from local_operator.asks.decision import note_site_card_verified
+    from local_operator.mobile.attach_client import AttachClient
+    from local_operator.operator.sign import Signature
+
+    asked: list[dict[str, Any]] = []
+
+    async def fake_request_frame(op: str, **fields: Any) -> dict[str, Any]:
+        asked.append({"op": op, **fields})
+        return {"op": "ack", "challenge": "cd" * 32, "expires_s": 30}
+
+    monkeypatch.setattr(
+        "local_operator.mobile.attach_client.sign_challenge",
+        lambda **kwargs: Signature(sig="aa" * 71, key_id="0f" * 16),
+    )
+    client = object.__new__(AttachClient)
+    client._operator_signatures = {}
+    client._session_id = "sess-9"
+    client._on_operator_prompt = lambda _copy: None
+    client._request_frame = fake_request_frame
+    checked = "a1#site:v1:abc#approve"
+    note_site_card_verified("a1", "site:v1:abc", "approve")
+    await client._operator_signature("decide", checked)
+    await client._operator_signature("decide", "a2#site:v1:def#approve")
+    await client._operator_signature("decide", "a3#bmsg_1#approve")
+    assert [frame.get("site_card_verified") for frame in asked] == [True, None, None]
+
+
+# --- R2-2 / U1 / Q2: an allowed reply on a node is allowed ----------------------------
+
+
+@pytest.mark.asyncio
+async def test_an_allowed_reply_on_a_node_is_allowed_not_too_old(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("local_operator.browser_bridge.backend._on_headless_node", lambda: True)
+    client = _Client({"origin": VECTOR["origin"], "state": "allowed"})
+    result = await _request(client, _context([]))
+    assert not result.is_error
+    assert result.details["state"] == "allowed"
+    assert [method for method, _ in client.calls] == ["request_access"]
+    text = _text_of(result)
+    assert "too old" not in text and "backend='ui'" not in text
+    assert "allowed in this node's browser" in text
+
+
+@pytest.mark.asyncio
+async def test_a_pending_reply_without_approval_on_a_node_is_still_too_old(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("local_operator.browser_bridge.backend._on_headless_node", lambda: True)
+    client = _Client({"origin": VECTOR["origin"], "state": "pending", "entryId": "e"})
+    result = await _request(client, _context([]))
+    assert result.details["state"] == "unavailable_on_node"
+    assert [method for method, _ in client.calls] == ["request_access", "cancel_access"]
+    assert "--authorised-by" in _text_of(result)
+
+
+# --- Q4 / D3: a signed Deny sticks ----------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_denied_site_raises_no_card() -> None:
+    client = _Client(
+        {
+            "origin": VECTOR["origin"],
+            "state": "denied",
+            "approval": "signed",
+            "denied_by": "operator",
+        }
+    )
+    enqueued: list[Any] = []
+    result = await _request(client, _context(enqueued))
+    assert enqueued == []
+    assert [method for method, _ in client.calls] == ["request_access"]
+    assert result.details["state"] == "denied"
+    text = _text_of(result)
+    assert "do not ask again unless they tell you to" in text
+    assert "lop browser sites --revoke" in text
+
+
+# --- U3 / Q1: a stale card never blocks the live one ----------------------------------
+
+
+def _signed_reply(entry_id: str) -> dict[str, Any]:
+    return {
+        "origin": VECTOR["origin"],
+        "state": "pending",
+        "entryId": entry_id,
+        "approval": "signed",
+        "scope": "origin",
+        "node_device_id": VECTOR["node_device_id"],
+    }
+
+
+@pytest.mark.asyncio
+async def test_a_request_withdraws_a_card_bound_to_another_entry_first(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from local_operator.harness.types import ToolContext
+
+    monkeypatch.setattr(
+        "local_operator.operator.trust.load_anchor",
+        lambda *a, **k: SimpleNamespace(anchor=None, usable=False),
+    )
+    order: list[Any] = []
+
+    def withdraw(origin: str, keep_question_id: str = "") -> list[str]:
+        order.append(("withdraw", origin, keep_question_id))
+        return ["a-stale"]
+
+    def enqueue(questions, timeout=None, tool_call_id=""):
+        order.append(("enqueue", questions[0]["question_id"]))
+        return {"ok": True, "details": {"ask_id": "a-live"}}
+
+    context = ToolContext(enqueue_ask=enqueue, withdraw_site_asks=withdraw)
+    result = await _request(_Client(_signed_reply(VECTOR["entry_id"])), context)
+    assert not result.is_error
+    assert order == [
+        ("withdraw", VECTOR["origin"], VECTOR["question_id"]),
+        ("enqueue", VECTOR["question_id"]),
+    ]
+    text = _text_of(result)
+    assert "That card is the notification" in text
+    assert "ONCE more" in text
+
+
+@pytest.mark.asyncio
+async def test_cancel_access_on_a_node_withdraws_the_card(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from local_operator.harness.types import ToolContext
+    from local_operator.tools import builtin
+
+    monkeypatch.setattr("local_operator.browser_bridge.backend._on_headless_node", lambda: True)
+    withdrawn: list[tuple[str, str]] = []
+
+    def withdraw(origin: str, keep_question_id: str = "") -> list[str]:
+        withdrawn.append((origin, keep_question_id))
+        return ["a-1"]
+
+    client = _Client({})
+    client.result = {}
+
+    async def call(method: str, params: dict[str, Any]) -> dict[str, Any]:
+        client.calls.append((method, params))
+        return {"origin": VECTOR["origin"], "state": "cancelled"}
+
+    client.call = call  # type: ignore[method-assign]
+    params = builtin.BrowserParams(action="cancel_access", url=VECTOR["origin"])
+    result = await builtin._bridge_access(
+        "call-1", "cancel_access", params, ToolContext(withdraw_site_asks=withdraw), client=client
+    )
+    assert withdrawn == [(VECTOR["origin"], "")]
+    assert result.details is not None and result.details["withdrawn_asks"] == ["a-1"]
+    assert "its card with it" in _text_of(result)
+
+
+@pytest.mark.asyncio
+async def test_the_session_withdraws_only_stale_site_cards(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Q1 repro on the real AskQueue: after the stale card is withdrawn, the
+    live entry's card (same text, new digest) is accepted."""
+    session, ask_id, question_id = await _session_with_site_ask(tmp_path, monkeypatch)
+    assert session.withdraw_site_asks(VECTOR["origin"], keep_question_id=question_id) == []
+    assert _record(session, ask_id)["status"] == "open"
+    fresh = site_approval.site_ask_question(
+        origin=VECTOR["origin"],
+        node_name="node-a",
+        node_device_id=VECTOR["node_device_id"],
+        entry_id="entry-2",
+    )
+    refused = session._enqueue_ask([fresh], 600)
+    assert not refused["ok"] and "already carries that question" in refused["error"]
+    assert session.withdraw_site_asks(VECTOR["origin"], keep_question_id=fresh["question_id"]) == [
+        ask_id
+    ]
+    assert _record(session, ask_id)["status"] == "withdrawn"
+    accepted = session._enqueue_ask([fresh], 600)
+    assert accepted["ok"], accepted
+    await session.dispose()
+
+
+# --- U2 / Q3: node await texts ----------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("reply", "expect"),
+    [
+        ({"state": "allowed"}, "allowed in this node's browser"),
+        ({"state": "none"}, "ONCE more"),
+        ({"state": "denied"}, "Do not ask again"),
+    ],
+    ids=["allowed", "none", "denied"],
+)
+async def test_await_access_on_a_node_names_no_popup(
+    monkeypatch: pytest.MonkeyPatch, reply: dict[str, Any], expect: str
+) -> None:
+    from local_operator.tools import builtin
+
+    monkeypatch.setattr("local_operator.browser_bridge.backend._on_headless_node", lambda: True)
+    client = _Client({})
+
+    async def call(method: str, params: dict[str, Any]) -> dict[str, Any]:
+        return {"origin": VECTOR["origin"], **reply}
+
+    client.call = call  # type: ignore[method-assign]
+    params = builtin.BrowserParams(action="await_access", url=VECTOR["origin"], timeout_s=5)
+    result = await builtin._bridge_access("c", "await_access", params, None, client=client)
+    text = _text_of(result)
+    assert expect in text
+    assert "extension popup" not in text and "backend='ui'" not in text
+    assert "15 MINUTES" not in text
+
+
+@pytest.mark.asyncio
+async def test_await_access_timeout_on_a_node_names_the_card(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from local_operator.tools import builtin
+
+    monkeypatch.setattr("local_operator.browser_bridge.backend._on_headless_node", lambda: True)
+    monkeypatch.setattr(builtin, "_BRIDGE_AWAIT_SLICE_MS", 10)
+    client = _Client({})
+
+    async def call(method: str, params: dict[str, Any]) -> dict[str, Any]:
+        return {"origin": VECTOR["origin"], "state": "pending"}
+
+    client.call = call  # type: ignore[method-assign]
+    params = builtin.BrowserParams(action="await_access", url=VECTOR["origin"], timeout_s=0.05)
+    result = await builtin._bridge_access("c", "await_access", params, None, client=client)
+    text = _text_of(result)
+    assert "there is no popup on this node" in text
+    assert "extension popup" not in text and "15 MINUTES" not in text
+    assert "ONCE more" in text
+
+
+# --- D3 / D4 / U13: the terminal card ---------------------------------------------------
+
+
+def test_the_terminal_site_card_titles_and_free_text(monkeypatch: pytest.MonkeyPatch) -> None:
+    from local_operator.tui.app import OperatorApp
+    from local_operator.tui.widgets.ask_queue import AskRow
+
+    monkeypatch.setattr(site_approval, "mesh_device_name", lambda device_id, root=None: "")
+    card = _card(shown_origin=HONEST, bound_origin=HONEST, node="build-node-07")
+    open_row = AskRow(
+        ask_id="a", status="open", created_at=0, expires_at=0, urgent=False, questions=(card,)
+    )
+    title = OperatorApp._ask_card_title(open_row)
+    assert "build-node-07 (name not confirmed by your mesh)" in title
+    assert "your own computer" in title
+    lapsed = AskRow(
+        ask_id="a", status="timed_out", created_at=0, expires_at=0, urgent=False, questions=(card,)
+    )
+    assert lapsed.lapsed
+    lapsed_title = OperatorApp._ask_card_title(lapsed)
+    assert "nothing was allowed" in lapsed_title and "sender" not in lapsed_title
+    # D3: no "Other (type your own)" row on a closed signed decision; ordinary
+    # asks keep it.
+    assert OperatorApp._ask_card_allows_free_text(open_row) is False
+    plain = AskRow(
+        ask_id="b",
+        status="open",
+        created_at=0,
+        expires_at=0,
+        urgent=False,
+        questions=({"id": "q0", "question": "which?", "options": []},),
+    )
+    assert OperatorApp._ask_card_allows_free_text(plain) is True
+    monkeypatch.setattr(
+        site_approval, "mesh_device_name", lambda device_id, root=None: "build-node-07"
+    )
+    assert "not confirmed" not in OperatorApp._ask_card_title(open_row)
+
+
+# --- D2 / U4: lop browser sites -----------------------------------------------------------
+
+
+def test_lop_browser_sites_lists_and_revokes(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from local_operator.browser_bridge import sites_cli
+
+    calls: list[tuple[str, dict[str, Any]]] = []
+    stored = {
+        "allowed": ["http://127.0.0.1:8781"],
+        "denied": ["http://127.0.0.1:8783"],
+        "broad": [],
+        "allow_all": False,
+    }
+
+    async def fake_call(method: str, params: dict[str, Any]) -> dict[str, Any]:
+        calls.append((method, params))
+        if method == "revoke_access":
+            return {"origin": params["url"], "removed": ["allowed"]}
+        return stored
+
+    monkeypatch.setattr(sites_cli, "_call", fake_call)
+    assert sites_cli.main() == 0
+    listing = capsys.readouterr().out
+    assert "http://127.0.0.1:8781" in listing and "http://127.0.0.1:8783" in listing
+    assert "--revoke" in listing
+    assert sites_cli.main("http://127.0.0.1:8781/some/path") == 0
+    assert calls[-2] == ("revoke_access", {"url": "http://127.0.0.1:8781"})
+    assert "Removed the stored decision for http://127.0.0.1:8781" in capsys.readouterr().out
+    assert sites_cli.main("ftp://nope") == 1
+    assert "not an http or https origin" in capsys.readouterr().out

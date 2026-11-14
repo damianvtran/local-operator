@@ -3677,3 +3677,58 @@ def test_the_prompt_copy_is_wired_at_the_surfaces_that_can_show_it() -> None:
     assert (
         "set_operator_prompt_notice" in called
     ), "nothing installs the pane's prompt handler, so the copy has nowhere to land"
+
+
+@pytest.mark.asyncio
+async def test_a_site_decide_challenge_needs_the_checked_card_marker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """PR #3938 review U5: an operator client from before the signer's site-card
+    check would sign whatever card it was shown, so the node mints a ``decide``
+    challenge for a ``site:v1:`` target only when the request says the card was
+    checked (``site_card_verified``). An old client — or a phone — is refused
+    with the sentence that names where to answer; every other decide target is
+    unchanged."""
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    reset_operator_caps_for_tests()
+    anchor = _install_operator_key(config_dir())
+    live = await _serve(tmp_path, operator_cap=mint_operator_cap(), operator_anchor=anchor)
+    try:
+        conn = await _dial(live.record, client="attach")
+        site_target = "a-1#site:v1:" + "ab" * 32 + "#approve"
+        old = await _send(
+            conn, None, {"op": "operator_challenge", "action": "decide", "request_id": site_target}
+        )
+        assert old["op"] == "error", old
+        assert "updated to the release that added signed site approvals" in str(old), old
+        current = await _send(
+            conn,
+            None,
+            {
+                "op": "operator_challenge",
+                "action": "decide",
+                "request_id": site_target,
+                "site_card_verified": True,
+            },
+        )
+        assert current["op"] == "ack" and is_wire_hex(current["challenge"]), current
+        # A Team Bridge decision needs no marker (no site card to check).
+        bridge = await _challenge(conn, action="decide", request_id="a-2#bmsg_1#approve")
+        assert bridge
+        # And the old client's next step — the decide frame, unsigned — is
+        # refused with the same site-specific sentence, not the generic one.
+        refused = await _send(
+            conn,
+            None,
+            {
+                "op": "bridge_decide",
+                "ask_id": "a-1",
+                "question_id": "site:v1:" + "ab" * 32,
+                "word": "approve",
+            },
+        )
+        assert refused["op"] == "error", refused
+        assert "not from a phone or the node itself" in str(refused), refused
+        conn.close()
+    finally:
+        await live.close(tmp_path)

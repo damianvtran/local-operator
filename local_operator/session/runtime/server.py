@@ -2654,6 +2654,22 @@ def _serve_peer_bounded_history(payload: dict[str, Any], sync: Any, locality: st
     payload["display_history"] = bounded.model_dump(mode="json")
 
 
+def _is_site_decide_target(request_id: str) -> bool:
+    """Whether a ``decide`` request id (``ask#question#word``) names a headless
+    node's ``site:v1:`` card (``browser_bridge/site_approval.py``)."""
+    from local_operator.browser_bridge.site_approval import SITE_QUESTION_PREFIX
+
+    return f"#{SITE_QUESTION_PREFIX}" in str(request_id)
+
+
+def _site_old_signer_refusal() -> str:
+    """The keyed sentence for a site card answer this device cannot sign."""
+    from local_operator.i18n.keys import browser_site_approval as _keys
+    from local_operator.i18n.messages import render_resolved
+
+    return render_resolved(_keys.refused_old_signer())
+
+
 class RuntimeServer:
     """One per interactive process. Construct, ``start()``, ``close()``."""
 
@@ -7115,6 +7131,15 @@ class RuntimeServer:
                 # decide this caller could not be admitted, read from the same
                 # cached load, so the sentence and the decision cannot disagree.
                 anchored = self._anchor_cache.get().usable
+                if op == "bridge_decide" and _is_site_decide_target(
+                    f"#{frame.get('question_id') or ''}"
+                ):
+                    # A node site card answered unsigned: in practice an older
+                    # build or a phone that was refused its challenge above. The
+                    # generic "not proved" sentence (rebuilt by the CLIENT from
+                    # its own catalogue) would name remedies that cannot sign
+                    # a site card; this one says which device can (review U5).
+                    raise ValueError(_site_old_signer_refusal())
                 raise (
                     OperatorAuthorityRequired(trigger=op)
                     if anchored
@@ -7485,6 +7510,18 @@ class RuntimeServer:
                 request_id = frame.get("request_id", "")
                 if not isinstance(request_id, str):
                     raise ValueError("request_id must be a string")
+                if action == "decide" and _is_site_decide_target(request_id):
+                    # OLD SIGNERS FAIL CLOSED (review U5). A headless node's
+                    # site card is signed only by a client that checked it
+                    # against its ``site`` block first, and says so with this
+                    # marker (``asks/decision.py`` → ``attach_client``). A build
+                    # from before that check — or a phone, which cannot run it
+                    # — gets no challenge, so it cannot sign a card it never
+                    # verified. The marker is unsigned: it stops honest old
+                    # clients, not an attacker who controls the signer (one
+                    # who does holds the operator key anyway).
+                    if frame.get("site_card_verified") is not True:
+                        raise ValueError(_site_old_signer_refusal())
                 now = time.monotonic()
                 self._expire_challenges(conn, now)
                 if len(conn.operator_challenges) >= _MAX_CHALLENGES_PER_CONN:
