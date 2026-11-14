@@ -2265,6 +2265,16 @@ class OnboardRun:
                 return {"ok": True}
             code = str((payload or {}).get("code") or "")
             message = str((payload or {}).get("message") or "")
+            # THE REASON IS IN THE ROW. ``definitions push``/``mcp push`` answer an
+            # aggregate (``ok`` plus "0 of 1 …") and put each device's ``code`` and
+            # sentence in ``peers``, so reading only the top level filed a
+            # ``no_answer`` as a codeless failure and the run's log gave no reason
+            # (#3849's gate). The first failing row is the one this step pushed to.
+            rows = (payload or {}).get("peers") if isinstance(payload, dict) else None
+            failed = [row for row in (rows or []) if isinstance(row, dict) and not row.get("ok")]
+            if not code and failed:
+                code = str(failed[0].get("code") or "")
+                message = str(failed[0].get("message") or "") or message
             if not code and not message:
                 tail_lines = (result.stderr or "").strip().splitlines()
                 message = tail_lines[-1][:200] if tail_lines else "no output"
