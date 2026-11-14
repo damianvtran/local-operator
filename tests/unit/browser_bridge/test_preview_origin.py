@@ -133,7 +133,7 @@ async def test_non_quick_and_invalid_urls_retain_backend_semantics(tmp_path, bac
         assert not result.is_error
         assert backend.await_count == 1
         assert backend.call_args.args[2]["url"] == url
-    assert not list(tmp_path.rglob("*.sqlite3"))
+    assert not list(tmp_path.rglob("browser-preview-origin.*"))
 
 
 @pytest.mark.parametrize(
@@ -181,7 +181,7 @@ async def test_damaged_ancestry_fails_closed_without_rpc(tmp_path, backend, mark
 @pytest.mark.asyncio
 async def test_corrupt_pin_fails_closed(tmp_path, backend):
     ctx = session(tmp_path, "root")
-    (Path(ctx.session_dir) / "browser-preview-origin.sqlite3").write_bytes(b"broken database")
+    (Path(ctx.session_dir) / "browser-preview-origin.json").write_bytes(b"broken database")
     result = await request(ctx, "https://first.trycloudflare.com")
     assert result.details["code"] == "preview_origin_unavailable"
     backend.assert_not_awaited()
@@ -218,7 +218,7 @@ def test_atomic_competing_threads_and_persisted_process_resume(tmp_path):
     )
     assert result.stdout.strip() == f"{winner} True"
     assert (
-        os.stat(Path(ctx.session_dir) / "browser-preview-origin.sqlite3").st_mode & 0o777 == 0o600
+        os.stat(Path(ctx.session_dir) / "browser-preview-origin.json").st_mode & 0o777 == 0o600
     )
 
 
@@ -230,3 +230,223 @@ async def test_concurrent_public_requests_dispatch_one_host(tmp_path, backend):
     )
     assert sum(not result.is_error for result in results) == 1
     assert backend.await_count == 1
+
+
+ALIASES = [
+    "https://ｓｅｃｏｎｄ.trycloudflare.com",
+    "https://second。trycloudflare.com",
+    "https://second．trycloudflare.com",
+    "https://second｡trycloudflare.com",
+    "https:////second.trycloudflare.com",
+]
+
+
+@pytest.mark.parametrize("url", ALIASES)
+@pytest.mark.asyncio
+async def test_browser_aliases_pin_and_refuse_without_dispatch(tmp_path, backend, url):
+    ctx = session(tmp_path, "root")
+    first = await request(ctx, url)
+    assert not first.is_error
+    assert quick_tunnel_origin(url)[0] == "second.trycloudflare.com"
+    assert not (await request(ctx, "https://second.trycloudflare.com")).is_error
+    assert backend.await_count == 2
+    denied = await request(ctx, "https://third.trycloudflare.com")
+    assert denied.is_error and backend.await_count == 2
+    assert denied.text.startswith("Refused preview origin https://third.trycloudflare.com.")
+    assert "No new approval request was sent" in denied.text
+    assert "Do not await this attempt" in denied.text
+
+
+@pytest.mark.parametrize("url", ALIASES)
+@pytest.mark.asyncio
+async def test_second_browser_alias_has_zero_rpcs(tmp_path, backend, url):
+    ctx = session(tmp_path, "root")
+    await request(ctx, "https://first.trycloudflare.com")
+    result = await request(ctx, url)
+    assert result.details["code"] == "preview_origin_changed"
+    assert backend.await_count == 1
+
+
+def test_nontransitional_idna_and_nonquick_international_domains():
+    assert quick_tunnel_origin("https://ß.trycloudflare.com")[0] == "xn--zca.trycloudflare.com"
+    assert (
+        quick_tunnel_origin("https://xn--zca.trycloudflare.com")[0]
+        == "xn--zca.trycloudflare.com"
+    )
+    assert quick_tunnel_origin("https://ss.trycloudflare.com")[0] == "ss.trycloudflare.com"
+    for url in ("https://bücher.example", "https://ß.example", "https://example。com"):
+        assert quick_tunnel_origin(url) is None
+
+
+@pytest.mark.asyncio
+async def test_registry_survives_missing_creator_marker(tmp_path, backend):
+    from local_operator.resume import mark_session_origin
+    from local_operator.guardrails.provenance import read_lineage
+
+    store = tmp_path / "sessions"
+    root = session(store, "familyroot")
+    child = session(store, "child")
+    mark_session_origin(Path(child.session_dir), "subagent", parent="familyroot")
+    assert read_lineage(tmp_path)["child"]["parent"] == "familyroot"
+    await request(root, "https://first.trycloudflare.com")
+    (Path(child.session_dir) / "origin.json").unlink()  # Fixture owned by this test.
+    denied = await request(child, "https://second.trycloudflare.com")
+    assert denied.details["code"] == "preview_origin_changed"
+    assert backend.await_count == 1
+    assert not (Path(child.session_dir) / "browser-preview-origin.json").exists()
+
+
+@pytest.mark.asyncio
+async def test_runtime_ancestry_and_conflict_fail_closed(tmp_path, backend):
+    root = session(tmp_path, "root")
+    child = session(tmp_path, "child")
+    child.ancestor_session_ids = ("root",)
+    await request(root, "https://first.trycloudflare.com")
+    assert (await request(child, "https://second.trycloudflare.com")).is_error
+    assert backend.await_count == 1
+    (Path(child.session_dir) / "origin.json").write_text('{"parent":"other"}')
+    result = await request(child, "https://first.trycloudflare.com")
+    assert result.details["code"] == "preview_origin_unavailable"
+    assert backend.await_count == 1
+
+
+@pytest.mark.parametrize("target", ["directory", "marker", "pin", "store"])
+@pytest.mark.asyncio
+async def test_symlinks_never_write_outside_or_dispatch(tmp_path, backend, target):
+    store = tmp_path / "sessions"
+    ctx = session(store, "root")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    unrelated = outside / "unrelated.json"
+    unrelated.write_text('{"unrelated":true}')
+    if target == "directory":
+        (store / "parent").symlink_to(outside, target_is_directory=True)
+        (Path(ctx.session_dir) / "origin.json").write_text('{"parent":"parent"}')
+    elif target == "marker":
+        (Path(ctx.session_dir) / "origin.json").symlink_to(unrelated)
+    elif target == "pin":
+        (Path(ctx.session_dir) / "browser-preview-origin.json").symlink_to(unrelated)
+    else:
+        alias = tmp_path / "alias"
+        alias.symlink_to(store, target_is_directory=True)
+        ctx.session_dir = str(alias / "root")
+    result = await request(ctx, "https://first.trycloudflare.com")
+    assert result.details["code"] == "preview_origin_unavailable"
+    backend.assert_not_awaited()
+    assert unrelated.read_text() == '{"unrelated":true}'
+    assert sorted(p.name for p in outside.iterdir()) == ["unrelated.json"]
+
+
+@pytest.mark.parametrize("target", ["directory", "pin"])
+@pytest.mark.asyncio
+async def test_swap_between_descriptor_open_and_write_cannot_escape(
+    tmp_path, backend, monkeypatch, target
+):
+    from local_operator.browser_bridge import preview_origin as policy
+
+    ctx = session(tmp_path / "sessions", "root")
+    root = Path(ctx.session_dir)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    unrelated = outside / "unrelated.json"
+    unrelated.write_text("unchanged")
+    real_open = os.open
+    swapped = False
+
+    def swap_open(path, flags, *args, **kwargs):
+        nonlocal swapped
+        fd = real_open(path, flags, *args, **kwargs)
+        if path == "browser-preview-origin.json" and not swapped:
+            swapped = True
+            if target == "directory":
+                root.rename(root.with_name("moved"))
+                root.symlink_to(outside, target_is_directory=True)
+            else:
+                pin = root / "browser-preview-origin.json"
+                pin.rename(root / "old-pin.json")
+                pin.symlink_to(unrelated)
+        return fd
+
+    monkeypatch.setattr(policy.os, "open", swap_open)
+    result = await request(ctx, "https://first.trycloudflare.com")
+    assert swapped and result.details["code"] == "preview_origin_unavailable"
+    backend.assert_not_awaited()
+    assert unrelated.read_text() == "unchanged"
+    assert sorted(p.name for p in outside.iterdir()) == ["unrelated.json"]
+
+
+@pytest.mark.asyncio
+async def test_denial_guidance_and_transport_separator(tmp_path, backend):
+    ctx = session(tmp_path, "root")
+    backend.return_value = ({"state": "denied", "origin": "https://first.trycloudflare.com"}, None)
+    denied = await request(ctx, "https://first.trycloudflare.com")
+    assert "do not re-request it" in denied.text
+    assert "Coordinate reuse" not in denied.text
+    backend.return_value = (None, builtin._error("test", "browser", "transport failure"))
+    failed = await request(ctx, "https://first.trycloudflare.com")
+    assert "transport failure\n\nFixed-origin rule" in failed.text
+
+
+@pytest.mark.asyncio
+async def test_sharp_s_is_not_merged_with_ss(tmp_path, backend):
+    ctx = session(tmp_path, "root")
+    await request(ctx, "https://ß.trycloudflare.com")
+    assert not (await request(ctx, "https://xn--zca.trycloudflare.com")).is_error
+    assert (await request(ctx, "https://ss.trycloudflare.com")).is_error
+    assert backend.await_count == 2
+
+
+def test_competing_processes_share_first_durable_pin(tmp_path):
+    ctx = session(tmp_path, "root")
+    child = session(tmp_path, "child", "root")
+    code = (
+        "from pathlib import Path; import sys; "
+        "from local_operator.browser_bridge.preview_origin import pin_quick_tunnel; "
+        "sys.stdin.readline(); "
+        "p=pin_quick_tunnel(Path(sys.argv[1]),sys.argv[2],'https://'+sys.argv[2]); "
+        "print(p.host,p.allowed)"
+    )
+    processes = [
+        subprocess.Popen(
+            [sys.executable, "-c", code, directory, host],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        )
+        for directory, host in (
+            (ctx.session_dir, "a.trycloudflare.com"),
+            (child.session_dir, "b.trycloudflare.com"),
+        )
+    ]
+    try:
+        for process in processes:
+            process.stdin.write("go\n")
+            process.stdin.flush()
+        outputs = [process.communicate(timeout=30) for process in processes]
+        assert all(process.returncode == 0 for process in processes), outputs
+        lines = [out.strip().split() for out, _ in outputs]
+        assert lines[0][0] == lines[1][0]
+        assert sorted(line[1] for line in lines) == ["False", "True"]
+    finally:
+        for process in processes:
+            if process.poll() is None:
+                process.kill()
+            process.wait()
+
+
+@pytest.mark.parametrize("iteration", range(12))
+def test_atomic_first_file_creation_is_race_safe(tmp_path, iteration):
+    # Repeating fresh creation exercises Darwin's openat(O_CREAT) losing-race
+    # ENOENT, which an already-existing pin cannot reproduce.
+    root = session(tmp_path, "root")
+    gate = Barrier(2)
+
+    def pin(host):
+        gate.wait()
+        return pin_quick_tunnel(Path(root.session_dir), host, "https://" + host)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [
+            pool.submit(pin, host) for host in ("a.trycloudflare.com", "b.trycloudflare.com")
+        ]
+        pins = [future.result() for future in futures]
+    assert sum(pin.allowed for pin in pins) == 1
+    assert pins[0].host == pins[1].host

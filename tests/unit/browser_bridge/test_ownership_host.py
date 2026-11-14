@@ -2552,3 +2552,41 @@ def test_ownership_text_only_calls_a_tab_available_for_explicit_live_states(
     assert expected in text
     if expected == "Nothing to recover":
         assert "available" not in text
+
+
+@pytest.mark.asyncio
+async def test_local_preview_refusal_preserves_older_pending_hold(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, ui_client: FakeUiClient
+) -> None:
+    """Only a real terminal access response may settle the original hold."""
+    _ui_only(monkeypatch)
+    context, resource = _context(tmp_path)
+    context.session_id = "previewroot"
+    context.session_dir = str(tmp_path)
+    real_call = ui_client.call
+    approval_state = "pending"
+
+    async def call(method, params):
+        if method == "request_access":
+            ui_client.calls.append((method, params))
+            return {"state": approval_state, "origin": params["url"]}
+        return await real_call(method, params)
+
+    monkeypatch.setattr(ui_client, "call", call)
+    args = {"action": "request_access", "url": "https://first.trycloudflare.com", "backend": "ui"}
+    first = await builtin.execute_browser("first", args, None, None, context)
+    assert first.details["state"] == "pending"
+    assert resource.record["retention"] == "pending site approval"
+    releases = sum(method == "owner_release" for method, _ in ui_client.calls)
+    refused = await builtin.execute_browser(
+        "second", {**args, "url": "https://second.trycloudflare.com"}, None, None, context
+    )
+    assert refused.details["code"] == "preview_origin_changed"
+    assert resource.record["retention"] == "pending site approval"
+    assert sum(method == "owner_release" for method, _ in ui_client.calls) == releases
+    assert sum(method == "request_access" for method, _ in ui_client.calls) == 1
+    approval_state = "allowed"
+    terminal = await builtin.execute_browser("terminal", args, None, None, context)
+    assert terminal.details["state"] == "allowed"
+    assert resource.record["retention"] == ""
+    assert sum(method == "owner_release" for method, _ in ui_client.calls) == releases + 1
