@@ -220,9 +220,29 @@ three routes the checkpoint can verify. Everything CRITICAL is still refused.
   inside a quoted script or pager setting, or a working directory there — is
   at least HIGH, so a misparsed writer costs a judge call, never a silent
   LOW. A glob counts when it could reach those trees (`~/.local-operator/sess*`).
-  `sed`, `sqlite3 -readonly`, `rg`, `less` and `file` are not trusted there
-  (`w`, `.once`/`.shell`, `--pre`, `-o`, `-C` all write or run something), so
-  they rank HIGH when they name session state. Under a working directory that
+  One exception, for reads only: one subagent lineage is one owner, so a
+  session treats its ancestors' and descendants' scratchpads (any depth, by
+  `parent` links in the harness lineage registry or `origin.json`) as its own
+  for FILES — an existing regular file (not a link, not a directory, not the
+  pad itself) in one of them, handed to any program, `node -e
+  '…readFileSync(…)'` or `node <child pad>/x.mjs` included, ranks as it would
+  in your own scratchpad: LOW. Every spelling, the resolved one included,
+  must land in such a pad, and the word must not be named as an output nor
+  handed to a `sed` that runs code (`e`, `s///e`, `-f`). Siblings, cousins,
+  agent-opened and unrelated sessions inherit nothing (a sibling's read still
+  passes with a git-tracked script); evidence files keep their ranking.
+  Recognisable deletes and writes into a lineage member's scratchpad (`rm`,
+  `mv`, `cp`, `tee`, `>`, `-o`, `sed -i`/`-I`, delete one-liners) stay HIGH,
+  because it is a live session's working state (what you created there is
+  already credited through the creation ledger). Code an interpreter runs is
+  opaque: given a lineage FILE it is ranked as for your own scratchpad, so it
+  could rewrite or remove that one file; given a directory or the pad root it
+  stays HIGH.
+  `sqlite3 -readonly`, `rg`, `less` and `file` are not trusted there
+  (`.once`/`.shell`, `--pre`, `-o`, `-C` all write or run something), so
+  they rank HIGH when they name session state; nor is `sed`, unless every flag
+  is a known non-writing one (no `-i`, no `-f`) and its script has no `w`,
+  `W` or `e` at all (`sed -n '1,135p' <file>` is a read). Under a working directory that
   cannot be determined (`cd $(…)`, a glob `cd`, `CDPATH`), naming an evidence
   file (`origin.json`, `transcript.jsonl` …) is HIGH. The `write`, `edit` and `browser` (screenshot/recording `path`)
   tools refuse those files the same way. An interpreter that computes the path

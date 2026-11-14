@@ -168,6 +168,17 @@ _WRAPPER_VALUE_FLAGS: dict[str, frozenset[str]] = {
     "sudo": frozenset({"u", "g", "p", "C", "h", "r", "t", "U", "D"}),
     "nice": frozenset({"n"}),
     "xargs": frozenset({"I", "n", "P", "s", "L", "a", "d", "E"}),
+    # ``env -u NAME`` unsets NAME: without this the variable name read as the
+    # program (field report 2026-11-12: ``env -u NODE_OPTIONS … python
+    # run_bounded.py -- node <pad>/x.mjs`` was ranked as paths "handed to
+    # NODE_OPTIONS", so the real program's read-only inputs hit the backstop).
+    #
+    # Every valued short flag of GNU env (``-u``/``-C``/``-a``) and BSD env
+    # (``-u``/``-P``/``-L``/``-U``), not just ``-u``: with ``-C`` missing,
+    # ``env -C /tmp rm -rf ~`` read ``/tmp`` as the program and the ``rm``
+    # vanished (QA Q-3-1 on PR #3906). ``resolve._env_split`` reads this same
+    # entry, so the wrapper peel and the ``-S`` finder cannot drift apart.
+    "env": frozenset({"u", "C", "a", "P", "L", "U"}),
 }
 
 #: The same, spelled long and with a space rather than an ``=``.
@@ -187,6 +198,16 @@ _WRAPPER_LONG_VALUE_FLAGS = frozenset(
         "--arg-file",
     }
 )
+
+#: Long value flags only ONE wrapper takes. ``env --unset NAME`` (field report
+#: 2026-11-12) lives here, not in the shared table above: shared, it made
+#: ``sudo --unset rm -rf ~/work`` peel ``rm`` away as a flag value (review F2
+#: on PR #3906), though sudo rejects ``--unset``.
+_WRAPPER_OWN_LONG_VALUE_FLAGS: dict[str, frozenset[str]] = {
+    # ``--chdir`` is also in the shared table (sudo takes it); listed here too so
+    # this entry is env's complete long-option vocabulary for ``_env_split``.
+    "env": frozenset({"--unset", "--chdir", "--argv0"}),
+}
 
 #: Shells whose ``-c`` argument is a command string. Their inner text is parsed
 #: with the SAME rules, recursively — the wrapper an agent reaches for to make a
@@ -650,8 +671,10 @@ def _peel(segment: str) -> tuple[str | None, str]:
                 return None, ""
             spelling = _unquote(token)
             if spelling.startswith("-") and spelling != "-":
-                takes_value = (len(spelling) == 2 and spelling[1] in value_flags) or (
-                    spelling in _WRAPPER_LONG_VALUE_FLAGS
+                takes_value = (
+                    (len(spelling) == 2 and spelling[1] in value_flags)
+                    or spelling in _WRAPPER_LONG_VALUE_FLAGS
+                    or spelling in _WRAPPER_OWN_LONG_VALUE_FLAGS.get(literal, ())
                 )
                 rest = after.lstrip()
                 if takes_value:

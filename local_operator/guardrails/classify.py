@@ -400,7 +400,9 @@ def _in_session_scratchpad(path: str, sessions: str, *, pattern: bool = False) -
 OTHER_SCRATCHPAD = "another session's files"
 
 
-def _tree_read(target: Target, prot: _Protected, session_id: str) -> str | None:
+def _tree_read(
+    target: Target, prot: _Protected, session_id: str, *, only_assigned: bool = False
+) -> str | None:
     """Case 7 (2026-11-09): a read of a TASK-TREE session's scratch file.
 
     The settings lane ran ``node scripts/i18n/ledger-assemble.mjs --receipt
@@ -408,7 +410,9 @@ def _tree_read(target: Target, prot: _Protected, session_id: str) -> str | None:
     and the backstop refused it as another session's files. ``None`` = LOW:
     the file exists, its session is in the caller's subagent tree
     (``provenance.same_task_tree``), the interpreter runs a git-tracked script
-    (``Target.script``) and no output flag names the file. Otherwise the
+    (``Target.script``) and no output flag names the file — or, with no
+    script condition at all, when every owner is the caller's ancestor or
+    descendant (``_all_in_lineage``; field report 2026-11-12). Otherwise the
     suffix shown with the HIGH: the lineage fact when there is one, so the
     judge sees it; ``""`` for a stranger's pad (unchanged). Evidence files
     never reach here (``_touch_reason`` returns another reason for them).
@@ -438,6 +442,40 @@ def _tree_read(target: Target, prot: _Protected, session_id: str) -> str | None:
             if not relation:
                 return ""
             relations[owner] = relation
+    lineage = _all_in_lineage(set(relations), session_id, roots)
+    if (
+        lineage
+        and not target.as_output
+        and not target.executes
+        and not target.unproven_code
+        and _lineage_regular_file(path, target.raw_path)
+    ):
+        # Field report 2026-11-12 (UI #1888 native QA): QA child fbd3094083f4
+        # read its launcher a7450d93932d's staged manifest with ``node -e
+        # '…readFileSync("<parent pad>/…")…'``, and the launcher in turn ran
+        # its descendants' frozen supervisor (``node <child pad>/x.mjs``) and
+        # audit JSON — both refused as "another session's files". One subagent
+        # LINEAGE is one owner's working state, so a read of an ancestor's or a
+        # descendant's scratch that the resolver cannot pin (an interpreter
+        # running opaque code) ranks as it would in the caller's own pad: LOW.
+        # Kept narrow on purpose: only a ``touch`` (path handed to an unknown
+        # program) reaches here — RECOGNISED deletes, overwrites and writes
+        # into a lineage member's pad keep ``_high_reason``'s HIGH, because
+        # that pad is a live session's state (what the caller itself created
+        # there is already credited through the ledger). Opaque code handed a
+        # lineage FILE may still write or delete that one file, exactly as in
+        # the caller's own pad. Only an existing regular, non-symlink FILE
+        # earns the credit (QA Q1 on PR #3906): handed a pad ROOT or a
+        # directory, ``f["rm"+"Sync"](argv[1],{recursive:true})`` wiped a whole
+        # lineage pad unreviewed; a link or a missing path is unpinnable. A
+        # word named as an output, or handed to a sed that runs code
+        # (``Target.executes``), or ``python -c`` CODE that #3918's read-only
+        # proof refused (``Target.unproven_code``: visible code shown able to
+        # write gets no blanket credit), stays HIGH. Every spelling, the realpath included, must
+        # land in a lineage member's pad, so a link out to a sibling or a
+        # stranger never borrows the credit. Siblings are NOT lineage (see
+        # ``_all_in_lineage``): they keep case 7's tracked-script rule below.
+        return None
     if (
         os.path.isfile(path)
         and not os.path.islink(path)
@@ -466,7 +504,81 @@ def _tree_read(target: Target, prot: _Protected, session_id: str) -> str | None:
     ):
         return None
     owner = _pad_owner(os.path.realpath(path), roots) or ""
-    return f" (session {owner} is this session's {relations.get(owner, '')} in one task tree)"
+    shown = f"session {owner} is this session's {relations.get(owner, '')} in one task tree"
+    if lineage:
+        shown += _lineage_facts(target, only_assigned=only_assigned)
+    return f" ({shown})"
+
+
+def _lineage_facts(target: Target, *, only_assigned: bool) -> str:
+    """Why a lineage member's path still went to the judge, as provenance.
+
+    WHY (PR #3906 round 1, field case C): the launcher's run passed
+    ``LOCAL_OPERATOR_SCRATCHPAD=<child pad ROOT>``; a pad root handed to opaque
+    code is the QA-M1 wipe shape, so it stays HIGH by design (no carve-out by
+    variable name). The judge decides it, so it gets the facts the classifier
+    PROVED rather than an inference: what the path is, how it reached the call,
+    and that no recognised delete or write names it (``classify_targets``
+    skips a touch whose path a write or delete already ranked).
+    """
+    path = os.path.realpath(target.path or "")
+    if (
+        os.path.basename(path) == _SCRATCHPAD_DIRNAME
+        and os.path.basename(os.path.dirname(os.path.dirname(path))) == "sessions"
+    ):
+        what = "the path is that session's scratchpad root"
+    elif target.as_output:
+        what = "the path is named as an output"
+    elif os.path.islink(target.path or "") or not os.path.exists(path):
+        what = "the path is a link or does not exist"
+    elif os.path.isdir(path):
+        what = "the path is a directory in that session's scratchpad"
+    else:
+        what = "the path is handed to a program that may run code on it"
+    facts = [what]
+    if target.assigned and only_assigned:
+        facts.append(f"it reaches this call only as the inline env assignment {target.assigned}=…")
+    facts.append("no recognised delete or write op names it")
+    return "; " + "; ".join(facts)
+
+
+def _lineage_regular_file(path: str, raw_path: str | None) -> bool:
+    """Is ``path`` an existing regular file, by every spelling, never a link?
+
+    Lexical and resolved spellings both (and the un-normalised ``raw_path``):
+    a link anywhere in the word's own last component, or a directory or a
+    missing path, gets no lineage read credit (QA Q1 on PR #3906).
+    """
+    spellings = [path, os.path.realpath(path)]
+    if raw_path:
+        spellings += [raw_path, os.path.realpath(raw_path)]
+    return all(os.path.isfile(s) and not os.path.islink(s) for s in spellings)
+
+
+def _all_in_lineage(owners: set[str], session_id: str, roots: set[str]) -> bool:
+    """Is every ``owner`` an ancestor or a descendant of ``session_id``?
+
+    By ``parent`` links only (``provenance.subagent_ancestors``), the full
+    depth either way. An ``opener`` relation is a separate task and never
+    qualifies. Siblings and cousins do not either, deliberately: they share a
+    launcher, not a line of delegation — neither briefed the other, so neither
+    can know what the other's opaque script does with its files, and the
+    launcher, which CAN read both, is the party that hands one lane's output to
+    another. Their reads keep case 7's narrower rule (a git-tracked script,
+    no output flag) and otherwise the judge's HIGH.
+    """
+    from local_operator.guardrails import provenance
+
+    if not owners:
+        return False
+    for owner in owners:
+        root = _owner_root(owner, roots)
+        if owner in provenance.subagent_ancestors(session_id, state_root=root):
+            continue
+        if session_id in provenance.subagent_ancestors(owner, state_root=root):
+            continue
+        return False
+    return True
 
 
 def _pad_owner(path: str, roots: set[str]) -> str | None:
@@ -1712,9 +1824,16 @@ def classify_targets(
                 continue
             shown = f"{reason}, handed to {t.program or 'a program'}"
             if reason == OTHER_SCRATCHPAD:
-                tree = _tree_read(t, prot, session_id)
+                tree = _tree_read(
+                    t,
+                    prot,
+                    session_id,
+                    only_assigned=all(u.assigned for u in touched if u.path == t.path),
+                )
                 if tree is None:
-                    continue  # LOW: a tracked script reading a teammate's file
+                    # LOW: a tracked script reading a teammate's file, or any
+                    # read of a lineage member's scratch (``_tree_read``).
+                    continue
                 shown += tree
             evidence_hits.append(RankedTarget(t, Risk.HIGH, shown))
     for name in dict.fromkeys(blind):
