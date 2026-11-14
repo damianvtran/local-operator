@@ -855,7 +855,7 @@ class SyncState:
         self._dirty = True
 
     def copy_version(self, device: str, key: str) -> tuple[int, str] | None:
-        """Identity/revision of this known copy; legacy/unknown metadata cannot settle."""
+        """Read the copy token; only locked wipe planning initializes legacy metadata."""
         if self.ack_for(device, key) is None and self.dispatch_for(device, key) is None:
             return None
         row = (self.copy_versions.get(device) or {}).get(key)
@@ -872,6 +872,41 @@ class SyncState:
             "revision": int(row.get("revision") or 0) + 1,
             "identity": uuid.uuid4().hex,
         }
+        self._dirty = True
+
+    def prepare_ending(self, device: str, key: str) -> tuple[int, str] | None:
+        """Bind a planned wipe under mutate's lock; upgrade legacy rows once.
+
+        Planning and snapshotting must be ONE transaction, before dialing or an
+        earlier frame can let a re-copy race in. Old ledgers need an identity at
+        that point, not a permanent inability to confirm deletion. Merely
+        planning again must not change it; any accepted copy/ACK still does.
+        """
+        acked = self.ack_for(device, key)
+        if self.dispatch_for(device, key) is None and (acked is None or acked.get("wiped")):
+            return None
+        if self.copy_version(device, key) is None:
+            self._advance_copy_version(device, key)
+        return self.copy_version(device, key)
+
+    def record_ending(
+        self,
+        device: str,
+        key: str,
+        *,
+        gen: int,
+        digest: str,
+        expected: tuple[int, str] | None,
+    ) -> None:
+        """Settle only the instance bound to the request, never an unbound ACK.
+
+        The caller holds mutate's lock. None means no request correlation, not
+        permission to guess using generation/digest or to snapshot at receipt.
+        """
+        if not self.ending_is_current(device, key, expected):
+            return
+        if self.ack_for(device, key) is not None or self.dispatch_for(device, key) is not None:
+            self.record_ack(device, key, gen=gen, digest=digest, at=time.time(), wiped=True)
 
     def ending_is_current(self, device: str, key: str, expected: tuple[int, str] | None) -> bool:
         """The caller holds mutate's cross-process lock while testing/settling."""
@@ -1374,7 +1409,8 @@ class SyncEngine:
             _close_quietly(store)
 
     def _exchange_blocking(self, device_id: str) -> None:
-        network_id, announces = self._pending_announces(device_id)
+        endings: dict[str, tuple[int, str] | None] = {}
+        network_id, announces = self._pending_announces(device_id, endings=endings)
         if not announces:
             return
         link = self._server._ensure_link(device_id)  # noqa: SLF001 — the one dial seam
@@ -1391,11 +1427,8 @@ class SyncEngine:
                 "req": self._server._next_relay_req(),  # noqa: SLF001 — the relay's own counter
                 **item,
             }
-            expected = (
-                self._ending_snapshot(network_id, device_id, str(item.get("key") or ""))
-                if str(item.get("value_state") or "") == VALUE_STATE_ABSENT
-                else None
-            )
+            # Local-only sidecar of the list, never spread into the wire frame.
+            expected = endings.get(str(item.get("key") or ""))
             try:
                 reply = link.request(frame, timeout=ANNOUNCE_TIMEOUT_S)
             except Exception:  # noqa: BLE001 — one member's link is that member's problem
@@ -1409,18 +1442,6 @@ class SyncEngine:
                 return
             if str(item.get("value_state") or "") == VALUE_STATE_ABSENT:
                 self._record_wipe_reply(network_id, device_id, item, detail, expected=expected)
-
-    def _ending_snapshot(self, network_id: str, device: str, key: str) -> tuple[int, str] | None:
-        """Read the atomic local document BEFORE I/O; no extra lock wait on a dial.
-
-        Final compare-and-set runs under mutate's existing process lock. Any
-        intervening accepted dispatch or ACK changes the token, including an
-        equal-generation re-copy. A missing/unreadable snapshot confirms nothing.
-        """
-        try:
-            return SyncState.load(network_id, root=self._root).copy_version(device, key)
-        except Exception:  # noqa: BLE001 — do not claim an unprovable ending
-            return None
 
     def _record_wipe_reply(
         self,
@@ -1452,20 +1473,13 @@ class SyncEngine:
             with mutate(network_id, self._root) as state:
                 # The reply ends the instance that existed BEFORE this request,
                 # not a re-copy sent/applied while its answer was in flight.
-                if not state.ending_is_current(device_id, key, expected):
-                    return
-                # A dispatch row is a copy too: its wipe is confirmed the same way.
-                if (
-                    state.ack_for(device_id, key) is not None
-                    or state.dispatch_for(device_id, key) is not None
-                ):
-                    state.record_ack(
-                        device_id, key, gen=gen, digest=digest, at=time.time(), wiped=True
-                    )
+                state.record_ending(device_id, key, gen=gen, digest=digest, expected=expected)
         except Exception:  # noqa: BLE001 — a lost confirmation is retried next tick
             logger.debug("credentials sync: wipe confirmation for %s lost", key, exc_info=True)
 
-    def _pending_announces(self, device_id: str) -> tuple[str, list[dict[str, Any]]]:
+    def _pending_announces(
+        self, device_id: str, *, endings: dict[str, tuple[int, str] | None] | None = None
+    ) -> tuple[str, list[dict[str, Any]]]:
         """The frames this member is owed, computed under the lock.
 
         TWO KINDS, AND THE ENDINGS GO FIRST — BUT ONLY THEIR OWN KEY'S FLOW.
@@ -1491,7 +1505,7 @@ class SyncEngine:
         network_id = str(document.network_id)
         active = _member_is_active(self._root, network_id, device_id)
         with mutate(network_id, self._root) as state:
-            wipes = self._pending_wipes(document, state, device_id, active=active)
+            wipes = self._pending_wipes(document, state, device_id, active=active, endings=endings)
             if not active:
                 return network_id, wipes
             announces: list[dict[str, Any]] = list(wipes)
@@ -1529,7 +1543,13 @@ class SyncEngine:
             return network_id, announces
 
     def _pending_wipes(
-        self, document: Any, state: SyncState, device_id: str, *, active: bool
+        self,
+        document: Any,
+        state: SyncState,
+        device_id: str,
+        *,
+        active: bool,
+        endings: dict[str, tuple[int, str] | None] | None = None,
     ) -> list[dict[str, Any]]:
         """The wipe frames owed to ``device_id``, in key order, capped.
 
@@ -1560,6 +1580,9 @@ class SyncEngine:
                     and self._read_value(key, entry) is not None
                 ):
                     continue
+            expected = state.prepare_ending(device_id, key)
+            if endings is not None:
+                endings[key] = expected
             wipes.append(
                 {"key": key, "gen": gen, "digest": digest, "value_state": VALUE_STATE_ABSENT}
             )
@@ -1570,8 +1593,8 @@ class SyncEngine:
     def _has_pending_wipes(self, document: Any, device_id: str) -> bool:
         """Cheap gate half: does this member's ledger owe an ENDING (§5.5c)?
 
-        An open copy (acked or dispatched), not arbitrary ledger metadata, is
-        an ending candidate. This is reached when the owned-keys check found
+        A live, un-wiped ACK row, not arbitrary metadata or a dispatch-only
+        row, is this gate's ending candidate. This is reached when the owned-keys check found
         nothing to SERVE; the precise per-key decision runs under the state lock
         in ``_pending_wipes``. A state that cannot be read answers no: an
         unreadable document must not spin a dial per member per tick.
@@ -1627,23 +1650,25 @@ class SyncEngine:
         if document is None or not device_id:
             return {"copies": 0, "wiped": 0, "timed_out": 0}
         network_id = str(document.network_id)
-        try:
-            state = SyncState.load(network_id, root=self._root)
-        except Exception:  # noqa: BLE001 — unreadable state: nothing derivable
-            return {"copies": 0, "wiped": 0, "timed_out": 0}
-        # ACKED AND MERELY SENT ALIKE: a copy whose ack never arrived is still on
-        # the member, and this is the last contact it will ever get.
-        open_rows = state.open_copies(device_id)
-        unacknowledged = sum(1 for row in open_rows if row["unacknowledged"])
-        pending: list[dict[str, Any]] = [
-            {
-                "key": row["key"],
-                "gen": row["gen"],
-                "digest": row["digest"],
-                "value_state": VALUE_STATE_ABSENT,
-            }
-            for row in open_rows
-        ]
+        endings: dict[str, tuple[int, str] | None] = {}
+        # Build the whole list AND its local identities in one transaction. A
+        # dial or an earlier send may race a re-copy; neither may rebind a wipe
+        # already planned. Legacy identities are durable before any frame leaves.
+        with mutate(network_id, self._root) as state:
+            open_rows = state.open_copies(device_id)
+            unacknowledged = sum(1 for row in open_rows if row["unacknowledged"])
+            pending: list[dict[str, Any]] = [
+                {
+                    "key": row["key"],
+                    "gen": row["gen"],
+                    "digest": row["digest"],
+                    "value_state": VALUE_STATE_ABSENT,
+                }
+                for row in open_rows
+            ]
+            for item in pending[:ANNOUNCE_CAP]:
+                key = str(item["key"])
+                endings[key] = state.prepare_ending(device_id, key)
         if not pending:
             return {"copies": 0, "wiped": 0, "timed_out": 0, "unacknowledged": 0}
         link, _reason = self._server._ensure_link_with_reason(  # noqa: SLF001 — the one dial seam
@@ -1690,7 +1715,7 @@ class SyncEngine:
             # Clamping means the loop can never outrun REMOVAL_TOTAL_BUDGET_S,
             # so the envelope is probe + budget and the caller's wait covers it
             # by construction (pinned in test_wipe_notice.py).
-            expected = self._ending_snapshot(network_id, device_id, str(item.get("key") or ""))
+            expected = endings.get(str(item.get("key") or ""))
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 break
@@ -3038,11 +3063,11 @@ def owner_ack(broker: Any, link: Any, frame: Mapping[str, Any]) -> dict[str, Any
 
     TWO ACKS ARRIVE HERE, under DIFFERENT authority. A PRESENT ack claims a
     held copy: only a current holder of a key this device owns is recorded —
-    the ledger's job is not to collect assertions. An ABSENT ack confirms a
-    WIPE (§5.5c): it necessarily arrives after the grant was removed, so the
-    holder check cannot apply; the ledger entry the wipe was sent for is the
-    authority it is recorded against, and a wipe-ack with no such row (a lost
-    owner state) is receipt-only — the next announce pass recomputes the need.
+    the ledger's job is not to collect assertions. An ABSENT ack claims a
+    WIPE (§5.5c), possibly after the grant was removed. It carries no request
+    correlation: a generation/digest also names a same-byte re-copy, so even
+    a known ledger row cannot turn that claim into a confirmed ending. It is
+    receipt-only; the bound announce reply is the channel that can settle it.
     """
     key = _bounded_key(frame.get("key"))
     if not key:
@@ -3059,7 +3084,11 @@ def owner_ack(broker: Any, link: Any, frame: Mapping[str, Any]) -> dict[str, Any
         if owned_here and gen > 0 and digest:
             with mutate(broker.network_id, broker.root) as state:
                 if state.ack_for(by, key) is not None or state.dispatch_for(by, key) is not None:
-                    state.record_ack(by, key, gen=gen, digest=digest, at=time.time(), wiped=True)
+                    # A standalone ACK has no correlation to our wipe request.
+                    # Equal bytes/generation cannot identify its copy instance;
+                    # never substitute the current identity at receipt time.
+                    # The request's own reply supplies the bound proof instead.
+                    state.record_ending(by, key, gen=gen, digest=digest, expected=None)
         return {"kind": "ack", "key": key, "action": "recorded"}
     if value_state != VALUE_STATE_PRESENT:
         return BrokerError(

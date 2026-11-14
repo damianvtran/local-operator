@@ -214,25 +214,180 @@ def test_local_copy_versions_survive_reload_and_do_not_depend_on_clock(tmp_path:
     assert reset.copy_version("d_b", KEY) != first
 
 
-@pytest.mark.parametrize("legacy", ["absent", "malformed"])
-def test_an_unknown_old_format_identity_cannot_confirm_an_ending(
-    secret_mesh: Any, monkeypatch: pytest.MonkeyPatch, legacy: str  # noqa: F811
+@pytest.mark.parametrize("ending", ["tick", "removal"])
+def test_a_recopy_dispatched_after_planning_is_not_settled_by_that_wipe(
+    secret_mesh: Any, monkeypatch: pytest.MonkeyPatch, ending: str  # noqa: F811
 ) -> None:
     mesh = secret_mesh
-    _deliver_without_ack(mesh, monkeypatch)
+    sync.credentials_sync_step(mesh.a, mesh.member)
+    assert net.wait_for(
+        lambda: sync.SyncState.load(mesh.network_id, mesh.a.root).ack_for(mesh.member, KEY)
+        is not None
+    )
+    assert net.wait_for(lambda: mesh.member not in mesh.engine_a._inflight_members)
+    monkeypatch.setattr(mesh.engine_a, "enqueue_owner_exchange", lambda device: "scheduled")
+    old = sync.SyncState.load(mesh.network_id, mesh.a.root).ack_for(mesh.member, KEY)
+    assert old is not None
+    link = mesh.b._ensure_link(mesh.a.identity.device_id)
+    assert link is not None
+    if ending == "tick":
+        assert _lop_network("credential", "mark", SECRET_NAME, "local-only") == 0
+    dial_name = "_ensure_link" if ending == "tick" else "_ensure_link_with_reason"
+    dial = getattr(mesh.a, dial_name)
+    held_reply: list[dict[str, Any]] = []
+
+    def recopy_before_dial(*args: Any, **kwargs: Any) -> Any:
+        # The list already exists. Restore the seam before doing any more I/O;
+        # a same-generation copy is sent, but not applied until the wipe ends.
+        monkeypatch.setattr(mesh.a, dial_name, dial)
+        if ending == "tick":
+            assert _lop_network("credential", "mark", SECRET_NAME, "default") == 0
+        reply = link.request(
+            {
+                "op": "net_broker",
+                "kind": "copy",
+                "network_id": mesh.network_id,
+                "from_device": mesh.member,
+                "from_device_name": mesh.b.identity.name,
+                "req": mesh.b._next_relay_req(),
+                "key": KEY,
+                "gen": old["gen"],
+                "held": 0,
+                "held_digest": "",
+            },
+            timeout=sync.COPY_TIMEOUT_S,
+        )
+        assert isinstance(reply, dict)
+        detail = reply.get("detail")
+        assert isinstance(detail, dict) and detail.get("kind") == "copy"
+        assert detail["gen"] == old["gen"], "the schedule must not bump byte generation"
+        held_reply.append(detail)
+        assert sync.SyncState.load(mesh.network_id, mesh.a.root).dispatch_for(mesh.member, KEY)
+        return dial(*args, **kwargs)
+
+    monkeypatch.setattr(mesh.a, dial_name, recopy_before_dial)
+    if ending == "tick":
+        mesh.engine_a._exchange_blocking(mesh.member)
+    else:
+        result = mesh.engine_a.deliver_removal_endings(mesh.member)
+        assert result["wiped"] == 0, result
+    assert len(held_reply) == 1
+    assert not _member_has(mesh.b.root, SECRET_NAME), "the old copy really was wiped"
+    state = sync.SyncState.load(mesh.network_id, mesh.a.root)
+    assert state.dispatch_for(mesh.member, KEY) is not None, "the old reply erased a NEW send"
+    held = _HeldAcks(monkeypatch, mesh.b.root)
+    assert (
+        mesh.engine_b.apply_copy_reply(KEY, held_reply[0], owner=mesh.a.identity.device_id)
+        == "applied"
+    )
+    assert held.held.is_set() and _member_has(mesh.b.root, SECRET_NAME)
+    assert len(sync.SyncState.load(mesh.network_id, mesh.a.root).open_copies(mesh.member)) == 1
+    print(f"PLANNING_RACE {ending=} generation_unchanged=true pending=true copy_present=true")
+    record = store.load(mesh.network_id, mesh.a.root)
+    assert _lop_network("member", "rm", record.name, mesh.b.identity.name) == 0
+    assert not _member_has(mesh.b.root, SECRET_NAME)
+    assert sync.SyncState.load(mesh.network_id, mesh.a.root).open_copies(mesh.member) == []
+
+
+def _separate_absent_ack(mesh: Any) -> sync.SyncState:
+    state = sync.SyncState.load(mesh.network_id, mesh.a.root)
+    sent = state.dispatch_for(mesh.member, KEY)
+    assert sent is not None
+    link = mesh.b._ensure_link(mesh.a.identity.device_id)
+    assert link is not None
+    reply = link.request(
+        {
+            "op": "net_broker",
+            "kind": "ack",
+            "network_id": mesh.network_id,
+            "from_device": mesh.member,
+            "from_device_name": mesh.b.identity.name,
+            "req": mesh.b._next_relay_req(),
+            "key": KEY,
+            "gen": sent["gen"],
+            "digest": sent["digest"],
+            "value_state": "absent",
+        },
+        timeout=sync.ANNOUNCE_TIMEOUT_S,
+    )
+    assert isinstance(reply, dict) and reply.get("detail", {}).get("kind") == "ack"
+    assert _member_has(mesh.b.root, SECRET_NAME), "an ACK is not a physical wipe"
+    return sync.SyncState.load(mesh.network_id, mesh.a.root)
+
+
+def test_a_separate_absent_ack_cannot_settle_an_unidentified_copy(
+    secret_mesh: Any, monkeypatch: pytest.MonkeyPatch  # noqa: F811
+) -> None:
+    _deliver_without_ack(secret_mesh, monkeypatch)
+    after = _separate_absent_ack(secret_mesh)
+    assert after.dispatch_for(secret_mesh.member, KEY) is not None
+    assert not (after.ack_for(secret_mesh.member, KEY) or {}).get("wiped")
+
+
+def test_bypassing_identity_allows_the_separate_ack_to_forge_an_ending(
+    secret_mesh: Any, monkeypatch: pytest.MonkeyPatch  # noqa: F811
+) -> None:
+    _deliver_without_ack(secret_mesh, monkeypatch)
+    monkeypatch.setattr(sync.SyncState, "ending_is_current", lambda *args: True)
+    after = _separate_absent_ack(secret_mesh)
+    assert after.dispatch_for(secret_mesh.member, KEY) is None
+    assert (after.ack_for(secret_mesh.member, KEY) or {}).get("wiped") is True
+
+
+@pytest.mark.parametrize("legacy", ["absent", "malformed"])
+@pytest.mark.parametrize("ending", ["tick", "removal"])
+def test_a_legacy_copy_is_identified_when_planned_and_confirms_its_ending(
+    secret_mesh: Any,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    legacy: str,
+    ending: str,
+) -> None:
+    mesh = secret_mesh
+    if ending == "removal":
+        _deliver_without_ack(mesh, monkeypatch)
+    else:
+        sync.credentials_sync_step(mesh.a, mesh.member)
+        assert net.wait_for(
+            lambda: sync.SyncState.load(mesh.network_id, mesh.a.root).ack_for(mesh.member, KEY)
+            is not None
+        )
+    assert net.wait_for(lambda: mesh.member not in mesh.engine_a._inflight_members)
+    monkeypatch.setattr(mesh.engine_a, "enqueue_owner_exchange", lambda device: "scheduled")
     state = sync.SyncState.load(mesh.network_id, mesh.a.root)
     payload = state.to_json()
     if legacy == "absent":
         payload.pop("copy_versions", None)
     else:
         payload["copy_versions"] = {mesh.member: {KEY: {"revision": True, "identity": "bad"}}}
-    # Only our synthetic ledger is rewritten. The valid dispatch remains intact.
+    # Only our synthetic ledger is rewritten; the open copy is real and durable.
     state.path.write_text(json.dumps(payload), encoding="utf-8")
-    assert mesh.engine_a._ending_snapshot(mesh.network_id, mesh.member, KEY) is None
-    result = mesh.engine_a.deliver_removal_endings(mesh.member)
-    assert result["wiped"] == 0 and result["unacknowledged"] == 1, result
-    assert not _member_has(mesh.b.root, SECRET_NAME)
+    assert sync.SyncState.load(mesh.network_id, mesh.a.root).copy_version(mesh.member, KEY) is None
+    if ending == "removal":
+        record = store.load(mesh.network_id, mesh.a.root)
+        capsys.readouterr()
+        assert _lop_network("member", "rm", record.name, mesh.b.identity.name) == 0
+        out = capsys.readouterr().out
+        assert "was deleted (the ending is confirmed)" in out, out
+    else:
+        assert _lop_network("credential", "mark", SECRET_NAME, "local-only") == 0
+        mesh.engine_a._exchange_blocking(mesh.member)
     after = sync.SyncState.load(mesh.network_id, mesh.a.root)
-    assert after.dispatch_for(mesh.member, KEY) is not None
-    assert after.ack_for(mesh.member, KEY) is None
-    assert len(after.open_copies(mesh.member)) == 1
+    assert not _member_has(mesh.b.root, SECRET_NAME)
+    assert after.copy_version(mesh.member, KEY) is not None
+    assert (after.ack_for(mesh.member, KEY) or {}).get("wiped") is True
+    assert after.open_copies(mesh.member) == []
+    if ending == "tick":
+
+        def no_redial(*args: Any, **kwargs: Any) -> Any:
+            pytest.fail("a confirmed legacy ending must not be re-sent on the next tick")
+
+        monkeypatch.setattr(mesh.a, "_ensure_link", no_redial)
+        mesh.engine_a._exchange_blocking(mesh.member)
+        capsys.readouterr()
+        assert (
+            _lop_network("credential", "revoke", KEY, "--from", mesh.b.identity.name, "--json") == 0
+        )
+        receipt = json.loads(capsys.readouterr().out)
+        assert receipt["copy"] == {"confirmed": True, "wiped": True, "wipe": "done"}, receipt
+    print(f"LEGACY_ENDING {legacy=} {ending=} confirmed=true open_copies=0")
