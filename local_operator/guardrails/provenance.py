@@ -62,7 +62,7 @@ import sqlite3
 import stat
 import subprocess
 import time
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, NamedTuple
@@ -909,7 +909,7 @@ class CwdInventory(NamedTuple):
     one. That single refusal used to void the whole inventory (``None``), so
     every caller read "unknown" on such hosts. A hidden pid is now reported
     instead, and it still counts as "might be inside" (see
-    :func:`_live_cwd_inside`) unless a caller can prove otherwise.
+    :func:`_live_cwd_inside`): no caller deletes on its account.
     """
 
     cwds: tuple[str, ...]
@@ -972,104 +972,23 @@ def _cwd_inventory() -> CwdInventory | None:
     return inventory
 
 
-class ProcMark(NamedTuple):
-    """What /proc shows, without privilege, about whether a process has run.
-
-    ``start`` (``/proc/<pid>/stat`` field 22, clock ticks since boot) pins the
-    process identity across pid reuse; ``switches`` is the sum of its
-    voluntary and involuntary context switches; ``on_cpu`` is ``State: R``;
-    ``threads`` is ``Threads:``; ``runs`` is ``/proc/<pid>/schedstat`` field
-    3 (``sched_info.pcount``), the number of times it has been switched IN.
-    All three files stay readable for a non-dumpable process whose cwd is not
-    (``(sd-pam)`` reads ``204612 0 1``; measured on PR #3980 round 2).
-
-    WHY ``runs`` as well as ``switches``: the switch counts move when a task
-    is switched OUT, and ``State: S`` shows as soon as a task declares sleep,
-    before ``schedule()`` switches it out — so a process that has just run
-    (and ``chdir``-ed) reads ``S`` with its old counts for a moment (PR #3980
-    round 2 reproduced 49/15,000 and 26/150,000 false clears). ``pcount`` is
-    bumped at switch-IN (``sched_info_arrive``; v6.18 ``kernel/sched/stats.h``)
-    before the task executes anything, so it has already moved by the time
-    the task could run a ``chdir``. Field 1 (``sum_exec_runtime``) is updated
-    only on a tick or at dequeue, lags the same way, and is not used.
-
-    ``State`` and both switch counts belong to the thread-group LEADER only,
-    while the cwd is shared by every thread (``CLONE_FS``): a mark speaks for
-    the whole process only when ``threads`` is 1 (PR #3980 round 1 reproduced
-    a worker thread ``chdir``-ing in under a parked leader's unchanged mark).
-    """
-
-    start: int
-    switches: int
-    on_cpu: bool
-    threads: int
-    runs: int
-
-
-def _proc_mark(pid: int) -> ProcMark | None:
-    """The :class:`ProcMark` of ``pid`` now; ``None`` if it cannot be proved.
-
-    ORDER matters. ``schedstat`` is read before AND after ``status``, and the
-    mark exists only if both lines are identical: no switch-in happened while
-    ``status`` was read, so whichever side of a wake-up ``status`` landed on,
-    the bracketing ``runs`` covers it (a ``status`` caught between declaring
-    sleep and switching out comes after the switch-in that let it run, which
-    the first read or the settle's own reads already count). ``status``
-    prints ``State`` and ``Threads`` before the switch counts in one read.
-    ``stat`` (the start time) is read last: a pid reused before it then shows
-    a different start time, which never matches a snapshot.
-
-    ``None`` — no proof, so never cleared — when any file is unreadable or
-    malformed, the two ``schedstat`` lines differ, or ``runs`` is 0: a kernel
-    without ``CONFIG_SCHED_INFO`` prints ``0 0 0``, and a process that exists
-    has been switched in at least once.
-    """
-    try:
-        with open(f"/proc/{pid}/schedstat", encoding="utf-8") as fh:
-            sched_first = fh.read()
-        with open(f"/proc/{pid}/status", encoding="utf-8") as fh:
-            status = fh.read()
-        with open(f"/proc/{pid}/schedstat", encoding="utf-8") as fh:
-            sched_last = fh.read()
-        with open(f"/proc/{pid}/stat", encoding="utf-8") as fh:
-            stat_line = fh.read()
-        runs = int(sched_first.split()[2])
-        if sched_first != sched_last or runs <= 0:
-            return None
-        fields: dict[str, str] = {}
-        for line in status.splitlines():
-            key, _, value = line.partition(":")
-            fields[key] = value.strip()
-        # comm (field 2) may hold spaces and parentheses: split after the last ")".
-        start = int(stat_line[stat_line.rindex(")") + 2 :].split()[19])
-        switches = int(fields["voluntary_ctxt_switches"]) + int(
-            fields["nonvoluntary_ctxt_switches"]
-        )
-        return ProcMark(
-            start, switches, fields["State"].startswith("R"), int(fields["Threads"]), runs
-        )
-    except (OSError, ValueError, KeyError, IndexError, UnicodeError):
-        return None
-
-
-def _live_cwd_inside(real: str, cleared: Callable[[int], bool] | None = None) -> bool | None:
+def _live_cwd_inside(real: str) -> bool | None:
     """Whether a live process uses this tree; unknown never grants an exemption.
 
     Reads :func:`_cwd_inventory` (bounded, cached per process). ``None`` —
     timeout or an unreadable inventory — fails closed in ``worktree_state``.
     This protects ordinary clean removals as well as abandoned adds.
 
-    A hidden pid (cwd unreadable) might be inside, so it also answers ``None``
-    unless ``cleared(pid)`` proves it is not. Every caller treats ``None`` like
-    ``True`` (``busy`` / do not settle); only the interrupted-add settle can
-    supply a proof today (``interrupted_worktree_add.SpawnSnapshot``).
+    A hidden pid (cwd unreadable) might be inside, so it also answers ``None``.
+    Every caller treats ``None`` like ``True`` (``busy`` / never delete): PR
+    #3980 rounds 1-3 found no sound way to prove such a process outside a tree.
     """
     inventory = _cwd_inventory()
     if inventory is None:
         return None
     if any(cwd == real or cwd.startswith(real + os.sep) for cwd in inventory.cwds):
         return True
-    if any(cleared is None or not cleared(pid) for pid in inventory.hidden):
+    if inventory.hidden:
         return None
     return False
 
