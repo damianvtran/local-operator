@@ -333,6 +333,56 @@ def test_the_register_route_forwards_the_token_and_still_stores_none(login: int)
     assert token not in stored
 
 
+def test_the_register_forward_never_carries_preferences(login: int) -> None:
+    """Push preferences are machine-local: the cloud's register body is strict.
+
+    The real route stores the switches (the emit gate reads them) and the
+    forward it schedules carries none of them, in the device block or in the
+    credential rows riding beside it.
+    """
+    import time
+
+    from starlette.testclient import TestClient
+
+    from local_operator.mobile.daemon import MobileDaemon, build_app
+    from local_operator.paths import config_dir
+
+    cloud = Cloud(httpx.Response(200, json={"device_id": "d", "registered_at": 1}))
+    lane = PushLane(_transport(login, cloud), config_dir())
+    with TestClient(
+        build_app(MobileDaemon(port=0, password="pw123", push_lane=lane)), follow_redirects=False
+    ) as client:
+        assert client.post("/login", data={"password": "pw123"}).status_code in (200, 303)
+        answer = client.post(
+            "/api/push/register",
+            json={
+                "platform": "ios",
+                "token": "ef" * 32,
+                "environment": "production",
+                "app_version": "1.0.0 (449)",
+                "install_id": "9f5d1d6e-6b1a-4c6e-9b3a-7a1c2f3d4e5f",
+                "preferences": {"enabled": True, "completions": False, "errors": True},
+            },
+        )
+        assert answer.status_code == 200, answer.text
+        deadline = time.monotonic() + 10
+        while not cloud.seen and time.monotonic() < deadline:
+            time.sleep(0.05)
+    (request,) = cloud.seen
+    sent = json.loads(request.content)
+    assert set(sent) == {"computer", "device", "devices"}
+    assert "preferences" not in sent["device"]
+    assert all("preferences" not in row for row in sent["devices"])
+    assert b"preferences" not in request.content
+    # ...while the machine DID keep them, for the emit gate.
+    stored = json.loads((config_dir() / push_devices.PUSH_DEVICES_STORE_NAME).read_text())
+    assert stored["devices"][0]["preferences"] == {
+        "enabled": True,
+        "completions": False,
+        "errors": True,
+    }
+
+
 def test_a_refused_register_is_not_forwarded(login: int) -> None:
     from starlette.testclient import TestClient
 

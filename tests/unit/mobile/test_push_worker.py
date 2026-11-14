@@ -1644,3 +1644,120 @@ def test_a_degraded_listing_count_drops_the_count_term(tmp_path: Path) -> None:
     body = harness.plane.calls[0][1]
     assert body["count"] == 0
     assert body[ALERT_FIELD][ALERT_BODY_FIELD] == BODIES["complete"]
+
+
+# -- per-device push preferences: the emit gate --------------------------------
+#
+# The registry rows are written through the REAL register path
+# (``push_devices.register``), and the harness's live-device read is pointed at
+# the ids it minted, so these cells exercise the worker's compose path against
+# the stored switches exactly as the daemon would.
+
+
+def _register_device(harness: Harness, install_id: str, preferences: dict[str, bool] | None) -> str:
+    body: dict[str, Any] = {
+        "platform": "ios",
+        "token": "ab" * 32,
+        "environment": "production",
+        "app_version": "1.0.0 (449)",
+        "install_id": install_id,
+    }
+    if preferences is not None:
+        body["preferences"] = preferences
+    return str(push_devices.register(harness.root, body)["device_id"])
+
+
+def _devices_with(harness: Harness, *preferences: dict[str, bool] | None) -> list[str]:
+    ids = [
+        _register_device(harness, str(uuid.UUID(int=index + 1)), chosen)
+        for index, chosen in enumerate(preferences)
+    ]
+    harness.devices.ids = list(ids)
+    return ids
+
+
+def test_completions_off_skips_a_completion_emit(harness: Harness) -> None:
+    _devices_with(harness, {"completions": False})
+    harness.publish("done", kind="complete")
+    records = harness.worker.tick()
+    assert harness.plane.calls == [], "no device wants a completion"
+    assert [record.accepted for record in records] == [False]
+    # Resolved, not held: the cursor moved, so the skipped emit does not
+    # return on the next pass or pin later ones.
+    assert harness.worker.tick() == []
+    assert harness.worker.pending() == 0
+
+
+def test_errors_off_skips_an_error_but_still_emits_a_complete(harness: Harness) -> None:
+    _devices_with(harness, {"errors": False})
+    harness.publish("failed", kind="error")
+    harness.worker.tick()
+    assert harness.plane.calls == []
+    harness.publish("finished", kind="complete")
+    harness.worker.tick()
+    assert [body["kind"] for _key, body in harness.plane.calls] == ["complete"]
+
+
+def test_interrupted_and_closed_ride_the_completions_switch(harness: Harness) -> None:
+    _devices_with(harness, {"errors": False})
+    harness.publish("stopped", kind="interrupted")
+    harness.worker.tick()
+    assert [body["kind"] for _key, body in harness.plane.calls] == ["interrupted"]
+
+
+def test_enabled_off_silences_everything_including_attention(harness: Harness) -> None:
+    (device,) = _devices_with(harness, {"enabled": False})
+    token = harness.publish("muted", kind="complete")
+    harness.worker.tick()
+    harness.publish("muted-error", kind="error")
+    harness.worker.tick()
+    assert harness.plane.calls == [], "no completion of any kind"
+    # The badge correction an ack produces: the one live device opted out, so
+    # nobody is left to wake and the correction is not sent.
+    harness.store.acknowledge("session/muted", token)
+    harness.worker.tick()
+    assert harness.plane.calls == []
+    assert device in harness.devices.ids
+
+
+def test_one_device_on_and_one_off_still_emits(harness: Harness) -> None:
+    """The per-computer rule: the cloud fans a completion out to every device
+    and the wire forbids ``exclude`` on it, so one device wanting it is enough."""
+    _devices_with(harness, {"enabled": False}, None)
+    harness.publish("shared", kind="complete")
+    harness.worker.tick()
+    ((_key, body),) = harness.plane.calls
+    assert body["type"] == "completion"
+    assert "exclude" not in body, "the completion wire forbids exclude"
+
+
+def test_attention_excludes_the_disabled_device_and_wakes_the_other(harness: Harness) -> None:
+    muted, listening = _devices_with(harness, {"enabled": False}, {"completions": False})
+    token = harness.publish("read-elsewhere", kind="complete")
+    harness.worker.tick()
+    assert harness.plane.calls == [], "neither device wants a completion"
+    harness.store.acknowledge("session/read-elsewhere", token)
+    harness.worker.tick()
+    ((_key, body),) = harness.plane.calls
+    assert body["type"] == "attention"
+    # Only ``enabled`` governs the silent correction: the device with
+    # completions off still gets its badge fixed; the muted one is excluded.
+    assert body["exclude"] == [muted]
+    assert listening not in body["exclude"]
+
+
+def test_a_digest_excludes_devices_that_want_none_of_its_kinds(harness: Harness) -> None:
+    errors_only, everything = _devices_with(harness, {"completions": False}, None)
+    for index in range(worker_module.BURST_LIMIT + 1):
+        harness.publish(f"burst-{index}", kind="complete")
+    harness.worker.tick()
+    ((_key, body),) = [call for call in harness.plane.calls if call[1]["type"] == "digest"]
+    assert body["exclude"] == [errors_only]
+    assert everything not in body["exclude"]
+
+
+def test_no_registry_means_every_device_wants_everything(harness: Harness) -> None:
+    """The pre-preferences behaviour: the harness's default devices have no rows."""
+    harness.publish("plain", kind="error")
+    harness.worker.tick()
+    assert [body["kind"] for _key, body in harness.plane.calls] == ["error"]
