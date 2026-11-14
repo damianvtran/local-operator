@@ -534,6 +534,10 @@ class SyncState:
         #: generation, and a removal ending treats it as an open copy whose
         #: receipt says the delivery was never acknowledged.
         self.dispatched: dict[str, dict[str, dict[str, Any]]] = {}
+        #: Local copy-instance CAS tokens, never sent to a peer. Credential byte
+        #: generations can stay equal across wipe/re-copy, so an ending must also
+        #: distinguish which dispatch/ACK instance existed before its request.
+        self.copy_versions: dict[str, dict[str, dict[str, Any]]] = {}
         #: ``{key: {"gen", "digest", "owner_device", "row_id", "record_id", "at"}}``.
         self.applied: dict[str, dict[str, Any]] = {}
         #: ``{key: {"mark": str, "set_at": float}}`` — the §4.2 selection marks,
@@ -564,6 +568,11 @@ class SyncState:
             "dispatched": {
                 device: {key: dict(row) for key, row in sorted(by_key.items())}
                 for device, by_key in sorted(self.dispatched.items())
+                if by_key
+            },
+            "copy_versions": {
+                device: {key: dict(row) for key, row in sorted(by_key.items())}
+                for device, by_key in sorted(self.copy_versions.items())
                 if by_key
             },
             "applied": {key: dict(row) for key, row in sorted(self.applied.items())},
@@ -673,6 +682,35 @@ class SyncState:
                         "digest": digest,
                         "at": peer_int(row.get("at"), maximum=GEN_CEILING),
                     }
+        versions = payload.get("copy_versions")
+        if isinstance(versions, dict):
+            for device, by_key in versions.items():
+                device_id = str(device or "")
+                if not device_id or not isinstance(by_key, dict):
+                    continue
+                for key, row in by_key.items():
+                    name = _bounded_key(key)
+                    if not name or not isinstance(row, dict):
+                        continue
+                    revision = row.get("revision")
+                    identity = row.get("identity")
+                    if (
+                        not isinstance(revision, int)
+                        or isinstance(revision, bool)
+                        or revision <= 0
+                        or not isinstance(identity, str)
+                        or len(identity) != 32
+                        or any(char not in "0123456789abcdef" for char in identity)
+                    ):
+                        continue
+                    if (
+                        state.ack_for(device_id, name) is not None
+                        or state.dispatch_for(device_id, name) is not None
+                    ):
+                        state.copy_versions.setdefault(device_id, {})[name] = {
+                            "revision": revision,
+                            "identity": identity,
+                        }
         applied = payload.get("applied")
         if isinstance(applied, dict):
             for key, row in applied.items():
@@ -789,6 +827,7 @@ class SyncState:
         row: dict[str, Any] = {"gen": int(gen), "digest": digest, "at": float(at)}
         if wiped:
             row["wiped"] = True
+        self._advance_copy_version(device, key)
         by_key[key] = row
         self._dirty = True
         # An ack recorded NOW, at or past what was sent, settles the dispatch: the
@@ -811,8 +850,32 @@ class SyncState:
         existing = by_key.get(key)
         if existing is not None and int(existing.get("gen") or 0) > int(gen):
             return
+        self._advance_copy_version(device, key)
         by_key[key] = {"gen": int(gen), "digest": str(digest or ""), "at": float(at)}
         self._dirty = True
+
+    def copy_version(self, device: str, key: str) -> tuple[int, str] | None:
+        """Identity/revision of this known copy; legacy/unknown metadata cannot settle."""
+        if self.ack_for(device, key) is None and self.dispatch_for(device, key) is None:
+            return None
+        row = (self.copy_versions.get(device) or {}).get(key)
+        return (int(row["revision"]), str(row["identity"])) if row else None
+
+    def _advance_copy_version(self, device: str, key: str) -> None:
+        import uuid
+
+        row = (self.copy_versions.get(device) or {}).get(key) or {}
+        # One accepted local state transition, not a new bearer generation. The
+        # nonce prevents ABA after lost metadata/counter reset; no wall clock is
+        # used for identity or ordering, even if two sends have identical bytes.
+        self.copy_versions.setdefault(device, {})[key] = {
+            "revision": int(row.get("revision") or 0) + 1,
+            "identity": uuid.uuid4().hex,
+        }
+
+    def ending_is_current(self, device: str, key: str, expected: tuple[int, str] | None) -> bool:
+        """The caller holds mutate's cross-process lock while testing/settling."""
+        return expected is not None and self.copy_version(device, key) == expected
 
     def _drop_dispatch(self, device: str, key: str) -> None:
         by_key = self.dispatched.get(device)
@@ -1328,6 +1391,11 @@ class SyncEngine:
                 "req": self._server._next_relay_req(),  # noqa: SLF001 — the relay's own counter
                 **item,
             }
+            expected = (
+                self._ending_snapshot(network_id, device_id, str(item.get("key") or ""))
+                if str(item.get("value_state") or "") == VALUE_STATE_ABSENT
+                else None
+            )
             try:
                 reply = link.request(frame, timeout=ANNOUNCE_TIMEOUT_S)
             except Exception:  # noqa: BLE001 — one member's link is that member's problem
@@ -1340,7 +1408,19 @@ class SyncEngine:
                 logger.debug("credentials sync: announce to %s answered %s", device_id, detail)
                 return
             if str(item.get("value_state") or "") == VALUE_STATE_ABSENT:
-                self._record_wipe_reply(network_id, device_id, item, detail)
+                self._record_wipe_reply(network_id, device_id, item, detail, expected=expected)
+
+    def _ending_snapshot(self, network_id: str, device: str, key: str) -> tuple[int, str] | None:
+        """Read the atomic local document BEFORE I/O; no extra lock wait on a dial.
+
+        Final compare-and-set runs under mutate's existing process lock. Any
+        intervening accepted dispatch or ACK changes the token, including an
+        equal-generation re-copy. A missing/unreadable snapshot confirms nothing.
+        """
+        try:
+            return SyncState.load(network_id, root=self._root).copy_version(device, key)
+        except Exception:  # noqa: BLE001 — do not claim an unprovable ending
+            return None
 
     def _record_wipe_reply(
         self,
@@ -1348,6 +1428,8 @@ class SyncEngine:
         device_id: str,
         item: Mapping[str, Any],
         detail: Mapping[str, Any],
+        *,
+        expected: tuple[int, str] | None,
     ) -> None:
         """Record a wipe the member CONFIRMED on the announce's own reply.
 
@@ -1368,6 +1450,10 @@ class SyncEngine:
             return
         try:
             with mutate(network_id, self._root) as state:
+                # The reply ends the instance that existed BEFORE this request,
+                # not a re-copy sent/applied while its answer was in flight.
+                if not state.ending_is_current(device_id, key, expected):
+                    return
                 # A dispatch row is a copy too: its wipe is confirmed the same way.
                 if (
                     state.ack_for(device_id, key) is not None
@@ -1484,11 +1570,10 @@ class SyncEngine:
     def _has_pending_wipes(self, document: Any, device_id: str) -> bool:
         """Cheap gate half: does this member's ledger owe an ENDING (§5.5c)?
 
-        Any non-``wiped`` ledger row answers yes, because this is only reached
-        when the owned-keys check found nothing to SERVE — every remaining row
-        is by definition a key that cannot be served to this member anymore,
-        and the precise per-key decision runs under the state lock in
-        ``_pending_wipes``. A state that cannot be read answers no: an
+        An open copy (acked or dispatched), not arbitrary ledger metadata, is
+        an ending candidate. This is reached when the owned-keys check found
+        nothing to SERVE; the precise per-key decision runs under the state lock
+        in ``_pending_wipes``. A state that cannot be read answers no: an
         unreadable document must not spin a dial per member per tick.
         """
         try:
@@ -1605,6 +1690,10 @@ class SyncEngine:
             # Clamping means the loop can never outrun REMOVAL_TOTAL_BUDGET_S,
             # so the envelope is probe + budget and the caller's wait covers it
             # by construction (pinned in test_wipe_notice.py).
+            expected = self._ending_snapshot(network_id, device_id, str(item.get("key") or ""))
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
             wait_s = min(REMOVAL_FRAME_TIMEOUT_S, remaining)
             try:
                 reply = link.request(frame, timeout=wait_s)
@@ -1642,7 +1731,7 @@ class SyncEngine:
                 )
                 continue
             if str(detail.get("action") or "") == "wiped":
-                self._record_wipe_reply(network_id, device_id, item, detail)
+                self._record_wipe_reply(network_id, device_id, item, detail, expected=expected)
                 confirmed += 1
         # THE LEDGER IS THE COUNT, not the replies: ``_record_wipe_reply`` swallows
         # a lost write, and the receipt must say what the ledger will show a reader.
