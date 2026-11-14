@@ -1,0 +1,23 @@
+{
+  "wire.operator_setup.prompt.confirm_phone": "Local Operator necesita tu aprobación para confirmar un teléfono en este ordenador.",
+  "wire.operator_setup.prompt.remove_phone": "Local Operator necesita tu aprobación para quitar un teléfono de este ordenador.",
+  "wire.operator_setup.prompt.phone_approvals": "Local Operator necesita tu aprobación para activar las aprobaciones desde el teléfono en este ordenador.",
+  "wire.operator_setup.title.confirm_phone": "Confirmar este teléfono en este ordenador",
+  "wire.operator_setup.title.remove_phone": "Quitar este teléfono de este ordenador",
+  "wire.operator_setup.title.phone_approvals": "Activar las aprobaciones desde el teléfono",
+  "wire.operator_setup.body.phone_approvals": "Permite que los teléfonos aprueben solicitudes en este ordenador.",
+  "wire.operator_setup.refused.privileged": "Local Operator se está ejecutando con permisos de administrador, así que no puede pedirte la aprobación en persona. No se ha cambiado nada. Reinicia Local Operator con tu cuenta habitual y vuelve a intentarlo.",
+  "wire.operator_setup.refused.no_password_prompt": "Este ordenador no puede mostrar una solicitud de contraseña, así que las aprobaciones no se pueden activar desde aquí.",
+  "wire.operator_setup.refused.cannot_install": "Este ordenador no tiene un lugar protegido para la clave de aprobación, así que las aprobaciones no se pueden activar desde aquí.",
+  "wire.operator_setup.refused.in_progress": "La activación de las aprobaciones desde el teléfono ya está en curso. Responde a la solicitud de contraseña o espera a que termine.",
+  "wire.operator_setup.refused.key_failed": "Este ordenador no pudo crear su clave de aprobación, así que las aprobaciones no se activaron. Vuelve a intentarlo.",
+  "wire.operator_setup.outcome.cancelled": "Cancelaste la solicitud de contraseña, así que las aprobaciones no se activaron. Vuelve a intentarlo cuando quieras.",
+  "wire.operator_setup.outcome.failed": "La solicitud de contraseña no terminó, así que las aprobaciones no se activaron. Vuelve a intentarlo.",
+  "wire.operator_setup.outcome.not_verified": "La clave de aprobación se instaló, pero este ordenador todavía no puede usarla, así que las aprobaciones no están activadas. Vuelve a intentarlo.",
+  "wire.operator_setup.outcome.on": "Las aprobaciones desde el teléfono están activadas. Cada teléfono nuevo seguirá pidiendo una vez la contraseña de tu ordenador.",
+  "wire.operator_setup.outcome.already_on": "Las aprobaciones desde el teléfono ya están activadas en este ordenador.",
+  "wire.operator_setup.outcome.file_only": "Aquí las aprobaciones no pedirán huella dactilar ni contraseña.",
+  "wire.operator_setup.tui.usage": "Usa /mobile approvals on para permitir que los teléfonos aprueben solicitudes en este ordenador.",
+  "wire.operator_setup.tui.starting": "Activando las aprobaciones desde el teléfono…",
+  "wire.operator_setup.tui.anchor_clause": "; pero las aprobaciones desde el teléfono aún no están activadas en este ordenador, así que ninguna de las dos opciones puede ejecutarse hasta que lo estén. Actívalas en Ajustes → Acceso desde el teléfono, o con /mobile approvals on en la app de terminal"
+}

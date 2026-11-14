@@ -41,6 +41,9 @@ class ElevationResult:
     cancelled: bool = False
     refusal: str = ""
     diagnosis: str = ""
+    #: A machine code for a refusal a caller must branch on without parsing the
+    #: sentence (today only :data:`REFUSAL_NO_PASSWORD_PROMPT`); ``""`` otherwise.
+    refusal_code: str = ""
 
 
 def _without_sudo(command: list[list[str]]) -> list[list[str]]:
@@ -164,13 +167,58 @@ def prompt_refusal(*, windows: bool | None = None) -> str | None:
 _OSASCRIPT_USER_CANCELED = "(-128)"
 
 
+#: The machine code a ``run_elevated(..., terminal_sudo=False)`` refusal carries in
+#: ``ElevationResult.refusal_code`` when Linux has no pkexec (design v2 §6 item 2).
+REFUSAL_NO_PASSWORD_PROMPT = "no_password_prompt"
+
+
+def no_password_prompt_refusal() -> str:
+    """The U18 sentence: this host can show no GUI password prompt (A2, U18)."""
+    from local_operator.i18n.keys import wire_operator_setup as _ws
+    from local_operator.i18n.text import tr
+
+    return tr("wire.operator_setup")(_ws.refused_no_password_prompt())
+
+
+def gui_prompt_refusal(*, windows: bool | None = None) -> str | None:
+    """Like :func:`prompt_refusal`, but a terminal ``sudo`` does not count.
+
+    FOR CALLERS WITH NO TERMINAL A PERSON IS LOOKING AT — the desktop server (design
+    v2 §6 item 2). ``prompt_refusal`` accepts a bare ``sudo`` because a TTY-owning
+    caller (the CLI, the TUI under ``App.suspend()``) gets a real in-person password
+    prompt from it. A server has no TTY, so ``sudo`` there either fails or — under
+    passwordless sudo — SUCCEEDS WITH NO HUMAN AT ALL, which would turn "an OS prompt
+    a person must answer" into "any bearer holder installs authority". So on Linux
+    only pkexec (a polkit dialog) counts here; macOS and Windows have their own GUI
+    prompts and answer exactly as :func:`prompt_refusal` does.
+    """
+    is_windows = trust._on_windows() if windows is None else windows
+    refusal = prompt_refusal(windows=is_windows)
+    if refusal is not None:
+        return refusal
+    if is_windows or sys.platform == "darwin":
+        return None
+    if shutil.which("pkexec") is None:
+        return no_password_prompt_refusal()
+    return None
+
+
 def run_elevated(
-    command: list[list[str]], *, windows: bool | None = None, purpose: str = PURPOSE_CONFIRM
+    command: list[list[str]],
+    *,
+    windows: bool | None = None,
+    purpose: str = PURPOSE_CONFIRM,
+    terminal_sudo: bool = True,
 ) -> ElevationResult:
     """Launch the platform's in-person admin gesture, without a shell wrapper.
 
     ``purpose`` picks one of the fixed prompt sentences (macOS shows it in the dialog);
     other platforms' launchers have no prompt text to set.
+
+    ``terminal_sudo=False`` REFUSES the headless ``sh -c sudo`` fallback instead of
+    running it, for callers with no terminal (the desktop server, design v2 §6
+    item 2). It is enforced HERE, where the launcher is chosen, not only by the
+    caller's precheck, so the pkexec answer that was checked is the one acted on.
     """
     is_windows = trust._on_windows() if windows is None else windows
     refusal = prompt_refusal(windows=is_windows)
@@ -179,6 +227,11 @@ def run_elevated(
         # instead of the bare exit code that used to say nothing at all (design
         # round 1, D2).
         return ElevationResult(2, refusal=refusal)
+    # Checked on EVERY platform, not only where macOS renders the sentence: an unknown
+    # purpose is a programming error, and a Linux/Windows host must not quietly accept a
+    # caller that the Mac would refuse.
+    if _purpose_prompt(purpose) is None:
+        raise ValueError(f"unknown elevation purpose: {purpose!r}")
     if is_windows:
         # install_commands' Windows command is ShellExecute runas via PowerShell;
         # running it here (unlike onboarding) raises UAC and waits for its result.
@@ -189,6 +242,10 @@ def run_elevated(
         from local_operator.operator import format_install_commands
 
         argv = ["pkexec", "sh", "-c", format_install_commands(_without_sudo(command))]
+    elif not terminal_sudo:
+        return ElevationResult(
+            2, refusal=no_password_prompt_refusal(), refusal_code=REFUSAL_NO_PASSWORD_PROMPT
+        )
     else:
         # Headless Linux has no polkit agent. sudo's terminal prompt is still an
         # in-person gesture; its password never passes through this process.
@@ -215,7 +272,9 @@ def run_elevated(
     return ElevationResult(result.returncode, cancelled, diagnosis=diagnosis)
 
 
-def confirm_card_copy(*, windows: bool | None = None) -> tuple[str, str, str]:
+def confirm_card_copy(
+    *, windows: bool | None = None, purpose: str = PURPOSE_CONFIRM
+) -> tuple[str, str, str]:
     """The confirming card's words: title, body, and the gesture it promises.
 
     ONE source for the fleet promise, because two copies of it drift exactly where a
@@ -229,14 +288,38 @@ def confirm_card_copy(*, windows: bool | None = None) -> tuple[str, str, str]:
 
     ``windows`` defaults to the host, matching :func:`run_elevated`, so a caller
     cannot promise the wrong platform's gesture by forgetting to pass it.
+
+    ``purpose`` is the SAME closed set the OS prompt uses (design v2 §2.4), so the
+    card a person reads and the dialog that follows name the same action. Confirm keeps
+    its card exactly as it was; turning on approvals (:data:`PURPOSE_SETUP`) gets the
+    setup offer's own title and sentence. The removal body is left to the revoke
+    surface that owns it (C2), so it returns only a title and the neutral ``""``.
+    The gesture sentence is the same for every purpose: it names the OS step, not
+    the action.
     """
     is_windows = trust._on_windows() if windows is None else windows
-    title = "Confirm this phone on this computer"
-    body = (
-        "Confirming lets this phone approve things on this computer. It will also be "
-        "trusted on any computer that joins this one later. Computers that joined "
-        "earlier keep their own list."
-    )
+    if purpose == PURPOSE_SETUP:
+        from local_operator.i18n.keys import wire_operator_setup as _ws
+        from local_operator.i18n.text import tr
+
+        _s = tr("wire.operator_setup")
+        title, body = _s(_ws.title_phone_approvals()), _s(_ws.body_phone_approvals())
+    elif purpose == PURPOSE_REMOVE:
+        from local_operator.i18n.keys import wire_operator_setup as _ws
+        from local_operator.i18n.text import tr
+
+        title, body = tr("wire.operator_setup")(_ws.title_remove_phone()), ""
+    elif purpose == PURPOSE_CONFIRM:
+        title = "Confirm this phone on this computer"
+        body = (
+            "Confirming lets this phone approve things on this computer. It will also be "
+            "trusted on any computer that joins this one later. Computers that joined "
+            "earlier keep their own list."
+        )
+    else:
+        # The silent fallback to the confirm card is exactly the mislabelled prompt the
+        # purpose set exists to prevent.
+        raise ValueError(f"unknown elevation purpose: {purpose!r}")
     # D13 (design v2 A2): name the Touch ID step and say whose password it is, so a person
     # who signed in with Radient does not type their Radient password into the OS prompt.
     from local_operator.i18n.keys import operator_pairing as copy
@@ -257,8 +340,11 @@ __all__ = [
     "PURPOSE_CONFIRM",
     "PURPOSE_REMOVE",
     "PURPOSE_SETUP",
+    "REFUSAL_NO_PASSWORD_PROMPT",
     "ElevationResult",
     "confirm_card_copy",
+    "gui_prompt_refusal",
+    "no_password_prompt_refusal",
     "prompt_refusal",
     "run_elevated",
     "windows_uac_refusal",

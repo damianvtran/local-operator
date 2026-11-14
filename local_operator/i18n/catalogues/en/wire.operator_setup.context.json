@@ -1,0 +1,107 @@
+{
+  "wire.operator_setup.prompt.confirm_phone": {
+    "role": "Operating-system administrator prompt reason (macOS shows it inside the system password dialog)",
+    "tone": "Plain, calm, trustworthy",
+    "note": "Shown by the OS itself next to the password field, so the person sees WHY their computer password is asked for. One sentence. 'Local Operator' is the product name: keep it. Must not mention Radient: this is the computer's own password."
+  },
+  "wire.operator_setup.prompt.remove_phone": {
+    "role": "Operating-system administrator prompt reason (macOS shows it inside the system password dialog)",
+    "tone": "Plain, calm, trustworthy",
+    "note": "Shown by the OS itself next to the password field, so the person sees WHY their computer password is asked for. One sentence. 'Local Operator' is the product name: keep it. Must not mention Radient: this is the computer's own password."
+  },
+  "wire.operator_setup.prompt.phone_approvals": {
+    "role": "Operating-system administrator prompt reason (macOS shows it inside the system password dialog)",
+    "tone": "Plain, calm, trustworthy",
+    "note": "Shown by the OS itself next to the password field, so the person sees WHY their computer password is asked for. One sentence. 'Local Operator' is the product name: keep it. Must not mention Radient: this is the computer's own password."
+  },
+  "wire.operator_setup.title.confirm_phone": {
+    "role": "Card / dialog title for an action that needs the computer's administrator approval",
+    "tone": "Short, plain",
+    "note": "Title case is not required; sentence case. No trailing period."
+  },
+  "wire.operator_setup.title.remove_phone": {
+    "role": "Card / dialog title for an action that needs the computer's administrator approval",
+    "tone": "Short, plain",
+    "note": "Title case is not required; sentence case. No trailing period."
+  },
+  "wire.operator_setup.title.phone_approvals": {
+    "role": "Card / dialog title for an action that needs the computer's administrator approval",
+    "tone": "Short, plain",
+    "note": "Title case is not required; sentence case. No trailing period."
+  },
+  "wire.operator_setup.body.phone_approvals": {
+    "role": "Settings → Phone access block subtitle offering to turn on phone approvals",
+    "tone": "Inviting, plain",
+    "note": "Sits under the 'Turn on phone approvals' button. 'approve requests' = say yes to things the agent asks permission for."
+  },
+  "wire.operator_setup.refused.privileged": {
+    "role": "Desktop and terminal-app refusal for turning on phone approvals",
+    "tone": "Cautious, actionable, non-technical",
+    "note": "Classify by stable code/status, not text. Nothing was changed when this shows. Never mention 'anchor', 'sudo' or 'pkexec'."
+  },
+  "wire.operator_setup.refused.no_password_prompt": {
+    "role": "Desktop and terminal-app refusal for turning on phone approvals",
+    "tone": "Cautious, actionable, non-technical",
+    "note": "Classify by stable code/status, not text. Nothing was changed when this shows. Never mention 'anchor', 'sudo' or 'pkexec'."
+  },
+  "wire.operator_setup.refused.cannot_install": {
+    "role": "Desktop and terminal-app refusal for turning on phone approvals",
+    "tone": "Cautious, actionable, non-technical",
+    "note": "Classify by stable code/status, not text. Nothing was changed when this shows. Never mention 'anchor', 'sudo' or 'pkexec'."
+  },
+  "wire.operator_setup.refused.in_progress": {
+    "role": "Desktop and terminal-app refusal for turning on phone approvals",
+    "tone": "Cautious, actionable, non-technical",
+    "note": "Classify by stable code/status, not text. Nothing was changed when this shows. Never mention 'anchor', 'sudo' or 'pkexec'."
+  },
+  "wire.operator_setup.refused.key_failed": {
+    "role": "Desktop and terminal-app refusal for turning on phone approvals",
+    "tone": "Cautious, actionable, non-technical",
+    "note": "Classify by stable code/status, not text. Nothing was changed when this shows. Never mention 'anchor', 'sudo' or 'pkexec'."
+  },
+  "wire.operator_setup.outcome.cancelled": {
+    "role": "Result sentence after the computer's password prompt for turning on phone approvals",
+    "tone": "Plain, reassuring, honest",
+    "note": "'password prompt' = the operating system's own administrator dialog, not the Radient account password. The desktop shows its own 'Finish setup' button next to a failure, so the sentence itself names no button."
+  },
+  "wire.operator_setup.outcome.failed": {
+    "role": "Result sentence after the computer's password prompt for turning on phone approvals",
+    "tone": "Plain, reassuring, honest",
+    "note": "'password prompt' = the operating system's own administrator dialog, not the Radient account password. The desktop shows its own 'Finish setup' button next to a failure, so the sentence itself names no button."
+  },
+  "wire.operator_setup.outcome.not_verified": {
+    "role": "Result sentence after the computer's password prompt for turning on phone approvals",
+    "tone": "Plain, reassuring, honest",
+    "note": "'password prompt' = the operating system's own administrator dialog, not the Radient account password. The desktop shows its own 'Finish setup' button next to a failure, so the sentence itself names no button."
+  },
+  "wire.operator_setup.outcome.on": {
+    "role": "Result sentence after the computer's password prompt for turning on phone approvals",
+    "tone": "Plain, reassuring, honest",
+    "note": "'password prompt' = the operating system's own administrator dialog, not the Radient account password. The desktop shows its own 'Finish setup' button next to a failure, so the sentence itself names no button."
+  },
+  "wire.operator_setup.outcome.already_on": {
+    "role": "Result sentence after the computer's password prompt for turning on phone approvals",
+    "tone": "Plain, reassuring, honest",
+    "note": "'password prompt' = the operating system's own administrator dialog, not the Radient account password. The desktop shows its own 'Finish setup' button next to a failure, so the sentence itself names no button."
+  },
+  "wire.operator_setup.outcome.file_only": {
+    "role": "Result sentence after the computer's password prompt for turning on phone approvals",
+    "tone": "Plain, reassuring, honest",
+    "note": "'password prompt' = the operating system's own administrator dialog, not the Radient account password. The desktop shows its own 'Finish setup' button next to a failure, so the sentence itself names no button."
+  },
+  "wire.operator_setup.tui.usage": {
+    "role": "Terminal app usage line for the /mobile approvals command",
+    "tone": "Plain",
+    "note": "'/mobile approvals on' is a typed command: keep it exactly, untranslated."
+  },
+  "wire.operator_setup.tui.starting": {
+    "role": "Terminal app progress line shown just before the computer's password prompt",
+    "tone": "Plain",
+    "note": "Ends with an ellipsis character."
+  },
+  "wire.operator_setup.tui.anchor_clause": {
+    "role": "Clause appended to an approval-mode remedy sentence when phone approvals are not set up on this computer",
+    "tone": "Plain, actionable",
+    "note": "Starts with '; but' because it continues a previous sentence about two ways to change the approval mode ('neither' refers to those two). Keep 'Settings → Phone access' as the app's menu path and '/mobile approvals on' exactly as typed. No trailing period: the caller ends the sentence."
+  }
+}

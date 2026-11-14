@@ -1,0 +1,23 @@
+{
+  "wire.operator_setup.prompt.confirm_phone": "इस कंप्यूटर पर एक फ़ोन की पुष्टि करने के लिए Local Operator को आपकी स्वीकृति चाहिए।",
+  "wire.operator_setup.prompt.remove_phone": "इस कंप्यूटर से एक फ़ोन हटाने के लिए Local Operator को आपकी स्वीकृति चाहिए।",
+  "wire.operator_setup.prompt.phone_approvals": "इस कंप्यूटर पर फ़ोन से स्वीकृतियाँ चालू करने के लिए Local Operator को आपकी स्वीकृति चाहिए।",
+  "wire.operator_setup.title.confirm_phone": "इस कंप्यूटर पर इस फ़ोन की पुष्टि करें",
+  "wire.operator_setup.title.remove_phone": "इस फ़ोन को इस कंप्यूटर से हटाएँ",
+  "wire.operator_setup.title.phone_approvals": "फ़ोन से स्वीकृतियाँ चालू करें",
+  "wire.operator_setup.body.phone_approvals": "फ़ोन को इस कंप्यूटर पर अनुरोध स्वीकृत करने दें।",
+  "wire.operator_setup.refused.privileged": "Local Operator व्यवस्थापक अधिकारों के साथ चल रहा है, इसलिए यह आपसे स्वयं स्वीकृति नहीं माँग सकता। कुछ भी नहीं बदला गया। Local Operator को अपने सामान्य खाते से फिर शुरू करें, फिर दोबारा कोशिश करें।",
+  "wire.operator_setup.refused.no_password_prompt": "यह कंप्यूटर पासवर्ड प्रॉम्प्ट नहीं दिखा सकता, इसलिए यहाँ से स्वीकृतियाँ चालू नहीं की जा सकतीं।",
+  "wire.operator_setup.refused.cannot_install": "इस कंप्यूटर में स्वीकृति कुंजी के लिए कोई सुरक्षित जगह नहीं है, इसलिए यहाँ से स्वीकृतियाँ चालू नहीं की जा सकतीं।",
+  "wire.operator_setup.refused.in_progress": "फ़ोन से स्वीकृतियाँ चालू करने की प्रक्रिया पहले से चल रही है। पासवर्ड प्रॉम्प्ट का जवाब दें, या उसके पूरा होने की प्रतीक्षा करें।",
+  "wire.operator_setup.refused.key_failed": "यह कंप्यूटर अपनी स्वीकृति कुंजी नहीं बना सका, इसलिए स्वीकृतियाँ चालू नहीं हुईं। दोबारा कोशिश करें।",
+  "wire.operator_setup.outcome.cancelled": "आपने पासवर्ड प्रॉम्प्ट रद्द कर दिया, इसलिए स्वीकृतियाँ चालू नहीं हुईं। तैयार होने पर दोबारा कोशिश करें।",
+  "wire.operator_setup.outcome.failed": "पासवर्ड प्रॉम्प्ट पूरा नहीं हुआ, इसलिए स्वीकृतियाँ चालू नहीं हुईं। दोबारा कोशिश करें।",
+  "wire.operator_setup.outcome.not_verified": "स्वीकृति कुंजी इंस्टॉल हो गई, लेकिन यह कंप्यूटर अभी उसका उपयोग नहीं कर सकता, इसलिए स्वीकृतियाँ चालू नहीं हैं। दोबारा कोशिश करें।",
+  "wire.operator_setup.outcome.on": "फ़ोन से स्वीकृतियाँ चालू हैं। हर नया फ़ोन फिर भी एक बार आपके कंप्यूटर का पासवर्ड माँगेगा।",
+  "wire.operator_setup.outcome.already_on": "इस कंप्यूटर पर फ़ोन से स्वीकृतियाँ पहले से चालू हैं।",
+  "wire.operator_setup.outcome.file_only": "यहाँ स्वीकृतियाँ फ़िंगरप्रिंट या पासवर्ड नहीं माँगेंगी।",
+  "wire.operator_setup.tui.usage": "फ़ोन को इस कंप्यूटर पर अनुरोध स्वीकृत करने देने के लिए /mobile approvals on का उपयोग करें।",
+  "wire.operator_setup.tui.starting": "फ़ोन से स्वीकृतियाँ चालू की जा रही हैं…",
+  "wire.operator_setup.tui.anchor_clause": "; लेकिन इस कंप्यूटर पर फ़ोन से स्वीकृतियाँ अभी चालू नहीं हैं, इसलिए जब तक वे चालू न हों, दोनों में से कोई भी नहीं चल सकता। उन्हें सेटिंग्स → फ़ोन एक्सेस में चालू करें, या टर्मिनल ऐप में /mobile approvals on से"
+}

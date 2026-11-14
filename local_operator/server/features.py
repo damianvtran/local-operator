@@ -47,6 +47,7 @@ DESKTOP_ONLY_FEATURES = frozenset(
         # client must not be told it can read the portal password it signs in
         # with (routes/desktop_mobile_password.py).
         "mobile_password_read",
+        "operator_setup",
     }
 )
 
@@ -903,6 +904,13 @@ def static_feature_flags() -> dict[str, Any]:
         # click only, never cached or prefetched (see the route's module doc
         # for why the desktop bearer may read this secret at all).
         "mobile_password_read": 1,
+        # Turning on phone approvals (operator authority) without a terminal
+        # (design v2 §6, C3): `GET/POST /v1/desktop/operator/setup`. Its own
+        # key so a renderer shows [Turn on phone approvals] only against a
+        # backend that has the gesture-only route; an older backend keeps the
+        # renderer's existing copy. Desktop-only (DESKTOP_ONLY_FEATURES): the
+        # phone relay serves no such route.
+        "operator_setup": 1,
         # THE MESH, and both keys gate AFFORDANCES rather than shapes.
         #
         # `peers` is the peer catalogue's key (mesh-session-mobility.md
