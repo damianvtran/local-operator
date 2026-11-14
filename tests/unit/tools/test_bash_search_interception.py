@@ -281,6 +281,40 @@ def test_heredoc_body_is_not_a_command() -> None:
     assert C("cat <<'EOF'\nrg -n p\nEOF") is None
 
 
+def test_heredoc_delimiter_is_the_whole_word() -> None:
+    """PR #3962 R1: the delimiter is bash's WHOLE word after quote removal.
+
+    Reading only its first identifier (``<<E"O"F`` as ``E``) ran the body past
+    bash's delimiter line and hid the search after it as "data"; reading the
+    whole word ends the body where bash does, so the search is seen. A body
+    line equal to the whole word still ends the body (data stays data).
+    """
+    assert C('cat <<E"O"F\nx\nEOF\ngrep -rn p .\nE') is not None
+    assert C("cat <<'EOF'.x\nx\nEOF.x\ngrep -rn p .\nEOF") is not None
+    assert C("cat <<EOF-x\ngrep -rn p .\nEOF-x") is None
+
+
+def test_unreadable_heredoc_delimiter_fails_closed() -> None:
+    """A delimiter word with expansion syntax or a backslash is not guessed
+    at: no body is skipped, so the lines after it stay commands. (An unclosed
+    quote in the word opens a quote frame, so it is one open segment, as
+    before; the delete guard ranks that open line HIGH.)"""
+    assert C("cat <<E$X\ngrep -rn p .\nE$X") is not None
+    assert C("cat <<E\\OF\ngrep -rn p .\nEOF") is not None
+
+
+def test_extglob_delimiter_and_legacy_arithmetic_fail_closed() -> None:
+    """PR #3962 round 2 R3/M1: ``<<E@(x)`` is one word under extglob, and
+    ``$[1<<E]`` is a shift, not an opener. Neither may skip the grep as a
+    heredoc body (main intercepted every one of these)."""
+    for op in "?*+@!":
+        assert (
+            C(f"shopt -s extglob\ncat <<E{op}(x)\nhi\nE{op}(x)\ngrep -rn p .\nE{op}\n") is not None
+        )
+    assert C("echo $[1<<E]\ngrep -rn p .\nE]\n") is not None
+    assert C("echo $[1<<E]\ngrep -rn p .\nE\n") is not None
+
+
 def test_single_file_under_a_heavy_dir_is_not_a_walk() -> None:
     """M1 regression: a named FILE is read, never walked, regardless of the
     directory it lives under — and this fleet reads worktrees by path."""
