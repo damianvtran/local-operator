@@ -8,6 +8,7 @@ answering it) plus the anchor-root seam, as in the module's own tests.
 from __future__ import annotations
 
 import asyncio
+import json
 import shutil
 import sys
 from pathlib import Path
@@ -53,13 +54,19 @@ async def desktop(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Any:
     monkeypatch.setattr(trust, "_open_no_follow", as_root)
     monkeypatch.setattr(sys, "platform", "linux")
     monkeypatch.setattr(trust, "_on_windows", lambda: False)
+    # pkexec comes from fixed paths, never PATH (R1-5): a shim through the
+    # test-launcher-only seam stands in for the host's pkexec. Never executed:
+    # `run_elevated` itself is replaced below.
+    pkexec = tmp_path / "bin" / "pkexec"
+    pkexec.parent.mkdir()
+    pkexec.write_text("#!/bin/sh\nexit 99\n")
+    pkexec.chmod(0o755)
+    monkeypatch.setattr(elevate, "_PKEXEC_CANDIDATES_OVERRIDE", (str(pkexec),))
     real_which = shutil.which
     monkeypatch.setattr(
         shutil,
         "which",
-        lambda name, *a, **k: (
-            f"/usr/bin/{name}" if name in ("pkexec", "sudo") else real_which(name)
-        ),
+        lambda name, *a, **k: "/usr/bin/sudo" if name == "sudo" else real_which(name),
     )
     prompts: list[dict[str, Any]] = []
 
@@ -98,7 +105,7 @@ async def test_off_then_on_with_one_gesture_prompt(desktop: Any) -> None:
     # §6 item 5 / U18: a file-only key is reported, with the plain sentence.
     if result["file_only"]:
         assert result["file_only_notice"]["text"] == (
-            "Approvals here won't ask for a fingerprint or password."
+            "Note: on this computer itself, approvals won't ask for a fingerprint or password."
         )
     after = (await desktop.client.get(PATH)).json()["result"]
     assert after["state"] == "on" and after["last_attempt"]["outcome"] == "on"
@@ -135,6 +142,7 @@ async def test_privileged_server_is_refused(desktop: Any, monkeypatch: pytest.Mo
 async def test_linux_server_without_pkexec_is_refused(
     desktop: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    monkeypatch.setattr(elevate, "_PKEXEC_CANDIDATES_OVERRIDE", ())
     monkeypatch.setattr(
         shutil, "which", lambda name, *a, **k: "/usr/bin/sudo" if name == "sudo" else None
     )
@@ -186,6 +194,32 @@ async def test_second_click_while_prompt_open_is_409(
     release.set()
     assert second.status_code == 409 and second.json()["detail"]["code"] == "in_progress"
     assert (await first).json()["result"]["outcome"] == "cancelled"
+    # QA Q1: the refused second click is an attempt too, with its own audit row.
+    rows = [
+        json.loads(line)
+        for line in (desktop.root / "operator" / "authority-setup-audit.jsonl")
+        .read_text()
+        .splitlines()
+    ]
+    refused = [r for r in rows if r["code"] == "in_progress"]
+    assert len(refused) == 1 and refused[0]["actor"] == "desktop"
+    assert refused[0]["attempt"] not in {r["attempt"] for r in rows if r is not refused[0]}
+
+
+@pytest.mark.asyncio
+async def test_a_body_less_post_is_the_same_as_an_empty_object(desktop: Any) -> None:
+    """QA Q2: the click carries nothing, so no body at all is accepted as ``{}``;
+    whatever IS sent is still validated against the closed model."""
+    response = await desktop.client.post(PATH)
+
+    assert response.status_code == 200, response.text
+    assert response.json()["result"]["outcome"] == "on"
+    for body in (b"[]", b"not-json", b'{"sudo_secret": "x"}'):
+        refused = await desktop.client.post(
+            PATH, content=body, headers={"Content-Type": "application/json"}
+        )
+        assert refused.status_code == 422, (body, refused.text)
+    assert len(desktop.prompts) == 1
 
 
 def test_capability_flag_is_published_desktop_only() -> None:

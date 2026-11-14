@@ -31907,10 +31907,10 @@ class OperatorApp(App[None]):
         return remedy
 
     @staticmethod
-    def _uninstalled_anchor_clause() -> str:
-        """The missing-anchor remedy, or ``""`` when this host has an anchor.
+    def _uninstalled_anchor_report(live: str, saved: str) -> str | None:
+        """The whole report line for a host with no usable anchor, else ``None``.
 
-        The mirror of ``ServingSessionHandle._uninstalled_anchor_clause``, in the
+        The mirror of ``ServingSessionHandle._uninstalled_anchor_report``, in the
         same words, for the reason the two reports are written to match: one
         reader must not meet two rules. It replaces the deleted "retire and reopen
         the session here" clause with the state that made that clause look
@@ -31920,16 +31920,23 @@ class OperatorApp(App[None]):
         from local_operator.operator import operator_authority_unusable
 
         if not operator_authority_unusable():
-            return ""
+            return None
         # U17 (design v2 A2): the remedy names where a person turns approvals on —
         # Settings → Phone access in the desktop app, `/mobile approvals on` in the
         # terminal app — instead of "ask Local Operator to set up operator
         # authority", which sent a non-technical user to a terminal-only verb.
-        # Keyed, and ONE key for both mirrors so they cannot drift apart.
+        #
+        # THE WHOLE LINE IS ONE KEY (design round 1 on #3950, D2/D3). It used to be
+        # a keyed clause appended to the English report, so every other locale got
+        # a sentence that switched language halfway. Only this state's line is
+        # keyed; its only caller reaches it with the session asking (`live` is
+        # "ask"), which is why the effect words are part of the message. ONE key for
+        # both mirrors so they cannot drift apart.
         from local_operator.i18n.keys import wire_operator_setup as _ws
         from local_operator.i18n.text import tr
 
-        return tr("wire.operator_setup")(_ws.tui_anchor_clause())
+        report = _ws.tui_approvals_report_not_set_up(live=live, saved=saved)
+        return tr("wire.operator_setup")(report)
 
     def _configured_approvals_mode(self) -> str | None:
         """``tool_approval_mode`` as the WATCHER last read it, or ``None``.
@@ -55452,25 +55459,48 @@ class OperatorApp(App[None]):
         password in this terminal. To let it, the prompt runs on the UI thread
         under ``App.suspend()``, which hands the real terminal to sudo/pkexec and
         takes it back after; macOS and Windows show their own GUI prompt and need
-        no suspend. A host where no prompt can appear (no launcher, an
-        unsuspendable driver) gets U18's sentence instead of a promise.
+        no suspend. A host where no prompt can appear (no launcher) gets U18's
+        sentence; an unsuspendable driver gets its own sentence naming THIS
+        TERMINAL APP as the cause (QA Q4), decided in setup_authority's precheck via
+        ``can_prompt`` so it leaves no consent row, key or staging (QA Q3).
+
+        NOTICE SHAPE (design round 1, D1/D5/D8): nothing is printed until the
+        prechecks pass — the progress line comes from ``runner``, which only runs
+        once they have — so "already on" and refusals go straight to their outcome.
+        Every outcome is ONE single-line notice, so all outcomes land in the same
+        rhythm; anything that did not turn approvals on is ``warning`` kind, and the
+        file-only caveat is its own ``warning`` notice rather than a second line
+        under the success sentence that it seemed to contradict.
         """
         from local_operator.i18n.keys import wire_operator_setup as ws
         from local_operator.i18n.text import tr
+        from local_operator.operator import trust as trust_module
 
         text = tr("wire.operator_setup")
         if [w.casefold() for w in words] != ["on"]:
             notice(text(ws.tui_usage()))
             return
         if getattr(self, "_operator_setup_busy", False):
-            notice(text(ws.refused_in_progress()))
+            # An in-pane second attempt is still an attempt: audited (QA Q1).
+            from local_operator.operator.authority_setup import record_in_progress_refusal
+            from local_operator.paths import config_dir
+
+            record_in_progress_refusal(config_dir(), "tui")
+            notice(text(ws.refused_in_progress()), "warning")
             return
         self._operator_setup_busy = True
-        notice(text(ws.tui_starting()))
+        gui = sys.platform == "darwin" or trust_module._on_windows()
+
+        def can_prompt() -> bool:
+            # macOS/Windows show their own GUI prompt; elsewhere sudo needs the
+            # real terminal, which only a driver that can suspend can hand over.
+            driver = self._driver
+            return gui or (driver is not None and bool(driver.can_suspend))
 
         def runner(command: list[list[str]]) -> Any:
-            # Called only after setup_authority's prechecks passed, so the gesture
-            # sentence is printed only where a prompt really follows (D8).
+            # Called only after setup_authority's prechecks passed, so the progress
+            # line and the gesture sentence are printed only where a prompt really
+            # follows (design round 1, D5; D8 of the earlier round).
             from local_operator.operator import trust
             from local_operator.operator.elevate import (
                 PURPOSE_PHONE_APPROVALS,
@@ -55494,7 +55524,9 @@ class OperatorApp(App[None]):
                 # Asked BEFORE the promise below: a driver that cannot hand over
                 # the terminal (a web/headless driver) would otherwise print
                 # "will ask for your password" one line above U18's refusal (D8).
+                # `can_prompt` already refused this; kept as the last guard.
                 return refused()
+            self.call_from_thread(self._system_notice, text(ws.tui_starting()))
             gesture = confirm_card_copy(purpose=PURPOSE_PHONE_APPROVALS)[2]
             self.call_from_thread(self._system_notice, gesture)
 
@@ -55526,7 +55558,7 @@ class OperatorApp(App[None]):
             )
             from local_operator.paths import config_dir
 
-            lines: list[str] = []
+            notices: list[tuple[str, NoticeKind]] = []
             try:
                 result = await asyncio.to_thread(
                     setup_authority,
@@ -55534,18 +55566,24 @@ class OperatorApp(App[None]):
                     actor="tui",
                     terminal_sudo=True,
                     runner=runner,
+                    can_prompt=can_prompt,
                 )
-                lines.append(text(outcome_message(str(result["outcome"]))))
-                if result.get("ok") and result.get("file_only"):
-                    # §6 item 5 / U18: said plainly, not hidden.
-                    lines.append(text(file_only_message()))
+                ok = bool(result.get("ok"))
+                notices.append(
+                    (text(outcome_message(str(result["outcome"]))), "info" if ok else "warning")
+                )
+                if ok and result.get("file_only"):
+                    # §6 item 5 / U18: said plainly, not hidden — and as its own
+                    # caveat, so it does not read as contradicting the line above.
+                    notices.append((text(file_only_message()), "warning"))
             except SetupInProgress:
-                lines.append(text(outcome_message(OUTCOME_IN_PROGRESS)))
+                notices.append((text(outcome_message(OUTCOME_IN_PROGRESS)), "warning"))
             except Exception:  # noqa: BLE001 — a notice, never a traceback in the pane
-                lines.append(text(outcome_message(OUTCOME_FAILED)))
+                notices.append((text(outcome_message(OUTCOME_FAILED)), "warning"))
             finally:
                 self._operator_setup_busy = False
-            self._system_notice("\n".join(lines))
+            for body, kind in notices:
+                self._system_notice(body, kind)
 
         self.run_worker(run(), group="operator-setup")
 
@@ -60221,7 +60259,11 @@ class OperatorApp(App[None]):
                 # UX round 6 U4): the clause here was "or let this session's runtime
                 # retire and reopen the session here", which is the deleted remedy
                 # on the surface a reader consults BEFORE being refused.
-                remedy += self._uninstalled_anchor_clause()
+                keyed = (
+                    None if self._approve_all else self._uninstalled_anchor_report(live, saved)
+                )
+                if keyed is not None:
+                    return SlashResult(kind="notice", text=keyed, style="info")
             return SlashResult(
                 kind="notice",
                 text=f"tool approvals: {live} (this session) — {effect}; "

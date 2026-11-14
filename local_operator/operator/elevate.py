@@ -8,6 +8,7 @@ phone. Real UAC, polkit and SecurityAgent behaviour requires attended host QA.
 
 from __future__ import annotations
 
+import os
 import shlex
 import shutil
 import subprocess
@@ -168,9 +169,39 @@ def prompt_refusal(*, windows: bool | None = None) -> str | None:
         return windows_uac_refusal()
     if sys.platform == "darwin":
         return None
-    if shutil.which("pkexec") is not None or shutil.which("sudo") is not None:
+    if pkexec_path() is not None or shutil.which("sudo") is not None:
         return None
     return NO_LAUNCHER_REFUSAL
+
+
+#: Where pkexec is trusted to live (agent review R1-5). It is resolved from these
+#: FIXED system paths, never from ``PATH``: ``PATH`` usually starts with a
+#: user-writable directory (``~/.local/bin``), so a same-user process could plant a
+#: ``pkexec`` there that passes the "a GUI prompt can appear" gate and then runs
+#: ``sudo -n`` with no human on a passwordless host. A pkexec that exists only in a
+#: user directory therefore counts as no pkexec at all.
+_TRUSTED_PKEXEC_PATHS: tuple[str, ...] = ("/usr/bin/pkexec", "/bin/pkexec")
+
+#: TEST-LAUNCHER-ONLY SEAM, the same shape as ``trust._ANCHOR_ROOT_OVERRIDE``:
+#: assigned nowhere under ``local_operator/`` and reachable from no env var, config
+#: key or request — only a test (``tests/conftest.py`` pins it to a path that does
+#: not exist, so no unit test can reach a real pkexec) or an in-process QA/visual
+#: launcher sets it, to a shim it owns. ``None`` means the trusted paths above.
+#: Since R1-5 a ``PATH`` shim no longer shadows pkexec; this is the replacement.
+_PKEXEC_CANDIDATES_OVERRIDE: tuple[str, ...] | None = None
+
+
+def pkexec_path() -> str | None:
+    """The absolute pkexec to launch, from the trusted set only, or ``None``."""
+    candidates = (
+        _TRUSTED_PKEXEC_PATHS
+        if _PKEXEC_CANDIDATES_OVERRIDE is None
+        else _PKEXEC_CANDIDATES_OVERRIDE
+    )
+    for candidate in candidates:
+        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            return candidate
+    return None
 
 
 #: osascript's error number for "User canceled." on an administrator-privileges
@@ -211,7 +242,7 @@ def gui_prompt_refusal(*, windows: bool | None = None) -> str | None:
         return refusal
     if is_windows or sys.platform == "darwin":
         return None
-    if shutil.which("pkexec") is None:
+    if pkexec_path() is None:
         return no_password_prompt_refusal()
     return None
 
@@ -242,16 +273,20 @@ def run_elevated(
         return ElevationResult(2, refusal=refusal)
     if purpose not in PURPOSES:
         raise ValueError(f"unknown elevation purpose: {purpose!r}")
+    # A flag rather than ``argv[0] == "pkexec"``: argv[0] is now an absolute path.
+    via_pkexec = False
     if is_windows:
         # install_commands' Windows command is ShellExecute runas via PowerShell;
         # running it here (unlike onboarding) raises UAC and waits for its result.
         argv = command[0]
     elif sys.platform == "darwin":
         argv = _macos_prompt(command, purpose)
-    elif shutil.which("pkexec") is not None:
+    elif (pkexec := pkexec_path()) is not None:
         from local_operator.operator import format_install_commands
 
-        argv = ["pkexec", "sh", "-c", format_install_commands(_without_sudo(command))]
+        # The ABSOLUTE trusted path, so the binary checked is the binary run (R1-5).
+        argv = [pkexec, "sh", "-c", format_install_commands(_without_sudo(command))]
+        via_pkexec = True
     elif not terminal_sudo:
         return ElevationResult(
             2, refusal=no_password_prompt_refusal(), refusal_code=REFUSAL_NO_PASSWORD_PROMPT
@@ -271,7 +306,7 @@ def run_elevated(
         return ElevationResult(1)
     cancelled = (
         (darwin and result.returncode == 1 and _OSASCRIPT_USER_CANCELED in (result.stderr or ""))
-        or (argv[0] == "pkexec" and result.returncode in (126, 127))
+        or (via_pkexec and result.returncode in (126, 127))
         or (argv[0] == "sh" and result.returncode in (1, 130, -2))
         or (is_windows and result.returncode in (1223, -1073740771))
     )
@@ -340,6 +375,7 @@ __all__ = [
     "confirm_card_copy",
     "gui_prompt_refusal",
     "no_password_prompt_refusal",
+    "pkexec_path",
     "prompt_refusal",
     "run_elevated",
     "windows_uac_refusal",

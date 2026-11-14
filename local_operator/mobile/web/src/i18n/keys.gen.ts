@@ -873,6 +873,7 @@ export type MessageParams = {
   "wire.operator_setup.body.phone_approvals": undefined;
   "wire.operator_setup.outcome.already_on": undefined;
   "wire.operator_setup.outcome.cancelled": undefined;
+  "wire.operator_setup.outcome.changed_elsewhere": undefined;
   "wire.operator_setup.outcome.failed": undefined;
   "wire.operator_setup.outcome.file_only": undefined;
   "wire.operator_setup.outcome.not_verified": undefined;
@@ -885,10 +886,12 @@ export type MessageParams = {
   "wire.operator_setup.refused.key_failed": undefined;
   "wire.operator_setup.refused.no_password_prompt": undefined;
   "wire.operator_setup.refused.privileged": undefined;
+  "wire.operator_setup.refused.terminal_cannot_prompt": undefined;
+  "wire.operator_setup.refused.unsafe_staging": undefined;
   "wire.operator_setup.title.confirm_phone": undefined;
   "wire.operator_setup.title.phone_approvals": undefined;
   "wire.operator_setup.title.remove_phone": undefined;
-  "wire.operator_setup.tui.anchor_clause": undefined;
+  "wire.operator_setup.tui.approvals_report_not_set_up": { "live": string; "saved": string };
   "wire.operator_setup.tui.starting": undefined;
   "wire.operator_setup.tui.usage": undefined;
   "wire.outcome_notices.closed": undefined;

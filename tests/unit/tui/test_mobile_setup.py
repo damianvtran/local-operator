@@ -141,7 +141,11 @@ async def test_mobile_enable_progress_and_busy_guard(monkeypatch):
 async def test_mobile_approvals_on_runs_the_shared_gesture_setup(monkeypatch):
     """`/mobile approvals on` (design v2 §6): the SAME setup_authority as the desktop,
     with actor `tui` and terminal sudo allowed (the TUI owns a TTY), and the N5
-    success sentence; anything else after `approvals` prints the usage line."""
+    success sentence; anything else after `approvals` prints the usage line.
+
+    Notice shape (design round 1 on #3950): the progress line comes only from the
+    runner, i.e. after the prechecks (D5); the outcome is one `info` notice and the
+    file-only caveat its OWN `warning` notice (D1/D8)."""
     import asyncio
 
     from local_operator.operator import authority_setup, elevate
@@ -162,17 +166,18 @@ async def test_mobile_approvals_on_runs_the_shared_gesture_setup(monkeypatch):
     )
     monkeypatch.setattr("sys.platform", "darwin")  # a GUI prompt: no suspend needed
     app = OperatorApp(lambda: _factory(FakeSession()))
-    notices: list[str] = []
+    notices: list[tuple[str, str]] = []
 
     def notice(body: str, kind: NoticeKind = "info") -> None:
-        notices.append(body)
+        notices.append((body, kind))
 
     async with app.run_test(size=(100, 30)) as pilot:
         await pilot.pause()
         monkeypatch.setattr(app, "_system_notice", notice)
         app._cmd_mobile("approvals", notice)
         assert notices[-1] == (
-            "Use /mobile approvals on to let phones approve requests on this computer."
+            "To let phones approve requests on this computer, type /mobile approvals on",
+            "info",
         )
         app._cmd_mobile("approvals on", notice)
         for _ in range(50):
@@ -181,36 +186,74 @@ async def test_mobile_approvals_on_runs_the_shared_gesture_setup(monkeypatch):
                 break
         await asyncio.sleep(0)
     assert seen["actor"] == "tui" and seen["terminal_sudo"] is True
+    assert callable(seen["can_prompt"]) and seen["can_prompt"]() is True  # GUI prompt
     assert elevated == [{"purpose": "phone_approvals", "terminal_sudo": True}]
-    joined = "\n".join(notices)
-    assert "Turning on phone approvals…" in joined
-    assert "Each new phone will still ask for your computer's password once." in joined
-    assert "Approvals here won't ask for a fingerprint or password." in joined
+    assert notices[1][0] == "Turning on phone approvals…"
+    assert notices[-2] == (
+        "Phone approvals are on. Each new phone will still ask for your computer's password once.",
+        "info",
+    )
+    assert notices[-1] == (
+        "Note: on this computer itself, approvals won't ask for a fingerprint or password.",
+        "warning",
+    )
 
 
 @pytest.mark.asyncio
-async def test_mobile_approvals_on_linux_without_a_suspendable_terminal_refuses(monkeypatch):
-    """On Linux the prompt needs the real terminal (sudo/pkexec text agent), so it
-    runs under App.suspend(); a driver that cannot suspend gets U18's sentence and
-    no prompt is launched."""
-    from local_operator.operator import authority_setup, elevate
+async def test_mobile_approvals_already_on_prints_no_progress_line(monkeypatch):
+    """D5: a run that never reaches a prompt goes straight to its outcome."""
+    from local_operator.operator import authority_setup
 
-    seen: dict[str, object] = {}
+    monkeypatch.setattr(
+        authority_setup,
+        "setup_authority",
+        lambda root, **k: {"ok": True, "outcome": "already_on", "file_only": False},
+    )
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    notices: list[tuple[str, str]] = []
 
-    def fake_setup(root, **kwargs):
-        seen["result"] = kwargs["runner"]([["sudo", "true"]])
-        return {"ok": False, "outcome": "no_password_prompt"}
+    def notice(body: str, kind: NoticeKind = "info") -> None:
+        notices.append((body, kind))
 
-    monkeypatch.setattr(authority_setup, "setup_authority", fake_setup)
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        monkeypatch.setattr(app, "_system_notice", notice)
+        app._cmd_mobile("approvals on", notice)
+        for _ in range(50):
+            await pilot.pause(0.05)
+            if notices and not app._operator_setup_busy:
+                break
+    assert notices == [("Phone approvals are already on for this computer.", "info")]
+
+
+@pytest.mark.asyncio
+async def test_mobile_approvals_on_linux_without_a_suspendable_terminal_refuses(
+    monkeypatch, tmp_path
+):
+    """On Linux the prompt needs the real terminal (sudo), so it runs under
+    App.suspend(); a driver that cannot suspend is refused in setup_authority's
+    PRECHECK (QA Q3) — no consent row, no key, nothing staged — with a sentence
+    naming this terminal app as the cause (QA Q4), as a warning (D8), and with no
+    progress line before it (D5). The REAL setup_authority runs here."""
+    import json
+
+    from local_operator.operator import elevate, handlers, trust
+
+    config = tmp_path / "config"
+    config.mkdir()
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(config))
+    monkeypatch.setattr(trust, "_ANCHOR_ROOT_OVERRIDE", tmp_path / "anchors")
+    monkeypatch.setattr(handlers, "_is_privileged", lambda: False)
+    monkeypatch.setattr(elevate.shutil, "which", lambda name, *a, **k: "/usr/bin/sudo")
     launched: list[object] = []
     monkeypatch.setattr(elevate, "run_elevated", lambda *a, **k: launched.append(a))
     monkeypatch.setattr("sys.platform", "linux")
-    monkeypatch.setattr("local_operator.operator.trust._on_windows", lambda: False)
+    monkeypatch.setattr(trust, "_on_windows", lambda: False)
     app = OperatorApp(lambda: _factory(FakeSession()))
-    notices: list[str] = []
+    notices: list[tuple[str, str]] = []
 
     def notice(body: str, kind: NoticeKind = "info") -> None:
-        notices.append(body)
+        notices.append((body, kind))
 
     async with app.run_test(size=(100, 30)) as pilot:
         await pilot.pause()
@@ -219,10 +262,57 @@ async def test_mobile_approvals_on_linux_without_a_suspendable_terminal_refuses(
         app._cmd_mobile("approvals on", notice)
         for _ in range(50):
             await pilot.pause(0.05)
-            if seen and not app._operator_setup_busy:
+            if notices and not app._operator_setup_busy:
                 break
+        # QA Q1: a second attempt refused by the pane's own busy guard is audited.
+        app._operator_setup_busy = True
+        app._cmd_mobile("approvals on", notice)
+        app._operator_setup_busy = False
     assert launched == []
-    assert getattr(seen["result"], "refusal_code") == elevate.REFUSAL_NO_PASSWORD_PROMPT
-    assert notices[-1] == (
-        "This computer can't show a password prompt, so approvals can't be turned on from here."
+    assert notices[0] == (
+        "This terminal app can't show a password prompt, so approvals can't be turned on "
+        "from it. Use Settings → Phone access in the desktop app instead.",
+        "warning",
     )
+    assert notices[1][1] == "warning" and "already running" in notices[1][0]
+    rows = [
+        json.loads(line)
+        for line in (config / "operator" / "authority-setup-audit.jsonl").read_text().splitlines()
+    ]
+    assert [(r["step"], r["ok"], r["code"]) for r in rows] == [
+        ("proposed", True, "phone_approvals"),
+        ("consent", False, "terminal_cannot_prompt"),
+        ("proposed", False, "in_progress"),
+    ]
+    assert not trust.staging_path(config).exists()
+    assert handlers._existing_key(config, "auto") is None, "no key was created"
+
+
+def test_approvals_report_without_approvals_set_up_is_one_keyed_sentence(monkeypatch):
+    """D2/D3 (design round 1 on #3950): the report line for a host with no usable
+    anchor is ONE keyed message, so a non-English locale never gets a sentence that
+    switches language halfway, and the TUI and runtime mirrors cannot drift."""
+    from local_operator.i18n import text
+    from local_operator.session.runtime.serving import ServingSessionHandle
+
+    monkeypatch.setattr("local_operator.operator.operator_authority_unusable", lambda: True)
+    tui = OperatorApp._uninstalled_anchor_report("ask", "auto")
+    assert tui == ServingSessionHandle._uninstalled_anchor_report("ask", "auto")
+    assert tui is not None and tui.startswith("tool approvals: ask (this session)")
+    # D2: "phone approvals" names the switch; the blocker is approvals not set up.
+    assert "approvals aren't set up on this computer yet" in tui
+    assert "Settings → Phone access" in tui and "/mobile approvals on" in tui
+
+    # The catalogue, not shipped eligibility, is under test: `es` is made selectable
+    # so the line renders even while its audit receipt is pending.
+    from local_operator.i18n import resolve
+
+    monkeypatch.setattr(resolve, "shipped_locales", lambda: ("en", "es"))
+    text.set_active_locale("es")
+    es = OperatorApp._uninstalled_anchor_report("ask", "auto")
+    assert es is not None and es.startswith("aprobaciones de herramientas: ask")
+    for english in ("tool approvals", "this session", "config.yml says", "but approvals"):
+        assert english not in es
+
+    monkeypatch.setattr("local_operator.operator.operator_authority_unusable", lambda: False)
+    assert OperatorApp._uninstalled_anchor_report("ask", "auto") is None

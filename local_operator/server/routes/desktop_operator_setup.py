@@ -38,6 +38,10 @@ class OperatorSetupRequest(BaseModel):
     ``extra="forbid"`` is the point. A client (or an agent holding the bearer) that
     sends ``sudo_secret``, a password, a route or a purpose gets a 422 — this path
     takes no input that could replace the person answering the OS prompt.
+
+    The body is OPTIONAL (QA Q2): a body-less ``POST`` is the same request as
+    ``{}``, since the click carries nothing. Anything that is sent is still
+    validated against this closed model, so a non-object or an extra field is a 422.
     """
 
     model_config = ConfigDict(extra="forbid", strict=True)
@@ -76,11 +80,14 @@ async def operator_setup_state(request: Request) -> CRUDResponse[Any]:
 
 
 @router.post("/v1/desktop/operator/setup", response_model=CRUDResponse[Any])
-async def operator_setup_run(body: OperatorSetupRequest, request: Request) -> CRUDResponse[Any]:
+async def operator_setup_run(
+    request: Request, body: OperatorSetupRequest | None = None
+) -> CRUDResponse[Any]:
     from local_operator.operator.authority_setup import (
         OUTCOME_IN_PROGRESS,
         REFUSALS,
         SetupInProgress,
+        record_in_progress_refusal,
         setup_authority,
     )
     from local_operator.paths import config_dir
@@ -90,6 +97,9 @@ async def operator_setup_run(body: OperatorSetupRequest, request: Request) -> CR
     # the module's own lock is the cross-process half (a TUI attempt).
     active = getattr(request.app.state, "operator_setup_task", None)
     if active is not None and not active.done():
+        # Refused before `setup_authority` runs, so it audits here (QA Q1); a
+        # cross-process refusal is audited inside `setup_authority` instead.
+        await asyncio.to_thread(record_in_progress_refusal, config_dir(), "desktop")
         raise HTTPException(409, _envelope(OUTCOME_IN_PROGRESS))
 
     async def execute() -> dict[str, Any]:

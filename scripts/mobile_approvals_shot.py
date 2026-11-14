@@ -7,17 +7,24 @@ so the real slash dispatch, ``_cmd_mobile`` and ``setup_authority`` run:
     01-usage          `/mobile approvals` with no `on`: the usage line
     02-no-terminal    `/mobile approvals on` where the TUI cannot hand the terminal
                       to a password prompt (the headless test driver cannot suspend):
-                      the U18 sentence, and nothing staged or installed
-    03-on             the person answered the prompt: the N5 success sentence plus
-                      the file-only notice (U18) this host's key level earns
-    04-already-on     run again: idempotent, no second prompt
+                      this terminal app's refusal, nothing staged or installed, and
+                      no progress line before it
+    03-cancelled      the person cancelled the prompt: progress, gesture, then the
+                      cancelled outcome as a warning
+    04-on             the person answered the prompt: the N5 success sentence, then
+                      the file-only caveat (U18) as its own warning notice
+    05-already-on     run again: idempotent, no second prompt, no progress line
+    06-on-80col       a fresh host at 80 columns: how the success pair wraps
 
 ISOLATION. ``probe_isolation`` re-homes HOME/config before any import. The anchor
 root is the in-process test seam pointed at a temp dir (this script must never touch
 a real /etc or /Library anchor), and root ownership is faked exactly as the unit
-tests do. For frame 03 the OS prompt is stood in for by a runner-level stub that
-lands the staged bytes; the real elevation path is covered by the desktop route's
-real-path evidence.
+tests do. ``elevate.run_elevated`` is replaced BEFORE the first frame by a scripted
+gesture (cancel, then approve: land the staged bytes), so no frame can launch a real
+prompt; pkexec is pinned through the test-launcher-only seam
+(``elevate._PKEXEC_CANDIDATES_OVERRIDE``) to a logging shim, because since R1-5 a
+``PATH`` shim no longer shadows the fixed system path. The real elevation path is
+covered by the desktop route's real-path evidence.
 
     LOP_REPO=<tree> env -u NO_COLOR TERM=xterm-256color \\
         .venv/bin/python scripts/mobile_approvals_shot.py OUTDIR
@@ -75,6 +82,29 @@ async def main() -> None:
     out = Path(sys.argv[1] if len(sys.argv) > 1 else "mobile-approvals-shots").resolve()
     out.mkdir(parents=True, exist_ok=True)
     _isolate_anchor()
+    # No real pkexec, ever: the seam names a shim that only logs (R1-5).
+    shim_log = out / "launcher-shim.log"
+    shim = out / "pkexec-shim"
+    shim.write_text(f'#!/bin/sh\necho "pkexec $*" >> {shim_log}\nexit 1\n')
+    shim.chmod(0o755)
+    elevate._PKEXEC_CANDIDATES_OVERRIDE = (str(shim),)
+    gestures: list[str] = []
+
+    def gesture(command: list[list[str]], **_: Any) -> elevate.ElevationResult:
+        """The person at the prompt, scripted: cancel once, then approve."""
+        if not gestures:
+            gestures.append("cancelled")
+            return elevate.ElevationResult(1, cancelled=True)
+        gestures.append("approved")
+        trust.anchor_path().write_bytes(trust.staging_path(CONFIG_DIR).read_bytes())
+        return elevate.ElevationResult(0)
+
+    elevate.run_elevated = gesture  # type: ignore[assignment]
+
+    @contextmanager
+    def no_suspend() -> Iterator[None]:
+        yield
+
     app = OperatorApp(lambda: _factory(FakeSession()))
     async with app.run_test(size=(110, 26)) as pilot:
         await pilot.pause(0.5)
@@ -85,28 +115,34 @@ async def main() -> None:
         save_capture(app, out / "02-no-terminal.svg")
         assert not trust.staging_path(CONFIG_DIR).exists()
         assert not trust.anchor_path().exists()
+        assert gestures == []
 
-        # The person answers the prompt: suspend becomes a no-op and the gesture
-        # lands the staged bytes (what the privileged install script does).
-        @contextmanager
-        def no_suspend() -> Iterator[None]:
-            yield
-
+        # From here the driver can hand over the terminal, as a real one does, and
+        # suspend is a no-op around the scripted gesture.
         app.suspend = no_suspend  # type: ignore[method-assign]
-        # ...and the driver reports it can hand over the terminal, as a real one does.
         type(app._driver).can_suspend = property(lambda self: True)  # type: ignore[assignment]
-
-        def approve(command: list[list[str]], **_: Any) -> elevate.ElevationResult:
-            trust.anchor_path().write_bytes(trust.staging_path(CONFIG_DIR).read_bytes())
-            return elevate.ElevationResult(0)
-
-        elevate.run_elevated = approve  # type: ignore[assignment]
         await _type(pilot, app, "/mobile approvals on")
-        save_capture(app, out / "03-on.svg")
+        save_capture(app, out / "03-cancelled.svg")
+        assert gestures == ["cancelled"] and not trust.anchor_path().exists()
+
+        await _type(pilot, app, "/mobile approvals on")
+        save_capture(app, out / "04-on.svg")
         assert trust.load_anchor().usable
 
         await _type(pilot, app, "/mobile approvals on")
-        save_capture(app, out / "04-already-on.svg")
+        save_capture(app, out / "05-already-on.svg")
+        assert gestures == ["cancelled", "approved"]
+
+    # A fresh host for the narrow frame: the temp anchor this script wrote goes.
+    trust.anchor_path().unlink()
+    narrow = OperatorApp(lambda: _factory(FakeSession()))
+    async with narrow.run_test(size=(80, 26)) as pilot:
+        narrow.suspend = no_suspend  # type: ignore[method-assign]
+        await pilot.pause(0.5)
+        await _type(pilot, narrow, "/mobile approvals on")
+        save_capture(narrow, out / "06-on-80col.svg")
+        assert trust.load_anchor().usable
+    assert not shim_log.exists(), "nothing reached a launcher"
     print(out)
 
 
