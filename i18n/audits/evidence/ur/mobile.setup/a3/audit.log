@@ -1,0 +1,14 @@
+# mech.py output (scratch ~/.local-operator/sessions/9054cd229d3f/scratchpad/i18n-audit-3958/mech.py), run at ~/local-operator/.worktrees/tunnel-remedy-no-commands @ 01113e5aa
+== ur
+  stopped_plain: en_cells=118 cells=101 maxCells=None flags=none
+  owner_missing_plain: en_cells=139 cells=141 maxCells=None flags=none
+  login_plain: en_cells=75 cells=75 maxCells=None flags=none
+  choose_account_plain: en_cells=119 cells=129 maxCells=None flags=none
+  account_plain: en_cells=123 cells=129 maxCells=None flags=none
+  cloudflared_plain: en_cells=172 cells=174 maxCells=None flags=none
+  mobile_bundle_plain: en_cells=158 cells=158 maxCells=None flags=none
+  supervisor_plain: en_cells=160 cells=169 maxCells=None flags=none
+  apply_plain: en_cells=52 cells=51 maxCells=None flags=none
+  verification_plain: en_cells=89 cells=92 maxCells=None flags=none
+  failed_plain: en_cells=73 cells=83 maxCells=None flags=none
+  complete_plain: en_cells=79 cells=78 maxCells=None flags=none
