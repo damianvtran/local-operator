@@ -444,6 +444,9 @@ def test_every_advertised_op_capability_has_a_registered_handler(rig):
         # and answers that field; it adds no op and no new kind, which is why the
         # receiver it names is the broker itself, exactly as the two push strings do.
         wire.CREDENTIAL_PLACEMENT_DIGEST_V1: "net_broker",
+        # The renew nudge is a ``renew`` KIND on the broker op (``renew_push``),
+        # routed to its receiver even on a borrower-only device with no broker.
+        wire.CREDENTIAL_RENEW_PUSH_V1: "net_broker",
         # Catalogue is a metadata kind on the installed broker, not a pure
         # handshake feature or a second unregistered peer operation.
         wire.CREDENTIAL_CATALOGUE_METADATA_V1: "net_broker",

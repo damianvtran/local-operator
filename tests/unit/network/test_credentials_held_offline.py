@@ -427,6 +427,8 @@ async def test_the_served_session_band_stays_ok_while_held_and_blocks_at_lease_e
 
     pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="fixture-held-band")
     monkeypatch.setattr(serving, "_switch_executor_pool", pool)
+    # This session's own hold is what the band is pinned against; the owner's
+    # link-up renewal stays off here by the directory's ``_no_renew_nudge`` pin.
     from tests.unit.network.test_owner_return_clears_access_band import _band, _settle
     from tests.unit.session.runtime.test_serving import _AccessSession
 
