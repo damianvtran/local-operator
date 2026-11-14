@@ -201,12 +201,19 @@ def _unprobeable_monitors(root: Path, session_id: str) -> list[str]:
 
     Mirrors ``monitors.parked.probe_session``'s own row filters (disabled and
     expired rows are never checked) so a skip names only monitors that would
-    actually reopen the session.
+    actually reopen the session. The tool decision is ``parked.probeable`` —
+    the SAME predicate the probe applies — so pressure park and the probe
+    cannot disagree about a row (a disagreement is reopen/re-park churn).
+
+    MCP rows need the server's credential shape (passphrase-tier ``${REF}`` or
+    a brokered grant is session-only), which is per cwd; it is computed only
+    when the session actually holds an MCP row, so a bash-only session pays no
+    MCP config load.
     """
     import time
 
     from local_operator.monitors import store as monitor_store
-    from local_operator.monitors.parked import HEADLESS_TOOLS
+    from local_operator.monitors.parked import probeable, session_only_servers
 
     try:
         entry = monitor_store.read_entry(root, session_id)
@@ -215,15 +222,33 @@ def _unprobeable_monitors(root: Path, session_id: str) -> list[str]:
     if not isinstance(entry, dict):
         return []
     now_ms = int(time.time() * 1000)
-    names: list[str] = []
+    rows: list[dict[str, Any]] = []
     for row in entry.get("monitors") or ():
         if not isinstance(row, dict) or row.get("disabled"):
             continue
         until = row.get("until_at")
         if isinstance(until, int) and not isinstance(until, bool) and now_ms >= until:
             continue
+        rows.append(row)
+    if not rows:
+        return []
+    try:
+        from local_operator.secrets.keys import key_mode
+
+        tier = key_mode(root)
+    except Exception:  # noqa: BLE001 — unknown tier: assume the strict one
+        tier = "passphrase"
+    session_only: set[str] | None = None
+    if any(str(row.get("tool") or "").startswith("mcp__") for row in rows):
+        cwd = entry.get("cwd")
+        try:
+            session_only = session_only_servers(root, cwd if isinstance(cwd, str) else "", tier)
+        except Exception:  # noqa: BLE001 — unreadable configs: probeable() falls back on tier
+            session_only = None
+    names: list[str] = []
+    for row in rows:
         tool = str(row.get("tool") or "")
-        if tool and tool not in HEADLESS_TOOLS:
+        if tool and not probeable(row, tier, session_only_servers=session_only):
             names.append(f"{row.get('id') or '?'}:{tool}")
     return names
 

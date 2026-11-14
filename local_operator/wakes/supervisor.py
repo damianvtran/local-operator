@@ -1101,6 +1101,16 @@ async def _has_live_runtime(config_dir: Path, session_id: str) -> bool:
 #: reopen, never a missed tick.
 PARKED_PROBE_TIMEOUT_S = 180.0
 
+#: What the probe holds back from that ceiling for its interpreter start and
+#: tool-layer import before the first check (``monitors.parked``'s
+#: ``--budget-s`` = ceiling − this): the probe stops starting work at its
+#: budget and exits on its own terms, closing its MCP transports, rather than
+#: being SIGKILLed mid-connect. The value is the design's (§1 "Bounds") and
+#: sits far above the measured start cost: interpreter start + import of the
+#: probe, tool, registry, MCP-manager and session modules, n=10 on the dev Mac
+#: (2026-11-12, warm disk), median 1.06 s, max 4.59 s (one cold-cache run).
+PARKED_PROBE_START_MARGIN_S = 15.0
+
 
 def _is_parked_monitor_entry(entry: Any) -> bool:
     """A monitor entry stamped ``parked_at`` by a park (and not held)."""
@@ -1125,7 +1135,47 @@ async def _reap_probe(proc: Any) -> None:
         pass
 
 
-async def _parked_monitors_quiet(config_dir: Path, session_id: str) -> bool:
+def _parked_probe_env(config_dir: Path) -> dict[str, str]:
+    """The probe child's environment: the supervisor's, re-rooted and de-owned.
+
+    ``CONFIG_DIR_ENV`` = the store being probed: the probe's monitor settings,
+    spill store, ``auth.db``, secret base and fetch caches all resolve from the
+    AMBIENT config dir, and the in-session hash was produced under the session's
+    root; a mismatch here breaks byte-for-byte hash parity (design §3).
+
+    ``OWNER_ENV``/``SUPERVISOR_PID_ENV`` are stripped: they mark runtimes THIS
+    supervisor forked as its own (``owned_runtimes``), and a probe — or a stdio
+    MCP server it spawns — is not a runtime and must never be swept or stamped
+    as one.
+    """
+    from local_operator.paths import CONFIG_DIR_ENV
+    from local_operator.wakes.owned_runtimes import OWNER_ENV, SUPERVISOR_PID_ENV
+
+    env = {
+        key: value
+        for key, value in os.environ.items()
+        if key not in (OWNER_ENV, SUPERVISOR_PID_ENV)
+    }
+    env[CONFIG_DIR_ENV] = str(config_dir)
+    return env
+
+
+def _sweep_probe_group(pid: int) -> None:
+    """SIGKILL whatever is left in an EXITED probe's process group.
+
+    The probe closes its stdio MCP servers itself before printing a verdict;
+    this is the backstop for one it could not (a server ignoring stdin EOF).
+    The group is the probe's own (``start_new_session=True``) and the manager
+    keeps stdio children in it (``detach_stdio=False``), so the group is
+    exactly the probe's tree. ``ESRCH`` (nothing left) is the normal answer.
+    """
+    try:
+        os.killpg(pid, signal.SIGKILL)
+    except OSError:
+        pass
+
+
+async def _parked_monitors_quiet(config_dir: Path, session_id: str, cwd: str = "") -> bool:
     """Run a parked session's due monitor checks WITHOUT reopening it.
 
     True only when the probe ran every due check and each was unchanged (it
@@ -1154,10 +1204,15 @@ async def _parked_monitors_quiet(config_dir: Path, session_id: str) -> bool:
             session_id,
             "--config-dir",
             str(config_dir),
+            "--cwd",
+            cwd,
+            "--budget-s",
+            str(PARKED_PROBE_TIMEOUT_S - PARKED_PROBE_START_MARGIN_S),
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
             start_new_session=True,
+            env=_parked_probe_env(config_dir),
         )
     except OSError as exc:
         logger.warning("parked monitors %s: probe could not start (%s); engaging", session_id, exc)
@@ -1176,6 +1231,7 @@ async def _parked_monitors_quiet(config_dir: Path, session_id: str) -> bool:
         # cancellation propagate.
         await _reap_probe(proc)
         raise
+    _sweep_probe_group(proc.pid)
     verdict: dict[str, Any] = {}
     for line in reversed((out or b"").decode("utf-8", "replace").splitlines()):
         try:
@@ -1184,12 +1240,24 @@ async def _parked_monitors_quiet(config_dir: Path, session_id: str) -> bool:
         except ValueError:
             continue
     quiet = verdict.get("verdict") == "quiet"
+    raw_rss = verdict.get("maxrss_kib")
+    maxrss: dict[str, Any] = raw_rss if isinstance(raw_rss, dict) else {}
+    # maxrss is LOGGED, not capped. Measured on the isolated evidence rig
+    # (2026-11-12, stub stdio/HTTP MCP servers, web_fetch, code_requests, glob):
+    # probe self n=31, median 106 MiB, max 139 MiB; reaped stdio children max
+    # 67 MiB. No cap is set because (a) macOS refuses to lower RLIMIT_AS/
+    # RLIMIT_RSS below an interpreter's current limits ("current limit exceeds
+    # maximum limit"), so a cap would need a watcher, and (b) the distribution
+    # that matters — real servers such as Slack's — cannot be measured in
+    # isolation. A cap, if one is wanted, is derived from these log lines.
     logger.info(
-        "parked monitors %s: %s (%s, %s checked)",
+        "parked monitors %s: %s (%s, %s checked, maxrss self=%s KiB children=%s KiB)",
         session_id,
         "quiet — left parked" if quiet else "engaging",
-        verdict.get("why", "no verdict"),
+        verdict.get("why", f"no verdict, probe exit {proc.returncode}"),
         verdict.get("checked", 0),
+        maxrss.get("self", "?"),
+        maxrss.get("children", "?"),
     )
     return quiet
 
@@ -2252,7 +2320,7 @@ class _Sweeper:
                     # Inside the try so the in-flight key is popped by the
                     # ``finally`` below on every path, quiet or not.
                     async with self._semaphore:
-                        quiet = await _parked_monitors_quiet(config_dir, session_id)
+                        quiet = await _parked_monitors_quiet(config_dir, session_id, cwd)
                     if quiet:
                         # The checks ran and advanced; nothing to engage. Clears
                         # any backoff the same way a hosted session does.
