@@ -30,6 +30,7 @@ from local_operator.network import approval_ops
 from local_operator.network import approvals as approval_store
 from local_operator.network.credentials import desktop_approval, inheritance
 from local_operator.network.types import MeshRefusal
+from local_operator.operator import pair_op
 
 
 def approval_rows(root: Path | None = None) -> list[dict[str, Any]]:
@@ -57,6 +58,12 @@ def approval_rows(root: Path | None = None) -> list[dict[str, Any]]:
         if typed is not None:
             row["typed_approval"] = typed
             row.setdefault("can_approve_here", False)
+        # PHONE PAIRING (``features.phone_pairing``, design v2 §2): the card's mode, the
+        # sanitised name, the six digits in confirm mode only, live progress and the
+        # gesture line. Keyless and additive, like the blocks above.
+        pairing = pair_op.row_pairing(record, root)
+        if pairing is not None:
+            row["pairing"] = pairing
         rows.append(row)
     # NO cancel-latch reset here: the desktop polls this list every 15 s, so clearing it
     # on a list read made the latch last one poll (review #3002 round 1, R2). Only the

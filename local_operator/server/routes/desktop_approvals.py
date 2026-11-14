@@ -73,7 +73,12 @@ def _http_refusal(error: MeshRefusal) -> Exception:
     operator (or their next action) can act on all of them.
     """
     status = 404 if error.code in {"unknown_approval", "approval_missing"} else 409
-    if error.code in {"ssh_port_conflict", "invalid_ssh_port", "unexpected_run_body"}:
+    if error.code in {
+        "ssh_port_conflict",
+        "invalid_ssh_port",
+        "unexpected_run_body",
+        "bad_device_id",
+    }:
         status = 422
     body = _wd.desktop_refusal(error=str(error)).envelope(code=error.code)
     outcome = getattr(error, "apply_outcome", None)

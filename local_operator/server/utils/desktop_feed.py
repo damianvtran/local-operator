@@ -730,6 +730,10 @@ class DesktopFeed:
         self._approvals_token: tuple[Any, ...] | None = None
         self._approvals_pending: bool | None = None
         self._approvals_expiry = 0.0
+        # The live ``pair_phone`` approval id the ticker last PUBLISHED, and the one the
+        # last snapshot read (subscriber snapshots must not commit the published edge).
+        self._approvals_pair_request: str | None = None
+        self._approvals_pair_request_seen: str | None = None
         self._approvals_probed_at = float("-inf")
         #: When the inbox read last warned, so a corrupt store reports once a
         #: minute instead of once per 100 ms tick.
@@ -1268,10 +1272,12 @@ class DesktopFeed:
                 self._approvals_pending,
                 self._approvals_expiry,
             ) = self._approval_snapshot()
+            self._approvals_pair_request = self._approvals_pair_request_seen
         except Exception:  # noqa: BLE001 — an optional store remains unknown
             self._approvals_token = None
             self._approvals_pending = None
             self._approvals_expiry = 0.0
+            self._approvals_pair_request = None
         candidates = [*records, *self._wake_index, *self._monitor_index, *names]
         states = self.store.state_many([f"session/{session_id}" for session_id in candidates])
         for identity, state in states.items():
@@ -2441,35 +2447,26 @@ class DesktopFeed:
         )
 
     def _approval_snapshot(self) -> tuple[tuple[Any, ...], bool, float]:
-        """The existing store's requested predicate, without presentation data."""
-        from local_operator.network.approvals import approvals_dir, list_records
+        """The existing store's requested predicate, without presentation data.
 
-        directories = [approvals_dir(self.root), approvals_dir(self.root, enrollment_only=True)]
-        token: list[Any] = []
-        for directory in directories:
-            try:
-                stat = directory.stat()
-                token.append((stat.st_ino, stat.st_mtime_ns))
-            except FileNotFoundError:
-                token.append(None)
-        fingerprint = tuple(token)
-        now = time.time()
-        if (
-            fingerprint == self._approvals_token
-            and self._approvals_pending is not None
-            and (self._approvals_expiry == 0 or now < self._approvals_expiry)
-        ):
-            return fingerprint, self._approvals_pending, self._approvals_expiry
-        # list_records folds expiry and reads no secret/peer; use its own state,
-        # never infer a pending request from a rail row or notification delivery.
-        records = list_records(root=self.root, now=now)
-        requested = [record for record in records if record.get("state") == "requested"]
-        expirations = [
-            float(record["expires_at"])
-            for record in requested
-            if isinstance(record.get("expires_at"), (int, float)) and record["expires_at"] > now
-        ]
-        return fingerprint, bool(requested), min(expirations, default=0.0)
+        The body lives in ``network.approvals.approval_snapshot`` (pairing design v2
+        §2.3) so the TUI's dock shares ONE fingerprint and ONE "which pairing is live"
+        answer with this feed. The live ``pair_phone`` id rides the same read and is
+        kept beside the 3-tuple this method has always returned.
+        """
+        from local_operator.network.approvals import approval_snapshot
+
+        cached = None
+        if self._approvals_pending is not None:
+            cached = (
+                self._approvals_token,
+                self._approvals_pending,
+                self._approvals_expiry,
+                self._approvals_pair_request,
+            )
+        token, pending, expiry, pair_request = approval_snapshot(self.root, cached=cached)
+        self._approvals_pair_request_seen = pair_request
+        return token, pending, expiry
 
     async def _maybe_emit_approvals(self) -> None:
         # Optional authority reads and failures share the existing 1 s probe
@@ -2482,11 +2479,16 @@ class DesktopFeed:
             token, pending, expiry = await asyncio.to_thread(self._approval_snapshot)
         except Exception:  # noqa: BLE001 — optional authority failure is unknown, not empty
             return
-        if pending != self._approvals_pending:
-            self._publish("approvals", {"pending": pending})
+        pair_request = self._approvals_pair_request_seen
+        # ``pair_request`` (design v2 §2.3): the one live phone pairing's approval id, so a
+        # renderer can raise the pairing card on ANY route within one probe tick. Same
+        # frame, same 1 s probe, no new poller; an old UI ignores the extra key.
+        if pending != self._approvals_pending or pair_request != self._approvals_pair_request:
+            self._publish("approvals", {"pending": pending, "pair_request": pair_request})
         self._approvals_token = token
         self._approvals_pending = pending
         self._approvals_expiry = expiry
+        self._approvals_pair_request = pair_request
 
     def _notifications_state_or_none(self) -> tuple[int, int, int, int] | None:
         """The inbox counts, or ``None`` when the store cannot be read (CD1).

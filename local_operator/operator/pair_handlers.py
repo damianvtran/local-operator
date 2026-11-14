@@ -502,10 +502,18 @@ def describe_devices(args: argparse.Namespace) -> int:
                 file=sys.stderr,
             )
             return 1
-        devices.record_revocation(root, revoke)
-        code = install_anchor(root, print_only=bool(getattr(args, "print_only", False)))
-        if code != 0:
-            return code
+        if bool(getattr(args, "print_only", False)):
+            # ``--print-only`` prints the privileged commands for the operator to run;
+            # nothing is elevated here, so the unified removal below does not apply.
+            devices.record_revocation(root, revoke)
+            code = install_anchor(root, print_only=True)
+            if code != 0:
+                return code
+        else:
+            outcome = _unified_revoke(root, revoke)
+            if outcome != 0:
+                return outcome
+
         # WHAT THIS NOW SAYS, and why it changed with R6-1. The old sentence left the
         # operator with the impression that the install step alone was the whole
         # story, and it was: `AnchorCache` pinned the anchor and its revocation list
@@ -772,6 +780,24 @@ def describe_devices(args: argparse.Namespace) -> int:
             f"  {row.get('device_id')}  {row.get('name') or '(unnamed)':<20} "
             "PENDING — run `lop pair --yes` to approve"
         )
+    return 0
+
+
+def _unified_revoke(root: Path, revoke: str) -> int:
+    # THE SAME REMOVAL THE DESKTOP RUNS (pairing design v2 §2.4): relay record, then
+    # every linked push row, then the anchor through the OS prompt with the
+    # "remove a phone" purpose. A cancelled prompt leaves the phone ``removing``;
+    # running this again finishes it.
+    from local_operator.operator import devices_revoke
+
+    outcome = devices_revoke.revoke(root, revoke)
+    if outcome["detail"]:
+        print(outcome["detail"], file=sys.stderr)
+    if outcome["state"] != devices_revoke.STATE_REVOKED:
+        from local_operator.operator.pair_op import _copy
+
+        print(_copy("revoke_unfinished"), file=sys.stderr)
+        return 1
     return 0
 
 

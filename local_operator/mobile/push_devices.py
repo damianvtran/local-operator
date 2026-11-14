@@ -311,6 +311,12 @@ _OPTIONAL_RECORD_FIELDS = frozenset(
         "last_authenticated_at",
         "expired_at",
         "unpaired_at",
+        # Pairing design v2 §2.4 (push link): the OPERATOR device id this push row
+        # belongs to, set only when the register request proved it with that
+        # device's operator-signed certificate. Removing the paired phone then
+        # tombstones this row too, instead of leaving a phone that can no longer
+        # approve still receiving approval notifications.
+        "operator_device_id",
         "revoked_at",
         "sound_cached",
     }
@@ -324,7 +330,18 @@ _STORE_FIELDS = frozenset({"devices", OPERATOR_KEY_FIELD})
 
 #: The register body's canonical keys; an unknown key refuses (below).
 _REGISTER_FIELDS = frozenset(
-    {"platform", "token", "environment", "app_version", "install_id", "name"}
+    {
+        "platform",
+        "token",
+        "environment",
+        "app_version",
+        "install_id",
+        "name",
+        # The optional push link (design v2 §2.4): both or neither. The certificate is
+        # what proves the id; an id alone is never accepted.
+        "operator_device_id",
+        "operator_cert",
+    }
 )
 
 
@@ -623,6 +640,8 @@ def register(
             record["environment"] = fields["environment"]
             record["app_version"] = fields["app_version"]
             record["last_seen_at"] = stamp
+        if fields.get("operator_device_id"):
+            record["operator_device_id"] = fields["operator_device_id"]
         if fields["name"] is not None:
             record["name"] = fields["name"]
         else:
@@ -1023,6 +1042,8 @@ def list_devices(config_dir: Path, *, now: float | None = None) -> dict[str, Any
             entry["credential_live"] = credential_live_at(record, stamp)
         if "last_authenticated_at" in record:
             entry["last_authenticated_at"] = record["last_authenticated_at"]
+        if "operator_device_id" in record:
+            entry["operator_device_id"] = record["operator_device_id"]
         devices.append(entry)
     return {"devices": devices, "precedence": PRECEDENCE}
 
@@ -1062,6 +1083,42 @@ def revoke(config_dir: Path, device_id: str, *, now: float | None = None) -> dic
             record["revoked_at"] = int(time.time() if now is None else now)
             _save(config_dir, store)
     return {"ok": True}
+
+
+def revoke_linked(
+    config_dir: Path, operator_device_id: str, *, now: float | None = None
+) -> list[str]:
+    """Tombstone every push row linked to ``operator_device_id``; returns their ids.
+
+    The unified revoke's second phase (design v2 §2.4), deliberately BEFORE the
+    privileged anchor write: notifications stop the moment the person removes the
+    phone, whether or not they finish the OS prompt. Same tombstone as :func:`revoke`.
+    """
+    stamp = int(time.time() if now is None else now)
+    revoked: list[str] = []
+    with _LOCK:
+        store = _load_store(config_dir)
+        for record in store["devices"]:
+            if record.get("operator_device_id") == operator_device_id:
+                if "revoked_at" not in record:
+                    record["revoked_at"] = stamp
+                revoked.append(str(record["device_id"]))
+        if revoked:
+            _save(config_dir, store)
+    return revoked
+
+
+def live_linked(config_dir: Path, operator_device_id: str) -> bool:
+    """Whether any push row linked to ``operator_device_id`` is not tombstoned."""
+    try:
+        with _LOCK:
+            records = _load(config_dir)
+    except Exception:  # noqa: BLE001 - an unreadable store answers "unknown" as live
+        return True
+    return any(
+        record.get("operator_device_id") == operator_device_id and "revoked_at" not in record
+        for record in records
+    )
 
 
 def unrevoke(config_dir: Path, device_id: str, *, now: float | None = None) -> dict[str, Any]:
@@ -1173,7 +1230,43 @@ def _checked_registration(body: object) -> dict[str, Any]:
         "app_version": app_version,
         "install_id": install_id,
         "name": name,
+        "operator_device_id": _checked_operator_link(
+            body.get("operator_device_id"), body.get("operator_cert")
+        ),
     }
+
+
+def _checked_operator_link(device_id: object, certificate: object) -> str | None:
+    """The proven operator device id for a push row, or ``None`` when none was offered.
+
+    ACCEPTED ONLY WITH ITS PROOF (design v2 §2.4): the same request must carry an
+    operator-signed device certificate (``read_device_cert``) that VERIFIES under this
+    computer's installed anchor and names exactly that id. Otherwise any phone could
+    link its notifications to another phone's id. A link offered without a valid proof
+    refuses the registration rather than silently registering unlinked, so the app
+    learns its link did not take.
+    """
+    if device_id is None and certificate is None:
+        return None
+    if not isinstance(device_id, str) or not isinstance(certificate, str):
+        raise PushDeviceRefusal("operator_device_id needs operator_cert, both strings")
+    from local_operator.operator.trust import load_anchor
+    from local_operator.operator.verify import read_device_cert, verify_device_cert
+
+    parsed = read_device_cert(certificate)
+    loaded = load_anchor()
+    if (
+        parsed is None
+        or parsed.device_id != device_id
+        or not loaded.usable
+        or loaded.anchor is None
+        or verify_device_cert(
+            certificate, operator_spki=loaded.anchor.spki, now=int(time.time()), parsed=parsed
+        )
+        is None
+    ):
+        raise PushDeviceRefusal("operator_cert does not prove operator_device_id on this computer")
+    return device_id
 
 
 def _install_id(value: object) -> str:
@@ -1353,7 +1446,14 @@ def _validated_record(entry: object, index: int) -> dict[str, Any]:
             f"push device registry record {index} has an invalid environment;"
             " refusing to rewrite it"
         )
-    for field in ("device_id", "app_version", "install_id", "name", "device_key"):
+    for field in (
+        "device_id",
+        "app_version",
+        "install_id",
+        "name",
+        "device_key",
+        "operator_device_id",
+    ):
         if field not in entry:
             continue
         value = entry[field]

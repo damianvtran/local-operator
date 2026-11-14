@@ -502,8 +502,13 @@ def _admission_install(
     sudo_secret: str,
     runner: Any = None,
     announce: bool = False,
+    purpose: str = "",
 ) -> int:
     """Install with both old and new digests pinned across the OS prompt.
+
+    ``purpose`` is the elevation prompt's fixed purpose (``elevate.PURPOSE_*``); empty
+    means "confirm a phone", the admission this was written for. The unified revoke
+    (``devices_revoke``) passes ``remove`` so its prompt says what it does.
 
     ``announce`` prints the gesture sentence on stdout just before the prompt. Only the
     CLI verb asks for it: the desktop apply route runs in a server whose card already
@@ -567,7 +572,12 @@ def _admission_install(
             return ADMIT_NO_PROMPT
         if announce:
             print(confirm_card_copy()[2])
-    result = run_elevated(command) if runner is None else runner(command)
+    if runner is not None:
+        result = runner(command)
+    elif purpose:
+        result = run_elevated(command, purpose=purpose)
+    else:
+        result = run_elevated(command)
     if result.cancelled or result.exit_code != 0:
         # S3 signs the certificate only after a zero result, so a failed prompt can
         # never reach certificate issuance. The staged statement goes on ANY

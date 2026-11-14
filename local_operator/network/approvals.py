@@ -477,9 +477,110 @@ def presented(record: Mapping[str, Any], now: float | None = None) -> dict[str, 
         and expires_at > 0
         and view.get("state") not in TERMINAL_STATES
         and moment >= float(expires_at)
+        and not expiry_deferred(view, moment)
     ):
         view["state"] = STATE_EXPIRED
     return view
+
+
+def approval_snapshot(
+    root: Path | None,
+    *,
+    cached: tuple[Any, Any, float, str | None] | None = None,
+    now: float | None = None,
+) -> tuple[tuple[Any, ...], bool, float, str | None]:
+    """``(fingerprint, pending, next_expiry, pair_request)``: the cheap "anything to answer?".
+
+    Moved here from ``DesktopFeed._approval_snapshot`` (pairing design v2 §2.3) so the
+    desktop feed and the TUI share one fingerprint. ``fingerprint`` is the two approval
+    directories' ``(inode, mtime_ns)``: every record write is a staged rename into one
+    of them, so an unchanged fingerprint before ``next_expiry`` means nothing to
+    recompute and ``cached`` (the caller's previous answer) is returned as is.
+
+    ``pending``: any record ``requested``. ``pair_request``: the approval id of the one
+    LIVE ``pair_phone`` record (one live request is the filing rule), from ``requested``
+    through the run, so a pairing card stays up while its own signature is in flight.
+    Reads presentation-free state only (``list_records`` folds expiry, no secret).
+    """
+    directories = [approvals_dir(root), approvals_dir(root, enrollment_only=True)]
+    token: list[Any] = []
+    for directory in directories:
+        try:
+            stat = directory.stat()
+            token.append((stat.st_ino, stat.st_mtime_ns))
+        except FileNotFoundError:
+            token.append(None)
+    fingerprint = tuple(token)
+    moment = time.time() if now is None else now
+    if (
+        cached is not None
+        and fingerprint == cached[0]
+        and cached[1] is not None
+        and (cached[2] == 0 or moment < cached[2])
+    ):
+        return fingerprint, bool(cached[1]), float(cached[2]), cached[3]
+    records = list_records(root=root, now=moment)
+    requested = [record for record in records if record.get("state") == STATE_REQUESTED]
+    live_pairs = [
+        record
+        for record in records
+        if record.get("kind") == KIND_OPERATOR_DEVICE_PAIR
+        and record.get("state") not in TERMINAL_STATES
+    ]
+    expirations = [
+        float(record["expires_at"])
+        for record in [*requested, *live_pairs]
+        if isinstance(record.get("expires_at"), (int, float)) and record["expires_at"] > moment
+    ]
+    pair_request = str(live_pairs[0].get("approval_id") or "") or None if live_pairs else None
+    return fingerprint, bool(requested), min(expirations, default=0.0), pair_request
+
+
+def expiry_deferred(record: Mapping[str, Any], moment: float) -> bool:
+    """Whether a live record past ``expires_at`` is NOT folded to ``expired`` yet.
+
+    Pairing design v2 §2.1 (U11): for an op registered with ``expiry_scope="decision"``
+    (only ``pair_phone``) the window bounds the person's DECISION, not a run that
+    decision started. ``expires_at`` itself is never mutated, so "an expiry is never
+    extended" stays literally true; what changes is which live states the fold may
+    take, and every exemption is bounded by a number the engine already had:
+
+    * ``requested`` -- only inside the op's own signing gap (``decision_pending``):
+      the code/confirm receipt was written inside the window and the signer's
+      presence timeout has not run out since. Without this a Touch ID prompt that
+      straddles the window would lose the card to the fold mid-gesture;
+    * ``approved`` -- decided inside the window and silent for no longer than
+      :data:`STALE_RUN_AFTER_S` (the run starts immediately after the decision, so
+      a record still ``approved`` past that bound has no runner);
+    * ``connecting`` -- decided inside the window and the run is not stale
+      (:func:`run_is_stale`: the lease's pid is alive). A stale run is NOT deferred;
+      the writer fold settles it ``failed`` rather than ``expired``
+      (:func:`_materialize_expiry`).
+
+    ``failed`` past the window still folds to ``expired`` ("Try again" is offered only
+    while the window is open), and every other op keeps the whole-window rule.
+    """
+    state = str(record.get("state") or "")
+    if state not in (STATE_REQUESTED, STATE_APPROVED, STATE_CONNECTING):
+        return False
+    from local_operator.network import approval_ops
+
+    kind = str(record.get("kind") or "")
+    if approval_ops.expiry_scope(kind) != approval_ops.EXPIRY_SCOPE_DECISION:
+        return False
+    expires_at = record.get("expires_at")
+    if not isinstance(expires_at, (int, float)):
+        return False
+    if state == STATE_REQUESTED:
+        operation = approval_ops.for_kind(kind)
+        pending = getattr(operation, "decision_pending", None)
+        return bool(pending is not None and pending(record, moment))
+    decided = record.get("decided_at")
+    if not isinstance(decided, (int, float)) or float(decided) >= float(expires_at):
+        return False
+    if state == STATE_APPROVED:
+        return moment - float(decided) <= STALE_RUN_AFTER_S
+    return not run_is_stale(record, now=moment)
 
 
 def _load_raw(approval_id: str, root: Path | None = None) -> dict[str, Any]:
@@ -1132,8 +1233,18 @@ def _materialize_expiry(record: dict[str, Any], now: float, root: Path | None) -
         or expires_at <= 0
         or record.get("state") in TERMINAL_STATES
         or now < float(expires_at)
+        or expiry_deferred(record, now)
     ):
         return False
+    if _settle_stale_decided_run(record, now, root):
+        # The stale run settles ``failed``, NOT ``expired`` (§2.1): what ended it was a
+        # runner that died, and rollout watch counts exactly these (§11). This pass
+        # writes only that edge; ``failed`` past the window folds to ``expired`` for
+        # readers (``presented``) and at the next writer, so "Try again" is still only
+        # offered while the window is open. True, like an expiry: every caller that
+        # checks this result must stop exactly as it would on ``expired`` (``begin_run``
+        # in particular must not take ``failed -> connecting`` past the window).
+        return True
     _require_transition(record, STATE_EXPIRED)
     record["state"] = STATE_EXPIRED
     record["decided_at"] = float(now)
@@ -1145,6 +1256,53 @@ def _materialize_expiry(record: dict[str, Any], now: float, root: Path | None) -
         subject=str(record.get("approval_id")),
         root=root,
         detail={"kind": str(record.get("kind"))},
+    )
+    return True
+
+
+def _settle_stale_decided_run(record: dict[str, Any], now: float, root: Path | None) -> bool:
+    """A decision-scoped record whose run went stale past its window settles ``failed``.
+
+    Pairing design v2 §2.1: a stale run is a run that stopped (its pid is gone), not
+    a window that ran out, so its record says ``failed`` with a ``stale`` receipt
+    before the fold may expire it. Mutates ``record`` in place; the caller writes.
+    Only ``connecting`` records of a ``decision``-scope op whose decision landed
+    inside the window qualify; everything else is the ordinary fold.
+    """
+    if str(record.get("state")) != STATE_CONNECTING:
+        return False
+    from local_operator.network import approval_ops
+
+    kind = str(record.get("kind") or "")
+    if approval_ops.expiry_scope(kind) != approval_ops.EXPIRY_SCOPE_DECISION:
+        return False
+    decided = record.get("decided_at")
+    expires_at = record.get("expires_at")
+    if not isinstance(decided, (int, float)) or not isinstance(expires_at, (int, float)):
+        return False
+    if float(decided) >= float(expires_at) or not run_is_stale(record, now=now):
+        return False
+    _require_transition(record, STATE_FAILED)
+    run = _active_run(record) or {}
+    record["state"] = STATE_FAILED
+    record.setdefault("receipts", []).append(
+        {
+            "run_id": str(run.get("run_id") or ""),
+            "step": "stale",
+            "at": float(now),
+            "ok": False,
+            "detail": "the run stopped reporting before it finished; nothing else ran",
+            "digest": "",
+        }
+    )
+    record.setdefault("audit", []).append("onboard_run_stale")
+    _write_record(record, root)
+    _audit(
+        "onboard_run_stale",
+        actor="self",
+        subject=str(record.get("approval_id")),
+        root=root,
+        detail={"kind": kind},
     )
     return True
 
