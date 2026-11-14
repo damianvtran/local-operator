@@ -5648,6 +5648,23 @@ class _PeerNoReply(MeshRefusal):
     """
 
 
+#: Guards every relay's single-flight dial table (:meth:`RelayServer._ensure_link_with_probe`).
+#: Module-level, not per instance, because the table itself is created lazily: test
+#: rigs build a relay with ``object.__new__`` and never run ``__init__``. Held only
+#: to read or write the table — never across a dial.
+_DIAL_FLIGHTS_LOCK = threading.Lock()
+
+
+@dataclass
+class _DialFlight:
+    """One in-flight dial that concurrent same-peer callers share."""
+
+    deadline: float | None
+    done: threading.Event = field(default_factory=threading.Event)
+    result: tuple[Any, str, list[CandidateAttempt]] = field(default_factory=lambda: (None, "", []))
+    error: BaseException | None = None
+
+
 class RelayServer:
     """The listener, the links, the dispatch, and the loopback control surface."""
 
@@ -12138,7 +12155,82 @@ class RelayServer:
         probe_timeout_s: float | None = None,
         network_id: str | None = None,
     ) -> tuple["PeerLink | None", str, list[CandidateAttempt]]:
-        """``_ensure_link`` plus WHY it failed, for a surface that must say so.
+        """``_ensure_link`` plus WHY it failed — SINGLE-FLIGHT per peer.
+
+        ONE DIAL PER PEER AT A TIME. Two callers that both found no live link used
+        to dial the same peer concurrently (the definitions syncer and the CLI's
+        ``definitions_sync``, say). The peer's duplicate-identity rule keeps the
+        NEWEST link and closes the other (``_admit_link``, ``"replaced"``), so the
+        caller holding the loser sent its request into a closing link and reported
+        ``no_answer`` for a peer that was up — measured 5 of 6 concurrent pushes
+        with no prior link (#3849's gate, ``test_two_config_roots_…``). So callers
+        for the SAME ``(device, network)`` share ONE in-flight dial and its result:
+        the link, or the same refusal code. Callers for DIFFERENT peers never wait
+        on each other — the table is keyed, and the lock guards only the table.
+
+        Constraints: a failed or timed-out dial releases every waiter with that
+        failure and leaves nothing behind, so the next call dials fresh; a waiter
+        with its own probe budget waits no longer than that budget
+        (``not_attempted``, as an unprobed member reads). A real session op (no
+        deadline) behind a budget-limited listing probe dials for itself after a
+        failure rather than inheriting a claim about someone else's clock.
+        """
+        found = self._link_for(device_id)
+        if found is not None:
+            return found, "", []
+        if probe_timeout_s is not None and probe_timeout_s <= 0:
+            return None, NOT_ATTEMPTED_REASON, []
+        deadline = None if probe_timeout_s is None else time.monotonic() + probe_timeout_s
+        key = (device_id, network_id)
+        while True:
+            with _DIAL_FLIGHTS_LOCK:
+                flights: dict[tuple[str, str | None], _DialFlight] = self.__dict__.setdefault(
+                    "_dial_flights", {}
+                )
+                flight = flights.get(key)
+                leading = flight is None
+                if leading:
+                    flight = _DialFlight(deadline=deadline)
+                    flights[key] = flight
+            assert flight is not None
+            if leading:
+                try:
+                    flight.result = self._dial_for_link(
+                        device_id, probe_timeout_s=probe_timeout_s, network_id=network_id
+                    )
+                except BaseException as exc:
+                    flight.error = exc
+                    raise
+                finally:
+                    with _DIAL_FLIGHTS_LOCK:
+                        if flights.get(key) is flight:
+                            del flights[key]
+                    flight.done.set()
+                return flight.result
+            # A WAITER. Unbounded only when the caller is: the leader's own dial
+            # is bounded (per-candidate connect cap plus the handshake timeout).
+            remaining = None if deadline is None else deadline - time.monotonic()
+            if not flight.done.wait(remaining):
+                return None, NOT_ATTEMPTED_REASON, []
+            if flight.error is not None:
+                raise flight.error
+            link, reason, attempts = flight.result
+            if link is not None:
+                # Prefer what the table holds NOW: the shared link may have been
+                # superseded by an inbound one while this caller was waking.
+                return self._link_for(device_id) or link, "", list(attempts)
+            if flight.deadline is not None and deadline is None:
+                continue  # a listing's budget ran out; this caller has none, so it dials
+            return None, reason, list(attempts)
+
+    def _dial_for_link(
+        self,
+        device_id: str,
+        *,
+        probe_timeout_s: float | None = None,
+        network_id: str | None = None,
+    ) -> tuple["PeerLink | None", str, list[CandidateAttempt]]:
+        """The dial behind :meth:`_ensure_link_with_probe`; call that, not this.
 
         A listing that reports ``reachable: false`` with no reason is the
         dead-instrument failure this repo warns about: it cannot be told from
