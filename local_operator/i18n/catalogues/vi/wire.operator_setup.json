@@ -6,7 +6,7 @@
   "wire.operator_setup.title.remove_phone": "Gỡ điện thoại này khỏi máy tính này",
   "wire.operator_setup.title.phone_approvals": "Bật phê duyệt từ điện thoại",
   "wire.operator_setup.body.phone_approvals": "Cho phép điện thoại phê duyệt yêu cầu trên máy tính này.",
-  "wire.operator_setup.refused.privileged": "Local Operator đang chạy với quyền quản trị viên nên không thể trực tiếp hỏi bạn. Chưa có gì thay đổi. Hãy khởi động lại Local Operator bằng tài khoản thường dùng của bạn rồi thử lại.",
+  "wire.operator_setup.refused.privileged": "Local Operator đang chạy với quyền quản trị viên nên không thể trực tiếp hỏi bạn. Không có gì bị thay đổi. Hãy khởi động lại Local Operator bằng tài khoản thường dùng của bạn rồi thử lại.",
   "wire.operator_setup.refused.no_password_prompt": "Máy tính này không thể hiển thị lời nhắc nhập mật khẩu, nên không thể bật phê duyệt từ đây.",
   "wire.operator_setup.refused.cannot_install": "Máy tính này không có chỗ được bảo vệ để lưu khóa phê duyệt, nên không thể bật phê duyệt từ đây.",
   "wire.operator_setup.refused.in_progress": "Quá trình bật phê duyệt từ điện thoại đang chạy. Hãy trả lời lời nhắc nhập mật khẩu hoặc chờ nó hoàn tất.",
