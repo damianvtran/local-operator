@@ -1,0 +1,2045 @@
+[
+ {
+  "source": "test_family_delete_ownership",
+  "cmd": "cd ~/minervaai/infrastructure; set -e; for r in services terraform-cloud-bootstrap; do (cd $r; test ! -e .worktrees/tfc-acm-sbx-auth; git worktree add -q -b feat/tfc-acm-sbx-auth .worktrees/tfc-acm-sbx-auth origin-main; git -C .worktrees/tfc-acm-sbx-auth log --oneline -1); done",
+  "cwd": ".",
+  "base": {
+   "unrelated": "LOW",
+   "owner": "LOW"
+  }
+ },
+ {
+  "source": "test_family_delete_ownership",
+  "cmd": "cd ~/minervaai/infrastructure; for r in services terraform-cloud-bootstrap; do cd $r; mkdir made; done",
+  "cwd": ".",
+  "base": {
+   "unrelated": "LOW",
+   "owner": "LOW"
+  }
+ },
+ {
+  "source": "test_family_delete_ownership",
+  "cmd": "cd ~/minervaai/infrastructure; for r in services terraform-cloud-bootstrap; do (cd $r; mkdir made); cd services; done",
+  "cwd": ".",
+  "base": {
+   "unrelated": "LOW",
+   "owner": "LOW"
+  }
+ },
+ {
+  "source": "test_family_delete_ownership",
+  "cmd": "cd ~/minervaai/infrastructure; for r in services nowhere; do (cd $r; mkdir made); done",
+  "cwd": ".",
+  "base": {
+   "unrelated": "LOW",
+   "owner": "LOW"
+  }
+ },
+ {
+  "source": "test_family_delete_ownership",
+  "cmd": "cd /tmp; for r in /tmp ~; do (cd $r; rm -rf .local-operator); done",
+  "cwd": ".",
+  "base": {
+   "unrelated": "LOW",
+   "owner": "LOW"
+  }
+ },
+ {
+  "source": "test_family_delete_ownership",
+  "cmd": "cd /tmp; for r in /tmp ~; do cd $r; rm -rf .local-operator; done",
+  "cwd": ".",
+  "base": {
+   "unrelated": "LOW",
+   "owner": "LOW"
+  }
+ },
+ {
+  "source": "test_family_delete_ownership",
+  "cmd": "cd ~/minervaai; for r in infrastructure ..; do (cd $r; rm -rf .local-operator); done",
+  "cwd": ".",
+  "base": {
+   "unrelated": "LOW",
+   "owner": "LOW"
+  }
+ },
+ {
+  "source": "test_family_delete_ownership",
+  "cmd": "cd ~; for r in minervaai .; do (cd $r; rm -rf .local-operator); done",
+  "cwd": ".",
+  "base": {
+   "unrelated": "CRITICAL",
+   "owner": "CRITICAL"
+  }
+ },
+ {
+  "source": "test_family_delete_ownership",
+  "cmd": "cd ~/minervaai/infrastructure; for r in services terraform-cloud-bootstrap; do cd $r; rm -rf build; done",
+  "cwd": ".",
+  "base": {
+   "unrelated": "LOW",
+   "owner": "LOW"
+  }
+ },
+ {
+  "source": "test_family_delete_ownership",
+  "cmd": "for r in {home}/minervaai/infrastructure/services {home}/minervaai/infrastructure/terraform-cloud-bootstrap; do cd $r; mkdir m; done",
+  "cwd": ".",
+  "base": {
+   "unrelated": "LOW",
+   "owner": "LOW"
+  }
+ },
+ {
+  "source": "test_family_delete_ownership",
+  "cmd": "for r in terraform-cloud-bootstrap services; do git -C ~/minervaai/infrastructure/$r worktree remove ~/minervaai/infrastructure/$r/.worktrees/tfc-acm-sbx-auth; echo rc=$?; test -e ~/minervaai/infrastructure/$r/.worktrees/tfc-acm-sbx-auth && echo STILL || echo absent; git -C ~/minervaai/infrastructure/$r worktree list; git -C ~/minervaai/infrastructure/$r status --short | head; git -C ~/minervaai/infrastructure/$r branch --list feat/tfc-acm-sbx-auth; done",
+  "cwd": ".",
+  "base": {
+   "unrelated": "LOW",
+   "owner": "LOW"
+  }
+ },
+ {
+  "source": "test_family_delete_ownership",
+  "cmd": "cd {home}/minervaai/infrastructure/services && git worktree add -q -b feat/tfc-acm-sbx-auth .worktrees/tfc-acm-sbx-auth origin-main",
+  "cwd": ".",
+  "base": {
+   "unrelated": "LOW",
+   "owner": "LOW"
+  }
+ },
+ {
+  "source": "test_family_delete_ownership",
+  "cmd": "git -C {home}/minervaai/infrastructure/services worktree remove {home}/minervaai/infrastructure/services/.worktrees/tfc-acm-sbx-auth",
+  "cwd": ".",
+  "base": {
+   "unrelated": "LOW",
+   "owner": "LOW"
+  }
+ },
+ {
+  "source": "test_family_delete_ownership",
+  "cmd": "rm -rf {home}/minervaai/infrastructure/services/.worktrees/tfc-acm-sbx-auth",
+  "cwd": ".",
+  "base": {
+   "unrelated": "LOW",
+   "owner": "LOW"
+  }
+ },
+ {
+  "source": "test_family_delete_ownership",
+  "cmd": "git -C {home}/minervaai/infrastructure/services worktree remove --force {home}/minervaai/infrastructure/services/.worktrees/tfc-acm-sbx-auth",
+  "cwd": ".",
+  "base": {
+   "unrelated": "LOW",
+   "owner": "LOW"
+  }
+ },
+ {
+  "source": "test_family_delete_ownership",
+  "cmd": "mkdir -p {home}/minervaai/infrastructure/services/.worktrees/box",
+  "cwd": ".",
+  "base": {
+   "unrelated": "LOW",
+   "owner": "LOW"
+  }
+ },
+ {
+  "source": "test_family_delete_ownership",
+  "cmd": "git -C {home}/minervaai/infrastructure/services/.worktrees worktree remove {home}/minervaai/infrastructure/services/.worktrees/box/t",
+  "cwd": ".",
+  "base": {
+   "unrelated": "LOW",
+   "owner": "LOW"
+  }
+ },
+ {
+  "source": "test_family_delete_ownership",
+  "cmd": "for r in ~ /nowhere; do cd $r; rm -rf .local-operator; done",
+  "cwd": ".",
+  "base": {
+   "unrelated": "CRITICAL",
+   "owner": "CRITICAL"
+  }
+ },
+ {
+  "source": "test_family_delete_ownership",
+  "cmd": "cd ~; for r in . a; do cd $r; rm -rf .local-operator; done",
+  "cwd": ".",
+  "base": {
+   "unrelated": "CRITICAL",
+   "owner": "CRITICAL"
+  }
+ },
+ {
+  "source": "test_family_delete_ownership",
+  "cmd": "cd ~; for r in . nowhere; do (cd $r; rm -rf .local-operator); done",
+  "cwd": ".",
+  "base": {
+   "unrelated": "CRITICAL",
+   "owner": "CRITICAL"
+  }
+ },
+ {
+  "source": "test_family_delete_ownership",
+  "cmd": "cd ~; for r in /tmp ~/a; do cd $r; cd -; rm -rf .local-operator; done",
+  "cwd": ".",
+  "base": {
+   "unrelated": "CRITICAL",
+   "owner": "CRITICAL"
+  }
+ },
+ {
+  "source": "test_family_delete_ownership",
+  "cmd": "cd ~; for r in . a; do (cd -P $r; rm -rf .local-operator); done",
+  "cwd": ".",
+  "base": {
+   "unrelated": "CRITICAL",
+   "owner": "CRITICAL"
+  }
+ },
+ {
+  "source": "test_family_delete_ownership",
+  "cmd": "cd ~; for r in . a; do cd $r; rm -f .local-operator/config.yml; done",
+  "cwd": ".",
+  "base": {
+   "unrelated": "CRITICAL",
+   "owner": "CRITICAL"
+  }
+ },
+ {
+  "source": "test_family_delete_ownership",
+  "cmd": "cd /tmp; for r in ~/a ..; do cd $r; rm -rf .local-operator; done",
+  "cwd": ".",
+  "base": {
+   "unrelated": "LOW",
+   "owner": "LOW"
+  }
+ },
+ {
+  "source": "test_family_delete_ownership",
+  "cmd": "git -C {home}/minervaai/infrastructure/services worktree remove --f {home}/minervaai/infrastructure/services/.worktrees/tfc-acm-sbx-auth",
+  "cwd": ".",
+  "base": {
+   "unrelated": "LOW",
+   "owner": "LOW"
+  }
+ },
+ {
+  "source": "test_family_delete_ownership",
+  "cmd": "git -C {home}/minervaai/infrastructure/services worktree remove --fo {home}/minervaai/infrastructure/services/.worktrees/tfc-acm-sbx-auth",
+  "cwd": ".",
+  "base": {
+   "unrelated": "LOW",
+   "owner": "LOW"
+  }
+ },
+ {
+  "source": "test_family_delete_ownership",
+  "cmd": "git -C {home}/minervaai/infrastructure/services worktree remove --for {home}/minervaai/infrastructure/services/.worktrees/tfc-acm-sbx-auth",
+  "cwd": ".",
+  "base": {
+   "unrelated": "LOW",
+   "owner": "LOW"
+  }
+ },
+ {
+  "source": "test_family_delete_ownership",
+  "cmd": "git -C {home}/minervaai/infrastructure/services worktree remove --forc {home}/minervaai/infrastructure/services/.worktrees/tfc-acm-sbx-auth",
+  "cwd": ".",
+  "base": {
+   "unrelated": "LOW",
+   "owner": "LOW"
+  }
+ },
+ {
+  "source": "test_family_delete_ownership",
+  "cmd": "cd ~; for r in a .; do for s in .; do (cd $r; cd $s; rm -rf .local-operator); done; done",
+  "cwd": ".",
+  "base": {
+   "unrelated": "CRITICAL",
+   "owner": "CRITICAL"
+  }
+ },
+ {
+  "source": "test_family_delete_ownership",
+  "cmd": "cd ~; for s in .; do for r in a .; do (cd $r; cd $s; rm -rf .local-operator); done; done",
+  "cwd": ".",
+  "base": {
+   "unrelated": "CRITICAL",
+   "owner": "CRITICAL"
+  }
+ },
+ {
+  "source": "test_family_delete_ownership",
+  "cmd": "cd ~; for r in a .; do (cd $r; for s in .; do cd $s; done; rm -rf .local-operator); done",
+  "cwd": ".",
+  "base": {
+   "unrelated": "CRITICAL",
+   "owner": "CRITICAL"
+  }
+ },
+ {
+  "source": "test_family_delete_ownership",
+  "cmd": "cd ~/a; for r in sub .; do for s in ..; do (cd $r; cd $s; rm -rf .local-operator); done; done",
+  "cwd": ".",
+  "base": {
+   "unrelated": "CRITICAL",
+   "owner": "CRITICAL"
+  }
+ },
+ {
+  "source": "test_family_delete_ownership",
+  "cmd": "cd ~; for r in a .; do for s in . .; do (cd $r; cd $s; rm -rf .local-operator); done; done",
+  "cwd": ".",
+  "base": {
+   "unrelated": "CRITICAL",
+   "owner": "CRITICAL"
+  }
+ },
+ {
+  "source": "test_family_delete_ownership",
+  "cmd": "cd ~/a; s=..; for r in sub .; do (cd $r; cd $s; rm -rf .local-operator); done",
+  "cwd": ".",
+  "base": {
+   "unrelated": "CRITICAL",
+   "owner": "CRITICAL"
+  }
+ },
+ {
+  "source": "test_family_delete_ownership",
+  "cmd": "cd ~; for r in a .; do (cd $r; cd .; rm -rf .local-operator); done",
+  "cwd": ".",
+  "base": {
+   "unrelated": "CRITICAL",
+   "owner": "CRITICAL"
+  }
+ },
+ {
+  "source": "test_family_delete_ownership",
+  "cmd": "cd ~; for r in a b; do for s in .; do (cd $r; cd $s; rm -rf build); done; done",
+  "cwd": ".",
+  "base": {
+   "unrelated": "HIGH",
+   "owner": "LOW"
+  }
+ },
+ {
+  "source": "test_family_delete_ownership",
+  "cmd": "cd ~/a; for r in . ..; do cd $r; cd /tmp; cd -; rm -rf .local-operator; done",
+  "cwd": ".",
+  "base": {
+   "unrelated": "LOW",
+   "owner": "LOW"
+  }
+ },
+ {
+  "source": "test_family_delete_ownership",
+  "cmd": "cd ~/a; for r in . ..; do cd $r; cd /tmp; cd \"$OLDPWD\"; rm -rf .local-operator; done",
+  "cwd": ".",
+  "base": {
+   "unrelated": "LOW",
+   "owner": "LOW"
+  }
+ },
+ {
+  "source": "test_classification_accuracy",
+  "cmd": "D=$LOCAL_OPERATOR_SCRATCHPAD/i18n-audit && for l in es fr hi ru ur vi zh-CN; do node x.mjs --locale $l; done; diff -u a b > $D/ledger.patch",
+  "cwd": "work",
+  "base": {
+   "unrelated": "LOW",
+   "owner": "LOW"
+  }
+ },
+ {
+  "source": "test_classification_accuracy",
+  "cmd": "for l in a b; do rm -rf /t/sessions/$l; done",
+  "cwd": "../../../../../../w",
+  "base": {
+   "unrelated": "LOW",
+   "owner": "LOW"
+  }
+ },
+ {
+  "source": "test_classification_accuracy",
+  "cmd": "for l in es fr; do rm -rf \"/t/sessions/${l}\"; done",
+  "cwd": "../../../../../../w",
+  "base": {
+   "unrelated": "LOW",
+   "owner": "LOW"
+  }
+ },
+ {
+  "source": "test_classification_accuracy",
+  "cmd": "for l in es fr; do d=/t/x-$l; rm -r $d; done",
+  "cwd": "../../../../../../w",
+  "base": {
+   "unrelated": "LOW",
+   "owner": "LOW"
+  }
+ },
+ {
+  "source": "test_classification_accuracy",
+  "cmd": "for a in x y; do for b in 1 2; do rm \"/t/$a-$b\"; done; done",
+  "cwd": "../../../../../../w",
+  "base": {
+   "unrelated": "LOW",
+   "owner": "LOW"
+  }
+ },
+ {
+  "source": "test_classification_accuracy",
+  "cmd": "for l in es fr; do echo $l; done; rm /t/sessions/es",
+  "cwd": "../../../../../../w",
+  "base": {
+   "unrelated": "LOW",
+   "owner": "LOW"
+  }
+ },
+ {
+  "source": "test_classification_accuracy",
+  "cmd": "gh pr comment 1 -R o/r -F {home}/.local-operator/sessions/cccccccccccc/scratchpad/r2/notes.md",
+  "cwd": "work",
+  "base": {
+   "unrelated": "LOW",
+   "owner": "LOW"
+  }
+ },
+ {
+  "source": "test_classification_accuracy",
+  "cmd": "gh pr comment 1 -R o/r --body-file {home}/.local-operator/sessions/cccccccccccc/scratchpad/r2/notes.md",
+  "cwd": "work",
+  "base": {
+   "unrelated": "LOW",
+   "owner": "LOW"
+  }
+ },
+ {
+  "source": "test_classification_accuracy",
+  "cmd": "gh pr comment 1 -R o/r --body-file={home}/.local-operator/sessions/cccccccccccc/scratchpad/r2/notes.md",
+  "cwd": "work",
+  "base": {
+   "unrelated": "LOW",
+   "owner": "LOW"
+  }
+ },
+ {
+  "source": "test_classification_accuracy",
+  "cmd": "gh issue comment 1 -F{home}/.local-operator/sessions/cccccccccccc/scratchpad/r2/notes.md",
+  "cwd": "work",
+  "base": {
+   "unrelated": "LOW",
+   "owner": "LOW"
+  }
+ },
+ {
+  "source": "test_classification_accuracy",
+  "cmd": "gh release create v1 --notes-file {home}/.local-operator/sessions/cccccccccccc/scratchpad/r2/notes.md",
+  "cwd": "work",
+  "base": {
+   "unrelated": "LOW",
+   "owner": "LOW"
+  }
+ },
+ {
+  "source": "test_classification_accuracy",
+  "cmd": "cat {home}/.local-operator/sessions/cccccccccccc/scratchpad/r2/notes.md",
+  "cwd": "work",
+  "base": {
+   "unrelated": "LOW",
+   "owner": "LOW"
+  }
+ },
+ {
+  "source": "test_classification_accuracy",
+  "cmd": "shasum -a 256 {home}/.local-operator/sessions/cccccccccccc/scratchpad/r2/notes.md",
+  "cwd": "work",
+  "base": {
+   "unrelated": "LOW",
+   "owner": "LOW"
+  }
+ },
+ {
+  "source": "test_classification_accuracy",
+  "cmd": "sha256sum {home}/.local-operator/sessions/cccccccccccc/scratchpad/r2/notes.md",
+  "cwd": "work",
+  "base": {
+   "unrelated": "LOW",
+   "owner": "LOW"
+  }
+ },
+ {
+  "source": "test_classification_accuracy",
+  "cmd": "identify {home}/.local-operator/sessions/cccccccccccc/scratchpad/r2/notes.md",
+  "cwd": "work",
+  "base": {
+   "unrelated": "LOW",
+   "owner": "LOW"
+  }
+ },
+ {
+  "source": "test_classification_accuracy",
+  "cmd": "magick identify -verbose {home}/.local-operator/sessions/cccccccccccc/scratchpad/r2/notes.md",
+  "cwd": "work",
+  "base": {
+   "unrelated": "LOW",
+   "owner": "LOW"
+  }
+ },
+ {
+  "source": "test_classification_accuracy",
+  "cmd": "cmp {home}/.local-operator/sessions/cccccccccccc/scratchpad/r2/notes.md {home}/.local-operator/sessions/cccccccccccc/scratchpad/r2/notes.md",
+  "cwd": "work",
+  "base": {
+   "unrelated": "LOW",
+   "owner": "LOW"
+  }
+ },
+ {
+  "source": "test_classification_accuracy",
+  "cmd": "cp -n {home}/.local-operator/sessions/cccccccccccc/scratchpad/r2/notes.md ~/work/new-copy.md",
+  "cwd": "work",
+  "base": {
+   "unrelated": "LOW",
+   "owner": "LOW"
+  }
+ },
+ {
+  "source": "test_classification_accuracy",
+  "cmd": "cp -n {home}/.local-operator/sessions/cccccccccccc/scratchpad/r2/notes.md {home}/work/new.md",
+  "cwd": ".",
+  "base": {
+   "unrelated": "LOW",
+   "owner": "LOW"
+  }
+ },
+ {
+  "source": "test_classification_accuracy",
+  "cmd": "cp -n {home}/.local-operator/sessions/cccccccccccc/scratchpad/r2/notes.md {home}/work/old.md",
+  "cwd": ".",
+  "base": {
+   "unrelated": "LOW",
+   "owner": "LOW"
+  }
+ },
+ {
+  "source": "test_classification_accuracy",
+  "cmd": "cp -nf {home}/.local-operator/sessions/cccccccccccc/scratchpad/r2/notes.md {home}/work/old.md",
+  "cwd": ".",
+  "base": {
+   "unrelated": "LOW",
+   "owner": "LOW"
+  }
+ },
+ {
+  "source": "test_classification_accuracy",
+  "cmd": "cp -n -i {home}/.local-operator/sessions/cccccccccccc/scratchpad/r2/notes.md {home}/work/old.md",
+  "cwd": ".",
+  "base": {
+   "unrelated": "LOW",
+   "owner": "LOW"
+  }
+ },
+ {
+  "source": "test_classification_accuracy",
+  "cmd": "cp  {home}/.local-operator/sessions/cccccccccccc/scratchpad/r2/notes.md {home}/work/old.md",
+  "cwd": ".",
+  "base": {
+   "unrelated": "LOW",
+   "owner": "LOW"
+  }
+ },
+ {
+  "source": "test_classification_accuracy",
+  "cmd": "gh api repos/o/r -F body=@{home}/.local-operator/sessions/cccccccccccc/scratchpad/r2/notes.md",
+  "cwd": "work",
+  "base": {
+   "unrelated": "HIGH",
+   "owner": "HIGH"
+  }
+ },
+ {
+  "source": "test_classification_accuracy",
+  "cmd": "magick identify msl:{home}/.local-operator/sessions/cccccccccccc/scratchpad/r2/notes.md",
+  "cwd": "work",
+  "base": {
+   "unrelated": "HIGH",
+   "owner": "HIGH"
+  }
+ },
+ {
+  "source": "test_classification_accuracy",
+  "cmd": "identify -write /tmp/x.png {home}/.local-operator/sessions/cccccccccccc/scratchpad/r2/notes.md",
+  "cwd": "work",
+  "base": {
+   "unrelated": "HIGH",
+   "owner": "HIGH"
+  }
+ },
+ {
+  "source": "test_classification_accuracy",
+  "cmd": "cat {home}/.local-operator/sessions/bbbbbbbbbbbb/scratchpad/r2/agent-remediation-r1.md; git -C ~/work status --short; gh pr comment 3702 -R o/r -F {home}/.local-operator/sessions/bbbbbbbbbbbb/scratchpad/r2/agent-remediation-r1.md; gh pr comment 3702 -R o/r -F {home}/.local-operator/sessions/bbbbbbbbbbbb/scratchpad/r2/agent-remediation-r1.md; shasum -a 256 {home}/.local-operator/sessions/bbbbbbbbbbbb/scratchpad/r2/agent-remediation-r1.md; cp -n {home}/.local-operator/sessions/bbbbbbbbbbbb/scratchpad/r2/agent-remediation-r1.md ~/work/copied-aaaaaaaaaaaa.md",
+  "cwd": "work",
+  "base": {
+   "unrelated": "LOW",
+   "owner": "LOW"
+  }
+ },
+ {
+  "source": "test_classification_accuracy",
+  "cmd": "cat {home}/.local-operator/sessions/aaaaaaaaaaaa/scratchpad/r2/agent-remediation-r1.md; git -C ~/work status --short; gh pr comment 3702 -R o/r -F {home}/.local-operator/sessions/aaaaaaaaaaaa/scratchpad/r2/agent-remediation-r1.md; gh pr comment 3702 -R o/r -F {home}/.local-operator/sessions/aaaaaaaaaaaa/scratchpad/r2/agent-remediation-r1.md; shasum -a 256 {home}/.local-operator/sessions/aaaaaaaaaaaa/scratchpad/r2/agent-remediation-r1.md; cp -n {home}/.local-operator/sessions/aaaaaaaaaaaa/scratchpad/r2/agent-remediation-r1.md ~/work/copied-bbbbbbbbbbbb.md",
+  "cwd": "work",
+  "base": {
+   "unrelated": "LOW",
+   "owner": "LOW"
+  }
+ },
+ {
+  "source": "test_classification_accuracy",
+  "cmd": "rm -f {home}/.local-operator/sessions/bbbbbbbbbbbb/scratchpad/notes.md",
+  "cwd": "work",
+  "base": {
+   "unrelated": "HIGH",
+   "owner": "HIGH"
+  }
+ },
+ {
+  "source": "test_classification_accuracy",
+  "cmd": "mv {home}/.local-operator/sessions/bbbbbbbbbbbb/scratchpad/notes.md ~/work/x",
+  "cwd": "work",
+  "base": {
+   "unrelated": "HIGH",
+   "owner": "HIGH"
+  }
+ },
+ {
+  "source": "test_classification_accuracy",
+  "cmd": "cp ~/work/x {home}/.local-operator/sessions/bbbbbbbbbbbb/scratchpad/notes.md",
+  "cwd": "work",
+  "base": {
+   "unrelated": "HIGH",
+   "owner": "HIGH"
+  }
+ },
+ {
+  "source": "test_classification_accuracy",
+  "cmd": "echo x > {home}/.local-operator/sessions/bbbbbbbbbbbb/scratchpad/notes.md",
+  "cwd": "work",
+  "base": {
+   "unrelated": "HIGH",
+   "owner": "HIGH"
+  }
+ },
+ {
+  "source": "test_classification_accuracy",
+  "cmd": "rm -rf {home}/.local-operator/sessions/cccccccccccc/scratchpad/a",
+  "cwd": "work",
+  "base": {
+   "unrelated": "HIGH",
+   "owner": "HIGH"
+  }
+ },
+ {
+  "source": "test_classification_accuracy",
+  "cmd": "rm -f {home}/.local-operator/sessions/cccccccccccc/scratchpad/receipts-r2/m-es-x.json {home}/.local-operator/sessions/cccccccccccc/scratchpad/receipts-r2/m-fr-x.json {home}/.local-operator/sessions/cccccccccccc/scratchpad/receipts-r2/m-zh-cn-x.json",
+  "cwd": "work",
+  "base": {
+   "unrelated": "HIGH",
+   "owner": "HIGH"
+  }
+ },
+ {
+  "source": "test_classification_accuracy",
+  "cmd": "rm -f {home}/.local-operator/sessions/cccccccccccc/scratchpad/receipts-r2/m-es-x.json",
+  "cwd": "work",
+  "base": {
+   "unrelated": "HIGH",
+   "owner": "HIGH"
+  }
+ },
+ {
+  "source": "test_classification_accuracy",
+  "cmd": "rm -f {home}/.local-operator/sessions/cccccccccccc/scratchpad/receipts-r2/m-fr-x.json",
+  "cwd": "work",
+  "base": {
+   "unrelated": "HIGH",
+   "owner": "HIGH"
+  }
+ },
+ {
+  "source": "test_classification_accuracy",
+  "cmd": "rm -rf {home}/.local-operator/sessions/cccccccccccc/scratchpad/clone",
+  "cwd": "work",
+  "base": {
+   "unrelated": "HIGH",
+   "owner": "HIGH"
+  }
+ },
+ {
+  "source": "test_classification_accuracy",
+  "cmd": "rm -rf {home}/.local-operator/sessions/cccccccccccc/scratchpad/clone/.git",
+  "cwd": "work",
+  "base": {
+   "unrelated": "HIGH",
+   "owner": "HIGH"
+  }
+ },
+ {
+  "source": "test_classification_accuracy",
+  "cmd": "rm -rf {home}/.local-operator/sessions/cccccccccccc/scratchpad/clone/.git/objects",
+  "cwd": "work",
+  "base": {
+   "unrelated": "HIGH",
+   "owner": "HIGH"
+  }
+ },
+ {
+  "source": "test_classification_accuracy",
+  "cmd": "rm -f {home}/.local-operator/sessions/cccccccccccc/scratchpad/r2/notes.md",
+  "cwd": "work",
+  "base": {
+   "unrelated": "HIGH",
+   "owner": "HIGH"
+  }
+ },
+ {
+  "source": "test_classification_accuracy",
+  "cmd": "mv {home}/.local-operator/sessions/cccccccccccc/scratchpad/r2/notes.md ~/work/moved.md",
+  "cwd": "work",
+  "base": {
+   "unrelated": "HIGH",
+   "owner": "HIGH"
+  }
+ },
+ {
+  "source": "test_classification_accuracy",
+  "cmd": "cp ~/work/src.md {home}/.local-operator/sessions/cccccccccccc/scratchpad/r2/notes.md",
+  "cwd": "work",
+  "base": {
+   "unrelated": "HIGH",
+   "owner": "HIGH"
+  }
+ },
+ {
+  "source": "test_classification_accuracy",
+  "cmd": "cp -n ~/work/src.md {home}/.local-operator/sessions/cccccccccccc/scratchpad/r2/notes.md",
+  "cwd": "work",
+  "base": {
+   "unrelated": "HIGH",
+   "owner": "HIGH"
+  }
+ },
+ {
+  "source": "test_classification_accuracy",
+  "cmd": "cp -f ~/work/src.md {home}/.local-operator/sessions/cccccccccccc/scratchpad/r2/notes.md",
+  "cwd": "work",
+  "base": {
+   "unrelated": "HIGH",
+   "owner": "HIGH"
+  }
+ },
+ {
+  "source": "test_classification_accuracy",
+  "cmd": "echo x > {home}/.local-operator/sessions/cccccccccccc/scratchpad/r2/notes.md",
+  "cwd": "work",
+  "base": {
+   "unrelated": "HIGH",
+   "owner": "HIGH"
+  }
+ },
+ {
+  "source": "test_classification_accuracy",
+  "cmd": "for l in a b; do rm -rf {home}/.local-operator/sessions/cccccccccccc/scratchpad/r2/$l; done",
+  "cwd": "work",
+  "base": {
+   "unrelated": "HIGH",
+   "owner": "HIGH"
+  }
+ },
+ {
+  "source": "test_classification_accuracy",
+  "cmd": "cp -n ~/work/src.md {home}/.local-operator/sessions/cccccccccccc/transcript.jsonl",
+  "cwd": "work",
+  "base": {
+   "unrelated": "CRITICAL",
+   "owner": "CRITICAL"
+  }
+ },
+ {
+  "source": "test_classification_accuracy",
+  "cmd": "cp -n ~/work/src.md {home}/.local-operator/sessions/cccccccccccc/asks.jsonl",
+  "cwd": "work",
+  "base": {
+   "unrelated": "CRITICAL",
+   "owner": "CRITICAL"
+  }
+ },
+ {
+  "source": "test_classification_accuracy",
+  "cmd": "gh pr comment 1 -F ~/work/src.md > {home}/.local-operator/sessions/cccccccccccc/asks.jsonl",
+  "cwd": "work",
+  "base": {
+   "unrelated": "CRITICAL",
+   "owner": "CRITICAL"
+  }
+ },
+ {
+  "source": "test_classification_accuracy",
+  "cmd": "for l in a b; do rm -f {home}/.local-operator/sessions/cccccccccccc/transcript.jsonl; done",
+  "cwd": "work",
+  "base": {
+   "unrelated": "CRITICAL",
+   "owner": "CRITICAL"
+  }
+ },
+ {
+  "source": "test_classification_accuracy",
+  "cmd": "for d in /tmp/r3710/0 /tmp/r3710/1 /tmp/r3710/2 /tmp/r3710/3 /tmp/r3710/4 /tmp/r3710/5 /tmp/r3710/6 /tmp/r3710/7 /tmp/r3710/8 /tmp/r3710/9 /tmp/r3710/10 /tmp/r3710/11 /tmp/r3710/12 /tmp/r3710/13 /tmp/r3710/14 /tmp/r3710/15 /tmp/r3710/16 /tmp/r3710/17 /tmp/r3710/18 /tmp/r3710/19 /tmp/r3710/20 /tmp/r3710/21 /tmp/r3710/22 /tmp/r3710/23 /tmp/r3710/24 /tmp/r3710/25 /tmp/r3710/26 /tmp/r3710/27 /tmp/r3710/28 /tmp/r3710/29 /tmp/r3710/30 /tmp/r3710/31 /tmp/r3710/32 /tmp/r3710/33 /tmp/r3710/34 /tmp/r3710/35 /tmp/r3710/36 /tmp/r3710/37 /tmp/r3710/38 /tmp/r3710/39 /tmp/r3710/40 /tmp/r3710/41 /tmp/r3710/42 /tmp/r3710/43 /tmp/r3710/44 /tmp/r3710/45 /tmp/r3710/46 /tmp/r3710/47 /tmp/r3710/48 /tmp/r3710/49 /tmp/r3710/50 /tmp/r3710/51 /tmp/r3710/52 /tmp/r3710/53 /tmp/r3710/54 /tmp/r3710/55 /tmp/r3710/56 /tmp/r3710/57 /tmp/r3710/58 /tmp/r3710/59 /tmp/r3710/60 /tmp/r3710/61 /tmp/r3710/62 /tmp/r3710/63 /tmp/r3710/64 /tmp/r3710/65 /tmp/r3710/66 /tmp/r3710/67 /tmp/r3710/68 /tmp/r3710/69 /tmp/r3710/70 /tmp/r3710/71 /tmp/r3710/72 /tmp/r3710/73 /tmp/r3710/74 /tmp/r3710/75 /tmp/r3710/76 /tmp/r3710/77 /tmp/r3710/78 /tmp/r3710/79 /tmp/r3710/80 /tmp/r3710/81 /tmp/r3710/82 /tmp/r3710/83 /tmp/r3710/84 /tmp/r3710/85 /tmp/r3710/86 /tmp/r3710/87 /tmp/r3710/88 /tmp/r3710/89 /tmp/r3710/90 /tmp/r3710/91 /tmp/r3710/92 /tmp/r3710/93 /tmp/r3710/94 /tmp/r3710/95 /tmp/r3710/96 /tmp/r3710/97 /tmp/r3710/98 /tmp/r3710/99 /tmp/r3710/100 /tmp/r3710/101 /tmp/r3710/102 /tmp/r3710/103 /tmp/r3710/104 /tmp/r3710/105 /tmp/r3710/106 /tmp/r3710/107 /tmp/r3710/108 /tmp/r3710/109 /tmp/r3710/110 /tmp/r3710/111 /tmp/r3710/112 /tmp/r3710/113 /tmp/r3710/114 /tmp/r3710/115 /tmp/r3710/116 /tmp/r3710/117 /tmp/r3710/118 /tmp/r3710/119 /tmp/r3710/120 /tmp/r3710/121 /tmp/r3710/122 /tmp/r3710/123 /tmp/r3710/124 /tmp/r3710/125 /tmp/r3710/126 /tmp/r3710/127 /tmp/r3710/128 /tmp/r3710/129 /tmp/r3710/130 /tmp/r3710/131 /tmp/r3710/132 /tmp/r3710/133 /tmp/r3710/134 /tmp/r3710/135 /tmp/r3710/136 /tmp/r3710/137 /tmp/r3710/138 /tmp/r3710/139 /tmp/r3710/140 /tmp/r3710/141 /tmp/r3710/142 /tmp/r3710/143 /tmp/r3710/144 /tmp/r3710/145 /tmp/r3710/146 /tmp/r3710/147 /tmp/r3710/148 /tmp/r3710/149 /tmp/r3710/150 /tmp/r3710/151 /tmp/r3710/152 /tmp/r3710/153 /tmp/r3710/154 /tmp/r3710/155 /tmp/r3710/156 /tmp/r3710/157 /tmp/r3710/158 /tmp/r3710/159 /tmp/r3710/160 /tmp/r3710/161 /tmp/r3710/162 /tmp/r3710/163 /tmp/r3710/164 /tmp/r3710/165 /tmp/r3710/166 /tmp/r3710/167 /tmp/r3710/168 /tmp/r3710/169 /tmp/r3710/170 /tmp/r3710/171 /tmp/r3710/172 /tmp/r3710/173 /tmp/r3710/174 /tmp/r3710/175 /tmp/r3710/176 /tmp/r3710/177 /tmp/r3710/178 /tmp/r3710/179 /tmp/r3710/180 /tmp/r3710/181 /tmp/r3710/182 /tmp/r3710/183 /tmp/r3710/184 /tmp/r3710/185 /tmp/r3710/186 /tmp/r3710/187 /tmp/r3710/188 /tmp/r3710/189 /tmp/r3710/190 /tmp/r3710/191 /tmp/r3710/192 /tmp/r3710/193 /tmp/r3710/194 /tmp/r3710/195 /tmp/r3710/196 /tmp/r3710/197 /tmp/r3710/198 /tmp/r3710/199 /tmp/r3710/200 /tmp/r3710/201 /tmp/r3710/202 /tmp/r3710/203 /tmp/r3710/204 /tmp/r3710/205 /tmp/r3710/206 /tmp/r3710/207 /tmp/r3710/208 /tmp/r3710/209 /tmp/r3710/210 /tmp/r3710/211 /tmp/r3710/212 /tmp/r3710/213 /tmp/r3710/214 /tmp/r3710/215 /tmp/r3710/216 /tmp/r3710/217 /tmp/r3710/218 /tmp/r3710/219 /tmp/r3710/220 /tmp/r3710/221 /tmp/r3710/222 /tmp/r3710/223 /tmp/r3710/224 /tmp/r3710/225 /tmp/r3710/226 /tmp/r3710/227 /tmp/r3710/228 /tmp/r3710/229 /tmp/r3710/230 /tmp/r3710/231 /tmp/r3710/232 /tmp/r3710/233 /tmp/r3710/234 /tmp/r3710/235 /tmp/r3710/236 /tmp/r3710/237 /tmp/r3710/238 /tmp/r3710/239 /tmp/r3710/240 /tmp/r3710/241 /tmp/r3710/242 /tmp/r3710/243 /tmp/r3710/244 /tmp/r3710/245 /tmp/r3710/246 /tmp/r3710/247 /tmp/r3710/248 /tmp/r3710/249 /tmp/r3710/250 /tmp/r3710/251 /tmp/r3710/252 /tmp/r3710/253 /tmp/r3710/254 /tmp/r3710/255 /tmp/r3710/256 /tmp/r3710/257 /tmp/r3710/258 /tmp/r3710/259 /tmp/r3710/260 /tmp/r3710/261 /tmp/r3710/262 /tmp/r3710/263 /tmp/r3710/264 /tmp/r3710/265 /tmp/r3710/266 /tmp/r3710/267 /tmp/r3710/268 /tmp/r3710/269 /tmp/r3710/270 /tmp/r3710/271 /tmp/r3710/272 /tmp/r3710/273 /tmp/r3710/274 /tmp/r3710/275 /tmp/r3710/276 /tmp/r3710/277 /tmp/r3710/278 /tmp/r3710/279 /tmp/r3710/280 /tmp/r3710/281 /tmp/r3710/282 /tmp/r3710/283 /tmp/r3710/284 /tmp/r3710/285 /tmp/r3710/286 /tmp/r3710/287 /tmp/r3710/288 /tmp/r3710/289 /tmp/r3710/290 /tmp/r3710/291 /tmp/r3710/292 /tmp/r3710/293 /tmp/r3710/294 /tmp/r3710/295 /tmp/r3710/296 /tmp/r3710/297 /tmp/r3710/298 /tmp/r3710/299 /tmp/r3710/300 /tmp/r3710/301 /tmp/r3710/302 /tmp/r3710/303 /tmp/r3710/304 /tmp/r3710/305 /tmp/r3710/306 /tmp/r3710/307 /tmp/r3710/308 /tmp/r3710/309 /tmp/r3710/310 /tmp/r3710/311 /tmp/r3710/312 /tmp/r3710/313 /tmp/r3710/314 /tmp/r3710/315 /tmp/r3710/316 /tmp/r3710/317 /tmp/r3710/318 /tmp/r3710/319 /tmp/r3710/320 /tmp/r3710/321 /tmp/r3710/322 /tmp/r3710/323 /tmp/r3710/324 /tmp/r3710/325 /tmp/r3710/326 /tmp/r3710/327 /tmp/r3710/328 /tmp/r3710/329 /tmp/r3710/330 /tmp/r3710/331 /tmp/r3710/332 /tmp/r3710/333 /tmp/r3710/334 /tmp/r3710/335 /tmp/r3710/336 /tmp/r3710/337 /tmp/r3710/338 /tmp/r3710/339 /tmp/r3710/340 /tmp/r3710/341 /tmp/r3710/342 /tmp/r3710/343 /tmp/r3710/344 /tmp/r3710/345 /tmp/r3710/346 /tmp/r3710/347 /tmp/r3710/348 /tmp/r3710/349 /tmp/r3710/350 /tmp/r3710/351 /tmp/r3710/352 /tmp/r3710/353 /tmp/r3710/354 /tmp/r3710/355 /tmp/r3710/356 /tmp/r3710/357 /tmp/r3710/358 /tmp/r3710/359 /tmp/r3710/360 /tmp/r3710/361 /tmp/r3710/362 /tmp/r3710/363 /tmp/r3710/364 /tmp/r3710/365 /tmp/r3710/366 /tmp/r3710/367 /tmp/r3710/368 /tmp/r3710/369 /tmp/r3710/370 /tmp/r3710/371 /tmp/r3710/372 /tmp/r3710/373 /tmp/r3710/374 /tmp/r3710/375 /tmp/r3710/376 /tmp/r3710/377 /tmp/r3710/378 /tmp/r3710/379 /tmp/r3710/380 /tmp/r3710/381 /tmp/r3710/382 /tmp/r3710/383 /tmp/r3710/384 /tmp/r3710/385 /tmp/r3710/386 /tmp/r3710/387 /tmp/r3710/388 /tmp/r3710/389 /tmp/r3710/390 /tmp/r3710/391 /tmp/r3710/392 /tmp/r3710/393 /tmp/r3710/394 /tmp/r3710/395 /tmp/r3710/396 /tmp/r3710/397 /tmp/r3710/398 /tmp/r3710/399 /tmp/r3710/400 /tmp/r3710/401 /tmp/r3710/402 /tmp/r3710/403 /tmp/r3710/404 /tmp/r3710/405 /tmp/r3710/406 /tmp/r3710/407 /tmp/r3710/408 /tmp/r3710/409 /tmp/r3710/410 /tmp/r3710/411 /tmp/r3710/412 /tmp/r3710/413 /tmp/r3710/414 /tmp/r3710/415 /tmp/r3710/416 /tmp/r3710/417 /tmp/r3710/418 /tmp/r3710/419 /tmp/r3710/420 /tmp/r3710/421 /tmp/r3710/422 /tmp/r3710/423 /tmp/r3710/424 /tmp/r3710/425 /tmp/r3710/426 /tmp/r3710/427 /tmp/r3710/428 /tmp/r3710/429 /tmp/r3710/430 /tmp/r3710/431 /tmp/r3710/432 /tmp/r3710/433 /tmp/r3710/434 /tmp/r3710/435 /tmp/r3710/436 /tmp/r3710/437 /tmp/r3710/438 /tmp/r3710/439 /tmp/r3710/440 /tmp/r3710/441 /tmp/r3710/442 /tmp/r3710/443 /tmp/r3710/444 /tmp/r3710/445 /tmp/r3710/446 /tmp/r3710/447 /tmp/r3710/448 /tmp/r3710/449 /tmp/r3710/450 /tmp/r3710/451 /tmp/r3710/452 /tmp/r3710/453 /tmp/r3710/454 /tmp/r3710/455 /tmp/r3710/456 /tmp/r3710/457 /tmp/r3710/458 /tmp/r3710/459 /tmp/r3710/460 /tmp/r3710/461 /tmp/r3710/462 /tmp/r3710/463 /tmp/r3710/464 /tmp/r3710/465 /tmp/r3710/466 /tmp/r3710/467 /tmp/r3710/468 /tmp/r3710/469 /tmp/r3710/470 /tmp/r3710/471 /tmp/r3710/472 /tmp/r3710/473 /tmp/r3710/474 /tmp/r3710/475 /tmp/r3710/476 /tmp/r3710/477 /tmp/r3710/478 /tmp/r3710/479 /tmp/r3710/480 /tmp/r3710/481 /tmp/r3710/482 /tmp/r3710/483 /tmp/r3710/484 /tmp/r3710/485 /tmp/r3710/486 /tmp/r3710/487 /tmp/r3710/488 /tmp/r3710/489 /tmp/r3710/490 /tmp/r3710/491 /tmp/r3710/492 /tmp/r3710/493 /tmp/r3710/494 /tmp/r3710/495 /tmp/r3710/496 /tmp/r3710/497 /tmp/r3710/498 /tmp/r3710/499 /tmp/r3710/500 /tmp/r3710/501 /tmp/r3710/502 /tmp/r3710/503 /tmp/r3710/504 /tmp/r3710/505 /tmp/r3710/506 /tmp/r3710/507 /tmp/r3710/508 /tmp/r3710/509 /tmp/r3710/510 /tmp/r3710/511 /tmp/r3710/512 /tmp/r3710/513 /tmp/r3710/514 /tmp/r3710/515 /tmp/r3710/516 /tmp/r3710/517 /tmp/r3710/518 /tmp/r3710/519 /tmp/r3710/520 /tmp/r3710/521 /tmp/r3710/522 /tmp/r3710/523 /tmp/r3710/524 /tmp/r3710/525 /tmp/r3710/526 /tmp/r3710/527 /tmp/r3710/528 /tmp/r3710/529 /tmp/r3710/530 /tmp/r3710/531 /tmp/r3710/532 /tmp/r3710/533 /tmp/r3710/534 /tmp/r3710/535 /tmp/r3710/536 /tmp/r3710/537 /tmp/r3710/538 /tmp/r3710/539 /tmp/r3710/540 /tmp/r3710/541 /tmp/r3710/542 /tmp/r3710/543 /tmp/r3710/544 /tmp/r3710/545 /tmp/r3710/546 /tmp/r3710/547 /tmp/r3710/548 /tmp/r3710/549 /tmp/r3710/550 /tmp/r3710/551 /tmp/r3710/552 /tmp/r3710/553 /tmp/r3710/554 /tmp/r3710/555 /tmp/r3710/556 /tmp/r3710/557 /tmp/r3710/558 /tmp/r3710/559 /tmp/r3710/560 /tmp/r3710/561 /tmp/r3710/562 /tmp/r3710/563 /tmp/r3710/564 /tmp/r3710/565 /tmp/r3710/566 /tmp/r3710/567 /tmp/r3710/568 /tmp/r3710/569 /tmp/r3710/570 /tmp/r3710/571 /tmp/r3710/572 /tmp/r3710/573 /tmp/r3710/574 /tmp/r3710/575 /tmp/r3710/576 /tmp/r3710/577 /tmp/r3710/578 /tmp/r3710/579 /tmp/r3710/580 /tmp/r3710/581 /tmp/r3710/582 /tmp/r3710/583 /tmp/r3710/584 /tmp/r3710/585 /tmp/r3710/586 /tmp/r3710/587 /tmp/r3710/588 /tmp/r3710/589 /tmp/r3710/590 /tmp/r3710/591 /tmp/r3710/592 /tmp/r3710/593 /tmp/r3710/594 /tmp/r3710/595 /tmp/r3710/596 /tmp/r3710/597 /tmp/r3710/598 /tmp/r3710/599 /tmp/r3710/600 /tmp/r3710/601 /tmp/r3710/602 /tmp/r3710/603 /tmp/r3710/604 /tmp/r3710/605 /tmp/r3710/606 /tmp/r3710/607 /tmp/r3710/608 /tmp/r3710/609 /tmp/r3710/610 /tmp/r3710/611 /tmp/r3710/612 /tmp/r3710/613 /tmp/r3710/614 /tmp/r3710/615 /tmp/r3710/616 /tmp/r3710/617 /tmp/r3710/618 /tmp/r3710/619 /tmp/r3710/620 /tmp/r3710/621 /tmp/r3710/622 /tmp/r3710/623 /tmp/r3710/624 /tmp/r3710/625 /tmp/r3710/626 /tmp/r3710/627 /tmp/r3710/628 /tmp/r3710/629 /tmp/r3710/630 /tmp/r3710/631 /tmp/r3710/632 /tmp/r3710/633 /tmp/r3710/634 /tmp/r3710/635 /tmp/r3710/636 /tmp/r3710/637 /tmp/r3710/638 /tmp/r3710/639 /tmp/r3710/640 /tmp/r3710/641 /tmp/r3710/642 /tmp/r3710/643 /tmp/r3710/644 /tmp/r3710/645 /tmp/r3710/646 /tmp/r3710/647 /tmp/r3710/648 /tmp/r3710/649 /tmp/r3710/650 /tmp/r3710/651 /tmp/r3710/652 /tmp/r3710/653 /tmp/r3710/654 /tmp/r3710/655 /tmp/r3710/656 /tmp/r3710/657 /tmp/r3710/658 /tmp/r3710/659 /tmp/r3710/660 /tmp/r3710/661 /tmp/r3710/662 /tmp/r3710/663 /tmp/r3710/664 /tmp/r3710/665 /tmp/r3710/666 /tmp/r3710/667 /tmp/r3710/668 /tmp/r3710/669 /tmp/r3710/670 /tmp/r3710/671 /tmp/r3710/672 /tmp/r3710/673 /tmp/r3710/674 /tmp/r3710/675 /tmp/r3710/676 /tmp/r3710/677 /tmp/r3710/678 /tmp/r3710/679 /tmp/r3710/680 /tmp/r3710/681 /tmp/r3710/682 /tmp/r3710/683 /tmp/r3710/684 /tmp/r3710/685 /tmp/r3710/686 /tmp/r3710/687 /tmp/r3710/688 /tmp/r3710/689 /tmp/r3710/690 /tmp/r3710/691 /tmp/r3710/692 /tmp/r3710/693 /tmp/r3710/694 /tmp/r3710/695 /tmp/r3710/696 /tmp/r3710/697 /tmp/r3710/698 /tmp/r3710/699 /tmp/r3710/700 /tmp/r3710/701 /tmp/r3710/702 /tmp/r3710/703 /tmp/r3710/704 /tmp/r3710/705 /tmp/r3710/706 /tmp/r3710/707 /tmp/r3710/708 /tmp/r3710/709 /tmp/r3710/710 /tmp/r3710/711 /tmp/r3710/712 /tmp/r3710/713 /tmp/r3710/714 /tmp/r3710/715 /tmp/r3710/716 /tmp/r3710/717 /tmp/r3710/718 /tmp/r3710/719 /tmp/r3710/720 /tmp/r3710/721 /tmp/r3710/722 /tmp/r3710/723 /tmp/r3710/724 /tmp/r3710/725 /tmp/r3710/726 /tmp/r3710/727 /tmp/r3710/728 /tmp/r3710/729 /tmp/r3710/730 /tmp/r3710/731 /tmp/r3710/732 /tmp/r3710/733 /tmp/r3710/734 /tmp/r3710/735 /tmp/r3710/736 /tmp/r3710/737 /tmp/r3710/738 /tmp/r3710/739 /tmp/r3710/740 /tmp/r3710/741 /tmp/r3710/742 /tmp/r3710/743 /tmp/r3710/744 /tmp/r3710/745 /tmp/r3710/746 /tmp/r3710/747 /tmp/r3710/748 /tmp/r3710/749 /tmp/r3710/750 /tmp/r3710/751 /tmp/r3710/752 /tmp/r3710/753 /tmp/r3710/754 /tmp/r3710/755 /tmp/r3710/756 /tmp/r3710/757 /tmp/r3710/758 /tmp/r3710/759 /tmp/r3710/760 /tmp/r3710/761 /tmp/r3710/762 /tmp/r3710/763 /tmp/r3710/764 /tmp/r3710/765 /tmp/r3710/766 /tmp/r3710/767 /tmp/r3710/768 /tmp/r3710/769 /tmp/r3710/770 /tmp/r3710/771 /tmp/r3710/772 /tmp/r3710/773 /tmp/r3710/774 /tmp/r3710/775 /tmp/r3710/776 /tmp/r3710/777 /tmp/r3710/778 /tmp/r3710/779 /tmp/r3710/780 /tmp/r3710/781 /tmp/r3710/782 /tmp/r3710/783 /tmp/r3710/784 /tmp/r3710/785 /tmp/r3710/786 /tmp/r3710/787 /tmp/r3710/788 /tmp/r3710/789 /tmp/r3710/790 /tmp/r3710/791 /tmp/r3710/792 /tmp/r3710/793 /tmp/r3710/794 /tmp/r3710/795 /tmp/r3710/796 /tmp/r3710/797 /tmp/r3710/798 /tmp/r3710/799 /tmp/r3710/800 /tmp/r3710/801 /tmp/r3710/802 /tmp/r3710/803 /tmp/r3710/804 /tmp/r3710/805 /tmp/r3710/806 /tmp/r3710/807 /tmp/r3710/808 /tmp/r3710/809 /tmp/r3710/810 /tmp/r3710/811 /tmp/r3710/812 /tmp/r3710/813 /tmp/r3710/814 /tmp/r3710/815 /tmp/r3710/816 /tmp/r3710/817 /tmp/r3710/818 /tmp/r3710/819 /tmp/r3710/820 /tmp/r3710/821 /tmp/r3710/822 /tmp/r3710/823 /tmp/r3710/824 /tmp/r3710/825 /tmp/r3710/826 /tmp/r3710/827 /tmp/r3710/828 /tmp/r3710/829 /tmp/r3710/830 /tmp/r3710/831 /tmp/r3710/832 /tmp/r3710/833 /tmp/r3710/834 /tmp/r3710/835 /tmp/r3710/836 /tmp/r3710/837 /tmp/r3710/838 /tmp/r3710/839 /tmp/r3710/840 /tmp/r3710/841 /tmp/r3710/842 /tmp/r3710/843 /tmp/r3710/844 /tmp/r3710/845 /tmp/r3710/846 /tmp/r3710/847 /tmp/r3710/848 /tmp/r3710/849 /tmp/r3710/850 /tmp/r3710/851 /tmp/r3710/852 /tmp/r3710/853 /tmp/r3710/854 /tmp/r3710/855 /tmp/r3710/856 /tmp/r3710/857 /tmp/r3710/858 /tmp/r3710/859 /tmp/r3710/860 /tmp/r3710/861 /tmp/r3710/862 /tmp/r3710/863 /tmp/r3710/864 /tmp/r3710/865 /tmp/r3710/866 /tmp/r3710/867 /tmp/r3710/868 /tmp/r3710/869 /tmp/r3710/870 /tmp/r3710/871 /tmp/r3710/872 /tmp/r3710/873 /tmp/r3710/874 /tmp/r3710/875 /tmp/r3710/876 /tmp/r3710/877 /tmp/r3710/878 /tmp/r3710/879 /tmp/r3710/880 /tmp/r3710/881 /tmp/r3710/882 /tmp/r3710/883 /tmp/r3710/884 /tmp/r3710/885 /tmp/r3710/886 /tmp/r3710/887 /tmp/r3710/888 /tmp/r3710/889 /tmp/r3710/890 /tmp/r3710/891 /tmp/r3710/892 /tmp/r3710/893 /tmp/r3710/894 /tmp/r3710/895 /tmp/r3710/896 /tmp/r3710/897 /tmp/r3710/898 /tmp/r3710/899 /tmp/r3710/900 /tmp/r3710/901 /tmp/r3710/902 /tmp/r3710/903 /tmp/r3710/904 /tmp/r3710/905 /tmp/r3710/906 /tmp/r3710/907 /tmp/r3710/908 /tmp/r3710/909 /tmp/r3710/910 /tmp/r3710/911 /tmp/r3710/912 /tmp/r3710/913 /tmp/r3710/914 /tmp/r3710/915 /tmp/r3710/916 /tmp/r3710/917 /tmp/r3710/918 /tmp/r3710/919 /tmp/r3710/920 /tmp/r3710/921 /tmp/r3710/922 /tmp/r3710/923 /tmp/r3710/924 /tmp/r3710/925 /tmp/r3710/926 /tmp/r3710/927 /tmp/r3710/928 /tmp/r3710/929 /tmp/r3710/930 /tmp/r3710/931 /tmp/r3710/932 /tmp/r3710/933 /tmp/r3710/934 /tmp/r3710/935 /tmp/r3710/936 /tmp/r3710/937 /tmp/r3710/938 /tmp/r3710/939 /tmp/r3710/940 /tmp/r3710/941 /tmp/r3710/942 /tmp/r3710/943 /tmp/r3710/944 /tmp/r3710/945 /tmp/r3710/946 /tmp/r3710/947 /tmp/r3710/948 /tmp/r3710/949 /tmp/r3710/950 /tmp/r3710/951 /tmp/r3710/952 /tmp/r3710/953 /tmp/r3710/954 /tmp/r3710/955 /tmp/r3710/956 /tmp/r3710/957 /tmp/r3710/958 /tmp/r3710/959 /tmp/r3710/960 /tmp/r3710/961 /tmp/r3710/962 /tmp/r3710/963 /tmp/r3710/964 /tmp/r3710/965 /tmp/r3710/966 /tmp/r3710/967 /tmp/r3710/968 /tmp/r3710/969 /tmp/r3710/970 /tmp/r3710/971 /tmp/r3710/972 /tmp/r3710/973 /tmp/r3710/974 /tmp/r3710/975 /tmp/r3710/976 /tmp/r3710/977 /tmp/r3710/978 /tmp/r3710/979 /tmp/r3710/980 /tmp/r3710/981 /tmp/r3710/982 /tmp/r3710/983 /tmp/r3710/984 /tmp/r3710/985 /tmp/r3710/986 /tmp/r3710/987 /tmp/r3710/988 /tmp/r3710/989 /tmp/r3710/990 /tmp/r3710/991 /tmp/r3710/992 /tmp/r3710/993 /tmp/r3710/994 /tmp/r3710/995 /tmp/r3710/996 /tmp/r3710/997 /tmp/r3710/998 /tmp/r3710/999 /tmp/r3710/1000 /tmp/r3710/1001 /tmp/r3710/1002 /tmp/r3710/1003 /tmp/r3710/1004 /tmp/r3710/1005 /tmp/r3710/1006 /tmp/r3710/1007 /tmp/r3710/1008 /tmp/r3710/1009 /tmp/r3710/1010 /tmp/r3710/1011 /tmp/r3710/1012 /tmp/r3710/1013 /tmp/r3710/1014 /tmp/r3710/1015 /tmp/r3710/1016 /tmp/r3710/1017 /tmp/r3710/1018 /tmp/r3710/1019 /tmp/r3710/1020 /tmp/r3710/1021 /tmp/r3710/1022 /tmp/r3710/1023 /tmp/r3710/1024 /tmp/r3710/1025 /tmp/r3710/1026 /tmp/r3710/1027 /tmp/r3710/1028 /tmp/r3710/1029 /tmp/r3710/1030 /tmp/r3710/1031 /tmp/r3710/1032 /tmp/r3710/1033 /tmp/r3710/1034 /tmp/r3710/1035 /tmp/r3710/1036 /tmp/r3710/1037 /tmp/r3710/1038 /tmp/r3710/1039 /tmp/r3710/1040 /tmp/r3710/1041 /tmp/r3710/1042 /tmp/r3710/1043 /tmp/r3710/1044 /tmp/r3710/1045 /tmp/r3710/1046 /tmp/r3710/1047 /tmp/r3710/1048 /tmp/r3710/1049 /tmp/r3710/1050 /tmp/r3710/1051 /tmp/r3710/1052 /tmp/r3710/1053 /tmp/r3710/1054 /tmp/r3710/1055 /tmp/r3710/1056 /tmp/r3710/1057 /tmp/r3710/1058 /tmp/r3710/1059 /tmp/r3710/1060 /tmp/r3710/1061 /tmp/r3710/1062 /tmp/r3710/1063 /tmp/r3710/1064 /tmp/r3710/1065 /tmp/r3710/1066 /tmp/r3710/1067 /tmp/r3710/1068 /tmp/r3710/1069 /tmp/r3710/1070 /tmp/r3710/1071 /tmp/r3710/1072 /tmp/r3710/1073 /tmp/r3710/1074 /tmp/r3710/1075 /tmp/r3710/1076 /tmp/r3710/1077 /tmp/r3710/1078 /tmp/r3710/1079 /tmp/r3710/1080 /tmp/r3710/1081 /tmp/r3710/1082 /tmp/r3710/1083 /tmp/r3710/1084 /tmp/r3710/1085 /tmp/r3710/1086 /tmp/r3710/1087 /tmp/r3710/1088 /tmp/r3710/1089 /tmp/r3710/1090 /tmp/r3710/1091 /tmp/r3710/1092 /tmp/r3710/1093 /tmp/r3710/1094 /tmp/r3710/1095 /tmp/r3710/1096 /tmp/r3710/1097 /tmp/r3710/1098 /tmp/r3710/1099 ~; do rm -rf $d; done",
+  "cwd": "work",
+  "base": {
+   "unrelated": "HIGH",
+   "owner": "HIGH"
+  }
+ },
+ {
+  "source": "test_classification_accuracy",
+  "cmd": "for x in a0 a1 a2 a3 a4 a5 a6 a7 a8 a9 a10 a11 a12 a13 a14 a15 a16 a17 a18 a19 a20 a21 a22 a23 a24 a25 a26 a27 a28 a29 a30 a31 a32 a33 a34 a35 a36 a37 a38 a39; do for y in b0 b1 b2 b3 b4 b5 b6 b7 b8 b9 b10 b11 b12 b13 b14 b15 b16 b17 b18 b19 b20 b21 b22 b23 b24 b25 b26 b27 b28 b29 b30 b31 b32 b33 b34 b35 b36 b37 b38 b39 ..; do rm -rf \"/tmp/r3710/$x/$y\"; done; done",
+  "cwd": "work",
+  "base": {
+   "unrelated": "HIGH",
+   "owner": "HIGH"
+  }
+ },
+ {
+  "source": "test_classification_accuracy",
+  "cmd": "for y in /x /y \"\"; do D=$y; done; for y in /tmp/z ~; do rm -rf \"$y$D\"; done",
+  "cwd": "work",
+  "base": {
+   "unrelated": "CRITICAL",
+   "owner": "CRITICAL"
+  }
+ },
+ {
+  "source": "test_classification_accuracy",
+  "cmd": "node scripts/ledger-assemble.mjs --locale fr --receipt {home}/.local-operator/sessions/aaaaaaaaaaaa/scratchpad/receipts/r-fr.json --result clean",
+  "cwd": "work/ui",
+  "base": {
+   "unrelated": "HIGH",
+   "owner": "LOW"
+  }
+ },
+ {
+  "source": "test_classification_accuracy",
+  "cmd": "node scripts/untracked.mjs --receipt {home}/.local-operator/sessions/aaaaaaaaaaaa/scratchpad/receipts/r-fr.json",
+  "cwd": "work/ui",
+  "base": {
+   "unrelated": "HIGH",
+   "owner": "LOW"
+  }
+ },
+ {
+  "source": "test_classification_accuracy",
+  "cmd": "node scripts/ledger-assemble.mjs --out {home}/.local-operator/sessions/aaaaaaaaaaaa/scratchpad/receipts/r-fr.json",
+  "cwd": "work/ui",
+  "base": {
+   "unrelated": "HIGH",
+   "owner": "LOW"
+  }
+ },
+ {
+  "source": "test_classification_accuracy",
+  "cmd": "node scripts/ledger-assemble.mjs -o {home}/.local-operator/sessions/aaaaaaaaaaaa/scratchpad/receipts/r-fr.json",
+  "cwd": "work/ui",
+  "base": {
+   "unrelated": "HIGH",
+   "owner": "LOW"
+  }
+ },
+ {
+  "source": "test_classification_accuracy",
+  "cmd": "node scripts/ledger-assemble.mjs --write-receipt={home}/.local-operator/sessions/aaaaaaaaaaaa/scratchpad/receipts/r-fr.json",
+  "cwd": "work/ui",
+  "base": {
+   "unrelated": "HIGH",
+   "owner": "LOW"
+  }
+ },
+ {
+  "source": "test_classification_accuracy",
+  "cmd": "node scripts/ledger-assemble.mjs -i {home}/.local-operator/sessions/aaaaaaaaaaaa/scratchpad/receipts/r-fr.json",
+  "cwd": "work/ui",
+  "base": {
+   "unrelated": "HIGH",
+   "owner": "LOW"
+  }
+ },
+ {
+  "source": "test_classification_accuracy",
+  "cmd": "node scripts/ledger-assemble.mjs --in-place {home}/.local-operator/sessions/aaaaaaaaaaaa/scratchpad/receipts/r-fr.json",
+  "cwd": "work/ui",
+  "base": {
+   "unrelated": "HIGH",
+   "owner": "LOW"
+  }
+ },
+ {
+  "source": "test_classification_accuracy",
+  "cmd": "node scripts/ledger-assemble.mjs --inplace {home}/.local-operator/sessions/aaaaaaaaaaaa/scratchpad/receipts/r-fr.json",
+  "cwd": "work/ui",
+  "base": {
+   "unrelated": "HIGH",
+   "owner": "LOW"
+  }
+ },
+ {
+  "source": "test_classification_accuracy",
+  "cmd": "node scripts/ledger-assemble.mjs --in-place={home}/.local-operator/sessions/aaaaaaaaaaaa/scratchpad/receipts/r-fr.json",
+  "cwd": "work/ui",
+  "base": {
+   "unrelated": "HIGH",
+   "owner": "LOW"
+  }
+ },
+ {
+  "source": "test_classification_accuracy",
+  "cmd": "node -e 'x' {home}/.local-operator/sessions/aaaaaaaaaaaa/scratchpad/receipts/r-fr.json",
+  "cwd": "work/ui",
+  "base": {
+   "unrelated": "HIGH",
+   "owner": "LOW"
+  }
+ },
+ {
+  "source": "test_classification_accuracy",
+  "cmd": "node scripts/ledger-assemble.mjs --receipt {home}/.local-operator/sessions/cccccccccccc/scratchpad/receipts/r-fr.json",
+  "cwd": "work/ui",
+  "base": {
+   "unrelated": "HIGH",
+   "owner": "HIGH"
+  }
+ },
+ {
+  "source": "test_classification_accuracy",
+  "cmd": "node scripts/ledger-assemble.mjs --receipt {home}/.local-operator/sessions/aaaaaaaaaaaa/scratchpad/lnk/secret.md",
+  "cwd": "work/ui",
+  "base": {
+   "unrelated": "HIGH",
+   "owner": "LOW"
+  }
+ },
+ {
+  "source": "test_classification_accuracy",
+  "cmd": "stat -f 'stage-receipt.json bytes=%z' {home}/.local-operator/sessions/aaaaaaaaaaaa/scratchpad/ui1888-native-stage-ehzeemcn/stage-receipt.json; node -e 'const fs=require(\"fs\");const m=JSON.parse(fs.readFileSync(\"{home}/.local-operator/sessions/aaaaaaaaaaaa/scratchpad/ui1888-native-stage-ehzeemcn/bundle/manifest.json\"));console.log(\"Manifest-listed executable/package files=\"+m.files.length)'",
+  "cwd": "work",
+  "base": {
+   "unrelated": "HIGH",
+   "owner": "LOW"
+  }
+ },
+ {
+  "source": "test_classification_accuracy",
+  "cmd": "stat -f 'stage-receipt.json bytes=%z' {home}/.local-operator/sessions/bbbbbbbbbbbb/scratchpad/ui1888-native-stage-ehzeemcn/stage-receipt.json; node -e 'const fs=require(\"fs\");const m=JSON.parse(fs.readFileSync(\"{home}/.local-operator/sessions/bbbbbbbbbbbb/scratchpad/ui1888-native-stage-ehzeemcn/bundle/manifest.json\"));console.log(\"Manifest-listed executable/package files=\"+m.files.length)'",
+  "cwd": "work",
+  "base": {
+   "unrelated": "HIGH",
+   "owner": "HIGH"
+  }
+ },
+ {
+  "source": "test_classification_accuracy",
+  "cmd": "stat -f 'stage-receipt.json bytes=%z' {home}/.local-operator/sessions/ffffffffffff/scratchpad/ui1888-native-stage-ehzeemcn/stage-receipt.json; node -e 'const fs=require(\"fs\");const m=JSON.parse(fs.readFileSync(\"{home}/.local-operator/sessions/ffffffffffff/scratchpad/ui1888-native-stage-ehzeemcn/bundle/manifest.json\"));console.log(\"Manifest-listed executable/package files=\"+m.files.length)'",
+  "cwd": "work",
+  "base": {
+   "unrelated": "HIGH",
+   "owner": "HIGH"
+  }
+ },
+ {
+  "source": "test_classification_accuracy",
+  "cmd": "rm -rf {home}/.local-operator/sessions/aaaaaaaaaaaa/scratchpad",
+  "cwd": "work",
+  "base": {
+   "unrelated": "HIGH",
+   "owner": "LOW"
+  }
+ },
+ {
+  "source": "test_classification_accuracy",
+  "cmd": "rm -rf {home}/.local-operator/sessions/aaaaaaaaaaaa/scratchpad/ui1888-native-stage-ehzeemcn",
+  "cwd": "work",
+  "base": {
+   "unrelated": "HIGH",
+   "owner": "LOW"
+  }
+ },
+ {
+  "source": "test_classification_accuracy",
+  "cmd": "rm -f {home}/.local-operator/sessions/aaaaaaaaaaaa/scratchpad/ui1888-native-stage-ehzeemcn/bundle/manifest.json",
+  "cwd": "work",
+  "base": {
+   "unrelated": "HIGH",
+   "owner": "LOW"
+  }
+ },
+ {
+  "source": "test_classification_accuracy",
+  "cmd": "echo x > {home}/.local-operator/sessions/aaaaaaaaaaaa/scratchpad/ui1888-native-stage-ehzeemcn/bundle/manifest.json",
+  "cwd": "work",
+  "base": {
+   "unrelated": "HIGH",
+   "owner": "LOW"
+  }
+ },
+ {
+  "source": "test_classification_accuracy",
+  "cmd": "mv {home}/.local-operator/sessions/aaaaaaaaaaaa/scratchpad/ui1888-native-stage-ehzeemcn/bundle/manifest.json ~/work/x",
+  "cwd": "work",
+  "base": {
+   "unrelated": "HIGH",
+   "owner": "LOW"
+  }
+ },
+ {
+  "source": "test_classification_accuracy",
+  "cmd": "node tool.mjs -o {home}/.local-operator/sessions/aaaaaaaaaaaa/scratchpad/ui1888-native-stage-ehzeemcn/bundle/manifest.json",
+  "cwd": "work",
+  "base": {
+   "unrelated": "HIGH",
+   "owner": "LOW"
+  }
+ },
+ {
+  "source": "test_classification_accuracy",
+  "cmd": "node -e 'x' {home}/.local-operator/sessions/aaaaaaaaaaaa/transcript.jsonl",
+  "cwd": "work",
+  "base": {
+   "unrelated": "HIGH",
+   "owner": "HIGH"
+  }
+ },
+ {
+  "source": "test_classification_accuracy",
+  "cmd": "rm -rf {home}/.local-op*",
+  "cwd": "work",
+  "base": {
+   "unrelated": "CRITICAL",
+   "owner": "CRITICAL"
+  }
+ },
+ {
+  "source": "test_classification_accuracy",
+  "cmd": "node -e 'x' {home}/.local-operator*",
+  "cwd": "work",
+  "base": {
+   "unrelated": "HIGH",
+   "owner": "HIGH"
+  }
+ },
+ {
+  "source": "test_classification_accuracy",
+  "cmd": "node -e 'x' {home}/.local-operator/sessions/aaaaaaaaaaaa/scratchpad/lnk/secret.md",
+  "cwd": "work",
+  "base": {
+   "unrelated": "HIGH",
+   "owner": "LOW"
+  }
+ },
+ {
+  "source": "test_classification_accuracy",
+  "cmd": "shasum -a 256 {home}/.local-operator/sessions/bbbbbbbbbbbb/scratchpad/consent-native-supervisor.mjs; sed -n '1,135p' {home}/.local-operator/sessions/bbbbbbbbbbbb/scratchpad/consent-native-supervisor.mjs; sed -n '7,23p' {home}/.local-operator/sessions/bbbbbbbbbbbb/scratchpad/consent-guards.cjs; tail -9 {home}/.local-operator/sessions/bbbbbbbbbbbb/scratchpad/consent-guards.cjs",
+  "cwd": "work",
+  "base": {
+   "unrelated": "LOW",
+   "owner": "LOW"
+  }
+ },
+ {
+  "source": "test_classification_accuracy",
+  "cmd": "node --test --test-concurrency=1 {home}/.local-operator/sessions/bbbbbbbbbbbb/scratchpad/consent-static.test.cjs",
+  "cwd": "work",
+  "base": {
+   "unrelated": "HIGH",
+   "owner": "HIGH"
+  }
+ },
+ {
+  "source": "test_classification_accuracy",
+  "cmd": "set +e\nenv -u NODE_OPTIONS LOCAL_OPERATOR_SCRATCHPAD={home}/.local-operator/sessions/bbbbbbbbbbbb/scratchpad PYTHONPATH={home}/work python3 {home}/work/run_bounded.py --contract=command-status --timeout 170 -- node {home}/.local-operator/sessions/bbbbbbbbbbbb/scratchpad/consent-native-supervisor.mjs --manifest {home}/.local-operator/sessions/aaaaaaaaaaaa/scratchpad/ui1888-native-stage-ehzeemcn/bundle/manifest.json --binding-audit {home}/.local-operator/sessions/ffffffffffff/scratchpad/audit.json 2>&1 | tee {home}/.local-operator/sessions/aaaaaaaaaaaa/scratchpad/ui1888-native-stage-ehzeemcn/native-run.log\nrc=${PIPESTATUS[0]}\nexit \"$rc\"",
+  "cwd": "work",
+  "base": {
+   "unrelated": "HIGH",
+   "owner": "HIGH"
+  }
+ },
+ {
+  "source": "test_classification_accuracy",
+  "cmd": "set +e\nenv -u NODE_OPTIONS PYTHONPATH={home}/work python3 {home}/work/run_bounded.py --contract=command-status --timeout 170 -- node {home}/.local-operator/sessions/bbbbbbbbbbbb/scratchpad/consent-native-supervisor.mjs --manifest {home}/.local-operator/sessions/aaaaaaaaaaaa/scratchpad/ui1888-native-stage-ehzeemcn/bundle/manifest.json --binding-audit {home}/.local-operator/sessions/ffffffffffff/scratchpad/audit.json 2>&1 | tee {home}/.local-operator/sessions/aaaaaaaaaaaa/scratchpad/ui1888-native-stage-ehzeemcn/native-run.log\nrc=${PIPESTATUS[0]}\nexit \"$rc\"",
+  "cwd": "work",
+  "base": {
+   "unrelated": "HIGH",
+   "owner": "HIGH"
+  }
+ },
+ {
+  "source": "test_classification_accuracy",
+  "cmd": "set +e\nenv -u NODE_OPTIONS LOCAL_OPERATOR_SCRATCHPAD={home}/.local-operator/sessions/bbbbbbbbbbbb/scratchpad/consent-native-supervisor.mjs PYTHONPATH={home}/work python3 {home}/work/run_bounded.py --contract=command-status --timeout 170 -- node {home}/.local-operator/sessions/bbbbbbbbbbbb/scratchpad/consent-native-supervisor.mjs --manifest {home}/.local-operator/sessions/aaaaaaaaaaaa/scratchpad/ui1888-native-stage-ehzeemcn/bundle/manifest.json --binding-audit {home}/.local-operator/sessions/ffffffffffff/scratchpad/audit.json 2>&1 | tee {home}/.local-operator/sessions/aaaaaaaaaaaa/scratchpad/ui1888-native-stage-ehzeemcn/native-run.log\nrc=${PIPESTATUS[0]}\nexit \"$rc\"",
+  "cwd": "work",
+  "base": {
+   "unrelated": "HIGH",
+   "owner": "HIGH"
+  }
+ },
+ {
+  "source": "test_classification_accuracy",
+  "cmd": "env -u NODE_OPTIONS node /x/.local-operator/sessions/s/scratchpad/a.mjs",
+  "cwd": "../tmp",
+  "base": {
+   "unrelated": "LOW",
+   "owner": "LOW"
+  }
+ },
+ {
+  "source": "test_classification_accuracy",
+  "cmd": "node -e 'const f=require(\"fs\");f[\"rm\"+\"Sync\"](process.argv[1],{recursive:true})' {home}/.local-operator/sessions/aaaaaaaaaaaa/scratchpad",
+  "cwd": "work",
+  "base": {
+   "unrelated": "HIGH",
+   "owner": "LOW"
+  }
+ },
+ {
+  "source": "test_classification_accuracy",
+  "cmd": "node -e 'const f=require(\"fs\");f[\"rm\"+\"Sync\"](process.argv[1],{recursive:true})' {home}/.local-operator/sessions/aaaaaaaaaaaa/scratchpad/ui1888-native-stage-ehzeemcn",
+  "cwd": "work",
+  "base": {
+   "unrelated": "HIGH",
+   "owner": "LOW"
+  }
+ },
+ {
+  "source": "test_classification_accuracy",
+  "cmd": "python3 -c 'import shutil as s,sys;getattr(s,\"rm\"+\"tree\")(sys.argv[1])' {home}/.local-operator/sessions/bbbbbbbbbbbb/scratchpad",
+  "cwd": "work",
+  "base": {
+   "unrelated": "HIGH",
+   "owner": "HIGH"
+  }
+ },
+ {
+  "source": "test_classification_accuracy",
+  "cmd": "node ~/x {home}/.local-operator/sessions/bbbbbbbbbbbb/scratchpad",
+  "cwd": "work",
+  "base": {
+   "unrelated": "HIGH",
+   "owner": "HIGH"
+  }
+ },
+ {
+  "source": "test_classification_accuracy",
+  "cmd": "node ~/x {home}/.local-operator/sessions/aaaaaaaaaaaa/scratchpad/ui1888-native-stage-ehzeemcn/bundle",
+  "cwd": "work",
+  "base": {
+   "unrelated": "HIGH",
+   "owner": "LOW"
+  }
+ },
+ {
+  "source": "test_classification_accuracy",
+  "cmd": "node -e 'const f=require(\"fs\");f[\"rm\"+\"Sync\"](process.argv[1],{recursive:true})' {home}/.local-operator/sessions/aaaaaaaaaaaa/scratchpad/ui1888-native-stage-ehzeemcn/bundle/manifest.json",
+  "cwd": "work",
+  "base": {
+   "unrelated": "HIGH",
+   "owner": "LOW"
+  }
+ },
+ {
+  "source": "test_classification_accuracy",
+  "cmd": "node ~/x {home}/.local-operator/sessions/aaaaaaaaaaaa/scratchpad/ui1888-native-stage-ehzeemcn/bundle/manifest.json",
+  "cwd": "work",
+  "base": {
+   "unrelated": "HIGH",
+   "owner": "LOW"
+  }
+ },
+ {
+  "source": "test_classification_accuracy",
+  "cmd": "python3 -c 'import pathlib; pathlib.Path(\"{home}/.local-operator/sessions/aaaaaaaaaaaa/scratchpad/ui1888-native-stage-ehzeemcn/bundle/manifest.json\").unlink()'",
+  "cwd": "work",
+  "base": {
+   "unrelated": "HIGH",
+   "owner": "HIGH"
+  }
+ },
+ {
+  "source": "test_classification_accuracy",
+  "cmd": "python3 -Ic 'import pathlib; pathlib.Path(\"{home}/.local-operator/sessions/aaaaaaaaaaaa/scratchpad/ui1888-native-stage-ehzeemcn/bundle/manifest.json\").unlink()'",
+  "cwd": "work",
+  "base": {
+   "unrelated": "HIGH",
+   "owner": "LOW"
+  }
+ },
+ {
+  "source": "test_classification_accuracy",
+  "cmd": "python3 -W ignore -c 'import pathlib; pathlib.Path(\"{home}/.local-operator/sessions/aaaaaaaaaaaa/scratchpad/ui1888-native-stage-ehzeemcn/bundle/manifest.json\").unlink()'",
+  "cwd": "work",
+  "base": {
+   "unrelated": "HIGH",
+   "owner": "HIGH"
+  }
+ },
+ {
+  "source": "test_classification_accuracy",
+  "cmd": "python3 '-cimport pathlib; pathlib.Path(\"{home}/.local-operator/sessions/aaaaaaaaaaaa/scratchpad/ui1888-native-stage-ehzeemcn/bundle/manifest.json\").unlink()'",
+  "cwd": "work",
+  "base": {
+   "unrelated": "HIGH",
+   "owner": "LOW"
+  }
+ },
+ {
+  "source": "test_classification_accuracy",
+  "cmd": "./python3 -c 'print(open(\"{home}/.local-operator/sessions/aaaaaaaaaaaa/scratchpad/ui1888-native-stage-ehzeemcn/bundle/manifest.json\").read())'",
+  "cwd": "work",
+  "base": {
+   "unrelated": "HIGH",
+   "owner": "LOW"
+  }
+ },
+ {
+  "source": "test_classification_accuracy",
+  "cmd": "python3 -c 'print(open(\"{home}/.local-operator/sessions/aaaaaaaaaaaa/scratchpad/ui1888-native-stage-ehzeemcn/bundle/manifest.json\").read())'",
+  "cwd": "work",
+  "base": {
+   "unrelated": "HIGH",
+   "owner": "LOW"
+  }
+ },
+ {
+  "source": "test_classification_accuracy",
+  "cmd": "python3 ~/x {home}/.local-operator/sessions/aaaaaaaaaaaa/scratchpad/ui1888-native-stage-ehzeemcn/bundle/manifest.json",
+  "cwd": "work",
+  "base": {
+   "unrelated": "HIGH",
+   "owner": "LOW"
+  }
+ },
+ {
+  "source": "test_classification_accuracy",
+  "cmd": "python3 -m json.tool {home}/.local-operator/sessions/aaaaaaaaaaaa/scratchpad/ui1888-native-stage-ehzeemcn/bundle/manifest.json",
+  "cwd": "work",
+  "base": {
+   "unrelated": "HIGH",
+   "owner": "LOW"
+  }
+ },
+ {
+  "source": "test_classification_accuracy",
+  "cmd": "/usr/bin/env python3 -c 'import pathlib; pathlib.Path(\"{home}/.local-operator/sessions/aaaaaaaaaaaa/scratchpad/ui1888-native-stage-ehzeemcn/bundle/manifest.json\").write_text(\"x\")'",
+  "cwd": "work",
+  "base": {
+   "unrelated": "HIGH",
+   "owner": "LOW"
+  }
+ },
+ {
+  "source": "test_classification_accuracy",
+  "cmd": "env python3 -c 'import pathlib; pathlib.Path(\"{home}/.local-operator/sessions/aaaaaaaaaaaa/scratchpad/ui1888-native-stage-ehzeemcn/bundle/manifest.json\").write_text(\"x\")'",
+  "cwd": "work",
+  "base": {
+   "unrelated": "HIGH",
+   "owner": "LOW"
+  }
+ },
+ {
+  "source": "test_classification_accuracy",
+  "cmd": "command python3 -c 'import pathlib; pathlib.Path(\"{home}/.local-operator/sessions/aaaaaaaaaaaa/scratchpad/ui1888-native-stage-ehzeemcn/bundle/manifest.json\").write_text(\"x\")'",
+  "cwd": "work",
+  "base": {
+   "unrelated": "HIGH",
+   "owner": "LOW"
+  }
+ },
+ {
+  "source": "test_classification_accuracy",
+  "cmd": "nice python3 -c 'import pathlib; pathlib.Path(\"{home}/.local-operator/sessions/aaaaaaaaaaaa/scratchpad/ui1888-native-stage-ehzeemcn/bundle/manifest.json\").write_text(\"x\")'",
+  "cwd": "work",
+  "base": {
+   "unrelated": "HIGH",
+   "owner": "LOW"
+  }
+ },
+ {
+  "source": "test_classification_accuracy",
+  "cmd": "echo x | xargs python3 -c 'import pathlib; pathlib.Path(\"{home}/.local-operator/sessions/aaaaaaaaaaaa/scratchpad/ui1888-native-stage-ehzeemcn/bundle/manifest.json\").write_text(\"x\")'",
+  "cwd": "work",
+  "base": {
+   "unrelated": "HIGH",
+   "owner": "LOW"
+  }
+ },
+ {
+  "source": "test_classification_accuracy",
+  "cmd": "env python3 -c 'print(open(\"{home}/.local-operator/sessions/aaaaaaaaaaaa/scratchpad/ui1888-native-stage-ehzeemcn/bundle/manifest.json\").read())'",
+  "cwd": "work",
+  "base": {
+   "unrelated": "HIGH",
+   "owner": "LOW"
+  }
+ },
+ {
+  "source": "test_classification_accuracy",
+  "cmd": "python3 --check-hash-based-pycs always -c 'import pathlib; pathlib.Path(\"{home}/.local-operator/sessions/aaaaaaaaaaaa/scratchpad/ui1888-native-stage-ehzeemcn/bundle/manifest.json\").write_text(\"x\")'",
+  "cwd": "work",
+  "base": {
+   "unrelated": "HIGH",
+   "owner": "LOW"
+  }
+ },
+ {
+  "source": "test_classification_accuracy",
+  "cmd": "python3 --check-hash-based-pycs=always -c 'import pathlib; pathlib.Path(\"{home}/.local-operator/sessions/aaaaaaaaaaaa/scratchpad/ui1888-native-stage-ehzeemcn/bundle/manifest.json\").write_text(\"x\")'",
+  "cwd": "work",
+  "base": {
+   "unrelated": "HIGH",
+   "owner": "LOW"
+  }
+ },
+ {
+  "source": "test_classification_accuracy",
+  "cmd": "python3 --no-such-option -c 'import pathlib; pathlib.Path(\"{home}/.local-operator/sessions/aaaaaaaaaaaa/scratchpad/ui1888-native-stage-ehzeemcn/bundle/manifest.json\").write_text(\"x\")'",
+  "cwd": "work",
+  "base": {
+   "unrelated": "HIGH",
+   "owner": "LOW"
+  }
+ },
+ {
+  "source": "test_classification_accuracy",
+  "cmd": "python3 --check-hash-based-pycs always ~/x {home}/.local-operator/sessions/aaaaaaaaaaaa/scratchpad/ui1888-native-stage-ehzeemcn/bundle/manifest.json",
+  "cwd": "work",
+  "base": {
+   "unrelated": "HIGH",
+   "owner": "LOW"
+  }
+ },
+ {
+  "source": "test_classification_accuracy",
+  "cmd": "node -e 'x' {home}/.local-operator/sessions/aaaaaaaaaaaa/scratchpad/ui1888-native-stage-ehzeemcn/bundle/manifest.json",
+  "cwd": "work",
+  "base": {
+   "unrelated": "HIGH",
+   "owner": "LOW"
+  }
+ },
+ {
+  "source": "test_classification_accuracy",
+  "cmd": "env node -e 'x' {home}/.local-operator/sessions/aaaaaaaaaaaa/scratchpad/ui1888-native-stage-ehzeemcn/bundle/manifest.json",
+  "cwd": "work",
+  "base": {
+   "unrelated": "HIGH",
+   "owner": "LOW"
+  }
+ },
+ {
+  "source": "test_classification_accuracy",
+  "cmd": "node -e 'x' {home}/.local-operator/sessions/aaaaaaaaaaaa/scratchpad/m-link.json",
+  "cwd": "work",
+  "base": {
+   "unrelated": "HIGH",
+   "owner": "LOW"
+  }
+ },
+ {
+  "source": "test_classification_accuracy",
+  "cmd": "node -e 'x' {home}/.local-operator/sessions/aaaaaaaaaaaa/scratchpad/missing.json",
+  "cwd": "work",
+  "base": {
+   "unrelated": "HIGH",
+   "owner": "LOW"
+  }
+ },
+ {
+  "source": "test_classification_accuracy",
+  "cmd": "sed -n 's/x/rm -rf ~/e' {home}/.local-operator/sessions/bbbbbbbbbbbb/scratchpad/ui1888-native-stage-ehzeemcn/bundle/manifest.json",
+  "cwd": "work",
+  "base": {
+   "unrelated": "HIGH",
+   "owner": "HIGH"
+  }
+ },
+ {
+  "source": "test_classification_accuracy",
+  "cmd": "sed '1e rm -rf ~/work' {home}/.local-operator/sessions/bbbbbbbbbbbb/scratchpad/ui1888-native-stage-ehzeemcn/bundle/manifest.json",
+  "cwd": "work",
+  "base": {
+   "unrelated": "HIGH",
+   "owner": "HIGH"
+  }
+ },
+ {
+  "source": "test_classification_accuracy",
+  "cmd": "sed -f ~/x {home}/.local-operator/sessions/bbbbbbbbbbbb/scratchpad/ui1888-native-stage-ehzeemcn/bundle/manifest.json",
+  "cwd": "work",
+  "base": {
+   "unrelated": "HIGH",
+   "owner": "HIGH"
+  }
+ },
+ {
+  "source": "test_classification_accuracy",
+  "cmd": "sed --file=$HOME/x {home}/.local-operator/sessions/bbbbbbbbbbbb/scratchpad/ui1888-native-stage-ehzeemcn/bundle/manifest.json",
+  "cwd": "work",
+  "base": {
+   "unrelated": "HIGH",
+   "owner": "HIGH"
+  }
+ },
+ {
+  "source": "test_classification_accuracy",
+  "cmd": "sed -nf ~/x {home}/.local-operator/sessions/bbbbbbbbbbbb/scratchpad/ui1888-native-stage-ehzeemcn/bundle/manifest.json",
+  "cwd": "work",
+  "base": {
+   "unrelated": "HIGH",
+   "owner": "HIGH"
+  }
+ },
+ {
+  "source": "test_classification_accuracy",
+  "cmd": "sed -I '' 's/a/b/' {home}/.local-operator/sessions/aaaaaaaaaaaa/scratchpad/ui1888-native-stage-ehzeemcn/bundle/manifest.json",
+  "cwd": "work",
+  "base": {
+   "unrelated": "HIGH",
+   "owner": "LOW"
+  }
+ },
+ {
+  "source": "test_classification_accuracy",
+  "cmd": "sed -I.bak 's/a/b/' {home}/.local-operator/sessions/aaaaaaaaaaaa/scratchpad/ui1888-native-stage-ehzeemcn/bundle/manifest.json",
+  "cwd": "work",
+  "base": {
+   "unrelated": "HIGH",
+   "owner": "LOW"
+  }
+ },
+ {
+  "source": "test_classification_accuracy",
+  "cmd": "sed -nI '' 's/a/b/' {home}/.local-operator/sessions/aaaaaaaaaaaa/scratchpad/ui1888-native-stage-ehzeemcn/bundle/manifest.json",
+  "cwd": "work",
+  "base": {
+   "unrelated": "HIGH",
+   "owner": "LOW"
+  }
+ },
+ {
+  "source": "test_classification_accuracy",
+  "cmd": "sed -I .bak 's/a/b/' {home}/work/f.txt",
+  "cwd": "work",
+  "base": {
+   "unrelated": "LOW",
+   "owner": "LOW"
+  }
+ },
+ {
+  "source": "test_classification_accuracy",
+  "cmd": "sed -EI '' 's/a/b/' {home}/work/f.txt",
+  "cwd": "work",
+  "base": {
+   "unrelated": "LOW",
+   "owner": "LOW"
+  }
+ },
+ {
+  "source": "test_classification_accuracy",
+  "cmd": "sudo rm -rf {home}/work",
+  "cwd": "work",
+  "base": {
+   "unrelated": "HIGH",
+   "owner": "LOW"
+  }
+ },
+ {
+  "source": "test_classification_accuracy",
+  "cmd": "sudo --unset rm -rf {home}/work",
+  "cwd": "work",
+  "base": {
+   "unrelated": "HIGH",
+   "owner": "LOW"
+  }
+ },
+ {
+  "source": "test_classification_accuracy",
+  "cmd": "env --unset FOO rm -rf {home}/work",
+  "cwd": "work",
+  "base": {
+   "unrelated": "HIGH",
+   "owner": "LOW"
+  }
+ },
+ {
+  "source": "test_classification_accuracy",
+  "cmd": "env -u FOO -S 'rm -rf ~/.local-operator'",
+  "cwd": "work",
+  "base": {
+   "unrelated": "CRITICAL",
+   "owner": "CRITICAL"
+  }
+ },
+ {
+  "source": "test_classification_accuracy",
+  "cmd": "env --unset FOO -S 'rm -rf ~/.local-operator'",
+  "cwd": "work",
+  "base": {
+   "unrelated": "CRITICAL",
+   "owner": "CRITICAL"
+  }
+ },
+ {
+  "source": "test_classification_accuracy",
+  "cmd": "env -i -u FOO --split-string='rm -rf ~/.local-operator'",
+  "cwd": "work",
+  "base": {
+   "unrelated": "CRITICAL",
+   "owner": "CRITICAL"
+  }
+ },
+ {
+  "source": "test_classification_accuracy",
+  "cmd": "env -iS 'rm -rf ~/.local-operator'",
+  "cwd": "work",
+  "base": {
+   "unrelated": "CRITICAL",
+   "owner": "CRITICAL"
+  }
+ },
+ {
+  "source": "test_classification_accuracy",
+  "cmd": "env -i -u A -S 'node ~/x {home}/.local-operator/sessions/cccccccccccc/scratchpad'",
+  "cwd": "work",
+  "base": {
+   "unrelated": "HIGH",
+   "owner": "HIGH"
+  }
+ },
+ {
+  "source": "test_classification_accuracy",
+  "cmd": "env -S 'node ~/x {home}/.local-operator/sessions/cccccccccccc/scratchpad'",
+  "cwd": "work",
+  "base": {
+   "unrelated": "HIGH",
+   "owner": "HIGH"
+  }
+ },
+ {
+  "source": "test_classification_accuracy",
+  "cmd": "env -C /tmp -S 'node ~/x {home}/.local-operator/sessions/cccccccccccc/scratchpad'",
+  "cwd": "work",
+  "base": {
+   "unrelated": "HIGH",
+   "owner": "HIGH"
+  }
+ },
+ {
+  "source": "test_classification_accuracy",
+  "cmd": "env -u FOO -S 'node ~/x ~/.local-operator/sessions'",
+  "cwd": "work",
+  "base": {
+   "unrelated": "HIGH",
+   "owner": "HIGH"
+  }
+ },
+ {
+  "source": "test_classification_accuracy",
+  "cmd": "env -S'rm -rf ~'",
+  "cwd": "work",
+  "base": {
+   "unrelated": "CRITICAL",
+   "owner": "CRITICAL"
+  }
+ },
+ {
+  "source": "test_classification_accuracy",
+  "cmd": "env -u FOO -S 'cat {home}/.local-operator/sessions/aaaaaaaaaaaa/scratchpad/notes.txt'",
+  "cwd": "work",
+  "base": {
+   "unrelated": "LOW",
+   "owner": "LOW"
+  }
+ },
+ {
+  "source": "test_classification_accuracy",
+  "cmd": "env -u FOO -S 'rm -rf ~/x'",
+  "cwd": "work",
+  "base": {
+   "unrelated": "HIGH",
+   "owner": "HIGH"
+  }
+ },
+ {
+  "source": "test_classification_accuracy",
+  "cmd": "env -S 'rm\\_-rf\\_${HOME}'",
+  "cwd": "work",
+  "base": {
+   "unrelated": "CRITICAL",
+   "owner": "CRITICAL"
+  }
+ },
+ {
+  "source": "test_classification_accuracy",
+  "cmd": "env -S 'rm\\_-rf\\_{home}/.local-operator/sessions/cccccccccccc/scratchpad'",
+  "cwd": "work",
+  "base": {
+   "unrelated": "HIGH",
+   "owner": "HIGH"
+  }
+ },
+ {
+  "source": "test_classification_accuracy",
+  "cmd": "env -u A -S 'rm\\_-rf\\_{home}/.local-operator/sessions/cccccccccccc/scratchpad'",
+  "cwd": "work",
+  "base": {
+   "unrelated": "HIGH",
+   "owner": "HIGH"
+  }
+ },
+ {
+  "source": "test_classification_accuracy",
+  "cmd": "env -S 'rm\\_{home}/.local-operator/sessions/cccccccccccc/scratchpad/n.txt'",
+  "cwd": "work",
+  "base": {
+   "unrelated": "HIGH",
+   "owner": "HIGH"
+  }
+ },
+ {
+  "source": "test_classification_accuracy",
+  "cmd": "env -S \"env -S 'rm -rf \\${HOME}'\"",
+  "cwd": "work",
+  "base": {
+   "unrelated": "CRITICAL",
+   "owner": "CRITICAL"
+  }
+ },
+ {
+  "source": "test_classification_accuracy",
+  "cmd": "env -S \"env -S 'rm -rf ~/'\"",
+  "cwd": "work",
+  "base": {
+   "unrelated": "CRITICAL",
+   "owner": "CRITICAL"
+  }
+ },
+ {
+  "source": "test_classification_accuracy",
+  "cmd": "env -C /tmp -S 'rm -rf ~/'",
+  "cwd": "work",
+  "base": {
+   "unrelated": "CRITICAL",
+   "owner": "CRITICAL"
+  }
+ },
+ {
+  "source": "test_classification_accuracy",
+  "cmd": "env -C /tmp -S 'rm -rf {home}/.local-operator/sessions/bbbbbbbbbbbb/scratchpad/x.mjs'",
+  "cwd": "work",
+  "base": {
+   "unrelated": "HIGH",
+   "owner": "HIGH"
+  }
+ },
+ {
+  "source": "test_classification_accuracy",
+  "cmd": "env -S 'env -S '\"'\"'env -S '\"'\"'\"'\"'\"'\"'\"'\"'env -S '\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'cat {home}/.local-operator/sessions/aaaaaaaaaaaa/scratchpad/notes.txt'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"''\"'\"'\"'\"'\"'\"'\"'\"''\"'\"''",
+  "cwd": "work",
+  "base": {
+   "unrelated": "LOW",
+   "owner": "LOW"
+  }
+ },
+ {
+  "source": "test_classification_accuracy",
+  "cmd": "env -S 'env -S '\"'\"'env -S '\"'\"'\"'\"'\"'\"'\"'\"'env -S '\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'env -S '\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'cat {home}/.local-operator/sessions/aaaaaaaaaaaa/scratchpad/notes.txt'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"''\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"'\"''\"'\"'\"'\"'\"'\"'\"'\"''\"'\"''",
+  "cwd": "work",
+  "base": {
+   "unrelated": "HIGH",
+   "owner": "HIGH"
+  }
+ },
+ {
+  "source": "test_classification_accuracy",
+  "cmd": "env -C /tmp rm -rf ~",
+  "cwd": "work",
+  "base": {
+   "unrelated": "CRITICAL",
+   "owner": "CRITICAL"
+  }
+ },
+ {
+  "source": "test_classification_accuracy",
+  "cmd": "env -C /tmp rm -rf \"$HOME\"",
+  "cwd": "work",
+  "base": {
+   "unrelated": "CRITICAL",
+   "owner": "CRITICAL"
+  }
+ },
+ {
+  "source": "test_classification_accuracy",
+  "cmd": "env -iC /tmp rm -rf ~",
+  "cwd": "work",
+  "base": {
+   "unrelated": "CRITICAL",
+   "owner": "CRITICAL"
+  }
+ },
+ {
+  "source": "test_classification_accuracy",
+  "cmd": "env -a foo rm -rf ~/x",
+  "cwd": "work",
+  "base": {
+   "unrelated": "HIGH",
+   "owner": "HIGH"
+  }
+ },
+ {
+  "source": "test_classification_accuracy",
+  "cmd": "env -P /bin rm -rf ~",
+  "cwd": "work",
+  "base": {
+   "unrelated": "CRITICAL",
+   "owner": "CRITICAL"
+  }
+ },
+ {
+  "source": "test_classification_accuracy",
+  "cmd": "env --argv0 foo rm -rf ~",
+  "cwd": "work",
+  "base": {
+   "unrelated": "CRITICAL",
+   "owner": "CRITICAL"
+  }
+ },
+ {
+  "source": "test_classification_accuracy",
+  "cmd": "node scripts/ledger-assemble.mjs --receipt {home}/.local-operator/sessions/aaaaaaaaaaaa/scratchpad/receipts/r-fr.json",
+  "cwd": "work/ui",
+  "base": {
+   "unrelated": "HIGH",
+   "owner": "LOW"
+  }
+ },
+ {
+  "source": "test_classification_accuracy",
+  "cmd": "node scripts/ledger-assemble.mjs --receipt {home}/.local-operator/sessions/aaaaaaaaaaaa/scratchpad/receipts/r-fr.json",
+  "cwd": ".local-operator/sessions/bbbbbbbbbbbb/scratchpad/rig",
+  "base": {
+   "unrelated": "HIGH",
+   "owner": "HIGH"
+  }
+ },
+ {
+  "source": "test_classification_accuracy",
+  "cmd": "node scripts/ledger-assemble.mjs --receipt {home}/.local-operator/sessions/aaaaaaaaaaaa/transcript.jsonl > {home}/.local-operator/sessions/aaaaaaaaaaaa/transcript.jsonl",
+  "cwd": "work/ui",
+  "base": {
+   "unrelated": "CRITICAL",
+   "owner": "CRITICAL"
+  }
+ },
+ {
+  "source": "review",
+  "cmd": "cd ~/a; for r in sub .; do (cd $r; cd ..; cd ~; cd -; rm -rf .local-operator); done",
+  "cwd": ".",
+  "base": {
+   "unrelated": "CRITICAL",
+   "owner": "CRITICAL"
+  }
+ },
+ {
+  "source": "review",
+  "cmd": "cd ~/a; for r in sub .; do (cd $r; for s in ..; do cd $s; done; rm -rf .local-operator); done",
+  "cwd": ".",
+  "base": {
+   "unrelated": "CRITICAL",
+   "owner": "CRITICAL"
+  }
+ },
+ {
+  "source": "review",
+  "cmd": "cd ~/a; for r in sub .; do for s in ..; do (cd $r; cd $s; cd /tmp; cd -; rm -rf .local-operator); done; done",
+  "cwd": ".",
+  "base": {
+   "unrelated": "CRITICAL",
+   "owner": "CRITICAL"
+  }
+ },
+ {
+  "source": "review",
+  "cmd": "cd ~/a; for r in sub /tmp; do (cd $r; cd ..; rm -rf .local-operator); done",
+  "cwd": ".",
+  "base": {
+   "unrelated": "CRITICAL",
+   "owner": "CRITICAL"
+  }
+ },
+ {
+  "source": "review",
+  "cmd": "cd ~; for r in $(ls) .; do (cd $r; rm -rf .local-operator); done",
+  "cwd": ".",
+  "base": {
+   "unrelated": "CRITICAL",
+   "owner": "CRITICAL"
+  }
+ },
+ {
+  "source": "review",
+  "cmd": "cd ~; for r in $(ls) .; do (cd .; cd $r; rm -rf .local-operator); done",
+  "cwd": ".",
+  "base": {
+   "unrelated": "HIGH",
+   "owner": "HIGH"
+  }
+ },
+ {
+  "source": "review",
+  "cmd": "cd ~; for r in $(ls) .; do for s in .; do (cd $r; cd $s; rm -rf .local-operator); done; done",
+  "cwd": ".",
+  "base": {
+   "unrelated": "CRITICAL",
+   "owner": "CRITICAL"
+  }
+ },
+ {
+  "source": "review",
+  "cmd": "cd ~; for r in . $(ls); do (cd $r; rm -rf .local-operator); done",
+  "cwd": ".",
+  "base": {
+   "unrelated": "CRITICAL",
+   "owner": "CRITICAL"
+  }
+ },
+ {
+  "source": "review",
+  "cmd": "cd ~; for r in a .; do (cd $r && git worktree remove .worktrees/x); done",
+  "cwd": ".",
+  "base": {
+   "unrelated": "LOW",
+   "owner": "LOW"
+  }
+ },
+ {
+  "source": "review",
+  "cmd": "cd ~; for r in a .; do (cd $r; cd /tmp; cd \"$OLDPWD\"; rm -rf .local-operator); done",
+  "cwd": ".",
+  "base": {
+   "unrelated": "CRITICAL",
+   "owner": "CRITICAL"
+  }
+ },
+ {
+  "source": "review",
+  "cmd": "cd ~; for r in a .; do (cd $r; cd /tmp; cd \"$OLDPWD/sub\"; rm -rf .local-operator); done",
+  "cwd": ".",
+  "base": {
+   "unrelated": "HIGH",
+   "owner": "HIGH"
+  }
+ },
+ {
+  "source": "review",
+  "cmd": "cd ~; for r in a .; do (cd $r; cd /tmp; cd -; cd -; cd -; rm -rf .local-operator); done",
+  "cwd": ".",
+  "base": {
+   "unrelated": "CRITICAL",
+   "owner": "CRITICAL"
+  }
+ },
+ {
+  "source": "review",
+  "cmd": "cd ~; for r in a .; do (cd $r; cd /tmp; cd -; rm -rf .local-operator); done",
+  "cwd": ".",
+  "base": {
+   "unrelated": "CRITICAL",
+   "owner": "CRITICAL"
+  }
+ },
+ {
+  "source": "review",
+  "cmd": "cd ~; for r in a .; do (cd $r; cd /tmp; cd ~-; rm -rf .local-operator); done",
+  "cwd": ".",
+  "base": {
+   "unrelated": "HIGH",
+   "owner": "HIGH"
+  }
+ },
+ {
+  "source": "review",
+  "cmd": "cd ~; for r in a .; do (cd $r; cd ~; cd -; rm -rf .local-operator); done",
+  "cwd": ".",
+  "base": {
+   "unrelated": "CRITICAL",
+   "owner": "CRITICAL"
+  }
+ },
+ {
+  "source": "review",
+  "cmd": "cd ~; for r in a .; do (cd $r; git clean -fdx); done",
+  "cwd": ".",
+  "base": {
+   "unrelated": "CRITICAL",
+   "owner": "CRITICAL"
+  }
+ },
+ {
+  "source": "review",
+  "cmd": "cd ~; for r in a .; do (cd $r; pushd /tmp; popd; rm -rf .local-operator); done",
+  "cwd": ".",
+  "base": {
+   "unrelated": "HIGH",
+   "owner": "HIGH"
+  }
+ },
+ {
+  "source": "review",
+  "cmd": "cd ~; for r in a .; do (cd $r; rm -rf .local-operator); break; done",
+  "cwd": ".",
+  "base": {
+   "unrelated": "CRITICAL",
+   "owner": "CRITICAL"
+  }
+ },
+ {
+  "source": "review",
+  "cmd": "cd ~; for r in a .; do for s in . ..; do (cd $r; cd $s; rm -rf .local-operator); break; done; done",
+  "cwd": ".",
+  "base": {
+   "unrelated": "CRITICAL",
+   "owner": "CRITICAL"
+  }
+ },
+ {
+  "source": "review",
+  "cmd": "cd ~; for r in a .; do for s in . ..; do (cd $r; cd $s; rm -rf .local-operator); continue; done; done",
+  "cwd": ".",
+  "base": {
+   "unrelated": "CRITICAL",
+   "owner": "CRITICAL"
+  }
+ },
+ {
+  "source": "review",
+  "cmd": "cd ~; for r in a .; do for s in . /tmp; do (cd $r; cd $s; rm -rf .local-operator); done; done",
+  "cwd": ".",
+  "base": {
+   "unrelated": "CRITICAL",
+   "owner": "CRITICAL"
+  }
+ },
+ {
+  "source": "review",
+  "cmd": "cd ~; for r in a .; do for s in .; do (cd $r; cd $s; cd /tmp; cd -; rm -rf .local-operator); done; done",
+  "cwd": ".",
+  "base": {
+   "unrelated": "CRITICAL",
+   "owner": "CRITICAL"
+  }
+ },
+ {
+  "source": "review",
+  "cmd": "cd ~; for r in a .; do for s in .; do (cd $r; pushd $s; rm -rf .local-operator); done; done",
+  "cwd": ".",
+  "base": {
+   "unrelated": "CRITICAL",
+   "owner": "CRITICAL"
+  }
+ },
+ {
+  "source": "review",
+  "cmd": "cd ~; for r in a .; do for s in .; do (pushd $r; cd $s; rm -rf .local-operator); done; done",
+  "cwd": ".",
+  "base": {
+   "unrelated": "CRITICAL",
+   "owner": "CRITICAL"
+  }
+ },
+ {
+  "source": "review",
+  "cmd": "cd ~; for r in a .; do for s in /tmp ..; do (cd $r; cd $s; rm -rf .local-operator); done; done",
+  "cwd": ".",
+  "base": {
+   "unrelated": "LOW",
+   "owner": "LOW"
+  }
+ },
+ {
+  "source": "review",
+  "cmd": "cd ~; for r in a .; do for s in /tmp .; do (cd $r; cd $s; rm -rf .local-operator); done; done",
+  "cwd": ".",
+  "base": {
+   "unrelated": "LOW",
+   "owner": "LOW"
+  }
+ },
+ {
+  "source": "review",
+  "cmd": "cd ~; for r in a .; do for s in sub .; do for t in .; do (cd $r; cd $s; cd $t; rm -rf .local-operator); done; done; done",
+  "cwd": ".",
+  "base": {
+   "unrelated": "HIGH",
+   "owner": "HIGH"
+  }
+ },
+ {
+  "source": "review",
+  "cmd": "cd ~; for r in a .; do for s in ~ ..; do (cd $r; cd $s; rm -rf .local-operator); done; done",
+  "cwd": ".",
+  "base": {
+   "unrelated": "CRITICAL",
+   "owner": "CRITICAL"
+  }
+ },
+ {
+  "source": "review",
+  "cmd": "cd ~; for r in a .; do for s in ~/a .; do (cd $r; cd $s; rm -rf .local-operator); done; done",
+  "cwd": ".",
+  "base": {
+   "unrelated": "LOW",
+   "owner": "LOW"
+  }
+ },
+ {
+  "source": "review",
+  "cmd": "cd ~; for r in ~/a/sub ~/a; do (cd $r; for s in ..; do cd $s; done; rm -rf .local-operator); done",
+  "cwd": ".",
+  "base": {
+   "unrelated": "LOW",
+   "owner": "LOW"
+  }
+ },
+ {
+  "source": "review",
+  "cmd": "cd ~; if true; then (cd a; rm -rf ../.local-operator); fi",
+  "cwd": ".",
+  "base": {
+   "unrelated": "LOW",
+   "owner": "LOW"
+  }
+ },
+ {
+  "source": "review",
+  "cmd": "cd ~; while read r; do (cd $r; rm -rf .local-operator); done",
+  "cwd": ".",
+  "base": {
+   "unrelated": "CRITICAL",
+   "owner": "CRITICAL"
+  }
+ },
+ {
+  "source": "review",
+  "cmd": "for r in . ..; do (cd $r); rm -rf .local-operator; done",
+  "cwd": ".",
+  "base": {
+   "unrelated": "CRITICAL",
+   "owner": "CRITICAL"
+  }
+ }
+]

@@ -38,6 +38,7 @@ import itertools
 import os
 import re
 from collections.abc import Mapping, Sequence
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 
 from local_operator.tools.search_guard import (
@@ -1011,6 +1012,11 @@ class _State:
     #: ``cd`` left it, so ``cd -`` re-enters iteration-dependent ground even
     #: though that ``cd`` cleared the flag (review R2-m1, PR #3964).
     oldpwd_later_unknown: bool = False
+    #: The fan ``cwd_fan`` held when the last ``cd`` left it, i.e. every later
+    #: iteration's ``OLDPWD``. ``cd -`` / ``cd "$OLDPWD"`` restore it as the
+    #: fan (review R3-M1, PR #3964: ``(cd $r; cd /tmp; cd -; rm -rf
+    #: .local-operator)`` lost the ``~`` iteration and ranked LOW).
+    oldpwd_fan: tuple[str, ...] = ()
 
 
 def kernel_path(raw: str | None) -> str | None:
@@ -1601,6 +1607,27 @@ def _peel_wrappers(words: list[Expanded]) -> tuple[list[Expanded], bool]:
 _KEYWORD_SUBSHELL_RE = re.compile(r"^(?:(?:then|do|else|elif|if|while|until|!)\s+)+(?=\((?!\())")
 
 
+@dataclass
+class _CwdModel:
+    """Which cwd model the running ``resolve_command`` pass uses.
+
+    See :func:`resolve_command`: the loop-cd modelling this PR added (the
+    ``do (`` peel, the per-iteration cwd fan, the later-unknown flags) may
+    only ADD delete targets to what the pre-PR model resolved. The second,
+    ``base`` pass replays the pre-PR model, and ``engaged`` tells the first
+    pass whether any of that new modelling ran at all (so the replay is
+    skipped for the vast majority of commands, which never reach it).
+    """
+
+    base: bool = False
+    engaged: bool = False
+
+
+#: Set by ``resolve_command`` for the length of one pass; ``None`` outside it
+#: (a helper called directly then behaves as the current model).
+_CWD_MODEL: ContextVar[_CwdModel | None] = ContextVar("_CWD_MODEL", default=None)
+
+
 def _peel_subshell_keyword(text: str) -> str:
     """``do (cd $r`` -> ``(cd $r``: the subshell a loop or branch body opens.
 
@@ -1612,8 +1639,18 @@ def _peel_subshell_keyword(text: str) -> str:
     never made. Peeling the keyword lets the ``(`` open a real subshell
     scope and the ``cd`` move the cwd inside it. ``((`` is arithmetic and
     is left alone.
+
+    The BASE-model pass of ``resolve_command`` leaves the text as it was
+    before this peel existed (the ``cd`` dropped, the body read at the outer
+    cwd), so its delete targets can be unioned with this model's.
     """
-    return _KEYWORD_SUBSHELL_RE.sub("", text)
+    model = _CWD_MODEL.get()
+    if model is not None and model.base:
+        return text
+    peeled = _KEYWORD_SUBSHELL_RE.sub("", text)
+    if model is not None and peeled != text:
+        model.engaged = True
+    return peeled
 
 
 def _strip_grouping(text: str) -> str:
@@ -2644,6 +2681,7 @@ class _Snapshot:
     cwd_fan: tuple[str, ...] = ()
     cwd_later_unknown: bool = False
     oldpwd_later_unknown: bool = False
+    oldpwd_fan: tuple[str, ...] = ()
 
 
 class _Walker:
@@ -2724,6 +2762,7 @@ class _Walker:
             st.cwd_fan,
             st.cwd_later_unknown,
             st.oldpwd_later_unknown,
+            st.oldpwd_fan,
         )
 
     def _restore(self, snap: _Snapshot) -> None:
@@ -2733,6 +2772,7 @@ class _Walker:
         self.state.cwd_fan = snap.cwd_fan
         self.state.cwd_later_unknown = snap.cwd_later_unknown
         self.state.oldpwd_later_unknown = snap.oldpwd_later_unknown
+        self.state.oldpwd_fan = snap.oldpwd_fan
 
     def _isolated_walk(self, command: str, depth: int) -> None:
         """Walk text that runs in a CHILD shell: its cd/assignments never leak."""
@@ -3511,10 +3551,14 @@ class _Walker:
             st.cwd = None
             st.cwd_later_unknown = False  # ``cwd`` None already covers it
             st.oldpwd_later_unknown = False  # OLDPWD is dropped below
+            st.oldpwd_fan = ()
             st.private_cwd = private_target
             st.env.pop("OLDPWD", None)
             return
         st.private_cwd = False
+        previous_oldpwd = (
+            os.path.normpath(st.env["OLDPWD"]) if st.env.get("OLDPWD", "").startswith("/") else None
+        )
         if previous is None:
             st.env.pop("OLDPWD", None)
         else:
@@ -3528,7 +3572,18 @@ class _Walker:
             word.text == "-" or any(r[0] == "OLDPWD" for r in word.refs)
         )
         returns_to_unknown = to_oldpwd and st.oldpwd_later_unknown
+        # A landing EXACTLY on OLDPWD (``cd -``, ``cd "$OLDPWD"``) is, in every
+        # iteration, the cwd the previous ``cd`` left in that iteration, so
+        # its fan is the one that ``cd`` left behind (review R3-M1). Anything
+        # built on top (``cd "$OLDPWD/sub"``) is not modelled: if the left fan
+        # was non-empty, later iterations are unknown (fail closed).
+        oldpwd_fan = st.oldpwd_fan
+        exact_oldpwd = to_oldpwd and (
+            word is not None
+            and (word.text == "-" or (previous_oldpwd is not None and path == previous_oldpwd))
+        )
         st.oldpwd_later_unknown = st.cwd_later_unknown
+        st.oldpwd_fan = outer_fan
         fan = self._cwd_fan_for(word, physical, path, previous)
         # ``None``: a later iteration lands somewhere this walk cannot name
         # (review of this change: ``for r in /tmp ~; do cd $r; rm -rf
@@ -3557,6 +3612,15 @@ class _Walker:
         # later cwd) the later iterations stay unknown.
         if returns_to_unknown:
             st.cwd_later_unknown = True
+        if oldpwd_fan:
+            # ADDED to whatever the landing computed above (which may already
+            # be fail-closed), never replacing it.
+            if exact_oldpwd:
+                st.cwd_fan = tuple(
+                    dict.fromkeys(f for f in (*st.cwd_fan, *oldpwd_fan) if f != path)
+                )
+            elif to_oldpwd:
+                st.cwd_later_unknown = True
 
     def _cwd_fan_for(
         self, w: Expanded | None, physical: bool, path: str | None, previous: str | None
@@ -3591,6 +3655,9 @@ class _Walker:
         one (``_add``), which can only raise its rank.
         """
         st = self.state
+        model = _CWD_MODEL.get()
+        if model is not None and model.base:
+            return ()  # the pre-PR model: no fan (see ``resolve_command``)
         if path is None or w is None or w.opaque or w.pattern is not None:
             return ()
         loop_word = bool(w.refs) and any(r[0] in self.for_lists for r in w.refs)
@@ -3695,6 +3762,9 @@ class _Walker:
     def _for(self, words: list[Expanded]) -> None:
         """``for VAR in WORDS``: R6 — literal lists bind VAR to their values."""
         st = self.state
+        model = _CWD_MODEL.get()
+        if model is not None:
+            model.engaged = True  # loop-cd modelling may differ from base's
         var = words[0].text
         values: list[Expanded] = []
         seen_in = False
@@ -5732,14 +5802,63 @@ _RECURSIVE_GLOB_RE = re.compile(r"globstar|\b(?:zsh|ksh|fish|setopt)\b")
 def resolve_command(
     command: str, *, cwd: str | None, env: Mapping[str, str], home: str
 ) -> Resolution:
-    """Every path ``command`` would destroy, resolved statically. Never runs it."""
+    """Every path ``command`` would destroy, resolved statically. Never runs it.
+
+    INVARIANT (review R3, PR #3964): the loop-cd modelling (``do (`` peel,
+    per-iteration cwd fan, later-unknown flags) may only ADD what a command
+    is ranked against, never remove it. Three review waves in a row found a
+    shape where the new model computed a cwd that dropped one iteration's
+    real cwd, so a certain ``~/.local-operator`` delete fell from base's
+    CRITICAL to LOW. Rather than chase shapes, when that modelling ran at all
+    the command is walked a second time under the pre-PR model (``base``:
+    no peel, no fan) and its targets, touches, blind words and opaque
+    reasons are UNIONED into the result. Ranking is a maximum over those,
+    so the result ranks at least as high as either model alone.
+    ``created`` comes from the current model only: creation recording is
+    what the fan exists for (``do (cd $r; git worktree add …)``), and
+    ``provenance.commit_creations`` keeps only paths that really appeared.
+    ``tests/unit/guardrails/test_loop_cd_never_lowers.py`` pins the
+    invariant against base ``3bb7023``.
+    """
+    result = _walk_once(command, cwd=cwd, env=env, home=home, model=_CwdModel())
+    if result.engaged:
+        base = _walk_once(command, cwd=cwd, env=env, home=home, model=_CwdModel(base=True))
+        _union_ranked(result.resolution, base.resolution)
+    return result.resolution
+
+
+@dataclass
+class _Pass:
+    resolution: Resolution
+    engaged: bool
+
+
+def _walk_once(
+    command: str, *, cwd: str | None, env: Mapping[str, str], home: str, model: _CwdModel
+) -> _Pass:
     walker = _Walker(env, cwd, home)
     # Raw text, not parsed words, so a nested ``bash -c``/``zsh -c`` string
     # counts too. Deliberately one-way: ``shopt -u globstar`` is ignored
     # because a wider walk only errs safe (review round 9, NIT-1).
     walker.result.globstar = bool(_RECURSIVE_GLOB_RE.search(command))
+    token = _CWD_MODEL.set(model)
     try:
         walker.walk(command)
     except Exception as exc:  # noqa: BLE001 — a parser fault must not wave a call through
         walker.result.opaque_reasons.append(f"resolver error: {type(exc).__name__}")
-    return walker.result
+    finally:
+        _CWD_MODEL.reset(token)
+    return _Pass(walker.result, model.engaged)
+
+
+def _union_ranked(into: Resolution, extra: Resolution) -> None:
+    """Add every ranked fact of ``extra`` missing from ``into`` (not ``created``)."""
+    for mine, theirs in (
+        (into.targets, extra.targets),
+        (into.touched, extra.touched),
+        (into.blind, extra.blind),
+        (into.opaque_reasons, extra.opaque_reasons),
+    ):
+        for item in theirs:
+            if item not in mine:
+                mine.append(item)

@@ -66,7 +66,10 @@ three routes the checkpoint can verify. Everything CRITICAL is still refused.
   `for r in a b; do (cd $r; git worktree add .worktrees/x); done`; a loop whose
   later cwds cannot be named (a `cd $r` outside a subshell with relative
   values, a value that is not a directory) records nothing for them, and a
-  relative delete after such a `cd` ranks as unresolved.
+  relative delete after such a `cd` ranks as unresolved. That per-loop-value
+  cwd only ever adds to what a delete is ranked against: the delete is also
+  ranked where the guard placed it before it modelled loop `cd`s, so a loop
+  never ranks a delete lower than that.
 - **A session's family shares ownership.** What a session, its parents (any
   ancestor) or its subagents (any descendant) created counts as that session's
   own, with every own-path rule below, so a cleanup subagent may remove the

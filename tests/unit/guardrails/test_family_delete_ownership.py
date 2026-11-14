@@ -43,6 +43,7 @@ from typing import Any
 import pytest
 
 from local_operator.guardrails import provenance as prov
+from local_operator.guardrails import resolve as resolve_module
 from local_operator.guardrails.check import CallContext, GuardSettings, check_tool_call
 from local_operator.guardrails.classify import Risk, classify_bash
 from local_operator.guardrails.resolve import resolve_command
@@ -646,15 +647,25 @@ def test_literal_and_plain_variable_controls_stay_critical(home: Path, command: 
     assert _rank(home, command, U).risk is Risk.CRITICAL
 
 
-def test_inner_loop_cd_over_ordinary_dirs_stays_low(home: Path) -> None:
-    """Over-strictness control: the outer fan is moved, not turned into an
-    unknown cwd, so a delete of ordinary build output stays LOW."""
+def test_inner_loop_cd_over_ordinary_dirs_moves_the_fan(home: Path) -> None:
+    """The outer fan is moved, not turned into an unknown cwd: both real
+    iterations' ``build`` dirs are named, with no unresolved target.
+
+    Review R3 (PR #3964) made the loop-cd model ADD-only: the pre-PR model's
+    targets are unioned in (``resolve_command``). Base never saw this ``cd``
+    (``do (`` hid it) and names ``~/build``, a missing path ranked HIGH, so
+    the command ranks HIGH as on base: the accepted cost of the invariant."""
     for d in ("a", "b"):
         (home / d / "build").mkdir(parents=True)
     command = "cd ~; for r in a b; do for s in .; do (cd $r; cd $s; rm -rf build); done; done"
+    walked = resolve_module._walk_once(
+        command, cwd=str(home), env=_env(home), home=str(home), model=resolve_module._CwdModel()
+    )
+    paths = sorted(t.path for t in walked.resolution.targets)
+    assert paths == [str(home / "a" / "build"), str(home / "b" / "build")]
     targets = resolve_command(command, cwd=str(home), env=_env(home), home=str(home)).targets
-    assert sorted(t.path for t in targets) == [str(home / "a" / "build"), str(home / "b" / "build")]
-    assert _rank(home, command, U).risk is Risk.LOW
+    assert {str(home / "a" / "build"), str(home / "b" / "build")} <= {t.path for t in targets}
+    assert _rank(home, command, U).risk is Risk.HIGH
 
 
 def test_cd_dash_after_a_clearing_cd_in_a_loop_is_unresolved(home: Path) -> None:
