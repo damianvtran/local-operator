@@ -24,6 +24,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import shlex
 import time
 from pathlib import Path
 from typing import Any
@@ -824,6 +825,531 @@ def test_symlink_in_a_siblings_pad_to_a_strangers_pad_stays_high(home: Path) -> 
     verdict = _tree_verdict(home, command, CHILD, repo)
     assert verdict.risk is Risk.HIGH, verdict.reasons
     assert not any("task tree" in r for r in verdict.reasons)
+
+
+# -- 8. one subagent lineage reads its own scratch (2026-11-12, UI #1888) ---------------
+#
+# Field reports under manager a7450d93932d, all reads refused as "another
+# session's files":
+# A. QA child fbd3094083f4 ran ``stat`` plus a ``node -e`` reading the
+#    parent's staged ``manifest.json``. ``stat`` yields no target; the path
+#    literal inside the inline script is an unresolvable read (op ``touch``).
+# B. Reviewer b745482bd2a1 (the QA child's SIBLING) paged the QA child's
+#    frozen files with ``sed -n 'N,Mp'``: sed was never trusted, and its write
+#    check scanned the FILE operands, whose ``sessions`` holds an ``e``.
+# C. The parent ran its descendants' supervisor/audit under ``env -u
+#    NODE_OPTIONS … run_bounded.py -- node <child pad>/x.mjs``; ``-u``'s value
+#    was read as the program ("handed to NODE_OPTIONS").
+
+SIBLING = "eeeeeeeeeeee"
+GRANDCHILD = "ffffffffffff"
+
+
+def _staged_manifest(home: Path, sid: str) -> Path:
+    stage = _pad(home, sid) / "ui1888-native-stage-ehzeemcn"
+    (stage / "bundle").mkdir(parents=True, exist_ok=True)
+    (stage / "stage-receipt.json").write_text("{}\n")
+    manifest = stage / "bundle" / "manifest.json"
+    manifest.write_text('{"files": [1, 2]}\n')
+    return manifest
+
+
+def _field_command(manifest: Path) -> str:
+    """The refused call, byte-for-byte in shape (only the root differs)."""
+    stage = manifest.parent.parent
+    return (
+        f"stat -f 'stage-receipt.json bytes=%z' {stage}/stage-receipt.json; "
+        'node -e \'const fs=require("fs");const m=JSON.parse(fs.readFileSync('
+        f'"{manifest}"));console.log("Manifest-listed executable/package files="'
+        "+m.files.length)'"
+    )
+
+
+def _tree(home: Path) -> None:
+    """PARENT launched CHILD and SIBLING; CHILD launched GRANDCHILD."""
+    for sid in (SIBLING, GRANDCHILD):
+        _pad(home, sid).mkdir(parents=True, exist_ok=True)
+    _child_of(home, CHILD, PARENT)
+    _child_of(home, SIBLING, PARENT)
+    _child_of(home, GRANDCHILD, CHILD)
+
+
+@pytest.mark.parametrize(
+    ("reader", "owner"),
+    [
+        (CHILD, PARENT),  # case A as filed
+        (GRANDCHILD, PARENT),  # full depth upward
+        (PARENT, CHILD),  # descendant
+        (PARENT, GRANDCHILD),  # full depth downward
+    ],
+)
+def test_inline_read_within_one_lineage_is_low(home: Path, reader: str, owner: str) -> None:
+    _tree(home)
+    command = _field_command(_staged_manifest(home, owner))
+    verdict = _tree_verdict(home, command, reader, home / "work")
+    assert verdict.risk is Risk.LOW, verdict.reasons
+
+
+def test_field_read_from_outside_the_lineage_stays_high(home: Path) -> None:
+    """A stranger, a sibling and a cousin keep the HIGH (siblings are not lineage)."""
+    _tree(home)
+    parent_file = _staged_manifest(home, PARENT)
+    child_file = _staged_manifest(home, CHILD)
+    grandchild_file = _staged_manifest(home, GRANDCHILD)
+    cases = [
+        (STRANGER, parent_file, ""),
+        (SIBLING, child_file, f"session {CHILD} is this session's sibling"),
+        # A cousin-shaped relation: SIBLING's nephew is not in its lineage.
+        (SIBLING, grandchild_file, f"session {GRANDCHILD} is this session's sibling"),
+    ]
+    for reader, target, fact in cases:
+        verdict = _tree_verdict(home, _field_command(target), reader, home / "work")
+        assert verdict.risk is Risk.HIGH, (reader, verdict.reasons)
+        if fact:
+            assert any(fact in r for r in verdict.reasons), (reader, verdict.reasons)
+        else:
+            assert not any("task tree" in r for r in verdict.reasons), verdict.reasons
+
+
+def test_opener_link_is_not_a_launcher(home: Path) -> None:
+    """An agent-opened workstream is a separate task: no inherited scratch."""
+    prov.record_lineage(
+        CHILD, origin="workstream", opener=PARENT, state_root=home / ".local-operator"
+    )
+    command = _field_command(_staged_manifest(home, PARENT))
+    assert _tree_verdict(home, command, CHILD, home / "work").risk is Risk.HIGH
+
+
+def test_child_writes_and_deletes_in_a_launchers_scratch_stay_high(home: Path) -> None:
+    """Inheritance covers reads only: the launcher's pad is a live session's state."""
+    _tree(home)
+    manifest = _staged_manifest(home, PARENT)
+    pad = _pad(home, PARENT)
+    for command in (
+        f"rm -rf {pad}",
+        f"rm -rf {manifest.parent.parent}",
+        f"rm -f {manifest}",
+        f"echo x > {manifest}",
+        f"mv {manifest} ~/work/x",
+        f"node tool.mjs -o {manifest}",
+    ):
+        verdict = _tree_verdict(home, command, CHILD, home / "work")
+        assert verdict.risk is Risk.HIGH, (command, verdict.reasons)
+
+
+def test_child_read_of_launchers_evidence_or_state_root_is_unchanged(home: Path) -> None:
+    _tree(home)
+    state = home / ".local-operator"
+    transcript = state / "sessions" / PARENT / "transcript.jsonl"
+    transcript.write_text("{}\n")
+    high = _tree_verdict(home, f"node -e 'x' {transcript}", CHILD, home / "work")
+    assert high.risk is Risk.HIGH, high.reasons
+    glob = _tree_verdict(home, f"rm -rf {home}/.local-op*", CHILD, home / "work")
+    assert glob.risk is Risk.CRITICAL, glob.reasons
+    read_glob = _tree_verdict(home, f"node -e 'x' {home}/.local-operator*", CHILD, home / "work")
+    assert read_glob.risk is Risk.HIGH, read_glob.reasons
+
+
+def test_link_in_a_launchers_pad_to_a_strangers_pad_stays_high(home: Path) -> None:
+    """Every spelling, the realpath included, must land in a launcher's pad."""
+    _tree(home)
+    secret = _pad(home, STRANGER) / "secret.md"
+    secret.write_text("synthetic\n")
+    link = _pad(home, PARENT) / "lnk"
+    link.symlink_to(_pad(home, STRANGER))
+    verdict = _tree_verdict(home, f"node -e 'x' {link}/secret.md", CHILD, home / "work")
+    assert verdict.risk is Risk.HIGH, verdict.reasons
+
+
+def test_case_b_sibling_pages_frozen_files_with_sed_but_cannot_run_them(home: Path) -> None:
+    """Case B: ``sed -n 'N,Mp'`` is a pure read; running a sibling's code is not."""
+    _tree(home)
+    pad = _pad(home, CHILD)
+    for name in ("consent-native-supervisor.mjs", "consent-guards.cjs", "consent-static.test.cjs"):
+        (pad / name).write_text("// synthetic\n")
+    paged = (
+        f"shasum -a 256 {pad}/consent-native-supervisor.mjs; "
+        f"sed -n '1,135p' {pad}/consent-native-supervisor.mjs; "
+        f"sed -n '7,23p' {pad}/consent-guards.cjs; tail -9 {pad}/consent-guards.cjs"
+    )
+    assert _tree_verdict(home, paged, SIBLING, home / "work").risk is Risk.LOW
+    run = f"node --test --test-concurrency=1 {pad}/consent-static.test.cjs"
+    assert _tree_verdict(home, run, SIBLING, home / "work").risk is Risk.HIGH
+
+
+def _case_c(home: Path, scratch_value: str | None) -> str:
+    child, grandchild = _pad(home, CHILD), _pad(home, GRANDCHILD)
+    (child / "consent-native-supervisor.mjs").write_text("// synthetic\n")
+    (grandchild / "audit.json").write_text("{}\n")
+    stage = _staged_manifest(home, PARENT).parent.parent
+    assign = f"LOCAL_OPERATOR_SCRATCHPAD={scratch_value} " if scratch_value else ""
+    return (
+        f"set +e\nenv -u NODE_OPTIONS {assign}PYTHONPATH={home}/work "
+        f"python3 {home}/work/run_bounded.py --contract=command-status --timeout 170 -- "
+        f"node {child}/consent-native-supervisor.mjs --manifest {stage}/bundle/manifest.json "
+        f"--binding-audit {grandchild}/audit.json 2>&1 | tee {stage}/native-run.log\n"
+        'rc=${PIPESTATUS[0]}\nexit "$rc"'
+    )
+
+
+def test_case_c_parent_runs_descendants_files_under_env_unset(home: Path) -> None:
+    """Case C's files are LOW; the child's pad ROOT in an assignment is HIGH.
+
+    As filed (transcript a7450d93932d), the launcher also set
+    ``LOCAL_OPERATOR_SCRATCHPAD=<child pad ROOT>``. A pad root handed to opaque
+    code is the QA-M1 wipe shape, so that one mention stays HIGH by design
+    (PR #3906 round 1; no carve-out keyed on a variable name) and the judge
+    gets its provenance (next test). The files it runs and reads stay LOW.
+    """
+    _tree(home)
+    child = _pad(home, CHILD)
+    as_filed = _tree_verdict(home, _case_c(home, str(child)), PARENT, home / "work")
+    assert as_filed.risk is Risk.HIGH, as_filed.reasons
+    assert [t.target.path for t in as_filed.flagged_targets] == [str(child)]
+    assert not any("NODE_OPTIONS" in r for r in as_filed.reasons)
+    for value in (None, str(child / "consent-native-supervisor.mjs")):
+        verdict = _tree_verdict(home, _case_c(home, value), PARENT, home / "work")
+        assert verdict.risk is Risk.LOW, (value, verdict.reasons)
+    assert _tree_verdict(home, _case_c(home, None), STRANGER, home / "work").risk is Risk.HIGH
+
+
+@pytest.mark.asyncio
+async def test_case_c_judge_is_told_the_root_assignment_provenance(home: Path) -> None:
+    """The judge receives proved facts: whose root, how it arrived, no delete op."""
+    _tree(home)
+    judge = _RecordingJudge()
+    command = _case_c(home, str(_pad(home, CHILD)))
+    outcome = await _check(home, command, PARENT, [], judge)
+    assert outcome.blocked and len(judge.prompts) == 1
+    prompt = judge.prompts[0]
+    for fact in (
+        f"session {CHILD} is this session's descendant in one task tree",
+        "the path is that session's scratchpad root",
+        "it reaches this call only as the inline env assignment LOCAL_OPERATOR_SCRATCHPAD=…",
+        "no recognised delete or write op names it",
+    ):
+        assert fact in prompt, (fact, prompt)
+
+
+@pytest.mark.parametrize(
+    ("argv", "read_only"),
+    [
+        (["-n", "1,135p", "/s/sessions/x/scratchpad/a.mjs"], True),
+        (["-ne", "1p", "f"], True),
+        (["-n", "-e", "7,55p", "f"], True),
+        (["--expression=1,3p", "f"], True),
+        (["-i", "", "1p", "f"], False),
+        (["-ni", "1p", "f"], False),
+        (["--in-place", "p", "f"], False),
+        (["-n", "1w /x", "f"], False),
+        (["-n", "s/a/b/e", "f"], False),
+        (["-f", "script.sed", "f"], False),
+        (["--qui", "1p", "f"], False),  # abbreviated long option: unknown
+    ],
+)
+def test_sed_is_read_only_only_for_a_printing_script(argv: list[str], read_only: bool) -> None:
+    from local_operator.guardrails.resolve import read_only_argv
+
+    assert read_only_argv("sed", argv) is read_only
+
+
+def test_env_unset_value_is_not_the_program() -> None:
+    from local_operator.tools.search_guard import (
+        _WRAPPER_LONG_VALUE_FLAGS,
+        _WRAPPER_VALUE_FLAGS,
+    )
+
+    assert "u" in _WRAPPER_VALUE_FLAGS["env"]
+    # Env-only (review F2 on PR #3906): never a value flag of sudo/nice/timeout.
+    assert "--unset" not in _WRAPPER_LONG_VALUE_FLAGS
+    resolution = resolve_command(
+        "env -u NODE_OPTIONS node /x/.local-operator/sessions/s/scratchpad/a.mjs",
+        cwd="/tmp",
+        env={"HOME": "/h"},
+        home="/h",
+    )
+    assert {t.program for t in resolution.touched} <= {"node"}, resolution.touched
+
+
+def test_subagent_ancestors_follows_parent_links_only(home: Path) -> None:
+    _tree(home)
+    state = home / ".local-operator"
+    assert prov.subagent_ancestors(GRANDCHILD, state_root=state) == [CHILD, PARENT]
+    assert prov.subagent_ancestors(SIBLING, state_root=state) == [PARENT]
+    assert prov.subagent_ancestors(PARENT, state_root=state) == []
+    assert prov.task_tree_root(GRANDCHILD, state_root=state) == PARENT
+    assert prov.task_tree_root(PARENT, state_root=state) == PARENT
+
+
+# -- 8b. PR #3906 round 1: the lineage credit is a FILE read credit ----------------------
+
+_OPAQUE_RMSYNC = (
+    'node -e \'const f=require("fs");f["rm"+"Sync"](process.argv[1],{recursive:true})\''
+)
+_OPAQUE_RMTREE = 'python3 -c \'import shutil as s,sys;getattr(s,"rm"+"tree")(sys.argv[1])\''
+
+
+@pytest.mark.parametrize(
+    ("reader", "owner", "program", "sub"),
+    [
+        (CHILD, PARENT, _OPAQUE_RMSYNC, ""),  # QA M1: the parent's pad ROOT
+        (CHILD, PARENT, _OPAQUE_RMSYNC, "ui1888-native-stage-ehzeemcn"),  # M2: a dir
+        (PARENT, CHILD, _OPAQUE_RMTREE, ""),  # M6: a child's pad root
+        (PARENT, CHILD, "node ~/x", ""),  # D7: opaque script file, pad root
+        (GRANDCHILD, PARENT, "node ~/x", "ui1888-native-stage-ehzeemcn/bundle"),
+    ],
+)
+def test_opaque_program_on_a_lineage_directory_stays_high(
+    home: Path, reader: str, owner: str, program: str, sub: str
+) -> None:
+    """QA Q1: opaque code handed a lineage pad ROOT or DIRECTORY keeps the HIGH."""
+    _tree(home)
+    _staged_manifest(home, owner)
+    target = _pad(home, owner) / sub if sub else _pad(home, owner)
+    verdict = _tree_verdict(home, f"{program} {target}", reader, home / "work")
+    assert verdict.risk is Risk.HIGH, verdict.reasons
+
+
+def test_opaque_program_on_a_lineage_regular_file_is_low(home: Path) -> None:
+    """The three field shapes pass regular files only, so they keep the credit."""
+    _tree(home)
+    manifest = _staged_manifest(home, PARENT)
+    for program in (_OPAQUE_RMSYNC, "node ~/x"):
+        verdict = _tree_verdict(home, f"{program} {manifest}", CHILD, home / "work")
+        assert verdict.risk is Risk.LOW, (program, verdict.reasons)
+
+
+_UNLINK = 'import pathlib; pathlib.Path("{m}").unlink()'
+_READ = 'print(open("{m}").read())'
+#: A write no upstream pass recognises (an ``unlink`` is caught as a delete
+#: before the lineage credit is consulted), so only the guard can rank it.
+_WRITE = 'import pathlib; pathlib.Path("{m}").write_text("x")'
+
+
+@pytest.mark.parametrize(
+    ("program", "expected"),
+    [
+        (f"python3 -c '{_UNLINK}'", Risk.HIGH),
+        (f"python3 -Ic '{_UNLINK}'", Risk.HIGH),  # clustered
+        (f"python3 -W ignore -c '{_UNLINK}'", Risk.HIGH),  # -W takes a value
+        (f"python3 '-c{_UNLINK}'", Risk.HIGH),  # glued
+        (f"./python3 -c '{_READ}'", Risk.HIGH),  # proven code, unpinned interpreter
+        (f"python3 -c '{_READ}'", Risk.LOW),  # #3918's proof holds
+        ("python3 ~/x {m}", Risk.LOW),  # a script file: #3906's opaque credit stands
+        ("python3 -m json.tool {m}", Risk.LOW),  # -m ends the option scan
+        # Convergence review m1: the scan reads the words AFTER the wrapper
+        # prefix, so a wrapped writer is still seen as inline code.
+        (f"/usr/bin/env python3 -c '{_WRITE}'", Risk.HIGH),
+        (f"env python3 -c '{_WRITE}'", Risk.HIGH),
+        (f"command python3 -c '{_WRITE}'", Risk.HIGH),
+        (f"nice python3 -c '{_WRITE}'", Risk.HIGH),
+        (f"echo x | xargs python3 -c '{_WRITE}'", Risk.HIGH),
+        # #3918 fails closed on any wrapper, so proven code behind ``env`` is
+        # not proven here either: no lineage credit (HIGH, as on main).
+        (f"env python3 -c '{_READ}'", Risk.HIGH),
+        # m2: a valued long option's value is not the script, and an unknown
+        # long option fails closed.
+        (f"python3 --check-hash-based-pycs always -c '{_WRITE}'", Risk.HIGH),
+        (f"python3 --check-hash-based-pycs=always -c '{_WRITE}'", Risk.HIGH),
+        (f"python3 --no-such-option -c '{_WRITE}'", Risk.HIGH),
+        ("python3 --check-hash-based-pycs always ~/x {m}", Risk.LOW),  # script file
+        # node keeps #3906's approved opaque credit, bare or wrapped.
+        ("node -e 'x' {m}", Risk.LOW),
+        ("env node -e 'x' {m}", Risk.LOW),
+    ],
+)
+def test_unproven_python_inline_code_gets_no_lineage_credit(
+    home: Path, program: str, expected: Risk
+) -> None:
+    """Convergence of #3906 with #3918: lineage credit never covers unproven ``python -c``.
+
+    #3918's tests cover a parent on its CHILD's pad; this pins the other
+    direction (child on its PARENT's file, #3906's case A shape) and the
+    option spellings ``_python_inline_code`` parses.
+    """
+    _tree(home)
+    manifest = _staged_manifest(home, PARENT)
+    command = program.replace("{m}", str(manifest))
+    verdict = _tree_verdict(home, command, CHILD, home / "work")
+    assert verdict.risk is expected, verdict.reasons
+
+
+def test_lineage_symlink_or_missing_path_gets_no_credit(home: Path) -> None:
+    """A link (even to a lineage file) or a missing path is not a pinned file."""
+    _tree(home)
+    manifest = _staged_manifest(home, PARENT)
+    link = _pad(home, PARENT) / "m-link.json"
+    link.symlink_to(manifest)
+    for target in (link, _pad(home, PARENT) / "missing.json"):
+        verdict = _tree_verdict(home, f"node -e 'x' {target}", CHILD, home / "work")
+        assert verdict.risk is Risk.HIGH, (target, verdict.reasons)
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        "sed -n 's/x/rm -rf ~/e' {f}",  # QA B8: the ``s`` flag ``e``
+        "sed '1e rm -rf ~/work' {f}",  # the ``e`` command
+        "sed -f ~/x {f}",  # QA B9: script in a file
+        "sed --file=$HOME/x {f}",
+        "sed -nf ~/x {f}",
+    ],
+)
+def test_executing_sed_on_a_lineage_file_gets_no_read_credit(home: Path, script: str) -> None:
+    """QA Q2: a sed that runs code is an executor, not a reader."""
+    _tree(home)
+    manifest = _staged_manifest(home, CHILD)
+    verdict = _tree_verdict(home, script.format(f=manifest), PARENT, home / "work")
+    assert verdict.risk is Risk.HIGH, verdict.reasons
+
+
+def test_bsd_sed_capital_i_is_an_in_place_write(home: Path) -> None:
+    """Review F1: BSD ``sed -I`` edits in place, suffix or not, like ``-i``."""
+    _tree(home)
+    manifest = _staged_manifest(home, PARENT)
+    for flags in ("-I ''", "-I.bak", "-nI ''"):
+        command = f"sed {flags} 's/a/b/' {manifest}"
+        verdict = _tree_verdict(home, command, CHILD, home / "work")
+        assert verdict.risk is Risk.HIGH, (flags, verdict.reasons)
+        assert any(
+            t.op == "overwrite"
+            for t in resolve_command(
+                command, cwd=str(home / "work"), env={"HOME": str(home)}, home=str(home)
+            ).targets
+        ), flags
+
+
+@pytest.mark.parametrize("flags", ["-I .bak", "-EI ''"])
+def test_bsd_sed_capital_i_suffix_word_is_not_a_target(home: Path, flags: str) -> None:
+    """Review R2-2: ``-I`` ending a cluster takes the next word as its suffix."""
+    target = home / "work" / "f.txt"
+    command = f"sed {flags} 's/a/b/' {target}"
+    result = resolve_command(
+        command, cwd=str(home / "work"), env={"HOME": str(home)}, home=str(home)
+    )
+    assert [(t.op, t.path) for t in result.targets] == [("overwrite", str(target))]
+
+
+def test_unset_is_an_env_only_long_value_flag(home: Path) -> None:
+    """Review F2: ``sudo --unset rm -rf X`` still ranks the ``rm``."""
+    (home / "work" / "keep.txt").write_text("x\n")
+    plain = _verdict(home, f"sudo rm -rf {home}/work").risk
+    assert plain is not Risk.LOW
+    assert _verdict(home, f"sudo --unset rm -rf {home}/work").risk is plain
+    assert _verdict(home, f"env --unset FOO rm -rf {home}/work").risk is plain
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "env -u FOO -S 'rm -rf ~/.local-operator'",
+        "env --unset FOO -S 'rm -rf ~/.local-operator'",
+        "env -i -u FOO --split-string='rm -rf ~/.local-operator'",
+        "env -iS 'rm -rf ~/.local-operator'",
+    ],
+)
+def test_env_split_string_after_other_options_is_not_dropped(home: Path, command: str) -> None:
+    """``-S`` anywhere in env's option prefix runs a command line: never LOW."""
+    assert _verdict(home, command).risk is not Risk.LOW
+
+
+@pytest.mark.parametrize(
+    ("command", "expected"),
+    [
+        ("env -i -u A -S 'node ~/x {stranger}'", Risk.HIGH),
+        ("env -S 'node ~/x {stranger}'", Risk.HIGH),
+        ("env -C /tmp -S 'node ~/x {stranger}'", Risk.HIGH),
+        ("env -u FOO -S 'node ~/x ~/.local-operator/sessions'", Risk.HIGH),
+        ("env -S'rm -rf ~'", Risk.CRITICAL),
+        ("env -u FOO -S 'cat {own}'", Risk.LOW),
+        ("env -u FOO -S 'rm -rf ~/x'", Risk.HIGH),
+    ],
+)
+def test_env_split_string_is_resolved_as_the_real_command(
+    home: Path, command: str, expected: Risk
+) -> None:
+    """Review R2-1: the ``-S`` words are the program, not a delete-word scan.
+
+    Returning after the delete-word check dropped every other split command,
+    so opaque code handed a stranger's pad through ``env -i -u A -S`` was LOW.
+    """
+    own = _pad(home, PARENT) / "notes.txt"
+    own.write_text("x\n")
+    text = command.format(stranger=_pad(home, STRANGER), own=own)
+    verdict = _verdict(home, text)
+    assert verdict.risk is expected, verdict.reasons
+
+
+@pytest.mark.parametrize(
+    ("command", "expected"),
+    [
+        # R3-1: env's ``\_`` separator, which the shell tokeniser kept as one word.
+        ("env -S 'rm\\_-rf\\_${{HOME}}'", Risk.CRITICAL),
+        ("env -S 'rm\\_-rf\\_{stranger}'", Risk.HIGH),
+        ("env -u A -S 'rm\\_-rf\\_{stranger}'", Risk.HIGH),
+        ("env -S 'rm\\_{stranger}/n.txt'", Risk.HIGH),
+        # R3-1: a nested ``env -S`` is split again.
+        ("env -S \"env -S 'rm -rf \\${{HOME}}'\"", Risk.CRITICAL),
+        ("env -S \"env -S 'rm -rf ~/'\"", Risk.CRITICAL),
+        # R3-1 / Q-3-1: ``-C <dir>`` before ``-S``.
+        ("env -C /tmp -S 'rm -rf ~/'", Risk.CRITICAL),
+        ("env -C /tmp -S 'rm -rf {lineage}'", Risk.HIGH),
+        # Unchanged: a split read of one's own file.
+        ("env -u FOO -S 'cat {own}'", Risk.LOW),
+    ],
+)
+def test_env_split_string_keeps_its_raw_delete_floor(
+    home: Path, command: str, expected: Risk
+) -> None:
+    """Review R3-1 / QA Q-3-1: env's ``-S`` grammar is not the shell's.
+
+    The round-2 splice skipped the raw delete-word check, then mis-split
+    ``\\_`` and nested ``-S``, so real deletes of ``$HOME`` ranked LOW.
+    """
+    _child_of(home, CHILD, PARENT)
+    lineage = _pad(home, CHILD) / "x.mjs"
+    lineage.parent.mkdir(parents=True, exist_ok=True)
+    lineage.write_text("x\n")
+    own = _pad(home, PARENT) / "notes.txt"
+    own.write_text("x\n")
+    text = command.format(stranger=_pad(home, STRANGER), own=own, lineage=lineage)
+    verdict = _verdict(home, text)
+    assert verdict.risk is expected, (text, verdict.reasons)
+
+
+@pytest.mark.parametrize(("layers", "expected"), [(4, Risk.LOW), (5, Risk.HIGH)])
+def test_env_split_string_nesting_past_the_cap_fails_closed(
+    home: Path, layers: int, expected: Risk
+) -> None:
+    """Review R3-1: nested ``env -S`` is spliced to a bounded depth, then opaque."""
+    own = _pad(home, PARENT) / "notes.txt"
+    own.write_text("x\n")
+    command = f"cat {own}"
+    for _ in range(layers):
+        command = f"env -S {shlex.quote(command)}"
+    verdict = _verdict(home, command)
+    assert verdict.risk is expected, (command, verdict.reasons)
+
+
+@pytest.mark.parametrize(
+    ("command", "expected"),
+    [
+        ("env -C /tmp rm -rf ~", Risk.CRITICAL),
+        ('env -C /tmp rm -rf "$HOME"', Risk.CRITICAL),
+        ("env -iC /tmp rm -rf ~", Risk.CRITICAL),
+        ("env -a foo rm -rf ~/x", Risk.HIGH),
+        ("env -P /bin rm -rf ~", Risk.CRITICAL),
+        ("env --argv0 foo rm -rf ~", Risk.CRITICAL),
+    ],
+)
+def test_env_value_flags_never_become_the_program(home: Path, command: str, expected: Risk) -> None:
+    """QA Q-3-1: the wrapper peel shares ``-S``'s env value-flag table."""
+    from local_operator.guardrails.resolve import _ENV_VALUE_LETTERS
+    from local_operator.tools.search_guard import _WRAPPER_VALUE_FLAGS
+
+    assert _ENV_VALUE_LETTERS is _WRAPPER_VALUE_FLAGS["env"]
+    verdict = _verdict(home, command)
+    assert verdict.risk is expected, (command, verdict.reasons)
 
 
 def test_tracked_script_with_uncommitted_edits_is_high(home: Path) -> None:
