@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "vi",
   "namespace": "tunnel.status",
-  "history_sha256": "7fa2ca421925c44f5143dba82dd64afe72c861cb4ded6cd11dfd04ef626fe9ea",
+  "history_sha256": "7c8e361d48ae58b161e33a2fad3520c4e70f1b607eb19ccfe2fa8aeae47f8f3c",
   "entries": [
     {
       "locale": "vi",
@@ -49,6 +49,29 @@
       "evidence": "i18n/audits/evidence/vi/tunnel.status/a2/record.json",
       "round": "a2",
       "keys_audited": 13
+    },
+    {
+      "locale": "vi",
+      "namespace": "tunnel.status",
+      "source_sha256": "b368acfb0cdee89c8de5a210fc9956251701a9f3f73c88b1096611d0c1f9063f",
+      "translator": {
+        "agent": "i18n-translator subagent, Local Operator session 7af08d89b259 (values introduced in commit 1fce7ecb1f5f; English drafted by coder session b0300e2c2c7f)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-14"
+      },
+      "auditor": {
+        "agent": "i18n-auditor, independent `task` subagent, session ede889388023 (node lop-remote-node-2); not the translating i18n-translator (7af08d89b259) nor the English-drafting coder (b0300e2c2c7f); did not edit any value",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-14",
+        "result": "passed",
+        "findings": 2,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "a3: independent i18n-auditor ede889388023 (anthropic/claude-opus-5-5) of i18n-translator 7af08d89b259 values (claude-opus-5-5): PASSED, 0 blocker/major; 2 minor/nit (VI-01, VI-02). Whole namespace at new source hash. Record i18n/audits/evidence/vi/tunnel.status/a3/record.json",
+      "evidence": "i18n/audits/evidence/vi/tunnel.status/a3/record.json",
+      "round": "a3",
+      "keys_audited": 21
     }
   ]
 }

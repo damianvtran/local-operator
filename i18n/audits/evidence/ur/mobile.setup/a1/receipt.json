@@ -1,0 +1,23 @@
+{
+ "schema": 1,
+ "audit_id": "a1",
+ "locale": "ur",
+ "namespace": "mobile.setup",
+ "record": "i18n/audits/evidence/ur/mobile.setup/a1/record.json",
+ "source_sha256": "6883f92e94dfcec4be0af6041a0531c974fbf18294f7094a132cc555a2ad2065",
+ "target_sha256": "f3eed93e8e47535340535584b4e5320ec506e9f7d315dfb9655da4c2b1fb472d",
+ "verdict": "passed",
+ "auditor": {
+  "agent": "i18n-auditor, independent `task` subagent, session 4aaeb39ddb2f; neither the i18n-translator (7af08d89b259) nor the English-drafting coder (b0300e2c2c7f); did not edit any value",
+  "model": "anthropic/claude-opus-5-5"
+ },
+ "hashes": {
+  "record.json": "4e2951301524744f0a4d4d7428d25820c39d9db42e81747d55736dcc940be623",
+  "report.md": "83db32861c613641466504ed46d4901eb7dd73224ddb12ad9f65f13cfd16c699",
+  "audit.log": "973a581a908d06c9905a3c1d7675197888117b7d64a55e166110ce5aebe5928f",
+  "dryrun.log": "4cc6a04d0020709b6466ab6421837e24d2396106743c9d2137c2302aaf1c956f"
+ },
+ "ledger_receipt_staged": "/home/ec2-user/.local-operator/sessions/b0300e2c2c7f/scratchpad/ledger-fix/ur.mobile.setup.json",
+ "ledger_receipt_sha256": "fdbfabfc1c2d4a7ad582e34d32505463edcbbfcc8c5282d249c34195739f4d00",
+ "ledger_note_amended_by": "coordinator b0300e2c2c7f: appended 'Evidence: <record>' to the row note so the cg1 supersession check (tests/unit/i18n/test_audit_input_manifests.py) can follow it; verdict, findings and hashes unchanged; record.json gained top-level source_sha256/target_sha256 (restating input_hashes.en/target) and this receipt's record hash was recomputed"
+}

@@ -165,7 +165,7 @@ def hook(tmp_path, monkeypatch):
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
     monkeypatch.delenv("LOP_TUNNEL_NO_REARM", raising=False)
     monkeypatch.setattr(install.supervisors, "config_lives_in_real_home", lambda path: True)
-    spawned: list[dict] = []
+    spawned: list[dict[str, object]] = []
 
     def popen(argv, **kwargs):
         spawned.append({"argv": argv, **kwargs})
@@ -309,7 +309,9 @@ def test_the_first_sign_in_offer_shows_once_per_credential(tmp_path, monkeypatch
     from local_operator.tunnels import autosetup
 
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
-    rows = [type("Row", (), {"id": 4, "updated_at": 10, "credential_type": "oauth"})()]
+    from types import SimpleNamespace
+
+    rows = [SimpleNamespace(id=4, updated_at=10, credential_type="oauth")]
 
     class Store:
         def __init__(self, *a, **k):
@@ -327,7 +329,7 @@ def test_the_first_sign_in_offer_shows_once_per_credential(tmp_path, monkeypatch
     # Shown == dismissed for this credential: it never returns.
     assert autosetup.login_offer_due() is None
     # A NEW sign-in row may see it once.
-    rows.append(type("Row", (), {"id": 9, "updated_at": 20, "credential_type": "oauth"})())
+    rows.append(SimpleNamespace(id=9, updated_at=20, credential_type="oauth"))
     assert autosetup.login_offer_due() == 9
     # A machine that already has phone access is reconnected, never offered.
     _configure()
