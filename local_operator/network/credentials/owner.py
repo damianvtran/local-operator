@@ -1514,6 +1514,22 @@ class MeshCredentialBroker:
             return 0
         return lender.revoke_holder(holder, key=key, cause=cause)
 
+    def revoke_all_outstanding(self, *, cause: str = "panic") -> int:
+        """DELETE every outstanding lent GitHub token, for every holder, now.
+
+        The owner half of "a panic ends the hold" (lease review M1): a panic only
+        latches trust and closes links, which a minted GitHub installation token
+        outlives by up to its hour on the holder. ``GithubLender.revoke_all_holders``
+        is the existing primitive for exactly this; until this method it had no
+        caller. Zero without a lender: nothing was ever minted on this relay.
+        Provider (OAuth) grants have no issuer-side revoke — the borrower's trust
+        fence (``MeshCredentialClient._self_membership_active``) ends those.
+        """
+        lender = self._github_lender
+        if lender is None:
+            return 0
+        return lender.revoke_all_holders(key=github_app.GITHUB_KEY, cause=cause)
+
     def _github_scope_refusal(self, key: str, by: str) -> BrokerError | None:
         """No forge source supplies a verified read-only account identity today.
 
@@ -1718,7 +1734,7 @@ class MeshCredentialBroker:
             # THE DELIVERY (§3.4): the allow-list this mint was narrowed to
             # travels WITH the bearer, so the borrower materialises the same
             # bound the token carries (github.remember_delivered_repositories).
-            narrowing=github_app.grant_narrowing(repositories),
+            narrowing=_app_arm_narrowing(self.root, repositories),
             grant_id=f"g_{os.urandom(8).hex()}",
         )
         lender.register(
@@ -1768,8 +1784,13 @@ class MeshCredentialBroker:
             identity={},
             # §3.4's bound for the token arms is the helper's allow-list ALONE,
             # so it must reach the helper's device too (see _serve_github_app's
-            # note on the delivery; read fresh per serve, like the token).
-            narrowing=github_app.grant_narrowing(github_app.repositories_for(self.root)),
+            # note on the delivery; read fresh per serve, like the token). An
+            # operator who CLEARED the list — which every settings surface does
+            # by deleting the key — sends an explicit empty designation once this
+            # owner has ever lent one (borrowers refuse all); one who never set
+            # it sends nothing, so a borrower's hand-set backstop survives
+            # (``github.owner_designation``).
+            narrowing=_token_arm_narrowing(self.root),
             grant_id=f"g_{os.urandom(8).hex()}",
         )
 
@@ -3453,6 +3474,29 @@ def _caused_by_invalid_grant(exc: BaseException | None) -> bool:
     return False
 
 
+def revoke_lent_on_panic(server: Any, network_id: str) -> int:
+    """Revoke every token this relay lent in ``network_id`` because a panic latched.
+
+    Called by BOTH panic paths on the relay (raised: ``_ctl_panic``; received:
+    ``_op_panic``) after the trust write. It reads the EXISTING broker only and
+    never builds one: a relay that never brokered has minted nothing, and building
+    a broker (and its loop) inside an incident path would add work, not safety.
+    A broker for another network is left alone — the panic is per network. Never
+    raises: the panic's own latch and broadcast must not depend on GitHub answering.
+    """
+    broker = getattr(server, _BROKER_ATTR, None)
+    # An EMPTY ``network_id`` revokes this relay's broker network on purpose: an
+    # incident whose scope is unknown fails closed (revoke), never open. Only a
+    # NAMED other network is left alone. Review #3920 n2.
+    if broker is None or (network_id and broker.network_id != network_id):
+        return 0
+    try:
+        return broker.revoke_all_outstanding(cause="panic")
+    except Exception:  # noqa: BLE001 — the latch already holds; tokens still expire
+        logger.warning("panic: revoking lent GitHub tokens failed", exc_info=True)
+        return 0
+
+
 def broker_for_relay(server: Any) -> MeshCredentialBroker | None:
     """The broker for ``server``, built on first need and kept — or ``None``.
 
@@ -3573,3 +3617,24 @@ def _grant_ttl_s(root: Path | None) -> float:
     from local_operator.network.credentials import grant_ttl_s
 
     return float(grant_ttl_s(root))
+
+
+def _token_arm_narrowing(root: Path | None) -> dict[str, Any]:
+    """The token arms' delivery: the designation as set, or nothing if never set."""
+    from local_operator.network.credentials import github as github_app
+
+    repositories, explicit = github_app.owner_designation(root)
+    return github_app.grant_narrowing(repositories, explicit=explicit)
+
+
+def _app_arm_narrowing(root: Path | None, repositories: Any) -> dict[str, Any]:
+    """The App arm's delivery: the list this mint was narrowed to, always explicit.
+
+    Also marks the owner as having lent a designation, so a later clear on this
+    owner reaches token-arm borrowers too if the source ladder moves off the App.
+    """
+    from local_operator.network.credentials import github as github_app
+
+    if repositories:
+        github_app.mark_designation_delivered(root)
+    return github_app.grant_narrowing(repositories, explicit=True)

@@ -1671,3 +1671,91 @@ def test_a_compressed_session_moves_and_is_not_refused_as_unlisted(
     assert not source.exists()
     # THE CONVERSATION ARRIVED WHOLE, as the plain journal the protocol speaks.
     assert _transcript(server_b.root, SESSION) == before
+
+
+def test_an_offload_refreshes_definitions_on_the_destination_before_the_invite(
+    pair: Devices, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Gap B (remote-session-parity): a moved team session restores against the
+    CURRENT team brief and the operator's custom instructions, not a stale mirror.
+
+    ``_offload`` pushes the session's attachment (team + roster) and the
+    operator-instructions singleton to the destination BEFORE the invite, so the
+    destination holds them before it ever pulls, let alone commits. Asserted on the
+    real two-relay rig: the order of the push and the invite, and the bytes that
+    landed on B.
+    """
+    from local_operator.network import definitions
+    from local_operator.resume import write_session_attachment
+    from local_operator.teams import TeamEditFields, TeamMember, TeamRegistry
+
+    server_a, server_b, _host, _port = pair
+    _pair_settled(pair, monkeypatch, role="admin", settings=server_b.settings)
+    session_dir = _owned_session(server_a)
+    TeamRegistry(server_a.root).create_team(
+        TeamEditFields(
+            name="lopdev",
+            description="the team",
+            manager="manager",
+            members=[TeamMember(role="coder")],
+            instructions="Every PR gets a review round.",
+            project="local-operator",
+        )
+    )
+    write_session_attachment(session_dir, team="lopdev", agent="", goal="")
+    rules = "# Personal Defaults\n\n- Never merge without an agent-review round.\n"
+    (server_a.root / "system_prompt.md").write_text(rules, encoding="utf-8")
+
+    events: list[tuple[str, Any]] = []
+    real_push = definitions.push_to_peer
+    real_ask = mobility.LinkTransport.ask
+
+    def push(server: Any, device_id: str, **kwargs: Any) -> dict[str, Any]:
+        events.append(("push", kwargs.get("names")))
+        return real_push(server, device_id, **kwargs)
+
+    def ask(self: Any, frame: dict[str, Any]) -> dict[str, Any]:
+        events.append(("ask", frame.get("phase")))
+        return real_ask(self, frame)
+
+    monkeypatch.setattr(definitions, "push_to_peer", push)
+    monkeypatch.setattr(mobility.LinkTransport, "ask", ask)
+
+    result = _move(server_a, SESSION, to=server_b.identity.device_id, monkeypatch=monkeypatch)
+
+    assert result["ok"] is True, result
+    pushes = [i for i, (kind, _) in enumerate(events) if kind == "push"]
+    invite = events.index(("ask", "invite"))
+    assert pushes and pushes[0] < invite, events
+    assert events[pushes[0]][1] == {"agents": [], "teams": ["lopdev"]}, events
+    assert (server_b.root / "system_prompt.md").read_text(encoding="utf-8") == rules
+    mirrored = TeamRegistry(server_b.root).get_team_by_name("lopdev")
+    assert mirrored is not None
+    # A clean refresh adds nothing to the receipt.
+    assert "definitions_notice" not in (result.get("carry") or {}), result
+
+
+def test_a_failed_definitions_refresh_names_the_stale_copy_but_still_moves(
+    pair: Devices, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The refresh is non-fatal: the move completes and the receipt names what may
+    be stale on the destination, instead of silently running an older brief."""
+    from local_operator.network import definitions
+    from local_operator.resume import write_session_attachment
+
+    server_a, server_b, _host, _port = pair
+    _pair_settled(pair, monkeypatch, role="admin", settings=server_b.settings)
+    session_dir = _owned_session(server_a)
+    write_session_attachment(session_dir, team="lopdev", agent="", goal="")
+
+    def refused(server: Any, device_id: str, **kwargs: Any) -> dict[str, Any]:
+        return {"ok": False, "code": "conflict", "message": "team 'lopdev' (local edits)"}
+
+    monkeypatch.setattr(definitions, "push_to_peer", refused)
+
+    result = _move(server_a, SESSION, to=server_b.identity.device_id, monkeypatch=monkeypatch)
+
+    assert result["ok"] is True, result
+    assert (server_b.root / "sessions" / SESSION).is_dir()
+    notice = (result.get("carry") or {}).get("definitions_notice") or ""
+    assert "team 'lopdev'" in notice and "local edits" in notice, result

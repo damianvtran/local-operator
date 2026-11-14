@@ -64,6 +64,11 @@ def _hub(mode: str) -> Iterator[tuple[str, list[tuple[str, bool]]]]:
             if mode == "404":
                 self._send(404, {"code": "team_not_found", "error": "Team not found."})
                 return
+            if mode == "401":
+                # The operator's live answer on 2026-11-11 for a bearer the hub
+                # would not take (startup, before the token was usable).
+                self._send(401, {"code": "unauthorized", "error": "invalid API key format"})
+                return
             self._send(
                 200,
                 {
@@ -240,9 +245,53 @@ def test_a_control_character_becomes_a_space_not_a_deletion():
 
 def test_a_4xx_is_still_a_refusal():
     # A 5xx is the hub failing, not refusing; a 4xx must keep the refusal wording.
-    _reason, detail = chk._failure_reason(_api_error(401, "Invalid API key."))
+    # 403 (an entitlement answer) is the 4xx that stays a counted refusal; 401 is
+    # a sign-in fact (below).
+    reason, detail = chk._failure_reason(_api_error(403, "Team plan required."))
 
-    assert detail == "the hub refused the request (HTTP 401: Invalid API key.)"
+    assert reason == "hub-error"
+    assert detail == "the hub refused the request (HTTP 403: Team plan required.)"
+
+
+def test_a_401_is_a_rejected_sign_in_not_a_counted_hub_error():
+    # Operator report 2026-11-11: a startup tick whose bearer the hub refused
+    # stored a COUNTED hub-error on every org team (red "Retry" marks) and walked
+    # a both-changed row past MAX_ATTEMPTS. It is the uncounted sign-in class.
+    reason, detail = chk._failure_reason(_api_error(401, "invalid API key format"))
+
+    assert reason == "no-credential/rejected"
+    assert detail == "the hub did not accept the sign-in (HTTP 401: invalid API key format)"
+
+
+def test_a_401_wrapped_by_the_agent_download_is_still_a_rejected_sign_in():
+    # ``RadientClient.download_agent`` raises a bare RuntimeError FROM the
+    # requests HTTPError, so the status is only on ``__cause__.response``
+    # (the operator's qa-tester row stored exactly this as hub-error).
+    import requests
+
+    response = requests.Response()
+    response.status_code = 401
+    cause = requests.exceptions.HTTPError("401 Client Error: Unauthorized", response=response)
+    error = RuntimeError("Failed to download agent from Radient Agent Hub: 401 Client Error")
+    error.__cause__ = cause
+
+    reason, detail = chk._failure_reason(error)
+
+    assert reason == "no-credential/rejected"
+    assert detail.startswith("the hub did not accept the sign-in (HTTP 401: ")
+
+
+def test_an_org_team_answered_401_is_checked_as_a_rejected_sign_in(tmp_path):
+    with _hub("401") as (base_url, seen):
+        result = _check(tmp_path, base_url)
+
+    assert seen == [(f"/v1/teams/{HUB_ID}", True)]
+    assert result.verdict == "unavailable"
+    # ``reason`` stays the bare class every consumer compares; the sub-class
+    # rides beside it.
+    assert result.reason == "no-credential" and result.reason_subclass == "rejected"
+    assert result.detail == "the hub did not accept the sign-in (HTTP 401: invalid API key format)"
+    assert "sk-test-org-bearer" not in result.detail
 
 
 def test_a_5xx_html_body_does_not_repeat_the_status():

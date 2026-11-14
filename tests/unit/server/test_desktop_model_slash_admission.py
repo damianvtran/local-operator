@@ -59,11 +59,13 @@ class _SlashClient(AttachClient):
         args: str,
         images: list[dict[str, str]] | None = None,
         *,
+        bridge_ack: bool = False,
         defer_ok: bool = False,
         request_id: str | None = None,
     ) -> Any:
         # Same signature as ``AttachClient.slash_result`` (the deferred keys
-        # are keyword-only there); this seam never defers.
+        # and the Team Bridge ``bridge_ack`` marker are keyword-only there);
+        # this seam never defers and never sees a latched session.
         self.calls.append((command, args))
         return {
             "kind": "notice",
@@ -302,7 +304,7 @@ async def test_model_slash_lost_socket_ack_keeps_busy_disposition(desktop, tmp_p
 
     class _ShortAckClient(AttachClient):
         async def slash_result(
-            self, command, args, images=None, *, defer_ok=False, request_id=None
+            self, command, args, images=None, *, bridge_ack=False, defer_ok=False, request_id=None
         ):
             return await self._request_payload(
                 "slash_result", command=command, args=args, images=images or [], deadline_s=0.05

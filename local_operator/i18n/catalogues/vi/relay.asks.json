@@ -76,5 +76,9 @@
   "relay.asks.duration.less_than_minute": "<1 ph",
   "relay.asks.duration.minutes": "{count, number} ph",
   "relay.asks.duration.hours": "{count, number} giờ",
-  "relay.asks.duration.days": "{count, number} ngày"
+  "relay.asks.duration.days": "{count, number} ngày",
+  "relay.asks.card.command.label": "Lệnh đề xuất",
+  "relay.asks.card.command.copy": "Sao chép",
+  "relay.asks.card.command.copied": "Đã sao chép",
+  "relay.asks.card.command.copy_failed": "Không sao chép được — lệnh đã được chọn; hãy sao chép từ đó"
 }

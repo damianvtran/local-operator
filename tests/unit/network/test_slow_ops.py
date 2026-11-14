@@ -24,6 +24,7 @@ from local_operator.network import (
     meshupdate,
     mobility,
     relay,
+    skillsync,
     sync,
     types,
 )
@@ -425,6 +426,8 @@ def test_the_shipped_slices_route_their_ops_through_the_hook(root: Path) -> None
             # whole-bundle apply into the user's mcp.json — and bounded per bundle
             # for the same reason (see ``mcpdefs.MCP_DEFS_OP_DEADLINE_S``).
             "net_mcp_defs",
+            # User skills (network/skillsync.py): one bundle extraction + fsync.
+            "net_skills",
             # The single-peer update (meshupdate.py; S1 of mesh-rolling-updates.md
             # §8.2): when the member is idle the handler may run a whole install
             # inside its own bounded deadline, so it must not run on a link's
@@ -433,11 +436,20 @@ def test_the_shipped_slices_route_their_ops_through_the_hook(root: Path) -> None
             # Trusted-peer memory sync (network/memory.py): a bounded batch apply into the
             # SQLite store, 60 s like the other whole-bundle appliers.
             "net_memory",
+            # The single-file pull (network/files.py; mesh-file-transfer.md S1): a
+            # ``stat`` hashes up to 256 MiB, so it must not run on a link's reader.
+            "net_file_get",
             # The one CORE op on the lane (relay.py, not a slice): a create holds its
             # first turn for up to ``FIRST_TURN_WAIT_S``, which inline stalled the
             # whole link (#3547 review MAJOR-1/2).
             "net_session_create",
+            # The remote peek (network/peek.py): a deep needle search may take
+            # seconds, and the link reader must keep serving meanwhile.
+            "net_session_peek",
         }
+        from local_operator.network import peek as net_peek
+
+        assert server.slow_op_deadline("net_session_peek") == net_peek.SESSION_PEEK_DEADLINE_S
         assert server.slow_op_deadline("net_session_create") == relay.create_op_deadline_s(
             server.settings.op_wait_s
         )
@@ -447,6 +459,7 @@ def test_the_shipped_slices_route_their_ops_through_the_hook(root: Path) -> None
         # the one deadline nothing asserted — the 60 s constant could decay
         # unnoticed.
         assert server.slow_op_deadline("net_mcp_defs") == mcpdefs.MCP_DEFS_OP_DEADLINE_S
+        assert server.slow_op_deadline("net_skills") == skillsync.SKILLS_OP_DEADLINE_S
         assert server.slow_op_deadline("net_update") == meshupdate.UPDATE_OP_DEADLINE_S
         assert server.slow_op_deadline("net_broker") == credentials.BROKER_OP_DEADLINE_S
         assert server.slow_op_deadline("net_session_move") == mobility.MOVE_OP_DEADLINE_S
@@ -700,6 +713,10 @@ def test_the_session_move_contract_is_frozen() -> None:
         # Clause 4: the cwd the destination mapped onto this host, when the
         # recorded one did not exist here. Additive inside the optional block.
         "cwd",
+        # remote-session-parity Gap B: the source could not refresh the session's
+        # team/agent and custom instructions on the destination before the move;
+        # names the copy that may be stale. Absent when the refresh landed.
+        "definitions_notice",
     }
     # AND IT IS OPTIONAL — asserted on a DOCUMENT rather than through
     # ``__required_keys__``, which cannot answer this module: PEP 563 stringizes every

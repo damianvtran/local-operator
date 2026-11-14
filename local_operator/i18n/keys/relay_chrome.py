@@ -242,6 +242,10 @@ def row_unpin() -> Msg:
     return Msg("relay.chrome.row.unpin", {})
 
 
+def section_temporary(*, count: int | float) -> Msg:
+    return Msg("relay.chrome.section_temporary", {"count": count})
+
+
 def session_agents_title() -> Msg:
     return Msg("relay.chrome.session.agents_title", {})
 
@@ -356,3 +360,51 @@ def snackbar_dismiss() -> Msg:
 
 def spend_title() -> Msg:
     return Msg("relay.chrome.spend.title", {})
+
+
+def temporary_deletes_in(*, minutes: int | float) -> Msg:
+    return Msg("relay.chrome.temporary_deletes_in", {"minutes": minutes})
+
+
+def temporary_hold_armed_monitor() -> Msg:
+    return Msg("relay.chrome.temporary_hold_armed_monitor", {})
+
+
+def temporary_hold_armed_wake() -> Msg:
+    return Msg("relay.chrome.temporary_hold_armed_wake", {})
+
+
+def temporary_hold_cannot_verify() -> Msg:
+    return Msg("relay.chrome.temporary_hold_cannot_verify", {})
+
+
+def temporary_hold_linked() -> Msg:
+    return Msg("relay.chrome.temporary_hold_linked", {})
+
+
+def temporary_hold_on_screen() -> Msg:
+    return Msg("relay.chrome.temporary_hold_on_screen", {})
+
+
+def temporary_hold_open_ask() -> Msg:
+    return Msg("relay.chrome.temporary_hold_open_ask", {})
+
+
+def temporary_hold_operator_hold() -> Msg:
+    return Msg("relay.chrome.temporary_hold_operator_hold", {})
+
+
+def temporary_hold_running() -> Msg:
+    return Msg("relay.chrome.temporary_hold_running", {})
+
+
+def temporary_hold_unread_mail() -> Msg:
+    return Msg("relay.chrome.temporary_hold_unread_mail", {})
+
+
+def temporary_hold_unsaved_files() -> Msg:
+    return Msg("relay.chrome.temporary_hold_unsaved_files", {})
+
+
+def temporary_hold_unseen_result() -> Msg:
+    return Msg("relay.chrome.temporary_hold_unseen_result", {})

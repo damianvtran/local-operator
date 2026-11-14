@@ -3252,14 +3252,25 @@ class TestPlainWordValueIsMatchedOnWordBoundaries:
         masker = redaction_shapes.StreamMasker([PLAIN_WORD])
         assert masker.push(text, final=True) == f"a [redacted] store, un{PLAIN_WORD}ally\n"
 
-    def test_the_variable_store_registers_the_word_and_masks_it_as_a_word(
+    def test_the_shape_pass_masks_the_word_in_place_but_never_promotes_it(
         self, tmp_path: Path
     ) -> None:
-        """The real path: SCRUB ``PASSWORD=<word>``, never ``register_redaction`` by hand."""
+        """2026-11-13: an ordinary word a rule matched is masked THERE, never session-wide.
+
+        The promotion is what corrupted a header name in minervaai core-svc d20e5acb
+        (see ``redaction_shapes.is_ordinary_word_value``).
+        """
         store = VariableStore(cwd=str(tmp_path))
         first, _ = store.redact_with_report(f"PASSWORD={PLAIN_WORD}")
-        assert PLAIN_WORD not in first
-        assert PLAIN_WORD in store.redaction_values(), "premise: the shape pass registered it"
+        assert PLAIN_WORD not in first, "the in-place mask was lost"
+        assert store.redaction_values() == [], "an ordinary word was promoted session-wide"
+        assert store.redact(f"a {PLAIN_WORD} store") == f"a {PLAIN_WORD} store"
+
+    def test_a_known_word_secret_still_masks_as_a_word(self, tmp_path: Path) -> None:
+        """The other direction: a value the session KNOWS is a secret (the broker sink a
+        ``lop secret get`` retrieval registers through) keeps its word-boundary mask."""
+        store = VariableStore(cwd=str(tmp_path))
+        store.register_redaction(PLAIN_WORD)
         assert store.redact(f"a {PLAIN_WORD} store") == "a [redacted] store"
         prose = f"un{PLAIN_WORD}ally {PLAIN_WORD.capitalize()} {PLAIN_WORD.upper()}"
         assert store.redact(prose) == prose
@@ -4306,6 +4317,8 @@ def test_every_notice_fits_one_narrow_card_row() -> None:
         "terraform-output": "terraform output",
         "npm-token-list": "npm token list",
         "credential-file-read": "cat ~/.netrc",
+        "secret-cli-read": "op read op://vault/item/password",
+        "git-add-credential-file": "git add .env",
     }
     assert set(probes) == {shape.label for shape in DUMP_SHAPES}, "a rule has no probe"
     for label, command in probes.items():
@@ -8884,3 +8897,47 @@ def test_a_real_client_invocation_still_masks_its_inline_password(line: str) -> 
 def test_the_published_port_negatives_are_untouched_by_the_anchor(line: str) -> None:
     """``-p`` as a PORT (or a Go package flag) is not this rule's, and never was."""
     assert scrub_shapes(line) == line, f"{line!r} was rewritten"
+
+
+@pytest.mark.parametrize(
+    ("command", "label"),
+    [
+        ("op read op://vault/item/password", "secret cli"),
+        ("cd x && op read op://a/b/c", "secret cli"),
+        ("security find-generic-password -s svc -w", "secret cli"),
+        ("git add .env", "git"),
+        ("git add f.env", "git"),
+        ("git add .env.local", "git"),
+        ("git add src/app.py config/sa-service-account.json", "git"),
+        ("git add id_ed25519", "git"),
+        ("git add certs/tls.pem && git commit -m x", "git"),
+        ("git commit -m wip prod.env", "git"),
+    ],
+)
+def test_the_new_secret_task_advisories_steer(command: str, label: str) -> None:
+    """Warn-only steers for two egregious habits (never a block; see DUMP_SHAPES)."""
+    notice = credential_dump_notice(command)
+    assert notice is not None and notice.startswith(f"[credential guard] {label}:"), notice
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        # Piped or captured: the sanctioned consumer forms.
+        "op read op://v/i/p | docker login --password-stdin",
+        'docker login -p "$(op read op://v/i/p)" registry',
+        "x=$(op read op://v/i/p)",
+        "op read --out-file /tmp/k op://v/i/p",
+        "security find-generic-password -s svc -w | pbcopy",
+        "security find-generic-password -s svc",
+        # Not a credential file, or not a path argument.
+        "git add .env.example",
+        "git add prod.env.sample",
+        "git add ~/.ssh/id_ed25519.pub",
+        'git commit -m "drop .env"',
+        "git add -A",
+        "git add environment.py docs/env.md",
+    ],
+)
+def test_the_new_advisories_stay_quiet_on_the_safe_forms(command: str) -> None:
+    assert credential_dump_notice(command) is None, command

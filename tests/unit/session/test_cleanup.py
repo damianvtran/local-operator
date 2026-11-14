@@ -193,9 +193,12 @@ def test_a_manager_without_the_nested_reader_yields_the_disabled_default() -> No
         def get_config_value(self, key: str, default: object = None) -> object:
             return True  # would have enabled everything under the old accessor
 
-    # Disabled on BOTH classes: the delegated switch defaults to ON, so a stub
-    # that cannot be read must not inherit the bare default.
-    assert policy_from_config(Old()) == CleanupPolicy(delegated_enabled=False)
+    # Disabled on EVERY class: the delegated switch and the temporary-chat pass
+    # both default to ON, so a stub that cannot be read must not inherit either
+    # bare default (the temporary pass DELETES, so it fails closed too).
+    assert policy_from_config(Old()) == CleanupPolicy(
+        delegated_enabled=False, temporary_enabled=False
+    )
 
 
 # ---------------------------------------------------------------------------

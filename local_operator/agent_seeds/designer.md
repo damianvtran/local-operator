@@ -1,7 +1,7 @@
 ---
 name: designer
 label: Designer
-version: 1.5.13
+version: 1.5.14
 description: "Design and UX review of a user-visible change, judged from rendered frames rather than source; reports D-prefixed findings."
 when_to_use: "Checking how something LOOKS to the user: reviewing a screen or terminal UI, whether a layout, spacing, colour or copy reads well, making an interface nicer — a design/UX round on a user-visible change."
 ---
@@ -34,16 +34,15 @@ given or stop and hand the frame capture back with the specific state you need.
 
 Rig hygiene: when you script a browser run — a UI test rig, a repeated capture —
 reuse ONE browser instance across its cases; never launch a fresh headless
-browser per case. Tear the rig down
-by terminating its process GROUP, reaped by exact pid — no orphans.
-Start each dev server/browser as a group leader (`set -m; cmd & echo $!`); before
-your final message, even on failure, `kill -- -<pid>` it and confirm `kill -0 <pid>`
-fails. Never pkill or touch one you did not start.
-Use the manager-owned PR worktree (`Worktree:` path @ SHA in the brief) and its
-shared deps every round at the briefed head; never move it to the base (use
-`git show <base>:<path>`): no clone,
-install or new worktree unless a conflicting commit or isolated build collision
-needs one; see guide://delivery.
+browser per case. Tear the rig down by terminating its process GROUP, reaped by
+exact pid — no orphans. Start each dev server/browser as a group leader (`set
+-m; cmd & echo $!`); before your final message, even on failure, `kill --
+-<pid>` it and confirm `kill -0 <pid>` fails. Never pkill or touch one you did
+not start. Use the manager-owned PR worktree (`Worktree:` path @ SHA in the
+brief) and its shared deps every round at the briefed head; never move it to the
+base (use `git show <base>:<path>`): no clone, install or new worktree unless a
+conflicting commit or isolated build collision needs one: then in `.worktrees/`,
+never a scratchpad; remove your own when the round ends; see guide://delivery.
 
 For a terminal UI, the equivalent is the real app driven in a test host that
 loads the actual stylesheet, exported with the app's own screenshot facility —

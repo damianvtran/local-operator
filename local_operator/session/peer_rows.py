@@ -45,7 +45,8 @@ import math
 import time
 from collections.abc import Iterable, Mapping
 from pathlib import Path
-from typing import NamedTuple
+from time import time as _wall_time
+from typing import Any, NamedTuple
 
 from local_operator.resume import UNTITLED_CONVERSATION, SessionRow
 from local_operator.session.catalog import live_state_from_flags
@@ -56,14 +57,28 @@ from local_operator.session.catalog import live_state_from_flags
 #: still looking at the list it should appear in.
 _TTL_S = 20.0
 
-#: ``config root`` → ``(monotonic read time, rows, unanswered peers)``. Keyed by
+#: ``config root`` → ``(monotonic read time, rows, unanswered peers, wall-clock
+#: read start in ms)``. The wall-clock half exists for ONE reader,
+#: :func:`listing_read_at_ms`: the inbox forwarder compares it with its own
+#: rows' ``updated_at`` (QA round 2, Q3), which the monotonic clock cannot be
+#: compared with. Keyed by
 #: root so an isolated ``LOCAL_OPERATOR_CONFIG_DIR`` (every test and capture)
 #: cannot read a real install's answer, and module-level so the sidebar's poll
 #: thread and the app's own guard share ONE read rather than two. The unanswered
 #: peers ride in the same entry because they are one answer: the relay reports
 #: the device that did not reply WITH the rows the others did, and a second read
 #: for the second half would be the second staleness rule this module avoids.
-_CACHE: dict[str, tuple[float, tuple[SessionRow, ...], tuple[UnansweredPeer, ...]]] = {}
+_CACHE: dict[str, tuple[float, tuple[SessionRow, ...], tuple[UnansweredPeer, ...], int]] = {}
+
+
+def _wall_ms() -> int:
+    """This device's wall clock in ms, the clock the inbox's ``updated_at`` uses.
+
+    Its own seam, apart from the module's ``time`` (which tests replace with a
+    monotonic-only stand-in to drive the TTL), so moving one clock never
+    breaks the other.
+    """
+    return int(_wall_time() * 1000)
 
 
 def clear_cache() -> None:
@@ -126,6 +141,23 @@ def read_listing(
     if cached is not None and ttl_s > 0 and moment - cached[0] < ttl_s:
         return cached[1], cached[2]
     return _read_all(root, catalog, moment, key)
+
+
+def listing_read_at_ms(root: Path | None, rows: object) -> int | None:
+    """When the read that produced ``rows`` started (wall clock, ms), else ``None``.
+
+    Answers only for the very tuple :func:`read_listing` handed out for
+    ``root`` (identity, not equality): any other sequence — a rebuilt list, a
+    test's rows, a cache entry replaced by a newer read since — has no known
+    age, and ``None`` is the safe answer for the one caller
+    (``remote_attention.settle_unclaimed_done_items``, QA round 2 Q3), which
+    settles nothing from a listing of unknown age. An entry seeded by
+    :func:`seed_peer_row` reports 0, older than any row.
+    """
+    cached = _CACHE.get("" if root is None else str(root))
+    if cached is None or cached[1] is not rows:
+        return None
+    return cached[3]
 
 
 def peer_session_rows(
@@ -247,9 +279,11 @@ def seed_peer_row(root: Path | None, row: SessionRow) -> None:
     device = str(row.owner_device or "")
     cached = _CACHE.get(key)
     if cached is None:
-        _CACHE[key] = (float("-inf"), (row,), ())
+        # Wall time 0: a create is not a listing, so this entry may never
+        # settle a forwarded row (``listing_read_at_ms``).
+        _CACHE[key] = (float("-inf"), (row,), (), 0)
         return
-    moment, rows, unanswered = cached
+    moment, rows, unanswered, read_at_ms = cached
     merged: list[SessionRow] = []
     replaced = False
     for existing in rows:
@@ -260,7 +294,7 @@ def seed_peer_row(root: Path | None, row: SessionRow) -> None:
             merged.append(existing)
     if not replaced:
         merged.append(row)
-    _CACHE[key] = (moment, tuple(merged), unanswered)
+    _CACHE[key] = (moment, tuple(merged), unanswered, read_at_ms)
 
 
 def select_peer_session(
@@ -453,6 +487,107 @@ def park_edges(
     return edges, state
 
 
+class RemoteNotice(NamedTuple):
+    """One NEW (or newly revised) ``notify`` item on a peer, for that session."""
+
+    session_id: str
+    device_id: str
+    device_name: str
+    key: str
+    revision: int
+    priority: str
+    title: str
+    name: str
+    #: The owner item's own time (epoch ms, the owner's clock), or 0 when the
+    #: owner did not say (an older build). The origin raises only a notice newer
+    #: than its first-seen baseline and writes it at this time (2026-11-13).
+    at_ms: int = 0
+
+
+def _carry_silent(
+    previous: Mapping[Any, object],
+    state: dict[Any, Any],
+    unanswered: Iterable[str],
+) -> None:
+    """``park_edges``' SILENCE rule, shared: a silent device's episodes are carried.
+
+    A refused or timed-out read is not the completion being acknowledged or the
+    notice going away; dropping the key would settle the origin's row and then
+    re-raise the same episode when the device answered again. The whole-relay
+    failure residual ``park_edges`` documents applies identically here, and the
+    store's ``episode`` digest is what makes its re-raise a no-op rather than a
+    duplicate (``notifications/remote_attention``).
+    """
+    silent = {str(device_id) for device_id in unanswered}
+    for key, value in previous.items():
+        if key not in state and key[0] in silent:
+            state[key] = value
+
+
+#: One tracked notice: ``(device, session, owner item key)``.
+NoticeKey = tuple[str, str, str]
+
+
+def notice_edges(
+    previous: Mapping[NoticeKey, int],
+    rows: Iterable[SessionRow],
+    *,
+    unanswered: Iterable[str] = (),
+) -> tuple[tuple[RemoteNotice, ...], dict[NoticeKey, int]]:
+    """New notice EPISODES among ``rows``: a new owner item key or a new revision.
+
+    KEYED PER OWNER ITEM, ``(device, session, item key)`` -> revision (review
+    round 1, M2). A row now carries a bounded LIST of the owner's newest unread
+    items, and each is its own episode: keying per session made two notices
+    inside one listing TTL replace each other, so a ``high`` "Tests failed"
+    followed by a ``normal`` "Deploy done" lost the high one. The silence rule
+    is the one ``_carry_silent`` applies (it reads ``key[0]``, the
+    device, which this key keeps first). A notice that leaves the map is NOT
+    settled by the caller: the owner's item going read there says nothing about
+    whether the operator saw the forwarded row here, so the origin's row keeps
+    its own read/dismiss marks.
+    """
+    current: dict[NoticeKey, int] = {}
+    fresh: dict[NoticeKey, RemoteNotice] = {}
+    for row in rows:
+        device_id = str(row.owner_device or "")
+        # OLDEST FIRST (review round 2, R2-m1): the wire list is newest first,
+        # and the origin stamps ``updated_at`` in write order, so raising in
+        # wire order put the newest notice BELOW the older one in the inbox.
+        for claim in reversed(row.remote_notices or ()):
+            if not claim or not claim[0]:
+                continue
+            key = (device_id, row.id, claim[0])
+            current[key] = int(claim[1])
+            fresh[key] = RemoteNotice(
+                session_id=row.id,
+                device_id=device_id,
+                device_name=str(row.owner_device_name or ""),
+                key=claim[0],
+                revision=int(claim[1]),
+                priority=claim[2] or "normal",
+                title=claim[3],
+                name=_chosen_name(row),
+                # A 4-tuple (a parse older than ``at``) has no time: 0.
+                at_ms=int(claim[4]) if len(claim) > 4 else 0,
+            )
+    state: dict[NoticeKey, int] = dict(current)
+    _carry_silent(previous, state, unanswered)
+    edges = tuple(fresh[key] for key, value in current.items() if previous.get(key) != value)
+    return edges, state
+
+
+def _chosen_name(row: SessionRow) -> str:
+    """The conversation's name, or ``""`` for the placeholder a peer never chose.
+
+    ``_read`` paints a nameless peer row ``Untitled conversation``; a forwarded
+    row's title must fall back to the house title instead of a placeholder
+    pretending to be a name.
+    """
+    name = str(row.name or "")
+    return "" if name == UNTITLED_CONVERSATION else name
+
+
 def _read_all(
     root: Path | None, catalog: object | None, moment: float, key: str
 ) -> tuple[tuple[SessionRow, ...], tuple[UnansweredPeer, ...]]:
@@ -463,8 +598,11 @@ def _read_all(
     rows and then for the silent peers must not be able to see two different
     fan-outs of a mesh that is moving underneath it.
     """
+    # Taken BEFORE the read: the listing describes the owners no earlier than
+    # this, which is the conservative side for ``listing_read_at_ms``.
+    read_at_ms = _wall_ms()
     rows, unanswered = _read(root, catalog)
-    _CACHE[key] = (moment, rows, unanswered)
+    _CACHE[key] = (moment, rows, unanswered, read_at_ms)
     return rows, unanswered
 
 
@@ -628,6 +766,12 @@ def _read(
                 # claim rather than an error.
                 team=str(getattr(peer_row, "team", "") or ""),
                 agent=str(getattr(peer_row, "agent", "") or ""),
+                # The origin-only facts (``notifications/remote_attention``); a
+                # catalogue double or an older parse has neither attribute, which
+                # is no claim.
+                remote_attention=getattr(peer_row, "attention", None),
+                remote_notices=getattr(peer_row, "notices", None),
+                remote_attention_unknown=bool(getattr(peer_row, "attention_unknown", False)),
             )
         )
     # THE PEERS THAT DID NOT ANSWER, and the exclusion is by DEVICE rather than

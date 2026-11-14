@@ -26,6 +26,8 @@ best-effort ``stat`` calls whose failure never lowers a rank.
 
 from __future__ import annotations
 
+import contextvars
+import dataclasses
 import enum
 import fnmatch
 import functools
@@ -33,13 +35,16 @@ import os
 import re
 import stat
 import sys
+import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
+from typing import Any
 
 from local_operator.guardrails.resolve import (
     Creation,
     Target,
     kernel_path,
+    physical_path,
     resolve_command,
 )
 
@@ -308,8 +313,16 @@ def _pattern_reaches(pattern: str, protected: str) -> bool:
 #: ``provenance.py``): a session's transcript, its lineage and its ask store,
 #: matched per ``<state>/sessions/<id>/``. Any write to them — including an
 #: append — could forge a creating call, a child, or an operator's answer
-#: (review R1-MAJOR-1), so every op on them is CRITICAL.
-_EVIDENCE_FILES = ("transcript.jsonl", "origin.json", "asks.jsonl", "subagent-roster*.json")
+#: (review R1-MAJOR-1), so every op on them is CRITICAL. ``temporary.json`` is
+#: the temporary-chat mark the cleanup pass DELETES on: a shell that could plant
+#: one in another session could get that conversation deleted.
+_EVIDENCE_FILES = (
+    "transcript.jsonl",
+    "origin.json",
+    "asks.jsonl",
+    "subagent-roster*.json",
+    "temporary.json",
+)
 #: Matched case-insensitively (APFS/HFS+ are case-insensitive, so
 #: ``ORIGIN.JSON`` is the same file) and with sqlite's side files (review
 #: round 7, MINOR-2).
@@ -432,6 +445,26 @@ def _tree_read(target: Target, prot: _Protected, session_id: str) -> str | None:
         and provenance.tracked_script(target.script, state_roots=roots)
     ):
         return None
+    # Incident 2026-11-13 (0.102.2): ``python3 -c`` printing lines of four logs
+    # in the caller's child's pad. A tracked script must be handed a FILE (it
+    # could write into a directory it is given); an inline program proven
+    # unable to write anything (``Target.read_only_code``) may be handed the
+    # pad directory too — it joins file names onto it and only reads.
+    #
+    # Deliberately READS only. A parent DELETING its descendant's scratchpad
+    # keeps ``_high_reason``'s HIGH (destroying ops never come through here):
+    # the harness, not the child, creates that directory, so no ledger row
+    # vouches for it; the child may still be running and writing there; and
+    # its pad holds the child's working evidence the parent's report cites.
+    # What a subagent itself creates (``mkdir``, worktrees) is already LOW for
+    # the parent through the creation ledger written under every ancestor.
+    if (
+        target.read_only_code
+        and not target.as_output
+        and os.path.lexists(path)
+        and not os.path.islink(path)
+    ):
+        return None
     owner = _pad_owner(os.path.realpath(path), roots) or ""
     return f" (session {owner} is this session's {relations.get(owner, '')} in one task tree)"
 
@@ -483,6 +516,11 @@ def _kernel_reason(target: Target, prot: _Protected) -> str | None:
         # Opaque, globbed or unresolvable: no exemption, so the literal path
         # decides; under session state that is CRITICAL.
         lexical = target.path or ""
+        # An unpinned ``..`` (a missing or re-linked component before it) gets
+        # no own-pad exemption either: any part of the same command may make
+        # that component a link to anywhere, and every attempt to carve out
+        # the safe cases was bypassed by one more move/copy shape (reviews
+        # R2-1, R3-1, R4-1 on PR #3811). Name the physical path instead.
         for state in prot.state_roots:
             if _under_evidence(lexical, os.path.join(state, _LEDGER_DIRNAME)):
                 return "the guardrail's own records"
@@ -649,7 +687,40 @@ _GLOB_CAP = 2000
 _GLOB_WALK_CAP = 20_000
 
 
+#: One classification's glob expansions, keyed by ``(pattern, globstar)``
+#: (MINOR-4, PR #3802): the evidence check and the worktree-reach check walk
+#: the SAME glob, and on a 20k-entry glob the second walk doubled the cost.
+#: INVARIANT: set only for the duration of one synchronous
+#: ``classify_targets`` call (``_glob_memo_scope``), so a cached expansion is
+#: never older than that call — no staler than either walk alone would be.
+_GLOB_MEMO: contextvars.ContextVar[dict[tuple[str, bool], Any] | None] = contextvars.ContextVar(
+    "lop_glob_memo", default=None
+)
+
+
+def _glob_memo_scope(fn: Any) -> Any:
+    @functools.wraps(fn)
+    def scoped(*args: Any, **kwargs: Any) -> Any:
+        token = _GLOB_MEMO.set({})
+        try:
+            return fn(*args, **kwargs)
+        finally:
+            _GLOB_MEMO.reset(token)
+
+    return scoped
+
+
 def _expand_glob(pattern: str, *, globstar: bool = False) -> list[tuple[str, bool]] | None:
+    memo = _GLOB_MEMO.get()
+    if memo is None:
+        return _expand_glob_uncached(pattern, globstar=globstar)
+    key = (pattern, globstar)
+    if key not in memo:
+        memo[key] = _expand_glob_uncached(pattern, globstar=globstar)
+    return memo[key]
+
+
+def _expand_glob_uncached(pattern: str, *, globstar: bool = False) -> list[tuple[str, bool]] | None:
     """Matches of ``pattern`` as BASH would expand it, or ``None`` past a bound.
 
     Bash semantics, because that is what the command will do (review round
@@ -870,6 +941,10 @@ def _high_reason(path: str, target: Target, prot: _Protected, *, link: bool = Fa
             if _under(path, state) and path != state:
                 return "overwrites a file inside the local-operator state root"
         return None
+    if target.pattern is not None and not target.opaque:
+        git_dir = _glob_reaches_git_dir(target.pattern)
+        if git_dir is not None:
+            return git_dir
     if target.glob_children and not target.glob_all:
         # R3-2: a children-glob directly in a home or in the state root
         # (``~/D*``, ``~/[A-Z]*``, ``Doc*`` at cwd $HOME) can match the
@@ -901,6 +976,12 @@ def _high_reason(path: str, target: Target, prot: _Protected, *, link: bool = Fa
     try:
         if os.path.isdir(path) and os.path.exists(os.path.join(path, ".git")):
             return "a git repository root"
+        # The repository's history itself: deleting ``<repo>/.git`` loses every
+        # unpushed commit, stash and linked-worktree record just as deleting
+        # the root does, so it ranks with the root. Only a git DIRECTORY (a
+        # linked worktree's ``.git`` is a one-line pointer file).
+        if _is_git_dir(path):
+            return _GIT_DIR_REASON
     except OSError:
         return "an unreadable path"
     return None
@@ -952,16 +1033,109 @@ def link_entry(target: Target) -> str | None:
 
 def _link_spellings(path: str, link: str) -> set[str]:
     """``_spellings`` without following the link itself: the lexical path and
-    the canonical link path (parent resolved), each re-cased from disk."""
+    the canonical link path (parent resolved), each re-cased from disk.
+
+    Only the PARENT goes through ``_on_disk_case``: handed the link entry
+    itself, it opens the path (``F_GETPATH``) or tests ``isdir``, and both
+    follow the link, so the pointee's path leaked in as a "spelling" of the
+    link. ``rm LINK`` never touches the pointee, and a pointee in another
+    session's scratchpad made the refusal say "another session's files" on
+    some hash seeds and the link reason on others (#3793's flake). The leaf
+    is re-cased from the parent's listing, which never dereferences it.
+    """
     out = {_norm(path), link}
     for spelled in list(out):
-        cased = _on_disk_case(spelled)
-        if cased is not None:
-            out.add(cased)
+        parent, name = os.path.split(spelled)
+        cased_parent = _on_disk_case(parent) or parent
+        try:
+            names = os.listdir(cased_parent)
+        except OSError:
+            names = []
+        if name not in names:
+            name = next((n for n in names if n.casefold() == name.casefold()), name)
+        out.add(os.path.join(cased_parent, name))
     return out
 
 
-def _rank(target: Target, prot: _Protected, session_id: str = "") -> RankedTarget:
+def _spelling_order(path: str, spellings: set[str]) -> list[str]:
+    """``spellings`` in a stable order: the caller's own (normalised) spelling
+    first, the resolved and re-cased forms after it, sorted.
+
+    ``_rank`` returns the first spelling's reason, so iterating the bare set
+    made the refusal text depend on ``PYTHONHASHSEED``; an agent reading a
+    refusal must get the same answer for the same command. The lexical
+    spelling leads because it names what the command actually addresses.
+    """
+    lexical = _norm(path)
+    return sorted(spellings, key=lambda s: (s != lexical, s))
+
+
+_GIT_DIR_REASON = "a git repository's .git directory (its history)"
+
+
+def _is_git_dir(path: str) -> bool:
+    """A repository's ``.git`` DIRECTORY (a linked worktree's ``.git`` is a
+    one-line pointer file; a link is removed, not followed)."""
+    return (
+        os.path.basename(path).casefold() == ".git"
+        and not os.path.islink(path)
+        and os.path.isdir(path)
+        and os.path.exists(os.path.join(path, "HEAD"))
+    )
+
+
+def _glob_reaches_git_dir(pattern: str) -> str | None:
+    """``_GIT_DIR_REASON`` when the glob ``pattern`` matches a ``.git``
+    directory, else ``None``.
+
+    WHY. The ``.git`` rule in ``_high_reason`` judges one path, so
+    ``rm -rf ~/repo/.gi*`` (or ``.g?t``, ``.[g]it``, ``cd ~/repo && rm -rf
+    .g*``) named only the literal prefix ``~/repo`` and ranked LOW while the
+    shell deletes the history (review R1-2, PR #3811). Each match of the
+    existing bounded expansion is checked instead. Only a final component
+    that can match a LEADING dot counts: bash's ``*``/``?`` never do without
+    ``dotglob``, and treating ``rm -rf ~/repo/*`` as a ``.git`` delete would
+    over-block ordinary tree cleanups. A leading ``[`` counts conservatively
+    (``[.]git`` does not match in bash, but ``fnmatch`` says it does).
+    Past the expansion bound this rule simply does not apply; the evidence
+    checks own that fail-closed case.
+    """
+    last = pattern.rstrip("/").rsplit("/", 1)[-1]
+    # Casefolded: ``.GI*`` names ``.git`` on a case-insensitive volume; the
+    # on-disk matches below decide whether it really exists.
+    if not last.startswith((".", "[")) or not fnmatch.fnmatchcase(".git", last.casefold()):
+        return None
+    matches = _expand_glob(pattern)
+    for match, _linked in matches or ():
+        try:
+            if _is_git_dir(match):
+                return _GIT_DIR_REASON
+        except OSError:
+            return "an unreadable path"
+    return None
+
+
+def _rank(
+    target: Target, prot: _Protected, session_id: str = "", globstar: bool = False
+) -> RankedTarget:
+    if target.landings:
+        # An unpinned ``..``: rank the landing its missing and re-linked parts
+        # produce (``Target.landings``) as well as ``path``, and keep the worse.
+        # On a tie the landing wins, so the judge and the refusal name the file
+        # the kernel acts on rather than the lexical ``<pad>/config.yml``
+        # (review R2-1, QA Q2-1 on PR #3811). ``raw_path`` is the landing too,
+        # so ``_kernel_reason`` judges it, not the check-time lookup.
+        readings = [
+            _rank(
+                dataclasses.replace(target, path=p, raw_path=p, landings=()),
+                prot,
+                session_id,
+                globstar,
+            )
+            for p in target.landings
+        ]
+        readings.append(_rank(dataclasses.replace(target, landings=()), prot, session_id, globstar))
+        return max(readings, key=lambda r: r.risk)
     path = target.path
     notes: list[str] = list(target.empty)
     link = link_entry(target) if path is not None else None
@@ -974,13 +1148,17 @@ def _rank(target: Target, prot: _Protected, session_id: str = "") -> RankedTarge
         notes.append("contains an unresolvable substitution or variable (opaque)")
     if target.unknown_cwd:
         notes.append("relative to a working directory that cannot be determined")
+    if target.unpinned:
+        notes.append(
+            "a '..' follows a component that is missing or that this command re-links, "
+            "so where it lands cannot be known (unresolved)"
+        )
     if path is None:
         return RankedTarget(target, Risk.HIGH, "; ".join(notes) or "unresolved target")
-    if spellings is None:
-        spellings = _spellings(path)
+    ordered = _spelling_order(path, spellings if spellings is not None else _spellings(path))
     # A link's OWN path that is protected (``~/.local-operator``, config.yml,
     # the install layout) is still CRITICAL here: those spellings are lexical.
-    for spelling in spellings:
+    for spelling in ordered:
         if target.glob_children and not target.glob_all and not target.opaque:
             # R2-5: ``rm *.log`` at $HOME removes matching CHILDREN; it is
             # CRITICAL only when the pattern itself can reach a protected name.
@@ -1001,8 +1179,12 @@ def _rank(target: Target, prot: _Protected, session_id: str = "") -> RankedTarge
     # The session's own scratchpad is where the agent is TOLD to work, so a
     # timestamped component there (``$(date +%s)``) stays LOW — but only when the
     # substitution's program cannot print a ``..`` that climbs out of the pad.
-    in_own_pad = any(_under(path, pad) for pad in prot.own_scratchpad) and (
-        not target.opaque or target.opaque_contained
+    in_own_pad = (
+        any(_under(path, pad) for pad in prot.own_scratchpad)
+        and (not target.opaque or target.opaque_contained)
+        # ``path`` is only the lexical reading of an unpinned ``..``: the
+        # missing component may become a link out of the pad (resolve.Target).
+        and not target.unpinned
     )
     # R6: ``$(mktemp …)`` names a fresh temp entry — not "unknown" in the sense
     # that matters once CRITICAL ancestry was ruled out above.
@@ -1024,7 +1206,14 @@ def _rank(target: Target, prot: _Protected, session_id: str = "") -> RankedTarge
             worktree_state,
         )
 
-        state = worktree_state(path)
+        # OWN FIRST (operator escalation 2026-11-11, session 316765a40496): a
+        # worktree the ledger proves this session or its subagent created is
+        # judged on what its removal can LOSE. Before, a ``dirty`` state —
+        # here only ignored ``.expo/``/``.pnpm-store/`` git deletes anyway —
+        # returned HIGH below before the ledger check was ever reached, and
+        # the judge saw no ledger fact, so finished own trees were refused.
+        own = _owned_by_session(target, path, prot, session_id)
+        state = worktree_state(path, own=own is not None)
         if state != "not-linked":
             # Clean is not idle (operator incident 2026-11-09: a clean worktree
             # whose branch had an OPEN PR under QA was removed, deleting 34
@@ -1043,6 +1232,37 @@ def _rank(target: Target, prot: _Protected, session_id: str = "") -> RankedTarge
                     f"finish or close it first ({facts})",
                 )
             idle = activity.pr_state == "none" and not activity.owners_running
+            # OWN + CLEAN does not need the forge (operator escalation
+            # 2026-11-11, session 99c51054bdbd): ``git worktree remove --force``
+            # of its own clean tree for MERGED #1858 was refused twice, once
+            # because "PR state unknown (gh lookup timed out)" sent it to the
+            # judge and the judge then timed out (20 s). What the PR lookup
+            # protects is OTHER people's work in the tree (the 2026-11-09
+            # incident: a tree under QA); for a tree the ledger proves this
+            # session created, with nothing uncommitted and no other running
+            # owner, removal loses nothing (the branch ref survives) whatever
+            # gh says. A KNOWN open PR still refuses above; only an unknown
+            # state is waived, and only here. A dirty own tree, a foreign tree
+            # and an unproven path keep the judge, and a judge timeout there
+            # stays a refusal.
+            own_idle = not activity.owners_running and activity.pr_state in ("none", "unknown")
+            if own is not None and own_idle and state == "clean":
+                # Nothing uncommitted, nobody else in it, no open PR: the
+                # creator removing it loses nothing, ``--force`` or not.
+                return RankedTarget(
+                    target,
+                    Risk.LOW,
+                    f"{own[0]}; linked worktree with no uncommitted change ({facts})",
+                )
+            if own is not None and state == "dirty":
+                # Real tracked/untracked work in an OWN tree: the judge decides
+                # with the ledger row and the exact entries (``build_delete_case``
+                # lists both); the reason names them for the agent too.
+                return RankedTarget(
+                    target,
+                    Risk.HIGH,
+                    f"{own[0]}; linked worktree state: dirty; {_changes_phrase(path)}; {facts}",
+                )
             if idle and state == "clean" and not target.forced:
                 return RankedTarget(target, Risk.LOW, f"a clean linked git worktree ({facts})")
             if idle and state == "stale-initializing" and target.force_count == 2:
@@ -1081,35 +1301,283 @@ def _rank(target: Target, prot: _Protected, session_id: str = "") -> RankedTarge
             # ranking applies, but the state stays in whatever reason it gives.
             worktree_note = f"linked worktree state: {state}; {facts}"
             notes.append(worktree_note)
-    for spelling in spellings:
-        reason = _high_reason(spelling, target, prot, link=link is not None)
-        if reason is not None:
-            in_state = any(_under(spelling, st) for st in prot.state_roots)
-            if target.selected and not in_state and _is_work_tree(spelling):
-                # S2-3: a find with a selecting predicate (``-name '*.pyc'``)
-                # removes a SUBSET of a working tree — the R6 cleanup shape. It
-                # overrides ONLY the working-tree reasons: a repo root, even one
-                # at $HOME's top level (``~/<project>``). State-root children,
-                # other sessions and non-repo home dirs (``~/Documents``) stay
-                # HIGH, because their contents are the data a confused
-                # predicate would destroy.
-                return RankedTarget(target, Risk.LOW, "find with a selecting predicate")
-            owned = _owned_by_session(target, path, prot, session_id)
-            if owned is not None:
-                reason, matches = owned
-                shown = ""
-                if target.pattern is not None:
-                    shown = ", ".join(matches[:4]) + (
-                        f" … and {len(matches) - 4} more" if len(matches) > 4 else ""
-                    )
-                return RankedTarget(target, Risk.LOW, reason, shown)
-            return RankedTarget(target, Risk.HIGH, "; ".join([reason, *notes]))
+    if not target.worktree_remove and target.op == "delete" and not target.selected:
+        reached = _reached_worktrees(
+            target, path, prot, session_id, globstar=globstar, through_link=link is None
+        )
+        if reached is not None:
+            return reached
+    # Every spelling is ranked, not just the first with a reason: the verdict
+    # must not hinge on which spelling is looked at first. The most severe
+    # outcome wins (the selecting-find exemption applies only when EVERY
+    # spelling that has a reason qualifies for it); the reason text is the
+    # first in ``ordered``, i.e. the lexical spelling's when it has one.
+    reasons = [
+        (spelling, reason)
+        for spelling in ordered
+        if (reason := _high_reason(spelling, target, prot, link=link is not None)) is not None
+    ]
+    if reasons:
+        reason = reasons[0][1]
+        if target.selected and all(
+            not any(_under(spelling, st) for st in prot.state_roots) and _is_work_tree(spelling)
+            for spelling, _ in reasons
+        ):
+            # S2-3: a find with a selecting predicate (``-name '*.pyc'``)
+            # removes a SUBSET of a working tree — the R6 cleanup shape. It
+            # overrides ONLY the working-tree reasons: a repo root, even one
+            # at $HOME's top level (``~/<project>``). State-root children,
+            # other sessions and non-repo home dirs (``~/Documents``) stay
+            # HIGH, because their contents are the data a confused
+            # predicate would destroy.
+            return RankedTarget(target, Risk.LOW, "find with a selecting predicate")
+        owned = _owned_by_session(target, path, prot, session_id)
+        # An own linked worktree reached here, literally, by glob, by an
+        # ancestor or through a link (``link/``, resolved in
+        # ``_reached_worktrees``), already passed its bar (clean, idle, no
+        # open PR); a bare ``rm link`` removes only the entry.
+        if owned is not None:
+            reason, matches = owned
+            shown = ""
+            if target.pattern is not None:
+                shown = ", ".join(matches[:4]) + (
+                    f" … and {len(matches) - 4} more" if len(matches) > 4 else ""
+                )
+            return RankedTarget(target, Risk.LOW, reason, shown)
+        return RankedTarget(target, Risk.HIGH, "; ".join([reason, *notes]))
     if target.selected:
         return RankedTarget(target, Risk.LOW, "find with a selecting predicate")
     if worktree_note:
         # Never discard the worktree state the branch above recorded.
         return RankedTarget(target, Risk.LOW, f"ordinary path; {worktree_note}")
     return RankedTarget(target, Risk.LOW, "ordinary path")
+
+
+def _changes_phrase(path: str) -> str:
+    from local_operator.guardrails.provenance import describe_changes
+
+    return describe_changes(path)
+
+
+#: Foreign worktrees whose state, PR and owner a reason spells out in full
+#: (one PR lookup each, ~1.3–1.8 s measured for ``worktree_activity``); the
+#: rest are counted. States are read for up to ``_MAX_FOREIGN_STATES`` (one
+#: ``git status`` each) so trees holding work are the ones shown, not
+#: whichever sort first. Both bounds only shape the brief: the rank is HIGH
+#: for any foreign tree regardless.
+_MAX_FOREIGN_SHOWN = 4
+_MAX_FOREIGN_STATES = 16
+#: Bounds on the per-tree lookups (``git status`` plus one ``gh``/``glab``
+#: PR lookup each) of one reaching delete (MINOR-5, PR #3802: own trees ran
+#: them serially and uncapped, ~2 s each). CHOICE: a small thread pool —
+#: the lookups are subprocess waits, not CPU — plus a count cap and ONE
+#: deadline for the whole set, all failing closed:
+#:
+#: - more than ``_MAX_OWN_CHECKED`` own trees: the rest are "not checked",
+#:   HIGH (the judge decides; one delete of 16+ of your own trees is rare);
+#: - a lookup unfinished at the deadline: "not checked in time", HIGH.
+#:
+#: The deadline is one tree's own worst case (``_WORKTREE_STATUS_TIMEOUT_S``
+#: + ``_GH_TIMEOUT_S``, both measured bounds in provenance), and it is ONE
+#: deadline per classification, shared by the own-tree/foreign-state round
+#: and the later foreign-activity round (R2-MINOR-2, PR #3802: each had its
+#: own, so a delete reaching both waited up to ~2×), so a glob over N trees
+#: never waits longer than a literal delete of ONE may. Workers: 4
+#: keeps 16 trees at ~4 lookup rounds (~8 s at the measured 1.3–1.8 s per
+#: ``gh``) without fanning out more ``gh`` processes than a laptop shrugs off.
+_MAX_OWN_CHECKED = 16
+_REACH_LOOKUP_WORKERS = 4
+_REACH_LOOKUP_BUDGET_S = 68.0
+#: A reach scan past its entry budget (``provenance._REACH_MAX_ENTRIES``).
+REACH_TOO_WIDE = "too many entries to rule out a linked worktree under it"
+
+
+def _bounded_lookups(jobs: dict[str, Any], deadline: float) -> dict[str, Any]:
+    """Run ``jobs`` (key → zero-arg callable) on the pool under one deadline.
+
+    ``deadline`` is a ``time.monotonic()`` instant, shared by every round of
+    one classification. Keys whose call raised or did not finish by it are
+    ABSENT from the result: every caller treats absent as unknown → HIGH. An
+    unfinished thread is abandoned, not joined — each lookup carries its own
+    subprocess timeout, so it ends on its own.
+    """
+    import concurrent.futures as cf
+
+    if not jobs:
+        return {}
+    pool = cf.ThreadPoolExecutor(
+        max_workers=min(_REACH_LOOKUP_WORKERS, len(jobs)), thread_name_prefix="lop-reach"
+    )
+    try:
+        futures = {pool.submit(fn): key for key, fn in jobs.items()}
+        done, _ = cf.wait(futures, timeout=max(0.0, deadline - time.monotonic()))
+        results: dict[str, Any] = {}
+        for fut in done:
+            try:
+                results[futures[fut]] = fut.result()
+            except Exception:  # noqa: BLE001 — a failed lookup is unknown → HIGH
+                continue
+        return results
+    finally:
+        pool.shutdown(wait=False, cancel_futures=True)
+
+
+def _reached_worktrees(
+    target: Target,
+    path: str,
+    prot: _Protected,
+    session_id: str,
+    *,
+    globstar: bool = False,
+    through_link: bool = False,
+) -> RankedTarget | None:
+    """Rank a delete by the linked worktrees it reaches, or ``None`` if it reaches none.
+
+    WHY (security review of PR #3800): a linked worktree is ranked as one
+    however the delete reaches it — its literal path, a glob match
+    (``rm -rf <repo>/.worktrees/*``, or a loop over one) or an ancestor
+    (``rm -rf <repo>/.worktrees``). Before, only a literal path met the
+    repo-root test, so an unrelated session's glob ranked LOW and deleted
+    another session's uncommitted work unjudged.
+
+    - A tree this session's ledger does NOT record (``_owned_by_session``'s
+      bar) is HIGH: only the judge can weigh history evidence or an operator
+      answer, and it sees the tree's state, branch, PR, running owner and
+      recorded creator in the reason (``build_delete_case`` passes it on).
+    - An OWN tree is held to ``git worktree remove``'s bar (review M1): an
+      open PR/MR is CRITICAL; any state but clean (dirty, locked, busy,
+      unknown) or another running session in it is HIGH. An unknown PR
+      state alone does not hold a clean own tree (#3816's waiver). Only own,
+      clean and idle trees fall through to the ordinary ranking — the ledger
+      LOW for a literal path, ``ordinary path`` for a container.
+
+    Cost (MINOR-4/5, PR #3802): a glob is expanded with the SAME bounded walk
+    the evidence check uses (``_expand_glob``; past it, HIGH
+    ``GLOB_TOO_WIDE``), the reach scan has one entry budget per call (past
+    it, HIGH ``REACH_TOO_WIDE``), and the per-tree lookups run under
+    ``_bounded_lookups``.
+    """
+    from local_operator.guardrails import provenance as prov
+
+    if target.pattern is not None:
+        matches = _expand_glob(target.pattern, globstar=globstar)
+        if matches is None:
+            # Fail closed here, not by trusting the evidence check to say the
+            # same (it does, over the same walk; the (path, risk) dedup keeps one row).
+            return RankedTarget(target, Risk.HIGH, GLOB_TOO_WIDE)
+        # Only a match with a link on the way needs ``realpath`` (~8 lstats
+        # each; it dominated a 1258-match ``.pnpm/*``): the rest are real
+        # already, as ``_glob_matches_evidence`` relies on too.
+        # A match that IS a symlink is dropped, as ``linked_worktrees_reached``
+        # drops one: ``rm -rf`` removes the link, not what it points at.
+        candidates = [
+            os.path.realpath(m) if linked else m
+            for m, linked in matches
+            if not (linked and os.path.islink(m))
+        ]
+        roots = prov.linked_worktrees_reached(candidates, resolved=True)
+    else:
+        scan = path
+        if through_link and os.path.islink(path):
+            # MAJOR-1 (restack of #3802): ``path`` is slash-stripped, so for
+            # ``rm -rf link/`` it names the LINK, which
+            # ``linked_worktrees_reached`` skips ("removes the link, not what
+            # it points at") — yet ``link_entry`` returned None precisely
+            # because this delete goes THROUGH the link (on macOS ``rm -rf
+            # l/`` deletes the pointee). Scan the pointee, or an own dirty
+            # or unrecorded tree behind the link fell to the ledger LOW
+            # where #3800 ranks it HIGH. A bare ``rm link`` has a
+            # ``link_entry`` and never gets here (only the entry goes).
+            scan = os.path.realpath(path)
+        roots = prov.linked_worktrees_reached([scan])
+    if roots is None:
+        return RankedTarget(target, Risk.HIGH, REACH_TOO_WIDE)
+    if not roots:
+        return None
+    foreign: list[str] = []
+    own: list[str] = []
+    for root in roots:
+        owned = (
+            session_id
+            and not any(_under(root, st) for st in prot.state_roots)
+            and prov.owned_record(root, session_id) is not None
+        )
+        (own if owned else foreign).append(root)
+    checked, unchecked = own[:_MAX_OWN_CHECKED], own[_MAX_OWN_CHECKED:]
+    jobs: dict[str, Any] = {}
+    for root in checked:
+        jobs[f"state:{root}"] = lambda r=root: prov.worktree_state(r, own=True)
+        jobs[f"activity:{root}"] = lambda r=root: prov.worktree_activity(r, session_id)
+    for root in foreign[:_MAX_FOREIGN_STATES]:
+        jobs[f"fstate:{root}"] = lambda r=root: prov.worktree_state(r)
+    deadline = time.monotonic() + _REACH_LOOKUP_BUDGET_S
+    looked = _bounded_lookups(jobs, deadline)
+    held: list[str] = []
+    for root in checked:
+        state = looked.get(f"state:{root}")
+        activity = looked.get(f"activity:{root}")
+        if state is None or activity is None:
+            held.append(f"{root}: created by this session; not checked in time (state unknown)")
+            continue
+        facts = activity.facts()
+        if activity.pr_state == "open":
+            return RankedTarget(
+                target,
+                Risk.CRITICAL,
+                f"{root}: branch {activity.branch} has open {activity.pr_ref}; "
+                f"finish or close it first ({facts})",
+            )
+        # An unknown PR state does not hold an OWN clean tree (#3816, operator
+        # escalation 2026-11-11): removal keeps the branch, so nothing is lost
+        # whatever the forge says — the same waiver ``git worktree remove``
+        # gets in ``_rank``. Only own trees reach this loop; a foreign tree
+        # stays HIGH below, and a dirty/locked/busy own tree stays held.
+        idle = activity.pr_state in ("none", "unknown") and not activity.owners_running
+        # Strictly ``clean``: a stale ``initializing`` lock is LOW only for
+        # ``git worktree remove -f -f``, which says so; ``rm -rf`` goes to the judge.
+        if state != "clean" or not idle:
+            changes = f"; {prov.describe_changes(root)}" if state == "dirty" else ""
+            held.append(
+                f"{root}: created by this session; linked worktree state: {state}{changes}; {facts}"
+            )
+    if unchecked:
+        held.append(
+            f"… and {len(unchecked)} more linked worktrees created by this session, "
+            f"not checked (over {_MAX_OWN_CHECKED})"
+        )
+    if not foreign and not held:
+        return None
+    parts = list(held)
+    states = {
+        root: looked.get(f"fstate:{root}", "unknown") for root in foreign[:_MAX_FOREIGN_STATES]
+    }
+    # Work at risk first: a dirty/locked/busy tree is what the judge must see.
+    foreign.sort(key=lambda r: states.get(r, "not read") == "clean")
+    shown = foreign[:_MAX_FOREIGN_SHOWN]
+    activities = _bounded_lookups(
+        {root: (lambda r=root: prov.worktree_activity(r, session_id)) for root in shown},
+        deadline,
+    )
+    for root in shown:
+        state = states.get(root, "not read")
+        changes = f"; {prov.describe_changes(root)}" if state == "dirty" else ""
+        creators = prov.recorded_creators(root)
+        if session_id and session_id in creators:
+            # Its own row, refused by ``owned_record``'s stricter bar (a
+            # nested repository, another session's row inside): never "not
+            # created by this session" (QA Q1, PR #3802).
+            who = "recorded as created by this session, but not provably its own"
+        elif creators:
+            who = "not created by this session (recorded creator: " + ", ".join(creators) + ")"
+        else:
+            who = "not created by this session (not in the ledger)"
+        activity = activities.get(root)
+        facts = activity.facts() if activity is not None else "PR state unknown (lookup timed out)"
+        parts.append(f"{root}: {who}; linked worktree state: {state}{changes}; {facts}")
+    if len(foreign) > _MAX_FOREIGN_SHOWN:
+        parts.append(f"… and {len(foreign) - _MAX_FOREIGN_SHOWN} more foreign linked worktrees")
+    head = f"deletes {len(roots)} linked worktree{'s' if len(roots) != 1 else ''}"
+    return RankedTarget(target, Risk.HIGH, f"{head}: " + " | ".join(parts))
 
 
 def _owned_by_session(
@@ -1191,6 +1659,7 @@ def _is_work_tree(path: str) -> bool:
         return False
 
 
+@_glob_memo_scope
 def classify_targets(
     targets: Sequence[Target],
     opaque_reasons: Sequence[str],
@@ -1260,7 +1729,14 @@ def classify_targets(
     if not targets and not opaque_reasons and not evidence_hits:
         return Verdict(Risk.LOW)
     prot = prot or _protected(env, scratchpad, session_id)
-    ranked = [_rank(t, prot, session_id) for t in targets]
+    ranked = [_rank(t, prot, session_id, globstar) for t in targets]
+    # An alternate parse's word (GNU sed's reading of ``-i ''``) counts only
+    # as CRITICAL: under the other reading it is the script, so a HIGH or LOW
+    # row for it would invent a target (review M1 on PR #3816).
+    ranked = [r for r in ranked if not (r.target.critical_only and r.risk is not Risk.CRITICAL)]
+    evidence_hits = [
+        h for h in evidence_hits if not (h.target.critical_only and h.risk is not Risk.CRITICAL)
+    ]
     # An append that is not forging evidence is not a destructive target at all:
     # drop it so it adds no "destructive" annotation and no target text.
     ranked = [r for r in ranked if not (r.target.op == "append" and r.risk is Risk.LOW)]
@@ -1285,7 +1761,15 @@ def classify_bash(
 ) -> Verdict:
     """Rank a bash command. Pure parse: the command is never executed."""
     home = env.get("HOME") or os.path.expanduser("~")
-    resolution = resolve_command(command, cwd=_norm(cwd) if cwd else None, env=env, home=home)
+    # The process chdir()s to ``cwd`` as given, so a ``..`` in it lands
+    # physically (``abspath`` would collapse it lexically, hence the plain
+    # join); unpinnable means the cwd is unknown (relative words HIGH).
+    resolution = resolve_command(
+        command,
+        cwd=physical_path(os.path.join(os.getcwd(), os.path.expanduser(cwd))) if cwd else None,
+        env=env,
+        home=home,
+    )
     return classify_targets(
         resolution.targets,
         resolution.opaque_reasons,

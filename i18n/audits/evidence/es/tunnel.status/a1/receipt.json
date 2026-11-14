@@ -1,0 +1,22 @@
+{
+ "schema": 1,
+ "audit_id": "a1",
+ "locale": "es",
+ "namespace": "tunnel.status",
+ "record": "i18n/audits/evidence/es/tunnel.status/a1/record.json",
+ "source_sha256": "e5e82a9ab8bc9bc5cfdf3d39d034056d822251f1d759582c8826b27c46d6218a",
+ "target_sha256": "a128009e0cd9b77af2fc30e44b02f027a72de7e69b28b162bc55dcdf1513259d",
+ "verdict": "changes_requested",
+ "auditor": {
+  "agent": "i18n-auditor (lopdev team), independent `task` subagent, session 5469a14c00f5; did not translate or edit any value it judged",
+  "model": "anthropic/claude-opus-5-5"
+ },
+ "hashes": {
+  "record.json": "0104f14b01ec62e40e5303c977eb509a37cbf252ed50706d779bb07b5cb37920",
+  "report.md": "bc44eeadc60ef0f1ace4532eb79222c357b8582d5ec1d3ad21031d94ca389dfc",
+  "audit.log": "032644c55a067f863eccae11b5815bce40d6b6ca0431709e421e31bda30ce12c",
+  "dryrun.log": "d14839a19fefb862ec4a8d3b76f0aea37c15f0f280ff564116b86014edcab56d"
+ },
+ "ledger_receipt_staged": "/Users/damian/.local-operator/sessions/5469a14c00f5/scratchpad/i18n-3931/es.json",
+ "ledger_receipt_sha256": "f4ca3dd943626c28db739fd0cee06e4bb8784940a0fa552f528f05499225e2d4"
+}

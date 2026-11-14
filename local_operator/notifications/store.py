@@ -319,6 +319,16 @@ class ApplyResult:
     skipped: list[dict[str, str]] = field(default_factory=list)
 
 
+#: The one-time cleanup of the v0.102.2 remote backfill
+#: (:meth:`NotificationStore._cleanup_remote_backfill`): its ``meta`` flag, the
+#: ``read_via`` it stamps (so an undo restores exactly its own marks), and the
+#: ONLY key namespaces it touches — ``remote_attention.DONE_PREFIX``/
+#: ``NOTICE_PREFIX``, spelled here so the store keeps no import edge into that
+#: module (a test pins them equal). Never ``gate:``/``remote-gate:`` or an ask.
+CLEANUP_META_KEY = "cleanup.remote_backfill_v1"
+CLEANUP_VIA = "cleanup:remote-backfill-0.102.2"
+CLEANUP_KEY_PREFIXES: tuple[str, ...] = ("remote-done:", "remote-notice:")
+
 #: Columns added to ``items`` AFTER the table shipped. `CREATE TABLE IF NOT
 #: EXISTS` does nothing to an existing file, so a store written by an earlier
 #: build would answer every read with "no such column: <name>" — a 500 on list,
@@ -569,6 +579,7 @@ class NotificationStore:
             # "no such column" on every route (round-4 R5-1 review, MAJOR).
             # The column LIST is the contract; the version is not.
             self._ensure_columns(conn)
+            self._cleanup_remote_backfill(conn)
             self._adopt_wal(conn)
             return conn
         except BaseException:
@@ -602,6 +613,170 @@ class NotificationStore:
                 if column not in present:
                     conn.execute(alter)
                     logger.info("notifications: store upgraded with column %s", column)
+
+    @classmethod
+    def _cleanup_remote_backfill(cls, conn: sqlite3.Connection) -> None:
+        """ONE-TIME: mark READ the forwarded rows the v0.102.2 backfill flooded in.
+
+        WHY (operator rule, 2026-11-13). The first ``lop serve`` poll after
+        v0.102.2 installed wrote one unread ``remote-done:`` row per historic
+        mesh-node session (127 measured in four seconds) and 34 unread
+        ``remote-notice:`` rows for notices months old, all stamped with the
+        sync time. The producer is fixed at the source
+        (``notifications/remote_attention``); this clears what it already wrote.
+
+        CONSTRAINTS. Runs once per store (``meta`` flag :data:`CLEANUP_META_KEY`,
+        re-checked under ``BEGIN IMMEDIATE`` so racing processes mark once).
+        Touches ONLY unread rows whose key starts with
+        :data:`CLEANUP_KEY_PREFIXES` — never a park (``gate:``/``remote-gate:``),
+        an ask, or any other item — and only MARKS THEM READ with ``read_via =``
+        :data:`CLEANUP_VIA`; nothing is deleted. Each row's prior read marks are
+        recorded under the flag so :meth:`undo_remote_backfill_cleanup` can
+        restore exactly those rows. One ``meta`` read per connection otherwise.
+        """
+        if not conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='items'"
+        ).fetchone():
+            return
+        if conn.execute("SELECT 1 FROM meta WHERE k=?", (CLEANUP_META_KEY,)).fetchone():
+            return
+        with conn:
+            conn.execute("BEGIN IMMEDIATE")
+            if conn.execute("SELECT 1 FROM meta WHERE k=?", (CLEANUP_META_KEY,)).fetchone():
+                return
+            stamp = now_ms()
+            prefix_sql = " OR ".join("substr(key, 1, ?) = ?" for _ in CLEANUP_KEY_PREFIXES)
+            prefix_params: list[Any] = []
+            for prefix in CLEANUP_KEY_PREFIXES:
+                prefix_params += [len(prefix), prefix]
+            rows = conn.execute(
+                "SELECT id, revision, read_rev, read_at, read_via FROM items "
+                f"WHERE ({prefix_sql}) AND read_rev < revision ORDER BY seq",
+                prefix_params,
+            ).fetchall()
+            marked: dict[str, list[Any]] = {}
+            for row in rows:
+                seq = cls._next_seq(conn)
+                conn.execute(
+                    "UPDATE items SET seq=?, read_rev=revision, read_at=?, read_via=? WHERE id=?",
+                    (seq, stamp, CLEANUP_VIA, row["id"]),
+                )
+                marked[str(row["id"])] = [
+                    int(row["revision"]),
+                    int(row["read_rev"]),
+                    row["read_at"],
+                    row["read_via"],
+                ]
+            conn.execute(
+                "INSERT INTO meta(k, v) VALUES (?, ?)",
+                (CLEANUP_META_KEY, json.dumps({"at": stamp, "rows": marked}, sort_keys=True)),
+            )
+        if marked:
+            logger.info(
+                "notifications: marked %d forwarded remote rows read (%s)", len(marked), CLEANUP_VIA
+            )
+
+    def remote_backfill_cleanup_record(self, *, read_only: bool = False) -> dict[str, Any] | None:
+        """The one-time cleanup's record (``{"at", "rows", ["undone_at"]}``), or ``None``.
+
+        Opens a WRITE connection by default, on purpose: opening is what runs
+        the cleanup, so asking about it on a store that has not been opened
+        since the upgrade answers with the record it just wrote rather than
+        "none". ``read_only`` (the CLI's ``--dry-run``, QA round 1 Q2) reads
+        over ``mode=ro`` instead, so it never triggers the cleanup; ``None``
+        then may mean "not run yet" — :meth:`remote_backfill_pending` counts
+        what it would mark.
+        """
+
+        def body(conn: sqlite3.Connection) -> dict[str, Any] | None:
+            row = conn.execute("SELECT v FROM meta WHERE k=?", (CLEANUP_META_KEY,)).fetchone()
+            if row is None:
+                return None
+            data = json.loads(str(row[0]))
+            return data if isinstance(data, dict) else None
+
+        if read_only:
+            return self._read(body, None, "remote_backfill_cleanup_record")
+        return self._write(body, "remote_backfill_cleanup_record")
+
+    def remote_backfill_pending(self) -> int:
+        """How many rows the one-time cleanup WOULD mark read, read-only (Q2).
+
+        The same selection as :meth:`_cleanup_remote_backfill` (prefix and
+        unread), counted over ``mode=ro`` so a dry run writes nothing. 0 once
+        the cleanup has run: it is one-time, so nothing more would be marked.
+        """
+
+        def body(conn: sqlite3.Connection) -> int:
+            if conn.execute("SELECT 1 FROM meta WHERE k=?", (CLEANUP_META_KEY,)).fetchone():
+                return 0
+            prefix_sql = " OR ".join("substr(key, 1, ?) = ?" for _ in CLEANUP_KEY_PREFIXES)
+            params: list[Any] = []
+            for prefix in CLEANUP_KEY_PREFIXES:
+                params += [len(prefix), prefix]
+            row = conn.execute(
+                f"SELECT COUNT(*) FROM items WHERE ({prefix_sql}) AND read_rev < revision",
+                params,
+            ).fetchone()
+            return int(row[0])
+
+        return self._read(body, 0, "remote_backfill_pending")
+
+    def undo_remote_backfill_cleanup(self, *, dry_run: bool = False) -> int:
+        """Restore the read marks :meth:`_cleanup_remote_backfill` replaced. Returns rows restored.
+
+        RESTORES EXACTLY THOSE ROWS, and only while they are still the cleanup's:
+        a row the operator has since read or dismissed for themselves, or one
+        updated to a new revision (unread again by the store's own rule), carries
+        a different ``read_via``/``revision`` and is left alone. Idempotent — a
+        second undo finds no row still marked :data:`CLEANUP_VIA`. The flag
+        stays (with ``undone_at``) so the cleanup never re-runs on the next open.
+        ``dry_run`` counts over a read-only connection, so it never writes —
+        not even the cleanup a write open would run (QA round 1, Q2).
+        ``undone_at`` records the first undo that restored anything (or the
+        first undo at all); a repeat that restores nothing leaves it (Q3).
+        """
+
+        def body(conn: sqlite3.Connection) -> int:
+            row = conn.execute("SELECT v FROM meta WHERE k=?", (CLEANUP_META_KEY,)).fetchone()
+            if row is None:
+                return 0
+            data = json.loads(str(row[0]))
+            marked = data.get("rows") if isinstance(data, dict) else None
+            if not isinstance(marked, dict):
+                return 0
+            restored = 0
+            for item_id, prior in marked.items():
+                if not isinstance(prior, list) or len(prior) != 4:
+                    continue
+                revision, read_rev, read_at, read_via = prior
+                current = conn.execute(
+                    "SELECT revision, read_via FROM items WHERE id=?", (item_id,)
+                ).fetchone()
+                if (
+                    current is None
+                    or current["read_via"] != CLEANUP_VIA
+                    or int(current["revision"]) != int(revision)
+                ):
+                    continue
+                restored += 1
+                if dry_run:
+                    continue
+                conn.execute(
+                    "UPDATE items SET seq=?, read_rev=?, read_at=?, read_via=? WHERE id=?",
+                    (self._next_seq(conn), int(read_rev), read_at, read_via, item_id),
+                )
+            if not dry_run and (restored or not data.get("undone_at")):
+                data["undone_at"] = now_ms()
+                conn.execute(
+                    "UPDATE meta SET v=? WHERE k=?",
+                    (json.dumps(data, sort_keys=True), CLEANUP_META_KEY),
+                )
+            return restored
+
+        if dry_run:
+            return self._read(body, 0, "undo_remote_backfill_cleanup")
+        return self._write(body, "undo_remote_backfill_cleanup")
 
     @staticmethod
     def _adopt_wal(conn: sqlite3.Connection) -> None:
@@ -759,8 +934,21 @@ class NotificationStore:
         agent_id: str = "",
         team_id: str = "",
         now: int | None = None,
+        episode: str = "",
     ) -> NotifyOutcome:
         """Create or update one item (collapse table: contract §1.3).
+
+        ``episode`` is a WRITER-OWNED identity folded into the collapse digest,
+        for a writer whose same key and same words can describe two different
+        events. The remote-attention forwarder (``notifications/
+        remote_attention``) is the one user: two turns that finish on a peer
+        read "Finished on <device>" both times, and without this the second
+        completion would collapse into the first as ``unchanged`` and never
+        reach the operator. Passing the completion token here makes a NEW
+        completion an update (unread again) while a REPEAT of the same token —
+        a restarted watcher, or the TUI and ``lop serve`` both forwarding —
+        stays ``unchanged``. Empty (every other caller) leaves the digest
+        byte-identical to before, so no existing row's collapse changes.
 
         Every changed revision starts unread: session presence cannot prove
         the new callout rendered. Only a subsequent per-item receipt or an
@@ -776,7 +964,9 @@ class NotificationStore:
         body_md = str(body_md or "")[:BODY_MAX]
         key = str(key or "").strip()[:KEY_MAX]
         links_json = json.dumps(normalize_links(links), separators=(",", ":"), ensure_ascii=False)
-        digest = content_hash(title, body_md, links_json, priority)
+        digest = content_hash(
+            title, body_md, links_json + (f"\x1e{episode}" if episode else ""), priority
+        )
         stamp = now if now is not None else now_ms()
 
         def body(conn: sqlite3.Connection) -> NotifyOutcome:
@@ -1001,6 +1191,37 @@ class NotificationStore:
             return _row_dict(row) if row is not None else None
 
         return self._read(body, None, "get_by_key")
+
+    def unread_with_key_prefix(self, prefix: str, *, limit: int = 200) -> list[dict[str, Any]]:
+        """Unread, undismissed items whose ``key`` starts with ``prefix``, oldest first.
+
+        For a writer that owns a key NAMESPACE and must reconcile its unread
+        rows against an outside fact on every read rather than against process
+        memory: the remote-attention forwarder marks a ``remote-done:`` row read
+        once the owner's listing no longer claims that completion (QA round 1,
+        Q1 — a receipt that landed while no watcher ran left the row unread for
+        good, because the in-memory map that used to drive the settle started
+        empty after a restart). One indexed query per poll instead of one
+        lookup per listed session. Read-only, like :meth:`get_by_key`. ``%``
+        and ``_`` in ``prefix`` are escaped, so the prefix is matched literally.
+        """
+        if not prefix:
+            return []
+        escaped = prefix.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        params = (f"{escaped}%", max(1, int(limit)))
+
+        def body(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+            return [
+                _row_dict(row)
+                for row in conn.execute(
+                    f"SELECT {_ITEM_COLUMNS} FROM items WHERE key LIKE ? ESCAPE '\\' "
+                    "AND dismissed_at IS NULL AND read_rev < revision "
+                    "ORDER BY created_at, id LIMIT ?",
+                    params,
+                )
+            ]
+
+        return self._read(body, [], "unread_with_key_prefix")
 
     def find_by_key(self, key: str) -> list[dict[str, Any]]:
         """Every item holding ``key``, across all sessions (dismissed ones included).
@@ -1323,7 +1544,9 @@ class NotificationStore:
 
         return self._read(body, [], "undelivered")
 
-    def claim_delivery(self, item_id: str, by: str, *, now: int | None = None) -> bool:
+    def claim_delivery(
+        self, item_id: str, by: str, *, now: int | None = None, per_revision: bool = False
+    ) -> bool:
         """Claim the banner for an item's current revision, once, machine-wide.
 
         ``delivered_rev`` is the watermark a banner leg (desktop feed, TUI, the
@@ -1338,6 +1561,18 @@ class NotificationStore:
         one suppression the grace allows. It suppresses nothing permanently: a
         later content change bumps ``revision``, which makes the row unread and
         claimable again (``notifications/delivery.py`` states the rule).
+
+        ``per_revision=True`` skips the per-row banner cooldown and keeps every
+        other arm (watermark, read, dismissed). It is for a writer whose every
+        revision is a DISTINCT EVENT rather than a watcher re-describing one
+        topic: the remote-done claimant (``notifications/remote_attention``),
+        where each revision is one finished turn on a peer. A local completion
+        banners once per completion token with no time window
+        (``AttentionStore.claim_delivery``), and a remote one must match it
+        (review round 2, R2-M1 / QA Q4: two turns 5 minutes apart bannered once
+        remotely, twice locally). The watermark still makes it one banner per
+        revision across the TUI and ``lop serve``. Every other caller keeps the
+        cooldown (D15).
         """
 
         stamp = now if now is not None else now_ms()
@@ -1356,7 +1591,7 @@ class NotificationStore:
             # stays unread and badged; the SECOND update inside the window is
             # simply not news a banner can carry.
             last = row["delivered_at"]
-            if last is not None and stamp - int(last) < BANNER_COOLDOWN_MS:
+            if not per_revision and last is not None and stamp - int(last) < BANNER_COOLDOWN_MS:
                 return False
             if int(row["read_rev"]) >= int(row["revision"]):
                 return False

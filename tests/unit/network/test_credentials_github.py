@@ -475,6 +475,42 @@ def env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> _Env:
     return holder
 
 
+def _seed_borrower_network(root: Path, network_id: str) -> None:
+    """An active, trusted network record on ``root`` whose self member is the borrower.
+
+    A real borrower always holds its network record, and every no-dial cache serve
+    passes ``MeshCredentialClient.live_grant``, which fails CLOSED without one (no
+    record, an untrusted record or an inactive self row all refuse — the panic
+    fence, PR #3920). Tests that drive a bare client against a placement document
+    must therefore seed the record a paired device would have, as the ``mesh``
+    fixtures get from a real pairing; never weaken the fence to make them pass.
+    """
+    from local_operator.network import store
+    from local_operator.network import types as net_types
+
+    record = net_types.NetworkRecord(
+        network_id=network_id,
+        name="github-test",
+        created_by=OWNER_DEVICE,
+        self_device_id=BORROWER_DEVICE,
+        self_role="drive",
+        self_capabilities=sorted(net_types.capabilities_for_role("drive")),
+        listen={"address": "127.0.0.1", "port": 1, "advertised": []},
+    )
+    record.members.append(
+        net_types.MemberRecord(
+            device_id=BORROWER_DEVICE,
+            name="borrower",
+            kind="device",
+            lifecycle="active",
+            role="drive",
+            capabilities=sorted(net_types.capabilities_for_role("drive")),
+            endpoints=["127.0.0.1:1"],
+        )
+    )
+    store.save(record, root)
+
+
 def _seed_app_key(root: Path, pem: str, *, app_id: str = APP_ID) -> None:
     from local_operator.secrets.keys import load_master_key
     from local_operator.secrets.store import SecretStore
@@ -1675,6 +1711,7 @@ def test_after_the_window_the_next_command_gets_a_new_token_or_fails_clean(
     )
     document.grant(github_mod.GITHUB_KEY, BORROWER_DEVICE, scope="device", by=OWNER_DEVICE)
     document.save()
+    _seed_borrower_network(env.root, "n_gh_next")
     client = MeshCredentialClient(
         root=env.root,
         self_device=BORROWER_DEVICE,
@@ -1739,7 +1776,11 @@ def test_a_grant_carries_the_owner_s_narrowing(owner: Any, github_api: _FakeGith
     """
     detail = _ask_grant(owner, BORROWER_DEVICE)
     assert detail["kind"] == "grant", detail
-    assert detail["narrowing"] == {"repositories": [SCRATCH]}
+    narrowing = detail["narrowing"]
+    assert narrowing["repositories"] == [SCRATCH]
+    # Authoritative and ordered: the digest names the list, the generation orders it.
+    assert narrowing["digest"] == github_mod.designation_digest([SCRATCH])
+    assert int(narrowing["generation"]) > 0
 
 
 def test_the_delivered_narrowing_lands_in_an_empty_config_and_the_helper_serves(
@@ -1815,6 +1856,7 @@ def test_borrowed_git_env_materialises_the_narrowing_it_serves(tmp_path: Path) -
     )
     document.grant(github_mod.GITHUB_KEY, BORROWER_DEVICE, scope="device", by=OWNER_DEVICE)
     document.save()
+    _seed_borrower_network(root, "n_gh_env")
     client = MeshCredentialClient(
         root=root,
         self_device=BORROWER_DEVICE,
@@ -1972,4 +2014,8 @@ def test_a_write_failure_is_recorded_and_never_fatal(
 def test_an_owner_with_no_list_sends_no_narrowing() -> None:
     """Absence, not an empty list: a borrower's standing backstop is never wiped."""
     assert github_mod.grant_narrowing([]) == {}
-    assert github_mod.grant_narrowing([SCRATCH]) == {"repositories": [SCRATCH]}
+    assert github_mod.grant_narrowing([SCRATCH], generation_ms=7) == {
+        "repositories": [SCRATCH],
+        "digest": github_mod.designation_digest([SCRATCH]),
+        "generation": "7",
+    }

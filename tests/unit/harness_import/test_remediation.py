@@ -194,6 +194,35 @@ def test_zstd_rollout_opens_text_mode(tmp_path):
     assert [record["type"] for record in records] == ["session_meta", "response_item"]
 
 
+def test_zstd_rollout_uses_the_shared_decoder_fallback(tmp_path, monkeypatch):
+    """A 3.12/3.13 runtime decodes rollouts through ``backports.zstd`` too.
+
+    Codex used its own 3.14-only import; it now shares
+    ``session.compression.zstd_decoder``. A stand-in decoder (with only the
+    text ``open`` API both the stdlib and the backport expose) proves the
+    routing on any interpreter, and ``None`` keeps the honest refusal.
+    """
+    import io
+    import types
+
+    from local_operator.harness_import.sources.base import UnsupportedBody
+    from local_operator.harness_import.sources.codex import _records
+    from local_operator.session import compression
+
+    path = tmp_path / "rollout-synthetic.jsonl.zst"
+    path.write_bytes(b"\x28\xb5\x2f\xfd")  # content comes from the stand-in
+    line = json.dumps(
+        {"timestamp": "2026-01-01T00:00:01Z", "type": "session_meta", "payload": {"id": "z"}}
+    )
+    fake = types.SimpleNamespace(open=lambda *a, **k: io.StringIO(line + "\n"))
+    monkeypatch.setattr(compression, "_zstd_decoder", fake)
+    assert [record["type"] for record in _records(path)] == ["session_meta"]
+
+    monkeypatch.setattr(compression, "_zstd_decoder", None)
+    with pytest.raises(UnsupportedBody, match="backports.zstd"):
+        _records(path)
+
+
 def test_private_use_glyphs_are_stripped_from_titles():
     from local_operator.harness_import.service import normalise_title
 

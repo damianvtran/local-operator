@@ -29,14 +29,20 @@ never names a ref, and never runs a command:
   refused by name (``update_in_progress``).
 
 NEVER FORCED, and it is a structural property rather than a sentence: the
-handler has no force parameter, the frame has no force key, and the one gate
+handler has no force parameter and the frame has no force key. What protects a
+running turn depends on the install shape. On an IN-PLACE install the one gate
 before the install is a FRESH probe of this device's own session registry — a
 member with any live ``busy`` record answers ``busy`` with its own reason and
 NOTHING is touched (RU §4.3: the member's own registry is the sole authority on
-the member's busyness; the origin cannot see, and must not infer, it). A
+the member's busyness; the origin cannot see, and must not infer, it), and a
 registry that cannot be read is treated as "cannot prove idle" and refuses in
 the same shape, because the unsafe direction of a failed read is an install
-over a running turn.
+over a running turn. On the immutable GENERATION layout there is no busy gate:
+the install writes a new tree and flips a pointer, a busy runtime keeps the
+tree it loaded and is retired once idle (``buildwatch``), and the receipt
+names the sessions it left on the old build (the reason's "stay on … until
+they settle" clause and its ``left_busy`` twin). See the comment above the
+gate in ``_execute_validated`` for why the stricter rule was dropped there.
 
 OPEN QUESTION (verify at implementation), carried from the design rather than
 invented here: the reply map's origin-side ``no_grant`` skip (RU §3, first row)

@@ -368,6 +368,20 @@ def peer_affinity(value: Any) -> tuple[int, int] | None:
     return (account_id, created_at)
 
 
+#: The longest narrowing LIST a peer may carry. 500 is GitHub's own ceiling on
+#: ``repositories`` in ``POST /app/installations/{id}/access_tokens`` (the App
+#: mint maximum), so no designation the owner can actually lend is longer. It was
+#: 64, which silently truncated a longer list here while the owner had digested the
+#: whole one — every delivery then failed its digest and the borrower kept its
+#: standing list forever (PR #3841 mesh-lane m2). The settings validator refuses a
+#: designation over this same number where a person types it
+#: (``settings_io._validate_github_repositories``), so the two cannot drift; a
+#: hand-edited longer list still truncates here and is REFUSED, receipted, on the
+#: borrower (``too_many_entries``), never applied as a partial list. Size: 500 x
+#: 200 chars is ~100 KB, far inside the 8 MiB session frame.
+MAX_NARROWING_LIST_ENTRIES = 500
+
+
 def _bounded_narrowing(value: Any) -> dict[str, Any]:
     """A ``Grant.narrowing`` map a peer sent, bounded to shapes this build reads.
 
@@ -388,7 +402,7 @@ def _bounded_narrowing(value: Any) -> dict[str, Any]:
             out[name] = item[:200]
         elif isinstance(item, (list, tuple)):
             entries = [entry[:200] for entry in item if isinstance(entry, str) and entry]
-            out[name] = entries[:64]
+            out[name] = entries[:MAX_NARROWING_LIST_ENTRIES]
     return out
 
 

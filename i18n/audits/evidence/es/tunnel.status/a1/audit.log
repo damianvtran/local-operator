@@ -1,0 +1,31 @@
+$ PYTHONPATH=$PWD ~/local-operator/.venv/bin/python scripts/i18n/check.py --catalogues-only  # @ e95a77a5f3ac5266d24c2bc317a8710d26817d60
+check.py: catalogue checks: 0 problem(s)
+$ python mech.py <worktree>
+en sha256 e5e82a9ab8bc9bc5cfdf3d39d034056d822251f1d759582c8826b27c46d6218a keys 13
+fr sha256 c03f9eeab5eb707ca9bf7484ad55aa652ae07c8f7277cfa6c2e2d6745142c79d keys 13 mechanical: OK  | U+0020-before-:;!? 11 in 10 keys
+es sha256 a128009e0cd9b77af2fc30e44b02f027a72de7e69b28b162bc55dcdf1513259d keys 13 mechanical: OK 
+zh-CN sha256 ecfa838240466f61427faf9a604ccac22a6e8ae4938354320befcc89a7d7fd3f keys 13 mechanical: OK  | Han<->Latin spaces in 9 keys
+ru sha256 6e136c298abf605c17a43b1a45e8c0a33bd04b91dad9067aa2d235cfc1945aad keys 13 mechanical: OK 
+vi sha256 28368d9612520d71bf626b2748ac2afa9d6665237b4afbee0509eca7cd4d7600 keys 13 mechanical: OK 
+ur sha256 94179256116bf95a6b862192fc4d92dc2d50592bf7cad200b62dd5454caaa690 keys 13 mechanical: OK 
+hi sha256 3865bc0eff5c3d07cc29a8c2e83a3b57035565d73b10b97b97af1b846d88bf8e keys 13 mechanical: OK 
+corpus fr space-before-:; {'\u202f;': 353, '\u202f:': 623, ' ;': 34, ' :': 19}
+corpus zh-CN Han/Latin boundaries {'spaced': 107, 'tight': 1915}
+corpus vi tunnel terms {'tunnel': 16}
+corpus vi cổng uses 10
+corpus ur اخراج as exit (excl. اخراجات) {'اخراج': 2}
+corpus hi निकास {}
+$ python3 scripts/i18n/ledger.py history-sha --locale fr --namespace tunnel.status
+4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945
+$ python3 scripts/i18n/ledger.py history-sha --locale es --namespace tunnel.status
+4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945
+$ python3 scripts/i18n/ledger.py history-sha --locale zh-CN --namespace tunnel.status
+4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945
+$ python3 scripts/i18n/ledger.py history-sha --locale ru --namespace tunnel.status
+4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945
+$ python3 scripts/i18n/ledger.py history-sha --locale vi --namespace tunnel.status
+4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945
+$ python3 scripts/i18n/ledger.py history-sha --locale ur --namespace tunnel.status
+4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945
+$ python3 scripts/i18n/ledger.py history-sha --locale hi --namespace tunnel.status
+4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945

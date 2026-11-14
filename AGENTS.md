@@ -1413,25 +1413,43 @@ warnings below.
 that both run `lop sessions` and both announce themselves in the same minute
 each see "nobody owns it" and both proceed — which is precisely how two
 out-of-queue releases happened. A `send` is not observable to a session that
-was not listening, so it cannot be the lock. An open PR whose title starts
-`chore(release):` — first `claim release window`, later
-`bump version to X.Y.Z` — is observable to everyone through the forge, so it
-is; the search below keys on the prefix, so the retitle does not drop the lock. The lock is opened *before* the number is known — the bump
+was not listening, so it cannot be the lock. An open release PR — pushed from
+a `release-next` branch, titled first `chore(release): claim release window`,
+later `chore(release): bump version to X.Y.Z` — is observable to everyone
+through the forge, so it is. The lookup below lists open PRs and matches them
+locally: a branch starting `release-next` or `release/claim`, or a title
+starting `chore(release)`. The branch arm survives the retitle; the title arm
+catches a release PR pushed from any other branch name (#3665
+`chore/release-0-101-33`, claim #2903 `release-claim-0.90.1`). The lock is opened *before* the number is known — the bump
 is decided from the window's contents, which do not exist yet when the lock
 is taken — so it starts life as a claim and becomes the bump once decided.
 
 Before starting a release, every agent does the same things, in this order:
 
-1. **Look for the lock.**
-   `gh pr list --search '"chore(release)" in:title' --state open`.
-   An open bump PR means the window is owned: its body names
-   the owning session's pid, so `send` that session (by `pid`) your PR's
-   number, merge SHA and `Release:` line, and let it aggregate. Do not start a
-   second release. (Quote the phrase — `gh`'s search passes it to GitHub,
-   which treats bare parentheses as syntax and returns nothing.)
+1. **Look for the lock — list and match locally, never `--search`.**
+   ```sh
+   gh pr list --state open --limit 500 --json number,title,headRefName,createdAt \
+     --jq '.[] | select((.headRefName | startswith("release-next") or startswith("release/claim")) or (.title | startswith("chore(release)")))'
+   ```
+   ANY line of output means the window has an owner — claim or bump PR alike.
+   Its body names the owning session's pid, so `send` that session (by `pid`)
+   your PR's number, merge SHA and `Release:` line, and let it aggregate. Do not
+   start a second release. Why not a `--search`: a claim PR is a draft titled
+   `chore(release): claim release window`, and a `--search` on `chore(release)`
+   matches it only when the phrase is quoted exactly right — unquoted, GitHub
+   reads the parentheses as syntax and returns nothing, which reads as "no
+   owner" (measured 2026-11-14 on local-operator-ui: `chore(release)` and
+   `chore(release) in:title` returned nothing while claim PR #1908 was open).
+   In local-operator-ui, sessions that searched titles nearly claimed the
+   windows #1908 and #1878 already held. The `--jq` match is a plain local
+   string comparison, so the parentheses are not syntax there; it keeps the
+   title as a fallback arm for release PRs on other branch names. `--limit 500`
+   because `gh pr list` stops at 30 by default and this repo routinely has more
+   than 30 open PRs.
 2. **Take the lock by opening the claim PR.** If nothing is open, the
    release owner's *first* act — before collecting anything — is pushing
-   branch `release-next` with one empty commit and opening a draft PR titled
+   a branch that MUST start with `release-next` (plain `release-next` unless
+   that name is taken) with one empty commit and opening a draft PR titled
    `chore(release): claim release window`; its body names the owner's session
    pid from `lop sessions` and an empty checklist of the PRs in the window.
    Include a `## Public release notes` section following
@@ -1657,8 +1675,9 @@ git -C ~/local-operator fetch origin
 git -C ~/local-operator log --oneline "$(git -C ~/local-operator describe --tags --abbrev=0 origin/main)..origin/main"
 
 # 2. Take the lock: an empty claim commit in a throwaway worktree, opened as
-#    a draft PR. (No open chore(release) PR was found in step 1 of "One
-#    release owner per window".) The number is not known yet.
+#    a draft PR. (No open release-next*/release/claim* or chore(release) PR was
+#    found by the lookup in step 1 of "One release owner per window".) The
+#    number is not known yet. The branch MUST start with release-next.
 git -C ~/local-operator worktree add ~/local-operator/.worktrees/release-next origin/main
 git -C ~/local-operator/.worktrees/release-next checkout -b release-next
 git -C ~/local-operator/.worktrees/release-next commit --allow-empty -m 'chore(release): claim release window'
@@ -2278,6 +2297,49 @@ Every agent asked to "update local-operator" or make a change available through
 then either hand it to the window's release owner or become that owner. It
 does not bump the version on its own branch, and it does not release
 one PR alone while other merged work is sitting on `main` unreleased.
+
+### When the release owner runs on a mesh peer
+
+A lopdev session on a mesh node (for example a headless worker) finishes build
+→ review → merge → release the same way a local one does, with two
+machine-bound exceptions.
+
+**The install tail belongs to the operator's primary (head) device.**
+`lop-update`, `readlink ~/.local/share/lop/current` and the `lop` smoke all act
+on the machine they run on, so run on a node they update and report the NODE,
+not the device the operator uses. A release owner on a peer therefore:
+
+1. Does the window, the bump PR, and step 4's tag → GitHub Release and
+   `publish.yml`/PyPI watch exactly as above — none of that is machine-bound.
+   Step 4's install-and-verify half is the exception, next.
+2. Hands step 4's install-and-verify half (Mechanics `# 5. Install and verify`:
+   install, generation record, smoke) to a session on the head device:
+   `sessions op=spawn peer=<head>` with a brief naming the tag, the bump SHA and
+   the verification commands, or `send peer=<head> session=<id>` (or
+   `target=<name>`) to an existing head lopdev session — a bare `send
+   peer=<head>` is refused.
+3. Records the head's installed generation (`readlink
+   ~/.local/share/lop/current`) and `lop --version` **from that session's
+   reply**, and posts those in step 5 ("Post the refs"). Never post the node's
+   own values as the release's installed build.
+
+Fleet nodes, the owner's own included, need no manual install when the rollout
+fires. The head's update opens one (`rollouts.open_after_update`) only when all
+hold: the rollout policy is `auto` (the default), `--no-roll` was not given, the
+install moved to a strictly newer version, and the head has at least one other
+active member. Once open, the relay driver re-asks parked members every
+`CADENCE_S` (300 s), and on the generation layout a busy runtime keeps its build
+and is retired once idle (`buildwatch` convergence) — no drain.
+
+**Visual evidence on a headless node has no browser tool.** Electron capture
+still works there under Xvfb through `capturePage()` — a working example is
+local-operator-ui #1875 (an open PR at the time of writing; evidence in its
+`docs/pr-evidence/conversation-loading-indicator/README.md`), and a designer
+may review from those committed frames. What Xvfb cannot show is real
+translucency (macOS vibrancy): proof of that needs a capture on a macOS device.
+Delegate that capture to a session on a macOS peer (`sessions op=spawn
+peer=<mac>`), or state the limitation plainly in the PR — never present a Linux
+frame as vibrancy proof.
 
 ## Releasing the browser extension to the Chrome Web Store
 
@@ -3568,13 +3630,30 @@ written by the `scripts/bench_*.py` harnesses and read by nothing at runtime —
 and was swept on its own: a measurement store is regenerable, so it belongs with
 the PR that cites it, and it is ignored now (`.gitignore`).
 
-The evidence still has to exist; it just lives where the review does. Attach
-images to the PR description or the review comment (drag them into the GitHub
-editor, or `gh pr comment --body-file` with the rendered markdown), paste
-measured numbers and commands inline, and keep the capture *scripts* — the
-reusable part — under `scripts/` when they are worth reusing. A PR reviewer
-reads the PR; a future agent reads `git log` and the PR it links to; neither
-needs the frames in the tree.
+**Testing evidence must not be committed to the product branch or its PR**,
+including under a new directory name. Keep reusable capture/reproduction code
+under `scripts/` (existing rigs are indexed in `scripts/repro/`), functional
+fixtures under `tests/fixtures/`, and evaluation corpora/baselines with their
+own kits; these inputs are not disposable proof artifacts.
+
+The evidence still has to exist; choose a reviewable location:
+
+- Attach images to the PR description or review comment using the GitHub
+  editor's upload, and paste actual commands, responses and measurements inline.
+  `gh pr comment --body-file` posts Markdown; it does not upload a local image.
+- When repository-hosted evidence is needed, push it to a **dedicated testing
+  branch**, link its immutable commit from the PR, and never merge that evidence
+  branch into the product branch.
+- Alternatively, describe the image and measured geometry in the PR and attach
+  the actual image locally to the linked Local Operator project for operator
+  review. Say explicitly that the image is local-only so a remote reviewer is
+  not told it is attached to the PR.
+
+An image description is not pixel validation: the responsible reviewer must
+still look at the rendered frame. If they cannot access it, record that visual
+validation is blocked rather than claiming it passed. A PR reviewer reads the
+PR; a future agent reads `git log` and the PR it links to; neither needs proof
+captures in the product tree.
 
 What DOES belong in the tree: the shot scripts in `scripts/`, the opt-in SVG
 goldens under `tests/unit/tui/__snapshots__` (a design aid, see above), and
@@ -3598,6 +3677,7 @@ The commit to retrieve each from:
 | `browser-extension` | `39691ea0` |
 | `sibling-modes-boot-layout` | `2c4ebc77` |
 | everything else under `docs/evidence`, `docs/assets/pr-*`, `docs/pr-280`, `docs/performance` | `fc80a967` (the last `main` before the sweep) |
+| the second sweep (PR #3683): every `docs/evidence/` path that survived the first, including `session-load-central-cache/bench_ab.json`, `search-bar-rung`, `team-bridge-h1`; plus root `fixtures/` and `examples/notebooks/` | `60a908c2` (`60a908c247c4c5067488356da9c935a505759b87`, the last `main` that tracked them; reusable rigs moved to `scripts/repro/`, fixtures to `tests/fixtures/`) |
 | `bench` | `ba225070` (the `main` this sweep branched from; the whole store is still present there — `git show ba225070:bench/README.md` retrieves the tables, `git show ba225070:bench/analytics-rollup-after.json` the numbers behind them) |
 
 ### Detached runner memory budgets

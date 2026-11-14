@@ -47,5 +47,18 @@
   "tui.app.providers.no_live_list": "no live list: {names}",
   "tui.app.compaction.idle_receipt": "context compacted while idle · {detail}",
   "tui.app.compaction.idle_receipt_bare": "context compacted while idle",
-  "tui.app.compaction.idle_skipped": "idle compaction skipped · nothing changed"
+  "tui.app.compaction.idle_skipped": "idle compaction skipped · nothing changed",
+  "tui.app.section_temporary": "{count, plural, one {Temporary · #} other {Temporary · #}}",
+  "tui.app.temporary_deletes_in": "{minutes, plural, one {deletes in # min} other {deletes in # min}}",
+  "tui.app.temporary_hold_running": "kept while it runs",
+  "tui.app.temporary_hold_on_screen": "kept while on screen",
+  "tui.app.temporary_hold_open_ask": "kept while a question is open",
+  "tui.app.temporary_hold_armed_wake": "kept while a wake is set",
+  "tui.app.temporary_hold_armed_monitor": "kept while a monitor is set",
+  "tui.app.temporary_hold_unread_mail": "kept while a message is unread",
+  "tui.app.temporary_hold_operator_hold": "kept by a hold",
+  "tui.app.temporary_hold_unseen_result": "kept until you see the result",
+  "tui.app.temporary_hold_unsaved_files": "kept while files are unsaved",
+  "tui.app.temporary_hold_linked": "kept while pinned or linked",
+  "tui.app.temporary_hold_cannot_verify": "kept: could not check"
 }

@@ -123,7 +123,20 @@ def _record_for(config_dir: Path, session_id: str) -> Any:
     return None
 
 
-async def _wait_for_record(config_dir: Path, session_id: str, timeout: float = 30.0) -> Any:
+#: Backstop for a runtime child to publish its registry record. The wait returns
+#: the moment the record exists, so this only bounds a child that never boots.
+#: 30 s was not enough on a saturated box: the armed cell's non-editable child
+#: (a cold interpreter importing the whole package) took longer than that to
+#: reach its first record in 4 of 12 local runs under 12 busy loops on a
+#: 14-core host (load average ~60), old head and new alike, failing with
+#: ``no record for refresharmed1 within 30.0s`` -- a boot-speed wager, not a
+#: product signal. An idle box needs ~2 s.
+RECORD_BACKSTOP_S = 120.0
+
+
+async def _wait_for_record(
+    config_dir: Path, session_id: str, timeout: float = RECORD_BACKSTOP_S
+) -> Any:
     loop = asyncio.get_running_loop()
     deadline = loop.time() + timeout
     while loop.time() < deadline:
@@ -143,6 +156,78 @@ def _alive(child: subprocess.Popen[bytes]) -> bool:
     already retired. ``poll()`` reaps and answers.
     """
     return child.poll() is None
+
+
+#: How long the armed-probe cell's turn parks in the mock's ``[bash:N]`` tool.
+#: It is the mock's CAP (``_mock_bash_sleep`` bounds N at 60) on purpose: the
+#: turn is not meant to END on this clock. The cell releases it itself, with
+#: :func:`_release_parked_sleep`, once it has OBSERVED the latch; the number only
+#: has to outlast the latch (5-10 s on an idle box: a 5 s probe tick, a settle,
+#: one more tick) with room for a starved runner, and a bigger one would just
+#: be a longer hang if the release never came.
+ARMED_HOLD_S = 60
+
+
+def _descendant_commands(root_pid: int) -> list[tuple[int, str, bool]]:
+    """``(pid, argv, is_leaf)`` for every live descendant of ``root_pid``.
+
+    ``ps`` rather than psutil: it is not a dependency here, and the one fact
+    wanted -- "is the parked ``sleep`` a live descendant of THIS runtime" -- is
+    an ancestry question on a table that is short on a test box. ``-A -o`` with
+    empty headers parses the same on macOS and the Linux runner.
+    """
+    table = subprocess.run(
+        ["ps", "-A", "-o", "pid=,ppid=,args="], capture_output=True, text=True, timeout=30
+    ).stdout
+    children: dict[int, list[int]] = {}
+    commands: dict[int, str] = {}
+    for line in table.splitlines():
+        fields = line.split(None, 2)
+        if len(fields) < 2 or not (fields[0].isdigit() and fields[1].isdigit()):
+            continue
+        pid, parent = int(fields[0]), int(fields[1])
+        commands[pid] = fields[2] if len(fields) > 2 else ""
+        children.setdefault(parent, []).append(pid)
+    found: list[tuple[int, str, bool]] = []
+    queue = list(children.get(root_pid, []))
+    while queue:
+        pid = queue.pop()
+        found.append((pid, commands.get(pid, ""), pid not in children))
+        queue.extend(children.get(pid, []))
+    return found
+
+
+def _parked_sleep_pids(root_pid: int, seconds: int) -> list[int]:
+    """The ``sleep <seconds>`` leaf processes under the runtime: the bash tool, RUNNING.
+
+    A leaf, because ``bash -c "sleep N"`` may or may not exec its last command
+    and a wrapper's argv repeats the command line; the leaf is the one that is
+    actually sleeping, and the one safe to signal.
+    """
+    wanted = f"sleep {seconds}"
+    return [
+        pid
+        for pid, args, leaf in _descendant_commands(root_pid)
+        if leaf and args.strip().split("/")[-1].endswith(wanted)
+    ]
+
+
+def _release_parked_sleep(root_pid: int, seconds: int) -> int:
+    """End the parked tool call now (SIGTERM to its exact pid); how many were signalled.
+
+    The turn then completes the way any bash call that exited non-zero does --
+    the mock answers the tool row with text -- so the cell's later "the turn's
+    reply is durable" and "no error attention row" assertions still read a turn
+    that finished rather than one that was aborted.
+    """
+    signalled = 0
+    for pid in _parked_sleep_pids(root_pid, seconds):
+        try:
+            os.kill(pid, 15)
+            signalled += 1
+        except ProcessLookupError:
+            pass
+    return signalled
 
 
 async def _never_take_over() -> Any:
@@ -504,9 +589,92 @@ def _dump_successor_diagnostics(
             pass
 
 
+def _lose_the_retiring_frame(viewer: Any, monkeypatch: pytest.MonkeyPatch) -> list[int]:
+    """Make a reset overtake the owner's ``retiring`` frame, deterministically.
+
+    This is a test seam for CI gate 42969069065 (PR #3783, job 130362419678).
+    The old owner exited 0 and left ``runtime-exit.json`` saying "retiring for
+    <build>", but the viewer heard ``'owner connection reset'`` and never the
+    frame. That happens when the reset is queued before the pump reads the
+    frame: ``StreamReader.readuntil`` raises the stored exception before
+    scanning its buffer. The seam swaps the frame for the reset at the real
+    client's reader. The owner subprocess, its exit record and the app's
+    engage path stay real.
+
+    It covers EVERY connection this process dials, not only the current one.
+    Recovery can redial the retiring owner while its record is still
+    published, and a frame that reached that second connection would hide the
+    defect. The test asserts that the seam fired, so a frame that slipped
+    through fails the run instead of passing it.
+    """
+    from local_operator.mobile.attach_client import AttachClient
+
+    #: One entry per retiring frame the seam swallowed, so the test can prove
+    #: the ordering under test happened rather than passing on a frame that
+    #: slipped through.
+    fired: list[int] = []
+
+    def lose_on(reader: asyncio.StreamReader) -> None:
+        # Filtered at ``feed_data``, the transport's entry into the reader, and
+        # NOT at ``readline``. The pump is usually parked INSIDE an earlier
+        # ``readline`` call, and a wrapper installed after that call started
+        # would let the very next line through. That gave a false pass on main
+        # in 2 of 7 runs, where the retiring frame was the next line. Only
+        # complete lines are forwarded, so a frame split across TCP reads is
+        # still recognised.
+        if getattr(reader, "_test_loses_retiring", False):
+            return
+        feed_data = reader.feed_data
+        feed_eof = reader.feed_eof
+        partial = bytearray()
+
+        def feed_losing_retiring(data: bytes) -> None:
+            partial.extend(data)
+            *lines, rest = bytes(partial).split(b"\n")
+            partial[:] = rest
+            for line in lines:
+                try:
+                    op = json.loads(line).get("op") if line.strip() else None
+                except ValueError:
+                    op = None
+                if op == "retiring":
+                    fired.append(id(reader))
+                    reader.set_exception(
+                        ConnectionResetError("test seam: reset overtook the retiring frame")
+                    )
+                    return
+                feed_data(line + b"\n")
+
+        def flush_then_eof() -> None:
+            if partial:
+                feed_data(bytes(partial))
+                partial.clear()
+            feed_eof()
+
+        reader.feed_data = feed_losing_retiring  # type: ignore[method-assign]
+        reader.feed_eof = flush_then_eof  # type: ignore[method-assign]
+        reader._test_loses_retiring = True  # type: ignore[attr-defined]
+
+    pump = AttachClient._pump
+
+    async def pump_losing_retiring(self: AttachClient) -> None:
+        if self._reader is not None:
+            lose_on(self._reader)
+        await pump(self)
+
+    monkeypatch.setattr(AttachClient, "_pump", pump_losing_retiring)
+    client = viewer._client
+    assert client is not None and client._reader is not None
+    # The current pump is already running with its reader captured, so the class
+    # patch cannot reach it. Patch that reader directly.
+    lose_on(client._reader)
+    return fired
+
+
 @pytest.mark.asyncio
+@pytest.mark.parametrize("frame_lost", [False, True], ids=["frame", "reset-before-frame"])
 async def test_a_watched_idle_runtime_refreshes_and_the_viewer_rebinds_silently(
-    headless_tui_env: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    headless_tui_env: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, frame_lost: bool
 ) -> None:
     """Design test 13: the resume-then-update case, end to end.
 
@@ -514,6 +682,11 @@ async def test_a_watched_idle_runtime_refreshes_and_the_viewer_rebinds_silently(
     marker to NEW. Within the settle + stagger the old pid must be gone, the
     record must name a NEW pid, the viewer must be bound (not cold), and the
     ledger must contain none of :data:`FORBIDDEN`.
+
+    ``reset-before-frame`` runs the same journey with the ``retiring`` frame
+    lost to a reset (see :func:`_lose_the_retiring_frame`). The viewer must
+    still refresh from the owner's durable exit record, inside the same 30 s
+    deadline.
     """
     from local_operator.session.attached import AttachedSession
 
@@ -561,6 +734,9 @@ async def test_a_watched_idle_runtime_refreshes_and_the_viewer_rebinds_silently(
                 diag_events: list[str] = []
                 diag_t0: list[float] = []
                 _install_successor_spies(app, viewer, diag_events, diag_t0)
+                seam_fired: list[int] = []
+                if frame_lost:
+                    seam_fired = _lose_the_retiring_frame(viewer, monkeypatch)
                 diag_t0.append(time.monotonic())
                 _flip(prefix)
 
@@ -601,6 +777,10 @@ async def test_a_watched_idle_runtime_refreshes_and_the_viewer_rebinds_silently(
                 assert (
                     new_record is not None and int(new_record.pid) != old_pid
                 ), "no successor runtime was engaged after the refresh"
+                if frame_lost:
+                    assert (
+                        seam_fired
+                    ), "the seam never swallowed a retiring frame; nothing was tested"
                 assert not viewer.is_cold, "the viewer must be bound to the successor"
                 assert (
                     new_record.source_ref == NEW_MARKER.split()[0]
@@ -1487,7 +1667,7 @@ async def test_the_armed_probe_drains_and_exits_when_the_loaded_tree_vanishes(
         else:
             raise AssertionError("the warm-up turn never completed")
 
-        await viewer.prompt("please [bash:12]")
+        await viewer.prompt(f"please [bash:{ARMED_HOLD_S}]")
         deadline = time.monotonic() + 30
         while time.monotonic() < deadline:
             state = getattr(viewer, "frontend_state", None)
@@ -1496,6 +1676,32 @@ async def test_the_armed_probe_drains_and_exits_when_the_loaded_tree_vanishes(
             await asyncio.sleep(0.05)
         else:
             raise AssertionError("the runtime never started the turn")
+
+        # WAIT UNTIL THE BASH TOOL IS RUNNING, THEN DELETE -- ``streaming`` is
+        # not that moment. It flips when the turn is ADMITTED; the tool call
+        # that this cell parks the turn in is dispatched later (a provider
+        # request, then the guardrail check, then the spawn), and each of those
+        # touches modules on disk. Delete in that gap and the dispatch fails in
+        # microseconds -- "aborted", or "BLOCKED by guardrail ... the safety check
+        # failed" -- the turn completes with no tool ever having run, and the
+        # latch assertion below reports "completion rows: complete, complete".
+        # That was CI's failure (runs 43082470360, 43135142485): the gap is
+        # ~ms on an idle box and stretches with runner load, while the old
+        # cell's rmtree was timed against ``streaming`` alone. A live
+        # ``sleep`` under THIS runtime is the observable that the dispatch is
+        # behind us, so the deletion now lands on a turn that is genuinely
+        # parked in its tool, which is the situation the cell claims to test.
+        # (``AttachedSession`` publishes no per-tool state to wait on instead.)
+        deadline = time.monotonic() + 60
+        while time.monotonic() < deadline:
+            if _parked_sleep_pids(pid, ARMED_HOLD_S):
+                break
+            await asyncio.sleep(0.05)
+        else:
+            raise AssertionError(
+                "the turn never reached its bash tool: "
+                + _completion_attention_report(config, session_id, stderr_path)
+            )
 
         shutil.rmtree(tree)  # what `uv tool install --force` does first
 
@@ -1517,6 +1723,17 @@ async def test_the_armed_probe_drains_and_exits_when_the_loaded_tree_vanishes(
             viewer.frontend_state, "streaming", False
         ), "the latch must land while the turn is STILL running — " + _completion_attention_report(
             config, session_id, stderr_path
+        )
+
+        # THE TURN IS HELD OPEN UNTIL HERE, NOT FOR A FIXED TIME. The tool parks
+        # for ARMED_HOLD_S (the mock's cap), far past the latch, so "the latch
+        # landed while the turn was still running" cannot be lost to a slow
+        # probe tick; the cell ends the park itself now that the latch is
+        # observed and the assertion above has passed. Without it a loaded
+        # runner could finish a fixed 12 s turn before a 5 s probe fired twice.
+        assert _release_parked_sleep(pid, ARMED_HOLD_S), (
+            "the parked bash tool vanished before the cell could release it: "
+            + _completion_attention_report(config, session_id, stderr_path)
         )
 
         # (b) It EXITS — the Q-1 pin. On the wedged head this loop timed out with

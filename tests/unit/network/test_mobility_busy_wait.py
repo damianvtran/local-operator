@@ -251,3 +251,121 @@ def test_an_offload_with_a_wait_re_probes_a_busy_source(
     assert flaky.calls >= 2, "the destination never re-asked: the wait did not travel"
     assert (server_b.root / "sessions" / SESSION).is_dir()
     assert not (server_a.root / "sessions" / SESSION).exists()
+
+
+# A link lost mid-offload (CI main 43143140065, 2026-11-12) -------------------
+
+
+def _drop_link_at_first_invite(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """The destination's side of the link dies the moment the FIRST invite lands.
+
+    Deterministic stand-in for what CI saw under xdist load: A's reader logged "the
+    peer closed the connection" mid-move, and A's invite came back empty. Closed
+    before any answer, so A's ``LinkTransport.ask`` gets no reply — the exact hop
+    whose refusal reads "THAT DEVICE is unreachable" (``_unreachable(None)``). Only
+    the first invite: a retry dials a fresh link and must be served normally.
+    """
+    real = mobility._destination_invite
+    dropped: list[str] = []
+
+    def _dying(server: Any, link: Any, frame: dict[str, Any]) -> dict[str, Any]:
+        if not dropped:
+            dropped.append(str(link.link_id))
+            link.close("error")
+            return {"result": "refused", "code": "never_sent", "message": "never sent"}
+        return real(server, link, frame)
+
+    monkeypatch.setattr(mobility, "_destination_invite", _dying)
+    return dropped
+
+
+def _parked_at_prepared(server_a: Any, server_b: Any) -> None:
+    import time as time_mod
+
+    from local_operator.session.placement import write_handoff_entry
+
+    write_handoff_entry(
+        server_a.root,
+        SESSION,
+        {
+            "role": "source",
+            "phase": "prepared",
+            "to_device": server_b.identity.device_id,
+            "mode": "move",
+            "instance_id": str(server_a.instance_id),
+            "at": time_mod.time() - 42.0,
+        },
+    )
+
+
+def test_the_half_moved_refusal_survives_a_link_lost_mid_offload(
+    request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The owner's own ``prepared`` entry is legible whatever happens to the link.
+
+    RED before the fix: the offload learned its OWN journal's state only through the
+    destination (invite → status → prepare → refused, four asks over one link), so
+    a link lost at the invite read "that device is unreachable (no answer on its
+    link)" — the peer blamed for a state THIS device holds.
+    """
+    both: Devices = request.getfixturevalue("pair")
+    server_a, server_b, _host, _port = both
+    _pair_settled(both, monkeypatch, role="admin", settings=server_b.settings)
+    _owned_session(server_a)
+    _parked_at_prepared(server_a, server_b)
+    dropped = _drop_link_at_first_invite(monkeypatch)
+
+    result = _move(server_a, SESSION, to=server_b.identity.device_id, monkeypatch=monkeypatch)
+
+    assert result["ok"] is False and result["code"] == "in_progress", result
+    message = str(result["message"])
+    assert "phase: prepared" in message and "lop network restart" in message, message
+    assert "unreachable" not in message, message
+    # Answered from the journal: no invite was needed, so none was lost.
+    assert dropped == [], "the owner dialled the peer to learn its own state"
+    assert (server_a.root / "sessions" / SESSION).is_dir()
+    assert not (server_b.root / "sessions" / SESSION).exists()
+
+
+def test_a_link_lost_with_nothing_in_flight_is_still_reported_unreachable(
+    request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """REPORTING ONLY: a move with no handoff held here is not retried or renamed.
+
+    Nothing was in flight, the invite went unanswered, and nothing changed — so
+    ``unreachable`` is the true answer (design §6.5: the recovery is a NEW attempt,
+    which is the caller's to make). Passes before and after the fix.
+    """
+    both: Devices = request.getfixturevalue("pair")
+    server_a, server_b, _host, _port = both
+    _pair_settled(both, monkeypatch, role="admin", settings=server_b.settings)
+    _owned_session(server_a)
+    dropped = _drop_link_at_first_invite(monkeypatch)
+
+    result = _move(server_a, SESSION, to=server_b.identity.device_id, monkeypatch=monkeypatch)
+
+    assert result["ok"] is False and result["code"] == "unreachable", result
+    assert len(dropped) == 1, "exactly the one invite was sent; nothing retried it"
+    assert (server_a.root / "sessions" / SESSION).is_dir()
+    assert not (server_b.root / "sessions" / SESSION).exists()
+
+
+def test_the_session_roles_gate_still_answers_before_the_journal(
+    request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The early answer may not reorder refusals: roles first, as on the round trip."""
+    from local_operator.agent_profiles import install_seed
+    from local_operator.agents import AgentRegistry
+    from local_operator.profile_scope import scope_agent_registry
+
+    both: Devices = request.getfixturevalue("pair")
+    server_a, server_b, _host, _port = both
+    _pair_settled(both, monkeypatch, role="admin", settings=server_b.settings)
+    directory = _owned_session(server_a)
+    scoped = scope_agent_registry(AgentRegistry(server_a.root), directory)
+    assert install_seed("reviewer", registry=scoped, scope="session") is not None
+    _parked_at_prepared(server_a, server_b)
+
+    result = _move(server_a, SESSION, to=server_b.identity.device_id, monkeypatch=monkeypatch)
+
+    assert result["code"] == "session_roles", result

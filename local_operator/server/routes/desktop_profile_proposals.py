@@ -82,11 +82,14 @@ async def accept(proposal_id: str, body: Accept, request: Request):
             result = P.apply(root(request), proposal_id, actor="desktop", edited_after=body.after)
             record = result["proposal"]
             agents, teams = registries(request)
-            profile = (
-                profile_detail(agents, record["name"])
-                if record["kind"] == "agent"
-                else teams.get_team(record["target_id"]).model_dump(mode="json")
-            )
+            if record["kind"] == "skill":
+                # The skill library's own write receipt (name, source,
+                # fingerprint, ...), the shape the Skills tab already reads.
+                profile = result["profile"]
+            elif record["kind"] == "agent":
+                profile = profile_detail(agents, record["name"])
+            else:
+                profile = teams.get_team(record["target_id"]).model_dump(mode="json")
             return {
                 "proposal": P.detail(root(request), record),
                 "profile": profile,

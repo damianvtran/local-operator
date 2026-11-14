@@ -63,6 +63,7 @@ from local_operator import siginfo
 from local_operator.session.runtime import control, journal, registry
 from local_operator.session.runtime.process import SIGNAL_DRAIN_S
 from tests.e2e.harness import NO_NOTIFY_ENV
+from tests.e2e.signal_shutdown_diagnostics import CapturedChild
 from tests.e2e.test_cut_off_turns_e2e import (
     _attach,
     _child_env,
@@ -90,7 +91,7 @@ PARK_S = 60
 TURN_COMPLETED = "from the mock provider"
 
 
-def _spawn(config_dir: Path, session_id: str, **extra: str) -> subprocess.Popen[bytes]:
+def _spawn(config_dir: Path, session_id: str, **extra: str) -> CapturedChild:
     """The cut-off suite's spawn, with per-cell environment additions.
 
     Reusing ``_child_env`` wholesale is deliberate: that helper is where the
@@ -100,13 +101,10 @@ def _spawn(config_dir: Path, session_id: str, **extra: str) -> subprocess.Popen[
     """
     env = _child_env(config_dir, session_id)
     env.update(extra)
-    return subprocess.Popen(
+    return CapturedChild(
         [sys.executable, "-m", "local_operator.session.runtime.process"],
+        config=config_dir,
         env=env,
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        start_new_session=True,
     )
 
 
@@ -191,7 +189,7 @@ class _Rig:
 
     def __init__(self, config: Path) -> None:
         self.config = config
-        self.children: dict[str, subprocess.Popen[bytes]] = {}
+        self.children: dict[str, CapturedChild] = {}
         self.viewers: dict[str, Any] = {}
         self.directories: dict[str, Path] = {}
 
@@ -222,6 +220,9 @@ class _Rig:
                 except ProcessLookupError:
                     pass
                 _reap(child, self.config)
+            evidence = child.shutdown_evidence()
+            if evidence:
+                print(evidence)
         for record, _state in registry.scan(self.config):
             try:
                 os.kill(record.pid, signal.SIGKILL)
@@ -443,7 +444,9 @@ async def test_a_sigterm_with_nothing_in_flight_is_still_immediate(
             latency = time.monotonic() - started
 
             appended = _runtime_log(config)[log_before:]
-            assert code == 0, appended[-2000:]
+            assert code == 0, (
+                appended[-2000:] + "\n" + rig.children["drainsigidle"].shutdown_evidence()
+            )
             assert latency < 10.0, f"an idle runtime took {latency:.2f}s to leave"
             assert "exiting (SIGTERM" in appended, appended[-2000:]
             assert "arrived with work in flight" not in appended
@@ -712,17 +715,17 @@ raise SystemExit(process.main())
 """
 
 
-def _spawn_with_drain_bound(
-    config_dir: Path, session_id: str, bound_s: float
-) -> subprocess.Popen[bytes]:
-    """``_spawn``'s environment, a driver instead of ``-m``, and a short bound."""
-    return subprocess.Popen(
+def _spawn_with_drain_bound(config_dir: Path, session_id: str, bound_s: float) -> CapturedChild:
+    """``_spawn``'s environment, a driver instead of ``-m``, and a short bound.
+
+    A ``CapturedChild`` like every other runtime here, so a failing drain-bound
+    child leaves the same bounded stderr evidence and ``_Rig.children`` stays
+    honestly typed; ``_Rig.aclose`` stops its capture via ``shutdown_evidence``.
+    """
+    return CapturedChild(
         [sys.executable, "-c", _DRAIN_BOUND_DRIVER, str(bound_s)],
+        config=config_dir,
         env=_child_env(config_dir, session_id),
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        start_new_session=True,
     )
 
 
@@ -1128,9 +1131,9 @@ def _receipt_timeout_evidence(
 
     This runs ONLY on the timeout path, so the passing path is unchanged, and it
     never raises (every probe is bounded and caught): evidence must not mask the
-    timeout. It is diagnostics, not a fix. The child's stdio is DEVNULL by design;
-    the runtime's own ``logs/runtime.log`` (shared by the config's runtimes) is the
-    log that exists, so its tail is reported instead.
+    timeout. It is diagnostics, not a fix. The runtime's own ``logs/runtime.log``
+    (shared by the config's runtimes) is reported here; rig teardown separately
+    preserves the bounded stderr and stall-file tails of an abnormal child exit.
     """
 
     def listing(path: Path) -> str:

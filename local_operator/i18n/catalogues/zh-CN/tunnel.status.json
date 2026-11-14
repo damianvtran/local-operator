@@ -1,0 +1,15 @@
+{
+  "tunnel.status.create.conflict_unmatched": "Radient表示此请求的隧道已存在，但当前登录账户的隧道列表中没有唯一匹配的记录。先查看lop tunnel list，然后用lop tunnel connect --tunnel-id <id>连接。",
+  "tunnel.status.gateway.listening_http_status": "中继网关端口127.0.0.1:{port}上有程序在监听，但它对健康检查返回了HTTP {status}：可能有其他程序占用了该端口，或网关运行异常。重新安装无济于事。",
+  "tunnel.status.gateway.listening_timed_out": "本地中继网关正在127.0.0.1:{port}上监听，但其健康检查应答超时；重新安装无济于事。",
+  "tunnel.status.gateway.listening_unreadable": "本地中继网关正在127.0.0.1:{port}上监听，但其健康检查应答无法读取；重新安装无济于事。",
+  "tunnel.status.last_exit.at": "连接器上次退出：{label}（{at}）",
+  "tunnel.status.last_exit.plain": "连接器上次退出：{label}",
+  "tunnel.status.login.deferred_retried": "登录：刷新已推迟，将自动重试。",
+  "tunnel.status.login.unchecked": "登录：无法检查（刷新请求无法连接到Radient）。",
+  "tunnel.status.requests.heading": "请求（最近{window}条）：{tally}",
+  "tunnel.status.requests.no_response": "无响应",
+  "tunnel.status.server_unavailable.label": "Radient服务器错误",
+  "tunnel.status.server_unavailable.relay": "Radient对这台电脑的中继授权检查返回了临时服务器错误。登录和这台电脑都没有问题；Radient恢复后会自动重新授权。",
+  "tunnel.status.server_unavailable.terminal": "Radient对连接器的授权检查返回了临时服务器错误（HTTP 5xx），问题不在登录，也不在这台电脑。它每10秒重试一次，Radient恢复后会自动重新授权；无需执行任何本地命令。"
+}

@@ -704,16 +704,20 @@ SCRATCHPAD_SOFT_WARNING_PERCENT = 75
 #: that would send the caller to the wrong place. ``mktemp -d`` with no template
 #: lands in ``$TMPDIR``, NOT ``/tmp``: macOS's ``com.apple.tmp_cleaner`` prunes
 #: ``/tmp`` entries older than three days, so a template carrying that directory
-#: is the one way to put a live session's scratch under a reaper.
+#: is the one way to put a live session's scratch under a reaper. The worktree
+#: is SITED because a bare ``<path>`` read as "any path", the pad included: 33
+#: worktrees sat in session pads by 2026-11-13, where the guard never grants
+#: ledger ownership (the state root is excluded), so their creators could not
+#: remove them as their own.
 SCRATCHPAD_ELSEWHERE = (
     "The pad is for scratch you will read back in this session: a dependency tree or build "
-    "output belongs in a git worktree (`git worktree add <path>`), and a throwaway binary, "
-    "an archive or an oversized extract in `bash mktemp -d`, which lands in $TMPDIR rather "
-    "than /tmp."
+    "output belongs in a git worktree (`git worktree add <repo>/.worktrees/<name>`, never "
+    "in a pad), and a throwaway binary, an archive or an oversized extract in "
+    "`bash mktemp -d`, which lands in $TMPDIR rather than /tmp."
 )
 
 #: The SAME alternative said shorter, for the sentence whose audience is a
-#: card row rather than prose: where :data:`SCRATCHPAD_ELSEWHERE` costs 268
+#: card row rather than prose: where :data:`SCRATCHPAD_ELSEWHERE` costs 302
 #: cells, this costs 60.
 #:
 #: It exists because the two tails are drawn for different readers. Every

@@ -1,0 +1,15 @@
+{
+  "tunnel.status.create.conflict_unmatched": "Radient says a tunnel for this request already exists, but this login's tunnel list has no single matching record. Check lop tunnel list, then connect it with lop tunnel connect --tunnel-id <id>.",
+  "tunnel.status.gateway.listening_http_status": "Something is listening on the relay gateway port 127.0.0.1:{port}, but it answered the health check with HTTP {status}: another program may hold the port, or the gateway is unhealthy. Reinstalling will not help.",
+  "tunnel.status.gateway.listening_timed_out": "The local relay gateway is listening on 127.0.0.1:{port}, but its health answer timed out; reinstalling will not help.",
+  "tunnel.status.gateway.listening_unreadable": "The local relay gateway is listening on 127.0.0.1:{port}, but its health answer was unreadable; reinstalling will not help.",
+  "tunnel.status.last_exit.at": "Last connector exit: {label} (at {at})",
+  "tunnel.status.last_exit.plain": "Last connector exit: {label}",
+  "tunnel.status.login.deferred_retried": "Login: refresh deferred — retried automatically.",
+  "tunnel.status.login.unchecked": "Login: could not be checked (a refresh could not reach Radient).",
+  "tunnel.status.requests.heading": "Requests (last {window}): {tally}",
+  "tunnel.status.requests.no_response": "no response",
+  "tunnel.status.server_unavailable.label": "Radient server error",
+  "tunnel.status.server_unavailable.relay": "Radient answered this computer's relay authorization check with a temporary server error. Nothing is wrong with the login or this computer; it reauthorizes by itself once Radient recovers.",
+  "tunnel.status.server_unavailable.terminal": "Radient answered the connector's authorization check with a temporary server error (HTTP 5xx), so the login and this computer are not at fault. It retries every 10 seconds and reauthorizes by itself once Radient recovers; no local command is needed."
+}

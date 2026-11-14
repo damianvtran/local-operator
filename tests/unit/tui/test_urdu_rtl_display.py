@@ -20,6 +20,7 @@ from local_operator.tui.i18n_status import (
     technical_display,
     technical_literal_spans,
 )
+from tests.unit.tui.waiting import settle
 
 RLI, LRI, PDI = "\u2067", "\u2066", "\u2069"
 
@@ -444,7 +445,22 @@ async def test_real_language_picker_remounts_queued_copy_without_resize(
         await pilot.pause()
         block = UserBlock("queued prompt", queued=True)
         app._append_block(block)
-        await pilot.pause()
+        # The block is built DETACHED, so its first rows are authored at the
+        # fold ladder's fallback 80 (`TranscriptBlock.fold_width`); the mount's
+        # own 0->W Resize then refits it to the lane its container gives it
+        # (`UserBlock.on_resize` -> `refit_width`: 96 at 100 columns, the
+        # transcript content box less its stable scrollbar gutter). One bare
+        # `pause()` does not guarantee that refit has landed on a descheduled
+        # worker (CI run 42971789399: `96 == 80`), so the baseline below would
+        # capture the pre-layout fallback and the "no resize" check would fire
+        # on the mount refit rather than on anything the language switch did.
+        # Wait for the product's own settled condition — the built width equals
+        # the block's laid-out width — which says nothing about the switch.
+        await settle(
+            pilot,
+            lambda: block.size.width > 0 and block._built_width == block.size.width,
+            what="queued UserBlock refit to its laid-out width",
+        )
         before_width = block._built_width
         rendered = block.renderable
         assert isinstance(rendered, Text)

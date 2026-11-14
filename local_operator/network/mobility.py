@@ -482,6 +482,11 @@ class MoveCarryBlock(TypedDict, total=False):
     #: there. Additive inside an already-optional block, so a move that carried
     #: nothing new parses exactly as before.
     cwd: dict[str, str]
+    #: Present only when the source could NOT refresh the session's team/agent
+    #: definitions and the operator's custom instructions on the destination before
+    #: the move (``_push_move_definitions``): names what may be stale there. The
+    #: move itself still completed — a brief refresh never gates a move.
+    definitions_notice: str
 
 
 class SessionMoveResult(TypedDict):
@@ -3802,6 +3807,84 @@ def _source_session_cwd(server: "RelayServer", session_id: str) -> str:
     return ""
 
 
+def _handoff_in_progress_refusal(server: "RelayServer", session_id: str) -> dict[str, Any] | None:
+    """The ``in_progress`` refusal for a session THIS device's journal holds mid-handoff.
+
+    ONE answer for every route, because the state is this device's own durable fact:
+    the destination's ``prepare`` asks it here (:func:`_source_prepare`), and the
+    OWNER's own offload asks it before it dials (:func:`_offload`). The offload used
+    to learn it only through the destination — invite, then the destination's
+    ``status``/``prepare`` back to this device, then its ``refused`` report — four
+    asks over one link, so a link that died on the way (a ``replaced`` eviction, a
+    peer closing under load) turned this device's own, legible ``phase: prepared``
+    into "that device is unreachable (no answer on its link)", blaming the peer for
+    a state the asker was holding (CI main 43143140065, 2026-11-12). ``None`` means
+    no handoff is in flight here after a reconcile, so the move may proceed.
+    """
+    from local_operator.session.placement import handoff_in_flight
+
+    try:
+        existing = handoff_in_flight(server.root, session_id)
+    except Exception:  # noqa: BLE001 — an unreadable journal refuses elsewhere
+        existing = None
+    if existing and str(existing.get("phase") or "") in ("prepared", "handing-off"):
+        # Reconcile a stale entry before refusing, then re-read: a journal entry
+        # left by a crash is exactly what `--wait`'s retry must be able to clear.
+        reconcile(server.root, server=server, only=session_id)
+        try:
+            existing = handoff_in_flight(server.root, session_id)
+        except Exception:  # noqa: BLE001
+            existing = None
+        if existing:
+            # A HALF-MOVED SESSION HAS TO BE LEGIBLE FROM THE REFUSAL ALONE. The entry
+            # this device is holding may be a handoff that is genuinely under way, or
+            # one whose destination died — and until it is settled, every route to
+            # this conversation answers the same sentence. Measured on the two-device
+            # rig 2026-09-26 (probe 9): the destination's relay was killed mid-copy,
+            # A answered ``deadline_exceeded`` with "Nothing was deleted: this device
+            # still holds the conversation", and SEVEN retries over ten minutes then
+            # read "a handoff ... is already in progress on this device" with no way
+            # to tell what was wrong or what to do; the same move landed the moment
+            # A's relay restarted. The phase and the age are the two facts that make
+            # the state legible (``prepared`` = no bytes were committed anywhere;
+            # ``handing-off`` = monotone, the destination owns the outcome), so they
+            # are NAMED here rather than left for the user to infer from a JSON
+            # journal. The recovery the design's §6.5 table would apply to a stale
+            # entry written by a DEAD relay is deliberately not applied here — this
+            # entry's writer is alive — and that gap is recorded, not guessed at.
+            phase = str(existing.get("phase") or "")
+            age = _handoff_age(existing)
+            # THE DEVICE, NOT "this device": on the destination's route the reader
+            # is the DESTINATION, so "this device" named the wrong machine and its
+            # remedy (restart the destination's relay) cleared nothing. Naming the
+            # holder reads correctly on the owner's own offload route too. The
+            # journal is device-local, so the holder for an entry here is always
+            # this relay's own device.
+            holder = str(server._own_label())  # noqa: SLF001
+            # THE ESCAPE IS NAMED, because it is not derivable from the state. An
+            # entry written by this device's LIVE relay is skipped by every reconcile
+            # (the instance rule that stops a merely slow peer losing an in-flight
+            # handoff), so no amount of retrying clears it and no other verb does
+            # either: what clears it is making the writer instance stale, after which
+            # the next attempt reconciles it at ``prepared`` and rolls it back
+            # (measured 2026-09-26: seven retries over ten minutes read this sentence;
+            # the same move landed the moment the source's relay restarted). Review
+            # round 1's ruling is a user-facing abandon verb, and this clause is its
+            # prerequisite: a person can act on the state they can read.
+            return {
+                "result": "refused",
+                "code": "in_progress",
+                "message": (
+                    "a handoff of that conversation is already in progress on "
+                    f"{holder} (phase: {phase or 'unknown'}, {age}), so nothing was "
+                    f"changed. If the move does not finish on its own, restart the "
+                    f"relay on {holder} (`lop network restart`), then try the move again."
+                ),
+                "session_id": session_id,
+            }
+    return None
+
+
 def _source_prepare(
     server: "RelayServer", link: "PeerLink", frame: dict[str, Any]
 ) -> dict[str, Any]:
@@ -3822,7 +3905,6 @@ def _source_prepare(
     from local_operator.network import sync as sync_mod
     from local_operator.session.placement import (
         HANDOFF_PHASE_PREPARED,
-        handoff_in_flight,
         write_handoff_entry,
     )
 
@@ -3869,63 +3951,9 @@ def _source_prepare(
         if (session_roles and drop_session_roles and not keep)
         else ""
     )
-    try:
-        existing = handoff_in_flight(server.root, session_id)
-    except Exception:  # noqa: BLE001 — an unreadable journal refuses elsewhere
-        existing = None
-    if existing and str(existing.get("phase") or "") in ("prepared", "handing-off"):
-        # Reconcile a stale entry before refusing, then re-read: a journal entry
-        # left by a crash is exactly what `--wait`'s retry must be able to clear.
-        reconcile(server.root, server=server, only=session_id)
-        try:
-            existing = handoff_in_flight(server.root, session_id)
-        except Exception:  # noqa: BLE001
-            existing = None
-        if existing:
-            # A HALF-MOVED SESSION HAS TO BE LEGIBLE FROM THE REFUSAL ALONE. The entry
-            # this device is holding may be a handoff that is genuinely under way, or
-            # one whose destination died — and until it is settled, every route to
-            # this conversation answers the same sentence. Measured on the two-device
-            # rig 2026-09-26 (probe 9): the destination's relay was killed mid-copy,
-            # A answered ``deadline_exceeded`` with "Nothing was deleted: this device
-            # still holds the conversation", and SEVEN retries over ten minutes then
-            # read "a handoff ... is already in progress on this device" with no way
-            # to tell what was wrong or what to do; the same move landed the moment
-            # A's relay restarted. The phase and the age are the two facts that make
-            # the state legible (``prepared`` = no bytes were committed anywhere;
-            # ``handing-off`` = monotone, the destination owns the outcome), so they
-            # are NAMED here rather than left for the user to infer from a JSON
-            # journal. The recovery the design's §6.5 table would apply to a stale
-            # entry written by a DEAD relay is deliberately not applied here — this
-            # entry's writer is alive — and that gap is recorded, not guessed at.
-            phase = str(existing.get("phase") or "")
-            age = _handoff_age(existing)
-            # THE DEVICE, NOT "this device": the reader is the DESTINATION, so
-            # "this device" named the wrong machine and its remedy (restart the
-            # destination's relay) cleared nothing. The journal is device-local,
-            # so the holder for an entry here is always this relay's own device.
-            holder = str(server._own_label())  # noqa: SLF001
-            # THE ESCAPE IS NAMED, because it is not derivable from the state. An
-            # entry written by this device's LIVE relay is skipped by every reconcile
-            # (the instance rule that stops a merely slow peer losing an in-flight
-            # handoff), so no amount of retrying clears it and no other verb does
-            # either: what clears it is making the writer instance stale, after which
-            # the next attempt reconciles it at ``prepared`` and rolls it back
-            # (measured 2026-09-26: seven retries over ten minutes read this sentence;
-            # the same move landed the moment the source's relay restarted). Review
-            # round 1's ruling is a user-facing abandon verb, and this clause is its
-            # prerequisite: a person can act on the state they can read.
-            return {
-                "result": "refused",
-                "code": "in_progress",
-                "message": (
-                    "a handoff of that conversation is already in progress on "
-                    f"{holder} (phase: {phase or 'unknown'}, {age}), so nothing was "
-                    f"changed. If the move does not finish on its own, restart the "
-                    f"relay on {holder} (`lop network restart`), then try the move again."
-                ),
-                "session_id": session_id,
-            }
+    refused = _handoff_in_progress_refusal(server, session_id)
+    if refused is not None:
+        return refused
     # A QUEUED MOVE IS A PENDING HANDOFF TOO (§5.4), so it is checked before
     # anything else can start a second copy. The SAME request is idempotently
     # accepted (a re-delivery, a ``--wait`` re-probe); a DIFFERENT one is refused
@@ -6128,6 +6156,25 @@ def _offload(
             "already_local",
             f"{session_id} is already on this device, so nothing was moved",
         )
+    # A HANDOFF THIS DEVICE IS ALREADY HOLDING IS ANSWERED HERE, BEFORE ANY DIAL.
+    # It is this device's own durable journal, so its legibility must not depend on
+    # the link: through the destination it came back only after four asks over one
+    # link, and a link lost on the way read "that device is unreachable" for a
+    # session parked at ``phase: prepared`` HERE (see _handoff_in_progress_refusal).
+    # Same reconcile, same code, same sentence as the round trip; ``--wait`` never
+    # re-probes ``in_progress`` (only ``busy``), so answering it early loses nothing.
+    # The session-roles gate answers FIRST on the round trip (_source_prepare), so a
+    # session it would refuse is left to that path rather than reordered here.
+    try:
+        roles_block = bool(_session_role_definitions(server.root, session_id)) and not (
+            drop_session_roles
+        )
+    except _SessionRolesUnreadable:
+        roles_block = True
+    if not roles_block:
+        held = _handoff_in_progress_refusal(server, session_id)
+        if held is not None:
+            return _move_refusal(session_id, "in_progress", str(held["message"]))
     try:
         link = _link_for_move(server, target_device, target_name)
     except Moved as refusal:
@@ -6143,6 +6190,17 @@ def _offload(
     )
     if blocked is not None:
         return blocked
+    # THE DESTINATION GETS THIS DEVICE'S DEFINITIONS BEFORE IT PULLS, so the moved
+    # session restores against the CURRENT team/agent brief and the operator's custom
+    # instructions rather than whatever mirror the cadence last left there (a team
+    # edited a minute ago, or a node paired since the last tick). It runs before the
+    # invite, and therefore before any commit. NON-FATAL by design: the move's own
+    # contract is the transcript, and refusing a move because a brief could not be
+    # refreshed would strand the session on a device the operator is moving it off.
+    # The failure is not silent — it names the copy that may be stale on the receipt.
+    definitions_notice = _push_move_definitions(
+        server, session_id, target_device, target_name or target_device
+    )
     transport = LinkTransport(server, link, session_id)
     # THE CARRY IS READ FROM THIS DEVICE'S OWN STAMP OR ITS SAVED MODE, and it has
     # to be: the source holds the session, so the source is the only device that can
@@ -6287,6 +6345,8 @@ def _offload(
         # commit). Either half may be absent (an older peer sends none; no monitors),
         # and the key is absent when both are, so an unchanged move parses unchanged.
         carry_block = progress.carry(session_id) or {}
+        if definitions_notice:
+            carry_block["definitions_notice"] = definitions_notice
         if monitors_here > 0:
             carry_block.setdefault("monitors", monitors_here)
             carry_block["monitors_notice"] = carry.monitors_notice(monitors_here)
@@ -6375,6 +6435,78 @@ def _offload(
         phase_reached=reached,
         changed=bool(reached and reached != "prepared"),
     )
+
+
+def _push_move_definitions(
+    server: "RelayServer", session_id: str, target_device: str, target_label: str
+) -> str:
+    """Reconcile the moving session's team/agent (and the operator's instructions)
+    onto the destination; return the receipt's notice, or ``""`` when it landed.
+
+    The names come from the session's own ``attachment.json`` (what ``/team`` and
+    ``/agent`` put on it); ``definitions.push_to_peer`` expands a team to its roster
+    and always carries the operator-instructions singleton, so a session with no
+    attachment still gets the operator's standing rules. Never raises: see the call
+    site for why this cannot fail a move.
+    """
+    from local_operator.network import definitions
+    from local_operator.resume import read_session_attachment
+
+    team = agent = ""
+    try:
+        attachment = read_session_attachment(Path(server.root) / "sessions" / session_id)
+    except Exception:  # noqa: BLE001 — an unreadable sidecar still moves
+        attachment = None
+    if attachment is not None:
+        team, agent = attachment.team, attachment.agent
+    names = {"agents": [agent] if agent else [], "teams": [team] if team else []}
+    try:
+        pushed = definitions.push_to_peer(server, target_device, names=names)
+    except Exception as exc:  # noqa: BLE001 — non-fatal, see the call site
+        logger.warning(
+            "mobility: definitions push before moving %s failed", session_id, exc_info=True
+        )
+        pushed = {"ok": False, "message": str(exc)}
+    report = pushed.get(definitions.OPERATOR_INSTRUCTIONS_KIND)
+    report = report if isinstance(report, dict) else {}
+    outcome = str(report.get("outcome") or "")
+    # A KEPT-OWN-COPY IS ITS OWN SENTENCE, with its remedy (R1-2): the peer chose to
+    # keep its instructions, which is not "could not be refreshed". Informational —
+    # the move still completes.
+    kept_own = str(report.get("notice") or "") if outcome == "conflict" else ""
+    # THE INSTRUCTIONS ARE NAMED ONLY WHEN THEY ARE WHAT FAILED (R1-4). ``ok`` is
+    # False for an agent/team conflict or a transport failure; the instructions
+    # outcome never sets it, so naming them on every failure blamed them for a
+    # team conflict. No report at all (the push never reached the peer) leaves
+    # them unknown, so they stay named then.
+    instructions_stale = not kept_own and outcome not in definitions.INSTRUCTIONS_SETTLED_OUTCOMES
+    parts: list[str] = []
+    if not pushed.get("ok") or instructions_stale:
+        named = [
+            part
+            for part in (f"team {team!r}" if team else "", f"agent {agent!r}" if agent else "")
+            if part
+        ]
+        if instructions_stale:
+            named.append("the custom instructions")
+        if not pushed.get("ok"):
+            reason = str(pushed.get("message") or pushed.get("code") or "no answer")
+        else:
+            reason = str(report.get("reason") or outcome or "no answer")
+        if named:
+            subject = " and ".join(named)
+            parts.append(
+                f"{subject} on {target_label} may be an older copy — "
+                f"{'it' if len(named) == 1 else 'they'} could not be refreshed before the "
+                f"move ({reason})"
+            )
+    if kept_own:
+        parts.append(kept_own)
+    if not parts:
+        return ""
+    notice = "; ".join(parts)
+    logger.warning("mobility: after moving %s to %s: %s", session_id, target_label, notice)
+    return notice
 
 
 def _await_own_progress(
