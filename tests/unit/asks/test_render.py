@@ -176,9 +176,27 @@ def test_a_dismissed_notice_says_so_and_still_says_proceed_without_it():
     text = render.timeout_text(_record(), now_ms=1_700_003_600_000, dismissed=True)
     assert text.startswith("[Ask timed out]")
     assert "The user dismissed it without answering." in text
-    assert "Proceed without it: use your recommended option(s) or best judgment" in text
+    assert "Proceed without it: for a reversible choice, use your recommended option(s)" in text
     # Still never "the user denied": a dismissal is not a no.
     assert "denied" not in text
+    # ...and still never a yes: a dismissal authorises no delete either.
+    assert render.TIMEOUT_NOT_CONSENT in text
+
+
+def test_the_notice_says_a_timeout_is_not_consent_for_irreversible_options():
+    """Incident 2026-11-14 (session 1faad822298d, ask a-20fc).
+
+    The notice read "Proceed without it: use your recommended option(s) or best
+    judgment"; the recommendation was three delete buckets and the session
+    deleted them. The notice must now say plainly that a timeout is not consent
+    for a delete, overwrite or other irreversible option, and that those stay
+    undone and are reported.
+    """
+    text = render.timeout_text(_record(), now_ms=1_700_003_600_000)
+    assert "A timeout is NOT consent" in text
+    assert "only where it is reversible" in text
+    assert "Leave every delete, overwrite or otherwise irreversible option undone" in text
+    assert "report it as awaiting the user's answer" in text
 
 
 def test_a_dismissed_secret_notice_names_the_key_only():

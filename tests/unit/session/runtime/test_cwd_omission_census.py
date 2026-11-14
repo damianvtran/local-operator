@@ -27,6 +27,13 @@ SAFE_DEFAULTS = {
     ("guardrails/check.py", "build_delete_case"): (
         "HOME expands ~ in delete targets for the judge brief; static resolution only"
     ),
+    # Ask-escalation (PR 3966): HOME only expands ~ in ask text and delete
+    # targets while matching them; ``ctx.cwd`` is passed through undefaulted,
+    # so an omitted cwd stays omitted. A match only raises risk, never spawns.
+    ("guardrails/check.py", "escalate_asked_targets"): (
+        "HOME expands ~ while matching asks against delete targets; static resolution "
+        "only, cwd passed through as-is, never a spawn cwd"
+    ),
     ("guardrails/check.py", "evidence_write_verdict"): (
         "resolves a write/edit path exactly as the file tools do (base or process cwd) "
         "to refuse evidence writes; never a spawn cwd"
