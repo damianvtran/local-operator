@@ -8,7 +8,6 @@ session retention removes it with that conversation. No grants are created here.
 
 from __future__ import annotations
 
-import fcntl
 import json
 import os
 import re
@@ -17,6 +16,13 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
+
+try:
+    import fcntl
+except ImportError:
+    # Ordinary browser approvals also import this module on Windows. Only the
+    # quick-tunnel pin requires POSIX locking; do not break unrelated requests.
+    fcntl = None  # type: ignore[assignment]
 
 from pydantic_core import Url
 
@@ -158,6 +164,24 @@ def pin_quick_tunnel(
     write after a crash is invalid JSON and fails closed, never a new identity.
     fsync precedes any RPC; failed approvals cannot reset the committed pin.
     """
+    # Refuse before ancestry reads or pin I/O when the platform cannot uphold
+    # the same locked, descriptor-relative, no-follow durability contract. This
+    # is capability-based, not an OS bypass: other approvals keep their backend
+    # policy, while quick tunnels use the caller's typed unavailable refusal.
+    if (
+        fcntl is None
+        or not all(hasattr(fcntl, name) for name in ("flock", "LOCK_EX"))
+        or not all(
+            hasattr(os, name)
+            for name in ("O_DIRECTORY", "O_NOFOLLOW", "O_NONBLOCK", "getuid", "fsync")
+        )
+        or not {"open", "stat"}.issubset(
+            operation.__name__ for operation in getattr(os, "supports_dir_fd", ())
+        )
+        or "stat"
+        not in {operation.__name__ for operation in getattr(os, "supports_follow_symlinks", ())}
+    ):
+        raise ValueError("durable preview pin capabilities unavailable")
     with _family_root(session_dir, ancestors) as root_fd:
         flags = os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK
         # Darwin openat(O_CREAT) can spuriously return ENOENT to the loser
