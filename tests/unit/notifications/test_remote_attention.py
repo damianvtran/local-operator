@@ -1046,6 +1046,90 @@ def test_ask_absence_settles_nothing_it_cannot_vouch_for(root: Path) -> None:
     assert len(ask_rows) == 1 and not ask_rows[0]["dismissed_at"]
 
 
+_ASK_K7 = f"{ra.ASK_NOTICE_PREFIX}k7"  # ``_ask_claim``'s default owner key
+
+
+def test_q3_1_an_ask_open_before_first_contact_is_raised_once(
+    root: Path, _no_banner_threads: list[dict[str, Any]]
+) -> None:
+    """QA round 3, Q3-1 (row 9b): the ask was queued 1048 ms before the origin
+    first listed the node. No-backfill dropped it for good — the baseline only
+    moves earlier — though it was still waiting on the operator."""
+    assert not (root / ra.BASELINES_FILE).exists(), "this listing IS first contact"
+    asked = now_ms() - 1_048
+    listing = [_row(notices=(_ask_claim(at=asked),))]
+    ra.RemoteAttentionWatcher(root).observe(listing, listed_at_ms=now_ms())
+    [row] = _items(root)
+    assert row["key"] == ra.notice_key(NODE, SID, _ASK_K7)
+    assert row["priority"] == "high" and row["created_at"] == asked, "the ask's own time"
+    assert [call["action"] for call in _no_banner_threads] == ["created"]
+    # Restart / a second host / reconnect: the same ask is one row, one banner.
+    for _ in range(2):
+        ra.RemoteAttentionWatcher(root).observe(listing, listed_at_ms=_later())
+    assert [i["id"] for i in _items(root)] == [row["id"]]
+    assert [call["action"] for call in _no_banner_threads] == ["created"]
+    # Still retired by the existing settle once a fresh listing drops it.
+    ra.RemoteAttentionWatcher(root).observe([_row(notices=None)], listed_at_ms=_later())
+    assert _items(root) == []
+
+
+def test_q3_1_an_ask_from_an_owner_whose_clock_runs_behind_is_raised(
+    root: Path, _no_banner_threads: list[dict[str, Any]]
+) -> None:
+    """Q3-1, skew: contact was made long ago, the ask is new, but the node's
+    clock is a minute behind this device's — its ``created_at`` reads older
+    than the baseline. An open ask is judged by being listed, not by a time
+    taken on another machine's clock."""
+    baseline = ra.origin_baseline_ms(root, NODE)
+    behind = baseline - 60_000
+    ra.RemoteAttentionWatcher(root).observe(
+        [_row(notices=(_ask_claim(at=behind),))], listed_at_ms=_later()
+    )
+    [row] = _items(root)
+    assert row["key"] == ra.notice_key(NODE, SID, _ASK_K7)
+    assert [call["action"] for call in _no_banner_threads] == ["created"]
+
+
+def test_q3_1_a_plain_notice_from_before_first_contact_is_still_dropped(
+    root: Path, _no_banner_threads: list[dict[str, Any]]
+) -> None:
+    """The exemption is the ask namespace's alone: in the SAME first listing a
+    finished ``notify`` older than contact stays backfill (#3902), and so does
+    one with no owner time."""
+    old = now_ms() - 1_048
+    listing = [
+        _row(
+            notices=(
+                _ask_claim(at=old),
+                ("deploy", 1, "high", "Deploy needs sign-off", old),
+                ("legacy", 1, "high", "Older owner", 0),
+            )
+        )
+    ]
+    ra.RemoteAttentionWatcher(root).observe(listing, listed_at_ms=now_ms())
+    assert [i["key"] for i in _items(root)] == [ra.notice_key(NODE, SID, _ASK_K7)]
+    assert len(_no_banner_threads) == 1
+
+
+def test_q3_1_a_restart_never_revives_or_duplicates_a_read_ask_row(
+    root: Path, _no_banner_threads: list[dict[str, Any]]
+) -> None:
+    """Exempt from the time filter is not exempt from dedupe: an ask the
+    operator already read stays one read row across restarts, with no second
+    banner, while the node keeps listing it as open."""
+    listing = [_row(notices=(_ask_claim(at=now_ms() - 1_048),))]
+    ra.RemoteAttentionWatcher(root).observe(listing, listed_at_ms=now_ms())
+    [row] = _items(root)
+    store = NotificationStore(root)
+    store.apply("read", ids=[(str(row["id"]), int(row["revision"]))], via="test")
+    for _ in range(3):
+        ra.RemoteAttentionWatcher(root).observe(listing, listed_at_ms=_later())
+    [after] = _items(root)
+    assert after["id"] == row["id"] and after["read"], "not flipped back to unread"
+    assert after["revision"] == row["revision"]
+    assert [call["action"] for call in _no_banner_threads] == ["created"]
+
+
 def test_ask_a_plain_notice_is_never_retired_by_absence(root: Path) -> None:
     watcher = ra.RemoteAttentionWatcher(root)
     watcher.observe([_row(notice=("deploy", 1, "normal", "Deploy done"))], listed_at_ms=now_ms())
@@ -1073,9 +1157,7 @@ def test_r1_1_an_answered_ask_retires_under_a_full_list_of_plain_notices(root: P
     watcher = ra.RemoteAttentionWatcher(root)
     plain = tuple((f"m{i}", 1, "normal", "FYI %d" % i) for i in range(ra.NOTICES_ON_WIRE))
     ask = _ask_claim(at=_asked_at_first_contact(root))
-    watcher.observe(
-        [_row(notices=(ask,) + plain[: ra.NOTICES_ON_WIRE - 1])], listed_at_ms=now_ms()
-    )
+    watcher.observe([_row(notices=(ask,) + plain[: ra.NOTICES_ON_WIRE - 1])], listed_at_ms=now_ms())
     watcher.observe([_row(notices=plain)], listed_at_ms=_later())
     row = NotificationStore(root).get_by_key(SID, ra.notice_key(NODE, SID, "remote-ask:k7"))
     assert row is not None and row["dismissed_at"], "the answered ask still asks on the origin"

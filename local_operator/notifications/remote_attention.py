@@ -78,7 +78,9 @@ A FORWARDED NOTICE MUST BE NEW AND THE OPERATOR'S. Three filters, same date:
   and the origin raises only a notice newer than its persisted first-contact
   baseline for that device (:func:`origin_baseline_ms`), writing the row with
   the owner's timestamp rather than "now". A notice with no ``at`` (an owner
-  older than this rule) cannot prove it is new, so it is not raised.
+  older than this rule) cannot prove it is new, so it is not raised. A
+  forwarded OPEN ASK (``remote-ask:``) is exempt: it is still awaiting the
+  operator, not history (QA round 3, Q3-1; see ``RemoteAttentionWatcher.observe``).
 
 A notice passes its own priority through, so a ``high`` notice on the node is a
 banner-eligible ``high`` row here, raised through the item ladder
@@ -753,10 +755,27 @@ class RemoteAttentionWatcher:
                 baseline = baselines.get(notice.device_id)
                 if baseline is None:
                     baseline = origin_baseline_ms(self.root, notice.device_id)
-                if notice.at_ms <= 0 or notice.at_ms < baseline:
+                if not notice.key.startswith(ASK_NOTICE_PREFIX) and (
+                    notice.at_ms <= 0 or notice.at_ms < baseline
+                ):
                     # NO BACKFILL: posted before this device first watched
                     # that one (or by an owner too old to say when). Skipped
                     # deterministically, so a restart skips it again.
+                    #
+                    # A FORWARDED OPEN ASK IS EXEMPT (QA round 3, Q3-1). The
+                    # rule targets FINISHED notices — history the operator
+                    # never asked to see; an ask in the listing is still
+                    # waiting on the operator now, however long ago it was
+                    # queued. Judged by the ask's ``created_at`` it was dropped
+                    # forever whenever it predated the first listing (the
+                    # baseline only ever moves earlier) or whenever the owner's
+                    # clock ran behind this one — the time comparison mixes two
+                    # clocks, so the exemption is also what makes asks
+                    # skew-immune. Bounded without it: an ask rides the wire
+                    # only while the owner lists it as outstanding, the settle
+                    # above retires it once a fresh listing drops it, and
+                    # ``raise_notice_item``'s revision check keeps one row per
+                    # ask across watchers and restarts.
                     continue
                 raise_notice_item(
                     self.root,
