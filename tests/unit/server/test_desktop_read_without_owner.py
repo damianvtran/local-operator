@@ -238,7 +238,20 @@ async def test_a_session_with_no_owner_at_all_is_unchanged(
         status, elapsed, body = await _get(harness.client, base)
 
         assert status == 200, body
-        assert elapsed < 1.0, f"a cold read with no owner waited {elapsed:.2f}s"
+        # DERIVED, not a flat 1.0 s. With no owner there is nothing to dial, so
+        # the read's only legitimate wait is the first-frame grace (50 ms). The
+        # regression this row guards is a read that waits on an owner ATTACH,
+        # which costs READ_ATTACH_BUDGET_S (2.0 s) -- so that budget is the
+        # bound that separates the two, with the same headroom over the grace
+        # that every sibling row here takes. A flat 1.0 s also measured runner
+        # starvation (CI job 132415592908 read 1.03 s on a read that answered
+        # 200, cold, no attach in flight). The structural facts below carry the
+        # rest: nothing was dialled and nothing is still attaching.
+        assert elapsed < READ_ATTACH_BUDGET_S, f"a cold read with no owner waited {elapsed:.2f}s"
+        bridge = harness.pool.bridges.get(harness.session_id)
+        if bridge is not None and bridge.remote is not None:
+            assert not bridge.remote.owner_reachable, "a read with no owner dialled one"
+            assert not bridge.remote.attaching
         payload = body["result"]["payload"]
         assert payload["cold"] is True
         assert payload["cold_reason"] == "no-runtime"
