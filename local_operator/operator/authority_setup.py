@@ -139,7 +139,10 @@ def _exclusive(root: Path) -> Iterator[None]:
         except ImportError:  # pragma: no cover — Windows: the thread lock is the guard
             fcntl = None  # type: ignore[assignment]
         if fcntl is not None:
-            handle = open(_operator_dir(root) / _LOCK_FILE, "a+")  # noqa: SIM115
+            # 0600 like every other file this module writes under operator/.
+            handle = os.fdopen(
+                os.open(_operator_dir(root) / _LOCK_FILE, os.O_RDWR | os.O_CREAT, 0o600), "r+"
+            )
             try:
                 fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
             except OSError:

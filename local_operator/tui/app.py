@@ -55481,13 +55481,27 @@ class OperatorApp(App[None]):
                 run_elevated,
             )
 
+            def refused() -> Any:
+                return ElevationResult(
+                    2,
+                    refusal=no_password_prompt_refusal(),
+                    refusal_code=REFUSAL_NO_PASSWORD_PROMPT,
+                )
+
+            gui = sys.platform == "darwin" or trust._on_windows()
+            driver = self._driver
+            if not gui and (driver is None or not driver.can_suspend):
+                # Asked BEFORE the promise below: a driver that cannot hand over
+                # the terminal (a web/headless driver) would otherwise print
+                # "will ask for your password" one line above U18's refusal (D8).
+                return refused()
             gesture = confirm_card_copy(purpose=PURPOSE_PHONE_APPROVALS)[2]
             self.call_from_thread(self._system_notice, gesture)
 
             def elevate() -> Any:
                 return run_elevated(command, purpose=PURPOSE_PHONE_APPROVALS, terminal_sudo=True)
 
-            if sys.platform == "darwin" or trust._on_windows():
+            if gui:
                 return elevate()
 
             def suspended() -> Any:
@@ -55497,11 +55511,7 @@ class OperatorApp(App[None]):
                     with self.suspend():
                         return elevate()
                 except SuspendNotSupported:
-                    return ElevationResult(
-                        2,
-                        refusal=no_password_prompt_refusal(),
-                        refusal_code=REFUSAL_NO_PASSWORD_PROMPT,
-                    )
+                    return refused()
 
             return self.call_from_thread(suspended)
 
