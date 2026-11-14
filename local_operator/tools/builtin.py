@@ -26430,6 +26430,21 @@ async def _bridge_access(
     notify = _notify_channel(context)
     delegated = _delegated_here(context)
     if action == "request_access":
+        from local_operator.browser_bridge import backend as _bridge_backend
+
+        # `host` is the handle spelling here (`bridge`/`ui`); a node's managed
+        # Chrome is always the bridge (extension) host.
+        if host != HOST_UI_PREFIX and _bridge_backend._on_headless_node():  # noqa: SLF001
+            # On a headless node the prompt would queue in an extension popup
+            # nobody can reach, and its text tells the model to send the
+            # operator there (PR #3935 round 1, U1). Answer instead of queueing.
+            node_origin = _bridge_backend._origin(url)  # noqa: SLF001
+            return _text(
+                tool_call_id,
+                "browser",
+                _bridge_backend.node_approval_unavailable(node_origin),
+                details={"origin": node_origin, "state": "unavailable_on_node"},
+            )
         result, problem = await _bridge_call(
             tool_call_id, "request_access", {"url": url, **identity}, client=client
         )
@@ -36693,6 +36708,19 @@ async def execute_notify(
             "notify",
             f"refused: keys starting with `{_RESERVED_NOTIFY_KEY_PREFIX}` are reserved for "
             "agent-message notices; nothing was posted. Use a different key.",
+        )
+    from local_operator.notifications.remote_attention import ASK_NOTICE_PREFIX
+
+    if params.key.strip().startswith(ASK_NOTICE_PREFIX):
+        # PR #3934 Q2: the namespace of an open ask forwarded to the session's
+        # origin device. It is already kept off the wire, but posting it here
+        # would mint a local row that LOOKS like a forwarded question, so the
+        # tool refuses it outright, the ``team-bridge-`` way.
+        return _error(
+            tool_call_id,
+            "notify",
+            f"refused: keys starting with `{ASK_NOTICE_PREFIX}` are reserved for forwarded "
+            "questions; nothing was posted. Use a different key.",
         )
     door = getattr(context, "notify_inbox", None) if context is not None else None
     if door is None:

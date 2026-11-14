@@ -308,8 +308,11 @@ def enrollment_capabilities() -> frozenset[str]:
     any mesh where a peer reported it fail with "The network enrollment
     authority is invalid". Deriving from readiness' ``CAPABILITY_*`` constants
     makes a new row admissible the moment it exists; a capability no constant
-    names is still refused. Lazy import, as in :func:`public_report`: readiness
-    is large and enrollment is imported by lighter callers.
+    names is still refused. #3935 hit the same failure with the node-managed
+    ``browser`` row and answered it with a second hand-kept set; that set is
+    subsumed here (``readiness.CAPABILITY_BROWSER`` is derived like the rest).
+    Lazy import, as in :func:`public_report`: readiness is large and enrollment
+    is imported by lighter callers.
     """
     from local_operator.network import readiness
 

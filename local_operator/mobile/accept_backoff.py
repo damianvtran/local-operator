@@ -2,9 +2,12 @@
 
 WHY THIS EXISTS. When the phone daemon reaches its open-file limit, CPython's
 selector event loop does not stop trying to accept. `_accept_connection`
-(asyncio/selector_events.py, unchanged from 3.12 through 3.14) handles
-EMFILE/ENFILE/ENOBUFS/ENOMEM by logging, removing the reader and scheduling a
-restart in 1 s, but it then CONTINUES its ``for _ in range(backlog)`` loop.
+(asyncio/selector_events.py) handles EMFILE/ENFILE/ENOBUFS/ENOMEM by logging,
+removing the reader and scheduling a restart in 1 s, but it then CONTINUES its
+``for _ in range(backlog)`` loop. That resource-error branch is identical from
+3.12 through 3.14; the function around it is not (3.13 made the batch
+``range(backlog + 1)`` and turned ``ConnectionAbortedError`` from a ``return``
+into a ``continue``), and neither change affects what follows.
 uvicorn listens with a backlog of 2048, so one readiness wakeup produces up to
 2048 failed accepts, 2048 logged tracebacks and 2048 scheduled restarts, and
 each batch of restarts re-arms the next storm. Measured on a rig at a forced
@@ -36,8 +39,14 @@ whose ``accept()`` turns a resource error into ``BlockingIOError``, which the
 stdlib loop already treats as "nothing left to accept" and returns on. It thus
 relies only on `_accept_connection`/`_start_serving` taking
 ``(protocol_factory, sock, *rest)`` and calling ``sock.accept()`` — stable since
-3.7. If a future CPython changes that, the proxy is simply not consulted and
-the stdlib behaviour returns; nothing breaks.
+3.7. What holds if a future CPython changes that: if `_accept_connection` is
+renamed, the override is dead code and the stock behaviour returns; if it
+stops calling ``sock.accept()``, the proxy's guard is skipped and the stock
+behaviour returns; if it touches any other attribute of ``sock``, the proxy
+forwards that attribute to the real socket (``__getattr__``), so only
+``accept`` is ever intercepted. What would NOT hold is a type check on the
+socket (``isinstance(sock, socket.socket)``), which the proxy fails; no
+version from 3.12 to 3.14 makes one on this path.
 
 Windows is untouched: its default proactor loop accepts through IOCP, not this
 code path, so `loop_factory` returns the platform default there.
@@ -51,6 +60,7 @@ import logging
 import socket
 import sys
 import time
+from asyncio import trsock
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -92,6 +102,9 @@ class _GuardedListener:
         return pair
 
     def __getattr__(self, name: str) -> Any:
+        # Only reached for names the proxy does not define (slots and
+        # ``accept`` resolve first), so every other socket attribute the
+        # stdlib batch may touch is the real socket's.
         return getattr(self._sock, name)
 
 
@@ -122,11 +135,19 @@ class BackoffSelectorEventLoop(asyncio.SelectorEventLoop):
         fd = sock.fileno()
         pause = self._accept_pauses.get(fd)
         if guarded.exhausted is None:
+            # Any batch that did not hit a resource error ends the episode, even
+            # one that accepted nothing: a resume wakeup whose waiting client
+            # aborted first (ConnectionAbortedError, then EAGAIN) ends it too. If
+            # the limit has not in fact cleared, the next accept() starts a new,
+            # logged episode, which is the right outcome. Keeping the entry
+            # instead would make the NEXT
+            # episode look like a continuation, so it would never be logged,
+            # and the eventual recovery line would report the wrong duration.
+            self._accept_pauses.pop(fd, None)
             if pause is not None and guarded.accepted:
-                self._accept_pauses.pop(fd, None)
                 logger.warning(
-                    "accepting connections again after %.1f s paused for lack of file "
-                    "descriptors (%d retries)",
+                    "accepting connections again after %.1f s paused for lack of system "
+                    "resources (EMFILE/ENFILE/ENOBUFS/ENOMEM) (%d retries)",
                     time.monotonic() - pause.since,
                     pause.retries,
                 )
@@ -139,7 +160,9 @@ class BackoffSelectorEventLoop(asyncio.SelectorEventLoop):
                 {
                     "message": "socket.accept() out of system resource",
                     "exception": guarded.exhausted,
-                    "socket": sock,
+                    # Wrapped like the stdlib's own call, so a custom
+                    # exception handler cannot operate on the listener.
+                    "socket": trsock.TransportSocket(sock),
                 }
             )
         else:
