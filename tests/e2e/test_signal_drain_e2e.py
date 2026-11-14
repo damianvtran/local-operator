@@ -1651,10 +1651,25 @@ async def test_reclaims_sigterm_is_honoured_by_a_runtime_that_booted_slowly(
 
 
 class _FakeChild:
+    """Stands in for ``CapturedChild`` where only its pid and lifecycle matter.
+
+    Mirrors the slice of ``CapturedChild``'s interface ``_Rig.aclose`` reads —
+    ``poll`` and ``shutdown_evidence`` — so a fake child can pass through
+    teardown. It owns no stderr pipe, so like a cleanly exited real child it has
+    no evidence to report; calls are counted so a test can prove teardown asked.
+    """
+
     pid = 424242
 
-    def poll(self) -> None:
+    def __init__(self) -> None:
+        self.evidence_calls = 0
+
+    def poll(self) -> int | None:
         return None
+
+    def shutdown_evidence(self, artifacts: Path | None = None) -> str:
+        self.evidence_calls += 1
+        return ""
 
 
 def _fake_ps(monkeypatch: pytest.MonkeyPatch, answers: dict[str, list[Any]]) -> None:
@@ -1777,3 +1792,5 @@ def test_sigterm_timing_uses_record_seen_stamp_and_is_cleared_for_reused_pids(
 
     asyncio.run(run())
     assert child.pid not in _SIGTERM_TIMING and "sess" not in _RECORD_SEEN_AT
+    # Teardown consulted the child's shutdown witness exactly once.
+    assert child.evidence_calls == 1
