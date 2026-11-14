@@ -791,6 +791,43 @@ class Grant:
     #: ``effective.note_resolution`` say ``held_offline`` instead of claiming a fresh
     #: owner resolve.
     held_offline: bool = dataclasses.field(default=False, compare=False)
+    #: ON THE WIRE, set by the OWNER: the latest moment (epoch ms) the owner allows
+    #: this grant to be served from the borrower's memory while the owner cannot be
+    #: reached — ``min(token expiry, owner_now + offline_hold_s)``, never below
+    #: ``grant_expires_at_ms``. ``0`` = an older owner that states no hold, which
+    #: gets NO extension (the hold ends at ``grant_expires_at_ms``, today's bound).
+    #: Approved 2026-11-13 (C5); see ``credentials.OFFLINE_HOLD_S``.
+    hold_until_ms: int = 0
+    #: PROCESS-LOCAL receipt stamps, never on the wire (``GrantCache.put`` sets
+    #: them once): THIS device's wall clock and sleep-inclusive clock when the grant
+    #: arrived. The borrower's own cap on the hold is measured from these, so an
+    #: owner clock far ahead, a hostile ``hold_until_ms``, a wall clock stepped back
+    #: or a laptop sleeping through the window cannot stretch it (R4-m1, R1-B1).
+    received_wall: float = dataclasses.field(default=0.0, compare=False)
+    received_boot: float = dataclasses.field(default=0.0, compare=False)
+    #: PROCESS-LOCAL: the hold end this serve was licensed under, set only on the
+    #: copy ``_held_or`` returns, so ``effective.note_resolution`` publishes the
+    #: lapse at the hold end rather than at the (earlier) grant end.
+    held_until_ms: int = dataclasses.field(default=0, compare=False)
+
+    def hold_end_ms(self, local_cap_s: float, now_boot: float) -> int:
+        """Until when (epoch ms) this grant may be served while the owner is away.
+
+        ``min(owner-stated hold or grant end, token expiry, received_wall + cap)``,
+        and ``0`` once ``cap`` has passed on the sleep-inclusive clock. A grant this
+        process never stamped on receipt gets no extension: without a borrower-side
+        receipt there is nothing to cap the owner's number against.
+        """
+        end = self.grant_expires_at_ms
+        if not (self.received_wall and self.received_boot):
+            return end
+        if now_boot - self.received_boot >= local_cap_s:
+            return 0
+        if self.hold_until_ms > end:
+            end = self.hold_until_ms
+        if self.token_expires_at_ms:
+            end = min(end, self.token_expires_at_ms)
+        return min(end, int(self.received_wall * 1000 + local_cap_s * 1000))
 
     def usable_at(self, now_ms: float | None = None) -> bool:
         """Whether this grant may still be handed to a request right now."""
@@ -822,6 +859,9 @@ class Grant:
             detail["identity"] = dict(self.identity)
         if self.narrowing:
             detail["narrowing"] = dict(self.narrowing)
+        if self.hold_until_ms:
+            # Only when stated, so the frame to/from an older peer is unchanged.
+            detail["hold_until_ms"] = self.hold_until_ms
         return detail
 
     @classmethod
@@ -847,6 +887,8 @@ class Grant:
             # holds the grant: the failure is a re-ask, not a bearer kept forever.
             token_expires_at_ms=peer_int(detail.get("token_expires_at_ms")),
             grant_expires_at_ms=peer_int(detail.get("grant_expires_at_ms")),
+            # Garbled or absent reads as 0 = no hold stated = no extension.
+            hold_until_ms=peer_int(detail.get("hold_until_ms")),
             credential_ref=CredentialRef(
                 owner_device=str(ref_row.get("owner_device") or ""),
                 owner_device_name=str(ref_row.get("owner_device_name") or ""),

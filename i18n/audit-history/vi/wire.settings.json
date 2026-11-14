@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "vi",
   "namespace": "wire.settings",
-  "history_sha256": "47d983e16e74d268f018b59e7283fba9c5eb3f094d069b079b42bab0908efe5a",
+  "history_sha256": "aaf24ec7af7a819e83360ab64eea9dabe2fb08a1fb30c06c59c07b0cc8e8c11f",
   "entries": [
     {
       "locale": "vi",
@@ -240,6 +240,31 @@
       },
       "status": "passed",
       "note": "Round 3 evidence binding 2026-11-12, reviewer 5c6cf4252f37 (anthropic/claude-opus-5-5, no fallback): same audit and verdict as the preceding row, re-appended so the cg1 byte pin moves to a committed record. Source ffb9cf937f10d7298f9178f18286c2ac7669e578d595f30b4074a830b9667c13 and target ae1441e6fadc1f81823f5d9aeb35a3a01107ad9ff856f771a827c7936eba1eb7 recomputed from the shipped files at 4f6f57986. Evidence: i18n/audits/evidence/vi/wire.settings/temporary-r3-5c6cf4252f37/record.json"
+    },
+    {
+      "locale": "vi",
+      "namespace": "wire.settings",
+      "source_sha256": "2baf6804bc41b53ac92db5e10ad4ade04a8f0ce7ceed3702af6be1ab42aa4b24",
+      "translator": {
+        "agent": "i18n-translator subagent, job d5aeddae9573 under manager session 79bddc262663 (commit 1c956878e5d3) — relayed by the manager, not independently verified",
+        "model": "anthropic/claude-opus-5-5",
+        "fallback": "none (as relayed by the manager)",
+        "date": "2026-11-13"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (lopdev team), session d25b77f53a23",
+        "session": "d25b77f53a23",
+        "model": "anthropic/claude-opus-5-5",
+        "fallback": "none observed in this session",
+        "date": "2026-11-13",
+        "result": "passed",
+        "findings": 1,
+        "unresolved_blocker_major": 0,
+        "minor": 0,
+        "nit": 1
+      },
+      "status": "passed",
+      "note": "#3922 r1 2026-11-13 i18n-auditor d25b77f53a23 (anthropic/claude-opus-5-5, no fallback): 2 new offline_hold keys passed, 0 open blocker/major; findings I-vi-1. Rest byte-identical to f1e8d6410. Evidence: i18n/audits/evidence/vi/wire.settings/oh3922r1/record.json"
     }
   ]
 }

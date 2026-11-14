@@ -1,0 +1,64 @@
+{
+ "schema": 1,
+ "audit_id": "oh3922r1",
+ "audit_kind": "independent semantic audit of the offline-hold delta; unchanged keys carried by byte proof",
+ "locale": "ur",
+ "namespace": "wire.settings",
+ "audit_date": "2026-11-13",
+ "status": "passed",
+ "pr": "damianvtran/local-operator#3922",
+ "audited_revision": "e2ea7efff2f68a5059f23dea0cdff35e8f549326",
+ "key_count": 867,
+ "keys_audited": [
+  "wire.settings.network_credentials_offline_hold_s.help",
+  "wire.settings.network_credentials_offline_hold_s.label"
+ ],
+ "translator": {
+  "agent": "i18n-translator subagent, job d5aeddae9573 under manager session 79bddc262663 (commit 1c956878e5d3) — relayed by the manager, not independently verified",
+  "model": "anthropic/claude-opus-5-5",
+  "fallback": "none (as relayed by the manager)",
+  "date": "2026-11-13"
+ },
+ "auditor": {
+  "agent": "i18n-auditor (lopdev team), session d25b77f53a23",
+  "session": "d25b77f53a23",
+  "model": "anthropic/claude-opus-5-5",
+  "independent_from_translator_session": true,
+  "actual_model_source": "harness session model header (anthropic/claude-opus-5-5); no fallback observed",
+  "fallback": "none observed in this session",
+  "date": "2026-11-13"
+ },
+ "input_hashes": {
+  "en": {
+   "path": "local_operator/i18n/catalogues/en/wire.settings.json",
+   "sha256": "2baf6804bc41b53ac92db5e10ad4ade04a8f0ce7ceed3702af6be1ab42aa4b24"
+  },
+  "context": {
+   "path": "local_operator/i18n/catalogues/en/wire.settings.context.json",
+   "sha256": "6e0236d0d117e93358074648666cd1a70577b940b2f284bea63bac52dfb22862"
+  },
+  "ur": {
+   "path": "local_operator/i18n/catalogues/ur/wire.settings.json",
+   "sha256": "df609ae5c34199fff380d3f7b80574dd9d76625588d3d1a873f5ab01051ab3fb"
+  }
+ },
+ "artifacts": {
+  "report.md": {
+   "path": "i18n/audits/evidence/ur/wire.settings/oh3922r1/report.md",
+   "sha256": "b5380609c02467b26ce965c61d07a2b0a5621b24d6e3f6d82d7a4e9e811d028f"
+  },
+  "audit.log": {
+   "path": "i18n/audits/evidence/ur/wire.settings/oh3922r1/audit.log",
+   "sha256": "597004b7acc4f19d7956834fd5e92bd393e66d3547ac501de14969235b7e589e"
+  }
+ },
+ "current_report_verdict": {
+  "status": "passed",
+  "unresolved_blocker_major_count": 0,
+  "finding_ids": [
+   "I-ur-1"
+  ]
+ },
+ "audit_notes_not_execution_log": "report.md is reasoning; audit.log is the actual output of the mechanical check script run in this session",
+ "report": "PR #3922 comment \"### i18n audit — round 1\""
+}

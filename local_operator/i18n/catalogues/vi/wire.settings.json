@@ -409,6 +409,8 @@
   "wire.settings.network_credentials_github_repositories.placeholder": "damianvtran/scratch, damianvtran/sandbox",
   "wire.settings.network_credentials_grant_ttl_s.help": "Thời gian dài nhất một thiết bị được dùng đăng nhập mượn từ chủ sở hữu trước khi phải hỏi lại, cũng là thời gian đăng nhập của chủ sở hữu đã thu hồi hoặc ngoại tuyến còn hoạt động ở nơi khác. Không bao giờ dài hơn chính token.",
   "wire.settings.network_credentials_grant_ttl_s.label": "Thời hạn đăng nhập mượn (giây)",
+  "wire.settings.network_credentials_offline_hold_s.help": "Thời gian một thiết bị khác tiếp tục dùng đăng nhập đã mượn trong lúc thiết bị sở hữu đăng nhập đó không liên lạc được (ở chế độ ngủ, ngoại tuyến). Không bao giờ dài hơn chính token; giá trị của chủ sở hữu và của thiết bị này đều áp dụng, giá trị ngắn hơn được dùng.",
+  "wire.settings.network_credentials_offline_hold_s.label": "Giữ đăng nhập mượn khi chủ sở hữu vắng (giây)",
   "wire.settings.network_listen_address.help": "127.0.0.1 = chỉ gọi ra; 0.0.0.0 = tất cả; hoặc một địa chỉ.",
   "wire.settings.network_listen_address.label": "Địa chỉ lắng nghe",
   "wire.settings.network_max_handshakes.help": "Số kết nối chưa xác thực mà relay này giữ cùng lúc. Một lần ghép nối giữ một kết nối trong vài giây cho đến khi mã được nhập; phần vượt trần bị loại ngay khi chấp nhận, không có khung hồi đáp.",

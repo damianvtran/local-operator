@@ -73,6 +73,17 @@ def _restart_owner(mesh: Any, monkeypatch: pytest.MonkeyPatch) -> relay.RelaySer
     server.bind()
     server.bind_control()
     server.start()
+    # WAIT FOR THE LINK, NOT THE CLOCK (review R1-m4). Both relays redial on their
+    # own: the restarted owner's start-up pass seeds every member, the borrower's
+    # loop retries the lost link every ``REDIAL_TICK_S``. A request sent before that
+    # settles races those dials, and the link it rode could be the one replaced, so
+    # the "owner wins on return" assertion intermittently met ``owner_offline``
+    # and was served the hold (2 of 4 whole-file runs). The predicate is the
+    # condition those assertions are about: each side holds a live link to the other.
+    a_id, b_id = mesh.a.identity.device_id, mesh.b.identity.device_id
+    assert net_fixtures.wait_for(
+        lambda: mesh.b._link_for(a_id) is not None and server._link_for(b_id) is not None
+    ), "the owner came back but no link to it settled"
     return server
 
 
@@ -114,6 +125,16 @@ def _readiness_row(claim: Any) -> dict[str, Any]:
         session_id="sess-1",
         peer_label="synthetic-peer",
     )
+
+
+def _hold_end(grant: Grant, cap_s: float) -> float:
+    """The borrower-side hold end (ms) for a ``cap_s`` ``offline_hold_s``.
+
+    Measured from the receipt stamp ``GrantCache.put`` set, which is a few ms after
+    ``_bounded`` capped ``grant_expires_at_ms`` — so it is never earlier.
+    """
+    assert grant.received_wall, "the grant was never stamped on receipt"
+    return max(grant.grant_expires_at_ms, grant.received_wall * 1000 + cap_s * 1000)
 
 
 @pytest.fixture
@@ -173,10 +194,16 @@ def test_the_held_grant_serves_while_the_owner_is_away_and_the_owner_wins_on_ret
 def test_the_lease_is_not_extended_past_its_end(
     mesh: Any, monkeypatch: pytest.MonkeyPatch  # noqa: F811
 ) -> None:
-    """A3: the owner stays away past the grant's lease -> refused, owner_unavailable."""
-    # The BORROWER's own cap (``_bounded``) is the lease the hold honours; 2 s here.
+    """A3: the owner stays away past the hold -> refused, owner_unavailable.
+
+    Since the 2026-11-13 offline hold the end is the HOLD's, not the grant's: the
+    borrower's own ``offline_hold_s`` caps it from receipt (here 2 s, the floor
+    ``grant_ttl_s`` allows), whatever longer hold the owner stated.
+    """
     (mesh.b.root / "config.yml").write_text(
-        yaml.safe_dump({"values": {"network": {"credentials": {"grant_ttl_s": 2.0}}}}),
+        yaml.safe_dump(
+            {"values": {"network": {"credentials": {"grant_ttl_s": 2.0, "offline_hold_s": 2.0}}}}
+        ),
         encoding="utf-8",
     )
     _share(mesh)
@@ -187,7 +214,7 @@ def test_the_lease_is_not_extended_past_its_end(
     _stop_owner(mesh)
     if time.time() * 1000 < grant.grant_expires_at_ms - 200:
         assert isinstance(client.request_grant_sync(STUB_PROVIDER, session_id="sess-1"), Grant)
-    assert net_fixtures.wait_for(lambda: time.time() * 1000 > grant.grant_expires_at_ms + 50)
+    assert net_fixtures.wait_for(lambda: time.time() * 1000 > _hold_end(grant, 2.0) + 50)
     lapsed = client.request_grant_sync(STUB_PROVIDER, session_id="sess-1")
     assert isinstance(lapsed, BrokerError) and lapsed.code == "owner_offline", lapsed
     access = _state(mesh, client)
@@ -213,6 +240,73 @@ def test_a_revoke_heard_while_reachable_drops_the_grant_for_good(
     later = client.request_grant_sync(STUB_PROVIDER, session_id="sess-1")
     assert isinstance(later, BrokerError), later
     assert _state(mesh, client).usable is False
+
+
+def test_a_revoke_made_while_connected_reaches_an_idle_borrower_before_the_owner_sleeps(
+    mesh: Any, borrowed: Any  # noqa: F811
+) -> None:
+    """#3922 Q2: the borrower asks for nothing between the revoke and the owner sleeping.
+
+    ``credential revoke`` also took ``broker_credential`` off B's member row on A,
+    so A's authoriser refused B's placement pull with a codeless sentence and the
+    revoked document never arrived: B kept its holder row, and once A stopped the
+    offline hold served the revoked grant (to the grant end on main, an hour here).
+    The pull below is the borrower relay's own cadence call
+    (``sync._pull_placement_unless_parked``), with no grant request in between.
+    """
+    from local_operator.network.credentials import sync as sync_mod
+
+    client, _grant = borrowed
+    owner_id = mesh.a.identity.device_id
+    assert _lop_network("credential", "revoke", STUB_PROVIDER, "--from", mesh.b.identity.name) == 0
+    # Idle: the cadence pulls; nothing asks the owner for a grant.
+    sync_mod._pull_placement_unless_parked(
+        mesh.b, owner_id, park_codes=sync_mod._POLICY_PULL_REFUSALS
+    )
+    pulled = _pull(mesh)
+    assert pulled.get("refused_codes", {}).get(owner_id) == "not_a_holder", pulled
+    assert client.should_borrow(STUB_PROVIDER) is False, "the revoke never reached the borrower"
+    # The owner then sleeps. The held grant had an hour left; it must not serve.
+    _stop_owner(mesh)
+    after = client.request_grant_sync(STUB_PROVIDER, session_id="sess-1")
+    assert isinstance(after, BrokerError), "a revoked grant was served from the offline hold"
+    assert after.code == "not_a_holder", after
+    assert client.grants.peek(STUB_PROVIDER, "sess-1") is None
+    assert _state(mesh, client).usable is False
+
+
+def test_a_withdrawn_row_is_re_admitted_by_the_owners_next_document(tmp_path: Any) -> None:
+    """The withdrawal deletes rows rather than bumping ``doc_rev`` on a copy the owner
+    never saw: the owner's row at the SAME ``doc_rev`` merges again (a capability
+    re-granted with no share change), where a local strip would be dropped as a replay.
+    Only rows the refusing owner lent to this device are touched."""
+    from local_operator.network.credentials import placement as placement_mod
+
+    net, owner, other, me = "n_test", "d_owner", "d_other", "d_me"
+    my_root = tmp_path / "me"
+    with placement_mod.mutate(net, tmp_path / "owner", self_device=owner) as document:
+        for key in ("lent", "not-lent"):
+            document.declare(key, owner_device=owner, provider=key, by=owner)
+        document.grant("lent", me, scope="device", by=owner)
+        sent = document.to_json()
+    with placement_mod.mutate(net, tmp_path / "other", self_device=other) as document:
+        document.declare("theirs", owner_device=other, provider="theirs", by=other)
+        document.grant("theirs", me, scope="device", by=other)
+        theirs = document.to_json()
+    for incoming, sender in ((sent, owner), (theirs, other)):
+        placement_mod.merge_from_peer(
+            net, incoming, from_device=sender, self_device=me, root=my_root
+        )
+
+    withdrawn = placement_mod.withdraw_rows_lent_by(net, owner, holder_device=me, root=my_root)
+    assert withdrawn == ["lent"]
+    mine = placement_mod.PlacementDocument.load(net, my_root, self_device=me)
+    assert not mine.is_holder("lent", me)
+    assert mine.entry("not-lent") is not None, "a row not lent to this device was touched"
+    assert mine.is_holder("theirs", me), "another owner's row was touched"
+    assert placement_mod.merge_from_peer(
+        net, sent, from_device=owner, self_device=me, root=my_root
+    ) == ["lent"], "the owner's unchanged row was dropped as a replay"
 
 
 @pytest.mark.parametrize(
@@ -337,7 +431,9 @@ async def test_the_served_session_band_stays_ok_while_held_and_blocks_at_lease_e
     from tests.unit.session.runtime.test_serving import _AccessSession
 
     (mesh.b.root / "config.yml").write_text(
-        yaml.safe_dump({"values": {"network": {"credentials": {"grant_ttl_s": 3.0}}}}),
+        yaml.safe_dump(
+            {"values": {"network": {"credentials": {"grant_ttl_s": 3.0, "offline_hold_s": 3.0}}}}
+        ),
         encoding="utf-8",
     )
     effective._receipts.clear()
@@ -363,7 +459,7 @@ async def test_the_served_session_band_stays_ok_while_held_and_blocks_at_lease_e
         band = _band(session)
         assert (band.effective_state, band.state) == ("effective_borrow", "ok"), band
         assert len(mesh.idp.posts) == posts
-        assert net_fixtures.wait_for(lambda: time.time() * 1000 > grant.grant_expires_at_ms + 50)
+        assert net_fixtures.wait_for(lambda: time.time() * 1000 > _hold_end(grant, 3.0) + 50)
         lapsed = client.request_grant_sync(STUB_PROVIDER, session_id="sess-1")
         assert isinstance(lapsed, BrokerError) and lapsed.code == "owner_offline", lapsed
         await _settle(handle)
