@@ -462,7 +462,10 @@ async def test_qualified_typed_answer_never_settles_without_the_judge(
     judge = _TimedOutJudge()
     outcome = await _check(home, "rm -f " + " ".join(str(f) for f in files), CHILD, [], judge)
     assert outcome is not None and outcome.blocked, (answer, outcome)
-    assert judge.calls == 1
+    # A carve-out the decline veto catches ("yes, only es") is no trusted yes,
+    # so the ask refuses before any judge (PR #3966 R1-M1); the rest are read
+    # by the judge. Neither settles without it.
+    assert judge.calls == (0 if prov._answer_declines(answer, []) else 1)
 
 
 @pytest.mark.parametrize(
@@ -508,7 +511,11 @@ async def test_non_affirmative_pick_is_never_settled(
     judge = _TimedOutJudge()
     outcome = await _check(home, f"rm -f {files[0]}", PARENT, [], judge)
     assert outcome is not None and outcome.blocked, outcome
-    assert judge.calls == 1
+    # A declining pick ("Abort", "Nah") is no trusted yes: the ask refuses
+    # before any judge (PR #3966 R1-M1). A yes that qualifies itself in its
+    # description, or a narrowing pick, is the judge's to read.
+    labels = [lbl for lbl, _ in options]
+    assert judge.calls == (0 if prov._answer_declines(picked, labels) else 1)
 
 
 @pytest.mark.asyncio

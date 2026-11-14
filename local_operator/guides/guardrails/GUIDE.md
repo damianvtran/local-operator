@@ -60,9 +60,13 @@ into HIGH — a judge decision, never a pass. Rules only ADD restriction.
   subagents, up to 7 days old). Such a call is refused without the judge,
   unless this session's creation ledger records the path or the operator
   approved it; under a broad dir the ask names (a direct child of `~`, or one
-  with over 1000 entries) the judge decides instead. Overwrites keep their
-  usual rank. Leave the path in place and report it as waiting for the
-  operator's answer.
+  with over 1000 entries) the judge decides instead. Once the operator gives a
+  real yes, that ask never refuses on its own: a question they answered is
+  read like consent (question and labels, never a description), a path their
+  pick covers keeps its usual rank, and one only an option they did not pick
+  names goes to the judge, where citing the ask for it never verifies.
+  Overwrites keep their usual rank. Leave the path in place and report it as
+  waiting for the operator's answer.
 - **LOW** — everything else: this session's scratchpad, deep paths, `/tmp`. Runs
   unexamined. A target derived from a secret is refused even with an approved
   override: consent cannot be shown for a secret you should never see.

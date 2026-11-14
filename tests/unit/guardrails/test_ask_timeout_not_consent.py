@@ -892,3 +892,138 @@ def test_preview_reports_the_deterministic_refusal(deep: Path) -> None:
     assert report.builtin_effect == BUILTIN_REFUSE_LAPSED
     assert report.action == "refuse"
     assert NOT_CONSENT_TEXT in report.builtin_text
+
+
+# -- 9. one answered ask: consent, refusal and the verifier read one scope -------
+
+
+def _answered_ask(
+    home: Path,
+    ask_id: str,
+    question: str,
+    options: list[dict[str, str]],
+    *,
+    answer: str,
+    surface: str = "desktop",
+) -> None:
+    """One ask, answered ``answer`` on ``surface`` (``desktop`` is trusted)."""
+    now = int(time.time() * 1000)
+    rows = [
+        {
+            "v": 1,
+            "kind": "queued",
+            "ask_id": ask_id,
+            "at": now - 120_000,
+            "created_at": now - 120_000,
+            "expires_at": now + 3_600_000,
+            "timeout_s": 3600,
+            "questions": [
+                {
+                    "id": "q",
+                    "question": question,
+                    "options": options,
+                    "multi": False,
+                    "question_id": "",
+                }
+            ],
+        },
+        {
+            "v": 1,
+            "kind": "answered",
+            "ask_id": ask_id,
+            "at": now - 1000,
+            "by": {"surface": surface},
+            "answers": {"q": [answer]},
+        },
+    ]
+    path = home / ".local-operator" / "sessions" / S / "asks.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a") as fh:
+        for row in rows:
+            fh.write(json.dumps(row) + "\n")
+
+
+DESCR_OPTIONS = [
+    {"label": "Yes, clear it", "description": "rm -rf ~/descr-only/tree"},
+    {"label": "Keep it"},
+]
+
+
+@pytest.mark.asyncio
+async def test_a_trusted_yes_to_a_description_only_path_is_not_refused(deep: Path) -> None:
+    """Review R2-M3 (probe P4): the operator said yes on desktop to an ask that
+    names the path only in the picked option's description. Consent and refusal
+    read that answered question the same way (question + labels; a description
+    names nothing, live a-1d54), so the path keeps its base rank as on main:
+    never the refusal that says he did not approve."""
+    (deep / "descr-only" / "tree").mkdir(parents=True)
+    _answered_ask(deep, "a-de5d", "Clear the stale tree?", DESCR_OPTIONS, answer="Yes, clear it")
+    [ask] = prov.unanswered_asks(S)
+    assert ask.answer is not None and "descr-only" not in ask.text
+    judge = _Judge("BLOCK")
+    outcome = await _check(deep, "rm -rf ~/descr-only/tree", judge)
+    assert outcome is None or not outcome.blocked, outcome and outcome.text
+    assert judge.prompts == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("answer", "surface"),
+    [
+        ("Keep it", "desktop"),  # trusted, but declining
+        ("Yes, clear it", "chat"),  # the agent's own answered_in_chat
+        ("Yes, clear it", "relay"),
+        ("Yes, clear it", "bridge"),
+    ],
+)
+async def test_a_description_only_path_without_a_trusted_yes_still_refuses(
+    deep: Path, answer: str, surface: str
+) -> None:
+    """R1-M1 holds for the description-only shape: no trusted non-declining answer,
+    so the deterministic refusal stands with no judge call."""
+    (deep / "descr-only" / "tree").mkdir(parents=True)
+    _answered_ask(
+        deep, "a-de5e", "Clear the stale tree?", DESCR_OPTIONS, answer=answer, surface=surface
+    )
+    judge = _Judge("ALLOW ask=a-de5e")
+    outcome = await _check(deep, "rm -rf ~/descr-only/tree", judge)
+    assert outcome is not None and outcome.blocked and judge.prompts == []
+
+
+AB_OPTIONS = [
+    {"label": "Delete ~/hyperplane-cpp/build", "description": "build output"},
+    {"label": "Delete ~/bench/rigs", "description": "benchmark rigs"},
+]
+
+
+@pytest.mark.asyncio
+async def test_an_ask_citation_never_verifies_a_path_the_operator_did_not_pick(
+    deep: Path,
+) -> None:
+    """Review R2-m6: A picked, B not. A judge citing the ask for B must not pass
+    the verifier: the citation covers only what the chosen answer covers."""
+    _answered_ask(
+        deep, "a-ab12", "Which tree should I delete?", AB_OPTIONS, answer=AB_OPTIONS[0]["label"]
+    )
+    judge = _Judge("ALLOW ask=a-ab12")
+    outcome = await _check(deep, "rm -rf ~/bench/rigs", judge)
+    assert outcome is not None and outcome.blocked, "B was never picked"
+    assert len(judge.prompts) == 1
+    # A, the picked one, is still the operator's decision.
+    outcome = await _check(deep, "rm -rf ~/hyperplane-cpp/build", _Judge("BLOCK"))
+    assert outcome is None or not outcome.blocked, outcome and outcome.text
+
+
+@pytest.mark.asyncio
+async def test_above_an_approved_glob_the_judge_reads_and_the_citation_never_verifies(
+    deep: Path,
+) -> None:
+    """R2-M3 neighbour: a trusted yes no longer refuses outright, so deleting the
+    dir ABOVE the approved ``~/osworld/runs*`` reaches the judge; the ask is no
+    citation for it, so a judge fooled into ``ALLOW ask=`` is still blocked."""
+    _deep_ask(deep, answer=DEEP_LABEL, expired=False)
+    judge = _Judge(f"ALLOW ask={DEEP_ASK}")
+    outcome = await _check(deep, "rm -rf ~/osworld", judge)
+    assert outcome is not None and outcome.blocked, "the operator approved runs*, not ~/osworld"
+    assert len(judge.prompts) == 1
+    assert (deep / "osworld").is_dir()

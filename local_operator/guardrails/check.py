@@ -623,6 +623,7 @@ class DeleteCase:
         """
         import re
 
+        from local_operator.guardrails import provenance as prov
         from local_operator.guardrails.evidence import verify as verify_evidence
 
         first = (answer or "").strip().splitlines()[0] if (answer or "").strip() else ""
@@ -679,10 +680,16 @@ class DeleteCase:
                     w
                     for w in self.operator.words
                     if (
-                        (w.ask_id and w.ask_id in ask_ids)
-                        or (operator and w.label == "operator, direct")
+                        # An ask citation verifies only what the chosen
+                        # answer covers, never a path only an unpicked
+                        # option names (review R2-m6).
+                        w.ask_id
+                        and w.ask_id in ask_ids
+                        and prov.ask_citation_covers(
+                            w, path, home=self.home, cwd=self.cwd, protected=self.stop
+                        )
                     )
-                    and self._named_by(path, w)
+                    or (operator and w.label == "operator, direct" and self._named_by(path, w))
                 ),
                 None,
             )
@@ -737,6 +744,15 @@ def _ask_block(
     reach is UNDER a broad named dir (``provenance.broad_ask_dir``): that
     target goes to the judge with the not-consent fact instead of the
     deterministic refusal. A refusable hit wins over a judge-only one.
+
+    An ask the operator gave a trusted, non-declining answer never refuses
+    outright (review R2-M3): only an ask with no trusted yes may. When that
+    answer's ``ask=`` citation would verify the path or a dir above it
+    (``provenance.ask_answer_covers``: picked, not only an unpicked option's
+    label) it adds nothing, and the path keeps its base rank, as on main
+    (``node_modules`` inside a worktree the operator said to delete). When the
+    answer reaches the path only through an unpicked option, it goes to the
+    judge with the fact, and the verifier refuses the citation (review R2-m6).
     """
     from local_operator.guardrails import provenance as prov
 
@@ -751,7 +767,12 @@ def _ask_block(
         if prov.ask_consents(a, path, home=home, cwd=cwd, protected=stop):
             continue
         kind, named = reach
-        if kind == "under" and prov.broad_ask_dir(named, home=home):
+        answered = a.answer is not None and (
+            prov.ask_reach(a.answer.text, path, home=home, cwd=cwd, protected=stop) is not None
+        )
+        if answered and prov.ask_answer_covers(a.answer, path, home=home, cwd=cwd, protected=stop):
+            continue
+        if answered or (kind == "under" and prov.broad_ask_dir(named, home=home)):
             judge_only = judge_only or (a, False)
             continue
         return a, True

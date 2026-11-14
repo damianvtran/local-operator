@@ -2131,6 +2131,13 @@ class OperatorWords:
     #: (``_approved_text``): the yes/no question the operator said yes to, or
     #: the picked options. ``DeleteCase.evidence_basis`` settles on it.
     approved: str = ""
+    #: Labels of the options the operator did NOT pick, in the questions this
+    #: answer kept. A judge's ``ask=`` citation never verifies a path only
+    #: these reach (review R2-m6, :func:`ask_citation_covers`).
+    unpicked: str = ""
+    #: The picked labels plus any typed answer: a path these name is the
+    #: operator's pick even when an unpicked option names it too.
+    picked: str = ""
 
 
 @dataclass
@@ -2228,23 +2235,24 @@ def _ask_words(record: Mapping[str, Any], session_id: str) -> OperatorWords | No
     answers = record.get("answers") or {}
     parts: list[str] = []
     approved: list[str] = []
+    picked: list[str] = []
+    unpicked: list[str] = []
     for q in questions:
         if q.get("secret"):
             continue
-        chosen = [str(v) for v in (answers.get(str(q.get("id") or "")) or [])]
-        opts = [o for o in (q.get("options") or []) if isinstance(o, Mapping)]
-        labels = [str(o.get("label") or "") for o in opts]
-        if not chosen or any(_answer_declines(v, labels) for v in chosen):
+        chosen = _kept_answer(q, answers)
+        if chosen is None:
             # Deterministic veto (review R1-MINOR-3): a declining answer is
             # never consent, whatever a judge that read the history concludes.
             continue
-        options = "; ".join(labels)
-        parts.append(
-            f"Q: {q.get('question') or ''}"
-            + (f" [options: {options}]" if options else "")
-            + f" -> operator answered: {', '.join(chosen)}"
-        )
+        opts = [o for o in (q.get("options") or []) if isinstance(o, Mapping)]
+        labels = [str(o.get("label") or "") for o in opts]
+        # The consent rendering, which the refusal side also reads for every
+        # question this answer kept (``unanswered_asks``, review R2-M3).
+        parts.append(f"{_ask_question_text(q)} -> operator answered: {', '.join(chosen)}")
         approved.extend(_approved_text(q, opts, labels, chosen))
+        picked.extend(chosen)
+        unpicked.extend(lbl for lbl in labels if lbl not in chosen)
     if not parts:
         return None
     return OperatorWords(
@@ -2253,7 +2261,108 @@ def _ask_words(record: Mapping[str, Any], session_id: str) -> OperatorWords | No
         ask_id=ask_id,
         session_id=session_id,
         approved="\n".join(approved),
+        unpicked="\n".join(unpicked),
+        picked="\n".join(picked),
     )
+
+
+def _kept_answer(q: Mapping[str, Any], answers: Mapping[str, Any]) -> list[str] | None:
+    """The operator's answer to ``q`` when it can be consent, else None.
+
+    None for a secret question, no answer, or any declining answer. The ONE
+    test both :func:`_ask_words` (consent) and :func:`unanswered_asks`
+    (refusal) apply per question, so the two never disagree on which
+    questions a trusted answer kept.
+    """
+    if q.get("secret"):
+        return None
+    chosen = [str(v) for v in (answers.get(str(q.get("id") or "")) or [])]
+    labels = [str(o.get("label") or "") for o in q.get("options") or [] if isinstance(o, Mapping)]
+    if not chosen or any(_answer_declines(v, labels) for v in chosen):
+        return None
+    return chosen
+
+
+def _ask_question_text(q: Mapping[str, Any], *, descriptions: bool = False) -> str:
+    """One question as text: the question, its option labels, optionally descriptions.
+
+    The ONE rendering consent (:func:`_ask_words`) and refusal
+    (:func:`unanswered_asks`) read. Consent reads question + labels: an
+    option's description names nothing (live ask a-1d54, review R2-M1). The
+    refusal side adds descriptions only for questions with no trusted,
+    non-declining answer (review m4/QA Q2 vs R2-M3). No closing bracket after
+    the last option: ``_PATHISH`` would keep it on a trailing glob
+    (``~/osworld/runs*]``), which then matches nothing.
+    """
+    options = "; ".join(
+        (
+            f"{o.get('label') or ''} ({o.get('description')})"
+            if descriptions and o.get("description")
+            else str(o.get("label") or "")
+        )
+        for o in q.get("options") or []
+        if isinstance(o, Mapping)
+    )
+    return f"Q: {q.get('question') or ''} | options: {options}"
+
+
+def ask_citation_covers(
+    words: OperatorWords,
+    path: str,
+    *,
+    home: str,
+    cwd: str | None = None,
+    protected: Iterable[str] = (),
+) -> bool:
+    """May a judge's ``ask=<id>`` citation of ``words`` verify deleting ``path``?
+
+    The answer's text must name the path (question or labels, never a
+    description), AND the path must not be one that only an option the
+    operator did NOT pick reaches. WHY (review R2-m6, PR #3966): with
+    "Delete ~/A" picked and "Delete ~/B" not, a judge citing the ask for
+    ``~/B`` passed the verifier, which read every label. The question still
+    counts ("Delete ~/A and ~/B?" answered "Both"), unless an unpicked option
+    claims the path and no pick or typed answer names it.
+    """
+    protected = tuple(protected)
+    if not names_path(words.text, path, home=home, cwd=cwd, protected=protected):
+        return False
+    if not words.unpicked:
+        return True
+    reach = ask_reach(words.unpicked, path, home=home, cwd=cwd, protected=protected)
+    if reach is None or reach[0] not in ("exact", "under"):
+        return True
+    return names_path(words.picked, path, home=home, cwd=cwd, protected=protected)
+
+
+def ask_answer_covers(
+    words: OperatorWords,
+    path: str,
+    *,
+    home: str,
+    cwd: str | None = None,
+    protected: Iterable[str] = (),
+) -> bool:
+    """Would an ``ask=`` citation of ``words`` verify ``path`` or a dir above it?
+
+    The rank side of :func:`ask_citation_covers`: a path inside a tree the
+    operator's answer covers (``~/m/.worktrees/x/node_modules`` under an
+    answered "Delete all five" naming ``~/m/.worktrees/{x,…}``) is not lifted
+    out of its base rank by that ask. Only ancestors below ``$HOME`` count,
+    so an answer that names ``~`` covers nothing beneath it.
+    """
+    protected = tuple(protected)
+    home_real = os.path.realpath(home)
+    for spelled in dict.fromkeys([os.path.normpath(path), os.path.realpath(path)]):
+        current = spelled
+        while True:
+            if ask_citation_covers(words, current, home=home, cwd=cwd, protected=protected):
+                return True
+            parent = os.path.dirname(current)
+            if parent == current or parent in (home, home_real) or len(parent) <= len(home_real):
+                break
+            current = parent
+    return False
 
 
 def _approved_text(
@@ -2378,8 +2487,10 @@ class UnansweredAsk:
     session_id: str
     #: The fold's status (``timed_out``, ``answered``, ``declined``, ...).
     status: str
-    #: Question text, option labels AND descriptions: wider than consent's
-    #: naming bar on purpose, since this text is only ever matched to REFUSE.
+    #: Question text and option labels, plus descriptions for every question
+    #: the operator's trusted answer did not keep: wider than consent's naming
+    #: bar there on purpose, since that text is only ever matched to REFUSE.
+    #: A kept question reads exactly as consent reads it (review R2-M3).
     text: str
     #: Why it is not consent, for the judge fact and the refusal text.
     label: str = ""
@@ -2392,6 +2503,11 @@ class UnansweredAsk:
     #: True when the operator never answered (open/timed out/expired/...),
     #: False when an answer exists but does not approve the path.
     never_answered: bool = True
+    #: The operator's trusted, non-declining answer (:func:`_ask_words`), or
+    #: None. A path that answer's text reaches but did not approve
+    #: deterministically goes to the judge, never to the refusal (review
+    #: R2-M3): only an ask with no trusted yes may refuse outright.
+    answer: OperatorWords | None = None
 
 
 #: Statuses that mean "the operator never answered".
@@ -2479,28 +2595,24 @@ def unanswered_asks(
         for record in records:
             status = str(record.get("status") or "")
             questions = [q for q in record.get("questions") or [] if isinstance(q, Mapping)]
-            # No closing bracket after the last option: ``_PATHISH`` would keep
-            # it on a trailing glob (``~/osworld/runs*]``), which then matches
-            # nothing — and this text is matched to REFUSE, so a miss fails open.
-            # Descriptions are included (review m4/QA Q2): a path named only
-            # there must still refuse; consent keeps the narrower label bar.
+            words = _ask_words(record, sid)
+            answers = record.get("answers") or {}
+            # One parser for consent and refusal (review R2-M3): a question
+            # the operator's trusted answer kept is read exactly as consent
+            # reads it (question + labels), so a path named only in its
+            # description is neither approved nor refused (main's rank, the
+            # same as consent sees it). Every other question keeps its
+            # descriptions (review m4/QA Q2): with no trusted yes, a path
+            # named only there must still refuse.
             parts = [
-                f"Q: {q.get('question') or ''} | options: "
-                + "; ".join(
-                    (
-                        f"{o.get('label') or ''} ({o.get('description') or ''})"
-                        if o.get("description")
-                        else str(o.get("label") or "")
-                    )
-                    for o in (q.get("options") or [])
-                    if isinstance(o, Mapping)
+                _ask_question_text(
+                    q, descriptions=words is None or _kept_answer(q, answers) is None
                 )
                 for q in questions
                 if not q.get("secret")
             ]
             if not parts:
                 continue
-            words = _ask_words(record, sid)
             out.append(
                 UnansweredAsk(
                     ask_id=str(record.get("ask_id") or ""),
@@ -2508,11 +2620,12 @@ def unanswered_asks(
                     status=status,
                     text="\n".join(parts),
                     label=(
-                        "answered without approving this path"
+                        "answered by the operator with no picked label approving this path"
                         if words is not None
                         else _not_consent_label(record, status)
                     ),
                     approved=words.approved if words is not None else "",
+                    answer=words,
                     created_at=int(record.get("created_at") or 0),
                     never_answered=status in _UNANSWERED_LABEL,
                 )
@@ -2959,7 +3072,11 @@ def ask_reach(
     data ranked LOW, so no check ever ran. Asking about a path is the agent's
     own admission that removing it needs the operator; silence cannot turn it
     back into LOW. So this match is deliberately WIDER than consent's
-    :func:`names_path`, and only ever used to REFUSE (over-matching fails closed):
+    :func:`names_path`. It lifts or keeps escalation and refusals; the callers
+    that subtract consent with it (:func:`ask_consents` on the operator's
+    approved labels, :func:`ask_citation_covers` on unpicked options) can at
+    most return a target to its base rank, never below it (over-matching on
+    the refusal side fails closed):
 
     - ``("exact", path)``: :func:`names_path` names ``path`` itself, literally
       or by its glob (``~/osworld/runs*`` names ``~/osworld/runs-3``);
@@ -2978,7 +3095,8 @@ def ask_reach(
     ``rm -rf ~/Workspace/Harness-Cost-Bench`` deletes the tree an ask spelled
     ``~/workspace/harness-cost-bench``. On Darwin every spelling is compared
     casefolded. On a case-SENSITIVE Darwin volume that can over-match two
-    distinct paths, which only refuses (this function never grants consent).
+    distinct paths; that may lift only the escalation it added, never take a
+    target below its base rank.
     """
     if not text or not path:
         return None
