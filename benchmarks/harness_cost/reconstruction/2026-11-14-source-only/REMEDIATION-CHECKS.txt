@@ -1,0 +1,31 @@
+Unified R1/R2/R3 source-only remediation; no task/service execution
+UTC 2026-11-14T09:27:25Z
+test_hash_negative_control (test_reconstruction.ReconstructionTests.test_hash_negative_control) ... ok
+test_image_never_downloaded (test_reconstruction.ReconstructionTests.test_image_never_downloaded) ... ok
+test_new_image_observations_match_retained_metadata_not_historical_claims (test_reconstruction.ReconstructionTests.test_new_image_observations_match_retained_metadata_not_historical_claims) ... ok
+test_path_escape_rejected_without_network (test_reconstruction.ReconstructionTests.test_path_escape_rejected_without_network) ... ok
+test_privacy_scanner_negative_control (test_reconstruction.ReconstructionTests.test_privacy_scanner_negative_control) ... ok
+test_proposed_host_lock_retains_dependency_edges (test_reconstruction.ReconstructionTests.test_proposed_host_lock_retains_dependency_edges) ... ok
+test_public_fixture_classification_is_path_digest_and_rule_bound (test_reconstruction.ReconstructionTests.test_public_fixture_classification_is_path_digest_and_rule_bound) ... ok
+test_static_verification_real_command_and_dispatch_refusal (test_reconstruction.ReconstructionTests.test_static_verification_real_command_and_dispatch_refusal) ... ok
+test_tampered_per_task_complete_and_gaps_are_rejected (test_reconstruction.ReconstructionTests.test_tampered_per_task_complete_and_gaps_are_rejected) ... ok
+
+----------------------------------------------------------------------
+Ran 9 tests in 2.620s
+
+OK
+{"classified_public_fixtures": [{"classification": "exact-public-FAKE-canary-source", "path": "payloads/sanitize-git-repo/tests/test_outputs.py", "rules": ["aws-access-id", "github-token"]}], "errors": [], "file_statuses": {"exact_match": 381, "not_downloaded_non_source": 26}, "historical_checks": 37, "kind": "static-source-verification", "metadata_receipt_rows_checked": 43, "privacy_pattern_hits": [], "runtime_qualified": false}
+{"classified_public_fixtures": [{"classification": "exact-public-FAKE-canary-source", "path": "payloads/sanitize-git-repo/tests/test_outputs.py", "rules": ["aws-access-id", "github-token"]}], "errors": ["campaign incomplete: exact recovery gate refuses dispatch"], "file_statuses": {"exact_match": 381, "not_downloaded_non_source": 26}, "historical_checks": 37, "kind": "static-source-verification", "metadata_receipt_rows_checked": 43, "privacy_pattern_hits": [], "runtime_qualified": false}
+Incomplete campaign gate exit=1 (expected 1)
+usage: collect_metadata.py [-h]
+                           [--only {claude-code,claude-linux-x64,codex-best,codex-linux-x64,cryptography-proposed,dsh,harbor,hermes-pyproject,hermes-uv-lock,httpx-proposed,image-adaptive-rejection-sampler,image-build-pov-ray,image-code-from-image,image-dna-insert,image-llm-inference-batching-scheduler,image-merge-diff-arc-agi-task,image-password-recovery,image-pytorch-model-cli,image-regex-log,image-sanitize-git-repo,image-tune-mjcf,lop-pyproject,lop-uv-lock,omp,opencode,opencode-cli-package,opencode-install,opencode-linux-x64,opencode-no-v,opencode-npm,opencode-npm-correct,sanitize-file-history,starlette-proposed,task-license,uvicorn-proposed} [{claude-code,claude-linux-x64,codex-best,codex-linux-x64,cryptography-proposed,dsh,harbor,hermes-pyproject,hermes-uv-lock,httpx-proposed,image-adaptive-rejection-sampler,image-build-pov-ray,image-code-from-image,image-dna-insert,image-llm-inference-batching-scheduler,image-merge-diff-arc-agi-task,image-password-recovery,image-pytorch-model-cli,image-regex-log,image-sanitize-git-repo,image-tune-mjcf,lop-pyproject,lop-uv-lock,omp,opencode,opencode-cli-package,opencode-install,opencode-linux-x64,opencode-no-v,opencode-npm,opencode-npm-correct,sanitize-file-history,starlette-proposed,task-license,uvicorn-proposed} ...]]
+
+Collect public release metadata only, not distributions or credentials. An npm
+integrity or PyPI artifact hash pins an available distribution, not its
+transitive installation closure or the deleted historical installation.
+
+options:
+  -h, --help            show this help message and exit
+  --only {claude-code,claude-linux-x64,codex-best,codex-linux-x64,cryptography-proposed,dsh,harbor,hermes-pyproject,hermes-uv-lock,httpx-proposed,image-adaptive-rejection-sampler,image-build-pov-ray,image-code-from-image,image-dna-insert,image-llm-inference-batching-scheduler,image-merge-diff-arc-agi-task,image-password-recovery,image-pytorch-model-cli,image-regex-log,image-sanitize-git-repo,image-tune-mjcf,lop-pyproject,lop-uv-lock,omp,opencode,opencode-cli-package,opencode-install,opencode-linux-x64,opencode-no-v,opencode-npm,opencode-npm-correct,sanitize-file-history,starlette-proposed,task-license,uvicorn-proposed} [{claude-code,claude-linux-x64,codex-best,codex-linux-x64,cryptography-proposed,dsh,harbor,hermes-pyproject,hermes-uv-lock,httpx-proposed,image-adaptive-rejection-sampler,image-build-pov-ray,image-code-from-image,image-dna-insert,image-llm-inference-batching-scheduler,image-merge-diff-arc-agi-task,image-password-recovery,image-pytorch-model-cli,image-regex-log,image-sanitize-git-repo,image-tune-mjcf,lop-pyproject,lop-uv-lock,omp,opencode,opencode-cli-package,opencode-install,opencode-linux-x64,opencode-no-v,opencode-npm,opencode-npm-correct,sanitize-file-history,starlette-proposed,task-license,uvicorn-proposed} ...]
+                        Collect only selected sources; preserve earlier
+                        receipts

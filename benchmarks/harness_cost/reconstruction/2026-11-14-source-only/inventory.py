@@ -27,6 +27,7 @@ def main():
         files = [row for row in rows if row['task'] == task]
         counts = dict(collections.Counter(row['status'] for row in files))
         matrix.append({'task': task, 'source_commit': files[0]['source_commit'],
+                       'source_commits': sorted({row['source_commit'] for row in files}),
                        'counts': counts, 'complete_exact': all(row['status'] == 'exact_match' for row in files),
                        'gaps': [row for row in files if row['status'] != 'exact_match']})
     write('task-matrix.json', {'campaign_id': CAMPAIGN, 'receipt': source_receipt.name,
@@ -37,11 +38,21 @@ def main():
     public = json.loads((EXPERIMENTAL / 'coding/public-provenance.json').read_text())['tasks']
     names = prereg['headline_sample']['dev_tasks_excluded'] + prereg['tasks']
     reconstructed = []
+    image_path = HERE / 'image-bindings.json'
+    images = {row['task']: row for row in json.loads(image_path.read_text())['observations']} if image_path.exists() else {}
     for name in names:
         row = {'name': name, 'selection': 'dev' if name in prereg['headline_sample']['dev_tasks_excluded'] else 'held-out',
                'historical_metadata': known.get(name), 'image_digest': known.get(name, {}).get('image_digest') or public.get(name, {}).get('image_digest'),
                'missing_fields': [] if name in known else ['task8', 'image tag', 'hub_tag_full_size_bytes', 'task_checksum'],
                'source': 'surviving subset' if name in known else 'prereg task list; optional public-provenance image binding'}
+        if name in images:
+            observation = images[name]
+            # Fresh tag metadata is useful prospective acquisition identity, but
+            # must never masquerade as recovered original subset/runtime bytes.
+            row['new_image_observation'] = observation
+            if row['image_digest'] is None:
+                row['image_digest'] = observation['image_digest']
+                row['image_digest_origin'] = 'new-public-registry-observation'
         if row['image_digest'] is None:
             row['missing_fields'].append('image_digest')
         reconstructed.append(row)
@@ -59,9 +70,15 @@ def main():
     write('historical-bindings.json', {'preregistration_sha256': digest(prereg_path), 'checks': checks,
         'external_missing_bindings': {k: prereg[k] for k in ('builder_sha256', 'runtime_sha256', 'oracle_sha256', 'toolwire_sha256', 'catalog_sha256', 'prereg_tools_sha256')},
         'note': 'External digests are historical assertions, not recovered artifacts or fresh validation.'})
-    metadata_rows = [json.loads(line) for line in sorted(HERE.glob('metadata-receipt-*.jsonl'))[-1].read_text().splitlines()]
+    # Incremental observations do not erase earlier package pins. Keep the
+    # latest observation of each named source across all append-only receipts.
+    metadata_rows = {}
+    for path in sorted(HERE.glob('metadata-receipt-*.jsonl')):
+        for line in path.read_text().splitlines():
+            receipt = json.loads(line)
+            metadata_rows[receipt['name']] = receipt
     pins = []
-    for receipt in metadata_rows:
+    for receipt in metadata_rows.values():
         item = dict(receipt)
         if receipt['status'] == 'available' and receipt['file'].endswith('.json'):
             doc = json.loads((HERE / receipt['file']).read_text())

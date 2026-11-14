@@ -1,0 +1,15 @@
+{
+  "inputs": [
+    {
+      "bytes": 2687,
+      "lifetime": "Retain at this exact worktree path until parent/disk owner coordinate an explicit disposition. Ignore/HOLD is not deletion protection.",
+      "private_operator_credential": false,
+      "publication": "excluded-local-only",
+      "relative_path": "payloads/sanitize-git-repo/tests/test_outputs.py",
+      "sha256": "57e4904177acac5807b51f7c32444bde1968ba0445855fa4333d9eb73865b59e",
+      "source_commit": "3dbbcbbedc34919bd044f5780a87b00eb99b2b35",
+      "source_url": "https://raw.githubusercontent.com/harbor-framework/terminal-bench-2/3dbbcbbedc34919bd044f5780a87b00eb99b2b35/sanitize-git-repo/tests/test_outputs.py"
+    }
+  ],
+  "reason": "GitHub push protection rejected Hugging Face-shaped public synthetic canary; no bypass requested"
+}

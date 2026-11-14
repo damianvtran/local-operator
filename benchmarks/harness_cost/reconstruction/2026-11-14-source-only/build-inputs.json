@@ -1,39 +1,118 @@
 {
-  "campaign_id": "reconstruction-20261114-source-v1",
-  "status": "DRAFT-BLOCKED-UNPINNED-INPUTS",
-  "historical_source_commit": "2078250d8e990ee0840b4d045964ed8a68871d08",
-  "host_services": {
-    "source_root": "../../experimental",
-    "lock": "host-services.requirements.lock",
-    "lock_origin": "proposed slice of Hermes historical source uv.lock, not deleted host environment",
-    "python_family": "CPython 3.14",
-    "python_build_sha256": null,
-    "installer_version": null,
-    "installer_sha256": null,
-    "qualified": false
+  "budget": {
+    "current_authorized_spend_usd": 0,
+    "lane_usd": 100,
+    "prior_actual_spend_usd": null,
+    "programme_usd": 800,
+    "trial_usd": 5
   },
-  "linux_toolchain": {
-    "platform": "linux/amd64",
-    "mount": "/opt/bench",
-    "base_digest": null,
-    "os_package_lock": null,
-    "python_build_sha256": null,
-    "node_build_sha256": null,
-    "package_manager_sha256": null,
-    "compiler_build_tools_lock": null,
-    "distribution_metadata": "distribution-pins.partial.json",
-    "dependency_closure_complete": false,
-    "qualified": false
+  "campaign_id": "reconstruction-20261114-source-v1",
+  "execution_policy": {
+    "admission_disk_desk_session": "00e6a1cd8f62",
+    "benchmark_task_images_retained_at_once": 1,
+    "heavy_work_authorized_now": false,
+    "historical_task_and_arm_order_retained": true,
+    "local_only": true,
+    "memory_go_required": true,
+    "minimum_free_gib": 30
   },
   "harnesses": {
-    "claude-code": {"version": "2.1.274", "source_revision": null, "artifact_metadata": ["claude-code", "claude-linux-x64"], "original_installed_tree_recovered": false},
-    "codex-best": {"version": "0.147.0", "source_revision": null, "artifact_metadata": ["codex-best", "codex-linux-x64"], "original_installed_tree_recovered": false},
-    "local-operator": {"version": "500883ef-v0.94.22", "source_revision": "500883ef56ca504325ffd80c5b90bf2435d00e3f", "artifact_metadata": ["lop-pyproject"], "dependency_lock": null, "original_installed_tree_recovered": false},
-    "omp": {"version": "18.11.2", "source_revision": null, "artifact_metadata": ["omp"], "dependency_lock": null, "original_installed_tree_recovered": false},
-    "opencode": {"version": "2.0.27", "source_revision": null, "artifact_metadata": [], "dependency_lock": null, "exact_artifact_available": false, "original_installed_tree_recovered": false},
-    "hermes": {"version": "0.22.6", "source_revision": "f0d94882e89ab8d4098b5bb2f166adfb9ee0a0ab", "artifact_metadata": ["hermes-pyproject", "hermes-uv-lock"], "target_extras_selected": false, "original_installed_tree_recovered": false},
-    "dsh": {"version": "0.2.0-rc.2", "source_revision": null, "artifact_metadata": ["dsh"], "dependency_lock": null, "original_installed_tree_recovered": false}
+    "claude-code": {
+      "artifact_metadata": [
+        "claude-code",
+        "claude-linux-x64"
+      ],
+      "original_installed_tree_recovered": false,
+      "source_revision": null,
+      "version": "2.1.274"
+    },
+    "codex-best": {
+      "artifact_metadata": [
+        "codex-best",
+        "codex-linux-x64"
+      ],
+      "original_installed_tree_recovered": false,
+      "source_revision": null,
+      "version": "0.147.0"
+    },
+    "dsh": {
+      "artifact_metadata": [
+        "dsh"
+      ],
+      "dependency_lock": null,
+      "original_installed_tree_recovered": false,
+      "source_revision": null,
+      "version": "0.2.0-rc.2"
+    },
+    "hermes": {
+      "artifact_metadata": [
+        "hermes-pyproject",
+        "hermes-uv-lock"
+      ],
+      "original_installed_tree_recovered": false,
+      "source_revision": "f0d94882e89ab8d4098b5bb2f166adfb9ee0a0ab",
+      "target_extras_selected": false,
+      "version": "0.22.6"
+    },
+    "local-operator": {
+      "artifact_metadata": [
+        "lop-pyproject"
+      ],
+      "dependency_lock": null,
+      "original_installed_tree_recovered": false,
+      "source_revision": "500883ef56ca504325ffd80c5b90bf2435d00e3f",
+      "version": "500883ef-v0.94.22"
+    },
+    "omp": {
+      "artifact_metadata": [
+        "omp"
+      ],
+      "dependency_lock": null,
+      "original_installed_tree_recovered": false,
+      "source_revision": null,
+      "version": "18.11.2"
+    },
+    "opencode": {
+      "artifact_metadata": [
+        "opencode-npm-correct",
+        "opencode-linux-x64",
+        "opencode-cli-package",
+        "opencode-install"
+      ],
+      "dependency_lock": null,
+      "exact_artifact_available": true,
+      "historical_source_revision": null,
+      "identity_gate": "Historical adapter describes Go binary; newly inspected versioned source has no Go files. Resolve/review deleted-runtime identity discrepancy before freeze; never silently substitute.",
+      "original_installed_tree_recovered": false,
+      "source_revision": "1f4d07a4a519185955ae8ab2ea3607805509e386",
+      "source_revision_origin": "new-public-versioned-source-candidate-not-historical-runtime-recovery",
+      "version": "2.0.27"
+    }
+  },
+  "historical_source_commit": "2078250d8e990ee0840b4d045964ed8a68871d08",
+  "host_services": {
+    "installer_sha256": null,
+    "installer_version": null,
+    "lock": "host-services.requirements.lock",
+    "lock_origin": "proposed slice of Hermes historical source uv.lock, not deleted host environment",
+    "python_build_sha256": null,
+    "python_family": "CPython 3.14",
+    "qualified": false,
+    "source_root": "../../experimental"
+  },
+  "linux_toolchain": {
+    "base_digest": null,
+    "compiler_build_tools_lock": null,
+    "dependency_closure_complete": false,
+    "distribution_metadata": "distribution-pins.partial.json",
+    "mount": "/opt/bench",
+    "node_build_sha256": null,
+    "os_package_lock": null,
+    "package_manager_sha256": null,
+    "platform": "linux/amd64",
+    "python_build_sha256": null,
+    "qualified": false
   },
   "paid_dispatch_authorized": false,
-  "budget": {"lane_usd": 100, "trial_usd": 5, "programme_usd": 800, "prior_actual_spend_usd": null, "current_authorized_spend_usd": 0}
+  "status": "DRAFT-BLOCKED-UNPINNED-INPUTS"
 }

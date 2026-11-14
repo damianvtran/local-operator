@@ -1,7 +1,7 @@
 {
   "campaign_id": "reconstruction-20261114-source-v1",
   "files": 407,
-  "receipt": "source-receipt-20261114T084934148805Z.jsonl",
+  "receipt": "source-receipt-20261114T093327775088Z.jsonl",
   "tasks": [
     {
       "complete_exact": true,
@@ -10,6 +10,9 @@
       },
       "gaps": [],
       "source_commit": "7131e4375048a0e408a8fb404b5f499d726b695b",
+      "source_commits": [
+        "7131e4375048a0e408a8fb404b5f499d726b695b"
+      ],
       "task": "password-recovery"
     },
     {
@@ -19,6 +22,9 @@
       },
       "gaps": [],
       "source_commit": "7131e4375048a0e408a8fb404b5f499d726b695b",
+      "source_commits": [
+        "7131e4375048a0e408a8fb404b5f499d726b695b"
+      ],
       "task": "dna-insert"
     },
     {
@@ -28,6 +34,9 @@
       },
       "gaps": [],
       "source_commit": "7131e4375048a0e408a8fb404b5f499d726b695b",
+      "source_commits": [
+        "7131e4375048a0e408a8fb404b5f499d726b695b"
+      ],
       "task": "feal-linear-cryptanalysis"
     },
     {
@@ -37,6 +46,9 @@
       },
       "gaps": [],
       "source_commit": "7131e4375048a0e408a8fb404b5f499d726b695b",
+      "source_commits": [
+        "7131e4375048a0e408a8fb404b5f499d726b695b"
+      ],
       "task": "dna-assembly"
     },
     {
@@ -46,6 +58,9 @@
       },
       "gaps": [],
       "source_commit": "7131e4375048a0e408a8fb404b5f499d726b695b",
+      "source_commits": [
+        "7131e4375048a0e408a8fb404b5f499d726b695b"
+      ],
       "task": "schemelike-metacircular-eval"
     },
     {
@@ -55,6 +70,9 @@
       },
       "gaps": [],
       "source_commit": "7131e4375048a0e408a8fb404b5f499d726b695b",
+      "source_commits": [
+        "7131e4375048a0e408a8fb404b5f499d726b695b"
+      ],
       "task": "large-scale-text-editing"
     },
     {
@@ -64,6 +82,9 @@
       },
       "gaps": [],
       "source_commit": "7131e4375048a0e408a8fb404b5f499d726b695b",
+      "source_commits": [
+        "7131e4375048a0e408a8fb404b5f499d726b695b"
+      ],
       "task": "torch-pipeline-parallelism"
     },
     {
@@ -73,6 +94,9 @@
       },
       "gaps": [],
       "source_commit": "7131e4375048a0e408a8fb404b5f499d726b695b",
+      "source_commits": [
+        "7131e4375048a0e408a8fb404b5f499d726b695b"
+      ],
       "task": "circuit-fibsqrt"
     },
     {
@@ -82,6 +106,9 @@
       },
       "gaps": [],
       "source_commit": "7131e4375048a0e408a8fb404b5f499d726b695b",
+      "source_commits": [
+        "7131e4375048a0e408a8fb404b5f499d726b695b"
+      ],
       "task": "headless-terminal"
     },
     {
@@ -246,6 +273,9 @@
         }
       ],
       "source_commit": "7131e4375048a0e408a8fb404b5f499d726b695b",
+      "source_commits": [
+        "7131e4375048a0e408a8fb404b5f499d726b695b"
+      ],
       "task": "financial-document-processor"
     },
     {
@@ -255,6 +285,9 @@
       },
       "gaps": [],
       "source_commit": "7131e4375048a0e408a8fb404b5f499d726b695b",
+      "source_commits": [
+        "7131e4375048a0e408a8fb404b5f499d726b695b"
+      ],
       "task": "kv-store-grpc"
     },
     {
@@ -264,6 +297,9 @@
       },
       "gaps": [],
       "source_commit": "7131e4375048a0e408a8fb404b5f499d726b695b",
+      "source_commits": [
+        "7131e4375048a0e408a8fb404b5f499d726b695b"
+      ],
       "task": "fix-code-vulnerability"
     },
     {
@@ -273,6 +309,9 @@
       },
       "gaps": [],
       "source_commit": "7131e4375048a0e408a8fb404b5f499d726b695b",
+      "source_commits": [
+        "7131e4375048a0e408a8fb404b5f499d726b695b"
+      ],
       "task": "nginx-request-logging"
     },
     {
@@ -282,6 +321,9 @@
       },
       "gaps": [],
       "source_commit": "7131e4375048a0e408a8fb404b5f499d726b695b",
+      "source_commits": [
+        "7131e4375048a0e408a8fb404b5f499d726b695b"
+      ],
       "task": "build-pmars"
     },
     {
@@ -291,6 +333,9 @@
       },
       "gaps": [],
       "source_commit": "7131e4375048a0e408a8fb404b5f499d726b695b",
+      "source_commits": [
+        "7131e4375048a0e408a8fb404b5f499d726b695b"
+      ],
       "task": "overfull-hbox"
     },
     {
@@ -300,6 +345,9 @@
       },
       "gaps": [],
       "source_commit": "7131e4375048a0e408a8fb404b5f499d726b695b",
+      "source_commits": [
+        "7131e4375048a0e408a8fb404b5f499d726b695b"
+      ],
       "task": "sparql-university"
     },
     {
@@ -309,6 +357,9 @@
       },
       "gaps": [],
       "source_commit": "7131e4375048a0e408a8fb404b5f499d726b695b",
+      "source_commits": [
+        "7131e4375048a0e408a8fb404b5f499d726b695b"
+      ],
       "task": "largest-eigenval"
     },
     {
@@ -329,6 +380,9 @@
         }
       ],
       "source_commit": "7131e4375048a0e408a8fb404b5f499d726b695b",
+      "source_commits": [
+        "7131e4375048a0e408a8fb404b5f499d726b695b"
+      ],
       "task": "make-doom-for-mips"
     },
     {
@@ -349,6 +403,9 @@
         }
       ],
       "source_commit": "7131e4375048a0e408a8fb404b5f499d726b695b",
+      "source_commits": [
+        "7131e4375048a0e408a8fb404b5f499d726b695b"
+      ],
       "task": "extract-moves-from-video"
     },
     {
@@ -358,6 +415,9 @@
       },
       "gaps": [],
       "source_commit": "7131e4375048a0e408a8fb404b5f499d726b695b",
+      "source_commits": [
+        "7131e4375048a0e408a8fb404b5f499d726b695b"
+      ],
       "task": "llm-inference-batching-scheduler"
     },
     {
@@ -387,6 +447,9 @@
         }
       ],
       "source_commit": "7131e4375048a0e408a8fb404b5f499d726b695b",
+      "source_commits": [
+        "7131e4375048a0e408a8fb404b5f499d726b695b"
+      ],
       "task": "merge-diff-arc-agi-task"
     },
     {
@@ -396,6 +459,9 @@
       },
       "gaps": [],
       "source_commit": "7131e4375048a0e408a8fb404b5f499d726b695b",
+      "source_commits": [
+        "7131e4375048a0e408a8fb404b5f499d726b695b"
+      ],
       "task": "tune-mjcf"
     },
     {
@@ -416,6 +482,9 @@
         }
       ],
       "source_commit": "7131e4375048a0e408a8fb404b5f499d726b695b",
+      "source_commits": [
+        "7131e4375048a0e408a8fb404b5f499d726b695b"
+      ],
       "task": "build-pov-ray"
     },
     {
@@ -436,27 +505,22 @@
         }
       ],
       "source_commit": "7131e4375048a0e408a8fb404b5f499d726b695b",
+      "source_commits": [
+        "7131e4375048a0e408a8fb404b5f499d726b695b"
+      ],
       "task": "adaptive-rejection-sampler"
     },
     {
-      "complete_exact": false,
+      "complete_exact": true,
       "counts": {
-        "exact_match": 10,
-        "mismatch": 1
+        "exact_match": 11
       },
-      "gaps": [
-        {
-          "bytes": 2712,
-          "expected_sha256": "57e4904177acac5807b51f7c32444bde1968ba0445855fa4333d9eb73865b59e",
-          "file": "tests/test_outputs.py",
-          "observed_sha256": "8b3c1094b4628f80fc402c867c21ab5a373f529ad5ae54e49a0a8ac3eb7aae5d",
-          "source_commit": "7131e4375048a0e408a8fb404b5f499d726b695b",
-          "status": "mismatch",
-          "task": "sanitize-git-repo",
-          "url": "https://raw.githubusercontent.com/harbor-framework/terminal-bench-2-1/7131e4375048a0e408a8fb404b5f499d726b695b/tasks/sanitize-git-repo/tests/test_outputs.py"
-        }
-      ],
+      "gaps": [],
       "source_commit": "7131e4375048a0e408a8fb404b5f499d726b695b",
+      "source_commits": [
+        "3dbbcbbedc34919bd044f5780a87b00eb99b2b35",
+        "7131e4375048a0e408a8fb404b5f499d726b695b"
+      ],
       "task": "sanitize-git-repo"
     },
     {
@@ -466,6 +530,9 @@
       },
       "gaps": [],
       "source_commit": "7131e4375048a0e408a8fb404b5f499d726b695b",
+      "source_commits": [
+        "7131e4375048a0e408a8fb404b5f499d726b695b"
+      ],
       "task": "regex-log"
     },
     {
@@ -495,6 +562,9 @@
         }
       ],
       "source_commit": "7131e4375048a0e408a8fb404b5f499d726b695b",
+      "source_commits": [
+        "7131e4375048a0e408a8fb404b5f499d726b695b"
+      ],
       "task": "pytorch-model-cli"
     },
     {
@@ -515,6 +585,9 @@
         }
       ],
       "source_commit": "7131e4375048a0e408a8fb404b5f499d726b695b",
+      "source_commits": [
+        "7131e4375048a0e408a8fb404b5f499d726b695b"
+      ],
       "task": "code-from-image"
     }
   ]

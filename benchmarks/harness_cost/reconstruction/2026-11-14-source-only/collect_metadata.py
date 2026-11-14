@@ -3,6 +3,7 @@
 An npm integrity or PyPI artifact hash pins an available distribution, not its
 transitive installation closure or the deleted historical installation.
 """
+import argparse
 import datetime
 import hashlib
 import json
@@ -32,20 +33,43 @@ SOURCES = {
     'opencode-npm': 'https://registry.npmjs.org/opencode-ai/2.0.27',
     'sanitize-file-history': 'https://api.github.com/repos/harbor-framework/terminal-bench-2-1/commits?path=tasks/sanitize-git-repo/tests/test_outputs.py&per_page=5',
     'task-license': 'https://raw.githubusercontent.com/harbor-framework/terminal-bench-2-1/7131e4375048a0e408a8fb404b5f499d726b695b/LICENSE',
+    'opencode-npm-correct': 'https://registry.npmjs.org/@opencode%2fcli/2.0.27',
+    'opencode-linux-x64': 'https://registry.npmjs.org/@opencode%2fcli-linux-x64/2.0.27',
+    'opencode-cli-package': 'https://raw.githubusercontent.com/anomalyco/opencode/1f4d07a4a519185955ae8ab2ea3607805509e386/packages/cli/package.json',
+    'opencode-install': 'https://raw.githubusercontent.com/anomalyco/opencode/1f4d07a4a519185955ae8ab2ea3607805509e386/install',
 }
 
 
+def metadata_sources():
+    sources = dict(SOURCES)
+    bindings = HERE / 'image-bindings.json'
+    if bindings.exists():
+        for row in json.loads(bindings.read_text())['observations']:
+            sources['image-' + row['task']] = row['source_metadata_url']
+    return sources
+
+
 def main():
+    sources = metadata_sources()
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--only', nargs='+', choices=sorted(sources), help='Collect only selected sources; preserve earlier receipts')
+    args = parser.parse_args()
     rows = []
-    for name, url in SOURCES.items():
-        row = {'name': name, 'url': url}
+    for name in args.only or sources:
+        url = sources[name]
+        row = {'name': name, 'url': url, 'recorded_at': datetime.datetime.now(datetime.UTC).isoformat()}
         try:
             with urllib.request.urlopen(url, timeout=30) as response:
                 data = response.read(4_000_001)
             if len(data) > 4_000_000:
                 raise ValueError('metadata exceeds collection bound')
             digest = hashlib.sha256(data).hexdigest()
-            dest = HERE / 'metadata' / (name + '-' + digest + ('.txt' if name == 'task-license' else '.toml' if name.endswith('pyproject') else '.lock' if name.endswith('uv-lock') else '.json'))
+            try:
+                json.loads(data)
+                suffix = '.json'
+            except ValueError:
+                suffix = '.toml' if name.endswith('pyproject') else '.lock' if name.endswith('uv-lock') else '.txt'
+            dest = HERE / 'metadata' / (name + '-' + digest + suffix)
             dest.parent.mkdir(exist_ok=True)
             if not dest.exists():
                 with dest.open('xb') as out:

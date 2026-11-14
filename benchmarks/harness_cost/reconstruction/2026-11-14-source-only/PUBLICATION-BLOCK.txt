@@ -1,0 +1,16 @@
+Observed publication failure, 2026-11-14; redacted excerpt, no token value or bypass URL retained.
+Command: git push origin bench/reconstruct-20261114
+Exit: 1
+Rejected local commit: a29167953f7f078d01bcebf092a9a43b4aaa69d3
+Remote error: GH013: Repository rule violations found
+Remote control: GITHUB PUSH PROTECTION; Push cannot contain secrets
+Reported family: Hugging Face User Access Token
+Reported source: payloads/sanitize-git-repo/tests/test_outputs.py:12
+
+Disposition: do not bypass repository protection. The exact prereg-matching
+public synthetic fixture stays at the same local worktree path and is excluded
+from publication with a precise .gitignore entry. local-only-inputs.json records
+its immutable source, expected hash, lifetime and explicit non-publication state.
+The unpublished commit is amended to remove raw bytes from its published history;
+remote source metadata and receipts do not contain the flagged value.
+No altered/normalized source is substituted or described as exact recovery.

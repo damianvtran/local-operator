@@ -1,0 +1,4 @@
+# Exact upstream public canary bytes are retained locally, not published: GitHub
+# push protection flags a Hugging Face-shaped synthetic fixture token. Never
+# bypass that control or normalize the file and call it exact reconstruction.
+/payloads/sanitize-git-repo/tests/test_outputs.py

@@ -1,0 +1,36 @@
+{
+  "admission": {
+    "benchmark_task_images_retained_at_once": 1,
+    "disk_desk_session": "00e6a1cd8f62",
+    "local_only": true,
+    "memory_go_required": true,
+    "minimum_free_gib": 30,
+    "minimum_gate_is_not_sufficient_peak_proof": true
+  },
+  "compressed_30_entry_metadata_sum_bytes": 2421466837,
+  "largest_single_compressed_metadata_bytes": 202928151,
+  "measured_runtime_peak": null,
+  "resource_maxima": {
+    "cpus": 2,
+    "gpus": 0,
+    "memory_mb": 8192,
+    "storage_mb": 10240
+  },
+  "serial_assumptions_decimal_gb": {
+    "active_writable_allowance": 10.24,
+    "baseline_plus_writable": 35.24,
+    "compressed_active_image": 0.202928151,
+    "expanded_active_image_4x": 0.811712604,
+    "logs_outputs": 10,
+    "rounded_planning_baseline": 25,
+    "shared_toolchain_cache": 10,
+    "unrounded_total": 21.014640755
+  },
+  "source": "exact-bound payloads/*/task.toml and retained/new public image metadata",
+  "unknown_extra_storage": [
+    "Docker VM allocation/overhead",
+    "build intermediate layers/cache",
+    "optional weights/model artifacts",
+    "actual image expansion"
+  ]
+}

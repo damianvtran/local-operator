@@ -26,7 +26,7 @@
 | tune-mjcf | 10 | 0 | 0 | True |
 | build-pov-ray | 8 | 0 | 1 | False |
 | adaptive-rejection-sampler | 7 | 0 | 1 | False |
-| sanitize-git-repo | 10 | 1 | 0 | False |
+| sanitize-git-repo | 11 | 0 | 0 | True |
 | regex-log | 7 | 0 | 0 | True |
 | pytorch-model-cli | 12 | 0 | 2 | False |
 | code-from-image | 7 | 0 | 1 | False |

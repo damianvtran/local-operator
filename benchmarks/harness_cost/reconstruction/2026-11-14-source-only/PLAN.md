@@ -26,24 +26,38 @@ All new evidence uses this campaign ID, never historical run IDs.
 
 ## One proposal for Aida
 
-Proceed only as a **new, source-reconstructed campaign**, after resolving the
-listed gaps; do not attempt to resume the deleted run. Keep this draft unfrozen
+Proceed only as a **new, LOCAL-only, source-reconstructed campaign**, after
+resolving the listed gaps; do not attempt to resume the deleted run. Remote build
+or execution is not proposed or authorized. Retain **ONE benchmark task image at
+a time**, run its seven arms serially, and release that campaign-owned image under
+explicit disk-owner lifecycle authorization before admitting the next. Never
+prune shared images or another session's data. No image collection starts now. Keep this draft unfrozen
 until the new environment passes requalification. The source-only work is useful
-even if the full benchmark is deferred: 380/407 bound payload files are exact,
-19/28 tasks have every bound file restored, and all 37 retained source/closure
-bindings match. `TASK-MATRIX.md` and `task-matrix.json` give every task and gap.
+even if the full benchmark is deferred: 381/407 bound payload files are exact,
+20/28 tasks have every bound file restored locally, and all 37 retained source/
+closure bindings match. Publication retains 380 payload files: the additional
+exact sanitize verifier is LOCAL-ONLY because GitHub push protection flags its
+public synthetic Hugging Face canary. It remains at the same worktree path with
+its expected hash in local-only-inputs.json; no bypass or byte substitution.
+Fresh checkouts must reacquire that public local-only input before full local
+verification. The campaign remains unqualified. `TASK-MATRIX.md` and `task-matrix.json` give every task and gap.
 
 ### Requalification, gated order
 
 1. Review this proposal and authorize the exact next phase; coordinate durable
    raw-input/build/output roots with the parent and disk owner before collection.
-   Finish missing source/data/license review; resolve the single mismatching
-   sanitize-git-repo file or declare a prospective task amendment (never silently
-   substitute). Reconstruct missing image identities from independently verified
-   public manifests, not mutable tags. Do not infer DEV payload hashes.
+   Finish missing data/license review. The sanitize-git-repo verifier is now
+   recovered exactly from an immutable upstream2 ancestor, without substitution.
+   Nine freshly observed public registry rows now include all seven previously
+   missing image digests, explicitly NOT recovered historical receipts. Acquire
+   only by frozen content digest after review; never trust a tag to stay fixed.
+   Do not infer DEV payload hashes.
 2. Resolve all UNPINNED rows in BUILD-RECIPES.md; independently review the new
    dependency locks. Select exact host/Linux interpreters, OS/toolchain and build
    tools. A different lock is a new environment, not restored historical bytes.
+   Local build admission additionally requires disk desk session 00e6a1cd8f62 to
+   confirm >=30 GiB free AND a fresh memory GO. This is a necessary admission
+   floor, not sufficient proof of the working-set estimate or unknown overhead.
 3. Separately authorized build-only lane: one shared dependency/toolchain tree,
    compiled-source provenance and full per-file/runtime manifests. No model keys
    or external model traffic. Setup failure stops the lane, not paid fallback.
@@ -61,6 +75,10 @@ bindings match. `TASK-MATRIX.md` and `task-matrix.json` give every task and gap.
    old spend reconciliation and explicit paid authorization may paid trials begin.
    Retain historical ordering and 28 x 7 = 196 design only if requalification and
    model/price availability support it; otherwise preregister a visible amendment.
+   The historical driver is already task-major then harness-major (driver.py
+   loops at lines 1375/1399): one-image serial retention does NOT justify changing
+   task order or arm order. Any later scheduling change needs a visible prospective
+   amendment before model outcomes; do not quietly reorder to fit resources.
 
 ### Time and disk envelope (planning assumptions, not measurements)
 
@@ -79,16 +97,51 @@ runtime distribution survives, so this is not a performance forecast. Native
 attempt budget remains 3 failed/cancelled attempts or 6 hours per costly lane,
 then escalate; do not spend the full envelope retrying a broken setup.
 
-Surviving subset metadata records **1,753,275,201 compressed bytes** for 21
-images, max **190,685,882 bytes**; this is metadata, not a current registry check.
-Assuming each of nine missing entries still meets the historical 1,000,000,000
-byte selection cap, compressed total <=10,753,275,201 bytes. Assuming 4x expanded
-image storage +10 GB shared toolchains/build cache +10 GB logs/output, reserve
-**about 75 GB incremental** (10.754 + 43.014 + 10 + 10 = 73.768 decimal GB,
-rounded upward). This is a planning envelope, not a measured or hard disk bound;
-layer sharing can reduce it and expansion/model artifacts can exceed it. Verify
-actual free space with the disk owner and preflight each build/pull. Do not count
-APFS logical du sums as physical usage; no automatic cleanup of other sessions.
+**Primary required policy: LOCAL, serial, ONE benchmark task image retained.**
+The 21 surviving size rows plus nine new public registry observations sum to
+**2,421,466,837 compressed bytes**; largest single tag reports **202,928,151 bytes**.
+These are metadata observations, not a measured local peak or expansion bound.
+Under an explicit 4x expansion assumption, one image costs 0.202928151 +
+0.811712604 decimal GB; add assumed 10 GB shared toolchain/build cache and 10 GB
+logs/output: **21.014640755 GB**, rounded upward to a **25 GB planning baseline**.
+The largest task storage allowance is 10,240 MB; treating that as an additional
+10.24 decimal GB yields **35.24 GB including an active writable task allowance**.
+This is NOT a hard bound. Docker VM allocation/overhead, intermediate build layers,
+actual expansion, optional model weights and host overhead remain unknown; the
+>=30 GiB admission floor alone does not prove those fit. `planning-metadata.json`
+records the arithmetic and sources. Obtain disk-desk admission and memory GO
+before any heavy work, and preflight actual free space for each image transition.
+
+The largest-RAM task (`torch-pipeline-parallelism/task.toml`) requests 1 CPU,
+8,192 MB RAM, 10,240 MB storage and no GPU. Across restored task configurations,
+`overfull-hbox` requests 2 CPUs; host/services/VM memory is additional and unknown.
+Do not call the task's RAM allowance a measured process-tree peak or host budget.
+
+The old **75 GB** figure was a loose **all-images-retained** planning envelope
+using nine unknown images each assumed <=1 GB, 4x expansion and 20 GB tooling/logs.
+It is retained only as historical planning context: it is NOT the required serial
+working set and NOT authorization to retain all images. Do not count APFS logical
+`du` sums as physical usage or automatically clean another session's storage.
+
+### Objective eligibility and amendment rule — freeze before model outcomes
+
+Before any model outcome is observed, freeze the task/arm matrix, source/data
+hashes, licensing/admissibility decision, exact version and platform availability,
+configuration comparability, resource fit, oracle validity, contamination policy,
+egress and metering criteria. Apply those criteria symmetrically to every arm.
+A task or artifact is blocked only by a recorded objective failed prerequisite,
+not by expected difficulty, observed success, relative performance or cost outcome.
+
+Retain all 28 held-out tasks and the declared ordering by default. If a missing
+artifact/licence cannot be cleared, propose a version/task amendment with the
+specific failed criterion, comparable replacement rationale, all affected arms
+and changed estimand; independently review it BEFORE freeze/model dispatch.
+Missing OpenCode historical runtime identity is a prerequisite gap, not grounds
+to silently substitute another implementation with the same version string.
+If a new problem appears after outcomes, preserve every outcome and blocked row;
+stop the affected work and preregister a new campaign/amendment prospectively.
+Never retroactively exclude poor outcomes or optimize the eligible sample against
+model results. No outcome-conditioned exclusions or amendments are permitted.
 
 ### Hard spend rule
 
@@ -102,7 +155,12 @@ must be checked only in the separately authorized qualification phase.
 
 ### Durable receipts and lifetime
 
-Everything in this directory is committed public source or public metadata.
+Published content in this directory is public source or public metadata.
+One exact upstream verifier is retained LOCAL-ONLY under a precise .gitignore
+entry after remote push protection rejected its public synthetic canary; see
+local-only-inputs.json and PUBLICATION-BLOCK.txt. It is not private operator data,
+but it is NOT included in git or the published SHA256SUMS. Its exact hash and
+immutable acquisition URL remain in source receipts/local-only-inputs.json.
 `source-receipt-*.jsonl` and `metadata-receipt-*.jsonl` are exclusive-created
 observation manifests: append a new file for another collection; never rewrite
 an earlier receipt. `SHA256SUMS` binds retained files; git binds the collection.

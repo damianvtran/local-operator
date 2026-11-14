@@ -17,13 +17,25 @@ HERE = Path(__file__).resolve().parent
 PREREG = HERE.parents[1] / 'experimental/PREREGISTRATION-HEADLINE-2026-11-09-v2.json'
 REVISION = '7131e4375048a0e408a8fb404b5f499d726b695b'
 BASE = f'https://raw.githubusercontent.com/harbor-framework/terminal-bench-2-1/{REVISION}'
+# TB2.1 rewrote public FAKE_* string literals without changing semantics. The
+# immutable TB2 ancestor, not a locally reconstructed substitution, matches the
+# historical preregistered bytes exactly for this one verifier source file.
+SOURCE_OVERRIDES = {
+    ('sanitize-git-repo', 'tests/test_outputs.py'): (
+        '3dbbcbbedc34919bd044f5780a87b00eb99b2b35',
+        'https://raw.githubusercontent.com/harbor-framework/terminal-bench-2/3dbbcbbedc34919bd044f5780a87b00eb99b2b35/sanitize-git-repo/tests/test_outputs.py',
+    ),
+}
 TEXT_SUFFIXES = {'.md', '.toml', '.py', '.sh', '.txt', '.json', '.yaml', '.yml', '.scm', '.red', '.ttl', '.xml', '.c', '.h', '.cpp', '.js', '.ts', '.csv', '.tex', '.v', '.sv', '.s', '.asm', '.html', '.css', '.sql', '.patch', '.diff', '.cfg', '.ini', '.conf', '.log', '.fasta', '.pov', '.jsonl'}
 
 
 def recover(item):
     task, name, expected = item
+    revision, url = SOURCE_OVERRIDES.get((task, name), (REVISION, f'{BASE}/tasks/{task}/{name}'))
     row = {'task': task, 'file': name, 'expected_sha256': expected,
-           'source_commit': REVISION, 'url': f'{BASE}/tasks/{task}/{name}'}
+           'source_commit': revision, 'url': url}
+    if (task, name) in SOURCE_OVERRIDES:
+        row['publication'] = 'local-only: remote push protection; exact bytes excluded from git'
     path = Path(name)
     if path.is_absolute() or '..' in path.parts:
         raise ValueError('unsafe preregistration path')

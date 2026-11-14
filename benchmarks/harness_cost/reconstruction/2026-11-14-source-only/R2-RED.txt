@@ -1,0 +1,16 @@
+test_tampered_per_task_complete_and_gaps_are_rejected (test_reconstruction.ReconstructionTests.test_tampered_per_task_complete_and_gaps_are_rejected) ... FAIL
+
+======================================================================
+FAIL: test_tampered_per_task_complete_and_gaps_are_rejected (test_reconstruction.ReconstructionTests.test_tampered_per_task_complete_and_gaps_are_rejected)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "~/local-operator/.worktrees/benchmark-reconstruction-20261114/benchmarks/harness_cost/reconstruction/2026-11-14-source-only/test_reconstruction.py", line 71, in test_tampered_per_task_complete_and_gaps_are_rejected
+    self.assertTrue(status, output.getvalue())
+    ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: False is not true : {"errors": [], "file_statuses": {"exact_match": 380, "mismatch": 1, "not_downloaded_non_source": 26}, "historical_checks": 37, "kind": "static-source-verification", "metadata_receipt_rows_checked": 22, "privacy_pattern_hits": [], "runtime_qualified": false}
+
+
+----------------------------------------------------------------------
+Ran 1 test in 0.959s
+
+FAILED (failures=1)

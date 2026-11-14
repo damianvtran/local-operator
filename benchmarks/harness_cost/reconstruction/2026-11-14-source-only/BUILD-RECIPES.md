@@ -1,6 +1,9 @@
 # Source-only build recipes — DRAFT, execution blocked
 
-These recipes describe a **new** qualification environment. They cannot reproduce
+These recipes describe a **new LOCAL-only** qualification environment. Retain
+ONE benchmark task image at a time; obtain disk-desk >=30 GiB free admission and
+memory GO before heavy work. The PLAN's serial working-set assumptions, not the
+old all-images 75 GB envelope, govern scheduling. They cannot reproduce
 lost runtime bytes. No recipe here has been built or installed. A complete,
 platform-selected runtime lock is still a prerequisite for dispatch.
 
@@ -60,7 +63,7 @@ not a complete install lock. Fetching package metadata did not download binaries
 | dsh | 0.2.0-rc.2 | npm artifact SRI | transitive dependency closure; original installed tree |
 | local-operator | 500883ef56ca504325ffd80c5b90bf2435d00e3f, v0.94.22 | exact public pyproject bytes | upstream uv.lock 404; runtime and build dependency closures |
 | hermes | f0d94882e89ab8d4098b5bb2f166adfb9ee0a0ab, v0.22.6 | exact pyproject and uv.lock | target extras/platform selection, Python/build tools, runtime attestation |
-| opencode | 2.0.27 | no exact release artifact found | v-prefixed/unprefixed GitHub release + npm version returned 404; source revision unknown |
+| opencode | 2.0.27 | correct scoped @opencode/cli + @opencode/cli-linux-x64 SRI; tag/source 1f4d07a4a519185955ae8ab2ea3607805509e386 | original installed bytes/runtime identity and target CPU qualification unverified; older guessed release/npm paths 404 |
 
 Future separately authorized build sequence (NOT executed):
 
@@ -70,7 +73,13 @@ Future separately authorized build sequence (NOT executed):
 2. Resolve/lock missing dependency closures in an approved build lane. Keep
    historical version identity, but new lock bytes get new qualification identity.
    Freeze all OS packages and postinstall downloads. Do not silently replace the
-   missing OpenCode artifact with another version or Go implementation.
+   OpenCode runtime with another implementation merely sharing its version.
+   Immutable upstream install instructions name @opencode/cli, not opencode-ai;
+   its source package declares 2.0.27. The historical adapter comment calls the
+   deleted arm a Go binary, while this newly inspected source tree has no Go
+   files. The versioned public artifact/source candidate is pinned, but that
+   discrepancy is an explicit pre-freeze identity/review gate, NOT proof it is
+   the historical binary. No package bytes were downloaded or executed.
 3. Obtain the pinned public source/distribution artifacts using the metadata
    hashes, verify them *before* extraction, disable lifecycle hooks until reviewed.
    Build LoP at its exact revision and Hermes using its exact source/lock. Treat
@@ -86,6 +95,25 @@ This recipe is intentionally **not buildable yet**: unresolved inputs must not
 be replaced with guesses. A Dockerfile with moving defaults would falsely imply
 reproducibility; this document and partial locks expose the exact blockers instead.
 
+## Prospective identity amendment — proposed, NOT approved/frozen
+
+A1: retain declared OpenCode version 2.0.27, but prospectively name the public
+`@opencode/cli` wrapper and `@opencode/cli-linux-x64` artifact SRI recorded in
+`distribution-pins.partial.json`, with source candidate
+`1f4d07a4a519185955ae8ab2ea3607805509e386`. The original installed tree is gone;
+public source/version metadata is not byte-equivalence evidence. Independent
+review must settle the Go-versus-current-source discrepancy and future real CLI
+compatibility/CPU/platform checks before accepting this candidate. This proposal
+is based only on provenance availability, never observed model performance. If
+it is a different implementation, do not relabel it historical: require an explicit
+new-campaign artifact/estimand amendment and review before freeze, or stop the row.
+
+No task replacement/exclusion is proposed: all 26 uncollected inputs have public
+immutable blob metadata, so irretrievability has not been established. Licensing
+and exact-byte qualification remain gates. Any genuinely unavailable task input
+must get a specifically justified prospective amendment under PLAN's symmetric
+criteria before model outcomes; no arbitrary replacement is authorized here.
+
 ## Task data and unresolved historical artifacts
 
 `task-matrix.json` is authoritative per-file status at public source commit
@@ -93,18 +121,40 @@ reproducibility; this document and partial locks expose the exact blockers inste
 candidate, not proof of the original dataset checkout revision (that revision is
 missing). Per-file prereg hashes, not a moving upstream name, establish exact
 recovered byte identity. All downloaded task bytes must match
-prereg SHA256 before retention. 380/407 match; 26 binaries/media/archives were
-not collected under this source-only authorization, and one source file differs.
+prereg SHA256 before retention. 381/407 match; 26 binaries/media/archives were
+not collected under this source-only authorization. Twenty tasks are fully exact.
 
-* `sanitize-git-repo/tests/test_outputs.py`: public hash differs from prereg;
-  not retained as recovered. Narrow upstream history query found only the task
-  directory-move commit; no broad history hunt or local patch reconstruction.
+* `sanitize-git-repo/tests/test_outputs.py`: EXACT recovery from immutable
+  `harbor-framework/terminal-bench-2` commit
+  `3dbbcbbedc34919bd044f5780a87b00eb99b2b35`, SHA256
+  `57e4904177acac5807b51f7c32444bde1968ba0445855fa4333d9eb73865b59e`.
+  TB2.1 split the public FAKE_* credential string literals; the immutable upstream2
+  file independently matches prereg bytes. No local substitution was retained.
+  The verifier classifies only this exact path+digest and the expected synthetic
+  AWS/GitHub/Hugging Face pattern families as public canaries. Any changed byte or new family
+  fails privacy checks; operator credentials are never exempted.
+  GitHub push protection nevertheless rejects the Hugging Face-shaped fixture.
+  No bypass was attempted: exact bytes stay LOCAL-ONLY at the same worktree path,
+  excluded from publication via precise .gitignore. Published source recovery is
+  380 files; local exact recovery is 381. local-only-inputs.json binds the retained
+  bytes; fresh clones must reacquire that explicit input before full verification.
 * Non-source inputs: exact file names/expected hashes in `task-matrix.json`.
-  These are not declared irretrievable: they are uncollected. No container image,
-  image/media fixture, encrypted archive, model weights or Git bundle downloaded.
+  These are not declared irretrievable: they are uncollected. The static Git-tree
+  acquisition inventory (`non-source-acquisition.json`) records 26 blobs totaling
+  16,777,897 bytes, immutable source URLs, Git blob SHA1 and expected prereg SHA256.
+  SHA256 has NOT been checked without acquiring bytes. The observed repository
+  Apache-2.0 license does not independently clear third-party/media rights; no
+  per-file clearance is invented. The video README names an external YouTube
+  source; acquisition/licensing must be reviewed before collection.
+  No container image, media fixture, encrypted archive, model weights or Git
+  bundle was downloaded.
 * Frozen 30-task subset bytes: missing; surviving 21-row file hash differs.
-  `derived-subset.json` reconstructs selection, labels missing metadata; seven
-  image digests remain missing. DEV payload hashes are not bound in this prereg.
+  `derived-subset.json` reconstructs selection and labels missing historical
+  metadata. All seven missing digest candidates are now NEW public registry
+  observations (`image-bindings.json`), not recovered historical receipts. Nine
+  new size observations plus two historical digest/size controls are retained;
+  both controls match. Use content digests for future acquisition; tag mappings
+  may move. DEV payload hashes are not bound in this prereg.
 * Frozen builder, runtime, oracle, toolwire, catalog/prereg-tools and original
   S4/pre-inference receipts: only historical digests/claims survive, not bytes.
 * Original seven trial ledger/outcomes, streams, cost receipts and price-card
