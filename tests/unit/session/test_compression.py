@@ -643,6 +643,15 @@ def _load_compression_isolated(
     if not stdlib:
         monkeypatch.setitem(sys.modules, "compression.zstd", None)
     if backport is None:
+        # Blocking ``backports.zstd`` alone is not enough: where the real
+        # backport is installed (CI's 3.13 leg) the ``backports`` package is
+        # already imported with a ``zstd`` attribute, and ``from backports
+        # import zstd`` takes that attribute before consulting sys.modules.
+        # An empty stand-in package (no ``zstd`` attribute, nothing on
+        # ``__path__``) makes the import raise ImportError on any interpreter.
+        empty = types.ModuleType("backports")
+        empty.__path__ = []  # type: ignore[attr-defined]
+        monkeypatch.setitem(sys.modules, "backports", empty)
         monkeypatch.setitem(sys.modules, "backports.zstd", None)
     else:
         package = types.ModuleType("backports")
