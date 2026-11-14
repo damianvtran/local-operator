@@ -161,7 +161,11 @@ async def amain(port: int = DEFAULT_PORT) -> int:
 
 def main(port: int = DEFAULT_PORT) -> int:
     try:
-        return asyncio.run(amain(port))
+        # The backoff loop: at the descriptor limit the stdlib accept path spins
+        # a core and floods the log (see `mobile/accept_backoff.py`).
+        from local_operator.mobile.accept_backoff import loop_factory
+
+        return asyncio.run(amain(port), loop_factory=loop_factory)
     except KeyboardInterrupt:
         return 0
 
