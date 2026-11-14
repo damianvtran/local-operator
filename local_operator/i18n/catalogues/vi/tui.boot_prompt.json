@@ -1,0 +1,4 @@
+{
+  "tui.boot_prompt.returned_to_composer": "Prompt khởi động của bạn chưa được gửi — prompt đang nằm trong khung soạn thảo.",
+  "tui.boot_prompt.not_sent_kept_draft": "Prompt khởi động của bạn chưa được gửi: {prompt}"
+}

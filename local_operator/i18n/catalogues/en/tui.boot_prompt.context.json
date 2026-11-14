@@ -1,0 +1,12 @@
+{
+  "tui.boot_prompt.returned_to_composer": {
+    "role": "notice",
+    "tone": "warning",
+    "note": "One transcript notice shown when the TUI was still starting and the user opened another conversation (/resume or the sidebar) before the startup finished. The prompt the startup would have sent (a /fork opening message or an /aida request) was NOT sent; it has been placed, unsent, in the message box (the composer) so the user can edit and send it. Reassuring, not alarming: nothing ran, nothing was lost."
+  },
+  "tui.boot_prompt.not_sent_kept_draft": {
+    "role": "notice",
+    "tone": "warning",
+    "note": "Same situation as tui.boot_prompt.returned_to_composer, but the message box already held the user's own draft, so it was left untouched. {prompt} is the user's verbatim startup prompt text (possibly truncated with an ellipsis), never translated; this notice is its only remaining copy, so it must follow the colon intact."
+  }
+}
