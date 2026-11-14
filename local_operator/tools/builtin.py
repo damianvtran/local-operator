@@ -26430,10 +26430,75 @@ async def _bridge_access(
     notify = _notify_channel(context)
     delegated = _delegated_here(context)
     if action == "request_access":
+        from local_operator.browser_bridge.preview_origin import (
+            fixed_origin_instruction,
+            pin_quick_tunnel,
+            quick_tunnel_origin,
+        )
+
+        instruction = ""
+        pinned_origin = ""
+        quick_origin = quick_tunnel_origin(url)
+        if quick_origin is not None:
+            # Pin BEFORE the RPC: the remote host may notify the operator as soon
+            # as it receives a request. Host-owned durable ancestry, never args,
+            # binds manager, children and siblings even across runtime restarts.
+            host_name, requested_origin = quick_origin
+            try:
+                if context is None or not context.session_id:
+                    raise ValueError("missing session identity")
+                directory = (
+                    Path(context.session_dir)
+                    if context.session_dir
+                    else config_dir() / "sessions" / context.session_id
+                )
+                pin = await asyncio.to_thread(
+                    pin_quick_tunnel,
+                    directory,
+                    host_name,
+                    requested_origin,
+                    context.ancestor_session_ids,
+                )
+            except (OSError, ValueError):
+                return _error(
+                    # i18n: ignore model-facing tool recovery instruction
+                    tool_call_id,
+                    "browser",
+                    f"Refused preview origin {requested_origin}. No new approval request "
+                    "was sent; this attempt did not notify the user. Do not await this "
+                    "attempt. The durable session-family pin could not be verified. Reuse "
+                    "one fixed localhost port or stable preview URL; existing site "
+                    "approvals still apply. Do not mint another quick-tunnel host.",
+                    details={
+                        "code": "preview_origin_unavailable",
+                        "state": "refused",
+                        "approval_request_sent": False,
+                    },
+                )
+            pinned_origin = pin.origin
+            instruction = fixed_origin_instruction(pinned_origin)
+            if not pin.allowed:
+                return _error(
+                    # i18n: ignore model-facing local approval outcome and recovery policy
+                    tool_call_id,
+                    "browser",
+                    f"Refused preview origin {requested_origin}. No new approval request "
+                    "was sent; this attempt did not notify the user. Do not await this "
+                    f"attempt.\n\n{instruction}",
+                    details={
+                        "code": "preview_origin_changed",
+                        "approval_request_sent": False,
+                        "state": "refused",
+                        "origin": requested_origin,
+                        "pinned_origin": pin.origin,
+                    },
+                )
         result, problem = await _bridge_call(
             tool_call_id, "request_access", {"url": url, **identity}, client=client
         )
         if problem is not None:
+            if instruction:
+                problem.content.append(TextContent(text=f"\n\n{instruction}"))
             return problem
         assert result is not None
         state_value = str(result.get("state", ""))
@@ -26450,6 +26515,11 @@ async def _bridge_access(
                 attached=_attached_here(context),
                 notify=notify,
                 delegated=delegated,
+            )
+            + (
+                f"\n\n{fixed_origin_instruction(pinned_origin, denied=state_value == 'denied')}"
+                if instruction
+                else ""
             ),
             details={
                 "origin": origin,
@@ -29600,7 +29670,13 @@ async def _execute_browser_owned(
                     resource.record.pop("pending_access_host", None)
                 if access_state == "pending":
                     resource.record["retention"] = "pending site approval"
-                elif access_state and resource.record.get("retention") == "pending site approval":
+                elif (
+                    access_state
+                    # A local preview-policy refusal did not send a new RPC and
+                    # cannot settle an older prompt's ownership obligation.
+                    and (result.details or {}).get("approval_request_sent") is not False
+                    and resource.record.get("retention") == "pending site approval"
+                ):
                     await resource.client().call("owner_release", resource.params())
                     resource.record["retention"] = ""
             return _browser_update_note(state, result)
