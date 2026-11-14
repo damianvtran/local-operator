@@ -398,7 +398,9 @@ def test_dismiss_all_from_a_pseudo_session_is_accepted(client, tmp_path: Path) -
     )
     assert response.status_code == 200, response.text
     assert response.json()["result"]["changed"] == [repair.item_id]
-    assert store.get(kept.item_id)["dismissed"] is False
+    kept_row = store.get(kept.item_id)
+    assert kept_row is not None
+    assert kept_row["dismissed"] is False
     preview = client.get(
         URL,
         headers=AUTH,
