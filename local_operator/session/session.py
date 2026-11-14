@@ -30729,6 +30729,9 @@ class Session:
             raw_rows, _counts = translate_monitor_cwds(
                 raw_rows,
                 session_cwd=os.path.abspath(self._cwd),
+                # This host's home, named here rather than defaulted inside the
+                # translator (cwd omission census).
+                home=os.path.expanduser("~"),
                 # A moved-in session's cwds may come from a device sharing this
                 # home path; only then is a missing path under home foreign.
                 moved=moved_in(self._transcript.directory),

@@ -50,7 +50,9 @@ class TestMonitorCwds:
         (home / "local-operator").mkdir(parents=True)
         monkeypatch.setenv("HOME", str(home))
         gone = str(home / "local-operator" / ".worktrees" / "gone-xyz")
-        rows, counts = carry.translate_monitor_cwds([{"cwd": gone}], session_cwd=str(tmp_path))
+        rows, counts = carry.translate_monitor_cwds(
+            [{"cwd": gone}], session_cwd=str(tmp_path), home=str(home)
+        )
         assert rows == [{"cwd": gone}]
         assert counts == {"translated": 0, "fallback": 0}
 
@@ -78,6 +80,38 @@ class TestMonitorCwds:
             home=str(home),
         )
         assert counts_again == {"translated": 0, "fallback": 0}
+
+    def test_an_empty_home_never_falls_back_to_the_process_home(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Cwd omission census: ``home`` is the caller's explicit destination home.
+
+        An empty one must not be replaced by the receiving process's own home —
+        here a HOME holding the very tail the foreign path names, so a silent
+        default WOULD map it — and must not re-arm the monitor at ``session_cwd``.
+        """
+        process_home = tmp_path / "process-home"
+        (process_home / "proj").mkdir(parents=True)
+        monkeypatch.setenv("HOME", str(process_home))
+        foreign = "/Users/nobody-here/proj"
+        assert carry.translate_host_path(foreign, home="") == ""
+        assert carry.translate_host_path("/Users/nobody-here", home="") == ""
+        rows, counts = carry.translate_monitor_cwds(
+            [{"cwd": foreign}], session_cwd=str(tmp_path), home="", moved=True
+        )
+        assert rows == [{"cwd": foreign}]
+        assert counts == {"translated": 0, "fallback": 0}
+        # Control: the same inputs WITH that home named do map, so the empty-home
+        # result above is the guard, not a path that could never map.
+        assert carry.translate_host_path(foreign, home=str(process_home)) == str(
+            process_home / "proj"
+        )
+
+    def test_home_is_a_required_argument(self) -> None:
+        with pytest.raises(TypeError):
+            carry.translate_host_path("/Users/nobody-here")  # type: ignore[call-arg]
+        with pytest.raises(TypeError):
+            carry.translate_monitor_cwds([], session_cwd="/")  # type: ignore[call-arg]
 
 
 # -- (b) projects ------------------------------------------------------------
@@ -732,12 +766,12 @@ class TestMovedInLiftsTheLocalHomeRule:
         monkeypatch.setenv("HOME", str(home))
         source_only = str(home / "src-only" / "proj")
         rows, counts = carry.translate_monitor_cwds(
-            [{"cwd": source_only}], session_cwd=str(tmp_path), moved=True
+            [{"cwd": source_only}], session_cwd=str(tmp_path), home=str(home), moved=True
         )
         assert rows == [{"cwd": str(home / "proj")}] and counts["translated"] == 1
         # Not moved: the same path is this host's own and is left to fail loudly.
         rows, counts = carry.translate_monitor_cwds(
-            [{"cwd": source_only}], session_cwd=str(tmp_path)
+            [{"cwd": source_only}], session_cwd=str(tmp_path), home=str(home)
         )
         assert rows == [{"cwd": source_only}] and counts == {"translated": 0, "fallback": 0}
 

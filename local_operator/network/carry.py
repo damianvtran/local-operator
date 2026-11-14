@@ -220,7 +220,7 @@ def _home_relative_tail(recorded: str) -> str:
     return ""
 
 
-def translate_host_path(recorded: str, *, home: str = "") -> str:
+def translate_host_path(recorded: str, *, home: str) -> str:
     """Map another host's absolute path onto THIS host, or ``""`` when it cannot.
 
     The same rule :func:`rewrite_host_cwd` applies to the marker, minus its
@@ -230,11 +230,18 @@ def translate_host_path(recorded: str, *, home: str = "") -> str:
     that IS the other device's home maps to this home (``/Users/damian`` →
     ``/home/ec2-user``, the 2026-11-13 move). Relative or empty input is returned
     unchanged: a relative cwd was resolved by its writer. Never raises.
+
+    ``home`` IS REQUIRED AND NEVER DEFAULTED (cwd omission census): it is the
+    DESTINATION home the caller resolved for this move. An eager fallback to the
+    process's own home would let a caller that lost the value silently map a
+    foreign path somewhere the move never chose; an empty ``home`` therefore
+    means "cannot map" (``""``) and the caller's own fallback decides.
     """
     value = str(recorded or "")
     if not value or not os.path.isabs(value) or os.path.exists(value):
         return value
-    home = home or os.path.expanduser("~")
+    if not home:
+        return ""
     parts = [part for part in value.split("/") if part]
     if len(parts) == 2 and parts[0] in ("home", "Users"):
         return home
@@ -257,7 +264,7 @@ def translate_monitor_cwds(
     specs: Sequence[Mapping[str, Any]],
     *,
     session_cwd: str,
-    home: str = "",
+    home: str,
     moved: bool = False,
 ) -> tuple[list[dict[str, Any]], dict[str, int]]:
     """Rewrite each carried monitor's ``cwd`` for THIS host.
@@ -286,10 +293,18 @@ def translate_monitor_cwds(
     carries :data:`MOVED_IN_KEY` — may hold a cwd from a device that shares this
     home path (two Macs at ``/Users/damian``), and that path is foreign even
     though it sits under this home.
+
+    ``home`` IS REQUIRED (cwd omission census): the caller names this host's home
+    explicitly. Without it neither "is this path local?" nor "where does it map?"
+    can be answered, so an empty ``home`` returns the rows UNCHANGED — a monitor
+    that keeps failing loudly — rather than guessing the process's home and
+    re-arming somewhere the move never chose.
     """
     rows: list[dict[str, Any]] = []
     counts = {"translated": 0, "fallback": 0}
-    raw_home = home or os.path.expanduser("~")
+    if not home:
+        return [dict(raw) for raw in specs], counts
+    raw_home = home
     # Both spellings: a symlinked home (macOS ``/var`` → ``/private/var``) must not
     # make this host's own path read as foreign.
     local_homes = {os.path.normpath(raw_home), os.path.realpath(raw_home)}
@@ -528,7 +543,9 @@ def rebuild_indexes(
         # The index names the cwd each check runs in; the transcript keeps the
         # source host's value (never edited — see ``rewrite_host_cwd``) and the
         # session re-applies this same translation when it loads the specs.
-        specs, cwd_counts = translate_monitor_cwds(specs, session_cwd=cwd, moved=True)
+        specs, cwd_counts = translate_monitor_cwds(
+            specs, session_cwd=cwd, home=os.path.expanduser("~"), moved=True
+        )
         if cwd_counts["translated"] or cwd_counts["fallback"]:
             report["monitor_cwds"] = cwd_counts
         rows = _monitor_index_rows(specs)
