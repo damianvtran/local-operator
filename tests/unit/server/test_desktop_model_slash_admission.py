@@ -105,7 +105,7 @@ def _facade(*, version: str, native: list[str] | None = None) -> Any:
             # raised (CI's fork e2e, round 1).
             raise KeyError(f"{name!r} is not a copy-free state field")
 
-        async def bind_runtime(self) -> None:
+        async def bind_runtime(self, *, deadline: float | None = None) -> None:
             # The route's explicit _ensure_bound; this shell is already bound.
             return None
 

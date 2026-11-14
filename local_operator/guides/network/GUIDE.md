@@ -458,7 +458,8 @@ never on an empty listing or a zero exit alone; the family's vocabulary is in
   a `lop network doctor --json` question, not a retry.
 - `session_unknown` — the device answered and holds no such conversation.
 - `session_unreachable` — the device accepted the act and its runtime then
-  stopped answering inside the time this verb allows; nothing here changed.
+  stopped answering inside the time this verb allows, or is running but too busy
+  to answer; nothing here changed, and the act was not delivered: retry.
 - `turn_not_running` — a `--steer` reached a session with no turn there to
   correct.
 - `stop_unreported` / `engage_unreported` / `create_unreported` /
@@ -669,8 +670,11 @@ acting on one (QA round 5, Q-R5-1):
   there".
 - `session_unreachable` — the peer accepted the act and then its runtime stopped
   answering WITHIN THE TIME THIS VERB ALLOWS: a bind that ran out of its own budget
-  (that runtime may be starting, or wedged), or the act as a whole running out of
-  `PILOT_ACT_TIMEOUT_S`. The peer's own sentence is carried verbatim, and nothing on
+  (that runtime may be starting, or wedged), the act as a whole running out of
+  `PILOT_ACT_TIMEOUT_S`, or a runtime that is ALIVE and too busy to answer (it
+  accepted the connection and did not produce its state in time, or said it could
+  not prepare it). The busy sentence says the act was not delivered and to retry;
+  it is not a link problem, so it does not point at `network doctor`. The peer's own sentence is carried verbatim, and nothing on
   this side changed. A dial that produced NO stream at all is `peer_unreachable` (or
   `relay_unavailable` with no local relay) even when the rung that noticed was the
   bind: the two codes answer "which side of the open died", not "which sentence did
