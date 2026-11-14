@@ -1347,6 +1347,9 @@ class ActionBridge:
         # world never admitted. No second ledger: its rows go to the same
         # RecordSink below.
         self._attempted_groups = 0
+        # Attempts include invalid/refused commands, not just target executions.
+        # This is telemetry only: a command is not a decision-budget unit.
+        self.command_attempts = 0
         self._attempted_keys: set[str] = set()
         #: The group currently being served -- its key, the outcome kind its
         #: row will carry, and whether that row was already written.
@@ -2082,6 +2085,7 @@ class ActionBridge:
             COMMAND_MAX_TIMEOUT_S,
         )
 
+        self.command_attempts += 1
         requested = arguments.get("timeout_s", COMMAND_DEFAULT_TIMEOUT_S)
         client_timeout = action_server_client_timeout_s()
         lane_budget: float | None = None
@@ -3697,6 +3701,53 @@ def _agent_stop_terminal_reason(
 
 
 @dataclass(frozen=True)
+class SessionAccounting:
+    """Separate harness clocks; none is a claim of official benchmark steps.
+
+    Missing observations stay unknown (None), especially on setup failures or
+    arms without a verifier. Logical requests are deduplicated request finals,
+    not wire retries, and may be partial until the owning tree has joined.
+    """
+
+    decision_groups_used: int | None = None
+    decision_groups_limit: int | None = None
+    legacy_screen_epochs: int | None = None
+    command_attempts: int | None = None
+    logical_requests: int | None = None
+    verifier_requests: int | None = None
+    requests_complete: bool | None = None
+
+    def to_json(self) -> dict[str, int | bool | None]:
+        return {
+            "decision_groups_used": self.decision_groups_used,
+            "decision_groups_limit": self.decision_groups_limit,
+            "legacy_screen_epochs": self.legacy_screen_epochs,
+            "command_attempts": self.command_attempts,
+            "logical_requests": self.logical_requests,
+            "verifier_requests": self.verifier_requests,
+            "requests_complete": self.requests_complete,
+        }
+
+
+def _session_accounting(
+    bridge: ActionBridge | None,
+    handle: EpisodeSession | None,
+    *,
+    close_joined: bool | None,
+) -> SessionAccounting:
+    """Snapshot available sources, including partial runs, without a new ledger."""
+
+    return SessionAccounting(
+        decision_groups_used=bridge.attempted_groups if bridge is not None else None,
+        decision_groups_limit=bridge.max_steps if bridge is not None else None,
+        legacy_screen_epochs=bridge.steps if bridge is not None else None,
+        command_attempts=bridge.command_attempts if bridge is not None else None,
+        logical_requests=len(handle.request_rows) if handle is not None else None,
+        requests_complete=close_joined,
+    )
+
+
+@dataclass(frozen=True)
 class SessionArmOutcome:
     """What happened in the pilot arm, and where its record lives."""
 
@@ -3710,6 +3761,7 @@ class SessionArmOutcome:
     #: groups the admitted epoch never charged. ADDITIVE field -- historical
     #: rows and the ``steps`` semantics stay exactly as shipped.
     attempted_groups: int = 0
+    accounting: SessionAccounting = field(default_factory=SessionAccounting)
     #: The no-progress policy that was IN FORCE for this run, as
     #: :func:`~local_operator.evaluation.runner.guards.describe_progress_policy`
     #: states it (``{"on": bool, "guards": [{"code", "threshold"}, ...]}``).
@@ -3845,6 +3897,7 @@ async def run_session_episode(
     #: and the worker must NOT be released. Read by the cleanup paths and the
     #: closing ``_close_adapter_session``.
     retain_resources = False
+    close_joined: bool | None = None
     #: One re-join failure is recorded ONCE (R2 round 3): a sustained raise in
     #: the join surface must not flood the record, and must not end the join
     #: either -- the canonical task is still the thing being waited on, and a
@@ -4527,6 +4580,7 @@ async def run_session_episode(
             score=score,
             steps=steps,
             attempted_groups=bridge.attempted_groups,
+            accounting=_session_accounting(bridge, handle, close_joined=close_joined),
             progress_guards=policy_stamp,
             terminal_reason=terminal_reason,
             diagnostic=diagnostic,
@@ -4615,6 +4669,7 @@ async def run_session_episode(
             status="failed_pre_bundle" if adapter_session is None else "failed",
             episode_id=spec.episode_id,
             record_root=record_root,
+            accounting=_session_accounting(bridge, handle, close_joined=close_joined),
             progress_guards=policy_stamp,
             terminal_reason=_failure_terminal_reason(error),
             diagnostic=f"{type(error).__name__}: {error}",
@@ -4646,6 +4701,17 @@ async def run_session_episode(
             config,
             rescue_required,
             retain_resources=retain_resources,
+        )
+
+    # The same typed snapshot reaches both the stream and sealed summary. Do
+    # not label the legacy screen epoch as the total decision budget consumed.
+    record.write("accounting", outcome.accounting.to_json())
+    accounting_failure = _first_record_failure(record, record_errors)
+    if accounting_failure is not None:
+        outcome = replace(
+            outcome,
+            record_incomplete=True,
+            record_diagnostic=outcome.record_diagnostic or _record_diagnostic(accounting_failure),
         )
 
     # --- the seal -----------------------------------------------------------
@@ -5290,6 +5356,7 @@ def _outcome_json(outcome: SessionArmOutcome) -> dict[str, Any]:
         "score": score_payload,
         "steps": outcome.steps,
         "attempted_groups": outcome.attempted_groups,
+        "accounting": outcome.accounting.to_json(),
         "progress_guards": dict(outcome.progress_guards),
         "terminal_reason": outcome.terminal_reason,
         "diagnostic": outcome.diagnostic,

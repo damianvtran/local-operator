@@ -4,7 +4,10 @@ WHY THIS EXISTS
 ---------------
 Team Bridge delivers text written by people outside this machine (another
 tenant's member, a guest in a shared room) into a session's context: as a
-``team_bridge_message`` card, or as the result of any ``bridge`` tool call.
+``team_bridge_message`` card, or as a ``bridge`` tool result that carries
+inbound message or room text (a mailbox body, a room page, a shared-history
+page; see :func:`bridge_result_is_inbound` for the exact rule). A directory
+listing, a send receipt and an error notice do not count.
 Screening (``team_bridge/client.py``) is a probabilistic first layer. When an
 injected instruction gets through it, the cheapest exfiltration route was the
 read-tier web tools: ``web_fetch``, ``read https://…``, ``web_search`` and
@@ -22,7 +25,7 @@ S-38 outright.
 WHAT IT DOES
 ------------
 * **The latch** (:class:`BridgeTaintLatch`). A session latches the first time
-  any bridge content reaches it, and never unlatches: only ``/new`` or a fresh
+  inbound bridge content reaches it, and never unlatches: only ``/new`` or a fresh
   session starts clean. Taint has no epoch shorter than the session, because
   the hostile text survives the turn, compaction, pruning, the assistant's
   restatement of it and anything fetched while tainted. The
@@ -84,9 +87,12 @@ BRIDGE_TAINT_LATCH_TYPE = "bridge_taint_latch"
 #: leaf module must not import the team-bridge package (the loop imports us).
 TEAM_BRIDGE_MESSAGE_TYPE = "team_bridge_message"
 
-#: Every result of this tool is a source, whatever the op, refusals included
-#: (S-45): read ops return screened bodies, write ops echo resolved names and
-#: thread state. Over-approximating costs nothing.
+#: The ``tool_name`` of the Team Bridge tool. A result of this tool is a source
+#: only when :func:`bridge_result_is_inbound` says it carries inbound text: the
+#: name alone no longer decides (a directory listing, a send receipt and a
+#: refusal latched sessions that had read nothing a teammate wrote). Anything the
+#: allowlist does not positively recognise still counts, so a new op or a shape
+#: change fails closed.
 BRIDGE_TOOL_NAME = "bridge"
 
 #: The ``details`` key that marks a message (a tool result, or a host card
@@ -106,7 +112,7 @@ Tier = Literal["read", "write", "exec"]
 #: warning look wrong.
 #:
 #: * ``agent_message`` -- a Team Bridge card or a ``bridge`` tool result
-#:   reached THIS session directly.
+#:   carrying inbound text reached THIS session directly.
 #: * ``other_session`` -- the content arrived through another session or
 #:   device: a ``sessions`` peek, a mesh reply or peek, a ``read``/``grep``
 #:   under another session's directory, a spill or archive copy, or a
@@ -212,6 +218,59 @@ def _tool_payload_stamped(provider_payload: Any) -> bool:
     )
 
 
+#: ``details`` keys that carry text a person outside this machine wrote. A refusal
+#: or an ``ack`` result with one of them is not the harmless shape it looks like.
+_BODY_KEYS = ("content", "text")
+
+
+def bridge_result_is_inbound(provider_payload: Any) -> bool:
+    """Whether a ``bridge`` tool result carries inbound text, judged by its shape.
+
+    ``provider_payload["details"]`` is the tool's own outcome dict (see
+    ``Message.from_tool_result``), the same on a live message and on its durable
+    row, so the live check and the resume scan share this one rule. It returns
+    ``False`` only for a shape the tool builds with no teammate-written body:
+
+    * a refusal: ``ok`` false, no ``content``/``text`` (``_error``, owner_changed);
+    * a write receipt: ``ok`` true and a ``receipt_stage`` string (send, reply,
+      dm, channel_post), or the reply guard's ``skipped`` duplicate result;
+    * an ``ack`` result: ``state`` working/done, no ``content``/``text``;
+    * a ``channel_create`` result: ``state`` ``created`` with a ``conversation_id``;
+    * a directory listing: ``ok`` true and a ``members`` list.
+
+    Everything else (``take_up``, history and thread pages, ``react``,
+    ``channels``, the shared reads, a missing, empty or unrecognised ``details``)
+    returns ``True``: a new op or a changed shape fails closed. The receipt,
+    ``members`` and ``skipped`` shapes are therefore load-bearing; an op that
+    returns inbound text must never reuse them (``team_bridge/tool.py``
+    ``_post_receipt``).
+
+    Known residual, accepted on the operator's instruction: a directory listing
+    and an error notice can quote short strings other people chose (display and
+    endpoint names). See ``docs/security/team-bridge-egress.md``.
+    """
+    details = provider_payload.get("details") if isinstance(provider_payload, Mapping) else None
+    if not isinstance(details, Mapping) or not details:
+        return True
+    ok = details.get("ok")
+    has_body = any(key in details for key in _BODY_KEYS)
+    if ok is False:
+        return has_body
+    if ok is not True:
+        return True
+    if isinstance(details.get("receipt_stage"), str):
+        return False
+    if details.get("skipped") is True:
+        return False
+    if details.get("state") in ("working", "done") and not has_body:
+        return False
+    if details.get("state") == "created" and isinstance(details.get("conversation_id"), str):
+        return False
+    if isinstance(details.get("members"), list):
+        return False
+    return True
+
+
 def message_is_taint_source(message: Any) -> bool:
     """Whether one live message carries Team Bridge content into context.
 
@@ -227,7 +286,9 @@ def message_is_taint_source(message: Any) -> bool:
     if isinstance(message, Message):
         if message.role != "tool":
             return False
-        if message.tool_name == BRIDGE_TOOL_NAME:
+        if message.tool_name == BRIDGE_TOOL_NAME and bridge_result_is_inbound(
+            message.provider_payload
+        ):
             return True
         return _tool_payload_stamped(message.provider_payload)
     if isinstance(message, CustomMessage):
@@ -238,9 +299,12 @@ def message_is_taint_source(message: Any) -> bool:
         return True
     if getattr(message, "role", None) != "tool":
         return False
-    if getattr(message, "tool_name", None) == BRIDGE_TOOL_NAME:
+    payload = getattr(message, "provider_payload", None)
+    if getattr(message, "tool_name", None) == BRIDGE_TOOL_NAME and bridge_result_is_inbound(
+        payload
+    ):
         return True
-    return _tool_payload_stamped(getattr(message, "provider_payload", None))
+    return _tool_payload_stamped(payload)
 
 
 def message_source_kind(message: Any) -> SourceKind | None:
@@ -250,16 +314,19 @@ def message_source_kind(message: Any) -> SourceKind | None:
     clean session's included, but it delegates to
     :func:`message_is_taint_source` first and returns ``None`` for a
     non-source, so it only costs more than that check on a source. A Bridge
-    card or ``bridge`` result is an Agent message; any other source is a
+    card or an inbound ``bridge`` result is an Agent message; any other source is a
     stamp, which only cross-session routes write.
     """
     if not message_is_taint_source(message):
         return None
     if getattr(message, "custom_type", None) == TEAM_BRIDGE_MESSAGE_TYPE:
         return SOURCE_AGENT_MESSAGE
+    # The same predicate as the source test, so a bridge row that is a source
+    # only by its stamp is not mislabelled as an Agent message.
     if (
         getattr(message, "role", None) == "tool"
         and getattr(message, "tool_name", None) == BRIDGE_TOOL_NAME
+        and bridge_result_is_inbound(getattr(message, "provider_payload", None))
     ):
         return SOURCE_AGENT_MESSAGE
     return SOURCE_OTHER_SESSION
@@ -288,7 +355,11 @@ def entry_source_kind(entry_type: str, payload: Mapping[str, Any]) -> SourceKind
         return latch_row_kind(payload)
     if payload.get("custom_type") == TEAM_BRIDGE_MESSAGE_TYPE:
         return SOURCE_AGENT_MESSAGE
-    if payload.get("role") == "tool" and payload.get("tool_name") == BRIDGE_TOOL_NAME:
+    if (
+        payload.get("role") == "tool"
+        and payload.get("tool_name") == BRIDGE_TOOL_NAME
+        and bridge_result_is_inbound(payload.get("provider_payload"))
+    ):
         return SOURCE_AGENT_MESSAGE
     return SOURCE_OTHER_SESSION
 
@@ -305,9 +376,10 @@ def entry_is_taint_source(entry_type: str, payload: Mapping[str, Any]) -> bool:
         return True
     if payload.get("role") != "tool":
         return False
-    if payload.get("tool_name") == BRIDGE_TOOL_NAME:
+    provider_payload = payload.get("provider_payload")
+    if payload.get("tool_name") == BRIDGE_TOOL_NAME and bridge_result_is_inbound(provider_payload):
         return True
-    return _tool_payload_stamped(payload.get("provider_payload"))
+    return _tool_payload_stamped(provider_payload)
 
 
 class BridgeTaintLatch:

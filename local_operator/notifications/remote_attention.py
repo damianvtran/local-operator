@@ -1,4 +1,4 @@
-"""A finished turn or a ``notify`` on ANOTHER device, raised on the session's origin.
+"""A ``notify`` on ANOTHER device, raised on the session's origin (turn-ends are not).
 
 WHY THIS MODULE EXISTS (remote-session-parity, 2026-11-11). A session the
 operator starts on their head device and runs on a mesh node (``/new remote``,
@@ -25,8 +25,8 @@ beside ``park_edges``:
   ``wire.REMOTE_ATTENTION_V1``. Another member of the mesh
   sees neither: a completion is the operator's fact about THEIR session, and a
   co-member listing the node's sessions is not that operator.
-* ORIGIN SIDE (:class:`RemoteAttentionWatcher`): one edge per completion token
-  and per (owner item, revision), written through the SAME
+* ORIGIN SIDE (:class:`RemoteAttentionWatcher`): one edge per (owner item,
+  revision) — completions are no longer raised, see below — written through the SAME
   ``NotificationStore.notify`` door every other item uses — the kill switch
   (``notify_enabled``), the read/dismiss marks, the priority ladder and the
   store's retention are the shipped ones.
@@ -53,20 +53,37 @@ title and the "runs on <device>" body, which a renamed session or a host that
 read a nameless row would change (review round 1, m1). No cross-process lock or
 ledger is needed.
 
-PRIORITY AND BANNERS. A completion's ROW is ``normal`` (the reel and badge carry
-it, and the item ladder never banners ``normal``), but a NEW completion also
-raises the same clickable OS banner a local background completion raises
-(review round 1, M1: a remote completion must be as visible as a local one).
-That banner is :func:`_deliver_done_banner`, claimed per revision through
-``NotificationStore.claim_delivery`` so the TUI's watcher and ``lop serve``'s
-raise exactly one between them; its click carries the session id to ``lop
-resume-click``, whose ladder (desktop viewer, desktop launch, TUI viewer, then
-a terminal running ``lop --resume <id>``) opens a peer session by id — the same
-id ``lop --resume`` resolves to a remote viewer. A notice passes its own priority through,
-so a ``high`` notice on the node is a banner-eligible ``high`` row here, raised
-through the item ladder (``notifications.delivery.deliver_item``) whose
-per-revision claim keeps the TUI, the desktop feed and this writer to one
-banner between them.
+REMOTE TURN-ENDS ARE NOT NOTIFICATIONS (operator rule, 2026-11-13). This module
+used to raise a ``remote-done:<device>:<session>`` row (plus an OS banner) for
+every finished turn the owner stamped. The first serve poll after v0.102.2
+installed wrote 127 such rows in four seconds — one per historic node session,
+because every completion that predated the feature was "unacknowledged" — and
+34 ``remote-notice:`` rows for notices months old, all unread and stamped with
+the sync time. The operator's rule: the inbox carries ONLY what an agent
+deliberately posted (``notify``) or asked, so the completion producer and its
+banner are gone. The owner still stamps ``attention`` (the sidebar and the
+settle below read it), and :func:`settle_unclaimed_done_items` stays so a
+``remote-done:`` row an older build wrote is still marked read once the owner
+acknowledges it — it only ever marks read, never writes a row.
+
+A FORWARDED NOTICE MUST BE NEW AND THE OPERATOR'S. Three filters, same date:
+
+* only an explicit ``notify`` item (``NOT_FORWARDED_PREFIXES`` keeps parks,
+  this module's own rows and bridge notices out — unchanged);
+* never from a session another AGENT created on the owner (``origin.kind ==
+  "agent"`` on the mesh stamp, :data:`AGENT_ORIGIN_KIND`): a reviewer/QA/probe
+  child reports to the agent that spawned it, not to the operator — dropped by
+  the owner in :func:`stamp_rows_for_viewer`;
+* NO BACKFILL: the owner carries each notice's own ``updated_at`` (``at``, ms)
+  and the origin raises only a notice newer than its persisted first-contact
+  baseline for that device (:func:`origin_baseline_ms`), writing the row with
+  the owner's timestamp rather than "now". A notice with no ``at`` (an owner
+  older than this rule) cannot prove it is new, so it is not raised.
+
+A notice passes its own priority through, so a ``high`` notice on the node is a
+banner-eligible ``high`` row here, raised through the item ladder
+(``notifications.delivery.deliver_item``) whose per-revision claim keeps the
+TUI, the desktop feed and this writer to one banner between them.
 
 WHAT THIS DOES NOT DO. Phone push reads ``attention.db``, not this inbox
 (``mobile/push_worker.py``: its completion scan is built on ``AttentionStore``
@@ -96,9 +113,6 @@ logger = logging.getLogger(__name__)
 DONE_PREFIX = "remote-done"
 NOTICE_PREFIX = "remote-notice"
 
-#: A completion's row priority: informational, the turn is not blocked on anyone.
-DONE_PRIORITY = "normal"
-
 #: Owner-side items NEVER forwarded as a notice. ``gate:`` rows are parks, which
 #: reach the origin through ``pending`` (``remote_park``) — forwarding them here
 #: too would put two rows on one park. ``remote-*`` rows are THIS module's and
@@ -114,6 +128,13 @@ NOT_FORWARDED_PREFIXES: tuple[str, ...] = (
     f"{NOTICE_PREFIX}:",
     "team-bridge-",
 )
+
+#: ``origin.kind`` on a mesh stamp for a session an AGENT created on this device
+#: (``lop network sessions --create`` run from an agent's shell, or the
+#: ``sessions spawn peer=`` tool; ``network/cli.py`` sets it). Its notices are
+#: never forwarded: see the module doc, "A FORWARDED NOTICE MUST BE NEW AND THE
+#: OPERATOR'S". Every other kind (``user``, the default, and moves) forwards.
+AGENT_ORIGIN_KIND = "agent"
 
 #: How many notices one row carries for its origin, newest first (review round 1,
 #: M2: carrying only the newest lost every earlier unread notice, ``high`` ones
@@ -220,6 +241,12 @@ def stamp_rows_for_viewer(
         # the attention contract): honoured here exactly as the local legs do.
         if token and state.get("unseen") and state.get("notify", True):
             row["attention"] = {"token": str(token), "outcome": str(state.get("kind") or "")}
+        if str(row["origin"].get("kind") or "") == AGENT_ORIGIN_KIND:
+            # AN AGENT'S CHILD NEVER NOTIFIES THE OPERATOR (2026-11-13): a
+            # session another agent created here (a reviewer, QA or probe run
+            # spawned with ``peer=``) reports to that agent, so its ``notify``
+            # items stay in this device's inbox and are never put on the wire.
+            continue
         notices = _newest_notices(store, session_id) if store is not None else []
         if notices:
             row["notices"] = notices
@@ -250,6 +277,10 @@ def _newest_notices(store: Any, session_id: str) -> list[dict[str, Any]]:
                 "revision": int(item.get("revision") or 1),
                 "priority": str(item.get("priority") or "normal"),
                 "title": str(item.get("title") or ""),
+                # The item's OWN time (ms, this device's clock), so the origin
+                # can refuse a backfill and keep the original timestamp rather
+                # than stamping the sync moment (module doc, "NO BACKFILL").
+                "at": int(item.get("updated_at") or 0),
             }
         )
         if len(out) >= NOTICES_ON_WIRE:
@@ -274,86 +305,6 @@ def _location(device_label: str) -> str:
     from local_operator.tui.notify import remote_session_location
 
     return remote_session_location(device_label)
-
-
-def raise_done_item(
-    root: Path,
-    *,
-    session_id: str,
-    device_id: str,
-    token: str,
-    outcome: str = "complete",
-    device_name: str = "",
-    name: str = "",
-    deliver: bool = True,
-) -> str | None:
-    """Create or update the origin's row for one finished turn on ``device_id``.
-
-    The TITLE is the conversation's name (the local completion banner's own
-    title rule) and the BODY is the same house sentence a local completion of
-    that kind carries, then where it ran. ``token`` is the store's ``episode``:
-    the same completion re-raised is ``unchanged`` (no unread flip), a new one
-    is an update that is unread again. A new completion also raises the
-    completion banner off-thread (``deliver``; :func:`_deliver_done_banner`).
-    Returns the store's action, or ``None`` when nothing was written.
-    """
-    if not session_id or not device_id or not token:
-        return None
-    try:
-        if not _inbox_reads_here():
-            return None
-        from local_operator.notifications.store import NotificationStore
-        from local_operator.tui import notify as notify_copy
-
-        label = device_name or device_id
-        body = notify_copy.BODIES.get(outcome or "complete", notify_copy.BODY_COMPLETE)
-        store = NotificationStore(root)
-        existing = store.get_by_key(session_id, done_key(device_id, session_id))
-        if existing is not None and str(existing.get("anchor_id") or "") == token:
-            # THIS completion is already the row's (a restarted watcher, or a
-            # second host). Answered before the write rather than left to the
-            # digest, because the digest also covers the title: a session
-            # renamed since would otherwise turn a repeat into an update and
-            # flip a row the operator had read back to unread.
-            return "unchanged"
-        result = store.notify(
-            session_id=session_id,
-            title=name or notify_copy.BACKGROUND_FALLBACK_TITLE,
-            body_md=f"{body}\n\n{_location(label)}",
-            priority=DONE_PRIORITY,
-            key=done_key(device_id, session_id),
-            anchor_id=token,
-            session_title=name,
-            episode=token,
-        )
-        if result.action == "absorbed":
-            # A NEW completion on a row the operator dismissed: the store keeps
-            # an unescalated update dismissed, but a dismissed "it finished"
-            # must not swallow the next finish. Same reasoning as
-            # ``remote_park._reopen``; the episode makes this reachable only
-            # for a new token.
-            _undismiss(store, session_id, done_key(device_id, session_id))
-        if deliver and result.action in ("created", "updated", "revived", "absorbed"):
-            # Re-read: ``_undismiss`` may have moved the row, and the banner is
-            # claimed against the row's CURRENT revision.
-            row = store.get_by_key(session_id, done_key(device_id, session_id))
-            if row is not None:
-                kind = outcome if outcome in notify_copy.CONTEXTS else "complete"
-                _deliver_done_banner(
-                    root,
-                    item_id=str(row["id"]),
-                    revision=int(row["revision"]),
-                    session_id=session_id,
-                    title=name,
-                    body=body,
-                    subtitle=notify_copy.CONTEXTS.get(kind, ""),
-                )
-        return str(result.action)
-    except Exception:  # noqa: BLE001 — chrome; never the failure
-        logger.warning(
-            "remote attention: could not raise done row for %s", session_id, exc_info=True
-        )
-        return None
 
 
 def settle_done_item(root: Path, *, session_id: str, device_id: str, token: str) -> bool:
@@ -435,8 +386,7 @@ def settle_unclaimed_done_items(
             if key not in listed:
                 continue
             if listed[key]:
-                # Still claimed (this token, or a newer one ``raise_done_item``
-                # moves the row to on this same read): not acknowledged.
+                # Still claimed (this token, or a newer one): not acknowledged.
                 continue
             if int(item.get("updated_at") or 0) >= int(listed_at_ms):
                 # Written from a read newer than this listing (Q3, above).
@@ -465,6 +415,7 @@ def raise_notice_item(
     device_name: str = "",
     name: str = "",
     deliver: bool = True,
+    at_ms: int = 0,
 ) -> str | None:
     """Mirror one owner ``notify`` item onto the origin's inbox.
 
@@ -505,6 +456,9 @@ def raise_notice_item(
             anchor_id=f"rev:{int(revision)}",
             session_title=name,
             episode=f"rev:{int(revision)}",
+            # THE OWNER'S TIME, not the sync moment (2026-11-13): the row sorts
+            # where the agent posted it. ``None`` (no ``at``) keeps "now".
+            now=int(at_ms) if int(at_ms or 0) > 0 else None,
         )
         # An ``absorbed`` notice (the operator dismissed this row and the owner's
         # item was updated without escalating) STAYS dismissed: that is the
@@ -532,17 +486,6 @@ def _notice_rev(row: dict[str, Any]) -> int:
         return int(anchor[4:])
     except ValueError:
         return 0
-
-
-def _undismiss(store: Any, session_id: str, key: str) -> None:
-    row = store.get_by_key(session_id, key)
-    if row is not None and row["dismissed"]:
-        store.apply(
-            "undismiss", ids=[(str(row["id"]), int(row["revision"]))], via="remote-attention"
-        )
-    row = store.get_by_key(session_id, key)
-    if row is not None and row["read"]:
-        store.apply("unread", ids=[(str(row["id"]), int(row["revision"]))], via="remote-attention")
 
 
 def _deliver_async(root: Path, outcome: Any, *, session_id: str, title: str, body: str) -> None:
@@ -575,99 +518,6 @@ def _deliver_async(root: Path, outcome: Any, *, session_id: str, title: str, bod
     threading.Thread(target=run, name="remote-notice-banner", daemon=True).start()
 
 
-#: The claimant a done banner records in ``delivered_by``: distinct from the
-#: item ladder's ``runtime`` so a release can never undo another leg's claim.
-DONE_BANNER_CLAIMANT = "remote-done"
-
-
-def _deliver_done_banner(
-    root: Path,
-    *,
-    item_id: str,
-    revision: int,
-    session_id: str,
-    title: str,
-    body: str,
-    subtitle: str = "",
-    notify: Any = None,
-    background: bool = True,
-) -> None:
-    """Raise the completion banner for one NEW remote completion, at most once.
-
-    WHY NOT THE ITEM LADDER (review round 1, M1). ``deliver_item`` banners only a
-    ``high`` row, and both of its other rungs — the desktop feed and the TUI's
-    banner tick — read ``undelivered(priority="high")``, so handing a ``normal``
-    done row to it (or promoting the row to ``high``, which would also reorder
-    the reel and badge) either raises nothing or changes what the row IS. A
-    local background completion is announced by its own leg
-    (``OperatorApp._deliver_background_completion``) with a claim, a clickable
-    ``detached_notify`` and the house title/body; this is that leg for a
-    completion the origin only knows through its inbox row.
-
-    THE CLAIM IS THE ROW'S ``claim_delivery``, so the TUI's watcher and ``lop
-    serve``'s — both of which see the same new token — raise ONE banner
-    between them, and a row the operator already read (or dismissed) before
-    the claim is refused by the store. A notifier that started nothing hands
-    the claim back, the local leg's rule: a watermark must not assert a banner
-    nobody received.
-
-    GATES AND PRIVACY mirror the local leg: the notifications switch and the
-    rig guard (``delivery.gates_refuse``) refuse BEFORE the claim, so a gated
-    revision stays claimable for a process with the gates open; the title is
-    the conversation's name only when ``session_names_in_notifications`` allows
-    it (else the brand), and the body is the house sentence for the outcome,
-    never model-written text. ``session_id`` makes the banner clickable: it
-    rides to ``lop resume-click``, which opens the peer session by id.
-
-    Runs on a daemon thread by default so a slow notifier never stalls the
-    poll; ``background=False`` is the tests' synchronous seam.
-    """
-
-    def run() -> None:
-        try:
-            from local_operator.notifications.delivery import gates_refuse
-            from local_operator.notifications.store import NotificationStore
-            from local_operator.tui import notify as notify_copy
-
-            if gates_refuse():
-                return
-            store = NotificationStore(root)
-            row = store.get(item_id)
-            if row is None or int(row["revision"]) != int(revision):
-                # Superseded by a newer completion: that write raises its own.
-                return
-            # ``per_revision``: one banner per completion with no cooldown, the
-            # local leg's per-token rule (R2-M1; see ``claim_delivery``).
-            if not store.claim_delivery(item_id, DONE_BANNER_CLAIMANT, per_revision=True):
-                return
-            banner_title = (
-                notify_copy.sanitize_text(title) or notify_copy.BACKGROUND_FALLBACK_TITLE
-                if notify_copy.session_names_in_notifications()
-                else notify_copy.APP_NAME
-            )
-            send = notify if notify is not None else notify_copy.detached_notify
-            try:
-                started = bool(
-                    send(
-                        notify_copy.argv_safe(banner_title),
-                        notify_copy.argv_safe(body),
-                        session_id=session_id,
-                        subtitle=subtitle,
-                    )
-                )
-            except Exception:  # noqa: BLE001 — a banner is chrome; the row is durable
-                started = False
-            if not started:
-                store.release_delivery(item_id, int(revision), DONE_BANNER_CLAIMANT)
-        except Exception:  # noqa: BLE001
-            logger.debug("remote attention: done banner failed", exc_info=True)
-
-    if not background:
-        run()
-        return
-    threading.Thread(target=run, name="remote-done-banner", daemon=True).start()
-
-
 # ---------------------------------------------------------------------------
 # The watcher both hosts share
 # ---------------------------------------------------------------------------
@@ -684,7 +534,6 @@ class RemoteAttentionWatcher:
 
     def __init__(self, root: Path) -> None:
         self.root = Path(root)
-        self._done: dict[tuple[str, str], str] = {}
         self._notice: dict[tuple[str, str, str], int] = {}
 
     def observe(
@@ -704,7 +553,6 @@ class RemoteAttentionWatcher:
         """
         try:
             from local_operator.session.peer_rows import (
-                completion_edges,
                 listing_read_at_ms,
                 notice_edges,
             )
@@ -713,22 +561,28 @@ class RemoteAttentionWatcher:
                 listed_at_ms = listing_read_at_ms(self.root, rows)
             rows = tuple(rows)
             silent = tuple(unanswered)
-            done, done_state = completion_edges(self._done, rows, unanswered=silent)
-            self._done = done_state
+            # No completion edges: a remote turn-end is never an inbox row
+            # (module doc, operator rule 2026-11-13). The settle stays — it
+            # only marks an older build's ``remote-done:`` row read once the
+            # owner acknowledged it, and never writes one.
             settle_unclaimed_done_items(self.root, rows, listed_at_ms=listed_at_ms)
-            for edge in done:
-                raise_done_item(
-                    self.root,
-                    session_id=edge.session_id,
-                    device_id=edge.device_id,
-                    token=edge.token,
-                    outcome=edge.outcome,
-                    device_name=edge.device_name,
-                    name=edge.name,
-                )
             notices, notice_state = notice_edges(self._notice, rows, unanswered=silent)
             self._notice = notice_state
+            # FIRST CONTACT is the listing, not the first notice (R1-1): every
+            # owner device named here gets its baseline before any notice is
+            # judged, so the first deliberate notice after contact is raised.
+            baselines = origin_baselines_ms(
+                self.root, (str(getattr(row, "owner_device", "") or "") for row in rows)
+            )
             for notice in notices:
+                baseline = baselines.get(notice.device_id)
+                if baseline is None:
+                    baseline = origin_baseline_ms(self.root, notice.device_id)
+                if notice.at_ms <= 0 or notice.at_ms < baseline:
+                    # NO BACKFILL: posted before this device first watched
+                    # that one (or by an owner too old to say when). Skipped
+                    # deterministically, so a restart skips it again.
+                    continue
                 raise_notice_item(
                     self.root,
                     session_id=notice.session_id,
@@ -739,6 +593,7 @@ class RemoteAttentionWatcher:
                     title=notice.title,
                     device_name=notice.device_name,
                     name=notice.name,
+                    at_ms=notice.at_ms,
                 )
         except Exception:  # noqa: BLE001 — a poll that cannot forward is still a poll
             logger.debug("remote attention watch failed", exc_info=True)
@@ -839,6 +694,101 @@ def forwarding_origins(root: Path) -> dict[str, float]:
     if not isinstance(data, dict):
         return {}
     return {str(k): float(v) for k, v in data.items() if isinstance(v, (int, float))}
+
+
+#: The ORIGIN's record of when it first watched each owner device:
+#: ``{device_id: first-seen epoch ms}``, directly under the config root beside
+#: :data:`ORIGINS_FILE` (its owner-side twin) and for the same reason it is not
+#: in the networks directory. WHY PERSISTED (2026-11-13): the backfill flood came
+#: from a FIRST CONTACT treating every historic unread item as news; a baseline
+#: kept in memory would be "first contact" again after every restart. Written
+#: once per device, the first listing that names it; never moved later,
+#: so reconnects and restarts compare against the same instant. The comparison
+#: is against the OWNER's clock (``at``): skew between the two devices shifts the
+#: cut-off by that skew, which only matters for a notice posted within seconds of
+#: the very first contact.
+BASELINES_FILE = "remote-attention-baselines.json"
+_baselines_lock = threading.Lock()
+
+
+def _valid_baseline(value: object) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value > 0
+
+
+def origin_baselines_ms(root: Path, device_ids: Iterable[str]) -> dict[str, int]:
+    """This origin's first-contact instant (ms) for each of ``device_ids``.
+
+    A device not yet recorded is recorded NOW. :meth:`RemoteAttentionWatcher.observe`
+    calls this for every owner device in a listing BEFORE it looks at notices
+    (review round 1, R1-1): recording lazily, on the first notice, stamped that
+    notice's own observation instant as the baseline, so the first deliberate
+    notice from a newly watched device was always older than its baseline and
+    was dropped for good. Recorded at first contact, a notice posted after the
+    first listing that named the device is raised; one posted before is the
+    backfill this file exists to skip.
+
+    CROSS-PROCESS (R1-4): the TUI and ``lop serve`` both run the watcher, so the
+    read-merge-replace runs under an ``fcntl.flock`` on a sidecar lock file (the
+    ``network/approvals.py`` pattern) as well as the in-process lock, and a
+    device already in the file keeps its EARLIEST value — two writers can never
+    move a baseline later and silently swallow the notices in between.
+
+    Never raises: anything unreadable or unwritable answers "now" for the
+    devices it could not settle, the conservative direction — a notice that
+    cannot be shown to be new is not raised, which costs at worst a missed
+    notice, never a flood.
+    """
+    import json
+    import os
+    import time
+
+    wanted = sorted({str(d) for d in device_ids if d})
+    now = int(time.time() * 1000)
+    if not wanted:
+        return {}
+    try:
+        import fcntl
+
+        with _baselines_lock:
+            path = Path(root) / BASELINES_FILE
+            path.parent.mkdir(parents=True, exist_ok=True)
+            lock_fd = os.open(path.with_name(f".{path.name}.lock"), os.O_RDWR | os.O_CREAT, 0o600)
+            try:
+                fcntl.flock(lock_fd, fcntl.LOCK_EX)
+                try:
+                    try:
+                        known = json.loads(path.read_text(encoding="utf-8"))
+                    except (FileNotFoundError, ValueError):
+                        # Absent, or unparseable (rewritten below rather than
+                        # leaving every later poll to answer "now" forever).
+                        known = {}
+                    if not isinstance(known, dict):
+                        known = {}
+                    missing = [d for d in wanted if not _valid_baseline(known.get(d))]
+                    if missing:
+                        for device_id in missing:
+                            known[device_id] = now
+                        tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+                        # 0600 like ``ORIGINS_FILE``: it names the mesh devices this one reads.
+                        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+                        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                            handle.write(json.dumps(known, sort_keys=True))
+                        os.replace(tmp, path)
+                    return {d: int(known[d]) for d in wanted}
+                finally:
+                    fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            finally:
+                os.close(lock_fd)
+    except Exception:  # noqa: BLE001 — see the docstring: unknown is "now"
+        logger.debug("remote attention: baselines unavailable", exc_info=True)
+        return {d: now for d in wanted}
+
+
+def origin_baseline_ms(root: Path, device_id: str) -> int:
+    """:func:`origin_baselines_ms` for one device (recording it now if new)."""
+    import time
+
+    return origin_baselines_ms(root, (device_id,)).get(device_id, int(time.time() * 1000))
 
 
 def forwarded_notice_sentence(root: Path, session_id: str, key: str = "") -> str:

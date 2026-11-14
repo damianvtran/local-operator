@@ -72,6 +72,15 @@ CREDENTIAL_MARK = OPAQUE_MARK + "credential" + OPAQUE_MARK
 #: Same, for a ``$(mktemp …)`` value carried through a variable (R6): still
 #: unknowable, but known to be a fresh entry under the temp directory.
 TEMP_MARK = "\x02"
+#: Prefix of a ``for VAR in <glob>`` binding: ``FOR_GLOB_MARK + <key> +
+#: OPAQUE_MARK``, where ``<key>`` indexes ``_Walker.for_globs``. It contains
+#: OPAQUE_MARK, so every use of ``$VAR`` that is not a whole recorded word
+#: (``cd $f``, ``x-$f``, ``$f/..``) stays opaque exactly as before; only a
+#: word that IS the variable is pinned to the glob (see ``_Walker._add``).
+#: Carried in the VALUE, not a side table keyed by name, so a reassignment
+#: (``f=$(cmd)``) can never inherit a stale glob, and a copy (``g=$f``)
+#: carries it correctly.
+FOR_GLOB_MARK = OPAQUE_MARK + "for-glob:"
 
 
 # ---------------------------------------------------------------------------
@@ -919,12 +928,23 @@ class Target:
     forced: bool = False
     #: Double force is narrowly allowed for a verified stale git initialization lock.
     force_count: int = 0
+    #: A target only an ALTERNATE parse produces (GNU sed's reading of BSD
+    #: ``-i ''``, review M1 on PR #3816): ``classify`` keeps it only when it
+    #: ranks CRITICAL, so it can raise a verdict to CRITICAL and never add a
+    #: HIGH for what is, under the other reading, the script.
+    critical_only: bool = False
     #: A ``touch`` handed to an interpreter (``node``/``python``) running a
     #: script FILE: that script's absolute path. ``classify`` lets a read of a
     #: same-task-tree session's scratch file rank LOW only when the script is
     #: git-tracked (case 7, 2026-11-09: ``node scripts/i18n/ledger-assemble.mjs
     #: --receipt <auditor pad>/…json`` from a sibling lane).
     script: str | None = None
+    #: A ``touch`` handed to ``python -c CODE`` whose CODE is proven unable to
+    #: write, delete, rename or run anything (:func:`python_code_read_only`,
+    #: :meth:`_Walker._inline_read_only`). Like ``script``, it lets ``classify``
+    #: rank a read of a same-task-tree session's scratch LOW (incident
+    #: 2026-11-13); it never lowers a delete, a write or a stranger's pad.
+    read_only_code: bool = False
     #: The mention sits in a word the command names as an OUTPUT (``-o``,
     #: ``--out*``, ``--write*``, glued or as the next word): never a read.
     as_output: bool = False
@@ -1517,6 +1537,513 @@ _INTERPRETER_DELETE_RE = re.compile(
 )
 
 
+#: WHY AN ALLOW-LIST OVER THE WHOLE AST (review r1 M1 + r2 M3, PR #3918):
+#: two rounds of a DENY-list over Python's attribute graph each found a new
+#: route to ``getattr`` by a string — ``string.Formatter().get_field("0.unlink"
+#: …)``, ``pathlib.operator.methodcaller("unlink")``, then a generator's
+#: ``gi_frame.f_builtins["getattr"](p, "un"+"link")()`` — and every one deleted
+#: real files at LOW. The attribute graph is open-ended, so a deny-list can
+#: never be shown complete. :func:`python_code_read_only` therefore admits a
+#: program only when EVERY node type, module, name, attribute, keyword and
+#: subscript is on one of the lists below; anything not listed fails closed to
+#: the backstop's HIGH (a judge call, never a silent LOW). A read the lists do
+#: not cover costs a judge call — widen a list only with a reason here.
+#:
+#: Statement and expression node types, by ``type(node).__name__`` (so
+#: ``ast`` stays a lazy import). Deliberately absent: ``Lambda``,
+#: ``FunctionDef``/``ClassDef`` (a body can run on attribute access or
+#: decorate), ``Match`` (class patterns are ``getattr`` by string),
+#: ``NamedExpr``, ``With``, ``Try``, ``While``, ``Await``/``Yield``,
+#: ``Global``/``Nonlocal``, ``Starred``, ``Delete``, ``Pow`` and the
+#: bit operators (nothing a read needs). ``GeneratorExp`` stays: the incident
+#: itself joins one, and the M3 route was the generator's ``gi_frame``
+#: ATTRIBUTE, which the attribute allow-list never admits — without that a
+#: generator is just a lazy list comprehension.
+_PY_ALLOWED_NODES = frozenset(
+    {
+        # statements
+        "Module",
+        "Expr",
+        "Assign",
+        "AugAssign",
+        "For",
+        "If",
+        "Pass",
+        "Break",
+        "Continue",
+        "Import",
+        "ImportFrom",
+        "alias",
+        # expressions
+        "BoolOp",
+        "BinOp",
+        "UnaryOp",
+        "Compare",
+        "IfExp",
+        "Call",
+        "keyword",
+        "Attribute",
+        "Subscript",
+        "Slice",
+        "Name",
+        "Constant",
+        "List",
+        "Tuple",
+        "Dict",
+        "Set",
+        "JoinedStr",
+        "FormattedValue",
+        "ListComp",
+        "SetComp",
+        "DictComp",
+        "GeneratorExp",
+        "comprehension",
+        # contexts and operators (``Del`` and ``Pow``/bit ops are absent)
+        "Load",
+        "Store",
+        "And",
+        "Or",
+        "Add",
+        "Sub",
+        "Mult",
+        "Div",
+        "FloorDiv",
+        "Mod",
+        "USub",
+        "UAdd",
+        "Not",
+        "Eq",
+        "NotEq",
+        "Lt",
+        "LtE",
+        "Gt",
+        "GtE",
+        "In",
+        "NotIn",
+        "Is",
+        "IsNot",
+    }
+)
+#: Modules a read may import, by exact name (a dotted ``import json.tool``
+#: loads a CLI whose ``main()`` writes ``argv[2]``, so dotted names fail).
+#: The module object is harmless only because the attribute allow-list below
+#: limits what can be taken off it: no module-valued attribute is listed, so
+#: re-exports (``pathlib.os``, ``glob.operator``) are unreachable. ``string``,
+#: ``functools``, ``operator``, ``itertools`` (callable-taking helpers) and
+#: ``pprint`` (``pprint(obj, stream)`` writes to a positional stream) are out.
+_PY_READ_MODULES = frozenset(
+    {"pathlib", "json", "re", "glob", "fnmatch", "collections", "datetime"}
+)
+#: Builtins a read may name. None takes a callable it later calls through a
+#: positional argument, so a held callable can only run by a direct call the
+#: walk sees. ``open`` is admitted only as a callee with a literal read mode
+#: (:func:`_py_open_read_only`). Absent on purpose: ``getattr``/``exec``/
+#: ``eval``/``compile``/``__import__``/``vars``/``globals``/``type``,
+#: ``map``/``filter``/``iter``/``next`` (callables or protocol reach),
+#: ``isinstance`` (no read needs it), ``input``/``breakpoint``/``help``.
+_PY_ALLOWED_BUILTINS = frozenset(
+    {
+        "print",
+        "open",
+        "len",
+        "sorted",
+        "reversed",
+        "min",
+        "max",
+        "sum",
+        "any",
+        "all",
+        "enumerate",
+        "zip",
+        "range",
+        "str",
+        "int",
+        "float",
+        "bool",
+        "bytes",
+        "list",
+        "dict",
+        "set",
+        "tuple",
+        "repr",
+        "abs",
+        "round",
+    }
+)
+#: Every attribute name a read may use, on ANY object: the check is untyped,
+#: so each name must be harmless on every object reachable from the modules
+#: and builtins above. Notably absent: ``replace`` (``Path.replace`` RENAMES;
+#: untyped, so ``str.replace`` goes too), ``get`` (``b.get("getattr")`` once a
+#: dict of builtins is in hand), ``format``/``format_map`` (attribute walks by
+#: string), ``open``/``write*``/``unlink``/``rename``/``touch``/``mkdir``/
+#: ``chmod``/``copy``/``move``, every dunder, ``gi_frame``/``f_builtins``-
+#: style introspection, and any name that hands back a module able to act.
+#: Checked transitively on CPython 3.12 and 3.14: the only modules reachable
+#: through these names are the allowed ones plus ``glob.stat`` (the ``stat``
+#: module: constants and pure mode predicates). ``stat`` itself is there for
+#: ``Path.stat()`` (``os.stat``: metadata only). ``sub``/``subn`` are
+#: further limited in :func:`python_code_read_only` to a literal replacement.
+_PY_ALLOWED_ATTRS = frozenset(
+    {
+        # pathlib
+        "Path",
+        "PurePath",
+        "read_text",
+        "read_bytes",
+        "iterdir",
+        "glob",
+        "rglob",
+        "exists",
+        "is_file",
+        "is_dir",
+        "is_symlink",
+        "stat",
+        "st_size",
+        "st_mtime",
+        "name",
+        "suffix",
+        "suffixes",
+        "stem",
+        "parent",
+        "parents",
+        "parts",
+        "as_posix",
+        "joinpath",
+        "relative_to",
+        "with_suffix",
+        "with_name",
+        "resolve",
+        # file object from a read-mode ``open``
+        "read",
+        "readline",
+        "readlines",
+        # str / bytes
+        "splitlines",
+        "split",
+        "rsplit",
+        "strip",
+        "lstrip",
+        "rstrip",
+        "join",
+        "startswith",
+        "endswith",
+        "lower",
+        "upper",
+        "count",
+        "find",
+        "rfind",
+        "index",
+        "partition",
+        "rpartition",
+        "isdigit",
+        "isspace",
+        "decode",
+        "encode",
+        # containers (in-memory only)
+        "keys",
+        "values",
+        "items",
+        "append",
+        "extend",
+        "add",
+        # json (keyword hooks are refused by the keyword allow-list)
+        "loads",
+        "load",
+        "dumps",
+        # re
+        "compile",
+        "search",
+        "match",
+        "fullmatch",
+        "findall",
+        "finditer",
+        "sub",
+        "subn",
+        "escape",
+        "group",
+        "groups",
+        "start",
+        "end",
+        "span",
+        "IGNORECASE",
+        "MULTILINE",
+        "DOTALL",
+        "I",
+        "M",
+        "S",
+        # glob / fnmatch
+        "iglob",
+        "fnmatch",
+        "filter",
+        # collections
+        "Counter",
+        "most_common",
+        # datetime
+        "datetime",
+        "date",
+        "time",
+        "now",
+        "fromtimestamp",
+        "isoformat",
+        "strftime",
+    }
+)
+#: Keyword arguments a call may pass. ``key=``, ``default=``, ``object_hook=``,
+#: ``cls=``, ``opener=`` take callables; ``file=``/``stream=`` take a writer.
+#: ``mode=`` is admitted only for builtin ``open`` with a literal read mode.
+_PY_ALLOWED_KEYWORDS = frozenset(
+    {
+        "encoding",
+        "errors",
+        "reverse",
+        "sep",
+        "end",
+        "flush",
+        "maxsplit",
+        "flags",
+        "count",
+        "indent",
+        "sort_keys",
+        "ensure_ascii",
+        "recursive",
+        "start",
+        "mode",
+    }
+)
+_PY_READ_MODES = frozenset({"r", "rb", "rt", "br", "tr"})
+
+
+def _py_open_read_only(call: object) -> bool:
+    """Is a builtin ``open(...)`` call literally a read?
+
+    At most ``file, mode`` positionally: ``opener`` is ``open``'s eighth
+    positional parameter and can do anything with the path.
+    """
+    import ast
+
+    assert isinstance(call, ast.Call)
+    if len(call.args) > 2:
+        return False
+    mode: ast.expr | None = call.args[1] if len(call.args) > 1 else None
+    for kw in call.keywords:
+        if kw.arg == "mode":
+            mode = kw.value
+    if mode is None:
+        return True
+    return (
+        isinstance(mode, ast.Constant)
+        and isinstance(mode.value, str)
+        and mode.value in _PY_READ_MODES
+    )
+
+
+def _py_small_int(node: object) -> bool:
+    """A literal int, optionally negated (``x[0]``, ``x[-2500:]``)."""
+    import ast
+
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.USub, ast.UAdd)):
+        node = node.operand
+    return (
+        isinstance(node, ast.Constant)
+        and isinstance(node.value, int)
+        and not isinstance(node.value, bool)
+    )
+
+
+def python_code_read_only(code: str) -> bool:
+    """Can ``python -c CODE`` be PROVEN to write, delete and run nothing?
+
+    WHY (incident 2026-11-13, lop-remote-node-2 0.102.2): a parent printing
+    FAILED/passed lines from its child coder's logs with a ``pathlib``
+    one-liner was refused as dangerous-delete — the backstop treats every
+    path a non-read-only program mentions as a possible write, and nothing
+    told a print loop from ``shutil.rmtree``.
+
+    CONSTRAINT: guardrails only get more precise, never looser for a real
+    delete, so this proves, it does not guess — by CONSTRUCTION (see
+    ``_PY_ALLOWED_NODES``): every node type, import, name, attribute, keyword
+    and subscript must be on an allow-list. Consequences the lists alone do
+    not express, each enforced below:
+
+    - imports only as unconditional top-level statements (direct children
+      of the module): static analysis cannot tell which branch runs, so an
+      ``import re as exec`` under ``if 0:`` (or in a loop that never
+      iterates, a function, a comprehension) would be counted as imported
+      while at run time the name is still the real builtin (review r3 M4 —
+      real files deleted);
+    - no binding of ANY name in ``dir(builtins)`` — assignment, loop or
+      comprehension target, import alias — not only the allowed ones, and
+      no binding of an imported name; so a callee name is either an allowed
+      builtin that is never rebound or a top-level import, whatever branch
+      runs;
+    - a ``Name`` is loaded only if it is an allowed builtin, a top-level
+      import, or bound by this program;
+    - a call's callee is an allowed builtin, an imported name, or an allowed
+      attribute — never a local variable or a subscript, so a callable taken
+      as a value (``s = re.sub``) cannot dodge the per-call checks;
+    - no ``*``/``**`` anywhere; keywords only from ``_PY_ALLOWED_KEYWORDS``;
+    - subscripts only by a literal int or int slice (``b["getattr"]`` is out);
+    - builtin ``open`` only as a callee with a literal read mode;
+    - ``sub``/``subn`` only with literal leading arguments, so the
+      replacement is a string, never a callable;
+    - no dunder or ``_``-prefixed name or alias.
+
+    Anything else — a parse error, an unlisted node or name — is ``False``
+    and keeps the conservative ranking (a judge call, never a LOW).
+    """
+    import ast
+    import builtins
+
+    try:
+        tree = ast.parse(code)
+    except (SyntaxError, ValueError):
+        return False
+    nodes = list(ast.walk(tree))
+    if any(type(n).__name__ not in _PY_ALLOWED_NODES for n in nodes):
+        return False
+    # Only an unconditional top-level import is known to have run before a
+    # later call by its name; anything nested may never execute.
+    top_level = {id(n) for n in tree.body}
+    imported: set[str] = set()
+    bound: set[str] = set()
+    for node in nodes:
+        if isinstance(node, (ast.Import, ast.ImportFrom)) and id(node) not in top_level:
+            return False
+        if isinstance(node, ast.Import):
+            for a in node.names:
+                if a.name not in _PY_READ_MODULES:
+                    return False
+                imported.add(a.asname or a.name)
+        elif isinstance(node, ast.ImportFrom):
+            if node.level or node.module not in _PY_READ_MODULES:
+                return False
+            for a in node.names:
+                if a.name not in _PY_ALLOWED_ATTRS:
+                    return False  # also ``*``
+                imported.add(a.asname or a.name)
+        elif isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store):
+            bound.add(node.id)
+    if any(n.startswith("_") for n in imported | bound):
+        return False
+    # Rebinding a builtin or an import would let a later call by that name
+    # run whatever was bound; an import shadowing a builtin likewise. Every
+    # builtin name, not just the allowed ones: an alias that shadows ``exec``
+    # is exactly how a denied builtin would sneak back in as a callee.
+    builtin_names = frozenset(dir(builtins)) | _PY_ALLOWED_BUILTINS
+    if bound & (imported | builtin_names) or imported & builtin_names:
+        return False
+    callees = {id(n.func) for n in nodes if isinstance(n, ast.Call)}
+    known = _PY_ALLOWED_BUILTINS | imported | bound
+    for node in nodes:
+        if isinstance(node, ast.Name):
+            if node.id not in known:
+                return False
+            if node.id == "open" and id(node) not in callees:
+                return False  # ``o = open`` can be called later with any mode
+        elif isinstance(node, ast.Attribute):
+            if node.attr not in _PY_ALLOWED_ATTRS or not isinstance(node.ctx, ast.Load):
+                return False
+        elif isinstance(node, ast.Subscript):
+            if not isinstance(node.ctx, ast.Load):
+                return False
+            index = node.slice
+            if isinstance(index, ast.Slice):
+                parts = (index.lower, index.upper, index.step)
+                if any(p is not None and not _py_small_int(p) for p in parts):
+                    return False
+            elif not _py_small_int(index):
+                return False
+        elif isinstance(node, ast.Dict):
+            if any(k is None for k in node.keys):
+                return False  # ``{**d}``
+        elif isinstance(node, ast.comprehension):
+            if node.is_async:
+                return False
+        elif isinstance(node, ast.FormattedValue):
+            pass  # its spec is a JoinedStr whose parts this walk checks too
+        elif isinstance(node, ast.Call):
+            func = node.func
+            if isinstance(func, ast.Name):
+                if func.id not in _PY_ALLOWED_BUILTINS and func.id not in imported:
+                    return False
+                callee = func.id
+            elif isinstance(func, ast.Attribute):
+                callee = func.attr
+            else:
+                return False
+            if any(kw.arg not in _PY_ALLOWED_KEYWORDS for kw in node.keywords):
+                return False  # also ``**kw`` (``arg is None``)
+            if callee == "open" and isinstance(func, ast.Name):
+                if not _py_open_read_only(node):
+                    return False
+            elif any(kw.arg == "mode" for kw in node.keywords):
+                return False
+            if callee in ("sub", "subn"):
+                # ``re.sub(p, repl, s)`` / ``rx.sub(repl, s)``: untyped, so
+                # every argument before the subject must be a literal string.
+                if not node.args or any(
+                    not (isinstance(a, ast.Constant) and isinstance(a.value, str))
+                    for a in node.args[:-1]
+                ):
+                    return False
+    return True
+
+
+#: Interpreter flags that change nothing the read-only proof relies on. Any
+#: other flag before ``-c`` (``-X``, ``-W``, ``-m``…) makes it unprovable.
+_PY_SAFE_FLAGS = frozenset({"-I", "-E", "-s", "-S", "-B", "-u", "-q", "-P", "-b", "-bb"})
+#: Environment that makes ``python`` import or run code from somewhere else
+#: at start-up, write a file, or change which interpreter/stdlib runs:
+#: ``PYTHONPATH``/``PYTHONHOME``/``PYTHONPLATLIBDIR``/``PYTHONUSERBASE``
+#: (where ``site``/stdlib/``sitecustomize`` load from), ``PYTHONSTARTUP``/
+#: ``PYTHONINSPECT`` (run a file / go interactive), ``PYTHONWARNINGS``
+#: (``error::mod.Cls`` imports ``mod`` at start-up; review r1 m1),
+#: ``PYTHONBREAKPOINT`` (imports a callable by name), ``PYTHON_PRESITE``
+#: (imports a module before ``site``), ``PYTHONEXECUTABLE`` (macOS
+#: ``sys.executable``), ``PYTHONCASEOK`` (case-insensitive import: shadowing),
+#: ``PYTHONPYCACHEPREFIX`` (writes bytecode there), ``PYTHONIOENCODING``
+#: (codec looked up by name), ``PYTHONSAFEPATH`` (alters ``sys.path``; harmless
+#: when set, refused to keep the proof's assumptions fixed). Harmless knobs an
+#: operator commonly exports (``PYTHONUNBUFFERED``, ``PYTHONDONTWRITEBYTECODE``,
+#: ``PYTHONUTF8``) are deliberately not here: refusing them would re-break the
+#: incident read for no safety gain.
+_PY_STARTUP_ENV = (
+    "PYTHONPATH",
+    "PYTHONHOME",
+    "PYTHONPLATLIBDIR",
+    "PYTHONUSERBASE",
+    "PYTHONSTARTUP",
+    "PYTHONINSPECT",
+    "PYTHONWARNINGS",
+    "PYTHONBREAKPOINT",
+    "PYTHON_PRESITE",
+    "PYTHONEXECUTABLE",
+    "PYTHONCASEOK",
+    "PYTHONPYCACHEPREFIX",
+    "PYTHONIOENCODING",
+    "PYTHONSAFEPATH",
+)
+#: A cwd entry ``python -c`` would import before the stdlib (``sys.path[0]``
+#: is the cwd): ``pathlib`` importing a planted ``fnmatch.py`` runs it.
+_PY_SHADOW_SUFFIXES = (".py", ".pyc", ".so", ".pyd", ".pth")
+
+
+def _cwd_shadows_imports(cwd: str) -> bool:
+    try:
+        entries = list(os.scandir(cwd))
+    except OSError:
+        return True
+    for e in entries:
+        if e.name.endswith(_PY_SHADOW_SUFFIXES):
+            return True
+        try:
+            if e.is_dir() and os.path.exists(os.path.join(e.path, "__init__.py")):
+                return True
+        except OSError:
+            return True
+    return False
+
+
 def _in_place_edit(name: str, args: list[Expanded]) -> bool:
     """``sed -i``/``--in-place``, or perl with ``i`` in a short cluster (``-pi``)."""
     for w in args:
@@ -1545,6 +2072,28 @@ def _split_cluster(name: str, cluster: str) -> tuple[str, str | None]:
         if ch in letters:
             return cluster[:k], cluster[k + 1 :]
     return cluster, None
+
+
+def _sed_quiet(args: list[Expanded]) -> bool:
+    """Whether a sed command line asks for ``-n``/``--quiet``/``--silent``.
+
+    Review M1 (PR #3816): under GNU sed, ``-n -i ''`` runs the empty script
+    ``''`` with output suppressed and so truncates the next word's file in
+    place; the BSD ``-i ''`` reading must not apply then. Scans every option
+    word, a cluster up to its first script letter (``-ni``, ``-in``), and
+    stops at ``--``. A script word that merely looks like ``-n`` only makes
+    the reading stricter.
+    """
+    for w in args:
+        t = w.text
+        if t == "--":
+            return False
+        if t in ("--quiet", "--silent"):
+            return True
+        if t.startswith("-") and not t.startswith("--") and len(t) > 1:
+            if "n" in _split_cluster("sed", t[1:])[0]:
+                return True
+    return False
 
 
 @dataclass
@@ -1630,6 +2179,79 @@ def _group_closes(text: str) -> int:
             continue
         break
     return count
+
+
+#: A word that changes the shell's directory, or how a later ``cd`` resolves,
+#: anywhere in a ``for`` body (review round 2 m1 on PR #3816). Quote- and
+#: context-blind on purpose: a match only makes a relative glob pin opaque,
+#: so an ``echo cd`` over-blocking is the safe direction.
+_BODY_MOVES_RE = re.compile(
+    r"(?<![\w./~$-])(?:cd|pushd|popd)(?![\w./-])"
+    r"|(?<![\w./~$-])set(?:\s+\S+)*?\s+(?:[-+][A-Za-z]*P|[-+]o\b|\$)"
+)
+_LOOP_OPENERS = ("for", "while", "until", "select")
+#: Words that may sit in front of a loop keyword or ``done`` in command
+#: position (review round 3 m1). ``time`` takes an optional ``-p``.
+_LOOP_LEAD_WORDS = ("time", "!", "if", "then", "else", "elif", "do")
+
+
+def _command_word(text: str) -> str:
+    """The word in command position of a piece, past reserved lead words.
+
+    Strips leading ``time [-p]``, ``!``, ``if``, ``then``, ``else``, ``elif``,
+    ``do`` and group openers ``{``/``(`` (not ``((``, arithmetic), and trailing
+    ``)``/``}`` glued to the word (``done)`` closes a loop in a subshell).
+    """
+    head = text.strip()
+    while head:
+        word = head.split(None, 1)[0]
+        if word in _LOOP_LEAD_WORDS:
+            head = head[len(word) :].lstrip()
+            if word == "time" and head.split(None, 1)[:1] == ["-p"]:
+                head = head[2:].lstrip()
+        elif head[:1] in ("(", "{") and head[:2] != "((":
+            head = head[1:].lstrip()
+        else:
+            return word.rstrip(")}")
+    return ""
+
+
+def _for_body_moves(pieces: Sequence[tuple[str, bool, str]], index: int) -> bool:
+    """Whether the loop opened at ``pieces[index]`` changes directory in its body.
+
+    Review round 2 m1 (PR #3816): the use-site cwd check in
+    ``_Walker._for_glob_words`` sees the body ONCE, in order, with subshell
+    state restored, so two shapes real bash runs against the state root slip
+    past it: a ``cd`` AFTER the use (``do : > $f; cd ~/.local-operator;
+    done`` re-anchors ``$f`` from the second iteration on) and a ``cd`` in a
+    subshell (``do (cd ~/.local-operator && sed -i … $f)``). Rather than
+    model iterations and subshells, a relative glob is pinned only when the
+    body, nested loops and subshells included, holds no ``cd``/``pushd``/
+    ``popd``/``set -P`` at all.
+
+    The extent runs to the matching ``done`` (nested loops counted). Review
+    round 3 m1: ``done`` and the loop openers count only in COMMAND position
+    (:func:`_command_word`) — ``echo done`` is an argument, and a nested
+    ``time while …`` / ``then while …`` is a loop whose ``done`` must not
+    close this one. Either mistake ended the scan before a later ``cd``.
+    When no matching ``done`` is found the extent is unknown, so this fails
+    closed (``True``: do not pin).
+    """
+    depth = 0
+    body: list[str] = []
+    for text, _flag, _op in pieces[index:]:
+        word = _command_word(text)
+        if word in _LOOP_OPENERS:
+            depth += 1
+        elif word == "done":
+            depth -= 1
+        if not body and depth != 1:
+            return True  # this piece does not open a loop as parsed: fail closed
+        # The header (``for f in <words>``) is excluded: a list word is data.
+        body.append(text if body else "")
+        if depth <= 0:
+            return bool(_BODY_MOVES_RE.search("\n".join(body[1:])))
+    return True
 
 
 #: A STDOUT redirect: fd-less or ``1>``, or ``&>`` (R6-2). ``2>err.log`` only
@@ -1738,7 +2360,15 @@ class _Walker:
             for name, value in env.items()
         }
         self.state = _State(env=private_env, cwd=cwd, home=home)
+        #: ``PATH`` as the command inherits it: ``_inline_read_only`` trusts
+        #: a bare ``python3`` only while this command has not changed it.
+        self.inherited_path = env.get("PATH")
         self.result = Resolution()
+        #: Non-read-only programs an earlier part of THIS command runs (each
+        #: reaches ``_backstop``). Any of them could plant a module in the cwd
+        #: before a later ``python -c``, so ``_inline_read_only`` holds only
+        #: for the first one (see there).
+        self.programs_run = 0
         #: Paths an earlier segment of THIS command made into a symlink (S7):
         #: what they point at is resolved only at run time.
         self.linked: set[str] = set()
@@ -1764,6 +2394,16 @@ class _Walker:
         #: the loop variable; ``VAR`` for ``D=…/$VAR`` inside the body), so one
         #: iteration rewrites every related reference together.
         self.for_roots: dict[str, str] = {}
+        #: ``for VAR in <glob> …`` bindings, by the key inside the variable's
+        #: ``FOR_GLOB_MARK`` value: one ``(absolute text, absolute pattern)``
+        #: per list word (``pattern`` is ``None`` for a literal word), plus the
+        #: cwd of the ``for`` itself and whether every word was absolute. Bash
+        #: expands a relative glob to RELATIVE words, so the pin holds only
+        #: where the cwd still equals the loop's (review B1, PR #3816).
+        self.for_globs: dict[str, tuple[list[tuple[str, str | None]], str | None, bool]] = {}
+        #: Whether the ``for`` being walked changes directory anywhere in its
+        #: body; set per piece by ``walk`` from :func:`_for_body_moves`.
+        self.for_body_moves = False
 
     # -- state isolation (R4) ----------------------------------------------------
     def _save(self) -> _Snapshot:
@@ -1866,6 +2506,8 @@ class _Walker:
                 stages=[p[0] for p in pieces[start:index]],
                 earlier=[item for item in produced_so_far if not item.provably_sunk()],
             )
+            # Read by ``_for`` when this piece opens a ``for`` (review round 2 m1).
+            self.for_body_moves = _for_body_moves(pieces, index)
             if isolated:
                 snap = self._save()
                 self._segment(
@@ -2132,7 +2774,10 @@ class _Walker:
         # ``e`` such as ``-pe``), EVERY operand is a file; otherwise the
         # first operand is the script.
         files: list[Expanded] = []
+        #: Words only GNU sed's reading of ``-i ''`` makes files (review M1).
+        gnu_files: list[Expanded] = []
         script_by_flag = False
+        quiet = name == "sed" and _sed_quiet(args)
         k = 0
         while k < len(args):
             t = args[k].text
@@ -2158,6 +2803,39 @@ class _Walker:
                     script_by_flag = True
                     k += 1 if attached else 2
                     continue
+                if (
+                    # Review M1 (PR #3816): never ``gsed``, which is always GNU,
+                    # and never with ``-n``/``--quiet``/``--silent``: GNU's
+                    # ``-i`` takes only an ATTACHED suffix, so there ``''`` is
+                    # the script, the next word a file, and ``-n`` with an empty
+                    # script truncates it (``gsed -n -i '' config.yml``).
+                    name == "sed"
+                    and not quiet
+                    and _flags.endswith("i")
+                    and k + 1 < len(args)
+                    and args[k + 1].text == ""
+                    and not args[k + 1].opaque
+                    and not args[k + 1].empty
+                ):
+                    # BSD sed (macOS ``sed``): ``-i ''`` is ``-i`` with an EMPTY
+                    # backup suffix, so the '' is not the script and the word
+                    # after it is not a file. Read as GNU instead, '' would be
+                    # the script, which edits nothing: either way the next word
+                    # is never rewritten, so it is never a target. Before,
+                    # ``sed -i '' '/"$k"/d' f`` ranked the SCRIPT as a path (an
+                    # unset ``$k`` made it an "expanded empty" HIGH), and with
+                    # ``-e`` the '' itself resolved to the cwd as an overwrite.
+                    # Only a literal '' qualifies: ``-i "$SUF"`` may hold a name.
+                    # ``sed`` is GNU on Linux, though, where the next word IS a
+                    # file: rank it under that reading too, max of both. It is
+                    # ``critical_only`` because without ``-n`` GNU rewrites it
+                    # unchanged, so only a protected path (where even that is
+                    # forbidden) should move the verdict; a script word read
+                    # as a path must not re-create the HIGH this skip removed.
+                    if k + 2 < len(args) and not args[k + 2].text.startswith("-"):
+                        gnu_files.append(args[k + 2])
+                    k += 2
+                    continue
                 k += 1
                 continue
             if t.startswith("--"):
@@ -2165,8 +2843,17 @@ class _Walker:
                 continue
             files.append(args[k])
             k += 1
-        for w in files if script_by_flag else files[1:]:
+        chosen = files if script_by_flag else files[1:]
+        for w in chosen:
             self._add(w, "overwrite", name)
+        chosen_ids = {id(w) for w in chosen}
+        for w in gnu_files:
+            if id(w) in chosen_ids:
+                continue  # both readings already agree it is a file
+            before = len(self.result.targets)
+            self._add(w, "overwrite", name)
+            for target in self.result.targets[before:]:
+                target.critical_only = True
         return
 
     # -- program handlers ------------------------------------------------------
@@ -2468,6 +3155,51 @@ class _Walker:
         if not values:
             st.env[var] = OPAQUE_MARK
             return
+        if (
+            st.cwd is not None
+            and any(v.pattern is not None for v in values)
+            and len(values) <= _MAX_FOR_COMBINATIONS
+            and all(not v.opaque and not v.empty and CREDENTIAL_MARK not in v.text for v in values)
+        ):
+            # FIELD CASE (2026-11-11, session a85e507ffdfa): ``for f in
+            # src/i18n/catalogues/*/ui.teamBridge.json; do sed -i '' '/…/d' $f;
+            # done`` in the session's own worktree bound ``$f`` to OPAQUE_MARK,
+            # so the edit's target collapsed onto the worktree ROOT and went
+            # to the judge as an opaque delete there. Bash iterates the glob's
+            # matches (or the pattern itself when nothing matches), so
+            # ``CMD $f`` inside the body touches exactly what ``CMD <glob>``
+            # would: the target IS that glob, ranked by the existing glob rules
+            # (CRITICAL when it reaches a protected name, LOW for an ordinary
+            # match set). Resolved against the cwd of the ``for`` itself, as
+            # bash expands it there. But bash binds ``$f`` to the RELATIVE match
+            # (``config.yml``), so a ``cd``/``pushd`` in the body re-anchors it:
+            # ``for f in *.yml; do cd ~/.local-operator && sed -i … $f`` edits
+            # the state root's config.yml (review B1, reproduced in real bash).
+            # The loop's cwd is recorded so ``_for_glob_words`` pins only where
+            # the use site's cwd still equals it, or every word was absolute.
+            key = str(len(self.for_globs))
+            entries: list[tuple[str, str | None]] = []
+            for v in values:
+                text = v.text if v.text.startswith("/") else os.path.join(st.cwd, v.text)
+                pattern = None
+                if v.pattern is not None:
+                    pattern = (
+                        v.pattern
+                        if v.pattern.startswith("/")
+                        else os.path.join(_glob_escape(st.cwd), v.pattern)
+                    )
+                entries.append((text, pattern))
+            # A relative word is never pinned when the body moves directory
+            # ANYWHERE (review round 2 m1): ``absolute`` is then the only way
+            # to pin, and a relative glob stays opaque at every use site.
+            absolute = all(v.text.startswith("/") for v in values)
+            if not absolute and self.for_body_moves:
+                entries_cwd: str | None = None
+            else:
+                entries_cwd = st.cwd
+            self.for_globs[key] = (entries, entries_cwd, absolute)
+            st.env[var] = FOR_GLOB_MARK + key + OPAQUE_MARK
+            return
         if any(v.opaque or v.pattern is not None for v in values):
             st.env[var] = (
                 CREDENTIAL_MARK if any(CREDENTIAL_MARK in v.text for v in values) else OPAQUE_MARK
@@ -2669,6 +3401,49 @@ class _Walker:
             raw = w.text if w.text.startswith("/") else os.path.join(base, w.text)
             self.result.touched.append(Target(path=os.path.normpath(raw), op="touch", program="ln"))
 
+    def _inline_read_only(self, name: str, words: list[Expanded], assigns: list[str]) -> bool:
+        """Is this exactly ``python[3] [safe flags] -c CODE [argv…]`` with CODE
+        proven read-only (:func:`python_code_read_only`)?
+
+        Fail closed on everything the proof cannot see: a wrapper or inline
+        assignment in front (``env``, ``PYTHONPATH=…``), start-up environment
+        that imports other code, an opaque or substituted CODE word, an
+        unknown cwd or one holding importable modules that would shadow the
+        stdlib, and any earlier non-read-only program or write in the same
+        command (it may plant such a module before python starts). Trailing
+        argv words are inert: CODE cannot reach ``sys.argv`` without ``sys``.
+        """
+        st = self.state
+        if not words or not _INTERPRETER_RE.fullmatch(name) or name.startswith("node"):
+            return False
+        # Pin the interpreter (review r1 M2): ``./python3``, ``/abs/python3``
+        # or a ``PATH`` this command rewrote can run a planted executable
+        # named ``python3`` that ignores CODE. Only a bare word looked up on
+        # the INHERITED ``PATH`` is the interpreter the proof is about.
+        if words[0].text != name or "/" in words[0].text or words[0].opaque or assigns:
+            return False
+        if st.env.get("PATH") != self.inherited_path:
+            return False
+        if self.programs_run or self.named or self.linked or self.result.targets:
+            return False
+        if any(t.op != "touch" for t in self.result.touched) or self.result.created:
+            return False
+        if any(st.env.get(k) for k in _PY_STARTUP_ENV):
+            return False
+        if st.cwd is None or _cwd_shadows_imports(st.cwd):
+            return False
+        rest = words[1:]
+        while rest and rest[0].text in _PY_SAFE_FLAGS:
+            rest = rest[1:]
+        if len(rest) < 2 or rest[0].text != "-c":
+            return False
+        code = rest[1]
+        if code.opaque or code.pattern is not None or code.substitutions:
+            return False
+        if OPAQUE_MARK in code.text or TEMP_MARK in code.text:
+            return False
+        return python_code_read_only(code.text)
+
     def _backstop(
         self, name: str, args: list[Expanded], assigns: list[str], exempt: set[int]
     ) -> None:
@@ -2690,6 +3465,8 @@ class _Walker:
         """
         st = self.state
         script = _interpreter_script(name, args, st.cwd)
+        read_only_code = self._inline_read_only(name, args, assigns)
+        self.programs_run += 1
         outputs = _output_word_ids(args)
         words = [w for w in args if id(w) not in exempt]
         texts = [(w.text, id(w) in outputs) for w in words] + [
@@ -2720,6 +3497,7 @@ class _Walker:
                             op="touch",
                             program=name or "a program",
                             script=script,
+                            read_only_code=read_only_code and not as_output,
                             as_output=as_output,
                         )
                     )
@@ -2831,6 +3609,20 @@ class _Walker:
     # -- recording ---------------------------------------------------------------
     def _add(self, exp: Expanded, op: str, program: str, *, selected: bool = False) -> None:
         if exp.vanished and not exp.empty:
+            return
+        pinned = self._for_glob_words(exp) if op in ("overwrite", "append") else None
+        if pinned is not None:
+            # ``$f`` from ``for f in <glob>``: one target per list word, each
+            # the glob (or literal) bash iterates — never the opaque cwd.
+            # WRITES ONLY (in-place edits and redirections here; a copy's
+            # overwritten destination is folded the same way in
+            # ``_add_overwrite_dest``):
+            # a delete/move keeps the opaque reading, because a glob DELETE
+            # ranks by rules that are looser than the opaque judge for some
+            # shapes (``rm -rf .worktrees/*`` ranks LOW today, foreign trees
+            # included), and this fix must not widen what a loop may remove.
+            for word in pinned:
+                self._add(word, op, program, selected=selected)
             return
         target = _target(exp, op, program, self.state)
         target.selected = selected
@@ -3021,6 +3813,30 @@ class _Walker:
         if known and pointee is not None and key is not None:
             self._set_link(key, pointee)
 
+    def _for_glob_words(self, exp: Expanded) -> list[Expanded] | None:
+        """The list words a whole-word ``$VAR`` bound by a glob ``for`` stands for.
+
+        Only when the word is EXACTLY that one value (``$f``, ``"$f"``,
+        ``${f}``): a prefix, suffix or second expansion leaves it opaque, the
+        fail-closed reading it had before.
+        """
+        text = exp.text
+        if not text.startswith(FOR_GLOB_MARK) or not text.endswith(OPAQUE_MARK):
+            return None
+        key = text[len(FOR_GLOB_MARK) : -len(OPAQUE_MARK)]
+        binding = self.for_globs.get(key)
+        if binding is None or exp.substitutions or exp.empty or exp.temp:
+            return None
+        entries, loop_cwd, absolute = binding
+        # ``loop_cwd`` is ``None`` when the body moves directory anywhere
+        # (review round 2 m1): a relative glob is then never pinned.
+        if not absolute and (loop_cwd is None or self.state.cwd != loop_cwd):
+            # Review B1: a relative match moved with a ``cd``/``pushd`` (or an
+            # unknowable one, cwd ``None``) in the body; the pin would name
+            # the wrong file. The opaque reading is the fail-closed one.
+            return None
+        return [Expanded(text=t, pattern=p, opaque_contained=False) for t, p in entries]
+
     def _iterations(self, exp: Expanded) -> list[tuple[tuple[str, ...], dict[str, str]]] | None:
         """``(loop vars, {ref name: value})`` for every iteration after the first.
 
@@ -3090,6 +3906,16 @@ class _Walker:
         sources: list[Expanded] | None = None,
         flags: list[str] | None = None,
     ) -> None:
+        pinned = self._for_glob_words(exp)
+        if pinned is not None:
+            # Review m2 (PR #3816): ``for f in ~/.local-operator/*.yml; do cp x
+            # $f`` hit the opaque early return below and named NOTHING (LOW),
+            # while the direct ``cp x ~/.local-operator/config.yml`` is
+            # CRITICAL. The destination is overwritten, so it takes the same
+            # pin as a redirection; never looser, since before it named nothing.
+            for word in pinned:
+                self._add(word, "overwrite", program)
+            return
         if exp.opaque or exp.pattern is not None:
             return
         path, _ = _absolute(exp.text, self.state.cwd)

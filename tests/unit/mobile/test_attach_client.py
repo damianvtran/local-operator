@@ -1743,3 +1743,47 @@ async def test_the_capability_is_resolved_per_dial_from_the_record(
             await client.detach()
         finally:
             r.close()
+
+
+@pytest.mark.asyncio
+async def test_a_reset_after_the_retiring_frame_keeps_the_retiring_reason() -> None:
+    """A reset that follows a read ``retiring`` frame must not erase it.
+
+    This is the CI witness's sequence (gate 42969069065): the owner retired with
+    exit 0, and the viewer heard ``'owner connection reset'``. The owner is
+    loopback TCP, so a close with unread inbound bytes is an RST. Before the fix
+    the pump's reset clause overwrote ``reason`` unconditionally, and the viewer
+    recovered a planned refresh as owner death.
+    """
+    disconnected: list[str] = []
+    client = AttachClient(lambda p: None, disconnected.append)
+    reader = asyncio.StreamReader()
+    client._reader = reader
+    retiring: list[dict[str, Any]] = []
+    client._on_retiring = retiring.append
+    pump = asyncio.create_task(client._pump())
+
+    _feed(reader, {"op": "retiring", "session_id": "s", "reason": "stale-build"})
+    # The frame is consumed BEFORE the reset lands, the ordering under test.
+    await _wait_until(lambda: bool(retiring))
+    reader.set_exception(ConnectionResetError("peer reset"))
+    await asyncio.wait_for(pump, timeout=5)
+
+    assert disconnected == [RETIRING_REASON], disconnected
+
+
+@pytest.mark.asyncio
+async def test_a_reset_with_no_announcement_is_still_a_reset() -> None:
+    """Control: an unannounced reset still reports owner loss, unchanged."""
+    disconnected: list[str] = []
+    client = AttachClient(lambda p: None, disconnected.append)
+    reader = asyncio.StreamReader()
+    client._reader = reader
+    pump = asyncio.create_task(client._pump())
+
+    _feed(reader, {"op": "aside_delta", "req": 1, "data": {"delta": "x"}})
+    await asyncio.sleep(0)
+    reader.set_exception(ConnectionResetError("peer reset"))
+    await asyncio.wait_for(pump, timeout=5)
+
+    assert disconnected == ["owner connection reset"], disconnected

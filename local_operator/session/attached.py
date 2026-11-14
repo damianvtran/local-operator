@@ -8791,6 +8791,44 @@ class AttachedSession:
         record, _ = await asyncio.to_thread(find_runtime_record, self._config_dir, self._session_id)
         return record is None
 
+    async def _lost_owner_retired_for_refresh(self, lost: SessionRecord | None) -> bool:
+        """Whether the owner run ``lost`` left a durable "retired for a newer build" record.
+
+        This is the fallback for a lost ``retiring`` frame. The owner's
+        ``runtime-exit.json`` (``journal.write_exit_record``) outlives the socket
+        and says why the run left. Only the build-refresh exits in ``process.py``
+        write a reason that starts with ``retiring``. ``rescue._exit_record_explains``
+        reads the same vocabulary.
+
+        Three conditions guard against hiding a real crash:
+
+        * the record must cover THIS run (pid and ``started_at``), so a previous
+          run's clean retirement cannot explain a later death;
+        * ``requested`` must be False, because a requested exit is a stop and
+          not a refresh;
+        * the placement must be local, because a remote owner's exit record
+          is not on this machine.
+
+        A crash writes no record, so it still reaches the cold fallback with
+        refresh=False, visibly. A move does not write a ``retiring`` reason
+        either, so INV-1's "never re-engage mid-handoff" rule is kept.
+        """
+        if lost is None or not self._owner.placement.is_local:
+            return False
+        from local_operator.session.runtime import journal
+
+        directory = self._config_dir / "sessions" / self._session_id
+        try:
+            record = await asyncio.to_thread(journal.read_exit_record, directory)
+        except Exception:  # noqa: BLE001 — evidence must never fail recovery
+            logger.debug("reading the lost owner's exit record failed", exc_info=True)
+            return False
+        if record is None or record.requested:
+            return False
+        if not record.covers_run(int(lost.pid), float(lost.started_at)):
+            return False
+        return str(record.reason or "").startswith("retiring")
+
     def _unavailable_reason(self) -> str:
         """Why this facade cannot reach its owner right now, in the user's terms.
 
@@ -9174,6 +9212,9 @@ class AttachedSession:
             # this terminal for a record it never made.
             self._runtime_ready.set()  # prompts route to the stopped notice
             return
+        # The run that was lost. Captured before the loop, because a dial
+        # inside the loop replaces ``_runtime_record`` with whatever it found.
+        lost_run = self._runtime_record
         delay = 0.1
         # Under the viewer model, owner loss has a THIRD outcome beside
         # "reattached" and "took over": the runtime exited and no successor is
@@ -9361,6 +9402,30 @@ class AttachedSession:
                     self._deliberate_stop = True
                     self._runtime_ready.set()  # prompts route to the stopped notice
                     self._notify_stopped()
+                    return
+                if await self._lost_owner_retired_for_refresh(lost_run):
+                    # A planned refresh whose ``retiring`` frame never reached
+                    # this viewer (a reset overtook it; see
+                    # ``attach_client._ANNOUNCED_REASONS``). Take the same arm the
+                    # frame would have taken in ``_on_disconnected``: no turn
+                    # verdict, refresh callback, and the app engages the successor.
+                    # Without this the loop finds no record and goes cold
+                    # with refresh=False after COLD_FALLBACK_S, and nothing
+                    # engages a successor.
+                    # Checked on EVERY pass, not once: the owner writes
+                    # its exit record on its way out, which can be after the socket
+                    # dropped.
+                    logger.info(
+                        "owner of %s retired for a newer build (exit record); "
+                        "refreshing instead of recovering",
+                        self._session_id,
+                    )
+                    self._suspect_generation = None
+                    # Cleared before ``_go_cold`` so the refresh callback's engage
+                    # sees the same state as the frame path, where recovery never
+                    # started.
+                    self._recovering = False
+                    self._go_cold(refresh=True)
                     return
                 # A PEER-HELD SESSION ASKS THE OWNER SEAM, as the read attach already
                 # does (``locate`` above): a scan of THIS machine's run directory
