@@ -33,6 +33,7 @@ still rewrite the cache so the next splash is free.
 
 from __future__ import annotations
 
+import csv
 import errno
 import hashlib
 import json
@@ -2310,6 +2311,56 @@ def generation_staleness_of_process(pid: int) -> bool | None:
     both proven-current and unproven.
     """
     return _generation_comparison(pid)[1]
+
+
+def generation_code_digest(generation: Path | None) -> str:
+    """A digest of the PACKAGE'S OWN FILES in one generation, or ``""``.
+
+    The build identity a generation name cannot give: two generations installed
+    from one wheel have different names and byte-identical ``local_operator/``
+    trees. Computed from the hashes the installer recorded in the dist-info
+    ``RECORD`` (so nothing is re-read or imported), restricted to the package's
+    own paths so the dist-info's install-specific files (``direct_url.json``,
+    ``INSTALLER``) and the scripts cannot make one build look like two. ``""``
+    when the tree is gone or records no hashes (an editable install), which every
+    caller reads as "identity unproven".
+    """
+    if generation is None:
+        return ""
+    found = _distribution_at(_generation_install_root(generation))
+    if found is None:
+        return ""
+    try:
+        # The RECORD text itself, not ``Distribution.files``: on 3.12+ that view
+        # drops rows whose file is missing on disk, which would make the identity
+        # depend on what a prune or a stray delete left behind.
+        rows = csv.reader((found.read_text("RECORD") or "").splitlines())
+        entries = sorted(
+            f"{row[0]}={row[1]}"
+            for row in rows
+            if len(row) >= 2 and row[1] and row[0].startswith("local_operator/")
+        )
+    except Exception:  # noqa: BLE001 — an unreadable RECORD is "no identity"
+        logger.debug("RECORD unreadable under %s", generation, exc_info=True)
+        return ""
+    if not entries:
+        return ""
+    return hashlib.sha256("\n".join(entries).encode("utf-8")).hexdigest()
+
+
+def process_build_matches_current(pid: int) -> bool:
+    """True only when ``pid`` provably runs the SAME CODE as ``current``.
+
+    For a surface deciding whether "restart the relay" is worth saying: a
+    process on an older generation NAME whose package files hash identically to
+    the pointer's is not behind anything. False whenever either side's identity
+    cannot be read, so an unproven match never silences a real staleness.
+    """
+    running = generation_of_process(pid)
+    if running is None:
+        return False
+    mine = generation_code_digest(running)
+    return bool(mine) and mine == generation_code_digest(current_generation())
 
 
 def _generation_comparison(pid: int) -> tuple[Path | None, bool | None]:

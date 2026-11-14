@@ -95,7 +95,7 @@ class _FakeViewer:
         self.slashes: list[tuple[str, str]] = []
         self.waited: list[str] = []
 
-    async def bind_runtime(self) -> None:
+    async def bind_runtime(self, *, deadline: float | None = None) -> None:
         self.bound = True
 
     async def dispose(self) -> None:
@@ -419,7 +419,7 @@ class _BlindViewer(_FakeViewer):
         super().__init__()
         self.rung = rung
 
-    async def bind_runtime(self) -> None:
+    async def bind_runtime(self, *, deadline: float | None = None) -> None:
         if self.rung == "bind":
             raise ConnectionError("the remote owner did not send its state")
         self.bound = True
