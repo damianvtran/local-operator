@@ -112,10 +112,15 @@ _CANONICAL_HOSTS = {"github": "github.com", "gitlab": "gitlab.com"}
 class CredentialError(Exception):
     """No usable credential, with a message safe to show (never a value)."""
 
-    def __init__(self, kind: CredentialKind, message: str) -> None:
+    def __init__(self, kind: CredentialKind, message: str, *, lender: str = "") -> None:
         super().__init__(message)
         self.kind = kind
         self.message = message
+        #: Set when the refusal is about a mesh-LENT login (:func:`_borrowed_refusal`):
+        #: the message then already names the remedy on the lender, so a caller
+        #: must not append the generic "sign in with the gh CLI" hint after it
+        #: (QA round 1, Q1). A device label only, never a value.
+        self.lender = lender
 
 
 @dataclass(frozen=True)
@@ -198,6 +203,19 @@ def resolve(
         raise CredentialError(
             "absent", f"no credential path exists for {forge} (detect-and-link host)"
         )
+    if token.source == "brokered":
+        # A LENT TOKEN IS NEVER MEMOISED HERE (review round 1, R1-1). Its right
+        # to be used is the owner's, re-checked on every borrow by
+        # ``borrowed_git_env`` (``should_borrow`` for a revoked share or withdrawn
+        # consent, ``live_grant`` for membership/panic and grant expiry) — the
+        # same fences bash re-runs per command. A process-lifetime cache entry
+        # would skip all of them, and a PAT/owner-gh lend has no forge-side
+        # revoke to produce the 401 that would otherwise evict it. The grant
+        # cache behind ``borrowed_git_env`` is already the memo, so not caching
+        # costs a dict lookup per resolve, not an owner round-trip. The value is
+        # still registered for scrubbing before any caller can use it.
+        _register_for_scrubbing(token.value)
+        return token
     return _remember(token)
 
 
@@ -318,6 +336,12 @@ def _env_token(forge: str) -> str:
     return ""
 
 
+#: The ``session_id`` this module's borrows carry: the fetches are process-wide
+#: (no one session asked), so a fixed label names the SURFACE on the owner's
+#: audit rows. Attribution only — it authorises nothing.
+BORROW_ATTRIBUTION = "code_requests"
+
+
 @dataclass(frozen=True)
 class _Borrow:
     """What the mesh broker said about this device's github.com login.
@@ -358,7 +382,13 @@ def _borrow_github() -> _Borrow:
         logger.debug("github borrow arrangement could not be read", exc_info=True)
         return _Borrow()
     try:
-        _env, token = github_credentials.borrowed_git_env(client=client)
+        # ``session_id`` is ATTRIBUTION only (the owner's audit ``for_session``
+        # and this device's grant-cache partition, per ``borrowed_git_env``):
+        # a fixed label makes these process-wide reads legible on the owner's
+        # audit rows instead of a blank (review round 1, R1-4).
+        _env, token = github_credentials.borrowed_git_env(
+            client=client, session_id=BORROW_ATTRIBUTION
+        )
     except Exception:  # noqa: BLE001 - borrowed_git_env never raises; belt and braces
         token = ""
     if token:
@@ -380,26 +410,39 @@ def _borrowed_refusal(borrow: _Borrow) -> CredentialError:
 
     One sentence per provable cause (``healing.CAUSES``): the owner cannot be
     reached (reconnect it), this device is no longer permitted to borrow (re-share
-    or sign in here), or — the default, and what an owner whose own gh login
-    lapsed produces — the borrowed login expired, which is fixed ON the owner.
+    or sign in here), or the owner's own gh login lapsed — the borrowed login
+    expired, which is fixed ON the owner. Anything else — a broker or version
+    fault (``internal``, ``unsupported``, ``malformed_frame``, ``quota_blocked``
+    all classify ``unknown``) or no recorded refusal at all — proves nothing
+    about anyone's login, so it gets a neutral retry sentence rather than
+    sending the operator to re-login on the owner (review round 1, R1-3).
     Never a value, never a token name: only the device the operator named.
     """
-    from local_operator.network.credentials.types import CAUSE_GRANT, CAUSE_UNREACHABLE
+    from local_operator.network.credentials.types import (
+        CAUSE_GRANT,
+        CAUSE_OWNER_LOGIN,
+        CAUSE_UNREACHABLE,
+    )
 
     owner = borrow.owner or "the owner device"
     if borrow.cause == CAUSE_UNREACHABLE:
-        return CredentialError(
-            "unusable",
+        message = (
             f"Can't refresh — the GitHub login borrowed from {owner} could not be "
-            f"reached; reconnect {owner}, then refresh.",
+            f"reached; reconnect {owner}, then refresh."
         )
-    if borrow.cause == CAUSE_GRANT:
-        return CredentialError(
-            "unusable",
+    elif borrow.cause == CAUSE_GRANT:
+        message = (
             f"Can't refresh — {owner} no longer lends its GitHub login to this device; "
-            "share it again from there, or sign in here with `gh auth login`, then refresh.",
+            "share it again from there, or sign in here with `gh auth login`, then refresh."
         )
-    return CredentialError("unusable", borrowed_expired_message(owner))
+    elif borrow.cause == CAUSE_OWNER_LOGIN:
+        message = borrowed_expired_message(owner)
+    else:
+        message = (
+            f"Can't refresh — the GitHub login borrowed from {owner} is not available "
+            "right now; try again shortly."
+        )
+    return CredentialError("unusable", message, lender=owner)
 
 
 def borrowed_expired_message(owner: str) -> str:

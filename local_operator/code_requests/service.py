@@ -182,6 +182,19 @@ def plan(
     return out
 
 
+def _error_names_remedy(entry: Mapping[str, Any] | None) -> bool:
+    """Whether the stored ``refresh_error`` already carries its own remedy.
+
+    True for a mesh-LENT github.com login that failed (QA round 1, Q1): its
+    sentence names the lender and the fix there, and deliberately does NOT
+    offer "sign in here" (that would only shadow the arrangement). The generic
+    per-forge :func:`link_only_hint` appended after it would contradict it, so
+    the row carries the error's remedy alone. Read from the ``lent_by``
+    provenance recorded at the failure site, never by matching the copy.
+    """
+    return bool(entry and entry.get("refresh_error") and entry.get("lent_by"))
+
+
 def link_only_hint(ref: Mapping[str, Any] | None) -> str:
     """One line of remedy copy for a link-only row, per FORGE (finding X3).
 
@@ -331,7 +344,7 @@ def view_row(
         # SUPPRESSED while the row is pending (design §2): a first read that
         # has not resolved must not carry a remedy its reader could act on,
         # and an old UI then shows the bare link fallback instead.
-        if state != FETCH_PENDING:
+        if state != FETCH_PENDING and not _error_names_remedy(entry):
             row["link_only_hint"] = link_only_hint(ref_map)
         reason = skip_reason or str((entry or {}).get("refresh_error") or "")
         reason = reason or str(raw.get("unknown_reason") or "")
@@ -461,7 +474,7 @@ def view_for_ref(config_dir: Any, ref: Ref) -> dict[str, Any] | None:
         "stale": bool(entry.get("stale")),
         "refresh_error": entry.get("refresh_error"),
     }
-    if state != FETCH_PENDING:
+    if state != FETCH_PENDING and not _error_names_remedy(entry):
         # Same per-forge remedy copy the route's row carries (finding X3),
         # OMITTED rather than None while pending — the same rule as
         # ``view_row`` (design §2): a read that has not resolved must not
@@ -948,7 +961,9 @@ async def _fetch_one(config_dir: Any, ref: Ref, *, force: bool = False) -> bool:
     try:
         token = await asyncio.to_thread(resolve, ref.host, ref.forge)
     except CredentialError as exc:
-        changed = _record_failure(config_dir, ref, prior, exc.message, kind="credential")
+        changed = _record_failure(
+            config_dir, ref, prior, exc.message, kind="credential", lender=exc.lender
+        )
         # A gentle per-key backoff so a poll cannot re-spawn the login probe on
         # every GET; a sign-in is picked up on the next attempt after it.
         fetch_cache.note_key_failure(ref.key)
@@ -981,9 +996,17 @@ async def _handle_fetch_error(
         # ONE fresh re-resolve, then degrade to link_only. Never an error wall.
         try:
             fresh = await asyncio.to_thread(resolve, ref.host, ref.forge, fresh=True)
-        except CredentialError:
+        except CredentialError as refusal:
+            # A LENT token's failed re-resolve says WHY the lend is gone (owner
+            # unreachable, no longer lends, owner login lapsed); that beats the
+            # blanket "expired" sentence (review round 1, R1-2). A local arm keeps
+            # its rejection copy: its re-resolve failure is the same sign-in fix.
+            if token.source == "brokered":
+                message, lender = refusal.message, refusal.lender
+            else:
+                message, lender = _rejected_message(token), ""
             changed = _record_failure(
-                config_dir, ref, prior, _rejected_message(token), kind="credential"
+                config_dir, ref, prior, message, kind="credential", lender=lender
             )
             fetch_cache.note_key_failure(ref.key)
             return changed
@@ -999,7 +1022,12 @@ async def _handle_fetch_error(
         except ForgeHTTPError as second:
             if second.kind == "unauthorized":
                 changed = _record_failure(
-                    config_dir, ref, prior, _rejected_message(fresh), kind="credential"
+                    config_dir,
+                    ref,
+                    prior,
+                    _rejected_message(fresh),
+                    kind="credential",
+                    lender=fresh.lender if fresh.source == "brokered" else "",
                 )
                 fetch_cache.note_key_failure(ref.key)
                 return changed
@@ -1087,6 +1115,7 @@ def _record_failure(
     message: str,
     *,
     kind: str | None = None,
+    lender: str = "",
 ) -> bool:
     """Keep the last known row, add ``stale`` + ``refresh_error``; True when the
     RENDERED row changed.
@@ -1119,6 +1148,14 @@ def _record_failure(
     entry["refresh_error"] = message
     if kind is not None:
         entry["failure_kind"] = kind
+    # ``lent_by`` is the refusal's provenance like ``failure_kind``: the device
+    # whose lent login this message is about, so readers know the message
+    # already carries its remedy (:func:`_error_names_remedy`). Rewritten on
+    # EVERY failure — it explains this message, never an older one.
+    if lender:
+        entry["lent_by"] = lender
+    else:
+        entry.pop("lent_by", None)
     entry["stale"] = True
     entry["checked_at"] = round(time.time(), 3)
     fetch_cache.write_entry(config_dir, entry, ref=ref)
@@ -1249,6 +1286,7 @@ def _build_entry(
         # (design §2): ``fetch_state`` reads ``failure_kind`` as "the LAST
         # attempt's failure", so a stale kind must not outlive its error.
         "failure_kind": None,
+        "lent_by": None,
         "stale": False,
     }
     return entry

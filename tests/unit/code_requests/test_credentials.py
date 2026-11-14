@@ -358,6 +358,7 @@ class _FakeBorrowClient:
         self.holder = holder
         self.owner = owner
         self.asked = 0
+        self.session_ids: list = []
 
     def should_borrow(self, key: str) -> bool:
         return self.holder
@@ -367,6 +368,7 @@ class _FakeBorrowClient:
 
     def request_grant_sync(self, key: str, **kwargs):
         self.asked += 1
+        self.session_ids.append(kwargs.get("session_id"))
         return self.answer
 
     def cached_refusal(self, key: str):
@@ -469,3 +471,58 @@ def test_a_refused_borrow_still_falls_back_to_an_env_token(tmp_path: Path, monke
     monkeypatch.setattr(gh_credentials, "_client_for", lambda root: _FakeBorrowClient(refusal))
     monkeypatch.setenv("GITHUB_TOKEN", "env-synthetic-fallback")
     assert credentials.resolve("github.com", "github", home=home).source == "env"
+
+
+def test_a_revoked_lend_is_not_served_from_memory(tmp_path: Path, monkeypatch) -> None:
+    """Review round 1, R1-1: the owner revokes the share (or a panic fences the
+    mesh) AFTER a borrow; the next resolve must re-ask, exactly as bash does per
+    command, not re-serve the lent token from the process cache."""
+    home = _node_without_gh_login(tmp_path, monkeypatch)
+    client = _FakeBorrowClient(_Grant("ghs_synthetic_revoked_1"))
+    monkeypatch.setattr(gh_credentials, "_client_for", lambda root: client)
+    assert credentials.resolve("github.com", "github", home=home).source == "brokered"
+    client.holder = False  # should_borrow -> False: the share was revoked
+    with pytest.raises(credentials.CredentialError) as caught:
+        credentials.resolve("github.com", "github", home=home)
+    assert caught.value.kind == "absent"
+    assert client.asked == 1, "a revoked lend must not be asked again"
+
+
+def test_a_lent_token_is_still_registered_for_scrubbing(tmp_path: Path, monkeypatch) -> None:
+    home = _node_without_gh_login(tmp_path, monkeypatch)
+    client = _FakeBorrowClient(_Grant("ghs_synthetic_scrub_1"))
+    monkeypatch.setattr(gh_credentials, "_client_for", lambda root: client)
+    registered: list[str] = []
+    monkeypatch.setattr(credentials, "_register_for_scrubbing", registered.append)
+    credentials.resolve("github.com", "github", home=home)
+    assert registered == ["ghs_synthetic_scrub_1"]
+
+
+@pytest.mark.parametrize(
+    "code", ["internal", "unsupported", "malformed_frame", "quota_blocked", None]
+)
+def test_an_unclassified_borrow_failure_does_not_blame_the_owner_login(
+    tmp_path: Path, monkeypatch, code
+) -> None:
+    """Review round 1, R1-3: a broker/version fault, or a borrow with no
+    recorded refusal, proves nothing about the owner's login."""
+    from local_operator.network.credentials.types import BrokerError
+
+    home = _node_without_gh_login(tmp_path, monkeypatch)
+    answer = BrokerError(code=code, key="github") if code else None
+    monkeypatch.setattr(gh_credentials, "_client_for", lambda root: _FakeBorrowClient(answer))
+    with pytest.raises(credentials.CredentialError) as caught:
+        credentials.resolve("github.com", "github", home=home)
+    message = caught.value.message
+    assert "borrowed from studio-mac is not available right now; try again shortly" in message
+    assert "expired" not in message and "sign in again" not in message
+    assert caught.value.lender == "studio-mac"
+
+
+def test_borrows_are_attributed_to_code_requests(tmp_path: Path, monkeypatch) -> None:
+    """Review round 1, R1-4: the owner's audit row names the surface."""
+    home = _node_without_gh_login(tmp_path, monkeypatch)
+    client = _FakeBorrowClient(_Grant("ghs_synthetic_attr_1"))
+    monkeypatch.setattr(gh_credentials, "_client_for", lambda root: client)
+    credentials.resolve("github.com", "github", home=home)
+    assert client.session_ids == ["code_requests"]
