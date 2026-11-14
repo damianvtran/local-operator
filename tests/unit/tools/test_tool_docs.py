@@ -774,7 +774,14 @@ MEASURED_TOKENS: dict[str, int] = {
     # and the reference's mesh sentence say "selects only that device" and the
     # `include_stored` refusal names `peer` beside `scope='remote'`. Net +1
     # token; well inside the soft cap. Nothing else moved.
-    "sessions": 868,
+    # RE-MEASURED 2026-11-13 (session park op, PR #3850, merged over #3897):
+    # 868 -> 890. The delta is the `park` op's row and field copy in the
+    # sessions `tool://` reference — a new documented op, so the cost is
+    # deliberate and opt-in. Re-measured through this test's own printed table
+    # on the merged tree; it is the ONLY entry that moved, and the soft-cap
+    # assertion above it still holds. The schema-side cost of the same op is
+    # the context-budget bench's ledger, not this one.
+    "sessions": 890,
     # NEW (wave 4 slice A, 2026-10-10): the ``setting`` doc — the key
     # vocabulary, the op split and the validation-by-registry contract. 191
     # tokens is the deliberate cost of the reference detail staying off the

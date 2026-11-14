@@ -487,17 +487,6 @@ def park_edges(
     return edges, state
 
 
-class RemoteCompletion(NamedTuple):
-    """One NEW finished turn on a peer, for a session THIS device started."""
-
-    session_id: str
-    device_id: str
-    device_name: str
-    token: str
-    outcome: str
-    name: str
-
-
 class RemoteNotice(NamedTuple):
     """One NEW (or newly revised) ``notify`` item on a peer, for that session."""
 
@@ -509,6 +498,10 @@ class RemoteNotice(NamedTuple):
     priority: str
     title: str
     name: str
+    #: The owner item's own time (epoch ms, the owner's clock), or 0 when the
+    #: owner did not say (an older build). The origin raises only a notice newer
+    #: than its first-seen baseline and writes it at this time (2026-11-13).
+    at_ms: int = 0
 
 
 def _carry_silent(
@@ -531,44 +524,6 @@ def _carry_silent(
             state[key] = value
 
 
-def completion_edges(
-    previous: Mapping[tuple[str, str], str],
-    rows: Iterable[SessionRow],
-    *,
-    unanswered: Iterable[str] = (),
-) -> tuple[tuple[RemoteCompletion, ...], dict[tuple[str, str], str]]:
-    """New completion EPISODES among ``rows``, and the map to pass back next read.
-
-    Pure, and keyed exactly as :func:`park_edges` is — ``(device, session)`` —
-    for the same cross-device reason. The episode identity is the owner's
-    completion TOKEN: a new token is a new finished turn (fire once); the same
-    token on the next read is no edge; a key that leaves the map (the owner
-    acknowledged it — the operator opened the conversation somewhere) is the
-    caller's to settle. Unlike a park, a completion is a STORED fact, so a
-    stored row's claim counts as much as a live one's.
-    """
-    current: dict[tuple[str, str], object] = {}
-    fresh: dict[tuple[str, str], RemoteCompletion] = {}
-    for row in rows:
-        claim = row.remote_attention
-        if not claim or not claim[0]:
-            continue
-        key = (str(row.owner_device or ""), row.id)
-        current[key] = claim[0]
-        fresh[key] = RemoteCompletion(
-            session_id=row.id,
-            device_id=key[0],
-            device_name=str(row.owner_device_name or ""),
-            token=claim[0],
-            outcome=claim[1] or "complete",
-            name=_chosen_name(row),
-        )
-    state = dict(current)
-    _carry_silent(previous, state, unanswered)
-    edges = tuple(fresh[key] for key, token in current.items() if previous.get(key) != token)
-    return edges, {key: str(value) for key, value in state.items()}
-
-
 #: One tracked notice: ``(device, session, owner item key)``.
 NoticeKey = tuple[str, str, str]
 
@@ -586,7 +541,7 @@ def notice_edges(
     items, and each is its own episode: keying per session made two notices
     inside one listing TTL replace each other, so a ``high`` "Tests failed"
     followed by a ``normal`` "Deploy done" lost the high one. The silence rule
-    is :func:`completion_edges`' (``_carry_silent`` reads ``key[0]``, the
+    is the one ``_carry_silent`` applies (it reads ``key[0]``, the
     device, which this key keeps first). A notice that leaves the map is NOT
     settled by the caller: the owner's item going read there says nothing about
     whether the operator saw the forwarded row here, so the origin's row keeps
@@ -613,6 +568,8 @@ def notice_edges(
                 priority=claim[2] or "normal",
                 title=claim[3],
                 name=_chosen_name(row),
+                # A 4-tuple (a parse older than ``at``) has no time: 0.
+                at_ms=int(claim[4]) if len(claim) > 4 else 0,
             )
     state: dict[NoticeKey, int] = dict(current)
     _carry_silent(previous, state, unanswered)

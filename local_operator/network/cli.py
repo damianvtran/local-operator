@@ -542,6 +542,14 @@ def add_parser(
         metavar="KEY",
         help="with --create: retry a create whose reply was lost, without duplicating it",
     )
+    # WHO ASKED FOR THE CREATE (2026-11-13). Hidden: the ``sessions spawn
+    # peer=`` tool passes ``--origin agent``, and a run from an agent's shell is
+    # read as ``agent`` from its marker (``_create_origin``). The owner stamps
+    # it as ``origin.kind`` and never forwards an agent-created session's
+    # ``notify`` items to the operator (``notifications/remote_attention``).
+    net_sessions.add_argument(
+        "--origin", choices=("user", "agent"), default="", help=argparse.SUPPRESS
+    )
     net_sessions.add_argument("--engage", metavar="SESSION", default="", help="warm that session")
     net_sessions.add_argument("--stop", metavar="SESSION", default="", help="stop that session")
     # THE THREE LIFECYCLE ACTS RUN ON THE OWNER (design §8). They are flags on this
@@ -8575,6 +8583,7 @@ def _cmd_sessions(args: argparse.Namespace) -> int:
                 # fallback's first attempt was refused above the owner's mint,
                 # which reserves nothing, so the key is still free for the second.
                 create_key=str(getattr(args, "create_key", "") or ""),
+                origin=_create_origin(args),
                 timeout=120.0,  # a spawn plus its first turn's admission
             )
 
@@ -11098,6 +11107,24 @@ def _host_key_for_request(host: str, user: str, given: str) -> str:
             "when the fingerprint is already known.",
         )
     return found.host_key_fp
+
+
+def _create_origin(args: argparse.Namespace) -> str:
+    """``agent`` when an AGENT asked for this ``--create``, else ``user``.
+
+    The explicit ``--origin`` wins (the ``sessions spawn peer=`` tool passes
+    it); otherwise the ``bash`` tool's marker (``agent_shell.AGENT_SHELL_ENV``)
+    says an agent's command is running this. Like that marker it is attribution,
+    not a security boundary: what rides on it is only whether the session's
+    ``notify`` items are forwarded to the operator (operator rule 2026-11-13 —
+    a reviewer/QA/probe child reports to its parent agent, never the inbox).
+    """
+    explicit = str(getattr(args, "origin", "") or "")
+    if explicit in ("user", "agent"):
+        return explicit
+    from local_operator.agent_shell import AGENT_SHELL_ENV
+
+    return "agent" if os.environ.get(AGENT_SHELL_ENV) == "1" else "user"
 
 
 def _env_filing_session() -> str:
