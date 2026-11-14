@@ -860,9 +860,11 @@ backend exists — Darwin today. command-status keeps the bound, the forwarded
 signals, the leader-exit sweep and the memory grant, signals the group only
 while its leader is unreaped, and always reports `cleanup=unknown`; it never
 certifies cleanup (`docs/design/run-bounded-contract.md`). The recipe also gives the node child
-ci.yml's heap headroom — `NODE_OPTIONS=--max-old-space-size=6144`, raised only
-when the caller's `NODE_OPTIONS` has no `--max-old-space-size` or a smaller
-one, a larger value passing through — because a bare run otherwise inherits
+heap headroom — local `run_bounded` uses a 6144 MB floor
+(`scripts/run_bounded.py` `NODE_HEAP_MB`, `NODE_OPTIONS=--max-old-space-size=6144`)
+while CI's pyright step uses 8192 on the 16 GB runner (`ci.yml`); the local value
+is raised only when the caller's `NODE_OPTIONS` has no `--max-old-space-size` or
+a smaller one, a larger value passing through — because a bare run otherwise inherits
 node's ~4 GB default cap, which OOMed the analyzer under fleet load.
 
 **1800 s, deliberately NOT the 900 s that would mirror that job's
