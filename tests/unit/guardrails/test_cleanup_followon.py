@@ -802,3 +802,64 @@ def test_q4_warning_does_not_promise_the_branch_ref(home: Path, repo: Path) -> N
     assert v.risk is Risk.LOW and v.warnings
     assert all("Its branch ref is kept" not in w for w in v.warnings)
     assert any("unless that is deleted too" in w for w in v.warnings)
+
+
+# --- Round-3 remediation (PR #3992) -------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "command",
+    [
+        'eval rm -rf "$GOOGLE_APPLICATION_CREDENTIALS/.."',
+        'eval "rm -rf $GOOGLE_APPLICATION_CREDENTIALS/.."',
+        'bash -c "rm -rf $GOOGLE_APPLICATION_CREDENTIALS/.."',
+        'sh -c "rm -rf $GOOGLE_APPLICATION_CREDENTIALS/.."',
+        'zsh -c "rm -rf $GOOGLE_APPLICATION_CREDENTIALS/.."',
+        'env X=1 bash -c "rm -rf $GOOGLE_APPLICATION_CREDENTIALS/.."',
+        'bash <<< "rm -rf $GOOGLE_APPLICATION_CREDENTIALS/.."',
+        'source /dev/stdin <<< "rm -rf $GOOGLE_APPLICATION_CREDENTIALS/.."',
+        'source <(echo "rm -rf $GOOGLE_APPLICATION_CREDENTIALS/..")',
+        "bash <<EOF\nrm -rf $GOOGLE_APPLICATION_CREDENTIALS/..\nEOF",
+    ],
+    ids=[
+        "eval-bare",
+        "eval-quoted",
+        "bash-c",
+        "sh-c",
+        "zsh-c",
+        "env-bash-c",
+        "bash-herestring",
+        "source-herestring",
+        "source-procsub",
+        "bash-heredoc",
+    ],
+)
+async def test_r3_1_rewalked_credential_text_stays_opaque(
+    home: Path, caplog: pytest.LogCaptureFixture, command: str
+) -> None:
+    """R3-1 (PR #3992): ``eval``/``sh -c``/a herestring re-parse EXPANDED text,
+    which drops the ``refs`` spans that mark the credential value, so the inner
+    walk once ranked and printed the value's parent directory. These must stay
+    at least HIGH and opaque, as on base 33c331e3, with no carrier naming it."""
+    env = {"GOOGLE_APPLICATION_CREDENTIALS": _canary_value(home)}
+    v = _rank(home, command, **env)
+    assert v.risk in (Risk.HIGH, Risk.CRITICAL), (v.risk, [(t.path, t.reason) for t in v.targets])
+    assert all(CANARY not in (t.target.path or "") for t in v.targets)
+    out, text = await _carriers(home, caplog, command, **env)
+    assert out is not None and out.blocked
+    assert CANARY not in text
+
+
+def test_r3_1_literal_eval_ranks_as_on_base(home: Path) -> None:
+    """Control: an ``eval`` of literal text that only EXTENDS the value (no
+    variable) is still re-walked and ranks like the bare command (LOW)."""
+    keys = home / "keys"
+    keys.mkdir()
+    for name in ("sa.json", "sa.json.bak"):
+        (keys / name).write_text("{}\n")
+    env = {"GOOGLE_APPLICATION_CREDENTIALS": str(keys / "sa.json")}
+    for command in ("eval rm -f ~/keys/sa.json.bak", "rm -f ~/keys/sa.json.bak"):
+        v = _rank(home, command, **env)
+        assert v.risk is Risk.LOW, (command, [(t.path, t.reason) for t in v.targets])
+        assert not any(t.target.credential_derived for t in v.targets)

@@ -1256,6 +1256,22 @@ def _credential_paths_in(exp: Expanded, credential_paths: Mapping[str, str]) -> 
     return sorted(found, key=len, reverse=True)
 
 
+def _masked_credential_text(exp: Expanded, credential_paths: Mapping[str, str]) -> str:
+    """``exp.text`` with every credential path value it REFERENCES replaced by
+    ``CREDENTIAL_MARK`` — the text base 33c331e3 produced for that word.
+
+    WHY (review R3-1 on PR #3992). ``eval``, ``sh -c`` and a herestring fed to
+    a shell RE-PARSE expanded text. The re-parse sees the value as literal text
+    with no ``refs`` span, so ``_credential_paths_in`` cannot find it and the
+    inner walk would rank, and print, the value's directories. Callers mask the
+    value (or take the opaque route) BEFORE the text leaves the word.
+    """
+    text = exp.text
+    for value in _credential_paths_in(exp, credential_paths):
+        text = text.replace(value, CREDENTIAL_MARK)
+    return text
+
+
 def _target(exp: Expanded, op: str, program: str, state: _State) -> Target:
     """Build the :class:`Target` for ``exp``, keeping credential path values private.
 
@@ -2728,7 +2744,11 @@ class _Walker:
                     if op in (">", ">|", ">>"):
                         self._add(exp, "append" if op == ">>" else "overwrite", op)
             elif op == "<<<":
-                herestrings.append(expand(raw, st.env, st.home).text)
+                # R3-1: the body is re-parsed by the consuming shell, which
+                # loses the refs span; mask a referenced credential value now.
+                herestrings.append(
+                    _masked_credential_text(expand(raw, st.env, st.home), st.credential_paths)
+                )
         # Leading prefix words and assignments.
         while words and words[0].text in _PREFIX_WORDS and not words[0].opaque:
             words = words[1:]
@@ -2831,7 +2851,16 @@ class _Walker:
             return
         if name == "eval":
             inner = " ".join(w.text for w in args)
-            if any(w.opaque for w in args):
+            # R3-1: re-walking ``inner`` would turn a referenced credential
+            # path value into typed literal text with no refs span, so the
+            # walk would rank and print the value's parent. Such a word takes
+            # the opaque route, as it did on base (where the value WAS opaque).
+            credential = any(_credential_paths_in(w, self.state.credential_paths) for w in args)
+            if credential:
+                inner = " ".join(
+                    _masked_credential_text(w, self.state.credential_paths) for w in args
+                )
+            if credential or any(w.opaque for w in args):
                 # R9-1: an opaque word's text omits its substitution; the
                 # substitution's own text (a heredoc'd script) is what eval runs.
                 haystack = " ".join([inner, *(b for w in args for b in w.substitutions)])
@@ -3080,10 +3109,16 @@ class _Walker:
                 script = args[i]
             break  # the script (with -c) or a script file operand
         if script is not None:
-            if script.opaque or not script.text.strip():
+            # R3-1: like ``eval``, ``-c`` re-parses the script's EXPANDED
+            # text, dropping the refs span that marks a credential path value;
+            # such a script stays opaque (as on base) instead of re-walked.
+            credential = _credential_paths_in(script, self.state.credential_paths)
+            if script.opaque or not script.text.strip() or credential:
                 if _DELETE_WORD_RE.search(segment):
                     self.result.opaque_reasons.append("shell -c with an unresolvable script")
-                    self._private_script_target(script.text)
+                    self._private_script_target(
+                        _masked_credential_text(script, self.state.credential_paths)
+                    )
                 return
             self._isolated_walk(script.text, depth + 1)
             return
