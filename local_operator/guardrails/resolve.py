@@ -2348,6 +2348,50 @@ class _Snapshot:
     physical: bool = False
 
 
+#: Characters that make a credential value more than one plain path: shell
+#: syntax (quotes, expansions, globs, separators, redirections) and the
+#: backslash escape. Such a value is never parsed or evaluated, only refused.
+_CREDENTIAL_PATH_SYNTAX = frozenset("$`\\'\"*?[]{}();|&<>!#")
+
+
+def credential_path(value: str, home: str) -> str | None:
+    """The absolute path a credential-named variable's value spells, or ``None``.
+
+    WHY: S1 masks every credential-shaped variable (``CREDENTIAL_MARK``) so a
+    token never becomes a target, but path-valued ones
+    (``GOOGLE_APPLICATION_CREDENTIALS=~/keys/old.pem``) then could never be
+    cleaned up at all: the operator asked that guardrails steer, not
+    prevent outright. Only an unambiguous single path qualifies, so a real
+    secret is never treated as one:
+
+    - absolute (``/…``) or ``~/…`` only (expanded with the resolver's HOME,
+      never ``~user``); relative words, URLs and bare token strings fail;
+    - no control characters (NUL/newline included) and no shell syntax
+      (:data:`_CREDENTIAL_PATH_SYNTAX`): the value is not parsed as shell code;
+    - its first component must exist now (``/Users``, ``/home``, ``/tmp``):
+      a base64 token that happens to start with ``/`` names no real top-level
+      directory. The file itself need not exist; a missing one is a no-op.
+
+    The returned path then goes through the ordinary kernel-path resolution
+    and ranking (protected roots stay CRITICAL). PRIVACY: it is analysis input
+    only; every outward carrier masks it (``check.credential_path_masks``).
+    """
+    if not value or any(ord(c) < 32 or ord(c) == 127 for c in value):
+        return None
+    if _CREDENTIAL_PATH_SYNTAX & set(value):
+        return None
+    if value.startswith("~/"):
+        if not home.startswith("/"):
+            return None
+        value = home.rstrip("/") + value[1:]
+    elif not value.startswith("/") or value.startswith("//"):
+        return None
+    first = value.lstrip("/").split("/", 1)[0]
+    if not first or not os.path.isdir("/" + first):
+        return None
+    return value
+
+
 class _Walker:
     def __init__(self, env: Mapping[str, str], cwd: str | None, home: str) -> None:
         from local_operator.tools.shell_env import is_credential_shaped
@@ -2355,8 +2399,15 @@ class _Walker:
         # S1: inherited credentials are unknown paths, never empty expansions.
         # This analysis-only copy must not alter the actual child's grants. An
         # ordinary literal assignment later in the script can still replace it.
+        # Item C (cleanup follow-on): a credential-NAMED variable whose whole
+        # value is a plain filesystem path (GOOGLE_APPLICATION_CREDENTIALS)
+        # resolves like the literal path would, so ``rm -f "$GAC"`` of an old
+        # key file ranks by where it lands (CRITICAL under a protected root)
+        # instead of a refusal no answer lifts. Anything else keeps the mark.
         private_env = {
-            name: CREDENTIAL_MARK if is_credential_shaped(name) else value
+            name: (credential_path(value, home) or CREDENTIAL_MARK)
+            if is_credential_shaped(name)
+            else value
             for name, value in env.items()
         }
         self.state = _State(env=private_env, cwd=cwd, home=home)

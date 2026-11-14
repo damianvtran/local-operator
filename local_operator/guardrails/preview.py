@@ -49,6 +49,8 @@ from local_operator.guardrails.check import (
     GuardSettings,
     _critical_text,
     _safe_text,
+    credential_path_masks,
+    mask_credential_paths,
     _targets_text,
     build_delete_case,
     builtin_branch,
@@ -362,14 +364,21 @@ def preview_tool_call(
             effect = BUILTIN_REFUSE_CRITICAL
             builtin_text = _critical_text(verdict)
 
+    # Item C: a credential variable's path value resolves like a literal, so
+    # the preview hides it exactly as the checkpoint's carriers do.
+    masks = credential_path_masks(context.env)
+
+    def private(text: str) -> str:
+        return _safe_text(mask_credential_paths(text, masks))
+
     base: dict[str, Any] = {
         "tool": tool_name,
         "call_text": call_text(tool_name, args),
         "builtin_risk": verdict.risk.name if verdict is not None else "",
-        "builtin_targets": _ranked_targets(verdict),
+        "builtin_targets": private(_ranked_targets(verdict)),
         "builtin_effect": effect,
-        "builtin_text": _safe_text(builtin_text),
-        "builtin_facts": tuple(_safe_text(f) for f in builtin_facts),
+        "builtin_text": private(builtin_text),
+        "builtin_facts": tuple(private(f) for f in builtin_facts),
         "rule_dirs": tuple(str(path) for path in live.rules_dirs) if live.enabled else (),
     }
     if effect in _REFUSING:
