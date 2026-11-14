@@ -117,17 +117,25 @@ async def remove_phone(request: Request, device_id: str):
     Idempotent: a second call on a ``removing`` row finishes it (the OS prompt with the
     "remove a phone" purpose). The answer is the row's resulting ``state`` and which
     phases ran; a cancelled prompt is a 200 with ``state: removing``, not an error,
-    because phases 1-2 already took effect and the row must say so.
+    because phases 1-2 already took effect and the row must say so. ``detail`` is keyed
+    copy (``operator.pairing.revoke.unfinished``) while the row is not ``revoked``, else
+    empty. 404 ``unknown_device`` for an id this computer never issued or listed; 422
+    ``bad_device_id`` for one that is not an ASCII alphanumeric id.
     """
     from local_operator.network.types import MeshRefusal
     from local_operator.operator import devices_revoke
 
     def work():
-        try:
-            return devices_revoke.revoke(_root(request), device_id)
-        except ValueError as exc:
-            from local_operator.operator.pair_op import _copy
+        from local_operator.operator.pair_op import _copy
 
+        try:
+            # ``require_known`` (round-1 R6/Q3): this button only ever names a listed
+            # row, so an id this computer never issued is a 404 BEFORE any revocation
+            # record, anchor staging or admin prompt -- never a phantom ``revoked`` row.
+            return devices_revoke.revoke(_root(request), device_id, require_known=True)
+        except devices_revoke.UnknownDevice as exc:
+            raise MeshRefusal("unknown_device", _copy("refusal_bad_device_id")) from exc
+        except ValueError as exc:
             raise MeshRefusal("bad_device_id", _copy("refusal_bad_device_id")) from exc
 
     return reply(await _local(request, work))

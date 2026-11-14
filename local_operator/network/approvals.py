@@ -527,13 +527,49 @@ def approval_snapshot(
         if record.get("kind") == KIND_OPERATOR_DEVICE_PAIR
         and record.get("state") not in TERMINAL_STATES
     ]
-    expirations = [
-        float(record["expires_at"])
-        for record in [*requested, *live_pairs]
-        if isinstance(record.get("expires_at"), (int, float)) and record["expires_at"] > moment
-    ]
+    expirations: list[float] = []
+    for record in [*requested, *live_pairs]:
+        expires_at = record.get("expires_at")
+        if isinstance(expires_at, (int, float)) and expires_at > moment:
+            expirations.append(float(expires_at))
+        elif expiry_deferred(record, moment):
+            # A DEFERRED card (past ``expires_at``, still live) dies with NO write, so
+            # the fingerprint cannot tell this cache it changed (round-1 R1). Its own
+            # deferral end is the recheck deadline; ``moment`` itself forces a
+            # recompute on the next tick for a run whose end is not a number.
+            expirations.append(deferral_end(record, moment))
     pair_request = str(live_pairs[0].get("approval_id") or "") or None if live_pairs else None
     return fingerprint, bool(requested), min(expirations, default=0.0), pair_request
+
+
+def deferral_end(record: Mapping[str, Any], moment: float) -> float:
+    """When a record :func:`expiry_deferred` exempts at ``moment`` stops being exempt.
+
+    Each bound is the one :func:`expiry_deferred` itself tests, so no new number:
+
+    * ``requested`` -- the op's ``decision_deadline`` (the decision plus the signer's
+      ``SIGN_TIMEOUT_SECONDS``);
+    * ``approved`` -- ``decided_at + STALE_RUN_AFTER_S``;
+    * ``connecting`` -- ``moment``: the exemption ends when the run's lease pid dies
+      (:func:`run_is_stale`), which has no clock instant. Returning ``moment`` makes
+      the snapshot's cache expire on its next read, i.e. it is not cached at all while
+      such a run is live -- bounded by the run, which is one admin prompt.
+
+    Callers only use the value when :func:`expiry_deferred` returned ``True``.
+    """
+    state = str(record.get("state") or "")
+    if state == STATE_REQUESTED:
+        from local_operator.network import approval_ops
+
+        operation = approval_ops.for_kind(str(record.get("kind") or ""))
+        deadline_of = getattr(operation, "decision_deadline", None)
+        deadline = deadline_of(record) if deadline_of is not None else None
+        return float(deadline) if isinstance(deadline, (int, float)) else moment
+    if state == STATE_APPROVED:
+        decided = record.get("decided_at")
+        if isinstance(decided, (int, float)):
+            return float(decided) + STALE_RUN_AFTER_S
+    return moment
 
 
 def expiry_deferred(record: Mapping[str, Any], moment: float) -> bool:

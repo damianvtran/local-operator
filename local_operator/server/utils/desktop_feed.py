@@ -3194,12 +3194,23 @@ class DesktopFeed:
         attention, catalogue_revision, authoring_revision, attention_status, notifications = (
             snapshot
         )
+
+        def read_approvals() -> tuple[bool, str | None]:
+            pending = self._approval_snapshot()[1]
+            # The live pairing id the SAME read just produced (round-1 Q5): a window
+            # opened or reconnected mid-request must raise the pairing card from the
+            # open frame, because no change frame follows for a level it never saw.
+            # Read in the same thread call as the snapshot; a ticker read racing it
+            # writes the same attribute from an equally fresh store read.
+            return pending, self._approvals_pair_request_seen
+
         try:
-            approvals_pending = (await asyncio.to_thread(self._approval_snapshot))[1]
+            approvals_pending, approvals_pair_request = await asyncio.to_thread(read_approvals)
             # A subscriber snapshot is local; only the ticker commits the
             # shared edge baseline, or subscriber B can consume A's next edge.
         except Exception:  # noqa: BLE001 — retain explicit unknown on an optional read
             approvals_pending = None
+            approvals_pair_request = None
         frame["payload"] = {
             "subscription_id": subscription.id,
             "heartbeat_seconds": HEARTBEAT_INTERVAL_S,
@@ -3211,6 +3222,7 @@ class DesktopFeed:
             "attention_status": attention_status,
             "notifications": notifications,
             "approvals_pending": approvals_pending,
+            "approvals_pair_request": approvals_pair_request,
         }
         return frame
 

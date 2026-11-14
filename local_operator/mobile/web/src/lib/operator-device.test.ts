@@ -35,6 +35,8 @@ import {
 	lengthPrefix,
 	loadOrCreateDeviceKey,
 	operatorFieldsFor,
+	pushLinkFields,
+	pushLinkMessage,
 	rawSignatureToDer,
 	signChallenge,
 	signedMessageBytes,
@@ -319,5 +321,81 @@ describe("signing a challenge", () => {
 		   relay mints its own when it is the spawner and drops any value arriving in
 		   an HTTP body — so a phone that sent one would be presenting a forgery. */
 		expect("operator_cap" in fields).toBe(false);
+	});
+});
+
+/** From `push_devices.link_message(at=1700000000, operator_device_id="0123…cdef",
+    install_id="3f2504e0-4f89-41d3-9a0c-0305e82c3301", platform="ios",
+    token="apns-token")` — produced by the Python side and pasted verbatim. */
+const PUSH_LINK_HEX =
+	"6c6f702d707573682d6c696e6b2d76310a313730303030303030300a3031323334353637383961626364656630" +
+	"3132333435363738396162636465660a33663235303465302d346638392d343164332d396130632d30333035" +
+	"6538326333333031" +
+	"0a696f730a39346132333637356465393634396439373761343136303738623364316237326333313066616538" +
+	"656134653464616563666431353061613935616362316533";
+
+describe("the push link signature (round-1 R4/Q1/Q2)", () => {
+	it("reproduces the relay's link message byte for byte, with the install id canonicalised", async () => {
+		const message = await pushLinkMessage({
+			at: 1_700_000_000,
+			deviceId: "0123456789abcdef0123456789abcdef",
+			/* Uppercase on purpose: the relay stores and verifies the canonical spelling. */
+			installId: "3F2504E0-4F89-41D3-9A0C-0305E82C3301",
+			platform: "ios",
+			token: "apns-token",
+		});
+		expect(bytesToHex(message)).toBe(PUSH_LINK_HEX);
+	});
+
+	it("is null for a phone that is not paired, so the register goes unlinked", async () => {
+		forgetCertificate();
+		expect(await pushLinkFields({ installId: "x", platform: "ios", token: "t" })).toBeNull();
+	});
+
+	it("signs the register body with THIS device's key, verifiable under its point", async () => {
+		storeCertificate("operator-signed-certificate", "0123456789abcdef0123456789abcdef");
+		const now = 1_700_000_123_456;
+		const installId = "3f2504e0-4f89-41d3-9a0c-0305e82c3301";
+		const fields = await pushLinkFields({ installId, platform: "ios", token: "apns-token", now });
+		expect(fields).not.toBeNull();
+		const key = await loadOrCreateDeviceKey();
+		const deviceId = await deviceIdFor(key.point);
+		expect(fields).toMatchObject({
+			operator_device_id: deviceId,
+			operator_cert: "operator-signed-certificate",
+			operator_link_at: 1_700_000_123,
+		});
+		const publicKey = await crypto.subtle.importKey(
+			"raw",
+			key.point as unknown as ArrayBuffer,
+			{ name: "ECDSA", namedCurve: "P-256" },
+			true,
+			["verify"],
+		);
+		const message = await pushLinkMessage({
+			at: 1_700_000_123,
+			deviceId,
+			installId,
+			platform: "ios",
+			token: "apns-token",
+		});
+		const raw = derSignatureToRaw(hexToBytes(String(fields?.operator_link_sig)));
+		const verify = (bytes: Uint8Array) =>
+			crypto.subtle.verify(
+				{ name: "ECDSA", hash: "SHA-256" },
+				publicKey,
+				raw as unknown as ArrayBuffer,
+				bytes as unknown as ArrayBuffer,
+			);
+		expect(await verify(message)).toBe(true);
+		/* Bound to the token: the same signature does not cover another token. */
+		const other = await pushLinkMessage({
+			at: 1_700_000_123,
+			deviceId,
+			installId,
+			platform: "ios",
+			token: "another-token",
+		});
+		expect(await verify(other)).toBe(false);
 	});
 });

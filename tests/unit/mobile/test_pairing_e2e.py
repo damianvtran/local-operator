@@ -37,6 +37,7 @@ from cryptography.hazmat.primitives.asymmetric import ec, rsa
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 from fastapi import FastAPI
+from jwt.algorithms import RSAAlgorithm
 from starlette.testclient import TestClient
 
 from local_operator.config import ConfigManager
@@ -86,6 +87,8 @@ class Phone:
         self.np = os.urandom(32)
         self.request_id = "req_" + uuid.uuid4().hex
         self.claim: dict[str, Any] = {}
+        self.name = "Ben\u2019s iPhone"
+        self.platform = "ios"
 
     def rekey(self) -> None:
         """U15: discard the revoked key and start over with a fresh one."""
@@ -108,8 +111,8 @@ class Phone:
                 "spki": self.spki,
                 "commit": commit,
                 "np": _b64(self.np),
-                "name": "Ben\u2019s iPhone",
-                "platform": "ios",
+                "name": self.name,
+                "platform": self.platform,
             }
         ).encode()
         headers = {"content-type": "application/json"}
@@ -143,13 +146,48 @@ class Phone:
     def certificate(self) -> dict[str, Any]:
         return self.relay.get(f"/api/pair/{self.device_id}").json()
 
+    def register_push(
+        self,
+        certificate: str,
+        *,
+        signer: Any = None,
+        device_id: str | None = None,
+        at: int | None = None,
+        install_id: str | None = None,
+    ) -> Any:
+        """``POST /api/push/register`` with the push link, signed as the PWA/app signs it."""
+        body: dict[str, Any] = {
+            "platform": "ios",
+            "token": "apns-token",
+            "environment": "sandbox",
+            "app_version": "1.0",
+            "install_id": install_id or str(uuid.uuid4()),
+        }
+        linked = device_id or self.device_id
+        stamp = int(time.time()) if at is None else at
+        message = push_devices.link_message(
+            at=stamp,
+            operator_device_id=linked,
+            install_id=body["install_id"],
+            platform=body["platform"],
+            token=body["token"],
+        )
+        sig = (signer or self.key).sign(message, ec.ECDSA(hashes.SHA256()))
+        body.update(
+            operator_device_id=linked,
+            operator_cert=certificate,
+            operator_link_sig=sig.hex(),
+            operator_link_at=stamp,
+        )
+        return self.relay.post("/api/push/register", json=body)
+
 
 class Edge:
     """The Radient edge: an RS256 key whose JWKS is pinned in ``tunnels/config.json``."""
 
     def __init__(self) -> None:
         self.key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
-        jwk = json.loads(jwt.algorithms.RSAAlgorithm.to_jwk(self.key.public_key()))
+        jwk = json.loads(RSAAlgorithm.to_jwk(self.key.public_key()))
         jwk["kid"] = "edge-e2e"
         self.access = {
             "issuer": "https://radient.example.test",
@@ -542,7 +580,7 @@ def test_a_decision_one_second_past_the_signing_bound_refuses(
     monkeypatch.setattr(time, "time", lambda: late_ack)
     assert _ack(rig, approval_id).status_code == 200
     acked = pair_op.decision_at(A.load_record(approval_id, root=rig.root))
-    assert acked == late_ack
+    assert acked is not None and acked == late_ack
     within = acked + SIGN_TIMEOUT_SECONDS
     past = within + 1
     assert within > float(record["expires_at"])  # the gap is past the window
@@ -583,19 +621,8 @@ def test_remove_cancelled_is_removing_then_finishes_and_the_phone_rekeys(rig: Ri
     phone = Phone(rig.relay, edge=rig.edge)
     _pair(rig, phone)
     cert = phone.certificate()["certificate"]
-    # The push link: registered with the device certificate as proof.
-    registered = rig.relay.post(
-        "/api/push/register",
-        json={
-            "platform": "ios",
-            "token": "apns-token",
-            "environment": "sandbox",
-            "app_version": "1.0",
-            "install_id": str(uuid.uuid4()),
-            "operator_device_id": phone.device_id,
-            "operator_cert": cert,
-        },
-    )
+    # The push link: the device certificate plus the device key's signature.
+    registered = phone.register_push(cert)
     assert registered.status_code == 200, registered.text
     listed = rig.desktop.get("/v1/desktop/devices").json()["result"]["devices"]
     assert [(row["device_id"], row["state"], row["push"]) for row in listed] == [
@@ -662,3 +689,222 @@ def test_desktop_routes_require_the_bearer(rig: Rig) -> None:
     bare = TestClient(rig.desktop.app)
     assert bare.get("/v1/desktop/devices").status_code == 401
     assert bare.post("/v1/desktop/approvals/ap_x/pair-ack", json={}).status_code in (401, 422)
+
+
+# ---------------------------------------------------------------------------
+# Round-1 remediation regressions (PR #3949: Q1/R4/Q2, R1, R6/Q3, R2/R7, R3, Q4, Q6)
+# ---------------------------------------------------------------------------
+
+
+def _paired_with_push(rig: Rig) -> tuple[Phone, str]:
+    _install_authority(rig)
+    phone = Phone(rig.relay, edge=rig.edge)
+    _pair(rig, phone)
+    cert = phone.certificate()["certificate"]
+    registered = phone.register_push(cert)
+    assert registered.status_code == 200, registered.text
+    return phone, cert
+
+
+def test_a_revoked_phone_cannot_relink_push_and_stays_revoked(rig: Rig) -> None:
+    """Q1: re-registering with the revoked phone's own key and cert is refused."""
+    phone, cert = _paired_with_push(rig)
+    removed = rig.desktop.delete(f"/v1/desktop/devices/{phone.device_id}")
+    assert removed.json()["result"]["state"] == "revoked", removed.text
+    again = phone.register_push(cert)
+    assert again.status_code == 422, again.text
+    assert "not a phone paired" in again.json()["error"]
+    row = rig.desktop.get("/v1/desktop/devices").json()["result"]["devices"][0]
+    assert (row["state"], row["push"]) == ("revoked", False)
+    # Also refused mid-removal (``removing``): phase 1 already revoked the id.
+    other, other_cert = Phone(rig.relay, edge=rig.edge), ""
+    _pair(rig, other)
+    other_cert = other.certificate()["certificate"]
+    rig.gesture["answer"] = "cancel"
+    assert rig.desktop.delete(f"/v1/desktop/devices/{other.device_id}").json()["result"][
+        "state"
+    ] == ("removing")
+    assert other.register_push(other_cert).status_code == 422
+
+
+def test_another_phones_certificate_without_its_key_is_refused(rig: Rig) -> None:
+    """R4/Q2: the certificate is public; only the device key's signature links."""
+    victim, cert = _paired_with_push(rig)
+    attacker = Phone(rig.relay, edge=rig.edge)
+    stolen = attacker.register_push(cert, device_id=victim.device_id)
+    assert stolen.status_code == 422, stolen.text
+    assert "signature" in stolen.json()["error"]
+    rows = push_devices.list_devices(rig.root)["devices"]
+    assert len(rows) == 1  # only the victim's own registration
+
+
+def test_a_stale_push_link_timestamp_is_refused(rig: Rig) -> None:
+    phone, cert = _paired_with_push(rig)
+    stale = int(time.time()) - push_devices.LINK_SKEW_S - 5
+    refused = phone.register_push(cert, at=stale)
+    assert refused.status_code == 422, refused.text
+    assert "clock window" in refused.json()["error"]
+    future = int(time.time()) + push_devices.LINK_SKEW_S + 5
+    assert phone.register_push(cert, at=future).status_code == 422
+
+
+def test_a_push_link_for_an_id_this_computer_never_issued_is_refused(rig: Rig) -> None:
+    """A certificate that verifies under the anchor but was not issued HERE (no stored
+    certificate, e.g. another computer sharing the operator key) does not link."""
+    phone, cert = _paired_with_push(rig)
+    devices.device_path(rig.root, phone.device_id).unlink()
+    assert not devices.is_revoked(rig.root, phone.device_id)
+    refused = phone.register_push(cert)
+    assert refused.status_code == 422, refused.text
+    assert "not a phone paired" in refused.json()["error"]
+
+
+def test_the_feed_snapshot_drops_a_deferred_pairing_once_its_signing_gap_ends(
+    rig: Rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R1: ack at t=290, the gesture never completes, and NOTHING is written after.
+
+    The deferred card dies at decision + SIGN_TIMEOUT_SECONDS with no write, so the
+    snapshot's cache must have scheduled that instant as its own recheck.
+    """
+    from local_operator.operator.macos.keyagent import SIGN_TIMEOUT_SECONDS
+
+    _install_authority(rig)
+    phone = Phone(rig.relay, edge=rig.edge)
+    record = phone.file().json()
+    approval_id = record["approval_id"]
+    acked_at = float(record["expires_at"]) - 10
+    monkeypatch.setattr(time, "time", lambda: acked_at)
+    assert _ack(rig, approval_id).status_code == 200
+    past_window = float(record["expires_at"]) + 1
+    first = A.approval_snapshot(rig.root, now=past_window)
+    assert first[1:] == (True, acked_at + SIGN_TIMEOUT_SECONDS, approval_id)
+    dead = acked_at + SIGN_TIMEOUT_SECONDS + 1
+    second = A.approval_snapshot(rig.root, cached=first, now=dead)
+    assert second[0] == first[0], "no write: the fingerprint is unchanged"
+    assert (second[1], second[3]) == (False, None)
+
+
+def test_a_deferred_connecting_run_is_never_served_from_the_cache(rig: Rig) -> None:
+    """R1, the connecting arm: its end is a pid's death, not an instant, so no caching."""
+    _install_authority(rig)
+    phone = Phone(rig.relay, edge=rig.edge)
+    record = phone.file().json()
+    approval_id = record["approval_id"]
+    assert _ack(rig, approval_id).status_code == 200
+    raw = A._load_raw(approval_id, rig.root)
+    raw.update(
+        state=A.STATE_CONNECTING,
+        decided_at=time.time(),
+        run={"run_id": "run_live", "pid": os.getpid(), "started_at": time.time()},
+    )
+    A._write_record(raw, rig.root)
+    moment = float(record["expires_at"]) + 1
+    snap = A.approval_snapshot(rig.root, now=moment)
+    assert snap[3] == approval_id and snap[2] == moment
+
+
+def test_deleting_an_id_this_computer_never_issued_is_404_with_no_prompt(rig: Rig) -> None:
+    """R6/Q3: no revocation record, no anchor write, no admin prompt."""
+    _install_authority(rig)
+    anchor = rig.trust.anchor_path().read_bytes()
+    unknown = "a" * 32
+    refused = rig.desktop.delete(f"/v1/desktop/devices/{unknown}")
+    assert refused.status_code == 404, refused.text
+    assert refused.json()["detail"]["code"] == "unknown_device"
+    assert rig.prompts == []
+    assert rig.trust.anchor_path().read_bytes() == anchor
+    assert unknown not in devices.revoked_ids(rig.root)
+    assert rig.desktop.get("/v1/desktop/devices").json()["result"]["devices"] == []
+    # Non-ASCII digits pass ``str.isalnum`` but are no id this computer derives.
+    arabic = "\u0661\u0662\u0663"
+    assert arabic.isalnum()
+    bad = rig.desktop.delete(f"/v1/desktop/devices/{arabic}")
+    assert bad.status_code == 422 and bad.json()["detail"]["code"] == "bad_device_id"
+    assert rig.prompts == []
+
+
+def test_phone_names_are_sanitised_on_the_card_and_the_paired_phones_row(rig: Rig) -> None:
+    """R2: a bidi override never reaches phone_name_full or the Paired-phones name."""
+    _install_authority(rig)
+    phone = Phone(rig.relay, edge=rig.edge)
+    phone.name = "Ben\u2019s iPhone\u202egnp.exe"
+    filed = phone.file()
+    assert filed.status_code == 201, filed.text
+    approval_id = filed.json()["approval_id"]
+    pairing = _row(rig, approval_id)["pairing"]
+    assert pairing["phone_name_full"] == "Ben\u2019s iPhonegnp.exe"
+    assert pairing["phone_name"] == "Ben\u2019s iPhonegnp.exe"
+    assert _ack(rig, approval_id).status_code == 200
+    assert _approve(rig, approval_id).status_code == 200
+    row = rig.desktop.get("/v1/desktop/devices").json()["result"]["devices"][0]
+    assert row["name"] == "Ben\u2019s iPhonegnp.exe"
+
+
+def test_display_name_keeps_the_zwj_and_strips_every_bidi_control() -> None:
+    """R7: emoji sequences survive; bidi controls and other invisible Cf do not."""
+    family = "\U0001f468\u200d\U0001f469\u200d\U0001f467"
+    assert pair_op.display_name(f"{family} phone") == f"{family} phone"
+    controls = "".join(
+        chr(c) for c in [*range(0x202A, 0x202F), *range(0x2066, 0x206A), 0x200E, 0x200F, 0x061C]
+    )
+    assert pair_op.display_name(f"a{controls}b\u200b\ufeffc") == "abc"
+
+
+def test_a_revoke_does_not_capture_other_threads_output(
+    rig: Rig, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """R3: no process-wide stdout/stderr swap while the OS prompt is up."""
+    import sys
+    import threading
+
+    phone, _ = _paired_with_push(rig)
+    capsys.readouterr()
+
+    def during() -> None:
+        writer = threading.Thread(target=lambda: sys.stderr.write("other-thread-line\n"))
+        writer.start()
+        writer.join()
+
+    rig.gesture["during"] = during
+    rig.gesture["answer"] = "cancel"
+    removed = rig.desktop.delete(f"/v1/desktop/devices/{phone.device_id}")
+    result = removed.json()["result"]
+    assert "other-thread-line" not in result["detail"]
+    assert "other-thread-line" in capsys.readouterr().err
+
+
+def test_a_removing_row_keeps_its_name_paired_at_and_filing_platform(rig: Rig) -> None:
+    """Q4: phase 1 deletes the certificate; the row still names the phone."""
+    _install_authority(rig)
+    phone = Phone(rig.relay, edge=rig.edge)
+    phone.platform = "web"
+    _pair(rig, phone)
+    (before,) = rig.desktop.get("/v1/desktop/devices").json()["result"]["devices"]
+    assert before["platform"] == "web" and before["paired_at"]
+    rig.gesture["answer"] = "cancel"
+    rig.desktop.delete(f"/v1/desktop/devices/{phone.device_id}")
+    (removing,) = rig.desktop.get("/v1/desktop/devices").json()["result"]["devices"]
+    assert removing["state"] == "removing"
+    assert (removing["name"], removing["paired_at"], removing["platform"]) == (
+        before["name"],
+        before["paired_at"],
+        "web",
+    )
+    rig.gesture["answer"] = "ok"
+    rig.desktop.delete(f"/v1/desktop/devices/{phone.device_id}")
+    (revoked,) = rig.desktop.get("/v1/desktop/devices").json()["result"]["devices"]
+    assert revoked["state"] == "revoked"
+    assert (revoked["name"], revoked["paired_at"]) == (before["name"], before["paired_at"])
+
+
+def test_the_delete_detail_is_keyed_copy_not_cli_stderr(rig: Rig) -> None:
+    """Q6(a): ``detail`` is the keyed "unfinished" sentence, or empty once revoked."""
+    phone, _ = _paired_with_push(rig)
+    rig.gesture["answer"] = "cancel"
+    first = rig.desktop.delete(f"/v1/desktop/devices/{phone.device_id}").json()["result"]
+    assert first["detail"] == pair_op._copy("revoke_unfinished")
+    assert "You cancelled the approval" not in first["detail"]
+    rig.gesture["answer"] = "ok"
+    second = rig.desktop.delete(f"/v1/desktop/devices/{phone.device_id}").json()["result"]
+    assert (second["state"], second["detail"]) == ("revoked", "")

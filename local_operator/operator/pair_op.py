@@ -630,15 +630,27 @@ def decision_pending(record: Mapping[str, Any], now: float) -> bool:
     window applies again.
     No new number: both bounds are the record's own ``expires_at`` and the signer's.
     """
+    deadline = decision_deadline(record)
+    return deadline is not None and now <= deadline
+
+
+def decision_deadline(record: Mapping[str, Any]) -> float | None:
+    """When a ``requested`` card's signing gap ends, or ``None`` when it has none.
+
+    The same bound :func:`decision_pending` tests, exposed as an instant so a reader
+    that caches on "nothing was written" (``approvals.approval_snapshot``) can schedule
+    its own recheck: the gap ends with NO write (round-1 R1), so a cache keyed only on
+    the directory fingerprint would otherwise serve the dead card indefinitely.
+    """
     if str(record.get("state") or "") != approvals.STATE_REQUESTED:
-        return False
+        return None
     at = decision_at(record)
     expires_at = record.get("expires_at")
     if at is None or not isinstance(expires_at, (int, float)) or at >= float(expires_at):
-        return False
+        return None
     from local_operator.operator.macos.keyagent import SIGN_TIMEOUT_SECONDS
 
-    return now <= at + SIGN_TIMEOUT_SECONDS
+    return at + SIGN_TIMEOUT_SECONDS
 
 
 def _strikes(record: Mapping[str, Any]) -> int:
@@ -870,20 +882,33 @@ def _deny_after_strikes(approval_id: str, root: Path | None) -> None:
 PHONE_NAME_DISPLAY_CHARS = 40
 
 
-def display_name(text: Any) -> str:
-    """A phone-sent name safe to show on a decision card (D2).
+#: The one FORMAT character a phone name keeps: ZERO WIDTH JOINER (round-1 R7). It glues
+#: emoji sequences (a family, a skin-toned profession, a flag) into one glyph, so
+#: stripping it split "👨‍👩‍👧" into three faces; it cannot reorder or hide surrounding
+#: text, which is the attack the Cf strip exists for. Every other Cf is still removed.
+_KEPT_FORMAT_CHARS = frozenset({"\u200d"})
+
+
+def display_name(text: Any, limit: int = PHONE_NAME_DISPLAY_CHARS) -> str:
+    """A phone-sent name safe to show on a decision card or a Paired-phones row (D2).
 
     Strips every control and FORMAT character (Unicode categories Cc/Cf: bidi
-    overrides and isolates, zero-width joiners/spaces, the BOM) so a name cannot
-    reorder or hide the text around it -- a phishing name like "iPhone\u202e..." would
-    otherwise render as something the person did not read. Capped at
-    :data:`PHONE_NAME_DISPLAY_CHARS` code points (an approximation of graphemes that
-    never splits inside a surrogate, since these are already code points).
+    embeddings, overrides and isolates U+202A-202E/U+2066-2069, the marks U+200E/F and
+    U+061C, zero-width spaces, the BOM) except the ZWJ (:data:`_KEPT_FORMAT_CHARS`), so
+    a name cannot reorder or hide the text around it -- a phishing name like
+    "iPhone\u202e..." would otherwise render as something the person did not read.
+    Capped at ``limit`` code points (:data:`PHONE_NAME_DISPLAY_CHARS` on a card line; a
+    caller showing the whole name passes the filing bound), an approximation of
+    graphemes that never splits inside a surrogate, since these are already code points.
     """
     import unicodedata
 
-    kept = "".join(ch for ch in str(text or "") if unicodedata.category(ch) not in {"Cc", "Cf"})
-    return " ".join(kept.split())[:PHONE_NAME_DISPLAY_CHARS]
+    kept = "".join(
+        ch
+        for ch in str(text or "")
+        if ch in _KEPT_FORMAT_CHARS or unicodedata.category(ch) not in {"Cc", "Cf"}
+    )
+    return " ".join(kept.split())[:limit]
 
 
 def row_pairing(record: Mapping[str, Any], root: Path | None = None) -> dict[str, Any] | None:
@@ -911,7 +936,9 @@ def row_pairing(record: Mapping[str, Any], root: Path | None = None) -> dict[str
     block: dict[str, Any] = {
         "mode": mode(record),
         "phone_name": display_name(device.get("name")),
-        "phone_name_full": _plain(device.get("name")),
+        # The whole name, through the SAME sanitiser as ``phone_name`` (round-1 R2):
+        # ``_plain`` strips only C0/C1, so bidi overrides reached the desktop here.
+        "phone_name_full": display_name(device.get("name"), limit=64),
         "platform": str(device.get("platform") or ""),
         "key_fingerprint": str(device.get("key_fp") or ""),
         "sas": None,
@@ -1209,6 +1236,9 @@ def _apply(approval_id: str, expected_block: dict[str, Any], root: Path | None) 
             operator_key_id=str(trio["key_id"]),
             name=_plain(device["name"]),
             scope=tuple(devices.DEVICE_SCOPES),
+            # The filing's platform (``_PLATFORMS``-checked by ``exact_shape``), so a PWA
+            # phone's row says "web" before any push link exists (round-1 Q4).
+            platform=str(device.get("platform") or ""),
         )
         # The relay's pairing request is settled by the install: leaving it would offer the
         # same phone a second, unchecked install path (``lop pair``'s watcher).
@@ -1468,6 +1498,9 @@ class _PairOp:
 
     def decision_pending(self, record: Mapping[str, Any], now: float) -> bool:
         return decision_pending(record, now)
+
+    def decision_deadline(self, record: Mapping[str, Any]) -> float | None:
+        return decision_deadline(record)
 
     def intent(self, record: dict[str, Any]) -> dict[str, Any] | None:
         return intent(record)

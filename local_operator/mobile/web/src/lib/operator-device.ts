@@ -448,6 +448,67 @@ export async function signChallenge(input: {
 	};
 }
 
+/** The push link's domain label — the relay's `push_devices.LINK_LABEL`. Its own
+    label, so a withdraw signature can never be replayed as a link. */
+export const PUSH_LINK_LABEL = "lop-push-link-v1";
+
+/** The exact bytes `push_devices.link_message` verifies: the label, then the
+    timestamp, device id, CANONICAL (lowercase) install id, platform and the hex
+    SHA-256 of the push token, newline-joined (no field can hold a newline). */
+export async function pushLinkMessage(input: {
+	at: number;
+	deviceId: string;
+	installId: string;
+	platform: string;
+	token: string;
+}): Promise<Uint8Array> {
+	const digest = new Uint8Array(
+		await crypto.subtle.digest("SHA-256", textEncoder.encode(input.token) as unknown as ArrayBuffer),
+	);
+	const body = [
+		String(input.at),
+		input.deviceId,
+		input.installId.toLowerCase(),
+		input.platform,
+		bytesToHex(digest),
+	].join("\n");
+	return textEncoder.encode(`${PUSH_LINK_LABEL}\n${body}`);
+}
+
+/**
+ * The push-register link fields (pairing design v2 §2.4, round-1 R4/Q1/Q2).
+ *
+ * WHY A SIGNATURE AND NOT JUST THE CERTIFICATE: the certificate is public (the relay
+ * serves it to any signed-in caller), so presenting it proved nothing about who was
+ * asking — another phone could link its notifications to this phone's id. The relay
+ * now requires the device key's signature over this register body's identity and a
+ * timestamp inside its clock window (`push_devices.LINK_SKEW_S`). The key is the
+ * existing non-extractable one, so only this browser profile can produce it.
+ *
+ * `null` when this phone is not paired (no certificate, or its key was lost): the
+ * register then goes without a link rather than with one the relay would refuse.
+ */
+export async function pushLinkFields(input: {
+	installId: string;
+	platform: string;
+	token: string;
+	now?: number;
+}): Promise<Record<string, string | number> | null> {
+	if (await reconcileDeviceKey()) return null;
+	const stored = storedCertificate();
+	if (stored === null) return null;
+	const key = await loadOrCreateDeviceKey();
+	const deviceId = await deviceIdFor(key.point);
+	const at = Math.floor((input.now ?? Date.now()) / 1000);
+	const message = await pushLinkMessage({ ...input, at, deviceId });
+	return {
+		operator_device_id: deviceId,
+		operator_cert: stored.certificate,
+		operator_link_sig: await signWithDeviceKey(message),
+		operator_link_at: at,
+	};
+}
+
 /** The fields an authority-increasing frame carries when this phone signs it. */
 export async function operatorFieldsFor(input: {
 	action: OperatorAction;

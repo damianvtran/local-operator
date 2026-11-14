@@ -337,12 +337,48 @@ _REGISTER_FIELDS = frozenset(
         "app_version",
         "install_id",
         "name",
-        # The optional push link (design v2 §2.4): both or neither. The certificate is
-        # what proves the id; an id alone is never accepted.
+        # The optional push link (design v2 §2.4): all four or none. The certificate
+        # proves the operator issued the id; the signature and its timestamp prove the
+        # caller HOLDS that device's key (round-1 R4/Q2). An id alone is never accepted.
         "operator_device_id",
         "operator_cert",
+        "operator_link_sig",
+        "operator_link_at",
     }
 )
+
+#: The domain label of the push link's device-key signature. Its own label, distinct
+#: from ``pair_requests.WITHDRAW_LABEL`` (neither is a prefix of the other), so a
+#: withdraw signature can never be replayed as a link and vice versa.
+LINK_LABEL = b"lop-push-link-v1"
+
+#: How far ``operator_link_at`` may sit from this computer's clock, either way.
+#: MEASURE-BEFORE-CAP: no new number — this is the relay's existing phone-clock
+#: allowance (``mobile.auth._SKEW_S``, 60 s, the drift it already tolerates on cookie
+#: expiry from the same phones). It bounds how long a captured register body could be
+#: replayed; the replay could only re-link the SAME install to the SAME device anyway,
+#: because the message binds both (``link_message``).
+LINK_SKEW_S = 60
+
+
+def link_message(
+    *, at: int, operator_device_id: str, install_id: str, platform: str, token: str
+) -> bytes:
+    """The exact bytes the phone signs to link a push row to its operator device.
+
+    ``LINK_LABEL || "\\n" || at || "\\n" || device_id || "\\n" || install_id || "\\n"
+    || platform || "\\n" || sha256_hex(token)``. Newline-joined because no field can hold
+    one (decimal, hex, canonical lowercase UUID, a closed platform set, a hex digest);
+    the token is hashed so its arbitrary bytes never need escaping. ``install_id`` is
+    the CANONICAL spelling (lowercase, hyphenated) the store records, so a client that
+    sent an uppercase UUID must sign the lowercase form. The PWA's ``pushLinkFields``
+    and the native app build the same bytes.
+    """
+    import hashlib
+
+    digest = hashlib.sha256(token.encode("utf-8")).hexdigest()
+    parts = (str(at), operator_device_id, install_id, platform, digest)
+    return LINK_LABEL + b"\n" + "\n".join(parts).encode("ascii")
 
 
 class PushDeviceRefusal(Exception):
@@ -606,7 +642,7 @@ def register(
     old and a device's liveness on that route is the CLOUD's grant, not this
     clock (ADR §4 rule 2).
     """
-    fields = _checked_registration(body)
+    fields = _checked_registration(body, config_dir, now=now)
     with _LOCK:
         store = _load_store(config_dir)
         records = store["devices"]
@@ -1183,8 +1219,14 @@ def unrevoke(config_dir: Path, device_id: str, *, now: float | None = None) -> d
 # -- payload validation ---------------------------------------------------------
 
 
-def _checked_registration(body: object) -> dict[str, Any]:
-    """One register body, field by field, strictly — or a refusal sentence."""
+def _checked_registration(
+    body: object, config_dir: Path | None = None, *, now: float | None = None
+) -> dict[str, Any]:
+    """One register body, field by field, strictly — or a refusal sentence.
+
+    ``config_dir`` is the root whose issued certificates and revocations the push
+    link is checked against; ``None`` (a caller with no root) refuses any link.
+    """
     if not isinstance(body, dict):
         raise PushDeviceRefusal("a JSON object body is required")
     # Unknown keys refuse in BOTH directions — the register body like a stored
@@ -1231,28 +1273,79 @@ def _checked_registration(body: object) -> dict[str, Any]:
         "install_id": install_id,
         "name": name,
         "operator_device_id": _checked_operator_link(
-            body.get("operator_device_id"), body.get("operator_cert")
+            body,
+            install_id=install_id,
+            platform=platform,
+            token=token,
+            config_dir=config_dir,
+            now=time.time() if now is None else now,
         ),
     }
 
 
-def _checked_operator_link(device_id: object, certificate: object) -> str | None:
+_LINK_FIELDS = ("operator_device_id", "operator_cert", "operator_link_sig", "operator_link_at")
+
+
+def _checked_operator_link(
+    body: Mapping[str, Any],
+    *,
+    install_id: str,
+    platform: str,
+    token: str,
+    config_dir: Path | None,
+    now: float,
+) -> str | None:
     """The proven operator device id for a push row, or ``None`` when none was offered.
 
-    ACCEPTED ONLY WITH ITS PROOF (design v2 §2.4): the same request must carry an
-    operator-signed device certificate (``read_device_cert``) that VERIFIES under this
-    computer's installed anchor and names exactly that id. Otherwise any phone could
-    link its notifications to another phone's id. A link offered without a valid proof
-    refuses the registration rather than silently registering unlinked, so the app
-    learns its link did not take.
-    """
-    if device_id is None and certificate is None:
-        return None
-    if not isinstance(device_id, str) or not isinstance(certificate, str):
-        raise PushDeviceRefusal("operator_device_id needs operator_cert, both strings")
-    from local_operator.operator.trust import load_anchor
-    from local_operator.operator.verify import read_device_cert, verify_device_cert
+    WHAT THE LINK PROVES, AND WHAT IT DOES NOT (round-1 R4/Q2/Q1). Four checks, all
+    required, so a push row is tied to a paired phone only by the phone itself:
 
+    1. ``operator_cert`` verifies under this computer's installed anchor and names
+       exactly ``operator_device_id``. Certificates are PUBLIC (``GET
+       /api/pair/{device_id}`` serves them), so this alone proves only that the
+       operator once issued that id -- never that the caller is that phone.
+    2. ``operator_link_sig`` is the DEVICE KEY's signature (DER P-256, the withdraw's
+       pattern) over :func:`link_message` -- the id, this install, this platform and
+       this token's hash -- under the certificate's own ``spki``. That is the proof of
+       possession: another phone holding a fetched certificate cannot produce it.
+    3. ``operator_link_at`` is within ``LINK_SKEW_S`` of now, so a captured body
+       cannot be replayed later (e.g. after a revoke) to re-link.
+    4. The id is one THIS computer issued (its certificate is still stored here) and
+       is not revoked (``devices.is_revoked``: the local record or the anchor). A
+       revoked phone keeps a certificate that still verifies, so without this a
+       re-register on launch would flip its row from ``revoked`` back to ``removing``.
+
+    A link offered without a valid proof refuses the registration rather than silently
+    registering unlinked, so the app learns its link did not take.
+    """
+    offered = [field for field in _LINK_FIELDS if body.get(field) is not None]
+    if not offered:
+        return None
+    device_id = body.get("operator_device_id")
+    certificate = body.get("operator_cert")
+    signature_hex = body.get("operator_link_sig")
+    at = body.get("operator_link_at")
+    if (
+        not isinstance(device_id, str)
+        or not isinstance(certificate, str)
+        or not isinstance(signature_hex, str)
+        or isinstance(at, bool)
+        or not isinstance(at, int)
+    ):
+        raise PushDeviceRefusal(
+            "operator_device_id needs operator_cert, operator_link_sig and operator_link_at"
+        )
+    if abs(now - at) > LINK_SKEW_S:
+        raise PushDeviceRefusal("operator_link_at is outside the accepted clock window")
+    from local_operator.operator import devices
+    from local_operator.operator.trust import load_anchor
+    from local_operator.operator.verify import (
+        read_device_cert,
+        verify_device_cert,
+        verify_signature,
+    )
+
+    refused = "operator_cert does not prove operator_device_id on this computer"
     parsed = read_device_cert(certificate)
     loaded = load_anchor()
     if (
@@ -1261,11 +1354,32 @@ def _checked_operator_link(device_id: object, certificate: object) -> str | None
         or not loaded.usable
         or loaded.anchor is None
         or verify_device_cert(
-            certificate, operator_spki=loaded.anchor.spki, now=int(time.time()), parsed=parsed
+            certificate, operator_spki=loaded.anchor.spki, now=int(now), parsed=parsed
         )
         is None
     ):
-        raise PushDeviceRefusal("operator_cert does not prove operator_device_id on this computer")
+        raise PushDeviceRefusal(refused)
+    if (
+        config_dir is None
+        or devices.read_device(config_dir, device_id) is None
+        or devices.is_revoked(config_dir, device_id)
+    ):
+        raise PushDeviceRefusal("operator_device_id is not a phone paired with this computer")
+    try:
+        signature = bytes.fromhex(signature_hex) if len(signature_hex) <= 512 else b""
+    except ValueError:
+        signature = b""
+    message = link_message(
+        at=at,
+        operator_device_id=device_id,
+        install_id=install_id,
+        platform=platform,
+        token=token,
+    )
+    if not signature or not verify_signature(
+        spki=parsed.spki, message=message, signature=signature
+    ):
+        raise PushDeviceRefusal("operator_link_sig is not this device's signature")
     return device_id
 
 

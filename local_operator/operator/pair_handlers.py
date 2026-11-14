@@ -790,9 +790,9 @@ def _unified_revoke(root: Path, revoke: str) -> int:
     # running this again finishes it.
     from local_operator.operator import devices_revoke
 
-    outcome = devices_revoke.revoke(root, revoke)
-    if outcome["detail"]:
-        print(outcome["detail"], file=sys.stderr)
+    # The install's own sentences stream straight to this terminal (``out``); the
+    # result's ``detail`` is the keyed "unfinished" line printed just below.
+    outcome = devices_revoke.revoke(root, revoke, out=sys.stderr)
     if outcome["state"] != devices_revoke.STATE_REVOKED:
         from local_operator.operator.pair_op import _copy
 

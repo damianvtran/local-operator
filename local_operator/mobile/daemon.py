@@ -9336,7 +9336,13 @@ def build_app(daemon: MobileDaemon):
             # which is the documented way to revoke a device whose certificate
             # this machine still holds — left the local record silent. Measured
             # before the fix: that device re-paired on a fresh code with HTTP 200.
-            return JSONResponse({"error": "this device has been revoked"}, status_code=403)
+            # The typed ``code`` (round-1 R5) is what the PWA keys its re-key on: it
+            # deletes the device key and certificate, so it must never fire on prose.
+            # ``error`` keeps its exact sentence for builds that match it.
+            return JSONResponse(
+                {"error": "this device has been revoked", "code": "pair_device_revoked"},
+                status_code=403,
+            )
         name = str(body.get("name") or "")[:64]
         devices.write_pending(
             root,

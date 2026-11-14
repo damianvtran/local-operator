@@ -72,7 +72,9 @@ def _http_refusal(error: MeshRefusal) -> Exception:
     connected, already decided, no signing surface — is 409, because the
     operator (or their next action) can act on all of them.
     """
-    status = 404 if error.code in {"unknown_approval", "approval_missing"} else 409
+    status = (
+        404 if error.code in {"unknown_approval", "approval_missing", "unknown_device"} else 409
+    )
     if error.code in {
         "ssh_port_conflict",
         "invalid_ssh_port",

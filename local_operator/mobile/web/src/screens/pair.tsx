@@ -619,6 +619,25 @@ function TerminalDisclosure({
 	);
 }
 
+/** The one sentence a pre-code daemon's `/api/pair` sent for a revoked key (403). */
+const LEGACY_REVOKED_SENTENCE = "this device has been revoked";
+
+/**
+ * Whether a refusal says THIS phone's key is revoked — the only case that may run
+ * `rekeyAfterRevocation`, which deletes the device key and certificate.
+ *
+ * EXACT MATCHES ONLY (round-1 R5). This used to fire on any message containing
+ * "revoked", so on an already-paired phone an unrelated refusal whose prose named a
+ * revocation (an anchor's, the operator key's) silently unpaired it. Now: the typed
+ * `pair_device_revoked` code, or a 403 carrying the exact legacy sentence an older
+ * daemon sent before the code existed.
+ */
+export function isDeviceRevokedRefusal(error: unknown): boolean {
+	if (!(error instanceof HttpError)) return false;
+	if (error.code === "pair_device_revoked") return true;
+	return error.code === "" && error.status === 403 && error.message === LEGACY_REVOKED_SENTENCE;
+}
+
 function CodeEntry({ onPaired }: { onPaired: (authorityReady: boolean) => void }) {
 	const [code, setCode] = useState("");
 	const [name, setName] = useState(() => defaultDeviceName());
@@ -665,15 +684,11 @@ function CodeEntry({ onPaired }: { onPaired: (authorityReady: boolean) => void }
 			}
 		} catch (error) {
 			setState("failed");
-			if (error instanceof HttpError && error.code === "pair_device_revoked") {
+			if (isDeviceRevokedRefusal(error)) {
 				await rekeyAfterRevocation();
 				setMessage(messageRuntime.t("relay.pairing.revoked"));
 			} else if (String((error as Error)?.message ?? error).includes("not valid")) {
 				setMessage(messageRuntime.t("relay.pairing.terminal.invalid_code"));
-			} else if (String((error as Error)?.message ?? error).includes("revoked")) {
-				/* An older daemon refuses a revoked key with prose only; same U15 path. */
-				await rekeyAfterRevocation();
-				setMessage(messageRuntime.t("relay.pairing.revoked"));
 			} else {
 				setMessage(humanizeFailure(error));
 			}
