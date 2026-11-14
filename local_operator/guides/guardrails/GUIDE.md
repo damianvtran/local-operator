@@ -46,19 +46,23 @@ into HIGH — a judge decision, never a pass. Rules only ADD restriction.
   cwd) — unless it lands on something already critical, as an empty expansion
   collapsing to `/` does. Goes to the judge.
   Also HIGH, wherever the path is: unlocking write-protected files for removal
-  — `chmod -R u+w`/`+w`/`755`, `chflags nouchg`/`noschg`, `chattr -i` — on
-  anything outside this session's own directory that its ledger does not
-  record. That is a forced removal, even where `rm -rf` of the same path alone
-  would be LOW.
-- **Asks that were never answered are not consent.** An ask that timed out,
-  expired, was withdrawn or dismissed, or is still open never authorises a
-  delete. Asking about a path also ranks it at least HIGH, however deep it is:
-  deleting, overwriting or unlocking a path equal to, under or above one such
-  an ask names (globs and brace lists included; asks from this session, its
-  parents and its subagents) is refused without asking the judge, unless this
-  session's creation ledger records the path or the operator later approves
-  it. Leave the path in place and report it as waiting for the operator's
-  answer.
+  — `chmod -R u+w`/`+w`/`755`/`-N`, the same through `find -exec` or `xargs`,
+  `setfacl -R`, `chflags nouchg`/`noschg`, `chattr -i` — on anything outside
+  this session's own directory that its ledger does not record. That is a
+  forced removal, even where `rm -rf` of the same path alone would be LOW.
+- **Only an approving operator answer to an ask is consent.** An ask that
+  timed out, expired, was withdrawn, dismissed or declined, is still open, or
+  was "answered" by the agent itself, a relay or a declining pick never
+  authorises a delete. Asking about a path also ranks deleting, moving away or
+  unlocking it at least HIGH, however deep it is (a path equal to, under or
+  above one the ask names, in its question, labels or descriptions; globs and
+  brace lists included; asks from this session, its parents and its
+  subagents, up to 7 days old). Such a call is refused without the judge,
+  unless this session's creation ledger records the path or the operator
+  approved it; under a broad dir the ask names (a direct child of `~`, or one
+  with over 1000 entries) the judge decides instead. Overwrites keep their
+  usual rank. Leave the path in place and report it as waiting for the
+  operator's answer.
 - **LOW** — everything else: this session's scratchpad, deep paths, `/tmp`. Runs
   unexamined. A target derived from a secret is refused even with an approved
   override: consent cannot be shown for a secret you should never see.

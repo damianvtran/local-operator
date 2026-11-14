@@ -61,6 +61,7 @@ import re
 import sqlite3
 import stat
 import subprocess
+import sys
 import time
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
@@ -2364,22 +2365,36 @@ def lineage_asks(
 
 @dataclass(frozen=True)
 class UnansweredAsk:
-    """An ask in the lineage that is NOT consent: what it proposed, and why not."""
+    """An ask in the family whose end state is NOT consent for what it names.
+
+    Despite the name (kept for its callers) this is every ask that names
+    paths and is not a trusted operator answer approving them: never answered
+    (open, timed out, expired, withdrawn, dismissed), declined, or answered in
+    a way :func:`_ask_words` refuses (the agent's own ``answered_in_chat``, a
+    relay or bridge row, a declining pick such as "Keep everything").
+    """
 
     ask_id: str
     session_id: str
-    #: The fold's status: ``timed_out``, ``expired``, ``withdrawn``, ``open``
-    #: or ``dismissed`` (:data:`_UNANSWERED_LABEL`).
+    #: The fold's status (``timed_out``, ``answered``, ``declined``, ...).
     status: str
-    #: Question text and option LABELS, the same naming bar as a consenting ask.
+    #: Question text, option labels AND descriptions: wider than consent's
+    #: naming bar on purpose, since this text is only ever matched to REFUSE.
     text: str
+    #: Why it is not consent, for the judge fact and the refusal text.
+    label: str = ""
+    #: What a trusted operator answer approved without a judge
+    #: (``OperatorWords.approved``); a path it reaches is consented, not
+    #: blocked (:func:`ask_consents`). Empty for every non-answer.
+    approved: str = ""
+    #: ``created_at`` (ms) of the ask; :data:`ASK_ESCALATION_MAX_AGE_MS` bounds it.
+    created_at: int = 0
+    #: True when the operator never answered (open/timed out/expired/...),
+    #: False when an answer exists but does not approve the path.
+    never_answered: bool = True
 
 
-#: Statuses that mean "the operator never answered". Deliberately NOT
-#: ``answered``/``late``/``declined``: an answer that :func:`_ask_words` refuses
-#: (a declining pick, an untrusted surface) is still the operator's words, and
-#: keeps reaching the judge exactly as before; only the never-answered asks are
-#: refused deterministically here.
+#: Statuses that mean "the operator never answered".
 _UNANSWERED_LABEL = {
     "timed_out": "TIMED OUT with no answer",
     "expired": "expired with no answer",
@@ -2388,9 +2403,33 @@ _UNANSWERED_LABEL = {
     "open": "still open, not yet answered",
 }
 
+#: An ask stops lifting paths out of LOW once it is this old (review R1-M2,
+#: PR #3966). WHY 7 days: the longest ask timeout is 24 h
+#: (``asks.policy.MAX_TIMEOUT_S``) and a cleanup that follows an ask runs
+#: within hours of its notice (incident a-20fc: one hour); a week covers a
+#: session resumed after a weekend with margin, while an ask about some path
+#: last Tuesday no longer stands between a session family and ordinary work
+#: under that path forever. Only escalation is bounded: the not-consent FACT
+#: still reaches the judge for any target that ranks HIGH on its own.
+ASK_ESCALATION_MAX_AGE_MS = 7 * 24 * 3600 * 1000
+
 
 def unanswered_label(status: str) -> str:
     return _UNANSWERED_LABEL.get(status, "never answered")
+
+
+def _not_consent_label(record: Mapping[str, Any], status: str) -> str:
+    """Why a folded ask that HAS an end state still is not consent."""
+    if status in _UNANSWERED_LABEL:
+        return _UNANSWERED_LABEL[status]
+    if status == "declined":
+        return "declined"
+    surface = str((record.get("answered_by") or {}).get("surface") or "")
+    if status in ("answered", "late") and surface not in TRUSTED_ASK_SURFACES:
+        # ``answered_in_chat`` is written by the AGENT (surface ``chat``); a
+        # relay row is another session's carriage. Neither is the operator.
+        return f"answered on the '{surface or 'unknown'}' surface, not by the operator"
+    return "answered without approving it"
 
 
 def unanswered_asks(
@@ -2399,17 +2438,24 @@ def unanswered_asks(
     state_root: str | os.PathLike[str] | None = None,
     now_ms: int | None = None,
 ) -> list[UnansweredAsk]:
-    """Asks in ``session_id``'s lineage that the store does NOT prove as consent.
+    """Asks in ``session_id``'s family that the store does NOT prove as consent.
 
     WHY (incident 2026-11-14, session 1faad822298d, ask a-20fc): an ask naming
     rig and benchmark paths timed out unanswered, the timeout notice said
     "proceed … use your recommended option(s)", and the session deleted them.
     :func:`verified_ask` already refused that ask as consent, but nothing said
-    so: the judge saw no ask at all while the forked judge's prefix carried the
-    notice and the agent's "after 1h timeout" prose. This lists exactly those
-    asks so the checkpoint can (a) tell the judge each one is NOT consent and
-    (b) refuse deterministically when such an ask is the only thing pointing at
-    a path (``check.DeleteCase.lapsed_only``). Never a source of consent.
+    so. This lists those asks so the checkpoint can (a) tell the judge each one
+    is NOT consent and (b) refuse deterministically when such an ask is the
+    only thing pointing at a path (``check.DeleteCase.lapsed_only``).
+
+    Review R1-M1 (PR #3966): listing only never-answered STATUSES let the
+    agent's own ``ask_withdraw answered_in_chat`` after the deadline (folded
+    ``late``, surface ``chat``), a relay answer, a bare ``declined`` and a
+    trusted "Keep everything" pick drop the ask from this list, so the path
+    fell back to LOW. Now: blocks = asks naming the path − asks granting
+    consent for it. Every ask is listed unless it has no visible question;
+    a trusted answer carries its ``approved`` text, and :func:`ask_consents`
+    lifts only the paths that text reaches. Never a source of consent.
     """
     try:
         from local_operator.asks import store
@@ -2432,16 +2478,20 @@ def unanswered_asks(
             continue
         for record in records:
             status = str(record.get("status") or "")
-            if status not in _UNANSWERED_LABEL:
-                continue
             questions = [q for q in record.get("questions") or [] if isinstance(q, Mapping)]
-            # No closing bracket after the last label: ``_PATHISH`` would keep
+            # No closing bracket after the last option: ``_PATHISH`` would keep
             # it on a trailing glob (``~/osworld/runs*]``), which then matches
             # nothing — and this text is matched to REFUSE, so a miss fails open.
+            # Descriptions are included (review m4/QA Q2): a path named only
+            # there must still refuse; consent keeps the narrower label bar.
             parts = [
                 f"Q: {q.get('question') or ''} | options: "
                 + "; ".join(
-                    str(o.get("label") or "")
+                    (
+                        f"{o.get('label') or ''} ({o.get('description') or ''})"
+                        if o.get("description")
+                        else str(o.get("label") or "")
+                    )
                     for o in (q.get("options") or [])
                     if isinstance(o, Mapping)
                 )
@@ -2450,15 +2500,45 @@ def unanswered_asks(
             ]
             if not parts:
                 continue
+            words = _ask_words(record, sid)
             out.append(
                 UnansweredAsk(
                     ask_id=str(record.get("ask_id") or ""),
                     session_id=sid,
                     status=status,
                     text="\n".join(parts),
+                    label=(
+                        "answered without approving this path"
+                        if words is not None
+                        else _not_consent_label(record, status)
+                    ),
+                    approved=words.approved if words is not None else "",
+                    created_at=int(record.get("created_at") or 0),
+                    never_answered=status in _UNANSWERED_LABEL,
                 )
             )
     return out
+
+
+def ask_consents(
+    ask: UnansweredAsk,
+    path: str,
+    *,
+    home: str,
+    cwd: str | None = None,
+    protected: Iterable[str] = (),
+) -> bool:
+    """Did the operator's trusted answer to ``ask`` approve ``path`` (equal or under)?
+
+    The approved text is the label(s) the operator picked (or the question, for
+    a bare yes to a yes/no ask). A path inside an approved tree is approved
+    (``rm -rf ~/osworld/runs-3/raw`` under an approved ``~/osworld/runs*``); a
+    path ABOVE it is not — approving ``~/x/build`` never approves ``~/x``.
+    """
+    if not ask.approved:
+        return False
+    kind = ask_reach(ask.approved, path, home=home, cwd=cwd, protected=protected)
+    return kind is not None and kind[0] in ("exact", "under")
 
 
 def _text_of(message: Any) -> str:
@@ -2856,7 +2936,22 @@ def ask_reaches(
     cwd: str | None = None,
     protected: Iterable[str] = (),
 ) -> bool:
-    """Does an UNANSWERED ask's ``text`` name ``path``, a path above it, or one inside it?
+    """Does an ask's ``text`` name ``path``, a path above it, or one inside it?
+
+    A boolean view of :func:`ask_reach`; see there for the rules.
+    """
+    return ask_reach(text, path, home=home, cwd=cwd, protected=protected) is not None
+
+
+def ask_reach(
+    text: str,
+    path: str,
+    *,
+    home: str,
+    cwd: str | None = None,
+    protected: Iterable[str] = (),
+) -> tuple[str, str] | None:
+    """HOW an ask's ``text`` reaches ``path``: ``(kind, named path)`` or ``None``.
 
     WHY (incident 2026-11-14, ask a-20fc, rows 302/320/365): the session asked
     which rig, build and benchmark trees to delete, got no answer, and removed
@@ -2866,29 +2961,45 @@ def ask_reaches(
     back into LOW. So this match is deliberately WIDER than consent's
     :func:`names_path`, and only ever used to REFUSE (over-matching fails closed):
 
-    - equal or under: :func:`names_path` on ``path`` or any ancestor of it
-      below ``$HOME`` (same glob and brace-list rules as the answered-ask
-      route, so ``~/osworld/runs*`` reaches ``~/osworld/runs-3/raw``);
-    - above: ``path`` is an ancestor of a named path, or of a glob's literal
-      parent directory (``rm -rf ~/osworld`` removes every ``runs*``).
+    - ``("exact", path)``: :func:`names_path` names ``path`` itself, literally
+      or by its glob (``~/osworld/runs*`` names ``~/osworld/runs-3``);
+    - ``("under", ancestor)``: it names an ancestor of ``path`` below
+      ``$HOME`` (same glob and brace-list rules). The caller needs the
+      ancestor: under a BROAD named dir (``~/workspace``) the target goes to
+      the judge instead of a deterministic refusal (review R1-M2);
+    - ``("above", named)``: ``path`` is an ancestor of a named path, or of a
+      glob's literal parent directory (``rm -rf ~/osworld`` removes every ``runs*``).
 
     ``$HOME``, its ancestors and the protected roots are never treated as
     "named" for the under-direction: an ask that merely mentions ``~`` or the
     state root must not make every deep delete in the session refusable.
+
+    Case (review R1-m1): macOS volumes are case-insensitive by default, so
+    ``rm -rf ~/Workspace/Harness-Cost-Bench`` deletes the tree an ask spelled
+    ``~/workspace/harness-cost-bench``. On Darwin every spelling is compared
+    casefolded. On a case-SENSITIVE Darwin volume that can over-match two
+    distinct paths, which only refuses (this function never grants consent).
     """
     if not text or not path:
-        return False
+        return None
     protected = tuple(protected)
-    if names_path(text, path, home=home, cwd=cwd, protected=protected):
-        return True
+    spellings = list(dict.fromkeys([os.path.realpath(path), os.path.normpath(path)]))
+    if sys.platform == "darwin":
+        text = text.casefold()
+        home = home.casefold()
+        cwd = cwd.casefold() if cwd else cwd
+        protected = tuple(p.casefold() for p in protected)
+        spellings = list(dict.fromkeys(s.casefold() for s in spellings))
+    for spelled in spellings:
+        if names_path(text, spelled, home=home, cwd=cwd, protected=protected):
+            return ("exact", spelled)
     home_n = os.path.normpath(home)
     stops = {os.path.normpath(p) for p in protected} | {home_n, "/"}
-    spellings = {os.path.realpath(path), os.path.normpath(path)}
     for spelled in spellings:
         anc = os.path.dirname(spelled)
         while anc and anc not in stops and not home_n.startswith(anc.rstrip("/") + "/"):
             if names_path(text, anc, home=home, cwd=cwd, protected=protected):
-                return True
+                return ("under", anc)
             parent = os.path.dirname(anc)
             if parent == anc:
                 break
@@ -2901,7 +3012,42 @@ def ask_reaches(
         named = expanded if wild is None else expanded[: wild.start()].rsplit("/", 1)[0]
         named = os.path.normpath(named or "/")
         if any(named == s or named.startswith(s.rstrip("/") + "/") for s in spellings):
-            return True
+            return ("above", named)
+    return None
+
+
+#: A named dir with more entries than this is "broad" (review R1-M2): an ask
+#: mentioning it ("~/workspace or ~/Documents?") is too wide a net to refuse
+#: everything under it without a judge. 1000 entries is far above a project
+#: tree's top level and the incident's rig/bench dirs (tens of entries) yet
+#: below a home-wide workspace or Downloads folder; the count stops at
+#: ``_BROAD_ASK_DIR_ENTRIES + 1`` so the check stays bounded.
+_BROAD_ASK_DIR_ENTRIES = 1000
+
+
+def broad_ask_dir(named: str, *, home: str) -> bool:
+    """Is ``named`` too broad for an ask about it to refuse paths UNDER it outright?
+
+    Broad: a direct child of ``$HOME`` (``~/workspace``, ``~/Documents``) or
+    any directory holding more than :data:`_BROAD_ASK_DIR_ENTRIES` entries.
+    Paths under a broad named dir still rank HIGH and reach the judge with the
+    not-consent fact; only the exact named path (or its glob matches) and
+    paths above it keep the deterministic refusal.
+    """
+    norm = os.path.normpath(named)
+    homes = {os.path.normpath(home), os.path.realpath(home)}
+    if sys.platform == "darwin":
+        norm = norm.casefold()
+        homes = {h.casefold() for h in homes}
+    if os.path.dirname(norm) in homes:
+        return True
+    try:
+        with os.scandir(named) as it:
+            for n, _ in enumerate(it, 1):
+                if n > _BROAD_ASK_DIR_ENTRIES:
+                    return True
+    except OSError:
+        return False
     return False
 
 

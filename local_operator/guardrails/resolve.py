@@ -1410,7 +1410,12 @@ DELETE_PROGRAMS = frozenset({"rm", "grm", "rmdir", "unlink", "gunlink", "shred"}
 #: protection is the owner saying "do not remove this", so unlocking it on a
 #: path the session did not create is a FORCED removal and is judged as one
 #: (``classify._high_reason``, op ``unprotect``).
-_UNPROTECT_PROGRAMS = frozenset({"chmod", "gchmod", "chflags", "chattr"})
+_UNPROTECT_PROGRAMS = frozenset({"chmod", "gchmod", "chflags", "chattr", "setfacl"})
+#: ``setfacl`` options that take the NEXT word as their value (an ACL spec or file).
+_SETFACL_VALUE_LETTERS = frozenset("mMxX")
+_SETFACL_VALUE_LONG = frozenset(
+    {"--modify", "--modify-file", "--remove", "--remove-file", "--set", "--set-file"}
+)
 #: ``chflags`` words that clear an immutable / append-only / no-unlink flag.
 _CHFLAGS_UNLOCK = frozenset(
     {
@@ -1456,7 +1461,9 @@ def _chmod_grants_write(mode: str) -> bool:
     return False
 
 
-def _unprotected_operands(name: str, args: list[Expanded]) -> list[Expanded]:
+def _unprotected_operands(
+    name: str, args: list[Expanded], *, recursive: bool = False
+) -> list[Expanded]:
     """The paths a permission change UNLOCKS for removal, else ``[]``.
 
     ``chmod`` counts only RECURSIVE (``-R``) grants of owner write: a
@@ -1464,12 +1471,43 @@ def _unprotected_operands(name: str, args: list[Expanded]) -> list[Expanded]:
     tree is how the incident got past ``rm``'s refusal. ``chflags`` clearing
     an immutable or append-only flag counts with or without ``-R``: nothing
     but a removal or rewrite needs that. ``chattr -i``/``-a`` (Linux) the same.
+
+    Review R1-m2 (PR #3966), the same unlock spelled differently:
+    ``recursive=True`` is passed for ``find -exec chmod`` (find walks the
+    tree for it); macOS ``chmod -R -N`` strips every ACL entry, deny-delete
+    ones included, and takes no mode operand; ``setfacl -R`` rewrites the
+    ACLs of a whole tree.
     """
     if name in ("chmod", "gchmod"):
         operands, flags = _operands(args, _CHMOD_VALUE_FLAGS)
-        if not (_has_short(flags, "R") or "--recursive" in flags) or len(operands) < 2:
+        if not (recursive or _has_short(flags, "R") or "--recursive" in flags):
+            return []
+        if _has_short(flags, "N"):
+            return operands
+        if len(operands) < 2:
             return []
         return operands[1:] if _chmod_grants_write(operands[0].text) else []
+    if name == "setfacl":
+        files: list[Expanded] = []
+        rec = recursive
+        skip = False
+        for w in args:
+            if skip:
+                skip = False
+                continue
+            t = w.text
+            if t.startswith("--"):
+                rec = rec or t == "--recursive"
+                skip = t in _SETFACL_VALUE_LONG
+                continue
+            if t.startswith("-") and len(t) > 1 and not w.opaque:
+                rec = rec or "R" in t[1:]
+                # ``-Rm spec``: a value letter LAST in the cluster takes the next word.
+                skip = t[-1] in _SETFACL_VALUE_LETTERS
+                continue
+            if not w.vanished:
+                files.append(w)
+        return files if rec else []
     if name == "chflags":
         operands, _ = _operands(args)
         if len(operands) < 2:
@@ -2778,6 +2816,13 @@ class _Walker:
             # it had (the write-surface backstop); this only ADDS targets.
             for w in _unprotected_operands(name, args):
                 self._add(w, "unprotect", name)
+            # ``… | xargs chmod u+w`` (review R1-m2): the files arrive on
+            # stdin, typically a whole ``find`` walk, so it is read as
+            # recursive; a stand-in operand asks "would this unlock its files?".
+            if stdin_fed and _unprotected_operands(
+                name, [*args, Expanded(text="{}")], recursive=True
+            ):
+                self._add_stdin(name, op="unprotect")
         if name in DELETE_PROGRAMS:
             flags_with_value = _SHRED_VALUE_FLAGS if name == "shred" else _RM_VALUE_FLAGS
             operands, _flags = _operands(args, flags_with_value)
@@ -3356,6 +3401,21 @@ class _Walker:
             i += 1
         rest = args[i:]
         texts = [w.text for w in rest]
+        # ``find <tree> -exec chmod u+w {} +`` (review R1-m2) unlocks every
+        # file find walks: the same forced removal as ``chmod -R u+w <tree>``.
+        for j, t in enumerate(texts):
+            if t not in _FIND_EXEC or j + 1 >= len(texts):
+                continue
+            prog = os.path.basename(texts[j + 1])
+            if prog not in _UNPROTECT_PROGRAMS:
+                continue
+            end = next(
+                (k for k in range(j + 2, len(texts)) if texts[k] in (";", "\\;", "+")),
+                len(texts),
+            )
+            if _unprotected_operands(prog, rest[j + 2 : end], recursive=True):
+                for w in roots or [Expanded(text=".")]:
+                    self._add(w, "unprotect", f"find -exec {prog}")
         destructive = "-delete" in texts
         for j, t in enumerate(texts):
             if t in _FIND_EXEC and j + 1 < len(texts):
@@ -4055,11 +4115,11 @@ class _Walker:
                 self._add(Expanded(text=landed), "append", program)
                 self._carry_link(landed, state)
 
-    def _add_stdin(self, program: str) -> None:
+    def _add_stdin(self, program: str, op: str = "delete") -> None:
         self.result.targets.append(
             Target(
                 path=self.state.cwd,
-                op="delete",
+                op=op,
                 program=f"xargs {program}",
                 credential_derived=self.state.private_cwd,
                 opaque=True,

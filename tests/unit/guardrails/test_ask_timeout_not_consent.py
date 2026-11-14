@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import time
 from pathlib import Path
 from typing import Any
@@ -264,6 +265,13 @@ def test_chmod_r_uw_on_a_foreign_tree_is_high(home: Path) -> None:
         "chflags -R nouchg ~/workspace/harness-cost-bench/coding",
         "chflags nouchg,noschg ~/workspace/harness-cost-bench/coding",
         "chattr -R -i ~/workspace/harness-cost-bench/coding",
+        # Review R1-m2: the same unlock through find, xargs, ACLs.
+        "find ~/workspace/harness-cost-bench/coding -exec chmod u+w {} +",
+        "find ~/workspace/harness-cost-bench/coding -type f -exec chmod 644 {} \\;",
+        "cd ~/workspace/harness-cost-bench && find coding | xargs chmod u+w",
+        "setfacl -R -m u:me:rwx ~/workspace/harness-cost-bench/coding",
+        "setfacl -Rm u:me:rwx ~/workspace/harness-cost-bench/coding",
+        "chmod -R -N ~/workspace/harness-cost-bench/coding",
     ],
 )
 def test_similar_unlocks_on_a_foreign_tree_are_high(home: Path, command: str) -> None:
@@ -279,6 +287,10 @@ def test_similar_unlocks_on_a_foreign_tree_are_high(home: Path, command: str) ->
         "chmod -R go+w ~/workspace/harness-cost-bench/coding",
         "chmod -R 555 ~/workspace/harness-cost-bench/coding",
         "chflags -R uchg ~/workspace/harness-cost-bench/coding",
+        "find ~/workspace/harness-cost-bench/coding -exec chmod go+w {} +",
+        "find ~/workspace/harness-cost-bench/coding | xargs chmod +x",
+        "setfacl -m u:me:rwx ~/workspace/harness-cost-bench/coding",
+        "chmod -N ~/workspace/harness-cost-bench/coding",
     ],
 )
 def test_non_unlocking_permission_changes_stay_low(home: Path, command: str) -> None:
@@ -380,9 +392,14 @@ NOT_CONSENT_TEXT = (
 
 
 def _deep_ask(
-    home: Path, *, answer: str | None = None, expired: bool = True, session: str = S
+    home: Path,
+    *,
+    answer: str | None = None,
+    expired: bool = True,
+    session: str = S,
+    age_ms: int = 0,
 ) -> None:
-    now = int(time.time() * 1000)
+    now = int(time.time() * 1000) - age_ms
     expires = now - 60_000 if expired else now + 3_600_000
     rows: list[dict[str, Any]] = [
         {
@@ -482,7 +499,10 @@ async def test_open_ask_naming_a_deep_path_says_wait_for_the_answer(deep: Path) 
 @pytest.mark.parametrize("command", DEEP_COMMANDS[:3])
 async def test_approving_answer_lifts_the_deep_refusal(deep: Path, command: str) -> None:
     _deep_ask(deep, answer=DEEP_LABEL, expired=False)
-    assert prov.unanswered_asks(S) == []
+    # Listed (it names paths), but its trusted answer consents to them.
+    [ask] = prov.unanswered_asks(S)
+    assert ask.approved == DEEP_LABEL
+    assert prov.ask_consents(ask, str(deep / "osworld/runs-3/raw"), home=str(deep))
     judge = _Judge("ALLOW ask=a-77de")
     outcome = await _check(deep, command, judge)
     assert outcome is None or not outcome.blocked, outcome and outcome.text
@@ -561,3 +581,314 @@ async def test_an_unanswered_ask_anywhere_in_the_family_counts(deep: Path, asker
 def test_an_unrelated_sessions_ask_does_not_count(deep: Path) -> None:
     _deep_ask(deep, session="0123456789ab")  # no lineage row: not family
     assert prov.unanswered_asks(S) == []
+
+
+# -- Review R1 remediation (PR #3966) -------------------------------------------------
+
+
+class _QueueSession:
+    """What ``AskQueue`` needs of a session, and nothing else (as in test_queue.py)."""
+
+    def __init__(self) -> None:
+        self.transcript = type("T", (), {"has_entry": lambda self, _id: True})()
+        self.spawned: list[Any] = []
+
+    def credential_names(self) -> list[str]:
+        return []
+
+    def ask_reach(self) -> list[str]:
+        return []
+
+    def _spawn_background(self, coro: Any) -> Any:
+        import asyncio
+
+        task = asyncio.ensure_future(coro)
+        self.spawned.append(task)
+        return task
+
+    async def deliver_ask_messages(self, messages: Any) -> None:
+        return None
+
+
+def _queued_deep_ask(deep: Path, clock: dict[str, int]) -> tuple[Any, str]:
+    """``DEEP_LABEL``'s ask through the REAL queue API, already past its 1 h deadline."""
+    from local_operator.asks.queue import AskQueue
+
+    queue = AskQueue(
+        _QueueSession(),
+        config_dir=deep / ".local-operator",
+        session_id=S,
+        clock=lambda: clock["now"],
+    )
+    receipt = queue.enqueue(
+        [
+            {
+                "id": "deep_cleanup",
+                "question": "Which build and benchmark trees should I delete?",
+                "options": [
+                    {"label": "Keep everything", "description": "stop"},
+                    {"label": DEEP_LABEL, "description": "reclaim ~40 GB"},
+                ],
+                "multi": False,
+                "recommended": 1,
+            }
+        ],
+        3600,
+    )
+    assert receipt["ok"], receipt
+    ask_id = receipt["details"]["ask_id"]
+    clock["now"] = int(time.time() * 1000)  # the deadline is behind us now
+    return queue, ask_id
+
+
+def _settle(queue: Any, ask_id: str, how: str) -> dict[str, Any]:
+    if how == "answered_in_chat":
+        # The AGENT records a chat "answer" after the timeout (review R1-M1).
+        return queue.withdraw(
+            ask_id, reason="answered_in_chat", answers={"deep_cleanup": ["yes delete them"]}
+        )
+    if how == "moot":
+        return queue.withdraw(ask_id, reason="moot")
+    if how == "relay":
+        return queue.respond(ask_id, {"deep_cleanup": [DEEP_LABEL]}, by="relay")
+    if how == "declined":
+        return queue.decline(ask_id, by="desktop")
+    if how == "keep_everything":
+        # The operator, on a trusted surface, said NO.
+        return queue.respond(ask_id, {"deep_cleanup": ["Keep everything"]}, by="desktop")
+    if how == "timed_out":
+        return {"ok": True}
+    raise AssertionError(how)
+
+
+SETTLES = ["timed_out", "answered_in_chat", "moot", "relay", "declined", "keep_everything"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("how", SETTLES)
+async def test_no_end_state_but_a_trusted_approval_lifts_the_refusal(deep: Path, how: str) -> None:
+    """Review R1-M1: blocks = asks naming the path − asks granting consent for it."""
+    clock = {"now": int(time.time() * 1000) - 2 * 3_600_000}
+    queue, ask_id = _queued_deep_ask(deep, clock)
+    settled = _settle(queue, ask_id, how)
+    assert settled.get("ok"), settled
+    assert prov.verified_ask(S, ask_id) is None or how == "keep_everything"
+    for command in ("rm -rf ~/hyperplane-cpp/build", "rm -rf ~/osworld/runs-3/raw"):
+        judge = _Judge(f"ALLOW ask={ask_id}")  # would be fooled
+        outcome = await _check(deep, command, judge)
+        assert outcome is not None and outcome.blocked, (how, command)
+        assert judge.prompts == [], (how, command)
+        assert ask_id in outcome.text and "NOT consent" in outcome.text
+    assert (deep / "hyperplane-cpp/build/obj").is_dir()
+
+
+@pytest.mark.asyncio
+async def test_a_trusted_approval_through_the_queue_still_allows(deep: Path) -> None:
+    """Control for the row above: the operator's own approving pick on desktop."""
+    clock = {"now": int(time.time() * 1000) - 60_000}
+    queue, ask_id = _queued_deep_ask(deep, clock)
+    clock["now"] = int(time.time() * 1000) - 60_000 + 1000  # before the deadline
+    assert queue.respond(ask_id, {"deep_cleanup": [DEEP_LABEL]}, by="desktop")["ok"]
+    judge = _Judge("BLOCK")
+    outcome = await _check(deep, "rm -rf ~/hyperplane-cpp/build", judge)
+    assert outcome is None or not outcome.blocked, outcome and outcome.text
+    assert judge.prompts == []
+
+
+DAY_MS = 24 * 3_600_000
+
+
+def _ask_text(home: Path, question: str, *, age_ms: int, label: str = "Go ahead") -> None:
+    """A timed-out ask with a free question, ``age_ms`` old."""
+    created = int(time.time() * 1000) - age_ms
+    row = {
+        "v": 1,
+        "kind": "queued",
+        "ask_id": "a-0be1",
+        "at": created,
+        "created_at": created,
+        "expires_at": created + 3_600_000,
+        "timeout_s": 3600,
+        "questions": [
+            {
+                "id": "q",
+                "question": question,
+                "options": [{"label": label, "description": ""}, {"label": "Skip"}],
+                "multi": False,
+                "question_id": "",
+            }
+        ],
+    }
+    path = home / ".local-operator" / "sessions" / S / "asks.jsonl"
+    with path.open("a") as fh:
+        fh.write(json.dumps(row) + "\n")
+
+
+@pytest.fixture
+def rig(home: Path) -> Path:
+    (home / "workspace" / "rig-1").mkdir(parents=True)
+    (home / "workspace" / "rig-1" / "f.txt").write_text("a\n")
+    (home / "Documents").mkdir()
+    _ask_text(home, "Should the report go in ~/workspace or ~/Documents?", age_ms=3 * DAY_MS)
+    return home
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "command",
+    ["echo b > ~/workspace/rig-1/f.txt", "sed -i '' s/a/b/ ~/workspace/rig-1/f.txt"],
+)
+async def test_an_unrelated_broad_ask_leaves_overwrites_low(rig: Path, command: str) -> None:
+    """Review R1-M2: overwrites are not lifted by an ask at all."""
+    from local_operator.guardrails.check import escalate_asked_targets
+
+    assert escalate_asked_targets(_rank(rig, command), _ctx(rig, command)).risk is Risk.LOW
+    judge = _Judge("BLOCK")
+    outcome = await _check(rig, command, judge)
+    assert outcome is None or not outcome.blocked, outcome and outcome.text
+    assert judge.prompts == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "command",
+    ["mv ~/workspace/rig-1/f.txt ~/workspace/rig-1/g.txt", "rm ~/workspace/rig-1/f.txt"],
+)
+async def test_under_a_broad_named_dir_the_judge_decides(rig: Path, command: str) -> None:
+    """Review R1-M2: under ``~/workspace`` (a direct child of $HOME) → judge, not refusal."""
+    judge = _Judge("BLOCK unrelated to the ask")
+    outcome = await _check(rig, command, judge)
+    # The JUDGE decided (one prompt), not the deterministic lapsed-ask branch.
+    assert outcome is not None and NOT_CONSENT_TEXT not in outcome.text
+    assert len(judge.prompts) == 1
+    assert "a-0be1 names it but was TIMED OUT with no answer: NOT consent" in judge.prompts[0]
+
+
+@pytest.mark.asyncio
+async def test_a_dir_with_many_entries_is_broad(home: Path) -> None:
+    big = home / "data" / "big"
+    big.mkdir(parents=True)
+    for n in range(1001):
+        (big / f"e{n}").mkdir()
+    _ask_text(home, "Is ~/data/big still needed?", age_ms=DAY_MS)
+    judge = _Judge("BLOCK")
+    outcome = await _check(home, "rm -rf ~/data/big/e5", judge)
+    assert outcome is not None and outcome.blocked
+    assert len(judge.prompts) == 1  # the judge refused it, not the deterministic branch
+    # The named dir itself keeps the deterministic refusal.
+    judge = _Judge("ALLOW")
+    outcome = await _check(home, "rm -rf ~/data/big", judge)
+    assert outcome is not None and outcome.blocked and judge.prompts == []
+
+
+@pytest.mark.asyncio
+async def test_an_ask_older_than_the_bound_stops_escalating(deep: Path) -> None:
+    from local_operator.guardrails.check import escalate_asked_targets
+
+    _deep_ask(deep, age_ms=prov.ASK_ESCALATION_MAX_AGE_MS + DAY_MS)
+    command = "rm -rf ~/hyperplane-cpp/build"
+    assert escalate_asked_targets(_rank(deep, command), _ctx(deep, command)).risk is Risk.LOW
+    judge = _Judge("BLOCK")
+    outcome = await _check(deep, command, judge)
+    assert outcome is None or not outcome.blocked
+    assert judge.prompts == []
+    # Inside the bound it still refuses.
+    (deep / ".local-operator" / "sessions" / S / "asks.jsonl").unlink()
+    _deep_ask(deep, age_ms=prov.ASK_ESCALATION_MAX_AGE_MS - DAY_MS)
+    outcome = await _check(deep, command, _Judge("ALLOW"))
+    assert outcome is not None and outcome.blocked
+
+
+@pytest.mark.asyncio
+async def test_an_overwrite_that_is_high_anyway_gets_the_fact_not_a_refusal(home: Path) -> None:
+    """Overwrites are never refused by an ask, but the judge still hears it."""
+    note = home / ".local-operator" / "notes.txt"
+    note.write_text("x")
+    _ask_text(home, "May I rewrite ~/.local-operator/notes.txt?", age_ms=DAY_MS)
+    command = "echo y > ~/.local-operator/notes.txt"
+    assert _rank(home, command).risk is Risk.HIGH  # S10, without any ask
+    judge = _Judge("BLOCK")
+    outcome = await _check(home, command, judge)
+    assert outcome is not None and outcome.blocked
+    assert len(judge.prompts) == 1
+    assert "a-0be1 names it but was TIMED OUT with no answer: NOT consent" in judge.prompts[0]
+
+
+def _case_insensitive(path: Path) -> bool:
+    return os.path.exists(str(path).swapcase()) if path.exists() else False
+
+
+@pytest.mark.asyncio
+async def test_a_case_respelling_is_still_reached(deep: Path) -> None:
+    """Review R1-m1: APFS folds case, so the respelled path is the asked one."""
+    if sys.platform != "darwin" or not _case_insensitive(deep / "hyperplane-cpp"):
+        pytest.skip("needs a case-insensitive Darwin volume")
+    _deep_ask(deep)
+    judge = _Judge("ALLOW")
+    outcome = await _check(deep, "rm -rf ~/Hyperplane-CPP/Build", judge)
+    assert outcome is not None and outcome.blocked and judge.prompts == []
+
+
+@pytest.mark.asyncio
+async def test_removing_own_scratchpad_link_to_an_asked_path_stays_low(deep: Path) -> None:
+    """Review R1-m3: ``rm link`` unlinks the alias; ``rm -rf link/`` empties the pointee."""
+    from local_operator.guardrails.check import escalate_asked_targets
+
+    _deep_ask(deep)
+    link = Path(_pad(deep)) / "l"
+    link.symlink_to(deep / "hyperplane-cpp" / "build")
+    command = f"rm -rf {link}"
+    assert escalate_asked_targets(_rank(deep, command), _ctx(deep, command)).risk is Risk.LOW
+    judge = _Judge("BLOCK")
+    outcome = await _check(deep, f"rm {link}", judge)
+    assert outcome is None or not outcome.blocked
+    outcome = await _check(deep, f"rm -rf {link}/", _Judge("ALLOW"))
+    assert outcome is not None and outcome.blocked
+    assert (deep / "hyperplane-cpp/build/obj").is_dir()
+
+
+@pytest.mark.asyncio
+async def test_a_path_named_only_in_a_description_is_refused(deep: Path) -> None:
+    """Review R1-m4 / QA Q2: descriptions only ever refuse."""
+    (deep / "descr-only" / "tree").mkdir(parents=True)
+    created = int(time.time() * 1000) - 2 * 3_600_000
+    row = {
+        "v": 1,
+        "kind": "queued",
+        "ask_id": "a-de5c",
+        "at": created,
+        "created_at": created,
+        "expires_at": created + 3_600_000,
+        "timeout_s": 3600,
+        "questions": [
+            {
+                "id": "q",
+                "question": "Clear the stale tree?",
+                "options": [
+                    {"label": "Yes, clear it", "description": "rm -rf ~/descr-only/tree"},
+                    {"label": "Keep it"},
+                ],
+                "multi": False,
+                "question_id": "",
+            }
+        ],
+    }
+    with (deep / ".local-operator" / "sessions" / S / "asks.jsonl").open("a") as fh:
+        fh.write(json.dumps(row) + "\n")
+    judge = _Judge("ALLOW")
+    outcome = await _check(deep, "rm -rf ~/descr-only/tree", judge)
+    assert outcome is not None and outcome.blocked and judge.prompts == []
+
+
+def test_preview_reports_the_deterministic_refusal(deep: Path) -> None:
+    """QA R1-Q1: preview names the refusal the checkpoint makes, not a judge."""
+    from local_operator.guardrails.preview import BUILTIN_REFUSE_LAPSED
+
+    _deep_ask(deep)
+    command = "rm -rf ~/hyperplane-cpp/build"
+    report = preview_tool_call(
+        "bash", {"command": command}, _ctx(deep, command), settings=GuardSettings()
+    )
+    assert report.builtin_effect == BUILTIN_REFUSE_LAPSED
+    assert report.action == "refuse"
+    assert NOT_CONSENT_TEXT in report.builtin_text
