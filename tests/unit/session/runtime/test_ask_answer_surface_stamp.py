@@ -32,7 +32,12 @@ import pytest
 from local_operator.asks import store
 from local_operator.asks.queue import AskQueue
 from local_operator.asks.store import mirror_request_id
-from local_operator.asks.surfaces import stamp_answer_surface
+from local_operator.asks.surfaces import (
+    GUARD_TRUSTED_SURFACES,
+    PROFILE_CONSENT_SURFACES,
+    stamp_answer_surface,
+    weakest_surface,
+)
 from local_operator.guardrails.check import CallContext, GuardSettings, check_tool_call
 from local_operator.harness.approval import (
     ASK_ANSWER_OPS,
@@ -72,6 +77,9 @@ class _Session:
     def answer_ask_question(self, ask_id: str, key: str, values: Any, by: str = "unknown") -> Any:
         return self._queue.answer_one(ask_id, key, values, by=by)
 
+    def revise_ask(self, ask_id: str, answers: Any, by: str = "unknown", **_: Any) -> Any:
+        return self._queue.revise(ask_id, answers, by=by)
+
     def decline_ask(self, ask_id: str, by: str = "unknown") -> Any:
         return self._queue.decline(ask_id, by=by)
 
@@ -85,7 +93,9 @@ class _Session:
 class _Rig:
     """One session's real ask log, a real serving handle over it, and a victim dir."""
 
-    def __init__(self, home: Path, config: Path, tag: str) -> None:
+    def __init__(
+        self, home: Path, config: Path, tag: str, *, second_question: bool = False
+    ) -> None:
         self.home = home
         self.config = config
         self.session_id = f"stamp{tag}"
@@ -95,16 +105,24 @@ class _Rig:
         self.scratchpad = config / "sessions" / self.session_id / "scratchpad"
         self.scratchpad.mkdir(parents=True)
         self.queue = AskQueue(_QueueOwnerStub(), config_dir=config, session_id=self.session_id)
-        receipt = self.queue.enqueue(
-            [
+        questions = [
+            {
+                "id": "q1",
+                "question": f"Delete {self.victim}?",
+                "options": [{"label": "Yes"}, {"label": "No, keep it"}],
+            }
+        ]
+        if second_question:
+            # Scenario M's harmless companion: the model writes the ask, so it
+            # can pair the delete with a question the operator will happily tap.
+            questions.append(
                 {
-                    "id": "q1",
-                    "question": f"Delete {self.victim}?",
-                    "options": [{"label": "Yes"}, {"label": "No, keep it"}],
+                    "id": "q2",
+                    "question": "Also tidy the build logs?",
+                    "options": [{"label": "Yes, tidy"}, {"label": "No"}],
                 }
-            ],
-            "1h",
-        )
+            )
+        receipt = self.queue.enqueue(questions, "1h")
         assert receipt.get("ok"), receipt
         self.ask_id = str(self.queue.records()[-1]["ask_id"])
         handle = ServingSessionHandle.__new__(ServingSessionHandle)
@@ -679,3 +697,144 @@ def test_an_unverified_answer_reads_unattributed_in_the_refusal() -> None:
     assert refusal_copy(unverified) == "already answered."
     desktop = {"status": "answered", "answered_by": {"surface": "desktop"}}
     assert refusal_copy(desktop) == "already answered by desktop."
+
+
+# ---------------------------------------------------------------------------
+# Agent review round 1: an unproven write must not inherit a proved label
+# (scenarios R, R2 and M: allowed with 0 judge calls at 0587523)
+# ---------------------------------------------------------------------------
+
+
+async def _proved_no_then_revise(rig: _Rig, reviser: Any) -> None:
+    """A proved desktop "No, keep it", then a revision to "Yes" from ``reviser``."""
+    await rig.dispatch(
+        "ask_respond", {"ask_id": rig.ask_id, "answers": {"q1": ["No, keep it"]}}, _PROVED_DESKTOP
+    )
+    assert rig.record()["answered_by"] == {"surface": "desktop"}
+    # The frame's ``by`` claims desktop; only the connection's stamp counts.
+    await rig.dispatch(
+        "ask_revise", {"ask_id": rig.ask_id, "answers": {"q1": ["Yes"]}, "by": "desktop"}, reviser
+    )
+    assert rig.record()["answers"] == {"q1": ["Yes"]}
+
+
+@pytest.mark.asyncio
+async def test_scenario_r_an_unproven_revise_does_not_keep_the_proved_label(
+    home: tuple[Path, Path],
+) -> None:
+    """R1-1 (R): the fold kept the FIRST answer's ``desktop`` over the revised
+    "Yes" a local key-holder wrote, so the delete lifted with no judge."""
+    rig = _Rig(*home, tag="R")
+    await _proved_no_then_revise(rig, _LOCAL_UNPROVEN)
+    assert rig.record()["answered_by"] == {"surface": "unverified"}
+    outcome, judge_calls = await rig.guard()
+    _assert_judged_and_blocked(outcome, judge_calls, rig.victim)
+
+
+@pytest.mark.asyncio
+async def test_scenario_r2_a_mesh_revise_does_not_keep_the_proved_label(
+    home: tuple[Path, Path],
+) -> None:
+    """R1-1 (R2): the same laundering from a mesh peer holding ``prompt``."""
+    rig = _Rig(*home, tag="R2")
+    await _proved_no_then_revise(rig, _REMOTE_PROMPT)
+    assert rig.record()["answered_by"] == {"surface": "remote"}
+    outcome, judge_calls = await rig.guard()
+    _assert_judged_and_blocked(outcome, judge_calls, rig.victim)
+
+
+@pytest.mark.asyncio
+async def test_a_proved_revise_of_a_proved_answer_still_lifts(home: tuple[Path, Path]) -> None:
+    """The honest change of mind: every write proved, so the label stays trusted."""
+    rig = _Rig(*home, tag="RP")
+    await _proved_no_then_revise(rig, _PROVED_DESKTOP)
+    assert rig.record()["answered_by"] == {"surface": "desktop"}
+    outcome, judge_calls = await rig.guard()
+    assert judge_calls == 0
+    assert outcome is None or outcome.blocked is False, outcome
+
+
+@pytest.mark.asyncio
+async def test_a_proved_revise_cannot_wash_an_earlier_unproven_one(
+    home: tuple[Path, Path],
+) -> None:
+    """Fail-closed over EVERY revision: unproven "Yes", then a proved revise to
+    the same "Yes" still reads unverified (the weakest write shaped the log)."""
+    rig = _Rig(*home, tag="RW")
+    await _proved_no_then_revise(rig, _LOCAL_UNPROVEN)
+    await rig.dispatch(
+        "ask_revise", {"ask_id": rig.ask_id, "answers": {"q1": ["Yes"]}}, _PROVED_DESKTOP
+    )
+    assert rig.record()["answered_by"] == {"surface": "unverified"}
+    outcome, judge_calls = await rig.guard()
+    _assert_judged_and_blocked(outcome, judge_calls, rig.victim)
+
+
+@pytest.mark.asyncio
+async def test_scenario_m_an_unproven_cell_is_not_settled_by_a_proved_tap(
+    home: tuple[Path, Path],
+) -> None:
+    """R1-2 (M): an unproven tap answers the delete, a proved tap answers the
+    harmless q2; the draft settled with the LAST tap's ``mirror`` label."""
+    rig = _Rig(*home, tag="M", second_question=True)
+    await rig.dispatch(
+        "ask_answer",
+        {"request_id": mirror_request_id(rig.ask_id, 0), "value": "Yes"},
+        _LOCAL_UNPROVEN,
+    )
+    await rig.dispatch(
+        "ask_answer",
+        {"request_id": mirror_request_id(rig.ask_id, 1), "value": "No"},
+        _PROVED_DESKTOP,
+    )
+    record = rig.record()
+    assert record["status"] == "answered"
+    assert record["answers"] == {"q1": ["Yes"], "q2": ["No"]}
+    assert record["answered_by"] == {"surface": "unverified"}
+    outcome, judge_calls = await rig.guard()
+    _assert_judged_and_blocked(outcome, judge_calls, rig.victim)
+
+
+@pytest.mark.asyncio
+async def test_a_fully_proved_multi_question_answer_still_lifts(home: tuple[Path, Path]) -> None:
+    rig = _Rig(*home, tag="MP", second_question=True)
+    for index, value in ((0, "Yes"), (1, "No")):
+        await rig.dispatch(
+            "ask_answer",
+            {"request_id": mirror_request_id(rig.ask_id, index), "value": value},
+            _PROVED_DESKTOP,
+        )
+    assert rig.record()["answered_by"] == {"surface": "mirror"}
+    outcome, judge_calls = await rig.guard()
+    assert judge_calls == 0
+    assert outcome is None or outcome.blocked is False, outcome
+
+
+def test_the_guard_trust_set_mirror_matches_the_guard() -> None:
+    """``weakest_surface`` reasons over a COPY of the guard's set; pin them equal."""
+    from local_operator.guardrails.provenance import TRUSTED_ASK_SURFACES
+
+    assert GUARD_TRUSTED_SURFACES == TRUSTED_ASK_SURFACES
+
+
+@pytest.mark.parametrize(
+    "labels,expected",
+    [
+        (("desktop",), "desktop"),
+        (("desktop", "desktop"), "desktop"),
+        (("desktop", "unverified"), "unverified"),
+        (("remote", "desktop"), "remote"),
+        (("desktop", "mirror"), "mirror"),
+        (("desktop", "terminal"), "terminal"),
+        (("tui", "desktop"), "tui"),
+        # Each trusted by one reader only: no input is safe, so neither trusts it.
+        (("chat", "terminal"), "unverified"),
+        ((), "unverified"),
+    ],
+)
+def test_weakest_surface_never_exceeds_any_input(labels: tuple[str, ...], expected: str) -> None:
+    result = weakest_surface(*labels)
+    assert result == expected
+    for reader in (GUARD_TRUSTED_SURFACES, PROFILE_CONSENT_SURFACES):
+        if result in reader:
+            assert all(label in reader for label in labels)

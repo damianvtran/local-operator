@@ -3020,8 +3020,15 @@ async def engage_session_client(
     *,
     deadline_s: float = ACK_TIMEOUT_S,
     on_projection: Callable[[SessionProjection], None] | None = None,
+    locality: str = "local",
 ) -> tuple[AttachClient, str]:
     """Make a runtime exist for ``session_id``, then dial it: ``(client, detail)``.
+
+    ``locality`` is what the dial declares in its hello. The phone daemon's
+    cold ask route passes ``"remote"``: it relays a portal answer, and the
+    runtime stamps a relayed answer ``remote`` (``asks.surfaces``) — the honest
+    audit label for a phone, where a ``local`` dial without the operator proof
+    would read ``unverified`` (QA round 1, Q1). Neither label is consent.
 
     THE ONE ENGAGE-AND-DIAL SEAM. Every surface that must turn "no runtime" into
     "a runtime and a live connection" comes through here, so the engagement it
@@ -3068,6 +3075,7 @@ async def engage_session_client(
     client = AttachClient(
         on_projection or (lambda projection: None),
         lambda reason: None,
+        locality=locality,
     )
     try:
         await client.connect(record, session_id)

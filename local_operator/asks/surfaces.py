@@ -24,6 +24,16 @@ legacy card op — and an unproven one gets :data:`REMOTE` (a relayed/peer or
 phone-daemon hop) or :data:`UNVERIFIED` (a local dial without the proof). Both
 still SETTLE the ask, so the agent gets its answer; neither is consent.
 
+ONE ANSWER, MANY WRITES (agent review round 1, R1-1/R1-2). The label that
+counts is not one frame's: an ask's effective answers can be shaped by several
+writes — the first ``answered`` row and every ``revised`` row after it, or the
+legacy mirror's one-question-at-a-time taps that settle as one row. Each write
+is stamped on its own, and the record carries the WEAKEST of them
+(:func:`weakest_surface`): a proved "No, keep it" revised to "Yes" by an
+unproven dial, or an unproven tap on question 1 completed by a proved tap on
+question 2, must read as the unproven write it contains, never as the proved
+one around it. Consent is trusted only when EVERY contributing write was.
+
 WHO PRESENTS THE PROOF. ``AttachClient`` attaches it to an ask frame only when
 the CALLER opts in (``operator_ask=True``): the desktop facade, the attached
 pane and the TUI dock do; the phone daemon never does, although it can hold a
@@ -60,6 +70,38 @@ MIRROR = "mirror"
 #: ``terminal`` without crossing the socket). ``chat`` is unchanged pre-existing
 #: behaviour (the agent's ``ask_withdraw answered_in_chat``) and out of scope here.
 PROFILE_CONSENT_SURFACES = frozenset({"tui", "desktop", "chat"})
+
+
+#: Labels the dangerous-delete checkpoint trusts. A MIRROR of
+#: ``guardrails.provenance.TRUSTED_ASK_SURFACES`` (that module is too heavy to
+#: import from here); ``test_ask_answer_surface_stamp`` pins the two equal, so a
+#: drift fails a test rather than weakening :func:`weakest_surface`.
+GUARD_TRUSTED_SURFACES = frozenset({"terminal", "tui", "desktop", "mirror"})
+
+
+def weakest_surface(*surfaces: str) -> str:
+    """The least-trusted label among the writes that shaped one answer.
+
+    WHY A LATTICE, NOT A RANK. The two consent readers trust DIFFERENT sets —
+    the guard :data:`GUARD_TRUSTED_SURFACES`, the profile classifier
+    :data:`PROFILE_CONSENT_SURFACES` — so the result must be trusted by a reader
+    only when EVERY input is trusted by that reader. An input that already has
+    exactly that membership is returned as-is (an untrusted input is always one,
+    so ``remote``/``unverified`` survive verbatim); when no single input does
+    (``chat`` + ``terminal``: each trusted by one reader only) the answer is
+    :data:`UNVERIFIED`, which neither reader trusts. Fail-closed by construction:
+    no combination can produce a label more trusted than any of its parts.
+    An empty call (nothing recorded who wrote) reads :data:`UNVERIFIED` too.
+    """
+    labels = [str(s or "") for s in surfaces]
+    if not labels:
+        return UNVERIFIED
+    readers = (GUARD_TRUSTED_SURFACES, PROFILE_CONSENT_SURFACES)
+    wanted = tuple(all(label in reader for label in labels) for reader in readers)
+    for label in labels:
+        if tuple(label in reader for reader in readers) == wanted:
+            return label
+    return UNVERIFIED
 
 
 def stamp_answer_surface(

@@ -9152,8 +9152,11 @@ def build_app(daemon: MobileDaemon):
                     # nothing here may shorten it by dropping the engage, because
                     # a refusal that arrives without a runtime is the bug this
                     # arm exists to fix.
+                    # ``remote``: a portal answer is a relayed answer, so the
+                    # runtime records it as ``remote`` (``asks.surfaces``), the
+                    # label the live daemon route already gets — not consent.
                     client, _ = await engage_session_client(
-                        config_dir(), session_id, AskErrand(ask_id=ask_id)
+                        config_dir(), session_id, AskErrand(ask_id=ask_id), locality="remote"
                     )
                     try:
                         if op == "ask_respond":
