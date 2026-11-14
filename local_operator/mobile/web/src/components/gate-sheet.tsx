@@ -46,7 +46,8 @@ import {
 	setApprovalsPolicy,
 } from "../lib/approval-policy";
 import { messageRuntime, useLocaleSnapshot } from "../store";
-import { PairPromptSheet } from "../screens/pair";
+import { openPairingSheet } from "../screens/pair";
+import { rekeyAfterRevocation } from "../lib/pair-flow";
 import type { ApprovalMode, ApprovalProvenance } from "../types";
 
 type Mode = "ask" | "auto" | "default auto";
@@ -144,7 +145,6 @@ export function GateSheet({
 	const [busy, setBusy] = useState<Mode | null>(null);
 	const [error, setError] = useState("");
 	const [notice, setNotice] = useState("");
-	const [pairPrompt, setPairPrompt] = useState(false);
 	/* The copy language the sentence below is rendered in (see `clauseSeparator`).
 	   Subscribing here is also what repaints the seams when the language changes
 	   under a mounted sheet. */
@@ -225,10 +225,19 @@ export function GateSheet({
 			onClose();
 		} catch (failure) {
 			if (failure instanceof NotPairedError) {
-				/* The remedy the refusal copy names, one tap away rather than a
-				   sentence telling the reader to go and find a terminal. */
-				setPairPrompt(true);
+				/* Pairing opens IN PLACE (D15, design v2 A1): the remedy one tap
+				   away, never a sentence sending the reader to a terminal. The
+				   choice is not retried when pairing finishes — the person chooses
+				   again, so pairing never changes the gate by itself. */
+				openPairingSheet({ purpose: "choose" });
 				setError(messageRuntime.t("relay.asks.gate.not_paired_error"));
+				return;
+			}
+			if (failure instanceof HttpError && failure.code === "operator_device_revoked") {
+				/* U15: the computer removed this phone. Its key is discarded and a
+				   fresh one minted, so pairing again is a new request. */
+				await rekeyAfterRevocation();
+				openPairingSheet({ purpose: "choose", notice: "revoked" });
 				return;
 			}
 			setError(humanizeGateError(failure));
@@ -325,7 +334,6 @@ export function GateSheet({
 					{error ? <p className="text-body-sm text-danger">{error}</p> : null}
 				</div>
 			</Sheet>
-			<PairPromptSheet open={pairPrompt} onClose={() => setPairPrompt(false)} />
 		</>
 	);
 }
@@ -338,10 +346,10 @@ export function GateSheet({
 export function humanizeGateError(error: unknown): string {
 	if (error instanceof HttpError && isAuthorityRefusalCode(error.code)) {
 		if (error.code === "operator_authority_unconfigured") {
-			/* THE RUNTIME'S OWN COPY, and nothing added: on this host it already
-			   names `lop operator install`, which is the command that unlocks both
-			   remedies it mentions. Appending a second copy is how two surfaces end
-			   up describing one rule differently (UX round 6, U1/U2). */
+			/* THE RUNTIME'S OWN COPY, and nothing added: it already names the
+			   setup step that unlocks both remedies it mentions (and no shell
+			   command, which D16 would forbid here). Appending a second copy is how
+			   two surfaces end up describing one rule differently (UX round 6). */
 			return error.message;
 		}
 		if (error.code === "operator_authority_required") {
@@ -352,7 +360,10 @@ export function humanizeGateError(error: unknown): string {
 			   must not reword a refusal it does not own), but the one step that is
 			   actually left is knowable here and nowhere else: the machine refused a
 			   signature from a device that believed it was paired. */
-			return messageRuntime.t("relay.asks.gate.operator_refused", { message: error.message });
+			/* D16: the older `relay.asks.gate.operator_refused` sentence appended a
+			   terminal command for checking revocation; the phone now handles a
+			   revoked device itself (U15), so this names the pairing remedy. */
+			return messageRuntime.t("relay.pairing.refused_signature");
 		}
 	}
 	const message = String((error as Error)?.message ?? error);

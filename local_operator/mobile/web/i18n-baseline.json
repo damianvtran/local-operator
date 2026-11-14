@@ -17,6 +17,7 @@
     "src/components/asks-sheet.tsx",
     "src/components/gate-sheet.tsx",
     "src/components/pending-card.tsx",
+    "src/screens/pair.tsx",
     "src/components/ui/disclosure.tsx",
     "src/lib/asks.ts",
     "src/screens/notifications.tsx",

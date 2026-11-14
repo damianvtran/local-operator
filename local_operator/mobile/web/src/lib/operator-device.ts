@@ -275,6 +275,80 @@ export async function loadOrCreateDeviceKey(): Promise<DeviceKey> {
 	return key;
 }
 
+/** Whether this device holds a key at all, WITHOUT creating one. The U16 check
+    below needs the difference between "no key yet" and "a key was here and the
+    browser evicted it", and `loadOrCreateDeviceKey` would erase it by minting. */
+export async function hasStoredDeviceKey(): Promise<boolean> {
+	return (await readStoredKey()) !== null;
+}
+
+/**
+ * Discard this device's key (U15, design v2 A2).
+ *
+ * A phone the operator removed must never come back under the same key: the
+ * revocation is permanent on the computer, so re-filing with the old point would
+ * be refused forever. Deleting the key (and the certificate that covered it) and
+ * letting the next `loadOrCreateDeviceKey` mint a fresh one makes "pair again" an
+ * ordinary new request — which still needs a fresh approval on the computer.
+ */
+export async function forgetDeviceKey(): Promise<void> {
+	memoryKey = null;
+	forgetCertificate();
+	const db = await openStore();
+	if (db === null) return;
+	await new Promise<void>((resolve) => {
+		const tx = db.transaction(IDB_STORE, "readwrite");
+		tx.objectStore(IDB_STORE).delete("key");
+		tx.oncomplete = () => resolve();
+		tx.onerror = () => resolve();
+	});
+}
+
+/** Where U16's "your pairing was lost" fact waits for the pairing screen to read
+    it. localStorage, like the certificate: it must survive a reload, and it is a
+    fact about this browser rather than about a session. */
+const KEY_LOST_FLAG = "lo-mobile-operator-key-lost";
+
+/**
+ * U16: a certificate with no key behind it is a pairing the browser half-evicted.
+ *
+ * IndexedDB and localStorage are evicted separately (Safari's 7-day ITP purge, a
+ * "clear site data" that missed one store), so a phone can keep the certificate
+ * and lose the key. Signing then would mint a NEW key and present the OLD
+ * certificate — refused every time, with copy blaming the computer. Detecting it
+ * up front turns that into the honest state: not paired, pair again. Returns
+ * whether it found (and cleared) such a pairing.
+ */
+export async function reconcileDeviceKey(): Promise<boolean> {
+	if (storedCertificate() === null) return false;
+	if (await hasStoredDeviceKey()) return false;
+	forgetCertificate();
+	localStorage.setItem(KEY_LOST_FLAG, "1");
+	return true;
+}
+
+export function deviceKeyWasLost(): boolean {
+	return localStorage.getItem(KEY_LOST_FLAG) === "1";
+}
+
+export function clearDeviceKeyLost(): void {
+	localStorage.removeItem(KEY_LOST_FLAG);
+}
+
+/** Sign arbitrary bytes with this device's key and return the DER signature as
+    hex — the pairing withdraw's proof (`"lop-pair-withdraw-v1" ‖ request_id`). */
+export async function signWithDeviceKey(message: Uint8Array): Promise<string> {
+	const key = await loadOrCreateDeviceKey();
+	const raw = new Uint8Array(
+		await crypto.subtle.sign(
+			{ name: "ECDSA", hash: "SHA-256" },
+			key.privateKey,
+			message as unknown as ArrayBuffer,
+		),
+	);
+	return bytesToHex(rawSignatureToDer(raw));
+}
+
 /** Unpadded url-safe base64 of a public point — the pairing request's shape. */
 export function encodePoint(point: Uint8Array): string {
 	let binary = "";
@@ -350,6 +424,9 @@ export async function signChallenge(input: {
 	requestId: string;
 	challenge: string;
 }): Promise<OperatorProof> {
+	/* U16 at the moment it matters: a certificate whose key was evicted would
+	   otherwise sign with a freshly minted key and be refused as a forgery. */
+	if (await reconcileDeviceKey()) throw new NotPairedError();
 	const stored = storedCertificate();
 	if (stored === null) throw new NotPairedError();
 	if (input.challenge.length !== CHALLENGE_HEX_CHARS) {

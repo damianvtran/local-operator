@@ -578,7 +578,10 @@ describe("the refusal helpers", () => {
 		const installed = humanizeGateError(
 			new HttpError(422, "authorise it from this machine (Touch ID) or from your paired phone.", "operator_authority_required"),
 		);
-		expect(installed).toContain("lop operator devices");
+		/* D16 (design v2 A2): no shell command on the approval path. The phone
+		   now handles a removed device itself (U15), so the step left is pairing. */
+		expect(installed).toBe("Your computer refused this phone’s approval. If the phone was removed there, pair it again.");
+		expect(installed).not.toMatch(/\blop /);
 		const unconfigured = humanizeGateError(
 			new HttpError(422, "…set it up for this machine first…", "operator_authority_unconfigured"),
 		);
