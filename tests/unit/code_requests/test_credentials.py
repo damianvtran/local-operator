@@ -358,7 +358,7 @@ class _FakeBorrowClient:
         self.holder = holder
         self.owner = owner
         self.asked = 0
-        self.session_ids: list = []
+        self.session_ids: list[str | None] = []
 
     def should_borrow(self, key: str) -> bool:
         return self.holder

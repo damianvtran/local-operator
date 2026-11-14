@@ -410,9 +410,11 @@ async def test_a_local_login_failure_keeps_the_sign_in_hint(tmp_path: Path, monk
     # ``_fetch_one`` directly: the pass-level per-key backoff would (rightly)
     # skip the second attempt this test needs.
     await service._fetch_one(tmp_path, REF)
-    assert "lent_by" in cache.read_entry(tmp_path, REF)
+    entry = cache.read_entry(tmp_path, REF)
+    assert entry is not None and "lent_by" in entry
     await service._fetch_one(tmp_path, REF)
-    assert "lent_by" not in cache.read_entry(tmp_path, REF)
+    entry = cache.read_entry(tmp_path, REF)
+    assert entry is not None and "lent_by" not in entry
     view = service.view_for_ref(tmp_path, REF)
     assert view is not None and "gh auth login" in view["link_only_reason"]
     assert view["link_only_hint"] == "Link only \u2014 sign in with the gh CLI to track this one."
