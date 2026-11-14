@@ -1084,8 +1084,10 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         1,
         "``.sync.lock`` under ``network/credentials/<network_id>/`` (its ``sync.json`` "
         "sibling is not a path-shaped constant the derivation reports): the sync "
-        "engine's flock file beside the generation/ack record — a store file beside "
-        "``sessions/``, never an entry a session directory holds",
+        "engine's flock file beside the generation/ack record. The sibling sync.json "
+        "also holds copy_versions (local per-recipient/key identity and revision); "
+        "neither the ledger nor those CAS fields may be copied to a peer. These are "
+        "device-local store files beside ``sessions/``, never session entries",
     ),
     "local_operator/network/credentials/github.py": (
         4,
@@ -2000,6 +2002,31 @@ def test_a_copy_does_not_carry_the_store_of_an_unreferenced_blob(tmp_path: Path)
     assert (dest / "attachments" / f"{used}.bin").is_file()
     assert (dest / "attachments" / f"{used}.json").is_file()
     assert not (dest / "attachments" / f"{unused}.bin").exists()
+
+
+def test_copy_instance_versions_stay_in_the_device_local_ledger(tmp_path: Path) -> None:
+    from local_operator.network.credentials import sync as credentials_sync
+
+    source = tmp_path / "owner"
+    session_id = "c0ffee123456"
+    directory = source / "sessions" / session_id
+    directory.mkdir(parents=True)
+    (directory / "transcript.jsonl").write_text("{}\n", encoding="utf-8")
+    with credentials_sync.mutate("n_test", source) as state:
+        state.record_dispatch(
+            "d_member",
+            "secret:TEST",
+            gen=1,
+            digest=credentials_sync._DIGEST_PREFIX + "a" * credentials_sync._DIGEST_HEX_LENGTH,
+            at=100.0,
+        )
+    ledger = credentials_sync.SyncState.load("n_test", source)
+    assert ledger.copy_version("d_member", "secret:TEST") is not None
+    assert "copy_versions" in json.loads(ledger.path.read_text(encoding="utf-8"))
+    destination = tmp_path / "holder"
+    sync.sync_from(source, session_id, ask=_ask(source), into=destination)
+    assert not (destination / "network" / "credentials" / "n_test" / "sync.json").exists()
+    assert not any(path.name == "sync.json" for path in destination.rglob("*"))
 
 
 # ---------------------------------------------------------------------------

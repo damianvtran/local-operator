@@ -707,13 +707,11 @@ def render_copy_revoke_notice(peer_name: str, key: str, *, copied: bool, wiped: 
     a copy is outstanding.
 
     A RECEIPT SAYS WHAT THE LEDGER HOLDS, NEVER WHAT THE WORLD HOLDS (design review round 1,
-    D1). A row is written from the member's REPLY — the channel the removal path itself
-    documents as losable — so "no row" means "not confirmed", not "not there": a copy whose
-    confirmation never arrived looks exactly like this state. The first draft ("… was
-    confirmed on <peer>, so there is nothing to wipe there") turned an absent row into a
-    guarantee about the device, and its caller then withheld the ceiling in this one state.
-    The second line names what the ledger cannot see; the stored-secret caller prints the
-    ceiling after EVERY arm (the provider-key caller keeps its own closing sentence).
+    D1). An absent record is not proof that a device holds nothing. Dispatch-aware callers
+    report known sends separately even when their delivery ACK was lost; the no-copy arm
+    must not deny that tracking or promise that historical/unrecorded copies never existed.
+    The stored-secret caller prints the source-rotation ceiling after EVERY arm (the
+    provider-key caller keeps its own closing sentence).
 
     ``key`` is the placement key; a store secret is named by its bare name
     (:func:`render_key_name`) and any other key as typed.
@@ -722,7 +720,6 @@ def render_copy_revoke_notice(peer_name: str, key: str, *, copied: bool, wiped: 
     if not copied:
         return [
             f"no copy of '{name}' is recorded on {peer_name}, so there is no wipe to send",
-            "a copy whose confirmation never arrived is not tracked here",
         ]
     if wiped:
         return [f"the copy of '{name}' on {peer_name} was already wiped"]
