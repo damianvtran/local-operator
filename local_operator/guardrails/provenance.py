@@ -62,7 +62,7 @@ import sqlite3
 import stat
 import subprocess
 import time
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, NamedTuple
@@ -897,16 +897,37 @@ _CWD_INVENTORY_TIMEOUT_S = 20.0
 #: the owning-session check (``worktree_activity``) reads the session
 #: registry fresh on every call. Failures are never cached.
 _CWD_INVENTORY_TTL_S = 30.0
-_cwd_inventory_cache: tuple[float, tuple[str, ...]] | None = None
 
 
-def _cwd_inventory() -> tuple[str, ...] | None:
-    """Realpaths of every cwd this uid's processes hold, or ``None`` if unknown.
+class CwdInventory(NamedTuple):
+    """One process-cwd inventory: the cwds it could read and the pids it could not.
+
+    ``hidden`` WHY (2026-11-14, found by QA on PR #3975): on Linux the kernel
+    refuses ``readlink /proc/<pid>/cwd`` (EACCES) for a same-uid process that
+    is non-dumpable — ``(sd-pam)``, the systemd user-session helper, is one on
+    every host with a systemd user session, and ``ssh-agent`` makes itself
+    one. That single refusal used to void the whole inventory (``None``), so
+    every caller read "unknown" on such hosts. A hidden pid is now reported
+    instead, and it still counts as "might be inside" (see
+    :func:`_live_cwd_inside`) unless a caller can prove otherwise.
+    """
+
+    cwds: tuple[str, ...]
+    hidden: tuple[int, ...] = ()
+
+
+_cwd_inventory_cache: tuple[float, CwdInventory] | None = None
+
+
+def _cwd_inventory() -> CwdInventory | None:
+    """Every cwd this uid's processes hold, or ``None`` if there is no inventory.
 
     lsof's cwd inventory is read-only and avoids probing process command lines
     (which may carry secrets). Linux exposes the same data under /proc. A
-    disappearing process no longer owns a cwd; other inspection errors give
-    ``None``. A success is cached for :data:`_CWD_INVENTORY_TTL_S`.
+    disappearing process no longer owns a cwd; a same-uid process whose cwd the
+    kernel will not reveal is listed in ``hidden`` rather than voiding the
+    inventory. Other inspection errors give ``None``. A success is cached for
+    :data:`_CWD_INVENTORY_TTL_S`.
     """
     global _cwd_inventory_cache
     now = time.monotonic()
@@ -914,6 +935,7 @@ def _cwd_inventory() -> tuple[str, ...] | None:
     if cached is not None and now - cached[0] < _CWD_INVENTORY_TTL_S:
         return cached[1]
     paths: list[str] = []
+    hidden: list[int] = []
     if os.path.isdir("/proc/self"):
         try:
             for entry in os.scandir("/proc"):
@@ -923,8 +945,10 @@ def _cwd_inventory() -> tuple[str, ...] | None:
                     if entry.stat().st_uid != os.getuid():
                         continue
                     paths.append(os.readlink(os.path.join(entry.path, "cwd")))
-                except FileNotFoundError:
-                    continue
+                except (FileNotFoundError, ProcessLookupError):
+                    continue  # exited mid-scan: it holds no cwd any more
+                except PermissionError:
+                    hidden.append(int(entry.name))
         except OSError:
             return None
     else:
@@ -943,22 +967,71 @@ def _cwd_inventory() -> tuple[str, ...] | None:
         paths = [line[1:] for line in proc.stdout.splitlines() if line.startswith("n/")]
         if not paths:
             return None  # this process alone holds a cwd: an empty list is a failed read
-    inventory = tuple(os.path.realpath(p) for p in paths)
+    inventory = CwdInventory(tuple(os.path.realpath(p) for p in paths), tuple(hidden))
     _cwd_inventory_cache = (now, inventory)
     return inventory
 
 
-def _live_cwd_inside(real: str) -> bool | None:
+class ProcMark(NamedTuple):
+    """What /proc shows, without privilege, about whether a process has run.
+
+    ``start`` (``/proc/<pid>/stat`` field 22, clock ticks since boot) pins the
+    process identity across pid reuse; ``switches`` is the sum of its
+    voluntary and involuntary context switches; ``on_cpu`` is ``State: R``.
+    Both files stay readable for a non-dumpable process whose cwd is not.
+    """
+
+    start: int
+    switches: int
+    on_cpu: bool
+
+
+def _proc_mark(pid: int) -> ProcMark | None:
+    """The :class:`ProcMark` of ``pid`` now; ``None`` if it cannot be read.
+
+    ORDER matters. ``status`` prints ``State`` before the switch counts, and
+    ``stat`` (the start time) is read last: a pid reused between the two reads
+    then shows a different start time, which never matches a snapshot.
+    """
+    try:
+        with open(f"/proc/{pid}/status", encoding="utf-8") as fh:
+            status = fh.read()
+        with open(f"/proc/{pid}/stat", encoding="utf-8") as fh:
+            stat_line = fh.read()
+        fields: dict[str, str] = {}
+        for line in status.splitlines():
+            key, _, value = line.partition(":")
+            fields[key] = value.strip()
+        # comm (field 2) may hold spaces and parentheses: split after the last ")".
+        start = int(stat_line[stat_line.rindex(")") + 2 :].split()[19])
+        switches = int(fields["voluntary_ctxt_switches"]) + int(
+            fields["nonvoluntary_ctxt_switches"]
+        )
+        return ProcMark(start, switches, fields["State"].startswith("R"))
+    except (OSError, ValueError, KeyError, IndexError, UnicodeError):
+        return None
+
+
+def _live_cwd_inside(real: str, cleared: Callable[[int], bool] | None = None) -> bool | None:
     """Whether a live process uses this tree; unknown never grants an exemption.
 
     Reads :func:`_cwd_inventory` (bounded, cached per process). ``None`` —
     timeout or an unreadable inventory — fails closed in ``worktree_state``.
     This protects ordinary clean removals as well as abandoned adds.
+
+    A hidden pid (cwd unreadable) might be inside, so it also answers ``None``
+    unless ``cleared(pid)`` proves it is not. Every caller treats ``None`` like
+    ``True`` (``busy`` / do not settle); only the interrupted-add settle can
+    supply a proof today (``interrupted_worktree_add.SpawnSnapshot``).
     """
     inventory = _cwd_inventory()
     if inventory is None:
         return None
-    return any(cwd == real or cwd.startswith(real + os.sep) for cwd in inventory)
+    if any(cwd == real or cwd.startswith(real + os.sep) for cwd in inventory.cwds):
+        return True
+    if any(cleared is None or not cleared(pid) for pid in inventory.hidden):
+        return None
+    return False
 
 
 def _only_regenerable(directory: str) -> bool:

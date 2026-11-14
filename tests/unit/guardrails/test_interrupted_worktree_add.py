@@ -40,7 +40,7 @@ def env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, str]:
     monkeypatch.setenv("GIT_TERMINAL_PROMPT", "0")
     # No live process ever holds a cwd in these fixtures; the lsof inventory
     # is exercised by its own provenance tests.
-    monkeypatch.setattr(iwa, "_live_cwd_inside", lambda _tree: False)
+    monkeypatch.setattr(iwa, "_live_cwd_inside", lambda _tree, _snapshot=None: False)
     return dict(os.environ)
 
 
@@ -131,7 +131,7 @@ def test_anything_not_provably_this_calls_add_is_untouched(repo, env, case):
 @pytest.mark.parametrize("live", [True, None])
 def test_a_live_or_unknown_cwd_inside_the_tree_blocks_removal(repo, env, monkeypatch, live):
     # An escaped (setsid/nohup) add would still be checking out; unknown fails closed.
-    monkeypatch.setattr(iwa, "_live_cwd_inside", lambda _tree: live)
+    monkeypatch.setattr(iwa, "_live_cwd_inside", lambda _tree, _snapshot=None: live)
     tree = _add(repo, "d", killed=True)
     assert iwa.settle_after_kill(_cmd(repo, "d"), cwd=None, env=env, spawned_at=0) == []
     assert tree.is_dir()

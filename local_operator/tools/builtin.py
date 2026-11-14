@@ -4700,6 +4700,12 @@ async def execute_bash(
             return _error(tool_call_id, "bash", shell_write.spawn_refusal())
         shell_argv = wrapped
     spawn_options = detached_popen_kwargs()
+    # Before the spawn by construction: proves a process whose cwd Linux hides
+    # (systemd's ``(sd-pam)``) has not run since, so a killed add can still be
+    # settled on such hosts. ``None`` for anything not a worktree add.
+    worktree_snapshot = interrupted_worktree_add.snapshot_before_spawn(
+        params.command, cwd=cwd, env=env
+    )
     # Wall clock, not monotonic: compared with the mtime of a lock git writes
     # during this call (guardrails/interrupted_worktree_add.py).
     spawned_at = time.time()
@@ -4987,7 +4993,12 @@ async def execute_bash(
             settle_started.append(True)
             with contextlib.suppress(Exception):
                 interrupted_worktree_add.settle_in_background(
-                    params.command, cwd=cwd, env=env, spawned_at=spawned_at, pgid=spawned_pgid
+                    params.command,
+                    cwd=cwd,
+                    env=env,
+                    spawned_at=spawned_at,
+                    pgid=spawned_pgid,
+                    snapshot=worktree_snapshot,
                 )
 
     def _emit_update() -> None:

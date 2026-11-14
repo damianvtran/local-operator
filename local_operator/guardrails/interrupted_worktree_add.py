@@ -32,7 +32,10 @@ CONSTRAINTS (fail closed: anything unproven is left alone):
   lock on a pre-existing tree, or a reason someone chose, is never touched.
   A command passing ``--lock`` asked to keep its lock, so it is skipped.
 * The process group is gone and no live process has its cwd inside the tree,
-  so no escaped (``setsid``/``nohup``) add is still checking out.
+  so no escaped (``setsid``/``nohup``) add is still checking out. A process
+  whose cwd the kernel hides (Linux, non-dumpable: ``(sd-pam)`` on every host
+  with a systemd user session) counts as inside unless :class:`SpawnSnapshot`
+  proves it has not run since before the tree existed.
 * Branches are never deleted. POSIX only. Never raises: a miss leaves exactly
   what the harness left before this module existed.
 """
@@ -46,6 +49,11 @@ import subprocess
 import threading
 import time
 from collections.abc import Mapping
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from local_operator.guardrails.provenance import ProcMark
 
 logger = logging.getLogger(__name__)
 
@@ -84,13 +92,115 @@ def _registration(tree: str) -> str | None:
     return os.path.realpath(admin)
 
 
-def _live_cwd_inside(tree: str) -> bool | None:
+@dataclass(frozen=True)
+class SpawnSnapshot:
+    """What was true just BEFORE the call spawned, for proving a hidden pid out.
+
+    WHY: Linux will not reveal the cwd of a non-dumpable same-uid process —
+    not ``readlink``, not ``stat`` (both EACCES; measured on ``(sd-pam)``
+    2026-11-14) — so the cwd inventory cannot say where it is, and treating it
+    as "inside" meant no interrupted add ever settled on a host with a systemd
+    user session. ``/proc/<pid>/status`` and ``/proc/<pid>/stat`` stay readable.
+
+    THE PROOF, per hidden pid, for a tree in ``absent``:
+
+    1. the tree path did not exist when the snapshot ended (checked after the
+       marks were read), so every directory in it was created later, and a cwd
+       inside it needs a ``chdir`` after the marks were read;
+    2. at settle time the pid has the same start time (same process, not a
+       reused pid), the same context-switch total, and is not ``State: R``.
+       A process that ran at all after the snapshot and is now off-CPU has
+       switched out since, which increments one of the two counters; ``State``
+       is printed before the counters in one read, so a wake-up between them
+       cannot pass. Unchanged counters and off-CPU therefore mean it executed
+       nothing — no ``chdir`` — since before the tree existed.
+
+    Anything else (a pid absent from the snapshot, a changed counter, a
+    running process, an unreadable mark, a target that already existed) stays
+    "might be inside". The remaining window — a process that ``chdir``s in
+    after the settle's inventory — is the one the inventory always had.
+    """
+
+    absent: frozenset[str] = frozenset()
+    marks: Mapping[int, ProcMark] = field(default_factory=dict)
+
+    def cleared(self, pid: int) -> bool:
+        from local_operator.guardrails import provenance
+
+        before = self.marks.get(pid)
+        if before is None:
+            return False
+        now = provenance._proc_mark(pid)
+        return (
+            now is not None
+            and not now.on_cpu
+            and now.start == before.start
+            and now.switches == before.switches
+        )
+
+
+def _targets(command: str, cwd: str | None, env: Mapping[str, str]) -> list[str]:
+    """The exact ``worktree`` creation targets the guard's resolver reads."""
+    from local_operator.guardrails.resolve import resolve_command
+
+    home = env.get("HOME") or os.path.expanduser("~")
+    cwd_n = os.path.normpath(os.path.abspath(os.path.expanduser(cwd))) if cwd else None
+    resolution = resolve_command(command, cwd=cwd_n, env=env, home=home)
+    trees = [c.path for c in resolution.created if c.kind == "worktree" and c.path]
+    return list(dict.fromkeys(trees))
+
+
+def snapshot_before_spawn(
+    command: str, *, cwd: str | None, env: Mapping[str, str]
+) -> SpawnSnapshot | None:
+    """Record the :class:`SpawnSnapshot` for a call that may add a worktree.
+
+    Called by the bash tool right before it spawns. Cheap and never raises:
+    ``None`` (no proof available) unless this is a Linux ``/proc`` host and
+    the command names a ``worktree`` add target that does not exist yet. Only
+    same-uid pids whose cwd is hidden get a mark, so the cost is one
+    ``/proc`` scan plus two small reads per hidden pid.
+    """
+    if os.name != "posix" or "worktree" not in command or "--lock" in command:
+        return None
+    try:
+        from local_operator.guardrails import provenance
+
+        trees = _targets(command, cwd, env)
+        if not trees or not os.path.isdir("/proc/self"):
+            return None
+        marks: dict[int, ProcMark] = {}
+        uid = os.getuid()
+        for entry in os.scandir("/proc"):
+            if not entry.name.isdecimal():
+                continue
+            try:
+                if entry.stat().st_uid != uid:
+                    continue
+                os.readlink(os.path.join(entry.path, "cwd"))
+            except PermissionError:
+                mark = provenance._proc_mark(int(entry.name))
+                if mark is not None:
+                    marks[int(entry.name)] = mark
+            except OSError:
+                continue
+        # After the marks (proof step 1): absent now means created after them.
+        absent = frozenset(t for t in trees if not os.path.lexists(t))
+        return SpawnSnapshot(absent=absent, marks=marks) if absent else None
+    except Exception as exc:  # noqa: BLE001 — a missing snapshot only withholds a proof
+        logger.debug("interrupted worktree add: spawn snapshot failed: %s", exc)
+        return None
+
+
+def _live_cwd_inside(tree: str, snapshot: SpawnSnapshot | None) -> bool | None:
     # Reuse the guard's cwd inventory, but read it fresh: a cached inventory
-    # taken before an escaped add started would miss it. None = unknown.
+    # taken before an escaped add started would miss it. None = unknown,
+    # including a hidden pid the snapshot cannot prove out.
     from local_operator.guardrails import provenance
 
     provenance._cwd_inventory_cache = None
-    return provenance._live_cwd_inside(os.path.realpath(tree))
+    cleared = snapshot.cleared if snapshot is not None and tree in snapshot.absent else None
+    return provenance._live_cwd_inside(os.path.realpath(tree), cleared)
 
 
 def _git(admin: str, env: Mapping[str, str], *args: str) -> bool:
@@ -113,20 +223,20 @@ def _git(admin: str, env: Mapping[str, str], *args: str) -> bool:
 
 
 def settle_after_kill(
-    command: str, *, cwd: str | None, env: Mapping[str, str], spawned_at: float
+    command: str,
+    *,
+    cwd: str | None,
+    env: Mapping[str, str],
+    spawned_at: float,
+    snapshot: SpawnSnapshot | None = None,
 ) -> list[str]:
     """Undo or finish this call's own interrupted adds; returns what it did."""
     if os.name != "posix" or "worktree" not in command or "--lock" in command:
         return []
-    from local_operator.guardrails.resolve import resolve_command
 
     done: list[str] = []
     try:
-        home = env.get("HOME") or os.path.expanduser("~")
-        cwd_n = os.path.normpath(os.path.abspath(os.path.expanduser(cwd))) if cwd else None
-        resolution = resolve_command(command, cwd=cwd_n, env=env, home=home)
-        trees = [c.path for c in resolution.created if c.kind == "worktree" and c.path]
-        for tree in dict.fromkeys(trees):
+        for tree in _targets(command, cwd, env):
             admin = _registration(tree)
             if admin is None:
                 continue
@@ -136,7 +246,12 @@ def settle_after_kill(
             with contextlib.suppress(OSError):
                 if os.stat(locked).st_mtime < spawned_at:
                     continue  # a lock older than this call is not this call's
-            if not os.path.exists(locked) or _live_cwd_inside(tree) is not False:
+            if not os.path.exists(locked):
+                continue
+            live = _live_cwd_inside(tree, snapshot)
+            if live is not False:
+                # Logged so a tree left locked says why (busy vs unprovable).
+                logger.debug("interrupted worktree add: %s left, live cwd=%s", tree, live)
                 continue
             complete = os.path.isfile(os.path.join(admin, "index")) and not os.path.exists(
                 os.path.join(admin, "index.lock")
@@ -179,6 +294,7 @@ def settle_in_background(
     env: Mapping[str, str],
     spawned_at: float,
     pgid: int | None,
+    snapshot: SpawnSnapshot | None = None,
 ) -> threading.Thread | None:
     """Run :func:`settle_after_kill` off the event loop once ``pgid`` is gone.
 
@@ -194,7 +310,9 @@ def settle_in_background(
 
     def _run() -> None:
         if _group_gone(pgid, _GROUP_GONE_TIMEOUT_S):
-            settle_after_kill(command, cwd=cwd, env=env_copy, spawned_at=spawned_at)
+            settle_after_kill(
+                command, cwd=cwd, env=env_copy, spawned_at=spawned_at, snapshot=snapshot
+            )
 
     thread = threading.Thread(target=_run, name="interrupted-worktree-add", daemon=True)
     thread.start()
