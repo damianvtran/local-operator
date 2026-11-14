@@ -12,6 +12,7 @@ from typing import Any
 import pytest
 
 from local_operator.network import store
+from local_operator.network.credentials import renew_push
 from local_operator.providers.auth_store import AuthStore
 from tests.unit.network.test_credentials_real_link import (  # noqa: F401 — fixtures by import
     STUB_PROVIDER,
@@ -60,8 +61,18 @@ def _refresh(rig: Any, home: Path) -> tuple[int, dict[str, Any]]:
 
 
 def test_explicit_cli_refresh_keeps_owner_gate_and_rotates_once(
-    request: pytest.FixtureRequest, tmp_path: Path
+    request: pytest.FixtureRequest, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    # THE RENEW NUDGE IS OFF IN THIS RIG, before the fixture links the relays. Owner
+    # A's link-up schedules a nudge after a 0-5 s jitter (``renew_push.on_link_up``);
+    # when it fires after ``_share`` it finds the key lent to B, B re-asks through the
+    # ordinary borrow path (a DRIVE member may borrow), and A's EXPIRED login rotates
+    # at the IdP. That is the product working, not the owner gate leaking, but it adds
+    # a POST this test cannot tell from one the explicit refresh made (PR #3946 CI:
+    # 10/60 local runs, every extra POST on ``mesh-credential-renew-ask``). The nudge
+    # has its own real-link coverage in ``test_credentials_renew_on_reconnect``; here
+    # every POST counted must be the explicit refresh's.
+    monkeypatch.setattr(renew_push, "on_link_up", lambda *_a, **_k: None)
     rig = request.getfixturevalue("mesh")
     _share(rig)
     _pull(rig)
