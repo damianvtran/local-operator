@@ -231,6 +231,35 @@ def _no_real_gh(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(github_mod, "_resolve_program", lambda name, path=None: None)
 
 
+class _OfflineGithubTransport:
+    """Every request fails as a transport error: GitHub is "offline" in this suite."""
+
+    def request(self, method: str, url: str, **_kwargs: Any) -> Any:
+        raise OSError(f"no unit test reaches {url}")
+
+
+@pytest.fixture(autouse=True)
+def _no_real_github_api(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No test in this suite may call api.github.com (the enumeration's default client).
+
+    The GitHub designation enumerates what the owner's login can push to, and the
+    CLI's share receipt and ``credential github repos`` build their client through
+    ``github.default_minter``. Pinning that seam to an offline transport here means
+    an un-stubbed cell sees an honest "could not list" instead of a live request
+    with a test token; cells that exercise enumeration pass their own loopback
+    minter or override this pin.
+    """
+    from local_operator.network.credentials import github as github_mod
+
+    monkeypatch.setattr(
+        github_mod,
+        "default_minter",
+        lambda: github_mod.GithubMinter(
+            base_url="http://127.0.0.1:9", transport=_OfflineGithubTransport()
+        ),
+    )
+
+
 @pytest.fixture(autouse=True)
 def _no_first_contact_nudge(monkeypatch: pytest.MonkeyPatch) -> None:
     """The definitions syncer's first-contact nudge is OFF unless a cell opts in.

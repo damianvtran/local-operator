@@ -1088,16 +1088,20 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "``sessions/``, never an entry a session directory holds",
     ),
     "local_operator/network/credentials/github.py": (
-        4,
+        5,
         "``APP_SECRET_NAME`` and ``TOKEN_SECRET_NAME``: the secret-store NAMES the "
         "owner's ladder arms live under (the GitHub App key; the GITHUB_TOKEN-class "
         "token) — the identifier-not-a-path case this file's docstring names (the "
-        "reply-channel/action-tool precedent), never a file in a session directory; "
-        "``NARROWING_STATE_NAME`` and ``OWNER_DESIGNATION_MARKER``: per-device files "
-        "under the config root's ``network/`` directory (this device's repository "
-        "narrowing; the marker that a designation, including a cleared one, was "
-        "delivered) — device state that must stay on the device, never a file in a "
-        "session directory, so it never travels with a session",
+        "reply-channel/action-tool precedent), never a file in a session directory. "
+        "``ENUMERATION_CACHE_NAME`` (``github-pushable.json``): the OWNER's cache of "
+        "the repos its own GitHub login can push to, at ``<config>/network/`` "
+        "(``network_root``), keyed by token hash and login hint — DEVICE-LOCAL and "
+        "never copied to a peer: a borrower receives the narrowed list inside the "
+        "grant, never this record, and ``copy_set``/``content_trees`` walk only "
+        "``sessions/<id>/``, so no sync path reaches it; "
+        "``NARROWING_STATE_NAME`` and ``OWNER_DESIGNATION_MARKER`` are also "
+        "device-local ordering/explicit-clear records beneath ``<config>/network/``, "
+        "outside every session copy tree, and must never travel to peers",
     ),
     "local_operator/network/credentials/gitlab.py": (
         1,

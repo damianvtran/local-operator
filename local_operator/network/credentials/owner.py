@@ -68,6 +68,7 @@ requirement exists to prevent. So a report may, at most:
 from __future__ import annotations
 
 import asyncio
+import functools
 import logging
 import os
 import secrets
@@ -77,7 +78,7 @@ from concurrent.futures import TimeoutError as FutureTimeoutError
 from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Sequence
 
 from local_operator.network.credentials import github as github_app
 from local_operator.network.credentials import placement as placement_mod
@@ -1472,7 +1473,7 @@ class MeshCredentialBroker:
         if self._github_lender is None:
             minter = self._github_minter
             if minter is None:
-                minter = github_app.GithubMinter()
+                minter = github_app.default_minter()
             self._github_lender = github_app.GithubLender(minter=minter)
             self._github_lender.attach_loop(self._loop.loop())
             self._github_lender.attach_audit(self._github_audit_sink)
@@ -1637,13 +1638,40 @@ class MeshCredentialBroker:
                     else github_app.CODE_GH_UNUSABLE
                 )
                 return BrokerError(code=code, message=str(exc), **common)
+            # The token arms are narrowed by the borrower's helper ALONE (§3.4),
+            # so the list it enforces must be a real one: the explicit
+            # designation, or what THIS login can push to minus opt-outs. An
+            # unavailable list refuses here instead of lending a token whose
+            # helper would then refuse every push without saying why.
+            designated = await asyncio.get_running_loop().run_in_executor(
+                None,
+                functools.partial(
+                    github_app.designation,
+                    self.root,
+                    source=source,
+                    token=token,
+                    minter=self._lender().minter,
+                ),
+            )
+            refusal = self._github_designation_refusal(
+                designated,
+                limit=github_app.MAX_DESIGNATED_REPOSITORIES,
+                common=common,
+                allow_explicit_clear=True,
+            )
+            if refusal is not None:
+                return refusal
             # Extraction already in flight cannot be undone, but a newly
             # persisted reduction must prevent constructing/emitting its grant.
             scope_refusal = self._github_scope_refusal(key, by)
             if scope_refusal is not None:
                 return scope_refusal
             return self._grant_from_owner_token(
-                token=token, key=key, provider=provider, common=common
+                token=token,
+                key=key,
+                provider=provider,
+                common=common,
+                repositories=designated.repositories,
             )
         return BrokerError(
             code="no_local_credential", message=github_app.no_source_message(), **common
@@ -1675,17 +1703,27 @@ class MeshCredentialBroker:
                     **common,
                 )
             return BrokerError(code=github_app.CODE_APP_UNUSABLE, message=str(exc), **common)
-        repositories = github_app.repositories_for(self.root)
-        if not repositories:
-            return BrokerError(
-                code=github_app.CODE_REPOSITORIES_UNSET,
-                message=(
-                    "no repositories are designated for GitHub brokering on this device; "
-                    "set network.credentials.github.repositories (see the network "
-                    "guide) — nothing was lent"
-                ),
-                **common,
-            )
+        lender = self._lender()
+        # THE DESIGNATION IS ENUMERATED WHEN UNSET (operator decision 2026-11-12):
+        # every repository the installation covers, minus the operator's opt-outs,
+        # as an explicit list. It may walk GitHub's API, so it runs off this loop
+        # like the mint. The App mint below is narrowed to exactly this list.
+        designated = await asyncio.get_running_loop().run_in_executor(
+            None,
+            functools.partial(
+                github_app.designation,
+                self.root,
+                source=github_app.SOURCE_APP,
+                app=app,
+                minter=lender.minter,
+            ),
+        )
+        refusal = self._github_designation_refusal(
+            designated, limit=github_app.APP_MINT_MAX_REPOSITORIES, common=common
+        )
+        if refusal is not None:
+            return refusal
+        repositories = designated.repositories
         # Recheck after local configuration reads, immediately before external
         # work. A revoke racing an already-started mint cannot retract that
         # request; registration still arranges cleanup and final grant() denial
@@ -1693,7 +1731,6 @@ class MeshCredentialBroker:
         scope_refusal = self._github_scope_refusal(key, by)
         if scope_refusal is not None:
             return scope_refusal
-        lender = self._lender()
         try:
             minted = await asyncio.get_running_loop().run_in_executor(
                 None, lender.mint, app, repositories
@@ -1747,8 +1784,58 @@ class MeshCredentialBroker:
         )
         return grant
 
+    def _github_designation_refusal(
+        self,
+        designated: Any,
+        *,
+        limit: int,
+        common: dict[str, Any],
+        allow_explicit_clear: bool = False,
+    ) -> Any:
+        """The refusal for a designation that cannot be lent, or ``None``.
+
+        Empty is refused with the designation's own reason (never "no
+        narrowing"). Over ``limit`` is refused rather than cut: the App mint
+        takes at most :data:`github.APP_MINT_MAX_REPOSITORIES`, the wire carries
+        at most :data:`github.MAX_DESIGNATED_REPOSITORIES`, and a truncated list
+        would lend for a different set than the one the operator was shown.
+        """
+        if not designated.repositories:
+            # Token arms retain #3841's explicit refuse-all delivery after a
+            # previously lent hand-picked list is cleared. Do not confuse that
+            # with all opt-outs (listed is nonempty), or let an App mint an
+            # installation-wide token: only token arms opt into this branch.
+            if (
+                allow_explicit_clear
+                and designated.origin == github_app.ORIGIN_EXPLICIT
+                and not designated.listed
+            ):
+                return None
+            return BrokerError(
+                code=github_app.CODE_REPOSITORIES_UNSET,
+                message=designated.refusal(),
+                **common,
+            )
+        count = len(designated.repositories)
+        if count > limit:
+            return BrokerError(
+                code=github_app.CODE_REPOSITORIES_OVERFLOW,
+                # A DETAIL, not a sentence: the borrower's catalogue wraps it in the
+                # remedy (messages.py), so it names no device and no remedy itself —
+                # the old self-contained sentence was rendered twice (QA F1).
+                message=f"{count} repositories; one share can carry at most {limit}",
+                **common,
+            )
+        return None
+
     def _grant_from_owner_token(
-        self, *, token: str, key: str, provider: str, common: dict[str, Any]
+        self,
+        *,
+        token: str,
+        key: str,
+        provider: str,
+        common: dict[str, Any],
+        repositories: Sequence[str],
     ) -> Any:
         """The Grant arms 2/3 serve: NO registration and no server-side revoke.
 
@@ -1784,13 +1871,10 @@ class MeshCredentialBroker:
             identity={},
             # §3.4's bound for the token arms is the helper's allow-list ALONE,
             # so it must reach the helper's device too (see _serve_github_app's
-            # note on the delivery; read fresh per serve, like the token). An
-            # operator who CLEARED the list — which every settings surface does
-            # by deleting the key — sends an explicit empty designation once this
-            # owner has ever lent one (borrowers refuse all); one who never set
-            # it sends nothing, so a borrower's hand-set backstop survives
-            # (``github.owner_designation``).
-            narrowing=_token_arm_narrowing(self.root),
+            # note on delivery). Use the resolved enumeration/opt-out result,
+            # not a second config-only list, with #3841's digest/generation and
+            # explicit-clear bookkeeping preserved.
+            narrowing=_token_arm_narrowing(self.root, repositories),
             grant_id=f"g_{os.urandom(8).hex()}",
         )
 
@@ -3619,12 +3703,12 @@ def _grant_ttl_s(root: Path | None) -> float:
     return float(grant_ttl_s(root))
 
 
-def _token_arm_narrowing(root: Path | None) -> dict[str, Any]:
-    """The token arms' delivery: the designation as set, or nothing if never set."""
+def _token_arm_narrowing(root: Path | None, repositories: Sequence[str]) -> dict[str, Any]:
+    """Deliver the resolved list without losing explicit-clear ordering semantics."""
     from local_operator.network.credentials import github as github_app
 
-    repositories, explicit = github_app.owner_designation(root)
-    return github_app.grant_narrowing(repositories, explicit=explicit)
+    github_app.owner_designation(root)
+    return github_app.grant_narrowing(repositories, explicit=True)
 
 
 def _app_arm_narrowing(root: Path | None, repositories: Any) -> dict[str, Any]:
@@ -3635,6 +3719,8 @@ def _app_arm_narrowing(root: Path | None, repositories: Any) -> dict[str, Any]:
     """
     from local_operator.network.credentials import github as github_app
 
-    if repositories:
-        github_app.mark_designation_delivered(root)
+    # Only a hand-picked designation creates the legacy clear marker. Marking
+    # an enumerated default would misread its next unset config as a clear and
+    # disable automatic lending immediately after its first successful serve.
+    github_app.owner_designation(root)
     return github_app.grant_narrowing(repositories, explicit=True)

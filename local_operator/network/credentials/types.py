@@ -368,18 +368,12 @@ def peer_affinity(value: Any) -> tuple[int, int] | None:
     return (account_id, created_at)
 
 
-#: The longest narrowing LIST a peer may carry. 500 is GitHub's own ceiling on
-#: ``repositories`` in ``POST /app/installations/{id}/access_tokens`` (the App
-#: mint maximum), so no designation the owner can actually lend is longer. It was
-#: 64, which silently truncated a longer list here while the owner had digested the
-#: whole one — every delivery then failed its digest and the borrower kept its
-#: standing list forever (PR #3841 mesh-lane m2). The settings validator refuses a
-#: designation over this same number where a person types it
-#: (``settings_io._validate_github_repositories``), so the two cannot drift; a
-#: hand-edited longer list still truncates here and is REFUSED, receipted, on the
-#: borrower (``too_many_entries``), never applied as a partial list. Size: 500 x
-#: 200 chars is ~100 KB, far inside the 8 MiB session frame.
-MAX_NARROWING_LIST_ENTRIES = 500
+#: The largest list one ``Grant.narrowing`` entry may carry across the peer
+#: boundary. Equal to ``github.MAX_DESIGNATED_REPOSITORIES`` (a unit test pins
+#: them equal): the owner refuses a longer designation, so an honest owner never
+#: reaches this bound. 2000 entries of at most 200 characters stay far inside the
+#: 8 MiB record ceiling.
+MAX_NARROWING_LIST_ENTRIES = 2000
 
 
 def _bounded_narrowing(value: Any) -> dict[str, Any]:
@@ -401,8 +395,15 @@ def _bounded_narrowing(value: Any) -> dict[str, Any]:
         if isinstance(item, str):
             out[name] = item[:200]
         elif isinstance(item, (list, tuple)):
+            # NEVER CUT A LIST: a truncated allow-list is a DIFFERENT designation
+            # (it silently drops repos, and a digest delivered beside it cannot
+            # verify). Over the bound the entry is dropped whole, which reads as
+            # "nothing delivered": the borrower keeps its standing list, the
+            # fail-closed direction. This replaced a silent ``[:64]``.
+            if len(item) > MAX_NARROWING_LIST_ENTRIES:
+                continue
             entries = [entry[:200] for entry in item if isinstance(entry, str) and entry]
-            out[name] = entries[:MAX_NARROWING_LIST_ENTRIES]
+            out[name] = entries
     return out
 
 
@@ -540,6 +541,10 @@ BROKER_ERROR_TTL_MS: dict[str, int] = {
     "device_scope_required": 60_000,
     "github_app_unusable": 300_000,
     "github_repositories_unset": 300_000,
+    # A designation larger than one grant can carry (the App mint's 500, the
+    # wire's MAX_NARROWING_LIST_ENTRIES): refused rather than cut, and repaired
+    # by the operator on the owner (an opt-out or an explicit list).
+    "github_repositories_overflow": 300_000,
     "github_repo_refused": 0,
     # The forge ladder's token arms (mesh-consent-provisioning §3.2): a source
     # that RESOLVED but could not be read refuses by arm rather than falling

@@ -851,18 +851,52 @@ def github_fact(root: Path, home: Path | None = None) -> dict[str, Any]:
         "has_local": source
         in (github_mod.SOURCE_APP, github_mod.SOURCE_TOKEN, github_mod.SOURCE_GH),
     }
+    if source in (github_mod.SOURCE_APP, github_mod.SOURCE_TOKEN, github_mod.SOURCE_GH):
+        _designation_fact(fact, root, source, home)
     if source == github_mod.SOURCE_APP:
         fact["permissions"] = dict(github_mod.GITHUB_PERMISSIONS)
-        try:
-            fact["repositories"] = [
-                _safe_text(name, limit=200) for name in github_mod.repositories_for(root)
-            ]
-        except Exception:  # noqa: BLE001 — an unreadable list is "not stated"
-            fact["repositories"] = None
         fact["origin"] = _secret_mesh_origin(root, github_mod.APP_SECRET_NAME)
     elif source == github_mod.SOURCE_TOKEN:
         fact["origin"] = _secret_mesh_origin(root, github_mod.TOKEN_SECRET_NAME)
     return fact
+
+
+#: How many designated names a readiness fact carries. The COUNT is always
+#: exact (``repositories_count``); the names are a sample so an enumerated list
+#: of hundreds does not bloat every readiness reply. ``lop network credential
+#: github repos`` on the owner prints the whole list.
+READINESS_REPOSITORY_SAMPLE = 50
+
+
+def _designation_fact(
+    fact: dict[str, Any], root: Path, source: str, home: Path | None = None
+) -> None:
+    """The effective GitHub designation, from the owner's CACHE only.
+
+    ``allow_fetch=False``: readiness never calls GitHub. ``repositories_origin``
+    is ``explicit`` / ``enumerated`` / ``last_good`` / ``unavailable`` (the
+    vocabulary ``credentials.github`` owns) and ``repositories_age_s`` the age of
+    an enumerated list, so a viewer can say "the last good list, 9 h old" rather
+    than presenting a stale list as current. ``repositories: null`` keeps its
+    meaning — the designation could not be read at all.
+    """
+    from local_operator.network.credentials import github as github_mod
+
+    try:
+        designated = github_mod.designation(root, source=source, allow_fetch=False, home=home)
+    except Exception:  # noqa: BLE001 — an unreadable list is "not stated"
+        fact["repositories"] = None
+        return
+    names = list(designated.repositories)
+    fact["repositories"] = [
+        _safe_text(name, limit=200) for name in names[:READINESS_REPOSITORY_SAMPLE]
+    ]
+    fact["repositories_count"] = len(names)
+    fact["repositories_origin"] = _safe_text(designated.origin, limit=40)
+    fact["repositories_age_s"] = int(designated.age_s()) if designated.fetched_at else None
+    fact["excluded_count"] = int(designated.excluded_count)
+    if designated.error:
+        fact["repositories_error"] = _safe_text(designated.error, limit=200)
 
 
 def _transport_of(raw: Mapping[str, Any]) -> str:
@@ -3098,7 +3132,7 @@ def _ssh_github_clause(facts: Mapping[str, Any], peer_label: str) -> str:
     )
 
 
-def _github_scope_clause(fact: Mapping[str, Any], peer_label: str) -> str:
+def _github_scope_clause(fact: Mapping[str, Any], peer_label: str, where: str = "") -> str:
     """What a peer-held GitHub credential covers, or an explicit "not knowable".
 
     Scopes are only knowable for the App arm, whose permissions are fixed
@@ -3126,10 +3160,19 @@ def _github_scope_clause(fact: Mapping[str, Any], peer_label: str) -> str:
         )
     )
     if str(fact.get("source") or "") != "app":
-        return (
+        unknown = (
             "this report cannot read the scopes that credential carries, so whether "
             "it covers a push is not knowable from here"
         )
+        if "repositories_origin" not in fact:
+            return unknown
+        # The token arms are narrowed by lop's git helper alone, to the same
+        # designation the App would mint for — so the list IS stated, the scopes
+        # are not.
+        phrase = _designation_phrase(fact, where or peer_label)
+        return f"{unknown}; lop's git helper serves it for {phrase}"
+    if "repositories_origin" in fact:
+        return f"it mints {stated}, narrowed to {_designation_phrase(fact, where or peer_label)}"
     if "repositories" not in fact:
         return f"it mints {stated}; what that mint is narrowed to is not stated here"
     repositories = fact.get("repositories")
@@ -3145,6 +3188,58 @@ def _github_scope_clause(fact: Mapping[str, Any], peer_label: str) -> str:
         )
     shown = _name_list([str(name) for name in repositories])
     return f"it mints {stated}, narrowed to {shown}, which is what a push and a PR need"
+
+
+def _designation_phrase(fact: Mapping[str, Any], where: str) -> str:
+    """The designated list and WHERE it came from, in one phrase.
+
+    The source is never left implicit: an enumerated list says it is what the
+    login can push to, a fallback says how old it is and why, and an unlisted
+    one says a borrow refuses rather than widens (never "all repositories").
+    Ages come from ``github.listed_ago`` — the receipt's and ``repos``' own
+    wording (UX round 1, U3) — and the full list is one command away (U2).
+    """
+    from local_operator.network.credentials import github as github_mod
+
+    names = [str(name) for name in (fact.get("repositories") or []) if str(name)]
+    try:
+        count = int(fact.get("repositories_count") or len(names))
+    except (TypeError, ValueError):
+        count = len(names)
+    origin = str(fact.get("repositories_origin") or "")
+    try:
+        excluded = int(fact.get("excluded_count") or 0)
+    except (TypeError, ValueError):
+        excluded = 0
+    opted = f", {excluded} opted out" if excluded else ""
+    # Older peers/cache records may carry API text; only local kind wording is
+    # suitable for a readiness surface, just like the owner's refusal boundary.
+    error = github_mod.enumeration_failure_words(str(fact.get("repositories_error") or ""))
+    if not count:
+        if origin == "unavailable":
+            why = f" ({error})" if error else ""
+            return (
+                f"no repository listed yet{why} — the next borrow asks GitHub, and is "
+                "refused rather than widened if it cannot"
+            )
+        return f"no repository{opted} — a borrow would refuse rather than widen"
+    # Five names and a count: the whole list is `credential github repos` on the
+    # device that lends, and a readiness row is read at a glance.
+    shown = names if count <= 5 and len(names) == count else [*names[:5], f"{count - 5} more"]
+    listed = _name_list(shown)
+    ago = github_mod.listed_ago(fact.get("repositories_age_s"))
+    if origin == "explicit":
+        source = f"the list chosen by hand there{opted}"
+    elif origin == "last_good":
+        why = f": {error}" if error else ""
+        source = (
+            f"the list fetched {ago}{opted} — that device could not list GitHub repositories "
+            f"at its last check{why}"
+        )
+    else:
+        source = f"every repository its login can push to, listed {ago}{opted}"
+    pointer = f"; full list: lop network credential github repos on {where}" if where else ""
+    return f"{listed} ({count} — {source}{pointer})"
 
 
 def _github_observed(fact: Any) -> dict[str, Any]:
@@ -3269,7 +3364,7 @@ def _github_push_clause(
                     "but this device holds no GitHub credential to lend: a push there "
                     f"would be refused until one is set up here — {github_mod.no_source_arms()}"
                 )
-            covered = _github_scope_clause(local or {}, peer_label)
+            covered = _github_scope_clause(local or {}, peer_label, "this device")
         else:
             covered = (
                 f"what that grant covers is decided on {owner_label(placement_owner)}, "
