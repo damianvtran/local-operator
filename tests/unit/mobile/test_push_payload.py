@@ -50,8 +50,17 @@ from local_operator.mobile.push_payload import (
     emit_body,
     push_sound,
 )
+from local_operator.notifications import compose
 from local_operator.notifications.sound import DEFAULT_SOUND_ID, sound_ids
-from local_operator.tui.notify import APP_NAME, BODIES, BODY_COMPLETE, digest_subtitle
+from local_operator.tui.notify import (
+    APP_NAME,
+    BACKGROUND_FALLBACK_TITLE,
+    BODIES,
+    BODY_COMPLETE,
+    CONTEXT_MIXED,
+    CONTEXTS,
+    digest_subtitle,
+)
 
 #: ``tests/unit/mobile/<this file>`` -> the repo root, where the shared
 #: contract tree lives. Derived from the file rather than the cwd so the suite
@@ -69,6 +78,71 @@ _TYPES: dict[str, type] = {
     "list[str]": list,
     "list[object]": list,
 }
+
+
+@pytest.fixture(autouse=True)
+def _names_off(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every cell runs with ``display.notification_session_name`` OFF by default.
+
+    Since 2026-11-14 the completion alert is the desktop composer's output, which
+    reads that switch; the filed literals are the PRIVATE form (app name + house
+    sentence), the one form that is a fixed string. Pinning the switch here keeps
+    the goldens independent of the developer's own settings. Cells about the
+    named form opt back in with :func:`_names_on`.
+    """
+    monkeypatch.setattr("local_operator.tui.notify.settings_get", lambda key, default=None: False)
+
+
+def _names_on(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("local_operator.tui.notify.settings_get", lambda key, default=None: True)
+
+
+def _session(root: Path, *, assistant: str = "", title: str = "") -> Path:
+    """A session directory in the shapes ``resume.py`` reads (as test_compose's).
+
+    Real files rather than a stubbed composer, so these cells prove the push says
+    what the desktop composer says for the SAME directory.
+    """
+    session = root / "sessions" / "abcdef123456"
+    session.mkdir(parents=True, exist_ok=True)
+    rows: list[dict[str, object]] = [
+        {
+            "id": "user-1",
+            "ts": 1.0,
+            "type": "message",
+            "payload": {"kind": "message", "role": "user", "content": [{"text": "do the thing"}]},
+        }
+    ]
+    if assistant:
+        rows.append(
+            {
+                "id": "assistant-1",
+                "ts": 2.0,
+                "type": "message",
+                "payload": {
+                    "kind": "message",
+                    "role": "assistant",
+                    "content": [{"text": assistant}],
+                },
+            }
+        )
+    (session / "transcript.jsonl").write_text(
+        "".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8"
+    )
+    if title:
+        (session / "title.json").write_text(
+            json.dumps({"text": title, "user_set": True, "names": [title]}), encoding="utf-8"
+        )
+    return session
+
+
+#: Every string the PRIVATE alert may carry: the house vocabulary, nothing else.
+def _house_strings() -> set[str]:
+    return (
+        set(BODIES.values())
+        | set(CONTEXTS.values())
+        | {CONTEXT_MIXED, BACKGROUND_FALLBACK_TITLE, APP_NAME}
+    )
 
 
 def _fixture(name: str) -> dict[str, Any]:
@@ -137,9 +211,9 @@ def _without_alert(value: dict[str, Any]) -> dict[str, Any]:
     The deny list is scanned by KEY NAME and forbids ``title``/``body`` as payload
     fields. Since the lane's ruling the machine composes the user-visible alert,
     and that object is the one place those two keys legitimately appear. Its
-    CONTENT stays checked: :func:`_check_alert` asserts it is the house text plus
-    the count, so removing it from the name scan does not loosen the rule that no
-    name, snippet or error line may travel.
+    CONTENT stays checked: :func:`_check_alert` asserts a filed literal is the
+    private form (app name + house sentence), so removing it from the name scan
+    does not loosen what the fixtures promise when the privacy switch is off.
     """
     return {key: item for key, item in value.items() if key != ALERT_FIELD}
 
@@ -148,8 +222,8 @@ def _check_alert(value: dict[str, Any], fixture: dict[str, Any], *, where: str) 
     """The alert's own allow-list, and the two facts about its text."""
     alert = value[ALERT_FIELD]
     _check_shape(alert, fixture["alert_required"], {}, where=f"{where}.{ALERT_FIELD}")
-    assert alert[ALERT_TITLE_FIELD] == APP_NAME, f"{where}: the title is the product's own name"
-    assert " · " in alert[ALERT_BODY_FIELD], f"{where}: the body is <house constant> · <count>"
+    assert alert[ALERT_TITLE_FIELD] == APP_NAME, f"{where}: the private title is the app name"
+    assert alert[ALERT_BODY_FIELD] in _house_strings(), f"{where}: the private body is house text"
 
 
 def _walk_keys(value: object) -> list[str]:
@@ -271,9 +345,7 @@ def test_the_completion_payload_and_emit_body_equal_the_filed_literals() -> None
         "fixture's allow-list in the same change"
     )
     _check_alert(payload, fixture, where="emit-completion")
-    assert payload[ALERT_FIELD] == completion_alert(
-        COMPLETION_INPUT["kind"], COMPLETION_INPUT["count"]
-    )
+    assert payload[ALERT_FIELD] == completion_alert(COMPLETION_INPUT["kind"])
 
     body = emit_body(payload, DEVICE_ROWS)
     # Both sides of the block, against the block's own allow-list FIRST, so a
@@ -350,7 +422,7 @@ def test_the_digest_payload_equals_the_filed_literals_with_and_without_exclude()
     assert without == fixture["exclude_absent_payload"]
     assert "exclude" not in without
     _check_alert(with_exclude, fixture, where="emit-digest")
-    assert with_exclude[ALERT_FIELD] == digest_alert(DIGEST_INPUT["kinds"], DIGEST_INPUT["count"])
+    assert with_exclude[ALERT_FIELD] == digest_alert(DIGEST_INPUT["kinds"])
 
     body = emit_body(with_exclude, DEVICE_ROWS)
     _check_block(body["devices"], fixture, where="emit-digest.body.devices")
@@ -403,8 +475,8 @@ def test_the_alert_allow_list_bites_in_both_directions() -> None:
     accept it, and one dropped must be dropped there too.
     """
     for name, alert in (
-        ("emit-completion.json", completion_alert("complete", 2)),
-        ("emit-digest.json", digest_alert(["complete", "complete"], 2)),
+        ("emit-completion.json", completion_alert("complete")),
+        ("emit-digest.json", digest_alert(["complete", "complete"])),
     ):
         fixture = _fixture(name)
         required = fixture["alert_required"]
@@ -417,61 +489,178 @@ def test_the_alert_allow_list_bites_in_both_directions() -> None:
             _check_shape({ALERT_TITLE_FIELD: APP_NAME}, required, {}, where="mutated")
 
 
-def test_the_alert_is_the_house_text_and_the_count_and_nothing_else() -> None:
-    """The machine composes the user-visible text, so this is the privacy cell.
+def test_a_named_completion_is_the_desktop_composers_title_and_preview(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The operator's request (2026-11-14): say which session, preview the turn.
 
-    Every string the alert can carry is the product's own: the app name, a house
-    sentence for the outcome, and the §3.2 count. A name, a snippet or a
-    provider's error line has no way in — which is why the builder takes a KIND
-    and a COUNT and no free text at all.
+    Asserted as EQUALITY with what the desktop composer returns for the same
+    directory, so the phone and the desktop cannot drift into two formatters.
     """
-    alert = completion_alert("complete", 2)
+    _names_on(monkeypatch)
+    session = _session(tmp_path, assistant="Migrated 14 tables.", title="Quota reporting fix")
+    composed = compose("complete", session_dir=session)
+
+    alert = completion_alert("complete", session_dir=session)
+
+    assert alert == {ALERT_TITLE_FIELD: composed.title, ALERT_BODY_FIELD: composed.body}
     assert alert == {
-        ALERT_TITLE_FIELD: APP_NAME,
-        ALERT_BODY_FIELD: f"{BODIES['complete']} · 2 conversations need you",
+        ALERT_TITLE_FIELD: "Quota reporting fix",
+        ALERT_BODY_FIELD: "Migrated 14 tables.",
     }
-    assert completion_alert("error", 5)[ALERT_BODY_FIELD] == (
-        f"{BODIES['error']} · 5 conversations need you"
-    )
-    # The singular: a count of one is the common case for a completion push, and
-    # "1 conversations need you" is prose no surface should ship.
-    assert completion_alert("complete", 1)[ALERT_BODY_FIELD].endswith("1 conversation needs you")
+    assert _fixture("emit-completion.json")["alert_named_example"] == alert
+    # No count phrase any more — the count stays a payload field only.
+    assert "need" not in alert[ALERT_BODY_FIELD]
+
+
+def test_with_names_off_no_session_text_reaches_the_emit_bytes(
+    tmp_path: Path,
+) -> None:
+    """The privacy switch is one promise for name AND snippet, as on the desktop.
+
+    Off (the autouse default here): the alert is exactly what the desktop shows
+    in that mode — the app name and the house sentence — and neither the session
+    name nor the snippet appears ANYWHERE in the serialised emit.
+    """
+    session = _session(tmp_path, assistant="Secret plan: rotate the keys", title="Project Falcon")
+    composed = compose("complete", session_dir=session)
+    payload = completion_payload(**{**COMPLETION_INPUT, "session_dir": session})
+    raw = json.dumps(emit_body(payload, DEVICE_ROWS), ensure_ascii=False).encode("utf-8")
+
+    assert payload[ALERT_FIELD] == {
+        ALERT_TITLE_FIELD: composed.title,
+        ALERT_BODY_FIELD: composed.body,
+    }
+    assert payload[ALERT_FIELD] == {ALERT_TITLE_FIELD: APP_NAME, ALERT_BODY_FIELD: BODY_COMPLETE}
+    for leaked in (b"Project Falcon", b"Secret plan", b"rotate the keys", b"abcdef123456"):
+        assert leaked not in raw, leaked
+    assert _fixture("emit-completion.json")["alert_private"] == payload[ALERT_FIELD]
+
+
+def test_a_long_final_message_is_clamped_well_formed_and_under_the_cloud_bound(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A 2,000-char reply: the body stays inside validateAlert's 1-200 code points."""
+    _names_on(monkeypatch)
+    long_reply = ("word " * 400).strip()
+    assert len(long_reply) >= 1999
+    session = _session(tmp_path, assistant=long_reply, title="T" * 500)
+
+    alert = completion_alert("complete", session_dir=session)
+
+    for field in (ALERT_TITLE_FIELD, ALERT_BODY_FIELD):
+        text = alert[field]
+        assert 1 <= len(text) <= push_payload.ALERT_TEXT_MAX_CHARS, (field, len(text))
+        assert text == text.strip()
+        assert not any(ord(ch) < 32 for ch in text)
+    assert alert[ALERT_BODY_FIELD].startswith("word word")
+
+
+def test_the_clamp_cuts_on_a_grapheme_boundary_with_an_ellipsis() -> None:
+    """Above 200 code points: cut whole graphemes, end with one ellipsis.
+
+    Compose's own budgets (80/120) keep its output under 200 today, so the clamp
+    is exercised directly: a family emoji (5 code points, one grapheme) sits
+    across the cut and must survive whole or not at all.
+    """
+    family = "\U0001f468\u200d\U0001f469\u200d\U0001f467"
+    text = "a" * 197 + family + "tail"
+    clamped = push_payload._bounded_alert_text(text, "fallback")
+
+    assert len(clamped) <= push_payload.ALERT_TEXT_MAX_CHARS
+    assert clamped.endswith("\u2026")
+    assert clamped == "a" * 197 + "\u2026", "the family emoji is dropped whole, never split"
+    assert not clamped[:-1].endswith("\u200d")
+    # Within the bound: untouched.
+    assert push_payload._bounded_alert_text("short", "fallback") == "short"
+
+
+@pytest.mark.parametrize("preview", ["", "   ", "\x00\x01"])
+def test_an_empty_or_missing_preview_falls_back_and_is_never_empty(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, preview: str
+) -> None:
+    """Empty text is refused by the cloud, so every string falls back to house text."""
+    _names_on(monkeypatch)
+    session = _session(tmp_path, assistant=preview)
+    alert = completion_alert("complete", session_dir=session)
+    assert alert[ALERT_BODY_FIELD] == BODY_COMPLETE
+    assert alert[ALERT_TITLE_FIELD] == BACKGROUND_FALLBACK_TITLE
+
+    # No directory at all: compose's nameless fallback, still non-empty.
+    missing = completion_alert("complete", session_dir=tmp_path / "sessions" / "gone")
+    assert all(missing.values())
+    # And the clamp itself never returns "" whatever it is handed.
+    assert push_payload._bounded_alert_text(preview, "") == APP_NAME
+    assert push_payload._bounded_alert_text(preview, "house") == "house"
+
+
+def test_a_compose_failure_degrades_to_the_house_alert(monkeypatch: pytest.MonkeyPatch) -> None:
+    """compose promises never to raise; a push must not fail even if it does."""
+
+    def boom(*_a: object, **_k: object) -> None:
+        raise RuntimeError("compose exploded")
+
+    monkeypatch.setattr("local_operator.notifications.compose", boom)
+    assert completion_alert("error") == {
+        ALERT_TITLE_FIELD: APP_NAME,
+        ALERT_BODY_FIELD: BODIES["error"],
+    }
+
+
+def test_other_kinds_take_whatever_compose_produces(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """error / interrupted / closed / retired: compose's own text, unedited."""
+    _names_on(monkeypatch)
+    session = _session(tmp_path, assistant="All 412 tests pass.", title="CI fix")
+    for kind in PUSH_KINDS:
+        composed = compose(kind, session_dir=session)  # type: ignore[arg-type]
+        alert = completion_alert(kind, session_dir=session)
+        assert alert == {ALERT_TITLE_FIELD: composed.title, ALERT_BODY_FIELD: composed.body}
+        if kind != "complete":
+            # Snippet is complete-only (compose's rule): an errored turn's last
+            # line must not read as a success on a lock screen.
+            assert "412" not in alert[ALERT_BODY_FIELD]
     # An unknown kind takes the composer's own default rather than inventing one.
-    assert completion_alert("not-a-kind", 1)[ALERT_BODY_FIELD].startswith(BODY_COMPLETE)
+    assert completion_alert("not-a-kind")[ALERT_BODY_FIELD] == BODY_COMPLETE
+
+
+def test_a_worst_case_emit_stays_well_under_the_apns_4kb_limit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Both strings at their 200-code-point cap, in 4-byte characters, plus the block.
+
+    APNs refuses a payload over 4,096 bytes; the cloud wraps this alert in its
+    envelope, so the machine's whole emit must leave generous headroom.
+    """
+    _names_on(monkeypatch)
+    session = _session(tmp_path, assistant="\U0001f600" * 2000, title="\U0001f600" * 2000)
+    payload = completion_payload(
+        **{**COMPLETION_INPUT, "session_dir": session, "sound_custom": "c_" + "0" * 16}
+    )
+    size = len(json.dumps(emit_body(payload, DEVICE_ROWS), ensure_ascii=False).encode("utf-8"))
+    assert size < 2048, size
 
 
 def test_the_digest_alert_says_the_sets_state_and_never_a_fixed_one() -> None:
-    """A coalesced batch speaks for a SET, so it must not claim one member's state."""
-    uniform = digest_alert(["error"] * 3, 3)
-    assert (
-        uniform[ALERT_BODY_FIELD] == f"{digest_subtitle(['error'] * 3)} · 3 conversations need you"
-    )
-    assert uniform[ALERT_TITLE_FIELD] == APP_NAME
+    """A coalesced batch speaks for a SET, so it names no session and prints no count."""
+    uniform = digest_alert(["error"] * 3)
+    assert uniform == {
+        ALERT_TITLE_FIELD: APP_NAME,
+        ALERT_BODY_FIELD: digest_subtitle(["error"] * 3),
+    }
 
-    mixed = digest_alert(["complete", "error"], 2)[ALERT_BODY_FIELD]
-    assert mixed.startswith("Mixed outcomes"), mixed
+    mixed = digest_alert(["complete", "error"])[ALERT_BODY_FIELD]
+    assert mixed == CONTEXT_MIXED
 
-    # Kinds that could not be read make NO claim (review round 2, R2-4): the house
-    # answers an uncharacterisable set with an empty subtitle, and a push cannot
-    # send an empty body, so the phrase is dropped rather than replaced by
-    # "Task complete" — which is the claim this vocabulary exists to refuse.
-    unreadable = digest_alert([], 2)[ALERT_BODY_FIELD]
-    assert unreadable == "2 conversations need you"
-    assert not unreadable.startswith(BODY_COMPLETE)
-
-
-def test_the_filed_count_one_alerts_are_the_builders_singular() -> None:
-    """R2-3's amendment, filed rather than only asserted.
-
-    The ruled template is `<count> conversations need you`; a count of one is the
-    common case for a completion push, so the machine spells the singular. Both
-    fixtures carry that literal (`alert_count_one`) so no reader of this tree — or
-    of the freeze — only ever sees the plural.
-    """
-    assert _fixture("emit-completion.json")["alert_count_one"] == completion_alert("complete", 1)
-    assert _fixture("emit-digest.json")["alert_count_one"] == digest_alert(["complete"], 1)
-    assert completion_alert("complete", 1)[ALERT_BODY_FIELD].endswith("1 conversation needs you")
-    assert digest_alert(["complete"], 1)[ALERT_BODY_FIELD].endswith("1 conversation needs you")
+    # Kinds that could not be read make NO outcome claim (review round 2, R2-4):
+    # "A session finished" is true of any digest, "Task complete" is not.
+    unreadable = digest_alert([])
+    assert unreadable[ALERT_BODY_FIELD] == BACKGROUND_FALLBACK_TITLE
+    assert not unreadable[ALERT_BODY_FIELD].startswith(BODY_COMPLETE)
+    assert _fixture("emit-digest.json")["alert_unreadable"] == unreadable
+    for alert in (uniform, unreadable):
+        assert "need" not in alert[ALERT_BODY_FIELD]
 
 
 def test_the_report_block_allow_list_rejects_an_extra_or_mistyped_row() -> None:

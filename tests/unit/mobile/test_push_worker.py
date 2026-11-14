@@ -483,26 +483,66 @@ def test_a_catch_up_above_the_burst_limit_is_one_digest(harness: Harness) -> Non
     ), "a digest is not sequence-keyed and must not burn the attention counter"
     assert body[ALERT_FIELD] == {
         ALERT_TITLE_FIELD: APP_NAME,
-        ALERT_BODY_FIELD: "Complete · 4 conversations need you",
-    }, "a uniform batch says its real state, and the count is the batch's"
+        ALERT_BODY_FIELD: "Complete",
+    }, "a uniform batch says its real state; the count rides the payload, not the text"
     for name in ("conversation", "completion_token", "kind"):
         assert name not in body, f"a digest spans conversations and names none: {name}"
 
 
-def test_the_alert_rides_the_visible_types_and_never_the_silent_one(harness: Harness) -> None:
+def test_the_alert_rides_the_visible_types_and_never_the_silent_one(
+    harness: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """The lane's ruling: the machine writes the text for completion and digest,
     and an attention push carries none at all — it is a silent badge correction.
     """
+    # Privacy switch off: the private form, whatever the developer's settings say.
+    monkeypatch.setattr("local_operator.tui.notify.settings_get", lambda key, default=None: False)
     token = harness.publish("alert-me")
     assert [record.kind for record in harness.worker.tick()] == ["completion"]
     alert = harness.plane.calls[0][1][ALERT_FIELD]
-    assert alert[ALERT_TITLE_FIELD] == APP_NAME
-    assert alert[ALERT_BODY_FIELD].endswith("1 conversation needs you")
-    assert alert[ALERT_BODY_FIELD].startswith(BODIES["complete"])
+    assert alert == {ALERT_TITLE_FIELD: APP_NAME, ALERT_BODY_FIELD: BODIES["complete"]}
 
     harness.store.acknowledge("session/alert-me", token)
     assert [record.kind for record in harness.worker.tick()] == ["attention"]
     assert ALERT_FIELD not in harness.plane.calls[1][1], "the silent form has no text"
+
+
+def test_the_completion_alert_is_composed_from_the_conversations_own_directory(
+    harness: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The call site maps ``session/<id>`` to ``<config_dir>/sessions/<id>``.
+
+    Operator request (2026-11-14): the push names the session and previews the
+    turn, as the desktop does. Real transcript files under the worker's own
+    config dir, a real tick, and the bytes the transport received — so the
+    identity → directory mapping is proven on the path that ships.
+    """
+    import json as _json
+
+    monkeypatch.setattr("local_operator.tui.notify.settings_get", lambda key, default=None: True)
+    session = harness.root / "sessions" / "named-one"
+    session.mkdir(parents=True, exist_ok=True)
+    row = {
+        "id": "assistant-1",
+        "ts": 2.0,
+        "type": "message",
+        "payload": {"kind": "message", "role": "assistant", "content": [{"text": "Shipped v2."}]},
+    }
+    (session / "transcript.jsonl").write_text(_json.dumps(row) + "\n", encoding="utf-8")
+    (session / "title.json").write_text(
+        _json.dumps({"text": "Release prep", "user_set": True, "names": ["Release prep"]}),
+        encoding="utf-8",
+    )
+    harness.publish("named-one")
+    assert [record.kind for record in harness.worker.tick()] == ["completion"]
+    body = harness.plane.calls[0][1]
+    assert body[ALERT_FIELD] == {ALERT_TITLE_FIELD: "Release prep", ALERT_BODY_FIELD: "Shipped v2."}
+    assert isinstance(body["count"], int), "count still rides the payload"
+
+    # A store key that is not a bare name never reaches the filesystem.
+    assert worker_module._session_dir_of(harness.root, "../escape") is None
+    assert worker_module._session_dir_of(harness.root, "..") is None
+    assert worker_module._session_dir_of(harness.root, None) is None
 
 
 def test_the_sound_is_read_live_from_the_workers_config_and_skips_the_silent_form(

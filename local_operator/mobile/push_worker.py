@@ -1183,6 +1183,12 @@ class PushWorker:
                 count=completion_count,
                 sound=sound,
                 sound_custom=sound_custom,
+                # The alert now names the session and previews the turn
+                # (operator request, 2026-11-14), composed by the desktop's own
+                # composer from this directory. This runs on the tick's worker
+                # thread, never the event loop, because compose reads the
+                # transcript. The privacy switch is applied inside compose.
+                session_dir=_session_dir_of(self.config_dir, session_id),
             )
         elif item.kind == EVENT_DIGEST:
             # The coalesced catch-up: a set, so it names no conversation and
@@ -1698,3 +1704,17 @@ def _session_id_of(conversation: str) -> str | None:
     if namespace != "session" or not session_id:
         return None
     return session_id
+
+
+def _session_dir_of(config_dir: Path, session_id: str | None) -> Path | None:
+    """The session directory a completion alert is composed from, or ``None``.
+
+    ``<config_dir>/sessions/<id>`` is the layout the desktop feed composes from
+    (``desktop_feed.sessions_dir``). The id must be a bare name — the same check
+    ``daemon._durable_user_session_dir`` applies — so a malformed store key can
+    never point compose's reads outside the sessions tree. A missing directory is
+    fine: compose degrades to its nameless fallback.
+    """
+    if not session_id or session_id in (".", "..") or Path(session_id).name != session_id:
+        return None
+    return config_dir / "sessions" / session_id

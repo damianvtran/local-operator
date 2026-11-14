@@ -72,10 +72,13 @@ there is one digest pin to follow.)
   alert) with a type per field, plus `forbidden` where the shape has one and
   `absent_fields` where a shape declares a field it must never carry. A field is
   either named in a shape block **or** in
-  `payload-forbidden-fields.json` — never both, never neither. The two shapes
-  with an alert also file `alert_count_one`: the same alert at a count of one,
-  where the count term is singular (`1 conversation needs you`), so no reader of
-  this tree only ever sees the plural.
+  `payload-forbidden-fields.json` — never both, never neither. The literals'
+  alerts are the PRIVATE form (`display.notification_session_name` off: the app
+  name over the house sentence), the one form that is a fixed string. The
+  completion shape also files `alert_private` and `alert_named_example` (the
+  session's name over a preview of the turn, what the desktop composer renders
+  with the switch on); the digest files `alert_unreadable`. Since 2026-11-14 no
+  alert prints the count; it stays a payload field.
 - **`custom_payload` / `custom_body`** (completion and digest) are the literal
   for a **custom** sound selection: `sound_custom` (`c_<sha256[:16]>`) beside the
   `soft-pulse` fallback in `sound`, and `sound_custom_ready` on every live
@@ -123,7 +126,9 @@ there is one digest pin to follow.)
   and stops; the phone-facing envelope is the cloud's fan-out and a proposal.
   `aps.badge` is never sent at all (§1.5). The machine DOES compose the
   user-visible `alert` for the two visible types (the lane's ruling of
-  2026-10-01), and the cloud delivers that text verbatim and wraps it; the
+  2026-10-01; since 2026-11-14 the completion alert is the desktop composer's
+  output, gated by the session-name privacy switch), and the cloud delivers that
+  text verbatim and wraps it; the
   attention form deliberately carries none, because it is a silent wake.
 - **The cloud's own route shapes** (`POST <cloud>/v1/push/register`, the
   heartbeat) — proposals, owned by the cloud lane's `docs/push-cloud-ops.md`. The

@@ -11,13 +11,15 @@ and the cloud build against one written contract instead of against prose.
 
 Three decisions shape this module, and each avoids a named trap:
 
-- **The payload is composed here, never by the desktop composer.** The desktop
-  notifier's body is a last-assistant-line snippet when the privacy flag allows,
-  and its failure text may name a provider, a model or a quota
-  (``notifications/compose.py``); reusing that path would put model-written text
-  into a push. §3.2 names this builder as a slice deliverable for exactly that
-  reason. What the phone renders as the banner's title and body is composed
-  cloud-side from the ``kind`` — which is what the ``kind`` field is FOR.
+- **The alert text is the desktop composer's, the rest of the payload is
+  this module's.** Until 2026-11-14 the alert was house constants only (the
+  lane's ruling of 2026-10-01), deliberately bypassing
+  ``notifications/compose.py``. The operator then asked for the push to say
+  which session finished and preview what it said, "similar to the UI
+  notifications", so :func:`completion_alert` now renders through that same
+  composer — one formatter, one privacy rule (``display.notification_session_name``
+  gates the name and the snippet together), and the phone says what the desktop
+  says. The ``kind``, keys and every other field are still spelled here.
 
 - **``kind`` is the STORE's vocabulary, not the composer's.** The composer's set
   lists ``retired`` and the gate kinds but NOT ``closed``, so a builder keyed to
@@ -36,7 +38,7 @@ Three decisions shape this module, and each avoids a named trap:
 - **The digest is a THIRD form, and it is visible on purpose.** A coalesced
   catch-up spans conversations, so it can carry none of the completion form's
   record fields and cannot be keyed on any one record's content; it is a "look at
-  the app" nudge whose body is a house constant plus the count, and the type is
+  the app" nudge whose body is the set's house state (no count), and the type is
   what tells the cloud to compose an ALERT from it rather than the silent
   ``content-available`` wake the attention form means. Collapsing it per COMPUTER
   (rather than per conversation) is what keeps a burst to one banner on a phone
@@ -50,13 +52,15 @@ The machine also never sends a badge — ``aps.badge`` is rejected by §1.5 — 
 ``tests/fixtures/push/payload-forbidden-fields.json`` names it as forbidden so a later edit
 cannot add it here without failing a test.
 
-**The alert text is composed HERE, from the house constants, and that is a
-privacy rule rather than a formatting one** (the lane's ruling of 2026-10-01).
-The only strings a push may carry are the product's own: ``APP_NAME`` for the
-title, and a house constant plus the count for the body. A builder that handed
-the cloud a conversation name, a transcript snippet or a provider's error line
-would put model-written text on a lock screen, which is why the alert is built
-by this module's own functions and why the fixtures pin its literals.
+**The alert text now carries conversation content when the user allows it,
+and that is a privacy decision, not a formatting one.** With
+``display.notification_session_name`` on, the session's name and a line of the
+model's reply (or, for ``error``, the provider's failure line) leave the machine:
+they transit Radient's cloud, which keeps emit records for up to 14 days, and the
+platform push service. With it off, the alert is ``APP_NAME`` over the house
+sentence, byte for byte what the desktop shows in that mode. Every string is
+clamped to the cloud's 1–200 code-point bound (:data:`ALERT_TEXT_MAX_CHARS`).
+The digest stays generic: it spans conversations, so it names none.
 
 The keys are frozen here too, and they are deliberately different in kind
 (§3.4). A **completion** emit is keyed on the record's CONTENT, so a heal mints a
@@ -73,6 +77,7 @@ from __future__ import annotations
 
 import hashlib
 from collections.abc import Mapping, Sequence
+from pathlib import Path
 from typing import Any
 
 #: The credential report block's row key (ADR §3.2 #2), IMPORTED from the module
@@ -95,7 +100,7 @@ from local_operator.notifications.sound import (
     configured,
 )
 from local_operator.tui import notify as _notify
-from local_operator.tui.notify import APP_NAME, BODIES, digest_subtitle
+from local_operator.tui.notify import APP_NAME, BODIES, digest_subtitle, sanitize_text
 
 # ``BODY_COMPLETE`` is read as ``_notify.BODY_COMPLETE`` at call time, not
 # imported by value: ``tui.notify._reload_copy`` rebinds it on a live language
@@ -109,8 +114,8 @@ _t = tr("wire.push_alert")
 #: The alert object: the user-visible text the machine composes and the cloud
 #: delivers verbatim. Its two keys are named here because the deny list is
 #: scanned by key name and ``title``/``body`` are forbidden as PAYLOAD fields —
-#: this object is the one place they may appear, holding the product's own words
-#: (:func:`completion_alert` / :func:`digest_alert`) and nothing else.
+#: this object is the one place they may appear, holding what
+#: :func:`completion_alert` / :func:`digest_alert` compose and nothing else.
 ALERT_FIELD = "alert"
 ALERT_TITLE_FIELD = "title"
 ALERT_BODY_FIELD = "body"
@@ -239,7 +244,11 @@ def attention_emit_key(sequence: int) -> str:
 
 
 def count_phrase(count: int) -> str:
-    """The body's count term: ``1 conversation needs you`` / ``5 conversations need you``.
+    """The count term: ``1 conversation needs you`` / ``5 conversations need you``.
+
+    No longer printed in the push alert since 2026-11-14 (operator request: the
+    banner now names the session and previews the turn); kept, translated and
+    tested for any surface that wants the sentence.
 
     THE NOUN MATCHES WHAT THE COUNT IS. ``count`` is the machine's unread
     CONVERSATION count at composition time (§3.2's field table), the same number
@@ -269,63 +278,134 @@ def wire_count(count: int | None) -> int:
     client reads it as a fact: the app takes its badge from the daemon (ADR
     §1.5) and its payload parser reads only ``conversation``/``computer``
     (local-operator-mobile ``src/notifications/payload.ts``). So an unknown count
-    travels as ``0`` and the ALERT, the one place a human reads the number, makes
-    no machine-count claim: :func:`completion_alert` drops the count term, and
-    :func:`digest_alert` falls back to the batch's own size, a lower bound true of
-    the set rather than the machine's unread number.
+    travels as ``0``. The banner TEXT never carries a count at all (operator,
+    2026-11-14: a descriptive banner, no "N conversations need you" line), so
+    this field is the only place the number travels.
     """
     return 0 if count is None else count
 
 
-def completion_alert(kind: str, count: int | None) -> dict[str, str]:
-    """The alert for one completion: the product name, then the outcome + count.
+#: The cloud's bound on each alert string, in Unicode code points: agent-server
+#: ``internal/sessionpush/wire.go`` ``validateAlert`` refuses a title or body
+#: whose ``len([]rune(v))`` is outside 1–200, and a refused emit is a push that
+#: never arrives. Python's ``len(str)`` counts the same unit, so the clamp below
+#: measures exactly what the cloud measures.
+ALERT_TEXT_MAX_CHARS = 200
 
-    An unknown kind falls back to ``BODY_COMPLETE`` exactly as the composer's own
-    ``BODIES.get(kind, BODY_COMPLETE)`` does — one default, and the same one the
-    local banner takes, so a push and a toast never disagree about an outcome the
-    vocabulary does not carry.
+#: What a clamped alert string ends with: one code point, so the budget it
+#: costs is known exactly.
+_ELLIPSIS = "\u2026"
 
-    ``count is None`` (the listing could not be read) drops the count term and
-    the body is the outcome alone ("Task complete"): no number is better than a
-    wrong one, and the 2026-11-14 "47502 conversations need you" banner is what
-    a wrong one looks like.
+
+def _bounded_alert_text(text: str, fallback: str) -> str:
+    """``text`` made safe for the cloud's 1–200 code-point rule.
+
+    NEVER EMPTY: an empty (or whitespace-only) string is replaced by
+    ``fallback``, the house sentence, because the cloud refuses an empty alert
+    string outright and a refused emit is a banner that silently never shows.
+
+    CUT ON A GRAPHEME BOUNDARY, via :func:`rich.cells.split_graphemes` (the
+    splitter ``cli._clamp_reason_cell`` already uses): a code-point cut can split
+    a family emoji or a letter from its combining accent, which renders as a
+    replacement box on a lock screen. The prefix also never ends on a zero-width
+    joiner, for the same reason. Today compose's own budgets (80-char title,
+    120-char snippet) keep its output well inside 200, so this is the guard
+    against a future budget change rather than a path the common case takes.
     """
-    body = BODIES.get(kind, _notify.BODY_COMPLETE)
-    if count is None:
-        return {ALERT_TITLE_FIELD: APP_NAME, ALERT_BODY_FIELD: body}
-    return {ALERT_TITLE_FIELD: APP_NAME, ALERT_BODY_FIELD: f"{body} · {count_phrase(count)}"}
+    from rich.cells import split_graphemes
+
+    # Re-sanitised even though compose already did it: this text now leaves the
+    # machine, and control characters are never wanted on a lock screen.
+    cleaned = sanitize_text(text, len(text) if text else 0)
+    if not cleaned:
+        cleaned = sanitize_text(fallback, len(fallback)) or APP_NAME
+    if len(cleaned) <= ALERT_TEXT_MAX_CHARS:
+        return cleaned
+    budget = ALERT_TEXT_MAX_CHARS - len(_ELLIPSIS)
+    spans, _cells = split_graphemes(cleaned)
+    cut = ""
+    for _start, end, _width in spans:
+        if end > budget:
+            break
+        cut = cleaned[:end]
+    while cut.endswith("\u200d"):
+        cut = cut[:-1]
+    cut = cut.rstrip()
+    return f"{cut}{_ELLIPSIS}" if cut else _ELLIPSIS
 
 
-def digest_alert(kinds: Sequence[str], count: int | None) -> dict[str, str]:
-    """The alert for a coalesced catch-up: the SET's honest state, then the count.
+def completion_alert(kind: str, *, session_dir: Path | None = None) -> dict[str, str]:
+    """The alert for one completion: the session's name over a preview of the turn.
 
-    The leading phrase is ``digest_subtitle``'s answer, not a fixed "Task
-    complete": the batch is whatever the burst rule held back, so a set that is
-    entirely failures must not be announced as complete (the TUI's own design
-    round 2, D8). A uniform set gets its real category out of the house
-    vocabulary, and a mixed one says so.
+    WHY THIS CHANGED (operator, 2026-11-14): "the notification should be more
+    descriptive" — "It should say which session completed, with a preview of the
+    completed information similar to the UI notifications". The banner used to be
+    the fixed ``APP_NAME`` over ``<outcome> · N conversations need you``, which
+    told the user that something finished but never what.
 
-    AN UNREADABLE BATCH MAKES NO CLAIM (review round 2, R2-4).
-    ``digest_subtitle`` answers "" for a set it cannot characterise, and the house
-    reads that as no claim at all — both desktop backends accept an empty
-    subtitle. A push cannot send an empty body, so the phrase is dropped and the
-    sentence becomes the count alone ("5 conversations need you"), which is true
-    of any batch. Falling back to ``BODY_COMPLETE`` — what this did first — is
-    exactly the claim the digest vocabulary exists to refuse.
+    THE TEXT IS THE DESKTOP'S OWN COMPOSITION, not a second formatter:
+    :func:`local_operator.notifications.compose` is what the desktop app and the
+    TUI already show, so the phone and the desktop say the same thing about the
+    same turn. That composer owns the sanitising, the per-kind body rules (a
+    snippet only for ``complete``, the failure line for ``error``, the house
+    sentence otherwise — ``closed`` included, which it renders through
+    ``BODIES``) and, crucially, the privacy rule.
 
-    ``count is None`` (the listing could not be read) drops the count term, as
-    on the completion form, so the body is the set's state alone. When there is
-    no state either, the sentence falls back to the BATCH's own size — every
-    member of a digest is a conversation that needs the reader, so
-    ``max(1, len(kinds))`` is a lower bound that is true of the set, where the
-    machine's unread number is the one thing this alert cannot know.
+    CONTENT NOW LEAVES THE MACHINE. When ``display.notification_session_name``
+    is on, the session's name and a line of the model's reply travel through
+    Radient's cloud (which keeps emit records for up to 14 days) and Apple's or
+    Google's push service to the phone. That switch is the user's one control,
+    for the name and the snippet together, exactly as on the desktop: when it is
+    off, compose answers ``APP_NAME`` and the house sentence, and nothing derived
+    from the conversation is in the emit at all.
+
+    ``session_dir`` is the conversation's directory; ``None`` (or a directory
+    that cannot be read) degrades to compose's nameless fallback. The count is
+    deliberately NOT printed any more — it stays a payload field because the
+    wire requires it, but "N conversations need you" read as noise beside a
+    real preview. This reads the transcript, so it must run off the event loop
+    (the push worker's tick already does, via ``asyncio.to_thread``).
     """
+    house_body = BODIES.get(kind, _notify.BODY_COMPLETE)
+    try:
+        # Through the PACKAGE, as ``notification_payload`` does, so a test or a
+        # wrapper that patches ``notifications.compose`` patches this path too.
+        from local_operator import notifications
+
+        composed = notifications.compose(kind, session_dir=session_dir)  # type: ignore[arg-type]
+        title, body = composed.title, composed.body
+    except Exception:  # noqa: BLE001 — compose promises not to raise; a push still must not fail
+        title, body = APP_NAME, house_body
+    return {
+        ALERT_TITLE_FIELD: _bounded_alert_text(title, APP_NAME),
+        ALERT_BODY_FIELD: _bounded_alert_text(body, house_body),
+    }
+
+
+def digest_alert(kinds: Sequence[str]) -> dict[str, str]:
+    """The alert for a coalesced catch-up: the product name over the SET's state.
+
+    GENERIC ON PURPOSE. A digest stands for several conversations, so no one
+    session's name or snippet can title it, and compose has no multi-conversation
+    form to reuse (the TUI's digest banner prints a count and points at a
+    terminal key binding, neither of which belongs on a phone). So the body is the
+    house's set vocabulary, :func:`digest_subtitle`: a uniform set's real state
+    ("Complete", "Needs attention"), "Mixed outcomes" for a mixed one — never a
+    fixed "Task complete", which would announce a batch of failures as done (the
+    TUI's design round 2, D8).
+
+    The "N conversations need you" phrase was dropped here too (operator,
+    2026-11-14) — ``count`` still rides the payload. A batch whose kinds could not
+    be read makes no claim about outcomes; it gets
+    ``BACKGROUND_FALLBACK_TITLE`` ("A session finished"), which is true of any
+    digest, since a digest only exists because sessions finished.
+    """
+    fallback = _notify.BACKGROUND_FALLBACK_TITLE
     state = digest_subtitle(kinds)
-    if count is None:
-        body = state or count_phrase(max(1, len(kinds)))
-        return {ALERT_TITLE_FIELD: APP_NAME, ALERT_BODY_FIELD: body}
-    body = f"{state} · {count_phrase(count)}" if state else count_phrase(count)
-    return {ALERT_TITLE_FIELD: APP_NAME, ALERT_BODY_FIELD: body}
+    return {
+        ALERT_TITLE_FIELD: APP_NAME,
+        ALERT_BODY_FIELD: _bounded_alert_text(state, fallback),
+    }
 
 
 def push_sound(values: Mapping[str, Any] | None) -> str:
@@ -397,6 +477,7 @@ def completion_payload(
     count: int | None,
     sound: str,
     sound_custom: str | None = None,
+    session_dir: Path | None = None,
 ) -> dict[str, Any]:
     """One completion emit's payload — the ``data`` object of ADR §3.2 #2.
 
@@ -417,6 +498,11 @@ def completion_payload(
     ``sound_custom`` (:data:`SOUND_CUSTOM_FIELD`) is OMITTED when ``None`` — the
     repo's absence rule, so a built-in selection's body is byte-for-byte the
     pre-C5 shape.
+
+    ``session_dir`` is the conversation's directory, read by
+    :func:`completion_alert` for the session's name and a preview of the turn
+    (subject to the desktop's notification privacy switch). It never becomes a
+    payload field. ``None`` yields compose's nameless fallback alert.
     """
     if kind not in PUSH_KINDS:
         raise ValueError(f"unknown completion kind: {kind!r}")
@@ -430,7 +516,7 @@ def completion_payload(
         "kind": kind,
         "emit_id": emit_id,
         "count": wire_count(count),
-        ALERT_FIELD: completion_alert(kind, count),
+        ALERT_FIELD: completion_alert(kind, session_dir=session_dir),
         SOUND_FIELD: sound,
     }
     if sound_custom is not None:
@@ -488,7 +574,7 @@ def digest_payload(
     load-bearing — §3.2 fixes the attention form's envelope as a silent,
     best-effort wake, so a burst that rode it would arrive with no banner at all.
     ``type: "digest"`` is what tells the cloud to compose an alert: a house
-    constant plus the count, never a name, a snippet or an error line.
+    state for the set, never a name, a snippet or an error line.
 
     ``exclude`` is permitted here with the attention form's meaning and is NEVER
     REQUIRED (§3.2 at ``5da35710``): the required case belongs to the attention
@@ -509,7 +595,7 @@ def digest_payload(
         "computer": computer,
         "count": wire_count(count),
         "emit_id": emit_id,
-        ALERT_FIELD: digest_alert(kinds, count),
+        ALERT_FIELD: digest_alert(kinds),
         SOUND_FIELD: _checked_sound(sound),
     }
     if sound_custom is not None:
