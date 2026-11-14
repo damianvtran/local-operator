@@ -418,6 +418,58 @@ async def _no_takeover() -> None:
     raise RuntimeError("Desktop viewers cannot own a runtime")
 
 
+def _log_abandoned_frame_read(task: asyncio.Future[Any]) -> None:
+    """Retrieve, and log at debug, the outcome of a bounded open-frame index read.
+
+    WHY: ``_bounded_frame_read`` stops waiting for an ``index_read_model`` worker
+    hop (``summary`` or ``frame_facts``) at the first frame's deadline but never
+    cancels it mid-I/O -- a thread cannot be interrupted, and the SQLite read is
+    side-effect free, so letting it finish is cheaper than any abort. Nobody
+    else awaits an abandoned read, so without this its failure would surface
+    only as "Task exception was never retrieved" at garbage collection. Same
+    contract as ``_log_abandoned_proof_read``; a read awaited normally re-raises
+    to its caller as well.
+    """
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is not None:
+        logger.debug(
+            "Open-frame index read failed (abandoned at the open-frame deadline or "
+            "by a cancelled request; the frame answered runs_state='building')",
+            exc_info=exc,
+        )
+
+
+async def _bounded_frame_read(
+    deadline: float | None, func: Any, /, *args: Any, **kwargs: Any
+) -> tuple[bool, Any]:
+    """Run ``func`` on a worker thread, waiting at most until ``deadline``.
+
+    Returns ``(True, value)`` when the read finished in time and ``(False, None)``
+    when the deadline was already spent or passed while waiting. ``deadline=None``
+    (a standalone ``/history`` read) waits for the whole read: that request is
+    the follow-up the degraded first frame points the client at, so it must
+    carry the facts. Exceptions from a read that finished in time propagate
+    exactly as the bare ``asyncio.to_thread`` call did.
+    """
+    if deadline is None:
+        return True, await asyncio.to_thread(func, *args, **kwargs)
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        # Spent before the read began: starting a worker only to discard it
+        # would queue one more hop ahead of the next open.
+        return False, None
+    read = asyncio.ensure_future(asyncio.to_thread(func, *args, **kwargs))
+    # Attached BEFORE the wait so a request cancelled mid-wait (the viewer
+    # clicked elsewhere) also retrieves the abandoned read's exception.
+    read.add_done_callback(_log_abandoned_frame_read)
+    done, _pending = await asyncio.wait({read}, timeout=remaining)
+    if read not in done:
+        return False, None
+    return True, read.result()
+
+
 class _OpenFrameSteps:
     """Per-step ``open_trace`` marks for the open-frame page (``a.hist.<step>``).
 
@@ -4204,9 +4256,17 @@ class DesktopSessionBridge:
                     "head_cut": False,
                 }
             anchored = self._wire_rows(page.entries, copy=False)
-            anchored_index = await self._frame_source(deadline, [page])
+            anchored_index = await self._frame_source(
+                deadline, [page], paint_deadline=paint_deadline
+            )
             anchored_index, facts = await self._resolve_frame_source(
-                anchored_index, anchored, [page], order_ids or [], False, deadline
+                anchored_index,
+                anchored,
+                [page],
+                order_ids or [],
+                False,
+                deadline,
+                paint_deadline=paint_deadline,
             )
             result = build_frame(
                 anchored,
@@ -4350,7 +4410,9 @@ class DesktopSessionBridge:
                 and through_id is None
                 and around_id is None
             ):
-                index = await self._frame_source(deadline, order_pages)
+                index = await self._frame_source(
+                    deadline, order_pages, paint_deadline=paint_deadline
+                )
                 index_at_first_page = index is not None
             if (
                 index is not None
@@ -4378,7 +4440,7 @@ class DesktopSessionBridge:
                 break
         step("pages", pages=len(order_pages), rows=len(collected))
         if index is None:
-            index = await self._frame_source(deadline, order_pages)
+            index = await self._frame_source(deadline, order_pages, paint_deadline=paint_deadline)
             if tail_read and not index_at_first_page:
                 # THE INDEX LANDED DURING THE HUNT (#3037 QA, O1; the relay twin
                 # carries the same rule): the facts will say ``ready``, so the rows
@@ -4405,7 +4467,13 @@ class DesktopSessionBridge:
         # not paid for, and ``runs`` carries that run's true size instead.
         step("frame_source", index=type(index).__name__)
         index, facts = await self._resolve_frame_source(
-            index, collected, order_pages, order_ids or [], tail_read, deadline
+            index,
+            collected,
+            order_pages,
+            order_ids or [],
+            tail_read,
+            deadline,
+            paint_deadline=paint_deadline,
         )
         step("resolve", facts=facts is not None)
         kept, reached = align_page(collected, limit, supplements=supplements, memo=strip_memo)
@@ -4492,11 +4560,24 @@ class DesktopSessionBridge:
             ]
         )
 
-    async def _frame_source(self, deadline: float, pages: list[Any]) -> Any:
+    async def _frame_source(
+        self, deadline: float, pages: list[Any], *, paint_deadline: float | None = None
+    ) -> Any:
         """Resident first, then witnessed tail summary; fallback keeps its wager.
 
         A summary only guides the head hunt. It never authorizes suppressing a
         refresh for a later failed selection or pretending the whole index exists.
+
+        THE SUMMARY READ IS BOUNDED BY THE FIRST FRAME'S DEADLINE (``paint_deadline``,
+        set only for the snapshot's embedded page). It is a SQLite read on a
+        worker thread and was awaited in full: on the operator's v0.102.2
+        desktop it measured up to 1,178 ms on one 3.2 s open (session
+        7c8130c573dd) against a 120 ms ``OPEN_FRAME_SNAPSHOT_BUDGET_S``. Past the
+        deadline the frame proceeds with no index -- the head hunt's existing
+        blind path and ``runs_state='building'`` -- and the follow-up ``/history``
+        (``paint_deadline=None``) waits for the summary and carries the facts.
+        No refresh is started on that timeout: the summary EXISTS, it was only
+        slow, and a full scan would cost far more than the read it replaces.
         """
         source = index_read_model.page_source(pages)
         resident = transcript_index.fresh_resident(self.root, self.session_id)
@@ -4508,9 +4589,12 @@ class DesktopSessionBridge:
             )
             return resident if source == expected else None
         step = _OpenFrameSteps(self.session_id)
-        projected = await asyncio.to_thread(
-            index_read_model.summary, self.root, self.session_id, source
+        finished, projected = await _bounded_frame_read(
+            paint_deadline, index_read_model.summary, self.root, self.session_id, source
         )
+        if not finished:
+            step("frame_source.summary", state="deadline")
+            return None
         step("frame_source.summary", state=projected.state)
         if projected.state == "ready":
             return projected.value
@@ -4526,11 +4610,28 @@ class DesktopSessionBridge:
         order_ids: list[str],
         reaches_eof: bool,
         deadline: float,
+        *,
+        paint_deadline: float | None = None,
     ) -> tuple[Any, Any]:
-        """Materialize selected facts before build_frame, on an existing worker hop."""
+        """Materialize selected facts before build_frame, on an existing worker hop.
+
+        THE ``frame_facts`` HOP IS BOUNDED BY THE FIRST FRAME'S DEADLINE, as
+        ``_frame_index`` and the proof join already are. It was the one
+        open-frame await with no bound: on the operator's v0.102.2 desktop
+        (21 sidebar opens, ``LOP_OPEN_TRACE``) ``a.hist.resolve`` on the summary
+        path measured median 88 ms and max 818 ms, against a 120 ms
+        ``OPEN_FRAME_SNAPSHOT_BUDGET_S`` it was supposed to share. Past the
+        deadline the frame answers with no facts -- the ``building`` shape it
+        already serves for a cold index -- and the standalone ``/history``
+        that follows (``paint_deadline=None``) waits for the read and carries
+        them. No ``_frame_index`` wait follows a timeout: the budget is spent,
+        and starting a full refresh scan for a summary that exists would cost
+        more than the read it abandons.
+        """
         source = index_read_model.page_source(pages)
         if isinstance(candidate, index_read_model.FrameSummary):
-            result = await asyncio.to_thread(
+            finished, result = await _bounded_frame_read(
+                paint_deadline,
                 index_read_model.frame_facts,
                 self.root,
                 self.session_id,
@@ -4539,6 +4640,8 @@ class DesktopSessionBridge:
                 order_ids=order_ids,
                 source=source,
             )
+            if not finished:
+                return None, None
             if result.state == "ready":
                 return None, result.value
             # Summary success is NOT selection success. Corruption/races use the
