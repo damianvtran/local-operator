@@ -1,0 +1,25 @@
+test_image_cleanup_hook_is_before_quit_in_actual_lifecycle (test_owned_image.OwnedImageTests.test_image_cleanup_hook_is_before_quit_in_actual_lifecycle) ... FAIL
+test_swap_threshold_uses_binary_sysctl_units_without_rounding_down (test_owned_image.OwnedImageTests.test_swap_threshold_uses_binary_sysctl_units_without_rounding_down) ... FAIL
+
+======================================================================
+FAIL: test_image_cleanup_hook_is_before_quit_in_actual_lifecycle (test_owned_image.OwnedImageTests.test_image_cleanup_hook_is_before_quit_in_actual_lifecycle)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "~/local-operator/.worktrees/benchmark-reconstruction-20261114/benchmarks/harness_cost/reconstruction/2026-11-14-source-only/test_owned_image.py", line 13, in test_image_cleanup_hook_is_before_quit_in_actual_lifecycle
+    self.assertIn('cleanup-image',ops.events)
+    ~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: 'cleanup-image' not found in ['fresh-preflight', 'start-owned', 'info', 'attributed-rss', 'disk', 'resolver', 'disk', 'attributed-rss', 'stop-resolver', 'quit-owned']
+
+======================================================================
+FAIL: test_swap_threshold_uses_binary_sysctl_units_without_rounding_down (test_owned_image.OwnedImageTests.test_swap_threshold_uses_binary_sysctl_units_without_rounding_down)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "~/local-operator/.worktrees/benchmark-reconstruction-20261114/benchmarks/harness_cost/reconstruction/2026-11-14-source-only/test_owned_image.py", line 19, in test_swap_threshold_uses_binary_sysctl_units_without_rounding_down
+    self.assertTrue(hasattr(target,'parse_swap_used_bytes'),'missing explicit swap parser')
+    ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: False is not true : missing explicit swap parser
+
+----------------------------------------------------------------------
+Ran 2 tests in 0.004s
+
+FAILED (failures=2)

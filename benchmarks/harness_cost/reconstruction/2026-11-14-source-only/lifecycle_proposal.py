@@ -15,6 +15,7 @@ import hashlib
 import json
 import re
 import pwd
+from decimal import Decimal, ROUND_CEILING
 from pathlib import Path
 import signal
 import subprocess
@@ -30,6 +31,27 @@ HELPERS = {'com.apple.Virtualization.VirtualMachine', 'com.docker.virtualization
 def require(condition, message):
     if not condition:
         raise RuntimeError('STOP: ' + message)
+
+
+SWAP_LIMIT_BYTES=12_000_000_000  # New desk admission, NOT a rounded GiB limit.
+
+
+def swap_measurement(text):
+    match=re.search(r'\bused\s*=\s*([0-9]+(?:\.[0-9]+)?)([KMG])\b',text)
+    require(match is not None,'swap usage unavailable/unrecognized; fail closed')
+    value,unit=match.groups();scale={'K':1024,'M':1024**2,'G':1024**3}[unit]
+    nominal=Decimal(value)*scale
+    # sysctl prints rounded text. Include half its last displayed unit before
+    # ceiling, so formatting/conversion cannot round the admission guard down.
+    places=len(value.split('.')[1]) if '.' in value else 0
+    upper=(Decimal(value)+Decimal(5).scaleb(-places-1))*scale
+    return {'reported_used_bytes_ceiling':int(nominal.to_integral_value(rounding=ROUND_CEILING)),
+            'conservative_used_bytes_upper':int(upper.to_integral_value(rounding=ROUND_CEILING)),
+            'limit_bytes':SWAP_LIMIT_BYTES,'raw':text,'unit_interpretation':'K/M/G are binary units; formatted precision conservatively bounded'}
+
+
+def parse_swap_used_bytes(text):
+    return swap_measurement(text)['reported_used_bytes_ceiling']
 
 
 def validated_registered_root(raw):
@@ -126,6 +148,7 @@ def run_lifecycle(ops, admission, pins, require_runtime_scope=True):
         helper=ops.vm_helper(owner)
         require(helper['rss_bytes'] <= CAP, 'attributed helper RSS exceeds 4.3 GB')
         ops.check_disk()
+        ops.snapshot_assets()  # Before ANY pull: only a later new exact ID is ownable.
         image=ops.cached_carrier()
         if image is None:
             require(review.get('allow_digest_pull') is True and admission.get('authorize_digest_pull') is True, 'carrier missing; optional digest pull not explicitly reviewed/authorized')
@@ -161,6 +184,8 @@ def run_lifecycle(ops, admission, pins, require_runtime_scope=True):
                 try: action()
                 except BaseException as error: cleanup_errors.append(type(error).__name__+': '+str(error))
             if owner is not None:
+                try: ops.cleanup_owned_image()
+                except BaseException as error: cleanup_errors.append(type(error).__name__+': '+str(error))
                 try: ops.quit_owned(owner)
                 except BaseException as error: cleanup_errors.append(type(error).__name__+': '+str(error))
             ops.record({'status':'cleanup-unverified' if cleanup_errors else status,'runtime_qualified':False,'cleanup_errors':cleanup_errors,'failure_reason':failure,'prestart_cap_validation':'SKIPPED-with-operator-ack','operator_ack_id':ACK,'measurement_caveat':'VM helper RSS is not guest/process footprint or total host memory'})
@@ -179,6 +204,8 @@ class NativeOps:
         self.raw=Path(admission.get('docker_raw_path','/INVALID'))
         self.deadline=0;self.next_rss=0;self.samples=[];self.helpers={};self.before=[]
         self.clients=[];self.monitor_enabled=False;self.monitoring=False;self.startup_uncertain=False;self.cleanup_until=None
+        self.assets_before=None;self.asset_receipt={'policy':'exact new carrier ID only; never force/prune/layer/cache removal'}
+        self.pull_attempted=False;self.pull_complete=False;self.owned_image_id=None;self.foreign_asset_activity=False
     def now(self): return time.monotonic()
     def sleep(self,seconds): time.sleep(seconds)
     def command(self,args,timeout=15,check=True):
@@ -227,6 +254,7 @@ class NativeOps:
         return [p for p in rows if p['exe'].startswith(self.app_root) or Path(p['exe']).name in {'Docker Desktop','com.docker.backend'}]
     def preflight(self):
         validated_registered_root(str(self.root))  # Reject bad roots before any startup/work.
+        self.sample_swap('PRE-startup')  # No Desktop starts when swap evidence fails.
         require(self.a.get('operator_ack_id')==ACK and self.a.get('operator_ack_quote')==ACK_QUOTE,'operator acknowledgement missing')
         require(self.a.get('prestart_cap_validation')=='skipped-with-operator-ack' and 'vm_caps_verified_before_start' not in self.a,'must not fabricate pre-start verification')
         now=datetime.datetime.now(datetime.UTC)
@@ -301,7 +329,17 @@ class NativeOps:
         self.samples.append(dict(helper,phase='VM-RSS',measurement_caveat='RSS is NOT footprint; no unrelated VM sum'))
         self.monitor_enabled=True;self.next_rss=self.now()+10
         return helper
+    def sample_swap(self,phase):
+        _,out,_=self.command(['/usr/sbin/sysctl','vm.swapusage'])
+        measurement=dict(swap_measurement(out),phase=phase)
+        self.samples.append({'swap':measurement})
+        require(measurement['conservative_used_bytes_upper']<=SWAP_LIMIT_BYTES,'swap exceeds 12,000,000,000 bytes or precision bound; abort owned work')
+        return measurement
     def check_disk(self):
+        if not self.monitoring:
+            self.monitoring=True
+            try:self.sample_swap('during')
+            finally:self.monitoring=False
         require(self.raw.is_file(),'approved Docker.raw absent after startup')
         current=self.raw.stat();identity=(current.st_dev,current.st_ino)
         require(self.raw_identity is None or self.raw_identity==identity,'Docker.raw identity changed; growth comparison invalid')
@@ -314,11 +352,128 @@ class NativeOps:
         # Same physical fences, but NEVER re-enter the already-expired work
         # deadline. Cleanup has its own budget and must retire owned work.
         require(self.cleanup_until is not None and self.now()<self.cleanup_until,'owned cleanup budget exhausted')
+        self.sample_swap('cleanup')
         current=self.raw.stat();fs=os.statvfs(self.root)
         require(self.raw_identity is None or self.raw_identity==(current.st_dev,current.st_ino),'cleanup raw-file identity changed; still retire owned container')
         sample={'phase':'cleanup','allocated_bytes':current.st_blocks*512,'free_bytes':fs.f_bavail*fs.f_frsize}
         self.samples.append(sample)
         require(sample['allocated_bytes']-self.baseline<=5*1024**3 and sample['free_bytes']>=25*1024**3,'cleanup resource fence crossed; still retire owned container')
+    def asset_inventory(self):
+        # CLI output selects IDs/layer metadata only, never Config.Env or secrets.
+        ids=set(self.command(self.d+['image','ls','--all','--no-trunc','--quiet'])[1].split())
+        require(all(re.fullmatch(r'sha256:[0-9a-f]{64}',x) for x in ids),'unrecognized full image ID')
+        images={}
+        fmt='{"Id":{{json .Id}},"Layers":{{json .RootFS.Layers}},"RepoTags":{{json .RepoTags}},"RepoDigests":{{json .RepoDigests}}}'
+        if ids:
+            lines=self.command(self.d+['image','inspect','--format',fmt,*sorted(ids)])[1].splitlines()
+            for line in lines:
+                row=json.loads(line);require(row['Id'] in ids,'image snapshot identity mismatch');images[row['Id']]=row
+            require(set(images)==ids,'incomplete image/content snapshot')
+        # Docker CLI pinned source formatter/disk_usage.go: non-table verbose
+        # templates expose untruncated BuildCache IDs. Unsupported CLI => STOP.
+        cache=[];cache_in_use=False
+        cache_format='{{range .BuildCache}}{"ID":{{json .ID}},"InUse":{{json .InUse}}}{{println}}{{end}}'
+        for line in self.command(self.d+['system','df','--verbose','--format',cache_format])[1].splitlines():
+            row=json.loads(line);require(row['InUse'] in ('true','false'),'build-cache activity unavailable')
+            active=row['InUse']=='true';raw_id=row['ID']
+            require(bool(raw_id) and raw_id.endswith('*')==active,'cache activity/ID marker inconsistent')
+            cache_id=raw_id[:-1] if active else raw_id
+            require(re.fullmatch(r'[A-Za-z0-9_:-]+',cache_id) is not None,'unrecognized build-cache ID')
+            cache.append(cache_id);cache_in_use=cache_in_use or active
+        cids=self.command(self.d+['ps','--all','--no-trunc','--quiet'])[1].split();containers={}
+        require(all(re.fullmatch(r'[0-9a-f]{64}',x) for x in cids),'unrecognized container ID')
+        for cid in cids:
+            row=json.loads(self.command(self.d+['container','inspect','--format','{"Image":{{json .Image}},"Running":{{json .State.Running}}}',cid])[1])
+            require(isinstance(row['Running'],bool),'container running state unavailable');containers[cid]=row
+        return {'images':images,'cache_ids':sorted(set(cache)),'cache_in_use':cache_in_use,'containers':containers}
+    def snapshot_assets(self):
+        require(self.assets_before is None and not self.pull_attempted,'asset baseline cannot be replaced')
+        try:self.assets_before=self.asset_inventory()
+        except BaseException as error:
+            self.foreign_asset_activity=True
+            self.asset_receipt['snapshot_error']=type(error).__name__+': '+str(error)
+            raise
+        self.asset_receipt['before']=self.assets_before
+        conflict=self.assets_before['cache_in_use'] or any(x['Running'] for x in self.assets_before['containers'].values())
+        if conflict:self.foreign_asset_activity=True
+        require(not conflict,'foreign running/build work before pull')
+    def cleanup_owned_image(self):
+        # Always invoked before quit; failed ownership/budget never authorizes a
+        # broad prune, force removal, deleting layers or touching shared caches.
+        if self.assets_before is None:
+            require(not self.pull_attempted,'pull without complete ownership baseline')
+            self.asset_receipt['cleanup']='no pull/baseline; no image ownership claimed'
+            return
+        if self.cleanup_until is None or self.now()>=self.cleanup_until:
+            self.foreign_asset_activity=True
+            raise RuntimeError('asset cleanup budget absent/exhausted; no commands or ownership claims')
+        try:
+            try:current=self.asset_inventory()
+            except BaseException:
+                self.foreign_asset_activity=True  # Cannot prove that a concurrent builder/user is absent.
+                raise
+            self.asset_receipt['cleanup_before']=current
+            before=self.assets_before;new_ids=set(current['images'])-set(before['images'])
+            conflict=(current['cache_in_use'] or not set(before['images'])<=set(current['images']) or
+                      set(current['cache_ids'])!=set(before['cache_ids']) or
+                      set(current['containers'])-set(before['containers']) or
+                      any(x['Running'] for x in current['containers'].values()))
+            if conflict:
+                self.foreign_asset_activity=True
+                raise RuntimeError('foreign container/cache activity; preserve all unowned work')
+            if not self.pull_attempted:
+                if new_ids:self.foreign_asset_activity=True
+                require(not new_ids,'unexpected new image without owned pull')
+                self.asset_receipt.update(after=current,cleanup='preexisting images preserved',no_new_build_cache=True)
+                return
+            code,out,err=self.command(self.d+['image','inspect',self.p['base_image']],check=False)
+            if code:
+                require('No such image' in err or 'No such object' in err,'carrier ownership lookup unavailable')
+                if new_ids:self.foreign_asset_activity=True
+                raise RuntimeError('partial pull: no exact carrier identity; partial blob retirement UNVERIFIED; no prune')
+            target=json.loads(out)[0];verify_carrier(target,self.p);image_id=target['Id']
+            require(re.fullmatch(r'sha256:[0-9a-f]{64}',image_id) is not None,'invalid carrier content ID')
+            if image_id in before['images']:
+                if new_ids:self.foreign_asset_activity=True
+                require(not new_ids,'unexpected image alongside preexisting carrier')
+                self.asset_receipt.update(after=current,cleanup='carrier content ID preexisted; preserved',no_new_build_cache=True)
+                return
+            if new_ids!={image_id}:self.foreign_asset_activity=True
+            require(new_ids=={image_id},'new image ownership ambiguous; preserve unowned images')
+            if target.get('RepoTags'):self.foreign_asset_activity=True
+            require(not target.get('RepoTags'),'new carrier gained tags; foreign image use possible')
+            expected=self.p['base_image'].split('@',1)[1]
+            allowed={prefix+'@'+expected for prefix in ('python','library/python','docker.io/library/python')}
+            if not set(target.get('RepoDigests',[]) or [])<=allowed:self.foreign_asset_activity=True
+            require(set(target.get('RepoDigests',[]) or [])<=allowed,'foreign reference to new carrier; no removal')
+            if any(x['Image']==image_id for x in current['containers'].values()):self.foreign_asset_activity=True
+            require(not any(x['Image']==image_id for x in current['containers'].values()),'carrier used by foreign/stopped container; preserve it')
+            self.owned_image_id=image_id;self.asset_receipt['owned_image_id']=image_id
+            self.asset_receipt['ownership_basis']={'exact_pinned_ref':self.p['base_image'],'platform':'linux/amd64','new_since_before_pull':True,'exclusive_desktop_lease_required':True}
+            self.asset_receipt['shared_layers_preserved']=sorted(set(target.get('RootFS',{}).get('Layers',[])) & {x for row in before['images'].values() for x in (row.get('Layers') or [])})
+            removal_error=None
+            try:self.command(self.d+['image','rm',image_id])  # Exact ID; NEVER --force.
+            except BaseException as error:removal_error=type(error).__name__+': '+str(error)
+            self.asset_receipt['removal_error']=removal_error
+            try:after=self.asset_inventory()
+            except BaseException:
+                self.foreign_asset_activity=True
+                raise
+            self.asset_receipt['after']=after
+            # Classify post-removal foreign use BEFORE failing owned absence.
+            # A failed rm can be the first evidence that another user acquired it.
+            if (after['cache_in_use'] or set(after['cache_ids'])!=set(before['cache_ids']) or
+                not set(before['images'])<=set(after['images']) or set(after['images'])-(set(before['images'])|{image_id}) or
+                set(after['containers'])-set(before['containers']) or any(x['Running'] for x in after['containers'].values())):
+                self.foreign_asset_activity=True
+                raise RuntimeError('asset namespace changed during retirement; do not quit shared work')
+            require(image_id not in after['images'],'owned image absence not proven')
+            require(removal_error is None,'image removal command failed; absence observation retained but mandatory cleanup NOT successful')
+            self.asset_receipt.update(cleanup='new exact carrier ID removed; baseline images/cache IDs preserved',no_new_build_cache=True,
+                                      storage_caveat='Logical image removal only; shared layers retained; no physical sparse-disk reclamation claim')
+        except BaseException as error:
+            self.asset_receipt['cleanup_error']=type(error).__name__+': '+str(error)
+            raise
     def cached_carrier(self):
         require(not self.command(self.d+['ps','-q'])[1].strip(),'foreign auto-started workloads; no pull/resolver')
         code,out,err=self.command(self.d+['image','inspect',self.p['base_image']],check=False)
@@ -328,7 +483,10 @@ class NativeOps:
         return json.loads(out)[0]
     def pull(self):
         # Caller already verified explicit FULL-scope optional-pull signoff.
+        require(self.assets_before is not None and not self.pull_attempted,'pull requires immutable asset baseline; no retry')
+        self.pull_attempted=True;self.asset_receipt.update(pull_attempted=True,pull_command_completed=False,exact_pull_ref=self.p['base_image'])
         self.command(self.d+['pull','--platform=linux/amd64',self.p['base_image']],timeout=60)
+        self.pull_complete=True;self.asset_receipt['pull_command_completed']=True
         self.check_disk()
     def wheel_hash(self):
         path=self.root/'artifacts'/self.p['uv_wheel']['filename']
@@ -402,6 +560,7 @@ class NativeOps:
     def quit_owned(self,owner):
         # No bundle-wide quit, pkill, settings route or unknown process takeover.
         self.monitor_enabled=False
+        require(not self.foreign_asset_activity,'foreign asset activity; Desktop quit not safe')
         rows=self.snapshot();current={p['pid']:p for p in rows}
         require(self.owner==owner and not self.existing_desktop(),'ownership was not established before startup')
         pid=owner['pid'];row=current.get(pid)
@@ -438,6 +597,10 @@ class NativeOps:
                 require(code==0 and ('n'+str(self.raw)) not in out.splitlines(),'VM shutdown association unverified; do not claim cleanup')
     def record(self,value):
         if self.directory is None:return
+        final_swap_error=None
+        try:self.sample_swap('final')
+        except BaseException as error:final_swap_error=type(error).__name__+': '+str(error);value['status']='swap-final-unverified-or-over-limit'
+        value.update(asset_ownership=self.asset_receipt,final_swap_error=final_swap_error)
         fs=os.statvfs(self.root)
         if self.startup_uncertain:value['status']='cleanup-unverified-startup-identity'
         value.update(operator_ack_quote=ACK_QUOTE,source_head=self.a['full_scope_review']['source_commit'],samples=self.samples,after={'allocated_bytes':self.raw.stat().st_blocks*512 if self.raw.exists() else 0,'free_bytes':fs.f_bavail*fs.f_frsize})
@@ -445,6 +608,7 @@ class NativeOps:
         if breached:value['status']='disk-fence-failed-after-cleanup'
         with (self.directory/'receipt.json').open('x') as out:out.write(json.dumps(value,sort_keys=True,indent=2)+'\n')
         require(not breached,'final disk fence crossed; retained failed receipt')
+        require(final_swap_error is None,'final swap gate failed; retained failed receipt')
 
 
 def main():

@@ -1,0 +1,42 @@
+{
+  "all_process_rss_bytes": 15978860544,
+  "conversion_note": "Original truncated byte conversion retained as historical evidence; R9 guard ceilings conversion and includes formatted precision upper bound",
+  "desk_admission_go_written": false,
+  "dispatch_started": false,
+  "free_bytes": 41530380288,
+  "kind": "execution-preflight-stop",
+  "manifest": {
+    "entries_checked": 527,
+    "errors": [],
+    "sha256": "8ee6ec7ec0f2de40c283e042196486904a6c7e005dbe0de9dbf28b0a590188b0"
+  },
+  "original_receipt_sha256": "013d4ddb41f383cf810d8d2e0dab01617cbfdf2e90f6c8e0c7e0dc53c123a007",
+  "original_relative_path": "execution-preflight/stop-20261114T201418057172Z.json",
+  "preservation": {
+    "existing_desk_admission_untouched": true,
+    "no_desktop_start": true,
+    "no_docker_cli": true,
+    "no_install_or_extraction": true,
+    "no_paid_trial_or_model": true,
+    "no_pull": true,
+    "no_source_changes": true
+  },
+  "privacy": "Selected technical fields only; no home paths, process identities, credentials, admission tokens or private payloads",
+  "reason": "Reviewed lifecycle has no newly-owned image retirement before unconditional owned Desktop shutdown; exact cleanup mandate cannot be guaranteed by external swap watcher. No source/live patch permitted.",
+  "recorded_at_utc": "2026-11-14T20:14:18.057172+00:00",
+  "source_commit": "6ea66a73f5766db25ce47c0dafe804053005cb89",
+  "status": "blocked-before-desktop-start",
+  "swap_exceeds_conservative_decimal_12GB": true,
+  "swap_query": {
+    "exit": 0,
+    "stderr": "",
+    "stdout": "vm.swapusage: total = 13312.00M  used = 11738.12M  free = 1573.88M  (encrypted)"
+  },
+  "swap_used_bytes_from_binary_unit": 12308310917,
+  "wheel": {
+    "bytes": 17389450,
+    "exists": true,
+    "matches_pin": true,
+    "sha256": "e18a57b8b352eb7c8feb317b9f6f533c8f0ad9673fd6cf34bbe3cf1a9f6a8984"
+  }
+}

@@ -10,6 +10,26 @@ it must not be launched directly to omit owned Desktop lifecycle/VM-RSS checks.
 This is a proposal only. It needs a LOCAL Docker Linux VM; it is NOT a macOS
 cross-platform lock. No Docker/resolver/install/build has run in this phase.
 
+## R9 source-only amendment — predecessor GO EXPIRED, NEW review/GO required
+
+The lifecycle wrapper now snapshots preexisting full image/content IDs, build-cache
+IDs/activity and container/image use before any optional exact-digest pull.
+After exact owned-container recovery it retires ONLY the new pinned carrier image
+ID, without force, BEFORE owned Desktop quit. Preexisting IDs and shared layers
+are preserved. No builder/cache/layer/global prune exists. New unexpected cache,
+foreign containers or image references block deletion/unsafe Desktop shutdown;
+mandatory cleanup failure is unverified, never success. Partial pull blobs lacking
+a proven exact image ID cannot safely be pruned: record that storage gap.
+
+Additional desk swap ceiling is exactly **12,000,000,000 bytes**, NOT 12 GiB.
+`sysctl vm.swapusage` K/M/G text is interpreted as binary units, converted with
+Decimal ceiling and a conservative half-last-displayed-unit precision bound.
+Sample PRE-startup, during work/cleanup and final. Missing/malformed/over-limit
+swap evidence fails closed. The stopped preflight's 11738.12M exceeds this limit;
+no old GO may be reused after this source change. Existing raw-growth <=5 GiB,
+free >=25 GiB, start free >=30 GiB and all VM/container limits remain unchanged.
+See REMEDIATION-R9.md and the safe preflight-stop-public.json; neither is GO.
+
 ## Prerequisites and disk-desk packet — CONDITIONAL SLOT, NO GO
 
 The old 2026-11-14 17:00–18:15 UTC slot was RELEASED. No fresh slot or

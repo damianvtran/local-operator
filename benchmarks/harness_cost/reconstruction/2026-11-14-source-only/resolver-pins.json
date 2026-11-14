@@ -1,4 +1,16 @@
 {
+  "asset_retirement": {
+    "allowed_delete": "only exact new pinned carrier image ID, no force",
+    "baseline": "full image IDs, layer/content IDs, build-cache IDs/activity, container IDs/image use",
+    "native_qualified": false,
+    "never_delete": [
+      "preexisting images",
+      "shared layers",
+      "build caches",
+      "unowned containers"
+    ],
+    "order": "recover owned containers -> retire owned image -> quit owned Desktop only absent conflicting work"
+  },
   "base_image": "docker.io/library/python@sha256:9bbb8720ae0a24a6ca8dd678bfdf57818fe70caf54c52a53ec01d8db43405056",
   "base_reported_compressed_bytes": 44588823,
   "base_tag_observed": "3.14.0-slim-bookworm",
@@ -19,16 +31,19 @@
     "minimum_free_gib_at_start": 30,
     "operator_ack_id": "a-7072",
     "optional_digest_pull_requires_new_full_scope_review": true,
-    "optional_pull_review_disposition": "NO SIGNOFF in round6; NOPULL until explicit clean review and desk authority",
+    "optional_pull_review_disposition": "R9 patch invalidates predecessor GO/signoff; new independent review and NEW desk GO required",
     "post_start_mem_total_max_bytes": 4300000000,
     "post_start_ncpu_max": 2,
     "prestart_cap_validation": "SKIPPED-with-operator-ack-NOT-verified",
+    "prior_go_reusable": false,
     "registered_hold_root": "~/benchmark-runs/reconstruction-20261114-source-v1/",
     "rss_is_footprint": false,
     "rss_max_bytes": 4300000000,
     "rss_sample_interval_seconds": 10,
     "settings_write_or_bypass_allowed": false,
     "status": "NO-FRESH-SLOT-GO",
+    "swap_limit_bytes": 12000000000,
+    "swap_unit_policy": "sysctl K/M/G binary units; decimal byte limit; ceiling plus formatted precision upper bound",
     "vm_helper_attribution_required": true,
     "whole_owned_desktop_lifecycle_required": true
   },

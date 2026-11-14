@@ -22,6 +22,8 @@ class StubOps:
         self.events.append('attributed-rss'); return {'pid':456,'rss_bytes':200_000_000,'measurement':'RSS-not-footprint'}
     def check_disk(self): self.events.append('disk')
     def cached_carrier(self): return None if self.missing else {'Architecture':'amd64','Os':'linux','RepoDigests':['python@sha256:' + ('b' if self.digest else 'a')*64]}
+    def snapshot_assets(self): self.events.append('snapshot-assets')
+    def cleanup_owned_image(self): self.events.append('cleanup-image')
     def pull(self): self.events.append('PULL'); self.missing=False
     def wheel_hash(self): return 'c'*64
     def begin_resolver(self): self.events.append('resolver')
@@ -108,7 +110,7 @@ class LifecycleTests(unittest.TestCase):
         self.assertIsNotNone(target)
         ops=object.__new__(target.NativeOps)
         owner={'pid':123,'ppid':1,'start':'owned','exe':'/Applications/Docker.app/Contents/MacOS/Docker','rss_kib':1}
-        ops.owner=owner;ops.before=[];ops.monitor_enabled=True;ops.app_root='/Applications/Docker.app/'
+        ops.owner=owner;ops.before=[];ops.foreign_asset_activity=False;ops.monitor_enabled=True;ops.app_root='/Applications/Docker.app/'
         ops.snapshot=lambda:[dict(owner,start='different-start')]
         ops.proc=mock.Mock();ops.proc.poll.return_value=None
         with mock.patch.object(target.os,'kill') as kill:

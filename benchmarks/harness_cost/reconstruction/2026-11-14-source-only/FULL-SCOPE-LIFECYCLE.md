@@ -29,6 +29,29 @@ launch environment is tested against the emitted supervisor's admission/artifact
 read fragment, with invalid/escaping roots rejected. This source-only integration
 proof grants no runtime GO or optional-pull approval.
 
+## R9 preflight gap repair — source-only; previous execution GO invalidated
+
+The 20:14 UTC preflight stopped before Desktop startup because exact-owned image
+retirement was absent and swap exceeded the conservative decimal ceiling. The
+original durable receipt remains unchanged; preflight-stop-public.json contains
+only privacy-reviewed technical fields and its original receipt SHA256.
+
+REMEDIATION-R9.md adds actual-adapter asset snapshots, exact new carrier-ID
+retirement between container recovery and Desktop quit, preexisting/shared-layer
+protection, unexpected build-cache/foreign-work fail-closed behavior and native
+ownership receipt fields. Docker run/pull is not Docker build: no new build-cache
+IDs are expected; a delta/active cache is an ownership conflict, never permission
+to prune. Logical removal does NOT claim immediate sparse-disk reclamation.
+Runtime inventories can contain private image references: retain them in HOLD;
+do not auto-publish raw future ownership receipts.
+
+Swap guard uses exactly 12,000,000,000 bytes with binary sysctl text units and
+conservative precision/ceiling conversion, before startup/during/final. A desk may
+clarify units only in a future explicit admission; this code never rounds down or
+silently changes to 12 GiB. Native swap/image/cleanup behavior is NOT qualified by
+stub tests. NEW independent review and NEW desk GO are mandatory before runtime;
+all previous slots/GO/signoff are non-reusable after this patch.
+
 ## Operator acknowledgement, not fabricated verification
 
 Operator answer **a-7072**, relayed via desk 5170, verbatim:

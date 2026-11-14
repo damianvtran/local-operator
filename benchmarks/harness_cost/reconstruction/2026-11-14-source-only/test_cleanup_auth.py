@@ -17,7 +17,8 @@ class CleanupTests(unittest.TestCase):
         ops.root=root;ops.resolver=mock.Mock();ops.d=['stub-container-cli'];ops.directory=root
         ops.now=lambda:1000.0;ops.deadline=0;ops.cleanup_until=1060
         ops.monitor_enabled=True;ops.monitoring=False;ops.next_rss=0;ops.owner={'pid':123}
-        ops.samples=[];ops.raw=root/'Docker.raw';ops.raw.write_bytes(b'');ops.baseline=0;ops.raw_identity=None
+        ops.samples=[];ops.sample_swap=mock.Mock(return_value={'kind':'safe-swap-fixture'})
+        ops.raw=root/'Docker.raw';ops.raw.write_bytes(b'');ops.baseline=0;ops.raw_identity=None
         ops.sleep=lambda seconds:None
         ops.check_cleanup_resources=lambda:(_ for _ in ()).throw(RuntimeError('cleanup resource monitor failed'))
         ops.check_disk=lambda:(_ for _ in ()).throw(RuntimeError('expired work deadline'))
