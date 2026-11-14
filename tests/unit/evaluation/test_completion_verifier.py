@@ -963,3 +963,125 @@ async def test_guest_reads_are_clipped_to_the_verification_deadline() -> None:
     text, is_error = await inspector.inspect({"command": "cat h", "timeout_s": 30})
     assert not is_error, text
     assert [t for c, t in seen if "cat h" in c] == [30], seen
+
+
+# -- verdicts bind (main33: 11 unchanged re-finishes after a challenge) ---------
+
+
+@pytest.mark.asyncio
+async def test_a_challenge_lists_each_unmet_requirement_and_binds_the_next_finish(
+    tmp_path: Path,
+) -> None:
+    bridge, _actions, _events, _seen = _armed(
+        tmp_path, [_verdict("FAIL", "UNMET: Q5 is the decoy paper\nQ2: MET")]
+    )
+    reply = await bridge.call(DONE)
+    text = reply["content"][0].text
+    assert text.startswith("An independent check of your deliverable reported (FAIL):")
+    assert "1. Q5 is the decoy paper" in text
+    assert "recorded with these requirements as unverified-unmet" in " ".join(text.split())
+    # The shared self-check challenge still follows.
+    assert "That declaration is a CLAIM" in text
+
+
+@pytest.mark.asyncio
+async def test_a_refinish_over_unaddressed_requirements_is_recorded_unverified_unmet(
+    tmp_path: Path,
+) -> None:
+    """The last round still accepts (bounded), but the finish row carries the
+    challenged requirements as unverified-unmet, and why no check ran -- the
+    challenge's words are true."""
+
+    bridge, actions, _events, _seen = _armed(
+        tmp_path, [_verdict("FAIL", "UNMET: Q5 is the decoy paper")], rounds=1
+    )
+    await bridge.call(DONE)
+    second = await bridge.call(DONE)
+    assert second["details"]["terminal"] == "finish"
+    [finish] = [p for k, p in actions if k == "finish"]
+    assert finish["unverified_unmet"] == ["Q5 is the decoy paper"]
+    assert finish["unverified_reason"] == "rounds-spent"
+    assert "not_done" not in finish
+
+
+@pytest.mark.asyncio
+async def test_a_capped_verdict_keeps_the_earlier_unmet_list(tmp_path: Path) -> None:
+    """QA Q1: FAIL naming two requirements, then a capped INCONCLUSIVE naming
+    none, then an accepted re-finish. No check ever passed, so the row keeps
+    BOTH -- a line-less verdict says nothing about the earlier ones."""
+
+    bridge, actions, _events, _seen = _armed(
+        tmp_path,
+        [
+            _verdict("FAIL", "UNMET: B2 holds 42 -- read None\nUNMET: C3 says total"),
+            _verdict(
+                "INCONCLUSIVE",
+                "the verifier was stopped by its request cap before giving a verdict",
+                ended_by="requests",
+            ),
+        ],
+        rounds=2,
+        max_steps=10,
+    )
+    assert (await bridge.call(DONE))["details"]["terminal"] == "completion-challenged"
+    assert (await bridge.call(DONE))["details"]["terminal"] == "completion-challenged"
+    assert (await bridge.call(DONE))["details"]["terminal"] == "finish"
+    [finish] = [p for k, p in actions if k == "finish"]
+    assert finish["unverified_unmet"] == ["B2 holds 42 -- read None", "C3 says total"]
+    assert finish["unverified_reason"] == "rounds-spent"
+
+
+@pytest.mark.asyncio
+async def test_a_later_fail_naming_fewer_requirements_narrows_the_list(
+    tmp_path: Path,
+) -> None:
+    bridge, actions, _events, _seen = _armed(
+        tmp_path,
+        [_verdict("FAIL", "UNMET: B2\nUNMET: C3"), _verdict("FAIL", "UNMET: C3")],
+        rounds=2,
+        max_steps=10,
+    )
+    for _ in range(3):
+        await bridge.call(DONE)
+    [finish] = [p for k, p in actions if k == "finish"]
+    assert finish["unverified_unmet"] == ["C3"]
+
+
+@pytest.mark.asyncio
+async def test_a_skipped_round_two_records_why(
+    tmp_path: Path,
+) -> None:
+    """m1: a round the arm meant to run but could not (here the verifier
+    raised) is named on the row, not left to read as 'rounds spent'."""
+
+    bridge, actions, _events, _seen = _armed(
+        tmp_path, [_verdict("FAIL", "UNMET: B2")], rounds=2, max_steps=10
+    )
+    first = bridge.verifier
+    assert first is not None
+
+    async def broken_second(claim: Any, pending: Any, round_: int) -> VerifierVerdict:
+        if round_ == 2:
+            raise RuntimeError("verifier child crashed")
+        return await first(claim, pending, round_)
+
+    bridge.verifier = broken_second
+    await bridge.call(DONE)
+    assert (await bridge.call(DONE))["details"]["terminal"] == "finish"
+    [finish] = [p for k, p in actions if k == "finish"]
+    assert finish["unverified_unmet"] == ["B2"]
+    assert finish["unverified_reason"] == "error"
+
+
+@pytest.mark.asyncio
+async def test_a_later_pass_clears_the_unverified_unmet_report(tmp_path: Path) -> None:
+    bridge, actions, _events, _seen = _armed(
+        tmp_path,
+        [_verdict("FAIL", "UNMET: Q5 is the decoy paper"), _verdict("PASS", "all met")],
+        rounds=2,
+        max_steps=10,
+    )
+    await bridge.call(DONE)
+    assert (await bridge.call(DONE))["details"]["terminal"] == "finish"
+    [finish] = [p for k, p in actions if k == "finish"]
+    assert finish["verified"] == "PASS" and "unverified_unmet" not in finish
