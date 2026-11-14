@@ -208,6 +208,14 @@ EVENT_KINDS: frozenset[str] = frozenset(
         # A refusal: which device asked, for which key, and the machine code. The
         # person-facing sentence is rendered where the operator is, never stored here.
         "credential.grant_refused",
+        # The BORROWER's receipts for the offline hold (credentials/client.py
+        # ``_held_or``, operator-approved 2026-11-13): a grant served from this
+        # device's memory while its owner was unreachable, coalesced to one record
+        # per grant per minute with a `serves` count, and the hold's end. Written on
+        # the borrowing device (the owner is asleep: it cannot record them), ids and
+        # counts only, never the token.
+        "credential.held_served",
+        "credential.held_lapsed",
         # The owner refreshed because a peer's report asked it to. At most one per
         # credential per five minutes, and worth having: a burst is a borrower
         # hammering a failing login.
@@ -571,6 +579,16 @@ DETAIL_KEYS: dict[str, frozenset[str]] = {
     "credential.desktop_applied": frozenset({"surface", "operation"}),
     "credential.desktop_apply_refused": frozenset({"surface", "operation", "code"}),
     "credential.grant_refused": frozenset({"credential_key", "act", "sub", "code", "capability"}),
+    # `act` is the OWNER whose login was served, `sub` this borrowing device (the
+    # credential.grant vocabulary). `hold_until` is the hold end (epoch ms) and
+    # `bound` which limit set it (token|hold|cap|grant); `serves` counts the
+    # offline serves this record covers, `pending` those not yet in a served row.
+    "credential.held_served": frozenset(
+        {"credential_key", "act", "sub", "grant_id", "hold_until", "bound", "serves"}
+    ),
+    "credential.held_lapsed": frozenset(
+        {"credential_key", "act", "sub", "grant_id", "serves", "pending", "bound"}
+    ),
     "credential.refresh": frozenset({"credential_key", "act", "sub", "cause"}),
     "credential.report": frozenset({"credential_key", "act", "sub", "failure"}),
     "credential.placement": frozenset(

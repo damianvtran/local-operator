@@ -183,9 +183,10 @@ Hosts, focus safety and subagent handoff: `guide://browser`.
 {{/if}}{{#if no_browser}}
 When the `browser` tool is NOT in your tool list, no browser host is connected
 (desktop app tab, paired extension or cmux panel). Treat that as a setup step:
-follow `guide://browser` with the user. Never install or script a browser
-engine; if the user declines setup, read static pages with curl and say a
-rendered screenshot is unavailable.
+follow `guide://browser` with the user (on a headless node: the node-managed
+browser, `guide://browser` "Headless nodes", with the operator's authorisation).
+Never install or script a browser engine; if setup is declined, read static
+pages with curl and say a rendered screenshot is unavailable.
 {{/if}}{{#if has_console}}
 Interactive terminal work (a TUI, REPL, installer, prompt)
 goes through the `console` tool, and nowhere else; ordinary commands stay in `bash`. Before

@@ -409,6 +409,8 @@
   "wire.settings.network_credentials_github_repositories.placeholder": "damianvtran/scratch, damianvtran/sandbox",
   "wire.settings.network_credentials_grant_ttl_s.help": "El tiempo máximo que un dispositivo puede usar un inicio de sesión prestado por su propietario antes de volver a pedirlo, y por tanto cuánto sigue funcionando en otros lugares el inicio de sesión de un propietario revocado o desconectado. Nunca más que el propio token.",
   "wire.settings.network_credentials_grant_ttl_s.label": "Duración del inicio de sesión prestado (s)",
+  "wire.settings.network_credentials_offline_hold_s.help": "Mientras el dispositivo propietario de un inicio de sesión está inaccesible (en reposo, desconectado), cuánto tiempo sigue otro dispositivo usando el inicio de sesión que ya tomó prestado. Nunca más que el propio token; se aplican tanto el valor del propietario como el de este dispositivo, y prevalece el más corto.",
+  "wire.settings.network_credentials_offline_hold_s.label": "Inicio de sesión prestado: margen sin el propietario (s)",
   "wire.settings.network_listen_address.help": "127.0.0.1 = solo saliente; 0.0.0.0 = todas; o una dirección.",
   "wire.settings.network_listen_address.label": "Dirección de escucha",
   "wire.settings.network_max_handshakes.help": "Conexiones sin autenticar que este relé mantendrá a la vez. Un emparejamiento mantiene una durante los segundos hasta que se escribe el código; lo que supere el límite se descarta al aceptar, sin trama de respuesta.",

@@ -409,6 +409,8 @@
   "wire.settings.network_credentials_github_repositories.placeholder": "damianvtran/scratch, damianvtran/sandbox",
   "wire.settings.network_credentials_grant_ttl_s.help": "Durée maximale pendant laquelle un appareil peut utiliser un login emprunté à son propriétaire avant de redemander, et donc combien de temps le login d’un propriétaire révoqué ou hors ligne continue de fonctionner ailleurs. Jamais plus longtemps que le token lui-même.",
   "wire.settings.network_credentials_grant_ttl_s.label": "Durée de vie du login emprunté (s)",
+  "wire.settings.network_credentials_offline_hold_s.help": "Pendant que l’appareil propriétaire d’un login est injoignable (en veille, hors ligne), durée pendant laquelle un autre appareil continue d’utiliser le login qu’il a déjà emprunté. Jamais plus longtemps que le token lui-même ; les valeurs du propriétaire et de cet appareil s’appliquent toutes deux, et la plus courte l’emporte.",
+  "wire.settings.network_credentials_offline_hold_s.label": "Maintien du login emprunté, propriétaire absent (s)",
   "wire.settings.network_listen_address.help": "127.0.0.1 = sortant uniquement ; 0.0.0.0 = tout ; ou une adresse.",
   "wire.settings.network_listen_address.label": "Adresse d’écoute",
   "wire.settings.network_max_handshakes.help": "Connexions non authentifiées que ce relais garde simultanément. Un appairage en retient une jusqu’à la saisie du code ; tout dépassement du plafond est abandonné dès l’acceptation, sans trame de réponse.",

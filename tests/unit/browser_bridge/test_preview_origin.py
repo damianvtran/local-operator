@@ -83,6 +83,37 @@ async def test_public_family_repeat_siblings_nested_and_unrelated(tmp_path, back
 
 
 @pytest.mark.asyncio
+async def test_node_unavailable_does_not_consume_family_preview_origin(
+    tmp_path, backend, monkeypatch
+):
+    """Convergence: an unreachable node prompt must not reserve a desktop origin.
+
+    The node guard and durable family fence both precede the approval RPC, but
+    only a request that can reach an approval surface should consume the pin.
+    Switching the synthetic host to desktop also checks the fence still applies.
+    """
+    from local_operator.browser_bridge import node_host
+
+    ctx = session(tmp_path, "root")
+    monkeypatch.setattr(node_host, "headless_node_once", lambda: True)
+    unavailable = await request(ctx, "https://unavailable.trycloudflare.com")
+    assert unavailable.details is not None
+    assert unavailable.details["state"] == "unavailable_on_node"
+    assert "cannot open sites on a headless node" in unavailable.text
+    assert backend.await_count == 0
+
+    monkeypatch.setattr(node_host, "headless_node_once", lambda: False)
+    allowed = await request(ctx, "https://first.trycloudflare.com")
+    assert not allowed.is_error and "Fixed-origin rule" in allowed.text
+    assert backend.await_count == 1
+    refused = await request(ctx, "https://unavailable.trycloudflare.com")
+    assert refused.is_error and refused.details is not None
+    assert refused.details["code"] == "preview_origin_changed"
+    assert refused.details["pinned_origin"] == "https://first.trycloudflare.com"
+    assert backend.await_count == 1
+
+
+@pytest.mark.asyncio
 async def test_cancel_await_and_resumed_runtime_do_not_reset_pin(tmp_path, backend):
     ctx = session(tmp_path, "root")
     assert ctx.session_dir is not None

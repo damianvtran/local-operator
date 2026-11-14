@@ -116,7 +116,7 @@ def _consumer_defaults() -> dict[str, object]:
     # ``rollout_policy`` resolves an absent ``network.rollout_on_update`` against
     # ``DEFAULT_ROLLOUT_ON_UPDATE``, and the registry row's own default must be the
     # same value or the page would advertise a policy the driver does not apply.
-    from local_operator.network.credentials import GRANT_TTL_S
+    from local_operator.network.credentials import GRANT_TTL_S, OFFLINE_HOLD_S
     from local_operator.network.credentials.github import DEFAULT_REPOSITORIES
     from local_operator.network.relay import (
         DEFAULT_ADVERTISE_HOSTS,
@@ -342,6 +342,7 @@ def _consumer_defaults() -> dict[str, object]:
         "network.sync.debounce_s": SYNC_DEBOUNCE_S,
         "network.sync.tick_s": SYNC_TICK_S,
         "network.credentials.grant_ttl_s": GRANT_TTL_S,
+        "network.credentials.offline_hold_s": OFFLINE_HOLD_S,
         # The github adapter's allow-list default: empty, and empty is a REFUSAL
         # at mint time — so the registry default and the reader's fallback must
         # stay the same "none designated" answer.

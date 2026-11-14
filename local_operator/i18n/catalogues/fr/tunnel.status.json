@@ -1,0 +1,15 @@
+{
+  "tunnel.status.create.conflict_unmatched": "Radient indique qu’un tunnel existe déjà pour cette demande, mais la liste des tunnels de cette connexion ne contient aucun enregistrement correspondant unique. Consultez lop tunnel list, puis connectez-le avec lop tunnel connect --tunnel-id <id>.",
+  "tunnel.status.gateway.listening_http_status": "Un programme écoute sur le port de la passerelle de relais 127.0.0.1:{port}, mais il a répondu à la vérification d’état par HTTP {status} : un autre programme occupe peut-être le port, ou la passerelle est défaillante. Une réinstallation n’y changera rien.",
+  "tunnel.status.gateway.listening_timed_out": "La passerelle de relais locale écoute sur 127.0.0.1:{port}, mais elle n’a pas répondu à temps à la vérification d’état ; une réinstallation n’y changera rien.",
+  "tunnel.status.gateway.listening_unreadable": "La passerelle de relais locale écoute sur 127.0.0.1:{port}, mais sa réponse à la vérification d’état est illisible ; une réinstallation n’y changera rien.",
+  "tunnel.status.last_exit.at": "Dernier arrêt du connecteur : {label} ({at})",
+  "tunnel.status.last_exit.plain": "Dernier arrêt du connecteur : {label}",
+  "tunnel.status.login.deferred_retried": "Connexion : actualisation différée — nouvelle tentative automatique.",
+  "tunnel.status.login.unchecked": "Connexion : vérification impossible (une actualisation n’a pas pu joindre Radient).",
+  "tunnel.status.requests.heading": "Requêtes (les {window} dernières) : {tally}",
+  "tunnel.status.requests.no_response": "aucune réponse",
+  "tunnel.status.server_unavailable.label": "Erreur du serveur Radient",
+  "tunnel.status.server_unavailable.relay": "Radient a répondu au contrôle d’autorisation du relais de cet ordinateur par une erreur serveur temporaire. Ni la connexion ni cet ordinateur ne sont en cause ; il se réautorise de lui-même dès que Radient est rétabli.",
+  "tunnel.status.server_unavailable.terminal": "Radient a répondu au contrôle d’autorisation du connecteur par une erreur serveur temporaire (HTTP 5xx) : ni la connexion ni cet ordinateur ne sont en cause. Il réessaie toutes les 10 secondes et se réautorise de lui-même dès que Radient est rétabli ; aucune commande locale n’est nécessaire."
+}

@@ -3252,14 +3252,25 @@ class TestPlainWordValueIsMatchedOnWordBoundaries:
         masker = redaction_shapes.StreamMasker([PLAIN_WORD])
         assert masker.push(text, final=True) == f"a [redacted] store, un{PLAIN_WORD}ally\n"
 
-    def test_the_variable_store_registers_the_word_and_masks_it_as_a_word(
+    def test_the_shape_pass_masks_the_word_in_place_but_never_promotes_it(
         self, tmp_path: Path
     ) -> None:
-        """The real path: SCRUB ``PASSWORD=<word>``, never ``register_redaction`` by hand."""
+        """2026-11-13: an ordinary word a rule matched is masked THERE, never session-wide.
+
+        The promotion is what corrupted a header name in minervaai core-svc d20e5acb
+        (see ``redaction_shapes.is_ordinary_word_value``).
+        """
         store = VariableStore(cwd=str(tmp_path))
         first, _ = store.redact_with_report(f"PASSWORD={PLAIN_WORD}")
-        assert PLAIN_WORD not in first
-        assert PLAIN_WORD in store.redaction_values(), "premise: the shape pass registered it"
+        assert PLAIN_WORD not in first, "the in-place mask was lost"
+        assert store.redaction_values() == [], "an ordinary word was promoted session-wide"
+        assert store.redact(f"a {PLAIN_WORD} store") == f"a {PLAIN_WORD} store"
+
+    def test_a_known_word_secret_still_masks_as_a_word(self, tmp_path: Path) -> None:
+        """The other direction: a value the session KNOWS is a secret (the broker sink a
+        ``lop secret get`` retrieval registers through) keeps its word-boundary mask."""
+        store = VariableStore(cwd=str(tmp_path))
+        store.register_redaction(PLAIN_WORD)
         assert store.redact(f"a {PLAIN_WORD} store") == "a [redacted] store"
         prose = f"un{PLAIN_WORD}ally {PLAIN_WORD.capitalize()} {PLAIN_WORD.upper()}"
         assert store.redact(prose) == prose

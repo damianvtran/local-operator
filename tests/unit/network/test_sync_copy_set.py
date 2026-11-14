@@ -83,7 +83,11 @@ def _entry_owners() -> dict[str, str]:
         TRANSCRIPT_FILENAME,
     )
     from local_operator.session.runtime.inbox import INBOX_NAME
-    from local_operator.session.runtime.journal import EXIT_RECORD_NAME, RUN_RECORD_NAME
+    from local_operator.session.runtime.journal import (
+        BIND_FAILURES_NAME,
+        EXIT_RECORD_NAME,
+        RUN_RECORD_NAME,
+    )
     from local_operator.session.runtime.registry import (
         SIGNAL_RECEIPT_NAME,
         STOP_MARKER_NAME,
@@ -117,6 +121,7 @@ def _entry_owners() -> dict[str, str]:
         SIGNAL_RECEIPT_NAME: "session.runtime.registry",
         EXIT_RECORD_NAME: "session.runtime.journal",
         RUN_RECORD_NAME: "session.runtime.journal",
+        BIND_FAILURES_NAME: "session.runtime.journal",
         INBOX_NAME: "session.runtime.inbox",
         FORK_BOUNDARY_NAME: "fork",
         # The temporary-chat mark travels: a moved temporary chat must still be
@@ -332,6 +337,15 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "the per-DEVICE tunnel directory (<config>/tunnel/, beside config.json), never "
         "inside a session directory -- so no session copy carries it. Device-local by "
         "design: the credential row ids it names are local to this device's auth.db.",
+    ),
+    "local_operator/tunnels/request_log.py": (
+        2,
+        "``REQUEST_LOG_NAME`` ('requests.log') is the per-DEVICE HTTP request log, "
+        "written in the tunnel's config directory (<config>/tunnel/, beside service.log); "
+        "the mobile daemon's counterpart is 'mobile-requests.log' in its log directory "
+        "(mobile/install.py); neither is inside a session directory. ``PROBE_ID_PREFIX`` "
+        "('lop-probe-') is an ``x-request-id`` value prefix marking the package's own "
+        "loopback probe, not a path. None is a session entry to copy or exclude.",
     ),
     "local_operator/network/credentials/refresh.py": (
         2,
@@ -1278,6 +1292,14 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "``run/browser`` and its bridge record ``bridge.json``",
     ),
     "local_operator/browser_bridge/gen_ts.py": (1, "the generated protocol bundle's name"),
+    "local_operator/browser_bridge/node_host.py": (
+        2,
+        "neither is a path: ``EXTENSION_ASSET_PREFIX`` is a GitHub release asset-name "
+        "prefix and ``REFUSE_NO_RECORD`` a refusal code. The module's real paths (the "
+        "node record, profile and extension dirs under ``<config>/browser/``, the "
+        "systemd unit, ``/etc`` repo and policy files) are node-local machine state "
+        "built at runtime or absolute, never an entry of a session directory",
+    ),
     "local_operator/browser_bridge/daemon.py": (
         2,
         "the daemon's pairing record (``browser/pairing.json``) and the pending file beside "
