@@ -33,6 +33,7 @@ scrutiny (opaque, empty, unknown cwd), never less.
 
 from __future__ import annotations
 
+import dataclasses
 import fnmatch
 import itertools
 import os
@@ -919,6 +920,15 @@ class Target:
     # A judge cannot approve a root deliberately hidden for privacy. Keep this
     # distinct from ordinary opaque substitutions that can receive review.
     credential_derived: bool = False
+    #: A target spelled through a credential-NAMED variable whose value is a
+    #: plain path (``resolve.credential_path``) and that lands at or under that
+    #: value: it ranks like the literal path, but every outward reason must
+    #: hide the value AND its ancestor directories (review R1 / QA Q2 on PR
+    #: #3992), so ``classify`` sanitizes this target's reason with them. The
+    #: name is shown; the value never is (``repr=False`` keeps it out of
+    #: debug output too).
+    credential_name: str | None = None
+    credential_value: str | None = field(default=None, repr=False)
     #: ``git worktree remove <path>``: git itself refuses a dirty or primary
     #: checkout unless forced, so the classifier may rank a CLEAN linked
     #: worktree LOW (see ``provenance.clean_linked_worktree``).
@@ -984,6 +994,10 @@ class _State:
     #: ``set -P`` / ``set -o physical``: every later ``cd`` resolves ``..``
     #: physically, as ``cd -P`` does (review R2-MINOR-2).
     physical: bool = False
+    #: Path-valued credential variables (value -> NAME), see
+    #: ``credential_path``. Kept so a target that merely CONTAINS such a value
+    #: can be told apart from one that stays inside it (``_target``).
+    credential_paths: dict[str, str] = field(default_factory=dict)
 
 
 def kernel_path(raw: str | None) -> str | None:
@@ -1206,7 +1220,65 @@ def _joined(text: str, cwd: str | None) -> str | None:
     return None if cwd is None else os.path.join(cwd, text)
 
 
+def _credential_spellings(value: str) -> set[str]:
+    """Lexical and physical spellings of a credential path value (no trailing ``/``)."""
+    norm = os.path.normpath(value)
+    head, tail = os.path.split(norm)
+    return {norm, os.path.realpath(norm), os.path.join(os.path.realpath(head), tail)}
+
+
 def _target(exp: Expanded, op: str, program: str, state: _State) -> Target:
+    """Build the :class:`Target` for ``exp``, keeping credential path values private.
+
+    WHY (review R1 / QA Q2 on PR #3992). ``credential_path`` lets a
+    path-valued credential variable resolve like a literal so its old key file
+    can be cleaned up. That is only safe while the target stays INSIDE the
+    value's own subtree: ``"$VAR/.."``, ``"$VAR"*`` (a glob whose literal
+    directory is the value's parent), ``/x/$VAR`` or a link out of it would
+    otherwise rank, and print, a directory that ENCLOSES the private path. Any
+    such word is rebuilt exactly as before the change, with the value replaced
+    by ``CREDENTIAL_MARK``: opaque, ``credential_derived``, refused without
+    naming a path. A word that stays inside is tagged with the variable's NAME
+    and value so ``classify`` can scrub the value's ancestors from its reason.
+    """
+    found = sorted((v for v in state.credential_paths if v in exp.text), key=len, reverse=True)
+    if not found:
+        return _plain_target(exp, op, program, state)
+    value = found[0]
+    target = _plain_target(exp, op, program, state)
+    rest = exp.text[len(value) :]
+    spellings = _credential_spellings(value)
+    inside = (
+        len(found) == 1
+        and exp.text.startswith(value)
+        and (rest == "" or rest.startswith("/"))
+        and ".." not in rest.split("/")
+        and not target.unpinned
+        and not target.landings
+        and target.path is not None
+        and any(
+            target.path.rstrip("/") == s or target.path.startswith(s.rstrip("/") + "/")
+            for s in spellings
+        )
+    )
+    if not inside:
+        masked = exp.text
+        for v in found:
+            masked = masked.replace(v, CREDENTIAL_MARK)
+        return _plain_target(
+            dataclasses.replace(
+                exp, text=masked, pattern=None, opaque=True, opaque_contained=False
+            ),
+            op,
+            program,
+            state,
+        )
+    target.credential_name = state.credential_paths[value]
+    target.credential_value = value
+    return target
+
+
+def _plain_target(exp: Expanded, op: str, program: str, state: _State) -> Target:
     text = exp.text
     pattern = exp.pattern
     opaque = exp.opaque
@@ -2413,6 +2485,11 @@ class _Walker:
             for name, value in env.items()
         }
         self.state = _State(env=private_env, cwd=cwd, home=home)
+        self.state.credential_paths = {
+            value: name
+            for name, value in private_env.items()
+            if is_credential_shaped(name) and value != CREDENTIAL_MARK
+        }
         #: ``PATH`` as the command inherits it: ``_inline_read_only`` trusts
         #: a bare ``python3`` only while this command has not changed it.
         self.inherited_path = env.get("PATH")
@@ -3117,8 +3194,15 @@ class _Walker:
         # A privacy-hidden cd leaves relative deletion roots uninspectable too.
         # This is cwd provenance, not a whole-command taint: a later successful
         # literal cd clears it, and the existing shell snapshots isolate it.
-        private_target = st.private_cwd or CREDENTIAL_MARK in (
-            operands[0].text if operands else st.home
+        cd_text = operands[0].text if operands else st.home
+        # A ``cd`` into (or through) a credential path value hides the cwd as
+        # it did before such values resolved: a relative ``..`` from there
+        # would otherwise rank and print the value's parent (R1, PR #3992).
+        # Its path is left unresolved below, so this flag is what sticks.
+        private_target = (
+            st.private_cwd
+            or CREDENTIAL_MARK in cd_text
+            or any(v in cd_text for v in st.credential_paths)
         )
         if not operands or (operands[0].vanished and not operands[0].opaque):
             path = st.home
@@ -3131,7 +3215,9 @@ class _Walker:
                     Target(path=w.text, op="touch", program="cd", pattern=w.pattern)
                 )
                 path = None
-            elif w.opaque:
+            elif w.opaque or any(v in w.text for v in st.credential_paths):
+                # A credential path value: unresolved, as before such values
+                # resolved, so ``private_target`` hides the cwd below.
                 path = None
             elif st.env.get("CDPATH") and not w.text.startswith(("/", "~", "./", "../")):
                 path = None  # CDPATH search: unresolvable (R6-MINOR-2)
@@ -3909,9 +3995,12 @@ class _Walker:
         if path is None:
             return
         self._name(path)
+        # A pointee spelled from a credential path value is never recorded:
+        # a later ``rm L/x`` would land, and print, wherever that value (or
+        # its parent, through ``..``) lives (R1, PR #3992). Unknown ranks HIGH.
         literal = all(
             not w.opaque and w.pattern is None and not w.empty and w.text for w in (link, pointee)
-        )
+        ) and not any(v in pointee.text for v in self.state.credential_paths)
         no_deref = _has_short(flags, "nT") or bool(
             {"--no-dereference", "--no-target-directory"} & set(flags)
         )

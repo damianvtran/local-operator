@@ -762,6 +762,59 @@ class ForeignCreations:
         ``None`` when nothing foreign relates — or when the ledger is unreadable.
         """
         reals = sorted({os.path.realpath(p).rstrip("/") or "/" for p in paths if p})
+        live = self._live_rows(reals)
+        if live is None:
+            return None
+
+        def foreign(path: str) -> CreationRecord | None:
+            owners, rec = live[path]
+            return None if any(self._related(o) for o in owners) else rec
+
+        for real in reals:
+            covering = [p for p in live if p == real or real.startswith(p.rstrip("/") + "/")]
+            if covering:
+                nearest = max(covering, key=len)
+                rec = foreign(nearest)
+                if rec is not None:
+                    relation = "at" if nearest == real else "inside"
+                    return ForeignHit(rec.creator, rec, relation)
+            prefix = real.rstrip("/") + "/"
+            for p in sorted(p for p in live if p.startswith(prefix)):
+                rec = foreign(p)
+                if rec is not None:
+                    return ForeignHit(rec.creator, rec, "holds")
+        return None
+
+    def foreign_under(self, root: str) -> ForeignHit | None:
+        """A foreign live row strictly UNDER ``root`` whose creator did not create ``root``.
+
+        WHY (review R2 on PR #3992). A finished foreign worktree is cleared
+        by :func:`finished_foreign_worktree`, which proves the TREE's work is
+        merged and clean; it says nothing about a directory a THIRD session
+        recorded inside it (an empty ``mkdir`` passes ``clean``). Such a row
+        keeps the route from applying. Rows by the tree's own creator are
+        that creator's finished work, already covered by the proof, so they
+        do not object. Unreadable ledger: ``None`` (as :meth:`match`).
+        """
+        real = os.path.realpath(root).rstrip("/") or "/"
+        live = self._live_rows([real])
+        if live is None:
+            return None
+        creators = live[real][0] if real in live else set()
+        prefix = real + "/"
+        for p in sorted(p for p in live if p.startswith(prefix)):
+            owners, rec = live[p]
+            if owners & creators or any(self._related(o) for o in owners):
+                continue
+            return ForeignHit(rec.creator, rec, "holds")
+        return None
+
+    def _live_rows(self, reals: list[str]) -> dict[str, tuple[set[str], CreationRecord]] | None:
+        """path -> (owners, row) for the LIVE generation of rows related to ``reals``.
+
+        Rows of a root in :attr:`cleared` are kept out; ``None`` when the
+        ledger is unreadable.
+        """
         conn = self._connection()
         if not reals or conn is None:
             return None
@@ -784,29 +837,13 @@ class ForeignCreations:
             if rec.path in self.cleared:
                 # Exactly a worktree root ``finished_foreign_worktree`` proved
                 # safe in this classification: its creator's row is the very
-                # objection that predicate settles. Rows INSIDE or ABOVE it are
-                # still matched, so other foreign data stays protected.
+                # objection that predicate settles. Rows ABOVE it are still
+                # matched here; a third session's row INSIDE it already barred
+                # the route (``foreign_under``, checked before clearing), so
+                # other foreign data stays protected.
                 continue
             live.setdefault(rec.path, (set(), rec))[0].add(owner)
-
-        def foreign(path: str) -> CreationRecord | None:
-            owners, rec = live[path]
-            return None if any(self._related(o) for o in owners) else rec
-
-        for real in reals:
-            covering = [p for p in live if p == real or real.startswith(p.rstrip("/") + "/")]
-            if covering:
-                nearest = max(covering, key=len)
-                rec = foreign(nearest)
-                if rec is not None:
-                    relation = "at" if nearest == real else "inside"
-                    return ForeignHit(rec.creator, rec, relation)
-            prefix = real.rstrip("/") + "/"
-            for p in sorted(p for p in live if p.startswith(prefix)):
-                rec = foreign(p)
-                if rec is not None:
-                    return ForeignHit(rec.creator, rec, "holds")
-        return None
+        return live
 
 
 def link_path(path: str) -> str:
@@ -2221,7 +2258,10 @@ class FinishedForeign:
             f"Guardrail {_DANGEROUS_DELETE}: finished worktree {root} removed without review — "
             "registered linked tree, HEAD on its branch and merged into origin's default "
             "branch, no open PR, no running owner, clean with no ignored files. "
-            "Its branch ref is kept."
+            # Q4 on PR #3992: the ref lives in the primary checkout, which an
+            # enclosing delete in the same call may remove too, so the note
+            # states the condition instead of promising the ref survives.
+            "Its branch ref stays in the main checkout unless that is deleted too."
         )
 
 
@@ -2346,6 +2386,18 @@ def finished_foreign_worktree(
         return no("open-pr", state)
     if activity.pr_state != "none" or activity.branch != ref[len("refs/heads/") :]:
         return unknown("pr-unknown", state)
+    # Race re-check (review R4 on PR #3992): the forge lookup above can take
+    # up to the ``gh`` timeout, so the clean / no-ignored / not-busy facts read
+    # at the start are re-read with the same helper just before answering. A
+    # file written, or a shell that cd'd in, during that window fails it. The
+    # process-cwd inventory is cached for ``_CWD_INVENTORY_TTL_S``, longer than
+    # that window, so the cache is dropped first or "busy" would be the stale
+    # reading. Check-then-act stays inherent; this narrows it to the end.
+    global _cwd_inventory_cache
+    _cwd_inventory_cache = None
+    again: dict[str, bool] = {}
+    if worktree_state(real, facts=again) != "clean" or again.get("ignored", True):
+        return unknown("state-moved", state)
     if (_git(["rev-parse", "--verify", "HEAD"], real) or "").strip() != head:
         return unknown("head-moved", state)
     return FinishedForeign("safe", _FINISHED_FACTS, state, activity)

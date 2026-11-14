@@ -50,7 +50,11 @@ from local_operator.guardrails.resolve import (
 
 if TYPE_CHECKING:
     # Runtime import is deferred: ``provenance`` imports this module.
-    from local_operator.guardrails.provenance import ForeignCreations
+    from local_operator.guardrails.provenance import (
+        FinishedForeign,
+        ForeignCreations,
+        WorktreeActivity,
+    )
 
 _STATE_DIRNAME = ".local-operator"
 _CONFIG_FILE = "config.yml"
@@ -1290,12 +1294,20 @@ def _rank(
                 )
             if idle and state == "clean" and not target.forced:
                 return RankedTarget(target, Risk.LOW, f"a clean linked git worktree ({facts})")
-            if own is None and idle and state == "clean" and target.forced:
+            if (
+                own is None
+                and idle
+                and state == "clean"
+                and target.forced
+                and not _finished_route_barred(path, prot)
+            ):
                 # ``--force`` on ANOTHER session's clean tree: LOW only when the
                 # finished-worktree predicate proves it merged and unused
                 # (operator decision a-891c); otherwise the ordinary ranking
                 # below and its foreign-ledger HIGH apply as before.
-                finished = _finished(path, session_id, foreign, activity)
+                finished = _no_ledger_inside(
+                    foreign, path, _finished(path, session_id, foreign, activity)
+                )
                 if finished.safe:
                     _clear_finished(foreign, path, finished)
                     return RankedTarget(
@@ -1601,11 +1613,17 @@ def _reached_worktrees(
         )
     if not foreign and not held:
         return None
-    finished = {root: looked.get(f"fstate:{root}") for root in foreign[:_MAX_FOREIGN_STATES]}
+    finished = {
+        root: (_no_ledger_inside(foreign_rows, root, f) if f is not None else None)
+        for root in foreign[:_MAX_FOREIGN_STATES]
+        for f in [looked.get(f"fstate:{root}")]
+    }
+    proven = {root: f for root, f in finished.items() if f is not None and f.safe}
     if (
         not held
         and len(foreign) <= _MAX_FOREIGN_STATES
-        and all(f is not None and f.safe for f in finished.values())
+        and len(proven) == len(foreign)
+        and not any(_finished_route_barred(root, prot) for root in foreign)
     ):
         # Every foreign tree reached is a finished, merged, idle one (item A):
         # that objection is settled, and ONLY that one. A delete of exactly
@@ -1613,7 +1631,7 @@ def _reached_worktrees(
         # is LOW; an enclosing delete continues to the ordinary ranking, so
         # parent data, other sessions' rows and protected names still count.
         for root in foreign:
-            _clear_finished(foreign_rows, root, finished[root])
+            _clear_finished(foreign_rows, root, proven[root])
         exact = set(candidates) if target.pattern is not None else {os.path.realpath(scan)}
         if exact and exact <= set(roots):
             return RankedTarget(target, Risk.LOW, "finished, merged linked git worktrees")
@@ -1659,17 +1677,44 @@ def _reached_worktrees(
     return RankedTarget(target, Risk.HIGH, f"{head}: " + " | ".join(parts))
 
 
+def _finished_route_barred(root: str, prot: _Protected) -> bool:
+    """True when a foreign tree sits where a plain directory already ranks HIGH.
+
+    WHY (QA Q1 on PR #3992). The finished-foreign-worktree route settles ONE
+    objection, "another session's worktree"; it must never outrank where the
+    tree lives. A tree under a local-operator state root (``<state>/worktrees``,
+    another session's scratchpad) or at the top level of a home ranked HIGH on
+    main for that place alone ("inside the local-operator state root"), and
+    the two early LOW returns of the route skipped those checks. Barring the
+    route there keeps main's rank: the ordinary/foreign ranking runs as before.
+    Both the lexical and physical spellings count, as in ``_high_reason``.
+    """
+    for spelling in {root.rstrip("/") or "/", os.path.realpath(root)}:
+        if any(_under(spelling, state) for state in prot.state_roots):
+            return True
+        if spelling in prot.homes or os.path.dirname(spelling) in prot.homes:
+            return True
+        if any(_under(spelling, r) for r in (*prot.install_roots, *prot.secrets_dirs)):
+            return True
+    return False
+
+
 def _finished(
     root: str,
     session_id: str,
     rows: ForeignCreations | None,
-    activity: Any = None,
-) -> Any:
+    activity: WorktreeActivity | None = None,
+) -> FinishedForeign:
     """``provenance.finished_foreign_worktree`` for ``root``, memoised per classification.
 
     The memo lives on the call's ``ForeignCreations`` (see its ``finished``),
     so a tree reached by two targets of one command is checked once, and
     never across calls (an owner may start in between).
+
+    Runs on the lookup pool (``_reached_worktrees``), so it never touches
+    the ledger connection: SQLite objects are bound to their creating thread.
+    Callers pass a ``safe`` answer through :func:`_no_ledger_inside` on the
+    classifying thread before acting on it.
     """
     from local_operator.guardrails import provenance as prov
 
@@ -1680,7 +1725,29 @@ def _finished(
     return memo[real]
 
 
-def _clear_finished(rows: ForeignCreations | None, root: str, finished: Any) -> None:
+def _no_ledger_inside(
+    rows: ForeignCreations | None, root: str, finished: FinishedForeign
+) -> FinishedForeign:
+    """``finished``, downgraded when a third session's ledger row lies INSIDE ``root``.
+
+    WHY (review R2 on PR #3992): the predicate proves the tree's own work is
+    finished, not a directory another session recorded inside it (an empty
+    ``mkdir`` passes ``clean``), so such a row makes the tree not safe
+    (``foreign-ledger-inside``). The downgrade is memoised like the answer.
+    With no ``rows`` the predicate's answer stands, as before.
+    """
+    from local_operator.guardrails import provenance as prov
+
+    if not finished.safe or rows is None or rows.foreign_under(root) is None:
+        return finished
+    downgraded = prov.FinishedForeign(
+        "not-safe", ("foreign-ledger-inside",), finished.state, finished.activity
+    )
+    rows.finished[os.path.realpath(root)] = downgraded
+    return downgraded
+
+
+def _clear_finished(rows: ForeignCreations | None, root: str, finished: FinishedForeign) -> None:
     """Record a proven finished tree: its ledger row stops objecting, and the
     LOW result carries the facts as a warning (``Verdict.warnings``)."""
     if rows is None:
@@ -1892,6 +1959,9 @@ def classify_targets(
     # as CRITICAL: under the other reading it is the script, so a HIGH or LOW
     # row for it would invent a target (review M1 on PR #3816).
     ranked = [r for r in ranked if not (r.target.critical_only and r.risk is not Risk.CRITICAL)]
+    for r in ranked:
+        if r.target.credential_value:
+            _hide_credential_path(r, prot)
     evidence_hits = [
         h for h in evidence_hits if not (h.target.critical_only and h.risk is not Risk.CRITICAL)
     ]
@@ -1906,7 +1976,49 @@ def classify_targets(
     if opaque_reasons:
         risk = max(risk, Risk.HIGH)
     reasons = [r.reason for r in ranked if r.risk is not Risk.LOW] + list(opaque_reasons)
-    return Verdict(risk=risk, targets=ranked, reasons=reasons, warnings=list(foreign.notices))
+    # The "removed without review" notices describe a LOW outcome (R3, PR
+    # #3992): a verdict that ends HIGH or CRITICAL for another target removed
+    # nothing without review, so it must not carry them.
+    warnings = list(foreign.notices) if risk is Risk.LOW else []
+    return Verdict(risk=risk, targets=ranked, reasons=reasons, warnings=warnings)
+
+
+#: Characters that end a path inside a reason (same set ``check`` masks with).
+_PATH_END = r"\s;,()'\"|"
+
+
+def _hide_credential_path(ranked: RankedTarget, prot: _Protected) -> None:
+    """Scrub a credential path value AND its ancestor directories from ``ranked``.
+
+    WHY (review R1 / QA Q2 on PR #3992). A target inside a path-valued
+    credential variable ranks like a literal, and its reason can name an
+    ENCLOSING directory: "inside <ledger dir>, created by another session",
+    a worktree root, a protected parent. ``check.credential_path_masks`` hides
+    only the value and what lies under it, so such an ancestor reached the
+    refusal, the judge brief, the journal and the preview. This runs at the
+    source, for this target only, so unrelated targets keep their paths:
+    the value (each lexical/physical spelling) becomes ``$NAME <credential
+    path>``, and every ancestor below ``$HOME`` (or below ``/`` outside it)
+    becomes "a directory holding $NAME <credential path>". ``$HOME`` itself and
+    its ancestors stay: they say nothing about where the key lives.
+    """
+    from local_operator.guardrails.resolve import _credential_spellings
+
+    name = ranked.target.credential_name or "credential"
+    label = f"${name} <credential path>"
+    masks: dict[str, str] = {}
+    for spelling in _credential_spellings(ranked.target.credential_value or ""):
+        masks[spelling] = label
+        parent = os.path.dirname(spelling)
+        while parent not in ("", "/"):
+            if parent in prot.homes or any(h.startswith(parent + "/") for h in prot.homes):
+                break
+            masks.setdefault(parent, f"a directory holding {label}")
+            parent = os.path.dirname(parent)
+    for spelling in sorted(masks, key=len, reverse=True):
+        pattern = re.compile(re.escape(spelling) + f"(?=$|[/{_PATH_END}])[^{_PATH_END}]*")
+        ranked.reason = pattern.sub(lambda _m, lab=masks[spelling]: lab, ranked.reason)
+        ranked.shown = pattern.sub(lambda _m, lab=masks[spelling]: lab, ranked.shown)
 
 
 def classify_bash(

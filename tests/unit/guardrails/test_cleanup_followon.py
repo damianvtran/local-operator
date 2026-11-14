@@ -24,6 +24,7 @@ from typing import Any
 
 import pytest
 
+from local_operator.guardrails import classify as cls
 from local_operator.guardrails import provenance as prov
 from local_operator.guardrails.check import CallContext, GuardSettings, check_tool_call
 from local_operator.guardrails.classify import Risk, classify_bash
@@ -97,9 +98,14 @@ def _repo(home: Path, default: str = "main") -> Path:
     return repo
 
 
-def _finished_tree(home: Path, repo: Path, name: str, default: str = "main") -> Path:
-    """A worktree whose branch commit was merged (fast-forward) into origin's default."""
-    wt = repo / ".worktrees" / name
+def _finished_tree(
+    home: Path, repo: Path, name: str, default: str = "main", at: Path | None = None
+) -> Path:
+    """A worktree whose branch commit was merged (fast-forward) into origin's default.
+
+    ``at``: where the tree lives (default ``<repo>/.worktrees/<name>``).
+    """
+    wt = at if at is not None else repo / ".worktrees" / name
     # Cut from origin's current tip, so each tree fast-forwards it in turn.
     _git("worktree", "add", "-q", "-b", f"fix/{name}", str(wt), f"origin/{default}", cwd=repo)
     (wt / f"{name}.txt").write_text("done\n")
@@ -491,3 +497,241 @@ async def test_no_carrier_discloses_the_private_path(
     report = preview_tool_call("bash", {"command": 'rm -rf "$GOOGLE_APPLICATION_CREDENTIALS"'}, ctx)
     shown = repr(report)
     assert CANARY not in shown and label in shown
+
+
+# --- Round-1 remediation (PR #3992) -------------------------------------------
+#
+# Each test pins one ledger ID from the round-1 review (R*) / QA (Q*) comments.
+
+
+async def _carriers(
+    home: Path, caplog: pytest.LogCaptureFixture, command: str, **env: str
+) -> tuple[Any, str]:
+    """Every outward carrier of one call joined: refusal text, warnings, judge
+    brief, journal (the check logger) and preview. Returns ``(outcome, text)``."""
+    caplog.clear()
+    caplog.set_level(logging.INFO, logger="local_operator.guardrails.check")
+    judge = _Judge()
+    out = await _check(home, command, judge, **env)
+    ctx = CallContext(cwd=str(home), env=_env(home, **env), scratchpad=None, session_id=ME)
+    report = preview_tool_call("bash", {"command": command}, ctx)
+    parts = [
+        out.text if out is not None else "",
+        *(out.warnings if out is not None else []),
+        *judge.prompts,
+        caplog.text,
+        repr(report),
+    ]
+    return out, "\n".join(parts)
+
+
+def _canary_value(home: Path) -> str:
+    sub = home / CANARY / "sub"
+    sub.mkdir(parents=True)
+    (sub / "old.pem").write_text("k\n")
+    return str(sub / "old.pem")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "command",
+    [
+        'rm -rf "$GOOGLE_APPLICATION_CREDENTIALS/.."',
+        'D="$GOOGLE_APPLICATION_CREDENTIALS"; rm -rf "$D/.."',
+        'rm -rf "$GOOGLE_APPLICATION_CREDENTIALS"*',
+        'rm -rf "/x$GOOGLE_APPLICATION_CREDENTIALS"',
+        'cd "$GOOGLE_APPLICATION_CREDENTIALS/.."; rm -rf ../sub',
+        'ln -sfn "$GOOGLE_APPLICATION_CREDENTIALS/.." ~/L; rm -rf ~/L/x',
+    ],
+    ids=["dotdot", "copied-dotdot", "glued-glob", "prefixed", "cd-dotdot", "link-pointee"],
+)
+async def test_r1_q2_credential_target_outside_its_value_stays_opaque(
+    home: Path, caplog: pytest.LogCaptureFixture, command: str
+) -> None:
+    """R1 = Q2: a word that leaves the value's own subtree ranks opaque, as on
+    base 33c331e3, and no carrier names the value's directories."""
+    env = {"GOOGLE_APPLICATION_CREDENTIALS": _canary_value(home)}
+    v = _rank(home, command, **env)
+    assert v.risk is not Risk.LOW, [(t.path, t.reason) for t in v.targets]
+    assert all(CANARY not in (t.target.path or "") for t in v.targets)
+    out, text = await _carriers(home, caplog, command, **env)
+    assert out is not None and out.blocked
+    assert CANARY not in text
+
+
+def test_r1_value_subtree_still_ranks_like_the_literal(home: Path) -> None:
+    """Control: the value itself and paths UNDER it keep item C's literal ranking."""
+    value = _canary_value(home)
+    env = {"GOOGLE_APPLICATION_CREDENTIALS": str(Path(value).parent)}
+    for command in (
+        'rm -f "$GOOGLE_APPLICATION_CREDENTIALS/old.pem"',
+        'rm -rf "$GOOGLE_APPLICATION_CREDENTIALS"/*',
+    ):
+        v = _rank(home, command, **env)
+        assert v.risk is Risk.LOW, (command, [(t.path, t.reason) for t in v.targets])
+        assert not any(t.target.credential_derived for t in v.targets)
+
+
+def _foreign_dir(home: Path) -> Path:
+    """``~/w/<canary>`` recorded by another session, holding ``old.pem``."""
+    d = home / "w" / CANARY
+    d.mkdir(parents=True)
+    (d / "old.pem").write_text("k\n")
+    prov.write_records(
+        [(os.path.realpath(d), "mkdir")],
+        owners=[DONE],
+        creator=DONE,
+        command=f"mkdir -p {d}",
+        state_root=home / ".local-operator",
+    )
+    return d
+
+
+@pytest.mark.asyncio
+async def test_r1_q2_ancestor_reason_hides_the_ledger_directory(
+    home: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Q2's repro: the value sits inside another session's created dir; the
+    "inside <dir>, created by another session" reason must not name it."""
+    d = _foreign_dir(home)
+    env = {"GOOGLE_APPLICATION_CREDENTIALS": str(d / "old.pem")}
+    command = 'rm -f "$GOOGLE_APPLICATION_CREDENTIALS"'
+    v = _rank(home, command, **env)
+    assert v.risk is Risk.HIGH
+    reason = v.targets[0].reason
+    assert "created by another session" in reason and CANARY not in reason
+    assert "a directory holding $GOOGLE_APPLICATION_CREDENTIALS <credential path>" in reason
+    out, text = await _carriers(home, caplog, command, **env)
+    assert out is not None and out.blocked
+    assert CANARY not in text and "<credential path>" in text
+
+
+@pytest.mark.asyncio
+async def test_r1_q2_value_reached_through_a_symlink_is_hidden(
+    home: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The value's lexical spelling holds no canary; its physical one does."""
+    d = _foreign_dir(home)
+    (home / "w" / "lnk").symlink_to(d)
+    env = {"GOOGLE_APPLICATION_CREDENTIALS": str(home / "w" / "lnk" / "old.pem")}
+    for command in (
+        'rm -f "$GOOGLE_APPLICATION_CREDENTIALS"',
+        'rm -rf "$GOOGLE_APPLICATION_CREDENTIALS/.."',
+    ):
+        out, text = await _carriers(home, caplog, command, **env)
+        assert out is not None and out.blocked, command
+        assert CANARY not in text, command
+
+
+# --- Q1 (MAJOR): protected places keep main's rank ---------------------------
+
+
+@pytest.mark.parametrize(
+    "command", ["git worktree remove --force {wt}", "rm -rf {wt}"], ids=["worktree-force", "rm-rf"]
+)
+@pytest.mark.parametrize(
+    "where",
+    [".local-operator/worktrees/b", f".local-operator/sessions/{DONE}/scratchpad/b"],
+    ids=["state-root", "other-scratchpad"],
+)
+def test_q1_finished_tree_in_a_protected_place_stays_high(
+    home: Path, repo: Path, command: str, where: str
+) -> None:
+    wt = _finished_tree(home, repo, "b", at=home / where)
+    assert prov.finished_foreign_worktree(str(wt), ME).safe  # the facts alone pass
+    v = _rank(home, command.format(wt=wt))
+    assert v.risk is Risk.HIGH, [(t.path, t.reason) for t in v.targets]
+    assert not v.warnings
+
+
+@pytest.mark.parametrize(
+    "command", ["git worktree remove --force {wt}", "rm -rf {wt}"], ids=["worktree-force", "rm-rf"]
+)
+def test_q1_control_plain_finished_tree_elsewhere_stays_low(
+    home: Path, repo: Path, command: str
+) -> None:
+    wt = _finished_tree(home, repo, "b", at=home / "w" / "b")
+    assert _rank(home, command.format(wt=wt)).risk is Risk.LOW
+
+
+# --- R2 (minor): another session's ledger row inside the tree ----------------
+
+
+def _row_inside(home: Path, repo: Path, creator: str) -> Path:
+    wt = _finished_tree(home, repo, "done")
+    inner = wt / "emptydir"
+    inner.mkdir()
+    prov.write_records(
+        [(os.path.realpath(inner), "mkdir")],
+        owners=[creator],
+        creator=creator,
+        command=f"mkdir {inner}",
+        state_root=home / ".local-operator",
+    )
+    # The mkdir moved the tree's ctime (Linux ``creation_stamp``): re-record
+    # its own row so the predicate's owner fact still reads it.
+    _record(home, wt)
+    return wt
+
+
+def test_r2_third_session_row_inside_the_tree_bars_the_route(home: Path, repo: Path) -> None:
+    wt = _row_inside(home, repo, "ccccccccccc3")
+    assert prov.finished_foreign_worktree(str(wt), ME).safe
+    rows = prov.ForeignCreations(ME)
+    try:
+        got = cls._no_ledger_inside(rows, str(wt), prov.finished_foreign_worktree(str(wt), ME))
+    finally:
+        rows.close()
+    assert got.reasons == ("foreign-ledger-inside",) and not got.safe
+    for command in (f"rm -rf {wt}", f"git worktree remove --force {wt}"):
+        v = _rank(home, command)
+        assert v.risk is Risk.HIGH, (command, [(t.path, t.reason) for t in v.targets])
+
+
+def test_r2_control_creators_own_row_inside_does_not_bar(home: Path, repo: Path) -> None:
+    wt = _row_inside(home, repo, DONE)
+    assert _rank(home, f"rm -rf {wt}").risk is Risk.LOW
+
+
+# --- R3 (minor): notices only on a LOW verdict --------------------------------
+
+
+def test_r3_high_verdict_carries_no_removed_without_review_notice(home: Path, repo: Path) -> None:
+    _finished_tree(home, repo, "done")
+    v = _rank(home, f"rm -rf {repo}")
+    assert v.risk is Risk.HIGH
+    assert v.warnings == []
+
+
+# --- R4 (minor): the race re-check re-reads clean and busy -------------------
+
+
+@pytest.mark.parametrize("change", ["file", "busy"])
+def test_r4_state_change_during_the_forge_lookup_is_caught(
+    home: Path, repo: Path, monkeypatch: pytest.MonkeyPatch, change: str
+) -> None:
+    wt = _finished_tree(home, repo, "done")
+    moved = {"now": False}
+
+    def forge(repo_: str, branch: str) -> list[Any]:
+        # The forge lookup is the slow step the re-check guards.
+        moved["now"] = True
+        if change == "file":
+            (wt / "late.txt").write_text("x\n")
+        return []
+
+    monkeypatch.setattr(prov, "_gh_prs", forge)
+    monkeypatch.setattr(prov, "_live_cwd_inside", lambda _: moved["now"] and change == "busy")
+    got = prov.finished_foreign_worktree(str(wt), ME)
+    assert not got.safe and got.reasons == ("state-moved",), got
+
+
+# --- Q4 (minor): the branch-ref clause is conditional ------------------------
+
+
+def test_q4_warning_does_not_promise_the_branch_ref(home: Path, repo: Path) -> None:
+    wt = _finished_tree(home, repo, "done")
+    v = _rank(home, f"rm -rf {wt}")
+    assert v.risk is Risk.LOW and v.warnings
+    assert all("Its branch ref is kept" not in w for w in v.warnings)
+    assert any("unless that is deleted too" in w for w in v.warnings)
