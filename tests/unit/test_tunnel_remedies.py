@@ -264,6 +264,37 @@ def test_the_switch_defaults_on_and_reads_both_spellings(hook):
     assert install.auto_setup_enabled() is False
 
 
+def test_a_config_write_reaches_the_next_sign_in_without_a_restart(hook):
+    """The `phone_access` section's LIVE claim, end to end in ONE process.
+
+    `settings_io` files `tunnel.auto_setup_after_login` under a LIVE section,
+    and `test_config_live.HOST_OWNED_LIVE_SECTIONS` cites this test as the
+    proof: no `Session` holds the switch, so the live half is that
+    `auto_setup_enabled` re-reads config.yml on every sign-in. The writes go
+    through `settings_io.write_setting` — the path `lop config set`, the
+    settings page and the desktop PATCH all take — on a SEPARATE
+    `ConfigManager`, the way another process's write lands, and nothing here
+    reloads a module. A memoised switch would keep the first answer and fail
+    the second or third call.
+    """
+    from local_operator.config import ConfigManager
+    from local_operator.settings_io import BY_KEY, write_setting
+
+    tmp, spawned = hook
+    _configure()
+    setting = BY_KEY[install.AUTO_SETUP_KEY]
+    assert install.auto_setup_after_login(provider="radient", credential_id=17)
+    assert len(spawned) == 1
+
+    write_setting(ConfigManager(config_dir=tmp), setting, False)
+    assert install.auto_setup_after_login(provider="radient", credential_id=17) == ""
+    assert len(spawned) == 1
+
+    write_setting(ConfigManager(config_dir=tmp), setting, True)
+    assert install.auto_setup_after_login(provider="radient", credential_id=17)
+    assert len(spawned) == 2
+
+
 @pytest.mark.parametrize(
     "verified,healed,note,expected",
     [
