@@ -1724,6 +1724,21 @@ class AwsProvider:
                 self._run_guest_command,
                 client_password=plan.client_password,
                 clock=time.monotonic,
+                # Upstream's own gate: ``DesktopEnv(volume_size=N)`` grows the
+                # guest filesystem into the volume, ``volume_size=None`` does
+                # not. ``plan.volume_gb`` is exactly that parameter, resolved
+                # with upstream's precedence (a task's own ``volume_size``,
+                # else the ``AWS_ROOT_VOLUME_SIZE`` default), and the adapter
+                # never hands it to ``DesktopEnv`` -- so without this the
+                # volume was enlarged and the filesystem was not. The source
+                # is recorded so an override-granted grow is visible in the
+                # bundle. See ``guest_disk``'s module docstring.
+                requested_volume_gb=plan.volume_gb,
+                volume_source=plan.volume_source,
+                # The hold's retries run on the adapter's recovery cadence and
+                # the provider's injected sleep (virtual in tests).
+                sleep=self._sleep,
+                retry_delays=_RECOVERY_PROBE_DELAYS_S,
             )
         except Exception:
             return

@@ -32,6 +32,7 @@ import pytest
 from botocore.stub import ANY, Stubber
 from lop_osworld_v2_adapter import (
     cleanup,
+    guest_disk,
     guest_xcursor,
     provisioning,
     scoring,
@@ -3126,3 +3127,104 @@ async def test_allocate_patches_a_stock_guest_before_upstream_resets(
     )
     assert _ResetRecordingEnv.posts_at_reset is not None
     assert write_index < _ResetRecordingEnv.posts_at_reset
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("volume", ["120", None])
+async def test_the_root_filesystem_is_grown_exactly_when_a_volume_size_was_requested(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, volume: str | None
+) -> None:
+    """Upstream's gate, wired: ``volume_size`` set grows, ``None`` does not.
+
+    Every campaign record read ``disk_bytes`` 120 GiB around a 29.5G
+    filesystem because the adapter sized the volume and never grew into it.
+    ``DesktopEnv(volume_size=N)`` would have; the default would not -- so the
+    override grows and the default leaves the AMI's filesystem alone.
+    """
+
+    task = taskfile.load_static(fixtures.PLAIN.encode(), module_name="tasks/task_plain.py")
+    infra = _volume_infra(volume) if volume is not None else _infra()
+    plan = provisioning.resolve(task, episode_id=EPISODE, infra_values=infra)
+
+    with _Stubs() as stubs:
+        stubs.guest_default = {"returncode": 0, "output": str(2_200_000_000), "error": ""}
+        # The geometry before (29.5G in 120 GiB) and after the grow.
+        stubs.guest_responses.append(
+            ("--output=size", {"returncode": 0, "output": "30993747968\n128849018880\n"})
+        )
+        _expect_describe_images(stubs)
+        _expect_run_instances(stubs, plan=plan, volume_gb=120 if volume else None)
+        _expect_create_schedule(stubs)
+        _expect_running(stubs)
+        provider = _provider(
+            stubs,
+            monkeypatch,
+            desktop_env_factory=_FakeEnv,
+            task_factory=lambda t: {"id": t.task_id, "instruction": "do it"},
+        )
+        root = _cache_root(tmp_path)
+        await provider.allocate(plan, task, cache_root=root)
+
+    grow_posts = [post for post in stubs.guest_posts if "growpart" in " ".join(post["command"])]
+    report = json.loads((root / "guest-preparation.json").read_bytes())
+    names = [step["name"] for step in report["steps"]]
+    if volume is None:
+        assert grow_posts == []
+        assert report["root_grow_requested"] is False
+        assert "grow-root-filesystem" not in names
+        return
+    assert len(grow_posts) == 1
+    # The grow's own ceiling reached the guest, not the 60 s reclamation one.
+    assert grow_posts[0]["timeout"] == guest_deadline_for(guest_disk.GROW_TIMEOUT_S)
+    assert report["root_grow_requested"] is True
+    # The plan's size AND its source reach the record: PLAIN declares no
+    # volume_size, so 120 is the override filling it -- the disclosed deviation.
+    assert (report["requested_volume_gb"], report["volume_size_source"]) == (120, "override")
+    assert names.index("clear-snapd-download-scratch") < names.index("grow-root-filesystem")
+    assert "measure-geometry-after" in names
+    assert report["blocking_steps"] == []
+
+
+@pytest.mark.asyncio
+async def test_a_hold_answered_500_once_is_retried_on_the_provider_cadence(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The t33v-t054 refusal, replayed end to end through the real runner.
+
+    ``http_post_json`` raises ``requests.HTTPError`` for the guest's 500, as
+    the live run recorded; the provider's injected sleep paces the retry on
+    its own recovery cadence, and the episode is no longer refused.
+    """
+
+    import requests
+
+    response = requests.Response()
+    response.status_code = 500
+    calls = {"hold": 0}
+
+    with _Stubs() as stubs:
+        stubs.guest_default = {"returncode": 0, "output": str(2_200_000_000), "error": ""}
+        original = stubs.clients.http_post_json
+
+        def flaky_post(url: str, payload: dict[str, Any], timeout: float) -> dict[str, Any]:
+            if "snap refresh --hold" in " ".join(payload.get("command", [])):
+                calls["hold"] += 1
+                if calls["hold"] == 1:
+                    stubs.guest_posts.append(payload)
+                    raise requests.HTTPError("500 Server Error", response=response)
+            return original(url, payload, timeout)
+
+        stubs.clients = _Clients(
+            ec2=stubs.clients.ec2,
+            scheduler=stubs.clients.scheduler,
+            http_get=stubs.clients.http_get,
+            http_post_json=flaky_post,
+        )
+        root = await _allocate_with_guest(stubs, monkeypatch, tmp_path)
+
+    report = json.loads((root / "guest-preparation.json").read_bytes())
+    hold = next(s for s in report["steps"] if s["name"] == "hold-snap-auto-refresh")
+    assert hold["status"] == "ok"
+    assert hold["attempts"] == 2
+    assert report["blocking_steps"] == []
+    assert stubs.slept[:1] == [aws_mod._RECOVERY_PROBE_DELAYS_S[0]]
