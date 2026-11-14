@@ -126,13 +126,13 @@ async def _owner_refresh_after_standby(mesh: Any) -> dict[str, Any]:  # noqa: F8
     return await _owner_refresh(mesh)
 
 
-async def _owner_refresh(mesh: Any) -> dict[str, Any]:  # noqa: F811
+async def _owner_refresh(mesh: Any, *, force: bool = False) -> dict[str, Any]:  # noqa: F811
     """One owner-process refresh of the lent row, through the store's real path."""
     auth = _owner_store(mesh)
     auth.set_lend_fence(renewal.OwnerLendFence(mesh.a.root))
     try:
         row = auth.list_credentials(STUB_PROVIDER)[0]
-        return await auth._ensure_oauth_fresh(row)  # noqa: SLF001
+        return await auth._ensure_oauth_fresh(row, force=force)  # noqa: SLF001
     finally:
         auth.close()
 
@@ -427,7 +427,13 @@ def test_a_node_write_back_is_adopted_with_receipts_and_one_notice(lent: Any) ->
 
 
 def _replay_done(
-    lent: Any, *, epoch: int, parent_epoch: int, parent_refresh: str, refresh: str
+    lent: Any,
+    *,
+    epoch: int,
+    parent_epoch: int,
+    parent_refresh: str,
+    refresh: str,
+    receipts: list[Any] | None = None,
 ) -> dict[str, Any]:
     from local_operator.network.credentials.types import PEER_BROKER_OP
 
@@ -449,7 +455,7 @@ def _replay_done(
             "parent_fp": renewal.fingerprint(salt, parent_refresh),
             "login_incarnation": incarnation,
             "refresh": refresh,
-            "receipts": [],
+            "receipts": list(receipts or []),
         },
         required_capability=renewal.RENEWAL_CAP_STRING,
     )
@@ -484,16 +490,18 @@ def test_both_renewed_the_owner_wins_and_the_conflict_is_written(lent: Any) -> N
 def test_an_owner_invalid_grant_on_a_lent_login_waits_for_the_write_back(lent: Any) -> None:
     """§B.4: no tombstone while a write-back is possible; the write-back clears it."""
     mesh = lent.mesh  # noqa: F811 — the fixture name, bound to the lent mesh
-    newer = _node_renews_out_of_band(mesh)  # the node rotated; the owner's copy is spent
-    # The node is reachable but its B1 claim answer is ``standby`` (it cannot know it
-    # is B2 here), so the owner POSTs its spent token and the IdP refuses it with
-    # ``invalid_grant`` — what a real provider answers for a spent rotating token,
-    # and the only class the store's dead-grant path runs for.
-    mesh.idp.invalid = True
+    from local_operator.network.credentials.owner import broker_for_relay
     from local_operator.providers.auth_store import CredentialInvalidError
 
+    # THE RACE B2 MUST SURVIVE: the node answers ``standby`` (nothing newer), THEN
+    # renews; the owner POSTs on that fresh standby and the IdP refuses its spent
+    # token with ``invalid_grant`` (what a real provider answers, and the only class
+    # the store's dead-grant path runs for).
+    assert renewal.owner_claim(broker_for_relay(mesh.a), KEY)["state"] == "standby"
+    newer = _node_renews_out_of_band(mesh)
+    mesh.idp.invalid = True
     with pytest.raises(CredentialInvalidError):
-        asyncio.run(_owner_refresh_after_standby(mesh))
+        asyncio.run(_owner_refresh(mesh))
     mesh.idp.invalid = False
     _row_id, data = _owner_row(mesh)
     assert data.get(AWAITING_WRITEBACK_KEY), "a lent login was tombstoned"
@@ -625,3 +633,385 @@ def test_a_first_epoch_standby_claim_allows_the_owner_post() -> None:
     assert renewal.owner_fence_verdict(data, now_ms=now)[0] == "allow"
     data[REFRESH_DELEGATE_KEY]["claim"]["epoch"] = 1  # answered for another epoch
     assert renewal.owner_fence_verdict(data, now_ms=now)[0] == "claim"
+
+
+# ===========================================================================
+# Round-1 remediation (review #3955 r1 + QA r1). Each cell was RED on 00c98947.
+# ===========================================================================
+
+DAY_MS = 86_400_000
+
+
+def _lent_payload(**record: Any) -> dict[str, Any]:
+    base = {"state": renewal.LENT_STATE, "device": "d_node", "device_name": "node2", "epoch": 0}
+    base.update(record)
+    return {REFRESH_DELEGATE_KEY: base}
+
+
+def test_m1_an_owner_whose_relay_cannot_be_asked_waits_by_name_and_offers_login(
+    lent: Any,
+) -> None:
+    """M1: with the owner's relay gone the claim can never run. That is R4 (no
+    answer): the row records the wait and the sentence names ``/login`` — not a
+    "Checking with" that repeats for ever."""
+    mesh = lent.mesh  # noqa: F811 — the fixture name, bound to the lent mesh
+    mesh.a.stop()
+    messages: list[str] = []
+    for _ in range(6):
+        with pytest.raises(RefreshDelegatedError) as caught:
+            asyncio.run(_owner_refresh(mesh))
+        messages.append(str(caught.value))
+        if "/login" in messages[-1]:
+            break
+        time.sleep(0.5)
+    assert f"/login {STUB_PROVIDER}" in messages[-1], messages
+    claim = _owner_row(mesh)[1][REFRESH_DELEGATE_KEY].get("claim") or {}
+    assert claim.get("state") == "awaiting_handback", claim
+    assert mesh.idp.posts == []
+
+
+def test_m1_the_return_cap_bounds_every_lent_verdict() -> None:
+    """M1: the 7-day return cap applied only to ``awaiting_handback`` with a recorded
+    contact, so a lend never answered stayed ``claim`` for ever. The cap now runs
+    from the last contact or, with none, from the lend itself."""
+    now = int(time.time() * 1000)
+    old = (now - 8 * DAY_MS) / 1000.0
+    recent = (now - 1 * DAY_MS) / 1000.0
+    never_answered = _lent_payload(issued_at=old)
+    assert renewal.owner_fence_verdict(never_answered, now_ms=now)[0] == "allow"
+    waiting = _lent_payload(issued_at=old, claim={"state": "awaiting_handback", "at_ms": now})
+    assert renewal.owner_fence_verdict(waiting, now_ms=now)[0] == "allow"
+    young = _lent_payload(issued_at=recent)
+    assert renewal.owner_fence_verdict(young, now_ms=now)[0] == "claim"
+    contacted = _lent_payload(
+        issued_at=old,
+        last_contact_ms=now - DAY_MS,
+        claim={"state": "awaiting_handback", "at_ms": now},
+    )
+    assert renewal.owner_fence_verdict(contacted, now_ms=now)[0] == "awaiting"
+
+
+def _owner_refused_with_invalid_grant(mesh: Any) -> None:  # noqa: F811
+    """The owner's POST of its lent token is refused: the row waits for a write-back."""
+    from local_operator.providers.auth_store import CredentialInvalidError
+
+    mesh.idp.invalid = True
+    with pytest.raises(CredentialInvalidError):
+        asyncio.run(_owner_refresh_after_standby(mesh))
+    mesh.idp.invalid = False
+    assert _owner_row(mesh)[1].get(AWAITING_WRITEBACK_KEY)
+
+
+def test_m2_a_stale_write_back_ends_the_wait_with_sign_in_again(lent: Any) -> None:
+    """M2: a ``stale`` write-back proves the node holds nothing newer, so the refused
+    token was the family's last: the row says "sign in again" instead of waiting."""
+    from local_operator.providers.auth_store import (
+        GRANT_DEAD_AT_KEY,
+        CredentialInvalidError,
+    )
+
+    mesh = lent.mesh  # noqa: F811 — the fixture name, bound to the lent mesh
+    _owner_refused_with_invalid_grant(mesh)
+    result = renewal.node_write_back(lent.client, KEY)
+    assert result.get("state") == "stale", result
+    data = _owner_row(mesh)[1]
+    assert AWAITING_WRITEBACK_KEY not in data and data.get(GRANT_DEAD_AT_KEY), data
+    with pytest.raises(CredentialInvalidError):
+        asyncio.run(_owner_refresh(mesh))
+
+
+def test_m2_a_standby_answer_ends_the_wait_through_the_requests_own_claim(lent: Any) -> None:
+    """M2: the wait asks the node by itself (the request's claim), and the node's
+    ``standby`` settles it — while the node stays connected, nothing else would."""
+    from local_operator.providers.auth_store import CredentialInvalidError
+
+    mesh = lent.mesh  # noqa: F811 — the fixture name, bound to the lent mesh
+    _owner_refused_with_invalid_grant(mesh)
+    deadline = time.monotonic() + 20.0
+    last: BaseException | None = None
+    while time.monotonic() < deadline:
+        try:
+            asyncio.run(_owner_refresh(mesh))
+        except CredentialInvalidError as exc:
+            last = exc
+            break
+        except RefreshDelegatedError as exc:
+            last = exc
+        time.sleep(0.5)
+    assert isinstance(last, CredentialInvalidError), last
+    assert len(mesh.idp.posts) == 1, "the dead token was presented again"
+
+
+def test_m2_awaiting_writeback_ends_at_the_return_cap(
+    tmp_path: Any, stub_provider: str  # noqa: F811
+) -> None:
+    from local_operator.providers.auth_store import CredentialInvalidError
+
+    auth = AuthStore(db_path=tmp_path / "auth.db", config_dir=tmp_path)
+    try:
+        row = auth.upsert_credential(
+            STUB_PROVIDER,
+            {"type": "oauth", "access": "a", "expires": 1, "refresh": "r", "email": "x@y.test"},
+        )
+
+        def write(payload: dict[str, Any]) -> bool:
+            payload.update(_lent_payload(issued_at=0))
+            payload[AWAITING_WRITEBACK_KEY] = int(time.time() * 1000) - 8 * DAY_MS
+            return True
+
+        assert auth._update_payload(row.id, write)  # noqa: SLF001
+        fresh = auth.get_credential(row.id)
+        assert fresh is not None
+        with pytest.raises(CredentialInvalidError, match="/login"):
+            asyncio.run(auth._ensure_oauth_fresh(fresh))  # noqa: SLF001
+    finally:
+        auth.close()
+
+
+@pytest.mark.parametrize("deny", ["local_only", "consent"])
+def test_m3_the_lend_runs_the_grants_authorisation(
+    renewal_caps: None,
+    mesh: Any,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+    deny: str,
+) -> None:
+    """M3 (C5): the renewal token is the stronger credential, so a lend refuses
+    whatever an access grant refuses: the ``local-only`` mark and the durable
+    consent reductions (``consent.check_borrow``)."""
+    from local_operator.network.credentials import consent
+    from local_operator.network.credentials.sync import MARK_LOCAL_ONLY, SyncState
+    from local_operator.network.types import MeshRefusal
+
+    peer = mesh.b.identity.name
+    assert _lop_network("credential", "share", KEY, "--with", peer, "--scope", "device") == 0
+    client = MeshCredentialClient.for_relay(mesh.b)
+    assert client is not None
+    assert net_fixtures.wait_for(lambda: client.owner_of(KEY) == mesh.owner)
+    if deny == "local_only":
+        marks = SyncState.load(mesh.network_id, mesh.a.root)
+        marks.record_mark(KEY, MARK_LOCAL_ONLY)
+        marks.save()
+    else:
+
+        def check_borrow(*_: Any, **__: Any) -> None:
+            raise MeshRefusal("consent_denied", "the owner withdrew this login from that device")
+
+        monkeypatch.setattr(consent, "check_borrow", check_borrow)
+    taken = renewal.node_take(client, KEY)
+    assert taken["ok"] is False, taken
+    assert taken["code"] == ("local_only" if deny == "local_only" else "consent_denied"), taken
+    assert REFRESH_DELEGATE_KEY not in _owner_row(mesh)[1]
+    assert _node_custody(mesh) is None
+
+
+def test_m4_custody_never_overwrites_the_nodes_own_login(
+    renewal_caps: None, mesh: Any  # noqa: F811
+) -> None:
+    """M4: the node signed in to the SAME account itself. The lent pair is kept on a
+    row of its own; the node's own login keeps its token and stays refreshable."""
+    own = AuthStore(db_path=mesh.b.root / "auth.db", config_dir=mesh.b.root)
+    try:
+        own_row = own.upsert_credential(
+            STUB_PROVIDER,
+            {
+                "type": "oauth",
+                "access": "node-own-access",
+                "expires": int(time.time() * 1000) + 3_600_000,
+                "refresh": "node-own-refresh",
+                "email": "owner@example.test",
+            },
+        )
+    finally:
+        own.close()
+    peer = mesh.b.identity.name
+    assert _lop_network("credential", "share", KEY, "--with", peer, "--scope", "device") == 0
+    client = MeshCredentialClient.for_relay(mesh.b)
+    assert client is not None
+    assert net_fixtures.wait_for(lambda: client.owner_of(KEY) == mesh.owner)
+    assert renewal.node_take(client, KEY)["ok"] is True
+    node = AuthStore(db_path=mesh.b.root / "auth.db", config_dir=mesh.b.root)
+    try:
+        mine = node.get_credential(own_row.id)
+        assert mine is not None
+        assert mine.data["refresh"] == "node-own-refresh", mine.data
+        assert REFRESH_DELEGATE_KEY not in mine.data and renewal.CUSTODY_KEY not in mine.data
+        found = renewal.node_custody(node, KEY, mesh.owner)
+        assert found is not None and found[0] != own_row.id
+    finally:
+        node.close()
+
+
+def _end_by(mesh: Any, trigger: str) -> None:  # noqa: F811
+    if trigger == "revoke":
+        assert _lop_network("credential", "revoke", KEY, "--from", mesh.b.identity.name) == 0
+    elif trigger == "member_rm":
+        mesh.a._ctl_member_rm(  # noqa: SLF001 — the CLI's own control op
+            {"network": mesh.network_id, "device_id": mesh.borrower}
+        )
+    else:
+        mesh.a._ctl_panic({"network": mesh.network_id, "reason": "synthetic"})  # noqa: SLF001
+
+
+@pytest.mark.parametrize("trigger", ["revoke", "member_rm", "panic"])
+def test_q1_revoke_removal_and_panic_end_the_owners_lend(lent: Any, trigger: str) -> None:
+    """Q1/m1: each of the three ends the owner's ``lent`` record, so the owner renews
+    on its own again instead of waiting (up to 7 days) on a node that is gone."""
+    mesh = lent.mesh  # noqa: F811 — the fixture name, bound to the lent mesh
+    _end_by(mesh, trigger)
+    assert net_fixtures.wait_for(
+        lambda: REFRESH_DELEGATE_KEY not in _owner_row(mesh)[1], timeout_s=15.0
+    ), _owner_row(mesh)[1].get(REFRESH_DELEGATE_KEY)
+    ended = _audit(mesh.a, "credential.renewal_ended")
+    assert ended and ended[-1]["detail"]["sub"] == mesh.borrower, ended
+    assert asyncio.run(_owner_refresh(mesh))["refresh"] == "refresh-1"
+    assert mesh.idp.posts == ["refresh-0"]
+
+
+def test_q2_a_slow_node_answer_never_blocks_the_owners_login(
+    lent: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Q2: "Checking with <node>" is not a broken login. It must not trip the
+    store's 60 s backoff, and the owner has its key within ~1 s of the answer."""
+    mesh = lent.mesh  # noqa: F811 — the fixture name, bound to the lent mesh
+    real = renewal.node_on_claim
+
+    def slow(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        # Slower than the fence's inline wait (1.5 s), inside W (3 s here).
+        time.sleep(2.2)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(renewal, "node_on_claim", slow)
+    auth = _owner_store(mesh)
+    auth.set_lend_fence(renewal.OwnerLendFence(mesh.a.root))
+    try:
+        row_id = auth.list_credentials(STUB_PROVIDER)[0].id
+        assert asyncio.run(auth.get_api_key(STUB_PROVIDER)) is None
+        assert not auth.is_blocked(row_id, STUB_PROVIDER), "a fence refusal blocked the login"
+        key = None
+        got_at = 0.0
+        deadline = time.monotonic() + 15.0
+        while time.monotonic() < deadline and key is None:
+            key = asyncio.run(auth.get_api_key(STUB_PROVIDER))
+            got_at = time.time()
+            if key is None:
+                time.sleep(0.1)
+        assert key == "access-1", key
+        claim_at = max(
+            float(row.get("ts") or 0)
+            for row in _audit(mesh.a, "credential.renewal_claim")
+            if row["detail"]["outcome"] == "standby"
+        )
+        assert got_at - claim_at <= 1.5, (got_at, claim_at)
+    finally:
+        auth.close()
+
+
+def test_q2_an_adopted_write_back_unblocks_the_owners_login(lent: Any) -> None:
+    """The invalid_grant before an adoption blocks the row (a real refusal); the
+    adoption is the proof the login works, so it lifts that block at once."""
+    mesh = lent.mesh  # noqa: F811 — the fixture name, bound to the lent mesh
+    from local_operator.network.credentials.owner import broker_for_relay
+
+    # The same race as the invalid-grant cell: standby, then the node renews.
+    assert renewal.owner_claim(broker_for_relay(mesh.a), KEY)["state"] == "standby"
+    newer = _node_renews_out_of_band(mesh)
+    mesh.idp.invalid = True
+    auth = _owner_store(mesh)
+    auth.set_lend_fence(renewal.OwnerLendFence(mesh.a.root))
+    try:
+        row_id = auth.list_credentials(STUB_PROVIDER)[0].id
+        assert asyncio.run(auth.get_api_key(STUB_PROVIDER)) is None
+        assert auth.is_blocked(row_id, STUB_PROVIDER)
+        mesh.idp.invalid = False
+        assert renewal.node_write_back(lent.client, KEY)["state"] == "adopted"
+        assert not auth.is_blocked(row_id, STUB_PROVIDER)
+        assert _owner_row(mesh)[1]["refresh"] == newer
+    finally:
+        auth.close()
+
+
+def test_m2_minor_a_write_back_from_the_owners_current_pair_is_adopted(lent: Any) -> None:
+    """m2: the parent fingerprint matches the owner's CURRENT pair, so the node rotated
+    the owner's token and the owner's copy is spent. Epochs that disagree must not
+    turn that into a discarded "conflict" (and a later POST of a spent token)."""
+    mesh = lent.mesh  # noqa: F811 — the fixture name, bound to the lent mesh
+    reply = _replay_done(
+        lent, epoch=2, parent_epoch=1, parent_refresh="refresh-0", refresh="node-made"
+    )
+    assert reply.get("act") == "done" and reply.get("ok"), reply
+    assert _owner_row(mesh)[1]["refresh"] == "node-made"
+    assert not _audit(mesh.a, "credential.renewal_conflict")
+
+
+def test_q3_one_standby_authorises_one_owner_post(lent: Any) -> None:
+    """Q3: a cached ``standby`` answered for the PREVIOUS epoch authorised a second
+    POST within ``CLAIM_RETRY_S`` (RED: 2 POSTs, 1 standby). One standby, one POST —
+    and the audit shows each."""
+    mesh = lent.mesh  # noqa: F811 — the fixture name, bound to the lent mesh
+    _refresh_until_allowed(mesh)
+    assert mesh.idp.posts == ["refresh-0"]
+    # The next renewal, at once: it may POST only on a NEW claim's answer.
+    for _ in range(40):
+        try:
+            asyncio.run(_owner_refresh(mesh, force=True))
+            break
+        except RefreshDelegatedError:
+            time.sleep(0.3)
+    assert mesh.idp.posts == ["refresh-0", "refresh-1"]
+    standby = [
+        row
+        for row in _audit(mesh.a, "credential.renewal_claim")
+        if row["detail"]["outcome"] == "standby"
+    ]
+    assert len(standby) == len(mesh.idp.posts), standby
+
+
+def test_q5_the_nodes_refusal_says_plainly_whose_login_it_holds(lent: Any) -> None:
+    mesh = lent.mesh  # noqa: F811 — the fixture name, bound to the lent mesh
+    node = AuthStore(db_path=mesh.b.root / "auth.db", config_dir=mesh.b.root)
+    try:
+        found = renewal.node_custody(node, KEY, mesh.owner)
+        assert found is not None
+        row = node.get_credential(found[0])
+        assert row is not None
+        with pytest.raises(RefreshDelegatedError) as caught:
+            asyncio.run(node._ensure_oauth_fresh(row, force=True))  # noqa: SLF001
+    finally:
+        node.close()
+    text = str(caught.value)
+    assert "operator-signed" not in text and "delegation" not in text, text
+    assert "renews it" in text, text
+
+
+def test_n2_a_malformed_receipt_never_fails_an_adopted_write_back(lent: Any) -> None:
+    mesh = lent.mesh  # noqa: F811 — the fixture name, bound to the lent mesh
+    reply = _replay_done(
+        lent,
+        epoch=1,
+        parent_epoch=0,
+        parent_refresh="refresh-0",
+        refresh="node-made",
+        receipts=[{"at_ms": "not-a-number", "epoch": "x"}, {"at_ms": 5}],
+    )
+    assert reply.get("act") == "done" and reply.get("ok"), reply
+    assert _owner_row(mesh)[1]["refresh"] == "node-made"
+
+
+def test_m2_the_store_cap_equals_the_return_cap() -> None:
+    from local_operator.providers.auth_store import AWAITING_WRITEBACK_CAP_MS
+
+    assert AWAITING_WRITEBACK_CAP_MS == int(renewal.RETURN_CAP_S * 1000)
+
+
+def test_m2_a_node_ahead_of_the_owner_is_never_a_standby(lent: Any) -> None:
+    """A node whose custody is NEWER than the owner's pair (it renewed and has not
+    written back) must not authorise the owner's POST of a spent token, nor settle a
+    wait as "sign in again": the owner waits for the hand-back."""
+    from local_operator.network.credentials.owner import broker_for_relay
+
+    mesh = lent.mesh  # noqa: F811 — the fixture name, bound to the lent mesh
+    _node_renews_out_of_band(mesh)
+    assert renewal.owner_claim(broker_for_relay(mesh.a), KEY)["state"] == "awaiting_handback"
+    with pytest.raises(RefreshDelegatedError, match="/login"):
+        asyncio.run(_owner_refresh(mesh))
+    assert mesh.idp.posts == ["refresh-0"]  # only the node's own renewal

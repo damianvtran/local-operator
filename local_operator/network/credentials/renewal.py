@@ -288,6 +288,31 @@ def owner_take(broker: Any, link: Any, key: str, by: str) -> dict[str, Any] | No
     existing = data.get(REFRESH_DELEGATE_KEY)
     if isinstance(existing, dict) and existing.get("state") != LENT_STATE:
         return None  # a signed delegation: slice 1's handler owns it
+    # THE GRANT'S AUTHORISATION FIRST (#3955 M3, C5). The renewal token is the
+    # stronger credential, so a lend refuses everything an access grant refuses, by
+    # the same codes: a device-bound login, the durable consent reductions
+    # (``consent.check_borrow`` — authority even when the peer-merged holder
+    # projection is stale) and the ``local-only`` mark (``owner.grant`` step 1).
+    from local_operator.network.credentials import consent
+    from local_operator.network.credentials.sync import MARK_LOCAL_ONLY, SyncState
+    from local_operator.network.credentials.types import (
+        device_bound_refusal,
+        is_device_bound_provider,
+    )
+    from local_operator.network.types import MeshRefusal
+
+    if is_device_bound_provider(provider):
+        return broker._refuse(  # noqa: SLF001
+            link, key, provider, by, "device_bound", device_bound_refusal(provider)
+        )
+    try:
+        consent.check_borrow(broker.network_id, broker.self_device, by, key, root=broker.root)
+    except MeshRefusal as exc:
+        return broker._refuse(link, key, provider, by, exc.code, str(exc))  # noqa: SLF001
+    if SyncState.load(broker.network_id, broker.root).mark_for(key) == MARK_LOCAL_ONLY:
+        return broker._refuse(  # noqa: SLF001
+            link, key, provider, by, "local_only", "local-only access is not borrowed"
+        )
     holder = entry.holder(by)
     native = store.native_login_incarnation(row_id)
     reason = lend_refusal(
@@ -337,6 +362,8 @@ def owner_take(broker: Any, link: Any, key: str, by: str) -> dict[str, Any] | No
                 "device": by,
                 # Read by the owner fence, which sees the row and nothing else.
                 "key": key,
+                # Which network's events END this lend (panic, removal: ``end_lends``).
+                "network_id": str(broker.network_id),
                 "provider": provider,
                 "epoch": 0,
                 "issued_at": now_ms / 1000.0,
@@ -453,7 +480,10 @@ def owner_return(
     parent_epoch = int(frame.get(WIRE_PARENT_EPOCH) or 0)
     parent_fp = str(frame.get("parent_fp") or "")
     incarnation = str(frame.get("login_incarnation") or "")
-    receipts = [r for r in (frame.get("receipts") or []) if isinstance(r, dict)][:64]
+    # PARSED BEFORE THE WRITE (#3955 n2): the receipts are the node's words, and a
+    # malformed one must cost its own line, never an error answer for a write-back
+    # that has already been adopted.
+    receipts = _parse_receipts(frame.get("receipts"))
     outcome: dict[str, Any] = {"case": "stale_refused"}
     # The login's lineage NOW: a sign-in on this device since the lend moved it, and
     # the node's family is then another login's (case 0, refused).
@@ -475,7 +505,12 @@ def owner_return(
         owner_epoch = int(record.get("epoch") or 0)
         record = dict(record)
         record["last_contact_ms"] = int(time.time() * 1000)
-        if parent_fp and parent_fp == current_fp and epoch > parent_epoch == owner_epoch:
+        # ADOPT ON THE PAIR, NOT THE EPOCHS (#3955 m2): a parent fingerprint equal to
+        # the owner's CURRENT pair proves the node rotated exactly the token the
+        # owner holds, so the owner's copy is spent whatever the node's epoch
+        # bookkeeping says. Discarding it as a "conflict" would leave the owner to
+        # POST a spent token. Constant-time compare (n1).
+        if parent_fp and hmac.compare_digest(parent_fp, current_fp) and epoch > owner_epoch:
             new_refresh = frame.get("refresh")
             if not isinstance(new_refresh, str) or not new_refresh:
                 return False
@@ -511,6 +546,9 @@ def owner_return(
             return False
         elif epoch == parent_epoch:
             outcome["case"] = "stale"  # case 2 (or nothing renewed): re-lend the owner's
+            # The node holds nothing newer. If the owner's own token was refused
+            # meanwhile, that refusal was FINAL: say "sign in again" (#3955 M2).
+            _settle_refused(payload)
         else:
             outcome["case"] = "conflict"  # case 3: the owner's own rotation wins
         payload[REFRESH_DELEGATE_KEY] = record
@@ -546,7 +584,10 @@ def owner_return(
     fresh = dict(getattr(store.get_credential(row_id), "data", {}) or {})
     case = outcome["case"]
     if case == "adopted":
-        stamps = [int(r.get("at_ms") or 0) for r in receipts if int(r.get("at_ms") or 0) > 0]
+        # The adopted pair works (the node just renewed with it): lift the backoff
+        # an earlier refusal of the spent copy put on this row (#3955 Q2).
+        _unblock(store, row_id, provider)
+        stamps = [r["at_ms"] for r in receipts if r["at_ms"] > 0]
         broker._audit(  # noqa: SLF001
             "credential.renewal_returned",
             actor=broker.self_device,
@@ -562,8 +603,8 @@ def owner_return(
                     "credential_key": key,
                     "act": by,
                     "sub": broker.self_device,
-                    "epoch": int(receipt.get("epoch") or 0),
-                    "at": int(receipt.get("at_ms") or 0),
+                    "epoch": receipt["epoch"],
+                    "at": receipt["at_ms"],
                 },
             )
         notify_returned(
@@ -586,6 +627,55 @@ def owner_return(
     reply = material_reply(key, provider, record, fresh, kind="refresh_return")
     reply.update(act="stale", code="owner_wins" if case == "conflict" else "stale")
     return reply
+
+
+def _parse_receipts(raw: Any) -> list[dict[str, int]]:
+    """The node's renewal receipts as ``{at_ms, epoch}`` ints; garbage reads as 0."""
+
+    def number(value: Any) -> int:
+        if isinstance(value, bool):
+            return 0
+        try:
+            return max(0, int(value))
+        except (TypeError, ValueError):
+            return 0
+
+    items = raw if isinstance(raw, list) else []
+    return [
+        {"at_ms": number(r.get("at_ms")), "epoch": number(r.get("epoch"))}
+        for r in items[:64]
+        if isinstance(r, dict)
+    ]
+
+
+def _settle_refused(payload: dict[str, Any]) -> bool:
+    """Turn ``awaiting_writeback`` into the dead-grant marker; whether it did.
+
+    Called (inside the row's CAS write) when the node has proved it holds nothing
+    newer — a ``stale`` write-back, a ``standby``/``none`` claim answer, or the lend
+    ending. The provider's refusal of the owner's token was then the family's last
+    word, and the honest state is "sign in again", never an open-ended wait.
+    """
+    from local_operator.providers.auth_store import (
+        AWAITING_WRITEBACK_KEY,
+        GRANT_DEAD_AT_KEY,
+    )
+
+    if not payload.get(AWAITING_WRITEBACK_KEY):
+        return False
+    payload.pop(AWAITING_WRITEBACK_KEY, None)
+    payload[GRANT_DEAD_AT_KEY] = int(time.time() * 1000)
+    return True
+
+
+def _unblock(store: Any, row_id: int | None, provider: str) -> None:
+    """Lift the backoff ``get_api_key`` put on this row. Never raises."""
+    if row_id is None:
+        return
+    try:
+        store.clear_block(row_id, provider)
+    except Exception:  # noqa: BLE001 — the block still expires on its own
+        logger.debug("block could not be lifted", exc_info=True)
 
 
 def _take_lease(store: Any, row_id: int | None) -> bool:
@@ -664,13 +754,19 @@ def owner_claim(broker: Any, key: str, *, wait_s: float | None = None) -> dict[s
         store = broker._auth_store_instance()  # noqa: SLF001
         row_id = broker._credential_id_for(key)  # noqa: SLF001
         row = store.get_credential(row_id) if row_id is not None else None
-        record = lent_record(dict(getattr(row, "data", {}) or {}))
+        row_data = dict(getattr(row, "data", {}) or {})
+        record = lent_record(row_data)
         if row_id is None or record is None:
             return {"state": "not_lent"}
         claim = record.get("claim") or {}
         now_ms = int(time.time() * 1000)
+        from local_operator.providers.auth_store import AWAITING_WRITEBACK_KEY
+
         if (
-            claim.get("state") == "standby"
+            # A refusal since that answer is a NEW question (#3955 M2): only the
+            # node can say whether it holds a newer pair, so ask it again.
+            not row_data.get(AWAITING_WRITEBACK_KEY)
+            and claim.get("state") == "standby"
             and now_ms - int(claim.get("at_ms") or 0) < CLAIM_FRESH_S * 1000
             and _claim_epoch(claim) == int(record.get("epoch") or 0)
         ):
@@ -703,13 +799,36 @@ def owner_claim(broker: Any, key: str, *, wait_s: float | None = None) -> dict[s
                 capabilities = (RENEWAL_CAP_STRING,)
 
             adopted = owner_return(broker, _Link(), key, node, {**detail, "act": "done"})
-            state = "renewed" if adopted.get("ok") and adopted.get("act") == "done" else "standby"
-            if state == "renewed":
+            if adopted.get("ok") and adopted.get("act") == "done":
                 _record_claim(store, row_id, {"state": "renewed", "at_ms": now_ms})
                 _audit_claim(broker, key, node, "renewed")
                 return {"state": "renewed"}
+            if not (adopted.get("act") == "stale" or adopted.get("code") == "renewal_stale"):
+                # A renewal the owner could NOT place (#3955 m2): the node may hold
+                # the family and the owner's copy may be spent, so the owner must
+                # not POST on a "standby" it never got. Wait, by name (R4).
+                _record_claim(
+                    store,
+                    row_id,
+                    {"state": "awaiting_handback", "at_ms": now_ms, "epoch": owner_epoch},
+                )
+                _audit_claim(broker, key, node, "unplaced")
+                return {"state": "awaiting_handback", "node": node}
+            # ``stale``/``renewal_stale``: the owner's pair is the current one (the
+            # node got it back, or the owner already holds it) — a standby.
         if answer in ("standby", "renewed"):
             node_epoch = int((detail or {}).get(WIRE_EPOCH) or 0)
+            if node_epoch > owner_epoch:
+                # The node is AHEAD: it holds a newer pair than the owner (it renewed
+                # and has not written back). Not a standby — the owner's copy may be
+                # spent, so no POST and no "sign in again"; wait for the hand-back.
+                _record_claim(
+                    store,
+                    row_id,
+                    {"state": "awaiting_handback", "at_ms": now_ms, "epoch": owner_epoch},
+                )
+                _audit_claim(broker, key, node, "newer_on_node")
+                return {"state": "awaiting_handback", "node": node}
             if node_epoch < owner_epoch:
                 # The node missed a push: send the owner's pair before it may stand by.
                 push_to_node(broker, key)
@@ -726,7 +845,9 @@ def owner_claim(broker: Any, key: str, *, wait_s: float | None = None) -> dict[s
             )
             _audit_claim(broker, key, node, "no_custody")
             return {"state": "standby"}
-        _record_claim(store, row_id, {"state": "awaiting_handback", "at_ms": now_ms})
+        _record_claim(
+            store, row_id, {"state": "awaiting_handback", "at_ms": now_ms, "epoch": owner_epoch}
+        )
         _audit_claim(broker, key, node, "no_answer")
         return {"state": "awaiting_handback", "node": node}
 
@@ -756,10 +877,20 @@ def _record_claim(store: Any, row_id: int, claim: dict[str, Any]) -> None:
         record = payload.get(REFRESH_DELEGATE_KEY)
         if not isinstance(record, dict) or record.get("state") != LENT_STATE:
             return False
+        asked_for = claim.get("epoch")
+        if isinstance(asked_for, int) and asked_for != int(record.get("epoch") or 0):
+            # The lend moved on while this claim ran (an adoption or an owner POST
+            # bumped the epoch): its answer is about a pair that is gone. Recording
+            # it would re-open a wait the adoption just closed.
+            return False
         record = dict(record)
         record["claim"] = dict(claim)
         if claim.get("state") in ("standby", "renewed"):
             record["last_contact_ms"] = int(claim.get("at_ms") or 0)
+        if claim.get("state") == "standby":
+            # The node holds nothing newer than the owner's pair, so a refusal of
+            # that pair was final: "sign in again", not a wait (#3955 M2).
+            _settle_refused(payload)
         payload[REFRESH_DELEGATE_KEY] = record
         return True
 
@@ -847,10 +978,34 @@ def _claim_epoch(claim: dict[str, Any]) -> int:
     return raw
 
 
+def _cap_anchor_ms(record: dict[str, Any]) -> int:
+    """When the return cap starts counting: the node's last answer, else the lend.
+
+    #3955 M1: the cap read ``last_contact_ms`` alone and only for a recorded
+    ``awaiting_handback``, so a lend the node never answered — or one whose owner
+    relay could not be asked at all — had no end. ``issued_at`` (epoch seconds)
+    is when the node last provably had the pair.
+    """
+    last = record.get("last_contact_ms")
+    issued = record.get("issued_at")
+    anchors = [0]
+    if isinstance(last, (int, float)) and not isinstance(last, bool):
+        anchors.append(int(last))
+    if isinstance(issued, (int, float)) and not isinstance(issued, bool):
+        anchors.append(int(float(issued) * 1000))
+    return max(anchors)
+
+
 def owner_fence_verdict(data: dict[str, Any], *, now_ms: int | None = None) -> tuple[str, str]:
     """``(verdict, node_label)`` for a lent row: ``allow`` / ``claim`` / ``awaiting``.
 
     ``""`` verdict = not lent (the fence does nothing). Pure: reads the row only.
+
+    THE RETURN CAP BOUNDS EVERY VERDICT (#3955 M1, design §D reconciliation): past
+    :data:`RETURN_CAP_S` since the node last provably held the pair, it has
+    certainly dropped anything newer, so the owner renews on its own again —
+    whether the node never answered, the owner's relay could not ask, or the wait
+    was recorded.
     """
     record = lent_record(data)
     if record is None:
@@ -866,12 +1021,10 @@ def owner_fence_verdict(data: dict[str, Any], *, now_ms: int | None = None) -> t
         and _claim_epoch(claim) == int(record.get("epoch") or 0)
     ):
         return "allow", label
+    anchor = _cap_anchor_ms(record)
+    if anchor and now - anchor >= RETURN_CAP_S * 1000:
+        return "allow", label
     if state == "awaiting_handback":
-        last = int(record.get("last_contact_ms") or 0)
-        if last and now - last >= RETURN_CAP_S * 1000:
-            # R4 clears on its own at the return cap (§D reconciliation): past it the
-            # node has certainly deleted anything newer than this pair.
-            return "allow", label
         return "awaiting", label
     return "claim", label
 
@@ -885,7 +1038,8 @@ class OwnerLendFence:
     (``credential_claim``, up to :data:`CLAIM_WAIT_S`), the fence waits at most
     :data:`CLAIM_INLINE_S` for it, and otherwise answers "checking with <node>"
     so the turn moves on; the claim's outcome lands on the row, where the next
-    refresh reads it.
+    refresh reads it. Its refusals are ``LendClaimPendingError`` in the store, which
+    ``get_api_key`` does NOT back off on (#3955 Q2).
     """
 
     def __init__(self, root: Path | None) -> None:
@@ -898,12 +1052,16 @@ class OwnerLendFence:
         record = lent_record(data) or {}
         key = str(record.get("key") or "")
         provider = str(record.get("provider") or key or "this")
-        done = request_claim(self.root, key)
-        if verdict == "awaiting":
-            _note_awaiting(self.root, provider, record)
-            return awaiting_handback_message(provider, label)
+        epoch = int(record.get("epoch") or 0)
+        done = request_claim(self.root, key, credential_id=credential_id, epoch=epoch)
+        # A RECORDED WAIT ASKS AGAIN TOO, and reads the answer inline like any claim:
+        # a node that reconnected answers ``standby`` and the owner renews on this
+        # request, not on one after the retry clock.
         if done is not None and done.wait(CLAIM_INLINE_S):
-            outcome = _claim_outcomes.get((_root_key(self.root), key), "")
+            # BOUND TO THE EPOCH IT ANSWERED (#3955 Q3): a ``standby`` the node gave
+            # for the previous epoch authorised the POST that moved the epoch on,
+            # and must not authorise another.
+            outcome = claim_outcome(self.root, key, epoch)
             if outcome == "standby":
                 return None
             if outcome == "renewed":
@@ -913,7 +1071,26 @@ class OwnerLendFence:
             if outcome == "awaiting_handback":
                 _note_awaiting(self.root, provider, record)
                 return awaiting_handback_message(provider, label)
+        if verdict == "awaiting":
+            _note_awaiting(self.root, provider, record)
+            return awaiting_handback_message(provider, label)
         return checking_message(provider, label)
+
+    def nudge(self, credential_id: int, data: dict[str, Any]) -> None:
+        """Start a claim without waiting (the ``awaiting_writeback`` wait, #3955 M2).
+
+        Only the node's answer can end that wait while it stays connected: a
+        write-back adopts, a ``standby``/``none`` proves the refusal was final.
+        """
+        record = lent_record(data)
+        if record is None:
+            return
+        request_claim(
+            self.root,
+            str(record.get("key") or ""),
+            credential_id=credential_id,
+            epoch=int(record.get("epoch") or 0),
+        )
 
     def posted(self, credential_id: int, data: dict[str, Any]) -> None:
         """After this owner renewed a lent login: bump the epoch, push to the node."""
@@ -922,8 +1099,15 @@ class OwnerLendFence:
         record = lent_record(data)
         if record is None:
             return
+        # The standby that authorised this POST is spent (#3955 Q3): the next
+        # refresh asks the node again at once, not on the retry clock.
+        forget_claim(self.root, str(record.get("key") or ""))
         try:
-            store = AuthStore(config_dir=self.root) if self.root is not None else AuthStore()
+            store = (
+                AuthStore(db_path=self.root / "auth.db", config_dir=self.root)
+                if self.root is not None
+                else AuthStore()
+            )
             try:
                 note_owner_posted(store, credential_id, data)
             finally:
@@ -934,7 +1118,8 @@ class OwnerLendFence:
 
 
 _claim_threads: dict[tuple[str, str], threading.Event] = {}
-_claim_outcomes: dict[tuple[str, str], str] = {}
+#: ``slot -> (outcome, epoch the claim was asked for)`` — see :func:`claim_outcome`.
+_claim_outcomes: dict[tuple[str, str], tuple[str, int]] = {}
 _claim_started: dict[tuple[str, str], float] = {}
 _claim_guard = threading.Lock()
 
@@ -943,11 +1128,36 @@ def _root_key(root: Path | None) -> str:
     return str(root) if root is not None else ""
 
 
-def request_claim(root: Path | None, key: str) -> threading.Event | None:
+def claim_outcome(root: Path | None, key: str, epoch: int) -> str:
+    """This process's last claim answer for ``key`` — only if it was for ``epoch``."""
+    with _claim_guard:
+        outcome, asked_for = _claim_outcomes.get((_root_key(root), key), ("", -1))
+    return outcome if asked_for == epoch else ""
+
+
+def forget_claim(root: Path | None, key: str) -> None:
+    """Drop this process's cached claim for ``key`` (its answer was used)."""
+    slot = (_root_key(root), key)
+    with _claim_guard:
+        _claim_outcomes.pop(slot, None)
+        _claim_started.pop(slot, None)
+        running = _claim_threads.get(slot)
+        if running is not None and running.is_set():
+            _claim_threads.pop(slot, None)
+
+
+def request_claim(
+    root: Path | None, key: str, *, credential_id: int | None = None, epoch: int = 0
+) -> threading.Event | None:
     """Start (or join) ONE background ``credential_claim`` for ``key``; its done event.
 
     Rate-limited per key (:data:`CLAIM_RETRY_S`) so a burst of requests does not
     queue claims behind each other on the relay.
+
+    A RELAY THAT CANNOT BE ASKED IS R4, NOT "CHECKING" (#3955 M1): stopped, crashed
+    or gone with a left network, no claim will ever answer, so the wait is recorded
+    on the row (``awaiting_handback``) where the fence reads it — the sentence then
+    names ``/login`` and the return cap bounds it.
     """
     if not key:
         return None
@@ -956,7 +1166,14 @@ def request_claim(root: Path | None, key: str) -> threading.Event | None:
         running = _claim_threads.get(slot)
         if running is not None and not running.is_set():
             return running
-        if time.monotonic() - _claim_started.get(slot, -1e9) < CLAIM_RETRY_S and running:
+        answered_for = _claim_outcomes.get(slot, ("", -1))[1]
+        if (
+            running is not None
+            and answered_for == epoch
+            and time.monotonic() - _claim_started.get(slot, -1e9) < CLAIM_RETRY_S
+        ):
+            # Rate limit — but only for an answer about THIS epoch. One about the
+            # pair before an adoption or a POST says nothing now (#3955 Q3).
             return running
         done = threading.Event()
         _claim_threads[slot] = done
@@ -965,12 +1182,41 @@ def request_claim(root: Path | None, key: str) -> threading.Event | None:
     def run() -> None:
         try:
             answer = _relay_op(root, "credential_claim", key, timeout=CLAIM_WAIT_S + 5.0)
-            _claim_outcomes[slot] = str((answer or {}).get("state") or "")
+            state = str((answer or {}).get("state") or "")
+            if answer is None:
+                state = "awaiting_handback"
+                _record_unreachable(root, credential_id, epoch)
+            with _claim_guard:
+                _claim_outcomes[slot] = (state, epoch)
         finally:
             done.set()
 
     threading.Thread(target=run, name="mesh-renewal-claim-ask", daemon=True).start()
     return done
+
+
+def _record_unreachable(root: Path | None, credential_id: int | None, epoch: int) -> None:
+    """Write R4's wait on the row when this device's relay could not be asked."""
+    if credential_id is None:
+        return
+    try:
+        from local_operator.providers.auth_store import AuthStore
+
+        store = (
+            AuthStore(db_path=root / "auth.db", config_dir=root)
+            if root is not None
+            else AuthStore()
+        )
+        try:
+            _record_claim(
+                store,
+                credential_id,
+                {"state": "awaiting_handback", "at_ms": int(time.time() * 1000), "epoch": epoch},
+            )
+        finally:
+            store.close()
+    except Exception:  # noqa: BLE001 — the fence still answers "checking"
+        logger.debug("unreachable relay could not be recorded", exc_info=True)
 
 
 def _relay_op(
@@ -1026,7 +1272,10 @@ def node_custody_marker(owner: str) -> dict[str, Any]:
 def node_store(client: Any, key: str, owner: str, detail: dict[str, Any]) -> bool:
     """Write (or replace) the node's custody of ``key`` from an owner lend/push/stale answer."""
     from local_operator.network.credentials import sync as sync_mod
-    from local_operator.providers.auth_store import REFRESH_DELEGATE_KEY
+    from local_operator.providers.auth_store import (
+        MESH_CUSTODY_IDENTITY_KEY,
+        REFRESH_DELEGATE_KEY,
+    )
 
     refresh = detail.get("refresh")
     if not isinstance(refresh, str) or not refresh:
@@ -1046,6 +1295,11 @@ def node_store(client: Any, key: str, owner: str, detail: dict[str, Any]) -> boo
             "epoch": epoch,
         },
         REFRESH_DELEGATE_KEY: node_custody_marker(owner),
+        # ITS OWN ROW, ALWAYS (#3955 M4): the store dedupes on the account identity
+        # (email/account_id), so without this a node signed in to the same account
+        # had its OWN login overwritten by the lent pair — and signed out of it when
+        # custody ended. One row per (owner, key), never the node's account row.
+        MESH_CUSTODY_IDENTITY_KEY: f"{owner}:{key}",
         CUSTODY_KEY: {
             "owner": owner,
             "key": key,
@@ -1300,3 +1554,114 @@ def _audit_provider_revoked(root: Any, key: str, provider: str, outcome: str) ->
         log.flush()
     except Exception:  # noqa: BLE001 — a log that cannot be written is not a refusal
         logger.debug("provider revoke could not be audited", exc_info=True)
+
+
+# ---------------------------------------------------------------------------
+# Owner — ending a lend (share revoke, member removal, panic, leaving: #3955 Q1)
+# ---------------------------------------------------------------------------
+
+
+def end_lends(
+    root: Path | None,
+    network_id: str,
+    *,
+    devices: Any = None,
+    key: str = "",
+    cause: str,
+    audit: Any = None,
+) -> int:
+    """End the owner's ``lent`` records for ``devices`` (all when ``None``); a count.
+
+    WHY (#3955 Q1/m1): nothing ended the record, so after a revoke, a ``member
+    rm`` or a panic the owner kept asking a node that could never answer and,
+    under R4, waited up to the 7-day return cap with its own login unusable — and
+    refused every other node as ``already_lent``. With the record gone the owner
+    renews on its own again, at once.
+
+    The safe direction in B1: the node never renews (custody only), so the owner's
+    pair is the family's current one. From B2 a node MAY have renewed; the
+    owner's next POST then meets ``invalid_grant`` and, with no lend left to wait
+    for, reads as "sign in again" — honest, and never a re-presented token. A
+    pending ``awaiting_writeback`` is settled the same way here.
+
+    Scoped to ``network_id`` (a record from before the field existed is ended
+    too: fail closed). ``key`` narrows a share revoke to its credential. Ids only
+    in the audit. Never raises: the revoke, removal or panic already committed.
+    """
+    from local_operator.providers.auth_store import REFRESH_DELEGATE_KEY, AuthStore
+
+    wanted = None if devices is None else {str(d) for d in devices if d}
+    ended: list[tuple[str, str]] = []
+    try:
+        store = (
+            AuthStore(db_path=root / "auth.db", config_dir=root)
+            if root is not None
+            else AuthStore()
+        )
+    except Exception:  # noqa: BLE001
+        logger.warning("ending renewal lends: the store could not be opened", exc_info=True)
+        return 0
+    try:
+        for row in store.list_credentials(include_disabled=True):
+            record = lent_record(dict(getattr(row, "data", {}) or {}))
+            if record is None:
+                continue
+            node = str(record.get("device") or "")
+            record_key = str(record.get("key") or "")
+            if wanted is not None and node not in wanted:
+                continue
+            if key and record_key != key:
+                continue
+            if network_id and str(record.get("network_id") or network_id) != network_id:
+                continue
+
+            def write(payload: dict[str, Any], node: str = node) -> bool:
+                current = payload.get(REFRESH_DELEGATE_KEY)
+                if not isinstance(current, dict) or current.get("state") != LENT_STATE:
+                    return False
+                if str(current.get("device") or "") != node:
+                    return False
+                payload.pop(REFRESH_DELEGATE_KEY, None)
+                _settle_refused(payload)
+                return True
+
+            try:
+                if store._update_payload(row.id, write):  # noqa: SLF001
+                    ended.append((record_key, node))
+            except Exception:  # noqa: BLE001
+                logger.warning("ending one renewal lend failed", exc_info=True)
+    finally:
+        store.close()
+    for record_key, node in ended:
+        forget_claim(root, record_key)
+        _audit_ended(root, network_id, record_key, node, cause, audit)
+    return len(ended)
+
+
+def _audit_ended(
+    root: Path | None, network_id: str, key: str, node: str, cause: str, audit: Any
+) -> None:
+    """``credential.renewal_ended``, on the relay's log when one is given. Never raises."""
+    try:
+        from local_operator.network import audit as audit_mod
+        from local_operator.network import store as net_store
+
+        log = audit if audit is not None else audit_mod.AuditLog(root)
+        actor = ""
+        try:
+            actor = net_store.load(network_id, root).self_device_id
+        except Exception:  # noqa: BLE001 — a left network may have no record
+            actor = ""
+        log.record(
+            audit_mod.AuditEvent(
+                event="credential.renewal_ended",
+                actor=actor,
+                subject=node,
+                network_id=network_id,
+                detail={"credential_key": key, "act": actor, "sub": node, "cause": cause},
+            )
+        )
+        if audit is None:
+            log.flush()
+    except Exception:  # noqa: BLE001 — a log that cannot be written is not a refusal
+        logger.debug("renewal end could not be audited", exc_info=True)
