@@ -948,7 +948,11 @@ async def test_stop_runs_the_graceful_ladder_only(
             "t", {"op": "stop", "session": record.session_id}, None, None, _context(root)
         )
         assert not result.is_error, result.text
-        assert result.text == _Outcome.line
+        # The receipt leads; the second line names the cost and offers park
+        # (2026-11-12 field gap: stops silently made wakes dormant).
+        head, hint = result.text.split("\n", 1)
+        assert head == _Outcome.line
+        assert "DORMANT" in hint and "op='park'" in hint
         assert captured["target"] == record
         # v1 is the graceful ladder only: no SIGKILL from the tool, and the
         # marker records which front end asked.
@@ -1246,7 +1250,11 @@ def test_schema_budget_is_measured_with_the_repos_own_ruler() -> None:
     # trimmed to the start-context budget — pinned at 1314, the same one-token
     # headroom as every pin above rather than the cushion the untrimmed field
     # would have left.
-    assert count_text_tokens(params) <= 1314
+    # RE-MEASURED for `park` (2026-11-12): one enum word plus the one clause
+    # that tells it apart from `stop` ("keeps wakes/monitors armed") — 1326
+    # measured with this test's own ruler, pinned at 1327 (one-token headroom).
+    # The rest of park's contract lives in op='help', not the schema.
+    assert count_text_tokens(params) <= 1327
     assert count_text_tokens(_SESSIONS_TOOL_DESCRIPTION) <= 273
 
 
@@ -1562,9 +1570,11 @@ async def test_peek_search_budget_is_a_depth_and_moves_with_the_needle(
     budget, needle at ~5 KB depth (hit, ``scanned_bytes`` under the cap) and
     the SAME fixture shape with the needle at ~330 KB depth (honest miss) —
     the miss message names the bound and a pointer to widen."""
-    from local_operator.tools import builtin as builtin_module
+    # The search lives in ``session/peek.py`` (shared with a mesh owner's
+    # ``net_session_peek``), so the budget is patched where the walk reads it.
+    from local_operator.session import peek as peek_module
 
-    monkeypatch.setattr(builtin_module, "_PEEK_SCAN_BYTES", 64 * 1024)
+    monkeypatch.setattr(peek_module, "_PEEK_SCAN_BYTES", 64 * 1024)
 
     _, shallow_ids, _ = _big_journal(
         root, "ffff66667777", rows=400, pad=900, needle="needle-shallow", needle_row=395
@@ -2012,11 +2022,9 @@ async def test_help_returns_the_reference_and_refuses_an_address() -> None:
     result = await execute_sessions("t", {"op": "help"}, None, None, None)
     assert not result.is_error, result.text
     assert result.text == render_sessions_reference()
-    # Round 1 (NIT): the reference's refusal line must match behavior —
-    # `include_stored` widens only the LOCAL half (refused beside
-    # `scope='remote'` alone), while `query` is refused beside `peer` too.
+    # Local-only fields must not be silently ignored by an addressed peer.
     assert (
-        "`include_stored` widens only the local half and is refused beside `scope='remote'`."
+        "`include_stored` widens only the local half and is refused beside `peer`/`scope='remote'`."
         in result.text
     )
 
@@ -2054,7 +2062,7 @@ async def test_a_stray_parameter_refusal_names_the_ops_accepted_set() -> None:
     mixed = await execute_sessions("t", {"op": "bogus", "timeout_ms": 1}, None, None, None)
     assert mixed.is_error
     assert mixed.text.startswith("invalid arguments:")
-    assert "The ops are list, info, spawn, resume, stop, peek, move, help." in mixed.text
+    assert "The ops are list, info, spawn, resume, stop, park, peek, move, help." in mixed.text
 
 
 @pytest.mark.asyncio
@@ -2633,6 +2641,96 @@ async def test_list_scope_remote_and_peer_narrow_the_fetch(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("scope", [None, "all", "remote"])
+async def test_list_explicit_peer_never_reads_local_rows(
+    root: Path, monkeypatch: pytest.MonkeyPatch, scope: str | None
+) -> None:
+    """An address selects its device before the shared result limit is applied."""
+
+    def forbidden_local(*args: Any, **kwargs: Any) -> Any:
+        pytest.fail("an explicitly addressed peer must not read the local catalogue")
+
+    monkeypatch.setattr("local_operator.info.collect.session_rows", forbidden_local)
+    calls: list[tuple[list[str], float]] = []
+    _fake_mesh(monkeypatch, _fed_doc(), calls=calls)
+    params: dict[str, Any] = {"op": "list", "peer": PEER, "limit": 1}
+    if scope is not None:
+        params["scope"] = scope
+    context = _context(root)
+    tool = build_sessions_tool(context)
+    assert tool is not None
+    result = await tool.execute("t", params, None, None, context)
+    assert not result.is_error, result.text
+    assert (result.details or {})["scope"] == "remote"
+    assert [row["session_id"] for row in (result.details or {})["rows"]] == ["aaaa11112222"]
+    assert (result.details or {})["total"] == 2
+    assert "shared-one" in result.text and "second" not in result.text
+    assert calls == [(["network", "sessions", "--json", "--peer", PEER], 30.0)]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "failure", ["relay_unavailable", "peer_not_found", "no_json", "timeout", "unreachable"]
+)
+async def test_list_explicit_peer_failure_never_falls_back_local(
+    root: Path, monkeypatch: pytest.MonkeyPatch, failure: str
+) -> None:
+    def forbidden_local(*args: Any, **kwargs: Any) -> Any:
+        pytest.fail("a peer failure must never fall back to local sessions")
+
+    monkeypatch.setattr("local_operator.info.collect.session_rows", forbidden_local)
+    calls: list[list[str]] = []
+
+    async def fake(argv: list[str], timeout: float, context: object | None = None):
+        calls.append(argv)
+        if failure == "timeout":
+            raise TimeoutError
+        if failure == "no_json":
+            return 1, None, "synthetic peer transport failed"
+        if failure == "unreachable":
+            return (
+                0,
+                _fed_doc(
+                    sessions=[],
+                    peers={
+                        "d_b": {
+                            "name": PEER,
+                            "reachable": False,
+                            "reason": "connect_failed:ConnectionRefusedError",
+                        }
+                    },
+                ),
+                "",
+            )
+        return 1, {"ok": False, "code": failure, "message": f"synthetic {failure}"}, ""
+
+    monkeypatch.setattr(builtin, "_mesh_cli_json", fake)
+    context = _context(root)
+    tool = build_sessions_tool(context)
+    assert tool is not None
+    result = await tool.execute("t", {"op": "list", "peer": PEER, "limit": 1}, None, None, context)
+    assert calls == [["network", "sessions", "--json", "--peer", PEER]]
+    assert not (result.details or {}).get("rows")
+    if failure == "unreachable":
+        assert not result.is_error
+        assert f"{PEER}: unreachable" in result.text
+        assert (result.details or {})["scope"] == "remote"
+    else:
+        assert result.is_error, result.text
+        assert "synthetic" in result.text or "did not finish" in result.text
+
+
+def test_list_peer_conflicts_refuse_instead_of_ignoring_local_fields() -> None:
+    for scope in ("all", "remote"):
+        refusal = _sessions_validation_error(
+            SessionsParams(op="list", peer=PEER, scope=scope, include_stored=True)
+        )
+        assert refusal is not None and "include_stored" in refusal and "drop" in refusal
+    refusal = _sessions_validation_error(SessionsParams(op="list", peer=PEER, scope="local"))
+    assert refusal is not None and "drop one" in refusal
+
+
+@pytest.mark.asyncio
 async def test_list_with_no_mesh_degrades_to_local_rows_and_one_note(
     root: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2777,8 +2875,7 @@ async def test_remote_peek_reads_a_tail_and_relays_the_stored_gate(
                 PEER,
                 "--peek",
                 "aaaa11112222",
-                "--steps",
-                "2",
+                "--steps=2",
             ],
             net_pilot_bound(),
         )
@@ -2873,6 +2970,8 @@ async def test_remote_ops_map_to_the_pilot_argv_and_bounds(
                 "--peer",
                 PEER,
                 "--create",
+                "--origin",
+                "agent",
                 "--prompt",
                 "go",
                 "--hosting",
@@ -2918,13 +3017,16 @@ async def test_remote_stop_refuses_without_sending_weaker_stop(
 def test_mesh_field_refusals_name_the_local_route() -> None:
     """The remote/local composition refusals: each names the field that does
     not apply and the route that does, rather than dropping it silently."""
-    refusal = _sessions_validation_error(
-        SessionsParams(op="peek", peer="p", session="s", query="q")
-    )
-    assert refusal is not None
+    # A remote peek takes every local window now (the owner reads its journal
+    # with the same readers), so `query` beside `peer` validates clean — and an
+    # over-budget remote window refuses with the LOCAL sentence.
     assert (
-        "reads THIS device's transcript" in refusal and "drop `peer` for the local read" in refusal
+        _sessions_validation_error(SessionsParams(op="peek", peer="p", session="s", query="q"))
+        is None
     )
+    assert _sessions_validation_error(
+        SessionsParams(op="peek", peer="p", session="s", head=51)
+    ) == _sessions_validation_error(SessionsParams(op="peek", session="s", head=51))
     refusal = _sessions_validation_error(SessionsParams(op="list", peer="p", scope="local"))
     assert refusal is not None and "drop one" in refusal
     refusal = _sessions_validation_error(SessionsParams(op="list", scope="remote", query="q"))
@@ -3551,6 +3653,392 @@ async def test_stop_puts_the_outcome_above_the_wait_lines(
     lines = result.text.splitlines()
     assert lines[0] == 'stopped "stoppable"'
     assert "waiting up to" in lines[1]
+
+
+# ---------------------------------------------------------------------------
+# park — free a session's memory, keep its wakes and monitors armed
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_stop_without_dormant_schedules_has_no_park_hint(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The hint is about what the stop COST; a stop that parked nothing says nothing."""
+    worker = _live_pid()
+    record = _publish_record(root, "abcdabcdab01", "plain", pid=worker.pid)
+
+    async def _fake_stop(target: Any, **kwargs: Any) -> Any:
+        return control.StopOutcome(
+            pid=record.pid,
+            session_id=record.session_id,
+            name="plain",
+            method="socket",
+            line='stopped "plain"',
+        )
+
+    monkeypatch.setattr(control, "stop_session", _fake_stop)
+    try:
+        result = await execute_sessions(
+            "t", {"op": "stop", "session": record.session_id}, None, None, _context(root)
+        )
+        assert result.text == 'stopped "plain"'
+    finally:
+        registry.unpublish(record.pid, root)
+        worker.terminate()
+        worker.wait(timeout=10)
+
+
+@pytest.mark.asyncio
+async def test_park_another_session_uses_the_park_ladder_and_says_what_stays_armed(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    worker = _live_pid()
+    record = _publish_record(root, "abcdabcdab02", "parkable", pid=worker.pid)
+    captured: dict[str, Any] = {}
+
+    async def _fake_park(target: Any, **kwargs: Any) -> Any:
+        captured["target"] = target
+        captured.update(kwargs)
+        return control.StopOutcome(
+            pid=record.pid,
+            session_id=record.session_id,
+            name="parkable",
+            method="socket",
+            line="parked",
+            parked=True,
+            wakes_armed=2,
+            monitors_armed=1,
+        )
+
+    async def _no_stop(*_a: Any, **_k: Any) -> Any:  # pragma: no cover — must not run
+        raise AssertionError("park must not take the stop path")
+
+    monkeypatch.setattr(control, "park_session", _fake_park)
+    monkeypatch.setattr(control, "stop_session", _no_stop)
+    try:
+        result = await execute_sessions(
+            "t", {"op": "park", "session": record.session_id}, None, None, _context(root)
+        )
+        assert not result.is_error, result.text
+        assert result.text == (
+            'parked "parkable" — 2 wakes and 1 monitor stay armed; the supervisor '
+            "reopens it when one fires"
+        )
+        assert captured["target"] == record
+        details = result.details or {}
+        assert details["op"] == "park" and details["parked"] is True
+        assert (details["wakes_armed"], details["monitors_armed"]) == (2, 1)
+    finally:
+        registry.unpublish(record.pid, root)
+        worker.terminate()
+        worker.wait(timeout=10)
+
+
+@pytest.mark.asyncio
+async def test_park_refusal_is_the_stops_refusal(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    worker = _live_pid()
+    record = _publish_record(root, "abcdabcdab03", "busy-one", pid=worker.pid)
+
+    async def _fake_park(target: Any, **kwargs: Any) -> Any:
+        return control.StopOutcome(
+            pid=record.pid,
+            session_id=record.session_id,
+            name="busy-one",
+            method="refused",
+            reason=control.REASON_BUSY,
+            line="refused",
+        )
+
+    monkeypatch.setattr(control, "park_session", _fake_park)
+    try:
+        result = await execute_sessions(
+            "t", {"op": "park", "session": record.session_id}, None, None, _context(root)
+        )
+        assert result.is_error
+        assert "is working right now" in result.text
+    finally:
+        registry.unpublish(record.pid, root)
+        worker.terminate()
+        worker.wait(timeout=10)
+
+
+@pytest.mark.asyncio
+async def test_park_with_peer_is_refused_without_contacting_anything(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        control, "park_session", AsyncMock(side_effect=AssertionError("must not park"))
+    )
+    result = await execute_sessions(
+        "t", {"op": "park", "session": "abcdabcdab04", "peer": "laptop"}, None, None, _context(root)
+    )
+    assert result.is_error
+    assert "another device" in result.text
+
+
+class _Jobs:
+    """A ``JobManagerProtocol`` with fixed rows (only ``status`` is read)."""
+
+    def __init__(self, statuses: list[str]) -> None:
+        self._rows = [type("Job", (), {"status": status})() for status in statuses]
+
+    def get(self, job_id: str, *, registrant_id: str | None = None) -> Any:
+        return None
+
+    def list(self, *, registrant_id: str | None = None) -> list[Any]:
+        return list(self._rows)
+
+    async def cancel(self, job_id: str, *, registrant_id: str | None = None) -> bool:
+        return False
+
+
+@pytest.mark.asyncio
+async def test_self_park_is_deferred_to_a_detached_helper_when_idle(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No address = THIS session, after this turn: the tool spawns the helper and
+    returns; it never runs the ladder itself (that would cut its own turn)."""
+    from local_operator.session.runtime import park_after_turn
+
+    spawned: list[tuple[int, str]] = []
+    monkeypatch.setattr(
+        park_after_turn, "spawn", lambda pid, sid: spawned.append((pid, sid)) or 4242
+    )
+    monkeypatch.setattr(
+        control, "park_session", AsyncMock(side_effect=AssertionError("not synchronously"))
+    )
+    result = await execute_sessions(
+        "t", {"op": "park"}, None, None, _context(root, jobs=_Jobs(["completed"]))
+    )
+    assert not result.is_error, result.text
+    assert spawned == [(os.getpid(), REQUESTER_ID)]
+    assert "parks as soon as this turn ends" in result.text
+    assert (result.details or {})["helper_pid"] == 4242
+
+
+@pytest.mark.asyncio
+async def test_self_park_is_refused_while_a_job_or_subagent_runs(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from local_operator.session.runtime import park_after_turn
+
+    monkeypatch.setattr(
+        park_after_turn, "spawn", lambda *_a: (_ for _ in ()).throw(AssertionError("no spawn"))
+    )
+    result = await execute_sessions(
+        "t", {"op": "park"}, None, None, _context(root, jobs=_Jobs(["running"]))
+    )
+    assert result.is_error
+    assert "cannot park itself" in result.text
+
+
+@pytest.mark.asyncio
+async def test_self_park_is_refused_while_an_ask_is_open(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from local_operator.session.runtime import park_after_turn
+
+    monkeypatch.setattr(builtin, "_self_park_busy", lambda _ctx: True)
+    monkeypatch.setattr(
+        park_after_turn, "spawn", lambda *_a: (_ for _ in ()).throw(AssertionError("no spawn"))
+    )
+    result = await execute_sessions("t", {"op": "park"}, None, None, _context(root))
+    assert result.is_error
+
+
+def test_self_park_busy_reads_open_asks_from_the_store(root: Path) -> None:
+    """The ask half of the predicate, against the real ask log."""
+    from local_operator.asks import store as ask_store
+
+    ctx = _context(root, jobs=_Jobs([]))
+    assert builtin._self_park_busy(ctx) is False
+    directory = ask_store.session_dir(root, REQUESTER_ID)
+    directory.mkdir(parents=True, exist_ok=True)
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(ask_store, "fold", lambda *_a, **_k: [{"status": ask_store.STATUS_OPEN}])
+        assert builtin._self_park_busy(ctx) is True
+
+
+def test_park_approval_copy_names_what_stays_armed() -> None:
+    assert "wakes and monitors armed" in _describe_sessions_approval(
+        {"op": "park", "session": "abc"}, "."
+    )
+    assert "after this turn" in _describe_sessions_approval({"op": "park"}, ".")
+
+
+# --- remote peek parity: the owner's journal read renders like a local peek --
+
+
+def _owner_mesh(monkeypatch: pytest.MonkeyPatch, owner_root: Path) -> list[list[str]]:
+    """A ``_mesh_cli_json`` double that runs the REAL chain minus the sockets.
+
+    argv → the real ``lop network`` parser → the CLI's own flag reading
+    (``_peek_journal_fields``) → the OWNER's ``net_session_peek`` handler body
+    (``network.peek.serve``) on ``owner_root`` → the CLI's receipt. What the tool
+    receives is the payload ``lop network sessions --json --peek`` prints, so a
+    parity claim here covers argv spelling, wire fields, the owner's readers and
+    the viewer-side render — everything but the relay hop itself, which the
+    pilot CLI tests cover over a real pair.
+    """
+    import argparse
+
+    from local_operator.network import cli as net_cli
+    from local_operator.network import peek as net_peek
+    from local_operator.network.types import MeshRefusal
+
+    parser = argparse.ArgumentParser()
+    net_cli.add_parser(parser.add_subparsers(dest="command"))
+    seen: list[list[str]] = []
+
+    async def fake(argv: list[str], timeout: float, context: object | None = None):
+        seen.append(argv)
+        args = parser.parse_args(argv)
+        request = net_cli._peek_journal_fields(args)
+        if args.steps is not None:
+            request["steps"] = args.steps
+        frame = {"session_id": args.peek, **request}
+        try:
+            answer = net_peek.serve(owner_root, frame, own_label="owner-box")
+        except MeshRefusal as exc:
+            return 1, {"ok": False, "code": exc.code, "message": exc.sentence}, ""
+        payload, _lines = net_cli._peek_journal_receipt(answer, args.peek, "owner-box")
+        return 0, payload, ""
+
+    monkeypatch.setattr("local_operator.tools.builtin._mesh_cli_json", fake)
+    return seen
+
+
+@pytest.mark.asyncio
+async def test_remote_peek_windows_match_the_owners_local_peek(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Acceptance: with `peer`, head/query/regex/digest/around_id/before_id/steps
+    return the same text as the equivalent LOCAL call on the owner — and the
+    session is STORED (no live record anywhere), which the v1 tail refused."""
+    _, ids, _ = _big_journal(
+        root, "abab12121212", rows=120, pad=40, custom_every=7, needle="needle-x", needle_row=30
+    )
+    seen = _owner_mesh(monkeypatch, root)
+    cases: list[dict[str, Any]] = [
+        {},
+        {"steps": 5},
+        {"head": 4},
+        {"before_id": ids[60]},
+        {"around_id": ids[40]},
+        {"query": "needle-x", "steps": 3},
+        {"query": "needle-[x]", "regex": True, "steps": 3},
+        {"query": "no-such-needle"},
+        {"digest": True},
+    ]
+    for case in cases:
+        local = await _peek(root, {"op": "peek", "session": "abab12121212", **case})
+        remote = await _peek(root, {"op": "peek", "session": "abab12121212", "peer": PEER, **case})
+        assert not local.is_error, (case, local.text)
+        assert not remote.is_error, (case, remote.text)
+        assert remote.text == local.text, case
+        # ``bridge_taint`` is the one deliberate difference (#3796, S-60): the
+        # local peek judges the journal's own Team Bridge latch, while a mesh
+        # peer reports none, so any step it returns latches fail closed.
+        skip = {"peer", "bridge_taint"}
+        local_details = {k: v for k, v in local.details.items() if k not in skip}
+        remote_details = {k: v for k, v in remote.details.items() if k not in skip}
+        assert remote_details == local_details, case
+        assert remote.details["peer"] == PEER
+        assert "bridge_taint" not in local.details, case
+        shown = remote.details.get("steps_shown") or remote.details.get("steps_seen")
+        assert remote.details.get("bridge_taint") is (True if shown else None), case
+    # The head read really is the ORIGINAL request end of the journal.
+    head = await _peek(root, {"op": "peek", "session": "abab12121212", "peer": PEER, "head": 2})
+    assert _rows_in(head.text) == {1, 2}, head.text
+    # Only the named windows rode the argv, in one-token `--flag=value` form.
+    assert seen[1][-1] == "--steps=5" and "--head=4" in seen[2]
+    assert "--regex" in seen[6] and "--query=needle-[x]" in seen[6]
+
+
+@pytest.mark.asyncio
+async def test_remote_peek_refuses_over_budget_with_the_local_sentence(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Over-budget and malformed windows refuse with the SAME words as local —
+    and refuse at validation, before any hop (nothing reaches the owner)."""
+    _big_journal(root, "cdcd34343434", rows=10, pad=10)
+    seen = _owner_mesh(monkeypatch, root)
+    for case in (
+        {"head": 51},
+        {"steps": 51},
+        {"steps": 3, "head": 3},
+        {"digest": True, "query": "x"},
+        {"regex": True},
+    ):
+        local = await _peek(root, {"op": "peek", "session": "cdcd34343434", **case})
+        remote = await _peek(root, {"op": "peek", "session": "cdcd34343434", "peer": PEER, **case})
+        assert local.is_error and remote.is_error, case
+        assert remote.text == local.text, case
+    assert seen == []
+
+
+@pytest.mark.asyncio
+async def test_remote_peek_bounds_a_peer_regex_before_the_hop(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A peer-side regex runs on the OWNER's CPU: over-long and nested-quantifier
+    patterns are refused here (and by the owner), a malformed one in the local
+    argument class; a plain one is served."""
+    _big_journal(root, "efef56565656", rows=10, pad=10)
+    seen = _owner_mesh(monkeypatch, root)
+    base = {"op": "peek", "session": "efef56565656", "peer": PEER, "regex": True}
+    too_long = await _peek(root, {**base, "query": "a" * 257})
+    assert too_long.is_error and "capped at 256" in too_long.text
+    nested = await _peek(root, {**base, "query": "(a+)+$"})
+    assert nested.is_error and "nest quantifiers" in nested.text
+    broken = await _peek(root, {**base, "query": "(unclosed"})
+    assert broken.is_error and "invalid regex" in broken.text
+    assert seen == []
+    ok = await _peek(root, {**base, "query": r"row \d+"})
+    assert not ok.is_error, ok.text
+    # The OWNER enforces the same caps for a frame no tool validated.
+    from local_operator.network import peek as net_peek
+    from local_operator.network.types import MeshRefusal
+
+    with pytest.raises(MeshRefusal, match="nest quantifiers"):
+        net_peek.serve(
+            root,
+            {"session_id": "efef56565656", "query": "(a+)+", "regex": True},
+            own_label="owner-box",
+        )
+
+
+@pytest.mark.asyncio
+async def test_remote_peek_on_an_old_owner_degrades_to_the_tail_and_says_why(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An owner without ``session-peek-v1`` answers the live-display tail; the
+    note naming the reason and the dropped window LEADS the text."""
+    _fake_mesh(
+        monkeypatch,
+        {
+            "ok": True,
+            "session_id": "aaaa11112222",
+            "peer": PEER,
+            "verb": "peek",
+            "steps": 1,
+            "rows": [{"role": "user", "text": "hi"}],
+            "has_older": False,
+            "fallback": "cloud-node-1 runs a build without the remote peek (session-peek-v1)",
+            "note": "showing the newest steps instead of --head: cloud-node-1 runs a build "
+            "without the remote peek (session-peek-v1)",
+        },
+    )
+    result = await _peek(root, {"op": "peek", "peer": PEER, "session": "aaaa11112222", "head": 3})
+    assert not result.is_error, result.text
+    first = result.text.splitlines()[0]
+    assert first.startswith("note: showing the newest steps instead of --head")
+    assert "session-peek-v1" in first
+    assert result.details["fallback"].endswith("(session-peek-v1)")
+    assert "1. user: hi" in result.text
 
 
 @pytest.mark.asyncio

@@ -1898,20 +1898,33 @@ def test_an_oversized_stored_page_is_bounded_and_never_tears_the_link_down(
         pong = link.request({"op": "ping", "req": 99_001, "locality": "remote"}, timeout=10.0)
         assert pong is not None and pong.get("op") == "ack", pong
 
-        # NOTHING SERVABLE AT ALL is a NAMED refusal over the same live link: one
-        # row larger than the frame cannot be served "in part", and the reader is
-        # told which page it was rather than left with a dead link.
+        # ONE ROW LARGER THAN THE FRAME is SERVED BOUNDED AND MARKED over the same
+        # live link (PR #3903 changed this from a ``page_too_large`` refusal, which
+        # left a conversation whose newest entry was a huge paste unreadable from
+        # any other device): its identity survives so paging stays gap-free, its
+        # body is a preview plus the truncation marker, and since no row was left
+        # behind the page claims no more. Metadata too large to fit is still the
+        # named refusal; ``test_peer_view_oversized`` pins that half.
         huge = "9f3ac1e0b7d3"
-        _seed_journal(server_b.root, huge, ["y" * 9_000_000])
-        refused = _call(
+        huge_ids = _seed_journal(server_b.root, huge, ["y" * 9_000_000])
+        served = _call(
             server_a.root,
             "peer_session_history",
             peer=server_b.identity.device_id,
             session_id=huge,
         )
-        assert refused.get("op") == "error", refused
-        assert refused.get("code") == "page_too_large", refused
-        assert link.alive, "a row too large to serve closed the peer link"
+        assert served.get("op") == "ack", served
+        huge_page = served["detail"]
+        assert [entry["id"] for entry in huge_page["entries"]] == huge_ids
+        assert huge_page["has_more"] is False, "nothing was left behind"
+        payload = huge_page["entries"][0]["payload"]
+        assert payload["role"] == "user"
+        text = payload["content"][0]["text"]
+        assert text.startswith("y") and "[truncated: this entry is" in text
+        assert len(text) < 9_000_000, "the oversized body was sent whole"
+        assert link.alive, "a row too large for one frame closed the peer link"
+        pong = link.request({"op": "ping", "req": 99_002, "locality": "remote"}, timeout=10.0)
+        assert pong is not None and pong.get("op") == "ack", pong
     finally:
         link.close("test")
 
@@ -3618,28 +3631,36 @@ async def test_the_viewer_surfaces_the_owners_frame_for_a_peer_row(
         link.close("test")
 
 
-def test_a_stored_session_refuses_a_peek_and_stays_cold(
+def test_a_stored_session_peek_is_served_from_the_journal_and_stays_cold(
     peer_pair: Devices, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """§8.3, over a real link: the gate reads the row state BEFORE any viewer.
+    """§8.3, over a real link: a remote read of a STORED session starts nothing.
 
-    The tempting implementation of a remote read is to open the viewer and let
-    the bind warm whatever is there — that is what ENGAGE does, and it is why
-    this cell sits beside the cold-engage one: the refusal is only half the
-    claim; the other half is read off the OWNER's own rows afterwards, because
-    a gate that merely raised after a bind would still have started a runtime
-    on a device nobody is watching.
+    This cell used to pin a REFUSAL (``session_stored``): the live-only gate was
+    the only way to keep a read from warming a runtime. PR #3831 replaced that
+    gate with the owner's journal read (``net_session_peek``): the owner answers
+    from its own disk and never opens, binds or warms the session, so the read
+    is now SERVED. ``session_stored`` survives only for an owner too old to read
+    its journal for us, which ``test_sessions_pilot`` covers.
+
+    The half that never changed is the cold check, and it stays strict: it is
+    read off the OWNER's own rows afterwards, because a read that answered after
+    a bind would still have started a runtime on a device nobody is watching —
+    the tempting implementation (open the viewer and let the bind warm whatever
+    is there) is what ENGAGE does, which is why this cell sits beside the
+    cold-engage one.
 
     Driven through the CLI's own handler over the real relay control socket,
-    so the RESOLUTION (a real fan-out, a real stored row) and the GATE run as
-    one path.
+    so the RESOLUTION (a real fan-out, a real stored row) and the journal read
+    run as one path. A REAL journal is seeded so "served" is proved by its text
+    coming back, not by an exit code alone.
     """
     from local_operator.network import cli as network_cli
 
     server_a, server_b, _host_a, _port_a = peer_pair
     record, _host, _port = _pair(peer_pair, monkeypatch, role="drive")
     host_b, port_b = _listen(server_b)
-    _seed(server_b.root, SESSION)
+    _seed_journal(server_b.root, SESSION, ["a stored line only the owner's disk holds"])
     link = _dial_to(server_a, record, host_b, port_b)
     try:
         monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(server_a.root))
@@ -3653,11 +3674,13 @@ def test_a_stored_session_refuses_a_peek_and_stays_cold(
                     peek=SESSION,
                 )
             )
-            == 1
+            == 0
         )
         payload = json.loads(capsys.readouterr().out)
-        assert payload["code"] == "session_stored", payload
-        assert "engage" in payload["message"] and "resume" in payload["message"], payload
+        assert payload["ok"] is True, payload
+        assert payload["source"] == "journal", payload
+        assert payload["session_id"] == SESSION, payload
+        assert "a stored line only the owner's disk holds" in json.dumps(payload), payload
         states = [
             item["state"] for item in server_b.local_session_rows() if item["session_id"] == SESSION
         ]

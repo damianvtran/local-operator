@@ -154,6 +154,7 @@ from local_operator.session.retention import (
 from local_operator.session.runtime import registry
 from local_operator.session.runtime.types import JOURNAL_ORDER_EVENT
 from local_operator.session.session_search import search_store
+from local_operator.session.temporary import RowProjector as _TemporaryRows
 from local_operator.session.transcript import (
     custom_type_proven_absent,
     read_entry_by_id,
@@ -6418,7 +6419,30 @@ class DesktopSessionBridge:
         # viewer cold and the next keystroke should be free to try again.
         if remote.engage_in_flight or (self.warm_task is not None and not self.warm_task.done()):
             return
+        # A DELETED TEMPORARY CHAT IS NEVER RE-SPAWNED. A bridge resident from
+        # before the temporary pass removed the directory still carries a live
+        # watch lease, and its lease loop (or a retire frame) would start a
+        # runtime that recreates ``sessions/<id>/`` -- which masks the tombstone
+        # for good, since ``deleted_at`` answers only while the directory is
+        # absent. Silent here because two of the three callers have nobody to
+        # answer; the routes are refused at the pool's door instead.
+        if self.deleted_temporary_at() is not None:
+            return
         self.warm_task = asyncio.create_task(remote.warm_runtime())
+
+    def deleted_temporary_at(self) -> float | None:
+        """When this session was reaped as a temporary chat, or ``None``.
+
+        One stat on the common path (the directory exists); the tombstone file
+        is read only when it is gone. A draft has no directory by design and a
+        peer's conversation lives on another device, so neither is ever
+        answered from this machine's tombstones.
+        """
+        if self.draft is not None or self.remote_row is not None:
+            return None
+        from local_operator.session.temporary import deleted_at
+
+        return deleted_at(self.root, self.session_id)
 
     def _on_runtime_retired(self) -> None:
         """The runtime retired itself; engage its successor now.
@@ -7147,6 +7171,65 @@ def prepare_images_for_owner(
             send = {**send, "origin_path": image["origin_path"]}
         prepared.append(send)
     return prepared
+
+
+class TemporaryRefusal(ValueError):
+    """A temporary-chat refusal with its wire status, code and catalogued sentence.
+
+    One class for every temporary-chat answer the routes give (409 pin/project/
+    not-user, 404 deleted, 422 peer, 500 mark failed) so the failure ladder has
+    ONE arm for them and the code is never re-spelled per route. ``extra`` rides
+    beside the envelope (``deleted_at`` on the tombstone 404).
+    """
+
+    _STATUS = {
+        "session_temporary": 409,
+        "session_pinned": 409,
+        "session_in_project": 409,
+        "session_not_user": 409,
+        "session_temporary_deleted": 404,
+        "session_not_found": 404,
+        "temporary_peer_unsupported": 422,
+        "temporary_mark_failed": 500,
+    }
+
+    def __init__(self, code: str, session_id: str = "", **extra: Any) -> None:
+        self.code = code
+        self.session_id = session_id
+        self.extra = extra
+        self.status = self._STATUS.get(code, 409)
+        super().__init__(code)
+
+    def envelope(self, *, locale: str | None = None) -> dict[str, Any]:
+        """The wire body; ``locale`` as :meth:`Msg.envelope` (``None``: active).
+
+        The desktop routes take the default. A caller OUTSIDE the HTTP plane
+        (the relay, the TUI) names its locale, as the envelope-locale ratchet
+        requires of every non-route envelope.
+        """
+        sid = self.session_id
+        message = {
+            "session_temporary": lambda: _wd.session_temporary(session_id=sid),
+            "session_pinned": lambda: _wd.session_pinned(session_id=sid),
+            "session_in_project": lambda: _wd.session_in_project(session_id=sid),
+            "session_not_user": lambda: _wd.temporary_not_user(session_id=sid),
+            "session_temporary_deleted": _wd.session_temporary_deleted,
+            "session_not_found": lambda: _wd.session_not_found(session_id=sid),
+            "temporary_peer_unsupported": _wd.temporary_peer_unsupported,
+        }.get(self.code, lambda: _wd.temporary_mark_failed(session_id=sid))()
+        body = message.envelope(code=self.code, locale=locale)
+        body.update(self.extra)
+        return body
+
+
+def temporary_deleted_refusal(root: Path, session_id: str) -> TemporaryRefusal | None:
+    """The tombstone 404 for ``session_id`` when it is a deleted temporary chat."""
+    from local_operator.session.temporary import CODE_DELETED, deleted_at
+
+    stamp = deleted_at(root, session_id)
+    if stamp is None:
+        return None
+    return TemporaryRefusal(CODE_DELETED, session_id, deleted_at=stamp)
 
 
 class SessionDeletionRefused(ValueError):
@@ -8215,9 +8298,51 @@ class DesktopSessions:
                 raise KeyError("Unknown session")
             if not (self.root / "sessions" / session_id).is_dir():
                 raise KeyError("Unknown session")
+            # A pin is a promise to keep; a temporary chat is a promise to
+            # delete. Refused (409 ``session_temporary``) so the remedy — Keep
+            # and pin — stays the user's act. Unpinning is always allowed.
+            if pinned:
+                from local_operator.session.temporary import pin_refusal
+
+                code = pin_refusal(self.root, session_id)
+                if code:
+                    raise TemporaryRefusal(code, session_id)
             return {
                 "session_id": session_id,
                 "pinned": set_sidebar_pin(self.root, session_id, pinned),
+            }
+
+        return await asyncio.to_thread(apply)
+
+    async def set_temporary(
+        self, session_id: str, on: bool, *, by: str = "desktop"
+    ) -> dict[str, Any]:
+        """Mark (``on``) or keep (``not on``) a conversation as temporary.
+
+        Desired state, like pin and archive: a retry lands on the same state.
+        Marking runs the admission in ``session.temporary.write_mark`` (a user
+        session, not pinned, not in a project); keeping always succeeds for a
+        session that exists. The reply carries the row's ``temporary`` object as
+        it reads back, so the client reconciles on the store's own answer.
+        """
+        from local_operator.session import temporary as temp
+
+        def apply() -> dict[str, Any]:
+            # ``session_not_found`` (contract §2.3), not the ladder's generic
+            # ``requested_not_found``: this route's refusals are all named
+            # temporary-chat codes, and the client keys its copy off them.
+            if not SESSION_ID.fullmatch(session_id):
+                # Not echoed: a malformed id is caller input, not an id we know.
+                raise TemporaryRefusal(temp.CODE_NOT_FOUND, "")
+            if not (self.root / "sessions" / session_id).is_dir():
+                gone = temporary_deleted_refusal(self.root, session_id)
+                raise gone or TemporaryRefusal(temp.CODE_NOT_FOUND, session_id)
+            result = temp.write_mark(self.root, session_id, on, by=by)
+            if not result.ok:
+                raise TemporaryRefusal(result.code, session_id)
+            return {
+                "session_id": session_id,
+                "temporary": temp.RowProjector(self.root).info(session_id),
             }
 
         return await asyncio.to_thread(apply)
@@ -8907,6 +9032,7 @@ class DesktopSessions:
         model: dict[str, Any] | None = None,
         draft_id: str | None = None,
         purpose: str | None = None,
+        temporary: bool = False,
     ) -> str:
         """Create a draft session's record, optionally materialising a warm draft.
 
@@ -9038,6 +9164,17 @@ class DesktopSessions:
             # Through the shared writer, which carries the model key too, so the
             # MOVE route's second call site and this one cannot disagree about
             # the bytes, the mode or the fields.
+            # THE TEMPORARY MARK, written before the desktop marker (so the
+            # draft row is never listed unmarked) and VERIFIED by read-back:
+            # the user asked for deletion, and silently retaining the chat
+            # would break that promise, so a mark that did not land refuses
+            # the create (the ``agent-config`` stamp's precedent above).
+            if temporary:
+                from local_operator.session.temporary import write_mark
+
+                marked = write_mark(self.root, session_id, True, by="desktop")
+                if not marked.ok:
+                    raise TemporaryRefusal(marked.code, session_id)
             write_desktop_marker(path, directory, model=model, purpose=purpose)
 
         try:
@@ -9328,6 +9465,7 @@ class DesktopSessions:
         status_stamps: tuple[str, dict[str, int]] | None = None,
         *,
         include_archived: bool = False,
+        include_temporary: bool = False,
         include_peers: bool = False,
         scope: CatalogueScope | None = None,
         cursor: str | None = None,
@@ -9470,6 +9608,10 @@ class DesktopSessions:
                 # it cannot come back through the off-page pinned resolution
                 # below as a phantom row with no section to belong to.
                 include_archived=include_archived,
+                # Temporary chats (``session/temporary.py``) follow the same
+                # choke point: left out unless the client asked, and a client
+                # asks only when it advertises the group (``temporary_chats``).
+                include_temporary=include_temporary,
                 with_counts=with_counts,
                 # DRAFTS ARE NEVER LISTED (spec §1.6; QA round 2's Q-2), and the
                 # exclusion is handed INTO the catalogue's ranking→window step:
@@ -9518,6 +9660,7 @@ class DesktopSessions:
             # after the page (``entries[limit:]``): it decides them, so a filter
             # here must not re-decide them.
             projected: dict[str, dict[str, Any]] = {}
+            temporary_rows = _TemporaryRows(self.root)
             for entry in (*page_entries, *extra_entries):
                 row = entry.row._asdict()
                 # ``SessionRow.team``/``agent`` carry a PEER row's binding into the
@@ -9593,6 +9736,9 @@ class DesktopSessions:
                         # a row cannot be filtered out of the catalogue and still
                         # claim to be un-hidden by the row it came from.
                         "archived": bool(entry.row.archived),
+                        # ALWAYS PRESENT: ``null`` is the explicit "not
+                        # temporary", the object carries the window and hold.
+                        "temporary": temporary_rows.info(entry.id, bool(entry.row.temporary)),
                         # ``_asdict`` already carried this through as a tuple;
                         # spelled as a list here rather than left to the
                         # serializer, because JSON has one array type and a
@@ -9720,6 +9866,9 @@ class DesktopSessions:
                     # not return one at all, so every hit of a default search is
                     # `false` and the key exists for the answer that is not.
                     "archived": bool(match.row.archived),
+                    # Search never returns a temporary chat, so this is always
+                    # ``null``; the key exists so every row shape carries it.
+                    "temporary": None,
                     # THE FLAT LOCALITY FIELDS, local values included — the same
                     # six keys the catalogue carries them on, for the same merge
                     # reason: a search hit is the one row a client can SYNTHESISE
@@ -9752,6 +9901,7 @@ class DesktopSessions:
                         "body_match": False,
                         "pinned": bool(row.get("pinned")),
                         "archived": bool(row.get("archived")),
+                        "temporary": None,
                         "locality": "remote",
                         "owner_device": row.get("owner_device") or "",
                         "owner_device_name": row.get("owner_device_name") or "",
@@ -10247,6 +10397,7 @@ class DesktopSessions:
         """
         if not SESSION_ID.fullmatch(session_id):
             raise KeyError("Unknown session")
+        await self._refuse_deleted_temporary(session_id)
         bridge: DesktopSessionBridge | None = None
         flight: asyncio.Task[_LocatedSession] | None = None
         # ``taken`` rather than an unconditional release in the ``finally``: a
@@ -10612,6 +10763,30 @@ class DesktopSessions:
             return False
         await bridge.close()
         return True
+
+    async def _refuse_deleted_temporary(self, session_id: str) -> None:
+        """Answer a reaped temporary chat's tombstone BEFORE any residency is used.
+
+        The temporary pass removes a directory from whichever process hosts the
+        sweeper (this one, the phone daemon or a TUI), so nothing tells THIS
+        pool's resident bridge that it went -- the explicit delete's
+        :meth:`forget` has no counterpart there. Without this check a resident
+        bridge kept answering snapshot/history/events 200 for a removed chat,
+        and ``watch``/``warm``/``events`` re-spawned a runtime that recreated
+        the directory, after which the tombstone could never be read again.
+        So the door asks first and :meth:`forget`\\ s the bridge, the same
+        close-and-drop an explicit delete performs. A draft id is skipped: it
+        has no directory by design and was never a reaped session.
+        """
+        if session_id in self.drafts or (self.root / "sessions" / session_id).exists():
+            return
+        from local_operator.session.temporary import CODE_DELETED, deleted_at
+
+        stamp = await asyncio.to_thread(deleted_at, self.root, session_id)
+        if stamp is None:
+            return
+        await self.forget(session_id)
+        raise TemporaryRefusal(CODE_DELETED, session_id, deleted_at=stamp)
 
     async def close(self) -> None:
         await asyncio.gather(*(bridge.close() for bridge in self.bridges.values()))

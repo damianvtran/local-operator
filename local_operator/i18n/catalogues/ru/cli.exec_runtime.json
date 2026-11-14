@@ -9,5 +9,8 @@
   "cli.exec_runtime.model_returned": "[dim]возврат к {selector}[/dim]",
   "cli.exec_runtime.compacting": "[dim]сжатие контекста…[/dim]",
   "cli.exec_runtime.error": "Ошибка: {sentence}",
-  "cli.exec_runtime.aborted": "[red]прервано[/red]"
+  "cli.exec_runtime.aborted": "[red]прервано[/red]",
+  "cli.exec_runtime.temporary_agent_shell_refused": "временный чат начинаете вы сами; его нельзя начать из оболочки агента",
+  "cli.exec_runtime.temporary_conflicts_resume": "--temporary начинает новый чат, поэтому его нельзя сочетать с --resume",
+  "cli.exec_runtime.temporary_conflicts_workstream": "--temporary нельзя сочетать с --workstream: workstream сохраняется"
 }

@@ -9,5 +9,8 @@
   "cli.exec_runtime.model_returned": "[dim]已返回{selector}[/dim]",
   "cli.exec_runtime.compacting": "[dim]正在压缩上下文……[/dim]",
   "cli.exec_runtime.error": "错误：{sentence}",
-  "cli.exec_runtime.aborted": "[red]已中止[/red]"
+  "cli.exec_runtime.aborted": "[red]已中止[/red]",
+  "cli.exec_runtime.temporary_agent_shell_refused": "临时对话只能由你亲自开始，不能从智能体的 shell 中开始",
+  "cli.exec_runtime.temporary_conflicts_resume": "--temporary 会开始新对话，不能与 --resume 一起使用",
+  "cli.exec_runtime.temporary_conflicts_workstream": "--temporary 不能与 --workstream 一起使用：workstream 会被保留"
 }

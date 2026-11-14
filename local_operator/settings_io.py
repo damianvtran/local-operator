@@ -3575,6 +3575,28 @@ SETTINGS: tuple[Setting, ...] = (
         gated_by="session.cleanup.delegated.enabled",
         synonyms=("retention", "expiry", "purge"),
     ),
+    # -- temporary chats -------------------------------------------------------
+    # The idle window of a TEMPORARY chat (``session/temporary.py``). Read LIVE
+    # by every pass (``cleanup.policy_from_config``), never gated by
+    # ``session.cleanup.enabled``: the per-chat mark is the opt-in. An ENUM of
+    # the four presets the clients offer; ``cleanup`` clamps any other stored
+    # value UP to the next preset (kept longer, the fail-closed side).
+    Setting(
+        key="session.cleanup.temporary.idle_minutes",
+        path=("session", "cleanup", "temporary", "idle_minutes"),
+        section="session_cleanup",
+        label=_t(_ws.session_cleanup_temporary_idle_minutes_label()),
+        kind=Kind.ENUM,
+        default=30,
+        help=_t(_ws.session_cleanup_temporary_idle_minutes_help()),
+        choices=(
+            Choice(15, _t(_ws.session_cleanup_temporary_idle_minutes_choice_15m_label())),
+            Choice(30, _t(_ws.session_cleanup_temporary_idle_minutes_choice_30m_label())),
+            Choice(120, _t(_ws.session_cleanup_temporary_idle_minutes_choice_2h_label())),
+            Choice(1440, _t(_ws.session_cleanup_temporary_idle_minutes_choice_24h_label())),
+        ),
+        synonyms=("retention", "expiry", "ephemeral"),
+    ),
     Setting(
         key="runtime.unattended_gate_timeout",
         path=("runtime", "unattended_gate_timeout"),
@@ -6667,6 +6689,13 @@ def coerce(setting: Setting, text: str) -> Any:
             raise ValueError(
                 'expected JSON, e.g. {"default": ["anthropic/claude-opus-5"]}'
             ) from None
+    if setting.kind is Kind.ENUM:
+        # An ENUM whose members are whole numbers (the temporary-chat window)
+        # stores ints, so typed text must become the member, not its digits.
+        for choice in setting.resolved_choices or ():
+            value = choice.value
+            if type(value) is int and text == str(value):
+                return value
     if setting.validate_value is validate_tier_value and text.startswith("{"):
         # A ``{model, effort}`` tier typed on the page or via ``lop config
         # edit`` (#2428): parsed here so the MAPPING is stored, never the JSON

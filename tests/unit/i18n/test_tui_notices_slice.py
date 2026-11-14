@@ -140,6 +140,36 @@ REPLACED_LITERALS = {
     # refuses — there was no earlier literal to preserve.
     "model_switch_queued": "switch to {model} queued — applies at the next step",
     "model_switch_refused": "{model} was not applied: {reason}",
+    # NEW copy, same rule as ``fast_mode_refused``: the temporary-chat feature
+    # (core #3832, ``/temporary`` and ``/new temporary``) added these; there
+    # was no earlier literal, so each row pins the sentence it ships with.
+    "temporary_on": (
+        "temporary chat: left out of history and deleted after {minutes} idle minutes — "
+        "/temporary off keeps it"
+    ),
+    "temporary_off": "kept: this chat is no longer temporary and stays in your history",
+    "temporary_status_on": "temporary chat — {deletes_in} (/temporary off keeps it)",
+    "temporary_status_off": "this chat is kept in your history (not temporary)",
+    "temporary_confirm": (
+        "make this chat temporary? Its messages, files in its scratchpad and its session "
+        "memory are deleted after it sits idle; anything you saved elsewhere is kept. Type "
+        "/temporary on again within 30 seconds to confirm."
+    ),
+    "temporary_refused_pinned": (
+        "this chat is pinned, so it cannot be made temporary — unpin it first"
+    ),
+    "temporary_refused_project": (
+        "this chat is linked to a project, so it cannot be made temporary — unlink it first"
+    ),
+    "temporary_deleted": (
+        "temporary chat {session_id} was deleted after it sat idle. Start a new one: "
+        "lop --temporary"
+    ),
+    "temporary_new_hint": (
+        "/new temporary [message] starts a temporary chat that is left out of history and "
+        "deleted when idle"
+    ),
+    "temporary_refused": "this chat cannot be made temporary: {reason}",
 }
 
 
@@ -190,6 +220,11 @@ _SAMPLE_PARAMS = {
     "fast_mode_refused": {"selector": "anthropic/claude-opus-5", "reason": "no fast tier"},
     "model_switch_queued": {"model": "gpt-x"},
     "model_switch_refused": {"model": "gpt-x", "reason": "model not available"},
+    # Strings, as tui/temporary_chat.py passes them (minutes is str(int)).
+    "temporary_on": {"minutes": "30"},
+    "temporary_status_on": {"deletes_in": "deletes in 12 min"},
+    "temporary_deleted": {"session_id": "0123456789ab"},
+    "temporary_refused": {"reason": "this chat is pinned"},
 }
 
 

@@ -12,3 +12,7 @@ from ..messages import Msg
 
 def placeholder_default() -> Msg:
     return Msg("tui.composer.placeholder_default", {})
+
+
+def temporary_placeholder() -> Msg:
+    return Msg("tui.composer.temporary_placeholder", {})

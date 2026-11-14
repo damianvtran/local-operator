@@ -675,6 +675,11 @@ async def test_forked_judge_uses_the_session_prefix_and_falls_back() -> None:
         "sed -i s/a/b/ ~/.local-operator/sessions/aaaaaaaaaaaa/transcript.jsonl",
         "rm ~/.local-operator/sessions/aaaaaaaaaaaa/subagent-roster.v1.json",
         "echo x >> ~/.local-operator/sessions/*/transcript.jsonl",
+        # The temporary-chat mark: a planted mark would get another
+        # conversation deleted by the cleanup pass.
+        "echo x > ~/.local-operator/sessions/aaaaaaaaaaaa/temporary.json",
+        "mv /tmp/m ~/.local-operator/sessions/aaaaaaaaaaaa/temporary.json",
+        "rm ~/.local-operator/sessions/aaaaaaaaaaaa/temporary.json",
     ],
 )
 def test_writes_to_evidence_are_critical(home: Path, command: str) -> None:

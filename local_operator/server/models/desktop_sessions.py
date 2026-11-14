@@ -34,6 +34,37 @@ class OpenedBy(BaseModel):
     session: str | None
 
 
+#: Why a temporary chat is being kept past its window (``session.temporary.HOLD_CODES``).
+TemporaryHold = Literal[
+    "running",
+    "on_screen",
+    "open_ask",
+    "armed_wake",
+    "armed_monitor",
+    "unread_mail",
+    "operator_hold",
+    "unseen_result",
+    "unsaved_files",
+    "linked",
+    "cannot_verify",
+]
+
+
+class TemporaryInfo(BaseModel):
+    """A TEMPORARY chat's retention facts (``session/temporary.py``).
+
+    ``deletes_at`` is ``null`` while a ``hold`` keeps the chat; ``idle_minutes``
+    is the window in force. Carried as ``temporary`` on every row and snapshot,
+    where ``null`` is the explicit "not temporary" (``archived``'s rule: an
+    absent key is not a claim).
+    """
+
+    marked_at: float
+    idle_minutes: int
+    deletes_at: float | None
+    hold: TemporaryHold | None
+
+
 class SessionRow(BaseModel):
     model_config = ConfigDict(extra="allow")
     id: str
@@ -147,6 +178,11 @@ class SessionRow(BaseModel):
     #: an absence the client is entitled to read as no claim, and an archived
     #: conversation would sit in the ordinary list with nothing saying so.
     archived: bool
+    #: The temporary-chat object, or ``null`` (not temporary). ALWAYS PRESENT:
+    #: defaulted so a remote row from an older peer still validates, and a
+    #: default still serialises. Only a listing that asked
+    #: (``include_temporary=true``) can carry a non-null one.
+    temporary: TemporaryInfo | None = None
     #: How many of this session's OWN delegated children are running, and how
     #: many are parked waiting for a capacity slot — or ``null`` when nothing
     #: reported them.
@@ -531,6 +567,9 @@ class SessionSearchRow(BaseModel):
     owner_device_name: str = ""
     reachable: bool = True
     unreachable_reason: str = ""
+    #: Always ``null``: search never returns a temporary chat. Present so a row a
+    #: client synthesises from a hit carries the key like every other row.
+    temporary: TemporaryInfo | None = None
 
 
 class SessionSearch(BaseModel):
@@ -1189,6 +1228,8 @@ class SnapshotPayload(BaseModel):
     cold: bool
     cold_reason: Literal["no-runtime", "owner-silent", "owner-leaving"] | None = None
     attaching: bool = False
+    #: The conversation's temporary-chat object, or ``null`` (not temporary).
+    temporary: TemporaryInfo | None = None
 
 
 class DraftPreviewPayload(BaseModel):
@@ -1547,6 +1588,18 @@ class ArchiveState(BaseModel):
 
     session_id: str
     archived: bool
+
+
+class TemporaryState(BaseModel):
+    """A conversation's temporary state after ``POST …/temporary``.
+
+    ``ArchiveState``'s shape, except the flag is the row's full object read
+    back from the store (``null`` after Keep), so the client reconciles the
+    countdown as well as the flag.
+    """
+
+    session_id: str
+    temporary: TemporaryInfo | None
 
 
 class DeletedSession(BaseModel):

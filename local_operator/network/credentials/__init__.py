@@ -74,6 +74,32 @@ def grant_ttl_s(root: Path | None = None) -> float:
     return float(store.read_config(("network", "credentials", "grant_ttl_s"), GRANT_TTL_S, root))
 
 
+#: How often a turn waiting for an absent owner re-reads the owner's liveness stamp
+#: (:func:`owner_wait_s`). The relay acts at this resolution (``REDIAL_TICK_S``), so
+#: polling faster cannot see the owner sooner; each poll is file reads, never a dial.
+OWNER_WAIT_POLL_S = 1.0
+
+
+def owner_wait_s(root: Path | None = None) -> float:
+    """How long ONE turn waits for an absent owner after this device's lease ran out.
+
+    PR-D (Root 0). Half the grant TTL, 450 s at the default, with no setting of its
+    own (operator decision, 2026-11-10):
+
+    * ``grant_ttl_s / 2`` is already the scale this device acts on without hearing
+      from the owner (the #3581 lost-update ceiling), so an operator who shortens
+      the TTL shortens this with it;
+    * it stays under what a turn already waits out for a dead network (about 543 s
+      of connectivity patience), so an owner-away turn never stalls longer than a
+      no-network one can;
+    * it spans several owner reconnect cycles (redial backoff caps at 60 s).
+
+    It bounds a WAIT, never a lease: nothing is served, refreshed or extended
+    while it runs (``store.MeshAwareAuthStore.owner_wait_hint``).
+    """
+    return max(0.0, grant_ttl_s(root) / 2.0)
+
+
 def build_auth_store(config_dir: Path | None = None, *, db_path: str | Path | None = None) -> Any:
     """The session's credential store: plain, or mesh-aware when this device borrows.
 
