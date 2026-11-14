@@ -268,6 +268,63 @@ def test_a_share_revoke_ends_the_github_hold_and_deletes_the_token_at_once(held:
     assert "held" not in readiness.github_fact(net.b.root)
 
 
+def _mcp_status_reason(net: Any) -> str:
+    """The ``/mcp`` row's reason for MCP_KEY, from B's evidence file as it is now."""
+    row = mcp_state.load(net.network_id, net.b.root).get(MCP_KEY) or {}
+    return _status_row(dict(row))["reason"]
+
+
+def test_a_share_revoke_by_pull_retires_the_mcp_held_row(held: Any) -> None:
+    """#3947 R2-m1 / QA Q4c: the pull's withdrawal ends the MCP ``held`` reading at once.
+
+    The pull rewrites the placement file; this process's client sees it on its next
+    read and clears every slot. Before the fix only the GitHub row was retired, the
+    MCP row kept "held from … until", and the later ``not_a_holder`` read had nothing
+    left to drop so it retired nothing either.
+    """
+    client, net = held.client, held.mesh
+    _stop_owner(net)
+    _past_window(held.mcp)
+    assert isinstance(client.request_grant_sync(MCP_KEY, provider="mcp-oauth"), Grant)
+    assert isinstance(
+        client.request_grant_sync(github_mod.GITHUB_KEY, provider=github_mod.GITHUB_KEY), Grant
+    )
+    assert _mcp_status_reason(net).startswith("held from"), _mcp_status_reason(net)
+    document = placement_mod.PlacementDocument.load(
+        net.network_id, net.b.root, self_device=net.borrower
+    )
+    document.revoke(MCP_KEY, net.borrower, by=net.owner)
+    document.save()
+    assert client.placement is not None  # the read a session's next request makes
+    rows = mcp_state.load(net.network_id, net.b.root)
+    assert rows[MCP_KEY]["state"] == "revoked" and "until" not in rows[MCP_KEY], rows
+    assert rows[github_mod.GITHUB_KEY]["state"] == "held", "a key still shared was retired"
+    assert "held from" not in _mcp_status_reason(net)
+    refused = client.request_grant_sync(MCP_KEY, provider="mcp-oauth")
+    assert isinstance(refused, BrokerError) and refused.code == "not_a_holder", refused
+    assert "held from" not in _mcp_status_reason(net)
+
+
+def test_a_fresh_process_retires_a_held_row_whose_share_is_gone(held: Any) -> None:
+    """The QA's fresh-client shape: the withdrawal landed before this process read it,
+    so no placement change is seen here — the ``not_a_holder`` arm retires it."""
+    client, net = held.client, held.mesh
+    _stop_owner(net)
+    _past_window(held.mcp)
+    assert isinstance(client.request_grant_sync(MCP_KEY, provider="mcp-oauth"), Grant)
+    document = placement_mod.PlacementDocument.load(
+        net.network_id, net.b.root, self_device=net.borrower
+    )
+    document.revoke(MCP_KEY, net.borrower, by=net.owner)
+    document.save()
+    fresh = MeshCredentialClient.for_this_device(net.b.root)
+    assert fresh is not None
+    refused = fresh.request_grant_sync(MCP_KEY, provider="mcp-oauth")
+    assert isinstance(refused, BrokerError) and refused.code == "not_a_holder", refused
+    assert mcp_state.load(net.network_id, net.b.root)[MCP_KEY]["state"] == "revoked"
+    assert "held from" not in _mcp_status_reason(net)
+
+
 def test_an_unrelated_placement_edit_does_not_kill_the_held_token(held: Any) -> None:
     """Negative control for the withdrawal hook: only a GitHub withdrawal DELETEs."""
     client, net, api = held.client, held.mesh, held.api
@@ -635,11 +692,52 @@ def test_the_revoke_receipt_names_the_hold_bound_and_the_github_remedy(
     assert "window end" not in "\n".join(
         network_cli._github_revoke_lines("node2", None, github_mod.SOURCE_APP)  # noqa: SLF001
     )
+    # #3947 R2-m2: the bound is what was LENT, never the current setting. A cap
+    # lowered after lending changes nothing in the receipt; the lent hold does.
     (tmp_path / "config.yml").write_text(
-        yaml.safe_dump({"values": {"network": {"credentials": {"github_token_hold_s": 7200}}}}),
+        yaml.safe_dump({"values": {"network": {"credentials": {"github_token_hold_s": 900}}}}),
         encoding="utf-8",
     )
-    capped = "\n".join(
+    unknown = "\n".join(
         network_cli._github_revoke_lines("node2", 0, github_mod.SOURCE_GH)  # noqa: SLF001
     )
-    assert "for up to 2 h" in capped
+    assert "for up to 24 h after its last grant" in unknown and "15 min" not in unknown
+    lent_until_ms = int((time.time() + 5 * 3600) * 1000)
+    hhmm = time.strftime("%H:%M UTC", time.gmtime(lent_until_ms / 1000))
+    lent = "\n".join(
+        network_cli._github_revoke_lines(  # noqa: SLF001
+            "node2", 0, github_mod.SOURCE_GH, lent_hold_until_ms=lent_until_ms
+        )
+    )
+    assert f"it may keep using it until {hhmm} (the hold it was lent with)" in lent
+    lent_payload = network_cli._github_revocation_payload(  # noqa: SLF001
+        0, 900, github_mod.SOURCE_GH, lent_hold_until_ms=lent_until_ms
+    )
+    assert 5 * 3600 - 5 <= lent_payload["lent_grant_max_s"] <= 5 * 3600
+    assert lent_payload["lent_hold_until"] == pytest.approx(lent_until_ms / 1000)
+
+
+def test_the_revoke_op_reports_the_hold_it_lent(
+    owner: Any, github_api: _FakeGithub, monkeypatch: pytest.MonkeyPatch  # noqa: F811
+) -> None:
+    """#3947 R2-m2 at the source: the relay's revoke ack carries the lent hold end,
+    and lowering the cap afterwards does not move it."""
+    from local_operator.network.credentials import _LocalOps  # noqa: PLC2701
+
+    _write_config(owner.root, repositories=[SCRATCH])
+    detail = _ask_grant(owner, BORROWER_DEVICE)
+    monkeypatch.setattr(owner_mod, "broker_for_relay", lambda server: owner.broker)
+    (owner.root / "config.yml").write_text(
+        yaml.safe_dump({"values": {"network": {"credentials": {"github_token_hold_s": 900}}}}),
+        encoding="utf-8",
+    )
+    acked = _LocalOps(server=object()).revoke(
+        {"credential_key": github_mod.GITHUB_KEY, "holder": BORROWER_DEVICE}
+    )
+    assert acked["revoked"] == 1
+    assert acked["lent_hold_until_ms"] == detail["hold_until_ms"] > 0
+    # Another holder was lent nothing: no hold to report.
+    other = _LocalOps(server=object()).revoke(
+        {"credential_key": github_mod.GITHUB_KEY, "holder": "d_" + "7" * 32}
+    )
+    assert other["lent_hold_until_ms"] == 0

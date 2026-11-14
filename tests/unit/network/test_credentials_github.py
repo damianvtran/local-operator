@@ -1647,7 +1647,12 @@ def test_the_revoke_op_deletes_now_and_the_receipt_carries_the_mint_revoke_copy(
     monkeypatch.setattr(owner_mod, "broker_for_relay", lambda server: owner.broker)
     ops = _LocalOps(server=object())
     acked = ops.revoke({"credential_key": github_mod.GITHUB_KEY, "holder": BORROWER_DEVICE})
-    assert acked == {"kind": "ack", "key": github_mod.GITHUB_KEY, "revoked": 1}
+    # ``lent_hold_until_ms`` (#3947 R2-m2) is pinned in test_credentials_hold_github_mcp.
+    assert {k: v for k, v in acked.items() if k != "lent_hold_until_ms"} == {
+        "kind": "ack",
+        "key": github_mod.GITHUB_KEY,
+        "revoked": 1,
+    }
     assert github_api.revoke_requests == [token]
     assert not github_api.live(token)
 

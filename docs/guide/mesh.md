@@ -157,7 +157,8 @@ expires sooner (Anthropic OAuth after about 8 hours, Radient after about an
 hour) stops working at its own expiry until the owner is back. Lent GitHub and MCP
 logins are held the same way: a GitHub token from the owner's `GITHUB_TOKEN` or
 `gh` login lasts the whole hold (`network.credentials.github_token_hold_s` can
-shorten it for those two alone), a GitHub App token at most its one hour, and an
+shorten it for those two alone; lowering it affects grants lent after the change,
+not one a node already holds), a GitHub App token at most its one hour, and an
 MCP sign-in until its access token expires. `kimi` is the one provider that can
 never be lent: its grants are signed with the fingerprint of the device that made
 them.

@@ -135,7 +135,9 @@ def github_token_hold_s(root: Path | None = None) -> float:
     chose the full 24 h for personal tokens too ("Full 24 h for personal tokens too",
     Damian, 2026-11-14), so this DEFAULTS TO :func:`offline_hold_s`; the setting
     exists so that residual can be narrowed for those two arms alone without new
-    plumbing. Read on the OWNER, where the token lives and the hold is stated
+    plumbing. Lowering it affects LATER grants only: a grant already lent keeps the
+    hold it was stated with (the revoke receipt reports that one, #3947 R2-m2). Read
+    on the OWNER, where the token lives and the hold is stated
     (``owner._grant_from_owner_token``); clamped to ``[grant_ttl_s, offline_hold_s]``
     so it can only shorten the hold. A garbled value reads as the hold.
     """
@@ -377,7 +379,15 @@ class _LocalOps:
         broker = owner_mod.broker_for_relay(self._server)
         if broker is None:
             return {"kind": "ack", "key": key, "revoked": 0}
-        return {"kind": "ack", "key": key, "revoked": broker.revoke_outstanding(key, holder)}
+        # Read BEFORE the revoke: what this relay lent the holder, so the receipt
+        # states the hold a node that cannot hear the revoke actually has (#3947 R2-m2).
+        lent_until = broker.lent_hold_until_ms(key, holder)
+        return {
+            "kind": "ack",
+            "key": key,
+            "revoked": broker.revoke_outstanding(key, holder),
+            "lent_hold_until_ms": lent_until,
+        }
 
     def share_push(self, frame: dict[str, Any]) -> dict[str, Any]:
         """Push one just-shared placement row to its holder now (``share_push``).

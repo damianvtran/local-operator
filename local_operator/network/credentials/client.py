@@ -538,8 +538,10 @@ class MeshCredentialClient:
         if stamp == self._placement_stamp:
             return self._placement
         dropped: list[Grant] = []
+        changed = False
         with self._placement_lock:
             if stamp != self._placement_stamp:
+                changed = True
                 self._placement = (
                     PlacementDocument.load(self.network_id, self.root, self_device=self.self_device)
                     if stamp is not None
@@ -549,13 +551,17 @@ class MeshCredentialClient:
                 # never serve a cached bearer across a withdrawal.
                 dropped = self.grants.clear()
                 self._placement_stamp = stamp
-        if dropped:
+        if changed:
             # A SHARE REVOKE reaches a session process as this placement change
-            # (the relay's pull rewrites the file), so this is where its GitHub
-            # token must die at once rather than at the hold end (2026-11-14).
-            # Only when GitHub itself was withdrawn: an unrelated edit to the
-            # document must not kill a token a push is using right now.
-            self._revoke_withdrawn_github(dropped)
+            # (the relay's pull rewrites the file), so this is where a held login
+            # ends: its durable ``held`` reading for EVERY withdrawn key (#3947
+            # R2-m1 — the MCP row kept saying "held until" after the pull), and a
+            # GitHub App token at once rather than at the hold end (2026-11-14).
+            # Only for keys actually withdrawn: an unrelated edit to the document
+            # must not kill a token a push is using right now.
+            self._retire_withdrawn_holds()
+            if dropped:
+                self._revoke_withdrawn_github(dropped)
         return self._placement
 
     def _stat_placement(self) -> tuple[int, int] | None:
@@ -941,8 +947,10 @@ class MeshCredentialClient:
             # A share revoke ends a held GitHub token at once (2026-11-14), and its
             # durable ``held`` reading with it (#3947 m2).
             dropped_now = self.grants.drop(key)
-            if dropped_now:
-                self._retire_held([key], "not_a_holder")
+            # UNCONDITIONAL (#3947 R2-m1): the placement hook may already have
+            # cleared the slot, so an empty drop is no evidence that nothing was
+            # held. ``retire_held`` only rewrites ``held`` rows, so this is idempotent.
+            self._retire_held([key], "not_a_holder")
             self._revoke_dropped_github(dropped_now)
             if self._held_receipts:
                 # A revoke heard while the hold was serving (now also through the
@@ -1475,6 +1483,25 @@ class MeshCredentialClient:
         """
         mcp_state.retire_held(self.network_id, keys, code=code, root=self.root)
 
+    def _retire_withdrawn_holds(self) -> None:
+        """Retire the ``held`` evidence row of every key this device may no longer borrow.
+
+        Read from the evidence file, not the grant cache: the cache is per process
+        and is cleared on any placement change, while the ``held`` row is shared by
+        every surface on the device (#3947 R2-m1). One file read per placement change.
+        Never raises.
+        """
+        try:
+            withdrawn = [
+                key
+                for key, row in mcp_state.load(self.network_id, self.root).items()
+                if row.get("state") == "held" and not self.should_borrow(key)
+            ]
+            if withdrawn:
+                self._retire_held(withdrawn, "not_a_holder")
+        except Exception:  # noqa: BLE001 — status copy; serving is already refused
+            logger.debug("held-row retirement after a placement change failed", exc_info=True)
+
     def _revoke_withdrawn_github(self, dropped: list[Grant]) -> None:
         """:meth:`_revoke_dropped_github` after a placement change, IF GitHub was withdrawn."""
         try:
@@ -1485,7 +1512,6 @@ class MeshCredentialClient:
 
             if self.should_borrow(GITHUB_KEY):
                 return
-            self._retire_held([GITHUB_KEY], "not_a_holder")
             tokens = [grant for grant in dropped if is_installation_grant(grant)]
             if tokens:
                 self._revoke_dropped_github(tokens)
