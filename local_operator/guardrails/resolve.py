@@ -1227,6 +1227,35 @@ def _credential_spellings(value: str) -> set[str]:
     return {norm, os.path.realpath(norm), os.path.join(os.path.realpath(head), tail)}
 
 
+def _credential_paths_in(exp: Expanded, credential_paths: Mapping[str, str]) -> list[str]:
+    """The credential path values ``exp`` actually REFERENCES, longest first.
+
+    WHY (review R2-1 on PR #3992). A plain ``value in exp.text`` test also
+    caught literal words that merely EXTEND the key's path:
+    ``rm -f ~/keys/sa.json.bak`` with ``GOOGLE_APPLICATION_CREDENTIALS`` =
+    ``~/keys/sa.json`` was rebuilt with ``CREDENTIAL_MARK`` and refused for
+    good, blocking the key-rotation cleanup this route exists to allow. A word
+    spelled by the user discloses nothing the user did not type, so only a
+    value that some ``$NAME``/``${NAME}`` expansion put into the word counts:
+    a value occurrence lying wholly inside one ``refs`` span.
+
+    Matching the SPAN, not the variable's name, keeps every propagated copy
+    covered without tracking taint through each binding site: ``D="$VAR"``,
+    ``export D=...``, a ``for`` list or a ``read`` all leave ``$D``'s span
+    holding the value text. The cost is fail-closed: a variable the user bound
+    to a LITERAL string containing the value is treated like a copy.
+    ``${VAR%…}``-style operators never reach here with the value intact; they
+    expand to ``CREDENTIAL_MARK`` upstream.
+    """
+    found = []
+    for value in credential_paths:
+        for _name, start, end, *_rest in exp.refs:
+            if value in exp.text[start:end]:
+                found.append(value)
+                break
+    return sorted(found, key=len, reverse=True)
+
+
 def _target(exp: Expanded, op: str, program: str, state: _State) -> Target:
     """Build the :class:`Target` for ``exp``, keeping credential path values private.
 
@@ -1241,7 +1270,7 @@ def _target(exp: Expanded, op: str, program: str, state: _State) -> Target:
     naming a path. A word that stays inside is tagged with the variable's NAME
     and value so ``classify`` can scrub the value's ancestors from its reason.
     """
-    found = sorted((v for v in state.credential_paths if v in exp.text), key=len, reverse=True)
+    found = _credential_paths_in(exp, state.credential_paths)
     if not found:
         return _plain_target(exp, op, program, state)
     value = found[0]
@@ -3202,7 +3231,7 @@ class _Walker:
         private_target = (
             st.private_cwd
             or CREDENTIAL_MARK in cd_text
-            or any(v in cd_text for v in st.credential_paths)
+            or bool(operands and _credential_paths_in(operands[0], st.credential_paths))
         )
         if not operands or (operands[0].vanished and not operands[0].opaque):
             path = st.home
@@ -3215,7 +3244,7 @@ class _Walker:
                     Target(path=w.text, op="touch", program="cd", pattern=w.pattern)
                 )
                 path = None
-            elif w.opaque or any(v in w.text for v in st.credential_paths):
+            elif w.opaque or _credential_paths_in(w, st.credential_paths):
                 # A credential path value: unresolved, as before such values
                 # resolved, so ``private_target`` hides the cwd below.
                 path = None
@@ -4000,7 +4029,7 @@ class _Walker:
         # its parent, through ``..``) lives (R1, PR #3992). Unknown ranks HIGH.
         literal = all(
             not w.opaque and w.pattern is None and not w.empty and w.text for w in (link, pointee)
-        ) and not any(v in pointee.text for v in self.state.credential_paths)
+        ) and not _credential_paths_in(pointee, self.state.credential_paths)
         no_deref = _has_short(flags, "nT") or bool(
             {"--no-dereference", "--no-target-directory"} & set(flags)
         )

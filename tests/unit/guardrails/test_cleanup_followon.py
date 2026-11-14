@@ -542,8 +542,23 @@ def _canary_value(home: Path) -> str:
         'rm -rf "/x$GOOGLE_APPLICATION_CREDENTIALS"',
         'cd "$GOOGLE_APPLICATION_CREDENTIALS/.."; rm -rf ../sub',
         'ln -sfn "$GOOGLE_APPLICATION_CREDENTIALS/.." ~/L; rm -rf ~/L/x',
+        'rm -rf "${GOOGLE_APPLICATION_CREDENTIALS%/*}"',
+        'export D="$GOOGLE_APPLICATION_CREDENTIALS"; rm -rf "$D/.."',
+        'for f in "$GOOGLE_APPLICATION_CREDENTIALS/.."; do rm -rf "$f"; done',
+        'cd "$(dirname "$GOOGLE_APPLICATION_CREDENTIALS")"; rm -rf ..',
     ],
-    ids=["dotdot", "copied-dotdot", "glued-glob", "prefixed", "cd-dotdot", "link-pointee"],
+    ids=[
+        "dotdot",
+        "copied-dotdot",
+        "glued-glob",
+        "prefixed",
+        "cd-dotdot",
+        "link-pointee",
+        "suffix-strip",
+        "exported-copy",
+        "loop-copy",
+        "cd-dirname",
+    ],
 )
 async def test_r1_q2_credential_target_outside_its_value_stays_opaque(
     home: Path, caplog: pytest.LogCaptureFixture, command: str
@@ -570,6 +585,58 @@ def test_r1_value_subtree_still_ranks_like_the_literal(home: Path) -> None:
         v = _rank(home, command, **env)
         assert v.risk is Risk.LOW, (command, [(t.path, t.reason) for t in v.targets])
         assert not any(t.target.credential_derived for t in v.targets)
+
+
+@pytest.mark.asyncio
+async def test_r2_1_cd_into_the_value_then_climb_stays_opaque(
+    home: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """R2-1 neighbour: ``cd "$VAR"; rm -rf ..`` with a DIRECTORY value still
+    hides the cwd once detection keys on the expansion's refs."""
+    env = {"GOOGLE_APPLICATION_CREDENTIALS": str(Path(_canary_value(home)).parent)}
+    command = 'cd "$GOOGLE_APPLICATION_CREDENTIALS"; rm -rf ..'
+    v = _rank(home, command, **env)
+    assert v.risk is not Risk.LOW, [(t.path, t.reason) for t in v.targets]
+    assert all(CANARY not in (t.target.path or "") for t in v.targets)
+    out, text = await _carriers(home, caplog, command, **env)
+    assert out is not None and out.blocked and CANARY not in text
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "rm -f ~/keys/sa.json.bak",
+        "rm -f {home}/keys/sa.json.bak",
+        "rm -rf {home}/keys/sa.json.d/x",
+        "cp {home}/keys/new.json {home}/keys/sa.json.tmp",
+        'rm -f "$HOME/keys/sa.json.bak"',
+        "cd {home}/keys/sa.json.d && rm -rf x",
+        "ln -sfn {home}/keys/sa.json.d ~/L && rm -rf ~/L/x",
+    ],
+    ids=[
+        "tilde-bak",
+        "abs-bak",
+        "abs-subdir",
+        "cp-tmp",
+        "home-var-bak",
+        "cd-literal",
+        "ln-literal",
+    ],
+)
+def test_r2_1_literal_paths_extending_the_value_rank_as_on_base(home: Path, command: str) -> None:
+    """R2-1 (PR #3992): a word that never references the credential variable
+    but whose literal text EXTENDS its value (key-rotation backups beside the
+    live key) ranks exactly as on base 33c331e3: LOW, not credential-derived.
+    A substring test once made these a final CRITICAL refusal aimed at HOME."""
+    keys = home / "keys"
+    (keys / "sa.json.d" / "x").mkdir(parents=True)
+    for name in ("sa.json", "sa.json.bak", "new.json"):
+        (keys / name).write_text("{}\n")
+    env = {"GOOGLE_APPLICATION_CREDENTIALS": str(keys / "sa.json")}
+    v = _rank(home, command.format(home=home), **env)
+    assert v.risk is Risk.LOW, (command, [(t.path, t.reason) for t in v.targets])
+    assert not any(t.target.credential_derived for t in v.targets)
+    assert "credential" not in " ".join(t.reason for t in v.targets)
 
 
 def _foreign_dir(home: Path) -> Path:
