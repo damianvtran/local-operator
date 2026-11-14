@@ -1,0 +1,22 @@
+{
+ "schema": 1,
+ "audit_id": "a4",
+ "locale": "vi",
+ "namespace": "tunnel.status",
+ "record": "i18n/audits/evidence/vi/tunnel.status/a4/record.json",
+ "source_sha256": "e2bc8c63d3124c363252511306fd3951917ab9f93a2398c49cac8c79302aa8f9",
+ "target_sha256": "3d545d4f6534d8d5584f5d0eb7fd069a352272dcade75ecec9cb00cc400e1132",
+ "verdict": "passed",
+ "auditor": {
+  "agent": "i18n-auditor, independent `task` subagent, session 4d11fabf1ca7; not the translating i18n-translator (c0c9e9803405) nor the English-drafting coder (889b9f67edf5); did not edit any value",
+  "model": "anthropic/claude-opus-5-5"
+ },
+ "hashes": {
+  "record.json": "d35d5099d35e95f6ed7520276dcbf1e019500439351990988315a1357675df42",
+  "report.md": "acea1ee6ed78ac236fac89e0f6356a207aca7acf1123cd0a20c5d96d77ac7a2e",
+  "audit.log": "5e367d1f76975d5719d23ad02f9f8b30622d547c15465e10a59a4283396ce5a4",
+  "dryrun.log": "6a7dabbe39c96249266db55b9b55e11d577c1c8ca02f9166a96e6e00016e6c04"
+ },
+ "ledger_receipt_staged": "$LOCAL_OPERATOR_SCRATCHPAD/audit-vi-zh/vi.tunnel.status.json (auditor session 4d11fabf1ca7 scratchpad)",
+ "ledger_receipt_sha256": "786ecf1c19815f0220718fe0395ca36b9b3b8f392d96612658e880391b2665c2"
+}

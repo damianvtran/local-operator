@@ -219,8 +219,11 @@ TUNNEL_DISABLED = "tunnel_disabled"
 BILLING_INACTIVE = "billing_inactive"
 BILLING_LAPSED = "billing_lapsed"
 #: The reasons whose copy lives in the `tunnel.status` catalogue rather than the
-#: legacy English tables below (see `_localized`).
-_INACTIVE_REASONS = (TUNNEL_INACTIVE, TUNNEL_DISABLED, BILLING_INACTIVE, BILLING_LAPSED)
+#: legacy English tables below (see `_localized`). Public because the TUI card
+#: (`report.retrying_notice`) raises on exactly these transient causes: each
+#: needs a person (or at least an explanation) yet never parks.
+INACTIVE_REASONS = (TUNNEL_INACTIVE, TUNNEL_DISABLED, BILLING_INACTIVE, BILLING_LAPSED)
+_INACTIVE_REASONS = INACTIVE_REASONS
 
 # What a phone is shown: self-contained, and carrying any link it needs, because
 # there is nothing to type on that surface.
@@ -473,6 +476,12 @@ REMEDY_KIND = {
 #: control would invite a person to "fix" something that is not broken.
 WAITING_KINDS = frozenset({"wait_network", "wait_radient", "wait_reconnect"})
 
+#: Kinds whose whole fix is in the Radient console (a link): they carry NO setup
+#: command, because setup can neither add credit nor override an owner's console
+#: switch-off, and `lop tunnel setup` there only pointed back at the console
+#: (#3945 round 1, Q8).
+CONSOLE_KINDS = frozenset({"add_credit", "open_console"})
+
 
 def remedy_kind(reason: str) -> str | None:
     """The `remedy.kind` for a reason code, or ``None`` for one this build lacks.
@@ -501,7 +510,9 @@ REASON_LABEL = {
     LOCAL_PREREQUISITE: "prerequisite missing",
     REENROLMENT_REQUIRED: "needs re-enrolment",
     # English fallbacks only; the keyed `tunnel.status` copy wins (`_localized`).
-    TUNNEL_INACTIVE: "tunnel not active",
+    # Not "tunnel not active": that is the phrase the field report asked to
+    # retire (#3945 round 1, D3/R5/Q7); it now matches the detail sentence.
+    TUNNEL_INACTIVE: "paused by Radient — reconnecting",
     TUNNEL_DISABLED: "tunnel turned off in the console",
     BILLING_INACTIVE: "billing not activated",
     BILLING_LAPSED: "billing lapsed",

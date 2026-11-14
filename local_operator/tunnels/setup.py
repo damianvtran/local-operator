@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
 import re
 import subprocess
 import threading
@@ -105,7 +106,15 @@ async def apply(
     accepted: str | None = None,
     *,
     progress: Callable[[str], None] | None = None,
+    on_claim: Callable[[], None] | None = None,
 ) -> dict[str, Any]:
+    """Observe, then perform the next ready step under `setup.lock`.
+
+    ``on_claim`` runs once `setup.lock` is HELD and before any mutation: it is
+    how the unattended run journals ``running`` only while it really owns the
+    lock (#3945 round 1, R1), so a run that loses the claim never claims to be
+    the one reconnecting.
+    """
     plan = await observe(selected)
     if (
         plan["verified"]
@@ -122,6 +131,13 @@ async def apply(
         with nonblocking_file_claim(config.directory() / "setup.lock") as acquired:
             if not acquired:
                 raise SetupInProgress(_t(ms.in_progress()))
+            # A setup run may change the very state the connector's cached
+            # inactive cause describes (R3 invariant: invalidated on a run).
+            from local_operator.tunnels.service import invalidate_refinement
+
+            invalidate_refinement()
+            if on_claim is not None:
+                on_claim()
             operation = asyncio.create_task(_apply(selected, accepted, progress=progress))
             # Reobserve under the claim, and drain even a repeatedly cancelled
             # response before its lease can be released around blocking install.
@@ -490,11 +506,18 @@ async def observe(selected: int | None = None) -> dict[str, Any]:
             # where they manage it, and an automatic run (the post-sign-in hook)
             # must never override that choice. The console is the remedy.
             return _plan("disabled", _t(ms.disabled()), url=None, **fields)
-    if fields["activation_required"] and quote.get("active") is True:
+    if (
+        fields["activation_required"]
+        and quote.get("active") is True
+        and not fields["positive_balance"]
+    ):
         # LAPSED, not never-activated (the split of `activation_required`): the
         # quote was accepted once and the balance no longer covers it. Accepting
         # the price again is not the fix and would ask for a second purchase
         # decision; adding credit is, and the connector resumes by itself.
+        # Active-but-ineligible WITH credit (a re-acceptance after a price change)
+        # is not lapsed: it falls through to the quote step below (#3945 round 1,
+        # R4), the same rule `service.refine_inactive` applies.
         return _plan("billing_lapsed", _t(ms.billing_lapsed()), **fields)
     # An interrupted create reuses its reservation rather than treating renewal
     # as a new enrollment. It still needs a fresh valid account and quote.
@@ -775,8 +798,63 @@ def _apply_command(plan: dict[str, Any], surface: str) -> str:
     return command
 
 
+#: The `remedy.kind` each step offers, for the TEXT surfaces (`lop tunnel setup`,
+#: the TUI's `/mobile status`). The desktop route derives the same kinds from its
+#: own step -> blocker -> kind tables; `test_setup_text_kinds_match_the_route`
+#: holds the two equal so a terminal and a button can never name different
+#: fixes for one step. Only the steps whose action line is chosen by kind are
+#: listed: every other step keeps its existing copy unchanged.
+STEP_REMEDY_KIND = {
+    "reconnect": "run",
+    "repoint": "run",
+    "quote": "accept_quote",
+    "billing_lapsed": "add_credit",
+    "disabled": "open_console",
+    "network": "wait_network",
+    "radient_unavailable": "wait_radient",
+    "reconnecting": "wait_reconnect",
+}
+
+
+def _kind_action(plan: dict[str, Any], surface: str) -> str | None:
+    """The one action line a step's KIND calls for, or ``None`` for no line.
+
+    Keyed on the kind, never on the reason or the remedy sentence (#3945 round
+    1, Q2/D4): before this the six new steps printed under "could not finish
+    setup" with nothing to do, because the action line was hard-wired to three
+    steps. The rules, matching the buttons the desktop renders for each kind:
+
+    - ``run`` names the setup run in the surface's own spelling (`/mobile enable`
+      in the TUI, `lop tunnel setup apply` only on the CLI);
+    - ``accept_quote`` keeps the existing price/consent/command lines in
+      `text`, which show the price before the command;
+    - ``add_credit`` / ``open_console`` name the Radient console and its URL and
+      NO setup command — setup cannot add credit, and it deliberately never
+      overrides a console switch-off;
+    - the waits (``wait_*``) print nothing: they clear by themselves.
+    """
+    from local_operator.tunnels import gateway
+
+    kind = STEP_REMEDY_KIND.get(plan["step"])
+    if kind == "run":
+        return _t(ms.apply(command=_apply_command(plan, surface)))
+    if kind == "add_credit":
+        return _t(ms.action_add_credit(url=gateway.CONSOLE_URL))
+    if kind == "open_console":
+        return _t(ms.action_open_console(url=gateway.CONSOLE_URL))
+    return None
+
+
 def text(plan: dict[str, Any], *, surface: str = "cli", include_receipts: bool = True) -> str:
     titles = {
+        # Each of these is a state, not a setup failure: titled by what it is so
+        # a paused or waiting tunnel does not read "could not finish setup".
+        "reconnect": ms.title_reconnect,
+        "billing_lapsed": ms.title_billing_lapsed,
+        "disabled": ms.title_disabled,
+        "network": ms.title_network,
+        "radient_unavailable": ms.title_radient_unavailable,
+        "reconnecting": ms.title_reconnecting,
         "login": ms.title_login,
         "owner_choice": ms.title_owner_choice,
         "owner_missing": ms.title_owner_missing,
@@ -869,13 +947,13 @@ def text(plan: dict[str, Any], *, surface: str = "cli", include_receipts: bool =
         remedy = remedy.replace("lop login radient", "/login radient")
         remedy = remedy.replace("lop tunnel start", "/mobile start")
     lines.append(remedy)
-    if plan["step"] == "repoint":
-        # The remedy says what the state IS; the command is the one that performs
-        # it, on its own labelled line (`mobile.setup.apply`, exactly as the apply
-        # step does) so it does not read as the remedy's last sentence.
-        # Surface-aware (`/mobile enable` for the TUI) and appended AFTER the token
-        # rewrites above, which do not know this plan's copy.
-        lines.append(_t(ms.apply(command=_apply_command(plan, surface))))
+    # The remedy says what the state IS; the action is on its own labelled line
+    # (`mobile.setup.apply`, exactly as the apply step does) so it does not read
+    # as the remedy's last sentence. Surface-aware (`/mobile enable` for the TUI)
+    # and appended AFTER the token rewrites above, which do not know this copy.
+    action = _kind_action(plan, surface)
+    if action is not None:
+        lines.append(action)
     if plan.get("activation_required") and plan["step"] in {"quote", "quote_changed"}:
         lines.append(_apply_command(plan, surface))
     if plan.get("credential_choices"):
@@ -915,6 +993,16 @@ def reconnecting_plan(**fields: Any) -> dict[str, Any]:
     return _plan("reconnecting", _t(ms.reconnecting()), **fields)
 
 
+def unknown_credential_plan(choices: list[Any]) -> dict[str, Any]:
+    """`observe`'s answer for a credential id this device does not hold.
+
+    The same `owner_choice` step and sentence `observe` returns for an id that
+    is neither the pin nor its successor, with NO ``credential_id``: a surface
+    must never restate an unverified client id as the plan's own (Q4).
+    """
+    return _plan("owner_choice", _t(ms.owner_mismatch()), credential_choices=choices)
+
+
 async def command(args: argparse.Namespace) -> str:
     # `--no-spend` pins `accepted` to None, and that is the whole guarantee: every
     # billing write `apply` can reach is gated on `_same_price(accepted, quote)`
@@ -925,16 +1013,30 @@ async def command(args: argparse.Namespace) -> str:
     no_spend = bool(getattr(args, "no_spend", False))
     accepted = None if no_spend else args.accept_monthly_price
     unattended = no_spend and args.setup_action == "apply"
-    if unattended:
-        autosetup.write_journal({"state": "running", "started_at": int(time.time())})
+    claimed = False
+
+    def journal_running() -> None:
+        # Written only once `setup.lock` is HELD (R1): `running` then means
+        # "this pid owns the lock", which `autosetup.auto_reconnecting` checks
+        # with the pid's liveness too, so a SIGKILLed run reads as not running.
+        nonlocal claimed
+        claimed = True
+        autosetup.write_journal(
+            {"state": "running", "pid": os.getpid(), "started_at": int(time.time())}
+        )
+
     try:
         plan = await (
-            apply(args.credential_id, accepted)
+            apply(args.credential_id, accepted, on_claim=journal_running if unattended else None)
             if args.setup_action == "apply"
             else observe(args.credential_id)
         )
+    except SetupInProgress:
+        # Lost the claim to another run: that run's journal is the truth, and
+        # writing `failed` here wiped a live winner's `running` (R1a).
+        raise
     except BaseException:
-        if unattended:
+        if unattended and claimed:
             autosetup.write_journal({"state": "failed", "finished_at": int(time.time())})
         raise
     if unattended:
@@ -942,12 +1044,14 @@ async def command(args: argparse.Namespace) -> str:
         # is recorded as the step and its kind only — never the remedy text or
         # any provider field — so a later surface can say why the background
         # run did not finish without this file becoming a second plan store.
+        # A run that never claimed must not overwrite a live claimant's record.
         autosetup.write_journal(
             {
                 "state": "finished",
                 "finished_at": int(time.time()),
                 "step": str(plan.get("step")),
                 "verified": bool(plan.get("verified")),
-            }
+            },
+            unless_live_other=not claimed,
         )
     return json.dumps(plan, allow_nan=False) if args.json else text(plan)

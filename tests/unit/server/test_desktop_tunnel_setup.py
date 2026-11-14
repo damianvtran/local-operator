@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import threading
 from contextlib import closing
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -676,7 +677,7 @@ def _hold_background_run():
     """The post-sign-in run's two facts: its journal, and the held lock."""
     from local_operator.tunnels import autosetup
 
-    autosetup.write_journal({"state": "running"})
+    autosetup.write_journal({"state": "running", "pid": os.getpid()})
     return nonblocking_file_claim(config.directory() / "setup.lock")
 
 
@@ -715,3 +716,30 @@ async def test_a_lock_held_by_someone_else_is_still_setup_in_progress(desktop, u
     assert response.status_code in (200, 409)
     if response.status_code == 200:
         assert response.json()["result"]["step"] != "reconnecting"
+
+
+@pytest.mark.asyncio
+async def test_a_reconnecting_reply_never_echoes_an_unknown_credential_id(desktop, upstream):
+    """Q4: the identity comes from the local plan; an id this device lacks is refused."""
+    client, _app, _tmp = desktop
+    with _hold_background_run() as acquired:
+        assert acquired
+        unknown = await client.post(PATH, json={"action": "plan", "credential_id": 999})
+        known = await client.post(PATH, json={"action": "plan", "credential_id": 17})
+    assert unknown.status_code == 200, unknown.text
+    refused = unknown.json()["result"]
+    assert refused["step"] == "owner_choice"
+    assert refused["credential_id"] is None
+    assert "999" not in unknown.text
+    assert known.json()["result"]["step"] == "reconnecting"
+    assert known.json()["result"]["credential_id"] == 17
+
+
+def test_setup_text_kinds_match_the_route(monkeypatch):
+    """One vocabulary: the text surfaces' kind per step equals the route's."""
+    monkeypatch.setattr(setup, "local_credential_choices", lambda: [])
+    for step, kind in setup.STEP_REMEDY_KIND.items():
+        result = routes._contract(
+            {"step": step, "ready": False, "remedy": "sentence", "receipts": []}, local=True
+        )
+        assert result["remedy"]["kind"] == kind, step

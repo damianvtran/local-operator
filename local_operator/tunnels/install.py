@@ -15,6 +15,7 @@ import plistlib
 import shutil
 import subprocess
 import sys
+import threading
 import time
 import urllib.request
 from pathlib import Path
@@ -1163,6 +1164,28 @@ def _person_owns_tunnel() -> bool:
         return True
 
 
+def _bound_auto_setup_log(log: Path) -> None:
+    """Keep `auto-setup.log` bounded the way `request_log` bounds its file.
+
+    The child writes its stdout/stderr straight into the file, so a logging
+    handler cannot rotate it; this rotates BEFORE each spawn instead, with the
+    request log's own cap and backup count (`request_log.FILE_MAX_BYTES`, one
+    backup), so the worst case stays ~1 MiB whatever the number of sign-ins
+    (#3945 round 1, N2). Best-effort: a rotation that fails must not stop the run.
+    """
+    from local_operator.tunnels.request_log import FILE_BACKUPS, FILE_MAX_BYTES
+
+    try:
+        if log.stat().st_size < FILE_MAX_BYTES:
+            return
+        for index in range(FILE_BACKUPS, 0, -1):
+            source = log if index == 1 else log.with_name(f"{log.name}.{index - 1}")
+            if source.exists():
+                os.replace(source, log.with_name(f"{log.name}.{index}"))
+    except OSError:
+        return
+
+
 def auto_setup_after_login(*, provider: str, credential_id: int) -> str:
     """Start the no-spend setup run after a verified Radient sign-in, when wanted.
 
@@ -1213,8 +1236,9 @@ def auto_setup_after_login(*, provider: str, credential_id: int) -> str:
             "--json",
         ]
         log = config.directory() / "auto-setup.log"
+        _bound_auto_setup_log(log)
         with open(log, "ab") as sink:
-            subprocess.Popen(  # noqa: S603 — fixed argv, no shell
+            child = subprocess.Popen(  # noqa: S603 — fixed argv, no shell
                 argv,
                 stdin=subprocess.DEVNULL,
                 stdout=sink,
@@ -1222,6 +1246,11 @@ def auto_setup_after_login(*, provider: str, credential_id: int) -> str:
                 start_new_session=True,
                 close_fds=True,
             )
+        # Reap it (#3945 round 1, N2): in a long-lived server the dropped handle
+        # left the exited child a zombie until some later `subprocess` call
+        # happened to collect it. A daemon thread only waits; it never blocks the
+        # sign-in or keeps the process alive at exit.
+        threading.Thread(target=child.wait, name="auto-setup-reaper", daemon=True).start()
     except Exception:  # noqa: BLE001 — a login must not fail over a background run
         logger.warning("could not start the post-sign-in tunnel setup run")
         return ""

@@ -10,7 +10,9 @@ and the guards on the unattended run a verified sign-in starts.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
@@ -138,8 +140,9 @@ def test_the_capability_flag_is_advertised():
         (gateway.UNREACHABLE, "wait_network", None),
         (gateway.SERVER_UNAVAILABLE, "wait_radient", None),
         (gateway.TUNNEL_INACTIVE, "run", "lop tunnel setup"),
-        (gateway.BILLING_LAPSED, "add_credit", "lop tunnel setup"),
-        (gateway.TUNNEL_DISABLED, "open_console", "lop tunnel setup"),
+        # Console kinds are a link: no setup command (#3945 round 1, Q8).
+        (gateway.BILLING_LAPSED, "add_credit", None),
+        (gateway.TUNNEL_DISABLED, "open_console", None),
     ],
 )
 def test_a_retrying_connector_gets_a_remedy_kind(reason, kind, command):
@@ -171,6 +174,8 @@ def hook(tmp_path, monkeypatch):
 
     def popen(argv, **kwargs):
         spawned.append({"argv": argv, **kwargs})
+        # A child handle the reaper thread can wait on (N2).
+        return SimpleNamespace(wait=lambda: 0)
 
     monkeypatch.setattr(install.subprocess, "Popen", popen)
     return tmp_path, spawned
@@ -370,9 +375,217 @@ async def test_the_health_payload_says_reconnecting_while_the_run_holds_the_lock
     before = await report.local_payload()
     assert before["reconnecting"] is False
     assert before["remedy"]["kind"] == "run"
-    autosetup.write_journal({"state": "running"})
+    autosetup.write_journal({"state": "running", "pid": os.getpid()})
     with nonblocking_file_claim(config.directory() / "setup.lock"):
         during = await report.local_payload()
     assert during["reconnecting"] is True
     assert during["remedy"] == {"kind": "wait_reconnect", "command": None, "url": None}
     assert json.dumps(during)
+
+
+# --- #3945 round-1 remediation ------------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "quote,expected",
+    [
+        # R4: active + ineligible WITH credit is a re-acceptance (quote), not lapsed.
+        ({"active": True, "eligible": False, "balance_usd": "4.00"}, gateway.BILLING_INACTIVE),
+        ({"active": True, "eligible": False, "balance_usd": 0}, gateway.BILLING_LAPSED),
+        ({"active": True, "eligible": False, "balance_usd": "-1"}, gateway.BILLING_LAPSED),
+    ],
+)
+async def test_lapsed_needs_a_balance_that_is_not_positive(quote, expected):
+    reason = await refine_inactive(_api(quote), VALUE, default=gateway.TUNNEL_INACTIVE)
+    assert reason == expected
+
+
+@pytest.mark.asyncio
+async def test_a_console_switch_off_wins_over_lapsed_billing():
+    """Q3: one precedence with `setup.observe` — disabled wins (open_console)."""
+    lapsed = {"active": True, "eligible": False, "balance_usd": 0}
+    for record in ({"enabled": False}, None):
+        api = _api(lapsed, {"enabled": False})
+        reason = await refine_inactive(api, VALUE, default=gateway.TUNNEL_INACTIVE, record=record)
+        assert reason == gateway.TUNNEL_DISABLED
+
+
+@pytest.mark.parametrize("status", [402, 403])
+def test_a_bare_403_outside_connect_stays_an_authorization_refusal(status):
+    """R2: only the `/connect` raise site (a `TunnelInactive`) is an inactive cause."""
+    failure = RequestFailed(f"Radient tunnel request failed (HTTP {status}).", status=status)
+    assert authorization_failure_reason(failure) == gateway.REFUSED
+    assert classify_failure(failure).reason not in gateway.INACTIVE_REASONS
+
+
+@pytest.mark.asyncio
+async def test_the_refinement_is_cached_per_tunnel_and_trigger(tmp_path, monkeypatch):
+    """R3: a retrying suspended connector adds no Radient reads within the TTL."""
+    from local_operator.tunnels import service
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    api = _api({"active": True, "eligible": False, "balance_usd": 0}, {"enabled": True})
+    for _ in range(3):
+        reason = await service.refine_inactive_cached(api, VALUE, default=gateway.TUNNEL_INACTIVE)
+        assert reason == gateway.BILLING_LAPSED
+    assert api.request.await_count == 2  # one record GET + one /billing, once
+    # A different trigger (402) re-refines at once.
+    await service.refine_inactive_cached(api, VALUE, default=gateway.BILLING_INACTIVE)
+    assert api.request.await_count == 4
+    # Invalidated (successful connect / setup run): the next retry reads again.
+    service.invalidate_refinement()
+    await service.refine_inactive_cached(api, VALUE, default=gateway.BILLING_INACTIVE)
+    assert api.request.await_count == 6
+    # Expired past the TTL: read again.
+    cache = config.directory() / service.REFINE_CACHE
+    record = json.loads(cache.read_text())
+    record["at"] -= service.REFINE_TTL_S
+    cache.write_text(json.dumps(record))
+    await service.refine_inactive_cached(api, VALUE, default=gateway.BILLING_INACTIVE)
+    assert api.request.await_count == 8
+
+
+@pytest.mark.asyncio
+async def test_an_unreadable_refinement_is_not_cached(tmp_path, monkeypatch):
+    from local_operator.tunnels import service
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    api = _api(ValueError("no billing"), {"enabled": True})
+    assert (
+        await service.refine_inactive_cached(api, VALUE, default=gateway.TUNNEL_INACTIVE)
+        == gateway.TUNNEL_INACTIVE
+    )
+    assert not (config.directory() / service.REFINE_CACHE).exists()
+
+
+def test_the_inactive_label_no_longer_says_not_active():
+    label = gateway.reason_label(gateway.TUNNEL_INACTIVE)
+    assert label == "paused by Radient — reconnecting"
+    assert gateway.REASON_LABEL[gateway.TUNNEL_INACTIVE] == label
+
+
+# --- The TUI card, keyed by remedy kind (Q2/D4) --------------------------------
+
+
+@pytest.mark.parametrize(
+    "reason,expected",
+    [
+        (gateway.TUNNEL_INACTIVE, "! /mobile enable — paused by Radient"),
+        (gateway.BILLING_INACTIVE, "! /mobile enable — billing not activated"),
+        (gateway.BILLING_LAPSED, "! Add Radient credit to resume phone access"),
+        (gateway.TUNNEL_DISABLED, "! Turn phone access on in the Radient console"),
+    ],
+)
+def test_the_card_is_keyed_by_kind_and_fits_50_cells(reason, expected):
+    from rich.cells import cell_len
+
+    from local_operator.tui.app import ICON_APPROVALS, tunnel_park_card
+
+    card = tunnel_park_card(reason, gateway.TERMINAL_REMEDY[reason])
+    assert card == expected.replace("!", ICON_APPROVALS, 1)
+    assert cell_len(card) <= 50
+    assert "lop " not in card
+
+
+def test_a_waiting_kind_card_names_no_command():
+    from local_operator.tui.app import tunnel_park_card
+
+    card = tunnel_park_card(gateway.UNREACHABLE, "lop tunnel status")
+    assert "lop " not in card and "/mobile" not in card
+
+
+def _service_log(tmp_path, reason, *, at=None):
+    import datetime
+
+    stamp = datetime.datetime.fromtimestamp(at if at is not None else __import__("time").time())
+    config.directory().mkdir(parents=True, exist_ok=True)
+    (config.directory() / "service.log").write_text(
+        f"{stamp.isoformat()} local_operator.tunnels.service: "
+        f"connector stopped reason={reason}: Radient is not serving this tunnel.\n"
+    )
+
+
+@pytest.mark.parametrize("reason", list(gateway.INACTIVE_REASONS))
+def test_a_current_inactive_exit_raises_the_card_without_a_park(tmp_path, monkeypatch, reason):
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    _configure()
+    _service_log(tmp_path, reason)
+    notice = report.retrying_notice()
+    assert notice == {"reason": reason, "remedy": None}
+    # The card renders it through the same kind-keyed path as a park would.
+    from local_operator.tui.app import tunnel_park_card
+
+    card = tunnel_park_card(reason, "")
+    assert "lop " not in card
+
+
+def test_state_mirrors_the_gateway_inactive_reasons():
+    assert state.INACTIVE_REASONS == gateway.INACTIVE_REASONS
+
+
+@pytest.mark.parametrize("case", ["wait_reason", "old_line", "stopped", "no_tunnel"])
+def test_the_retrying_card_stays_quiet_outside_its_gates(tmp_path, monkeypatch, case):
+    import time
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    if case != "no_tunnel":
+        _configure(stopped=case == "stopped")
+    reason = gateway.UNREACHABLE if case == "wait_reason" else gateway.TUNNEL_INACTIVE
+    _service_log(tmp_path, reason, at=time.time() - 3600 if case == "old_line" else None)
+    assert report.retrying_notice() is None
+
+
+# --- auto-setup.log bound and child reaping (N2) -------------------------------
+
+
+def test_the_auto_setup_log_is_rotated_at_the_request_log_cap(tmp_path):
+    from local_operator.tunnels.request_log import FILE_MAX_BYTES
+
+    log = tmp_path / "auto-setup.log"
+    log.write_bytes(b"x" * FILE_MAX_BYTES)
+    install._bound_auto_setup_log(log)
+    assert not log.exists()
+    assert (tmp_path / "auto-setup.log.1").stat().st_size == FILE_MAX_BYTES
+    small = tmp_path / "small.log"
+    small.write_bytes(b"y")
+    install._bound_auto_setup_log(small)
+    assert small.read_bytes() == b"y"
+
+
+def test_the_spawned_run_is_reaped(hook, monkeypatch):
+    import threading
+
+    _configure()
+    waited = threading.Event()
+
+    class Child:
+        def wait(self):
+            waited.set()
+
+    monkeypatch.setattr(install.subprocess, "Popen", lambda argv, **kw: Child())
+    assert install.auto_setup_after_login(provider="radient", credential_id=17)
+    assert waited.wait(5), "the child handle must be waited on (no zombie)"
+
+
+def test_the_offer_accents_the_slash_command(monkeypatch):
+    """D6: `/mobile enable` is drawn in the inline-code ink, the rest stays muted."""
+    from rich.style import Style
+    from rich.text import Text
+
+    from local_operator.tui import theme as theme_mod
+    from local_operator.tui.widgets.transcript import NoticeBlock
+
+    text = "Reach this computer from the phone app: run /mobile enable. Price first."
+    block = NoticeBlock(text, "note", fold_width=200, accent="/mobile enable")
+    built = block._build(200)
+    assert isinstance(built, Text)
+    signal = theme_mod.semantic_color("signal").lower()
+    accented = []
+    for span in built.spans:
+        color = span.style.color if isinstance(span.style, Style) else None
+        if color is not None and color.triplet is not None and color.triplet.hex == signal:
+            accented.append(built.plain[span.start : span.end])
+    assert accented == ["/mobile enable"]
+    plain = NoticeBlock(text, "note", fold_width=200)._build(200)
+    assert isinstance(plain, Text) and plain.plain == built.plain

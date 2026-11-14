@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "ur",
   "namespace": "tunnel.status",
-  "history_sha256": "299b5a24bf49e90214ce03fcae140aa9204aad8f5d7b63897a9fe2fa5bc6fa15",
+  "history_sha256": "742e68e937d5a4190eee43536ec4b20d4b73f98e8800db7efedfcb23f10c535e",
   "entries": [
     {
       "locale": "ur",
@@ -72,6 +72,52 @@
       "evidence": "i18n/audits/evidence/ur/tunnel.status/a3/record.json",
       "round": "a3",
       "keys_audited": 21
+    },
+    {
+      "locale": "ur",
+      "namespace": "tunnel.status",
+      "source_sha256": "e2bc8c63d3124c363252511306fd3951917ab9f93a2398c49cac8c79302aa8f9",
+      "translator": {
+        "agent": "i18n-translator subagent, Local Operator session c0c9e9803405 (#3945 round-1 remediation, uncommitted on 7c0fc7bf2); English source drafted by coder session 889b9f67edf5",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-14"
+      },
+      "auditor": {
+        "agent": "i18n-auditor, independent `task` subagent, session dff33b90744d; neither the i18n-translator (c0c9e9803405) nor the English-drafting coder (889b9f67edf5); did not edit any value",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-14",
+        "result": "passed",
+        "findings": 2,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "a4: independent i18n-auditor dff33b90744d (anthropic/claude-opus-5-5) of i18n-translator c0c9e9803405 (claude-opus-5-5): PASSED, 0 blocker/major; 2 minor/nit (UR-06, UR-07). Evidence: i18n/audits/evidence/ur/tunnel.status/a4/record.json",
+      "evidence": "i18n/audits/evidence/ur/tunnel.status/a4/record.json",
+      "round": "a4",
+      "keys_audited": 24
+    },
+    {
+      "locale": "ur",
+      "namespace": "tunnel.status",
+      "source_sha256": "e2bc8c63d3124c363252511306fd3951917ab9f93a2398c49cac8c79302aa8f9",
+      "translator": {
+        "agent": "i18n-translator subagent, Local Operator session c0c9e9803405 (#3945 round-1 remediation fixes, uncommitted on 7c0fc7bf2); English source drafted by coder session 889b9f67edf5",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-14"
+      },
+      "auditor": {
+        "agent": "i18n-auditor, independent `task` subagent, session 5ac9acc2ba69 (round-1 remediation re-audit); neither the i18n-translator (c0c9e9803405), the English-drafting coder (889b9f67edf5), nor the prior auditors (117e988422ff, dff33b90744d); did not edit any value",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-14",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "a5: independent i18n-auditor 5ac9acc2ba69 (anthropic/claude-opus-5-5) re-audit of i18n-translator c0c9e9803405 #3945 r1 fixes: PASSED, 0 blocker/major; UR-06/UR-07 fixed; open none. Evidence: i18n/audits/evidence/ur/tunnel.status/a5/record.json",
+      "evidence": "i18n/audits/evidence/ur/tunnel.status/a5/record.json",
+      "round": "a5",
+      "keys_audited": 8
     }
   ]
 }

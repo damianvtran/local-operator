@@ -134,6 +134,11 @@ _CHILD_SETTINGS_NAMESPACES = (
     "wire.memory",
     "wire.radient_saver",
     "wire.notification_sound",
+    # The Phone access section (`tunnel.auto_setup_after_login`). Missing here,
+    # `_t` fell back to the message codes and Settings printed raw keys in every
+    # locale (#3945 review round 1, D1/Q1); `test_no_registry_string_is_its_own_code`
+    # now fails for any child namespace left out of this tuple.
+    "wire.phone_access",
 )
 
 

@@ -19,6 +19,21 @@
     "tone": "Plain, lowercase fragment",
     "note": "Tunnel billing had been activated but is no longer eligible because the prepaid Radient balance ran out."
   },
+  "tunnel.status.card_add_credit": {
+    "role": "whole TUI notice card line (no command)",
+    "tone": "Plain, actionable imperative",
+    "note": "The prepaid Radient balance ran out; adding credit in the Radient console resumes phone access by itself. One line of the terminal app's notice card; keep it short (the English line with its icon fits 50 terminal cells), and name no command or URL."
+  },
+  "tunnel.status.card_open_console": {
+    "role": "whole TUI notice card line (no command)",
+    "tone": "Plain, actionable imperative",
+    "note": "The owner switched phone access off in the Radient web console; only the console can turn it back on. One line of the terminal app's notice card; keep it short (the English line with its icon fits 50 terminal cells), and name no command or URL."
+  },
+  "tunnel.status.card_paused": {
+    "role": "tail of the TUI notice card after '/mobile enable — '",
+    "tone": "Plain, lowercase fragment",
+    "note": "Radient paused phone access although billing is fine; /mobile enable reconnects it. One line of the terminal app's notice card; keep it short (the English line with its icon fits 50 terminal cells), and name no command or URL."
+  },
   "tunnel.status.create.conflict_unmatched": {
     "role": "lop tunnel create failure sentence",
     "tone": "Plain, actionable",
@@ -102,6 +117,6 @@
   "tunnel.status.tunnel_inactive.label": {
     "role": "short connector state label (lop tunnel status, desktop)",
     "tone": "Plain, lowercase fragment",
-    "note": "Radient refused to connect this tunnel because it is not active (suspended) while its billing is fine."
+    "note": "Radient has paused phone access although billing is in order; the connector keeps reconnecting by itself. Shown after 'Connector: retrying — ' on one line."
   }
 }

@@ -26,6 +26,18 @@ def billing_lapsed_label() -> Msg:
     return Msg("tunnel.status.billing_lapsed.label", {})
 
 
+def card_add_credit() -> Msg:
+    return Msg("tunnel.status.card_add_credit", {})
+
+
+def card_open_console() -> Msg:
+    return Msg("tunnel.status.card_open_console", {})
+
+
+def card_paused() -> Msg:
+    return Msg("tunnel.status.card_paused", {})
+
+
 def create_conflict_unmatched() -> Msg:
     return Msg("tunnel.status.create.conflict_unmatched", {})
 

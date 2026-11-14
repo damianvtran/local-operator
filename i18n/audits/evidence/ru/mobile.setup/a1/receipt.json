@@ -12,7 +12,7 @@
   "model": "anthropic/claude-opus-5-5"
  },
  "hashes": {
-  "record.json": "a07945d471f39cc83c2ae9c27cbbc9600732eb94fa11c49a798215e16465dc43",
+  "record.json": "d85ecd2f9ecec58579672b98c7ae681a3e59ef4fad9cdc09e62a14edda8b0593",
   "report.md": "b640726ddf924ac6d28229f9e6e728755fbcc79cdec8d44b4f7fee64c7c0e1ce",
   "audit.log": "56ec1c0e4cb5490462d8d7543539bdef67e61362432391ac7f650bd8e1d49c50",
   "dryrun.log": "23857e51655e1bca1e4e82fdcf2061cd2cc663c0d2265eaf59b9c2a3dc483bcf"

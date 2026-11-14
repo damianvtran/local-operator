@@ -80,5 +80,11 @@
    "RU-03": "nit"
   }
  },
- "staged_not_committed": true
+ "staged_not_committed": true,
+ "amended_after_audit": {
+  "by": "coordinator b0300e2c2c7f (not the auditor)",
+  "what": "added top-level source_sha256/target_sha256 restating input_hashes (en/target); appended the Evidence pointer to the ledger row note",
+  "unchanged": "verdict, findings, artifacts hashes",
+  "disclosed_by": "#3945 review round 1, N3 (remediation session 889b9f67edf5)"
+ }
 }

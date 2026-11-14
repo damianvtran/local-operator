@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "vi",
   "namespace": "mobile.setup",
-  "history_sha256": "0a4df2d794b9e584f277022511e024b809201c2a56341a87a201340a8aa5c693",
+  "history_sha256": "79da1d85bd76c5a3ced9d61e339536d38fd9fb9aa5b61954cb613f6d75b34a20",
   "entries": [
     {
       "locale": "vi",
@@ -49,6 +49,29 @@
       "evidence": "i18n/audits/evidence/vi/mobile.setup/a1/record.json",
       "round": "a1",
       "keys_audited": 86
+    },
+    {
+      "locale": "vi",
+      "namespace": "mobile.setup",
+      "source_sha256": "0d245737d539f4d2fe54cf3a2c2174b0aa64820d2eb387e94ea16f65d1b487d7",
+      "translator": {
+        "agent": "i18n-translator subagent, Local Operator session c0c9e9803405 (round-1 remediation values, uncommitted working tree on HEAD 7c0fc7bf2; English drafted by coder session 889b9f67edf5)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-14"
+      },
+      "auditor": {
+        "agent": "i18n-auditor, independent `task` subagent, session 4d11fabf1ca7; not the translating i18n-translator (c0c9e9803405) nor the English-drafting coder (889b9f67edf5); did not edit any value",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-14",
+        "result": "passed",
+        "findings": 1,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "a2: independent i18n-auditor 4d11fabf1ca7 (anthropic/claude-opus-5-5) of i18n-translator c0c9e9803405 values, PR #3945 r1: PASSED, 0 blocker/major; 1 minor/nit (VI-01). Evidence: i18n/audits/evidence/vi/mobile.setup/a2/record.json",
+      "evidence": "i18n/audits/evidence/vi/mobile.setup/a2/record.json",
+      "round": "a2",
+      "keys_audited": 12
     }
   ]
 }

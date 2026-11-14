@@ -1834,23 +1834,51 @@ def tunnel_park_card(reason: str, command: str) -> str:
     same mark, which is what makes the card findable at a glance rather than only
     readable once it has been found.
     """
+    tail = TUNNEL_CARD_REASONS.get(reason)
+    if tail is None:
+        return _kind_card(reason, command)
+    # The three park reasons keep their own wording and command, and import
+    # nothing heavy onto the poll's loop (`test_a_poll_tick_imports_nothing…`).
     mapped = tunnel_card_command(command)
-    tail = TUNNEL_CARD_REASONS.get(reason) or _park_reason_label(reason)
     if not mapped:
         return f"{ICON_APPROVALS} {tail}"
     return f"{ICON_APPROVALS} {mapped} — {tail}"
 
 
-def _park_reason_label(reason: str) -> str:
-    """`gateway.reason_label` for a code this app has no card wording for.
+def _kind_card(reason: str, command: str) -> str:
+    """The card for a reason with no hand-written tail, keyed on its remedy KIND.
 
-    A lazy import for the reason the poll's own import is lazy: `tunnels.gateway`
-    drags httpx and starlette, and this module is on the boot path of every
-    session — including the ones that will never see a park.
+    Keyed on the kind, not on the command or the reason (#3945 round 1,
+    D4/Q2): a console fix names the console and NO command (setup can neither
+    add credit nor override an owner's switch-off), and a wait names nothing to
+    run. Only the action kinds keep a command, mapped to the in-app verb; a
+    retrying notice carries none, so the reason's `TERMINAL_REMEDY` supplies it.
+    `gateway` is imported here, once a card for such a reason is actually
+    raised, never on an idle poll tick.
     """
+    from local_operator.i18n.keys import tunnel_status as _ts_keys
+    from local_operator.i18n.text import tr
     from local_operator.tunnels import gateway
 
-    return gateway.reason_label(reason)
+    kind = gateway.remedy_kind(reason)
+    status = tr("tunnel.status")
+    if kind == "add_credit":
+        return f"{ICON_APPROVALS} {status(_ts_keys.card_add_credit())}"
+    if kind == "open_console":
+        return f"{ICON_APPROVALS} {status(_ts_keys.card_open_console())}"
+    if kind in gateway.WAITING_KINDS:
+        mapped = ""
+    else:
+        mapped = tunnel_card_command(command or gateway.TERMINAL_REMEDY.get(reason, ""))
+    if reason == gateway.TUNNEL_INACTIVE:
+        # Its label ("paused by Radient — reconnecting") is a status-line phrase
+        # and one cell over the card's 50; the card's own tail says the cause.
+        tail = status(_ts_keys.card_paused())
+    else:
+        tail = gateway.reason_label(reason)
+    if not mapped:
+        return f"{ICON_APPROVALS} {tail}"
+    return f"{ICON_APPROVALS} {mapped} — {tail}"
 
 
 #: Bucket the dock's expiry clock to this many seconds. Rows whose settle
@@ -38776,7 +38804,12 @@ class OperatorApp(App[None]):
         """
         from local_operator.tunnels import state
 
-        notice = state.nag()
+        # The inactive-tunnel causes never park (they clear from outside this
+        # machine), so the park file alone left the card unreachable for them
+        # (#3945 round 1, D4). A current retrying exit for one of them raises the
+        # same card: a bounded local tail read in `state`, never the network and
+        # nothing heavy imported onto this loop.
+        notice = state.nag() or state.retrying_notice()
         reason = str(notice.get("reason") or "") if notice else ""
         self._assert_tunnel_band(bool(reason))
         if not reason:
@@ -57717,7 +57750,14 @@ class OperatorApp(App[None]):
             if due is None:
                 return
             await asyncio.to_thread(autosetup.record_login_offer, due)
-            await notice(tr("mobile.setup")(_ms_keys.login_offer()), "note")
+            # The command is accented in the inline-code ink (design round 1, D6):
+            # it is the one actionable token in an otherwise muted note. The
+            # literal is the slash command itself, verbatim in every locale.
+            self._append_block(
+                NoticeBlock(
+                    tr("mobile.setup")(_ms_keys.login_offer()), "note", accent="/mobile enable"
+                )
+            )
         except Exception:  # noqa: BLE001 — an offer must not fail a completed sign-in
             logger.debug("phone access offer skipped", exc_info=True)
 
