@@ -28,6 +28,7 @@ from local_operator.session.frontend_state import (
     FrontendSessionState,
     FrontendStateStore,
 )
+from local_operator.session.placement import SessionPlacement
 
 
 async def _never_take_over() -> Any:
@@ -326,7 +327,14 @@ def _lost_run(pid: int = 4242, started_at: float = 1_000.0) -> Any:
     )
 
 
-def _write_exit(tmp_path, *, reason: str, pid: int = 4242, requested: bool = False) -> None:
+def _write_exit(
+    tmp_path,
+    *,
+    reason: str,
+    pid: int = 4242,
+    requested: bool = False,
+    started_at: float = 1_000.0,
+) -> None:
     from local_operator.session.runtime import journal
 
     directory = tmp_path / "sessions" / "s1"
@@ -335,21 +343,38 @@ def _write_exit(tmp_path, *, reason: str, pid: int = 4242, requested: bool = Fal
         "s1",
         conversation_dir=directory,
         pid=pid,
-        started_at=1_000.0,
+        started_at=started_at,
         reason=reason,
         requested=requested,
     )
 
 
-def _reset_viewer(tmp_path, monkeypatch) -> tuple[AttachedSession, list[str], list[str]]:
+class _PeerOwner:
+    """A non-local owner seam: its exit record is not on this machine."""
+
+    placement = SessionPlacement(mode="peer", network_id="n_1", home_device="dev_x")
+
+    def locate(self) -> tuple[None, None]:
+        return (None, None)
+
+    async def engage(self, **kwargs: Any) -> None:  # pragma: no cover
+        return None
+
+    def make_client(self, *args: Any, **kwargs: Any) -> Any:  # pragma: no cover
+        raise AssertionError("not dialled in this test")
+
+
+def _reset_viewer(
+    tmp_path, monkeypatch, *, owner: Any = None, lost: Any = "default", cold_s: float = 1.0
+) -> tuple[AttachedSession, list[str], list[str]]:
     monkeypatch.setattr(remote_module, "find_runtime_record", lambda *args: (None, None))
     # A short cold bound keeps the crash control fast. The fix acts on the
     # FIRST pass, well inside any bound.
-    monkeypatch.setattr(remote_module, "COLD_FALLBACK_S", 1.0)
+    monkeypatch.setattr(remote_module, "COLD_FALLBACK_S", cold_s)
     remote = AttachedSession(
-        config_dir=tmp_path, session_id="s1", takeover_factory=_never_take_over
+        config_dir=tmp_path, session_id="s1", takeover_factory=_never_take_over, owner=owner
     )
-    remote._runtime_record = _lost_run()
+    remote._runtime_record = _lost_run() if lost == "default" else lost
     refreshed: list[str] = []
     cold: list[str] = []
     remote.set_refresh_callback(lambda: refreshed.append("refresh"))
@@ -391,24 +416,43 @@ async def test_a_retiring_record_written_after_the_reset_still_refreshes(tmp_pat
     assert cold == []
 
 
+_RETIRING = "retiring for 0.101.44@f4a70b9"
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "exit_record",
+    ("exit_record", "viewer"),
     [
-        None,  # a genuine crash: no record at all
-        {"reason": "retiring for 0.101.44@f4a70b9", "pid": 9999},  # a different run
-        {"reason": "retiring for 0.101.44@f4a70b9", "requested": True},  # a stop
-        {"reason": "leaving after SIGTERM"},  # not a build refresh
+        (None, {}),  # a genuine crash: no record at all
+        ({"reason": _RETIRING, "pid": 9999}, {}),  # a different run
+        ({"reason": _RETIRING, "requested": True}, {}),  # a stop
+        ({"reason": "leaving after SIGTERM"}, {}),  # not a build refresh
+        # The three guards round 1 of #3797's review found untested (m3). Each
+        # writes a GENUINE retiring record, so only the guard under test stands
+        # between it and a silent refresh.
+        ({"reason": _RETIRING, "started_at": 2_000.0}, {}),  # same pid, a later run
+        ({"reason": _RETIRING}, {"owner": "peer"}),  # not this machine's record
+        ({"reason": _RETIRING}, {"lost": None}),  # no run to attribute it to
     ],
-    ids=["crash", "other-run", "requested", "signal"],
+    ids=[
+        "crash",
+        "other-run",
+        "requested",
+        "signal",
+        "pid-reuse",
+        "non-local-placement",
+        "no-lost-run",
+    ],
 )
 async def test_owner_loss_without_a_retiring_record_for_this_run_still_goes_cold(
-    tmp_path, monkeypatch, exit_record
+    tmp_path, monkeypatch, exit_record, viewer
 ):
     """Control: real owner loss must stay a visible went-cold, never a silent refresh."""
     if exit_record is not None:
         _write_exit(tmp_path, **exit_record)
-    remote, refreshed, cold = _reset_viewer(tmp_path, monkeypatch)
+    if viewer.get("owner") == "peer":
+        viewer = {**viewer, "owner": _PeerOwner()}
+    remote, refreshed, cold = _reset_viewer(tmp_path, monkeypatch, **viewer)
 
     remote._on_disconnected("owner connection reset")
     task = remote._recovery_task
@@ -417,3 +461,25 @@ async def test_owner_loss_without_a_retiring_record_for_this_run_still_goes_cold
 
     assert refreshed == [], "owner loss must not be read as a refresh"
     assert cold == ["cold"], "owner loss must go cold visibly"
+
+
+@pytest.mark.asyncio
+async def test_a_retiring_record_present_at_the_cold_deadline_is_still_read(tmp_path, monkeypatch):
+    """m2 (#3797 review round 1): the deadline branch must look at the exit record once.
+
+    A zero cold bound puts the loop's FIRST check on the deadline branch, which
+    is exactly where a record written during the final paced sleep is met:
+    the per-pass exit-record check sits after it and is never reached. Before
+    the fix this went cold with refresh=False and nothing engaged a successor.
+    """
+    _write_exit(tmp_path, reason=_RETIRING)
+    remote, refreshed, cold = _reset_viewer(tmp_path, monkeypatch, cold_s=0.0)
+
+    remote._on_disconnected("owner connection reset")
+    task = remote._recovery_task
+    assert task is not None
+    await asyncio.wait_for(task, timeout=5)
+
+    assert refreshed == ["refresh"], "a record present at the deadline must still refresh"
+    assert cold == []
+    assert remote._recovering is False
