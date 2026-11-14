@@ -158,16 +158,30 @@ def test_group_gone_waits_out_macos_eperm_for_reaped_zombies(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_bash_timeout_kill_of_a_real_add_leaves_no_lock(tmp_path, env, monkeypatch):
-    """The real stop path: execute_bash's timeout SIGKILLs a checkout in flight."""
+    """The real stop path: execute_bash's timeout SIGKILLs a checkout in flight.
+
+    The add must still be running when the 0.15 s timeout fires. This test used
+    to bet that checking out 4,000 files took longer than that, which raced the
+    machine's speed: a fast CI runner (run 43589725193) finished the add first,
+    so nothing was killed and the TIMEOUT assertion failed. A smudge filter now
+    blocks checkout on a FIFO nothing ever writes, so the add sits mid-checkout
+    with its ``initializing`` lock held until the timeout's group SIGKILL reaps
+    git and the filter child together, however fast the machine is.
+    """
     from local_operator.tools.builtin import execute_bash
 
     big = tmp_path / "big"
     big.mkdir()
     _git("init", "-q", str(big))
-    for d in range(4):
-        (big / f"d{d}").mkdir()
-        for i in range(1000):
-            (big / f"d{d}" / f"f{i}.txt").write_text(f"{d}-{i}\n" * 20)
+    for i in range(3):
+        (big / f"f{i}.txt").write_text(f"{i}\n")
+    # Committed attributes apply when the new tree checks out; the filter
+    # config lives in the shared .git/config, which linked worktrees inherit.
+    (big / ".gitattributes").write_text("*.txt filter=block\n")
+    fifo = tmp_path / "never-written.fifo"
+    os.mkfifo(fifo)
+    # Opening a FIFO for reading blocks until a writer appears; none ever does.
+    _git("config", "filter.block.smudge", f"cat '{fifo}' >/dev/null; cat", cwd=big)
     _git("add", "-A", cwd=big)
     _git("-c", "user.name=t", "-c", "user.email=t@x", "commit", "-qm", "init", cwd=big)
     started: list[threading.Thread | None] = []
@@ -182,6 +196,6 @@ async def test_bash_timeout_kill_of_a_real_add_leaves_no_lock(tmp_path, env, mon
     thread = started[0] if started else None
     assert thread is not None
     await asyncio.to_thread(thread.join, 30)
-    # Whether the kill landed mid-checkout (removed) or after it (git already
-    # unlocked), no `initializing` registration may remain.
+    # The filter guarantees the kill landed mid-checkout, so no `initializing`
+    # registration may remain.
     assert "locked" not in _porcelain(big)
