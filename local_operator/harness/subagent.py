@@ -194,10 +194,96 @@ class SubagentModelUnavailable(RuntimeError):
     which key to fix) does not have to parse the string.
     """
 
-    def __init__(self, tier: str, reason: str) -> None:
-        super().__init__(f"effort tier {tier!r} is unavailable: {reason}")
+    def __init__(self, tier: str, reason: str, *, remedy: str = "") -> None:
+        # ``remedy`` rides the MESSAGE only, never ``reason``: ``reason`` is the
+        # fact the desktop ``/effective`` contract and existing callers key on,
+        # while the message is what the ``task`` tool hands the delegating model.
+        # A mesh node with ``subagents: {}`` refused every tier-pinned role with
+        # no hint of the fix, and node managers then fell back to
+        # ``model=inherit`` or spawned whole sessions instead of subagents.
+        message = f"effort tier {tier!r} is unavailable: {reason}"
+        super().__init__(f"{message}. {remedy}" if remedy else message)
         self.tier = tier
         self.reason = reason
+        self.remedy = remedy
+
+
+def missing_tier_remedy(
+    tier: str,
+    *,
+    where: str = "this device",
+    push_peer: str = "",
+    keeps_own_map: bool = False,
+) -> str:
+    """The fix for a tier that is simply NOT configured on this device.
+
+    One sentence shared by the launch refusal (:class:`SubagentModelUnavailable`)
+    and the tool-argument refusal (:func:`effort_tier_rejection`), both through
+    :func:`local_missing_tier_remedy`, and by the peer readiness row
+    (``readiness.subagent_tier_pins_row``), so the model and the operator read
+    the same remedy wherever the gap surfaces.
+
+    WHY IT NAMES THE MESH PUSH FIRST: the common way to land here is a mesh node
+    whose ``config.yml`` keeps the shipped ``subagents: {}`` while the roles it
+    received through the definitions sync pin ``effort: hi``. The operator's
+    device carries its tier models to its nodes with that push (PR #3869), so
+    the push is the fix that keeps the node on the operator's models; setting the
+    key locally is the alternative for a standalone machine. "The operator's
+    device" is ``mirror_authority``'s term, spelled out as "the one that signs for
+    the operator": #3869 sends tiers ONLY from the device holding the operator
+    anchor's private half (``may_send_to``), so a push from any other device —
+    including a credential "owner device", a different concept — sends nothing.
+
+    THE COMMAND MUST RUN AS PRINTED: a bare ``definitions push`` is refused
+    (``peer_required``), so it names ``--peer <push_peer>`` when the caller
+    knows the node (the readiness viewer does) and ``--all-peers`` otherwise
+    (a node does not know the name the operator's device files it under).
+
+    ``keeps_own_map`` (the node's tier state is ``authored``/``edited``): #3869's
+    apply never installs over a node's own map, so the push changes nothing
+    there and is NOT offered. The node may hold its own map through
+    ``subagents.model_choice`` alone, so the clear advice names both keys.
+
+    Model-facing and operator-facing technical text (a command and a config
+    key), English by design like the rest of this refusal. ``where`` names the
+    device for a reader on ANOTHER device (the readiness viewer names the peer).
+    """
+    if keeps_own_map:
+        return (
+            f"To fix: set subagents.models.{tier} on {where}, or clear its "
+            "subagents.models and subagents.model_choice (whichever are set) to receive "
+            "the operator's tiers; it keeps its own tier map, so `lop network "
+            "definitions push` does not replace it"
+        )
+    target = f"--peer {push_peer}" if push_peer else "--all-peers"
+    return (
+        f"To fix: run `lop network definitions push {target}` on the operator's device "
+        f"(the one that signs for the operator; only it sends the subagent tier models "
+        f"to mesh nodes), or set subagents.models.{tier} on {where}"
+    )
+
+
+def keeps_own_tier_map(root: Path | None = None) -> bool:
+    """Whether THIS device holds a tier map of its own (``authored``/``edited``).
+
+    The same status the peer readiness row keys its remedy on
+    (``definitions.subagent_tiers_state``), read here so the launch refusal on
+    that node gives the same advice (review m3 / QA Q-2). ``False`` when the
+    state cannot be read: the push remedy is the right default for the
+    ``subagents: {}`` node this exists for, and a refusal must not fail on it.
+    """
+    try:
+        from local_operator.network import definitions
+
+        state = definitions.subagent_tiers_state(root if root is not None else config_dir())
+    except Exception:  # noqa: BLE001 — advice only; never fail a refusal on it
+        return False
+    return str(state.get("status") or "") in ("authored", "edited")
+
+
+def local_missing_tier_remedy(tier: str) -> str:
+    """:func:`missing_tier_remedy` for a refusal on THIS device, own-map aware."""
+    return missing_tier_remedy(tier, keeps_own_map=keeps_own_tier_map())
 
 
 # ``CANONICAL_EFFORT_TIERS`` is imported above from ``local_operator.model.effort``
@@ -307,7 +393,7 @@ def read_effort_tier_selectors() -> dict[str, Any]:
     return {tier: selector for tier, (selector, _effort) in read_effort_tier_targets().items()}
 
 
-def read_effort_tier_targets() -> dict[str, tuple[Any, str | None]]:
+def read_effort_tier_targets(root: Path | None = None) -> dict[str, tuple[Any, str | None]]:
     """``{tier: (selector, reasoning effort)}`` — the tier read with its depth.
 
     A tier is either a bare ``provider/model`` selector (effort ``None``: the
@@ -324,10 +410,17 @@ def read_effort_tier_targets() -> dict[str, tuple[Any, str | None]]:
     The effort is NOT clamped here: the ladder belongs to the resolved
     ``ModelSpec`` (the ``default`` sentinel resolves only at launch), so the
     launch path clamps against it, as ``failover.spec_for_target`` does.
+
+    ``root`` reads another config root than this process's own: the peer
+    readiness fact (``readiness.subagent_tier_pins_fact``) answers for the root
+    its handler was given, and must resolve tiers exactly as a launch there
+    would rather than through a second parser.
     """
     from local_operator.config import ConfigManager
 
-    raw = ConfigManager(config_dir()).get_config_value("subagents", None)
+    raw = ConfigManager(root if root is not None else config_dir()).get_config_value(
+        "subagents", None
+    )
     models = raw.get("models") if isinstance(raw, dict) else None
     if not isinstance(models, dict):
         return {}
@@ -825,7 +918,7 @@ def effort_tier_rejection(tier: str, *, session_model_label: str | None = None) 
             )
         return (
             f"effort tier {tier!r} is unavailable: no tiers are configured under "
-            f"subagents.models; {inherit}"
+            f"subagents.models; {inherit}. {local_missing_tier_remedy(tier)}"
         )
     try:
         raw = read_effort_tier_selectors().get(tier)
@@ -839,10 +932,13 @@ def effort_tier_rejection(tier: str, *, session_model_label: str | None = None) 
         if raw not in (None, "")
         else f"not configured at subagents.models.{tier}"
     )
+    # The remedy only for a MISSING tier: a present-but-malformed value is fixed
+    # by correcting it, and a push would not name that.
+    remedy = "" if raw not in (None, "") else f". {local_missing_tier_remedy(tier)}"
     return (
         f"effort tier {tier!r} is unavailable: {why} "
         f"(configured: {describe_effort_tiers(tiers, session_model_label=session_model_label)}); "
-        f"pick one of those or {inherit}"
+        f"pick one of those or {inherit}{remedy}"
     )
 
 

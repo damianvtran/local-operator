@@ -523,6 +523,9 @@ def test_a_peer_readiness_probe_never_moves_a_broken_config_aside(tmp_path: Path
     assert sorted(p.name for p in node.iterdir() if ".bad" in p.name) == []
     assert facts["subagent_tiers"] is not None
     assert facts["subagent_tiers"]["status"] == "unreadable", facts["subagent_tiers"]
+    # #3951's pins fact reads the same config: guarded, so no fact (and no row)
+    # rather than a rename plus a "nothing configured" claim read off defaults.
+    assert facts["subagent_tier_pins"] is None
     assert facts["default_model"]["resolved"] is False
     assert "could not be read" in facts["default_model"]["reason"], facts["default_model"]
 

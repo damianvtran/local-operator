@@ -124,7 +124,16 @@ def test_delivery_authority_keeps_cost_and_safety_controls_together():
     # Raised to 12700 for the reader `evidence` sentence (+88 measured with
     # `len(read_text())`, 12559 -> 12647): without it a reviewer has no
     # sanctioned way to file the receipt its repository mandates, and refuses.
-    assert len(policy) < 12700
+    #
+    # Raised to 12900 for the subagent-lanes pointer (+148 measured with
+    # `len(read_text())`, 12647 -> 12795): mesh-node managers, refused a pinned
+    # tier, ran review/QA as parallel sessions or on `model=inherit`. The rule
+    # itself lives in guide://sessions; this policy, which every engineering role
+    # loads, carries only the one line that sends a reader there.
+    assert len(policy) < 12900
+    flat = " ".join(policy.split())
+    assert "review/QA/design/UX are `task` subagents, on mesh nodes too" in flat
+    assert "`guide://sessions`" in flat
 
 
 def test_root_instructions_link_detail_instead_of_duplicating_it():

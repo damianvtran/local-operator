@@ -23169,6 +23169,7 @@ class Session:
         """
         from local_operator.harness.subagent import (
             SubagentModelUnavailable,
+            local_missing_tier_remedy,
             resolve_member_model,
         )
 
@@ -23283,7 +23284,16 @@ class Session:
             # that would be noise about a default (the pre-strict code was
             # silent there too). Malformed or unreadable config still warns.
             if strict:
-                raise SubagentModelUnavailable(wanted, reason)
+                # ``quiet`` is exactly the "nothing configured at that tier"
+                # case (``resolve_member_model``), the one a mesh node with
+                # ``subagents: {}`` hits for every tier-pinned role; the refusal
+                # names the fix so the delegating model reports it instead of
+                # silently relaunching on ``model=inherit`` or as a session.
+                raise SubagentModelUnavailable(
+                    wanted,
+                    reason,
+                    remedy=local_missing_tier_remedy(str(wanted)) if quiet else "",
+                )
             if not quiet:
                 logger.warning("subagent model tier %r: %s; using session model", wanted, reason)
             return None
