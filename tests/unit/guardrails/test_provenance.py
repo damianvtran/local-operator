@@ -1052,8 +1052,12 @@ def test_write_shaped_planters_stay_critical(home: Path, command: str) -> None:
 _READS = [
     (f"python3 ana.py ~/.local-operator/sessions/{CHILD}/transcript.jsonl", Risk.HIGH),
     (f"python3 ana.py ~/.local-operator/sessions/{SID}/transcript.jsonl", Risk.HIGH),
-    # Round 6: sed/sqlite3 are not strict read-only; a session mention is HIGH.
-    (f"sed -n 1p ~/.local-operator/sessions/{CHILD}/transcript.jsonl", Risk.HIGH),
+    # Round 6: sqlite3 and a sed that may write are not strict read-only. A
+    # sed whose script can only print (no w/W/e, no -i/-f) is a pure read
+    # since field case B, 2026-11-12 (``resolve._sed_read_only``).
+    (f"sed -n 1p ~/.local-operator/sessions/{CHILD}/transcript.jsonl", Risk.LOW),
+    (f"sed -n '1w /x' ~/.local-operator/sessions/{CHILD}/transcript.jsonl", Risk.HIGH),
+    (f"sed -i '' 1p ~/.local-operator/sessions/{CHILD}/transcript.jsonl", Risk.CRITICAL),
     (f"awk 'NR==1' ~/.local-operator/sessions/{CHILD}/transcript.jsonl", Risk.HIGH),
     # Plain sort/uniq/shasum only read (operator, 2026-11-09: "Read-only
     # commands are never dangerous-delete"); ``sort -o`` stays a write.
@@ -1265,6 +1269,10 @@ def test_mention_invariant_is_never_low(home: Path, program: str) -> None:
         if program in ("zip", "tar") and " Q " in command:
             # Exemption (b): ``zip Q <s>`` / ``tar Q <s>`` name ``Q`` as the
             # archive and the session path as a SOURCE — a read.
+            continue
+        if program == "sed" and " Q " in command:
+            # ``sed Q <s>``: the script is ``Q`` (quit) and the path an INPUT,
+            # a provable read (``resolve._sed_read_only``, case B 2026-11-12).
             continue
         assert _verdict(home, command).risk is not Risk.LOW, command
 
