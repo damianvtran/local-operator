@@ -329,3 +329,131 @@ def test_an_orphaned_overdue_monitor_does_not_pin_the_sleep(tmp_path: Path) -> N
     )
     index, _deliveries, _spooled, _triggers, monitors = _state(tmp_path)
     assert _next_wake_ms(index, monitors=monitors, config_dir=tmp_path) == real_due
+
+
+# ---------------------------------------------------------------------------
+# PARKED sessions (2026-11-12): armed, not held, and probed before a reopen
+# ---------------------------------------------------------------------------
+
+
+def _park(config_dir: Path, session_id: str) -> None:
+    entry = monitor_store.read_entry(config_dir, session_id)
+    assert entry is not None
+    monitor_store.write_entry(
+        config_dir,
+        session_id,
+        cwd=entry["cwd"],
+        monitors=entry["monitors"],
+        preserve={**entry, "parked_at": NOW_MS - 5_000},
+    )
+
+
+def test_a_parked_monitor_session_stays_due_unlike_a_stopped_one(tmp_path: Path) -> None:
+    _arm(tmp_path, "parkedmon001", index_due=NOW_MS - 1_000, counters_due=NOW_MS - 1_000)
+    _park(tmp_path, "parkedmon001")
+    _arm(tmp_path, "stoppedmon01", index_due=NOW_MS - 1_000, held=True)
+    assert [row[0] for row in _due(tmp_path)] == ["parkedmon001"]
+
+
+def test_a_parked_wake_entry_is_fired(tmp_path: Path) -> None:
+    from local_operator.wakes import store as wake_store
+
+    _make_session(tmp_path, "parkedwake01")
+    wake_store.write_entry(
+        tmp_path,
+        "parkedwake01",
+        cwd=str(tmp_path),
+        schedules=[{"id": "w1", "message": "prod window", "next_due_at": NOW_MS - 1_000}],
+        preserve={"parked_at": NOW_MS - 60_000},
+    )
+    assert [row[0] for row in _due(tmp_path)] == ["parkedwake01"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("quiet", [True, False])
+async def test_a_parked_monitor_is_probed_first_and_engaged_only_when_not_quiet(
+    quiet: bool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    works: list[Any] = []
+    probed: list[str] = []
+
+    async def fake_engage(session_id, cwd, work, **_kwargs):  # noqa: ANN001, ANN202
+        works.append((session_id, work))
+
+    async def cold(config_dir, session_id):  # noqa: ANN001, ANN202
+        return False
+
+    async def probe(config_dir, session_id):  # noqa: ANN001, ANN202
+        probed.append(session_id)
+        return quiet
+
+    monkeypatch.setattr("local_operator.session.runtime.launch.engage_runtime", fake_engage)
+    monkeypatch.setattr(sup, "_has_live_runtime", cold)
+    monkeypatch.setattr(sup, "_parked_monitors_quiet", probe)
+    _arm(tmp_path, "parkedmon002", index_due=NOW_MS - 1_000, counters_due=NOW_MS - 1_000)
+    _park(tmp_path, "parkedmon002")
+
+    await fire_due_wakes(tmp_path, now_ms=NOW_MS)
+    assert probed == ["parkedmon002"]
+    assert [sid for sid, _work in works] == ([] if quiet else ["parkedmon002"])
+
+
+@pytest.mark.asyncio
+async def test_an_unparked_cold_monitor_is_never_probed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Negative control: only a PARK routes through the probe."""
+
+    async def fake_engage(session_id, cwd, work, **_kwargs):  # noqa: ANN001, ANN202
+        return None
+
+    async def cold(config_dir, session_id):  # noqa: ANN001, ANN202
+        return False
+
+    async def probe(config_dir, session_id):  # noqa: ANN001, ANN202
+        raise AssertionError("an idle-exited session is engaged as before")
+
+    monkeypatch.setattr("local_operator.session.runtime.launch.engage_runtime", fake_engage)
+    monkeypatch.setattr(sup, "_has_live_runtime", cold)
+    monkeypatch.setattr(sup, "_parked_monitors_quiet", probe)
+    _arm(tmp_path, "coldmonitor2", index_due=NOW_MS - 1_000, counters_due=NOW_MS - 1_000)
+    assert await fire_due_wakes(tmp_path, now_ms=NOW_MS) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_cancelled_parked_probe_is_reaped_and_the_cancellation_propagates(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R1-5: shutdown mid-probe kills the probe's group and never engages the session."""
+    import asyncio
+    import os
+    import signal
+    import sys
+
+    async def cold(config_dir, session_id):  # noqa: ANN001, ANN202
+        return False
+
+    real_exec = asyncio.create_subprocess_exec
+    started: list[Any] = []
+
+    async def slow_probe(*_args: Any, **kwargs: Any) -> Any:
+        # A real child in its own session, standing in for a check that hangs.
+        proc = await real_exec(sys.executable, "-c", "import time; time.sleep(60)", **kwargs)
+        started.append(proc)
+        return proc
+
+    monkeypatch.setattr(sup, "_has_live_runtime", cold)
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", slow_probe)
+    task = asyncio.ensure_future(sup._parked_monitors_quiet(tmp_path, "cancelme0001"))
+    for _ in range(200):
+        if started:
+            break
+        await asyncio.sleep(0.01)
+    assert started, "probe subprocess never started"
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    proc = started[0]
+    assert proc.returncode == -signal.SIGKILL
+    with pytest.raises(ProcessLookupError):
+        os.kill(proc.pid, 0)

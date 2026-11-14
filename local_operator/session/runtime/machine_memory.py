@@ -210,6 +210,9 @@ class MemoryPassReport:
     #: an operator to the wrong place (round 2, R2-3).
     withheld_cause: str = ""
     reason: str = ""
+    #: How many idle sessions the ``relieve`` rung parked INSTEAD of a kill
+    #: (``withheld_cause == "parked"``). See :mod:`park_pressure`.
+    parked: int = 0
 
     def summary(self) -> str:
         """One line, no newline, safe for a log record."""
@@ -226,6 +229,8 @@ class MemoryPassReport:
                 parts.append("kill withheld: a fragment was ended within the cooldown")
             elif self.withheld_cause == "changed":
                 parts.append("kill withheld: the fragment changed before the signal")
+            elif self.withheld_cause == "parked":
+                parts.append(f"kill withheld: parked {self.parked} idle session(s) first")
             elif self.withheld_cause == "unreadable":
                 parts.append("kill withheld: the fragment's rows could not be re-read")
             else:
@@ -254,6 +259,7 @@ def machine_memory_pass(
     identity_probe: "IdentityProbe | None" = None,
     in_cooldown: Callable[[frozenset[tuple[str, int]]], bool] | None = None,
     notify: "OwnerNotifier | None" = None,
+    relieve: Callable[[str], int] | None = None,
 ) -> MemoryPassReport:
     """Run one aggregate pass; blocking, and the caller hands it to a thread.
 
@@ -390,6 +396,33 @@ def machine_memory_pass(
         )
 
     # --- act: the sum is closing on the device -----------------------------
+
+    # PARK BEFORE KILL (2026-11-12). ``relieve`` parks idle sessions — their
+    # runtimes are freed while their wakes and monitors stay armed — and is the
+    # cheaper remedy than ending a fragment, which is usually a build someone is
+    # waiting on. When it parked anything, THIS pass ends nothing: the next pass
+    # re-measures the fleet, and only if the sum still demands it (and nothing
+    # idle is left to park) does the kill below run. Gated on ``apply`` and
+    # ``kill_allowed`` like the kill itself: a measuring pass changes nothing.
+    if apply and kill_allowed and relieve is not None:
+        try:
+            parked = int(relieve(verdict.reason) or 0)
+        except Exception:  # noqa: BLE001 — a failed rung falls through to the kill path
+            logger.warning("machine memory: the park rung raised", exc_info=True)
+            parked = 0
+        if parked:
+            return MemoryPassReport(
+                state="act",
+                fleet_mb=fleet_mb,
+                runtimes=len(roots),
+                measured=len(closure) - unmeasured,
+                unmeasured=unmeasured,
+                top=top,
+                kill_withheld=True,
+                withheld_cause="parked",
+                parked=parked,
+                reason=verdict.reason,
+            )
     logger.warning(
         "machine memory: %s; largest fragments: %s",
         verdict.reason,

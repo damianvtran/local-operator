@@ -430,6 +430,16 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "else. A copy that carried any of them would hand a peer a path to a host that does "
         "not exist there.",
     ),
+    "local_operator/session/runtime/control.py": (
+        2,
+        "``STOP_MARKER`` ('stopped_at') and ``PARK_MARKER`` ('parked_at') are JSON KEYS a "
+        "stop or park stamps inside a wake/monitor INDEX entry (``write_entry``'s "
+        "``preserve``), not file or directory names. The entry file is the session's own "
+        "derived index and is classified by name in the copy set; the stamp is state "
+        "INSIDE it, so nothing under either spelling is an entry of a session directory to "
+        "copy or exclude -- a copy carries the entry, keys and all, and the session's own "
+        "open-time rewrite clears the stamp.",
+    ),
     # ---- this install's CONFIG, LOG and STORE surface (outside ``sessions/``) ----
     "local_operator/server/utils/settings_intents.py": (
         1,

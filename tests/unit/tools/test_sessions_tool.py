@@ -948,7 +948,11 @@ async def test_stop_runs_the_graceful_ladder_only(
             "t", {"op": "stop", "session": record.session_id}, None, None, _context(root)
         )
         assert not result.is_error, result.text
-        assert result.text == _Outcome.line
+        # The receipt leads; the second line names the cost and offers park
+        # (2026-11-12 field gap: stops silently made wakes dormant).
+        head, hint = result.text.split("\n", 1)
+        assert head == _Outcome.line
+        assert "DORMANT" in hint and "op='park'" in hint
         assert captured["target"] == record
         # v1 is the graceful ladder only: no SIGKILL from the tool, and the
         # marker records which front end asked.
@@ -1246,7 +1250,11 @@ def test_schema_budget_is_measured_with_the_repos_own_ruler() -> None:
     # trimmed to the start-context budget — pinned at 1314, the same one-token
     # headroom as every pin above rather than the cushion the untrimmed field
     # would have left.
-    assert count_text_tokens(params) <= 1314
+    # RE-MEASURED for `park` (2026-11-12): one enum word plus the one clause
+    # that tells it apart from `stop` ("keeps wakes/monitors armed") — 1326
+    # measured with this test's own ruler, pinned at 1327 (one-token headroom).
+    # The rest of park's contract lives in op='help', not the schema.
+    assert count_text_tokens(params) <= 1327
     assert count_text_tokens(_SESSIONS_TOOL_DESCRIPTION) <= 273
 
 
@@ -2054,7 +2062,7 @@ async def test_a_stray_parameter_refusal_names_the_ops_accepted_set() -> None:
     mixed = await execute_sessions("t", {"op": "bogus", "timeout_ms": 1}, None, None, None)
     assert mixed.is_error
     assert mixed.text.startswith("invalid arguments:")
-    assert "The ops are list, info, spawn, resume, stop, peek, move, help." in mixed.text
+    assert "The ops are list, info, spawn, resume, stop, park, peek, move, help." in mixed.text
 
 
 @pytest.mark.asyncio
@@ -3645,6 +3653,220 @@ async def test_stop_puts_the_outcome_above_the_wait_lines(
     lines = result.text.splitlines()
     assert lines[0] == 'stopped "stoppable"'
     assert "waiting up to" in lines[1]
+
+
+# ---------------------------------------------------------------------------
+# park — free a session's memory, keep its wakes and monitors armed
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_stop_without_dormant_schedules_has_no_park_hint(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The hint is about what the stop COST; a stop that parked nothing says nothing."""
+    worker = _live_pid()
+    record = _publish_record(root, "abcdabcdab01", "plain", pid=worker.pid)
+
+    async def _fake_stop(target: Any, **kwargs: Any) -> Any:
+        return control.StopOutcome(
+            pid=record.pid,
+            session_id=record.session_id,
+            name="plain",
+            method="socket",
+            line='stopped "plain"',
+        )
+
+    monkeypatch.setattr(control, "stop_session", _fake_stop)
+    try:
+        result = await execute_sessions(
+            "t", {"op": "stop", "session": record.session_id}, None, None, _context(root)
+        )
+        assert result.text == 'stopped "plain"'
+    finally:
+        registry.unpublish(record.pid, root)
+        worker.terminate()
+        worker.wait(timeout=10)
+
+
+@pytest.mark.asyncio
+async def test_park_another_session_uses_the_park_ladder_and_says_what_stays_armed(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    worker = _live_pid()
+    record = _publish_record(root, "abcdabcdab02", "parkable", pid=worker.pid)
+    captured: dict[str, Any] = {}
+
+    async def _fake_park(target: Any, **kwargs: Any) -> Any:
+        captured["target"] = target
+        captured.update(kwargs)
+        return control.StopOutcome(
+            pid=record.pid,
+            session_id=record.session_id,
+            name="parkable",
+            method="socket",
+            line="parked",
+            parked=True,
+            wakes_armed=2,
+            monitors_armed=1,
+        )
+
+    async def _no_stop(*_a: Any, **_k: Any) -> Any:  # pragma: no cover — must not run
+        raise AssertionError("park must not take the stop path")
+
+    monkeypatch.setattr(control, "park_session", _fake_park)
+    monkeypatch.setattr(control, "stop_session", _no_stop)
+    try:
+        result = await execute_sessions(
+            "t", {"op": "park", "session": record.session_id}, None, None, _context(root)
+        )
+        assert not result.is_error, result.text
+        assert result.text == (
+            'parked "parkable" — 2 wakes and 1 monitor stay armed; the supervisor '
+            "reopens it when one fires"
+        )
+        assert captured["target"] == record
+        details = result.details or {}
+        assert details["op"] == "park" and details["parked"] is True
+        assert (details["wakes_armed"], details["monitors_armed"]) == (2, 1)
+    finally:
+        registry.unpublish(record.pid, root)
+        worker.terminate()
+        worker.wait(timeout=10)
+
+
+@pytest.mark.asyncio
+async def test_park_refusal_is_the_stops_refusal(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    worker = _live_pid()
+    record = _publish_record(root, "abcdabcdab03", "busy-one", pid=worker.pid)
+
+    async def _fake_park(target: Any, **kwargs: Any) -> Any:
+        return control.StopOutcome(
+            pid=record.pid,
+            session_id=record.session_id,
+            name="busy-one",
+            method="refused",
+            reason=control.REASON_BUSY,
+            line="refused",
+        )
+
+    monkeypatch.setattr(control, "park_session", _fake_park)
+    try:
+        result = await execute_sessions(
+            "t", {"op": "park", "session": record.session_id}, None, None, _context(root)
+        )
+        assert result.is_error
+        assert "is working right now" in result.text
+    finally:
+        registry.unpublish(record.pid, root)
+        worker.terminate()
+        worker.wait(timeout=10)
+
+
+@pytest.mark.asyncio
+async def test_park_with_peer_is_refused_without_contacting_anything(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        control, "park_session", AsyncMock(side_effect=AssertionError("must not park"))
+    )
+    result = await execute_sessions(
+        "t", {"op": "park", "session": "abcdabcdab04", "peer": "laptop"}, None, None, _context(root)
+    )
+    assert result.is_error
+    assert "another device" in result.text
+
+
+class _Jobs:
+    """A ``JobManagerProtocol`` with fixed rows (only ``status`` is read)."""
+
+    def __init__(self, statuses: list[str]) -> None:
+        self._rows = [type("Job", (), {"status": status})() for status in statuses]
+
+    def get(self, job_id: str, *, registrant_id: str | None = None) -> Any:
+        return None
+
+    def list(self, *, registrant_id: str | None = None) -> list[Any]:
+        return list(self._rows)
+
+    async def cancel(self, job_id: str, *, registrant_id: str | None = None) -> bool:
+        return False
+
+
+@pytest.mark.asyncio
+async def test_self_park_is_deferred_to_a_detached_helper_when_idle(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No address = THIS session, after this turn: the tool spawns the helper and
+    returns; it never runs the ladder itself (that would cut its own turn)."""
+    from local_operator.session.runtime import park_after_turn
+
+    spawned: list[tuple[int, str]] = []
+    monkeypatch.setattr(
+        park_after_turn, "spawn", lambda pid, sid: spawned.append((pid, sid)) or 4242
+    )
+    monkeypatch.setattr(
+        control, "park_session", AsyncMock(side_effect=AssertionError("not synchronously"))
+    )
+    result = await execute_sessions(
+        "t", {"op": "park"}, None, None, _context(root, jobs=_Jobs(["completed"]))
+    )
+    assert not result.is_error, result.text
+    assert spawned == [(os.getpid(), REQUESTER_ID)]
+    assert "parks as soon as this turn ends" in result.text
+    assert (result.details or {})["helper_pid"] == 4242
+
+
+@pytest.mark.asyncio
+async def test_self_park_is_refused_while_a_job_or_subagent_runs(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from local_operator.session.runtime import park_after_turn
+
+    monkeypatch.setattr(
+        park_after_turn, "spawn", lambda *_a: (_ for _ in ()).throw(AssertionError("no spawn"))
+    )
+    result = await execute_sessions(
+        "t", {"op": "park"}, None, None, _context(root, jobs=_Jobs(["running"]))
+    )
+    assert result.is_error
+    assert "cannot park itself" in result.text
+
+
+@pytest.mark.asyncio
+async def test_self_park_is_refused_while_an_ask_is_open(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from local_operator.session.runtime import park_after_turn
+
+    monkeypatch.setattr(builtin, "_self_park_busy", lambda _ctx: True)
+    monkeypatch.setattr(
+        park_after_turn, "spawn", lambda *_a: (_ for _ in ()).throw(AssertionError("no spawn"))
+    )
+    result = await execute_sessions("t", {"op": "park"}, None, None, _context(root))
+    assert result.is_error
+
+
+def test_self_park_busy_reads_open_asks_from_the_store(root: Path) -> None:
+    """The ask half of the predicate, against the real ask log."""
+    from local_operator.asks import store as ask_store
+
+    ctx = _context(root, jobs=_Jobs([]))
+    assert builtin._self_park_busy(ctx) is False
+    directory = ask_store.session_dir(root, REQUESTER_ID)
+    directory.mkdir(parents=True, exist_ok=True)
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(ask_store, "fold", lambda *_a, **_k: [{"status": ask_store.STATUS_OPEN}])
+        assert builtin._self_park_busy(ctx) is True
+
+
+def test_park_approval_copy_names_what_stays_armed() -> None:
+    assert "wakes and monitors armed" in _describe_sessions_approval(
+        {"op": "park", "session": "abc"}, "."
+    )
+    assert "after this turn" in _describe_sessions_approval({"op": "park"}, ".")
 
 
 # --- remote peek parity: the owner's journal read renders like a local peek --
