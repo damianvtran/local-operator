@@ -424,7 +424,11 @@ async def test_hub_ops_list_renders_idle_and_attribution(iso) -> None:
     await parent.async_init()
     job_id = parent._launch_subagent(label="cancel-lane", prompt="do a long thing")
     await wait_child_dir(parent, job_id)
-    await asyncio.sleep(0.2)
+    # Wait for the progress stamp itself, as the sibling tests above do: the
+    # child dir existing says nothing about whether the first progress report
+    # has stamped ``last_progress_at`` yet, and a fixed sleep lost that race
+    # under CI load (run 43376137563: ``None -= 5.0`` TypeError).
+    await wait_until(lambda: (job_of(parent, job_id).last_progress_at or 0) > 0)
     job_of(parent, job_id).last_progress_at -= 5.0
 
     listed = await execute_hub("c", {"op": "list"}, None, None, ctx_for(parent))
