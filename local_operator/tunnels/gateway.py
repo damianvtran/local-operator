@@ -455,6 +455,11 @@ _REQUEST_HEADERS = {
 # local-operator credential and another harness has no use for it, and that
 # allowlist's own rule is that a harness may log what it is handed.
 _LOCAL_OPERATOR_DEVICE_HEADERS = ("x-lop-device", "x-lop-device-key")
+# The relay's pairing filing route and the gateway-owned header that carries the
+# edge assertion to it (``mobile.pair_requests.ASSERTION_HEADER`` names the same
+# string; restated here so the gateway does not import the relay's filer).
+_PAIR_FILING_PATH = "/api/pair/request"
+_PAIR_ASSERTION_HEADER = "x-lop-radient-assertion"
 _RESPONSE_HEADERS = {
     "content-type",
     "content-length",
@@ -786,6 +791,20 @@ class Gateway:
             headers = self.headers(request.headers, host, harness)
         except ValueError:
             return JSONResponse({"error": "mobile relay is not installed"}, status_code=503)
+        if (
+            harness["id"] == "local-operator"
+            and request.method == "POST"
+            and request.url.path == _PAIR_FILING_PATH
+        ):
+            # PAIRING DESIGN v2 §1 item 1: the assertion this gateway JUST verified for
+            # this exact request rides to the relay under a gateway-owned name, so the
+            # relay can re-verify it and file the card as edge-attested (confirm mode).
+            # Only this one path: no other route has a use for it, and the allowlist's
+            # rule (a harness may log what it is handed) argues for the narrowest
+            # forward. An inbound header of this name never crosses -- ``headers()``
+            # copies an allowlist that does not contain it -- so the only value the
+            # relay can see is the one set here.
+            headers[_PAIR_ASSERTION_HEADER] = request.headers.get(PROOF_HEADER, "")
         target = httpx.URL(
             scheme="http",
             host="127.0.0.1",

@@ -1,0 +1,29 @@
+{
+  "schema": 1,
+  "locale": "es",
+  "namespace": "operator.pairing",
+  "history_sha256": "e124ab7666597098944c02b25476c49c71587903b5fad2fcc37774ebb18faa27",
+  "entries": [
+    {
+      "locale": "es",
+      "namespace": "operator.pairing",
+      "source_sha256": "bd9cfbb87ad8fc9e2cfd2dc530df6dafb3f1c0deffb337ff9694a65349435db0",
+      "translator": {
+        "agent": "coder subagent (C2a PWA slice; lop session a2980a9d3820)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-14"
+      },
+      "auditor": {
+        "agent": "i18n-auditor subagent (independent of the translator; lop session 8b4290dc2e57, delegated by lopdev manager 97e3f00bc260)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-14",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0,
+        "read_route_verified": false
+      },
+      "status": "passed",
+      "note": "Independent audit of all 14 operator.pairing keys at English source sha256 bd9cfbb8… (unchanged). Checked: key parity, prompt.* contain no double quotes (AppleScript literal), gesture.* say it is the computer's/Mac's/Windows' own confirmation and NOT the Radient password, refusal copy keeps 'nothing was approved/withdrawn', no `lop ` command in any value. Clean: 14/14 keys, tú register, no findings. Auditor edited no catalogue."
+    }
+  ]
+}

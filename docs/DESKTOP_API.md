@@ -2949,7 +2949,7 @@ to.
             "attention":{"session/<id>":{ /* AttentionState */ }},
             "attention_status":{"session/<id>":{"code":"complete","revision":3}},
             "notifications":{"revision":42,"unread_count":3,"waiting_count":1,"waiting_unread_count":0},
-            "approvals_pending":false}}
+            "approvals_pending":false,"approvals_pair_request":null}}
 {"epoch":"…","seq":13,"type":"attention","session_id":"<12 hex>","payload":{ /* AttentionState */ }}
 {"epoch":"…","seq":14,"type":"notification","session_id":"<12 hex>","payload":{ /* per-session payload */ }}
 {"epoch":"…","seq":15,"type":"catalogue","payload":{"revision":98124}}
@@ -2973,7 +2973,11 @@ to.
   the `notifications` frame below; `null` means the inbox authority could not be
   read, not a verified zero. `open.approvals_pending` is the existing local
   approval store's expiry-folded requested-state boolean, or `null` when that
-  optional authority is unreadable. Missing fields likewise mean unsupported or
+  optional authority is unreadable. `open.approvals_pair_request` is the one live
+  phone-pairing approval id from the same read (the `approvals` frame's
+  `pair_request`), so a window that connects mid-request can raise the pairing
+  card without waiting for a change frame; `null` when none is live or the read
+  failed. Missing fields likewise mean unsupported or
   unknown, not empty. The open receipt cursor is reserved before snapshot reads,
   so level edges queued during those reads remain newer than the snapshot.
 - **`approvals` is a device-local level, not a notification.** Its boolean

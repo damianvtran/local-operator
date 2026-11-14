@@ -15,11 +15,13 @@
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { HttpError, isAuthorityRefusalCode } from "./api";
 import { clauseSeparator, humanizeGateError } from "./components/gate-sheet";
 import { isAuthorityRefusal } from "./components/pending-card";
+import { NotPairedError } from "./lib/operator-device";
+import { closePairingSheet, PairingSheetHost } from "./screens/pair";
 import { SessionScreen } from "./screens/session-view";
 import { messageRuntime } from "./store";
 import type { PendingRequest, SessionProjection } from "./types";
@@ -251,6 +253,17 @@ describe("the phone's gate sheet", () => {
 		fireEvent.click(screen.getByText("keep asking (ask)"));
 		await waitFor(() => expect(screen.queryByRole("status")).toBeNull());
 		expect(mocks.sendCommandWithProof).toHaveBeenCalledTimes(2);
+	});
+
+	it("U4: an unpaired choice opens pairing and leaves no 'not paired' line in the gate sheet", async () => {
+		mocks.operatorFieldsFor.mockRejectedValueOnce(new NotPairedError());
+		await openSheet();
+		render(<PairingSheetHost />);
+		fireEvent.click(screen.getByText("run without asking (auto)"));
+		await screen.findByText("Pair this phone to approve from here");
+		expect(screen.queryByText(/not paired with that machine/)).toBeNull();
+		expect(mocks.sendCommandWithProof).not.toHaveBeenCalled();
+		act(() => closePairingSheet());
 	});
 
 	it("says what it will refuse before the tap on an unpaired phone (D4)", async () => {
@@ -578,7 +591,10 @@ describe("the refusal helpers", () => {
 		const installed = humanizeGateError(
 			new HttpError(422, "authorise it from this machine (Touch ID) or from your paired phone.", "operator_authority_required"),
 		);
-		expect(installed).toContain("lop operator devices");
+		/* D16 (design v2 A2): no shell command on the approval path. The phone
+		   now handles a removed device itself (U15), so the step left is pairing. */
+		expect(installed).toBe("Your computer refused this phone’s approval. If the phone was removed there, pair it again.");
+		expect(installed).not.toMatch(/\blop /);
 		const unconfigured = humanizeGateError(
 			new HttpError(422, "…set it up for this machine first…", "operator_authority_unconfigured"),
 		);

@@ -303,6 +303,14 @@ EVENT_KINDS: frozenset[str] = frozenset(
         # able to tell it apart from a deny (the operator said no) and from an
         # expiry (the window lapsed on its own).
         "onboard_withdrawn",
+        # A decision-scoped run (a phone pairing) whose runner stopped reporting
+        # INSIDE its window settles ``failed`` with a ``step=stale`` receipt before
+        # the fold may expire it (pairing design v2 §2.1). A row of its own because
+        # an incident reader must tell "the run died after the operator approved"
+        # apart from `onboard_failed` (a step reported failure) and from
+        # `onboard_expired` (no decision inside the window). Terminal and routine,
+        # so it stays batched like its two neighbours.
+        "onboard_run_stale",
         # THE PHONE PAIRING APPROVAL (S4a-pair-op, ``operator/pair_op.py``). One row per
         # semantic step of ONE ``operator_device_pair`` record, and the reason the family
         # exists at all: a pairing is the one approval that issues a STANDING signer, so an
@@ -312,8 +320,12 @@ EVENT_KINDS: frozenset[str] = frozenset(
         # is the disclosure the operator accepted (a-2a8b); `desktop_ack` names the typed code
         # check and how many strikes it has taken (a wrong code costs one, and the third
         # closes the card as a deny); `desktop_applied` is the certificate landing in the
-        # device store, and `desktop_apply_refused` is why it did not.
+        # device store, and `desktop_apply_refused` is why it did not. `desktop_confirm`
+        # is the CONFIRM-mode decision ("Codes match — Approve") on an ATTESTED card:
+        # the Radient edge, not a typed code, proved the filer, so the row names that
+        # edge (`via`) in place of a strike count.
         "device_pair.desktop_ack",
+        "device_pair.desktop_confirm",
         "device_pair.desktop_signed",
         "device_pair.desktop_applied",
         "device_pair.desktop_apply_refused",
@@ -646,6 +658,9 @@ DETAIL_KEYS: dict[str, frozenset[str]] = {
     # withdrew (the store only ever accepts the filer), so the row is
     # self-explaining without reading the record.
     "onboard_withdrawn": frozenset({"kind", "surface", "session_id"}),
+    # The stale-run settle carries only the record's `kind`: the run id and the
+    # ``stale`` step live on the record's receipt, which is the fold's own copy.
+    "onboard_run_stale": frozenset({"kind"}),
     # The phone pairing approval (``operator/pair_op.py``). `device_id` is DERIVED from the
     # phone's public key (public data, the same string the certificate and the revocation
     # list carry). `strikes`/`ok` are the typed-code check's own outcome, `assurance` the
@@ -653,6 +668,9 @@ DETAIL_KEYS: dict[str, frozenset[str]] = {
     # `code` a refusal token -- never a sentence, never key material, and never the six
     # digits themselves (they are compared in constant time and are never stored).
     "device_pair.desktop_ack": frozenset({"surface", "ok", "strikes", "device_id"}),
+    # `via` names the attestation that stood in for the typed code
+    # (``radient:<edge version>``) -- a fixed token, never the account or a token.
+    "device_pair.desktop_confirm": frozenset({"surface", "device_id", "via"}),
     "device_pair.desktop_signed": frozenset(
         {"surface", "operation", "device_id", "key_id", "assurance"}
     ),

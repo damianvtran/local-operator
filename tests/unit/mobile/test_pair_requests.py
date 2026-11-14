@@ -97,15 +97,15 @@ def test_http_filing_produces_exact_apply_shape_and_honest_attribution(
     assert pair_op.exact_shape(record)
     assert A._immutable_request(record)["what"] == record["what"]
     assert record["device"]["device_id"] == record["requested_by"]["device_id"]
+    # Design v2 §1: a configured owner account is NOT evidence any more. With no edge
+    # assertion on the filing the route is custom (typed mode), whatever config says.
     assert record["requested_by"] == {
-        "surface": "radient-relay",
+        "surface": "phone",
         "device_id": record["device"]["device_id"],
         "session_id": "",
     }
-    assert record["what"]["pair_phone"]["via"] == {
-        "route": "radient",
-        "account": "acct_from_validated_tunnel",
-    }
+    assert record["what"]["pair_phone"]["via"] == {"route": "custom"}
+    assert pair_op.mode(record) == pair_op.MODE_CODE
     # The person-facing disclosure and apply's exact expectation both accept what
     # the HTTP route filed; no hand-maintained sibling shape is involved.
     assert pair_op.disclosure(record)["key_fingerprint"] == record["device"]["key_fp"]

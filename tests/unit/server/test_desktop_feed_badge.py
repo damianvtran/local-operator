@@ -93,7 +93,7 @@ async def test_tick_approval_edge_survives_another_subscriber_open(
     assert opening_b["payload"]["approvals_pending"] is True
     assert feed._approvals_pending is False, "B must not consume A's pending ticker edge"
     await feed._maybe_emit_approvals()
-    assert frames == [("approvals", {"pending": True})]
+    assert frames == [("approvals", {"pending": True, "pair_request": None})]
     assert feed._approvals_pending is True
 
 
@@ -170,3 +170,77 @@ async def test_baseline_primes_approval_level_without_a_replay(
     feed._approvals_probed_at = float("-inf")
     await feed._maybe_emit_approvals()
     assert frames == [], "a pre-existing level is not a new approval edge"
+
+
+@pytest.mark.asyncio
+async def test_a_live_pairing_rides_the_next_approvals_tick(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    """Pairing design v2 §2.3: ``pair_request`` within one probe tick, no new poller.
+
+    The live ``pair_phone`` id comes from the SAME store read as ``pending`` (moved to
+    ``approvals.approval_snapshot``), and a change of id alone publishes a frame.
+    """
+    from local_operator.network import approvals
+
+    feed = DesktopFeed(tmp_path, bridged=lambda: set())
+    rows = [
+        {
+            "approval_id": "ap_PAIR1",
+            "kind": approvals.KIND_OPERATOR_DEVICE_PAIR,
+            "state": "requested",
+            "expires_at": 4_102_444_800.0,
+        }
+    ]
+    monkeypatch.setattr(approvals, "list_records", lambda **kwargs: list(rows))
+    frames: list[Any] = []
+    monkeypatch.setattr(feed, "_publish", lambda kind, payload: frames.append((kind, payload)))
+    feed._approvals_probed_at = 0.0
+    await feed._maybe_emit_approvals()
+    assert frames == [("approvals", {"pending": True, "pair_request": "ap_PAIR1"})]
+    # The card is signed and running: still the live pairing, still pending=False.
+    rows[0]["state"] = "connecting"
+    feed._approvals_token = None  # a record write moves the directory fingerprint
+    feed._approvals_probed_at = 0.0
+    await feed._maybe_emit_approvals()
+    assert frames[-1] == ("approvals", {"pending": False, "pair_request": "ap_PAIR1"})
+    rows[0]["state"] = "connected"
+    feed._approvals_token = None
+    feed._approvals_probed_at = 0.0
+    await feed._maybe_emit_approvals()
+    assert frames[-1] == ("approvals", {"pending": False, "pair_request": None})
+
+
+@pytest.mark.asyncio
+async def test_the_open_snapshot_carries_a_live_pair_request(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    """Round-1 Q5: a window connecting mid-request gets the pairing id in ``open``.
+
+    No change frame follows for a level the subscriber never saw, so without it a
+    reconnecting window could not raise the pairing card from the feed alone.
+    """
+    from local_operator.network import approvals
+
+    feed = DesktopFeed(tmp_path, bridged=lambda: set())
+    feed._authoring_token = 1
+    monkeypatch.setattr(feed, "_badge_open_snapshot", lambda: ({}, 0, 0, {}, None))
+    monkeypatch.setattr(
+        approvals,
+        "list_records",
+        lambda **kwargs: [
+            {
+                "approval_id": "ap_PAIR1",
+                "kind": approvals.KIND_OPERATOR_DEVICE_PAIR,
+                "state": "requested",
+                "expires_at": 4_102_444_800.0,
+            }
+        ],
+    )
+    opening = await feed._open_frame(
+        FeedSubscription(id="subscriber-mid", baseline_completion_sequence=0)
+    )
+    assert opening["payload"]["approvals_pending"] is True
+    assert opening["payload"]["approvals_pair_request"] == "ap_PAIR1"
+    # A subscriber snapshot never commits the ticker's published edge.
+    assert feed._approvals_pair_request is None
