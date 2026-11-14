@@ -970,9 +970,9 @@ def test_headless_node_gets_the_node_managed_browser_note(monkeypatch) -> None:
     assert "Never install or script any other browser engine" in inventory
     assert "playwright" in inventory
     assert "no browser host is connected on this host" not in inventory
-    # Round 1 (U1, U2, U3): the note says no site opens yet, how long setup
-    # runs, and what counts as the operator's authorisation.
-    assert "no site can be opened" in inventory
+    # Round 1 (U1, U2, U3): the note says how a site is approved there (#3938),
+    # how long setup runs, and what counts as the operator's authorisation.
+    assert "on their own device and sign" in inventory
     assert "900" in inventory and "background" in inventory
     assert "naming this node" in inventory
     # Round 2 (U14): the operator's standing instruction for visual testing

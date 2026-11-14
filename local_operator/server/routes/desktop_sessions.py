@@ -4788,6 +4788,27 @@ def _dismissal_refusal(error: object) -> HTTPException:
     return HTTPException(409, sentence or _DISMISSAL_REFUSED)
 
 
+def _verified_decision_target(bridge: Any, body: Answer) -> tuple[str, str, str] | None:
+    """``(ask_id, question_id, word)`` when this answer decides a signed-door ask.
+
+    Read off the row the session's own frame publishes (``frontend_state.asks``)
+    with the SAME mapping the TUI uses (``asks.decision.bridge_decision_target``),
+    so the two surfaces cannot disagree on which word a tap means. ``None`` for
+    every ordinary ask, for a decline/revise (those are not decisions — the
+    plain door's own refusal stands), and when the row is not on the frame (the
+    plain door then answers or refuses as it always did).
+    """
+    if body.decline or body.revise or not body.answers or body.ask_id is None:
+        return None
+    from local_operator.asks.decision import bridge_decision_target
+
+    state = getattr(bridge.remote, "frontend_state", None)
+    for row in getattr(state, "asks", None) or ():
+        if str(getattr(row, "ask_id", "")) == str(body.ask_id):
+            return bridge_decision_target(row, body.answers)
+    return None
+
+
 async def _dismiss_queued_ask(request: Request, session_id: str, bridge: Any, body: Answer) -> str:
     """Put a queued ask away from the desktop — the NO-BOOT door (SA-D5, §14).
 
@@ -4916,6 +4937,23 @@ async def answer(session_id: str, body: Answer, request: Request):
                 image_kwargs: dict[str, Any] = (
                     {"images": [image.model_dump() for image in body.images]} if body.images else {}
                 )
+                target = _verified_decision_target(bridge, body)
+                if target is not None:
+                    # A question carrying a ``question_id`` (a Team Bridge
+                    # request, or a headless node's ``site:v1:`` browser
+                    # approval) is decided ONLY through the signed door: the
+                    # plain ``ask_respond`` refuses it by construction. The
+                    # facade's ``bridge_decide`` signs with the operator key on
+                    # the way out (``attach_client``), which is what a node's
+                    # browser extension re-verifies before approving a site.
+                    # Two holder shapes answer this: the attached facade returns
+                    # a ``{"ok", "error"}`` verdict, a serving handle raises
+                    # ``ValueError`` (caught below with the plain door's). Both
+                    # reach the user as the same 409 sentence.
+                    verdict = await bridge.remote.bridge_decide(*target)
+                    if isinstance(verdict, Mapping) and not verdict.get("ok", True):
+                        raise ValueError(str(verdict.get("error") or "the decision was refused"))
+                    return reply({"detail": "decided"})
                 detail = await bridge.remote.ask_respond(
                     body.ask_id,
                     body.answers,

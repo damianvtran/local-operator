@@ -1800,7 +1800,13 @@ class AskPickerScreen(Container):
                 )
                 if windowed.question or not plan.question:
                     plan = windowed
-            if plan.body_line_budget < QUESTION_LIST_RESERVE:
+            # The reserve is capped at the list's OWN height (PR #3938 D9): a
+            # two-row list with no "Other" row needs two lines, never four, so
+            # demanding four starved a short closed question (a node's site
+            # card, any 2-option yes/no with free text off) down to
+            # MIN_QUESTION_ROWS at every terminal size — hiding what the user
+            # was consenting to while the options had room to spare.
+            if plan.body_line_budget < min(QUESTION_LIST_RESERVE, max(total, 1)):
                 break
             cap = candidate
         return cap

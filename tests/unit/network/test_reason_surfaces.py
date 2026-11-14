@@ -771,6 +771,17 @@ _DECLARED_RAW_READS: dict[tuple[str, str, str], tuple[int, str]] = {
         1,
         "the session's own compaction refusal token, journalled as bookkeeping, never rendered",
     ),
+    # A node site card's signed decision the browser bridge refused: ``reason`` is
+    # the bridge's machine refusal code (``unsigned_decision``/``no_approver``/
+    # ``wrong_key``/``bad_signature``/...). The ``str()`` coercion only keys a
+    # lookup into this project's own refusal copy (``browser_site_approval``),
+    # and the raw token travels on as the answer's machine ``code`` field —
+    # the person reads the mapped sentence, never the token.
+    ("local_operator/session/session.py", "Session.site_decide", "reason"): (
+        1,
+        "the bridge's refusal code, mapped to this project's own refusal copy and "
+        "returned as a machine code field, never rendered",
+    ),
     # The move queue's record projection: ``detail`` is the RECORD'S OWN phase
     # sentence, copied into the receipt payload a front end reads — the same
     # class as the ack's payload key above. Nothing renders it into a line in

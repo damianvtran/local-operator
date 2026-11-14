@@ -1,0 +1,162 @@
+{
+  "browser.site_approval.question": {
+    "role": "headless-node site approval: the queued ask the operator answers on their own device, and its refusals",
+    "tone": "plain, calm, operator-facing; URLs and product names verbatim",
+    "note": "the ask card's question when an agent on a headless mesh node wants to open a new website. The FIRST LINE (before the line break) must keep {origin} then {node} and stay short: narrow terminals show only that line. {origin} is a URL origin like https://example.org (keep verbatim), {node} is the node's device name; each appears once. `lop browser sites --revoke` is a command: keep verbatim"
+  },
+  "browser.site_approval.option_approve": {
+    "role": "headless-node site approval: the queued ask the operator answers on their own device, and its refusals",
+    "tone": "plain, calm, operator-facing; URLs and product names verbatim",
+    "note": "button on that card; grants the site"
+  },
+  "browser.site_approval.option_deny": {
+    "role": "headless-node site approval: the queued ask the operator answers on their own device, and its refusals",
+    "tone": "plain, calm, operator-facing; URLs and product names verbatim",
+    "note": "button on that card; refuses the site"
+  },
+  "browser.site_approval.refused_unsigned": {
+    "role": "headless-node site approval: the queued ask the operator answers on their own device, and its refusals",
+    "tone": "plain, calm, operator-facing; URLs and product names verbatim",
+    "note": "toast when a site approval is answered from a surface that cannot sign with the operator key itself (the node's own terminal, or a paired phone whose device certificate the node's browser does not accept)"
+  },
+  "browser.site_approval.refused_bad_signature": {
+    "role": "headless-node site approval: the queued ask the operator answers on their own device, and its refusals",
+    "tone": "plain, calm, operator-facing; URLs and product names verbatim",
+    "note": "toast when the node's browser rejects the operator's signature (a different key than the node trusts). The command is verbatim; '<who, when>' is a placeholder the reader fills in, translate only its words"
+  },
+  "browser.site_approval.refused_expired": {
+    "role": "headless-node site approval: the queued ask the operator answers on their own device, and its refusals",
+    "tone": "plain, calm, operator-facing; URLs and product names verbatim",
+    "note": "toast when the extension's pending request is gone (expired, or already answered)"
+  },
+  "browser.site_approval.refused_unreachable": {
+    "role": "headless-node site approval: the queued ask the operator answers on their own device, and its refusals",
+    "tone": "plain, calm, operator-facing; URLs and product names verbatim",
+    "note": "toast when the node's browser extension could not be contacted"
+  },
+  "browser.site_approval.card_title": {
+    "role": "headless-node site approval: the queued ask the operator answers on their own device, and its refusals",
+    "tone": "plain, calm, operator-facing; URLs and product names verbatim",
+    "note": "title line of the terminal ask card for a site approval; starts after a '?' glyph the code prepends. {device} is the asking machine's name as this computer's mesh knows it, or the name it claims followed by device_unconfirmed's marker. Keep it short (about 60 characters plus the name)"
+  },
+  "browser.site_approval.refused_card_mismatch": {
+    "role": "headless-node site approval: the queued ask the operator answers on their own device, and its refusals",
+    "tone": "plain, calm, operator-facing; URLs and product names verbatim",
+    "note": "toast when the operator's own computer refuses to sign a site card whose text does not match what it would approve (possible tampering, or two different Local Operator versions)"
+  },
+  "browser.site_approval.refused_no_approver": {
+    "role": "headless-node site approval: the queued ask the operator answers on their own device, and its refusals",
+    "tone": "plain, calm, operator-facing; URLs and product names verbatim",
+    "note": "refusal when the node's browser has no operator anchor to verify answers against, or the node holds the operator key file; the path and command are verbatim"
+  },
+  "browser.site_approval.device_unconfirmed": {
+    "role": "headless-node site approval: the queued ask the operator answers on their own device, and its refusals",
+    "tone": "plain, calm, operator-facing; URLs and product names verbatim",
+    "note": "the asking machine's self-reported name when this computer's mesh membership does not list that device; shown inside card_title as {device}"
+  },
+  "browser.site_approval.card_title_lapsed": {
+    "role": "headless-node site approval: the queued ask the operator answers on their own device, and its refusals",
+    "tone": "plain, calm, operator-facing; URLs and product names verbatim",
+    "note": "title line of a site-approval card that timed out unanswered; read-only. Starts after a '?' glyph the code prepends"
+  },
+  "browser.site_approval.refused_node_name_mismatch": {
+    "role": "headless-node site approval: the queued ask the operator answers on their own device, and its refusals",
+    "tone": "plain, calm, operator-facing; URLs and product names verbatim",
+    "note": "toast when a site card's machine name disagrees with the name this computer's mesh membership records for that device id. {claimed} and {known} are device names"
+  },
+  "browser.site_approval.refused_old_signer": {
+    "role": "headless-node site approval: the queued ask the operator answers on their own device, and its refusals",
+    "tone": "plain, calm, operator-facing; URLs and product names verbatim",
+    "note": "refusal when an answer to a node's site approval comes from a device or build that cannot check the card before signing (an older Local Operator, a phone); also returned by the node's plain ask doors an old desktop app answers through. Says the card stays open"
+  },
+  "browser.site_approval.sites_help": {
+    "role": "headless-node site approval: the queued ask the operator answers on their own device, and its refusals",
+    "tone": "plain, calm, operator-facing; URLs and product names verbatim",
+    "note": "help text for `lop browser sites`"
+  },
+  "browser.site_approval.sites_revoke_help": {
+    "role": "headless-node site approval: the queued ask the operator answers on their own device, and its refusals",
+    "tone": "plain, calm, operator-facing; URLs and product names verbatim",
+    "note": "help text for the --revoke ORIGIN flag of `lop browser sites`"
+  },
+  "browser.site_approval.sites_allowed": {
+    "role": "headless-node site approval: the queued ask the operator answers on their own device, and its refusals",
+    "tone": "plain, calm, operator-facing; URLs and product names verbatim",
+    "note": "heading above the list of allowed origins"
+  },
+  "browser.site_approval.sites_denied": {
+    "role": "headless-node site approval: the queued ask the operator answers on their own device, and its refusals",
+    "tone": "plain, calm, operator-facing; URLs and product names verbatim",
+    "note": "heading above the list of origins the operator denied"
+  },
+  "browser.site_approval.sites_broad": {
+    "role": "headless-node site approval: the queued ask the operator answers on their own device, and its refusals",
+    "tone": "plain, calm, operator-facing; URLs and product names verbatim",
+    "note": "heading above domain/host-wide grants"
+  },
+  "browser.site_approval.sites_allow_all": {
+    "role": "headless-node site approval: the queued ask the operator answers on their own device, and its refusals",
+    "tone": "plain, calm, operator-facing; URLs and product names verbatim",
+    "note": "line shown when the extension allows all sites"
+  },
+  "browser.site_approval.sites_none": {
+    "role": "headless-node site approval: the queued ask the operator answers on their own device, and its refusals",
+    "tone": "plain, calm, operator-facing; URLs and product names verbatim",
+    "note": "shown when nothing is allowed or denied"
+  },
+  "browser.site_approval.sites_revoke_hint": {
+    "role": "headless-node site approval: the queued ask the operator answers on their own device, and its refusals",
+    "tone": "plain, calm, operator-facing; URLs and product names verbatim",
+    "note": "hint after the list; the command is verbatim"
+  },
+  "browser.site_approval.sites_revoke_limits": {
+    "role": "headless-node site approval: the queued ask the operator answers on their own device, and its refusals",
+    "tone": "plain, calm, operator-facing; URLs and product names verbatim",
+    "note": "shown under the listing when broad grants or the all-sites switch are present: what --revoke cannot remove and where those are changed; `--revoke` verbatim"
+  },
+  "browser.site_approval.sites_revoked": {
+    "role": "headless-node site approval: the queued ask the operator answers on their own device, and its refusals",
+    "tone": "plain, calm, operator-facing; URLs and product names verbatim",
+    "note": "receipt after a successful revoke; {origin} is a URL origin"
+  },
+  "browser.site_approval.sites_revoked_denial": {
+    "role": "headless-node site approval: the queued ask the operator answers on their own device, and its refusals",
+    "tone": "plain, calm, operator-facing; URLs and product names verbatim",
+    "note": "`lop browser sites --revoke` result when the operator's stored denial of {origin} was removed; nothing is approved by it"
+  },
+  "browser.site_approval.sites_revoke_nothing": {
+    "role": "headless-node site approval: the queued ask the operator answers on their own device, and its refusals",
+    "tone": "plain, calm, operator-facing; URLs and product names verbatim",
+    "note": "receipt when revoke found nothing for that origin"
+  },
+  "browser.site_approval.sites_still_broad": {
+    "role": "headless-node site approval: the queued ask the operator answers on their own device, and its refusals",
+    "tone": "plain, calm, operator-facing; URLs and product names verbatim",
+    "note": "warning after revoke when a domain/host-wide grant still covers the origin; {grants} is a comma-separated list"
+  },
+  "browser.site_approval.sites_bad_origin": {
+    "role": "headless-node site approval: the queued ask the operator answers on their own device, and its refusals",
+    "tone": "plain, calm, operator-facing; URLs and product names verbatim",
+    "note": "error when --revoke gets something that is not an http(s) URL"
+  },
+  "browser.site_approval.sites_bad_origin_no_scheme": {
+    "role": "headless-node site approval: the queued ask the operator answers on their own device, and its refusals",
+    "tone": "plain, calm, operator-facing; URLs and product names verbatim",
+    "note": "`lop browser sites --revoke` refusal when the argument is a bare host with no http:// or https://; the example keeps {origin} verbatim"
+  },
+  "browser.site_approval.sites_unreachable": {
+    "role": "headless-node site approval: the queued ask the operator answers on their own device, and its refusals",
+    "tone": "plain, calm, operator-facing; URLs and product names verbatim",
+    "note": "error when the browser bridge cannot be reached; {detail} is a technical reason without a trailing period; {remedy} is one of the sites_remedy_* sentences"
+  },
+  "browser.site_approval.sites_remedy_desktop": {
+    "role": "headless-node site approval: the queued ask the operator answers on their own device, and its refusals",
+    "tone": "plain, calm, operator-facing; URLs and product names verbatim",
+    "note": "next step when the browser bridge is unreachable on a desktop machine; commands verbatim"
+  },
+  "browser.site_approval.sites_remedy_node": {
+    "role": "headless-node site approval: the queued ask the operator answers on their own device, and its refusals",
+    "tone": "plain, calm, operator-facing; URLs and product names verbatim",
+    "note": "next step when the browser bridge is unreachable on a headless node; commands verbatim"
+  }
+}

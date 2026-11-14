@@ -2654,6 +2654,22 @@ def _serve_peer_bounded_history(payload: dict[str, Any], sync: Any, locality: st
     payload["display_history"] = bounded.model_dump(mode="json")
 
 
+def _is_site_decide_target(request_id: str) -> bool:
+    """Whether a ``decide`` request id (``ask#question#word``) names a headless
+    node's ``site:v1:`` card (``browser_bridge/site_approval.py``)."""
+    from local_operator.browser_bridge.site_approval import SITE_QUESTION_PREFIX
+
+    return f"#{SITE_QUESTION_PREFIX}" in str(request_id)
+
+
+def _site_old_signer_refusal() -> str:
+    """The keyed sentence for a site card answer this device cannot sign."""
+    from local_operator.i18n.keys import browser_site_approval as _keys
+    from local_operator.i18n.messages import render_resolved
+
+    return render_resolved(_keys.refused_old_signer())
+
+
 class RuntimeServer:
     """One per interactive process. Construct, ``start()``, ``close()``."""
 
@@ -6646,7 +6662,7 @@ class RuntimeServer:
             client_nonce=conn.operator_nonce,
             server_salt=conn.operator_salt,
         )
-        signature = self._operator_signature_verdict(frame, conn)
+        signature, challenge = self._operator_signature_check(frame, conn)
         admitted = admit_increasing(capability=capability, signature=signature)
         if admitted and frame.get("op") == "bridge_decide":
             # TB-02 P1: the one-shot ask-bound grant the decision needs is
@@ -6656,11 +6672,31 @@ class RuntimeServer:
             # Memory-only; see approval.py's grant table.
             from local_operator.harness.approval import mint_bridge_decide_grant
 
+            # The signed PROOF rides with the grant ONLY when the signature
+            # verdict is True: a headless node's extension re-verifies it before
+            # approving a site (``browser_bridge/site_approval.py``). A
+            # capability admission (the node's own console) carries none, which
+            # the extension refuses as ``unsigned_decision`` — the operator, not
+            # whoever holds the node, decides a site. Nor does an answer signed
+            # by a DEVICE certificate (a paired phone): the extension knows only
+            # the anchor point, so it could only call that signature "bad";
+            # without proof it says "answer from your own computer", which is
+            # the remedy (review R1-4).
+            proof = (
+                {
+                    "operator_sig": str(frame.get("operator_sig") or ""),
+                    "operator_key_id": str(frame.get("operator_key_id") or ""),
+                    "challenge": challenge,
+                }
+                if signature is True and challenge and frame.get("operator_cert") is None
+                else None
+            )
             mint_bridge_decide_grant(
                 session_id=str(self._record.session_id),
                 ask_id=str(frame.get("ask_id") or ""),
                 question_id=str(frame.get("question_id") or ""),
                 word=str(frame.get("word") or ""),
+                proof=proof,
             )
         if not admitted:
             # Logged because the two refusals have different causes and only
@@ -6678,7 +6714,16 @@ class RuntimeServer:
         return admitted
 
     def _operator_signature_verdict(self, frame: dict[str, Any], conn: _ClientConn) -> bool | None:
-        """``True``/``False`` when a signature was offered, ``None`` when not.
+        """The verdict alone; see :meth:`_operator_signature_check`."""
+        return self._operator_signature_check(frame, conn)[0]
+
+    def _operator_signature_check(
+        self, frame: dict[str, Any], conn: _ClientConn
+    ) -> tuple[bool | None, str]:
+        """``(verdict, challenge)``: ``True``/``False`` when a signature was
+        offered, ``None`` when not; the challenge it consumed (``""`` when none
+        was), which a site approval's proof needs because the extension
+        re-verifies the same signed message.
 
         THE CHALLENGE IS CONSUMED HERE, before verification, and that is the
         replay defence rather than a detail: a popped challenge cannot be
@@ -6695,17 +6740,17 @@ class RuntimeServer:
         """
         target = signature_target(frame)
         if target is None:
-            return None
+            return None, ""
         supplied = frame.get("operator_sig")
         if supplied is None:
-            return None
+            return None, ""
         action, request_id = target
         entry = conn.operator_challenges.pop((action, request_id), None)
         if entry is None:
-            return False
+            return False, ""
         challenge, expires_at = entry
         if time.monotonic() > expires_at:
-            return False
+            return False, ""
         # The runtime-wide count follows the CONSUME as well as the mint: a
         # challenge handed back here is spent, and leaving it in the aggregate
         # would let a subject that never signs slowly fill the runtime's budget
@@ -6714,7 +6759,7 @@ class RuntimeServer:
         loaded = self._anchor_cache.get()
         anchor = loaded.anchor if loaded.usable else None
         device_spki = self._device_cert_point(frame.get("operator_cert"), anchor)
-        return operator_verify.signature_verdict(
+        verdict = operator_verify.signature_verdict(
             action=action,
             session_id=self._record.session_id,
             request_id=request_id,
@@ -6726,6 +6771,7 @@ class RuntimeServer:
             device_spki=device_spki,
             now=int(time.time()),
         )
+        return verdict, str(challenge)
 
     def _device_cert_point(self, certificate: object, anchor: Any) -> bytes | None:
         """The device point behind a certificate, verified once per TTL.
@@ -7085,6 +7131,15 @@ class RuntimeServer:
                 # decide this caller could not be admitted, read from the same
                 # cached load, so the sentence and the decision cannot disagree.
                 anchored = self._anchor_cache.get().usable
+                if op == "bridge_decide" and _is_site_decide_target(
+                    f"#{frame.get('question_id') or ''}"
+                ):
+                    # A node site card answered unsigned: in practice an older
+                    # build or a phone that was refused its challenge above. The
+                    # generic "not proved" sentence (rebuilt by the CLIENT from
+                    # its own catalogue) would name remedies that cannot sign
+                    # a site card; this one says which device can (review U5).
+                    raise ValueError(_site_old_signer_refusal())
                 raise (
                     OperatorAuthorityRequired(trigger=op)
                     if anchored
@@ -7455,6 +7510,18 @@ class RuntimeServer:
                 request_id = frame.get("request_id", "")
                 if not isinstance(request_id, str):
                     raise ValueError("request_id must be a string")
+                if action == "decide" and _is_site_decide_target(request_id):
+                    # OLD SIGNERS FAIL CLOSED (review U5). A headless node's
+                    # site card is signed only by a client that checked it
+                    # against its ``site`` block first, and says so with this
+                    # marker (``asks/decision.py`` → ``attach_client``). A build
+                    # from before that check — or a phone, which cannot run it
+                    # — gets no challenge, so it cannot sign a card it never
+                    # verified. The marker is unsigned: it stops honest old
+                    # clients, not an attacker who controls the signer (one
+                    # who does holds the operator key anyway).
+                    if frame.get("site_card_verified") is not True:
+                        raise ValueError(_site_old_signer_refusal())
                 now = time.monotonic()
                 self._expire_challenges(conn, now)
                 if len(conn.operator_challenges) >= _MAX_CHALLENGES_PER_CONN:

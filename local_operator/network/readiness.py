@@ -4101,6 +4101,29 @@ def browser_row(member: Any, facts: Mapping[str, Any], *, peer_label: str) -> di
         }
         chrome = str(fact.get("chrome_version") or "").removeprefix("Google ").strip()
         extension = str(fact.get("extension_version") or "")
+        if unit_active and daemon_healthy and paired and fact.get("operator_key_held_locally"):
+            # Usable, but no PERSON can approve a new site here (review R2-3):
+            # the node holds its operator key, so a signature could come from
+            # the agent itself, and the browser tool refuses to raise cards.
+            return _capability_row(
+                device_id=member.device_id,
+                device_name=peer_label,
+                capability=CAPABILITY_BROWSER,
+                ok=False,
+                code=CODE_UNUSABLE,
+                detail=(
+                    f"{chrome or 'Chrome'} (node-managed, headless) works, but {peer_label} "
+                    "holds the operator key's private half, so no one can approve new "
+                    "sites there"
+                ),
+                remedies=[
+                    f"remove the operator key file from {peer_label} (it belongs on the "
+                    "operator's own computer), then run `lop browser setup --node --repair "
+                    f"--authorised-by '<who, when>'` on {peer_label}"
+                ],
+                source=SOURCE_PEER,
+                observed={**observed, "operator_key_held_locally": True},
+            )
         if unit_active and daemon_healthy and paired:
             return _capability_row(
                 device_id=member.device_id,

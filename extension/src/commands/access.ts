@@ -1,8 +1,39 @@
 import { requesterOriginKey } from "../access-queue";
-import { accessStatus, cancelAccess, enqueueAccess } from "../approval-store";
+import { accessStatus, cancelAccess, decideAccess, enqueueAccess, readQueueSnapshot } from "../approval-store";
 import { BridgeCommandError } from "../cdp";
 import { originAllowed, safeHttpUrl } from "../origins";
 import { getSession } from "../state";
+import { SITE_SCOPE, readNodeApproval, submitSignedDecisionWith } from "../signed-decision";
+import {
+  listSiteDecisions,
+  nodeDenied,
+  recordNodeDenial,
+  revokeSiteDecision,
+  type StorageLike,
+} from "../node-site-decisions";
+import { CHROME_API_DEADLINE_MS, deadline } from "../settle";
+import { withSessionMutation } from "../state";
+
+/* The managed-policy area, or undefined where Chrome offers none (tests, old
+ * builds). Read per call, never cached: setup rewrites the anchor in a running
+ * Chrome, and a revoked anchor must stop verifying at once. */
+function managedArea(): Pick<chrome.storage.StorageArea, "get"> | undefined {
+  return typeof chrome !== "undefined" ? chrome.storage?.managed : undefined;
+}
+
+/* `chrome.storage.local` as node-site-decisions.ts's StorageLike. Every await is
+ * behind `deadline` for the reason access-grants.ts gives: these run on the
+ * shared mutation lane, and one hung storage call would park every command. */
+function localStorageLike(): StorageLike {
+  return {
+    get: (keys) =>
+      deadline(chrome.storage.local.get(keys), CHROME_API_DEADLINE_MS, "chrome.storage.local.get(node decisions)") as Promise<
+        Record<string, unknown>
+      >,
+    set: (items) =>
+      deadline(chrome.storage.local.set(items), CHROME_API_DEADLINE_MS, "chrome.storage.local.set(node decisions)"),
+  };
+}
 
 /* Approval RPCs are surface-free: they are the recovery path after open/goto
  * refused a new origin. Each poll reads only the caller's requester-bound entry
@@ -29,6 +60,21 @@ export async function requestAccess(
   const url = safeHttpUrl(params.url);
   const requester = requesterOf(params, requestId);
   if (await callerAlreadyAllowed(url, requester)) return { origin: url.origin, state: "allowed" };
+  // HEADLESS NODE (signed-decision.ts): nobody can click the popup, so the
+  // decision has to come from the operator's signature. With no usable anchor
+  // there is nobody who can decide at all — say so now (`approval:
+  // "no_approver"`, an ok result, never a new error code) instead of queueing a
+  // prompt that expires unseen ten minutes later.
+  const node = await readNodeApproval(managedArea());
+  if (node.headless && !node.anchor) {
+    return { origin: url.origin, state: "none", approval: "no_approver" };
+  }
+  // D3 "ask me once per site" (review Q4): a site the operator DENIED with a
+  // signed answer stays denied on this node until `lop browser sites --revoke`
+  // removes it, so no second card is raised for it.
+  if (node.headless && node.anchor && (await nodeDenied(localStorageLike(), url.origin))) {
+    return { origin: url.origin, state: "denied", approval: "signed", denied_by: "operator" };
+  }
   const result = await enqueueAccess(url, requester, "async");
   if (result.full) {
     throw new BridgeCommandError(
@@ -40,7 +86,57 @@ export async function requestAccess(
   // enqueueAccess centrally arms the earliest durable deadline. Arming this
   // request's own expiry here would let a later request delay an earlier one.
   const { entry: _entry, full: _full, ...response } = result;
+  if (node.anchor && response.state === "pending" && response.entryId) {
+    // Everything the session needs to raise the operator's card and bind it to
+    // THIS entry: the question id is derived from these, and the extension
+    // re-derives it from its own entry when the signed answer comes back.
+    return {
+      ...response,
+      approval: "signed",
+      scope: SITE_SCOPE,
+      node_device_id: node.nodeDeviceId,
+    };
+  }
   return { ...response };
+}
+
+/** `submit_signed_decision`: the operator's signed answer to a node site ask.
+ * Requester-free on purpose — the signature, not the caller, is the authority,
+ * and it names its entry through the question id. */
+export async function submitSignedDecision(params: Record<string, unknown>): Promise<Record<string, unknown>> {
+  const approval = await readNodeApproval(managedArea());
+  const result = await submitSignedDecisionWith(params, {
+    approval,
+    liveEntries: async () => (await readQueueSnapshot()).queue,
+    decide: async (entryId, decision) => {
+      const outcome = await decideAccess(entryId, decision);
+      if (outcome.applied && decision === "deny") {
+        // Only a SIGNED deny reaches here, so only the operator's own refusal
+        // becomes sticky; a popup Deny elsewhere stays a one-off receipt.
+        const now = Date.now();
+        await withSessionMutation(async () => {
+          for (const entry of outcome.decided) await recordNodeDenial(localStorageLike(), entry.origin, now);
+        });
+      }
+      return outcome.applied;
+    },
+  });
+  return { ...result };
+}
+
+/** `list_access`: what this browser has stored per site — exact-origin grants,
+ * signed node denials, broad grants and the all-sites switch. Read-only. */
+export async function listAccess(): Promise<Record<string, unknown>> {
+  return { ...(await listSiteDecisions(localStorageLike())) };
+}
+
+/** `revoke_access`: remove the stored decision (grant or signed denial) for one
+ * exact origin. Permission-reducing, so unsigned by design
+ * (node-site-decisions.ts). `removed: []` means nothing was stored for it. */
+export async function revokeAccess(params: Record<string, unknown>): Promise<Record<string, unknown>> {
+  const url = safeHttpUrl(params.url);
+  const result = await withSessionMutation(() => revokeSiteDecision(localStorageLike(), url.origin));
+  return { ...result };
 }
 
 export async function awaitAccess(
