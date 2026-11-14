@@ -282,3 +282,104 @@ def test_without_session_id_own_holder_still_busy(home: Path, repo: Path, live: 
     _wait_seen(wt, child.pid)
     assert prov.worktree_state(str(wt), own=True) == "busy"
     assert prov.worktree_state(str(wt), own=True, session_id=S) == "dirty"
+
+
+# -- PR #3987 round-1 remediation ----------------------------------------------
+
+
+def _wait_seen_keeping_cache(tree: Path, pid: int) -> None:
+    """Wait until a FRESH inventory shows ``pid`` inside, then put the warm cache back.
+
+    QA Q1's precondition is a cache warmed BEFORE the holder arrived; a fresh
+    read refreshes the cache, so the earlier (still in-TTL) snapshot is restored.
+    """
+    warm = prov._cwd_inventory_cache
+    assert warm is not None
+    real = os.path.realpath(tree)
+    deadline = time.monotonic() + 10
+    try:
+        while time.monotonic() < deadline:
+            entries = prov._cwd_entries(fresh=True) or ()
+            if any(p == pid and prov._inside(cwd, real) for p, cwd in entries):
+                return
+            time.sleep(0.05)
+        raise AssertionError(f"pid {pid} never showed a cwd inside {tree}")
+    finally:
+        prov._cwd_inventory_cache = warm
+
+
+@pytest.mark.parametrize("command", FIELD)
+def test_q1_warm_empty_cache_does_not_hide_a_foreign_holder(
+    home: Path, repo: Path, live: list[int], command: str
+) -> None:
+    """QA Q1 (row 2e): a cached "nobody inside" must never lower an own tree."""
+    wt = _attr3880(home, repo)
+    real = os.path.realpath(wt)
+    # Warm the 30 s cache while nobody is inside.
+    assert _REAL_LIVE_CWD_INSIDE(real) is False
+    pid = _orphan_in(wt, live)
+    _wait_seen_keeping_cache(wt, pid)
+    # The stale cache alone still says "nobody inside" (the hole Q1 found) ...
+    assert prov._live_cwd_inside(real) is False
+    # ... but the own-tree path reads fresh and finds the foreign orphan.
+    assert prov.worktree_state(str(wt), own=True, session_id=S) == "busy"
+    risk, reason = _rank(home, command)
+    assert risk is Risk.HIGH, reason
+    assert f"pid {pid} sleep (no session record" in reason
+
+
+def test_m1_sibling_subagents_shell_in_this_harness_is_foreign(
+    home: Path, repo: Path, live: list[int]
+) -> None:
+    """Review m1: a child of THIS process spawned by an unrelated in-process session."""
+    from local_operator.guardrails import spawned
+
+    wt = _attr3880(home, repo)
+    child = _own_child_in(wt, live)
+    _wait_seen(wt, child.pid)
+    spawned.record(child.pid, S2, child)  # what the bash tool records at spawn
+    holders = prov.cwd_holders(os.path.realpath(wt), S)
+    assert holders is not None and [h.family for h in holders] == [False]
+    assert f"session {S2}, another session in this harness process" in holders[0].owner
+    assert prov.worktree_state(str(wt), own=True, session_id=S) == "busy"
+    risk, reason = _rank(home, FIELD[0])
+    assert risk is Risk.HIGH, reason
+    assert f"pid {child.pid} sleep (session {S2}" in reason
+
+
+@pytest.mark.parametrize(("spawner", "relation"), [(S, ""), (S2, "ancestor"), (S2, "descendant")])
+def test_m1_own_or_lineage_spawned_shell_is_family(
+    home: Path,
+    repo: Path,
+    live: list[int],
+    monkeypatch: pytest.MonkeyPatch,
+    spawner: str,
+    relation: str,
+) -> None:
+    """The deleting session's own shell, or its ancestor's/descendant's, stays family."""
+    from local_operator.guardrails import spawned
+
+    monkeypatch.setattr(prov, "same_task_tree", lambda a, b, **_: relation)
+    wt = _attr3880(home, repo)
+    child = _own_child_in(wt, live)
+    _wait_seen(wt, child.pid)
+    spawned.record(child.pid, spawner, child)
+    holders = prov.cwd_holders(os.path.realpath(wt), S)
+    assert holders is not None and [h.family for h in holders] == [True]
+    assert prov.worktree_state(str(wt), own=True, session_id=S) == "dirty"
+    assert _rank(home, FIELD[0])[0] is Risk.LOW
+
+
+def test_m1_reaped_spawn_record_is_not_believed() -> None:
+    """Pid reuse: an entry whose process was reaped attributes nothing."""
+    from local_operator.guardrails import spawned
+
+    class _Proc:
+        returncode: int | None = None
+
+    proc = _Proc()
+    spawned.record(987_654_321, S2, proc)
+    assert spawned.session_of(987_654_321) == S2
+    proc.returncode = 0
+    assert spawned.session_of(987_654_321) is None
+    assert spawned.session_of(987_654_321) is None  # pruned, not resurrected

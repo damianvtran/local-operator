@@ -335,3 +335,84 @@ async def test_judge_facts_say_detached_when_the_ledger_row_is_missing(
     assert prompts and "HEAD: detached (no branch) at" in prompts[0]
     assert "own-created detached worktree" not in prompts[0]  # no ledger row, no claim
     assert "`git worktree remove --force <exact path>`" in outcome.text
+
+
+# -- PR #3987 round-1 remediation ----------------------------------------------
+
+
+def test_refusal_guidance_is_reason_specific() -> None:
+    """Review m2: a fixable refusal must not steer the agent to ask about its own tree."""
+    text = SUPPORTED_DELETE_PATHS
+    assert "treat it as a path you did not create" not in text
+    assert "HEAD reachable from no ref → keep the commit with `git tag` or `git branch`" in text
+    assert "held by a foreign pid → wait for that process to exit" in text
+    assert "only 'not in the ledger' / no creation record means a path you did not create" in text
+
+
+@pytest.mark.parametrize("name", ["café", "a\tb", 'q"uote'])
+def test_nested_repo_under_a_quoted_name_is_not_scratch(home: Path, repo: Path, name: str) -> None:
+    """Review m3: git C-quotes these names without ``-z``; the nested-repo check still sees them."""
+    wt = _attr3880(home, repo)
+    nested = wt / name
+    nested.mkdir()
+    _git("init", "-q", cwd=nested)
+    (nested / "only.txt").write_text("only copy\n")
+    _git("add", ".", cwd=nested)
+    _git("commit", "-qm", "only copy", cwd=nested)
+    plain = _git("status", "--porcelain", cwd=wt)
+    assert '"' in plain  # the shape the old parser mis-read
+    assert prov.own_detached_scratch(str(wt)) is None
+
+
+def test_quoted_untracked_file_alone_is_still_scratch(home: Path, repo: Path) -> None:
+    """The ``-z`` parse keeps the waiver for a plain quoted-name file (no nested repo)."""
+    wt = _attr3880(home, repo)
+    (wt / "café.tmp").write_text("scratch\n")
+    assert prov.own_detached_scratch(str(wt)) is not None
+    assert _rank(home, FIELD_COMMANDS[0])[0] is Risk.LOW
+
+
+def test_own_detached_tree_outside_worktrees_keeps_base_rank(home: Path, repo: Path) -> None:
+    """QA Q2: the waiver holds only under ``<repo>/.worktrees/``."""
+    _run_recorded(home, "cd ~/local-operator && git worktree add --detach ~/outside-wt")
+    wt = home / "outside-wt"
+    (wt / "a.py").write_text("a = 'scratch'\n")
+    assert (
+        prov.own_detached_scratch(str(wt)) is not None
+    )  # detached, HEAD kept: only location fails
+    for command in (
+        "git -C ~/local-operator worktree remove --force ~/outside-wt",
+        "rm -rf ~/outside-wt",
+    ):
+        risk, reason = _rank(home, command)
+        assert risk is Risk.HIGH, (command, reason)
+        assert "own-created detached worktree" not in reason
+
+
+def test_own_detached_tree_in_a_scratchpad_is_unchanged(home: Path, repo: Path) -> None:
+    """QA Q2: a scratchpad tree never reaches the waiver (state-root bar), as on base."""
+    pad = f"~/.local-operator/sessions/{S}/scratchpad/wt"
+    _run_recorded(home, f"cd ~/local-operator && git worktree add --detach {pad}")
+    wt = home / ".local-operator" / "sessions" / S / "scratchpad" / "wt"
+    (wt / "a.py").write_text("a = 'scratch'\n")
+    assert prov.recorded_creators(str(wt)) == [S]  # the ledger has the row ...
+    for command in (f"git -C ~/local-operator worktree remove --force {pad}", f"rm -rf {pad}"):
+        risk, reason = _rank(home, command)
+        assert risk is Risk.HIGH, (command, reason)  # ... but the state-root bar holds
+        assert "own-created detached worktree" not in reason
+
+
+def test_rm_rf_low_reason_names_detached_head(home: Path, repo: Path) -> None:
+    """Review n2: the ``rm -rf`` LOW reason carries the detached/kept-by fact."""
+    _attr3880(home, repo)
+    risk, reason = _rank(home, "rm -rf ~/local-operator/.worktrees/attr3880-ci")
+    assert risk is Risk.LOW, reason
+    assert "own-created detached worktree (no branch; HEAD " in reason
+    assert "is kept by main" in reason or "is kept by feature" in reason
+
+
+def test_glob_of_only_own_detached_trees_is_low(home: Path, repo: Path) -> None:
+    """Review n1 (accepted): a glob reaching only own scratch trees ranks like ledger LOW."""
+    _attr3880(home, repo)
+    risk, reason = _rank(home, "rm -rf ~/local-operator/.worktrees/attr*")
+    assert risk is Risk.LOW, reason

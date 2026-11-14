@@ -1290,7 +1290,7 @@ def _rank(
                 # returns ``None`` and falls to the judge below.
                 from local_operator.guardrails.provenance import own_detached_scratch
 
-                scratch = own_detached_scratch(path)
+                scratch = own_detached_scratch(path) if _scratch_location(path) else None
                 if scratch is not None:
                     return RankedTarget(
                         target,
@@ -1347,9 +1347,16 @@ def _rank(
             # ranking applies, but the state stays in whatever reason it gives.
             worktree_note = f"linked worktree state: {state_text}; {facts}"
             notes.append(worktree_note)
+    scratch_facts: list[str] = []
     if not target.worktree_remove and target.op == "delete" and not target.selected:
         reached = _reached_worktrees(
-            target, path, prot, session_id, globstar=globstar, through_link=link is None
+            target,
+            path,
+            prot,
+            session_id,
+            globstar=globstar,
+            through_link=link is None,
+            scratch=scratch_facts,
         )
         if reached is not None:
             return reached
@@ -1384,6 +1391,8 @@ def _rank(
         # open PR); a bare ``rm link`` removes only the entry.
         if owned is not None:
             reason, matches = owned
+            if scratch_facts:
+                reason = "; ".join([reason, *scratch_facts])
             shown = ""
             if target.pattern is not None:
                 shown = ", ".join(matches[:4]) + (
@@ -1405,6 +1414,34 @@ def _rank(
         # Never discard the worktree state the branch above recorded.
         return RankedTarget(target, Risk.LOW, f"ordinary path; {worktree_note}")
     return RankedTarget(target, Risk.LOW, "ordinary path")
+
+
+def _scratch_location(path: str) -> bool:
+    """May an own detached tree at ``path`` rank as disposable scratch, by WHERE it is?
+
+    WHY (QA Q2, PR #3987): the operator's waiver covers the place agents put
+    throwaway trees — under the repository's own ``.worktrees/`` directory
+    (``<main checkout>/.worktrees/...``). An own detached tree anywhere else
+    (``~/outside-wt``) keeps the ordinary ranking: its location says nothing
+    about it being scratch, so its uncommitted changes go to the judge.
+
+    A session scratchpad is the brief's other location, but no tree there
+    reaches this check: ``_owned_by_session`` refuses every path under a
+    state root (another session's files), so the ledger never vouches for a
+    scratchpad tree and it stays HIGH (unchanged from base). Widening that
+    bar is a separate, security-relevant change, not this waiver's.
+
+    Lexical on the realpath; an unreadable ``.git`` answers ``False`` (fail
+    closed to the base rank).
+    """
+    from local_operator.guardrails import provenance as prov
+
+    real = os.path.realpath(path)
+    common = prov._common_dir(real)
+    if not common or os.path.basename(common.rstrip(os.sep)) != ".git":
+        return False  # a bare common dir has no main checkout to hold ``.worktrees/``
+    holder = os.path.join(os.path.realpath(os.path.dirname(common.rstrip(os.sep))), ".worktrees")
+    return real.startswith(holder + os.sep)
 
 
 def _changes_phrase(path: str) -> str:
@@ -1484,8 +1521,12 @@ def _reached_worktrees(
     *,
     globstar: bool = False,
     through_link: bool = False,
+    scratch: list[str] | None = None,
 ) -> RankedTarget | None:
     """Rank a delete by the linked worktrees it reaches, or ``None`` if it reaches none.
+
+    ``scratch`` collects the fact phrase of each own detached scratch tree
+    let through (``provenance.own_detached_scratch``), for the LOW reason.
 
     WHY (security review of PR #3800): a linked worktree is ranked as one
     however the delete reaches it — its literal path, a glob match
@@ -1591,11 +1632,21 @@ def _reached_worktrees(
         idle = activity.pr_state in ("none", "unknown") and not activity.owners_running
         # Strictly ``clean``: a stale ``initializing`` lock is LOW only for
         # ``git worktree remove -f -f``, which says so; ``rm -rf`` goes to the judge.
-        if state == "dirty" and idle and prov.own_detached_scratch(root) is not None:
-            # ``rm -rf <exact path>`` of an own detached dirty tree: the same
-            # waiver ``git worktree remove`` gets in ``_rank`` (operator
-            # directive 2026-11-14, field case attr3880-ci). Not held, so the
-            # ordinary ranking below gives the ledger LOW for a literal path.
+        if (
+            state == "dirty"
+            and idle
+            and _scratch_location(root)
+            and (phrase := prov.own_detached_scratch(root)) is not None
+        ):
+            # ``rm -rf`` of an own detached dirty tree: the same waiver ``git
+            # worktree remove`` gets in ``_rank`` (operator directive
+            # 2026-11-14, field case attr3880-ci). Not held, so the ordinary
+            # ranking below gives the ledger LOW — for a literal path, or a
+            # glob reaching only own trees (review n1, PR #3987: consistent
+            # with ledger LOW elsewhere; a foreign match still holds). The
+            # detached/kept-by fact rides into that reason (review n2).
+            if scratch is not None:
+                scratch.append(f"{root}: {phrase}")
             continue
         if state != "clean" or not idle:
             changes = f"; {prov.describe_changes(root)}" if state == "dirty" else ""

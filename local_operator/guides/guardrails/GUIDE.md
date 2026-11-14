@@ -119,18 +119,26 @@ three routes the checkpoint can verify. Everything CRITICAL is still refused.
   refused outright; any other shortfall (dirty, locked, busy, `git status`
   failed or timed out, another running session) goes to the judge — with one
   exception: a **detached** own worktree (`git worktree add --detach`, no
-  branch) whose HEAD some branch, remote-tracking ref or tag still contains
-  ranks LOW even with uncommitted changes, for `git worktree remove [--force]
-  <exact path>` and `rm -rf <exact path>`. There is no branch whose work could
-  be lost and no commit is lost, so what goes is your own scratch (a
-  `merge-tree`/`read-tree` index, edited files). A detached tree whose HEAD
-  no ref contains (commits made only there), a repository nested inside it,
-  or a lock, live cwd or other running session keeps the judge. A live cwd
-  counts only when it is someone else's: your own harness, eval kernel, bash
-  children and subagents (by parent pid from the session registry) do not make
-  your own tree busy. A foreign process, an orphan with no session record, or
-  a process table that cannot be read keeps it busy, and the judge is told
-  each holder's pid, command and session, or why the inventory failed. Ignored
+  branch) under the repository's `.worktrees/` directory, whose HEAD some branch,
+  remote-tracking ref or tag still contains, ranks LOW even with uncommitted
+  changes, for `git worktree remove [--force] <exact path>` and `rm -rf` of
+  its path — or a glob that matches only your own trees, as ledger LOW does
+  elsewhere; a glob that also reaches someone else's tree still holds. There
+  is no branch whose work could be lost and no commit is lost, so what goes
+  is your own scratch (a `merge-tree`/`read-tree` index, edited files). The
+  same tree anywhere else, a detached tree whose HEAD no ref contains
+  (commits made only there — `git tag` or `git branch` it first), a
+  repository nested inside it, or a lock, live cwd or other running session
+  keeps the judge. For your own tree the process inventory is always read
+  fresh, never from the 30-second cache, and a live cwd counts only when it
+  is someone else's: your own eval kernel and bash children (recorded by the
+  session that spawned them, since subagents share one harness process), your
+  ancestor's and descendant's, and processes of your registry-recorded harness
+  that no session spawned do not make your own tree busy. A sibling
+  subagent's shell or kernel, another session's process, an orphan with no
+  session record, or an inventory or process table that cannot be read keeps
+  it busy, and the judge is told each holder's pid, command and session, or
+  why the inventory failed. Ignored
   entries (`.expo/`, `.pnpm-store/`, a `node_modules` symlink, an ignored `.env`
   or local config) never count against your own tree: removing it deletes them
   with no judge call, exactly as `git worktree remove` does — move a secret you

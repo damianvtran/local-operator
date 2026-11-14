@@ -247,12 +247,18 @@ SUPPORTED_DELETE_PATHS = (
     "worktree (commit or push what you want to keep first), or the literal path the "
     "creating call named; never ask the operator about your own worktrees or scratch. "
     # Operator directive 2026-11-14 (field case attr3880-ci): an own DETACHED
-    # tree with uncommitted changes is removable too; when it is refused the
-    # creation ledger has no row for it, which only the operator can vouch for.
-    "A detached worktree you created (`git worktree add --detach`) is yours to remove "
-    "even with uncommitted changes: `git worktree remove --force <exact path>`; if that is "
-    "refused, the guard has no creation record for it: treat it as a path you did not "
-    "create, below. "
+    # tree with uncommitted changes is removable too. A refusal names its
+    # reason, and most reasons are fixable by the agent itself (review m2,
+    # PR #3987): steering every refusal to "a path you did not create" sent
+    # agents to ask the operator about their own trees — the ask the
+    # directive exists to end. Only a missing creation record is that case.
+    "A detached worktree you created (`git worktree add --detach`) under the repo's "
+    "`.worktrees/` is yours to remove even with uncommitted "
+    "changes: `git worktree remove --force <exact path>`. If that is refused, act on the "
+    "reason it names: HEAD reachable from no ref → keep the commit with `git tag` or "
+    "`git branch` first, then remove; held by a foreign pid → wait for that process to "
+    "exit, then retry; only 'not in the ledger' / no creation record means a path you "
+    "did not create, below. "
     "Only for a path you did not create, ask the operator with `ask`, writing each exact "
     "full path (`~/…`; a brace list is fine) in the question or the option label — a "
     "relative path, or one only in an option's description, names nothing. A message "

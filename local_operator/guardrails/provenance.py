@@ -68,6 +68,8 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, NamedTuple
 
+from local_operator.guardrails import spawned
+
 logger = logging.getLogger(__name__)
 
 LEDGER_DIRNAME = "guardrails"
@@ -1385,7 +1387,9 @@ class CwdHolder:
 
     ``family``: the process descends (by parent pid) from the deleting
     session's own harness process or a registry record of that session or of
-    an ancestor/descendant in its subagent tree. ``owner`` is the judge-facing
+    an ancestor/descendant in its subagent tree — except a bash child or eval
+    kernel of this harness, which is attributed to the session that spawned
+    it (:mod:`.spawned`; in-process siblings share the pid). ``owner`` is the judge-facing
     attribution ("this session", "session <id> (another session)", "no
     session record").
     """
@@ -1452,10 +1456,14 @@ def _session_pids(session_id: str) -> tuple[dict[int, str], dict[int, str]]:
 
     Family = the caller's own record, records of its ancestors/descendants in
     one subagent tree (``same_task_tree``), and THIS process — the guard runs
-    inside the deleting session's harness, and a process hosts one session
-    (``SessionRecord``) — unless a record says this pid is another session's.
-    Siblings are other work and count as others. Records, never text: a
-    process's environment or command line is not consulted.
+    inside the deleting session's harness — unless a record says this pid is
+    another session's. Siblings in separate processes count as others. THIS
+    process may also host sibling subagents (in-process ``Session``s share the
+    harness pid; review m1, PR #3987), so its family label covers only what no
+    session spawned: :func:`cwd_holders` attributes the harness's bash
+    children and eval kernels by the session that spawned them
+    (:mod:`.spawned`), not by this pid. Records, never text: a process's
+    environment or command line is not consulted.
     """
     family: dict[int, str] = {}
     others: dict[int, str] = {}
@@ -1505,22 +1513,40 @@ def cwd_holders(real: str, session_id: str) -> tuple[CwdHolder, ...] | None:
     if table is None:
         return None
     family, others = _session_pids(session_id)
+    me = os.getpid()
     holders: list[CwdHolder] = []
     for pid, _cwd in inside:
         owner, is_family = "no session record; unknown process", False
-        node, seen = pid, 0
+        node, below, seen = pid, 0, 0
         while node > 1 and seen < _PARENT_WALK_MAX:
+            spawner = spawned.session_of(below) if node == me and below else None
+            if spawner is not None:
+                # A bash child or eval kernel of THIS harness: in-process
+                # subagents share its pid, so the spawning session decides
+                # (review m1, PR #3987) — a sibling's shell is foreign.
+                owner, is_family = _spawner_owner(session_id, spawner)
+                break
             if node in family:
                 owner, is_family = family[node], True
                 break
             if node in others:
                 owner = others[node]
                 break
-            node = table.get(node, (0, ""))[0]
+            below, node = node, table.get(node, (0, ""))[0]
             seen += 1
         command = table.get(pid, (0, ""))[1][:_HOLDER_COMMAND_MAX]
         holders.append(CwdHolder(pid, command, owner, is_family))
     return tuple(holders)
+
+
+def _spawner_owner(session_id: str, spawner: str) -> tuple[str, bool]:
+    """``(owner label, family?)`` for a harness child spawned by session ``spawner``."""
+    if session_id and spawner == session_id:
+        return "this session", True
+    relation = same_task_tree(session_id, spawner) if session_id else ""
+    if relation in ("ancestor", "descendant"):
+        return f"this session's {relation} {spawner}", True
+    return f"session {spawner}, another session in this harness process", False
 
 
 def busy_phrase(path: str, session_id: str = "") -> str:
@@ -1679,17 +1705,22 @@ def worktree_state(path: str, *, own: bool = False, session_id: str = "") -> str
         pass
     except (OSError, UnicodeError):
         return "unknown"
-    live = _live_cwd_inside(real)
-    if live is True and own and session_id:
-        # OWN tree, held only by this session's family (operator directive
-        # 2026-11-14, field case ``attr3880-ci``): the creator's own eval
-        # kernel, bash child or subagent sitting in the tree is not someone
-        # else's work in progress, so it does not make the tree busy. Any
-        # foreign holder, an empty fresh read (the holder cannot be named)
-        # or an unreadable process table keeps it busy — fail closed.
+    live: bool | None
+    if own and session_id:
+        # OWN tree: ALWAYS a fresh inventory (QA Q1, PR #3987). This answer
+        # is what lets an own tree rank LOW (clean, or detached scratch), and
+        # the 30 s cache's "nobody inside" is no proof: a foreign process that
+        # entered after the cached scan was missed, the own dirty detached
+        # tree ranked LOW with no judge call, and ``git worktree remove
+        # --force`` deleted it under that process. Holders from this
+        # session's own family (operator directive 2026-11-14, field case
+        # ``attr3880-ci``: the creator's eval kernel, bash child or subagent)
+        # do not make it busy; any foreign holder, or an inventory or process
+        # table that cannot be read (``None``), keeps it busy — fail closed.
         holders = cwd_holders(real, session_id)
-        if holders and all(h.family for h in holders):
-            live = False
+        live = None if holders is None else any(not h.family for h in holders)
+    else:
+        live = _live_cwd_inside(real)
     if live is not False:
         return "busy"  # unknown process inventory also fails closed
     # ``git worktree remove`` deletes IGNORED content too (review R1-MAJOR-4 /
@@ -1810,17 +1841,31 @@ def own_detached_scratch(path: str) -> str | None:
     detached = detached_head(real)
     if detached is None or detached[1] is None:
         return None
+    # ``-z`` (review m3, PR #3987): without it git C-quotes special names
+    # (``?? "caf\303\251/"``), the quoted spelling is no directory, and the
+    # nested-repo check below was silently skipped for exactly those names.
+    # With ``-z`` each record is ``XY <path>`` NUL-terminated, verbatim; a
+    # rename's extra source record follows its ``R``/``C`` entry and is
+    # skipped (only ``??``/``!!`` records are read, and they never have one).
     status = _git(
-        ["status", "--porcelain", "--ignored", "--untracked-files=normal"],
+        ["status", "--porcelain", "-z", "--ignored", "--untracked-files=normal"],
         real,
         timeout=_WORKTREE_STATUS_TIMEOUT_S,
     )
     if status is None:
         return None
-    for line in status.splitlines():
-        if not (line.startswith("?? ") or line.startswith("!! ")):
+    records = status.split("\0")
+    skip_next = False
+    for record in records:
+        if skip_next:
+            skip_next = False
             continue
-        entry = os.path.join(real, line[3:].strip().strip('"').rstrip("/"))
+        if record[:1] in ("R", "C") or record[1:2] in ("R", "C"):
+            skip_next = True  # the rename/copy source path follows as its own record
+            continue
+        if not (record.startswith("?? ") or record.startswith("!! ")):
+            continue
+        entry = os.path.join(real, record[3:].rstrip("/"))
         if os.path.isdir(entry) and _holds_git(entry):
             return None
     head, ref = detached
