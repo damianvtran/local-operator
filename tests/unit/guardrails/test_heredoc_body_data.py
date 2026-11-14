@@ -268,3 +268,54 @@ def test_arithmetic_shift_is_not_a_heredoc_opener(home: Path) -> None:
     """``$((1<<x))``: ``<<`` is a shift; no body is read past the newline."""
     assert _risk(home, "echo $((1<<x))\nrm -rf ~/x") >= Risk.HIGH
     assert _risk(home, "echo $((1<<x))\nls") is Risk.LOW
+
+
+#: Security review round 2 R3 (PR #3962): under ``shopt -s extglob`` bash
+#: reads ``E@(x)`` as ONE delimiter word, so the body ends at ``E@(x)`` and
+#: ``rm -rf ~`` after it runs (verified under bash 5.3). Reading the word as
+#: ``E@`` would skip to the later ``E@`` line and hide the delete as data.
+_EXTGLOB_OPS = ["?", "*", "+", "@", "!"]
+
+
+@pytest.mark.parametrize("op", _EXTGLOB_OPS, ids=["qmark", "star", "plus", "at", "bang"])
+@pytest.mark.parametrize(
+    ("shape", "floor"),
+    [
+        # Main ranked the apostrophe form HIGH (phantom quote) and the others
+        # CRITICAL; each row must stay at least there.
+        ('x="$(cat <<{w}\nit\'s\n{w}\nrm -rf ~\n{p}\n)"', Risk.HIGH),
+        ('x="$(cat <<{w}\nits\n{w}\nrm -rf ~\n{p}\n)"', Risk.CRITICAL),
+        ("cat <<{w}\nhi\n{w}\nrm -rf ~\n{p}\n", Risk.CRITICAL),
+    ],
+    ids=["sub-apos", "sub", "top"],
+)
+def test_extglob_delimiter_word_fails_closed(home: Path, op: str, shape: str, floor: Risk) -> None:
+    command = "shopt -s extglob\n" + shape.format(w=f"E{op}(x)", p=f"E{op}")
+    assert _risk(home, command) >= floor
+
+
+#: Round 2 M1: ``$[ … ]`` is legacy arithmetic, so its ``<<`` is a shift and
+#: no body follows; the ``rm`` on the next line runs whichever line comes after.
+@pytest.mark.parametrize("closing", ["E]", "E"], ids=["bracket", "bare"])
+@pytest.mark.parametrize("wrap", ["{c}", 'x="$({c})"'], ids=["top", "sub"])
+def test_legacy_arithmetic_shift_is_not_a_heredoc_opener(
+    home: Path, closing: str, wrap: str
+) -> None:
+    command = wrap.format(c=f"echo $[1<<E]\nrm -rf ~\n{closing}\n")
+    assert _risk(home, command) is Risk.CRITICAL
+    assert _risk(home, "echo $[a[1]<<2]\nls") is Risk.LOW
+
+
+#: Round 2 M2: a CRLF opener line makes bash's delimiter ``EOF\r``; its body
+#: ends at the ``EOF\r`` line and the delete after it runs.
+@pytest.mark.parametrize(
+    "command",
+    [
+        'x="$(cat <<EOF\r\nit\'s\nEOF\r\nrm -rf ~\nEOF\n)"',
+        'x="$(cat <<EOF\r\nits\nEOF\r\nrm -rf ~\nEOF\n)"',
+        "cat <<EOF\r\nit's\nEOF\r\nrm -rf ~\nEOF\n",
+    ],
+    ids=["sub-apos", "sub", "top"],
+)
+def test_carriage_return_delimiter_ranks_like_main(home: Path, command: str) -> None:
+    assert _risk(home, command) is Risk.CRITICAL

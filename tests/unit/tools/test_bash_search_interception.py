@@ -303,6 +303,18 @@ def test_unreadable_heredoc_delimiter_fails_closed() -> None:
     assert C("cat <<E\\OF\ngrep -rn p .\nEOF") is not None
 
 
+def test_extglob_delimiter_and_legacy_arithmetic_fail_closed() -> None:
+    """PR #3962 round 2 R3/M1: ``<<E@(x)`` is one word under extglob, and
+    ``$[1<<E]`` is a shift, not an opener. Neither may skip the grep as a
+    heredoc body (main intercepted every one of these)."""
+    for op in "?*+@!":
+        assert (
+            C(f"shopt -s extglob\ncat <<E{op}(x)\nhi\nE{op}(x)\ngrep -rn p .\nE{op}\n") is not None
+        )
+    assert C("echo $[1<<E]\ngrep -rn p .\nE]\n") is not None
+    assert C("echo $[1<<E]\ngrep -rn p .\nE\n") is not None
+
+
 def test_single_file_under_a_heavy_dir_is_not_a_walk() -> None:
     """M1 regression: a named FILE is read, never walked, regardless of the
     directory it lives under — and this fleet reads worktrees by path."""

@@ -125,7 +125,11 @@ def _skip_heredoc_bodies(text: str, j: int, delimiters: list[str]) -> int:
     (which ends a body only on the exact line, or tab-stripped for ``<<-``),
     so it can only end a body EARLIER than bash does. An early end exposes
     body lines as commands to the walk, which is stricter, never a hidden
-    command.
+    command. That holds because :func:`heredoc_opener` strips the word too
+    (round 2 M2/N1, PR #3962): before it did, a quoted word with outer
+    whitespace (``<<'EOF '``) or a trailing CR (``<<EOF\r`` in CRLF text)
+    never equalled a stripped line, so its body never ended at all — still
+    fail-closed (-1), but one rank lower than bash's real behaviour warrants.
     """
     pos = j + 1
     n = len(text)
@@ -191,6 +195,15 @@ def _read_sub(text: str, i: int, *, heredocs: bool = True) -> tuple[str, int, bo
         elif ch == "\\":
             j += 2
             continue
+        elif ch == "$" and text.startswith("$[", j):
+            # Legacy arithmetic ``$[1<<E]`` (round 2 M1, PR #3962): ``<<`` is
+            # a shift, as in ``$((``, so the bracketed span is skipped whole
+            # rather than offered to the heredoc reader. Unbalanced: fail closed.
+            close = _match_bracket(text, j + 2)
+            if close == -1:
+                return text[i:], n, False
+            j = close + 1
+            continue
         elif heredocs and ch == "<" and text.startswith("<<", j) and not text.startswith("<<<", j):
             opener = heredoc_opener(text, j)
             if opener is not None and opener[0] == HEREDOC_UNREADABLE:
@@ -243,6 +256,22 @@ def _read_dollar(text: str, i: int, word: _RawWord, kind: str) -> int:
         return i + 2
     word.add(kind, "$")
     return i + 1
+
+
+def _match_bracket(text: str, i: int) -> int:
+    """Index of the ``]`` closing a ``$[`` whose body starts at ``i``; -1 if none.
+
+    Depth-counted so a subscript (``$[a[1]<<2]``) stays inside the span.
+    """
+    depth = 1
+    for j in range(i, len(text)):
+        if text[j] == "[":
+            depth += 1
+        elif text[j] == "]":
+            depth -= 1
+            if depth == 0:
+                return j
+    return -1
 
 
 def _match_brace(text: str, i: int) -> int:

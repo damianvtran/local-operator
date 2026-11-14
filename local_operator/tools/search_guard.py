@@ -256,6 +256,20 @@ def heredoc_opener(text: str, i: int) -> tuple[str, int] | None:
     Constraints: bash does no expansion on the delimiter, but ``$``, backticks
     and backslashes inside it are rare enough and subtle enough (``$'…'``,
     escapes) that this reader refuses them rather than modelling them.
+
+    Extglob (security review round 2 R3, PR #3962): with ``shopt -s extglob``
+    in effect bash reads ``E@(x)`` (also ``?( *( +( !(``) as ONE word, so its
+    delimiter is ``E@(x)``, not the ``E@`` this loop stops at. Whether extglob
+    is on cannot be known from the text, so the word is refused (fail closed);
+    with extglob off the shape is a bash syntax error, so refusing costs
+    nothing real.
+
+    The returned word is stripped of outer whitespace (round 2 M2): readers
+    compare it with ``line.strip()``, so a word ending in ``\r`` (CRLF text)
+    or a quoted ``'EOF '`` could otherwise never match any line and would
+    always fall to the unterminated path. Stripping both sides keeps the match
+    a superset of bash's exact-line match: a body can only end EARLIER than
+    bash ends it, never later. A word that is all whitespace is refused.
     """
     m = _HEREDOC_START_RE.match(text, i)
     if m is None:
@@ -279,7 +293,10 @@ def heredoc_opener(text: str, i: int) -> tuple[str, int] | None:
             return HEREDOC_UNREADABLE, m.end()
         parts.append(ch)
         j += 1
-    delim = "".join(parts)
+    if j < n and text[j] == "(" and j > m.end() and text[j - 1] in "?*+@!":
+        # An extglob group continues the word under `shopt -s extglob` (R3).
+        return HEREDOC_UNREADABLE, m.end()
+    delim = "".join(parts).strip()
     if not delim:
         return HEREDOC_UNREADABLE, m.end()
     return delim, j
@@ -324,7 +341,7 @@ class _FrameStack(list[str]):
             self.quotes += step
         elif frame in ("$(", "`"):
             self.subs += step
-        elif frame in ("$((", "${"):
+        elif frame in ("$((", "${", "$["):
             self.arith += step
 
     def append(self, frame: str) -> None:
@@ -352,7 +369,8 @@ def lex(command: str) -> Lexed:
 
     Model (deliberately bash-like, not a full parser):
     - Context stack frames: ``'``, ``"``, ``$'`` (ANSI-C, ``\\`` escapes),
-      ``$(``, ``$((``, ``${``, `````, plain ``(`` inside a substitution.
+      ``$(``, ``$((``, ``${``, ``$[`` (legacy arithmetic, ``[`` nested in it),
+      `````, plain ``(`` inside a substitution.
     - Operators ``; | & newline`` split segments unless a QUOTE frame is on the
       stack. Splitting inside an unquoted ``$(…)`` is kept on purpose: the
       search guard has always looked at a ``grep`` behind ``$(cd x; …``.
@@ -360,7 +378,7 @@ def lex(command: str) -> Lexed:
       start of a word (input start, or after unescaped whitespace or one of
       ``; & | (``).
     - ``<<WORD`` opens a heredoc only with no quote frame and outside
-      ``$((``/``${``; its body is captured at the next newline and blanked
+      ``$((``/``${``/``$[``; its body is captured at the next newline and blanked
       from the segment text (data is never read as commands), the opener kept.
       An opener with no delimiter line leaves the text in place and marks the
       result ``open`` (fail closed).
@@ -443,6 +461,15 @@ def lex(command: str) -> Lexed:
             i += 3
             word_start = False
             continue
+        if command.startswith("$[", i):
+            # Legacy arithmetic ``$[1<<2]`` (round 2 M1, PR #3962): its ``<<``
+            # is a shift, exactly like ``$((``; reading it as a heredoc opener
+            # let a later ``E]`` line "close" a body bash never opened.
+            stack.append("$[")
+            buf.append("$[")
+            i += 2
+            word_start = False
+            continue
         if command.startswith("$(", i) or command.startswith("${", i):
             stack.append(command[i : i + 2])
             buf.append(command[i : i + 2])
@@ -467,6 +494,16 @@ def lex(command: str) -> Lexed:
             stack.pop()
             buf.append("))")
             i += 2
+            continue
+        if top in ("$[", "[") and ch in "[]":
+            # A subscript ``$[a[1]<<2]`` nests ``[``; only the matching ``]``
+            # ends the arithmetic.
+            if ch == "[":
+                stack.append("[")
+            else:
+                stack.pop()
+            buf.append(ch)
+            i += 1
             continue
         if ch == "(" and stack:
             stack.append("(")
