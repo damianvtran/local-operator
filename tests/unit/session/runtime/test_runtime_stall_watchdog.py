@@ -2904,6 +2904,45 @@ def test_the_only_arm_site_is_the_runtime_entry_point() -> None:
     )
 
 
+_STALL_TAIL_CHARS = 3000
+
+
+def _abnormal_exit_evidence(child: Any, config_dir: Path) -> str:
+    """How a real runtime child left, plus its own fault dump, for a failure message.
+
+    WHY: Linux CI job 132417763337 (run 43579083489, test (3.12, 3)) failed this
+    file's real-child cell with "the runtime exited (rc=-7)" and a message carrying
+    only the runtime.log tail and an EMPTY stdio capture. The child's faulthandler
+    report goes to ``runtime-stall-<pid>.log`` (``_enable_fatal_report``), which the
+    message never printed, so the crash site stayed unknown. The e2e rig
+    (``signal_shutdown_diagnostics``) already carries that tail; this is the same
+    evidence for the unit-level rig.
+
+    Evaluated only inside an assertion MESSAGE, so a passing run never reads the
+    file. Never raises (a missing or unreadable file is reported, not thrown): the
+    evidence must not mask the failure it explains. The tail is a stack dump, no
+    secrets. ``rc`` is named via ``signal.Signals`` for a negative code; the name is
+    platform-specific (-7 is SIGBUS on Linux, SIGEMT on macOS), so it is resolved
+    here rather than guessed.
+    """
+    rc = child.poll()
+    if rc is None:
+        how = "still running"
+    elif rc < 0:
+        try:
+            how = f"rc={rc} ({signal.Signals(-rc).name})"
+        except ValueError:
+            how = f"rc={rc} (unnamed signal {-rc})"
+    else:
+        how = f"rc={rc}"
+    path = config_dir / "logs" / f"{stall_watchdog.DUMP_PREFIX}-{child.pid}.log"
+    try:
+        tail = path.read_text(encoding="utf-8", errors="replace")[-_STALL_TAIL_CHARS:]
+    except OSError:
+        tail = ""
+    return f"{how}; {path.name} tail:\n{tail or '<no stall log>'}"
+
+
 @pytest.mark.slow
 def test_a_real_runtime_child_arms_its_bound_and_disarms_on_a_clean_stop(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -3015,8 +3054,8 @@ def test_a_real_runtime_child_arms_its_bound_and_disarms_on_a_clean_stop(
         deadline = time.monotonic() + 60.0
         while "state: streaming=" not in _log_text(config_dir):
             assert child.poll() is None, (
-                f"the runtime exited (rc={child.returncode}) after its one SIGUSR1 probe:\n"
-                f"{_capture_text(child)}\n{_log_text(config_dir)[-1000:]}"
+                f"the runtime exited ({_abnormal_exit_evidence(child, config_dir)}) after its one "
+                f"SIGUSR1 probe:\n{_capture_text(child)}\n{_log_text(config_dir)[-1000:]}"
             )
             assert time.monotonic() < deadline, (
                 "the runtime did not take the SIGUSR1 task dump after readiness:\n"
@@ -3229,7 +3268,8 @@ def test_a_real_runtime_child_engages_at_publication_and_moves_its_own_bound(
         deadline = time.monotonic() + 60.0
         while not dump.is_file() and time.monotonic() < deadline:
             assert child.poll() is None, (
-                f"the runtime exited (rc={child.returncode}) without arming:\n"
+                f"the runtime exited ({_abnormal_exit_evidence(child, config_dir)}) "
+                "without arming:\n"
                 f"{_capture_text(child)}\n{_log_text(config_dir)[-1000:]}"
             )
             time.sleep(0.05)
@@ -3248,7 +3288,8 @@ def test_a_real_runtime_child_engages_at_publication_and_moves_its_own_bound(
         deadline = time.monotonic() + 60.0
         while not sibling.is_file() and time.monotonic() < deadline:
             assert child.poll() is None, (
-                f"the runtime exited (rc={child.returncode}) before anything re-armed its "
+                f"the runtime exited ({_abnormal_exit_evidence(child, config_dir)}) "
+                "before anything re-armed its "
                 f"timer:\n{_capture_text(child)}\n{_log_text(config_dir)[-1000:]}"
             )
             time.sleep(0.05)
@@ -4549,7 +4590,8 @@ def test_a_real_runtime_child_fires_the_progress_leg(
                 break
             time.sleep(0.5)
         assert child.poll() is None, (
-            f"the diagnostic timer terminated the runtime (rc={child.returncode}):\n"
+            "the diagnostic timer terminated the runtime "
+            f"({_abnormal_exit_evidence(child, config_dir)}):\n"
             f"{_log_text(config_dir)[-1500:]}"
         )
         assert (
@@ -4570,7 +4612,8 @@ def test_a_real_runtime_child_fires_the_progress_leg(
         child, config_dir, dump = spawn_body(_DROP_PROBE_SITECUSTOMIZE, "drop")
         time.sleep(bound_s * 2)
         assert child.poll() is None, (
-            f"the probe-less rig exited (rc={child.returncode}); the negative is not a "
+            f"the probe-less rig exited ({_abnormal_exit_evidence(child, config_dir)}); "
+            "the negative is not a "
             f"negative:\n{_log_text(config_dir)[-1500:]}"
         )
         assert not dump.exists() or stall_watchdog.FIRED_MARKER not in dump.read_text(
@@ -8143,3 +8186,27 @@ def test_the_armed_class_carries_the_slots_both_sides_of_the_fold_added() -> Non
         "the fold lost half of the __slots__ union, which fails only when that slot is "
         f"first written: missing {sorted(required - slots)}"
     )
+
+
+def test_abnormal_exit_evidence_names_the_signal_and_carries_the_stall_tail(
+    tmp_path: Path,
+) -> None:
+    """Fake child only: no runtime is spawned. Pins the failure-message helper."""
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    (logs / f"{stall_watchdog.DUMP_PREFIX}-4242.log").write_text(
+        "header\n" + "x" * 5000 + "Fatal Python error: Bus error\n", encoding="utf-8"
+    )
+    child = SimpleNamespace(pid=4242, poll=lambda: -signal.SIGSEGV)
+    text = _abnormal_exit_evidence(child, tmp_path)
+    assert "rc=-11 (SIGSEGV)" in text
+    assert text.rstrip().endswith("Fatal Python error: Bus error")
+    assert "header" not in text  # only the tail window is carried
+    assert len(text) < _STALL_TAIL_CHARS + 200
+
+    # Missing file, ordinary exit and unnamed signal never raise.
+    gone = SimpleNamespace(pid=1, poll=lambda: 1)
+    assert "<no stall log>" in _abnormal_exit_evidence(gone, tmp_path)
+    assert "rc=1" in _abnormal_exit_evidence(gone, tmp_path)
+    odd = SimpleNamespace(pid=1, poll=lambda: -9999)
+    assert "unnamed signal 9999" in _abnormal_exit_evidence(odd, tmp_path)
