@@ -79,7 +79,9 @@ if TYPE_CHECKING:
 
     from local_operator.harness.types import AudioContent, DocumentContent, ImageContent
 
+from local_operator.asks.surfaces import stamp_answer_surface
 from local_operator.harness.approval import (
+    ASK_ANSWER_OPS,
     AUTHORITY_OPS,
     admit_increasing,
     frame_authority,
@@ -2093,6 +2095,17 @@ class _ConnectionAuthority:
     #: onto the card (``_stamp_peer_sender``) so the receiver knows which device
     #: wrote and can answer with ``send peer=``.
     peer: Mapping[str, Any] = field(default_factory=dict)
+    #: Whether THIS frame proved the operator capability for THIS connection
+    #: (``request_proof_ok``). Computed by the reader that holds the connection
+    #: (``_dispatch_with_authority``), only for :data:`ASK_ANSWER_OPS`, and read
+    #: only to stamp an ask answer's surface. ``False`` by default, so a direct
+    #: ``_dispatch`` with no connection records a non-consent label.
+    operator_proved: bool = False
+    #: The connection's server-decided surface (``desktop``/``terminal``) and
+    #: kind (``attach``/``daemon``): what a PROVED answer is labelled with, and
+    #: how an unproven one is told apart (``asks/surfaces.stamp_answer_surface``).
+    surface: str = ""
+    kind: str = ""
 
 
 def _stamp_peer_sender(raw: Any, authority: "_ConnectionAuthority") -> dict[str, Any]:
@@ -8705,8 +8718,24 @@ class RuntimeServer:
         """
         kwargs: dict[str, Any] = {}
         if _accepts_kw(self._dispatch, "authority"):
+            # THE ASK-ANSWER PROOF (forged-surface fix). An ask answer is an
+            # ORDINARY op — the record key alone may settle it — but the label it
+            # records is read by the guard as operator consent, so whether this
+            # frame proved the capability travels down as a value, exactly like
+            # locality: ``_dispatch`` holds no ``conn`` and must not.
+            proved = op in ASK_ANSWER_OPS and request_proof_ok(
+                supplied=frame.get("operator_cap"),
+                held=self._operator_cap,
+                client_nonce=conn.operator_nonce,
+                server_salt=conn.operator_salt,
+            )
             kwargs["authority"] = _ConnectionAuthority(
-                conn.locality, conn.capabilities, dict(conn.peer)
+                conn.locality,
+                conn.capabilities,
+                dict(conn.peer),
+                operator_proved=proved,
+                surface=conn.surface,
+                kind=conn.kind,
             )
         if deliver is not None and _accepts_kw(self._dispatch, "deliver"):
             kwargs["deliver"] = deliver
@@ -9121,6 +9150,17 @@ class RuntimeServer:
                     "this session's runtime predates queued asks; update the runtime "
                     "to answer them"
                 )
+            # THE SURFACE IS STAMPED HERE, NEVER READ OFF THE FRAME. ``by`` used
+            # to be copied verbatim, so anyone holding the record key (a model's
+            # own ``bash``, any same-uid process) or a mesh peer with ``prompt``
+            # could record ``desktop`` and the guard took it as delete consent.
+            # The frame's ``by`` is ignored; see ``asks/surfaces``.
+            stamped_by = stamp_answer_surface(
+                proved=authority.operator_proved,
+                surface=authority.surface,
+                locality=authority.locality,
+                kind=authority.kind,
+            )
             if op in ("ask_respond", "ask_revise"):
                 raw = frame.get("answers") or {}
                 if not isinstance(raw, dict):
@@ -9146,7 +9186,7 @@ class RuntimeServer:
                 outcome = method(
                     str(frame.get("ask_id", "")),
                     answers,
-                    by=str(frame.get("by", "")),
+                    by=stamped_by,
                     **ask_kwargs,
                 )
             elif op == "ask_dismiss" and frame.get("reason"):
@@ -9154,11 +9194,11 @@ class RuntimeServer:
                 # ``ask_dismiss`` predates ``reason`` is still called as before.
                 outcome = method(
                     str(frame.get("ask_id", "")),
-                    by=str(frame.get("by", "")),
+                    by=stamped_by,
                     reason=str(frame["reason"]),
                 )
             else:
-                outcome = method(str(frame.get("ask_id", "")), by=str(frame.get("by", "")))
+                outcome = method(str(frame.get("ask_id", "")), by=stamped_by)
             # ``method`` came from a getattr probe, so what it returns is not
             # statically known to be awaitable; the same spelling the
             # ``adopt_aside`` arm below uses.
@@ -9191,11 +9231,20 @@ class RuntimeServer:
             # pre-guard behaviour.
             raw_index = frame.get("question_index")
             question_index = int(raw_index) if isinstance(raw_index, (int, float)) else None
-            return await h.ask_answer(
-                frame["request_id"],
-                frame["value"],
-                question_index=question_index,
-            )
+            answer_kwargs: dict[str, Any] = {"question_index": question_index}
+            if _accepts_kw(h.ask_answer, "by"):
+                # The legacy mirrored card used to stamp ``mirror`` (a trusted
+                # label) for ANY caller. The handle now records what this seam
+                # decides; a handle without the keyword is a test double or an
+                # owner that never mirrors queued asks.
+                answer_kwargs["by"] = stamp_answer_surface(
+                    proved=authority.operator_proved,
+                    surface=authority.surface,
+                    locality=authority.locality,
+                    kind=authority.kind,
+                    mirror=True,
+                )
+            return await h.ask_answer(frame["request_id"], frame["value"], **answer_kwargs)
         if op == "adopt_aside":
             adopt = getattr(h, "adopt_aside", None)
             if not callable(adopt):

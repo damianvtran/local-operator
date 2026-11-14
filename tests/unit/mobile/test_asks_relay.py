@@ -308,9 +308,13 @@ async def test_a_queued_ask_is_answered_through_the_command_route() -> None:
                 )
             assert reply.status_code == 200, reply.text
             assert reply.json()["ok"] is True
+            # ``by`` is the RUNTIME's stamp, not the phone's: the relay's
+            # connection proved no operator capability, so the answer records
+            # ``remote`` and is never read as delete consent
+            # (``asks/surfaces.stamp_answer_surface``).
             assert handle.ask_calls[-1] == (
                 "ask_respond",
-                {"ask_id": "ask-1", "answers": {"q1": ["yes"], "q2": []}, "by": ""},
+                {"ask_id": "ask-1", "answers": {"q1": ["yes"], "q2": []}, "by": "remote"},
             )
 
             # §10 (#1936): the SAME atomic body over the SAME route, as a
@@ -333,7 +337,7 @@ async def test_a_queued_ask_is_answered_through_the_command_route() -> None:
             assert reply.json()["ok"] is True
             assert handle.ask_calls[-1] == (
                 "ask_revise",
-                {"ask_id": "ask-1", "answers": {"q1": ["no"], "q2": []}, "by": ""},
+                {"ask_id": "ask-1", "answers": {"q1": ["no"], "q2": []}, "by": "remote"},
             )
         finally:
             dial.cancel()
@@ -711,6 +715,28 @@ def test_an_answer_to_a_stopped_session_engages_it(monkeypatch, op, body, answer
         assert client.calls[-1][1]["answers"] == body["answers"]
     # The engaged connection is released rather than left open by the route.
     assert client.closed is True
+
+
+def test_a_portal_body_cannot_name_the_answering_surface(monkeypatch) -> None:
+    """PORTAL FORGERY: the HTTP body's ``by`` never reaches the runtime.
+
+    Anyone holding the portal cookie writes this body. Before the fix ``by``
+    went verbatim to ``client.ask_respond(..., by=by)`` and the runtime recorded
+    it, so ``"desktop"`` became delete consent. Now the route forwards no ``by``
+    and does not opt into the operator proof (the fake's signature has no
+    ``operator_ask``, so an opt-in would fail the request); the runtime stamps
+    the surface itself (``asks/surfaces``).
+    """
+    client, _engagements = _cold_engage(monkeypatch)
+    reply = _client().post(
+        f"/api/sessions/{SESSION_A}/command",
+        json={"op": "ask_respond", "ask_id": "ask-1", "answers": {"q1": ["yes"]}, "by": "desktop"},
+    )
+    assert reply.status_code == 200, reply.text
+    assert client.calls[-1] == (
+        "ask_respond",
+        {"ask_id": "ask-1", "answers": {"q1": ["yes"]}, "by": ""},
+    )
 
 
 def test_a_cold_dismiss_never_engages(monkeypatch) -> None:

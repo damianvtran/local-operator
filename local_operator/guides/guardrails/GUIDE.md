@@ -235,7 +235,15 @@ three routes the checkpoint can verify. Everything CRITICAL is still refused.
 session they opened (one the harness knows no parent or opener for — no
 in-process parent, no lineage-registry row, no `origin.json`; a missing or
 symlinked `origin.json` alone never makes a session operator-opened), or their answer to `ask` as recorded in the ask store
-(`sessions/<id>/asks.jsonl`, answered on the terminal, desktop or phone). In a
+(`sessions/<id>/asks.jsonl`) and answered on a local operator surface: the
+terminal or TUI, or the desktop app or its attached pane on a runtime it
+started. The runtime stamps who answered (`answered_by.surface`) itself and
+never takes the answering frame's `by`. A trusted surface is recorded only
+when the connection proved the in-memory operator capability on that frame.
+Answers from the phone portal, a mesh peer, or any process that merely read the
+session's `control_key` (your own `bash` included) are recorded as `remote` or
+`unverified`. They settle the ask but are never consent, so do not answer your
+own asks through the socket: it only sends the delete to the judge. In a
 subagent or an agent-opened workstream the user rows are the delegating agent's
 words, so there only store-verified asks count. An ask id (`a-xxxx`) cited by a
 peer message, the intent or the command is looked up only in this session's

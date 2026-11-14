@@ -30004,6 +30004,7 @@ class OperatorApp(App[None]):
         from local_operator.asks.render import NOT_IN_QUEUE
         from local_operator.mobile.attach_client import engage_session_client
         from local_operator.paths import config_dir
+        from local_operator.session.attached import operator_ask_kwargs
         from local_operator.session.runtime.launch import AskErrand
 
         failed = ""
@@ -30036,11 +30037,23 @@ class OperatorApp(App[None]):
                             # answer (TB-02 wiring, PR #2378).
                             await client.bridge_decide(*target)
                         else:
-                            await client.ask_respond(row.ask_id, answers or {}, by="terminal")
+                            await client.ask_respond(
+                                row.ask_id,
+                                answers or {},
+                                by="terminal",
+                                **operator_ask_kwargs(client.ask_respond),
+                            )
                     elif op == "decline":
-                        await client.ask_decline(row.ask_id, by="terminal")
+                        await client.ask_decline(
+                            row.ask_id, by="terminal", **operator_ask_kwargs(client.ask_decline)
+                        )
                     else:
-                        await client.ask_dismiss(row.ask_id, by="terminal", reason=reason)
+                        await client.ask_dismiss(
+                            row.ask_id,
+                            by="terminal",
+                            reason=reason,
+                            **operator_ask_kwargs(client.ask_dismiss),
+                        )
                 finally:
                     client.close()
         except Exception as exc:  # noqa: BLE001 — the refusal is the message

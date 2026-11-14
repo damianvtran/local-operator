@@ -54,6 +54,7 @@ if TYPE_CHECKING:
     from local_operator.session.runtime.launch import Errand
 
 from local_operator.harness.approval import (
+    ASK_ANSWER_OPS,
     frame_authority,
     handshake_proof,
     handshake_proof_ok,
@@ -1779,7 +1780,9 @@ class AttachClient:
             getattr(self, "_runtime_pid", None),
         )
 
-    def authority_proof(self, op: str, fields: dict[str, Any]) -> str | None:
+    def authority_proof(
+        self, op: str, fields: dict[str, Any], *, operator_ask: bool = False
+    ) -> str | None:
         """The proof for an authority-increasing frame, or ``None`` for any other.
 
         THE SINGLE ENTRY POINT for every producer of control frames THIS client
@@ -1800,7 +1803,22 @@ class AttachClient:
         cap = getattr(self, "_operator_cap", None)
         if cap is None:
             return None
-        if frame_authority({"op": op, **fields}) != "authority-increasing":
+        # ASK ANSWERS CARRY THE PROOF TOO, though they are ordinary: the runtime
+        # stamps a trusted ``answered_by`` surface (the label the guard reads as
+        # delete consent) only on a frame that proved the capability, so a
+        # console that started this runtime must keep presenting it or its own
+        # answers would stop counting. Prompt-free by construction — this is the
+        # capability, never a signature (``asks/surfaces``).
+        #
+        # OPT-IN PER CALL (``operator_ask``), never by holding the capability
+        # alone: the phone daemon also engages runtimes and so can hold one, but
+        # what it relays is a REMOTE device's answer (anyone with the portal
+        # cookie), which must never be stamped as a local operator surface. Only
+        # the desktop facade, the attached pane and the TUI dock pass it.
+        if op in ASK_ANSWER_OPS:
+            if not operator_ask:
+                return None
+        elif frame_authority({"op": op, **fields}) != "authority-increasing":
             return None
         return request_proof(
             cap,
@@ -1926,7 +1944,9 @@ class AttachClient:
             logger.info("attach: could not sign the operator challenge: %s", exc)
             return None
 
-    def _present_authority(self, frame: dict[str, Any]) -> dict[str, Any]:
+    def _present_authority(
+        self, frame: dict[str, Any], *, operator_ask: bool = False
+    ) -> dict[str, Any]:
         """Add this connection's proof to a frame that INCREASES authority.
 
         The console's half of the rule in ``harness/approval.frame_authority``:
@@ -1940,7 +1960,7 @@ class AttachClient:
         future caller forgets.
         """
         op = str(frame.get("op", ""))
-        proof = self.authority_proof(op, frame)
+        proof = self.authority_proof(op, frame, operator_ask=operator_ask)
         out = {**frame, "operator_cap": proof} if proof is not None else dict(frame)
         # THE SENTENCE HALF. ``slash_result`` returns REPORTS that name remedies,
         # and whether this connection may loosen decides which remedy is true —
@@ -2024,6 +2044,9 @@ class AttachClient:
         # request_ack_with_duplicate directly and never passes through them:
         # an owner that did not advertise ``input-mode-v1`` must receive
         # byte-identical frames on EVERY path (agent review round 1, R1-1).
+        # A local-operator ask answer's opt-in (see ``authority_proof``): a
+        # private keyword, popped so it never reaches the wire.
+        operator_ask = bool(fields.pop("_operator_ask", False))
         fields = self._strip_unsupported_annotation(fields)
         # FITTED BEFORE THE FUTURE IS REGISTERED, because this can raise
         # `OversizedRequest` and a future parked in `_pending` for a request
@@ -2032,7 +2055,7 @@ class AttachClient:
         # `ConnectionError` with nobody awaiting it — an "exception was never
         # retrieved" log for a refusal the caller had already handled cleanly.
         frame = await self._present_operator_signature(
-            self._present_authority({"op": op, "req": req, **fields})
+            self._present_authority({"op": op, "req": req, **fields}, operator_ask=operator_ask)
         )
         frame = await fit_request_frame(frame)
         future: asyncio.Future[dict[str, Any]] = asyncio.get_running_loop().create_future()
@@ -2774,13 +2797,22 @@ class AttachClient:
         *,
         question_index: int | None = None,
         deadline_s: float = ACK_TIMEOUT_S,
+        operator_ask: bool = False,
     ) -> str:
-        """See :meth:`approval_answer` for what ``deadline_s`` is for."""
+        """See :meth:`approval_answer` for what ``deadline_s`` is for.
+
+        ``operator_ask`` (here and on every ask method): True ONLY for a caller
+        that is a person's local operator surface (desktop facade, attached pane,
+        TUI dock). It lets this client present its capability proof so the
+        runtime may stamp a trusted surface; see ``authority_proof``.
+        """
         fields: dict[str, Any] = {"request_id": request_id, "value": value}
         if question_index is not None:
             # The stale-answer guard (U8): name the question that was on
             # screen when the user answered, so an advanced picker refuses it.
             fields["question_index"] = question_index
+        if operator_ask:
+            fields["_operator_ask"] = True
         return await self._request("ask_answer", deadline_s=deadline_s, **fields)
 
     async def ask_respond(
@@ -2790,6 +2822,7 @@ class AttachClient:
         *,
         by: str = "",
         images: list[dict[str, Any]] | None = None,
+        operator_ask: bool = False,
     ) -> str:
         """Answer a QUEUED ask, ATOMIC per ask (design §2.4).
 
@@ -2820,6 +2853,8 @@ class AttachClient:
             if not getattr(self, "_ask_attachments_supported", False):
                 raise ValueError(ASK_ATTACHMENTS_UNSUPPORTED)
             fields["images"] = list(images)
+        if operator_ask:
+            fields["_operator_ask"] = True
         return await self._request("ask_respond", **fields)
 
     async def bridge_decide(self, ask_id: str, question_id: str, word: str) -> str:
@@ -2842,7 +2877,14 @@ class AttachClient:
         }
         return await self._request("bridge_decide", **fields)
 
-    async def ask_revise(self, ask_id: str, answers: dict[str, list[str]], *, by: str = "") -> str:
+    async def ask_revise(
+        self,
+        ask_id: str,
+        answers: dict[str, list[str]],
+        *,
+        by: str = "",
+        operator_ask: bool = False,
+    ) -> str:
         """REVISE a queued ask's recorded answer before it is delivered (§10).
 
         Same body as :meth:`ask_respond` and deliberately a separate frame: the
@@ -2852,16 +2894,27 @@ class AttachClient:
         fields: dict[str, Any] = {"ask_id": ask_id, "answers": answers}
         if by:
             fields["by"] = by
+        if operator_ask:
+            fields["_operator_ask"] = True
         return await self._request("ask_revise", **fields)
 
-    async def ask_decline(self, ask_id: str, *, by: str = "") -> str:
+    async def ask_decline(self, ask_id: str, *, by: str = "", operator_ask: bool = False) -> str:
         """Decline a queued ask: explicit "no answer, decide yourself"."""
         fields: dict[str, Any] = {"ask_id": ask_id}
         if by:
             fields["by"] = by
+        if operator_ask:
+            fields["_operator_ask"] = True
         return await self._request("ask_decline", **fields)
 
-    async def ask_dismiss(self, ask_id: str, *, by: str = "", reason: str | None = None) -> str:
+    async def ask_dismiss(
+        self,
+        ask_id: str,
+        *,
+        by: str = "",
+        reason: str | None = None,
+        operator_ask: bool = False,
+    ) -> str:
         """Dismiss an ask from the view. Asks the model nothing, ever.
 
         ``reason`` (``answered_in_chat`` | ``moot``) rides the frame only when given,
@@ -2876,6 +2929,8 @@ class AttachClient:
             fields["by"] = by
         if reason:
             fields["reason"] = reason
+        if operator_ask:
+            fields["_operator_ask"] = True
         return await self._request("ask_dismiss", **fields)
 
     @property

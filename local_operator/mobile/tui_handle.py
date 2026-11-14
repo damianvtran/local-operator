@@ -49,6 +49,7 @@ from concurrent.futures import Future
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Iterable, cast
 
+from local_operator.asks.surfaces import UNVERIFIED as UNVERIFIED_SURFACE
 from local_operator.harness.wire import bound_agent_end_for_wire
 from local_operator.mobile.command_reservation import CommandReservations
 from local_operator.mobile.projection import ProjectionFold
@@ -1453,7 +1454,11 @@ class TuiSessionHandle(SessionHandle):
         return "approved" if approved else "denied"
 
     async def ask_answer(
-        self, request_id: str, value: str, question_index: int | None = None
+        self,
+        request_id: str,
+        value: str,
+        question_index: int | None = None,
+        by: str = UNVERIFIED_SURFACE,
     ) -> str:
         """Answer the CURRENT question of a live TUI ask picker from the phone.
 
@@ -1501,7 +1506,10 @@ class TuiSessionHandle(SessionHandle):
             # the queue rather than onto the (empty) ``_ask_pending`` map.
             # ``None`` is "not a mirrored id" and everything below runs
             # unchanged.
-            mirrored = self._mirror_ask_answer(request_id, value)
+            # ``by`` is the runtime-stamped label (``mirror`` only for a
+            # connection that proved the operator capability); see
+            # ``asks/surfaces``.
+            mirrored = self._mirror_ask_answer(request_id, value, by=by)
             if mirrored is not None:
                 return mirrored
             card = self._ask_pending.get(request_id)
@@ -1539,7 +1547,9 @@ class TuiSessionHandle(SessionHandle):
 
         return await self._on_app(resolve)
 
-    def _mirror_ask_answer(self, request_id: str, value: str) -> str | None:
+    def _mirror_ask_answer(
+        self, request_id: str, value: str, *, by: str = UNVERIFIED_SURFACE
+    ) -> str | None:
         """Answer a queued ask through the legacy mirrored card id, or ``None``.
 
         ``None`` is "not a mirrored id" — the ordinary case, where the caller
@@ -1569,7 +1579,7 @@ class TuiSessionHandle(SessionHandle):
         if not value:
             # An EMPTY value is today's Esc and settles the WHOLE ask: a decline
             # is not a step of the multi-step flow.
-            outcome = session.decline_ask(ask_id, by="mirror")
+            outcome = session.decline_ask(ask_id, by=by)
             if not outcome.get("ok"):
                 raise ValueError(str(outcome.get("error") or "the decline was refused"))
             return "declined"
@@ -1581,7 +1591,7 @@ class TuiSessionHandle(SessionHandle):
         # same bridge the runtime uses so a mirror answered through the terminal's
         # registrant settles exactly as one answered through the runtime: one
         # question per tap into the queue's draft, one atomic write on the last.
-        outcome = session.answer_ask_question(ask_id, key, [value], by="mirror")
+        outcome = session.answer_ask_question(ask_id, key, [value], by=by)
         if not outcome.get("ok"):
             raise ValueError(str(outcome.get("error") or "the answer was refused"))
         if not outcome.get("settled"):

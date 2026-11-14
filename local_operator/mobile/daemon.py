@@ -9127,7 +9127,12 @@ def build_app(daemon: MobileDaemon):
                 from local_operator.session.runtime.launch import AskErrand
 
                 ask_id = str(body.get("ask_id") or "")
-                by = str(body.get("by") or "")
+                # The body's ``by`` is NOT forwarded: anyone holding the portal
+                # cookie writes this body, and the runtime stamps the surface
+                # itself (``asks/surfaces``). This client never opts into the
+                # operator proof either, so a portal answer is recorded, never
+                # read as a local operator's consent.
+                by = ""
                 answers = {
                     str(key): [str(item) for item in (value or [])]
                     for key, value in (body.get("answers") or {}).items()

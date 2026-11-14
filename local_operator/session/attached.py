@@ -181,6 +181,22 @@ from local_operator.session_lease import SessionLeaseHeldError
 logger = logging.getLogger(__name__)
 
 
+def operator_ask_kwargs(method: Any) -> dict[str, Any]:
+    """``{"operator_ask": True}`` when ``method`` takes it, else ``{}``.
+
+    The opt-in that lets ``AttachClient`` present its capability proof on an ask
+    answer (``AttachClient.authority_proof``). Probed rather than always passed
+    so a reduced client double, or a client from before the keyword, is still
+    called with exactly the shape it always took.
+    """
+    try:
+        return (
+            {"operator_ask": True} if "operator_ask" in inspect.signature(method).parameters else {}
+        )
+    except (TypeError, ValueError):
+        return {}
+
+
 def _settings_notice(message: Msg, *, kind: Literal["info", "error"]) -> NoticeEvent:
     """A viewer-local notice about this viewer's own settings switch.
 
@@ -3948,7 +3964,11 @@ class AttachedSession:
                 and question_index == pending.question_index
             ):
                 return await client.ask_answer(
-                    request_id, value, question_index=question_index, deadline_s=ack_budget
+                    request_id,
+                    value,
+                    question_index=question_index,
+                    deadline_s=ack_budget,
+                    **operator_ask_kwargs(client.ask_answer),
                 )
             raise ValueError("the answer does not match the current question")
 
@@ -4215,17 +4235,24 @@ class AttachedSession:
         method = getattr(client, name)
         if tail:
             return await method(ask_id, *tail)
+        # THIS facade is a person's local surface (the desktop app's backend, the
+        # attached pane, the CLI), so it opts its client into presenting the
+        # operator-capability proof; the runtime then stamps a trusted surface
+        # only if that proof holds (``asks/surfaces``).
+        operator = operator_ask_kwargs(method)
         if name in ("ask_respond", "ask_revise"):
             body = {
                 str(key): [str(item) for item in (values or ())]
                 for key, values in (answers or {}).items()
             }
             if images:
-                return await method(ask_id, body, by=by, images=[dict(i) for i in images])
-            return await method(ask_id, body, by=by)
+                return await method(
+                    ask_id, body, by=by, images=[dict(i) for i in images], **operator
+                )
+            return await method(ask_id, body, by=by, **operator)
         if name == "ask_dismiss" and reason:
-            return await method(ask_id, by=by, reason=reason)
-        return await method(ask_id, by=by)
+            return await method(ask_id, by=by, reason=reason, **operator)
+        return await method(ask_id, by=by, **operator)
 
     def move_will_wait(self) -> bool:
         """Whether :meth:`set_working_directory` is about to make the user wait.
@@ -8341,6 +8368,7 @@ class AttachedSession:
                         pending.request_id,
                         values[0],
                         question_index=pending.question_index,
+                        **operator_ask_kwargs(client.ask_answer),
                     )
                 except OperatorAuthorityRequired:
                     # The approval arm's first clause, one kind over: a refusal is

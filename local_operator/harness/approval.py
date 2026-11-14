@@ -534,6 +534,23 @@ def transition_authority(command: str, args: str, *, approved: bool | None = Non
 #: an unguarded way to loosen a running gate.
 AUTHORITY_OPS = frozenset({"slash", "slash_result", "approval_answer", "bridge_decide"})
 
+#: The control ops that ANSWER a queued ask (or its legacy mirrored card).
+#:
+#: NOT authority-increasing, and deliberately kept out of :data:`AUTHORITY_OPS`:
+#: any holder of the record key may still settle an ask, because an ask's answer
+#: is first of all the agent's input, and refusing it would strand the agent on
+#: an unproven surface (a phone, a peer) that has every right to reply. What the
+#: answer must NOT carry without proof is the CLAIM that a person on a local
+#: operator surface gave it — the guard reads that claim as consent for a
+#: dangerous delete (``guardrails.provenance.TRUSTED_ASK_SURFACES``). So the
+#: runtime stamps the recorded surface itself (``asks/surfaces.stamp_answer_surface``)
+#: and the console presents the same per-connection capability proof on these
+#: frames that it presents on an increasing one (``mobile/attach_client``): the
+#: proof decides the label, never the frame's own ``by``.
+ASK_ANSWER_OPS = frozenset(
+    {"ask_respond", "ask_revise", "ask_decline", "ask_dismiss", "ask_answer"}
+)
+
 
 def frame_authority(frame: dict[str, Any]) -> Authority | None:
     """The class of a control FRAME, or ``None`` when the op carries no class.

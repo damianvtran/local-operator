@@ -395,7 +395,10 @@ def refusal_copy(record: Mapping[str, Any] | None) -> str:
         )
     if status == store.STATUS_ANSWERED:
         by = (record.get("answered_by") or {}).get("surface")
-        if not by or by in ROLE_BY_WORDS:
+        if not by or by in ROLE_BY_WORDS or by == "unverified":
+            # ``unverified`` is the runtime's stamp for an answer whose surface
+            # it could not prove (``asks/surfaces``) — a fact about the proof,
+            # not a place the user would recognise, so it reads unattributed.
             return "already answered."
         return f"already answered by {by}."
     return "this ask is no longer open."

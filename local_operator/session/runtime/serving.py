@@ -50,6 +50,7 @@ from typing import (
     cast,
 )
 
+from local_operator.asks.surfaces import UNVERIFIED as UNVERIFIED_SURFACE
 from local_operator.buildwatch import UpdateLock
 from local_operator.buildwatch import wake_within_window as _wake_within_window
 from local_operator.harness.approval import (
@@ -7245,7 +7246,11 @@ class ServingSessionHandle(SessionHandle):
 
     @_on_session_loop
     async def ask_answer(
-        self, request_id: str, value: str, question_index: int | None = None
+        self,
+        request_id: str,
+        value: str,
+        question_index: int | None = None,
+        by: str = UNVERIFIED_SURFACE,
     ) -> str:
         # ``question_index`` is accepted for protocol parity with the TUI handle
         # (U8 guard). An owned session assigns a DISTINCT request_id per question
@@ -7259,7 +7264,11 @@ class ServingSessionHandle(SessionHandle):
         # synthetic id has to resolve onto the whole-ask queue rather than onto a
         # gate future that never existed. Nothing else is touched: every other
         # request id is an approval or a live picker and falls through unchanged.
-        mirrored = await self._mirror_ask_answer(request_id, value)
+        # ``by`` is the label the RUNTIME stamped for this connection
+        # (``asks/surfaces.stamp_answer_surface``): ``mirror`` only when the
+        # frame proved the operator capability. The fail-closed default is for
+        # a caller that never went through that seam.
+        mirrored = await self._mirror_ask_answer(request_id, value, by=by)
         if mirrored is not None:
             return mirrored
         # Resolve with the QUESTION id the harness asked under — never our
@@ -7272,7 +7281,9 @@ class ServingSessionHandle(SessionHandle):
             raise ValueError("that question was already answered") from exc
         return "answered"
 
-    async def _mirror_ask_answer(self, request_id: str, value: str | None) -> str | None:
+    async def _mirror_ask_answer(
+        self, request_id: str, value: str | None, *, by: str = UNVERIFIED_SURFACE
+    ) -> str | None:
         """Answer a queued ask through the legacy mirrored card id, or ``None``.
 
         ``None`` is "this is not a mirrored ask id" — the ordinary case on every
@@ -7296,7 +7307,7 @@ class ServingSessionHandle(SessionHandle):
         if not value:
             # An EMPTY value is today's Esc and settles the WHOLE ask: a decline
             # is not a step of the multi-step flow.
-            outcome = self._session.decline_ask(ask_id, by="mirror")
+            outcome = self._session.decline_ask(ask_id, by=by)
             if not outcome.get("ok"):
                 raise ValueError(str(outcome.get("error") or "the decline was refused"))
             return "declined"
@@ -7310,7 +7321,7 @@ class ServingSessionHandle(SessionHandle):
         # settle the ask in one atomic write. ``ask_respond`` stays atomic and
         # still refuses a partial map — a whole-ask client has no reason to send
         # one, and accepting it there would be a second, weaker contract.
-        outcome = self._session.answer_ask_question(ask_id, key, [value], by="mirror")
+        outcome = self._session.answer_ask_question(ask_id, key, [value], by=by)
         if not outcome.get("ok"):
             raise ValueError(str(outcome.get("error") or "the answer was refused"))
         if not outcome.get("settled"):

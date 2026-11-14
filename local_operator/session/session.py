@@ -69,6 +69,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, cast
 
+from local_operator.asks.surfaces import PROFILE_CONSENT_SURFACES
 from local_operator.compaction.carry import (
     is_carried_tier,
     read_recent_decisions,
@@ -474,7 +475,12 @@ def _profile_input_class(message: Any) -> str:
     if custom_type == "ask_response":
         details = getattr(message, "details", None) or {}
         by = details.get("answered_by") or {}
-        if ask_answer_is_person(message) and by.get("surface") in {"tui", "desktop", "chat"}:
+        # ``desktop``/``tui`` are consent only because the runtime now stamps
+        # every WIRE answer's surface from a per-connection capability proof
+        # (``asks/surfaces.stamp_answer_surface``): a frame's own ``by`` can no
+        # longer write them, so an unproven answer reads ``unverified``/``remote``
+        # and lands here as untrusted.
+        if ask_answer_is_person(message) and by.get("surface") in PROFILE_CONSENT_SURFACES:
             return "consent"
         return "untrusted"
     if custom_type is not None:
