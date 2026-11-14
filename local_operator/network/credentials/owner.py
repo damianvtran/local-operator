@@ -502,6 +502,20 @@ class MeshCredentialBroker:
                         "req": (frame or {}).get("req"),
                         "detail": share_push_mod.member_share_push(server, link, frame),
                     }
+                # THE RENEW NUDGE, same reason: it is addressed to a HOLDER, and the
+                # holder that most needs it (a borrower-only node) owns nothing. Its
+                # receiver re-asks only the authenticated sender, only for rows that
+                # name the sender owner and this device holder (``renew_push``).
+                if str((frame or {}).get("kind") or "") == "renew":
+                    from local_operator.network.credentials import (
+                        renew_push as renew_push_mod,
+                    )
+
+                    return {
+                        "op": "ack",
+                        "req": (frame or {}).get("req"),
+                        "detail": renew_push_mod.member_renew(server, link, frame),
+                    }
                 return refuse(link, frame)
             return broker.on_broker(link, frame)
 
@@ -599,6 +613,13 @@ class MeshCredentialBroker:
             detail = share_push_mod.member_share_push(self._server, link, frame)
         elif kind == "placement":
             detail = self.placement_frame(link, frame)
+        elif kind == "renew":
+            # Owner -> holder: "ask me again now" (``renew_push``). A device that
+            # both lends and borrows is a holder here too; a borrower-only one
+            # reaches the same receiver through ``relay_handler``'s pre-broker arm.
+            from local_operator.network.credentials import renew_push as renew_push_mod
+
+            detail = renew_push_mod.member_renew(self._server, link, frame)
         elif kind == "lifecycle_read":
             detail = self.lifecycle_read(link, frame)
         elif kind == "lifecycle_ack":

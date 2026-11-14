@@ -5975,6 +5975,105 @@ def _peer_checks(
         rows.extend(not_asked_rows(member, detail=f"not asked: {problem}", remedies=()))
         return rows
     rows[restart_index] = peer_restart_row(member, facts, record=record, peer_label=peer_label)
+    rows.extend(
+        _fact_rows(
+            member,
+            facts,
+            record=record,
+            server=server,
+            viewer=viewer,
+            selector=selector,
+            session_id=session_id,
+            repository=repository,
+            selected_row=selected_row,
+        )
+    )
+    return rows
+
+
+def _self_member(server: "RelayServer", target: str) -> tuple[Any, Any] | None:
+    """``(record, member)`` when ``target`` names THIS device, else ``None``.
+
+    Matched on this device's id, its identity name or its own member row's name
+    in a network it belongs to; the first network that lists it wins, which is
+    the one its facts are about (facts are per device, not per network).
+    """
+    from local_operator.network import store as store_mod
+
+    identity = getattr(server, "identity", None)
+    own_id = str(getattr(identity, "device_id", "") or "")
+    if not (target and own_id):
+        return None
+    own_name = str(getattr(identity, "name", "") or "")
+    for record in store_mod.list_networks(server.root):
+        for member in record.members:
+            if member.device_id != own_id:
+                continue
+            if target in (own_id, own_name, member.name):
+                return record, member
+    return None
+
+
+def _self_checks(
+    member: Any,
+    *,
+    record: Any,
+    server: "RelayServer",
+    viewer: Viewer,
+    selector: str = "",
+    session_id: str = "",
+    repository: Mapping[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    """The rows ``ready --peer <self>`` prints: this device's own facts, no dial.
+
+    Same facts (``collect_peer_facts``) and the same row builders a viewer uses
+    on this device's answer, so a node reads exactly what its owner would. No
+    reachability, build or restart rows: those are questions about a LINK, and
+    there is no link to oneself.
+    """
+    facts = collect_peer_facts(
+        server.root, selector=selector, session_id=session_id, repository=repository
+    )
+    selected_row: dict[str, Any] | None = None
+    rows: list[dict[str, Any]] = []
+    if selector:
+        selected_row = {}
+        rows.append(selected_row)
+    rows.extend(
+        _fact_rows(
+            member,
+            facts,
+            record=record,
+            server=server,
+            viewer=viewer,
+            selector=selector,
+            session_id=session_id,
+            repository=repository,
+            selected_row=selected_row,
+        )
+    )
+    return rows
+
+
+def _fact_rows(
+    member: Any,
+    facts: Mapping[str, Any],
+    *,
+    record: Any,
+    server: "RelayServer",
+    viewer: Viewer,
+    selector: str,
+    session_id: str,
+    repository: Mapping[str, Any] | None,
+    selected_row: dict[str, Any] | None,
+) -> list[dict[str, Any]]:
+    """The capability rows built from one device's readiness facts.
+
+    Shared by a peer's answer (:func:`_peer_checks`) and this device's own
+    (:func:`_self_checks`), so the two cannot word the same fact differently.
+    """
+    peer_label = _label(member)
+    rows: list[dict[str, Any]] = []
     rows.append(operator_row(member, facts, peer_label=peer_label))
     rows.append(git_row(member, facts, peer_label=peer_label, viewer=viewer))
     rows.append(repository_row(member, facts, peer_label=peer_label, repository=repository))
@@ -6068,7 +6167,13 @@ def compose(
     from local_operator.network import store as store_mod
 
     deadline = time.monotonic() + relay_mod.LISTING_PROBE_BUDGET_S
-    device_id = server._resolve_peer(peer) if peer else ""  # noqa: SLF001
+    # ``--peer <this device>`` ANSWERS LOCALLY (mesh lane 64949): a node's
+    # operator chasing a GitHub lapse ran ``ready --peer <its own name>`` and got
+    # ``unknown_peer``, because the resolver (rightly) never matches the asking
+    # device as a PEER. The rows it wanted are the ones this device would send a
+    # viewer, so they are built from the same facts, read here with no dial.
+    own = _self_member(server, peer) if peer else None
+    device_id = "" if own is not None or not peer else server._resolve_peer(peer)  # noqa: SLF001
     identity_missing = server.identity is None or not server.identity.device_id
     checks: list[dict[str, Any]] = []
     if identity_missing:
@@ -6108,6 +6213,20 @@ def compose(
                         "remedies": standing["remedies"],
                     }
                 )
+            if own is not None:
+                if own[0].network_id == record.network_id:
+                    checks.extend(
+                        _self_checks(
+                            own[1],
+                            record=record,
+                            server=server,
+                            viewer=viewer,
+                            selector=selector,
+                            session_id=session_id,
+                            repository=repository,
+                        )
+                    )
+                continue
             for member in record.active_members():
                 if member.device_id == record.self_device_id:
                     continue
@@ -6127,7 +6246,7 @@ def compose(
                 )
     finally:
         viewer.close()
-    if not device_id:
+    if not device_id and own is None:
         # THIS DEVICE'S OWN SERVE DAEMON, beside its peers' (2026-10-28): `ready`
         # run ON a node is where that node's operator looks. Left out of a
         # `--peer` report, which asked about another device.
