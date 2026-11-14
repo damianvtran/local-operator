@@ -457,8 +457,13 @@ async def test_a_header_refresh_on_the_whole_diff_does_not_repaint_the_body(monk
         card = ToolCard("huge", "write", {"path": "x"})
         card.mark_done(
             "Wrote x",
-            {"path": "x", "added": total, "removed": 0, "diff": rows[:203],
-             DIFF_TRUNCATED_ROWS_KEY: total - 200},
+            {
+                "path": "x",
+                "added": total,
+                "removed": 0,
+                "diff": rows[:203],
+                DIFF_TRUNCATED_ROWS_KEY: total - 200,
+            },
         )
         app._append_block(card)
         await pilot.pause()

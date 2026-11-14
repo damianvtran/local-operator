@@ -309,12 +309,35 @@ _DECLARED_RAW_READS: dict[tuple[str, str, str], tuple[int, str]] = {
     # on purpose: the wire facts (``outcome``/``engaged``/``admitted``) are the booleans
     # beside it, and UX round 3 removed the second copy of those from these lines.
     ("local_operator/network/cli.py", "_cmd_sessions", "detail"): (
-        5,
+        6,
         "the relay's own sentence — the 4th read is the model receipt's detail, which "
         "says why a requested model was not applied; the 5th is the first turn's CAUSE, "
         "the owner runtime's own error sentence (the provider's reason, e.g. a rate "
         "limit or an expired login), carried verbatim on purpose: it is the one fact "
-        "that tells the reader whether to retry, re-auth or pick another model",
+        "that tells the reader whether to retry, re-auth or pick another model; the "
+        "6th is the create-idempotency sentence (``create_unconfirmed``/``replayed``) "
+        "the relay composes in ``_settle_lost_create``/``_create_replay_reply``",
+    ),
+    # The create-idempotency sentence (PR #3827) on the agent tool's mesh spawn: the
+    # relay's OWN prose — ``RelayServer._create_replay_reply`` on the owner, or the
+    # requesting relay's ``_settle_lost_create`` — saying the first prompt's
+    # admission was not observed by this call. NOT GLOSSED because the gloss would
+    # break it: ``peer_reason_words`` reads the ``(CLI: `lop …`)`` colon as a stage
+    # prefix and keeps only the tail. Same class as ``_cmd_sessions`` above.
+    ("local_operator/tools/builtin.py", "_sessions_spawn_mesh", "detail"): (
+        1,
+        "the relay's own create-idempotency sentence (replayed / reply lost), shown "
+        "verbatim because the gloss would cut it at its `CLI:` colon",
+    ),
+    # The owner runtime's own reply sentence for a ``--send --mailbox`` delivery,
+    # stored as the receipt's ``receipt`` and printed as ``<peer>: <sentence>``. Kept
+    # raw because an EMPTY reply must stay empty (``mailbox_receipt_lines`` prints
+    # nothing then) and ``peer_reason_words`` never returns empty — it would print
+    # "it did not answer" under a message that was delivered.
+    ("local_operator/network/cli.py", "_pilot_mailbox", "detail"): (
+        1,
+        "the owner's own mailbox-delivery sentence, attributed to the peer; empty "
+        "stays empty, which the never-empty gloss cannot express",
     ),
     # ``_op_session_create`` hands the owner's first-turn cause to the requesting
     # device (``_prompt_on``'s ``detail``). DELIBERATELY RAW, and the counter-example
@@ -403,9 +426,37 @@ _DECLARED_RAW_READS: dict[tuple[str, str, str], tuple[int, str]] = {
         1,
         "the same local skip code, compared for deduplication — never rendered",
     ),
+    # Three reads: the push's per-row conflict line, the push's custom-instructions
+    # outcome line, and ``state``'s recorded custom-instructions conflict — every one
+    # the peer's (or, for ``state``, this device's own apply's) conflict sentence,
+    # printed verbatim so a person learns why the head's copy was not installed.
     ("local_operator/network/cli.py", "_cmd_definitions", "reason"): (
-        1,
+        3,
         "the peer's own conflict sentence, printed verbatim",
+    ),
+    # The custom-instructions singleton's report: the push copies the peer's apply
+    # sentence (``push_to_peer``) or the conflict the peer recorded for this exact
+    # revision (``_instructions_to_send``) into its per-peer result, which the CLI
+    # line above renders. Relayed, never composed from a token.
+    ("local_operator/network/definitions.py", "push_to_peer", "reason"): (
+        1,
+        "the peer's custom-instructions apply sentence, relayed into the push report",
+    ),
+    ("local_operator/network/definitions.py", "_instructions_to_send", "reason"): (
+        1,
+        "the peer's recorded custom-instructions conflict sentence, relayed into the report",
+    ),
+    # The peer-voiced kept-own-copy sentence falls back to the peer's own reason only
+    # for an older node whose report carries no ``code`` (PR #3829 round 1, Q-2).
+    ("local_operator/network/definitions.py", "instructions_conflict_notice", "reason"): (
+        1,
+        "an older node's custom-instructions conflict sentence, quoted when it sent no code",
+    ),
+    # The move notice quotes the instructions report's own sentence (a withheld or
+    # refused revision) when only the instructions failed to refresh (R1-4).
+    ("local_operator/network/mobility.py", "_push_move_definitions", "reason"): (
+        1,
+        "the push report's custom-instructions sentence, relayed onto the move receipt",
     ),
     # The mobility slice's wire transport reads the ACK'S ``detail`` key - the
     # envelope field itself, never rendered to anyone: what a surface renders is the
@@ -705,6 +756,17 @@ _DECLARED_RAW_READS: dict[tuple[str, str, str], tuple[int, str]] = {
         "the browser host's own record_* refusal token, compared against a fixed set "
         "to decide whether a capture can still be running; never rendered, and a "
         "browser host's value, not a mesh peer's",
+    ),
+    # A tab a finished child handed to this session (``browser_bridge.handoff``)
+    # is listed with the child's retain reason. That reason is the child's own
+    # resource record's ``retention``, written only in this process: the browser
+    # tool's ``retain`` action (the agent's own ``text``), "pending site
+    # approval", or the subagent runner's "paused scope" — never a peer's prose.
+    ("local_operator/tools/builtin.py", "_format_bridge_tab", "reason"): (
+        1,
+        "the handed tab's retain reason — the child's own resource record "
+        "retention, written by this process's browser tool or subagent runner, "
+        "never a mesh value",
     ),
     ("local_operator/tools/builtin.py", "execute_bash", "reason"): (
         2,

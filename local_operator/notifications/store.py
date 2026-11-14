@@ -759,8 +759,21 @@ class NotificationStore:
         agent_id: str = "",
         team_id: str = "",
         now: int | None = None,
+        episode: str = "",
     ) -> NotifyOutcome:
         """Create or update one item (collapse table: contract §1.3).
+
+        ``episode`` is a WRITER-OWNED identity folded into the collapse digest,
+        for a writer whose same key and same words can describe two different
+        events. The remote-attention forwarder (``notifications/
+        remote_attention``) is the one user: two turns that finish on a peer
+        read "Finished on <device>" both times, and without this the second
+        completion would collapse into the first as ``unchanged`` and never
+        reach the operator. Passing the completion token here makes a NEW
+        completion an update (unread again) while a REPEAT of the same token —
+        a restarted watcher, or the TUI and ``lop serve`` both forwarding —
+        stays ``unchanged``. Empty (every other caller) leaves the digest
+        byte-identical to before, so no existing row's collapse changes.
 
         Every changed revision starts unread: session presence cannot prove
         the new callout rendered. Only a subsequent per-item receipt or an
@@ -776,7 +789,9 @@ class NotificationStore:
         body_md = str(body_md or "")[:BODY_MAX]
         key = str(key or "").strip()[:KEY_MAX]
         links_json = json.dumps(normalize_links(links), separators=(",", ":"), ensure_ascii=False)
-        digest = content_hash(title, body_md, links_json, priority)
+        digest = content_hash(
+            title, body_md, links_json + (f"\x1e{episode}" if episode else ""), priority
+        )
         stamp = now if now is not None else now_ms()
 
         def body(conn: sqlite3.Connection) -> NotifyOutcome:
@@ -1001,6 +1016,37 @@ class NotificationStore:
             return _row_dict(row) if row is not None else None
 
         return self._read(body, None, "get_by_key")
+
+    def unread_with_key_prefix(self, prefix: str, *, limit: int = 200) -> list[dict[str, Any]]:
+        """Unread, undismissed items whose ``key`` starts with ``prefix``, oldest first.
+
+        For a writer that owns a key NAMESPACE and must reconcile its unread
+        rows against an outside fact on every read rather than against process
+        memory: the remote-attention forwarder marks a ``remote-done:`` row read
+        once the owner's listing no longer claims that completion (QA round 1,
+        Q1 — a receipt that landed while no watcher ran left the row unread for
+        good, because the in-memory map that used to drive the settle started
+        empty after a restart). One indexed query per poll instead of one
+        lookup per listed session. Read-only, like :meth:`get_by_key`. ``%``
+        and ``_`` in ``prefix`` are escaped, so the prefix is matched literally.
+        """
+        if not prefix:
+            return []
+        escaped = prefix.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        params = (f"{escaped}%", max(1, int(limit)))
+
+        def body(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+            return [
+                _row_dict(row)
+                for row in conn.execute(
+                    f"SELECT {_ITEM_COLUMNS} FROM items WHERE key LIKE ? ESCAPE '\\' "
+                    "AND dismissed_at IS NULL AND read_rev < revision "
+                    "ORDER BY created_at, id LIMIT ?",
+                    params,
+                )
+            ]
+
+        return self._read(body, [], "unread_with_key_prefix")
 
     def find_by_key(self, key: str) -> list[dict[str, Any]]:
         """Every item holding ``key``, across all sessions (dismissed ones included).
@@ -1323,7 +1369,9 @@ class NotificationStore:
 
         return self._read(body, [], "undelivered")
 
-    def claim_delivery(self, item_id: str, by: str, *, now: int | None = None) -> bool:
+    def claim_delivery(
+        self, item_id: str, by: str, *, now: int | None = None, per_revision: bool = False
+    ) -> bool:
         """Claim the banner for an item's current revision, once, machine-wide.
 
         ``delivered_rev`` is the watermark a banner leg (desktop feed, TUI, the
@@ -1338,6 +1386,18 @@ class NotificationStore:
         one suppression the grace allows. It suppresses nothing permanently: a
         later content change bumps ``revision``, which makes the row unread and
         claimable again (``notifications/delivery.py`` states the rule).
+
+        ``per_revision=True`` skips the per-row banner cooldown and keeps every
+        other arm (watermark, read, dismissed). It is for a writer whose every
+        revision is a DISTINCT EVENT rather than a watcher re-describing one
+        topic: the remote-done claimant (``notifications/remote_attention``),
+        where each revision is one finished turn on a peer. A local completion
+        banners once per completion token with no time window
+        (``AttentionStore.claim_delivery``), and a remote one must match it
+        (review round 2, R2-M1 / QA Q4: two turns 5 minutes apart bannered once
+        remotely, twice locally). The watermark still makes it one banner per
+        revision across the TUI and ``lop serve``. Every other caller keeps the
+        cooldown (D15).
         """
 
         stamp = now if now is not None else now_ms()
@@ -1356,7 +1416,7 @@ class NotificationStore:
             # stays unread and badged; the SECOND update inside the window is
             # simply not news a banner can carry.
             last = row["delivered_at"]
-            if last is not None and stamp - int(last) < BANNER_COOLDOWN_MS:
+            if not per_revision and last is not None and stamp - int(last) < BANNER_COOLDOWN_MS:
                 return False
             if int(row["read_rev"]) >= int(row["revision"]):
                 return False

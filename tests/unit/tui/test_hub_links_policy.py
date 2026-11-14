@@ -25,6 +25,7 @@ from local_operator.hub_sync.identity import Kind, LinkIdentity, Visibility
 from local_operator.tui.app import OperatorApp
 from local_operator.tui.widgets.hub_links_panel import HubLinksPanel
 from tests.unit.tui.test_app_pilot import FakeSession, _factory
+from tests.unit.tui.waiting import settle
 
 HUB = "https://api.radienthq.com/v1"
 
@@ -112,13 +113,17 @@ async def _open_panel(app: OperatorApp, pilot: Any) -> None:
     app.action_hub_links()
     # The inventory is a real thread hop. Keys sent while it is loading have
     # no selected row to act on, however many message-pump pauses preceded them.
-    await _await_settle(
+    # ``hub-links`` is the group ``action_hub_links`` runs the fetch in
+    # (``app.py`` ``_fetch_hub_links_worker``); joining it joins the
+    # ``asyncio.to_thread`` snapshot read inside it.
+    await settle(
         pilot,
         lambda: not _mounted_panel(app)._loading
         and bool(_mounted_panel(app)._rows)
         and app.focused is _mounted_panel(app),
         what="the initial inventory and panel focus",
-        guard=5,
+        workers=("hub-links",),
+        deadline_s=5,
     )
     # One navigation key engages the panel (round-3 D15), so subsequent presses
     # are treated as intent rather than typed-ahead.
@@ -213,13 +218,17 @@ async def test_private_eligible_auto_push_enables_on_single_press(
         await pilot.pause()
         await _open_panel(app, pilot)
         await pilot.press("a")
-        # The write and inventory re-read both hop to a thread; draining the
-        # message pump does not establish that the persisted effect landed.
-        await _await_settle(
+        # The write and inventory re-read both hop to a thread inside the
+        # ``hub-links`` policy worker; draining the message pump does not
+        # establish that the persisted effect landed. Join the worker and wait
+        # for the card to leave ``Saving…`` (set by the press, cleared by the
+        # re-read's ``show_links`` or ``show_save_failed``); the persisted value
+        # is left to the assertion, so a refused or failed write fails there.
+        await settle(
             pilot,
-            lambda: _policy_values(tmp_path, identity.link_id)["auto_push"] is True
-            and not _mounted_panel(app)._refreshing,
+            lambda: not _mounted_panel(app)._refreshing,
             what="the private auto-push write and re-read",
+            workers=("hub-links",),
         )
     assert _policy_values(tmp_path, identity.link_id)["auto_push"] is True
 
@@ -610,8 +619,15 @@ async def test_selected_row_is_painted_at_every_boundary(
     async with app.run_test(size=(100, 40)) as pilot:
         await pilot.pause()
         app.action_hub_links()
-        await pilot.pause()
-        await pilot.pause()
+        # The inventory is read in a thread inside the ``hub-links`` fetch
+        # worker. Two pauses lost that race on CI (the failing frames paint
+        # ``Loading hub links…``): select only once the rows are installed.
+        await settle(
+            pilot,
+            lambda: not _mounted_panel(app)._loading,
+            what="the hub-links inventory to install",
+            workers=("hub-links",),
+        )
         panel = _mounted_panel(app)
         panel._selected = count - 1
         panel._repaint()
@@ -638,10 +654,11 @@ async def test_selected_row_is_painted_with_wrapped_rows(
         panel = _mounted_panel(app)
         # Inventory is loaded in a thread. Selecting while its rows are still
         # absent paints Loading, as CI job 129220076198's failing frame shows.
-        await _await_settle(
+        await settle(
             pilot,
             lambda: not panel._loading and len(panel._rows) == 20,
             what="the wrapped-row inventory to install",
+            workers=("hub-links",),
         )
         panel._selected = 19
         panel._repaint()
@@ -927,8 +944,15 @@ async def test_mid_section_window_keeps_its_section_title(
     async with app.run_test(size=(60, 20)) as pilot:
         await pilot.pause()
         app.action_hub_links()
-        await pilot.pause()
-        await pilot.pause()
+        # The inventory is read in a thread inside the ``hub-links`` fetch
+        # worker. Two pauses lost that race on CI (the failing frames paint
+        # ``Loading hub links…``): select only once the rows are installed.
+        await settle(
+            pilot,
+            lambda: not _mounted_panel(app)._loading,
+            what="the hub-links inventory to install",
+            workers=("hub-links",),
+        )
         panel = _mounted_panel(app)
         panel._selected = 15
         panel._repaint()
@@ -1338,22 +1362,28 @@ async def test_policy_actions_are_inert_while_the_error_body_shows(
         assert "s subscribe" not in hint and "a auto-push" not in hint, hint
         assert "r refresh" in hint and "esc close" in hint, hint
         # Recovery is the taught key: `r` re-reads and reinstalls the rows.
-        # That re-read is the same inventory thread hop as the open, so wait
-        # on its installed state rather than a pause count.
+        # That re-read is the same inventory thread hop as the open, run in
+        # the ``hub-links`` group by ``on_hub_links_panel_refresh_requested``
+        # without ``start_fetch``, so the error body clears only when its
+        # ``show_links`` lands. Join the worker and wait for that edge; whether
+        # rows came back is left to the assertion.
         await pilot.press("r")
-        await _await_settle(
+        await settle(
             pilot,
-            lambda: panel._error == "" and bool(panel._rows),
+            lambda: panel._error == "",
             what="the taught refresh to reinstall the rows",
+            workers=("hub-links",),
         )
         assert panel._error == "" and panel._rows, "the refresh must restore the rows"
         await pilot.press("s")
-        # Recovery has a second independent write/re-read thread round trip.
-        await _await_settle(
+        # Recovery has a second independent write/re-read thread round trip in
+        # the ``hub-links`` policy worker; wait for the card to leave
+        # ``Saving…`` and leave the persisted value to the assertion.
+        await settle(
             pilot,
-            lambda: _policy_values(tmp_path, identity.link_id)["subscribe"] is False
-            and not panel._refreshing,
+            lambda: not panel._refreshing,
             what="the recovered subscribe write and re-read",
+            workers=("hub-links",),
         )
     assert _policy_values(tmp_path, identity.link_id)["subscribe"] is False
 

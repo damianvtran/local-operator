@@ -797,6 +797,22 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "Removes only its own `relay-stop-requested.json.<pid>.tmp` staging FILE in "
         "<config>/run after a failed write or replace",
     ),
+    # The owner-side create-key index (`network/create_keys.py`): ONE fixed-name
+    # FILE, `<config>/network/create-keys.json`, rewritten atomically from a
+    # mkstemp sidecar in the same directory. A sibling of `sessions/`, never a
+    # parent of it, and never a directory.
+    (
+        "local_operator/network/create_keys.py::CreateKeyIndex._save",
+        "os.replace",
+        "Atomic replacement of the fixed config-root FILE <config>/network/create-keys.json "
+        "from this call's own mkstemp sidecar; never a directory and never under sessions/",
+    ),
+    (
+        "local_operator/network/create_keys.py::CreateKeyIndex._save",
+        "os.unlink",
+        "Removes only this call's own `.create-keys.*.tmp` mkstemp FILE in "
+        "<config>/network after a failed write or replace",
+    ),
     (
         "local_operator/network/relay.py::clear_deliberate_stop",
         "<path>.unlink",
@@ -891,6 +907,18 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
     # call minted. Every replace target and every unlink target is a regular FILE
     # (or a symlink planted in a sound's slot, unlinked as the link itself); no
     # call names a directory, and none can resolve under `sessions/`.
+    # `record_forwarding_origin`: the target is `_origins_path(root)` =
+    # <config>/remote-attention-origins.json (a fixed basename joined to the relay's
+    # config root, never a session id), and the source is the sibling
+    # `.remote-attention-origins.json.<pid>.tmp` FILE this same call created with
+    # O_CREAT. `os.replace` onto a regular file cannot displace a directory, and
+    # neither path can resolve under `sessions/`.
+    (
+        "local_operator/notifications/remote_attention.py::record_forwarding_origin",
+        "os.replace",
+        "Atomic replace of <config>/remote-attention-origins.json from its sibling "
+        "pid-suffixed tmp FILE; never a directory and never under sessions/",
+    ),
     (
         "local_operator/notifications/custom_sounds.py::_write_index",
         "os.replace",
@@ -1699,6 +1727,18 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "local_operator/network/definitions.py::write_index",
         "<path>.unlink",
         "only the same-directory temp FILE this write created",
+    ),
+    (
+        "local_operator/network/definitions.py::_write_instructions_file",
+        "os.replace",
+        "mkstemp-created temp FILE -> <config>/system_prompt.md (the only caller "
+        "passes aida.profile.instruction_file(root)); os.replace rejects a "
+        "directory target",
+    ),
+    (
+        "local_operator/network/definitions.py::_write_instructions_file",
+        "<path>.unlink",
+        "only the mkstemp temp FILE this write created, on a failed write",
     ),
     # The move route's own rollback. It removes `<sessions>/<id>/desktop.json`:
     # the marker FILE beside the transcript, whose name is the fixed

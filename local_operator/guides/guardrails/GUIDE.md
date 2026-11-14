@@ -81,15 +81,29 @@ three routes the checkpoint can verify. Everything CRITICAL is still refused.
   (tracked files gone, registration still present), so treat a failed
   removal as damage to report, not a step to retry. Anything else takes the
   ordinary ranking. Prefer this to
-  `rm -rf .worktrees/<name>`. A worktree this session created is its own:
-  through the ledger it ranks LOW even dirty or with `--force`, so commit or
-  push what you want to keep before removing your own tree.
+  `rm -rf .worktrees/<name>`.
 
   Before you `ask` to remove a worktree, preview `git worktree remove <exact path>`
   with `preview_tool_call` and quote its worktree facts verbatim in the ask: branch,
   open PR/MR state, the newest PR/MR with its state and date (merged, closed
   unmerged, or none found), and whether an owning session is running. The newest
   PR is shown, never ranked: a merged PR does not prove nobody works in the tree.
+- **Your own worktree.** A linked worktree the ledger records for this session
+  (or a subagent it launched) is yours to remove: `git worktree remove [--force]
+  <exact path>` or `rm -rf <exact path>` ranks LOW, with no judge call, when it
+  holds no tracked or untracked change and is idle (no open PR, no other
+  running session in it). Ignored entries (`.expo/`, `.pnpm-store/`, a
+  `node_modules` symlink) never count against your own tree — `git worktree
+  remove` deletes them itself. Real uncommitted work goes to the judge, whose
+  brief carries the ledger row (creator, kind, time, creating command) and the
+  exact `git status` entries; it may answer `ALLOW ledger`, which the
+  checkpoint re-verifies against the ledger. Never ask the operator about your
+  own worktrees or scratch; commit or push what you want to keep, then remove
+  it by exact path. `ask` is for paths you did not create, and it names a path
+  only when the question or the picked option's label spells it in full
+  (`~/repo/.worktrees/{a,b}` works); a relative `.worktrees/a`, or a path only
+  in an option's description, names nothing (live ask a-1d54, 2026-11-11). Another session's
+  worktree, a primary checkout, `$HOME` and the state root keep their ranking.
 - **History evidence.** A HIGH delete goes to a judge forked from the session's
   own prefix. Before it runs, the checkpoint extracts real tool calls: this
   session's from the harness's memory, its descendants' (found by `origin.json`
@@ -132,10 +146,21 @@ three routes the checkpoint can verify. Everything CRITICAL is still refused.
   CRITICAL. A path written with `..` is judged where the kernel lands it
   (`..` resolves after following links): inside your own scratchpad it stays
   LOW, inside another session's scratchpad HIGH, anywhere else in session
-  state CRITICAL. Where it cannot be pinned at check time — a `..` below a directory that
-  does not exist yet, as in `mkdir -p <pad>/n && rm -f <pad>/n/../x` — it is
-  deliberately CRITICAL: write `rm -f <pad>/x` instead. `cd -P` (or `cd` after
-  `set -P`/`set -o physical`) is followed to the directory the kernel resolves. The
+  state CRITICAL. Where it cannot be pinned at check time it is never LOW,
+  even in `/tmp`: a `..` below a directory that does not exist yet
+  (`mkdir -p <pad>/n && rm -f <pad>/n/../x`), or below one an earlier part of
+  the same command linked, moved or copied onto, deleted or created
+  (`ln -sfn <dir> <pad>/l && rm -f <pad>/l/../x`), because that same command
+  could make the component a link to anywhere. Inside session state — your
+  own scratchpad included — such a `..` after a missing or re-linked
+  component is CRITICAL; elsewhere it is judged (HIGH). It is also ranked by
+  where it lands if every missing part becomes a directory and every part
+  re-linked with a literal `ln -s`/`cp -s` target points there, so a refusal
+  names the file the kernel would act on. Name the physical path directly
+  instead: write `rm -f <pad>/x`.
+  `cd -P` (or `cd` after `set -P`/`set -o physical`) is followed to the
+  directory the kernel resolves; through a part the same command re-linked,
+  the working directory counts as unknown, so later relative paths rank HIGH. The
   `write`/`edit` file tools are not ranked HIGH there: they refuse only the
   evidence files, so a plain file in another session's scratchpad is not
   refused by them. CRITICAL here means every redirection (`>`, `>>`, `>|`,
@@ -164,7 +189,7 @@ three routes the checkpoint can verify. Everything CRITICAL is still refused.
   tools refuse those files the same way. An interpreter that computes the path
   itself (`python -c`, `node -e`) is the documented ceiling, as for any
   interpreter delete. The judge must answer
-  `ALLOW evidence=<ids>`, `ALLOW ask=<id>` or `ALLOW operator`. The checkpoint
+  `ALLOW evidence=<ids>`, `ALLOW ledger`, `ALLOW ask=<id>` or `ALLOW operator`. The checkpoint
   re-verifies each citation and refuses an ALLOW that does not cover every target.
 
 **Who can authorise a delete.** Only the operator: a message they typed in a

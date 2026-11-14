@@ -142,7 +142,8 @@ async def _open_with_question(pilot, app: OperatorApp, question: str) -> AsidePa
     Two product workers stand between the keystroke and the state every caller
     reads, and a fixed number of ``pause()`` calls was a bet on both (CI lost it:
     ``aside_calls == []`` on #3720, ``forked == []`` on #3732; a 0.4 s delay
-    injected at either boundary reproduces both exactly):
+    injected at the boot or the aside boundary reproduces the first exactly,
+    while the second needs the delay at the ``aside-fork`` boundary instead):
 
     * the BOOT worker (group ``session``) must have adopted the session, or
       ``_ask_aside`` answers "the session is still starting…" on the card and
@@ -814,13 +815,16 @@ async def test_forking_mid_turn_queues_the_aside_and_mounts_nothing_yet() -> Non
 
         await pilot.press("ctrl+f")
         # ^f only schedules the `aside-fork` worker; `adopt_aside` runs in it.
-        # Join that group, and wait on the product's own ^f gate going false
-        # (the worker consumed the card), so a worker that starts and finishes
-        # inside one pause is still covered. Five pauses lost this race on CI.
+        # Join that group, and wait on the session having been handed the pair
+        # (`adopt_aside` ran), so a worker that starts and finishes inside one
+        # pause is still covered. Five pauses lost this race on CI. Not
+        # `not app._aside_can_fork()`: that gate includes `not panel.is_open`,
+        # so a card left open would time out here instead of failing the
+        # `is_open` assertion below at its own line (#3783 R1-m1).
         await settle(
             pilot,
-            lambda: not app._aside_can_fork(),
-            what="the ^f fork worker consumed the aside",
+            lambda: bool(session.forked),
+            what="the ^f fork worker handed the pair to the session",
             workers=("aside-fork",),
         )
 

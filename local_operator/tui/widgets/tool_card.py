@@ -1962,9 +1962,7 @@ class ToolCard(ExpandableActionBlock):
         #: a header refresh (hover, focus, hint) re-assembles the card, and
         #: rebuilding thousands of rows for a one-row change was the bulk of
         #: the whole-diff level's per-refresh cost (QA round 1, Q1).
-        self._diff_body_cache: (
-            tuple[tuple[Any, ...], Sequence[str], Text, int | None] | None
-        ) = None
+        self._diff_body_cache: tuple[tuple[Any, ...], Sequence[str], Text, int | None] | None = None
         #: Line-at-a-time painter for a card showing its whole diff (Q1): only
         #: the rows on screen are rendered, never the thousands above/below.
         self._lazy_rows: _LazyRows | None = None

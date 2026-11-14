@@ -7977,9 +7977,7 @@ class TranscriptView(ScrollableContainer):
                 return
             top = block.virtual_region.y + block.styles.gutter.top
             with self._tail_anchor.programmatic_scroll():
-                self.scroll_to(
-                    y=max(0, top + row - screen_row), animate=False, immediate=True
-                )
+                self.scroll_to(y=max(0, top + row - screen_row), animate=False, immediate=True)
 
         settle()
         self.call_after_refresh(settle)

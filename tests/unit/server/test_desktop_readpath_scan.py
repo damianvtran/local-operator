@@ -403,3 +403,197 @@ async def test_the_bridge_history_serves_proof_once_the_resident_index_is_curren
         assert records is not None, "a warm resident index did not serve the proof join"
         assert records["records"] == []
         assert records["unavailable"] == [expected]
+
+
+# --- The first frame's proof join is bounded by the snapshot's deadline ---------
+#
+# WOULD-HAVE-FAILED-BEFORE. ``_with_peer_cycle_records`` awaited its archive read
+# (``discover_records`` on a worker hop) with no bound, so a snapshot whose own
+# budget (``OPEN_FRAME_SNAPSHOT_BUDGET_S``) had already degraded every other fact
+# to ``building`` still waited for this display-only join. The trap below never
+# returns until released: the old code hangs on it (the ``wait_for`` fails the
+# test), the bounded code answers the explicit "no proof yet" partition.
+
+
+class _GatedDiscover:
+    """A ``discover_records`` stand-in that blocks until released, and counts."""
+
+    SERVED = {
+        "records": [],
+        "remaining": [],
+        "unavailable": [],
+        "bytes": 0,
+        "served": True,
+    }
+
+    def __init__(self, *, release_after_s: float | None = None) -> None:
+        import threading
+
+        self.calls = 0
+        self.gate = threading.Event()
+        self.release_after_s = release_after_s
+
+    def __call__(self, *_: Any, **__: Any) -> dict[str, Any]:
+        self.calls += 1
+        self.gate.wait(self.release_after_s if self.release_after_s is not None else 30)
+        return dict(self.SERVED)
+
+
+async def _open_frame_page(harness: Any, deadline: float | None) -> dict[str, Any]:
+    async with harness.pool.session(harness.session_id) as bridge:
+        return await asyncio.wait_for(
+            bridge.history(limit=100, open_frame=True, deadline=deadline), timeout=5
+        )
+
+
+@pytest.mark.asyncio
+async def test_the_first_frame_does_not_wait_past_its_deadline_for_the_proof_join(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import time
+
+    from local_operator.harness import peer_cycle_display
+
+    async with _Harness(tmp_path) as harness:
+        harness.seed(rows=400)
+        await harness.warm()
+        trap = _GatedDiscover()
+        monkeypatch.setattr(peer_cycle_display, "discover_records", trap)
+        try:
+            # 1.0 s, not tighter: the budget must outlast the session open plus
+            # the page read on a loaded CI runner so the frame always REACHES the
+            # join (a 50 ms budget expired first on shard 5, run 43080856512). It
+            # still discriminates: the old unbounded join blocks on the 30 s trap
+            # and ``_open_frame_page``'s 5 s ``wait_for`` fails the test.
+            page = await _open_frame_page(harness, time.monotonic() + 1.0)
+        finally:
+            trap.gate.set()
+        expected = record_id(harness.session_id, "a-last", "root-call")
+        assert trap.calls == 1, "the join should still have been attempted inside the budget"
+        assert page["entries"][-1]["id"] == "a-last", "degrading the join must keep the page"
+        assert page["peer_cycle_display_records"] == {
+            "records": [],
+            "remaining": [],
+            "unavailable": [expected],
+            "bytes": 0,
+        }, "past the deadline the frame must answer the explicit 'no proof yet' partition"
+
+
+@pytest.mark.asyncio
+async def test_a_spent_deadline_does_not_start_the_proof_join(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import time
+
+    from local_operator.harness import peer_cycle_display
+
+    async with _Harness(tmp_path) as harness:
+        harness.seed(rows=400)
+        await harness.warm()
+        trap = _GatedDiscover()
+        monkeypatch.setattr(peer_cycle_display, "discover_records", trap)
+        trap.gate.set()
+        page = await _open_frame_page(harness, time.monotonic() - 1)
+        assert trap.calls == 0, "a spent budget must not queue a worker hop it will discard"
+        assert page["peer_cycle_display_records"]["unavailable"] == [
+            record_id(harness.session_id, "a-last", "root-call")
+        ]
+
+
+@pytest.mark.asyncio
+async def test_a_standalone_history_page_still_waits_for_the_proof_join(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``/history`` (no caller deadline) is the read the degraded frame points at."""
+    from local_operator.harness import peer_cycle_display
+
+    async with _Harness(tmp_path) as harness:
+        harness.seed(rows=400)
+        await harness.warm()
+        # Slower than the open frame's whole budget, so a leaked default deadline
+        # would degrade this read too.
+        trap = _GatedDiscover(release_after_s=0.4)
+        monkeypatch.setattr(peer_cycle_display, "discover_records", trap)
+        page = await _open_frame_page(harness, None)
+        assert page["peer_cycle_display_records"] == _GatedDiscover.SERVED
+
+
+@pytest.mark.asyncio
+async def test_a_deadline_that_is_not_hit_serves_the_same_frame(
+    tmp_path: Path,
+) -> None:
+    """Rows, order, cursor fields and the proof join are byte-identical in budget."""
+    import time
+
+    async with _Harness(tmp_path) as harness:
+        harness.seed(rows=400, decoy=True)
+        await harness.warm()
+        unbounded = await _open_frame_page(harness, None)
+        bounded = await _open_frame_page(harness, time.monotonic() + 60)
+        assert "peer_cycle_display_records" in bounded
+        assert json.dumps(bounded, sort_keys=True) == json.dumps(unbounded, sort_keys=True)
+
+
+class _FailingDiscover(_GatedDiscover):
+    """Blocks until released, then raises: a read abandoned past the deadline."""
+
+    def __call__(self, *_: Any, **__: Any) -> dict[str, Any]:
+        self.calls += 1
+        self.gate.wait(30)
+        raise RuntimeError("archive read failed after the frame left")
+
+
+@pytest.mark.asyncio
+async def test_an_abandoned_proof_read_failure_is_logged_not_left_unretrieved(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The read left running past the deadline is retrieved and logged once.
+
+    WOULD-HAVE-FAILED-BEFORE: nothing logged the abandoned read's exception, so
+    its failure was invisible (or surfaced only as asyncio's "Task exception was
+    never retrieved" on collection, with no request context).
+    """
+    import gc
+    import logging
+    import time
+
+    from local_operator.harness import peer_cycle_display
+    from local_operator.server.utils import desktop_sessions
+
+    async with _Harness(tmp_path) as harness:
+        harness.seed(rows=400)
+        await harness.warm()
+        trap = _FailingDiscover()
+        monkeypatch.setattr(peer_cycle_display, "discover_records", trap)
+        loop = asyncio.get_running_loop()
+        unretrieved: list[dict[str, Any]] = []
+        previous_handler = loop.get_exception_handler()
+        loop.set_exception_handler(lambda _loop, context: unretrieved.append(context))
+        caplog.set_level(logging.DEBUG, logger=desktop_sessions.logger.name)
+        try:
+            page = await _open_frame_page(harness, time.monotonic() + 1.0)
+            assert trap.calls == 1
+            assert page["peer_cycle_display_records"]["records"] == []
+            trap.gate.set()
+            # Let the worker raise and the done-callback run on the loop.
+            for _ in range(200):
+                if any(r.exc_info for r in caplog.records):
+                    break
+                await asyncio.sleep(0.01)
+            gc.collect()
+            await asyncio.sleep(0)
+        finally:
+            trap.gate.set()
+            loop.set_exception_handler(previous_handler)
+        failures = [
+            r
+            for r in caplog.records
+            if r.name == desktop_sessions.logger.name
+            and r.exc_info
+            and isinstance(r.exc_info[1], RuntimeError)
+        ]
+        assert len(failures) == 1, "the abandoned read's failure must be logged exactly once"
+        assert failures[0].levelno == logging.DEBUG
+        assert not [
+            c for c in unretrieved if "never retrieved" in str(c.get("message", ""))
+        ], "the abandoned read's exception must be retrieved, not left for GC"
