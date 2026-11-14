@@ -709,6 +709,95 @@ class DeleteCase:
 _MAX_FACTS = 64
 
 
+#: Ops an unanswered ask lifts out of LOW: the ones that destroy or unlock
+#: what is there (``classify._DESTROYING_OPS`` plus overwrite and unprotect).
+_ASKED_OPS = frozenset({"delete", "move", "clean", "overwrite", "unprotect"})
+
+
+def escalate_asked_targets(verdict: Verdict, ctx: CallContext) -> Verdict:
+    """Rank HIGH every LOW target an UNANSWERED ask in this lineage reaches.
+
+    WHY (incident 2026-11-14, ask a-20fc, rows 302/320/365): the refusal of a
+    timed-out ask only ran for HIGH targets, and the deletes that did the
+    damage (``~/hyperplane-cpp/build``, benchmark raw data) were deep paths
+    that ranked LOW and ran unexamined. Asking the operator about a path is the
+    agent's own admission that removing it needs them; an ask that timed out,
+    expired, was withdrawn, dismissed or is still open cannot lower that again.
+    Once HIGH, :func:`build_delete_case` marks the path ``lapsed_only`` (no
+    creation evidence, no ledger row, no trusted operator words) and
+    ``_dangerous_delete`` refuses it without a judge.
+
+    Exempt, as before: this session's own directory/scratchpad and anything its
+    creation ledger records (``classify._owned_by_session``). CRITICAL rows and
+    already-HIGH rows are left as they are. Matching is
+    :func:`provenance.ask_reaches` (equal, under or above a named path; globs
+    and brace lists expanded) — wide on purpose, since a match only refuses.
+    The ask store is read only when a LOW destroying target exists.
+    """
+    if not ctx.session_id:
+        return verdict
+    candidates = [
+        i
+        for i, r in enumerate(verdict.targets)
+        if r.risk is Risk.LOW
+        and r.target.path is not None
+        and r.target.op in _ASKED_OPS
+        and not r.target.opaque
+    ]
+    if not candidates:
+        return verdict
+    import dataclasses
+    import glob as _glob
+
+    from local_operator.guardrails import provenance as prov
+    from local_operator.guardrails.classify import _owned_by_session, _protected
+
+    lapsed = prov.unanswered_asks(ctx.session_id)
+    if not lapsed:
+        return verdict
+    home = ctx.env.get("HOME") or os.path.expanduser("~")
+    prot = _protected(ctx.env, ctx.scratchpad, ctx.session_id)
+    stop = tuple(sorted({*prot.homes, *prot.state_roots, *prot.install_roots, "/"}))
+    own = [*prot.own_session, *([ctx.scratchpad] if ctx.scratchpad else [])]
+    targets = list(verdict.targets)
+    reasons = list(verdict.reasons)
+    for i in candidates:
+        t = targets[i].target
+        assert t.path is not None  # filtered above
+        spelled = [t.path]
+        if t.pattern is not None:
+            try:
+                spelled += _glob.glob(t.pattern)
+            except (OSError, ValueError):
+                pass
+        reals = [os.path.realpath(p) for p in spelled]
+        if any(r == o or r.startswith(o.rstrip("/") + "/") for r in reals for o in own):
+            continue
+        if _owned_by_session(t, t.path, prot, ctx.session_id) is not None:
+            continue
+        hit = next(
+            (
+                a
+                for a in lapsed
+                for p in spelled
+                if prov.ask_reaches(a.text, p, home=home, cwd=ctx.cwd, protected=stop)
+            ),
+            None,
+        )
+        if hit is None:
+            continue
+        why = (
+            f"named by ask {hit.ask_id}, which was {prov.unanswered_label(hit.status)}: "
+            "the agent asked the operator about it, so removing it is not LOW"
+        )
+        targets[i] = dataclasses.replace(targets[i], risk=Risk.HIGH, reason=why)
+        reasons.append(why)
+    if len(reasons) == len(verdict.reasons):
+        return verdict
+    risk = max(verdict.risk, Risk.HIGH)
+    return dataclasses.replace(verdict, risk=risk, targets=targets, reasons=reasons)
+
+
 def build_delete_case(verdict: Verdict, ctx: CallContext) -> DeleteCase:
     """Extract operator words, evidence and per-target facts for a HIGH delete."""
     import glob as _glob
@@ -813,7 +902,9 @@ def build_delete_case(verdict: Verdict, ctx: CallContext) -> DeleteCase:
                 f"ask {a.ask_id} names it but was {prov.unanswered_label(a.status)}: "
                 "NOT consent (a timeout, withdrawal or unanswered ask never authorises a delete)"
                 for a in lapsed
-                if prov.names_path(a.text, path, home=home, cwd=ctx.cwd, protected=stop)
+                # The same wide reach that ranked a deep path HIGH
+                # (``escalate_asked_targets``): equal, under or above.
+                if prov.ask_reaches(a.text, path, home=home, cwd=ctx.cwd, protected=stop)
             ),
             "",
         )
@@ -1012,6 +1103,7 @@ async def _dangerous_delete(
     verdict = classify_bash(
         command, cwd=ctx.cwd, env=ctx.env, scratchpad=ctx.scratchpad, session_id=ctx.session_id
     )
+    verdict = escalate_asked_targets(verdict, ctx)
     branch = builtin_branch(verdict, critical_override=settings.critical_override)
     if branch == BUILTIN_PASS:
         # Ordinary delete: runs with zero model calls. Still marked destructive
@@ -1057,9 +1149,17 @@ async def _dangerous_delete(
         # holds the timeout notice and the agent's own "proceeding after the
         # timeout" prose, and must not get the chance to read either as a yes.
         path, why = next(iter(case.lapsed_only.items()))
+        # ``unanswered_label("open")`` spells "still open, not yet answered".
+        still_open = "still open" in why
         reason = (
-            f"{path}: {why}. Leave it in place and report it as awaiting the operator's "
-            "answer; only an answer they actually give can authorise it"
+            f"{path}: {why}. You asked the operator about this path and got no answer; "
+            "a timeout or no answer is not consent; wait for an answer or leave it. "
+            + (
+                "The ask is still open: wait for the operator's answer before touching it"
+                if still_open
+                else "Leave it in place and report it as awaiting the operator's answer; "
+                "only an answer they actually give can authorise it"
+            )
         )
         _journal(DANGEROUS_DELETE_RULE, risk_name, "block", 0.0, targets, "lapsed ask")
         return GuardOutcome(

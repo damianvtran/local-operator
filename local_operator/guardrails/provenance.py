@@ -2416,7 +2416,7 @@ def unanswered_asks(
         from local_operator.paths import config_dir
 
         root = Path(state_root) if state_root is not None else config_dir()
-        lineage, _ = session_lineage(session_id, state_root=root)
+        lineage = session_family(session_id, state_root=root)
         now = now_ms if now_ms is not None else store.now_ms()
     except Exception:  # noqa: BLE001 — unreadable: nothing extra to report
         logger.debug("guardrail: unanswered asks unreadable", exc_info=True)
@@ -2435,14 +2435,16 @@ def unanswered_asks(
             if status not in _UNANSWERED_LABEL:
                 continue
             questions = [q for q in record.get("questions") or [] if isinstance(q, Mapping)]
+            # No closing bracket after the last label: ``_PATHISH`` would keep
+            # it on a trailing glob (``~/osworld/runs*]``), which then matches
+            # nothing — and this text is matched to REFUSE, so a miss fails open.
             parts = [
-                f"Q: {q.get('question') or ''} [options: "
+                f"Q: {q.get('question') or ''} | options: "
                 + "; ".join(
                     str(o.get("label") or "")
                     for o in (q.get("options") or [])
                     if isinstance(o, Mapping)
                 )
-                + "]"
                 for q in questions
                 if not q.get("secret")
             ]
@@ -2543,6 +2545,39 @@ def session_lineage(
             ]
         queue.extend(p for p in pointers if isinstance(p, str))
     return lineage, operator_opened
+
+
+def session_family(
+    session_id: str, *, state_root: str | os.PathLike[str] | None = None
+) -> list[str]:
+    """``session_id``, its ancestors (:func:`session_lineage`) and its descendants.
+
+    WHY descendants too (incident 2026-11-14 follow-up): an ask a subagent
+    raised and nobody answered still means "the operator has not said yes" to
+    the manager that spawned it, and the reverse. Descendants come from the
+    harness lineage registry (``read_lineage``: ``parent``/``opener`` rows),
+    followed down to a fixpoint; ``origin.json`` files are not scanned (that
+    would read every session on disk per call). Bounded at 64 sessions.
+    """
+    from local_operator.paths import config_dir
+
+    root = Path(state_root) if state_root is not None else config_dir()
+    lineage, _ = session_lineage(session_id, state_root=root)
+    family = list(lineage or [session_id])
+    registry = read_lineage(root)
+    below = {session_id}
+    grew = True
+    while grew and len(family) < 64:
+        grew = False
+        for child, row in registry.items():
+            if child in below or len(family) >= 64:
+                continue
+            if row.get("parent") in below or row.get("opener") in below:
+                below.add(child)
+                if child not in family:
+                    family.append(child)
+                grew = True
+    return family
 
 
 def task_tree_root(session_id: str, *, state_root: str | os.PathLike[str] | None = None) -> str:
@@ -2811,6 +2846,63 @@ def _path_readings(text: str) -> list[tuple[str, bool]]:
         if len(stripped) > 1:
             out.append((stripped, False))
     return out
+
+
+def ask_reaches(
+    text: str,
+    path: str,
+    *,
+    home: str,
+    cwd: str | None = None,
+    protected: Iterable[str] = (),
+) -> bool:
+    """Does an UNANSWERED ask's ``text`` name ``path``, a path above it, or one inside it?
+
+    WHY (incident 2026-11-14, ask a-20fc, rows 302/320/365): the session asked
+    which rig, build and benchmark trees to delete, got no answer, and removed
+    the deep ones anyway — ``~/hyperplane-cpp/build`` and the benchmark raw
+    data ranked LOW, so no check ever ran. Asking about a path is the agent's
+    own admission that removing it needs the operator; silence cannot turn it
+    back into LOW. So this match is deliberately WIDER than consent's
+    :func:`names_path`, and only ever used to REFUSE (over-matching fails closed):
+
+    - equal or under: :func:`names_path` on ``path`` or any ancestor of it
+      below ``$HOME`` (same glob and brace-list rules as the answered-ask
+      route, so ``~/osworld/runs*`` reaches ``~/osworld/runs-3/raw``);
+    - above: ``path`` is an ancestor of a named path, or of a glob's literal
+      parent directory (``rm -rf ~/osworld`` removes every ``runs*``).
+
+    ``$HOME``, its ancestors and the protected roots are never treated as
+    "named" for the under-direction: an ask that merely mentions ``~`` or the
+    state root must not make every deep delete in the session refusable.
+    """
+    if not text or not path:
+        return False
+    protected = tuple(protected)
+    if names_path(text, path, home=home, cwd=cwd, protected=protected):
+        return True
+    home_n = os.path.normpath(home)
+    stops = {os.path.normpath(p) for p in protected} | {home_n, "/"}
+    spellings = {os.path.realpath(path), os.path.normpath(path)}
+    for spelled in spellings:
+        anc = os.path.dirname(spelled)
+        while anc and anc not in stops and not home_n.startswith(anc.rstrip("/") + "/"):
+            if names_path(text, anc, home=home, cwd=cwd, protected=protected):
+                return True
+            parent = os.path.dirname(anc)
+            if parent == anc:
+                break
+            anc = parent
+    for word, _ in _path_readings(text):
+        expanded = _expand_word(word, home, cwd) if word else None
+        if not expanded:
+            continue
+        wild = _GLOBISH.search(expanded)
+        named = expanded if wild is None else expanded[: wild.start()].rsplit("/", 1)[0]
+        named = os.path.normpath(named or "/")
+        if any(named == s or named.startswith(s.rstrip("/") + "/") for s in spellings):
+            return True
+    return False
 
 
 def names_path(

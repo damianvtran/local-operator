@@ -53,6 +53,7 @@ from local_operator.guardrails.check import (
     build_delete_case,
     builtin_branch,
     credential_refusal_text,
+    escalate_asked_targets,
     evidence_write_verdict,
     read_settings,
     review_text,
@@ -330,6 +331,8 @@ def preview_tool_call(
                 scratchpad=context.scratchpad,
                 session_id=context.session_id,
             )
+            # Same ranking the checkpoint applies (unanswered asks lift LOW).
+            verdict = escalate_asked_targets(verdict, context)
             effect = builtin_branch(verdict, critical_override=live.critical_override)
             if effect == BUILTIN_REFUSE_CRITICAL:
                 builtin_text = _critical_text(verdict)

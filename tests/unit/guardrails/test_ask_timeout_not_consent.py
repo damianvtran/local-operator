@@ -24,7 +24,10 @@ Fixed at the source, pinned here in a synthetic HOME and ask store:
    refused deterministically before any judge runs, and every such ask is
    named "NOT consent" in the judge's facts;
 3. a recursive write grant / immutable-flag clear on a path the session did
-   not create ranks HIGH and reaches the judge as a forced removal.
+   not create ranks HIGH and reaches the judge as a forced removal;
+4. a DEEP path (LOW on its own) that an unanswered ask in the session's family
+   names — equal, under or above, globs included — ranks HIGH and is refused
+   the same way (incident rows 302, 320, 365), unless the ledger records it.
 """
 
 from __future__ import annotations
@@ -359,3 +362,202 @@ def test_system_prompt_and_ask_docs_say_a_timeout_is_not_consent() -> None:
     assert "never for a delete, overwrite or other irreversible step" in inline
     assert "a timeout is never consent to delete" in builtin._ASK_DESCRIPTION_QUEUED
     assert "Closing it is NOT consent" in builtin.ASK_UNANSWERED_TEXT
+
+
+# -- 4. an unanswered ask lifts a DEEP path out of LOW -----------------------------
+#
+# Incident rows 302, 320 and 365 ran ``rm -rf`` on deep paths the timed-out ask
+# a-20fc named (``~/hyperplane-cpp/build``, benchmark raw data): LOW, so the
+# refusal in section 2 never saw them. Asking about a path admits removing it
+# needs the operator; silence cannot make it LOW again.
+
+DEEP_ASK = "a-77de"
+DEEP_LABEL = "Delete ~/bench/rigs, ~/hyperplane-cpp/build and ~/osworld/runs*"
+NOT_CONSENT_TEXT = (
+    "You asked the operator about this path and got no answer; "
+    "a timeout or no answer is not consent; wait for an answer or leave it"
+)
+
+
+def _deep_ask(
+    home: Path, *, answer: str | None = None, expired: bool = True, session: str = S
+) -> None:
+    now = int(time.time() * 1000)
+    expires = now - 60_000 if expired else now + 3_600_000
+    rows: list[dict[str, Any]] = [
+        {
+            "v": 1,
+            "kind": "queued",
+            "ask_id": DEEP_ASK,
+            "at": expires - 3_600_000,
+            "created_at": expires - 3_600_000,
+            "expires_at": expires,
+            "timeout_s": 3600,
+            "questions": [
+                {
+                    "id": "deep_cleanup",
+                    "question": "Which build and benchmark trees should I delete?",
+                    # The glob is LAST, as the incident's labels put it.
+                    "options": [
+                        {"label": "Keep everything", "description": "stop"},
+                        {"label": DEEP_LABEL, "description": "reclaim ~40 GB"},
+                    ],
+                    "multi": False,
+                    "question_id": "",
+                    "recommended": 1,
+                }
+            ],
+        }
+    ]
+    if answer is not None:
+        rows.append(
+            {
+                "v": 1,
+                "kind": "answered",
+                "ask_id": DEEP_ASK,
+                "at": now - 1000,
+                "by": {"surface": "desktop"},
+                "answers": {"deep_cleanup": [answer]},
+            }
+        )
+    path = home / ".local-operator" / "sessions" / session / "asks.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a") as fh:
+        for row in rows:
+            fh.write(json.dumps(row) + "\n")
+
+
+@pytest.fixture
+def deep(home: Path) -> Path:
+    for rel in ("bench/rigs/r1", "hyperplane-cpp/build/obj", "osworld/runs-3/raw", "other/x/y"):
+        (home / rel).mkdir(parents=True)
+    return home
+
+
+DEEP_COMMANDS = [
+    "rm -rf ~/hyperplane-cpp/build",
+    "rm -rf ~/osworld/runs-3/raw",  # under the named glob ~/osworld/runs*
+    "chmod -R u+w ~/bench/rigs && rm -rf ~/bench/rigs",
+]
+
+
+@pytest.mark.parametrize(
+    "command",
+    ["rm -rf ~/hyperplane-cpp/build", "rm -rf ~/osworld/runs-3/raw", "rm -rf ~/bench/rigs"],
+)
+def test_deep_paths_are_low_without_any_ask(deep: Path, command: str) -> None:
+    """Control: the rows below change rank ONLY because of the ask."""
+    assert _rank(deep, command).risk is Risk.LOW
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("command", DEEP_COMMANDS)
+async def test_timed_out_ask_naming_a_deep_path_is_refused_without_judge(
+    deep: Path, command: str
+) -> None:
+    _deep_ask(deep)
+    judge = _Judge("ALLOW ask=a-77de")  # would be fooled if asked
+    outcome = await _check(deep, command, judge)
+    assert outcome is not None and outcome.blocked, command
+    assert judge.prompts == []
+    assert NOT_CONSENT_TEXT in outcome.text
+    assert DEEP_ASK in outcome.text and "TIMED OUT" in outcome.text
+    for rel in ("bench/rigs/r1", "hyperplane-cpp/build/obj", "osworld/runs-3/raw"):
+        assert (deep / rel).is_dir()
+
+
+@pytest.mark.asyncio
+async def test_open_ask_naming_a_deep_path_says_wait_for_the_answer(deep: Path) -> None:
+    _deep_ask(deep, expired=False)
+    judge = _Judge("ALLOW")
+    outcome = await _check(deep, "rm -rf ~/hyperplane-cpp/build", judge)
+    assert outcome is not None and outcome.blocked
+    assert judge.prompts == []
+    assert "still open" in outcome.text
+    assert "wait for the operator's answer" in outcome.text
+    assert NOT_CONSENT_TEXT in outcome.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("command", DEEP_COMMANDS[:3])
+async def test_approving_answer_lifts_the_deep_refusal(deep: Path, command: str) -> None:
+    _deep_ask(deep, answer=DEEP_LABEL, expired=False)
+    assert prov.unanswered_asks(S) == []
+    judge = _Judge("ALLOW ask=a-77de")
+    outcome = await _check(deep, command, judge)
+    assert outcome is None or not outcome.blocked, outcome and outcome.text
+
+
+@pytest.mark.asyncio
+async def test_ledger_recorded_path_stays_low_despite_the_ask(deep: Path) -> None:
+    build = deep / "hyperplane-cpp" / "build"
+    prov.write_records(
+        [(os.path.realpath(build), "mkdir")],
+        owners=[S],
+        creator=S,
+        command=f"mkdir -p {build}",
+        state_root=deep / ".local-operator",
+    )
+    _deep_ask(deep)
+    from local_operator.guardrails.check import escalate_asked_targets
+
+    command = "rm -rf ~/hyperplane-cpp/build"
+    verdict = escalate_asked_targets(_rank(deep, command), _ctx(deep, command))
+    assert verdict.risk is Risk.LOW, verdict.reasons
+    judge = _Judge("BLOCK")
+    outcome = await _check(deep, command, judge)
+    assert outcome is None or not outcome.blocked
+    assert judge.prompts == []
+
+
+@pytest.mark.asyncio
+async def test_unrelated_deep_path_stays_low_with_the_ask_open(deep: Path) -> None:
+    _deep_ask(deep)
+    from local_operator.guardrails.check import escalate_asked_targets
+
+    command = "rm -rf ~/other/x"
+    assert escalate_asked_targets(_rank(deep, command), _ctx(deep, command)).risk is Risk.LOW
+    judge = _Judge("BLOCK")
+    outcome = await _check(deep, command, judge)
+    assert outcome is None or not outcome.blocked
+    assert judge.prompts == []
+
+
+def test_ask_reaches_equal_under_above_and_glob(deep: Path) -> None:
+    home = str(deep)
+    text = f"Q: x | options: {DEEP_LABEL}"
+    reach = lambda p: prov.ask_reaches(text, str(deep / p), home=home)  # noqa: E731
+    assert reach("hyperplane-cpp/build")
+    assert reach("hyperplane-cpp/build/obj")
+    assert reach("hyperplane-cpp")
+    assert reach("osworld/runs-3/raw")
+    assert reach("osworld")  # the glob's parent: removes every runs*
+    assert reach("bench")  # an ancestor of a literal name
+    assert not reach("other/x")
+    assert not reach("osworld-old")
+    # Naming ``~`` itself never makes every path under it "asked about".
+    assert not prov.ask_reaches("Q: clean ~ ?", str(deep / "other/x"), home=home)
+
+
+CHILD = "c0ffee000001"  # synthetic subagent of S
+PARENT = "beef00000001"  # synthetic manager of S
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("asker", ["child", "parent"])
+async def test_an_unanswered_ask_anywhere_in_the_family_counts(deep: Path, asker: str) -> None:
+    state = deep / ".local-operator"
+    prov.record_lineage(CHILD, origin="subagent", parent=S, state_root=state)
+    prov.record_lineage(S, origin="subagent", parent=PARENT, state_root=state)
+    _deep_ask(deep, session=CHILD if asker == "child" else PARENT)
+    assert [a.ask_id for a in prov.unanswered_asks(S)] == [DEEP_ASK]
+    judge = _Judge("ALLOW")
+    outcome = await _check(deep, "rm -rf ~/hyperplane-cpp/build", judge)
+    assert outcome is not None and outcome.blocked
+    assert judge.prompts == []
+    assert NOT_CONSENT_TEXT in outcome.text
+
+
+def test_an_unrelated_sessions_ask_does_not_count(deep: Path) -> None:
+    _deep_ask(deep, session="0123456789ab")  # no lineage row: not family
+    assert prov.unanswered_asks(S) == []

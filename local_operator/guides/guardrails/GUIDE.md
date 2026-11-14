@@ -52,9 +52,13 @@ into HIGH — a judge decision, never a pass. Rules only ADD restriction.
   would be LOW.
 - **Asks that were never answered are not consent.** An ask that timed out,
   expired, was withdrawn or dismissed, or is still open never authorises a
-  delete. When such an ask is the only thing naming a HIGH path, the call is
-  refused without asking the judge. Leave the path in place and report it as
-  waiting for the operator's answer.
+  delete. Asking about a path also ranks it at least HIGH, however deep it is:
+  deleting, overwriting or unlocking a path equal to, under or above one such
+  an ask names (globs and brace lists included; asks from this session, its
+  parents and its subagents) is refused without asking the judge, unless this
+  session's creation ledger records the path or the operator later approves
+  it. Leave the path in place and report it as waiting for the operator's
+  answer.
 - **LOW** — everything else: this session's scratchpad, deep paths, `/tmp`. Runs
   unexamined. A target derived from a secret is refused even with an approved
   override: consent cannot be shown for a secret you should never see.
