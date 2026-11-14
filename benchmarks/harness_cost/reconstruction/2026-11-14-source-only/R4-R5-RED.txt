@@ -1,0 +1,60 @@
+test_independent_container_deadline_exists (test_resolver_safety.ResolverSafetyTests.test_independent_container_deadline_exists) ... FAIL
+test_optimization_guard_precedes_effects (test_resolver_safety.ResolverSafetyTests.test_optimization_guard_precedes_effects) ...
+  test_optimization_guard_precedes_effects (test_resolver_safety.ResolverSafetyTests.test_optimization_guard_precedes_effects) (flags=['-O']) ... FAIL
+  test_optimization_guard_precedes_effects (test_resolver_safety.ResolverSafetyTests.test_optimization_guard_precedes_effects) (flags=['-OO']) ... FAIL
+test_optimization_guard_precedes_effects (test_resolver_safety.ResolverSafetyTests.test_optimization_guard_precedes_effects) ... FAIL
+test_outer_sigterm_reaps_owned_client_and_container (test_resolver_safety.ResolverSafetyTests.test_outer_sigterm_reaps_owned_client_and_container) ... FAIL
+test_outer_timeout_reaps_owned_client_and_container (test_resolver_safety.ResolverSafetyTests.test_outer_timeout_reaps_owned_client_and_container) ... ok
+
+======================================================================
+FAIL: test_independent_container_deadline_exists (test_resolver_safety.ResolverSafetyTests.test_independent_container_deadline_exists)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "~/local-operator/.worktrees/benchmark-reconstruction-20261114/benchmarks/harness_cost/reconstruction/2026-11-14-source-only/test_resolver_safety.py", line 93, in test_independent_container_deadline_exists
+    self.assertIn('signal.alarm(840)', inner)
+    ~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: 'signal.alarm(840)' not found in "\nimport hashlib,json,os,pathlib,platform,subprocess,sys,zipfile\nassert sys.version_info[:3] == (3,14,0) and platform.machine() == 'x86_64'\npins=json.loads(pathlib.Path('/in/pins.json').read_text())\nwith zipfile.ZipFile('/uv.whl') as z:\n    candidates=[i for i in z.infolist() if pathlib.PurePosixPath(i.filename).name=='uv']\n    assert len(candidates)==1\n    pathlib.Path('/tool/uv').write_bytes(z.read(candidates[0]))\nos.chmod('/tool/uv',0o755)\nversion=subprocess.check_output(['/tool/uv','--version'],text=True).strip()\nassert version.split()[:2]==['uv',pins['uv_version']]\npathlib.Path('/out/identity.json').write_text(json.dumps({'uv':version,'python':sys.version,'platform':platform.platform(),'python_executable_sha256':hashlib.sha256(pathlib.Path(sys.executable).read_bytes()).hexdigest(),'libc':platform.libc_ver(),'uv_binary_sha256':hashlib.sha256(pathlib.Path('/tool/uv').read_bytes()).hexdigest()},sort_keys=True))\nsubprocess.run(['/tool/uv','--no-config','pip','compile','/in/requirements.in','--constraint','/in/services.lock','--python','/usr/local/bin/python3.14','--python-version','3.14.0','--python-platform','x86_64-manylinux_2_28','--only-binary',':all:','--generate-hashes','--index-url','https://pypi.org/simple','--exclude-newer','2026-11-14T00:00:00Z','--output-file','/out/requirements.lock'],check=True)\nlock=pathlib.Path('/out/requirements.lock').read_text()\nassert '--hash=sha256:' in lock and 'git+' not in lock and 'file://' not in lock\nassert ' @ ' not in lock, 'STOP: unreviewed direct reference'\n"
+
+======================================================================
+FAIL: test_optimization_guard_precedes_effects (test_resolver_safety.ResolverSafetyTests.test_optimization_guard_precedes_effects) (flags=['-O'])
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "~/local-operator/.worktrees/benchmark-reconstruction-20261114/benchmarks/harness_cost/reconstruction/2026-11-14-source-only/test_resolver_safety.py", line 35, in test_optimization_guard_precedes_effects
+    self.assertEqual('EFFECT' in result.stdout, not optimized)
+    ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: True != False
+
+======================================================================
+FAIL: test_optimization_guard_precedes_effects (test_resolver_safety.ResolverSafetyTests.test_optimization_guard_precedes_effects) (flags=['-OO'])
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "~/local-operator/.worktrees/benchmark-reconstruction-20261114/benchmarks/harness_cost/reconstruction/2026-11-14-source-only/test_resolver_safety.py", line 35, in test_optimization_guard_precedes_effects
+    self.assertEqual('EFFECT' in result.stdout, not optimized)
+    ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: True != False
+
+======================================================================
+FAIL: test_optimization_guard_precedes_effects (test_resolver_safety.ResolverSafetyTests.test_optimization_guard_precedes_effects)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "~/local-operator/.worktrees/benchmark-reconstruction-20261114/benchmarks/harness_cost/reconstruction/2026-11-14-source-only/test_resolver_safety.py", line 38, in test_optimization_guard_precedes_effects
+    self.assertNotIn('EFFECT', result.stdout)
+    ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: 'EFFECT' unexpectedly found in 'EFFECT\n'
+
+======================================================================
+FAIL: test_outer_sigterm_reaps_owned_client_and_container (test_resolver_safety.ResolverSafetyTests.test_outer_sigterm_reaps_owned_client_and_container)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "~/local-operator/.worktrees/benchmark-reconstruction-20261114/benchmarks/harness_cost/reconstruction/2026-11-14-source-only/test_resolver_safety.py", line 85, in test_outer_sigterm_reaps_owned_client_and_container
+    self.exercise_supervisor(True)
+    ~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^
+  File "~/local-operator/.worktrees/benchmark-reconstruction-20261114/benchmarks/harness_cost/reconstruction/2026-11-14-source-only/test_resolver_safety.py", line 71, in exercise_supervisor
+    self.assertTrue(gone, 'owned stub client leaked')
+    ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: False is not true : owned stub client leaked
+
+----------------------------------------------------------------------
+Ran 4 tests in 2.337s
+
+FAILED (failures=5)

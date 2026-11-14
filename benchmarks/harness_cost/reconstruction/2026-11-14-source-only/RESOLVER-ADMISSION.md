@@ -13,8 +13,15 @@ lock presented as Linux. Existing macOS environments and dependency trees remain
 untouched. No historical deleted dependency tree is assumed to survive. No task
 image, binary/media input, key, model endpoint or service belongs in this operation.
 
-Admission is still pending: disk desk 00e6a1cd8f62 must provide a fresh >=30 GiB
-free-space check plus memory GO and approve actual growth/unknown VM overhead.
-LOCAL-only, one retained benchmark task image, original ordering and all existing
-cost/rights gates remain standing. The resolver uses a separate tool carrier, not
-a task-image qualification, and never retains multiple task images.
+Admission is still NO GO. Desk 00e6a1cd8f62 offers only a CONDITIONAL
+2026-11-14 17:00–18:15 UTC slot. At start it must refresh free >=30 GiB,
+fleet <=26,000 MB and memory GO. Desktop VM caps must be verified <=4 GB RAM /
+2 CPUs BEFORE start; blocked settings evidence is an unresolved access gap, not
+permission to read another route or write a workaround. Durable HOLD root
+~/benchmark-runs/reconstruction-20261114-source-v1/ is registered by parent.
+Docker.raw ALLOCATED bytes and free disk must be captured before/during/after;
+>5 GiB allocated growth or free <25 GiB stops owned work. Only a separately
+admitted session-start owner may quit Docker it started; never other work.
+LOCAL-only, one retained task image, existing ordering/cost/rights gates stand.
+The resolver carrier is not task qualification. R4/R5 safety remediation is in
+RESOLVER-COMMAND.md and source-only stub tests; no command has been dispatched.

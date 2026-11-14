@@ -3,12 +3,40 @@
 This is a proposal only. It needs a LOCAL Docker Linux VM; it is NOT a macOS
 cross-platform lock. No Docker/resolver/install/build has run in this phase.
 
-## Prerequisites and disk-desk packet
+## Prerequisites and disk-desk packet — CONDITIONAL SLOT, NO GO
 
-* Parent/disk desk 00e6a1cd8f62 must register the proposed durable root
+Desk's conditional slot is 2026-11-14 **17:00–18:15 UTC**, not permission to run.
+The supervisor reserves its 900 s lease + 60 s cleanup before slot end; late
+admission is rejected. At start the desk must refresh free disk >=30 GiB and
+fleet <=26,000 MB plus memory GO. No admission receipt may be fabricated by the
+resolver. Durable HOLD root `~/benchmark-runs/reconstruction-20261114-source-v1/`
+is now registered by parent; no directory or runtime input was created here.
+
+Docker daemon is absent. Desktop VM caps MUST be verified <=4 GB RAM /2 CPUs
+BEFORE any session start. Access to the settings evidence is currently blocked:
+this is an unresolved cap-verification access gap. DO NOT read the blocked
+settings by another path/API or write a config workaround. Approved human/desk
+cap evidence is required before start. This proposal neither starts nor configures
+Docker. A separately admitted session-start owner must quit ONLY Docker it started
+at the end and prove its exact owned lifecycle is closed, without stopping any
+other work. The resolver never starts/quits a shared daemon or kills other work;
+VM lifecycle admission/ownership remains with that startup owner and desk.
+
+The future desk-admission.json must contain go=true, attempt_id, valid_until_utc,
+fresh_memory_go, fleet_mb, vm_caps_verified_before_start,
+vm_cap_evidence_accessible, vm_memory_mb (decimal MB, <=4000), vm_cpus, approved docker_raw_path,
+docker_raw_allocated_before_start and fresh before-start df/free-space evidence.
+The resolver records its own baseline/during/after free bytes and Docker.raw
+**allocated** blocks*512, not logical sparse size. A >5 GiB allocation increase
+from the desk's BEFORE-START baseline OR free <25 GiB stops owned work and retains
+failure receipts. Polling is a stop fence, not an atomic disk quota; VM growth
+while cleanup runs is still accounted in the after snapshot. No Docker.raw is
+read now, and no blocked settings route is consulted.
+
+* Parent/disk desk 00e6a1cd8f62 has registered the durable root
   `~/benchmark-runs/reconstruction-20261114-source-v1/` and retention: preserve
   attempts and receipts until an explicit parent/disk-owner disposition. The root
-  is NOT created now; a HOLD/ignore marker is not deletion protection.
+  is not created by this source-only change; HOLD/ignore alone is not protection.
 * Fresh `df` free >=30 GiB, memory GO including Docker VM overhead, no conflicting
   lease, approved exact daemon socket and compatible LOCAL linux/amd64 execution.
   Read-only filesystem metadata currently shows `/var/run/docker.sock` is a
@@ -32,7 +60,8 @@ cross-platform lock. No Docker/resolver/install/build has run in this phase.
 
 ### Resource envelope — proposed lease, not measured peak
 
-One attempt, 900 s hard supervisor lease, 1 CPU, container memory+swap ceiling
+One attempt, termination-aware 900 s supervisor lease and independent 840 s
+in-container alarm (including host SIGKILL/disconnect), 1 CPU, container memory+swap ceiling
 2 GiB, pids 128. Tool/cache/tmp tmpfs limits are 128/256/64 MiB (448 MiB total,
 charged within container memory); fresh output/inputs/log growth is stopped at
 64 MiB observational growth guard (0.5 s polling, possible overshoot, NOT a host
@@ -78,7 +107,32 @@ reuse the path. Existing macOS environments remain unmounted and unchanged.
 
 ```python
 # PROPOSED ONLY — no permission to run is conveyed by this code block.
-import hashlib, json, os, pathlib, resource, signal, stat, subprocess, time, tomllib
+import sys
+# Check before filesystem-facing imports or any operational side effect.
+if sys.flags.optimize:
+    raise SystemExit('STOP: optimized Python is prohibited before any effects')
+import os
+if os.environ.get('PYTHONOPTIMIZE'):
+    raise SystemExit('STOP: optimized Python is prohibited before any effects')
+import datetime, hashlib, json, pathlib, resource, signal, stat, subprocess, time, tomllib
+
+class TerminationRequested(BaseException):
+    pass
+
+def request_termination(signum, frame):
+    raise TerminationRequested('STOP: termination requested')
+
+def disk_sample(raw_path, output_path):
+    # st_size is the sparse image's logical size, NOT allocated disk blocks.
+    allocated=raw_path.stat().st_blocks*512
+    fs=os.statvfs(output_path)
+    return {'monotonic':time.monotonic(),'docker_raw_allocated_bytes':allocated,
+            'free_bytes':fs.f_bavail*fs.f_frsize}
+
+def check_disk(sample, baseline):
+    if sample['docker_raw_allocated_bytes']-baseline > 5*1024**3 or sample['free_bytes'] < 25*1024**3:
+        raise RuntimeError('STOP: Docker.raw growth/free-space desk fence crossed')
+
 R = pathlib.Path.cwd().resolve()
 pins = json.loads((R / 'resolver-pins.json').read_text())
 source_head = subprocess.check_output(['git','rev-parse','HEAD'],cwd=R,text=True).strip()
@@ -86,6 +140,24 @@ assert pins['platform'] == 'linux/amd64'
 S = pathlib.Path('/var/run/docker.sock')
 assert S.exists() and stat.S_ISSOCK(S.stat().st_mode), 'STOP: approved LOCAL daemon socket absent'
 ROOT = pathlib.Path.home() / 'benchmark-runs/reconstruction-20261114-source-v1'
+admission=json.loads((ROOT/'desk-admission.json').read_text())
+now=datetime.datetime.now(datetime.UTC)
+begin=datetime.datetime(2026,11,14,17,0,tzinfo=datetime.UTC)
+end=datetime.datetime(2026,11,14,18,15,tzinfo=datetime.UTC)
+if not (admission.get('go') is True and admission.get('attempt_id')=='linux-amd64-01'
+        and begin <= now and now+datetime.timedelta(seconds=960) <= end
+        and now <= datetime.datetime.fromisoformat(admission['valid_until_utc'])
+        and admission['fleet_mb'] <= 26000 and admission.get('fresh_memory_go') is True
+        and admission.get('vm_caps_verified_before_start') is True
+        and admission.get('vm_cap_evidence_accessible') is True
+        and admission['vm_memory_mb'] <= 4000 and admission['vm_cpus'] <= 2):
+    raise SystemExit('STOP: no fresh desk GO/window/fleet/verified VM caps')
+docker_raw=pathlib.Path(admission['docker_raw_path'])
+raw_baseline=admission['docker_raw_allocated_before_start']
+initial_disk=disk_sample(docker_raw,ROOT)
+if initial_disk['free_bytes'] < 30*1024**3:
+    raise SystemExit('STOP: fresh free disk below 30 GiB')
+check_disk(initial_disk,raw_baseline)
 W = ROOT / 'artifacts' / pins['uv_wheel']['filename']
 assert W.is_file(), 'STOP: separately admitted uv wheel staging required'
 assert hashlib.sha256(W.read_bytes()).hexdigest() == pins['uv_wheel']['sha256']
@@ -94,6 +166,7 @@ A.parent.mkdir(parents=True, exist_ok=True)
 A.mkdir(mode=0o700)  # exclusive: an earlier attempt is never overwritten
 for name in ('input', 'output', 'docker-config'):
     (A / name).mkdir()
+(A/'input/desk-admission.json').write_text(json.dumps(admission,sort_keys=True))
 D = ['docker', '--config', str(A / 'docker-config'), '--host', 'unix:///var/run/docker.sock']
 # Empty owned config avoids the operator's credential store/context helpers.
 try:
@@ -114,7 +187,32 @@ assert all(not any(t in line for t in ('://', ' @ ', 'git+', 'file:', '--')) for
 (A / 'input/services.lock').write_bytes((R / 'host-services.requirements.lock').read_bytes())
 (A / 'input/pins.json').write_text(json.dumps(pins, sort_keys=True))
 INNER = r'''
-import hashlib,json,os,pathlib,platform,subprocess,sys,zipfile
+import sys
+if sys.flags.optimize:
+    raise SystemExit('STOP: optimized Python is prohibited before any effects')
+import os
+if os.environ.get('PYTHONOPTIMIZE'):
+    raise SystemExit('STOP: optimized Python is prohibited before any effects')
+import hashlib,json,pathlib,platform,signal,subprocess,zipfile
+child = None
+
+def container_deadline(signum, frame):
+    # Independent of the host/client lifetime, including host SIGKILL/disconnect.
+    if child is not None and child.poll() is None:
+        try:
+            os.killpg(child.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        # Never re-enter Popen.wait() from a handler interrupting that wait:
+        # its internal lock is not reentrant. Reap directly before PID1 exits.
+        try:
+            os.waitpid(child.pid, 0)
+        except ChildProcessError:
+            pass
+    os._exit(124)
+
+signal.signal(signal.SIGALRM, container_deadline)
+signal.alarm(840)
 assert sys.version_info[:3] == (3,14,0) and platform.machine() == 'x86_64'
 pins=json.loads(pathlib.Path('/in/pins.json').read_text())
 with zipfile.ZipFile('/uv.whl') as z:
@@ -125,7 +223,9 @@ os.chmod('/tool/uv',0o755)
 version=subprocess.check_output(['/tool/uv','--version'],text=True).strip()
 assert version.split()[:2]==['uv',pins['uv_version']]
 pathlib.Path('/out/identity.json').write_text(json.dumps({'uv':version,'python':sys.version,'platform':platform.platform(),'python_executable_sha256':hashlib.sha256(pathlib.Path(sys.executable).read_bytes()).hexdigest(),'libc':platform.libc_ver(),'uv_binary_sha256':hashlib.sha256(pathlib.Path('/tool/uv').read_bytes()).hexdigest()},sort_keys=True))
-subprocess.run(['/tool/uv','--no-config','pip','compile','/in/requirements.in','--constraint','/in/services.lock','--python','/usr/local/bin/python3.14','--python-version','3.14.0','--python-platform','x86_64-manylinux_2_28','--only-binary',':all:','--generate-hashes','--index-url','https://pypi.org/simple','--exclude-newer','2026-11-14T00:00:00Z','--output-file','/out/requirements.lock'],check=True)
+child=subprocess.Popen(['/tool/uv','--no-config','pip','compile','/in/requirements.in','--constraint','/in/services.lock','--python','/usr/local/bin/python3.14','--python-version','3.14.0','--python-platform','x86_64-manylinux_2_28','--only-binary',':all:','--generate-hashes','--index-url','https://pypi.org/simple','--exclude-newer','2026-11-14T00:00:00Z','--output-file','/out/requirements.lock'],start_new_session=True)
+if child.wait() != 0:
+    raise SystemExit('STOP: resolver failed')
 lock=pathlib.Path('/out/requirements.lock').read_text()
 assert '--hash=sha256:' in lock and 'git+' not in lock and 'file://' not in lock
 assert ' @ ' not in lock, 'STOP: unreviewed direct reference'
@@ -133,11 +233,28 @@ assert ' @ ' not in lock, 'STOP: unreviewed direct reference'
 cmd = D + ['run','--rm','--pull=never','--platform=linux/amd64','--read-only','--network=bridge','--cpus=1','--memory=2g','--memory-swap=2g','--pids-limit=128','--ulimit','fsize=67108864:67108864','--cap-drop=ALL','--security-opt=no-new-privileges','--log-driver=none','--user',f'{os.getuid()}:{os.getgid()}','--cidfile',str(A/'container.cid'),'--tmpfs','/tool:rw,exec,nosuid,size=134217728,mode=1777','--tmpfs','/cache:rw,noexec,nosuid,size=268435456,mode=1777','--tmpfs','/tmp:rw,noexec,nosuid,size=67108864,mode=1777','-e','HOME=/tmp','-e','UV_CACHE_DIR=/cache','-e','UV_PYTHON_DOWNLOADS=never','-e','UV_CONCURRENT_DOWNLOADS=1','-v',f'{A}/input:/in:ro','-v',f'{A}/output:/out:rw','-v',f'{W}:/uv.whl:ro',pins['base_image'],'python3','-c',INNER]
 (A / 'command.json').write_text(json.dumps(cmd))
 started=time.monotonic(); status='failed'; proc=None
+(A/'disk-baseline.json').write_text(json.dumps({'before_start_allocated_bytes':raw_baseline,'at_resolver_start':disk_sample(docker_raw,A)}))
+previous_handlers={s:signal.getsignal(s) for s in (signal.SIGTERM,signal.SIGINT)}
+for s in previous_handlers:
+    signal.signal(s,request_termination)
 with (A / 'stdout.log').open('xb') as log:
     try:
-        proc=subprocess.Popen(cmd,stdout=log,stderr=subprocess.STDOUT,start_new_session=True,
-                              preexec_fn=lambda: resource.setrlimit(resource.RLIMIT_FSIZE,(16777216,16777216)))
+        blocked={signal.SIGTERM,signal.SIGINT}
+        mask=signal.pthread_sigmask(signal.SIG_BLOCK,blocked)
+        try:
+            def child_setup():
+                resource.setrlimit(resource.RLIMIT_FSIZE,(16777216,16777216))
+                signal.pthread_sigmask(signal.SIG_UNBLOCK,blocked)
+            proc=subprocess.Popen(cmd,stdout=log,stderr=subprocess.STDOUT,start_new_session=True,
+                                  preexec_fn=child_setup)
+        finally:
+            # Deliver a pending termination only after ownership is recorded.
+            signal.pthread_sigmask(signal.SIG_SETMASK,mask)
         while proc.poll() is None:
+            sample=disk_sample(docker_raw,A)
+            with (A/'disk-samples.jsonl').open('a') as snapshots:
+                snapshots.write(json.dumps(sample)+'\n')
+            check_disk(sample,raw_baseline)
             size=sum(x.stat().st_size for x in A.rglob('*') if x.is_file())
             if time.monotonic()-started>900 or size>67108864:
                 raise RuntimeError('STOP: resolver lease/output-growth budget exhausted')
@@ -145,6 +262,9 @@ with (A / 'stdout.log').open('xb') as log:
         if proc.returncode: raise RuntimeError(f'resolver exited {proc.returncode}')
         status='resolved-not-installed-not-qualified'
     finally:
+        # A second termination must not interrupt the bounded owned cleanup.
+        for s in previous_handlers:
+            signal.signal(s,signal.SIG_IGN)
         if proc is not None:
             if proc.poll() is None:
                 os.killpg(proc.pid,signal.SIGTERM)
@@ -163,8 +283,20 @@ with (A / 'stdout.log').open('xb') as log:
             if not absent:
                 (A/'cleanup-failure.json').write_text(json.dumps({'status':'cleanup-unverified','returncode':check.returncode,'stderr':check.stderr}))
                 raise RuntimeError('STOP: owned container survived or daemon unavailable; cleanup not proven')
+        final_disk=disk_sample(docker_raw,A)
+        (A/'disk-after.json').write_text(json.dumps(final_disk))
+        disk_failed=False
+        try:
+            check_disk(final_disk,raw_baseline)
+        except RuntimeError:
+            disk_failed=True
+            status='disk-fence-failed'
         files=[{'path':str(x.relative_to(A)),'bytes':x.stat().st_size,'sha256':hashlib.sha256(x.read_bytes()).hexdigest()} for x in sorted(A.rglob('*')) if x.is_file()]
         (A/'receipt.json').write_text(json.dumps({'status':status,'runtime_qualified':False,'source_head':source_head,'files':files},sort_keys=True,indent=2)+'\n')
+        for s,handler in previous_handlers.items():
+            signal.signal(s,handler)
+        if disk_failed:
+            raise RuntimeError('STOP: final disk fence crossed; retained failed receipt')
 ```
 
 Validation after the attempt: read actual identity.json/requirements.lock and

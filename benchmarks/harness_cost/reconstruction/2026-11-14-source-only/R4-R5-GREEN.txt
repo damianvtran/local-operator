@@ -1,0 +1,16 @@
+R4/R5 source-only GREEN: stub child/container commands ONLY; no Docker or resolver
+UTC 2026-11-14T10:26:04Z
+test_disk_fences_use_allocated_growth_and_free_space (test_resolver_safety.ResolverSafetyTests.test_disk_fences_use_allocated_growth_and_free_space) ... ok
+test_independent_container_deadline_exists (test_resolver_safety.ResolverSafetyTests.test_independent_container_deadline_exists) ... ok
+test_inner_optimization_guard_precedes_effects (test_resolver_safety.ResolverSafetyTests.test_inner_optimization_guard_precedes_effects) ... ok
+test_optimization_guard_precedes_effects (test_resolver_safety.ResolverSafetyTests.test_optimization_guard_precedes_effects) ... ok
+test_outer_sigterm_reaps_owned_client_and_container (test_resolver_safety.ResolverSafetyTests.test_outer_sigterm_reaps_owned_client_and_container) ... ok
+test_outer_timeout_reaps_owned_client_and_container (test_resolver_safety.ResolverSafetyTests.test_outer_timeout_reaps_owned_client_and_container) ... ok
+
+----------------------------------------------------------------------
+Ran 6 tests in 2.946s
+
+OK
+{"classified_public_fixtures": [{"classification": "exact-public-FAKE-canary-source", "path": "payloads/sanitize-git-repo/tests/test_outputs.py", "rules": ["aws-access-id", "github-token", "huggingface-token"]}], "errors": [], "file_statuses": {"exact_match": 381, "not_downloaded_non_source": 26}, "historical_checks": 37, "kind": "static-source-verification", "metadata_receipt_rows_checked": 75, "privacy_pattern_hits": [], "runtime_qualified": false}
+{"classified_public_fixtures": [{"classification": "exact-public-FAKE-canary-source", "path": "payloads/sanitize-git-repo/tests/test_outputs.py", "rules": ["aws-access-id", "github-token", "huggingface-token"]}], "errors": ["campaign incomplete: exact recovery gate refuses dispatch"], "file_statuses": {"exact_match": 381, "not_downloaded_non_source": 26}, "historical_checks": 37, "kind": "static-source-verification", "metadata_receipt_rows_checked": 75, "privacy_pattern_hits": [], "runtime_qualified": false}
+Incomplete gate exit=1 (expected 1)

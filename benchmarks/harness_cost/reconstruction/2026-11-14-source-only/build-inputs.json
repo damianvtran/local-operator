@@ -150,13 +150,16 @@
   "resolver_proposal": {
     "admission": "RESOLVER-ADMISSION.md",
     "daemon_socket_target_present_at_static_check": false,
+    "desk_slot_conditional_no_go": true,
     "disk_desk": "00e6a1cd8f62",
     "exact_command": "RESOLVER-COMMAND.md",
     "executed": false,
     "memory_go_pending": true,
     "output_root_proposed_not_created": "~/benchmark-runs/reconstruction-20261114-source-v1/resolver/linux-amd64-01",
     "pins": "resolver-pins.json",
-    "requires_local_docker_linux_vm": true
+    "requires_local_docker_linux_vm": true,
+    "round4_remediation": "REMEDIATION-R4.md; pending independent review, unexecuted",
+    "vm_cap_verification_access_gap": true
   },
   "status": "DRAFT-BLOCKED-UNPINNED-INPUTS"
 }
