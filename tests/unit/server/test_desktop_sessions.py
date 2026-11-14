@@ -5356,7 +5356,12 @@ async def test_a_cold_move_is_a_field_assignment_and_answers_cold(move_api, monk
         except Exception:  # noqa: BLE001 — the engage's own outcome is not under test
             pass
 
-    assert spawns == [str(after)], "the next engage was handed the wrong directory"
+    # The invariant is the DIRECTORY, not the engage count: this fake engage
+    # leaves no registry record, and a bind whose engage succeeds but whose
+    # locate finds nothing re-engages (bounded by `_BIND_REENGAGE_ATTEMPTS`),
+    # so the same directory may legitimately be handed over more than once.
+    assert spawns, "the next engage never happened"
+    assert set(spawns) == {str(after)}, "the next engage was handed the wrong directory"
 
 
 @pytest.mark.asyncio
