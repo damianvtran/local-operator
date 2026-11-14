@@ -189,8 +189,18 @@ def test_thumbnails_are_keyed_by_content_and_width_and_invalidate(tmp_path, monk
     image.write_bytes(b"png-bytes")
     session(root, SESSION, write_rows("w1", 1.0, image))
     indexer.rebuild_now(root)
-    asset_id = service.list_assets(root, service.Query())["rows"][0]["id"]
     store = LibraryStore(root)
+    # Read the id from the store, NOT ``service.list_assets``: a list read calls
+    # ``ensure_started``, which (this process holds the writer lock after the
+    # rebuild) starts the real ``library-thumbs`` worker. Its startup sweep then
+    # races this test's own ``ensure_thumbnail`` calls on the same row: when it
+    # regenerated the v2 image between the ``thumb_is_live`` check and
+    # ``saved.clear()`` below, the test's call found a live thumbnail, saved
+    # nothing, and failed "a stale thumbnail must be regenerated" (seen once in CI).
+    asset_id = store.thumbnail_candidates(width=480)[0][0]
+    assert not any(t.name == "library-thumbs" and t.is_alive() for t in threading.enumerate()), (
+        "a background thumbnail worker would race this test's direct generation"
+    )
 
     saved: list[tuple[str, str, int]] = []
 
