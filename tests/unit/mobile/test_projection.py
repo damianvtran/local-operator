@@ -2664,6 +2664,10 @@ def test_summarize_args_sessions_rows_are_the_shared_decision() -> None:
     )
     assert _summarize_args("sessions", {"op": "list"}) == "list"
     assert _summarize_args("sessions", {"op": "stop"}) == "stop · ?"
+    # R1-6 (session park): park names its target; no address is the self-park.
+    assert _summarize_args("sessions", {"op": "park", "pid": 48213}) == "park · pid 48213"
+    assert _summarize_args("sessions", {"op": "park", "target": "crew"}) == "park · crew"
+    assert _summarize_args("sessions", {"op": "park"}) == "park · self"
     assert _summarize_args("sessions", {"op": "frobnicate"}) == "frobnicate"
     # R2 (round 1): a degenerate call stands on the tool name, exactly as the
     # TUI's row does — `sessions_row_summary` returns "" when even the op is

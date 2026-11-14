@@ -3249,6 +3249,18 @@ class SessionPickerScreen(ModalScreen[str | None]):
     #:   paints them, so comparing them would repaint on a change no pixel
     #:   reflects. THE DAY A TUI SURFACE RENDERS THEM, they move into
     #:   `_SIGNATURE_FIELDS` — the rule `degraded`'s entry above states.
+    #: * `remote_attention` / `remote_notices` / `remote_attention_unknown` are
+    #:   the origin-only completion and notify facts an owner stamps on a
+    #:   REMOTE row for the inbox forwarder
+    #:   (`notifications/remote_attention`). No picker pixel paints them; the
+    #:   same move-when-rendered rule applies.
+    #: * `pending_queued` / `remote_asks_unknown` qualify a remote row's
+    #:   `pending` and its forwarded asks for the park detector and the ask
+    #:   settle (PR #3934); `pending` itself is the painted fact.
+    #: * `temporary` is the scan's temporary-chat verdict. The resume picker
+    #:   never asks for temporary rows (``include_temporary`` defaults off), so
+    #:   every row it holds carries ``False`` and the field cannot differ
+    #:   between two ticks of this screen.
     _SIGNATURE_EXCLUDED = (
         "mtime",
         "created_at",
@@ -3258,6 +3270,12 @@ class SessionPickerScreen(ModalScreen[str | None]):
         "opened_by",
         "team",
         "agent",
+        "remote_attention",
+        "remote_notices",
+        "remote_attention_unknown",
+        "temporary",
+        "pending_queued",
+        "remote_asks_unknown",
     )
 
     # BIDIRECTIONAL, and that is the whole point of it. The previous form

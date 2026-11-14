@@ -191,6 +191,10 @@ COPIED_SIDECARS: tuple[str, ...] = (
 #:   every fork of it open ungated too, with nothing in the fork's own history
 #:   saying anyone chose that here. (The narrowing direction is merely
 #:   unhelpful; the pair is why the file is excluded rather than inherited.)
+#: - ``temporary.json``: the temporary-chat mark (``session/temporary.py``).
+#:   A fork is RETAINED: branching a conversation is a deliberate act of keeping
+#:   it, and inheriting the mark would schedule the new branch for deletion
+#:   without the user ever having asked for that on it.
 EXCLUDED_SIDECARS: tuple[str, ...] = (
     ".session.pid",
     "subagent-roster.v1.json",
@@ -199,6 +203,7 @@ EXCLUDED_SIDECARS: tuple[str, ...] = (
     MESH_STAMP_NAME,
     "auto-tag.json",
     APPROVALS_SIDECAR_NAME,
+    "temporary.json",
 )
 
 #: Ceiling on the conversation-scoped definitions a fork will copy.

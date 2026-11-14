@@ -3938,6 +3938,34 @@ class ProjectionFold:
         self._pending_queue = [req for req in self._pending_queue if req.request_id != request_id]
         self._sync_pending()
 
+    def latch_pending(self, notice: str) -> bool:
+        """Re-stamp every queued APPROVAL as a Team Bridge latched card, in place.
+
+        Why (security r7 lead on #3796, team-bridge-egress.md: "Cards"): a card
+        raised while the session was clean carries ``bridge_latched=False``,
+        and a viewer keeps offering that card's ``A``/``S``/``G`` escapes after
+        the session latches. The owner re-broadcasts the latch on the SAME
+        request ids (an answer still resolves the parked gate), using the
+        fields the card was raised with: the flag, and ``notice`` -- the
+        kind-selected ``bridge_card_notice`` line -- prefixed to the detail
+        exactly as a card raised after the latch carries it. Returns whether
+        anything changed (already-latched cards and ask cards are left alone).
+        """
+        from dataclasses import replace
+
+        changed = False
+        queue: list[PendingRequest] = []
+        for req in self._pending_queue:
+            if req.kind == "approval" and not req.bridge_latched:
+                detail = f"{notice}\n{req.detail}" if notice else req.detail
+                req = replace(req, bridge_latched=True, detail=detail)
+                changed = True
+            queue.append(req)
+        if changed:
+            self._pending_queue = queue
+            self._sync_pending()
+        return changed
+
     def _sync_pending(self) -> None:
         """Project the queue onto the wire fields the phone renders: the front
         request as ``pending`` plus the total ``pending_count`` for the "1 of

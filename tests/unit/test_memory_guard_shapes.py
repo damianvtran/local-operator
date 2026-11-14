@@ -597,6 +597,59 @@ def test_a_hex_run_longer_than_a_dns_label_is_not_a_hostname():
     assert not refused(f"value {DIGEST64[:63]}.evil.example")
 
 
+# Exact bounded note supplied by the mobile PR #199 owner. Its merge SHA was
+# independently verified through the public PR API; this is not credential data.
+MOBILE_MERGED_NOTE = (
+    "2026-11-09 mobile feedback current: #199 send-stage error/retry-attribution "
+    "merged 953a00a711ca06928518baeaa56833584bd9e0ab, all code/QA/design/UX "
+    "clean+12CIgreen; worktree send-stage-errors removed."
+)
+MERGED_COMMIT_PUBLIC = [
+    MOBILE_MERGED_NOTE,
+    f"PR #199 merged {HEX40}",
+    f"PR #199 merged as {HEX40}",
+    f"PR #199 merged as `{HEX40}`",
+    f"PR #199 merged '{HEX40}'",
+    f'PR #199 merged as "{HEX40}"',
+    f"PR #199 merged as {DIGEST64}",  # Git's SHA-256 object format
+    f"PR #199 MERGED AS {HEX40.upper()}",
+]
+MERGED_COMMIT_SECRET = [
+    (f"PR #199 merged {ALNUM40}", "opaque-base64"),
+    (f"PR #199 merged as `{SYNTH_GITHUB}`", "github-token"),
+    (f"PR #199 merged as {SYNTH_JWT}", "jwt"),
+    (f"PR #199 merged as {SYNTH_PEM}", "pem-private-key"),
+    (f"PR #199 merged as Authorization: Bearer {SYNTH_BEARER_VALUE}", "authorization-bearer"),
+    (f"deploy token for PR #199 merged as `{HEX40}`", "named-secret"),
+    (f"api_key={HEX40}; PR #199 merged as {HEX40}", "credential-assignment"),
+    (f"PR #199 merged {AKIA20} / {ALNUM40}", "aws-access-key-id"),
+    (f"PR #199 merged {HEX40[:32]}", "opaque-hex"),
+    (f"PR #199 merged {DIGEST64[:48]}", "opaque-hex"),
+    (f"PR #199 uploaded {HEX40}", "opaque-hex"),
+    (f"PR #199 merged output {HEX40}", "opaque-hex"),
+    (f"PR #199 unmerged {HEX40}", "opaque-hex"),
+]
+
+
+@pytest.mark.parametrize("text", MERGED_COMMIT_PUBLIC)
+def test_merged_commit_provenance_agrees_on_every_guard_path(text):
+    assert _verdicts(text) == (False,) * 6, text
+
+
+@pytest.mark.parametrize("text,kind", MERGED_COMMIT_SECRET)
+def test_merged_commit_context_does_not_launder_secrets(text, kind):
+    assert _verdicts(text) == (True,) * 6, text
+    with pytest.raises(SensitiveValueError) as caught:
+        guard(text, field="text")
+    assert any(span.kind == kind for span in caught.value.spans)
+    kept, raw, masked = retained_arguments("memory", {"op": "store", "text": text})
+    assert masked
+    for span in caught.value.spans:
+        value = text[span.start : span.end]
+        assert value not in json.dumps(kept) and value not in (raw or "")
+        assert value not in str(caught.value)
+
+
 def test_spelling_guard_skips_only_the_opaque_rule():
     from local_operator.memory import guard_spelling
 

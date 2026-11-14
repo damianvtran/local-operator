@@ -954,6 +954,16 @@
         "effort": null,
         "delegate": false,
         "class": null
+      },
+      {
+        "sha": "7415ea9f8ffa608fbd56dc5512442e9cfb238326",
+        "version": "1.5.14",
+        "instructions_sha256": "23cc928c49190b74d2fe3ecfadbeb569c5dc123551f09b36b7513faee99dfb38",
+        "description": "Checking how something LOOKS to the user: reviewing a screen or terminal UI, whether a layout, spacing, colour or copy reads well, making an interface nicer — a design/UX round on a user-visible change.",
+        "tools": null,
+        "effort": null,
+        "delegate": false,
+        "class": null
       }
     ],
     "librarian": [
@@ -1981,6 +1991,27 @@
         "effort": null,
         "delegate": false,
         "class": null
+      },
+      {
+        "sha": "7415ea9f8ffa608fbd56dc5512442e9cfb238326",
+        "version": "1.0.15",
+        "instructions_sha256": "86d1ffec507cb386a0f48e073a7b782e154ea7a3ee9e243c57a9217df4c89bca",
+        "description": "Independently testing whether a pull request, patch or feature actually works end to end; reproducing a bug, validating side effects, or checking remediation regressions.",
+        "tools": [
+          "read",
+          "glob",
+          "grep",
+          "list_variables",
+          "read_variable",
+          "bash",
+          "todo",
+          "web_search",
+          "web_fetch",
+          "browser"
+        ],
+        "effort": null,
+        "delegate": false,
+        "class": null
       }
     ],
     "reviewer": [
@@ -2541,6 +2572,27 @@
         "effort": null,
         "delegate": false,
         "class": null
+      },
+      {
+        "sha": "7415ea9f8ffa608fbd56dc5512442e9cfb238326",
+        "version": "1.3.20",
+        "instructions_sha256": "7f74c9f83d0dd2fe65fbc39e3d7d3a9f82added01b495fd842387c6078d4647b",
+        "description": "Reviewing a pull request, merge request, diff, commit range or patch for defects and bugs; auditing or critiquing code someone else (or another agent) wrote.",
+        "tools": [
+          "read",
+          "glob",
+          "grep",
+          "list_variables",
+          "read_variable",
+          "bash",
+          "todo",
+          "project",
+          "web_search",
+          "web_fetch"
+        ],
+        "effort": null,
+        "delegate": false,
+        "class": null
       }
     ],
     "scout": [
@@ -2917,6 +2969,16 @@
         "sha": "242449c33c3a29523b67434e350a2a0b59ee2f8c",
         "version": "1.4.12",
         "instructions_sha256": "b043d46fe5a271b1d7b8b85cdbeeb664f5660dfb104cb087dc68c1a02b17418c",
+        "description": "Reviewing the user EXPERIENCE of a change — interaction flow, keyboard/input handling, discoverability, feedback and error messaging, copy tone, and whether a task can actually be completed smoothly — as distinct from a visual/design review of how it looks.",
+        "tools": null,
+        "effort": null,
+        "delegate": false,
+        "class": null
+      },
+      {
+        "sha": "7415ea9f8ffa608fbd56dc5512442e9cfb238326",
+        "version": "1.4.13",
+        "instructions_sha256": "fb9ba9964eb9c71c59232542e7cdbec281ab6a959d38302c6b603eecdca2945b",
         "description": "Reviewing the user EXPERIENCE of a change — interaction flow, keyboard/input handling, discoverability, feedback and error messaging, copy tone, and whether a task can actually be completed smoothly — as distinct from a visual/design review of how it looks.",
         "tools": null,
         "effort": null,

@@ -146,6 +146,17 @@ def test_to_namespace_matches_the_exec_factory_field_for_field(
     assert vars(SessionSpec().to_namespace()) == _exec_only_fields(defaults)
 
 
+def test_exec_binds_temporary_only_for_a_temporary_run(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``lop exec --temporary`` reaches the factory; an ordinary run keeps the
+    SDK-pinned shape. Binding ``temporary=False`` on every run once broke the
+    parity above, because the SDK's eight-field namespace has no temporary chats."""
+    from local_operator import exec_mode
+
+    marked = _exec_namespace(monkeypatch, exec_mode.ExecArgs(temporary=True))
+    assert marked["temporary"] is True
+    assert "temporary" not in _exec_namespace(monkeypatch, exec_mode.ExecArgs())
+
+
 def test_to_namespace_has_exactly_the_eight_pinned_fields() -> None:
     """No ninth field sneaks in, and none of the eight disappears.
 

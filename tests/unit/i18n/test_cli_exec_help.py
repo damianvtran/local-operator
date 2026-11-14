@@ -236,7 +236,9 @@ def test_twenty_generated_zero_argument_messages_and_english_fallback():
 
     source = catalogues.load_catalogue("en", NAMESPACE)
     functions = [f for _, f in inspect.getmembers(keys, inspect.isfunction)]
-    assert len(source) == len(functions) == 20
+    # 21 since core #3832 added `exec --temporary` (``cli.exec_help.temporary``,
+    # audited in every locale); the name keeps the slice's original twenty.
+    assert len(source) == len(functions) == 21
     for function in functions:
         assert not inspect.signature(function).parameters
         message = function()
@@ -287,8 +289,9 @@ def test_extracted_sites_ratchet_without_activating_legacy_cli(i18n_check):
     # with the production scanner and prove a reintroduced literal is rejected.
     calls = _help_calls()
     # 21 since LO2 added `exec --saver`: the census counts the help call
-    # SITES in `add_startup_arguments`, so a new flag moves it by one.
-    assert len(calls) == 21
+    # SITES in `add_startup_arguments`, so a new flag moves it by one. 22 since
+    # core #3832 added `exec --temporary`.
+    assert len(calls) == 22
     source = "\n".join(ast.unparse(call) for call in calls)
     assert i18n_check.scan_source("local_operator/cli.py", source) == []
     next(k for k in calls[0].keywords if k.arg == "help").value = ast.Constant(

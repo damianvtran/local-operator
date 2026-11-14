@@ -2091,6 +2091,11 @@ def test_a_borrowed_mcp_bearer_is_re_borrowed_when_its_grant_expires() -> None:
             self.borrows = 0
             self.reports: list[str] = []
 
+        def live_grant(self, key: str, session_id: str) -> Grant | None:
+            # The real client's trust fence is pinned in
+            # test_credentials_panic_ends_hold; this fake is always trusted.
+            return self.grants.get(key, session_id)
+
         def request_grant_sync(self, key: str, **_kwargs: Any) -> Grant:
             self.borrows += 1
             return _grant(f"fresh-{self.borrows}", expires_in_ms=900_000)

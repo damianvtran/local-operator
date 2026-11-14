@@ -107,6 +107,32 @@ cleanup. Ordinary assistant final messages and idle sessions are not terminal
 lifecycle evidence. Running jobs, paused work, and pending approvals are not
 orphans.
 
+### Subagents: a tab for a human belongs with the parent
+
+A subagent's tab lives exactly as long as the subagent's task. When a child
+ends, the harness settles every surface it owns and appends one authoritative
+line per surface to the result its parent receives:
+
+- `Browser: closed ui:N` — the tab was closed (every tab the child did not
+  retain);
+- `Browser: handed ui:N to parent <sid>` — the tab was retained (an explicit
+  `retain`, or an approval still pending from `request_access`), so it was
+  handed to the parent session, which now owns it: its `tabs` listing marks it
+  `(yours — handed from child <sid>: <reason>; …)`, `close tab='ui:N'` closes
+  it, and the parent's own teardown closes it (or hands it up again when the
+  parent is itself a child);
+- `Browser: could not close ui:N (…)` — the settle failed; say so.
+
+So, as a subagent: if a human must use the tab (sign in, approve, finish a
+form), `retain` it with a reason before you finish — that hands it to your
+parent — and report it as `handed ui:N to parent <sid>`. Otherwise close it
+and report `closed ui:N`. **Never tell anyone a tab was "left open"**: an
+unretained child tab is closed when the child finishes, whatever its final
+message says. When you are the parent, or you are briefing a child for a
+sign-in, prefer opening the human's tab in the parent or another long-lived
+session yourself; a parent holding a handed tab should close it once the human
+is done.
+
 Operator diagnostics are conservative:
 
 ```sh
@@ -999,7 +1025,9 @@ Before the final answer, check:
 2. If yes, has `action=close` succeeded, or does one of the explicit exceptions
    above still apply and appear in the response?
 3. For subagents/reviewers, did cleanup happen before terminal handoff rather
-   than waiting for the parent to dispose the child?
+   than waiting for the parent to dispose the child? A tab a human still needs
+   is `retain`ed (handed to the parent on finish), never reported "left open"
+   — see "Subagents: a tab for a human belongs with the parent".
 
 If `close` errors, the tool drops the stale handle so it cannot accidentally
 control another tab. Report that the close failed and the handle was dropped;

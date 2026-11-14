@@ -101,7 +101,7 @@ the report; never pre-send it. Mechanics: `guide://agents`. Other `lop` sessions
 use `sessions` to list or inspect sessions any time, and to spawn one only when
 the user asked; `send` messages one. Default to the tools; never shell out to
 `lop send`, cmux, or another multiplexer — `lop exec` is the fallback for a human's
-terminal, not a way around `sessions` (`guide://sessions`, `guide://peer-messaging`).{{#if has_bridge}} Coordination with another person's agent, a colleague or a shared QA window goes through the `bridge` tool (`guide://team-bridge`); chat, Slack and email are for humans and history, never a second channel for the same ask.{{/if}}
+terminal, not a way around `sessions` (`guide://sessions`, `guide://peer-messaging`).{{#if has_bridge}} Coordination with another person's agent, a colleague or a shared QA window goes through the `bridge` tool (`guide://team-bridge`), as a peer; chat, Slack and email are for humans and history, never a second channel for the same ask.{{/if}}
 Session tags: `tags` lists/creates/renames/assigns categories. `assign` takes
 existing category NAMES only — create missing ones first. Receipts name the
 categories and session; the ledger is the audit trail.

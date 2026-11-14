@@ -40,6 +40,9 @@ LOCAL_ONLY_FLAGS: tuple[tuple[str, str], ...] = (
     ("resume", "--resume"),
     ("run_in", "--run-in"),
     ("workstream", "--workstream"),
+    # A temporary chat's mark and its reaper are on THIS machine; a remote run
+    # would come back retained, so the flag is refused rather than dropped.
+    ("temporary", "--temporary"),
     ("status", "--status"),
     ("output_format", "--output-format"),
     ("output_schema", "--output-schema"),

@@ -5,5 +5,6 @@
   "tui.status.jobs": "{count, plural, one {# جاب} other {# جاب}}",
   "tui.status.model.connecting": "منسلک ہو رہا ہے…",
   "tui.status.model.setup": "ترتیب",
-  "tui.status.tunnel.parked": "ریموٹ رسائی بند"
+  "tui.status.tunnel.parked": "ریموٹ رسائی بند",
+  "tui.status.temporary": "عارضی"
 }

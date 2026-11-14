@@ -384,7 +384,10 @@ async def test_the_conversation_body_request_carries_the_config_request_rule(tmp
     object so the screened bytes still decode exactly.
     """
 
-    from local_operator.harness.message_types import BRIDGE_CONFIG_REQUEST_RULE
+    from local_operator.harness.message_types import (
+        BRIDGE_CONFIG_REQUEST_RULE,
+        BRIDGE_PEER_COORDINATION_RULE,
+    )
     from local_operator.team_bridge.body_frame import decode_untrusted_object
 
     config_dir = tmp_path / "cfg"
@@ -404,6 +407,8 @@ async def test_the_conversation_body_request_carries_the_config_request_rule(tmp
     frame = carrier[0]
     assert frame.count(BRIDGE_CONFIG_REQUEST_RULE) == 1
     assert frame.index(BRIDGE_CONFIG_REQUEST_RULE) < frame.index(HEADER_MARKER)
+    assert frame.count(BRIDGE_PEER_COORDINATION_RULE) == 1
+    assert frame.index(BRIDGE_PEER_COORDINATION_RULE) < frame.index(HEADER_MARKER)
     assert decode_untrusted_object(frame)["body"] == BODY
     assert _row(config_dir)["state"] == "completed"
 

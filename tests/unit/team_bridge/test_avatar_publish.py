@@ -1312,3 +1312,238 @@ async def test_normal_hub_codes_survive_the_shared_parser():
 
     for code in ["avatar_type_unsupported", "rate_limited", "endpoint_avatar_not_found"]:
         assert _refusal(httpx.Response(403, json={"code": code})).code == code
+
+
+# -- the plan runs OFF the event loop, and an unchanged picture is not re-encoded --
+#
+# Why: the plan scanned every agent.yml and re-encoded the picture through Pillow
+# inside the ``lop serve`` loop (~0.86 s per full status check profiled on
+# v0.101.50), stalling every concurrent Team Bridge read behind it.
+
+
+async def _max_loop_gap_during(coro: Any) -> float:
+    """The longest gap between 10 ms ticks of a concurrent task while ``coro`` runs."""
+
+    import asyncio
+    import time
+
+    gaps: list[float] = []
+    done = False
+
+    async def ticker() -> None:
+        last = time.perf_counter()
+        while not done:
+            await asyncio.sleep(0.01)
+            now = time.perf_counter()
+            gaps.append(now - last)
+            last = now
+
+    task = asyncio.create_task(ticker())
+    await asyncio.sleep(0.03)
+    try:
+        await coro
+    finally:
+        done = True
+        await task
+    return max(gaps)
+
+
+async def test_reconcile_never_blocks_the_event_loop(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    import time
+
+    from local_operator.team_bridge import cos_name
+
+    _enrolled(tmp_path)
+    _agent(tmp_path, block=_png_block(), files={"avatar.png": PNG})
+    real_definition = cos_name._aida_definition
+
+    def slow_definition(root: Path) -> Any:
+        time.sleep(0.3)  # stands in for the 72-file YAML scan + Pillow re-encode
+        return real_definition(root)
+
+    monkeypatch.setattr(cos_name, "_aida_definition", slow_definition)
+    client = FakeClient(_status(hub_sha="0" * 64).payload)
+
+    gap = await _max_loop_gap_during(
+        avatar_publish.reconcile(client, _status(hub_sha="0" * 64), "tnt_1", tmp_path, "bep_1")
+    )
+
+    # Tick period is 10 ms; on the old synchronous plan the gap was >= 300 ms.
+    assert gap < 0.2, f"event loop blocked for {gap * 1000:.0f} ms"
+    assert client.puts == [("bep_1", PNG, PNG_SHA)]
+
+
+async def test_the_explicit_publish_never_blocks_the_event_loop(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    import time
+
+    from local_operator.team_bridge import cos_name
+
+    _enrolled(tmp_path)
+    _agent(tmp_path, block=_png_block(), files={"avatar.png": PNG})
+    real_definition = cos_name._aida_definition
+
+    def slow_definition(root: Path) -> Any:
+        time.sleep(0.3)
+        return real_definition(root)
+
+    monkeypatch.setattr(cos_name, "_aida_definition", slow_definition)
+    client = FakeClient(_status(hub_sha=PNG_SHA).payload)
+
+    gap = await _max_loop_gap_during(
+        avatar_publish.publish_agent_avatar(client, "tnt_1", tmp_path, status=_status(PNG_SHA))
+    )
+
+    assert gap < 0.2, f"event loop blocked for {gap * 1000:.0f} ms"
+    assert client.puts == [("bep_1", PNG, PNG_SHA)]
+
+
+async def test_the_config_watcher_is_polled_on_the_loop_thread(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """The designated-CoS gate stays on the loop: its watcher's listeners are loop-affine."""
+
+    import threading
+
+    from local_operator.team_bridge import cos_name
+
+    _enrolled(tmp_path)
+    _agent(tmp_path, block=_png_block(), files={"avatar.png": PNG})
+    threads: list[threading.Thread] = []
+    real_values = cos_name._config_values
+
+    def recording_values(root: Path) -> Any:
+        threads.append(threading.current_thread())
+        return real_values(root)
+
+    monkeypatch.setattr(cos_name, "_config_values", recording_values)
+    client = FakeClient(_status(hub_sha="0" * 64).payload)
+
+    await avatar_publish.reconcile(client, _status(hub_sha="0" * 64), "tnt_1", tmp_path, "bep_1")
+
+    assert threads and all(t is threading.main_thread() for t in threads)
+    assert client.puts == [("bep_1", PNG, PNG_SHA)]
+
+
+async def test_an_unchanged_picture_is_normalised_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    from local_operator import agent_avatar
+    from local_operator.team_bridge import cos_name
+
+    monkeypatch.setattr(cos_name, "_NORMALISE_MEMO", type(cos_name._NORMALISE_MEMO)())
+    calls: list[bytes] = []
+    real_normalise = agent_avatar.normalise
+
+    def counting(data: bytes) -> Any:
+        calls.append(data)
+        return real_normalise(data)
+
+    monkeypatch.setattr(agent_avatar, "normalise", counting)
+    _enrolled(tmp_path)
+    _agent(tmp_path, block=_png_block(), files={"avatar.png": PNG})
+
+    first = published_agent(tmp_path)
+    second = published_agent(tmp_path)
+
+    assert first is not None and second is not None
+    assert first.avatar_data == second.avatar_data == PNG
+    assert len(calls) == 1  # memo hit on the unchanged file
+
+
+async def test_a_changed_picture_always_renormalises(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    from io import BytesIO
+
+    from PIL import Image
+
+    from local_operator import agent_avatar
+    from local_operator.team_bridge import cos_name
+
+    monkeypatch.setattr(cos_name, "_NORMALISE_MEMO", type(cos_name._NORMALISE_MEMO)())
+    calls: list[bytes] = []
+    real_normalise = agent_avatar.normalise
+
+    def counting(data: bytes) -> Any:
+        calls.append(data)
+        return real_normalise(data)
+
+    monkeypatch.setattr(agent_avatar, "normalise", counting)
+    _enrolled(tmp_path)
+    _agent(tmp_path, block=_png_block(), files={"avatar.png": PNG})
+    first = published_agent(tmp_path)
+
+    buffer = BytesIO()
+    Image.new("RGBA", (512, 512), (10, 200, 30, 255)).save(buffer, format="PNG")
+    other = real_normalise(buffer.getvalue()).data
+    other_sha = hashlib.sha256(other).hexdigest()
+    _agent(
+        tmp_path,
+        block=_png_block(sha=other_sha, size=len(other)),
+        files={"avatar.png": other},
+    )
+    second = published_agent(tmp_path)
+
+    assert first is not None and first.avatar_data == PNG
+    assert second is not None and second.avatar_data == other
+    assert len(calls) == 2  # a changed file is a memo miss, never the old picture
+
+
+async def test_an_unchanged_agent_definition_is_parsed_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    import yaml
+
+    from local_operator.team_bridge import cos_name
+
+    monkeypatch.setattr(cos_name, "_DEFINITION_MEMO", {})
+    _enrolled(tmp_path)
+    _agent(tmp_path, block=_png_block(), files={"avatar.png": PNG})
+    _agent(tmp_path, name="Someone else", agent_id="other")
+    parsed: list[str] = []
+    real_load = yaml.safe_load
+
+    def counting(text: str) -> Any:
+        parsed.append(text)
+        return real_load(text)
+
+    monkeypatch.setattr(yaml, "safe_load", counting)
+
+    first = cos_name._aida_definition(tmp_path)
+    parsed_first = len(parsed)
+    second = cos_name._aida_definition(tmp_path)
+
+    assert first is not None and second is not None
+    assert first[0] == second[0] == "aida"
+    assert parsed_first >= 1
+    assert len(parsed) == parsed_first  # memo hit: no re-parse of unchanged files
+    # A handed-out definition is a copy: mutating it never poisons the memo.
+    first[2]["name"] = "mutated"  # type: ignore[index]
+    third = cos_name._aida_definition(tmp_path)
+    assert third is not None and third[2]["name"] == "aida"
+
+
+async def test_a_changed_agent_definition_always_reparses(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    from local_operator.team_bridge import cos_name
+
+    monkeypatch.setattr(cos_name, "_DEFINITION_MEMO", {})
+    _enrolled(tmp_path)
+    _agent(tmp_path, block=_png_block(), files={"avatar.png": PNG})
+    assert cos_name._aida_definition(tmp_path) is not None
+
+    # Rename her definition away: the very next scan must see it.
+    _agent(tmp_path, name="Not her any more")
+    assert cos_name._aida_definition(tmp_path) is None
+
+    # A deleted definition is pruned from the memo, not kept forever.
+    import shutil
+
+    shutil.rmtree(tmp_path / "agents" / "aida")
+    assert cos_name._aida_definition(tmp_path) is None
+    assert cos_name._DEFINITION_MEMO == {}

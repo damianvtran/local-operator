@@ -283,6 +283,11 @@ async def test_desktop_control_surface(headless_tui_env: Path, workspace: Path, 
                 # desktop destination ships in this slice.
                 "tag",
                 "tags",
+                # The desktop owns its own temporary-chat controls (header
+                # toggle, header-menu Keep/Make temporary, and
+                # `POST /v1/desktop/sessions/{id}/temporary`); a slash
+                # destination with no renderer adapter would dead-end.
+                "temporary",
             }
             assert len(catalog) == len(SLASH_COMMANDS) - len(withheld)
             # The literal is DELIBERATE, unlike its three neighbours. The

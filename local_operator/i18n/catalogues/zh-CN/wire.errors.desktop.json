@@ -87,5 +87,12 @@
   "wire.errors.desktop.sort_unknown": "sort必须为{sorts}之一。",
   "wire.errors.desktop.start_after_end": "开始时间必须早于结束时间",
   "wire.errors.desktop.unknown_command": "未知命令",
-  "wire.errors.desktop.unknown_provider": "未知提供商"
+  "wire.errors.desktop.unknown_provider": "未知提供商",
+  "wire.errors.desktop.session_in_project": "会话{session_id}已关联到项目；请先取消关联",
+  "wire.errors.desktop.session_pinned": "会话{session_id}已置顶；请先取消置顶",
+  "wire.errors.desktop.session_temporary": "会话{session_id}是临时对话；请先保留它",
+  "wire.errors.desktop.session_temporary_deleted": "此临时对话因闲置已被删除",
+  "wire.errors.desktop.temporary_mark_failed": "无法将会话{session_id}记录为临时对话，因此未做任何更改",
+  "wire.errors.desktop.temporary_not_user": "会话{session_id}不是由你发起的，因此不能设为临时对话",
+  "wire.errors.desktop.temporary_peer_unsupported": "暂不支持在其他设备上开始临时对话"
 }

@@ -69,6 +69,7 @@ surfaces as it did: this converts the lock refusal only, never a defect.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any, Literal
 
@@ -279,10 +280,21 @@ def _refuse_lock(verb: str, name: str, exc: BaseException) -> HTTPException:
 
 @router.get("/v1/desktop/aida", response_model=CRUDResponse[AidaState])
 async def get_aida(request: Request) -> CRUDResponse[AidaState]:
-    """Her state. Never creates: a caller that wants her to exist POSTs ``open``."""
+    """Her state. Never creates: a caller that wants her to exist POSTs ``open``.
+
+    OFF THE EVENT LOOP. The desktop polls this route, and ``_state`` is all
+    synchronous file reads -- policy, ledger, naming, identity, and the
+    first-run predicate, which on a not-yet-settled greeting scans every
+    session directory. Run inline it held the loop for up to 5.3 s per poll on
+    a 2,506-session store (2026-11-11 loop rig), stalling every other request
+    -- conversation opens included -- behind it.
+    """
+    return await asyncio.to_thread(_get_aida_reply, _config_dir(request))
+
+
+def _get_aida_reply(root: Any) -> CRUDResponse[AidaState]:
     from local_operator import aida
 
-    root = _config_dir(request)
     if not aida.enabled(root):
         # NOT a 409 here: the GET is how a renderer DISCOVERS the switch, so it
         # must answer. \u00a73.4 of the design: new UI x disabled backend renders

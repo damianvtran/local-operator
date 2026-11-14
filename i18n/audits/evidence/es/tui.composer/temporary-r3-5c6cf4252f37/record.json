@@ -1,0 +1,53 @@
+{
+  "schema": 1,
+  "audit_id": "temporary-r3-5c6cf4252f37",
+  "audit_kind": "independent semantic audit of the temporary-chat delta; unchanged keys carried by byte proof",
+  "locale": "es",
+  "namespace": "tui.composer",
+  "status": "passed",
+  "verdict": "passed",
+  "audit_task": "i18n-inpr-core",
+  "pr": "damianvtran/local-operator#3832",
+  "audited_revision": "367fbb857",
+  "catalogue_state": "catalogue bytes identical at 4f6f57986 (hashes recomputed from the shipped files)",
+  "scope": "all 1 key(s) the PR changed or added in tui.composer, read against i18n/glossary.md and i18n/style-guides/es.md; the other 1 key(s) are byte-identical to origin/main 27bfbdb21, whose last ledger row was passed and fresh",
+  "keys_audited": [
+    "tui.composer.temporary_placeholder"
+  ],
+  "keys_total": 2,
+  "mechanical_checks": [
+    "placeholder parity",
+    "CLDR plural categories",
+    "vi NFC",
+    "no manual bidi controls",
+    "no ASCII ellipsis",
+    "fr U+202F before :;?!",
+    "maxCells via rich.cells.cell_len"
+  ],
+  "translator": {
+    "agent": "core-backend coder cf2843d74957; round-1 remediation coder 1c07b39051ed (lopdev coder role) — relayed from PR #3832 i18n audit comments 6811281029/6812645445, not independently verified",
+    "model": "anthropic/claude-opus-5-5",
+    "fallback": "none reported in the relayed source",
+    "date": "2026-11-11..2026-11-12 (git: 09839b6de, 75606914f, eaff8c7a9)"
+  },
+  "auditor": {
+    "agent": "independent i18n auditor (lopdev reviewer role, task i18n-inpr-core, session 5c6cf4252f37; independent of the translators and of the round-1/2 auditors 506f24a144fa/2d1500d56d0e, whose artifacts were not read)",
+    "session": "5c6cf4252f37",
+    "model": "anthropic/claude-opus-5-5",
+    "fallback": "none observed in this session",
+    "date": "2026-11-12",
+    "result": "passed",
+    "findings": 0,
+    "unresolved_blocker_major": 0,
+    "minor": 0,
+    "nit": 0
+  },
+  "findings_note": "no findings.",
+  "report": "https://github.com/damianvtran/local-operator/pull/3832#issuecomment-6813468699",
+  "source_sha256": "1164aebe2e66934357cecbda131b79ce7d73064016b8f188c5e835fc0bd98be6",
+  "target_sha256": "553137034d5bee6da40530f34724af1f38a573a2d858a4de4c4d76afaf40f657",
+  "input_paths": {
+    "en": "local_operator/i18n/catalogues/en/tui.composer.json",
+    "target": "local_operator/i18n/catalogues/es/tui.composer.json"
+  }
+}

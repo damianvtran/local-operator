@@ -1,0 +1,28 @@
+{
+  "schema": 1,
+  "locale": "zh-CN",
+  "namespace": "wire.sessions",
+  "history_sha256": "a09e2f31acbe7f8901df080e55321c5b41b8327fa849ce30587ce18b5c6c29e9",
+  "entries": [
+    {
+      "locale": "zh-CN",
+      "namespace": "wire.sessions",
+      "source_sha256": "d2fc32791eed5f6fb37de7ceb286f479c5e90928a518d9bee6285284d45421b4",
+      "translator": {
+        "agent": "coder agent as translator (local-operator lopdev team, PR #3850 implementer at b8e63886c348; round-1 remediation 2c9de4645dfe)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-12"
+      },
+      "auditor": {
+        "agent": "translation-auditor specialist (local-operator lopdev team; round 1 task park-i18n-audit at b8e63886c348, round 2 task park-i18n-audit-r2 at 2c9de4645dfe) — not the translator",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-12",
+        "result": "passed",
+        "findings": 4,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "PR #3850 session-park: 6 new keys (approval_park_local, approval_park_self, park_done, park_self_refused_busy, park_self_scheduled, stop_dormant_hint); the 9 previously audited keys are byte-identical to origin/main 5795d706581e. Round 1 at b8e63886c348 FAILED this locale or raised minors (I4, I5 major + I6 minor + I7 nit); all fixed at 2c9de4645dfe and re-read in round 2: placeholders/ICU plural categories identical to en, op='park' byte-identical, glossary terms match tui.app.parked.* and the sibling keys, 0 open findings. Translator and auditor are separate agents on the same model (not model-independent). Round 2 and round 1 ran as separate auditor tasks. Fresh only at en source d2fc32791eed5f6fb37de7ceb286f479c5e90928a518d9bee6285284d45421b4; any English byte change lapses it."
+    }
+  ]
+}

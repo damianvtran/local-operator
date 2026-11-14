@@ -5,5 +5,6 @@
   "tui.status.jobs": "{count, plural, other {# 个任务}}",
   "tui.status.model.connecting": "连接中……",
   "tui.status.model.setup": "初始设置",
-  "tui.status.tunnel.parked": "远程访问已关闭"
+  "tui.status.tunnel.parked": "远程访问已关闭",
+  "tui.status.temporary": "临时"
 }

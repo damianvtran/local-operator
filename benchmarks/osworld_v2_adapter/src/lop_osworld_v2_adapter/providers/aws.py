@@ -1580,9 +1580,15 @@ class AwsProvider:
             # ``ConnectionError`` wrapping ``ReadTimeoutError``, not as
             # ``ReadTimeout`` from ``adapters.send``). That overrun had already
             # eaten the harness's whole RPC slack (``timeout_s + 15``), leaving
-            # no room for the probe below. A cancelled wait leaves the worker
-            # thread to finish its own bounded read and drop the result; nothing
-            # in it is replayed.
+            # no room for the probe below. A cancelled wait ABANDONS the worker
+            # thread rather than stopping it: nothing in it is replayed and its
+            # result is dropped, but it is NOT wall-bounded -- ``requests``
+            # bounds each socket read, so a guest that keeps dripping bytes
+            # holds that thread and its socket for as long as it drips (QA
+            # measured it on PR #3826). Closing the response from here is not
+            # simple: ``requests.post`` reads the body before returning, so the
+            # caller never holds the response while the read stalls; it would
+            # take a streamed read inside ``http_post_json``.
             body = await asyncio.wait_for(
                 asyncio.to_thread(
                     self._clients.http_post_json,
@@ -1619,17 +1625,27 @@ class AwsProvider:
             # session.
             logger.warning("guest answered an unreadable 2xx body for a command: %r", error)
             return unreadable_answer(error)
-        except (requests.ConnectionError, requests.Timeout, TimeoutError) as error:
+        except (
+            requests.ConnectionError,
+            requests.Timeout,
+            requests.exceptions.ChunkedEncodingError,
+            TimeoutError,
+        ) as error:
             # ``requests.ConnectionError`` covers refused/reset connects, a
             # ConnectTimeout, the body-read stall the sealed runs hit, and a
             # server that closed the socket unanswered (``RemoteDisconnected``
-            # wrapped in ``ProtocolError``, sealed run t32v-t054); ``requests.
-            # Timeout`` the header-read ``ReadTimeout``; ``TimeoutError`` the
-            # wall-clock bound above. None of them says whether the command
-            # ran. A bare builtin ``ConnectionError`` is deliberately NOT here:
-            # ``requests`` wraps every socket drop, so an unwrapped one is not
-            # a transport loss this client produces and keeps the unclassified
-            # poison (``test_an_unclassified_command_failure_still_poisons``).
+            # wrapped in ``ProtocolError``, sealed run t32v-t054);
+            # ``requests.Timeout`` the header-read ``ReadTimeout``;
+            # ``ChunkedEncodingError`` a body cut off mid-stream (urllib3's
+            # ``ProtocolError``/``IncompleteRead`` during ``.content``, which
+            # ``requests`` re-raises as a bare ``RequestException`` -- neither a
+            # ``ConnectionError`` nor a ``Timeout``, so it escaped unprobed and
+            # poisoned; PR #3826 review R1); ``TimeoutError`` the wall-clock
+            # bound above. None of them says whether the command ran. A bare
+            # builtin ``ConnectionError`` is deliberately NOT here: ``requests``
+            # wraps every socket drop, so an unwrapped one is not a transport
+            # loss this client produces and keeps the unclassified poison
+            # (``test_an_unclassified_command_failure_still_poisons``).
             return await self._command_reply_lost(error, deadline, started)
         return decode_result(body, params)
 

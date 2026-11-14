@@ -134,6 +134,32 @@ def _section_bounds(content: str) -> tuple[int, int] | None:
     return start, end
 
 
+def split_profile_section(content: str) -> tuple[str, str]:
+    """``(text outside the profile section, the section itself)`` for ``content``.
+
+    WHY A SECOND READER NEEDS THIS: the mesh carries the operator's custom
+    instructions to peers (``network.definitions``), and the section this module
+    writes is NOT part of them — it is the identity of whoever signed in on THIS
+    device, written by every ``lop login``. Counted as instructions, a node that
+    merely signed in looked "authored" and refused the head's rules, and a head
+    would ship its own account identity to every node. So the mesh judges and
+    carries only the outside text, and keeps each device's section where it is.
+
+    The outside text is stripped and the two halves around the section are joined
+    by one blank line, so the same instructions read the same digest whether the
+    section sits above, below or nowhere — the property a mirror check relies on.
+    The section is returned marker to marker (inclusive), or ``""`` when absent.
+    Same first-marker semantics as :func:`_section_bounds`.
+    """
+    bounds = _section_bounds(content)
+    if bounds is None:
+        return content.strip(), ""
+    start, end = bounds
+    end += len(SECTION_END)
+    before, after = content[:start].strip(), content[end:].strip()
+    return "\n\n".join(part for part in (before, after) if part), content[start:end]
+
+
 def _render_section(bullets: list[str]) -> str:
     body = "\n".join(bullets)
     return f"{SECTION_START}\n{SECTION_HEADING}\n{body}\n{SECTION_END}"

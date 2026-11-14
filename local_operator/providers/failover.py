@@ -3576,7 +3576,10 @@ def _pinned_exhaustion_error(
         cause = "every route that could serve it failed"
     else:
         status = f" HTTP {reported.status}" if reported.status else ""
-        cause = f"{reported.kind or 'failure'}{status}: {reported.message}"
+        # Every arm closes the cause with its own period; a provider message that
+        # already ends in one rendered ".." (agent review round 1, F3).
+        message = reported.message.rstrip().rstrip(".")
+        cause = f"{reported.kind or 'failure'}{status}: {message}"
     if strict:
         notes: list[str] = []
         if same_family_available:
@@ -4341,10 +4344,15 @@ async def _stream_with_failover_events(
     pinned_strict = False
     pinned_blocked: list[str] = []
     pinned_family_available = False
+    # Whether a chain is CONFIGURED for the primary, independent of what the
+    # pin policy filters out of it: the borrowed-quota tail may only say "no
+    # fallback is configured" when that is literally true (review round 1, F2).
+    chain_configured = False
     if retry.enabled and retry.model_fallback:
         if pinned and pin_selector is not None:
             pinned_strict = retry.pinned_fallback != PINNED_FALLBACK_CROSS_FAMILY
         chain = resolve_chain(primary_selector, retry.fallback_chains)
+        chain_configured = bool(chain)
         if chain:
             candidates = expand_fallback_targets(
                 primary_selector, chain, primary_effort=request.model.reasoning_effort
@@ -4465,6 +4473,13 @@ async def _stream_with_failover_events(
         ]
     walked: set[tuple[str, str | None]] = set()
     recoverable: set[tuple[str, str | None]] = set()
+    # PR-D (Root 0): targets whose credential owner was SILENT after this device's
+    # lease from it ran out, each with the store's keyless waiter. Non-empty, the
+    # loop-back below waits for the owner (bounded, abortable, no dials) instead of
+    # sweeping at once; ``owner_waited_s`` is how long it waited, for the sentence a
+    # still-absent owner's revisit reports. See ``_await_owner_return``.
+    owner_waits: dict[tuple[str, str | None], Any] = {}
+    owner_waited_s: float | None = None
     # Server-fault spend per target, carried ACROSS the sweeps: the per-turn
     # ceiling is about what one provider receives, and a loop-back that reset
     # the counter would quietly double it.
@@ -4744,8 +4759,28 @@ async def _stream_with_failover_events(
                     # reported frame sent the user off to configure a key they
                     # already had -- the reported `No API key configured for
                     # provider 'openai'` on an account signed in via OAuth.
+                    # A borrowed quota refusal is recorded WITHOUT its "what
+                    # next" tail: the error the turn ends on is chosen later
+                    # (the primary outranks every hop), so a tail written here
+                    # could promise a hop that has since failed. The walk's
+                    # end adds it once, from the final state.
                     missing = _no_credential_error(auth, provider)
+                    waiter = owner_waits.get(route_key)
+                    if (
+                        waiter is not None
+                        and owner_waited_s is not None
+                        and _owner_wait_hint(auth, provider) is not None
+                    ):
+                        # The sweep after a wait found the owner STILL away: say so,
+                        # with how long this turn waited (PR-D). Same class and the
+                        # same pre-wire stamp as the sentence it replaces.
+                        missing = _owner_wait_expired_error(waiter, owner_waited_s) or missing
                     record(missing, primary=is_primary, target=target)
+                    # A borrowed quota refusal states the owner's reset; a fallback
+                    # hop that is benched below waits it out like a local 429's
+                    # advertised reset, instead of re-asking a resting pool each
+                    # message. Errors without one leave the bench floor as it was.
+                    target_retry_after_ms = max(target_retry_after_ms, missing.retry_after_ms or 0)
                     if missing.retryable:
                         # Retryable means blocked-not-absent: backoffs expire on
                         # their own (and other processes release credentials),
@@ -4753,6 +4788,10 @@ async def _stream_with_failover_events(
                         # serviceable again. A genuinely unconfigured provider
                         # is not retryable and gets no second visit.
                         recoverable.add(route_key)
+                        if retry.enabled and not looped_back:
+                            hint = _owner_wait_hint(auth, provider)
+                            if hint is not None:
+                                owner_waits[route_key] = hint
                     break
                 error = None
             retry_same_key = False
@@ -5489,9 +5528,35 @@ async def _stream_with_failover_events(
             delay_ms = min(shortest_retry_after_ms, LOOPBACK_MAX_WAIT_MS)
         else:
             delay_ms = backoff_delay_ms(retry.base_delay_ms, 1, rng=rng)
-        await _abortable_sleep(delay_ms, signal)
+        if owner_waits and all(
+            (candidate.selector, candidate.effort) in owner_waits for candidate in revisit
+        ):
+            # PR-D (Root 0): EVERY revisited target is owner-away with its lease from
+            # that owner ended, so nothing else could serve sooner. Wait for the owner
+            # HERE, after every configured fallback was already walked and before
+            # anything was sent. The wait replaces the backoff and makes no asks, so
+            # the sweep below is the same single re-ask as before, only later: served
+            # once if the owner came back, the real answer otherwise. Not C5: no grant
+            # is served, refreshed or extended while it runs.
+            #
+            # ONLY when every one is (#3722 review R1-1): ``revisit`` also carries
+            # targets the walk could not finish for their own reasons (a fallback's
+            # 429 with its own retry-after, a primary the route pin excluded). Waiting
+            # for an absent owner in front of those delayed a turn they would have
+            # served in seconds by up to the whole bound. A mixed revisit keeps
+            # today's backoff, and ``owner_waited_s`` stays ``None``, so its sweep
+            # reports a still-absent owner with today's plain sentence.
+            owner_waited_s = await _await_owner_return(list(owner_waits.values()), signal)
+        else:
+            await _abortable_sleep(delay_ms, signal)
         pending = revisit
 
+    fallback_off = (
+        "retry.enabled"
+        if not retry.enabled
+        else "retry.modelFallback" if not retry.model_fallback else None
+    )
+    hops_tried = tuple(dict.fromkeys(t.selector for t in full_targets if t != primary_target))
     if pinned and pin_selector is not None:
         # A pinned child that ends the walk without serving fails LEGIBLY,
         # never with a bare provider error: under strict the refusal says the
@@ -5505,19 +5570,23 @@ async def _stream_with_failover_events(
             pinned_blocked,
             pinned_family_available,
             strict=pinned_strict,
-            hops_tried=tuple(
-                dict.fromkeys(t.selector for t in full_targets if t != primary_target)
-            ),
-            fallback_off=(
-                "retry.enabled"
-                if not retry.enabled
-                else "retry.modelFallback" if not retry.model_fallback else None
-            ),
+            hops_tried=hops_tried,
+            fallback_off=fallback_off,
         )
         if reported is not None:
             raise error from reported
         raise error
     if reported is not None:
+        # The pinned branch above needs no tail: its own copy already says
+        # which hops were tried, declined or switched off.
+        if getattr(reported, BORROWED_QUOTA_ATTR, False):
+            _say_borrowed_quota_outcome(
+                reported,
+                auth,
+                hops_tried=hops_tried,
+                fallback_off=fallback_off,
+                chain_configured=chain_configured,
+            )
         raise reported
     raise ProviderError(None, f"Failover exhausted for '{primary_selector}'", retryable=False)
 
@@ -6013,13 +6082,77 @@ def _mark_prewire_refusal(error: ProviderError) -> ProviderError:
 
 #: Set on a :class:`ProviderError` whose message is a complete sentence for a person
 #: and must render WITHOUT the kind label, while keeping its ``kind`` for ranking.
-#: Only :func:`_borrowed_refresh_refusal` sets it (#3616 design D6): the label is
+#: Set by :func:`_borrowed_refresh_refusal` (#3616 design D6) and by the borrowed
+#: quota arm of :func:`_no_credential_error` (the owner's sentence already says it
+#: is rate-limited, so a kind label in front would only stutter): the label is
 #: what the display layers key their LOCAL auth hint on (``is_rendered_auth_error``
 #: -> ``append_auth_recovery``, TUI and headless alike), and that hint ("To fix:
 #: /login <provider> … here") contradicts a sentence whose remedy is on ANOTHER
 #: device. Verbatim also makes the first failing turn read exactly like the later
 #: turns, which reach the same sentence through ``_no_credential_error``.
 VERBATIM_MESSAGE_ATTR = "lo_verbatim_message"
+
+
+#: Set on the ``quota`` error :func:`_no_credential_error` builds from a BORROWED
+#: login's ``quota_blocked`` refusal, so the walk can finish its sentence with what
+#: the turn did (:func:`_say_borrowed_quota_outcome`).
+BORROWED_QUOTA_ATTR = "lo_borrowed_quota"
+
+
+def _say_borrowed_quota_outcome(
+    error: ProviderError,
+    auth: FailoverAuthStore,
+    *,
+    hops_tried: Sequence[str],
+    fallback_off: str | None,
+    chain_configured: bool,
+) -> None:
+    """Append what THIS turn did after a borrowed login's quota refusal ended it.
+
+    The broker's sentence can only say what the owner answered; the walk is the one
+    place that knows the borrower's own chain. The 2026-11-12 incident on
+    ``lop-remote-node-2`` is why this is said at all: the old copy promised "the
+    usual failover… is already running" while the remote's chain was empty and the
+    turn stopped.
+
+    Called ONCE, on the error the walk actually raises, never when the refusal is
+    recorded: the reported error is picked after the whole walk (the primary's
+    outranks every hop's), so a "trying <hop>" tail written at record time
+    survived as the final word after that hop had failed too (agent review round
+    1, F1). By then the turn has stopped, so every arm states the end state:
+
+    - fallback switched off (``retry.enabled`` / ``retry.modelFallback``) — say so
+      and name the switch, since a configured chain is never expanded then;
+    - hops tried — none of them served this turn;
+    - no chain configured for this model — the only case that may point at
+      ``retry.fallbackChains`` (chains are per device, not synced);
+    - anything else (e.g. a pin policy filtered every hop) — only that no fallback
+      model served, which is true whatever the cause (review round 1, F2).
+
+    ``auth.device_label`` is duck-typed like the store's other hooks; a store
+    without it reads "this device".
+    """
+    label_for = getattr(auth, "device_label", None)
+    try:
+        device = label_for() if callable(label_for) else ""
+    except Exception:  # noqa: BLE001 - copy must never mask the real failure
+        device = ""
+    device = device if isinstance(device, str) and device else "this device"
+    if fallback_off is not None:
+        tail = f"Fallback is switched off on {device} ({fallback_off}), so the turn stops here."
+    elif hops_tried:
+        tail = (
+            f"No model in the fallback chain on {device} served this turn"
+            f" ({', '.join(hops_tried)})."
+        )
+    elif not chain_configured:
+        tail = (
+            f"No fallback is configured on {device} "
+            "(retry.fallbackChains), so the turn stops here."
+        )
+    else:
+        tail = "No fallback model served this turn."
+    error.message = f"{error.message} {tail}"
 
 
 def _borrowed_refresh_refusal(auth: FailoverAuthStore, provider: str) -> ProviderError | None:
@@ -6055,6 +6188,58 @@ def _borrowed_refresh_refusal(auth: FailoverAuthStore, provider: str) -> Provide
     return refused
 
 
+def _owner_wait_hint(auth: FailoverAuthStore, provider: str) -> Any | None:
+    """The mesh-aware store's waiter for an absent credential owner, or ``None``.
+
+    Duck-typed for the reason :func:`_no_credential_error` states: this module must
+    not import the network package, and every other store lacks the method.
+    """
+    hint_for = getattr(auth, "owner_wait_hint", None)
+    if not callable(hint_for):
+        return None
+    try:
+        hint = hint_for(provider)
+    except Exception:  # noqa: BLE001 - a hint that fails is no hint; fail fast as before
+        return None
+    return hint if callable(getattr(hint, "poll", None)) else None
+
+
+async def _await_owner_return(hints: list[Any], signal: AbortSignal | None) -> float:
+    """Wait for an absent owner, bounded and abortable; return the seconds waited.
+
+    Ends at the first waiter that is no longer ``waiting`` (the owner's link was
+    admitted again, or the share/membership/policy changed, so the sweep must ask
+    now), at the bound, or on abort (``ProviderError(kind="aborted")``). Each poll is
+    the waiter's file reads, off the event loop; nothing here dials, so N waiting
+    turns cost N reads per poll interval and no storm. WALL TIME, not monotonic:
+    the bound is stated against the owner's lease clock, and this module may not
+    import the network package's clock helpers.
+    """
+    started = time.time()
+    deadline = started + max(float(getattr(hint, "bound_s", 0.0)) for hint in hints)
+    interval_s = min(float(getattr(hint, "poll_s", 1.0)) for hint in hints)
+    while True:
+        states = await asyncio.to_thread(lambda: [hint.poll() for hint in hints])
+        if any(state != "waiting" for state in states):
+            break
+        remaining = deadline - time.time()
+        if remaining <= 0:
+            break
+        await _abortable_sleep(max(1, int(min(interval_s, remaining) * 1000)), signal)
+    return time.time() - started
+
+
+def _owner_wait_expired_error(waiter: Any, waited_s: float) -> ProviderError | None:
+    """The still-away owner's sentence, naming the wait, classed like the one it replaces."""
+    try:
+        reason = waiter.expired_reason(waited_s)
+    except Exception:  # noqa: BLE001 - diagnosis must never mask the real failure
+        return None
+    if not isinstance(reason, str) or not reason:
+        return None
+    return _mark_prewire_refusal(ProviderError(None, reason, retryable=True, kind="unknown"))
+
+
 def _no_credential_error(auth: FailoverAuthStore, provider: str) -> ProviderError:
     """Say WHY no bearer could be resolved, distinguishing two opposite causes.
 
@@ -6083,6 +6268,29 @@ def _no_credential_error(auth: FailoverAuthStore, provider: str) -> ProviderErro
         except Exception:  # noqa: BLE001 - diagnosis must never mask the real failure
             reason = None
         if isinstance(reason, str) and reason:
+            # A BORROWED LOGIN'S QUOTA IS A QUOTA (2026-11-12, lop-remote-node-2): the
+            # owner refused ``quota_blocked``, which is the same fact as a local
+            # account resting, so it carries ``kind="quota"`` and the owner's reset
+            # like one. Labelled ``unknown`` it read as an unclassified fault in every
+            # display ("unknown: … is rate-limited"). Verbatim keeps the broker's
+            # sentence free of a "rate limit or quota exceeded:" stutter; the walk
+            # still advances to the next target below, as for any empty resolve.
+            limit_for = getattr(auth, "no_credential_limit", None)
+            try:
+                limit_ms = limit_for(provider) if callable(limit_for) else None
+            except Exception:  # noqa: BLE001 - diagnosis must never mask the real failure
+                limit_ms = None
+            if isinstance(limit_ms, int) and not isinstance(limit_ms, bool):
+                limited = ProviderError(
+                    None,
+                    reason,
+                    retryable=True,
+                    kind="quota",
+                    retry_after_ms=limit_ms or None,
+                )
+                setattr(limited, VERBATIM_MESSAGE_ATTR, True)
+                setattr(limited, BORROWED_QUOTA_ATTR, True)
+                return _mark_prewire_refusal(limited)
             # Kind ``unknown`` with no status renders the sentence verbatim (see
             # ``ProviderError.__str__``): it is already written for a person, and a
             # "rate limit or quota exceeded:" label in front would be the lie this

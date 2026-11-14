@@ -388,5 +388,25 @@
     "role": "compact countdown unit: days",
     "tone": "Keep it short; localize the unit abbreviation.",
     "note": "Owned relay SPA asks copy. Used only for deadlines at least 48 hours away."
+  },
+  "relay.asks.card.command.label": {
+    "role": "accessible name of the suggested-command block on an ask card",
+    "tone": "Plain noun phrase, sentence case.",
+    "note": "Owned relay SPA asks copy. Read by screen readers only. The block shows a shell command the agent suggests the user run; the phone only displays and copies it, it never runs it."
+  },
+  "relay.asks.card.command.copy": {
+    "role": "button label: copy the suggested command to the clipboard",
+    "tone": "One short verb, sentence case.",
+    "note": "Owned relay SPA asks copy. Sits beside the command in a narrow row; keep it to one short word. Copies only, never runs."
+  },
+  "relay.asks.card.command.copied": {
+    "role": "the same button's label for ~2 s after a successful copy",
+    "tone": "One short past participle, sentence case.",
+    "note": "Owned relay SPA asks copy. Replaces the Copy label in place, so keep it about the same width as relay.asks.card.command.copy."
+  },
+  "relay.asks.card.command.copy_failed": {
+    "role": "small note under the command when the clipboard write failed",
+    "tone": "Plain, calm, lowercase after the em dash.",
+    "note": "Owned relay SPA asks copy. The card has selected the command text so the platform's own copy gesture works; the note says so. Preserve the em dash."
   }
 }

@@ -16,6 +16,10 @@ from local_operator.memory_privacy import retained_arguments, retained_message
 from local_operator.session.session import Session
 from local_operator.session.transcript import Transcript, encode_message_payload
 from local_operator.tools.builtin import build_write_tool
+from tests.unit.test_memory_guard_shapes import (
+    MERGED_COMMIT_PUBLIC,
+    MERGED_COMMIT_SECRET,
+)
 
 
 @pytest.mark.asyncio
@@ -217,6 +221,51 @@ def _tool_result_text(transcript) -> str:
     results = [e for e in transcript.entries() if e.payload.get("role") == "tool"]
     assert results
     return json.dumps(results[-1].payload)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("text", MERGED_COMMIT_PUBLIC)
+async def test_mobile_merged_commit_recurrence_stores_in_real_session(tmp_path, text):
+    """PR #199's bounded operator note must survive both prechecks and the write."""
+    session, transcript = await _run_memory_store(
+        tmp_path, {"op": "store", "scope": "session", "text": text}
+    )
+    try:
+        result = _tool_result_text(transcript)
+        assert "refused" not in result, result
+        serialized = json.dumps([entry.payload for entry in transcript.entries()])
+        assert json.dumps(text)[1:-1] in serialized
+        assert any(
+            p.is_file() and text.encode() in p.read_bytes()
+            for p in (session._config_dir / "memory").rglob("*")
+        ), "the complete note must land in the session bank"
+    finally:
+        await session.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("text,kind", MERGED_COMMIT_SECRET)
+async def test_merged_commit_secrets_are_refused_in_real_session(tmp_path, text, kind):
+    from local_operator.memory import SensitiveValueError, guard
+
+    with pytest.raises(SensitiveValueError) as caught:
+        guard(text, field="text")
+    session, transcript = await _run_memory_store(
+        tmp_path, {"op": "store", "scope": "session", "text": text}
+    )
+    try:
+        result = _tool_result_text(transcript)
+        span = next(s for s in caught.value.spans if s.kind == kind)
+        assert f"text: {kind} at chars {span.start}-{span.end}" in result, result
+        serialized = json.dumps([entry.payload for entry in transcript.entries()])
+        retained_files = [p for p in transcript.directory.iterdir() if p.is_file()]
+        for span in caught.value.spans:
+            value = text[span.start : span.end]
+            assert value not in serialized
+            assert all(value.encode() not in p.read_bytes() for p in retained_files)
+        assert not (session._config_dir / "memory").exists()
+    finally:
+        await session.dispose()
 
 
 @pytest.mark.asyncio

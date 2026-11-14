@@ -2186,6 +2186,8 @@ def test_the_stored_role_refusal_speaks_the_callers_grammar(
 _DISABLED_ROLE_WORDS_ALLOWLIST: frozenset[tuple[str, str]] = frozenset(
     {
         ("server/request_update.py", "_deliver"),
+        # Exact session-id selector for the peek header/digest; no ``target``.
+        ("network/peek.py", "_owner_record"),
         ("tui/app.py", "_stop_unbound_worker"),
         ("tui/app.py", "_quick_send_worker"),
     }

@@ -15,5 +15,6 @@
   "cli.global_help.propagated_resume": "Reanudar una sesión anterior por ID. Sin ID, usa la más reciente.",
   "cli.global_help.propagated_hosting": "Plataforma de alojamiento para esta ejecución (p. ej., anthropic, openai, openrouter)",
   "cli.global_help.propagated_model": "Modelo que usar en esta ejecución",
-  "cli.global_help.propagated_run_in": "Directorio de trabajo en el que ejecutar el operador"
+  "cli.global_help.propagated_run_in": "Directorio de trabajo en el que ejecutar el operador",
+  "cli.global_help.temporary": "Inicia un chat temporal: queda fuera del historial y se elimina tras quedar inactivo (30 minutos por defecto)."
 }

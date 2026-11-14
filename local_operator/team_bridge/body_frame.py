@@ -38,7 +38,7 @@ import re
 from dataclasses import dataclass
 from typing import Any, Mapping
 
-from local_operator.harness.message_types import BRIDGE_CONFIG_REQUEST_RULE
+from local_operator.harness.message_types import BRIDGE_RECEIVER_RULES
 
 __all__ = [
     "BodyFrameRefused",
@@ -245,7 +245,8 @@ def build_body_frame(
         raise BodyFrameRefused("body_too_large")
 
     mention_line = "mention: true" if source.mention else "mention: false"
-    # B5: the receiver rule for a teammate's config/model/settings suggestion.
+    # B5: the receiver rules (peer-coordination default, then the config
+    # boundary for a teammate's model/settings suggestion).
     # This frame is the ONLY place a conversation (channel/DM) body reaches the
     # model — the journal card is swapped for a fixed marker in every model
     # render — so the rule must ride here or it never arrives on that path.
@@ -255,7 +256,7 @@ def build_body_frame(
     # its bytes are counted by ``request_size``/``frame_within_capacity`` and by
     # the turn's cached bytes, so capacity can never under-measure it.
     lines = [
-        BRIDGE_CONFIG_REQUEST_RULE,
+        BRIDGE_RECEIVER_RULES,
         _SOURCE_MARKER,
         f"tenant_id: {source.tenant_id}",
         f"conversation_id: {source.conversation_id}",

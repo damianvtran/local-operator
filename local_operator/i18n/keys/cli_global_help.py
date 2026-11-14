@@ -58,6 +58,10 @@ def run_in() -> Msg:
     return Msg("cli.global_help.run_in", {})
 
 
+def temporary() -> Msg:
+    return Msg("cli.global_help.temporary", {})
+
+
 def train() -> Msg:
     return Msg("cli.global_help.train", {})
 

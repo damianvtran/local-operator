@@ -1,0 +1,15 @@
+{
+  "tunnel.status.create.conflict_unmatched": "Radient сообщает, что туннель для этого запроса уже существует, но в списке туннелей этого входа нет единственной подходящей записи. Проверьте lop tunnel list, затем подключите его командой lop tunnel connect --tunnel-id <id>.",
+  "tunnel.status.gateway.listening_http_status": "Порт шлюза ретранслятора 127.0.0.1:{port} кто-то слушает, но на проверку состояния пришёл ответ HTTP {status}: возможно, порт занят другой программой или шлюз неисправен. Переустановка не поможет.",
+  "tunnel.status.gateway.listening_timed_out": "Локальный шлюз ретранслятора слушает 127.0.0.1:{port}, но не ответил на проверку состояния вовремя; переустановка не поможет.",
+  "tunnel.status.gateway.listening_unreadable": "Локальный шлюз ретранслятора слушает 127.0.0.1:{port}, но его ответ на проверку состояния не удалось прочитать; переустановка не поможет.",
+  "tunnel.status.last_exit.at": "Последняя остановка коннектора: {label} (в {at})",
+  "tunnel.status.last_exit.plain": "Последняя остановка коннектора: {label}",
+  "tunnel.status.login.deferred_retried": "Вход: обновление отложено — повтор выполнится автоматически.",
+  "tunnel.status.login.unchecked": "Вход: проверить не удалось (запрос на обновление не дошёл до Radient).",
+  "tunnel.status.requests.heading": "Запросы (последние {window}): {tally}",
+  "tunnel.status.requests.no_response": "нет ответа",
+  "tunnel.status.server_unavailable.label": "Ошибка сервера Radient",
+  "tunnel.status.server_unavailable.relay": "Radient ответил на проверку авторизации ретранслятора этого компьютера временной ошибкой сервера. Со входом и с этим компьютером всё в порядке; авторизация восстановится сама, когда Radient заработает.",
+  "tunnel.status.server_unavailable.terminal": "Radient ответил на проверку авторизации коннектора временной ошибкой сервера (HTTP 5xx), так что ни вход, ни этот компьютер не виноваты. Коннектор повторяет попытку каждые 10 секунд и сам авторизуется заново, когда Radient восстановится; никаких локальных команд не нужно."
+}

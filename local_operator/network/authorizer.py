@@ -227,7 +227,7 @@ class Authorizer:
             self._refused(link, effective, refusal, frame, capability=capability)
             raise refusal
 
-        session_id = self._session_scope(link, effective, frame)
+        session_id = self._session_scope(link, effective, frame, outer_op=outer_op)
         return Granted(action=effective, session_id=session_id, capability=capability)
 
     # -- steps --------------------------------------------------------------
@@ -319,7 +319,9 @@ class Authorizer:
             raise Refusal("unknown_op", f"{op!r} is not an operation this build dispatches")
         return OP_CAPABILITY[op]
 
-    def _session_scope(self, link: LinkContext, op: str, frame: dict[str, Any]) -> str | None:
+    def _session_scope(
+        self, link: LinkContext, op: str, frame: dict[str, Any], *, outer_op: str
+    ) -> str | None:
         """A session-scoped op must name a session THIS device owns.
 
         ``net_forward`` carries the session id in its inner frame; the network-scope
@@ -333,7 +335,20 @@ class Authorizer:
             # yet to own, and checking one would answer "you do not own it" to a
             # frame that is simply malformed.
             return None
-        inner = frame.get("frame") if isinstance(frame.get("frame"), dict) else None
+        # THE ID IS READ WHERE THE HANDLER READS IT (PR #3831 review). This took
+        # the inner ``frame`` dict for EVERY op, while every handler but the
+        # carriers reads the OUTER ``session_id``: a ``net_session_peek`` (or
+        # ``net_session_history``) frame with outer ``"../outside"`` and a stray
+        # inner ``{"session_id": <owned>}`` was granted as the owned session and
+        # read outside ``sessions/``. Only the two carriers forward an inner
+        # frame — ``net_forward`` and a stream's ``send`` (whose outer frame
+        # names no session; the stream was scoped at ``open``) — so only they
+        # are judged by it.
+        carrier = outer_op == "net_forward" or (
+            op == "net_stream" and frame.get("action") == "send"
+        )
+        raw_inner = frame.get("frame")
+        inner = raw_inner if carrier and isinstance(raw_inner, dict) else None
         session_id = ""
         if inner is not None:
             session_id = str(inner.get("session_id") or "")
