@@ -218,13 +218,13 @@ def test_landing_recursion_keeps_foreign_ledger_and_critical_ranks(home: Path) -
     # Isolate the recursion's contract: both spellings are ordinary paths
     # without ledger evidence, so dropping `foreign` silently returns LOW.
     target = Target(path=str(ordinary), op="delete", program="rm", landings=(str(foreign_dir),))
-    ranked = _rank(target, prot, SID, foreign)
+    ranked = _rank(target, prot, SID, foreign=foreign)
     assert ranked.risk is Risk.HIGH
     assert f"created by another session ({OTHER}" in ranked.reason
     assert _rank(target, prot, SID).risk is Risk.LOW
 
     target.landings = (str(home / ".local-operator" / "config.yml"),)
-    assert _rank(target, prot, SID, foreign).risk is Risk.CRITICAL
+    assert _rank(target, prot, SID, foreign=foreign).risk is Risk.CRITICAL
 
 
 def test_unrecorded_deep_dir_and_own_dir_stay_low(home: Path) -> None:
@@ -681,3 +681,85 @@ def test_lone_surrogate_target_does_not_raise(home: Path, rel: str) -> None:
         assert verdict.risk is Risk.HIGH, verdict.targets[0].reason
     else:
         assert verdict.risk is Risk.LOW and verdict.targets[0].reason == "ordinary path"
+
+
+# -- Convergence with #3802 (foreign worktree reach) ------------------------------------
+
+
+def test_rank_takes_the_foreign_ledger_by_keyword_only(home: Path) -> None:
+    """#3802 put ``globstar`` in the slot this PR's ``foreign`` had held.
+
+    Passed positionally, the ledger became ``globstar`` (truthy) and
+    ``foreign`` stayed None, so a foreign row ranked LOW with no error. The
+    keyword-only parameter turns that mix-up into a TypeError.
+    """
+    from local_operator.guardrails.classify import _protected, _rank
+    from local_operator.guardrails.resolve import Target
+
+    target = Target(path=str(_osworld(home)), op="delete", program="rm")
+    prot = _protected(_env(home), None, SID)
+    foreign = prov.ForeignCreations(SID)
+    try:
+        with pytest.raises(TypeError):
+            _rank(target, prot, SID, False, foreign)  # type: ignore[misc]
+        assert _rank(target, prot, SID, False, foreign=foreign).risk is Risk.HIGH
+    finally:
+        foreign.close()
+
+
+def _repo_with_worktrees(home: Path) -> Path:
+    repo = home / "src" / "repo"
+    repo.mkdir(parents=True)
+    git = ["git", "-c", "user.name=t", "-c", "user.email=t@example.com"]
+    subprocess.run([*git, "init", "-q", "-b", "main"], cwd=repo, check=True)
+    subprocess.run([*git, "commit", "-q", "--allow-empty", "-m", "init"], cwd=repo, check=True)
+    (repo / ".worktrees").mkdir()
+    return repo
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "rm -rf ~/src/repo/.worktrees/*",
+        "rm -rf ~/src/repo/.worktrees/theirs",
+        "rm -rf ~/src/repo/.worktrees",
+        "cd ~/src/repo && for d in theirs; do rm -rf .worktrees/$d; done",
+    ],
+    ids=["glob", "literal", "ancestor", "word-loop"],
+)
+def test_foreign_created_worktree_reached_any_way_is_high_naming_owner(
+    home: Path, command: str
+) -> None:
+    """A dir another session created that is ALSO a linked worktree (#3802 reach).
+
+    Whichever rule fires first — #3802's foreign-worktree reach or this PR's
+    foreign ledger — the rank is HIGH and the reason names the creator.
+    """
+    repo = _repo_with_worktrees(home)
+    _run(home, "git worktree add -q -b feat/theirs .worktrees/theirs main", sid=OTHER, cwd=repo)
+    assert prov.recorded_creators(str(repo / ".worktrees" / "theirs")) == [OTHER]
+    verdict = _verdict(home, command)
+    assert verdict.risk is Risk.HIGH, [(t.path, t.reason) for t in verdict.targets]
+    assert any(OTHER in t.reason for t in verdict.targets), [t.reason for t in verdict.targets]
+
+
+def test_glob_loop_over_a_foreign_created_worktree_is_not_low(home: Path) -> None:
+    """``for d in .worktrees/*; do rm -rf "$d"`` leaves ``$d`` opaque: HIGH as
+    unresolved before either worktree rule runs (as on main, #3802's
+    ``test_unrelated_loop_over_worktrees_is_not_low``), so no owner is named."""
+    repo = _repo_with_worktrees(home)
+    _run(home, "git worktree add -q -b feat/theirs .worktrees/theirs main", sid=OTHER, cwd=repo)
+    command = 'cd ~/src/repo && for d in .worktrees/*; do rm -rf "$d"; done'
+    assert _verdict(home, command).risk is Risk.HIGH
+
+
+def test_own_clean_worktree_glob_does_not_lower_a_foreign_dir_beside_it(home: Path) -> None:
+    """The own-tree route (#3802: own, clean, unknown PR = idle) must not
+    carry a foreign-created sibling the same glob reaches down to LOW."""
+    repo = _repo_with_worktrees(home)
+    _run(home, "git worktree add -q -b feat/mine .worktrees/mine main", sid=SID, cwd=repo)
+    _run(home, "mkdir .worktrees/scratch", sid=OTHER, cwd=repo)
+    assert _verdict(home, "rm -rf ~/src/repo/.worktrees/m*").risk is Risk.LOW  # control
+    verdict = _verdict(home, "rm -rf ~/src/repo/.worktrees/*")
+    assert verdict.risk is Risk.HIGH, [(t.path, t.reason) for t in verdict.targets]
+    assert any(OTHER in t.reason for t in verdict.targets), [t.reason for t in verdict.targets]

@@ -1124,6 +1124,11 @@ def _rank(
     prot: _Protected,
     session_id: str = "",
     globstar: bool = False,
+    *,
+    # Keyword-only (convergence with #3802, which added ``globstar`` in the
+    # same slot): passed positionally, a ``ForeignCreations`` landed in
+    # ``globstar`` — truthy, so ``foreign`` was silently None and a foreign
+    # row ranked LOW. A keyword-only parameter makes that mix-up a TypeError.
     foreign: ForeignCreations | None = None,
 ) -> RankedTarget:
     if target.landings:
@@ -1139,12 +1144,18 @@ def _rank(
                 prot,
                 session_id,
                 globstar,
-                foreign,
+                foreign=foreign,
             )
             for p in target.landings
         ]
         readings.append(
-            _rank(dataclasses.replace(target, landings=()), prot, session_id, globstar, foreign)
+            _rank(
+                dataclasses.replace(target, landings=()),
+                prot,
+                session_id,
+                globstar,
+                foreign=foreign,
+            )
         )
         return max(readings, key=lambda r: r.risk)
     path = target.path
@@ -1792,7 +1803,7 @@ def classify_targets(
     # only if some target reaches the LOW fallbacks in ``_rank``).
     foreign = ForeignCreations(session_id)
     try:
-        ranked = [_rank(t, prot, session_id, globstar, foreign) for t in targets]
+        ranked = [_rank(t, prot, session_id, globstar, foreign=foreign) for t in targets]
     finally:
         foreign.close()
     # An alternate parse's word (GNU sed's reading of ``-i ''``) counts only
