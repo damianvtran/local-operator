@@ -121,13 +121,15 @@ def test_the_phone_503_carries_the_remedy_kind(reason, kind):
 
 
 def test_every_reason_code_has_a_remedy_kind():
-    codes = {
-        value
-        for name, value in vars(gateway).items()
-        if name.isupper() and isinstance(value, str) and name in gateway.REASON_LABEL.keys()
-    }
-    assert set(gateway.REASON_LABEL) <= set(gateway.REMEDY_KIND) | {gateway.LOGIN_SUPERSEDED}
-    del codes
+    # A new reason cannot ship without the action a graphical surface offers.
+    assert set(gateway.REASON_LABEL) <= set(gateway.REMEDY_KIND)
+
+
+def test_the_capability_flag_is_advertised():
+    # The desktop gates every new kind on this key (absent => old handling).
+    from local_operator.server.features import static_feature_flags
+
+    assert static_feature_flags()["tunnel_remedy_kinds"] == 1
 
 
 @pytest.mark.parametrize(
