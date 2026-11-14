@@ -379,14 +379,16 @@ def strict_linux(
         message carries the errno name so a witness names the real cause.
 
         ESRCH is treated like ENOENT on the FIRST read only, and only as a
-        trigger for the same stat(path) proof: on Linux, read() of
-        /proc/<pid>/stat for a task that exits after open() returns ESRCH, not
-        ENOENT (witness: PR #3879 gate, xdist churn, census refused with
-        "unreadable /proc row", 170 PIDs scanned). ESRCH never excuses a PID by
-        itself: gone is still proven only by stat(path) raising ENOENT; a live
-        directory gets the one retry, and a second ESRCH there stays Unknown.
-        To extend: add exception types to the first `except` only if the kernel documents them
-        as "task no longer exists"; EACCES/EIO must never join. The
+        trigger for the same stat(path) proof. Believed (NOT reproduced) cause
+        of the witness (PR #3879 gate, xdist churn, census refused with
+        "unreadable /proc row", 170 PIDs scanned): on Linux a read() of
+        /proc/<pid>/stat for a task that exits after open() can return ESRCH
+        rather than ENOENT. ESRCH never excuses a PID by itself: gone is still
+        proven only by stat(path) raising ENOENT; a live directory gets the
+        one retry, and a second ESRCH there stays Unknown (the errno is named).
+        To extend: add exception types to the first `except` only if the
+        kernel documents them as "task no longer exists"; EACCES/EIO must
+        never join. The
         opening scan and the closing-delta reconciliation share this one
         proof so an added PID can never be excused by a weaker rule.
         """
