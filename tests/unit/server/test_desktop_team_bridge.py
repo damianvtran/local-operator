@@ -17,6 +17,8 @@ import os
 import sqlite3
 import subprocess
 import sys
+import threading
+import traceback
 from collections.abc import Iterator, Mapping
 from dataclasses import replace
 from pathlib import Path
@@ -119,8 +121,62 @@ _REAL_CLIENT_INIT = tb_client.TeamBridgeClient.__init__
 _REAL_POPEN_INIT = subprocess.Popen.__init__
 
 
+#: Parallel diagnostics to ``_TRIPWIRE["trips"]`` (kept name-only so the
+#: declared-trip controls that compare it keep working): one record per trip.
+#: Why it exists: CI run 43600785935 (test (3.12,3) gw0) failed two teardowns
+#: with ``httpx.HTTPTransport`` trips in cells that cannot build a sync
+#: transport themselves. INFERENCE (not reproduced): a thread leaked from an
+#: earlier cell on the same xdist worker constructed it. The log named no
+#: thread, so these records name the constructing thread and its stack the
+#: next time it happens. Diagnostics only — the audit condition is unchanged.
+_TRIP_DETAIL: list[dict[str, Any]] = []
+
+#: ``threading.get_ident()`` of the thread that armed the guard (the cell's).
+_ARMED_IDENT: list[int] = []
+
+_REPO_ROOT = Path(__file__).resolve().parents[3]
+
+
+def _short_stack(limit: int = 8) -> list[str]:
+    """The last ``limit`` frames as ``file:line func``, repo-relative paths."""
+
+    frames = traceback.extract_stack()[:-2][-limit:]
+    out: list[str] = []
+    for f in frames:
+        try:
+            shown = str(Path(f.filename).resolve().relative_to(_REPO_ROOT))
+        except ValueError:
+            shown = f.filename
+        out.append(f"{shown}:{f.lineno} {f.name}")
+    return out
+
+
+def _describe_trips(trips: list[str], detail: list[dict[str, Any]]) -> str:
+    """The audit's failure text: trip names plus who constructed each."""
+
+    lines = [str(trips)]
+    for d in detail:
+        where = "the cell's own thread" if d["same_thread"] else "a DIFFERENT thread"
+        lines.append(
+            f"  {d['name']} built by thread {d['thread_name']!r} "
+            f"(ident {d['thread_ident']}), {where}; stack (oldest first): "
+            + " <- ".join(d["stack"])
+        )
+    return "\n".join(lines)
+
+
 def _trip(name: str) -> NoReturn:
     _TRIPWIRE["trips"].append(name)
+    cur = threading.current_thread()
+    _TRIP_DETAIL.append(
+        {
+            "name": name,
+            "thread_name": cur.name,
+            "thread_ident": cur.ident,
+            "same_thread": bool(_ARMED_IDENT) and cur.ident == _ARMED_IDENT[0],
+            "stack": _short_stack(),
+        }
+    )
     raise AssertionError(f"GUARD TRIPPED: {name}")
 
 
@@ -269,6 +325,8 @@ def _install_wire_guard(monkeypatch: pytest.MonkeyPatch) -> None:
 
     _TRIPWIRE["trips"].clear()
     _TRIPWIRE["expected"].clear()
+    _TRIP_DETAIL.clear()
+    _ARMED_IDENT[:] = [threading.get_ident()]
     _OUTER_ATTEMPTS.clear()
     _retain_outer_noio_layer(monkeypatch)
     _arm_tripwire(monkeypatch)
@@ -279,7 +337,7 @@ def _audit_wire_guard() -> None:
 
     assert len(_TRIPWIRE["trips"]) == len(_TRIPWIRE["expected"]), (
         "a real wire object was constructed in a cell that did not declare it: "
-        f"{_TRIPWIRE['trips']}"
+        f"{_describe_trips(_TRIPWIRE['trips'], _TRIP_DETAIL)}"
     )
 
 
@@ -4736,3 +4794,28 @@ async def test_put_settings_clears_the_choice_with_an_empty_string(api):
     )
     assert response.status_code == 200, response.text
     assert response.json()["result"]["screening"]["preferred"] is None
+
+
+def test_trip_from_a_helper_thread_is_named_in_the_audit_message() -> None:
+    """A trip from another thread yields a message naming that thread.
+
+    Calls ``_trip`` from a helper thread (its AssertionError is expected and
+    swallowed there), formats with ``_describe_trips``, then restores the ledger
+    so the autouse audit still passes for this cell.
+    """
+
+    def worker() -> None:
+        with contextlib.suppress(AssertionError):
+            _trip("httpx.HTTPTransport")
+
+    t = threading.Thread(target=worker, name="leaky-helper-thread")
+    t.start()
+    t.join()
+    msg = _describe_trips(list(_TRIPWIRE["trips"]), list(_TRIP_DETAIL))
+    # Undo before asserting so a failure here is not masked by the audit.
+    _TRIPWIRE["trips"].clear()
+    _TRIP_DETAIL.clear()
+    assert "httpx.HTTPTransport" in msg
+    assert "leaky-helper-thread" in msg
+    assert "a DIFFERENT thread" in msg
+    assert "test_desktop_team_bridge.py" in msg and "worker" in msg
