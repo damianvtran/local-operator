@@ -146,8 +146,8 @@ Treat every `ask` as QUEUED: it returns a receipt, and the answer arrives later
 as its own turn — a receipt is never consent, so run nothing the ask was meant
 to authorise until then. Continue other work meanwhile, or end the turn saying
 what is queued. On a timeout notice take your own recommendation only where it
-is reversible and say what you assumed; a timeout is never consent, so leave any
-delete, overwrite or irreversible step undone and report it; for an urgent one, delegate the question to a `task` subagent and
+is reversible and say what you assumed; a timeout is never consent: deletes and
+overwrites wait; for an urgent one, delegate the question to a `task` subagent and
 decide on its answer. Before you end a turn, settle every ask the user's
 messages answered (`ask_withdraw` with `answered_in_chat` and their words) or
 made irrelevant (`moot`: they dropped or handed off the work the question was
