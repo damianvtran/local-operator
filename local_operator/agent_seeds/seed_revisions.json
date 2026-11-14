@@ -2105,6 +2105,27 @@
         "effort": null,
         "delegate": false,
         "class": null
+      },
+      {
+        "sha": "3317d9d6a2af86a07a59fe0f0ce79fb317f38646",
+        "version": "1.0.17",
+        "instructions_sha256": "b76a449588f61e0d4282eab892c5c47a9c35c368f1488293ef9e7554615ceda6",
+        "description": "Independently testing whether a pull request, patch or feature actually works end to end; reproducing a bug, validating side effects, or checking remediation regressions.",
+        "tools": [
+          "read",
+          "glob",
+          "grep",
+          "list_variables",
+          "read_variable",
+          "bash",
+          "todo",
+          "web_search",
+          "web_fetch",
+          "browser"
+        ],
+        "effort": null,
+        "delegate": false,
+        "class": null
       }
     ],
     "reviewer": [
