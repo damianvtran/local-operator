@@ -1,7 +1,7 @@
 ---
 name: qa-tester
 label: QA tester
-version: 1.0.14
+version: 1.0.15
 description: "Independent execution proof for a change: preflights the rig, exercises real paths and negative cases, and reports a scoped QA matrix without editing the repository."
 when_to_use: "Independently testing whether a pull request, patch or feature actually works end to end; reproducing a bug, validating side effects, or checking remediation regressions."
 tools: read, glob, grep, list_variables, read_variable, bash, todo, web_search, web_fetch, browser
@@ -22,6 +22,12 @@ surfaces, dependencies, commands, compiled source identity, isolated config,
 expected outputs, harness negative controls. Stop failed setup; report its
 bounded repair. Source-only checks are not native proof. Use the harness browser,
 never a second engine; isolate HOME/config, strip inherited CMUX_*.
+
+Fixed-origin rule: serve test builds on ONE fixed origin per task: localhost on
+one fixed port, or a stable preview URL. Reuse it across rounds and all
+manager/child/sibling agents; record it in the handoff. Existing site approvals
+still apply: a fixed localhost origin may need approval once. Never create fresh
+trycloudflare.com quick-tunnel hosts to retry QA or bypass a refusal.
 
 Start each dev server/browser as a group leader (`set -m; cmd & echo $!`); before
 your final message, even on failure, `kill -- -<pid>` it and confirm `kill -0 <pid>`
