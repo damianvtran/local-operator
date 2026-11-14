@@ -906,9 +906,11 @@ def _answered_ask(
     *,
     answer: str,
     surface: str = "desktop",
+    command: str | None = None,
 ) -> None:
     """One ask, answered ``answer`` on ``surface`` (``desktop`` is trusted)."""
     now = int(time.time() * 1000)
+    extra = {"command": command, "command_target": "agent"} if command else {}
     rows = [
         {
             "v": 1,
@@ -925,6 +927,7 @@ def _answered_ask(
                     "options": options,
                     "multi": False,
                     "question_id": "",
+                    **extra,
                 }
             ],
         },
@@ -989,6 +992,69 @@ async def test_a_description_only_path_without_a_trusted_yes_still_refuses(
     judge = _Judge("ALLOW ask=a-de5e")
     outcome = await _check(deep, "rm -rf ~/descr-only/tree", judge)
     assert outcome is not None and outcome.blocked and judge.prompts == []
+
+
+# -- Suggested-command field (PR #3926): refusal-side naming only ------------------
+
+CMD_OPTIONS = [{"label": "Yes, run it"}, {"label": "No"}]
+CMD_ONLY = "rm -rf ~/bench/rigs"
+
+
+@pytest.mark.asyncio
+async def test_a_timed_out_ask_naming_a_path_only_in_its_command_is_refused(
+    deep: Path,
+) -> None:
+    """The ask names ``~/bench/rigs`` only in its suggested ``command`` and timed
+    out: the path is refused deterministically, not left LOW."""
+    created = int(time.time() * 1000) - 2 * 3_600_000
+    row = {
+        "v": 1,
+        "kind": "queued",
+        "ask_id": "a-c0d1",
+        "at": created,
+        "created_at": created,
+        "expires_at": created + 3_600_000,
+        "timeout_s": 3600,
+        "questions": [
+            {
+                "id": "q",
+                "question": "Free the disk space?",
+                "options": CMD_OPTIONS,
+                "multi": False,
+                "question_id": "",
+                "command": CMD_ONLY,
+                "command_target": "agent",
+            }
+        ],
+    }
+    with (deep / ".local-operator" / "sessions" / S / "asks.jsonl").open("a") as fh:
+        fh.write(json.dumps(row) + "\n")
+    judge = _Judge("ALLOW ask=a-c0d1")  # would be fooled if asked
+    outcome = await _check(deep, CMD_ONLY, judge)
+    assert outcome is not None and outcome.blocked
+    assert judge.prompts == []
+    assert NOT_CONSENT_TEXT in outcome.text
+    assert (deep / "bench/rigs/r1").is_dir()
+
+
+@pytest.mark.asyncio
+async def test_a_trusted_yes_does_not_lift_a_path_named_only_in_its_command(
+    deep: Path,
+) -> None:
+    """M3 rule: a trusted yes reads question + labels only, and the refusal side
+    reads the kept question the same way, so a command-only path keeps its base
+    rank (LOW here): neither approved by the yes nor refused."""
+    _answered_ask(
+        deep, "a-c0d2", "Free the disk space?", CMD_OPTIONS, answer="Yes, run it", command=CMD_ONLY
+    )
+    [ask] = prov.unanswered_asks(S)
+    assert ask.answer is not None
+    assert "bench" not in ask.text and "bench" not in ask.answer.text
+    assert _rank(deep, CMD_ONLY).risk is Risk.LOW
+    judge = _Judge("BLOCK")
+    outcome = await _check(deep, CMD_ONLY, judge)
+    assert outcome is None or not outcome.blocked, outcome and outcome.text
+    assert judge.prompts == []
 
 
 AB_OPTIONS = [

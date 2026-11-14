@@ -2293,6 +2293,15 @@ def _ask_question_text(q: Mapping[str, Any], *, descriptions: bool = False) -> s
     non-declining answer (review m4/QA Q2 vs R2-M3). No closing bracket after
     the last option: ``_PATHISH`` would keep it on a trailing glob
     (``~/osworld/runs*]``), which then matches nothing.
+
+    The suggested terminal command (``AskQuestion.command``, PR #3926; stored
+    on the question only, never per option) rides with ``descriptions``: it
+    is the agent's proposal, like a description, not words the operator
+    approved. So it names a path on the REFUSAL side (``rm -rf ~/bench/rigs``
+    suggested, then the ask timed out: refuse, not LOW), but a trusted yes
+    never lifts a path named only there — consent reads question + labels
+    (review R2-M3), and a kept question's refusal text matches it, so such a
+    path keeps its base rank, exactly as a description-only path does.
     """
     options = "; ".join(
         (
@@ -2303,7 +2312,12 @@ def _ask_question_text(q: Mapping[str, Any], *, descriptions: bool = False) -> s
         for o in q.get("options") or []
         if isinstance(o, Mapping)
     )
-    return f"Q: {q.get('question') or ''} | options: {options}"
+    command = q.get("command")
+    suggested = (
+        f" | suggested command: {command}" if descriptions and isinstance(command, str) else ""
+    )
+    # Before the options: the text keeps ending on the last option (see above).
+    return f"Q: {q.get('question') or ''}{suggested} | options: {options}"
 
 
 def ask_citation_covers(
