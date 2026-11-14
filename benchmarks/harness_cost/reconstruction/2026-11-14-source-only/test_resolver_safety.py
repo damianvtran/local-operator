@@ -50,7 +50,7 @@ class ResolverSafetyTests(unittest.TestCase):
             prefix = 'import hashlib,json,os,pathlib,resource,signal,subprocess,sys,time\n' + functions(code)
             prefix += '\nA=pathlib.Path(' + repr(str(a)) + ');source_head="0"*40\n'
             prefix += 'docker_raw=A/"stub.raw";raw_baseline=0\ndef disk_sample(*args): return {"docker_raw_allocated_bytes":0,"free_bytes":40*1024**3}\n'
-            prefix += 'cmd=[sys.executable,' + repr(str(client)) + ',str(A)];D=[sys.executable,' + repr(str(docker)) + ',str(A)]\n'
+            prefix += 'cmd=[sys.executable,' + repr(str(client)) + ',str(A)];D=[sys.executable,' + repr(str(docker)) + ',str(A)];CLI_ENV={"PATH":os.defpath,"HOME":str(A)}\n'
             if not terminate:
                 # Expire the declared 900 s lease only AFTER the owned stub is
                 # ready; scaling interpreter startup time caused a setup race.

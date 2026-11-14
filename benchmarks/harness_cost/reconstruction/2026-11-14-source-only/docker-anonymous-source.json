@@ -1,0 +1,24 @@
+{
+  "anonymous_reason": "nonempty map suppresses default-store detection; no configured store/helper; empty file auth record; auth environment overrides excluded",
+  "chosen_config": {
+    "auths": {
+      "https://index.docker.io/v1/": {}
+    },
+    "credHelpers": {},
+    "credsStore": ""
+  },
+  "contains_auth_rule": "CredentialsStore nonempty OR len(CredentialHelpers)>0 OR len(AuthConfigs)>0",
+  "license_source": {
+    "file": "metadata/docker-cli-license-2d81ea060825006fc8f3fe28aa5dc0ffeb80faf325b612c955229157b8c10dc0.txt",
+    "name": "docker-cli-license",
+    "recorded_at": "2026-11-14T18:37:24.791712+00:00",
+    "sha256": "2d81ea060825006fc8f3fe28aa5dc0ffeb80faf325b612c955229157b8c10dc0",
+    "status": "available",
+    "url": "https://raw.githubusercontent.com/docker/cli/fdd4b8e5da335e1d0d83d29af5045f57280cd694/LICENSE"
+  },
+  "real_keychain_helper_executed": false,
+  "receipt": "metadata-receipt-20261114T181800779675Z.jsonl",
+  "runtime_docker_executed": false,
+  "source_commit": "fdd4b8e5da335e1d0d83d29af5045f57280cd694",
+  "test_limit": "Python sentinel driver follows pinned source-selection semantics; not a native Docker CLI smoke test"
+}

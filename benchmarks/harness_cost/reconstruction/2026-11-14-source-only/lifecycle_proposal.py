@@ -31,6 +31,31 @@ def require(condition, message):
         raise RuntimeError('STOP: ' + message)
 
 
+def write_anonymous_cli_config(directory):
+    """A non-empty AuthConfigs map suppresses Docker's helper auto-detection.
+
+    Docker CLI fdd4b8e5da335e1d0d83d29af5045f57280cd694:
+    LoadDefaultConfigFile calls DetectDefaultStore only if !ContainsAuth();
+    ContainsAuth counts map entries, not passwords. With no configured store or
+    helper, GetCredentialsStore selects file storage and this empty record is
+    anonymous. Empty auths={} would NOT suppress macOS osxkeychain detection.
+    """
+    config={'auths':{'https://index.docker.io/v1/':{}},'credsStore':'','credHelpers':{}}
+    with (directory/'config.json').open('x') as out:
+        out.write(json.dumps(config,sort_keys=True)+'\n')
+    return config
+
+
+def anonymous_cli_environment(directory):
+    # Whitelist instead of copying DOCKER_AUTH_CONFIG or private proxy/token
+    # variables. Never retrieve/read the operator's credential configuration.
+    home=directory/'docker-home' if directory is not None else Path.home()
+    return {'HOME':str(home),'PATH':'/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin:/opt/homebrew/bin',
+            'LANG':'C','LC_ALL':'C','PYTHONDONTWRITEBYTECODE':'1',
+            'GIT_CONFIG_SYSTEM':'/dev/null','GIT_CONFIG_GLOBAL':'/dev/null',
+            'GIT_TERMINAL_PROMPT':'0','GIT_ASKPASS':'/usr/bin/false'}
+
+
 def verify_caps(info):
     memory, cpus = info.get('MemTotal'), info.get('NCPU')
     require(type(memory) is int and type(cpus) is int and 0 < memory <= CAP and 0 < cpus <= 2, 'observed docker info exceeds 4.3 GB/2 CPUs or is invalid')
@@ -147,7 +172,8 @@ class NativeOps:
         try:
             blocked={signal.SIGTERM,signal.SIGINT};mask=signal.pthread_sigmask(signal.SIG_BLOCK,blocked)
             try:
-                proc=subprocess.Popen(args,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True,start_new_session=True,
+                proc=subprocess.Popen(args,stdin=subprocess.DEVNULL,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True,start_new_session=True,
+                                      env=anonymous_cli_environment(self.directory),
                                       preexec_fn=lambda:signal.pthread_sigmask(signal.SIG_UNBLOCK,blocked))
                 self.clients.append(proc)
             finally:signal.pthread_sigmask(signal.SIG_SETMASK,mask)
@@ -158,7 +184,7 @@ class NativeOps:
                     break
                 except subprocess.TimeoutExpired:
                     require(self.now()<limit,'owned command deadline exhausted')
-                    if self.monitor_enabled and not self.monitoring:
+                    if self.cleanup_until is None and self.monitor_enabled and not self.monitoring:
                         self.check_disk()
                         if self.now()>=self.next_rss:
                             self.monitoring=True
@@ -212,6 +238,8 @@ class NativeOps:
         require(self.a['attempt_id'] not in {'','.', '..'},'empty attempt id')
         self.directory.parent.mkdir(exist_ok=True);self.directory.mkdir(mode=0o700)
         (self.directory/'docker-config').mkdir()
+        (self.directory/'docker-home').mkdir()
+        write_anonymous_cli_config(self.directory/'docker-config')
         self.d=['docker','--config',str(self.directory/'docker-config'),'--host','unix:///var/run/docker.sock']
         self.deadline=self.now()+840
         self.samples.append({'phase':'PRE-startup','allocated_bytes':self.baseline,'free_bytes':fs.f_bavail*fs.f_frsize})
@@ -220,7 +248,7 @@ class NativeOps:
     def start_owned(self):
         blocked={signal.SIGTERM,signal.SIGINT};mask=signal.pthread_sigmask(signal.SIG_BLOCK,blocked)
         try:
-            self.proc=subprocess.Popen([str(self.desktop)],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,start_new_session=True,
+            self.proc=subprocess.Popen([str(self.desktop)],stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,start_new_session=True,
                                        preexec_fn=lambda:signal.pthread_sigmask(signal.SIG_UNBLOCK,blocked))
             rows=self.snapshot();row=next((p for p in rows if p['pid']==self.proc.pid),None)
             require(self.proc.poll() is None and row is not None and row['exe']==str(self.desktop),'Desktop startup identity unprovable')
@@ -263,6 +291,15 @@ class NativeOps:
         self.samples.append({'phase':'during','allocated_bytes':allocated,'free_bytes':fs.f_bavail*fs.f_frsize})
         require(allocated-self.baseline <= 5*1024**3 and fs.f_bavail*fs.f_frsize >= 25*1024**3,'raw allocation/free disk fence')
         require(self.now() < self.deadline,'whole-lifecycle working lease exhausted; reserve cleanup')
+    def check_cleanup_resources(self):
+        # Same physical fences, but NEVER re-enter the already-expired work
+        # deadline. Cleanup has its own budget and must retire owned work.
+        require(self.cleanup_until is not None and self.now()<self.cleanup_until,'owned cleanup budget exhausted')
+        current=self.raw.stat();fs=os.statvfs(self.root)
+        require(self.raw_identity is None or self.raw_identity==(current.st_dev,current.st_ino),'cleanup raw-file identity changed; still retire owned container')
+        sample={'phase':'cleanup','allocated_bytes':current.st_blocks*512,'free_bytes':fs.f_bavail*fs.f_frsize}
+        self.samples.append(sample)
+        require(sample['allocated_bytes']-self.baseline<=5*1024**3 and sample['free_bytes']>=25*1024**3,'cleanup resource fence crossed; still retire owned container')
     def cached_carrier(self):
         require(not self.command(self.d+['ps','-q'])[1].strip(),'foreign auto-started workloads; no pull/resolver')
         code,out,err=self.command(self.d+['image','inspect',self.p['base_image']],check=False)
@@ -283,10 +320,10 @@ class NativeOps:
         require(not self.command(self.d+['ps','-q'])[1].strip(),'foreign running containers; resolver forbidden')
         code=(HERE/'RESOLVER-COMMAND.md').read_text().split('```python\n',1)[1].split('\n```',1)[0]
         path=self.directory/'resolver-supervisor.py';path.write_text(code)
-        env=dict(os.environ,BENCH_LIFECYCLE_DIR=str(self.directory),PYTHONPATH=str(HERE))
+        env=dict(anonymous_cli_environment(self.directory),BENCH_LIFECYCLE_DIR=str(self.directory),PYTHONPATH=str(HERE))
         blocked={signal.SIGTERM,signal.SIGINT};mask=signal.pthread_sigmask(signal.SIG_BLOCK,blocked)
         try:
-            self.resolver=subprocess.Popen([sys.executable,'-B',str(path)],cwd=HERE,env=env,start_new_session=True,
+            self.resolver=subprocess.Popen([sys.executable,'-B',str(path)],cwd=HERE,env=env,stdin=subprocess.DEVNULL,start_new_session=True,
                                            preexec_fn=lambda:signal.pthread_sigmask(signal.SIG_UNBLOCK,blocked))
         finally:signal.pthread_sigmask(signal.SIG_SETMASK,mask)
     def resolver_done(self):
@@ -296,30 +333,52 @@ class NativeOps:
     def begin_cleanup(self):
         signal.alarm(0)  # Work alarm must not re-enter termination during cleanup.
         self.cleanup_until=self.now()+60
-    def stop_owned_resolver(self):
-        if self.resolver is not None and self.resolver.poll() is None:
-            os.killpg(self.resolver.pid,signal.SIGTERM)
-            limit=self.now()+45
-            try:
-                while self.resolver.poll() is None and self.now()<limit:
-                    self.check_disk()
-                    if self.now()>=self.next_rss:
-                        require(self.vm_helper(self.owner)['rss_bytes']<=CAP,'VM helper RSS over cap during cleanup')
-                    self.sleep(0.5)
-            finally:
-                if self.resolver.poll() is None:
-                    os.killpg(self.resolver.pid,signal.SIGKILL)
-                self.resolver.wait(timeout=5)
-        # The inner stage's directory was absent at preflight and created only
-        # by this owned child. Recover its exact CID if a signal interrupted its
-        # own finally; never classify that known container as foreign work.
+    def recover_owned_container(self):
+        # Recovery is attempted even after monitor/client failures, but it may
+        # never exceed the independent cleanup budget or touch an unknown CID.
         cid=self.root/'resolver/linux-amd64-01/container.cid'
-        if self.resolver is not None and cid.exists():
-            owned=cid.read_text().strip()
-            require(re.fullmatch(r'[0-9a-f]{64}',owned) is not None,'invalid owned CID; no broad cleanup')
-            self.command(self.d+['rm','--force',owned],check=False)
-            code,_,err=self.command(self.d+['container','inspect',owned],check=False)
-            require(code!=0 and ('No such object' in err or 'No such container' in err),'owned container absence not proven')
+        if self.resolver is None or not cid.exists():return
+        require(self.cleanup_until is not None,'cleanup budget not established; no unbounded recovery commands')
+        owned=cid.read_text().strip()
+        require(re.fullmatch(r'[0-9a-f]{64}',owned) is not None,'invalid owned CID; no broad cleanup')
+        removal_error=None
+        try:self.command(self.d+['rm','--force',owned],check=False)
+        except BaseException as error:removal_error=type(error).__name__+': '+str(error)
+        # A timed-out remove is not proof either way. Always try authoritative
+        # absence verification; command() still enforces remaining cleanup time.
+        code,_,err=self.command(self.d+['container','inspect',owned],check=False)
+        absent=code!=0 and ('No such object' in err or 'No such container' in err)
+        self.samples.append({'phase':'owned-CID-recovery','absence_verified':absent,'remove_error':removal_error})
+        require(absent,'owned container absence not proven')
+    def stop_owned_resolver(self):
+        failures=[]
+        try:
+            if self.resolver is not None and self.resolver.poll() is None:
+                try:os.killpg(self.resolver.pid,signal.SIGTERM)
+                except ProcessLookupError:pass
+                # Existing 60 s cleanup envelope: reserve 5 s for reap, two
+                # 15 s CID calls and 15 s for Desktop retirement BEFORE granting
+                # client grace. These are budget allocations, not latency claims.
+                require(self.cleanup_until is not None,'cleanup budget not established')
+                limit=min(self.now()+45,self.cleanup_until-50)
+                try:
+                    while self.resolver.poll() is None and self.now()<limit:
+                        self.check_cleanup_resources()
+                        if self.now()>=self.next_rss:
+                            require(self.vm_helper(self.owner)['rss_bytes']<=CAP,'VM helper RSS over cap during cleanup')
+                        self.sleep(0.5)
+                finally:
+                    if self.resolver.poll() is None:
+                        try:os.killpg(self.resolver.pid,signal.SIGKILL)
+                        except ProcessLookupError:pass
+                    self.resolver.wait(timeout=max(0.001,min(5,self.cleanup_until-self.now())))
+        except BaseException as error:failures.append(type(error).__name__+': '+str(error))
+        finally:
+            # A failed monitor or expired WORK lease must not skip CID recovery.
+            self.monitor_enabled=False
+            try:self.recover_owned_container()
+            except BaseException as error:failures.append(type(error).__name__+': '+str(error))
+        require(not failures,'owned cleanup incomplete/monitor failed: '+'; '.join(failures))
     def quit_owned(self,owner):
         # No bundle-wide quit, pkill, settings route or unknown process takeover.
         self.monitor_enabled=False

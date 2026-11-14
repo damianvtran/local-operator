@@ -163,7 +163,7 @@ if not (admission.get('go') is True and admission.get('attempt_id')=='linux-amd6
         and 'vm_caps_verified_before_start' not in admission
         and admission.get('full_scope_review',{}).get('kind') == 'full-scope'):
     raise SystemExit('STOP: no fresh full-scope GO/window/fleet/operator acknowledgement')
-from lifecycle_proposal import ACK_QUOTE, verify_caps, verify_carrier
+from lifecycle_proposal import ACK_QUOTE, verify_caps, verify_carrier, write_anonymous_cli_config, anonymous_cli_environment
 if admission.get('operator_ack_quote') != ACK_QUOTE:
     raise SystemExit('STOP: exact operator acknowledgement missing')
 lifecycle=pathlib.Path(os.environ.get('BENCH_LIFECYCLE_DIR','/INVALID'))
@@ -181,14 +181,17 @@ assert hashlib.sha256(W.read_bytes()).hexdigest() == pins['uv_wheel']['sha256']
 A = ROOT / 'resolver/linux-amd64-01'
 A.parent.mkdir(parents=True, exist_ok=True)
 A.mkdir(mode=0o700)  # exclusive: an earlier attempt is never overwritten
-for name in ('input', 'output', 'docker-config'):
+for name in ('input', 'output', 'docker-config', 'docker-home'):
     (A / name).mkdir()
+write_anonymous_cli_config(A/'docker-config')
+CLI_ENV=anonymous_cli_environment(A)
 (A/'input/desk-admission.json').write_text(json.dumps(admission,sort_keys=True))
 D = ['docker', '--config', str(A / 'docker-config'), '--host', 'unix:///var/run/docker.sock']
-# Empty owned config avoids the operator's credential store/context helpers.
+# Explicit anonymous auth entry suppresses helper auto-detection; environment
+# whitelisting excludes DOCKER_AUTH_CONFIG and operator credential overrides.
 try:
-    verify_caps(json.loads(subprocess.check_output(D+['info','--format','{{json .}}'],timeout=10)))
-    image = json.loads(subprocess.check_output(D + ['image', 'inspect', pins['base_image']], timeout=15))[0]
+    verify_caps(json.loads(subprocess.check_output(D+['info','--format','{{json .}}'],timeout=10,env=CLI_ENV)))
+    image = json.loads(subprocess.check_output(D + ['image', 'inspect', pins['base_image']], timeout=15,env=CLI_ENV))[0]
     verify_carrier(image,pins)
     assert image['Architecture'] == 'amd64' and image['Os'] == 'linux'
 except BaseException as error:
@@ -264,7 +267,7 @@ with (A / 'stdout.log').open('xb') as log:
             def child_setup():
                 resource.setrlimit(resource.RLIMIT_FSIZE,(16777216,16777216))
                 signal.pthread_sigmask(signal.SIG_UNBLOCK,blocked)
-            proc=subprocess.Popen(cmd,stdout=log,stderr=subprocess.STDOUT,start_new_session=True,
+            proc=subprocess.Popen(cmd,stdout=log,stderr=subprocess.STDOUT,start_new_session=True,env=CLI_ENV,
                                   preexec_fn=child_setup)
         finally:
             # Deliver a pending termination only after ownership is recorded.
@@ -296,8 +299,8 @@ with (A / 'stdout.log').open('xb') as log:
         cid=A/'container.cid'
         if cid.exists():
             owned=cid.read_text().strip()
-            subprocess.run(D+['rm','--force',owned],capture_output=True,timeout=15,check=False)
-            check=subprocess.run(D+['container','inspect',owned],capture_output=True,text=True,timeout=15,check=False)
+            subprocess.run(D+['rm','--force',owned],capture_output=True,timeout=15,check=False,env=CLI_ENV)
+            check=subprocess.run(D+['container','inspect',owned],capture_output=True,text=True,timeout=15,check=False,env=CLI_ENV)
             absent=check.returncode != 0 and ('No such container' in check.stderr or 'No such object' in check.stderr)
             if not absent:
                 (A/'cleanup-failure.json').write_text(json.dumps({'status':'cleanup-unverified','returncode':check.returncode,'stderr':check.stderr}))

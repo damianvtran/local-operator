@@ -1,0 +1,43 @@
+test_actual_anonymous_config_suppresses_sentinel_autodetection (test_cleanup_auth.AuthTests.test_actual_anonymous_config_suppresses_sentinel_autodetection) ... FAIL
+test_actual_command_does_not_reenter_failed_work_monitor_in_cleanup (test_cleanup_auth.CleanupTests.test_actual_command_does_not_reenter_failed_work_monitor_in_cleanup) ... ERROR
+test_monitor_failure_still_reaches_known_cid_removal_and_verification (test_cleanup_auth.CleanupTests.test_monitor_failure_still_reaches_known_cid_removal_and_verification) ... FAIL
+
+======================================================================
+ERROR: test_actual_command_does_not_reenter_failed_work_monitor_in_cleanup (test_cleanup_auth.CleanupTests.test_actual_command_does_not_reenter_failed_work_monitor_in_cleanup)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "~/local-operator/.worktrees/benchmark-reconstruction-20261114/benchmarks/harness_cost/reconstruction/2026-11-14-source-only/test_cleanup_auth.py", line 44, in test_actual_command_does_not_reenter_failed_work_monitor_in_cleanup
+    self.assertEqual(ops.command(['stub-command'])[1],'ok')
+                     ~~~~~~~~~~~^^^^^^^^^^^^^^^^^^
+  File "~/local-operator/.worktrees/benchmark-reconstruction-20261114/benchmarks/harness_cost/reconstruction/2026-11-14-source-only/lifecycle_proposal.py", line 162, in command
+    self.check_disk()
+    ~~~~~~~~~~~~~~~^^
+  File "~/local-operator/.worktrees/benchmark-reconstruction-20261114/benchmarks/harness_cost/reconstruction/2026-11-14-source-only/test_cleanup_auth.py", line 20, in <lambda>
+    ops.check_disk=lambda:(_ for _ in ()).throw(RuntimeError('expired work deadline'))
+                          ~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "~/local-operator/.worktrees/benchmark-reconstruction-20261114/benchmarks/harness_cost/reconstruction/2026-11-14-source-only/test_cleanup_auth.py", line 20, in <genexpr>
+    ops.check_disk=lambda:(_ for _ in ()).throw(RuntimeError('expired work deadline'))
+RuntimeError: expired work deadline
+
+======================================================================
+FAIL: test_actual_anonymous_config_suppresses_sentinel_autodetection (test_cleanup_auth.AuthTests.test_actual_anonymous_config_suppresses_sentinel_autodetection)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "~/local-operator/.worktrees/benchmark-reconstruction-20261114/benchmarks/harness_cost/reconstruction/2026-11-14-source-only/test_cleanup_auth.py", line 50, in test_actual_anonymous_config_suppresses_sentinel_autodetection
+    self.assertTrue(hasattr(target,'write_anonymous_cli_config'),'explicit anonymous config helper missing')
+    ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: False is not true : explicit anonymous config helper missing
+
+======================================================================
+FAIL: test_monitor_failure_still_reaches_known_cid_removal_and_verification (test_cleanup_auth.CleanupTests.test_monitor_failure_still_reaches_known_cid_removal_and_verification)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "~/local-operator/.worktrees/benchmark-reconstruction-20261114/benchmarks/harness_cost/reconstruction/2026-11-14-source-only/test_cleanup_auth.py", line 36, in test_monitor_failure_still_reaches_known_cid_removal_and_verification
+    self.assertTrue(any(args[-3:]==['rm','--force','a'*64] for args in calls),calls)
+    ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: False is not true : []
+
+----------------------------------------------------------------------
+Ran 3 tests in 0.308s
+
+FAILED (failures=2, errors=1)

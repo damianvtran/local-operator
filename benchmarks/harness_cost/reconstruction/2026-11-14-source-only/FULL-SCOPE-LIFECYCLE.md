@@ -6,6 +6,19 @@ it does NOT approve this expanded Desktop lifecycle or optional pull. The next
 independent review MUST cover the WHOLE command/lifecycle/ownership/resource/pull
 scope, not merely a delta, and explicitly sign off any optional digest pull.
 
+## Round 6 disposition — NO optional-pull signoff
+
+Full review 401077fb590a at 1163494896d6 found MAJOR R6/R7. The unified fixes,
+actual-adapter RED/GREEN tests and immutable Docker CLI authentication-source proof
+are in REMEDIATION-R6-R7.md and docker-anonymous-source.json. NOPULL stays the
+current disposition; no review or desk execution permission is inferred here.
+Cleanup checks now use their own bounded budget, never an expired WORK lease;
+monitor/client failures cannot skip known-CID removal and absence verification.
+Failures are reported after recovery attempts, not represented as successful
+cleanup. CLI config is explicitly anonymous (a non-empty empty-auth record), not
+an empty config that can autodetect osxkeychain; CLI auth environment overrides
+are excluded. Source/sentinel proof is NOT native credential-helper proof.
+
 ## Operator acknowledgement, not fabricated verification
 
 Operator answer **a-7072**, relayed via desk 5170, verbatim:
@@ -86,7 +99,8 @@ network download, arbitrary dependency fallback or implicit pull request.
    cannot be established, stop the exact owned root child and record cleanup
    uncertainty; no container may follow an unproved start.
 3. FIRST readiness API is docker info. Over-cap/invalid MemTotal/NCPU aborts before
-   any container and enters owned cleanup. No configuration write or settings read.
+   any container and enters owned cleanup. No Desktop/global configuration write or settings read. The explicitly anonymous
+   CLI config is written only inside the new owned attempt directory.
 4. Attribute exactly ONE actual VM runner: recognized Apple virtualization helper,
    Docker virtualization helper or bundled qemu runner. A familiar name is NOT
    enough. It must be new since pre-start and descend from the still-live exact

@@ -2,6 +2,12 @@
   "base_image": "docker.io/library/python@sha256:9bbb8720ae0a24a6ca8dd678bfdf57818fe70caf54c52a53ec01d8db43405056",
   "base_reported_compressed_bytes": 44588823,
   "base_tag_observed": "3.14.0-slim-bookworm",
+  "cli_authentication": {
+    "anonymous_config": "nonempty blank Docker Hub auth record; no store/helpers",
+    "environment": "whitelist; no operator auth overrides",
+    "native_cli_credential_probe_performed": false,
+    "proof": "docker-anonymous-source.json"
+  },
   "desk_admission": {
     "default_pull": false,
     "docker_raw_growth_stop_gib": 5,
@@ -13,6 +19,7 @@
     "minimum_free_gib_at_start": 30,
     "operator_ack_id": "a-7072",
     "optional_digest_pull_requires_new_full_scope_review": true,
+    "optional_pull_review_disposition": "NO SIGNOFF in round6; NOPULL until explicit clean review and desk authority",
     "post_start_mem_total_max_bytes": 4300000000,
     "post_start_ncpu_max": 2,
     "prestart_cap_validation": "SKIPPED-with-operator-ack-NOT-verified",
