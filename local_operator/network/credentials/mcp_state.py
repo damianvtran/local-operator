@@ -218,6 +218,46 @@ def clear(network_id: str, key: str, *, root: Path | None = None) -> None:
         return
 
 
+def retire_held(
+    network_id: str,
+    keys: Any = None,
+    *,
+    code: str,
+    root: Path | None = None,
+) -> None:
+    """Rewrite ``held`` rows as ``revoked`` (with ``code``) when a hold ends for cause.
+
+    WHY (review #3947 m2): a ``held`` row is written on each held serve and says
+    "held until HH:MM UTC". A panic, a share revoke or a lost membership ends the
+    hold NOW, but nothing rewrites the row until something reads the key again — so
+    ``/mcp``, readiness and the git push clause kept promising the hold until its
+    ``until`` passed. The drop paths call this. ``keys=None`` retires every held row
+    of the network (a panic or a lost membership ends them all). Only ``held`` rows
+    move: a newer ``synced`` or failure row is left exactly as it is. Never raises.
+    """
+    if not network_id:
+        return
+    wanted = None if keys is None else {str(key) for key in keys}
+
+    def retire(entries: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]] | None:
+        changed = False
+        out: dict[str, dict[str, Any]] = {}
+        for key, row in entries.items():
+            if row.get("state") == "held" and (wanted is None or key in wanted):
+                row = {k: v for k, v in row.items() if k != "until"}
+                row.update(state="revoked", code=str(code or "")[:64], at=time.time())
+                changed = True
+            out[key] = row
+        return out if changed else None
+
+    try:
+        if retire(load(network_id, root)) is None:
+            return
+        _update(network_id, root, retire)
+    except Exception:  # noqa: BLE001 — see :func:`record`
+        return
+
+
 def forget_device(network_id: str, device: str, *, root: Path | None = None) -> None:
     """Drop every entry owned by ``device``. Never raises.
 

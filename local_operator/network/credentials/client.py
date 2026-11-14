@@ -90,6 +90,21 @@ _MEMBERSHIP_LOST = "<membership-lost>"
 #: ``owner_offline``, and before this fence the hold served the bearer anyway.
 _NETWORK_UNTRUSTED = "<network-untrusted>"
 
+
+def _retire_code(verdict: str) -> str:
+    """The evidence code a ``held`` row is retired with for an admission ``verdict``.
+
+    The sentinels are internal markers, never a code a renderer knows: a panic
+    reads as ``revoked`` (access to this network's credentials was withdrawn),
+    a lost membership as ``member_not_active``; an owner code passes through.
+    """
+    if verdict == _NETWORK_UNTRUSTED:
+        return "revoked"
+    if verdict == _MEMBERSHIP_LOST:
+        return "member_not_active"
+    return verdict
+
+
 #: Outcomes that are not an owner answer about permission either, so they neither
 #: serve nor drop a held grant: a local broker fault, a busy owner, a quota rest.
 _TRANSIENT_REFUSALS: frozenset[str] = frozenset(
@@ -294,7 +309,9 @@ class GrantCache:
                     self._reuse.pop(pair, None)
         return dropped
 
-    def invalidate_policy(self, key: str, session_id: str, fence: str) -> bool:
+    def invalidate_policy(
+        self, key: str, session_id: str, fence: str, *, dropped: list[Grant] | None = None
+    ) -> bool:
         """Drop ALL old slots, not just the session that first hears the refusal.
 
         Compare opaque generations, never the remote owner's clock. A fresh
@@ -309,6 +326,10 @@ class GrantCache:
             ]
             requested = (key, session_id) in stale
             for pair in stale:
+                if dropped is not None:
+                    # The caller revokes these when the new generation is a
+                    # restriction (#3947 m1); it decides, this only reports.
+                    dropped.append(self._grants[pair])
                 del self._grants[pair]
                 self._policy_fences.pop(pair, None)
                 self._reuse.pop(pair, None)
@@ -917,8 +938,12 @@ class MeshCredentialClient:
         # a login-negative cache: the owner may have signed in since the last
         # request. Forced refresh therefore always reaches the sole refresh owner.
         if not self.should_borrow(key):
-            # A share revoke ends a held GitHub token at once (2026-11-14).
-            self._revoke_dropped_github(self.grants.drop(key))
+            # A share revoke ends a held GitHub token at once (2026-11-14), and its
+            # durable ``held`` reading with it (#3947 m2).
+            dropped_now = self.grants.drop(key)
+            if dropped_now:
+                self._retire_held([key], "not_a_holder")
+            self._revoke_dropped_github(dropped_now)
             if self._held_receipts:
                 # A revoke heard while the hold was serving (now also through the
                 # pull's withdrawal, #3922 Q2) ends it here: write its last serves.
@@ -1195,6 +1220,7 @@ class MeshCredentialClient:
             # The persistent deny could not be written; the in-process slots
             # still go, so this process serves nothing either way (fail closed).
             self._revoke_dropped_github(self.grants.drop_borrowed(self.self_device))
+            self._retire_held(None, "member_not_active")
             lost = self._policy_error(key, "not_a_holder")
         note_resolution(self.root, key, lost)
         return lost
@@ -1272,12 +1298,20 @@ class MeshCredentialClient:
                     note_resolution(self.root, key, lost)
                     return lost
                 if verdict:
-                    dropped = self.grants.drop(key)
-                    if verdict == _NETWORK_UNTRUSTED or verdict == "not_a_holder":
-                        # Panic or a withdrawn share: a GitHub token dies now.
-                        self._revoke_dropped_github(dropped)
+                    # ONE RULE WITH ``_held_or`` (review #3947 m1): ``_hold_admission``
+                    # is the shared fence, so every non-empty verdict — a panic, a
+                    # withdrawn share, an owner-stated restriction such as
+                    # ``consent_withdrawn`` or ``consent_unverifiable`` — means the
+                    # cached token is no longer this device's to use, and a GitHub
+                    # App token dies now rather than at the hold end.
+                    self._revoke_dropped_github(self.grants.drop(key))
+                    self._retire_held([key], _retire_code(verdict))
                     return None
-                if self.grants.invalidate_policy(key, session_id, stamp):
+                invalidated: list[Grant] = []
+                if self.grants.invalidate_policy(key, session_id, stamp, dropped=invalidated):
+                    if policy.code(document, self.owner_of(key), key):
+                        # Same rule as ``_held_or``: a restriction ends them (#3947 m1).
+                        self._revoke_dropped_github(invalidated)
                     return None
                 if self._lifecycle_fence(key) != fence:
                     # Dial, but KEEP the slot: if the owner is unreachable the
@@ -1339,6 +1373,7 @@ class MeshCredentialClient:
         # once, not at the hold end (2026-11-14). Started off-thread, so the
         # policy transaction this may run inside is not held across a DELETE.
         self._revoke_dropped_github(dropped)
+        self._retire_held(None, "member_not_active")
         return self._policy_error(key, "not_a_holder")
 
     def _adopt_online(
@@ -1431,6 +1466,15 @@ class MeshCredentialClient:
         except Exception:  # noqa: BLE001 — a revoke is a belt; the drop already happened
             logger.debug("immediate github revoke failed", exc_info=True)
 
+    def _retire_held(self, keys: list[str] | None, code: str) -> None:
+        """End the durable ``held`` reading for ``keys`` (``None``: all) after a drop for cause.
+
+        The status surfaces read ``held`` rows from disk (another process), so a hold
+        a panic, revoke or lost membership just ended must be rewritten here, or they
+        keep saying "held until HH:MM UTC" (review #3947 m2). Never raises.
+        """
+        mcp_state.retire_held(self.network_id, keys, code=code, root=self.root)
+
     def _revoke_withdrawn_github(self, dropped: list[Grant]) -> None:
         """:meth:`_revoke_dropped_github` after a placement change, IF GitHub was withdrawn."""
         try:
@@ -1439,8 +1483,11 @@ class MeshCredentialClient:
                 is_installation_grant,
             )
 
+            if self.should_borrow(GITHUB_KEY):
+                return
+            self._retire_held([GITHUB_KEY], "not_a_holder")
             tokens = [grant for grant in dropped if is_installation_grant(grant)]
-            if tokens and not self.should_borrow(GITHUB_KEY):
+            if tokens:
                 self._revoke_dropped_github(tokens)
         except Exception:  # noqa: BLE001 — see _revoke_dropped_github
             logger.debug("github withdrawal check failed", exc_info=True)
@@ -1523,6 +1570,7 @@ class MeshCredentialClient:
                     elif verdict == _NETWORK_UNTRUSTED:
                         # A panic ends a held GitHub token at once (2026-11-14).
                         self._revoke_dropped_github(self.grants.drop(key))
+                        self._retire_held(None, _retire_code(verdict))
                         dropped = True
                     elif verdict:
                         code = verdict
@@ -1530,15 +1578,24 @@ class MeshCredentialClient:
                         # A withdrawn share or an owner-stated restriction: the held
                         # token is no longer this device's to use, so it dies now.
                         self._revoke_dropped_github(self.grants.drop(key))
+                        self._retire_held([key], _retire_code(code))
                         dropped = True
                         outcome = self._policy_error(key, code)
                     else:
-                        stale = self.grants.invalidate_policy(key, session_id, stamp)
+                        invalidated: list[Grant] = []
+                        stale = self.grants.invalidate_policy(
+                            key, session_id, stamp, dropped=invalidated
+                        )
                         held = self.grants.peek(key, session_id)
                         if stale or held is None:
                             code = policy.code(document, self.owner_of(key), key)
                             if code:
                                 outcome = self._policy_error(key, code)
+                                # A restriction another process recorded (e.g.
+                                # ``consent_withdrawn``) ends the slots it fenced
+                                # out the same way a verdict does (#3947 m1).
+                                self._revoke_dropped_github(invalidated)
+                                self._retire_held([key], code)
                         elif force_refresh:
                             # A repair of the bearer is never answered from memory,
                             # and does not end the hold for the next plain call.

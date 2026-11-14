@@ -77,7 +77,7 @@ from concurrent.futures import TimeoutError as FutureTimeoutError
 from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Iterable
 
 from local_operator.network.credentials import github as github_app
 from local_operator.network.credentials import placement as placement_mod
@@ -1776,6 +1776,8 @@ class MeshCredentialBroker:
         below is what lop promises about ITS OWN hand-off, not what the token
         promises.
         """
+        from local_operator.network.credentials import github_token_hold_s
+
         now_ms = int(time.time() * 1000)
         ttl_ms = int(_grant_ttl_s(self.root) * 1000)
         return Grant(
@@ -1783,7 +1785,14 @@ class MeshCredentialBroker:
             kind="bearer",
             token_expires_at_ms=0,
             grant_expires_at_ms=now_ms + ttl_ms,
-            hold_until_ms=_offline_hold_until_ms(self.root, now_ms, 0, now_ms + ttl_ms),
+            # A PAT or ``gh`` token has no revoke endpoint, so its hold has its own
+            # cap (``github_token_hold_s``, default = the whole hold — the operator's
+            # "Full 24 h for personal tokens too", 2026-11-14). ``min`` so the cap can
+            # only shorten what ``_offline_hold_until_ms`` states.
+            hold_until_ms=min(
+                _offline_hold_until_ms(self.root, now_ms, 0, now_ms + ttl_ms),
+                max(now_ms + int(github_token_hold_s(self.root) * 1000), now_ms + ttl_ms),
+            ),
             credential_ref=CredentialRef(
                 owner_device=self.self_device,
                 owner_device_name=self.self_device_name,
@@ -3510,6 +3519,38 @@ def revoke_lent_on_panic(server: Any, network_id: str) -> int:
     except Exception:  # noqa: BLE001 — the latch already holds; tokens still expire
         logger.warning("panic: revoking lent GitHub tokens failed", exc_info=True)
         return 0
+
+
+def revoke_lent_on_removal(server: Any, network_id: str, device_ids: Iterable[str]) -> int:
+    """DELETE the GitHub tokens this relay lent to devices that just left ``network_id``.
+
+    WHY (review #3947 M2): before the offline hold the lender's scheduled DELETE
+    fired at the 15-minute grant window, which bounded a removed node's App token to
+    15 min. Since 2026-11-14 it fires at the hold end — for the App arm the token's
+    own hour — and the borrower-side DELETE on membership loss needs the removed node
+    to cooperate, which a lost or stolen node (the reason one is removed) will not.
+    So the owner revokes here, like panic's owner half (:func:`revoke_lent_on_panic`).
+
+    Called by the relay after ``member rm`` (raised), after a peer's rotation that
+    names removed devices (received) and after a ``leave``. Reads the EXISTING
+    broker only (a relay that never brokered minted nothing), leaves another
+    network's broker alone, and never raises: the removal is already committed.
+    PAT/``gh`` tokens have no revoke endpoint; this only reaches App tokens.
+    """
+    from local_operator.network.credentials import github as github_app
+
+    broker = getattr(server, _BROKER_ATTR, None)
+    if broker is None or (network_id and broker.network_id != network_id):
+        return 0
+    revoked = 0
+    for device_id in sorted({str(d) for d in device_ids if d}):
+        try:
+            revoked += broker.revoke_outstanding(
+                github_app.GITHUB_KEY, device_id, cause="member_removed"
+            )
+        except Exception:  # noqa: BLE001 — the tombstone holds; the token's hour bounds it
+            logger.warning("member removal: revoking lent GitHub tokens failed", exc_info=True)
+    return revoked
 
 
 def broker_for_relay(server: Any) -> MeshCredentialBroker | None:

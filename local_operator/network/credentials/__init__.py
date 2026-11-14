@@ -126,6 +126,34 @@ def offline_hold_s(root: Path | None = None) -> float:
     return min(max(value, grant_ttl_s(root)), OFFLINE_HOLD_MAX_S)
 
 
+def github_token_hold_s(root: Path | None = None) -> float:
+    """``network.credentials.github_token_hold_s``: the hold for a lent PAT or ``gh`` token.
+
+    WHY A SEPARATE CAP (review #3947 M1, 2026-11-14): a PAT or a ``gh`` login has no
+    revoke endpoint, so a lost node that never hears ``lop network panic`` can keep
+    using one for the whole hold — only revoking it at GitHub ends it. The operator
+    chose the full 24 h for personal tokens too ("Full 24 h for personal tokens too",
+    Damian, 2026-11-14), so this DEFAULTS TO :func:`offline_hold_s`; the setting
+    exists so that residual can be narrowed for those two arms alone without new
+    plumbing. Read on the OWNER, where the token lives and the hold is stated
+    (``owner._grant_from_owner_token``); clamped to ``[grant_ttl_s, offline_hold_s]``
+    so it can only shorten the hold. A garbled value reads as the hold.
+    """
+    from local_operator.network import store
+
+    hold = offline_hold_s(root)
+    raw = store.read_config(("network", "credentials", "github_token_hold_s"), None, root)
+    if raw is None:
+        return hold
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return hold
+    if value != value:  # NaN
+        return hold
+    return min(max(value, grant_ttl_s(root)), hold)
+
+
 #: How often a turn waiting for an absent owner re-reads the owner's liveness stamp
 #: (:func:`owner_wait_s`). The relay acts at this resolution (``REDIAL_TICK_S``), so
 #: polling faster cannot see the owner sooner; each poll is file reads, never a dial.

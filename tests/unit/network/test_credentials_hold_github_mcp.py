@@ -22,6 +22,7 @@ window end and the hold end are both observable in bounded time. Synthetic ids o
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import time
 from typing import Any
 
@@ -213,11 +214,22 @@ def test_a_panic_ends_the_github_hold_and_deletes_the_token_at_once(held: Any) -
     assert isinstance(
         client.request_grant_sync(github_mod.GITHUB_KEY, provider=github_mod.GITHUB_KEY), Grant
     ), "precondition: the hold serves"
+    held_mcp = client.request_grant_sync(MCP_KEY, provider="mcp-oauth")
+    assert isinstance(held_mcp, Grant) and held_mcp.held_offline
+    rows = mcp_state.load(net.network_id, net.b.root)
+    assert {rows[k]["state"] for k in (github_mod.GITHUB_KEY, MCP_KEY)} == {"held"}, rows
     with store.mutate(net.network_id, net.b.root) as copy:
         copy.trust = "untrusted"
         store.save(copy, net.b.root)
     refused = client.request_grant_sync(github_mod.GITHUB_KEY, provider=github_mod.GITHUB_KEY)
     assert isinstance(refused, BrokerError), "a panicked node served a held GitHub token"
+    # #3947 m2: the panic ends EVERY held reading on disk at once, not at ``until`` —
+    # the MCP row too, though nothing has read the MCP key since. (The GitHub row was
+    # already replaced by the refused dial's own ``unavailable`` evidence.)
+    rows = mcp_state.load(net.network_id, net.b.root)
+    for key in (github_mod.GITHUB_KEY, MCP_KEY):
+        assert rows[key]["state"] != "held" and "until" not in rows[key], rows
+    assert rows[MCP_KEY]["state"] == "revoked", rows
     assert net_fixtures.wait_for(lambda: not api.live(held.gh.access_token), timeout_s=5.0)
     assert api.revoke_requests.count(held.gh.access_token) == 1, api.revoke_requests
     # Long before the hold end: this was the panic's DELETE, not the belt's.
@@ -248,6 +260,12 @@ def test_a_share_revoke_ends_the_github_hold_and_deletes_the_token_at_once(held:
     assert net_fixtures.wait_for(lambda: not api.live(held.gh.access_token), timeout_s=5.0)
     assert api.revoke_requests.count(held.gh.access_token) == 1, api.revoke_requests
     assert time.time() * 1000 < held.gh.hold_until_ms
+    # #3947 m2: the git push clause stops saying "held until" the moment it ends.
+    row = mcp_state.load(net.network_id, net.b.root)[github_mod.GITHUB_KEY]
+    assert row["state"] == "revoked" and row["code"] == "not_a_holder", row
+    from local_operator.network import readiness
+
+    assert "held" not in readiness.github_fact(net.b.root)
 
 
 def test_an_unrelated_placement_edit_does_not_kill_the_held_token(held: Any) -> None:
@@ -292,14 +310,150 @@ def test_a_forced_refresh_of_github_is_never_served_from_the_hold(held: Any) -> 
 
 
 def test_an_mcp_bearer_the_server_refused_is_not_held_again(held: Any) -> None:
-    """A 401 drops the slot (``BrokeredBearerAuth``), so the re-ask finds nothing to hold."""
+    """A 401 on a held bearer ends it: driven through the real ``BrokeredBearerAuth``.
+
+    Review #3947 m3: the server is an ``httpx2`` mock that refuses everything with a
+    401, and the connect goes through the auth flow MCP really uses. The held bearer
+    is sent once; the flow reports, drops the slot and re-asks, the owner is away and
+    the hold has nothing left to serve, so neither the retry nor a later request
+    carries a bearer at all.
+    """
+    import httpx2
+
+    from local_operator.network.credentials.mcp_bearer import BrokeredBearerAuth
+
     client, net = held.client, held.mesh
     _stop_owner(net)
     _past_window(held.mcp)
-    assert isinstance(client.request_grant_sync(MCP_KEY, provider="mcp-oauth"), Grant)
-    client.grants.drop(MCP_KEY)  # what the 401 path does after reporting
+    sent: list[str] = []
+
+    def refuse(request: Any) -> Any:
+        sent.append(request.headers.get("Authorization", "<none>"))
+        return httpx2.Response(401)
+
+    auth = BrokeredBearerAuth(url=MCP_URL, key=MCP_KEY, client=client)
+
+    async def connect_twice() -> None:
+        async with httpx2.AsyncClient(transport=httpx2.MockTransport(refuse), auth=auth) as http:
+            await http.get(MCP_URL)
+            await http.get(MCP_URL)
+
+    asyncio.run(connect_twice())
+    assert sent == ["Bearer mcp-held-access", "<none>"], sent
+    assert client.grants.peek(MCP_KEY, "") is None
     again = client.request_grant_sync(MCP_KEY, provider="mcp-oauth")
     assert isinstance(again, BrokerError) and again.code == "owner_offline", again
+
+
+def test_member_rm_on_the_owner_revokes_the_removed_nodes_app_token(held: Any) -> None:
+    """#3947 M2: ``member rm`` DELETEs the removed node's App token at once, on the OWNER.
+
+    The removed node is the one that cannot be trusted to revoke it itself, and since
+    the lender's scheduled DELETE moved to the hold end (the token's hour) nothing
+    else would end it inside that hour. Owner relay up; the node is not asked.
+    """
+    net, api = held.mesh, held.api
+    token = held.gh.access_token
+    assert api.live(token)
+    net.a._ctl_member_rm({"network": net.network_id, "device_id": net.borrower})  # noqa: SLF001
+    assert net_fixtures.wait_for(lambda: not api.live(token), timeout_s=10.0)
+    assert token in api.revoke_requests
+    assert time.time() * 1000 < held.gh.hold_until_ms, "that was the hold-end belt, not rm"
+    broker = owner_mod.broker_for_relay(net.a)
+    assert broker is not None
+    assert broker._lender().outstanding(holder=net.borrower) == 0  # noqa: SLF001
+
+
+def test_a_node_that_leaves_has_its_app_token_revoked_by_the_owner(held: Any) -> None:
+    """#3947 M2's sibling: a ``disconnect`` (``net_leave``) ends the leaver's App token too."""
+    net, api = held.mesh, held.api
+    token = held.gh.access_token
+    net.b._ctl_disconnect({"network": net.network_id})  # noqa: SLF001
+    assert net_fixtures.wait_for(lambda: not api.live(token), timeout_s=10.0)
+    assert token in api.revoke_requests
+    # The scaled hold is 6 s, so a DELETE after it could be the belt: only one
+    # before the hold end is the owner's revoke on the leave.
+    assert time.time() * 1000 < held.gh.hold_until_ms, "that was the hold-end belt"
+
+
+def test_removal_revoke_is_scoped_to_its_network_and_devices(
+    owner: Any, github_api: _FakeGithub  # noqa: F811
+) -> None:
+    """The owner-side primitive: only the named devices, only the broker's network."""
+    from types import SimpleNamespace
+
+    _write_config(owner.root, repositories=[SCRATCH])
+    token = _ask_grant(owner, BORROWER_DEVICE)["access_token"]
+    server = SimpleNamespace(**{owner_mod._BROKER_ATTR: owner.broker})  # noqa: SLF001
+    assert owner_mod.revoke_lent_on_removal(server, "n_other", [BORROWER_DEVICE]) == 0
+    assert owner_mod.revoke_lent_on_removal(server, "n_gh", ["d_" + "9" * 32]) == 0
+    assert github_api.revoke_requests == [] and github_api.live(token)
+    assert owner_mod.revoke_lent_on_removal(server, "n_gh", [BORROWER_DEVICE]) == 1
+    assert github_api.revoke_requests == [token] and not github_api.live(token)
+
+
+def test_an_owner_restriction_ends_a_held_github_token_at_once(held: Any) -> None:
+    """#3947 m1 on the reachable path: a ``consent_withdrawn`` answer heard before the
+    outage refuses the held serve AND DELETEs the token, like a revoke."""
+    client, net, api = held.client, held.mesh, held.api
+    client.state.observe(
+        github_mod.GITHUB_KEY, "consent_withdrawn", owner_device=net.owner, retry_after_ms=1
+    )
+    client.state.save()
+    _stop_owner(net)
+    _past_window(held.gh)
+    refused = client.request_grant_sync(github_mod.GITHUB_KEY, provider=github_mod.GITHUB_KEY)
+    assert isinstance(refused, BrokerError) and refused.code == "consent_withdrawn", refused
+    assert net_fixtures.wait_for(lambda: not api.live(held.gh.access_token), timeout_s=5.0)
+    assert time.time() * 1000 < held.gh.hold_until_ms, "that was the hold-end belt"
+
+
+@pytest.mark.parametrize("verdict", ["consent_withdrawn", "consent_unverifiable"])
+def test_the_hot_read_revokes_on_every_admission_verdict(
+    held: Any, monkeypatch: pytest.MonkeyPatch, verdict: str
+) -> None:
+    """#3947 m1: ``_serve_cached`` follows ``_held_or``'s rule — any verdict DELETEs.
+
+    White-box on purpose: GitHub serves through ``live_grant`` today and never reaches
+    the hot read, so the rule is pinned at the method, with a reuse stamp that makes
+    the read young enough to reach the shared admission fence.
+    """
+    client, api = held.client, held.api
+    # A window long enough that the cache's re-ask margin does not hide the slot.
+    gh = dataclasses.replace(held.gh, grant_expires_at_ms=int(time.time() * 1000) + 600_000)
+    client.grants.put(github_mod.GITHUB_KEY, "sess-hot", gh, lifecycle_fence="f", selection={})
+    monkeypatch.setattr(type(client), "_lifecycle_fence", lambda self, key: "f")
+    monkeypatch.setattr(
+        type(client), "_hold_admission", lambda self, policy, document, key: (verdict, "")
+    )
+    assert (
+        client._serve_cached(  # noqa: SLF001
+            github_mod.GITHUB_KEY, "sess-hot", model_id="", selection={}
+        )
+        is None
+    )
+    assert client.grants.peek(github_mod.GITHUB_KEY, "sess-hot") is None
+    assert net_fixtures.wait_for(lambda: not api.live(gh.access_token), timeout_s=5.0)
+
+
+def test_a_personal_token_hold_can_be_capped_alone(tmp_path: Any) -> None:
+    """The PAT/``gh`` cap: defaults to the hold (Damian, "Full 24 h for personal tokens
+    too"), can only shorten it, and a garbled value reads as the hold."""
+    from local_operator.network.credentials import github_token_hold_s, offline_hold_s
+
+    root = tmp_path
+    (root / "config.yml").write_text(
+        yaml.safe_dump({"values": {"network": {"credentials": {}}}}), encoding="utf-8"
+    )
+    assert github_token_hold_s(root) == offline_hold_s(root) == 86400.0
+    for value, expected in ((3600, 3600.0), (10**9, 86400.0), (1, 900.0), ("x", 86400.0)):
+        (root / "config.yml").write_text(
+            yaml.safe_dump(
+                {"values": {"network": {"credentials": {"github_token_hold_s": value}}}}
+            ),
+            encoding="utf-8",
+        )
+        assert github_token_hold_s(root) == expected, value
 
 
 # -- the owner's lender: the scheduled DELETE moved to the hold end -------------
@@ -439,3 +593,53 @@ def test_held_is_in_the_closed_vocabulary_and_survives_a_load(tmp_path: Any) -> 
     assert row["state"] == "held" and row["until"] == pytest.approx(until)
     mcp_state.record("n_x", MCP_KEY, state="unavailable", code="owner_offline", root=tmp_path)
     assert "until" not in mcp_state.load("n_x", tmp_path)[MCP_KEY]
+
+
+def test_the_owner_states_the_personal_token_cap_on_the_grant(
+    owner: Any, monkeypatch: pytest.MonkeyPatch  # noqa: F811
+) -> None:
+    """The cap reaches the wire: a PAT/``gh`` grant's ``hold_until_ms`` honours it."""
+    (owner.root / "config.yml").write_text(
+        yaml.safe_dump({"values": {"network": {"credentials": {"github_token_hold_s": 1800}}}}),
+        encoding="utf-8",
+    )
+    before = int(time.time() * 1000)
+    grant = owner.broker._grant_from_owner_token(  # noqa: SLF001
+        token="ghp_SYNTHETIC_cap", key=github_mod.GITHUB_KEY, provider="", common={}
+    )
+    after = int(time.time() * 1000)
+    assert before + 1_800_000 <= grant.hold_until_ms <= after + 1_800_000
+    assert not github_mod.is_installation_grant(grant)
+
+
+def test_the_revoke_receipt_names_the_hold_bound_and_the_github_remedy(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#3947 M1: a revoke stops a node that HEARS it; a lost one keeps a PAT for the hold."""
+    from local_operator.network import cli as network_cli
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    lines = "\n".join(
+        network_cli._github_revoke_lines("node2", 0, github_mod.SOURCE_TOKEN)  # noqa: SLF001
+    )
+    assert "as soon as it hears this revoke" in lines
+    assert "(lost, stolen or offline) it may keep using it for up to 24 h" in lines
+    assert "revoke the PAT at GitHub" in lines
+    assert "window end" not in lines
+    payload = network_cli._github_revocation_payload(  # noqa: SLF001
+        0, 900, github_mod.SOURCE_TOKEN
+    )
+    assert payload["lent_grant_max_s"] == 86400 and payload["grant_window_s"] == 900
+    app = network_cli._github_revocation_payload(1, 900, github_mod.SOURCE_APP)  # noqa: SLF001
+    assert app["lent_grant_max_s"] == 3600
+    assert "window end" not in "\n".join(
+        network_cli._github_revoke_lines("node2", None, github_mod.SOURCE_APP)  # noqa: SLF001
+    )
+    (tmp_path / "config.yml").write_text(
+        yaml.safe_dump({"values": {"network": {"credentials": {"github_token_hold_s": 7200}}}}),
+        encoding="utf-8",
+    )
+    capped = "\n".join(
+        network_cli._github_revoke_lines("node2", 0, github_mod.SOURCE_GH)  # noqa: SLF001
+    )
+    assert "for up to 2 h" in capped

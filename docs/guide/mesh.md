@@ -156,13 +156,21 @@ online once a day keeps remote work going. The hold never outlives the access to
 expires sooner (Anthropic OAuth after about 8 hours, Radient after about an
 hour) stops working at its own expiry until the owner is back. Lent GitHub and MCP
 logins are held the same way: a GitHub token from the owner's `GITHUB_TOKEN` or
-`gh` login lasts the whole hold, a GitHub App token at most its one hour, and an
-MCP sign-in until its access token expires (often about an hour). A lost or stolen
-node can therefore push to GitHub for up to 24 hours unless you run
-`lop network panic`, which ends every held login on that network at once (and
-revokes a held GitHub App token); revoking the share does the same once the node
-hears of it. `kimi` is the one provider that can never be
-lent: its grants are signed with the fingerprint of the device that made them.
+`gh` login lasts the whole hold (`network.credentials.github_token_hold_s` can
+shorten it for those two alone), a GitHub App token at most its one hour, and an
+MCP sign-in until its access token expires. `kimi` is the one provider that can
+never be lent: its grants are signed with the fingerprint of the device that made
+them.
+
+`lop network panic` and revoking a share stop every node that *hears* them from
+using held logins at once, and revoke a GitHub App token at GitHub. They cannot
+reach a node that is lost, stolen or offline: such a node can keep pushing with a
+lent `GITHUB_TOKEN` or `gh` token for up to 24 hours after its last grant (a GitHub
+App token for at most an hour), and a copy of the token taken off it works until
+the token itself is revoked. For a lost node, **revoke the token at GitHub**:
+Settings → Developer settings → Personal access tokens for a `GITHUB_TOKEN`, or
+Settings → Applications → Authorized OAuth Apps → GitHub CLI → Revoke for a `gh`
+login (`gh auth logout` only forgets the token locally).
 
 **The desktop app has its own view of it.**
 [`local-operator-ui`](https://github.com/damianvtran/local-operator-ui) mounts a
