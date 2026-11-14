@@ -1324,8 +1324,27 @@ def _rank(
         # here only ignored ``.expo/``/``.pnpm-store/`` git deletes anyway —
         # returned HIGH below before the ledger check was ever reached, and
         # the judge saw no ledger fact, so finished own trees were refused.
-        own = _owned_by_session(target, path, prot, session_id)
-        state = worktree_state(path, own=own is not None)
+        #
+        # FAMILY (field case 2026-11-14, cleanup subagent bbb5e6c44eb8): a
+        # tree an ANCESTOR created is this session's too (``owned_record``).
+        # A SIBLING's or cousin's counts only here, for ``git worktree
+        # remove`` WITHOUT ``--force`` (``kin``): git itself refuses a tree
+        # with tracked or untracked changes and keeps the branch ref, so the
+        # removal loses nothing but ignored files — and only when the tree is
+        # clean, no PR/MR is open or unknown, and neither its creator nor any
+        # other session is running in it (all checked below). ``rm -rf``,
+        # ``--force``, any other delete and every write keep a sibling's tree
+        # foreign.
+        #
+        # IGNORED FILES follow git's own rule for a non-forced removal by the
+        # family (``git worktree remove`` deletes them without ``--force``;
+        # measured with git 2.55 on a throwaway repo: ignored ``.terraform/``
+        # plus ``.env`` removed, rc 0). A FORCED removal of an ancestor's or
+        # sibling's tree keeps the stricter rule — an ignored ``.env`` the
+        # caller never made is not known to be reproducible.
+        own = _owned_by_session(target, path, prot, session_id, kin=not target.forced)
+        relation = own[2] if own is not None else ""
+        state = worktree_state(path, own=own is not None and (relation == "" or not target.forced))
         if state != "not-linked":
             # Clean is not idle (operator incident 2026-11-09: a clean worktree
             # whose branch had an OPEN PR under QA was removed, deleting 34
@@ -1336,6 +1355,18 @@ def _rank(
             # the judge sees those facts. ``worktree_activity`` explains both.
             activity = worktree_activity(path, session_id)
             facts = activity.facts()
+            if own is None:
+                # Whose tree it is (QA Q1, PR #3964): the foreign-tree path
+                # through ``_reached_worktrees`` already names the ledger's
+                # creator, but a direct ``git worktree remove`` of a tree
+                # outside this family did not, so neither the agent nor the
+                # judge learned who to hand it back to. Display only — the
+                # rank above never reads it.
+                from local_operator.guardrails import provenance
+
+                creators = provenance.recorded_creators(path)
+                if creators:
+                    facts += "; recorded creator: " + ", ".join(creators)
             if activity.pr_state == "open":
                 return RankedTarget(
                     target,
@@ -1358,6 +1389,10 @@ def _rank(
             # and an unproven path keep the judge, and a judge timeout there
             # stays a refusal.
             own_idle = not activity.owners_running and activity.pr_state in ("none", "unknown")
+            if relation == "kin":
+                # A sibling's tree never gets #3816's unknown-PR waiver: that
+                # waiver rests on the caller having made the tree itself.
+                own_idle = own_idle and activity.pr_state == "none"
             if own is not None and own_idle and state == "clean":
                 # Nothing uncommitted, nobody else in it, no open PR: the
                 # creator removing it loses nothing, ``--force`` or not.
@@ -1449,7 +1484,7 @@ def _rank(
         # ``_reached_worktrees``), already passed its bar (clean, idle, no
         # open PR); a bare ``rm link`` removes only the entry.
         if owned is not None:
-            reason, matches = owned
+            reason, matches, _relation = owned
             shown = ""
             if target.pattern is not None:
                 shown = ", ".join(matches[:4]) + (
@@ -1608,17 +1643,25 @@ def _reached_worktrees(
         return None
     foreign: list[str] = []
     own: list[str] = []
+    # Roots only an ANCESTOR's row vouches for: still own (``owned_record``),
+    # but ``rm -rf`` deletes their ignored files too, and an ignored ``.env``
+    # the caller never made is not known to be reproducible, so their state
+    # is read with the non-own ignored rule. A sibling's row never applies
+    # here (``kin`` is for non-forced ``git worktree remove`` only).
+    inherited: set[str] = set()
     for root in roots:
-        owned = (
-            session_id
-            and not any(_under(root, st) for st in prot.state_roots)
-            and prov.owned_record(root, session_id) is not None
+        record = (
+            prov.owned_record(root, session_id)
+            if session_id and not any(_under(root, st) for st in prot.state_roots)
+            else None
         )
-        (own if owned else foreign).append(root)
+        (own if record is not None else foreign).append(root)
+        if record is not None and record.relation:
+            inherited.add(root)
     checked, unchecked = own[:_MAX_OWN_CHECKED], own[_MAX_OWN_CHECKED:]
     jobs: dict[str, Any] = {}
     for root in checked:
-        jobs[f"state:{root}"] = lambda r=root: prov.worktree_state(r, own=True)
+        jobs[f"state:{root}"] = lambda r=root: prov.worktree_state(r, own=r not in inherited)
         jobs[f"activity:{root}"] = lambda r=root: prov.worktree_activity(r, session_id)
     for root in foreign[:_MAX_FOREIGN_STATES]:
         jobs[f"fstate:{root}"] = lambda r=root: prov.worktree_state(r)
@@ -1693,9 +1736,16 @@ def _reached_worktrees(
 
 
 def _owned_by_session(
-    target: Target, path: str, prot: _Protected, session_id: str
-) -> tuple[str, list[str]] | None:
+    target: Target, path: str, prot: _Protected, session_id: str, *, kin: bool = False
+) -> tuple[str, list[str], str] | None:
     """A LOW reason when this session created what ``target`` destroys, else ``None``.
+
+    "This session" is its family (``provenance.owned_record``): its own and
+    its descendants' creations, and its ancestors'. ``kin`` admits a
+    sibling's or cousin's ``git worktree add`` too; only the non-forced
+    ``git worktree remove`` branch of ``_rank`` passes it. The third item
+    is the matched ``CreationRecord.relation`` (``""`` when several targets
+    mix relations, the strictest one seen otherwise).
 
     Only reached for a target already ranked HIGH by ``_high_reason`` and
     already cleared of CRITICAL ancestry, credential derivation and opaque or
@@ -1717,7 +1767,7 @@ def _owned_by_session(
         record = provenance.owned_link(link, session_id)
         if record is None:
             return None
-        return f"a symlink {record.describe()}; only the link is removed", [path]
+        return f"a symlink {record.describe()}; only the link is removed", [path], ""
 
     if target.pattern is not None:
         import glob as _glob
@@ -1732,22 +1782,29 @@ def _owned_by_session(
     else:
         paths = [path]
     first: str | None = None
+    relation = ""
     for candidate in paths:
         real = os.path.realpath(candidate)
         if any(_under(real, st) for st in prot.state_roots):
             return None
-        record = provenance.owned_record(real, session_id)
+        record = provenance.owned_record(real, session_id, kin=kin)
         if record is None:
+            return None
+        if record.relation == "kin" and not (record.kind == "worktree" and record.path == real):
+            # A sibling vouches only for the exact linked worktree it added,
+            # never for a container or a directory it made inside one.
             return None
         if provenance.is_primary_checkout(real) and not (
             record.kind == "clone" and record.path == real
         ):
             return None
         first = first or record.describe()
+        if record.relation == "kin" or (record.relation == "ancestor" and relation == ""):
+            relation = record.relation
     if first is None:
         return None
     reason = first if len(paths) == 1 else f"{len(paths)} matches, all {first}"
-    return reason, sorted(paths)
+    return reason, sorted(paths), relation
 
 
 #: ``*.log``, ``build-*.tmp``: a last component that ends in a literal
