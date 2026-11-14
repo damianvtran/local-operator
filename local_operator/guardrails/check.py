@@ -770,7 +770,14 @@ def _ask_block(
         answered = a.answer is not None and (
             prov.ask_reach(a.answer.text, path, home=home, cwd=cwd, protected=stop) is not None
         )
-        if answered and prov.ask_answer_covers(a.answer, path, home=home, cwd=cwd, protected=stop):
+        # ``answered`` already implies ``a.answer is not None``; the repeat is
+        # for the type checker (narrowing does not flow through the bool) and
+        # keeps a missing answer as "no coverage", never consent.
+        if (
+            answered
+            and a.answer is not None
+            and prov.ask_answer_covers(a.answer, path, home=home, cwd=cwd, protected=stop)
+        ):
             continue
         if answered or (kind == "under" and prov.broad_ask_dir(named, home=home)):
             judge_only = judge_only or (a, False)

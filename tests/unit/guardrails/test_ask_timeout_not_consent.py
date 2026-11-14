@@ -36,6 +36,7 @@ import json
 import os
 import sys
 import time
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
@@ -57,7 +58,7 @@ ASK = "a-20fc"
 
 
 @pytest.fixture
-def home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+def home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
     home = tmp_path / "home"
     state = home / ".local-operator"
     (state / "sessions" / S / "scratchpad").mkdir(parents=True)
