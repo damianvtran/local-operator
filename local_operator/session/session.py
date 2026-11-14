@@ -21458,6 +21458,7 @@ class Session:
                 capture_prepared_write=(
                     self._capture_prepared_write if self._prepared_capture_enabled else None
                 ),
+                bind_nested_diff=self._bind_nested_diff,
                 divergence_judge=self._divergence_judge,
                 model=self._model,
                 # Re-read per provider call, so a ``set_model`` landing while
@@ -23004,6 +23005,38 @@ class Session:
                 logger.debug("could not record the divergence notice", exc_info=True)
 
         self._spawn_background(_append())
+
+    async def _bind_nested_diff(
+        self, outer_call_id: str, call_id: str, tool_name: str, desc: dict[str, Any]
+    ) -> bool:
+        """Journal the trusted binding of one nested write/edit archive.
+
+        The eval bridge awaits this before it advertises ``archived`` (QA F5 on
+        #3762: a nested call has no tool row, so its archive was unreachable).
+        The entry carries only ids, the tool name and the content-free
+        descriptor -- never a row -- and is written to THIS session's own
+        journal, which is the one a child route resolves through containment.
+        Any failure answers ``False`` and the caller downgrades the descriptor.
+        """
+        from local_operator.tools import diff_archive
+
+        if not self._session_id:
+            return False
+        try:
+            await self.transcript.append_custom(
+                diff_archive.NESTED_DIFF_BINDING_TYPE,
+                diff_archive.nested_binding(
+                    session_id=self._session_id,
+                    outer_call_id=outer_call_id,
+                    call_id=call_id,
+                    tool_name=tool_name,
+                    desc=desc,
+                ),
+            )
+        except Exception:  # noqa: BLE001 - an unbound archive is reported unavailable
+            logger.warning("nested diff binding failed for %s", tool_name)
+            return False
+        return True
 
     def _capture_prepared_write(self, call: ToolCall, result: ToolResult) -> None:
         """Private exact executed bytes; never persisted or passed to a provider.

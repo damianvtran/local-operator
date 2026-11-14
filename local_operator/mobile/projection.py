@@ -685,6 +685,10 @@ def _tool_row_details(
         for key in (
             "diff",
             "diff_truncated_rows",
+            # The content-free full-diff descriptor (``tools/diff_archive``):
+            # lets the phone say the complete diff WAS captured (or why not)
+            # instead of reading a partial preview as the whole record.
+            "diff_full",
             "added",
             "removed",
             "lines_added",
