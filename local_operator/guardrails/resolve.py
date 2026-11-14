@@ -42,6 +42,7 @@ from dataclasses import dataclass, field
 
 from local_operator.tools.search_guard import (
     _DURATION_RE,
+    _HEREDOC_RE,
     _MAX_PEEL_DEPTH,
     _SHELL_C_WORDS,
     _WRAPPER_LONG_VALUE_FLAGS,
@@ -112,18 +113,66 @@ class _RawWord:
             self.parts.append(_Part(kind, text))
 
 
-def _read_sub(text: str, i: int) -> tuple[str, int, bool]:
+def _skip_heredoc_bodies(text: str, j: int, delimiters: list[str]) -> int:
+    """Index of the newline ending the last of ``delimiters``' bodies; -1 if any is missing.
+
+    ``text[j]`` is the newline after the opener line. Bodies follow in opener
+    order, each ending at a line equal to its delimiter (``<<-`` strips tabs;
+    the strip here matches :func:`lex`, so the two readers agree).
+    """
+    pos = j + 1
+    n = len(text)
+    end = j
+    for delim in delimiters:
+        while True:
+            if pos > n:
+                return -1
+            end = text.find("\n", pos)
+            line = text[pos : end if end != -1 else n]
+            if line.strip() == delim:
+                break
+            if end == -1:
+                return -1
+            pos = end + 1
+        if end == -1:
+            return n
+        pos = end + 1
+    return end
+
+
+def _read_sub(text: str, i: int, *, heredocs: bool = True) -> tuple[str, int, bool]:
     """Body of a ``$(`` substitution starting at ``text[i]`` (just past ``$(``).
 
     Depth-counted and quote-aware so a nested substitution stays one word.
     Returns ``(body, index_after, balanced)``.
+
+    Heredoc-aware, like the shared :func:`lex`: a ``<<WORD`` opener's body
+    lines are data to this reader, so an apostrophe, paren or backtick in them
+    never opens a phantom quote or closes the substitution. Without this, the
+    field command ``gh pr comment N --body "$(cat <<'EOF' … it's … EOF)"``
+    (a reviewer's comment, PR #3960) left a phantom quote open, the body ran to
+    the end of the line, and the prose's word "remove" plus the open text made
+    the walk rank HIGH as an unresolvable delete. The body text is still
+    RETURNED, so the inner walk's :func:`lex` decides what it is: data for a
+    quoted heredoc fed to ``cat``, a script for ``bash <<EOF``, and live
+    ``$(…)`` for an unquoted heredoc. ``heredocs=False`` is for ``$((``
+    arithmetic, where ``<<`` is a shift.
     """
     depth = 1
     quote: str | None = None
+    pending: list[str] = []
     j = i
     n = len(text)
     while j < n:
         ch = text[j]
+        if not quote and ch == "\n" and pending:
+            end = _skip_heredoc_bodies(text, j, pending)
+            pending = []
+            if end == -1:
+                # No delimiter line: bash would keep reading (fail closed).
+                return text[i:], n, False
+            j = end + 1
+            continue
         if quote:
             if ch == "\\" and quote == '"':
                 j += 2
@@ -135,6 +184,12 @@ def _read_sub(text: str, i: int) -> tuple[str, int, bool]:
         elif ch == "\\":
             j += 2
             continue
+        elif heredocs and ch == "<" and text.startswith("<<", j) and not text.startswith("<<<", j):
+            m = _HEREDOC_RE.match(text, j)
+            if m is not None:
+                pending.append(m.group(2))
+                j = m.end()
+                continue
         elif ch == "(":
             depth += 1
         elif ch == ")":
@@ -156,7 +211,7 @@ def _read_dollar(text: str, i: int, word: _RawWord, kind: str) -> int:
         return j
     if nxt == "(":
         # $(( arithmetic )) — evaluates to a number, never a path we can know.
-        body, j, ok = _read_sub(text, i + 2)
+        body, j, ok = _read_sub(text, i + 2, heredocs=False)
         word.add("sub", "\x01arith")
         word.broken |= not ok
         return j
@@ -2559,6 +2614,7 @@ class _Walker:
             for body in w.substitutions:
                 if body.strip() and body.strip() not in _EMPTY_BODIES:
                     self._isolated_walk(body, depth + 1)
+        self._walk_heredoc_substitutions(redirects, heredocs or [], depth)
         herestrings: list[str] = []
         for op, raw in redirects:
             if op in (">", ">|", ">>", ">&", "<>"):
@@ -2957,6 +3013,42 @@ class _Walker:
                 self._fetched_script(stdin_piped, feed)
                 return
         self._unseen_script(segment, stdin_piped, pipeline, feed)
+
+    def _walk_heredoc_substitutions(
+        self, redirects: list[tuple[str, _RawWord]], bodies: list[str], depth: int
+    ) -> None:
+        """Walk the ``$(…)``/backtick commands an UNQUOTED heredoc body runs.
+
+        Bash expands an unquoted-delimiter heredoc (``<<EOF``) before the reader
+        sees it, so ``cat <<EOF`` with ``$(rm -rf ~/x)`` in its body runs that
+        ``rm`` whatever ``cat`` does. A quoted delimiter (``<<'EOF'``,
+        ``<<"EOF"``, ``<<\\EOF``) makes the body literal data: never walked
+        here, so prose in a ``gh pr comment --body "$(cat <<'EOF' …)"`` is not
+        a command. Bodies pair with the segment's ``<<`` openers in order; if
+        the counts disagree (an opener sat inside a split substitution, R10)
+        the pairing is a guess, so every body is walked (fails toward scrutiny).
+        """
+        delimiters = [raw for op, raw in redirects if op in ("<<", "<<-")]
+        if not bodies:
+            return
+        if len(delimiters) == len(bodies):
+            active = [
+                body
+                for delimiter, body in zip(delimiters, bodies)
+                if all(part.kind == "bare" for part in delimiter.parts)
+            ]
+        else:
+            active = list(bodies)
+        st = self.state
+        for data in active:
+            if "$" not in data and "`" not in data:
+                continue
+            data_words, _ = scan(data, heredoc=True)
+            for w in data_words:
+                for exp in expand_all(w, st.env, st.home):
+                    for body in exp.substitutions:
+                        if body.strip() and body.strip() not in _EMPTY_BODIES:
+                            self._isolated_walk(body, depth + 1)
 
     def _walk_stdin_bodies(self, heredocs: list[str], herestrings: list[str], depth: int) -> None:
         for body in list(herestrings) + list(heredocs):

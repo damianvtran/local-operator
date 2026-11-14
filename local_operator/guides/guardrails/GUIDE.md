@@ -50,6 +50,10 @@ into HIGH — a judge decision, never a pass. Rules only ADD restriction.
   override: consent cannot be shown for a secret you should never see.
   Also LOW: a HIGH path this session (or a subagent it launched) recorded
   creating, and `git worktree remove <path>` of a clean linked worktree.
+  Heredoc and quoted body arguments are data, not commands: a quoted-delimiter
+  body (`gh pr comment N --body "$(cat <<'EOF' … EOF)"`) is never read for
+  delete words or targets, while a body fed to a shell (`bash <<EOF`, `| sh`)
+  and the `$(…)` inside an unquoted `<<EOF` body are still walked.
 
 ## Cleaning up what you made
 
