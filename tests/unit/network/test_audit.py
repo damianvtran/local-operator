@@ -175,8 +175,7 @@ def test_every_literal_event_a_call_site_names_is_registered() -> None:
     forwarders = sorted(
         path
         for path in package.parent.rglob("*.py")
-        if package not in path.parents
-        and "approvals._audit(" in path.read_text(encoding="utf-8")
+        if package not in path.parents and "approvals._audit(" in path.read_text(encoding="utf-8")
     )
     assert any(path.name == "pair_op.py" for path in forwarders), (
         f"the forwarder walk no longer finds operator/pair_op.py (found {forwarders}); "
