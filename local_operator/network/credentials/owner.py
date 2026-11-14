@@ -1716,8 +1716,9 @@ class MeshCredentialBroker:
             kind="bearer",
             token_expires_at_ms=minted.expires_at_ms,
             grant_expires_at_ms=grant_exp,
-            # Stated for the github arm too, though PR-A's borrower does not hold
-            # github yet: the window-end self-revoke must move first (design §4.3).
+            # The borrower holds this token through the offline hold (2026-11-14,
+            # "Yes, GitHub and MCP"); for the App arm the hold ends at the token's
+            # own 1 h ceiling, never past it (``_offline_hold_until_ms``).
             hold_until_ms=_offline_hold_until_ms(
                 self.root, now_ms, minted.expires_at_ms, grant_exp
             ),
@@ -1748,7 +1749,14 @@ class MeshCredentialBroker:
             holder=by,
             grant_id=grant.grant_id,
             token=minted.token,
-            grant_exp_ms=grant_exp,
+            # THE SCHEDULED DELETE FIRES AT THE HOLD END, NOT THE GRANT WINDOW
+            # (2026-11-14): a node that keeps serving this token from the offline
+            # hold after the 15-minute window would otherwise be handed a token its
+            # owner had already killed. For the App arm the hold end IS the token's
+            # 1 h ceiling, so in practice the token lives its hour unless revoked
+            # early. ``credential revoke`` and a panic still DELETE at once
+            # (``revoke_outstanding`` / ``revoke_all_outstanding``).
+            revoke_at_ms=grant.hold_until_ms or grant_exp,
             token_exp_ms=minted.expires_at_ms,
         )
         return grant

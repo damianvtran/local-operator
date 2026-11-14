@@ -278,14 +278,21 @@ class GrantCache:
         with self._lock:
             return self._policy_fences.get((key, session_id))
 
-    def drop_borrowed(self, self_device: str) -> None:
-        """One client owns one root/network; local-owned sentinels are unrelated."""
+    def drop_borrowed(self, self_device: str) -> list[Grant]:
+        """One client owns one root/network; local-owned sentinels are unrelated.
+
+        Returns the grants it dropped, so a caller ending access for a SECURITY
+        reason can revoke what it just forgot (``_revoke_dropped_github``).
+        """
+        dropped: list[Grant] = []
         with self._lock:
             for pair, grant in list(self._grants.items()):
                 if grant.credential_ref.owner_device != self_device:
+                    dropped.append(grant)
                     del self._grants[pair]
                     self._policy_fences.pop(pair, None)
                     self._reuse.pop(pair, None)
+        return dropped
 
     def invalidate_policy(self, key: str, session_id: str, fence: str) -> bool:
         """Drop ALL old slots, not just the session that first hears the refusal.
@@ -307,18 +314,23 @@ class GrantCache:
                 self._reuse.pop(pair, None)
             return requested
 
-    def drop(self, key: str, session_id: str = "") -> None:
-        """Forget one grant, or every session's grant for ``key`` when unnamed."""
+    def drop(self, key: str, session_id: str = "") -> list[Grant]:
+        """Forget one grant, or every session's grant for ``key`` when unnamed.
+
+        Returns what was dropped (see :meth:`drop_borrowed`); most callers ignore it.
+        """
         with self._lock:
             if session_id:
-                self._grants.pop((key, session_id), None)
+                gone = self._grants.pop((key, session_id), None)
                 self._policy_fences.pop((key, session_id), None)
                 self._reuse.pop((key, session_id), None)
-                return
+                return [gone] if gone is not None else []
+            dropped: list[Grant] = []
             for pair in [p for p in self._grants if p[0] == key]:
-                del self._grants[pair]
+                dropped.append(self._grants.pop(pair))
                 self._policy_fences.pop(pair, None)
                 self._reuse.pop(pair, None)
+            return dropped
 
     def find_by_token(self, key: str, bearer: str) -> tuple[str, str] | None:
         """The ``(key, session_id)`` a bearer belongs to, for attributing a failure.
@@ -349,11 +361,14 @@ class GrantCache:
         with self._lock:
             return sorted({key for key, _session in self._grants})
 
-    def clear(self) -> None:
+    def clear(self) -> list[Grant]:
+        """Forget every grant; returns them (see :meth:`drop_borrowed`)."""
         with self._lock:
+            dropped = list(self._grants.values())
             self._grants.clear()
             self._policy_fences.clear()
             self._reuse.clear()
+        return dropped
 
 
 class MeshCredentialClient:
@@ -501,6 +516,7 @@ class MeshCredentialClient:
         stamp = self._stat_placement()
         if stamp == self._placement_stamp:
             return self._placement
+        dropped: list[Grant] = []
         with self._placement_lock:
             if stamp != self._placement_stamp:
                 self._placement = (
@@ -510,8 +526,15 @@ class MeshCredentialClient:
                 )
                 # Changed/deleted placement invalidates permission and generation;
                 # never serve a cached bearer across a withdrawal.
-                self.grants.clear()
+                dropped = self.grants.clear()
                 self._placement_stamp = stamp
+        if dropped:
+            # A SHARE REVOKE reaches a session process as this placement change
+            # (the relay's pull rewrites the file), so this is where its GitHub
+            # token must die at once rather than at the hold end (2026-11-14).
+            # Only when GitHub itself was withdrawn: an unrelated edit to the
+            # document must not kill a token a push is using right now.
+            self._revoke_withdrawn_github(dropped)
         return self._placement
 
     def _stat_placement(self) -> tuple[int, int] | None:
@@ -894,7 +917,8 @@ class MeshCredentialClient:
         # a login-negative cache: the owner may have signed in since the last
         # request. Forced refresh therefore always reaches the sole refresh owner.
         if not self.should_borrow(key):
-            self.grants.drop(key)
+            # A share revoke ends a held GitHub token at once (2026-11-14).
+            self._revoke_dropped_github(self.grants.drop(key))
             if self._held_receipts:
                 # A revoke heard while the hold was serving (now also through the
                 # pull's withdrawal, #3922 Q2) ends it here: write its last serves.
@@ -1170,7 +1194,7 @@ class MeshCredentialClient:
         except PolicyUnknown:
             # The persistent deny could not be written; the in-process slots
             # still go, so this process serves nothing either way (fail closed).
-            self.grants.drop_borrowed(self.self_device)
+            self._revoke_dropped_github(self.grants.drop_borrowed(self.self_device))
             lost = self._policy_error(key, "not_a_holder")
         note_resolution(self.root, key, lost)
         return lost
@@ -1248,7 +1272,10 @@ class MeshCredentialClient:
                     note_resolution(self.root, key, lost)
                     return lost
                 if verdict:
-                    self.grants.drop(key)
+                    dropped = self.grants.drop(key)
+                    if verdict == _NETWORK_UNTRUSTED or verdict == "not_a_holder":
+                        # Panic or a withdrawn share: a GitHub token dies now.
+                        self._revoke_dropped_github(dropped)
                     return None
                 if self.grants.invalidate_policy(key, session_id, stamp):
                     return None
@@ -1303,10 +1330,15 @@ class MeshCredentialClient:
         if document is None:
             with policy.transaction() as row:
                 policy.deny_network(row)
-                self.grants.drop_borrowed(self.self_device)
+                dropped = self.grants.drop_borrowed(self.self_device)
         else:
             policy.deny_network(document)
-            self.grants.drop_borrowed(self.self_device)
+            dropped = self.grants.drop_borrowed(self.self_device)
+        # Membership loss AND a panic (an untrusted network fails
+        # ``_self_membership_active``) both land here: a held GitHub token dies at
+        # once, not at the hold end (2026-11-14). Started off-thread, so the
+        # policy transaction this may run inside is not held across a DELETE.
+        self._revoke_dropped_github(dropped)
         return self._policy_error(key, "not_a_holder")
 
     def _adopt_online(
@@ -1379,6 +1411,40 @@ class MeshCredentialClient:
         note_resolution(self.root, key, denied)
         return denied
 
+    def _revoke_dropped_github(self, dropped: list[Grant]) -> None:
+        """DELETE the GitHub installation tokens in ``dropped`` now. Never raises.
+
+        Called ONLY where a grant is dropped for a security reason — a panic, a
+        withdrawn share, a lost membership. Since 2026-11-14 a node holds a lent
+        GitHub token for its whole hour (the offline hold), and in those cases the
+        owner may be the device that is away, so this device's own DELETE is the
+        one that ends it. A hold that simply lapses is NOT routed here: the
+        scheduled belt fires at the hold end, and the token's ceiling is under both.
+        Grants of other keys in ``dropped`` are ignored (``is_installation_grant``).
+        """
+        if not dropped:
+            return
+        try:
+            from local_operator.network.credentials.github import revoke_now
+
+            revoke_now(dropped)
+        except Exception:  # noqa: BLE001 — a revoke is a belt; the drop already happened
+            logger.debug("immediate github revoke failed", exc_info=True)
+
+    def _revoke_withdrawn_github(self, dropped: list[Grant]) -> None:
+        """:meth:`_revoke_dropped_github` after a placement change, IF GitHub was withdrawn."""
+        try:
+            from local_operator.network.credentials.github import (
+                GITHUB_KEY,
+                is_installation_grant,
+            )
+
+            tokens = [grant for grant in dropped if is_installation_grant(grant)]
+            if tokens and not self.should_borrow(GITHUB_KEY):
+                self._revoke_dropped_github(tokens)
+        except Exception:  # noqa: BLE001 — see _revoke_dropped_github
+            logger.debug("github withdrawal check failed", exc_info=True)
+
     def _held_or(
         self,
         refusal: BrokerError,
@@ -1405,10 +1471,21 @@ class MeshCredentialClient:
         the synced failover chain (#3900) moves on only on a quota refusal. The slot
         is kept, because the rest can end inside the hold.
 
-        GITHUB STAYS EXCLUDED in this build: the borrower's own window-end
-        self-revoke (``github._schedule_self_revoke``) DELETEs the token at
-        ``grant_exp``, so holding it past that would hand out a token this device
-        has already killed. Moving that DELETE to the hold end is design §4.3.
+        GITHUB AND MCP ARE HELD TOO (operator decision 2026-11-14, "Yes, GitHub and
+        MCP"; design ``mesh-credential-renewal.md`` §A). ``e70f7643c`` excluded them
+        out of caution, and GitHub for a concrete hazard: the borrower's belt
+        (``github._schedule_self_revoke``) and the owner's lender both DELETEd the
+        installation token at the 15-minute grant window, so a held serve would
+        have handed out a token already killed. Both DELETEs now fire at the hold
+        end (``github.belt_revoke_at_ms``, ``owner._serve_github_app``), and a panic,
+        a share revoke or a lost membership DELETEs it at once
+        (:meth:`_revoke_dropped_github`). The token's own expiry still wins inside
+        :meth:`Grant.hold_end_ms`: an App installation token (1 h) or an MCP access
+        token (the server's ``expires_in``) ends the hold early; a PAT or ``gh``
+        token rides the full hold. An MCP refresh token never leaves the owner, and
+        an MCP 401 drops the slot before it re-asks (``BrokeredBearerAuth``), so a
+        bearer the server refused is never served from the hold again.
+        DEVICE-BOUND providers stay excluded: their login cannot be brokered at all.
 
         Every offline serve is counted in a ``credential.held_served`` receipt and
         a hold that ends with the owner still away writes ``credential.held_lapsed``
@@ -1416,10 +1493,9 @@ class MeshCredentialClient:
         """
         from local_operator.network.credentials import offline_hold_s
         from local_operator.network.credentials.effective import note_resolution
-        from local_operator.network.credentials.github import is_github_key
         from local_operator.network.credentials.held_policy import PolicyUnknown
 
-        if is_mcp_key(key) or is_device_bound_provider(key) or is_github_key(key):
+        if is_device_bound_provider(key):
             note_resolution(self.root, key, refusal)
             return refusal
         if refusal.code not in _HOLDABLE_REFUSALS:
@@ -1445,12 +1521,15 @@ class MeshCredentialClient:
                         outcome = self._invalidate_membership_scope(key, document)
                         dropped = True
                     elif verdict == _NETWORK_UNTRUSTED:
-                        self.grants.drop(key)
+                        # A panic ends a held GitHub token at once (2026-11-14).
+                        self._revoke_dropped_github(self.grants.drop(key))
                         dropped = True
                     elif verdict:
                         code = verdict
                         policy.deny(document, self.owner_of(key), key, code)
-                        self.grants.drop(key)
+                        # A withdrawn share or an owner-stated restriction: the held
+                        # token is no longer this device's to use, so it dies now.
+                        self._revoke_dropped_github(self.grants.drop(key))
                         dropped = True
                         outcome = self._policy_error(key, code)
                     else:
@@ -1505,6 +1584,27 @@ class MeshCredentialClient:
             # The receipt is written OUTSIDE the policy lock: an audit append is
             # disk I/O, and the decision it records is already final.
             self._note_held_serve(key, outcome)
+            from local_operator.network.credentials.github import is_github_key
+
+            if is_mcp_key(key) or is_github_key(key):
+                # THE MCP AND GITHUB STATUS SURFACES READ DURABLE EVIDENCE, not this
+                # process's in-memory receipts (``/mcp``, ``lop network mcp
+                # credentials`` and readiness's ``github_fact`` all run in another
+                # process). The dial just wrote ``unavailable`` for the
+                # ``owner_offline``; a held serve replaces it with ``held`` and its
+                # end, so they say "held until HH:MM UTC" instead of "the owner is
+                # unreachable" while the server or push works (2026-11-14). Model
+                # keys keep their own published-claim path and are not written here.
+                mcp_state.record(
+                    self.network_id,
+                    key,
+                    state="held",
+                    code=refusal.code,
+                    owner_device=outcome.credential_ref.owner_device or self.owner_of(key),
+                    owner_name=outcome.credential_ref.owner_device_name or self.owner_label(key),
+                    until=outcome.held_until_ms / 1000.0,
+                    root=self.root,
+                )
             return outcome
         if lapsed is not None:
             self._note_held_lapsed(key, lapsed, bound=lapsed_bound)
@@ -3134,7 +3234,8 @@ class MeshCredentialClient:
                 continue
             owner = self.owner_of(key)
             owner_name = self.owner_label(key)
-            self.grants.drop(key)
+            # Reconcile's revoke/membership-loss drop: a GitHub token dies now.
+            self._revoke_dropped_github(self.grants.drop(key))
             mcp_state.record(
                 self.network_id,
                 key,

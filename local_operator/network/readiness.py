@@ -862,7 +862,41 @@ def github_fact(root: Path, home: Path | None = None) -> dict[str, Any]:
         fact["origin"] = _secret_mesh_origin(root, github_mod.APP_SECRET_NAME)
     elif source == github_mod.SOURCE_TOKEN:
         fact["origin"] = _secret_mesh_origin(root, github_mod.TOKEN_SECRET_NAME)
+    held = _github_held_fact(root)
+    if held:
+        fact["held"] = held
     return fact
+
+
+def _github_held_fact(root: Path) -> dict[str, Any] | None:
+    """``{"until", "owner_device", "owner_name"}`` while this device holds a lent GitHub grant.
+
+    THE OFFLINE HOLD FOR GITHUB (2026-11-14, "Yes, GitHub and MCP"): the grant lives
+    in the memory of whichever session process borrowed it, so the durable ``held``
+    evidence row it wrote (``client._held_or`` → ``mcp_state``) is how this report —
+    another process — knows a push here is riding a hold, and until when. ``None``
+    when no row says so or its end has passed: a lapsed hold must not read as usable.
+    Names and a time only; the token never reaches the evidence file.
+    """
+    try:
+        from local_operator.network.credentials import github as github_mod
+        from local_operator.network.credentials import mcp_state
+        from local_operator.network.credentials.placement import placement_entries_for
+
+        placed = placement_entries_for(provider=github_mod.GITHUB_KEY, root=root)
+        if placed is None:
+            return None
+        network_id, _entry = placed
+        row = mcp_state.load(network_id, root).get(github_mod.GITHUB_KEY) or {}
+        if row.get("state") != "held" or not mcp_state.held_until_clause(row.get("until")):
+            return None
+        return {
+            "until": float(row["until"]),
+            "owner_device": _safe_text(str(row.get("owner_device") or ""), limit=128),
+            "owner_name": _safe_text(str(row.get("owner_name") or ""), limit=120),
+        }
+    except Exception:  # noqa: BLE001 — an unreadable hold reads as "no hold stated"
+        return None
 
 
 def _transport_of(raw: Mapping[str, Any]) -> str:
@@ -3293,9 +3327,30 @@ def _github_push_clause(
                 f"what that grant covers is decided on {owner_label(placement_owner)}, "
                 "which this report cannot read from here"
             )
+        held = fact.get("held")
+        if isinstance(held, Mapping):
+            from local_operator.network.credentials.mcp_state import held_until_clause
+
+            until = held_until_clause(held.get("until"))
+            if until:
+                # THE OFFLINE HOLD (2026-11-14): the owner is away and the peer pushes
+                # with the grant it lent before it went — until the token's own end
+                # when that comes first (an App token lives 1 h), never past 24 h.
+                lender = _safe_text(str(held.get("owner_name") or ""), limit=120) or owner_label(
+                    placement_owner
+                )
+                return (
+                    f"a push there uses the GitHub grant {lender} lent before it went "
+                    f"offline{until}; nothing is renewed until {lender} is back, and {covered}"
+                )
+        # Since 2026-11-14 a lent grant outlives its 15-minute window while the owner
+        # is away (the offline hold), so "revoked when the grant ends" was no longer
+        # true; the sentence says what does end it.
         return (
             f"a push there borrows a grant from {owner_label(placement_owner)}: minted "
-            f"for that request and revoked when the grant ends, and {covered}"
+            f"for that request, kept while {owner_label(placement_owner)} is offline "
+            f"until the token ends (at most 24 h), and dropped at once on a panic or a "
+            f"share revoke; {covered}"
         )
     if placement_owner:
         return (
@@ -4578,6 +4633,37 @@ def _mcp_credential_row(
             source=SOURCE_PEER,
             observed={"server": name, "url": url, "auth_evidence": dict(evidence)},
         )
+    if current_owner_evidence and evidence.get("state") == "held":
+        # THE OFFLINE HOLD FOR MCP (2026-11-14, "Yes, GitHub and MCP"): the owner is
+        # away and the peer serves the access token it lent before it went, until the
+        # row's ``until`` — the token's own end when that comes first, so a 1 h MCP
+        # token never reads as a 24 h hold. Same sentence shape as the model row's
+        # ``held_offline`` reading (``selected_model_row``). Past its end the row is
+        # not usable any more and falls through to the branches below.
+        from local_operator.network.credentials.mcp_state import held_until_clause
+
+        until = held_until_clause(evidence.get("until"))
+        if until:
+            owner_label = _bounded(evidence.get("owner_name") or "", 120) or _owner_label(
+                placement, fallback=owner
+            )
+            return _capability_row(
+                device_id=member.device_id,
+                device_name=peer_label,
+                capability=CAPABILITY_MCP_CREDENTIAL,
+                ok=True,
+                code="held_offline",
+                detail=(
+                    f"{peer_label} is using the {name} sign-in {owner_label} lent before "
+                    f"it went offline{until}; nothing is renewed until {owner_label} is back"
+                ),
+                remedies=(
+                    f"continue on {peer_label}; reconnect {owner_label} before then, or "
+                    f"sign in to {name} on {peer_label} to stop depending on it",
+                ),
+                source=SOURCE_PEER,
+                observed={"server": name, "url": url, "auth_evidence": dict(evidence)},
+            )
     if local_unavailable:
         # A usable-but-unavailable grant (expired with no refresh, or a live
         # unconfirmed send) is still the runtime's local rung, and a tombstoned
