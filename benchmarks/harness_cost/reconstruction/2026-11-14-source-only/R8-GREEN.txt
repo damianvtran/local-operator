@@ -1,0 +1,36 @@
+test_actual_adapter_environment_reads_registered_admission_and_artifact (test_registered_root.RegisteredRootTests.test_actual_adapter_environment_reads_registered_admission_and_artifact) ... ok
+test_missing_wrong_relative_and_parent_escape_roots_fail_closed (test_registered_root.RegisteredRootTests.test_missing_wrong_relative_and_parent_escape_roots_fail_closed) ... ok
+test_symlink_escape_rejected_before_adapter_launch (test_registered_root.RegisteredRootTests.test_symlink_escape_rejected_before_adapter_launch) ... ok
+test_actual_anonymous_config_suppresses_sentinel_autodetection (test_cleanup_auth.AuthTests.test_actual_anonymous_config_suppresses_sentinel_autodetection) ... ok
+test_absent_cid_never_broad_cleans_and_daemon_error_is_unverified (test_cleanup_auth.CleanupTests.test_absent_cid_never_broad_cleans_and_daemon_error_is_unverified) ... ok
+test_actual_command_does_not_reenter_failed_work_monitor_in_cleanup (test_cleanup_auth.CleanupTests.test_actual_command_does_not_reenter_failed_work_monitor_in_cleanup) ... ok
+test_expired_work_healthy_cleanup_resources_succeeds (test_cleanup_auth.CleanupTests.test_expired_work_healthy_cleanup_resources_succeeds) ... ok
+test_invalid_cid_and_exhausted_cleanup_budget_never_spawn (test_cleanup_auth.CleanupTests.test_invalid_cid_and_exhausted_cleanup_budget_never_spawn) ... ok
+test_monitor_failure_still_reaches_known_cid_removal_and_verification (test_cleanup_auth.CleanupTests.test_monitor_failure_still_reaches_known_cid_removal_and_verification) ... ok
+test_remove_error_still_attempts_authoritative_absence_check (test_cleanup_auth.CleanupTests.test_remove_error_still_attempts_authoritative_absence_check) ... ok
+test_cleanup_ownership_failure_is_not_reported_success (test_lifecycle_proposal.LifecycleTests.test_cleanup_ownership_failure_is_not_reported_success) ... ok
+test_concrete_quit_refuses_changed_owner_before_any_signal (test_lifecycle_proposal.LifecycleTests.test_concrete_quit_refuses_changed_owner_before_any_signal) ... ok
+test_cpu_overcap_missing_wheel_and_work_deadline_abort (test_lifecycle_proposal.LifecycleTests.test_cpu_overcap_missing_wheel_and_work_deadline_abort) ... ok
+test_default_no_pull_and_missing_artifact_aborts (test_lifecycle_proposal.LifecycleTests.test_default_no_pull_and_missing_artifact_aborts) ... ok
+test_digest_and_wheel_hash_mismatch_never_installs (test_lifecycle_proposal.LifecycleTests.test_digest_and_wheel_hash_mismatch_never_installs) ... ok
+test_existing_desktop_is_neither_started_nor_quit (test_lifecycle_proposal.LifecycleTests.test_existing_desktop_is_neither_started_nor_quit) ... ok
+test_no_full_scope_review_has_no_effects (test_lifecycle_proposal.LifecycleTests.test_no_full_scope_review_has_no_effects) ... ok
+test_optional_digest_pull_requires_full_scope_signoff (test_lifecycle_proposal.LifecycleTests.test_optional_digest_pull_requires_full_scope_signoff) ... ok
+test_overcap_aborts_and_quits_only_owned_without_container (test_lifecycle_proposal.LifecycleTests.test_overcap_aborts_and_quits_only_owned_without_container) ... ok
+test_rss_overcap_and_termination_cleanup (test_lifecycle_proposal.LifecycleTests.test_rss_overcap_and_termination_cleanup) ... ok
+test_termination_during_resolver_start_still_requests_owned_cleanup (test_lifecycle_proposal.LifecycleTests.test_termination_during_resolver_start_still_requests_owned_cleanup) ... ok
+test_unidentified_vm_fails_closed (test_lifecycle_proposal.LifecycleTests.test_unidentified_vm_fails_closed) ... ok
+test_vm_attribution_excludes_unrelated_and_rejects_ambiguity (test_lifecycle_proposal.LifecycleTests.test_vm_attribution_excludes_unrelated_and_rejects_ambiguity) ... ok
+test_disk_fences_use_allocated_growth_and_free_space (test_resolver_safety.ResolverSafetyTests.test_disk_fences_use_allocated_growth_and_free_space) ... ok
+test_independent_container_deadline_exists (test_resolver_safety.ResolverSafetyTests.test_independent_container_deadline_exists) ... ok
+test_inner_optimization_guard_precedes_effects (test_resolver_safety.ResolverSafetyTests.test_inner_optimization_guard_precedes_effects) ... ok
+test_optimization_guard_precedes_effects (test_resolver_safety.ResolverSafetyTests.test_optimization_guard_precedes_effects) ... ok
+test_outer_sigterm_reaps_owned_client_and_container (test_resolver_safety.ResolverSafetyTests.test_outer_sigterm_reaps_owned_client_and_container) ... ok
+test_outer_timeout_reaps_owned_client_and_container (test_resolver_safety.ResolverSafetyTests.test_outer_timeout_reaps_owned_client_and_container) ... ok
+
+----------------------------------------------------------------------
+Ran 29 tests in 9.568s
+
+OK
+PROPOSAL ONLY: no fresh slot/full-scope approval; no execution
+{"classified_public_fixtures": [{"classification": "exact-public-FAKE-canary-source", "path": "payloads/sanitize-git-repo/tests/test_outputs.py", "rules": ["aws-access-id", "github-token", "huggingface-token"]}], "errors": [], "file_statuses": {"exact_match": 381, "not_downloaded_non_source": 26}, "historical_checks": 37, "kind": "static-source-verification", "metadata_receipt_rows_checked": 83, "privacy_pattern_hits": [], "runtime_qualified": false}

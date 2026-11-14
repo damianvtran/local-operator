@@ -19,6 +19,16 @@ cleanup. CLI config is explicitly anonymous (a non-empty empty-auth record), not
 an empty config that can autodetect osxkeychain; CLI auth environment overrides
 are excluded. Source/sentinel proof is NOT native credential-helper proof.
 
+## Round 7 root integration repair — pending review, still NOPULL
+
+Review f2df8b75a5f5 marked R6/R7 FIXED and identified MAJOR R8. See
+REMEDIATION-R8.md. The supervisor now receives BENCH_REGISTERED_ROOT explicitly,
+validated against the native account's canonical registered campaign directory,
+not Docker CLI HOME. CLI HOME/auth isolation is unchanged. The actual adapter
+launch environment is tested against the emitted supervisor's admission/artifact
+read fragment, with invalid/escaping roots rejected. This source-only integration
+proof grants no runtime GO or optional-pull approval.
+
 ## Operator acknowledgement, not fabricated verification
 
 Operator answer **a-7072**, relayed via desk 5170, verbatim:

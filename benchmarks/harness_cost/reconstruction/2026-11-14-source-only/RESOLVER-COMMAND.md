@@ -149,7 +149,10 @@ source_head = subprocess.check_output(['git','rev-parse','HEAD'],cwd=R,text=True
 assert pins['platform'] == 'linux/amd64'
 S = pathlib.Path('/var/run/docker.sock')
 assert S.exists() and stat.S_ISSOCK(S.stat().st_mode), 'STOP: approved LOCAL daemon socket absent'
-ROOT = pathlib.Path.home() / 'benchmark-runs/reconstruction-20261114-source-v1'
+# Docker CLI HOME stays isolated; campaign admission/artifacts use the explicit
+# native-account-anchored registered root, never a path derived from CLI HOME.
+from lifecycle_proposal import validated_registered_root
+ROOT = validated_registered_root(os.environ['BENCH_REGISTERED_ROOT'])
 admission=json.loads((ROOT/'desk-admission.json').read_text())
 now=datetime.datetime.now(datetime.UTC)
 begin=datetime.datetime.fromisoformat(admission['slot_start_utc'])

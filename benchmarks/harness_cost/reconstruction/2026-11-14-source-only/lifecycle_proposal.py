@@ -14,6 +14,7 @@ import datetime
 import hashlib
 import json
 import re
+import pwd
 from pathlib import Path
 import signal
 import subprocess
@@ -29,6 +30,23 @@ HELPERS = {'com.apple.Virtualization.VirtualMachine', 'com.docker.virtualization
 def require(condition, message):
     if not condition:
         raise RuntimeError('STOP: ' + message)
+
+
+def validated_registered_root(raw):
+    """Bind campaign storage independently of Docker's deliberately isolated HOME.
+
+    The native account home is an independent anchor, not a second untrusted
+    environment variable. Refuse aliases/traversal rather than silently reading
+    another campaign's admission or following a symlink outside registered HOLD.
+    """
+    require(isinstance(raw,str) and bool(raw),'registered root must be explicit')
+    root=Path(raw)
+    home=Path(pwd.getpwuid(os.getuid()).pw_dir)
+    expected=home/'benchmark-runs/reconstruction-20261114-source-v1'
+    require(root.is_absolute() and '..' not in root.parts and root==expected,'unregistered campaign root/escape')
+    require(root.is_dir() and root.resolve(strict=True)==root,'registered root absent or symlink escape')
+    require(root.stat().st_uid==os.getuid(),'registered root not owned by operator')
+    return root
 
 
 def write_anonymous_cli_config(directory):
@@ -208,6 +226,7 @@ class NativeOps:
     def desktop_records(self, rows):
         return [p for p in rows if p['exe'].startswith(self.app_root) or Path(p['exe']).name in {'Docker Desktop','com.docker.backend'}]
     def preflight(self):
+        validated_registered_root(str(self.root))  # Reject bad roots before any startup/work.
         require(self.a.get('operator_ack_id')==ACK and self.a.get('operator_ack_quote')==ACK_QUOTE,'operator acknowledgement missing')
         require(self.a.get('prestart_cap_validation')=='skipped-with-operator-ack' and 'vm_caps_verified_before_start' not in self.a,'must not fabricate pre-start verification')
         now=datetime.datetime.now(datetime.UTC)
@@ -316,11 +335,12 @@ class NativeOps:
         require(path.is_file(),'staged uv wheel missing; no implicit download')
         return hashlib.sha256(path.read_bytes()).hexdigest()
     def begin_resolver(self):
+        registered=validated_registered_root(str(self.root))
         # Refuse foreign auto-restarted workloads rather than stopping their work.
         require(not self.command(self.d+['ps','-q'])[1].strip(),'foreign running containers; resolver forbidden')
         code=(HERE/'RESOLVER-COMMAND.md').read_text().split('```python\n',1)[1].split('\n```',1)[0]
         path=self.directory/'resolver-supervisor.py';path.write_text(code)
-        env=dict(anonymous_cli_environment(self.directory),BENCH_LIFECYCLE_DIR=str(self.directory),PYTHONPATH=str(HERE))
+        env=dict(anonymous_cli_environment(self.directory),BENCH_REGISTERED_ROOT=str(registered),BENCH_LIFECYCLE_DIR=str(self.directory),PYTHONPATH=str(HERE))
         blocked={signal.SIGTERM,signal.SIGINT};mask=signal.pthread_sigmask(signal.SIG_BLOCK,blocked)
         try:
             self.resolver=subprocess.Popen([sys.executable,'-B',str(path)],cwd=HERE,env=env,stdin=subprocess.DEVNULL,start_new_session=True,

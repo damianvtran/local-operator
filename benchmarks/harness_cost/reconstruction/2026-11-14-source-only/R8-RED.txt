@@ -1,0 +1,24 @@
+test_actual_adapter_environment_reads_registered_admission_and_artifact (test_registered_root.RegisteredRootTests.test_actual_adapter_environment_reads_registered_admission_and_artifact) ... ERROR
+
+======================================================================
+ERROR: test_actual_adapter_environment_reads_registered_admission_and_artifact (test_registered_root.RegisteredRootTests.test_actual_adapter_environment_reads_registered_admission_and_artifact)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "~/local-operator/.worktrees/benchmark-reconstruction-20261114/benchmarks/harness_cost/reconstruction/2026-11-14-source-only/test_registered_root.py", line 59, in test_actual_adapter_environment_reads_registered_admission_and_artifact
+    result=self.run_fragment(self.fragment(code),env,pins)
+  File "~/local-operator/.worktrees/benchmark-reconstruction-20261114/benchmarks/harness_cost/reconstruction/2026-11-14-source-only/test_registered_root.py", line 47, in run_fragment
+    with mock.patch.dict(os.environ,env,clear=True):exec(fragment,scope)
+                                                    ~~~~^^^^^^^^^^^^^^^^
+  File "<actual-supervisor-root-admission-artifact-fragment>", line 35, in <module>
+  File "/opt/homebrew/Cellar/python@3.14/3.14.7/Frameworks/Python.framework/Versions/3.14/lib/python3.14/pathlib/__init__.py", line 787, in read_text
+    with self.open(mode='r', encoding=encoding, errors=errors, newline=newline) as f:
+         ~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/Cellar/python@3.14/3.14.7/Frameworks/Python.framework/Versions/3.14/lib/python3.14/pathlib/__init__.py", line 771, in open
+    return io.open(self, mode, buffering, encoding, errors, newline)
+           ~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+FileNotFoundError: [Errno 2] No such file or directory: '~/.local-operator/sessions/70ba7562e541/scratchpad/tmp56okksm2/benchmark-runs/reconstruction-20261114-source-v1/lifecycle/linux-amd64-01/docker-home/benchmark-runs/reconstruction-20261114-source-v1/desk-admission.json'
+
+----------------------------------------------------------------------
+Ran 1 test in 0.099s
+
+FAILED (errors=1)
