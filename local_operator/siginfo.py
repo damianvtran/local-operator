@@ -248,8 +248,35 @@ def _struct_type() -> type[ctypes.Structure] | None:
     return _STRUCTS.get(sys.platform)
 
 
+SENSOR_ENV = "LOCAL_OPERATOR_SIGINFO_SENSOR"
+_OFF_VALUES = frozenset({"off", "0", "false", "no"})
+
+
+def _disabled_by_env() -> bool:
+    """True when ``LOCAL_OPERATOR_SIGINFO_SENSOR`` is off/0/false/no (any case).
+
+    DIAGNOSTIC SWITCH for the macOS runtime-boot SIGSEGV experiment: the crash
+    family is *inferred* (not reproduced) to come from the ctypes ``CFUNCTYPE``
+    callback installed as a raw ``SA_SIGINFO`` handler, and running with the
+    sensor off is the discriminating test. DEFAULT IS UNCHANGED (armed on
+    darwin): unset or any other value leaves the sensor on. Read at CALL time,
+    not import time, so a test or an inheriting child sees the value it was
+    given. Off makes :func:`supported` false, so every caller degrades through
+    the existing "unsupported" path and receipts keep the old ``no-siginfo``
+    wording.
+    """
+    return os.environ.get(SENSOR_ENV, "").strip().lower() in _OFF_VALUES
+
+
 def supported() -> bool:
-    """Whether this platform can capture a sender at all. Never raises."""
+    """Whether this process can capture a sender at all. Never raises.
+
+    False on an unverified platform or when ``LOCAL_OPERATOR_SIGINFO_SENSOR`` is
+    switched off (see :func:`_disabled_by_env`); the env check short-circuits
+    before any libc lookup so an off sensor touches no ctypes machinery.
+    """
+    if _disabled_by_env():
+        return False
     return sys.platform in _ARMED_PLATFORMS and _struct_type() is not None and _libc() is not None
 
 
