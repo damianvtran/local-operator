@@ -3726,6 +3726,8 @@ not style preferences.
 
 ### Wait on the event, never on the clock
 
+**Rule:** no hard-coded elapsed bounds or fixed sleeps in unit tests; wait on an event or a settle helper (`wait_for`, `ChangeSignal`), and derive any bound from the property protected or an existing calibration.
+
 **Do not** poll a wall-clock deadline and assert afterwards:
 
 ```python
