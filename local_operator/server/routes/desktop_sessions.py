@@ -12,7 +12,7 @@ import sqlite3
 import time
 from collections.abc import AsyncIterator, Mapping
 from contextlib import aclosing, asynccontextmanager
-from typing import Annotated, Any, Callable, Literal, NamedTuple
+from typing import TYPE_CHECKING, Annotated, Any, Callable, Literal, NamedTuple, cast
 
 from fastapi import (
     APIRouter,
@@ -83,6 +83,7 @@ from local_operator.server.models.desktop_sessions import (
     StoredFile,
     SupplementReceipt,
     TemporaryState,
+    ToolCallDiffPage,
     WarmReceipt,
     WatchReceipt,
 )
@@ -157,6 +158,11 @@ from local_operator.supplements.contract import (
     STEER_TEXT_MAX_CHARS,
     supplement_read_options,
 )
+
+if TYPE_CHECKING:
+    # Type-only: the ``cast`` on each ``diff_bindings`` unpack names it as a string, so
+    # this route module keeps its lazy ``tools.diff_archive`` import at runtime.
+    from local_operator.tools.diff_archive import DiffBindingReadOptions
 
 logger = logging.getLogger(__name__)
 
@@ -3652,6 +3658,9 @@ async def snapshot(
     ] = None,
     peer_journal_source: Annotated[int, Query(ge=0, le=1)] = 0,
     supplements: int = Query(default=0, ge=0),
+    # Viewer-declared (QA F5 on #3762): a client that can paint nested
+    # write/edit binding rows sends 1; default 0 serves today's rows exactly.
+    diff_bindings: Annotated[int, Query(ge=0, le=1)] = 0,
 ):
     # READ: an existing but silent owner must not fail a read. The durable answer
     # is on disk in this same process, so the attempt is bounded
@@ -3706,6 +3715,7 @@ async def snapshot(
             **({"journal_order": True, "order_ids": order_ids} if journal_order else {}),
             peer_journal_source=bool(peer_journal_source),
             **supplement_read_options(bool(supplements)),
+            **cast("DiffBindingReadOptions", {"diff_bindings": True} if diff_bindings else {}),
         )
         # The temporary-chat object rides on the snapshot so an open chat shows
         # its pill and countdown without a list read. ``null`` for every other
@@ -3778,6 +3788,9 @@ async def history(
     source_read: Annotated[str | None, Query(max_length=32)] = None,
     expected_journal_generation: Annotated[str | None, Query(max_length=128)] = None,
     supplements: int = Query(default=0, ge=0),
+    # Viewer-declared (QA F5 on #3762): a client that can paint nested
+    # write/edit binding rows sends 1; default 0 serves today's rows exactly.
+    diff_bindings: Annotated[int, Query(ge=0, le=1)] = 0,
 ):
     # READ, for the same reason as ``snapshot`` beside it — and on a draft the
     # empty page is the correct answer (the open frame's own ``history()``
@@ -3839,6 +3852,7 @@ async def history(
                 source_read=source_read,
                 expected_journal_generation=expected_journal_generation,
                 **supplement_read_options(bool(supplements)),
+                **cast("DiffBindingReadOptions", {"diff_bindings": True} if diff_bindings else {}),
             )
         )
 
@@ -4056,6 +4070,98 @@ async def child_trajectory_release(session_id: str, child_id: str, request: Requ
     """
     async with errors(request):
         return reply(await host(request).unload_child_trajectory(session_id, child_id))
+
+
+#: Tool-call ids are provider-minted opaque strings; the bound keeps a crafted
+#: path segment from costing more than one transcript prefilter.
+_TOOL_CALL_ID_MAX = 256
+
+
+def _diff_reply(page: dict[str, Any]) -> JSONResponse:
+    """The CRUD envelope with the headers this evidence must carry.
+
+    ``no-store`` is also applied by ``managed_desktop_boundary``; stating it
+    here keeps the contract true for any host that mounts the router alone.
+    """
+    body = reply(ToolCallDiffPage.model_validate(page)).model_dump(mode="json")
+    return JSONResponse(
+        body, headers={"X-Content-Type-Options": "nosniff", "Cache-Control": "no-store"}
+    )
+
+
+async def _diff_page_or_422(load: Any) -> dict[str, Any]:
+    from local_operator.tools.diff_archive import DiffPageRangeError
+
+    try:
+        return await load
+    except DiffPageRangeError:
+        # A start past the last row is the caller's request being wrong, not
+        # the resource being absent, so it is not folded into the uniform 404.
+        # The page is addressed by the server-issued (next_start, next_offset)
+        # cursor, so the audited paging-cursor refusal is the localized body.
+        raise HTTPException(422, _wd.session_files_bad_cursor().envelope()) from None
+
+
+@router.get(
+    "/v1/desktop/sessions/{session_id}/tool-calls/{call_id}/diff",
+    response_model=CRUDResponse[ToolCallDiffPage],
+)
+async def tool_call_diff(
+    session_id: str,
+    request: Request,
+    call_id: str = Path(min_length=1, max_length=_TOOL_CALL_ID_MAX),
+    start: int = Query(default=0, ge=0),
+    limit: int = Query(default=200, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+):
+    """One page of a write/edit call's COMPLETE, source-redacted diff.
+
+    The inline ``details['diff']`` keeps 200 rows; ``details['diff_full']``
+    names the archive that holds the rest (``tools/diff_archive``). The client
+    sends ids only -- never a digest: membership is proved server-side from
+    this session's own transcript row for ``call_id``. Unknown session,
+    foreign call or a non-write/edit call are one 404; bad paging is 422; a
+    captured-but-unservable diff (``oversized``/``withheld``/``unavailable``/
+    ``evicted``) and an old row (``not_recorded``) are 200 answers with no rows;
+    so is a call id that two distinct persisted rows share (``unavailable``:
+    serving either could be the wrong capture). ``offset`` is the opaque,
+    server-issued continuation into one row too large for a page (see
+    ``ToolCallDiffPage``); a client echoes ``next_offset`` and never computes it.
+    """
+    async with errors(request):
+        page = await _diff_page_or_422(
+            host(request).tool_call_diff(
+                session_id, call_id, start=start, limit=limit, offset=offset
+            )
+        )
+    return _diff_reply(page)
+
+
+@router.get(
+    "/v1/desktop/sessions/{session_id}/children/{child_id}/tool-calls/{call_id}/diff",
+    response_model=CRUDResponse[ToolCallDiffPage],
+)
+async def child_tool_call_diff(
+    session_id: str,
+    child_id: str,
+    request: Request,
+    call_id: str = Path(min_length=1, max_length=_TOOL_CALL_ID_MAX),
+    start: int = Query(default=0, ge=0),
+    limit: int = Query(default=200, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+):
+    """The child reader's twin of :func:`tool_call_diff`.
+
+    Same contract; the containment proof (``_contained_child_dir``) runs
+    before the child's transcript is read, and refusals are the same 404.
+    """
+    async with errors(request):
+        page = await _diff_page_or_422(
+            host(request).child_tool_call_diff(
+                session_id, child_id, call_id, start=start, limit=limit, offset=offset
+            )
+        )
+    return _diff_reply(page)
 
 
 @router.get(
@@ -6274,6 +6380,9 @@ async def events(
     ] = None,
     peer_journal_source: Annotated[int, Query(ge=0, le=1)] = 0,
     supplements: int = Query(default=0, ge=0),
+    # Viewer-declared (QA F5 on #3762): a client that can paint nested
+    # write/edit binding rows sends 1; default 0 serves today's rows exactly.
+    diff_bindings: Annotated[int, Query(ge=0, le=1)] = 0,
 ):
     # Acquire BEFORE returning response headers: invalid identity/capacity must
     # return JSON status, not a misleading 200 followed by a broken SSE stream.
@@ -6326,6 +6435,7 @@ async def events(
                 sub = bridge.subscribe(
                     frontend_replace=bool(frontend_replace),
                     supplements=bool(supplements),
+                    diff_bindings=bool(diff_bindings),
                     journal_order=bool(journal_order),
                     peer_journal_source=bool(peer_journal_source),
                 )
