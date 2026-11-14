@@ -186,6 +186,84 @@ def test_genuine_secret_still_masks_on_every_surface(case_id: str, text: str, va
     assert scrub_shapes(text) != text, f"{case_id}: bare shape pass published a secret"
 
 
+#: Ordinary words and plain identifiers a name-driven or evidence rule can match as a
+#: VALUE. Assembled from parts (an eight-letter one mirrors the minervaai core-svc
+#: d20e5acb header word) so this source does not register them in a reader's session.
+ORDINARY_WORDS = (
+    "quorb" + "ish",
+    "inter" + "nal",
+    "synth" + "etic",
+    "Stag" + "ing",
+    "READ" + "ONLY",
+    "read" + "_only",
+    "alert" + "-key",
+)
+
+#: Every carrier that promoted a word session-wide before 2026-11-13 (measured on the
+#: pre-fix head: each registered the word). The format slot is the value.
+WORD_CARRIERS = (
+    "PASSWORD={}",
+    "password: {}",
+    "--password {}",
+    "token: {}",
+    "api_key={}",
+    "x-api-key: {}",
+    "secret: {}",
+    "Authorization: Bearer {}",
+    "postgres://user:{}@db.example.com/app",
+    "https://h.example/cb?token={}",
+)
+
+
+@pytest.mark.parametrize("carrier", WORD_CARRIERS)
+@pytest.mark.parametrize("word", ORDINARY_WORDS)
+def test_an_ordinary_word_value_is_masked_in_place_but_never_promoted(
+    carrier: str, word: str
+) -> None:
+    """Policy "Ordinary words are never promoted": identifiers containing the word survive.
+
+    The regression for minervaai core-svc d20e5acb: a promoted word was masked INSIDE
+    ``x-alert-disposition-<word>-key`` in every later result, and the agent wrote the
+    marker into a test rig's header name.
+    """
+    store = VariableStore()
+    store.redact_with_report(carrier.format(word))
+    assert word not in store.redaction_values(), f"{word!r} promoted via {carrier!r}"
+    header = f"x-alert-disposition-{word}-key"
+    later = f"curl -H '{header}: 1' && grep {word} cfg && KEY_TYPE={word}"
+    assert store.redact_with_report(later)[0] == later
+    assert not is_registerable_component(word, label="dsn-password", assigned=True)
+
+
+@pytest.mark.parametrize(
+    "value",
+    (
+        "hunter2" + "x9",  # a digit
+        "Xk9" + "-pq2Lm_77",  # symbols and mixed case
+        "sword!" + "fishing",  # one symbol in otherwise plain letters
+        "correcthorse" + "batterystaple",  # letters-only but past the length cap
+    ),
+)
+def test_a_credential_looking_value_is_still_contained_session_wide(value: str) -> None:
+    """The other direction: credential character (or a passphrase's length) still promotes."""
+    store = VariableStore()
+    first, _ = store.redact_with_report("PASSWORD=" + value)
+    assert value not in first
+    assert value in store.redaction_values(), "containment of a real credential was lost"
+    assert value not in store.redact_with_report("later: " + value + " again")[0]
+
+
+def test_a_known_secret_that_is_a_word_is_still_masked() -> None:
+    """Session credentials and broker retrievals are KNOWN secrets: shape is not consulted."""
+    word = "inter" + "nal"
+    store = VariableStore()
+    store.register_redaction(word)
+    assert word not in store.redact_with_report("value " + word + " here")[0]
+    credentialed = VariableStore()
+    credentialed.store_credential("TIER_TOKEN", word)
+    assert word not in credentialed.redact_with_report("value " + word + " here")[0]
+
+
 def test_the_same_evidence_shows_the_secret_masked_and_the_key_readable() -> None:
     """The operator's requested same-frame proof.
 

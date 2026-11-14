@@ -925,6 +925,19 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "Atomic replace of <config>/remote-attention-origins.json from its sibling "
         "pid-suffixed tmp FILE; never a directory and never under sessions/",
     ),
+    # `origin_baselines_ms`: the target is `Path(root) / BASELINES_FILE` =
+    # <config>/remote-attention-baselines.json (a fixed basename joined to the
+    # watcher's config root — tui/app.py and server/app.py pass their config dir,
+    # never a session id), and the source is the sibling
+    # `.remote-attention-baselines.json.<pid>.tmp` FILE this same call created
+    # with O_CREAT under the flock. `os.replace` onto a regular file cannot
+    # displace a directory, and neither path can resolve under `sessions/`.
+    (
+        "local_operator/notifications/remote_attention.py::origin_baselines_ms",
+        "os.replace",
+        "Atomic replace of <config>/remote-attention-baselines.json from its sibling "
+        "pid-suffixed tmp FILE; never a directory and never under sessions/",
+    ),
     (
         "local_operator/notifications/custom_sounds.py::_write_index",
         "os.replace",
@@ -1749,6 +1762,43 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "local_operator/network/definitions.py::write_index",
         "<path>.unlink",
         "only the same-directory temp FILE this write created",
+    ),
+    # Mesh skill sync (network/skillsync.py). Every path below is built from the
+    # fixed roots `<config>/skills` and `<config>/network/skill-stage` plus either
+    # a `validate_name` kebab-case name (no `/`, no `..`) or a fresh uuid4 hex, and
+    # each is checked by `_assert_inside_root` AND `_assert_not_sessions` before the
+    # call — the latter refuses a `skills/` or `network/` link resolving into
+    # `sessions/` (pinned by test_skillsync's
+    # `test_an_apply_never_writes_through_a_skills_link_into_sessions`).
+    (
+        "local_operator/network/skillsync.py::_apply_locked",
+        "os.replace",
+        "the swap: skills/<name> -> skill-stage/<uuid>/previous, then the extracted "
+        "skill-stage/<uuid>/tree -> skills/<name>; both guarded off sessions/",
+        2,
+    ),
+    (
+        "local_operator/network/skillsync.py::_apply_locked",
+        "shutil.rmtree",
+        "only this apply's own skill-stage/<uuid> dir, created fresh (mkdir without "
+        "exist_ok) by the same call and guarded off sessions/",
+    ),
+    (
+        "local_operator/network/skillsync.py::_record_receipt",
+        "os.replace",
+        "temp FILE -> config/network/skills-sync.json; replace rejects a directory target",
+    ),
+    (
+        "local_operator/network/skillsync.py::_sweep_stage",
+        "shutil.rmtree",
+        "aged entries of config/network/skill-stage only; refuses a linked stage or "
+        "network/ dir and a stage resolving into sessions/",
+    ),
+    (
+        "local_operator/network/skillsync.py::_sweep_stage",
+        "os.unlink",
+        "aged non-dir entries of config/network/skill-stage (a link itself, never its "
+        "target); same refusals as the rmtree row",
     ),
     (
         "local_operator/network/definitions.py::_write_instructions_file",

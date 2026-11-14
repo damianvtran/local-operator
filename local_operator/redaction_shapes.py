@@ -4908,6 +4908,53 @@ _MIN_REGISTERABLE_SECRET = 8
 DETECTED_COMPONENT_FLOOR = _MIN_REGISTERABLE_SECRET
 
 
+#: An ORDINARY WORD or a plain identifier built from them: ASCII letters in one case
+#: (``internal``, ``Internal``, ``INTERNAL``), optionally joined by ``-``/``_`` into
+#: lowercase compounds (``alert-key``, ``read_only``). No digit, no mixed case inside
+#: a part, no other symbol — none of the characters that make a string read as a
+#: credential.
+_ORDINARY_WORD_VALUE = re.compile(r"[a-z]+(?:[-_][a-z]+)*|[A-Z][a-z]+|[A-Z]+")
+
+#: Longest ordinary-word value that is refused session-wide containment. Above it a
+#: letters-only value is a passphrase more often than a vocabulary word, so it keeps
+#: the old containment. MEASURED, not chosen: see the PR's false-positive section and
+#: ``docs/security/redaction-policy.md`` ("Ordinary words are never promoted").
+_ORDINARY_WORD_MAX_LEN = 16
+
+
+def is_ordinary_word_value(value: str) -> bool:
+    """Whether ``value`` is vocabulary or a plain identifier, never a session-wide mask.
+
+    **Why (2026-11-13, minervaai core-svc d20e5acb).** A name-driven rule matched an
+    ordinary eight-letter word as the value of a ``token`` key (the rule is
+    right to mask THAT occurrence in place), and :meth:`VariableStore.
+    _register_shape_hits` promoted the word to a session-wide redaction. The
+    exact-value pass then masked it everywhere, including INSIDE a protocol
+    identifier, because :func:`_word_pattern` treats ``-`` as a word boundary:
+    ``x-alert-disposition-<word>-key`` was shown to the agent with the marker in
+    the middle, the agent copied that header name into a test rig, and the rig's
+    34-byte header got a 401 where the real client sends 32 bytes. No secret was
+    involved; a protocol identifier was corrupted on disk.
+
+    The operator's invariant (``docs/security/redaction-policy.md``): only
+    credential-looking VALUES are masked; key names, header names, identifiers and
+    ordinary words survive. A one-case letters-only word carries none of a
+    credential's characters, so promoting it can only ever rewrite vocabulary.
+
+    **What stays masked.** The occurrence the rule matched is still masked IN PLACE
+    (this gates registration only). Values the session KNOWS are secrets — injected
+    session credentials, broker retrievals (``lop secret get``), the eval ledger —
+    do not pass through here and keep their exact-value mask whatever their shape.
+    The accepted residual: a weak password that is a single dictionary word (a
+    ``--password`` flag given one word) is masked where a rule sees it but is no longer
+    contained in a later bare occurrence; mixed case, digits or symbols restore
+    containment, and so does a value longer than :data:`_ORDINARY_WORD_MAX_LEN`.
+    """
+    return (
+        len(value) <= _ORDINARY_WORD_MAX_LEN and _ORDINARY_WORD_VALUE.fullmatch(value) is not None
+    )
+
+
 def is_registerable_component(
     value: str, *, label: str | None = None, assigned: bool = False
 ) -> bool:
@@ -5003,6 +5050,12 @@ def is_registerable_component(
     # this gate is what holds when another rule fires first and its value reaches
     # the store by a path that has no name context to consult.
     if _is_code_keyword_value(value):
+        return False
+    # ORDINARY WORDS never become session-wide redactions, whichever rule matched
+    # them — evidence labels included, because the promotion is what corrupts and
+    # a word carries no credential character for the evidence to vouch for. See
+    # :func:`is_ordinary_word_value` for the incident and the stated residual.
+    if is_ordinary_word_value(value):
         return False
     # NAME values, over the WHOLE DNS grammar and not only the qualifier vocabulary
     # the in-place release uses: the qualifier is what an operator means by "that is

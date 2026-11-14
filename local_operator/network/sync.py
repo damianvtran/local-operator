@@ -587,7 +587,31 @@ EXCLUDED_ENTRIES: dict[str, str] = {
     # that used the approvals feature refused with `unlisted_content` and told
     # the user to delete the record (round-4 review, blocker).
     OVERRIDE_FILENAME: "the conversation's own approval choice; a copy must start without it",
+    # OPERATING-SYSTEM FOLDER METADATA (``OS_METADATA_NAMES`` below). Finder writes
+    # ``.DS_Store`` into every folder a user opens, so before this entry a deleting move
+    # of any Mac session someone had browsed refused with ``unlisted_content`` and told
+    # the user to remove it (2026-11-13: ``lop sessions move d5aaf8ba6ba5 --to
+    # lop-remote-node-2 --queue`` refused for ``.DS_Store``; 18 session directories on
+    # the operator's Mac held one at depth <= 2). They are view state the shell rebuilds
+    # (icon positions, window size, thumbnail cache), never session content, so they
+    # are DROPPED rather than carried or refused. Windows Explorer's ``Thumbs.db`` and
+    # ``desktop.ini`` are the same class and exact names, so they ride the same rule;
+    # AppleDouble ``._*`` files are a prefix pattern, not a name, and stay unlisted.
+    ".DS_Store": "Finder's per-folder view state, rebuilt by the destination's shell",
+    "Thumbs.db": "Windows Explorer's thumbnail cache, rebuilt by the destination's shell",
+    "desktop.ini": "Windows Explorer's per-folder view settings, not session content",
 }
+
+#: The ``EXCLUDED_ENTRIES`` rows that are OS folder metadata. Kept as their own tuple
+#: because their exclusion is conditional on SHAPE, unlike the store files above (whose
+#: reason is whose state the file is, so a symlinked one keeps its exclusion —
+#: ``test_a_symlinked_store_file_keeps_its_exclusion``): the shell only ever writes a
+#: REGULAR file under these names, so a symlink or a directory wearing one is not
+#: metadata and ``unlisted_entries`` refuses it rather than dropping it unseen. Only the
+#: session ROOT is affected: inside a content tree (``scratchpad/.DS_Store``) the tree
+#: travels byte for byte as it always has — harmless, and it keeps the tree walk and its
+#: digest identical on builds before and after this rule, so mixed-version peers agree.
+OS_METADATA_NAMES: tuple[str, ...] = (".DS_Store", "Thumbs.db", "desktop.ini")
 
 #: The tuple the code branches on. Kept as a tuple (rather than reading
 #: ``EXCLUDED_ENTRIES`` everywhere) because these are the names a fan-out of
@@ -952,6 +976,10 @@ def unlisted_entries(directory: Path) -> list[str]:
     found: list[str] = []
     for child in children:
         name = child.name
+        # Dropped only as the regular file the OS writes (see ``OS_METADATA_NAMES``).
+        if name in OS_METADATA_NAMES and (child.is_symlink() or not child.is_file()):
+            found.append(name)
+            continue
         if child.is_symlink() and name in listed and name not in NEVER_COPIED:
             found.append(name)
             continue
@@ -4055,7 +4083,7 @@ class SyncWatcher(threading.Thread):
         # METHOD that CPython 3.12's ``join()``/``is_alive()`` call once the thread
         # has ended (``_wait_for_tstate_lock``). An Event under that name made both
         # raise ``TypeError: 'Event' object is not callable`` for a finished
-        # thread, so no stop could ever be joined or confirmed (3.14 no longer
+        # thread, so no stop could ever be joined or confirmed (3.13+ no longer
         # calls it; 3.12 is the floor and CI's interpreter).
         self._halt = threading.Event()
 
@@ -4063,11 +4091,14 @@ class SyncWatcher(threading.Thread):
         self._halt.set()
 
     def run(self) -> None:  # pragma: no cover — the tick is what tests drive
-        while not self._halt.wait(self._settings.tick_s):
-            try:
-                self.tick(now=time.time())
-            except Exception:  # noqa: BLE001 — a watcher must never kill the relay
-                logger.debug("sync: watcher tick failed", exc_info=True)
+        try:
+            while not self._halt.wait(self._settings.tick_s):
+                try:
+                    self.tick(now=time.time())
+                except Exception:  # noqa: BLE001 — a watcher must never kill the relay
+                    logger.debug("sync: watcher tick failed", exc_info=True)
+        finally:
+            _release_registration("watcher", self._server, self)
 
     def tick(self, *, now: float) -> list[tuple[str, str]]:
         """One pass. Returns ``(session_id, reason)`` per push, so cadence is testable.
@@ -4233,11 +4264,14 @@ class ReplicaRefresher(threading.Thread):
                 self._marked[session_id] = reason
 
     def run(self) -> None:  # pragma: no cover — the tick is what tests drive
-        while not self._halt.wait(self._settings.tick_s):
-            try:
-                self.tick()
-            except Exception:  # noqa: BLE001 — a refresher must never kill the relay
-                logger.debug("sync: replica refresh tick failed", exc_info=True)
+        try:
+            while not self._halt.wait(self._settings.tick_s):
+                try:
+                    self.tick()
+                except Exception:  # noqa: BLE001 — a refresher must never kill the relay
+                    logger.debug("sync: replica refresh tick failed", exc_info=True)
+        finally:
+            _release_registration("refresher", self._server, self)
 
     def tick(self) -> list[tuple[str, str]]:
         """One pass. Returns ``(session_id, outcome)`` per attempt, so it is testable.
@@ -4309,7 +4343,9 @@ def ensure_refresher(server: "RelayServer") -> ReplicaRefresher:
             # not start a fresh thread afterwards: that thread would be the leak
             # this module's ``on_stop`` closes, re-opened. An unstarted, UNREGISTERED
             # instance keeps the caller's ``.mark()`` harmless and holds nothing.
-            return ReplicaRefresher(server)
+            # Defaults, not ``from_config``: it never ticks, so reading
+            # ``config.yml`` for it was disk I/O on every late push.
+            return ReplicaRefresher(server, settings=SyncSettings())
         existing = _refreshers.get(id(server))
         if existing is not None and existing.is_alive():
             return existing
@@ -4340,7 +4376,8 @@ def ensure_watcher(server: "RelayServer") -> SyncWatcher:
             # not start a fresh thread afterwards: that thread would be the leak
             # this module's ``on_stop`` closes, re-opened. An unstarted, UNREGISTERED
             # instance keeps the caller's ``.mark()`` harmless and holds nothing.
-            return SyncWatcher(server)
+            # Defaults, not ``from_config``, for the refresher's reason.
+            return SyncWatcher(server, settings=SyncSettings())
         existing = _watchers.get(id(server))
         if existing is not None and existing.is_alive():
             return existing
@@ -4416,6 +4453,31 @@ def stop_threads(server: "RelayServer", *, timeout: float = SYNC_THREAD_STOP_JOI
             if table.get(key) is thread:
                 del table[key]
             _survivor_warned.pop((kind, key), None)
+
+
+def _release_registration(kind: str, server: "RelayServer", thread: threading.Thread) -> None:
+    """A sync thread's exit drops its OWN registry entry (and its warning row).
+
+    WHY (#3719 review R1-1): :func:`stop_threads` keeps a survivor's entry so a later
+    stop can retry it, but on the normal path no later stop comes — and a tick can
+    legitimately outlive the join (a ``_push`` to a wedged peer: links close only
+    after the stop hooks run). When that tick finally returned, the exited thread
+    stayed in the registry, holding its ``_server``, and the stopped relay was
+    pinned for the life of the process: the leak ``on_stop`` exists to close.
+
+    IDENTITY-MATCHED UNDER THE LOCK: an entry that is no longer this thread (a
+    restart registered a successor) is not this thread's to drop. Runs from
+    ``run``'s ``finally``, so an unstarted stand-in never reaches it.
+    """
+    lock, table = (
+        (_watcher_lock, _watchers) if kind == "watcher" else (_refresher_lock, _refreshers)
+    )
+    key = id(server)
+    with lock:
+        if table.get(key) is thread:
+            del table[key]
+        if _survivor_warned.get((kind, key)) is thread:
+            del _survivor_warned[(kind, key)]
 
 
 # ---------------------------------------------------------------------------

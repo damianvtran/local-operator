@@ -404,6 +404,25 @@ _DECLARED_RAW_READS: dict[tuple[str, str, str], tuple[int, str]] = {
         2,
         "the peer's own conflict and refusal sentences, printed verbatim",
     ),
+    # The skill bundle (network/skillsync.py) mirrors the MCP bundle: every ``reason``
+    # it carries is a composed sentence, never a machine token -- the receiver's
+    # ``_refused``/``_decide``/``_ownership_reason`` prose, the sender's own "kept"
+    # sentences, a scan's ``LocalSkill.reason``, or an exception's message.
+    # ``_push_locked`` copies the peer's sentence into the per-peer outcome row;
+    # ``_describe`` and ``_cmd_skills`` (push report + local listing) print it.
+    ("local_operator/network/skillsync.py", "_push_locked", "reason"): (
+        1,
+        "carries the peer's own refusal/conflict sentence into the outcome row verbatim",
+    ),
+    ("local_operator/network/skillsync.py", "_describe", "reason"): (
+        1,
+        "the peer's or this device's refusal sentence, rendered as ``name (reason)``",
+    ),
+    ("local_operator/network/cli.py", "_cmd_skills", "reason"): (
+        2,
+        "the push report's per-skill sentence and the local listing's composed "
+        "will-not-travel sentence, printed verbatim",
+    ),
     # The MCP credential repair verb reads its OWN skip vocabulary. The rows come
     # from ``placement.grant_key_set`` and this handler's ``local-only`` check in
     # process (``no_local_credential``, ``local_only``, ...); ``--json`` carries
@@ -551,6 +570,14 @@ _DECLARED_RAW_READS: dict[tuple[str, str, str], tuple[int, str]] = {
     # the PROBE'S OWN machine code — compared against the producer's constants so
     # a rename cannot drift it, and never printed from this site (the renderers
     # gloss through ``doctor_detail_words``).
+    # The failover sentence (remote routing sync): reads the row's OWN detail,
+    # just built by ``model_credential_row``'s glossing renderers, and appends a
+    # sentence authored in ``routing_sync.failover_sentence``. Nothing from a
+    # peer's raw reason is echoed.
+    ("local_operator/network/readiness.py", "_attach_failover", "detail"): (
+        1,
+        "appends to this device's own rendered row detail; no peer reason is echoed",
+    ),
     ("local_operator/network/readiness.py", "_did_not_lead", "detail"): (
         1,
         "classifier input (the probe's own code, compared against the producer's "

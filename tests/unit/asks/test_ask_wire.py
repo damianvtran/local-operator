@@ -1475,3 +1475,57 @@ def test_a_running_session_republishes_when_the_window_changes(
     assert before["asks_open"] == 0  # #2388: shown, but settled
     assert "asks" not in after
     assert after["asks_open"] == 0
+
+
+# ---------------------------------------------------------------------------
+# suggested terminal commands (`AskQuestion.command`) on the wire
+# ---------------------------------------------------------------------------
+
+
+def _command_row(command: str | None) -> dict[str, Any]:
+    question: dict[str, Any] = {
+        "id": "q0",
+        "question": "Sign in to GitLab first?",
+        "options": [{"label": "Done"}, {"label": "Skip"}],
+    }
+    if command is not None:
+        question["command"] = command
+        question["command_target"] = "agent"
+    return {"ask_id": "a-cmd", "status": "open", "created_at": 1, "questions": [question]}
+
+
+def test_the_legacy_mirror_title_carries_the_command_so_old_clients_keep_it() -> None:
+    card = mirror_card([_command_row("glab auth login")])
+    assert card is not None and card["command"] == "glab auth login"
+    request = ask_mirror_request(card)
+    assert request.title == "Sign in to GitLab first?\n\nglab auth login"
+    # Through the real fold, as an old client's `pending` card sees it.
+    projection = SessionProjection(session_id="s1", pid=1, kind="daemon")
+    ProjectionFold(projection).set_asks([_command_row("glab auth login")], 1)
+    assert projection.to_json()["pending"]["title"].endswith("\n\nglab auth login")
+
+
+def test_a_mirror_card_without_a_command_keeps_its_exact_prior_keys() -> None:
+    card = mirror_card([_command_row(None)])
+    assert card is not None and "command" not in card
+    assert ask_mirror_request(card).title == "Sign in to GitLab first?"
+
+
+def test_the_row_budget_charges_the_command() -> None:
+    from local_operator.session.frontend_state import bound_ask_rows
+
+    # The head row is exempt; the second row's charge decides whether it rides.
+    head = _command_row(None)
+    question_len = len("Sign in to GitLab first?") + len("Done") + len("Skip")
+    command = "x" * 300
+    tail = {**_command_row(command), "ask_id": "a-tail"}
+    # A budget the tail fits WITHOUT its command but not WITH it: the command
+    # must be what tips it over, so an uncharged field would let it through.
+    budget = question_len + 100
+    kept, dropped = bound_ask_rows([head, tail], budget=budget)
+    assert [row["ask_id"] for row in kept] == ["a-cmd"] and dropped
+    kept, dropped = bound_ask_rows([head, tail], budget=question_len + len(command))
+    assert len(kept) == 2 and not dropped
+    # And the command rides the frame dict unchanged.
+    assert kept[1]["questions"][0]["command"] == command
+    assert kept[1]["questions"][0]["command_target"] == "agent"

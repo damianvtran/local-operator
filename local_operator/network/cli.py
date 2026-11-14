@@ -542,6 +542,14 @@ def add_parser(
         metavar="KEY",
         help="with --create: retry a create whose reply was lost, without duplicating it",
     )
+    # WHO ASKED FOR THE CREATE (2026-11-13). Hidden: the ``sessions spawn
+    # peer=`` tool passes ``--origin agent``, and a run from an agent's shell is
+    # read as ``agent`` from its marker (``_create_origin``). The owner stamps
+    # it as ``origin.kind`` and never forwards an agent-created session's
+    # ``notify`` items to the operator (``notifications/remote_attention``).
+    net_sessions.add_argument(
+        "--origin", choices=("user", "agent"), default="", help=argparse.SUPPRESS
+    )
     net_sessions.add_argument("--engage", metavar="SESSION", default="", help="warm that session")
     net_sessions.add_argument("--stop", metavar="SESSION", default="", help="stop that session")
     # THE THREE LIFECYCLE ACTS RUN ON THE OWNER (design §8). They are flags on this
@@ -800,6 +808,31 @@ def add_parser(
         "state", help="What this device holds, and what it mirrored from a peer"
     )
     definitions_state.add_argument("--json", action="store_true")
+
+    # `lop network skills`: what makes `skill://NAME` resolve on the OTHER device.
+    # The definitions/mcp pair's shape — `push` is the deliberate half of the sync
+    # the mesh-definitions cadence also performs; `state` is local and relay-free,
+    # and names every skill that will NOT travel (too large, unreadable) and why.
+    skills = actions.add_parser(
+        "skills",
+        help="Sync your user skills so a peer's sessions can load them",
+        description=(
+            "A session on another device reads the same skills a local one does only "
+            "when that device holds them. The mesh syncs this device's own skills "
+            "(~/.local-operator/skills) to every paired member each minute and before "
+            "a create; `push` does it now and reports per skill, `state` lists what "
+            "this device holds, where each copy came from, and what will not travel."
+        ),
+    )
+    skills_actions = skills.add_subparsers(dest="skills_command")
+    skills_push = skills_actions.add_parser("push", help="Send this device's skills to a peer")
+    skills_push.add_argument("--peer", default="", help="the device to send them to")
+    skills_push.add_argument("--all-peers", action="store_true", help="every linked peer")
+    skills_push.add_argument("--json", action="store_true")
+    skills_state = skills_actions.add_parser(
+        "state", help="What this device holds, what it mirrored, and what will not travel"
+    )
+    skills_state.add_argument("--json", action="store_true")
 
     # `lop network mcp`: what makes a peer able to RUN this device's MCP servers.
     # Two verbs, the definitions pair's shape and reasons — `push` is the
@@ -8875,6 +8908,8 @@ def _cmd_sessions(args: argparse.Namespace) -> int:
         explicit_yolo = bool(getattr(args, "yolo", False))
         implied_yolo = (not explicit_yolo) and saved_tool_approval_is_auto()
 
+        from local_operator.network.relay import CREATE_CLIENT_BOUND_S
+
         def _create(yolo: bool) -> dict[str, Any]:
             # ONE BUILDER FOR BOTH ATTEMPTS, so the fallback differs in nothing
             # but ``yolo``. The retry is a CHANGED BODY — a changed intent — and
@@ -8908,7 +8943,11 @@ def _cmd_sessions(args: argparse.Namespace) -> int:
                 # fallback's first attempt was refused above the owner's mint,
                 # which reserves nothing, so the key is still free for the second.
                 create_key=str(getattr(args, "create_key", "") or ""),
-                timeout=120.0,  # a spawn plus its first turn's admission
+                origin=_create_origin(args),
+                # A spawn plus its first turn's admission, plus the relay's bounded
+                # confirm-by-key window after a lost reply: a client that gave up
+                # first would lose the id the relay was about to confirm.
+                timeout=CREATE_CLIENT_BOUND_S,
             )
 
         unattended_notice = ""
@@ -9012,6 +9051,20 @@ def _cmd_sessions(args: argparse.Namespace) -> int:
             lines.append(
                 f"no copy of {names} on this device: that device's own revision of it is "
                 "what runs there"
+            )
+        # WHAT THIS CREATE DID ABOUT SKILLS (``skillsync.push_for_create``): printed
+        # only when this create's own push did not finish cleanly — still running in
+        # the background, or failed — so a clean create's receipt is unchanged.
+        # Standing facts (an oversize skill that never travels, a skill the peer keeps
+        # as its own) would repeat on every create; they are named by `lop network
+        # skills state|push` and `lop network ready` instead, and `--json` carries
+        # the whole block here (``**detail``).
+        skills_note = detail.get("skills")
+        if isinstance(skills_note, dict) and (
+            skills_note.get("background") or not skills_note.get("ok")
+        ):
+            lines.append(
+                f"skills: {skills_note.get('message') or skills_note.get('code') or 'not synced'}"
             )
         if prompt:
             # ONE FACT, SAID ONCE (UX round 3, U21). This printed the boolean
@@ -11437,6 +11490,24 @@ def _host_key_for_request(host: str, user: str, given: str) -> str:
     return found.host_key_fp
 
 
+def _create_origin(args: argparse.Namespace) -> str:
+    """``agent`` when an AGENT asked for this ``--create``, else ``user``.
+
+    The explicit ``--origin`` wins (the ``sessions spawn peer=`` tool passes
+    it); otherwise the ``bash`` tool's marker (``agent_shell.AGENT_SHELL_ENV``)
+    says an agent's command is running this. Like that marker it is attribution,
+    not a security boundary: what rides on it is only whether the session's
+    ``notify`` items are forwarded to the operator (operator rule 2026-11-13 —
+    a reviewer/QA/probe child reports to its parent agent, never the inbox).
+    """
+    explicit = str(getattr(args, "origin", "") or "")
+    if explicit in ("user", "agent"):
+        return explicit
+    from local_operator.agent_shell import AGENT_SHELL_ENV
+
+    return "agent" if os.environ.get(AGENT_SHELL_ENV) == "1" else "user"
+
+
 def _env_filing_session() -> str:
     """The audit-only ``LOCAL_OPERATOR_SESSION_ID`` a tool child inherits, or ``""``.
 
@@ -12157,8 +12228,41 @@ def _cmd_definitions(args: argparse.Namespace) -> int:
                 else ""
             )
         )
+    # Failover routing (``retry.*`` units, see ``routing_sync``): which units are a
+    # peer's mirror and which this device owns. Kept units are the answer to "why
+    # does this node fail over differently from my Mac".
+    from local_operator.network import routing_sync
+
+    routing = state.get(routing_sync.ROUTING_KIND) or {}
+    for unit, cls in sorted((routing.get("units") or {}).items()):
+        source = str(cls.get("source") or "")
+        if source == "mirror":
+            lines.append(f"failover routing {unit}: mirrored from {cls.get('origin') or '?'}")
+        elif source in ("local", "edited"):
+            lines.append(f"failover routing {unit}: yours")
+    if routing.get("status") == "unreadable":
+        lines.append("failover routing: config.yml could not be read")
     if not lines:
         lines = ["no agent or team definitions on this device"]
+    # Routing authority (review r2, m3), after the empty-state line so a bare
+    # device still says it has no definitions: the one fact that explains a node staying
+    # primary-only — it holds no anchor (the head will not send to it), or it holds
+    # one verify-only (it accepts the operator's chain), or it signs for it (it is
+    # the operator's device and keeps its own). From ``mirror_authority.state_fact``.
+    authority = routing.get("authority")
+    if isinstance(authority, dict):
+        key_id = str(authority.get("key_id") or "")
+        if not key_id:
+            lines.append(
+                "routing authority: no operator anchor (the operator's failover routing "
+                "is not accepted here)"
+            )
+        elif authority.get("signs"):
+            lines.append(f"routing authority: signs for {key_id} (this device sends routing)")
+        else:
+            lines.append(
+                f"routing authority: verify-only under {key_id} (accepts that operator's routing)"
+            )
     return _emit(
         args,
         {
@@ -12167,6 +12271,7 @@ def _cmd_definitions(args: argparse.Namespace) -> int:
             "teams": state.get("teams") or {},
             "mirrored": mirrored,
             definitions.OPERATOR_INSTRUCTIONS_KIND: instructions,
+            routing_sync.ROUTING_KIND: routing,
         },
         lines,
     )
@@ -12272,6 +12377,77 @@ def _cmd_mcp(args: argparse.Namespace) -> int:
     if not lines:
         lines = ["no user-scope MCP servers on this device"]
     return _emit(args, {"ok": True, "servers": rows}, lines)
+
+
+def _cmd_skills(args: argparse.Namespace) -> int:
+    """``lop network skills push|state`` — user skills over the mesh (``skillsync.py``).
+
+    The same split as ``mcp push|state``: the cadence already carries skills, so
+    ``push`` is the deliberate, per-skill-reporting half, and ``state`` answers
+    "why is ``skill://x`` missing over there" on the side that can act, with no
+    relay needed.
+    """
+    from local_operator.network import skillsync
+    from local_operator.network.types import MeshRefusal
+    from local_operator.paths import config_dir
+
+    verb = str(getattr(args, "skills_command", None) or "state")
+    root = config_dir()
+    if verb == "push":
+        peer = str(getattr(args, "peer", "") or "")
+        if not peer and not bool(getattr(args, "all_peers", False)):
+            raise MeshRefusal(
+                "peer_required",
+                "name a device with --peer, or ask every device with --all-peers",
+            )
+        detail = _relay_answer("skills_sync", peer=peer, timeout=180.0)
+        rows = [item for item in (detail.get("peers") or []) if isinstance(item, dict)]
+        lines = [str(detail.get("message") or "")] if detail.get("message") else []
+        for item in rows:
+            # The member's NAME where the mesh knows one (QA round 1, Q-5): a raw
+            # ``d_…`` id is not what the operator typed or can recognise.
+            label = str(item.get("name") or item.get("device_id") or "?")
+            lines.append(f"{label}: {item.get('message') or item.get('code') or 'no answer'}")
+            for outcome in ("installed", "updated"):
+                for row in item.get(outcome) or []:
+                    if isinstance(row, dict):
+                        lines.append(f"  {outcome} skill {row.get('name')!r}")
+            for outcome in ("kept", "refused", "skipped"):
+                for row in item.get(outcome) or []:
+                    if isinstance(row, dict):
+                        lines.append(
+                            f"  {outcome} skill {row.get('name')!r}: "
+                            f"{row.get('reason') or outcome}"
+                        )
+        return _emit(
+            args, {"ok": bool(detail.get("ok")), "peers": rows}, lines or ["nothing to do"]
+        )
+
+    rows = skillsync.state_rows(root)
+    receipts = skillsync.read_receipts(root)
+    lines = []
+    for row in rows:
+        origin = str(row.get("origin") or "")
+        if origin:
+            source = _device_name_anywhere(origin) or origin
+            line = f"skill: {row.get('name')} (mirrored from {source}" + (
+                ", edited here)" if row.get("edited") else ")"
+            )
+        else:
+            line = f"skill: {row.get('name')} (yours)"
+        if row.get("status") != "ready" and (not origin or row.get("edited")):
+            line += f" — will not travel: {row.get('reason') or row.get('status')}"
+        lines.append(line)
+    if not lines:
+        lines = ["no user skills on this device"]
+    for device_id, receipt in sorted(receipts.items()):
+        if isinstance(receipt, dict):
+            target = str(receipt.get("name") or "") or _device_name_anywhere(device_id)
+            lines.append(
+                f"last push to {target or device_id}: "
+                f"{receipt.get('message') or receipt.get('code') or '?'}"
+            )
+    return _emit(args, {"ok": True, "skills": rows, "pushes": receipts}, lines)
 
 
 def _mcp_server_shape(server: Mapping[str, Any]) -> str:
@@ -13021,6 +13197,7 @@ _HANDLERS: dict[str, Callable[[argparse.Namespace], int]] = {
     "sessions": _cmd_sessions,
     "definitions": _cmd_definitions,
     "mcp": _cmd_mcp,
+    "skills": _cmd_skills,
     "serve": _cmd_serve,
     "start": _cmd_service("start"),
     "stop": _cmd_service("stop"),

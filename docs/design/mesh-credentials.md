@@ -713,6 +713,7 @@ class MeshCredentialBroker:
 | Owner's answer for a token with remaining life ≥ 120 s | Served from the existing row, `refreshed: false` | `_needs_refresh`, `auth_store.py:68-80` | No gratuitous POSTs. Never refresh what is alive. |
 | Requester's copy of the bearer — **for provider keys, see the as-built note below: this row no longer describes how a bearer is served** | `expires_at = min(token_expires_at_ms, now + grant_ttl_s)`; re-ask at `expires_at - 120 s` | `MeshAwareAuthStore` | 120 s > the owner's own 60 s skew, deliberately: the requester must not be the thing that discovers expiry. |
 | `grant_ttl_s` default | **900 s** (15 min) | `network.credentials.grant_ttl_s` in `config.yml` | Bounds the window in which a revoked peer still holds a live bearer (§3.7). |
+| `offline_hold_s` default (2026-11-13, C5) | **86400 s** (24 h), clamped to `[grant_ttl_s, 24 h]` (was 1 h earlier the same day) | `network.credentials.offline_hold_s` | How long a borrower keeps serving a grant it already holds while the owner is **unreachable**, so remote work survives an owner laptop closed overnight. The owner states `hold_until_ms = min(token_exp, now + offline_hold_s)` on the grant; the borrower caps it at receipt + its own value on wall and sleep-inclusive clocks. Every grant the borrower receives restarts the window, so an owner that is online once a day while the borrower asks keeps it going. The token's own expiry still ends the hold first: nothing is refreshed on the borrower, so Radient (~55 min) and Anthropic OAuth (~8 h) access tokens end their holds at their own expiry; OpenAI OAuth (~10 days) and static API keys ride the full day. Set it equal to `grant_ttl_s` to restore the pre-2026-11-13 bound. |
 | Requester's local coalescing — **as built: overlapping resolves only, see the as-built note below** | one `asyncio.Future` per `(provider, session_id)` | `MeshAwareAuthStore._grant_futures` | A single turn issues several provider calls; they must share one grant. |
 | Owner's refresh scheduling with several askers | one POST per `(credential_id, force)` per `_join_window_s`; the existing lease for the rest | §3.4 | N peers ⇒ 1 POST, not N. |
 | Proactive top-up (`/usage` style) | Not added. A borrow is demand-driven. | — | A background refresher on the owner would be a second scheduler for something the lease already bounds; the demand path is sufficient. |
@@ -739,11 +740,18 @@ back is still cached per `(key, session_id)`, its expiry capped at
 **When the owner is unreachable, the cached grant is served.** A dial answered
 `owner_offline` or `owner_unreachable`, or one with no relay to go through,
 reaches `_held_or`, which serves that session's cached grant marked
-`held_offline` while it is still live (`Grant.usable_at`: until
-`grant_expires_at_ms`, with no re-ask margin). It does so only for an unforced
-resolve, and only while this device is still a member and a holder and the
-policy generation the grant was cached under is still current. MCP keys, the
-`github` key and device-bound providers never take this path.
+`held_offline` until its offline hold ends (`Grant.hold_end_ms`: the owner's
+`hold_until_ms`, capped at receipt + the borrower's `offline_hold_s` on both
+clocks; an older owner that states no hold ends at `grant_expires_at_ms`, with no
+re-ask margin). It does so only for an unforced resolve, only while this device
+is still a member and a holder, only while the network is `trust: active` (a
+panic ends it), only while the policy generation the grant was cached under is
+still current, and never for a login this device is resting for the requested
+model (that answers `quota_blocked`, so failover moves on). Each offline serve is
+counted in a `credential.held_served` audit record (first at once, then one per
+minute) and the end in `credential.held_lapsed`; neither carries the token. MCP
+keys, the `github` key and device-bound providers never take this path (the
+GitHub hold needs the window-end self-revoke moved first).
 
 **Coalescing is per resolve, not per turn.** Overlapping resolves for the same
 (key, session, force) share one dial (`_borrow`'s in-flight future). Sequential
@@ -1000,7 +1008,7 @@ does not surface, add it as a purely additive method there (§8 Q2).
   |---|---|
   | New grants | Now: the owner refuses the next ask. |
   | A grant a covered provider key is reusing (revoke, withdraw, owner logout or rotation) | About one tick (15 s) on whichever path arrives first: B's placement pull (revoke) or A's lifecycle announce (revoke as `withdrawn`, logout, rotation). Measured on loopback, n = 5: revoke median 10.6 s (max 14.0 s), logout 7.6 s (max 13.4 s), revoke via the lifecycle announce alone 4.4 s (max 13.7 s). Both paths run on their device's definitions-tick thread, so a peer request hung on that thread delays the next tick: a black-holed `net_broker` request waits out its 75 s owner deadline plus 5 s margin, which is how a rig that dropped placement frames measured 83 s (median) for the lifecycle-only path. In every case, at most `grant_ttl_s/2` (450 s at the default) after the grant was fetched, if the update is lost while the owner is reachable. |
-  | Any other lent grant, honest borrower | At its next ask, which the owner refuses; held while the owner is unreachable, but never past the grant's expiry (within `grant_ttl_s`). |
+  | Any other lent grant, honest borrower | At its next ask, which the owner refuses; held while the owner is unreachable, but never past the offline hold (`offline_hold_s`, default 24 h, and never past the token's own expiry). A borrower that hears the revoke by any route stops at once. |
   | A copied bearer | Only when the token expires or is revoked at the provider. |
 
   A shared `api-key-static` credential has no expiry,

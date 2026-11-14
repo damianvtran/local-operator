@@ -1442,6 +1442,7 @@ class MeshCredentialBroker:
             kind="bearer" if kind in ("oauth", "mcp-oauth") else "api_key",
             token_expires_at_ms=token_exp_ms,
             grant_expires_at_ms=grant_exp,
+            hold_until_ms=_offline_hold_until_ms(self.root, now_ms, token_exp_ms, grant_exp),
             credential_ref=CredentialRef(
                 owner_device=self.self_device,
                 owner_device_name=self.self_device_name,
@@ -1514,6 +1515,22 @@ class MeshCredentialBroker:
         if lender is None or not github_app.is_github_key(key):
             return 0
         return lender.revoke_holder(holder, key=key, cause=cause)
+
+    def revoke_all_outstanding(self, *, cause: str = "panic") -> int:
+        """DELETE every outstanding lent GitHub token, for every holder, now.
+
+        The owner half of "a panic ends the hold" (lease review M1): a panic only
+        latches trust and closes links, which a minted GitHub installation token
+        outlives by up to its hour on the holder. ``GithubLender.revoke_all_holders``
+        is the existing primitive for exactly this; until this method it had no
+        caller. Zero without a lender: nothing was ever minted on this relay.
+        Provider (OAuth) grants have no issuer-side revoke — the borrower's trust
+        fence (``MeshCredentialClient._self_membership_active``) ends those.
+        """
+        lender = self._github_lender
+        if lender is None:
+            return 0
+        return lender.revoke_all_holders(key=github_app.GITHUB_KEY, cause=cause)
 
     def _github_scope_refusal(self, key: str, by: str) -> BrokerError | None:
         """No forge source supplies a verified read-only account identity today.
@@ -1736,6 +1753,11 @@ class MeshCredentialBroker:
             kind="bearer",
             token_expires_at_ms=minted.expires_at_ms,
             grant_expires_at_ms=grant_exp,
+            # Stated for the github arm too, though PR-A's borrower does not hold
+            # github yet: the window-end self-revoke must move first (design §4.3).
+            hold_until_ms=_offline_hold_until_ms(
+                self.root, now_ms, minted.expires_at_ms, grant_exp
+            ),
             credential_ref=CredentialRef(
                 owner_device=self.self_device,
                 owner_device_name=self.self_device_name,
@@ -1840,6 +1862,7 @@ class MeshCredentialBroker:
             kind="bearer",
             token_expires_at_ms=0,
             grant_expires_at_ms=now_ms + ttl_ms,
+            hold_until_ms=_offline_hold_until_ms(self.root, now_ms, 0, now_ms + ttl_ms),
             credential_ref=CredentialRef(
                 owner_device=self.self_device,
                 owner_device_name=self.self_device_name,
@@ -3542,6 +3565,29 @@ def _caused_by_invalid_grant(exc: BaseException | None) -> bool:
     return False
 
 
+def revoke_lent_on_panic(server: Any, network_id: str) -> int:
+    """Revoke every token this relay lent in ``network_id`` because a panic latched.
+
+    Called by BOTH panic paths on the relay (raised: ``_ctl_panic``; received:
+    ``_op_panic``) after the trust write. It reads the EXISTING broker only and
+    never builds one: a relay that never brokered has minted nothing, and building
+    a broker (and its loop) inside an incident path would add work, not safety.
+    A broker for another network is left alone — the panic is per network. Never
+    raises: the panic's own latch and broadcast must not depend on GitHub answering.
+    """
+    broker = getattr(server, _BROKER_ATTR, None)
+    # An EMPTY ``network_id`` revokes this relay's broker network on purpose: an
+    # incident whose scope is unknown fails closed (revoke), never open. Only a
+    # NAMED other network is left alone. Review #3920 n2.
+    if broker is None or (network_id and broker.network_id != network_id):
+        return 0
+    try:
+        return broker.revoke_all_outstanding(cause="panic")
+    except Exception:  # noqa: BLE001 — the latch already holds; tokens still expire
+        logger.warning("panic: revoking lent GitHub tokens failed", exc_info=True)
+        return 0
+
+
 def broker_for_relay(server: Any) -> MeshCredentialBroker | None:
     """The broker for ``server``, built on first need and kept — or ``None``.
 
@@ -3662,6 +3708,24 @@ def _grant_ttl_s(root: Path | None) -> float:
     from local_operator.network.credentials import grant_ttl_s
 
     return float(grant_ttl_s(root))
+
+
+def _offline_hold_until_ms(
+    root: Path | None, now_ms: int, token_exp_ms: int, grant_exp_ms: int
+) -> int:
+    """The owner's stated offline hold: ``min(token expiry, now + offline_hold_s)``.
+
+    WHY THE OWNER STATES IT: only the owner knows the token's real expiry, and only
+    the owner's operator approved how long its logins may be used unasked (C5,
+    2026-11-13). Never below ``grant_exp_ms``, so a stated hold can only extend
+    the pre-existing ``held_offline`` window, never shrink it. ``token_exp_ms = 0``
+    (a static key, a PAT) has no known end, so the hold alone bounds it.
+    """
+    from local_operator.network.credentials import offline_hold_s
+
+    ceiling = now_ms + int(offline_hold_s(root) * 1000)
+    hold = min(token_exp_ms, ceiling) if token_exp_ms else ceiling
+    return max(hold, grant_exp_ms)
 
 
 def _token_arm_narrowing(root: Path | None, repositories: Sequence[str]) -> dict[str, Any]:

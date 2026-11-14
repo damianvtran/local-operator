@@ -337,7 +337,14 @@ MEASURED_TOKENS: dict[str, int] = {
     # now `int | list[int]` (an extra `array` arm in the schema) and the notes
     # drop the false "preselected" and say a multi-select may recommend several.
     # `recommended_all` is derived and hidden (SkipJsonSchema), so it costs 0.
-    "ask": 1112,
+    # 1112 -> 1195 (+83, suggested terminal commands): each question gains the
+    # optional `command` (one-line shell command; "include cd") and
+    # `command_target` ("agent" | "user"; one-click run only on the right
+    # device). Field descriptions only, no sentence added to the ask
+    # description; same reading on both LOP_ASK_NONBLOCKING arms. The start
+    # budget (bench_context_budget.py) absorbs it with headroom on both arms, so
+    # that ceiling is unchanged.
+    "ask": 1195,
     "ask_withdraw": 452,
     # 295 -> 308 (highlights deliverables, #3392): the new ``deliver`` parameter
     # ("Files to show.") -- re-measured via this test's own print; bash is the only
@@ -774,7 +781,14 @@ MEASURED_TOKENS: dict[str, int] = {
     # and the reference's mesh sentence say "selects only that device" and the
     # `include_stored` refusal names `peer` beside `scope='remote'`. Net +1
     # token; well inside the soft cap. Nothing else moved.
-    "sessions": 868,
+    # RE-MEASURED 2026-11-13 (session park op, PR #3850, merged over #3897):
+    # 868 -> 890. The delta is the `park` op's row and field copy in the
+    # sessions `tool://` reference — a new documented op, so the cost is
+    # deliberate and opt-in. Re-measured through this test's own printed table
+    # on the merged tree; it is the ONLY entry that moved, and the soft-cap
+    # assertion above it still holds. The schema-side cost of the same op is
+    # the context-budget bench's ledger, not this one.
+    "sessions": 890,
     # NEW (wave 4 slice A, 2026-10-10): the ``setting`` doc — the key
     # vocabulary, the op split and the validation-by-registry contract. 191
     # tokens is the deliberate cost of the reference detail staying off the

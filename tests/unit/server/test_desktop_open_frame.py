@@ -388,15 +388,34 @@ async def test_the_first_frame_spends_only_what_is_left_of_its_budget(
     keeps today's path until the next frame. Both arms are stated here, and the
     second one also pins the deadline itself — a frame whose budget is already
     spent must not wait at all.
+
+    THE READY ARM'S BUDGET IS A HANG CEILING, NOT THE PRODUCT FIGURE. "Lands
+    inside what is left" is a property of the wait, not of how fast this host
+    scans: with the real 120 ms the arm asserted that a cold scan of the fixture
+    finishes in 120 ms on whatever runner it lands on, and a loaded CI runner's
+    scan did not (CI run 43371490028, ``'building' == 'ready'``; reproduced 5/5
+    with 150 ms injected into the first ``refresh_index``). A ceiling no scan of
+    four turns approaches makes "the scan landed before the deadline" true by
+    construction, so the arm now pins only what it means: a cold open AWAITS
+    its refresh out of the deadline and answers READY with facts (drop the wait
+    and it answers ``building``). The other two arms keep the real figure: they
+    pin that a spent or too-small budget is not waited on.
     """
+    from local_operator.server.utils import desktop_sessions as desktop_sessions_utils
+
     async with _Harness(tmp_path) as harness:
         harness.seed(turns=4)
         assert harness.client is not None
         url = f"/v1/desktop/sessions/{harness.session_id}/history"
 
-        first = (await harness.client.get(url, params={"limit": 5, "open_frame": 1})).json()[
-            "result"
-        ]
+        assert (
+            ti.fresh_resident(harness.root, harness.session_id) is None
+        ), "the ready arm must exercise the cold refresh wait, not a resident index"
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(desktop_sessions_utils, "OPEN_FRAME_SNAPSHOT_BUDGET_S", 600.0)
+            first = (await harness.client.get(url, params={"limit": 5, "open_frame": 1})).json()[
+                "result"
+            ]
         assert first["runs_state"] == "ready"
         settled = [run for run in first["runs"] if run["settled"]]
         assert settled and settled[-1]["action_count"] >= 1

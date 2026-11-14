@@ -51,6 +51,7 @@ a parent cleaning up after its subagents needs no lineage lookup at read time.
 from __future__ import annotations
 
 import fnmatch
+import functools
 import glob as _glob
 import itertools
 import json
@@ -59,6 +60,7 @@ import math
 import os
 import re
 import sqlite3
+import stat
 import subprocess
 import time
 from collections.abc import Iterable, Mapping, Sequence
@@ -74,6 +76,19 @@ LEDGER_FILENAME = "created.sqlite"
 #: a held lock past this is a stuck writer, and the guard degrades to "no
 #: provenance" (the old ranking) rather than stalling a turn.
 _DB_TIMEOUT_S = 2.0
+#: Busy wait for the foreign-ledger lookup (``ForeignCreations``), which runs
+#: on every LOW delete classify. Readers only wait on an EXCLUSIVE writer
+#: (rollback journal: RESERVED/PENDING never block a reader's shared lock
+#: until commit); a commit of these tiny rows takes milliseconds, so a lock
+#: still held after this is not worth stalling the turn for — the lookup
+#: gives up and the rank stays what it was before the rule existed (m5,
+#: review round 2 of PR #3835: the 2 s wait measured 3.86 s per classify).
+#: This is the busy wait handed to SQLite, not the lookup's wall time: SQLite's
+#: own lock-reporting latency dominates under an EXCLUSIVE lock (QA measured
+#: the lookup at 0.74-0.79 s; a bare stdlib ``connect(timeout=0.25)`` took
+#: ~1.3 s to report "locked" on a loaded box). Still bounded, and well under
+#: the 2 s path.
+_DB_READ_TIMEOUT_S = 0.25
 #: Bound on every git probe. Measured on this machine's worktrees (n=12,
 #: ``git status --porcelain --untracked-files=all`` on local-operator linked
 #: worktrees, 2026-11-07): median 0.015 s, max 0.86 s. 10 s is far above that and still
@@ -363,10 +378,23 @@ class CreationRecord:
         brief fences it as data like every other target fact.
         """
         when = time.strftime("%Y-%m-%d %H:%M", time.localtime(self.created_at))
+        # Fenced the way ``judge.render_brief`` fences every agent-authored
+        # field (security review N2, PR #3800): a newline could start a forged
+        # fact line, and a crafted command could otherwise read as part of this
+        # fact (``…; uncommitted changes: none``). One line, own closing tag
+        # neutralised, so it stays data inside ``<command>``.
+        # Every closing-tag shape (``</COMMAND >``, ``< /command>``, any tag
+        # name; NIT-1, PR #3802), not just the exact lowercase ``</command>``:
+        # a model reads those as a close too.
+        command = _CLOSE_TAG_RE.sub("<\\/", " ".join(self.command[:200].split()))
         return (
             f"ledger: created by {self.creator} (this session or its subagent), "
-            f"kind {self.kind}, at {when}, via `{self.command[:200]}`"
+            f"kind {self.kind}, at {when}, via <command>{command}</command>"
         )
+
+
+#: Any closing-tag opener, however cased or spaced: ``</``, ``< /``.
+_CLOSE_TAG_RE = re.compile(r"<\s*/")
 
 
 _SCHEMA = (
@@ -377,14 +405,27 @@ _SCHEMA = (
 )
 
 
-def _connect(path: Path, *, create: bool) -> sqlite3.Connection | None:
+#: ``ForeignCreations`` looks rows up by path (``_foreign_query``); the
+#: primary key leads with ``owner`` and cannot serve that. ``IF NOT EXISTS``
+#: adds it to ledgers written before it existed, on their next WRITE open
+#: only (m5): creating it is a write, and a read-only ledger (or one a writer
+#: holds) must keep serving lookups — unindexed until the next recording
+#: call, which SQLite answers with a table scan, never an error.
+_PATH_INDEX = "CREATE INDEX IF NOT EXISTS created_path ON created (path)"
+
+
+def _connect(
+    path: Path, *, create: bool, timeout: float = _DB_TIMEOUT_S
+) -> sqlite3.Connection | None:
     if not create and not path.exists():
         return None
     if create:
         path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(path), timeout=_DB_TIMEOUT_S)
+    conn = sqlite3.connect(str(path), timeout=timeout)
     try:
         conn.execute(_SCHEMA)
+        if create:
+            conn.execute(_PATH_INDEX)
         # A ledger written before the stamp column existed: add it (old rows
         # keep NULL and so never match — fail closed).
         columns = {row[1] for row in conn.execute("PRAGMA table_info(created)")}
@@ -508,6 +549,248 @@ def owned_record(
     return best
 
 
+@functools.lru_cache(maxsize=1)
+def _path_max() -> int:
+    r"""Longest path a ledger row can hold (``_foreign_query``'s M3 bound).
+
+    ``os.pathconf`` is POSIX-only and simply absent on Windows, where this
+    module still has to import (CI ``xplat-probe-windows`` caught an
+    ``AttributeError: module 'os' has no attribute 'pathconf'`` at import
+    time), so it is looked up, never called unguarded. Without it each
+    platform keeps its own ceiling: an NTFS extended-length (``\\?\``) path
+    runs to 32767 characters and a realpath'd ledger row can legitimately
+    reach that, so a smaller Windows bound would silently drop ancestors;
+    1024 is the conservative floor everywhere else.
+
+    Cached and lazy on purpose: importing the module must not probe the
+    filesystem or be able to fail, and the answer cannot change in a process.
+    """
+    pathconf = getattr(os, "pathconf", None)
+    if pathconf is None:
+        return 32767 if os.name == "nt" else 1024
+    try:
+        value = pathconf("/", "PC_PATH_MAX")
+    except (OSError, ValueError):
+        return 1024
+    return value if value > 0 else 1024
+
+
+#: Most ancestors bound per target; see ``_foreign_query``.
+_MAX_ANCESTORS = 512
+
+
+def _bindable(text: str) -> bool:
+    try:
+        text.encode("utf-8")
+    except UnicodeEncodeError:
+        return False
+    return True
+
+
+def _foreign_query(paths: Iterable[str]) -> tuple[str, list[str]]:
+    """SQL selecting only the ledger rows that can relate to ``paths``.
+
+    m3 (review of PR #3835): reading the whole table (``ORDER BY created_at``,
+    no index) cost 230-890 ms per classify at 20k rows, on every LOW delete.
+    A row relates to a target only when its path is the target or one of its
+    ancestors (an exact ``IN`` list) or lies under it (a half-open range: every
+    string starting ``t/`` sorts in ``[t/, t0)`` because ``'0'`` follows
+    ``'/'`` in the BINARY collation SQLite compares ``path`` with). Both shapes
+    are served by the ``created_path`` index, so the read stays millisecond-
+    scale however large the never-pruned ledger grows.
+
+    BOUNDS (M3, review round 2). Keeping every prefix of ``real`` costs
+    Σ len(prefix) = O(L²): a single 20k-component token in a command OOMs the
+    classifier. No stored row can be longer than ``PATH_MAX`` (rows are
+    realpaths of directories that existed), so only ancestors within it are
+    bound, and the prefixes are sliced from separator offsets rather than
+    built by repeated ``dirname``. Under a huge ``PATH_MAX`` the shallowest
+    ``_MAX_ANCESTORS`` still cap the list; deeper ancestors (and a target too
+    long to be a row) add no foreign info — the rank stays what it was
+    without this rule. Paths SQLite cannot bind (a lone surrogate from a
+    surrogateescape'd name, m6) are dropped the same way; their encodable
+    ancestors still match.
+    """
+    ancestors: dict[str, None] = {}
+    ranges: list[str] = []
+    path_max = _path_max()
+    for real in paths:
+        ends = [1] if real.startswith("/") else []  # "/" itself
+        ends += [i for i, ch in enumerate(real) if ch == "/" and 0 < i <= path_max]
+        if len(real) <= path_max:
+            ends.append(len(real))
+        kept = 0
+        for end in dict.fromkeys(ends):
+            if kept >= _MAX_ANCESTORS:
+                break
+            if _bindable(node := real[:end]):
+                ancestors[node] = None
+                kept += 1
+        prefix = real.rstrip("/") + "/"
+        # Rows under the target: only when the target itself was bound (not
+        # past PATH_MAX or the cap, and encodable), so beyond the bound means
+        # no foreign info for the whole subtree, consistently.
+        if real in ancestors:
+            ranges += [prefix, prefix[:-1] + "0"]
+    clauses = []
+    if ancestors:
+        clauses.append(f"path IN ({','.join('?' * len(ancestors))})")
+    clauses += ["(path >= ? AND path < ?)"] * (len(ranges) // 2)
+    sql = (
+        "SELECT owner, path, dev, ino, created_at, creator, kind, command, stamp"
+        f" FROM created WHERE kind != 'symlink' AND ({' OR '.join(clauses) or '0'})"
+    )
+    return sql, [*ancestors, *ranges]
+
+
+@dataclass(frozen=True)
+class ForeignHit:
+    """A live directory another session created, related to a delete target."""
+
+    #: The session named to the judge: the row's ``creator`` (the session that
+    #: ran the creating command), never an ancestor copy of the row.
+    owner: str
+    record: CreationRecord
+    #: ``"at"`` (the target is that directory), ``"inside"`` (the target is
+    #: within it) or ``"holds"`` (the target contains it).
+    relation: str
+
+
+class ForeignCreations:
+    """Another session's live ledger rows, for one classify call.
+
+    WHY (operator incident, osworld): ``rm -rf ~/worktrees/osworld/osworld-21/runs``
+    deleted another session's sealed benchmark evidence. A deep non-git
+    directory under HOME is an "ordinary path" (LOW), so nothing asked. The
+    creation ledger already knew a different session made that tree; this
+    surfaces that fact so ``classify._rank`` sends the delete to the judge
+    (HIGH) with the owning session named.
+
+    Constraints:
+
+    * LIVE IDENTITY. A row counts only while its directory is that same inode
+      generation (dev, ino and ``creation_stamp``, as ``owned_record``
+      checks). Rows are grouped by path AND identity: a dead row at a reused
+      path (``runs``, ``/tmp/qa``) neither excuses the live directory as this
+      session's nor gets named as its owner (review M1).
+    * NEAREST OWNER. ``mkdir -p a/b`` records only the topmost new component,
+      so the first session into a shared parent "owns" it. For a target at or
+      inside recorded directories, only the DEEPEST live one decides: this
+      session's ``~/shared/mine`` inside another's ``~/shared`` stays this
+      session's (review M2). A target that HOLDS a foreign live directory is
+      HIGH whoever owns the target, since deleting it destroys that work.
+    * A row any owner of which is this session, or a session in its subagent
+      tree (``same_task_tree``), is not foreign: the ledger copies a child's
+      creation to its ancestors, and a manager may remove its child's work and
+      vice versa. Lineage reads run only after the cheap ``stat`` identity
+      check passes, memoised per owner.
+    * One connection per classify call, opened on first use; the caller
+      closes it (``close``). Only rows related to the target are read
+      (``_foreign_query``), so no row cap is needed.
+    * Unreadable ledger (locked, corrupt, missing): ``match`` returns ``None``
+      and the caller adds nothing. Failing "HIGH" there would turn every
+      delete on the machine into a judge call while one writer holds the DB.
+    * Linux: ``creation_stamp`` falls back to ``st_ctime_ns``, which moves
+      whenever an entry is added to the directory, so a foreign row there
+      stops matching once its directory changes after the recording call —
+      this rule fails OPEN on Linux (ranking returns to what it was before
+      it existed). The guarantee is macOS/BSD-only, where birth time is used.
+    * Symlink rows are skipped: they vouch for a link entry, never a tree.
+    """
+
+    def __init__(
+        self, session_id: str, *, state_root: str | os.PathLike[str] | None = None
+    ) -> None:
+        self.session_id = session_id
+        self.state_root = state_root
+        self._conn: sqlite3.Connection | None = None
+        self._tried = False
+        self._tree: dict[str, bool] = {}
+        self._identity: dict[str, tuple[int, int, int] | None] = {}
+
+    def close(self) -> None:
+        if self._conn is not None:
+            self._conn.close()
+            self._conn = None
+
+    def _connection(self) -> sqlite3.Connection | None:
+        """The cached connection; ``None`` with no ledger or an unreadable one."""
+        if not self._tried:
+            self._tried = True
+            try:
+                self._conn = _connect(
+                    ledger_path(self.state_root), create=False, timeout=_DB_READ_TIMEOUT_S
+                )
+            except (OSError, sqlite3.Error):
+                logger.debug("guardrail ledger unreadable", exc_info=True)
+        return self._conn
+
+    def _live(self, path: str) -> tuple[int, int, int] | None:
+        if path not in self._identity:
+            try:
+                st = os.stat(path)
+            except OSError:
+                self._identity[path] = None
+            else:
+                self._identity[path] = (st.st_dev, st.st_ino, creation_stamp(st))
+        return self._identity[path]
+
+    def _related(self, owner: str) -> bool:
+        if owner == self.session_id:
+            return True
+        if owner not in self._tree:
+            self._tree[owner] = bool(
+                same_task_tree(self.session_id, owner, state_root=self.state_root)
+            )
+        return self._tree[owner]
+
+    def match(self, paths: Iterable[str]) -> ForeignHit | None:
+        """The foreign live directory at, under or above any of ``paths``.
+
+        ``None`` when nothing foreign relates — or when the ledger is unreadable.
+        """
+        reals = sorted({os.path.realpath(p).rstrip("/") or "/" for p in paths if p})
+        conn = self._connection()
+        if not reals or conn is None:
+            return None
+        try:
+            sql, params = _foreign_query(reals)
+            rows = conn.execute(sql, params).fetchall()
+        # ValueError covers UnicodeEncodeError: a lone surrogate SQLite cannot
+        # bind (m6). ``_foreign_query`` already drops such parameters; this
+        # keeps any other unbindable input at "no foreign info" (the rank
+        # main gives), never a guardrail-error hard block.
+        except (sqlite3.Error, ValueError):
+            logger.debug("guardrail ledger unreadable", exc_info=True)
+            return None
+        # path -> (owners, row) over rows of the LIVE generation only.
+        live: dict[str, tuple[set[str], CreationRecord]] = {}
+        for owner, *fields in rows:
+            rec = CreationRecord(*fields)
+            if rec.stamp is None or self._live(rec.path) != (rec.dev, rec.ino, rec.stamp):
+                continue
+            live.setdefault(rec.path, (set(), rec))[0].add(owner)
+
+        def foreign(path: str) -> CreationRecord | None:
+            owners, rec = live[path]
+            return None if any(self._related(o) for o in owners) else rec
+
+        for real in reals:
+            covering = [p for p in live if p == real or real.startswith(p.rstrip("/") + "/")]
+            if covering:
+                nearest = max(covering, key=len)
+                rec = foreign(nearest)
+                if rec is not None:
+                    relation = "at" if nearest == real else "inside"
+                    return ForeignHit(rec.creator, rec, relation)
+            prefix = real.rstrip("/") + "/"
+            for p in sorted(p for p in live if p.startswith(prefix)):
+                rec = foreign(p)
+                if rec is not None:
+                    return ForeignHit(rec.creator, rec, "holds")
+        return None
+
+
 def link_path(path: str) -> str:
     """The canonical path of the link ENTRY at ``path``: its parent resolved, its
     own last component kept, so the link itself is never followed."""
@@ -570,8 +853,28 @@ def owned_link(
 
 def _holds_git(directory: str) -> bool:
     """A ``.git`` anywhere in ``directory`` (bounded; over the bound → True)."""
+    return _git_inside(directory) is not None
+
+
+class GitInside(NamedTuple):
+    """What :func:`_git_inside` found: ``path`` holds a ``.git`` when
+    ``exhausted`` is False; when True the bounded walk ran out under ``path``
+    and a nested repository could NOT be ruled out (R2-MAJOR-1, PR #3802: the
+    two were one bare path, so a 20k-file ignored ``.expo/cache`` reached the
+    judge as "nested repository … commits may exist nowhere else")."""
+
+    path: str
+    exhausted: bool
+
+
+def _git_inside(directory: str) -> GitInside | None:
+    """Where a ``.git`` sits in ``directory`` (its parent's path), or that the
+    bounded walk ran out first (unknown: callers count it as holding one, so
+    it fails closed), or ``None``. The path is for the judge (MINOR-3, PR
+    #3802): a tree held back for a nested repository must say WHICH one —
+    and must not claim one it never saw."""
     if not os.path.isdir(directory) or os.path.islink(directory):
-        return False
+        return None
     seen = 0
     stack: list[tuple[str, int]] = [(directory, 0)]
     while stack:
@@ -582,13 +885,13 @@ def _holds_git(directory: str) -> bool:
             continue
         seen += len(entries)
         if seen > _WALK_ENTRIES:
-            return True
+            return GitInside(directory, exhausted=True)
         for entry in entries:
             if entry.name == ".git":
-                return True
+                return GitInside(current, exhausted=False)
             if depth < _WALK_DEPTH and entry.is_dir(follow_symlinks=False):
                 stack.append((entry.path, depth + 1))
-    return False
+    return None
 
 
 #: Bounds on the work-tree walks (``_foreign_inside``, ``_holds_git``). Hitting either fails
@@ -974,7 +1277,11 @@ def worktree_state(path: str, *, own: bool = False) -> str:
     ``git worktree remove`` deletes them itself, and its creator made them
     (operator escalation 2026-11-11: refusing on ignored ``.expo/`` drove
     agents to ``--force`` and then ``rm -rf``). Tracked and untracked changes,
-    a lock, a live cwd and an unreferenced detached HEAD still count.
+    a lock, a live cwd, an unreferenced detached HEAD and a nested repository
+    (``.git`` inside an ignored entry) still count. CONSEQUENCE, by design:
+    an ignored secret or config file (``.env``, ``.envrc``, local settings) in
+    your OWN tree does not make it dirty, so removing the tree deletes it with
+    no judge call — exactly as ``git worktree remove`` itself does.
 
     One of ``clean``, ``dirty``, ``locked``, ``stale-initializing`` (locked
     "initializing" for over an hour, otherwise clean), ``busy`` (a live process
@@ -1076,12 +1383,16 @@ def worktree_state(path: str, *, own: bool = False) -> str:
     if any(ln and not ln.startswith("!! ") for ln in ignored.splitlines()):
         return "dirty"  # a tracked change or an untracked (``??``) entry
     for line in ignored.splitlines():
-        if own or not line.startswith("!! "):
+        if not line.startswith("!! "):
             continue
         entry = line[3:].strip().strip('"').rstrip("/")
         name = os.path.basename(entry)
-        if not _regenerable(name) and not _only_regenerable(os.path.join(real, entry)):
+        if not own and not _regenerable(name) and not _only_regenerable(os.path.join(real, entry)):
             return "dirty"
+        # Kept for OWN trees too (security review M2, PR #3800): a nested
+        # repository's commits may exist nowhere else. ``owned_record``'s
+        # ``_foreign_inside`` also refuses such a tree, but this check must
+        # not depend on that caller having run first.
         if _holds_git(os.path.join(real, entry)):
             return "dirty"
     # A detached HEAD whose commit no ref contains is lost with the tree.
@@ -1101,6 +1412,260 @@ def worktree_state(path: str, *, own: bool = False) -> str:
         if not (refs or "").strip():
             return "dirty"
     return "stale-initializing" if stale_initializing else "clean"
+
+
+#: Bounds on :func:`linked_worktrees_reached`. ``_REACH_MAX_LEVELS``:
+#: ancestor levels climbed to find an enclosing repository or to match a
+#: registered root (deeper than any real path). ``_REACH_MAX_ENTRIES``:
+#: DIRECTORIES the whole call may inspect (each a ``_common_dir`` probe) —
+#: one budget per call, not per target (MINOR-4, PR #3802: a per-match
+#: 2000-child probe took a 200×200 ``big/*/*`` from 0.011 s to 9.5 s). The
+#: same value as ``_WALK_ENTRIES`` and ``classify._GLOB_WALK_CAP``, the
+#: guard's existing per-call walk bound. Past it the scan cannot rule a
+#: linked worktree out, so it answers ``None`` (unknown) and the caller ranks
+#: the target HIGH — fail closed, where the old per-target child cap stopped
+#: and reported only what it had found.
+#:
+#: Only directories are charged (R2-MINOR-1 / QA Q2, PR #3802): a plain file
+#: can neither be nor hold a linked worktree (that takes a ``.git`` file in
+#: a directory, or a ``worktrees/`` registry), and charging files turned
+#: ``rm -rf logs/`` of 25k log files from LOW into a judge call.
+#: ``_REACH_MAX_LISTED`` still bounds the raw listing: 50× the directory
+#: budget, so only a pathological single directory (a million entries) fails
+#: closed on listing cost alone.
+_REACH_MAX_LEVELS = 64
+_REACH_MAX_ENTRIES = 20_000
+_REACH_MAX_LISTED = 1_000_000
+
+
+def _common_dir(root: str) -> str | None:
+    """The git common directory of a work tree rooted at ``root``, read from files.
+
+    No git process: this runs for EVERY delete target, so it must cost a few
+    stats (one when there is no ``.git``). A ``.git`` directory is its own
+    common dir; a ``.git`` FILE (``gitdir: X``) names a linked worktree's
+    private dir, whose ``commondir`` file points at the shared one (a
+    submodule's has none).
+    """
+    dotgit = os.path.join(root, ".git")
+    try:
+        mode = os.stat(dotgit).st_mode
+    except OSError:
+        return None
+    try:
+        if stat.S_ISDIR(mode):
+            return os.path.realpath(dotgit)
+        if not stat.S_ISREG(mode):
+            return None
+        with open(dotgit, encoding="utf-8") as fh:
+            first = fh.readline().strip()
+        if not first.startswith("gitdir:"):
+            return None
+        git_dir = os.path.join(root, first[len("gitdir:") :].strip())
+        try:
+            with open(os.path.join(git_dir, "commondir"), encoding="utf-8") as fh:
+                return os.path.realpath(os.path.join(git_dir, fh.read().strip()))
+        except FileNotFoundError:
+            return os.path.realpath(git_dir)
+    except (OSError, UnicodeError):
+        return None
+
+
+def _registered_worktrees(common: str) -> list[str]:
+    """Roots of the linked worktrees ``<common>/worktrees/*`` registers and that exist."""
+    registry = os.path.join(common, "worktrees")
+    roots: list[str] = []
+    try:
+        entries = list(os.scandir(registry))
+    except OSError:
+        return roots
+    for entry in entries:
+        try:
+            with open(os.path.join(entry.path, "gitdir"), encoding="utf-8") as fh:
+                back = fh.read().strip()
+        except (OSError, UnicodeError):
+            continue
+        # Relative when ``worktree.useRelativePaths`` is set (git >= 2.48).
+        root = os.path.realpath(os.path.dirname(os.path.join(entry.path, back)))
+        if os.path.isfile(os.path.join(root, ".git")):
+            roots.append(root)  # a pruned/missing tree has nothing left to delete
+    return roots
+
+
+def linked_worktrees_reached(paths: Iterable[str], *, resolved: bool = False) -> list[str] | None:
+    """Linked worktree roots a recursive delete of ``paths`` would destroy.
+
+    ``resolved``: the caller vouches each path is absolute with no symlink
+    on the way (a glob match ``classify._expand_glob`` saw no link in), so
+    the per-path ``realpath`` is skipped.
+
+    ``None`` = unknown: the scan ran past ``_REACH_MAX_ENTRIES``, so the
+    caller must not treat the delete as reaching nothing.
+
+    WHY (security review of PR #3800, pre-existing gap): ``rm -rf
+    <repo>/.worktrees/*`` from an unrelated session ranked LOW as an
+    "ordinary path", because only the target ITSELF was tested for a
+    ``.git``; a glob match or an ancestor (``rm -rf <repo>/.worktrees``)
+    deleted every linked worktree under it unjudged. A tree is reached when
+    its root IS a deleted directory or lies under one.
+
+    "Is" means filesystem identity, ``(st_dev, st_ino)``, never a string
+    prefix (MAJOR-1, PR #3802): ``realpath`` keeps the case a command typed,
+    so on case-insensitive APFS ``rm -rf <repo>/.WORKTREES`` deleted the
+    trees while ``…/.WORKTREES/`` was no prefix of the registry's
+    ``…/.worktrees/x``. Each registered root and its ancestors are stat'ed
+    and looked up among the deleted directories' identities; that also holds
+    through firmlinks and bind mounts.
+
+    HOW, without spawning git: find the repositories whose registries could
+    list such a tree — the one enclosing each path (climbing ancestors) and
+    any repository that is a direct child of it — and read their
+    ``worktrees/*/gitdir`` records. The cost is bounded per CALL, not per
+    path (MINOR-4): sibling glob matches share their ancestors, so a
+    directory already climbed or probed ends the climb (its chain is done),
+    and child probes draw on one entry budget. CEILING: a worktree
+    registered by a repository that neither encloses the target nor sits
+    directly in it (``rm -rf ~/a`` where ``~/a/b/repo`` registers
+    ``~/a/b/wt``) is not found here; ``~/a`` itself still takes its ordinary
+    ranking.
+
+    A symlink named without a trailing slash is skipped: ``rm -rf link``
+    removes the link, not what it points at. Targets arrive normalised, so a
+    ``link/`` delete (which DOES reach the pointee) would be skipped too; the
+    caller resolves it first (``classify._reached_worktrees``, MAJOR-1 of the
+    #3802 restack).
+    """
+    deleted: set[tuple[int, int]] = set()
+    commons: set[str] = set()
+    # Directories whose ``.git`` was probed; a climb reaching one stops, as
+    # everything above it was climbed when it was first seen.
+    probed: set[str] = set()
+    budget = _REACH_MAX_ENTRIES
+    listed = 0
+    for raw in paths:
+        try:
+            if not resolved and os.path.islink(raw) and not raw.endswith("/"):
+                continue
+            st = os.stat(raw)
+        except OSError:
+            continue
+        if not stat.S_ISDIR(st.st_mode):
+            continue
+        deleted.add((st.st_dev, st.st_ino))
+        real = os.path.normpath(raw) if resolved else os.path.realpath(raw)
+        # The target's own listing answers "is it a work tree?" (a ``.git``
+        # entry) and yields its child directories: one ``scandir``, no extra
+        # stat — ``is_dir(follow_symlinks=False)`` reads d_type. Files are
+        # dropped here and never charged to ``budget`` (R2-MINOR-1).
+        listing: list[os.DirEntry[str]] | None = []
+        try:
+            with os.scandir(real) as it:
+                for entry in it:
+                    listed += 1
+                    if listed > _REACH_MAX_LISTED:
+                        return None
+                    if entry.name == ".git" or entry.is_dir(follow_symlinks=False):
+                        listing.append(entry)
+        except OSError:
+            listing = None
+        if listing is not None:
+            budget -= len(listing)
+            if budget < 0:
+                return None
+        here: str | None = real
+        if real not in probed:
+            probed.add(real)
+            if listing is None or any(e.name == ".git" for e in listing):
+                common = _common_dir(real)
+                if common is not None:
+                    commons.add(common)
+                    here = None
+            if here is not None:
+                here = os.path.dirname(real)
+                here = None if here == real else here
+        else:
+            here = None
+        for _ in range(_REACH_MAX_LEVELS):
+            if here is None or here in probed:
+                break
+            probed.add(here)
+            common = _common_dir(here)
+            if common is not None:
+                commons.add(common)
+                break
+            parent = os.path.dirname(here)
+            if parent == here:
+                break
+            here = parent
+        for entry in listing or ():
+            if entry.path in probed or not entry.is_dir(follow_symlinks=False):
+                continue
+            probed.add(entry.path)
+            common = _common_dir(entry.path)
+            if common is not None:
+                commons.add(common)
+    if not deleted or not commons:
+        return []
+    # Per directory: does it, or an ancestor, belong to ``deleted``? Shared
+    # across roots, which share their ancestors.
+    hit: dict[str, bool] = {}
+
+    def _reached(root: str) -> bool:
+        chain: list[str] = []
+        here, found = root, False
+        for _ in range(_REACH_MAX_LEVELS):
+            if here in hit:
+                found = hit[here]
+                break
+            chain.append(here)
+            try:
+                st = os.stat(here)
+            except OSError:
+                st = None
+            if st is not None and (st.st_dev, st.st_ino) in deleted:
+                found = True
+                break
+            parent = os.path.dirname(here)
+            if parent == here:
+                break
+            here = parent
+        for c in chain:
+            hit[c] = found
+        return found
+
+    reached = {
+        root for common in commons for root in _registered_worktrees(common) if _reached(root)
+    }
+    return sorted(reached)
+
+
+def recorded_creators(path: str, *, state_root: str | os.PathLike[str] | None = None) -> list[str]:
+    """Creators of the ledger rows recording exactly ``path`` (same inode generation).
+
+    For the judge brief of a FOREIGN worktree: whose work it is, which this
+    session's ``owned_record`` cannot say. Display only, never ownership.
+    """
+    try:
+        real = os.path.realpath(path)
+        conn = _connect(ledger_path(state_root), create=False)
+        if conn is None:
+            return []
+        try:
+            rows = conn.execute(
+                "SELECT dev, ino, creator, stamp FROM created WHERE path = ?", (real,)
+            ).fetchall()
+        finally:
+            conn.close()
+        st = os.stat(real)
+    except (OSError, sqlite3.Error):
+        return []
+    return sorted(
+        {
+            creator
+            for dev, ino, creator, stamp in rows
+            if (dev, ino) == (st.st_dev, st.st_ino) and stamp == creation_stamp(st)
+        }
+    )
 
 
 #: How many dirty entries a judge brief or refusal reason shows per worktree.
@@ -1134,8 +1699,52 @@ def describe_changes(path: str) -> str:
     if changes is None:
         return "uncommitted changes: unknown (git status failed)"
     if not changes:
-        return "uncommitted changes: none"
+        hidden = _hidden_work(path)
+        return "uncommitted changes: none" + "".join(f"; {h}" for h in hidden)
     return "uncommitted changes: " + ", ".join(changes)
+
+
+def _hidden_work(path: str) -> list[str]:
+    """What makes a tree with no ``git status`` entry still ``dirty``.
+
+    WHY (MINOR-3 / QA Q1, PR #3802): ``worktree_state`` also calls a tree
+    dirty for a nested repository inside an IGNORED entry (its commits may
+    exist nowhere else) — ignored entries are not in ``worktree_changes`` —
+    so the brief read "dirty; uncommitted changes: none" and gave the judge
+    nothing to weigh. Called only for a dirty tree, so the extra status is
+    paid only where the judge is asked anyway.
+    """
+    real = os.path.realpath(path)
+    # ``-z``: paths verbatim, NUL-terminated. Without it git C-quotes a
+    # non-ASCII name (``"\303\251…"``), which never resolved, so that entry
+    # silently dropped out of the brief (R2-NIT-1, PR #3802).
+    out = _git(
+        ["status", "--porcelain", "-z", "--ignored", "--untracked-files=normal"],
+        real,
+        timeout=_WORKTREE_STATUS_TIMEOUT_S,
+    )
+    facts: list[str] = []
+    records = iter((out or "").split("\0"))
+    for record in records:
+        if len(record) > 3 and record[2] == " " and ("R" in record[:2] or "C" in record[:2]):
+            next(records, None)  # a rename/copy's source path is its own record
+        if not record.startswith("!! "):
+            continue
+        entry = record[3:].rstrip("/")
+        inside = _git_inside(os.path.join(real, entry))
+        if inside is None:
+            continue
+        if inside.exhausted:
+            # Unknown, not found: the tree stays dirty (fail closed), but the
+            # judge must not be told a repository exists (R2-MAJOR-1).
+            facts.append(f"ignored entry too large to rule out a nested repository: {inside.path}")
+        else:
+            facts.append(
+                f"nested repository (ignored, its commits may exist nowhere else): {inside.path}"
+            )
+        if len(facts) >= _MAX_DIRTY_SHOWN:
+            break
+    return facts
 
 
 #: Bound on each ``gh pr list`` that :func:`worktree_activity` runs (one, or

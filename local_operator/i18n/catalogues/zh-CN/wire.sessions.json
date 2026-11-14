@@ -1,6 +1,12 @@
 {
+  "wire.sessions.approval_park_local": "若{address}空闲则停放：结束其运行时以释放内存，唤醒和监控保持启用；正在工作时拒绝",
+  "wire.sessions.approval_park_self": "本轮结束后停放此会话：结束其运行时以释放内存，并保持其唤醒和监控处于启用状态",
   "wire.sessions.approval_stop_local": "若{address}空闲则停止：释放会话租约，绝不发送信号；正在工作时拒绝",
   "wire.sessions.approval_stop_peer": "{address}在{peer}上无法停止：此构建一律拒绝，不会发送任何内容",
+  "wire.sessions.park_done": "已停放“{name}”——{wakes, plural, other {#个唤醒}}和{monitors, plural, other {#个监控}}保持启用；其中任一触发时，监管进程会重新打开它",
+  "wire.sessions.park_self_refused_busy": "此会话仍有子智能体、后台任务或未回答的问题在进行中，无法自行停放，因此没有安排任何操作。请在这些工作完成后再停放。",
+  "wire.sessions.park_self_scheduled": "此会话将在本轮结束后立即停放：其运行时退出以释放内存，{wakes, plural, other {#个唤醒}}和{monitors, plural, other {#个监控}}保持启用。任一触发或有消息到达时会重新打开。",
+  "wire.sessions.stop_dormant_hint": "停止后，它的唤醒和监控会处于休眠状态，直到会话被重新打开。若想释放内存并让它们保持启用，请改用 op='park'。",
   "wire.sessions.stop_pending": "“{name}”已接受停止，但{seconds} s后仍未退出。没有发送任何信号——重试前先查看会话列表。",
   "wire.sessions.stop_refused_busy": "“{name}”正在工作（一个轮次、一项审批、一个子智能体或一个任务），因此没有停止任何内容，也没有发送任何信号。等它空闲后再重试。",
   "wire.sessions.stop_refused_old_owner": "“{name}”运行的是较旧的构建，无法保证只在空闲时停止，因此没有停止任何内容，也没有发送任何信号。重试不会改变这一点——让操作员停止它。",

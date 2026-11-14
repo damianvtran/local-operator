@@ -1046,6 +1046,22 @@ class PendingRequest:
         return asdict(self)
 
 
+def _title_with_command(title: str, command: Any) -> str:
+    """The legacy single-slot ``title`` with the ask's suggested command folded in.
+
+    The legacy ``PendingRequest`` card has ONE text slot, and every client that
+    reads it (an old desktop app, the native app, the blocking
+    ``LOP_ASK_NONBLOCKING=0`` arm) predates ``AskQuestion.command``: without
+    this, a question like "Sign in to GitLab first?" would reach them with the
+    command that makes it answerable silently gone. Appending it as its own
+    paragraph keeps it visible and copyable on every one of them; newer
+    surfaces read the structured field instead.
+    """
+    if isinstance(command, str) and command.strip():
+        return f"{title}\n\n{command.strip()}"
+    return title
+
+
 def ask_mirror_request(card: Mapping[str, Any]) -> PendingRequest:
     """The legacy single-slot card for the mirrored question of a QUEUED ask (§4).
 
@@ -1066,7 +1082,9 @@ def ask_mirror_request(card: Mapping[str, Any]) -> PendingRequest:
     return PendingRequest(
         request_id=str(card.get("request_id") or ""),
         kind="ask",
-        title=str(card.get("title") or "the agent is asking"),
+        title=_title_with_command(
+            str(card.get("title") or "the agent is asking"), card.get("command")
+        ),
         detail="",
         options=[
             AskOptionWire(
@@ -1119,7 +1137,10 @@ def ask_pending_request(
     return PendingRequest(
         request_id=request_id,
         kind="ask",
-        title=str(getattr(question, "question", "") or "the agent is asking"),
+        title=_title_with_command(
+            str(getattr(question, "question", "") or "the agent is asking"),
+            getattr(question, "command", None),
+        ),
         detail="",
         options=options,
         secret=bool(getattr(question, "secret", False)),

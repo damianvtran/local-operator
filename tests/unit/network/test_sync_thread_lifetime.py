@@ -186,3 +186,89 @@ def test_a_finished_sync_thread_can_be_joined_and_queried() -> None:
         thread.stop()
         thread.join(STOP_BOUND_S)
         assert thread.is_alive() is False
+
+
+# #3719 round 1 follow-ups -------------------------------------------------
+
+
+@pytest.mark.parametrize("kind", ["watcher", "refresher"])
+def test_a_thread_that_outlives_the_stop_frees_the_relay_when_it_exits(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, kind: str
+) -> None:
+    """R1-1: a tick wedged past the stop's join must not pin the relay forever.
+
+    A ``_push`` to a wedged peer can run past ``SYNC_THREAD_STOP_JOIN_S`` (links close
+    only after the hooks run), so ``stop_threads`` keeps the survivor's entry, and on
+    the normal path nothing calls ``stop()`` again. RED before the fix: once the tick
+    returned and the thread exited, its registry entry (and the once-per-episode
+    warning row) still held the thread, the thread its ``_server``.
+    """
+    monkeypatch.setattr(
+        sync.SyncSettings,
+        "from_config",
+        classmethod(lambda cls, root=None: sync.SyncSettings(tick_s=0.02)),
+    )
+    entered = threading.Event()
+    release = threading.Event()
+
+    def _wedged(self: object, *args: object, **kwargs: object) -> list[tuple[str, str]]:
+        entered.set()
+        release.wait(STOP_BOUND_S * 4)
+        return []
+
+    cls = sync.SyncWatcher if kind == "watcher" else sync.ReplicaRefresher
+    monkeypatch.setattr(cls, "tick", _wedged)
+    table = sync._watchers if kind == "watcher" else sync._refreshers  # noqa: SLF001
+    server = _started_relay(tmp_path, monkeypatch)
+    start = sync.ensure_watcher if kind == "watcher" else sync.ensure_refresher
+    thread = start(server)  # type: ignore[arg-type]
+    assert entered.wait(STOP_BOUND_S), "the wedged tick never ran"
+    ref = weakref.ref(server)
+    # THE ONE REAL STOP, its join shortened through the module (the relay's hook
+    # looks ``stop_threads`` up at call time). No second stop follows: on the
+    # normal path nothing calls one, which is the finding.
+    real_stop_threads = sync.stop_threads
+    monkeypatch.setattr(
+        sync, "stop_threads", lambda srv, timeout=0.1: real_stop_threads(srv, timeout=timeout)
+    )
+    try:
+        server.stop()  # type: ignore[attr-defined]
+        assert thread.is_alive(), "the wedge did not hold: this proves nothing"
+        assert table.get(id(server)) is thread, "the survivor's entry must be kept while alive"
+    finally:
+        release.set()
+        thread.join(STOP_BOUND_S)
+    assert not thread.is_alive()
+    del server, thread
+    gc.collect()
+    held_by = (
+        sorted({type(r).__name__ for r in gc.get_referrers(ref())}) if ref() is not None else []
+    )
+    assert ref() is None, f"the relay stayed pinned after its survivor exited: {held_by}"
+
+
+def test_a_starter_on_a_stopped_relay_reads_no_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R1-2: the unstarted, unregistered stand-in is built from defaults.
+
+    It exists so a late caller's ``.mark()`` is harmless; reading ``config.yml`` from
+    disk for an instance that never ticks was wasted I/O on every late push.
+    """
+    server = _started_relay(tmp_path, monkeypatch)
+    server.stop()  # type: ignore[attr-defined]
+    reads: list[object] = []
+    real = sync.SyncSettings.from_config
+
+    def _counting(cls: type, root: object = None) -> object:
+        reads.append(root)
+        return real(root)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(sync.SyncSettings, "from_config", classmethod(_counting))
+
+    watcher = sync.ensure_watcher(server)  # type: ignore[arg-type]
+    refresher = sync.ensure_refresher(server)  # type: ignore[arg-type]
+
+    assert reads == [], f"a stand-in read config {len(reads)} time(s)"
+    assert not watcher.is_alive() and not refresher.is_alive()
+    refresher.mark("abc", "available")  # still harmless

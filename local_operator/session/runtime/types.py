@@ -1530,6 +1530,11 @@ class SessionRecord:
     #: cost has to be findable — this field is what puts it in `lop sessions`
     #: and sorts it first in the picker.
     pending: str | None = None
+    #: ``pending`` is the ask QUEUE's claim (an open queued ask, nothing parked)
+    #: rather than a parked gate's. Peers paint both as "needs you" but park
+    #: only on a gate (``peer_rows.park_edges``; PR #3934 Q1/R1-3). Additive and
+    #: keyless on an older reader, like ``watching``.
+    pending_queued: bool = False
     #: This runtime HAS COMMITTED TO LEAVING and is finishing work in flight
     #: first: a short phrase (``LEAVING_ON_SIGNAL``) while that drain runs,
     #: ``""`` when it is going nowhere. Set by the signal drain

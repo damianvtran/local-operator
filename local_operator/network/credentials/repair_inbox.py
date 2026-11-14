@@ -58,6 +58,9 @@ from local_operator.network.credentials.repair import (
     repair_notices,
     repaired_keys,
 )
+from local_operator.notifications.store import (
+    NETWORK_CREDENTIALS_SESSION_ID as _NETWORK_CREDENTIALS_SESSION_ID,
+)
 
 if TYPE_CHECKING:
     from local_operator.network.relay import RelayServer
@@ -67,7 +70,9 @@ logger = logging.getLogger(__name__)
 #: The owner-scoped pseudo-session every repair item is filed under. Not a
 #: conversation: no session directory exists, so the reel falls back to
 #: :data:`SESSION_TITLE` (``items.SessionFacts.get``) and offers only read/dismiss.
-SESSION_ID = "network-credentials"
+# Owned by the store's allowlist so the desktop routes' session-id grammar
+# admits it (``store.PSEUDO_SESSION_IDS``); a literal here could drift.
+SESSION_ID = _NETWORK_CREDENTIALS_SESSION_ID
 
 #: The label the reel shows for :data:`SESSION_ID` — the in-app command that shows
 #: the full repair rows. A command is a technical identifier (exempt from the copy
