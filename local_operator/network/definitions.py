@@ -977,9 +977,9 @@ def subagent_tiers_state(root: Path) -> dict[str, Any]:
 
     Same vocabulary as :func:`operator_instructions_state`: ``absent``,
     ``unreadable``, ``authored``, ``mirror``, ``edited``; ``conflict`` is the last
-    revision this device refused. The ``models`` map is included because it is a
-    handful of model ids and the operator's first question on a node is "which
-    model does hi run on here".
+    revision this device refused. The ``models`` map is included for the local
+    CLI, because the operator's first question on a node is "which model does hi
+    run on here"; :func:`definition_state` drops it from the wire reply.
     """
     index = read_index(root)
     row, unreadable = _subagent_tiers_on_disk(root)
@@ -1096,8 +1096,9 @@ def _apply_subagent_tiers_locked(
     ``lop network definitions state`` and readiness read. A conflict never fails a
     push or a create: a node whose operator chose other models is a legitimate
     state, and the push's agent/team rows must still land. The caller has already
-    checked the sender is this node's operator-authority device
-    (``mirror_authority.accepts_from``), so ``origin`` here is always the operator.
+    checked the sender CLAIMS this node's operator anchor
+    (``mirror_authority.accepts_from``). That claim is unsigned (see
+    ``mirror_authority``), so the own/other-origin/edited guards below still apply.
     """
     incoming = digest_of(row)
     recorded_in = index.get(SUBAGENT_TIERS_INDEX_KEY)
@@ -2232,7 +2233,10 @@ def _apply_team_locked(
 
 
 def definition_state(
-    root: Path, *, names: Mapping[str, Iterable[str]] | None = None
+    root: Path,
+    *,
+    names: Mapping[str, Iterable[str]] | None = None,
+    include_tier_models: bool = False,
 ) -> dict[str, Any]:
     """A digest manifest of the definitions THIS device holds.
 
@@ -2240,6 +2244,13 @@ def definition_state(
     and reading a summary, because it lets the sender see that the peer already
     holds an equal revision (idempotence without a write) and that it holds a
     DIFFERENT one (a conflict to report rather than a row to clobber).
+
+    ``include_tier_models`` is for the LOCAL ``lop network definitions state``
+    only. The default is the wire shape (the ``state`` phase answers every admin
+    peer that asks, on every cadence tick): the tier values stay home. They are
+    read off disk unvalidated, so a value the push itself withholds as
+    credential-shaped would otherwise leave this device in the reply, and no
+    sender reads them (``_tiers_to_send`` uses digest/status/conflict/authority).
     """
     agents = {str(row["name"]): digest_of(row) for row in _read_agents(root)}
     teams = {str(row["name"]): digest_of(row) for row in _read_teams(root)}
@@ -2264,7 +2275,11 @@ def definition_state(
         # ``authority`` rides here, not in ``subagent_tiers_state``: readiness reads
         # that state too, and has no use for a signer probe.
         SUBAGENT_TIERS_KIND: {
-            **subagent_tiers_state(root),
+            **{
+                key: value
+                for key, value in subagent_tiers_state(root).items()
+                if include_tier_models or key != "models"
+            },
             "authority": mirror_authority.state_fact(root),
         },
     }

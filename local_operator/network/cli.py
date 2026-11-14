@@ -11864,7 +11864,8 @@ def _cmd_definitions(args: argparse.Namespace) -> int:
 
     # ``state``: this device's own definitions, plus what was mirrored here.
     index = definitions.read_index(root)
-    state = definitions.definition_state(root)
+    # Local view: the tier values are shown here, never sent in the wire reply.
+    state = definitions.definition_state(root, include_tier_models=True)
     mirrored = {
         kind: {
             str(name): str(row.get("origin") or "")

@@ -403,6 +403,52 @@ def test_state_and_readiness_name_the_tiers(
     assert readiness.subagent_tiers_row(member, facts, peer_label="x") is None
 
 
+def test_the_state_reply_never_carries_this_devices_own_tier_values(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """QA round 4, Q-3: the ``state`` phase answers every admin peer, every tick.
+
+    A node's own tier text is read off disk unvalidated, so before the fix a
+    credential-shaped selector the push would withhold still left the device in
+    the reply. The wire carries digest/status/origin only; the local CLI keeps
+    showing the values.
+    """
+    from types import SimpleNamespace
+
+    from local_operator.network import cli as network_cli
+
+    head, node = _root(tmp_path, "head"), _root(tmp_path, "node")
+    _set_subagents(head, {"models": dict(HEAD_TIERS)})
+    own = {"hi": "openai/gpt-6", "med": FAKE_TOKEN}
+    _set_subagents(node, {"models": dict(own)})
+
+    # The real ``net_definitions`` handler, as a peer's state request reaches it.
+    handler = definitions.make_handler(SimpleNamespace(root=node))  # type: ignore[arg-type]
+    reply = handler(None, {"phase": "state"})
+    wire = json.dumps(reply, default=str)
+    assert FAKE_TOKEN not in wire and "openai/gpt-6" not in wire, reply
+    row = reply[definitions.SUBAGENT_TIERS_KIND]
+    assert "models" not in row, row
+    assert row["status"] == "authored" and row["digest"], row
+
+    # The sender decides on what the reply still carries: the node keeps its own
+    # map, and no frame in either direction carries the token.
+    link = _PeerLink(node)
+    _push(head, link)
+    assert _subagents(node)["models"] == own
+    assert all(FAKE_TOKEN not in json.dumps(f, default=str) for f in link.frames)
+
+    # The node's own operator still sees which model each tier runs on, locally.
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(node))
+    args = argparse.Namespace(definitions_command="state", json=True)
+    assert network_cli._cmd_definitions(args) == 0
+    payload = json.loads(capsys.readouterr().out)
+    local = payload.get(definitions.SUBAGENT_TIERS_KIND) or payload.get("detail", {}).get(
+        definitions.SUBAGENT_TIERS_KIND
+    )
+    assert local["models"]["hi"] == "openai/gpt-6", payload
+
+
 def _tiers_bundle(tiers: dict[str, Any], origin: str = HEAD_DEVICE) -> dict[str, Any]:
     return {
         "kind": definitions.BUNDLE_KIND,
