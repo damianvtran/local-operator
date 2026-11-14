@@ -52,6 +52,12 @@ from tests.unit.network.test_relay_e2e import (  # noqa: F401 — fixtures by im
     serve_shaped_relay,
 )
 
+#: This file IS the renew nudge's coverage, so every cell re-arms the real hook that
+#: the directory's autouse pin (``conftest._no_renew_nudge``) switches off. Module-wide
+#: rather than per cell: the ``mesh`` fixture's own link-ups must run the real hook too,
+#: exactly as they did before the pin existed.
+pytestmark = pytest.mark.usefixtures("renew_nudge")
+
 
 @pytest.fixture
 def borrowed(

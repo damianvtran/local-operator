@@ -250,3 +250,48 @@ def _no_first_contact_nudge(monkeypatch: pytest.MonkeyPatch) -> None:
     from local_operator.network import definitions
 
     monkeypatch.setattr(definitions, "_on_link_up", lambda _server, _link: None, raising=False)
+
+
+@pytest.fixture(autouse=True)
+def _no_renew_nudge(monkeypatch: pytest.MonkeyPatch) -> Callable[..., None]:
+    """The owner's link-up renew nudge is OFF unless a cell opts in (PR #3946, R4-M1).
+
+    Every relay link coming up schedules ``renew_push.on_link_up`` on the owner end:
+    after a random 0-5 s jitter, the owner nudges each member it lends a key to, and
+    that member's relay re-asks through the ordinary grant path. Cells in this
+    directory share a key over real relays and then count IdP POSTs, grants, holds
+    and audit rows they drive BY HAND; a nudge landing inside that window adds a
+    rotation, a fresh grant or a restarted hold the cell did not cause. Measured by
+    pinning the jitter into the cell's window (review round 4): the line-567 cell in
+    ``test_credentials_real_link`` (3/200 unpinned), ``test_credential_binding_two_root``
+    ``test_e4``, the outage cell in ``test_credentials_offline_hold``,
+    ``test_owner_return_clears_access_band`` and ``test_credentials_held_offline``
+    all fail, as did ``test_credential_refresh_real_link`` (an extra IdP POST in 10/60
+    local runs, every one on ``mesh-credential-renew-ask``). Pinning the seam here
+    keeps every file, present and future, on the quiet contract they were written
+    against — the same shape as ``_no_first_contact_nudge`` above.
+    ``test_credentials_renew_on_reconnect`` is the nudge's own coverage and re-arms
+    it (fixture ``renew_nudge``).
+
+    The seam is the module attribute: the relay hook registered in
+    ``credentials.register`` resolves ``renew_push_mod.on_link_up`` at call time.
+    Returns the real function so ``renew_nudge`` can restore it without a second
+    import-time capture.
+    """
+    from local_operator.network.credentials import renew_push
+
+    real = renew_push.on_link_up
+    monkeypatch.setattr(renew_push, "on_link_up", lambda *_a, **_k: None)
+    return real
+
+
+@pytest.fixture()
+def renew_nudge(_no_renew_nudge: Callable[..., None], monkeypatch: pytest.MonkeyPatch) -> None:
+    """Re-arm the real link-up renew nudge for the cells that exercise it.
+
+    Requests the autouse pin explicitly so it has run first, and restores the very
+    function it replaced.
+    """
+    from local_operator.network.credentials import renew_push
+
+    monkeypatch.setattr(renew_push, "on_link_up", _no_renew_nudge)
