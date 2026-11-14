@@ -18370,10 +18370,14 @@ class Session:
           ``resume.ORIGIN_AGENT_WORKSTREAM``, the spawn tool's default) — listed
           so the operator can watch it, but its findings go back to the agent
           that spawned it, which decides whether the operator needs an item;
-        * a session minted here at another device's request by an AGENT
-          (mesh stamp ``origin.kind == "agent"``, ``remote_attention.
-          AGENT_ORIGIN_KIND``) — the owner already refuses to forward its
-          items, so the tool would only fill an inbox nobody reads.
+        * a session placed here at another device's request (a ``peer``
+          placement) whose stamp does NOT positively say the operator started
+          it (``remote_attention.origin_is_operator_started``): an AGENT's
+          create, and — DEFAULT-DENY (operator rule, 2026-11-14) — a legacy
+          stamp from before the attestation, a move or anything unreadable.
+          The owner refuses to forward such a session's items, so the tool
+          would only fill an inbox nobody reads. A local top-level session
+          (no stamp, or a ``local`` placement) is untouched.
 
         Withholding the tool (rather than a tool that refuses) is the delegated
         child's own mechanism: the model is never offered a channel it may not
@@ -18384,7 +18388,10 @@ class Session:
         if not directory:
             return False
         try:
-            from local_operator.notifications.remote_attention import AGENT_ORIGIN_KIND
+            from local_operator.notifications.remote_attention import (
+                AGENT_ORIGIN_KIND,
+                origin_is_operator_started,
+            )
             from local_operator.resume import ORIGIN_AGENT_WORKSTREAM, session_origin
             from local_operator.session.placement import MESH_STAMP_NAME, MeshStamp
 
@@ -18394,7 +18401,13 @@ class Session:
             if not stamp_file.is_file():
                 return False
             stamp = MeshStamp.from_json(json.loads(stamp_file.read_text(encoding="utf-8")))
-            return bool(stamp and str(stamp.origin.get("kind") or "") == AGENT_ORIGIN_KIND)
+            if stamp is None:
+                return False
+            if str(stamp.origin.get("kind") or "") == AGENT_ORIGIN_KIND:
+                return True
+            if stamp.placement.mode != "peer":
+                return False
+            return not origin_is_operator_started(stamp.origin)
         except Exception:  # noqa: BLE001 — an unanswered question keeps the tool
             logger.debug("notify: could not read the session's spawner", exc_info=True)
             return False

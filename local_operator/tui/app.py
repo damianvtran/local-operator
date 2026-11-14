@@ -20514,7 +20514,11 @@ class OperatorApp(App[None]):
         # names it or the owner's own auto-namer titles the first substantive
         # turn. Nothing is lost by it — the `↗` mark and the tooltip carry the
         # device, which is what the bogus name was duplicating.
-        argv = ["sessions", "--peer", addressing, "--create"]
+        # ``--origin user``: the operator's own gesture, stated rather than
+        # inferred from the environment, so the owner stamps the session
+        # ``started_by: operator`` and its ``notify`` items keep reaching the
+        # inbox under the default-deny rule (``remote_attention.STARTED_BY_FIELD``).
+        argv = ["sessions", "--peer", addressing, "--create", "--origin", "user"]
         if prompt:
             argv += ["--prompt", prompt]
         self._run_network_cli(

@@ -145,6 +145,12 @@ from local_operator.network.types import (
     capabilities_for_role,
     trust_state,
 )
+from local_operator.notifications.remote_attention import (
+    AGENT_ORIGIN_KIND,
+    OPERATOR_STARTED,
+    STARTED_BY_FIELD,
+    started_by_for_origin,
+)
 from local_operator.paths import CONFIG_DIR_ENV, config_dir, log_dir
 from local_operator.session import open_trace
 from local_operator.session.runtime.types import (
@@ -5553,6 +5559,18 @@ def _model_credential_refusal(root: Path, model: Any, birth: Any) -> str:
     )
 
 
+def _started_by_claim(frame: dict[str, Any]) -> dict[str, str]:
+    """``{"started_by": <value>}`` when the create frame attested one, else ``{}``.
+
+    Only the two values ``remote_attention.started_by_for_origin`` writes are
+    kept; anything else (absent from an origin older than the attestation, or
+    garbage) stamps nothing, which the owner and the origin read as NOT
+    operator-started — the default-deny the operator rule asks for.
+    """
+    value = str(frame.get(STARTED_BY_FIELD) or "")
+    return {STARTED_BY_FIELD: value} if value in (OPERATOR_STARTED, AGENT_ORIGIN_KIND) else {}
+
+
 def _resolve_peer_cwd(cwd: str, *, owner: str) -> str:
     """The working directory a peer create names, or a refusal naming ``owner``.
 
@@ -10036,6 +10054,12 @@ class RelayServer:
                     "kind": str(frame.get("origin") or "user"),
                     "source_device": link.device_id,
                     "source_session_id": "",
+                    # THE ATTESTATION, copied only when the asking origin sent one
+                    # (``_ctl_peer_create``). Never defaulted: ``kind`` above defaults
+                    # to ``user`` for an origin that predates attribution, and a
+                    # default here would let that legacy guess forward ``notify``
+                    # items again (``remote_attention.STARTED_BY_FIELD``).
+                    **_started_by_claim(frame),
                 },
                 # CARRIED AUTO AUTHORITY (§6 defect 2): the accepted grant travels ON
                 # THE SESSION, so the runtime this create engages — and every runtime a
@@ -14741,6 +14765,12 @@ class RelayServer:
             "prompt": str(frame.get("prompt") or ""),
             "images": list(frame.get("images") or []),
             "origin": str(frame.get("origin") or "user"),
+            # WHO ASKED, attested HERE where it was decided: ``origin`` comes from
+            # ``network/cli._create_origin`` (agent shell / ``--origin``) or is
+            # absent for the desktop's operator route, which means ``user``. The
+            # owner stamps it verbatim and forwards ``notify`` items only for
+            # ``operator`` (default-deny, ``remote_attention.STARTED_BY_FIELD``).
+            "started_by": started_by_for_origin(str(frame.get("origin") or "user")),
             # THE REQUEST TRAVELS WITH THE FRAME, and the answer comes from the
             # owner: it accepts only against its own ``unattended`` grant
             # (``_op_session_create``), which is the fact this side cannot read.
