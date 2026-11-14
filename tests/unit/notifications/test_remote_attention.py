@@ -1325,6 +1325,61 @@ def test_default_deny_forwards_notify_items_only_for_an_attested_operator_sessio
     assert keys == (["deploy"] if forwarded else []), (origin, keys)
 
 
+def _restamp(owner: Path, origin: dict[str, Any]) -> None:
+    import json
+
+    stamp_file = owner / "sessions" / SID / "mesh.json"
+    data = json.loads(stamp_file.read_text(encoding="utf-8"))
+    data["origin"] = dict(origin)
+    stamp_file.write_text(json.dumps(data), encoding="utf-8")
+
+
+@pytest.mark.parametrize(
+    ("origin", "forwarded"),
+    [
+        # Moved / forked ONTO this node by the operator: no attestation, so the
+        # owner keeps its items, and the reply must say so (QA r2, Q1).
+        ({"kind": "moved", "source_device": HEAD, "source_session_id": ""}, False),
+        ({"kind": "fork", "source_device": HEAD, "source_session_id": ""}, False),
+        # An attested operator create: promised AND put on the wire.
+        ({**LEGACY_ORIGIN, "started_by": "operator"}, True),
+    ],
+)
+def test_default_deny_the_node_reply_matches_the_owner_forward_filter(
+    tmp_path: Path, origin: dict[str, Any], forwarded: bool
+) -> None:
+    """QA r2 Q1: the node's ``notify`` reply applies the owner's own forward
+    predicate, so "will be forwarded" is said exactly when the item travels."""
+    owner = _owner(tmp_path)
+    _restamp(owner, origin)
+    # The head has read this node, so it IS recorded as collecting forwards:
+    # the old reply said "will be forwarded" here regardless of the stamp.
+    rows = [{**_catalog_row(), "origin": dict(origin)}]
+    ra.stamp_rows_for_viewer(owner, rows, HEAD)
+    assert HEAD in ra.forwarding_origins(owner)
+    sentence = ra.forwarded_notice_sentence(owner, SID)
+    keys = [n["key"] for n in rows[0].get("notices") or ()]
+    if forwarded:
+        assert "will be forwarded to its origin device" in sentence, sentence
+        assert keys == ["deploy"]
+    else:
+        assert "will be forwarded" not in sentence, sentence
+        assert "it stays on this device" in sentence and "moved, forked" in sentence
+        assert keys == [], "the head inbox gets nothing from an unattested stamp"
+
+
+def test_a_session_brought_home_keeps_its_reply_byte_for_byte(tmp_path: Path) -> None:
+    """A session moved HOME (its source device never reads this one, so it is not
+    a recorded forwarding origin): the reply is unchanged from before Q1."""
+    owner = _owner(tmp_path, origin=NODE)
+    _restamp(owner, {"kind": "moved", "source_device": NODE, "source_session_id": ""})
+    assert NODE not in ra.forwarding_origins(owner)
+    assert ra.forwarded_notice_sentence(owner, SID) == (
+        " Posted on this device; it stays on this device, because its origin device,"
+        " where this session started, is not known to collect forwarded notices."
+    )
+
+
 def test_default_deny_a_legacy_sessions_open_ask_still_reaches_the_origin(
     tmp_path: Path,
 ) -> None:

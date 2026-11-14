@@ -1050,7 +1050,9 @@ def forwarded_notice_sentence(root: Path, session_id: str, key: str = "") -> str
     "Will be forwarded" is said ONLY for an origin recorded as collecting
     forwarded items (:func:`record_forwarding_origin`); any other origin — an
     older build, or one that has not read this device since updating — gets
-    "it stays on <this device>" (review round 1, m2). ``""`` for every session
+    "it stays on <this device>" (review round 1, m2), and so does a session whose
+    stamp lacks the operator attestation (:func:`origin_is_operator_started`, the
+    owner's own forward filter — QA round 2, Q1). ``""`` for every session
     not placed here by another device, and for a ``key`` this module never
     forwards — an ordinary local session's result is unchanged byte for byte.
     """
@@ -1066,7 +1068,20 @@ def forwarded_notice_sentence(root: Path, session_id: str, key: str = "") -> str
         if not origin:
             return ""
         here, there = _device_names(Path(root), origin)
-        if origin in forwarding_origins(Path(root)):
+        collects = origin in forwarding_origins(Path(root))
+        if collects and not origin_is_operator_started(stamp.origin):
+            # THE SAME PREDICATE AS THE OWNER'S FORWARD FILTER
+            # (:func:`stamp_rows_for_viewer`), or the reply promises what the
+            # filter withholds (QA r2, Q1): a session the operator moved or forked
+            # ONTO this node carries no ``started_by`` attestation (a move is not
+            # a create, and does not prove who asked), so default-deny keeps its
+            # items here. Forwarding across a move is a declared deferral.
+            return (
+                f" Posted on {here}; it stays on {here}, because only notices from"
+                f" sessions the operator started on {there} are forwarded there, and"
+                " this one was moved, forked or placed here otherwise."
+            )
+        if collects:
             return (
                 f" Posted on {here}; it will be forwarded to {there}, where this session started."
             )
