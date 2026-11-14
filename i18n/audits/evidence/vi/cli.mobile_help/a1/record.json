@@ -1,0 +1,84 @@
+{
+ "schema": 1,
+ "audit_id": "a1",
+ "audit_kind": "independent_translation_audit",
+ "locale": "vi",
+ "namespace": "cli.mobile_help",
+ "round": 1,
+ "audit_date": "2026-11-14",
+ "verdict": "passed",
+ "status": "passed",
+ "source_sha256": "3e1aea77751a6a1286cd0bc525163ac6e90da2f81fd19fff1fc23ae247133267",
+ "target_sha256": "5f41ef406576bc50973da9420129037d0c67993d9b35e5f1bc2fdd87a42688ed",
+ "scope": "complete 17-key namespace at the new English source hash: 2 NEW keys (cli.mobile_help.doctor, cli.mobile_help.doctor_json) judged in full; the 15 previously audited keys re-read for consistency with the new keys and with mobile.doctor",
+ "key_count": 17,
+ "keys_audited": 2,
+ "keys_reread_for_consistency": 15,
+ "source_audit_revision": "a3722be7dadacaf140a2587a0100bd3b26c2ab50",
+ "worktree": "~/local-operator/.worktrees/mobile-doctor",
+ "branch": "feat/mobile-doctor",
+ "translator": {
+  "agent": "i18n-translator subagent, session 398cdb26808f (English source drafted by coder session b0300e2c2c7f)",
+  "model": "anthropic/claude-opus-5-5",
+  "date": "2026-11-14"
+ },
+ "auditor": {
+  "agent": "i18n-auditor (C4 lane: vi, zh-CN), independent `task` subagent, session 2c1a73eaa6cd; did not translate or edit any value it judged",
+  "model": "anthropic/claude-opus-5-5 (served model of this session; no provider fallback occurred)",
+  "date": "2026-11-14",
+  "independent_from_translator": true
+ },
+ "input_hashes": {
+  "en": "3e1aea77751a6a1286cd0bc525163ac6e90da2f81fd19fff1fc23ae247133267",
+  "context": "dab85ceb9e4acf145e434179d866848912a0831bbf827ea196f82c28f855a869",
+  "target": "5f41ef406576bc50973da9420129037d0c67993d9b35e5f1bc2fdd87a42688ed",
+  "glossary": "a576d5a4b2718ba79a70a42600e3b6233ea28d716b1e2d996a208ac8dd7fabdb",
+  "style_guide": "e4901497ed553e2b2ae4a2660bf776adb787b89e11d7eb0f8d08f3da4b227888"
+ },
+ "input_paths": {
+  "en": "local_operator/i18n/catalogues/en/cli.mobile_help.json",
+  "context": "local_operator/i18n/catalogues/en/cli.mobile_help.context.json",
+  "target": "local_operator/i18n/catalogues/vi/cli.mobile_help.json",
+  "glossary": "i18n/glossary.md",
+  "style_guide": "i18n/style-guides/vi.md"
+ },
+ "findings": [],
+ "counts": {
+  "blocker": 0,
+  "major": 0,
+  "minor": 0,
+  "nit": 0
+ },
+ "unresolved_blocker_major_count": 0,
+ "translator_questions_answered": null,
+ "verified": [
+  "doctor: «Chẩn đoán truy cập điện thoại ở chế độ chỉ đọc (an toàn để chia sẻ)» keeps both “read-only” («chỉ đọc», the shipped term in cli.browser_help, cli.services_help…) and “safe to share”; names no command",
+  "doctor_json: JSON verbatim",
+  "«Truy cập điện thoại» matches the namespace's `mobile` one-liner and mobile.doctor/mobile.setup",
+  "daemon_action select branches render start/stop/restart/other correctly"
+ ],
+ "limitations": [
+  "Independent LLM review on anthropic/claude-opus-5-5, not native-speaker certification.",
+  "Text renders via the product renderer only (audit.log); no terminal, desktop or device frame.",
+  "Phone-app catalogue (separate repo) not compared for the 'asleep' label.",
+  "generate.py / check.py not run by this lane."
+ ],
+ "artifacts": [
+  "record.json",
+  "report.md",
+  "audit.log",
+  "dryrun.log",
+  "receipt.json"
+ ],
+ "audit_ledger_row": {
+  "storage": "i18n/audit-history/vi/cli.mobile_help.json (ordered suffix, appended with scripts/i18n/ledger.py append)",
+  "history_sha256_before_append": "5d6747d2b3b9375dbf2ec47236739c0e612d23038406c32babb12e24857e7129",
+  "history_sha256_after_append": "18ead41010de3208894c80d3d75ab2c99b9a810335af72e9628d9a4aafec6315",
+  "ledger_status": "passed",
+  "why_not_i18n_ledger_json": "i18n/ledger.json and i18n/ledger/<locale>.json are migration snapshots pinned by i18n/audit-history.json; a new audit is an appended row and the last row per (locale, namespace) wins."
+ },
+ "evidence_receipt": {
+  "path": "i18n/audits/evidence/vi/cli.mobile_help/a1/receipt.json",
+  "self_hash_rule": "receipt.json hashes every other artifact in this directory and not itself"
+ }
+}

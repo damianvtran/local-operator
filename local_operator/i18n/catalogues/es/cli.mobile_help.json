@@ -13,5 +13,7 @@
   "cli.mobile_help.devices_port": "Puerto del daemon móvil (por defecto, el del propio daemon)",
   "cli.mobile_help.uninstall": "Eliminar el LaunchAgent",
   "cli.mobile_help.uninstall_purge": "Eliminar también la contraseña",
-  "cli.mobile_help.serve": "Ejecutar el daemon (en primer plano)"
+  "cli.mobile_help.serve": "Ejecutar el daemon (en primer plano)",
+  "cli.mobile_help.doctor": "Diagnóstico de solo lectura del acceso desde el teléfono (seguro para compartir)",
+  "cli.mobile_help.doctor_json": "Mostrar el diagnóstico en formato JSON"
 }

@@ -1,0 +1,173 @@
+{
+  "schema": 1,
+  "audit_id": "a3",
+  "audit_kind": "independent_translation_audit_remediation_delta",
+  "locale": "zh-CN",
+  "namespace": "mobile.doctor",
+  "audit_date": "2026-11-14",
+  "verdict": "passed",
+  "status": "passed",
+  "scope": "PR #3953 round-1 remediation: 14 changed + 9 new keys judged side by side with English and context; 8 unchanged keys verified byte-identical to 52c0e1c93 and cross-read for glossary; tunnel.problem verified removed",
+  "key_count": 31,
+  "keys_audited": 23,
+  "changed_keys": [
+    "mobile.doctor.daemon.gate_open",
+    "mobile.doctor.daemon.not_answering",
+    "mobile.doctor.daemon.not_installed",
+    "mobile.doctor.daemon.not_running",
+    "mobile.doctor.daemon.slow",
+    "mobile.doctor.daemon.state_not_answering",
+    "mobile.doctor.files.at_limit",
+    "mobile.doctor.files.near",
+    "mobile.doctor.files.unknown",
+    "mobile.doctor.login.missing",
+    "mobile.doctor.logs.clean",
+    "mobile.doctor.logs.errors",
+    "mobile.doctor.tunnel.connecting",
+    "mobile.doctor.tunnel.duplicates",
+    "mobile.doctor.tunnel.list_skipped",
+    "mobile.doctor.tunnel.list_unchecked",
+    "mobile.doctor.tunnel.login_needed",
+    "mobile.doctor.tunnel.not_configured",
+    "mobile.doctor.tunnel.not_running",
+    "mobile.doctor.tunnel.offline",
+    "mobile.doctor.tunnel.ok",
+    "mobile.doctor.tunnel.setup_again",
+    "mobile.doctor.tunnel.turned_off"
+  ],
+  "source_sha256": "0428c5c217967add291b75b8a493b08083cffe5270a6f8600c0fd0a82d89afe9",
+  "target_sha256": "c1ac9464974a1498b106b1cef327bb84293c2d2650c4aee2e5406db8ed23c16d",
+  "source_audit_revision": "1505e6d2f8dc51f219ddeba76ca0cc344c73806a",
+  "base_revision": "52c0e1c93",
+  "worktree": "~/local-operator/.worktrees/mobile-doctor",
+  "branch": "feat/mobile-doctor",
+  "translator": {
+    "agent": "coder subagent of host session 25fe8dfbf610 (round-1 remediation of PR #3953, commit 1505e6d2f; wrote the English source and all 7 translations)",
+    "model": "not reported in the commit; host session 25fe8dfbf610 runs anthropic/claude-opus-5-5, the coder child's served model is unverified",
+    "date": "2026-11-14"
+  },
+  "auditor": {
+    "agent": "translation-auditor, lopdev team member (independent `task` subagent), session 11bf5c282289; did not translate or edit any catalogue value, did not author the remediation",
+    "model": "anthropic/claude-opus-5-5 (served model of this session; no provider fallback observed)",
+    "date": "2026-11-14",
+    "independent_from_translator": true
+  },
+  "input_hashes": {
+    "en": "0428c5c217967add291b75b8a493b08083cffe5270a6f8600c0fd0a82d89afe9",
+    "context": "be9bc29ee9b33fd9a8350f8fbfe12153c59ea68c29b629038787fbfe3c8d5467",
+    "glossary": "a576d5a4b2718ba79a70a42600e3b6233ea28d716b1e2d996a208ac8dd7fabdb",
+    "style_guide": "8f95d89debbd0af848e72e4805e256ef9566632e520a5c6d9b37928cd617142c"
+  },
+  "counts": {
+    "blocker": 0,
+    "major": 0,
+    "minor": 11,
+    "nit": 1
+  },
+  "findings": [
+    {
+      "id": "ZH-R1",
+      "severity": "minor",
+      "key": "mobile.doctor.daemon.not_running",
+      "current": "手机访问服务已设置但未运行，因此手机应用会将此电脑显示为睡眠状态。请运行 lop mobile start 启动它，或重启此电脑。",
+      "proposed": "手机访问服务已设置但未运行，因此手机应用会将此电脑显示为睡眠状态。请运行lop mobile start启动它，或重启此电脑。",
+      "reason": "Spaces between Chinese and the bare command run — zh-CN style guide l.67 says none, and sibling mobile.setup writes all 9 such commands unspaced (“运行lop login radient，…”)."
+    },
+    {
+      "id": "ZH-R1",
+      "severity": "minor",
+      "key": "mobile.doctor.daemon.not_answering",
+      "current": "手机访问服务正在运行但未响应，因此手机应用会将此电脑显示为未响应。请运行 lop mobile restart 重启它，或重启此电脑。",
+      "proposed": "手机访问服务正在运行但未响应，因此手机应用会将此电脑显示为未响应。请运行lop mobile restart重启它，或重启此电脑。",
+      "reason": "Spaces between Chinese and the bare command run — zh-CN style guide l.67 says none, and sibling mobile.setup writes all 9 such commands unspaced (“运行lop login radient，…”)."
+    },
+    {
+      "id": "ZH-R1",
+      "severity": "minor",
+      "key": "mobile.doctor.daemon.slow",
+      "current": "手机访问服务用了{ms}毫秒才响应，手机应用可能会将其显示为未响应。请运行 lop mobile restart 重启它；如果再次出现，请将这份报告发给支持团队。",
+      "proposed": "手机访问服务用了{ms}毫秒才响应，手机应用可能会将其显示为未响应。请运行lop mobile restart重启它；如果再次出现，请将这份报告发给支持团队。",
+      "reason": "Spaces between Chinese and the bare command run — zh-CN style guide l.67 says none, and sibling mobile.setup writes all 9 such commands unspaced (“运行lop login radient，…”)."
+    },
+    {
+      "id": "ZH-R1",
+      "severity": "minor",
+      "key": "mobile.doctor.daemon.gate_open",
+      "current": "手机访问服务未要求输入密码就作出了响应，因此手机门户未受保护。请立即运行 lop mobile stop 停止它，然后运行 lop mobile install 设置新密码。",
+      "proposed": "手机访问服务未要求输入密码就作出了响应，因此手机门户未受保护。请立即运行lop mobile stop停止它，然后运行lop mobile install设置新密码。",
+      "reason": "Spaces between Chinese and the bare command run — zh-CN style guide l.67 says none, and sibling mobile.setup writes all 9 such commands unspaced (“运行lop login radient，…”)."
+    },
+    {
+      "id": "ZH-R1",
+      "severity": "minor",
+      "key": "mobile.doctor.files.near",
+      "current": "手机访问服务已打开{open}个文件（上限{limit}个），已接近上限，新的手机连接可能会失败。请运行 lop mobile restart 重启它。",
+      "proposed": "手机访问服务已打开{open}个文件（上限{limit}个），已接近上限，新的手机连接可能会失败。请运行lop mobile restart重启它。",
+      "reason": "Spaces between Chinese and the bare command run — zh-CN style guide l.67 says none, and sibling mobile.setup writes all 9 such commands unspaced (“运行lop login radient，…”)."
+    },
+    {
+      "id": "ZH-R1",
+      "severity": "minor",
+      "key": "mobile.doctor.files.unknown",
+      "current": "无法统计此电脑上手机访问服务打开的文件数。如果手机应用将其显示为未响应，请运行 lop mobile restart 重启它，并将这份报告发给支持团队。",
+      "proposed": "无法统计此电脑上手机访问服务打开的文件数。如果手机应用将其显示为未响应，请运行lop mobile restart重启它，并将这份报告发给支持团队。",
+      "reason": "Spaces between Chinese and the bare command run — zh-CN style guide l.67 says none, and sibling mobile.setup writes all 9 such commands unspaced (“运行lop login radient，…”)."
+    },
+    {
+      "id": "ZH-R1",
+      "severity": "minor",
+      "key": "mobile.doctor.logs.errors",
+      "current": "最近一天，手机访问服务有{emfile}次达到打开文件数上限，有{sqlite}次无法打开数据库。请运行 lop mobile restart 重启它；如果再次出现，请将这份报告发给支持团队。",
+      "proposed": "最近一天，手机访问服务有{emfile}次达到打开文件数上限，有{sqlite}次无法打开数据库。请运行lop mobile restart重启它；如果再次出现，请将这份报告发给支持团队。",
+      "reason": "Spaces between Chinese and the bare command run — zh-CN style guide l.67 says none, and sibling mobile.setup writes all 9 such commands unspaced (“运行lop login radient，…”)."
+    },
+    {
+      "id": "ZH-R1",
+      "severity": "minor",
+      "key": "mobile.doctor.files.at_limit",
+      "current": "手机访问服务已打开{open}个文件（上限{limit}个），已达到上限，新的手机连接会失败。请运行 lop mobile restart 重启它。",
+      "proposed": "手机访问服务已打开{open}个文件（上限{limit}个），已达到上限，新的手机连接会失败。请运行lop mobile restart重启它。",
+      "reason": "Spaces between Chinese and the bare command run — zh-CN style guide l.67 says none, and sibling mobile.setup writes all 9 such commands unspaced (“运行lop login radient，…”)."
+    },
+    {
+      "id": "ZH-R1",
+      "severity": "minor",
+      "key": "mobile.doctor.tunnel.connecting",
+      "current": "通过Radient的手机访问仍在连接中。请等待几分钟；如果仍未连接，请运行 lop tunnel restart 重启它。",
+      "proposed": "通过Radient的手机访问仍在连接中。请等待几分钟；如果仍未连接，请运行lop tunnel restart重启它。",
+      "reason": "Spaces between Chinese and the bare command run — zh-CN style guide l.67 says none, and sibling mobile.setup writes all 9 such commands unspaced (“运行lop login radient，…”)."
+    },
+    {
+      "id": "ZH-R1",
+      "severity": "minor",
+      "key": "mobile.doctor.tunnel.turned_off",
+      "current": "此电脑上通过Radient的手机访问已关闭。要在外出时使用手机，请运行 lop tunnel start 重新开启。",
+      "proposed": "此电脑上通过Radient的手机访问已关闭。要在外出时使用手机，请运行lop tunnel start重新开启。",
+      "reason": "Spaces between Chinese and the bare command run — zh-CN style guide l.67 says none, and sibling mobile.setup writes all 9 such commands unspaced (“运行lop login radient，…”)."
+    },
+    {
+      "id": "ZH-R1",
+      "severity": "minor",
+      "key": "mobile.doctor.tunnel.not_running",
+      "current": "此电脑上通过Radient的手机访问未运行。请运行 lop tunnel restart 重启它；如果仍然没有运行，请将这份报告发给支持团队。",
+      "proposed": "此电脑上通过Radient的手机访问未运行。请运行lop tunnel restart重启它；如果仍然没有运行，请将这份报告发给支持团队。",
+      "reason": "Spaces between Chinese and the bare command run — zh-CN style guide l.67 says none, and sibling mobile.setup writes all 9 such commands unspaced (“运行lop login radient，…”)."
+    },
+    {
+      "id": "ZH-R2",
+      "severity": "nit",
+      "key": "mobile.doctor.login.ok",
+      "current": "已登录Radient",
+      "proposed": "已登录Radient。",
+      "reason": "Pre-existing (unchanged, not gating): the only sentence in the namespace without a closing “。”."
+    }
+  ],
+  "checks": [
+    "placeholder multiset identical to English for all 23 keys",
+    "every `lop … …` command byte-identical",
+    "no ASCII apostrophe, no bidi control characters",
+    "Providers page label matches local-operator-ui ui.settings.model.provider_callout.providers_link",
+    "Tunnels kept verbatim"
+  ],
+  "limits": "LLM audit, same model family as the coder (disclosed); no native-speaker pass and no rendered terminal/desktop frame claimed."
+}

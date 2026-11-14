@@ -1,0 +1,54 @@
+{
+  "schema": 1,
+  "locale": "ru",
+  "namespace": "mobile.doctor",
+  "history_sha256": "886ccb54ca549be707776aba532d94300e85d993ac494d85521fad85e1f35ebb",
+  "entries": [
+    {
+      "locale": "ru",
+      "namespace": "mobile.doctor",
+      "source_sha256": "0ca00b276fdea066228394e3fee336042b1e149c9e7df3ea31be11a24f0beb72",
+      "translator": {
+        "agent": "i18n-translator subagent, session 398cdb26808f (English drafted by coder session b0300e2c2c7f)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-14"
+      },
+      "auditor": {
+        "agent": "i18n-auditor, independent `task` subagent (C4 i18n-auditor es fr ru), session 5e5b8d070b27; did not translate or edit any value it judged",
+        "model": "anthropic/claude-opus-5-5 (served model reported by the session; no provider fallback observed)",
+        "date": "2026-11-14",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Complete new namespace: independent audit a1 PASSED, 0 blocker / 0 major / 0 minor / 0 nit.  Translator and auditor share model anthropic/claude-opus-5-5 (disclosed). Not verified: native-speaker review, no terminal/desktop frame. Evidence: i18n/audits/evidence/ru/mobile.doctor/a1/record.json",
+      "evidence": "i18n/audits/evidence/ru/mobile.doctor/a1/record.json",
+      "round": "a1",
+      "keys_audited": 23
+    },
+    {
+      "locale": "ru",
+      "namespace": "mobile.doctor",
+      "source_sha256": "0428c5c217967add291b75b8a493b08083cffe5270a6f8600c0fd0a82d89afe9",
+      "translator": {
+        "agent": "coder subagent of host session 25fe8dfbf610 (round-1 remediation of PR #3953, commit 1505e6d2f; wrote the English source and all 7 translations)",
+        "model": "not reported in the commit; host session 25fe8dfbf610 runs anthropic/claude-opus-5-5, the coder child's served model is unverified",
+        "date": "2026-11-14"
+      },
+      "auditor": {
+        "agent": "translation-auditor, lopdev team member (independent `task` subagent), session 11bf5c282289; did not translate or edit any catalogue value, did not author the remediation",
+        "model": "anthropic/claude-opus-5-5 (served model of this session; no provider fallback observed)",
+        "date": "2026-11-14",
+        "result": "passed",
+        "findings": 5,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "PR #3953 round-1 remediation audit a2 PASSED: 23 changed/new keys, 0 blocker / 0 major / 4 minor / 1 nit. Findings: RU-R1 minor (logs.errors); RU-R2 minor (daemon.not_answering, daemon.slow, files.unknown); RU-R3 nit (tunnel.connecting). Translator model unverified; auditor anthropic/claude-opus-5-5 (disclosed). Not verified: native-speaker review, rendered frame. Evidence: i18n/audits/evidence/ru/mobile.doctor/a2/record.json",
+      "evidence": "i18n/audits/evidence/ru/mobile.doctor/a2/record.json",
+      "round": "a2",
+      "keys_audited": 23
+    }
+  ]
+}

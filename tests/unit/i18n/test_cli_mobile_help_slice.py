@@ -59,7 +59,8 @@ def test_the_catalogue_is_the_golden_fixture() -> None:
         )
     )
     assert live == golden, "the shipped catalogue and the fixture golden drifted"
-    assert len(golden) == 15, len(golden)
+    # 17: `lop mobile doctor` and its `--json` flag joined the original 15.
+    assert len(golden) == 17, len(golden)
     sidecar = catalogues.context("en", "cli.mobile_help")
     for key, entry in sidecar.items():
         assert all(entry.get(field) for field in ("role", "tone", "note")), key
@@ -71,8 +72,8 @@ def test_the_mobile_block_renders_through_the_help_bootstrap() -> None:
     after = start + len("mobile_parser = subparsers.add_parser(")
     nxt = after + source[after:].index(" = subparsers.add_parser(")
     block = source[start:nxt]
-    assert block.count("_mb.") == 15, block.count("_mb.")
-    assert block.count('.envelope(locale=help_locale)["text"]') == 15
+    assert block.count("_mb.") == 17, block.count("_mb.")
+    assert block.count('.envelope(locale=help_locale)["text"]') == 17
     assert "# i18n: ignore" not in block
 
 

@@ -1,0 +1,98 @@
+# zh-CN/mobile.doctor mechanical + render check (scripts run with .venv/bin/python; runtime.render_message = product renderer)
+en catalogue_sha256     0ca00b276fdea066228394e3fee336042b1e149c9e7df3ea31be11a24f0beb72
+zh-CN catalogue_sha256  203ed8d5aae57db257226d7085a3b9787c55c6de188765571781cf0a81f78f87
+keys en=23 zh-CN=23 missing=[] extra=[]
+
+[mobile.doctor.versions.ok] args=OK nfc=True cells en=58 zh-CN=58
+  en : Local Operator 0.42.1 on Python 3.13.2 (macOS-15.1-arm64).
+  zh-CN: Local Operator 0.42.1，Python 3.13.2（macOS-15.1-arm64）。
+
+[mobile.doctor.daemon.not_installed] args=OK nfc=True cells en=71 zh-CN=46
+  en : The phone service is not set up on this computer, so it is not running.
+  zh-CN: 此电脑上未设置手机访问服务，因此该服务未运行。
+
+[mobile.doctor.daemon.not_running] args=OK nfc=True cells en=105 zh-CN=72
+  en : The phone service is set up but not running; the phone app shows this computer as asleep until it starts.
+  zh-CN: 手机访问服务已设置但未运行；在服务启动前，手机应用会将此电脑显示为休眠。
+
+[mobile.doctor.daemon.ok] args=OK nfc=True cells en=51 zh-CN=38
+  en : The phone service is running and answered in 12 ms.
+  zh-CN: 手机访问服务正在运行，响应用时12毫秒。
+
+[mobile.doctor.daemon.slow] args=OK nfc=True cells en=101 zh-CN=76
+  en : The phone service is running but took 12 ms to answer, which the phone app may show as not answering.
+  zh-CN: 手机访问服务正在运行，但响应用时12毫秒，手机应用可能会将此电脑显示为无响应。
+
+[mobile.doctor.daemon.gate_open] args=OK nfc=True cells en=92 zh-CN=58
+  en : The phone service answered without asking for its password: the phone portal is unprotected.
+  zh-CN: 手机访问服务未要求输入密码就作出了响应：手机门户未受保护。
+
+[mobile.doctor.daemon.state_not_running] args=OK nfc=True cells en=11 zh-CN=6
+  en : not running
+  zh-CN: 未运行
+
+[mobile.doctor.files.ok] args=OK nfc=True cells en=44 zh-CN=42
+  en : The phone service has 118 of 256 files open.
+  zh-CN: 手机访问服务已打开118个文件（上限256个）。
+
+[mobile.doctor.files.near] args=OK nfc=True cells en=118 zh-CN=94
+  en : The phone service has 118 of 256 files open, close to its limit, so new phone connections and database opens can fail.
+  zh-CN: 手机访问服务已打开118个文件（上限256个），已接近上限，新的手机连接和数据库打开操作可能会失败。
+
+[mobile.doctor.files.unknown] args=OK nfc=True cells en=69 zh-CN=44
+  en : The phone service's open files could not be counted on this computer.
+  zh-CN: 无法在此电脑上统计手机访问服务打开的文件数。
+
+[mobile.doctor.files.status_line] args=OK nfc=True cells en=15 zh-CN=13
+  en : 118 open of 256
+  zh-CN: 已打开118/256
+
+[mobile.doctor.logs.clean] args=OK nfc=True cells en=64 zh-CN=56
+  en : No out-of-files or database-open errors in the last day of logs.
+  zh-CN: 最近一天的日志中没有“打开文件过多”错误或数据库打开错误。
+
+[mobile.doctor.logs.errors] args=OK nfc=True cells en=127 zh-CN=102
+  en : The last day of logs shows out-of-files errors (3) and database-open errors (2); the phone service may be running out of files.
+  zh-CN: 最近一天的日志中有“打开文件过多”错误（3）和数据库打开错误（2）；手机访问服务可能已接近打开文件数上限。
+
+[mobile.doctor.tunnel.not_configured] args=OK nfc=True cells en=60 zh-CN=37
+  en : Phone access through Radient is not set up on this computer.
+  zh-CN: 此电脑上未设置通过Radient的手机访问。
+
+[mobile.doctor.tunnel.ok] args=OK nfc=True cells en=50 zh-CN=35
+  en : The tunnel is set up and its connector is stopped.
+  zh-CN: 隧道已设置，其连接器状态为stopped。
+
+[mobile.doctor.tunnel.problem] args=OK nfc=True cells en=67 zh-CN=55
+  en : The tunnel is set up but its connector is stopped (login_required).
+  zh-CN: 隧道已设置，但其连接器状态为stopped（login_required）。
+
+[mobile.doctor.tunnel.single] args=OK nfc=True cells en=54 zh-CN=35
+  en : This Radient account has one tunnel for this computer.
+  zh-CN: 此Radient账户为此电脑设有一个隧道。
+
+[mobile.doctor.tunnel.duplicates] args=OK nfc=True cells en=100 zh-CN=64
+  en : This Radient account has 3 tunnels for this computer; the phone app may be connecting to an old one.
+  zh-CN: 此Radient账户为此电脑设有3个隧道；手机应用可能正在连接旧的隧道。
+
+[mobile.doctor.tunnel.list_unchecked] args=OK nfc=True cells en=83 zh-CN=46
+  en : The account's tunnel list could not be read, so duplicate tunnels were not checked.
+  zh-CN: 无法读取该账户的隧道列表，因此未检查重复隧道。
+
+[mobile.doctor.login.ok] args=OK nfc=True cells en=21 zh-CN=13
+  en : Signed in to Radient.
+  zh-CN: 已登录Radient
+
+[mobile.doctor.login.missing] args=OK nfc=True cells en=25 zh-CN=13
+  en : Not signed in to Radient.
+  zh-CN: 未登录Radient
+
+[mobile.doctor.files.not_running] args=OK nfc=True cells en=67 zh-CN=46
+  en : The phone service is not running, so it has no open files to count.
+  zh-CN: 手机访问服务未运行，因此没有可统计的打开文件。
+
+[mobile.doctor.daemon.not_answering] args=OK nfc=True cells en=129 zh-CN=94
+  en : The phone service is running but not answering; the phone app shows this computer as not answering. It may have run out of files.
+  zh-CN: 手机访问服务正在运行但无响应；手机应用会将此电脑显示为无响应。该服务可能已达到打开文件数上限。
+
+RESULT placeholder/NFC defects: 0

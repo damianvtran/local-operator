@@ -1,0 +1,12 @@
+# es/mobile.doctor audit.log — commands this auditor ran for the ledger step (verbatim outputs). Session 5e5b8d070b27.
+# Render: .venv/bin/python $LOCAL_OPERATOR_SCRATCHPAD/render/render.py es  -> rendered.txt (exit 0)
+# Staged ledger receipt: ledger-receipt-es-mobile.doctor.json (scratchpad)
+$ .venv/bin/python scripts/i18n/ledger.py history-sha --locale es --namespace mobile.doctor
+4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945
+[exit 0]
+$ .venv/bin/python scripts/i18n/ledger.py append --receipt $LOCAL_OPERATOR_SCRATCHPAD/ledger-receipt-es-mobile.doctor.json --expected-history-sha 4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945 --dry-run
+i18n/audit-history/es/mobile.doctor.json
+[exit 0]
+$ .venv/bin/python scripts/i18n/ledger.py append --receipt $LOCAL_OPERATOR_SCRATCHPAD/ledger-receipt-es-mobile.doctor.json --expected-history-sha 4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945 --apply
+i18n/audit-history/es/mobile.doctor.json
+[exit 0]

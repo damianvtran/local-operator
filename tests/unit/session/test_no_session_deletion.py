@@ -2050,6 +2050,18 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "os.unlink",
         "that temp FILE, only while the write above is failing",
     ),
+    # The daemon's file-descriptor limits record (`mobile/fdlimit.py`), read back
+    # by `lop mobile doctor`. `record` writes `<path>.tmp` then atomically replaces
+    # `limits_path()`, which takes NO arguments and is always
+    # `config_dir() / "mobile" / "daemon-limits.json"` — a fixed basename in the
+    # mobile config subdirectory, with no session id and no caller input, so
+    # neither the temp nor the target can name a path under `sessions/`.
+    (
+        "local_operator/mobile/fdlimit.py::record",
+        "os.replace",
+        "temp FILE -> <config_dir>/mobile/daemon-limits.json; both names are "
+        "config-root-derived with a fixed basename",
+    ),
     ("local_operator/mobile/seen.py::SeenStore._persist_locked", "os.replace", "temp FILE"),
     ("local_operator/mobile/seen.py::SeenStore._persist_locked", "os.unlink", "temp FILE"),
     # The push device registry (`mobile/push_devices.py`): one JSON store at a fixed

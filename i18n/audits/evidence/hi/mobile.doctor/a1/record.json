@@ -1,0 +1,251 @@
+{
+ "schema": 1,
+ "audit_id": "a1",
+ "audit_kind": "independent_translation_audit",
+ "locale": "hi",
+ "namespace": "mobile.doctor",
+ "round": 1,
+ "audit_date": "2026-11-14",
+ "verdict": "passed",
+ "status": "passed",
+ "scope": "new namespace, all 23 keys judged",
+ "key_count": 23,
+ "keys_audited": 23,
+ "keys_judged_in_full": [
+  "mobile.doctor.versions.ok",
+  "mobile.doctor.daemon.not_installed",
+  "mobile.doctor.daemon.not_running",
+  "mobile.doctor.daemon.ok",
+  "mobile.doctor.daemon.slow",
+  "mobile.doctor.daemon.gate_open",
+  "mobile.doctor.daemon.state_not_running",
+  "mobile.doctor.files.ok",
+  "mobile.doctor.files.near",
+  "mobile.doctor.files.unknown",
+  "mobile.doctor.files.status_line",
+  "mobile.doctor.logs.clean",
+  "mobile.doctor.logs.errors",
+  "mobile.doctor.tunnel.not_configured",
+  "mobile.doctor.tunnel.ok",
+  "mobile.doctor.tunnel.problem",
+  "mobile.doctor.tunnel.single",
+  "mobile.doctor.tunnel.duplicates",
+  "mobile.doctor.tunnel.list_unchecked",
+  "mobile.doctor.login.ok",
+  "mobile.doctor.login.missing",
+  "mobile.doctor.files.not_running",
+  "mobile.doctor.daemon.not_answering"
+ ],
+ "source_audit_revision": "a3722be7dada",
+ "worktree": "~/local-operator/.worktrees/mobile-doctor",
+ "branch": "feat/mobile-doctor",
+ "node": "lop-remote-node-2",
+ "translator": {
+  "agent": "i18n-translator subagent, session 398cdb26808f (values in commit a3722be7dada; English source drafted by coder session b0300e2c2c7f)",
+  "model": "anthropic/claude-opus-5-5",
+  "date": "2026-11-14"
+ },
+ "auditor": {
+  "agent": "independent i18n-auditor (C4 hi/ur lane, `task` subagent), session f9d4556f4a66; did not translate, draft or edit any value it judged",
+  "model": "anthropic/claude-opus-5-5 (served model; no provider fallback observed)",
+  "date": "2026-11-14",
+  "independent_from_translator": true
+ },
+ "source_sha256": "0ca00b276fdea066228394e3fee336042b1e149c9e7df3ea31be11a24f0beb72",
+ "target_sha256": "56377a70658d5f432a88b63722b823e44fa561aa8c4b8944f3cb8a868d2bab69",
+ "input_hashes": {
+  "en": "0ca00b276fdea066228394e3fee336042b1e149c9e7df3ea31be11a24f0beb72",
+  "context": "c6baa99bc539ef2d2e03bf7b6b11e83edac37139eede8db82034f5fad98d4614",
+  "target": "56377a70658d5f432a88b63722b823e44fa561aa8c4b8944f3cb8a868d2bab69",
+  "glossary": "a576d5a4b2718ba79a70a42600e3b6233ea28d716b1e2d996a208ac8dd7fabdb",
+  "style_guide": "82292dc8d13fcc93dc752457719264aed3cc20bb65ecfaba0f0e5a31f4cb40d5"
+ },
+ "input_paths": {
+  "en": "local_operator/i18n/catalogues/en/mobile.doctor.json",
+  "context": "local_operator/i18n/catalogues/en/mobile.doctor.context.json",
+  "target": "local_operator/i18n/catalogues/hi/mobile.doctor.json",
+  "glossary": "i18n/glossary.md",
+  "style_guide": "i18n/style-guides/hi.md"
+ },
+ "values_audited": {
+  "mobile.doctor.versions.ok": {
+   "en": "Local Operator {lop} on Python {python} ({platform}).",
+   "hi": "Local Operator {lop}, Python {python} ({platform}) पर।"
+  },
+  "mobile.doctor.daemon.not_installed": {
+   "en": "The phone service is not set up on this computer, so it is not running.",
+   "hi": "फ़ोन एक्सेस सेवा इस कंप्यूटर पर सेट अप नहीं है, इसलिए यह नहीं चल रही।"
+  },
+  "mobile.doctor.daemon.not_running": {
+   "en": "The phone service is set up but not running; the phone app shows this computer as asleep until it starts.",
+   "hi": "फ़ोन एक्सेस सेवा सेट अप है लेकिन नहीं चल रही; इसके शुरू होने तक फ़ोन ऐप इस कंप्यूटर को स्लीप मोड में दिखाता है।"
+  },
+  "mobile.doctor.daemon.ok": {
+   "en": "The phone service is running and answered in {ms} ms.",
+   "hi": "फ़ोन एक्सेस सेवा चल रही है और उसने {ms} मिलीसेकंड में उत्तर दिया।"
+  },
+  "mobile.doctor.daemon.slow": {
+   "en": "The phone service is running but took {ms} ms to answer, which the phone app may show as not answering.",
+   "hi": "फ़ोन एक्सेस सेवा चल रही है लेकिन उत्तर देने में {ms} मिलीसेकंड लगे, इसलिए फ़ोन ऐप इस कंप्यूटर को उत्तर न देने वाला दिखा सकता है।"
+  },
+  "mobile.doctor.daemon.gate_open": {
+   "en": "The phone service answered without asking for its password: the phone portal is unprotected.",
+   "hi": "फ़ोन एक्सेस सेवा ने पासवर्ड माँगे बिना उत्तर दिया: फ़ोन पोर्टल असुरक्षित है।"
+  },
+  "mobile.doctor.daemon.state_not_running": {
+   "en": "not running",
+   "hi": "नहीं चल रहा"
+  },
+  "mobile.doctor.files.ok": {
+   "en": "The phone service has {open} of {limit} files open.",
+   "hi": "फ़ोन एक्सेस सेवा ने {open} फ़ाइलें खोल रखी हैं (सीमा {limit})।"
+  },
+  "mobile.doctor.files.near": {
+   "en": "The phone service has {open} of {limit} files open, close to its limit, so new phone connections and database opens can fail.",
+   "hi": "फ़ोन एक्सेस सेवा ने {open} फ़ाइलें खोल रखी हैं (सीमा {limit}), जो सीमा के क़रीब है, इसलिए नए फ़ोन कनेक्शन और डेटाबेस खोलना विफल हो सकता है।"
+  },
+  "mobile.doctor.files.unknown": {
+   "en": "The phone service's open files could not be counted on this computer.",
+   "hi": "इस कंप्यूटर पर फ़ोन एक्सेस सेवा की खुली फ़ाइलें गिनी नहीं जा सकीं।"
+  },
+  "mobile.doctor.files.status_line": {
+   "en": "{open} open of {limit}",
+   "hi": "{open} खुली, सीमा {limit}"
+  },
+  "mobile.doctor.logs.clean": {
+   "en": "No out-of-files or database-open errors in the last day of logs.",
+   "hi": "पिछले एक दिन के लॉग में “बहुत ज़्यादा खुली फ़ाइलें” या डेटाबेस खोलने की कोई त्रुटि नहीं है।"
+  },
+  "mobile.doctor.logs.errors": {
+   "en": "The last day of logs shows out-of-files errors ({emfile}) and database-open errors ({sqlite}); the phone service may be running out of files.",
+   "hi": "पिछले एक दिन के लॉग में “बहुत ज़्यादा खुली फ़ाइलें” त्रुटियाँ ({emfile}) और डेटाबेस खोलने की त्रुटियाँ ({sqlite}) हैं; हो सकता है फ़ोन एक्सेस सेवा खुली फ़ाइलों की सीमा तक पहुँच रही हो।"
+  },
+  "mobile.doctor.tunnel.not_configured": {
+   "en": "Phone access through Radient is not set up on this computer.",
+   "hi": "इस कंप्यूटर पर Radient के ज़रिए फ़ोन एक्सेस सेट अप नहीं है।"
+  },
+  "mobile.doctor.tunnel.ok": {
+   "en": "The tunnel is set up and its connector is {state}.",
+   "hi": "टनल सेट अप है और उसका कनेक्टर {state} स्थिति में है।"
+  },
+  "mobile.doctor.tunnel.problem": {
+   "en": "The tunnel is set up but its connector is {state} ({reason}).",
+   "hi": "टनल सेट अप है लेकिन उसका कनेक्टर {state} स्थिति में है ({reason})।"
+  },
+  "mobile.doctor.tunnel.single": {
+   "en": "This Radient account has one tunnel for this computer.",
+   "hi": "इस Radient खाते में इस कंप्यूटर के लिए एक टनल है।"
+  },
+  "mobile.doctor.tunnel.duplicates": {
+   "en": "This Radient account has {count} tunnels for this computer; the phone app may be connecting to an old one.",
+   "hi": "इस Radient खाते में इस कंप्यूटर के लिए {count} टनल हैं; हो सकता है फ़ोन ऐप किसी पुराने टनल से जुड़ रहा हो।"
+  },
+  "mobile.doctor.tunnel.list_unchecked": {
+   "en": "The account's tunnel list could not be read, so duplicate tunnels were not checked.",
+   "hi": "खाते की टनल सूची पढ़ी नहीं जा सकी, इसलिए डुप्लिकेट टनल जाँचे नहीं गए।"
+  },
+  "mobile.doctor.login.ok": {
+   "en": "Signed in to Radient.",
+   "hi": "Radient में साइन इन है।"
+  },
+  "mobile.doctor.login.missing": {
+   "en": "Not signed in to Radient.",
+   "hi": "Radient में साइन इन नहीं है।"
+  },
+  "mobile.doctor.files.not_running": {
+   "en": "The phone service is not running, so it has no open files to count.",
+   "hi": "फ़ोन एक्सेस सेवा नहीं चल रही, इसलिए गिनने के लिए कोई खुली फ़ाइल नहीं है।"
+  },
+  "mobile.doctor.daemon.not_answering": {
+   "en": "The phone service is running but not answering; the phone app shows this computer as not answering. It may have run out of files.",
+   "hi": "फ़ोन एक्सेस सेवा चल रही है लेकिन उत्तर नहीं दे रही; फ़ोन ऐप इस कंप्यूटर को उत्तर न देने वाला दिखाता है। हो सकता है वह खुली फ़ाइलों की सीमा तक पहुँच गई हो।"
+  }
+ },
+ "findings": [
+  {
+   "id": "HI-D01",
+   "severity": "nit",
+   "keys": [
+    "mobile.doctor.files.ok",
+    "mobile.doctor.files.near"
+   ],
+   "finding": "«{open} फ़ाइलें» is a fixed plural; an {open} of 1 would read «1 फ़ाइलें». {open} is a pre-formatted string argument, so an ICU plural is not available, and a running phone service always holds far more than one descriptor.",
+   "disposition": "accepted, no change requested. Also answers translator question 1: keeping the English placeholder order and recasting «{open} of {limit}» as «{open} फ़ाइलें खोल रखी हैं (सीमा {limit})» preserves the meaning and reads naturally."
+  },
+  {
+   "id": "HI-D02",
+   "severity": "nit",
+   "keys": [
+    "mobile.doctor.versions.ok"
+   ],
+   "finding": "«Local Operator {lop}, Python {python} ({platform}) पर।» is verbless, mirroring the English fragment; «… पर चल रहा है।» would be a full sentence.",
+   "disposition": "accepted as a terse diagnostic line; optional polish only."
+  },
+  {
+   "id": "HI-D03",
+   "severity": "nit",
+   "keys": [
+    "mobile.doctor.daemon.state_not_running"
+   ],
+   "finding": "Masculine «नहीं चल रहा» while the namespace's feminine subject सेवा takes «नहीं चल रही». The label is printed after the English «auth gate:» prefix (cli.py `lop mobile status`), where गेट is masculine, so the masculine default is the correct agreement for this slot.",
+   "disposition": "adjudicated correct; no change."
+  }
+ ],
+ "verified": [
+  "Key parity with en (mobile.doctor 23/23, cli.mobile_help 17/17) and placeholder parity for every key; the only checker flag (cli.mobile_help.daemon_action) is an ICU select whose branch text my regex mis-read as placeholders — the carried value is correct.",
+  "No command, flag or `lop` invocation named in any mobile.doctor value; placeholders {lop} {python} {platform} {ms} {open} {limit} {emfile} {sqlite} {state} {reason} {count} verbatim and in source order.",
+  "Calm, factual tone throughout; gate_open keeps its warning meaning (portal unprotected) without alarm words.",
+  "'phone service' rendered consistently in every key as the phone-access service (hi «फ़ोन एक्सेस सेवा», ur «فون رسائی سروس»); glossary service → सेवा / سروس honoured; 'phone access' matches mobile.setup and cli.mobile_help.mobile.",
+  "login.ok/login.missing are byte-identical to the already-audited wire.voice_availability.radient_signed_in/out in each locale.",
+  "Real product path exercised: `LOP_LANG=<locale> .venv/bin/lop mobile doctor`, `lop mobile --help` and `lop mobile doctor --help` on this Linux node (exit 0) — six doctor checks plus both new help strings rendered in-locale; remaining keys rendered through the real resolver (tr('mobile.doctor') after set_active_locale) with sample arguments (audit.log).",
+  "rich.cells.cell_len widths recorded per key; no en sidecar sets maxCells for these keys.",
+  "Danda । closes every full sentence; ASCII comma/semicolon as the guide allows; curly quotes “ ”; nukta consistent (फ़ोन, फ़ाइल, ज़रिए, क़रीब, ज़्यादा); no ZWJ/ZWNJ; Latin digits."
+ ],
+ "not_verified": [
+  "No native-speaker pass; this is an LLM independent audit.",
+  "No rendered terminal/desktop/phone frame or RTL screenshot; Nastaliq/Devanagari glyph shaping not observed. Desktop Copy-diagnostics surface (local-operator-ui) not driven.",
+  "Daemon-running, tunnel-configured, signed-in and log-error branches were rendered via the resolver with sample args, not by staging those machine states."
+ ],
+ "source_side_observations": [
+  "Source-side (not a translation finding, for the coder): cli.py passes the English words 'unlimited' and '?' into mobile.doctor.files.status_line {limit}/{open}, while the context sidecar says {limit} may be 'unknown'; the gate line beside state_not_running prints untranslated 'closed'/'OPEN (this is a boundary failure)'."
+ ],
+ "translator_open_questions": {
+  "q1_placeholder_order_hi_ur": "accepted (see HI-D01)",
+  "q6_asleep": "accepted: «स्लीप मोड में» / «سلیپ موڈ میں»",
+  "q2_q3_q4_q5": "not this lane's locales (ru, zh-CN, es); q5's hi/ur analogue adjudicated in HI-D03"
+ },
+ "current_report_verdict": {
+  "status": "passed",
+  "unresolved_blocker_major_count": 0,
+  "finding_ids": [
+   "HI-D01",
+   "HI-D02",
+   "HI-D03"
+  ],
+  "findings_total": 3,
+  "blocker": 0,
+  "major": 0,
+  "minor": 0,
+  "nit": 3
+ },
+ "commands": [
+  ".venv/bin/python <scratch>/audit_checks.py hi",
+  "LOP_LANG=hi .venv/bin/lop mobile doctor",
+  "LOP_LANG=hi .venv/bin/lop mobile --help",
+  "LOP_LANG=hi .venv/bin/lop mobile doctor --help",
+  ".venv/bin/python scripts/i18n/ledger.py history-sha --locale hi --namespace mobile.doctor",
+  ".venv/bin/python scripts/i18n/ledger.py append --dry-run|--apply --receipt <scratch receipt> --expected-history-sha <sha>"
+ ],
+ "artifacts": [
+  "record.json",
+  "report.md",
+  "audit.log",
+  "dryrun.log",
+  "receipt.json"
+ ],
+ "evidence_receipt": {
+  "path": "i18n/audits/evidence/hi/mobile.doctor/a1/receipt.json",
+  "self_hash_rule": "receipt.json hashes every other artifact in this directory and not itself"
+ },
+ "ledger_status": "passed"
+}

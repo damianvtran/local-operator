@@ -1,0 +1,165 @@
+{
+  "schema": 1,
+  "audit_id": "a3",
+  "audit_kind": "independent_translation_audit_remediation_delta",
+  "locale": "fr",
+  "namespace": "mobile.doctor",
+  "audit_date": "2026-11-14",
+  "verdict": "passed",
+  "status": "passed",
+  "scope": "PR #3953 round-1 remediation: 14 changed + 9 new keys judged side by side with English and context; 8 unchanged keys verified byte-identical to 52c0e1c93 and cross-read for glossary; tunnel.problem verified removed",
+  "key_count": 31,
+  "keys_audited": 23,
+  "changed_keys": [
+    "mobile.doctor.daemon.gate_open",
+    "mobile.doctor.daemon.not_answering",
+    "mobile.doctor.daemon.not_installed",
+    "mobile.doctor.daemon.not_running",
+    "mobile.doctor.daemon.slow",
+    "mobile.doctor.daemon.state_not_answering",
+    "mobile.doctor.files.at_limit",
+    "mobile.doctor.files.near",
+    "mobile.doctor.files.unknown",
+    "mobile.doctor.login.missing",
+    "mobile.doctor.logs.clean",
+    "mobile.doctor.logs.errors",
+    "mobile.doctor.tunnel.connecting",
+    "mobile.doctor.tunnel.duplicates",
+    "mobile.doctor.tunnel.list_skipped",
+    "mobile.doctor.tunnel.list_unchecked",
+    "mobile.doctor.tunnel.login_needed",
+    "mobile.doctor.tunnel.not_configured",
+    "mobile.doctor.tunnel.not_running",
+    "mobile.doctor.tunnel.offline",
+    "mobile.doctor.tunnel.ok",
+    "mobile.doctor.tunnel.setup_again",
+    "mobile.doctor.tunnel.turned_off"
+  ],
+  "source_sha256": "0428c5c217967add291b75b8a493b08083cffe5270a6f8600c0fd0a82d89afe9",
+  "target_sha256": "ba802ec1bcc2edf16445eebaf8c34580a23b08a4a61d1db9140735643ecebff7",
+  "source_audit_revision": "1505e6d2f8dc51f219ddeba76ca0cc344c73806a",
+  "base_revision": "52c0e1c93",
+  "worktree": "~/local-operator/.worktrees/mobile-doctor",
+  "branch": "feat/mobile-doctor",
+  "translator": {
+    "agent": "coder subagent of host session 25fe8dfbf610 (round-1 remediation of PR #3953, commit 1505e6d2f; wrote the English source and all 7 translations)",
+    "model": "not reported in the commit; host session 25fe8dfbf610 runs anthropic/claude-opus-5-5, the coder child's served model is unverified",
+    "date": "2026-11-14"
+  },
+  "auditor": {
+    "agent": "translation-auditor, lopdev team member (independent `task` subagent), session 11bf5c282289; did not translate or edit any catalogue value, did not author the remediation",
+    "model": "anthropic/claude-opus-5-5 (served model of this session; no provider fallback observed)",
+    "date": "2026-11-14",
+    "independent_from_translator": true
+  },
+  "input_hashes": {
+    "en": "0428c5c217967add291b75b8a493b08083cffe5270a6f8600c0fd0a82d89afe9",
+    "context": "be9bc29ee9b33fd9a8350f8fbfe12153c59ea68c29b629038787fbfe3c8d5467",
+    "glossary": "a576d5a4b2718ba79a70a42600e3b6233ea28d716b1e2d996a208ac8dd7fabdb",
+    "style_guide": "5315e1ac10c2ce57aac631ba653d08de680ee70c9a022ed3a8345ce2f9902ee7"
+  },
+  "counts": {
+    "blocker": 0,
+    "major": 0,
+    "minor": 11,
+    "nit": 0
+  },
+  "findings": [
+    {
+      "id": "FR-R1",
+      "severity": "minor",
+      "key": "mobile.doctor.daemon.slow",
+      "current": "Le service d’accès téléphone a mis {ms} ms à répondre, ce que l’application mobile peut afficher comme une absence de réponse. Redémarrez-le avec lop mobile restart ; si cela se reproduit, envoyez ce rapport au support.",
+      "proposed": "Le service d’accès téléphone a mis {ms} ms à répondre, ce que l’application mobile peut afficher comme une absence de réponse. Redémarrez-le avec lop mobile restart ; si cela se reproduit, envoyez ce rapport au support.",
+      "reason": "U+0020 before “;”/“:” — fr style guide l.93 requires U+202F, which every a1/a2-audited key used; a plain space can also wrap the punctuation onto its own line."
+    },
+    {
+      "id": "FR-R1",
+      "severity": "minor",
+      "key": "mobile.doctor.files.near",
+      "current": "Le service d’accès téléphone a {open} fichiers ouverts sur {limit}, près de sa limite : les nouvelles connexions du téléphone peuvent échouer. Redémarrez-le avec lop mobile restart.",
+      "proposed": "Le service d’accès téléphone a {open} fichiers ouverts sur {limit}, près de sa limite : les nouvelles connexions du téléphone peuvent échouer. Redémarrez-le avec lop mobile restart.",
+      "reason": "U+0020 before “;”/“:” — fr style guide l.93 requires U+202F, which every a1/a2-audited key used; a plain space can also wrap the punctuation onto its own line."
+    },
+    {
+      "id": "FR-R1",
+      "severity": "minor",
+      "key": "mobile.doctor.logs.errors",
+      "current": "Au cours de la dernière journée, le service d’accès téléphone a atteint sa limite de fichiers ouverts {emfile} fois et n’a pas pu ouvrir une base de données {sqlite} fois. Redémarrez-le avec lop mobile restart ; si cela se reproduit, envoyez ce rapport au support.",
+      "proposed": "Au cours de la dernière journée, le service d’accès téléphone a atteint sa limite de fichiers ouverts {emfile} fois et n’a pas pu ouvrir une base de données {sqlite} fois. Redémarrez-le avec lop mobile restart ; si cela se reproduit, envoyez ce rapport au support.",
+      "reason": "U+0020 before “;”/“:” — fr style guide l.93 requires U+202F, which every a1/a2-audited key used; a plain space can also wrap the punctuation onto its own line."
+    },
+    {
+      "id": "FR-R1",
+      "severity": "minor",
+      "key": "mobile.doctor.tunnel.list_unchecked",
+      "current": "La liste des tunnels du compte n’a pas pu être lue ; les tunnels en double n’ont donc pas été vérifiés. Vérifiez votre connexion internet et relancez la vérification.",
+      "proposed": "La liste des tunnels du compte n’a pas pu être lue ; les tunnels en double n’ont donc pas été vérifiés. Vérifiez votre connexion internet et relancez la vérification.",
+      "reason": "U+0020 before “;”/“:” — fr style guide l.93 requires U+202F, which every a1/a2-audited key used; a plain space can also wrap the punctuation onto its own line."
+    },
+    {
+      "id": "FR-R1",
+      "severity": "minor",
+      "key": "mobile.doctor.files.at_limit",
+      "current": "Le service d’accès téléphone a {open} fichiers ouverts sur {limit}, soit sa limite : les nouvelles connexions du téléphone échouent. Redémarrez-le avec lop mobile restart.",
+      "proposed": "Le service d’accès téléphone a {open} fichiers ouverts sur {limit}, soit sa limite : les nouvelles connexions du téléphone échouent. Redémarrez-le avec lop mobile restart.",
+      "reason": "U+0020 before “;”/“:” — fr style guide l.93 requires U+202F, which every a1/a2-audited key used; a plain space can also wrap the punctuation onto its own line."
+    },
+    {
+      "id": "FR-R1",
+      "severity": "minor",
+      "key": "mobile.doctor.tunnel.offline",
+      "current": "L’accès téléphone via Radient ne parvient pas à joindre Radient pour le moment. Vérifiez la connexion internet de cet ordinateur ; il se reconnecte tout seul dès que Radient répond.",
+      "proposed": "L’accès téléphone via Radient ne parvient pas à joindre Radient pour le moment. Vérifiez la connexion internet de cet ordinateur ; il se reconnecte tout seul dès que Radient répond.",
+      "reason": "U+0020 before “;”/“:” — fr style guide l.93 requires U+202F, which every a1/a2-audited key used; a plain space can also wrap the punctuation onto its own line."
+    },
+    {
+      "id": "FR-R1",
+      "severity": "minor",
+      "key": "mobile.doctor.tunnel.connecting",
+      "current": "L’accès téléphone via Radient est encore en cours de connexion. Patientez quelques minutes ; s’il ne se connecte pas, redémarrez-le avec lop tunnel restart.",
+      "proposed": "L’accès téléphone via Radient est encore en cours de connexion. Patientez quelques minutes ; s’il ne se connecte pas, redémarrez-le avec lop tunnel restart.",
+      "reason": "U+0020 before “;”/“:” — fr style guide l.93 requires U+202F, which every a1/a2-audited key used; a plain space can also wrap the punctuation onto its own line."
+    },
+    {
+      "id": "FR-R1",
+      "severity": "minor",
+      "key": "mobile.doctor.tunnel.not_running",
+      "current": "L’accès téléphone via Radient n’est pas lancé sur cet ordinateur. Redémarrez-le avec lop tunnel restart ; s’il reste arrêté, envoyez ce rapport au support.",
+      "proposed": "L’accès téléphone via Radient n’est pas lancé sur cet ordinateur. Redémarrez-le avec lop tunnel restart ; s’il reste arrêté, envoyez ce rapport au support.",
+      "reason": "U+0020 before “;”/“:” — fr style guide l.93 requires U+202F, which every a1/a2-audited key used; a plain space can also wrap the punctuation onto its own line."
+    },
+    {
+      "id": "FR-R2",
+      "severity": "minor",
+      "key": "mobile.doctor.daemon.not_answering",
+      "current": "Le service d’accès téléphone est lancé mais ne répond pas, donc l’application mobile affiche cet ordinateur comme ne répondant pas. Redémarrez-le avec lop mobile restart, ou redémarrez cet ordinateur.",
+      "proposed": "Le service d’accès téléphone est lancé mais ne répond pas, donc l’application mobile indique que cet ordinateur ne répond pas. Redémarrez-le avec lop mobile restart, ou redémarrez cet ordinateur.",
+      "reason": "“afficher … comme ne répondant pas / comme une absence de réponse” is a word-for-word calque of “show as not answering”; French says “indique qu’il ne répond pas”."
+    },
+    {
+      "id": "FR-R2",
+      "severity": "minor",
+      "key": "mobile.doctor.daemon.slow",
+      "current": "Le service d’accès téléphone a mis {ms} ms à répondre, ce que l’application mobile peut afficher comme une absence de réponse. Redémarrez-le avec lop mobile restart ; si cela se reproduit, envoyez ce rapport au support.",
+      "proposed": "Le service d’accès téléphone a mis {ms} ms à répondre ; l’application mobile peut donc indiquer qu’il ne répond pas. Redémarrez-le avec lop mobile restart ; si cela se reproduit, envoyez ce rapport au support.",
+      "reason": "“afficher … comme ne répondant pas / comme une absence de réponse” is a word-for-word calque of “show as not answering”; French says “indique qu’il ne répond pas”."
+    },
+    {
+      "id": "FR-R2",
+      "severity": "minor",
+      "key": "mobile.doctor.files.unknown",
+      "current": "Impossible de compter les fichiers ouverts du service d’accès téléphone sur cet ordinateur. Si l’application mobile l’affiche comme ne répondant pas, redémarrez-le avec lop mobile restart et envoyez ce rapport au support.",
+      "proposed": "Impossible de compter les fichiers ouverts du service d’accès téléphone sur cet ordinateur. Si l’application mobile indique qu’il ne répond pas, redémarrez-le avec lop mobile restart et envoyez ce rapport au support.",
+      "reason": "“afficher … comme ne répondant pas / comme une absence de réponse” is a word-for-word calque of “show as not answering”; French says “indique qu’il ne répond pas”."
+    }
+  ],
+  "checks": [
+    "placeholder multiset identical to English for all 23 keys",
+    "every `lop … …` command byte-identical",
+    "no ASCII apostrophe, no bidi control characters",
+    "Providers page label matches local-operator-ui ui.settings.model.provider_callout.providers_link",
+    "Tunnels kept verbatim"
+  ],
+  "limits": "LLM audit, same model family as the coder (disclosed); no native-speaker pass and no rendered terminal/desktop frame claimed."
+}

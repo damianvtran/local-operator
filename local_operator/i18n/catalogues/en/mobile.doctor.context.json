@@ -1,0 +1,157 @@
+{
+  "mobile.doctor.versions.ok": {
+    "role": "Diagnostics check result (CLI, desktop, pasted into support)",
+    "tone": "Plain, calm, factual",
+    "note": "Doctor check sentence for `lop mobile doctor` and the desktop's Copy diagnostics, read by a non-technical user. 'phone service' is the mobile daemon that the phone app talks to; Radient and Local Operator are product names. Placeholders are pre-formatted numbers and stay verbatim."
+  },
+  "mobile.doctor.daemon.not_installed": {
+    "role": "Diagnostics check result (CLI, desktop, pasted into support)",
+    "tone": "Plain, calm, factual",
+    "note": "Doctor check sentence for `lop mobile doctor` and the desktop's Copy diagnostics, read by a non-technical user. 'phone service' is the mobile daemon that the phone app talks to; Radient and Local Operator are product names. A problem line states what is wrong, then the fix as a second sentence. Commands in it (lop mobile restart, lop tunnel start, ...) stay verbatim; 'the Providers page' is the desktop app's Providers page (use the desktop UI's own translation of 'Providers'); 'the Tunnels page of the Radient console' keeps 'Tunnels' verbatim (an English-only web page). Never say 'connector', 'parked' or a reason code."
+  },
+  "mobile.doctor.daemon.not_running": {
+    "role": "Diagnostics check result (CLI, desktop, pasted into support)",
+    "tone": "Plain, calm, factual",
+    "note": "Doctor check sentence for `lop mobile doctor` and the desktop's Copy diagnostics, read by a non-technical user. 'phone service' is the mobile daemon that the phone app talks to; Radient and Local Operator are product names. A problem line states what is wrong, then the fix as a second sentence. Commands in it (lop mobile restart, lop tunnel start, ...) stay verbatim; 'the Providers page' is the desktop app's Providers page (use the desktop UI's own translation of 'Providers'); 'the Tunnels page of the Radient console' keeps 'Tunnels' verbatim (an English-only web page). Never say 'connector', 'parked' or a reason code."
+  },
+  "mobile.doctor.daemon.ok": {
+    "role": "Diagnostics check result (CLI, desktop, pasted into support)",
+    "tone": "Plain, calm, factual",
+    "note": "Doctor check sentence for `lop mobile doctor` and the desktop's Copy diagnostics, read by a non-technical user. 'phone service' is the mobile daemon that the phone app talks to; Radient and Local Operator are product names. Placeholders are pre-formatted numbers and stay verbatim."
+  },
+  "mobile.doctor.daemon.slow": {
+    "role": "Diagnostics check result (CLI, desktop, pasted into support)",
+    "tone": "Plain, calm, factual",
+    "note": "Doctor check sentence for `lop mobile doctor` and the desktop's Copy diagnostics, read by a non-technical user. 'phone service' is the mobile daemon that the phone app talks to; Radient and Local Operator are product names. A problem line states what is wrong, then the fix as a second sentence. Commands in it (lop mobile restart, lop tunnel start, ...) stay verbatim; 'the Providers page' is the desktop app's Providers page (use the desktop UI's own translation of 'Providers'); 'the Tunnels page of the Radient console' keeps 'Tunnels' verbatim (an English-only web page). Never say 'connector', 'parked' or a reason code. Placeholders are pre-formatted numbers and stay verbatim."
+  },
+  "mobile.doctor.daemon.gate_open": {
+    "role": "Diagnostics check result (CLI, desktop, pasted into support)",
+    "tone": "Plain, calm, factual",
+    "note": "Doctor check sentence for `lop mobile doctor` and the desktop's Copy diagnostics, read by a non-technical user. 'phone service' is the mobile daemon that the phone app talks to; Radient and Local Operator are product names. A problem line states what is wrong, then the fix as a second sentence. Commands in it (lop mobile restart, lop tunnel start, ...) stay verbatim; 'the Providers page' is the desktop app's Providers page (use the desktop UI's own translation of 'Providers'); 'the Tunnels page of the Radient console' keeps 'Tunnels' verbatim (an English-only web page). Never say 'connector', 'parked' or a reason code."
+  },
+  "mobile.doctor.daemon.state_not_running": {
+    "role": "Short state label in `lop mobile status` (auth gate line)",
+    "tone": "lowercase fragment",
+    "note": "Shown when the phone service is not running, instead of an alarming 'OPEN' gate."
+  },
+  "mobile.doctor.files.ok": {
+    "role": "Diagnostics check result (CLI, desktop, pasted into support)",
+    "tone": "Plain, calm, factual",
+    "note": "Doctor check sentence for `lop mobile doctor` and the desktop's Copy diagnostics, read by a non-technical user. 'phone service' is the mobile daemon that the phone app talks to; Radient and Local Operator are product names. Placeholders are pre-formatted numbers and stay verbatim."
+  },
+  "mobile.doctor.files.near": {
+    "role": "Diagnostics check result (CLI, desktop, pasted into support)",
+    "tone": "Plain, calm, factual",
+    "note": "Doctor check sentence for `lop mobile doctor` and the desktop's Copy diagnostics, read by a non-technical user. 'phone service' is the mobile daemon that the phone app talks to; Radient and Local Operator are product names. A problem line states what is wrong, then the fix as a second sentence. Commands in it (lop mobile restart, lop tunnel start, ...) stay verbatim; 'the Providers page' is the desktop app's Providers page (use the desktop UI's own translation of 'Providers'); 'the Tunnels page of the Radient console' keeps 'Tunnels' verbatim (an English-only web page). Never say 'connector', 'parked' or a reason code. Placeholders are pre-formatted numbers and stay verbatim."
+  },
+  "mobile.doctor.files.unknown": {
+    "role": "Diagnostics check result (CLI, desktop, pasted into support)",
+    "tone": "Plain, calm, factual",
+    "note": "Doctor check sentence for `lop mobile doctor` and the desktop's Copy diagnostics, read by a non-technical user. 'phone service' is the mobile daemon that the phone app talks to; Radient and Local Operator are product names. A problem line states what is wrong, then the fix as a second sentence. Commands in it (lop mobile restart, lop tunnel start, ...) stay verbatim; 'the Providers page' is the desktop app's Providers page (use the desktop UI's own translation of 'Providers'); 'the Tunnels page of the Radient console' keeps 'Tunnels' verbatim (an English-only web page). Never say 'connector', 'parked' or a reason code."
+  },
+  "mobile.doctor.files.status_line": {
+    "role": "Short value in `lop mobile status` ('open files:' line)",
+    "tone": "compact",
+    "note": "Doctor check sentence for `lop mobile doctor` and the desktop's Copy diagnostics, read by a non-technical user. 'phone service' is the mobile daemon that the phone app talks to; Radient and Local Operator are product names. Placeholders are pre-formatted numbers and stay verbatim."
+  },
+  "mobile.doctor.logs.clean": {
+    "role": "Diagnostics check result (CLI, desktop, pasted into support)",
+    "tone": "Plain, calm, factual",
+    "note": "Doctor check sentence for `lop mobile doctor` and the desktop's Copy diagnostics, read by a non-technical user. 'phone service' is the mobile daemon that the phone app talks to; Radient and Local Operator are product names."
+  },
+  "mobile.doctor.logs.errors": {
+    "role": "Diagnostics check result (CLI, desktop, pasted into support)",
+    "tone": "Plain, calm, factual",
+    "note": "Doctor check sentence for `lop mobile doctor` and the desktop's Copy diagnostics, read by a non-technical user. 'phone service' is the mobile daemon that the phone app talks to; Radient and Local Operator are product names. A problem line states what is wrong, then the fix as a second sentence. Commands in it (lop mobile restart, lop tunnel start, ...) stay verbatim; 'the Providers page' is the desktop app's Providers page (use the desktop UI's own translation of 'Providers'); 'the Tunnels page of the Radient console' keeps 'Tunnels' verbatim (an English-only web page). Never say 'connector', 'parked' or a reason code. Placeholders are pre-formatted numbers and stay verbatim."
+  },
+  "mobile.doctor.tunnel.not_configured": {
+    "role": "Diagnostics check result (CLI, desktop, pasted into support)",
+    "tone": "Plain, calm, factual",
+    "note": "Doctor check sentence for `lop mobile doctor` and the desktop's Copy diagnostics, read by a non-technical user. 'phone service' is the mobile daemon that the phone app talks to; Radient and Local Operator are product names. A problem line states what is wrong, then the fix as a second sentence. Commands in it (lop mobile restart, lop tunnel start, ...) stay verbatim; 'the Providers page' is the desktop app's Providers page (use the desktop UI's own translation of 'Providers'); 'the Tunnels page of the Radient console' keeps 'Tunnels' verbatim (an English-only web page). Never say 'connector', 'parked' or a reason code."
+  },
+  "mobile.doctor.tunnel.ok": {
+    "role": "Diagnostics check result (CLI, desktop, pasted into support)",
+    "tone": "Plain, calm, factual",
+    "note": "Doctor check sentence for `lop mobile doctor` and the desktop's Copy diagnostics, read by a non-technical user. 'phone service' is the mobile daemon that the phone app talks to; Radient and Local Operator are product names."
+  },
+  "mobile.doctor.tunnel.single": {
+    "role": "Diagnostics check result (CLI, desktop, pasted into support)",
+    "tone": "Plain, calm, factual",
+    "note": "Doctor check sentence for `lop mobile doctor` and the desktop's Copy diagnostics, read by a non-technical user. 'phone service' is the mobile daemon that the phone app talks to; Radient and Local Operator are product names."
+  },
+  "mobile.doctor.tunnel.duplicates": {
+    "role": "Diagnostics check result (CLI, desktop, pasted into support)",
+    "tone": "Plain, calm, factual",
+    "note": "Doctor check sentence for `lop mobile doctor` and the desktop's Copy diagnostics, read by a non-technical user. 'phone service' is the mobile daemon that the phone app talks to; Radient and Local Operator are product names. A problem line states what is wrong, then the fix as a second sentence. Commands in it (lop mobile restart, lop tunnel start, ...) stay verbatim; 'the Providers page' is the desktop app's Providers page (use the desktop UI's own translation of 'Providers'); 'the Tunnels page of the Radient console' keeps 'Tunnels' verbatim (an English-only web page). Never say 'connector', 'parked' or a reason code. Placeholders are pre-formatted numbers and stay verbatim."
+  },
+  "mobile.doctor.tunnel.list_unchecked": {
+    "role": "Diagnostics check result (CLI, desktop, pasted into support)",
+    "tone": "Plain, calm, factual",
+    "note": "Doctor check sentence for `lop mobile doctor` and the desktop's Copy diagnostics, read by a non-technical user. 'phone service' is the mobile daemon that the phone app talks to; Radient and Local Operator are product names. A problem line states what is wrong, then the fix as a second sentence. Commands in it (lop mobile restart, lop tunnel start, ...) stay verbatim; 'the Providers page' is the desktop app's Providers page (use the desktop UI's own translation of 'Providers'); 'the Tunnels page of the Radient console' keeps 'Tunnels' verbatim (an English-only web page). Never say 'connector', 'parked' or a reason code."
+  },
+  "mobile.doctor.login.ok": {
+    "role": "Diagnostics check result (CLI, desktop, pasted into support)",
+    "tone": "Plain, calm, factual",
+    "note": "Doctor check sentence for `lop mobile doctor` and the desktop's Copy diagnostics, read by a non-technical user. 'phone service' is the mobile daemon that the phone app talks to; Radient and Local Operator are product names."
+  },
+  "mobile.doctor.login.missing": {
+    "role": "Diagnostics check result (CLI, desktop, pasted into support)",
+    "tone": "Plain, calm, factual",
+    "note": "Doctor check sentence for `lop mobile doctor` and the desktop's Copy diagnostics, read by a non-technical user. 'phone service' is the mobile daemon that the phone app talks to; Radient and Local Operator are product names. A problem line states what is wrong, then the fix as a second sentence. Commands in it (lop mobile restart, lop tunnel start, ...) stay verbatim; 'the Providers page' is the desktop app's Providers page (use the desktop UI's own translation of 'Providers'); 'the Tunnels page of the Radient console' keeps 'Tunnels' verbatim (an English-only web page). Never say 'connector', 'parked' or a reason code."
+  },
+  "mobile.doctor.files.not_running": {
+    "role": "Diagnostics check result (CLI, desktop, pasted into support)",
+    "tone": "Plain, calm, factual",
+    "note": "Doctor check sentence for `lop mobile doctor` and the desktop's Copy diagnostics, read by a non-technical user. 'phone service' is the mobile daemon that the phone app talks to; Radient and Local Operator are product names."
+  },
+  "mobile.doctor.daemon.not_answering": {
+    "role": "Diagnostics check result (CLI, desktop, pasted into support)",
+    "tone": "Plain, calm, factual",
+    "note": "Doctor check sentence for `lop mobile doctor` and the desktop's Copy diagnostics, read by a non-technical user. 'phone service' is the mobile daemon that the phone app talks to; Radient and Local Operator are product names. A problem line states what is wrong, then the fix as a second sentence. Commands in it (lop mobile restart, lop tunnel start, ...) stay verbatim; 'the Providers page' is the desktop app's Providers page (use the desktop UI's own translation of 'Providers'); 'the Tunnels page of the Radient console' keeps 'Tunnels' verbatim (an English-only web page). Never say 'connector', 'parked' or a reason code."
+  },
+  "mobile.doctor.daemon.state_not_answering": {
+    "role": "Short state label in `lop mobile status` (auth gate line)",
+    "tone": "lowercase fragment",
+    "note": "Shown when a process holds the phone service's port but does not answer, so the gate cannot be read; matches the doctor's 'not answering' state."
+  },
+  "mobile.doctor.files.at_limit": {
+    "role": "Diagnostics check result (CLI, desktop, pasted into support)",
+    "tone": "Plain, calm, factual",
+    "note": "Doctor check sentence for `lop mobile doctor` and the desktop's Copy diagnostics, read by a non-technical user. 'phone service' is the mobile daemon that the phone app talks to; Radient and Local Operator are product names. A problem line states what is wrong, then the fix as a second sentence. Commands in it (lop mobile restart, lop tunnel start, ...) stay verbatim; 'the Providers page' is the desktop app's Providers page (use the desktop UI's own translation of 'Providers'); 'the Tunnels page of the Radient console' keeps 'Tunnels' verbatim (an English-only web page). Never say 'connector', 'parked' or a reason code. Placeholders are pre-formatted numbers and stay verbatim."
+  },
+  "mobile.doctor.tunnel.login_needed": {
+    "role": "Diagnostics check result (CLI, desktop, pasted into support)",
+    "tone": "Plain, calm, factual",
+    "note": "Doctor check sentence for `lop mobile doctor` and the desktop's Copy diagnostics, read by a non-technical user. 'phone service' is the mobile daemon that the phone app talks to; Radient and Local Operator are product names. A problem line states what is wrong, then the fix as a second sentence. Commands in it (lop mobile restart, lop tunnel start, ...) stay verbatim; 'the Providers page' is the desktop app's Providers page (use the desktop UI's own translation of 'Providers'); 'the Tunnels page of the Radient console' keeps 'Tunnels' verbatim (an English-only web page). Never say 'connector', 'parked' or a reason code."
+  },
+  "mobile.doctor.tunnel.setup_again": {
+    "role": "Diagnostics check result (CLI, desktop, pasted into support)",
+    "tone": "Plain, calm, factual",
+    "note": "Doctor check sentence for `lop mobile doctor` and the desktop's Copy diagnostics, read by a non-technical user. 'phone service' is the mobile daemon that the phone app talks to; Radient and Local Operator are product names. A problem line states what is wrong, then the fix as a second sentence. Commands in it (lop mobile restart, lop tunnel start, ...) stay verbatim; 'the Providers page' is the desktop app's Providers page (use the desktop UI's own translation of 'Providers'); 'the Tunnels page of the Radient console' keeps 'Tunnels' verbatim (an English-only web page). Never say 'connector', 'parked' or a reason code."
+  },
+  "mobile.doctor.tunnel.offline": {
+    "role": "Diagnostics check result (CLI, desktop, pasted into support)",
+    "tone": "Plain, calm, factual",
+    "note": "Doctor check sentence for `lop mobile doctor` and the desktop's Copy diagnostics, read by a non-technical user. 'phone service' is the mobile daemon that the phone app talks to; Radient and Local Operator are product names. A problem line states what is wrong, then the fix as a second sentence. Commands in it (lop mobile restart, lop tunnel start, ...) stay verbatim; 'the Providers page' is the desktop app's Providers page (use the desktop UI's own translation of 'Providers'); 'the Tunnels page of the Radient console' keeps 'Tunnels' verbatim (an English-only web page). Never say 'connector', 'parked' or a reason code."
+  },
+  "mobile.doctor.tunnel.connecting": {
+    "role": "Diagnostics check result (CLI, desktop, pasted into support)",
+    "tone": "Plain, calm, factual",
+    "note": "Doctor check sentence for `lop mobile doctor` and the desktop's Copy diagnostics, read by a non-technical user. 'phone service' is the mobile daemon that the phone app talks to; Radient and Local Operator are product names. A problem line states what is wrong, then the fix as a second sentence. Commands in it (lop mobile restart, lop tunnel start, ...) stay verbatim; 'the Providers page' is the desktop app's Providers page (use the desktop UI's own translation of 'Providers'); 'the Tunnels page of the Radient console' keeps 'Tunnels' verbatim (an English-only web page). Never say 'connector', 'parked' or a reason code."
+  },
+  "mobile.doctor.tunnel.turned_off": {
+    "role": "Diagnostics check result (CLI, desktop, pasted into support)",
+    "tone": "Plain, calm, factual",
+    "note": "Doctor check sentence for `lop mobile doctor` and the desktop's Copy diagnostics, read by a non-technical user. 'phone service' is the mobile daemon that the phone app talks to; Radient and Local Operator are product names. A problem line states what is wrong, then the fix as a second sentence. Commands in it (lop mobile restart, lop tunnel start, ...) stay verbatim; 'the Providers page' is the desktop app's Providers page (use the desktop UI's own translation of 'Providers'); 'the Tunnels page of the Radient console' keeps 'Tunnels' verbatim (an English-only web page). Never say 'connector', 'parked' or a reason code."
+  },
+  "mobile.doctor.tunnel.not_running": {
+    "role": "Diagnostics check result (CLI, desktop, pasted into support)",
+    "tone": "Plain, calm, factual",
+    "note": "Doctor check sentence for `lop mobile doctor` and the desktop's Copy diagnostics, read by a non-technical user. 'phone service' is the mobile daemon that the phone app talks to; Radient and Local Operator are product names. A problem line states what is wrong, then the fix as a second sentence. Commands in it (lop mobile restart, lop tunnel start, ...) stay verbatim; 'the Providers page' is the desktop app's Providers page (use the desktop UI's own translation of 'Providers'); 'the Tunnels page of the Radient console' keeps 'Tunnels' verbatim (an English-only web page). Never say 'connector', 'parked' or a reason code."
+  },
+  "mobile.doctor.tunnel.list_skipped": {
+    "role": "Diagnostics check result (CLI, desktop, pasted into support)",
+    "tone": "Plain, calm, factual",
+    "note": "Doctor check sentence for `lop mobile doctor` and the desktop's Copy diagnostics, read by a non-technical user. 'phone service' is the mobile daemon that the phone app talks to; Radient and Local Operator are product names. A problem line states what is wrong, then the fix as a second sentence. Commands in it (lop mobile restart, lop tunnel start, ...) stay verbatim; 'the Providers page' is the desktop app's Providers page (use the desktop UI's own translation of 'Providers'); 'the Tunnels page of the Radient console' keeps 'Tunnels' verbatim (an English-only web page). Never say 'connector', 'parked' or a reason code."
+  }
+}

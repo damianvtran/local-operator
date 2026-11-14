@@ -61,6 +61,7 @@ from local_operator.server.routes import (
     desktop_link_preview,
     desktop_mcp,
     desktop_mesh,
+    desktop_mobile_doctor,
     desktop_mobile_password,
     desktop_monitors,
     desktop_notifications,
@@ -1086,6 +1087,7 @@ app.include_router(desktop_tunnel_setup.router)
 # `/v1/desktop/mobile/password` (capability `features.mobile_password_read`):
 # a literal path, beside the tunnel block it serves ("Using your own tunnel?").
 app.include_router(desktop_mobile_password.router)
+app.include_router(desktop_mobile_doctor.router)
 # Agent messages (Team Bridge, capability `features.team_bridge`):
 # `/v1/desktop/team-bridge/{status,settings,allowlist}`. Registered after the
 # tunnel block for the reason every block here gives -- FastAPI matches in

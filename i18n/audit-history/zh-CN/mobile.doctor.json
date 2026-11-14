@@ -1,0 +1,77 @@
+{
+  "schema": 1,
+  "locale": "zh-CN",
+  "namespace": "mobile.doctor",
+  "history_sha256": "d98e79916c208e69072fcf7b6b71f92ac978bd15da3d2180a2725651494c22b3",
+  "entries": [
+    {
+      "locale": "zh-CN",
+      "namespace": "mobile.doctor",
+      "source_sha256": "0ca00b276fdea066228394e3fee336042b1e149c9e7df3ea31be11a24f0beb72",
+      "translator": {
+        "agent": "i18n-translator subagent, session 398cdb26808f (English source drafted by coder session b0300e2c2c7f)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-14"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (C4 lane: vi, zh-CN), independent `task` subagent, session 2c1a73eaa6cd; did not translate or edit any value it judged",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-14",
+        "result": "passed",
+        "findings": 4,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "New 23-key namespace; round a1 independent audit PASSED, 0 blocker / 0 major / 2 minor / 2 nit: ZH-D1 minor (daemon.slow, daemon.not_answering); ZH-D2 minor (daemon.not_running); ZH-D3 nit (login.ok, login.missing); ZH-D4 nit (daemon.ok, daemon.slow). Placeholders, NFC and product-renderer output verified (audit.log). Not verified: native-speaker review, rendered frames. Evidence: i18n/audits/evidence/zh-CN/mobile.doctor/a1/record.json",
+      "evidence": "i18n/audits/evidence/zh-CN/mobile.doctor/a1/record.json",
+      "round": "a1",
+      "keys_audited": 23
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "mobile.doctor",
+      "source_sha256": "0ca00b276fdea066228394e3fee336042b1e149c9e7df3ea31be11a24f0beb72",
+      "translator": {
+        "agent": "i18n-translator subagent, session 8dedc962f71a (remediation of a1 findings); original values by session 398cdb26808f (English source drafted by coder session b0300e2c2c7f)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-14"
+      },
+      "auditor": {
+        "agent": "i18n-auditor round 2 (remediation delta: vi, zh-CN, fr mobile.doctor), independent `task` subagent, session 24933ff37418; did not translate round 1 or the remediation, did not audit round 1, and edited no catalogue value",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-14",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Round a2 remediation-delta audit PASSED (3 changed keys: daemon.slow, daemon.not_answering, daemon.not_running), 0 blocker / 0 major / 0 minor / 0 nit new. ZH-D1 minor RESOLVED: «未响应» now matches relay.chrome.session.subtitle.not_answering. ZH-D2 minor RESOLVED: «睡眠状态» replaces «休眠» (Hibernate/dormant). ZH-D3, ZH-D4 nits carried (accepted). Placeholders, NFC, key parity and product-renderer output verified (audit.log); other 20 keys byte-identical to a1. Not verified: native-speaker review, rendered frames, phone app's own 'asleep' label (separate repository). Evidence: i18n/audits/evidence/zh-CN/mobile.doctor/a2/record.json",
+      "evidence": "i18n/audits/evidence/zh-CN/mobile.doctor/a2/record.json",
+      "round": "a2",
+      "keys_audited": 3
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "mobile.doctor",
+      "source_sha256": "0428c5c217967add291b75b8a493b08083cffe5270a6f8600c0fd0a82d89afe9",
+      "translator": {
+        "agent": "coder subagent of host session 25fe8dfbf610 (round-1 remediation of PR #3953, commit 1505e6d2f; wrote the English source and all 7 translations)",
+        "model": "not reported in the commit; host session 25fe8dfbf610 runs anthropic/claude-opus-5-5, the coder child's served model is unverified",
+        "date": "2026-11-14"
+      },
+      "auditor": {
+        "agent": "translation-auditor, lopdev team member (independent `task` subagent), session 11bf5c282289; did not translate or edit any catalogue value, did not author the remediation",
+        "model": "anthropic/claude-opus-5-5 (served model of this session; no provider fallback observed)",
+        "date": "2026-11-14",
+        "result": "passed",
+        "findings": 12,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "PR #3953 round-1 remediation audit a3 PASSED: 23 changed/new keys, 0 blocker / 0 major / 11 minor / 1 nit. Findings: ZH-R1 minor (daemon.gate_open, daemon.not_answering, daemon.not_running, daemon.slow, files.at_limit, files.near, files.unknown, logs.errors, tunnel.connecting, tunnel.not_running, tunnel.turned_off); ZH-R2 nit (login.ok). Translator model unverified; auditor anthropic/claude-opus-5-5 (disclosed). Not verified: native-speaker review, rendered frame. Evidence: i18n/audits/evidence/zh-CN/mobile.doctor/a3/record.json",
+      "evidence": "i18n/audits/evidence/zh-CN/mobile.doctor/a3/record.json",
+      "round": "a3",
+      "keys_audited": 23
+    }
+  ]
+}

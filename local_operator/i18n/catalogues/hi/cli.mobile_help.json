@@ -13,5 +13,7 @@
   "cli.mobile_help.devices_port": "मोबाइल डेमन का पोर्ट (डिफ़ॉल्ट: डेमन का अपना डिफ़ॉल्ट)",
   "cli.mobile_help.uninstall": "LaunchAgent हटाएँ",
   "cli.mobile_help.uninstall_purge": "पासवर्ड भी हटाएँ",
-  "cli.mobile_help.serve": "डेमन चलाएँ (फ़ोरग्राउंड)"
+  "cli.mobile_help.serve": "डेमन चलाएँ (फ़ोरग्राउंड)",
+  "cli.mobile_help.doctor": "फ़ोन एक्सेस का केवल-पढ़ने योग्य डायग्नोस्टिक्स (साझा करना सुरक्षित)",
+  "cli.mobile_help.doctor_json": "डायग्नोस्टिक्स JSON के रूप में दिखाएँ"
 }

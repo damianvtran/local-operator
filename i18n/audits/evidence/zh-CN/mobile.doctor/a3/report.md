@@ -1,0 +1,28 @@
+# zh-CN / mobile.doctor — independent translation audit a3 (PR #3953 round-1 remediation)
+
+- Verdict: **passed** — blocker 0 · major 0 · minor 11 · nit 1 (unresolved blocker/major: 0)
+- Scope: 23 keys (14 changed + 9 new) at 1505e6d2f8dc51f219ddeba76ca0cc344c73806a; 8 unchanged keys byte-identical to 52c0e1c93; `tunnel.problem` removed from catalogue, keys module, code and tests
+- Source sha256 (en): `0428c5c217967add291b75b8a493b08083cffe5270a6f8600c0fd0a82d89afe9`; target `c1ac9464974a1498b106b1cef327bb84293c2d2650c4aee2e5406db8ed23c16d`
+- Translator: coder subagent of host session 25fe8dfbf610 (round-1 remediation of PR #3953, commit 1505e6d2f; wrote the English source and all 7 translations) — model: not reported in the commit; host session 25fe8dfbf610 runs anthropic/claude-opus-5-5, the coder child's served model is unverified
+- Auditor: translation-auditor, lopdev team member (independent `task` subagent), session 11bf5c282289; did not translate or edit any catalogue value, did not author the remediation — anthropic/claude-opus-5-5 (served model of this session; no provider fallback observed)
+
+## Findings
+
+| id | severity | key | current | proposed | reason |
+|---|---|---|---|---|---|
+| ZH-R1 | minor | `mobile.doctor.daemon.not_running` | 手机访问服务已设置但未运行，因此手机应用会将此电脑显示为睡眠状态。请运行 lop mobile start 启动它，或重启此电脑。 | 手机访问服务已设置但未运行，因此手机应用会将此电脑显示为睡眠状态。请运行lop mobile start启动它，或重启此电脑。 | Spaces between Chinese and the bare command run — zh-CN style guide l.67 says none, and sibling mobile.setup writes all 9 such commands unspaced (“运行lop login radient，…”). |
+| ZH-R1 | minor | `mobile.doctor.daemon.not_answering` | 手机访问服务正在运行但未响应，因此手机应用会将此电脑显示为未响应。请运行 lop mobile restart 重启它，或重启此电脑。 | 手机访问服务正在运行但未响应，因此手机应用会将此电脑显示为未响应。请运行lop mobile restart重启它，或重启此电脑。 | Spaces between Chinese and the bare command run — zh-CN style guide l.67 says none, and sibling mobile.setup writes all 9 such commands unspaced (“运行lop login radient，…”). |
+| ZH-R1 | minor | `mobile.doctor.daemon.slow` | 手机访问服务用了{ms}毫秒才响应，手机应用可能会将其显示为未响应。请运行 lop mobile restart 重启它；如果再次出现，请将这份报告发给支持团队。 | 手机访问服务用了{ms}毫秒才响应，手机应用可能会将其显示为未响应。请运行lop mobile restart重启它；如果再次出现，请将这份报告发给支持团队。 | Spaces between Chinese and the bare command run — zh-CN style guide l.67 says none, and sibling mobile.setup writes all 9 such commands unspaced (“运行lop login radient，…”). |
+| ZH-R1 | minor | `mobile.doctor.daemon.gate_open` | 手机访问服务未要求输入密码就作出了响应，因此手机门户未受保护。请立即运行 lop mobile stop 停止它，然后运行 lop mobile install 设置新密码。 | 手机访问服务未要求输入密码就作出了响应，因此手机门户未受保护。请立即运行lop mobile stop停止它，然后运行lop mobile install设置新密码。 | Spaces between Chinese and the bare command run — zh-CN style guide l.67 says none, and sibling mobile.setup writes all 9 such commands unspaced (“运行lop login radient，…”). |
+| ZH-R1 | minor | `mobile.doctor.files.near` | 手机访问服务已打开{open}个文件（上限{limit}个），已接近上限，新的手机连接可能会失败。请运行 lop mobile restart 重启它。 | 手机访问服务已打开{open}个文件（上限{limit}个），已接近上限，新的手机连接可能会失败。请运行lop mobile restart重启它。 | Spaces between Chinese and the bare command run — zh-CN style guide l.67 says none, and sibling mobile.setup writes all 9 such commands unspaced (“运行lop login radient，…”). |
+| ZH-R1 | minor | `mobile.doctor.files.unknown` | 无法统计此电脑上手机访问服务打开的文件数。如果手机应用将其显示为未响应，请运行 lop mobile restart 重启它，并将这份报告发给支持团队。 | 无法统计此电脑上手机访问服务打开的文件数。如果手机应用将其显示为未响应，请运行lop mobile restart重启它，并将这份报告发给支持团队。 | Spaces between Chinese and the bare command run — zh-CN style guide l.67 says none, and sibling mobile.setup writes all 9 such commands unspaced (“运行lop login radient，…”). |
+| ZH-R1 | minor | `mobile.doctor.logs.errors` | 最近一天，手机访问服务有{emfile}次达到打开文件数上限，有{sqlite}次无法打开数据库。请运行 lop mobile restart 重启它；如果再次出现，请将这份报告发给支持团队。 | 最近一天，手机访问服务有{emfile}次达到打开文件数上限，有{sqlite}次无法打开数据库。请运行lop mobile restart重启它；如果再次出现，请将这份报告发给支持团队。 | Spaces between Chinese and the bare command run — zh-CN style guide l.67 says none, and sibling mobile.setup writes all 9 such commands unspaced (“运行lop login radient，…”). |
+| ZH-R1 | minor | `mobile.doctor.files.at_limit` | 手机访问服务已打开{open}个文件（上限{limit}个），已达到上限，新的手机连接会失败。请运行 lop mobile restart 重启它。 | 手机访问服务已打开{open}个文件（上限{limit}个），已达到上限，新的手机连接会失败。请运行lop mobile restart重启它。 | Spaces between Chinese and the bare command run — zh-CN style guide l.67 says none, and sibling mobile.setup writes all 9 such commands unspaced (“运行lop login radient，…”). |
+| ZH-R1 | minor | `mobile.doctor.tunnel.connecting` | 通过Radient的手机访问仍在连接中。请等待几分钟；如果仍未连接，请运行 lop tunnel restart 重启它。 | 通过Radient的手机访问仍在连接中。请等待几分钟；如果仍未连接，请运行lop tunnel restart重启它。 | Spaces between Chinese and the bare command run — zh-CN style guide l.67 says none, and sibling mobile.setup writes all 9 such commands unspaced (“运行lop login radient，…”). |
+| ZH-R1 | minor | `mobile.doctor.tunnel.turned_off` | 此电脑上通过Radient的手机访问已关闭。要在外出时使用手机，请运行 lop tunnel start 重新开启。 | 此电脑上通过Radient的手机访问已关闭。要在外出时使用手机，请运行lop tunnel start重新开启。 | Spaces between Chinese and the bare command run — zh-CN style guide l.67 says none, and sibling mobile.setup writes all 9 such commands unspaced (“运行lop login radient，…”). |
+| ZH-R1 | minor | `mobile.doctor.tunnel.not_running` | 此电脑上通过Radient的手机访问未运行。请运行 lop tunnel restart 重启它；如果仍然没有运行，请将这份报告发给支持团队。 | 此电脑上通过Radient的手机访问未运行。请运行lop tunnel restart重启它；如果仍然没有运行，请将这份报告发给支持团队。 | Spaces between Chinese and the bare command run — zh-CN style guide l.67 says none, and sibling mobile.setup writes all 9 such commands unspaced (“运行lop login radient，…”). |
+| ZH-R2 | nit | `mobile.doctor.login.ok` | 已登录Radient | 已登录Radient。 | Pre-existing (unchanged, not gating): the only sentence in the namespace without a closing “。”. |
+
+## Method and limits
+
+LLM audit, same model family as the coder (disclosed); no native-speaker pass and no rendered terminal/desktop frame claimed.

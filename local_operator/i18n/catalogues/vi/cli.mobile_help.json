@@ -13,5 +13,7 @@
   "cli.mobile_help.devices_port": "cổng của daemon di động (mặc định: cổng mặc định của chính daemon)",
   "cli.mobile_help.uninstall": "Gỡ LaunchAgent",
   "cli.mobile_help.uninstall_purge": "Xóa cả mật khẩu",
-  "cli.mobile_help.serve": "Chạy daemon (tiền cảnh)"
+  "cli.mobile_help.serve": "Chạy daemon (tiền cảnh)",
+  "cli.mobile_help.doctor": "Chẩn đoán truy cập điện thoại ở chế độ chỉ đọc (an toàn để chia sẻ)",
+  "cli.mobile_help.doctor_json": "In kết quả chẩn đoán dưới dạng JSON"
 }

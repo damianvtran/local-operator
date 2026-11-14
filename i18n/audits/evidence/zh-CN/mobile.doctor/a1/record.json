@@ -1,0 +1,130 @@
+{
+ "schema": 1,
+ "audit_id": "a1",
+ "audit_kind": "independent_translation_audit",
+ "locale": "zh-CN",
+ "namespace": "mobile.doctor",
+ "round": 1,
+ "audit_date": "2026-11-14",
+ "verdict": "passed",
+ "status": "passed",
+ "source_sha256": "0ca00b276fdea066228394e3fee336042b1e149c9e7df3ea31be11a24f0beb72",
+ "target_sha256": "203ed8d5aae57db257226d7085a3b9787c55c6de188765571781cf0a81f78f87",
+ "scope": "complete NEW namespace, all 23 keys judged",
+ "key_count": 23,
+ "keys_audited": 23,
+ "keys_reread_for_consistency": 0,
+ "source_audit_revision": "a3722be7dadacaf140a2587a0100bd3b26c2ab50",
+ "worktree": "~/local-operator/.worktrees/mobile-doctor",
+ "branch": "feat/mobile-doctor",
+ "translator": {
+  "agent": "i18n-translator subagent, session 398cdb26808f (English source drafted by coder session b0300e2c2c7f)",
+  "model": "anthropic/claude-opus-5-5",
+  "date": "2026-11-14"
+ },
+ "auditor": {
+  "agent": "i18n-auditor (C4 lane: vi, zh-CN), independent `task` subagent, session 2c1a73eaa6cd; did not translate or edit any value it judged",
+  "model": "anthropic/claude-opus-5-5 (served model of this session; no provider fallback occurred)",
+  "date": "2026-11-14",
+  "independent_from_translator": true
+ },
+ "input_hashes": {
+  "en": "0ca00b276fdea066228394e3fee336042b1e149c9e7df3ea31be11a24f0beb72",
+  "context": "c6baa99bc539ef2d2e03bf7b6b11e83edac37139eede8db82034f5fad98d4614",
+  "target": "203ed8d5aae57db257226d7085a3b9787c55c6de188765571781cf0a81f78f87",
+  "glossary": "a576d5a4b2718ba79a70a42600e3b6233ea28d716b1e2d996a208ac8dd7fabdb",
+  "style_guide": "8f95d89debbd0af848e72e4805e256ef9566632e520a5c6d9b37928cd617142c"
+ },
+ "input_paths": {
+  "en": "local_operator/i18n/catalogues/en/mobile.doctor.json",
+  "context": "local_operator/i18n/catalogues/en/mobile.doctor.context.json",
+  "target": "local_operator/i18n/catalogues/zh-CN/mobile.doctor.json",
+  "glossary": "i18n/glossary.md",
+  "style_guide": "i18n/style-guides/zh-CN.md"
+ },
+ "findings": [
+  {
+   "id": "ZH-D1",
+   "severity": "minor",
+   "keys": [
+    "mobile.doctor.daemon.slow",
+    "mobile.doctor.daemon.not_answering"
+   ],
+   "issue": "The sentence tells the reader what the phone app shows, but uses «无响应» while the phone app's own zh-CN label for this state is «未响应» (relay.chrome.session.subtitle.not_answering). A user comparing the report with the phone screen sees two different words.",
+   "fix": "Use «未响应»: «…手机应用可能会将此电脑显示为未响应。» / «手机访问服务正在运行但未响应；手机应用会将此电脑显示为未响应。…»",
+   "status": "open"
+  },
+  {
+   "id": "ZH-D2",
+   "severity": "minor",
+   "keys": [
+    "mobile.doctor.daemon.not_running"
+   ],
+   "issue": "Translator question 6: «休眠» is the zh-CN OS term for Hibernate (Sleep is «睡眠» on both Windows and macOS) and this catalogue set already uses «休眠» for “dormant” (tui.app.parked.dormant). «显示为休眠» is understood, but «睡眠» is the precise everyday word for a computer that is asleep.",
+   "fix": "«…在服务启动前，手机应用会将此电脑显示为睡眠状态。» — or whatever exact word the phone app's zh-CN UI shows for this state (that catalogue is outside this repo and was not checked).",
+   "status": "open"
+  },
+  {
+   "id": "ZH-D3",
+   "severity": "nit",
+   "keys": [
+    "mobile.doctor.login.ok",
+    "mobile.doctor.login.missing"
+   ],
+   "issue": "Translator question 3: no final 。. The style guide permits omitting 。 on short statuses, so this is acceptable; but doctor.text() prints one summary per line and every other check summary in this namespace ends in 。, so the report mixes both.",
+   "fix": "Optional: «已登录Radient。» / «未登录Radient。» for consistency within the report.",
+   "status": "accepted"
+  },
+  {
+   "id": "ZH-D4",
+   "severity": "nit",
+   "keys": [
+    "mobile.doctor.daemon.ok",
+    "mobile.doctor.daemon.slow"
+   ],
+   "issue": "«响应用时{ms}毫秒» briefly parses as «响/应用/时» (应用 = app) in sentences that also say «手机应用».",
+   "fix": "Optional: «响应耗时{ms}毫秒».",
+   "status": "accepted"
+  }
+ ],
+ "counts": {
+  "blocker": 0,
+  "major": 0,
+  "minor": 2,
+  "nit": 2
+ },
+ "unresolved_blocker_major_count": 0,
+ "translator_questions_answered": "Q3 (no final 。 on login.ok/missing): acceptable per style guide, nit ZH-D3 for consistency. Q6 (asleep): «休眠» = Hibernate in zh-CN OS vocabulary — minor ZH-D2, suggest «睡眠». Q1/Q2/Q4/Q5 concern other locales.",
+ "verified": [
+  "“phone service” consistently «手机访问服务»; «手机访问» matches mobile.setup / cli.mobile_help (24+2 shipped uses)",
+  "«隧道» / «连接器» match mobile.setup; «此电脑» matches mobile.setup and cli.mobile_help.devices",
+  "full-width punctuation, no space between CJK and Latin/digits, per style guide; {state}/{reason} left Latin",
+  "counts take 个 classifier (files, tunnels); zh-CN plural category other only — tunnel.duplicates fine",
+  "«打开文件过多» is a faithful plain rendering of EMFILE; gate_open calm and factual",
+  "no command named; NFC verified"
+ ],
+ "limitations": [
+  "Independent LLM review on anthropic/claude-opus-5-5, not native-speaker certification.",
+  "Text renders via the product renderer only (audit.log); no terminal, desktop or device frame.",
+  "Phone-app catalogue (separate repo) not compared for the 'asleep' label.",
+  "generate.py / check.py not run by this lane."
+ ],
+ "artifacts": [
+  "record.json",
+  "report.md",
+  "audit.log",
+  "dryrun.log",
+  "receipt.json"
+ ],
+ "audit_ledger_row": {
+  "storage": "i18n/audit-history/zh-CN/mobile.doctor.json (ordered suffix, appended with scripts/i18n/ledger.py append)",
+  "history_sha256_before_append": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+  "history_sha256_after_append": "d33efe9b8b788d0af8e799deae2778eb6ded2c4f0afac3112d914f8084d1936f",
+  "ledger_status": "passed",
+  "why_not_i18n_ledger_json": "i18n/ledger.json and i18n/ledger/<locale>.json are migration snapshots pinned by i18n/audit-history.json; a new audit is an appended row and the last row per (locale, namespace) wins."
+ },
+ "evidence_receipt": {
+  "path": "i18n/audits/evidence/zh-CN/mobile.doctor/a1/receipt.json",
+  "self_hash_rule": "receipt.json hashes every other artifact in this directory and not itself"
+ }
+}

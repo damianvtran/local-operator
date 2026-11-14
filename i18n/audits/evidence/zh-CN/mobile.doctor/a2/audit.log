@@ -1,0 +1,39 @@
+# zh-CN/mobile.doctor a2 remediation-delta mechanical + render check (session 24933ff37418; scripts run with .venv/bin/python; runtime.render_message = product renderer)
+# script: $LOCAL_OPERATOR_SCRATCHPAD/r2check.py zh-CN <changed keys> <sample args {"lop": "0.42.1", "python": "3.13.2", "platform": "macOS-15.1-arm64", "ms": "2400", "open": "231", "limit": "256", "emfile": "14", "sqlite": "3", "state": "stopped", "reason": "login_required", "count": 3}>
+en catalogue_sha256     0ca00b276fdea066228394e3fee336042b1e149c9e7df3ea31be11a24f0beb72
+zh-CN catalogue_sha256  192643761971f366519342cfacb4261deee88f55e6a20f4d4ea5c5e8cf4a4024  (a1 audited 203ed8d5aae57db257226d7085a3b9787c55c6de188765571781cf0a81f78f87)
+keys parity(order)=True missing=[] extra=[]
+unchanged keys byte-identical to HEAD a3722be7dada: True (git show HEAD:<target> vs working tree; only 3 key(s) differ)
+
+[mobile.doctor.daemon.slow] args_en=['ms'] args_zh-CN=['ms'] args=OK nfc=True
+  old : 手机访问服务正在运行，但响应用时{ms}毫秒，手机应用可能会将此电脑显示为无响应。
+  new : 手机访问服务正在运行，但响应用时{ms}毫秒，手机应用可能会将此电脑显示为未响应。
+  en  : The phone service is running but took 2400 ms to answer, which the phone app may show as not answering.
+  zh-CN: 手机访问服务正在运行，但响应用时2400毫秒，手机应用可能会将此电脑显示为未响应。
+
+[mobile.doctor.daemon.not_answering] args_en=[] args_zh-CN=[] args=OK nfc=True
+  old : 手机访问服务正在运行但无响应；手机应用会将此电脑显示为无响应。该服务可能已达到打开文件数上限。
+  new : 手机访问服务正在运行但未响应；手机应用会将此电脑显示为未响应。该服务可能已达到打开文件数上限。
+  en  : The phone service is running but not answering; the phone app shows this computer as not answering. It may have run out of files.
+  zh-CN: 手机访问服务正在运行但未响应；手机应用会将此电脑显示为未响应。该服务可能已达到打开文件数上限。
+
+[mobile.doctor.daemon.not_running] args_en=[] args_zh-CN=[] args=OK nfc=True
+  old : 手机访问服务已设置但未运行；在服务启动前，手机应用会将此电脑显示为休眠。
+  new : 手机访问服务已设置但未运行；在服务启动前，手机应用会将此电脑显示为睡眠状态。
+  en  : The phone service is set up but not running; the phone app shows this computer as asleep until it starts.
+  zh-CN: 手机访问服务已设置但未运行；在服务启动前，手机应用会将此电脑显示为睡眠状态。
+
+RESULT placeholder/NFC defects: 0
+
+$ .venv/bin/python scripts/i18n/ledger.py history-sha --locale zh-CN --namespace mobile.doctor
+d33efe9b8b788d0af8e799deae2778eb6ded2c4f0afac3112d914f8084d1936f
+[exit 0]
+$ .venv/bin/python scripts/i18n/ledger.py append --receipt $LOCAL_OPERATOR_SCRATCHPAD/ledger-receipt-zh-CN-mobile.doctor-a2.json --expected-history-sha d33efe9b8b788d0af8e799deae2778eb6ded2c4f0afac3112d914f8084d1936f --dry-run
+i18n/audit-history/zh-CN/mobile.doctor.json
+[exit 0]
+$ .venv/bin/python scripts/i18n/ledger.py append --receipt $LOCAL_OPERATOR_SCRATCHPAD/ledger-receipt-zh-CN-mobile.doctor-a2.json --expected-history-sha d33efe9b8b788d0af8e799deae2778eb6ded2c4f0afac3112d914f8084d1936f --apply
+i18n/audit-history/zh-CN/mobile.doctor.json
+[exit 0]
+$ .venv/bin/python scripts/i18n/ledger.py history-sha --locale zh-CN --namespace mobile.doctor   # after apply
+29061148b4d724e3404b7ef17ee00ecb61deab0e8f5c30eb4171c7c98585df71
+[exit 0]
