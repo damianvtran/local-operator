@@ -6,6 +6,7 @@ import threading
 import time
 from contextlib import closing
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from typing import cast
 from unittest.mock import AsyncMock
 
 import pytest
@@ -958,6 +959,12 @@ class _ListingApi:
         assert method == "GET"
         return {"tunnels": self.records}
 
+    def as_api(self) -> api.RadientTunnels:
+        # `_adopt_conflicting_create` only calls `request("GET")`, which this
+        # fake implements; the cast keeps the production signature honest
+        # (a real `RadientTunnels`) instead of widening it for a test double.
+        return cast(api.RadientTunnels, self)
+
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("device_id", [None, "", 7])
@@ -967,7 +974,7 @@ async def test_a_409_adoption_needs_a_real_pending_device_id(device_id):
 
     api = _ListingApi([{"id": "tun-a", "name": "mac"}, {"id": "tun-b", "device_id": device_id}])
     with pytest.raises(ValueError, match="already exists"):
-        await cli._adopt_conflicting_create(api, {"device_id": device_id, "name": "mac"})
+        await cli._adopt_conflicting_create(api.as_api(), {"device_id": device_id, "name": "mac"})
     assert api.calls == 0, "no list read without a proof to match it against"
 
 
@@ -979,9 +986,9 @@ async def test_a_409_adoption_never_matches_a_nameless_record():
     pending = {"device_id": "dev-1", "name": "mac"}
     nameless = _ListingApi([{"id": "tun-a", "device_id": "dev-1"}])
     with pytest.raises(ValueError, match="already exists"):
-        await cli._adopt_conflicting_create(nameless, pending)
+        await cli._adopt_conflicting_create(nameless.as_api(), pending)
     renamed = _ListingApi([{"id": "tun-a", "device_id": "dev-1", "name": "other"}])
     with pytest.raises(ValueError, match="already exists"):
-        await cli._adopt_conflicting_create(renamed, pending)
+        await cli._adopt_conflicting_create(renamed.as_api(), pending)
     exact = _ListingApi([{"id": "tun-a", "device_id": "dev-1", "name": "mac"}])
-    assert (await cli._adopt_conflicting_create(exact, pending))["id"] == "tun-a"
+    assert (await cli._adopt_conflicting_create(exact.as_api(), pending))["id"] == "tun-a"

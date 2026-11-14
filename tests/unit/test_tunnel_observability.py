@@ -189,10 +189,13 @@ def test_failure_freshness_follows_the_retry_cadence(tmp_path, monkeypatch):
     assert found is not None and found["current"] is True
     at = found["at"]
     bound = report.CURRENT_FAILURE_S
-    assert report.last_connector_failure(now=at + bound)["current"] is True
-    assert report.last_connector_failure(now=at + bound + 1)["current"] is False
+    at_bound = report.last_connector_failure(now=at + bound)
+    assert at_bound is not None and at_bound["current"] is True
+    past_bound = report.last_connector_failure(now=at + bound + 1)
+    assert past_bound is not None and past_bound["current"] is False
     # A stamp from the future (clock moved back) is no evidence either.
-    assert report.last_connector_failure(now=at - bound - 1)["current"] is False
+    future = report.last_connector_failure(now=at - bound - 1)
+    assert future is not None and future["current"] is False
 
 
 class _Http500Health(BaseHTTPRequestHandler):
