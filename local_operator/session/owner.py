@@ -104,7 +104,7 @@ class SessionOwner(Protocol):
         """Make an owner exist, or join one that is starting.
 
         ``kwargs`` carries the bind loop's own budgets (``preempt``,
-        ``preempt_budget_s``), which the local implementation forwards to
+        ``preempt_budget_s``, optionally ``deadline_s``), which the local implementation forwards to
         ``launch.engage_runtime`` and a remote one ignores — it has no local
         spawn to preempt.
         """
@@ -158,6 +158,11 @@ class LocalOwner:
             config_dir=self._config_dir,
             preempt=kwargs.get("preempt"),
             preempt_budget_s=kwargs.get("preempt_budget_s", 0.0),
+            # A re-engage inside a bind passes what is left of the bind's budget
+            # here: ``engage_runtime`` expires on its own deadline (unlinking its
+            # capture file, reporting the child's reason) where a cancelling
+            # ``wait_for`` would leak the one and lose the other.
+            **({"deadline_s": kwargs["deadline_s"]} if "deadline_s" in kwargs else {}),
         )
 
     def make_client(
