@@ -178,7 +178,7 @@ and raises `Task025EvaluationError`, which left `t30a-t025-20261111-222346`
 unscored. The apparatus cannot raise the cap or bound the reasoning: the worker
 environment is a closed allowlist, and the checker's `options` take precedence
 over `OSWORLD_EVAL_MODEL_MAX_OUTPUT_TOKENS`. A replacement judge must therefore
-answer inside the unchanged caps and accept images (15 of the 21 judged tasks
+answer inside the unchanged caps and accept images (14 of the 19 judged tasks
 pass them). The candidate measurements, sealed-result impact and the wiring each
 candidate needs are in
 [`records/EVAL-JUDGE-FINDING-reasoning-budget.md`](records/EVAL-JUDGE-FINDING-reasoning-budget.md).

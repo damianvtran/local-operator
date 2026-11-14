@@ -37,11 +37,14 @@ are injectable judge settings (`vendor_bridge._ENV_INJECTABLE`).
 `OSWORLD_EVAL_MODEL_MAX_OUTPUT_TOKENS` would lose to the checker's `options["max_tokens"]`
 anyway (`model_client._build_config` picks options first).
 
-Scope: of the 108 corpus tasks, 21 are judged according to the adapter's own
-`requirements.is_judged`. Eighteen of those pass an explicit cap: 5, 10, 16, 64, 128, 200,
-400, 1024, 1500, 2048 or 4096. The other three (007, 092, 093) pass no literal cap, so the
-cap comes from a metric helper or `generate_text`'s 512 default. Fifteen of the 21 pass
-images directly. Every small-cap task grades a silent NO under this judge. In the 20-task sample, task_003 (cap 5) and task_025
+Scope: of the 108 corpus tasks, 19 are judged according to the adapter's own
+`requirements.is_judged` (003 007 008 019 025 031 035 041 074 075 077 078 079 081 082 087
+089 090 092; `test_requirements.py::test_judge_detection_over_the_pinned_corpus_matches_the_call_surface`
+pins the same 19). Eighteen of those pass a literal `max_tokens` cap, drawn from 5, 10, 16,
+64, 128, 200, 400, 1024 and 1500 (task_092 passes 5). The other one, task_007, passes no
+literal cap: it calls `metrics.compare_text_with_llm`, whose default cap is 10
+(`llm_metrics.py:382`). Fourteen of the 19 pass images (`image_paths=`); task_007 is
+text-only. Every small-cap task grades a silent NO under this judge. In the 20-task sample, task_003 (cap 5) and task_025
 (cap 1500) are judged. Their sealed results:
 
 | run | judge reached | judge outcome | decided the score? |
@@ -116,7 +119,7 @@ The campaign owner chose it for these reasons:
 **Rule for existing results.** A judged task's result scored with the
 `qwen/qwen3.8-max-0902` judge is **flagged unreliable**. It is not a capability
 measurement, whatever its score. A judged task is one that the adapter's
-`requirements.is_judged` reports, 21 of the 108. On a cap-5 task that judge always
+`requirements.is_judged` reports, 19 of the 108. On a cap-5 task that judge always
 answers NO. On task_025 it crashes. A pass on such a task can still come from the
 checker's non-judge half, but a fail or an unscored result says nothing about the
 agent. Unjudged tasks are unaffected. Results from the two judges are not comparable on
