@@ -409,6 +409,8 @@
   "wire.settings.network_credentials_github_repositories.placeholder": "damianvtran/scratch, damianvtran/sandbox",
   "wire.settings.network_credentials_grant_ttl_s.help": "设备借用所有者的登录后、在再次请求之前可使用的最长时间；也是被撤销或离线的所有者的登录在别处继续可用的时长。绝不会超过令牌本身。",
   "wire.settings.network_credentials_grant_ttl_s.label": "借用登录有效期（秒）",
+  "wire.settings.network_credentials_offline_hold_s.help": "拥有某个登录的设备无法连接（休眠、离线）时，其他设备可继续使用已借用登录的时长。绝不会超过令牌本身；所有者和本设备的设置同时生效，以较短者为准。",
+  "wire.settings.network_credentials_offline_hold_s.label": "所有者离线时借用登录的保留时长（秒）",
   "wire.settings.network_listen_address.help": "127.0.0.1表示只拨出；0.0.0.0表示全部；或填一个地址。",
   "wire.settings.network_listen_address.label": "监听地址",
   "wire.settings.network_max_handshakes.help": "本中继同时持有的未认证连接数。配对过程会占用一个连接，直到配对码被输入为止；超过上限的连接在accept时即被丢弃，不回任何应答帧。",

@@ -110,6 +110,12 @@ CAPABILITY_MODEL_SWITCH = "model_switch"
 #: report — so a node silently ran without the head's review and release rules.
 #: Emitted only when there is a refusal to name; never in ``PEER_SIDE_CHECKS``.
 CAPABILITY_CUSTOM_INSTRUCTIONS = "custom_instructions"
+#: (l) user skills: does the peer hold this device's own skills at the revision
+#: this device has (``skillsync.py``)? Added 2026-11-11 with the mesh skill sync:
+#: a brief naming ``skill://x`` resolves on the head and, before that sync, on no
+#: peer. Informational (non-gating): the cadence repairs it within a minute, and
+#: the create path pushes first.
+CAPABILITY_SKILLS = "skills"
 
 #: The class a readiness row carries (F8 ruling, 2026-10-04). "The device is
 #: onboarded" and "the equipment on it is set up" are DIFFERENT questions:
@@ -160,6 +166,9 @@ NON_GATING_EQUIPMENT: frozenset[str] = frozenset(
         # operator wrote them there); the row names it with the remedy and never
         # holds the verdict, as the create and the move never refuse on it.
         CAPABILITY_CUSTOM_INSTRUCTIONS,
+        # A missing skill is a sync in flight or a skill that cannot travel; the
+        # row names which, and nothing about onboarding depends on it.
+        CAPABILITY_SKILLS,
     }
 )
 
@@ -211,6 +220,11 @@ CODE_RELAY_OOM_POLICY = "relay_oom_policy"
 #: The peer has not granted this device the lifecycle capability net_restart
 #: requires. The remedy is a grant ON THE PEER, never a local gate bypass.
 CODE_UPDATE_GRANT_MISSING = "update_grant_missing"
+#: The peer lacks some of this device's skills at this device's revision. A
+#: named constant (not a literal at the emit site) because enrollment's
+#: ``public_report`` admits only ``CODE_*`` values: a bare literal made a failed
+#: ``skills`` row refuse the whole terminal receipt (PR #3839).
+CODE_SKILLS_NOT_SYNCED = "skills_not_synced"
 #: Serve daemon (2026-10-28): its build differs from the install's, or nothing
 #: but a login session holds it (Linux: a ``session-*.scope``, not a unit).
 CODE_SERVE_STALE = "serve_stale"
@@ -1595,12 +1609,30 @@ def selected_model_row(
             (f"sign in to {provider} on {peer_label}, or choose another model",),
         ),
     }
-    if state not in readings and state != "held_offline":
+    # A HELD GRANT is access the owner lent BEFORE it became unreachable, served
+    # from the borrower's memory until the offline hold ends (up to 24 hours since
+    # 2026-11-13). Reading it as a fresh resolve ("the next request verifies the
+    # owner again") was wrong for that whole window (design review m1), so it says
+    # what it is and when it stops. The end is the receipt's
+    # ``last_grant_expires_at`` (the hold end, ``effective.note_resolution``),
+    # rendered in UTC because the reader may sit in another time zone.
+    held_until = fact.get("last_grant_expires_at")
+    until = (
+        time.strftime(" until %H:%M UTC", time.gmtime(held_until))
+        if isinstance(held_until, (int, float)) and not isinstance(held_until, bool)
+        else ""
+    )
+    readings["held_offline"] = (
+        f"{peer_label} is using {provider} access {owner} lent before it went "
+        f"offline{until}; nothing is refreshed until {owner} is back",
+        (
+            f"continue on {peer_label}; reconnect {owner} before then, or sign in to "
+            f"{provider} on {peer_label} to stop depending on it",
+        ),
+    )
+    if state not in readings:
         state = "pending"
-    # A held grant is borrowed access the owner lent (``held_offline``): the same
-    # reading as a resolved borrow, whose "the next request verifies the owner again"
-    # is exactly what the client does. Its own CODE stays on the row below.
-    detail, remedies = readings["effective_borrow" if state == "held_offline" else state]
+    detail, remedies = readings[state]
     if state == "expired" and observer_is_admin and getattr(member, "role", "") == "admin":
         import shlex
 
@@ -1728,6 +1760,9 @@ def collect_peer_facts(
         # ADDITIVE ON THE WIRE: a viewer built before this key ignores it, and a
         # viewer reading a peer built before it renders ``unknown`` — never ok.
         "serve_daemons": serve_daemons_fact(root),
+        # ADDITIVE ON THE WIRE (2026-11-11): names, tree hashes and mirror origin of
+        # this device's user skills — never content. Absent from older peers.
+        "skills": skills_fact(root),
         # ADDITIVE ON THE WIRE: an older viewer ignores it, and an older peer's
         # answer lacks it, which this build reads as "nothing to report" (no row).
         "custom_instructions": custom_instructions_fact(root),
@@ -1737,6 +1772,113 @@ def collect_peer_facts(
         # and the model-credential row then reads byte-for-byte as before.
         "failover": _failover_fact(root, model),
     }
+
+
+def skills_fact(root: Path) -> dict[str, Any] | None:
+    """This device's user skills as the skill sync sees them; ``None`` if unreadable."""
+    try:
+        from local_operator.network import skillsync
+
+        return {"skills": skillsync.skill_state(root)["skills"]}
+    except Exception:  # noqa: BLE001 — a fact is not a gate; the row reads None as unknown
+        return None
+
+
+def skills_row(
+    member: Any,
+    facts: Mapping[str, Any],
+    *,
+    peer_label: str,
+    local: Sequence[Any],
+    own_device_id: str,
+) -> dict[str, Any]:
+    """(k) Does the peer hold this device's own skills, current? Informational.
+
+    ``local`` is this device's ``skillsync.authored_skills`` (the only skills it
+    sends); ``facts["skills"]`` is the peer's own ``skill_state``. Every skill
+    that will not travel is NAMED with its reason, so an oversize skill is never
+    a silent absence on the far side.
+    """
+    fact = facts.get("skills")
+    held_in = fact.get("skills") if isinstance(fact, Mapping) else None
+    if not isinstance(held_in, Mapping):
+        return _capability_row(
+            device_id=member.device_id,
+            device_name=peer_label,
+            capability=CAPABILITY_SKILLS,
+            ok=False,
+            code=CODE_UNKNOWN,
+            detail="the peer's answer did not carry its skills (it may predate skill sync)",
+            # The remedy push/tick/state already give for an old peer, so this
+            # row is not the one surface that leaves the operator guessing
+            # (QA round 1, Q-4).
+            remedies=[f"run `lop-update` on {peer_label}, then re-check"],
+            source=SOURCE_UNKNOWN,
+        )
+    current: list[str] = []
+    kept: list[str] = []
+    shadowed: list[str] = []
+    missing: list[str] = []
+    untravelled: list[str] = []
+    for skill in local:
+        name = str(getattr(skill, "name", "") or "")
+        if getattr(skill, "status", "") != "ready":
+            untravelled.append(f"{name} ({getattr(skill, 'reason', '') or 'cannot travel'})")
+            continue
+        held = held_in.get(name)
+        held = held if isinstance(held, Mapping) else None
+        if held is not None and str(held.get("tree_hash") or "") == getattr(skill, "tree_hash", ""):
+            current.append(name)
+        elif held is not None and held.get("mirror_wins"):
+            # The peer owns this name elsewhere, yet this device's EARLIER copy
+            # still sits in its skills/<name> and wins there; "kept as its own"
+            # would be false (QA round 3, Q-8). Counted as kept for the sums.
+            shadowed.append(name)
+        elif held is not None and (
+            not held.get("origin") or held.get("origin") != own_device_id or held.get("edited")
+        ):
+            kept.append(name)
+        else:
+            missing.append(name)
+    sendable = len(current) + len(kept) + len(shadowed) + len(missing)
+    parts = [f"{peer_label} holds {len(current)} of this device's {sendable} sendable skills"]
+    if kept:
+        parts.append(f"kept as its own: {_name_list(kept)}")
+    if shadowed:
+        parts.append(
+            f"has its own {_name_list(shadowed)}, but an earlier synced copy still wins "
+            f"there; delete skills/<name> on {peer_label} to use its own"
+        )
+    if missing:
+        parts.append(f"not synced yet: {_name_list(missing)}")
+    if untravelled:
+        parts.append(f"will not travel: {'; '.join(untravelled)}")
+    return _capability_row(
+        device_id=member.device_id,
+        device_name=peer_label,
+        capability=CAPABILITY_SKILLS,
+        ok=not missing,
+        code="" if not missing else CODE_SKILLS_NOT_SYNCED,
+        detail="; ".join(parts),
+        remedies=(
+            [
+                "the mesh syncs skills about once a minute; to do it now, run "
+                f"`lop network skills push --peer {peer_label}`"
+            ]
+            if missing
+            else []
+        ),
+        source=SOURCE_PEER,
+        observed={
+            "current": current,
+            "kept": kept,
+            "shadowed": shadowed,
+            "missing": missing,
+            "untravelled": [
+                str(getattr(s, "name", "")) for s in local if getattr(s, "status", "") != "ready"
+            ],
+        },
+    )
 
 
 def _failover_fact(root: Path, model: Mapping[str, Any]) -> dict[str, Any] | None:
@@ -5837,6 +5979,21 @@ def _peer_checks(
     rows.append(git_row(member, facts, peer_label=peer_label, viewer=viewer))
     rows.append(repository_row(member, facts, peer_label=peer_label, repository=repository))
     rows.append(mcp_servers_row(member, facts, peer_label=peer_label))
+    try:
+        from local_operator.network import skillsync
+
+        own_skills: list[Any] = list(skillsync.authored_skills(server.root))
+    except Exception:  # noqa: BLE001 — this device's own skills unreadable: compare none
+        own_skills = []
+    rows.append(
+        skills_row(
+            member,
+            facts,
+            peer_label=peer_label,
+            local=own_skills,
+            own_device_id=str(getattr(getattr(server, "identity", None), "device_id", "") or ""),
+        )
+    )
     credential_row = model_credential_row(member, facts, viewer=viewer, peer_label=peer_label)
     _attach_failover(credential_row, facts, server=server)
     rows.append(credential_row)

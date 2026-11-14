@@ -30,6 +30,7 @@ from starlette.websockets import WebSocket, WebSocketDisconnect
 
 from local_operator.mobile.auth import COOKIE_NAME, sign_cookie
 from local_operator.tunnels.config import validate_connection
+from local_operator.tunnels.request_log import RequestLog, note_reason
 
 MAX_BODY_BYTES = 10 * 1024 * 1024
 MAX_STREAM_SECONDS = 60
@@ -148,6 +149,14 @@ AUTHORIZATION_DEFERRED = "authorization_deferred"
 #: lock deadline, so no request was sent at all. Both clear by themselves.
 CONTROL_PLANE_TIMEOUT = "control_plane_timeout"
 CREDENTIAL_STORE_BUSY = "credential_store_busy"
+#: Radient ANSWERED, with a 5xx: the control plane is up enough to reply and
+#: failing on its side. It used to fall through to `REFUSED` (a field report on
+#: 0.96.5: a 503 from `/v1/tunnels` read as "authorization refused", which sends
+#: the operator to sign in again for a fault that is neither their login nor
+#: their network). Transient: the connector keeps its existing retry cadence (the
+#: poller's next pass, and the supervisor's documented 10 s restart floor on a
+#: cold start), so no new timing is introduced for it.
+SERVER_UNAVAILABLE = "server_unavailable"
 NOT_AUTHORIZED = "tunnel_not_authorized"
 LEASE_PENDING = "authorization_lease_pending"
 # The connector's own terminal states, not relay refusals: the connector exited
@@ -359,6 +368,7 @@ TERMINAL_REMEDY = {
     # Self-clearing like `UNREACHABLE`, so they name the check, not a repair.
     CONTROL_PLANE_TIMEOUT: "lop tunnel status",
     CREDENTIAL_STORE_BUSY: "lop tunnel status",
+    SERVER_UNAVAILABLE: "lop tunnel status",
     REFUSED: "lop login radient",
     NOT_AUTHORIZED: "lop tunnel connect",
     LEASE_PENDING: "lop tunnel status",
@@ -415,6 +425,9 @@ def reason_label(reason: str) -> str:
     a daemon from another version naming its own state is more useful to an
     operator than a shrug, and `terminal_detail` already takes that position.
     """
+    localized = _localized(reason)
+    if localized is not None:
+        return localized[0]
     return REASON_LABEL.get(reason, reason)
 
 
@@ -425,7 +438,42 @@ def terminal_detail(reason: str, relay_detail: str) -> str:
     a daemon from another version — rather than saying nothing about a cause the
     daemon plainly named.
     """
+    localized = _localized(reason)
+    if localized is not None:
+        return localized[1]
     return TERMINAL_DETAIL.get(reason, relay_detail)
+
+
+def relay_detail(reason: str) -> str:
+    """The phone-facing sentence for a refusal reason (the 503 body's ``detail``)."""
+    localized = _localized(reason)
+    if localized is not None:
+        return localized[2]
+    return RELAY_DETAIL[reason]
+
+
+def _localized(reason: str) -> tuple[str, str, str] | None:
+    """``(label, terminal detail, relay detail)`` for a reason whose copy is keyed.
+
+    The tables above predate the i18n catalogues and are still English
+    literals; copy ADDED since then lives in the `tunnel.status` namespace
+    (AGENTS.md: new user-facing copy is keyed), so it is resolved here, at call
+    time — never at import, so a live language change is followed — and every
+    caller keeps reading one vocabulary through `reason_label`,
+    `terminal_detail` and `relay_detail`. Imported lazily to keep this module's
+    import graph (pinned in `tests/unit/test_import_graph.py`) unchanged.
+    """
+    if reason != SERVER_UNAVAILABLE:
+        return None
+    from local_operator.i18n.keys import tunnel_status
+    from local_operator.i18n.text import tr
+
+    _t = tr("tunnel.status")
+    return (
+        _t(tunnel_status.server_unavailable_label()),
+        _t(tunnel_status.server_unavailable_terminal()),
+        _t(tunnel_status.server_unavailable_relay()),
+    )
 
 
 # Only presentation/protocol headers cross the boundary. In particular the
@@ -633,7 +681,7 @@ class Gateway:
         terminal cannot disagree about the cause.
         """
         reason = self.refusal_reason()
-        return {"detail": RELAY_DETAIL[reason], "reason": reason}
+        return {"detail": relay_detail(reason), "reason": reason}
 
     def unavailable_body(self) -> dict[str, str]:
         """The phone-facing 503 body.
@@ -721,11 +769,13 @@ class Gateway:
                 payload.update(self.refusal())
             return JSONResponse(payload)
         if self.revoked or time.monotonic() >= self.authorized_until:
+            note_reason(request.scope, self.refusal_reason())
             return JSONResponse(
                 self.unavailable_body(), status_code=503, headers=self.refusal_headers()
             )
         harness = self.harness(host)
         if harness is None:
+            note_reason(request.scope, "unknown_host")
             return JSONResponse({"error": "unknown tunnel host"}, status_code=404)
         expected_origin = "https://" + host
         origin = request.headers.get("origin")
@@ -745,13 +795,16 @@ class Gateway:
             )
             or (request.method not in {"GET", "HEAD", "OPTIONS"} and origin != expected_origin)
         ):
+            note_reason(request.scope, "cross_origin")
             return JSONResponse({"error": "same-origin request required"}, status_code=403)
         body = bytearray()
         async for chunk in request.stream():
             body.extend(chunk)
             if len(body) > MAX_BODY_BYTES:
+                note_reason(request.scope, "body_too_large")
                 return JSONResponse({"error": "request exceeds 10 MiB"}, status_code=413)
         if request.method in {"GET", "HEAD"} and body:
+            note_reason(request.scope, "unexpected_body")
             return JSONResponse({"error": "GET/HEAD bodies are not supported"}, status_code=400)
         try:
             await self.verifier.verify(
@@ -763,6 +816,7 @@ class Gateway:
                 body=bytes(body),
             )
         except (ValueError, KeyError, TypeError, jwt.PyJWTError, httpx.HTTPError):
+            note_reason(request.scope, "origin_proof_invalid")
             return JSONResponse(
                 {"error": "valid Radient origin assertion required"}, status_code=401
             )
@@ -771,6 +825,7 @@ class Gateway:
         # recheck after consuming/verifying its body, immediately before any
         # harness request or local side effect begins.
         if self.revoked or time.monotonic() >= self.authorized_until:
+            note_reason(request.scope, self.refusal_reason())
             return JSONResponse(
                 self.unavailable_body(), status_code=503, headers=self.refusal_headers()
             )
@@ -785,6 +840,7 @@ class Gateway:
         try:
             headers = self.headers(request.headers, host, harness)
         except ValueError:
+            note_reason(request.scope, "mobile_relay_not_installed")
             return JSONResponse({"error": "mobile relay is not installed"}, status_code=503)
         target = httpx.URL(
             scheme="http",
@@ -801,7 +857,11 @@ class Gateway:
                 stream=True,
                 follow_redirects=False,
             )
-        except httpx.HTTPError:
+        except httpx.HTTPError as failure:
+            # The class name only (never its text: httpx echoes the URL). It is
+            # the split the field report needed: a harness that refused the
+            # connection is down, one that timed out is up and stuck.
+            note_reason(request.scope, f"harness_{type(failure).__name__}")
             return JSONResponse({"error": "local harness unavailable"}, status_code=502)
         response_headers = {k: v for k, v in upstream.headers.items() if k in _RESPONSE_HEADERS}
         location = upstream.headers.get("location")
@@ -817,6 +877,7 @@ class Gateway:
                 response_headers["location"] = location
             else:
                 await upstream.aclose()
+                note_reason(request.scope, "unsafe_redirect")
                 return JSONResponse({"error": "unsafe harness redirect"}, status_code=502)
         response_headers["cache-control"] = "no-store"
         response_headers["referrer-policy"] = "same-origin"
@@ -971,3 +1032,14 @@ class Gateway:
                 WebSocketRoute("/{path:path}", self.websocket),
             ]
         )
+
+    def logged_app(self, log: RequestLog) -> Any:
+        """`app()` wrapped in the bounded request log (`tunnels/request_log.py`).
+
+        A separate entry point so the bare app — what tests and the import-graph
+        pin construct — is unchanged, and only the supervised connector writes
+        a log file. The loopback health probe is skipped: `lop tunnel status`
+        and the desktop poll hit it, and they would crowd the phone's requests
+        out of the bounded tail the status surfaces read.
+        """
+        return log.middleware(self.app(), skip=frozenset({"/_lop_tunnel/health"}))

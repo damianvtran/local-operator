@@ -39,12 +39,14 @@ class _Server:
     def __init__(self, attached: int = 0) -> None:
         self._attached = attached
         self.pending: list[str | None] = []
+        self.queued: list[bool] = []
 
     def attach_clients(self) -> int:
         return self._attached
 
-    def set_record_pending(self, pending: str | None) -> None:
+    def set_record_pending(self, pending: str | None, *, queued: bool = False) -> None:
         self.pending.append(pending)
+        self.queued.append(queued)
 
 
 def _handle(
@@ -533,3 +535,74 @@ def test_an_attached_pane_still_parks_a_hidden_sessions_gate(monkeypatch, tmp_pa
     handle._registrant._attached = 1
 
     assert handle._gate_timeout_s() == DEFAULT_UNATTENDED_GATE_TIMEOUT_H * 3600.0
+
+
+# ---------------------------------------------------------------------------
+# Queued asks claim ``pending`` too (node-ask-forward, 2026-11-13)
+# ---------------------------------------------------------------------------
+#
+# A queued ask (the default) never parks a gate, so before this nothing set the
+# record's ``pending`` for it and a mesh node's question never lit the origin's
+# "needs" badge. The claim is the existing ``"ask"`` kind, written through the
+# same ``set_record_pending`` door; no OS toast is raised for it (the queue has
+# its own notification, and a second one is the dedupe trap).
+
+
+def test_an_open_queued_ask_claims_pending_and_its_settle_clears_it(monkeypatch) -> None:
+    handle = _handle(monkeypatch, attached=0)
+    toasts: list[Any] = []
+    monkeypatch.setattr(handle, "_announce_pending", lambda *a: toasts.append(a), raising=False)
+
+    handle._sync_queued_ask_pending(1)
+    handle._sync_queued_ask_pending(2)
+    handle._sync_queued_ask_pending(0)
+
+    assert handle._registrant.pending == ["ask", "ask", None]
+    assert toasts == [], "a queued ask must not raise a second (gate) notification"
+
+
+def test_a_parked_gate_owns_pending_and_hands_it_back_to_an_open_ask(monkeypatch) -> None:
+    handle = _handle(monkeypatch, attached=1)
+
+    handle._announce_pending("approval", "bash", "rm -rf build/")
+    # The queue moves while the gate is parked: the gate's kind is not clobbered.
+    handle._sync_queued_ask_pending(1)
+    handle._announce_settled()
+    handle._sync_queued_ask_pending(0)
+
+    assert handle._registrant.pending == ["approval", "ask", None]
+
+
+def test_the_ask_fold_sink_drives_the_claim(monkeypatch) -> None:
+    """The REAL hook: ``_ask_state_changed`` is what the queue calls on every move."""
+    handle = _handle(monkeypatch, attached=0)
+
+    class _Fold:
+        def set_asks(self, rows: Any, count: Any) -> None:
+            self.count = count
+
+    handle._fold = _Fold()  # type: ignore[attr-defined]
+    handle._on_projection = None  # type: ignore[attr-defined]
+    monkeypatch.setattr(handle, "_publish_pending_gate", lambda: None, raising=False)
+
+    handle._ask_state_changed([{"ask_id": "a1", "status": "open"}], 1)
+    handle._ask_state_changed([], 0)
+
+    assert handle._registrant.pending == ["ask", None]
+
+
+def test_only_the_queues_claim_is_marked_queued(monkeypatch) -> None:
+    """PR #3934 R1-3/Q1: a peer parks on a blocking gate, never on the queue's claim."""
+    handle = _handle(monkeypatch, attached=1)
+
+    handle._sync_queued_ask_pending(1)
+    handle._announce_pending("ask", "ask", "Which branch?")
+    handle._announce_settled()
+    handle._sync_queued_ask_pending(0)
+
+    assert list(zip(handle._registrant.pending, handle._registrant.queued)) == [
+        ("ask", True),
+        ("ask", False),
+        ("ask", True),
+        (None, False),
+    ]

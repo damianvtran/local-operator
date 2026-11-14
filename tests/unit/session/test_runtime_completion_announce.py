@@ -748,8 +748,18 @@ async def test_the_ladder_is_bounded_and_stops_when_nothing_can_deliver(
         session_id = handle._session_id_for_resume()
         token = _publish("complete", session_id)
         handle._schedule_completion_announce()
-        await _until(lambda: len(calls) >= 3)
-        await asyncio.sleep(0.2)  # any further retry would land inside this
+        # Wait for the LADDER to stop, not for the third banner call and not for
+        # a fixed dwell. `len(calls) >= 3` goes true as the third attempt ENTERS
+        # its sink, before `_announce_completion` runs `release_delivery`, so the
+        # claim read below raced that release (CI job 132338398281, run
+        # 43558123292: "a failed banner must not spend the claim"). A `sleep` only
+        # narrows that race under load. `_ladder_exhausted` awaits the attempt
+        # tasks, so the handback has landed when it returns; and because the
+        # successor is stored in `_completion_task` BEFORE a rung returns, a slot
+        # that still holds the finished task also proves no 4th attempt was
+        # scheduled, so no extra dwell is needed for the "ran past its bound"
+        # check. The count assertion below pins the rungs the wait cannot.
+        await _ladder_exhausted(handle)
         assert len(calls) == 3, f"the ladder ran past its bound: {len(calls)} attempts"
         assert len(serving_module._COMPLETION_RETRY_DELAYS_S) == 2
         assert _delivered(session_id, token) is False, "a failed banner must not spend the claim"

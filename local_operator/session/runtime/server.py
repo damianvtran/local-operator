@@ -2725,6 +2725,7 @@ class RuntimeServer:
         #: than read off the record so the publish is one assignment and the
         #: fields have a defined value before the record exists.
         self._pending: str | None = None
+        self._pending_queued = False
         #: True once this session has run at least one real turn. Starts
         #: False for every fresh boot (a ``/new`` session sitting in the
         #: composer) and flips True the first time a turn actually runs — the
@@ -5780,7 +5781,7 @@ class RuntimeServer:
         except Exception:  # noqa: BLE001
             pass
 
-    def set_record_pending(self, pending: str | None) -> None:
+    def set_record_pending(self, pending: str | None, *, queued: bool = False) -> None:
         """Record that this session is waiting for a PERSON (or no longer is).
 
         Named for the RECORD it writes, distinct from ``set_pending`` below,
@@ -5792,10 +5793,16 @@ class RuntimeServer:
         than waiting for the 15 s heartbeat, because the whole value of the
         field is that a user hunting for "what is that 283 MB process doing"
         finds the answer at once.
+
+        ``queued`` marks the claim as the ask QUEUE's (an open queued ask, no
+        gate parked): a peer badges it but raises no park row
+        (``SessionRecord.pending_queued``).
         """
-        if self._pending == pending:
+        queued = bool(queued and pending)
+        if self._pending == pending and getattr(self, "_pending_queued", False) == queued:
             return
         self._pending = pending
+        self._pending_queued = queued
         self._republish()
 
     def _republish_detached(self) -> None:
@@ -6110,6 +6117,7 @@ class RuntimeServer:
         try:
             publisher.heartbeat(
                 pending=self._pending,
+                pending_queued=getattr(self, "_pending_queued", False),
                 busy=self._busy,
                 leaving=self._leaving,
                 started=self._started,

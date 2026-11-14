@@ -40,7 +40,12 @@ from local_operator.tui.widgets.editor import (
     SHELL_PLACEHOLDER,
     Editor,
 )
-from local_operator.tui.widgets.transcript import NoticeBlock, TranscriptView, UserBlock
+from local_operator.tui.widgets.transcript import (
+    TAIL_TOLERANCE_ROWS,
+    NoticeBlock,
+    TranscriptView,
+    UserBlock,
+)
 from tests.unit.tui.test_app_pilot import FakeSession, _factory, _renderable_plain
 from tests.unit.tui.waiting import settle
 
@@ -549,11 +554,21 @@ async def test_a_reader_scrolled_back_is_not_yanked_to_the_tail_on_close() -> No
     session = AsideSession(answer="\n\n".join(f"para {i} " * 20 for i in range(20)))
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(120, 24)) as pilot:
-        await pilot.pause()
+        # Boot adoption calls ``follow_tail`` (via ``project_settled_rows``).
+        # If it lands AFTER the reader parks at y=3 below, the next
+        # ``_scroll_to_tail`` drags the view to the end and the premise reads
+        # ``68 < 68`` -- CI run 43279222834. Wait on the adoption edge first.
+        await _settle_boot(pilot, app, session)
         for i in range(40):
             app._append_block(UserBlock(f"question number {i:02d} about the codebase"))
-        await pilot.pause()
         transcript = app._transcript_view()
+        # Park only once the appended rows are laid out past y=3 by more than
+        # the tail tolerance; otherwise y=3 could still count as "at the tail".
+        await settle(
+            pilot,
+            lambda: transcript.max_scroll_y > 3 + TAIL_TOLERANCE_ROWS,
+            what="the 40 appended rows are laid out past the parked offset",
+        )
 
         # Scroll back to re-read something, the gesture the docstring names.
         transcript.note_user_scroll()

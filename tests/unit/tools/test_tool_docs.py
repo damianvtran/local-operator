@@ -337,7 +337,14 @@ MEASURED_TOKENS: dict[str, int] = {
     # now `int | list[int]` (an extra `array` arm in the schema) and the notes
     # drop the false "preselected" and say a multi-select may recommend several.
     # `recommended_all` is derived and hidden (SkipJsonSchema), so it costs 0.
-    "ask": 1112,
+    # 1112 -> 1195 (+83, suggested terminal commands): each question gains the
+    # optional `command` (one-line shell command; "include cd") and
+    # `command_target` ("agent" | "user"; one-click run only on the right
+    # device). Field descriptions only, no sentence added to the ask
+    # description; same reading on both LOP_ASK_NONBLOCKING arms. The start
+    # budget (bench_context_budget.py) absorbs it with headroom on both arms, so
+    # that ceiling is unchanged.
+    "ask": 1195,
     "ask_withdraw": 452,
     # 295 -> 308 (highlights deliverables, #3392): the new ``deliver`` parameter
     # ("Files to show.") -- re-measured via this test's own print; bash is the only
