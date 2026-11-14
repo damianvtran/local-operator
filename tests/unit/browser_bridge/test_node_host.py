@@ -1006,6 +1006,55 @@ def test_each_step_is_reported_as_it_completes(paths: Path) -> None:
     assert [n for _, n in seen] == sorted(n for _, n in seen) and seen[0][1] < seen[-1][1]
 
 
+def test_cli_routes_a_broken_pipe_to_the_quiet_exit(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], paths: Path
+) -> None:
+    """`lop browser … | head`: a BrokenPipeError reaches the quiet exit, NOT the
+    traceback panel. Pinned because the handling moved from its own `except
+    BrokenPipeError:` clause into main()'s single handler (CI fix: the extra clause
+    made pyright give up on main() as too complex); this proves the routing kept."""
+    from local_operator import cli
+
+    node = FakeNode(paths, provisioned=True)
+    monkeypatch.setattr(node_host, "default_env", lambda: node.env)
+
+    def _pipe_gone(*_args: Any, **_kwargs: Any) -> Any:
+        raise BrokenPipeError(32, "Broken pipe")
+
+    monkeypatch.setattr(node_host, "setup", _pipe_gone)
+    # A sentinel, so the assertion proves THIS path ran rather than the panel's `1`.
+    monkeypatch.setattr(cli, "_exit_quietly_on_broken_pipe", lambda: 141)
+    monkeypatch.setattr("sys.argv", ["lop", "browser", "setup", "--node", "--dry-run"])
+    assert cli.main() == 141
+    assert "Stack Trace" not in capsys.readouterr().err
+
+
+def test_quiet_exit_points_stdout_at_devnull_and_returns_1(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The helper itself, on a real descriptor (never pytest's own capture fds)."""
+    import io
+    import os
+
+    from local_operator import cli
+
+    read_end, write_end = os.pipe()
+    target = os.dup(write_end)
+
+    class _Stdout(io.StringIO):
+        def fileno(self) -> int:
+            return target
+
+    monkeypatch.setattr("sys.stdout", _Stdout())
+    try:
+        assert cli._exit_quietly_on_broken_pipe() == 1  # noqa: SLF001 - the unit under test
+        now, devnull = os.fstat(target), os.stat(os.devnull)
+        assert (now.st_dev, now.st_ino) == (devnull.st_dev, devnull.st_ino)
+    finally:
+        for fd in (read_end, write_end, target):
+            os.close(fd)
+
+
 def test_cli_streams_human_rows_and_keeps_json_a_single_document(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], paths: Path
 ) -> None:

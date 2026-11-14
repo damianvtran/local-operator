@@ -4575,7 +4575,14 @@ def browser_command(args: argparse.Namespace) -> int:
     if command == "setup" or (command == "uninstall" and getattr(args, "node", False)):
         return _browser_node_command(args)
     if command == "uninstall":
-        if args.dry_run or args.authorised_by or args.json:
+        # getattr, like the `--node` read above: a programmatic Namespace (the
+        # install tests, any embedding caller) built before these flags existed
+        # carries none of them, and must reach the plain route unchanged.
+        if (
+            getattr(args, "dry_run", False)
+            or getattr(args, "authorised_by", "")
+            or getattr(args, "json", False)
+        ):
             # These flags exist for `--node` only. The plain route ignored them,
             # so `uninstall --dry-run --purge` ran a REAL purge despite its help
             # text promising "change nothing" (round 1, R1-1).
@@ -18042,6 +18049,20 @@ def _exec_temporary_refusal(args: argparse.Namespace) -> str | None:
     return None
 
 
+def _exit_quietly_on_broken_pipe() -> int:
+    """Exit status for a reader that went away (`lop browser status | head`).
+
+    That is the reader's choice, not a crash, and main()'s traceback panel
+    used to print for it. Point stdout at devnull so the interpreter's own
+    flush at exit does not raise a second time, and exit the way a SIGPIPE'd
+    filter does by convention — quietly, non-zero (the Python docs' "Note on
+    SIGPIPE" recipe).
+    """
+    devnull = os.open(os.devnull, os.O_WRONLY)
+    os.dup2(devnull, sys.stdout.fileno())
+    return 1
+
+
 def main() -> int:
     # Name this process in the OS process listing. On Linux this is a
     # ~microsecond `prctl` on the current process and nothing else happens; the
@@ -19645,17 +19666,14 @@ def main() -> int:
                 agent_registry,
             )
         )
-    except BrokenPipeError:
-        # The reader went away (`lop browser status | head`): that is the
-        # reader's choice, not a crash, and the traceback panel below used to
-        # print for it. Point stdout at devnull so the interpreter's own flush
-        # at exit does not raise a second time, and exit the way a SIGPIPE'd
-        # filter does by convention — quietly, non-zero (the Python docs'
-        # "Note on SIGPIPE" recipe).
-        devnull = os.open(os.devnull, os.O_WRONLY)
-        os.dup2(devnull, sys.stdout.fileno())
-        return 1
     except Exception as e:
+        # Checked inside the one handler rather than as its own `except
+        # BrokenPipeError:` clause: a second handler on this try adds flow
+        # edges from every statement in main()'s body, which tipped pyright
+        # into "Code is too complex to analyze" for main(). Same behaviour —
+        # BrokenPipeError is an Exception subclass and is tested first.
+        if isinstance(e, BrokenPipeError):
+            return _exit_quietly_on_broken_pipe()
         # U5-1 (narrow re-check): if the failure is teams-registry lock
         # contention — an expected recoverable state, not a defect — present
         # one concise line instead of the traceback panel below, which reads
