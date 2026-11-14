@@ -4950,7 +4950,9 @@ def is_ordinary_word_value(value: str) -> bool:
     contained in a later bare occurrence; mixed case, digits or symbols restore
     containment, and so does a value longer than :data:`_ORDINARY_WORD_MAX_LEN`.
     """
-    return len(value) <= _ORDINARY_WORD_MAX_LEN and _ORDINARY_WORD_VALUE.fullmatch(value) is not None
+    return (
+        len(value) <= _ORDINARY_WORD_MAX_LEN and _ORDINARY_WORD_VALUE.fullmatch(value) is not None
+    )
 
 
 def is_registerable_component(
