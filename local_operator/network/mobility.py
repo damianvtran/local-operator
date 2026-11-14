@@ -2755,6 +2755,9 @@ def _promote(server: "RelayServer", staging: Path, target_id: str) -> _PromoteOu
         logger.warning("mobility: could not map %s's cwd for this host", target_id, exc_info=True)
 
     monitor_cwds: dict[str, int] = {}
+    # Before the rebuild, after the cwd rewrite: the session's own monitor load
+    # reads this to treat carried cwds as foreign even under a shared home path.
+    carry.mark_moved_in(target)
     try:
         report = carry.rebuild_indexes(server.root, target_id)
         wakes = int(report.get("wakes") or 0)

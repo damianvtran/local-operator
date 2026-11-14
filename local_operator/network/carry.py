@@ -85,6 +85,10 @@ ENTRY_CUSTOM = "custom"
 #: ``session.retention.DESKTOP_MARKER_NAME`` — the created-session marker a copy
 #: carries, and the second source of the ``cwd`` a rebuilt index names.
 DESKTOP_MARKER_NAME = "desktop.json"
+#: Set to ``true`` in an existing ``desktop.json`` by the promote (see
+#: :func:`mark_moved_in`), so the session's own monitor load knows its carried
+#: cwds may be foreign even under this host's home path (review r2 R2-m1).
+MOVED_IN_KEY = "moved_in"
 
 #: Backward-read granularity for the transcript scan (the reference walker's
 #: chunk; kept in one place so the two readers stay comparably shaped).
@@ -250,7 +254,11 @@ def _under(path: str, root: str) -> bool:
 
 
 def translate_monitor_cwds(
-    specs: Sequence[Mapping[str, Any]], *, session_cwd: str, home: str = ""
+    specs: Sequence[Mapping[str, Any]],
+    *,
+    session_cwd: str,
+    home: str = "",
+    moved: bool = False,
 ) -> tuple[list[dict[str, Any]], dict[str, int]]:
     """Rewrite each carried monitor's ``cwd`` for THIS host.
 
@@ -272,6 +280,12 @@ def translate_monitor_cwds(
     that must keep failing loudly, not silently re-arm somewhere else. Only a cwd
     outside this home — another device's ``/Users/<u>`` or ``/home/<u>`` — is
     foreign and mapped.
+
+    ``moved=True`` lifts that skip (review r2 R2-m1): a session KNOWN to have
+    arrived by move — the promote's index rebuild, or a load whose marker
+    carries :data:`MOVED_IN_KEY` — may hold a cwd from a device that shares this
+    home path (two Macs at ``/Users/damian``), and that path is foreign even
+    though it sits under this home.
     """
     rows: list[dict[str, Any]] = []
     counts = {"translated": 0, "fallback": 0}
@@ -287,7 +301,7 @@ def translate_monitor_cwds(
             and cwd
             and os.path.isabs(cwd)
             and not os.path.exists(cwd)
-            and not any(_under(cwd, local) for local in local_homes)
+            and (moved or not any(_under(cwd, local) for local in local_homes))
         ):
             mapped = translate_host_path(cwd, home=home)
             if mapped:
@@ -405,6 +419,35 @@ def rewrite_host_cwd(
     return {"from": recorded_value, "to": mapped}
 
 
+def mark_moved_in(target: Path) -> bool:
+    """Record on an EXISTING marker that this session arrived by move.
+
+    Only an existing ``desktop.json`` is touched: creating one would change how
+    the desktop treats a TUI-created session, which a flag must not do. Without
+    the marker, the promote's index rebuild still maps the cwds (``moved=True``)
+    and only the session-load seat keeps the local-home rule. Never raises.
+    """
+    marker_path = Path(target) / DESKTOP_MARKER_NAME
+    try:
+        marker = json.loads(marker_path.read_text(encoding="utf-8"))
+        if not isinstance(marker, dict) or marker.get(MOVED_IN_KEY) is True:
+            return isinstance(marker, dict)
+        marker[MOVED_IN_KEY] = True
+        _write_marker(marker_path, marker)
+        return True
+    except (OSError, ValueError):
+        return False
+
+
+def moved_in(session_dir: Path) -> bool:
+    """Whether :func:`mark_moved_in` flagged this session's marker. Never raises."""
+    try:
+        marker = json.loads((Path(session_dir) / DESKTOP_MARKER_NAME).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    return isinstance(marker, dict) and marker.get(MOVED_IN_KEY) is True
+
+
 def _monitor_index_rows(specs: list[Any]) -> list[dict[str, Any]]:
     """The index rows for carried monitor specs, with NO counters (fresh defaults).
 
@@ -485,7 +528,7 @@ def rebuild_indexes(
         # The index names the cwd each check runs in; the transcript keeps the
         # source host's value (never edited — see ``rewrite_host_cwd``) and the
         # session re-applies this same translation when it loads the specs.
-        specs, cwd_counts = translate_monitor_cwds(specs, session_cwd=cwd)
+        specs, cwd_counts = translate_monitor_cwds(specs, session_cwd=cwd, moved=True)
         if cwd_counts["translated"] or cwd_counts["fallback"]:
             report["monitor_cwds"] = cwd_counts
         rows = _monitor_index_rows(specs)

@@ -567,3 +567,186 @@ class TestMovedSessionReappliesItsTeamBrief:
             assert "[team: lopdev]" not in stream.requests[0].model_dump_json()
         finally:
             await session.dispose()
+
+
+def _role(registry: Any, name: str, prompt: str) -> None:
+    """A ``role``-tagged agent row (attachable by name) with ``prompt`` as its voice."""
+    from local_operator.agents import AgentEditFields
+
+    fields: dict[str, Any] = dict.fromkeys(
+        (
+            "description",
+            "categories",
+            "security_prompt",
+            "hosting",
+            "model",
+            "last_message",
+            "temperature",
+            "top_p",
+            "top_k",
+            "max_tokens",
+            "stop",
+            "frequency_penalty",
+            "presence_penalty",
+            "seed",
+            "current_working_directory",
+        )
+    )
+    agent = registry.create_agent(AgentEditFields(name=name, tags=["role"], **fields))
+    registry.set_agent_system_prompt(agent.id, prompt)
+
+
+async def _answered_session(dest: Path, *, team: str = "", agent: str = "") -> tuple[Any, Any]:
+    """A session on ``dest`` whose attachment names definitions this device lacks,
+    answered once (so the late adoption is closed, as for every moved session)."""
+    from local_operator.agents import AgentRegistry
+    from local_operator.harness.types import StreamEndEvent, StreamTextDelta
+    from local_operator.prompts_api import build_system_blocks
+    from local_operator.resume import write_session_attachment
+    from local_operator.session.goal import GoalState
+    from local_operator.session.session import Session
+    from local_operator.session.transcript import Transcript
+    from local_operator.teams import TeamRegistry
+    from tests.unit.session.test_session import MODEL, ScriptedStream
+
+    session_dir = dest / "sessions" / SID
+    session_dir.mkdir(parents=True)
+    write_session_attachment(session_dir, team=team, agent=agent, goal="")
+    goal_state = GoalState()
+
+    def provider() -> list[str]:
+        return build_system_blocks(
+            [],
+            "<skills/>",
+            "test environment",
+            "2026-11-13",
+            team_brief=goal_state.team_brief,
+            agent_brief=goal_state.agent_brief,
+        )
+
+    provider.append_only_state = True  # type: ignore[attr-defined]
+    reply = [StreamTextDelta(delta="ok"), StreamEndEvent(stop_reason="stop")]
+    stream = ScriptedStream([reply, reply, reply])
+    session = Session(
+        model=MODEL,
+        stream_fn=stream,
+        tools=[],
+        transcript=Transcript(session_dir),
+        system_blocks_provider=provider,
+        goal_state=goal_state,
+        agent_registry=AgentRegistry(dest),
+        team_registry=TeamRegistry(dest),
+    )
+    await session.prompt("answered before the definitions landed")
+    return session, stream
+
+
+class TestReresolveRefreshesBothRegistries:
+    """Review r2 R2-M1: the agent registry was never force-refreshed (it spells
+    the method ``refresh_now``), so agent lookups inside the 5 s snapshot missed
+    and the spent fingerprint meant no retry."""
+
+    @pytest.mark.asyncio
+    async def test_a_team_and_its_mirrored_manager_both_reach_the_next_turn(
+        self, tmp_path: Path
+    ) -> None:
+        from datetime import datetime, timezone
+
+        from local_operator.agents import AgentRegistry
+        from local_operator.network import definitions
+        from local_operator.teams import Team, TeamRegistry
+
+        source, dest = tmp_path / "src", tmp_path / "dst"
+        session, stream = await _answered_session(dest, team="lopdev")
+        try:
+            assert session._unresolved_team == "lopdev"
+            # Within the agent registry's 5 s snapshot of turn 1: the push lands.
+            _role(AgentRegistry(source), "qa-mgr", "MGR-VOICE-MARKER")
+            TeamRegistry(source).save_team(
+                Team(
+                    id="t-lopdev",
+                    name="lopdev",
+                    created_date=datetime.now(timezone.utc),
+                    manager="qa-mgr",
+                    instructions="Ship reviewed work.",
+                    project="local-operator",
+                )
+            )
+            definitions.apply_bundle(
+                dest, definitions.local_bundle(source), origin_device="dev-source"
+            )
+
+            await session.prompt("the next turn")
+            assert session.active_team_name == "lopdev"
+            assert session._goal_state.agent_name == "qa-mgr"
+            assert "MGR-VOICE-MARKER" in session._goal_state.team_brief
+            sent = stream.requests[1].model_dump_json()
+            assert "[team: lopdev]" in sent and "MGR-VOICE-MARKER" in sent
+        finally:
+            await session.dispose()
+
+    @pytest.mark.asyncio
+    async def test_an_agent_only_attachment_resolves_on_the_next_turn(self, tmp_path: Path) -> None:
+        from local_operator.agents import AgentRegistry
+
+        dest = tmp_path / "dst"
+        session, stream = await _answered_session(dest, agent="qa-helper")
+        try:
+            assert session._unresolved_agent == "qa-helper"
+            _role(AgentRegistry(dest), "qa-helper", "HELPER-VOICE-MARKER")
+
+            await session.prompt("the next turn")
+            assert session._goal_state.agent_name == "qa-helper"
+            assert session._unresolved_agent == ""
+            assert "HELPER-VOICE-MARKER" in stream.requests[1].model_dump_json()
+        finally:
+            await session.dispose()
+
+    @pytest.mark.asyncio
+    async def test_an_unresolved_slot_keeps_its_marker_and_retries(self, tmp_path: Path) -> None:
+        from local_operator.agents import AgentRegistry
+
+        dest = tmp_path / "dst"
+        session, stream = await _answered_session(dest, agent="qa-helper")
+        try:
+            # An unrelated row lands: the attempt runs, misses, and keeps the name.
+            _role(AgentRegistry(dest), "someone-else", "x")
+            await session.prompt("still missing")
+            assert session._unresolved_agent == "qa-helper"
+            _role(AgentRegistry(dest), "qa-helper", "HELPER-VOICE-MARKER")
+            await session.prompt("now it lands")
+            assert session._goal_state.agent_name == "qa-helper"
+            assert "HELPER-VOICE-MARKER" in stream.requests[2].model_dump_json()
+        finally:
+            await session.dispose()
+
+
+class TestMovedInLiftsTheLocalHomeRule:
+    """Review r2 R2-m1: a move between devices sharing a home path still maps."""
+
+    def test_a_moved_session_maps_a_missing_cwd_under_a_shared_home(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        home = tmp_path / "home" / "damian"
+        (home / "proj").mkdir(parents=True)
+        monkeypatch.setenv("HOME", str(home))
+        source_only = str(home / "src-only" / "proj")
+        rows, counts = carry.translate_monitor_cwds(
+            [{"cwd": source_only}], session_cwd=str(tmp_path), moved=True
+        )
+        assert rows == [{"cwd": str(home / "proj")}] and counts["translated"] == 1
+        # Not moved: the same path is this host's own and is left to fail loudly.
+        rows, counts = carry.translate_monitor_cwds(
+            [{"cwd": source_only}], session_cwd=str(tmp_path)
+        )
+        assert rows == [{"cwd": source_only}] and counts == {"translated": 0, "fallback": 0}
+
+    def test_the_promote_flag_is_read_back_and_never_creates_a_marker(self, tmp_path: Path) -> None:
+        assert carry.mark_moved_in(tmp_path) is False
+        assert not (tmp_path / carry.DESKTOP_MARKER_NAME).exists()
+        (tmp_path / carry.DESKTOP_MARKER_NAME).write_text('{"cwd": "/x"}', encoding="utf-8")
+        assert carry.moved_in(tmp_path) is False
+        assert carry.mark_moved_in(tmp_path) is True
+        assert carry.moved_in(tmp_path) is True
+        marker = json.loads((tmp_path / carry.DESKTOP_MARKER_NAME).read_text(encoding="utf-8"))
+        assert marker == {"cwd": "/x", carry.MOVED_IN_KEY: True}

@@ -9077,7 +9077,7 @@ class Session:
     #: genuinely gone would otherwise force a registry rescan per step.
     _ATTACHMENT_RERESOLVE_INTERVAL_S = 15.0
 
-    def _reresolve_unresolved_attachment(self) -> dict[str, bool] | None:
+    def _reresolve_unresolved_attachment(self) -> None:
         """Re-apply a stored team/agent brief this LIVE runtime failed to resolve.
 
         WHY (2026-11-13, PR #3937 round 1, session ce6fcb93c28a on
@@ -9102,13 +9102,14 @@ class Session:
         included. A failed attempt is retried only once a registry root's mtime
         moves (or, unfingerprintable, after :data:`_ATTACHMENT_RERESOLVE_INTERVAL_S`).
 
-        Returns ``{"resolved": bool, "applied": bool}`` when an attempt ran, else
-        ``None``. Never raises: a turn must not fail over a brief.
+        Each slot is cleared only once IT resolved (review r2 R2-M1); a slot still
+        missing keeps its marker and is retried on the next registry change.
+        Never raises: a turn must not fail over a brief.
         """
         pending_team = self._unresolved_team and self.active_team is None
         pending_agent = self._unresolved_agent and not self._goal_state.agent_name
         if not (pending_team or pending_agent):
-            return None
+            return
         # Retry only when something could have changed: a definitions install
         # creates a row directory, which moves its registry root's mtime. Where a
         # (scoped) registry does not expose its root, fall back to a time throttle.
@@ -9129,41 +9130,44 @@ class Session:
         last = self._attachment_reresolved_at
         if last is not None:
             if fingerprint and tuple(fingerprint) == self._attachment_reresolve_fingerprint:
-                return None
+                return
             if not fingerprint and now - last < self._ATTACHMENT_RERESOLVE_INTERVAL_S:
-                return None
+                return
         self._attachment_reresolved_at = now
         self._attachment_reresolve_fingerprint = tuple(fingerprint)
         for registry in (self.team_registry, self.agent_registry):
-            refresh = getattr(registry, "refresh", None)
+            # BOTH registries must re-read disk NOW (review r2 R2-M1): the team
+            # registry spells it ``refresh`` but ``AgentRegistry`` /
+            # ``ScopedAgentRegistry`` spell it ``refresh_now``. Calling only the
+            # first left agent lookups (a team's specialist manager, an agent-only
+            # attachment) on the 5 s snapshot while the fingerprint above was
+            # already spent, so the miss was never retried.
+            refresh = getattr(registry, "refresh", None) or getattr(registry, "refresh_now", None)
             if callable(refresh):
                 try:
                     refresh()
                 except Exception:  # noqa: BLE001 — the restore reports a bad registry
                     logger.debug("attachment re-resolve: refresh failed", exc_info=True)
-        wanted_team = self._unresolved_team
         try:
             self._restore_attachment()
         except Exception:  # noqa: BLE001 — see the docstring
             logger.debug("attachment re-resolve failed", exc_info=True)
-        applied = bool(
-            (wanted_team and self.active_team is not None)
-            or (not wanted_team and self._goal_state.agent_name)
+        # Per slot: the restore records misses but never clears them (that is a
+        # user action's job), so a slot that now resolved is cleared here and one
+        # that did not keeps its name for the next attempt. An attached team also
+        # settles the agent slot: it owns that slot (issue #2014), so a stored
+        # agent beside it is superseded, not missing.
+        team_done = not pending_team or self.active_team is not None
+        agent_done = (
+            not pending_agent or bool(self._goal_state.agent_name) or self.active_team is not None
         )
-        if applied:
-            # The restore records misses but never clears them (that is a user
-            # action's job); this miss is now resolved, so the band and the next
-            # journal write must stop carrying it as pending.
-            # Both slots: an applied team owns the agent slot (a stored agent
-            # beside it is superseded, issue #2014), and an applied agent is the one.
+        if team_done and pending_team:
             self._unresolved_team = ""
+        if agent_done and pending_agent:
             self._unresolved_agent = ""
+        if team_done and agent_done:
             self.attachment_restore_notice = ""
-            logger.info(
-                "attachment re-resolve: applied %s",
-                f"team {wanted_team!r}" if wanted_team else "agent",
-            )
-        return {"resolved": applied, "applied": applied}
+            logger.info("attachment re-resolve: applied the stored attachment")
 
     def _transcript_has_assistant_message(self) -> bool:
         """Whether the DURABLE conversation has produced any assistant reply.
@@ -30720,10 +30724,14 @@ class Session:
             # here, at load, with the promote's own rule (``network/carry.py``);
             # an untranslatable cwd re-arms at this session's cwd. A no-op for a
             # session that never moved: every existing cwd is kept as-is.
-            from local_operator.network.carry import translate_monitor_cwds
+            from local_operator.network.carry import moved_in, translate_monitor_cwds
 
             raw_rows, _counts = translate_monitor_cwds(
-                raw_rows, session_cwd=os.path.abspath(self._cwd)
+                raw_rows,
+                session_cwd=os.path.abspath(self._cwd),
+                # A moved-in session's cwds may come from a device sharing this
+                # home path; only then is a missing path under home foreign.
+                moved=moved_in(self._transcript.directory),
             )
         except Exception:  # noqa: BLE001 — a load must not fail over a path mapping
             logger.debug("monitor cwd translation failed", exc_info=True)
