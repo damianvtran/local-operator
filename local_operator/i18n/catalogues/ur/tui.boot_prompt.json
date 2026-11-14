@@ -1,0 +1,4 @@
+{
+  "tui.boot_prompt.returned_to_composer": "آغاز کے وقت دیا گیا آپ کا پرامپٹ نہیں بھیجا گیا — یہ کمپوزر میں ہے۔",
+  "tui.boot_prompt.not_sent_kept_draft": "آغاز کے وقت دیا گیا آپ کا پرامپٹ نہیں بھیجا گیا: {prompt}"
+}
