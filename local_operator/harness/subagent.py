@@ -221,15 +221,21 @@ def missing_tier_remedy(tier: str, *, where: str = "this device") -> str:
     received through the definitions sync pin ``effort: hi``. The operator's
     device carries its tier models to its nodes with that push (PR #3869), so
     the push is the fix that keeps the node on the operator's models; setting the
-    key locally is the alternative for a standalone machine. Model-facing and
+    key locally is the alternative for a standalone machine. "The operator's
+    device" is ``mirror_authority``'s term, spelled out as "the one that signs for
+    the operator": #3869 sends tiers ONLY from the device holding the operator
+    anchor's private half (``may_send_to``), so a push from any other device —
+    including a credential "owner device", a different concept — sends nothing.
+    The push installs only on a node holding no tier map of its own; a node that
+    keeps its own is told so by ``readiness.subagent_tier_pins_row``. Model-facing and
     operator-facing technical text (a command and a config key), English by
     design like the rest of this refusal. ``where`` names the device for a
     reader on ANOTHER device (the readiness viewer names the peer).
     """
     return (
-        f"To fix: run `lop network definitions push` on the operator's owner device "
-        f"(it carries the subagent tier models to mesh nodes), or set "
-        f"subagents.models.{tier} on {where}"
+        f"To fix: run `lop network definitions push` on the operator's device (the one "
+        f"that signs for the operator; only it sends the subagent tier models to mesh "
+        f"nodes), or set subagents.models.{tier} on {where}"
     )
 
 

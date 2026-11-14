@@ -155,8 +155,9 @@ def test_unconfigured_tier_refusal_names_the_mesh_fix(tmp_path, monkeypatch):
     assert caught.value.reason == "no model configured at subagents.models.hi"
     assert str(caught.value) == (
         "effort tier 'hi' is unavailable: no model configured at subagents.models.hi. "
-        "To fix: run `lop network definitions push` on the operator's owner device "
-        "(it carries the subagent tier models to mesh nodes), or set "
+        "To fix: run `lop network definitions push` on the operator's device (the one "
+        "that signs for the operator; only it sends the subagent tier models to mesh "
+        "nodes), or set "
         "subagents.models.hi on this device"
     )
 

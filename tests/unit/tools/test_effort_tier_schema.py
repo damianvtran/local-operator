@@ -1176,8 +1176,9 @@ def test_rejection_of_a_missing_tier_names_the_mesh_fix(config_dir) -> None:
     both when no tiers exist (a mesh node's ``subagents: {}``) and when only the
     asked-for tier is missing."""
     remedy = (
-        "To fix: run `lop network definitions push` on the operator's owner device "
-        "(it carries the subagent tier models to mesh nodes), or set "
+        "To fix: run `lop network definitions push` on the operator's device (the one "
+        "that signs for the operator; only it sends the subagent tier models to mesh "
+        "nodes), or set "
         "subagents.models.hi on this device"
     )
     write_tiers(config_dir, None)

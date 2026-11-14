@@ -1972,6 +1972,7 @@ def subagent_tier_pins_fact(root: Path) -> dict[str, Any] | None:
     readiness answer never fails on it.
     """
     try:
+        from local_operator import settings_io
         from local_operator.agent_profiles import is_role, list_seeds
         from local_operator.agents import AgentRegistry
         from local_operator.harness.subagent import (
@@ -1979,7 +1980,18 @@ def subagent_tier_pins_fact(root: Path) -> dict[str, Any] | None:
             resolve_member_model,
         )
 
-        targets = read_effort_tier_targets(root)
+        # GUARD BEFORE ``read_effort_tier_targets`` CONSTRUCTS A MANAGER (#3869's
+        # Q-2 rule, ``definitions._subagent_tiers_on_disk``): ``ConfigManager``
+        # renames a malformed config.yml aside and loads defaults, and this runs
+        # on a PEER's read-only probe. Unreadable → ``None`` (no pins row; the
+        # ``subagent_tiers`` row already reports the node as ``unreadable``). No
+        # file → no tiers, without constructing a manager that would write one.
+        config_file = root / "config.yml"
+        if config_file.exists():
+            settings_io.require_readable_config_path(config_file)
+            targets = read_effort_tier_targets(root)
+        else:
+            targets = {}
         # ``initialize``/``migrate`` off: a readiness probe must not create or
         # migrate the peer's role store as a side effect of reading it.
         registry = AgentRegistry(root, initialize=False, migrate=False)
@@ -2039,6 +2051,31 @@ def subagent_tier_pins_row(
         return None
     from local_operator.harness.subagent import missing_tier_remedy
 
+    # INTERPLAY WITH THE (l) ``subagent_tiers`` ROW (PR #3869). That row says
+    # WHOSE tier map the node holds (it kept its own over the operator's); this
+    # one says WHICH ROLES cannot launch. Both may be drawn for one node, so they
+    # must not contradict: the shared remedy names the mesh push, but #3869's
+    # apply never installs over a node's own map (``_apply_subagent_tiers_locked``:
+    # authored/edited keep theirs). Advising the push there sends the operator
+    # round a loop that changes nothing, so a node holding its own map gets the
+    # remedy that works on it instead. Keyed on the
+    # node's STATUS, not on a recorded conflict: a node that authored its own map
+    # refuses the push before any conflict exists. An older peer omits the fact
+    # and keeps the push remedy (true for the ``subagents: {}`` node it targets).
+    # An UNREADABLE node draws no pins row at all (the fact is ``None`` there),
+    # so the (l) row's "could not read its own config" stands alone.
+    tiers_fact = facts.get("subagent_tiers")
+    tiers_status = str(tiers_fact.get("status") or "") if isinstance(tiers_fact, Mapping) else ""
+
+    def unconfigured_remedy(tier: str) -> str:
+        if tiers_status in ("authored", "edited"):
+            return (
+                f"Set subagents.models.{tier} on {peer_label}, or clear subagents.models "
+                "there to receive the operator's tiers (it keeps its own tier map, so "
+                "`lop network definitions push` does not replace it)"
+            )
+        return missing_tier_remedy(tier, where=peer_label)
+
     clauses: list[str] = []
     remedies: list[str] = []
     observed: list[dict[str, Any]] = []
@@ -2051,7 +2088,7 @@ def subagent_tier_pins_row(
         state = "is not configured" if missing else "is configured but unusable"
         clauses.append(f"tier '{tier}' {state} (pinned by {', '.join(roles)})")
         remedies.append(
-            missing_tier_remedy(tier, where=peer_label)
+            unconfigured_remedy(tier)
             if missing
             else f"Correct subagents.models.{tier} on {peer_label} to a provider/model id"
         )

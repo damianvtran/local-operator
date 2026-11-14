@@ -4763,8 +4763,9 @@ def test_tier_pins_row_names_roles_pinned_to_a_tier_the_peer_cannot_resolve(
     assert "tier 'hi' is not configured (pinned by designer, ux-reviewer)" in row["detail"]
     assert "tier 'lo' is not configured (pinned by scout)" in row["detail"]
     assert row["remedies"][0] == (
-        "To fix: run `lop network definitions push` on the operator's owner device "
-        "(it carries the subagent tier models to mesh nodes), or set "
+        "To fix: run `lop network definitions push` on the operator's device (the one "
+        "that signs for the operator; only it sends the subagent tier models to mesh "
+        "nodes), or set "
         "subagents.models.hi on cloud-node-1"
     )
     assert "subagents.models.lo on cloud-node-1" in row["remedies"][1]
@@ -4812,6 +4813,40 @@ def test_tier_pins_row_says_a_present_but_unusable_tier_needs_correcting(
     assert "tier 'hi' is configured but unusable (pinned by designer)" in row["detail"]
     assert row["remedies"] == ["Correct subagents.models.hi on cloud-node-1 to a provider/model id"]
     assert "marker7731" not in json.dumps(row)
+
+
+@pytest.mark.parametrize("status", ["authored", "edited"])
+def test_tier_pins_row_does_not_offer_the_push_to_a_node_keeping_its_own_tiers(
+    status: str,
+) -> None:
+    """Both tier rows can be drawn for one node: (l) says it kept its own map, (n)
+    which roles cannot launch. #3869 never installs over a node's own map, so the
+    pin row must not send the operator to a push that changes nothing there."""
+    facts = {
+        "subagent_tiers": {
+            "status": status,
+            "origin": "",
+            "conflict": {"origin": "d_operator", "code": "own", "reason": "kept"},
+        },
+        "subagent_tier_pins": {
+            "unresolved": [{"tier": "hi", "roles": ["designer"], "missing": True}]
+        },
+    }
+    pins = readiness.subagent_tier_pins_row(_member(), facts, peer_label="cloud-node-1")
+    tiers = readiness.subagent_tiers_row(_member(), facts, peer_label="cloud-node-1")
+    assert pins is not None and tiers is not None
+    assert tiers["capability"] == readiness.CAPABILITY_SUBAGENT_TIERS
+    assert pins["remedies"] == [
+        "Set subagents.models.hi on cloud-node-1, or clear subagents.models there to "
+        "receive the operator's tiers (it keeps its own tier map, so "
+        "`lop network definitions push` does not replace it)"
+    ]
+    # Mirror state (or a peer too old to say) keeps the push remedy.
+    for tiers_fact in ({"status": "mirror", "origin": "d_operator", "conflict": None}, None):
+        mirrored = {**facts, "subagent_tiers": tiers_fact}
+        row = readiness.subagent_tier_pins_row(_member(), mirrored, peer_label="cloud-node-1")
+        assert row is not None
+        assert row["remedies"][0].startswith("To fix: run `lop network definitions push`")
 
 
 def test_tier_pins_fact_is_collected_with_the_peer_facts(tmp_path: Path) -> None:
