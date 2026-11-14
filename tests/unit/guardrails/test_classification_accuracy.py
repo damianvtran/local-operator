@@ -1119,6 +1119,39 @@ def test_opaque_program_on_a_lineage_regular_file_is_low(home: Path) -> None:
         assert verdict.risk is Risk.LOW, (program, verdict.reasons)
 
 
+_UNLINK = 'import pathlib; pathlib.Path("{m}").unlink()'
+_READ = 'print(open("{m}").read())'
+
+
+@pytest.mark.parametrize(
+    ("program", "expected"),
+    [
+        (f"python3 -c '{_UNLINK}'", Risk.HIGH),
+        (f"python3 -Ic '{_UNLINK}'", Risk.HIGH),  # clustered
+        (f"python3 -W ignore -c '{_UNLINK}'", Risk.HIGH),  # -W takes a value
+        (f"python3 '-c{_UNLINK}'", Risk.HIGH),  # glued
+        (f"./python3 -c '{_READ}'", Risk.HIGH),  # proven code, unpinned interpreter
+        (f"python3 -c '{_READ}'", Risk.LOW),  # #3918's proof holds
+        ("python3 ~/x {m}", Risk.LOW),  # a script file: #3906's opaque credit stands
+        ("python3 -m json.tool {m}", Risk.LOW),  # -m ends the option scan
+    ],
+)
+def test_unproven_python_inline_code_gets_no_lineage_credit(
+    home: Path, program: str, expected: Risk
+) -> None:
+    """Convergence of #3906 with #3918: lineage credit never covers unproven ``python -c``.
+
+    #3918's tests cover a parent on its CHILD's pad; this pins the other
+    direction (child on its PARENT's file, #3906's case A shape) and the
+    option spellings ``_python_inline_code`` parses.
+    """
+    _tree(home)
+    manifest = _staged_manifest(home, PARENT)
+    command = program.replace("{m}", str(manifest))
+    verdict = _tree_verdict(home, command, CHILD, home / "work")
+    assert verdict.risk is expected, verdict.reasons
+
+
 def test_lineage_symlink_or_missing_path_gets_no_credit(home: Path) -> None:
     """A link (even to a lineage file) or a missing path is not a pinned file."""
     _tree(home)

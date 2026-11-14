@@ -946,6 +946,11 @@ class Target:
     #: rank a read of a same-task-tree session's scratch LOW (incident
     #: 2026-11-13); it never lowers a delete, a write or a stranger's pad.
     read_only_code: bool = False
+    #: A ``touch`` handed to ``python -c CODE`` that ``read_only_code`` did
+    #: NOT prove (``_python_inline_code``): #3918's proof refused the code or
+    #: could not pin the interpreter, so ``classify._tree_read`` gives it no
+    #: lineage credit either (convergence of #3906 with #3918).
+    unproven_code: bool = False
     #: The mention sits in a word the command names as an OUTPUT (``-o``,
     #: ``--out*``, ``--write*``, glued or as the next word): never a read.
     as_output: bool = False
@@ -1341,6 +1346,48 @@ _INTERPRETER_RE = re.compile(r"(?:node|python(?:3(?:\.\d+)?)?)")
 #: script told to rewrite its input writes the file it was handed.
 _OUTPUT_FLAG_RE = re.compile(r"(?:-o|-i|--out[\w-]*|--write[\w-]*|--in-?place)")
 _OUTPUT_GLUED_RE = re.compile(r"(?:-o.|-i.|--out[\w-]*=|--write[\w-]*=|--in-?place=)")
+
+
+def _python_inline_code(name: str, words: list[Expanded]) -> bool:
+    """Does this ``python`` run inline CODE (``-c``, glued or clustered)?
+
+    WHY (convergence of PR #3906 with #3918, 2026-11-13): #3918 made
+    ``python -c`` a PROOF-carrying lane — its CODE is visible, so a read of a
+    task-tree pad earns LOW only when :func:`python_code_read_only` proves it
+    and the interpreter is pinned (``Target.read_only_code``). #3906's lineage
+    credit (``classify._tree_read``) grants LOW to code it cannot see at all
+    (``node -e``, a script file); without this flag it also credited an
+    UNPROVEN ``python -c`` — a ``write_text``/``unlink`` the proof had just
+    refused, or proven code under a repathed interpreter — so #3918's HIGH
+    rows ranked LOW on a child's pad. Such a target carries
+    ``Target.unproven_code`` and gets no lineage credit.
+
+    Parses the option prefix the way CPython does: ``-c`` (alone, glued
+    ``-cCODE`` or clustered ``-Ic``) means inline code; ``-m`` or the first
+    non-option word (a script, ``-`` for stdin) ends the scan; ``-W``/``-X``
+    take a value. An opaque word in the prefix fails closed (``True``).
+    """
+    if not _INTERPRETER_RE.fullmatch(name) or name.startswith("node"):
+        return False
+    i = 1
+    while i < len(words):
+        if words[i].opaque:
+            return True
+        text = words[i].text
+        if text == "--" or text == "-" or not text.startswith("-"):
+            return False
+        if not text.startswith("--"):
+            flags = text[1:]
+            for j, ch in enumerate(flags):
+                if ch == "c":
+                    return True
+                if ch == "m":
+                    return False
+                if ch in "WX":
+                    i += j == len(flags) - 1  # the value is the next word
+                    break
+        i += 1
+    return False
 
 
 def _interpreter_script(name: str, words: list[Expanded], cwd: str | None) -> str | None:
@@ -3674,6 +3721,7 @@ class _Walker:
         st = self.state
         script = _interpreter_script(name, args, st.cwd)
         read_only_code = self._inline_read_only(name, args, assigns)
+        unproven_code = not read_only_code and _python_inline_code(name, args)
         self.programs_run += 1
         outputs = _output_word_ids(args)
         words = [w for w in args if id(w) not in exempt]
@@ -3716,6 +3764,7 @@ class _Walker:
                             program=name or "a program",
                             script=script,
                             read_only_code=read_only_code and not as_output,
+                            unproven_code=unproven_code,
                             as_output=as_output,
                             executes=executes,
                             assigned=assigned,

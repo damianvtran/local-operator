@@ -447,6 +447,7 @@ def _tree_read(
         lineage
         and not target.as_output
         and not target.executes
+        and not target.unproven_code
         and _lineage_regular_file(path, target.raw_path)
     ):
         # Field report 2026-11-12 (UI #1888 native QA): QA child fbd3094083f4
@@ -468,7 +469,9 @@ def _tree_read(
         # directory, ``f["rm"+"Sync"](argv[1],{recursive:true})`` wiped a whole
         # lineage pad unreviewed; a link or a missing path is unpinnable. A
         # word named as an output, or handed to a sed that runs code
-        # (``Target.executes``), stays HIGH. Every spelling, the realpath included, must
+        # (``Target.executes``), or ``python -c`` CODE that #3918's read-only
+        # proof refused (``Target.unproven_code``: visible code shown able to
+        # write gets no blanket credit), stays HIGH. Every spelling, the realpath included, must
         # land in a lineage member's pad, so a link out to a sibling or a
         # stranger never borrows the credit. Siblings are NOT lineage (see
         # ``_all_in_lineage``): they keep case 7's tracked-script rule below.
