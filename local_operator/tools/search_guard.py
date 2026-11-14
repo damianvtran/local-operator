@@ -222,8 +222,67 @@ SCRATCHPAD_ENV = "LOCAL_OPERATOR_SCRATCHPAD"
 #: child (``skills/``, ``attachments/``, the scratchpad) is not.
 _STORE_STR_RE = re.compile(r"^(?:~|\$HOME|\$\{HOME\})/\.local-operator")
 
-#: A heredoc opener: `<<EOF`, `<<-EOF`, `<<'EOF'`, `<<"EOF"`.
-_HEREDOC_RE = re.compile(r"<<-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1")
+#: Where a heredoc opener's delimiter word starts: `<<EOF`, `<<-EOF`,
+#: `<<'EOF'`, `<<"EOF"`. Only the START is matched here; the whole word is
+#: read by :func:`heredoc_opener`. Words not starting like this (``<<\EOF``,
+#: ``<<1``) are not treated as openers at all, so the lines after them stay
+#: commands to every guard (stricter, and unchanged from before).
+_HEREDOC_START_RE = re.compile(r"<<-?\s*(?=['\"]?[A-Za-z_])")
+
+#: Bash metacharacters: an unquoted one ends the delimiter word.
+_WORD_END = frozenset(" \t\n|&;()<>")
+
+#: Returned by :func:`heredoc_opener` for an opener whose delimiter word this
+#: reader will not guess at (expansion syntax, a backslash, an unclosed quote).
+HEREDOC_UNREADABLE = ""
+
+
+def heredoc_opener(text: str, i: int) -> tuple[str, int] | None:
+    """Read a heredoc opener at ``text[i] == '<'``: ``(delimiter, index_after)``.
+
+    Returns None when ``text[i:]`` is not an opener this scanner recognises.
+    Returns ``(HEREDOC_UNREADABLE, index_after_start)`` when it is one but the
+    delimiter word cannot be read safely; callers must then FAIL CLOSED (treat
+    the line as open/unresolvable and keep reading later lines as commands).
+
+    Why the whole word (security review R1, PR #3962): the old regex stopped
+    at the first non-identifier character, so ``<<E"O"F`` read as ``E``,
+    ``<<'EO'F`` as ``EO``, ``<<EOF-x`` as ``EOF`` and ``<<'EOF'.x`` as ``EOF``.
+    Bash's delimiter is the whole word after quote removal (``EOF``,
+    ``EOF``, ``EOF-x``, ``EOF.x``), so a body could end at a line bash still
+    reads as data — or, worse, run past the line where bash's body ends and
+    swallow the commands after it (``rm -rf ~`` hidden as "heredoc data").
+
+    Constraints: bash does no expansion on the delimiter, but ``$``, backticks
+    and backslashes inside it are rare enough and subtle enough (``$'…'``,
+    escapes) that this reader refuses them rather than modelling them.
+    """
+    m = _HEREDOC_START_RE.match(text, i)
+    if m is None:
+        return None
+    j = m.end()
+    n = len(text)
+    parts: list[str] = []
+    while j < n and text[j] not in _WORD_END:
+        ch = text[j]
+        if ch in "'\"":
+            close = text.find(ch, j + 1)
+            if close == -1:
+                return HEREDOC_UNREADABLE, m.end()
+            inner = text[j + 1 : close]
+            if ch == '"' and any(c in inner for c in "$`\\"):
+                return HEREDOC_UNREADABLE, m.end()
+            parts.append(inner)
+            j = close + 1
+            continue
+        if ch in "$`\\":
+            return HEREDOC_UNREADABLE, m.end()
+        parts.append(ch)
+        j += 1
+    delim = "".join(parts)
+    if not delim:
+        return HEREDOC_UNREADABLE, m.end()
+    return delim, j
 
 
 @dataclass
@@ -419,11 +478,16 @@ def lex(command: str) -> Lexed:
             word_start = False
             continue
         if ch == "<" and command.startswith("<<", i) and not stack.arith:
-            m = _HEREDOC_RE.match(command, i)
-            if m is not None:
-                pending.append((m.group(2), len(segments), stack.subs > 0, not quoted()))
-                buf.append(command[i : m.end()])
-                i = m.end()
+            opener = heredoc_opener(command, i)
+            if opener is not None and opener[0] == HEREDOC_UNREADABLE:
+                # An opener whose delimiter we cannot read: no body is
+                # skipped (its lines stay commands) and the line is open.
+                unterminated_heredoc = True
+            elif opener is not None:
+                delim, end = opener
+                pending.append((delim, len(segments), stack.subs > 0, not quoted()))
+                buf.append(command[i:end])
+                i = end
                 word_start = False
                 continue
         if ch == "\n" and pending:

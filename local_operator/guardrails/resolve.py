@@ -42,13 +42,14 @@ from dataclasses import dataclass, field
 
 from local_operator.tools.search_guard import (
     _DURATION_RE,
-    _HEREDOC_RE,
     _MAX_PEEL_DEPTH,
     _SHELL_C_WORDS,
     _WRAPPER_LONG_VALUE_FLAGS,
     _WRAPPER_VALUE_FLAGS,
+    HEREDOC_UNREADABLE,
     WRAPPER_WORDS,
     _unquote,
+    heredoc_opener,
     lex,
 )
 
@@ -119,6 +120,12 @@ def _skip_heredoc_bodies(text: str, j: int, delimiters: list[str]) -> int:
     ``text[j]`` is the newline after the opener line. Bodies follow in opener
     order, each ending at a line equal to its delimiter (``<<-`` strips tabs;
     the strip here matches :func:`lex`, so the two readers agree).
+
+    ``line.strip() == delim`` is deliberately looser in matching than bash
+    (which ends a body only on the exact line, or tab-stripped for ``<<-``),
+    so it can only end a body EARLIER than bash does. An early end exposes
+    body lines as commands to the walk, which is stricter, never a hidden
+    command.
     """
     pos = j + 1
     n = len(text)
@@ -185,10 +192,14 @@ def _read_sub(text: str, i: int, *, heredocs: bool = True) -> tuple[str, int, bo
             j += 2
             continue
         elif heredocs and ch == "<" and text.startswith("<<", j) and not text.startswith("<<<", j):
-            m = _HEREDOC_RE.match(text, j)
-            if m is not None:
-                pending.append(m.group(2))
-                j = m.end()
+            opener = heredoc_opener(text, j)
+            if opener is not None and opener[0] == HEREDOC_UNREADABLE:
+                # Delimiter word we will not guess at (R1, PR #3962): fail
+                # closed rather than skip a body bash may end elsewhere.
+                return text[i:], n, False
+            if opener is not None:
+                pending.append(opener[0])
+                j = opener[1]
                 continue
         elif ch == "(":
             depth += 1

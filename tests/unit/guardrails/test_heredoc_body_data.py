@@ -208,6 +208,62 @@ def test_quoted_heredoc_substitution_text_is_not_run(home: Path) -> None:
     assert _risk(home, "cat <<'EOF'\nhi $(rm -rf ~/x)\nEOF") is Risk.LOW
 
 
+#: Security review R1 (PR #3962): openers whose delimiter WORD continues past
+#: its first identifier. (opener, bash's delimiter, the prefix the old regex
+#: read). Each row hides ``rm -rf ~`` between bash's delimiter line and a later
+#: line equal to the misread prefix; bash runs it (verified under bash 5).
+_CONTINUED_WORDS = [
+    ('E"O"F', "EOF", "E"),
+    ("'EO'F", "EOF", "EO"),
+    ("EOF-x", "EOF-x", "EOF"),
+    ("'EOF'.x", "EOF.x", "EOF"),
+]
+
+
+@pytest.mark.parametrize("prefix", ["x=", "gh pr comment 1 --body "], ids=["assign", "gh"])
+@pytest.mark.parametrize("body", ["it's", "its"], ids=["apos", "no-apos"])
+@pytest.mark.parametrize(
+    ("opener", "real", "misread"), _CONTINUED_WORDS, ids=["dq-mid", "sq-prefix", "dash", "dot"]
+)
+def test_command_after_bashs_real_delimiter_is_walked(
+    home: Path, prefix: str, body: str, opener: str, real: str, misread: str
+) -> None:
+    """The delete after the real delimiter line runs, so it is seen.
+
+    Main ranked the apostrophe rows HIGH only by the phantom-quote accident and
+    the apostrophe-free rows LOW; the whole-word delimiter makes both CRITICAL.
+    """
+    command = f'{prefix}"$(cat <<{opener}\n{body}\n{real}\nrm -rf ~\n{misread}\n)"'
+    assert _risk(home, command) is Risk.CRITICAL
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "gh pr comment 1 --body \"$(cat <<'EOF'.x\n" + _BODY + 'EOF.x\n)"',
+        'gh pr comment 1 --body "$(cat <<E"O"F\n' + _BODY + 'EOF\n)"',
+    ],
+    ids=["dot", "dq-mid"],
+)
+def test_whole_word_quoted_delimiter_body_is_still_data(home: Path, command: str) -> None:
+    """Reading the whole word keeps a correctly closed quoted body as data."""
+    assert _risk(home, command) is Risk.LOW
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        'x="$(cat <<E$X\nit\nE$X\nrm -rf ~/x\n)"',
+        'x="$(cat <<\'EOF\nit\nEOF\nrm -rf ~/x\n)"',
+        'x="$(cat <<E\\OF\nit\nEOF\nrm -rf ~/x\n)"',
+    ],
+    ids=["dollar", "unclosed-quote", "backslash"],
+)
+def test_unreadable_delimiter_word_fails_closed(home: Path, command: str) -> None:
+    """A delimiter word this reader will not model is never skipped over."""
+    assert _risk(home, command) >= Risk.HIGH
+
+
 def test_arithmetic_shift_is_not_a_heredoc_opener(home: Path) -> None:
     """``$((1<<x))``: ``<<`` is a shift; no body is read past the newline."""
     assert _risk(home, "echo $((1<<x))\nrm -rf ~/x") >= Risk.HIGH
