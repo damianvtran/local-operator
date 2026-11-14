@@ -1766,6 +1766,14 @@ def status_lines() -> list[str]:
     for report in stuck:
         lines.extend(not_serving_lines(report))
     lines.extend(_fleet_action_lines(daemons, stamp))
+    # A restart the update handed to a background worker (it was slow, not
+    # failed) reports how it ENDED here, since the update had already exited.
+    try:
+        from local_operator import update
+
+        lines.extend(update.background_refresh_lines())
+    except Exception:  # noqa: BLE001 - an unreadable record must not break status
+        logger.debug("background refresh records unreadable", exc_info=True)
     supervised = _supervised_daemon_plists()
     for path in supervised:
         lines.append(f"supervised daemon: {path.stem}")
