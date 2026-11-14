@@ -246,6 +246,13 @@ SUPPORTED_DELETE_PATHS = (
     "yourself by its exact path — `git worktree remove <exact path>` for a linked "
     "worktree (commit or push what you want to keep first), or the literal path the "
     "creating call named; never ask the operator about your own worktrees or scratch. "
+    # Operator directive 2026-11-14 (field case attr3880-ci): an own DETACHED
+    # tree with uncommitted changes is removable too; when it is refused the
+    # creation ledger has no row for it, which only the operator can vouch for.
+    "A detached worktree you created (`git worktree add --detach`) is yours to remove "
+    "even with uncommitted changes: `git worktree remove --force <exact path>`; if that is "
+    "refused, the guard has no creation record for it: treat it as a path you did not "
+    "create, below. "
     "Only for a path you did not create, ask the operator with `ask`, writing each exact "
     "full path (`~/…`; a brace list is fine) in the question or the option label — a "
     "relative path, or one only in an option's description, names nothing. A message "
@@ -806,6 +813,26 @@ def build_delete_case(verdict: Verdict, ctx: CallContext) -> DeleteCase:
                 # The exact entries, not just "dirty" (2026-11-11): the judge
                 # tells finished from unfinished work by what would be lost.
                 tree += f"; {prov.describe_changes(path)}"
+                # Say plainly whether a branch is at stake (operator directive
+                # 2026-11-14, field case attr3880-ci: the judge refused an own
+                # detached tree as "busy detached worktree with substantial
+                # uncommitted changes" with no fact saying no branch or commit
+                # could be lost). Normally such a tree never reaches the judge
+                # (``classify`` ranks it LOW); this covers a missing ledger row.
+                detached = prov.detached_head(path)
+                if detached is not None:
+                    head, ref = detached
+                    tree += (
+                        f"; HEAD: detached (no branch) at {head}, kept by {ref}"
+                        if ref
+                        else f"; HEAD: detached at {head}, reachable from NO ref "
+                        "(commits made in it are lost with the tree)"
+                    )
+                    if ref and record is not None:
+                        tree += (
+                            "; own-created detached worktree: removal loses only this "
+                            "session's uncommitted scratch"
+                        )
         facts.append(
             f"{path}: created by this session or its subagents: "
             + (", ".join(ids) if ids else "no history evidence")

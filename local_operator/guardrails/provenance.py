@@ -526,8 +526,11 @@ def owned_record(
         logger.debug("guardrail ledger unreadable", exc_info=True)
         return None
     best: CreationRecord | None = None
-    for row in rows:
-        rec = CreationRecord(*row)
+    records = [CreationRecord(*row) for row in rows]
+    gitfiles = {r.path: r for r in records if r.kind == WORKTREE_GITFILE_KIND}
+    for rec in records:
+        if rec.kind == WORKTREE_GITFILE_KIND:
+            continue  # a stamp companion, never a covering row (see the kind)
         if rec.kind == "symlink":
             # A link row vouches for removing that link entry only
             # (``owned_link``), never for its pointee or anything under it.
@@ -540,7 +543,9 @@ def owned_record(
             continue
         if (st.st_dev, st.st_ino) != (rec.dev, rec.ino):
             continue
-        if rec.stamp is None or creation_stamp(st) != rec.stamp:
+        if rec.stamp is None or (
+            creation_stamp(st) != rec.stamp and not _gitfile_generation_holds(rec, gitfiles)
+        ):
             continue  # same inode number, different generation (or unstamped)
         if best is None or len(rec.path) > len(best.path):
             best = rec
@@ -694,7 +699,9 @@ class ForeignCreations:
       whenever an entry is added to the directory, so a foreign row there
       stops matching once its directory changes after the recording call —
       this rule fails OPEN on Linux (ranking returns to what it was before
-      it existed). The guarantee is macOS/BSD-only, where birth time is used.
+      it existed). The guarantee is macOS/BSD-only, where birth time is used —
+      except a ``worktree`` row, kept live by its ``.git`` companion row
+      (``_gitfile_holds``) as ``owned_record`` does.
     * Symlink rows are skipped: they vouch for a link entry, never a tree.
     """
 
@@ -735,6 +742,37 @@ class ForeignCreations:
                 self._identity[path] = (st.st_dev, st.st_ino, creation_stamp(st))
         return self._identity[path]
 
+    def _gitfile_holds(self, conn: sqlite3.Connection, rec: CreationRecord) -> bool:
+        """A ``worktree`` row whose dir stamp moved is still live via its ``.git`` row.
+
+        WHY (rebase of PR #3987 onto #3835): ``owned_record`` already accepts
+        the ``WORKTREE_GITFILE_KIND`` companion as the generation witness on
+        Linux, where the directory's ctime stamp moves on every root-level
+        change. Without the same rule here the nearest-owner walk dropped a
+        session's OWN worktree row after its first checkout, so a broader
+        foreign ancestor row became "nearest" and the session's own tree read
+        HIGH; and another session's worktree row failed open. Accepting the
+        companion only ever adds live rows: foreign ones rank stricter, own
+        ones are exactly the "unambiguously this session's row" exception.
+        The companion is read by exact path because ``_foreign_query`` binds
+        only ancestors of and rows under the target, never ``<wt>/.git``
+        when the target is inside ``<wt>``.
+        """
+        if rec.kind != "worktree":
+            return False
+        gitfile = os.path.join(rec.path, ".git")
+        try:
+            companions = conn.execute(
+                "SELECT path, dev, ino, created_at, creator, kind, command, stamp"
+                " FROM created WHERE path = ? AND kind = ?",
+                (gitfile, WORKTREE_GITFILE_KIND),
+            ).fetchall()
+        except (sqlite3.Error, ValueError):
+            return False
+        return any(
+            _gitfile_generation_holds(rec, {gitfile: CreationRecord(*row)}) for row in companions
+        )
+
     def _related(self, owner: str) -> bool:
         if owner == self.session_id:
             return True
@@ -767,7 +805,14 @@ class ForeignCreations:
         live: dict[str, tuple[set[str], CreationRecord]] = {}
         for owner, *fields in rows:
             rec = CreationRecord(*fields)
-            if rec.stamp is None or self._live(rec.path) != (rec.dev, rec.ino, rec.stamp):
+            if rec.stamp is None:
+                continue
+            identity = self._live(rec.path)
+            if identity != (rec.dev, rec.ino, rec.stamp) and not (
+                identity is not None
+                and identity[:2] == (rec.dev, rec.ino)
+                and self._gitfile_holds(conn, rec)
+            ):
                 continue
             live.setdefault(rec.path, (set(), rec))[0].add(owner)
 
@@ -789,6 +834,46 @@ class ForeignCreations:
                 if rec is not None:
                     return ForeignHit(rec.creator, rec, "holds")
         return None
+
+
+#: Ledger kind of the companion row ``commit_creations`` writes for a
+#: recorded worktree's ``.git`` FILE. WHY: on Linux ``creation_stamp`` is the
+#: directory's ``st_ctime_ns`` (no birth time), which moves whenever an entry
+#: is added, removed or renamed in the worktree ROOT — and git rewrites root
+#: files by unlink+create on checkout/read-tree -u/merge. So on a Linux host
+#: (every headless mesh node, e.g. lop-remote-node-2, Amazon Linux) the
+#: worktree row stopped matching after the session's first root-level change
+#: and its own tree read as foreign (operator directive 2026-11-14, field case
+#: attr3880-ci). The ``.git`` file git writes once at ``worktree add`` is not
+#: rewritten by any of those (only ``worktree repair``/``move``, which then
+#: fail closed), so its inode generation is a stable second witness that the
+#: directory is the one this session created. Never a covering row itself.
+WORKTREE_GITFILE_KIND = "worktree-gitfile"
+
+
+def _gitfile_generation_holds(rec: CreationRecord, gitfiles: Mapping[str, CreationRecord]) -> bool:
+    """A ``worktree`` row whose dir stamp moved still matches via its ``.git`` file.
+
+    Only ``kind == "worktree"`` (the directory's dev+ino already matched in
+    the caller); the companion must match dev, ino AND ``creation_stamp``.
+    """
+    if rec.kind != "worktree":
+        return False
+    gitfile = os.path.join(rec.path, ".git")
+    companion = gitfiles.get(gitfile)
+    if companion is None or companion.stamp is None:
+        return False
+    try:
+        st = os.lstat(gitfile)
+    except OSError:
+        return False
+    if not stat.S_ISREG(st.st_mode):
+        return False
+    return (st.st_dev, st.st_ino, creation_stamp(st)) == (
+        companion.dev,
+        companion.ino,
+        companion.stamp,
+    )
 
 
 def link_path(path: str) -> str:
@@ -1054,6 +1139,13 @@ def commit_creations(
                 # vouch for a work tree inside it (``_foreign_inside``), so
                 # the session's own worktree needs its own row (QA Q7).
                 entries.append((os.path.realpath(path), kind))
+            if kind == "worktree" and os.path.isfile(os.path.join(path, ".git")):
+                # A second generation stamp for Linux hosts (headless mesh
+                # nodes such as lop-remote-node-2 run Linux): see
+                # ``WORKTREE_GITFILE_KIND``.
+                entries.append(
+                    (os.path.join(os.path.realpath(path), ".git"), WORKTREE_GITFILE_KIND)
+                )
         for parent, pattern, before in pending.patterned:
             now = _glob.glob(os.path.join(_glob.escape(parent), pattern))
             for match in now:
@@ -1412,6 +1504,91 @@ def worktree_state(path: str, *, own: bool = False) -> str:
         if not (refs or "").strip():
             return "dirty"
     return "stale-initializing" if stale_initializing else "clean"
+
+
+def detached_head(path: str) -> tuple[str, str | None] | None:
+    """``(short HEAD, ref containing it)`` for a DETACHED tree, else ``None``.
+
+    ``None`` = HEAD is on a branch, or git could not answer (fail closed: the
+    caller then keeps its ordinary ranking). The ref is ``None`` when no
+    branch, remote-tracking ref or tag contains HEAD — commits made in the
+    detached tree that only its own HEAD file names, which removal loses.
+    """
+    real = os.path.realpath(path)
+    if _git(["symbolic-ref", "-q", "HEAD"], real) is not None:
+        return None  # on a branch
+    head = _git(["rev-parse", "--short", "HEAD"], real)
+    if not (head or "").strip():
+        return None
+    refs = _git(
+        [
+            "for-each-ref",
+            "--count=1",
+            "--format=%(refname:short)",
+            "--contains",
+            "HEAD",
+            "refs/heads",
+            "refs/remotes",
+            "refs/tags",
+        ],
+        real,
+    )
+    if refs is None:
+        return None  # unknown reachability is not "reachable"
+    return (head or "").strip(), (refs.strip() or None)
+
+
+def own_detached_scratch(path: str) -> str | None:
+    """A fact phrase when an OWN dirty linked tree is disposable scratch, else ``None``.
+
+    WHY (operator directive 2026-11-14, relayed by Aida: "the safety guards
+    should never refuse being able to clean up uncommitted files that look
+    like scratch, safe to delete, etc. … this sort of ask should never come
+    up again"). Field case, mesh node lop-remote-node-2, session
+    99ffc68d3d05: it ran ``git worktree add --detach .worktrees/attr3880-ci``,
+    then ``git merge-tree`` + ``git read-tree`` left an uncommitted index and
+    working-tree changes; ``git worktree remove --force`` of that path went
+    to the judge as an own DIRTY tree and the judge refused ("busy detached
+    worktree with substantial uncommitted changes" — judge wording, no
+    deterministic branch writes it).
+
+    What makes such a tree safe for its creator to drop: there is NO branch,
+    so nobody's branch work can be lost, and HEAD itself is contained in a
+    ref, so no commit is lost either. What remains — the uncommitted index
+    and files — is what the creating session itself put there.
+
+    CONSTRAINTS, each a fail-closed ``None``:
+    - only called for a tree the creation ledger already proves own
+      (``classify._owned_by_session`` / ``owned_record``) and whose state is
+      ``dirty`` — locked/busy/unknown keep their ranking;
+    - HEAD on a branch → ``None`` (branch work is the judge's to weigh);
+    - HEAD reachable from no ref → ``None`` (dangling commits made in the
+      tree are lost with it; treated like unpushed work);
+    - a nested repository in any untracked or ignored entry → ``None`` (its
+      commits may exist nowhere else; ``worktree_state`` holds the same line).
+    """
+    real = os.path.realpath(path)
+    detached = detached_head(real)
+    if detached is None or detached[1] is None:
+        return None
+    status = _git(
+        ["status", "--porcelain", "--ignored", "--untracked-files=normal"],
+        real,
+        timeout=_WORKTREE_STATUS_TIMEOUT_S,
+    )
+    if status is None:
+        return None
+    for line in status.splitlines():
+        if not (line.startswith("?? ") or line.startswith("!! ")):
+            continue
+        entry = os.path.join(real, line[3:].strip().strip('"').rstrip("/"))
+        if os.path.isdir(entry) and _holds_git(entry):
+            return None
+    head, ref = detached
+    return (
+        f"own-created detached worktree (no branch; HEAD {head} is kept by {ref}): "
+        "removal loses only this session's uncommitted scratch"
+    )
 
 
 #: Bounds on :func:`linked_worktrees_reached`. ``_REACH_MAX_LEVELS``:

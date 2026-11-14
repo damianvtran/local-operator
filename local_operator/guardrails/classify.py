@@ -1276,6 +1276,23 @@ def _rank(
                     Risk.LOW,
                     f"{own[0]}; linked worktree with no uncommitted change ({facts})",
                 )
+            if own is not None and own_idle and state == "dirty":
+                # OWN + DETACHED + DIRTY (operator directive 2026-11-14, field
+                # case attr3880-ci on lop-remote-node-2; see
+                # ``provenance.own_detached_scratch``): no branch to lose and
+                # HEAD kept by a ref, so the uncommitted changes are the
+                # creator's own scratch — LOW for ``remove`` with or without
+                # ``--force``. A branch, a dangling HEAD or a nested repo
+                # returns ``None`` and falls to the judge below.
+                from local_operator.guardrails.provenance import own_detached_scratch
+
+                scratch = own_detached_scratch(path)
+                if scratch is not None:
+                    return RankedTarget(
+                        target,
+                        Risk.LOW,
+                        f"{own[0]}; {scratch}; {_changes_phrase(path)}; {facts}",
+                    )
             if own is not None and state == "dirty":
                 # Real tracked/untracked work in an OWN tree: the judge decides
                 # with the ledger row and the exact entries (``build_delete_case``
@@ -1565,6 +1582,12 @@ def _reached_worktrees(
         idle = activity.pr_state in ("none", "unknown") and not activity.owners_running
         # Strictly ``clean``: a stale ``initializing`` lock is LOW only for
         # ``git worktree remove -f -f``, which says so; ``rm -rf`` goes to the judge.
+        if state == "dirty" and idle and prov.own_detached_scratch(root) is not None:
+            # ``rm -rf <exact path>`` of an own detached dirty tree: the same
+            # waiver ``git worktree remove`` gets in ``_rank`` (operator
+            # directive 2026-11-14, field case attr3880-ci). Not held, so the
+            # ordinary ranking below gives the ledger LOW for a literal path.
+            continue
         if state != "clean" or not idle:
             changes = f"; {prov.describe_changes(root)}" if state == "dirty" else ""
             held.append(
