@@ -974,6 +974,16 @@
         "effort": null,
         "delegate": false,
         "class": null
+      },
+      {
+        "sha": "ee97dada8e326d497af8b439b8373875e8ea516b",
+        "version": "1.5.15",
+        "instructions_sha256": "c572edc74d312fc37684c5324f2b3a08fcca9027d571add51b45117347182aee",
+        "description": "Checking how something LOOKS to the user: reviewing a screen or terminal UI, whether a layout, spacing, colour or copy reads well, making an interface nicer — a design/UX round on a user-visible change.",
+        "tools": null,
+        "effort": null,
+        "delegate": false,
+        "class": null
       }
     ],
     "librarian": [
@@ -2027,6 +2037,27 @@
         "sha": "abebb2320511d27f0cf8ba97f486cc99ec8a9895",
         "version": "1.0.15",
         "instructions_sha256": "7c1d2920d61b912ffab45c8255abe57b00dfb1983b1c1bb00f777f3938052104",
+        "description": "Independently testing whether a pull request, patch or feature actually works end to end; reproducing a bug, validating side effects, or checking remediation regressions.",
+        "tools": [
+          "read",
+          "glob",
+          "grep",
+          "list_variables",
+          "read_variable",
+          "bash",
+          "todo",
+          "web_search",
+          "web_fetch",
+          "browser"
+        ],
+        "effort": null,
+        "delegate": false,
+        "class": null
+      },
+      {
+        "sha": "ee97dada8e326d497af8b439b8373875e8ea516b",
+        "version": "1.0.16",
+        "instructions_sha256": "b1210c57f8202568a1a7528519a7e5c0c0e5161859476b46d673267ec2172974",
         "description": "Independently testing whether a pull request, patch or feature actually works end to end; reproducing a bug, validating side effects, or checking remediation regressions.",
         "tools": [
           "read",
