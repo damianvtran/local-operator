@@ -871,7 +871,10 @@ def mobile_action(
                 # routes answer the same plan (U10), so the TUI cannot disagree.
                 return setup.text(setup.reconnecting_plan(), surface="tui")
             plan = (
-                await setup.apply(selected, accepted, progress=progress)
+                # A typed `/mobile enable` is the person asking for phone access
+                # back, so it may lift a deliberate stop (`setup.apply`'s
+                # `resume_stopped`); the auto-hook never reaches this function.
+                await setup.apply(selected, accepted, progress=progress, resume_stopped=True)
                 if action == "enable"
                 else await setup.observe(selected)
             )

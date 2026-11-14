@@ -92,5 +92,17 @@
   "mobile.setup.title_radient_unavailable": "L’accès téléphone attend Radient",
   "mobile.setup.title_reconnecting": "L’accès téléphone se reconnecte",
   "mobile.setup.action_add_credit": "Ajoutez du crédit dans la console Radient : {url}",
-  "mobile.setup.action_open_console": "Réactivez l’accès téléphone dans la console Radient : {url}"
+  "mobile.setup.action_open_console": "Réactivez l’accès téléphone dans la console Radient : {url}",
+  "mobile.setup.stopped_plain": "L’accès téléphone est désactivé sur cet ordinateur. Réactivez-le quand vous voulez accéder à cet ordinateur depuis votre téléphone.",
+  "mobile.setup.owner_missing_plain": "Le compte Radient qui a configuré l’accès téléphone n’est plus connecté sur cet ordinateur. Connectez-vous avec ce compte pour rétablir l’accès téléphone.",
+  "mobile.setup.login_plain": "Connectez-vous à Radient avec le compte propriétaire de l’accès téléphone, puis réessayez.",
+  "mobile.setup.choose_account_plain": "Choisissez le compte Radient que l’accès téléphone doit utiliser. La configuration ne transfère jamais une adresse de téléphone existante vers un autre compte.",
+  "mobile.setup.account_plain": "Radient n’a pas pu confirmer le compte et l’adresse de téléphone. Vérifiez votre connexion internet et réessayez ; rien n’a été modifié.",
+  "mobile.setup.cloudflared_plain": "L’accès téléphone a besoin d’une application d’assistance appelée cloudflared, qui n’est pas installée sur cet ordinateur. Demandez à votre agent de l’installer (il vous demandera d’abord votre approbation), puis réessayez.",
+  "mobile.setup.mobile_bundle_plain": "L’interface téléphone n’est pas encore préparée sur cet ordinateur. Demandez à votre agent de la préparer (il vous demandera d’abord votre approbation), puis réessayez. Rien n’a été modifié.",
+  "mobile.setup.supervisor_plain": "Cet ordinateur ne peut pas encore maintenir l’accès téléphone en arrière-plan. Demandez à votre agent de configurer un service en arrière-plan pour cela, puis réessayez. Rien n’a été modifié.",
+  "mobile.setup.apply_plain": "Tout est prêt. Activez l’accès téléphone pour terminer.",
+  "mobile.setup.verification_plain": "La connexion n’est pas encore confirmée. Revérifiez dans un instant ; les étapes terminées restent enregistrées.",
+  "mobile.setup.failed_plain": "La configuration de l’accès téléphone ne s’est pas terminée. Réessayez ; les étapes terminées restent enregistrées.",
+  "mobile.setup.complete_plain": "Ouvrez l’adresse ci-dessus sur votre téléphone et connectez-vous avec le même compte Radient."
 }

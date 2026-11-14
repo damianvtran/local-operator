@@ -92,5 +92,17 @@
   "mobile.setup.title_radient_unavailable": "手机访问正在等待Radient",
   "mobile.setup.title_reconnecting": "手机访问正在重新连接",
   "mobile.setup.action_add_credit": "在Radient控制台中充值：{url}",
-  "mobile.setup.action_open_console": "在Radient控制台中重新开启手机访问：{url}"
+  "mobile.setup.action_open_console": "在Radient控制台中重新开启手机访问：{url}",
+  "mobile.setup.stopped_plain": "这台电脑的手机访问已关闭。想从手机访问这台电脑时，随时可以重新开启。",
+  "mobile.setup.owner_missing_plain": "设置手机访问的Radient账户已不再在这台电脑上登录。使用该账户登录即可恢复手机访问。",
+  "mobile.setup.login_plain": "使用手机访问所属的账户登录Radient，然后重试。",
+  "mobile.setup.choose_account_plain": "选择手机访问要使用的Radient账户。设置绝不会把现有的手机地址转到其他账户。",
+  "mobile.setup.account_plain": "Radient无法确认账户和手机地址。请检查网络连接后重试；未作任何更改。",
+  "mobile.setup.cloudflared_plain": "手机访问需要一个名为cloudflared的辅助应用，但这台电脑尚未安装。请让智能体安装它（会先征求你的审批），然后重试。",
+  "mobile.setup.mobile_bundle_plain": "这台电脑尚未准备好手机界面。请让智能体准备它（会先征求你的审批），然后重试。未作任何更改。",
+  "mobile.setup.supervisor_plain": "这台电脑暂时无法让手机访问在后台持续运行。请让智能体为此设置一个后台服务，然后重试。未作任何更改。",
+  "mobile.setup.apply_plain": "一切就绪。开启手机访问即可完成。",
+  "mobile.setup.verification_plain": "连接尚未确认。请稍后再检查；已完成的步骤仍然保留。",
+  "mobile.setup.failed_plain": "手机访问设置未完成。请重试；已完成的步骤仍然保留。",
+  "mobile.setup.complete_plain": "在手机上打开上方地址，并使用同一Radient账户登录。"
 }

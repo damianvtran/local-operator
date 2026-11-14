@@ -92,5 +92,17 @@
   "mobile.setup.title_radient_unavailable": "Phone access is waiting for Radient",
   "mobile.setup.title_reconnecting": "Phone access is reconnecting",
   "mobile.setup.action_add_credit": "Add credit in the Radient console: {url}",
-  "mobile.setup.action_open_console": "Turn phone access back on in the Radient console: {url}"
+  "mobile.setup.action_open_console": "Turn phone access back on in the Radient console: {url}",
+  "mobile.setup.stopped_plain": "Phone access is turned off on this computer. Turn it back on whenever you want to reach this computer from your phone.",
+  "mobile.setup.owner_missing_plain": "The Radient account that set up phone access is no longer signed in on this computer. Sign in with that account to bring phone access back.",
+  "mobile.setup.login_plain": "Sign in to Radient with the account that owns phone access, then try again.",
+  "mobile.setup.choose_account_plain": "Choose the Radient account phone access should use. Setup never moves an existing phone address to a different account.",
+  "mobile.setup.account_plain": "Radient could not confirm the account and phone address. Check your internet connection and try again; nothing was changed.",
+  "mobile.setup.cloudflared_plain": "Phone access needs a helper app called cloudflared, which is not installed on this computer. Ask your agent to install it (it asks for your approval first), then try again.",
+  "mobile.setup.mobile_bundle_plain": "The phone interface is not prepared on this computer yet. Ask your agent to prepare it (it asks for your approval first), then try again. Nothing was changed.",
+  "mobile.setup.supervisor_plain": "This computer cannot keep phone access running in the background yet. Ask your agent to set up a background service for it, then try again. Nothing was changed.",
+  "mobile.setup.apply_plain": "Everything is ready. Turn on phone access to finish.",
+  "mobile.setup.verification_plain": "The connection is not confirmed yet. Check again in a moment; completed steps stay saved.",
+  "mobile.setup.failed_plain": "Phone access setup did not finish. Try again; completed steps stay saved.",
+  "mobile.setup.complete_plain": "Open the address above on your phone and sign in with the same Radient account."
 }

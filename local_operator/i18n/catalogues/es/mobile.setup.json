@@ -92,5 +92,17 @@
   "mobile.setup.title_radient_unavailable": "El acceso telefónico espera a Radient",
   "mobile.setup.title_reconnecting": "El acceso telefónico se está reconectando",
   "mobile.setup.action_add_credit": "Añade crédito en la consola de Radient: {url}",
-  "mobile.setup.action_open_console": "Vuelve a activar el acceso telefónico en la consola de Radient: {url}"
+  "mobile.setup.action_open_console": "Vuelve a activar el acceso telefónico en la consola de Radient: {url}",
+  "mobile.setup.stopped_plain": "El acceso telefónico está desactivado en este equipo. Vuelve a activarlo cuando quieras acceder a este equipo desde tu teléfono.",
+  "mobile.setup.owner_missing_plain": "La cuenta de Radient que configuró el acceso telefónico ya no tiene la sesión iniciada en este equipo. Inicia sesión con esa cuenta para recuperar el acceso telefónico.",
+  "mobile.setup.login_plain": "Inicia sesión en Radient con la cuenta propietaria del acceso telefónico y vuelve a intentarlo.",
+  "mobile.setup.choose_account_plain": "Elige la cuenta de Radient que debe usar el acceso telefónico. La configuración nunca pasa una dirección de teléfono existente a otra cuenta.",
+  "mobile.setup.account_plain": "Radient no pudo confirmar la cuenta y la dirección de teléfono. Comprueba tu conexión a internet y vuelve a intentarlo; no se cambió nada.",
+  "mobile.setup.cloudflared_plain": "El acceso telefónico necesita una aplicación auxiliar llamada cloudflared, que no está instalada en este equipo. Pide a tu agente que la instale (antes te pedirá tu aprobación) y vuelve a intentarlo.",
+  "mobile.setup.mobile_bundle_plain": "La interfaz del teléfono aún no está preparada en este equipo. Pide a tu agente que la prepare (antes te pedirá tu aprobación) y vuelve a intentarlo. No se cambió nada.",
+  "mobile.setup.supervisor_plain": "Este equipo todavía no puede mantener el acceso telefónico funcionando en segundo plano. Pide a tu agente que configure un servicio en segundo plano para ello y vuelve a intentarlo. No se cambió nada.",
+  "mobile.setup.apply_plain": "Todo está listo. Activa el acceso telefónico para terminar.",
+  "mobile.setup.verification_plain": "La conexión aún no está confirmada. Vuelve a comprobarlo en un momento; los pasos completados siguen guardados.",
+  "mobile.setup.failed_plain": "La configuración del acceso telefónico no terminó. Vuelve a intentarlo; los pasos completados siguen guardados.",
+  "mobile.setup.complete_plain": "Abre la dirección de arriba en tu teléfono e inicia sesión con la misma cuenta de Radient."
 }
