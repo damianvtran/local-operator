@@ -14312,7 +14312,7 @@ class Session:
         return queue.withdraw(ask_id, reason=reason, answers=answers, message_id=message_id, by=by)
 
     def site_ask_lapses(self, origin: str) -> int:
-        """How many of this session's site cards for ``origin`` lapsed unanswered.
+        """How many site cards for ``origin`` lapsed unanswered since the operator last spoke.
 
         Review U15: a node's agent may re-raise a site card once after it
         expires; the browser tool refuses a further card from this count, so the
@@ -14322,6 +14322,28 @@ class Session:
         is not an answer, and must not reset the bound. A card the agent
         withdrew itself (``cancel_access``, a superseded entry) or one the
         operator answered or declined is not the operator ignoring it.
+
+        THE OPERATOR'S REPLY RE-OPENS THE BOUND (review R4-1). Counting the
+        whole session's history refused forever, so an operator who came back
+        and said "ask me again" could not be honoured. Only lapses that settled
+        AFTER the operator's last admitted chat message count, which gives one
+        fresh card plus one re-raise per operator reply. A card lapses at its
+        ``expires_at`` (a dismissal is only accepted on an already-lapsed card,
+        so that is its lapse moment too), compared in the same millisecond clock
+        as the message stamp.
+
+        "The operator spoke" is :meth:`latest_user_message_at`, deliberately:
+        it is stamped only by :meth:`_note_admitted_user_message`, i.e. a plain
+        ``Message(role="user")`` the turn or the steer drain handed to the
+        model, minus rows stamped harness-injected (``RENDERED_INJECTION_KEY``)
+        and harness chrome (goal/connectivity continuations, spooled prompts).
+        Wake and monitor deliveries, incidents, system notices, peer ``send``
+        cards, Team Bridge messages and subagent ``hub`` messages are
+        ``CustomMessage`` rows and never reach the stamp, so nothing another
+        local session or this agent sends can re-open the bound. A REMOTE prompt
+        (``REMOTE_PROMPT_KEY``: the operator's desktop attached over the mesh,
+        the relayed phone) is still a person's turn and counts — on a headless
+        node it is the operator's only way to chat at all.
         """
         from local_operator.asks import store as _ask_store
         from local_operator.browser_bridge.site_approval import is_site_question_id
@@ -14334,9 +14356,12 @@ class Session:
             _ask_store.STATUS_EXPIRED,
             _ask_store.STATUS_DISMISSED,
         )
+        spoke_at = self.latest_user_message_at() or 0
         count = 0
         for record in queue.records():
             if record.get("status") not in lapsed_states:
+                continue
+            if int(record.get("expires_at") or 0) <= spoke_at:
                 continue
             if any(
                 isinstance(question, Mapping)

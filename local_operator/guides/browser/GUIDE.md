@@ -589,8 +589,11 @@ The flow keeps the same three calls; only who answers, and where, changes:
    expires, tell the operator in chat which site you need, and stop using it.
    The tool counts this from the session's own cards: once two cards for an
    origin have expired unanswered, `request_access` raises no third and says
-   the operator hasn't answered twice. `cancel_access` withdraws the request
-   and its card together (a withdrawn card does not count as unanswered).
+   the operator hasn't answered twice. If the operator replies in chat asking
+   for it, you may raise one new card (plus one re-raise): only cards that
+   lapsed after their last chat message count. `cancel_access` withdraws the
+   request and its card together (a withdrawn card does not count as
+   unanswered).
 
 Removing a decision: an approval lasts until someone runs `lop browser sites
 --revoke <origin>` **on the node** (`lop browser sites` lists what that

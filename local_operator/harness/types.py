@@ -2881,8 +2881,10 @@ class ToolContext(BaseModel):
     #: U3/Q1). Bound beside :attr:`withdraw_ask`, ``None`` where it is.
     withdraw_site_asks: Callable[..., list[str]] | None = None
     #: ``site_ask_lapses(origin)``: how many of this session's site cards for
-    #: ``origin`` lapsed unanswered. ``request_access`` refuses a further card
-    #: past the one re-raise (review U15). Bound beside
+    #: ``origin`` lapsed unanswered since the operator's last admitted chat
+    #: message. ``request_access`` refuses a further card past the one re-raise
+    #: (review U15); an operator reply re-opens one card plus one re-raise
+    #: (review R4-1). Bound beside
     #: :attr:`withdraw_site_asks`, ``None`` where it is.
     site_ask_lapses: Callable[[str], int] | None = None
     #: THE ASK GATE'S DOOR (design docs/design/ask-gate.md §2.2). Async — the

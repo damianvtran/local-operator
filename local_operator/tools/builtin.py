@@ -26437,7 +26437,9 @@ def _node_wait_text(url: str, origin: str, *, reraised: bool = False) -> str:
         return (
             f"{head} This is your one re-raise: if this card also expires unanswered, "
             f"tell the operator in chat that you need {origin} on this node, and stop "
-            "using it — request_access will not raise another card for it in this session."
+            "using it — request_access will not raise another card for it until the "
+            "operator replies in chat; if they ask for it, you may raise one new card "
+            "(plus one re-raise)."
         )
     return (
         f"{head} If it then reports no live request (expired unanswered), you may "
@@ -26632,7 +26634,9 @@ async def _node_site_access(
     # THE RE-RAISE IS COUNTED, NOT REMEMBERED (review U15): the session queue
     # already holds this origin's cards that lapsed unanswered, so the bound
     # survives compaction and an agent that lost count. Cards the agent
-    # withdrew itself (cancel_access) or the operator answered do not count.
+    # withdrew itself (cancel_access) or the operator answered do not count,
+    # and neither do lapses before the operator's last chat message (R4-1):
+    # their reply re-opens one card plus one re-raise.
     lapses_of: Any = getattr(context, "site_ask_lapses", None) if context is not None else None
     lapsed = 0
     if callable(lapses_of):
@@ -26648,9 +26652,11 @@ async def _node_site_access(
             "browser",
             _wrap_receipt(
                 f"the operator hasn't answered twice ({lapsed} cards for {origin} expired "
-                f"unanswered in this session); tell them in chat that you need {origin} on "
-                "this node, and stop. No new card was raised and the request was "
-                "withdrawn; do not call request_access for it again."
+                "unanswered since their last chat message); tell them in chat that you "
+                f"need {origin} on this node, and stop. No new card was raised and the "
+                "request was withdrawn; do not call request_access for it again unless "
+                "the operator replies in chat asking for it — then you may raise one new "
+                "card (plus one re-raise)."
             ),
             details={"origin": origin, "state": "none", "approval": "unanswered", "lapsed": lapsed},
         )
