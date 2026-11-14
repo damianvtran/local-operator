@@ -434,7 +434,19 @@ async def test_an_agent_spawned_session_still_raises_its_gate_rows(
             },
             True,
         ),
-        ({"mode": "peer", "origin": {"kind": "moved", "source_device": "d_head"}}, False),
+        # A session the operator BROUGHT here (``move --to local`` writes mode
+        # ``peer``, kind ``moved``/``fork``, no ``started_by``) keeps the tool:
+        # it is the operator's own device (review r1, M1).
+        ({"mode": "peer", "origin": {"kind": "moved", "source_device": "d_head"}}, True),
+        ({"mode": "peer", "origin": {"kind": "fork", "source_device": "d_head"}}, True),
+        # An AGENT's peer create stays withheld, attested or not.
+        (
+            {
+                "mode": "peer",
+                "origin": {"kind": "agent", "source_device": "d_head", "started_by": "agent"},
+            },
+            False,
+        ),
         # A LOCAL placement (a recovered replica) is the operator's own device.
         ({"mode": "local", "origin": {"kind": "replica", "source_device": "d_head"}}, True),
     ],

@@ -18374,7 +18374,8 @@ class Session:
           placement) whose stamp does NOT positively say the operator started
           it (``remote_attention.origin_is_operator_started``): an AGENT's
           create, and — DEFAULT-DENY (operator rule, 2026-11-14) — a legacy
-          stamp from before the attestation, a move or anything unreadable.
+          peer-create stamp from before the attestation. A ``moved``/``fork``
+          stamp (the operator carried the session here) keeps the tool.
           The owner refuses to forward such a session's items, so the tool
           would only fill an inbox nobody reads. A local top-level session
           (no stamp, or a ``local`` placement) is untouched.
@@ -18390,6 +18391,7 @@ class Session:
         try:
             from local_operator.notifications.remote_attention import (
                 AGENT_ORIGIN_KIND,
+                PEER_CREATE_ORIGIN_KINDS,
                 origin_is_operator_started,
             )
             from local_operator.resume import ORIGIN_AGENT_WORKSTREAM, session_origin
@@ -18406,6 +18408,14 @@ class Session:
             if str(stamp.origin.get("kind") or "") == AGENT_ORIGIN_KIND:
                 return True
             if stamp.placement.mode != "peer":
+                return False
+            # Only a peer CREATE is withheld without the attestation (review r1,
+            # M1). A ``moved``/``fork`` stamp is a session the operator carried
+            # here themselves (``lop sessions move --to local`` writes mode
+            # ``peer`` with no ``started_by``); denying it would strip ``notify``
+            # from the operator's own device. No leak follows from keeping it:
+            # the owner already refuses to forward a non-attested stamp's items.
+            if str(stamp.origin.get("kind") or "") not in PEER_CREATE_ORIGIN_KINDS:
                 return False
             return not origin_is_operator_started(stamp.origin)
         except Exception:  # noqa: BLE001 — an unanswered question keeps the tool

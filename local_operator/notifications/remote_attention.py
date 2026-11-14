@@ -159,6 +159,12 @@ AGENT_ORIGIN_KIND = "agent"
 #: or a replica — denies. Asks are exempt: a question still waiting on the
 #: operator always travels (:func:`stamp_rows_for_viewer`).
 STARTED_BY_FIELD = "started_by"
+
+#: The ``origin.kind`` values a peer CREATE writes (the owner defaults a missing
+#: kind to ``user``). Only these are subject to the ``started_by`` default-deny on
+#: the node's ``notify`` mount: a ``moved``/``fork`` stamp is a session the
+#: operator carried to this device, and the owner never forwards its items anyway.
+PEER_CREATE_ORIGIN_KINDS: frozenset[str] = frozenset({"user", AGENT_ORIGIN_KIND})
 OPERATOR_STARTED = "operator"
 
 
@@ -169,6 +175,9 @@ def started_by_for_origin(origin_kind: str) -> str:
     control op, after ``network/cli._create_origin`` or the desktop route), never
     on the owner from a frame that may predate the field.
     """
+    # Anything but an exact ``user`` — ``agent``, an empty or a future kind —
+    # deliberately maps to ``agent``: default-deny means an attestation is only
+    # ever OPERATOR when the caller was positively identified as the operator.
     return OPERATOR_STARTED if origin_kind == "user" else AGENT_ORIGIN_KIND
 
 
