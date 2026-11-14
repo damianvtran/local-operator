@@ -10808,31 +10808,28 @@ async def test_an_ordinary_ask_beside_a_signed_one_keeps_the_plain_door(answers_
 
 
 def _site_card(*, shown_origin: str, bound_origin: str) -> dict[str, Any]:
-    """A node's site card as its frame publishes it (``site_ask_question``'s
-    shape), drawn by hand so the forged variant is expressible."""
-    from local_operator.browser_bridge.site_approval import site_question_id
+    """A node's site card as its frame publishes it: ``site_ask_question``'s
+    own output, bound to ``bound_origin``. Only the forged variant's sentence
+    is swapped for one naming ``shown_origin``.
+
+    Built from the real builder, not by hand: the signer compares the WHOLE
+    question (review R2-1: option order, labels, ``recommended``, ``multi``),
+    so a hand-drawn copy drifts the moment the card's shape moves and the
+    genuine case is refused as a mismatch for the wrong reason.
+    """
+    from local_operator.browser_bridge.site_approval import site_ask_question
     from local_operator.i18n.messages import render
 
-    return {
-        "id": "site-access",
-        "question": render(
+    card = site_ask_question(
+        origin=bound_origin, node_name="node-a", node_device_id="d_node", entry_id="entry-1"
+    )
+    if shown_origin != bound_origin:
+        card["question"] = render(
             "browser.site_approval.question",
             {"origin": shown_origin, "node": "node-a"},
             locale="en",
-        ),
-        "options": [{"id": "approve", "label": "Approve"}, {"id": "deny", "label": "Deny"}],
-        "human_required": True,
-        "question_id": site_question_id(
-            node_device_id="d_node", entry_id="entry-1", origin=bound_origin
-        ),
-        "site": {
-            "node_device_id": "d_node",
-            "entry_id": "entry-1",
-            "origin": bound_origin,
-            "scope": "origin",
-            "node_name": "node-a",
-        },
-    }
+        )
+    return card
 
 
 @pytest.mark.asyncio
@@ -10857,6 +10854,6 @@ async def test_the_desktop_route_signs_only_a_card_it_can_rebuild(answers_api, s
         assert remote.decisions == [("a-site", card["question_id"], "approve")]
     else:
         assert result.status_code == 409, result.text
-        assert "not signed" in result.json()["detail"]
+        assert "did not sign" in result.json()["detail"]
         assert remote.decisions == []
     assert remote.calls == []
