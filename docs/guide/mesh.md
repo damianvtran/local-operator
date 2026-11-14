@@ -154,7 +154,14 @@ closed overnight), a peer keeps using the login it already borrowed for up to
 received (a working peer asks again every grant period), so an owner that comes
 online once a day keeps remote work going. The hold never outlives the access token itself: a token that
 expires sooner (Anthropic OAuth after about 8 hours, Radient after about an
-hour) stops working at its own expiry until the owner is back. `kimi` is the one provider that can never be
+hour) stops working at its own expiry until the owner is back. Lent GitHub and MCP
+logins are held the same way: a GitHub token from the owner's `GITHUB_TOKEN` or
+`gh` login lasts the whole hold, a GitHub App token at most its one hour, and an
+MCP sign-in until its access token expires (often about an hour). A lost or stolen
+node can therefore push to GitHub for up to 24 hours unless you run
+`lop network panic`, which ends every held login on that network at once (and
+revokes a held GitHub App token); revoking the share does the same once the node
+hears of it. `kimi` is the one provider that can never be
 lent: its grants are signed with the fingerprint of the device that made them.
 
 **The desktop app has its own view of it.**

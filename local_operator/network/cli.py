@@ -2194,7 +2194,10 @@ def _durable_record(
       shared it again. ``granted_at`` is the owner's clock, so a few seconds of skew
       is the residual; the record carries no ``doc_rev`` to compare instead.
     """
-    if not evidence or str(evidence.get("state") or "") == "synced":
+    # ``held`` is not a failure either: the owner is away and the token it lent is
+    # still serving through the offline hold (2026-11-14). The listing's live
+    # columns already say the borrow works; a failure record here would contradict it.
+    if not evidence or str(evidence.get("state") or "") in ("synced", "held"):
         return None
     recorded_owner = str(evidence.get("owner_device") or "")
     if recorded_owner and owner_device and recorded_owner != owner_device:

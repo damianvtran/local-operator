@@ -457,6 +457,40 @@ def _oauth_row(
             peer_name=peer_name,
         ).sentence
 
+    if evidence_state == "held":
+        # THE OFFLINE HOLD (2026-11-14, "Yes, GitHub and MCP"): the owner is away and
+        # this device is serving the access token it lent before it went, until the
+        # row's ``until``. Usable, so the row is ``synced``; the reason says it is a
+        # hold, when it stops and that nothing is renewed meanwhile — the same reading
+        # the model readiness row gives (``readiness.selected_model_row``). Past its
+        # end it is what it then is: the owner is unreachable, with that remedy.
+        from local_operator.network.credentials.mcp_state import held_until_clause
+
+        until = held_until_clause(evidence.get("until"))
+        if until:
+            lender = owner_name or "a shared device"
+            return _row(
+                "synced",
+                _bounded(
+                    f"held from {lender}{until} — lent before it went offline; nothing "
+                    f"is renewed until it is back"
+                ),
+                owner=owner or str(evidence.get("owner_device") or ""),
+                shape="oauth",
+                refs=refs,
+            )
+        from local_operator.network.credentials.types import (
+            CAUSE_UNREACHABLE as _UNREACHABLE,
+        )
+
+        return _row(
+            "not_yet_synced",
+            _bounded(_repaired(_UNREACHABLE)),
+            owner=owner or str(evidence.get("owner_device") or ""),
+            shape="oauth",
+            refs=refs,
+        )
+
     # THE CAUSE COMES FROM THE CLASSIFIER, NOT FROM THE STATE WORD. The evidence
     # state is a coarse bucket (``expired`` / ``revoked`` / ``unauthorized`` /
     # ``unavailable``) and several CODES inside one bucket need different remedies:
