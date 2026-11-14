@@ -585,15 +585,23 @@ The flow keeps the same three calls; only who answers, and where, changes:
    and a later `request_access` for that origin answers "the operator denied
    this site" without raising a card. Do not ask again unless they tell you to.
 4. If `await_access` reports no live request (the card expired unanswered),
-   you may call `request_access` **once** more. If that card also expires,
-   tell the operator in chat which site you need, and stop using it.
-   `cancel_access` withdraws the request and its card together.
+   you may re-raise it with `request_access` one time. If that card also
+   expires, tell the operator in chat which site you need, and stop using it.
+   The tool counts this from the session's own cards: once two cards for an
+   origin have expired unanswered, `request_access` raises no third and says
+   the operator hasn't answered twice. `cancel_access` withdraws the request
+   and its card together (a withdrawn card does not count as unanswered).
 
 Removing a decision: an approval lasts until someone runs `lop browser sites
 --revoke <origin>` **on the node** (`lop browser sites` lists what that
 browser allows and which sites the operator denied). Revoking a denial lets an
 agent ask about the site again. Both only ever reduce what is allowed, so they
-need no signature.
+need no signature. **Lifting a denial is the operator's decision, never
+yours:** run `lop browser sites --revoke <origin>` only when the operator tells
+you to (quote them), then `request_access`; never on your own initiative.
+`--revoke` removes one exact origin; broad grants and the extension's
+all-sites switch are changed only in the extension's Settings page, which a
+node has no screen for.
 
 What can go wrong, and what to say:
 
@@ -601,8 +609,10 @@ What can go wrong, and what to say:
   to verify against (setup ran without a usable anchor), or this machine
   holds the operator key's private half (then a signature here would not show
   a person decided). Do not retry; tell the operator, and carry on without the
-  site. The fix is theirs: install the anchor (or remove the key file from the
-  node), then `lop browser setup --node --repair --authorised-by '<who, when>'`.
+  site. The fix is theirs: `lop browser setup --node --repair --authorised-by
+  '<who, when>'` on the node re-derives the browser's anchor from the installed
+  operator anchor (`/etc/local-operator/operators/<uid>.json`); if the node
+  holds the operator key file, remove it from the node first.
 - An answer from the node's own terminal, or from a paired phone, is refused
   (`unsigned_decision`): only an answer signed with the operator key itself
   decides. Approving from Local Operator (the app or `lop`) on their own
@@ -638,12 +648,14 @@ answer your own card.
 Other rules:
 
 - `denied` is final for the task at hand: **do not retry or re-request the
-  same origin** unless the user says they've changed their mind.
+  same origin** unless the user says they've changed their mind (on a node,
+  that is also when you run `--revoke`, above).
 - A redirect INTO a new origin mid-navigation still prompts synchronously at
   that hop (a running command cannot fail early); if a navigation returns
   `origin_denied` after a redirect, explain which hop needed approval.
 - If you know you will visit several sites, `request_access` them and tell
-  the user up front in ONE message so they can approve in a batch.
+  the user up front in ONE message so they can approve in a batch. On a node
+  the cards are the batch: skip the message.
 - Subresources are not gated (this is a navigation gate, not a network filter).
 - `http`/`https` only; the extension refuses `chrome://`, `file://`, etc.
 

@@ -26412,20 +26412,55 @@ _NODE_APPROVAL_REACH = (
 _NODE_CARD_IS_NOTICE = "That card is the notification: do not also send an ask or a message for it."
 
 
-def _node_wait_text(url: str, origin: str) -> str:
+#: How many of this session's site cards for one origin may lapse unanswered
+#: before ``request_access`` stops raising another (review U15): the first
+#: card, plus the one re-raise the texts below offer.
+_NODE_SITE_LAPSE_LIMIT = 2
+
+
+def _node_wait_text(url: str, origin: str, *, reraised: bool = False) -> str:
     """How to wait for a node site card, and the ONE bounded re-raise (review U2).
 
     The desktop flow's popup and 15-minute re-request window do not exist on a
     node: the entry lives 10 minutes, the card is on the operator's device, and
     a re-raised card pings a person. So the agent may re-raise once after an
     expiry, then must say so in chat and stop — never a card every ten minutes.
+    The limit is ENFORCED by :func:`_node_site_access` from the session's own
+    queue (review U15), so the text states it rather than relying on the agent
+    to count: an agent that lost count after compaction still cannot re-ping.
+    """
+    head = (
+        f"Call action='await_access' url={url} — each call waits at most 240s — until it "
+        "returns allowed or denied; the request stays open about 10 minutes."
+    )
+    if reraised:
+        return (
+            f"{head} This is your one re-raise: if this card also expires unanswered, "
+            f"tell the operator in chat that you need {origin} on this node, and stop "
+            "using it — request_access will not raise another card for it in this session."
+        )
+    return (
+        f"{head} If it then reports no live request (expired unanswered), you may "
+        "re-raise it with request_access one time; if that card also expires "
+        f"unanswered, tell the operator in chat that you need {origin} on this node, "
+        "and stop using it."
+    )
+
+
+def _node_denied_text(origin: str) -> str:
+    """The operator's sticky Deny, as the agent on the node reads it (R3-1/U14).
+
+    ``lop browser sites --revoke`` is unsigned by design (it only reduces what
+    is allowed), and the agent has a shell on the node — so whether a denial is
+    lifted must be stated as the OPERATOR's decision, or "no re-ask until they
+    revoke it" is a convention the agent can quietly undo itself.
     """
     return (
-        f"Call action='await_access' url={url} — each call waits at most 240s — until it "
-        "returns allowed or denied; the request stays open about 10 minutes. If it "
-        "then reports no live request (expired unanswered), you may call "
-        "request_access ONCE more. If that card also expires unanswered, tell the "
-        f"operator in chat that you need {origin} on this node, and stop using it."
+        f"the operator denied {origin} on this node; do not ask again unless they tell "
+        "you to. Continue without this site. Only the operator decides to lift a "
+        "denial: if they tell you they changed their mind (quote them), run "
+        f"`lop browser sites --revoke {origin}` here — it approves nothing, it only "
+        "lets you ask again — then request_access. Never run it on your own initiative."
     )
 
 
@@ -26442,10 +26477,7 @@ def _node_access_result_text(state: str, origin: str, url: str, *, total_s: floa
             f"{origin} is allowed in this node's browser. 'open' or 'goto' the URL " "there now."
         )
     if state == "denied":
-        return _wrap_receipt(
-            f"the operator denied {origin} on this node. Do not ask again unless they "
-            "tell you to; continue without this site."
-        )
+        return _wrap_receipt(_node_denied_text(origin))
     if state in ("pending", "await_timeout"):
         waited = f" after {total_s:.0f}s" if total_s else ""
         return _wrap_receipt(
@@ -26455,18 +26487,19 @@ def _node_access_result_text(state: str, origin: str, url: str, *, total_s: floa
             "- Keep calling action='await_access' — each call waits at most 240s — "
             "while the request is open (about 10 minutes from when it was raised), "
             "or do other work and come back.\n"
-            "- If await_access then reports no live request, you may call "
-            "request_access ONCE more; if that card also expires unanswered, tell "
-            f"the operator in chat that you need {origin} on this node, and stop.\n"
+            "- If await_access then reports no live request, you may re-raise it with "
+            "request_access; the tool allows one re-raise per site in this session and "
+            "says so when the operator has not answered twice — then tell them in chat "
+            f"that you need {origin} on this node, and stop.\n"
             "AN UNANSWERED CARD IS NOT A REFUSAL."
         )
     if state == "cancelled":
         return _wrap_receipt(f"your request for {origin} was withdrawn, and its card with it.")
     return _wrap_receipt(
         f"no live request for {origin} on this node (it expired unanswered, was "
-        "withdrawn, or was never raised). If you have not re-raised it yet, you may "
-        f"call action='request_access' url={url} ONCE more; otherwise tell the "
-        "operator in chat that you need this site, and stop using it."
+        f"withdrawn, or was never raised). You may call action='request_access' url={url} "
+        "to raise it again; if the tool says the operator has not answered twice, tell "
+        f"them in chat that you need {origin} on this node, and stop using it."
     )
 
 
@@ -26527,11 +26560,7 @@ async def _node_site_access(
         return _text(
             tool_call_id,
             "browser",
-            _wrap_receipt(
-                f"the operator denied {origin} on this node; do not ask again unless "
-                "they tell you to. Continue without this site. (They can remove that "
-                f"decision with `lop browser sites --revoke {origin}` on this node.)"
-            ),
+            _wrap_receipt(_node_denied_text(origin)),
             details={"origin": origin, "state": "denied", "approval": "signed", "sticky": True},
         )
     details: dict[str, Any] = {"origin": origin, "approval": site_approval.APPROVAL_NO_APPROVER}
@@ -26600,6 +26629,31 @@ async def _node_site_access(
     # can only be refused when answered, and its identical text would make the
     # queue refuse the live entry's card. Settle it first; the card bound to
     # THIS entry (the extension deduplicated onto it) is kept.
+    # THE RE-RAISE IS COUNTED, NOT REMEMBERED (review U15): the session queue
+    # already holds this origin's cards that lapsed unanswered, so the bound
+    # survives compaction and an agent that lost count. Cards the agent
+    # withdrew itself (cancel_access) or the operator answered do not count.
+    lapses_of: Any = getattr(context, "site_ask_lapses", None) if context is not None else None
+    lapsed = 0
+    if callable(lapses_of):
+        try:
+            counted = lapses_of(origin)
+            lapsed = counted if isinstance(counted, int) else 0
+        except Exception:  # noqa: BLE001 — an uncounted history only loses the bound
+            logger.debug("node site access: counting lapsed cards failed", exc_info=True)
+    if lapsed >= _NODE_SITE_LAPSE_LIMIT:
+        await _withdraw_entry()
+        return _error(
+            tool_call_id,
+            "browser",
+            _wrap_receipt(
+                f"the operator hasn't answered twice ({lapsed} cards for {origin} expired "
+                f"unanswered in this session); tell them in chat that you need {origin} on "
+                "this node, and stop. No new card was raised and the request was "
+                "withdrawn; do not call request_access for it again."
+            ),
+            details={"origin": origin, "state": "none", "approval": "unanswered", "lapsed": lapsed},
+        )
     withdraw_site: Any = (
         getattr(context, "withdraw_site_asks", None) if context is not None else None
     )
@@ -26612,7 +26666,7 @@ async def _node_site_access(
     receipt: Mapping[str, Any] = outcome if isinstance(outcome, Mapping) else {}
     ask_details = receipt.get("details")
     ask_id = str(ask_details.get("ask_id") or "") if isinstance(ask_details, Mapping) else ""
-    wait = _node_wait_text(url, origin)
+    wait = _node_wait_text(url, origin, reraised=lapsed > 0)
     if not receipt.get("ok"):
         error = str(receipt.get("error") or "the ask was refused")
         if "already carries that question" in error:
@@ -26651,7 +26705,7 @@ async def _node_site_access(
             "their own device, signed with their operator key, and the browser checks "
             f"the signature itself.\n{_NODE_APPROVAL_REACH} {_NODE_CARD_IS_NOTICE}\n"
             f"{wait}\n"
-            "Do other work meanwhile; do not ask them again for the same site."
+            "Do other work meanwhile; while this card is open, do not request the site again."
         ),
         details={
             "origin": origin,
@@ -26852,14 +26906,27 @@ async def _bridge_access(
 
     # A headless node's texts name the operator's card, not a popup (U2/Q3).
     await_on_node = host != HOST_UI_PREFIX and _await_backend._on_headless_node()  # noqa: SLF001
+    # Every node text names the ORIGIN, the unit a grant covers (review U19/Q5):
+    # the extension's reported origin once a slice answered, the URL's own
+    # scheme://host[:port] before that.
+    from urllib.parse import urlsplit as _urlsplit
+
+    node_origin = url
+    try:
+        _parts = _urlsplit(url)
+        if _parts.scheme in ("http", "https") and _parts.hostname:
+            _port = f":{_parts.port}" if _parts.port else ""
+            node_origin = f"{_parts.scheme}://{_parts.hostname}{_port}"
+    except ValueError:  # a malformed port: name the URL as given
+        node_origin = url
     while True:
         remaining_ms = int((deadline - time.monotonic()) * 1000)
         if remaining_ms <= 0 and await_on_node:
             return _text(
                 tool_call_id,
                 "browser",
-                _node_access_result_text("await_timeout", url, url, total_s=total_s),
-                details={"origin": url, "state": "pending"},
+                _node_access_result_text("await_timeout", node_origin, url, total_s=total_s),
+                details={"origin": node_origin, "state": "pending"},
             )
         if remaining_ms <= 0:
             # RENDERED BY ``_access_result_text`` rather than inline: this arm and
@@ -26891,6 +26958,7 @@ async def _bridge_access(
             return problem
         assert result is not None
         state_value = str(result.get("state", ""))
+        node_origin = str(result.get("origin") or node_origin)
         if state_value != "pending" and await_on_node:
             origin = str(result.get("origin", url))
             return _text(

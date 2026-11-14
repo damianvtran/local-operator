@@ -81,6 +81,10 @@ def sites_bad_origin(*, origin: str) -> Msg:
     return Msg("browser.site_approval.sites_bad_origin", {"origin": origin})
 
 
+def sites_bad_origin_no_scheme(*, origin: str) -> Msg:
+    return Msg("browser.site_approval.sites_bad_origin_no_scheme", {"origin": origin})
+
+
 def sites_broad() -> Msg:
     return Msg("browser.site_approval.sites_broad", {})
 
@@ -105,6 +109,10 @@ def sites_revoke_hint() -> Msg:
     return Msg("browser.site_approval.sites_revoke_hint", {})
 
 
+def sites_revoke_limits() -> Msg:
+    return Msg("browser.site_approval.sites_revoke_limits", {})
+
+
 def sites_revoke_nothing(*, origin: str) -> Msg:
     return Msg("browser.site_approval.sites_revoke_nothing", {"origin": origin})
 
@@ -113,9 +121,21 @@ def sites_revoked(*, origin: str) -> Msg:
     return Msg("browser.site_approval.sites_revoked", {"origin": origin})
 
 
+def sites_revoked_denial(*, origin: str) -> Msg:
+    return Msg("browser.site_approval.sites_revoked_denial", {"origin": origin})
+
+
 def sites_still_broad(*, origin: str, grants: str) -> Msg:
     return Msg("browser.site_approval.sites_still_broad", {"origin": origin, "grants": grants})
 
 
-def sites_unreachable(*, detail: str) -> Msg:
-    return Msg("browser.site_approval.sites_unreachable", {"detail": detail})
+def sites_remedy_desktop() -> Msg:
+    return Msg("browser.site_approval.sites_remedy_desktop", {})
+
+
+def sites_remedy_node() -> Msg:
+    return Msg("browser.site_approval.sites_remedy_node", {})
+
+
+def sites_unreachable(*, detail: str, remedy: str) -> Msg:
+    return Msg("browser.site_approval.sites_unreachable", {"detail": detail, "remedy": remedy})

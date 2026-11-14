@@ -13437,6 +13437,35 @@ class Session:
             if isinstance(question, Mapping)
         )
 
+    @staticmethod
+    def _bridge_door_refusal(record: Mapping[str, Any] | None) -> str:
+        """The sentence a plain ask door refuses a bridge-carried record with.
+
+        PR #3938 U5: a headless node's ``site:v1:`` card is a bridge record too,
+        so it is refused here like any other — but the Team Bridge sentence
+        ("approve it from the request's own card … or a paired device") is wrong
+        for it. The caller reaching this door IS on the card: it is a desktop
+        app or client from before signed site approvals, whose answer route
+        still posts to ``ask_respond``/revise/per-question. The phone the
+        sentence offers is exactly what a site card cannot be answered from.
+        So a site card gets the old-signer refusal, the same keyed sentence the
+        runtime's challenge and ``bridge_decide`` doors give (update this
+        computer; the card stays open). The refusal itself is unchanged: these
+        doors carry no signature, so they still fail by construction.
+        """
+        from local_operator.browser_bridge.site_approval import is_site_question_id
+
+        if isinstance(record, Mapping) and any(
+            is_site_question_id(question.get("question_id"))
+            for question in (record.get("questions") or ())
+            if isinstance(question, Mapping)
+        ):
+            from local_operator.i18n.keys import browser_site_approval as _site_keys
+            from local_operator.i18n.messages import render_resolved
+
+            return render_resolved(_site_keys.refused_old_signer())
+        return Session.BRIDGE_DECISION_DOOR_REQUIRED
+
     async def site_decide(
         self,
         ask_id: str,
@@ -13823,7 +13852,7 @@ class Session:
             # re-word a message from another organization. The refusal names
             # the door that works. Class-qualified because reduced stand-in
             # sessions (the ask-wire fixtures) drive the real method.
-            return {"ok": False, "error": Session.BRIDGE_DECISION_DOOR_REQUIRED}
+            return {"ok": False, "error": Session._bridge_door_refusal(record)}
         refusal = _ask_refusal_copy(record)
         if refusal:
             return {"ok": False, "error": refusal}
@@ -13912,7 +13941,7 @@ class Session:
             # and `answer_ask_question` — a bridge request is re-worded only
             # through the verified door (`bridge_decide`), never by a raw
             # revision this route carries no proof for.
-            return {"ok": False, "error": Session.BRIDGE_DECISION_DOOR_REQUIRED}
+            return {"ok": False, "error": Session._bridge_door_refusal(record)}
         # THE PROBE BEFORE THE HOP. Same decision the write path makes, asked
         # without writing; see the docstring for what doing it in the other order
         # costs. Nothing can interleave between the two — this method is sync and
@@ -13977,7 +14006,7 @@ class Session:
             # re-word a message from another organization. The refusal names
             # the door that works. Class-qualified because reduced stand-in
             # sessions (the ask-wire fixtures) drive the real method.
-            return {"ok": False, "error": Session.BRIDGE_DECISION_DOOR_REQUIRED}
+            return {"ok": False, "error": Session._bridge_door_refusal(record)}
         refusal = _ask_refusal_copy(record)
         if refusal:
             return {"ok": False, "error": refusal}
@@ -14281,6 +14310,43 @@ class Session:
         if queue is None:
             return {"ok": False, "error": "this session's runtime predates queued asks"}
         return queue.withdraw(ask_id, reason=reason, answers=answers, message_id=message_id, by=by)
+
+    def site_ask_lapses(self, origin: str) -> int:
+        """How many of this session's site cards for ``origin`` lapsed unanswered.
+
+        Review U15: a node's agent may re-raise a site card once after it
+        expires; the browser tool refuses a further card from this count, so the
+        bound lives in the queue (it survives compaction and an agent that lost
+        count) rather than in the model's memory. ``timed_out``/``expired``
+        count, and ``dismissed`` too — clearing a lapsed card from the screen
+        is not an answer, and must not reset the bound. A card the agent
+        withdrew itself (``cancel_access``, a superseded entry) or one the
+        operator answered or declined is not the operator ignoring it.
+        """
+        from local_operator.asks import store as _ask_store
+        from local_operator.browser_bridge.site_approval import is_site_question_id
+
+        queue = self.ask_queue()
+        if queue is None:
+            return 0
+        lapsed_states = (
+            _ask_store.STATUS_TIMED_OUT,
+            _ask_store.STATUS_EXPIRED,
+            _ask_store.STATUS_DISMISSED,
+        )
+        count = 0
+        for record in queue.records():
+            if record.get("status") not in lapsed_states:
+                continue
+            if any(
+                isinstance(question, Mapping)
+                and is_site_question_id(question.get("question_id"))
+                and isinstance(question.get("site"), Mapping)
+                and str(question["site"].get("origin") or "") == origin
+                for question in record.get("questions") or ()
+            ):
+                count += 1
+        return count
 
     def withdraw_site_asks(self, origin: str, keep_question_id: str = "") -> list[str]:
         """Settle this session's OPEN site cards for ``origin`` (review U3/Q1).
@@ -22939,6 +23005,10 @@ class Session:
             # condition binds it.
             withdraw_site_asks=(
                 self.withdraw_site_asks if self._ask_withdraw_callable() is not None else None
+            ),
+            # The re-raise bound (review U15) reads the same queue.
+            site_ask_lapses=(
+                self.site_ask_lapses if self._ask_withdraw_callable() is not None else None
             ),
             # THE ASK GATE'S DOOR (design docs/design/ask-gate.md §2.2): the
             # same two conditions as the two doors above, so its presence IS

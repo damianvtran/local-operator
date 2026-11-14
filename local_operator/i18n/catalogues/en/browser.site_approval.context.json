@@ -47,7 +47,7 @@
   "browser.site_approval.refused_no_approver": {
     "role": "headless-node site approval: the queued ask the operator answers on their own device, and its refusals",
     "tone": "plain, calm, operator-facing; URLs and product names verbatim",
-    "note": "toast when the node's browser has no operator key configured. The command is verbatim; '<who, when>' is a placeholder the reader fills in"
+    "note": "refusal when the node's browser has no operator anchor to verify answers against, or the node holds the operator key file; the path and command are verbatim"
   },
   "browser.site_approval.device_unconfirmed": {
     "role": "headless-node site approval: the queued ask the operator answers on their own device, and its refusals",
@@ -67,7 +67,7 @@
   "browser.site_approval.refused_old_signer": {
     "role": "headless-node site approval: the queued ask the operator answers on their own device, and its refusals",
     "tone": "plain, calm, operator-facing; URLs and product names verbatim",
-    "note": "refusal when an answer to a node's site approval comes from a device or build that cannot check the card before signing (an older Local Operator, a phone)"
+    "note": "refusal when an answer to a node's site approval comes from a device or build that cannot check the card before signing (an older Local Operator, a phone); also returned by the node's plain ask doors an old desktop app answers through. Says the card stays open"
   },
   "browser.site_approval.sites_help": {
     "role": "headless-node site approval: the queued ask the operator answers on their own device, and its refusals",
@@ -109,10 +109,20 @@
     "tone": "plain, calm, operator-facing; URLs and product names verbatim",
     "note": "hint after the list; the command is verbatim"
   },
+  "browser.site_approval.sites_revoke_limits": {
+    "role": "headless-node site approval: the queued ask the operator answers on their own device, and its refusals",
+    "tone": "plain, calm, operator-facing; URLs and product names verbatim",
+    "note": "shown under the listing when broad grants or the all-sites switch are present: what --revoke cannot remove and where those are changed; `--revoke` verbatim"
+  },
   "browser.site_approval.sites_revoked": {
     "role": "headless-node site approval: the queued ask the operator answers on their own device, and its refusals",
     "tone": "plain, calm, operator-facing; URLs and product names verbatim",
     "note": "receipt after a successful revoke; {origin} is a URL origin"
+  },
+  "browser.site_approval.sites_revoked_denial": {
+    "role": "headless-node site approval: the queued ask the operator answers on their own device, and its refusals",
+    "tone": "plain, calm, operator-facing; URLs and product names verbatim",
+    "note": "`lop browser sites --revoke` result when the operator's stored denial of {origin} was removed; nothing is approved by it"
   },
   "browser.site_approval.sites_revoke_nothing": {
     "role": "headless-node site approval: the queued ask the operator answers on their own device, and its refusals",
@@ -129,9 +139,24 @@
     "tone": "plain, calm, operator-facing; URLs and product names verbatim",
     "note": "error when --revoke gets something that is not an http(s) URL"
   },
+  "browser.site_approval.sites_bad_origin_no_scheme": {
+    "role": "headless-node site approval: the queued ask the operator answers on their own device, and its refusals",
+    "tone": "plain, calm, operator-facing; URLs and product names verbatim",
+    "note": "`lop browser sites --revoke` refusal when the argument is a bare host with no http:// or https://; the example keeps {origin} verbatim"
+  },
   "browser.site_approval.sites_unreachable": {
     "role": "headless-node site approval: the queued ask the operator answers on their own device, and its refusals",
     "tone": "plain, calm, operator-facing; URLs and product names verbatim",
-    "note": "error when the browser bridge cannot be reached; {detail} is a technical reason; the command is verbatim"
+    "note": "error when the browser bridge cannot be reached; {detail} is a technical reason without a trailing period; {remedy} is one of the sites_remedy_* sentences"
+  },
+  "browser.site_approval.sites_remedy_desktop": {
+    "role": "headless-node site approval: the queued ask the operator answers on their own device, and its refusals",
+    "tone": "plain, calm, operator-facing; URLs and product names verbatim",
+    "note": "next step when the browser bridge is unreachable on a desktop machine; commands verbatim"
+  },
+  "browser.site_approval.sites_remedy_node": {
+    "role": "headless-node site approval: the queued ask the operator answers on their own device, and its refusals",
+    "tone": "plain, calm, operator-facing; URLs and product names verbatim",
+    "note": "next step when the browser bridge is unreachable on a headless node; commands verbatim"
   }
 }

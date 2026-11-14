@@ -118,15 +118,15 @@ def test_the_card_question_is_code_built_and_human_required() -> None:
     assert [option["id"] for option in question["options"]] == ["deny", "approve"]
     assert question["recommended"] is None
     assert question["secret"] is False and question["multi"] is False
-    # Design D1/D7: the first row is the whole subject, origin then node, and
-    # each appears exactly once, so a 1-row question bound at 80x24 still shows
-    # what Approve grants and where.
+    # Design D1/D7: the first row is the whole subject, origin then node, so a
+    # short question bound still shows what Approve grants and where. The rest
+    # names the origin only inside the pasteable revoke command (U18).
     first, _, rest = question["question"].partition("\n")
     assert first == "Allow http://127.0.0.1:8765 on node-a?"
     assert len(first) <= 80
-    assert "http://127.0.0.1:8765" not in rest and "node-a" not in rest
-    # D2/U4: the removal the card promises exists, and D3/U5 say who answers.
-    assert "lop browser sites --revoke" in rest
+    command = "`lop browser sites --revoke http://127.0.0.1:8765`"
+    assert command in rest
+    assert "http://127.0.0.1:8765" not in rest.replace(command, "") and "node-a" not in rest
     assert "not from a phone" in rest
 
 
@@ -1024,7 +1024,7 @@ async def test_a_request_withdraws_a_card_bound_to_another_entry_first(
     ]
     text = _text_of(result)
     assert "That card is the notification" in text
-    assert "ONCE more" in text
+    assert "re-raise it with request_access one time" in text
 
 
 @pytest.mark.asyncio
@@ -1092,8 +1092,8 @@ async def test_the_session_withdraws_only_stale_site_cards(
     ("reply", "expect"),
     [
         ({"state": "allowed"}, "allowed in this node's browser"),
-        ({"state": "none"}, "ONCE more"),
-        ({"state": "denied"}, "Do not ask again"),
+        ({"state": "none"}, "to raise it again"),
+        ({"state": "denied"}, "Never run it on your own initiative"),
     ],
     ids=["allowed", "none", "denied"],
 )
@@ -1131,12 +1131,17 @@ async def test_await_access_timeout_on_a_node_names_the_card(
         return {"origin": VECTOR["origin"], "state": "pending"}
 
     client.call = call  # type: ignore[method-assign]
-    params = builtin.BrowserParams(action="await_access", url=VECTOR["origin"], timeout_s=0.05)
+    params = builtin.BrowserParams(
+        action="await_access", url=f"{VECTOR['origin']}/login/x", timeout_s=0.05
+    )
     result = await builtin._bridge_access("c", "await_access", params, None, client=client)
     text = _text_of(result)
     assert "there is no popup on this node" in text
     assert "extension popup" not in text and "15 MINUTES" not in text
-    assert "ONCE more" in text
+    assert "re-raise it with request_access" in text
+    # U19/Q5: the timeout names the ORIGIN, never the full URL.
+    assert result.details is not None and result.details["origin"] == VECTOR["origin"]
+    assert "/login" not in text
 
 
 # --- D3 / D4 / U13: the terminal card ---------------------------------------------------
@@ -1207,6 +1212,220 @@ def test_lop_browser_sites_lists_and_revokes(
     assert "--revoke" in listing
     assert sites_cli.main("http://127.0.0.1:8781/some/path") == 0
     assert calls[-2] == ("revoke_access", {"url": "http://127.0.0.1:8781"})
-    assert "Removed the stored decision for http://127.0.0.1:8781" in capsys.readouterr().out
+    assert "Removed the grant for http://127.0.0.1:8781" in capsys.readouterr().out
     assert sites_cli.main("ftp://nope") == 1
     assert "not an http or https origin" in capsys.readouterr().out
+
+
+# --- U5: an old desktop app's plain ask doors -----------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_plain_ask_doors_refuse_a_site_card_with_the_old_signer_sentence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A desktop app from before signed site approvals answers through
+    ``ask_respond`` (and revise / per-question): the node must tell it to update,
+    not send it to the Team Bridge "paired device" door, and leave the card open."""
+    from local_operator.i18n.keys import browser_site_approval as keys
+    from local_operator.i18n.messages import render_resolved
+    from local_operator.session.session import Session
+
+    session, ask_id, question_id = await _session_with_site_ask(tmp_path, monkeypatch)
+    expected = render_resolved(keys.refused_old_signer())
+    assert "latest release" in expected and "card stays open" in expected
+    outcomes = [
+        session.respond_ask(ask_id, {"site-access": ["Approve"]}),
+        session.revise_ask(ask_id, {"site-access": ["Approve"]}),
+        session.answer_ask_question(ask_id, question_id, ["Approve"]),
+    ]
+    for outcome in outcomes:
+        assert outcome == {"ok": False, "error": expected}, outcome
+        assert Session.BRIDGE_DECISION_DOOR_REQUIRED not in outcome["error"]
+    assert _record(session, ask_id)["status"] == "open"
+    # An ordinary bridge record keeps the Team Bridge sentence.
+    assert (
+        Session._bridge_door_refusal({"questions": [{"question_id": "tb:req-1"}]})
+        == Session.BRIDGE_DECISION_DOOR_REQUIRED
+    )
+    await session.dispose()
+
+
+# --- U15: the one re-raise is enforced from the session's own cards --------------------
+
+
+@pytest.mark.asyncio
+async def test_the_session_counts_site_cards_that_lapsed_unanswered(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    session, ask_id, _question_id = await _session_with_site_ask(tmp_path, monkeypatch)
+    queue = session.ask_queue()
+    assert session.site_ask_lapses(VECTOR["origin"]) == 0
+    real_now = queue._now
+    monkeypatch.setattr(queue, "_now", lambda: real_now() + 3_600_000)
+    assert _record(session, ask_id)["status"] in ("timed_out", "expired")
+    assert session.site_ask_lapses(VECTOR["origin"]) == 1
+    assert session.site_ask_lapses("https://other.example") == 0
+    # A card the agent withdrew itself does not count.
+    second = site_approval.site_ask_question(
+        origin=VECTOR["origin"],
+        node_name="node-a",
+        node_device_id=VECTOR["node_device_id"],
+        entry_id="entry-2",
+    )
+    receipt = session._enqueue_ask([second], 600)
+    assert receipt["ok"], receipt
+    assert session.withdraw_site_asks(VECTOR["origin"]) == [receipt["details"]["ask_id"]]
+    assert session.site_ask_lapses(VECTOR["origin"]) == 1
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("lapsed", [0, 1, 2])
+async def test_request_access_allows_one_re_raise_then_refuses(
+    monkeypatch: pytest.MonkeyPatch, lapsed: int
+) -> None:
+    from local_operator.harness.types import ToolContext
+
+    monkeypatch.setattr(
+        "local_operator.operator.trust.load_anchor",
+        lambda *a, **k: SimpleNamespace(anchor=None, usable=False),
+    )
+    enqueued: list[Any] = []
+
+    def enqueue(questions, timeout=None, tool_call_id=""):
+        enqueued.append(questions)
+        return {"ok": True, "details": {"ask_id": "a-live"}}
+
+    client = _Client(_signed_reply(VECTOR["entry_id"]))
+    context = ToolContext(enqueue_ask=enqueue, site_ask_lapses=lambda origin: lapsed)
+    result = await _request(client, context)
+    text = _text_of(result)
+    # No contradictory "ONCE more" / "do not ask them again" mix in any receipt.
+    assert "ONCE more" not in text and "do not ask them again" not in text
+    if lapsed >= 2:
+        assert result.is_error
+        assert enqueued == []
+        assert "the operator hasn't answered twice" in text
+        assert "tell them in chat" in text
+        assert [method for method, _ in client.calls] == ["request_access", "cancel_access"]
+        assert result.details is not None and result.details["approval"] == "unanswered"
+    else:
+        assert not result.is_error and len(enqueued) == 1
+        assert ("This is your one re-raise" in text) is (lapsed == 1)
+
+
+# --- R3-1 / U14: only the operator lifts a denial ---------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_the_denied_text_leaves_revoking_to_the_operator() -> None:
+    client = _Client({"origin": VECTOR["origin"], "state": "denied", "approval": "signed"})
+    text = _text_of(await _request(client, _context([])))
+    assert "Only the operator decides to lift a denial" in text
+    assert "Never run it on your own initiative" in text
+    assert f"lop browser sites --revoke {VECTOR['origin']}" in text
+
+
+def test_the_site_card_names_the_origin_in_its_revoke_command() -> None:
+    """U18: the card's command is pasteable as written."""
+    question = site_approval.site_ask_question(
+        origin="https://staging.example.com",
+        node_name="node-a",
+        node_device_id=VECTOR["node_device_id"],
+        entry_id=VECTOR["entry_id"],
+    )
+    assert "`lop browser sites --revoke https://staging.example.com`" in question["question"]
+
+
+def test_the_no_approver_refusal_names_both_causes_and_the_repair() -> None:
+    """D12: where the anchor comes from, and the second cause."""
+    from local_operator.i18n.keys import browser_site_approval as keys
+    from local_operator.i18n.messages import render_resolved
+
+    text = render_resolved(keys.refused_no_approver())
+    assert "/etc/local-operator/operators/<uid>.json" in text
+    assert "holds your operator key file" in text
+    assert "lop browser setup --node --repair" in text
+
+
+# --- U17 / D10 / D11 / D14 / R3-2 / R3-3 / U21: lop browser sites output ------------------
+
+
+def test_lop_browser_sites_revoke_wording_follows_what_was_removed(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from local_operator.browser_bridge import sites_cli
+
+    replies: dict[str, Any] = {}
+
+    async def fake_call(method: str, params: dict[str, Any]) -> dict[str, Any]:
+        reply = replies[method]
+        if isinstance(reply, Exception):
+            raise reply
+        return reply
+
+    monkeypatch.setattr(sites_cli, "_call", fake_call)
+    # A denial removed: the news is that an agent may ask again (U17), and the
+    # shown origin is the one the extension acted on (R3-2).
+    replies["revoke_access"] = {"origin": "https://example.com", "removed": ["denied"]}
+    replies["list_access"] = {"broad": []}
+    assert sites_cli.main("https://u@EXAMPLE.com:443/path") == 0
+    out = capsys.readouterr().out
+    assert "Removed the operator's denial of https://example.com" in out
+    assert "u@" not in out and ":443" not in out
+    assert "has to ask the operator again" not in out
+    # A listing failure after the revoke landed keeps exit 0 (R3-3).
+    replies["list_access"] = RuntimeError("bridge went away")
+    assert sites_cli.main("https://example.com") == 0
+    assert "Could not reach" not in capsys.readouterr().out
+    # A bare host is pointed at its scheme (U21).
+    assert sites_cli.main("staging.example.com") == 1
+    assert "https://staging.example.com" in capsys.readouterr().out
+
+
+def test_lop_browser_sites_failures_and_wrapping(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    import json
+
+    from local_operator.browser_bridge import backend, sites_cli
+
+    no_state = backend.HOST_COPY[backend.HOST_EXTENSION].no_state
+
+    async def unreachable(method: str, params: dict[str, Any]) -> dict[str, Any]:
+        raise backend.BridgeUnreachable(no_state)
+
+    monkeypatch.setattr(sites_cli, "_call", unreachable)
+    # D11/U17: the remedy once, no "..", and the node's own remedy on a node.
+    monkeypatch.setattr(backend, "_on_headless_node", lambda: True)
+    assert sites_cli.main() == 1
+    out = " ".join(capsys.readouterr().out.split())
+    assert ".." not in out
+    assert out.count("lop browser status") == 1
+    assert "lop browser setup --node --repair" in out and "lop browser install" not in out
+    monkeypatch.setattr(backend, "_on_headless_node", lambda: False)
+    assert sites_cli.main() == 1
+    assert "lop browser install" in capsys.readouterr().out
+    # --json failures are JSON (U17).
+    assert sites_cli.main(as_json=True) == 1
+    assert json.loads(capsys.readouterr().out)["error"] == "unreachable"
+    assert sites_cli.main("ftp://nope", as_json=True) == 1
+    assert json.loads(capsys.readouterr().out)["error"] == "bad_origin"
+
+    long_origin = "https://customer-onboarding.eu-west-2.internal.acme-research.example:8443"
+
+    async def listing(method: str, params: dict[str, Any]) -> dict[str, Any]:
+        if method == "revoke_access":
+            return {"origin": long_origin, "removed": ["allowed"]}
+        return {"allowed": [], "denied": [], "broad": ["example.org"], "allow_all": True}
+
+    monkeypatch.setattr(sites_cli, "_call", listing)
+    # D10: an origin is never split across lines.
+    assert sites_cli.main(long_origin) == 0
+    assert long_origin in capsys.readouterr().out
+    # D14/U17: the switch and broad grants name where they ARE changed.
+    assert sites_cli.main() == 0
+    out = " ".join(capsys.readouterr().out.split())
+    assert "--revoke removes exact origins only" in out
+    assert "Remove one exact origin" not in out

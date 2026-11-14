@@ -3700,7 +3700,7 @@ async def test_a_site_decide_challenge_needs_the_checked_card_marker(
             conn, None, {"op": "operator_challenge", "action": "decide", "request_id": site_target}
         )
         assert old["op"] == "error", old
-        assert "updated to the release that added signed site approvals" in str(old), old
+        assert "updated to the latest release" in str(old), old
         current = await _send(
             conn,
             None,
