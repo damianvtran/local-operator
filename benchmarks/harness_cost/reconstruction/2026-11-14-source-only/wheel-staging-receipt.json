@@ -1,0 +1,18 @@
+{
+  "artifact_path": "~/benchmark-runs/reconstruction-20261114-source-v1/artifacts/uv-0.13.8-py3-none-manylinux_2_17_x86_64.manylinux2014_x86_64.whl",
+  "authorization": "parent relayed wheel-only desk resource GO; approved new HOLD directory creation; no runtime/VM/pull/install",
+  "executed": false,
+  "expected_bytes": 17389450,
+  "expected_sha256": "e18a57b8b352eb7c8feb317b9f6f533c8f0ad9673fd6cf34bbe3cf1a9f6a8984",
+  "installed": false,
+  "observed_bytes": 17389450,
+  "observed_sha256": "e18a57b8b352eb7c8feb317b9f6f533c8f0ad9673fd6cf34bbe3cf1a9f6a8984",
+  "privacy_outcome": "public pinned upstream distribution; no credentials accessed; binary secret scan not performed",
+  "readback_sha256": "e18a57b8b352eb7c8feb317b9f6f533c8f0ad9673fd6cf34bbe3cf1a9f6a8984",
+  "recorded_at": "2026-11-14T17:05:21.953178+00:00",
+  "retention": "HOLD until explicit parent/disk-owner disposition; append-only receipt; no cleanup/deletion authorized",
+  "runtime_use_authorized": false,
+  "source_commit": "e040a0a8fcfa06a02c509c593e9e6bb74f6dce02",
+  "status": "staged-verified-not-installed",
+  "url": "https://files.pythonhosted.org/packages/c5/32/52ee34636aea1ab3f8baeeae1c3599461b8cddfb379862cc72ac61b8d91c/uv-0.13.8-py3-none-manylinux_2_17_x86_64.manylinux2014_x86_64.whl"
+}

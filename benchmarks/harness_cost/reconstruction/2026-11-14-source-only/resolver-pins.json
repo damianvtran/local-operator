@@ -3,22 +3,27 @@
   "base_reported_compressed_bytes": 44588823,
   "base_tag_observed": "3.14.0-slim-bookworm",
   "desk_admission": {
-    "alternate_blocked_settings_access_allowed": false,
+    "default_pull": false,
     "docker_raw_growth_stop_gib": 5,
     "free_space_stop_gib": 25,
     "fresh_memory_go_required": true,
+    "full_scope_review_required_not_delta_only": true,
+    "last_fleet_mb_parent_relay": 27154,
     "maximum_fleet_mb_at_start": 26000,
     "minimum_free_gib_at_start": 30,
-    "quit_only_session_started_docker_by_startup_owner": true,
-    "raw_allocation_unit": "st_blocks * 512; not logical st_size",
+    "operator_ack_id": "a-7072",
+    "optional_digest_pull_requires_new_full_scope_review": true,
+    "post_start_mem_total_max_bytes": 4300000000,
+    "post_start_ncpu_max": 2,
+    "prestart_cap_validation": "SKIPPED-with-operator-ack-NOT-verified",
     "registered_hold_root": "~/benchmark-runs/reconstruction-20261114-source-v1/",
-    "slot_end_utc": "2026-11-14T18:15:00Z",
-    "slot_start_utc": "2026-11-14T17:00:00Z",
-    "status": "NO-GO-CONDITIONAL-SLOT-ONLY",
-    "vm_cap_evidence_access_gap": true,
-    "vm_cap_max_cpus": 2,
-    "vm_cap_max_memory_decimal_mb": 4000,
-    "vm_caps_verified_before_start_required": true
+    "rss_is_footprint": false,
+    "rss_max_bytes": 4300000000,
+    "rss_sample_interval_seconds": 10,
+    "settings_write_or_bypass_allowed": false,
+    "status": "NO-FRESH-SLOT-GO",
+    "vm_helper_attribution_required": true,
+    "whole_owned_desktop_lifecycle_required": true
   },
   "dev_extra_included": false,
   "execution_authorized": false,
@@ -50,5 +55,11 @@
     "filename": "uv-0.13.8-py3-none-manylinux_2_17_x86_64.manylinux2014_x86_64.whl",
     "sha256": "e18a57b8b352eb7c8feb317b9f6f533c8f0ad9673fd6cf34bbe3cf1a9f6a8984",
     "url": "https://files.pythonhosted.org/packages/c5/32/52ee34636aea1ab3f8baeeae1c3599461b8cddfb379862cc72ac61b8d91c/uv-0.13.8-py3-none-manylinux_2_17_x86_64.manylinux2014_x86_64.whl"
+  },
+  "wheel_staging": {
+    "carrier_cache_state": "UNKNOWN-no-pull",
+    "executed": false,
+    "receipt": "wheel-staging-receipt.json",
+    "status": "staged-verified-not-installed"
   }
 }

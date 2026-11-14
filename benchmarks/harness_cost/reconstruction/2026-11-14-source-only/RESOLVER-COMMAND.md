@@ -1,30 +1,39 @@
-# EXACT proposed resolver command — DO NOT EXECUTE without separate admission
+# Internal resolver stage — invoke ONLY through the full-scope lifecycle proposal
+
+**SUPERSEDED ADMISSION POLICY, operator a-7072:** see FULL-SCOPE-LIFECYCLE.md.
+The only proposed public entry is `python3 -B lifecycle_proposal.py --execute
+--admission ~/benchmark-runs/reconstruction-20261114-source-v1/desk-admission.json`,
+after NEW full-scope CLEAN review and fresh desk GO/slot. No such GO exists now.
+This fenced stage is retained for its reviewed signal/deadline/resource controls;
+it must not be launched directly to omit owned Desktop lifecycle/VM-RSS checks.
 
 This is a proposal only. It needs a LOCAL Docker Linux VM; it is NOT a macOS
 cross-platform lock. No Docker/resolver/install/build has run in this phase.
 
 ## Prerequisites and disk-desk packet — CONDITIONAL SLOT, NO GO
 
-Desk's conditional slot is 2026-11-14 **17:00–18:15 UTC**, not permission to run.
+The old 2026-11-14 17:00–18:15 UTC slot was RELEASED. No fresh slot or
+18:45 extension is granted or assumed; explicit future desk times are mandatory.
 The supervisor reserves its 900 s lease + 60 s cleanup before slot end; late
 admission is rejected. At start the desk must refresh free disk >=30 GiB and
 fleet <=26,000 MB plus memory GO. No admission receipt may be fabricated by the
 resolver. Durable HOLD root `~/benchmark-runs/reconstruction-20261114-source-v1/`
 is now registered by parent; no directory or runtime input was created here.
 
-Docker daemon is absent. Desktop VM caps MUST be verified <=4 GB RAM /2 CPUs
-BEFORE any session start. Access to the settings evidence is currently blocked:
-this is an unresolved cap-verification access gap. DO NOT read the blocked
-settings by another path/API or write a config workaround. Approved human/desk
-cap evidence is required before start. This proposal neither starts nor configures
-Docker. A separately admitted session-start owner must quit ONLY Docker it started
-at the end and prove its exact owned lifecycle is closed, without stopping any
-other work. The resolver never starts/quits a shared daemon or kills other work;
-VM lifecycle admission/ownership remains with that startup owner and desk.
+Operator a-7072 explicitly acknowledges SKIPPING the inaccessible pre-start cap
+validation; it is NOT marked passed. No settings writes/alternate blocked-settings
+reads are authorized. The new lifecycle proposal proves Desktop absent before
+own start, records exact startup identity, queries docker info first and requires
+MemTotal <=4,300,000,000 bytes and NCPU <=2 BEFORE any container. It attributes one
+actual VM helper and samples RSS every 10 s, stopping above that same byte cap;
+RSS is NOT footprint. Unknown/ambiguous attribution fails closed. Only its exact
+owned Desktop/process identities may be quit at abort/end; never other work.
+See FULL-SCOPE-LIFECYCLE.md for owner/probe/pull limits and unproven native behavior.
 
 The future desk-admission.json must contain go=true, attempt_id, valid_until_utc,
-fresh_memory_go, fleet_mb, vm_caps_verified_before_start,
-vm_cap_evidence_accessible, vm_memory_mb (decimal MB, <=4000), vm_cpus, approved docker_raw_path,
+fresh_memory_go, fleet_mb, operator_ack_id=a-7072, exact operator_ack_quote,
+prestart_cap_validation=skipped-with-operator-ack (NOT passed), full_scope_review,
+explicit fresh slot_start_utc/slot_end_utc and approved docker_raw_path,
 docker_raw_allocated_before_start and fresh before-start df/free-space evidence.
 The resolver records its own baseline/during/after free bytes and Docker.raw
 **allocated** blocks*512, not logical sparse size. A >5 GiB allocation increase
@@ -48,8 +57,9 @@ read now, and no blocked settings route is consulted.
   no task image is pulled. No surviving frozen dependency tree is assumed.
 * The exact uv wheel must ALREADY be staged at
   `~/benchmark-runs/reconstruction-20261114-source-v1/artifacts/<pinned filename>`.
-  Its URL, SHA256 and size are in resolver-pins.json. Staging is a separate
-  explicitly authorized acquisition, not performed by this command or now.
+  Its URL, SHA256 and size are in resolver-pins.json. The separately authorized
+  17,389,450-byte staging is now hash/read-back verified; see wheel-staging-receipt.json.
+  It is NOT installed/executed. This command never downloads or installs it.
 * Intended resolver HTTP endpoints: `https://pypi.org/simple/` and wheel/METADATA
   GETs at `https://files.pythonhosted.org/`. Carrier prefetch, if separately
   authorized, additionally uses Docker registry/auth/CDN endpoints. This command
@@ -142,16 +152,23 @@ assert S.exists() and stat.S_ISSOCK(S.stat().st_mode), 'STOP: approved LOCAL dae
 ROOT = pathlib.Path.home() / 'benchmark-runs/reconstruction-20261114-source-v1'
 admission=json.loads((ROOT/'desk-admission.json').read_text())
 now=datetime.datetime.now(datetime.UTC)
-begin=datetime.datetime(2026,11,14,17,0,tzinfo=datetime.UTC)
-end=datetime.datetime(2026,11,14,18,15,tzinfo=datetime.UTC)
+begin=datetime.datetime.fromisoformat(admission['slot_start_utc'])
+end=datetime.datetime.fromisoformat(admission['slot_end_utc'])
 if not (admission.get('go') is True and admission.get('attempt_id')=='linux-amd64-01'
         and begin <= now and now+datetime.timedelta(seconds=960) <= end
         and now <= datetime.datetime.fromisoformat(admission['valid_until_utc'])
         and admission['fleet_mb'] <= 26000 and admission.get('fresh_memory_go') is True
-        and admission.get('vm_caps_verified_before_start') is True
-        and admission.get('vm_cap_evidence_accessible') is True
-        and admission['vm_memory_mb'] <= 4000 and admission['vm_cpus'] <= 2):
-    raise SystemExit('STOP: no fresh desk GO/window/fleet/verified VM caps')
+        and admission.get('operator_ack_id') == 'a-7072'
+        and admission.get('prestart_cap_validation') == 'skipped-with-operator-ack'
+        and 'vm_caps_verified_before_start' not in admission
+        and admission.get('full_scope_review',{}).get('kind') == 'full-scope'):
+    raise SystemExit('STOP: no fresh full-scope GO/window/fleet/operator acknowledgement')
+from lifecycle_proposal import ACK_QUOTE, verify_caps, verify_carrier
+if admission.get('operator_ack_quote') != ACK_QUOTE:
+    raise SystemExit('STOP: exact operator acknowledgement missing')
+lifecycle=pathlib.Path(os.environ.get('BENCH_LIFECYCLE_DIR','/INVALID'))
+if lifecycle != ROOT/'lifecycle'/admission['attempt_id'] or not (lifecycle/'startup-owner.json').is_file():
+    raise SystemExit('STOP: owned lifecycle wrapper evidence required')
 docker_raw=pathlib.Path(admission['docker_raw_path'])
 raw_baseline=admission['docker_raw_allocated_before_start']
 initial_disk=disk_sample(docker_raw,ROOT)
@@ -170,7 +187,9 @@ for name in ('input', 'output', 'docker-config'):
 D = ['docker', '--config', str(A / 'docker-config'), '--host', 'unix:///var/run/docker.sock']
 # Empty owned config avoids the operator's credential store/context helpers.
 try:
+    verify_caps(json.loads(subprocess.check_output(D+['info','--format','{{json .}}'],timeout=10)))
     image = json.loads(subprocess.check_output(D + ['image', 'inspect', pins['base_image']], timeout=15))[0]
+    verify_carrier(image,pins)
     assert image['Architecture'] == 'amd64' and image['Os'] == 'linux'
 except BaseException as error:
     (A/'preflight-failure.json').write_text(json.dumps({'status':'carrier-preflight-failed','error_type':type(error).__name__,'source_head':source_head}))

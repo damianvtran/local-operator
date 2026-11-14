@@ -1,0 +1,106 @@
+test_default_no_pull_and_missing_artifact_aborts (test_lifecycle_proposal.LifecycleTests.test_default_no_pull_and_missing_artifact_aborts) ... FAIL
+test_digest_and_wheel_hash_mismatch_never_installs (test_lifecycle_proposal.LifecycleTests.test_digest_and_wheel_hash_mismatch_never_installs) ... FAIL
+test_existing_desktop_is_neither_started_nor_quit (test_lifecycle_proposal.LifecycleTests.test_existing_desktop_is_neither_started_nor_quit) ... FAIL
+test_no_full_scope_review_has_no_effects (test_lifecycle_proposal.LifecycleTests.test_no_full_scope_review_has_no_effects) ... FAIL
+test_optional_digest_pull_requires_full_scope_signoff (test_lifecycle_proposal.LifecycleTests.test_optional_digest_pull_requires_full_scope_signoff) ... FAIL
+test_overcap_aborts_and_quits_only_owned_without_container (test_lifecycle_proposal.LifecycleTests.test_overcap_aborts_and_quits_only_owned_without_container) ... FAIL
+test_rss_overcap_and_termination_cleanup (test_lifecycle_proposal.LifecycleTests.test_rss_overcap_and_termination_cleanup) ... FAIL
+test_unidentified_vm_fails_closed (test_lifecycle_proposal.LifecycleTests.test_unidentified_vm_fails_closed) ... FAIL
+
+======================================================================
+FAIL: test_default_no_pull_and_missing_artifact_aborts (test_lifecycle_proposal.LifecycleTests.test_default_no_pull_and_missing_artifact_aborts)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "~/local-operator/.worktrees/benchmark-reconstruction-20261114/benchmarks/harness_cost/reconstruction/2026-11-14-source-only/test_lifecycle_proposal.py", line 57, in test_default_no_pull_and_missing_artifact_aborts
+    with self.assertRaises(RuntimeError):self.run_case(ops)
+                                         ~~~~~~~~~~~~~^^^^^
+  File "~/local-operator/.worktrees/benchmark-reconstruction-20261114/benchmarks/harness_cost/reconstruction/2026-11-14-source-only/test_lifecycle_proposal.py", line 41, in run_case
+    self.assertIsNotNone(target, 'new lifecycle contract absent')
+    ~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: unexpectedly None : new lifecycle contract absent
+
+======================================================================
+FAIL: test_digest_and_wheel_hash_mismatch_never_installs (test_lifecycle_proposal.LifecycleTests.test_digest_and_wheel_hash_mismatch_never_installs)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "~/local-operator/.worktrees/benchmark-reconstruction-20261114/benchmarks/harness_cost/reconstruction/2026-11-14-source-only/test_lifecycle_proposal.py", line 68, in test_digest_and_wheel_hash_mismatch_never_installs
+    with self.assertRaises(RuntimeError):self.run_case(ops)
+                                         ~~~~~~~~~~~~~^^^^^
+  File "~/local-operator/.worktrees/benchmark-reconstruction-20261114/benchmarks/harness_cost/reconstruction/2026-11-14-source-only/test_lifecycle_proposal.py", line 41, in run_case
+    self.assertIsNotNone(target, 'new lifecycle contract absent')
+    ~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: unexpectedly None : new lifecycle contract absent
+
+======================================================================
+FAIL: test_existing_desktop_is_neither_started_nor_quit (test_lifecycle_proposal.LifecycleTests.test_existing_desktop_is_neither_started_nor_quit)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "~/local-operator/.worktrees/benchmark-reconstruction-20261114/benchmarks/harness_cost/reconstruction/2026-11-14-source-only/test_lifecycle_proposal.py", line 53, in test_existing_desktop_is_neither_started_nor_quit
+    with self.assertRaises(RuntimeError):self.run_case(ops)
+                                         ~~~~~~~~~~~~~^^^^^
+  File "~/local-operator/.worktrees/benchmark-reconstruction-20261114/benchmarks/harness_cost/reconstruction/2026-11-14-source-only/test_lifecycle_proposal.py", line 41, in run_case
+    self.assertIsNotNone(target, 'new lifecycle contract absent')
+    ~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: unexpectedly None : new lifecycle contract absent
+
+======================================================================
+FAIL: test_no_full_scope_review_has_no_effects (test_lifecycle_proposal.LifecycleTests.test_no_full_scope_review_has_no_effects)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "~/local-operator/.worktrees/benchmark-reconstruction-20261114/benchmarks/harness_cost/reconstruction/2026-11-14-source-only/test_lifecycle_proposal.py", line 78, in test_no_full_scope_review_has_no_effects
+    self.assertIsNotNone(target)
+    ~~~~~~~~~~~~~~~~~~~~^^^^^^^^
+AssertionError: unexpectedly None
+
+======================================================================
+FAIL: test_optional_digest_pull_requires_full_scope_signoff (test_lifecycle_proposal.LifecycleTests.test_optional_digest_pull_requires_full_scope_signoff)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "~/local-operator/.worktrees/benchmark-reconstruction-20261114/benchmarks/harness_cost/reconstruction/2026-11-14-source-only/test_lifecycle_proposal.py", line 60, in test_optional_digest_pull_requires_full_scope_signoff
+    ops=StubOps(missing=True);self.run_case(ops,pull=True)
+                              ~~~~~~~~~~~~~^^^^^^^^^^^^^^^
+  File "~/local-operator/.worktrees/benchmark-reconstruction-20261114/benchmarks/harness_cost/reconstruction/2026-11-14-source-only/test_lifecycle_proposal.py", line 41, in run_case
+    self.assertIsNotNone(target, 'new lifecycle contract absent')
+    ~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: unexpectedly None : new lifecycle contract absent
+
+======================================================================
+FAIL: test_overcap_aborts_and_quits_only_owned_without_container (test_lifecycle_proposal.LifecycleTests.test_overcap_aborts_and_quits_only_owned_without_container)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "~/local-operator/.worktrees/benchmark-reconstruction-20261114/benchmarks/harness_cost/reconstruction/2026-11-14-source-only/test_lifecycle_proposal.py", line 45, in test_overcap_aborts_and_quits_only_owned_without_container
+    with self.assertRaises(RuntimeError): self.run_case(ops)
+                                          ~~~~~~~~~~~~~^^^^^
+  File "~/local-operator/.worktrees/benchmark-reconstruction-20261114/benchmarks/harness_cost/reconstruction/2026-11-14-source-only/test_lifecycle_proposal.py", line 41, in run_case
+    self.assertIsNotNone(target, 'new lifecycle contract absent')
+    ~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: unexpectedly None : new lifecycle contract absent
+
+======================================================================
+FAIL: test_rss_overcap_and_termination_cleanup (test_lifecycle_proposal.LifecycleTests.test_rss_overcap_and_termination_cleanup)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "~/local-operator/.worktrees/benchmark-reconstruction-20261114/benchmarks/harness_cost/reconstruction/2026-11-14-source-only/test_lifecycle_proposal.py", line 72, in test_rss_overcap_and_termination_cleanup
+    with self.assertRaises(RuntimeError):self.run_case(ops)
+                                         ~~~~~~~~~~~~~^^^^^
+  File "~/local-operator/.worktrees/benchmark-reconstruction-20261114/benchmarks/harness_cost/reconstruction/2026-11-14-source-only/test_lifecycle_proposal.py", line 41, in run_case
+    self.assertIsNotNone(target, 'new lifecycle contract absent')
+    ~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: unexpectedly None : new lifecycle contract absent
+
+======================================================================
+FAIL: test_unidentified_vm_fails_closed (test_lifecycle_proposal.LifecycleTests.test_unidentified_vm_fails_closed)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "~/local-operator/.worktrees/benchmark-reconstruction-20261114/benchmarks/harness_cost/reconstruction/2026-11-14-source-only/test_lifecycle_proposal.py", line 49, in test_unidentified_vm_fails_closed
+    with self.assertRaises(RuntimeError):self.run_case(ops)
+                                         ~~~~~~~~~~~~~^^^^^
+  File "~/local-operator/.worktrees/benchmark-reconstruction-20261114/benchmarks/harness_cost/reconstruction/2026-11-14-source-only/test_lifecycle_proposal.py", line 41, in run_case
+    self.assertIsNotNone(target, 'new lifecycle contract absent')
+    ~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: unexpectedly None : new lifecycle contract absent
+
+----------------------------------------------------------------------
+Ran 8 tests in 0.126s
+
+FAILED (failures=8)

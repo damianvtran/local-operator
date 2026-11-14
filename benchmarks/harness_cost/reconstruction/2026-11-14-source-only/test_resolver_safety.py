@@ -52,7 +52,9 @@ class ResolverSafetyTests(unittest.TestCase):
             prefix += 'docker_raw=A/"stub.raw";raw_baseline=0\ndef disk_sample(*args): return {"docker_raw_allocated_bytes":0,"free_bytes":40*1024**3}\n'
             prefix += 'cmd=[sys.executable,' + repr(str(client)) + ',str(A)];D=[sys.executable,' + repr(str(docker)) + ',str(A)]\n'
             if not terminate:
-                prefix += '_clock=time.monotonic;time.monotonic=lambda:_clock()*10000\n'
+                # Expire the declared 900 s lease only AFTER the owned stub is
+                # ready; scaling interpreter startup time caused a setup race.
+                prefix += '_clock=time.monotonic;time.monotonic=lambda:_clock()+(1000 if (A/"client.pid").exists() else 0)\n'
             proc = subprocess.Popen([sys.executable, '-c', prefix + tail], stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
             child_pid = None
             try:
@@ -75,7 +77,7 @@ class ResolverSafetyTests(unittest.TestCase):
             finally:
                 if proc.poll() is None:
                     os.killpg(proc.pid, signal.SIGKILL)
-                    proc.communicate(timeout=5)
+                proc.communicate(timeout=5)
                 if child_pid is not None:
                     try:
                         os.killpg(child_pid, signal.SIGKILL)

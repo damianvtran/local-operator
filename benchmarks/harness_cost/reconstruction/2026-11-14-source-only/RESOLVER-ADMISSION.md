@@ -13,15 +13,27 @@ lock presented as Linux. Existing macOS environments and dependency trees remain
 untouched. No historical deleted dependency tree is assumed to survive. No task
 image, binary/media input, key, model endpoint or service belongs in this operation.
 
-Admission is still NO GO. Desk 00e6a1cd8f62 offers only a CONDITIONAL
-2026-11-14 17:00–18:15 UTC slot. At start it must refresh free >=30 GiB,
-fleet <=26,000 MB and memory GO. Desktop VM caps must be verified <=4 GB RAM /
-2 CPUs BEFORE start; blocked settings evidence is an unresolved access gap, not
-permission to read another route or write a workaround. Durable HOLD root
-~/benchmark-runs/reconstruction-20261114-source-v1/ is registered by parent.
-Docker.raw ALLOCATED bytes and free disk must be captured before/during/after;
->5 GiB allocated growth or free <25 GiB stops owned work. Only a separately
-admitted session-start owner may quit Docker it started; never other work.
-LOCAL-only, one retained task image, existing ordering/cost/rights gates stand.
-The resolver carrier is not task qualification. R4/R5 safety remediation is in
-RESOLVER-COMMAND.md and source-only stub tests; no command has been dispatched.
+Admission is NO GO: no fresh slot is granted; the old slot was released and no
+18:45 extension is assumed. NEW operator a-7072 acknowledgement explicitly SKIPS
+inaccessible PRE-start settings cap verification, without falsely marking it
+passed. Exact quote and whole new lifecycle are in FULL-SCOPE-LIFECYCLE.md.
+No settings writes or blocked-settings read workaround is authorized.
+
+Before ANY container, actual post-start docker info must report MemTotal <=4.3
+GB decimal and NCPU <=2. One attributed VM helper RSS is sampled every 10 s;
+RSS is NOT footprint. Unidentified/ambiguous VM association aborts. Prove Desktop
+absent before own start and retain PID/start/executable identity; quit only that
+instance at abort/end, never shared/changed owners or other work. NEW FULL-SCOPE
+independent CLEAN review is mandatory for this expanded proposal, not delta-only.
+
+At start desk must refresh free >=30 GiB, fleet <=26,000 MB and memory GO under
+an exclusive Desktop lease. Parent's last relayed 27,154 MB fleet snapshot is HOLD,
+not fresh eligibility. Raw ALLOCATED growth >5 GiB or free <25 GiB stops owned
+work, with before/during/after samples and unchanged container limits.
+
+Registered HOLD root now contains the separately authorized, hash/read-back-
+verified 17,389,450-byte uv wheel only; NOT installed/executed. Carrier cache is
+UNKNOWN, no prefetch/pull occurred. NOPULL is default; optional ONE pinned digest
+pull requires explicit NEW FULL-SCOPE reviewer signoff plus desk scope authority.
+No Desktop/Docker/resolver runtime has been dispatched. LOCAL/one-task-image,
+original ordering, all 28 tasks, media rights and paid-call gates remain unchanged.

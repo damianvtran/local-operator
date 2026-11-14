@@ -1,0 +1,44 @@
+NEW a-7072 full-scope SOURCE proposal; stubs only, no Desktop/Docker/pull/resolver/install
+UTC 2026-11-14T17:32:38Z
+test_cleanup_ownership_failure_is_not_reported_success (test_lifecycle_proposal.LifecycleTests.test_cleanup_ownership_failure_is_not_reported_success) ... ok
+test_concrete_quit_refuses_changed_owner_before_any_signal (test_lifecycle_proposal.LifecycleTests.test_concrete_quit_refuses_changed_owner_before_any_signal) ... ok
+test_cpu_overcap_missing_wheel_and_work_deadline_abort (test_lifecycle_proposal.LifecycleTests.test_cpu_overcap_missing_wheel_and_work_deadline_abort) ... ok
+test_default_no_pull_and_missing_artifact_aborts (test_lifecycle_proposal.LifecycleTests.test_default_no_pull_and_missing_artifact_aborts) ... ok
+test_digest_and_wheel_hash_mismatch_never_installs (test_lifecycle_proposal.LifecycleTests.test_digest_and_wheel_hash_mismatch_never_installs) ... ok
+test_existing_desktop_is_neither_started_nor_quit (test_lifecycle_proposal.LifecycleTests.test_existing_desktop_is_neither_started_nor_quit) ... ok
+test_no_full_scope_review_has_no_effects (test_lifecycle_proposal.LifecycleTests.test_no_full_scope_review_has_no_effects) ... ok
+test_optional_digest_pull_requires_full_scope_signoff (test_lifecycle_proposal.LifecycleTests.test_optional_digest_pull_requires_full_scope_signoff) ... ok
+test_overcap_aborts_and_quits_only_owned_without_container (test_lifecycle_proposal.LifecycleTests.test_overcap_aborts_and_quits_only_owned_without_container) ... ok
+test_rss_overcap_and_termination_cleanup (test_lifecycle_proposal.LifecycleTests.test_rss_overcap_and_termination_cleanup) ... ok
+test_termination_during_resolver_start_still_requests_owned_cleanup (test_lifecycle_proposal.LifecycleTests.test_termination_during_resolver_start_still_requests_owned_cleanup) ... ok
+test_unidentified_vm_fails_closed (test_lifecycle_proposal.LifecycleTests.test_unidentified_vm_fails_closed) ... ok
+test_vm_attribution_excludes_unrelated_and_rejects_ambiguity (test_lifecycle_proposal.LifecycleTests.test_vm_attribution_excludes_unrelated_and_rejects_ambiguity) ... ok
+test_disk_fences_use_allocated_growth_and_free_space (test_resolver_safety.ResolverSafetyTests.test_disk_fences_use_allocated_growth_and_free_space) ... ok
+test_independent_container_deadline_exists (test_resolver_safety.ResolverSafetyTests.test_independent_container_deadline_exists) ... ok
+test_inner_optimization_guard_precedes_effects (test_resolver_safety.ResolverSafetyTests.test_inner_optimization_guard_precedes_effects) ... ok
+test_optimization_guard_precedes_effects (test_resolver_safety.ResolverSafetyTests.test_optimization_guard_precedes_effects) ... ok
+test_outer_sigterm_reaps_owned_client_and_container (test_resolver_safety.ResolverSafetyTests.test_outer_sigterm_reaps_owned_client_and_container) ... ok
+test_outer_timeout_reaps_owned_client_and_container (test_resolver_safety.ResolverSafetyTests.test_outer_timeout_reaps_owned_client_and_container) ... FAIL
+/opt/homebrew/Cellar/python@3.14/3.14.7/Frameworks/Python.framework/Versions/3.14/lib/python3.14/unittest/case.py:668: ResourceWarning: unclosed file <_io.BufferedReader name=5>
+  with outcome.testPartExecutor(self):
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/opt/homebrew/Cellar/python@3.14/3.14.7/Frameworks/Python.framework/Versions/3.14/lib/python3.14/unittest/case.py:668: ResourceWarning: unclosed file <_io.BufferedReader name=3>
+  with outcome.testPartExecutor(self):
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+
+======================================================================
+FAIL: test_outer_timeout_reaps_owned_client_and_container (test_resolver_safety.ResolverSafetyTests.test_outer_timeout_reaps_owned_client_and_container)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "~/local-operator/.worktrees/benchmark-reconstruction-20261114/benchmarks/harness_cost/reconstruction/2026-11-14-source-only/test_resolver_safety.py", line 89, in test_outer_timeout_reaps_owned_client_and_container
+    self.exercise_supervisor(False)
+    ~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^
+  File "~/local-operator/.worktrees/benchmark-reconstruction-20261114/benchmarks/harness_cost/reconstruction/2026-11-14-source-only/test_resolver_safety.py", line 62, in exercise_supervisor
+    self.assertTrue((a / 'client.pid').exists())
+    ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: False is not true
+
+----------------------------------------------------------------------
+Ran 19 tests in 11.235s
+
+FAILED (failures=1)
