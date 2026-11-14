@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "fr",
   "namespace": "wire.operator_setup",
-  "history_sha256": "d3de51733d8d51b9d310d979026615b85d5d6a18b75ad422388917c40287882e",
+  "history_sha256": "20586adb2f26c9c8780dfe49ced299ac803fd7c15c47280a4d917d766b2c1de3",
   "entries": [
     {
       "locale": "fr",
@@ -30,6 +30,33 @@
       },
       "status": "passed",
       "note": "Round 1 audited all 21 keys at 3be60bb565e4 against en + context sidecar, i18n/glossary.md and i18n/style-guides/fr.md; mechanical: key parity, no placeholders, NFC, no Cc/Cf/bidi controls, verbatim 'Local Operator' and '/mobile approvals on', no anchor/sudo/pkexec/Radient, no ASCII apostrophe/ellipsis, fr U+202F; menu path in tui.anchor_clause matches desktop ui.settings.page.title/ui.providers.phone.heading; anchor_clause opens with the locale semicolon and has no final period (composed at serving.py:11540 / tui/app.py:60214). Remediation at 0ac607ad6437 applied every finding verbatim; round 2 verified all changed values byte-equal to the recommended strings, no other key changed; check.py --catalogues-only 0 problems. Target fr/wire.operator_setup.json sha256 b7703b12637944d1f206ad64797f27f695bd7f786d7fb4eecf470475d8ad3ae0. Findings: FR-1 NIT outcome.cancelled: gendered \"quand vous serez prêt\" -> \"quand vous le souhaitez\" (fixed). A second independent audit of the high-visibility prompt.* keys (shown inside the macOS password dialog) is running separately; this receipt does not stand in for it."
+    },
+    {
+      "locale": "fr",
+      "namespace": "wire.operator_setup",
+      "source_sha256": "1e76a1dde28ed78f9ddc15aec24b8ac7e964052bc9735aafde542b151847fb78",
+      "translator": {
+        "agent": "coder subagent job 7e0de4d5b443 (label 3950-c3-r1-remediation) of host session 25fe8dfbf610",
+        "model": "anthropic/claude-opus-5-5",
+        "fallback": "model from the host's launch record ('on this session's model'); actual served fallback not observable by the auditor",
+        "date": "2026-11-14"
+      },
+      "auditor": {
+        "agent": "independent i18n auditor (lopdev translation-auditor role, session 3c3553f39a3c; independent of translator job 7e0de4d5b443 — same model family, separate session)",
+        "session": "3c3553f39a3c",
+        "model": "anthropic/claude-opus-5-5",
+        "fallback": "none observed in this session",
+        "date": "2026-11-14",
+        "result": "passed",
+        "findings": 1,
+        "unresolved_blocker_major": 0,
+        "blocker": 0,
+        "major": 0,
+        "minor": 1,
+        "nit": 0
+      },
+      "status": "passed",
+      "note": "Round-1 remediation audit at ed2e82a80368 (branch feat/approvals-setup-no-terminal, PR #3950): the 10 changed/added keys (prompt.phone_approvals, refused.terminal_cannot_prompt, refused.cannot_install, refused.key_failed, refused.unsafe_staging, outcome.not_verified, outcome.changed_elsewhere, outcome.file_only, tui.usage, tui.approvals_report_not_set_up) and the removal of tui.anchor_clause, per git diff d72765c18905..ed2e82a80368, read against en + context sidecar, i18n/glossary.md and i18n/style-guides/fr.md; the 14 unchanged keys are byte-identical to d72765c18905 (previous passed receipt) and were re-read only for glossary consistency. Mechanical (verified in bytes): 24/24 key parity with en, {live}/{saved}x2 placeholder multiset equal, verbatim '/mobile approvals on', '/approvals {saved}', 'config.yml', 'Touch ID', 'Local Operator'; no manual bidi controls; U+202F before every : and ; in prose, U+2019 apostrophes; tui.usage has no trailing period; Settings -> Phone access path equals the desktop labels ui.settings.page.title + ui.providers.phone.heading in local-operator-ui; tui.approvals_report_not_set_up is rendered whole (serving.py:11409, tui/app.py:31938). Target fr/wire.operator_setup.json sha256 118a053f544b2ab486b494b192e17c67ef44984a1bb30a41d1053312ba686b7c. Findings: FR-R1-1 MINOR refused.cannot_install: \"les réglages des approbations depuis un téléphone\" -> \"les paramètres des approbations depuis un téléphone\" (glossary drift: fr style guide settles settings → paramètres (21 corpus uses vs 3 'réglages'), and the desktop menu itself is 'Paramètres') — open, non-gating, for the translator/implementer. This receipt does not stand in for the separate second independent audit of the high-visibility prompt.* keys."
     }
   ]
 }

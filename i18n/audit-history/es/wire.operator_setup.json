@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "es",
   "namespace": "wire.operator_setup",
-  "history_sha256": "f4eb5ab1e089582bba839321c4da830ceeceac4b11762f568f72d4b707f483a1",
+  "history_sha256": "6c7f674ff0b0fd6c2786ef106dcfbdfee0de3aa783c72cdf5240e2f039dcb5f2",
   "entries": [
     {
       "locale": "es",
@@ -30,6 +30,33 @@
       },
       "status": "passed",
       "note": "Round 1 audited all 21 keys at 3be60bb565e4 against en + context sidecar, i18n/glossary.md and i18n/style-guides/es.md; mechanical: key parity, no placeholders, NFC, no Cc/Cf/bidi controls, verbatim 'Local Operator' and '/mobile approvals on', no anchor/sudo/pkexec/Radient, no ASCII apostrophe/ellipsis, fr U+202F; menu path in tui.anchor_clause matches desktop ui.settings.page.title/ui.providers.phone.heading; anchor_clause opens with the locale semicolon and has no final period (composed at serving.py:11540 / tui/app.py:60214). Remediation at 0ac607ad6437 applied every finding verbatim; round 2 verified all changed values byte-equal to the recommended strings, no other key changed; check.py --catalogues-only 0 problems. Target es/wire.operator_setup.json sha256 a20eab33a2ce5f09be83c1c19ced32e55b7c15339d4fa1cb7f3ed6858f774dc6. Findings: ES-1 MINOR outcome.on (spec N5): \"seguirá pidiendo una vez\" read as \"will keep asking once\" -> \"Aun así, cada teléfono nuevo pedirá una vez…\" (fixed); ES-2 NIT refused.privileged: \"No se ha cambiado nada.\" -> \"No se cambió nada.\" for preterite consistency (fixed). Note (not a finding): \"ordenador\" kept, consistent with the shipped es corpus (20 ordenador / 0 computadora). A second independent audit of the high-visibility prompt.* keys (shown inside the macOS password dialog) is running separately; this receipt does not stand in for it."
+    },
+    {
+      "locale": "es",
+      "namespace": "wire.operator_setup",
+      "source_sha256": "1e76a1dde28ed78f9ddc15aec24b8ac7e964052bc9735aafde542b151847fb78",
+      "translator": {
+        "agent": "coder subagent job 7e0de4d5b443 (label 3950-c3-r1-remediation) of host session 25fe8dfbf610",
+        "model": "anthropic/claude-opus-5-5",
+        "fallback": "model from the host's launch record ('on this session's model'); actual served fallback not observable by the auditor",
+        "date": "2026-11-14"
+      },
+      "auditor": {
+        "agent": "independent i18n auditor (lopdev translation-auditor role, session 3c3553f39a3c; independent of translator job 7e0de4d5b443 — same model family, separate session)",
+        "session": "3c3553f39a3c",
+        "model": "anthropic/claude-opus-5-5",
+        "fallback": "none observed in this session",
+        "date": "2026-11-14",
+        "result": "passed",
+        "findings": 1,
+        "unresolved_blocker_major": 0,
+        "blocker": 0,
+        "major": 0,
+        "minor": 1,
+        "nit": 0
+      },
+      "status": "passed",
+      "note": "Round-1 remediation audit at ed2e82a80368 (branch feat/approvals-setup-no-terminal, PR #3950): the 10 changed/added keys (prompt.phone_approvals, refused.terminal_cannot_prompt, refused.cannot_install, refused.key_failed, refused.unsafe_staging, outcome.not_verified, outcome.changed_elsewhere, outcome.file_only, tui.usage, tui.approvals_report_not_set_up) and the removal of tui.anchor_clause, per git diff d72765c18905..ed2e82a80368, read against en + context sidecar, i18n/glossary.md and i18n/style-guides/es.md; the 14 unchanged keys are byte-identical to d72765c18905 (previous passed receipt) and were re-read only for glossary consistency. Mechanical (verified in bytes): 24/24 key parity with en, {live}/{saved}x2 placeholder multiset equal, verbatim '/mobile approvals on', '/approvals {saved}', 'config.yml', 'Touch ID', 'Local Operator'; no manual bidi controls; tui.usage has no trailing period; Settings -> Phone access path equals the desktop labels ui.settings.page.title + ui.providers.phone.heading in local-operator-ui; tui.approvals_report_not_set_up is rendered whole (serving.py:11409, tui/app.py:31938). Target es/wire.operator_setup.json sha256 4ba5f91e595751b956563c07e15947799d4d21b85667af67465d9e9841d0e2a0. Findings: ES-R1-1 MINOR refused.terminal_cannot_prompt: \"en la app de escritorio\" -> \"en la aplicación de escritorio\" (glossary drift: the es corpus renders 'desktop app' as 'aplicación de escritorio' 14 times; this is the only 'app de escritorio') — open, non-gating, for the translator/implementer. This receipt does not stand in for the separate second independent audit of the high-visibility prompt.* keys."
     }
   ]
 }
