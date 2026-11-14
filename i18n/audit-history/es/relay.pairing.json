@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "es",
   "namespace": "relay.pairing",
-  "history_sha256": "9236894fdef12f00cbbbbb57f94366f38727188eccdcadf414c5a9623517094b",
+  "history_sha256": "da7781a752561a60f4f751b1a55e2e210cb1aafb74c6ab35e0f37aabc8cd9488",
   "entries": [
     {
       "locale": "es",
@@ -24,6 +24,27 @@
       },
       "status": "passed",
       "note": "Independent audit of all 61 relay.pairing keys at English source sha256 d3dd6f85… (current bytes; the implementer's identity-only rename relay.pairing.terminal.approvals -> relay.pairing.terminal.turn_on_approving was verified by the auditor: substituting the old key name back reproduces the drafted 6f356b22… hash byte-for-byte, so every value is unchanged and the renamed key's translation was audited under its new name). Checked: key parity, {countdown}/{digits}/{command}/{name} preserved byte-exactly, no `lop ` command in any value, no ICU plurals in source, safety meaning (computer's own password vs Radient, nothing approved yet, removed/re-pair, wrong-code strikes), Approve/Deny label agreement with relay.asks.pending.*, Settings/Phone access path vs local-operator-ui origin/main f49d62bd2 desktop labels, maxCells with rich.cells.cell_len. Findings (0 blocker/major): minor unavailable.body + paired.not_ready 'Acceso telefónico' -> 'Acceso desde el teléfono' (desktop label; 'acceso telefónico' also reads as dial-up access); minor title_for_action 46/44 cells -> 'Empareja este teléfono para aprobar aquí' (40); nit withdraw_in_progress 'Termina o cancela allí.' -> 'Termina o cancela la operación allí.' tú register consistent. Auditor edited no catalogue."
+    },
+    {
+      "locale": "es",
+      "namespace": "relay.pairing",
+      "source_sha256": "f1808a94c40b906328743d9115514368b4103c09d73c3c0ed80d328943203fe8",
+      "translator": {
+        "agent": "coder subagent 3949-r2-remediation (job c6eae4851264, lop session 63949a7a87e3; host session 25fe8dfbf610)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-14"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team; independent of the translator; lop session 130807af6161)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-14",
+        "result": "passed",
+        "findings": 2,
+        "unresolved_blocker_major": 0,
+        "read_route_verified": false
+      },
+      "status": "passed",
+      "note": "Independent round-2 audit of PR #3949 relay.pairing at head dd9e9918e, English source sha256 f1808a94…: read all 64 keys side by side with en and the context sidecar; focus on the 12 changed/new keys (intro.body, denied, expired, withdrawn, strikes_exhausted, busy.other, return.approve, return.choose, busy.maybe_this_phone, error.refused, error.support_code, rate_limited_over) and confirmed relay.pairing.start_again is absent from every catalogue. Checked in bytes: {code} preserved exactly (no ICU plurals in source), typographic apostrophes, no manual bidi controls, no `lop ` literal in any value; denied/expired/withdrawn name pairing; busy.other keeps the deny-if-not-yours instruction with the same Deny verb as operator.pairing.refusal.in_progress; return.approve names the button exactly as relay.asks.pending.approve; no maxCells on these keys (wrapping body copy). Findings (0 blocker/major): nit strikes_exhausted 'Vuelve a emparejar para obtener…' -> 'Vuelve a emparejar el teléfono para obtener un código nuevo.' (emparejar wants an object); nit busy.maybe_this_phone 'app' vs 'aplicación' elsewhere in relay.* (acceptable for the Home Screen web app). tú register consistent. Auditor edited no catalogue."
     }
   ]
 }
