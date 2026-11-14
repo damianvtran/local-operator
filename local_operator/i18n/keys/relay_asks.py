@@ -18,6 +18,22 @@ def card_cold_wait() -> Msg:
     return Msg("relay.asks.card.cold_wait", {})
 
 
+def card_command_copied() -> Msg:
+    return Msg("relay.asks.card.command.copied", {})
+
+
+def card_command_copy() -> Msg:
+    return Msg("relay.asks.card.command.copy", {})
+
+
+def card_command_copy_failed() -> Msg:
+    return Msg("relay.asks.card.command.copy_failed", {})
+
+
+def card_command_label() -> Msg:
+    return Msg("relay.asks.card.command.label", {})
+
+
 def card_decline() -> Msg:
     return Msg("relay.asks.card.decline", {})
 
