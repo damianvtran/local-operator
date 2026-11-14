@@ -107,18 +107,34 @@ class SpawnSnapshot:
     1. the tree path did not exist when the snapshot ended (checked after the
        marks were read), so every directory in it was created later, and a cwd
        inside it needs a ``chdir`` after the marks were read;
-    2. at settle time the pid has the same start time (same process, not a
-       reused pid), the same context-switch total, and is not ``State: R``.
-       A process that ran at all after the snapshot and is now off-CPU has
-       switched out since, which increments one of the two counters; ``State``
-       is printed before the counters in one read, so a wake-up between them
-       cannot pass. Unchanged counters and off-CPU therefore mean it executed
-       nothing — no ``chdir`` — since before the tree existed.
+    2. the process has exactly one thread (``Threads: 1``) at the snapshot
+       AND at settle. ``State`` and the switch counts are the leader thread's
+       alone, but the cwd is shared by every thread, so a worker thread can
+       ``chdir`` in under a parked leader whose mark never moves (reproduced
+       in PR #3980 round 1). With one thread the leader's counters are the
+       process's, and it cannot grow a thread without running itself;
+    3. at settle the pid has the same start time (same process, not a reused
+       pid) and the same context-switch total, and it was not ``State: R`` at
+       either read. ``State: S`` only says "declared asleep": a task sets it
+       just BEFORE calling ``schedule()``, so it is not proof of being off
+       the CPU. What proves it did not run is the count: the kernel bumps a
+       task's count each time it is switched OUT (``__schedule``, prev !=
+       next), so a process that ran after the snapshot has been switched out
+       since — and changed the count — unless it is still on the CPU at the
+       settle's read. ``State`` is printed before the counts in one read, so
+       a wake-up between them cannot pass.
 
     Anything else (a pid absent from the snapshot, a changed counter, a
-    running process, an unreadable mark, a target that already existed) stays
-    "might be inside". The remaining window — a process that ``chdir``s in
-    after the settle's inventory — is the one the inventory always had.
+    second thread, a ``State: R`` read, an unreadable mark, a target that
+    already existed) stays "might be inside". OUTSIDE THE MODEL: (a) another
+    actor renaming or bind-mounting an existing directory — one a hidden
+    process already sits in — onto the absent target path during the call,
+    which needs no ``chdir`` by that process (step 1 assumes the tree's
+    directories are new); (b) a process that ran during the call and is
+    still on the CPU, caught at the settle's single read between declaring
+    sleep and being switched out — one read cannot tell "about to sleep"
+    from "asleep". The remaining window — a process that ``chdir``s in after
+    the settle's inventory — is the one the inventory always had.
     """
 
     absent: frozenset[str] = frozenset()
@@ -133,6 +149,9 @@ class SpawnSnapshot:
         now = provenance._proc_mark(pid)
         return (
             now is not None
+            and before.threads == 1
+            and now.threads == 1
+            and not before.on_cpu
             and not now.on_cpu
             and now.start == before.start
             and now.switches == before.switches

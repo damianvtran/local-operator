@@ -89,7 +89,7 @@ def fake_proc(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]
     monkeypatch.setattr(prov, "os", fake_os)
     monkeypatch.setattr(iwa, "os", fake_os)
     monkeypatch.setattr(prov, "_cwd_inventory_cache", None)
-    marks = {HIDDEN: prov.ProcMark(start=359, switches=1, on_cpu=False)}
+    marks = {HIDDEN: prov.ProcMark(start=359, switches=1, on_cpu=False, threads=1)}
     monkeypatch.setattr(prov, "_proc_mark", lambda pid: marks.get(pid))
     return {"state": state, "marks": marks, "elsewhere": elsewhere}
 
@@ -163,11 +163,28 @@ def test_a_hidden_pid_that_has_not_run_since_the_spawn_lets_the_add_settle(fake_
 
 @pytest.mark.parametrize(
     "case",
-    ["ran-since", "on-cpu", "pid-reused", "new-since-spawn", "target-existed", "no-snapshot"],
+    [
+        "ran-since",
+        "on-cpu",
+        "pid-reused",
+        "new-since-spawn",
+        "target-existed",
+        "no-snapshot",
+        # PR #3980 round 1: the leader's mark does not speak for other threads.
+        "multi-threaded-at-snapshot",
+        "multi-threaded-at-settle",
+        # ...and "R" at the snapshot means it may never have switched out at all.
+        "on-cpu-at-snapshot",
+    ],
 )
 def test_a_hidden_pid_that_might_be_inside_blocks_the_settle(fake_proc, repo, case):
     env = dict(os.environ)
     marks: dict[int, prov.ProcMark] = fake_proc["marks"]
+    settled_mark = marks[HIDDEN]
+    if case == "multi-threaded-at-snapshot":
+        marks[HIDDEN] = settled_mark._replace(threads=2)
+    if case == "on-cpu-at-snapshot":
+        marks[HIDDEN] = settled_mark._replace(on_cpu=True)
     if case == "new-since-spawn":
         fake_proc["state"][HIDDEN] = FileNotFoundError  # not there at the snapshot
     if case == "target-existed":
@@ -177,11 +194,12 @@ def test_a_hidden_pid_that_might_be_inside_blocks_the_settle(fake_proc, repo, ca
     if case == "target-existed":
         assert snapshot is None
     fake_proc["state"][HIDDEN] = PermissionError
-    before = marks[HIDDEN]
+    before = settled_mark
     marks[HIDDEN] = {
         "ran-since": before._replace(switches=before.switches + 1),
         "on-cpu": before._replace(on_cpu=True),
         "pid-reused": before._replace(start=before.start + 1),
+        "multi-threaded-at-settle": before._replace(threads=2),
     }.get(case, before)
     started = time.time() - 1
     tree = _killed_add(repo, "b")
@@ -240,3 +258,90 @@ def test_proc_mark_sees_the_reader_itself_running():
     mark = prov._proc_mark(os.getpid())
     assert mark is not None and mark.on_cpu
     assert prov._proc_mark(2**22 + 12345) is None  # no such pid: no mark, no proof
+
+
+# -- a real hidden process (PR #3980 round 1, R1-MAJOR-1 / Q1) ---------------------
+
+# A same-uid process that hides its cwd the way (sd-pam) does: non-dumpable.
+# With "2" a worker thread waits on stdin for a path, chdirs into it, says so,
+# and stays there; the main (leader) thread only ever sleeps, so its State and
+# switch counts never move — exactly what fooled the leader-only mark.
+_HIDDEN_HELPER = """
+import ctypes, os, sys, threading, time
+assert ctypes.CDLL(None, use_errno=True).prctl(4, 0, 0, 0, 0) == 0  # PR_SET_DUMPABLE 0
+def worker():
+    os.chdir(sys.stdin.readline().strip())
+    print("inside", flush=True)
+    time.sleep(10**6)
+if sys.argv[1] == "2":
+    threading.Thread(target=worker, daemon=True).start()
+print("ready", flush=True)
+time.sleep(10**6)
+"""
+
+
+def _hidden_helper(threads: int) -> subprocess.Popen[str]:
+    child = subprocess.Popen(
+        [sys.executable, "-c", _HIDDEN_HELPER, str(threads)],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    assert child.stdout is not None and child.stdout.readline().strip() == "ready"
+    try:
+        os.readlink(f"/proc/{child.pid}/cwd")
+    except PermissionError:
+        pass
+    else:  # e.g. root (CAP_SYS_PTRACE) reads any cwd: nothing is hidden to test
+        child.kill()
+        child.wait()
+        pytest.skip("this user can read a non-dumpable process's cwd")
+    # Settle into the sleep before the snapshot, as a parked process would be.
+    deadline = time.monotonic() + 5
+    mark = prov._proc_mark(child.pid)
+    while (mark is None or mark.on_cpu or mark.threads != threads) and time.monotonic() < deadline:
+        time.sleep(0.02)
+        mark = prov._proc_mark(child.pid)
+    assert mark is not None and not mark.on_cpu and mark.threads == threads
+    return child
+
+
+@needs_proc
+def test_a_hidden_thread_that_chdirs_into_the_new_tree_keeps_it(repo):
+    env = dict(os.environ)
+    child = _hidden_helper(threads=2)
+    try:
+        snapshot = iwa.snapshot_before_spawn(_cmd(repo, "t"), cwd=None, env=env)
+        assert snapshot is not None and child.pid in snapshot.marks
+        started = time.time() - 1
+        tree = _killed_add(repo, "t")
+        assert child.stdin is not None and child.stdout is not None
+        child.stdin.write(f"{tree}\n")
+        child.stdin.flush()
+        assert child.stdout.readline().strip() == "inside"
+        # The leader's mark is unchanged: only the thread count gives it away.
+        now = prov._proc_mark(child.pid)
+        assert now is not None and now.switches == snapshot.marks[child.pid].switches
+        assert not snapshot.cleared(child.pid)
+        done = iwa.settle_after_kill(
+            _cmd(repo, "t"), cwd=None, env=env, spawned_at=started, snapshot=snapshot
+        )
+        assert done == []
+        assert tree.is_dir()
+    finally:
+        child.kill()
+        child.wait()
+
+
+@needs_proc
+def test_a_single_threaded_hidden_process_that_slept_is_still_cleared(repo):
+    env = dict(os.environ)
+    child = _hidden_helper(threads=1)
+    try:
+        snapshot = iwa.snapshot_before_spawn(_cmd(repo, "s"), cwd=None, env=env)
+        assert snapshot is not None and child.pid in snapshot.marks
+        _killed_add(repo, "s")
+        assert snapshot.cleared(child.pid)
+    finally:
+        child.kill()
+        child.wait()
