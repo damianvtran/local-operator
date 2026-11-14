@@ -5991,7 +5991,9 @@ def _peer_checks(
     return rows
 
 
-def _self_member(server: "RelayServer", target: str) -> tuple[Any, Any] | None:
+def _self_member(
+    server: "RelayServer", target: str, *, by_id_only: bool = False
+) -> tuple[Any, Any] | None:
     """``(record, member)`` when ``target`` names THIS device, else ``None``.
 
     Matched on this device's id, its identity name or its own member row's name
@@ -6009,7 +6011,7 @@ def _self_member(server: "RelayServer", target: str) -> tuple[Any, Any] | None:
         for member in record.members:
             if member.device_id != own_id:
                 continue
-            if target in (own_id, own_name, member.name):
+            if target == own_id or (not by_id_only and target in (own_name, member.name)):
                 return record, member
     return None
 
@@ -6172,8 +6174,20 @@ def compose(
     # ``unknown_peer``, because the resolver (rightly) never matches the asking
     # device as a PEER. The rows it wanted are the ones this device would send a
     # viewer, so they are built from the same facts, read here with no dial.
-    own = _self_member(server, peer) if peer else None
-    device_id = "" if own is not None or not peer else server._resolve_peer(peer)  # noqa: SLF001
+    # A PEER WINS A NAME (review N2): a peer that happens to share this device's
+    # name is still the device a person typing that name means; only this
+    # device's id, or a name no peer answers to, means self.
+    from local_operator.network.types import MeshRefusal
+
+    own = _self_member(server, peer, by_id_only=True) if peer else None
+    device_id = ""
+    if peer and own is None:
+        try:
+            device_id = server._resolve_peer(peer)  # noqa: SLF001
+        except MeshRefusal as exc:
+            own = _self_member(server, peer) if exc.code == "unknown_peer" else None
+            if own is None:
+                raise
     identity_missing = server.identity is None or not server.identity.device_id
     checks: list[dict[str, Any]] = []
     if identity_missing:

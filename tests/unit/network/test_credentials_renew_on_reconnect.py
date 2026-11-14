@@ -253,24 +253,30 @@ def test_wake_step_renews_surviving_links_once_per_wake(
     clocks = {"mono": 100.0, "boot": 1000.0}
     monkeypatch.setattr(renew_push.time, "monotonic", lambda: clocks["mono"])
     monkeypatch.setattr(client_mod, "_sleep_inclusive_clock", lambda: clocks["boot"])
-    calls: list[str] = []
+    calls: list[tuple[str, str]] = []
     monkeypatch.setattr(
         renew_push,
         "renew_peer",
-        lambda _s, _n, dev, **_k: calls.append(dev) or {"outcome": "nudged"},
+        lambda _s, net, dev, **_k: calls.append((net, dev)) or {"outcome": "nudged"},
     )
-    server = SimpleNamespace(_link_for=lambda dev, **_k: SimpleNamespace(network_id="n1"))
+
+    def _link(network: str, device: str = "d_peer") -> Any:
+        return SimpleNamespace(network_id=network, device_id=device, alive=True, closing=False)
+
+    # TWO networks shared with the same member, one link each (review m4), plus
+    # another member's link that must not be renewed.
+    server = SimpleNamespace(links={1: _link("n1"), 2: _link("n2"), 3: _link("n1", "d_other")})
     assert renew_push.wake_step(server, "d_peer") is None  # first sight: link-up covered it
     clocks["mono"] += 15
     clocks["boot"] += 15
     assert renew_push.wake_step(server, "d_peer") is None and calls == []
     clocks["mono"] += 15
     clocks["boot"] += 15 + 8 * 3600  # slept 8 h
-    assert renew_push.wake_step(server, "d_peer") == "nudged"
-    assert calls == ["d_peer"]
+    assert renew_push.wake_step(server, "d_peer") == "nudged,nudged"
+    assert calls == [("n1", "d_peer"), ("n2", "d_peer")]
     clocks["mono"] += 15
     clocks["boot"] += 15
-    assert renew_push.wake_step(server, "d_peer") is None and calls == ["d_peer"]
+    assert renew_push.wake_step(server, "d_peer") is None and len(calls) == 2
 
 
 # -- observability (mesh lane 64949) -----------------------------------------
@@ -331,3 +337,152 @@ def test_ready_for_this_device_answers_locally(mesh: Any) -> None:  # noqa: F811
     with pytest.raises(MeshRefusal) as refused:
         readiness.compose(mesh.b, peer="nobody-called-this")
     assert refused.value.code == "unknown_peer"
+
+
+# -- review round 1 remediation ------------------------------------------------
+
+
+def _hold_renewal_on_b(mesh: Any) -> None:  # noqa: F811
+    """Owner nudges now; wait until B's relay holds the renewal."""
+    for server in (mesh.a, mesh.b):
+        getattr(server, "_credential_renew_floors", {}).clear()
+    assert _renew(mesh)["outcome"] == "nudged"
+    assert net_fixtures.wait_for(
+        lambda: renew_push.held_renewal(mesh.b, STUB_PROVIDER, _owner_id(mesh)) is not None
+    )
+
+
+def _renewals(mesh: Any) -> list[str]:  # noqa: F811
+    return renew_push.held_keys(mesh.b)
+
+
+def test_a_lost_nudge_is_retried_within_the_failure_floor(
+    mesh: Any, borrowed: Any, nudges: list[str], monkeypatch: pytest.MonkeyPatch  # noqa: F811
+) -> None:
+    """M1: a nudge with no answer keeps a 30 s floor only, and the tick retries it."""
+    b_id = mesh.b.identity.device_id
+    link = mesh.a._link_for(b_id, network_id=mesh.network_id)
+    assert link is not None
+    real = link.request
+    lost = {"done": False}
+
+    def _flaky(frame: dict[str, Any], **kwargs: Any) -> Any:
+        if frame.get("kind") == "renew" and not lost["done"]:
+            lost["done"] = True
+            raise ConnectionError("synthetic: the wake re-link dropped mid-nudge")
+        return real(frame, **kwargs)
+
+    monkeypatch.setattr(link, "request", _flaky)
+    clock = {"now": 10_000.0}
+    monkeypatch.setattr(renew_push, "_clock", lambda: clock["now"])
+    assert _renew(mesh)["outcome"] == "failed"
+    assert nudges == []
+    # Flap protection still holds inside the failure floor...
+    clock["now"] += renew_push.RENEW_FAILED_RETRY_S - 1
+    assert _renew(mesh)["outcome"] == "rate_limited"
+    # ...and once it passes, the member's own tick re-sends without any link-up.
+    clock["now"] += 2
+    assert renew_push.wake_step(mesh.a, b_id) == "nudged"
+    assert nudges == [STUB_PROVIDER]
+    # Delivered: no further retries, and the full window applies again.
+    clock["now"] += renew_push.RENEW_FAILED_RETRY_S + 1
+    assert renew_push.wake_step(mesh.a, b_id) is None
+    assert _renew(mesh)["outcome"] == "rate_limited"
+
+
+def test_an_older_peer_is_not_nudged(
+    mesh: Any, borrowed: Any, nudges: list[str], monkeypatch: pytest.MonkeyPatch  # noqa: F811
+) -> None:
+    """N3: without ``credential-renew-push-v1`` on the link, nothing is sent."""
+    from local_operator.network import wire
+
+    link = mesh.a._link_for(mesh.b.identity.device_id, network_id=mesh.network_id)
+    assert link is not None
+    monkeypatch.setattr(
+        link, "capabilities", frozenset(link.capabilities) - {wire.CREDENTIAL_RENEW_PUSH_V1}
+    )
+    assert _renew(mesh)["outcome"] == "skipped:peer_lacks_renew"
+    assert nudges == []
+
+
+@pytest.mark.parametrize("path", ["trust", "panic"])
+def test_a_trust_change_drops_the_relay_renewal_at_once(
+    mesh: Any, borrowed: Any, path: str  # noqa: F811
+) -> None:
+    """m1: the holder's own trust change / panic forgets the renewal now, not lazily."""
+    _hold_renewal_on_b(mesh)
+    assert _renewals(mesh) == [STUB_PROVIDER]
+    if path == "trust":
+        mesh.b._ctl_trust({"network": mesh.network_id, "trust": "untrusted"})
+    else:
+        mesh.b._ctl_panic({"network": mesh.network_id})
+    assert _renewals(mesh) == [], "the renewed login outlived the trust change"
+
+
+def test_a_revoke_drops_the_relay_renewal_at_reconcile(
+    mesh: Any, borrowed: Any  # noqa: F811
+) -> None:
+    """m1: a revoke landing through the pull drops the renewal at that reconcile."""
+    _hold_renewal_on_b(mesh)
+    with placement_mod.mutate(
+        mesh.network_id, mesh.a.root, self_device=_owner_id(mesh)
+    ) as document:
+        document.revoke(STUB_PROVIDER, mesh.b.identity.device_id, by=_owner_id(mesh))
+    _pull(mesh)
+    assert _renewals(mesh) == [], "the revoked renewal outlived the reconcile"
+
+
+def test_a_session_that_never_borrowed_is_served_and_the_owner_sees_relay_renew(
+    mesh: Any, borrowed: Any  # noqa: F811
+) -> None:
+    """m2/N3: documented behaviour, pinned; the owner's audit names the renewal."""
+    import json
+
+    _hold_renewal_on_b(mesh)
+    mesh.a.audit.flush()
+    rows = [json.dumps(row) for row in mesh.a.audit.tail(500)]
+    assert any(renew_push.RENEW_SESSION in row for row in rows), "owner audit cannot tell"
+    _stop_owner(mesh)
+    fresh = _client(mesh)
+    served = fresh.request_grant_sync(
+        STUB_PROVIDER, session_id="sess-never-borrowed", model_id="stub-model"
+    )
+    assert isinstance(served, Grant) and served.held_offline, served
+
+
+def test_a_renewal_fetched_before_a_policy_change_is_not_adopted(
+    mesh: Any, borrowed: Any  # noqa: F811
+) -> None:
+    """m3: only a renewal whose fetch-time policy stamp is still current is adopted."""
+    import dataclasses
+
+    from local_operator.network.credentials.held_policy import Stamp
+
+    client, grant = borrowed
+    current = Stamp("inc", 1, _owner_id(mesh), STUB_PROVIDER, 0)
+    stale = dataclasses.replace(current, key_generation=1)  # a deny since the fetch
+    renewal = dataclasses.replace(grant, grant_id="g-renewal")
+    from local_operator.network.credentials.client import _sleep_inclusive_clock
+
+    renewal.received_wall, renewal.received_boot = time.time(), _sleep_inclusive_clock()
+    client._adopt_renewal(STUB_PROVIDER, "sess-m3", (renewal, stale), current)
+    assert client.grants.peek(STUB_PROVIDER, "sess-m3") is None
+    client._adopt_renewal(STUB_PROVIDER, "sess-m3", (renewal, current), current)
+    adopted = client.grants.peek(STUB_PROVIDER, "sess-m3")
+    assert adopted is not None and adopted.grant_id == "g-renewal"
+
+
+def test_ready_prefers_a_peer_that_shares_this_devices_name(mesh: Any) -> None:  # noqa: F811
+    """N2: a peer named like this device is still the peer; the id always means self."""
+    from local_operator.network import readiness
+
+    b_name = mesh.b.identity.name
+    with store.mutate(mesh.network_id, mesh.b.root) as record:
+        owner_row = record.member(_owner_id(mesh))
+        assert owner_row is not None
+        owner_row.name = b_name
+        store.save(record, mesh.b.root)
+    by_name = readiness.compose(mesh.b, peer=b_name)
+    assert any(c.get("check") == "reachability" for c in by_name["checks"]), "answered for self"
+    by_id = readiness.compose(mesh.b, peer=mesh.b.identity.device_id)
+    assert not any(c.get("check") == "reachability" for c in by_id["checks"])

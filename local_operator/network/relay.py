@@ -9541,6 +9541,10 @@ class RelayServer:
                     root=self.root,
                 )
                 epoch_after = record.epoch
+                # A panic, trust change or disconnect ends this network's credentials NOW:
+                # the login the relay renewed on the owner's return must not outlive it in
+                # memory until the next ask (``renew_push``; PR #3946 review m1).
+                self._drop_renewed_logins()
             # The snapshot is taken HERE, inside the section that wrote the state.
             victims = [
                 other
@@ -9616,7 +9620,21 @@ class RelayServer:
         # writes inside the lock.
         with store.mutate(link.network_id, self.root) as record:
             set_trust(record, trust=trust, reason=f"set by {link.device_id}", root=self.root)
+            if record.trust != "active":
+                # A panic, trust change or disconnect ends this network's credentials NOW:
+                # the login the relay renewed on the owner's return must not outlive it in
+                # memory until the next ask (``renew_push``; PR #3946 review m1).
+                self._drop_renewed_logins()
         return {"op": "ack", "req": frame.get("req"), "detail": {"trust": trust}}
+
+    def _drop_renewed_logins(self) -> None:
+        """Forget every login this relay renewed for its sessions (best effort)."""
+        try:
+            from local_operator.network.credentials import renew_push
+
+            renew_push.drop_held(self)
+        except Exception:  # noqa: BLE001 — a trust change must never fail on this
+            logger.debug("mesh relay: dropping renewed logins failed", exc_info=True)
 
     def _op_identity_rotate(self, link: PeerLink, frame: dict[str, Any]) -> dict[str, Any]:
         record = self.store_view.network(link.network_id)
@@ -13869,6 +13887,11 @@ class RelayServer:
                 reason=str(frame.get("reason") or "operator"),
                 root=self.root,
             )
+            if record.trust != "active":
+                # A panic, trust change or disconnect ends this network's credentials NOW:
+                # the login the relay renewed on the owner's return must not outlive it in
+                # memory until the next ask (``renew_push``; PR #3946 review m1).
+                self._drop_renewed_logins()
             self.audit.record(
                 AuditEvent(
                     event="trust_changed",
@@ -14200,6 +14223,10 @@ class RelayServer:
                     reason="this device raised a panic",
                     root=self.root,
                 )
+                # A panic, trust change or disconnect ends this network's credentials NOW:
+                # the login the relay renewed on the owner's return must not outlive it in
+                # memory until the next ask (``renew_push``; PR #3946 review m1).
+                self._drop_renewed_logins()
                 self.audit.record(
                     AuditEvent(
                         event="panic_raised",
@@ -14319,6 +14346,10 @@ class RelayServer:
                 reason="this device disconnected",
                 root=self.root,
             )
+            # A panic, trust change or disconnect ends this network's credentials NOW:
+            # the login the relay renewed on the owner's return must not outlive it in
+            # memory until the next ask (``renew_push``; PR #3946 review m1).
+            self._drop_renewed_logins()
             self.audit.record(
                 AuditEvent(
                     event="disconnect_initiated",

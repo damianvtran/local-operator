@@ -18,6 +18,10 @@ daily login did nothing for it. Here the owner's return is the trigger instead:
   A session whose own held grant is older (or which has none) adopts it the next
   time the owner is unreachable (``client._held_or`` with ``renewal=``), so its hold
   window counts from the owner's return, not from that session's last ask.
+  This includes a session that never borrowed (started on the node while the
+  owner is away): the share is the DEVICE's, every same-uid process could already
+  borrow under it while the owner was up, and the renewal is asked under
+  ``for_session=relay-renew`` so the owner's audit tells it from a session's ask.
 
 NOTHING NEW IS LENT. The nudge carries no material and grants nothing: the token
 travels in an ordinary grant reply to an ordinary grant request, which the owner's
@@ -66,6 +70,16 @@ HOLDER_MIN_INTERVAL_S = 60.0
 #: between two ticks means this machine slept: on macOS ``time.monotonic`` stops in
 #: sleep and the definitions tick runs every 15 s, so a 60 s gap is unambiguous.
 WAKE_GAP_S = 60.0
+#: After a nudge that got no answer (timeout, dead link, exception), the floor for
+#: those keys is moved back so they may be re-sent this many seconds later, and the
+#: member's next tick retries (:func:`wake_step`). Without it one lost RPC at wake
+#: cost the node its renewal until the NEXT wake (PR #3946 review M1). Two 15 s
+#: ticks: a link flapping faster still costs at most one nudge per 30 s.
+RENEW_FAILED_RETRY_S = 30.0
+#: The ``for_session`` a relay renewal is asked under, so the OWNER's audit tells a
+#: node's renewal from a session's own ask (review m2). Informational only: the
+#: owner authorises the device's share, never a session id.
+RENEW_SESSION = "relay-renew"
 #: Bounds on the nudge frame (one row per lent key; an owner lends a handful).
 MAX_RENEW_KEYS = 32
 
@@ -73,6 +87,7 @@ _FLOORS_ATTR = "_credential_renew_floors"
 _WAKE_ATTR = "_credential_renew_wake"
 _HELD_ATTR = "_credential_renewals"
 _TIMERS_ATTR = "_credential_renew_timers"
+_FAILED_ATTR = "_credential_renew_failed"
 _GUARD = threading.Lock()
 
 
@@ -195,8 +210,21 @@ def renew_peer(
         logger.debug("renew push: request to %s failed", device_id, exc_info=True)
         reply = None
     detail = reply.get("detail") if isinstance(reply, dict) else None
+    failed = _server_attr(server, _FAILED_ATTR)
     if not isinstance(detail, dict):
+        # NO ANSWER: nothing says the holder heard it. Keep the floor only for
+        # RENEW_FAILED_RETRY_S (flap protection) and mark the member for the
+        # tick's retry; a nudge that did land is harmless to repeat, because the
+        # holder's own floor absorbs it.
+        retry_floor = now - RENEW_MIN_INTERVAL_S + RENEW_FAILED_RETRY_S
+        with _GUARD:
+            for key in due:
+                if floors.get((network_id, device_id, key)) == now:
+                    floors[(network_id, device_id, key)] = retry_floor
+            failed[(network_id, device_id)] = now
         return {"outcome": "failed", "keys": due}
+    with _GUARD:
+        failed.pop((network_id, device_id), None)
     if detail.get("kind") == "error":
         return {"outcome": f"refused:{detail.get('code') or 'unknown'}", "keys": due}
     return {"outcome": "nudged", "keys": due}
@@ -238,6 +266,8 @@ def stop(server: Any) -> None:
     for timer in pending:
         if timer is not threading.current_thread():
             timer.join(timeout=1.0)
+    # The renewed logins die with the relay that fetched them (review m1).
+    drop_held(server)
 
 
 def on_link_up(server: Any, link: Any) -> None:
@@ -264,8 +294,12 @@ def wake_step(server: Any, device_id: str) -> str | None:
     from local_operator.network.credentials.client import _sleep_inclusive_clock
 
     state = _server_attr(server, _WAKE_ATTR)
+    failed = _server_attr(server, _FAILED_ATTR)
     mono, boot = time.monotonic(), _sleep_inclusive_clock()
     with _GUARD:
+        # A nudge to this member that got no answer is retried here, every tick,
+        # until one lands (the failure floor spaces the actual sends).
+        retry = sorted(network for (network, device) in failed if device == device_id)
         ref = state.get("ref")
         epoch = int(state.get("epoch", 0))
         if ref is not None and (boot - ref[1]) - (mono - ref[0]) >= WAKE_GAP_S:
@@ -273,22 +307,40 @@ def wake_step(server: Any, device_id: str) -> str | None:
         state["ref"] = (mono, boot)
         state["epoch"] = epoch
         seen = state.setdefault("seen", {})
+        woke = False
         if device_id not in seen:
             # First visit: start/link-up already covered this member.
             seen[device_id] = epoch
-            return None
-        if seen[device_id] >= epoch:
-            return None
-        seen[device_id] = epoch
-    link_for = getattr(server, "_link_for", None)
-    link = link_for(device_id) if link_for is not None else None
-    if link is None:
-        # No surviving link: the link-up that brings it back renews.
-        return None
-    outcome = renew_peer(
-        server, str(getattr(link, "network_id", "") or ""), device_id, reason="wake"
-    )
-    return str(outcome.get("outcome") or "") or None
+        elif seen[device_id] < epoch:
+            seen[device_id] = epoch
+            woke = True
+    if woke:
+        # EVERY network this member shares with us has its own link and its own
+        # placement rows; renewing only the first link's network missed the rest
+        # (review m4). No surviving link in a network: its link-up renews it.
+        networks = sorted(
+            {
+                str(getattr(link, "network_id", "") or "")
+                for link in list(getattr(server, "links", {}).values())
+                if getattr(link, "device_id", "") == device_id
+                and getattr(link, "alive", False)
+                and not getattr(link, "closing", False)
+            }
+            - {""}
+        )
+        reason = "wake"
+    else:
+        networks, reason = retry, "retry"
+    outcomes: list[str] = []
+    for network in networks:
+        outcome = str(renew_peer(server, network, device_id, reason=reason).get("outcome") or "")
+        outcomes.append(outcome)
+        if outcome not in ("failed", "rate_limited"):
+            # Answered, or a skip a retry cannot change (revoked, panicked,
+            # offline: the next link-up renews): stop retrying this member.
+            with _GUARD:
+                failed.pop((network, device_id), None)
+    return ",".join(o for o in outcomes if o) or None
 
 
 # ---------------------------------------------------------------------------
@@ -384,7 +436,19 @@ def renew_key(server: Any, client: Any, owner: str, key: str) -> str:
 
     if client.owner_of(key) != owner:
         return "skipped:owner_changed"
-    detail = client.serve_grant(key, provider=key, session_id="")
+    # THE POLICY STAMP AT FETCH TIME (review m3), taken before the ask. A session
+    # adopts the renewal only while the held policy still reads this stamp, so a
+    # deny recorded after this fetch (even one later cleared) keeps it out, exactly
+    # as it keeps out a grant that session fetched itself.
+    from local_operator.network.credentials.held_policy import PolicyUnknown
+
+    try:
+        policy = client._policy()  # noqa: SLF001 — the client's own policy store
+        with policy.transaction() as document:
+            fetch_stamp = policy.stamp(document, owner, key)
+    except PolicyUnknown:
+        return "skipped:policy_unknown"
+    detail = client.serve_grant(key, provider=key, session_id=RENEW_SESSION)
     if not isinstance(detail, dict) or detail.get("kind") != "grant":
         return f"refused:{(detail or {}).get('code') or 'unknown'}"
     grant = Grant.from_detail(detail)
@@ -395,7 +459,7 @@ def renew_key(server: Any, client: Any, owner: str, key: str) -> str:
     grant.received_boot = _sleep_inclusive_clock()
     held = _server_attr(server, _HELD_ATTR)
     with _GUARD:
-        held[key] = grant
+        held[key] = (grant, fetch_stamp)
     return "renewed"
 
 
@@ -414,19 +478,34 @@ def held_renewal(server: Any, key: str, owner: str) -> dict[str, Any] | None:
     if not isinstance(held, dict):
         return None
     with _GUARD:
-        grant = held.get(key)
-    if grant is None or grant.credential_ref.owner_device != owner:
+        entry = held.get(key)
+    if entry is None:
+        return None
+    grant, fetch_stamp = entry
+    if grant.credential_ref.owner_device != owner:
         return None
     now_boot = _sleep_inclusive_clock()
     end = grant.hold_end_ms(offline_hold_s(Path(getattr(server, "root"))), now_boot)
     if time.time() * 1000.0 >= end:
         with _GUARD:
-            if held.get(key) is grant:
+            if held.get(key) is entry:
                 held.pop(key, None)
         return None
+    import dataclasses
+
     detail = grant.to_detail()
     detail["held_age_s"] = max(0.0, now_boot - grant.received_boot)
+    detail["policy_stamp"] = dataclasses.asdict(fetch_stamp)
     return detail
+
+
+def held_keys(server: Any) -> list[str]:
+    """The keys this relay currently holds a renewal for (for a revoke sweep)."""
+    held = getattr(server, _HELD_ATTR, None)
+    if not isinstance(held, dict):
+        return []
+    with _GUARD:
+        return list(held)
 
 
 def drop_held(server: Any, key: str | None = None) -> None:

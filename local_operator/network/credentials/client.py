@@ -144,7 +144,7 @@ CLIENT_DEADLINE_S = 8.0
 REASK_MARGIN_MS = 120_000
 
 
-def _renewal_from_reply(reply: Any) -> Grant | None:
+def _renewal_from_reply(reply: Any) -> tuple[Grant, Any] | None:
     """The relay's ``held_renewal`` on an owner-unreachable reply, as a stamped Grant.
 
     The receipt stamps are back-dated by the relay's ``held_age_s`` (its receipt
@@ -165,9 +165,25 @@ def _renewal_from_reply(reply: Any) -> Grant | None:
         return None
     if not grant.access_token:
         return None
+    from local_operator.network.credentials.held_policy import Stamp
+
+    raw_stamp = raw.get("policy_stamp")
+    if not isinstance(raw_stamp, dict):
+        # No fetch-time policy stamp, nothing to fence the adoption with: refuse.
+        return None
+    try:
+        stamp = Stamp(
+            incarnation=str(raw_stamp["incarnation"]),
+            network_generation=int(raw_stamp["network_generation"]),
+            owner=str(raw_stamp["owner"]),
+            key=str(raw_stamp["key"]),
+            key_generation=int(raw_stamp["key_generation"]),
+        )
+    except (KeyError, TypeError, ValueError):
+        return None
     grant.received_wall = time.time() - float(age)
     grant.received_boot = _sleep_inclusive_clock() - float(age)
-    return grant
+    return grant, stamp
 
 
 def _sleep_inclusive_clock() -> float:
@@ -1423,7 +1439,7 @@ class MeshCredentialClient:
         prior_status: str = "",
         label: str = "",
         resting: list[dict[str, Any]] | None = None,
-        renewal: Grant | None = None,
+        renewal: tuple[Grant, Any] | None = None,
     ) -> Grant | BrokerError:
         """A CURRENT immutable stamp + the owner's stated hold, never a retry-cache vote.
 
@@ -1559,7 +1575,9 @@ class MeshCredentialClient:
         note_resolution(self.root, key, outcome)
         return outcome
 
-    def _adopt_renewal(self, key: str, session_id: str, renewal: Grant, stamp: Any) -> None:
+    def _adopt_renewal(
+        self, key: str, session_id: str, renewal: tuple[Grant, Any], stamp: Any
+    ) -> None:
         """Put the relay's renewal in this session's slot when it holds out longer.
 
         Called inside :meth:`_held_or`'s admitted branch, so the policy stamp it is
@@ -1569,16 +1587,24 @@ class MeshCredentialClient:
         """
         from local_operator.network.credentials import offline_hold_s
 
-        if renewal.credential_ref.owner_device != self.owner_of(key):
+        grant, fetch_stamp = renewal
+        if grant.credential_ref.owner_device != self.owner_of(key):
             return
+        if fetch_stamp != stamp:
+            # THE HELD POLICY MOVED SINCE THE RELAY FETCHED IT (review m3): a deny
+            # (even one since cleared) was recorded after the fetch. Fencing that
+            # renewal with today's stamp would serve what a session's own grant of
+            # the same age would be refused, so it is not adopted.
+            return
+        renewal_grant = grant
         cap = offline_hold_s(self.root)
         now_boot = _sleep_inclusive_clock()
         held = self.grants.peek(key, session_id)
-        if held is not None and held.hold_end_ms(cap, now_boot) >= renewal.hold_end_ms(
+        if held is not None and held.hold_end_ms(cap, now_boot) >= renewal_grant.hold_end_ms(
             cap, now_boot
         ):
             return
-        self.grants.put(key, session_id, renewal, policy_fence=stamp)
+        self.grants.put(key, session_id, renewal_grant, policy_fence=stamp)
 
     #: One coalesced ``credential.held_served`` record per grant at most this often
     #: (seconds, sleep-inclusive). A held model session calls every few seconds; a
@@ -1834,6 +1860,28 @@ class MeshCredentialClient:
             # owner's last return rather than at its own last ask.
             offline["held_renewal"] = renewal
         return offline
+
+    def _sweep_relay_renewals(self) -> None:
+        """Drop the relay's renewed logins this device may no longer hold, NOW.
+
+        Runs at every placement reconcile (``revoke_local_grants``), which is where
+        a revoke lands on this device (the pull's merge or its withdrawal). Before,
+        a revoked renewal sat in relay memory until an owner-unreachable ask for
+        that key (review m1); it was never served, but a revoke's promise is now.
+        """
+        if self._relay is None:
+            return
+        from local_operator.network.credentials import renew_push
+
+        keys = renew_push.held_keys(self._relay)
+        if not keys:
+            return
+        if not (self._self_membership_active() and self._network_trusted()):
+            renew_push.drop_held(self._relay)
+            return
+        for key in keys:
+            if not self.should_borrow(key):
+                renew_push.drop_held(self._relay, key)
 
     def _held_renewal(self, key: str, owner: str) -> dict[str, Any] | None:
         """The renewal this relay holds for ``key``, if it may still be offered.
@@ -3223,6 +3271,7 @@ class MeshCredentialClient:
         reconcile must be captured before that read. ``None`` means "whatever the
         cache holds now".
         """
+        self._sweep_relay_renewals()
         candidates = list(self.grants.keys()) if keys is None else list(dict.fromkeys(keys))
         if not candidates:
             return []
