@@ -187,6 +187,12 @@ BIND_FAILED_REASON = "owner could not prepare this view; the session is alive �
 #: sessions tool, and an owner (older, or hostile) is untrusted input here.
 _BIND_FAILED_DETAIL_LIMIT = 300
 
+#: The head of a ``bind_failed`` reason that names the owner's cause. Named so
+#: :func:`_reset_reason` can recognise the announcement: the cause makes the
+#: sentence dynamic, so it can no longer sit in ``_ANNOUNCED_REASONS`` as an
+#: exact string. Only :func:`bind_failed_reason` builds a reason with this head.
+_BIND_FAILED_CAUSE_PREFIX = "owner could not prepare this view: "
+
 
 def bind_failed_reason(message: object) -> str:
     """The disconnect reason for a ``bind_failed`` frame, naming the owner's cause.
@@ -219,9 +225,7 @@ def bind_failed_reason(message: object) -> str:
     detail = sanitize_prompt_line(scrub_shapes(message), limit=_BIND_FAILED_DETAIL_LIMIT)
     if not detail:
         return BIND_FAILED_REASON
-    return (
-        f"owner could not prepare this view: {detail}; " "the session is alive — reconnect to retry"
-    )
+    return f"{_BIND_FAILED_CAUSE_PREFIX}{detail}; the session is alive — reconnect to retry"
 
 
 #: Maximum bytes in one frame. Must equal the server's ``_MAX_LINE_BYTES``:
@@ -275,8 +279,18 @@ _ANNOUNCED_REASONS = frozenset({STOPPED_REASON, RETIRING_REASON, MOVED_REASON, B
 
 
 def _reset_reason(announced: str) -> str:
-    """The disconnect reason for a transport reset, keeping an announced one."""
-    return announced if announced in _ANNOUNCED_REASONS else "owner connection reset"
+    """The disconnect reason for a transport reset, keeping an announced one.
+
+    A ``bind_failed`` frame that names its cause yields a reason built per
+    message (:func:`bind_failed_reason`), so it is matched by its head rather
+    than by the exact-string set. Without that, the same RST that the set
+    guards against for a bare ``bind_failed`` replaced a cause-bearing one with
+    ``"owner connection reset"`` — telling the person their session died and
+    discarding the very cause the owner sent.
+    """
+    if announced in _ANNOUNCED_REASONS or announced.startswith(_BIND_FAILED_CAUSE_PREFIX):
+        return announced
+    return "owner connection reset"
 
 
 logger = logging.getLogger(__name__)

@@ -2038,3 +2038,30 @@ async def test_owner_masks_ledger_secret_before_wire_and_record(
         assert disconnected and secret not in disconnected[0], disconnected
     finally:
         r.close()
+
+
+@pytest.mark.asyncio
+async def test_a_reset_after_a_cause_bearing_bind_failed_keeps_the_cause() -> None:
+    """A reset after a ``bind_failed`` that names its cause must not erase it.
+
+    Convergence of this PR with #3797: ``_ANNOUNCED_REASONS`` matches exact
+    strings, and the cause makes the bind-failure reason dynamic, so the RST that
+    follows the owner's ``_drop_client`` replaced the cause with
+    ``"owner connection reset"``. Same sequence as the retiring witness above.
+    """
+    disconnected: list[str] = []
+    client = AttachClient(lambda p: None, disconnected.append)
+    reader = asyncio.StreamReader()
+    client._reader = reader
+    pump = asyncio.create_task(client._pump())
+
+    _feed(reader, {"op": "bind_failed", "message": "profile store locked"})
+    # The reset lands only after the frame has been consumed.
+    await _wait_until(lambda: reader.at_eof() or not reader._buffer)
+    await asyncio.sleep(0)
+    reader.set_exception(ConnectionResetError("peer reset"))
+    await asyncio.wait_for(pump, timeout=5)
+
+    expected = attach_client.bind_failed_reason("profile store locked")
+    assert expected.startswith("owner could not prepare this view: profile store locked")
+    assert disconnected == [expected], disconnected
