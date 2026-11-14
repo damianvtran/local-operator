@@ -417,6 +417,45 @@ OPERATOR_CAP_BYTES = 32
 #: believes the frame is ordinary" divergence ``AUTHORITY_OPS`` exists to
 #: prevent.
 APPROVALS_LOOSENING_WORDS = frozenset({"auto", "off", "yolo"})
+#: The ``/approvals [default] <word>`` spellings that resolve to ask.
+APPROVALS_TIGHTENING_WORDS = frozenset({"ask", "on", "prompt"})
+
+
+def approvals_default_target(word: str, *, current_auto: bool | None) -> bool | None:
+    """What ``/approvals default <word>`` writes: ``True`` auto, ``False`` ask, ``None`` unknown.
+
+    ONE resolver for every host that honours the persist form, so the hosts
+    that write and the latched refusal that guards the write read the same
+    table (security r1 S-1 on #3849: the TUI owner's refusal matched typed
+    words while the app resolved a bare ``default`` from state, and the gap
+    between the two wrote global auto from a latched conversation).
+
+    ``current_auto`` is the host's reading of a bare ``default``: the TUI app
+    keeps the mode it is in (pass its ``_approve_all``); the detached runtime
+    refuses the bare form outright (pass ``None``, and it resolves unknown).
+    """
+    word = str(word or "").strip().lower()
+    if word in APPROVALS_TIGHTENING_WORDS:
+        return False
+    if word in APPROVALS_LOOSENING_WORDS:
+        return True
+    if not word:
+        return current_auto
+    return None
+
+
+def approvals_default_may_loosen(word: str) -> bool:
+    """Whether ``/approvals default <word>`` can write auto on ANY host, in ANY state.
+
+    A latched conversation's refusal asks this rather than matching words, so
+    a bare ``default`` -- which resolves to auto whenever the host's current
+    mode is auto, e.g. a suspended pre-latch session auto -- is refused without
+    reading that state across threads, and a loosening word added to the table
+    above is refused with no second edit. Worst case is assumed: a bare
+    ``default`` on a latched conversation whose mode is ask is refused too; the
+    operator names ``default ask``, which always passes.
+    """
+    return approvals_default_target(word, current_auto=True) is True
 
 
 def transition_authority(command: str, args: str, *, approved: bool | None = None) -> Authority:

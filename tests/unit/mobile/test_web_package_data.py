@@ -5,8 +5,11 @@ puts in a generation tree — has the web sources and no bundle, which leaves
 ``lop mobile install`` rebuilding them in place as the ONE documented repair
 for the 503 the daemon then serves. That rebuild runs ``pnpm build``, whose
 first step is ``tsc -b`` over ``tsconfig.app.json`` with ``include: ["src"]``:
-the installed tree compiles EVERY file under ``src`` — the ``*.test.tsx`` files
-included, since they ship too — so anything those files read is a build input.
+the installed tree compiles EVERY file under ``src`` that it holds, so anything
+those files read is a build input. The ``*.test.ts(x)`` unit tests are the one
+deliberate exception: ``[tool.setuptools.exclude-package-data]`` keeps them out
+of the wheel (PyPI size budget; nothing installed runs them), and the checks
+below model that exclusion rather than treating a test as a missing file.
 
 ``mobile/web/src/fixtures/*.json`` was left out of
 ``[tool.setuptools.package-data]``, and the shipped tree therefore could not
@@ -32,6 +35,7 @@ the globs in ``pyproject.toml`` are written to (see the note beside them).
 
 from __future__ import annotations
 
+import fnmatch
 import re
 import tomllib
 from pathlib import Path
@@ -91,7 +95,35 @@ def _glob_regex(pattern: str) -> re.Pattern[str]:
     return re.compile("".join(out) + r"\Z")
 
 
+def _excluded_patterns() -> list[str]:
+    """The ``exclude-package-data`` patterns that apply to EVERY package (``"*"``).
+
+    Only the ``"*"`` key is read on purpose: ``packages.find`` discovers each
+    ``src`` subdirectory as its own namespace package, so a pattern under the
+    ``local_operator`` key never reaches those files (measured: the wheel kept
+    all of them). Modelling only ``"*"`` makes a pattern moved to that key stop
+    counting here, which the shipping tests below then report."""
+    config = tomllib.loads(PYPROJECT.read_text(encoding="utf-8"))
+    table = config["tool"]["setuptools"].get("exclude-package-data", {})
+    patterns = table.get("*", [])
+    assert isinstance(patterns, list), "exclude-package-data['*'] is not a list"
+    return [pattern for pattern in patterns if isinstance(pattern, str)]
+
+
+def _excluded(relative: str) -> bool:
+    """Whether setuptools drops ``relative`` (package-relative) from the wheel.
+
+    setuptools joins each pattern onto the owning package's directory and
+    filters with ``fnmatch``, whose ``*`` DOES cross ``/``. Every pattern
+    here starts with ``*``, so matching the basename is the same answer for
+    whichever package directory owns the file."""
+    name = relative.rsplit("/", 1)[-1]
+    return any(fnmatch.fnmatchcase(name, pattern) for pattern in _excluded_patterns())
+
+
 def _shipped(relative: str, globs: list[str]) -> bool:
+    if _excluded(relative):
+        return False
     return any(_glob_regex(glob).fullmatch(relative) for glob in globs)
 
 
@@ -198,13 +230,57 @@ def _imported_specs() -> list[tuple[str, str]]:
 
 def test_every_file_in_the_web_tree_ships() -> None:
     globs = _package_data_globs()
-    unshipped = [relative for relative in _tree_files() if not _shipped(relative, globs)]
+    unshipped = [
+        relative
+        for relative in _tree_files()
+        if not _excluded(relative) and not _shipped(relative, globs)
+    ]
     assert not unshipped, (
         "the installed tree builds from its own copy of the web tree, so a file left out of "
         "[tool.setuptools.package-data] is a file that tree does not have — which is how a "
         "missing JSON fixture made `tsc -b` fail, and how a missing .gitignore made Tailwind "
         "emit a utility-less stylesheet at exit 0. Add a glob for: " + ", ".join(unshipped)
     )
+
+
+def test_relay_web_unit_tests_are_kept_out_of_the_wheel() -> None:
+    """The exclusion that keeps the wheel under its PyPI size budget, pinned in
+    both directions: every relay-web unit test is excluded, the compile-only
+    ``keys.type-test.ts`` the build runs still ships, and the exclusion cannot
+    silently reach a ``.test.ts(x)`` anywhere else in the package."""
+    assert sorted(_excluded_patterns()) == ["*.test.ts", "*.test.tsx"]
+    globs = _package_data_globs()
+    tests = [relative for relative in _tree_files() if relative.endswith((".test.ts", ".test.tsx"))]
+    assert tests, "no relay web unit tests found; this check would be vacuous"
+    assert not [relative for relative in tests if _shipped(relative, globs)]
+    # Nested directories too: the exclusion is not per-directory like the globs.
+    assert any("/src/lib/" in relative for relative in tests)
+    assert _shipped("mobile/web/src/i18n/keys.type-test.ts", globs)
+    assert _shipped("mobile/web/src/lib/temporary.ts", globs)
+
+    # The `"*"` key applies to every package, so a test file outside the relay
+    # web would be dropped too; make that a decision, not a side effect.
+    elsewhere = [
+        path.relative_to(PACKAGE_DIR).as_posix()
+        for pattern in ("*.test.ts", "*.test.tsx")
+        for path in PACKAGE_DIR.rglob(pattern)
+        if WEB_SRC not in path.parents and "node_modules" not in path.parts
+    ]
+    assert not elsewhere, f"test files outside mobile/web/src would be excluded too: {elsewhere}"
+
+
+def test_no_shipped_source_imports_an_unshipped_test_file() -> None:
+    """The installed tree's `tsc -b` compiles whatever `src` holds; with the
+    tests excluded, a non-test source importing one would fail that repair
+    build with TS2307. Nothing does today; keep it that way."""
+    problems = []
+    for importer, spec in _imported_specs():
+        if importer.endswith((".test.ts", ".test.tsx")):
+            continue
+        resolved = _resolve(WEB_SRC / importer, spec)
+        if resolved is not None and _excluded(resolved.name):
+            problems.append(f"{importer} imports {spec!r}")
+    assert not problems, "shipped sources import excluded test files: " + ", ".join(problems)
 
 
 def test_every_asset_the_sources_import_is_shipped() -> None:

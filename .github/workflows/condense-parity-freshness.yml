@@ -1,0 +1,47 @@
+name: Condense parity freshness
+
+# Deliberately separate from required branch validation: this reports newer UI
+# main without making an unchanged PR red when another repository merges. A red
+# scheduled run is the explicit port/re-pin signal, never an advisory success.
+on:
+  schedule:
+    - cron: '17 8 * * *'
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'local_operator/mobile/web/src/lib/parity-sources.json'
+      - 'local_operator/mobile/web/src/lib/condense.parity.json'
+      - 'local_operator/mobile/web/scripts/check-condense-parity-latest.mjs'
+      - '.github/workflows/condense-parity-freshness.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  desktop-main-freshness:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: local_operator/mobile/web
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+      - name: Compare committed fixture with desktop main
+        run: |
+          set -euo pipefail
+          desktop="$RUNNER_TEMP/desktop-condense-fixture"
+          mkdir -p "$desktop/scripts/fixtures"
+          # Resolve main once: even the freshness pair must come from one tree.
+          revision=$(git ls-remote https://github.com/damianvtran/local-operator-ui.git refs/heads/main | cut -f1)
+          [[ "$revision" =~ ^[0-9a-f]{40}$ ]]
+          echo "Comparing desktop main at $revision" | tee -a "$GITHUB_STEP_SUMMARY"
+          for file in condense.parity.json condense.parity.manifest.json; do
+            curl -fsS --retry 2 --retry-delay 1 \
+              "https://raw.githubusercontent.com/damianvtran/local-operator-ui/$revision/scripts/fixtures/$file" \
+              -o "$desktop/scripts/fixtures/$file"
+          done
+          node scripts/check-condense-parity-latest.mjs \
+            --latest --require-sibling --sibling "$desktop" 2>&1 | tee -a "$GITHUB_STEP_SUMMARY"

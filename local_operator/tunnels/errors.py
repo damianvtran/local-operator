@@ -66,3 +66,20 @@ class RecordNotFound(ValueError):
     generic fixed literal, and this stays a ``ValueError`` subclass so every
     existing handler on this path keeps working unchanged.
     """
+
+
+class RequestFailed(ValueError):
+    """The control plane answered a non-404 error status; ``status`` carries it.
+
+    The sentence stays the fixed literal every tunnel command already prints
+    (provider error bodies are never surfaced — they may echo a bearer), and it
+    stays a ``ValueError`` so every existing handler keeps working. The status
+    is attached as DATA because the mobile push transport has to report it: the
+    push worker's refusal record (``push_worker.EmitRefused``) carries the
+    status as the whole of what its one drop line can say after the third try,
+    and parsing it back out of a sentence would couple that log to prose.
+    """
+
+    def __init__(self, message: str, *, status: int) -> None:
+        super().__init__(message)
+        self.status = status

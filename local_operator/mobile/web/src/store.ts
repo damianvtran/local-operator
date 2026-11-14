@@ -8,6 +8,7 @@
  */
 import { useEffect, useState, useSyncExternalStore } from "react";
 import { handleUnauthorized } from "./api";
+import { SESSION_TEMPORARY_DELETED_CODE, temporaryChatsEnabled } from "./lib/temporary";
 import { supplementsFromWire } from "./lib/supplement";
 import { createMessageRuntime, directionFor, isResolvedLocale, type LocaleSnapshot } from "./i18n/runtime";
 import { createWireLoader } from "./i18n/wire-cache";
@@ -343,6 +344,45 @@ export function useLocaleSnapshot(): LocaleSnapshot {
 	return useSyncExternalStore(subscribe, () => localeSnapshot);
 }
 
+/* DELETED TEMPORARY CHATS this page has been told about (404
+   `session_temporary_deleted` on the events stream or a write), id → the
+   relay's `deleted_at` (epoch s, or null when it sent none). The session
+   screen swaps to the tombstone on this and nothing else: a plain 404 or an
+   outage is not a deletion, and painting "deleted" for one would be a lie. */
+let temporaryTombstones: ReadonlyMap<string, number | null> = new Map();
+
+export function recordTemporaryTombstone(sessionId: string, deletedAt: unknown): void {
+	if (temporaryTombstones.has(sessionId)) return;
+	temporaryTombstones = new Map(temporaryTombstones).set(
+		sessionId,
+		typeof deletedAt === "number" && Number.isFinite(deletedAt) ? deletedAt : null,
+	);
+	/* The cached transcript goes with the chat: the tombstone must not leave
+	   the deleted conversation readable behind it. */
+	projections.delete(sessionId);
+	emit();
+}
+
+/** `undefined` while the chat is not known to be deleted. */
+export function useTemporaryTombstone(sessionId: string): number | null | undefined {
+	return useSyncExternalStore(subscribe, () =>
+		temporaryTombstones.has(sessionId) ? (temporaryTombstones.get(sessionId) ?? null) : undefined,
+	);
+}
+
+/* The conversation this page last opened. The list's Temporary group opens on
+   its own while it holds this chat (the reader came back from it). Page state
+   only: a reload starts collapsed, which is the group's default. */
+let lastViewedSession: string | null = null;
+
+export function noteViewedSession(sessionId: string): void {
+	lastViewedSession = sessionId;
+}
+
+export function getLastViewedSession(): string | null {
+	return lastViewedSession;
+}
+
 export function useProjection(sessionId: string): ProjectionSlot {
 	return useSyncExternalStore(
 		subscribe,
@@ -446,6 +486,10 @@ export function openEventStream(
 	url: string, event: string, onData: (data: string, connected: boolean) => boolean | void,
 	onOpen: () => void, onDisconnect: () => void,
 	onRecovered: () => void = () => {},
+	/* A 404 whose typed `code` the caller recognises as PERMANENT (a deleted
+	   temporary chat): returning true ends the stream instead of retrying a
+	   resource that will never come back. Any other 404 keeps the retry policy. */
+	onGone?: (code: string, body: Record<string, unknown>) => boolean,
 ): () => void {
 	let closed = false, failures = 0, generation = 0, lastByte = Date.now();
 	let controller: AbortController | null = null;
@@ -511,6 +555,17 @@ export function openEventStream(
 				dispose(); handleUnauthorized(); return;
 			}
 			if (!response.ok || !response.body || !response.headers.get("content-type")?.includes("text/event-stream")) {
+				if (response.status === 404 && onGone) {
+					let body: Record<string, unknown> = {};
+					try {
+						const parsed: unknown = await response.json();
+						if (parsed && typeof parsed === "object") body = parsed as Record<string, unknown>;
+					} catch { /* A non-JSON 404 names nothing; keep retrying. */ }
+					if (!current()) return;
+					if (typeof body.code === "string" && onGone(body.code, body)) {
+						dispose(); return;
+					}
+				}
 				if (response.status === 503) {
 					const header = response.headers.get("retry-after");
 					if (header) {
@@ -593,14 +648,49 @@ export function openEventStream(
 let listStreamClose: (() => void) | null = null;
 let listStreamRefs = 0;
 let listStreamLinger: ReturnType<typeof setTimeout> | null = null;
+/* WHETHER THE OPEN LIST STREAM ASKED FOR TEMPORARY ROWS. The flag is a
+   connection-open parameter on the relay (`_list_frame`, like `include_peers`),
+   and the capability that permits sending it arrives on the stream's own first
+   frame — so the stream opens without it and is reopened once with it when the
+   relay advertises `features.temporary_chats`, and reopened without it if a
+   later frame withdraws the capability (fail closed: never send it unasked). */
+let listIncludesTemporary = false;
+
+function sessionListUrl(): string {
+	return listIncludesTemporary ? "/api/sessions/events?include_temporary=1" : "/api/sessions/events";
+}
+
+function reopenSessionListStream(): void {
+	if (listStreamClose === null) return;
+	listStreamClose();
+	listStreamClose = openSessionListStream();
+}
 
 export function retainSessionListStream(): () => void {
 	listStreamRefs++;
 	if (listStreamLinger !== null) clearTimeout(listStreamLinger);
 	listStreamLinger = null;
-	if (listStreamClose === null) {
-		listStreamClose = openEventStream(
-			"/api/sessions/events",
+	if (listStreamClose === null) listStreamClose = openSessionListStream();
+	return () => {
+		listStreamRefs--;
+		if (listStreamRefs === 0 && listStreamClose) {
+			// React destroys before creating the next route. A brief linger makes
+			// list/conversation navigation reuse the same authenticated stream.
+			listStreamLinger = setTimeout(() => {
+				listStreamLinger = null;
+				if (listStreamRefs) return;
+				listStreamClose?.(); listStreamClose = null;
+			}, 10000);
+		}
+	};
+}
+
+function openSessionListStream(): () => void {
+	/* The list frame handler, unchanged but for the temporary reopen below; it
+	   stays at its historical indentation so the move is reviewable. */
+	{
+		return openEventStream(
+			sessionListUrl(),
 			"sessions",
 			(data, connected) => {
 				try {
@@ -625,6 +715,13 @@ export function retainSessionListStream(): () => void {
 					   screen that sent it. */
 					settlePinMarks(payload.sessions);
 					emitStream();
+					const wantTemporary = temporaryChatsEnabled(capabilities);
+					if (wantTemporary !== listIncludesTemporary) {
+						listIncludesTemporary = wantTemporary;
+						/* Not from inside this stream's own read loop: the reopen
+						   disposes the leg that is delivering this frame. */
+						setTimeout(reopenSessionListStream, 0);
+					}
 					return true;
 				} catch {
 					/* A malformed frame is dropped; the next one repaints. */
@@ -639,18 +736,6 @@ export function retainSessionListStream(): () => void {
 			() => { sessionsConnected = true; emitStream(); },
 		);
 	}
-	return () => {
-		listStreamRefs--;
-		if (listStreamRefs === 0 && listStreamClose) {
-			// React destroys before creating the next route. A brief linger makes
-			// list/conversation navigation reuse the same authenticated stream.
-			listStreamLinger = setTimeout(() => {
-				listStreamLinger = null;
-				if (listStreamRefs) return;
-				listStreamClose?.(); listStreamClose = null;
-			}, 10000);
-		}
-	};
 }
 
 /* ------------------------------------------------------------------ */
@@ -976,6 +1061,13 @@ export function retainProjectionStream(sessionId: string): () => void {
 					projections.set(sessionId, { ...current, connected: true });
 					emitStream();
 				}
+			},
+			/* A deleted temporary chat never comes back: stop retrying and let the
+			   screen show the tombstone. Every other 404 keeps the retry policy. */
+			(code, body) => {
+				if (code !== SESSION_TEMPORARY_DELETED_CODE) return false;
+				recordTemporaryTombstone(sessionId, body.deleted_at);
+				return true;
 			},
 		);
 		projectionStreams.set(sessionId, { close, refs: 1, linger: null });

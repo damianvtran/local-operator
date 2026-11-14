@@ -137,6 +137,10 @@ async def execute_profile_proposal(tool_call_id, args, signal=None, on_update=No
             text += (
                 f" Backup {backup}; revert with {proposal['kind']} op=revert backup_id={backup}."
             )
+        elif proposal["kind"] == "skill":
+            # Skills have no op=revert: the skill storage keeps the previous
+            # bytes in hub/backups, as a direct ``skill`` tool edit does.
+            text += " The previous version is kept in the profile's hub/backups folder."
         return _text(
             tool_call_id,
             "profile_proposal",

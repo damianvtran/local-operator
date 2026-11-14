@@ -75,6 +75,13 @@ def _staged_copy_of_the_receivers_move(
     instead of the thing under test.
     """
     moved = _move(server_a, SESSION, to=server_b.identity.device_id, monkeypatch=monkeypatch)
+    if moved.get("code") == "unreachable":
+        # THE SETUP RETRIES A LOST LINK ONCE, as the design prescribes (§6.5, "the
+        # link dies mid-copy … the retry prepares afresh"). A link may legitimately
+        # die under a loaded runner (a peer close, a ``replaced`` eviction), and
+        # this cell is about the promote, not the transport: CI main 2026-11-11 read
+        # ``unreachable`` here with nothing moved. A second failure is real.
+        moved = _move(server_a, SESSION, to=server_b.identity.device_id, monkeypatch=monkeypatch)
     assert moved["ok"] is True, moved
     staged = sync.staging_dir(server_b.root, SESSION)
     staged.parent.mkdir(parents=True, exist_ok=True)
@@ -285,3 +292,21 @@ def test_the_pull_route_reads_the_record_before_it_promotes(
         server_b.root / "sessions" / SESSION
     ).is_dir(), "the pull route promoted a copy the record does not name"
     assert staged.is_dir(), "the refusal must leave the only copy of the conversation alone"
+
+
+def test_the_setup_move_survives_one_lost_link(
+    request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The rig's own tolerance, pinned: one link lost at the invite is retried."""
+    from tests.unit.network.test_mobility_busy_wait import _drop_link_at_first_invite
+
+    both: Devices = request.getfixturevalue("pair")
+    server_a, server_b, _host, _port = both
+    _pair_settled(both, monkeypatch, role="admin", settings=server_b.settings)
+    _owned_session(server_a)
+    dropped = _drop_link_at_first_invite(monkeypatch)
+
+    staged = _staged_copy_of_the_receivers_move(server_a, server_b, monkeypatch)
+
+    assert len(dropped) == 1, "the drop never fired, so this proves nothing"
+    assert (staged / "ready.json").is_file()

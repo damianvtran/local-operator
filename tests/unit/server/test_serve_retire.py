@@ -725,10 +725,12 @@ def test_the_create_route_does_not_call_every_failure_a_retirement(
             model: Any = None,
             draft_id: Any = None,
             purpose: Any = None,
+            temporary: Any = False,
         ) -> str:
-            # ``model``, ``draft_id`` and ``purpose`` because the create route
-            # passes the birth selection, the pane's minted warm id and (for a
-            # configuration run) the purpose through here (see
+            # ``model``, ``draft_id``, ``purpose`` and ``temporary`` because the
+            # create route passes the birth selection, the pane's minted warm
+            # id, (for a configuration run) the purpose and the temporary-chat
+            # flag through here (see
             # ``DesktopSessions.create``): the mirror is about the ERROR the
             # adapter raises, not about those parameters.
             raise ValueError("something else went wrong")

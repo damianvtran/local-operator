@@ -1,3 +1,4 @@
 {
-  "tui.composer.placeholder_default": "Local Operator को संदेश लिखें…"
+  "tui.composer.placeholder_default": "Local Operator को संदेश लिखें…",
+  "tui.composer.temporary_placeholder": "संदेश (अस्थायी चैट — रखी नहीं जाएगी)…"
 }

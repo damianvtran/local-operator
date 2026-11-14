@@ -1,4 +1,14 @@
 {
+  "wire.sessions.approval_park_local": {
+    "role": "approval prompt line shown before the agent parks another session with the sessions tool",
+    "tone": "plain, factual",
+    "note": "{address} is the operator's own words for the target, keep verbatim. 'park' ends the runtime process to free memory while wakes (scheduled reminders) and monitors (watches) stay armed — the opposite of a stop, which makes them dormant. Idle-only, never interrupts work."
+  },
+  "wire.sessions.approval_park_self": {
+    "role": "approval prompt line shown before the agent parks the session it is running in",
+    "tone": "plain, factual",
+    "note": "The park happens after the current turn ends. Wakes are scheduled reminders, monitors are watches; both stay armed."
+  },
   "wire.sessions.approval_stop_local": {
     "role": "approval prompt line shown to the operator before the agent runs the sessions tool's stop op",
     "tone": "plain, factual, no alarm",
@@ -8,6 +18,26 @@
     "role": "approval prompt line shown to the operator before a remote sessions stop the build always refuses",
     "tone": "plain, factual",
     "note": "{address} is the session name or id, {peer} is the device name; both are the operator's own words, keep them verbatim. The refusal is unconditional on this build, so the line must say nothing will be sent — the operator is being told, not asked to weigh a risk."
+  },
+  "wire.sessions.park_done": {
+    "role": "tool-result receipt after another session was parked",
+    "tone": "calm, confirming",
+    "note": "{name} is the session name (keep verbatim). {wakes}/{monitors} are counts (ICU plural, may be 0). 'the supervisor' is the background wake supervisor process that reopens sessions."
+  },
+  "wire.sessions.park_self_refused_busy": {
+    "role": "tool-result refusal when a session asked to park itself while background work is still pending",
+    "tone": "calm, actionable",
+    "note": "Nothing was scheduled. The three kinds of pending work (subagent, background job, open question to the operator) are the definition of busy here."
+  },
+  "wire.sessions.park_self_scheduled": {
+    "role": "tool-result receipt when the calling session scheduled its own park for the end of the turn",
+    "tone": "calm, confirming",
+    "note": "{wakes}/{monitors} are counts (ICU plural, may be 0). Nothing has happened yet: the park takes effect once the turn ends."
+  },
+  "wire.sessions.stop_dormant_hint": {
+    "role": "second line of the sessions-tool stop receipt when the stop made wakes or monitors dormant",
+    "tone": "plain warning, actionable",
+    "note": "Follows the stop receipt line, which already states the counts. DORMANT is emphasized on purpose: wakes (scheduled reminders) and monitors (watches) will not fire until someone reopens the session. op='park' is a literal tool argument, keep it verbatim."
   },
   "wire.sessions.stop_pending": {
     "role": "tool-result receipt painted in the tool card when a stop was accepted but the exit was still unconfirmed",

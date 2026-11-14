@@ -1650,6 +1650,14 @@ def network_credentials_grant_ttl_s_label() -> Msg:
     return Msg("wire.settings.network_credentials_grant_ttl_s.label", {})
 
 
+def network_credentials_offline_hold_s_help() -> Msg:
+    return Msg("wire.settings.network_credentials_offline_hold_s.help", {})
+
+
+def network_credentials_offline_hold_s_label() -> Msg:
+    return Msg("wire.settings.network_credentials_offline_hold_s.label", {})
+
+
 def network_listen_address_help() -> Msg:
     return Msg("wire.settings.network_listen_address.help", {})
 
@@ -2436,6 +2444,30 @@ def session_cleanup_remove_empty_help() -> Msg:
 
 def session_cleanup_remove_empty_label() -> Msg:
     return Msg("wire.settings.session_cleanup_remove_empty.label", {})
+
+
+def session_cleanup_temporary_idle_minutes_choice_15m_label() -> Msg:
+    return Msg("wire.settings.session_cleanup_temporary_idle_minutes.choice.15m.label", {})
+
+
+def session_cleanup_temporary_idle_minutes_choice_24h_label() -> Msg:
+    return Msg("wire.settings.session_cleanup_temporary_idle_minutes.choice.24h.label", {})
+
+
+def session_cleanup_temporary_idle_minutes_choice_2h_label() -> Msg:
+    return Msg("wire.settings.session_cleanup_temporary_idle_minutes.choice.2h.label", {})
+
+
+def session_cleanup_temporary_idle_minutes_choice_30m_label() -> Msg:
+    return Msg("wire.settings.session_cleanup_temporary_idle_minutes.choice.30m.label", {})
+
+
+def session_cleanup_temporary_idle_minutes_help() -> Msg:
+    return Msg("wire.settings.session_cleanup_temporary_idle_minutes.help", {})
+
+
+def session_cleanup_temporary_idle_minutes_label() -> Msg:
+    return Msg("wire.settings.session_cleanup_temporary_idle_minutes.label", {})
 
 
 def session_compression_description() -> Msg:

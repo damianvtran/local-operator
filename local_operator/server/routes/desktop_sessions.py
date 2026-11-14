@@ -82,6 +82,7 @@ from local_operator.server.models.desktop_sessions import (
     SessionSnapshot,
     StoredFile,
     SupplementReceipt,
+    TemporaryState,
     WarmReceipt,
     WatchReceipt,
 )
@@ -106,8 +107,10 @@ from local_operator.server.utils.desktop_sessions import (
     PeerSessionUnreachable,
     SessionDeletionRefused,
     SubagentChildUnavailable,
+    TemporaryRefusal,
     move_session,
     resolve_working_directory,
+    temporary_deleted_refusal,
 )
 from local_operator.server.utils.store_failures import (
     STORE_BUSY,
@@ -768,6 +771,12 @@ class Archive(Input):
     archived: StrictBool
 
 
+class TemporaryToggle(Input):
+    """The TEMPORARY state the caller wants: ``Archive``'s shape and reasons."""
+
+    temporary: StrictBool
+
+
 class ConfirmDeletion(Input):
     """The explicit confirmation a PERMANENT deletion requires.
 
@@ -950,6 +959,12 @@ class CreateSession(Input):
     #: ``Input`` is ``extra="forbid"``, so an OLDER backend answers this field with
     #: a 422 and the renderer must capability-gate before sending it.
     purpose: Literal["agents-config"] | None = None
+    #: Start a TEMPORARY chat (``session/temporary.py``): left out of every
+    #: history listing and deleted after its idle window. Capability-gated on
+    #: ``features.temporary_chats`` for the same release-skew reason as
+    #: ``purpose``. With ``peer`` it is refused (422 ``temporary_peer_unsupported``):
+    #: a temporary chat on another device is deferred.
+    temporary: StrictBool = False
 
     @model_validator(mode="after")
     def _a_local_create_still_names_a_folder(self) -> "CreateSession":
@@ -2280,7 +2295,21 @@ async def errors(request: Request, copy: StoreRefusalCopy | None = None) -> Asyn
             503,
             _wd.conversations_unreadable().envelope(code=error.code),
         ) from None
+    except TemporaryRefusal as error:
+        raise HTTPException(error.status, error.envelope()) from None
     except KeyError:
+        # A DELETED TEMPORARY CHAT answers its own 404 code on every session
+        # route (snapshot, history, events, message, pin, archive, temporary),
+        # so a client can say "this temporary chat was deleted" rather than
+        # "not found". The tombstone is consulted only on the not-found path.
+        session_id = request.path_params.get("session_id")
+        if isinstance(session_id, str):
+            try:
+                tombstone = temporary_deleted_refusal(host(request).root, session_id)
+            except Exception:  # noqa: BLE001 — the generic 404 is still true
+                tombstone = None
+            if tombstone is not None:
+                raise HTTPException(tombstone.status, tombstone.envelope()) from None
         raise HTTPException(404, _wd.requested_not_found().envelope()) from None
     except MoveIndeterminate as error:
         # 503 with the same NAMED-CONDITION body ``DaemonRetiring`` and
@@ -2747,6 +2776,10 @@ async def list_sessions(
     request: Request,
     limit: int = Query(default=100, ge=1, le=500),
     include_archived: bool = Query(default=False),
+    # Temporary chats (``features.temporary_chats``): off by default, so an
+    # older client never sees one; the UI asks and partitions them into its
+    # ``Temporary · N`` group. Search deliberately has no such parameter.
+    include_temporary: bool = Query(default=False),
     include_peers: bool = Query(default=False),
     # THE SCOPED, PAGED PARAMETERS, all optional and all defaulted so that a
     # request which sends none of them is answered exactly as it was before this
@@ -2798,6 +2831,7 @@ async def list_sessions(
             limit,
             status_stamps=stamps,
             include_archived=include_archived,
+            include_temporary=include_temporary,
             include_peers=include_peers,
             scope=scope,
             cursor=cursor or None,
@@ -3071,6 +3105,9 @@ async def create_session(body: CreateSession, request: Request):
 
     No ``model`` ⇒ the body, the marker and the launch are byte-for-byte today's.
     """
+    if body.peer and body.temporary:
+        # Before any receipt or peer dial: a refusal leaves the store untouched.
+        raise HTTPException(422, TemporaryRefusal("temporary_peer_unsupported").envelope())
 
     async def create():
         if body.peer:
@@ -3223,6 +3260,7 @@ async def create_session(body: CreateSession, request: Request):
             # conversation is refused there with its own typed answer.
             draft_id=body.draft_id,
             purpose=body.purpose,
+            temporary=body.temporary,
         )
         return {"session_id": session_id, "binding": await pool.binding(session_id)}
 
@@ -3662,15 +3700,24 @@ async def snapshot(
         errors(request),
         host(request).session(session_id, read=True, allow_draft=True) as bridge,
     ):
-        return reply(
-            await bridge.snapshot(
-                entry_times=bool(entry_ts),
-                open_frame=bool(open_frame),
-                **({"journal_order": True, "order_ids": order_ids} if journal_order else {}),
-                peer_journal_source=bool(peer_journal_source),
-                **supplement_read_options(bool(supplements)),
-            )
+        frame = await bridge.snapshot(
+            entry_times=bool(entry_ts),
+            open_frame=bool(open_frame),
+            **({"journal_order": True, "order_ids": order_ids} if journal_order else {}),
+            peer_journal_source=bool(peer_journal_source),
+            **supplement_read_options(bool(supplements)),
         )
+        # The temporary-chat object rides on the snapshot so an open chat shows
+        # its pill and countdown without a list read. ``null`` for every other
+        # conversation (a peer's id has no local mark, so it reads ``null`` too).
+        payload = frame.get("payload") if isinstance(frame, dict) else None
+        if isinstance(payload, dict):
+            from local_operator.session.temporary import RowProjector
+
+            payload["temporary"] = await asyncio.to_thread(
+                RowProjector(host(request).root).info, session_id
+            )
+        return reply(frame)
 
 
 async def _remote_open_refusal(request: Request, session_id: str) -> None:
@@ -5238,6 +5285,23 @@ async def archive(session_id: str, body: Archive, request: Request):
         if remote is not None:
             return reply(remote)
         return reply(await host(request).set_archived(session_id, body.archived))
+
+
+@router.post(
+    "/v1/desktop/sessions/{session_id}/temporary", response_model=CRUDResponse[TemporaryState]
+)
+async def temporary(session_id: str, body: TemporaryToggle, request: Request):
+    """Make a conversation temporary, or keep it (desired state, like ``/archive``).
+
+    ``{"temporary": true}`` marks it: it leaves every history listing and is
+    deleted after its idle window. Refused 409 ``session_pinned`` /
+    ``session_in_project`` / ``session_not_user``. ``{"temporary": false}`` is
+    "Keep": always allowed, and idempotent. The UI owns the confirmation; the
+    server does not confirm. A deleted temporary chat answers 404
+    ``session_temporary_deleted`` with ``deleted_at``.
+    """
+    async with errors(request):
+        return reply(await host(request).set_temporary(session_id, body.temporary))
 
 
 @router.delete("/v1/desktop/sessions/{session_id}", response_model=CRUDResponse[DeletedSession])

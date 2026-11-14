@@ -475,10 +475,24 @@ async def test_an_unreachable_gateway_resets_the_public_stream():
 # -- 3. end to end through the real gateway -----------------------------------
 
 
-def free_port() -> int:
-    with closing(socket.socket()) as probe:
-        probe.bind(("127.0.0.1", 0))
-        return probe.getsockname()[1]
+def bound_socket() -> tuple[socket.socket, int]:
+    """A loopback socket already bound to an ephemeral port, and that port.
+
+    The servers in this section are handed the socket itself (uvicorn's
+    ``serve(sockets=[...])``) instead of a port number. Picking a port by
+    binding to 0, closing the probe and letting uvicorn bind the number later
+    left a window in which another xdist worker could take the port: main
+    run 43143140065 died in uvicorn's startup with ``[Errno 98] address
+    already in use`` and ``SystemExit: 3``. Holding the bound socket from pick
+    to serve closes that window instead of retrying around it.
+    """
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        sock.bind(("127.0.0.1", 0))
+    except BaseException:
+        sock.close()
+        raise
+    return sock, sock.getsockname()[1]
 
 
 def harness_app():
@@ -517,20 +531,26 @@ def harness_app():
 
 
 @contextlib.asynccontextmanager
-async def serving(app, port):
+async def serving(app, sock: socket.socket):
     import uvicorn
 
+    port = sock.getsockname()[1]
     server = uvicorn.Server(
         uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning", lifespan="off")
     )
-    task = asyncio.create_task(server.serve())
-    while not server.started:
-        await asyncio.sleep(0.01)
+    # The already-bound socket, never the bare port: see ``bound_socket``.
+    task = asyncio.create_task(server.serve(sockets=[sock]))
     try:
+        while not server.started:
+            await asyncio.sleep(0.01)
         yield
     finally:
         server.should_exit = True
-        await task
+        try:
+            await task
+        finally:
+            # uvicorn closes it on a clean shutdown; this covers the rest.
+            sock.close()
 
 
 @pytest.mark.asyncio
@@ -549,7 +569,8 @@ async def test_end_to_end_http_sse_websocket_and_upload_through_the_real_gateway
 
     key = make_signing_key()
     connection = make_connection(key)
-    gateway_port, harness_port = free_port(), free_port()
+    gateway_sock, gateway_port = bound_socket()
+    harness_sock, harness_port = bound_socket()
     connection["gateway_port"] = connection["tunnel"]["gateway_port"] = gateway_port
     connection["tunnel"]["harnesses"][0]["port"] = harness_port
     tunnel_id, version = connection["tunnel"]["id"], connection["tunnel"]["version"]
@@ -570,8 +591,8 @@ async def test_end_to_end_http_sse_websocket_and_upload_through_the_real_gateway
             cloudflared_running=lambda: False,
         )
         async with (
-            serving(harness_app(), harness_port),
-            serving(gateway.app(), gateway_port),
+            serving(harness_app(), harness_sock),
+            serving(gateway.app(), gateway_sock),
             running(connector),
         ):
             await relay.wait_sessions(1)
@@ -982,9 +1003,10 @@ async def test_a_pooled_relay_stream_still_serves_after_uvicorns_default_keep_al
         return PlainTextResponse(f"{request.method} {len(await request.body())}")
 
     app = Starlette(routes=[Route("/api/echo", echo, methods=["GET", "POST"])])
-    port = free_port()
+    sock, port = bound_socket()
     server = uvicorn.Server(gateway_server_config(app, port))
-    serve = asyncio.create_task(server.serve())
+    # The already-bound socket, never the bare port: see ``bound_socket``.
+    serve = asyncio.create_task(server.serve(sockets=[sock]))
     log: list[str] = []
     try:
         while not server.started:
@@ -1007,7 +1029,10 @@ async def test_a_pooled_relay_stream_still_serves_after_uvicorns_default_keep_al
         assert not [line for line in log if "reset by this device" in line]
     finally:
         server.should_exit = True
-        await serve
+        try:
+            await serve
+        finally:
+            sock.close()
 
 
 @pytest.mark.asyncio

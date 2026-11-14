@@ -9,5 +9,8 @@
   "cli.exec_runtime.model_returned": "[dim]{selector} پر لوٹ آیا[/dim]",
   "cli.exec_runtime.compacting": "[dim]کانٹیکسٹ کمپریس ہو رہا ہے…[/dim]",
   "cli.exec_runtime.error": "خرابی: {sentence}",
-  "cli.exec_runtime.aborted": "[red]منسوخ[/red]"
+  "cli.exec_runtime.aborted": "[red]منسوخ[/red]",
+  "cli.exec_runtime.temporary_agent_shell_refused": "عارضی چیٹ آپ خود شروع کرتے ہیں؛ اسے کسی ایجنٹ کے شیل سے شروع نہیں کیا جا سکتا",
+  "cli.exec_runtime.temporary_conflicts_resume": "--temporary نئی چیٹ شروع کرتا ہے، اس لیے اسے --resume کے ساتھ نہیں ملایا جا سکتا",
+  "cli.exec_runtime.temporary_conflicts_workstream": "--temporary کو --workstream کے ساتھ نہیں ملایا جا سکتا: workstream محفوظ رکھا جاتا ہے"
 }

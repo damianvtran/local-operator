@@ -409,6 +409,8 @@
   "wire.settings.network_credentials_github_repositories.placeholder": "damianvtran/scratch, damianvtran/sandbox",
   "wire.settings.network_credentials_grant_ttl_s.help": "ڈیوائس مالک سے لیا لاگ اِن دوبارہ پوچھنے سے پہلے زیادہ سے زیادہ کتنی دیر استعمال کرے؛ اس سے منسوخ یا آف لائن مالک کا لاگ اِن کہیں اور کتنی دیر چلے۔ ٹوکن سے زیادہ کبھی نہیں۔",
   "wire.settings.network_credentials_grant_ttl_s.label": "عارضی لاگ اِن مدت (s)",
+  "wire.settings.network_credentials_offline_hold_s.help": "جب تک لاگ اِن کی مالک ڈیوائس دستیاب نہ ہو (سلیپ موڈ یا آف لائن)، دوسری ڈیوائس پہلے سے لیا ہوا لاگ اِن کتنی دیر استعمال کرتی رہے۔ ٹوکن سے زیادہ کبھی نہیں؛ مالک اور اس ڈیوائس دونوں کی قدریں لاگو ہوتی ہیں، اور کم والی غالب رہتی ہے۔",
+  "wire.settings.network_credentials_offline_hold_s.label": "مالک کی غیر موجودگی میں عارضی لاگ اِن مہلت (s)",
   "wire.settings.network_listen_address.help": "127.0.0.1 = صرف ڈائل؛ 0.0.0.0 = سب؛ یا ایک ایڈریس۔",
   "wire.settings.network_listen_address.label": "کنکشن قبول کرنے کا ایڈریس",
   "wire.settings.network_max_handshakes.help": "غیر تصدیق شدہ کنکشنز جو ریلے ایک وقت میں رکھے۔ پیئرنگ کوڈ لکھنے کے سیکنڈز تک ایک رکھتی ہے؛ حد سے زیادہ کنکشن قبول کے وقت بغیر جوابی فریم کے حذف ہوتا ہے۔",
@@ -857,5 +859,11 @@
   "wire.settings.web_search_timeout_seconds.help": "فی-پرووائیڈر درخواست ٹائم آؤٹ۔ پڑھتے وقت 1-120 پر محدود۔",
   "wire.settings.web_search_timeout_seconds.label": "ٹائم آؤٹ (s)",
   "wire.settings.web_tools.description": "تلاش اور فیچ ٹولز پیش کیے اور چلائے جا سکیں یا نہیں۔",
-  "wire.settings.web_tools.title": "ویب ٹولز"
+  "wire.settings.web_tools.title": "ویب ٹولز",
+  "wire.settings.session_cleanup_temporary_idle_minutes.choice.15m.label": "15 منٹ",
+  "wire.settings.session_cleanup_temporary_idle_minutes.choice.30m.label": "30 منٹ",
+  "wire.settings.session_cleanup_temporary_idle_minutes.choice.2h.label": "2 گھنٹے",
+  "wire.settings.session_cleanup_temporary_idle_minutes.choice.24h.label": "24 گھنٹے",
+  "wire.settings.session_cleanup_temporary_idle_minutes.label": "اتنی دیر بعد عارضی چیٹس حذف کریں",
+  "wire.settings.session_cleanup_temporary_idle_minutes.help": "عارضی چیٹ کتنی دیر غیر فعال رہ سکتی ہے اس سے پہلے کہ حذف ہو جائے۔ اسکرین پر رہنے کا وقت، چلتا ہوا کام یا کھلا سوال غیر فعالی میں شمار نہیں ہوتا۔"
 }

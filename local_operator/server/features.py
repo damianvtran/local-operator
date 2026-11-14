@@ -39,7 +39,15 @@ from local_operator.supplements.contract import (
 #: checking ``notification_bulk_selection``; the relay's ``extra="ignore"`` query
 #: drops ``include_ask_reads`` and answers the same plain first page.
 DESKTOP_ONLY_FEATURES = frozenset(
-    {"notification_bulk_selection", "notification_bulk_ask_read", "profile_proposals"}
+    {
+        "notification_bulk_selection",
+        "notification_bulk_ask_read",
+        "profile_proposals",
+        # The phone relay serves no `/v1/desktop/mobile/password`; a phone
+        # client must not be told it can read the portal password it signs in
+        # with (routes/desktop_mobile_password.py).
+        "mobile_password_read",
+    }
 )
 
 
@@ -887,6 +895,14 @@ def static_feature_flags() -> dict[str, Any]:
         # retain health/sign-in behavior; only this key admits the new account-
         # pinned quote/run affordance, never an automatic poll-side mutation.
         "tunnel_setup": 1,
+        # `GET /v1/desktop/mobile/password`: the desktop's "Show phone
+        # password" under "Using your own tunnel?". Its own key because the
+        # route is new and additive: an older backend has no way to answer,
+        # so ABSENT ⇒ the renderer keeps pointing at `lop mobile password` in
+        # a terminal rather than showing a button that 404s. The read is on
+        # click only, never cached or prefetched (see the route's module doc
+        # for why the desktop bearer may read this secret at all).
+        "mobile_password_read": 1,
         # THE MESH, and both keys gate AFFORDANCES rather than shapes.
         #
         # `peers` is the peer catalogue's key (mesh-session-mobility.md
@@ -1007,6 +1023,17 @@ def static_feature_flags() -> dict[str, Any]:
         # the body would be rejected as an unknown field. Absent ⇒ no
         # "close anyway" affordance anywhere.
         "projects_force_done": 1,
+        # TEMPORARY CHATS (``session/temporary.py``): `temporary` on
+        # `POST /v1/desktop/sessions` and `POST /api/sessions/start`,
+        # `include_temporary` on the session lists, the
+        # `POST …/sessions/{id}/temporary` toggle, the `temporary` object on
+        # every row and snapshot, and the `session_temporary(_deleted)` codes.
+        # NOT desktop-only, so the relay republishes it. The
+        # `projects_force_done` precedent: absent ⇒ no toggle, no pill, no
+        # group, no ⌘⇧N and no palette entry, and the client never sends
+        # `temporary` or `include_temporary` — `Input` models are
+        # `extra="forbid"`, so an ungated send would 422.
+        "temporary_chats": 1,
         # THE SILENT INPUT-METADATA CARRIAGE: `input_mode`/`input_path` on a
         # message body (`POST /v1/desktop/sessions/{id}/messages`) and onto the
         # durable user row. ONE key un-gates BOTH fields, because they landed

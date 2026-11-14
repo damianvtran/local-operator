@@ -5,5 +5,6 @@
   "tui.status.jobs": "{count, plural, one {# जॉब} other {# जॉब्स}}",
   "tui.status.model.connecting": "कनेक्ट हो रहा है…",
   "tui.status.model.setup": "सेटअप",
-  "tui.status.tunnel.parked": "रिमोट एक्सेस बंद"
+  "tui.status.tunnel.parked": "रिमोट एक्सेस बंद",
+  "tui.status.temporary": "अस्थायी"
 }

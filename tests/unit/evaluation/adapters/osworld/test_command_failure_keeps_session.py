@@ -438,3 +438,233 @@ def test_the_harness_rpc_deadline_leaves_room_for_the_lost_reply_probe() -> None
         timeout_s + aws._COMMAND_SOCKET_SLACK_S + 2 * aws._COMMAND_REPLY_LOST_PROBE_TIMEOUT_S
     )
     assert seen and seen[0] - worst_case >= 5.0
+
+
+# --------------------------------------------------------------------------
+# A body cut off MID-STREAM (PR #3826 review R1). ``requests`` re-raises
+# urllib3's ``ProtocolError``/``IncompleteRead`` during ``.content`` as
+# ``ChunkedEncodingError`` -- a ``RequestException`` that is neither a
+# ``ConnectionError`` nor a ``Timeout`` -- so it escaped the lost-reply arm
+# unprobed and poisoned the session. Same split as every other lost reply.
+# --------------------------------------------------------------------------
+
+
+def _cut_mid_stream() -> BaseException:
+    import requests
+
+    return requests.exceptions.ChunkedEncodingError(
+        f"('Connection broken: IncompleteRead(10 bytes read, 190 more expected)', "
+        f"HTTPConnectionPool(host='{_GUEST_IP}', port=5000))"
+    )
+
+
+def test_a_body_cut_off_mid_stream_from_a_live_guest_is_answered(tmp_path: Path) -> None:
+    from lop_osworld_v2_adapter.remote_command import UNKNOWN_OUTCOME_CAUTION
+
+    verifier = HostVerifier("task", EPISODE, tmp_path)
+    verifier.accept_initial(observation("task", EPISODE, 0))
+    probes: list[str] = []
+    worker = _Worker(
+        [_cut_mid_stream(), _answer(json.dumps(_GOOD))],
+        _score(tmp_path),
+        http_get=lambda url, timeout: probes.append(url) or 200,
+    )
+    session = VerifiedAdapterSession(worker, verifier)  # type: ignore[arg-type]
+
+    async def run() -> None:
+        lost = await session.run_command(_params("command_001", "cat big.json"), timeout=5)
+        assert lost.exit_code is None and lost.error is not None
+        assert "ChunkedEncodingError" in lost.error
+        assert lost.error.endswith(UNKNOWN_OUTCOME_CAUTION)
+        assert _GUEST_IP not in lost.error
+        after = await session.run_command(_params("command_002", "echo after"), timeout=5)
+        assert (after.stdout, after.error) == ("after\n", None)
+        scored = await session.score(
+            ScoreParams(operation_id="score", episode_id=EPISODE), timeout=5
+        )
+        assert scored.score.binary == 1
+
+    asyncio.run(run())
+    assert not session._poisoned and not worker.terminated
+    assert probes == ["http://127.0.0.1:5000/platform"]
+
+
+def test_a_body_cut_off_mid_stream_from_a_dead_guest_still_poisons(tmp_path: Path) -> None:
+    import pytest
+    import requests
+
+    verifier = HostVerifier("task", EPISODE, tmp_path)
+    verifier.accept_initial(observation("task", EPISODE, 0))
+
+    def http_get(url: str, timeout: float) -> int:
+        raise requests.ConnectTimeout("guest gone")
+
+    worker = _Worker([_cut_mid_stream()], _score(tmp_path), http_get=http_get)
+    session = VerifiedAdapterSession(worker, verifier)  # type: ignore[arg-type]
+
+    async def run() -> None:
+        with pytest.raises(requests.exceptions.ChunkedEncodingError):
+            await session.run_command(_params("command_001", "cat big.json"), timeout=5)
+
+    asyncio.run(run())
+    assert session._poisoned and worker.terminated
+
+
+# --------------------------------------------------------------------------
+# A HARNESS-SIDE cancellation after dispatch (sealed episode
+# ``t29a-t030-20261111-192648``, rows 4377-4498). The MCP client cut a
+# ``timeout_s: 300`` command at 305.06 s; the action server forwarded that as
+# a cancellation, the bridge cancelled the in-flight ``run_command`` RPC,
+# ``_mutating_call`` poisoned the session and terminated the worker, and every
+# later call and ``score`` failed. Driven here through the real bridge wire
+# (``forward_call`` half-closes on cancellation exactly as the action server
+# does), the real ``_make_run_command`` and the real ``AwsProvider``.
+# --------------------------------------------------------------------------
+
+
+class _HeldWorker(_Worker):
+    """``run_command`` whose guest reply is held until the test releases it."""
+
+    def __init__(self, reply: Any, score: ScoreResult, *, http_get: Any = None) -> None:
+        super().__init__([], score, http_get=http_get)
+        import threading
+
+        self.entered = threading.Event()
+        self.release = threading.Event()
+        self.reply = reply
+
+    async def _call_raw(
+        self, method: str, params: Any, result_type: type[Any], *, timeout: float, **kwargs: Any
+    ) -> Any:
+        if method != "run_command":
+            return await super()._call_raw(method, params, result_type, timeout=timeout, **kwargs)
+        self.calls.append(method)
+
+        def http_post_json(url: str, payload: dict[str, Any], timeout: float) -> dict[str, Any]:
+            del url, payload, timeout
+            self.entered.set()
+            self.release.wait(10)
+            if isinstance(self.reply, BaseException):
+                raise self.reply
+            return self.reply
+
+        provider = object.__new__(AwsProvider)
+        provider._public_ip = "127.0.0.1"
+        provider._clients = _Clients(
+            ec2=None, scheduler=None, http_get=self.http_get, http_post_json=http_post_json
+        )
+        return await provider.run_command(params)
+
+
+def _cancel_after_dispatch(tmp_path: Path, worker: _HeldWorker) -> tuple[Any, list[Any]]:
+    """Dispatch one command over the bridge wire, cancel its caller, settle it."""
+
+    from local_operator.evaluation.action_server import COMMAND_TOOL_NAME, forward_call
+    from local_operator.evaluation.session_arm import _make_run_command
+    from tests.unit.evaluation.test_session_arm import _bridge
+
+    verifier = HostVerifier("task", EPISODE, tmp_path)
+    verifier.accept_initial(observation("task", EPISODE, 0))
+    session = VerifiedAdapterSession(worker, verifier)  # type: ignore[arg-type]
+    rows: list[Any] = []
+
+    async def run() -> None:
+        recorded = asyncio.Event()
+
+        def record(kind: str, payload: dict[str, Any]) -> None:
+            rows.append((kind, payload))
+            if kind == "command":
+                recorded.set()
+
+        bridge = _bridge(tmp_path, record=record)
+        bridge.run_command = _make_run_command(session, EPISODE)
+        await bridge.start()
+        try:
+            caller = asyncio.create_task(
+                forward_call(
+                    str(bridge.endpoint),
+                    {"command": "python train.py", "timeout_s": 300},
+                    tool=COMMAND_TOOL_NAME,
+                )
+            )
+            assert await asyncio.to_thread(worker.entered.wait, 5), "command never dispatched"
+            caller.cancel()
+            try:
+                await caller
+            except asyncio.CancelledError:
+                pass
+            # The guest answers only AFTER the caller is gone: the reply the
+            # cut client never saw.
+            worker.release.set()
+            await asyncio.wait_for(recorded.wait(), 10)
+        finally:
+            worker.release.set()
+            await bridge.stop()
+
+    asyncio.run(run())
+    return session, rows
+
+
+def test_a_cancelled_caller_does_not_poison_a_live_guest_and_scoring_works(
+    tmp_path: Path,
+) -> None:
+    worker = _HeldWorker(_answer(json.dumps(_GOOD)), _score(tmp_path))
+    session, rows = _cancel_after_dispatch(tmp_path, worker)
+
+    commands = [payload for kind, payload in rows if kind == "command"]
+    assert len(commands) == 1
+    row = commands[0]
+    # The caller was left with an unknown outcome, and the row says so...
+    assert (row["outcome"], row["cancelled"], row["target_may_have_run"]) == (
+        "cancelled_after_dispatch",
+        True,
+        True,
+    )
+    # ...while recording what the target actually answered once it settled.
+    assert row["settled_after_cancel"]["exit_code"] == 0
+    assert not session._poisoned and not worker.terminated
+
+    async def after() -> None:
+        scored = await session.score(
+            ScoreParams(operation_id="score", episode_id=EPISODE), timeout=5
+        )
+        assert scored.score.binary == 1
+
+    asyncio.run(after())
+
+
+def test_a_cancelled_caller_with_a_lost_reply_from_a_live_guest_is_answered_unknown(
+    tmp_path: Path,
+) -> None:
+    """The settled RPC carries the existing liveness rule: one probe, caution."""
+
+    from lop_osworld_v2_adapter.remote_command import UNKNOWN_OUTCOME_CAUTION
+
+    probes: list[str] = []
+    worker = _HeldWorker(
+        _sealed_read_timeout(),
+        _score(tmp_path),
+        http_get=lambda url, timeout: probes.append(url) or 200,
+    )
+    session, rows = _cancel_after_dispatch(tmp_path, worker)
+
+    row = next(payload for kind, payload in rows if kind == "command")
+    assert row["outcome"] == "cancelled_after_dispatch"
+    assert row["settled_after_cancel"]["error"].endswith(UNKNOWN_OUTCOME_CAUTION)
+    assert probes == ["http://127.0.0.1:5000/platform"]
+    assert not session._poisoned and not worker.terminated
+
+
+def test_a_cancelled_caller_with_a_dead_guest_still_poisons(tmp_path: Path) -> None:
+    import requests
+
+    def http_get(url: str, timeout: float) -> int:
+        raise requests.ConnectTimeout("guest gone")
+
+    worker = _HeldWorker(_sealed_read_timeout(), _score(tmp_path), http_get=http_get)
+    session, rows = _cancel_after_dispatch(tmp_path, worker)
+
+    row = next(payload for kind, payload in rows if kind == "command")
+    assert row["outcome"] == "cancelled_after_dispatch"
+    assert row["settled_after_cancel"]["error"].startswith("ConnectionError")
+    assert session._poisoned and worker.terminated

@@ -110,6 +110,12 @@ CAPABILITY_MODEL_SWITCH = "model_switch"
 #: report — so a node silently ran without the head's review and release rules.
 #: Emitted only when there is a refusal to name; never in ``PEER_SIDE_CHECKS``.
 CAPABILITY_CUSTOM_INSTRUCTIONS = "custom_instructions"
+#: (l) user skills: does the peer hold this device's own skills at the revision
+#: this device has (``skillsync.py``)? Added 2026-11-11 with the mesh skill sync:
+#: a brief naming ``skill://x`` resolves on the head and, before that sync, on no
+#: peer. Informational (non-gating): the cadence repairs it within a minute, and
+#: the create path pushes first.
+CAPABILITY_SKILLS = "skills"
 
 #: The class a readiness row carries (F8 ruling, 2026-10-04). "The device is
 #: onboarded" and "the equipment on it is set up" are DIFFERENT questions:
@@ -160,6 +166,9 @@ NON_GATING_EQUIPMENT: frozenset[str] = frozenset(
         # operator wrote them there); the row names it with the remedy and never
         # holds the verdict, as the create and the move never refuse on it.
         CAPABILITY_CUSTOM_INSTRUCTIONS,
+        # A missing skill is a sync in flight or a skill that cannot travel; the
+        # row names which, and nothing about onboarding depends on it.
+        CAPABILITY_SKILLS,
     }
 )
 
@@ -205,9 +214,17 @@ CODE_NOT_ON_PATH = "not_on_path"
 CODE_NOT_AUTHENTICATED = "not_authenticated"
 #: Resilience (2026-10-21): under :data:`RESILIENCE_MIN_RAM_MB` of RAM and no swap.
 CODE_LOW_MEMORY = "low_memory"
+#: The peer's relay unit lets systemd stop the relay when the kernel OOM-kills
+#: any session process in its cgroup (``relay.RELAY_OOM_POLICY``).
+CODE_RELAY_OOM_POLICY = "relay_oom_policy"
 #: The peer has not granted this device the lifecycle capability net_restart
 #: requires. The remedy is a grant ON THE PEER, never a local gate bypass.
 CODE_UPDATE_GRANT_MISSING = "update_grant_missing"
+#: The peer lacks some of this device's skills at this device's revision. A
+#: named constant (not a literal at the emit site) because enrollment's
+#: ``public_report`` admits only ``CODE_*`` values: a bare literal made a failed
+#: ``skills`` row refuse the whole terminal receipt (PR #3839).
+CODE_SKILLS_NOT_SYNCED = "skills_not_synced"
 #: Serve daemon (2026-10-28): its build differs from the install's, or nothing
 #: but a login session holds it (Linux: a ``session-*.scope``, not a unit).
 CODE_SERVE_STALE = "serve_stale"
@@ -349,8 +366,8 @@ def operator_fact() -> dict[str, Any]:
     }
 
 
-def _can_sign_here() -> bool:
-    """Whether THIS host holds the private half, probed without prompting.
+def _can_sign_here(expected_key_id: str | None = None) -> bool:
+    """Whether THIS host holds the ANCHOR's private half, probed without prompting.
 
     The probe is the operator module's own signer lookup (the anchor names the
     backend), and it is the ONLY sound question to ask: a keychain query from
@@ -359,6 +376,14 @@ def _can_sign_here() -> bool:
     that has one. ``False`` on every failure — a broken agent is "cannot sign
     NOW", which is the fact this answer is for — and the signer is closed
     immediately, because a probe must leave nothing running.
+
+    "A signer loads" is NOT the question (PR #3905 review r2, M3): a second Mac
+    that ran ``lop operator init`` holds ITS OWN operator key, and counting that
+    as authority made it author routing for the fleet and refuse the head's.
+    The loaded key must be the one the anchor pins: ``expected_key_id`` when the
+    caller already holds the anchor, else the installed anchor's own key id. With
+    no usable anchor and no expectation there is nothing to compare against, so
+    any loadable key answers (the pre-anchor "has a key at all" reading).
     """
     try:
         from local_operator.operator.keychain import choose_backend
@@ -366,15 +391,25 @@ def _can_sign_here() -> bool:
         from local_operator.paths import config_dir
 
         loaded = load_anchor()
-        backend_name = loaded.anchor.backend if loaded.usable and loaded.anchor else "auto"
+        anchor = loaded.anchor if loaded.usable else None
+        backend_name = anchor.backend if anchor else "auto"
+        if expected_key_id is None and anchor is not None:
+            expected_key_id = str(anchor.key_id or "")
         signer: Any = choose_backend(backend_name, config_root=config_dir()).load()
         if signer is None:
             return False
         try:
-            signer.close()
-        except Exception:  # noqa: BLE001 — closing a probe is best-effort
-            pass
-        return True
+            held = str(getattr(getattr(signer, "handle", None), "key_id", "") or "")
+        finally:
+            try:
+                signer.close()
+            except Exception:  # noqa: BLE001 — closing a probe is best-effort
+                pass
+        if expected_key_id is None:
+            return True
+        # An empty expectation (an anchor without a key id) matches nothing: fail
+        # closed rather than let any key stand in for an unnamed one.
+        return bool(expected_key_id) and held == expected_key_id
     except Exception:  # noqa: BLE001 — see above: "cannot sign", not a crash
         return False
 
@@ -1574,12 +1609,30 @@ def selected_model_row(
             (f"sign in to {provider} on {peer_label}, or choose another model",),
         ),
     }
-    if state not in readings and state != "held_offline":
+    # A HELD GRANT is access the owner lent BEFORE it became unreachable, served
+    # from the borrower's memory until the offline hold ends (up to 24 hours since
+    # 2026-11-13). Reading it as a fresh resolve ("the next request verifies the
+    # owner again") was wrong for that whole window (design review m1), so it says
+    # what it is and when it stops. The end is the receipt's
+    # ``last_grant_expires_at`` (the hold end, ``effective.note_resolution``),
+    # rendered in UTC because the reader may sit in another time zone.
+    held_until = fact.get("last_grant_expires_at")
+    until = (
+        time.strftime(" until %H:%M UTC", time.gmtime(held_until))
+        if isinstance(held_until, (int, float)) and not isinstance(held_until, bool)
+        else ""
+    )
+    readings["held_offline"] = (
+        f"{peer_label} is using {provider} access {owner} lent before it went "
+        f"offline{until}; nothing is refreshed until {owner} is back",
+        (
+            f"continue on {peer_label}; reconnect {owner} before then, or sign in to "
+            f"{provider} on {peer_label} to stop depending on it",
+        ),
+    )
+    if state not in readings:
         state = "pending"
-    # A held grant is borrowed access the owner lent (``held_offline``): the same
-    # reading as a resolved borrow, whose "the next request verifies the owner again"
-    # is exactly what the client does. Its own CODE stays on the row below.
-    detail, remedies = readings["effective_borrow" if state == "held_offline" else state]
+    detail, remedies = readings[state]
     if state == "expired" and observer_is_admin and getattr(member, "role", "") == "admin":
         import shlex
 
@@ -1700,13 +1753,142 @@ def collect_peer_facts(
         "github": github_fact(root, home),
         "operator": operator_fact(),
         "memory": memory_fact(),
+        # ADDITIVE ON THE WIRE: what this device's relay unit says OOMPolicy is.
+        # A viewer built before this key ignores it; this build reads its ABSENCE
+        # (an older peer) as no claim, never as a gap.
+        "relay_unit": relay_unit_fact(),
         # ADDITIVE ON THE WIRE: a viewer built before this key ignores it, and a
         # viewer reading a peer built before it renders ``unknown`` — never ok.
         "serve_daemons": serve_daemons_fact(root),
+        # ADDITIVE ON THE WIRE (2026-11-11): names, tree hashes and mirror origin of
+        # this device's user skills — never content. Absent from older peers.
+        "skills": skills_fact(root),
         # ADDITIVE ON THE WIRE: an older viewer ignores it, and an older peer's
         # answer lacks it, which this build reads as "nothing to report" (no row).
         "custom_instructions": custom_instructions_fact(root),
+        # ADDITIVE ON THE WIRE: the fallback chain this device's default would
+        # actually walk, and whose it is (mirrored from the operator's device or
+        # this device's own). An older viewer ignores it; an older peer omits it
+        # and the model-credential row then reads byte-for-byte as before.
+        "failover": _failover_fact(root, model),
     }
+
+
+def skills_fact(root: Path) -> dict[str, Any] | None:
+    """This device's user skills as the skill sync sees them; ``None`` if unreadable."""
+    try:
+        from local_operator.network import skillsync
+
+        return {"skills": skillsync.skill_state(root)["skills"]}
+    except Exception:  # noqa: BLE001 — a fact is not a gate; the row reads None as unknown
+        return None
+
+
+def skills_row(
+    member: Any,
+    facts: Mapping[str, Any],
+    *,
+    peer_label: str,
+    local: Sequence[Any],
+    own_device_id: str,
+) -> dict[str, Any]:
+    """(k) Does the peer hold this device's own skills, current? Informational.
+
+    ``local`` is this device's ``skillsync.authored_skills`` (the only skills it
+    sends); ``facts["skills"]`` is the peer's own ``skill_state``. Every skill
+    that will not travel is NAMED with its reason, so an oversize skill is never
+    a silent absence on the far side.
+    """
+    fact = facts.get("skills")
+    held_in = fact.get("skills") if isinstance(fact, Mapping) else None
+    if not isinstance(held_in, Mapping):
+        return _capability_row(
+            device_id=member.device_id,
+            device_name=peer_label,
+            capability=CAPABILITY_SKILLS,
+            ok=False,
+            code=CODE_UNKNOWN,
+            detail="the peer's answer did not carry its skills (it may predate skill sync)",
+            # The remedy push/tick/state already give for an old peer, so this
+            # row is not the one surface that leaves the operator guessing
+            # (QA round 1, Q-4).
+            remedies=[f"run `lop-update` on {peer_label}, then re-check"],
+            source=SOURCE_UNKNOWN,
+        )
+    current: list[str] = []
+    kept: list[str] = []
+    shadowed: list[str] = []
+    missing: list[str] = []
+    untravelled: list[str] = []
+    for skill in local:
+        name = str(getattr(skill, "name", "") or "")
+        if getattr(skill, "status", "") != "ready":
+            untravelled.append(f"{name} ({getattr(skill, 'reason', '') or 'cannot travel'})")
+            continue
+        held = held_in.get(name)
+        held = held if isinstance(held, Mapping) else None
+        if held is not None and str(held.get("tree_hash") or "") == getattr(skill, "tree_hash", ""):
+            current.append(name)
+        elif held is not None and held.get("mirror_wins"):
+            # The peer owns this name elsewhere, yet this device's EARLIER copy
+            # still sits in its skills/<name> and wins there; "kept as its own"
+            # would be false (QA round 3, Q-8). Counted as kept for the sums.
+            shadowed.append(name)
+        elif held is not None and (
+            not held.get("origin") or held.get("origin") != own_device_id or held.get("edited")
+        ):
+            kept.append(name)
+        else:
+            missing.append(name)
+    sendable = len(current) + len(kept) + len(shadowed) + len(missing)
+    parts = [f"{peer_label} holds {len(current)} of this device's {sendable} sendable skills"]
+    if kept:
+        parts.append(f"kept as its own: {_name_list(kept)}")
+    if shadowed:
+        parts.append(
+            f"has its own {_name_list(shadowed)}, but an earlier synced copy still wins "
+            f"there; delete skills/<name> on {peer_label} to use its own"
+        )
+    if missing:
+        parts.append(f"not synced yet: {_name_list(missing)}")
+    if untravelled:
+        parts.append(f"will not travel: {'; '.join(untravelled)}")
+    return _capability_row(
+        device_id=member.device_id,
+        device_name=peer_label,
+        capability=CAPABILITY_SKILLS,
+        ok=not missing,
+        code="" if not missing else CODE_SKILLS_NOT_SYNCED,
+        detail="; ".join(parts),
+        remedies=(
+            [
+                "the mesh syncs skills about once a minute; to do it now, run "
+                f"`lop network skills push --peer {peer_label}`"
+            ]
+            if missing
+            else []
+        ),
+        source=SOURCE_PEER,
+        observed={
+            "current": current,
+            "kept": kept,
+            "shadowed": shadowed,
+            "missing": missing,
+            "untravelled": [
+                str(getattr(s, "name", "")) for s in local if getattr(s, "status", "") != "ready"
+            ],
+        },
+    )
+
+
+def _failover_fact(root: Path, model: Mapping[str, Any]) -> dict[str, Any] | None:
+    from local_operator.network import routing_sync
+
+    return routing_sync.failover_fact(
+        root,
+        hosting=str(model.get("hosting") or ""),
+        model_name=str(model.get("model_name") or ""),
+    )
 
 
 def custom_instructions_fact(root: Path) -> dict[str, Any] | None:
@@ -1778,11 +1960,90 @@ def custom_instructions_row(
     )
 
 
+def _attach_failover(row: dict[str, Any], facts: Mapping[str, Any], *, server: Any) -> None:
+    """Name the peer's effective fallback chain on its model-credential row.
+
+    WHY ON THIS ROW: "can the default be served" and "what happens when it is
+    rate-limited" are one question for an operator handing a node work — a node
+    whose chain is primary-only ends a turn on the first borrowed 429. Riding the
+    existing row (sentence + ``observed.failover``) instead of a new capability
+    keeps enrollment's closed capability set (``enrollment.public_report``)
+    untouched. Absent fact (an older peer) leaves the row exactly as it was.
+    """
+    fact = facts.get("failover")
+    if not isinstance(fact, Mapping):
+        return
+    from local_operator.network import routing_sync
+
+    origin = str(fact.get("origin") or "")
+    self_id = str(getattr(getattr(server, "identity", None), "device_id", "") or "")
+    label = ""
+    if origin:
+        label = (
+            _self_label(server)
+            if origin == self_id
+            else str(server._member_name(origin) or "")  # noqa: SLF001 — the mesh's own name
+        )
+    # The sentence only when the peer HAS routing to name: a bare peer's row keeps
+    # its existing words (its empty chain is still in ``observed``), so a viewer
+    # reading an unconfigured fleet sees no new prose on every row.
+    if fact.get("hops") or fact.get("model_fallback") is False:
+        sentence = routing_sync.failover_sentence(fact, origin_label=label)
+        detail = str(row.get("detail") or "")
+        # Q-1: a detail that does not already end a sentence gets one, or the
+        # failover sentence runs on from it ("... is refused Fails over to: ...").
+        if detail and not detail.rstrip().endswith((".", "!", "?")):
+            detail = detail.rstrip() + "."
+        row["detail"] = f"{detail} {sentence}".strip()
+    observed = dict(row.get("observed") or {})
+    observed["failover"] = {
+        key: fact.get(key)
+        for key in ("chain_key", "hops", "source", "origin", "model_fallback")
+        if key in fact
+    }
+    row["observed"] = observed
+
+
 #: The RAM below which a swapless member is reported as a resilience risk. 4 GB
 #: is the measured line, not a guess: cloud-node-1 at 2 GB with no swap OOM-killed
 #: its own relay running ordinary session work plus one Next.js build, and the
 #: same work fits on this family's 8 GB hosts with headroom.
 RESILIENCE_MIN_RAM_MB = 4096
+
+
+def relay_unit_fact() -> dict[str, Any]:
+    """This device's relay-unit OOM policy (``relay.installed_unit_oom_policy``).
+
+    No-raise: a readiness answer never fails on a diagnostic fact.
+    """
+    try:
+        from local_operator.network import relay as relay_mod
+
+        return relay_mod.installed_unit_oom_policy()
+    except Exception:  # noqa: BLE001 — a diagnostic fact degrades to unknown
+        return {"supervisor": None}
+
+
+def _relay_oom_policy_gap(facts: Mapping[str, Any]) -> bool:
+    """Whether the peer PROVED its installed relay unit lacks ``OOMPolicy=continue``."""
+    from local_operator.network import relay as relay_mod
+
+    unit = facts.get("relay_unit")
+    return (
+        isinstance(unit, Mapping)
+        and unit.get("supervisor") == "systemd"
+        and unit.get("installed") is True
+        and unit.get("readable") is True
+        and unit.get("oom_policy") != relay_mod.RELAY_OOM_POLICY
+    )
+
+
+def _relay_oom_policy_remedy(peer_label: str) -> str:
+    return (
+        f"on {peer_label}, run `lop network install`: it rewrites the relay unit with "
+        "OOMPolicy=continue and reloads systemd without restarting the relay (an "
+        "update does the same)"
+    )
 
 
 def memory_fact() -> dict[str, Any]:
@@ -1830,6 +2091,10 @@ def resilience_row(member: Any, facts: Mapping[str, Any], *, peer_label: str) ->
             source=SOURCE_UNKNOWN,
         )
     swapless = isinstance(swap, int) and not isinstance(swap, bool) and swap == 0
+    # 2026-11-11: a session child's OOM kill stopped the relay UNIT five times on
+    # a 15.7 GB node, because the unit ran on systemd's default OOMPolicy=stop.
+    # RAM alone does not answer this row; the unit's policy is the other half.
+    policy_gap = _relay_oom_policy_gap(facts)
     if total < RESILIENCE_MIN_RAM_MB and swapless:
         return _capability_row(
             device_id=member.device_id,
@@ -1847,9 +2112,30 @@ def resilience_row(member: Any, facts: Mapping[str, Any], *, peer_label: str) ->
                 f"host with at least {RESILIENCE_MIN_RAM_MB // 1024} GB of RAM",
                 f"run `lop update` on {peer_label} so its relay unit carries "
                 "OOMScoreAdjust and its runtimes refuse to start when memory is short",
+                *([_relay_oom_policy_remedy(peer_label)] if policy_gap else []),
             ],
             source=SOURCE_PEER,
             observed={"total_mb": total, "swap_total_mb": swap},
+        )
+    if policy_gap:
+        return _capability_row(
+            device_id=member.device_id,
+            device_name=peer_label,
+            capability=CAPABILITY_RESILIENCE,
+            ok=False,
+            code=CODE_RELAY_OOM_POLICY,
+            detail=(
+                f"{peer_label}'s relay service stops whenever the kernel OOM-kills any "
+                "session process there (its unit does not set OOMPolicy=continue), so "
+                "one heavy session takes the device off the mesh until the relay restarts"
+            ),
+            remedies=[_relay_oom_policy_remedy(peer_label)],
+            source=SOURCE_PEER,
+            observed={
+                "total_mb": total,
+                "swap_total_mb": swap,
+                "oom_policy": facts["relay_unit"].get("oom_policy"),
+            },
         )
     return _capability_row(
         device_id=member.device_id,
@@ -5693,7 +5979,24 @@ def _peer_checks(
     rows.append(git_row(member, facts, peer_label=peer_label, viewer=viewer))
     rows.append(repository_row(member, facts, peer_label=peer_label, repository=repository))
     rows.append(mcp_servers_row(member, facts, peer_label=peer_label))
-    rows.append(model_credential_row(member, facts, viewer=viewer, peer_label=peer_label))
+    try:
+        from local_operator.network import skillsync
+
+        own_skills: list[Any] = list(skillsync.authored_skills(server.root))
+    except Exception:  # noqa: BLE001 — this device's own skills unreadable: compare none
+        own_skills = []
+    rows.append(
+        skills_row(
+            member,
+            facts,
+            peer_label=peer_label,
+            local=own_skills,
+            own_device_id=str(getattr(getattr(server, "identity", None), "device_id", "") or ""),
+        )
+    )
+    credential_row = model_credential_row(member, facts, viewer=viewer, peer_label=peer_label)
+    _attach_failover(credential_row, facts, server=server)
+    rows.append(credential_row)
     switch_row = model_switch_row(
         member,
         facts,

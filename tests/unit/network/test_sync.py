@@ -238,6 +238,24 @@ def seed(root: Path, session_id: str, *, rows: int = 3) -> Path:
         ),
         encoding="utf-8",
     )
+    # THE TEMPORARY-CHAT MARK (``session/temporary.MARK_NAME``), in the KEPT
+    # shape ``write_mark`` lands: a moved chat that arrived unmarked would be
+    # retained silently on its new device. One of each, or the round trip below
+    # tests the fixture.
+    from local_operator.session.temporary import MARK_NAME, MARK_VERSION
+
+    (directory / MARK_NAME).write_text(
+        json.dumps(
+            {
+                "v": MARK_VERSION,
+                "temporary": False,
+                "session_id": session_id,
+                "kept_at": 1_700_000_000.0,
+                "by": "cli",
+            }
+        ),
+        encoding="utf-8",
+    )
     (directory / "created_at.json").write_text("1758230400.5", encoding="utf-8")
     (directory / "scratchpad").mkdir(exist_ok=True)
     (directory / "scratchpad" / "notes.md").write_text("the operator's notes", encoding="utf-8")
@@ -301,6 +319,7 @@ def test_the_copy_set_names_match_the_modules_that_own_them() -> None:
         STOP_MARKER_NAME,
         TURN_JOURNAL_NAME,
     )
+    from local_operator.session.temporary import MARK_NAME as TEMPORARY_MARK_NAME
     from local_operator.tools.eval import KERNEL_MARKER_NAME
 
     assert set(sync.COPY_SET_NAMES) == {
@@ -364,6 +383,9 @@ def test_the_copy_set_names_match_the_modules_that_own_them() -> None:
         # losing it would re-enable auto-capture on a moved imported session and
         # make the next import look native (sync.COPY_SET_NAMES has the argument).
         "harness-import.json",
+        # The temporary-chat mark: a moved temporary chat must still be deleted on
+        # its new device, not silently retained there (sync.COPY_SET_NAMES).
+        TEMPORARY_MARK_NAME,
     }
     # And the deny-list is a real deny-list: every name on it is a file a session
     # directory actually holds, so the copy's allow-list is the only thing keeping

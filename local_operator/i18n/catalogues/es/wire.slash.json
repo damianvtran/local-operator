@@ -50,5 +50,6 @@
   "wire.slash.theme": "Cambia el tema; las flechas previsualizan en vivo",
   "wire.slash.unarchive": "Vuelve a mostrar esta conversación en las listas",
   "wire.slash.update": "Instala la última versión desde PyPI y relanza",
-  "wire.slash.usage": "Muestra la cuota de uso del proveedor"
+  "wire.slash.usage": "Muestra la cuota de uso del proveedor",
+  "wire.slash.temporary": "Haz temporal este chat o consérvalo (on, off, status)"
 }

@@ -1965,6 +1965,13 @@ def sessions_row_summary(args: Mapping[str, object]) -> str:
         name = _sessions_scalar(args.get("name")) or _sessions_scalar(args.get("prompt"))
         parts = [op, visibility] + ([name] if name else [])
         return " · ".join(parts)
+    if op == "park":
+        # PARK NAMES ITS TARGET like stop (review round 1, R1-6), with one
+        # difference: no address is not a malformed call but the documented
+        # self-park (the caller parks itself after this turn), so the row says
+        # ``self`` rather than stop's ``?``.
+        address = _sessions_address(args)
+        return " · ".join([op, "self" if address == "?" else address])
     if op in ("stop", "resume", "info", "peek"):
         parts = [op, _sessions_address(args)]
         if op == "peek":

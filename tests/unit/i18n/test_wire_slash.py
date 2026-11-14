@@ -146,6 +146,10 @@ PREVIOUS_ENGLISH: dict[str, str] = {
     # (shipped ahead), and this row folds it in as the command registers — the
     # edit-together rule the SHIPPED_AHEAD allowance existed to keep honest.
     "hub": "Open Hub links — per-link subscribe and auto-push policy",
+    # Added AFTER the S2 slice (temporary chats, core #3832), the `/highlights`
+    # precedent: a new command with no pre-slice English, so the row pins the
+    # text the audited catalogue (and every locale ledger row) shipped with.
+    "temporary": "Make this chat temporary, or keep it (on, off, status)",
 }
 
 
@@ -160,7 +164,7 @@ def test_every_registry_description_is_the_pre_slice_english() -> None:
     # +13: the ten commands above, the LO2 pair (/radient, /saver), whose
     # copy lives in wire.radient_saver rather than in this audited namespace,
     # and `/sound`, whose copy lives in tui.sound.
-    assert len(SLASH_COMMANDS) == len(PREVIOUS_ENGLISH) + 13 == 65
+    assert len(SLASH_COMMANDS) == len(PREVIOUS_ENGLISH) + 13 == 66
     for command in SLASH_COMMANDS:
         if command.name in (
             MEMORY_COMMAND,

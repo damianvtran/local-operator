@@ -116,7 +116,7 @@ def _consumer_defaults() -> dict[str, object]:
     # ``rollout_policy`` resolves an absent ``network.rollout_on_update`` against
     # ``DEFAULT_ROLLOUT_ON_UPDATE``, and the registry row's own default must be the
     # same value or the page would advertise a policy the driver does not apply.
-    from local_operator.network.credentials import GRANT_TTL_S
+    from local_operator.network.credentials import GRANT_TTL_S, OFFLINE_HOLD_S
     from local_operator.network.credentials.github import DEFAULT_REPOSITORIES
     from local_operator.network.relay import (
         DEFAULT_ADVERTISE_HOSTS,
@@ -164,6 +164,9 @@ def _consumer_defaults() -> dict[str, object]:
         DEFAULT_KEEP_ALIVE_SECONDS,
     )
     from local_operator.session.runtime.serving import DEFAULT_UNATTENDED_GATE_TIMEOUT_H
+    from local_operator.session.temporary import (
+        DEFAULT_IDLE_MINUTES as _TEMPORARY_DEFAULT_IDLE_MINUTES,
+    )
     from local_operator.spawn.policy import (
         DEFAULT_FORK_CMUX_PLACEMENT,
         DEFAULT_FORK_MODE,
@@ -296,6 +299,7 @@ def _consumer_defaults() -> dict[str, object]:
         "session.cleanup.remove_empty": DEFAULT_REMOVE_EMPTY,
         "session.cleanup.delegated.enabled": DEFAULT_DELEGATED_ENABLED,
         "session.cleanup.delegated.max_age_hours": DEFAULT_DELEGATED_MAX_AGE_HOURS,
+        "session.cleanup.temporary.idle_minutes": _TEMPORARY_DEFAULT_IDLE_MINUTES,
         # The compression switch and threshold. ``enabled`` defaults TRUE here,
         # unlike every cleanup switch: nothing is removed, so the page must
         # advertise the value the pass actually runs with.
@@ -338,6 +342,7 @@ def _consumer_defaults() -> dict[str, object]:
         "network.sync.debounce_s": SYNC_DEBOUNCE_S,
         "network.sync.tick_s": SYNC_TICK_S,
         "network.credentials.grant_ttl_s": GRANT_TTL_S,
+        "network.credentials.offline_hold_s": OFFLINE_HOLD_S,
         # The github adapter's allow-list default: empty, and empty is a REFUSAL
         # at mint time — so the registry default and the reader's fallback must
         # stay the same "none designated" answer.
@@ -3767,3 +3772,14 @@ def test_the_status_command_is_operator_only_on_the_agent_write_path(tmp_path) -
     assert interval is not None
     settings_control.apply(manager, interval, 60)
     assert settings_control.read(manager, interval) == 60
+
+
+def test_the_temporary_window_is_an_int_enum_typed_text_coerces_to_the_member() -> None:
+    """The four presets are stored as whole minutes; ``lop config edit ... 120``
+    must store ``120`` (an int), and a value outside the presets is refused."""
+    setting = settings_io.BY_KEY["session.cleanup.temporary.idle_minutes"]
+    assert [choice.value for choice in setting.choices] == [15, 30, 120, 1440]
+    assert settings_io.coerce(setting, "120") == 120
+    assert settings_io.validate(setting, 120) is None
+    assert settings_io.validate(setting, 45) is not None
+    assert settings_io.validate(setting, "30") is not None

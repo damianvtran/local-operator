@@ -257,6 +257,37 @@ class ProjectNameConflictError(ValueError):
     """
 
 
+class TemporarySessionError(ValueError):
+    """A session to link is a TEMPORARY chat (``session/temporary.py``).
+
+    A project link is a promise to keep the conversation; a temporary chat is a
+    promise to delete it, so the link is refused until the user keeps the chat.
+    A ValueError so every existing ``except ValueError`` arm still answers; the
+    desktop and relay routes map THIS subclass to 409 ``session_temporary``.
+    The message is model-facing English (the ``project`` tool renders it; an
+    allowed i18n exemption): the human surfaces use their keyed sentence.
+    """
+
+    code = "session_temporary"
+
+    def __init__(self, session_id: str) -> None:
+        self.session_id = session_id
+        super().__init__(
+            f"Session {session_id} is a temporary chat and can't be linked to a project "
+            "until the user keeps it. Use `ask` to ask the user whether to keep it; "
+            "do not retry."
+        )
+
+
+def _refuse_temporary_sessions(config_dir: Path, session_ids: Sequence[str]) -> None:
+    """Raise :class:`TemporarySessionError` for the first marked id in ``session_ids``."""
+    from local_operator.session.temporary import is_marked
+
+    for session_id in session_ids:
+        if is_marked(config_dir, session_id):
+            raise TemporarySessionError(session_id)
+
+
 class ProjectDoneGateError(ValueError):
     """``status='done'`` was refused because milestones are still incomplete.
 
@@ -2616,6 +2647,7 @@ class ProjectRegistry:
         """
         name = validate_project_name(fields.name or "")
         now = _utc_now()
+        _refuse_temporary_sessions(self.config_dir, [*sessions, *coordination_sessions])
         with self._persistence_lock():
             # Unconditional refresh INSIDE the lock: an interval-gated snapshot
             # cannot prove uniqueness when another process wrote since our last
@@ -2928,6 +2960,7 @@ class ProjectRegistry:
             raise ValueError("role must be 'work' or 'coordination'")
         project_id = validate_project_id(project_id)
         session_id = _validate_sessions([session_id])[0]
+        _refuse_temporary_sessions(self.config_dir, [session_id])
         target = "sessions" if role == "work" else "coordination_sessions"
         other = "coordination_sessions" if role == "work" else "sessions"
         with self._persistence_lock():

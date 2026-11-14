@@ -578,6 +578,7 @@ def test_bridge_clause_is_membership_gated_and_costs_nothing_when_absent() -> No
     bridged = build_system_blocks([*TOOLS, _tool("bridge", "Agent bridge.")], SKILLS, ENV, DATE)[0]
     assert "guide://team-bridge" in bridged
     assert "never a second channel for the same ask" in bridged
+    assert "(`guide://team-bridge`), as a peer;" in bridged
 
     # INLINE: excising the clause must restore the exact absent bytes, which is
     # what proves the marker adds nothing of its own when the flag is false.

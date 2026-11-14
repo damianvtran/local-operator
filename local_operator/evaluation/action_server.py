@@ -114,8 +114,23 @@ COMMAND_TOOL_DESCRIPTION = (
     "your local workspace; it cannot answer prompts or open windows you can "
     "type into. Output beyond the cap is cut, and the result says so. A "
     "command the remote computer could not run at all still comes back as a "
-    "result, saying why in its own words."
+    "result, saying why in its own words. Calls run one at a time. If a call "
+    "is cut short before its result arrives (it times out or is interrupted), "
+    "the command's outcome is unknown -- it may have run already, or it may "
+    "still be running on the remote computer, and later calls wait until it "
+    "finishes -- so re-issuing it blindly could run it twice; check its effect "
+    'first. A call refused with "Not run" was never sent.'
 )
+# WHY the cut-short sentences live in the DESCRIPTION: when the MCP client cuts
+# a call, the model is shown only the client's generic "MCP error: Request
+# 'tools/call' timed out" -- the bridge's own answer has nowhere to go, because
+# the caller is gone (``ActionBridge._handle`` detaches a dispatched command
+# rather than cancelling it, so it keeps running and holds the lane). The
+# description is the one text the model always has. The wording mirrors the
+# adapter's ``UNKNOWN_OUTCOME_CAUTION`` (a separate package this module cannot
+# import), the sentence that measurably stopped a blind re-issue. The bridge
+# also bounds the lane wait so a QUEUED command is refused with a real
+# "Not run" reply rather than cut (``ActionBridge.call_command``).
 
 #: The model-facing timeout bounds. The ceiling stays well inside the
 #: harness-wide ``MAX_COMMAND_TIMEOUT_S``; the default covers ordinary file

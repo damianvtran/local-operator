@@ -533,6 +533,66 @@ async def test_a_peek_reads_a_live_tail_over_a_real_pair(
 
 
 @pytest.mark.asyncio
+async def test_a_journal_peek_reads_the_original_request_over_a_real_pair(
+    peer_pair: Devices, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """``net_session_peek`` over two real relays: both builds advertise
+    ``session-peek-v1``, the owner's session-scope chokepoint admits the frame,
+    the slow lane runs the local readers on B's journal, and A prints the
+    window — ``--head`` (the original request) and ``--query`` (a search),
+    neither of which the v1 display tail could serve."""
+    created = await asyncio.to_thread(
+        _create_named_session_on_a_real_peer,
+        peer_pair,
+        monkeypatch,
+        name="journal-peek",
+        prompt="original request: audit the ledger",
+    )
+    try:
+        root_a = created.server_a.root
+        (root_a / "config.yml").write_text(
+            "version: 0.0.0\nvalues:\n  hosting: test\n  model_name: mock\n", encoding="utf-8"
+        )
+        code, out, err = await asyncio.to_thread(
+            _run_cli,
+            root_a,
+            _home(tmp_path),
+            "sessions",
+            "--json",
+            "--peer",
+            "device-b",
+            "--peek",
+            "journal-peek",
+            "--head",
+            "1",
+        )
+        assert code == 0, (code, out, err)
+        payload = json.loads(out)
+        assert payload["source"] == "journal" and payload["mode"] == "head", payload
+        assert payload["session_id"] == created.session_id, payload
+        steps = payload["window"]["steps"]
+        assert len(steps) == 1 and "original request: audit the ledger" in steps[0]["body"]
+
+        code, out, err = await asyncio.to_thread(
+            _run_cli,
+            root_a,
+            _home(tmp_path),
+            "sessions",
+            "--peer",
+            "device-b",
+            "--peek",
+            created.session_id,
+            "--query=audit the ledger",
+            "--steps",
+            "1",
+        )
+        assert code == 0, (code, out, err)
+        assert "around the match for 'audit the ledger'" in out and "← match" in out, out
+    finally:
+        await asyncio.to_thread(created.stop)
+
+
+@pytest.mark.asyncio
 async def test_a_peek_names_the_model_the_owner_says_served_the_turn(
     peer_pair: Devices, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

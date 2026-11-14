@@ -5,5 +5,6 @@
   "tui.status.jobs": "{count, plural, other {# tác vụ}}",
   "tui.status.model.connecting": "đang kết nối…",
   "tui.status.model.setup": "thiết lập",
-  "tui.status.tunnel.parked": "truy cập từ xa đã tắt"
+  "tui.status.tunnel.parked": "truy cập từ xa đã tắt",
+  "tui.status.temporary": "tạm thời"
 }

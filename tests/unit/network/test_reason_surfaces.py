@@ -309,12 +309,35 @@ _DECLARED_RAW_READS: dict[tuple[str, str, str], tuple[int, str]] = {
     # on purpose: the wire facts (``outcome``/``engaged``/``admitted``) are the booleans
     # beside it, and UX round 3 removed the second copy of those from these lines.
     ("local_operator/network/cli.py", "_cmd_sessions", "detail"): (
-        5,
+        6,
         "the relay's own sentence — the 4th read is the model receipt's detail, which "
         "says why a requested model was not applied; the 5th is the first turn's CAUSE, "
         "the owner runtime's own error sentence (the provider's reason, e.g. a rate "
         "limit or an expired login), carried verbatim on purpose: it is the one fact "
-        "that tells the reader whether to retry, re-auth or pick another model",
+        "that tells the reader whether to retry, re-auth or pick another model; the "
+        "6th is the create-idempotency sentence (``create_unconfirmed``/``replayed``) "
+        "the relay composes in ``_settle_lost_create``/``_create_replay_reply``",
+    ),
+    # The create-idempotency sentence (PR #3827) on the agent tool's mesh spawn: the
+    # relay's OWN prose — ``RelayServer._create_replay_reply`` on the owner, or the
+    # requesting relay's ``_settle_lost_create`` — saying the first prompt's
+    # admission was not observed by this call. NOT GLOSSED because the gloss would
+    # break it: ``peer_reason_words`` reads the ``(CLI: `lop …`)`` colon as a stage
+    # prefix and keeps only the tail. Same class as ``_cmd_sessions`` above.
+    ("local_operator/tools/builtin.py", "_sessions_spawn_mesh", "detail"): (
+        1,
+        "the relay's own create-idempotency sentence (replayed / reply lost), shown "
+        "verbatim because the gloss would cut it at its `CLI:` colon",
+    ),
+    # The owner runtime's own reply sentence for a ``--send --mailbox`` delivery,
+    # stored as the receipt's ``receipt`` and printed as ``<peer>: <sentence>``. Kept
+    # raw because an EMPTY reply must stay empty (``mailbox_receipt_lines`` prints
+    # nothing then) and ``peer_reason_words`` never returns empty — it would print
+    # "it did not answer" under a message that was delivered.
+    ("local_operator/network/cli.py", "_pilot_mailbox", "detail"): (
+        1,
+        "the owner's own mailbox-delivery sentence, attributed to the peer; empty "
+        "stays empty, which the never-empty gloss cannot express",
     ),
     # ``_op_session_create`` hands the owner's first-turn cause to the requesting
     # device (``_prompt_on``'s ``detail``). DELIBERATELY RAW, and the counter-example
@@ -370,6 +393,25 @@ _DECLARED_RAW_READS: dict[tuple[str, str, str], tuple[int, str]] = {
     ("local_operator/network/cli.py", "_cmd_mcp", "reason"): (
         2,
         "the peer's own conflict and refusal sentences, printed verbatim",
+    ),
+    # The skill bundle (network/skillsync.py) mirrors the MCP bundle: every ``reason``
+    # it carries is a composed sentence, never a machine token -- the receiver's
+    # ``_refused``/``_decide``/``_ownership_reason`` prose, the sender's own "kept"
+    # sentences, a scan's ``LocalSkill.reason``, or an exception's message.
+    # ``_push_locked`` copies the peer's sentence into the per-peer outcome row;
+    # ``_describe`` and ``_cmd_skills`` (push report + local listing) print it.
+    ("local_operator/network/skillsync.py", "_push_locked", "reason"): (
+        1,
+        "carries the peer's own refusal/conflict sentence into the outcome row verbatim",
+    ),
+    ("local_operator/network/skillsync.py", "_describe", "reason"): (
+        1,
+        "the peer's or this device's refusal sentence, rendered as ``name (reason)``",
+    ),
+    ("local_operator/network/cli.py", "_cmd_skills", "reason"): (
+        2,
+        "the push report's per-skill sentence and the local listing's composed "
+        "will-not-travel sentence, printed verbatim",
     ),
     # The MCP credential repair verb reads its OWN skip vocabulary. The rows come
     # from ``placement.grant_key_set`` and this handler's ``local-only`` check in
@@ -518,6 +560,14 @@ _DECLARED_RAW_READS: dict[tuple[str, str, str], tuple[int, str]] = {
     # the PROBE'S OWN machine code — compared against the producer's constants so
     # a rename cannot drift it, and never printed from this site (the renderers
     # gloss through ``doctor_detail_words``).
+    # The failover sentence (remote routing sync): reads the row's OWN detail,
+    # just built by ``model_credential_row``'s glossing renderers, and appends a
+    # sentence authored in ``routing_sync.failover_sentence``. Nothing from a
+    # peer's raw reason is echoed.
+    ("local_operator/network/readiness.py", "_attach_failover", "detail"): (
+        1,
+        "appends to this device's own rendered row detail; no peer reason is echoed",
+    ),
     ("local_operator/network/readiness.py", "_did_not_lead", "detail"): (
         1,
         "classifier input (the probe's own code, compared against the producer's "

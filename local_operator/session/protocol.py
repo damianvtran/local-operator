@@ -2240,8 +2240,10 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
     def bridge_taint_latch(self) -> Any:
         """This process's ``BridgeTaintLatch``, or ``None`` when it holds none.
 
-        Only a session whose runtime lives in this process has a latch; an
-        attached facade answers ``None`` and the owner's runtime enforces.
+        A session whose runtime lives in this process has the real latch. An
+        attached facade answers a MIRROR (``mirror=True``) marked from the
+        owner's per-card ``bridge_latched`` flag, so a host can redraw cards
+        parked before the latch; the owner's runtime still enforces.
         """
         ...
 
@@ -2249,9 +2251,10 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
     def bridge_latched(self) -> bool:
         """Whether THIS process's latch says the session holds Team Bridge content.
 
-        A facade has no local latch and answers False; its gate cards carry the
-        owner's ``bridge_latched`` flag and the owner re-checks every press, so
-        a viewer never decides taint from this answer alone.
+        A facade answers its mirror (False until an owner card arrives
+        latched); its gate cards carry the owner's ``bridge_latched`` flag and
+        the owner re-checks every press, so a viewer never decides taint from
+        this answer alone.
         """
         ...
 

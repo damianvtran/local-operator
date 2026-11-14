@@ -50,5 +50,6 @@
   "wire.slash.theme": "Switch color theme; arrows preview live",
   "wire.slash.unarchive": "Show this conversation in the lists again",
   "wire.slash.update": "Install the latest version from PyPI and relaunch",
-  "wire.slash.usage": "Show provider usage quota"
+  "wire.slash.usage": "Show provider usage quota",
+  "wire.slash.temporary": "Make this chat temporary, or keep it (on, off, status)"
 }

@@ -29,6 +29,7 @@ from local_operator.harness.types import ToolContext
 from local_operator.network import approvals as A
 from local_operator.network import cli as net_cli
 from local_operator.network.credentials import consent, finite_share
+from local_operator.network.types import MeshRefusal
 from local_operator.secrets.access import SESSION_ID_ENV
 from local_operator.server.utils.desktop_approvals import approval_rows
 from local_operator.tools import builtin
@@ -260,6 +261,181 @@ def test_the_env_names_no_authority(
     the finite card still needs the operator's real signature to run."""
     monkeypatch.setenv(SESSION_ID_ENV, SID)
     filed = _finite(rig, monkeypatch, filed_by_session=os.environ[SESSION_ID_ENV])
-    with pytest.raises(Exception):  # noqa: B017 — any refusal; the point is "not applied"
-        finite_share.apply(filed["approval_id"], {}, rig.root)
+    # R1-4: the REFUSAL is pinned, not "any exception". The exact subject is passed
+    # so the subject check passes and the gate reached is the missing operator
+    # decision itself: an empty ``expected`` was refused as a subject mismatch and
+    # never got there.
+    expected = dict(
+        owner_device=rig.own.device_id,
+        network_id=N,
+        recipient_device=rig.peer.device_id,
+        key=P,
+        scope="session",
+    )
+    record = A.load_record(filed["approval_id"], root=rig.root)
+    # ``approval_record_tampered`` also names a digest mismatch; the digest still
+    # re-derives here, so the refusal can only be the missing operator signature.
+    assert A.request_digest(record) == record["request_digest"]
+    with pytest.raises(MeshRefusal) as refused:
+        finite_share.apply(filed["approval_id"], expected, rig.root)
+    assert refused.value.code == "approval_record_tampered"
     assert A.load_record(filed["approval_id"], root=rig.root)["state"] == "requested"
+
+
+# ---------------------------------------------------------------------------
+# #3436 deferred findings (review 6639762235, QA 6640171041)
+# ---------------------------------------------------------------------------
+
+
+def test_an_env_value_not_shaped_like_a_session_is_not_attribution(
+    root: Path,  # noqa: F811
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """R1-3 / Q-1: the env is the DEFAULT source now, so it gets the one shape rule.
+
+    QA filed ``requested_by.session_id: "ctx-deadbeef"`` on a device-onboard card
+    from a context whose id was not session-shaped. The next slice shows these
+    cards inline in the conversation, where free text would read as a real
+    session; unattributed is the honest answer.
+    """
+    _make_key(root)
+    for value in ("ctx-deadbeef", "x" * 12, f"{SID}\nasked by: operator"):
+        monkeypatch.setenv(SESSION_ID_ENV, value)
+        assert net_cli.main(Namespace(**_cli("request", **{**REQUEST_ARGS, "session": None}))) == 0
+        filed = json.loads(capsys.readouterr().out)["approval_id"]
+        row = next(r for r in approval_rows(root) if r["approval_id"] == filed)
+        assert row["requested_by"]["session_id"] == "", value
+    # A session-shaped value is still attribution (the #3436 contract).
+    monkeypatch.setenv(SESSION_ID_ENV, SID)
+    assert net_cli.main(Namespace(**_cli("request", **{**REQUEST_ARGS, "session": None}))) == 0
+    filed = json.loads(capsys.readouterr().out)["approval_id"]
+    row = next(r for r in approval_rows(root) if r["approval_id"] == filed)
+    assert row["requested_by"]["session_id"] == SID
+
+
+@pytest.mark.asyncio
+async def test_an_explicit_empty_session_flag_wins_over_the_env(
+    root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch  # noqa: F811
+) -> None:
+    """R1-2: ``--session ""`` is an explicit value, so it beats the env.
+
+    Without that, a tool child could not withdraw an UNATTRIBUTED card (filed
+    before upgrade, or from the operator's terminal): the env always won and the
+    store refused ``approval_requester_mismatch``. Real path: bash tool -> this
+    worktree's `lop` -> the store.
+    """
+    _make_key(root)
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    monkeypatch.delenv(SESSION_ID_ENV, raising=False)
+    payload = json.loads(_stdout(await _bash(ToolContext(cwd=str(ws)), _request_cmd())))
+    assert A.load_record(payload["approval_id"], root=root)["requested_by"]["session_id"] == ""
+    withdrawn = json.loads(
+        _stdout(
+            await _bash(
+                ToolContext(cwd=str(ws), session_id=SID),
+                f"{shlex.quote(_LOP)} network approvals withdraw "
+                f"{payload['approval_id']} --session '' --json",
+            )
+        )
+    )
+    assert withdrawn.get("state") == "withdrawn", withdrawn
+
+
+def test_the_session_flags_default_to_absent_not_empty() -> None:
+    """R1-2: the parser must be able to tell "not given" from ``--session ""``."""
+    from local_operator.cli import build_cli_parser
+
+    parser = build_cli_parser()
+    request = parser.parse_args(
+        ["network", "approvals", "request", "--host", "h", "--user", "u", "--host-key-fp", "f"]
+    )
+    withdraw = parser.parse_args(["network", "approvals", "withdraw", "apr_x"])
+    assert request.session is None
+    assert withdraw.session is None
+    assert (
+        parser.parse_args(["network", "approvals", "withdraw", "apr_x", "--session", ""]).session
+        == ""
+    )
+
+
+class _BootReached(BaseException):
+    """Stop a real entry point before it can load credentials or providers."""
+
+
+def test_a_runtime_does_not_keep_its_parents_session_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """R1-1: a runtime started from a tool hosts ITS OWN session.
+
+    Since #3436 every bash/eval child carries the filing session's id, so a
+    runtime launched from one booted with its PARENT's id in ``os.environ``, and
+    its in-process ``secrets.access.session_id()`` readers audited as the parent.
+    Real entry, stopped at its first boot work; the no-strip counterfactual
+    proves the probe can see the leak.
+    """
+    from local_operator.compaction import tokens
+    from local_operator.secrets import access
+    from local_operator.session.runtime import process
+
+    observed: list[str | None] = []
+
+    def first_logged_work(**_kwargs: Any) -> None:
+        observed.append(os.environ.get(SESSION_ID_ENV))
+        raise _BootReached
+
+    # The tokenizer warm-start is not run; the checkpoint is the log setup, before
+    # the lease, the session and anything that can spawn.
+    monkeypatch.setattr(tokens, "warm_tokenizer_in_background", lambda: None)
+    monkeypatch.setattr("local_operator.logger.configure_file_logging", first_logged_work)
+    monkeypatch.setenv(SESSION_ID_ENV, SID)
+    with pytest.raises(_BootReached):
+        process.main()
+    assert observed[-1] is None
+
+    monkeypatch.setenv(SESSION_ID_ENV, SID)
+    monkeypatch.setattr(access, "forget_inherited_session_id", lambda: None)
+    with pytest.raises(_BootReached):
+        process.main()
+    assert observed[-1] == SID
+
+
+def test_an_exec_run_does_not_keep_its_parents_session_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """R1-1: `lop exec` from bash hosts a session in THIS process (foreground) or
+    spawns a worker from this env (``--background``); either way the parent's id
+    must be gone before anything is built. Stopped at its first check."""
+    from local_operator import exec_mode
+    from local_operator.secrets import access
+
+    observed: list[str | None] = []
+
+    def first_check(_args: Any) -> None:
+        observed.append(os.environ.get(SESSION_ID_ENV))
+        raise _BootReached
+
+    monkeypatch.setattr(exec_mode, "reject_detached_supervisor_fd", first_check)
+    monkeypatch.setenv(SESSION_ID_ENV, SID)
+    with pytest.raises(_BootReached):
+        exec_mode.run_exec("hello", Namespace())  # type: ignore[arg-type]
+    assert observed[-1] is None
+
+    monkeypatch.setenv(SESSION_ID_ENV, SID)
+    monkeypatch.setattr(access, "forget_inherited_session_id", lambda: None)
+    with pytest.raises(_BootReached):
+        exec_mode.run_exec("hello", Namespace())  # type: ignore[arg-type]
+    assert observed[-1] == SID
+
+
+def test_a_spawned_session_does_not_inherit_the_callers_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """R1-1: a ``sessions`` spawn is a DIFFERENT session, so its CLI must not file
+    or audit under the caller's id (the bash tool's clear arm, same helper)."""
+    monkeypatch.setenv(SESSION_ID_ENV, SID)
+    env = builtin._sessions_open_env(ToolContext(cwd=".", session_id=SID))
+    assert env.get(SESSION_ID_ENV, "") == ""
+    monkeypatch.delenv(SESSION_ID_ENV)
+    assert SESSION_ID_ENV not in builtin._sessions_open_env(None)
