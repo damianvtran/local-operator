@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ctypes
+import errno
 
 import pytest
 
@@ -98,6 +99,38 @@ def test_linux_disappeared_requires_directory_absence():
     with pytest.raises(o.Unknown, match="existing"):
         o.strict_linux(
             10, 5, listdir=lambda _: ["10"], read=absent, stat=lambda _: object(), clock=lambda: 0
+        )
+
+
+def test_linux_esrch_row_read_is_gone_only_after_the_stat_proof():
+    """xdist-churn witness (PR #3879 gate): a task exiting after open() makes
+    read() raise ESRCH, not ENOENT. It must go through the same stat(path)
+    proof as ENOENT -- gone only when stat says so -- never excuse a live PID."""
+    snapshots = iter([["10"], []])
+
+    def esrch(_):
+        raise ProcessLookupError(errno.ESRCH, "fake")
+
+    def gone(_):
+        raise FileNotFoundError("fake")
+
+    assert o.strict_linux(
+        10, 5, listdir=lambda _: next(snapshots), read=esrch, stat=gone, clock=lambda: 0
+    ) == ([], True, True)
+    # Live directory: one retry, a second ESRCH stays Unknown and names the errno.
+    with pytest.raises(o.Unknown, match=r"unreadable /proc row \(ESRCH\)"):
+        o.strict_linux(
+            10, 5, listdir=lambda _: ["10"], read=esrch, stat=lambda _: object(), clock=lambda: 0
+        )
+
+
+def test_linux_eio_row_read_stays_unknown_and_names_errno():
+    def eio(_):
+        raise OSError(errno.EIO, "fake")
+
+    with pytest.raises(o.Unknown, match=r"unreadable /proc row \(EIO\)"):
+        o.strict_linux(
+            10, 5, listdir=lambda _: ["10"], read=eio, stat=lambda _: object(), clock=lambda: 0
         )
 
 
