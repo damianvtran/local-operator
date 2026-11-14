@@ -198,9 +198,9 @@ def test_thumbnails_are_keyed_by_content_and_width_and_invalidate(tmp_path, monk
     # ``saved.clear()`` below, the test's call found a live thumbnail, saved
     # nothing, and failed "a stale thumbnail must be regenerated" (seen once in CI).
     asset_id = store.thumbnail_candidates(width=480)[0][0]
-    assert not any(t.name == "library-thumbs" and t.is_alive() for t in threading.enumerate()), (
-        "a background thumbnail worker would race this test's direct generation"
-    )
+    assert not any(
+        t.name == "library-thumbs" and t.is_alive() for t in threading.enumerate()
+    ), "a background thumbnail worker would race this test's direct generation"
 
     saved: list[tuple[str, str, int]] = []
 
