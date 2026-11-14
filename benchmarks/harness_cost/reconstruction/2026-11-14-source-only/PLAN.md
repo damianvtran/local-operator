@@ -24,6 +24,16 @@ resolution/builds; then test service health, metering and egress negative contro
 harness identity and oracle correctness before any separately authorized paid run.
 All new evidence uses this campaign ID, never historical run IDs.
 
+## Bounded source-lock follow-on (after approved source-only baseline)
+
+`ENVIRONMENT-AMENDMENT.md` proposes E1–E4 prospectively; none is accepted/frozen.
+OMP/DSH/OpenCode exact source locks/manifests are retained with provenance limits;
+LoP's runtime Python closure remains unavailable. Published OpenCode source/listing
+clarifies the candidate's Bun build, not the lost Go-described historical binary.
+All 26 non-source acquisition records remain on conservative licensing HOLD in
+`binary-eligibility.json`. These source findings need delta review; they do not
+request build admission or change LOCAL-only/one-image/memory/disk requirements.
+
 ## One proposal for Aida
 
 Proceed only as a **new, LOCAL-only, source-reconstructed campaign**, after

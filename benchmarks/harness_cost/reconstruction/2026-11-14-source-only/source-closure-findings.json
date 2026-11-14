@@ -1,0 +1,256 @@
+{
+  "baseline": "229694dad8b53c05ae884508c5247e2a95e9be79",
+  "collection_sources": {
+    "dsh-cli-package": "https://raw.githubusercontent.com/deepseek-ai/deepseek-harness/639ed015397290b3745d163aafe02ffee4aa3f84/apps/cli/package.json",
+    "dsh-patch-2": "https://raw.githubusercontent.com/deepseek-ai/deepseek-harness/639ed015397290b3745d163aafe02ffee4aa3f84/patches/@earendil-works__pi-ai@0.87.1.patch",
+    "dsh-patch-3": "https://raw.githubusercontent.com/deepseek-ai/deepseek-harness/639ed015397290b3745d163aafe02ffee4aa3f84/patches/@electron__osx-sign@1.3.3.patch",
+    "dsh-patch-4": "https://raw.githubusercontent.com/deepseek-ai/deepseek-harness/639ed015397290b3745d163aafe02ffee4aa3f84/patches/@fortune-sheet__core@1.0.4.patch",
+    "dsh-patch-5": "https://raw.githubusercontent.com/deepseek-ai/deepseek-harness/639ed015397290b3745d163aafe02ffee4aa3f84/patches/@fortune-sheet__react@1.0.4.patch",
+    "dsh-patch-6": "https://raw.githubusercontent.com/deepseek-ai/deepseek-harness/639ed015397290b3745d163aafe02ffee4aa3f84/patches/@yao-pkg__pkg@6.21.0.patch",
+    "dsh-patch-7": "https://raw.githubusercontent.com/deepseek-ai/deepseek-harness/639ed015397290b3745d163aafe02ffee4aa3f84/patches/exceljs@4.4.0.patch",
+    "dsh-patch-8": "https://raw.githubusercontent.com/deepseek-ai/deepseek-harness/639ed015397290b3745d163aafe02ffee4aa3f84/patches/node-pty@1.2.0-beta.15.patch",
+    "dsh-provenance": "https://registry.npmjs.org/-/npm/v1/attestations/@deepseek-ai%2fdsh@0.2.0-rc.2",
+    "dsh-ref": "https://api.github.com/repos/deepseek-ai/deepseek-harness/git/ref/tags/v0.2.0-rc.2",
+    "dsh-root-package": "https://raw.githubusercontent.com/deepseek-ai/deepseek-harness/639ed015397290b3745d163aafe02ffee4aa3f84/package.json",
+    "dsh-root-tree": "https://api.github.com/repos/deepseek-ai/deepseek-harness/git/trees/639ed015397290b3745d163aafe02ffee4aa3f84",
+    "dsh-source-lock": "https://raw.githubusercontent.com/deepseek-ai/deepseek-harness/639ed015397290b3745d163aafe02ffee4aa3f84/pnpm-lock.yaml",
+    "dsh-tags": "https://api.github.com/repos/deepseek-ai/deepseek-harness/tags?per_page=100",
+    "dsh-workspace": "https://raw.githubusercontent.com/deepseek-ai/deepseek-harness/639ed015397290b3745d163aafe02ffee4aa3f84/pnpm-workspace.yaml",
+    "oc-linux-listing": "https://unpkg.com/@opencode/cli-linux-x64@2.0.27/?meta",
+    "oc-published-package": "https://unpkg.com/@opencode/cli@2.0.27/package.json",
+    "oc-published-postinstall": "https://unpkg.com/@opencode/cli@2.0.27/postinstall.mjs",
+    "oc-source-build": "https://raw.githubusercontent.com/anomalyco/opencode/1f4d07a4a519185955ae8ab2ea3607805509e386/packages/cli/script/build.ts",
+    "oc-source-lock": "https://raw.githubusercontent.com/anomalyco/opencode/1f4d07a4a519185955ae8ab2ea3607805509e386/bun.lock",
+    "oc-wrapper-listing": "https://unpkg.com/@opencode/cli@2.0.27/?meta",
+    "omp-patch-0": "https://raw.githubusercontent.com/can1357/oh-my-pi/470b7efb67673960d37e3e64584669e6e9caad1c/patches/@ark%252Fschema@0.56.2.patch",
+    "omp-patch-1": "https://raw.githubusercontent.com/can1357/oh-my-pi/470b7efb67673960d37e3e64584669e6e9caad1c/patches/puppeteer-core@25.3.0.patch",
+    "omp-provenance": "https://registry.npmjs.org/-/npm/v1/attestations/@oh-my-pi%2fpi-coding-agent@18.11.2",
+    "omp-ref": "https://api.github.com/repos/can1357/oh-my-pi/git/ref/tags/v18.11.2",
+    "omp-root-package": "https://raw.githubusercontent.com/can1357/oh-my-pi/470b7efb67673960d37e3e64584669e6e9caad1c/package.json",
+    "omp-source-lock": "https://raw.githubusercontent.com/can1357/oh-my-pi/470b7efb67673960d37e3e64584669e6e9caad1c/bun.lock",
+    "omp-source-package": "https://raw.githubusercontent.com/can1357/oh-my-pi/470b7efb67673960d37e3e64584669e6e9caad1c/packages/coding-agent/package.json"
+  },
+  "dsh": {
+    "build_manager_declaration": "pnpm@11.7.0",
+    "historical_installed_tree_recovered": false,
+    "patches": [
+      {
+        "bytes": 4469,
+        "file": "metadata/dsh-patch-2-b9bcce474fb2ac44633dff0fa722816a5bff5451b4575d5874035ea14ba70a4f.txt",
+        "name": "dsh-patch-2",
+        "recorded_at": "2026-11-14T09:44:28.998228+00:00",
+        "sha256": "b9bcce474fb2ac44633dff0fa722816a5bff5451b4575d5874035ea14ba70a4f",
+        "status": "available",
+        "url": "https://raw.githubusercontent.com/deepseek-ai/deepseek-harness/639ed015397290b3745d163aafe02ffee4aa3f84/patches/@earendil-works__pi-ai@0.87.1.patch"
+      },
+      {
+        "bytes": 1403,
+        "file": "metadata/dsh-patch-3-280e7b2816caf01423097d24e79107a66afeb563a348630ce9928ae8499a5861.txt",
+        "name": "dsh-patch-3",
+        "recorded_at": "2026-11-14T09:44:29.095328+00:00",
+        "sha256": "280e7b2816caf01423097d24e79107a66afeb563a348630ce9928ae8499a5861",
+        "status": "available",
+        "url": "https://raw.githubusercontent.com/deepseek-ai/deepseek-harness/639ed015397290b3745d163aafe02ffee4aa3f84/patches/@electron__osx-sign@1.3.3.patch"
+      },
+      {
+        "bytes": 3658,
+        "file": "metadata/dsh-patch-4-8791a230763dbf853fd65d627c68c31de37209992851377855e16cf08ea70532.txt",
+        "name": "dsh-patch-4",
+        "recorded_at": "2026-11-14T09:44:29.101040+00:00",
+        "sha256": "8791a230763dbf853fd65d627c68c31de37209992851377855e16cf08ea70532",
+        "status": "available",
+        "url": "https://raw.githubusercontent.com/deepseek-ai/deepseek-harness/639ed015397290b3745d163aafe02ffee4aa3f84/patches/@fortune-sheet__core@1.0.4.patch"
+      },
+      {
+        "bytes": 6722,
+        "file": "metadata/dsh-patch-5-2932e52e79afcd4ced08cfa123b5eded786c85043da32f622f3e80af6fc96c37.txt",
+        "name": "dsh-patch-5",
+        "recorded_at": "2026-11-14T09:44:29.115958+00:00",
+        "sha256": "2932e52e79afcd4ced08cfa123b5eded786c85043da32f622f3e80af6fc96c37",
+        "status": "available",
+        "url": "https://raw.githubusercontent.com/deepseek-ai/deepseek-harness/639ed015397290b3745d163aafe02ffee4aa3f84/patches/@fortune-sheet__react@1.0.4.patch"
+      },
+      {
+        "bytes": 35056,
+        "file": "metadata/dsh-patch-7-c1bf8ac8f319dab382f08e3a669b715e691d46c703ac5a4163eb383fbedd1d48.txt",
+        "name": "dsh-patch-7",
+        "recorded_at": "2026-11-14T09:44:29.188167+00:00",
+        "sha256": "c1bf8ac8f319dab382f08e3a669b715e691d46c703ac5a4163eb383fbedd1d48",
+        "status": "available",
+        "url": "https://raw.githubusercontent.com/deepseek-ai/deepseek-harness/639ed015397290b3745d163aafe02ffee4aa3f84/patches/exceljs@4.4.0.patch"
+      },
+      {
+        "bytes": 1324,
+        "file": "metadata/dsh-patch-8-b40ae545608897914bd25fb009c97eeac478c34e8a910298ddcb01b746534bb0.txt",
+        "name": "dsh-patch-8",
+        "recorded_at": "2026-11-14T09:44:29.224096+00:00",
+        "sha256": "b40ae545608897914bd25fb009c97eeac478c34e8a910298ddcb01b746534bb0",
+        "status": "available",
+        "url": "https://raw.githubusercontent.com/deepseek-ai/deepseek-harness/639ed015397290b3745d163aafe02ffee4aa3f84/patches/node-pty@1.2.0-beta.15.patch"
+      },
+      {
+        "bytes": 400454,
+        "file": "metadata/dsh-patch-6-75891fc22b277c145cafeab83e41baf4a70f5b8fe6dc0801c6a0b922d7ee88c7.txt",
+        "name": "dsh-patch-6",
+        "recorded_at": "2026-11-14T09:44:29.184705+00:00",
+        "sha256": "75891fc22b277c145cafeab83e41baf4a70f5b8fe6dc0801c6a0b922d7ee88c7",
+        "status": "available",
+        "url": "https://raw.githubusercontent.com/deepseek-ai/deepseek-harness/639ed015397290b3745d163aafe02ffee4aa3f84/patches/@yao-pkg__pkg@6.21.0.patch"
+      }
+    ],
+    "source_binding_strength": "tag and matching source CLI version; publish attestation unavailable",
+    "source_cli_manifest": {
+      "bytes": 7473,
+      "file": "metadata/dsh-cli-package-96845d9efaa4ab078f1405fbe28445b606b5ab79377fd607866dd46b0c0b52c1.json",
+      "name": "dsh-cli-package",
+      "recorded_at": "2026-11-14T09:42:19.552492+00:00",
+      "sha256": "96845d9efaa4ab078f1405fbe28445b606b5ab79377fd607866dd46b0c0b52c1",
+      "status": "available",
+      "url": "https://raw.githubusercontent.com/deepseek-ai/deepseek-harness/639ed015397290b3745d163aafe02ffee4aa3f84/apps/cli/package.json"
+    },
+    "source_lock": {
+      "bytes": 1020774,
+      "file": "metadata/dsh-source-lock-80fe05eae33582ae26839afd05f1965f9b0e4be11034ddf9797af6085d5ba9b1.txt",
+      "name": "dsh-source-lock",
+      "recorded_at": "2026-11-14T09:42:54.333806+00:00",
+      "sha256": "80fe05eae33582ae26839afd05f1965f9b0e4be11034ddf9797af6085d5ba9b1",
+      "status": "available",
+      "url": "https://raw.githubusercontent.com/deepseek-ai/deepseek-harness/639ed015397290b3745d163aafe02ffee4aa3f84/pnpm-lock.yaml"
+    },
+    "source_revision": "639ed015397290b3745d163aafe02ffee4aa3f84",
+    "unresolved": [
+      "independent publish-artifact-to-source attestation",
+      "pnpm/Node executable hashes",
+      "native/lifecycle build dependencies and platform qualification"
+    ],
+    "version": "0.2.0-rc.2",
+    "workspace": {
+      "bytes": 5411,
+      "file": "metadata/dsh-workspace-8486cab8bfbba2b0f740eac3d5109132b18a3bd53d3b07aebf441e4f1462eb4e.txt",
+      "name": "dsh-workspace",
+      "recorded_at": "2026-11-14T09:42:54.335707+00:00",
+      "sha256": "8486cab8bfbba2b0f740eac3d5109132b18a3bd53d3b07aebf441e4f1462eb4e",
+      "status": "available",
+      "url": "https://raw.githubusercontent.com/deepseek-ai/deepseek-harness/639ed015397290b3745d163aafe02ffee4aa3f84/pnpm-workspace.yaml"
+    }
+  },
+  "local_operator": {
+    "evidence": "exact git tree has pyproject.toml and development flake; no root Python runtime lock. Unrelated extension/OSWorld locks are not substituted.",
+    "nix_flake_locks_python_dependencies": false,
+    "nix_inputs_lock_retained": true,
+    "root_python_lock_available": false,
+    "source_revision": "500883ef56ca504325ffd80c5b90bf2435d00e3f",
+    "unresolved": [
+      "complete runtime Python dependency lock including extras and build backend",
+      "interpreter/installer/OS identities",
+      "installed tree qualification"
+    ],
+    "version": "500883ef-v0.94.22"
+  },
+  "omp": {
+    "build_manager_declaration": "bun@>=1.4",
+    "historical_installed_tree_recovered": false,
+    "patches": [
+      {
+        "bytes": 1431,
+        "file": "metadata/omp-patch-0-5421df0afd80cba41063a8db9c841ac7ca0dea1635f716d5fe28c0de66f979b2.txt",
+        "name": "omp-patch-0",
+        "recorded_at": "2026-11-14T09:44:28.994286+00:00",
+        "sha256": "5421df0afd80cba41063a8db9c841ac7ca0dea1635f716d5fe28c0de66f979b2",
+        "status": "available",
+        "url": "https://raw.githubusercontent.com/can1357/oh-my-pi/470b7efb67673960d37e3e64584669e6e9caad1c/patches/@ark%252Fschema@0.56.2.patch"
+      },
+      {
+        "bytes": 37801,
+        "file": "metadata/omp-patch-1-6b1a58844185cd5096b7cff14012d171d01d344d4d3d2206d65975d67ed6c5d7.txt",
+        "name": "omp-patch-1",
+        "recorded_at": "2026-11-14T09:44:28.996254+00:00",
+        "sha256": "6b1a58844185cd5096b7cff14012d171d01d344d4d3d2206d65975d67ed6c5d7",
+        "status": "available",
+        "url": "https://raw.githubusercontent.com/can1357/oh-my-pi/470b7efb67673960d37e3e64584669e6e9caad1c/patches/puppeteer-core@25.3.0.patch"
+      }
+    ],
+    "provenance_signature_verified": false,
+    "provenance_subject_matches_npm_sha512": true,
+    "root_manifest": {
+      "bytes": 9869,
+      "file": "metadata/omp-root-package-0102822f4173b829deb2d8618170e64fbfa7de463abb4d91540a7c2eea445a4e.json",
+      "name": "omp-root-package",
+      "recorded_at": "2026-11-14T09:42:19.651115+00:00",
+      "sha256": "0102822f4173b829deb2d8618170e64fbfa7de463abb4d91540a7c2eea445a4e",
+      "status": "available",
+      "url": "https://raw.githubusercontent.com/can1357/oh-my-pi/470b7efb67673960d37e3e64584669e6e9caad1c/package.json"
+    },
+    "source_binding_strength": "public npm provenance statement plus matching tag/version; signature verification not performed",
+    "source_cli_manifest": {
+      "bytes": 16030,
+      "file": "metadata/omp-source-package-e90dadc329588a6c6f0ac930a9763843793bdde686982958743331e1e2a63d61.json",
+      "name": "omp-source-package",
+      "recorded_at": "2026-11-14T09:41:50.509971+00:00",
+      "sha256": "e90dadc329588a6c6f0ac930a9763843793bdde686982958743331e1e2a63d61",
+      "status": "available",
+      "url": "https://raw.githubusercontent.com/can1357/oh-my-pi/470b7efb67673960d37e3e64584669e6e9caad1c/packages/coding-agent/package.json"
+    },
+    "source_lock": {
+      "bytes": 160768,
+      "file": "metadata/omp-source-lock-526f07ffa88e93d82e3a6fee10dddbf7e45194b5056565bdf7d42cd6dd88f13d.txt",
+      "name": "omp-source-lock",
+      "recorded_at": "2026-11-14T09:41:50.501727+00:00",
+      "sha256": "526f07ffa88e93d82e3a6fee10dddbf7e45194b5056565bdf7d42cd6dd88f13d",
+      "status": "available",
+      "url": "https://raw.githubusercontent.com/can1357/oh-my-pi/470b7efb67673960d37e3e64584669e6e9caad1c/bun.lock"
+    },
+    "source_revision": "470b7efb67673960d37e3e64584669e6e9caad1c",
+    "unresolved": [
+      "exact Bun executable/version/hash",
+      "native build tools and optional assets/lifecycle downloads",
+      "target closure qualification and installed tree"
+    ],
+    "version": "18.11.2"
+  },
+  "opencode": {
+    "historical_runtime_identity": "unrecoverable from surviving evidence; original installed binary/attestation missing",
+    "linux_binary_acquired": false,
+    "linux_declared_binary": {
+      "integrity": "sha256-4mqhAc/cQPDmgLqmCf8Y8TG7xrkcYP3BGysuLLpygaQ=",
+      "path": "/bin/opencode",
+      "size": 210367968,
+      "type": "application/octet-stream"
+    },
+    "pinned_source_build_uses": "Bun.build compile and Bun release asset fetching; not Go",
+    "published_postinstall_copies_platform_binary": true,
+    "published_source_checks": [
+      {
+        "file": "/package.json",
+        "listing_sha256": "b23a0a02176e147275909f481d16d7709d98fc469f56014f8ee9da9a4aa56760",
+        "matches": true,
+        "observed_sha256": "b23a0a02176e147275909f481d16d7709d98fc469f56014f8ee9da9a4aa56760"
+      },
+      {
+        "file": "/postinstall.mjs",
+        "listing_sha256": "8a76bec72d7174f93fac97790d985dee02eadf8b301054a5df61edc7b33996bd",
+        "matches": true,
+        "observed_sha256": "8a76bec72d7174f93fac97790d985dee02eadf8b301054a5df61edc7b33996bd"
+      }
+    ],
+    "source_lock": {
+      "bytes": 1096081,
+      "file": "metadata/oc-source-lock-97b04a1407c4cf48ad4e3fc7c0c85932188e4d0e97ca8005309420062887f60f.txt",
+      "name": "oc-source-lock",
+      "recorded_at": "2026-11-14T09:42:54.423134+00:00",
+      "sha256": "97b04a1407c4cf48ad4e3fc7c0c85932188e4d0e97ca8005309420062887f60f",
+      "status": "available",
+      "url": "https://raw.githubusercontent.com/anomalyco/opencode/1f4d07a4a519185955ae8ab2ea3607805509e386/bun.lock"
+    },
+    "source_revision": "1f4d07a4a519185955ae8ab2ea3607805509e386",
+    "unresolved": [
+      "historical Go-described identity discrepancy",
+      "exact Bun compiler release and build-time release assets",
+      "native/platform/source build equivalence",
+      "original installed-file identity"
+    ],
+    "version": "2.0.27"
+  },
+  "runtime_build_ready": false,
+  "source_receipt": "metadata-receipt-20261114T094539541257Z.jsonl"
+}

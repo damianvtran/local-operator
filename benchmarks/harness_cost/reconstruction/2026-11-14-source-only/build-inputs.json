@@ -39,9 +39,17 @@
       "artifact_metadata": [
         "dsh"
       ],
-      "dependency_lock": null,
+      "dependency_lock": "metadata/dsh-source-lock-80fe05eae33582ae26839afd05f1965f9b0e4be11034ddf9797af6085d5ba9b1.txt",
       "original_installed_tree_recovered": false,
-      "source_revision": null,
+      "remaining_gates": [
+        "independent publish-artifact-to-source attestation",
+        "pnpm/Node executable hashes",
+        "native/lifecycle build dependencies and platform qualification"
+      ],
+      "runtime_build_closure_complete": false,
+      "source_lock_manifest_recovered": true,
+      "source_revision": "639ed015397290b3745d163aafe02ffee4aa3f84",
+      "source_revision_origin": "new-public-source-candidate-not-historical-installation-recovery",
       "version": "0.2.0-rc.2"
     },
     "hermes": {
@@ -59,7 +67,9 @@
         "lop-pyproject"
       ],
       "dependency_lock": null,
+      "nix_development_inputs_retained": true,
       "original_installed_tree_recovered": false,
+      "runtime_python_lock_recovered": false,
       "source_revision": "500883ef56ca504325ffd80c5b90bf2435d00e3f",
       "version": "500883ef-v0.94.22"
     },
@@ -67,9 +77,17 @@
       "artifact_metadata": [
         "omp"
       ],
-      "dependency_lock": null,
+      "dependency_lock": "metadata/omp-source-lock-526f07ffa88e93d82e3a6fee10dddbf7e45194b5056565bdf7d42cd6dd88f13d.txt",
       "original_installed_tree_recovered": false,
-      "source_revision": null,
+      "remaining_gates": [
+        "exact Bun executable/version/hash",
+        "native build tools and optional assets/lifecycle downloads",
+        "target closure qualification and installed tree"
+      ],
+      "runtime_build_closure_complete": false,
+      "source_lock_manifest_recovered": true,
+      "source_revision": "470b7efb67673960d37e3e64584669e6e9caad1c",
+      "source_revision_origin": "new-public-source-candidate-not-historical-installation-recovery",
       "version": "18.11.2"
     },
     "opencode": {
@@ -79,11 +97,20 @@
         "opencode-cli-package",
         "opencode-install"
       ],
+      "candidate_build_mechanism": "Bun compile; published wrapper copies optional platform executable",
       "dependency_lock": null,
       "exact_artifact_available": true,
+      "historical_identity_recovered": false,
       "historical_source_revision": null,
       "identity_gate": "Historical adapter describes Go binary; newly inspected versioned source has no Go files. Resolve/review deleted-runtime identity discrepancy before freeze; never silently substitute.",
       "original_installed_tree_recovered": false,
+      "remaining_gates": [
+        "historical Go-described identity discrepancy",
+        "exact Bun compiler release and build-time release assets",
+        "native/platform/source build equivalence",
+        "original installed-file identity"
+      ],
+      "source_dependency_lock": "metadata/oc-source-lock-97b04a1407c4cf48ad4e3fc7c0c85932188e4d0e97ca8005309420062887f60f.txt",
       "source_revision": "1f4d07a4a519185955ae8ab2ea3607805509e386",
       "source_revision_origin": "new-public-versioned-source-candidate-not-historical-runtime-recovery",
       "version": "2.0.27"
@@ -114,5 +141,11 @@
     "qualified": false
   },
   "paid_dispatch_authorized": false,
+  "prospective_amendment": {
+    "acceptance": "PROPOSED-NOT-FROZEN",
+    "applies_to_all_arms": true,
+    "build_admission_requested": false,
+    "document": "ENVIRONMENT-AMENDMENT.md"
+  },
   "status": "DRAFT-BLOCKED-UNPINNED-INPUTS"
 }

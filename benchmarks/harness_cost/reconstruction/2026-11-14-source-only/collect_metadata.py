@@ -46,6 +46,11 @@ def metadata_sources():
     if bindings.exists():
         for row in json.loads(bindings.read_text())['observations']:
             sources['image-' + row['task']] = row['source_metadata_url']
+    closure = HERE / 'source-closure-findings.json'
+    if closure.exists():
+        # Preserve exact source/metadata URLs for replay without invoking any
+        # package manager or downloading the platform binaries they describe.
+        sources.update(json.loads(closure.read_text())['collection_sources'])
     return sources
 
 

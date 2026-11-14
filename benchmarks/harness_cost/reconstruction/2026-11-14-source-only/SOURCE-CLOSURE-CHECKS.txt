@@ -1,0 +1,26 @@
+Bounded source closure follow-on from approved 229694dad8b5; no binary/media acquisition or execution
+UTC 2026-11-14T09:48:44Z
+test_collector_replays_retained_source_urls_without_network (test_environment_sources.EnvironmentSourceTests.test_collector_replays_retained_source_urls_without_network) ... ok
+test_dsh_source_version_and_all_patch_hashes_are_lock_bound (test_environment_sources.EnvironmentSourceTests.test_dsh_source_version_and_all_patch_hashes_are_lock_bound) ... ok
+test_licensing_and_build_admission_remain_blocked (test_environment_sources.EnvironmentSourceTests.test_licensing_and_build_admission_remain_blocked) ... ok
+test_omp_statement_binds_source_and_distribution_without_signature_claim (test_environment_sources.EnvironmentSourceTests.test_omp_statement_binds_source_and_distribution_without_signature_claim) ... ok
+test_opencode_source_files_match_listing_but_binary_is_unacquired (test_environment_sources.EnvironmentSourceTests.test_opencode_source_files_match_listing_but_binary_is_unacquired) ... ok
+test_receipt_bytes_and_collection_urls_are_source_metadata_only (test_environment_sources.EnvironmentSourceTests.test_receipt_bytes_and_collection_urls_are_source_metadata_only) ... ok
+test_exact_local_canary_is_not_in_publication_index (test_reconstruction.ReconstructionTests.test_exact_local_canary_is_not_in_publication_index) ... ok
+test_hash_negative_control (test_reconstruction.ReconstructionTests.test_hash_negative_control) ... ok
+test_image_never_downloaded (test_reconstruction.ReconstructionTests.test_image_never_downloaded) ... ok
+test_new_image_observations_match_retained_metadata_not_historical_claims (test_reconstruction.ReconstructionTests.test_new_image_observations_match_retained_metadata_not_historical_claims) ... ok
+test_path_escape_rejected_without_network (test_reconstruction.ReconstructionTests.test_path_escape_rejected_without_network) ... ok
+test_privacy_scanner_negative_control (test_reconstruction.ReconstructionTests.test_privacy_scanner_negative_control) ... ok
+test_proposed_host_lock_retains_dependency_edges (test_reconstruction.ReconstructionTests.test_proposed_host_lock_retains_dependency_edges) ... ok
+test_public_fixture_classification_is_path_digest_and_rule_bound (test_reconstruction.ReconstructionTests.test_public_fixture_classification_is_path_digest_and_rule_bound) ... ok
+test_static_verification_real_command_and_dispatch_refusal (test_reconstruction.ReconstructionTests.test_static_verification_real_command_and_dispatch_refusal) ... ok
+test_tampered_per_task_complete_and_gaps_are_rejected (test_reconstruction.ReconstructionTests.test_tampered_per_task_complete_and_gaps_are_rejected) ... ok
+
+----------------------------------------------------------------------
+Ran 16 tests in 3.898s
+
+OK
+{"classified_public_fixtures": [{"classification": "exact-public-FAKE-canary-source", "path": "payloads/sanitize-git-repo/tests/test_outputs.py", "rules": ["aws-access-id", "github-token", "huggingface-token"]}], "errors": [], "file_statuses": {"exact_match": 381, "not_downloaded_non_source": 26}, "historical_checks": 37, "kind": "static-source-verification", "metadata_receipt_rows_checked": 71, "privacy_pattern_hits": [], "runtime_qualified": false}
+{"classified_public_fixtures": [{"classification": "exact-public-FAKE-canary-source", "path": "payloads/sanitize-git-repo/tests/test_outputs.py", "rules": ["aws-access-id", "github-token", "huggingface-token"]}], "errors": ["campaign incomplete: exact recovery gate refuses dispatch"], "file_statuses": {"exact_match": 381, "not_downloaded_non_source": 26}, "historical_checks": 37, "kind": "static-source-verification", "metadata_receipt_rows_checked": 71, "privacy_pattern_hits": [], "runtime_qualified": false}
+Incomplete gate exit=1 (expected 1)

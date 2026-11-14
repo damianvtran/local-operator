@@ -59,11 +59,11 @@ not a complete install lock. Fetching package metadata did not download binaries
 |---|---|---|---|
 | claude-code | 2.1.274 | npm wrapper and Linux-x64 package SRI | original installed bytes/postinstall attestation |
 | codex-best | 0.147.0 | npm wrapper and Linux-x64 package SRI | original installed bytes/runtime attestation |
-| omp | 18.11.2 | npm artifact SRI | transitive/optional dependency closure; original compiled binary |
-| dsh | 0.2.0-rc.2 | npm artifact SRI | transitive dependency closure; original installed tree |
+| omp | 18.11.2 | npm SRI + provenance-reported source 470b7efb67673960d37e3e64584669e6e9caad1c, exact bun.lock/manifests/patches | exact Bun/native/optional build inputs; original installed tree; provenance signature not verified |
+| dsh | 0.2.0-rc.2 | npm SRI + tagged source 639ed015397290b3745d163aafe02ffee4aa3f84, exact pnpm lock/workspace/manifests/patches | publish/source attestation, manager/Node/native hooks and original installed tree |
 | local-operator | 500883ef56ca504325ffd80c5b90bf2435d00e3f, v0.94.22 | exact public pyproject bytes | upstream uv.lock 404; runtime and build dependency closures |
 | hermes | f0d94882e89ab8d4098b5bb2f166adfb9ee0a0ab, v0.22.6 | exact pyproject and uv.lock | target extras/platform selection, Python/build tools, runtime attestation |
-| opencode | 2.0.27 | correct scoped @opencode/cli + @opencode/cli-linux-x64 SRI; tag/source 1f4d07a4a519185955ae8ab2ea3607805509e386 | original installed bytes/runtime identity and target CPU qualification unverified; older guessed release/npm paths 404 |
+| opencode | 2.0.27 | scoped npm SRI; published source files match listing integrity; exact source bun.lock/build script at 1f4d07a4a519185955ae8ab2ea3607805509e386 | source uses Bun compile, not historical Go description; original identity cannot be recovered; compiler/assets/CPU qualification unresolved |
 
 Future separately authorized build sequence (NOT executed):
 
@@ -94,6 +94,16 @@ Future separately authorized build sequence (NOT executed):
 This recipe is intentionally **not buildable yet**: unresolved inputs must not
 be replaced with guesses. A Dockerfile with moving defaults would falsely imply
 reproducibility; this document and partial locks expose the exact blockers instead.
+
+## Source-lock follow-on and prospective environment amendment
+
+See `ENVIRONMENT-AMENDMENT.md` and `source-closure-findings.json` for the bounded
+follow-on from reviewed baseline 229694dad8b5. OMP/DSH/OpenCode exact upstream
+source locks are now retained; that is not a complete native/runtime build closure.
+LoP's development flake is not a pip dependency lock. All 26 binary/media inputs
+remain uncleared for acquisition under conservative `binary-eligibility.json`.
+E1–E4 propose explicit symmetric NEW environment/identity/task-rights gates before
+outcomes; none is accepted or frozen. No heavy admission has been requested.
 
 ## Prospective identity amendment — proposed, NOT approved/frozen
 

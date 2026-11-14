@@ -1181,6 +1181,276 @@
       "sha256": "218684e3a651c0fb281e6f6c9c77b10e2c82e690afa338f807547ee837a9dae1",
       "status": "available",
       "url": "https://hub.docker.com/v2/repositories/alexgshaw/sanitize-git-repo/tags/20251031"
+    },
+    {
+      "error": "HTTP Error 404: Not Found",
+      "name": "dsh-provenance",
+      "recorded_at": "2026-11-14T09:41:02.065028+00:00",
+      "sha256": null,
+      "status": "unavailable",
+      "url": "https://registry.npmjs.org/-/npm/v1/attestations/@deepseek-ai%2fdsh@0.2.0-rc.2"
+    },
+    {
+      "bytes": 340,
+      "file": "metadata/omp-ref-0332408577143a4b4be75171f827f55ce420ec0410fc486ec8214151ec6a20d8.json",
+      "name": "omp-ref",
+      "recorded_at": "2026-11-14T09:41:02.069865+00:00",
+      "sha256": "0332408577143a4b4be75171f827f55ce420ec0410fc486ec8214151ec6a20d8",
+      "status": "available",
+      "url": "https://api.github.com/repos/can1357/oh-my-pi/git/ref/tags/v18.11.2"
+    },
+    {
+      "error": "HTTP Error 404: Not Found",
+      "name": "dsh-ref",
+      "recorded_at": "2026-11-14T09:41:02.296452+00:00",
+      "sha256": null,
+      "status": "unavailable",
+      "url": "https://api.github.com/repos/deepseek-ai/deepseek-harness/git/ref/tags/v0.2.0-rc.2"
+    },
+    {
+      "bytes": 14581,
+      "file": "metadata/omp-provenance-3d5aa5739dc14294c48925fa25782643e6d9a71a464ac518b51cb2e7bf9839f4.json",
+      "name": "omp-provenance",
+      "recorded_at": "2026-11-14T09:41:02.061447+00:00",
+      "sha256": "3d5aa5739dc14294c48925fa25782643e6d9a71a464ac518b51cb2e7bf9839f4",
+      "status": "available",
+      "url": "https://registry.npmjs.org/-/npm/v1/attestations/@oh-my-pi%2fpi-coding-agent@18.11.2"
+    },
+    {
+      "bytes": 609,
+      "file": "metadata/oc-wrapper-listing-9a0fb0e2567da1322fdcabb7a08ada612e0cc27417bdfcf116c8af77261eb196.json",
+      "name": "oc-wrapper-listing",
+      "recorded_at": "2026-11-14T09:41:02.312367+00:00",
+      "sha256": "9a0fb0e2567da1322fdcabb7a08ada612e0cc27417bdfcf116c8af77261eb196",
+      "status": "available",
+      "url": "https://unpkg.com/@opencode/cli@2.0.27/?meta"
+    },
+    {
+      "bytes": 349,
+      "file": "metadata/oc-linux-listing-92dfe4cc329f7e6e4144868bc264c593bd13ac145aeb07d63b14fe2d5af73d72.json",
+      "name": "oc-linux-listing",
+      "recorded_at": "2026-11-14T09:41:02.456204+00:00",
+      "sha256": "92dfe4cc329f7e6e4144868bc264c593bd13ac145aeb07d63b14fe2d5af73d72",
+      "status": "available",
+      "url": "https://unpkg.com/@opencode/cli-linux-x64@2.0.27/?meta"
+    },
+    {
+      "bytes": 16030,
+      "file": "metadata/omp-source-package-e90dadc329588a6c6f0ac930a9763843793bdde686982958743331e1e2a63d61.json",
+      "name": "omp-source-package",
+      "recorded_at": "2026-11-14T09:41:50.509971+00:00",
+      "sha256": "e90dadc329588a6c6f0ac930a9763843793bdde686982958743331e1e2a63d61",
+      "status": "available",
+      "url": "https://raw.githubusercontent.com/can1357/oh-my-pi/470b7efb67673960d37e3e64584669e6e9caad1c/packages/coding-agent/package.json"
+    },
+    {
+      "bytes": 19421,
+      "file": "metadata/dsh-tags-48aecc6fc98a5deb90df9693dfb767fb3829825ff8e89e300348e55e9d584a06.json",
+      "name": "dsh-tags",
+      "recorded_at": "2026-11-14T09:41:50.486927+00:00",
+      "sha256": "48aecc6fc98a5deb90df9693dfb767fb3829825ff8e89e300348e55e9d584a06",
+      "status": "available",
+      "url": "https://api.github.com/repos/deepseek-ai/deepseek-harness/tags?per_page=100"
+    },
+    {
+      "bytes": 160768,
+      "file": "metadata/omp-source-lock-526f07ffa88e93d82e3a6fee10dddbf7e45194b5056565bdf7d42cd6dd88f13d.txt",
+      "name": "omp-source-lock",
+      "recorded_at": "2026-11-14T09:41:50.501727+00:00",
+      "sha256": "526f07ffa88e93d82e3a6fee10dddbf7e45194b5056565bdf7d42cd6dd88f13d",
+      "status": "available",
+      "url": "https://raw.githubusercontent.com/can1357/oh-my-pi/470b7efb67673960d37e3e64584669e6e9caad1c/bun.lock"
+    },
+    {
+      "bytes": 1014,
+      "file": "metadata/oc-published-package-b23a0a02176e147275909f481d16d7709d98fc469f56014f8ee9da9a4aa56760.json",
+      "name": "oc-published-package",
+      "recorded_at": "2026-11-14T09:41:50.618995+00:00",
+      "sha256": "b23a0a02176e147275909f481d16d7709d98fc469f56014f8ee9da9a4aa56760",
+      "status": "available",
+      "url": "https://unpkg.com/@opencode/cli@2.0.27/package.json"
+    },
+    {
+      "bytes": 6024,
+      "file": "metadata/oc-published-postinstall-8a76bec72d7174f93fac97790d985dee02eadf8b301054a5df61edc7b33996bd.txt",
+      "name": "oc-published-postinstall",
+      "recorded_at": "2026-11-14T09:41:50.676690+00:00",
+      "sha256": "8a76bec72d7174f93fac97790d985dee02eadf8b301054a5df61edc7b33996bd",
+      "status": "available",
+      "url": "https://unpkg.com/@opencode/cli@2.0.27/postinstall.mjs"
+    },
+    {
+      "bytes": 7473,
+      "file": "metadata/dsh-cli-package-96845d9efaa4ab078f1405fbe28445b606b5ab79377fd607866dd46b0c0b52c1.json",
+      "name": "dsh-cli-package",
+      "recorded_at": "2026-11-14T09:42:19.552492+00:00",
+      "sha256": "96845d9efaa4ab078f1405fbe28445b606b5ab79377fd607866dd46b0c0b52c1",
+      "status": "available",
+      "url": "https://raw.githubusercontent.com/deepseek-ai/deepseek-harness/639ed015397290b3745d163aafe02ffee4aa3f84/apps/cli/package.json"
+    },
+    {
+      "bytes": 17200,
+      "file": "metadata/dsh-root-package-a303ffb8994be8e7a874bc887db1abd47a77a6e08872e65f1d65281f43eab91b.json",
+      "name": "dsh-root-package",
+      "recorded_at": "2026-11-14T09:42:19.552332+00:00",
+      "sha256": "a303ffb8994be8e7a874bc887db1abd47a77a6e08872e65f1d65281f43eab91b",
+      "status": "available",
+      "url": "https://raw.githubusercontent.com/deepseek-ai/deepseek-harness/639ed015397290b3745d163aafe02ffee4aa3f84/package.json"
+    },
+    {
+      "bytes": 9869,
+      "file": "metadata/omp-root-package-0102822f4173b829deb2d8618170e64fbfa7de463abb4d91540a7c2eea445a4e.json",
+      "name": "omp-root-package",
+      "recorded_at": "2026-11-14T09:42:19.651115+00:00",
+      "sha256": "0102822f4173b829deb2d8618170e64fbfa7de463abb4d91540a7c2eea445a4e",
+      "status": "available",
+      "url": "https://raw.githubusercontent.com/can1357/oh-my-pi/470b7efb67673960d37e3e64584669e6e9caad1c/package.json"
+    },
+    {
+      "bytes": 14053,
+      "file": "metadata/dsh-root-tree-475caa114c7739b35bd7c528e5ae9672b36e913f142e57c43165620fc81223ca.json",
+      "name": "dsh-root-tree",
+      "recorded_at": "2026-11-14T09:42:19.551670+00:00",
+      "sha256": "475caa114c7739b35bd7c528e5ae9672b36e913f142e57c43165620fc81223ca",
+      "status": "available",
+      "url": "https://api.github.com/repos/deepseek-ai/deepseek-harness/git/trees/639ed015397290b3745d163aafe02ffee4aa3f84"
+    },
+    {
+      "bytes": 5411,
+      "file": "metadata/dsh-workspace-8486cab8bfbba2b0f740eac3d5109132b18a3bd53d3b07aebf441e4f1462eb4e.txt",
+      "name": "dsh-workspace",
+      "recorded_at": "2026-11-14T09:42:54.335707+00:00",
+      "sha256": "8486cab8bfbba2b0f740eac3d5109132b18a3bd53d3b07aebf441e4f1462eb4e",
+      "status": "available",
+      "url": "https://raw.githubusercontent.com/deepseek-ai/deepseek-harness/639ed015397290b3745d163aafe02ffee4aa3f84/pnpm-workspace.yaml"
+    },
+    {
+      "bytes": 11170,
+      "file": "metadata/oc-source-build-2a849e8722c6607752817a0fb4dd1a99c149062da2582d1c763a7e08a3a999e2.txt",
+      "name": "oc-source-build",
+      "recorded_at": "2026-11-14T09:42:54.337066+00:00",
+      "sha256": "2a849e8722c6607752817a0fb4dd1a99c149062da2582d1c763a7e08a3a999e2",
+      "status": "available",
+      "url": "https://raw.githubusercontent.com/anomalyco/opencode/1f4d07a4a519185955ae8ab2ea3607805509e386/packages/cli/script/build.ts"
+    },
+    {
+      "bytes": 1020774,
+      "file": "metadata/dsh-source-lock-80fe05eae33582ae26839afd05f1965f9b0e4be11034ddf9797af6085d5ba9b1.txt",
+      "name": "dsh-source-lock",
+      "recorded_at": "2026-11-14T09:42:54.333806+00:00",
+      "sha256": "80fe05eae33582ae26839afd05f1965f9b0e4be11034ddf9797af6085d5ba9b1",
+      "status": "available",
+      "url": "https://raw.githubusercontent.com/deepseek-ai/deepseek-harness/639ed015397290b3745d163aafe02ffee4aa3f84/pnpm-lock.yaml"
+    },
+    {
+      "bytes": 1096081,
+      "file": "metadata/oc-source-lock-97b04a1407c4cf48ad4e3fc7c0c85932188e4d0e97ca8005309420062887f60f.txt",
+      "name": "oc-source-lock",
+      "recorded_at": "2026-11-14T09:42:54.423134+00:00",
+      "sha256": "97b04a1407c4cf48ad4e3fc7c0c85932188e4d0e97ca8005309420062887f60f",
+      "status": "available",
+      "url": "https://raw.githubusercontent.com/anomalyco/opencode/1f4d07a4a519185955ae8ab2ea3607805509e386/bun.lock"
+    },
+    {
+      "acquisition": "retained git object, no network",
+      "bytes": 583,
+      "file": "metadata/lop-flake-nix-9f31d3d8a8241c3e1851a75424ad5a9bd1ed2ade424c21374aebb08f43b552e8.txt",
+      "name": "lop-flake.nix",
+      "recorded_at": "2026-11-14T09:42:55.098481+00:00",
+      "sha256": "9f31d3d8a8241c3e1851a75424ad5a9bd1ed2ade424c21374aebb08f43b552e8",
+      "status": "available",
+      "url": "https://github.com/damianvtran/local-operator/blob/500883ef56ca504325ffd80c5b90bf2435d00e3f/flake.nix"
+    },
+    {
+      "acquisition": "retained git object, no network",
+      "bytes": 1497,
+      "file": "metadata/lop-flake-lock-2847abefaa9fa8cf3687d7f6297aaa04d1640348188b4d70588e9ec1adb4f66b.txt",
+      "name": "lop-flake.lock",
+      "recorded_at": "2026-11-14T09:42:55.408247+00:00",
+      "sha256": "2847abefaa9fa8cf3687d7f6297aaa04d1640348188b4d70588e9ec1adb4f66b",
+      "status": "available",
+      "url": "https://github.com/damianvtran/local-operator/blob/500883ef56ca504325ffd80c5b90bf2435d00e3f/flake.lock"
+    },
+    {
+      "bytes": 1431,
+      "file": "metadata/omp-patch-0-5421df0afd80cba41063a8db9c841ac7ca0dea1635f716d5fe28c0de66f979b2.txt",
+      "name": "omp-patch-0",
+      "recorded_at": "2026-11-14T09:44:28.994286+00:00",
+      "sha256": "5421df0afd80cba41063a8db9c841ac7ca0dea1635f716d5fe28c0de66f979b2",
+      "status": "available",
+      "url": "https://raw.githubusercontent.com/can1357/oh-my-pi/470b7efb67673960d37e3e64584669e6e9caad1c/patches/@ark%252Fschema@0.56.2.patch"
+    },
+    {
+      "bytes": 4469,
+      "file": "metadata/dsh-patch-2-b9bcce474fb2ac44633dff0fa722816a5bff5451b4575d5874035ea14ba70a4f.txt",
+      "name": "dsh-patch-2",
+      "recorded_at": "2026-11-14T09:44:28.998228+00:00",
+      "sha256": "b9bcce474fb2ac44633dff0fa722816a5bff5451b4575d5874035ea14ba70a4f",
+      "status": "available",
+      "url": "https://raw.githubusercontent.com/deepseek-ai/deepseek-harness/639ed015397290b3745d163aafe02ffee4aa3f84/patches/@earendil-works__pi-ai@0.87.1.patch"
+    },
+    {
+      "bytes": 37801,
+      "file": "metadata/omp-patch-1-6b1a58844185cd5096b7cff14012d171d01d344d4d3d2206d65975d67ed6c5d7.txt",
+      "name": "omp-patch-1",
+      "recorded_at": "2026-11-14T09:44:28.996254+00:00",
+      "sha256": "6b1a58844185cd5096b7cff14012d171d01d344d4d3d2206d65975d67ed6c5d7",
+      "status": "available",
+      "url": "https://raw.githubusercontent.com/can1357/oh-my-pi/470b7efb67673960d37e3e64584669e6e9caad1c/patches/puppeteer-core@25.3.0.patch"
+    },
+    {
+      "bytes": 1403,
+      "file": "metadata/dsh-patch-3-280e7b2816caf01423097d24e79107a66afeb563a348630ce9928ae8499a5861.txt",
+      "name": "dsh-patch-3",
+      "recorded_at": "2026-11-14T09:44:29.095328+00:00",
+      "sha256": "280e7b2816caf01423097d24e79107a66afeb563a348630ce9928ae8499a5861",
+      "status": "available",
+      "url": "https://raw.githubusercontent.com/deepseek-ai/deepseek-harness/639ed015397290b3745d163aafe02ffee4aa3f84/patches/@electron__osx-sign@1.3.3.patch"
+    },
+    {
+      "bytes": 3658,
+      "file": "metadata/dsh-patch-4-8791a230763dbf853fd65d627c68c31de37209992851377855e16cf08ea70532.txt",
+      "name": "dsh-patch-4",
+      "recorded_at": "2026-11-14T09:44:29.101040+00:00",
+      "sha256": "8791a230763dbf853fd65d627c68c31de37209992851377855e16cf08ea70532",
+      "status": "available",
+      "url": "https://raw.githubusercontent.com/deepseek-ai/deepseek-harness/639ed015397290b3745d163aafe02ffee4aa3f84/patches/@fortune-sheet__core@1.0.4.patch"
+    },
+    {
+      "bytes": 6722,
+      "file": "metadata/dsh-patch-5-2932e52e79afcd4ced08cfa123b5eded786c85043da32f622f3e80af6fc96c37.txt",
+      "name": "dsh-patch-5",
+      "recorded_at": "2026-11-14T09:44:29.115958+00:00",
+      "sha256": "2932e52e79afcd4ced08cfa123b5eded786c85043da32f622f3e80af6fc96c37",
+      "status": "available",
+      "url": "https://raw.githubusercontent.com/deepseek-ai/deepseek-harness/639ed015397290b3745d163aafe02ffee4aa3f84/patches/@fortune-sheet__react@1.0.4.patch"
+    },
+    {
+      "bytes": 35056,
+      "file": "metadata/dsh-patch-7-c1bf8ac8f319dab382f08e3a669b715e691d46c703ac5a4163eb383fbedd1d48.txt",
+      "name": "dsh-patch-7",
+      "recorded_at": "2026-11-14T09:44:29.188167+00:00",
+      "sha256": "c1bf8ac8f319dab382f08e3a669b715e691d46c703ac5a4163eb383fbedd1d48",
+      "status": "available",
+      "url": "https://raw.githubusercontent.com/deepseek-ai/deepseek-harness/639ed015397290b3745d163aafe02ffee4aa3f84/patches/exceljs@4.4.0.patch"
+    },
+    {
+      "bytes": 1324,
+      "file": "metadata/dsh-patch-8-b40ae545608897914bd25fb009c97eeac478c34e8a910298ddcb01b746534bb0.txt",
+      "name": "dsh-patch-8",
+      "recorded_at": "2026-11-14T09:44:29.224096+00:00",
+      "sha256": "b40ae545608897914bd25fb009c97eeac478c34e8a910298ddcb01b746534bb0",
+      "status": "available",
+      "url": "https://raw.githubusercontent.com/deepseek-ai/deepseek-harness/639ed015397290b3745d163aafe02ffee4aa3f84/patches/node-pty@1.2.0-beta.15.patch"
+    },
+    {
+      "bytes": 400454,
+      "file": "metadata/dsh-patch-6-75891fc22b277c145cafeab83e41baf4a70f5b8fe6dc0801c6a0b922d7ee88c7.txt",
+      "name": "dsh-patch-6",
+      "recorded_at": "2026-11-14T09:44:29.184705+00:00",
+      "sha256": "75891fc22b277c145cafeab83e41baf4a70f5b8fe6dc0801c6a0b922d7ee88c7",
+      "status": "available",
+      "url": "https://raw.githubusercontent.com/deepseek-ai/deepseek-harness/639ed015397290b3745d163aafe02ffee4aa3f84/patches/@yao-pkg__pkg@6.21.0.patch"
     }
   ],
   "runtime_installable_lock": false
