@@ -1,0 +1,33 @@
+{
+  "schema": 1,
+  "locale": "zh-CN",
+  "namespace": "relay.asks",
+  "history_sha256": "8caa3eb5043fc8197437894cddcab8873e169f090d0a8d97bc1844d4a5e1e960",
+  "entries": [
+    {
+      "locale": "zh-CN",
+      "namespace": "relay.asks",
+      "source_sha256": "ebd750dd732723096fbbe195a25f314a4137ba765829b9def0c61787ac2634ad",
+      "translator": {
+        "agent": "lopdev coder (implementation commit ffadc217b, PR #3926); session id not recorded in the commit or PR, not independently verified",
+        "model": "unrecorded (not disclosed in ffadc217b)",
+        "fallback": "unknown",
+        "date": "2026-11-13"
+      },
+      "auditor": {
+        "agent": "independent i18n auditor (lopdev reviewer role, task core-r1-i18n, session 0f77a9c3b23c; not the translator, read no prior audit of these keys)",
+        "session": "0f77a9c3b23c",
+        "model": "anthropic/claude-opus-5-5",
+        "fallback": "none observed in this session",
+        "date": "2026-11-13",
+        "result": "passed",
+        "findings": 1,
+        "unresolved_blocker_major": 0,
+        "minor": 0,
+        "nit": 1
+      },
+      "status": "passed",
+      "note": "PR #3926 suggested-command delta, independent audit 2026-11-13 by reviewer 0f77a9c3b23c (anthropic/claude-opus-5-5, no fallback): 4 added relay.asks.card.command.* keys passed; 78 unchanged keys carried by byte proof from the passed aeae7917 row. Source ebd750dd732723096fbbe195a25f314a4137ba765829b9def0c61787ac2634ad and target 09601afcea02cf2dff7e3891422d56476127eac4978ca490dcb9be0fe6a58139 recomputed from the files. Evidence: i18n/audits/evidence/zh-CN/relay.asks/askcmd-r1-0f77a9c3b23c/record.json"
+    }
+  ]
+}

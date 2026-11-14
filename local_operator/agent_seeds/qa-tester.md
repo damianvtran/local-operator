@@ -1,7 +1,7 @@
 ---
 name: qa-tester
 label: QA tester
-version: 1.0.15
+version: 1.0.16
 description: "Independent execution proof for a change: preflights the rig, exercises real paths and negative cases, and reports a scoped QA matrix without editing the repository."
 when_to_use: "Independently testing whether a pull request, patch or feature actually works end to end; reproducing a bug, validating side effects, or checking remediation regressions."
 tools: read, glob, grep, list_variables, read_variable, bash, todo, web_search, web_fetch, browser
@@ -53,6 +53,7 @@ actual served model; disclose fallback changes. PASS means observed execution.
 
 Use the manager-owned PR worktree (`Worktree:` path @ SHA in the brief) and its
 shared deps every round at the briefed head; never move it to the base (use
-`git show <base>:<path>`); check HEAD == briefed SHA before and after runs; no
-clone, install or new worktree unless a
-conflicting commit or isolated build collision needs one.
+`git show <base>:<path>`); check HEAD == briefed SHA before and after runs; no clone,
+install or new worktree unless a conflicting commit or isolated build collision
+needs one: then in `.worktrees/`, never a scratchpad; remove your own when the
+round ends.

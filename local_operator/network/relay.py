@@ -505,6 +505,7 @@ SLICE_PEER_OPS: frozenset[str] = frozenset(
         "net_definitions",
         "net_readiness",
         "net_mcp_defs",
+        "net_skills",
         "net_memory",
         # The single-peer update (meshupdate.py; S1 of mesh-rolling-updates.md
         # §8.2). Slow by registration below: the handler may run a real install
@@ -544,6 +545,7 @@ SLICE_LOCAL_OPS: frozenset[str] = frozenset(
         "definitions_sync",
         "peer_readiness",
         "mcp_defs_sync",
+        "skills_sync",
         # The single-peer update's local half — a viewer asking ITS OWN relay to
         # ask a peer (the ``peer_*`` boundary rule; the peer-scope half is
         # ``net_update``).
@@ -571,6 +573,8 @@ SLICE_MODULES: tuple[str, ...] = (
     # registers a tick step there), so it is installed after that module but
     # starts no thread of its own.
     "local_operator.network.mcpdefs",
+    # User skills ride the same definitions cadence (a tick step), no thread.
+    "local_operator.network.skillsync",
     "local_operator.network.memory",
     # S1 of the mesh rolling updates: the ``update`` capability's op halves. It
     # starts no thread of its own (the S3 rollout driver is a different slice).
@@ -5637,6 +5641,40 @@ def warm_open_frame_strip_now() -> None:
 #: reply was lost. A read of one in-memory/JSON index on the owner; the bound is
 #: the link round trip, not work — and the device just failed to answer once.
 CREATE_LOOKUP_TIMEOUT_S = 10.0
+
+#: How long a requester KEEPS TRYING to confirm a create by its key after the
+#: create's reply was lost, across every lookup, dial and pause inside it.
+#:
+#: WHY A WINDOW AND NOT ONE LOOKUP (2026-11-14, 535b1f3bb8df): a reply is most often
+#: lost because the LINK dropped — and a single lookup asked straight after the
+#: drop finds that same link still down, so the caller printed "could not be asked"
+#: for a session the owner had created AND bound to the caller's key. The owner's
+#: audit for that create: ``link_closed cause=error`` 38.5 s in, the link back
+#: 22.7 s later.
+#:
+#: MEASURED, NOT GUESSED: every ``link_closed`` -> next ``link_opened`` gap for the
+#: same peer in a long-running node's ``network/audit.jsonl`` (2026-11-05 ..
+#: 2026-11-14; n=155): median 2.1 s; 144 of 155 (93%) back within 60 s, the
+#: largest of those 44.4 s; the rest form a separate tail at 90 s, 119 s, 181 s
+#: and then 1100-5500 s (a device offline, ``cause=timeout``), which no bounded
+#: wait can cover. 60 s sits above the whole short-gap cluster with room for the
+#: redial and one lookup after the link returns, and fits the client bounds
+#: (``CREATE_CLIENT_BOUND_S`` below, the ``sessions`` tool's 180 s child).
+CREATE_CONFIRM_WINDOW_S = 60.0
+
+#: Pause between confirm attempts while the owner cannot be asked (link down) or
+#: says the create is still ``pending``. The measured median re-establishment is
+#: 2.1 s, so polling faster than this mostly re-dials a link not yet back.
+CREATE_CONFIRM_POLL_S = 2.0
+
+#: The control-socket budget a CLIENT gives ``peer_session_create`` (the CLI and
+#: the desktop surface). It was 120 s while the relay asked once for 10 s after a
+#: lost reply; it grows by EXACTLY what the confirm window added, so the client
+#: never gives up while its relay is still confirming — a client that gave up
+#: first would print "the relay did not answer" and lose the id the window found.
+#: Stays below the ``sessions`` tool's 180 s child bound
+#: (``tools.builtin._MESH_CREATE_ENGAGE_TIMEOUT_S``; a test pins the order).
+CREATE_CLIENT_BOUND_S = 120.0 + (CREATE_CONFIRM_WINDOW_S - CREATE_LOOKUP_TIMEOUT_S)
 
 
 class _PeerNoReply(MeshRefusal):
@@ -14372,9 +14410,16 @@ class RelayServer:
         The owner may have created the session (observed live 2026-11-11, where
         "stopped answering before it replied" was printed for a session that
         existed), so "unreachable" is the one answer this must never give. Asks
-        the owner ONCE, by the key the create carried, on a short read-sized
-        bound: a device that just failed to answer is not given another full
-        create budget.
+        the owner by the key the create carried, each ask on a short read-sized
+        bound, and KEEPS ASKING for up to ``CREATE_CONFIRM_WINDOW_S`` while the
+        owner cannot be reached or still says ``pending``: a lost reply usually
+        means a dropped link, and the first ask lands while it is still down
+        (2026-11-14, 535b1f3bb8df — see ``CREATE_CONFIRM_WINDOW_S``).
+
+        NEVER RE-SENDS THE CREATE. Only the read-only lookup is repeated: an owner
+        older than create keys ignores the key, so a re-sent create would be a
+        second session there, and such an owner answers the lookup ``unknown_op``,
+        which ends this at once rather than being retried.
 
         Returns the detail of a confirmed create (the id, marked
         ``create_unconfirmed`` because the create's own reply — and with it the
@@ -14394,30 +14439,57 @@ class RelayServer:
             f"`lop network sessions --peer {peer} --create --create-key {create_key}` with "
             "the same options — returns that session instead of making a second one"
         )
-        try:
-            found = self._local_peer_call(
-                "net_session_create_lookup",
-                peer,
-                timeout=CREATE_LOOKUP_TIMEOUT_S,
-                create_key=create_key,
-            )
-        except MeshRefusal as refusal:
-            # An older owner answers ``unknown_op`` (and ignored the key, so a
-            # retry WOULD duplicate there); a dead link answers nothing. Either
-            # way nothing is known, and the sentence says exactly that.
-            logging.getLogger(__name__).info(
-                "create lookup on %s failed: %s %s",
-                peer,
-                refusal.code,
-                refusal.sentence,
-            )
-            raise MeshRefusal(
-                "create_unconfirmed",
-                f"{label} stopped answering before it replied to the create, and could "
-                f"not be asked whether it made the session — it may have been created; {check}",
-            ) from None
-        state = str(found.get("state") or "")
-        session_id = str(found.get("session_id") or "")
+        cannot_ask = MeshRefusal(
+            "create_unconfirmed",
+            f"{label} stopped answering before it replied to the create, and could "
+            f"not be asked whether it made the session — it may have been created; {check}",
+        )
+        deadline = time.monotonic() + CREATE_CONFIRM_WINDOW_S
+        found: dict[str, Any] | None = None
+        state = session_id = ""
+        while True:
+            remaining = deadline - time.monotonic()
+            try:
+                found = self._local_peer_call(
+                    "net_session_create_lookup",
+                    peer,
+                    timeout=max(0.1, min(CREATE_LOOKUP_TIMEOUT_S, remaining)),
+                    create_key=create_key,
+                )
+            except MeshRefusal as refusal:
+                logging.getLogger(__name__).info(
+                    "create lookup on %s failed: %s %s",
+                    peer,
+                    refusal.code,
+                    refusal.sentence,
+                )
+                # ONLY "COULD NOT BE ASKED" IS WORTH WAITING OUT: a link that is
+                # down (no link, or no answer on it) comes back within the window
+                # in 93% of measured drops. Any answer the owner DID give —
+                # ``unknown_op`` from an owner older than create keys (which also
+                # ignored the key, so nothing may be re-sent), a policy refusal —
+                # will not change by asking again.
+                if refusal.code != "peer_unreachable":
+                    raise cannot_ask from None
+                # ``found`` keeps the owner's LAST answer (a ``pending`` seen before
+                # the link dropped again still says more than "never asked").
+                # A dial inside ``_local_peer_call`` is bounded by the handshake
+                # budget, not by ``remaining``, so the window can overrun by one
+                # dial (10 s); ``CREATE_CLIENT_BOUND_S`` keeps slack above it.
+            else:
+                state = str(found.get("state") or "")
+                session_id = str(found.get("session_id") or "")
+                # ``pending`` is the owner between its reservation and its mkdir —
+                # the bind follows within that create — so it is waited out too.
+                # Anything else (created, or a key the owner never saw) is final.
+                if state != "pending":
+                    break
+            remaining = deadline - time.monotonic()
+            if remaining <= CREATE_CONFIRM_POLL_S:
+                break
+            time.sleep(CREATE_CONFIRM_POLL_S)
+        if found is None:
+            raise cannot_ask
         if state == "created" and session_id:
             return {
                 "session_id": session_id,
@@ -14637,6 +14709,24 @@ class RelayServer:
                 "pinned": {name: digest for name, digest in sorted(pinned_names.items())},
                 "unpinned": unpinned,
             }
+        # SKILLS TRAVEL BEFORE THE CREATE, so a brief that names ``skill://x`` resolves
+        # on the session's FIRST turn rather than after the next cadence tick (up to
+        # a minute later). Unconditional — unlike definitions, nothing in the frame
+        # names which skills a session will read — and BOUNDED
+        # (``skillsync.CREATE_PUSH_BUDGET_S``): a large first sync continues in the
+        # background and the receipt says so, so it can never stall the create.
+        # Best-effort: a peer that is unreachable or predates skill sync answers the
+        # create exactly as before, with the reason on the receipt.
+        skills_receipt: dict[str, Any] = {}
+        try:
+            from local_operator.network import skillsync
+
+            skills_receipt = skillsync.push_for_create(self, self._resolve_peer(peer))
+        except MeshRefusal:
+            skills_receipt = {}  # an unknown peer is refused by the create itself below
+        except Exception as exc:  # noqa: BLE001 — a skills push must never fail a create
+            logger.debug("peer create: skills push failed", exc_info=True)
+            skills_receipt = {"ok": False, "code": "failed", "message": str(exc)}
         fields: dict[str, Any] = {
             "cwd": str(frame.get("cwd") or ""),
             "model": frame.get("model"),
@@ -14691,11 +14781,14 @@ class RelayServer:
                 # half); ``message`` is the wire frame's name for it, not the exception's.
                 raise MeshRefusal(refusal.code, f"{refusal.sentence} ({push_reason})") from None
             raise
+        extra: dict[str, Any] = {}
         if instructions_notice:
-            detail = {**detail, "custom_instructions_notice": instructions_notice}
+            extra["custom_instructions_notice"] = instructions_notice
         if reconciliation:
-            return {**detail, "definitions": reconciliation}
-        return detail
+            extra["definitions"] = reconciliation
+        if skills_receipt:
+            extra["skills"] = skills_receipt
+        return {**detail, **extra} if extra else detail
 
     def _ctl_peer_engage(self, frame: dict[str, Any]) -> dict[str, Any]:
         return self._local_peer_call(

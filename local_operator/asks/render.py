@@ -833,6 +833,11 @@ def mirror_card(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any] | None:
         "secret": bool(question.get("secret")),
         "recommended": question.get("recommended"),
         "persist": bool(question.get("persist")),
+        # The suggested terminal command, only when the row carries one (the
+        # row already applied the rule in `queue._question_shape`), so a card
+        # for an ask without one keeps its exact prior keys. The legacy title
+        # folds it in (`mobile.types.ask_mirror_request`).
+        **({"command": question["command"]} if isinstance(question.get("command"), str) else {}),
     }
 
 

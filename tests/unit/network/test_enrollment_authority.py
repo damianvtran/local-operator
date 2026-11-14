@@ -627,3 +627,68 @@ def test_cli_typed_disclosure_and_explicit_empty_grant_do_not_use_generic_approv
     for key in ("key_id", "spki_fp", "statement_digest"):
         assert r["what"]["anchor"][key] in captured.err
     assert "fixture-ssh-reference" not in captured.out + captured.err
+
+
+@pytest.mark.parametrize("skills_ok", [True, False], ids=["skills_ok", "skills_missing"])
+def test_verify_accepts_the_non_gating_skills_row(skills_ok):
+    """PR #3839 regression: the mesh skill sync added a per-peer ``skills`` row.
+
+    ``ready_evidence`` keeps a closed capability allowlist, so before ``skills``
+    joined it every enrollment from that build ended ``failed`` ("The network
+    enrollment authority is invalid"). The failing row must also survive
+    ``public_report``, whose code allowlist is the ``readiness.CODE_*`` set.
+    """
+    skills_row = {
+        "check": "readiness",
+        "class": "equipment",
+        "device_id": "d_target",
+        "ok": skills_ok,
+        "capability": "skills",
+        "source": "peer",
+    }
+    if not skills_ok:
+        # The wire value skills_row emits; a literal so the pre-fix build fails
+        # on the refusal itself rather than on a missing constant.
+        skills_row["code"] = "skills_not_synced"
+    report = {
+        "ok": skills_ok,
+        "identity_present": True,
+        "checks": [
+            {
+                "check": "reachability",
+                "class": "admission",
+                "device_id": "d_target",
+                "ok": True,
+                "observed": {"outcome": "connected"},
+            },
+            {
+                "check": "readiness",
+                "class": "admission",
+                "device_id": "d_target",
+                "ok": True,
+                "capability": "build",
+                "source": "peer",
+            },
+            {
+                "check": "readiness",
+                "class": "equipment",
+                "device_id": "d_target",
+                "ok": True,
+                "capability": "operator_authority",
+                "source": "peer",
+            },
+            skills_row,
+        ],
+    }
+    rows = e.ready_evidence(report, device_id="d_target", network_id="n_target")
+    expected = [] if skills_ok else [{"capability": "skills", "code": "skills_not_synced"}]
+    assert rows == expected
+    terminal = e.public_report(
+        {
+            "enrollment_verified": True,
+            "ready_ok": skills_ok,
+            "task_ready": False,
+            "equipment_warnings": rows,
+        }
+    )
+    assert terminal["equipment_warnings"] == expected

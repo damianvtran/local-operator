@@ -52,6 +52,10 @@ export type MessageParams = {
   "relay.ask.dismiss.title": undefined;
   "relay.asks.card.choose_any": undefined;
   "relay.asks.card.cold_wait": undefined;
+  "relay.asks.card.command.copied": undefined;
+  "relay.asks.card.command.copy": undefined;
+  "relay.asks.card.command.copy_failed": undefined;
+  "relay.asks.card.command.label": undefined;
   "relay.asks.card.decline": undefined;
   "relay.asks.card.dismiss": undefined;
   "relay.asks.card.gone": undefined;
@@ -945,8 +949,14 @@ export type MessageParams = {
   "wire.remote_compute.unreadable_envelope": undefined;
   "wire.session.status.scheduled": { "count": number };
   "wire.session_status.retired_label": { "base": string };
+  "wire.sessions.approval_park_local": { "address": string };
+  "wire.sessions.approval_park_self": undefined;
   "wire.sessions.approval_stop_local": { "address": string };
   "wire.sessions.approval_stop_peer": { "address": string; "peer": string };
+  "wire.sessions.park_done": { "name": string; "wakes": number; "monitors": number };
+  "wire.sessions.park_self_refused_busy": undefined;
+  "wire.sessions.park_self_scheduled": { "wakes": number; "monitors": number };
+  "wire.sessions.stop_dormant_hint": undefined;
   "wire.sessions.stop_pending": { "name": string; "seconds": string };
   "wire.sessions.stop_refused_busy": { "name": string };
   "wire.sessions.stop_refused_old_owner": { "name": string };

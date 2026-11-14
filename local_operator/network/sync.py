@@ -587,7 +587,31 @@ EXCLUDED_ENTRIES: dict[str, str] = {
     # that used the approvals feature refused with `unlisted_content` and told
     # the user to delete the record (round-4 review, blocker).
     OVERRIDE_FILENAME: "the conversation's own approval choice; a copy must start without it",
+    # OPERATING-SYSTEM FOLDER METADATA (``OS_METADATA_NAMES`` below). Finder writes
+    # ``.DS_Store`` into every folder a user opens, so before this entry a deleting move
+    # of any Mac session someone had browsed refused with ``unlisted_content`` and told
+    # the user to remove it (2026-11-13: ``lop sessions move d5aaf8ba6ba5 --to
+    # lop-remote-node-2 --queue`` refused for ``.DS_Store``; 18 session directories on
+    # the operator's Mac held one at depth <= 2). They are view state the shell rebuilds
+    # (icon positions, window size, thumbnail cache), never session content, so they
+    # are DROPPED rather than carried or refused. Windows Explorer's ``Thumbs.db`` and
+    # ``desktop.ini`` are the same class and exact names, so they ride the same rule;
+    # AppleDouble ``._*`` files are a prefix pattern, not a name, and stay unlisted.
+    ".DS_Store": "Finder's per-folder view state, rebuilt by the destination's shell",
+    "Thumbs.db": "Windows Explorer's thumbnail cache, rebuilt by the destination's shell",
+    "desktop.ini": "Windows Explorer's per-folder view settings, not session content",
 }
+
+#: The ``EXCLUDED_ENTRIES`` rows that are OS folder metadata. Kept as their own tuple
+#: because their exclusion is conditional on SHAPE, unlike the store files above (whose
+#: reason is whose state the file is, so a symlinked one keeps its exclusion —
+#: ``test_a_symlinked_store_file_keeps_its_exclusion``): the shell only ever writes a
+#: REGULAR file under these names, so a symlink or a directory wearing one is not
+#: metadata and ``unlisted_entries`` refuses it rather than dropping it unseen. Only the
+#: session ROOT is affected: inside a content tree (``scratchpad/.DS_Store``) the tree
+#: travels byte for byte as it always has — harmless, and it keeps the tree walk and its
+#: digest identical on builds before and after this rule, so mixed-version peers agree.
+OS_METADATA_NAMES: tuple[str, ...] = (".DS_Store", "Thumbs.db", "desktop.ini")
 
 #: The tuple the code branches on. Kept as a tuple (rather than reading
 #: ``EXCLUDED_ENTRIES`` everywhere) because these are the names a fan-out of
@@ -952,6 +976,10 @@ def unlisted_entries(directory: Path) -> list[str]:
     found: list[str] = []
     for child in children:
         name = child.name
+        # Dropped only as the regular file the OS writes (see ``OS_METADATA_NAMES``).
+        if name in OS_METADATA_NAMES and (child.is_symlink() or not child.is_file()):
+            found.append(name)
+            continue
         if child.is_symlink() and name in listed and name not in NEVER_COPIED:
             found.append(name)
             continue

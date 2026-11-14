@@ -2575,18 +2575,21 @@ async def test_local_preview_refusal_preserves_older_pending_hold(
     monkeypatch.setattr(ui_client, "call", call)
     args = {"action": "request_access", "url": "https://first.trycloudflare.com", "backend": "ui"}
     first = await builtin.execute_browser("first", args, None, None, context)
+    assert first.details is not None
     assert first.details["state"] == "pending"
     assert resource.record["retention"] == "pending site approval"
     releases = sum(method == "owner_release" for method, _ in ui_client.calls)
     refused = await builtin.execute_browser(
         "second", {**args, "url": "https://second.trycloudflare.com"}, None, None, context
     )
+    assert refused.details is not None
     assert refused.details["code"] == "preview_origin_changed"
     assert resource.record["retention"] == "pending site approval"
     assert sum(method == "owner_release" for method, _ in ui_client.calls) == releases
     assert sum(method == "request_access" for method, _ in ui_client.calls) == 1
     approval_state = "allowed"
     terminal = await builtin.execute_browser("terminal", args, None, None, context)
+    assert terminal.details is not None
     assert terminal.details["state"] == "allowed"
     assert resource.record["retention"] == ""
     assert sum(method == "owner_release" for method, _ in ui_client.calls) == releases + 1

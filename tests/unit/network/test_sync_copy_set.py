@@ -430,6 +430,16 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "else. A copy that carried any of them would hand a peer a path to a host that does "
         "not exist there.",
     ),
+    "local_operator/session/runtime/control.py": (
+        2,
+        "``STOP_MARKER`` ('stopped_at') and ``PARK_MARKER`` ('parked_at') are JSON KEYS a "
+        "stop or park stamps inside a wake/monitor INDEX entry (``write_entry``'s "
+        "``preserve``), not file or directory names. The entry file is the session's own "
+        "derived index and is classified by name in the copy set; the stamp is state "
+        "INSIDE it, so nothing under either spelling is an entry of a session directory to "
+        "copy or exclude -- a copy carries the entry, keys and all, and the session's own "
+        "open-time rewrite clears the stamp.",
+    ),
     # ---- this install's CONFIG, LOG and STORE surface (outside ``sessions/``) ----
     "local_operator/server/utils/settings_intents.py": (
         1,
@@ -994,6 +1004,16 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "``.corrupt`` fragment suffixed onto a quarantined store file",
     ),
     "local_operator/network/projection.py": (1, "the tombstone list under ``network/``"),
+    "local_operator/network/skillsync.py": (
+        1,
+        "``RECEIPTS_NAME`` (``skills-sync.json``): the sender's last-push receipt per "
+        "peer at ``<config>/network/``, beside the extraction stage "
+        "(``<config>/network/skill-stage``, built inline, not a constant) and next to the "
+        "``<config>/skills/`` root it fills -- per-DEVICE config-root state, never an "
+        "entry of a session directory (apply refuses any path under ``sessions/``). It "
+        "must NOT travel with a session: the receipt describes THIS device's pushes to "
+        "its peers, and skills are synced to the config root by their own channel",
+    ),
     "local_operator/network/create_keys.py": (
         1,
         "``INDEX_FILENAME`` (``create-keys.json``): the OWNER device's per-device "
@@ -1906,6 +1926,64 @@ def test_an_unlisted_entry_refuses_a_deleting_move(tmp_path: Path) -> None:
     assert refusal.value.code == "unlisted_content"
     assert "a-file-from-the-future.dat" in refusal.value.message
     assert (directory / "a-file-from-the-future.dat").exists()
+
+
+def test_finder_metadata_does_not_block_a_move_and_is_dropped_at_the_root(
+    tmp_path: Path,
+) -> None:
+    """A Mac session someone browsed in Finder moves (2026-11-13 offload refusal).
+
+    ``lop sessions move d5aaf8ba6ba5 --to lop-remote-node-2 --queue`` refused with
+    ``unlisted_content`` for ``.DS_Store``. The root copy is DROPPED (view state, not
+    content); inside ``scratchpad/`` the tree travels byte for byte, so it is carried.
+    """
+    source = tmp_path / "owner"
+    source.mkdir()
+    directory = _seeded(source)
+    for name in sync.OS_METADATA_NAMES:
+        (directory / name).write_bytes(b"\x00\x00\x00\x01Bud1")
+    (directory / "scratchpad" / ".DS_Store").write_bytes(b"\x00\x00\x00\x01Bud1")
+
+    assert sync.unlisted_entries(directory) == []
+    sync.assert_complete(directory)
+    plan = _move_manifest(source, "abc123")
+    assert "scratchpad/.DS_Store" in plan["trees"]
+    for name in sync.OS_METADATA_NAMES:
+        assert name not in plan["members"], f"{name} must not be carried"
+
+    dest = tmp_path / "holder"
+    sync.sync_from(source, "abc123", ask=_ask(source), into=dest)
+    for name in sync.OS_METADATA_NAMES:
+        assert not (dest / name).exists(), f"{name} was dropped, not carried"
+    assert (dest / "scratchpad" / ".DS_Store").read_bytes() == b"\x00\x00\x00\x01Bud1"
+
+
+@pytest.mark.parametrize("shape", ["symlink", "directory"])
+def test_os_metadata_names_still_refuse_when_not_a_regular_file(tmp_path: Path, shape: str) -> None:
+    """Only the regular file the shell writes is dropped; any other shape still refuses.
+
+    A ``.DS_Store`` symlink at the root is a pointer out of the session, not view
+    state, so dropping it silently would be the deletion ``assert_complete`` guards.
+    An unknown name beside a real ``.DS_Store`` still refuses too.
+    """
+    directory = tmp_path / "sessions" / "abc123"
+    directory.mkdir(parents=True)
+    (directory / "transcript.jsonl").write_text("{}\n", encoding="utf-8")
+    (directory / "Thumbs.db").write_bytes(b"thumbs")
+    (directory / "a-file-from-the-future.dat").write_bytes(b"\x00")
+    if shape == "symlink":
+        outside = tmp_path / "outside"
+        outside.write_bytes(b"x")
+        (directory / ".DS_Store").symlink_to(outside)
+    else:
+        (directory / ".DS_Store").mkdir()
+
+    with pytest.raises(sync.SyncRefused) as refusal:
+        sync.assert_complete(directory)
+    assert refusal.value.code == "unlisted_content"
+    assert ".DS_Store" in refusal.value.message
+    assert "a-file-from-the-future.dat" in refusal.value.message
+    assert "Thumbs.db" not in refusal.value.message
 
 
 def test_an_irregular_entry_in_a_tree_refuses_a_deleting_move(tmp_path: Path) -> None:

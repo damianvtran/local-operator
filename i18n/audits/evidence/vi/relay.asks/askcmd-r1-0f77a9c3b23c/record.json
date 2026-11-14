@@ -1,0 +1,56 @@
+{
+  "schema": 1,
+  "audit_id": "askcmd-r1-0f77a9c3b23c",
+  "audit_kind": "independent semantic audit of the suggested-command delta; unchanged keys carried by byte proof",
+  "locale": "vi",
+  "namespace": "relay.asks",
+  "status": "passed",
+  "verdict": "passed",
+  "audit_task": "core-r1-i18n",
+  "pr": "damianvtran/local-operator#3926",
+  "audited_revision": "ea9a06d8a",
+  "catalogue_state": "catalogue bytes identical at ea9a06d8a (hashes recomputed from the shipped files)",
+  "scope": "the 4 key(s) PR #3926 added to relay.asks, read against the en source, en/relay.asks.context.json, i18n/glossary.md and i18n/style-guides/vi.md; the other 78 key(s) are byte-identical to base be6f138ee, whose last ledger row was passed and fresh (source aeae7917)",
+  "keys_audited": [
+    "relay.asks.card.command.label",
+    "relay.asks.card.command.copy",
+    "relay.asks.card.command.copied",
+    "relay.asks.card.command.copy_failed"
+  ],
+  "keys_total": 82,
+  "mechanical_checks": [
+    "key set and order parity with en",
+    "no placeholders/ICU in source or target",
+    "NFC",
+    "no bidi/zero-width/control characters",
+    "no ASCII ellipsis",
+    "fr U+202F before ;",
+    "cell width via rich.cells.cell_len against the Copy button layout (shrink-0 button, flex-1 break-all code)"
+  ],
+  "translator": {
+    "agent": "lopdev coder (implementation commit ffadc217b, PR #3926); session id not recorded in the commit or PR, not independently verified",
+    "model": "unrecorded (not disclosed in ffadc217b)",
+    "fallback": "unknown",
+    "date": "2026-11-13"
+  },
+  "auditor": {
+    "agent": "independent i18n auditor (lopdev reviewer role, task core-r1-i18n, session 0f77a9c3b23c; not the translator, read no prior audit of these keys)",
+    "session": "0f77a9c3b23c",
+    "model": "anthropic/claude-opus-5-5",
+    "fallback": "none observed in this session",
+    "date": "2026-11-13",
+    "result": "passed",
+    "findings": 0,
+    "unresolved_blocker_major": 0,
+    "minor": 0,
+    "nit": 0
+  },
+  "findings_note": "label 'Lệnh đề xuất'; copy 'Sao chép'; copied 'Đã sao chép'; copy_failed 'hãy sao chép từ đó', no redundant 'bạn' per vi guide, spaced em dash, NFC. No findings.",
+  "report": "https://github.com/damianvtran/local-operator/pull/3926 (comment '### i18n audit — round 1', session 0f77a9c3b23c)",
+  "source_sha256": "ebd750dd732723096fbbe195a25f314a4137ba765829b9def0c61787ac2634ad",
+  "target_sha256": "175275cc7c2a083e31aae3725bdb7c2aad2400c46e10f58ef2ea9b29ce2e6675",
+  "input_paths": {
+    "en": "local_operator/i18n/catalogues/en/relay.asks.json",
+    "target": "local_operator/i18n/catalogues/vi/relay.asks.json"
+  }
+}

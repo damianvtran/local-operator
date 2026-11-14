@@ -54,9 +54,13 @@ async def request(ctx, url, action="request_access"):
 @pytest.mark.asyncio
 async def test_public_family_repeat_siblings_nested_and_unrelated(tmp_path, backend):
     parent = session(tmp_path, "root")
+    assert parent.session_dir is not None
     child = session(tmp_path, "child", "root")
+    assert child.session_dir is not None
     sibling = session(tmp_path, "sibling", "root")
+    assert sibling.session_dir is not None
     nested = session(tmp_path, "nested", "child")
+    assert nested.session_dir is not None
     first = await request(child, "https://FIRST.trycloudflare.com./path")
     assert not first.is_error and "Fixed-origin rule" in first.text
     assert "https://first.trycloudflare.com" in first.text
@@ -66,7 +70,9 @@ async def test_public_family_repeat_siblings_nested_and_unrelated(tmp_path, back
     for member in (parent, sibling, nested):
         denied = await request(member, "https://second.trycloudflare.com")
         assert denied.is_error
+        assert denied.details is not None
         assert denied.details["code"] == "preview_origin_changed"
+        assert denied.details is not None
         assert denied.details["pinned_origin"] == "https://first.trycloudflare.com"
         assert "ONE fixed origin per task" in denied.text
         assert backend.await_count == 2  # ZERO second-host approval RPCs.
@@ -79,12 +85,14 @@ async def test_public_family_repeat_siblings_nested_and_unrelated(tmp_path, back
 @pytest.mark.asyncio
 async def test_cancel_await_and_resumed_runtime_do_not_reset_pin(tmp_path, backend):
     ctx = session(tmp_path, "root")
+    assert ctx.session_dir is not None
     await request(ctx, "https://first.trycloudflare.com")
     for action in ("await_access", "cancel_access"):
         result = await request(ctx, "https://other.trycloudflare.com", action)
         assert not result.is_error  # These operations retain existing semantics.
     assert backend.await_count == 3
     resumed = session(tmp_path, "root")
+    assert resumed.session_dir is not None
     assert (await request(resumed, "https://other.trycloudflare.com")).is_error
     assert backend.await_count == 3
     assert not (await request(resumed, "https://first.trycloudflare.com")).is_error
@@ -94,10 +102,12 @@ async def test_cancel_await_and_resumed_runtime_do_not_reset_pin(tmp_path, backe
 async def test_rpc_failure_keeps_pin_and_rule(tmp_path, backend):
     backend.return_value = (None, builtin._error("test", "browser", "isolated transport failure"))
     ctx = session(tmp_path, "root")
+    assert ctx.session_dir is not None
     first = await request(ctx, "https://first.trycloudflare.com")
     assert first.is_error and "Fixed-origin rule" in first.text
     assert "isolated transport failure" in first.text
     second = await request(ctx, "https://second.trycloudflare.com")
+    assert second.details is not None
     assert second.details["code"] == "preview_origin_changed"
     assert backend.await_count == 1
 
@@ -110,7 +120,9 @@ async def test_repeated_sync_failure_never_authorizes_rpc(
     from local_operator.browser_bridge import preview_origin as policy
 
     root = session(tmp_path, "root")
+    assert root.session_dir is not None
     child = session(tmp_path, "child", "root")
+    assert child.session_dir is not None
     real_fsync = os.fsync
     failed_syncs = []
 
@@ -126,7 +138,9 @@ async def test_repeated_sync_failure_never_authorizes_rpc(
     pin_bytes = None
     for ctx in (root, root, child):
         result = await request(ctx, "https://first.trycloudflare.com")
+        assert result.details is not None
         assert result.details["code"] == "preview_origin_unavailable"
+        assert result.details is not None
         assert result.details["approval_request_sent"] is False
         backend.assert_not_awaited()
         if pin_bytes is None:
@@ -140,6 +154,7 @@ async def test_repeated_sync_failure_never_authorizes_rpc(
     assert not (await request(child, "https://first.trycloudflare.com")).is_error
     assert backend.await_count == 1
     changed = await request(root, "https://second.trycloudflare.com")
+    assert changed.details is not None
     assert changed.details["code"] == "preview_origin_changed"
     assert backend.await_count == 1
     assert pin_path.read_bytes() == pin_bytes
@@ -168,6 +183,7 @@ async def test_repeated_sync_failure_never_authorizes_rpc(
 async def test_non_quick_and_invalid_urls_retain_backend_semantics(tmp_path, backend, url):
     assert quick_tunnel_origin(url) is None
     ctx = session(tmp_path, "root")
+    assert ctx.session_dir is not None
     result = await request(ctx, url)
     # Existing public validation refuses non-HTTP syntax before discovery;
     # other malformed HTTP values remain the backend's responsibility.
@@ -194,7 +210,9 @@ async def test_non_quick_and_invalid_urls_retain_backend_semantics(tmp_path, bac
     ],
 )
 def test_real_host_normalized_without_credentials(url):
-    host, origin = quick_tunnel_origin(url)
+    parsed = quick_tunnel_origin(url)
+    assert parsed is not None
+    host, origin = parsed
     assert host == "a.trycloudflare.com"
     assert origin.startswith("https://a.trycloudflare.com")
     assert "user" not in origin and "pass" not in origin
@@ -217,8 +235,10 @@ def test_real_host_normalized_without_credentials(url):
 @pytest.mark.asyncio
 async def test_damaged_ancestry_fails_closed_without_rpc(tmp_path, backend, marker):
     ctx = session(tmp_path, "root")
+    assert ctx.session_dir is not None
     (Path(ctx.session_dir) / "origin.json").write_text(marker)
     result = await request(ctx, "https://first.trycloudflare.com")
+    assert result.details is not None
     assert result.is_error and result.details["code"] == "preview_origin_unavailable"
     backend.assert_not_awaited()
 
@@ -226,15 +246,19 @@ async def test_damaged_ancestry_fails_closed_without_rpc(tmp_path, backend, mark
 @pytest.mark.asyncio
 async def test_corrupt_pin_fails_closed(tmp_path, backend):
     ctx = session(tmp_path, "root")
+    assert ctx.session_dir is not None
     (Path(ctx.session_dir) / "browser-preview-origin.json").write_bytes(b"broken database")
     result = await request(ctx, "https://first.trycloudflare.com")
+    assert result.details is not None
     assert result.details["code"] == "preview_origin_unavailable"
     backend.assert_not_awaited()
 
 
 def test_atomic_competing_threads_and_persisted_process_resume(tmp_path):
     ctx = session(tmp_path, "root")
+    assert ctx.session_dir is not None
     child = session(tmp_path, "child", "root")
+    assert child.session_dir is not None
     gate = Barrier(2)
 
     def compete(directory, host):
@@ -248,6 +272,7 @@ def test_atomic_competing_threads_and_persisted_process_resume(tmp_path):
     assert sum(pin.allowed for pin in pins) == 1
     assert pins[0].host == pins[1].host
     winner = pins[0].host
+    assert winner is not None
     code = (
         "from pathlib import Path; "
         "from local_operator.browser_bridge.preview_origin import pin_quick_tunnel; "
@@ -288,9 +313,12 @@ ALIASES = [
 @pytest.mark.asyncio
 async def test_browser_aliases_pin_and_refuse_without_dispatch(tmp_path, backend, url):
     ctx = session(tmp_path, "root")
+    assert ctx.session_dir is not None
     first = await request(ctx, url)
     assert not first.is_error
-    assert quick_tunnel_origin(url)[0] == "second.trycloudflare.com"
+    parsed = quick_tunnel_origin(url)
+    assert parsed is not None
+    assert parsed[0] == "second.trycloudflare.com"
     assert not (await request(ctx, "https://second.trycloudflare.com")).is_error
     assert backend.await_count == 2
     denied = await request(ctx, "https://third.trycloudflare.com")
@@ -304,18 +332,23 @@ async def test_browser_aliases_pin_and_refuse_without_dispatch(tmp_path, backend
 @pytest.mark.asyncio
 async def test_second_browser_alias_has_zero_rpcs(tmp_path, backend, url):
     ctx = session(tmp_path, "root")
+    assert ctx.session_dir is not None
     await request(ctx, "https://first.trycloudflare.com")
     result = await request(ctx, url)
+    assert result.details is not None
     assert result.details["code"] == "preview_origin_changed"
     assert backend.await_count == 1
 
 
 def test_nontransitional_idna_and_nonquick_international_domains():
-    assert quick_tunnel_origin("https://ß.trycloudflare.com")[0] == "xn--zca.trycloudflare.com"
-    assert (
-        quick_tunnel_origin("https://xn--zca.trycloudflare.com")[0] == "xn--zca.trycloudflare.com"
-    )
-    assert quick_tunnel_origin("https://ss.trycloudflare.com")[0] == "ss.trycloudflare.com"
+    for url, host in (
+        ("https://ß.trycloudflare.com", "xn--zca.trycloudflare.com"),
+        ("https://xn--zca.trycloudflare.com", "xn--zca.trycloudflare.com"),
+        ("https://ss.trycloudflare.com", "ss.trycloudflare.com"),
+    ):
+        parsed = quick_tunnel_origin(url)
+        assert parsed is not None
+        assert parsed[0] == host
     for url in ("https://bücher.example", "https://ß.example", "https://example。com"):
         assert quick_tunnel_origin(url) is None
 
@@ -327,12 +360,15 @@ async def test_registry_survives_missing_creator_marker(tmp_path, backend):
 
     store = tmp_path / "sessions"
     root = session(store, "familyroot")
+    assert root.session_dir is not None
     child = session(store, "child")
+    assert child.session_dir is not None
     mark_session_origin(Path(child.session_dir), "subagent", parent="familyroot")
     assert read_lineage(tmp_path)["child"]["parent"] == "familyroot"
     await request(root, "https://first.trycloudflare.com")
     (Path(child.session_dir) / "origin.json").unlink()  # Fixture owned by this test.
     denied = await request(child, "https://second.trycloudflare.com")
+    assert denied.details is not None
     assert denied.details["code"] == "preview_origin_changed"
     assert backend.await_count == 1
     assert not (Path(child.session_dir) / "browser-preview-origin.json").exists()
@@ -341,13 +377,16 @@ async def test_registry_survives_missing_creator_marker(tmp_path, backend):
 @pytest.mark.asyncio
 async def test_runtime_ancestry_and_conflict_fail_closed(tmp_path, backend):
     root = session(tmp_path, "root")
+    assert root.session_dir is not None
     child = session(tmp_path, "child")
+    assert child.session_dir is not None
     child.ancestor_session_ids = ("root",)
     await request(root, "https://first.trycloudflare.com")
     assert (await request(child, "https://second.trycloudflare.com")).is_error
     assert backend.await_count == 1
     (Path(child.session_dir) / "origin.json").write_text('{"parent":"other"}')
     result = await request(child, "https://first.trycloudflare.com")
+    assert result.details is not None
     assert result.details["code"] == "preview_origin_unavailable"
     assert backend.await_count == 1
 
@@ -357,6 +396,7 @@ async def test_runtime_ancestry_and_conflict_fail_closed(tmp_path, backend):
 async def test_symlinks_never_write_outside_or_dispatch(tmp_path, backend, target):
     store = tmp_path / "sessions"
     ctx = session(store, "root")
+    assert ctx.session_dir is not None
     outside = tmp_path / "outside"
     outside.mkdir()
     unrelated = outside / "unrelated.json"
@@ -373,6 +413,7 @@ async def test_symlinks_never_write_outside_or_dispatch(tmp_path, backend, targe
         alias.symlink_to(store, target_is_directory=True)
         ctx.session_dir = str(alias / "root")
     result = await request(ctx, "https://first.trycloudflare.com")
+    assert result.details is not None
     assert result.details["code"] == "preview_origin_unavailable"
     backend.assert_not_awaited()
     assert unrelated.read_text() == '{"unrelated":true}'
@@ -387,6 +428,7 @@ async def test_swap_between_descriptor_open_and_write_cannot_escape(
     from local_operator.browser_bridge import preview_origin as policy
 
     ctx = session(tmp_path / "sessions", "root")
+    assert ctx.session_dir is not None
     root = Path(ctx.session_dir)
     outside = tmp_path / "outside"
     outside.mkdir()
@@ -411,6 +453,7 @@ async def test_swap_between_descriptor_open_and_write_cannot_escape(
 
     monkeypatch.setattr(policy.os, "open", swap_open)
     result = await request(ctx, "https://first.trycloudflare.com")
+    assert result.details is not None
     assert swapped and result.details["code"] == "preview_origin_unavailable"
     backend.assert_not_awaited()
     assert unrelated.read_text() == "unchanged"
@@ -420,6 +463,7 @@ async def test_swap_between_descriptor_open_and_write_cannot_escape(
 @pytest.mark.asyncio
 async def test_denial_guidance_and_transport_separator(tmp_path, backend):
     ctx = session(tmp_path, "root")
+    assert ctx.session_dir is not None
     backend.return_value = ({"state": "denied", "origin": "https://first.trycloudflare.com"}, None)
     denied = await request(ctx, "https://first.trycloudflare.com")
     assert "do not re-request it" in denied.text
@@ -432,6 +476,7 @@ async def test_denial_guidance_and_transport_separator(tmp_path, backend):
 @pytest.mark.asyncio
 async def test_sharp_s_is_not_merged_with_ss(tmp_path, backend):
     ctx = session(tmp_path, "root")
+    assert ctx.session_dir is not None
     await request(ctx, "https://ß.trycloudflare.com")
     assert not (await request(ctx, "https://xn--zca.trycloudflare.com")).is_error
     assert (await request(ctx, "https://ss.trycloudflare.com")).is_error
@@ -440,7 +485,9 @@ async def test_sharp_s_is_not_merged_with_ss(tmp_path, backend):
 
 def test_competing_processes_share_first_durable_pin(tmp_path):
     ctx = session(tmp_path, "root")
+    assert ctx.session_dir is not None
     child = session(tmp_path, "child", "root")
+    assert child.session_dir is not None
     code = (
         "from pathlib import Path; import sys; "
         "from local_operator.browser_bridge.preview_origin import pin_quick_tunnel; "
@@ -463,6 +510,7 @@ def test_competing_processes_share_first_durable_pin(tmp_path):
     ]
     try:
         for process in processes:
+            assert process.stdin is not None
             process.stdin.write("go\n")
             process.stdin.flush()
         outputs = [process.communicate(timeout=30) for process in processes]
@@ -482,10 +530,12 @@ def test_atomic_first_file_creation_is_race_safe(tmp_path, iteration):
     # Repeating fresh creation exercises Darwin's openat(O_CREAT) losing-race
     # ENOENT, which an already-existing pin cannot reproduce.
     root = session(tmp_path, "root")
+    assert root.session_dir is not None
     gate = Barrier(2)
 
     def pin(host):
         gate.wait()
+        assert root.session_dir is not None
         return pin_quick_tunnel(Path(root.session_dir), host, "https://" + host)
 
     with ThreadPoolExecutor(max_workers=2) as pool:
