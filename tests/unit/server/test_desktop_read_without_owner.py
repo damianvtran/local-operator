@@ -235,10 +235,43 @@ async def test_a_session_with_no_owner_at_all_is_unchanged(
         assert registry.scan(tmp_path) == []
         base = f"/v1/desktop/sessions/{harness.session_id}"
 
+        # Spies record and DELEGATE, so behaviour is unchanged: the read path's
+        # attach entry point and the owner socket dial it would reach.
+        attach_calls: list[Any] = []
+        dial_calls: list[Any] = []
+        real_attach = AttachedSession.attach_existing
+        real_dial = AttachedSession._dial
+
+        async def _spy_attach(self: AttachedSession, *a: Any, **k: Any) -> bool:
+            attach_calls.append(k)
+            return await real_attach(self, *a, **k)
+
+        async def _spy_dial(self: AttachedSession, *a: Any, **k: Any) -> Any:
+            dial_calls.append(k)
+            return await real_dial(self, *a, **k)
+
+        monkeypatch.setattr(AttachedSession, "attach_existing", _spy_attach)
+        monkeypatch.setattr(AttachedSession, "_dial", _spy_dial)
+
         status, elapsed, body = await _get(harness.client, base)
 
         assert status == 200, body
-        assert elapsed < 1.0, f"a cold read with no owner waited {elapsed:.2f}s"
+        # The wall-clock bound is DERIVED, not a flat 1.0 s. With no owner there
+        # is nothing to dial, so the read's only legitimate wait is the
+        # first-frame grace (50 ms). READ_ATTACH_BUDGET_S (2.0 s) is the cost of a
+        # read that waits out an owner ATTACH, so it is the line between the two,
+        # with the headroom every sibling row takes (a flat 1.0 s also measured
+        # runner starvation: CI job 132415592908). What the bound does NOT catch:
+        # a read that waits 50 ms-2 s on something slower than the grace would
+        # slip under it; the product path has no such wait today. The "nothing
+        # dialled" claim therefore rests on the call spy above, not on this clock.
+        assert elapsed < READ_ATTACH_BUDGET_S, f"a cold read with no owner waited {elapsed:.2f}s"
+        # Non-vacuous structural proof: the request's release() detaches
+        # ``bridge.remote``, so nothing is left to inspect afterwards -- the
+        # evidence is the spy, recorded DURING the read. The attach entry point
+        # WAS reached (so the instrumented path ran) and it never opened a dial.
+        assert attach_calls, "the read never reached attach_existing: the spy proves nothing"
+        assert dial_calls == [], "a read with no owner dialled one"
         payload = body["result"]["payload"]
         assert payload["cold"] is True
         assert payload["cold_reason"] == "no-runtime"
