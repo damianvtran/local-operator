@@ -936,10 +936,14 @@ def _settle_ask(owner: Path, ask_id: str) -> None:
 
 def test_ask_an_open_queued_ask_is_stamped_first_for_the_origin(tmp_path: Path) -> None:
     owner = _owner(tmp_path)
-    _queue_ask(owner, "k7", "Install Chromium on the node?")
+    from local_operator.asks import store as ask_store
+
+    asked_at = ask_store.now_ms()
+    _queue_ask(owner, "k7", "Install Chromium on the node?", at=asked_at)
     rows = [_catalog_row()]
     ra.stamp_rows_for_viewer(owner, rows, HEAD)
-    assert rows[0]["notices"] == [
+    blocks = rows[0]["notices"]
+    assert [{k: v for k, v in block.items() if k != "at"} for block in blocks] == [
         {
             "key": "remote-ask:k7",
             "revision": 1,
@@ -948,6 +952,9 @@ def test_ask_an_open_queued_ask_is_stamped_first_for_the_origin(tmp_path: Path) 
         },
         {"key": "deploy", "revision": 1, "priority": "high", "title": "Deploy finished"},
     ]
+    # The ask carries its OWN queue time: the origin drops a timeless notice
+    # (the no-backfill rule), so without it the ask would never be raised.
+    assert blocks[0]["at"] == asked_at
     # Another member of the mesh still sees nothing (the origin-only rule).
     other = [_catalog_row(origin="d_other")]
     ra.stamp_rows_for_viewer(owner, other, HEAD)
@@ -976,17 +983,33 @@ def test_ask_the_wire_list_stays_bounded_with_asks_first(tmp_path: Path) -> None
     assert all(key.startswith(ra.ASK_NOTICE_PREFIX) for key in keys)
 
 
-def _ask_claim(ask_id: str = "k7", title: str = "Install Chromium on the node?") -> Any:
-    return (f"{ra.ASK_NOTICE_PREFIX}{ask_id}", 1, "high", title)
+def _ask_claim(
+    ask_id: str = "k7", title: str = "Install Chromium on the node?", *, at: int | None = None
+) -> Any:
+    claim = (f"{ra.ASK_NOTICE_PREFIX}{ask_id}", 1, "high", title)
+    return claim if at is None else (*claim, at)
+
+
+def _asked_at_first_contact(root: Path) -> int:
+    """An ask time the origin both raises and can later settle by absence.
+
+    The no-backfill rule raises only a claim at or after the origin's baseline,
+    and the row keeps that owner time as ``updated_at``, which the absence
+    settle (Q3) requires to be OLDER than the settling listing. ``_timed``'s
+    hour-ahead default would pass the first and never the second, so an ask
+    test states the realistic case: asked at the moment of first contact.
+    """
+    return ra.origin_baseline_ms(root, NODE)
 
 
 def test_ask_the_origin_raises_one_high_row_and_retires_it_on_settle(
     root: Path, _no_banner_threads: list[dict[str, Any]]
 ) -> None:
     watcher = ra.RemoteAttentionWatcher(root)
-    watcher.observe([_row(notices=(_ask_claim(),))], listed_at_ms=now_ms())
+    claim = _ask_claim(at=_asked_at_first_contact(root))
+    watcher.observe([_row(notices=(claim,))], listed_at_ms=now_ms())
     # A second host / restarted watcher: no second row, no second banner.
-    ra.RemoteAttentionWatcher(root).observe([_row(notices=(_ask_claim(),))], listed_at_ms=now_ms())
+    ra.RemoteAttentionWatcher(root).observe([_row(notices=(claim,))], listed_at_ms=now_ms())
     [row] = _items(root)
     assert row["key"] == ra.notice_key(NODE, SID, "remote-ask:k7")
     assert row["session_id"] == SID, "the row deep-links to the remote session"
@@ -1002,7 +1025,8 @@ def test_ask_the_origin_raises_one_high_row_and_retires_it_on_settle(
 
 def test_ask_absence_settles_nothing_it_cannot_vouch_for(root: Path) -> None:
     watcher = ra.RemoteAttentionWatcher(root)
-    watcher.observe([_row(notices=(_ask_claim(),))], listed_at_ms=now_ms())
+    claim = _ask_claim(at=_asked_at_first_contact(root))
+    watcher.observe([_row(notices=(claim,))], listed_at_ms=now_ms())
     # A listing that started BEFORE the row was written (a stale cache) — Q3.
     watcher.observe([_row(notices=None)], listed_at_ms=0)
     # The device did not answer: no row for the session at all.
@@ -1048,8 +1072,9 @@ def test_r1_1_an_answered_ask_retires_under_a_full_list_of_plain_notices(root: P
     """
     watcher = ra.RemoteAttentionWatcher(root)
     plain = tuple((f"m{i}", 1, "normal", "FYI %d" % i) for i in range(ra.NOTICES_ON_WIRE))
+    ask = _ask_claim(at=_asked_at_first_contact(root))
     watcher.observe(
-        [_row(notices=(_ask_claim(),) + plain[: ra.NOTICES_ON_WIRE - 1])], listed_at_ms=now_ms()
+        [_row(notices=(ask,) + plain[: ra.NOTICES_ON_WIRE - 1])], listed_at_ms=now_ms()
     )
     watcher.observe([_row(notices=plain)], listed_at_ms=_later())
     row = NotificationStore(root).get_by_key(SID, ra.notice_key(NODE, SID, "remote-ask:k7"))
@@ -1073,7 +1098,8 @@ def test_r1_2_a_failed_ask_read_is_unknown_and_settles_nothing(tmp_path: Path) -
 
     head = tmp_path / "head"
     watcher = ra.RemoteAttentionWatcher(head)
-    watcher.observe([_row(notices=(_ask_claim(),))], listed_at_ms=now_ms())
+    claim = _ask_claim(at=_asked_at_first_contact(head))
+    watcher.observe([_row(notices=(claim,))], listed_at_ms=now_ms())
     unknown = _row(notice=("deploy", 1, "high", "Deploy finished"))._replace(
         remote_asks_unknown=True
     )

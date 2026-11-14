@@ -372,6 +372,11 @@ def open_ask_notices(root: Path, session_id: str) -> list[dict[str, Any]] | None
                     "revision": 1,
                     "priority": ASK_PRIORITY,
                     "title": title,
+                    # The ask's OWN queue time, like ``_newest_notices``'s
+                    # ``at``: the origin drops a notice with no time (or one
+                    # older than its first contact, "NO BACKFILL", PR #3902), so
+                    # an ask block without it would never be raised there.
+                    "at": int(record.get("created_at") or 0),
                 }
             )
         return out[:NOTICES_ON_WIRE]

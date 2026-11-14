@@ -167,6 +167,10 @@ def test_an_open_queued_ask_crosses_and_its_answer_retires_the_origin_row(
 
     server_a, server_b, _host, _port = pair
     owner = server_a.identity.device_id
+    head = tmp_path / "head-inbox"
+    # The head first watched the owner BEFORE the ask was queued there, so the
+    # no-backfill rule lets it through (the notice test's own setup).
+    ra.origin_baseline_ms(head, owner)
     _record, link = _live_link(pair, monkeypatch)
     _own_session(server_a, server_b.identity.device_id)
     _ask_event(
@@ -195,17 +199,18 @@ def test_an_open_queued_ask_crosses_and_its_answer_retires_the_origin_row(
         return peer_rows.peer_session_rows(None, ttl_s=0, catalog=_Catalog())
 
     monkeypatch.setattr(ra, "_deliver_async", lambda *_a, **_k: None)
-    monkeypatch.setattr(ra, "_deliver_done_banner", lambda *_a, **_k: None)
-    head = tmp_path / "head-inbox"
     watcher = ra.RemoteAttentionWatcher(head)
     try:
         row = _catalog_row(link)
-        assert row["notices"][0] == {
+        block = row["notices"][0]
+        assert {k: v for k, v in block.items() if k != "at"} == {
             "key": ASK_KEY,
             "revision": 1,
             "priority": "high",
             "title": "Install Chromium here?",
         }
+        # The ask's own queue time rides the block (the no-backfill rule).
+        assert block["at"] > 0
         watcher.observe(_origin_rows(row), listed_at_ms=ra_now())
         key = ra.notice_key(owner, SID, ASK_KEY)
         item = NotificationStore(head).get_by_key(SID, key)
