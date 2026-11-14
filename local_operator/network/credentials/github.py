@@ -88,13 +88,23 @@ protocol, so the env is the only carrier for that leg).
 
 MINT-REVOKE (design F4). The owner keeps a bounded in-memory registry of
 minted-but-unrevoked tokens per ``(key, holder)`` and calls
-``DELETE /installation/token`` at each token's window end on the broker's own
-loop; ``credential revoke`` (and only that path today) revokes immediately via
-the ``credential_revoke`` local op. Revoke is idempotent: a token that no longer
-authenticates IS the goal state. A failed call is recorded and retried while
-this process lives; if no revoke can ever be delivered, the token falls back to
-its own 60-minute ceiling. The borrower holds a best-effort belt: it self-revokes
-the tokens it fetched at their window end.
+``DELETE /installation/token`` at each token's HOLD end on the broker's own
+loop; ``credential revoke`` and a panic revoke immediately (the
+``credential_revoke`` local op, ``revoke_all_outstanding``). Revoke is idempotent: a
+token that no longer authenticates IS the goal state. A failed call is recorded and
+retried while this process lives; if no revoke can ever be delivered, the token falls
+back to its own 60-minute ceiling. The borrower holds a best-effort belt: it
+self-revokes the installation tokens it fetched at their hold end, and at once when
+it drops one for a panic, a share revoke or a lost membership (:func:`revoke_now`).
+
+WHY THE HOLD END AND NOT THE 15-MINUTE GRANT WINDOW (operator decision
+2026-11-14, "Yes, GitHub and MCP"): a node keeps a lent GitHub login through the
+24 h offline hold (#3922) exactly like a model login. A window-end DELETE would hand
+the held serve a token this device or its owner had already killed, so both
+scheduled revokes moved to ``Grant.hold_end_ms`` — which for an installation token
+is its own 1 h ceiling, because the hold never outlives the token. Only App
+installation tokens are DELETEd: a PAT or a ``gh`` token has no revoke endpoint, so a
+DELETE at one was a 401 that only looked like a revoke.
 
 Stdlib only at import: the relay imports the credentials package at
 construction, so ``jwt`` and ``httpx`` are imported inside the functions that
@@ -1073,14 +1083,17 @@ class _TrackedToken:
     holder: str
     grant_id: str
     token: str
-    grant_exp_ms: int
+    #: When the scheduled DELETE fires: the grant's HOLD end (``hold_until_ms``),
+    #: not its 15-minute window, so a borrower serving the token from the offline
+    #: hold is never handed a token its owner already killed (2026-11-14).
+    revoke_at_ms: int
     token_exp_ms: int
     attempts: int = 0
     last_error: str = ""
 
 
 class GithubLender:
-    """Mints on demand and revokes at each token's window end (design F4).
+    """Mints on demand and revokes at each token's hold end (design F4, 2026-11-14).
 
     ONE instance per broker process, owned by :class:`MeshCredentialBroker`. The
     registry is IN MEMORY and intentionally so: a token's life is one window
@@ -1139,16 +1152,16 @@ class GithubLender:
         holder: str,
         grant_id: str,
         token: str,
-        grant_exp_ms: int,
+        revoke_at_ms: int,
         token_exp_ms: int,
     ) -> None:
-        """Track a fresh token and schedule its window-end revoke."""
+        """Track a fresh token and schedule its revoke at ``revoke_at_ms`` (the hold end)."""
         record = _TrackedToken(
             key=key,
             holder=holder,
             grant_id=grant_id,
             token=token,
-            grant_exp_ms=grant_exp_ms,
+            revoke_at_ms=revoke_at_ms,
             token_exp_ms=token_exp_ms,
         )
         overflow: list[_TrackedToken] = []
@@ -1234,7 +1247,7 @@ class GithubLender:
     def _schedule(self, record: _TrackedToken, *, delay_s: float | None = None) -> None:
         """Queue one revoke on the broker's loop (thread-safe), or run it inline."""
         if delay_s is None:
-            delay_s = max(0.05, record.grant_exp_ms / 1000.0 - self._clock())
+            delay_s = max(0.05, record.revoke_at_ms / 1000.0 - self._clock())
         loop = self._loop
         if loop is None:
             # No loop (a unit-test lender, or a process that never bound one):
@@ -1362,6 +1375,10 @@ _GIT_CLIENTS_LOCK = threading.Lock()
 
 #: Tokens this process has already scheduled a self-revoke for, by token string.
 _SELF_REVOKE_SCHEDULED: set[str] = set()
+#: The pending belt timers, by token. Kept so an immediate revoke (:func:`revoke_now`)
+#: cancels the belt it supersedes: since the belt moved to the hold end it can be
+#: pending for up to the token's hour, and a second DELETE then is noise.
+_SELF_REVOKE_TIMERS: dict[str, threading.Timer] = {}
 _SELF_REVOKE_LOCK = threading.Lock()
 
 
@@ -1380,13 +1397,17 @@ def _client_for(root: Path | None) -> Any:
     return client
 
 
-def _schedule_self_revoke(token: str, grant_exp_ms: int) -> None:
-    """The borrower's best-effort belt: DELETE the token at its window end.
+def _schedule_self_revoke(token: str, revoke_at_ms: int) -> None:
+    """The borrower's best-effort belt: DELETE the token at its HOLD end.
 
     Fires only while THIS process lives; the owner-side revoker is the primary,
     and the token's own ceiling is the floor under both. Duplicate scheduling is
     suppressed per token: the env path re-reads the same cached grant for every
     command in a window, and one timer per command would be a thread storm.
+
+    ``revoke_at_ms`` is :func:`belt_revoke_at_ms`, never the 15-minute grant window:
+    the offline hold (2026-11-14) keeps serving this token after the window, and a
+    belt that fired there would kill the very token the hold hands out.
     """
     if not token:
         return
@@ -1394,7 +1415,7 @@ def _schedule_self_revoke(token: str, grant_exp_ms: int) -> None:
         if token in _SELF_REVOKE_SCHEDULED:
             return
         _SELF_REVOKE_SCHEDULED.add(token)
-    delay = max(0.1, grant_exp_ms / 1000.0 - time.time())
+    delay = max(0.1, revoke_at_ms / 1000.0 - time.time())
 
     def _fire() -> None:
         try:
@@ -1402,10 +1423,126 @@ def _schedule_self_revoke(token: str, grant_exp_ms: int) -> None:
         finally:
             with _SELF_REVOKE_LOCK:
                 _SELF_REVOKE_SCHEDULED.discard(token)
+                _SELF_REVOKE_TIMERS.pop(token, None)
 
     timer = threading.Timer(delay, _fire)
     timer.daemon = True
+    with _SELF_REVOKE_LOCK:
+        _SELF_REVOKE_TIMERS[token] = timer
     timer.start()
+
+
+def _cancel_self_revoke(token: str) -> None:
+    """Cancel a pending belt for ``token`` (it is being revoked now, or never will be)."""
+    with _SELF_REVOKE_LOCK:
+        timer = _SELF_REVOKE_TIMERS.pop(token, None)
+        _SELF_REVOKE_SCHEDULED.discard(token)
+    if timer is not None:
+        timer.cancel()
+
+
+def cancel_pending_self_revokes() -> int:
+    """Cancel every pending belt in this process; returns how many. For teardown.
+
+    A test that scheduled a belt at a hold end seconds away must not leave it to fire
+    after its loopback GitHub is gone — the module base it reads at call time would
+    then be the real ``api.github.com``.
+    """
+    with _SELF_REVOKE_LOCK:
+        tokens = list(_SELF_REVOKE_TIMERS)
+    for token in tokens:
+        _cancel_self_revoke(token)
+    return len(tokens)
+
+
+def is_installation_grant(grant: Any) -> bool:
+    """Whether ``grant`` carries an App INSTALLATION token, the one arm GitHub can revoke.
+
+    All three arms travel as ``kind="github-app"`` (``owner._serve_github_app`` and
+    ``owner._grant_from_owner_token``), so the kind cannot tell them apart. The
+    token's stated expiry can: the App arm sends the mint's ``expires_at`` (GitHub
+    caps it at 1 h), while the PAT and ``gh`` arms send ``0``, the store's encoding
+    for "no known expiry" (``_grant_from_owner_token``'s docstring). A DELETE at a
+    PAT or ``gh`` token is a 401 that revokes nothing, so those are skipped rather
+    than reported as revoked.
+    """
+    ref = getattr(grant, "credential_ref", None)
+    return (
+        getattr(ref, "kind", "") == GITHUB_KIND
+        and int(getattr(grant, "token_expires_at_ms", 0) or 0) > 0
+        and bool(getattr(grant, "access_token", ""))
+    )
+
+
+def belt_revoke_at_ms(grant: Any, root: Path | None = None) -> int:
+    """When the borrower's belt DELETEs ``grant``'s token: the end of its offline hold.
+
+    A held serve already carries the end it was served under (``held_until_ms``);
+    a fresh one computes the same bound with :meth:`Grant.hold_end_ms` — the owner's
+    ``hold_until_ms`` capped by the token's own expiry and THIS device's receipt
+    clocks. A grant this process never stamped (or an older owner that states no
+    hold) ends at ``grant_expires_at_ms``, which is today's window-end behaviour.
+    """
+    held_until = int(getattr(grant, "held_until_ms", 0) or 0)
+    if held_until:
+        return held_until
+    from local_operator.network.credentials.types import Grant
+
+    if isinstance(grant, Grant):
+        from local_operator.network.credentials import offline_hold_s
+        from local_operator.network.credentials.client import _sleep_inclusive_clock
+
+        end = grant.hold_end_ms(offline_hold_s(root), _sleep_inclusive_clock())
+        if end:
+            return end
+    return int(getattr(grant, "grant_expires_at_ms", 0) or 0)
+
+
+#: Tokens :func:`revoke_now` has already DELETEd (or is DELETEing) in this process.
+#: Bounded like ``_STALE_ACCEPTED``: every drop path may see the same grant, and one
+#: DELETE per token is the whole contract.
+_REVOKED_NOW: dict[str, None] = {}
+_REVOKED_NOW_MAX = 256
+
+
+def revoke_now(grants: Any, *, base_url: str | None = None) -> list[threading.Thread]:
+    """DELETE every installation token in ``grants`` NOW, off the caller's thread.
+
+    THE BORROWER HALF OF "PANIC, SHARE REVOKE AND MEMBERSHIP LOSS END IT AT ONCE"
+    (operator decision 2026-11-14). Once a node may hold a lent GitHub token for up
+    to its hour, the scheduled belt at the hold end is not enough for those three
+    causes: the owner may be the device that is away (it cannot revoke) or the one
+    that was lost. The client calls this with the grants it just dropped for one of
+    them. Off-thread because the caller is a request path and a DELETE can take
+    ``HTTP_TIMEOUT_S``; daemon threads because a revoke that cannot finish before
+    exit still has the token's own ceiling under it. Returns the started threads so
+    a test can join them. Never raises.
+    """
+    started: list[threading.Thread] = []
+    for grant in grants or ():
+        if not is_installation_grant(grant):
+            continue
+        token = str(grant.access_token)
+        _cancel_self_revoke(token)
+        with _SELF_REVOKE_LOCK:
+            if token in _REVOKED_NOW:
+                continue
+            _REVOKED_NOW[token] = None
+            while len(_REVOKED_NOW) > _REVOKED_NOW_MAX:
+                del _REVOKED_NOW[next(iter(_REVOKED_NOW))]
+        thread = threading.Thread(
+            target=revoke_installation_token,
+            args=(token,),
+            kwargs={"base_url": base_url},
+            name="lop-github-revoke-now",
+            daemon=True,
+        )
+        try:
+            thread.start()
+        except RuntimeError:  # interpreter shutting down; the ceiling remains
+            continue
+        started.append(thread)
+    return started
 
 
 def revoke_installation_token(token: str, *, base_url: str | None = None) -> bool:
@@ -1909,8 +2046,12 @@ def borrowed_git_env(
                         _accept_stale(outcome, client=client, root=root)
     except Exception:  # noqa: BLE001 — a delivery receipt is never worth a lost env
         pass
-    grant_exp_ms = int(getattr(outcome, "grant_expires_at_ms", 0) or 0)
-    _schedule_self_revoke(token, grant_exp_ms)
+    # THE BELT FIRES AT THE HOLD END, AND ONLY FOR AN INSTALLATION TOKEN
+    # (2026-11-14): the grant window is 15 min but the offline hold keeps serving
+    # this token after it, so a window-end DELETE would kill the token the hold
+    # hands to the next push. A PAT or ``gh`` token has no revoke endpoint.
+    if is_installation_grant(outcome):
+        _schedule_self_revoke(token, belt_revoke_at_ms(outcome, root))
     return git_env_for_token(token), token
 
 

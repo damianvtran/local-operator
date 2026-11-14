@@ -69,8 +69,15 @@ FILE_MODE = 0o600
 #:                   network; access ended at reconcile;
 #: ``unauthorized``  the server refused the bearer we presented (a 401);
 #: ``unavailable``   the owner could not be reached;
+#: ``held``          the owner could not be reached, and this device is serving the
+#:                   access token the owner lent before it went away, until ``until``
+#:                   (epoch seconds) — the offline hold, 2026-11-14 ("Yes, GitHub and
+#:                   MCP"). Usable, like ``synced``, but it says when it stops and that
+#:                   nothing is renewed meanwhile;
 #: ``synced``        the last thing we know is that it worked.
-STATES: frozenset[str] = frozenset({"expired", "revoked", "unauthorized", "unavailable", "synced"})
+STATES: frozenset[str] = frozenset(
+    {"expired", "revoked", "unauthorized", "unavailable", "held", "synced"}
+)
 
 #: Broker code -> evidence state. The mapping lives HERE rather than at each
 #: caller so the client, the sync engine and the CLI cannot disagree about what
@@ -95,6 +102,22 @@ STATE_FOR_CODE: dict[str, str] = {
     "not_authorised": "unauthorized",
     "grant_invalid": "unauthorized",
 }
+
+
+def held_until_clause(until: Any, *, now: float | None = None) -> str:
+    """``" until HH:MM UTC"`` for a ``held`` row still inside its hold, else ``""``.
+
+    One spelling for every MCP surface that renders a held row, matching the model
+    readiness sentence (``readiness.selected_model_row``). UTC because the reader may
+    sit in another time zone than the device that holds the token. ``""`` once the
+    hold has ended (or the value is not a number): a lapsed hold must never read as
+    usable, so callers fall back to the "owner unreachable" remedy.
+    """
+    if isinstance(until, bool) or not isinstance(until, (int, float)) or until <= 0:
+        return ""
+    if until <= (time.time() if now is None else now):
+        return ""
+    return time.strftime(" until %H:%M UTC", time.gmtime(until))
 
 
 def state_for_code(code: str) -> str:
@@ -143,9 +166,13 @@ def record(
     code: str = "",
     owner_device: str = "",
     owner_name: str = "",
+    until: float = 0.0,
     root: Path | None = None,
 ) -> None:
     """Write (or replace) one key's evidence. NEVER raises.
+
+    ``until`` (epoch seconds) is written only when positive; ``held`` rows carry the
+    hold end there so a status surface can say "until HH:MM UTC".
 
     ``state`` outside :data:`STATES` is a programming error, and it records
     nothing rather than writing a word no surface can render. A blank network id
@@ -163,6 +190,8 @@ def record(
         "owner_name": str(owner_name or "")[:128],
         "at": time.time(),
     }
+    if until and until > 0:
+        row["until"] = float(until)
     try:
         _update(network_id, root, lambda entries: {**entries, key: row})
     except Exception:  # noqa: BLE001 — bookkeeping must never fail a borrow
@@ -185,6 +214,46 @@ def clear(network_id: str, key: str, *, root: Path | None = None) -> None:
                 {k: v for k, v in entries.items() if k != key} if key in entries else None
             ),
         )
+    except Exception:  # noqa: BLE001 — see :func:`record`
+        return
+
+
+def retire_held(
+    network_id: str,
+    keys: Any = None,
+    *,
+    code: str,
+    root: Path | None = None,
+) -> None:
+    """Rewrite ``held`` rows as ``revoked`` (with ``code``) when a hold ends for cause.
+
+    WHY (review #3947 m2): a ``held`` row is written on each held serve and says
+    "held until HH:MM UTC". A panic, a share revoke or a lost membership ends the
+    hold NOW, but nothing rewrites the row until something reads the key again — so
+    ``/mcp``, readiness and the git push clause kept promising the hold until its
+    ``until`` passed. The drop paths call this. ``keys=None`` retires every held row
+    of the network (a panic or a lost membership ends them all). Only ``held`` rows
+    move: a newer ``synced`` or failure row is left exactly as it is. Never raises.
+    """
+    if not network_id:
+        return
+    wanted = None if keys is None else {str(key) for key in keys}
+
+    def retire(entries: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]] | None:
+        changed = False
+        out: dict[str, dict[str, Any]] = {}
+        for key, row in entries.items():
+            if row.get("state") == "held" and (wanted is None or key in wanted):
+                row = {k: v for k, v in row.items() if k != "until"}
+                row.update(state="revoked", code=str(code or "")[:64], at=time.time())
+                changed = True
+            out[key] = row
+        return out if changed else None
+
+    try:
+        if retire(load(network_id, root)) is None:
+            return
+        _update(network_id, root, retire)
     except Exception:  # noqa: BLE001 — see :func:`record`
         return
 

@@ -834,7 +834,12 @@ def test_the_revoke_receipt_is_per_source() -> None:
     gh_lines = network_cli._github_revoke_lines(
         "peer-b", None, github_mod.SOURCE_GH
     )  # noqa: SLF001
-    assert "sign out of the gh CLI" in "\n".join(gh_lines)
+    gh_joined = "\n".join(gh_lines)
+    # ``gh auth logout`` does not revoke the token (#3947 M1): the receipt names the
+    # revoke at GitHub, and the hold bound a node that cannot hear the revoke keeps.
+    assert "revoke the GitHub CLI's access at GitHub" in gh_joined
+    assert "only forgets the token locally" in gh_joined
+    assert "may keep using it for up to 24 h" in gh_joined
 
     none_lines = network_cli._github_revoke_lines("peer-b", None, "")  # noqa: SLF001
     assert "no GitHub source is configured" in "\n".join(none_lines)

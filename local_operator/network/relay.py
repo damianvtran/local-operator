@@ -9305,6 +9305,7 @@ class RelayServer:
         # block exits) and ``_rehandshake_network`` touches ``self.links`` alone, so
         # nothing it needed was being protected here.
         rehandshake = False
+        removed_here: list[str] = []
         with store.mutate(link.network_id, self.root) as record:
             if incoming == record.epoch and str(
                 frame.get("rotation_id") or ""
@@ -9365,6 +9366,11 @@ class RelayServer:
                     )
                 )
                 rehandshake = True
+                removed_here = [
+                    str(device)
+                    for device in frame.get("removed") or []
+                    if str(device) != record.self_device_id
+                ]
         if rehandshake:
             # THE LINK'S NETWORK ID, NOT THE RECORD'S, and deliberately: after the move
             # above this call sits OUTSIDE the ``store.mutate`` block, so a record bound
@@ -9377,6 +9383,10 @@ class RelayServer:
             # FROM that field), so the two are equal today and the link is the one that
             # stays right if they ever are not.
             self._rehandshake_network(link.network_id, reason="epoch_stale")
+            # A removal another admin made reaches this owner as the rotation that
+            # names it: revoke what this device lent the removed ones (#3947 M2).
+            if removed_here:
+                self._revoke_lent_on_removal(link.network_id, removed_here)
         return {
             "op": "ack",
             "req": frame.get("req"),
@@ -9502,6 +9512,8 @@ class RelayServer:
                 )
         if outcome is not None:
             self._broadcast_epoch(record, state, reason="member_left", removed=outcome.removed)
+        # A device that left keeps no lent GitHub token either (#3947 M2).
+        self._revoke_lent_on_removal(link.network_id, [link.device_id])
         return {"op": "ack", "req": frame.get("req"), "detail": {"left": link.device_id}}
 
     def _op_panic(self, link: PeerLink, frame: dict[str, Any]) -> dict[str, Any] | None:
@@ -13795,6 +13807,8 @@ class RelayServer:
             )
         self._broadcast_epoch(record, state, reason="member_removed", removed=outcome.removed)
         self._rehandshake_network(record.network_id, reason="epoch_stale")
+        # The owner half of "membership loss ends a held GitHub token" (#3947 M2).
+        self._revoke_lent_on_removal(record.network_id, [device_id])
         return {
             "network_id": record.network_id,
             "removed": device_id,
@@ -14243,6 +14257,29 @@ class RelayServer:
             **tally,
             "peers": reports,
         }
+
+    def _revoke_lent_on_removal(self, network_id: str, device_ids: list[str]) -> threading.Thread:
+        """DELETE the GitHub tokens this owner lent to removed devices, off-thread.
+
+        The removal twin of :meth:`_revoke_lent_on_panic` (review #3947 M2): since the
+        offline hold the lender's scheduled DELETE fires at the hold end (an App
+        token's hour), so a removed node's token must be revoked here rather than
+        left to it. Off-thread for the same reasons — the received path runs on a
+        link reader and a receipt must not wait on GitHub's API. Never raises.
+        """
+        from local_operator.network.credentials import owner as owner_mod
+
+        thread = threading.Thread(
+            target=owner_mod.revoke_lent_on_removal,
+            args=(self, network_id, list(device_ids)),
+            name="mesh-removal-revoke",
+            daemon=True,
+        )
+        try:
+            thread.start()
+        except RuntimeError:
+            logger.warning("member removal: could not start the lent-token revoke", exc_info=True)
+        return thread
 
     def _revoke_lent_on_panic(self, network_id: str) -> threading.Thread:
         """DELETE the GitHub tokens this owner lent in ``network_id``, off-thread.

@@ -154,8 +154,24 @@ closed overnight), a peer keeps using the login it already borrowed for up to
 received (a working peer asks again every grant period), so an owner that comes
 online once a day keeps remote work going. The hold never outlives the access token itself: a token that
 expires sooner (Anthropic OAuth after about 8 hours, Radient after about an
-hour) stops working at its own expiry until the owner is back. `kimi` is the one provider that can never be
-lent: its grants are signed with the fingerprint of the device that made them.
+hour) stops working at its own expiry until the owner is back. Lent GitHub and MCP
+logins are held the same way: a GitHub token from the owner's `GITHUB_TOKEN` or
+`gh` login lasts the whole hold (`network.credentials.github_token_hold_s` can
+shorten it for those two alone; lowering it affects grants lent after the change,
+not one a node already holds), a GitHub App token at most its one hour, and an
+MCP sign-in until its access token expires. `kimi` is the one provider that can
+never be lent: its grants are signed with the fingerprint of the device that made
+them.
+
+`lop network panic` and revoking a share stop every node that *hears* them from
+using held logins at once, and revoke a GitHub App token at GitHub. They cannot
+reach a node that is lost, stolen or offline: such a node can keep pushing with a
+lent `GITHUB_TOKEN` or `gh` token for up to 24 hours after its last grant (a GitHub
+App token for at most an hour), and a copy of the token taken off it works until
+the token itself is revoked. For a lost node, **revoke the token at GitHub**:
+Settings → Developer settings → Personal access tokens for a `GITHUB_TOKEN`, or
+Settings → Applications → Authorized OAuth Apps → GitHub CLI → Revoke for a `gh`
+login (`gh auth logout` only forgets the token locally).
 
 **The desktop app has its own view of it.**
 [`local-operator-ui`](https://github.com/damianvtran/local-operator-ui) mounts a

@@ -392,16 +392,15 @@ def test_a_removed_member_holds_nothing(mesh: Any, borrowed: Any) -> None:  # no
     assert _state(mesh, client).usable is False
 
 
-def test_an_mcp_grant_is_never_held(mesh: Any, borrowed: Any) -> None:  # noqa: F811
-    """A rotating MCP token may already be rotated by its owner: never bridged.
+def test_a_device_bound_grant_is_never_held(mesh: Any, borrowed: Any) -> None:  # noqa: F811
+    """The one exclusion left: a device-bound login (``kimi``) is never bridged.
 
-    A unit of the hold's guard (MCP keys borrow through ``mcp_bearer``, not this
-    fixture's provider share), so it calls the guard directly with a real held grant.
+    MCP and GitHub keys ARE held since 2026-11-14 ("Yes, GitHub and MCP"; their
+    real-path cells live in ``test_credentials_hold_github_mcp.py``). A unit of the
+    hold's guard, called directly with a real held grant under the kimi key.
     """
-    from local_operator.network.credentials.types import credential_key_for_mcp
-
     client, grant = borrowed
-    key = credential_key_for_mcp("https://mcp.example.test/mcp")
+    key = "kimi"
     client.grants.put(key, "sess-1", grant)
     refusal = BrokerError(code="owner_offline", key=key)
     out = client._held_or(refusal, key, "sess-1", force_refresh=False)  # noqa: SLF001

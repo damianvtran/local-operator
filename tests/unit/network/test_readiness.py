@@ -4701,3 +4701,82 @@ def test_the_peer_answer_carries_the_relay_unit_fact(monkeypatch: pytest.MonkeyP
 
     monkeypatch.setattr(relay_mod, "installed_unit_oom_policy", _boom)
     assert readiness.relay_unit_fact() == {"supervisor": None}
+
+
+# -- the offline hold for GitHub and MCP (2026-11-14, "Yes, GitHub and MCP") --------
+
+
+def _held_mcp_row(until: float) -> dict[str, Any]:
+    placement = {
+        "owner_device": THIRD,
+        "owner_device_name": "Damian's MacBook",
+        "holders": [{"device": PEER, "scope": "device"}],
+    }
+    server = {
+        "name": "linear",
+        "url": "https://mcp.linear.test/mcp",
+        "has_row": False,
+        "has_placement": True,
+        "auth_evidence": {
+            "state": "held",
+            "code": "owner_offline",
+            "owner_device": THIRD,
+            "owner_name": "Damian's MacBook",
+            "at": time.time(),
+            "until": until,
+        },
+    }
+    return readiness._mcp_credential_row(  # noqa: SLF001
+        _member(name="node2"),
+        url=server["url"],
+        name="linear",
+        server=server,
+        viewer=_FakeViewer(device_id=VIEWER, rows=[], holds_mcp=False, placement=placement),
+        peer_label="node2",
+    )
+
+
+def test_a_held_mcp_login_reads_held_until_its_end() -> None:
+    """The MCP row says it is a hold, until when (UTC), and that nothing is renewed."""
+    until = time.time() + 3600
+    row = _held_mcp_row(until)
+    assert row["ok"] is True and row["code"] == "held_offline", row
+    hhmm = time.strftime("%H:%M UTC", time.gmtime(until))
+    assert row["detail"] == (
+        f"node2 is using the linear sign-in Damian's MacBook lent before it went offline "
+        f"until {hhmm}; nothing is renewed until Damian's MacBook is back"
+    )
+    assert "reconnect Damian's MacBook before then" in row["remedies"][0]
+
+
+def test_a_lapsed_mcp_hold_never_reads_as_usable() -> None:
+    row = _held_mcp_row(time.time() - 1)
+    assert row.get("code") != "held_offline"
+    assert "lent before it went offline" not in row["detail"]
+
+
+def test_git_row_says_a_held_github_grant_and_until_when() -> None:
+    placement = {
+        "owner_device": THIRD,
+        "owner_device_name": "macbook",
+        "holders": [{"device": PEER, "scope": "device"}],
+    }
+    until = time.time() + 1800
+    held = {"until": until, "owner_device": THIRD, "owner_name": "macbook"}
+    row = _github_row(
+        {"source": "", "has_local": False, "held": held},
+        viewer=_GithubViewer(placement=placement),
+    )
+    hhmm = time.strftime("%H:%M UTC", time.gmtime(until))
+    assert (
+        f"a push there uses the GitHub grant macbook lent before it went offline until {hhmm}; "
+        "nothing is renewed until macbook is back" in row["detail"]
+    )
+    # Lapsed: the ordinary brokered sentence, which no longer claims a window-end revoke.
+    lapsed = _github_row(
+        {"source": "", "has_local": False, "held": {**held, "until": time.time() - 1}},
+        viewer=_GithubViewer(placement=placement),
+    )
+    assert "lent before it went offline" not in lapsed["detail"]
+    assert "revoked when the grant ends" not in lapsed["detail"]
+    assert "dropped at once on a panic or a share revoke" in lapsed["detail"]

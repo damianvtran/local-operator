@@ -961,16 +961,22 @@ def test_revoke_deletes_the_outstanding_token_now(owner: Any, github_api: _FakeG
     assert github_api.revoke_requests == [token]
 
 
-def test_window_end_revokes_on_the_broker_loop(
+def test_hold_end_revokes_on_the_broker_loop(
     owner: Any, github_api: _FakeGithub, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """T3(a): the broker's own loop issues the DELETE at ``grant_expires_at``.
+    """T3(a): the broker's own loop issues the DELETE at the grant's HOLD end.
 
-    The window is shortened by patching the TTL reader the broker uses — the
-    mechanism under test is the REVOKER (registration, scheduling on the loop,
-    the DELETE), not the number of seconds a config says.
+    Since 2026-11-14 the scheduled DELETE fires at ``hold_until_ms`` (a borrower may
+    serve the token from the offline hold after the window), not ``grant_expires_at``.
+    Both are shortened by patching the readers the broker uses — the mechanism under
+    test is the REVOKER (registration, scheduling on the loop, the DELETE), not the
+    number of seconds a config says. The window-vs-hold timing itself is pinned in
+    ``test_credentials_hold_github_mcp.py``.
     """
     monkeypatch.setattr(owner_mod, "_grant_ttl_s", lambda root: 1.0)
+    monkeypatch.setattr(
+        owner_mod, "_offline_hold_until_ms", lambda root, now_ms, token_ms, grant_ms: now_ms + 1500
+    )
     audited = threading.Event()
     audit_sink = owner.broker._github_audit_sink
 
@@ -984,7 +990,7 @@ def test_window_end_revokes_on_the_broker_loop(
     monkeypatch.setattr(owner.broker, "_github_audit_sink", record)
     token = _ask_grant(owner, BORROWER_DEVICE)["access_token"]
     assert github_api.live(token)
-    assert audited.wait(timeout=10.0), "the window-end revoke audit never completed"
+    assert audited.wait(timeout=10.0), "the hold-end revoke audit never completed"
     assert github_api.revoke_requests == [token]
     assert not github_api.live(token)
     rows = _audit_rows(owner, "credential.revoke")
@@ -1641,7 +1647,12 @@ def test_the_revoke_op_deletes_now_and_the_receipt_carries_the_mint_revoke_copy(
     monkeypatch.setattr(owner_mod, "broker_for_relay", lambda server: owner.broker)
     ops = _LocalOps(server=object())
     acked = ops.revoke({"credential_key": github_mod.GITHUB_KEY, "holder": BORROWER_DEVICE})
-    assert acked == {"kind": "ack", "key": github_mod.GITHUB_KEY, "revoked": 1}
+    # ``lent_hold_until_ms`` (#3947 R2-m2) is pinned in test_credentials_hold_github_mcp.
+    assert {k: v for k, v in acked.items() if k != "lent_hold_until_ms"} == {
+        "kind": "ack",
+        "key": github_mod.GITHUB_KEY,
+        "revoked": 1,
+    }
     assert github_api.revoke_requests == [token]
     assert not github_api.live(token)
 
