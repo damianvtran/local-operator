@@ -4701,3 +4701,124 @@ def test_the_peer_answer_carries_the_relay_unit_fact(monkeypatch: pytest.MonkeyP
 
     monkeypatch.setattr(relay_mod, "installed_unit_oom_policy", _boom)
     assert readiness.relay_unit_fact() == {"supervisor": None}
+
+
+# ---------------------------------------------------------------------------
+# (l) subagent tier pins — can the peer launch every tier-pinned role?
+# ---------------------------------------------------------------------------
+
+
+def _pin_role(root: Path, name: str, tier: str) -> None:
+    """A delegation role whose own row pins ``effort:<tier>``, as the definitions
+    sync installs the operator's designer/ux-reviewer/architect on a node."""
+    from local_operator.agents import AgentEditFields, AgentRegistry
+
+    fields = {field: None for field in AgentEditFields.model_fields}
+    fields.update(name=name, description=f"{name} role", tags=["role", f"effort:{tier}"])
+    AgentRegistry(root).create_agent(AgentEditFields(**fields))
+
+
+def _write_subagents(root: Path, subagents: dict[str, Any]) -> None:
+    import yaml
+
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "config.yml").write_text(yaml.safe_dump({"values": {"subagents": subagents}}))
+
+
+def test_tier_pins_row_names_roles_pinned_to_a_tier_the_peer_cannot_resolve(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The incident: a node with ``subagents: {}`` holds roles pinning ``hi``, so
+    every designer/ux-reviewer launch there refused. The fact is computed for
+    the ROOT it is given (the ambient config dir is a DIFFERENT, fully
+    configured root, so reading it instead would wrongly report healthy)."""
+    ambient = tmp_path / "ambient"
+    _write_subagents(ambient, {"models": {"hi": "anthropic/claude-opus-5-5"}})
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(ambient))
+    node = tmp_path / "node"
+    _write_subagents(node, {})
+    for name in ("designer", "ux-reviewer"):
+        _pin_role(node, name, "hi")
+    _pin_role(node, "scout", "lo")
+    _pin_role(node, "architect", "default")  # the inherit sentinel names no tier
+
+    fact = readiness.subagent_tier_pins_fact(node)
+    assert fact == {
+        "unresolved": [
+            {"tier": "hi", "roles": ["designer", "ux-reviewer"], "missing": True},
+            {"tier": "lo", "roles": ["scout"], "missing": True},
+        ]
+    }
+    # The fact travels as names only: wire-safe JSON, no selector values.
+    assert json.loads(json.dumps(fact)) == fact
+
+    row = readiness.subagent_tier_pins_row(
+        _member(), {"subagent_tier_pins": fact}, peer_label="cloud-node-1"
+    )
+    assert row is not None
+    assert row["capability"] == readiness.CAPABILITY_SUBAGENT_TIER_PINS == "subagent_tier_pins"
+    assert row["ok"] is False and row["code"] == readiness.CODE_TIER_UNAVAILABLE
+    assert row["class"] == readiness.CLASS_EQUIPMENT
+    assert readiness.CAPABILITY_SUBAGENT_TIER_PINS in readiness.NON_GATING_EQUIPMENT
+    assert "tier 'hi' is not configured (pinned by designer, ux-reviewer)" in row["detail"]
+    assert "tier 'lo' is not configured (pinned by scout)" in row["detail"]
+    assert row["remedies"][0] == (
+        "To fix: run `lop network definitions push` on the operator's owner device "
+        "(it carries the subagent tier models to mesh nodes), or set "
+        "subagents.models.hi on cloud-node-1"
+    )
+    assert "subagents.models.lo on cloud-node-1" in row["remedies"][1]
+    assert row["observed"]["unresolved"][0] == {
+        "tier": "hi",
+        "roles": ["designer", "ux-reviewer"],
+        "missing": True,
+    }
+
+
+def test_tier_pins_row_is_absent_when_every_pinned_tier_resolves(tmp_path: Path) -> None:
+    """Healthy node (its own or a mirrored tier map): no row, no new prose."""
+    node = tmp_path / "node"
+    _write_subagents(node, {"models": {"hi": "anthropic/claude-opus-5-5"}})
+    _pin_role(node, "designer", "hi")
+
+    fact = readiness.subagent_tier_pins_fact(node)
+    assert fact == {"unresolved": []}
+    assert (
+        readiness.subagent_tier_pins_row(
+            _member(), {"subagent_tier_pins": fact}, peer_label="cloud-node-1"
+        )
+        is None
+    )
+    # An older peer omits the fact: no row, never a claim either way.
+    assert readiness.subagent_tier_pins_row(_member(), {}, peer_label="cloud-node-1") is None
+
+
+def test_tier_pins_row_says_a_present_but_unusable_tier_needs_correcting(
+    tmp_path: Path,
+) -> None:
+    """A malformed value is not fixed by a push; the remedy says to correct it,
+    and the configured value itself never rides the fact."""
+    node = tmp_path / "node"
+    _write_subagents(node, {"models": {"hi": "no-provider-marker7731"}})
+    _pin_role(node, "designer", "hi")
+
+    fact = readiness.subagent_tier_pins_fact(node)
+    assert fact == {"unresolved": [{"tier": "hi", "roles": ["designer"], "missing": False}]}
+    assert "marker7731" not in json.dumps(fact)
+    row = readiness.subagent_tier_pins_row(
+        _member(), {"subagent_tier_pins": fact}, peer_label="cloud-node-1"
+    )
+    assert row is not None
+    assert "tier 'hi' is configured but unusable (pinned by designer)" in row["detail"]
+    assert row["remedies"] == ["Correct subagents.models.hi on cloud-node-1 to a provider/model id"]
+    assert "marker7731" not in json.dumps(row)
+
+
+def test_tier_pins_fact_is_collected_with_the_peer_facts(tmp_path: Path) -> None:
+    node = tmp_path / "node"
+    _write_subagents(node, {})
+    _pin_role(node, "designer", "hi")
+    facts = readiness.collect_peer_facts(node, home=tmp_path)
+    assert facts["subagent_tier_pins"] == {
+        "unresolved": [{"tier": "hi", "roles": ["designer"], "missing": True}]
+    }

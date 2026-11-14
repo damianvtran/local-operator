@@ -55,6 +55,16 @@ and the result's note names the reason and the dropped windows.
 Message delivery to a session on another device is `send` with `peer`;
 `guide://peer-messaging` carries it.
 
+A session on a mesh node delegates its OWN lane's review, QA, design and UX
+with `task` subagents (`agent='reviewer'`, `'qa-tester'`, `'designer'`,
+`'ux-reviewer'`), exactly as locally — never by spawning parallel sessions.
+`spawn` is only for work the user asked to run as its own session, or to host
+another manager's lane at their request, and then ONE host session per lane,
+never one per round or per reviewer. A role refused with "effort tier 'hi' is
+unavailable" is a node missing `subagents.models.<tier>`: run `lop network
+definitions push` from the owner device (or set the tier on the node), not a
+`model=inherit` or session workaround.
+
 ## Visibility: `spawn` is listed by default
 
 `spawn` opens the run as a **workstream** by default: the operator's sidebar,

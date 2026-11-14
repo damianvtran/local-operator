@@ -30,6 +30,12 @@ Coder children edit within ~10 calls; after ~40 without an edit, return the
 blocker. A repeat "explored, nothing landed" needs a smaller brief after checking
 for a harness cut-off.
 
+Your lane's review/QA/design/UX are `task` subagents (`agent='reviewer'`,
+`'qa-tester'`, `'designer'`...), on mesh nodes too. `sessions spawn` only for
+work the user asked for as its own session, or to host another manager's lane
+at their request: ONE session per lane, never per round or reviewer. A tier
+refusal is reported, never worked around with `model=inherit` or a session.
+
 ## Budgets
 
 Classify each lane at its start; record class and budget in the project.

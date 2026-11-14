@@ -747,6 +747,9 @@ _LATER_ROWS = (
     ("custom_instructions", "kept_own"),
     ("model_switch", "session_scoped_share"),
     ("subagent_tiers", "kept_own"),
+    # #3951's role-pin row: admitted by the derived set (no hand entry), and its
+    # failure code is a named ``CODE_*`` the receipt accepts.
+    ("subagent_tier_pins", "tier_unavailable"),
 )
 
 

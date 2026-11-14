@@ -1169,3 +1169,30 @@ async def test_the_task_tool_refuses_the_inherit_sentinel_as_a_tier(config_dir, 
     result = await _call(tmp_path, "task", {"label": "r", "prompt": "p", "effort": "default"})
     assert result.is_error
     assert "invalid arguments" in result.text
+
+
+def test_rejection_of_a_missing_tier_names_the_mesh_fix(config_dir) -> None:
+    """The tool-argument refusal carries the same remedy as the launch refusal,
+    both when no tiers exist (a mesh node's ``subagents: {}``) and when only the
+    asked-for tier is missing."""
+    remedy = (
+        "To fix: run `lop network definitions push` on the operator's owner device "
+        "(it carries the subagent tier models to mesh nodes), or set "
+        "subagents.models.hi on this device"
+    )
+    write_tiers(config_dir, None)
+    rejection = effort_tier_rejection("hi")
+    assert rejection is not None and rejection.endswith(remedy)
+    assert "no tiers are configured under subagents.models" in rejection
+
+    write_tiers(config_dir, {"lo": THREE["lo"]})
+    rejection = effort_tier_rejection("hi")
+    assert rejection is not None and rejection.endswith(remedy)
+    assert "not configured at subagents.models.hi" in rejection
+
+
+def test_rejection_of_a_malformed_tier_does_not_offer_the_push(config_dir) -> None:
+    write_tiers(config_dir, {"lo": THREE["lo"], "hi": "no-provider"})
+    rejection = effort_tier_rejection("hi")
+    assert rejection is not None
+    assert "lop network definitions push" not in rejection

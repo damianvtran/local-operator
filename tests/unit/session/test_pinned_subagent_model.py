@@ -140,6 +140,39 @@ def test_strict_launch_fails_on_a_malformed_selector(tmp_path, monkeypatch):
     assert "lacks provider/model" in caught.value.reason
 
 
+def test_unconfigured_tier_refusal_names_the_mesh_fix(tmp_path, monkeypatch):
+    """A mesh node with ``subagents: {}`` refused every tier-pinned role, and
+    its delegating model, told only "no model configured", fell back to
+    ``model=inherit`` or to whole sessions. The message the ``task`` tool
+    returns must name the fix; ``reason`` stays the bare fact the desktop
+    ``/effective`` contract keys on."""
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    write_tiers(tmp_path / "config", lo="openrouter/moonshotai/kimi-k3")
+    session = make_session(tmp_path)
+
+    with pytest.raises(SubagentModelUnavailable) as caught:
+        session._launch_subagent(label="review", prompt="review it", effort="hi")
+    assert caught.value.reason == "no model configured at subagents.models.hi"
+    assert str(caught.value) == (
+        "effort tier 'hi' is unavailable: no model configured at subagents.models.hi. "
+        "To fix: run `lop network definitions push` on the operator's owner device "
+        "(it carries the subagent tier models to mesh nodes), or set "
+        "subagents.models.hi on this device"
+    )
+
+
+def test_malformed_tier_refusal_does_not_offer_the_push(tmp_path, monkeypatch):
+    """A present-but-wrong value is fixed by correcting it; a push would not."""
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    write_tiers(tmp_path / "config", hi="just-a-model-no-provider")
+    session = make_session(tmp_path)
+
+    with pytest.raises(SubagentModelUnavailable) as caught:
+        session._launch_subagent(label="review", prompt="review it", effort="hi")
+    assert caught.value.remedy == ""
+    assert "lop network definitions push" not in str(caught.value)
+
+
 def test_strict_launch_refuses_a_non_string_selector(tmp_path, monkeypatch):
     """Q-1's regression guard, made deletable-only-with-a-failure (review
     R2-F8). A truthy non-string selector must be a NAMED refusal: without the
