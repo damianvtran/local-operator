@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import configparser
 import json
+import math
 import os
 import re
 import shlex
@@ -127,6 +128,17 @@ CAPABILITY_SUBAGENT_TIERS = "subagent_tiers"
 #: ``enrollment``'s capability allowlist — derived from these constants — can
 #: never miss it (it used to be the only row spelled as a literal).
 CAPABILITY_SELECTED_MODEL_CREDENTIAL = "selected_model_credential"
+#: (o) subagent tier pins: can this peer resolve every effort tier a role on it
+#: pins (``effort: lo|med|hi`` on the role row)? Added 2026-11-14: a node whose
+#: ``config.yml`` kept ``subagents: {}`` refused every designer/ux-reviewer/
+#: architect launch with "effort tier 'hi' is unavailable", and its sessions then
+#: fell back to ``model=inherit`` or to whole separate sessions for review — while
+#: this report said the peer was fine. Deliberately its OWN row id, apart from
+#: PR #3869's ``subagent_tiers`` mirror-conflict row: this one is computed from
+#: the peer's RESOLVED tier map and its roles' pins, so it is right whether that
+#: map came from the mirror or the node's own config. Emitted only when a pinned
+#: tier does not resolve; never in ``PEER_SIDE_CHECKS``.
+CAPABILITY_SUBAGENT_TIER_PINS = "subagent_tier_pins"
 
 #: The class a readiness row carries (F8 ruling, 2026-10-04). "The device is
 #: onboarded" and "the equipment on it is set up" are DIFFERENT questions:
@@ -182,6 +194,10 @@ NON_GATING_EQUIPMENT: frozenset[str] = frozenset(
         CAPABILITY_SKILLS,
         # A node keeping its own tier map is the node operator's choice, never a gate.
         CAPABILITY_SUBAGENT_TIERS,
+        # Sessions there still run; only the roles pinned to the missing tier
+        # refuse to launch. A warning with the remedy, never the onboarding
+        # verdict (the launch refusal is its point of use).
+        CAPABILITY_SUBAGENT_TIER_PINS,
     }
 )
 
@@ -251,6 +267,8 @@ CODE_KEPT_OWN = "kept_own"
 CODE_SESSION_SCOPED_SHARE = "session_scoped_share"
 #: MCP credential: the stored grant is expired/tombstoned on this device.
 CODE_LOCAL_GRANT_UNAVAILABLE = "local_grant_unavailable"
+#: Subagent tier pins (2026-11-14): a role pins a tier the peer cannot resolve.
+CODE_TIER_UNAVAILABLE = "tier_unavailable"
 
 #: Rows read from the peer's own state carry ``source: "peer"``; rows about a
 #: fact that could not be established carry ``"unknown"``. ``"local"`` is kept
@@ -1816,6 +1834,10 @@ def collect_peer_facts(
         "failover": _failover_fact(root, model),
         # Same additive contract as ``custom_instructions``.
         "subagent_tiers": subagent_tiers_fact(root),
+        # ADDITIVE ON THE WIRE: which role-pinned tiers this device cannot
+        # resolve. An older viewer ignores it; an older peer omits it and no
+        # ``subagent_tier_pins`` row is drawn (absence is never "all resolve").
+        "subagent_tier_pins": subagent_tier_pins_fact(root),
     }
 
 
@@ -1923,6 +1945,214 @@ def skills_row(
                 str(getattr(s, "name", "")) for s in local if getattr(s, "status", "") != "ready"
             ],
         },
+    )
+
+
+#: Wire bounds on the tier-pins fact: the peer answers from its own registry, but
+#: the viewer renders whatever arrives, so neither side trusts an unbounded list.
+MAX_TIER_PIN_ROLES = 32
+MAX_TIER_PIN_NAME_CHARS = 64
+
+
+class _ScannedRegistry:
+    """An ``AgentRegistry`` frozen at the scan it was built with, for one probe.
+
+    Forwards every read, but has no ``refresh_now`` (``_row_effort_tier`` skips
+    the per-launch refresh when the attribute is absent) and answers
+    ``require_complete_metadata`` from one check made here, so resolving N roles
+    costs one tree scan, not N. Valid only because the probe is a single
+    point-in-time answer: a launch must keep the real, refreshing registry.
+    """
+
+    def __init__(self, registry: Any) -> None:
+        self._registry = registry
+        self._incomplete: Exception | None = None
+        try:
+            registry.require_complete_metadata()
+        except Exception as exc:  # noqa: BLE001 — re-raised per role, as a launch would
+            self._incomplete = exc
+
+    def require_complete_metadata(self) -> None:
+        if self._incomplete is not None:
+            raise self._incomplete
+
+    def __getattr__(self, name: str) -> Any:
+        if name == "refresh_now":
+            raise AttributeError(name)
+        return getattr(self._registry, name)
+
+
+def subagent_tier_pins_fact(root: Path) -> dict[str, Any] | None:
+    """The role-pinned effort tiers this device cannot resolve, by tier.
+
+    ``{"unresolved": [{"tier": "hi", "roles": ["architect", "designer"],
+    "missing": True}]}`` — ``missing`` is ``True`` when nothing is configured at
+    the tier (the ``subagents: {}`` node) and ``False`` when a value is present
+    but unusable. Role and tier NAMES only: the configured selector is never
+    sent, so a credential pasted into ``subagents.models`` cannot leave the node
+    through this report.
+
+    Resolved through the launch's own resolver (``resolve_member_model`` over
+    this root's ``read_effort_tier_targets``), never a second parser, so the row
+    says "designer cannot launch" exactly when a ``task(agent='designer')``
+    there would refuse. Only a role's OWN pin counts (``tier_source == "row"``):
+    a launch tier or a roster slot is chosen per call, and the inherit sentinel
+    names no tier. ``None`` when the registry or config cannot be read — a
+    readiness answer never fails on it.
+    """
+    try:
+        from local_operator import settings_io
+        from local_operator.agent_profiles import is_role, list_seeds
+        from local_operator.agents import AgentRegistry
+        from local_operator.harness.subagent import (
+            read_effort_tier_targets,
+            resolve_member_model,
+        )
+
+        # GUARD BEFORE ``read_effort_tier_targets`` CONSTRUCTS A MANAGER (#3869's
+        # Q-2 rule, ``definitions._subagent_tiers_on_disk``): ``ConfigManager``
+        # renames a malformed config.yml aside and loads defaults, and this runs
+        # on a PEER's read-only probe. Unreadable → ``None``: no pins row, and
+        # the viewer learns of the broken config from the ``model_credential``
+        # row (and, once a push has recorded the refusal, the ``subagent_tiers``
+        # row), not from this one. No file → no tiers, without constructing a
+        # manager that would write one.
+        config_file = root / "config.yml"
+        if config_file.exists():
+            settings_io.require_readable_config_path(config_file)
+            targets = read_effort_tier_targets(root)
+        else:
+            targets = {}
+        # ``initialize``/``migrate`` off: a readiness probe must not create or
+        # migrate the peer's role store as a side effect of reading it.
+        # ONE SCAN FOR EVERY ROLE (review round 1, M1). ``resolve_member_model``
+        # is the launch's resolver, and a launch re-reads the registry per call
+        # (``_row_effort_tier`` → ``refresh_now``; ``require_complete_metadata``
+        # rescans an incomplete tree). Here that ran once PER ROLE: 60 rescans of
+        # 72 agent.yml files took 7.6-8.8 s, past ``READINESS_OP_TIMEOUT_S``, so
+        # the viewer lost EVERY row for the peer, on the link reader thread. An
+        # infinite interval keeps the constructor's scan for the whole probe,
+        # and ``_ScannedRegistry`` answers the two per-launch refreshes from it.
+        registry = _ScannedRegistry(
+            AgentRegistry(root, refresh_interval=math.inf, initialize=False, migrate=False)
+        )
+        # Packaged seeds too: ``resolve_profile`` falls through to them, so a
+        # seed's pin is what a launch of that name would honour.
+        names = {str(agent.name) for agent in registry.list_agents() if is_role(agent)}
+        names |= set(list_seeds())
+    except Exception:  # noqa: BLE001 — a readiness answer must not fail on this
+        return None
+    by_tier: dict[str, dict[str, Any]] = {}
+    for name in sorted(names, key=str.casefold):
+        try:
+            resolution = resolve_member_model(name, agent_registry=registry, tier_targets=targets)
+        except Exception:  # noqa: BLE001 — one unreadable role is not all of them
+            continue
+        if (
+            resolution.tier_source != "row"
+            or resolution.role_pins_inherit
+            or not resolution.unavailable
+            or not resolution.tier
+        ):
+            continue
+        entry = by_tier.setdefault(
+            str(resolution.tier),
+            {"tier": str(resolution.tier), "roles": [], "missing": True},
+        )
+        if len(entry["roles"]) < MAX_TIER_PIN_ROLES:
+            entry["roles"].append(name[:MAX_TIER_PIN_NAME_CHARS])
+        entry["missing"] = entry["missing"] and bool(resolution.unavailable_quiet)
+    return {"unresolved": [by_tier[tier] for tier in sorted(by_tier)]}
+
+
+def subagent_tier_pins_row(
+    member: Any, facts: Mapping[str, Any], *, peer_label: str
+) -> dict[str, Any] | None:
+    """(o) Can this peer launch every role whose profile pins an effort tier?
+
+    ``None`` (no row) when the peer did not answer the fact (older build, or an
+    unreadable registry) or every pinned tier resolves — the healthy case adds no
+    prose to every peer's report, as with ``custom_instructions``. Otherwise a
+    non-gating ``warn`` row naming each tier, the roles pinned to it, and the
+    remedy the launch refusal itself prints (``missing_tier_remedy``).
+    """
+    fact = facts.get("subagent_tier_pins")
+    if not isinstance(fact, Mapping):
+        return None
+    entries = [
+        entry
+        for entry in (fact.get("unresolved") or [])
+        if isinstance(entry, Mapping)
+        and isinstance(entry.get("tier"), str)
+        and entry.get("tier")
+        and isinstance(entry.get("roles"), list)
+        and entry.get("roles")
+    ][:MAX_TIER_PIN_ROLES]
+    if not entries:
+        return None
+    from local_operator.harness.subagent import missing_tier_remedy
+
+    # INTERPLAY WITH THE (l) ``subagent_tiers`` ROW (PR #3869). That row says
+    # WHOSE tier map the node holds (it kept its own over the operator's); this
+    # one says WHICH ROLES cannot launch. Both may be drawn for one node, so they
+    # must not contradict: the shared remedy names the mesh push, but #3869's
+    # apply never installs over a node's own map (``_apply_subagent_tiers_locked``:
+    # authored/edited keep theirs). Advising the push there sends the operator
+    # round a loop that changes nothing, so a node holding its own map gets the
+    # remedy that works on it instead (the launch refusal there says the same,
+    # ``local_missing_tier_remedy``). Keyed on the node's STATUS, not on a
+    # recorded conflict: a node that authored its own map refuses the push
+    # before any conflict exists. An older peer omits the fact and keeps the push
+    # remedy (true for the ``subagents: {}`` node it targets). An UNREADABLE node
+    # draws no pins row at all (the fact is ``None`` there); the broken config
+    # shows in ``model_credential``, and in the (l) row only once a push has
+    # recorded the refusal.
+    tiers_fact = facts.get("subagent_tiers")
+    tiers_status = str(tiers_fact.get("status") or "") if isinstance(tiers_fact, Mapping) else ""
+    keeps_own = tiers_status in ("authored", "edited")
+    # ``--peer`` takes a name or a device id (``RelayServer._resolve_peer``); the
+    # name reads better, but only a single shell-safe token is printed as one, so
+    # the command still runs as printed for a name with spaces or quotes.
+    name = str(getattr(member, "name", "") or "")
+    push_peer = name if re.fullmatch(r"[A-Za-z0-9._-]+", name) else str(member.device_id)
+
+    def unconfigured_remedy(tier: str) -> str:
+        return missing_tier_remedy(
+            tier, where=peer_label, push_peer=push_peer, keeps_own_map=keeps_own
+        )
+
+    clauses: list[str] = []
+    remedies: list[str] = []
+    observed: list[dict[str, Any]] = []
+    for entry in entries:
+        tier = str(entry["tier"])[:MAX_TIER_PIN_NAME_CHARS]
+        roles = [str(role)[:MAX_TIER_PIN_NAME_CHARS] for role in entry["roles"]][
+            :MAX_TIER_PIN_ROLES
+        ]
+        missing = entry.get("missing") is not False
+        state = "is not configured" if missing else "is configured but unusable"
+        clauses.append(f"tier '{tier}' {state} (pinned by {', '.join(roles)})")
+        remedies.append(
+            unconfigured_remedy(tier)
+            if missing
+            else f"Correct subagents.models.{tier} on {peer_label} to a provider/model id"
+        )
+        observed.append({"tier": tier, "roles": roles, "missing": missing})
+    detail = (
+        f"{peer_label} cannot launch subagents whose role pins an effort tier it "
+        f"cannot resolve: {'; '.join(clauses)}. Sessions there still run, but "
+        "those roles refuse to launch."
+    )
+    return _capability_row(
+        device_id=member.device_id,
+        device_name=peer_label,
+        capability=CAPABILITY_SUBAGENT_TIER_PINS,
+        ok=False,
+        code=CODE_TIER_UNAVAILABLE,
+        detail=detail,
+        remedies=remedies,
+        source=SOURCE_PEER,
+        observed={"unresolved": observed},
     )
 
 
@@ -6149,6 +6379,9 @@ def _peer_checks(
     tiers_row = subagent_tiers_row(member, facts, peer_label=peer_label)
     if tiers_row is not None:
         rows.append(tiers_row)
+    tier_pins_row = subagent_tier_pins_row(member, facts, peer_label=peer_label)
+    if tier_pins_row is not None:
+        rows.append(tier_pins_row)
     rows.append(serve_daemon_row(member, facts, peer_label=peer_label))
     rows.extend(
         mcp_credential_rows(
