@@ -174,6 +174,8 @@ async def test_the_tool_reports_hash_then_refuses_the_overwrite(root: str) -> No
     first = await tool.execute("c1", args, None, None, _CTX)
     assert not first.is_error, first
     assert hashlib.sha256(b"receipt\n").hexdigest() in _text_of(first)
+    # Readers cannot commit; the result names who does (2026-11-13 hygiene).
+    assert "Untracked until the PR owner commits it" in _text_of(first)
     second = await tool.execute("c2", {**args, "content": "forged\n"}, None, None, _CTX)
     assert second.is_error
     assert "create-only" in _text_of(second)

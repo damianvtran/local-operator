@@ -7,7 +7,6 @@ description: "Allocate bounded engineering delivery, brief so a child can land, 
 
 AGENTS.md remains the authority for isolation, commands, security, merge/release,
 approvals and public notes; this changes scope/allocation, not validation depth.
-Keep internal gate evidence out of user-facing notes.
 
 ## Allocate once, inspect narrowly
 
@@ -29,7 +28,7 @@ Keep internal gate evidence out of user-facing notes.
 Briefs name file:line, failure and acceptance check; do not delegate rediscovery.
 Coder children edit within ~10 calls; after ~40 without an edit, return the
 blocker. A repeat "explored, nothing landed" needs a smaller brief after checking
-for a harness cut-off (cut children end named).
+for a harness cut-off.
 
 ## Budgets
 
@@ -77,11 +76,13 @@ worktree, and no full-tree copies into scratch. A reader files its own NEW
 receipt with `evidence` (bound to the briefed worktree), not `bash` or `write`.
 Never move it off that head;
 base/before reads use `git show <base>:<path>` or `git archive` into scratch. Python:
-`PYTHONPATH=<worktree>` with the primary `.venv`; `python -c 'import
-local_operator;print(local_operator.__file__)'` must print a worktree path.
+`PYTHONPATH=<worktree>` with the primary `.venv`; `local_operator.__file__`
+must print a worktree path.
 Exception, with a manager lease: a conflicting commit author or an isolated
-mutable build collision gets a detached-SHA worktree on shared deps, bounded and
-creator-removed, with isolated HOME/config. Remove clean
+mutable build collision gets a detached-SHA worktree in `<repo>/.worktrees/`
+(never a scratchpad or /tmp) on shared deps with isolated HOME/config; its
+creator removes it before reporting. The PR owner commits (or deletes) each
+receipt a round filed: a merged tree is `git status` clean. Remove clean
 worktrees on merge/close; the manager verifies (`scripts/worktree_janitor.py`).
 
 ## Never use a live peer as the revoke test
@@ -89,7 +90,7 @@ worktrees on merge/close; the manager verifies (`scripts/worktree_janitor.py`).
 Use a disposable peer, else exercise revocation at the grant/token layer. Before any
 membership change, list the peer's sessions and worktree state, confirm a
 reachable head and console path, get explicit operator approval naming the
-peer, and record it. Authorization to test is not authorization to delete.
+peer, and record it.
 
 ## Spend coverage once
 

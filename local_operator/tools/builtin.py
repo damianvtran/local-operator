@@ -83,6 +83,7 @@ from rich.cells import cell_len
 from local_operator import memory_guard
 from local_operator.agent_shell import AGENT_SHELL_ENV, MAY_DELEGATE_ENV
 from local_operator.config import CONFIG_FILE_NAME, ConfigManager
+from local_operator.guardrails import interrupted_worktree_add
 from local_operator.harness.approval import (
     APPROVAL_UNAVAILABLE_NOTICE,
     ApprovalUnavailableError,
@@ -4699,6 +4700,9 @@ async def execute_bash(
             return _error(tool_call_id, "bash", shell_write.spawn_refusal())
         shell_argv = wrapped
     spawn_options = detached_popen_kwargs()
+    # Wall clock, not monotonic: compared with the mtime of a lock git writes
+    # during this call (guardrails/interrupted_worktree_add.py).
+    spawned_at = time.time()
     try:
         process = await asyncio.create_subprocess_exec(
             *shell_argv,
@@ -4961,6 +4965,8 @@ async def execute_bash(
     stderr_task = asyncio.create_task(_pump(process.stderr, stderr_chunks))
     readers = (stdout_task, stderr_task)
 
+    settle_started: list[bool] = []
+
     def _kill() -> None:
         # Kill the whole session group so children (sh -c spawns) die too.
         #
@@ -4972,6 +4978,17 @@ async def execute_bash(
         # `contextlib.suppress(ProcessLookupError)` could not catch it. On
         # POSIX the call is exactly `killpg(getpgid(pid), SIGKILL)` as before.
         terminate_process_tree(process.pid, force=True)
+        # SIGKILL skips git's own cleanup of a `git worktree add` in flight,
+        # stranding its "initializing" lock and a partial checkout. Do that
+        # cleanup for this call's exact add targets once the group is gone, on
+        # a daemon thread so no stop path waits. Once per call: several stop
+        # paths can reach _kill for the same command.
+        if not settle_started:
+            settle_started.append(True)
+            with contextlib.suppress(Exception):
+                interrupted_worktree_add.settle_in_background(
+                    params.command, cwd=cwd, env=env, spawned_at=spawned_at, pgid=spawned_pgid
+                )
 
     def _emit_update() -> None:
         if on_update is None:

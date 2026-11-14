@@ -735,7 +735,9 @@ DELIVERY_POINTER_ROLES = frozenset(
 DELIVERY_POINTER = (
     "Read guide://delivery before engineering work or review: it carries the "
     "current scope, batched-remediation, review-economy and worktree rules. "
-    "Reuse the manager-owned PR worktree; no clone, install or new worktree by default."
+    "Reuse the manager-owned PR worktree; no clone, install or new worktree by default. "
+    "One you must make goes in `<repo>/.worktrees/`, never a scratchpad; remove your "
+    "own when the round ends."
 )
 
 
