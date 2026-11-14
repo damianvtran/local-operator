@@ -28,6 +28,7 @@ import argparse
 import asyncio
 import concurrent.futures
 import contextlib
+import functools
 import gc
 import json
 import logging
@@ -4512,6 +4513,123 @@ def test_a_viewer_leaving_releases_the_owner_s_stream(
             child.kill()
             child.wait(timeout=20)
         _stop_all(served)
+
+
+@pytest.mark.asyncio
+async def test_a_mailbox_send_lands_on_an_owner_too_busy_to_prepare_a_view(
+    peer_pair: Devices, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The live bounce (2026-11-14, 0.102.5), over two real relays and a real session.
+
+    The owner's session loop is held busy, the state a long, mid-turn session is
+    in. CONTROL: a viewer's bind on that owner is refused with ``bind_failed`` —
+    a remote viewer negotiates a display window, which the owner must capture on
+    that loop within ``_REMOTE_HISTORY_BIND_WAIT_S`` — so the pilot's old mailbox
+    path, which bound a viewer first, could never write the message. THE ACT: the
+    same owner, still busy past that 2 s cliff, takes a mailbox send through the
+    view-free dial, and the receipt says delivered only once the owner's
+    admission ack arrives (it cannot while the loop is held: the send is still
+    pending at release). The row is then in the OWNER's transcript.
+    """
+    from local_operator.network import cli as net_cli
+    from local_operator.session.remote_open import open_remote_viewer
+    from local_operator.session.runtime.server import RuntimeServer
+
+    # THE SERVING PLANE ON ITS OWN THREAD, as ``process.amain`` runs it in
+    # production (``runtime.start()``): the shared rig serves in-process, where a
+    # held session loop also parks the welcome and the dial fails a rung earlier
+    # ("did not answer") than the live bounce did. The live owner WELCOMED every
+    # dial (``session_stream_opened role=owner``) and then refused the bind.
+    async def _serve_on_its_own_thread(self: RuntimeServer) -> None:
+        self.start()
+        assert await self.wait_until_published(), "the runtime never published"
+
+    monkeypatch.setattr(RuntimeServer, "start_in_process", _serve_on_its_own_thread)
+
+    created = await asyncio.to_thread(
+        _create_named_session_on_a_real_peer, peer_pair, monkeypatch, name="busy", prompt="first"
+    )
+    release = threading.Event()
+    try:
+        # An ENGAGED session, as the live one was: the owner refuses a peer
+        # message into a conversation whose owner has not typed yet.
+        await asyncio.to_thread(created.owner.wait_for_turn)
+        monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(created.server_a.root))
+        entered = threading.Event()
+
+        def _hold_owner_loop() -> None:
+            entered.set()
+            release.wait(net_fixtures.NET_WAIT_BUDGET_S)
+
+        created.owner._loop.call_soon_threadsafe(_hold_owner_loop)  # noqa: SLF001
+        assert await asyncio.to_thread(
+            entered.wait, net_fixtures.NET_WAIT_BUDGET_S
+        ), "the owner loop was not held"
+
+        async def _never() -> Any:
+            raise AssertionError("a remote viewer never takes over")
+
+        viewer = await open_remote_viewer(
+            created.session_id, config_dir=created.server_a.root, takeover=_never
+        )
+        assert viewer is not None
+        try:
+            with pytest.raises(ConnectionError, match="could not prepare this view"):
+                await viewer.bind_runtime()
+        finally:
+            await viewer.dispose()
+
+        # THE FRAME REACHING THE OWNER is the event this waits on, not a clock:
+        # the handle's receiver is entered on the serving thread before it hops
+        # to the held session loop, so seeing it proves the message got past the
+        # point the viewer path never left, while the loop still cannot ack.
+        arrived = threading.Event()
+        receive = created.owner.handle.receive_peer_message
+
+        @functools.wraps(receive)
+        async def _observed(*args: Any, **kwargs: Any) -> Any:
+            arrived.set()
+            return await receive(*args, **kwargs)
+
+        monkeypatch.setattr(created.owner.handle, "receive_peer_message", _observed)
+
+        act = asyncio.create_task(
+            net_cli._pilot_act(  # noqa: SLF001 — the act the CLI and the tool both run
+                verb="send",
+                session_id=created.session_id,
+                peer=created.server_b.identity.device_id,
+                text="mailbox while the owner is busy",
+                config_dir=created.server_a.root,
+                mailbox=net_cli._MailboxMode(wake=False, now=False),  # noqa: SLF001
+            )
+        )
+        assert await asyncio.to_thread(
+            net_fixtures.wait_for, arrived.is_set
+        ), "the mailbox frame never reached the owner"
+        # Still held, so no admission yet: "delivered" must wait for the ACK.
+        assert not act.done(), act.result() if act.done() else None
+        release.set()
+        payload, _lines = await asyncio.wait_for(act, net_fixtures.NET_WAIT_BUDGET_S)
+        assert payload["ok"] is True and payload["outcome"] == "delivered", payload
+        assert payload["delivery_path"] == "mailbox" and "fallback" not in payload
+        assert not payload["delivery"].get("duplicate"), payload
+        assert await asyncio.to_thread(
+            net_fixtures.wait_for,
+            lambda: "mailbox while the owner is busy"
+            in json.dumps(created.owner.transcript_entries()),
+        ), "the owner acked a message its transcript does not hold"
+    finally:
+        release.set()
+        # The threaded serving plane closes from any thread (``close``); the
+        # rig's own teardown then has no in-process runtime left to ``aclose``.
+        runtime = created.owner.runtime
+        await asyncio.to_thread(runtime.close)
+
+        async def _already_closed() -> None:
+            return None
+
+        monkeypatch.setattr(runtime, "aclose", _already_closed)
+        await asyncio.to_thread(_stop_real, created.served)
 
 
 def test_a_refused_stream_open_writes_no_close_row(
