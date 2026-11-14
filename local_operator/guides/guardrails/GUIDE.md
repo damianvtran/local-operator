@@ -45,6 +45,16 @@ into HIGH — a judge decision, never a pass. Rules only ADD restriction.
   the resolver could not pin down** (opaque substitution, empty expansion, unknown
   cwd) — unless it lands on something already critical, as an empty expansion
   collapsing to `/` does. Goes to the judge.
+  Also HIGH, wherever the path is: unlocking write-protected files for removal
+  — `chmod -R u+w`/`+w`/`755`, `chflags nouchg`/`noschg`, `chattr -i` — on
+  anything outside this session's own directory that its ledger does not
+  record. That is a forced removal, even where `rm -rf` of the same path alone
+  would be LOW.
+- **Asks that were never answered are not consent.** An ask that timed out,
+  expired, was withdrawn or dismissed, or is still open never authorises a
+  delete. When such an ask is the only thing naming a HIGH path, the call is
+  refused without asking the judge. Leave the path in place and report it as
+  waiting for the operator's answer.
 - **LOW** — everything else: this session's scratchpad, deep paths, `/tmp`. Runs
   unexamined. A target derived from a secret is refused even with an approved
   override: consent cannot be shown for a secret you should never see.

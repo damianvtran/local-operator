@@ -60,6 +60,20 @@ LATE_LEAD = (
     "the answer changes your work.\n\n"
 )
 
+#: Appended to every non-secret timeout notice. A timeout is the operator NOT
+#: answering, so it can settle only what is safe to get wrong: a reversible
+#: choice. Incident 2026-11-14 (session 1faad822298d, ask a-20fc): the notice
+#: said only "use your recommended option(s)", the recommendation was three
+#: delete buckets, and the session deleted them, an on-hold benchmark's only
+#: raw data included. The guardrail refuses such deletes too
+#: (``guardrails/check.py``, ``DeleteCase.lapsed_only``); this is the half that
+#: stops the agent trying.
+TIMEOUT_NOT_CONSENT = (
+    "A timeout is NOT consent: take your recommendation only where it is reversible. "
+    "Leave every delete, overwrite or otherwise irreversible option undone and report it "
+    "as awaiting the user's answer."
+)
+
 #: The timeout notice. "Proceed without it" is the actionable half — the point of
 #: the deadline is that the session must not stall forever. It used to end "The ask
 #: stays open for the user; if they answer later you will be told", which stopped
@@ -69,8 +83,8 @@ LATE_LEAD = (
 TIMEOUT_NOTICE = (
     "[Ask timed out] No reply to ask {ask_id} arrived within {waited} (asked {asked}). "
     "{questions}\n"
-    "Proceed without it: use your recommended option(s) or best judgment and state the "
-    "assumption in your report."
+    "Proceed without it: for a reversible choice, use your recommended option(s) or best "
+    "judgment and state the assumption in your report. " + TIMEOUT_NOT_CONSENT
 )
 
 #: Added when the ask was urgent (``timeout <= 15 min``). An urgent ask whose
@@ -111,8 +125,8 @@ TIMEOUT_NOTICE_DISMISSED = (
     "[Ask timed out] No reply to ask {ask_id} arrived within {waited} (asked {asked}). "
     "{questions}\n"
     "The user dismissed it without answering.\n"
-    "Proceed without it: use your recommended option(s) or best judgment and state the "
-    "assumption in your report."
+    "Proceed without it: for a reversible choice, use your recommended option(s) or best "
+    "judgment and state the assumption in your report. " + TIMEOUT_NOT_CONSENT
 )
 
 #: The same row for a SECRET ask: names the key and nothing else (see

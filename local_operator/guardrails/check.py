@@ -526,6 +526,12 @@ class DeleteCase:
     session_id: str = ""
     #: Every protected state root (``ledger_record``'s refusal bar).
     state_roots: tuple[str, ...] = ()
+    #: path -> the not-consent sentence, for each path whose ONLY consent-like
+    #: fact is an ask the operator never approved (timed out, withdrawn,
+    #: dismissed, open, declined): no creating call, no ledger row, no trusted
+    #: operator row names it. ``_dangerous_delete`` refuses these before any
+    #: judge runs (incident 2026-11-14, ask a-20fc).
+    lapsed_only: Mapping[str, str] = field(default_factory=dict)
 
     def _named_by(self, path: str, words: Any) -> bool:
         from local_operator.guardrails.provenance import names_path
@@ -781,6 +787,11 @@ def build_delete_case(verdict: Verdict, ctx: CallContext) -> DeleteCase:
         for r in verdict.flagged_targets
         if r.target.path is not None and not r.target.pattern
     }
+    # Asks that are NOT consent, read only to SAY so (``unanswered_asks``):
+    # the judge must never infer consent from a timeout notice or from the
+    # agent's own "the ask timed out, proceeding" in the command or intent.
+    lapsed = prov.unanswered_asks(ctx.session_id) if ctx.session_id and paths else []
+    lapsed_only: dict[str, str] = {}
     facts: list[str] = []
     for path in [*paths, *operator_only][:_MAX_FACTS]:
         ids = [] if path in operator_only else (evidence.covers.get(path) or [])
@@ -797,6 +808,17 @@ def build_delete_case(verdict: Verdict, ctx: CallContext) -> DeleteCase:
             if path in operator_only
             else ledger_record(path, ctx.session_id, stop, tuple(prot.state_roots))
         )
+        not_consent = next(
+            (
+                f"ask {a.ask_id} names it but was {prov.unanswered_label(a.status)}: "
+                "NOT consent (a timeout, withdrawal or unanswered ask never authorises a delete)"
+                for a in lapsed
+                if prov.names_path(a.text, path, home=home, cwd=ctx.cwd, protected=stop)
+            ),
+            "",
+        )
+        if not_consent and not ids and record is None and not named:
+            lapsed_only[path] = not_consent
         tree = ""
         if not os.path.islink(path) and os.path.exists(os.path.join(path, ".git")):
             tree = f"; git: {prov.worktree_state(path, own=record is not None)}"
@@ -814,6 +836,7 @@ def build_delete_case(verdict: Verdict, ctx: CallContext) -> DeleteCase:
             + f"; {record.ledger_fact() if record else 'ledger: no row for this session'}"
             + tree
             + f"; operator named it: {'yes (' + named + ')' if named else 'no'}"
+            + (f"; {not_consent}" if not_consent else "")
             # Last, the classifier's reason: it carries the branch's PR/MR
             # state and any running owner already looked up (no second lookup).
             + (f"; ranked because: {reasons[path]}" if path in reasons else "")
@@ -846,6 +869,7 @@ def build_delete_case(verdict: Verdict, ctx: CallContext) -> DeleteCase:
         stop=stop,
         home=home,
         cwd=ctx.cwd,
+        lapsed_only=lapsed_only,
     )
 
 
@@ -1028,6 +1052,25 @@ async def _dangerous_delete(
         )
         outcome.warnings.append(f"Guardrail {DANGEROUS_DELETE_RULE}: allowed — {proven}.")
         return outcome
+    if case.lapsed_only:
+        # Deterministic, before any model: the forked judge reads a prefix that
+        # holds the timeout notice and the agent's own "proceeding after the
+        # timeout" prose, and must not get the chance to read either as a yes.
+        path, why = next(iter(case.lapsed_only.items()))
+        reason = (
+            f"{path}: {why}. Leave it in place and report it as awaiting the operator's "
+            "answer; only an answer they actually give can authorise it"
+        )
+        _journal(DANGEROUS_DELETE_RULE, risk_name, "block", 0.0, targets, "lapsed ask")
+        return GuardOutcome(
+            blocked=True,
+            text=review_text(
+                DANGEROUS_DELETE_RULE, reason, targets, worktree=worktree_flagged(verdict)
+            ),
+            rule=DANGEROUS_DELETE_RULE,
+            risk=risk_name,
+            destructive=True,
+        )
     eligible = _scope_eligible(case, verdict, ctx) if forked_judge else {}
     result = await run_judge(
         JudgeBrief(

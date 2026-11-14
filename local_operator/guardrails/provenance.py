@@ -2362,6 +2362,103 @@ def lineage_asks(
     return out
 
 
+@dataclass(frozen=True)
+class UnansweredAsk:
+    """An ask in the lineage that is NOT consent: what it proposed, and why not."""
+
+    ask_id: str
+    session_id: str
+    #: The fold's status: ``timed_out``, ``expired``, ``withdrawn``, ``open``
+    #: or ``dismissed`` (:data:`_UNANSWERED_LABEL`).
+    status: str
+    #: Question text and option LABELS, the same naming bar as a consenting ask.
+    text: str
+
+
+#: Statuses that mean "the operator never answered". Deliberately NOT
+#: ``answered``/``late``/``declined``: an answer that :func:`_ask_words` refuses
+#: (a declining pick, an untrusted surface) is still the operator's words, and
+#: keeps reaching the judge exactly as before; only the never-answered asks are
+#: refused deterministically here.
+_UNANSWERED_LABEL = {
+    "timed_out": "TIMED OUT with no answer",
+    "expired": "expired with no answer",
+    "withdrawn": "withdrawn by the agent, never answered",
+    "dismissed": "dismissed by the user without an answer",
+    "open": "still open, not yet answered",
+}
+
+
+def unanswered_label(status: str) -> str:
+    return _UNANSWERED_LABEL.get(status, "never answered")
+
+
+def unanswered_asks(
+    session_id: str,
+    *,
+    state_root: str | os.PathLike[str] | None = None,
+    now_ms: int | None = None,
+) -> list[UnansweredAsk]:
+    """Asks in ``session_id``'s lineage that the store does NOT prove as consent.
+
+    WHY (incident 2026-11-14, session 1faad822298d, ask a-20fc): an ask naming
+    rig and benchmark paths timed out unanswered, the timeout notice said
+    "proceed … use your recommended option(s)", and the session deleted them.
+    :func:`verified_ask` already refused that ask as consent, but nothing said
+    so: the judge saw no ask at all while the forked judge's prefix carried the
+    notice and the agent's "after 1h timeout" prose. This lists exactly those
+    asks so the checkpoint can (a) tell the judge each one is NOT consent and
+    (b) refuse deterministically when such an ask is the only thing pointing at
+    a path (``check.DeleteCase.lapsed_only``). Never a source of consent.
+    """
+    try:
+        from local_operator.asks import store
+        from local_operator.paths import config_dir
+
+        root = Path(state_root) if state_root is not None else config_dir()
+        lineage, _ = session_lineage(session_id, state_root=root)
+        now = now_ms if now_ms is not None else store.now_ms()
+    except Exception:  # noqa: BLE001 — unreadable: nothing extra to report
+        logger.debug("guardrail: unanswered asks unreadable", exc_info=True)
+        return []
+    out: list[UnansweredAsk] = []
+    for sid in lineage or [session_id]:
+        try:
+            directory = store.session_dir(root, sid)
+            if not directory.is_dir():
+                continue
+            records = store.fold(store.read_events(directory), now)
+        except Exception:  # noqa: BLE001
+            continue
+        for record in records:
+            status = str(record.get("status") or "")
+            if status not in _UNANSWERED_LABEL:
+                continue
+            questions = [q for q in record.get("questions") or [] if isinstance(q, Mapping)]
+            parts = [
+                f"Q: {q.get('question') or ''} [options: "
+                + "; ".join(
+                    str(o.get("label") or "")
+                    for o in (q.get("options") or [])
+                    if isinstance(o, Mapping)
+                )
+                + "]"
+                for q in questions
+                if not q.get("secret")
+            ]
+            if not parts:
+                continue
+            out.append(
+                UnansweredAsk(
+                    ask_id=str(record.get("ask_id") or ""),
+                    session_id=sid,
+                    status=status,
+                    text="\n".join(parts),
+                )
+            )
+    return out
+
+
 def _text_of(message: Any) -> str:
     text = getattr(message, "text", None)
     if isinstance(text, str):
