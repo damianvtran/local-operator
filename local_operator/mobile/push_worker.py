@@ -815,7 +815,7 @@ class PushWorker:
 
         1. ``notifications_enabled()`` False — the env kill switch or the
            config flag (``tui/notify.py``);
-        2. ``_session_may_announce`` False — a session the operator's own
+        2. ``session_may_announce`` False — a session the operator's own
            listings hide (subagent, exec worker, agent-opened run), judged by
            ``resume.is_user_session`` on the transcript dir's ``origin.json``;
         3. ``kind`` outside ``BRIDGE_NOTIFIABLE_KINDS`` (complete/error/retired).
@@ -825,13 +825,13 @@ class PushWorker:
         desktop predicate takes is shaped here from ``<config>/sessions/<id>`` —
         the layout ``mobile.daemon._durable_user_session_dir`` and the listing
         address — and a conversation that is not a ``session/<id>`` identity has
-        no directory: ``_session_may_announce``'s own documented answer for that
+        no directory: ``session_may_announce``'s own documented answer for that
         is YES ("a question that cannot be put must not silence a banner"), so it
         is followed here rather than invented. Runs on the worker's thread with
         a config read and one small file read; nothing touches the loop.
         """
         from local_operator.server.utils.desktop_sessions import BRIDGE_NOTIFIABLE_KINDS
-        from local_operator.session.runtime.serving import _session_may_announce
+        from local_operator.session.runtime.serving import session_may_announce
         from local_operator.tui.notify import notifications_enabled
 
         if kind not in BRIDGE_NOTIFIABLE_KINDS:
@@ -846,7 +846,7 @@ class PushWorker:
             else None
         )
         handle = SimpleNamespace(transcript=SimpleNamespace(directory=directory))
-        return _session_may_announce(handle)
+        return session_may_announce(handle)
 
     def _add_completion(
         self,
@@ -1153,13 +1153,22 @@ class PushWorker:
                 # construction. Resolved, not re-keyed — the move that changed
                 # the content has its own cursor read and its own emit.
                 return None
+            # FLOOR AT 1 (PR #3989 review R1). The snapshot ``count`` reads was
+            # built before this tick collected the item, so a completion
+            # published in between is missing from it — and when it is the only
+            # unread conversation the banner would read "0 conversations need
+            # you". The candidacy gate already proved THIS conversation is
+            # unseen and listed, so 1 is a true lower bound. ``None`` (the
+            # degraded read) stays ``None``: inventing a number there is exactly
+            # what the degraded form refuses.
+            completion_count = None if count is None else max(1, count)
             payload = completion_payload(
                 computer=self.computer,
                 conversation=handle,
                 completion_token=token,
                 kind=kind,
                 emit_id=emit_id,
-                count=count,
+                count=completion_count,
                 sound=sound,
                 sound_custom=sound_custom,
             )

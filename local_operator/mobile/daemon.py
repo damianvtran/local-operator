@@ -5250,7 +5250,7 @@ class MobileDaemon:
         await self._maybe_arm_push_lane()
         push_worker = self.push_worker
         if push_worker is not None:
-            await self._refresh_push_count(revision)
+            await self._refresh_push_count()
             try:
                 # BOUNDED (review round 1, m3). The transport is required to
                 # bound its own call — that is stated where the Protocol is — and
@@ -5282,7 +5282,7 @@ class MobileDaemon:
             except Exception:  # noqa: BLE001 — a push fault must not cost the tick
                 logger.warning("push heartbeat failed", exc_info=True)
 
-    async def _refresh_push_count(self, revision: Any) -> None:
+    async def _refresh_push_count(self) -> None:
         """Rebuild the listing snapshot the push count reads, when it can have moved.
 
         The push worker's count is ``SessionTable.listing_unread_count``, a read
@@ -5300,7 +5300,17 @@ class MobileDaemon:
         A failed build is logged and leaves the revision unrecorded, so the next
         scan retries; the worker then reads whatever the table holds, and a
         degraded snapshot drops the count term rather than inventing one.
+
+        The revision is read FRESH here, immediately before the worker's tick,
+        not taken from the start of the scan pass (PR #3989 review R1): the
+        registry scan and projection captures sit between the two, and a
+        completion published in that window would otherwise be counted against
+        a snapshot that predates it. The window left (this read to the tick's
+        collect) is closed by the worker flooring a completion's count at 1.
         """
+        from local_operator.session.attention import AttentionStore
+
+        revision = await asyncio.to_thread(AttentionStore().revision)
         if revision == self._push_count_revision:
             return
         try:

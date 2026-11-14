@@ -270,7 +270,9 @@ def wire_count(count: int | None) -> int:
     §1.5) and its payload parser reads only ``conversation``/``computer``
     (local-operator-mobile ``src/notifications/payload.ts``). So an unknown count
     travels as ``0`` and the ALERT, the one place a human reads the number, makes
-    no count claim at all (:func:`completion_alert`, :func:`digest_alert`).
+    no machine-count claim: :func:`completion_alert` drops the count term, and
+    :func:`digest_alert` falls back to the batch's own size, a lower bound true of
+    the set rather than the machine's unread number.
     """
     return 0 if count is None else count
 

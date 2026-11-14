@@ -530,7 +530,7 @@ _ANNOUNCE_FAILED = "failed"
 _display_watch_attached: set[str] = set()
 
 
-def _session_may_announce(session: Any) -> bool:
+def session_may_announce(session: Any) -> bool:
     """Whether ``session`` is one the operator's OWN listings would show.
 
     THE RULE, stated once: a session the operator's own listings HIDE must not
@@ -574,6 +574,14 @@ def _session_may_announce(session: Any) -> bool:
     except Exception:  # noqa: BLE001 — an unanswered question must not silence a toast
         logger.debug("could not read the session origin for the announce gate", exc_info=True)
         return True
+
+
+# PUBLIC since the mobile push worker asks the same question (push parity with
+# the desktop banner, PR #3989 review R2): a cross-module caller must not hang
+# off a private name in this module, where a rename would break pushes silently
+# inside a tick whose exceptions are only logged. The private alias stays so
+# this module's own call sites and existing tests keep reading unchanged.
+_session_may_announce = session_may_announce
 
 
 def _already_bounded(images: Any) -> bool:

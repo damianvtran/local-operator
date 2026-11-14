@@ -734,12 +734,25 @@ def test_build_push_lane_hands_the_count_source_to_the_worker(login: int, tmp_pa
     assert lane.worker._count() == 7
 
 
-def test_the_scan_refreshes_the_push_count_snapshot_once_per_attention_revision() -> None:
+def _pin_revision(monkeypatch: pytest.MonkeyPatch) -> list[tuple[int, int, int]]:
+    """Drive the store's revision from the test: ``_refresh_push_count`` reads
+    it fresh, so the cell sets it here instead of passing it in."""
+    from local_operator.session.attention import AttentionStore
+
+    current = [(1, 0, 0)]
+    monkeypatch.setattr(AttentionStore, "revision", lambda self: current[0])
+    return current
+
+
+def test_the_scan_refreshes_the_push_count_snapshot_once_per_attention_revision(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Nothing builds the listing while no phone is looking, which is exactly
     when pushes go out — so the scan rebuilds it on the loop, before the
     worker's pass, whenever the attention revision moved."""
     from local_operator.mobile.daemon import MobileDaemon
 
+    revision = _pin_revision(monkeypatch)
     daemon = MobileDaemon(port=0, password="pw123")
     builds: list[int] = []
 
@@ -755,10 +768,11 @@ def test_the_scan_refreshes_the_push_count_snapshot_once_per_attention_revision(
     daemon.table.summaries = summaries  # type: ignore[method-assign]
 
     async def go() -> None:
-        await daemon._refresh_push_count((1, 0, 0))
-        await daemon._refresh_push_count((1, 0, 0))  # unchanged: no rebuild
+        await daemon._refresh_push_count()
+        await daemon._refresh_push_count()  # unchanged: no rebuild
         assert builds == [1]
-        await daemon._refresh_push_count((2, 0, 0))
+        revision[0] = (2, 0, 0)
+        await daemon._refresh_push_count()
         assert builds == [1, 1]
 
     asyncio.run(go())
@@ -766,6 +780,7 @@ def test_the_scan_refreshes_the_push_count_snapshot_once_per_attention_revision(
 
 
 def test_a_failed_push_count_refresh_is_retried_on_the_next_scan(
+    monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     from local_operator.mobile.daemon import MobileDaemon
@@ -782,9 +797,10 @@ def test_a_failed_push_count_refresh_is_retried_on_the_next_scan(
     daemon.table.summaries = summaries  # type: ignore[method-assign]
 
     async def go() -> None:
-        await daemon._refresh_push_count((1, 0, 0))
-        await daemon._refresh_push_count((1, 0, 0))
+        await daemon._refresh_push_count()
+        await daemon._refresh_push_count()
 
+    _pin_revision(monkeypatch)
     asyncio.run(go())
     assert calls == [1, 1]
     assert "push count refresh failed" in caplog.text
@@ -795,3 +811,107 @@ def test_the_daemon_adopts_the_table_the_lane_reads() -> None:
 
     table = SessionTable()
     assert MobileDaemon(port=0, password="pw123", table=table).table is table
+
+
+# -- a completion published mid-scan (PR #3989 review R1) ----------------------
+#
+# The scan reads the attention revision at its START; the registry scan and the
+# projection captures run before the worker's tick. A completion published in
+# that window used to be counted against a snapshot built before it, so the
+# banner undercounted — down to "0 conversations need you" when it was the only
+# unread. These cells publish exactly there and drive the real refresh -> tick
+# -> compose -> transport path.
+
+
+def _listing_over_the_store(daemon: Any, lane: PushLane) -> list[int]:
+    """Stand the daemon's listing build on the store's own unread census.
+
+    The real ``summaries()`` walks durable transcripts this rig does not have;
+    on an empty machine the census IS the listing's unread population, so the
+    snapshot it publishes has the shape and the number the real build would.
+    """
+    builds: list[int] = []
+
+    async def summaries() -> list[dict[str, Any]]:
+        builds.append(1)
+        daemon.table._unread_snapshot = {
+            "count": lane.worker._store_count(),
+            "revision": [len(builds), 0, 0],
+            "degraded": [],
+        }
+        return []
+
+    daemon.table.summaries = summaries  # type: ignore[method-assign]
+    daemon.push_worker = lane.worker
+    return builds
+
+
+def test_a_completion_published_after_the_scans_revision_read_is_counted(
+    login: int, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from local_operator.mobile.daemon import MobileDaemon
+    from local_operator.mobile.push_payload import ALERT_BODY_FIELD, ALERT_FIELD
+    from local_operator.session.attention import AttentionStore
+    from local_operator.tui.notify import BODIES
+
+    store = AttentionStore()
+    daemon = MobileDaemon(port=0, password="pw123")
+    cloud = Cloud(_accepted())
+    lane = _armed_lane(login, cloud, daemon.table.listing_unread_count, monkeypatch)
+    builds = _listing_over_the_store(daemon, lane)
+
+    async def go() -> None:
+        # The previous pass: nothing unread, snapshot built, baseline tick.
+        await daemon._refresh_push_count()
+        assert daemon.table.listing_unread_count() == 0
+        assert await asyncio.to_thread(lane.worker.tick) == []
+        # THIS pass: its start-of-scan read, then the mid-scan completion.
+        scan_start = await asyncio.to_thread(store.revision)
+        store.publish("session/fresh", str(uuid.uuid4()), "entry-fresh", "complete")
+        assert store.revision() != scan_start  # the window is real
+        await daemon._refresh_push_count()
+        # Off the loop, as the scan runs it (``asyncio.to_thread(tick)``).
+        await asyncio.to_thread(lane.worker.tick)
+
+    asyncio.run(go())
+    assert builds == [1, 1], "the fresh revision must trigger a rebuild"
+    body = _emitted_completion(cloud)
+    assert body["count"] == 1
+    assert body["conversation"]
+    alert = body[ALERT_FIELD][ALERT_BODY_FIELD]
+    assert alert == f"{BODIES['complete']} · 1 conversation needs you"
+    assert "0 conversations" not in alert
+
+
+def test_a_completion_published_after_the_refresh_never_reads_zero(
+    login: int, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The window the fresh read cannot close (refresh -> the tick's collect):
+    the worker floors a completion's count at 1, a bound the candidacy gate
+    proved true for this conversation."""
+    from local_operator.mobile.daemon import MobileDaemon
+    from local_operator.mobile.push_payload import ALERT_BODY_FIELD, ALERT_FIELD
+    from local_operator.session.attention import AttentionStore
+    from local_operator.tui.notify import BODIES
+
+    store = AttentionStore()
+    daemon = MobileDaemon(port=0, password="pw123")
+    cloud = Cloud(_accepted())
+    lane = _armed_lane(login, cloud, daemon.table.listing_unread_count, monkeypatch)
+    _listing_over_the_store(daemon, lane)
+
+    async def go() -> None:
+        await daemon._refresh_push_count()
+        assert await asyncio.to_thread(lane.worker.tick) == []
+        await daemon._refresh_push_count()  # this pass's refresh: still 0
+        assert daemon.table.listing_unread_count() == 0
+        store.publish("session/late", str(uuid.uuid4()), "entry-late", "complete")
+        # Off the loop, as the scan runs it (``asyncio.to_thread(tick)``).
+        await asyncio.to_thread(lane.worker.tick)
+
+    asyncio.run(go())
+    body = _emitted_completion(cloud)
+    assert body["count"] == 1
+    assert body[ALERT_FIELD][ALERT_BODY_FIELD] == (
+        f"{BODIES['complete']} · 1 conversation needs you"
+    )
