@@ -1751,6 +1751,7 @@ async def test_an_exact_remote_id_routes_to_its_one_holder(
     assert argv[argv.index("--peer") + 1] == "d_cloud_node_1"
     assert argv[argv.index("--send") + 1] == "ffff12345678"
     assert "--no-wake" in argv and argv[-1] == "hi"
+    assert result.details is not None
     assert result.details["peer"] == "d_cloud_node_1"
     assert result.details["routed_to"] == "cloud-node-1"
 
