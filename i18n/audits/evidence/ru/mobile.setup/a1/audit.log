@@ -1,0 +1,25 @@
+$ git rev-parse HEAD
+1fce7ecb1f5fb587e7b91ef2f9c7fe658521e0d0
+exit=0
+$ sha256sum local_operator/i18n/catalogues/en/mobile.setup.json local_operator/i18n/catalogues/en/mobile.setup.context.json local_operator/i18n/catalogues/ru/mobile.setup.json i18n/glossary.md i18n/style-guides/ru.md
+6883f92e94dfcec4be0af6041a0531c974fbf18294f7094a132cc555a2ad2065  local_operator/i18n/catalogues/en/mobile.setup.json
+0286efeb90731f6bf23c47cb1e80deb873b99302cc3ad0f41de60ddace171176  local_operator/i18n/catalogues/en/mobile.setup.context.json
+d1d26ba807b11ebd26bd120c3cfc72d42789eae2ca10ba3e18d4f30d4d931da1  local_operator/i18n/catalogues/ru/mobile.setup.json
+a576d5a4b2718ba79a70a42600e3b6233ea28d716b1e2d996a208ac8dd7fabdb  i18n/glossary.md
+f20e1cafaf70578c17ce072c71725628808d228e4be5604329f8da30386f1fb5  i18n/style-guides/ru.md
+exit=0
+$ .venv/bin/python scripts/i18n/check.py --catalogues-only
+check.py: catalogue checks: 0 problem(s)
+exit=0
+$ .venv/bin/python scripts/i18n/ledger.py history-sha --locale ru --namespace mobile.setup
+4025381b33f4c552c7c8feae515cffeb91bff9ac227240a4d5f8a21c8e71669c
+exit=0
+$ .venv/bin/python $SCRATCH/audit_gen.py  # mech(ru, mobile.setup) over the 7 new keys
+keys en=86 ru=86 parity=OK
+mobile.setup.disabled: placeholders=OK urls=OK commands=OK terminal_cmd=NONE len_ratio=0.97 space_before_punct=[] ascii_apostrophe=0 safety:present
+mobile.setup.billing_lapsed: placeholders=OK urls=OK commands=OK terminal_cmd=NONE len_ratio=1.09 space_before_punct=[] ascii_apostrophe=0 safety:present
+mobile.setup.reconnect: placeholders=OK urls=OK commands=OK terminal_cmd=NONE len_ratio=1.19 space_before_punct=[] ascii_apostrophe=0 safety:present
+mobile.setup.network: placeholders=OK urls=OK commands=OK terminal_cmd=NONE len_ratio=1.14 space_before_punct=[] ascii_apostrophe=0
+mobile.setup.radient_unavailable: placeholders=OK urls=OK commands=OK terminal_cmd=NONE len_ratio=0.99 space_before_punct=[] ascii_apostrophe=0
+mobile.setup.reconnecting: placeholders=OK urls=OK commands=OK terminal_cmd=NONE len_ratio=1.04 space_before_punct=[] ascii_apostrophe=0 safety:present
+mobile.setup.login_offer: placeholders=OK urls=OK commands=OK terminal_cmd=NONE len_ratio=1.22 space_before_punct=[] ascii_apostrophe=0 safety:present

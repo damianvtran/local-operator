@@ -1053,10 +1053,14 @@ async def test_suspended_with_billing_in_order_is_a_ready_reconnect(rig):
     [
         (lambda: __import__("httpx").ConnectError("down"), "network"),
         (lambda: __import__("httpx").ReadTimeout("slow"), "network"),
-        (lambda: api.RequestFailed("Radient tunnel request failed (HTTP 503).", status=503),
-         "radient_unavailable"),
-        (lambda: api.RequestFailed("Radient tunnel request failed (HTTP 400).", status=400),
-         "account"),
+        (
+            lambda: api.RequestFailed("Radient tunnel request failed (HTTP 503).", status=503),
+            "radient_unavailable",
+        ),
+        (
+            lambda: api.RequestFailed("Radient tunnel request failed (HTTP 400).", status=400),
+            "account",
+        ),
     ],
 )
 async def test_an_unreadable_fresh_read_says_wait_rather_than_check_account(
