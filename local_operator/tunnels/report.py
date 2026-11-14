@@ -41,12 +41,15 @@ Two rules the code below keeps, both of them lessons from that incident:
 from __future__ import annotations
 
 import asyncio
+import datetime
 import time
 from contextlib import closing
 from typing import Any
 
 import httpx
 
+from local_operator.i18n.keys import tunnel_status
+from local_operator.i18n.text import tr
 from local_operator.providers.auth_store import (
     DEFAULT_BLOCK_MS,
     AuthStore,
@@ -55,6 +58,8 @@ from local_operator.providers.auth_store import (
     RefreshUnconfirmedError,
 )
 from local_operator.tunnels import config, gateway, state
+
+_t = tr("tunnel.status")
 
 #: How long the login verdict may wait for a token endpoint that is not answering.
 #:
@@ -154,12 +159,16 @@ async def probe(value: dict[str, Any]) -> dict[str, Any]:
     detail = ""
     transport = ""
     cloudflared = False
+    listening = False
+    status_code: int | None = None
+    last: dict[str, Any] | None = None
     try:
         async with httpx.AsyncClient(trust_env=False) as client:
             reply = await client.get(
                 f"http://127.0.0.1:{value['gateway_port']}/_lop_tunnel/health", timeout=2
             )
-            served = reply.status_code == 200
+            status_code = reply.status_code
+            served = status_code == 200
             payload = reply.json() if served else {}
             if not isinstance(payload, dict):
                 # A stale or foreign listener on this port can answer 200 with
@@ -181,18 +190,61 @@ async def probe(value: dict[str, Any]) -> dict[str, Any]:
                 # own sentence rather than saying nothing.
                 reason = str(payload.get("reason") or "")
                 detail = gateway.terminal_detail(reason, str(payload.get("detail") or ""))
-    except (httpx.HTTPError, ValueError):
-        # A stopped connector and a gateway that is not there are also
-        # different jobs: the first is this process, the second is the unit.
-        detail = (
-            "The local relay gateway is not answering on "
-            f"127.0.0.1:{value['gateway_port']}; run lop tunnel install to restore it"
+    except httpx.ConnectError:
+        # REFUSED: nothing is listening on the port. Only here can a missing or
+        # dead unit be the explanation — but a connector in its retry loop also
+        # leaves the port closed between attempts (it exits and the supervisor
+        # restarts it 10 s later), so a CURRENT retrying exit wins over the
+        # install advice (field report: a Radient 503 read here as "run lop
+        # tunnel install" while the real cause sat in service.log). An old exit
+        # does not: the log outlives the outage, so a failure from last week
+        # beside a closed port means the unit is gone, and the install advice
+        # is the right answer (review round 1, R1-1). It is still returned as
+        # `last_error`, which the CLI prints as history.
+        last = last_connector_failure()
+        if last is not None and last["current"]:
+            reason = last["reason"]
+            detail = gateway.terminal_detail(reason, "")
+        else:
+            detail = (
+                "The local relay gateway is not answering on "
+                f"127.0.0.1:{value['gateway_port']}; run lop tunnel install to restore it"
+            )
+    except (httpx.HTTPError, ValueError) as failure:
+        # The port ACCEPTED the connection, so the unit is there: install advice
+        # would send the operator to repair something that is running. Say what
+        # was actually observed (timed out, or an answer that is not a health
+        # payload) — the exception's own text is not used, because httpx echoes
+        # the request URL.
+        listening = True
+        port = str(value["gateway_port"])
+        if isinstance(failure, httpx.TimeoutException):
+            detail = _t(tunnel_status.gateway_listening_timed_out(port=port))
+        else:
+            detail = _t(tunnel_status.gateway_listening_unreadable(port=port))
+    if not served and status_code is not None:
+        # The port answered HTTP, but not the 200 every lop gateway gives its
+        # health route: a foreign listener holds the port, or the gateway is
+        # failing. Name the status rather than printing a bare "stopped"
+        # (QA round 1, Q2); install advice would not free the port either.
+        listening = True
+        detail = _t(
+            tunnel_status.gateway_listening_http_status(
+                port=str(value["gateway_port"]), status=str(status_code)
+            )
         )
+    if listening:
+        last = last_connector_failure()
+        if last is not None and last["current"]:
+            # Only a CURRENT exit explains a listener that is not serving; an
+            # old one is history and is printed as such by the CLI (R1-1).
+            reason = last["reason"]
+            detail += " " + gateway.terminal_detail(reason, "")
     if connected:
         word = "connected"
     elif healthy:
         word = "connecting"
-    elif served:
+    elif served or listening:
         # The gateway answered and is refusing to serve. That is not a stopped
         # connector — cloudflared may still hold the edge connection — and
         # "stopped" beside a sentence promising it clears itself would
@@ -210,7 +262,88 @@ async def probe(value: dict[str, Any]) -> dict[str, Any]:
     if transport:
         result["transport"] = transport
         result["cloudflared"] = cloudflared
+    if last is not None:
+        # Additive: the code and when it was written, so `--json` readers and
+        # the CLI can show the connector's own last exit beside the state.
+        result["last_error"] = last
     return result
+
+
+#: How much of `service.log`'s TAIL is read for the connector's last exit line.
+#: Bounded because the launchd log is only truncated by `lop tunnel install`, so
+#: on a long-lived machine it can be large, and `status` must stay a cheap read.
+#: A retry line is ~200 bytes and the connector writes at most one per restart
+#: (the supervisor's 10 s floor), so 64 KiB holds the last ~300 lines — far more
+#: than the one line this needs, and still ~0.1 ms to read.
+LOG_TAIL_BYTES = 64 * 1024
+
+#: The ONE line shape this reads: `service.main`'s retrying exit, which is this
+#: package's own literal (`connector stopped reason=<code>…`), never an upstream
+#: body. Parks are not read here — they live in `state.json`.
+_SERVICE_PREFIX = " local_operator.tunnels.service: "
+_RETRY_MARKER = _SERVICE_PREFIX + "connector stopped reason="
+
+#: How old a retrying exit may be and still be the CURRENT cause.
+#:
+#: Derived from the retry cadence, not chosen for taste: a retrying connector
+#: exits 1 and its supervisor restarts it no sooner than 10 s later
+#: (`ThrottleInterval: 10` in `tunnels/install.py`'s launchd plan and
+#: `restart_sec=10` in its systemd unit), and each failed start writes a fresh line. So while a
+#: fault persists the newest line is at most ~10 s plus one start attempt old
+#: (the control-plane calls are themselves bounded well under 30 s). 60 s is
+#: several missed cycles of slack; past it nothing is restarting the connector,
+#: and the line is history (review round 1, R1-1: a two-month-old line beside a
+#: closed port had replaced the install advice).
+CURRENT_FAILURE_S = 60
+
+
+def last_connector_failure(*, now: float | None = None) -> dict[str, Any] | None:
+    """The connector's most recent retrying exit from `service.log`, if any.
+
+    `state.json` deliberately records only PARKS (see `tunnels/state.py`), so a
+    connector cycling on a transient fault — the field report's Radient 503 —
+    leaves its cause only in the log its supervisor captures. This reads that
+    cause back as a reason CODE (this package's vocabulary) plus the line's own
+    timestamp; the free text after the code is not returned, so nothing beyond
+    the fixed vocabulary reaches a status surface.
+
+    ``current`` says whether the exit can explain what is happening NOW: it must
+    be the LAST line the service wrote (a later line — a relay start, a park
+    withdrawn — means the connector moved on) and no older than
+    :data:`CURRENT_FAILURE_S`. `service.log` is truncated only by `lop tunnel
+    install`, so without both checks one transient blip would explain every
+    later outage forever.
+    """
+    log = config.directory() / "service.log"
+    try:
+        with log.open("rb") as handle:
+            handle.seek(0, 2)
+            size = handle.tell()
+            handle.seek(max(0, size - LOG_TAIL_BYTES))
+            tail = handle.read(LOG_TAIL_BYTES).decode("utf-8", "replace")
+    except OSError:
+        return None
+    superseded = False
+    for line in reversed(tail.splitlines()):
+        stamp, marker, rest = line.partition(_RETRY_MARKER)
+        if not marker:
+            if _SERVICE_PREFIX in line:
+                superseded = True
+            continue
+        code = rest.split(":", 1)[0].split(";", 1)[0].strip()
+        if not code or not all(c.isalnum() or c == "_" for c in code):
+            return None
+        at: int | None
+        try:
+            at = int(datetime.datetime.fromisoformat(stamp.strip()).timestamp())
+        except ValueError:
+            at = None
+        age = (time.time() if now is None else now) - at if at is not None else None
+        # Both directions bounded: a stamp from the future (a clock moved back)
+        # is no evidence of a retry happening now either.
+        current = not superseded and age is not None and abs(age) <= CURRENT_FAILURE_S
+        return {"reason": code, "at": at, "current": current}
+    return None
 
 
 async def connector_state(value: dict[str, Any], *, reachable: bool = True) -> dict[str, Any]:

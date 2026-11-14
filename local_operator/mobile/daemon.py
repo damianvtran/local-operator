@@ -144,6 +144,9 @@ from local_operator.session.runtime.types import (
 from local_operator.session.store_failures import store_failure
 from local_operator.tui.sidebar_pins import PINS_FILE, read_pins, set_pin
 
+# stdlib-only module (no httpx/starlette), unlike `tunnels.gateway` below.
+from local_operator.tunnels.request_log import note_reason
+
 logger = logging.getLogger(__name__)
 #: The gateway's own spelling (``tunnels.gateway.STREAM_CLEANUP_FAILED``): one
 #: name for the one failure class, with the logger name carrying the surface.
@@ -1919,12 +1922,44 @@ def _bootstrap_mobile_attention() -> None:
     # Match the relay's bounded recent-history surface. Older conversations are
     # imported when a real Session loads them, avoiding an unbounded boot scan.
     live = {record.session_id for record, state in registry.scan() if state == "live"}
-    directories = sorted(root.iterdir(), key=lambda path: path.stat().st_mtime, reverse=True)
+
+    def _mtime(path: Path) -> float:
+        # A directory deleted between ``iterdir`` and ``stat`` would otherwise
+        # raise out of ``sorted`` and abort the sweep the same way an
+        # unreadable transcript did; it sorts last and is skipped below.
+        try:
+            return path.stat().st_mtime
+        except OSError:
+            return 0.0
+
+    directories = sorted(root.iterdir(), key=_mtime, reverse=True)
+    skipped = 0
     for directory in directories[:100]:
         if directory.name in live:
             continue
-        if _durable_user_session_dir(directory.name) is not None:
-            bootstrap_transcript(Transcript(directory, defer_materialise=True))
+        # ONE unreadable session must never abort the sweep. The caller marks
+        # ``_attention_bootstrapped`` only after this returns, so a raise here
+        # re-ran the whole sweep on every 2 s scan forever (57k+ warnings in
+        # the field, phone stuck on "Not answering"). The field case was a
+        # ``.zst`` archive written by a 3.14 runtime and read by a 3.13 daemon
+        # (``ArchiveUnavailable``), but a truncated archive, a permission
+        # error or a malformed journal line fail the same way, so the guard is
+        # deliberately broad: a skipped session is still migrated later when a
+        # real Session opens it. The log names only the session id and the
+        # exception class — never transcript content — and is one line per
+        # skipped session, bounded by the 100-directory window above.
+        try:
+            if _durable_user_session_dir(directory.name) is not None:
+                bootstrap_transcript(Transcript(directory, defer_materialise=True))
+        except Exception as exc:  # noqa: BLE001 — see the comment above
+            skipped += 1
+            logger.warning(
+                "mobile attention bootstrap skipped session %s: %s",
+                directory.name,
+                type(exc).__name__,
+            )
+    if skipped:
+        logger.info("mobile attention bootstrap finished with %d skipped session(s)", skipped)
 
 
 #: The outcome types the runtime NAMES as a completed mutation, and therefore the
@@ -6564,6 +6599,7 @@ def build_app(daemon: MobileDaemon):
         if (
             origin is not None and origin not in {f"http://{host}", f"https://{host}"}
         ) or request.headers.get("sec-fetch-site") == "cross-site":
+            note_reason(request.scope, "cross_origin")
             return JSONResponse({"error": "same-origin request required"}, status_code=403)
         return None
 
@@ -6576,6 +6612,9 @@ def build_app(daemon: MobileDaemon):
         if authed(request):
             return None
         if request.url.path.startswith("/api/"):
+            # A reason code on the request log's entry (QA round 1, Q3): a 401
+            # with an empty reason could not be told apart from a handler's own.
+            note_reason(request.scope, "unauthorized")
             return JSONResponse({"error": "authentication required"}, status_code=401)
         return RedirectResponse("/login", status_code=303)
 
@@ -6611,6 +6650,7 @@ def build_app(daemon: MobileDaemon):
         form = await request.form()
         candidate = str(form.get("password", ""))
         if not daemon.password or not check_password(candidate, daemon.password):
+            note_reason(request.scope, "login_failed")
             return HTMLResponse(
                 await asyncio.to_thread(_render_login_html, error=True),
                 status_code=401,
@@ -6895,6 +6935,7 @@ def build_app(daemon: MobileDaemon):
         if origin_denied is not None:
             return origin_denied
         if not authed(request):
+            note_reason(request.scope, "unauthorized")
             return JSONResponse({"error": "authentication required"}, status_code=401)
         from local_operator import agent_avatar
         from local_operator.i18n.http import etag_matches

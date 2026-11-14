@@ -1,0 +1,34 @@
+$ git rev-parse HEAD
+cf5fa645a0d44abd77a77109b21cff6f0f50aca4
+$ git diff --stat e95a77a5f3ac..cf5fa645a0d4
+ i18n/style-guides/vi.md                            |  5 +++++
+ .../i18n/catalogues/es/tunnel.status.json          |  8 ++++----
+ .../i18n/catalogues/fr/tunnel.status.json          | 22 +++++++++++-----------
+ .../i18n/catalogues/hi/tunnel.status.json          | 12 ++++++------
+ .../i18n/catalogues/ur/tunnel.status.json          | 10 +++++-----
+ .../i18n/catalogues/vi/tunnel.status.json          |  8 ++++----
+ .../i18n/catalogues/zh-CN/tunnel.status.json       | 20 ++++++++++----------
+ 7 files changed, 45 insertions(+), 40 deletions(-)
+$ PYTHONPATH=$PWD ~/local-operator/.venv/bin/python scripts/i18n/check.py --catalogues-only
+check.py: catalogue checks: 0 problem(s)
+$ python3 mech2.py <worktree>
+en sha256 e5e82a9ab8bc9bc5cfdf3d39d034056d822251f1d759582c8826b27c46d6218a keys 13
+fr sha256 375156fbf820f4309411d1bbaf1a1a57093c5d5c13984d1a73926d68bb7b6d89 keys 13 mechanical: OK | U+202F-before-:; 11; U+0020-before-:;!? 0; 'santé' 0; '(à {at})' 0
+es sha256 25b64bf618650faabe7d7cfb3322fa8dca8634c48d4cb5d7ef332db430b5c4b0 keys 13 mechanical: OK | 'solo cuando' 0; '(a las {at})' 0; 'salida del conector' 0
+zh-CN sha256 5af782027d176fa74b45f9c9eca31616f948396654b5c47c1ce186b2cabf47e3 keys 13 mechanical: OK | Han<->Latin spaced boundaries 0; ' — ' 0; '请' 3
+vi sha256 0461827f28c9ceaf0eed1d19660b7d269d6425ef70bd63625a8ebfe716a427f2 keys 13 mechanical: OK | 'đường hầm' 0; 'cổng chuyển tiếp' 0; 'gateway' 4
+ur sha256 f1ae365c108f6b638b12011329d79b7dd7c301ca35fc250d899608a0c3a7bb0a keys 13 mechanical: OK | 'اخراج' 0; 'ہیلتھ' 0; bidi-controls 0
+hi sha256 07867b5ed9e16d60e0e52979e41fe8c89668c435b54ab2e296811e013612b9bc keys 13 mechanical: OK | 'निकास' 0; 'हेल्थ' 0; 'गलती' 0
+ru sha256 6e136c298abf605c17a43b1a45e8c0a33bd04b91dad9067aa2d235cfc1945aad keys 13 mechanical: OK | 
+$ python3 scripts/i18n/ledger.py history-sha --locale fr --namespace tunnel.status
+4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945
+$ python3 scripts/i18n/ledger.py history-sha --locale es --namespace tunnel.status
+4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945
+$ python3 scripts/i18n/ledger.py history-sha --locale zh-CN --namespace tunnel.status
+4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945
+$ python3 scripts/i18n/ledger.py history-sha --locale vi --namespace tunnel.status
+4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945
+$ python3 scripts/i18n/ledger.py history-sha --locale ur --namespace tunnel.status
+4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945
+$ python3 scripts/i18n/ledger.py history-sha --locale hi --namespace tunnel.status
+4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945

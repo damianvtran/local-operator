@@ -10895,6 +10895,14 @@ def mobile_command(args: argparse.Namespace) -> int:
         gate = "closed" if result["gate_closed"] else "OPEN (this is a boundary failure)"
         print(f"auth gate:    {gate}")
         print(f"log:          {result['log']}")
+        from local_operator.tunnels.request_log import render as render_requests
+
+        # `requests` is `read_tail`'s dict, but `result` is a loosely typed
+        # status payload; anything else (absent, or an older payload shape)
+        # renders as the empty summary rather than crashing the status line.
+        requests = result.get("requests")
+        for row in render_requests(requests if isinstance(requests, dict) else {}):
+            print(row)
         sessions = result.get("sessions", [])
         assert isinstance(sessions, list)
         print(f"sessions:     {len(sessions)}")
