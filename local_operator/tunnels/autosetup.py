@@ -14,6 +14,7 @@ import os
 from typing import Any
 
 from local_operator.config_writer import nonblocking_file_claim
+from local_operator.procstate import pid_alive
 from local_operator.tunnels import config
 
 #: The unattended run's journal (`tunnels/auto-setup.json`): ``running`` while a
@@ -74,19 +75,19 @@ def _read_journal() -> dict[str, Any] | None:
 
 
 def _pid_alive(pid: object) -> bool:
-    """Whether ``pid`` names a live process (a journal without one is not live)."""
+    """Whether ``pid`` names a live process (a journal without one is not live).
+
+    Delegates to :func:`local_operator.procstate.pid_alive` rather than calling
+    ``os.kill(pid, 0)`` here: on Windows signal 0 goes to ``TerminateProcess``,
+    so the "probe" would KILL the setup run it is asking about (the xplat
+    battery's ``static.posix_attributes`` fatal on #3945). The shared probe asks
+    ``OpenProcess`` on win32 and keeps the POSIX ESRCH/EPERM answers unchanged;
+    its fail-closed doubt (alive) only means a journal is treated as live, and
+    ``is_running`` still requires the setup lock to be held as well.
+    """
     if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
         return False
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        # Exists, owned by someone else: alive. (Not expected for our own run.)
-        return True
-    except OSError:
-        return False
-    return True
+    return pid_alive(pid)
 
 
 def write_journal(record: dict[str, Any], *, unless_live_other: bool = False) -> None:
