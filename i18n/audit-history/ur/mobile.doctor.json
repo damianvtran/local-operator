@@ -1,0 +1,32 @@
+{
+  "schema": 1,
+  "locale": "ur",
+  "namespace": "mobile.doctor",
+  "history_sha256": "dfa0b5ca5c1df6efc6c153e7b3489abd2c774afcad6b89d2ec1e8478fa432869",
+  "entries": [
+    {
+      "locale": "ur",
+      "namespace": "mobile.doctor",
+      "source_sha256": "0ca00b276fdea066228394e3fee336042b1e149c9e7df3ea31be11a24f0beb72",
+      "translator": {
+        "agent": "i18n-translator subagent, session 398cdb26808f (values in commit a3722be7dada; English source drafted by coder session b0300e2c2c7f)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-14"
+      },
+      "auditor": {
+        "agent": "independent i18n-auditor (C4 hi/ur lane, `task` subagent), session f9d4556f4a66; did not translate, draft or edit any value it judged",
+        "model": "anthropic/claude-opus-5-5 (served model; no provider fallback observed)",
+        "date": "2026-11-14",
+        "independent_from_translator": true,
+        "result": "passed",
+        "findings": 3,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Independent audit a1 of mobile.doctor (new namespace, all 23 keys judged) at target sha256 842c776c34a6… in a3722be7dada: PASSED, 0 blocker / 0 major / 0 minor / 3 nit (UR-D01, UR-D02, UR-D03; all adjudicated, none asks for a change). Real path exercised with LOP_LANG lop mobile doctor/--help; no native-speaker pass, no rendered frame. Evidence: i18n/audits/evidence/ur/mobile.doctor/a1/record.json",
+      "evidence": "i18n/audits/evidence/ur/mobile.doctor/a1/record.json",
+      "round": "a1",
+      "keys_audited": 23
+    }
+  ]
+}

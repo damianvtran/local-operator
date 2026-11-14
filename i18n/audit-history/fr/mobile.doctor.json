@@ -1,0 +1,54 @@
+{
+  "schema": 1,
+  "locale": "fr",
+  "namespace": "mobile.doctor",
+  "history_sha256": "82c30c4d0658575870e63fe7f70918d320d66ae2e7f5aded0d0fd033cc9ccc6c",
+  "entries": [
+    {
+      "locale": "fr",
+      "namespace": "mobile.doctor",
+      "source_sha256": "0ca00b276fdea066228394e3fee336042b1e149c9e7df3ea31be11a24f0beb72",
+      "translator": {
+        "agent": "i18n-translator subagent, session 398cdb26808f (English drafted by coder session b0300e2c2c7f)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-14"
+      },
+      "auditor": {
+        "agent": "i18n-auditor, independent `task` subagent (C4 i18n-auditor es fr ru), session 5e5b8d070b27; did not translate or edit any value it judged",
+        "model": "anthropic/claude-opus-5-5 (served model reported by the session; no provider fallback observed)",
+        "date": "2026-11-14",
+        "result": "passed",
+        "findings": 2,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Complete new namespace: independent audit a1 PASSED, 0 blocker / 0 major / 1 minor / 1 nit. FR-D1 minor (doctor.daemon.not_running). FR-D2 nit (doctor.daemon.state_not_running). Translator and auditor share model anthropic/claude-opus-5-5 (disclosed). Not verified: native-speaker review, no terminal/desktop frame. Evidence: i18n/audits/evidence/fr/mobile.doctor/a1/record.json",
+      "evidence": "i18n/audits/evidence/fr/mobile.doctor/a1/record.json",
+      "round": "a1",
+      "keys_audited": 23
+    },
+    {
+      "locale": "fr",
+      "namespace": "mobile.doctor",
+      "source_sha256": "0ca00b276fdea066228394e3fee336042b1e149c9e7df3ea31be11a24f0beb72",
+      "translator": {
+        "agent": "i18n-translator subagent, session 8dedc962f71a (remediation of a1 findings); original values by session 398cdb26808f (English source drafted by coder session b0300e2c2c7f)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-14"
+      },
+      "auditor": {
+        "agent": "i18n-auditor round 2 (remediation delta: vi, zh-CN, fr mobile.doctor), independent `task` subagent, session 24933ff37418; did not translate round 1 or the remediation, did not audit round 1, and edited no catalogue value",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-14",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Round a2 remediation-delta audit PASSED (1 changed key: daemon.not_running), 0 blocker / 0 major / 0 minor / 0 nit new. FR-D1 minor RESOLVED: «jusqu’au démarrage du service» binds to the phone service, not the computer. FR-D2 nit carried (unchanged key). U+202F before ; and U+2019 apostrophes kept; placeholders, NFC, key parity and product-renderer output verified (audit.log). Translator and auditor share model anthropic/claude-opus-5-5 (disclosed). Not verified: native-speaker review, rendered frames. Evidence: i18n/audits/evidence/fr/mobile.doctor/a2/record.json",
+      "evidence": "i18n/audits/evidence/fr/mobile.doctor/a2/record.json",
+      "round": "a2",
+      "keys_audited": 1
+    }
+  ]
+}

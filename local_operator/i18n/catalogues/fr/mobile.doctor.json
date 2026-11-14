@@ -1,7 +1,7 @@
 {
   "mobile.doctor.versions.ok": "Local Operator {lop} sur Python {python} ({platform}).",
   "mobile.doctor.daemon.not_installed": "Le service d’accès téléphone n’est pas configuré sur cet ordinateur, il n’est donc pas lancé.",
-  "mobile.doctor.daemon.not_running": "Le service d’accès téléphone est configuré mais n’est pas lancé ; l’application mobile affiche cet ordinateur en veille jusqu’à son démarrage.",
+  "mobile.doctor.daemon.not_running": "Le service d’accès téléphone est configuré mais n’est pas lancé ; l’application mobile affiche cet ordinateur en veille jusqu’au démarrage du service.",
   "mobile.doctor.daemon.ok": "Le service d’accès téléphone est lancé et a répondu en {ms} ms.",
   "mobile.doctor.daemon.slow": "Le service d’accès téléphone est lancé mais a mis {ms} ms à répondre ; l’application mobile peut alors indiquer que cet ordinateur ne répond pas.",
   "mobile.doctor.daemon.gate_open": "Le service d’accès téléphone a répondu sans demander son mot de passe : le portail téléphone n’est pas protégé.",

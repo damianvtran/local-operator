@@ -10894,7 +10894,26 @@ def mobile_command(args: argparse.Namespace) -> int:
         assert isinstance(result, dict)
         print(f"installed:    {'yes' if result['installed'] else 'no'}")
         print(f"password set: {'yes' if result['password_set'] else 'no'}")
-        print(f"healthy:      {'yes' if result['healthy'] else 'no'}")
+        # The daemon's descriptor headroom (open of the soft limit that
+        # `mobile/fdlimit.py` raises at start), on the `healthy` line it
+        # qualifies: exhausting it is how a healthy-looking daemon stops
+        # answering the phone. Joined with symbols only, so the line adds no
+        # untranslated word (the keyed copy carries the words); an unlimited
+        # or unreadable value is a symbol for the same reason.
+        files_note = ""
+        files = result.get("files")
+        if result["healthy"] and isinstance(files, dict):
+            from local_operator.i18n.keys import mobile_doctor as _md_files
+            from local_operator.i18n.text import tr as _tr_files
+
+            used, limit = files.get("open"), files.get("soft")
+            files_note = " · " + _tr_files("mobile.doctor")(
+                _md_files.files_status_line(
+                    open=str(used) if used is not None else "?",
+                    limit=str(limit) if limit is not None else "∞",
+                )
+            )
+        print(f"healthy:      {'yes' if result['healthy'] else 'no'}{files_note}")
         # A healthy daemon with no bundle serves a 503 to every authenticated GET
         # ("mobile web bundle not built"), so `healthy: yes` on its own reads as
         # fine while the phone has no UI at all — the state generations
@@ -10928,21 +10947,6 @@ def mobile_command(args: argparse.Namespace) -> int:
         else:
             gate = "closed" if result["gate_closed"] else "OPEN (this is a boundary failure)"
         print(f"auth gate:    {gate}")
-        files = result.get("files")
-        if result["healthy"] and isinstance(files, dict):
-            # The daemon's descriptor headroom: the limit `mobile/fdlimit.py`
-            # raises at start, beside what is in use now.
-            used = files.get("open")
-            limit = files.get("soft")
-            print(
-                "open files:   "
-                + _md_t(
-                    _md_keys.files_status_line(
-                        open=str(used if used is not None else "?"),
-                        limit=str(limit if limit is not None else "unlimited"),
-                    )
-                )
-            )
         print(f"log:          {result['log']}")
         from local_operator.tunnels.request_log import render as render_requests
 

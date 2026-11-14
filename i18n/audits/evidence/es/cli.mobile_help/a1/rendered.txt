@@ -1,0 +1,43 @@
+# es/cli.mobile_help: every key rendered through local_operator.i18n Msg.envelope(locale='es') at a3722be7dada with sample args {"lop": "0.42.1", "python": "3.12.7", "platform": "macOS-15.1-arm64", "ms": "2400", "open": "231", "limit": "256", "emfile": "14", "sqlite": "3", "state": "stopped", "reason": "login_required", "count": "3"}; daemon_action also with action=bogus (other branch).
+# Text render only; no terminal or desktop frame captured.
+cli.mobile_help.daemon_action {'action': 'start'}
+  -> Iniciar el daemon
+cli.mobile_help.daemon_action {'action': 'stop'}
+  -> Detener el daemon
+cli.mobile_help.daemon_action {'action': 'restart'}
+  -> Reiniciar el daemon
+cli.mobile_help.daemon_action {'action': 'bogus'}
+  -> bogus el daemon
+cli.mobile_help.devices
+  -> Listar los dispositivos push de esta máquina o revocar/anular la revocación de uno
+cli.mobile_help.devices_command
+  -> list (predeterminado), revoke <device_id> o unrevoke <device_id>
+cli.mobile_help.devices_device_id
+  -> El device_id que muestra `lop mobile devices`; obligatorio para revoke/unrevoke
+cli.mobile_help.devices_port
+  -> Puerto del daemon móvil (por defecto, el del propio daemon)
+cli.mobile_help.doctor
+  -> Diagnóstico de solo lectura del acceso desde el teléfono (seguro para compartir)
+cli.mobile_help.doctor_json
+  -> Mostrar el diagnóstico en formato JSON
+cli.mobile_help.install
+  -> Instalar el daemon, la contraseña y el LaunchAgent
+cli.mobile_help.logs
+  -> Mostrar el final de los registros del daemon y de los runtimes
+cli.mobile_help.logs_follow
+  -> Seguir por nombre para ver los registros creados o rotados mientras miras (seguir el descriptor se pierde ambos)
+cli.mobile_help.logs_lines
+  -> Líneas por archivo (se leen hasta dos)
+cli.mobile_help.mobile
+  -> Acceso desde el teléfono: controlar las sesiones de lop de esta máquina
+cli.mobile_help.password
+  -> Mostrar o rotar la contraseña del portal
+cli.mobile_help.serve
+  -> Ejecutar el daemon (en primer plano)
+cli.mobile_help.status
+  -> Estado del daemon, control de acceso y sesiones activas
+cli.mobile_help.uninstall
+  -> Eliminar el LaunchAgent
+cli.mobile_help.uninstall_purge
+  -> Eliminar también la contraseña
+

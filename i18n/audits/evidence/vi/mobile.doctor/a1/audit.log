@@ -1,0 +1,98 @@
+# vi/mobile.doctor mechanical + render check (scripts run with .venv/bin/python; runtime.render_message = product renderer)
+en catalogue_sha256     0ca00b276fdea066228394e3fee336042b1e149c9e7df3ea31be11a24f0beb72
+vi catalogue_sha256  2642bc0c30738625eb8b2c99b4410f8d1a9ef1bbef7f20d6ea61bdd4c4042314
+keys en=23 vi=23 missing=[] extra=[]
+
+[mobile.doctor.versions.ok] args=OK nfc=True cells en=58 vi=60
+  en : Local Operator 0.42.1 on Python 3.13.2 (macOS-15.1-arm64).
+  vi: Local Operator 0.42.1 trên Python 3.13.2 (macOS-15.1-arm64).
+
+[mobile.doctor.daemon.not_installed] args=OK nfc=True cells en=71 vi=80
+  en : The phone service is not set up on this computer, so it is not running.
+  vi: Dịch vụ truy cập điện thoại chưa được thiết lập trên máy tính này nên chưa chạy.
+
+[mobile.doctor.daemon.not_running] args=OK nfc=True cells en=105 vi=149
+  en : The phone service is set up but not running; the phone app shows this computer as asleep until it starts.
+  vi: Dịch vụ truy cập điện thoại đã được thiết lập nhưng chưa chạy; ứng dụng trên điện thoại hiển thị máy tính này đang ngủ cho đến khi dịch vụ khởi động.
+
+[mobile.doctor.daemon.ok] args=OK nfc=True cells en=51 vi=65
+  en : The phone service is running and answered in 12 ms.
+  vi: Dịch vụ truy cập điện thoại đang chạy và đã phản hồi trong 12 ms.
+
+[mobile.doctor.daemon.slow] args=OK nfc=True cells en=101 vi=143
+  en : The phone service is running but took 12 ms to answer, which the phone app may show as not answering.
+  vi: Dịch vụ truy cập điện thoại đang chạy nhưng mất 12 ms để phản hồi, nên ứng dụng trên điện thoại có thể hiển thị máy tính này là không phản hồi.
+
+[mobile.doctor.daemon.gate_open] args=OK nfc=True cells en=92 vi=120
+  en : The phone service answered without asking for its password: the phone portal is unprotected.
+  vi: Dịch vụ truy cập điện thoại đã phản hồi mà không yêu cầu mật khẩu: cổng thông tin dành cho điện thoại không được bảo vệ.
+
+[mobile.doctor.daemon.state_not_running] args=OK nfc=True cells en=11 vi=10
+  en : not running
+  vi: không chạy
+
+[mobile.doctor.files.ok] args=OK nfc=True cells en=44 vi=62
+  en : The phone service has 118 of 256 files open.
+  vi: Dịch vụ truy cập điện thoại đang mở 118 tệp trên giới hạn 256.
+
+[mobile.doctor.files.near] args=OK nfc=True cells en=118 vi=157
+  en : The phone service has 118 of 256 files open, close to its limit, so new phone connections and database opens can fail.
+  vi: Dịch vụ truy cập điện thoại đang mở 118 tệp trên giới hạn 256, gần chạm giới hạn, nên các kết nối mới từ điện thoại và việc mở cơ sở dữ liệu có thể thất bại.
+
+[mobile.doctor.files.unknown] args=OK nfc=True cells en=69 vi=80
+  en : The phone service's open files could not be counted on this computer.
+  vi: Không đếm được số tệp đang mở của dịch vụ truy cập điện thoại trên máy tính này.
+
+[mobile.doctor.files.status_line] args=OK nfc=True cells en=15 vi=15
+  en : 118 open of 256
+  vi: đang mở 118/256
+
+[mobile.doctor.logs.clean] args=OK nfc=True cells en=64 vi=85
+  en : No out-of-files or database-open errors in the last day of logs.
+  vi: Nhật ký trong ngày qua không có lỗi “quá nhiều tệp đang mở” hay lỗi mở cơ sở dữ liệu.
+
+[mobile.doctor.logs.errors] args=OK nfc=True cells en=127 vi=152
+  en : The last day of logs shows out-of-files errors (3) and database-open errors (2); the phone service may be running out of files.
+  vi: Nhật ký trong ngày qua có lỗi “quá nhiều tệp đang mở” (3) và lỗi mở cơ sở dữ liệu (2); dịch vụ truy cập điện thoại có thể sắp chạm giới hạn tệp đang mở.
+
+[mobile.doctor.tunnel.not_configured] args=OK nfc=True cells en=60 vi=70
+  en : Phone access through Radient is not set up on this computer.
+  vi: Truy cập điện thoại qua Radient chưa được thiết lập trên máy tính này.
+
+[mobile.doctor.tunnel.ok] args=OK nfc=True cells en=50 vi=75
+  en : The tunnel is set up and its connector is stopped.
+  vi: Tunnel đã được thiết lập và trình kết nối của nó đang ở trạng thái stopped.
+
+[mobile.doctor.tunnel.problem] args=OK nfc=True cells en=67 vi=95
+  en : The tunnel is set up but its connector is stopped (login_required).
+  vi: Tunnel đã được thiết lập nhưng trình kết nối của nó đang ở trạng thái stopped (login_required).
+
+[mobile.doctor.tunnel.single] args=OK nfc=True cells en=54 vi=53
+  en : This Radient account has one tunnel for this computer.
+  vi: Tài khoản Radient này có một tunnel cho máy tính này.
+
+[mobile.doctor.tunnel.duplicates] args=OK nfc=True cells en=100 vi=115
+  en : This Radient account has 3 tunnels for this computer; the phone app may be connecting to an old one.
+  vi: Tài khoản Radient này có 3 tunnel cho máy tính này; ứng dụng trên điện thoại có thể đang kết nối tới một tunnel cũ.
+
+[mobile.doctor.tunnel.list_unchecked] args=OK nfc=True cells en=83 vi=82
+  en : The account's tunnel list could not be read, so duplicate tunnels were not checked.
+  vi: Không đọc được danh sách tunnel của tài khoản, nên chưa kiểm tra tunnel trùng lặp.
+
+[mobile.doctor.login.ok] args=OK nfc=True cells en=21 vi=21
+  en : Signed in to Radient.
+  vi: Đã đăng nhập Radient.
+
+[mobile.doctor.login.missing] args=OK nfc=True cells en=25 vi=23
+  en : Not signed in to Radient.
+  vi: Chưa đăng nhập Radient.
+
+[mobile.doctor.files.not_running] args=OK nfc=True cells en=67 vi=75
+  en : The phone service is not running, so it has no open files to count.
+  vi: Dịch vụ truy cập điện thoại không chạy nên không có tệp đang mở nào để đếm.
+
+[mobile.doctor.daemon.not_answering] args=OK nfc=True cells en=129 vi=170
+  en : The phone service is running but not answering; the phone app shows this computer as not answering. It may have run out of files.
+  vi: Dịch vụ truy cập điện thoại đang chạy nhưng không phản hồi; ứng dụng trên điện thoại hiển thị máy tính này là không phản hồi. Có thể dịch vụ đã chạm giới hạn tệp đang mở.
+
+RESULT placeholder/NFC defects: 0

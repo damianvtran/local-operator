@@ -1,0 +1,162 @@
+{
+ "schema": 1,
+ "audit_id": "a1",
+ "audit_kind": "independent_translation_audit",
+ "locale": "fr",
+ "namespace": "cli.mobile_help",
+ "round": 1,
+ "audit_date": "2026-11-14",
+ "packaged_at_utc": "2026-11-14T01:38:35Z",
+ "verdict": "passed",
+ "status": "passed",
+ "scope": "whole namespace (17 keys) at the new English source hash: the 2 NEW keys (cli.mobile_help.doctor, cli.mobile_help.doctor_json) judged in full; the 15 previously audited keys re-read for consistency with the new keys and with mobile.doctor, and any defect seen is recorded",
+ "key_count": 17,
+ "keys_audited": 17,
+ "new_keys": [
+  "cli.mobile_help.doctor",
+  "cli.mobile_help.doctor_json"
+ ],
+ "source_sha256": "3e1aea77751a6a1286cd0bc525163ac6e90da2f81fd19fff1fc23ae247133267",
+ "target_sha256": "98392767f98a8f09b2c1e29f405ee68bba0692c0bf87462da5423e3da1daafd5",
+ "source_audit_revision": "a3722be7dadacaf140a2587a0100bd3b26c2ab50",
+ "worktree": "~/local-operator/.worktrees/mobile-doctor",
+ "branch": "feat/mobile-doctor",
+ "node": "lop-remote-node-2",
+ "translator": {
+  "agent": "i18n-translator subagent, session 398cdb26808f (English drafted by coder session b0300e2c2c7f)",
+  "model": "anthropic/claude-opus-5-5",
+  "date": "2026-11-14"
+ },
+ "auditor": {
+  "agent": "i18n-auditor, independent `task` subagent (C4 i18n-auditor es fr ru), session 5e5b8d070b27; did not translate or edit any value it judged",
+  "model": "anthropic/claude-opus-5-5 (served model reported by the session; no provider fallback observed)",
+  "date": "2026-11-14",
+  "independent_from_translator": true,
+  "independence": "Different session (5e5b8d070b27) from the translator (398cdb26808f) and the English drafter (b0300e2c2c7f); never edited a catalogue value. Translator and auditor ran the same model (anthropic/claude-opus-5-5) — disclosed; no native-speaker pass is claimed."
+ },
+ "input_hashes": {
+  "en": "3e1aea77751a6a1286cd0bc525163ac6e90da2f81fd19fff1fc23ae247133267",
+  "context": "dab85ceb9e4acf145e434179d866848912a0831bbf827ea196f82c28f855a869",
+  "target": "98392767f98a8f09b2c1e29f405ee68bba0692c0bf87462da5423e3da1daafd5",
+  "glossary": "a576d5a4b2718ba79a70a42600e3b6233ea28d716b1e2d996a208ac8dd7fabdb",
+  "style_guide": "5315e1ac10c2ce57aac631ba653d08de680ee70c9a022ed3a8345ce2f9902ee7"
+ },
+ "input_paths": {
+  "en": "local_operator/i18n/catalogues/en/cli.mobile_help.json",
+  "context": "local_operator/i18n/catalogues/en/cli.mobile_help.context.json",
+  "target": "local_operator/i18n/catalogues/fr/cli.mobile_help.json",
+  "glossary": "i18n/glossary.md",
+  "style_guide": "i18n/style-guides/fr.md"
+ },
+ "counts": {
+  "blocker": 0,
+  "major": 0,
+  "minor": 1,
+  "nit": 1
+ },
+ "unresolved_blocker_major": 0,
+ "findings": [
+  {
+   "id": "FR-H1",
+   "severity": "minor",
+   "keys": [
+    "cli.mobile_help.logs"
+   ],
+   "issue": "Pre-existing value: «Suivre les logs du daemon et des runtimes en continu» describes --follow; the bare `logs` command prints the last --lines lines (default 100) and exits unless --follow is given (cli.py logs_parser). «Tail» here means «show the end of».",
+   "suggested_fix": "«Afficher la fin des logs du daemon et des runtimes».",
+   "status": "open (non-blocking)"
+  },
+  {
+   "id": "FR-H2",
+   "severity": "nit",
+   "keys": [
+    "cli.mobile_help.password"
+   ],
+   "issue": "Pre-existing value: «faire tourner le mot de passe» is a calque of «rotate»; understood by technical readers.",
+   "suggested_fix": "Optional: «Afficher ou renouveler le mot de passe du portail».",
+   "status": "open (non-blocking)"
+  }
+ ],
+ "translator_questions": {
+  "Q5": {
+   "question": "ru/es daemon.state_not_running fragment",
+   "adjudication": "n/a to es/ru only; fr «arrêté» nit FR-D2."
+  },
+  "Q6": {
+   "question": "«asleep» renderings",
+   "adjudication": "«en veille» idiomatic for a sleeping device; not verified against the phone app's own label."
+  }
+ },
+ "per_key": {
+  "cli.mobile_help.mobile": "ok",
+  "cli.mobile_help.install": "ok",
+  "cli.mobile_help.status": "ok",
+  "cli.mobile_help.daemon_action": "ok",
+  "cli.mobile_help.logs": "FR-H1",
+  "cli.mobile_help.logs_lines": "ok",
+  "cli.mobile_help.logs_follow": "ok",
+  "cli.mobile_help.password": "FR-H2",
+  "cli.mobile_help.devices": "ok",
+  "cli.mobile_help.devices_command": "ok",
+  "cli.mobile_help.devices_device_id": "ok",
+  "cli.mobile_help.devices_port": "ok",
+  "cli.mobile_help.uninstall": "ok",
+  "cli.mobile_help.uninstall_purge": "ok",
+  "cli.mobile_help.serve": "ok",
+  "cli.mobile_help.doctor": "ok",
+  "cli.mobile_help.doctor_json": "ok"
+ },
+ "mechanical_checks": [
+  {
+   "check": "key parity (same set and order)",
+   "result": "pass"
+  },
+  {
+   "check": "ICU argument names identical",
+   "result": "pass"
+  },
+  {
+   "check": "select branch labels identical",
+   "result": "pass"
+  },
+  {
+   "check": "no command named that English does not name",
+   "result": "pass"
+  },
+  {
+   "check": "final period mirrors English",
+   "result": "pass"
+  },
+  {
+   "check": "fr: U+202F before ; : and inside « » ; apostrophe U+2019 only",
+   "result": "pass"
+  },
+  {
+   "check": "rendered through Msg.envelope(locale=fr) without error (17/17 keys present in render)",
+   "result": "pass"
+  },
+  {
+   "check": "no silent English fallback in render",
+   "result": "pass"
+  }
+ ],
+ "must_survive": {
+  "no command named": "verified (no added `lop …`/backticks)",
+  "calm factual tone": "verified by reading",
+  "placeholders verbatim": "verified (ICU argument names identical)",
+  "read-only / safe to share": "verified in cli.mobile_help.doctor"
+ },
+ "evidence_files": [
+  "record.json",
+  "report.md",
+  "rendered.txt",
+  "audit.log",
+  "dryrun.log",
+  "receipt.json"
+ ],
+ "not_verified": [
+  "native-speaker review",
+  "terminal/desktop rendered frame (text render only)",
+  "the phone app's own localized 'asleep'/'not answering' labels (separate repository)"
+ ]
+}

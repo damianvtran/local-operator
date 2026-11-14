@@ -1,0 +1,11 @@
+# ledger append dry-run for zh-CN/cli.mobile_help (.venv/bin/python scripts/i18n/ledger.py)
+$ ledger.py history-sha --locale zh-CN --namespace cli.mobile_help
+372e2619bbdff11c2d89a256743099c288e6a316fd68dd8ff58591de51179438
+$ ledger.py append --receipt <scratchpad>/c4/receipt-zh-CN-cli.mobile_help.json --expected-history-sha 372e2619bbdff11c2d89a256743099c288e6a316fd68dd8ff58591de51179438 --dry-run
+exit=0
+i18n/audit-history/zh-CN/cli.mobile_help.json
+$ ledger.py append ... --apply
+exit=0
+i18n/audit-history/zh-CN/cli.mobile_help.json
+$ ledger.py history-sha --locale zh-CN --namespace cli.mobile_help   # after apply
+4279949766ccaa9805258a9c0b09df1dc878c454bd84be3e30801e2f0d0758b2

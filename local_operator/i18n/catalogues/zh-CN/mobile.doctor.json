@@ -1,9 +1,9 @@
 {
   "mobile.doctor.versions.ok": "Local Operator {lop}，Python {python}（{platform}）。",
   "mobile.doctor.daemon.not_installed": "此电脑上未设置手机访问服务，因此该服务未运行。",
-  "mobile.doctor.daemon.not_running": "手机访问服务已设置但未运行；在服务启动前，手机应用会将此电脑显示为休眠。",
+  "mobile.doctor.daemon.not_running": "手机访问服务已设置但未运行；在服务启动前，手机应用会将此电脑显示为睡眠状态。",
   "mobile.doctor.daemon.ok": "手机访问服务正在运行，响应用时{ms}毫秒。",
-  "mobile.doctor.daemon.slow": "手机访问服务正在运行，但响应用时{ms}毫秒，手机应用可能会将此电脑显示为无响应。",
+  "mobile.doctor.daemon.slow": "手机访问服务正在运行，但响应用时{ms}毫秒，手机应用可能会将此电脑显示为未响应。",
   "mobile.doctor.daemon.gate_open": "手机访问服务未要求输入密码就作出了响应：手机门户未受保护。",
   "mobile.doctor.daemon.state_not_running": "未运行",
   "mobile.doctor.files.ok": "手机访问服务已打开{open}个文件（上限{limit}个）。",
@@ -21,5 +21,5 @@
   "mobile.doctor.login.ok": "已登录Radient",
   "mobile.doctor.login.missing": "未登录Radient",
   "mobile.doctor.files.not_running": "手机访问服务未运行，因此没有可统计的打开文件。",
-  "mobile.doctor.daemon.not_answering": "手机访问服务正在运行但无响应；手机应用会将此电脑显示为无响应。该服务可能已达到打开文件数上限。"
+  "mobile.doctor.daemon.not_answering": "手机访问服务正在运行但未响应；手机应用会将此电脑显示为未响应。该服务可能已达到打开文件数上限。"
 }

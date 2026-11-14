@@ -1,0 +1,12 @@
+# fr/cli.mobile_help audit.log — commands this auditor ran for the ledger step (verbatim outputs). Session 5e5b8d070b27.
+# Render: .venv/bin/python $LOCAL_OPERATOR_SCRATCHPAD/render/render.py fr  -> rendered.txt (exit 0)
+# Staged ledger receipt: ledger-receipt-fr-cli.mobile_help.json (scratchpad)
+$ .venv/bin/python scripts/i18n/ledger.py history-sha --locale fr --namespace cli.mobile_help
+334bda1ea7f50c02cbbd345252f62d72411aa223044cd31c3332f66d256d377d
+[exit 0]
+$ .venv/bin/python scripts/i18n/ledger.py append --receipt $LOCAL_OPERATOR_SCRATCHPAD/ledger-receipt-fr-cli.mobile_help.json --expected-history-sha 334bda1ea7f50c02cbbd345252f62d72411aa223044cd31c3332f66d256d377d --dry-run
+i18n/audit-history/fr/cli.mobile_help.json
+[exit 0]
+$ .venv/bin/python scripts/i18n/ledger.py append --receipt $LOCAL_OPERATOR_SCRATCHPAD/ledger-receipt-fr-cli.mobile_help.json --expected-history-sha 334bda1ea7f50c02cbbd345252f62d72411aa223044cd31c3332f66d256d377d --apply
+i18n/audit-history/fr/cli.mobile_help.json
+[exit 0]

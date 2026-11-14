@@ -1,0 +1,54 @@
+{
+  "schema": 1,
+  "locale": "vi",
+  "namespace": "mobile.doctor",
+  "history_sha256": "91b5a9626fbdefc7304d4755f0a97e749ae24fce287ff537e997a05a5a424e94",
+  "entries": [
+    {
+      "locale": "vi",
+      "namespace": "mobile.doctor",
+      "source_sha256": "0ca00b276fdea066228394e3fee336042b1e149c9e7df3ea31be11a24f0beb72",
+      "translator": {
+        "agent": "i18n-translator subagent, session 398cdb26808f (English source drafted by coder session b0300e2c2c7f)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-14"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (C4 lane: vi, zh-CN), independent `task` subagent, session 2c1a73eaa6cd; did not translate or edit any value it judged",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-14",
+        "result": "changes_requested",
+        "findings": 2,
+        "unresolved_blocker_major": 1
+      },
+      "status": "changes_requested",
+      "note": "New 23-key namespace; round a1 independent audit CHANGES_REQUESTED, 0 blocker / 1 major / 0 minor / 1 nit: VI-D1 major (files.ok, files.near); VI-D2 nit (daemon.not_installed, daemon.not_running, daemon.state_not_running, files.not_running). VI-D1 fix: «đang mở {open} tệp (giới hạn {limit})». Placeholders, NFC and product-renderer output verified (audit.log). Not verified: native-speaker review, rendered frames. Evidence: i18n/audits/evidence/vi/mobile.doctor/a1/record.json",
+      "evidence": "i18n/audits/evidence/vi/mobile.doctor/a1/record.json",
+      "round": "a1",
+      "keys_audited": 23
+    },
+    {
+      "locale": "vi",
+      "namespace": "mobile.doctor",
+      "source_sha256": "0ca00b276fdea066228394e3fee336042b1e149c9e7df3ea31be11a24f0beb72",
+      "translator": {
+        "agent": "i18n-translator subagent, session 8dedc962f71a (remediation of a1 findings); original values by session 398cdb26808f (English source drafted by coder session b0300e2c2c7f)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-14"
+      },
+      "auditor": {
+        "agent": "i18n-auditor round 2 (remediation delta: vi, zh-CN, fr mobile.doctor), independent `task` subagent, session 24933ff37418; did not translate round 1 or the remediation, did not audit round 1, and edited no catalogue value",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-14",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Round a2 remediation-delta audit PASSED (2 changed keys: files.ok, files.near), 0 blocker / 0 major / 0 minor / 0 nit new. VI-D1 major RESOLVED: «đang mở {open} tệp (giới hạn {limit})» no longer reads as above the limit; files.near now agrees with «gần chạm giới hạn». VI-D2 nit carried (accepted, unchanged keys). Placeholders, NFC, key parity and product-renderer output verified (audit.log); other 21 keys byte-identical to a1. Not verified: native-speaker review, rendered frames. Evidence: i18n/audits/evidence/vi/mobile.doctor/a2/record.json",
+      "evidence": "i18n/audits/evidence/vi/mobile.doctor/a2/record.json",
+      "round": "a2",
+      "keys_audited": 2
+    }
+  ]
+}

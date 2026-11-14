@@ -1,0 +1,24 @@
+{
+  "schema": 1,
+  "audit_id": "a1",
+  "locale": "vi",
+  "namespace": "cli.mobile_help",
+  "source_sha256": "3e1aea77751a6a1286cd0bc525163ac6e90da2f81fd19fff1fc23ae247133267",
+  "target_sha256": "5f41ef406576bc50973da9420129037d0c67993d9b35e5f1bc2fdd87a42688ed",
+  "verdict": "passed",
+  "auditor": {
+    "agent": "i18n-auditor (C4 lane: vi, zh-CN), independent `task` subagent, session 2c1a73eaa6cd; did not translate or edit any value it judged",
+    "model": "anthropic/claude-opus-5-5"
+  },
+  "translator": {
+    "agent": "i18n-translator subagent, session 398cdb26808f (English source drafted by coder session b0300e2c2c7f)",
+    "model": "anthropic/claude-opus-5-5",
+    "date": "2026-11-14"
+  },
+  "hashes": {
+    "audit.log": "b58410778bc644ee16fffaec2619446926475d0665f53cc2299e337e347a244c",
+    "dryrun.log": "04fb7ff85e0054ceebec4f9ae5cbbab6c2af80a843737c3ee78a76df4b4c53b8",
+    "record.json": "0100ec2a4de943fa4064c8555f10e43d429803d56ec0576108c038a9cfe7cdfb",
+    "report.md": "6fcc8a45bebbd0801aaffff59f03624587bcd43ef01268494167793109f8c942"
+  }
+}
