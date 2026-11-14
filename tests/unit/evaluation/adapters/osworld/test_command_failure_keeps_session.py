@@ -727,8 +727,10 @@ def test_a_body_cut_off_mid_stream_from_a_dead_guest_still_poisons(tmp_path: Pat
 class _HeldWorker(_Worker):
     """``run_command`` whose guest reply is held until the test releases it."""
 
-    def __init__(self, reply: Any, score: ScoreResult, *, http_get: Any = None) -> None:
-        super().__init__([], score, http_get=http_get)
+    def __init__(
+        self, reply: Any, score: ScoreResult, *, http_get: Any = None, clock: Any = None
+    ) -> None:
+        super().__init__([], score, http_get=http_get, clock=clock)
         import threading
 
         self.entered = threading.Event()
@@ -755,6 +757,14 @@ class _HeldWorker(_Worker):
         provider._clients = _Clients(
             ec2=None, scheduler=None, http_get=self.http_get, http_post_json=http_post_json
         )
+        # This held-reply seam bypasses ``AwsProvider.__init__`` too, so it must
+        # wire the budget clock itself (as ``_Worker`` does). The real clock by
+        # default keeps cancellation exercising the provider's lost-reply
+        # deadline; a dead-guest case passes a ``_FakeClock`` because the
+        # restart-wait probe window (~13 s of probes) would otherwise outlive
+        # ``_cancel_after_dispatch``'s 10 s settle wait.
+        provider._monotonic = self.clock.monotonic if self.clock else time.monotonic
+        provider._sleep = self.clock.sleep if self.clock else time.sleep
         return await provider.run_command(params)
 
 
@@ -863,7 +873,9 @@ def test_a_cancelled_caller_with_a_dead_guest_still_poisons(tmp_path: Path) -> N
     def http_get(url: str, timeout: float) -> int:
         raise requests.ConnectTimeout("guest gone")
 
-    worker = _HeldWorker(_sealed_read_timeout(), _score(tmp_path), http_get=http_get)
+    worker = _HeldWorker(
+        _sealed_read_timeout(), _score(tmp_path), http_get=http_get, clock=_FakeClock()
+    )
     session, rows = _cancel_after_dispatch(tmp_path, worker)
 
     row = next(payload for kind, payload in rows if kind == "command")
