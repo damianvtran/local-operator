@@ -102,3 +102,55 @@ def test_amain_wires_the_daemon_into_the_display_settings_follower() -> None:
         "running relay keeps the display value from its first read until a "
         "restart, which is the D1 defect the follower exists to fix."
     )
+
+
+def test_both_push_lane_paths_read_the_listing_count_of_the_daemons_own_table(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The 2026-11-14 defect's wiring: ``amain`` built the lane with no
+    ``unread_count``, so the worker fell back to the lifetime census ("47502
+    conversations need you"). Both construction paths — the lane built at start
+    and the late-tunnel factory — must hand the worker the reader of the SAME
+    table the daemon serves the badge from."""
+    from local_operator.mobile import push_transport
+
+    lanes: list[object] = []
+
+    class FakeLane:
+        def __init__(self, unread_count: object) -> None:
+            self.unread_count = unread_count
+            self.transport = type("T", (), {"computer": "computer-handle"})()
+
+    def build(config_dir: object, *, unread_count: object = None) -> FakeLane:
+        lane = FakeLane(unread_count)
+        lanes.append(lane)
+        return lane
+
+    captured: dict[str, object] = {}
+
+    class Stop(Exception):
+        pass
+
+    def daemon(**kwargs: object) -> None:
+        captured.update(kwargs)
+        raise Stop
+
+    monkeypatch.setattr(service, "load_password", lambda: "pw123")
+    monkeypatch.setattr(push_transport, "build_push_lane", build)
+    monkeypatch.setattr(service, "MobileDaemon", daemon)
+    monkeypatch.delenv("LO_MOBILE_NO_DIAL", raising=False)
+
+    with pytest.raises(Stop):
+        asyncio.run(service.amain())
+
+    table = captured["table"]
+    assert isinstance(table, service.SessionTable)
+    start = captured["push_lane"]
+    assert isinstance(start, FakeLane)
+    assert start.unread_count == table.listing_unread_count
+    factory = captured["push_lane_factory"]
+    assert callable(factory)
+    late = factory()
+    assert isinstance(late, FakeLane)
+    assert late.unread_count == table.listing_unread_count
+    assert len(lanes) == 2

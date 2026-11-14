@@ -280,14 +280,22 @@ def test_selected_push_stem_follows_the_selection() -> None:
 
 
 @pytest.fixture
-def worker_harness() -> Any:
+def worker_harness(monkeypatch: pytest.MonkeyPatch) -> Any:
     """The push-worker suite's own harness, rooted at the isolated config dir.
 
     Rooted there (not at ``tmp_path``) because the custom store and the device
     registry both read ``config_dir()``; the harness's ``config_dir`` is the
     worker's, so the three agree.
+
+    The suite-wide notification kill switch is cleared, as in
+    ``test_push_worker``: the worker now asks the desktop banner's own
+    ``notifications_enabled()`` (gating parity), and with the switch on no
+    completion would push. The transport is the harness's in-memory plane, so
+    nothing reaches a real desktop.
     """
     from tests.unit.mobile.test_push_worker import Harness
+
+    monkeypatch.delenv("LOCAL_OPERATOR_NO_NOTIFICATIONS", raising=False)
 
     root = config_dir()
     root.mkdir(parents=True, exist_ok=True)

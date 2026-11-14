@@ -259,19 +259,42 @@ def count_phrase(count: int) -> str:
     return _t(_k.attention_count(total=count, count=str(count)))
 
 
-def completion_alert(kind: str, count: int) -> dict[str, str]:
+def wire_count(count: int | None) -> int:
+    """The ``count`` field's value for a count the machine may not know.
+
+    ``None`` is the listing's DEGRADED read (``SessionTable.unread_snapshot``
+    with no ``count``): the machine could not read its unread number. The wire
+    field still has to be a non-negative integer — agent-server refuses an emit
+    without one (``internal/sessionpush/wire.go``, ``non_negative_int``) — and no
+    client reads it as a fact: the app takes its badge from the daemon (ADR
+    §1.5) and its payload parser reads only ``conversation``/``computer``
+    (local-operator-mobile ``src/notifications/payload.ts``). So an unknown count
+    travels as ``0`` and the ALERT, the one place a human reads the number, makes
+    no count claim at all (:func:`completion_alert`, :func:`digest_alert`).
+    """
+    return 0 if count is None else count
+
+
+def completion_alert(kind: str, count: int | None) -> dict[str, str]:
     """The alert for one completion: the product name, then the outcome + count.
 
     An unknown kind falls back to ``BODY_COMPLETE`` exactly as the composer's own
     ``BODIES.get(kind, BODY_COMPLETE)`` does — one default, and the same one the
     local banner takes, so a push and a toast never disagree about an outcome the
     vocabulary does not carry.
+
+    ``count is None`` (the listing could not be read) drops the count term and
+    the body is the outcome alone ("Task complete"): no number is better than a
+    wrong one, and the 2026-11-14 "47502 conversations need you" banner is what
+    a wrong one looks like.
     """
     body = BODIES.get(kind, _notify.BODY_COMPLETE)
+    if count is None:
+        return {ALERT_TITLE_FIELD: APP_NAME, ALERT_BODY_FIELD: body}
     return {ALERT_TITLE_FIELD: APP_NAME, ALERT_BODY_FIELD: f"{body} · {count_phrase(count)}"}
 
 
-def digest_alert(kinds: Sequence[str], count: int) -> dict[str, str]:
+def digest_alert(kinds: Sequence[str], count: int | None) -> dict[str, str]:
     """The alert for a coalesced catch-up: the SET's honest state, then the count.
 
     The leading phrase is ``digest_subtitle``'s answer, not a fixed "Task
@@ -287,8 +310,18 @@ def digest_alert(kinds: Sequence[str], count: int) -> dict[str, str]:
     sentence becomes the count alone ("5 conversations need you"), which is true
     of any batch. Falling back to ``BODY_COMPLETE`` — what this did first — is
     exactly the claim the digest vocabulary exists to refuse.
+
+    ``count is None`` (the listing could not be read) drops the count term, as
+    on the completion form, so the body is the set's state alone. When there is
+    no state either, the sentence falls back to the BATCH's own size — every
+    member of a digest is a conversation that needs the reader, so
+    ``max(1, len(kinds))`` is a lower bound that is true of the set, where the
+    machine's unread number is the one thing this alert cannot know.
     """
     state = digest_subtitle(kinds)
+    if count is None:
+        body = state or count_phrase(max(1, len(kinds)))
+        return {ALERT_TITLE_FIELD: APP_NAME, ALERT_BODY_FIELD: body}
     body = f"{state} · {count_phrase(count)}" if state else count_phrase(count)
     return {ALERT_TITLE_FIELD: APP_NAME, ALERT_BODY_FIELD: body}
 
@@ -359,7 +392,7 @@ def completion_payload(
     completion_token: str,
     kind: str,
     emit_id: str,
-    count: int,
+    count: int | None,
     sound: str,
     sound_custom: str | None = None,
 ) -> dict[str, Any]:
@@ -394,7 +427,7 @@ def completion_payload(
         "completion_token": completion_token,
         "kind": kind,
         "emit_id": emit_id,
-        "count": count,
+        "count": wire_count(count),
         ALERT_FIELD: completion_alert(kind, count),
         SOUND_FIELD: sound,
     }
@@ -406,7 +439,7 @@ def completion_payload(
 def attention_payload(
     *,
     computer: str,
-    count: int,
+    count: int | None,
     emit_id: str,
     exclude: Sequence[str] | None = None,
 ) -> dict[str, Any]:
@@ -427,7 +460,7 @@ def attention_payload(
         "v": PAYLOAD_VERSION,
         "type": TYPE_ATTENTION,
         "computer": computer,
-        "count": count,
+        "count": wire_count(count),
         "emit_id": emit_id,
     }
     if exclude is not None:
@@ -438,7 +471,7 @@ def attention_payload(
 def digest_payload(
     *,
     computer: str,
-    count: int,
+    count: int | None,
     emit_id: str,
     kinds: Sequence[str],
     sound: str,
@@ -472,7 +505,7 @@ def digest_payload(
         "v": PAYLOAD_VERSION,
         "type": TYPE_DIGEST,
         "computer": computer,
-        "count": count,
+        "count": wire_count(count),
         "emit_id": emit_id,
         ALERT_FIELD: digest_alert(kinds, count),
         SOUND_FIELD: _checked_sound(sound),

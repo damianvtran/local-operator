@@ -1479,6 +1479,36 @@ class SessionTable:
             return {"degraded": [DECORATION_ATTENTION]}
         return snapshot
 
+    def listing_unread_count(self) -> int | None:
+        """The listing's unread count for the push lane, or ``None`` when unknown.
+
+        THE BADGE'S NUMBER, read from the same snapshot :meth:`unread_block`
+        serves, so a push banner's "N conversations need you" equals the phone's
+        badge (ADR 0006 §1.4/§3.2). The lane used to fall back to the worker's
+        store census instead, and on 2026-11-14 the operator's first real push
+        read "Task complete · 47502 conversations need you" — lifetime history,
+        not his handful of unread conversations.
+
+        ``None`` is the degraded shape (``count`` absent: a failed read, or no
+        build yet). The census is deliberately NOT the fallback — it is the
+        defect — and neither is 0, which this module already refuses to claim
+        for a store it could not read; the payload drops the count term instead
+        (``push_payload.wire_count``).
+
+        THREADING: the push worker calls this from its ``to_thread`` pass, off
+        the loop. It is a plain attribute read and nothing else: the snapshot is
+        published by ONE reference assignment in :meth:`summaries` and never
+        mutated afterwards, so a worker thread sees either the old dict or the
+        new one, whole. No lock, no I/O and no loop hop — keeping it fresh is the
+        scan's job (``MobileDaemon._refresh_push_count``), on the loop, before
+        the worker's pass starts.
+        """
+        snapshot = self.unread_snapshot()
+        count = snapshot.get("count")
+        if snapshot.get("degraded") or not isinstance(count, int) or isinstance(count, bool):
+            return None
+        return count
+
     def unread_block(self) -> dict[str, Any]:
         """The list payload's ``unread`` block: the aggregate minus its rows.
 
@@ -4328,10 +4358,15 @@ class MobileDaemon:
         push_worker: PushWorker | None = None,
         push_lane: PushLane | None = None,
         push_lane_factory: Callable[[], PushLane | None] | None = None,
+        table: SessionTable | None = None,
     ) -> None:
         self.port = port
         self.password = password
-        self.table = SessionTable()
+        # Injectable because the push lane is built BEFORE the daemon (service
+        # ``amain``) and needs this table's ``listing_unread_count`` at
+        # construction: the service makes the table, hands its reader to the
+        # lane and the table itself here, so both read one snapshot.
+        self.table = table if table is not None else SessionTable()
         #: Subscribers to ``/api/config/events`` (wave-5 slice D, the relay's
         #: half of the settings doorbell): one queue per open SSE response.
         #: Doorbell-style — a watcher listener hands the change over, the
@@ -4370,6 +4405,9 @@ class MobileDaemon:
         # tunnel config from the scan.
         self._push_lane_factory = push_lane_factory
         self._push_lane_tried_at: float | None = None
+        #: The attention revision the push count's listing snapshot was last
+        #: rebuilt at (``_refresh_push_count``); ``None`` forces the first one.
+        self._push_count_revision: Any = None
         # Stamp the build THIS process loaded, before any lazy import can meet a
         # replaced tree: every later comparison in ``_log_import_failure`` is
         # against this value.
@@ -5212,6 +5250,7 @@ class MobileDaemon:
         await self._maybe_arm_push_lane()
         push_worker = self.push_worker
         if push_worker is not None:
+            await self._refresh_push_count(revision)
             try:
                 # BOUNDED (review round 1, m3). The transport is required to
                 # bound its own call — that is stated where the Protocol is — and
@@ -5242,6 +5281,34 @@ class MobileDaemon:
                 )
             except Exception:  # noqa: BLE001 — a push fault must not cost the tick
                 logger.warning("push heartbeat failed", exc_info=True)
+
+    async def _refresh_push_count(self, revision: Any) -> None:
+        """Rebuild the listing snapshot the push count reads, when it can have moved.
+
+        The push worker's count is ``SessionTable.listing_unread_count``, a read
+        of the snapshot the LAST listing build published — and nothing builds
+        the listing while no phone is looking, which is exactly when pushes go
+        out. So the scan rebuilds it here, on the loop and before the worker's
+        off-loop pass, whenever the attention revision differs from the one the
+        snapshot was last built at (and once on the first armed scan). The
+        invariant: unread state is a function of the attention store, so a
+        snapshot built at the current revision is current for every emit this
+        pass composes — a deferred digest included — without a rebuild per
+        scan. The build is ``summaries()`` itself (its disk work is already off
+        the loop), never a second implementation of the count.
+
+        A failed build is logged and leaves the revision unrecorded, so the next
+        scan retries; the worker then reads whatever the table holds, and a
+        degraded snapshot drops the count term rather than inventing one.
+        """
+        if revision == self._push_count_revision:
+            return
+        try:
+            await self.table.summaries()
+        except Exception:  # noqa: BLE001 — a push fault must not cost the tick
+            logger.warning("push count refresh failed", exc_info=True)
+            return
+        self._push_count_revision = revision
 
     async def _maybe_arm_push_lane(self) -> None:
         """Build the push lane once a tunnel appears after start (late arming).

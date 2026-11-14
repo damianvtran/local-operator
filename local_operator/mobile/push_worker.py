@@ -86,6 +86,7 @@ import uuid
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Protocol
 
 from local_operator.config import read_config_values
@@ -386,7 +387,7 @@ class PushWorker:
         presence: Callable[[], bool] | None = None,
         live_devices: Callable[[], Sequence[str]] | None = None,
         report_block: Callable[[], Sequence[Mapping[str, Any]]] | None = None,
-        unread_count: Callable[[], int] | None = None,
+        unread_count: Callable[[], int | None] | None = None,
     ) -> None:
         """``computer`` is the opaque per-account handle §3.2 carries.
 
@@ -401,6 +402,16 @@ class PushWorker:
         than a yes/no, because S6 has a second question for the same read: which
         devices a correction would actually reach once §3.2's ``exclude`` has
         been subtracted (`[]` is "no device this machine may deliver to").
+
+        ``unread_count`` is the DAEMON'S LISTING count
+        (``SessionTable.listing_unread_count``) whenever a daemon composes this
+        worker — the lane passes it — so the push's number is the badge's number.
+        It answers ``None`` when the listing could not be read, and the alert
+        then makes no count claim (``push_payload.wire_count``). Leaving it
+        unset falls back to :meth:`_store_count`, which is for a daemon-less
+        caller ONLY: on 2026-11-14 the production lane left it unset and the
+        operator's first push read "Task complete · 47502 conversations need
+        you" — that census over a long-lived machine's lifetime history.
 
         ``report_block`` is the S4c coalescer's ``piggyback(CARRIER_EMIT)``. It
         is OPTIONAL and the body falls back to the bare §3.2 payload rather than
@@ -786,7 +797,56 @@ class PushWorker:
         is a property of the computer rather than of the row.
         """
         state = self.store.state(conversation)
-        return bool(state.get("unseen")) and bool(state.get("notify"))
+        if not (bool(state.get("unseen")) and bool(state.get("notify"))):
+            return False
+        return self._desktop_would_announce(conversation, state.get("kind"))
+
+    def _desktop_would_announce(self, conversation: str, kind: Any) -> bool:
+        """The desktop banner's OWN gates, asked of a pushed completion (parity).
+
+        WHY: the operator, 2026-11-14 — "only notify under the same circumstances
+        that the UI notifies … It seems to be now giving me notification spam on
+        every single completed task". The store's ``notify`` flag (gate 2 above)
+        already settles wake/monitor triggers, peer-only runs, ``no_reply`` quiet
+        ends and the proactive veto, but the desktop's completion banner
+        (``serving.SessionRuntime._announce_completion``) refuses three more
+        cases the push lane never asked about, and on a machine running dozens
+        of delegated agent sessions the second one is the spam:
+
+        1. ``notifications_enabled()`` False — the env kill switch or the
+           config flag (``tui/notify.py``);
+        2. ``_session_may_announce`` False — a session the operator's own
+           listings hide (subagent, exec worker, agent-opened run), judged by
+           ``resume.is_user_session`` on the transcript dir's ``origin.json``;
+        3. ``kind`` outside ``BRIDGE_NOTIFIABLE_KINDS`` (complete/error/retired).
+
+        Each is the SAME function or constant the desktop calls, never a
+        re-derivation, so the two surfaces cannot drift. The session handle the
+        desktop predicate takes is shaped here from ``<config>/sessions/<id>`` —
+        the layout ``mobile.daemon._durable_user_session_dir`` and the listing
+        address — and a conversation that is not a ``session/<id>`` identity has
+        no directory: ``_session_may_announce``'s own documented answer for that
+        is YES ("a question that cannot be put must not silence a banner"), so it
+        is followed here rather than invented. Runs on the worker's thread with
+        a config read and one small file read; nothing touches the loop.
+        """
+        from local_operator.server.utils.desktop_sessions import BRIDGE_NOTIFIABLE_KINDS
+        from local_operator.session.runtime.serving import _session_may_announce
+        from local_operator.tui.notify import notifications_enabled
+
+        if kind not in BRIDGE_NOTIFIABLE_KINDS:
+            return False
+        if not notifications_enabled():
+            return False
+        session_id = _session_id_of(conversation)
+        directory = (
+            self.config_dir / "sessions" / session_id
+            # The daemon's own traversal guard (``_durable_user_session_dir``).
+            if session_id not in (None, "", ".", "..") and Path(session_id).name == session_id
+            else None
+        )
+        handle = SimpleNamespace(transcript=SimpleNamespace(directory=directory))
+        return _session_may_announce(handle)
 
     def _add_completion(
         self,
@@ -1355,12 +1415,27 @@ class PushWorker:
             and bool(fact.get("credential_live"))
         ]
 
-    def _count(self) -> int:
-        """§3.2's ``count``: the machine's unread count at composition time."""
-        return max(0, int(self._unread_count()))
+    def _count(self) -> int | None:
+        """§3.2's ``count``: the machine's unread count at composition time.
+
+        ``None`` is "unknown" (a degraded listing), carried through to the
+        payload builders rather than coerced here: a coerced 0 would print
+        "0 conversations need you" on a banner announcing a completion.
+        """
+        value = self._unread_count()
+        if value is None:
+            return None
+        return max(0, int(value))
 
     def _store_count(self) -> int:
-        """The default unread count: a census over this machine's own store.
+        """The no-daemon fallback unread count: a census over this machine's own store.
+
+        NEVER THE PRODUCTION SOURCE. The census counts every conversation the
+        store has ever published a completion for and not acked — on a
+        long-lived machine that is lifetime history, and it is how the
+        2026-11-14 banner came to read "47502 conversations need you" when the
+        operator's real unread count was a handful. ``PushLane`` now passes the
+        listing count; this stays only so the worker runs with no daemon.
 
         INTERIM, and named as such: §1.4's badge population is the LISTING's rows
         in the listing's snapshot, and the daemon already has that implementation
