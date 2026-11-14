@@ -18306,6 +18306,10 @@ class Session:
           exclusions — the host's product is the final text);
         * ``LOP_NOTIFY=0``.
 
+        A session ANOTHER AGENT started keeps this door (its parked approvals
+        and asks are gate rows the operator must see) and loses only the
+        ``notify`` TOOL — :meth:`_notify_tool_callable`, review round 1 R1-2/Q1.
+
         The gate answers "is there an inbox the operator reads for this
         session" — reachability, not host identity (AGENTS.md footprint ladder).
         """
@@ -18318,6 +18322,63 @@ class Session:
         if not self._session_is_listed():
             return None
         return self._notify_inbox
+
+    def _notify_tool_callable(self) -> Callable[..., Awaitable[str]] | None:
+        """The door the ``notify`` TOOL is built on: the inbox door, minus agent-spawned sessions.
+
+        WHY A SEPARATE DOOR (review round 1, R1-2 / QA Q1): the agent-spawned
+        exclusion first sat in :meth:`_notify_inbox_callable`, which
+        :meth:`raise_gate_item` also uses — so a spawned workstream (and every
+        subagent under it) parked approvals and asks with no ``gate:`` row, and
+        the operator never saw them. The operator rule withholds only the
+        deliberate ``notify`` channel from agent-started sessions; asks must
+        still reach the inbox, so the gate path keeps the unfiltered door.
+        """
+        door = self._notify_inbox_callable()
+        if door is None or self._session_was_agent_spawned():
+            return None
+        return door
+
+    def _session_was_agent_spawned(self) -> bool:
+        """Whether ANOTHER AGENT started this session, so it reports to that agent.
+
+        OPERATOR RULE (2026-11-13): "child/reviewer/QA sessions never notify the
+        operator directly." A delegated child (``_job_id``) and a hidden run
+        were already gated above; two agent-started kinds were not, because they
+        are LISTED:
+
+        * a ``sessions spawn`` workstream (``origin.json`` =
+          ``resume.ORIGIN_AGENT_WORKSTREAM``, the spawn tool's default) — listed
+          so the operator can watch it, but its findings go back to the agent
+          that spawned it, which decides whether the operator needs an item;
+        * a session minted here at another device's request by an AGENT
+          (mesh stamp ``origin.kind == "agent"``, ``remote_attention.
+          AGENT_ORIGIN_KIND``) — the owner already refuses to forward its
+          items, so the tool would only fill an inbox nobody reads.
+
+        Withholding the tool (rather than a tool that refuses) is the delegated
+        child's own mechanism: the model is never offered a channel it may not
+        use, and ``hub``/its final text is how it reports. An unreadable marker
+        answers NO, the ``_session_is_listed`` direction.
+        """
+        directory = getattr(getattr(self, "transcript", None), "directory", None)
+        if not directory:
+            return False
+        try:
+            from local_operator.notifications.remote_attention import AGENT_ORIGIN_KIND
+            from local_operator.resume import ORIGIN_AGENT_WORKSTREAM, session_origin
+            from local_operator.session.placement import MESH_STAMP_NAME, MeshStamp
+
+            if session_origin(Path(directory)) == ORIGIN_AGENT_WORKSTREAM:
+                return True
+            stamp_file = Path(directory) / MESH_STAMP_NAME
+            if not stamp_file.is_file():
+                return False
+            stamp = MeshStamp.from_json(json.loads(stamp_file.read_text(encoding="utf-8")))
+            return bool(stamp and str(stamp.origin.get("kind") or "") == AGENT_ORIGIN_KIND)
+        except Exception:  # noqa: BLE001 — an unanswered question keeps the tool
+            logger.debug("notify: could not read the session's spawner", exc_info=True)
+            return False
 
     def _session_is_listed(self) -> bool:
         """Whether the operator's own listings show this session (``is_user_session``).
@@ -22703,8 +22764,9 @@ class Session:
             # THE INBOX DOOR (docs/design/notifications-inbox.md §3.2): the
             # whole availability fact of ``notify`` — ``None`` for delegated
             # children, hidden sessions, one-shot hosts, output-contract
-            # sessions and under the kill switch.
-            notify_inbox=self._notify_inbox_callable(),
+            # sessions and under the kill switch — and, for the TOOL only,
+            # sessions another agent started (``_notify_tool_callable``).
+            notify_inbox=self._notify_tool_callable(),
             # The channel-spend ingest seam. ACTIVE only where a session owns a
             # fold: tools build a frozen record and call it, and the session
             # folds, journals and publishes. A bound method (not a value) so the
