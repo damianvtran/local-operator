@@ -101,6 +101,14 @@ def sites_none() -> Msg:
     return Msg("browser.site_approval.sites_none", {})
 
 
+def sites_remedy_desktop() -> Msg:
+    return Msg("browser.site_approval.sites_remedy_desktop", {})
+
+
+def sites_remedy_node() -> Msg:
+    return Msg("browser.site_approval.sites_remedy_node", {})
+
+
 def sites_revoke_help() -> Msg:
     return Msg("browser.site_approval.sites_revoke_help", {})
 
@@ -127,14 +135,6 @@ def sites_revoked_denial(*, origin: str) -> Msg:
 
 def sites_still_broad(*, origin: str, grants: str) -> Msg:
     return Msg("browser.site_approval.sites_still_broad", {"origin": origin, "grants": grants})
-
-
-def sites_remedy_desktop() -> Msg:
-    return Msg("browser.site_approval.sites_remedy_desktop", {})
-
-
-def sites_remedy_node() -> Msg:
-    return Msg("browser.site_approval.sites_remedy_node", {})
 
 
 def sites_unreachable(*, detail: str, remedy: str) -> Msg:
