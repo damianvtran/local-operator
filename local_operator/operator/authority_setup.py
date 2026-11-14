@@ -134,6 +134,16 @@ _MESSAGES: dict[str, Callable[[], Msg]] = {
     OUTCOME_CHANGED_ELSEWHERE: _ws.outcome_changed_elsewhere,
 }
 
+#: Held as a key REFERENCE, like ``_MESSAGES``, because ``wire.operator_setup`` is a
+#: deferred namespace (not in the eager bundle): every caller renders the Msg
+#: in-process — the TUI through ``text()``, the desktop route as an envelope whose
+#: ``code`` is the machine token ``file_only`` and whose ``text`` is server-rendered
+#: — so no client ever resolves this key. The census in
+#: ``scripts/i18n/deferred_watch.py`` checks that shape (a bare key call handed on
+#: is its failure signal); these callers are recorded in
+#: ``local_operator/i18n/deferred_wire_inventory.json``.
+_FILE_ONLY_MESSAGE: Callable[[], Msg] = _ws.outcome_file_only
+
 _STATE_FILE = "authority-setup.json"
 _AUDIT_FILE = "authority-setup-audit.jsonl"
 _LOCK_FILE = "authority-setup.lock"
@@ -155,7 +165,7 @@ def outcome_message(outcome: str) -> Msg:
 
 def file_only_message() -> Msg:
     """U18's plain statement for a host whose approvals are not presence-gated."""
-    return _ws.outcome_file_only()
+    return _FILE_ONLY_MESSAGE()
 
 
 def _operator_dir(root: Path) -> Path:
