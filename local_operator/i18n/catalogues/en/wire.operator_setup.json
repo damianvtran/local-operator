@@ -1,0 +1,23 @@
+{
+  "wire.operator_setup.prompt.confirm_phone": "Local Operator needs your approval to confirm a phone on this computer.",
+  "wire.operator_setup.prompt.remove_phone": "Local Operator needs your approval to remove a phone from this computer.",
+  "wire.operator_setup.prompt.phone_approvals": "Local Operator needs your approval to turn on phone approvals on this computer.",
+  "wire.operator_setup.title.confirm_phone": "Confirm this phone on this computer",
+  "wire.operator_setup.title.remove_phone": "Remove this phone from this computer",
+  "wire.operator_setup.title.phone_approvals": "Turn on phone approvals",
+  "wire.operator_setup.body.phone_approvals": "Let phones approve requests on this computer.",
+  "wire.operator_setup.refused.privileged": "Local Operator is running with administrator rights, so it can't ask you in person. Nothing was changed. Restart Local Operator under your usual account, then try again.",
+  "wire.operator_setup.refused.no_password_prompt": "This computer can't show a password prompt, so approvals can't be turned on from here.",
+  "wire.operator_setup.refused.cannot_install": "This computer has no protected place for the approval key, so approvals can't be turned on from here.",
+  "wire.operator_setup.refused.in_progress": "Phone approvals setup is already running. Answer the password prompt, or wait for it to finish.",
+  "wire.operator_setup.refused.key_failed": "This computer couldn't create its approval key, so approvals weren't turned on. Try again.",
+  "wire.operator_setup.outcome.cancelled": "You cancelled the password prompt, so approvals weren't turned on. Try again when you're ready.",
+  "wire.operator_setup.outcome.failed": "The password prompt didn't finish, so approvals weren't turned on. Try again.",
+  "wire.operator_setup.outcome.not_verified": "The approval key was installed, but this computer can't use it yet, so approvals aren't on. Try again.",
+  "wire.operator_setup.outcome.on": "Phone approvals are on. Each new phone will still ask for your computer's password once.",
+  "wire.operator_setup.outcome.already_on": "Phone approvals are already on for this computer.",
+  "wire.operator_setup.outcome.file_only": "Approvals here won't ask for a fingerprint or password.",
+  "wire.operator_setup.tui.usage": "Use /mobile approvals on to let phones approve requests on this computer.",
+  "wire.operator_setup.tui.starting": "Turning on phone approvals…",
+  "wire.operator_setup.tui.anchor_clause": "; but phone approvals aren't turned on for this computer yet, so neither can run until they are. Turn them on in Settings → Phone access, or with /mobile approvals on in the terminal app"
+}

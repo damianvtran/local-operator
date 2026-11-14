@@ -135,3 +135,94 @@ async def test_mobile_enable_progress_and_busy_guard(monkeypatch):
             # Unpark the fake thread before app teardown, even when an
             # assertion above fails, so it can neither leak nor stall exit.
             release.set()
+
+
+@pytest.mark.asyncio
+async def test_mobile_approvals_on_runs_the_shared_gesture_setup(monkeypatch):
+    """`/mobile approvals on` (design v2 §6): the SAME setup_authority as the desktop,
+    with actor `tui` and terminal sudo allowed (the TUI owns a TTY), and the N5
+    success sentence; anything else after `approvals` prints the usage line."""
+    import asyncio
+
+    from local_operator.operator import authority_setup, elevate
+
+    seen: dict[str, object] = {}
+
+    def fake_setup(root, **kwargs):
+        seen.update(kwargs)
+        seen["runner_result"] = kwargs["runner"]([["sudo", "true"]])
+        return {"ok": True, "outcome": "on", "file_only": True}
+
+    monkeypatch.setattr(authority_setup, "setup_authority", fake_setup)
+    elevated: list[object] = []
+    monkeypatch.setattr(
+        elevate,
+        "run_elevated",
+        lambda command, **k: elevated.append(k) or elevate.ElevationResult(0),
+    )
+    monkeypatch.setattr("sys.platform", "darwin")  # a GUI prompt: no suspend needed
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    notices: list[str] = []
+
+    def notice(body: str, kind: NoticeKind = "info") -> None:
+        notices.append(body)
+
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        monkeypatch.setattr(app, "_system_notice", notice)
+        app._cmd_mobile("approvals", notice)
+        assert notices[-1] == (
+            "Use /mobile approvals on to let phones approve requests on this computer."
+        )
+        app._cmd_mobile("approvals on", notice)
+        for _ in range(50):
+            await pilot.pause(0.05)
+            if seen and not app._operator_setup_busy:
+                break
+        await asyncio.sleep(0)
+    assert seen["actor"] == "tui" and seen["terminal_sudo"] is True
+    assert elevated == [{"purpose": "phone_approvals", "terminal_sudo": True}]
+    joined = "\n".join(notices)
+    assert "Turning on phone approvals…" in joined
+    assert "Each new phone will still ask for your computer's password once." in joined
+    assert "Approvals here won't ask for a fingerprint or password." in joined
+
+
+@pytest.mark.asyncio
+async def test_mobile_approvals_on_linux_without_a_suspendable_terminal_refuses(monkeypatch):
+    """On Linux the prompt needs the real terminal (sudo/pkexec text agent), so it
+    runs under App.suspend(); a driver that cannot suspend gets U18's sentence and
+    no prompt is launched."""
+    from local_operator.operator import authority_setup, elevate
+
+    seen: dict[str, object] = {}
+
+    def fake_setup(root, **kwargs):
+        seen["result"] = kwargs["runner"]([["sudo", "true"]])
+        return {"ok": False, "outcome": "no_password_prompt"}
+
+    monkeypatch.setattr(authority_setup, "setup_authority", fake_setup)
+    launched: list[object] = []
+    monkeypatch.setattr(elevate, "run_elevated", lambda *a, **k: launched.append(a))
+    monkeypatch.setattr("sys.platform", "linux")
+    monkeypatch.setattr("local_operator.operator.trust._on_windows", lambda: False)
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    notices: list[str] = []
+
+    def notice(body: str, kind: NoticeKind = "info") -> None:
+        notices.append(body)
+
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        monkeypatch.setattr(app, "_system_notice", notice)
+        assert app._driver is not None and app._driver.can_suspend is False  # headless
+        app._cmd_mobile("approvals on", notice)
+        for _ in range(50):
+            await pilot.pause(0.05)
+            if seen and not app._operator_setup_busy:
+                break
+    assert launched == []
+    assert getattr(seen["result"], "refusal_code") == elevate.REFUSAL_NO_PASSWORD_PROMPT
+    assert notices[-1] == (
+        "This computer can't show a password prompt, so approvals can't be turned on from here."
+    )

@@ -39,7 +39,12 @@ from local_operator.supplements.contract import (
 #: checking ``notification_bulk_selection``; the relay's ``extra="ignore"`` query
 #: drops ``include_ask_reads`` and answers the same plain first page.
 DESKTOP_ONLY_FEATURES = frozenset(
-    {"notification_bulk_selection", "notification_bulk_ask_read", "profile_proposals"}
+    {
+        "notification_bulk_selection",
+        "notification_bulk_ask_read",
+        "profile_proposals",
+        "operator_setup",
+    }
 )
 
 
@@ -887,6 +892,13 @@ def static_feature_flags() -> dict[str, Any]:
         # retain health/sign-in behavior; only this key admits the new account-
         # pinned quote/run affordance, never an automatic poll-side mutation.
         "tunnel_setup": 1,
+        # Turning on phone approvals (operator authority) without a terminal
+        # (design v2 §6, C3): `GET/POST /v1/desktop/operator/setup`. Its own
+        # key so a renderer shows [Turn on phone approvals] only against a
+        # backend that has the gesture-only route; an older backend keeps the
+        # renderer's existing copy. Desktop-only (DESKTOP_ONLY_FEATURES): the
+        # phone relay serves no such route.
+        "operator_setup": 1,
         # THE MESH, and both keys gate AFFORDANCES rather than shapes.
         #
         # `peers` is the peer catalogue's key (mesh-session-mobility.md

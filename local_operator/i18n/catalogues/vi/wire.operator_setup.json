@@ -1,0 +1,23 @@
+{
+  "wire.operator_setup.prompt.confirm_phone": "Local Operator cần bạn chấp thuận để xác nhận một điện thoại trên máy tính này.",
+  "wire.operator_setup.prompt.remove_phone": "Local Operator cần bạn chấp thuận để gỡ một điện thoại khỏi máy tính này.",
+  "wire.operator_setup.prompt.phone_approvals": "Local Operator cần bạn chấp thuận để bật phê duyệt từ điện thoại trên máy tính này.",
+  "wire.operator_setup.title.confirm_phone": "Xác nhận điện thoại này trên máy tính này",
+  "wire.operator_setup.title.remove_phone": "Gỡ điện thoại này khỏi máy tính này",
+  "wire.operator_setup.title.phone_approvals": "Bật phê duyệt từ điện thoại",
+  "wire.operator_setup.body.phone_approvals": "Cho phép điện thoại phê duyệt yêu cầu trên máy tính này.",
+  "wire.operator_setup.refused.privileged": "Local Operator đang chạy với quyền quản trị viên nên không thể trực tiếp hỏi bạn. Chưa có gì thay đổi. Hãy khởi động lại Local Operator bằng tài khoản thường dùng của bạn rồi thử lại.",
+  "wire.operator_setup.refused.no_password_prompt": "Máy tính này không thể hiển thị lời nhắc nhập mật khẩu, nên không thể bật phê duyệt từ đây.",
+  "wire.operator_setup.refused.cannot_install": "Máy tính này không có chỗ được bảo vệ để lưu khóa phê duyệt, nên không thể bật phê duyệt từ đây.",
+  "wire.operator_setup.refused.in_progress": "Quá trình bật phê duyệt từ điện thoại đang chạy. Hãy trả lời lời nhắc nhập mật khẩu hoặc chờ nó hoàn tất.",
+  "wire.operator_setup.refused.key_failed": "Máy tính này không tạo được khóa phê duyệt nên phê duyệt chưa được bật. Hãy thử lại.",
+  "wire.operator_setup.outcome.cancelled": "Bạn đã hủy lời nhắc nhập mật khẩu nên phê duyệt chưa được bật. Hãy thử lại khi bạn sẵn sàng.",
+  "wire.operator_setup.outcome.failed": "Lời nhắc nhập mật khẩu chưa hoàn tất nên phê duyệt chưa được bật. Hãy thử lại.",
+  "wire.operator_setup.outcome.not_verified": "Khóa phê duyệt đã được cài, nhưng máy tính này chưa dùng được nó nên phê duyệt chưa bật. Hãy thử lại.",
+  "wire.operator_setup.outcome.on": "Đã bật phê duyệt từ điện thoại. Mỗi điện thoại mới vẫn sẽ hỏi mật khẩu máy tính của bạn một lần.",
+  "wire.operator_setup.outcome.already_on": "Phê duyệt từ điện thoại đã được bật trên máy tính này.",
+  "wire.operator_setup.outcome.file_only": "Ở đây, phê duyệt sẽ không hỏi vân tay hay mật khẩu.",
+  "wire.operator_setup.tui.usage": "Dùng /mobile approvals on để cho phép điện thoại phê duyệt yêu cầu trên máy tính này.",
+  "wire.operator_setup.tui.starting": "Đang bật phê duyệt từ điện thoại…",
+  "wire.operator_setup.tui.anchor_clause": "; nhưng phê duyệt từ điện thoại chưa được bật trên máy tính này, nên cả hai cách đều không chạy được cho đến khi bật. Hãy bật trong Cài đặt → Truy cập từ điện thoại, hoặc bằng /mobile approvals on trong ứng dụng terminal"
+}

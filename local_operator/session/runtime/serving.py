@@ -11392,11 +11392,15 @@ class ServingSessionHandle(SessionHandle):
 
         if not operator_authority_unusable():
             return ""
-        return (
-            "; but operator authority is not installed on this machine yet: neither can run "
-            "until it is set up here — ask Local Operator to set up operator authority for "
-            "you (one approval and one admin password prompt)"
-        )
+        # U17 (design v2 A2): the remedy names where a person turns approvals on —
+        # Settings → Phone access in the desktop app, `/mobile approvals on` in the
+        # terminal app — instead of "ask Local Operator to set up operator
+        # authority", which sent a non-technical user to a terminal-only verb.
+        # Keyed, and ONE key for both mirrors so they cannot drift apart.
+        from local_operator.i18n.keys import wire_operator_setup as _ws
+        from local_operator.i18n.text import tr
+
+        return tr("wire.operator_setup")(_ws.tui_anchor_clause())
 
     def _approvals_slash(
         self,
