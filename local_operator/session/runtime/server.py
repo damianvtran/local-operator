@@ -387,6 +387,14 @@ def document_blocks(
     return out
 
 
+#: How much of a bind failure's exception text (head of the message, tail of
+#: the traceback) is scrubbed for secrets before the final clips (400 / 4000
+#: characters). The scrub runs on the runtime's event loop and is linear in its
+#: input: measured in review round 1 of PR #3873, a 1 MB message held the loop
+#: ~0.2 s and the traceback pass about doubled it. 16 KiB is 40x the message
+#: clip and 4x the traceback clip, so nothing that could be kept is cut first.
+_BIND_FAILURE_SCRUB_WINDOW = 16 * 1024
+
 #: A prompt payload past 1 MB is a bug, not a prompt — the line limit the
 #: control socket reader enforces.
 _MAX_LINE_BYTES = 1 << 20
@@ -5037,10 +5045,105 @@ class RuntimeServer:
         Best-effort: a failure to announce must never stop the drop that
         follows, and the send path drops the client itself when the write fails.
         """
+        # EVERYTHING HERE IS GUARDED (review M1 / QA Q1): the caller drops the
+        # connection only after this returns, so a raise from rendering the
+        # exception (a broken ``__str__``) or from the scrub would skip that
+        # drop and leave the viewer on a dead, still-registered connection
+        # until its 15 s sync timeout. Each step degrades instead of raising.
+        message = self._bind_failure_message(exc)
+        # REMOTE COORDINATORS WERE BLIND HERE (2026-11-12): the viewer dropped
+        # this message and the traceback went only to the shared rotating
+        # runtime.log, gone within minutes. The client now surfaces the message;
+        # this keeps a durable per-session record on the owner as well. Written
+        # before the announce so it exists even when the socket write fails.
+        # ``_record_bind_failure`` never raises.
+        self._record_bind_failure(conn, exc, message)
         try:
-            await self._send_to(conn, {"op": "bind_failed", "message": str(exc)[:400]})
+            await self._send_to(conn, {"op": "bind_failed", "message": message})
         except Exception:  # noqa: BLE001 — announcing is best-effort
             logger.debug("bind-failure announcement write failed", exc_info=True)
+
+    def _bind_failure_message(self, exc: BaseException) -> str:
+        """The redacted, clipped message a bind failure is announced with. Never raises.
+
+        ``str(exc)`` can itself raise (an exception with bad args or a broken
+        override); the type name then stands in, which still tells the viewer
+        more than nothing. Should the scrub fail, the type name is sent too,
+        never the unscrubbed text.
+        """
+        try:
+            text = str(exc)
+        except Exception:  # noqa: BLE001 — an unprintable exception still gets named
+            logger.debug("bind-failure exception text unavailable", exc_info=True)
+            return type(exc).__name__
+        try:
+            # Pre-clipped HEAD first (review m1): the scrub is linear in its
+            # input and runs on the event loop — 1 MB held it ~0.2 s. Only the
+            # first 400 characters survive the final clip anyway.
+            return self._redacted_bind_failure_text(text[:_BIND_FAILURE_SCRUB_WINDOW])[:400]
+        except Exception:  # noqa: BLE001 — fall back to a name, never to raw text
+            logger.debug("bind-failure message scrub failed", exc_info=True)
+            return type(exc).__name__
+
+    def _redacted_bind_failure_text(self, text: str) -> str:
+        """``text`` with known secret values and credential shapes masked.
+
+        The exception text LEAVES THIS PROCESS (to a viewer, possibly on another
+        device) and lands on disk, so it gets the same side-effect-free passes
+        ``supplements._metadata_text`` uses: the runtime's retrieved-secret
+        ledger, then the shape scrubber. Not the session's tool-result redactor,
+        which also writes report rows into the transcript.
+        """
+        import sys
+
+        from local_operator.redaction_shapes import scrub_shapes
+
+        safe = text
+        runtime = sys.modules.get("local_operator.secrets.runtime")
+        if runtime is not None:
+            try:
+                safe = runtime.scrub(safe)
+            except Exception:  # noqa: BLE001 — the shape pass below still runs
+                logger.debug("bind-failure secret scrub failed", exc_info=True)
+        return scrub_shapes(safe)
+
+    def _record_bind_failure(self, conn: _ClientConn, exc: BaseException, message: str) -> None:
+        """Persist this bind failure beside ``runtime-exit.json`` (best-effort)."""
+        try:
+            import traceback
+            from pathlib import Path
+
+            from local_operator.session.runtime import journal
+
+            session = getattr(self._handle, "_session", None)
+            directory = getattr(getattr(session, "_transcript", None), "directory", None)
+            if directory is None:
+                return
+            from local_operator.ansi import sanitize_prompt_line
+
+            try:
+                tb = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
+                # The TAIL is what the record keeps (the raising frame and the
+                # exception line), so pre-clip to it before the on-loop scrub
+                # (review m1), as the message pre-clips its head.
+                tb = self._redacted_bind_failure_text(tb[-_BIND_FAILURE_SCRUB_WINDOW:])
+            except Exception:  # noqa: BLE001 — keep the row; the traceback is a bonus
+                logger.debug("bind-failure traceback render failed", exc_info=True)
+                tb = ""
+            journal.record_bind_failure(
+                Path(directory),
+                session_id=str(getattr(session, "session_id", "") or ""),
+                exc_type=type(exc).__name__,
+                # One line, control sequences stripped (QA Q2): a future reader
+                # printing the record must not be repainted or line-forged by
+                # it. The traceback stays multi-line by nature; its reader
+                # must render it as a block.
+                message=sanitize_prompt_line(message, limit=400),
+                traceback_text=tb,
+                surface=str(getattr(conn, "surface", "") or ""),
+            )
+        except Exception:  # noqa: BLE001 — an instrument never breaks the drop
+            logger.debug("bind-failure record write failed", exc_info=True)
 
     def _release_when_landed(self, bind_task: asyncio.Task[Any]) -> None:
         """Release a bind's eventual subscription once nothing will receive it.
