@@ -59,7 +59,8 @@ into HIGH — a judge decision, never a pass. Rules only ADD restriction.
 ## Cleaning up what you made
 
 Deleting your own rig directories and worktrees works without asking, through
-three routes the checkpoint can verify. Everything CRITICAL is still refused.
+the routes below the checkpoint can verify; so does a finished worktree another
+session made. Everything CRITICAL is still refused.
 
 - **Creation ledger.** After every bash call the loop records the directories it
   created: `mkdir [-p]` (the topmost new component), `mktemp -d TEMPLATE`,
@@ -126,6 +127,28 @@ three routes the checkpoint can verify. Everything CRITICAL is still refused.
   (`~/repo/.worktrees/{a,b}` works); a relative `.worktrees/a`, or a path only
   in an option's description, names nothing (live ask a-1d54, 2026-11-11). Another session's
   worktree, a primary checkout, `$HOME` and the state root keep their ranking.
+- **A finished worktree another session made.** `git worktree remove --force`,
+  `rm -rf` of the exact tree, or a glob matching only such trees ranks LOW with
+  no judge call, plus a short warning listing the facts, when ALL hold: a
+  registered linked tree, clean (no tracked, untracked or ANY ignored entry —
+  a `.venv` or `node_modules` name proves nothing about its contents), not
+  locked, no live cwd; HEAD on a named branch that points at it; HEAD an
+  ancestor of the commit origin advertises for its default branch (read with
+  `git ls-remote --symref origin HEAD`, no fetch; your local
+  `origin/<default>` must equal it — run `git fetch` first if it is stale); no
+  open PR or MR (an unreadable forge fails); and no running owner, with the
+  creation ledger and session registry both readable. A parent directory
+  holding only such trees loses that objection and is ranked on its own data.
+  Not covered, by design: squash- or rebase-merged branches (no ancestry),
+  trees with ignored content, trees with no ledger creator row (pre-ledger),
+  detached HEADs — those go to the judge, or to an `ask` naming each exact path.
+- **Path-valued credential variables.** A credential-named variable whose whole
+  value is one absolute or `~/` path (`GOOGLE_APPLICATION_CREDENTIALS`) resolves
+  like that literal path, so `rm -f "$GOOGLE_APPLICATION_CREDENTIALS"` of an old
+  key file is ranked by where it lands (CRITICAL under a protected root). Every
+  refusal, judge brief, journal line and preview shows it as
+  `$NAME <credential path>`, never the path. Token values, URLs, relative words
+  and shell syntax keep the credential refusal: spell the path literally.
 - **In-place edits are writes, not deletes.** `sed -i` / `perl -i` rewrite a
   file's content and remove no path, so they rank like any write: CRITICAL on
   the state root, `config.yml`, `secrets/` and session evidence, LOW elsewhere
