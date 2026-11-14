@@ -92,5 +92,17 @@
   "mobile.setup.title_radient_unavailable": "Truy cập điện thoại đang chờ Radient",
   "mobile.setup.title_reconnecting": "Truy cập điện thoại đang kết nối lại",
   "mobile.setup.action_add_credit": "Nạp tín dụng trong bảng điều khiển Radient: {url}",
-  "mobile.setup.action_open_console": "Bật lại truy cập điện thoại trong bảng điều khiển Radient: {url}"
+  "mobile.setup.action_open_console": "Bật lại truy cập điện thoại trong bảng điều khiển Radient: {url}",
+  "mobile.setup.stopped_plain": "Truy cập điện thoại đang tắt trên máy tính này. Hãy bật lại bất cứ khi nào bạn muốn truy cập máy tính này từ điện thoại.",
+  "mobile.setup.owner_missing_plain": "Tài khoản Radient đã thiết lập truy cập điện thoại không còn đăng nhập trên máy tính này. Hãy đăng nhập bằng tài khoản đó để khôi phục truy cập điện thoại.",
+  "mobile.setup.login_plain": "Hãy đăng nhập Radient bằng tài khoản sở hữu truy cập điện thoại, rồi thử lại.",
+  "mobile.setup.choose_account_plain": "Chọn tài khoản Radient mà truy cập điện thoại sẽ dùng. Thiết lập không bao giờ chuyển một địa chỉ điện thoại hiện có sang tài khoản khác.",
+  "mobile.setup.account_plain": "Radient không thể xác nhận tài khoản và địa chỉ điện thoại. Hãy kiểm tra kết nối internet rồi thử lại; chưa có gì thay đổi.",
+  "mobile.setup.cloudflared_plain": "Truy cập điện thoại cần một ứng dụng hỗ trợ tên là cloudflared, nhưng ứng dụng này chưa được cài trên máy tính này. Hãy nhờ tác nhân của bạn cài đặt (tác nhân sẽ xin phê duyệt của bạn trước), rồi thử lại.",
+  "mobile.setup.mobile_bundle_plain": "Giao diện điện thoại chưa được chuẩn bị trên máy tính này. Hãy nhờ tác nhân của bạn chuẩn bị (tác nhân sẽ xin phê duyệt của bạn trước), rồi thử lại. Chưa có gì thay đổi.",
+  "mobile.setup.supervisor_plain": "Máy tính này chưa thể duy trì truy cập điện thoại chạy nền. Hãy nhờ tác nhân của bạn thiết lập một dịch vụ chạy nền cho việc này, rồi thử lại. Chưa có gì thay đổi.",
+  "mobile.setup.apply_plain": "Mọi thứ đã sẵn sàng. Hãy bật truy cập điện thoại để hoàn tất.",
+  "mobile.setup.verification_plain": "Kết nối chưa được xác nhận. Hãy kiểm tra lại sau giây lát; các bước đã hoàn tất vẫn được giữ.",
+  "mobile.setup.failed_plain": "Thiết lập truy cập điện thoại chưa hoàn tất. Hãy thử lại; các bước đã hoàn tất vẫn được giữ.",
+  "mobile.setup.complete_plain": "Mở địa chỉ ở trên trên điện thoại của bạn và đăng nhập bằng cùng tài khoản Radient."
 }

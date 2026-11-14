@@ -80,7 +80,7 @@ async def test_mobile_enable_progress_and_busy_guard(monkeypatch):
     release = threading.Event()
     seen = []
 
-    async def apply(selected=None, accepted=None, *, progress=None):
+    async def apply(selected=None, accepted=None, *, progress=None, resume_stopped=False):
         seen.append((selected, accepted))
         assert progress is not None
         progress("Synthetic reservation saved")
