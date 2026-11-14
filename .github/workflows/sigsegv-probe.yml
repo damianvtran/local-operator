@@ -1,0 +1,122 @@
+# PROBE, never merged: macOS signal-drain SIGSEGV discriminator.
+#
+# Question: does the SA_SIGINFO sender sensor (local_operator/siginfo.py) cause
+# the intermittent `Segmentation fault` / rc=-11 seen in
+# tests/e2e/test_signal_drain_e2e.py::test_sigkill_still_ends_a_runtime_that_refused_a_sigterm
+# on hosted macOS? Two arms run the SAME test N times, each in a FRESH pytest
+# process (the crash is process-lifetime state; a loop inside one process would
+# hide it):
+#   armed   - default environment (sensor on)
+#   unarmed - LOCAL_OPERATOR_SIGINFO_SENSOR=off (the switch on this base)
+# A failure rate that differs between arms is the answer; the result is the job
+# summary, so the job exits 0 even when iterations fail. It fails only if the
+# harness itself broke (zero iterations ran).
+#
+# Triggers: a push to probe/sigsegv that touches THIS file (the first push of the
+# branch counts) = one run of the 2-job matrix, so no dispatch is needed.
+# workflow_dispatch exists only as a re-run path. Install/checkout/python pins
+# mirror the tui-e2e job in full-suite.yml (checkout@v7, setup-python@v7 3.12 with
+# pip cache, `pip install -e ".[dev]"`, `env -u NO_COLOR TERM=xterm-256color
+# pytest ... -m e2e -n0`).
+name: sigsegv-probe
+
+on:
+  push:
+    branches: [probe/sigsegv]
+    paths: [.github/workflows/sigsegv-probe.yml]
+  workflow_dispatch:
+    inputs:
+      count:
+        description: "Iterations per arm"
+        default: "30"
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    name: probe (${{ matrix.arm }})
+    runs-on: macos-latest
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        arm: [armed, unarmed]
+    env:
+      COUNT: ${{ github.event.inputs.count || '30' }}
+      TEST: tests/e2e/test_signal_drain_e2e.py::test_sigkill_still_ends_a_runtime_that_refused_a_sigterm
+    steps:
+      - uses: actions/checkout@v7
+      - name: Set Up Python 3.12
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - name: Install Package
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+      - name: Loop the test, one fresh pytest process per iteration
+        shell: bash
+        run: |
+          set +e
+          mkdir -p "$RUNNER_TEMP/probe-logs" "$RUNNER_TEMP/probe-evidence"
+          if [ "${{ matrix.arm }}" = "unarmed" ]; then
+            export LOCAL_OPERATOR_SIGINFO_SENSOR=off
+          fi
+          echo "arm=${{ matrix.arm }} sensor_env=${LOCAL_OPERATOR_SIGINFO_SENSOR:-<unset>} count=$COUNT"
+          ran=0; pass=0; fail=0; failing=""
+          for i in $(seq 1 "$COUNT"); do
+            log="$RUNNER_TEMP/probe-logs/iter-$i.log"
+            # --basetemp is per iteration so the stall log's location
+            # (<basetemp>/<test>0/config/logs/runtime-stall-<pid>.log, see
+            # tests/e2e/signal_shutdown_diagnostics.py) is known and no
+            # later iteration's cleanup can prune it.
+            env -u NO_COLOR TERM=xterm-256color \
+              python -m pytest "$TEST" -m e2e -n0 -q -p no:cacheprovider \
+                --basetemp="$RUNNER_TEMP/probe-bt/$i" >"$log" 2>&1
+            rc=$?
+            ran=$((ran+1))
+            seg=no; rc11=no; norec=no
+            grep -q 'Segmentation fault' "$log" && seg=yes
+            grep -q 'rc=-11' "$log" && rc11=yes
+            grep -qi 'no refusal record' "$log" && norec=yes
+            echo "iter=$i rc=$rc segfault=$seg rc-11=$rc11 no_refusal_record=$norec"
+            if [ "$rc" -eq 0 ]; then
+              pass=$((pass+1)); rm -rf "$RUNNER_TEMP/probe-bt/$i"
+            else
+              fail=$((fail+1)); failing="$failing $i(rc=$rc,seg=$seg,rc11=$rc11,norec=$norec)"
+              mkdir -p "$RUNNER_TEMP/probe-evidence/$i"
+              cp "$log" "$RUNNER_TEMP/probe-evidence/$i/"
+              find "$RUNNER_TEMP/probe-bt/$i" -name 'runtime-stall-*.log' -exec cp {} "$RUNNER_TEMP/probe-evidence/$i/" \;
+              find "$RUNNER_TEMP/probe-bt/$i" -name 'signal-shutdown-*.json' -exec cp {} "$RUNNER_TEMP/probe-evidence/$i/" \;
+            fi
+          done
+          {
+            echo "### ${{ matrix.arm }}"
+            echo
+            echo "\`${{ matrix.arm }}: pass=$pass fail=$fail of $ran\`"
+            echo
+            echo "Failing iterations: ${failing:-none}"
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "${{ matrix.arm }}: pass=$pass fail=$fail of $ran"
+          # Experiment, not a gate: only a broken harness is an error.
+          [ "$ran" -gt 0 ] || exit 1
+          exit 0
+      - name: Collect macOS crash reports
+        if: always()
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/probe-evidence/crash-reports"
+          cp ~/Library/Logs/DiagnosticReports/*.ips "$RUNNER_TEMP/probe-evidence/crash-reports/" 2>/dev/null || true
+          # Test-run-relative artifacts the helper also stages in the checkout.
+          cp -R test-artifacts "$RUNNER_TEMP/probe-evidence/test-artifacts" 2>/dev/null || true
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: sigsegv-evidence-${{ matrix.arm }}
+          path: ${{ runner.temp }}/probe-evidence
+          if-no-files-found: ignore
+          retention-days: 14
