@@ -1013,7 +1013,15 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: junit-timings-e2e-${{ matrix.os }}-${{ matrix.shard }}
-          path: junit-e2e-${{ matrix.os }}-${{ matrix.shard }}.xml
+          # Signal cases run in this job, not `test`: jobs have separate working
+          # trees, so a unit-job allowlist cannot collect their shutdown witnesses.
+          # Preserve only diagnostic JSON, bounded stderr and the owned child's
+          # complete stall dump staged before pytest removes its temporary config.
+          path: |
+            junit-e2e-${{ matrix.os }}-${{ matrix.shard }}.xml
+            test-artifacts/process-proof/*.json
+            test-artifacts/signal-shutdown/*/runtime-stderr-*.stderr
+            test-artifacts/signal-shutdown/*/runtime-stall-*.log
           # 7 days, not 1: same post-hoc evidence rationale as the unit-shard
           # junit artifact (PR #2470: expired XML forced a full re-run).
           retention-days: 7

@@ -1,6 +1,12 @@
 {
+  "wire.sessions.approval_park_local": "park {address} if it is idle: ends its runtime to free memory and keeps its wakes and monitors armed; refused while it is working",
+  "wire.sessions.approval_park_self": "park this session after this turn: ends its runtime to free memory and keeps its wakes and monitors armed",
   "wire.sessions.approval_stop_local": "stop {address} if it is idle: releases the session lease and never signals; refused while it is working",
   "wire.sessions.approval_stop_peer": "stop {address} on {peer}: always refused on this build, nothing will be sent",
+  "wire.sessions.park_done": "parked \"{name}\" — {wakes, plural, one {# wake} other {# wakes}} and {monitors, plural, one {# monitor} other {# monitors}} stay armed; the supervisor reopens it when one fires",
+  "wire.sessions.park_self_refused_busy": "This session cannot park itself while a subagent, a background job or an open question is still pending, so nothing was scheduled. Park it once that work has finished.",
+  "wire.sessions.park_self_scheduled": "This session parks as soon as this turn ends: its runtime exits to free memory, and its {wakes, plural, one {# wake} other {# wakes}} and {monitors, plural, one {# monitor} other {# monitors}} stay armed. It reopens when one fires or a message arrives.",
+  "wire.sessions.stop_dormant_hint": "Stopping makes its wakes and monitors DORMANT until the session is reopened. To free memory and keep them armed, use op='park' instead.",
   "wire.sessions.stop_pending": "stop accepted by \"{name}\", but it had not exited after {seconds} s. No signal was sent — read the session list before retrying.",
   "wire.sessions.stop_refused_busy": "\"{name}\" is working right now (a turn, an approval, a subagent or a job), so nothing was stopped and no signal was sent. Try again once it is idle.",
   "wire.sessions.stop_refused_old_owner": "\"{name}\" runs an older build that cannot promise an idle-only stop, so nothing was stopped and no signal was sent. Retrying will not change that — ask the operator to stop it.",

@@ -16079,7 +16079,12 @@ class OperatorApp(App[None]):
         return bool(self._resume_pending_head)
 
     def _project_settled_rows(
-        self, history: list[Any], *, bound: int | None = None, start: int | None = None
+        self,
+        history: list[Any],
+        *,
+        bound: int | None = None,
+        start: int | None = None,
+        follow: bool = True,
     ) -> bool:
         from local_operator.tui.session_presentation import project_settled_rows
 
@@ -16190,6 +16195,7 @@ class OperatorApp(App[None]):
                 display_records=self._peer_display_records_for(history, bound=bound, start=start),
                 proof_history=proof_history,
                 proof_transcript=local_transcript,
+                follow=follow,
             )
             # The visible transcript, so the app's own registry is the right
             # owner: a row this repaints live is one `_retire_live_tool_cards`
@@ -62789,7 +62795,14 @@ class OperatorApp(App[None]):
             self._project_settled_rows(message.messages, bound=RESUME_RENDER_MESSAGES)
             view.follow_tail()
         else:
-            self._project_settled_rows(message.messages)
+            # A reconnect gap lands under whatever the reader is doing. Sample
+            # the anchor BEFORE projecting: a reader who scrolled back to read
+            # history keeps their place (the gap rows still mount below them),
+            # and a reader at the tail still follows the new rows down. An
+            # unconditional follow here yanked a scrolled-back reader to the
+            # newest message every time the owner socket reconnected.
+            following = self._transcript_view().is_following_tail
+            self._project_settled_rows(message.messages, follow=following)
 
     def on_context_usage_reported(self, message: ContextUsageReported) -> None:
         """Move the context reading AND the cost DURING a turn, not only at its end.

@@ -17334,10 +17334,10 @@ class SessionsParams(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    op: Literal["list", "info", "spawn", "resume", "stop", "peek", "move", "help"] = Field(
+    op: Literal["list", "info", "spawn", "resume", "stop", "park", "peek", "move", "help"] = Field(
         description=(
             "list; info; spawn (USER-requested work; listed by default); resume;"
-            " stop; peek; move; help (per-op reference)."
+            " stop; park (keeps wakes/monitors armed); peek; move; help (per-op reference)."
         )
     )
     session: str | None = Field(
@@ -17353,19 +17353,19 @@ class SessionsParams(BaseModel):
     pid: int | None = Field(default=None, description="info/stop: exact pid.")
     # --- mesh: another device's sessions (design §3C; PR B) ------------------
     # `peer` is the device an address resolves ON for info/peek/spawn/resume/
-    # stop, and the remote half's narrowing key on `list`; `scope` is the same
+    # stop, and the exclusive device selector on `list`; `scope` is the same
     # question for `list` alone (local rows beside remote ones, or either).
     # Both sit with the ADDRESSES because they modify addressing, not content.
     peer: str | None = Field(
         default=None,
         description=(
             "Remote (mesh): the device holding the session — a name or id; on `list`, "
-            "narrows remote rows to it."
+            "selects only that device's rows."
         ),
     )
     scope: Literal["all", "local", "remote"] = Field(
         default="all",
-        description="list: which homes to show — all (default), local, or remote.",
+        description="list: all (default), local, or remote; peer selects only its device.",
     )
     prompt: str | None = Field(
         default=None,
@@ -17478,6 +17478,10 @@ _SESSIONS_OP_FIELDS: dict[str, frozenset[str]] = {
         }
     ),
     "stop": frozenset({"op", "session", "target", "pid", "peer"}),
+    # ``park`` takes the stop's addresses, all OPTIONAL: no address parks the
+    # calling session once its turn ends (``_sessions_park``), which is why it
+    # is not in ``_SESSIONS_TARGET_OPS`` (that set REQUIRES an address).
+    "park": frozenset({"op", "session", "target", "pid", "peer"}),
     "peek": frozenset({"op", "session", "target", "pid", "query", "peer"}) | _SESSIONS_PEEK_FIELDS,
     # ``move`` comes after ``peek`` so the reference and the op list read
     # stop; peek; move; help, the order the enum text states.
@@ -17630,13 +17634,13 @@ _SESSIONS_OP_DOCS: dict[str, _SessionsOpDoc] = {
     "list": _SessionsOpDoc(
         summary="show what is running; `include_stored` widens the listing to"
         " stored (not running) sessions and `query` searches them. `peer`/`scope`"
-        " read the mesh: remote rows beside local ones by default, or one home"
-        " alone.",
+        " read the mesh: remote rows beside local ones by default; `peer` selects"
+        " only that remote device.",
         example="sessions(op='list', include_stored=True)",
         refusals=(
             "takes no address and no `prompt`/`name`; `query` reads THIS machine's"
             " store and is refused beside `peer`/`scope='remote'`; `include_stored`"
-            " widens only the local half and is refused beside `scope='remote'`.",
+            " widens only the local half and is refused beside `peer`/`scope='remote'`.",
         ),
     ),
     "info": _SessionsOpDoc(
@@ -17682,8 +17686,9 @@ _SESSIONS_OP_DOCS: dict[str, _SessionsOpDoc] = {
         summary="end an IDLE local session and release its lease. It never signals"
         " and never cuts work: a session that is working (a turn, an approval, a"
         " subagent or a job), or one due a wake inside the hold window, is refused"
-        " with the reason. With `peer`, always refused — an idle-only remote stop is"
-        " not on the wire yet.",
+        " with the reason. Its wakes and monitors go DORMANT until it is reopened —"
+        " to free memory and keep them armed, use `park`. With `peer`, always"
+        " refused — an idle-only remote stop is not on the wire yet.",
         example="sessions(op='stop', session='a1b2c3d4e5f6')",
         refusals=(
             "needs an address; a stored (not running) session is refused; the"
@@ -17691,6 +17696,20 @@ _SESSIONS_OP_DOCS: dict[str, _SessionsOpDoc] = {
             " refused; a remote (`peer`) target is always refused; an owner too old"
             " to promise an idle-only stop is refused; an owner that does not answer"
             " is refused rather than signalled.",
+        ),
+    ),
+    "park": _SessionsOpDoc(
+        summary="end an IDLE session's runtime to free its memory while its wakes and"
+        " monitors stay ARMED: the wake supervisor reopens it when one fires, and"
+        " checks its read-only monitors without reopening it until one changes. Same"
+        " idle-only rules as `stop` (never signals, never cuts work). With no address"
+        " it parks THIS session as soon as the current turn ends — refused while this"
+        " session has a subagent, a background job or an open ask.",
+        example="sessions(op='park')",
+        refusals=(
+            "a stored (not running) session is refused; a working or wake-due session"
+            " is refused; self-park is refused while a subagent, job or open ask is"
+            " live; a remote (`peer`) target is always refused.",
         ),
     ),
     "peek": _SessionsOpDoc(
@@ -18004,6 +18023,12 @@ def _sessions_validation_error(params: SessionsParams) -> str | None:
                 "`query` searches THIS device's store, so it cannot ride a "
                 "`peer`/remote listing — drop `query`, or list with `scope='local'`.",
             )
+        if "include_stored" in given and peer:
+            return _sessions_stray_field_refusal(
+                op,
+                "`peer` selects only that device's rows; `include_stored` widens THIS "
+                "device's listing — drop it, or drop `peer` for a local/all listing.",
+            )
         if "include_stored" in given and params.scope == "remote":
             return _sessions_stray_field_refusal(
                 op,
@@ -18157,6 +18182,12 @@ def _describe_sessions_approval(args: dict[str, Any], cwd: str) -> str:
             f"move to {destination} (now in {source}) — the session restarts there; "
             "with nothing attached, it stops and resumes there on the next engage"
         )
+    if op == "park":
+        if peer:
+            return _sessions_copy(_ws.approval_stop_peer(address=address, peer=peer))
+        if not any(str(args.get(key) or "").strip() for key in ("session", "target", "pid")):
+            return _sessions_copy(_ws.approval_park_self())
+        return _sessions_copy(_ws.approval_park_local(address=address))
     if op == "stop":
         if peer:
             # The remote form is refused unconditionally on this build, so the
@@ -18724,7 +18755,7 @@ async def _sessions_list(
     already in hand), each remote row keeps its ``locality``/``peer`` markers,
     and the merge is keyed by ``session_id`` with the LOCAL row winning — the
     CLI's own rule ("a row this device holds is named as such"). ``scope``
-    narrows to one home; ``peer`` narrows the remote half to one device. A relay
+    narrows to one home; ``peer`` selects only that remote device. A relay
     that cannot be asked DEGRADES rather than refuses — the rows that were
     readable plus ONE note saying why the rest were not — because an empty answer
     from a listing must never read as "asked, and nothing is held". A peer that
@@ -18739,8 +18770,12 @@ async def _sessions_list(
     from local_operator.info.collect import session_rows
     from local_operator.resume import peer_reason_words
 
-    scope = params.scope
     peer = str(params.peer or "").strip()
+    # An explicit device is an address, not just a filter on a federated
+    # listing. Otherwise local rows consume the shared limit before the
+    # requested device's rows, and a failed peer can look like local success.
+    # Keep unaddressed scope='all' federation/degradation unchanged.
+    scope = "remote" if peer else params.scope
 
     local_rows: list[dict[str, Any]] = []
     if scope in ("all", "local"):
@@ -18769,7 +18804,7 @@ async def _sessions_list(
         if early is not None:
             return early
         refusal = _mesh_refusal_sentence(payload)
-        if refusal and str(payload.get("code") or "") == "relay_unavailable":
+        if refusal and not peer and str(payload.get("code") or "") == "relay_unavailable":
             # THE DEGRADE: a relay that cannot be asked is a NOTE on what was
             # readable, never an empty remote half dressed as a result.
             notes.append(f"no remote rows: {refusal}")
@@ -19469,6 +19504,16 @@ async def _sessions_stop(
         _command="sessions tool",
         on_wait=waited.append,
     )
+    # SAY WHAT THE STOP COST, AND OFFER PARK. The 2026-11-12 field gap: an agent
+    # stopped idle sessions to free memory and only learned afterwards that 9
+    # prod-window wakes and customer-thread monitors had gone DORMANT. A stop
+    # still means dormant (that is the kill switch's contract), so the receipt
+    # names the dormant counts and the op that would have kept them armed.
+    if outcome.wakes_dormant or outcome.monitors_dormant:
+        waited.insert(
+            0,
+            _sessions_copy(_ws.stop_dormant_hint()),
+        )
     details: dict[str, Any] = {
         "op": "stop",
         "session_id": outcome.session_id,
@@ -19493,6 +19538,153 @@ async def _sessions_stop(
         "sessions",
         "\n".join([_sessions_receipt(outcome, control.DEFAULT_TIMEOUT_S), *waited]),
         details=details,
+    )
+
+
+def _self_park_busy(context: "ToolContext | None") -> bool:
+    """Whether THIS session holds work a park would orphan, apart from this turn.
+
+    The self-park precondition (operator request, 2026-11-12): only an idle
+    session may volunteer its memory back. The current turn is excluded by
+    construction — the park is deferred until it ends — so what remains is work
+    that OUTLIVES the turn: a running subagent or background job (both are rows
+    in the session's job manager, the same rows ``ServingSessionHandle.is_busy``
+    counts) and an open ask (an answer is owed to a live conversation). Fails
+    CLOSED: a manager or ask log that cannot be read counts as busy.
+    """
+    jobs = getattr(context, "jobs", None) if context is not None else None
+    if jobs is not None:
+        try:
+            if any(getattr(job, "status", None) == "running" for job in jobs.list()):
+                return True
+        except Exception:  # noqa: BLE001 — uncertainty keeps the runtime
+            return True
+    session_id = str(getattr(context, "session_id", "") or "")
+    if session_id:
+        from local_operator.asks import store as ask_store
+
+        try:
+            events = ask_store.read_events(ask_store.session_dir(config_dir(), session_id))
+            if ask_store.open_asks(ask_store.fold(events, ask_store.now_ms())):
+                return True
+        except Exception:  # noqa: BLE001
+            return True
+    return False
+
+
+async def _sessions_park(
+    tool_call_id: str, params: SessionsParams, context: "ToolContext | None" = None
+) -> ToolResult:
+    """Park a session: end its runtime, keep its wakes and monitors ARMED.
+
+    Two shapes. ADDRESSED (another session): the idle-only stop ladder via
+    ``control.park_session`` — same refusals as ``stop``, but the index stamp is
+    ``parked_at`` (not a hold), so the wake supervisor keeps firing its wakes
+    and checking its monitors. SELF (no address, or an address resolving to
+    this pid): the call runs INSIDE the turn it would end, so it cannot stop
+    synchronously — it hands the park to a detached helper
+    (``session.runtime.park_after_turn``) that issues the same idle-only park
+    once this turn has ended. The helper is a separate process because the
+    stamp must land AFTER the runtime exits, which this process cannot witness.
+    """
+    if str(params.peer or "").strip():
+        return _error(tool_call_id, "sessions", _sessions_copy(_ws.stop_remote_refused()))
+    from local_operator.session.runtime import control
+
+    addressed = any(
+        getattr(params, field) is not None and str(getattr(params, field)).strip()
+        for field in _SESSIONS_ADDRESS_FIELDS
+    )
+    record = None
+    if addressed:
+        target = await _sessions_target(params, context)
+        if target.candidates:
+            return _error(tool_call_id, "sessions", _sessions_candidates_text(target))
+        if target.record is None:
+            if target.session_id:
+                return _error(
+                    tool_call_id,
+                    "sessions",
+                    f"session {target.session_id!r} is not running — `park` ends a live "
+                    "run, and a stored conversation has none to end.",
+                )
+            return _error(tool_call_id, "sessions", target.error)
+        record = target.record
+    if record is None or record.pid == os.getpid():
+        return await _sessions_park_self(tool_call_id, context)
+
+    outcome = await control.park_session(
+        record, timeout_s=control.DEFAULT_TIMEOUT_S, _command="sessions tool park"
+    )
+    details: dict[str, Any] = {
+        "op": "park",
+        "session_id": outcome.session_id,
+        "name": outcome.name,
+        "pid": outcome.pid,
+        "method": outcome.method,
+        "parked": outcome.parked,
+        "wakes_armed": outcome.wakes_armed,
+        "monitors_armed": outcome.monitors_armed,
+    }
+    if outcome.reason:
+        details["reason"] = outcome.reason
+    if outcome.parked:
+        line = _sessions_copy(
+            _ws.park_done(
+                name=outcome.name,
+                wakes=outcome.wakes_armed,
+                monitors=outcome.monitors_armed,
+            )
+        )
+        return _text(tool_call_id, "sessions", line, details=details)
+    render = _error if outcome.method in ("refused", "busy", "draining") else _text
+    return render(
+        tool_call_id,
+        "sessions",
+        _sessions_receipt(outcome, control.DEFAULT_TIMEOUT_S),
+        details=details,
+    )
+
+
+async def _sessions_park_self(tool_call_id: str, context: "ToolContext | None") -> ToolResult:
+    """Schedule THIS session's park for the end of the current turn.
+
+    Refused (nothing scheduled) while work that outlives the turn is live —
+    see :func:`_self_park_busy`. Otherwise a detached helper is spawned; it
+    polls the idle-only park on this pid until the turn has ended (the owner's
+    ``stop_if_idle`` latch refuses while the turn runs, so the park can never
+    cut it), then exits. Counting armed wakes/monitors here is a preview for the
+    receipt; the helper's own stamp is the authority.
+    """
+    from local_operator.session.runtime import control, park_after_turn
+
+    session_id = str(getattr(context, "session_id", "") or "")
+    if not session_id:
+        return _error(
+            tool_call_id,
+            "sessions",
+            "this session has no id to park (a host without a published session)",
+        )
+    if _self_park_busy(context):
+        return _error(tool_call_id, "sessions", _sessions_copy(_ws.park_self_refused_busy()))
+    try:
+        helper_pid = park_after_turn.spawn(os.getpid(), session_id)
+    except OSError as exc:
+        return _error(tool_call_id, "sessions", f"could not schedule the park: {exc}")
+    wakes, monitors = control.armed_counts(config_dir(), session_id)
+    return _text(
+        tool_call_id,
+        "sessions",
+        _sessions_copy(_ws.park_self_scheduled(wakes=wakes, monitors=monitors)),
+        details={
+            "op": "park",
+            "self": True,
+            "session_id": session_id,
+            "pid": os.getpid(),
+            "helper_pid": helper_pid,
+            "wakes_armed": wakes,
+            "monitors_armed": monitors,
+        },
     )
 
 
@@ -20057,7 +20249,10 @@ def _mesh_create_argv(peer: str, params: SessionsParams) -> tuple[list[str], str
     """The ``--create`` spelling for a remote spawn; ``(argv, error)`` for the
     ``model`` split — ``<provider>/<model-id>``, the grammar ``send`` documents —
     because the CLI takes hosting and model as two flags."""
-    argv = ["network", "sessions", "--json", "--peer", peer, "--create"]
+    # ``--origin agent``: an agent asked for this session, so the owner never
+    # forwards its ``notify`` items to the operator (2026-11-13; the CLI's
+    # ``_create_origin`` and ``notifications/remote_attention``).
+    argv = ["network", "sessions", "--json", "--peer", peer, "--create", "--origin", "agent"]
     argv += ["--prompt", str(params.prompt or "")]
     name = str(params.name or "").strip()
     if name:
@@ -21307,6 +21502,8 @@ async def execute_sessions(
         return await _sessions_peek(tool_call_id, params, context)
     if params.op == "stop":
         return await _sessions_stop(tool_call_id, params, context)
+    if params.op == "park":
+        return await _sessions_park(tool_call_id, params, context)
     if params.op == "move":
         return await _sessions_move(tool_call_id, params, context)
     if params.op == "resume" and (params.paused or params.failed or params.all):

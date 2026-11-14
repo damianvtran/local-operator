@@ -15206,8 +15206,9 @@ class Session:
         1. ``hub_pull`` keeps its own ladder, untouched.
         2. A CLEAN LOCAL agent -- this run and every ancestor run read no
            untrusted input (:meth:`profile_lineage`) -- creates, updates or
-           reverts an account agent/team ITSELF: no owner text, no card. The
-           backup/revert receipt and the transaction audit record it. This
+           reverts an account agent/team, or creates/updates a managed skill,
+           ITSELF: no owner text, no card. The backup/revert receipt (a skill's
+           previous bytes in ``hub/backups``) and the audit record it. This
            holds for a row linked to an org hub too: this write changes the
            LOCAL account copy and never publishes, nor enables or grants any
            push. A link's EXISTING user-set ``auto_push`` may later publish
@@ -15234,9 +15235,13 @@ class Session:
             # can be granted by it.
             return await self._authorize_hub_pull(intent)
         run_ms = int(self._run_started_at * 1000)
+        # Skills are in this rung too (create/update only: the skill tool has
+        # no revert, and ``remove_paths`` is a ``delete`` that keeps its card).
+        # Its writes stay LOCAL like the agent/team rows: the skill tool never
+        # publishes, and a hub-linked skill's edit is an unpublished local change.
         if (
             intent.operation in {"create", "update", "revert"}
-            and intent.kind in {"agent", "team"}
+            and intent.kind in {"agent", "team", "skill"}
             and not self.profile_lineage()[1]
         ):
             # ``local-agent:`` (not ``owner-prompt:``) so the audit trail says
@@ -15262,7 +15267,18 @@ class Session:
             from local_operator import profile_proposals
             from local_operator.harness.types import ProposedProfileWrite
 
-            registry = self.agent_registry if intent.kind == "agent" else self.team_registry
+            # A skill proposal has no registry of its own: it lives in the same
+            # config root the agent/team ones do, the root ``profile_proposal``
+            # and ``decide_profile_proposal`` read (``agent or team`` registry).
+            registry = (
+                self.agent_registry
+                if intent.kind == "agent"
+                else (
+                    self.team_registry
+                    if intent.kind == "team"
+                    else self.agent_registry or self.team_registry
+                )
+            )
             if registry is None:
                 return None
             record = profile_proposals.file(
@@ -15293,7 +15309,10 @@ class Session:
                     profile_proposals.summary_line(item)
                     for item in profile_proposals.summarize_changes(
                         profile_proposals.changes(
-                            record.get("before"), record["after"], record.get("fields") or []
+                            record.get("before"),
+                            record["after"],
+                            record.get("fields") or [],
+                            record["kind"],
                         )
                     )
                 ),
@@ -15313,7 +15332,7 @@ class Session:
         # has no structured before/after, and counts parsed from its prose
         # summary mis-counted — PR #3777 R3-1), then — after a blank line —
         # the change content clipped to SAVE_DETAIL_MAX_CHARS: a direct save
-        # has no review page (skills have no proposal path), so the card is
+        # has no review page (e.g. a skill delete), so the card is
         # the only place the approver can read what they approve (R2-2).
         # Proposal cards stay 3 lines with structured counts.
         changed = profile_proposals.save_changes_line(
@@ -18306,6 +18325,10 @@ class Session:
           exclusions — the host's product is the final text);
         * ``LOP_NOTIFY=0``.
 
+        A session ANOTHER AGENT started keeps this door (its parked approvals
+        and asks are gate rows the operator must see) and loses only the
+        ``notify`` TOOL — :meth:`_notify_tool_callable`, review round 1 R1-2/Q1.
+
         The gate answers "is there an inbox the operator reads for this
         session" — reachability, not host identity (AGENTS.md footprint ladder).
         """
@@ -18318,6 +18341,63 @@ class Session:
         if not self._session_is_listed():
             return None
         return self._notify_inbox
+
+    def _notify_tool_callable(self) -> Callable[..., Awaitable[str]] | None:
+        """The door the ``notify`` TOOL is built on: the inbox door, minus agent-spawned sessions.
+
+        WHY A SEPARATE DOOR (review round 1, R1-2 / QA Q1): the agent-spawned
+        exclusion first sat in :meth:`_notify_inbox_callable`, which
+        :meth:`raise_gate_item` also uses — so a spawned workstream (and every
+        subagent under it) parked approvals and asks with no ``gate:`` row, and
+        the operator never saw them. The operator rule withholds only the
+        deliberate ``notify`` channel from agent-started sessions; asks must
+        still reach the inbox, so the gate path keeps the unfiltered door.
+        """
+        door = self._notify_inbox_callable()
+        if door is None or self._session_was_agent_spawned():
+            return None
+        return door
+
+    def _session_was_agent_spawned(self) -> bool:
+        """Whether ANOTHER AGENT started this session, so it reports to that agent.
+
+        OPERATOR RULE (2026-11-13): "child/reviewer/QA sessions never notify the
+        operator directly." A delegated child (``_job_id``) and a hidden run
+        were already gated above; two agent-started kinds were not, because they
+        are LISTED:
+
+        * a ``sessions spawn`` workstream (``origin.json`` =
+          ``resume.ORIGIN_AGENT_WORKSTREAM``, the spawn tool's default) — listed
+          so the operator can watch it, but its findings go back to the agent
+          that spawned it, which decides whether the operator needs an item;
+        * a session minted here at another device's request by an AGENT
+          (mesh stamp ``origin.kind == "agent"``, ``remote_attention.
+          AGENT_ORIGIN_KIND``) — the owner already refuses to forward its
+          items, so the tool would only fill an inbox nobody reads.
+
+        Withholding the tool (rather than a tool that refuses) is the delegated
+        child's own mechanism: the model is never offered a channel it may not
+        use, and ``hub``/its final text is how it reports. An unreadable marker
+        answers NO, the ``_session_is_listed`` direction.
+        """
+        directory = getattr(getattr(self, "transcript", None), "directory", None)
+        if not directory:
+            return False
+        try:
+            from local_operator.notifications.remote_attention import AGENT_ORIGIN_KIND
+            from local_operator.resume import ORIGIN_AGENT_WORKSTREAM, session_origin
+            from local_operator.session.placement import MESH_STAMP_NAME, MeshStamp
+
+            if session_origin(Path(directory)) == ORIGIN_AGENT_WORKSTREAM:
+                return True
+            stamp_file = Path(directory) / MESH_STAMP_NAME
+            if not stamp_file.is_file():
+                return False
+            stamp = MeshStamp.from_json(json.loads(stamp_file.read_text(encoding="utf-8")))
+            return bool(stamp and str(stamp.origin.get("kind") or "") == AGENT_ORIGIN_KIND)
+        except Exception:  # noqa: BLE001 — an unanswered question keeps the tool
+            logger.debug("notify: could not read the session's spawner", exc_info=True)
+            return False
 
     def _session_is_listed(self) -> bool:
         """Whether the operator's own listings show this session (``is_user_session``).
@@ -19348,31 +19428,51 @@ class Session:
 
             sync = subscription.sync
             try:
-                window = capture_window(
-                    self._transcript,
-                    conversation_id=sync.snapshot.session_id,
-                    owner_epoch=sync.epoch,
-                    through_id=sync.live_cursor,
-                    durable_seed_tools=frozenset(
+                capture_args: dict[str, Any] = {
+                    "conversation_id": sync.snapshot.session_id,
+                    "owner_epoch": sync.epoch,
+                    "through_id": sync.live_cursor,
+                    "durable_seed_tools": frozenset(
                         str(event.get("tool_call_id", ""))
                         for event in sync.snapshot.live_events
                         if event.get("type") == "tool_execution_end"
                     ),
-                )
-                window.durable_seed_ids = [
+                }
+                window = capture_window(self._transcript, **capture_args)
+                durable_seed_ids = [
                     str(event["message"]["id"])
                     for event in sync.snapshot.live_events
                     if isinstance(event.get("message"), dict)
                     and self._transcript.has_entry(str(event["message"].get("id", "")))
                 ]
+                window.durable_seed_ids = durable_seed_ids
                 sync.display_history = window
+                if window.status == "full_required":
+                    # THE PEER VIEWER'S PAGE FOR THE SAME CUT, captured here on
+                    # the loop that owns the transcript and only when the exact
+                    # page escalated (rare, and the cost of one more bounded
+                    # read). The runtime serves it to a non-local connection
+                    # instead of a ``full_required`` that viewer cannot act on;
+                    # see ``history_window.PEER_BOUNDED_MIN_MESSAGE_BYTES``.
+                    bounded = capture_window(
+                        self._transcript, **capture_args, bound_oversized=True
+                    ).model_copy(update={"durable_seed_ids": list(durable_seed_ids)})
+                    if bounded.status == "ok":
+                        sync._peer_display_history = bounded
             except BaseException:
                 subscription.unsubscribe()
                 raise
         return subscription
 
-    def history_page(self, before: str, anchor: str = ""):  # type: ignore[no-untyped-def]
-        """Authenticated reads reuse the resident replay at the signed sync cut."""
+    def history_page(  # type: ignore[no-untyped-def]
+        self, before: str, anchor: str = "", *, bound_oversized: bool = False
+    ):
+        """Authenticated reads reuse the resident replay at the signed sync cut.
+
+        ``bound_oversized`` is the runtime's answer for a NON-LOCAL viewer: an
+        older group too large for one page rides bounded and marked rather than
+        escalating to a local replay that viewer cannot perform.
+        """
         from local_operator.session.history_window import display_window
 
         state = self.frontend_state
@@ -19383,6 +19483,7 @@ class Session:
             through_id=state.history_cursor,
             before=before,
             anchor=anchor,
+            bound_oversized=bound_oversized,
         ).model_dump(mode="json")
 
     def refresh_frontend_state(self) -> None:
@@ -22682,8 +22783,9 @@ class Session:
             # THE INBOX DOOR (docs/design/notifications-inbox.md §3.2): the
             # whole availability fact of ``notify`` — ``None`` for delegated
             # children, hidden sessions, one-shot hosts, output-contract
-            # sessions and under the kill switch.
-            notify_inbox=self._notify_inbox_callable(),
+            # sessions and under the kill switch — and, for the TOOL only,
+            # sessions another agent started (``_notify_tool_callable``).
+            notify_inbox=self._notify_tool_callable(),
             # The channel-spend ingest seam. ACTIVE only where a session owns a
             # fold: tools build a frozen record and call it, and the session
             # folds, journals and publishes. A bound method (not a value) so the
@@ -31810,7 +31912,12 @@ class Session:
         precisely what the supervisor engages to achieve, so this is where
         "the wake machinery got this far" becomes observable."""
         self._write_wake_index_entry(
-            list(self._wake.schedules), clear=("stopped_at",), stamp="last_attempt_at"
+            # ``parked_at`` too: a park is over the moment a runtime exists
+            # again, and a stale stamp would mislabel a live session as parked
+            # (and make the parked-monitor sweep probe a session that is up).
+            list(self._wake.schedules),
+            clear=("stopped_at", "parked_at"),
+            stamp="last_attempt_at",
         )
 
     def _write_wake_index_entry(
@@ -31912,7 +32019,10 @@ class Session:
         EVERY open, which is the self-healing property for the derived file a
         cold reader (cleanup guard, picker, ``lop monitor status``) sees.
         """
-        self._write_monitor_index_entry(list(self._monitors.monitors), clear=("stopped_at",))
+        # ``parked_at`` is cleared for the same reason as on the wake entry.
+        self._write_monitor_index_entry(
+            list(self._monitors.monitors), clear=("stopped_at", "parked_at")
+        )
         self._prune_monitor_store()
 
     def _prune_monitor_store(self) -> None:

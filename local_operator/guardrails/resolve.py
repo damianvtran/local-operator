@@ -939,6 +939,12 @@ class Target:
     #: git-tracked (case 7, 2026-11-09: ``node scripts/i18n/ledger-assemble.mjs
     #: --receipt <auditor pad>/…json`` from a sibling lane).
     script: str | None = None
+    #: A ``touch`` handed to ``python -c CODE`` whose CODE is proven unable to
+    #: write, delete, rename or run anything (:func:`python_code_read_only`,
+    #: :meth:`_Walker._inline_read_only`). Like ``script``, it lets ``classify``
+    #: rank a read of a same-task-tree session's scratch LOW (incident
+    #: 2026-11-13); it never lowers a delete, a write or a stranger's pad.
+    read_only_code: bool = False
     #: The mention sits in a word the command names as an OUTPUT (``-o``,
     #: ``--out*``, ``--write*``, glued or as the next word): never a read.
     as_output: bool = False
@@ -1531,6 +1537,513 @@ _INTERPRETER_DELETE_RE = re.compile(
 )
 
 
+#: WHY AN ALLOW-LIST OVER THE WHOLE AST (review r1 M1 + r2 M3, PR #3918):
+#: two rounds of a DENY-list over Python's attribute graph each found a new
+#: route to ``getattr`` by a string — ``string.Formatter().get_field("0.unlink"
+#: …)``, ``pathlib.operator.methodcaller("unlink")``, then a generator's
+#: ``gi_frame.f_builtins["getattr"](p, "un"+"link")()`` — and every one deleted
+#: real files at LOW. The attribute graph is open-ended, so a deny-list can
+#: never be shown complete. :func:`python_code_read_only` therefore admits a
+#: program only when EVERY node type, module, name, attribute, keyword and
+#: subscript is on one of the lists below; anything not listed fails closed to
+#: the backstop's HIGH (a judge call, never a silent LOW). A read the lists do
+#: not cover costs a judge call — widen a list only with a reason here.
+#:
+#: Statement and expression node types, by ``type(node).__name__`` (so
+#: ``ast`` stays a lazy import). Deliberately absent: ``Lambda``,
+#: ``FunctionDef``/``ClassDef`` (a body can run on attribute access or
+#: decorate), ``Match`` (class patterns are ``getattr`` by string),
+#: ``NamedExpr``, ``With``, ``Try``, ``While``, ``Await``/``Yield``,
+#: ``Global``/``Nonlocal``, ``Starred``, ``Delete``, ``Pow`` and the
+#: bit operators (nothing a read needs). ``GeneratorExp`` stays: the incident
+#: itself joins one, and the M3 route was the generator's ``gi_frame``
+#: ATTRIBUTE, which the attribute allow-list never admits — without that a
+#: generator is just a lazy list comprehension.
+_PY_ALLOWED_NODES = frozenset(
+    {
+        # statements
+        "Module",
+        "Expr",
+        "Assign",
+        "AugAssign",
+        "For",
+        "If",
+        "Pass",
+        "Break",
+        "Continue",
+        "Import",
+        "ImportFrom",
+        "alias",
+        # expressions
+        "BoolOp",
+        "BinOp",
+        "UnaryOp",
+        "Compare",
+        "IfExp",
+        "Call",
+        "keyword",
+        "Attribute",
+        "Subscript",
+        "Slice",
+        "Name",
+        "Constant",
+        "List",
+        "Tuple",
+        "Dict",
+        "Set",
+        "JoinedStr",
+        "FormattedValue",
+        "ListComp",
+        "SetComp",
+        "DictComp",
+        "GeneratorExp",
+        "comprehension",
+        # contexts and operators (``Del`` and ``Pow``/bit ops are absent)
+        "Load",
+        "Store",
+        "And",
+        "Or",
+        "Add",
+        "Sub",
+        "Mult",
+        "Div",
+        "FloorDiv",
+        "Mod",
+        "USub",
+        "UAdd",
+        "Not",
+        "Eq",
+        "NotEq",
+        "Lt",
+        "LtE",
+        "Gt",
+        "GtE",
+        "In",
+        "NotIn",
+        "Is",
+        "IsNot",
+    }
+)
+#: Modules a read may import, by exact name (a dotted ``import json.tool``
+#: loads a CLI whose ``main()`` writes ``argv[2]``, so dotted names fail).
+#: The module object is harmless only because the attribute allow-list below
+#: limits what can be taken off it: no module-valued attribute is listed, so
+#: re-exports (``pathlib.os``, ``glob.operator``) are unreachable. ``string``,
+#: ``functools``, ``operator``, ``itertools`` (callable-taking helpers) and
+#: ``pprint`` (``pprint(obj, stream)`` writes to a positional stream) are out.
+_PY_READ_MODULES = frozenset(
+    {"pathlib", "json", "re", "glob", "fnmatch", "collections", "datetime"}
+)
+#: Builtins a read may name. None takes a callable it later calls through a
+#: positional argument, so a held callable can only run by a direct call the
+#: walk sees. ``open`` is admitted only as a callee with a literal read mode
+#: (:func:`_py_open_read_only`). Absent on purpose: ``getattr``/``exec``/
+#: ``eval``/``compile``/``__import__``/``vars``/``globals``/``type``,
+#: ``map``/``filter``/``iter``/``next`` (callables or protocol reach),
+#: ``isinstance`` (no read needs it), ``input``/``breakpoint``/``help``.
+_PY_ALLOWED_BUILTINS = frozenset(
+    {
+        "print",
+        "open",
+        "len",
+        "sorted",
+        "reversed",
+        "min",
+        "max",
+        "sum",
+        "any",
+        "all",
+        "enumerate",
+        "zip",
+        "range",
+        "str",
+        "int",
+        "float",
+        "bool",
+        "bytes",
+        "list",
+        "dict",
+        "set",
+        "tuple",
+        "repr",
+        "abs",
+        "round",
+    }
+)
+#: Every attribute name a read may use, on ANY object: the check is untyped,
+#: so each name must be harmless on every object reachable from the modules
+#: and builtins above. Notably absent: ``replace`` (``Path.replace`` RENAMES;
+#: untyped, so ``str.replace`` goes too), ``get`` (``b.get("getattr")`` once a
+#: dict of builtins is in hand), ``format``/``format_map`` (attribute walks by
+#: string), ``open``/``write*``/``unlink``/``rename``/``touch``/``mkdir``/
+#: ``chmod``/``copy``/``move``, every dunder, ``gi_frame``/``f_builtins``-
+#: style introspection, and any name that hands back a module able to act.
+#: Checked transitively on CPython 3.12 and 3.14: the only modules reachable
+#: through these names are the allowed ones plus ``glob.stat`` (the ``stat``
+#: module: constants and pure mode predicates). ``stat`` itself is there for
+#: ``Path.stat()`` (``os.stat``: metadata only). ``sub``/``subn`` are
+#: further limited in :func:`python_code_read_only` to a literal replacement.
+_PY_ALLOWED_ATTRS = frozenset(
+    {
+        # pathlib
+        "Path",
+        "PurePath",
+        "read_text",
+        "read_bytes",
+        "iterdir",
+        "glob",
+        "rglob",
+        "exists",
+        "is_file",
+        "is_dir",
+        "is_symlink",
+        "stat",
+        "st_size",
+        "st_mtime",
+        "name",
+        "suffix",
+        "suffixes",
+        "stem",
+        "parent",
+        "parents",
+        "parts",
+        "as_posix",
+        "joinpath",
+        "relative_to",
+        "with_suffix",
+        "with_name",
+        "resolve",
+        # file object from a read-mode ``open``
+        "read",
+        "readline",
+        "readlines",
+        # str / bytes
+        "splitlines",
+        "split",
+        "rsplit",
+        "strip",
+        "lstrip",
+        "rstrip",
+        "join",
+        "startswith",
+        "endswith",
+        "lower",
+        "upper",
+        "count",
+        "find",
+        "rfind",
+        "index",
+        "partition",
+        "rpartition",
+        "isdigit",
+        "isspace",
+        "decode",
+        "encode",
+        # containers (in-memory only)
+        "keys",
+        "values",
+        "items",
+        "append",
+        "extend",
+        "add",
+        # json (keyword hooks are refused by the keyword allow-list)
+        "loads",
+        "load",
+        "dumps",
+        # re
+        "compile",
+        "search",
+        "match",
+        "fullmatch",
+        "findall",
+        "finditer",
+        "sub",
+        "subn",
+        "escape",
+        "group",
+        "groups",
+        "start",
+        "end",
+        "span",
+        "IGNORECASE",
+        "MULTILINE",
+        "DOTALL",
+        "I",
+        "M",
+        "S",
+        # glob / fnmatch
+        "iglob",
+        "fnmatch",
+        "filter",
+        # collections
+        "Counter",
+        "most_common",
+        # datetime
+        "datetime",
+        "date",
+        "time",
+        "now",
+        "fromtimestamp",
+        "isoformat",
+        "strftime",
+    }
+)
+#: Keyword arguments a call may pass. ``key=``, ``default=``, ``object_hook=``,
+#: ``cls=``, ``opener=`` take callables; ``file=``/``stream=`` take a writer.
+#: ``mode=`` is admitted only for builtin ``open`` with a literal read mode.
+_PY_ALLOWED_KEYWORDS = frozenset(
+    {
+        "encoding",
+        "errors",
+        "reverse",
+        "sep",
+        "end",
+        "flush",
+        "maxsplit",
+        "flags",
+        "count",
+        "indent",
+        "sort_keys",
+        "ensure_ascii",
+        "recursive",
+        "start",
+        "mode",
+    }
+)
+_PY_READ_MODES = frozenset({"r", "rb", "rt", "br", "tr"})
+
+
+def _py_open_read_only(call: object) -> bool:
+    """Is a builtin ``open(...)`` call literally a read?
+
+    At most ``file, mode`` positionally: ``opener`` is ``open``'s eighth
+    positional parameter and can do anything with the path.
+    """
+    import ast
+
+    assert isinstance(call, ast.Call)
+    if len(call.args) > 2:
+        return False
+    mode: ast.expr | None = call.args[1] if len(call.args) > 1 else None
+    for kw in call.keywords:
+        if kw.arg == "mode":
+            mode = kw.value
+    if mode is None:
+        return True
+    return (
+        isinstance(mode, ast.Constant)
+        and isinstance(mode.value, str)
+        and mode.value in _PY_READ_MODES
+    )
+
+
+def _py_small_int(node: object) -> bool:
+    """A literal int, optionally negated (``x[0]``, ``x[-2500:]``)."""
+    import ast
+
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.USub, ast.UAdd)):
+        node = node.operand
+    return (
+        isinstance(node, ast.Constant)
+        and isinstance(node.value, int)
+        and not isinstance(node.value, bool)
+    )
+
+
+def python_code_read_only(code: str) -> bool:
+    """Can ``python -c CODE`` be PROVEN to write, delete and run nothing?
+
+    WHY (incident 2026-11-13, lop-remote-node-2 0.102.2): a parent printing
+    FAILED/passed lines from its child coder's logs with a ``pathlib``
+    one-liner was refused as dangerous-delete — the backstop treats every
+    path a non-read-only program mentions as a possible write, and nothing
+    told a print loop from ``shutil.rmtree``.
+
+    CONSTRAINT: guardrails only get more precise, never looser for a real
+    delete, so this proves, it does not guess — by CONSTRUCTION (see
+    ``_PY_ALLOWED_NODES``): every node type, import, name, attribute, keyword
+    and subscript must be on an allow-list. Consequences the lists alone do
+    not express, each enforced below:
+
+    - imports only as unconditional top-level statements (direct children
+      of the module): static analysis cannot tell which branch runs, so an
+      ``import re as exec`` under ``if 0:`` (or in a loop that never
+      iterates, a function, a comprehension) would be counted as imported
+      while at run time the name is still the real builtin (review r3 M4 —
+      real files deleted);
+    - no binding of ANY name in ``dir(builtins)`` — assignment, loop or
+      comprehension target, import alias — not only the allowed ones, and
+      no binding of an imported name; so a callee name is either an allowed
+      builtin that is never rebound or a top-level import, whatever branch
+      runs;
+    - a ``Name`` is loaded only if it is an allowed builtin, a top-level
+      import, or bound by this program;
+    - a call's callee is an allowed builtin, an imported name, or an allowed
+      attribute — never a local variable or a subscript, so a callable taken
+      as a value (``s = re.sub``) cannot dodge the per-call checks;
+    - no ``*``/``**`` anywhere; keywords only from ``_PY_ALLOWED_KEYWORDS``;
+    - subscripts only by a literal int or int slice (``b["getattr"]`` is out);
+    - builtin ``open`` only as a callee with a literal read mode;
+    - ``sub``/``subn`` only with literal leading arguments, so the
+      replacement is a string, never a callable;
+    - no dunder or ``_``-prefixed name or alias.
+
+    Anything else — a parse error, an unlisted node or name — is ``False``
+    and keeps the conservative ranking (a judge call, never a LOW).
+    """
+    import ast
+    import builtins
+
+    try:
+        tree = ast.parse(code)
+    except (SyntaxError, ValueError):
+        return False
+    nodes = list(ast.walk(tree))
+    if any(type(n).__name__ not in _PY_ALLOWED_NODES for n in nodes):
+        return False
+    # Only an unconditional top-level import is known to have run before a
+    # later call by its name; anything nested may never execute.
+    top_level = {id(n) for n in tree.body}
+    imported: set[str] = set()
+    bound: set[str] = set()
+    for node in nodes:
+        if isinstance(node, (ast.Import, ast.ImportFrom)) and id(node) not in top_level:
+            return False
+        if isinstance(node, ast.Import):
+            for a in node.names:
+                if a.name not in _PY_READ_MODULES:
+                    return False
+                imported.add(a.asname or a.name)
+        elif isinstance(node, ast.ImportFrom):
+            if node.level or node.module not in _PY_READ_MODULES:
+                return False
+            for a in node.names:
+                if a.name not in _PY_ALLOWED_ATTRS:
+                    return False  # also ``*``
+                imported.add(a.asname or a.name)
+        elif isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store):
+            bound.add(node.id)
+    if any(n.startswith("_") for n in imported | bound):
+        return False
+    # Rebinding a builtin or an import would let a later call by that name
+    # run whatever was bound; an import shadowing a builtin likewise. Every
+    # builtin name, not just the allowed ones: an alias that shadows ``exec``
+    # is exactly how a denied builtin would sneak back in as a callee.
+    builtin_names = frozenset(dir(builtins)) | _PY_ALLOWED_BUILTINS
+    if bound & (imported | builtin_names) or imported & builtin_names:
+        return False
+    callees = {id(n.func) for n in nodes if isinstance(n, ast.Call)}
+    known = _PY_ALLOWED_BUILTINS | imported | bound
+    for node in nodes:
+        if isinstance(node, ast.Name):
+            if node.id not in known:
+                return False
+            if node.id == "open" and id(node) not in callees:
+                return False  # ``o = open`` can be called later with any mode
+        elif isinstance(node, ast.Attribute):
+            if node.attr not in _PY_ALLOWED_ATTRS or not isinstance(node.ctx, ast.Load):
+                return False
+        elif isinstance(node, ast.Subscript):
+            if not isinstance(node.ctx, ast.Load):
+                return False
+            index = node.slice
+            if isinstance(index, ast.Slice):
+                parts = (index.lower, index.upper, index.step)
+                if any(p is not None and not _py_small_int(p) for p in parts):
+                    return False
+            elif not _py_small_int(index):
+                return False
+        elif isinstance(node, ast.Dict):
+            if any(k is None for k in node.keys):
+                return False  # ``{**d}``
+        elif isinstance(node, ast.comprehension):
+            if node.is_async:
+                return False
+        elif isinstance(node, ast.FormattedValue):
+            pass  # its spec is a JoinedStr whose parts this walk checks too
+        elif isinstance(node, ast.Call):
+            func = node.func
+            if isinstance(func, ast.Name):
+                if func.id not in _PY_ALLOWED_BUILTINS and func.id not in imported:
+                    return False
+                callee = func.id
+            elif isinstance(func, ast.Attribute):
+                callee = func.attr
+            else:
+                return False
+            if any(kw.arg not in _PY_ALLOWED_KEYWORDS for kw in node.keywords):
+                return False  # also ``**kw`` (``arg is None``)
+            if callee == "open" and isinstance(func, ast.Name):
+                if not _py_open_read_only(node):
+                    return False
+            elif any(kw.arg == "mode" for kw in node.keywords):
+                return False
+            if callee in ("sub", "subn"):
+                # ``re.sub(p, repl, s)`` / ``rx.sub(repl, s)``: untyped, so
+                # every argument before the subject must be a literal string.
+                if not node.args or any(
+                    not (isinstance(a, ast.Constant) and isinstance(a.value, str))
+                    for a in node.args[:-1]
+                ):
+                    return False
+    return True
+
+
+#: Interpreter flags that change nothing the read-only proof relies on. Any
+#: other flag before ``-c`` (``-X``, ``-W``, ``-m``…) makes it unprovable.
+_PY_SAFE_FLAGS = frozenset({"-I", "-E", "-s", "-S", "-B", "-u", "-q", "-P", "-b", "-bb"})
+#: Environment that makes ``python`` import or run code from somewhere else
+#: at start-up, write a file, or change which interpreter/stdlib runs:
+#: ``PYTHONPATH``/``PYTHONHOME``/``PYTHONPLATLIBDIR``/``PYTHONUSERBASE``
+#: (where ``site``/stdlib/``sitecustomize`` load from), ``PYTHONSTARTUP``/
+#: ``PYTHONINSPECT`` (run a file / go interactive), ``PYTHONWARNINGS``
+#: (``error::mod.Cls`` imports ``mod`` at start-up; review r1 m1),
+#: ``PYTHONBREAKPOINT`` (imports a callable by name), ``PYTHON_PRESITE``
+#: (imports a module before ``site``), ``PYTHONEXECUTABLE`` (macOS
+#: ``sys.executable``), ``PYTHONCASEOK`` (case-insensitive import: shadowing),
+#: ``PYTHONPYCACHEPREFIX`` (writes bytecode there), ``PYTHONIOENCODING``
+#: (codec looked up by name), ``PYTHONSAFEPATH`` (alters ``sys.path``; harmless
+#: when set, refused to keep the proof's assumptions fixed). Harmless knobs an
+#: operator commonly exports (``PYTHONUNBUFFERED``, ``PYTHONDONTWRITEBYTECODE``,
+#: ``PYTHONUTF8``) are deliberately not here: refusing them would re-break the
+#: incident read for no safety gain.
+_PY_STARTUP_ENV = (
+    "PYTHONPATH",
+    "PYTHONHOME",
+    "PYTHONPLATLIBDIR",
+    "PYTHONUSERBASE",
+    "PYTHONSTARTUP",
+    "PYTHONINSPECT",
+    "PYTHONWARNINGS",
+    "PYTHONBREAKPOINT",
+    "PYTHON_PRESITE",
+    "PYTHONEXECUTABLE",
+    "PYTHONCASEOK",
+    "PYTHONPYCACHEPREFIX",
+    "PYTHONIOENCODING",
+    "PYTHONSAFEPATH",
+)
+#: A cwd entry ``python -c`` would import before the stdlib (``sys.path[0]``
+#: is the cwd): ``pathlib`` importing a planted ``fnmatch.py`` runs it.
+_PY_SHADOW_SUFFIXES = (".py", ".pyc", ".so", ".pyd", ".pth")
+
+
+def _cwd_shadows_imports(cwd: str) -> bool:
+    try:
+        entries = list(os.scandir(cwd))
+    except OSError:
+        return True
+    for e in entries:
+        if e.name.endswith(_PY_SHADOW_SUFFIXES):
+            return True
+        try:
+            if e.is_dir() and os.path.exists(os.path.join(e.path, "__init__.py")):
+                return True
+        except OSError:
+            return True
+    return False
+
+
 def _in_place_edit(name: str, args: list[Expanded]) -> bool:
     """``sed -i``/``--in-place``, or perl with ``i`` in a short cluster (``-pi``)."""
     for w in args:
@@ -1847,7 +2360,15 @@ class _Walker:
             for name, value in env.items()
         }
         self.state = _State(env=private_env, cwd=cwd, home=home)
+        #: ``PATH`` as the command inherits it: ``_inline_read_only`` trusts
+        #: a bare ``python3`` only while this command has not changed it.
+        self.inherited_path = env.get("PATH")
         self.result = Resolution()
+        #: Non-read-only programs an earlier part of THIS command runs (each
+        #: reaches ``_backstop``). Any of them could plant a module in the cwd
+        #: before a later ``python -c``, so ``_inline_read_only`` holds only
+        #: for the first one (see there).
+        self.programs_run = 0
         #: Paths an earlier segment of THIS command made into a symlink (S7):
         #: what they point at is resolved only at run time.
         self.linked: set[str] = set()
@@ -2880,6 +3401,49 @@ class _Walker:
             raw = w.text if w.text.startswith("/") else os.path.join(base, w.text)
             self.result.touched.append(Target(path=os.path.normpath(raw), op="touch", program="ln"))
 
+    def _inline_read_only(self, name: str, words: list[Expanded], assigns: list[str]) -> bool:
+        """Is this exactly ``python[3] [safe flags] -c CODE [argv…]`` with CODE
+        proven read-only (:func:`python_code_read_only`)?
+
+        Fail closed on everything the proof cannot see: a wrapper or inline
+        assignment in front (``env``, ``PYTHONPATH=…``), start-up environment
+        that imports other code, an opaque or substituted CODE word, an
+        unknown cwd or one holding importable modules that would shadow the
+        stdlib, and any earlier non-read-only program or write in the same
+        command (it may plant such a module before python starts). Trailing
+        argv words are inert: CODE cannot reach ``sys.argv`` without ``sys``.
+        """
+        st = self.state
+        if not words or not _INTERPRETER_RE.fullmatch(name) or name.startswith("node"):
+            return False
+        # Pin the interpreter (review r1 M2): ``./python3``, ``/abs/python3``
+        # or a ``PATH`` this command rewrote can run a planted executable
+        # named ``python3`` that ignores CODE. Only a bare word looked up on
+        # the INHERITED ``PATH`` is the interpreter the proof is about.
+        if words[0].text != name or "/" in words[0].text or words[0].opaque or assigns:
+            return False
+        if st.env.get("PATH") != self.inherited_path:
+            return False
+        if self.programs_run or self.named or self.linked or self.result.targets:
+            return False
+        if any(t.op != "touch" for t in self.result.touched) or self.result.created:
+            return False
+        if any(st.env.get(k) for k in _PY_STARTUP_ENV):
+            return False
+        if st.cwd is None or _cwd_shadows_imports(st.cwd):
+            return False
+        rest = words[1:]
+        while rest and rest[0].text in _PY_SAFE_FLAGS:
+            rest = rest[1:]
+        if len(rest) < 2 or rest[0].text != "-c":
+            return False
+        code = rest[1]
+        if code.opaque or code.pattern is not None or code.substitutions:
+            return False
+        if OPAQUE_MARK in code.text or TEMP_MARK in code.text:
+            return False
+        return python_code_read_only(code.text)
+
     def _backstop(
         self, name: str, args: list[Expanded], assigns: list[str], exempt: set[int]
     ) -> None:
@@ -2901,6 +3465,8 @@ class _Walker:
         """
         st = self.state
         script = _interpreter_script(name, args, st.cwd)
+        read_only_code = self._inline_read_only(name, args, assigns)
+        self.programs_run += 1
         outputs = _output_word_ids(args)
         words = [w for w in args if id(w) not in exempt]
         texts = [(w.text, id(w) in outputs) for w in words] + [
@@ -2931,6 +3497,7 @@ class _Walker:
                             op="touch",
                             program=name or "a program",
                             script=script,
+                            read_only_code=read_only_code and not as_output,
                             as_output=as_output,
                         )
                     )

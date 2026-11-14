@@ -430,6 +430,16 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "else. A copy that carried any of them would hand a peer a path to a host that does "
         "not exist there.",
     ),
+    "local_operator/session/runtime/control.py": (
+        2,
+        "``STOP_MARKER`` ('stopped_at') and ``PARK_MARKER`` ('parked_at') are JSON KEYS a "
+        "stop or park stamps inside a wake/monitor INDEX entry (``write_entry``'s "
+        "``preserve``), not file or directory names. The entry file is the session's own "
+        "derived index and is classified by name in the copy set; the stamp is state "
+        "INSIDE it, so nothing under either spelling is an entry of a session directory to "
+        "copy or exclude -- a copy carries the entry, keys and all, and the session's own "
+        "open-time rewrite clears the stamp.",
+    ),
     # ---- this install's CONFIG, LOG and STORE surface (outside ``sessions/``) ----
     "local_operator/server/utils/settings_intents.py": (
         1,
@@ -465,6 +475,13 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "before the commit deletes the session directory. Deliberately a sibling of "
         "``sessions/``, never an entry inside one: the copy set must not carry it, no "
         "retention/cleanup path may walk it, and its only removal path is the user's",
+    ),
+    "local_operator/network/routing_sync.py": (
+        1,
+        "``CHAIN_PREFIX`` ('fallbackChains.') prefixes a dotted settings KEY -- one "
+        "routing unit per ``retry.fallbackChains`` key, mirrored between devices by the "
+        "definitions sync -- never a path in a session directory, so nothing under it "
+        "is a session entry to copy or exclude.",
     ),
     "local_operator/session/cold_metadata.py": (
         1,
@@ -1397,7 +1414,7 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "and never a session directory entry, so there is nothing for the copy to carry",
     ),
     "local_operator/notifications/remote_attention.py": (
-        3,
+        4,
         "``remote-done`` and ``remote-notice`` (``DONE_PREFIX``/``NOTICE_PREFIX``) prefix "
         "a forwarded completion's/notice's row KEY in ``notifications.db``: primary "
         "keys inside SQLite, never paths on disk. "
@@ -1406,7 +1423,13 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "record of which mesh viewers collect this node's forwarded items. It is never "
         "an entry of a session directory and must not travel with one -- a moved "
         "session would carry another device's viewer list to a node those viewers "
-        "never collected from",
+        "never collected from. "
+        "``BASELINES_FILE`` ('remote-attention-baselines.json', plus its "
+        "``.remote-attention-baselines.json.lock`` flock sidecar, derived from the path "
+        "rather than a separate constant) likewise lives ONLY at the config root: the "
+        "head/origin-side per-device first-contact baselines. It is never a session "
+        "directory entry and must not travel with a moved session -- it describes this "
+        "device's view of other devices",
     ),
     "local_operator/notifications/remote_park.py": (
         1,

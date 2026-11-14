@@ -343,6 +343,16 @@ class ApplyResult:
     skipped: list[dict[str, str]] = field(default_factory=list)
 
 
+#: The one-time cleanup of the v0.102.2 remote backfill
+#: (:meth:`NotificationStore._cleanup_remote_backfill`): its ``meta`` flag, the
+#: ``read_via`` it stamps (so an undo restores exactly its own marks), and the
+#: ONLY key namespaces it touches — ``remote_attention.DONE_PREFIX``/
+#: ``NOTICE_PREFIX``, spelled here so the store keeps no import edge into that
+#: module (a test pins them equal). Never ``gate:``/``remote-gate:`` or an ask.
+CLEANUP_META_KEY = "cleanup.remote_backfill_v1"
+CLEANUP_VIA = "cleanup:remote-backfill-0.102.2"
+CLEANUP_KEY_PREFIXES: tuple[str, ...] = ("remote-done:", "remote-notice:")
+
 #: Columns added to ``items`` AFTER the table shipped. `CREATE TABLE IF NOT
 #: EXISTS` does nothing to an existing file, so a store written by an earlier
 #: build would answer every read with "no such column: <name>" — a 500 on list,
@@ -593,6 +603,7 @@ class NotificationStore:
             # "no such column" on every route (round-4 R5-1 review, MAJOR).
             # The column LIST is the contract; the version is not.
             self._ensure_columns(conn)
+            self._cleanup_remote_backfill(conn)
             self._adopt_wal(conn)
             return conn
         except BaseException:
@@ -626,6 +637,170 @@ class NotificationStore:
                 if column not in present:
                     conn.execute(alter)
                     logger.info("notifications: store upgraded with column %s", column)
+
+    @classmethod
+    def _cleanup_remote_backfill(cls, conn: sqlite3.Connection) -> None:
+        """ONE-TIME: mark READ the forwarded rows the v0.102.2 backfill flooded in.
+
+        WHY (operator rule, 2026-11-13). The first ``lop serve`` poll after
+        v0.102.2 installed wrote one unread ``remote-done:`` row per historic
+        mesh-node session (127 measured in four seconds) and 34 unread
+        ``remote-notice:`` rows for notices months old, all stamped with the
+        sync time. The producer is fixed at the source
+        (``notifications/remote_attention``); this clears what it already wrote.
+
+        CONSTRAINTS. Runs once per store (``meta`` flag :data:`CLEANUP_META_KEY`,
+        re-checked under ``BEGIN IMMEDIATE`` so racing processes mark once).
+        Touches ONLY unread rows whose key starts with
+        :data:`CLEANUP_KEY_PREFIXES` — never a park (``gate:``/``remote-gate:``),
+        an ask, or any other item — and only MARKS THEM READ with ``read_via =``
+        :data:`CLEANUP_VIA`; nothing is deleted. Each row's prior read marks are
+        recorded under the flag so :meth:`undo_remote_backfill_cleanup` can
+        restore exactly those rows. One ``meta`` read per connection otherwise.
+        """
+        if not conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='items'"
+        ).fetchone():
+            return
+        if conn.execute("SELECT 1 FROM meta WHERE k=?", (CLEANUP_META_KEY,)).fetchone():
+            return
+        with conn:
+            conn.execute("BEGIN IMMEDIATE")
+            if conn.execute("SELECT 1 FROM meta WHERE k=?", (CLEANUP_META_KEY,)).fetchone():
+                return
+            stamp = now_ms()
+            prefix_sql = " OR ".join("substr(key, 1, ?) = ?" for _ in CLEANUP_KEY_PREFIXES)
+            prefix_params: list[Any] = []
+            for prefix in CLEANUP_KEY_PREFIXES:
+                prefix_params += [len(prefix), prefix]
+            rows = conn.execute(
+                "SELECT id, revision, read_rev, read_at, read_via FROM items "
+                f"WHERE ({prefix_sql}) AND read_rev < revision ORDER BY seq",
+                prefix_params,
+            ).fetchall()
+            marked: dict[str, list[Any]] = {}
+            for row in rows:
+                seq = cls._next_seq(conn)
+                conn.execute(
+                    "UPDATE items SET seq=?, read_rev=revision, read_at=?, read_via=? WHERE id=?",
+                    (seq, stamp, CLEANUP_VIA, row["id"]),
+                )
+                marked[str(row["id"])] = [
+                    int(row["revision"]),
+                    int(row["read_rev"]),
+                    row["read_at"],
+                    row["read_via"],
+                ]
+            conn.execute(
+                "INSERT INTO meta(k, v) VALUES (?, ?)",
+                (CLEANUP_META_KEY, json.dumps({"at": stamp, "rows": marked}, sort_keys=True)),
+            )
+        if marked:
+            logger.info(
+                "notifications: marked %d forwarded remote rows read (%s)", len(marked), CLEANUP_VIA
+            )
+
+    def remote_backfill_cleanup_record(self, *, read_only: bool = False) -> dict[str, Any] | None:
+        """The one-time cleanup's record (``{"at", "rows", ["undone_at"]}``), or ``None``.
+
+        Opens a WRITE connection by default, on purpose: opening is what runs
+        the cleanup, so asking about it on a store that has not been opened
+        since the upgrade answers with the record it just wrote rather than
+        "none". ``read_only`` (the CLI's ``--dry-run``, QA round 1 Q2) reads
+        over ``mode=ro`` instead, so it never triggers the cleanup; ``None``
+        then may mean "not run yet" — :meth:`remote_backfill_pending` counts
+        what it would mark.
+        """
+
+        def body(conn: sqlite3.Connection) -> dict[str, Any] | None:
+            row = conn.execute("SELECT v FROM meta WHERE k=?", (CLEANUP_META_KEY,)).fetchone()
+            if row is None:
+                return None
+            data = json.loads(str(row[0]))
+            return data if isinstance(data, dict) else None
+
+        if read_only:
+            return self._read(body, None, "remote_backfill_cleanup_record")
+        return self._write(body, "remote_backfill_cleanup_record")
+
+    def remote_backfill_pending(self) -> int:
+        """How many rows the one-time cleanup WOULD mark read, read-only (Q2).
+
+        The same selection as :meth:`_cleanup_remote_backfill` (prefix and
+        unread), counted over ``mode=ro`` so a dry run writes nothing. 0 once
+        the cleanup has run: it is one-time, so nothing more would be marked.
+        """
+
+        def body(conn: sqlite3.Connection) -> int:
+            if conn.execute("SELECT 1 FROM meta WHERE k=?", (CLEANUP_META_KEY,)).fetchone():
+                return 0
+            prefix_sql = " OR ".join("substr(key, 1, ?) = ?" for _ in CLEANUP_KEY_PREFIXES)
+            params: list[Any] = []
+            for prefix in CLEANUP_KEY_PREFIXES:
+                params += [len(prefix), prefix]
+            row = conn.execute(
+                f"SELECT COUNT(*) FROM items WHERE ({prefix_sql}) AND read_rev < revision",
+                params,
+            ).fetchone()
+            return int(row[0])
+
+        return self._read(body, 0, "remote_backfill_pending")
+
+    def undo_remote_backfill_cleanup(self, *, dry_run: bool = False) -> int:
+        """Restore the read marks :meth:`_cleanup_remote_backfill` replaced. Returns rows restored.
+
+        RESTORES EXACTLY THOSE ROWS, and only while they are still the cleanup's:
+        a row the operator has since read or dismissed for themselves, or one
+        updated to a new revision (unread again by the store's own rule), carries
+        a different ``read_via``/``revision`` and is left alone. Idempotent — a
+        second undo finds no row still marked :data:`CLEANUP_VIA`. The flag
+        stays (with ``undone_at``) so the cleanup never re-runs on the next open.
+        ``dry_run`` counts over a read-only connection, so it never writes —
+        not even the cleanup a write open would run (QA round 1, Q2).
+        ``undone_at`` records the first undo that restored anything (or the
+        first undo at all); a repeat that restores nothing leaves it (Q3).
+        """
+
+        def body(conn: sqlite3.Connection) -> int:
+            row = conn.execute("SELECT v FROM meta WHERE k=?", (CLEANUP_META_KEY,)).fetchone()
+            if row is None:
+                return 0
+            data = json.loads(str(row[0]))
+            marked = data.get("rows") if isinstance(data, dict) else None
+            if not isinstance(marked, dict):
+                return 0
+            restored = 0
+            for item_id, prior in marked.items():
+                if not isinstance(prior, list) or len(prior) != 4:
+                    continue
+                revision, read_rev, read_at, read_via = prior
+                current = conn.execute(
+                    "SELECT revision, read_via FROM items WHERE id=?", (item_id,)
+                ).fetchone()
+                if (
+                    current is None
+                    or current["read_via"] != CLEANUP_VIA
+                    or int(current["revision"]) != int(revision)
+                ):
+                    continue
+                restored += 1
+                if dry_run:
+                    continue
+                conn.execute(
+                    "UPDATE items SET seq=?, read_rev=?, read_at=?, read_via=? WHERE id=?",
+                    (self._next_seq(conn), int(read_rev), read_at, read_via, item_id),
+                )
+            if not dry_run and (restored or not data.get("undone_at")):
+                data["undone_at"] = now_ms()
+                conn.execute(
+                    "UPDATE meta SET v=? WHERE k=?",
+                    (json.dumps(data, sort_keys=True), CLEANUP_META_KEY),
+                )
+            return restored
+
+        if dry_run:
+            return self._read(body, 0, "undo_remote_backfill_cleanup")
+        return self._write(body, "undo_remote_backfill_cleanup")
 
     @staticmethod
     def _adopt_wal(conn: sqlite3.Connection) -> None:
