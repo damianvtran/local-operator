@@ -494,3 +494,61 @@ def test_foreign_match_without_git_file_witness_falls_to_the_foreign_pool(
         assert hit is not None and hit.owner == S2 and hit.relation == "inside"
     finally:
         foreign.close()
+
+
+def _stale_worktree_row(wt: Path, *, owner: str) -> None:
+    """Simulate inode reuse: ``owner``'s dead worktree row at ``wt``.
+
+    Ledger rows are never pruned and ext4/xfs hand a freed inode number to the
+    next directory, so a removed worktree's row can carry the live dev+ino of
+    another session's new worktree at the same path, under an older stamp.
+    APFS never reuses inode numbers, so the row is written directly.
+    """
+    import sqlite3
+
+    real = os.path.realpath(wt)
+    st = os.stat(real)
+    conn = sqlite3.connect(prov.ledger_path())
+    try:
+        conn.execute(
+            "INSERT OR REPLACE INTO created VALUES (?,?,?,?,?,?,?,?,?)",
+            (
+                owner,
+                real,
+                st.st_dev,
+                st.st_ino,
+                1.0,
+                owner,
+                "worktree",
+                "git worktree add (removed long ago)",
+                prov.creation_stamp(st) + 1,
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+@pytest.mark.parametrize("rel", ["/runs", "/runs/r.json"])
+def test_foreign_worktree_git_file_never_revives_another_owners_stale_row(
+    home: Path, repo: Path, rel: str
+) -> None:
+    """R-C1: a ``.git`` companion vouches only for its own owner's row.
+
+    S2's live worktree reuses the inode of a worktree S removed. S's dead row
+    must not borrow S2's ``.git`` row as its generation witness: that put S
+    among the tree's owners and ranked ``rm -rf <S2's wt>/runs`` LOW.
+    """
+    wt = _attr3880(home, repo, name="theirs", sid=S2)
+    (wt / "runs").mkdir()
+    (wt / "runs" / "r.json").write_text("{}")
+    _stale_worktree_row(wt, owner=S)
+    foreign = prov.ForeignCreations(S)
+    try:
+        hit = foreign.match([str(wt) + rel])
+        assert hit is not None and hit.owner == S2 and hit.relation == "inside"
+    finally:
+        foreign.close()
+    risk, reason = _rank(home, f"rm -rf ~/local-operator/.worktrees/theirs{rel}")
+    assert risk is Risk.HIGH, reason
+    assert "created by another session" in reason, reason

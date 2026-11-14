@@ -744,7 +744,7 @@ class ForeignCreations:
                 self._identity[path] = (st.st_dev, st.st_ino, creation_stamp(st))
         return self._identity[path]
 
-    def _gitfile_holds(self, conn: sqlite3.Connection, rec: CreationRecord) -> bool:
+    def _gitfile_holds(self, conn: sqlite3.Connection, rec: CreationRecord, owner: str) -> bool:
         """A ``worktree`` row whose dir stamp moved is still live via its ``.git`` row.
 
         WHY (rebase of PR #3987 onto #3835): ``owned_record`` already accepts
@@ -753,9 +753,19 @@ class ForeignCreations:
         change. Without the same rule here the nearest-owner walk dropped a
         session's OWN worktree row after its first checkout, so a broader
         foreign ancestor row became "nearest" and the session's own tree read
-        HIGH; and another session's worktree row failed open. Accepting the
-        companion only ever adds live rows: foreign ones rank stricter, own
-        ones are exactly the "unambiguously this session's row" exception.
+        HIGH; and another session's worktree row failed open.
+
+        The companion must belong to the SAME ``owner`` as ``rec`` (R-C1, as
+        ``owned_record`` scopes it with ``WHERE owner = ?``). Ledger rows are
+        never pruned, and ext4/xfs reuse a freed inode number, so a dead
+        worktree row of session A can share dev+ino with session B's new
+        worktree at the same path. Accepting B's ``.git`` row as A's witness
+        revived A's dead row, put A among the owners of B's live tree, and
+        dropped ``rm -rf <B's wt>/sub`` from HIGH to an ordinary path.
+        Owner-scoped, a companion only vouches for its own owner's row, so
+        it can keep a genuinely live row live but never adds a dead owner
+        to a live path. Companions are written under the same owners as
+        their worktree row (``commit_creations``), so no real hold is lost.
         The companion is read by exact path because ``_foreign_query`` binds
         only ancestors of and rows under the target, never ``<wt>/.git``
         when the target is inside ``<wt>``.
@@ -766,8 +776,8 @@ class ForeignCreations:
         try:
             companions = conn.execute(
                 "SELECT path, dev, ino, created_at, creator, kind, command, stamp"
-                " FROM created WHERE path = ? AND kind = ?",
-                (gitfile, WORKTREE_GITFILE_KIND),
+                " FROM created WHERE path = ? AND kind = ? AND owner = ?",
+                (gitfile, WORKTREE_GITFILE_KIND, owner),
             ).fetchall()
         except (sqlite3.Error, ValueError):
             return False
@@ -813,7 +823,7 @@ class ForeignCreations:
             if identity != (rec.dev, rec.ino, rec.stamp) and not (
                 identity is not None
                 and identity[:2] == (rec.dev, rec.ino)
-                and self._gitfile_holds(conn, rec)
+                and self._gitfile_holds(conn, rec, owner)
             ):
                 continue
             live.setdefault(rec.path, (set(), rec))[0].add(owner)
