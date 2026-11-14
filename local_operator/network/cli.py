@@ -8575,6 +8575,8 @@ def _cmd_sessions(args: argparse.Namespace) -> int:
         explicit_yolo = bool(getattr(args, "yolo", False))
         implied_yolo = (not explicit_yolo) and saved_tool_approval_is_auto()
 
+        from local_operator.network.relay import CREATE_CLIENT_BOUND_S
+
         def _create(yolo: bool) -> dict[str, Any]:
             # ONE BUILDER FOR BOTH ATTEMPTS, so the fallback differs in nothing
             # but ``yolo``. The retry is a CHANGED BODY — a changed intent — and
@@ -8609,7 +8611,10 @@ def _cmd_sessions(args: argparse.Namespace) -> int:
                 # which reserves nothing, so the key is still free for the second.
                 create_key=str(getattr(args, "create_key", "") or ""),
                 origin=_create_origin(args),
-                timeout=120.0,  # a spawn plus its first turn's admission
+                # A spawn plus its first turn's admission, plus the relay's bounded
+                # confirm-by-key window after a lost reply: a client that gave up
+                # first would lose the id the relay was about to confirm.
+                timeout=CREATE_CLIENT_BOUND_S,
             )
 
         unattended_notice = ""
