@@ -358,7 +358,10 @@ class CreationRecord:
     def describe(self) -> str:
         when = time.strftime("%Y-%m-%d %H:%M", time.localtime(self.created_at))
         if self.relation == "ancestor":
-            return f"created by this session's parent session {self.creator} ({self.kind}, {when})"
+            # "ancestor", not "parent" (QA Q2, PR #3964): the relation covers
+            # every session above this one, and ``owned_record`` does not
+            # carry the depth, so a grandchild must not be told "parent".
+            return f"created by ancestor session {self.creator} of this one ({self.kind}, {when})"
         if self.relation == "kin":
             return (
                 f"created by sibling session {self.creator} in this subagent tree "
@@ -398,7 +401,7 @@ _CLOSE_TAG_RE = re.compile(r"<\s*/")
 #: ``CreationRecord.ledger_fact``'s wording for each ``relation``.
 _RELATION_WORDS = {
     "": "this session or its subagent",
-    "ancestor": "a parent session of this one",
+    "ancestor": "an ancestor session of this one",
     "kin": "a sibling session in this subagent tree",
 }
 

@@ -278,10 +278,15 @@ def test_field_loop_creation_is_recorded_for_both_trees(home: Path, infra: Path)
     ],
     ids=["cd-outside-subshell", "cd-after-subshell", "missing-dir"],
 )
-def test_unprovable_loop_cwds_record_nothing(home: Path, infra: Path, command: str) -> None:
-    """Never record a guess: the cwd after such a ``cd`` is unknown."""
+def test_unprovable_loop_cwds_record_only_the_first_iteration(
+    home: Path, infra: Path, command: str
+) -> None:
+    """Never record a guess: a LATER iteration's cwd after such a ``cd`` is
+    unknown, so its ``made`` is not listed. Iteration 1 runs in ``services``
+    for certain (review R1-M1 keeps that cwd), so its creation is listed;
+    ``commit_creations`` still records it only if it is a new directory."""
     created = resolve_command(command, cwd=str(home), env=_env(home), home=str(home)).created
-    assert [c.path for c in created] == []
+    assert [c.path for c in created] == [str(infra / "services" / "made")]
 
 
 @pytest.mark.parametrize(
@@ -310,7 +315,8 @@ def test_unprovable_loop_cwd_makes_a_relative_delete_unresolved(home: Path, infr
         "do cd $r; rm -rf build; done"
     )
     targets = resolve_command(command, cwd=str(home), env=_env(home), home=str(home)).targets
-    assert [t.path for t in targets] == [None]
+    # Iteration 1's cwd is certain; the later one is not (review R1-M1).
+    assert [t.path for t in targets] == [str(infra / "services" / "build"), None]
 
 
 def test_absolute_loop_cwds_fan_without_a_subshell(home: Path, infra: Path) -> None:
@@ -382,7 +388,7 @@ def test_child_removes_parents_tree_holding_only_ignored_files(home: Path, infra
     assert prov.worktree_state(str(wt)) == "dirty"  # the field's foreign reading
     verdict = _rank(home, _remove(wt), C)
     assert verdict.risk is Risk.LOW, verdict.targets[0].reason
-    assert f"parent session {P}" in verdict.targets[0].reason
+    assert f"ancestor session {P}" in verdict.targets[0].reason
 
 
 def test_child_removes_parents_tree_with_tracked_change_is_high(home: Path, infra: Path) -> None:
@@ -522,3 +528,77 @@ def test_kin_container_row_vouches_for_nothing(home: Path, infra: Path) -> None:
     verdict = _rank(home, _remove(tree), C)
     assert verdict.risk is Risk.HIGH, verdict.targets[0].reason
     assert "sibling session" not in verdict.targets[0].reason
+
+
+# -- round 1 remediation (PR #3964) ---------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "for r in ~ /nowhere; do cd $r; rm -rf .local-operator; done",
+        "cd ~; for r in . a; do cd $r; rm -rf .local-operator; done",
+        "cd ~; for r in . nowhere; do (cd $r; rm -rf .local-operator); done",
+        "cd ~; for r in /tmp ~/a; do cd $r; cd -; rm -rf .local-operator; done",
+        "cd ~; for r in . a; do (cd -P $r; rm -rf .local-operator); done",
+        "cd ~; for r in . a; do cd $r; rm -f .local-operator/config.yml; done",
+    ],
+)
+def test_unnameable_later_iteration_keeps_the_first_cwd(home: Path, command: str) -> None:
+    """Review R1-M1: bash runs iteration 1 at the first value before any
+    unknown iteration, so its ``~/.local-operator`` delete is certain. Before
+    the fix the whole body's cwd was forgotten and these ranked a judge-able
+    HIGH; base 3bb7023 refused them outright."""
+    verdict = _rank(home, command, U)
+    assert verdict.risk is Risk.CRITICAL, [t.reason for t in verdict.targets]
+    targets = resolve_command(command, cwd=str(home), env=_env(home), home=str(home)).targets
+    assert None in [t.path for t in targets]  # the later iterations stay unresolved
+
+
+def test_relative_value_after_an_absolute_one_is_not_read_from_the_header(home: Path) -> None:
+    """Review R1-m1: ``cd ..`` in iteration 2 runs from ``~/a`` (iteration 1's
+    cwd), so bash deletes ``~/.local-operator``; the walk once resolved it from
+    the header's ``/tmp`` (``/.local-operator``, LOW). That previous-iteration
+    cwd is not modelled, so it must be unresolved, never the header's."""
+    (home / "a").mkdir()
+    command = "cd /tmp; for r in ~/a ..; do cd $r; rm -rf .local-operator; done"
+    targets = resolve_command(command, cwd=str(home), env=_env(home), home=str(home)).targets
+    paths = [t.path for t in targets]
+    assert str(home / "a" / ".local-operator") in paths
+    assert None in paths
+    assert "/.local-operator" not in paths
+    assert _rank(home, command, U).risk >= Risk.HIGH
+
+
+@pytest.mark.parametrize("flag", ["--f", "--fo", "--for", "--forc", "--force"])
+def test_abbreviated_force_is_forced(home: Path, infra: Path, flag: str) -> None:
+    """Review R1-m2: git accepts any unique prefix of ``--force`` (measured,
+    git 2.55: ``git worktree remove --f`` removed an untracked-dirty tree)."""
+    wt = _add_tree(home, infra / "services", K)
+    command = f"git -C {wt.parent.parent} worktree remove {flag} {wt}"
+    targets = resolve_command(command, cwd=str(home), env=_env(home), home=str(home)).targets
+    assert [t.forced for t in targets] == [True]
+    # A sibling's tree is admitted only for a NON-forced remove.
+    assert _rank(home, command, C).risk is Risk.HIGH
+
+
+def test_direct_remove_of_a_foreign_tree_names_the_recorded_creator(
+    home: Path, infra: Path
+) -> None:
+    """QA Q1: the refusal says whose tree it is."""
+    wt = _add_tree(home, infra / "services", K)
+    (wt / "notes.md").write_text("wip\n")
+    _restamp(wt)
+    verdict = _rank(home, _remove(wt), U)
+    assert verdict.risk is Risk.HIGH
+    assert f"recorded creator: {K}" in verdict.targets[0].reason
+
+
+def test_grandchild_sees_an_ancestor_not_a_parent(home: Path, infra: Path) -> None:
+    """QA Q2: G is P's grandchild, so P is an ancestor, not its parent."""
+    wt = _add_tree(home, infra / "services", P)
+    _ignore_only(wt)
+    verdict = _rank(home, _remove(wt), G)
+    assert verdict.risk is Risk.LOW, verdict.targets[0].reason
+    assert f"ancestor session {P}" in verdict.targets[0].reason
+    assert "parent session" not in verdict.targets[0].reason

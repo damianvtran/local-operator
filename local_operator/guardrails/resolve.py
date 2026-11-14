@@ -1002,6 +1002,11 @@ class _State:
     #: ``cd $VAR`` (``cwd`` holds the first). See ``_Walker._cwd_fan_for``.
     #: Read ONLY to record creations, never to rank a delete.
     cwd_fan: tuple[str, ...] = ()
+    #: A ``cd`` of the enclosing ``for`` lands somewhere this walk cannot
+    #: name in some LATER iteration, while ``cwd`` (iteration 1) is still
+    #: known. ``_add`` then ranks a relative word at ``cwd`` AND as an
+    #: unresolved target. See ``_Walker._cd``.
+    cwd_later_unknown: bool = False
 
 
 def kernel_path(raw: str | None) -> str | None:
@@ -1474,6 +1479,15 @@ def _operands(
             continue
         operands.append(w)
     return operands, flags
+
+
+def _is_force_abbrev(flag: str) -> bool:
+    """``--force`` or a prefix git accepts for it (``--f`` .. ``--forc``).
+
+    Only for subcommands where ``--force`` is the sole long option starting
+    with ``f`` (``git worktree remove``), so every such prefix is unique.
+    """
+    return len(flag) >= 3 and "--force".startswith(flag)
 
 
 def _has_short(flags: list[str], letters: str) -> bool:
@@ -2624,6 +2638,7 @@ class _Snapshot:
     private_cwd: bool = False
     physical: bool = False
     cwd_fan: tuple[str, ...] = ()
+    cwd_later_unknown: bool = False
 
 
 class _Walker:
@@ -2695,13 +2710,22 @@ class _Walker:
     # -- state isolation (R4) ----------------------------------------------------
     def _save(self) -> _Snapshot:
         st = self.state
-        return _Snapshot(dict(st.env), st.cwd, st.home, st.private_cwd, st.physical, st.cwd_fan)
+        return _Snapshot(
+            dict(st.env),
+            st.cwd,
+            st.home,
+            st.private_cwd,
+            st.physical,
+            st.cwd_fan,
+            st.cwd_later_unknown,
+        )
 
     def _restore(self, snap: _Snapshot) -> None:
         self.state.env, self.state.cwd, self.state.home = snap.env, snap.cwd, snap.home
         self.state.private_cwd = snap.private_cwd
         self.state.physical = snap.physical
         self.state.cwd_fan = snap.cwd_fan
+        self.state.cwd_later_unknown = snap.cwd_later_unknown
 
     def _isolated_walk(self, command: str, depth: int) -> None:
         """Walk text that runs in a CHILD shell: its cd/assignments never leak."""
@@ -3478,6 +3502,7 @@ class _Walker:
             # assume success (or recover it after an unmodelled popd), so
             # invalidate BOTH instead of letting cd - revive a stale path.
             st.cwd = None
+            st.cwd_later_unknown = False  # ``cwd`` None already covers it
             st.private_cwd = private_target
             st.env.pop("OLDPWD", None)
             return
@@ -3486,13 +3511,32 @@ class _Walker:
             st.env.pop("OLDPWD", None)
         else:
             st.env["OLDPWD"] = previous
-        fan = self._cwd_fan_for(operands[0] if operands else None, physical, path, previous)
-        # ``None``: a later iteration lands somewhere this walk cannot name,
-        # so the cwd is unknown from here on and a relative delete ranks as
-        # one (review of this change: ``for r in /tmp ~; do cd $r; rm -rf
-        # .local-operator; done`` read only the first iteration, LOW).
+        word = operands[0] if operands else None
+        fan = self._cwd_fan_for(word, physical, path, previous)
+        # ``None``: a later iteration lands somewhere this walk cannot name
+        # (review of this change: ``for r in /tmp ~; do cd $r; rm -rf
+        # .local-operator; done`` read only the first iteration, LOW). The
+        # FIRST iteration still lands at ``path`` — bash runs it before any
+        # unknown one — so ``cwd`` keeps it and only the later iterations are
+        # flagged unknown; ``_add`` ranks a relative word at both. Forgetting
+        # ``cwd`` instead dropped a certain ``~/.local-operator`` delete from
+        # CRITICAL to a judge-able HIGH (review R1-M1, PR #3964).
         st.cwd_fan = fan or ()
-        st.cwd = path if fan is not None else None
+        st.cwd = path
+        if fan is None:
+            st.cwd_later_unknown = True
+        elif word is None or (
+            (spun := self._iterations(word)) is not None
+            and all(
+                text.startswith(("/", "~"))
+                for text in [word.text] + [_fan_out(word, values).text for _roots, values in spun]
+            )
+        ):
+            # Every iteration lands somewhere named whatever cwd it started
+            # in: home, or an absolute path in every iteration.
+            st.cwd_later_unknown = False
+        # Otherwise (a relative or ``cd -`` move from an already-unknown
+        # later cwd) the later iterations stay unknown.
 
     def _cwd_fan_for(
         self, w: Expanded | None, physical: bool, path: str | None, previous: str | None
@@ -3540,16 +3584,23 @@ class _Walker:
             return ()
         if physical:
             return None
-        if not w.text.startswith("/"):
+        iterations = self._iterations(w)
+        relative = not w.text.startswith("/") or any(
+            not _fan_out(w, values).text.startswith("/") for _roots, values in iterations or ()
+        )
+        if relative:
             # A RELATIVE loop cd lands per iteration only if every iteration
             # starts where the first did: inside a subshell opened in the
             # body, from the loop header's own cwd, in a body that never
-            # moves outside a subshell. Anything else: no fan.
+            # moves outside a subshell. Anything else: no fan. ANY relative
+            # value counts, not only the first (review R1-m1, PR #3964):
+            # ``cd /tmp; for r in ~/a ..; do cd $r; …`` runs ``cd ..`` from
+            # ``~/a``, not from ``/tmp``; that previous-iteration cwd is not
+            # modelled, so it is unknown (``None``), never the header's.
             for root in {self.for_roots.get(r[0], r[0]) for r in w.refs if r[0] in self.for_lists}:
                 keeps, header_cwd, header_depth = self.for_fan_scope.get(root, (False, None, 0))
                 if not keeps or header_cwd != previous or self.subshell_depth <= header_depth:
-                    return None if self._iterations(w) else ()
-        iterations = self._iterations(w)
+                    return None if iterations else ()
         if iterations is None:
             return None
         if not iterations:
@@ -4076,7 +4127,12 @@ class _Walker:
                 )
         elif sub == "remove":
             operands, flags = _operands(args[2:])
-            forced = _has_short(flags, "f") or "--force" in flags
+            # git's parse-options accepts any unique prefix of a long option,
+            # and ``--force`` is ``worktree remove``'s only ``--f…`` option, so
+            # ``--f`` .. ``--forc`` force too (review R1-m2, PR #3964; measured
+            # with git 2.55: ``git worktree remove --f`` of an untracked-dirty
+            # tree, rc 0, tree gone). Kin admission keys on ``forced``.
+            forced = _has_short(flags, "f") or any(_is_force_abbrev(f) for f in flags)
             for w in operands:
                 saved = self.state.cwd
                 self.state.cwd = base
@@ -4087,7 +4143,7 @@ class _Walker:
                         target.worktree_remove = True
                         target.forced = forced
                         target.force_count = sum(
-                            1 if f == "--force" else f[1:].count("f")
+                            1 if _is_force_abbrev(f) else f[1:].count("f")
                             for f in flags
                             if f.startswith("-")
                         )
@@ -4141,6 +4197,37 @@ class _Walker:
             self._unpin_relinked(extra, fanned.text)
             self.result.targets.append(extra)
         self._add_at_fanned_cwds(exp, op, program, selected, iterations)
+        self._add_at_unknown_later_cwd(exp, op, program, selected, iterations)
+
+    def _add_at_unknown_later_cwd(
+        self,
+        exp: Expanded,
+        op: str,
+        program: str,
+        selected: bool,
+        iterations: list[tuple[tuple[str, ...], dict[str, str]]],
+    ) -> None:
+        """Add an unresolved target for a relative word whose later loop
+        iterations run in a cwd this walk cannot name (``cwd_later_unknown``).
+
+        The word was already ranked at iteration 1's known cwd, so a certain
+        CRITICAL there stays CRITICAL; this extra target makes the rest at
+        least HIGH (review R1-M1, PR #3964).
+        """
+        st = self.state
+        if not st.cwd_later_unknown or exp.opaque:
+            return
+        spellings = [exp.text] + [_fan_out(exp, values).text for _roots, values in iterations]
+        if all(text.startswith(("/", "~")) for text in spellings):
+            return
+        saved = st.cwd
+        try:
+            st.cwd = None
+            extra = _target(exp, op, program, st)
+        finally:
+            st.cwd = saved
+        extra.selected = selected
+        self.result.targets.append(extra)
 
     def _add_at_fanned_cwds(
         self,

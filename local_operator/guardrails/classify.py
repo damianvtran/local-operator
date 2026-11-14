@@ -1355,6 +1355,18 @@ def _rank(
             # the judge sees those facts. ``worktree_activity`` explains both.
             activity = worktree_activity(path, session_id)
             facts = activity.facts()
+            if own is None:
+                # Whose tree it is (QA Q1, PR #3964): the foreign-tree path
+                # through ``_reached_worktrees`` already names the ledger's
+                # creator, but a direct ``git worktree remove`` of a tree
+                # outside this family did not, so neither the agent nor the
+                # judge learned who to hand it back to. Display only — the
+                # rank above never reads it.
+                from local_operator.guardrails import provenance
+
+                creators = provenance.recorded_creators(path)
+                if creators:
+                    facts += "; recorded creator: " + ", ".join(creators)
             if activity.pr_state == "open":
                 return RankedTarget(
                     target,
