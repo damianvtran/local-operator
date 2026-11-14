@@ -1,4 +1,39 @@
 {
+  "tunnel.status.billing_inactive.detail": {
+    "role": "connector refusal sentence shown on the phone, desktop and terminal",
+    "tone": "Plain, actionable",
+    "note": "The fix is accepting the monthly price in Local Operator's phone access setup. Never names a command: the sentence reaches the phone, the desktop callout and the TUI card."
+  },
+  "tunnel.status.billing_inactive.label": {
+    "role": "short connector state label",
+    "tone": "Plain, lowercase fragment",
+    "note": "Tunnel billing (a monthly price) was never activated."
+  },
+  "tunnel.status.billing_lapsed.detail": {
+    "role": "connector refusal sentence shown on the phone, desktop and terminal",
+    "tone": "Plain, actionable",
+    "note": "The fix is adding credit in the Radient console; the tunnel then reconnects without further action. Never names a command: the sentence reaches the phone, the desktop callout and the TUI card. {url} is the Radient console URL and stays verbatim."
+  },
+  "tunnel.status.billing_lapsed.label": {
+    "role": "short connector state label",
+    "tone": "Plain, lowercase fragment",
+    "note": "Tunnel billing had been activated but is no longer eligible because the prepaid Radient balance ran out."
+  },
+  "tunnel.status.card_add_credit": {
+    "role": "whole TUI notice card line (no command)",
+    "tone": "Plain, actionable imperative",
+    "note": "The prepaid Radient balance ran out; adding credit in the Radient console resumes phone access by itself. One line of the terminal app's notice card; keep it short (the English line with its icon fits 50 terminal cells), and name no command or URL."
+  },
+  "tunnel.status.card_open_console": {
+    "role": "whole TUI notice card line (no command)",
+    "tone": "Plain, actionable imperative",
+    "note": "The owner switched phone access off in the Radient web console; only the console can turn it back on. One line of the terminal app's notice card; keep it short (the English line with its icon fits 50 terminal cells), and name no command or URL."
+  },
+  "tunnel.status.card_paused": {
+    "role": "tail of the TUI notice card after '/mobile enable — '",
+    "tone": "Plain, lowercase fragment",
+    "note": "Radient paused phone access although billing is fine; /mobile enable reconnects it. One line of the terminal app's notice card; keep it short (the English line with its icon fits 50 terminal cells), and name no command or URL."
+  },
   "tunnel.status.create.conflict_unmatched": {
     "role": "lop tunnel create failure sentence",
     "tone": "Plain, actionable",
@@ -63,5 +98,25 @@
     "role": "lop tunnel status / desktop connector detail",
     "tone": "Reassuring, factual",
     "note": "The connector's authorization check got HTTP 5xx from Radient. Self-clearing; must not suggest signing in again. Commands (lop …), 127.0.0.1:{port}, HTTP, 5xx and <id> stay verbatim."
+  },
+  "tunnel.status.tunnel_disabled.detail": {
+    "role": "connector refusal sentence shown on the phone, desktop and terminal",
+    "tone": "Plain, actionable",
+    "note": "The only fix is turning the tunnel back on in the Radient console. Never names a command: the sentence reaches the phone, the desktop callout and the TUI card. {url} is the Radient console URL and stays verbatim."
+  },
+  "tunnel.status.tunnel_disabled.label": {
+    "role": "short connector state label",
+    "tone": "Plain, lowercase fragment",
+    "note": "The tunnel was switched off by its owner in the Radient web console."
+  },
+  "tunnel.status.tunnel_inactive.detail": {
+    "role": "connector refusal sentence shown on the phone, desktop and terminal",
+    "tone": "Plain, calm, actionable",
+    "note": "The tunnel is suspended by Radient but billing is in order; the fix is the Reconnect action in Local Operator's phone access setup (no payment). 'phone access' is the product feature name for mobile remote access. Never names a command: the sentence reaches the phone, the desktop callout and the TUI card. {url} is the Radient console URL and stays verbatim."
+  },
+  "tunnel.status.tunnel_inactive.label": {
+    "role": "short connector state label (lop tunnel status, desktop)",
+    "tone": "Plain, lowercase fragment",
+    "note": "Radient has paused phone access although billing is in order; the connector keeps reconnecting by itself. Shown after 'Connector: retrying — ' on one line."
   }
 }

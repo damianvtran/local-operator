@@ -3461,6 +3461,7 @@ async def test_status_json_reports_the_park_the_login_and_the_remedy(
     # the command that re-points the device instead.
     assert payload["login"]["state"] == "owner_missing"
     assert payload["remedy"] == {
+        "kind": "restore_owner",
         "command": gateway.TERMINAL_REMEDY[gateway.OWNER_MISSING],
         "url": gateway.CONSOLE_URL,
     }
@@ -3481,6 +3482,7 @@ def test_the_remedy_for_a_gone_login_is_the_repoint_not_a_sign_in() -> None:
     missing = {"credential_id": 19, "state": gateway.OWNER_MISSING}
     refused = {"credential_id": 19, "state": "login_required"}
     repoint = {
+        "kind": "restore_owner",
         "command": gateway.TERMINAL_REMEDY[gateway.OWNER_MISSING],
         "url": gateway.CONSOLE_URL,
     }
@@ -3492,6 +3494,7 @@ def test_the_remedy_for_a_gone_login_is_the_repoint_not_a_sign_in() -> None:
     assert report.remedy({"stopped": False}, {"remedy": None}, missing) == repoint
     assert report.remedy({"stopped": False}, parked_sign_in, missing) == repoint
     assert report.remedy({"stopped": False}, parked_sign_in, refused) == {
+        "kind": "sign_in",
         "command": gateway.TERMINAL_REMEDY[LOGIN_REQUIRED],
         "url": CONSOLE_URL,
     }
@@ -3500,6 +3503,7 @@ def test_the_remedy_for_a_gone_login_is_the_repoint_not_a_sign_in() -> None:
         "remedy": {"command": "lop tunnel connect", "url": CONSOLE_URL},
     }
     assert report.remedy({"stopped": False}, parked_reconnect, missing) == {
+        "kind": "run",
         "command": "lop tunnel connect",
         "url": CONSOLE_URL,
     }
@@ -3556,6 +3560,7 @@ async def test_a_login_that_is_gone_is_never_reported_as_sign_in_expired(
     payload = json.loads(await dispatch(parser.parse_args(["tunnel", "status", "--json"])))
     assert payload["login"] == {"credential_id": 19, "state": "owner_missing"}
     assert payload["remedy"] == {
+        "kind": "restore_owner",
         "command": gateway.TERMINAL_REMEDY[gateway.OWNER_MISSING],
         "url": gateway.CONSOLE_URL,
     }

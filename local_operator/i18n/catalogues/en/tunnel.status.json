@@ -1,4 +1,11 @@
 {
+  "tunnel.status.billing_inactive.detail": "Phone access isn't turned on for this Radient account yet. Open phone access setup in Local Operator on that computer and accept the monthly price.",
+  "tunnel.status.billing_inactive.label": "billing not activated",
+  "tunnel.status.billing_lapsed.detail": "Your Radient balance has run out, so phone access is paused. Add credit at {url}; it reconnects by itself once the balance is restored.",
+  "tunnel.status.billing_lapsed.label": "billing lapsed",
+  "tunnel.status.card_add_credit": "Add Radient credit to resume phone access",
+  "tunnel.status.card_open_console": "Turn phone access on in the Radient console",
+  "tunnel.status.card_paused": "paused by Radient",
   "tunnel.status.create.conflict_unmatched": "Radient says a tunnel for this request already exists, but this login's tunnel list has no single matching record. Check lop tunnel list, then connect it with lop tunnel connect --tunnel-id <id>.",
   "tunnel.status.gateway.listening_http_status": "Something is listening on the relay gateway port 127.0.0.1:{port}, but it answered the health check with HTTP {status}: another program may hold the port, or the gateway is unhealthy. Reinstalling will not help.",
   "tunnel.status.gateway.listening_timed_out": "The local relay gateway is listening on 127.0.0.1:{port}, but its health answer timed out; reinstalling will not help.",
@@ -11,5 +18,9 @@
   "tunnel.status.requests.no_response": "no response",
   "tunnel.status.server_unavailable.label": "Radient server error",
   "tunnel.status.server_unavailable.relay": "Radient answered this computer's relay authorization check with a temporary server error. Nothing is wrong with the login or this computer; it reauthorizes by itself once Radient recovers.",
-  "tunnel.status.server_unavailable.terminal": "Radient answered the connector's authorization check with a temporary server error (HTTP 5xx), so the login and this computer are not at fault. It retries every 10 seconds and reauthorizes by itself once Radient recovers; no local command is needed."
+  "tunnel.status.server_unavailable.terminal": "Radient answered the connector's authorization check with a temporary server error (HTTP 5xx), so the login and this computer are not at fault. It retries every 10 seconds and reauthorizes by itself once Radient recovers; no local command is needed.",
+  "tunnel.status.tunnel_disabled.detail": "Phone access for this computer is turned off in the Radient console. Turn it back on at {url}; it reconnects by itself.",
+  "tunnel.status.tunnel_disabled.label": "tunnel turned off in the console",
+  "tunnel.status.tunnel_inactive.detail": "Radient has paused phone access for this computer, but billing is in order. Reconnect phone access in Local Operator on the computer running it; it also keeps retrying by itself. If it stays paused, review it in the Radient console at {url}.",
+  "tunnel.status.tunnel_inactive.label": "paused by Radient — reconnecting"
 }

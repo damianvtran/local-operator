@@ -40,8 +40,26 @@ def test_a_control_plane_5xx_is_a_transient_server_error_not_a_refusal(status):
         assert authorization_failure_reason(outer) == gateway.SERVER_UNAVAILABLE
 
 
-@pytest.mark.parametrize("status", [401, 403, 409])
+@pytest.mark.parametrize("status", [401, 409])
 def test_a_4xx_still_reads_as_a_refusal(status):
+    assert authorization_failure_reason(_server_error(status)) == gateway.REFUSED
+
+
+@pytest.mark.parametrize(
+    "status,reason", [(403, gateway.TUNNEL_INACTIVE), (402, gateway.BILLING_INACTIVE)]
+)
+def test_a_403_or_402_names_the_inactive_tunnel_not_the_login(status, reason):
+    # `/connect` answers 403 for any non-active tunnel (402 is billing): before
+    # this reason they read as `REFUSED`, whose remedy is a sign-in that cannot
+    # clear billing or a console state. Only the `/connect` raise site wraps the
+    # refusal in `TunnelInactive` (#3945 round 1, R2); a bare 402/403 from any
+    # other read (the poller's `GET <tunnel>`) stays an authorization refusal.
+    from local_operator.tunnels.errors import TunnelInactive
+
+    wrapped = TunnelInactive(reason)
+    wrapped.__cause__ = _server_error(status)
+    assert authorization_failure_reason(wrapped) == reason
+    assert classify_failure(wrapped).reason == reason
     assert authorization_failure_reason(_server_error(status)) == gateway.REFUSED
 
 

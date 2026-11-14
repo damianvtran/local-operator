@@ -192,6 +192,7 @@ def _consumer_defaults() -> dict[str, object]:
         DEFAULT_SIDEBAR_VISIBLE,
     )
     from local_operator.tui.theme import DEFAULT_THEME
+    from local_operator.tunnels.install import AUTO_SETUP_DEFAULT
     from local_operator.ui_console.policy import (
         DEFAULT_LIVE_LIMIT,
         DEFAULT_OWNER_LIMIT,
@@ -333,6 +334,7 @@ def _consumer_defaults() -> dict[str, object]:
         # this constant — the reader's own fallback, not a restatement).
         "network.rollout_on_update": DEFAULT_ROLLOUT_ON_UPDATE,
         "memory.enabled": MEMORY_DEFAULT_ENABLED,
+        "tunnel.auto_setup_after_login": AUTO_SETUP_DEFAULT,
         "memory.capture": MEMORY_DEFAULT_ENABLED,
         "memory.capture.locators": LOCATORS_DEFAULT_ENABLED,
         "memory.suggest": MEMORY_DEFAULT_ENABLED,

@@ -1,0 +1,83 @@
+{
+ "schema": 1,
+ "audit_id": "a4",
+ "audit_kind": "independent_translation_audit",
+ "locale": "hi",
+ "namespace": "tunnel.status",
+ "source_sha256": "e2bc8c63d3124c363252511306fd3951917ab9f93a2398c49cac8c79302aa8f9",
+ "target_sha256": "0889cda75b5bd52926ff634d516a61d6e9e6238daeecca351c0d52b23c08fe0e",
+ "round": 4,
+ "audit_date": "2026-11-14",
+ "key_count": 24,
+ "keys_audited": 24,
+ "keys_in_scope": 8,
+ "keys_new_in_scope": 3,
+ "keys_changed_in_scope": 5,
+ "scope_keys": [
+  "tunnel.status.tunnel_inactive.label",
+  "tunnel.status.tunnel_inactive.detail",
+  "tunnel.status.tunnel_disabled.detail",
+  "tunnel.status.billing_lapsed.detail",
+  "tunnel.status.billing_inactive.detail",
+  "tunnel.status.card_paused",
+  "tunnel.status.card_add_credit",
+  "tunnel.status.card_open_console"
+ ],
+ "source_audit_revision": "7c0fc7bf22aade04f78c367c906374b73a1914d7",
+ "scope": "7c0fc7bf2..working tree (uncommitted #3945 round-1 remediation catalogue changes)",
+ "prior_audit": "i18n/audits/evidence/hi/tunnel.status/a3/record.json",
+ "pr": "https://github.com/damianvtran/local-operator/pull/3945 (round-1 remediation, branch fix/tunnel-remedies-auto-up)",
+ "translator": {
+  "agent": "i18n-translator subagent, Local Operator session c0c9e9803405 (#3945 round-1 remediation, uncommitted on 7c0fc7bf2); English source drafted by coder session 889b9f67edf5",
+  "model": "anthropic/claude-opus-5-5 (read from session c0c9e9803405 transcript metadata; not otherwise verified)",
+  "date": "2026-11-14"
+ },
+ "auditor": {
+  "agent": "i18n-auditor, independent `task` subagent, session dff33b90744d; neither the i18n-translator (c0c9e9803405) nor the English-drafting coder (889b9f67edf5); did not edit any value",
+  "session": "dff33b90744d",
+  "model": "anthropic/claude-opus-5-5",
+  "independent_from_translator_session": true,
+  "actual_model_source": "harness system prompt of session dff33b90744d (`Model: anthropic/claude-opus-5-5`); no provider fallback disclosed during the audit"
+ },
+ "input_hashes": {
+  "en": {
+   "path": "local_operator/i18n/catalogues/en/tunnel.status.json",
+   "sha256": "e2bc8c63d3124c363252511306fd3951917ab9f93a2398c49cac8c79302aa8f9"
+  },
+  "context": {
+   "path": "local_operator/i18n/catalogues/en/tunnel.status.context.json",
+   "sha256": "78580b806d2acc2c0c84bcf2655b62ea5ae847bf206c43134762e288bba8695d"
+  },
+  "target": {
+   "path": "local_operator/i18n/catalogues/hi/tunnel.status.json",
+   "sha256": "0889cda75b5bd52926ff634d516a61d6e9e6238daeecca351c0d52b23c08fe0e"
+  },
+  "glossary": {
+   "path": "i18n/glossary.md",
+   "sha256": "a576d5a4b2718ba79a70a42600e3b6233ea28d716b1e2d996a208ac8dd7fabdb"
+  },
+  "style_guide": {
+   "path": "i18n/style-guides/hi.md",
+   "sha256": "82292dc8d13fcc93dc752457719264aed3cc20bb65ecfaba0f0e5a31f4cb40d5"
+  }
+ },
+ "artifacts": {
+  "report.md": "7f1e3bfb9b865300548640bb3d79c73988468cdda9d34f189fe2669ca1c955e5",
+  "audit.log": "fa7d8efe96c02aafe7634e1a4a5bbc07585470214bb5fdf7daea79d97f941929"
+ },
+ "audit_notes_not_execution_log": "report.md is reasoning; audit.log is the captured stdout/stderr of the commands it lists (git rev-parse, git diff --stat, sha256sum, check.py --catalogues-only, mech.py, ledger.py history-sha). dryrun.log is the captured ledger.py append --dry-run output. mech.py is session-scratch tooling; its source is not retained here.",
+ "current_report_verdict": {
+  "status": "passed",
+  "unresolved_blocker_major_count": 0,
+  "finding_ids": [
+   "HI-05"
+  ],
+  "findings_by_severity": {
+   "blocker": 0,
+   "major": 0,
+   "minor": 0,
+   "nit": 1
+  }
+ },
+ "staged_not_committed": true
+}

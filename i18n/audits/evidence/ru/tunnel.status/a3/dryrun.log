@@ -1,0 +1,3 @@
+$ .venv/bin/python scripts/i18n/ledger.py append --receipt $SCRATCH/audit-es-fr-ru/ledger/ru.tunnel.status.json --expected-history-sha e5b460825f62f10385462cf330e3f21d2216054b94482f977558cd183a485422 --dry-run
+i18n/audit-history/ru/tunnel.status.json
+exit=0

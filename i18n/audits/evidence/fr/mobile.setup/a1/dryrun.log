@@ -1,0 +1,3 @@
+$ .venv/bin/python scripts/i18n/ledger.py append --receipt $SCRATCH/i18n-tunnel-remedies/fr.mobile.setup.json --expected-history-sha 7c5068e961d825c47ea2d7d4b9fec29ad700f35d0cd8114f35f0c2ce6702e9f5 --dry-run
+i18n/audit-history/fr/mobile.setup.json
+exit=0

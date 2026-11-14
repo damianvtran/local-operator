@@ -77,5 +77,20 @@
   "mobile.setup.corrupt_intent": "The saved phone setup request is invalid. Leave create.json unchanged and ask your agent to recover the original request before retrying. No setup changes were made.",
   "mobile.setup.title_repoint": "Phone access needs reconnecting to this device’s newer sign-in",
   "mobile.setup.repoint": "A newer sign-in to the same Radient account is already on this device. Reconnect phone access to that sign-in — same account, same phone address.",
-  "mobile.setup.repointed": "Reconnected phone access to this device’s newer sign-in for the same account (credential {id})."
+  "mobile.setup.repointed": "Reconnected phone access to this device’s newer sign-in for the same account (credential {id}).",
+  "mobile.setup.disabled": "Phone access for this computer is turned off in the Radient console. It reconnects by itself once it is back on; setup will not override that choice.",
+  "mobile.setup.billing_lapsed": "Your Radient balance has run out, so phone access is paused. Setup never purchases credit; phone access reconnects by itself once the balance is restored.",
+  "mobile.setup.reconnect": "Radient has paused phone access for this computer, but billing is in order. Reconnecting brings it back; nothing is charged.",
+  "mobile.setup.network": "This computer could not reach Radient (its network may have changed or dropped). Phone access reconnects by itself once the connection is back. You don't need to do anything.",
+  "mobile.setup.radient_unavailable": "Radient answered with a temporary server error. Nothing is wrong with this computer or its sign-in; phone access reconnects by itself once Radient recovers.",
+  "mobile.setup.reconnecting": "Phone access is reconnecting in the background after your sign-in. Nothing is charged; this clears by itself in a minute or two.",
+  "mobile.setup.login_offer": "Reach this computer from the phone app: run /mobile enable. Any monthly price is shown to you before billing starts.",
+  "mobile.setup.title_reconnect": "Phone access is paused by Radient",
+  "mobile.setup.title_billing_lapsed": "Phone access needs more Radient credit",
+  "mobile.setup.title_disabled": "Phone access is turned off in the Radient console",
+  "mobile.setup.title_network": "Phone access is waiting for the network",
+  "mobile.setup.title_radient_unavailable": "Phone access is waiting for Radient",
+  "mobile.setup.title_reconnecting": "Phone access is reconnecting",
+  "mobile.setup.action_add_credit": "Add credit in the Radient console: {url}",
+  "mobile.setup.action_open_console": "Turn phone access back on in the Radient console: {url}"
 }

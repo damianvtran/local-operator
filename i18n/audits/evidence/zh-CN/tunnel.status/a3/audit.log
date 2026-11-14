@@ -1,0 +1,63 @@
+$ git rev-parse HEAD
+1fce7ecb1f5fb587e7b91ef2f9c7fe658521e0d0
+exit=0
+$ git diff --stat 1fce7ecb1f5f~1..1fce7ecb1f5f -- 'local_operator/i18n/catalogues/en/tunnel.status*' 'local_operator/i18n/catalogues/en/mobile.setup*' 'local_operator/i18n/catalogues/en/wire.phone_access*' 'local_operator/i18n/catalogues/vi/' 'local_operator/i18n/catalogues/zh-CN/'
+ .../i18n/catalogues/en/mobile.setup.context.json   | 35 +++++++++++++++++++
+ .../i18n/catalogues/en/mobile.setup.json           |  9 ++++-
+ .../i18n/catalogues/en/tunnel.status.context.json  | 40 ++++++++++++++++++++++
+ .../i18n/catalogues/en/tunnel.status.json          | 10 +++++-
+ .../catalogues/en/wire.phone_access.context.json   | 22 ++++++++++++
+ .../i18n/catalogues/en/wire.phone_access.json      |  6 ++++
+ .../i18n/catalogues/vi/mobile.setup.json           |  9 ++++-
+ .../i18n/catalogues/vi/tunnel.status.json          | 10 +++++-
+ .../i18n/catalogues/vi/wire.phone_access.json      |  6 ++++
+ .../i18n/catalogues/zh-CN/mobile.setup.json        |  9 ++++-
+ .../i18n/catalogues/zh-CN/tunnel.status.json       | 10 +++++-
+ .../i18n/catalogues/zh-CN/wire.phone_access.json   |  6 ++++
+ 12 files changed, 166 insertions(+), 6 deletions(-)
+exit=0
+$ PYTHONPATH=$PWD .venv/bin/python scripts/i18n/check.py --catalogues-only
+check.py: catalogue checks: 0 problem(s)
+exit=0
+$ .venv/bin/python $LOCAL_OPERATOR_SCRATCHPAD/i18n-tunnel-remedies/mech.py $PWD
+en tunnel.status catalogue_sha256 b368acfb0cdee89c8de5a210fc9956251701a9f3f73c88b1096611d0c1f9063f file_sha256 b368acfb0cdee89c8de5a210fc9956251701a9f3f73c88b1096611d0c1f9063f keys 21
+vi tunnel.status catalogue_sha256 df6e1132957448034b7470e95792783dd9e892ad84720b71c7e1fa6d5a620a1a file_sha256 df6e1132957448034b7470e95792783dd9e892ad84720b71c7e1fa6d5a620a1a keys 21 new 8 mechanical: OK | 'đường hầm' 0; 'tín dụng' 1; 'quý khách' 0; 'bạn' 0
+zh-CN tunnel.status catalogue_sha256 b5ae3b1046bf0dbc02ce8e8f7e83f51bbd18bc9cc56b1b413f79d9b21f41768c file_sha256 b5ae3b1046bf0dbc02ce8e8f7e83f51bbd18bc9cc56b1b413f79d9b21f41768c keys 21 new 8 mechanical: OK | '请' in new keys 4; '您' 0; '点数' 0; '额度' 0
+en mobile.setup catalogue_sha256 6883f92e94dfcec4be0af6041a0531c974fbf18294f7094a132cc555a2ad2065 file_sha256 6883f92e94dfcec4be0af6041a0531c974fbf18294f7094a132cc555a2ad2065 keys 86
+vi mobile.setup catalogue_sha256 2fae6ac3321a41639515cfbb6cd451ee724c3c567d94472ab983cf080c1b44ca file_sha256 2fae6ac3321a41639515cfbb6cd451ee724c3c567d94472ab983cf080c1b44ca keys 86 new 7 mechanical: OK | 'đường hầm' 0; 'tín dụng' 2; 'quý khách' 0; 'bạn' 3
+zh-CN mobile.setup catalogue_sha256 c696f2ea4828c70b8f8e542aa8beba0e7a41de1169f0138627500a04f0f076fc file_sha256 c696f2ea4828c70b8f8e542aa8beba0e7a41de1169f0138627500a04f0f076fc keys 86 new 7 mechanical: OK | '请' in new keys 2; '您' 0; '点数' 1; '额度' 0
+en wire.phone_access catalogue_sha256 2979b226db50db768fcad68f5f7376854f2185b08e6b0af08eb8e72bdb470f58 file_sha256 2979b226db50db768fcad68f5f7376854f2185b08e6b0af08eb8e72bdb470f58 keys 4
+vi wire.phone_access catalogue_sha256 4ba3314d237eab53fb40ef40f91d218404f4e4324ce56fd96b3a98de69ad9074 file_sha256 4ba3314d237eab53fb40ef40f91d218404f4e4324ce56fd96b3a98de69ad9074 keys 4 new 4 mechanical: OK | 'đường hầm' 0; 'tín dụng' 2; 'quý khách' 0; 'bạn' 2
+zh-CN wire.phone_access catalogue_sha256 a5ca3ff66513d0d487bd4f6084d23d63fbcf7a5db3ca5a0d096a291ab087feed file_sha256 a5ca3ff66513d0d487bd4f6084d23d63fbcf7a5db3ca5a0d096a291ab087feed keys 4 new 4 mechanical: OK | '请' in new keys 0; '您' 0; '点数' 2; '额度' 0
+exit=0
+$ python3 scripts/i18n/ledger.py history-sha --locale vi --namespace tunnel.status
+7fa2ca421925c44f5143dba82dd64afe72c861cb4ded6cd11dfd04ef626fe9ea
+exit=0
+$ python3 scripts/i18n/ledger.py history-sha --locale vi --namespace mobile.setup
+83dcbad3fd53e560443aaba7c34cb89cf9666a43bd717ba3efc8ebf6ba5250c2
+exit=0
+$ python3 scripts/i18n/ledger.py history-sha --locale vi --namespace wire.phone_access
+4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945
+exit=0
+$ python3 scripts/i18n/ledger.py history-sha --locale zh-CN --namespace tunnel.status
+f7684438a29ab31a65b204654c4242ee05473a6b678ddf62d11127c879ae3fa5
+exit=0
+$ python3 scripts/i18n/ledger.py history-sha --locale zh-CN --namespace mobile.setup
+529a6c444a46df06ffd1668bec5182baea855d08a05c53a9f9dcdcce8a887663
+exit=0
+$ python3 scripts/i18n/ledger.py history-sha --locale zh-CN --namespace wire.phone_access
+4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945
+exit=0
+$ prior last-row status per (locale, namespace) vs parent en hash
+parent en tunnel.status sha256 e5e82a9ab8bc9bc5cfdf3d39d034056d822251f1d759582c8826b27c46d6218a
+vi tunnel.status last row: passed e5e82a9ab8bc9bc5cfdf3d39d034056d822251f1d759582c8826b27c46d6218a a2 13 0
+zh-CN tunnel.status last row: passed e5e82a9ab8bc9bc5cfdf3d39d034056d822251f1d759582c8826b27c46d6218a a2 13 0
+parent en mobile.setup sha256 f38364c1895f79f93c5565d5d5f3047065cb68ebb0b8954e429c2ea9ad6800b4
+vi mobile.setup last row: passed f38364c1895f79f93c5565d5d5f3047065cb68ebb0b8954e429c2ea9ad6800b4 r1 3 0
+zh-CN mobile.setup last row: passed f38364c1895f79f93c5565d5d5f3047065cb68ebb0b8954e429c2ea9ad6800b4 r1 3 0
+$ git diff 1fce7ecb1f5f~1..1fce7ecb1f5f -U0 -- vi/zh-CN mobile.setup tunnel.status (removed lines only)
+-  "mobile.setup.repointed": "Đã kết nối lại truy cập điện thoại với lần đăng nhập mới hơn trên thiết bị này cho cùng tài khoản (thông tin xác thực {id})."
+-  "tunnel.status.server_unavailable.terminal": "Radient đã trả lời bước kiểm tra ủy quyền của trình kết nối bằng một lỗi máy chủ tạm thời (HTTP 5xx), nên không phải lỗi của thông tin đăng nhập hay máy tính này. Trình kết nối thử lại mỗi 10 giây và tự ủy quyền lại khi Radient hoạt động trở lại; không cần chạy lệnh nào trên máy."
+-  "mobile.setup.repointed": "已为同一账户将手机访问重新连接到此设备较新的登录（凭据{id}）。"
+-  "tunnel.status.server_unavailable.terminal": "Radient对连接器的授权检查返回了临时服务器错误（HTTP 5xx），问题不在登录，也不在这台电脑。它每10秒重试一次，Radient恢复后会自动重新授权；无需执行任何本地命令。"
+exit=0
