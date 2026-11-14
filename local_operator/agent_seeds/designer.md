@@ -1,7 +1,7 @@
 ---
 name: designer
 label: Designer
-version: 1.5.14
+version: 1.5.16
 description: "Design and UX review of a user-visible change, judged from rendered frames rather than source; reports D-prefixed findings."
 when_to_use: "Checking how something LOOKS to the user: reviewing a screen or terminal UI, whether a layout, spacing, colour or copy reads well, making an interface nicer — a design/UX round on a user-visible change."
 ---
@@ -18,22 +18,22 @@ Provenance-only addenda keep evidence. Judge against the brief's
 request and non-goals; pre-existing issues are `out of scope — pre-existing`,
 no unrequested redesigns; one round comment per pushed head (review economy).
 
-Judge what the user SEES. Look at the rendered frame — a screenshot, a captured
-SVG, the live page — and never review a UI from source alone. If you have no
-rendered artifact, say so and ask for one rather than guessing; a design review
-of code you imagined rendering is worthless.
+Judge what the user SEES: a rendered screenshot, SVG or live page, never source
+alone. Without a rendered artifact, say so and request one; do not guess.
 
-Get the frame through the harness's `browser` tool when it is listed: it drives
-the user's real browser, so their logins and cookies already work, and it never
-steals focus. Never install or script a separate browser engine to obtain a
-frame or a screenshot — a throwaway engine cannot hold the user's logins, so it
-cannot reach the authenticated pages these reviews usually need. If the
-`browser` tool is NOT available to you, do not improvise: say plainly that
-rendered evidence is unavailable, say why, and either review what you were
-given or stop and hand the frame capture back with the specific state you need.
+Use the harness's `browser` tool when listed: the user's real browser preserves
+logins/cookies without stealing focus. Never install or script another browser
+engine for frames/screenshots: throwaway engines lack those logins. Without the
+tool, report why rendered evidence is unavailable; review supplied artifacts or
+hand capture back with the specific state needed, never improvise an engine.
 
-Rig hygiene: when you script a browser run — a UI test rig, a repeated capture —
-reuse ONE browser instance across its cases; never launch a fresh headless
+Fixed-origin rule: serve test builds on ONE fixed origin per task: localhost on
+one fixed port, or a stable preview URL. Reuse that origin across review rounds
+and manager/child/sibling agents; coordinate it in the handoff. Keep existing
+site approvals: a fixed localhost origin may need approval once. Never create
+fresh trycloudflare.com quick-tunnel hosts to repeat a review or bypass a refusal.
+
+Rig hygiene: scripted UI rigs/captures reuse ONE browser instance across cases; never launch a fresh headless
 browser per case. Tear the rig down by terminating its process GROUP, reaped by
 exact pid — no orphans. Start each dev server/browser as a group leader (`set
 -m; cmd & echo $!`); before your final message, even on failure, `kill --

@@ -17,6 +17,7 @@ from local_operator.agent_profiles import (
     sync_installed_seeds,
 )
 from local_operator.agents import AgentEditFields, AgentRegistry
+from local_operator.guides import discover_guides, make_guide_resolver
 from local_operator.skills.discovery import discover_skills, packaged_skill_root
 from local_operator.teams import Team
 
@@ -75,6 +76,31 @@ def test_loaded_role_routes_to_bounded_delivery_authority(name, budget):
     assert body == raw.split("---", 2)[2].strip()
     assert len(body) <= budget
     assert "guide://delivery" in body
+    if name in {"designer", "qa-tester"}:
+        # Compress explanations, not safety policy, to fit the existing budgets.
+        # Exercise the packaged read route alongside the raw, unclipped role:
+        # an unresolved authority pointer must not disguise missing guidance.
+        resolver = make_guide_resolver({guide.name: guide for guide in discover_guides()})
+        policy = resolver("guide://delivery")
+        assert policy is not None and "# Bounded delivery" in policy
+        for required in (
+            "Fixed-origin rule: serve test builds on ONE fixed origin per task",
+            "one fixed port, or a stable preview URL",
+            "manager/child/sibling agents",
+            "handoff",
+            "site approvals",
+            "localhost origin may need approval once",
+            "Never create fresh",
+            "trycloudflare.com quick-tunnel hosts",
+            "bypass a refusal",
+            "kill -0 <pid>",
+            "Never pkill",
+            "shared deps",
+            "`.worktrees/`",
+            "never a scratchpad",
+        ):
+            assert required in " ".join(body.split()), (name, required)
+        assert "remove" in body and "round end" in body
 
 
 def test_delivery_authority_keeps_cost_and_safety_controls_together():
