@@ -1,0 +1,74 @@
+{
+  "schema": 1,
+  "locale": "ru",
+  "namespace": "cli.permissions",
+  "history_sha256": "6f0713a0acd14af0c885dac1f0d1f2082935b88a93eb95edfd7318a4410acfa2",
+  "entries": [
+    {
+      "locale": "ru",
+      "namespace": "cli.permissions",
+      "source_sha256": "eba1e1dd19a618fa8c46a3744197afd2dfa4e84b6774f16b20e8de389f4dbf8f",
+      "translator": {
+        "agent": "coder agent of PR #3691",
+        "session": "ad99821ab9e1",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-09"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (lopdev team subagent)",
+        "session": "741233d88cd4",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-09",
+        "result": "changes_requested",
+        "findings": 9,
+        "unresolved_blocker_major": 2
+      },
+      "status": "changes_requested",
+      "note": "Independent ru audit pa1: changes_requested, 0B/2M/5m/2n. R1 runtime must be «рантайм» (13 keys), R2 «сеансы»→«сессии». Record: i18n/audits/evidence/ru/cli.permissions/pa1/record.json"
+    },
+    {
+      "locale": "ru",
+      "namespace": "cli.permissions",
+      "source_sha256": "d5eed4044348f0fa462e1238209230507a48eb5e018b22c7a8b971b518d3f186",
+      "translator": {
+        "agent": "i18n-translator (ru, PR #3691 round-2 wave; commit 788cc399410)",
+        "session": null,
+        "model": null,
+        "date": "2026-11-09"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (lopdev team subagent)",
+        "session": "a6f580403f3a",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-09",
+        "result": "changes_requested",
+        "findings": 4,
+        "unresolved_blocker_major": 2
+      },
+      "status": "changes_requested",
+      "note": "Independent ru re-audit pb2: changes_requested, 0B/2M/1m/1n; pa1 R1-R9 applied. P1 tab «Контроль доступа»→«Доступ», P2 «Всегда разрешать»→«Разрешать всегда» (Apple ru tables). Record: i18n/audits/evidence/ru/cli.permissions/pb2/record.json"
+    },
+    {
+      "locale": "ru",
+      "namespace": "cli.permissions",
+      "source_sha256": "58e58c3b19a07c024b609f614e686cc9a72def77e3de704870f0557e84e7be41",
+      "translator": {
+        "agent": "i18n-translator (ru, PR #3691 round-3 wave; commit 85fb35811f9)",
+        "session": null,
+        "model": null,
+        "date": "2026-11-09"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (lopdev team subagent)",
+        "session": "7b05bb0e2f09",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-09",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Independent ru re-audit pc3: passed, 0B/0M/0m/0n. pb2 P1-P4 fixed (Apple ru tables: «Доступ», «Разрешать всегда»); status.scope, already_signed, new always_allow_kept OK. Record: i18n/audits/evidence/ru/cli.permissions/pc3/record.json"
+    }
+  ]
+}

@@ -1,0 +1,292 @@
+{
+  "record_type": "candidate_independent_locale_audit",
+  "locale": "fr",
+  "namespace": "wire.errors.sdk_spec",
+  "head_sha": "cf5c90bad0d1e6745d9bc7e0d85f9aee5c084b55",
+  "scope": "dfc7411cac4..cf5c90bad0d1",
+  "audit_date": "2026-11-10",
+  "audited_at": "2026-11-10T01:13:51.894730+00:00",
+  "key_count": 21,
+  "translator": {
+    "agent": "i18n-translator",
+    "model": "anthropic/claude-sonnet-5-5",
+    "session": null,
+    "source": "delegation brief; session id not supplied"
+  },
+  "auditor": {
+    "agent": "i18n-auditor",
+    "session": "e94e8375895d",
+    "model": "openai/gpt-6.1-sol",
+    "actual_model_source": "session-state Model header",
+    "fallback": null,
+    "independent_from_translator_session": true
+  },
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/wire.errors.sdk_spec.json",
+      "sha256": "a92bc479321cd0ee938d338cff05c1fced88590df3d43ec39d14f4d7b3cf5855"
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/wire.errors.sdk_spec.context.json",
+      "sha256": "8735964058f901e1d97527801eb88f5a36585f0d7713c1e21f7f98ebaa55418e"
+    },
+    "fr": {
+      "path": "local_operator/i18n/catalogues/fr/wire.errors.sdk_spec.json",
+      "sha256": "e50078912a982dd2bb1ee9d77874cd28b8b2899dffa866e5db70e5711106ebe4"
+    }
+  },
+  "target_sha256": "e50078912a982dd2bb1ee9d77874cd28b8b2899dffa866e5db70e5711106ebe4",
+  "english_sha256": "a92bc479321cd0ee938d338cff05c1fced88590df3d43ec39d14f4d7b3cf5855",
+  "findings": [
+    {
+      "id": "FR1",
+      "severity": "major",
+      "key": "wire.errors.sdk_spec.spawn_model_pair_required",
+      "current_text": "spawn_session() transmet hosting/model à un NOUVEAU runtime comme un seul échantillon de création ; indiquez les deux, ou aucun (l’enfant résout alors son modèle depuis la configuration de la racine).",
+      "problem": "The sidecar explicitly preserves the literal NEW; NOUVEAU does not preserve it. All five existing non-English peers also translate this marker, but precedent is not a waiver of the explicit preservation contract. No guard-side regression is claimed.",
+      "suggested_value": "spawn_session() transmet le couple hosting/model à un runtime NEW dans un même ensemble de paramètres initiaux ; indiquez les deux, ou aucun (l’enfant résout alors son modèle depuis la configuration de la racine).",
+      "evidence": "en/wire.errors.sdk_spec.context.json: spawn_model_pair_required, note: Preserve technical tokens: spawn_session(), hosting/model, NEW. Tiny byte check: rendered French is missing NEW.",
+      "terminology_precedent": "fr/wire.errors.sdk_startup.json:wire.errors.sdk_startup.attach_runtime_missing accepts runtime and spawn_session(); no sibling preserves NEW in this sense; NEW follows this key’s explicit sidecar."
+    },
+    {
+      "id": "FR2",
+      "severity": "major",
+      "key": "wire.errors.sdk_spec.spawn_birth_effort_pair_required",
+      "related_keys": [
+        "wire.errors.sdk_spec.spawn_model_pair_required"
+      ],
+      "current_text": "birth_effort d’une nouvelle session lancée voyage avec l’échantillon de création et exige le couple hosting/model à ses côtés ; indiquez les trois, ou ouvrez la session dans le processus courant (open_session) pour fixer un niveau initial sans couple de modèle.",
+      "related_current_text": "spawn_session() transmet hosting/model à un NOUVEAU runtime comme un seul échantillon de création ; indiquez les deux, ou aucun (l’enfant résout alors son modèle depuis la configuration de la racine).",
+      "problem": "“voyage avec l’échantillon de création” is a literal calque, not natural French developer copy. An “échantillon” normally means a sample/subset, whereas sdk.py describes the initial provider/model/effort selection carried together to the child. The companion model-pair key repeats the same unsupported rendering. Translate the concept as initial parameters, not a creation sample.",
+      "suggested_value": "birth_effort d’une nouvelle session lancée fait partie des paramètres initiaux et exige que le couple hosting/model soit également fourni ; indiquez les trois, ou ouvrez la session dans le processus courant (open_session) pour fixer un niveau initial sans couple de modèle.",
+      "related_suggested_values": {
+        "wire.errors.sdk_spec.spawn_model_pair_required": "spawn_session() transmet le couple hosting/model à un runtime NEW dans un même ensemble de paramètres initiaux ; indiquez les deux, ou aucun (l’enfant résout alors son modèle depuis la configuration de la racine)."
+      },
+      "evidence": "local_operator/sdk.py:1163–1170 and 1182–1204 describe WarmErrand carrying the birth sample/provider+model choice and enforcing the complete pair.",
+      "terminology_precedent": "No échantillon/birth-sample precedent in any other fr wire.errors.* file. fr/wire.errors.sdk_startup.json:wire.errors.sdk_startup.attach_hosting_unconfigured establishes racine and runtime; fr/wire.errors.desktop.json:wire.errors.desktop.agents_config_client_fields establishes modèle/configuration. Suggested paramètres initiaux is a contextual rendering, not a claimed shipped glossary entry."
+    },
+    {
+      "id": "FR3",
+      "severity": "minor",
+      "key": "wire.errors.sdk_spec.spawn_output_unsupported",
+      "current_text": "spawn_session() ne peut pas porter de contrainte de sortie ({fields}) ; ouvrez la session avec open_session(..., mode=''own'') puis mettez-la ensuite au travail",
+      "problem": "“mettez-la ensuite au travail” is understandable and idiomatic as a metaphor, but overly anthropomorphic for a terse SDK diagnostic; puis/ensuite are also redundant. Meaning remains recoverable, so this is non-gating.",
+      "suggested_value": "spawn_session() ne peut pas porter de contrainte de sortie ({fields}) ; ouvrez la session avec open_session(..., mode=''own'') puis confiez-lui une tâche",
+      "evidence": "English remedy is “open the session ... and engage it afterwards”, not a change to session ownership.",
+      "terminology_precedent": "fr/wire.errors.sdk_startup.json:wire.errors.sdk_startup.attach_runtime_missing uses ouvrez-le ... pour l’exécuter dans ce processus. No sibling requires the anthropomorphic phrase."
+    }
+  ],
+  "per_key_audit": [
+    {
+      "key": "wire.errors.sdk_spec.agent_identity_conflict",
+      "findings": [],
+      "mechanical": "pass",
+      "linguistic": "pass"
+    },
+    {
+      "key": "wire.errors.sdk_spec.approval_callback_gate_required",
+      "findings": [],
+      "mechanical": "pass",
+      "linguistic": "pass"
+    },
+    {
+      "key": "wire.errors.sdk_spec.approval_declared_tools_empty",
+      "findings": [],
+      "mechanical": "pass",
+      "linguistic": "pass"
+    },
+    {
+      "key": "wire.errors.sdk_spec.approval_handler_wrong_mode",
+      "findings": [],
+      "mechanical": "pass",
+      "linguistic": "pass"
+    },
+    {
+      "key": "wire.errors.sdk_spec.approval_tools_wrong_mode",
+      "findings": [],
+      "mechanical": "pass",
+      "linguistic": "pass"
+    },
+    {
+      "key": "wire.errors.sdk_spec.attach_fields_unsupported",
+      "findings": [],
+      "mechanical": "pass",
+      "linguistic": "pass"
+    },
+    {
+      "key": "wire.errors.sdk_spec.attach_output_unsupported",
+      "findings": [],
+      "mechanical": "pass",
+      "linguistic": "pass"
+    },
+    {
+      "key": "wire.errors.sdk_spec.attach_resume_required",
+      "findings": [],
+      "mechanical": "pass",
+      "linguistic": "pass"
+    },
+    {
+      "key": "wire.errors.sdk_spec.mode_invalid",
+      "findings": [],
+      "mechanical": "pass",
+      "linguistic": "pass"
+    },
+    {
+      "key": "wire.errors.sdk_spec.output_format_invalid",
+      "findings": [],
+      "mechanical": "pass",
+      "linguistic": "pass"
+    },
+    {
+      "key": "wire.errors.sdk_spec.output_retries_range",
+      "findings": [],
+      "mechanical": "pass",
+      "linguistic": "pass"
+    },
+    {
+      "key": "wire.errors.sdk_spec.output_retries_requires_format",
+      "findings": [],
+      "mechanical": "pass",
+      "linguistic": "pass"
+    },
+    {
+      "key": "wire.errors.sdk_spec.output_schema_requires_format",
+      "findings": [],
+      "mechanical": "pass",
+      "linguistic": "pass"
+    },
+    {
+      "key": "wire.errors.sdk_spec.resume_empty",
+      "findings": [],
+      "mechanical": "pass",
+      "linguistic": "pass"
+    },
+    {
+      "key": "wire.errors.sdk_spec.spawn_birth_effort_pair_required",
+      "findings": [
+        "FR2"
+      ],
+      "mechanical": "pass",
+      "linguistic": "findings"
+    },
+    {
+      "key": "wire.errors.sdk_spec.spawn_fields_unsupported",
+      "findings": [],
+      "mechanical": "pass",
+      "linguistic": "pass"
+    },
+    {
+      "key": "wire.errors.sdk_spec.spawn_model_pair_required",
+      "findings": [
+        "FR1",
+        "FR2"
+      ],
+      "mechanical": "pass",
+      "linguistic": "findings"
+    },
+    {
+      "key": "wire.errors.sdk_spec.spawn_output_unsupported",
+      "findings": [
+        "FR3"
+      ],
+      "mechanical": "pass",
+      "linguistic": "findings"
+    },
+    {
+      "key": "wire.errors.sdk_spec.tools_empty",
+      "findings": [],
+      "mechanical": "pass",
+      "linguistic": "pass"
+    },
+    {
+      "key": "wire.errors.sdk_spec.world_root_empty",
+      "findings": [],
+      "mechanical": "pass",
+      "linguistic": "pass"
+    },
+    {
+      "key": "wire.errors.sdk_spec.yolo_approval_unreachable",
+      "findings": [],
+      "mechanical": "pass",
+      "linguistic": "pass"
+    }
+  ],
+  "severity_counts": {
+    "blocker": 0,
+    "major": 2,
+    "minor": 1,
+    "nit": 0
+  },
+  "verdict": "changes_requested",
+  "checks": {
+    "execution_scope": "Tiny read-only Python string checks only; no builds, installs, test suites, browser, checkout changes or ledger writes.",
+    "repo_validator": "Executed scripts.i18n.check.check_catalogues() with catalogues.namespaces scoped to wire.errors.sdk_spec and catalogues.locales scoped to en/fr; result []. This is the actual repository catalogue validator, not the full tree ratchet.",
+    "mechanics": "21/21 keys; JSON and exact key/placeholder name+type parity pass; all French strings parsed and rendered with the repository runtime; sentinel parameters survive; no doubled apostrophes survive rendering; no plural/select messages in source/target.",
+    "apostrophe_detail": "attach_fields_unsupported has four doubled-apostrophe escapes versus five in English; spawn_model_pair_required has zero versus one in English. Both remove an English possessive and use natural French de/du phrasing. No unpaired single ASCII apostrophe exists anywhere in the target. Required mode literals render with ASCII single quotes.",
+    "typography": "No manual bidi controls. All French prose : ; ! ? have U+202F; prose apostrophes U+2019; @latest guillemets contain U+202F. Code ASCII quoting unchanged after ICU rendering.",
+    "tokens": "Explicit rendered token checks found only NEW absent in the checked preservation set; spawn_session(), open_session(..., mode='own'), hosting/model, ApprovalPolicy.auto(), @latest and ASCII yolo assignment are preserved. No Markdown/backtick/Rich spans were present to preserve.",
+    "redaction": "Raw git-show byte checks: en/fr/es contain no literal redaction-mask artifact; all three preserve the exact public ASCII assignment yolo=True. Tool display masking was distinguished from actual catalogue content with boolean byte comparisons.",
+    "existing_locale_comparison": "The five named non-English peers zh-CN/ru/vi/ur/hi each have 21 keys with source-compatible placeholders. Only placeholder and token presence was compared, never their wording. All five also lack literal NEW; this does not override the sidecar. The brief says six peers but lists five.",
+    "width": "All 21 sidecar notes explicitly say no width cap. These are multiline developer diagnostics, not fixed-size buttons/status lines; no new terminal-width risk identified from the text. No visual/runtime UI proof claimed.",
+    "execution_provenance": "This object summarizes actual commands run in this auditor session; it is audit_notes_not_execution_log, not a captured subprocess transcript."
+  },
+  "terminology_decisions": [
+    {
+      "term": "runtime / racine / identifiant / rattacher / spawn_session() / mode='own'",
+      "decision": "accept",
+      "precedent": "fr/wire.errors.sdk_startup.json:wire.errors.sdk_startup.attach_hosting_unconfigured and wire.errors.sdk_startup.attach_runtime_missing"
+    },
+    {
+      "term": "approbation",
+      "decision": "accept",
+      "precedent": "fr/wire.errors.desktop.json:wire.errors.desktop.question_no_longer_pending; glossary approvals→approbations"
+    },
+    {
+      "term": "session / modèle / configuration",
+      "decision": "accept",
+      "precedent": "fr/wire.errors.desktop.json:wire.errors.desktop.agents_config_client_fields"
+    },
+    {
+      "term": "must be one of / range / empty",
+      "decision": "accept",
+      "precedent": "fr/wire.errors.files.json:wire.errors.files.sign_route, wire.errors.files.sign_ttl, wire.errors.files.sign_path"
+    },
+    {
+      "term": "outil / équipe / objectif / profil / appelable / contrôle d’approbation",
+      "decision": "accept",
+      "precedent": "outil and équipe follow glossary/style guide; profil follows fr/wire.errors.sdk_startup.json:wire.errors.sdk_startup.profile_attach_failed. No sibling precedent for callable gate or objectif: judged from English and native developer register, not invented precedent."
+    },
+    {
+      "term": "dispose / open_session / ApprovalPolicy identifiers / spec / resume / tools / None / birth_effort / output_* / hosting/model",
+      "decision": "accept as code identifiers, not untranslated prose",
+      "precedent": "glossary §1 identifiers preserved; sidecar technical-token instructions. fr/wire.errors.sdk_startup.json:wire.errors.sdk_startup.tool_inventory_mismatch preserves spec.tools and ApprovalPolicy.declared; no sibling dispose precedent."
+    },
+    {
+      "term": "échantillon de création / NOUVEAU replacing NEW",
+      "decision": "reject",
+      "precedent": "See FR1/FR2: no valid sibling precedent for these usages; explicit source contract governs NEW."
+    }
+  ],
+  "caller_contract_assessment": "The old allowance rationale is not moot merely because five other non-English locales carry the namespace. Sidecar still requires English exception bytes. All 21 SDK guard sites in sdk.py/session/spec.py still explicitly use envelope(locale=\"en\"), so adding fr/es text alone does not localize their existing raised exceptions. I independently rendered mode_invalid with explicit en and fr: the en result stays English and the fr result changes to French. Explicit-locale messages.render/envelope consumers and the eager wire catalogue can now expose localized text rather than English fallback; wire_namespaces(fr) includes this namespace and it is not deferred, so catalogue content/cache identity changes too. Publishing translations is not a caller-contract migration.",
+  "translator_doubts": {
+    "fr_birth_sample": "FR2: reject the calque, prefer paramètres initiaux.",
+    "fr_mettez_la_au_travail": "FR3: understandable idiom, non-gating register improvement.",
+    "es_NUEVO": "Literal NEW is explicitly required by the shared sidecar. Spanish idiom is outside this French audit.",
+    "es_runtime_gate_dispose_spawn": "Spanish prose terminology not audited here; runtime is explicitly kept English in the French guide, named methods remain code. English gate/spawn would not be allowed as ordinary French prose without a recorded exception."
+  },
+  "unverified": [
+    "No full tree validator/CI/test suite under resource hold.",
+    "No SDK service or browser flow executed; only catalogue/parser rendering and source guard inspection.",
+    "This is one independent French pass, not the separate second independent audit required for high-visibility errors.",
+    "No audit ledger/evidence root written: manager explicitly requested candidate-only receipt."
+  ],
+  "current_report_verdict": {
+    "status": "changes_requested",
+    "unresolved_blocker_major_count": 2,
+    "finding_ids": [
+      "FR1",
+      "FR2",
+      "FR3"
+    ]
+  }
+}

@@ -1,0 +1,11 @@
+{"audit_id":"vp2","locale":"vi","namespace":"cli.permissions","round":2,"unresolved_blocker_major_count":0,
+ "round1_findings":[
+  {"id":"m1","status":"resolved","key":"cli.permissions.setup.always_allow"},
+  {"id":"m2","status":"resolved","key":"cli.permissions.setup.failed"},
+  {"id":"n1","status":"resolved","key":"(quoted labels)","note":"all quotes now “ ”"},
+  {"id":"n2","status":"resolved","key":"cli.permissions.status.identity.none"},
+  {"id":"n3","status":"resolved","key":"(row → mục)"},
+  {"id":"n4","status":"resolved","key":"cli.permissions.status.optin.*, setup.refused.isolated, setup.explain","note":"Ký bằng nhóm nhà phát triển"}],
+ "findings":[
+  {"id":"v2-m1","severity":"MINOR","key":"cli.permissions.setup.explain","current":"“Luôn Cho phép” sẽ không hỏi lại nữa, nhưng khi đó …","suggested":"“Luôn Cho phép” giúp macOS không hỏi lại nữa, nhưng khi đó …"},
+  {"id":"v2-n1","severity":"NIT","key":"cli.permissions.setup.explain","current":"chọn khóa cá nhân của khóa đó","suggested":"chọn khóa cá nhân tương ứng"}]}

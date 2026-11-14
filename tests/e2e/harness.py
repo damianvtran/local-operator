@@ -27,9 +27,11 @@ from __future__ import annotations
 import asyncio
 import json
 import time
-from collections.abc import AsyncIterator, Iterable, Mapping, Sequence
+from collections.abc import AsyncIterator, Callable, Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
+
+import pytest
 
 from local_operator.harness.rows import is_harness_notice_text
 from local_operator.harness.types import (
@@ -105,6 +107,20 @@ E2E_ORACLE_MODEL = ModelSpec(provider="openai", model_id="e2e-oracle-model", con
 #: that a genuinely stuck boot is reported by the assertion rather than by the
 #: watchdog, which gives a clearer message.
 ADOPT_TIMEOUT_S = 20.0
+
+#: Wall-clock backstop for :func:`settle_on`'s wait. A CATASTROPHE ceiling, not
+#: a timing assumption: the wait returns the moment the condition holds, so a
+#: fast machine pays nothing and a slow one costs nothing either. 30 s is the
+#: figure this file's siblings already treat as "the app is never going to get
+#: there" (``_wait_for_screen`` bounds itself at 30 s, ``ADOPT_TIMEOUT_S`` at
+#: 20 s), and AGENTS.md "Calibrate ceilings from CI" is the reason it is stated
+#: once here rather than tuned per call site.
+SETTLE_BOUND_S = 30.0
+
+#: Poll granularity for :func:`settle_on`. Small enough that a condition landing
+#: two or three turns after the action is observed promptly, large enough that a
+#: slow case does not spin the event loop it is waiting on.
+SETTLE_POLL_S = 0.01
 
 
 def _user_row_texts(request: ChatRequest | Mapping[str, Any]) -> list[str]:
@@ -436,6 +452,56 @@ async def drain(pilot: Any, cycles: int = 30) -> None:
     """Let the app settle: mount, layout, paint, and any queued workers."""
     for _ in range(cycles):
         await pilot.pause()
+
+
+async def settle_on(
+    pilot: Any,
+    condition: Callable[[], bool],
+    what: str,
+    *,
+    bound_s: float = SETTLE_BOUND_S,
+) -> None:
+    """Pump the pilot until ``condition`` holds, or fail naming ``what``.
+
+    The ONE wait for "an app transition finished", shared by every test that
+    would otherwise assert one tick after the key that starts it. A transition
+    in this app is not one loop turn: a key handler either posts a worker or
+    calls ``App.exit()``, and what the assertion reads afterwards is settled by
+    later turns — a worker's executor hop, ``on_turn_ended``'s dismissal of the
+    working line, or Textual unwinding the app, its workers and its screen.
+    A single ``pilot.pause()`` yields to the message pump and waits for none of
+    those, so asserting immediately lands between the hops on a loaded runner
+    and reads the pre-transition state. That is the shape of the flakes this
+    helper exists to remove (see the two call sites, and the same-class fix in
+    ``test_profile_revert_action.py``'s ``_await_profile_action_settled``).
+
+    The CONDITION is what is waited on, so the wait lasts exactly as long as the
+    work does and a slow or contended runner costs nothing — the bound only turns
+    a genuine wedge into a named failure instead of a hung shard (this suite has
+    no pytest-timeout). AGENTS.md "Wait on the event, never on the clock" is the
+    rule, and it allows a deadline in exactly this role: a backstop, never the
+    assertion. Wall-clock rather than a loop-turn count because the things being
+    awaited here include an executor round trip and Textual's own shutdown, whose
+    latencies scale with machine load — the same reasoning #3647 recorded for
+    waiting on a terminal profile-action state.
+
+    ``what`` is the condition in the operator's words, and it ends up in the
+    failure message: a wedge must say which transition never arrived, not merely
+    that a timeout elapsed. The caller keeps asserting the state afterwards, so
+    a condition that never holds FAILS here and can never pass silently.
+    """
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + bound_s
+    while True:
+        # Checked BEFORE the bound and BEFORE the pump, so a condition that
+        # becomes true on the final turn is returned rather than failed, and so
+        # a condition already true (``not app.is_running`` after a shutdown the
+        # previous pause absorbed) costs no extra turn on an app that is gone.
+        if condition():
+            return
+        if loop.time() >= deadline:
+            pytest.fail(f"waited {bound_s:g}s for {what}, and it never happened")
+        await pilot.pause(SETTLE_POLL_S)
 
 
 class LoopLiveness:

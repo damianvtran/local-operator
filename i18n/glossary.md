@@ -43,6 +43,8 @@ descriptions, prompt markers — never translates at all (RFC §2.7).
 |---|---|---|
 | session | translate | session · sesión · 会话 · сессия · phiên · سیشن · सत्र |
 | wake | translate — tool name `wake` stays | réveil · despertar · 唤醒 · пробуждение · thức dậy · بیداری¹ · जागृति¹ |
+| temporary chat | translate — one term on every surface; the relay says *temporary session* with its own `session` row (`/temporary` stays) | conversation temporaire · chat temporal · 临时对话 · временный чат · cuộc trò chuyện tạm thời · عارضی چیٹ · अस्थायी चैट |
+| keep (a temporary chat) | translate — the act that turns a temporary chat back into a retained one, never "save" | conserver · conservar · 保留 · сохранить · giữ (lại) · رکھیں · रखें |
 | agent | translate — `task(agent=…)` role names stay | agent · agente · 智能体 · агент · tác nhân · ایجنٹ · एजेंट |
 | subagent | translate | sous-agent · subagente · 子智能体 · субагент · tác nhân con · ذیلی ایجنٹ · उप-एजेंट |
 | tool | translate — tool names stay | outil · herramienta · 工具 · инструмент · công cụ · ٹول · टूल |

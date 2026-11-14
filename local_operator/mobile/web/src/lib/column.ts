@@ -64,6 +64,27 @@ export const SHORT_COLUMN_PX = 480;
  */
 export const PENDING_CARD_FRACTION = 0.6;
 export const PANEL_FRACTION = 0.4;
+/**
+ * The share of the column one ask QUESTION's text may take in an `AskCard`
+ * (asks sheet, notifications) before it scrolls inside itself. WHY: an agent
+ * once put a whole proposed team brief in a question; the card's options and
+ * free-text field then sat a screenful below it. Bounding the question text,
+ * not the card, keeps the answer controls directly beneath a short visible
+ * excerpt, whatever the question's length — the PendingCard lesson (content
+ * may scroll, the control that answers may not) applied per question.
+ */
+export const ASK_QUESTION_FRACTION = 0.3;
+
+/**
+ * A multi-question ask card's whole question stack, as a share of the column
+ * (PR #3777 code review M2). The per-question cap alone lets three long
+ * questions take ~90% of the column before their options, so the card's
+ * shared send/decline row fell off screen. Capping the stack at half the
+ * column leaves room for the sheet chrome and that row below it, while one
+ * question's capped excerpt (0.3) plus its options still fit without the
+ * stack scrolling for a typical two-question card.
+ */
+export const ASK_QUESTION_LIST_FRACTION = 0.5;
 
 /**
  * The `$skill` tray's share of the column.

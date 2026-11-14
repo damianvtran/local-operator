@@ -15,5 +15,6 @@
   "cli.global_help.propagated_resume": "id द्वारा पिछला सत्र फिर शुरू करें। सबसे हाल के लिए बिना id दें।",
   "cli.global_help.propagated_hosting": "इस रन के लिए होस्टिंग प्लेटफ़ॉर्म (जैसे anthropic, openai, openrouter)",
   "cli.global_help.propagated_model": "इस रन के लिए उपयोग किया जाने वाला मॉडल",
-  "cli.global_help.propagated_run_in": "वह कार्यशील डायरेक्टरी जिसमें ऑपरेटर चलाना है"
+  "cli.global_help.propagated_run_in": "वह कार्यशील डायरेक्टरी जिसमें ऑपरेटर चलाना है",
+  "cli.global_help.temporary": "अस्थायी चैट शुरू करें: यह इतिहास में शामिल नहीं होती और निष्क्रिय रहने के बाद हटा दी जाती है (डिफ़ॉल्ट 30 मिनट)।"
 }

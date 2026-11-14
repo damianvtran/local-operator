@@ -1,0 +1,18 @@
+{
+  "record": "i18n/audits/evidence/vi/cli.permissions/vp3/record.json",
+  "companions": {
+    "apple_labels.py.txt": "996afd38ff2eed7d53238bab6f0e675b838b5ed6529c8991923185f65a4f20e7",
+    "audit.log": "71e579e3cc8c0c1d3b7264c64c83a714acd8597034d7112a3e8aad68884b0c70",
+    "findings.json": "2e167fd9f3e4d4cef7e73dc44abd9d6c80aacd6b4ef2bbfdecd953fd9fd2960d",
+    "ledger-row.json": "759dd5be46e1bc0126ea9a00a9386493a169793cde7bbc4b5d166f453fcb8971",
+    "ledger.log": "e8ad3401f3b5d139caec47f2cb581a5a41fe5ec3c5a4aab82120d8b1d7797794",
+    "parity.py.txt": "747163b3ceeb09a2ba0212b09637592ecaf85912dae3d3e94e8d53717a2c5628",
+    "record.json": "0e5a73274a35a7744ac140db8aa18b89e58f93fd964dbd54356660b0be9f28e4",
+    "report.md": "f65d75c879939ba44cbae515eb3215ecbdcdf7095378bb3ca0ce1d9127e41242"
+  },
+  "ledger": {
+    "path": "i18n/audit-history/vi/cli.permissions.json",
+    "history_sha_before": "879c1fb002d5eac5eef54395c9662d276d1987228ee806219d888fe1ac27aafb",
+    "history_sha_after": "f7550ac109d9295ebab2b7a9fe8255d53ca94a4ede4e6e6ba5dbf9417c056513"
+  }
+}

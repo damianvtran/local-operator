@@ -1,0 +1,19 @@
+"""Mechanical parity en vs ru for cli.permissions: keys/order, placeholders, backtick spans, trailing space, line count, bullets, Latin tokens."""
+import json,re,sys
+C='local_operator/i18n/catalogues'
+en=json.load(open(f'{C}/en/cli.permissions.json'));ru=json.load(open(f'{C}/ru/cli.permissions.json'))
+print('keys en',len(en),'ru',len(ru),'same order',list(en)==list(ru),'missing',set(en)-set(ru),'extra',set(ru)-set(en))
+ph=lambda s:sorted(re.findall(r'\{[^}]*\}',s)); bt=lambda s:sorted(re.findall(r'`[^`]*`',s))
+tok=lambda s:sorted(set(re.findall(r'guide://\w+|/update\b|\[y/N\]|HOME|LOCAL_OPERATOR_\w+|~/\.local-operator|codesign|Developer ID(?: Application)?|Local Operator(?: Runtime)?|Python|macOS',s)))
+bad=0
+for k in en:
+    e,r=en[k],ru[k]; probs=[]
+    if ph(e)!=ph(r): probs.append(('placeholders',ph(e),ph(r)))
+    if bt(e)!=bt(r): probs.append(('backticks',bt(e),bt(r)))
+    if e.endswith(' ')!=r.endswith(' '): probs.append('trailing space')
+    if e.count('\n')!=r.count('\n'): probs.append('newlines')
+    if [l.startswith('- ') for l in e.split('\n')]!=[l.startswith('- ') for l in r.split('\n')]: probs.append('bullet prefixes')
+    if tok(e)!=tok(r): probs.append(('tokens',tok(e),tok(r)))
+    if probs: bad+=1; print('PROBLEM',k,probs)
+print('keys with problems:',bad)
+print('setup.explain ru full:'); print(ru['cli.permissions.setup.explain'])

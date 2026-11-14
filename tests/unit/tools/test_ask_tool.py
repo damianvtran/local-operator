@@ -24,7 +24,9 @@ from local_operator.tools import builtin
 from local_operator.tools.registry import create_tools
 
 
-def _questions(*, multi: bool = False, recommended: int | None = None) -> list[dict[str, Any]]:
+def _questions(
+    *, multi: bool = False, recommended: int | list[int] | None = None
+) -> list[dict[str, Any]]:
     return [
         {
             "id": "stale",
@@ -567,3 +569,35 @@ async def test_a_partially_answered_batch_reports_the_secret_as_not_provided() -
     assert result.text != builtin.ASK_SECRET_UNANSWERED_TEXT
     assert "Drop them" in result.text
     assert builtin.ASK_SECRET_NOT_PROVIDED in result.text
+
+
+@pytest.mark.asyncio
+async def test_a_list_recommendation_is_accepted_on_a_multi_select() -> None:
+    hook, seen = await _answer_with({"stale": ["Drop them"]})
+    result = await _call(_context(hook), {"questions": _questions(multi=True, recommended=[1, 0])})
+
+    assert result.is_error is False
+    question = seen[0][0]
+    assert (question.recommended, question.recommended_all) == (0, [0, 1])
+    assert [option.label for option in question.options] == [
+        "Backfill from the audit log",
+        "Drop them",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_list_recommendation_on_a_single_select_is_a_correctable_error() -> None:
+    hook, seen = await _answer_with(None)
+    result = await _call(_context(hook), {"questions": _questions(recommended=[0, 1])})
+
+    assert result.is_error is True
+    assert "several recommendations need multi=true" in result.text
+    assert seen == []
+
+
+def test_the_ask_tool_text_no_longer_claims_a_preselection() -> None:
+    from local_operator.tools.tool_docs import TOOL_NOTES
+
+    notes = repr(TOOL_NOTES["ask"])
+    assert "preselected" not in notes
+    assert "recommend several" in notes

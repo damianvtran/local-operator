@@ -466,3 +466,55 @@ def test_a_speculative_engages_residue_is_not_appended_as_a_live_row(tmp_path: P
     # would pass on a predicate that broke the append entirely.
     _publish_live(tmp_path, A)
     assert [entry.id for entry in load_catalog(tmp_path)] == [A]
+
+
+# ---------------------------------------------------------------------------
+# Temporary chats: the same gate, beside archive (contract §2.1)
+# ---------------------------------------------------------------------------
+
+
+def _temporary(root: Path, session_id: str) -> None:
+    from local_operator.session import temporary
+
+    assert temporary.write_mark(root, session_id, True, by="tui").ok
+
+
+def test_the_default_listings_hide_a_temporary_chat_and_include_temporary_reveals_it(
+    tmp_path: Path,
+) -> None:
+    _session(tmp_path, A)
+    _session(tmp_path, B)
+    _temporary(tmp_path, B)
+
+    assert sorted(name for name, _ in recent_sessions(tmp_path, limit=None)) == [A]
+    assert [(row.id, row.temporary) for row in recent_session_rows(tmp_path, limit=None)] == [
+        (A, False)
+    ]
+    revealed = recent_session_rows(tmp_path, limit=None, include_temporary=True)
+    assert sorted((row.id, row.temporary) for row in revealed) == [(A, False), (B, True)]
+    assert [entry.id for entry in load_catalog(tmp_path)] == [A]
+    catalogue = load_catalog(tmp_path, include_temporary=True)
+    assert {entry.id: entry.row.temporary for entry in catalogue} == {A: False, B: True}
+
+
+def test_a_temporary_chat_is_resolvable_by_id_and_never_searched(tmp_path: Path) -> None:
+    directory = _session(tmp_path, A)
+    _session(tmp_path, B)
+    _temporary(tmp_path, A)
+
+    assert resume_dir(tmp_path, A) == directory
+    assert [match.row.id for match in session_search.search_store(tmp_path, "about")] == [B]
+
+
+def test_the_temporary_flag_is_not_served_stale_from_the_row_cache(tmp_path: Path) -> None:
+    """Marking and keeping write nothing the transcript cache key observes."""
+    from local_operator.session import temporary
+
+    _session(tmp_path, A)
+    assert [(row.id, row.temporary) for row in cached_session_rows(tmp_path)] == [(A, False)]
+    _temporary(tmp_path, A)
+    assert cached_session_rows(tmp_path) == []
+    revealed = cached_session_rows(tmp_path, include_temporary=True)
+    assert [(row.id, row.temporary) for row in revealed] == [(A, True)]
+    assert temporary.write_mark(tmp_path, A, False, by="tui").ok
+    assert [(row.id, row.temporary) for row in cached_session_rows(tmp_path)] == [(A, False)]

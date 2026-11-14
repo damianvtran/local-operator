@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import io
+import time
+from datetime import datetime, timezone
 from types import SimpleNamespace
 from urllib.parse import parse_qs, urlsplit
 
@@ -42,13 +44,28 @@ class Clock:
         self.now += seconds
 
 
+def _live_expiry(days: int = 1) -> str:
+    """An ISO-Z expiry ``days`` after the REAL current time.
+
+    ``read_grant`` drops an expired grant against ``time.time()`` (no injectable
+    clock), so a fixed date here is a time-bomb: the fixture once hard-coded
+    2026-11-14T00:00:00Z and every branch went red at that instant (2026-11-14
+    incident). Deriving from now keeps the grant live whenever the test runs.
+    Read through ``time.time()``, the same clock ``grant_expired`` consults, so
+    a test that shifts that clock shifts this expiry with it.
+    """
+
+    when = datetime.fromtimestamp(time.time() + days * 86_400, timezone.utc)
+    return when.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
 def _row(**overrides):
     row = {
         "delegation_id": "vdl_" + "c" * 32,
         "tenant_id": TENANT,
         "endpoint_id": ENDPOINT,
         "key_fingerprint": keys.fingerprint_for_seed(SEED),
-        "expires_at": "2026-11-14T00:00:00Z",
+        "expires_at": _live_expiry(),
         "state": "live",
     }
     row.update(overrides)

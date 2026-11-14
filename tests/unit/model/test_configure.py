@@ -3667,6 +3667,86 @@ async def test_quota_pinned_fallback_is_reprobed_at_the_next_boundary(tmp_path) 
 
 
 @pytest.mark.asyncio
+async def test_hub_reprobe_reclaims_a_quota_pinned_primary_mid_message(tmp_path) -> None:
+    """A running subagent's task is ONE user message, so ``begin_message``
+    never fires again and its quota pin was never re-probed (the 2026-11
+    incident: children stayed on the fallback after quota returned).
+    ``request_reprobe`` (``hub op='set_model'``/``steer``) is the boundary it
+    gets instead. Negative control first: without it, a recovered primary is
+    NOT reclaimed mid-message."""
+    store = AuthStore(tmp_path / "auth.db")
+    store.upsert_credential("anthropic", _oauth("oauth-a", "account-a"))
+    store.upsert_credential("zai", {"key": "sk-zai", "source": "login"})
+    stream = create_stream_fn(
+        store,
+        {
+            "retry": {
+                "usageAwareFallback": True,
+                "usageReservePercent": 10,
+                "fallbackChains": {"default": ["zai/glm-5.3"]},
+            }
+        },
+        session_id="session-a",
+    )
+    state = {"report": _fable_report(100.0, 41.0, 79.0)}  # 5h spent: depleted
+
+    async def usage_for_access(_client, _provider, *, access_token=None, **_kwargs):
+        return state["report"]
+
+    try:
+        opus_spec = ModelSpec(provider="anthropic", model_id="claude-opus-4-8")
+        with patch("local_operator.providers.usage.fetch_usage", side_effect=usage_for_access):
+            stream.begin_message()
+            await stream.preflight_usage(opus_spec)
+            assert stream._route_state.active is not None
+            assert stream.route_quota_pinned
+
+            state["report"] = _fable_report(5.0, 41.0, 79.0)  # quota is back
+            # Same message, no hub nudge: the pin holds (the incident).
+            await stream.preflight_usage(opus_spec)
+            assert stream._route_state.active is not None
+
+            stream.request_reprobe()
+            await stream.preflight_usage(opus_spec)
+        assert stream._route_state.active is None
+        # The nudge does not spend the effort-classification token.
+        assert stream._message_boundary_pending is False
+    finally:
+        await stream.close()
+        store.close()
+
+
+@pytest.mark.asyncio
+async def test_hub_reprobe_withdraw_clears_any_pin_and_the_launch_pin(tmp_path) -> None:
+    """``withdraw=True`` (``set_model``) drops even a transport pin inside its
+    cooldown; ``clear_launch_pin`` turns a pinned child into an inheriting one.
+    Control: a plain re-probe (``steer``) leaves a transport pin's cooldown be."""
+    from local_operator.providers.failover import FallbackTarget
+
+    store = AuthStore(tmp_path / "auth.db")
+    stream = create_stream_fn(store, {}, session_id="session-a")
+    try:
+        opus_spec = ModelSpec(provider="anthropic", model_id="claude-opus-4-8")
+        stream._primary_selector = "anthropic/claude-opus-4-8"
+        await stream._route_state.activate(
+            FallbackTarget("zai/glm-5.3", None), "provider failure", cooldown_ms=3_600_000
+        )
+        stream.mark_launch_pin("anthropic/claude-opus-4-8")
+
+        stream.request_reprobe()
+        await stream.preflight_usage(opus_spec, consume_boundary=False)
+        assert stream._route_state.active is not None  # cooldown honoured
+
+        stream.request_reprobe(withdraw=True)
+        assert stream._route_state.active is None
+        stream.clear_launch_pin()
+        assert stream._route_state.launch_pin is None
+    finally:
+        await stream.close()
+        store.close()
+
+
+@pytest.mark.asyncio
 async def test_preflight_reuses_stale_row_when_a_peer_holds_the_lease(tmp_path) -> None:
     """Cross-process fan-out collapse, through the real configure→helper wiring.
 

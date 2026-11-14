@@ -123,8 +123,22 @@ def test_no_setting_can_disable_the_admission_gate():
         "team_bridge.screening.unaddressed_budget_per_hour",
         "team_bridge.screening.ambient_budget_per_hour",
         "team_bridge.screening.sender_budget_per_hour",
+        # The one row here that is not a CEILING: which evaluated screener is
+        # tried first. It is a name, never an amount, and it cannot express OFF —
+        # every unusable value (empty, an off-table pair, a hand-edited number)
+        # reads as "no preference", i.e. the chain's own tested order.
+        "team_bridge.screening.model",
     ]
     for setting in screening_rows:
+        if setting.key == "team_bridge.screening.model":
+            # Its gate property is pinned where it can be OBSERVED rather than
+            # inferred from a type — that no value of this key removes a hop:
+            # ``tests/unit/team_bridge/test_screening_preference.py``. Here it is
+            # enough that the row is not a switch-shaped kind and that its
+            # default is the shipped "no choice".
+            assert setting.kind is settings_io.Kind.TEXT, setting.key
+            assert setting.default == tb.DEFAULT_TEAM_BRIDGE_SCREENING_MODEL == ""
+            continue
         # A ceiling, never a switch: an INT whose floor is one. OFF would need a
         # boolean or a zero, and neither is storable here.
         assert setting.kind is settings_io.Kind.INT, setting.key

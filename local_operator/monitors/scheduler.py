@@ -295,6 +295,38 @@ class MonitorRuntime:
     counters: dict[str, Any] = field(default_factory=dict)
 
 
+def normalize_result(text: str, spec: MonitorSpec, settings: MonitorSettings) -> str:
+    """The comparable form of one check's text — the left side of every hash.
+
+    Module-level so the wake supervisor's parked-session probe
+    (:mod:`local_operator.monitors.parked`) hashes a result with EXACTLY the
+    pipeline this scheduler uses; a second spelling could drift and make a
+    parked watch read "changed" (a wasted reopen) or, worse, "unchanged".
+    """
+    return normalize(
+        text,
+        sort_lines=spec.sort_lines,
+        ignore=spec.ignore,
+        normalize_timestamps=settings.normalize_timestamps,
+    )
+
+
+def advance_due(
+    spec: MonitorSpec, now: int, uniform: Callable[[float, float], float] = random.uniform
+) -> int | None:
+    """The next due instant: now + every + positive-only jitter (§11.2).
+
+    Clamped at ``until_at``. Shared with the parked-session probe for the same
+    reason as :func:`normalize_result`: a quiet tick advanced outside a session
+    must schedule the next one exactly as the session would have.
+    """
+    jitter_cap = float(min(5_000, spec.every_ms // 10))
+    candidate = now + spec.every_ms + int(uniform(0.0, jitter_cap))
+    if spec.until_at is not None:
+        return min(candidate, spec.until_at)
+    return candidate
+
+
 def fresh_counters(monitor_id: str, next_due_at: int | None) -> dict[str, Any]:
     """A new monitor's counters/health file content (§10.3 shape)."""
     return {
@@ -1161,12 +1193,7 @@ class MonitorScheduler:
         # ``_classify_change``). A source that changes shape mid-stream is
         # handled by the basis check below, not by this flag.
         record_view = is_record_log(text)
-        normalized = normalize(
-            text,
-            sort_lines=spec.sort_lines,
-            ignore=spec.ignore,
-            normalize_timestamps=self._settings.normalize_timestamps,
-        )
+        normalized = normalize_result(text, spec, self._settings)
         new_hash = content_hash(normalized)
         old_hash = str(counters.get("content_hash") or "")
         pure_addition = False
@@ -2012,11 +2039,7 @@ class MonitorScheduler:
         Clamped at ``until_at`` (a monitor never checks past its stop time);
         the due scan treats "next_due ≥ until" as expired.
         """
-        jitter_cap = float(min(5_000, spec.every_ms // 10))
-        candidate = now + spec.every_ms + int(self._uniform(0.0, jitter_cap))
-        if spec.until_at is not None:
-            return min(candidate, spec.until_at)
-        return candidate
+        return advance_due(spec, now, self._uniform)
 
     # -- internals ----------------------------------------------------------
 

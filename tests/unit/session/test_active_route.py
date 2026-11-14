@@ -635,3 +635,45 @@ async def test_the_persisted_route_row_carries_the_settle_reason(tmp_path):
     assert len(entries) == 2
     assert entries[0]["reason"] == "provider failure: quota HTTP 429"
     assert entries[1]["reason"] is None
+
+
+class ReprobeStream(RoutedStream):
+    """Records the hub re-probe entry points ``request_route_reprobe`` drives."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.reprobes: list[bool] = []
+        self.pins: list[str | None] = []
+
+    def request_reprobe(self, *, withdraw: bool = False) -> None:
+        self.reprobes.append(withdraw)
+
+    def mark_launch_pin(self, selector: str) -> None:
+        self.pins.append(selector)
+
+    def clear_launch_pin(self) -> None:
+        self.pins.append(None)
+
+
+@pytest.mark.asyncio
+async def test_hub_reprobe_withdraws_the_displayed_fallback_and_relays_the_pin(tmp_path):
+    """``hub op='set_model'`` on a running child: the fallback stops being the
+    effective model at once (so ``hub list`` reads the primary), the stream is
+    armed to re-probe, and the launch pin follows the re-pin. A steer-style
+    re-probe (``withdraw=False``) leaves the fallback displayed: the stream,
+    not the hub, decides at the next call whether the primary is back."""
+    stream = ReprobeStream()
+    session = _session(tmp_path, stream)
+    await stream.route_handler(FallbackTarget("zai/glm-5.3", None), "provider failure")
+    assert session.effective_model_label == "zai/glm-5.3"
+
+    session.request_route_reprobe(withdraw=False)
+    assert session.effective_model_label == "zai/glm-5.3"
+    assert stream.reprobes == [False] and stream.pins == []
+
+    session.request_route_reprobe(withdraw=True, launch_pin="")
+    assert session.effective_model_label == "test/m"
+    assert stream.reprobes == [False, True] and stream.pins == [None]
+
+    session.request_route_reprobe(withdraw=True, launch_pin="anthropic/fable-5.2")
+    assert stream.pins == [None, "anthropic/fable-5.2"]

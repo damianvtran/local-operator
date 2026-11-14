@@ -324,6 +324,15 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "Removes only the failed write's own mkstemp temp FILE beside approvals.json; "
         "never a directory",
     ),
+    # -- permissions_cli: the team-signing opt-in record ----------------------
+    (
+        "local_operator/permissions_cli.py::_restore_optin",
+        "<path>.unlink",
+        # ``procname._optin_path()``: <passwd home>/.local-operator/
+        # runtime-signing.json, a fixed file name under the passwd-derived
+        # home, never a directory and never under sessions/.
+        "Removes the team-signing opt-in file a failed `lop permissions setup` wrote",
+    ),
     # -- procname: the branded interpreter image -----------------------------
     # Every path in this module is built from `sys.prefix` + "bin"/"lib" and a
     # fixed basename (the brand, or the interpreter's own LDLIBRARY name). None
@@ -384,12 +393,16 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "this module made",
     ),
     (
-        "local_operator/procname.py::_plant_runtime",
+        # ``_publish_tree`` is the one publish protocol every runtime tree
+        # shape (legacy and both bundle flavors) shares since the bundle
+        # identity work; it inherited ``_plant_runtime``'s rename and rmtrees.
+        "local_operator/procname.py::_publish_tree",
         "os.rename",
-        "Publishes this plant's staging dir as <runtime root>/<key>; both interpreter-derived",
+        "Publishes this plant's staging dir as <runtime root>/<key>[-<flavor>]; "
+        "both interpreter-derived",
     ),
     (
-        "local_operator/procname.py::_plant_runtime",
+        "local_operator/procname.py::_publish_tree",
         "shutil.rmtree",
         # Two: the failed-build staging tree (a clone that died on ENOSPC must
         # never be renamed onto the build key) and a staging tree whose rename
@@ -721,6 +734,13 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
     # withdraw its own record; the legacy fixed `delivery.json` is read but no
     # longer written.
     (
+        "local_operator/server/loop_watchdog.py::prune_stall_logs",
+        "<path>.unlink",
+        "Removes only ``serve-stall-<pid>.log`` FILES directly inside <config>/logs "
+        "(iterdir + fullmatch); never recurses, never reaches sessions/, and unlink "
+        "rejects directories (the OSError is swallowed).",
+    ),
+    (
         "local_operator/server/utils/desktop_presence.py::DesktopDeliveryPublisher._write",
         "os.replace",
         "Atomic replacement of THIS process's own <instance_id>.json record FILE "
@@ -736,6 +756,21 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "local_operator/server/utils/desktop_presence.py::DesktopDeliveryPublisher._write",
         "os.unlink",
         "Removes only its own named temporary file after a failed atomic replacement",
+    ),
+    # Desktop settings intents: sessions/<id>/settings-intent.json is written
+    # tmp + fsync + replace in the session directory, like desktop.json.
+    (
+        "local_operator/server/utils/settings_intents.py::IntentStore.save",
+        "os.replace",
+        "Publishes this call's mkstemp .settings-intent.*.tmp FILE onto the "
+        "settings-intent.json FILE; replace rejects a directory target and the "
+        "session directory itself is never a source or target",
+    ),
+    (
+        "local_operator/server/utils/settings_intents.py::IntentStore.save",
+        "os.unlink",
+        "Removes only this call's own mkstemp temporary FILE after a failed write; "
+        "unlink rejects directories",
     ),
     (
         "local_operator/server/utils/desktop_presence.py::DesktopDeliveryPublisher.close",
@@ -761,6 +796,22 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "<path>.unlink",
         "Removes only its own `relay-stop-requested.json.<pid>.tmp` staging FILE in "
         "<config>/run after a failed write or replace",
+    ),
+    # The owner-side create-key index (`network/create_keys.py`): ONE fixed-name
+    # FILE, `<config>/network/create-keys.json`, rewritten atomically from a
+    # mkstemp sidecar in the same directory. A sibling of `sessions/`, never a
+    # parent of it, and never a directory.
+    (
+        "local_operator/network/create_keys.py::CreateKeyIndex._save",
+        "os.replace",
+        "Atomic replacement of the fixed config-root FILE <config>/network/create-keys.json "
+        "from this call's own mkstemp sidecar; never a directory and never under sessions/",
+    ),
+    (
+        "local_operator/network/create_keys.py::CreateKeyIndex._save",
+        "os.unlink",
+        "Removes only this call's own `.create-keys.*.tmp` mkstemp FILE in "
+        "<config>/network after a failed write or replace",
     ),
     (
         "local_operator/network/relay.py::clear_deliberate_stop",
@@ -856,6 +907,31 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
     # call minted. Every replace target and every unlink target is a regular FILE
     # (or a symlink planted in a sound's slot, unlinked as the link itself); no
     # call names a directory, and none can resolve under `sessions/`.
+    # `record_forwarding_origin`: the target is `_origins_path(root)` =
+    # <config>/remote-attention-origins.json (a fixed basename joined to the relay's
+    # config root, never a session id), and the source is the sibling
+    # `.remote-attention-origins.json.<pid>.tmp` FILE this same call created with
+    # O_CREAT. `os.replace` onto a regular file cannot displace a directory, and
+    # neither path can resolve under `sessions/`.
+    (
+        "local_operator/notifications/remote_attention.py::record_forwarding_origin",
+        "os.replace",
+        "Atomic replace of <config>/remote-attention-origins.json from its sibling "
+        "pid-suffixed tmp FILE; never a directory and never under sessions/",
+    ),
+    # `origin_baselines_ms`: the target is `Path(root) / BASELINES_FILE` =
+    # <config>/remote-attention-baselines.json (a fixed basename joined to the
+    # watcher's config root — tui/app.py and server/app.py pass their config dir,
+    # never a session id), and the source is the sibling
+    # `.remote-attention-baselines.json.<pid>.tmp` FILE this same call created
+    # with O_CREAT under the flock. `os.replace` onto a regular file cannot
+    # displace a directory, and neither path can resolve under `sessions/`.
+    (
+        "local_operator/notifications/remote_attention.py::origin_baselines_ms",
+        "os.replace",
+        "Atomic replace of <config>/remote-attention-baselines.json from its sibling "
+        "pid-suffixed tmp FILE; never a directory and never under sessions/",
+    ),
     (
         "local_operator/notifications/custom_sounds.py::_write_index",
         "os.replace",
@@ -983,6 +1059,22 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "local_operator/session/archived.py::_write_archived",
         "<path>.unlink",
         "Removes only its own named temporary file after a failed atomic replacement",
+    ),
+    # -- the temporary-chat mark: one FILE inside the session's own directory ---
+    # The receiver is ``<sessions>/<id>/temporary.json`` and the source is this
+    # call's own mkstemp FILE in the same directory; neither can be a directory.
+    # "Keep" is a WRITE of ``temporary: false`` for this reason: the only removal
+    # in session/temporary.py is of its own temp file.
+    (
+        "local_operator/session/temporary.py::_write_mark_file",
+        "<path>.replace",
+        "Atomic replacement of temp FILE -> sessions/<id>/temporary.json; replace "
+        "onto a FILE name, never a directory",
+    ),
+    (
+        "local_operator/session/temporary.py::_write_mark_file",
+        "<path>.unlink",
+        "Removes only its own mkstemp temp FILE after a failed atomic replacement",
     ),
     # -- the mesh package: `<config>/network/` and the session STAMP ----------
     # THE MESH LEGITIMATELY WRITES AND REMOVES PLENTY — network records, invite
@@ -1665,6 +1757,55 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "<path>.unlink",
         "only the same-directory temp FILE this write created",
     ),
+    # Mesh skill sync (network/skillsync.py). Every path below is built from the
+    # fixed roots `<config>/skills` and `<config>/network/skill-stage` plus either
+    # a `validate_name` kebab-case name (no `/`, no `..`) or a fresh uuid4 hex, and
+    # each is checked by `_assert_inside_root` AND `_assert_not_sessions` before the
+    # call — the latter refuses a `skills/` or `network/` link resolving into
+    # `sessions/` (pinned by test_skillsync's
+    # `test_an_apply_never_writes_through_a_skills_link_into_sessions`).
+    (
+        "local_operator/network/skillsync.py::_apply_locked",
+        "os.replace",
+        "the swap: skills/<name> -> skill-stage/<uuid>/previous, then the extracted "
+        "skill-stage/<uuid>/tree -> skills/<name>; both guarded off sessions/",
+        2,
+    ),
+    (
+        "local_operator/network/skillsync.py::_apply_locked",
+        "shutil.rmtree",
+        "only this apply's own skill-stage/<uuid> dir, created fresh (mkdir without "
+        "exist_ok) by the same call and guarded off sessions/",
+    ),
+    (
+        "local_operator/network/skillsync.py::_record_receipt",
+        "os.replace",
+        "temp FILE -> config/network/skills-sync.json; replace rejects a directory target",
+    ),
+    (
+        "local_operator/network/skillsync.py::_sweep_stage",
+        "shutil.rmtree",
+        "aged entries of config/network/skill-stage only; refuses a linked stage or "
+        "network/ dir and a stage resolving into sessions/",
+    ),
+    (
+        "local_operator/network/skillsync.py::_sweep_stage",
+        "os.unlink",
+        "aged non-dir entries of config/network/skill-stage (a link itself, never its "
+        "target); same refusals as the rmtree row",
+    ),
+    (
+        "local_operator/network/definitions.py::_write_instructions_file",
+        "os.replace",
+        "mkstemp-created temp FILE -> <config>/system_prompt.md (the only caller "
+        "passes aida.profile.instruction_file(root)); os.replace rejects a "
+        "directory target",
+    ),
+    (
+        "local_operator/network/definitions.py::_write_instructions_file",
+        "<path>.unlink",
+        "only the mkstemp temp FILE this write created, on a failed write",
+    ),
     # The move route's own rollback. It removes `<sessions>/<id>/desktop.json`:
     # the marker FILE beside the transcript, whose name is the fixed
     # `DESKTOP_MARKER_NAME` basename joined onto the session directory the bridge
@@ -2335,6 +2476,38 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "plist/unit FILEs; state_store.remove()",
     ),
     ("local_operator/browser_bridge/state.py::remove", "<path>.unlink", "bridge state FILE"),
+    # node_host.py (`lop browser setup/uninstall` on a headless mesh node).
+    # Every path it writes or removes is a FILE under `<config>/browser/`,
+    # `~/.config/systemd/user/`, or a mkstemp/mkdtemp in the system temp dir —
+    # none is derived from a session id or the sessions/ tree.
+    (
+        "local_operator/browser_bridge/node_host.py::_write_private",
+        "os.replace",
+        "mkstemp temp FILE onto the node record/unit/update manifest/signing key "
+        "(<config>/browser/… or ~/.config/systemd/user/…); os.replace rejects a "
+        "directory target",
+    ),
+    (
+        "local_operator/browser_bridge/node_host.py::_write_private",
+        "os.unlink",
+        "its own mkstemp temp FILE, on a failed write",
+    ),
+    (
+        "local_operator/browser_bridge/node_host.py::_Plan._sudo_install_file",
+        "os.unlink",
+        "its own NamedTemporaryFile in the system temp dir, after `sudo install`",
+    ),
+    (
+        "local_operator/browser_bridge/node_host.py::setup",
+        "shutil.rmtree",
+        "the run's own tempfile.mkdtemp(prefix='lop-node-ext-') extension unpack "
+        "dirs (plan.scratch), in the system temp dir",
+    ),
+    (
+        "local_operator/browser_bridge/node_host.py::uninstall._remove_unit",
+        "<path>.unlink",
+        "the node browser's systemd user unit FILE (~/.config/systemd/user/…)",
+    ),
     (
         "local_operator/evaluation/adapters/supervisor.py::discard_rescue",
         "os.unlink",
@@ -2627,7 +2800,23 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
     ),
     ("local_operator/tunnels/cli.py::dispatch", "<path>.unlink", "tunnel pid/state FILEs", 2),
     ("local_operator/tunnels/install.py::uninstall", "<path>.unlink", "plist FILE"),
-    ("local_operator/tunnels/service.py::run", "<path>.unlink", "tunnel pid/state FILEs", 3),
+    ("local_operator/tunnels/service.py::run", "<path>.unlink", "tunnel pid/state FILEs", 2),
+    (
+        "local_operator/tunnels/service.py::run.start_cloudflared",
+        "<path>.unlink",
+        "tunnel cloudflared.pid FILE",
+    ),
+    (
+        "local_operator/tunnels/service.py::run.reconcile_cloudflared",
+        "<path>.unlink",
+        "tunnel cloudflared.pid/.token FILEs",
+        2,
+    ),
+    (
+        "local_operator/tunnels/config.py::record_relay_offer",
+        "<path>.unlink",
+        "tunnel relay-offered marker FILE",
+    ),
     # The generation layout's own trees and pointer. Every path in this block is
     # built from ``stable_root()`` (``~/.local/share/lop``, from ``Path.home()``)
     # plus a timestamped generation id this module chose, or from
@@ -4092,6 +4281,48 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "child, meta is its hex digest + '.json', neither session-derived",
         2,
     ),
+    # -- mesh file pull (network/files.py; docs/design/mesh-file-transfer.md S1) --
+    # ``AttachmentStore.adopt_file`` moves a VERIFIED staged file into the
+    # content-addressed store. Destination: ``self._content_path(digest)``, i.e.
+    # ``<config>/attachments/<hex digest>.bin``, a sibling of ``sessions/``, never under
+    # it, named by the digest of the bytes it just hashed. Source: its one caller
+    # (``files.pull_file``) passes the relay's own ``<root>/network/staging/files/
+    # <sha256>.part``, outside ``sessions/`` by construction. Both calls run only
+    # AFTER the source was streamed through ``open("rb")`` and hashed to the
+    # announced sha256, so a directory never reaches them (it fails the open), and
+    # ``unlink`` takes a file entry only.
+    (
+        "local_operator/session/attachments.py::AttachmentStore.adopt_file",
+        "os.replace",
+        "Renames the verified staging part (<root>/network/staging/files/) to "
+        "<config>/attachments/<digest>.bin; never session-derived",
+    ),
+    (
+        "local_operator/session/attachments.py::AttachmentStore.adopt_file",
+        "<path>.unlink",
+        "Drops the verified staging part when the store already holds that digest; a "
+        "FILE under <root>/network/staging/files/, never session-derived",
+    ),
+    # ``lop network files pull --out``: ``_land_out``'s source is the
+    # NamedTemporaryFile it just created beside ``out``; ``out`` is the target
+    # ``_out_target`` returned, which REFUSES anything whose resolved path (realpath of
+    # the parent plus the name, and the leaf's own resolution) is inside this device's
+    # config dir -- so neither ``sessions/`` nor anything else of Local Operator's own
+    # data is reachable (#3794 gate remediation; measured before it: ``--force`` over a
+    # transcript replaced it). A directory target is refused too, and a rename of a
+    # file onto a directory raises EISDIR.
+    (
+        "local_operator/network/cli.py::_land_out",
+        "os.replace",
+        "--force rename of our own sibling temp onto the user's --out FILE; _out_target "
+        "refuses any resolved target inside the config dir, so sessions/ is unreachable",
+    ),
+    (
+        "local_operator/network/cli.py::_land_out",
+        "<path>.unlink",
+        "Removes only the NamedTemporaryFile this function created beside --out, which "
+        "_out_target keeps outside the config dir",
+    ),
     # -- the delegated content layer's rescue-bundle housekeeping ------------
     # Both calls touch the SAME two artefacts, both spelled from the plan's
     # ``bundle_path`` (``<pad>/reap-rescue-<tree>.bundle``, strictly inside a
@@ -4528,6 +4759,7 @@ _NEAR_DISPLACERS: frozenset[str] = frozenset(
         "local_operator/session/transcript_index.py::write_index",  # tmp -> index FILE
         "local_operator/session/transcript_index.py::_publish_store",  # tmp -> snapshot FILE
         "local_operator/session/archived.py::_write_archived",  # tmp -> archive index FILE
+        "local_operator/session/temporary.py::_write_mark_file",  # tmp -> temporary.json FILE
         "local_operator/session/session.py::_write_roster_sidecar",  # tmp -> roster FILE
         # tmp -> runtime-stall-<pid>.deadline FILE. Both paths are log_dir() + an int
         # pid and nothing else (see the allow-list rows above): no session id, no
@@ -4555,6 +4787,8 @@ _NEAR_DISPLACERS: frozenset[str] = frozenset(
         # tmp -> approvals.json, a FILE inside the conversation's own directory
         # (the atomic-write shape every other sidecar writer here uses).
         "local_operator/session/approval_policy.py::write_override",
+        # verified staging part (<root>/network/staging/files/) -> attachments/<d>.bin
+        "local_operator/session/attachments.py::AttachmentStore.adopt_file",
     }
 )
 
@@ -4695,3 +4929,65 @@ def test_the_guard_ignores_string_and_container_methods(source: str) -> None:
 @pytest.mark.parametrize("key", sorted(_ALLOWED))
 def test_every_allowed_entry_has_a_reason(key: str) -> None:
     assert _ALLOWED[key].strip(), key
+
+
+# -- the temporary-chat pass: the two companion assertions --------------------
+#
+# The module docstring's promise ("removes nothing when disabled") holds for a
+# store with no marks. The temporary pass is NOT gated by ``enabled`` (the mark
+# is the opt-in), so these two cells pin exactly what it may remove: nothing on
+# an unmarked store, and ONLY the expired, marked, unguarded ids on a store with
+# cleanup disabled.
+
+
+def _temporary_store(tmp_path: Path, count: int = 50) -> tuple[Path, float]:
+    import json as _json
+    import os as _os
+
+    from local_operator.session.cleanup import mark_store
+
+    sessions = tmp_path / "sessions"
+    sessions.mkdir(parents=True)
+    mark_store(sessions)
+    now = 2_000_000_000.0
+    for index in range(count):
+        directory = sessions / f"{index:012x}"
+        directory.mkdir()
+        transcript = directory / "transcript.jsonl"
+        transcript.write_text(_json.dumps({"type": "message"}) + "\n", encoding="utf-8")
+        stamp = now - 400 * 86400
+        _os.utime(transcript, (stamp, stamp))
+    return tmp_path, now
+
+
+def test_the_temporary_pass_removes_nothing_from_an_unmarked_store(tmp_path: Path) -> None:
+    from local_operator.session.cleanup import CleanupPolicy, run_temporary_pass
+
+    root, now = _temporary_store(tmp_path)
+    before = sorted(p.name for p in (root / "sessions").iterdir())
+    policy = CleanupPolicy(enabled=False, max_sessions=1, max_inactive_days=1, remove_empty=True)
+    result = run_temporary_pass(root, policy, actor="test", now=now)
+    assert result.expired == [] and result.children == []
+    assert sorted(p.name for p in (root / "sessions").iterdir()) == before
+
+
+def test_the_temporary_pass_removes_only_expired_marked_unguarded_ids(tmp_path: Path) -> None:
+    from local_operator.session import temporary
+    from local_operator.session.cleanup import (
+        CleanupPolicy,
+        run_temporary_pass,
+        set_hold,
+    )
+
+    root, now = _temporary_store(tmp_path)
+    marked = [f"{index:012x}" for index in (1, 2, 3)]
+    for session_id in marked:
+        assert temporary.write_mark(root, session_id, True, by="cli", now=now - 3600).ok
+    fresh = f"{4:012x}"
+    assert temporary.write_mark(root, fresh, True, by="cli", now=now - 60).ok
+    assert set_hold(root / "sessions", marked[2], reason="keep it", by="test")
+    policy = CleanupPolicy(enabled=False, delegated_enabled=False)
+    result = run_temporary_pass(root, policy, actor="test", now=now)
+    assert sorted(result.expired) == marked[:2], (result.held, result.errors)
+    left = {p.name for p in (root / "sessions").iterdir() if p.is_dir()}
+    assert left == {f"{index:012x}" for index in range(50)} - set(marked[:2])

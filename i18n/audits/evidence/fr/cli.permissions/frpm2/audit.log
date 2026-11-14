@@ -1,0 +1,36 @@
+# audit.log — actual command output, captured 2026-11-09T19:42:09Z in .worktrees/runtime-privacy-identity @ 788cc3994101; macOS 27.2 (26B123)
+$ .venv/bin/python audit_checks.py
+sha256 en/cli.permissions.json d5eed4044348f0fa462e1238209230507a48eb5e018b22c7a8b971b518d3f186
+sha256 en/cli.permissions.context.json f2d9ce73f2791f209b1be203b8f1e0d042eff7a348c0822ee28c5141a3cec099
+sha256 fr/cli.permissions.json 5fb01ed775d2034e74224166fdf0aadec15475b582f896184d76239d168ebac4
+keys en/fr 38 38 added [] dropped []
+mechanical failures: 0
+ICU plural/select in en: 0
+U+2019 count 53 U+202F count 58
+longest fr lines (cells): [(323, 'cli.permissions.setup.explain'), (277, 'cli.permissions.setup.done_allow_once'), (243, 'cli.permissions.status.optin.unavailable'), (199, 'cli.permissions.status.screen.denied'), (180, 'cli.permissions.setup.already_signed')]
+non-NFC values: []
+$ .venv/bin/python scripts/i18n/check.py --catalogues-only
+check.py: catalogue checks: 0 problem(s)
+exit=0
+$ (negative control: round-1 fr bytes at 50badda, padded with en for new keys)
+mechanical failures: 32
+U+2019 count 0 U+202F count 0
+$ python3 apple_labels.py   (retained as apple_labels.py.txt)
+System Settings.app :: InfoPlist.loctable :: CFBundleDisplayName :: en='System Settings' :: fr='Réglages\xa0Système'
+SecurityPrivacyExtension.appex :: InfoPlist.loctable :: CFBundleDisplayName :: en='Privacy & Security' :: fr='Confidentialité et sécurité'
+SecurityPrivacyExtension.appex :: Localizable.loctable :: SCREEN_CAPTURE :: en='Screen Recording' :: fr='Enregistrement de l’écran'
+SecurityPrivacyExtension.appex :: Localizable.loctable :: SCREEN_CAPTURE_HEADER :: en='Screen & System Audio Recording' :: fr='Enregistrement de l’écran et des sons du système'
+SecurityPrivacyExtension.appex :: Localizable.loctable :: SCREENANDAUDIOCAPTURE :: en='Screen & System Audio Recording' :: fr='Enregistrement de l’écran et des sons du système'
+SecurityPrivacyExtension.appex :: Localizable.loctable :: FILE_ACCESS_COMBINED :: en='Files & Folders' :: fr='Fichiers et dossiers'
+SecurityPrivacyExtension.appex :: Localizable.loctable :: ACCESSIBILITY :: en='Device Control and Data Access' :: fr='Contrôle de l’appareil et accès aux données'
+SecurityAgent.bundle :: ConfirmAccess.loctable :: 100268.title :: en='Allow' :: fr='Autoriser'
+SecurityAgent.bundle :: ConfirmAccess.loctable :: 100267.title :: en='Always Allow' :: fr='Toujours autoriser'
+SecurityAgent.bundle :: ConfirmAccess.loctable :: 100266.title :: en='Deny' :: fr='Refuser'
+Keychain Access.app :: InfoPlist.loctable :: CFBundleDisplayName :: en='Keychain Access' :: fr='Trousseaux d’accès'
+Keychain Access.app :: KeyEditor.loctable :: 302.label :: en='Access Control' :: fr='Contrôle d’accès'
+Keychain Access.app :: Localizable.loctable :: private key :: en='private key' :: fr='clé privée'
+Keychain Access.app :: ACLEditor.loctable :: 100175.title :: en='Always allow access by these applications:' :: fr='Toujours autoriser l’accès par ces applications\xa0:'
+$ grep -c "app de bureau" local_operator/i18n/catalogues/fr/cli.permissions.json
+0
+$ git rev-parse HEAD
+788cc399410196b080cfc9f7e7bd558ccb713140

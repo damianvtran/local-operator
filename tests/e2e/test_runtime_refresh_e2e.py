@@ -31,6 +31,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 import uuid
 from pathlib import Path
@@ -47,6 +48,7 @@ from local_operator.session.runtime.inbox import (
 )
 from local_operator.tui.app import OperatorApp
 from local_operator.update import BuildStamp
+from tests.e2e import armed_probe_diagnostics
 from tests.e2e.harness import NO_NOTIFY_ENV, transcript_text, wait_for_adoption
 from tests.e2e.watchdog import bounded
 
@@ -121,7 +123,20 @@ def _record_for(config_dir: Path, session_id: str) -> Any:
     return None
 
 
-async def _wait_for_record(config_dir: Path, session_id: str, timeout: float = 30.0) -> Any:
+#: Backstop for a runtime child to publish its registry record. The wait returns
+#: the moment the record exists, so this only bounds a child that never boots.
+#: 30 s was not enough on a saturated box: the armed cell's non-editable child
+#: (a cold interpreter importing the whole package) took longer than that to
+#: reach its first record in 4 of 12 local runs under 12 busy loops on a
+#: 14-core host (load average ~60), old head and new alike, failing with
+#: ``no record for refresharmed1 within 30.0s`` -- a boot-speed wager, not a
+#: product signal. An idle box needs ~2 s.
+RECORD_BACKSTOP_S = 120.0
+
+
+async def _wait_for_record(
+    config_dir: Path, session_id: str, timeout: float = RECORD_BACKSTOP_S
+) -> Any:
     loop = asyncio.get_running_loop()
     deadline = loop.time() + timeout
     while loop.time() < deadline:
@@ -141,6 +156,78 @@ def _alive(child: subprocess.Popen[bytes]) -> bool:
     already retired. ``poll()`` reaps and answers.
     """
     return child.poll() is None
+
+
+#: How long the armed-probe cell's turn parks in the mock's ``[bash:N]`` tool.
+#: It is the mock's CAP (``_mock_bash_sleep`` bounds N at 60) on purpose: the
+#: turn is not meant to END on this clock. The cell releases it itself, with
+#: :func:`_release_parked_sleep`, once it has OBSERVED the latch; the number only
+#: has to outlast the latch (5-10 s on an idle box: a 5 s probe tick, a settle,
+#: one more tick) with room for a starved runner, and a bigger one would just
+#: be a longer hang if the release never came.
+ARMED_HOLD_S = 60
+
+
+def _descendant_commands(root_pid: int) -> list[tuple[int, str, bool]]:
+    """``(pid, argv, is_leaf)`` for every live descendant of ``root_pid``.
+
+    ``ps`` rather than psutil: it is not a dependency here, and the one fact
+    wanted -- "is the parked ``sleep`` a live descendant of THIS runtime" -- is
+    an ancestry question on a table that is short on a test box. ``-A -o`` with
+    empty headers parses the same on macOS and the Linux runner.
+    """
+    table = subprocess.run(
+        ["ps", "-A", "-o", "pid=,ppid=,args="], capture_output=True, text=True, timeout=30
+    ).stdout
+    children: dict[int, list[int]] = {}
+    commands: dict[int, str] = {}
+    for line in table.splitlines():
+        fields = line.split(None, 2)
+        if len(fields) < 2 or not (fields[0].isdigit() and fields[1].isdigit()):
+            continue
+        pid, parent = int(fields[0]), int(fields[1])
+        commands[pid] = fields[2] if len(fields) > 2 else ""
+        children.setdefault(parent, []).append(pid)
+    found: list[tuple[int, str, bool]] = []
+    queue = list(children.get(root_pid, []))
+    while queue:
+        pid = queue.pop()
+        found.append((pid, commands.get(pid, ""), pid not in children))
+        queue.extend(children.get(pid, []))
+    return found
+
+
+def _parked_sleep_pids(root_pid: int, seconds: int) -> list[int]:
+    """The ``sleep <seconds>`` leaf processes under the runtime: the bash tool, RUNNING.
+
+    A leaf, because ``bash -c "sleep N"`` may or may not exec its last command
+    and a wrapper's argv repeats the command line; the leaf is the one that is
+    actually sleeping, and the one safe to signal.
+    """
+    wanted = f"sleep {seconds}"
+    return [
+        pid
+        for pid, args, leaf in _descendant_commands(root_pid)
+        if leaf and args.strip().split("/")[-1].endswith(wanted)
+    ]
+
+
+def _release_parked_sleep(root_pid: int, seconds: int) -> int:
+    """End the parked tool call now (SIGTERM to its exact pid); how many were signalled.
+
+    The turn then completes the way any bash call that exited non-zero does --
+    the mock answers the tool row with text -- so the cell's later "the turn's
+    reply is durable" and "no error attention row" assertions still read a turn
+    that finished rather than one that was aborted.
+    """
+    signalled = 0
+    for pid in _parked_sleep_pids(root_pid, seconds):
+        try:
+            os.kill(pid, 15)
+            signalled += 1
+        except ProcessLookupError:
+            pass
+    return signalled
 
 
 async def _never_take_over() -> Any:
@@ -163,9 +250,431 @@ def _stale_child_env(monkeypatch: pytest.MonkeyPatch) -> None:
             monkeypatch.delenv(name, raising=False)
 
 
+# --- Successor-engage diagnostics (TEMPORARY; test-side only) -------------
+#
+# WHY THIS EXISTS: ``test_a_watched_idle_runtime_refreshes_and_the_viewer_
+# rebinds_silently`` failed on main CI (run 42780150549, job 129710348660, and
+# job 129293345900 before it, both ``tui-e2e (macos-latest, 1)``) with "no
+# successor runtime was engaged after the refresh": the old runtime retired
+# cleanly and no successor record appeared for the full 30 s. Three serial
+# local runs passed (successor latency n=3, median 5.42 s, max 6.91 s), so it
+# is UNREPRODUCED, and CI captured no log lines to say whether the spawn path
+# was never taken (a quiet early return) or was taken and failed. Candidates:
+#   1. ``AttachedSession._ensure_bound`` returning early on ``_recovering`` /
+#      ``not _can_go_cold`` / ``_disposed`` / ``not is_cold``;
+#   2. ``OperatorApp._start_runtime_engage`` returning early on the
+#      ``_warm_engage_started`` latch, a non-cold viewer, or
+#      ``_runtime_can_start()`` False;
+#   3. ``AttachedSession._on_disconnected`` taking the owner-loss path (no
+#      RETIRING reason, or ``_recovering`` already set), which cannot produce a
+#      successor under ``_never_take_over``;
+#   4. an environment leak (``LOP_WAKE_SUPERVISOR_*`` written into os.environ
+#      by ``wakes/supervisor.py`` and copied by ``launch._runtime_env``).
+#
+# CONTRACT: observation only. The spies below call straight through and only
+# append to a list; the dump runs on the TIMEOUT path alone, before the
+# unchanged assertion, and every read is individually guarded so nothing here
+# can raise, wait, or change the outcome. Output goes to stderr, which pytest
+# prints under "Captured stderr call" in the CI job log on failure.
+#
+# REMOVE once a CI occurrence has named the mechanism (and the fix has landed).
+
+_DIAG_TAIL_BYTES = 2048
+_DIAG_MAX_CAPTURES = 3
+_DIAG_MAX_LISTING = 60
+
+
+def _diag_read(label: str, read: Any) -> str:
+    try:
+        return f"{label}={read()!r}"
+    except BaseException as error:  # noqa: BLE001 — a diagnostic never raises
+        return f"{label}=<unreadable: {type(error).__name__}: {error}>"
+
+
+def _install_successor_spies(app: Any, viewer: Any, events: list[str], t0: list[float]) -> None:
+    """Record which re-engage hops ran, without changing any of them.
+
+    Each target is looked up dynamically by its caller (``_go_cold`` reads
+    ``self._refresh_callback`` / ``self._went_cold_callback`` at call time; the
+    app calls ``self._start_runtime_engage`` and ``getattr(session,
+    "_ensure_bound")``; the attach client's ``on_disconnected`` closure calls
+    ``self._on_disconnected(reason)`` and that method schedules
+    ``self._recover_runtime()``), so an instance attribute wrapping the
+    original sees every call. ``t0`` is filled at the flip so offsets read
+    from there; install events land before it and read from their own clock.
+
+    Every spy does its pre-call reads inside a ``try`` so a raising property
+    can never skip the real call, and preserves the original's sync/async
+    kind, arguments, return value and exception exactly. Each successful
+    install records one ``installed`` event, so a hop that never shows up can
+    be told apart from a spy that was overwritten or never installed.
+    """
+
+    def note(text: Any) -> None:
+        # ``text`` may be a zero-arg callable so a post-call message (which
+        # formats the error or result) is built inside this guard too: after
+        # the real call nothing may replace its return value or exception.
+        try:
+            base = t0[0] if t0 else time.monotonic()
+            events.append(f"+{time.monotonic() - base:.2f}s {text() if callable(text) else text}")
+        except BaseException:  # noqa: BLE001
+            pass
+
+    def peek(obj: Any, name: str) -> Any:
+        # ``getattr``'s default covers AttributeError only; a property that
+        # raises anything else must not turn an observed call into a failure.
+        try:
+            return getattr(obj, name, "?")
+        except BaseException as error:  # noqa: BLE001
+            return f"<unreadable: {type(error).__name__}>"
+
+    def wrap_callback(name: str) -> None:
+        try:
+            original = getattr(viewer, name, None)
+            if not callable(original):
+                note(f"{name} not registered ({original!r})")
+                return
+
+            def spy(*args: Any, **kwargs: Any) -> Any:
+                try:
+                    note(f"viewer.{name} fired; is_cold={peek(viewer, 'is_cold')}")
+                except BaseException:  # noqa: BLE001
+                    pass
+                return original(*args, **kwargs)
+
+            setattr(viewer, name, spy)
+            note(f"installed spy on viewer.{name}")
+        except BaseException as error:  # noqa: BLE001
+            note(f"spy on {name} not installed: {error!r}")
+
+    wrap_callback("_refresh_callback")
+    wrap_callback("_went_cold_callback")
+
+    try:
+        engage = app._start_runtime_engage
+
+        def engage_spy(*args: Any, **kwargs: Any) -> Any:
+            try:
+                note(
+                    f"app._start_runtime_engage({kwargs.get('reason', args)!r}) entered; "
+                    f"latch={peek(app, '_warm_engage_started')} "
+                    f"is_cold={peek(viewer, 'is_cold')}"
+                )
+            except BaseException:  # noqa: BLE001
+                pass
+            return engage(*args, **kwargs)
+
+        app._start_runtime_engage = engage_spy
+        note("installed spy on app._start_runtime_engage")
+    except BaseException as error:  # noqa: BLE001
+        note(f"spy on _start_runtime_engage not installed: {error!r}")
+
+    try:
+        ensure = viewer._ensure_bound
+
+        async def ensure_spy(*args: Any, **kwargs: Any) -> Any:
+            try:
+                note(
+                    f"viewer._ensure_bound({kwargs!r}) entered; recovering="
+                    f"{peek(viewer, '_recovering')} can_go_cold="
+                    f"{peek(viewer, '_can_go_cold')} disposed="
+                    f"{peek(viewer, '_disposed')} is_cold={peek(viewer, 'is_cold')}"
+                )
+            except BaseException:  # noqa: BLE001
+                pass
+            try:
+                result = await ensure(*args, **kwargs)
+            except BaseException as error:
+                note(lambda e=error: f"viewer._ensure_bound raised {type(e).__name__}: {e}")
+                raise
+            note(lambda: f"viewer._ensure_bound returned; is_cold={peek(viewer, 'is_cold')}")
+            return result
+
+        viewer._ensure_bound = ensure_spy
+        note("installed spy on viewer._ensure_bound")
+    except BaseException as error:  # noqa: BLE001
+        note(f"spy on _ensure_bound not installed: {error!r}")
+
+    # Candidate 3: which ``_on_disconnected`` branch ran is decided by the
+    # reason string alone, and the product keeps none of it, so record the
+    # RECEIVED reason and how it compares with each branch constant.
+    try:
+        disconnected = viewer._on_disconnected
+
+        def disconnected_spy(reason: str) -> Any:
+            try:
+                from local_operator.mobile.attach_client import (
+                    MOVED_REASON,
+                    RETIRING_REASON,
+                    STOPPED_REASON,
+                )
+
+                note(
+                    f"viewer._on_disconnected(reason={reason!r}) entered; "
+                    f"== RETIRING_REASON={reason == RETIRING_REASON} "
+                    f"(RETIRING_REASON={RETIRING_REASON!r}) "
+                    f"== MOVED_REASON={reason == MOVED_REASON} "
+                    f"== STOPPED_REASON={reason == STOPPED_REASON} "
+                    f"disposed={peek(viewer, '_disposed')} "
+                    f"recovering={peek(viewer, '_recovering')} "
+                    f"deliberate_stop={peek(viewer, '_deliberate_stop')}"
+                )
+            except BaseException:  # noqa: BLE001
+                pass
+            return disconnected(reason)
+
+        viewer._on_disconnected = disconnected_spy
+        note("installed spy on viewer._on_disconnected")
+    except BaseException as error:  # noqa: BLE001
+        note(f"spy on _on_disconnected not installed: {error!r}")
+
+    # The owner-lost branch's outcome: ``_recover_runtime`` is a coroutine
+    # function wrapped in ``asyncio.create_task``, so the spy stays ``async``
+    # and records cancellation (a BaseException) as well as errors.
+    try:
+        recover = viewer._recover_runtime
+
+        async def recover_spy(*args: Any, **kwargs: Any) -> Any:
+            try:
+                note(
+                    f"viewer._recover_runtime entered; deliberate_stop="
+                    f"{peek(viewer, '_deliberate_stop')} "
+                    f"is_cold={peek(viewer, 'is_cold')}"
+                )
+            except BaseException:  # noqa: BLE001
+                pass
+            try:
+                result = await recover(*args, **kwargs)
+            except BaseException as error:
+                note(lambda e=error: f"viewer._recover_runtime raised {type(e).__name__}: {e}")
+                raise
+            note(
+                lambda: f"viewer._recover_runtime returned {result!r}; "
+                f"is_cold={peek(viewer, 'is_cold')} "
+                f"runtime_pid={peek(viewer, '_runtime_pid')}"
+            )
+            return result
+
+        viewer._recover_runtime = recover_spy
+        note("installed spy on viewer._recover_runtime")
+    except BaseException as error:  # noqa: BLE001
+        note(f"spy on _recover_runtime not installed: {error!r}")
+
+
+def _dump_successor_diagnostics(
+    *,
+    app: Any,
+    viewer: Any,
+    config: Path,
+    session_id: str,
+    old_pid: int,
+    child: subprocess.Popen[bytes],
+    events: list[str],
+    t0: list[float],
+) -> None:
+    """Print the state every candidate gate reads; never raises."""
+    try:
+        lines: list[str] = ["===== RUNTIME-REFRESH-DIAG: successor poll timed out ====="]
+        flip = t0[0] if t0 else time.monotonic()
+        lines.append(f"since_flip={time.monotonic() - flip:.2f}s old_pid={old_pid}")
+        lines.append(_diag_read("old_child.returncode", lambda: child.returncode))
+        # Gates 1 and 3: the viewer's own flags.
+        for label, read in (
+            ("viewer.is_cold", lambda: viewer.is_cold),
+            ("viewer._recovering", lambda: viewer._recovering),
+            ("viewer._disposed", lambda: viewer._disposed),
+            ("viewer._can_go_cold", lambda: viewer._can_go_cold),
+            ("viewer._deliberate_stop", lambda: viewer._deliberate_stop),
+            ("viewer._moved_to", lambda: viewer._moved_to),
+            ("viewer._client", lambda: viewer._client),
+            ("viewer._client.connected", lambda: getattr(viewer._client, "connected", None)),
+            ("viewer._ready_for_events", lambda: viewer._ready_for_events),
+            ("viewer._runtime_pid", lambda: viewer._runtime_pid),
+            ("viewer._runtime_ready.is_set", lambda: viewer._runtime_ready.is_set()),
+            ("viewer._recovery_task", lambda: viewer._recovery_task),
+            ("viewer._pending_frame_cwd", lambda: viewer._pending_frame_cwd),
+        ):
+            lines.append(_diag_read(label, read))
+        # The disconnect reason is not retained by AttachedSession; the
+        # ``_on_disconnected`` spy records the reason it RECEIVED (and the
+        # ``_recover_runtime`` spy the owner-lost branch's outcome). No
+        # EngageOutcome is retained either (it is local to ``_ensure_bound``);
+        # its spy records return/raise.
+        lines.append(
+            "last_disconnect_reason=<not retained by product code; see _on_disconnected spy>"
+        )
+        lines.append("last_engage_outcome=<not retained by product code; see _ensure_bound spy>")
+        # Gate 2: the app's latch and startability.
+        for label, read in (
+            ("app._warm_engage_started", lambda: app._warm_engage_started),
+            ("app._runtime_can_start()", lambda: app._runtime_can_start()),
+            ("app._refreshed_from", lambda: app._refreshed_from),
+            ("app._session is viewer", lambda: app._session is viewer),
+        ):
+            lines.append(_diag_read(label, read))
+        lines.append(f"spy_events ({len(events)}):")
+        lines.extend(f"  {event}" for event in list(events)[-40:])
+        # The registry as this test sees it.
+        lines.append(_diag_read("_record_for", lambda: _record_for(config, session_id)))
+        lines.append(
+            _diag_read(
+                "registry.scan",
+                lambda: [
+                    (getattr(r, "session_id", "?"), getattr(r, "pid", "?"), s)
+                    for r, s in registry.scan(config, reap=False)
+                ],
+            )
+        )
+        roots = (("run_tree", config / "run"), ("session_dir", config / "sessions" / session_id))
+        for label, root in roots:
+            try:
+                entries = sorted(root.rglob("*")) if root.exists() else []
+                lines.append(f"{label} {root} ({len(entries)} entries):")
+                for entry in entries[:_DIAG_MAX_LISTING]:
+                    try:
+                        size = entry.stat().st_size if entry.is_file() else "dir"
+                    except OSError as error:
+                        size = f"<{error}>"
+                    lines.append(f"  {entry.relative_to(root)} {size}")
+            except BaseException as error:  # noqa: BLE001
+                lines.append(f"{label}=<unreadable: {error!r}>")
+        # The session's small state files (``runtime-exit.json``,
+        # ``update-window.json``) say how the old runtime left; bounded.
+        try:
+            session_root = config / "sessions" / session_id
+            for state in sorted(session_root.glob("*.json"))[:_DIAG_MAX_LISTING]:
+                try:
+                    body = state.read_bytes()[:_DIAG_TAIL_BYTES].decode("utf-8", "replace")
+                    lines.append(f"--- {state.name} ---\n{body}")
+                except BaseException as error:  # noqa: BLE001
+                    lines.append(f"--- {state.name} unreadable: {error!r}")
+        except BaseException as error:  # noqa: BLE001
+            lines.append(f"session state files=<unreadable: {error!r}>")
+        # Successor spawn captures (``launch`` writes ``lop-runtime-*.log`` via
+        # mkstemp and unlinks it on success), so a surviving recent one is the
+        # output of a spawn that did not hand over.
+        try:
+            captures = sorted(
+                (
+                    p
+                    for p in Path(tempfile.gettempdir()).glob("lop-runtime-*.log")
+                    if p.stat().st_mtime >= time.time() - (time.monotonic() - flip) - 5
+                ),
+                key=lambda p: p.stat().st_mtime,
+            )[-_DIAG_MAX_CAPTURES:]
+            lines.append(f"recent spawn captures: {[str(p) for p in captures]}")
+            for capture in captures:
+                try:
+                    tail = capture.read_bytes()[-_DIAG_TAIL_BYTES:].decode("utf-8", "replace")
+                    lines.append(f"--- tail {capture} ---\n{tail}")
+                except BaseException as error:  # noqa: BLE001
+                    lines.append(f"--- {capture} unreadable: {error!r}")
+        except BaseException as error:  # noqa: BLE001
+            lines.append(f"spawn captures=<unreadable: {error!r}>")
+        # Gate 4: what a spawned successor would inherit.
+        lines.append(
+            _diag_read(
+                "os.environ LOP_WAKE_SUPERVISOR_*",
+                lambda: {
+                    k: v for k, v in os.environ.items() if k.startswith("LOP_WAKE_SUPERVISOR")
+                },
+            )
+        )
+        lines.append("===== /RUNTIME-REFRESH-DIAG =====")
+        print("\n".join(lines), file=sys.stderr, flush=True)
+    except BaseException as error:  # noqa: BLE001 — the assertion below must still fire
+        try:
+            print(f"RUNTIME-REFRESH-DIAG failed: {error!r}", file=sys.stderr, flush=True)
+        except BaseException:  # noqa: BLE001
+            pass
+
+
+def _lose_the_retiring_frame(viewer: Any, monkeypatch: pytest.MonkeyPatch) -> list[int]:
+    """Make a reset overtake the owner's ``retiring`` frame, deterministically.
+
+    This is a test seam for CI gate 42969069065 (PR #3783, job 130362419678).
+    The old owner exited 0 and left ``runtime-exit.json`` saying "retiring for
+    <build>", but the viewer heard ``'owner connection reset'`` and never the
+    frame. That happens when the reset is queued before the pump reads the
+    frame: ``StreamReader.readuntil`` raises the stored exception before
+    scanning its buffer. The seam swaps the frame for the reset at the real
+    client's reader. The owner subprocess, its exit record and the app's
+    engage path stay real.
+
+    It covers EVERY connection this process dials, not only the current one.
+    Recovery can redial the retiring owner while its record is still
+    published, and a frame that reached that second connection would hide the
+    defect. The test asserts that the seam fired, so a frame that slipped
+    through fails the run instead of passing it.
+    """
+    from local_operator.mobile.attach_client import AttachClient
+
+    #: One entry per retiring frame the seam swallowed, so the test can prove
+    #: the ordering under test happened rather than passing on a frame that
+    #: slipped through.
+    fired: list[int] = []
+
+    def lose_on(reader: asyncio.StreamReader) -> None:
+        # Filtered at ``feed_data``, the transport's entry into the reader, and
+        # NOT at ``readline``. The pump is usually parked INSIDE an earlier
+        # ``readline`` call, and a wrapper installed after that call started
+        # would let the very next line through. That gave a false pass on main
+        # in 2 of 7 runs, where the retiring frame was the next line. Only
+        # complete lines are forwarded, so a frame split across TCP reads is
+        # still recognised.
+        if getattr(reader, "_test_loses_retiring", False):
+            return
+        feed_data = reader.feed_data
+        feed_eof = reader.feed_eof
+        partial = bytearray()
+
+        def feed_losing_retiring(data: bytes) -> None:
+            partial.extend(data)
+            *lines, rest = bytes(partial).split(b"\n")
+            partial[:] = rest
+            for line in lines:
+                try:
+                    op = json.loads(line).get("op") if line.strip() else None
+                except ValueError:
+                    op = None
+                if op == "retiring":
+                    fired.append(id(reader))
+                    reader.set_exception(
+                        ConnectionResetError("test seam: reset overtook the retiring frame")
+                    )
+                    return
+                feed_data(line + b"\n")
+
+        def flush_then_eof() -> None:
+            if partial:
+                feed_data(bytes(partial))
+                partial.clear()
+            feed_eof()
+
+        reader.feed_data = feed_losing_retiring  # type: ignore[method-assign]
+        reader.feed_eof = flush_then_eof  # type: ignore[method-assign]
+        reader._test_loses_retiring = True  # type: ignore[attr-defined]
+
+    pump = AttachClient._pump
+
+    async def pump_losing_retiring(self: AttachClient) -> None:
+        if self._reader is not None:
+            lose_on(self._reader)
+        await pump(self)
+
+    monkeypatch.setattr(AttachClient, "_pump", pump_losing_retiring)
+    client = viewer._client
+    assert client is not None and client._reader is not None
+    # The current pump is already running with its reader captured, so the class
+    # patch cannot reach it. Patch that reader directly.
+    lose_on(client._reader)
+    return fired
+
+
 @pytest.mark.asyncio
+@pytest.mark.parametrize("frame_lost", [False, True], ids=["frame", "reset-before-frame"])
 async def test_a_watched_idle_runtime_refreshes_and_the_viewer_rebinds_silently(
-    headless_tui_env: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    headless_tui_env: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, frame_lost: bool
 ) -> None:
     """Design test 13: the resume-then-update case, end to end.
 
@@ -173,6 +682,11 @@ async def test_a_watched_idle_runtime_refreshes_and_the_viewer_rebinds_silently(
     marker to NEW. Within the settle + stagger the old pid must be gone, the
     record must name a NEW pid, the viewer must be bound (not cold), and the
     ledger must contain none of :data:`FORBIDDEN`.
+
+    ``reset-before-frame`` runs the same journey with the ``retiring`` frame
+    lost to a reset (see :func:`_lose_the_retiring_frame`). The viewer must
+    still refresh from the owner's durable exit record, inside the same 30 s
+    deadline.
     """
     from local_operator.session.attached import AttachedSession
 
@@ -216,6 +730,14 @@ async def test_a_watched_idle_runtime_refreshes_and_the_viewer_rebinds_silently(
                 app._loaded_build = BuildStamp(version=record.version, source_ref=record.source_ref)
                 await pilot.pause()
 
+                # Diagnostics only (see _install_successor_spies).
+                diag_events: list[str] = []
+                diag_t0: list[float] = []
+                _install_successor_spies(app, viewer, diag_events, diag_t0)
+                seam_fired: list[int] = []
+                if frame_lost:
+                    seam_fired = _lose_the_retiring_frame(viewer, monkeypatch)
+                diag_t0.append(time.monotonic())
                 _flip(prefix)
 
                 # Wait on the EVENT — the old pid exiting — never on a clock.
@@ -239,9 +761,26 @@ async def test_a_watched_idle_runtime_refreshes_and_the_viewer_rebinds_silently(
                         break
                     await pilot.pause()
                     await asyncio.sleep(0.05)
+                else:
+                    # Timeout path only: the loop ran out without a bound
+                    # successor. Diagnostics, then the unchanged assertions.
+                    _dump_successor_diagnostics(
+                        app=app,
+                        viewer=viewer,
+                        config=config,
+                        session_id=session_id,
+                        old_pid=old_pid,
+                        child=child,
+                        events=diag_events,
+                        t0=diag_t0,
+                    )
                 assert (
                     new_record is not None and int(new_record.pid) != old_pid
                 ), "no successor runtime was engaged after the refresh"
+                if frame_lost:
+                    assert (
+                        seam_fired
+                    ), "the seam never swallowed a retiring frame; nothing was tested"
                 assert not viewer.is_cold, "the viewer must be bound to the successor"
                 assert (
                     new_record.source_ref == NEW_MARKER.split()[0]
@@ -951,7 +1490,9 @@ def _completion_attention(config_dir: Path, session_id: str) -> list[dict[str, A
     ]
 
 
-def _completion_attention_report(config_dir: Path, session_id: str) -> str:
+def _completion_attention_report(
+    config_dir: Path, session_id: str, stderr_path: Path | None = None
+) -> str:
     """Which of the two ways a missing latch happened, in words.
 
     "The latch must land while the turn is STILL running" is false in two
@@ -963,6 +1504,13 @@ def _completion_attention_report(config_dir: Path, session_id: str) -> str:
     (review round 3, MINOR 1).
     """
     rows = _completion_attention(config_dir, session_id)
+    # Appended to BOTH branches: the completion rows alone read "complete,
+    # complete" on the CI failure while the turn's bash result was a synthetic
+    # abort — see ``tests/e2e/armed_probe_diagnostics.py`` for why and when to
+    # remove it. Its only caller is the armed-probe cell.
+    extra = armed_probe_diagnostics.evidence(
+        config_dir / "sessions" / session_id / "transcript.jsonl", stderr_path
+    )
     killed = [
         row
         for row in rows
@@ -972,9 +1520,13 @@ def _completion_attention_report(config_dir: Path, session_id: str) -> str:
         return (
             "THE DELETED TREE KILLED THE TURN, NOT A LATE DRAIN — the child's own "
             f"site-packages is what a function-local import in its turn prelude "
-            f"reaches for, and this cell removed it: {killed!r}"
+            f"reaches for, and this cell removed it: "
+            f"{armed_probe_diagnostics.redacted_rows(killed)!r}" + extra
         )
-    return f"the turn's completion rows so far: {rows!r}"
+    return (
+        f"the turn's completion rows so far: {armed_probe_diagnostics.redacted_rows(rows)!r}"
+        + extra
+    )
 
 
 def _install_probe(prefix: Path) -> list[str]:
@@ -1055,6 +1607,12 @@ async def test_the_armed_probe_drains_and_exits_when_the_loaded_tree_vanishes(
     assert "UV_TOOL" in probe[1], f"install_kind is not UV_TOOL: {probe}"
     assert probe[2] == "True", f"the probe is not armed: {probe}"
 
+    # The child's stderr goes to a test-owned FILE instead of DEVNULL so a red
+    # cell can quote its tail (the CI failure left nothing to read). Neither is
+    # a tty, so the child sees the same kind of stream; the parent's handle is
+    # closed right after the spawn and only read back in a failure message.
+    stderr_path = tmp_path / "armed-child-stderr.log"
+    stderr_file = stderr_path.open("wb")
     child = subprocess.Popen(
         [str(prefix / "bin" / "python"), "-m", "local_operator.session.runtime.process"],
         env=_armed_child_env(config, session_id),
@@ -1066,9 +1624,11 @@ async def test_the_armed_probe_drains_and_exits_when_the_loaded_tree_vanishes(
         cwd=str(tmp_path),
         stdin=subprocess.DEVNULL,
         stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
+        stderr=stderr_file,
         start_new_session=True,
     )
+    stderr_file.close()
+    transcript = config / "sessions" / session_id / "transcript.jsonl"
     viewer = None
     try:
         record = await _wait_for_record(config, session_id)
@@ -1107,7 +1667,7 @@ async def test_the_armed_probe_drains_and_exits_when_the_loaded_tree_vanishes(
         else:
             raise AssertionError("the warm-up turn never completed")
 
-        await viewer.prompt("please [bash:12]")
+        await viewer.prompt(f"please [bash:{ARMED_HOLD_S}]")
         deadline = time.monotonic() + 30
         while time.monotonic() < deadline:
             state = getattr(viewer, "frontend_state", None)
@@ -1116,6 +1676,32 @@ async def test_the_armed_probe_drains_and_exits_when_the_loaded_tree_vanishes(
             await asyncio.sleep(0.05)
         else:
             raise AssertionError("the runtime never started the turn")
+
+        # WAIT UNTIL THE BASH TOOL IS RUNNING, THEN DELETE -- ``streaming`` is
+        # not that moment. It flips when the turn is ADMITTED; the tool call
+        # that this cell parks the turn in is dispatched later (a provider
+        # request, then the guardrail check, then the spawn), and each of those
+        # touches modules on disk. Delete in that gap and the dispatch fails in
+        # microseconds -- "aborted", or "BLOCKED by guardrail ... the safety check
+        # failed" -- the turn completes with no tool ever having run, and the
+        # latch assertion below reports "completion rows: complete, complete".
+        # That was CI's failure (runs 43082470360, 43135142485): the gap is
+        # ~ms on an idle box and stretches with runner load, while the old
+        # cell's rmtree was timed against ``streaming`` alone. A live
+        # ``sleep`` under THIS runtime is the observable that the dispatch is
+        # behind us, so the deletion now lands on a turn that is genuinely
+        # parked in its tool, which is the situation the cell claims to test.
+        # (``AttachedSession`` publishes no per-tool state to wait on instead.)
+        deadline = time.monotonic() + 60
+        while time.monotonic() < deadline:
+            if _parked_sleep_pids(pid, ARMED_HOLD_S):
+                break
+            await asyncio.sleep(0.05)
+        else:
+            raise AssertionError(
+                "the turn never reached its bash tool: "
+                + _completion_attention_report(config, session_id, stderr_path)
+            )
 
         shutil.rmtree(tree)  # what `uv tool install --force` does first
 
@@ -1129,12 +1715,25 @@ async def test_the_armed_probe_drains_and_exits_when_the_loaded_tree_vanishes(
             if drain_lines:
                 break
             await asyncio.sleep(0.1)
-        assert drain_lines, f"never drained:\n{chr(10).join(_runtime_log_lines()[-30:])}"
+        assert drain_lines, f"never drained:\n{chr(10).join(_runtime_log_lines()[-30:])}" + (
+            armed_probe_diagnostics.evidence(transcript, stderr_path)
+        )
         assert "loaded module tree is gone" in drain_lines[0], drain_lines[0]
         assert getattr(
             viewer.frontend_state, "streaming", False
         ), "the latch must land while the turn is STILL running — " + _completion_attention_report(
-            config, session_id
+            config, session_id, stderr_path
+        )
+
+        # THE TURN IS HELD OPEN UNTIL HERE, NOT FOR A FIXED TIME. The tool parks
+        # for ARMED_HOLD_S (the mock's cap), far past the latch, so "the latch
+        # landed while the turn was still running" cannot be lost to a slow
+        # probe tick; the cell ends the park itself now that the latch is
+        # observed and the assertion above has passed. Without it a loaded
+        # runner could finish a fixed 12 s turn before a 5 s probe fired twice.
+        assert _release_parked_sleep(pid, ARMED_HOLD_S), (
+            "the parked bash tool vanished before the cell could release it: "
+            + _completion_attention_report(config, session_id, stderr_path)
         )
 
         # (b) It EXITS — the Q-1 pin. On the wedged head this loop timed out with
@@ -1142,10 +1741,14 @@ async def test_the_armed_probe_drains_and_exits_when_the_loaded_tree_vanishes(
         deadline = time.monotonic() + 180
         while time.monotonic() < deadline and _alive(child):
             await asyncio.sleep(0.2)
-        assert not _alive(child), "the drain latched and the runtime NEVER exited:\n" + chr(
-            10
-        ).join(_lines_for_pid(pid)[-10:])
-        assert child.returncode == 0, f"the runtime exited {child.returncode}, not cleanly"
+        assert not _alive(child), (
+            "the drain latched and the runtime NEVER exited:\n"
+            + chr(10).join(_lines_for_pid(pid)[-10:])
+            + armed_probe_diagnostics.evidence(transcript, stderr_path)
+        )
+        assert child.returncode == 0, f"the runtime exited {child.returncode}, not cleanly" + (
+            armed_probe_diagnostics.evidence(transcript, stderr_path)
+        )
 
         # (c) Nothing in flight was aborted: the turn's own reply is durable.
         durable = (config / "sessions" / session_id / "transcript.jsonl").read_text(
@@ -1160,9 +1763,11 @@ async def test_the_armed_probe_drains_and_exits_when_the_loaded_tree_vanishes(
         # a turn off.
         attention = _completion_attention(config, session_id)
         assert attention, f"no completion was recorded at all:\n{durable[-2000:]}"
-        assert [
-            row for row in attention if row.get("kind") == "error"
-        ] == [], "the drain cut the turn off:\n" + json.dumps(attention, indent=2)
+        assert [row for row in attention if row.get("kind") == "error"] == [], (
+            "the drain cut the turn off:\n"
+            + json.dumps(armed_probe_diagnostics.redacted_rows(attention), indent=2)
+            + armed_probe_diagnostics.evidence(transcript, stderr_path)
+        )
         assert any(row.get("kind") == "complete" for row in attention), attention
     finally:
         if viewer is not None:

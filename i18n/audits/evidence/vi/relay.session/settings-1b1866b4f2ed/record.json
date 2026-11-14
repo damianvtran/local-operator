@@ -1,0 +1,50 @@
+{
+ "schema": 1,
+ "locale": "vi",
+ "namespace": "relay.session",
+ "pr": "damianvtran/local-operator#3697",
+ "worktree": "/Users/damian/local-operator/.worktrees/settings-lane",
+ "head": "dc3792c06eb22d2f6dfa70631eb4072275ab3dcb",
+ "merge_base": "ae1dd3e0a769fc0345dee7c21b4418f45b82cad3",
+ "catalogue_state": "uncommitted working-tree bytes",
+ "source_sha256": "a118c820060685e6b4f83601b9f6d7d2195bb8f7c40b6a9187c8c10195f5af54",
+ "target_sha256": "a75b7b0a87c0e728cfcc5639b449ec76a69129995334e7e01d0f0f89e678205b",
+ "base_target_sha256": "85ae31504ebf7a8482a9b5aef39909fe94163a4512d84580188713db9c0cdfb3",
+ "translator": {
+  "agent": "coder-settings-lane",
+  "model": "anthropic/claude-opus-5-5 (resumed run; initial implementation run fell back to openai/gpt-6.1-sol)",
+  "source": "manager message to auditor, 2026-11-09"
+ },
+ "auditor": {
+  "agent": "translation-auditor (lopdev reviewer role, session 1b1866b4f2ed; independent of PR author and translator)",
+  "session": "1b1866b4f2ed",
+  "model": "anthropic/claude-opus-5-5",
+  "fallback": "none observed in this session",
+  "date": "2026-11-09",
+  "result": "passed",
+  "findings": 0,
+  "unresolved_blocker_major": 0
+ },
+ "status": "passed",
+ "audit_kind": "delta audit of added keys + mechanical carry of unchanged keys",
+ "audited_keys": [
+  "relay.session.model.queued"
+ ],
+ "keys_total": 18,
+ "carry_proof": {
+  "unchanged_keys_byte_identical_to_merge_base": true,
+  "base_ledger_row_status": "passed",
+  "base_ledger_source_sha256_equals_base_en": true,
+  "base_ledger_row_names_base_target_sha": true
+ },
+ "verified": [
+  "key set equals en",
+  "placeholder names equal en",
+  "no bidi control characters",
+  "scripts/i18n/check.py --catalogues-only rc=0 (0 problems) under run_bounded 600s/1200MB"
+ ],
+ "reading": "Added values read against en and the context sidecar: meaning, register, 'step' = next model call (not next user message), reassuring tone, placeholder position, kept-Latin model labels. No findings.",
+ "findings": [],
+ "not_verified": "native-speaker review; rendered TUI/phone/desktop width and Urdu RTL",
+ "ledger_note_draft": "Delta audit 2026-11-09 by reviewer session 1b1866b4f2ed (anthropic/claude-opus-5-5, no fallback): 1 added key(s) read, 0 findings; 17 unchanged keys byte-identical to the passed row at base. Target a75b7b0a87c0e728cfcc5639b449ec76a69129995334e7e01d0f0f89e678205b. Evidence: i18n/audits/evidence/vi/relay.session/settings-1b1866b4f2ed/record.json"
+}

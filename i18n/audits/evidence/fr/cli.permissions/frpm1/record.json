@@ -1,0 +1,87 @@
+{
+  "schema": 1,
+  "audit_id": "frpm1",
+  "locale": "fr",
+  "namespace": "cli.permissions",
+  "audit_date": "2026-11-09",
+  "packaged_at_utc": "2026-11-09T18:57:00Z",
+  "key_count": 28,
+  "auditor": {
+    "agent": "i18n-auditor (lopdev team task subagent; did not translate or edit any copy)",
+    "session": "144ca81a304c",
+    "model": "anthropic/claude-opus-5-5",
+    "independent_from_translator_session": true,
+    "translator_session": "ad99821ab9e1",
+    "actual_model_source": "this session's own system-prompt model header (Model: anthropic/claude-opus-5-5); no provider fallback observed during the audit"
+  },
+  "source_audit_revision": "50badda034d755ebb049c4f542f3073439bf823e",
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/cli.permissions.json",
+      "sha256": "eba1e1dd19a618fa8c46a3744197afd2dfa4e84b6774f16b20e8de389f4dbf8f"
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/cli.permissions.context.json",
+      "sha256": "aca67def3cff590dcc5f681e8ff0127fecf6b33775555e3eaafc240070ba15ce"
+    },
+    "fr": {
+      "path": "local_operator/i18n/catalogues/fr/cli.permissions.json",
+      "sha256": "9eae53cdd40de70bc8103c41cd10288e1ad2a3023ec91a43c3c850283fb1badd"
+    },
+    "style_guide": {
+      "path": "i18n/style-guides/fr.md",
+      "sha256": "5315e1ac10c2ce57aac631ba653d08de680ee70c9a022ed3a8345ce2f9902ee7"
+    },
+    "glossary": {
+      "path": "i18n/glossary.md",
+      "sha256": "0eb34437a8c3d6f564f278ef957a603b1d9f51bb07d5ddae5ea8f37deba962f8"
+    }
+  },
+  "current_report_verdict": {
+    "status": "changes_requested",
+    "unresolved_blocker_major_count": 1,
+    "finding_ids": [
+      "FRPM-1",
+      "FRPM-2",
+      "FRPM-3",
+      "FRPM-4",
+      "FRPM-N1",
+      "FRPM-N2",
+      "FRPM-N3"
+    ],
+    "finding_counts": {
+      "blocker": 0,
+      "major": 1,
+      "minor": 3,
+      "nit": 3
+    }
+  },
+  "audit_notes_not_execution_log": "report.md and findings.json are reasoning/notes; audit.log alone is captured command output.",
+  "limitations": [
+    "Independent LLM review, not native-speaker certification.",
+    "Scalar text only: no rendered terminal frame captured; output is plain print lines with no declared width budget.",
+    "read_public_copy not used; catalogue bytes read directly from the PR worktree at the revision above."
+  ],
+  "artifacts": [
+    {
+      "path": "i18n/audits/evidence/fr/cli.permissions/frpm1/audit_checks.py.txt",
+      "sha256": "dead0818838ba7ec6b9d065c5c89bf8efeb93ff2d25488113678f0729954e708"
+    },
+    {
+      "path": "i18n/audits/evidence/fr/cli.permissions/frpm1/audit.log",
+      "sha256": "3aa583ab067ae60f0cd915932d3d66770f5e8edb807d5e8389c252791793137e"
+    },
+    {
+      "path": "i18n/audits/evidence/fr/cli.permissions/frpm1/findings.json",
+      "sha256": "4a40c787afbb59938ff0f8082b175802ad03439bacde440d5c546f29e6f4c457"
+    },
+    {
+      "path": "i18n/audits/evidence/fr/cli.permissions/frpm1/report.md",
+      "sha256": "0ff1d2c8ed22087c20b1d3790037aeda69b125434705e773b0fad13e26c9bf34"
+    },
+    {
+      "path": "i18n/audits/evidence/fr/cli.permissions/frpm1/receipt.json",
+      "sha256": "see receipt.json (hashes record.json; not self-hashed)"
+    }
+  ]
+}

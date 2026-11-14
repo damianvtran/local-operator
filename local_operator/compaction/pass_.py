@@ -48,6 +48,7 @@ from .thresholds import (
     CompactionSettings,
     compaction_context_tokens,
     resolve_strategy,
+    resolve_threshold_tokens,
     resolve_wire_bytes_budget,
     should_compact,
 )
@@ -239,6 +240,13 @@ async def run_compaction_pass(
                 _previous_archive_text(to_summarize),
                 context_window=model.context_window,
                 previous_carry=_previous_archive_carry(to_summarize),
+                # Size against the trigger the committed context must land
+                # under, not the raw window (snapcompact.EDGE_THRESHOLD_FRACTION).
+                threshold_tokens=(
+                    resolve_threshold_tokens(model.context_window, settings)
+                    if model.context_window
+                    else None
+                ),
             )
             summary = snapcompact.archive_summary(archive, model.provider, model.model_id) or " "
             preserve_data = {"snapcompact": archive.model_dump(mode="json")}

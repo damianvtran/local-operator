@@ -1,0 +1,40 @@
+# audit.log — actual command output captured by auditor session c77ef00ae239, 2026-11-09, worktree @ 85fb35811f9d17fb6dfadfc2d5df3269db04bd12
+$ git status --short -- local_operator/i18n/catalogues/{en,hi}/cli.permissions*
+$ shasum -a 256 inputs
+58e58c3b19a07c024b609f614e686cc9a72def77e3de704870f0557e84e7be41  local_operator/i18n/catalogues/en/cli.permissions.json
+6f8427bf5dd20f8fa252d0163387d59f4e53a30fe07cc9db4c5a5f55048fb1d2  local_operator/i18n/catalogues/en/cli.permissions.context.json
+40aa4904e2a07c95e9f178dd44b14e640ed0d20e3a6de34513394fe7eae96c1f  local_operator/i18n/catalogues/hi/cli.permissions.json
+82292dc8d13fcc93dc752457719264aed3cc20bb65ecfaba0f0e5a31f4cb40d5  i18n/style-guides/hi.md
+0eb34437a8c3d6f564f278ef957a603b1d9f51bb07d5ddae5ea8f37deba962f8  i18n/glossary.md
+$ .venv/bin/python scripts/i18n/check.py --catalogues-only
+check.py: catalogue checks: 0 problem(s)
+exit=0
+$ .venv/bin/python parity.py  (script retained as parity.py.txt)
+keys en 39 hi 39 missing [] extra []
+changed/new keys since 788cc399: ['cli.permissions.setup.already_signed', 'cli.permissions.setup.always_allow_kept', 'cli.permissions.setup.explain', 'cli.permissions.status.scope', 'cli.permissions.status.screen.denied']
+cli.permissions.setup.already_signed: ph []==[] True; bt True; quotes en 0 hi 0; nl 0/0; tokens [] missing; zw False; cells en 103 hi 87
+   hi: इस Python बिल्ड का रनटाइम पहले से साइन था, इसलिए अभी कुछ साइन नहीं किया गया और macOS के पास पूछने को कुछ नहीं था।
+cli.permissions.setup.always_allow_kept: ph []==[] True; bt True; quotes en 2 hi 2; nl 0/0; tokens [] missing; zw False; cells en 56 hi 48
+   hi: इस कुंजी के लिए आपका पहले वाला "हमेशा अनुमति दें" जवाब बना रहता है।
+cli.permissions.setup.explain: ph ['{name}']==['{name}'] True; bt True; quotes en 8 hi 8; nl 2/2; tokens [] missing; zw False; cells en 259 hi 215
+   hi: यह चरण रनटाइम को "{name}" से साइन करता है ताकि रनटाइम डेस्कटॉप ऐप की गोपनीयता अनुमतियाँ साझा करें। macOS पूछ सकता है कि क्या codesign उस कुंजी का उपयोग कर सकता है।
+- "अनुमति दें" केवल इस बार साइन करता है। बाद में टर्मिनल में `lop update` चलाने पर फिर पूछा जाएगा; बिना टर्मिनल वाले अपडेट (एजेंट द्वारा चलाए गए, या सत्र के अंदर /update) टीम साइनिंग छोड़ देते हैं, इसलिए नए Python बिल्ड "Local Operator Runtime" पंक्ति का उपयोग करते हैं।
+- "हमेशा अनुमति दें" से सवाल आने बंद हो जाते हैं, लेकिन तब आपके macOS उपयोगकर्ता के रूप में चलने वाला कोई भी प्रोग्राम codesign के ज़रिए बिना पूछे इस Developer ID कुंजी से साइन कर सकता है। इसे वापस लेने के लिए कीचेन ऐक्सेस खोलें, उसकी प्राइवेट-की चुनें, और ऐक्सेस कंट्रोल में से codesign हटाएँ।
+cli.permissions.status.scope: ph []==[] True; bt True; quotes en 0 hi 0; nl 0/0; tokens [] missing; zw False; cells en 98 hi 77
+   hi: केवल स्क्रीन रिकॉर्डिंग की जाँच होती है। फ़ाइल और फ़ोल्डर तथा अन्य गोपनीयता सेवाएँ भी इसी पंक्ति का उपयोग करती हैं।
+cli.permissions.status.screen.denied: ph ['{row}']==['{row}'] True; bt True; quotes en 2 hi 2; nl 0/0; tokens [] missing; zw False; cells en 141 hi 104
+   hi: स्क्रीन रिकॉर्डिंग (रनटाइम प्रीफ़्लाइट): अनुमति नहीं है। सिस्टम सेटिंग > गोपनीयता और सुरक्षा > स्क्रीन और सिस्टम ऑडियो रिकॉर्डिंग में "{row}" चालू करें।
+$ python3 apple_labels.py  (script retained as apple_labels.py.txt)
+ProductName:		macOS
+ProductVersion:		27.2
+BuildVersion:		26B123
+System Settings.app/InfoPlist.loctable [CFBundleDisplayName] en='System Settings' hi='सिस्टम सेटिंग'
+SecurityPrivacyExtension.appex/InfoPlist.loctable [CFBundleDisplayName] en='Privacy & Security' hi='गोपनीयता और सुरक्षा'
+SecurityPrivacyExtension.appex/Localizable.loctable [SCREEN_CAPTURE_HEADER] en='Screen & System Audio Recording' hi='स्क्रीन और सिस्टम ऑडियो रिकॉर्डिंग'
+SecurityPrivacyExtension.appex/Localizable.loctable [FILE_ACCESS_COMBINED] en='Files & Folders' hi='फ़ाइल और फ़ोल्डर'
+SecurityPrivacyExtension.appex/Localizable.loctable [SCREENANDAUDIOCAPTURE] en='Screen & System Audio Recording' hi='स्क्रीन और सिस्टम ऑडियो रिकॉर्डिंग'
+SecurityAgent.bundle/ConfirmAccess.loctable [100267.title] en='Always Allow' hi='हमेशा अनुमति दें'
+SecurityAgent.bundle/ConfirmAccess.loctable [100268.title] en='Allow' hi='अनुमति दें'
+Keychain Access.app/InfoPlist.loctable [CFBundleDisplayName] en='Keychain Access' hi='कीचेन ऐक्सेस'
+Keychain Access.app/KeyEditor.loctable [302.label] en='Access Control' hi='ऐक्सेस कंट्रोल'
+Keychain Access.app/Localizable.loctable [private key] en='private key' hi='प्राइवेट-की'

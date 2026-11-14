@@ -70,6 +70,22 @@ def session_id() -> str | None:
     return value or None
 
 
+def forget_inherited_session_id() -> None:
+    """Drop an inherited :data:`SESSION_ID_ENV` from a process that hosts its OWN session.
+
+    The value names the session whose TOOL ran this process. That is right for a
+    command a tool runs (``lop network approvals request`` files as that session),
+    and wrong for a process that hosts a session itself (a runtime, a `lop exec`
+    run started from a tool's shell): its in-process :func:`session_id` readers
+    would audit as the PARENT. Called at those hosts' entry. Clearing, not
+    replacing: the host does not know its own id yet, so unattributed is the honest
+    answer until it does, which is what such a process recorded before
+    ``LOCAL_OPERATOR_SESSION_ID`` was exported at all. Its own tool children get
+    their context's id from the child-env injection either way.
+    """
+    os.environ.pop(SESSION_ID_ENV, None)
+
+
 def resolve_master_key(base: Path | None = None, *, create: bool = False) -> bytes:
     """The key that actually opens this store, completing a broken rotation.
 

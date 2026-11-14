@@ -302,7 +302,9 @@ async def test_attached_owner_refusal_preserves_primary_and_new_bind_is_rechecke
             # This seam records owner RPC admission, never opens a socket.
             pass
 
-        async def set_model(self, provider: str, model_id: str, effort: str | None = None) -> str:
+        async def set_model(
+            self, provider: str, model_id: str, effort: str | None = None, **_: object
+        ) -> str:
             calls.append((provider, model_id))
             return "accepted"
 

@@ -1,0 +1,8 @@
+{
+  "schema": 1,
+  "record": "i18n/audits/evidence/ru/cli.permissions/pa1/record.json",
+  "companions": {
+    "i18n/audits/evidence/ru/cli.permissions/pa1/report.md": "f069b9d513c36d1da23cd1b4c6042c544a82a19921e234b341663d06a280db79",
+    "i18n/audits/evidence/ru/cli.permissions/pa1/audit.log": "6c19136ee163a4963d43ac64fd33180ba3f952edf706a92cc4d1adac5c77db80"
+  }
+}

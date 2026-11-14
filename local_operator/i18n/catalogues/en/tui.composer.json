@@ -1,3 +1,4 @@
 {
-  "tui.composer.placeholder_default": "Message Local Operator…"
+  "tui.composer.placeholder_default": "Message Local Operator…",
+  "tui.composer.temporary_placeholder": "Message (temporary chat — not kept)…"
 }

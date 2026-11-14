@@ -1,0 +1,18 @@
+"""Look up Apple's installed en->vi strings for macOS labels named in cli.permissions."""
+import plistlib, glob, re
+def search(paths, pat, loc='vi'):
+    rx = re.compile(pat)
+    for p in paths:
+        try: d = plistlib.load(open(p, 'rb'))
+        except Exception: continue
+        en = d.get('en', {}); v = d.get(loc, {})
+        for k, val in en.items():
+            if isinstance(val, str) and rx.search(val):
+                print(f"{p} :: {k} :: en={val!r} :: vi={v.get(k)!r}")
+SP='/System/Library/ExtensionKit/Extensions/SecurityPrivacyExtension.appex/Contents/Resources/'
+SA='/System/Library/Frameworks/Security.framework/Versions/A/MachServices/SecurityAgent.bundle/Contents/Resources/'
+KA='/System/Library/CoreServices/Applications/Keychain Access.app/Contents/Resources/'
+search(glob.glob(SP+'*.loctable'), r'^(Screen (&|and) System Audio Recording|Screen Recording|Files (&|and) Folders|Privacy (&|and) Security)$')
+search([SA+'ConfirmAccess.loctable', SA+'Localizable.loctable'], r'(?i)^(always allow|allow|deny)$')
+search(glob.glob(KA+'*.loctable'), r'(?i)^(access control|keychain access|private key|keychain|remove|-)$')
+search(['/System/Library/ExtensionKit/Extensions/AccessibilitySettingsExtension.appex/Contents/Resources/InfoPlist.loctable', '/System/Applications/System Settings.app/Contents/Resources/InfoPlist.loctable'], r'^(Accessibility|System Settings)$')

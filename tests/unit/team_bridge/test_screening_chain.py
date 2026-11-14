@@ -707,7 +707,7 @@ def test_input_refusal_400_on_hop0_holds_and_never_reaches_hop1(tmp_path, monkey
     assert _rows(tmp_path, "SELECT failure_class FROM screening_holds") == [("other",)]
 
 
-@pytest.mark.parametrize("status", [400, 403, 404, 413, 422, 500, 501])
+@pytest.mark.parametrize("status", [400, 403, 413, 422, 500, 501])
 def test_sender_triggerable_statuses_stop_the_walk(tmp_path, monkeypatch, status) -> None:
     store, owner = _setup(tmp_path)
     _config(tmp_path, chain=["deepseek/deepseek-flash"])
@@ -717,8 +717,16 @@ def test_sender_triggerable_statuses_stop_the_walk(tmp_path, monkeypatch, status
     assert [s["model"] for s in wire.sends] == ["gpt-5.4"]
 
 
-@pytest.mark.parametrize("status", [401, 429, 502, 503, 504, 529])
+@pytest.mark.parametrize("status", [401, 404, 429, 502, 503, 504, 529])
 def test_route_failures_advance_to_hop1(tmp_path, monkeypatch, status) -> None:
+    """A ROUTE failure advances: 404 included (PR #3632 review R1).
+
+    404 is the one hard 4xx in this list, and it belongs here because no
+    submission can make a provider report a missing model or route: the pinned
+    pair is simply not deployable on this account, which is the owner's
+    configuration, and a preference must never block the message.
+    """
+
     store, owner = _setup(tmp_path)
     _config(tmp_path, chain=["deepseek/deepseek-flash"])
     wire = _Wire({"gpt-5.4": ("fail", status), "deepseek-flash": ("reply", DELIVER)})
@@ -840,7 +848,10 @@ def test_advance_classifier_reads_raw_types_never_prose() -> None:
     assert _sender_cannot_cause(ProviderError(503, "x"))
     assert _sender_cannot_cause(ProviderError(429, "x"))
     assert _sender_cannot_cause(ProviderError(401, "x", auth_error=True))
-    for status in (400, 404, 413, 422, 500, 501):
+    # 404 is a ROUTE fact on its own (PR #3632 review R1): the pair is not
+    # served here, and no submission can make a provider say so.
+    assert _sender_cannot_cause(ProviderError(404, "x"))
+    for status in (400, 403, 413, 422, 500, 501):
         assert not _sender_cannot_cause(ProviderError(status, "x")), status
     assert not _sender_cannot_cause(RuntimeError("503 timeout quota"))
     assert not _sender_cannot_cause(ProviderError(None, "upstream 503 timed out"))
@@ -1229,6 +1240,28 @@ def test_wire_400_with_a_content_body_still_holds(tmp_path, monkeypatch) -> None
     assert result.disposition == "hold" and result.hold_code == "provider_error"
     assert [s["model"] for s in wire.sends] == ["gpt-5.4"], "hop 1 must never be sent"
     assert _rows(tmp_path, "SELECT failure_class FROM screening_holds") == [("other",)]
+
+
+def test_wire_404_carrying_a_verdict_still_holds(tmp_path, monkeypatch) -> None:
+    """The 404 ADVANCE IS ONE-WAY (PR #3632 review R1).
+
+    A 404 advances because the route does not serve the pair, which no body can
+    cause. When the same status nonetheless arrives with wording that NAMES a
+    content verdict, the first provider has already refused the submission and
+    the walk must hold (S-1) -- the marker check the gateway statuses already
+    use applies here too, so a crafted body can never trade the marker for a
+    fall-through.
+    """
+
+    store, owner = _setup(tmp_path)
+    _config(tmp_path, chain=["deepseek/deepseek-flash"])
+    wire = _BodyWire(404, "blocked: content policy violation, input flagged by guardrail")
+    _install_body_wire(monkeypatch, wire)
+
+    result = _cycle(tmp_path, owner)
+
+    assert result.disposition == "hold" and result.hold_code == "provider_error"
+    assert [s["model"] for s in wire.sends] == ["gpt-5.4"], "hop 1 must never be sent"
 
 
 def test_statusless_failure_after_a_send_still_holds(tmp_path, monkeypatch) -> None:

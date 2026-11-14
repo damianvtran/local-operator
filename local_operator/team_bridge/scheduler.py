@@ -408,6 +408,10 @@ class AcceptedLaw:
     # The hub's accepted consent-version set (``consent.accepted_versions``),
     # empty when the hub does not send one. See ``_consent_receipt_is_current``.
     consent_accepted_versions: tuple[str, ...] = ()
+    # The addressed-aware template the hub offers beside ``version``
+    # (``client.screening_addressed_version``): ``bridge-screen-v5`` or "". An
+    # optional per-message render upgrade, so a miss never refuses the law.
+    addressed_version: str = ""
 
 
 def _stage_text_floor(kind: str, version: Any, text: Any) -> tuple[str, str]:
@@ -498,6 +502,7 @@ def _normalize_accepted_status(status: "Mapping[str, Any]", owner: Any, store: A
     from local_operator.team_bridge.client import (
         _api_supported,
         _screening_is_trusted,
+        screening_addressed_version,
         screening_template_sha256,
     )
     from local_operator.team_bridge.store import StoreRefused
@@ -576,6 +581,7 @@ def _normalize_accepted_status(status: "Mapping[str, Any]", owner: Any, store: A
         guidance_sha=guidance_sha,
         consent_sha=consent_sha,
         consent_accepted_versions=accepted_versions,
+        addressed_version=screening_addressed_version(status),
     )
 
 
@@ -612,6 +618,7 @@ class AcceptedCapture:
         "guidance_sha",
         "consent_sha",
         "source",
+        "addressed_version",
     )
 
     def __init__(
@@ -634,6 +641,7 @@ class AcceptedCapture:
         consent_sha: Any = None,
         source: Any = None,
         consent_accepted_versions: "tuple[str, ...]" = (),
+        addressed_version: str = "",
     ) -> None:
         if token is not _CAPTURE_TOKEN:
             raise ValueError("AcceptedCapture is minted only by the verified status path")
@@ -658,6 +666,7 @@ class AcceptedCapture:
         self.guidance_sha = guidance_sha
         self.consent_sha = consent_sha
         self.source = source
+        self.addressed_version = addressed_version
         object.__setattr__(self, "_locked", True)
 
     def __setattr__(self, name: str, value: Any) -> None:
@@ -734,6 +743,11 @@ class _CyclePolicy:
     admission_revision: str
     approved_serving_identities: tuple[str, ...]
     provider: str
+    # Render option only (``PolicySnapshot.addressed_version``); never published.
+    addressed_version: str = ""
+    # A8: the privacy-pass control generation this policy was published under
+    # while ENABLED (0 = off). Read FRESH at publication; see privacy_pass.
+    privacy_generation: int = 0
 
 
 async def verified_status_capture(
@@ -830,6 +844,7 @@ async def verified_status_capture(
         guidance_sha=law.guidance_sha,
         consent_sha=law.consent_sha,
         source="sdk-verified",
+        addressed_version=law.addressed_version,
     )
 
 
@@ -845,8 +860,15 @@ async def run_screening_cycle(
     accepted_capture: "AcceptedCapture | None" = None,
     status_fetcher: "Callable[[], Awaitable[Any]] | None" = None,
     batch: bool = False,
+    privacy_runner_factory: Any = None,
 ) -> Any:
     """The SHIPPED THIN production composition (R6/Q3).
+
+    ``privacy_runner_factory`` is the A8 injection point at THIS composition
+    boundary (``privacy_pass.PrivacyRunnerFactory``): offline tests pass a
+    factory of scripted runners; production passes none today, so an enabled
+    privacy pass holds before any second-stage send (slice 1 ships no paid
+    privacy route). Answering provenance still comes only from the chain.
 
     ``batch=True`` screens EVERY item in one model call and returns a list of
     results in item order (``None`` when the account turn is busy); the
@@ -871,13 +893,30 @@ async def run_screening_cycle(
         resolve_screening_chain,
     )
     from local_operator.team_bridge.screening import ScreenResult, screen_message_async
+    from local_operator.team_bridge.settings import read_screening_model
     from local_operator.team_bridge.store import Store, StoreRefused, serialize_serving
 
     # ONE capture of the whole hop list: hop 0 is the configured default (the
     # published policy's model), the rest are the operator's configured
     # fallbacks, walked by ScreenChainRunner because failover disables its
     # own chain for isolated requests (see resolve_screening_chain).
-    chain = resolve_screening_chain(config_dir, settings)
+    #
+    # The machine's stored "Screening model" choice rides in as ``preferred``:
+    # it RE-ORDERS the evaluated screeners so the chosen pair is tried first and
+    # leaves the receiver's own cascade in place behind it (operator directive
+    # 2026-11-04: a choice must never block a receiver with no Anthropic account
+    # or an exhausted quota). ``None`` -- no choice, or one this build does not
+    # recognise -- is exactly the chain every machine screened with before the
+    # key existed.
+    chain = resolve_screening_chain(
+        config_dir,
+        settings,
+        preferred=(
+            getattr(settings, "screening_model", None)
+            if settings is not None
+            else read_screening_model(config_dir)
+        ),
+    )
     if not chain:
         # FAIL CLOSED: no preferred screener is credentialed AND the owner has
         # no usable configured model, so nothing can screen and the message is
@@ -1004,6 +1043,20 @@ async def run_screening_cycle(
     # fallback configured sees no revision change (and no epoch churn) from
     # the upgrade.
     serving = sorted({(hop.provider, hop.model_id) for hop in chain})
+    # A8 / S-2 AT PUBLICATION: one FRESH authority read (never a retained
+    # ConfigManager). Enabled binds rule, template digest and control
+    # generation into the revision, so a disable/re-enable always moves it;
+    # off appends nothing, so a machine that never enables A8 publishes the
+    # byte-identical revision it always did. The publish transaction re-checks
+    # the generation against the durable control row (a stale publisher
+    # cannot republish enabled after a disable).
+    from local_operator.team_bridge import privacy_pass as _privacy_pass
+
+    try:
+        privacy_authority = _privacy_pass.read_authority(config_dir, store)
+    except _privacy_pass.PrivacyAuthorityUnavailable as unavailable:
+        raise StoreRefused("policy_stale", "privacy authority unavailable") from unavailable
+    privacy_part = _privacy_pass.revision_suffix(privacy_authority)
     chain_part = (
         "|chain=" + ",".join(f"{provider}/{model}" for provider, model in serving)
         if len(chain) > 1
@@ -1016,6 +1069,7 @@ async def run_screening_cycle(
                 f"{version}|{template_hash}|{selection.provider}|{selection.model_id}|"
                 + ",".join(sorted(selection.approved_identities))
                 + chain_part
+                + privacy_part
             ).encode("utf-8")
         ).hexdigest()[:32]
     )
@@ -1053,6 +1107,7 @@ async def run_screening_cycle(
                 # The receipt fences accept a model in THIS set (B1/S-3); a
                 # single hop stores NULL, which reads as {default_model}.
                 approved_serving=serving if len(chain) > 1 else None,
+                privacy_generation=privacy_authority.policy_generation,
             )
         except StoreRefused:
             # A competing publisher moved authority; screen nothing rather
@@ -1074,6 +1129,10 @@ async def run_screening_cycle(
             sorted({identity for hop in chain for identity in hop.approved_identities})
         ),
         provider=selection.provider,
+        # Re-checked against the template it names: a capture is only ever minted
+        # with "" or a version whose embedded bytes the status read matched.
+        addressed_version=str(getattr(capture, "addressed_version", "") or ""),
+        privacy_generation=privacy_authority.policy_generation,
     )
     cycle = AccountScreeningCycle(store=store, owner=owner, holder=holder, ttl=ttl)
 
@@ -1105,6 +1164,7 @@ async def run_screening_cycle(
                 config_dir=config_dir,
                 policy=cast("ScreeningPolicy", policy),
                 runner=chain_runner,
+                privacy_runner_factory=privacy_runner_factory,
             )
 
         # ONE turn, ONE call: the cycle's single-target selection only picks
@@ -1140,6 +1200,7 @@ async def run_screening_cycle(
             # re-captures them into its own immutable snapshot.
             policy=cast("ScreeningPolicy", policy),
             runner=runner,
+            privacy_runner_factory=privacy_runner_factory,
         )
 
     return await cycle.run_once(items, _screen)

@@ -312,14 +312,27 @@ async def test_every_session_gated_tool_is_in_the_merge_set(
     from local_operator.tools import video_tool
 
     monkeypatch.setattr(video_tool, "video_provider_reachable", lambda *a, **k: True)
+    # The music trio carries the same kind of second gate: a persisted Radient
+    # login (``music_tool._available``), which a bare CI host never holds, so
+    # without this presence-only stub the trio is absent on CI only.
+    from local_operator.tools import music_tool
+
+    monkeypatch.setattr(music_tool, "radient_available", lambda *a, **k: True)
 
     stream = RecordingStream()
     session = make_session(tmp_path, stream)
     session.set_ask_handler(answer_nothing)
 
     # What ``session_factory`` builds the inventory from: no session fields.
+    # The factory's warm context DOES carry the profile root (session_factory
+    # sets ``memory_config_dir``), which is the ``skill`` tool's whole createIf,
+    # so ``skill`` is factory-built rather than a session capability and must
+    # stay out of the merge set.
     factory_side = {
-        tool.name for tool in create_tools(ToolContext(cwd=".", session_id="s", has_ui=True))
+        tool.name
+        for tool in create_tools(
+            ToolContext(cwd=".", session_id="s", has_ui=True, memory_config_dir=str(tmp_path))
+        )
     }
     session_side = {tool.name for tool in create_tools(session._build_tool_context())}
 
@@ -375,6 +388,12 @@ async def test_a_late_installed_ask_is_described_in_the_prompt_not_just_advertis
     # credential so it is IN the merge set's contribution this test asserts on
     # (a bare CI host has no provider key and the pair never appears).
     monkeypatch.setattr(video_tool, "video_provider_reachable", lambda *a, **k: True)
+    # The music trio carries the same kind of second gate: a persisted Radient
+    # login (``music_tool._available``), which a bare CI host never holds, so
+    # without this presence-only stub the trio is absent on CI only.
+    from local_operator.tools import music_tool
+
+    monkeypatch.setattr(music_tool, "radient_available", lambda *a, **k: True)
 
     stream = RecordingStream()
     session = make_prompt_session(tmp_path, stream)

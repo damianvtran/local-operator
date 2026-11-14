@@ -1,0 +1,14 @@
+{
+  "record": "i18n/audits/evidence/fr/wire.errors.sdk_spec/sdkfr3/record.json",
+  "audit_id": "sdkfr3",
+  "auditor_session": "7a9af2a8f0ea",
+  "model": "deepseek/deepseek-flash",
+  "head_sha": "255b798d112ca6a31f0eeaae59c069332c9e55c5",
+  "catalogue_sha256": "e0b8217ba430c8d1b686f2bffc4581a3eef2eacc60071ae2e34c107bca76dd8e",
+  "report_comment": "https://github.com/damianvtran/local-operator/pull/3708#issuecomment-6757119153",
+  "companions": {
+    "record.json": "7bb8d2d77be37f03860aa7fc0241f770b3826ea2366fbd6c7469044620bd2bcb",
+    "findings.json": "98510ce928cf6367a712a129e1953ae9a026f36110e7834d22bee2e41d5d2f16",
+    "report.md": "3a7cfeeeef67f963c34292434fe90f50d6b635801fcca96c617e360e2c01027d"
+  }
+}

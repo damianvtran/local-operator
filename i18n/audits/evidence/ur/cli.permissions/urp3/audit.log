@@ -1,0 +1,43 @@
+$ .venv/bin/python scripts/i18n/check.py --catalogues-only  # 2026-11-09T19:57:38Z @ 85fb35811f9d17fb6dfadfc2d5df3269db04bd12
+check.py: catalogue checks: 0 problem(s)
+exit=0
+$ shasum -a 256 <en> <context> <ur>
+58e58c3b19a07c024b609f614e686cc9a72def77e3de704870f0557e84e7be41  local_operator/i18n/catalogues/en/cli.permissions.json
+6f8427bf5dd20f8fa252d0163387d59f4e53a30fe07cc9db4c5a5f55048fb1d2  local_operator/i18n/catalogues/en/cli.permissions.context.json
+83ea8d20d41cc939d9bdc7b0c1a3023130c8c487538878acb5af4375db975132  local_operator/i18n/catalogues/ur/cli.permissions.json
+$ git diff --stat 788cc399..85fb3581 -- ur/ en/ catalogues
+ local_operator/i18n/catalogues/en/cli.permissions.context.json | 9 +++++++--
+ local_operator/i18n/catalogues/en/cli.permissions.json         | 5 +++--
+ local_operator/i18n/catalogues/ur/cli.permissions.json         | 7 ++++---
+ 3 files changed, 14 insertions(+), 7 deletions(-)
+$ .venv/bin/python mech_check.py  # retained as mech_check.py.txt
+keys 39 39 order_equal True ctx_has_new True
+cli.permissions.status.scope ph True backticks True tok_mismatch {} line_first_strong ['R'] cf 0 arabic_digits 0 nlines 1 1 ends '۔'
+cli.permissions.setup.already_signed ph True backticks True tok_mismatch {} line_first_strong ['R'] cf 0 arabic_digits 0 nlines 1 1 ends '۔'
+cli.permissions.setup.always_allow_kept ph True backticks True tok_mismatch {} line_first_strong ['R'] cf 0 arabic_digits 0 nlines 1 1 ends '۔'
+cli.permissions.setup.explain ph True backticks True tok_mismatch {} line_first_strong ['R', 'R', 'R'] cf 0 arabic_digits 0 nlines 3 3 ends '۔'
+exit=0
+$ python3 apple_labels.py  # retained as apple_labels.py.txt
+SPE /System/Library/ExtensionKit/Extensions/SecurityPrivacyExtension.appex/Contents/Resources/Localizable.loctable False langs 44
+  SPE en 'ACCESSIBILITY' = 'Device Control and Data Access'
+  SPE en 'FILE_ACCESS_COMBINED' = 'Files & Folders'
+  SPE en 'Allow' = 'Allow'
+  SPE en_GB 'ACCESSIBILITY' = 'Device Control and Data Access'
+  SPE en_GB 'FILE_ACCESS_COMBINED' = 'Files & Folders'
+  SPE en_GB 'Allow' = 'Allow'
+CA /System/Library/Frameworks/Security.framework/Versions/A/MachServices/SecurityAgent.bundle/Contents/Resources/ConfirmAccess.loctable False langs 41
+  CA en_GB '100267.title' = 'Always Allow'
+  CA en_GB '100268.title' = 'Allow'
+SS /System/Applications/System Settings.app/Contents/Resources/InfoPlist.loctable False langs 264
+  SS en_GB 'CFBundleDisplayName' = 'System Settings'
+  SS en_GB 'CFBundleName' = 'System Settings'
+exit=0
+$ sw_vers
+ProductName:		macOS
+ProductVersion:		27.2
+BuildVersion:		26B123
+$ python3 keychain_labels.py  # retained as keychain_labels.py.txt
+Localizable.loctable 'private key' en_GB= 'private key' ur_present= False
+Localizable.loctable 'Keychain Access' en_GB= 'Keychain Access' ur_present= False
+KeyEditor.loctable '302.label' en_GB= 'Access Control' ur_present= False
+exit=0

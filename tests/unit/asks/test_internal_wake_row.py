@@ -129,6 +129,12 @@ _SCHEDULES_READERS: dict[str, dict[str, str]] = {
             "from the live rows at take time; it renders nothing"
         ),
         "_flush_patience_armed_after": "full-list writer (patience's armed-after patch)",
+        "_idle_inputs": (
+            "an engine reader: the idle pass's next-due probe. Hidden rows stay IN — "
+            "a patience fire runs a turn via ``_prompt_messages`` and an "
+            "ask_timeout fire runs one via ``deliver_ask_messages``, so either "
+            "would hit the warm cache before expiry; it renders nothing"
+        ),
         "_queue_wake_rearm": (
             "the drain's successor reservation: it probes ``hold_pending``, which "
             "registers the owed one-shot in the owned list"

@@ -53,7 +53,10 @@ CAPABILITY = {
 #: (recovery: docs/design/mobile-start-receipts.md, section "Bounded
 #: limitations (honest)"). Forward is free.
 _INTENT_FIELDS = frozenset({"cwd", "provider", "model_id"})
-_OPTIONAL_INTENT_FIELDS = frozenset({"effort"})
+#: ``temporary`` (``features.temporary_chats``) follows ``effort``'s rule: stored
+#: only when chosen (as ``"1"``, since a resolved receipt holds non-empty strings),
+#: so a plain start fingerprints to exactly the bytes it did before.
+_OPTIONAL_INTENT_FIELDS = frozenset({"effort", "temporary"})
 
 #: Per-field bound on cwd/provider/model_id/effort, in code points.
 MAX_FIELD_CHARS = 4096
@@ -117,6 +120,11 @@ def canonical_request(body: dict[str, Any]) -> tuple[str, str]:
     effort = start_effort(body.get("effort"))
     if effort is not None:
         intent["effort"] = effort
+    temporary = body.get("temporary")
+    if temporary is not None and not isinstance(temporary, bool):
+        raise StartRefusal("invalid_start_request", 400)
+    if temporary:
+        intent["temporary"] = "1"
     return key, json.dumps(intent, sort_keys=True, separators=(",", ":"))
 
 

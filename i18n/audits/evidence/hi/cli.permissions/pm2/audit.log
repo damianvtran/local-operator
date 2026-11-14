@@ -1,0 +1,87 @@
+# audit.log — actual command output captured by auditor session d9395b58854d, 2026-11-09, worktree @ 788cc399410196b080cfc9f7e7bd558ccb713140
+$ sha256sum en/hi catalogues, context, style guide, glossary
+d5eed4044348f0fa462e1238209230507a48eb5e018b22c7a8b971b518d3f186  local_operator/i18n/catalogues/en/cli.permissions.json
+f2d9ce73f2791f209b1be203b8f1e0d042eff7a348c0822ee28c5141a3cec099  local_operator/i18n/catalogues/en/cli.permissions.context.json
+94cb61e796a304270031af2e60b7c1d93354adba0106f3cd0b8cf391a80231c1  local_operator/i18n/catalogues/hi/cli.permissions.json
+82292dc8d13fcc93dc752457719264aed3cc20bb65ecfaba0f0e5a31f4cb40d5  i18n/style-guides/hi.md
+0eb34437a8c3d6f564f278ef957a603b1d9f51bb07d5ddae5ea8f37deba962f8  i18n/glossary.md
+$ .venv/bin/python scripts/i18n/check.py --catalogues-only
+check.py: catalogue checks: 0 problem(s)
+exit=0
+$ .venv/bin/python parity.py  (placeholders, backtick spans, verbatim tokens, trailing space, newlines, ZWJ/ZWNJ; rich cell_len max line en hi)
+keys en 38 hi 38 symdiff []
+cli.permissions.help.permissions 72 68 []
+cli.permissions.help.status 84 76 []
+cli.permissions.help.setup 94 70 []
+cli.permissions.status.not_macos 56 40 []
+cli.permissions.status.identity.team 78 68 []
+cli.permissions.status.identity.adhoc 68 64 []
+cli.permissions.status.identity.legacy 105 81 []
+cli.permissions.status.identity.none 79 50 []
+cli.permissions.status.image 13 11 []
+cli.permissions.status.optin.on 51 40 []
+cli.permissions.status.optin.off 78 68 []
+cli.permissions.status.optin.no_app 99 81 []
+cli.permissions.status.optin.unavailable 191 159 []
+cli.permissions.status.optin.blocked 52 38 []
+cli.permissions.status.reason.isolated_home 44 41 []
+cli.permissions.status.reason.runtime_root_override 34 32 []
+cli.permissions.status.reason.config_dir_override 60 75 []
+cli.permissions.status.reason.not_darwin 9 13 []
+cli.permissions.status.app.found 33 28 []
+cli.permissions.status.app.missing 26 19 []
+cli.permissions.status.screen.granted 45 33 []
+cli.permissions.status.screen.denied 141 105 []
+cli.permissions.status.screen.unknown 58 37 []
+cli.permissions.status.screen.no_image 72 58 []
+cli.permissions.status.scope 113 86 []
+cli.permissions.status.guide 79 71 []
+cli.permissions.setup.refused.tty 61 49 []
+cli.permissions.setup.refused.isolated 89 62 []
+cli.permissions.setup.no_app 88 68 []
+cli.permissions.setup.no_identity 131 109 []
+cli.permissions.setup.explain 259 233 []
+cli.permissions.setup.confirm 16 13 []
+cli.permissions.setup.cancelled 31 23 []
+cli.permissions.setup.failed 117 95 []
+cli.permissions.setup.always_allow 67 57 []
+cli.permissions.setup.already_signed 147 125 []
+cli.permissions.setup.done 130 113 []
+cli.permissions.setup.done_allow_once 219 195 []
+$ python3 apple_labels.py  (en -> hi from installed Apple .loctable; script copied as apple_labels.py.txt)
+SystemSettings.app/InfoPlist.loctable [CFBundleDisplayName] en='System Settings' hi='सिस्टम सेटिंग'
+SecurityPrivacyExtension/InfoPlist.loctable [CFBundleDisplayName] en='Privacy & Security' hi='गोपनीयता और सुरक्षा'
+SecurityPrivacyExtension/Localizable.loctable [SCREEN_CAPTURE_HEADER] en='Screen & System Audio Recording' hi='स्क्रीन और सिस्टम ऑडियो रिकॉर्डिंग'
+SecurityPrivacyExtension/Localizable.loctable [FILE_ACCESS_COMBINED] en='Files & Folders' hi='फ़ाइल और फ़ोल्डर'
+SecurityPrivacyExtension/Localizable.loctable [SCREEN_CAPTURE] en='Screen Recording' hi='स्क्रीन रिकॉर्डिंग'
+SecurityPrivacyExtension/Localizable.loctable [SCREENANDAUDIOCAPTURE] en='Screen & System Audio Recording' hi='स्क्रीन और सिस्टम ऑडियो रिकॉर्डिंग'
+AccessibilitySettingsExtension.appex/InfoPlist.loctable [CFBundleDisplayName] en='Accessibility' hi='ऐक्सेसिबिलिटी'
+Security.framework/Resources/CloudKeychain.loctable [Allow] en='Allow' hi='अनुमति दें'
+Security.framework/Resources/authorization.buttons.loctable [com.apple.AOSNotification.FindMyMac.modify] en='Allow' hi='अनुमति दें'
+Security.framework/Resources/authorization.buttons.loctable [com.apple.security.sudo] en='Allow' hi='अनुमति दें'
+Security.framework/Versions/A/Resources/CloudKeychain.loctable [Allow] en='Allow' hi='अनुमति दें'
+Security.framework/Versions/A/Resources/authorization.buttons.loctable [com.apple.AOSNotification.FindMyMac.modify] en='Allow' hi='अनुमति दें'
+Security.framework/Versions/A/Resources/authorization.buttons.loctable [com.apple.security.sudo] en='Allow' hi='अनुमति दें'
+Security.framework/Versions/Current/Resources/CloudKeychain.loctable [Allow] en='Allow' hi='अनुमति दें'
+Security.framework/Versions/Current/Resources/authorization.buttons.loctable [com.apple.AOSNotification.FindMyMac.modify] en='Allow' hi='अनुमति दें'
+Security.framework/Versions/Current/Resources/authorization.buttons.loctable [com.apple.security.sudo] en='Allow' hi='अनुमति दें'
+$ python3 (ConfirmAccess.loctable hi + en_GB, SecurityAgent.bundle)
+ConfirmAccess.loctable '100266.title' en_GB= 'Deny' hi= 'अस्वीकार करें'
+ConfirmAccess.loctable '100267.title' en_GB= 'Always Allow' hi= 'हमेशा अनुमति दें'
+ConfirmAccess.loctable '100268.title' en_GB= 'Allow' hi= 'अनुमति दें'
+ConfirmAccess.loctable 'Q2F-4n-rKX.title' en_GB= 'Username:' hi= 'यूज़रनेम :'
+ConfirmAccess.loctable 'hJd-hz-GzF.title' en_GB= 'Password:' hi= 'पासवर्ड :'
+$ python3 (Keychain Access.app, /System/Library/CoreServices/Applications, en_GB -> hi)
+KeychainAccess/ACLEditor.loctable '100175.title' en_GB= 'Always allow access by these applications:' hi= 'इन ऐप्लिकेशन द्वारा ऐक्सेस की अनुमति दें।'
+KeychainAccess/CertificatePrefEditor.loctable '257.label' en_GB= 'Access Control' hi= 'ऐक्सेस कंट्रोल'
+KeychainAccess/InfoPlist.loctable 'CFBundleDisplayName' en_GB= 'Keychain Access' hi= 'कीचेन ऐक्सेस'
+KeychainAccess/KeyEditor.loctable '302.label' en_GB= 'Access Control' hi= 'ऐक्सेस कंट्रोल'
+KeychainAccess/Localizable.loctable 'private key' en_GB= 'private key' hi= 'प्राइवेट-की'
+KeychainAccess/Localizable.loctable 'Always allow access by these applications:' en_GB= 'Always allow access by these applications:' hi= 'इन ऐप्लिकेशन द्वारा ऐक्सेस की अनुमति दें।'
+KeychainAccess/NoteEditor.loctable '295.label' en_GB= 'Access Control' hi= 'ऐक्सेस कंट्रोल'
+KeychainAccess/PasswordEditor.loctable '257.label' en_GB= 'Access Control' hi= 'ऐक्सेस कंट्रोल'
+$ grep -rho over hi catalogues: System Settings / Access Control / private key / quotes
+   1 सिस्टम सेटिंग्ज़
+   1 ऐक्सेस नियंत्रण
+   1 निजी कुंजी
+hi files containing “: 12  cli.permissions “ count: 0

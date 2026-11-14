@@ -1,0 +1,231 @@
+{
+  "locale": "es",
+  "namespace": "wire.errors.sdk_spec",
+  "head_sha": "f990c30424edb03801b1ba2325f27092572c3a27",
+  "scope": "cf5c90bad0d1..f990c30424e",
+  "audit_date": "2026-11-09",
+  "key_count": 21,
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/wire.errors.sdk_spec.json",
+      "sha256": "a92bc479321cd0ee938d338cff05c1fced88590df3d43ec39d14f4d7b3cf5855"
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/wire.errors.sdk_spec.context.json",
+      "sha256": "8735964058f901e1d97527801eb88f5a36585f0d7713c1e21f7f98ebaa55418e"
+    },
+    "es": {
+      "path": "local_operator/i18n/catalogues/es/wire.errors.sdk_spec.json",
+      "sha256": "d3c6426e7842ae43906e674e6fe65d0cd1dc4475460195620d8dde8ce219ad44"
+    }
+  },
+  "target_sha256": "d3c6426e7842ae43906e674e6fe65d0cd1dc4475460195620d8dde8ce219ad44",
+  "english_source_sha256": "a92bc479321cd0ee938d338cff05c1fced88590df3d43ec39d14f4d7b3cf5855",
+  "translator": {
+    "agent": "i18n-translator",
+    "model": "anthropic/claude-sonnet-5-5",
+    "session": "not supplied"
+  },
+  "auditor": {
+    "agent": "i18n-auditor",
+    "session": "8b3d0ec1d217",
+    "model": "openai/gpt-6.1-sol",
+    "actual_model_source": "live session model header",
+    "fallback": null,
+    "independent_from_translator_session": true,
+    "independent_from_round_1_auditor_instance": true
+  },
+  "per_key_findings": {
+    "wire.errors.sdk_spec.agent_identity_conflict": {
+      "findings": [],
+      "assessment": "Mutual exclusion preserved; identifiers unchanged."
+    },
+    "wire.errors.sdk_spec.approval_callback_gate_required": {
+      "findings": [],
+      "assessment": "Callable approval function accurately names callback requirement."
+    },
+    "wire.errors.sdk_spec.approval_declared_tools_empty": {
+      "findings": [],
+      "assessment": "At-least-one condition and refusal remedy preserved."
+    },
+    "wire.errors.sdk_spec.approval_handler_wrong_mode": {
+      "findings": [],
+      "assessment": "Callback restriction and mode placeholder intact."
+    },
+    "wire.errors.sdk_spec.approval_tools_wrong_mode": {
+      "findings": [],
+      "assessment": "Declared restriction and mode placeholder intact."
+    },
+    "wire.errors.sdk_spec.attach_fields_unsupported": {
+      "findings": [],
+      "assessment": "Viewer/owner distinction, excluded state and remedies preserved."
+    },
+    "wire.errors.sdk_spec.attach_output_unsupported": {
+      "findings": [],
+      "assessment": "Output enforcement remains owner-controlled."
+    },
+    "wire.errors.sdk_spec.attach_resume_required": {
+      "findings": [],
+      "assessment": "Resume prerequisite and viewer attachment preserved."
+    },
+    "wire.errors.sdk_spec.mode_invalid": {
+      "findings": [],
+      "assessment": "Exact own/attach tokens and mode placeholder retained."
+    },
+    "wire.errors.sdk_spec.output_format_invalid": {
+      "findings": [],
+      "assessment": "Allowed-format requirement preserved."
+    },
+    "wire.errors.sdk_spec.output_retries_range": {
+      "findings": [],
+      "assessment": "Inclusive numeric range 0 through 5 preserved."
+    },
+    "wire.errors.sdk_spec.output_retries_requires_format": {
+      "findings": [],
+      "assessment": "Output-format dependency preserved."
+    },
+    "wire.errors.sdk_spec.output_schema_requires_format": {
+      "findings": [],
+      "assessment": "Output-format dependency preserved."
+    },
+    "wire.errors.sdk_spec.resume_empty": {
+      "findings": [],
+      "assessment": "Session identifier, @latest and nonempty-string requirement preserved."
+    },
+    "wire.errors.sdk_spec.spawn_birth_effort_pair_required": {
+      "findings": [],
+      "assessment": "Initial parameter set and all-three/alternative remedy accurate and idiomatic."
+    },
+    "wire.errors.sdk_spec.spawn_fields_unsupported": {
+      "findings": [],
+      "assessment": "Post-open state, dispose() and same-id spawn_session() sequence accurate."
+    },
+    "wire.errors.sdk_spec.spawn_model_pair_required": {
+      "findings": [],
+      "assessment": "NEW literal, atomic hosting/model pair and root-config fallback preserved."
+    },
+    "wire.errors.sdk_spec.spawn_output_unsupported": {
+      "findings": [],
+      "assessment": "Output-enforcement limitation and open_session remedy preserved; actívala matches sibling startup terminology."
+    },
+    "wire.errors.sdk_spec.tools_empty": {
+      "findings": [],
+      "assessment": "At-least-one tool and unrestricted None alternative preserved."
+    },
+    "wire.errors.sdk_spec.world_root_empty": {
+      "findings": [],
+      "assessment": "Nonempty path when supplied preserved."
+    },
+    "wire.errors.sdk_spec.yolo_approval_unreachable": {
+      "findings": [],
+      "assessment": "Comprobación de aprobación accurately describes unreachable policy check; auto/drop-yolo alternatives preserved."
+    }
+  },
+  "findings": [],
+  "severity_counts": {
+    "blocker": 0,
+    "major": 0,
+    "minor": 0,
+    "nit": 0
+  },
+  "verdict": "clean",
+  "round_1_confirmation": {
+    "ES1": "fixed: callable aprobación function; no prose gate",
+    "ES2": "fixed: comprobación de aprobación is an accurate independent translator choice, not required to repeat suggested función",
+    "ES3": "fixed: NEW retained exactly",
+    "ES4": "fixed: dispose() and spawn_session() retained as callable code tokens",
+    "ES5": "fixed: initial parameters and all-three remedy explicit"
+  },
+  "terminology": [
+    {
+      "term": "aprobación",
+      "precedent": "wire.errors.desktop.json:wire.errors.desktop.question_no_longer_pending"
+    },
+    {
+      "term": "sesión / iniciar",
+      "precedent": "wire.errors.session_host.json:wire.errors.session_host.unavailable"
+    },
+    {
+      "term": "equipo",
+      "precedent": "wire.errors.agents.json:wire.errors.agents.cannot_reconstruct_team"
+    },
+    {
+      "term": "perfil / vincular",
+      "precedent": "wire.errors.sdk_startup.json:wire.errors.sdk_startup.profile_attach_failed"
+    },
+    {
+      "term": "modelo / configuración",
+      "precedent": "wire.errors.desktop.json:wire.errors.desktop.agents_config_client_fields"
+    },
+    {
+      "term": "propietario",
+      "precedent": "wire.errors.desktop.json:wire.errors.desktop.answer_epoch_mismatch"
+    },
+    {
+      "term": "campo",
+      "precedent": "wire.errors.agents.json:wire.errors.agents.system_prompt_required"
+    },
+    {
+      "term": "runtime / en este proceso / activar / conectar",
+      "precedent": "wire.errors.sdk_startup.json:wire.errors.sdk_startup.attach_runtime_missing"
+    },
+    {
+      "term": "spawn_session() / deliver() API tokens",
+      "precedent": "wire.errors.sdk_startup.json:wire.errors.sdk_startup.attach_hosting_unconfigured"
+    },
+    {
+      "term": "herramienta",
+      "precedent": null,
+      "authority": "i18n/glossary.md §2 (no wire.errors sibling occurrence)"
+    },
+    {
+      "term": "función de aprobación invocable / comprobación de aprobación",
+      "precedent": null,
+      "authority": "Approval noun follows desktop.question_no_longer_pending; new compositional wording is accurate for sdk.py:_install_approval_policy. No sibling full-phrase precedent; prose gate rejected by es kept-English list."
+    },
+    {
+      "term": "parámetros iniciales",
+      "precedent": null,
+      "authority": "sdk.py:_model_sample documents the initial provider/model/effort sample; no sibling birth-sample phrase precedent."
+    },
+    {
+      "term": "NEW / dispose() / other technical identifiers",
+      "precedent": null,
+      "authority": "English source/context plus explicit audit brief; dispose() explicit requested remedy. Not invented sibling precedent."
+    },
+    {
+      "term": "formato de salida / aplicación forzosa / especificación / cadena vacía / no admitidos",
+      "precedent": null,
+      "authority": "Ordinary Spanish technical phrases; no wire.errors sibling full-phrase precedent; semantically faithful to source."
+    }
+  ],
+  "checks": {
+    "json_and_21_key_parity": "passed using git-show bytes and Python json",
+    "placeholder_names_types": "identical; mode/fields/formats/approval_mode all simple string substitutions",
+    "icu": "source reviewed check.py and runtime.py; tiny string checks confirm doubled apostrophes, no stray singles, only balanced simple placeholders; no plural/select present",
+    "preserved_tokens": "checked explicit identifier and quoted-code patterns; NEW and required API tokens retained",
+    "yolo_prefix_codepoints": [
+      "U+0079",
+      "U+006F",
+      "U+006C",
+      "U+006F",
+      "U+003D",
+      "U+0054",
+      "U+0072",
+      "U+0075",
+      "U+0065"
+    ],
+    "literal_redaction_marker": "absent from all 21 values",
+    "manual_bidi_controls": "absent",
+    "typography_register": "Spanish tú imperatives, accents and no French punctuation spacing; technical quotes retained",
+    "width": "No maxCells/maxChars cap in any of 21 sidecars; longest value 393 characters; no CJK/combining-mark width risk identified",
+    "semantic_review": "independent all-key judgment formed before fetching round-1 comment; afterwards confirmed ES1–ES5"
+  },
+  "unverified": [
+    "Repo validator not executed: host-overload restriction; checker/parser logic read instead.",
+    "No builds, installs, suites, browser, runtime formatting or rendering executed.",
+    "French locale not audited."
+  ],
+  "probe_note": "Initial generic quoted-span regex failed on English owner-double-apostrophe-s; corrected to known quoted code tokens and rechecked all 21 successfully. This was a probe false positive, not a translation defect.",
+  "artifact_kind": "candidate receipt; audit notes not execution log; not a repo ledger or canonical tracked audit record"
+}

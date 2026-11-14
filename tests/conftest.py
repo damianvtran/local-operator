@@ -436,6 +436,12 @@ _AMBIENT_VARS = (
     # one a stranger chose. The in-process announce is ``app.state`` and needs no
     # scrubbing; this is the ``--reload``-only channel.
     "LOCAL_OPERATOR_SERVE_ANNOUNCE",
+    # The serve loop watchdog's restart history (epoch seconds, comma-joined),
+    # carried across its self-exec so the restart budget survives the new image.
+    # An inherited value would pre-spend a test's budget (or refuse a restart it
+    # expects), and the watchdog writes it to the environ it is given, so it is
+    # scrubbed rather than ``_HARMLESS``.
+    "LOP_SERVE_WATCHDOG_RESTARTS",
     "LOP_MOBILE_CHILD_CWD",
     "LOP_MOBILE_PASSWORD",
     # The calling cmux workspace/surface. A headless fork e2e test inherited

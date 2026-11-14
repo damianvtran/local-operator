@@ -66,6 +66,18 @@ def older_failed() -> Msg:
     return Msg("relay.transcript.older.failed", {})
 
 
+def older_load() -> Msg:
+    return Msg("relay.transcript.older.load", {})
+
+
+def older_loading() -> Msg:
+    return Msg("relay.transcript.older.loading", {})
+
+
+def older_start() -> Msg:
+    return Msg("relay.transcript.older.start", {})
+
+
 def session_unread_refused() -> Msg:
     return Msg("relay.transcript.session.unread_refused", {})
 

@@ -83,5 +83,18 @@
   "relay.chrome.composer.model_label": "Modèle : {label}",
   "relay.chrome.composer.spend_label": "Dépenses et contexte : {label}",
   "relay.chrome.spend.title": "Dépenses et contexte",
-  "relay.chrome.model.effort": "Effort de raisonnement"
+  "relay.chrome.model.effort": "Effort de raisonnement",
+  "relay.chrome.section_temporary": "Temporaires · {count, number}",
+  "relay.chrome.temporary_deletes_in": "{minutes, plural, one {Supprimée dans # min} many {Supprimée dans # min} other {Supprimée dans # min}}",
+  "relay.chrome.temporary_hold_running": "Conservée pendant l’exécution",
+  "relay.chrome.temporary_hold_on_screen": "Conservée tant qu’affichée",
+  "relay.chrome.temporary_hold_open_ask": "Conservée : question ouverte",
+  "relay.chrome.temporary_hold_armed_wake": "Conservée : réveil programmé",
+  "relay.chrome.temporary_hold_armed_monitor": "Conservée : surveillance active",
+  "relay.chrome.temporary_hold_unread_mail": "Conservée : message non lu",
+  "relay.chrome.temporary_hold_operator_hold": "Conservée : mise en attente",
+  "relay.chrome.temporary_hold_unseen_result": "Conservée : résultat non vu",
+  "relay.chrome.temporary_hold_unsaved_files": "Conservée : fichiers à enregistrer",
+  "relay.chrome.temporary_hold_linked": "Conservée : épinglée ou liée",
+  "relay.chrome.temporary_hold_cannot_verify": "Conservée : non vérifiable"
 }

@@ -40,8 +40,14 @@ from local_operator.tui.widgets.editor import (
     SHELL_PLACEHOLDER,
     Editor,
 )
-from local_operator.tui.widgets.transcript import NoticeBlock, TranscriptView, UserBlock
+from local_operator.tui.widgets.transcript import (
+    TAIL_TOLERANCE_ROWS,
+    NoticeBlock,
+    TranscriptView,
+    UserBlock,
+)
 from tests.unit.tui.test_app_pilot import FakeSession, _factory, _renderable_plain
+from tests.unit.tui.waiting import settle
 
 
 class AsideSession(FakeSession):
@@ -136,14 +142,41 @@ async def _settle_boot(pilot, app: OperatorApp, session: FakeSession) -> None:
 
 
 async def _open_with_question(pilot, app: OperatorApp, question: str) -> AsidePanel:
-    """Type ``/btw <question>`` the way a user does, and settle the answer."""
+    """Type ``/btw <question>`` the way a user does, and settle the answer.
+
+    Two product workers stand between the keystroke and the state every caller
+    reads, and a fixed number of ``pause()`` calls was a bet on both (CI lost it:
+    ``aside_calls == []`` on #3720, ``forked == []`` on #3732; a 0.4 s delay
+    injected at the boot or the aside boundary reproduces the first exactly,
+    while the second needs the delay at the ``aside-fork`` boundary instead):
+
+    * the BOOT worker (group ``session``) must have adopted the session, or
+      ``_ask_aside`` answers "the session is still starting…" on the card and
+      never calls ``complete_aside`` — and ``^f`` later has nothing to fork;
+    * the ASIDE worker (group ``aside:<interaction token>``, exclusive) runs
+      ``complete_aside`` and settles the turn out of ``running``.
+
+    Each predicate is the precondition the product checks, not a caller's
+    assertion, so a wrong value still fails at the caller's own ``assert``.
+    """
+    await settle(
+        pilot,
+        lambda: app._session is not None and app._source_commands_ready(),
+        what="the boot session was adopted and accepts commands",
+        workers=("session",),
+    )
     app.query_one(Editor).focus()
     await pilot.pause()
     app.query_one(Editor).load_text(f"/btw {question}")
     await pilot.press("enter")
-    await pilot.pause()
-    await pilot.pause()
-    return app.query_one(AsidePanel)
+    panel = app.query_one(AsidePanel)
+    await settle(
+        pilot,
+        lambda: bool(panel.turns) and panel.turns[-1].state != "running",
+        what="the aside worker settled the question's turn",
+        workers=(app._interaction.worker_group("aside"),),
+    )
+    return panel
 
 
 # -- opening ---------------------------------------------------------------
@@ -521,11 +554,21 @@ async def test_a_reader_scrolled_back_is_not_yanked_to_the_tail_on_close() -> No
     session = AsideSession(answer="\n\n".join(f"para {i} " * 20 for i in range(20)))
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(120, 24)) as pilot:
-        await pilot.pause()
+        # Boot adoption calls ``follow_tail`` (via ``project_settled_rows``).
+        # If it lands AFTER the reader parks at y=3 below, the next
+        # ``_scroll_to_tail`` drags the view to the end and the premise reads
+        # ``68 < 68`` -- CI run 43279222834. Wait on the adoption edge first.
+        await _settle_boot(pilot, app, session)
         for i in range(40):
             app._append_block(UserBlock(f"question number {i:02d} about the codebase"))
-        await pilot.pause()
         transcript = app._transcript_view()
+        # Park only once the appended rows are laid out past y=3 by more than
+        # the tail tolerance; otherwise y=3 could still count as "at the tail".
+        await settle(
+            pilot,
+            lambda: transcript.max_scroll_y > 3 + TAIL_TOLERANCE_ROWS,
+            what="the 40 appended rows are laid out past the parked offset",
+        )
 
         # Scroll back to re-read something, the gesture the docstring names.
         transcript.note_user_scroll()
@@ -786,8 +829,19 @@ async def test_forking_mid_turn_queues_the_aside_and_mounts_nothing_yet() -> Non
         users_before = len([b for b in transcript.blocks() if isinstance(b, UserBlock)])
 
         await pilot.press("ctrl+f")
-        for _ in range(5):
-            await pilot.pause()
+        # ^f only schedules the `aside-fork` worker; `adopt_aside` runs in it.
+        # Join that group, and wait on the session having been handed the pair
+        # (`adopt_aside` ran), so a worker that starts and finishes inside one
+        # pause is still covered. Five pauses lost this race on CI. Not
+        # `not app._aside_can_fork()`: that gate includes `not panel.is_open`,
+        # so a card left open would time out here instead of failing the
+        # `is_open` assertion below at its own line (#3783 R1-m1).
+        await settle(
+            pilot,
+            lambda: bool(session.forked),
+            what="the ^f fork worker handed the pair to the session",
+            workers=("aside-fork",),
+        )
 
         assert [(m.role, m.text) for m in session.forked] == [
             ("user", "what are you doing?"),

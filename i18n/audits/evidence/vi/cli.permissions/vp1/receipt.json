@@ -1,0 +1,9 @@
+{
+  "record": "i18n/audits/evidence/vi/cli.permissions/vp1/record.json",
+  "companions": {
+    "report.md": "03b655de995b389e7a781311afae6b41475bc279a03c10e42d45b79c1fe504d5",
+    "findings.json": "f96a935218cb111ce4774531a658ca72dfa7762667f5fadb0865912a7681fc51",
+    "audit.log": "ad7135102260929ec3e8f9be11dd6193747c4707e2ca89c063ed394413a0afe7",
+    "record.json": "15a44574de3d6dca8819d2b1b65da5a5cc1ae67106c7cd6487eb949718a864ce"
+  }
+}

@@ -1,0 +1,8 @@
+{
+  "wire.music.label": "संगीत",
+  "wire.music.started": "संगीत बनाना शुरू हो गया — जॉब {job}।",
+  "wire.music.progress": "संगीत: {completed}/{total} ट्रैक पूरे हुए।",
+  "wire.music.ready": "संगीत तैयार है — जॉब {job}।",
+  "wire.music.failed": "संगीत बनाने में विफलता: {error}",
+  "wire.music.cancel_requested": "{job} को रद्द करने का अनुरोध किया गया है। चल रही प्रक्रिया फिर भी पूरी हो सकती है और उसका शुल्क लग सकता है; परिणाम उपलब्ध रहेंगे।"
+}

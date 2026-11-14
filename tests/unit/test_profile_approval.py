@@ -264,10 +264,16 @@ async def test_unattached_session_tool_queues_immediately(root):
             agent_registry=registry,
             authorize_durable_write=session._authorize_durable_write,
         )
+        # An untrusted run: since the 2026-11 ruling only such a run still files a
+        # proposal (a clean one writes directly); the whole-field rewrite is acked.
+        from tests.unit.session.test_account_profile_consent import _acked
+
+        session._run_untrusted_input = True
+        args = {"op": "update", "name": "reviewer", "instructions": "Queued, not saved."}
         result = await asyncio.wait_for(
             execute_agent(
                 "tool-queue",
-                {"op": "update", "name": "reviewer", "instructions": "Queued, not saved."},
+                _acked("agent", args, context),
                 None,
                 None,
                 context,
@@ -276,7 +282,7 @@ async def test_unattached_session_tool_queues_immediately(root):
         )
         assert not result.is_error, result.content
         assert result.details is not None
-        assert result.details["status"] == "queued"
+        assert result.details["status"] == "proposed"
         assert P.snapshot(root, "agent", data.target_id) == data.before
         assert not (directory / "profile-backups").exists()
     finally:
@@ -635,11 +641,20 @@ async def test_offline_signed_continuation_replaces_native_queued_result_once(
         )
 
     original = new_session()
+    # An untrusted run: since the 2026-11 ruling only such a run still files a
+    # proposal (a clean one writes directly); the whole-field rewrite is acked.
+    from tests.unit.session.test_account_profile_consent import _acked
+
+    original._run_untrusted_input = True
     args = {
         "op": "update",
         "name": "reviewer" if kind == "agent" else "lopdev",
         "instructions": "Approved offline guidance.",
     }
+    if kind == "team":
+        # Review m3: the team ``project`` brief takes the same canonical
+        # count heading as instructions, never a one-line repr of its text.
+        args["project"] = "Approved offline project.\nSecond project line."
     context = ToolContext(
         cwd=".",
         session_dir=str(directory),
@@ -648,10 +663,41 @@ async def test_offline_signed_continuation_replaces_native_queued_result_once(
         authorize_durable_write=original._authorize_durable_write,
     )
     queued = await (execute_agent if kind == "agent" else execute_team)(
-        "same-real-call", args, None, None, context
+        "same-real-call", _acked(kind, args, context), None, None, context
     )
     assert queued.details is not None
-    assert queued.details["status"] == "queued"
+    assert queued.details["status"] == "proposed"
+    from local_operator import profile_proposals as PP
+    from local_operator.harness.types import TextContent, ToolResult
+
+    proposed = PP.get(root, queued.details["proposal_id"])
+    assert proposed is not None
+    legacy = P.build(
+        root,
+        profile_kind=kind,
+        operation="update",
+        target_id=proposed["target_id"],
+        name=proposed["name"],
+        session_id=original._session_id,
+        tool_call_id=queued.tool_call_id,
+        before=proposed["before"],
+        after=proposed["after"],
+    )
+    legacy_record = P.file_request(root, legacy)
+    queued = ToolResult(
+        tool_call_id=queued.tool_call_id,
+        tool_name=kind,
+        content=[TextContent(text="Queued legacy profile save for signed approval.")],
+        details={
+            "status": "queued",
+            "approval_id": legacy_record["approval_id"],
+            "receipt_id": legacy.receipt_id,
+            "profile_kind": kind,
+            "profile_name": proposed["name"],
+            "scope": "global",
+        },
+    )
+    assert queued.details is not None and queued.details["status"] == "queued"
     # The ordinary harness native persistence boundary, using the ACTUAL call/result.
     call = Message.assistant(
         tool_calls=[ToolCall(id=queued.tool_call_id, name=queued.tool_name, arguments=args)]
@@ -749,6 +795,10 @@ async def test_offline_signed_continuation_replaces_native_queued_result_once(
         assert native[0].result.details["receipt_id"] == queued.details["receipt_id"]
         assert native[0].result.details is not None
         assert native[0].result.details["profile_action"] == applied["profile_action"]
+        if kind == "team":
+            receipt = native[0].result.text
+            assert "project" in receipt and "Second project line" not in receipt, receipt
+            assert "project:" in native[0].result.details["diff"]
         history = Transcript(directory).build_llm_history()
         tool = [
             message

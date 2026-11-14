@@ -1,0 +1,15 @@
+import plistlib,glob
+def load(p):
+    with open(p,'rb') as f: return plistlib.load(f)
+T={'SPE':'/System/Library/ExtensionKit/Extensions/SecurityPrivacyExtension.appex/Contents/Resources/Localizable.loctable',
+'CA':'/System/Library/Frameworks/Security.framework/Versions/A/MachServices/SecurityAgent.bundle/Contents/Resources/ConfirmAccess.loctable',
+'SS':'/System/Applications/System Settings.app/Contents/Resources/InfoPlist.loctable'}
+for n,p in T.items():
+    g=glob.glob(p)
+    if not g: print(n,'MISSING',p); continue
+    d=load(g[0]); print(n,p,'ur' in d, 'langs',len(d))
+    for lang in ('en','en_GB','Base'):
+        if lang in d:
+            for k,v in d[lang].items():
+                if isinstance(v,str) and v in('Files & Folders','Always Allow','Allow','System Settings','Device Control and Data Access','Accessibility'):
+                    print(' ',n,lang,repr(k),'=',repr(v))

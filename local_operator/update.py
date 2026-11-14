@@ -1901,6 +1901,10 @@ fi
 # that question before naming it; the interpreter below always starts.
 branded="$gen/tools/local-operator/bin/Local Operator"
 use_branded=""
+# What an intact image's size must be: the interpreter's for the legacy clone,
+# the size recorded in the build key's "image" sidecar for a bundle image
+# (signing rewrites the bytes, so the interpreter is no longer the oracle).
+expected=$(wc -c < "$gen/tools/local-operator/bin/python3" 2>/dev/null | tr -d ' ')
 if [ -x "$branded" ]; then
     use_branded=1
     if [ -L "$branded" ]; then
@@ -1910,23 +1914,33 @@ if [ -x "$branded" ]; then
             *) target="$(dirname -- "$branded")/$target" ;;
         esac
         found=""
-        # The probe is the IMAGE's directory, not the link's: the plant publishes
-        # ``<key>/lib`` beside ``<key>/bin/...``, so ``dirname`` of the target's
-        # parent is where the stdlib link lives. Probing ``<key>/bin/lib`` (one
-        # dirname short) never matched, so every supervised unit silently took
-        # the fallback interpreter and stayed a separate macOS privacy client.
-        for enc in "$(dirname -- "$(dirname -- "$target")")"/lib/python3*/encodings/__init__.py; do
+        # The probe is the build key's directory, not the link's: the plant
+        # publishes ``<key>/lib`` beside ``<key>/bin/...`` (legacy, two levels
+        # up) or beside ``<key>/Local Operator.lopruntime/Contents/MacOS/...``
+        # (bundle, four levels up -- the macOS privacy identity, keyed by
+        # bundle id). Probing one dirname short never matched, so every
+        # supervised unit silently took the fallback interpreter and stayed a
+        # separate macOS privacy client.
+        imgdir=$(dirname -- "$target")
+        case $imgdir in
+            */Contents/MacOS)
+                home=$(dirname -- "$(dirname -- "$(dirname -- "$imgdir")")")
+                expected=$(cut -d ' ' -f 1 < "$home/image" 2>/dev/null) || expected=""
+                ;;
+            *) home=$(dirname -- "$imgdir") ;;
+        esac
+        for enc in "$home"/lib/python3*/encodings/__init__.py; do
             if [ -f "$enc" ]; then found=1; break; fi
         done
         if [ -z "$found" ]; then use_branded=""; fi
     fi
 fi
 # A truncated or replaced image passes both checks above and then dies with
-# "Exec format error". The image is a byte copy of the interpreter beside it,
-# so a size mismatch (both read through their symlinks) means it is not one.
-fallback="$gen/tools/local-operator/bin/python3"
+# "Exec format error", so a size other than the expected one means it is not
+# the image we published.
 if [ -n "$use_branded" ]; then
-    if [ "$(wc -c < "$branded" 2>/dev/null)" != "$(wc -c < "$fallback" 2>/dev/null)" ]; then
+    actual=$(wc -c < "$branded" 2>/dev/null | tr -d ' ')
+    if [ -z "$expected" ] || [ "$actual" != "$expected" ]; then
         use_branded=""
     fi
 fi
@@ -3181,6 +3195,72 @@ def _remove_tree_unlocked(path: Path) -> bool:
     return True
 
 
+#: Operator-facing phrasing for :func:`procname.publish_team_runtime_result`
+#: reason codes in the ``lop update`` warning (log text, not catalogue copy).
+_TEAM_SKIP_REASONS = {
+    "needs-always-allow": '"Always Allow" was not confirmed in `lop permissions setup`',
+    "no-terminal": "no terminal to answer a keychain prompt",
+    "unsupported-interpreter": "this Python build cannot be bundled",
+    "app-missing": "the desktop app is not installed",
+    "team-mismatch": "the desktop app's team differs from the recorded signing team",
+    "no-requirement": "the desktop app's designated requirement is unreadable",
+    "signing-failed": "codesign failed",
+    "error": "unexpected error",
+}
+
+
+def _publish_team_runtime(generation: Path, *, allow_prompt: bool = False) -> None:
+    """Publish the TEAM-signed runtime bundle for ``generation``'s Python, if opted in.
+
+    WHY HERE, BEFORE THE FLIP: the team image (``com.local-operator``, the
+    desktop app's own privacy row) is the one thing on the session path that
+    may NOT be built at spawn time — signing with a Developer ID can raise the
+    keychain dialog, and a session start must never put a dialog on screen.
+    ``lop update`` is the moment the operator asked for a new build, so it is
+    where a new Python build gets its team image; every runtime started from
+    the new generation then selects it over the ad-hoc flavor.
+
+    Guarded and no-raise in :func:`procname.publish_team_runtime` (darwin,
+    passwd HOME, no root/config override, a recorded opt-in from
+    ``lop permissions setup``, an installed app of the same team). A failure
+    only means runtimes keep the ad-hoc "Local Operator Runtime" row; the
+    update itself is never refused for it.
+
+    ``allow_prompt`` is True only from the ``lop update`` CLI entry: there the
+    operator is at a terminal they started the update from, so a keychain
+    dialog is theirs to answer. Every other caller (the TUI's ``/update``, mesh
+    updates, the bootstrap) leaves it False and signs only after a recorded
+    "Always Allow" (review round 1, R2).
+
+    An opted-in host whose team image did NOT come back is told so at warning
+    level with the reason, because the next Python build's runtimes then land
+    on the "Local Operator Runtime" row, which may never have been granted —
+    a silent debug line left Screen Recording failing with no explanation
+    (UX round 1, U5). Hosts that never opted in (and isolated rigs, which are
+    refused before the opt-in is even read) stay at debug.
+    """
+    try:
+        from local_operator import procname
+
+        result = procname.publish_team_runtime_result(
+            _venv_interpreter(_generation_install_root(generation)), allow_prompt=allow_prompt
+        )
+        if result.image is not None:
+            logger.info("team-signed runtime image ready: %s", result.image)
+        elif result.reason == "not-opted-in" or str(result.reason).startswith("refused:"):
+            logger.debug("team runtime image not published: %s", result.reason)
+        else:
+            logger.warning(
+                "team signing skipped (%s%s): runtimes of this Python build use the "
+                '"Local Operator Runtime" privacy row; run `lop permissions setup` '
+                "from a terminal to sign it",
+                _TEAM_SKIP_REASONS.get(str(result.reason), str(result.reason)),
+                f": {result.detail}" if result.detail else "",
+            )
+    except Exception:  # noqa: BLE001 — an identity is never a reason to fail an update
+        logger.debug("team runtime image not published", exc_info=True)
+
+
 @_install_mutation
 def flip_pointer(generation: Path) -> None:
     """Point ``current`` at ``generation``, atomically.
@@ -3760,6 +3840,7 @@ def install_into_generation(
     origin: str = PYPI_SOURCE_TOKEN,
     note: str = "",
     target_mode: Literal["latest", "exact", "source"] = "exact",
+    team_signing_prompt: bool = False,
 ) -> Path:
     """Install ONE build into its own generation and point ``current`` at it.
 
@@ -3927,6 +4008,7 @@ def install_into_generation(
                 # post-rename staged-unlink errors are swallowed), so a successful return
                 # IS the proof. A failure AFTER this point retains for the independent
                 # reason ``_discard_candidate`` checks first: the pointer now names B.
+                _publish_team_runtime(generation, allow_prompt=team_signing_prompt)
                 try:
                     flip_pointer(generation)
                 except OSError as exc:
@@ -4050,6 +4132,7 @@ def clone_into_generation(
                 DOWNGRADE_NOTE,
             )
             previous = current_generation()
+            _publish_team_runtime(generation)
             flip_pointer(generation)
             _written, not_written = write_stable_launchers(generation)
             if not_written:
@@ -6768,6 +6851,7 @@ def perform_upgrade(
     ref: str = "",
     on_prune: Callable[["PrunePlan"], None] | None = None,
     on_promoted: Callable[[Path], None] | None = None,
+    team_signing_prompt: bool = False,
 ) -> str:
     """Run the detected installer. Returns ``target`` (this process cannot re-read it).
 
@@ -6830,7 +6914,12 @@ def perform_upgrade(
         # ``commit``/``ref`` describe that case, and leaving them empty is what
         # makes the marker say ``pypi <version>``.
         promoted = install_into_generation(
-            source, version=target, commit=commit, ref=ref, target_mode="latest"
+            source,
+            version=target,
+            commit=commit,
+            ref=ref,
+            target_mode="latest",
+            team_signing_prompt=team_signing_prompt,
         )
         if on_promoted is not None:
             on_promoted(promoted)
@@ -9024,7 +9113,11 @@ def _snapshot_command(
             # ``pypi <version>`` — this build genuinely has no git ref.
             try:
                 promoted_generation = install_into_generation(
-                    None, version=route.version, note=note
+                    None,
+                    version=route.version,
+                    note=note,
+                    # ``lop update`` CLI entry: see ``_publish_team_runtime``.
+                    team_signing_prompt=True,
                 )
             except UpdateError as exc:
                 # The sibling of the source-tree branch below: this route used
@@ -9141,6 +9234,7 @@ def _snapshot_command(
                     ref=snapshot.ref,
                     origin=SNAPSHOT_SOURCE_TOKEN,
                     note=note,
+                    team_signing_prompt=True,
                 )
             except UpdateError as exc:
                 step = _progress().step
@@ -9326,6 +9420,9 @@ def _update_command_body(
             kind=kind,
             on_prune=lambda plan: pruned.extend(prune_notice_lines(plan)),
             on_promoted=promoted.append,
+            # The CLI entry is the one caller whose operator is at the
+            # terminal that started it; see ``_publish_team_runtime``.
+            team_signing_prompt=True,
         )
     except UpdateError as exc:
         step = _progress().step

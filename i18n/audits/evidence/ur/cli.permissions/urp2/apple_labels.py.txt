@@ -1,0 +1,51 @@
+import plistlib,glob,os,sys
+targets=['Screen & System Audio Recording','Privacy & Security','System Settings','Files & Folders','Accessibility','Keychain Access','Access Control','Always Allow','Allow','Screen Recording']
+def load(p):
+    try: return plistlib.load(open(p,'rb'))
+    except Exception as e: return None
+files=glob.glob('/System/Library/ExtensionKit/Extensions/SecurityPrivacyExtension.appex/Contents/Resources/*.loctable')
+files+=glob.glob('/System/Applications/System Settings.app/Contents/Resources/*.loctable')
+files+=glob.glob('/System/Library/Frameworks/Security.framework/Versions/A/MachServices/SecurityAgent.bundle/Contents/Resources/*.loctable')
+files+=glob.glob('/System/Library/Frameworks/Security.framework/Versions/A/MachServices/SecurityAgent.bundle/Contents/Resources/en.lproj/*.strings')
+files+=glob.glob('/System/Library/CoreServices/Applications/Keychain Access.app/Contents/Resources/*.loctable')
+files+=glob.glob('/System/Library/CoreServices/Applications/Keychain Access.app/Contents/Resources/en.lproj/*')
+found={t:[] for t in targets}
+langs=set()
+for f in files:
+    d=load(f)
+    if not isinstance(d,dict): continue
+    tables=d if f.endswith('.loctable') else {'en':d}
+    if f.endswith('.loctable'): langs|=set(tables)
+    en=tables.get('en') or {}
+    if not isinstance(en,dict): continue
+    for k,v in en.items():
+        if isinstance(v,str) and v in targets: found[v].append(f"{os.path.basename(os.path.dirname(os.path.dirname(os.path.dirname(f))))}/{os.path.basename(f)}[en] key={k!r}")
+for t,v in found.items(): print(t,'->',v[:3] if v else 'NOT FOUND')
+print('ur in loctable languages:', 'ur' in langs, '| hi:', 'hi' in langs, '| n langs', len(langs))
+import plistlib,glob,subprocess,os
+SA='/System/Library/Frameworks/Security.framework/Versions/A/MachServices/SecurityAgent.bundle/Contents/Resources'
+d=plistlib.load(open(SA+'/ConfirmAccess.loctable','rb'))
+print('ConfirmAccess.loctable: ur present =', 'ur' in d, '; en_GB entries matching Allow:')
+for k,v in d['en_GB'].items():
+    if 'Allow' in str(v) or 'Deny' in str(v): print('  en_GB',repr(k),'=',repr(v))
+def nibstr(p,needles):
+    fs=[p] if os.path.isfile(p) else glob.glob(p+'/*')
+    out=set()
+    for f in fs:
+        s=subprocess.run(['strings','-a',f],capture_output=True,text=True).stdout
+        for n in needles:
+            if n in s.splitlines(): out.add((os.path.relpath(f,'/System'),n))
+    return out
+print(nibstr(SA+'/Base.lproj/ConfirmAccess.nib',['Always Allow','Allow','Deny']))
+KA='/System/Library/CoreServices/Applications/Keychain Access.app/Contents/Resources'
+print(sorted(os.listdir(KA))[:40])
+for f in glob.glob(KA+'/*.loctable'):
+    t=plistlib.load(open(f,'rb'))
+    if 'ur' in t: print('UR IN',f)
+    for k,v in (t.get('en_GB') or {}).items():
+        if isinstance(v,str) and (v in ('Access Control','Keychain Access') or v.lower() in('private key',)): print('  KA',os.path.basename(f),'en_GB',repr(k),'=',repr(v))
+for n in glob.glob(KA+'/Base.lproj/*'):
+    r=nibstr(n,['Access Control','Always allow access by these applications:','private key'])
+    if r: print(r)
+SS='/System/Applications/System Settings.app/Contents/Resources/InfoPlist.loctable'
+t=plistlib.load(open(SS,'rb')); print('System Settings InfoPlist en_GB:',{k:v for k,v in t['en_GB'].items() if 'Name' in k},'ur:', 'ur' in t, 'en' in t)

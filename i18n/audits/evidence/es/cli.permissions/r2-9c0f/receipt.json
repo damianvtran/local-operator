@@ -1,0 +1,9 @@
+{
+  "record": "i18n/audits/evidence/es/cli.permissions/r2-9c0f/record.json",
+  "companions": {
+    "record.json": "ee831e513d435dc7899fef012d3df8062dbdeb17b1c0fd7d979f98d738ec7ad5",
+    "report.md": "d63b7b0cebebad8e4accc31b6935107c2c0297ab8b088b673c5983226158c0bf",
+    "audit.log": "c1a3bb2e1b0d1b39ea7a17e34259e004c8ee2ffebbb4eeca1c248f95492e59fb",
+    "apple_labels.py.txt": "33564441db020afa7535f69e40c85e524ec6e3c5234106db4c12ed37710f0d92"
+  }
+}

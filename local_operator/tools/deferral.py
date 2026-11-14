@@ -95,6 +95,13 @@ DEFERRED_TOOLS: frozenset[str] = frozenset(
         # and the tracked note exist to keep the tool findable, and the
         # deferral PR's A/B measurement ships as the evidence.
         "code_requests",
+        "profile_proposal",
+        # ``skill`` became a default tool with the profile-proposals change
+        # (owner-requested skill authoring outside the Agents config run). Its
+        # schema is large and most turns never author a skill, so it is held
+        # off the wire like ``profile_proposal``: still resolvable by name, so
+        # an owner's "create a skill" request reaches it on demand.
+        "skill",
         # ``library`` is deferred on the start-context budget's arithmetic: the
         # tool is new and its published schema + description is 1,379 chars
         # (514 billed tokens) on a clean arm whose base already sits 115 tokens
@@ -144,6 +151,8 @@ DEFERRED_TOOL_PURPOSES: Mapping[str, str] = {
     "read_variable": "read one variable",
     "list_variables": "list variable names",
     "code_requests": "PR/MR status, review rounds, CI",
+    "profile_proposal": "Agents profile proposals",
+    "skill": "author skills",
     "library": "long-term asset catalog",
     "no_reply": "end a turn silently",
     "artifact_data": "claude.ai artifact shared data store",

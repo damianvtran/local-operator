@@ -228,5 +228,98 @@
     "role": "status",
     "tone": "dim",
     "note": "Providers with nothing stored to list; names are identifiers."
+  },
+  "tui.app.compaction.idle_receipt": {
+    "role": "TUI transcript notice",
+    "tone": "terse, operator-facing status",
+    "note": "Receipt for a compaction the session ran on its own while idle, just before its prompt cache expired. {detail} is the already-rendered English size/strategy/advisor clause (e.g. '262.0k → 88.0k tokens (66% smaller), via summary · advisor: work finished'); keep it at the end after the middle dot."
+  },
+  "tui.app.compaction.idle_receipt_bare": {
+    "role": "TUI transcript notice",
+    "tone": "terse, operator-facing status",
+    "note": "Same receipt as idle_receipt when no before/after figures are available."
+  },
+  "tui.app.compaction.idle_skipped": {
+    "role": "TUI transcript notice",
+    "tone": "quiet info, not an error",
+    "note": "An idle compaction the user never asked for did not complete; the conversation is untouched. Must not read as an alarm."
+  },
+  "tui.app.section_temporary": {
+    "role": "sidebar section heading",
+    "tone": "short",
+    "maxCells": 24,
+    "note": "Heading of the sidebar group of temporary chats (chats that are not kept and are deleted when idle). # is the count."
+  },
+  "tui.app.temporary_deletes_in": {
+    "role": "sidebar row hint",
+    "tone": "terse",
+    "maxCells": 20,
+    "note": "Countdown until a temporary chat is deleted; # is whole minutes."
+  },
+  "tui.app.temporary_hold_running": {
+    "role": "sidebar row hint",
+    "tone": "terse",
+    "maxCells": 32,
+    "note": "Why a temporary chat is not being deleted yet (hold code 'running')."
+  },
+  "tui.app.temporary_hold_on_screen": {
+    "role": "sidebar row hint",
+    "tone": "terse",
+    "maxCells": 32,
+    "note": "Why a temporary chat is not being deleted yet (hold code 'on_screen')."
+  },
+  "tui.app.temporary_hold_open_ask": {
+    "role": "sidebar row hint",
+    "tone": "terse",
+    "maxCells": 32,
+    "note": "Why a temporary chat is not being deleted yet (hold code 'open_ask')."
+  },
+  "tui.app.temporary_hold_armed_wake": {
+    "role": "sidebar row hint",
+    "tone": "terse",
+    "maxCells": 32,
+    "note": "Why a temporary chat is not being deleted yet (hold code 'armed_wake')."
+  },
+  "tui.app.temporary_hold_armed_monitor": {
+    "role": "sidebar row hint",
+    "tone": "terse",
+    "maxCells": 32,
+    "note": "Why a temporary chat is not being deleted yet (hold code 'armed_monitor')."
+  },
+  "tui.app.temporary_hold_unread_mail": {
+    "role": "sidebar row hint",
+    "tone": "terse",
+    "maxCells": 32,
+    "note": "Why a temporary chat is not being deleted yet (hold code 'unread_mail')."
+  },
+  "tui.app.temporary_hold_operator_hold": {
+    "role": "sidebar row hint",
+    "tone": "terse",
+    "maxCells": 32,
+    "note": "Why a temporary chat is not being deleted yet (hold code 'operator_hold')."
+  },
+  "tui.app.temporary_hold_unseen_result": {
+    "role": "sidebar row hint",
+    "tone": "terse",
+    "maxCells": 32,
+    "note": "Why a temporary chat is not being deleted yet (hold code 'unseen_result')."
+  },
+  "tui.app.temporary_hold_unsaved_files": {
+    "role": "sidebar row hint",
+    "tone": "terse",
+    "maxCells": 32,
+    "note": "Why a temporary chat is not being deleted yet (hold code 'unsaved_files')."
+  },
+  "tui.app.temporary_hold_linked": {
+    "role": "sidebar row hint",
+    "tone": "terse",
+    "maxCells": 32,
+    "note": "Why a temporary chat is not being deleted yet (hold code 'linked')."
+  },
+  "tui.app.temporary_hold_cannot_verify": {
+    "role": "sidebar row hint",
+    "tone": "terse",
+    "maxCells": 32,
+    "note": "Why a temporary chat is not being deleted yet (hold code 'cannot_verify')."
   }
 }

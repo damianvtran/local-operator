@@ -1,7 +1,7 @@
 """The push payload and its two keys, asserted against the frozen fixture contract.
 
 Push/ack-sync S3 (ADR 0006 §3.2 payload, §3.4 keys — pinned at
-``damianvtran/local-operator-mobile`` @ ``b03aeb15``). ``fixtures/push/`` is the
+``damianvtran/local-operator-mobile`` @ ``b03aeb15``). ``tests/fixtures/push/`` is the
 contract all three repos build against, so these cells compare the core's own
 builder against the FILED literals instead of restating the shapes: a field added
 to a builder fails an equality here, a field removed fails it too, and a forbidden
@@ -56,7 +56,7 @@ from local_operator.tui.notify import APP_NAME, BODIES, BODY_COMPLETE, digest_su
 #: ``tests/unit/mobile/<this file>`` -> the repo root, where the shared
 #: contract tree lives. Derived from the file rather than the cwd so the suite
 #: reads the fixtures of the checkout it is running in.
-FIXTURES = Path(__file__).resolve().parents[3] / "fixtures" / "push"
+FIXTURES = Path(__file__).resolve().parents[2] / "fixtures" / "push"
 
 #: The fixture alphabet -> the Python type each name asserts. ``object`` is a
 #: JSON object; the two list spellings differ only in what a reader is told about
@@ -717,7 +717,7 @@ def test_the_report_block_key_is_single_sourced() -> None:
 def test_the_idempotency_key_vectors_are_reproducible() -> None:
     """§3.4's completion recipe, recomputed from the filed vectors.
 
-    The digests are the one value in ``fixtures/push/`` that is not transcription,
+    The digests are the one value in ``tests/fixtures/push/`` that is not transcription,
     so they are pinned by recomputation here: a change to the recipe — a separator,
     a reordered part, a different digest — fails this cell rather than quietly
     diverging from the cloud's derivation.

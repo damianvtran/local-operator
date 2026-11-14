@@ -7,6 +7,7 @@ import pytest
 
 from local_operator.harness.types import AgentTool, ToolResult
 from local_operator.mcp.resources import (
+    MAX_INLINE_TOOL_SCHEMA_CHARS,
     MAX_PROMPT_SERVERS,
     make_mcp_resolver,
     render_mcp_catalogue,
@@ -398,13 +399,118 @@ def test_the_search_header_a_session_renders_states_when_a_schema_arrives() -> N
     # carry each match's input schema, so a claim about "here" would be
     # contradicted by the result it heads (review round 3, F3-1).
     assert "No schema added to your tool list" in header
-    assert "its URL says when" in header
-    # 155 today, from 157: the pin is what makes the next copy edit argue for the
-    # budget rather than spend it silently.
-    assert len(header) == 155, "the rendered search header grew; see this test's docstring"
+    # The per-tool read is cache-safe too (inline schema + defer), so the header
+    # no longer points at "its URL says when": every match is callable now.
+    assert "all callable now" in header
+    # 154 today, from 155 (and 157 before that): the pin is what makes the next
+    # copy edit argue for the budget rather than spend it silently.
+    assert len(header) == 154, "the rendered search header grew; see this test's docstring"
 
     unreachable = make_mcp_resolver(FakeManager(), lambda *a: None)
     enabled_result = unreachable("mcp://?search=authenticated+user&limit=2")
     assert enabled_result is not None
     assert "at the next model call, or at the next turn" in enabled_result
     assert "mcp://<server>/<tool>" in enabled_result
+
+
+def test_a_per_tool_read_with_a_deferrer_inlines_the_schema_and_never_publishes() -> None:
+    """The cache-safe arm: schema in the read result, origin deferred, no activate.
+
+    ``activate`` is the route into the request's tools array (position 0 of the
+    prompt-cache prefix); a per-tool read must not take it when the host can
+    defer, so the reply carries the compact schema itself and says the tool is
+    callable now — no "next model call"/"NEXT TURN" publication promise.
+    """
+    manager = FakeManager()
+    activated: list[tuple[str, str]] = []
+    deferred: list[tuple[str, str]] = []
+    resolve = make_mcp_resolver(
+        manager,
+        lambda *args: activated.append(args),
+        defer=lambda *args: deferred.append(args),
+    )
+
+    detail = resolve("mcp://linear/get_user")
+
+    assert detail is not None
+    assert activated == []
+    assert deferred == [("linear", "get_user")]
+    assert "# MCP tool ready: mcp__linear_get_user" in detail
+    assert 'Input schema: {"properties":{"verbose":{"type":"boolean"}}' in detail
+    assert 'tool("mcp__linear_get_user", **arguments)' in detail
+    assert "not added to your tool list" in detail
+    assert "untrusted reference data" in detail
+    assert "next model call" not in detail
+    assert "NEXT TURN" not in detail
+
+
+def test_a_per_tool_schema_over_the_inline_cap_falls_back_to_publication() -> None:
+    manager = FakeManager()
+    manager.tools[0].parameters = {
+        "type": "object",
+        "description": "x" * (MAX_INLINE_TOOL_SCHEMA_CHARS + 1),
+    }
+    activated: list[tuple[str, str]] = []
+    deferred: list[tuple[str, str]] = []
+    resolve = make_mcp_resolver(
+        manager,
+        lambda *args: activated.append(args) or False,
+        defer=lambda *args: deferred.append(args),
+    )
+
+    detail = resolve("mcp://linear/get_user")
+
+    assert detail is not None
+    assert deferred == []
+    assert activated == [("linear", "get_user")]
+    assert "# Enabled MCP tool: mcp__linear_get_user" in detail
+    assert "too large to show inline" in detail
+    # Never clipped into a plausible but wrong contract.
+    assert "x" * 100 not in detail
+    assert "NEXT TURN" in detail  # activate returned False: honest timing kept
+
+
+def test_a_schema_exactly_at_the_cap_still_inlines() -> None:
+    manager = FakeManager()
+    # Pad the description so the compact JSON is exactly the cap.
+    base = '{"description":"","type":"object"}'
+    manager.tools[0].parameters = {
+        "type": "object",
+        "description": "y" * (MAX_INLINE_TOOL_SCHEMA_CHARS - len(base)),
+    }
+    deferred: list[tuple[str, str]] = []
+    resolve = make_mcp_resolver(
+        manager,
+        lambda *a: pytest.fail("must not publish"),
+        defer=lambda *a: deferred.append(a),
+    )
+    detail = resolve("mcp://linear/get_user")
+    assert detail is not None and "# MCP tool ready" in detail
+    assert deferred == [("linear", "get_user")]
+
+
+def test_restricted_and_own_turn_only_still_refuse_a_per_tool_read_with_a_deferrer() -> None:
+    deferred: list[tuple[str, str]] = []
+    activated: list[tuple[str, str]] = []
+    restricted = make_mcp_resolver(
+        FakeManager(),
+        lambda *a: activated.append(a),
+        defer=lambda *a: deferred.append(a),
+        deny_activation_reason="This role cannot enable tools.",
+    )
+    own_turn = make_mcp_resolver(
+        FakeManager(),
+        lambda *a: activated.append(a),
+        defer=lambda *a: deferred.append(a),
+        deny_server_reason=lambda name: "reserved for the owning session's own turn.",
+    )
+    for resolve, reason in (
+        (restricted, "This role cannot enable tools."),
+        (own_turn, "reserved for the owning session's own turn."),
+    ):
+        detail = resolve("mcp://linear/get_user")
+        assert detail is not None
+        assert "# MCP tool not enabled: linear/get_user" in detail
+        assert reason in detail
+        assert "Input schema" not in detail
+    assert deferred == activated == []

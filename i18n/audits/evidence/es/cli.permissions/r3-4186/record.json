@@ -1,0 +1,75 @@
+{
+  "locale": "es",
+  "namespace": "cli.permissions",
+  "audit_id": "r3-4186",
+  "round": 3,
+  "audit_date": "2026-11-09",
+  "key_count": 39,
+  "keys_audited_this_round": [
+    "cli.permissions.status.screen.denied",
+    "cli.permissions.status.scope",
+    "cli.permissions.setup.explain",
+    "cli.permissions.setup.already_signed",
+    "cli.permissions.setup.always_allow_kept"
+  ],
+  "keys_carried_from": "i18n/audits/evidence/es/cli.permissions/r2-9c0f/record.json",
+  "pr": "https://github.com/damianvtran/local-operator/pull/3691",
+  "worktree_head": "85fb35811f9d17fb6dfadfc2d5df3269db04bd12",
+  "scope_diff": "788cc399..85fb3581",
+  "previous_audit": "i18n/audits/evidence/es/cli.permissions/r2-9c0f/record.json",
+  "auditor": {
+    "agent": "i18n-auditor (team lopdev)",
+    "session": "41862228e657",
+    "model": "anthropic/claude-opus-5-5",
+    "independent_from_translator_session": true,
+    "translator_session": "round-3 translator commit 85fb3581; session id not disclosed to auditor",
+    "independent_from_prior_auditor_sessions": [
+      "f8ab0a45e07a",
+      "9c0ff651f525"
+    ],
+    "actual_model_source": "auditor session system prompt 'Model: anthropic/claude-opus-5-5'; no provider fallback observed"
+  },
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/cli.permissions.json",
+      "sha256": "58e58c3b19a07c024b609f614e686cc9a72def77e3de704870f0557e84e7be41"
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/cli.permissions.context.json",
+      "sha256": "6f8427bf5dd20f8fa252d0163387d59f4e53a30fe07cc9db4c5a5f55048fb1d2"
+    },
+    "es": {
+      "path": "local_operator/i18n/catalogues/es/cli.permissions.json",
+      "sha256": "79015a98dab229546400c491fcd6196d74977d6f6f2ae288975713ef168ee69e"
+    }
+  },
+  "artifacts": [
+    {
+      "path": "i18n/audits/evidence/es/cli.permissions/r3-4186/report.md",
+      "sha256": "f6a75743b740b1a4d1089b78a8322b70ecfd84cdf506763ccbe810eea613084e"
+    },
+    {
+      "path": "i18n/audits/evidence/es/cli.permissions/r3-4186/audit.log",
+      "sha256": "6f8137719ac13d0c4147e5ba85dd3400e8ffea619d60ccf675455d2ec746a676"
+    }
+  ],
+  "audit_notes_not_execution_log": "report.md is reasoning/findings; audit.log is the actual captured command output",
+  "current_report_verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "finding_ids": [
+      "R3-1"
+    ],
+    "severity_counts": {
+      "blocker": 0,
+      "major": 0,
+      "minor": 1,
+      "nit": 0
+    },
+    "round2_findings": {
+      "R2-1": "fixed",
+      "R2-2": "fixed"
+    }
+  },
+  "limits": "round 2+ scope: changed keys + prior findings only; no native-speaker or rendered-frame certification; Apple labels from macOS 27.2 (26B123) loctables; catalogue not edited by auditor"
+}

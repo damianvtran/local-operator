@@ -1,0 +1,11 @@
+{
+  "schema": 1,
+  "record": "i18n/audits/evidence/hi/cli.permissions/pm2/record.json",
+  "companions": {
+    "record.json": "e25b5b9fa949c8c5c639998831e9e0e5349b1254706a3a744351f3c6d54cf2f3",
+    "report.md": "d4dfe6334d81b3002af27bdb0ce744f42383635b852ffc7f3c55f24759bfa221",
+    "audit.log": "6f3e75c528ca79cfcf6306b6c05d4143186ec02f34fe71c3004c1e6b2cb8f80b",
+    "apple_labels.py.txt": "01bcb4924b84b95c8608c25d6a7d39a021c6118ca65206ce76f1e70c7941e802",
+    "parity.py.txt": "97af5525cc7e9b08a0f5d78c684c6220a946e72a3d62be79accc2cffd0e7e08a"
+  }
+}

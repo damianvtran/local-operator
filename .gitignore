@@ -89,3 +89,14 @@ bench/
 # Anchored: the tests write it at the repo root only, and an unanchored rule would
 # have to be restated in the mobile web tree (test_web_package_data mirrors them).
 /test-artifacts/
+
+# One-off PR bodies and local command logs are not repository source.
+# Anchor exact names so legitimate nested fixtures remain trackable.
+/.c.md
+/.pr.log
+/.pyright.log
+/.body.txt
+
+# PR proof belongs on its PR, a separate testing branch, or the local project.
+# Reusable rigs now live in scripts/repro/; do not recreate the capture store.
+/docs/evidence/

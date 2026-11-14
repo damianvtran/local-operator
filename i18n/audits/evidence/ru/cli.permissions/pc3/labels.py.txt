@@ -1,0 +1,14 @@
+"""R3: Apple en|ru labels for the macOS labels in changed/fixed ru keys (ConfirmAccess buttons, Keychain Access tab, Screen Recording, Files & Folders, Accessibility/Device Control)."""
+import plistlib
+def show(path, keys):
+    t=plistlib.load(open(path,'rb')); e=t.get('en') or t.get('en_GB') or {}; r=t.get('ru',{})
+    print('==',path)
+    for k in keys: print(repr(k),'|',e.get(k),'|',r.get(k))
+show('/System/Library/Frameworks/Security.framework/Versions/A/MachServices/SecurityAgent.bundle/Contents/Resources/ConfirmAccess.loctable',['100266.title','100267.title','100268.title'])
+show('/System/Library/CoreServices/Applications/Keychain Access.app/Contents/Resources/KeyEditor.loctable',['302.label'])
+P='/System/Library/ExtensionKit/Extensions/SecurityPrivacyExtension.appex/Contents/Resources/Localizable.loctable'
+show(P,['SCREEN_CAPTURE','SCREEN_CAPTURE_HEADER','FILE_ACCESS_COMBINED'])
+t=plistlib.load(open(P,'rb')); e=t.get('en') or t.get('en_GB'); r=t['ru']
+print('== search SecurityPrivacyExtension for Accessibility / Device Control')
+for k,v in e.items():
+    if isinstance(v,str) and ('Device Control' in v or v=='Accessibility'): print(repr(k),'|',v,'|',r.get(k))

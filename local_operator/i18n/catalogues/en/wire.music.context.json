@@ -1,0 +1,32 @@
+{
+  "wire.music.label": {
+    "role": "status",
+    "tone": "neutral",
+    "note": "Detached music job. job is an opaque technical ID; error is a technical failure code. completed/total count independently settled variants. Cancellation does not promise upstream stop or refund. No fixed width."
+  },
+  "wire.music.started": {
+    "role": "status",
+    "tone": "neutral",
+    "note": "Detached music job. job is an opaque technical ID; error is a technical failure code. completed/total count independently settled variants. Cancellation does not promise upstream stop or refund. No fixed width."
+  },
+  "wire.music.progress": {
+    "role": "status",
+    "tone": "neutral",
+    "note": "Detached music job. job is an opaque technical ID; error is a technical failure code. completed/total count independently settled variants. Cancellation does not promise upstream stop or refund. No fixed width."
+  },
+  "wire.music.ready": {
+    "role": "status",
+    "tone": "neutral",
+    "note": "Detached music job. job is an opaque technical ID; error is a technical failure code. completed/total count independently settled variants. Cancellation does not promise upstream stop or refund. No fixed width."
+  },
+  "wire.music.failed": {
+    "role": "status",
+    "tone": "neutral",
+    "note": "Detached music job. job is an opaque technical ID; error is a technical failure code. completed/total count independently settled variants. Cancellation does not promise upstream stop or refund. No fixed width."
+  },
+  "wire.music.cancel_requested": {
+    "role": "status",
+    "tone": "neutral",
+    "note": "Detached music job. job is an opaque technical ID; error is a technical failure code. completed/total count independently settled variants. Cancellation does not promise upstream stop or refund. No fixed width."
+  }
+}

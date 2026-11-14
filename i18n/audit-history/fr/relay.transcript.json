@@ -1,0 +1,34 @@
+{
+  "schema": 1,
+  "locale": "fr",
+  "namespace": "relay.transcript",
+  "history_sha256": "2f696cd00f40ce29b1440f48edc047ecd8d9ff11e63e5bf6a21145b59cc369d6",
+  "entries": [
+    {
+      "locale": "fr",
+      "namespace": "relay.transcript",
+      "source_sha256": "0ebe3e4ffa1f1ee2938a6e9d2d77a5de0dc1c140556cbf26d8ba6df4582fb911",
+      "translator": {
+        "agent": "coder (lopdev session 9e66c1e9e422; strings copied verbatim from local-operator-ui ui.chat.canonical.older_history.*)",
+        "model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-11-10"
+      },
+      "auditor": {
+        "agent": "reviewer (independent; lop job 26e06a7a6bfe, label i18n-audit-seam)",
+        "model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-11-10",
+        "result": "passed",
+        "findings": 3,
+        "unresolved_blocker_major": 0,
+        "read_route_verified": false
+      },
+      "status": "passed",
+      "keys": [
+        "relay.transcript.older.load",
+        "relay.transcript.older.loading",
+        "relay.transcript.older.start"
+      ],
+      "note": "3 new keys relay.transcript.older.{load,loading,start} (history slot in the phone transcript). Strings are byte-equal to the desktop's already-audited local-operator-ui origin/main ui.chat.canonical.older_history.{load,loading,conversation_start} (24/24 locale cells compared by the auditor); the desktop's own audit was taken on trust, not re-derived. Independent audit of the 3 keys across es fr hi ru ur vi zh-CN: passed, no blocker/major. The 19 pre-existing keys are unchanged in every locale and carry their prior passed audit (2026-10-26, see i18n/ledger/<locale>.json); this row re-states the namespace against the new en hash. Minors, not blocking: vi `start` can read as imperative; vi `loading` terse; zh-CN uses 对话 where the glossary says 会话 (desktop ships the same)."
+    }
+  ]
+}

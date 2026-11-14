@@ -105,6 +105,7 @@ from local_operator.harness.types import (
 )
 from local_operator.hub_sync.definition import DefinitionRevisionMismatch
 from local_operator.profile_scope import Scope
+from local_operator.profile_text_edits import TextEdit
 from local_operator.projects import truncate_row
 from local_operator.tools.builtin import (
     INHERIT_EFFORT,
@@ -161,8 +162,8 @@ class AgentParams(BaseModel):
     description: str | None = Field(
         default=None,
         description=(
-            "create/update: when to use this profile. Semantic routing matches "
-            "this, so write the trigger condition, not a job title."
+            "create/update: when to use it. Semantic routing matches this: "
+            "write the trigger, not a job title."
         ),
     )
     instructions: str | None = Field(
@@ -175,8 +176,8 @@ class AgentParams(BaseModel):
     tools: list[str] | None = Field(
         default=None,
         description=(
-            "create/update on a ROLE: restrict the profile to these tools. "
-            "Omit for all. A specialist carries no tool allow-list."
+            "create/update on a ROLE: restrict it to these tools; omit for all. "
+            "Not on a specialist."
         ),
     )
     # A free string rather than a Literal for the same reason as the ``task``
@@ -194,7 +195,23 @@ class AgentParams(BaseModel):
 
     saver: Literal["on", "off", "inherit"] | None = Field(
         default=None,
-        description="create/update: pin Radient Saver for this role; inherit clears the pin.",
+        description="create/update: pin Radient Saver for this role; inherit clears it.",
+    )
+    edits: list[TextEdit] | None = Field(
+        default=None,
+        description="update: patch/append long text losslessly.",
+    )
+    field: Literal["instructions", "description"] | None = Field(
+        default=None, description="show: read this field page by page"
+    )
+    part: int | None = Field(default=None, ge=1, description="show: page, 1-based")
+    base_revision: str | None = Field(
+        default=None,
+        description="show/update: show's revision (CAS).",
+    )
+    replace: bool = Field(
+        default=False,
+        description="update: confirm a rewrite dropping lines.",
     )
 
     @field_validator("effort", mode="before")
@@ -257,31 +274,32 @@ class AgentParams(BaseModel):
     delegate: bool | None = Field(
         default=None,
         description=(
-            "create/update on a ROLE: may this profile launch subagents? "
-            "Default no; only coordinating roles should. A specialist cannot delegate."
+            "create/update on a ROLE: may it launch subagents? "
+            "Default no; only coordinating roles should. A specialist cannot."
         ),
     )
     action_class: Literal["reactive", "proactive"] | None = Field(
         default=None,
         description=(
-            "create/update: 'reactive' (default) or 'proactive'. Set proactive "
-            "ONLY when the user clearly asked for a proactive use case: it can "
-            "message them unprompted, so it is sparing by default."
+            # The full rationale lives in the tool:// notes (tool_docs.py); the
+            # wire keeps only the rule, trimmed for the start-context budget.
+            "create/update: 'reactive' (default) or 'proactive' — ONLY when the "
+            "user clearly asked for a proactive use case (it messages them unprompted)."
         ),
     )
     kind: Literal["role", "specialist"] | None = Field(
         default=None,
         description=(
-            "create: 'role' (default; a reusable task(agent=...) target) or "
+            "create: 'role' (default; a task(agent=...) target) or "
             "'specialist' (a durable named agent, may sit on a team roster). "
-            "Ignored on update: kind cannot change."
+            "Fixed after create."
         ),
     )
     scope: Literal["global", "session"] | None = Field(
         default=None,
         description=(
             "Default: this conversation if it has a store, else the account. "
-            "'global': the account, needs confirmation."
+            "'global': the account."
         ),
     )
     # ``as`` is a Python keyword, so the field carrying the design's ``[as=Y]`` is
@@ -292,7 +310,7 @@ class AgentParams(BaseModel):
     )
     backup_id: str | None = Field(
         default=None,
-        description="revert: the backup_id an account save's receipt returned.",
+        description="revert: backup_id from an account save's receipt.",
     )
     # ONE field, not ``replace`` + ``confirm_replace``: on this op the flag IS the
     # confirmation (the desktop body and the TUI's typed ``yes`` carry the same
@@ -727,7 +745,47 @@ async def _op_list(context: ToolContext | None, tool_call_id: str) -> ToolResult
     return _text(tool_call_id, "agent", text, details=spill or None)
 
 
-async def _op_show(context: ToolContext | None, tool_call_id: str, name: str) -> ToolResult:
+def _paged_field(
+    tool_call_id: str,
+    values: dict[str, str],
+    revision: str,
+    field: str,
+    part: int | None,
+    base_revision: str | None,
+) -> ToolResult:
+    """One page of a long field (``profile_text_edits`` rule 1)."""
+    from local_operator.profile_text_edits import TextEditRefusal, render_field_page
+
+    try:
+        page = render_field_page(
+            field, values.get(field) or "", part or 1, revision, base_revision=base_revision
+        )
+    except TextEditRefusal as exc:
+        return _error(tool_call_id, "agent", str(exc))
+    return _text(tool_call_id, "agent", page, details={"complete": True, "field": field})
+
+
+def _inline_or_pointer(field: str, value: str, used: int) -> tuple[str, bool]:
+    """``(rendered, paged)``: the field whole while the result stays replay-safe."""
+    from local_operator.profile_text_edits import (
+        SHOW_RESULT_BUDGET_CHARS,
+        field_pointer,
+    )
+
+    if used + len(value) + 200 <= SHOW_RESULT_BUDGET_CHARS:
+        return value, False
+    return field_pointer(field, value), True
+
+
+async def _op_show(
+    context: ToolContext | None,
+    tool_call_id: str,
+    name: str,
+    *,
+    field: str | None = None,
+    part: int | None = None,
+    base_revision: str | None = None,
+) -> ToolResult:
     from local_operator.agent_profiles import resolve_profile
 
     registry = _registry(context)
@@ -738,20 +796,36 @@ async def _op_show(context: ToolContext | None, tool_call_id: str, name: str) ->
         except Exception:  # noqa: BLE001
             specialist = None
         if specialist is not None and is_specialist(specialist):
-            instructions = registry.get_agent_system_prompt(specialist.id) or "(none)"
+            stored = registry.get_agent_system_prompt(specialist.id) or ""
             from local_operator.profile_scope import row_scope, scope_words
 
-            body = (
+            revision = _agent_revision(registry, specialist)
+            if field is not None:
+                return _paged_field(
+                    tool_call_id,
+                    {"instructions": stored, "description": specialist.description or ""},
+                    revision,
+                    field,
+                    part,
+                    base_revision,
+                )
+            head = (
                 f"{identifier_text(context, specialist.name)} — registered specialist\n"
                 f"scope: {scope_words(row_scope(registry, specialist))}\n"
+                f"revision: {revision}\n"
                 f"when to use: {specialist.description or '(unstated)'}\n"
                 "tools: full inventory\n\n"
-                f"instructions:\n{instructions}\n\n"
-                f"launch with --agent {identifier_text(context, specialist.name)}, "
+            )
+            # Lossless authoring read (``profile_text_edits`` rule 1): whole
+            # while replay-safe, else a pointer to its pages -- never clipped.
+            rendered, paged = _inline_or_pointer("instructions", stored, len(head))
+            body = (
+                head
+                + (f"instructions:\n{rendered or '(none)'}" if not paged else rendered)
+                + f"\n\nlaunch with --agent {identifier_text(context, specialist.name)}, "
                 "or add it to a team roster."
             )
-            text, spill = spill_truncate(body, "agent", context)
-            return _text(tool_call_id, "agent", text, details=spill or None)
+            return _text(tool_call_id, "agent", body, details={"complete": not paged})
     if profile is None:
         return _error(
             tool_call_id,
@@ -763,12 +837,21 @@ async def _op_show(context: ToolContext | None, tool_call_id: str, name: str) ->
         )
     origin = "registered" if profile.agent_id else "packaged starter (not installed)"
     scope_line = ""
+    row_revision: str | None = None
+    stored_instructions: str | None = None
     if profile.agent_id and registry is not None:
         from local_operator.profile_scope import row_scope, scope_words
 
         try:
             row = registry.get_agent(profile.agent_id)
             scope_line = f"scope: {scope_words(row_scope(registry, row))}\n"
+            # The CAS token an intentional rewrite echoes (``profile_text_edits``).
+            row_revision = _agent_revision(registry, row)
+            scope_line += f"revision: {row_revision}\n"
+            # Page the SAME text ``edits`` patch (``_resolve_text_edits``).
+            stored_instructions = str(
+                registry.definition_revision_fields(str(row.id)).get("instructions") or ""
+            )
         except Exception:  # noqa: BLE001 — the scope line is enrichment only
             scope_line = ""
     # Identifier fields: the role name and label head the body; both are
@@ -785,7 +868,33 @@ async def _op_show(context: ToolContext | None, tool_call_id: str, name: str) ->
     )
     if profile.effort:
         header.append(f"effort: {profile.effort}")
-    body = "\n".join(header) + "\n\ninstructions:\n" + (profile.instructions or "(none)")
+    if field is not None:
+        if row_revision is None:
+            # A packaged starter (not installed) has no registry revision; its
+            # text is fixed by the release, so its digest pins the pages.
+            from local_operator.profile_text_edits import field_digest
+
+            row_revision = f"packaged:{field_digest(profile.instructions or '')}"
+        return _paged_field(
+            tool_call_id,
+            {
+                "instructions": (
+                    stored_instructions
+                    if stored_instructions is not None
+                    else profile.instructions or ""
+                ),
+                "description": profile.when_to_use or profile.description or "",
+            },
+            row_revision,
+            field,
+            part,
+            base_revision,
+        )
+    head = "\n".join(header) + "\n\n"
+    rendered, instructions_paged = _inline_or_pointer(
+        "instructions", profile.instructions or "", len(head)
+    )
+    body = head + (rendered if instructions_paged else "instructions:\n" + (rendered or "(none)"))
     # Once a packaged role is installed and edited, the SHIPPED guidance is
     # unreachable through every other op: `show` renders the registry copy and
     # `update` asks the reader to retype text they can no longer read. So when
@@ -845,8 +954,51 @@ async def _op_show(context: ToolContext | None, tool_call_id: str, name: str) ->
             "to apply the packaged values yourself"
         )
     body += "."
-    text, spill = spill_truncate(body, "agent", context)
-    return _text(tool_call_id, "agent", text, details=spill or None)
+    # LOSSLESS, never the generic head+tail preview: ``show`` is the read an
+    # ``update`` is written from, and a clipped middle read back as the whole
+    # text silently deletes it (``profile_text_edits``). Instructions too long
+    # for one replay-safe result were printed as a pointer to their pages
+    # above, and ``complete`` says which case this is.
+    return _text(tool_call_id, "agent", body, details={"complete": not instructions_paged})
+
+
+def _agent_revision(registry: Any, row: Any) -> str:
+    """The row's definition revision -- the same value ``_plan_account_save``
+    binds an account save to, so show/CAS/consent agree on one token."""
+    from local_operator.hub_sync.definition import definition_revision
+
+    fields = dict(registry.definition_revision_fields(str(row.id)))
+    fields["saver"] = profile_from_agent(registry, row).saver
+    return definition_revision("agent", str(row.id), fields)
+
+
+def _resolve_text_edits(registry: Any, existing: Any, params: AgentParams) -> AgentParams | str:
+    """Apply ``edits``/``base_revision``/``replace`` (``profile_text_edits``).
+
+    Returns ``params`` with ``instructions`` set to the resolved WHOLE value, so
+    the plan, proposal, backup and receipt all describe one before/after pair;
+    or the refusal sentence. Runs for every tool update, either store.
+    """
+    from local_operator.profile_text_edits import resolve_text_fields
+
+    try:
+        # The same source ``_plan_account_save`` diffs against.
+        fields = registry.definition_revision_fields(str(existing.id))
+        stored = str(fields.get("instructions") or "")
+        current = _agent_revision(registry, existing)
+    except Exception as error:  # noqa: BLE001 — an unreadable row is a refusal
+        return f"could not read {existing.name!r}: {error}"
+    resolved = resolve_text_fields(
+        {"instructions": stored},
+        whole={"instructions": params.instructions},
+        edits=params.edits,
+        base_revision=params.base_revision,
+        current_revision=current,
+        replace=params.replace,
+    )
+    if isinstance(resolved, str):
+        return resolved
+    return params.model_copy(update={**resolved, "edits": None})
 
 
 async def _ranked_names(index: Any, query: str) -> tuple[list[str], float]:
@@ -1438,9 +1590,11 @@ async def _op_sync(
             # write the account on its own. A host with NO conversation store
             # (``needs_consent`` False) keeps pre-S2 behaviour and runs the arm.
             return seed.render() + (
-                "\n\nHub updates were not applied: they change roles saved in the "
-                "user's account, which needs their confirmation. The user can run "
-                "`lop agents sync` to apply them."
+                # No CLI command for the user (the people this reaches are
+                # often non-technical): org_pull files the consent ask itself.
+                "\n\nHub updates were not applied: they change items saved in the "
+                "user's account, which needs their confirmation. Use op='org_pull' "
+                "to update them; it asks the user when needed."
             )
         from local_operator.config import ConfigManager
 
@@ -2034,29 +2188,72 @@ class _AccountSave:
     post_revision: str | None = None
 
 
-def _queued_profile_receipt(tool_call_id: str, tool_name: str, queued: Any) -> ToolResult:
+#: How an agent should put a filed proposal to the user. WHY: an agent once
+#: pasted a whole proposed team brief into ``ask``; the card then filled the
+#: conversation and hid its own options. The diff is reviewed in Agents.
+PROPOSAL_ASK_GUIDANCE = (
+    "When asking the user, send a 1-3 line summary (what changes, which profile, "
+    "lines added/removed) plus the id {pid}; never paste the full instructions — "
+    "they review the diff in Agents."
+)
+
+
+def _proposed_profile_receipt(tool_call_id: str, tool_name: str, proposed: Any) -> ToolResult:
+    """The receipt for a write the host filed as a proposal instead of applying.
+
+    TOKEN-LEAN AND POINTS AT AGENTS, NEVER MESH: the person reviews proposals in
+    the desktop Agents section (Agents → <name>), or says yes in the
+    conversation and the agent applies it with ``profile_proposal``. The text
+    tells the model exactly those two routes so it neither retries the write nor
+    sends the user to the device approvals tray.
+    """
     from local_operator.profile_scope import profile_diff_summary
 
+    fields = ", ".join(proposed.changes) or "no fields"
+    pid = proposed.proposal_id
+    state = getattr(proposed, "state", "pending")
+    if state == "pending":
+        text = (
+            f"Proposed {proposed.profile_kind} {proposed.profile_name!r} change ({fields}) as "
+            f"{pid}; nothing changed yet. Tell the user to review it in Agents → "
+            f"{proposed.profile_name}, or ask them and call profile_proposal op=apply id={pid} "
+            "after they agree."
+        )
+    else:
+        # An identical idea that was already decided (or lapsed) is reported
+        # as such: it is never revived, and claiming "proposed" would send the
+        # user to an Agents entry that is not pending.
+        text = (
+            f"This exact {proposed.profile_kind} {proposed.profile_name!r} change ({fields}) "
+            f"was already proposed as {pid} and is {state}; nothing changed and it was not "
+            "re-opened. Ask the user before proposing it again with different content."
+        )
+    if getattr(proposed, "summary", ()):
+        text += "\n" + "\n".join(proposed.summary)
+    elif proposed.diff:
+        text += "\n" + profile_diff_summary("\n".join(proposed.diff))
+    if state == "pending":
+        # Producer-side half of the bounded ask card: the model relays what
+        # it was told, so tell it what a good ask looks like.
+        text += f"\n{PROPOSAL_ASK_GUIDANCE.format(pid=pid)}"
     return _text(
         tool_call_id,
         tool_name,
-        f"Queued {queued.profile_kind} {queued.profile_name!r} for durable approval "
-        f"({queued.approval_id}). No profile or backup was changed. "
-        "The signed approval continuation applies it; do not retry this tool call."
-        + ("\n" + profile_diff_summary("\n".join(queued.diff)) if queued.diff else ""),
+        text,
         details={
-            "status": "queued",
-            "fields": list(queued.changes),
-            "diff": list(queued.diff),
-            "approval_id": queued.approval_id,
-            "request_digest": queued.request_digest,
-            "expires_at": queued.expires_at,
-            "receipt_id": queued.receipt_id,
-            "profile_kind": queued.profile_kind,
-            "profile_name": queued.profile_name,
+            "status": "proposed" if state == "pending" else state,
+            "proposal_id": pid,
+            "profile_kind": proposed.profile_kind,
+            "profile_name": proposed.profile_name,
             "scope": "global",
+            "fields": list(proposed.changes),
+            "diff": list(proposed.diff),
         },
     )
+
+
+#: Old name, kept so an out-of-tree import keeps resolving for one release.
+_queued_profile_receipt = _proposed_profile_receipt
 
 
 def _agent_proposal(
@@ -2100,22 +2297,23 @@ def _plan_account_save(registry: Any, existing: Any, params: AgentParams) -> _Ac
         base_revision = definition_revision("agent", str(existing.id), before)
     changes = tuple(field for field, _key in _SAVE_FIELDS if getattr(params, field) is not None)
     lines: list[str] = []
+    instruction_section = ""
     for field, key in _SAVE_FIELDS:
         new = getattr(params, field)
         if new is None:
             continue
         if field == "instructions":
-            rendered, is_diff = _instruction_diff(
-                str(before.get("instructions") or ""),
-                str(new or ""),
-                fromfile="before",
-                tofile="after",
+            from local_operator.profile_text_edits import stats_heading
+
+            old_text = str(before.get("instructions") or "")
+            rendered, _is_diff = _instruction_diff(
+                old_text, str(new or ""), fromfile="before", tofile="after"
             )
-            # ``_instruction_diff`` falls back to the whole body when a diff
-            # would not be shorter; say so, or a reader cannot tell a full new
-            # text from a two-line diff.
-            heading = "instructions" if is_diff else "instructions (replaced; new text)"
-            lines.append(f"{heading}:\n{rendered}")
+            # Canonical whole-field counts in the heading, and the section is
+            # appended LAST (below) so ``profile_diff_summary`` never counts
+            # the body's own ``-`` bullets as removed lines.
+            instruction_section = f"{stats_heading('instructions', old_text, str(new or ''))}:\n"
+            instruction_section += rendered
             continue
         old = before.get(key) if key is not None else None
         # THE POLICY FIELDS ARE NAMED EXPLICITLY (operator requirement): a
@@ -2127,6 +2325,8 @@ def _plan_account_save(registry: Any, existing: Any, params: AgentParams) -> _Ac
             "action_class": "class",
         }.get(field, field)
         lines.append(f"{label}: {_format_field(old)} -> {_format_field(new)}")
+    if instruction_section:
+        lines.append(instruction_section)
     return _AccountSave(
         agent_id=agent_id,
         changes=changes,
@@ -2346,22 +2546,24 @@ async def _op_revert(context: ToolContext | None, tool_call_id: str, backup_id: 
         key for key, _ in _SAVE_FIELDS if key in before and before[key] != fields.get(key)
     )
     from local_operator.profile_scope import profile_field_label
+    from local_operator.profile_text_edits import stats_heading
 
     summary_lines: list[str] = []
+    instruction_section = ""
     for key in changes:
         if key == "instructions":
-            rendered, _ = _instruction_diff(
-                str(fields.get(key) or ""),
-                str(before.get(key) or ""),
-                fromfile="before",
-                tofile="after",
-            )
-            summary_lines.append(f"instructions:\n{rendered}")
+            old_text, new_text = str(fields.get(key) or ""), str(before.get(key) or "")
+            rendered, _ = _instruction_diff(old_text, new_text, fromfile="before", tofile="after")
+            # Canonical counts, section last (see ``profile_diff_summary``).
+            instruction_section = f"{stats_heading('instructions', old_text, new_text)}:\n"
+            instruction_section += rendered
         else:
             summary_lines.append(
                 f"{profile_field_label(key)}: {_format_field(fields.get(key))} -> "
                 f"{_format_field(before.get(key))}"
             )
+    if instruction_section:
+        summary_lines.append(instruction_section)
     from local_operator.profile_approval import AgentImage
 
     before_image = {
@@ -2390,8 +2592,8 @@ async def _op_revert(context: ToolContext | None, tool_call_id: str, backup_id: 
         tool_call_id=tool_call_id,
     )
     authorized_by, reason = await durable_write_decision(context, intent)
-    if reason == "queued":
-        return _queued_profile_receipt(tool_call_id, "agent", authorized_by)
+    if reason == "proposed":
+        return _proposed_profile_receipt(tool_call_id, "agent", authorized_by)
     if authorized_by is None:
         return _error(tool_call_id, "agent", durable_write_refusal(intent, reason))
 
@@ -2531,7 +2733,17 @@ async def _op_org(
         )
         return _error(tool_call_id, "agent", f"{lead}; pass org= one of: {listed}")
     registry = _registry(context)
-    if params.op == "org_pull" and getattr(registry, "session_registry", None) is not None:
+    org = next((o for o in orgs if o.tenant_id == tenant), None)
+    org_name = str(getattr(org, "tenant_name", "") or tenant)
+    role = str(getattr(org, "role", "") or "member")
+    # THE SAFE CLASS (``hub_pull``): adopt-link/skip never overwrite a local copy,
+    # and the linked-update arm below never forces a conflict. Hub-wins ``adopt``
+    # and LLM ``reconcile`` keep the ``sync`` intent + confirm_replace, so a
+    # hub_pull grant (auto policy, the owner's words, an answered host ask) can
+    # never authorise them.
+    safe_pull = params.op == "org_pull" and conflict in ("adopt-link", "skip")
+    scoped_host = getattr(registry, "session_registry", None) is not None
+    if params.op == "org_pull" and not safe_pull and scoped_host:
         from local_operator.profile_scope import (
             durable_write_decision,
             durable_write_refusal,
@@ -2548,47 +2760,29 @@ async def _op_org(
     ref = (params.name or "").strip()
     query = (params.query or "").strip().casefold()
 
-    def run() -> str:
+    def prepare() -> tuple[Any, str]:
+        """``(state, error)``: clients, the resolved reference and (org_pull) the plan."""
         from local_operator.config import ConfigManager
         from local_operator.hub_org import catalogue as cat
         from local_operator.hub_org.client import build_org_client
-        from local_operator.hub_org.pull import pull_all
 
         manager = ConfigManager(config_dir)
         client = build_org_client(manager).client
         if client is None:
-            return "error: not signed in to Radient (the user runs `lop login`)."
+            return None, "error: not signed in to Radient (the user runs `lop login`)."
         # Org items are ACCOUNT rows (the runner keeps them current for every
         # conversation), so a conversation-scoped host writes its global arm.
         account = getattr(registry, "global_registry", None) or registry
+        state: dict[str, Any] = {
+            "manager": manager,
+            "client": client,
+            "account": account,
+            "header": [],
+            "names": None,
+            "plan": None,
+        }
         if params.op == "org_list":
-            result = cat.catalogue_result(
-                client, tenant, kinds, config_dir=config_dir, agent_registry=account
-            )
-            rows = [
-                i
-                for i in result.items
-                if not query or query in f"{i.name} {i.description}".casefold()
-            ]
-            lines = [
-                f"{i.kind} {i.name} [{i.local}{' as ' + i.local_name if i.local_name else ''}]"
-                f" id={i.hub_id}"
-                for i in rows[:_ORG_ROW_CAP]
-            ]
-            # Model-facing tool output (English by design, AGENTS.md i18n).
-            if len(rows) > _ORG_ROW_CAP:
-                lines.append(  # i18n: ignore model-facing tool result
-                    f"... {len(rows) - _ORG_ROW_CAP} more (narrow with query/kinds)"
-                )
-            unlinked = [i.name for i in result.unlinked_local_copies()]
-            if unlinked:
-                lines.append(  # i18n: ignore model-facing tool result
-                    f"unlinked local copies: {', '.join(unlinked)} — op='org_pull' adopts them"
-                )
-            lines += [f"{k} list failed: {c}" for k, c in result.errors.items()]
-            return "\n".join(lines) or "the organization shares nothing of these kinds yet"
-        header: list[str] = []
-        names: list[str] | None = None
+            return state, ""
         if ref:
             # The CLI's rule, not a second one (UX review U2, QA Q1): exact id,
             # exact name, then a unique prefix; an ambiguous prefix REFUSES
@@ -2601,36 +2795,191 @@ async def _op_org(
             except cat.ReferenceError_ as error:
                 if not error.candidates:
                     scope = "/".join(kinds)
-                    return f"error: no {scope} item in organization {tenant} matches {ref!r}."
+                    return None, f"error: no {scope} item in organization {tenant} matches {ref!r}."
                 listed = "; ".join(
                     f"{c.kind} {c.name} (id {c.hub_id})" for c in error.candidates[:_ORG_ROW_CAP]
                 )
-                return (
+                return None, (
                     f"error: {ref!r} is ambiguous; pass name= one of these ids or a longer "
                     f"name: {listed}"
                 )
-            names = [item.hub_id]
+            state["names"] = [item.hub_id]
             if item.hub_id != ref:
-                header.append(f"resolved {ref!r} → {item.kind} {item.name} (id {item.hub_id})")
-        report = pull_all(
-            manager,
-            tenant,
-            kinds=kinds,
-            names=names,
-            subscribe=True,
-            auto_push=False,
-            on_conflict=conflict,  # type: ignore[arg-type]
-            client=client,
-            agent_registry=account,
+                state["header"].append(
+                    f"resolved {ref!r} → {item.kind} {item.name} (id {item.hub_id})"
+                )
+        if safe_pull:
+            from local_operator.hub_org.consent import build_plan
+
+            state["plan"] = build_plan(
+                manager,
+                tenant,
+                kinds,
+                client=client,
+                agent_registry=account,
+                hub_ids=state["names"],
+                on_conflict=conflict,
+                org_name=org_name,
+            )
+        return state, ""
+
+    state, failure = await asyncio.to_thread(prepare)
+    if state is None:
+        return _text(tool_call_id, "agent", failure)
+    plan = state["plan"]
+    # PINNED EXECUTION (PR #3693 review R2). On a scoped host the plan built
+    # above is the ONLY thing the grant covers, so the run below writes exactly
+    # it: new items by the hub ids the plan named (never a fresh all-catalogue
+    # pull), linked updates from the plan's own checks, re-subscriptions from its
+    # rows. An EMPTY plan (nothing to do, or every planning read failed) is a
+    # report, never a pull: a second read that found work would otherwise write
+    # without anyone having been asked.
+    # A plan-typed name bound only on the pinned path: a bare ``pinned`` bool does
+    # not narrow ``plan`` for the checker, and this keeps every pinned read on a plan
+    # proven non-None rather than relying on the flag and the plan staying in step.
+    pinned_plan = plan if safe_pull and scoped_host and plan is not None else None
+    pinned = pinned_plan is not None
+    if pinned_plan is not None and pinned_plan.is_empty():
+        lines = state["header"] + [
+            f"{r['kind']} {r['name']}: up-to-date" for r in pinned_plan.current
+        ]
+        lines += [f"{k}: check failed ({c})" for k, c in pinned_plan.errors.items()]
+        if pinned_plan.errors:
+            lines.append(  # i18n: ignore model-facing tool result
+                "nothing was changed: a check failed, so nothing could be confirmed; " "retry later"
+            )
+        return _text(
+            tool_call_id,
+            "agent",
+            "\n".join(lines) or "nothing to pull: no new items and no updates",
         )
-        lines = header + [
+    if pinned_plan is not None:
+        from local_operator.profile_scope import (
+            durable_write_decision,
+            hub_pull_refusal,
+        )
+
+        intent = DurableWriteIntent(
+            kind="agent",
+            operation="hub_pull",
+            name=f"org {tenant}",
+            plan=pinned_plan.to_dict(),
+            tool_call_id=tool_call_id,
+        )
+        authorized_by, reason = await durable_write_decision(
+            context, intent  # type: ignore[arg-type]
+        )
+        if reason == "ask_queued":
+            # Not an error: the host asked the user. A plain result (with the ask
+            # id in details) so the model ends its turn instead of "recovering".
+            ask_id = str(getattr(authorized_by, "ask_id", "") or "")
+            return _text(
+                tool_call_id,
+                "agent",
+                hub_pull_refusal("ask_queued", ask_id),
+                details={"status": "ask_queued", "ask_id": ask_id, "tenant": tenant},
+            )
+        if authorized_by is None:
+            return _error(tool_call_id, "agent", hub_pull_refusal(reason))
+
+    def run() -> str:
+        from local_operator.hub_org.pull import pull_all
+
+        manager, client, account = state["manager"], state["client"], state["account"]
+        if params.op == "org_list":
+            from local_operator.hub_org import catalogue as cat
+            from local_operator.hub_org.consent import build_plan, update_states
+
+            result = cat.catalogue_result(
+                client, tenant, kinds, config_dir=config_dir, agent_registry=account
+            )
+            rows = [
+                i
+                for i in result.items
+                if not query or query in f"{i.name} {i.description}".casefold()
+            ]
+            # LINKED ROWS SAY WHETHER THEY ARE CURRENT (Ben's agent could not
+            # tell). The same host check the pull plans from; only when a listed
+            # row is linked, so an unlinked catalogue costs nothing extra.
+            states: dict[tuple[str, str], str] = {}
+            if any(i.local == "linked" for i in rows[:_ORG_ROW_CAP]):
+                states = update_states(
+                    build_plan(
+                        manager,
+                        tenant,
+                        kinds,
+                        client=client,
+                        agent_registry=account,
+                        hub_ids=[i.hub_id for i in rows[:_ORG_ROW_CAP] if i.local == "linked"],
+                        org_name=org_name,
+                    )
+                )
+
+            def standing(i: Any) -> str:
+                text = i.local + (" as " + i.local_name if i.local_name else "")
+                state_word = states.get((i.kind, i.local_name or i.name))
+                return f"{text}, {state_word}" if state_word else text
+
+            lines = [
+                f"{i.kind} {i.name} [{standing(i)}] id={i.hub_id}" for i in rows[:_ORG_ROW_CAP]
+            ]
+            # Model-facing tool output (English by design, AGENTS.md i18n).
+            if len(rows) > _ORG_ROW_CAP:
+                lines.append(  # i18n: ignore model-facing tool result
+                    f"... {len(rows) - _ORG_ROW_CAP} more (narrow with query/kinds)"
+                )
+            unlinked = [i.name for i in result.unlinked_local_copies()]
+            if unlinked:
+                lines.append(  # i18n: ignore model-facing tool result
+                    f"unlinked local copies: {', '.join(unlinked)} — op='org_pull' adopts them"
+                )
+            if any(word == "update-available" for word in states.values()):
+                lines.append(  # i18n: ignore model-facing tool result
+                    "update-available items: op='org_pull' updates them (it asks the user first "
+                    "when needed)"
+                )
+            lines += [f"{k} list failed: {c}" for k, c in result.errors.items()]
+            return "\n".join(lines) or "the organization shares nothing of these kinds yet"
+        names = state["names"]
+        if pinned_plan is not None:
+            names = [str(r["hub_id"]) for r in pinned_plan.new if r.get("hub_id")]
+        if pinned and not names:
+            # Only updates/re-subscriptions were approved: no catalogue pull at
+            # all (an empty ``names`` would mean "everything").
+            from local_operator.hub_org.pull import OrgPullReport
+
+            report = OrgPullReport(items=(), adopted=(), errors={})
+        else:
+            report = pull_all(
+                manager,
+                tenant,
+                kinds=kinds,
+                names=names,
+                subscribe=True,
+                auto_push=False,
+                on_conflict=conflict,  # type: ignore[arg-type]
+                # The safe class never spends the user's model budget: identical to
+                # what org auto-enrol runs unattended. reconcile keeps its LLM path.
+                allow_llm=not safe_pull,
+                client=client,
+                agent_registry=account,
+            )
+        lines = state["header"] + [
             f"{i.kind} {i.name} id={i.hub_id}: {i.outcome}" + (f" ({i.detail})" if i.detail else "")
             for i in report.items
+            # Linked items are reported by the update arm below, with their outcome.
+            if not (plan is not None and i.outcome == "already-linked")
         ]
         lines += [
             f"adopted {a['kind']} {a['name']}: {a['result']} (backup {a.get('backup')})"
             for a in report.adopted
         ]
+        if plan is not None:
+            from local_operator.hub_org.consent import apply_linked
+
+            lines += apply_linked(manager, plan, client=client, agent_registry=account, role=role)
+            lines += [f"{r['kind']} {r['name']}: up-to-date" for r in plan.current]
+            lines += [f"{k}: check failed ({c})" for k, c in plan.errors.items()]
         lines += [f"{k} list failed: {c}" for k, c in report.errors.items()]
         return "\n".join(lines) or "nothing matched"
 
@@ -2683,6 +3032,18 @@ async def _op_write(
                 ),
             )
     target = row_scope(registry, existing) if existing is not None else scope
+    if not creating and existing is not None and (is_role(existing) or is_specialist(existing)):
+        resolved = _resolve_text_edits(registry, existing, params)
+        if isinstance(resolved, str):
+            return _error(tool_call_id, "agent", resolved)
+        params = resolved
+    elif existing is None and (params.edits or params.base_revision or params.replace):
+        # A non-role row falls through: ``write_profile`` names it ("not a role").
+        return _error(
+            tool_call_id,
+            "agent",
+            "edits/base_revision/replace apply to op='update' of an existing role or specialist.",
+        )
     # A row that is not a role/specialist is refused by ``write_profile`` with its
     # own specific sentence ("... is not a role"); asking for durable consent
     # first would replace that answer with a scope question the caller did not ask
@@ -2710,8 +3071,8 @@ async def _op_write(
             tool_call_id=tool_call_id,
         )
         authorized_by, reason = await durable_write_decision(context, intent)
-        if reason == "queued":
-            return _queued_profile_receipt(tool_call_id, "agent", authorized_by)
+        if reason == "proposed":
+            return _proposed_profile_receipt(tool_call_id, "agent", authorized_by)
         if authorized_by is None:
             return _error(tool_call_id, "agent", durable_write_refusal(intent, reason))
     try:
@@ -2985,7 +3346,14 @@ async def execute_agent(
     if params.op == "list":
         return await _op_list(context, tool_call_id)
     if params.op == "show":
-        return await _op_show(context, tool_call_id, str(params.name))
+        return await _op_show(
+            context,
+            tool_call_id,
+            str(params.name),
+            field=params.field,
+            part=params.part,
+            base_revision=params.base_revision,
+        )
     if params.op == "search":
         return await _op_search(context, tool_call_id, str(params.query))
     if params.op == "install":

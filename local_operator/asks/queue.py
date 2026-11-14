@@ -63,7 +63,11 @@ from local_operator.harness.message_types import (
     ASK_RESPONSE_MESSAGE_TYPE,
     ASK_TIMEOUT_MESSAGE_TYPE,
 )
-from local_operator.harness.types import CustomMessage, ImageContent
+from local_operator.harness.types import (
+    CustomMessage,
+    ImageContent,
+    ask_command_problem,
+)
 from local_operator.team_bridge.ask_issuance import bridge_scope_digest
 
 logger = logging.getLogger(__name__)
@@ -350,8 +354,14 @@ class AskQueue:
         timeout_raw: Any,
         *,
         tool_call_id: str = "",
+        consent: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Validate, cap, append ``queued``, arm the timer; return a receipt.
+
+        ``consent`` is HOST-ONLY (see ``store.EVENT_CONSENT_USED``): the account
+        write an affirmative answer to this ask authorises. Keyword-only and never
+        reachable from the ``ask`` tool, so a model cannot mint a consent-bearing
+        ask; the session grants on it only for a person's answer, once.
 
         Returns ``{"ok": True, "text": …, "details": …}`` or
         ``{"ok": False, "error": …}``. Every refusal is a validation error the
@@ -422,6 +432,8 @@ class AskQueue:
             "tool_call_id": str(tool_call_id or ""),
             "questions": shapes,
         }
+        if consent is not None:
+            record["consent"] = dict(consent)
         event = {"v": store.EVENT_SCHEMA, "kind": store.EVENT_QUEUED, "at": now, **record}
         if not store.append_event(self.session_dir, event):
             return {
@@ -2748,6 +2760,20 @@ class AskQueue:
             return ", ".join(names) if names else None
         return str(value)
 
+    def mark_consent_used(self, ask_id: str) -> bool:
+        """Spend a host-filed consent ask (single use; survives fold and restart).
+
+        ``False`` when the event could not be recorded: the caller must then
+        REFUSE the write, because an unrecorded spend could be spent again.
+        """
+        event = {
+            "v": store.EVENT_SCHEMA,
+            "kind": store.EVENT_CONSENT_USED,
+            "at": self._now(),
+            "ask_id": str(ask_id),
+        }
+        return bool(store.append_event(self.session_dir, event))
+
     def find(self, ask_id: str, now_ms: int | None = None) -> dict[str, Any] | None:
         """The folded record for ``ask_id``, or ``None`` when this log never had it.
 
@@ -3088,7 +3114,52 @@ def _question_shape(question: Any) -> dict[str, Any]:
         # when present — an ask without it keeps the exact pre-scope shape, so
         # existing logs fold and serialize byte-identically.
         shape["bridge"] = dict(bridge)
+    recommended_all = raw.get("recommended_all")
+    if recommended_all is not None:
+        # A multi-select's recommendation SET (`AskQuestion.recommended_all`),
+        # added ONLY when present: `recommended` stays the int the log has
+        # always carried, and every ask without a set keeps the exact prior
+        # shape, so existing logs fold byte-identically. Never emit it as None.
+        shape["recommended_all"] = list(recommended_all)
+    command = _carried_command(raw, shape)
+    if command is not None:
+        # The suggested terminal command (`AskQuestion.command`) and the device
+        # it is meant for, added ONLY when present — same rule as
+        # `bridge`/`recommended_all`, so every ask without one keeps the exact
+        # prior shape and existing logs fold byte-identically. Both ride to the
+        # desktop/fleet frames unchanged. The target is ALWAYS stamped with the
+        # command, so a surface deciding whether to offer one-click Run never
+        # has to guess a default; anything but an explicit "user" reads as
+        # "agent" (the tool's own default).
+        shape["command"] = command
+        shape["command_target"] = "user" if raw.get("command_target") == "user" else "agent"
     return shape
+
+
+def _carried_command(raw: Mapping[str, Any], shape: Mapping[str, Any]) -> str | None:
+    """The command a stored row may carry for ``raw``, or ``None``.
+
+    Two refusals on top of "absent":
+
+    * A BRIDGE row (another team's agent asking through the carriage — the same
+      structural reading as ``tui/app._is_bridge_ask_row``: a ``bridge`` block
+      or a carriage ``question_id``) never carries one. The desktop offers the
+      command as a one-click terminal action, and the operator must not be
+      handed a command by an agent outside their own team.
+    * A value that fails ``ask_command_problem`` is dropped rather than stored.
+      The tool's validator already refused it on the normal path; this covers a
+      question that reaches the queue as a plain mapping without passing
+      ``AskQuestion``, so the row a surface renders is always within the rule.
+    """
+    command = raw.get("command")
+    if not isinstance(command, str):
+        return None
+    if shape.get("bridge") or str(shape.get("question_id") or "").strip():
+        return None
+    command = command.strip()
+    if ask_command_problem(command) is not None:
+        return None
+    return command
 
 
 __all__ = ["AskQueue"]

@@ -33,7 +33,7 @@ from uuid import uuid4
 
 from local_operator.i18n.keys import wire_exec as _wd
 from local_operator.i18n.text import tr
-from local_operator.interpreter import python_argv
+from local_operator.interpreter import session_python_argv
 from local_operator.macos_disclaim import spawn_disclaimed
 from local_operator.procstate import O_BINARY
 
@@ -156,6 +156,10 @@ class ExecArgs:
     #: ``agent-workstream``; outside one nothing is stamped and the flag is a
     #: no-op, so the run is an ordinary session either way.
     workstream: bool = False
+    #: ``lop exec --temporary``: mark the fresh session a temporary chat
+    #: (``session/temporary.py``). Refused with ``--resume``/``--workstream``
+    #: and from an agent's shell, before any directory exists (``cli``).
+    temporary: bool = False
     goal: str | None = None
     clear_goal: bool = False
     loop: int | None = None
@@ -198,7 +202,9 @@ def slugify(command: str, max_length: int = 40) -> str:
 def build_worker_argv(command: str, exec_args: ExecArgs) -> list[str]:
     """Serialize the exec request into ``python -m local_operator.exec_worker``
     argv. Only set flags are passed so defaults stay in one place (worker)."""
-    # ``python_argv``: `exec --background` is launched from wherever the user
+    # ``session_python_argv``: an independent background session follows the
+    # current generation rather than its launcher's pinned build, and
+    # `exec --background` is launched from wherever the user
     # happens to be standing, and the worker imports the whole harness
     # (session_factory, agents, config) — so a run started inside a checkout of
     # this project would execute that checkout rather than the installed build,
@@ -211,7 +217,7 @@ def build_worker_argv(command: str, exec_args: ExecArgs) -> list[str]:
     # terminal ledger row is ever written and reconciliation reports the run as
     # `interrupted`: the vocabulary reserved for a worker killed mid-flight,
     # for a run that never started. The `=` form is unambiguous for any value.
-    argv = python_argv("-m", "local_operator.exec_worker", f"--prompt={command}")
+    argv = session_python_argv("-m", "local_operator.exec_worker", f"--prompt={command}")
     from local_operator.exec_startup import STARTUP_FIELDS
 
     for field in STARTUP_FIELDS:
@@ -750,7 +756,14 @@ def _spawn_background(command: str, exec_args: ExecArgs) -> int:
     # `sys.executable` (see `procname.spawn_identity`).
     from local_operator import procname
 
-    argv0, executable = procname.spawn_identity(procname.LABEL_EXEC, job=job_id)
+    # Branding must describe the selected generation too. Replacing only
+    # argv[0] with this parent's image would silently undo current selection.
+    if argv[0] == sys.executable:
+        argv0, executable = procname.spawn_identity(procname.LABEL_EXEC, job=job_id)
+    else:
+        argv0, executable = procname.spawn_identity_for_interpreter(
+            procname.LABEL_EXEC, argv[0], job=job_id
+        )
     argv = list(argv)
     argv[0] = argv0
 
@@ -921,6 +934,14 @@ def _make_default_session_factory(exec_args: ExecArgs, team: Any | None = None) 
             # an ordinary attribute, so it can never masquerade as a user flag.
             team_model_suggestion=team.model_suggestion if team is not None else None,
         )
+        # ``lop exec --temporary``: read by ``session_factory._prepare`` (via
+        # ``getattr``, default off) on the FRESH path only, which writes and
+        # verifies the mark before the first turn. Bound ONLY when asked: this
+        # namespace is pinned field-for-field to ``SessionSpec.to_namespace``
+        # (the SDK's published eight-field shape, which has no temporary
+        # chats), so an ordinary run must hand the factory exactly that shape.
+        if exec_args.temporary:
+            session_args.temporary = True
         # Exec constructs an in-process Session, so it never calls _spawn_runtime.
         # Keep the shared resolver here at that separate lifetime boundary.
         # A RESUME HONOURS THE SESSION'S RECORDED MOVE, like every other path that
@@ -1167,6 +1188,12 @@ def run_exec(command: str | None, args: ExecArgs) -> int:
     to STDERR because stdout is the payload stream.
     """
     from local_operator.exec_startup import resolve_startup
+    from local_operator.secrets import access as secrets_access
+
+    # A `lop exec` started from a tool's shell hosts a NEW session (here, or in the
+    # ``--background`` worker spawned from this environment), so the tool's
+    # ``LOCAL_OPERATOR_SESSION_ID`` names its parent, not it (#3436 review R1-1).
+    secrets_access.forget_inherited_session_id()
 
     refusal = reject_detached_supervisor_fd(args)
     if refusal is not None:

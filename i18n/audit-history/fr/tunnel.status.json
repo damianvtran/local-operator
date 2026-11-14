@@ -1,0 +1,54 @@
+{
+  "schema": 1,
+  "locale": "fr",
+  "namespace": "tunnel.status",
+  "history_sha256": "20467a09e24e966389a0266d0b1ca0f822354167f956eadec46b18c8e0a536ef",
+  "entries": [
+    {
+      "locale": "fr",
+      "namespace": "tunnel.status",
+      "source_sha256": "e5e82a9ab8bc9bc5cfdf3d39d034056d822251f1d759582c8826b27c46d6218a",
+      "translator": {
+        "agent": "coder subagent (lopdev team) remediating PR #3931 round 1 — not an i18n-translator lane; its session id is named in neither the manager brief nor commit e95a77a5f3ac",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-13"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (lopdev team), independent `task` subagent, session 5469a14c00f5; did not translate or edit any value it judged",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-13",
+        "result": "changes_requested",
+        "findings": 4,
+        "unresolved_blocker_major": 2
+      },
+      "status": "changes_requested",
+      "note": "a1: independent i18n-auditor 5469a14c00f5 (anthropic/claude-opus-5-5) of coder-drafted copy (claude-opus-5-5): CHANGES REQUESTED, 2 major (FR-01,FR-02). Record i18n/audits/evidence/fr/tunnel.status/a1/record.json",
+      "evidence": "i18n/audits/evidence/fr/tunnel.status/a1/record.json",
+      "round": "a1",
+      "keys_audited": 13
+    },
+    {
+      "locale": "fr",
+      "namespace": "tunnel.status",
+      "source_sha256": "e5e82a9ab8bc9bc5cfdf3d39d034056d822251f1d759582c8826b27c46d6218a",
+      "translator": {
+        "agent": "original drafts: coder subagent (PR #3931 round 1); revision: i18n-translator subagent job ec010cb7b6b8 (commit cf5fa645a0d4)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-13"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (lopdev team), independent `task` subagent, session c7c8dd95452d; neither the a1 auditor (5469a14c00f5) nor the drafting coder nor the revising i18n-translator (job ec010cb7b6b8); did not edit any value",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-13",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "a2: independent i18n-auditor c7c8dd95452d (anthropic/claude-opus-5-5) of i18n-translator ec010cb7b6b8 revision (claude-opus-5-5): PASSED, 0 blocker/major; a1 2 major fixed. Record i18n/audits/evidence/fr/tunnel.status/a2/record.json",
+      "evidence": "i18n/audits/evidence/fr/tunnel.status/a2/record.json",
+      "round": "a2",
+      "keys_audited": 13
+    }
+  ]
+}

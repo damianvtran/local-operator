@@ -1,0 +1,87 @@
+{
+  "locale": "vi",
+  "namespace": "cli.permissions",
+  "audit_id": "vp3",
+  "round": 3,
+  "audit_date": "2026-11-09",
+  "key_count": 4,
+  "catalogue_key_count": 39,
+  "scope": "round 2+: vp2 findings v2-m1,v2-n1 + keys changed/added in 788cc399..85fb3581 (setup.already_signed, setup.always_allow_kept, status.scope, setup.explain); unchanged keys retained from vp2",
+  "auditor": {
+    "agent": "i18n-auditor (lopdev team subagent)",
+    "session": "b03c86526f84",
+    "model": "anthropic/claude-opus-5-5",
+    "independent_from_translator_session": true,
+    "independent_from_prior_auditor_sessions": [
+      "fe66a4c43d27",
+      "bac062ad618b"
+    ],
+    "translator_session": null,
+    "translator_model": null,
+    "actual_model_source": "auditor session system-prompt 'Model:' line (anthropic/claude-opus-5-5); no provider fallback observed",
+    "independence_note": "Did not translate any wave or audit rounds 1-2. Translator session/model not recorded in the repo; same model family may apply."
+  },
+  "source_audit_revision": "85fb35811f9d17fb6dfadfc2d5df3269db04bd12",
+  "pr": "https://github.com/damianvtran/local-operator/pull/3691",
+  "previous_record": "i18n/audits/evidence/vi/cli.permissions/vp2/record.json",
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/cli.permissions.json",
+      "sha256": "58e58c3b19a07c024b609f614e686cc9a72def77e3de704870f0557e84e7be41"
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/cli.permissions.context.json",
+      "sha256": "6f8427bf5dd20f8fa252d0163387d59f4e53a30fe07cc9db4c5a5f55048fb1d2"
+    },
+    "vi": {
+      "path": "local_operator/i18n/catalogues/vi/cli.permissions.json",
+      "sha256": "3cdc9e61411e2caa42ca0bdbb4da94b57d763da93a841c2935d8f270daf7ea07"
+    },
+    "style_guide": {
+      "path": "i18n/style-guides/vi.md",
+      "sha256": "e4901497ed553e2b2ae4a2660bf776adb787b89e11d7eb0f8d08f3da4b227888"
+    },
+    "glossary": {
+      "path": "i18n/glossary.md",
+      "sha256": "0eb34437a8c3d6f564f278ef957a603b1d9f51bb07d5ddae5ea8f37deba962f8"
+    }
+  },
+  "apple_label_sources": "macOS 27.2 (26B123): SecurityPrivacyExtension.appex Localizable.loctable SCREEN_CAPTURE, FILE_ACCESS_COMBINED; SecurityAgent.bundle ConfirmAccess.loctable 100267/100268.title; Keychain Access.app InfoPlist/Localizable.loctable",
+  "artifacts": {
+    "report.md": {
+      "path": "i18n/audits/evidence/vi/cli.permissions/vp3/report.md",
+      "sha256": "f65d75c879939ba44cbae515eb3215ecbdcdf7095378bb3ca0ce1d9127e41242"
+    },
+    "findings.json": {
+      "path": "i18n/audits/evidence/vi/cli.permissions/vp3/findings.json",
+      "sha256": "2e167fd9f3e4d4cef7e73dc44abd9d6c80aacd6b4ef2bbfdecd953fd9fd2960d"
+    },
+    "audit.log": {
+      "path": "i18n/audits/evidence/vi/cli.permissions/vp3/audit.log",
+      "sha256": "71e579e3cc8c0c1d3b7264c64c83a714acd8597034d7112a3e8aad68884b0c70"
+    },
+    "apple_labels.py.txt": {
+      "path": "i18n/audits/evidence/vi/cli.permissions/vp3/apple_labels.py.txt",
+      "sha256": "996afd38ff2eed7d53238bab6f0e675b838b5ed6529c8991923185f65a4f20e7"
+    },
+    "parity.py.txt": {
+      "path": "i18n/audits/evidence/vi/cli.permissions/vp3/parity.py.txt",
+      "sha256": "747163b3ceeb09a2ba0212b09637592ecaf85912dae3d3e94e8d53717a2c5628"
+    },
+    "ledger-row.json": {
+      "path": "i18n/audits/evidence/vi/cli.permissions/vp3/ledger-row.json",
+      "sha256": "759dd5be46e1bc0126ea9a00a9386493a169793cde7bbc4b5d166f453fcb8971"
+    }
+  },
+  "audit_notes_not_execution_log": "report.md and findings.json are auditor judgement; audit.log holds actual command output (check.py exit 0 via run_bounded, parity, Apple loctable lookups, input hashes); ledger.log holds ledger history-sha/append output.",
+  "current_report_verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "finding_ids": [],
+    "round2_findings_resolved": [
+      "v2-m1",
+      "v2-n1"
+    ]
+  },
+  "limits": "no rendered frame, no human native-speaker review"
+}

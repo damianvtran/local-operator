@@ -1,0 +1,59 @@
+{
+  "locale": "es",
+  "namespace": "cli.permissions",
+  "audit_id": "r1-f8ab",
+  "audit_date": "2026-11-09",
+  "key_count": 28,
+  "pr": "https://github.com/damianvtran/local-operator/pull/3691",
+  "worktree_head": "50badda034d755ebb049c4f542f3073439bf823e",
+  "auditor": {
+    "agent": "i18n-auditor (team lopdev)",
+    "session": "f8ab0a45e07a",
+    "model": "anthropic/claude-opus-5-5",
+    "independent_from_translator_session": true,
+    "translator_session": "ad99821ab9e1 (PR coder agent, anthropic/claude-opus-5-5)",
+    "actual_model_source": "auditor session system prompt 'Model: anthropic/claude-opus-5-5'; no provider fallback observed; same model family as translator, no cross-model pass"
+  },
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/cli.permissions.json",
+      "sha256": "eba1e1dd19a618fa8c46a3744197afd2dfa4e84b6774f16b20e8de389f4dbf8f"
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/cli.permissions.context.json",
+      "sha256": "aca67def3cff590dcc5f681e8ff0127fecf6b33775555e3eaafc240070ba15ce"
+    },
+    "es": {
+      "path": "local_operator/i18n/catalogues/es/cli.permissions.json",
+      "sha256": "74a43c8736593cb445b35380ab9744d4dae1a04b824a4e9dfa9871d9f3dffd95"
+    }
+  },
+  "artifacts": [
+    {
+      "path": "i18n/audits/evidence/es/cli.permissions/r1-f8ab/report.md",
+      "sha256": "c2fdba9914e53402e57c5962a8ba59285ecfd2fab691335f0abd3de7dc95de14"
+    },
+    {
+      "path": "i18n/audits/evidence/es/cli.permissions/r1-f8ab/audit.log",
+      "sha256": "7d4f9f5ca8df0790e3b3de130abe372098fd9a56cfb856c065d826d1e66fd424"
+    }
+  ],
+  "audit_notes_not_execution_log": "report.md is reasoning/findings; audit.log is the actual captured command output",
+  "current_report_verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "finding_ids": [
+      "M1",
+      "M2",
+      "M3",
+      "M4"
+    ],
+    "severity_counts": {
+      "blocker": 0,
+      "major": 0,
+      "minor": 4,
+      "nit": 0
+    }
+  },
+  "limits": "no native-speaker or rendered-frame certification; catalogue not edited by auditor; minors unfixed at audit time"
+}

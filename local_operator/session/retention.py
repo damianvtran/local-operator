@@ -150,6 +150,10 @@ _SIDECAR_NAMES = frozenset(
         # written once, at compression, so it can only ever be older than the
         # transcript it describes — bookkeeping, never activity.
         "preview.json",
+        # The temporary-chat mark (``session/temporary.py``): bookkeeping ABOUT
+        # a conversation's retention, written with the directory mtime restored,
+        # so it is neither activity nor content bytes.
+        "temporary.json",
     }
 )
 

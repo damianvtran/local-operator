@@ -1,0 +1,187 @@
+{
+  "audit": "Secondary independent financial-warning copy preflight ONLY",
+  "date_utc": "2026-11-09T06:29:08.080144+00:00",
+  "agent": "designer, session 17cfebeba393",
+  "actual_model": "openai/gpt-6.1-sol",
+  "independence": "Not source author, coder translator, or primary reviewer/auditor c6abfadb3c9f",
+  "scope": [
+    "wire.music.cancel_requested",
+    "ui.music.cancel_warning"
+  ],
+  "verdict": "PASS — 16 warning strings; no blocking copy finding",
+  "limitations": [
+    "Uncommitted source; no formal pushed-head design approval",
+    "Not a native Urdu RTL/layout/shaping audit",
+    "No paid activation, provider request or runtime test performed in this audit",
+    "Billed-after-cancel fixture result is supplied by manager, not executed here",
+    "Other five namespace keys are context only; primary reviewer owns full six-key audit and T1 corrections"
+  ],
+  "locales": {
+    "en": {
+      "verdict": "PASS",
+      "reason": "Runtime says cancellation requested; may complete/be charged. UI is a pre-confirm warning, not a claim of cancellation. Both retain results.",
+      "runtime": {
+        "path": "/Users/damian/local-operator/.worktrees/music/local_operator/i18n/catalogues/en/wire.music.json",
+        "namespace_file_sha256": "e875d1719377ecb3daa5823c616276c522f5204190ce154e5fd56f005af5ff19",
+        "key": "wire.music.cancel_requested",
+        "text": "Cancellation requested for {job}. Running generation may still complete and be charged; results remain retrievable."
+      },
+      "ui": {
+        "path": "/Users/damian/local-operator-ui/.worktrees/music/src/i18n/catalogues/en/ui.music.json",
+        "namespace_file_sha256": "e4bfc1ac870036a1efd34cbd0b79e9c23cf92f360eb6325fdaa8451a1c25f1af",
+        "key": "ui.music.cancel_warning",
+        "text": "Work already started on “{label}” may still finish and be charged. Results remain available."
+      },
+      "placeholders": "PASS — runtime {job}, UI {label}; no additions/loss",
+      "bidi_controls": "none"
+    },
+    "fr": {
+      "verdict": "PASS",
+      "reason": "Annulation demandée preserves request-only status; peut encore and être facturée preserve conditional completion/charge; restent accessibles preserves retained outputs.",
+      "runtime": {
+        "path": "/Users/damian/local-operator/.worktrees/music/local_operator/i18n/catalogues/fr/wire.music.json",
+        "namespace_file_sha256": "d00435dea8bd1d6ca602e10fa5c2a671a7c1086c14b4c3137d1fb036eabce38e",
+        "key": "wire.music.cancel_requested",
+        "text": "Annulation demandée pour {job}. Une génération en cours peut encore aboutir et être facturée ; les résultats restent accessibles."
+      },
+      "ui": {
+        "path": "/Users/damian/local-operator-ui/.worktrees/music/src/i18n/catalogues/fr/ui.music.json",
+        "namespace_file_sha256": "8b33521b964c26260e52bf793bc9c86ac9710001797864110f935a20033d16bf",
+        "key": "ui.music.cancel_warning",
+        "text": "Le travail déjà commencé pour « {label} » peut encore aboutir et être facturé. Les résultats restent accessibles."
+      },
+      "placeholders": "PASS — runtime {job}, UI {label}; no additions/loss",
+      "bidi_controls": "none"
+    },
+    "es": {
+      "verdict": "PASS",
+      "reason": "Se solicitó cancelar preserves request-only status; aún puede completarse y cobrarse preserves conditional completion/charge; seguirán disponibles preserves retained outputs.",
+      "runtime": {
+        "path": "/Users/damian/local-operator/.worktrees/music/local_operator/i18n/catalogues/es/wire.music.json",
+        "namespace_file_sha256": "122382ac3db92f44d86c035aa282c59185ecec4565a5f6811db7ee456d95fdaa",
+        "key": "wire.music.cancel_requested",
+        "text": "Se solicitó cancelar {job}. La generación en curso aún puede completarse y cobrarse; los resultados seguirán disponibles."
+      },
+      "ui": {
+        "path": "/Users/damian/local-operator-ui/.worktrees/music/src/i18n/catalogues/es/ui.music.json",
+        "namespace_file_sha256": "e18186c45fe5a0922b29ddb2016358b56db79f7d9180225067a15dc0c466dc7e",
+        "key": "ui.music.cancel_warning",
+        "text": "El trabajo ya iniciado en «{label}» aún puede completarse y cobrarse. Los resultados seguirán disponibles."
+      },
+      "placeholders": "PASS — runtime {job}, UI {label}; no additions/loss",
+      "bidi_controls": "none"
+    },
+    "zh-CN": {
+      "verdict": "PASS",
+      "reason": "已请求取消 preserves requested status; 仍可能完成并产生费用 preserves possible completion/charge, not guaranteed payment; 仍可获取 preserves retrievability.",
+      "runtime": {
+        "path": "/Users/damian/local-operator/.worktrees/music/local_operator/i18n/catalogues/zh-CN/wire.music.json",
+        "namespace_file_sha256": "5d14e046cf85da39734b4b0b75ef5c6be10b66e530cf513286f5410f619894b9",
+        "key": "wire.music.cancel_requested",
+        "text": "已请求取消 {job}。正在进行的生成仍可能完成并产生费用；结果仍可获取。"
+      },
+      "ui": {
+        "path": "/Users/damian/local-operator-ui/.worktrees/music/src/i18n/catalogues/zh-CN/ui.music.json",
+        "namespace_file_sha256": "eefa96f3854ef64790aa4e2266b40f5b1379708023b4c3caee85c94eea6c3a7f",
+        "key": "ui.music.cancel_warning",
+        "text": "“{label}”已开始的生成仍可能完成并产生费用。结果仍可获取。"
+      },
+      "placeholders": "PASS — runtime {job}, UI {label}; no additions/loss",
+      "bidi_controls": "none"
+    },
+    "ru": {
+      "verdict": "PASS",
+      "reason": "Запрошена отмена задания preserves request-only status and approved задание terminology; может завершиться и быть оплачена warns of possible completion/payment without certainty; останутся доступны preserves availability. UI remains a pre-confirm warning.",
+      "runtime": {
+        "path": "/Users/damian/local-operator/.worktrees/music/local_operator/i18n/catalogues/ru/wire.music.json",
+        "namespace_file_sha256": "34b3279de473c2c9543288d7c9de023c443b0d91ced6dd996511be651deb2211",
+        "key": "wire.music.cancel_requested",
+        "text": "Запрошена отмена задания {job}. Генерация может завершиться и быть оплачена; результаты останутся доступны."
+      },
+      "ui": {
+        "path": "/Users/damian/local-operator-ui/.worktrees/music/src/i18n/catalogues/ru/ui.music.json",
+        "namespace_file_sha256": "36bf0442156598f4c858a2d06b1e58101abf0dfcd0484be562b0b369bc4ea040",
+        "key": "ui.music.cancel_warning",
+        "text": "Работа над «{label}» может завершиться и быть оплачена. Результаты останутся доступны."
+      },
+      "placeholders": "PASS — runtime {job}, UI {label}; no additions/loss",
+      "bidi_controls": "none"
+    },
+    "vi": {
+      "verdict": "PASS",
+      "reason": "Đã yêu cầu hủy preserves requested status; vẫn có thể hoàn tất và bị tính phí preserves possible completion/charge; vẫn có thể truy xuất preserves retrieval. tác vụ matches job glossary.",
+      "runtime": {
+        "path": "/Users/damian/local-operator/.worktrees/music/local_operator/i18n/catalogues/vi/wire.music.json",
+        "namespace_file_sha256": "de679e1e9e29bcdad432e279a169637fa25386fd03f8c6183d8fe6648555949a",
+        "key": "wire.music.cancel_requested",
+        "text": "Đã yêu cầu hủy {job}. Quá trình tạo đang chạy vẫn có thể hoàn tất và bị tính phí; kết quả vẫn có thể truy xuất."
+      },
+      "ui": {
+        "path": "/Users/damian/local-operator-ui/.worktrees/music/src/i18n/catalogues/vi/ui.music.json",
+        "namespace_file_sha256": "0c0b58cd2851b72ab711d0574083b0fdd67e9f8bbf8d23bd91ca6267d3ec7423",
+        "key": "ui.music.cancel_warning",
+        "text": "Công việc đã bắt đầu cho “{label}” vẫn có thể hoàn tất và bị tính phí. Kết quả vẫn có thể truy xuất."
+      },
+      "placeholders": "PASS — runtime {job}, UI {label}; no additions/loss",
+      "bidi_controls": "none"
+    },
+    "ur": {
+      "verdict": "PASS",
+      "reason": "منسوخ کرنے کی درخواست کی گئی ہے preserves requested cancellation; مکمل ہو سکتی ہے and فیس وصول ہو سکتی ہے preserve possible completion/fees; نتائج دستیاب رہیں گے preserves available results. No manual bidi controls; not a rendered RTL/shaping audit.",
+      "runtime": {
+        "path": "/Users/damian/local-operator/.worktrees/music/local_operator/i18n/catalogues/ur/wire.music.json",
+        "namespace_file_sha256": "80be4d6550622578f2b64468e56101a51bfe3d65e64ce6902c5225020f7a2303",
+        "key": "wire.music.cancel_requested",
+        "text": "{job} کو منسوخ کرنے کی درخواست کی گئی ہے۔ جاری تخلیق مکمل ہو سکتی ہے اور اس کی فیس وصول ہو سکتی ہے؛ نتائج دستیاب رہیں گے۔"
+      },
+      "ui": {
+        "path": "/Users/damian/local-operator-ui/.worktrees/music/src/i18n/catalogues/ur/ui.music.json",
+        "namespace_file_sha256": "355efb29e8d89fd2cb09192379e82e9ab273b626f548b4fefa9c6e8c2f072ff5",
+        "key": "ui.music.cancel_warning",
+        "text": "”{label}“ پر شروع کیا گیا کام مکمل ہو سکتا ہے اور اس کی فیس وصول ہو سکتی ہے۔ نتائج دستیاب رہیں گے۔"
+      },
+      "placeholders": "PASS — runtime {job}, UI {label}; no additions/loss",
+      "bidi_controls": "none"
+    },
+    "hi": {
+      "verdict": "PASS",
+      "reason": "रद्द करने का अनुरोध किया गया है preserves request-only status; पूरी हो सकती है / शुल्क लग सकता है preserve possible completion/charge; परिणाम उपलब्ध रहेंगे preserves availability. जॉब matches guide.",
+      "runtime": {
+        "path": "/Users/damian/local-operator/.worktrees/music/local_operator/i18n/catalogues/hi/wire.music.json",
+        "namespace_file_sha256": "ebe5a2596c1346e3c6078f64902056aae28921a7d319bf3b8507dde3875731b8",
+        "key": "wire.music.cancel_requested",
+        "text": "{job} को रद्द करने का अनुरोध किया गया है। चल रही प्रक्रिया फिर भी पूरी हो सकती है और उसका शुल्क लग सकता है; परिणाम उपलब्ध रहेंगे।"
+      },
+      "ui": {
+        "path": "/Users/damian/local-operator-ui/.worktrees/music/src/i18n/catalogues/hi/ui.music.json",
+        "namespace_file_sha256": "032c95246831de66bf5e8e55179cd6b7f27ed240ce4df92dc9043da11ee89ada",
+        "key": "ui.music.cancel_warning",
+        "text": "“{label}” पर शुरू हुआ काम फिर भी पूरा हो सकता है और उसका शुल्क लग सकता है। परिणाम उपलब्ध रहेंगे।"
+      },
+      "placeholders": "PASS — runtime {job}, UI {label}; no additions/loss",
+      "bidi_controls": "none"
+    }
+  },
+  "context_file_sha256": {
+    "/Users/damian/local-operator/.worktrees/music/i18n/glossary.md": "0eb34437a8c3d6f564f278ef957a603b1d9f51bb07d5ddae5ea8f37deba962f8",
+    "/Users/damian/local-operator/.worktrees/music/i18n/languages.json": "7fd056b916fc3d56ddf36991a09b29864ea0b0f825d938aead1ed165926f8d63",
+    "/Users/damian/local-operator/.worktrees/music/local_operator/music/jobs.py": "d5b9f2f2c978b4663e6914f6587ff3a1730bb55707389f2eb461e36087da44c2",
+    "/Users/damian/local-operator/.worktrees/music/local_operator/tools/music_tool.py": "40edd5b5086b5ac0c60a15d663d303659708ea76dbfeee968d84dbc8b8b31146",
+    "/Users/damian/local-operator/.worktrees/music/local_operator/i18n/keys/wire_music.py": "3075690343be90f133015238e2e304b8e2102c46e7a80640519dc39c34f3621d",
+    "/Users/damian/local-operator-ui/.worktrees/music/src/renderer/src/features/chat/components/run-details/job-cancel-popover.tsx": "b0387a4a1da6115963375cc5f39ba1d9eb914418b36228e16acf8ef18a78c210",
+    "/Users/damian/local-operator/.worktrees/music/i18n/style-guides/en.md": "c967c91037be79a7b184b3288b8c0326a261e4adae95b7db06d83e96f8ea6ec7",
+    "/Users/damian/local-operator/.worktrees/music/i18n/style-guides/fr.md": "5315e1ac10c2ce57aac631ba653d08de680ee70c9a022ed3a8345ce2f9902ee7",
+    "/Users/damian/local-operator/.worktrees/music/i18n/style-guides/es.md": "4a6f6270f028e5f5fbca7156a8f5099077f92585db94c14653482e9b188248a6",
+    "/Users/damian/local-operator/.worktrees/music/i18n/style-guides/zh-CN.md": "8f95d89debbd0af848e72e4805e256ef9566632e520a5c6d9b37928cd617142c",
+    "/Users/damian/local-operator/.worktrees/music/i18n/style-guides/ru.md": "f20e1cafaf70578c17ce072c71725628808d228e4be5604329f8da30386f1fb5",
+    "/Users/damian/local-operator/.worktrees/music/i18n/style-guides/vi.md": "e4901497ed553e2b2ae4a2660bf776adb787b89e11d7eb0f8d08f3da4b227888",
+    "/Users/damian/local-operator/.worktrees/music/i18n/style-guides/ur.md": "c0eecf7f7b5e89956b7de9ab7a9eb647ff1a7ef701ccf2a7f0264d5eea15ca60",
+    "/Users/damian/local-operator/.worktrees/music/i18n/style-guides/hi.md": "82292dc8d13fcc93dc752457719264aed3cc20bb65ecfaba0f0e5a31f4cb40d5"
+  },
+  "provenance_correction": {
+    "authority": "Manager-supplied authoritative host wait receipt for completed job d418d08e473e: model=openai/gpt-6.1-sol (pinned anthropic/claude-opus-5-5); background completion tag also identified GPT",
+    "fallback": "Host-verified fallback from pinned anthropic/claude-opus-5-5",
+    "previous_erroneous_self_report": "anthropic/claude-opus-5-5",
+    "scope": "Provenance-only correction; original audit date, warning text, file hashes and semantic verdicts retained unchanged. Audit not re-executed."
+  }
+}

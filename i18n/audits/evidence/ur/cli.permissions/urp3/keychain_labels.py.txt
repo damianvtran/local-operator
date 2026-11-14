@@ -1,0 +1,4 @@
+import plistlib
+R='/System/Library/CoreServices/Applications/Keychain Access.app/Contents/Resources/'
+for f,k in (('Localizable.loctable','private key'),('Localizable.loctable','Keychain Access'),('KeyEditor.loctable','302.label')):
+    d=plistlib.load(open(R+f,'rb')); print(f,repr(k),'en_GB=',repr(d.get('en_GB',{}).get(k)),'ur_present=',('ur' in d))

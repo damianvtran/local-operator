@@ -69,6 +69,13 @@ def clock(monkeypatch: pytest.MonkeyPatch) -> Any:
     view = _ClockView(controlled)
     monkeypatch.setattr(session_module, "time", view)
     monkeypatch.setattr(builtin, "time", view)
+    # These cells advance wall time and explicitly pump each transition. A real
+    # loop.call_later timer uses monotonic time instead: a ready tick can queue
+    # behind update's write lock, then win the lock after advance(), consuming
+    # OLD before the asserted pump (which correctly reports zero). Keep the
+    # real scheduler/delivery/persistence, but give this clock sole ownership
+    # of when a pump runs; cancellation also removes any previously armed timer.
+    monkeypatch.setattr(WakeScheduler, "_arm", WakeScheduler._cancel_timer)
     return controlled
 
 
@@ -97,6 +104,35 @@ class _ClockView:
 
 def _messages(rows: Any) -> dict[str, str]:
     return {row.id: row.message for row in rows}
+
+
+@pytest.mark.asyncio
+async def test_controlled_clock_owns_pump_timing(clock: Any) -> None:
+    """The manual-clock fixture must not leave a competing native tick armed."""
+    delivered = []
+    scheduler = WakeScheduler(
+        now=lambda: clock.ms,
+        deliver=delivered.append,
+        persist=lambda rows: None,
+    )
+    try:
+        await scheduler.update(
+            [
+                WakeSchedule(
+                    id="w1",
+                    message="OLD",
+                    next_due_at=clock.ms + 1000,
+                    created_at=clock.ms,
+                )
+            ]
+        )
+        assert scheduler._timer is None, "manual pumps must be the only clock driver"
+        clock.advance(2000)
+        assert await scheduler.pump() == 1
+        assert len(delivered) == 1
+        assert await scheduler.pump() == 0, "the final occurrence must not fire twice"
+    finally:
+        scheduler.dispose()
 
 
 # ---------------------------------------------------------------------------

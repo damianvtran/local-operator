@@ -53,5 +53,20 @@
     "role": "headless runtime aborted",
     "tone": "terse, factual",
     "note": "Fixed short terminal outcome; preserve red tags."
+  },
+  "cli.exec_runtime.temporary_agent_shell_refused": {
+    "role": "CLI error sentence",
+    "tone": "plain",
+    "note": "Printed after 'exec failed: '. A 'temporary chat' is a conversation that is not kept and is deleted after inactivity. An agent's shell is a command run by an AI agent."
+  },
+  "cli.exec_runtime.temporary_conflicts_resume": {
+    "role": "CLI usage error",
+    "tone": "plain",
+    "note": "--temporary and --resume are command-line flags; keep them verbatim."
+  },
+  "cli.exec_runtime.temporary_conflicts_workstream": {
+    "role": "CLI usage error",
+    "tone": "plain",
+    "note": "--temporary and --workstream are command-line flags; keep them verbatim."
   }
 }

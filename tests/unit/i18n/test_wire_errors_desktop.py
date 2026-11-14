@@ -80,3 +80,28 @@ def test_desktop_refusal_carries_lower_layer_prose_verbatim() -> None:
     assert envelope["code"] == "move_failed"
     assert envelope["params"] == {"error": "filesystem said no"}
     assert envelope["text"] == "filesystem said no"
+
+
+def test_settings_intent_codes_ride_verbatim() -> None:
+    """The settings-intent machine codes the renderer switches on.
+
+    ``model_unknown``, ``move_exclusive`` and ``retry_budget_exhausted`` reuse the
+    pass-through sentence (the runtime's own refusal) so no new copy is added for
+    them; ``effort_unsupported`` reuses the ladder sentences; ``generation_moved``
+    is the one new catalogued sentence (DELETE's 409).
+    """
+    for code in ("model_unknown", "move_exclusive", "retry_budget_exhausted"):
+        envelope = w.desktop_refusal(error="the owner's words").envelope(code=code)
+        assert envelope["code"] == code
+        assert envelope["text"] == "the owner's words"
+    assert w.runtime_unreachable().envelope(code="retry_budget_exhausted")["code"] == (
+        "retry_budget_exhausted"
+    )
+    assert (
+        w.effort_levels_missing(model="m").envelope(code="effort_unsupported")["code"]
+        == "effort_unsupported"
+    )
+    moved = w.settings_intent_generation_moved().envelope(code="generation_moved", locale="en")
+    assert moved["code"] == "generation_moved"
+    assert moved["params"] == {}
+    assert moved["text"] == "A newer change has replaced this one, so there is nothing to cancel."

@@ -141,7 +141,17 @@ def test_real_guards_preserve_english_bytes_and_missing_namespace_fallback(
     code, params = calls[0]
     assert code == "wire.errors.sdk_spec." + case
     # A carried locale missing this child must use English source formatting,
-    # not reinterpret repr quotes or opaque parameters as catalogue syntax.
+    # not reinterpret repr quotes or opaque parameters as catalogue syntax. Every
+    # shipped locale now carries the namespace (fr/es joined the other five), so
+    # the "carried but missing" state is simulated rather than read from disk.
+    real_load = catalogues.load_catalogue
+
+    def without_sdk_spec(locale, namespace):
+        if namespace == "wire.errors.sdk_spec" and locale == "fr":
+            raise catalogues.CatalogueNotFound(namespace)
+        return real_load(locale, namespace)
+
+    monkeypatch.setattr(catalogues, "load_catalogue", without_sdk_spec)
     assert original(code, params, locale="fr") == _EXPECTED[case]
 
 
@@ -204,3 +214,35 @@ def test_source_catalogue_and_context_cover_only_the_owned_21_keys():
     assert messages.render(unknown, {}, locale="en") == unknown
     missing = "wire.errors.unknown_namespace.unknown_key"
     assert messages.render(missing, {}, locale="fr") == missing
+
+
+@pytest.mark.parametrize("locale", ["fr", "es"])
+@pytest.mark.parametrize("case", sorted(_EXPECTED))
+def test_fr_es_render_every_key_as_valid_icu_with_the_guards_own_params(
+    locale, case, tmp_path, monkeypatch
+):
+    """fr/es carry the 21 keys; each renders through the real ``messages.render``
+    with the params the real guard passed, so a malformed value (unbalanced
+    apostrophe, dropped ``{param}``) fails here rather than in a user's SDK error.
+    The guards themselves always render ``en`` (callers parse those bytes), so the
+    localized value is exercised by re-rendering the captured call."""
+    namespace = "wire.errors.sdk_spec"
+    assert list(catalogues.load_catalogue(locale, namespace)) == list(
+        catalogues.load_catalogue("en", namespace)
+    )
+    calls = []
+    original = messages.render
+    monkeypatch.setattr(
+        messages,
+        "render",
+        lambda code, params, *, locale=None: calls.append((code, dict(params)))
+        or original(code, params, locale=locale),
+    )
+    english = str(_refuse(_cases(tmp_path)[case]))
+    ((code, params),) = calls
+    rendered = original(code, params, locale=locale)
+    assert code == namespace + "." + case
+    assert rendered != english
+    assert "''" not in rendered
+    for value in params.values():
+        assert str(value) in rendered

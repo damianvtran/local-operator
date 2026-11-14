@@ -1,0 +1,36 @@
+{
+  "schema": 1,
+  "locale": "zh-CN",
+  "namespace": "wire.music",
+  "history_sha256": "ad19c960726974968a2f03ba2474a76b9306740d925db75e39301810c8c7e5ca",
+  "entries": [
+    {
+      "locale": "zh-CN",
+      "namespace": "wire.music",
+      "source_sha256": "e875d1719377ecb3daa5823c616276c522f5204190ce154e5fd56f005af5ff19",
+      "context_sha256": "b4a9628643b0a8c29921f64d09b5acf4edbc4b49a4c21d9a2a9c40b9fececd9f",
+      "target_sha256": "5d14e046cf85da39734b4b0b75ef5c6be10b66e530cf513286f5410f619894b9",
+      "translator": {
+        "agent": "coder",
+        "session": "c44d6b2962c9",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-09",
+        "fallback": "none"
+      },
+      "auditor": {
+        "agent": "reviewer",
+        "session": "c6abfadb3c9f",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-09",
+        "fallback": "none",
+        "result": "pass",
+        "findings": 0,
+        "unresolved_blocker_major": 0,
+        "independent_from_translator": true,
+        "scope": "Full six-key namespace; T1 terminology corrections verified in final audit 3fc2d895c4cc"
+      },
+      "status": "passed",
+      "note": "Primary: i18n/audits/evidence/music/music-copy-audit-primary.json. Secondary financial-warning-only evidence: music-financial-warning-secondary-audit.json; no rendered/RTL QA claim."
+    }
+  ]
+}

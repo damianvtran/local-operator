@@ -1,0 +1,96 @@
+{
+  "schema": 1,
+  "audit_id": "pb2",
+  "round": 2,
+  "locale": "ru",
+  "namespace": "cli.permissions",
+  "audit_date": "2026-11-09",
+  "key_count": 38,
+  "pr": "https://github.com/damianvtran/local-operator/pull/3691",
+  "audited_revision": "788cc399410196b080cfc9f7e7bd558ccb713140",
+  "previous_round_record": "i18n/audits/evidence/ru/cli.permissions/pa1/record.json",
+  "translator": {
+    "agent": "i18n-translator (ru, PR #3691 round-2 wave; commit 788cc399410)",
+    "session": null,
+    "model": null,
+    "provenance_note": "Translator session/model not provided to the auditor and not recorded in the commit; left null rather than invented."
+  },
+  "auditor": {
+    "agent": "i18n-auditor (lopdev team subagent)",
+    "session": "a6f580403f3a",
+    "model": "anthropic/claude-opus-5-5",
+    "independent_from_translator_session": true,
+    "independent_from_round1_auditor_session": "741233d88cd4",
+    "actual_model_source": "auditor session system prompt 'Model:' line; no fallback observed",
+    "independence_note": "Did not translate or audit round 1. Same model family as other wave agents may apply (undisclosed translator model). No native-speaker or rendered-frame certification."
+  },
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/cli.permissions.json",
+      "sha256": "d5eed4044348f0fa462e1238209230507a48eb5e018b22c7a8b971b518d3f186"
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/cli.permissions.context.json",
+      "sha256": "f2d9ce73f2791f209b1be203b8f1e0d042eff7a348c0822ee28c5141a3cec099"
+    },
+    "ru": {
+      "path": "local_operator/i18n/catalogues/ru/cli.permissions.json",
+      "sha256": "1a4457218f5aa881cfd858ae5282516548b2fd5c699562842fd6dd1bac8c7ef5"
+    }
+  },
+  "macos_label_sources": "Apple ru .loctable resources on macOS 27.2 (26B123); tables/keys cited in report.md; raw output in audit.log",
+  "artifacts": [
+    {
+      "path": "i18n/audits/evidence/ru/cli.permissions/pb2/report.md",
+      "sha256": "80f91b10604b7a38dbb29d78d85054f289158a537f9d4082e6212b80c1184ffb"
+    },
+    {
+      "path": "i18n/audits/evidence/ru/cli.permissions/pb2/audit.log",
+      "sha256": "ef95db851b67fdd4e720eb2395730460e66550d368215c85acdcea827830e43b"
+    },
+    {
+      "path": "i18n/audits/evidence/ru/cli.permissions/pb2/apple_labels.py.txt",
+      "sha256": "d58ea67b45ad3cfd52c78ee25fef94ee6bf0a4303b7848be4484d4071f2a0abb"
+    },
+    {
+      "path": "i18n/audits/evidence/ru/cli.permissions/pb2/ka_labels.py.txt",
+      "sha256": "fb3cc3dcca89391bcdc1bd998a84c5e745fd4c1e71f53f79c6b69114bdaabe52"
+    },
+    {
+      "path": "i18n/audits/evidence/ru/cli.permissions/pb2/parity.py.txt",
+      "sha256": "a8141186c1a23e7d7a46d8b95c03a086064b32e5fc67a24bb6ff3bae33d82639"
+    },
+    {
+      "path": "i18n/audits/evidence/ru/cli.permissions/pb2/receipt.json",
+      "sha256": "daba0154845215d4d95ffa3bbaae374c3e525232d99b983cd27588f86edf1fc7"
+    }
+  ],
+  "audit_notes_not_execution_log": "report.md is reasoning; audit.log holds actual command output; *.py.txt are the reproduction scripts it ran.",
+  "round1_findings_resolution": {
+    "R1": "applied",
+    "R2": "applied",
+    "R3": "applied",
+    "R4": "applied",
+    "R5": "applied",
+    "R6": "applied",
+    "R7": "applied",
+    "R8": "applied",
+    "R9": "applied"
+  },
+  "current_report_verdict": {
+    "status": "changes_requested",
+    "unresolved_blocker_major_count": 2,
+    "finding_ids": [
+      "P1",
+      "P2",
+      "P3",
+      "P4"
+    ],
+    "severity_counts": {
+      "BLOCKER": 0,
+      "MAJOR": 2,
+      "MINOR": 1,
+      "NIT": 1
+    }
+  }
+}

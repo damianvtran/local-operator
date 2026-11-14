@@ -2255,6 +2255,34 @@ class DesktopFeed:
         self._authoring_revision += 1
         self._publish("authoring", {"revision": self._authoring_revision})
 
+    def publish_settings_intent(
+        self, session_id: str, kind: str, intent: dict[str, Any] | None
+    ) -> None:
+        """Announce one settings-intent slot change (``settings_intent`` frame).
+
+        Pushed by the background applier (``server/utils/settings_intents.py``)
+        rather than polled: the applier is the only writer of the intent file, so
+        it knows the exact moment a slot moves and no tick has to diff it.
+
+        LIVE-ONLY, like ``notification``: there is no replay of missed frames.
+        ``GET /v1/desktop/settings-intents`` is the baseline every client reads
+        at boot and on every feed reconnect, so a missed frame costs staleness
+        until the next reconnect, never a wrong final state. ``intent: null``
+        means the slot was pruned (applied and aged out, superseded, dismissed).
+
+        On the MACHINE-WIDE feed, not a session stream, so every window and every
+        sidebar row sees an apply land without holding a bridge to that session —
+        the whole point is that the user has already moved on to another
+        conversation.
+        """
+        self._publish(
+            "settings_intent",
+            # The session rides the envelope's top-level ``session_id`` like
+            # every other per-session feed frame; the payload is only the slot.
+            {"kind": kind, "intent": intent},
+            session_id=session_id,
+        )
+
     def _avatar_probe(self) -> dict[str, str | None]:
         """``{agent_id: avatar sha256 | None}`` from the shared, stat-memoised index.
 

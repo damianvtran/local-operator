@@ -1,6 +1,9 @@
 """A genuine OperatorApp/Pilot click, not a direct action-function call."""
 
+import asyncio
 import os
+import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -19,6 +22,50 @@ from tests.unit.tui.test_app_pilot import Editor, _await_session, _factory
 
 stores = consent_stores
 _EVIDENCE_ROOT = os.environ.get("LOCAL_OPERATOR_SCRATCHPAD")
+
+# States a revert can settle in. "pending" is the in-flight latch and
+# "available" is the pre-press state, so neither counts as settled.
+_TERMINAL_PROFILE_ACTION_STATES = frozenset({"succeeded", "failed", "stale"})
+# Generous next to a sqlite round trip, and cheap when the state has already
+# landed: the loop returns on its first terminal read.
+_PROFILE_ACTION_SETTLE_S = 15.0
+# How long one poll yields for. Long enough for an executor hop to make
+# progress, short enough that a settled revert is noticed promptly.
+_PROFILE_ACTION_SETTLE_POLL_S = 0.01
+_WORKER_DRAIN_S = 30.0
+
+
+async def _await_profile_action_settled(pilot, card) -> str:
+    """Pause until the card's profile-action state reaches a terminal value.
+
+    A revert is not one loop turn of work. The press posts
+    ``on_tool_card_profile_revert_requested``, which only posts a worker and
+    returns; that worker awaits ``asyncio.to_thread(...activate...)`` (an
+    executor round trip) and only then awaits ``_refresh_profile_action``, whose
+    status read is what finally calls ``set_profile_action_state``. A single
+    ``pilot.pause()`` yields to the message pump and does not wait for a thread
+    (the hazard ``test_app_pilot._await_session`` documents), so one pause lands
+    between those hops on a loaded runner and reads the "pending" latch — that
+    was the CI failure on the revert path.
+
+    The bound is wall-clock rather than a count of pauses, because what it waits
+    on is an executor hop whose latency scales with machine load: a fixed turn
+    count is the same bet that lost. A state that never settles still FAILS here
+    (``pytest.fail``), and the caller keeps asserting *which* terminal state it
+    must be, so a silent pass is not possible.
+    """
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + _PROFILE_ACTION_SETTLE_S
+    while True:
+        await pilot.pause(_PROFILE_ACTION_SETTLE_POLL_S)
+        if card._profile_action_state in _TERMINAL_PROFILE_ACTION_STATES:
+            return card._profile_action_state
+        if loop.time() >= deadline:
+            pytest.fail(
+                "profile action never reached a terminal state within "
+                f"{_PROFILE_ACTION_SETTLE_S}s; last state "
+                f"{card._profile_action_state!r}"
+            )
 
 
 @pytest.mark.asyncio
@@ -64,7 +111,7 @@ async def test_real_operator_revert_click_and_composer_negative_control(
             await pilot.pause()
             assert card.has_focus
             await pilot.press("r", "R")
-        await pilot.pause()
+        await _await_profile_action_settled(pilot, card)
         assert card.expanded == expanded
         assert card._profile_action_state == "succeeded"
         assert stores["account"].get_agent_system_prompt(row.id) == SEED_INSTRUCTIONS
@@ -76,6 +123,10 @@ async def test_real_operator_revert_click_and_composer_negative_control(
         await pilot.press("r", "R")
         await pilot.pause()
         assert stores["account"].get_agent_system_prompt(row.id) == "After revert, new edit."
+        # Drain before the loop closes: a revert worker still in flight here
+        # surfaces as RuntimeError('Event loop is closed') from teardown and
+        # would mask the assertions above rather than naming them.
+        await asyncio.wait_for(app.workers.wait_for_complete(), _WORKER_DRAIN_S)
 
 
 @pytest.mark.asyncio
@@ -288,3 +339,75 @@ async def test_actual_saved_receipt_body_is_readable_and_header_opens_once(
             )
         )
         assert ratio >= 4.5
+
+
+# The settle helper above is the thing that decides whether the revert tests
+# wait long enough, so its bound is worth a control of its own: a state that
+# never arrives must FAIL on the bound (not pass, not hang), and a state that
+# does arrive must return promptly. Both run without the app, because the
+# property under test is the wait, and booting a Pilot to prove it would make
+# the control as load-sensitive as the test it guards.
+
+
+class _FakePilot:
+    """Just the pump surface the helper uses; ``delay`` is ignored on purpose."""
+
+    def __init__(self, on_pause=None) -> None:
+        self._on_pause = on_pause
+        self.pauses = 0
+
+    async def pause(self, delay: float | None = None) -> None:
+        self.pauses += 1
+        if self._on_pause is not None:
+            self._on_pause(self.pauses)
+
+
+class _FakeCard:
+    """Only the latch the helper reads."""
+
+    def __init__(self, state: str = "pending") -> None:
+        self._profile_action_state = state
+
+
+@pytest.mark.asyncio
+async def test_settle_helper_returns_once_the_latch_reaches_a_terminal_state(monkeypatch):
+    """Positive control: without this, the bound test below could pass for a
+    helper that simply always fails."""
+    module = sys.modules[__name__]
+    monkeypatch.setattr(module, "_PROFILE_ACTION_SETTLE_S", 5.0)
+    card = _FakeCard("pending")
+
+    def advance(pauses: int) -> None:
+        if pauses >= 3:
+            card._profile_action_state = "succeeded"
+
+    pilot = _FakePilot(advance)
+    assert await _await_profile_action_settled(pilot, card) == "succeeded"
+    assert pilot.pauses == 3
+
+
+@pytest.mark.asyncio
+async def test_settle_helper_fails_on_its_bound_when_the_state_never_settles(monkeypatch):
+    """Negative control: the status read this delays on never lands.
+
+    The card parks at the "pending" latch the CI failure observed. The helper
+    must exhaust its bound and FAIL, naming the state it was stuck in — the
+    assertion in the revert test must never be able to pass on a revert that
+    did not actually happen, and the wait must not turn a stuck state into a
+    hang either.
+    """
+    module = sys.modules[__name__]
+    monkeypatch.setattr(module, "_PROFILE_ACTION_SETTLE_S", 0.05)
+    card = _FakeCard("pending")
+    pilot = _FakePilot()
+    started = time.monotonic()
+    with pytest.raises(pytest.fail.Exception) as raised:
+        await _await_profile_action_settled(pilot, card)
+    elapsed = time.monotonic() - started
+    message = str(raised.value)
+    assert "never reached a terminal state" in message
+    assert "'pending'" in message  # names what it was stuck in
+    assert card._profile_action_state == "pending"
+    # Bounded, not hung: a stuck state costs the bound, then fails.
+    assert elapsed < 10.0
+    assert pilot.pauses > 1

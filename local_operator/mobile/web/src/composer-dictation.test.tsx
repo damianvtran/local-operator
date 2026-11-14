@@ -2,8 +2,8 @@
 //
 // The composer's voice mic against a stubbed recorder + transcription endpoint:
 // visibility from capabilities, record → stop → APPEND (no clobber), cancel
-// (no request), the permission-denied copy, the failure-copy split, send
-// cancelling an in-flight dictation, and the send envelope carrying the
+// (no request), the permission-denied copy, the failure-copy split, Enter and
+// Send inert while a take is live, and the send envelope carrying the
 // provenance. happy-dom has no MediaRecorder or getUserMedia, so both are
 // stubbed here — which is exactly the seam the design says cannot be
 // unit-proven end to end (QA owns the real-engine cell).
@@ -337,21 +337,68 @@ describe("cancel, refusal and failure", () => {
 });
 
 describe("interaction with send", () => {
-	it("send cancels an in-flight dictation: no request, typed envelope", async () => {
+	/* Before the Send recording slot, the disc at the Send spot (and Enter) sent the
+	   typed draft and THREW THE TAKE AWAY. The disc now sends the take
+	   (composer.send-recording.test.tsx); Enter during a take is the desktop's
+	   "Insert transcript": stop, transcribe, put the words in the box, send nothing. */
+	it("Enter while recording stops the take and inserts the transcript without sending", async () => {
 		renderComposer();
 		fireEvent.change(field(), { target: { value: "typed text" } });
+		mockedTranscribe.mockResolvedValueOnce({ text: "spoken", provider: "radient", model: null, path: "provider_stt_radient" });
 		const recorder = await startRecording();
 		recorder.emitChunk("audio-bytes");
 
-		fireEvent.click(screen.getByRole("button", { name: "send" }));
+		fireEvent.keyDown(field(), { key: "Enter" });
 
+		await waitFor(() => expect(field().value).toBe("typed text spoken"));
+		expect(recorder.state).toBe("inactive");
+		expect(mockedTranscribe).toHaveBeenCalledOnce();
+		expect(mockedSendCommand).not.toHaveBeenCalled();
+	});
+
+	it("Enter with focus outside the box (window level) also inserts the transcript", async () => {
+		renderComposer();
+		mockedTranscribe.mockResolvedValueOnce({ text: "spoken", provider: "radient", model: null, path: "provider_stt_radient" });
+		const recorder = await startRecording();
+		recorder.emitChunk("audio-bytes");
+
+		fireEvent.keyDown(document.body, { key: "Enter" });
+
+		await waitFor(() => expect(field().value).toBe("spoken"));
+		expect(recorder.state).toBe("inactive");
+		expect(mockedSendCommand).not.toHaveBeenCalled();
+	});
+
+	it("Enter on a focused button keeps that button's own action (Enter on cancel is not Insert)", async () => {
+		renderComposer();
+		const recorder = await startRecording();
+		recorder.emitChunk("audio-bytes");
+
+		fireEvent.keyDown(screen.getByRole("button", { name: "cancel recording" }), { key: "Enter" });
+		await new Promise((r) => setTimeout(r, 0));
+
+		expect(mockedTranscribe).not.toHaveBeenCalled();
+		expect(recorder.state).toBe("recording");
+	});
+
+	it("Shift+Enter during a take is not claimed (it stays the box's newline key)", async () => {
+		renderComposer();
+		const recorder = await startRecording();
+		recorder.emitChunk("audio-bytes");
+
+		fireEvent.keyDown(field(), { key: "Enter", shiftKey: true });
+		await new Promise((r) => setTimeout(r, 0));
+
+		expect(mockedTranscribe).not.toHaveBeenCalled();
+		expect(recorder.state).toBe("recording");
+	});
+
+	it("Enter when not recording is not claimed: it still sends the typed draft", async () => {
+		renderComposer();
+		fireEvent.change(field(), { target: { value: "typed text" } });
+		fireEvent.keyDown(field(), { key: "Enter" });
 		await waitFor(() => expect(mockedSendCommand).toHaveBeenCalledOnce());
 		expect(mockedTranscribe).not.toHaveBeenCalled();
-		expect(trackStop).toHaveBeenCalled();
-		const envelope = mockedSendCommand.mock.calls[0]![1] as Record<string, unknown>;
-		expect(envelope.text).toBe("typed text");
-		expect(envelope.input_mode).toBe("typed");
-		expect(envelope.input_path).toBeUndefined();
 	});
 
 	it("the 120 s cap stops the recorder rather than discarding", async () => {
@@ -396,17 +443,31 @@ describe("empty transcript, discards and cancels", () => {
 		expect(field().value).toBe("");
 	});
 
-	it("says so when a send discards an in-flight dictation (U2)", async () => {
+	it("Enter while transcribing sends nothing: the old draft cannot overtake the words in flight", async () => {
 		renderComposer();
 		fireEvent.change(field(), { target: { value: "typed text" } });
+		let held:
+			| ((v: { text: string; provider: string; model: string | null; path: string }) => void)
+			| undefined;
+		mockedTranscribe.mockImplementationOnce(
+			() => new Promise((resolve) => { held = resolve; }),
+		);
 		const recorder = await startRecording();
 		recorder.emitChunk("audio-bytes");
+		fireEvent.click(screen.getByRole("button", { name: "stop and transcribe" }));
+		await screen.findByText("Transcribing…");
 
-		fireEvent.click(screen.getByRole("button", { name: "send" }));
+		fireEvent.keyDown(field(), { key: "Enter" });
+		fireEvent.keyDown(document.body, { key: "Enter" });
+		/* The disc is inert too: a press would abort the request and send the old draft. */
+		expect((screen.getByRole("button", { name: "send" }) as HTMLButtonElement).disabled).toBe(true);
+		expect(mockedSendCommand).not.toHaveBeenCalled();
 
-		await waitFor(() => expect(mockedSendCommand).toHaveBeenCalledOnce());
-		expect(screen.getByText("Voice input discarded.")).toBeTruthy();
-		expect(mockedTranscribe).not.toHaveBeenCalled();
+		held!({ text: "more", provider: "radient", model: null, path: "provider_stt_radient" });
+		await waitFor(() => expect(field().value).toBe("typed text more"));
+		expect(mockedSendCommand).not.toHaveBeenCalled();
+		/* Enter did not stop or discard the take: the one request was the tap's. */
+		expect(mockedTranscribe).toHaveBeenCalledOnce();
 	});
 
 	it("cancels an in-flight transcription from the status row (U5)", async () => {

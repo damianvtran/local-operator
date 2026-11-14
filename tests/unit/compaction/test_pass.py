@@ -233,6 +233,39 @@ async def test_run_compaction_pass_snapcompact_makes_no_provider_call() -> None:
 
 
 @pytest.mark.asyncio
+async def test_run_compaction_pass_sizes_snapcompact_against_the_threshold(monkeypatch) -> None:
+    """``run_compaction_pass`` forwards ``T_eff`` so the archive targets the trigger."""
+    from local_operator.compaction import snapcompact
+    from local_operator.compaction.thresholds import resolve_threshold_tokens
+
+    history = _history(8, words=200)
+    settings = CompactionSettings(strategy="snapcompact", keep_recent_tokens=300)
+    window = int(estimate_messages_tokens(history) / 0.9)
+    seen = {}
+    original = snapcompact.compact_to_archive
+
+    def observe(messages, provider, model_id, previous_text=None, **kwargs):
+        seen.update(kwargs)
+        return original(messages, provider, model_id, previous_text, **kwargs)
+
+    monkeypatch.setattr(snapcompact, "compact_to_archive", observe)
+
+    async def never(_prompt: str) -> str:
+        raise AssertionError("snapcompact must not call the summarizer")
+
+    result = await run_compaction_pass(
+        history,
+        model=_model(window=window, images=True),
+        settings=settings,
+        summarize=never,
+        now_ms=NOW,
+        last_activity_ms=NOW,
+    )
+    assert result.ran is True
+    assert seen["threshold_tokens"] == resolve_threshold_tokens(window, settings)
+
+
+@pytest.mark.asyncio
 async def test_run_compaction_pass_without_summarizer_refuses_rather_than_inventing() -> None:
     history = _history(8, words=200)
     tokens = estimate_messages_tokens(history)

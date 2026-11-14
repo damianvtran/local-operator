@@ -1,0 +1,8 @@
+{
+  "wire.music.label": "音乐",
+  "wire.music.started": "音乐生成已开始 — 任务 {job}。",
+  "wire.music.progress": "音乐：{completed}/{total} 条音轨已结算。",
+  "wire.music.ready": "音乐已就绪 — 任务 {job}。",
+  "wire.music.failed": "音乐生成失败：{error}",
+  "wire.music.cancel_requested": "已请求取消 {job}。正在进行的生成仍可能完成并产生费用；结果仍可获取。"
+}

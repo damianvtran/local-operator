@@ -13,7 +13,7 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-from local_operator.team_bridge import screening
+from local_operator.team_bridge import hold_release, screening
 from local_operator.team_bridge.client import (
     SCREENING_TEMPLATE_V1_SHA256,
     SCREENING_TEMPLATE_V2_SHA256,
@@ -94,16 +94,39 @@ def test_two_cycles_over_a_held_body_send_once_and_the_answer_parks(tmp_path) ->
     assert ("model_hold", "qa/default-model") in _cached_answers(tmp_path)
 
 
-def test_parse_failed_is_an_answer_and_is_cached_too(tmp_path) -> None:
-    """A reply that cannot be parsed is a MODEL answer, not a route failure."""
+def test_parse_failed_is_not_an_answer_and_is_re_screened(tmp_path) -> None:
+    """An unparsable reply describes the DRAW, not the message (2026-11-09, R2).
+
+    It used to be cached as a final answer, and one garbled draw parked a
+    message for days. Now it is a NON-cached hold: the next pass draws again.
+    """
 
     _store, owner = _setup(tmp_path)
     first = Runner("not a verdict at all")
     out = _run(owner, tmp_path, first, item=_item("bmsg_parse"))
     assert out.hold_code == "parse_failed" and len(first.calls) == 1
+    assert _cached_answers(tmp_path) == []
     second = Runner(DELIVER_REPLY)
     again = _run(owner, tmp_path, second, item=_item("bmsg_parse"))
-    assert again.hold_code == "parse_failed" and second.calls == []
+    assert len(second.calls) == 1 and again.disposition == "deliver"
+
+
+def test_an_empty_reply_is_its_own_non_cached_hold(tmp_path) -> None:
+    """Blank is ``empty_reply`` (a provider symptom), never cached, re-screened."""
+
+    _store, owner = _setup(tmp_path)
+    blank = Runner("   ")
+    out = _run(owner, tmp_path, blank, item=_item("blank body", "bmsg_blank"))
+    assert out.hold_code == "empty_reply"
+    assert _cached_answers(tmp_path) == []
+    hold = _store.screening_hold(owner, "bmsg_blank")
+    assert hold is not None and hold["hold_code"] == "empty_reply"
+    retry = Runner(HOLD_REPLY)
+    assert (
+        _run(owner, tmp_path, retry, item=_item("blank body", "bmsg_blank")).hold_code
+        == "model_hold"
+    )
+    assert len(retry.calls) == 1
 
 
 def test_route_failure_is_not_cached_and_still_retries(tmp_path) -> None:
@@ -215,7 +238,7 @@ def test_the_cache_key_is_content_equality_only(tmp_path) -> None:
             "model_hold",
             "model_refused",
             "reply_truncated",
-            "parse_failed",
+            # ``parse_failed``/``empty_reply`` are NOT answers (2026-11-09, R2).
             # A categoryless bounce is the model refusing the message too: it
             # explained instead of naming a category.
             "bounce_without_category",
@@ -226,9 +249,12 @@ def test_the_cache_key_is_content_equality_only(tmp_path) -> None:
     )
 
 
-def test_answer_cache_ignores_a_store_without_the_publishing_policy(tmp_path) -> None:
+def test_answer_cache_ignores_a_store_without_the_publishing_policy(tmp_path, monkeypatch) -> None:
     """Fail-open: an unverifiable cache row is a MISS, never a replayed answer."""
 
+    # The CACHE row in isolation: with owner review on, the message's own review
+    # decision (a separate, per-message row) would keep it held for the person.
+    monkeypatch.setattr(hold_release, "review_enabled", lambda _config_dir: False)
     store, owner = _setup(tmp_path)
     assert _run(owner, tmp_path, Runner(HOLD_REPLY), item=_item("bmsg_p")).hold_code == (
         "model_hold"
@@ -365,9 +391,15 @@ def test_re_enrollment_replaces_the_cached_answer(tmp_path) -> None:
 # --------------------------------------------------------------------------
 
 
-def test_a_fallback_hops_answer_is_never_cached_under_the_primary(tmp_path) -> None:
-    """A route failure must not become a permanent answer via the fallback."""
+def test_a_fallback_hops_answer_is_never_cached_under_the_primary(tmp_path, monkeypatch) -> None:
+    """A route failure must not become a permanent answer via the fallback.
 
+    Owner review is off so only the content-keyed cache is exercised: with it on,
+    the fallback's hold gets its own PER-MESSAGE review row and waits for the person
+    (QA round 1 Q2, ``test_review_held``), which is the terminal state by design.
+    """
+
+    monkeypatch.setattr(hold_release, "review_enabled", lambda _config_dir: False)
     _store, owner = _setup(tmp_path)
     body, mid = "fallback body", "bmsg_fb"
     policy = Policy(approved_serving_identities=("qa/default-model", "qa/fallback-model"))
@@ -412,25 +444,32 @@ def test_categoryless_bounce_is_a_model_answer_and_is_cached(tmp_path) -> None:
 
 
 def test_engine_version_bump_clears_a_cached_code_artefact(tmp_path, monkeypatch) -> None:
-    """A parser/ceiling fix must invalidate the artefact it produced."""
+    """A parser/ceiling fix must invalidate the answers the old engine cached.
 
+    ``parse_failed`` is no longer cached at all, so the artefact here is a cached
+    ``model_hold``; owner review is off so only the cache row is exercised.
+    """
+
+    monkeypatch.setattr(hold_release, "review_enabled", lambda _config_dir: False)
     _store, owner = _setup(tmp_path)
     body, mid = "artefact body", "bmsg_eng"
-    assert _run(owner, tmp_path, Runner("VERDICT: deliver  "), item=_item(body, mid)).hold_code == (
-        "parse_failed"
+    assert _run(owner, tmp_path, Runner(HOLD_REPLY), item=_item(body, mid)).hold_code == (
+        "model_hold"
     )
-    assert _run(owner, tmp_path, Runner(DELIVER_REPLY), item=_item(body, mid)).hold_code == (
-        "parse_failed"
-    )
-    # The ENGINE is fixed (a new stamp), and the old artefact must be re-drawn.
-    monkeypatch.setattr(screening, "SCREENING_ENGINE_VERSION", "bridge-screen-engine-2")
-    redraw = Runner(HOLD_REPLY)
+    replay = Runner(DELIVER_REPLY)
+    assert _run(owner, tmp_path, replay, item=_item(body, mid)).hold_code == "model_hold"
+    assert replay.calls == []
+    # The ENGINE is fixed (a new stamp), and the old answer must be re-drawn.
+    monkeypatch.setattr(screening, "SCREENING_ENGINE_VERSION", "bridge-screen-engine-test-next")
+    redraw = Runner(DELIVER_REPLY)
     out = _run(owner, tmp_path, redraw, item=_item(body, mid))
     assert len(redraw.calls) == 1
-    assert out.hold_code == "model_hold"  # the NEW answer, not the old artefact
-    after = Runner(DELIVER_REPLY)
-    assert _run(owner, tmp_path, after, item=_item(body, mid)).hold_code == "model_hold"
-    assert after.calls == []  # and the new answer is cached under the new stamp
+    assert out.disposition == "deliver"  # the NEW answer, not the old one
+    # QA round 1 Q3: the read that found the old engine's row dropped it, so an
+    # engine bump leaves no inert rows behind.
+    with sqlite3.connect(state_db_path(tmp_path)) as conn:
+        engines = [r[0] for r in conn.execute("SELECT engine_version FROM screening_answer_holds")]
+    assert engines == []
 
 
 # --------------------------------------------------------------------------

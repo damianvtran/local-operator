@@ -892,6 +892,7 @@ async def test_take_up_through_the_tool_carries_the_config_request_rule(tmp_path
 
     from local_operator.harness.message_types import (
         BRIDGE_CONFIG_REQUEST_RULE,
+        BRIDGE_RECEIVER_RULES,
         BRIDGE_UNTRUSTED_CLAUSE,
     )
     from local_operator.harness.types import ToolContext
@@ -917,7 +918,8 @@ async def test_take_up_through_the_tool_carries_the_config_request_rule(tmp_path
     first = result.content[0]
     assert isinstance(first, TextContent)
     content = first.text
-    assert content.startswith(f"{BRIDGE_UNTRUSTED_CLAUSE}\n{BRIDGE_CONFIG_REQUEST_RULE}\n\n")
+    assert content.startswith(f"{BRIDGE_UNTRUSTED_CLAUSE}\n{BRIDGE_RECEIVER_RULES}\n\n")
+    assert content.count(BRIDGE_CONFIG_REQUEST_RULE) == 1
     assert content.endswith(text)
 
 
@@ -937,6 +939,8 @@ async def test_conversation_reads_carry_the_config_request_rule(
     from local_operator.harness.message_types import (
         BRIDGE_BODY_READ_HEAD,
         BRIDGE_CONFIG_REQUEST_RULE,
+        BRIDGE_PEER_COORDINATION_RULE,
+        BRIDGE_RECEIVER_RULES,
         BRIDGE_UNTRUSTED_CLAUSE,
     )
     from local_operator.harness.rows import _bridge_json_tail
@@ -970,7 +974,9 @@ async def test_conversation_reads_carry_the_config_request_rule(
     first = result.content[0]
     assert isinstance(first, TextContent)
     text = first.text
-    assert BRIDGE_BODY_READ_HEAD == f"{BRIDGE_UNTRUSTED_CLAUSE}\n{BRIDGE_CONFIG_REQUEST_RULE}"
+    assert BRIDGE_BODY_READ_HEAD == f"{BRIDGE_UNTRUSTED_CLAUSE}\n{BRIDGE_RECEIVER_RULES}"
+    assert "\n\n" not in BRIDGE_BODY_READ_HEAD
+    assert text.count(BRIDGE_PEER_COORDINATION_RULE) == 1
     assert text.startswith(f"{BRIDGE_BODY_READ_HEAD}\n\n"), text
     assert text.count(BRIDGE_CONFIG_REQUEST_RULE) == 1
     assert result.details is not None

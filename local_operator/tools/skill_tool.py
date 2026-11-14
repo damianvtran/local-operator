@@ -1,14 +1,11 @@
-"""The ``skill`` tool: let a CONFIGURATION RUN revise the operator's own skills.
+"""The ``skill`` tool: owner-requested authoring of managed account skills.
 
-WHO GETS IT. Only a session whose declaration names it and whose host merges it
-in -- today the Agents page's configuration run (``session_factory``'s
-``AGENTS_CONFIG_TOOLS`` + ``apply_config_run_shape``). It is in ``TOOL_BUILDERS``
-but deliberately NOT in ``DEFAULT_TOOL_NAMES``, so no ordinary session builds it
-and no other session's provider-visible tool array (the prompt-cache prefix)
-moves. That is rung 3 of the AGENTS.md footprint ladder: opt-in, not host
-identity. The run has no file tools by design (its declaration is its boundary),
-and handing it ``read``/``write``/``edit`` to change one skill would hand it the
-whole disk; this tool reaches ``<config_dir>/skills`` and nothing else.
+WHO GETS IT. Ordinary owner conversations and the Agents configuration run.
+The factory gates on the profile root, not the host identity. Every mutation
+uses the session's host-held account-write seam: an owner's explicit edit
+request applies directly, remote/peer input needs the never-auto-approved card,
+and hosts without a consent seam refuse. The tool reaches managed skills only;
+no delete/publish/pull/subscribe operation is exposed.
 
 ONE WRITE PATH. Every write goes through ``server/utils/desktop_skill_writes``,
 the same module the Skills tab's routes use, so the rules are stated once:
@@ -493,6 +490,68 @@ def _work(params: SkillParams, config_dir: Path, context: ToolContext | None) ->
     return _write_receipt(result, "updated", context)
 
 
+def _plan(params: SkillParams, config_dir: Path, context: ToolContext | None) -> dict[str, Any]:
+    """The proposal plan for a create/update/edit: ``{before, after, ...}`` images.
+
+    Built by the SAME validators the write runs (``plan_only``), so a filed
+    proposal is exactly the write that would have happened -- including the
+    page bound, mask and marker refusals that keep a write from being composed
+    from text the model never saw. The base image and its fingerprint are read
+    together and checked against ``expected_fingerprint``: the after image was
+    overlaid on that revision, so a base read from a later one would let an
+    accept silently revert the change made in between.
+    """
+    from local_operator import profile_proposals as P
+    from local_operator.hub_sync.identity import LinkError
+    from local_operator.server.utils import desktop_skill_writes as writes
+
+    name = str(params.name)
+    files = [item.model_dump() for item in params.files or ()]
+    if params.op == "create":
+        writes.require_unshadowed(config_dir, name)
+        writes.refuse_new_markers_in_files(files)
+        writes.document_from_files(name, files)
+        if P.skill_image(config_dir, name) is not None:
+            raise LinkError(
+                "alias-occupied", f"a skill named {name!r} already exists on this machine"
+            )
+        before = None
+        after_files = {item["path"]: item["content"] for item in files}
+    else:
+        if params.op == "edit":
+            planned = writes.edit_files(
+                config_dir,
+                name,
+                [item.model_dump() for item in params.edits or ()],
+                str(params.expected_fingerprint),
+                plan_only=True,
+            )
+        else:
+            planned = writes.patch(
+                config_dir,
+                name,
+                files,
+                (),
+                str(params.expected_fingerprint),
+                whole_file_max_chars=PAGE_CHARS,
+                mask=_session_mask(context),
+                plan_only=True,
+            )
+        # Same fingerprint as the overlay's base => same bytes (content hash).
+        before, fingerprint = P._skill_read(config_dir, name)
+        if before is None or fingerprint != params.expected_fingerprint:
+            raise LinkError("local-concurrent-edit", "the skill changed since it was read")
+        after_files = planned["files"]
+    return {
+        "profile_kind": "skill",
+        "operation": params.op if params.op == "create" else "update",
+        "target_id": name,
+        "name": name,
+        "before": before,
+        "after": {"id": name, "name": name, "files": after_files},
+    }
+
+
 def _session_mask(context: ToolContext | None) -> Callable[[str], str] | None:
     """The credential mask the loop applies to this tool's results (review R6).
 
@@ -564,6 +623,54 @@ async def execute_skill(
     if config_dir is None:
         return _error(tool_call_id, _TOOL, "no profile is attached to this session.")
     try:
+        if params.op not in {"list", "show"}:
+            from local_operator.harness.types import DurableWriteIntent
+            from local_operator.profile_scope import (
+                durable_write_decision,
+                durable_write_refusal,
+            )
+
+            # Create/update/edit carry a proposal plan, exactly as the agent and
+            # team tools do: the host's ladder applies it directly for a clean
+            # local run and FILES it for review in Agents → <name> when the run
+            # read untrusted input (peer, Team Bridge, remote). ``remove_paths``
+            # is a delete and carries no plan, so it keeps the account card.
+            proposal = None
+            if not params.remove_paths:
+                proposal = await asyncio.to_thread(_plan, params, config_dir, context)
+                if proposal["before"] == proposal["after"]:
+                    # Nothing would change: no write, so no consent to ask for.
+                    return _text(
+                        tool_call_id,
+                        _TOOL,
+                        f"skill {identifier_text(context, str(params.name))} already had "
+                        "this content; nothing changed.",
+                    )
+            intent = DurableWriteIntent(
+                kind="skill",
+                name=str(params.name),
+                operation=(
+                    "delete"
+                    if params.remove_paths
+                    else "create" if params.op == "create" else "update"
+                ),
+                changes=tuple(f.path for f in params.files or ())
+                + tuple(e.path for e in params.edits or ()),
+                summary="\n".join(
+                    [f"{f.path}:\n{f.content}" for f in params.files or ()]
+                    + [f"{e.path}: {e.old_text} → {e.new_text}" for e in params.edits or ()]
+                    + [f"Remove: {path}" for path in params.remove_paths or ()]
+                ),
+                proposal=proposal,
+                tool_call_id=tool_call_id,
+            )
+            origin, reason = await durable_write_decision(context, intent)
+            if reason == "proposed":
+                from local_operator.tools.agent_tool import _proposed_profile_receipt
+
+                return _proposed_profile_receipt(tool_call_id, _TOOL, origin)
+            if origin is None:
+                return _error(tool_call_id, _TOOL, durable_write_refusal(intent, reason))
         text = await asyncio.to_thread(_work, params, config_dir, context)
     except (LinkError, SkillValidationError, TransactionError) as error:
         code = getattr(error, "code", "") or ""
@@ -576,11 +683,10 @@ async def execute_skill(
 
 
 def build_skill_tool(context: ToolContext) -> AgentTool | None:
-    """createIf: the tool needs the profile root its writes land under.
+    """createIf: any host with the managed profile root can use the tool.
 
-    Reaching a session at all is the declaration's job, not this factory's: the
-    tool is absent from ``DEFAULT_TOOL_NAMES``, so only a host that names it (the
-    configuration run) builds it.
+    Mutations independently require the host consent seam; availability itself
+    is not authority and does not depend on which page launched the session.
     """
     if _config_dir(context) is None:
         return None
@@ -593,9 +699,8 @@ def build_skill_tool(context: ToolContext) -> AgentTool | None:
             "whole short files). Pass the fingerprint show returned."
         ),
         parameters=SkillParams.model_json_schema(),
-        # The same tier as ``agent``/``team`` in this run: the operator's typed
-        # request on the page that watches the run is the authority, and every
-        # committed edit keeps the previous bytes in hub/backups.
+        # Per-call host consent owns mutation authority. Read-tier availability
+        # must not create a second blanket approval before the exact decision.
         approval_tier="read",
         concurrency="exclusive",
         interruptible=False,

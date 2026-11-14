@@ -262,7 +262,17 @@ def test_a_delegating_child_gets_the_parent_shape_and_others_keep_messages(
     assert "type" not in op_schema and "enum" not in op_schema
     assert op_schema["anyOf"] == [
         {
-            "enum": ["list", "peek", "send", "ask", "steer", "pause", "cancel", "resume"],
+            "enum": [
+                "list",
+                "peek",
+                "send",
+                "ask",
+                "steer",
+                "pause",
+                "cancel",
+                "resume",
+                "set_model",
+            ],
             "type": "string",
         },
         {"type": "null"},

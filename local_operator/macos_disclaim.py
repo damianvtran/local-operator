@@ -76,6 +76,19 @@ guarantee. The trade is accepted deliberately: the standing requirement ("kill
 the UI, never the sessions") makes a runtime swept with the UI the worse
 failure, and the grant is a one-time, per-host decision (the same statement
 lives in ``docs/EXEC.md`` and on the PR).
+
+SINCE 2026-11-09 RUNTIMES CARRY THEIR OWN PRIVACY IDENTITY, which is how the
+cost above is paid down without touching the disclaim. The image a runtime
+executes is a bundle (``procname``, "ONE MACOS PRIVACY IDENTITY"), and tccd
+keys a bundle by ``CFBundleIdentifier`` instead of the image path: the ad-hoc
+``com.local-operator.runtime`` ("Local Operator Runtime", one row per host) or,
+after ``lop permissions setup``, the team-signed ``com.local-operator`` that
+shares the APP's grant. Measured on the operator's host with a child spawned
+by THIS module: tccd ``requesting={identifier=com.local-operator, …}`` with no
+responsible app, ``subject=com.local-operator``, ``authValue=2``. The identity
+rides on the image's code signature, the survival on this module's
+responsibility disclaim; neither depends on the other, so the app can die
+without taking a runtime and the runtime still holds the grant.
 """
 
 from __future__ import annotations

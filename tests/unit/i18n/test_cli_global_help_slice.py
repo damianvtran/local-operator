@@ -36,6 +36,19 @@ PINS = [
     ("_propagate_global_flags", "propagated_model"),
     ("_propagate_global_flags", "propagated_run_in"),
 ]
+#: Root flags registered AFTER the immutable BASE, through the same
+#: snapshot shape. There is no BASE English for a flag that did not exist, so
+#: each row pins the text the catalogue shipped with (edit them together). The
+#: BASE fixture, golden and hashes stay frozen: these rows are subtracted
+#: before every BASE comparison and asserted on their own beside it.
+ADDED_AFTER_BASE = {
+    # Temporary chats (core #3832): `lop --temporary`, root parser only.
+    ("parser", "temporary"): (
+        "Start a temporary chat: it is left out of history and deleted after it sits "
+        "idle (30 minutes by default)."
+    ),
+}
+ADDED_KEYS = {key for _, key in ADDED_AFTER_BASE}
 
 
 def _fixture():
@@ -63,11 +76,17 @@ def test_base_bytes_catalogue_golden_context_and_factory_parity():
     golden = json.loads(
         (REPO / "tests/unit/i18n/fixtures/cli_global_help_en_golden.json").read_text()
     )
-    assert live == golden == expected
+    added = {"cli.global_help." + key: text for (_, key), text in ADDED_AFTER_BASE.items()}
+    assert {key: live[key] for key in added} == added
+    assert {key: value for key, value in live.items() if key not in added} == golden == expected
     context = catalogues.context("en", "cli.global_help")
     keys = {key for _, key in PINS}
     assert len(PINS) == 18 and len(keys) == 17
-    assert set(context) == set(expected) == {"cli.global_help." + key for key in keys}
+    assert not keys & ADDED_KEYS
+    assert set(expected) == {"cli.global_help." + key for key in keys}
+    keys |= ADDED_KEYS
+    expected = {**expected, **added}
+    assert set(context) == set(live) == set(expected)
     factories = {
         key
         for key, value in vars(_gh).items()
@@ -140,6 +159,15 @@ def test_all_pinned_copy_sites_render_from_the_existing_snapshot():
                         for value in values
                     )
     actual.sort(key=lambda row: row[:2])
+    # Post-BASE sites render from the same snapshot: each appears exactly once
+    # under its owner, then drops out so the BASE pin list stays exact.
+    added_shapes = {
+        (owner, ast.dump(ast.parse(_shape(key), mode="eval").body))
+        for owner, key in ADDED_AFTER_BASE
+    }
+    rendered = [(owner, ast.dump(value)) for _, _, owner, value in actual]
+    assert sorted(row for row in rendered if row in added_shapes) == sorted(added_shapes)
+    actual = [row for row in actual if (row[2], ast.dump(row[3])) not in added_shapes]
     assert [(owner, ast.dump(value)) for _, _, owner, value in actual] == [
         (owner, ast.dump(ast.parse(_shape(key), mode="eval").body)) for owner, key in PINS
     ]
@@ -235,7 +263,9 @@ def test_one_build_snapshot_covers_global_and_recursive_help(monkeypatch):
     cli.build_cli_parser()
     assert resolutions == ["fr"]
     assert len(propagated) > 1 and set(propagated) == {"fr"}
-    assert len(renders) == 12 + 5 * (len(propagated) - 1)
+    # Post-BASE flags are root-only: one render each per build, never propagated.
+    assert all(owner == "parser" for owner, _ in ADDED_AFTER_BASE)
+    assert len(renders) == 12 + len(ADDED_AFTER_BASE) + 5 * (len(propagated) - 1)
     assert set(renders) == {"fr"}
     assert (REPO / "local_operator/i18n/catalogues/fr/cli.global_help.json").is_file()
     assert set(catalogues.load_catalogue("fr", "cli.global_help")) == set(
@@ -411,6 +441,9 @@ def _root_calls(module):
         for node in module.body
         if isinstance(node, ast.FunctionDef) and node.name == "build_cli_parser"
     )
+    added_shapes = {
+        ast.dump(ast.parse(_shape(key), mode="eval").body) for owner, key in ADDED_AFTER_BASE
+    }
     result = []
     for node in ast.walk(fn):
         if (
@@ -423,6 +456,10 @@ def _root_calls(module):
         if (receiver in {"parser", "parent_parser"} and node.func.attr == "add_argument") or (
             receiver == "argparse" and node.func.attr == "ArgumentParser"
         ):
+            # A post-BASE root flag is not BASE protocol; subtracting exactly
+            # its call keeps the frozen BASE hash comparable.
+            if any(kw.arg == "help" and ast.dump(kw.value) in added_shapes for kw in node.keywords):
+                continue
             result.append(node)
     return sorted(result, key=lambda node: (node.lineno, node.col_offset))
 

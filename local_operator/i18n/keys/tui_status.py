@@ -34,5 +34,9 @@ def model_setup() -> Msg:
     return Msg("tui.status.model.setup", {})
 
 
+def temporary() -> Msg:
+    return Msg("tui.status.temporary", {})
+
+
 def tunnel_parked() -> Msg:
     return Msg("tui.status.tunnel.parked", {})

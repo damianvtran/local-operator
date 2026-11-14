@@ -731,6 +731,40 @@ describe("AskCard", () => {
 		expect(screen.getByText(/· recommended/)).toBeTruthy();
 	});
 
+	it("badges every row of a multi-select's recommendation set, and ticks none", () => {
+		renderCard(
+			ask({
+				questions: [
+					question({
+						multi: true,
+						options: [
+							{ label: "yes", description: "" },
+							{ label: "maybe", description: "" },
+							{ label: "no", description: "" },
+						],
+						recommended: 0,
+						recommended_all: [0, 1],
+					}),
+				],
+			}),
+		);
+		expect(screen.getAllByText(/· recommended/)).toHaveLength(2);
+		for (const name of [/yes/, /maybe/, /no/]) {
+			expect(screen.getByRole("button", { name }).getAttribute("aria-pressed")).toBe("false");
+		}
+	});
+
+	it("badges one row when a multi-select payload carries only `recommended: 0`", () => {
+		/* An older runtime, or a stored row from before the set existed. */
+		renderCard(ask({ questions: [question({ multi: true, recommended: 0 })] }));
+		expect(screen.getAllByText(/· recommended/)).toHaveLength(1);
+	});
+
+	it("badges nothing for a single-select with no recommendation", () => {
+		renderCard(ask({ questions: [question({ recommended: null })] }));
+		expect(screen.queryByText(/· recommended/)).toBeNull();
+	});
+
 	it("says why an ask with nothing left to answer cannot be sent", () => {
 		/* R6 (agent review round 1): `draft_question_ids` had every question, so
 		   the card rendered no fields and a disabled send with no explanation. */
@@ -965,5 +999,56 @@ describe("AskCard", () => {
 		renderCard(ask({ status: "answered", delivered: true, runtime_live: false, durable: false }));
 		expect(screen.queryByText(/this conversation no longer exists/)).toBeNull();
 		expect(screen.getByRole("status")).toBeTruthy();
+	});
+});
+
+describe("a long question stays bounded", () => {
+	/* The operator's screenshot: a proposal ask carrying a whole team brief
+	   filled the card and pushed its options off screen. The question text is
+	   its own capped scroller, and the answer controls are NOT inside it, so
+	   they stay directly under a visible excerpt whatever the length. */
+	it("caps the question text in column units and keeps options outside the scroller", () => {
+		const long = Array.from({ length: 400 }, (_, i) => `line ${i}: brief text`).join("\n");
+		renderCard(ask({ questions: [question({ question: long })] }));
+		const text = screen.getByTestId("ask-question-text");
+		expect(text.style.maxHeight).toBe("calc(var(--lo-vvh, 100dvh) * 0.3)");
+		expect(text.className).toContain("overflow-y-auto");
+		expect(text.className).toContain("whitespace-pre-line");
+		const yes = screen.getByRole("button", { name: /yes/ });
+		expect(text.contains(yes)).toBe(false);
+	});
+});
+
+describe("a multi-question card stays bounded as a whole", () => {
+	/* PR #3777 code review M2: each question was capped, the stack was not, so
+	   three long questions pushed the shared send/decline row off screen. The
+	   stack is one capped scroller and the answer row renders outside it. */
+	it("caps the question list and keeps send and decline outside it", () => {
+		const long = (n: number) =>
+			Array.from({ length: 300 }, (_, i) => `q${n} line ${i}: brief text`).join("\n");
+		renderCard(
+			ask({
+				questions: [1, 2, 3].map((n) =>
+					question({ id: `q${n}`, question: long(n) }),
+				),
+			}),
+		);
+		const list = screen.getByTestId("ask-question-list");
+		expect(list.style.maxHeight).toBe("calc(var(--lo-vvh, 100dvh) * 0.5)");
+		expect(list.className).toContain("overflow-y-auto");
+		// R2-5: the focusable scroller is a named region.
+		expect(screen.getByRole("region", { name: "3 questions waiting" })).toBe(list);
+		const texts = screen.getAllByTestId("ask-question-text");
+		expect(texts).toHaveLength(3);
+		for (const text of texts) expect(list.contains(text)).toBe(true);
+		const decline = screen.getByRole("button", { name: /decline/i });
+		expect(list.contains(decline)).toBe(false);
+		const send = screen.getByRole("button", { name: /send answers/ });
+		expect(list.contains(send)).toBe(false);
+	});
+
+	it("leaves a single question unwrapped so its options sit under the excerpt", () => {
+		renderCard(ask({ questions: [question({ question: "short" })] }));
+		expect(screen.queryByTestId("ask-question-list")).toBeNull();
 	});
 });

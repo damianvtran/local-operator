@@ -1,0 +1,24 @@
+"""Look up macOS localized UI labels (en_GB vs ru) from installed .loctable resources."""
+import plistlib, glob, os, sys
+def lt(p): return plistlib.load(open(p,'rb'))
+S='/System/Library/Frameworks/Security.framework/Versions/A/MachServices/SecurityAgent.bundle/Contents/Resources/'
+ca=lt(S+'ConfirmAccess.loctable')
+print('== SecurityAgent ConfirmAccess.loctable (en_GB | ru)')
+for k in ca['ru']:
+    print(k, '|', ca.get('en_GB',{}).get(k), '|', ca['ru'][k])
+def search(paths, needles, locs=('en_GB','en','ru')):
+    for f in paths:
+        try: t=lt(f)
+        except Exception: continue
+        base=t.get('en') or t.get('en_GB') or {}
+        for k,v in base.items():
+            if isinstance(v,str) and any(n==v.strip() or (len(n)>12 and n in v) for n in needles):
+                print(f.replace('/System/',''), '|', repr(k), '|', v, '|', t.get('ru',{}).get(k))
+needles=sys.argv[1:] or ['Screen & System Audio Recording','Screen Recording','Privacy & Security','System Settings','Files & Folders','Accessibility','Keychain Access','Access Control','Always Allow','Allow','Keychain','Private Key','private key','Login Keychain','My Certificates','Attributes']
+paths=glob.glob('/System/Library/ExtensionKit/Extensions/SecurityPrivacyExtension.appex/Contents/Resources/*.loctable')
+paths+=glob.glob('/System/Applications/System Settings.app/Contents/Resources/*.loctable')
+paths+=glob.glob('/System/Applications/Utilities/Keychain Access.app/Contents/Resources/*.loctable')
+paths+=glob.glob('/System/Applications/Utilities/Keychain Access.app/Contents/**/*.loctable', recursive=True)
+paths+=glob.glob('/System/Library/PrivateFrameworks/TCC.framework/**/*.loctable', recursive=True)
+print('== search over', len(set(paths)), 'tables')
+search(sorted(set(paths)), needles)

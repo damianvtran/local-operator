@@ -1,0 +1,20 @@
+"""Look up Apple's own es / es_419 strings for the macOS labels named in cli.permissions."""
+import plistlib, glob, os, re, subprocess
+roots=["/System/Applications/System Settings.app","/System/Library/ExtensionKit/Extensions/SecurityPrivacyExtension.appex","/System/Library/Frameworks/Security.framework","/System/Library/CoreServices/SecurityAgentPlugins","/System/Library/CoreServices/Applications/Keychain Access.app"]
+files=[]
+for r in roots:
+    files+=glob.glob(r+"/**/*.loctable",recursive=True)
+print("loctables:",len(files))
+pat=re.compile(r"Screen & System Audio|Always Allow|^Access Control|^System Settings$|^Screen Recording$|^Privacy & Security$|^Files & Folders$|^Accessibility$|^Keychain Access$|^Allow$")
+for f in sorted(files):
+    try: d=plistlib.load(open(f,'rb'))
+    except Exception: continue
+    en=d.get('en') or {}
+    for k,v in en.items():
+        if isinstance(v,str) and pat.search(v) and len(v)<80:
+            print(os.path.relpath(f,'/System'),'|',k,'|',repr(v),'| es:',repr((d.get('es') or {}).get(k)),'| es_419:',repr((d.get('es_419') or {}).get(k)))
+# lproj strings / nibs (Keychain Access tab, SecurityAgent ConfirmAccess)
+for r in roots:
+    for f in glob.glob(r+"/**/es.lproj/*",recursive=True):
+        if f.endswith(('.strings','.nib')) or os.path.isdir(f):
+            pass

@@ -1,0 +1,40 @@
+# audit.log — ru/cli.permissions pc3 — actual command output, 2026-11-09T19:56:48Z, worktree HEAD 85fb35811f9d17fb6dfadfc2d5df3269db04bd12
+
+$ sha256sum (inputs)
+58e58c3b19a07c024b609f614e686cc9a72def77e3de704870f0557e84e7be41  local_operator/i18n/catalogues/en/cli.permissions.json
+6f8427bf5dd20f8fa252d0163387d59f4e53a30fe07cc9db4c5a5f55048fb1d2  local_operator/i18n/catalogues/en/cli.permissions.context.json
+217cb8cd505af80574782f52e8341a992fd11fc3fd06663d1d5ede790f1263b4  local_operator/i18n/catalogues/ru/cli.permissions.json
+
+$ .venv/bin/python scripts/i18n/check.py --catalogues-only
+check.py: catalogue checks: 0 problem(s)
+exit=0
+
+$ .venv/bin/python parity.py.txt
+keys en 39 ru 39 same order True missing set() extra set()
+keys with problems: 0
+
+$ sw_vers
+ProductName:		macOS
+ProductVersion:		27.2
+BuildVersion:		26B123
+
+$ python3 labels.py.txt
+== /System/Library/Frameworks/Security.framework/Versions/A/MachServices/SecurityAgent.bundle/Contents/Resources/ConfirmAccess.loctable
+'100266.title' | Deny | Отказать
+'100267.title' | Always Allow | Разрешать всегда
+'100268.title' | Allow | Разрешить
+== /System/Library/CoreServices/Applications/Keychain Access.app/Contents/Resources/KeyEditor.loctable
+'302.label' | Access Control | Доступ
+== /System/Library/ExtensionKit/Extensions/SecurityPrivacyExtension.appex/Contents/Resources/Localizable.loctable
+'SCREEN_CAPTURE' | Screen Recording | Запись экрана
+'SCREEN_CAPTURE_HEADER' | Screen & System Audio Recording | Запись экрана и системного звука
+'FILE_ACCESS_COMBINED' | Files & Folders | Файлы и папки
+== search SecurityPrivacyExtension for Accessibility / Device Control
+'ACCESSIBILITY' | Device Control and Data Access | Управление устройством и доступ к данным
+
+$ git diff --word-diff 788cc399..85fb3581 -- ru/cli.permissions.json (changed values)
+  "cli.permissions.status.scope": "Проверяется только [-запись экрана.-]{+разрешение «Запись экрана».+} «Файлы и [-папки», «Универсальный доступ»-]{+папки»+} и другие службы конфиденциальности используют ту же строку.",
+  "cli.permissions.setup.explain": "Этот шаг подписывает рантайм [-ключом-]{+удостоверением+} «{name}», чтобы рантаймы использовали разрешения конфиденциальности настольного приложения. macOS может спросить, разрешить ли codesign доступ к этому ключу.\n- «Разрешить» — подпись только в этот раз. При следующих запусках `lop update` в терминале вопрос появится снова; обновления без терминала (запущенные агентом или через /update внутри сессии) пропускают подпись ключом команды, поэтому новые сборки Python используют строку «Local Operator Runtime».\n- [-«Всегда разрешать»-]{+«Разрешать всегда»+} — вопросов больше не будет, но тогда любая программа, запущенная от имени вашего пользователя macOS, сможет через codesign подписывать этим ключом Developer ID без запроса. Чтобы отменить это, откройте приложение «Связка ключей», выберите закрытый ключ этого удостоверения и удалите codesign на вкладке [-«Контроль доступа».",-]{+«Доступ».",+}
+  "cli.permissions.setup.always_allow": "Вы выбрали [-«Всегда разрешать»-]{+«Разрешать всегда»+} (или диалог macOS не появился)? [y/N] ",
+  "cli.permissions.setup.already_signed": "Рантайм этой сборки Python уже был подписан, поэтому сейчас ничего не подписывалось и запроса от macOS не [-было. Ваш-]{+было.",+}
+{+  "cli.permissions.setup.always_allow_kept": "Ваш+} прежний ответ [-«Всегда разрешать»-]{+«Разрешать всегда» для этого ключа+} сохранён.",

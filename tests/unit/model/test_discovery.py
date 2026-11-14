@@ -2792,3 +2792,411 @@ def test_a_cached_kimi_document_from_before_the_native_read_is_refetched(tmp_pat
     by_id = {row.id: row for row in models}
     assert by_id["k3.1-pro"].reasoning_efforts == ("low", "high", "max")
     assert json.loads(stale.read_text())["payload"]["capture"] == 2
+
+
+# --- Radient relays OpenRouter's ids but strips the ``reasoning`` object --------
+
+_OR_LADDER_BODY = {
+    "data": [
+        {
+            "id": "deepseek/deepseek-v4.1-flash",
+            "reasoning": {"supported_efforts": ["none", "low", "high", "max"]},
+        },
+        {
+            "id": "deepseek/deepseek-v4-flash",
+            "reasoning": {
+                "supported_efforts": ["none", "high", "xhigh"],
+                "default_effort": "high",
+            },
+        },
+        {"id": "meta/stated-by-both", "reasoning": {"supported_efforts": ["low", "high"]}},
+        {"id": "plain/no-reasoning"},
+    ]
+}
+
+_RADIENT_SILENT_BODY = {
+    "data": [
+        {"id": "deepseek/deepseek-v4.1-flash"},
+        {"id": "deepseek/deepseek-v4-flash"},
+        {"id": "meta/stated-by-both", "reasoning": {"supported_efforts": ["medium", "high"]}},
+        {"id": "plain/no-reasoning"},
+        {"id": "only/on-radient"},
+        {"id": "auto"},
+    ]
+}
+
+
+def _seed_openrouter(tmp_path) -> None:
+    available_models(
+        "openrouter",
+        api_key=None,
+        client=_StubClient([_Response(200, _OR_LADDER_BODY)]),
+        cache_dir=tmp_path,
+    )
+
+
+def _radient_rows(tmp_path, provider: str = "radient", body=_RADIENT_SILENT_BODY):
+    client = _StubClient([_Response(200, body)])
+    rows, status = available_models(provider, api_key="k", client=client, cache_dir=tmp_path)
+    assert status == "ok"
+    assert len(client.calls) == 1, "borrowing must not issue a second request on an injected client"
+    return {row.id: row for row in rows}
+
+
+@pytest.mark.parametrize("provider", ["radient", "radient-key"])
+def test_a_silent_radient_row_borrows_the_ladder_of_the_same_openrouter_id(
+    tmp_path, provider
+) -> None:
+    """The reported gap: ``radient/deepseek/deepseek-v4.1-flash`` booted with no
+    ladder because Radient's listing never carries OpenRouter's ``reasoning``
+    object, while Radient accepts every rung OpenRouter states."""
+    _seed_openrouter(tmp_path)
+
+    by_id = _radient_rows(tmp_path, provider)
+
+    assert by_id["deepseek/deepseek-v4.1-flash"].reasoning_efforts == (
+        "none",
+        "low",
+        "high",
+        "max",
+    )
+    # Exact id, not family: the sibling has its own ladder.
+    assert by_id["deepseek/deepseek-v4-flash"].reasoning_efforts == ("none", "high", "xhigh")
+
+
+def test_only_the_ladder_is_borrowed_never_the_default(tmp_path) -> None:
+    """A listing default seeded on the wire switched reasoning ON for models that
+    run without it when the key is omitted (measured on OpenRouter), so nothing
+    but the rungs crosses over."""
+    _seed_openrouter(tmp_path)
+
+    row = _radient_rows(tmp_path)["deepseek/deepseek-v4-flash"]
+
+    assert row.reasoning_efforts == ("none", "high", "xhigh")
+    assert row.reasoning_default_effort is None
+
+
+def test_a_ladder_radient_states_itself_wins_over_the_borrowed_one(tmp_path) -> None:
+    _seed_openrouter(tmp_path)
+
+    by_id = _radient_rows(tmp_path)
+
+    assert by_id["meta/stated-by-both"].reasoning_efforts == ("medium", "high")
+
+
+def test_a_model_openrouter_does_not_list_with_a_ladder_stays_unstated(tmp_path) -> None:
+    _seed_openrouter(tmp_path)
+
+    by_id = _radient_rows(tmp_path)
+
+    # Absent from OpenRouter, present without a ladder, and the router: all
+    # stay "the listing said nothing", which defers to the hand-written table.
+    assert by_id["only/on-radient"].reasoning_efforts is None
+    assert by_id["plain/no-reasoning"].reasoning_efforts is None
+    assert by_id["auto"].reasoning_efforts is None
+
+
+def test_a_cold_openrouter_cache_leaves_radient_rows_untouched_without_a_request(
+    tmp_path,
+) -> None:
+    by_id = _radient_rows(tmp_path)
+
+    assert by_id["deepseek/deepseek-v4.1-flash"].reasoning_efforts is None
+
+
+def test_the_borrowed_ladder_is_not_written_into_radients_cached_document(tmp_path) -> None:
+    """Applied at read time: the stored Radient document stays a copy of what
+    Radient said, and a refreshed OpenRouter listing is picked up without
+    refetching Radient's."""
+    _seed_openrouter(tmp_path)
+    _radient_rows(tmp_path)
+
+    stored = json.loads((tmp_path / "radient.listing.json").read_text())["payload"]["models"]
+
+    by_id = {entry["id"]: entry for entry in stored}
+    assert not by_id["deepseek/deepseek-v4.1-flash"].get("reasoning_efforts")
+    assert not by_id["deepseek/deepseek-v4-flash"].get("reasoning_efforts")
+    # What Radient itself stated is stored, as before.
+    assert by_id["meta/stated-by-both"]["reasoning_efforts"] == ["medium", "high"]
+
+    cached, status = available_models(
+        "radient", api_key="k", client=_StubClient([]), cache_dir=tmp_path
+    )
+    assert status == "cached"
+    assert {row.id: row.reasoning_efforts for row in cached}["deepseek/deepseek-v4.1-flash"] == (
+        "none",
+        "low",
+        "high",
+        "max",
+    )
+
+
+def test_borrowing_is_scoped_to_the_radient_providers(tmp_path) -> None:
+    _seed_openrouter(tmp_path)
+    rows = [discovery.DiscoveredModel(id="deepseek/deepseek-v4.1-flash", name="x")]
+
+    for provider in ("deepseek", "openai", "ollama"):
+        assert (
+            discovery._borrow_relayed_efforts(
+                provider, rows, cache_dir=tmp_path, client=_StubClient([])
+            )
+            == rows
+        )
+
+
+def test_a_broken_source_listing_never_fails_the_radient_listing(tmp_path, monkeypatch) -> None:
+    def boom(*_a: object, **_k: object) -> object:
+        raise RuntimeError("cache exploded")
+
+    monkeypatch.setattr(discovery, "peek_listing", boom)
+
+    by_id = _radient_rows(tmp_path)
+
+    assert by_id["deepseek/deepseek-v4.1-flash"].reasoning_efforts is None
+
+
+# --- The borrow never costs the Radient read (review round 1, MAJOR-1) --------
+
+
+@pytest.fixture
+def _no_relayed_warm_state():
+    """The warm bookkeeping is process-wide: isolate it per test."""
+    discovery._relayed_warm_last.clear()
+    discovery._relayed_warm_threads.clear()
+    yield
+    for thread in list(discovery._relayed_warm_threads.values()):
+        thread.join(timeout=5)
+    discovery._relayed_warm_last.clear()
+    discovery._relayed_warm_threads.clear()
+
+
+def _silent_radient_rows() -> list[discovery.DiscoveredModel]:
+    return [
+        discovery.DiscoveredModel(id="deepseek/deepseek-v4.1-flash"),
+        discovery.DiscoveredModel(id="auto"),
+    ]
+
+
+def _openrouter_rows() -> list[discovery.DiscoveredModel]:
+    return [
+        discovery.DiscoveredModel(
+            id="deepseek/deepseek-v4.1-flash", reasoning_efforts=("none", "low", "high", "max")
+        ),
+        # A router id a listing might one day carry: it must never shadow the
+        # route ladder `configure.ROUTER_EFFORT_LADDERS` owns.
+        discovery.DiscoveredModel(id="auto", reasoning_efforts=("low", "high")),
+    ]
+
+
+def test_a_cold_source_never_blocks_or_degrades_the_radient_read(
+    tmp_path, monkeypatch, _no_relayed_warm_state
+) -> None:
+    """The defect: a synchronous OpenRouter fetch blocked the Radient read for
+    the whole fetch ceiling when that host hangs, outran the caller's timeout,
+    reported the Radient result as degraded and put OpenRouter's own document
+    into backoff. The borrow now peeks; the fetch is a background warm."""
+    import threading
+
+    from local_operator.model import catalogue
+
+    release = threading.Event()
+    started = threading.Event()
+
+    def hung(*_a: object, **_k: object) -> object:
+        started.set()
+        release.wait(timeout=10)
+        raise TimeoutError("openrouter.ai never answered")
+
+    monkeypatch.setattr(discovery, "fetch_models", hung)
+    rows = _silent_radient_rows()
+
+    try:
+        with catalogue.collect_unavailable() as unavailable:
+            # Returning at all while the fetch is still parked on `release` is
+            # the structural proof that the caller does not wait on it.
+            out = discovery._borrow_relayed_efforts(
+                "radient", rows, cache_dir=tmp_path, client=None
+            )
+        assert not release.is_set(), "premise: the fetch was still parked when the call returned"
+        assert out == rows, "a cold source leaves the rows untouched"
+        assert unavailable == [], "the warm must not mark the caller's resolution degraded"
+        assert started.wait(timeout=5), "premise: the warm really started a fetch"
+    finally:
+        release.set()
+    for thread in list(discovery._relayed_warm_threads.values()):
+        thread.join(timeout=5)
+    assert not (tmp_path / "openrouter.listing.json").exists()
+    # And the failed warm leaves no failure backoff on OpenRouter's own document.
+    assert str(tmp_path / "openrouter.listing.json") not in catalogue._last_failure
+
+
+def test_the_warm_fills_the_source_for_the_next_read(
+    tmp_path, monkeypatch, _no_relayed_warm_state
+) -> None:
+    calls: list[str] = []
+
+    def fake_fetch(provider_id: str, **_k: object) -> list[discovery.DiscoveredModel]:
+        calls.append(provider_id)
+        return _openrouter_rows()
+
+    monkeypatch.setattr(discovery, "fetch_models", fake_fetch)
+
+    first = discovery._borrow_relayed_efforts(
+        "radient", _silent_radient_rows(), cache_dir=tmp_path, client=None
+    )
+    for thread in list(discovery._relayed_warm_threads.values()):
+        thread.join(timeout=5)
+    second = discovery._borrow_relayed_efforts(
+        "radient", _silent_radient_rows(), cache_dir=tmp_path, client=None
+    )
+
+    assert first[0].reasoning_efforts is None
+    assert second[0].reasoning_efforts == ("none", "low", "high", "max")
+    assert calls == ["openrouter"], "one source fetch, and none for Radient"
+    # Second read was served from the stored document: no second warm.
+    assert len(discovery._relayed_warm_threads) == 1
+
+
+def test_a_failed_warm_is_not_retried_by_every_read(
+    tmp_path, monkeypatch, _no_relayed_warm_state
+) -> None:
+    attempts = 0
+
+    def failing(*_a: object, **_k: object) -> object:
+        nonlocal attempts
+        attempts += 1
+        raise ConnectionError("blocked")
+
+    monkeypatch.setattr(discovery, "fetch_models", failing)
+
+    for _ in range(4):
+        discovery._borrow_relayed_efforts(
+            "radient", _silent_radient_rows(), cache_dir=tmp_path, client=None
+        )
+        for thread in list(discovery._relayed_warm_threads.values()):
+            thread.join(timeout=5)
+
+    assert attempts == 1
+
+
+def test_an_injected_client_never_starts_a_source_request(
+    tmp_path, monkeypatch, _no_relayed_warm_state
+) -> None:
+    monkeypatch.setattr(
+        discovery,
+        "fetch_models",
+        lambda *_a, **_k: pytest.fail(
+            "a caller-injected transport must not trigger a source fetch"
+        ),
+    )
+
+    out = discovery._borrow_relayed_efforts(
+        "radient", _silent_radient_rows(), cache_dir=tmp_path, client=_StubClient([])
+    )
+
+    assert out[0].reasoning_efforts is None
+    assert discovery._relayed_warm_threads == {}
+
+
+def test_an_expired_source_is_used_and_refreshed_in_the_background(
+    tmp_path, monkeypatch, _no_relayed_warm_state
+) -> None:
+    from local_operator.model.catalogue import DEFAULT_TTL_S
+
+    _seed_openrouter(tmp_path)
+    path = tmp_path / "openrouter.listing.json"
+    document = json.loads(path.read_text())
+    document["fetched_at"] = time.time() - DEFAULT_TTL_S - 60
+    path.write_text(json.dumps(document), encoding="utf-8")
+    refreshed: list[str] = []
+    monkeypatch.setattr(
+        discovery,
+        "fetch_models",
+        lambda provider_id, **_k: refreshed.append(provider_id) or _openrouter_rows(),
+    )
+
+    out = discovery._borrow_relayed_efforts(
+        "radient", _silent_radient_rows(), cache_dir=tmp_path, client=None
+    )
+    for thread in list(discovery._relayed_warm_threads.values()):
+        thread.join(timeout=5)
+
+    # The stale ladder is still better than none, and the refresh was asked for.
+    assert out[0].reasoning_efforts == ("none", "low", "high", "max")
+    assert refreshed == ["openrouter"]
+
+
+def test_a_router_id_is_never_given_a_borrowed_ladder(tmp_path, _no_relayed_warm_state) -> None:
+    available_models(
+        "openrouter",
+        api_key=None,
+        client=_StubClient(
+            [
+                _Response(
+                    200,
+                    {
+                        "data": [
+                            {"id": "auto", "reasoning": {"supported_efforts": ["low", "high"]}},
+                            {
+                                "id": "deepseek/deepseek-v4.1-flash",
+                                "reasoning": {"supported_efforts": ["none", "high"]},
+                            },
+                        ]
+                    },
+                )
+            ]
+        ),
+        cache_dir=tmp_path,
+    )
+
+    out = discovery._borrow_relayed_efforts(
+        "radient", _silent_radient_rows(), cache_dir=tmp_path, client=_StubClient([])
+    )
+
+    by_id = {row.id: row for row in out}
+    assert by_id["auto"].reasoning_efforts is None
+    assert by_id["deepseek/deepseek-v4.1-flash"].reasoning_efforts == ("none", "high")
+
+
+def test_a_failed_warm_does_not_back_off_openrouters_own_readers(
+    tmp_path, monkeypatch, _no_relayed_warm_state
+) -> None:
+    """Review round 2, MAJOR-1: the warm's failure used to stand as OpenRouter's
+    60 s failure backoff, so a user who then opened OpenRouter was answered
+    ``stale`` for a minute because a Radient read had asked for ladders."""
+    up = False
+    calls: list[str] = []
+
+    def fetch(provider_id: str, **_k: object) -> list[discovery.DiscoveredModel] | None:
+        calls.append(provider_id)
+        return _openrouter_rows() if up else None
+
+    monkeypatch.setattr(discovery, "fetch_models", fetch)
+
+    discovery._borrow_relayed_efforts(
+        "radient", _silent_radient_rows(), cache_dir=tmp_path, client=None
+    )
+    for thread in list(discovery._relayed_warm_threads.values()):
+        thread.join(timeout=5)
+    assert calls == ["openrouter"], "premise: the warm ran and failed"
+
+    up = True
+    rows, status = available_models("openrouter", api_key=None, cache_dir=tmp_path)
+
+    assert calls == ["openrouter", "openrouter"], "OpenRouter's own read was not suppressed"
+    assert status == "ok"
+    assert rows
+
+
+def test_a_row_that_states_its_own_ladder_survives_a_duplicate_silent_id(tmp_path) -> None:
+    _seed_openrouter(tmp_path)
+    rows = [
+        discovery.DiscoveredModel(id="deepseek/deepseek-v4.1-flash"),
+        discovery.DiscoveredModel(id="deepseek/deepseek-v4.1-flash", reasoning_efforts=("low",)),
+    ]
+
+    out = discovery._borrow_relayed_efforts(
+        "radient", rows, cache_dir=tmp_path, client=_StubClient([])
+    )
+
+    assert [row.reasoning_efforts for row in out] == [("none", "low", "high", "max"), ("low",)]

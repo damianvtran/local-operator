@@ -117,6 +117,14 @@ tried, in configured order. A fallback whose own provider is already at 0% is
 skipped rather than pinned — hopping onto a maxed provider costs a full prompt
 to learn what was already known.
 
+A login **borrowed** from another mesh device descends the same way. When the
+owner refuses with `quota_blocked` (its logins are resting, or this device's own
+cooldowns excluded each one), the owner has already picked among its accounts,
+so the turn records a `quota` failure carrying the owner's reset and walks on to
+the next target. The chain walked is the one in **this device's**
+`retry.fallbackChains`: chains are not synced between devices, so a remote node
+with an empty chain stops on the borrowed refusal.
+
 ## Pinned children (subagents launched on a resolved model)
 
 A subagent launched on an explicitly resolved model — a role's `effort` tier,
@@ -213,6 +221,26 @@ Returning to the primary is three separate mechanisms:
   serves sheds its mark, and the bench is **advisory** — the stream driver's
   loop-back sweep re-walks benched targets before declaring a turn exhausted, so
   it can delay a target but never remove the last route to a served turn.
+
+**Running subagents never meet a message boundary.** A subagent's whole task is
+one user message, so a child that fell back stays there until it finishes —
+even after the primary's quota returns. Two hub ops give it a boundary without
+ending its turn:
+
+- **`hub op='set_model'`** (`model='inherit'`, `provider/id`, or omitted to
+  only re-probe; `cascade=true` for the whole running subtree) applies at the
+  child's next model call: it withdraws the active fallback outright (cooldown
+  included, like an explicit `/model` re-selection) and re-probes. Same job id,
+  same subagents, same tabs. A primary still out of quota fails over again on
+  that call — the receipt and `hub list` show the model actually serving.
+- **`hub op='steer'`** re-probes like a new user message: a quota pin is
+  re-checked either way (with `usageAwareFallback: true` the primary's quota
+  is read first; otherwise the next call simply retries the primary), and a
+  transport pin keeps its cooldown.
+
+`hub list` and `jobs` show each child's served model when it differs from its
+primary: `pinned X, ran on Y` for a pinned child, `on Y (primary X)` for one
+that inherits.
 
 ## Retry and backoff
 

@@ -1,0 +1,26 @@
+# actual command output captured by auditor session fe66a4c43d27 on 2026-11-09 at worktree HEAD 50badda034d755ebb049c4f542f3073439bf823e
+$ .venv/bin/python scripts/i18n/check.py   (tail; full run exit 0)
+check.py: ok — 215 file(s) scanned, 2539 literal(s) at or below the baseline, catalogues consistent; 81 advisory finding(s) (report-only until activated)
+
+real	2m47.071s
+user	0m23.388s
+sys	0m51.538s
+EXIT=0
+
+$ .venv/bin/python <inline mechanical parity script: keys, {placeholders}, `code`, guide://, [y/N] trailing space, NFC, verbatim names>
+keys en/vi 28 28 diff []
+placeholder/backtick mismatch []
+guide:// mismatch []
+[y/N] trailing [('cli.permissions.setup.confirm', True), ('cli.permissions.setup.always_allow', True)]
+NFC all True
+ICU plural in en []
+verbatim names True
+
+$ shasum -a 256 (inputs)
+eba1e1dd19a618fa8c46a3744197afd2dfa4e84b6774f16b20e8de389f4dbf8f  local_operator/i18n/catalogues/en/cli.permissions.json
+aca67def3cff590dcc5f681e8ff0127fecf6b33775555e3eaafc240070ba15ce  local_operator/i18n/catalogues/en/cli.permissions.context.json
+794cb3a79453d613e9d20eb73d760e062a658637be881b688f518f327f163fc3  local_operator/i18n/catalogues/vi/cli.permissions.json
+e4901497ed553e2b2ae4a2660bf776adb787b89e11d7eb0f8d08f3da4b227888  i18n/style-guides/vi.md
+0eb34437a8c3d6f564f278ef957a603b1d9f51bb07d5ddae5ea8f37deba962f8  i18n/glossary.md
+$ .venv/bin/python scripts/i18n/ledger.py history-sha --locale vi --namespace cli.permissions
+4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945

@@ -752,6 +752,45 @@ def test_the_challenge_says_what_the_reason_is_and_names_both_replies() -> None:
     assert "obs-1" in text
 
 
+def test_the_done_challenge_asks_for_verification_at_the_source() -> None:
+    """The challenge checks the DELIVERABLE, not only how the screen looks.
+
+    Arm main29 measured the screen-only wording's miss: ``t29a-t010`` saved a
+    document with one wrong cell (378.67 for 302.93; its own finish text did
+    false arithmetic) and the challenge sent it to re-check the rendering;
+    ``t29a-t003`` set opacity where the task said transparency. Each clause
+    below is one check a screenshot cannot answer. The text must stay generic:
+    no task, benchmark or application names leak into the shared builder.
+    """
+
+    observation = Observation(
+        task_id="task-1",
+        episode_id="episode-1",
+        sequence=0,
+        observation_id="obs-1",
+        text="Fill the table and save the document",
+    )
+    claim = FinishAction(observation_id="obs-1", status="done", reason="Table filled and saved")
+
+    text = build_completion_challenge(
+        claim=claim, instruction=observation.text or "", observation=observation
+    )
+    lowered = text.lower()
+
+    assert "how the screen looks is not the same as what was saved or set" in lowered
+    assert "requirements one by one, in their exact wording" in lowered
+    assert "inspect the actual contents" in lowered
+    assert "not only how it renders on screen" in lowered
+    assert "recompute every number you derived or entered from its inputs" in lowered
+    assert "the units" in lowered
+    assert "complement or opposite are not interchangeable" in lowered
+    assert "if you have verified every requirement at the source" in lowered
+    # The old screen-only test is gone: "visible here" is no longer the bar.
+    assert "if any required outcome is not visible" not in lowered
+    for leak in ("osworld", "libreoffice", "opacity", "transparency", "docx", "302.93"):
+        assert leak not in lowered, leak
+
+
 # ---------------------------------------------------------------------------
 # The driver: the flag, and the refusal to seal a gate that cannot run
 # ---------------------------------------------------------------------------

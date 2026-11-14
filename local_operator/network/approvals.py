@@ -557,19 +557,39 @@ def load_record(
     return presented(_load_raw(approval_id, root), now)
 
 
-def list_records(*, root: Path | None = None, now: float | None = None) -> list[dict[str, Any]]:
+#: Kinds that live in this store for legacy reasons but are NOT mesh decisions.
+#: Account profile proposals moved to ``local_operator.profile_proposals``
+#: (reviewed in Agents, not Mesh): older runtimes may still file
+#: ``profile_save`` records here until they restart, and those records are
+#: imported from disk by ``profile_proposals.import_legacy`` — so every mesh
+#: listing (desktop Mesh tray, event-feed badge, ``lop network approvals``, the
+#: phone pairing budget) hides them at the source rather than per reader.
+NON_MESH_KINDS: frozenset[str] = frozenset({KIND_PROFILE_SAVE})
+
+
+def list_records(
+    *,
+    root: Path | None = None,
+    now: float | None = None,
+    exclude_kinds: frozenset[str] = NON_MESH_KINDS,
+) -> list[dict[str, Any]]:
     """Every record, folded, oldest first. The cold scan the badge is built on.
 
     A missing directory answers ``[]`` (the ``store.networks_dir`` rule: a
     reader must not be the reason ``network/`` appears). Unreadable files are
     skipped rather than fatal — a listing is how a person finds out something is
     wrong, so it must be the last surface to break.
+
+    ``exclude_kinds`` defaults to :data:`NON_MESH_KINDS`; a caller that truly
+    needs every kind passes ``frozenset()``.
     """
     directory = approvals_dir(root)
     records: list[dict[str, Any]] = []
     for path in sorted(directory.glob("ap_*.json")):
         data = _read_json(path)
         if isinstance(data, dict) and isinstance(data.get("approval_id"), str):
+            if data.get("kind") in exclude_kinds:
+                continue
             records.append(presented(data, now))
     for path in sorted(approvals_dir(root, enrollment_only=True).glob("apn_*.json")):
         try:

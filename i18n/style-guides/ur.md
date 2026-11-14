@@ -26,6 +26,12 @@ RTL & bidi section before translating a single string.
 - Settled loanwords take Urdu script: سیشن، ٹوکن، فائل، ریموٹ، ورک اسپیس.
 - Prefer the settled Urdu term where one exists: ترتیبات (settings), محفوظ
   کریں (save), استعمال (usage).
+- macOS UI labels stay in English, verbatim: macOS ships no Urdu UI, so the
+  user sees English labels on screen (System Settings, Privacy & Security,
+  Screen & System Audio Recording, "Allow", "Always Allow", Keychain Access).
+  An Urdu gloss may follow in brackets, never replace the label. (Recorded
+  from the `cli.permissions` round-1 audit, finding U3.) The ترتیبات rule
+  above is for Local Operator's own settings, not the macOS app.
 
 ## Locale calls (ur)
 

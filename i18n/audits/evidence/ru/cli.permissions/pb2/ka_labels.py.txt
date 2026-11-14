@@ -1,0 +1,9 @@
+"""Keychain Access (CoreServices/Applications) labels en_GB|ru: app name, Access Control tab, private key, removal button."""
+import plistlib, glob, os
+K='/System/Library/CoreServices/Applications/Keychain Access.app/Contents/Resources/'
+for f in sorted(glob.glob(K+'*.loctable')):
+    t=plistlib.load(open(f,'rb')); e=t.get('en_GB') or t.get('en') or {}; r=t.get('ru',{})
+    for k,v in e.items():
+        if not isinstance(v,str): continue
+        if v.strip() in ('Access Control','Attributes','Keychain Access','private key','Private Key','-','Remove','Delete') or 'private key' in v.lower() or 'Access Control' in v or v.startswith('Keychain Access'):
+            print(os.path.basename(f),'|',repr(k),'|',v,'|',r.get(k))

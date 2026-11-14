@@ -78,6 +78,7 @@
   "wire.errors.desktop.session_is_remote_open": "{session_id} está en {label}, y este escritorio todavía no puede abrir una conversación en otro dispositivo. Tráela a casa con `lop sessions move {session_id} --to local`, o pruébala desde la terminal con `/network sessions --peer {label} --engage {session_id}`.",
   "wire.errors.desktop.session_is_remote_write": "El {noun} de {session_id} está en {label}, y este escritorio todavía no puede escribirlo allí; aquí no se cambió nada.",
   "wire.errors.desktop.session_not_found": "no hay ninguna conversación con id {session_id}",
+  "wire.errors.desktop.settings_intent_generation_moved": "Un cambio más reciente ha sustituido a este, así que no hay nada que cancelar.",
   "wire.errors.desktop.skill_alias_occupied": "Una habilidad local ya usa este nombre. Haz pull de la habilidad del Hub con --dry-run para revisar un merge de adopción, o elige otro nombre.",
   "wire.errors.desktop.skill_local_changes_unpublished": "Esta habilidad tiene cambios locales que nunca se publicaron, y al quitarla se perderían. Publícalos primero, o quítala igualmente para descartarlos.",
   "wire.errors.desktop.skill_not_editable": "Aquí esta habilidad es de solo lectura. Cópiala a tus habilidades para hacer cambios.",
@@ -86,5 +87,12 @@
   "wire.errors.desktop.sort_unknown": "sort debe ser uno de {sorts}.",
   "wire.errors.desktop.start_after_end": "El inicio debe preceder al fin",
   "wire.errors.desktop.unknown_command": "Comando desconocido",
-  "wire.errors.desktop.unknown_provider": "Proveedor desconocido"
+  "wire.errors.desktop.unknown_provider": "Proveedor desconocido",
+  "wire.errors.desktop.session_in_project": "la conversación {session_id} está vinculada a un proyecto; desvincúlala primero",
+  "wire.errors.desktop.session_pinned": "la conversación {session_id} está fijada; desfíjala primero",
+  "wire.errors.desktop.session_temporary": "la conversación {session_id} es un chat temporal; consérvala primero",
+  "wire.errors.desktop.session_temporary_deleted": "este chat temporal se eliminó tras quedar inactivo",
+  "wire.errors.desktop.temporary_mark_failed": "no se pudo marcar la conversación {session_id} como temporal, así que no se cambió nada",
+  "wire.errors.desktop.temporary_not_user": "la conversación {session_id} no la iniciaste tú, así que no puede volverse temporal",
+  "wire.errors.desktop.temporary_peer_unsupported": "todavía no se puede iniciar un chat temporal en otro dispositivo"
 }

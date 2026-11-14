@@ -468,6 +468,20 @@ class AuthStoreError(Exception):
     """Credential resolution/refresh failure (never a bare sqlite error)."""
 
 
+class AuthStoreBusyError(AuthStoreError):
+    """Another thread or process held the bootstrap guard past its deadline.
+
+    A TYPE rather than only a sentence because callers act on it differently from
+    every other store failure: it is local lock contention (several `lop`
+    processes opening the store at once on a loaded machine), it says nothing
+    about the login or the network, and it clears as soon as the other opener
+    finishes. The tunnel connector retries it briefly and reports it as "local
+    credential store busy" instead of blaming Radient; matching the message
+    text for that would break on the first copy edit. Still an `AuthStoreError`,
+    so every existing `except AuthStoreError` keeps catching it.
+    """
+
+
 # Bootstrap exclusion is private to AuthStore, not a new general locking API.
 # SQLite serializes our BEGIN/ALTER, but WAL initialization happens BEFORE that
 # transaction and two direct constructors can conflict there (SQLITE_BUSY5).
@@ -613,7 +627,7 @@ def _auth_bootstrap_guard(database: Path) -> Iterator[None]:
     try:
         remaining = deadline - _bootstrap_clock()
         if remaining <= 0 or not entry.mutex.acquire(timeout=remaining):
-            raise AuthStoreError("Timed out acquiring AuthStore bootstrap thread guard")
+            raise AuthStoreBusyError("Timed out acquiring AuthStore bootstrap thread guard")
         held = True
         with _BOOTSTRAP_REGISTRY_LOCK:
             entry.owner = ident
@@ -624,7 +638,7 @@ def _auth_bootstrap_guard(database: Path) -> Iterator[None]:
         fd = _open_bootstrap_file(lock_path, database)
         while True:
             if _bootstrap_clock() >= deadline:
-                raise AuthStoreError("Timed out acquiring AuthStore bootstrap process guard")
+                raise AuthStoreBusyError("Timed out acquiring AuthStore bootstrap process guard")
             if _try_lock(fd):
                 locked = True
                 break

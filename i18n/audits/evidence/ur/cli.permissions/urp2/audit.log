@@ -1,0 +1,52 @@
+$ .venv/bin/python scripts/i18n/check.py --catalogues-only  # 2026-11-09T19:39:09Z @ 788cc399410196b080cfc9f7e7bd558ccb713140
+check.py: catalogue checks: 0 problem(s)
+exit=0
+$ .venv/bin/python mech_check.py  # own mechanical check (script retained as mech_check.py.txt)
+keys 38 38 order_equal True
+cli.permissions.status.reason.isolated_home FIRST_STRONG_LATIN_line0 HOME آپ کی لاگ ان ہوم ڈا
+cli.permissions.status.reason.runtime_root_override FIRST_STRONG_LATIN_line0 LOCAL_OPERATOR_RUNTIME_R
+cli.permissions.status.reason.config_dir_override FIRST_STRONG_LATIN_line0 LOCAL_OPERATOR_CONFIG_DI
+cli.permissions.setup.no_app FIRST_STRONG_LATIN_line0 Local Operator ڈیسک ٹاپ 
+cli.permissions.setup.explain FIRST_STRONG_LATIN_line1 - "Allow" (اجازت دیں) صر
+cli.permissions.setup.explain FIRST_STRONG_LATIN_line2 - "Always Allow" (ہمیشہ 
+findings 6
+exit=0
+$ python3 apple_labels.py
+Screen & System Audio Recording -> ["SecurityPrivacyExtension.appex/Localizable.loctable[en] key='SCREEN_CAPTURE_HEADER'", "SecurityPrivacyExtension.appex/Localizable.loctable[en] key='SCREENANDAUDIOCAPTURE'"]
+Privacy & Security -> ["SecurityPrivacyExtension.appex/InfoPlist.loctable[en] key='CFBundleDisplayName'", "SecurityPrivacyExtension.appex/InfoPlist.loctable[en] key='CFBundleName'", "System Settings.app/Localizable.loctable[en] key='Privacy & Security'"]
+System Settings -> NOT FOUND
+Files & Folders -> ["SecurityPrivacyExtension.appex/Localizable.loctable[en] key='FILE_ACCESS_COMBINED'"]
+Accessibility -> ["System Settings.app/Localizable.loctable[en] key='Accessibility'"]
+Keychain Access -> ["Keychain Access.app/Localizable.loctable[en] key='Keychain Access'", "Keychain Access.app/InfoPlist.loctable[en] key='CFBundleName'", "Keychain Access.app/InfoPlist.loctable[en] key='CFBundleDisplayName'"]
+Access Control -> NOT FOUND
+Always Allow -> NOT FOUND
+Allow -> ["SecurityPrivacyExtension.appex/Localizable.loctable[en] key='Allow'"]
+Screen Recording -> ["SecurityPrivacyExtension.appex/Localizable.loctable[en] key='SCREEN_CAPTURE'"]
+ur in loctable languages: False | hi: True | n langs 265
+$ python3 apple_labels4.py
+ConfirmAccess.loctable: ur present = False ; en_GB entries matching Allow:
+  en_GB '100267.title' = 'Always Allow'
+  en_GB '100266.title' = 'Deny'
+  en_GB '100268.title' = 'Allow'
+{('Library/Frameworks/Security.framework/Versions/A/MachServices/SecurityAgent.bundle/Contents/Resources/Base.lproj/ConfirmAccess.nib', 'Allow'), ('Library/Frameworks/Security.framework/Versions/A/MachServices/SecurityAgent.bundle/Contents/Resources/Base.lproj/ConfirmAccess.nib', 'Always Allow'), ('Library/Frameworks/Security.framework/Versions/A/MachServices/SecurityAgent.bundle/Contents/Resources/Base.lproj/ConfirmAccess.nib', 'Deny')}
+['ACLEditor.loctable', 'AddCertificatePanel.loctable', 'Algorithms.loctable', 'AppIcon.icns', 'Assets.car', 'Base.lproj', 'CertificateDetachedView.loctable', 'CertificatePrefEditor.loctable', 'CertificatePrefPreview.loctable', 'Defaults.plist', 'Errors.loctable', 'InfoPlist.loctable', 'KCAPreferences.loctable', 'KeyEditor.loctable', 'KeyPreview.loctable', 'KeychainFirstAid.loctable', 'Localizable.loctable', 'MainMenu.loctable', 'MasterView.loctable', 'NewCertificatePrefItem.loctable', 'NewKeychainItem.loctable', 'NoteEditor.loctable', 'NotePreview.loctable', 'PasswordEditor.loctable', 'PasswordPreview.loctable', 'ar.lproj', 'ca.lproj', 'configKeychain.loctable', 'cs.lproj', 'da.lproj', 'de.lproj', 'el.lproj', 'en.lproj', 'en_AU.lproj', 'en_GB.lproj', 'es.lproj', 'es_419.lproj', 'fi.lproj', 'fr.lproj', 'fr_CA.lproj']
+  KA MasterView.loctable en_GB '21.title' = 'Keychain Access'
+  KA MainMenu.loctable en_GB '57.title' = 'Keychain Access'
+  KA MainMenu.loctable en_GB '56.title' = 'Keychain Access'
+  KA NoteEditor.loctable en_GB '295.label' = 'Access Control'
+  KA PasswordEditor.loctable en_GB '257.label' = 'Access Control'
+  KA KeyEditor.loctable en_GB '302.label' = 'Access Control'
+  KA CertificatePrefEditor.loctable en_GB '257.label' = 'Access Control'
+  KA Localizable.loctable en_GB 'Keychain Access' = 'Keychain Access'
+  KA Localizable.loctable en_GB 'private key' = 'private key'
+  KA InfoPlist.loctable en_GB 'CFBundleName' = 'Keychain Access'
+  KA InfoPlist.loctable en_GB 'CFBundleDisplayName' = 'Keychain Access'
+{('Library/CoreServices/Applications/Keychain Access.app/Contents/Resources/Base.lproj/NoteEditor.nib', 'Access Control')}
+{('Library/CoreServices/Applications/Keychain Access.app/Contents/Resources/Base.lproj/KeyEditor.nib', 'Access Control')}
+{('Library/CoreServices/Applications/Keychain Access.app/Contents/Resources/Base.lproj/CertificatePrefEditor.nib', 'Access Control')}
+{('Library/CoreServices/Applications/Keychain Access.app/Contents/Resources/Base.lproj/PasswordEditor.nib', 'Access Control')}
+{('Library/CoreServices/Applications/Keychain Access.app/Contents/Resources/Base.lproj/ACLEditor.nib', 'Always allow access by these applications:')}
+System Settings InfoPlist en_GB: {'CFBundleDisplayName': 'System Settings', 'CFBundleName': 'System Settings'} ur: False False
+ProductName:		macOS
+ProductVersion:		27.2
+BuildVersion:		26B123

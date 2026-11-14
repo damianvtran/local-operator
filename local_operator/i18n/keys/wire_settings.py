@@ -478,6 +478,38 @@ def compaction_enabled_label() -> Msg:
     return Msg("wire.settings.compaction_enabled.label", {})
 
 
+def compaction_idle_enabled_choice_false_description() -> Msg:
+    return Msg("wire.settings.compaction_idle_enabled.choice.false.description", {})
+
+
+def compaction_idle_enabled_choice_true_description() -> Msg:
+    return Msg("wire.settings.compaction_idle_enabled.choice.true.description", {})
+
+
+def compaction_idle_enabled_help() -> Msg:
+    return Msg("wire.settings.compaction_idle_enabled.help", {})
+
+
+def compaction_idle_enabled_label() -> Msg:
+    return Msg("wire.settings.compaction_idle_enabled.label", {})
+
+
+def compaction_idle_min_growth_tokens_help() -> Msg:
+    return Msg("wire.settings.compaction_idle_min_growth_tokens.help", {})
+
+
+def compaction_idle_min_growth_tokens_label() -> Msg:
+    return Msg("wire.settings.compaction_idle_min_growth_tokens.label", {})
+
+
+def compaction_idle_threshold_tokens_help() -> Msg:
+    return Msg("wire.settings.compaction_idle_threshold_tokens.help", {})
+
+
+def compaction_idle_threshold_tokens_label() -> Msg:
+    return Msg("wire.settings.compaction_idle_threshold_tokens.label", {})
+
+
 def compaction_keep_recent_tokens_help() -> Msg:
     return Msg("wire.settings.compaction_keep_recent_tokens.help", {})
 
@@ -1618,6 +1650,14 @@ def network_credentials_grant_ttl_s_label() -> Msg:
     return Msg("wire.settings.network_credentials_grant_ttl_s.label", {})
 
 
+def network_credentials_offline_hold_s_help() -> Msg:
+    return Msg("wire.settings.network_credentials_offline_hold_s.help", {})
+
+
+def network_credentials_offline_hold_s_label() -> Msg:
+    return Msg("wire.settings.network_credentials_offline_hold_s.label", {})
+
+
 def network_listen_address_help() -> Msg:
     return Msg("wire.settings.network_listen_address.help", {})
 
@@ -2406,6 +2446,30 @@ def session_cleanup_remove_empty_label() -> Msg:
     return Msg("wire.settings.session_cleanup_remove_empty.label", {})
 
 
+def session_cleanup_temporary_idle_minutes_choice_15m_label() -> Msg:
+    return Msg("wire.settings.session_cleanup_temporary_idle_minutes.choice.15m.label", {})
+
+
+def session_cleanup_temporary_idle_minutes_choice_24h_label() -> Msg:
+    return Msg("wire.settings.session_cleanup_temporary_idle_minutes.choice.24h.label", {})
+
+
+def session_cleanup_temporary_idle_minutes_choice_2h_label() -> Msg:
+    return Msg("wire.settings.session_cleanup_temporary_idle_minutes.choice.2h.label", {})
+
+
+def session_cleanup_temporary_idle_minutes_choice_30m_label() -> Msg:
+    return Msg("wire.settings.session_cleanup_temporary_idle_minutes.choice.30m.label", {})
+
+
+def session_cleanup_temporary_idle_minutes_help() -> Msg:
+    return Msg("wire.settings.session_cleanup_temporary_idle_minutes.help", {})
+
+
+def session_cleanup_temporary_idle_minutes_label() -> Msg:
+    return Msg("wire.settings.session_cleanup_temporary_idle_minutes.label", {})
+
+
 def session_compression_description() -> Msg:
     return Msg("wire.settings.session_compression.description", {})
 
@@ -2968,6 +3032,14 @@ def team_bridge_screening_budget_per_hour_help() -> Msg:
 
 def team_bridge_screening_budget_per_hour_label() -> Msg:
     return Msg("wire.settings.team_bridge_screening_budget_per_hour.label", {})
+
+
+def team_bridge_screening_model_help() -> Msg:
+    return Msg("wire.settings.team_bridge_screening_model.help", {})
+
+
+def team_bridge_screening_model_label() -> Msg:
+    return Msg("wire.settings.team_bridge_screening_model.label", {})
 
 
 def team_bridge_screening_sender_budget_per_hour_help() -> Msg:

@@ -1401,6 +1401,35 @@ class BrowserResource:
             # no message, matching how the CLI renders its outer handler.
             return BrowserCleanupResult("pending", str(exc) or type(exc).__name__)
 
+    async def release_and_finish(self, outcome: str) -> BrowserCleanupResult:
+        """Drop this scope's retention, then settle it (close its tab).
+
+        The close path for a surface a child HANDED to its parent (see
+        ``browser_bridge.handoff``). A plain ``finish`` would answer "retained"
+        and keep the tab, because the host honours a scope's retention through
+        ``owner_finish`` by design; the new owner closing it is exactly the
+        explicit release that retention waits for. Ordered release-then-finish
+        so a host that loses the second call still holds an unretained scope a
+        later finish (or ``lop browser cleanup``) can settle.
+        """
+        try:
+            self.initialize()
+        except (RuntimeError, OSError, ValueError):
+            return BrowserCleanupResult(
+                "unresolved", "owner changed or unreadable; no action taken"
+            )
+        if self.record.get("retention"):
+            try:
+                if self.ownership_mode() is not False:
+                    async with self.lock:
+                        await self.ensure_recovered()
+                        await self.client().call("owner_release", self.params())
+                self.record["retention"] = ""
+                self._save()
+            except Exception as exc:
+                return BrowserCleanupResult("pending", str(exc) or type(exc).__name__)
+        return await self.finish(self.generation, outcome)
+
     async def finish_degraded(self) -> BrowserCleanupResult:
         """Settle the scope with a plain `close`, for a peer with no `owner_*`.
 
@@ -1478,6 +1507,15 @@ def cleanup_disposition(value: dict[str, Any]) -> tuple[bool, str]:
     the behaviour the fence exists to discourage.
     """
     if value.get("retention"):
+        if value.get("handed_to"):
+            # A finished child's retained tab handed to its parent (see
+            # ``browser_bridge.handoff``): the CHILD's record still holds it, so
+            # without this the operator is told to ask a dead session to release
+            # it, when the parent is the one that owns and closes it now.
+            return False, (
+                f"retained: {value['retention']} — handed to parent session "
+                f"{value['handed_to']}, which owns and closes it"
+            )
         return False, f"retained: {value['retention']} — the owning session must release it"
     if not value.get("terminal"):
         # The crash shape: killed before finish_browser_scope, so no terminal

@@ -71,6 +71,7 @@ __all__ = [
     "carry_digest_lines",
     "carry_is_empty",
     "is_role_header",
+    "last_role_header",
     "merge_carry",
     "mine_carry",
     "parse_carry",
@@ -185,6 +186,26 @@ _ROLE_HEADER = re.compile(
 )
 
 
+#: The marker ``snapcompact.compact_to_archive`` appends to an archive's head
+#: when it drops the oldest pages (``[... N chars of oldest history dropped]``).
+#: It is a SECTION BREAK for attribution: whatever follows it resumed mid-way
+#: through an unknown speaker's section, hundreds of thousands of chars after
+#: the last header before it, so no earlier header may claim that text. The
+#: archive is stored as ``text_head + kept_middle``, so on the next pass the
+#: marker is often glued to the following header on one line
+#: (``[... 322632 chars of oldest history dropped][Assistant]``), which hid
+#: that header from the miner (QA round 1 on PR #3750, Q1). Must match the
+#: f-string in ``compact_to_archive``.
+DROPPED_HISTORY_MARKER = re.compile(r"^\[\.\.\. \d+ chars of oldest history dropped\]")
+
+
+def _after_drop_marker(line: str) -> str | None:
+    """The stripped text after a leading drop marker, or ``None`` if none leads."""
+    stripped = line.strip()
+    marker = DROPPED_HISTORY_MARKER.match(stripped)
+    return stripped[marker.end() :].strip() if marker else None
+
+
 def is_role_header(line: str) -> bool:
     """True when ``line`` opens with one of the serializers' exact role headers.
 
@@ -194,6 +215,48 @@ def is_role_header(line: str) -> bool:
     exactly the way the anchor did.
     """
     return bool(_ROLE_HEADER.match(line.strip()))
+
+
+def last_role_header(text: str) -> str | None:
+    """The bare ``[Role]`` header of the section ``text`` ENDS inside, if any.
+
+    Why it exists: snapcompact mines only the pages it drops, and those pages
+    start exactly where the verbatim head edge stops — usually mid-section.
+    :func:`mine_carry` deliberately treats text before the first header as
+    ``other`` (QA round 3, Q12: a head ending mid tool-result mined JSON as
+    decisions). That is right for an unknown span but wrong when the head
+    PROVES the speaker: a long operator ask straddling the head boundary had
+    its continuation dropped with no ``[User]`` header, so the miner kept
+    nothing of it and the ask's later sentences vanished from every surface.
+    Tightening the head to the compaction threshold makes that straddle more
+    common, so the pass now re-opens the continuing section with this header.
+
+    Returns only the bracketed header (``[User]``, ``[Tool result: bash]``),
+    never its same-line remainder, so prefixing it adds no content of its own.
+    Scans from the end so a 60k-char head costs one reversed line walk.
+
+    Precondition for prepending the result to a continuation: ``text`` must
+    end at a LINE BOUNDARY inside a section body. A raw char cut can end inside
+    a header token (``[Assi`` | ``stant]``); the half-header is not a header,
+    so this returns the PREVIOUS section's header and prefixing it would
+    attribute assistant or tool text to the operator (review round 1 on PR
+    #3750, R1). Callers strip the trailing partial line first and rebuild a
+    split header from its two halves instead.
+
+    A drop marker after the last header returns ``None`` (or the header glued
+    after it): the text past the marker belongs to an unknown speaker, see
+    :data:`DROPPED_HISTORY_MARKER`. When unsure, no header — mislabeling is
+    worse than the role-less default.
+    """
+    for raw in reversed(text.splitlines()):
+        after_marker = _after_drop_marker(raw)
+        if after_marker is not None:
+            header = _ROLE_HEADER.match(after_marker)
+            return header.group(0) if header else None
+        header = _ROLE_HEADER.match(raw.strip())
+        if header:
+            return header.group(0)
+    return None
 
 
 #: Longest prefix of any single line the locator scan examines. A tool result
@@ -291,6 +354,17 @@ def mine_carry(text: str) -> Carry:
     role = "other"
     in_carry = False
     for raw in text.splitlines():
+        after_marker = _after_drop_marker(raw)
+        if after_marker is not None:
+            # A section break: the text after an oldest-history drop resumes
+            # an unknown speaker's section, so attribution resets exactly as at
+            # the start of the span. The marker itself is harness bookkeeping,
+            # never an ask; a header glued after it still switches role.
+            role = "other"
+            in_carry = False
+            if not after_marker:
+                continue
+            raw = after_marker
         header = _ROLE_HEADER.match(raw.strip())
         if header:
             title = header.group(1)

@@ -483,6 +483,15 @@ describe("the wire-to-record mapping (the one relay-specific file)", () => {
 		expect(record).toMatchObject({ stopReason: null, callsTools: false });
 	});
 
+	it("music bookkeeping stays silent while its terminal receipt remains visible", () => {
+		const records = toCondenseRecords([
+			entry({ id: "snapshot", kind: "notice", text: "Music observing", custom_type: "music_job_v1" }),
+			entry({ id: "result", kind: "notice", text: "Music settled", custom_type: "job_result" }),
+		]);
+		expect(records).toHaveLength(1);
+		expect(records[0]).toMatchObject({ id: "result", kind: "custom", customType: "job_result" });
+	});
+
 	it("a receipt notice becomes the custom row the fold groups by", () => {
 		const records = toCondenseRecords([
 			entry({ id: "n1", kind: "notice", text: "job done", custom_type: "job_result" }),

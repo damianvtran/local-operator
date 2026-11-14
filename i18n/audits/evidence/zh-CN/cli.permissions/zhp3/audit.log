@@ -1,0 +1,50 @@
+# audit.log — actual command output, zh-CN cli.permissions zhp3, 2026-11-09T19:56:42Z
+## $ git rev-parse HEAD
+85fb35811f9d17fb6dfadfc2d5df3269db04bd12
+## $ env -u CMUX_SOCKET_PATH .venv/bin/python scripts/i18n/check.py | tail -1
+check.py: ok — 215 file(s) scanned, 2539 literal(s) at or below the baseline, catalogues consistent; 81 advisory finding(s) (report-only until activated)
+rc=0
+## $ shasum -a 256 inputs
+58e58c3b19a07c024b609f614e686cc9a72def77e3de704870f0557e84e7be41  local_operator/i18n/catalogues/en/cli.permissions.json
+6f8427bf5dd20f8fa252d0163387d59f4e53a30fe07cc9db4c5a5f55048fb1d2  local_operator/i18n/catalogues/en/cli.permissions.context.json
+7388180ea75d725c25a9b41334ccd309fd6fed62664883f47a24e452deb9e814  local_operator/i18n/catalogues/zh-CN/cli.permissions.json
+## $ sw_vers
+ProductName:		macOS
+ProductVersion:		27.2
+BuildVersion:		26B123
+## $ .venv/bin/python $S/parity.py (own)
+keys en/zh: 39 39 diff: []
+keys with issues: 0
+ICU in en: []
+cli.permissions.help.status | 显示运行时使用的身份，以及是否已允许录屏（只读）
+cli.permissions.status.screen.granted | 录屏（运行时预检）：已允许
+cli.permissions.status.screen.denied | 录屏（运行时预检）：未允许。在“系统设置”>“隐私与安全”>“录屏与系统录音”中打开“{row}”。
+cli.permissions.status.screen.unknown | 录屏（运行时预检）：无法检查
+cli.permissions.status.screen.no_image | 录屏（运行时预检）：未检查（尚无运行时映像）
+cli.permissions.status.scope | 仅检查录屏。“文件与文件夹”及其他隐私服务使用同一条目。
+cli.permissions.setup.already_signed | 此Python构建的运行时之前已签名，因此本次未进行签名，macOS也无需询问。
+cli.permissions.setup.always_allow_kept | 之前为此密钥选择的“始终允许”仍然保留。
+cli.permissions.setup.done_allow_once | 没有终端的更新（由智能体运行，或在会话中使用/update）不会为新的Python构建签名；在终端中运行`lop update`或`lop permissions setup`之前，这些构建的运行时将使用“Local Operator Runtime”条目。
+'屏幕录制' 0
+'隐私与安全性' 0
+'辅助功能' 0
+'无障碍' 0
+'于' 0
+'请' 0
+'您' 0
+## $ /usr/bin/python3 $S/apple.py (installed .loctable lookups, (zh_CN, en))
+Privacy & Security (sidebar) | System Settings.app Privacy & Security | ('隐私与安全', 'Privacy & Security')
+Privacy & Security (pane bundle) | SecurityPrivacyExtension.appex CFBundleDisplayName | ('隐私与安全', 'Privacy & Security')
+Screen & System Audio Recording | SecurityPrivacyExtension.appex SCREEN_CAPTURE_HEADER | ('录屏与系统录音', 'Screen & System Audio Recording')
+Screen Recording service | SecurityPrivacyExtension.appex SCREEN_CAPTURE | ('录屏', 'Screen Recording')
+Files & Folders | SecurityPrivacyExtension.appex FILE_ACCESS_COMBINED | ('文件与文件夹', 'Files & Folders')
+System Settings | System Settings.app CFBundleDisplayName | ('系统设置', None)
+Keychain Access | Keychain Access.app CFBundleDisplayName | ('钥匙串访问', 'Keychain Access')
+ConfirmAccess tables: ['/System/Library/Frameworks/Security.framework/Versions/A/MachServices/SecurityAgent.bundle/Contents/Resources/ConfirmAccess.loctable', '/System/Library/Frameworks/Security.framework/Versions/Current/MachServices/SecurityAgent.bundle/Contents/Resources/ConfirmAccess.loctable']
+ConfirmAccess 100267.title ('始终允许', None)
+ConfirmAccess 100268.title ('允许', None)
+KA Localizable.loctable Keys 'Keys' -> 密钥
+KA Localizable.loctable private key 'private key' -> 专用密钥
+KA Localizable.loctable public key 'public key' -> 公共密钥
+## $ .venv/bin/python scripts/i18n/ledger.py history-sha --locale zh-CN --namespace cli.permissions
+b8adf9c2f92be7f1fb0c4f48bad18de252fd8e9691430abe24cd4f5216dadead

@@ -78,6 +78,7 @@
   "wire.errors.desktop.session_is_remote_open": "{session_id} lives on {label}, and this desktop cannot open a conversation on another device yet. Move it home with `lop sessions move {session_id} --to local`, or pilot it from the terminal with `/network sessions --peer {label} --engage {session_id}`.",
   "wire.errors.desktop.session_is_remote_write": "The {noun} for {session_id} lives on {label}, and this desktop cannot write it there yet; nothing was changed here.",
   "wire.errors.desktop.session_not_found": "no conversation with id {session_id}",
+  "wire.errors.desktop.settings_intent_generation_moved": "A newer change has replaced this one, so there is nothing to cancel.",
   "wire.errors.desktop.skill_alias_occupied": "A local skill already uses this name. Pull the Hub skill with --dry-run to review an adoption merge, or choose another name.",
   "wire.errors.desktop.skill_local_changes_unpublished": "This skill has local changes that were never published, and removing it would discard them. Publish them first, or remove it anyway to discard them.",
   "wire.errors.desktop.skill_not_editable": "This skill is read-only here. Copy it to your skills to make changes.",
@@ -86,5 +87,12 @@
   "wire.errors.desktop.sort_unknown": "sort must be one of {sorts}.",
   "wire.errors.desktop.start_after_end": "The start must precede the end",
   "wire.errors.desktop.unknown_command": "Unknown command",
-  "wire.errors.desktop.unknown_provider": "Unknown provider"
+  "wire.errors.desktop.unknown_provider": "Unknown provider",
+  "wire.errors.desktop.session_in_project": "conversation {session_id} is linked to a project; unlink it first",
+  "wire.errors.desktop.session_pinned": "conversation {session_id} is pinned; unpin it first",
+  "wire.errors.desktop.session_temporary": "conversation {session_id} is a temporary chat; keep it first",
+  "wire.errors.desktop.session_temporary_deleted": "this temporary chat was deleted after it sat idle",
+  "wire.errors.desktop.temporary_mark_failed": "could not record conversation {session_id} as temporary, so nothing was changed",
+  "wire.errors.desktop.temporary_not_user": "conversation {session_id} was not started by you, so it cannot be made temporary",
+  "wire.errors.desktop.temporary_peer_unsupported": "a temporary chat cannot be started on another device yet"
 }

@@ -29,7 +29,7 @@ measurements. Read the notes below before using any number in the body.
 - **(D) lazy `Transcript._entries` remains deferred**, for exactly the reason
   §3(D) gives, and is now the largest cost left on the runtime's cold engage.
 
-**Where the evidence lives**: `docs/evidence/session-load-central-cache/README.md`
+**Where the evidence lives**: `scripts/repro/session-load-central-cache/README.md`
 (the before/after table with host load averages, the isolated live
 reproduction, and the unit-level results). The corrected before-tree
 measurements — page reads already ~1-2 ms on `main`, `Transcript(...)`

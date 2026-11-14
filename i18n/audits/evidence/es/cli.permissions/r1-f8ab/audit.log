@@ -1,0 +1,51 @@
+# audit.log — actual command output, es/cli.permissions, auditor session f8ab0a45e07a, 2026-11-09T18:56:10Z
+$ git rev-parse HEAD
+50badda034d755ebb049c4f542f3073439bf823e
+$ .venv/bin/python scripts/i18n/check.py --catalogues-only (advisory lines filtered)
+check.py: catalogue checks: 0 problem(s)
+exit=0
+$ .venv/bin/python -c catalogue_sha256(en|es, cli.permissions)
+en eba1e1dd19a618fa8c46a3744197afd2dfa4e84b6774f16b20e8de389f4dbf8f
+es 74a43c8736593cb445b35380ab9744d4dae1a04b824a4e9dfa9871d9f3dffd95
+$ shasum -a 256 <inputs>
+eba1e1dd19a618fa8c46a3744197afd2dfa4e84b6774f16b20e8de389f4dbf8f  local_operator/i18n/catalogues/en/cli.permissions.json
+aca67def3cff590dcc5f681e8ff0127fecf6b33775555e3eaafc240070ba15ce  local_operator/i18n/catalogues/en/cli.permissions.context.json
+74a43c8736593cb445b35380ab9744d4dae1a04b824a4e9dfa9871d9f3dffd95  local_operator/i18n/catalogues/es/cli.permissions.json
+$ parity/placeholder/backtick/trailing-space/kept-token check (inline python)
+keys en 28 es 28 diff set() order_same True
+cli.permissions.help.permissions 96 ok
+cli.permissions.help.status 99 ok
+cli.permissions.help.setup 109 ok
+cli.permissions.status.not_macos 69 ok
+cli.permissions.status.identity.team 102 ok
+cli.permissions.status.identity.adhoc 84 ok
+cli.permissions.status.identity.legacy 147 ok
+cli.permissions.status.identity.none 96 ok
+cli.permissions.status.image 14 ok
+cli.permissions.status.optin.on 63 ok
+cli.permissions.status.optin.off 109 ok
+cli.permissions.status.optin.blocked 57 ok
+cli.permissions.status.app.found 41 ok
+cli.permissions.status.app.missing 31 ok
+cli.permissions.status.screen.granted 59 ok
+cli.permissions.status.screen.denied 151 ok
+cli.permissions.status.screen.unknown 70 ok
+cli.permissions.status.guide 30 ok
+cli.permissions.setup.refused.tty 65 ok
+cli.permissions.setup.refused.isolated 117 ok
+cli.permissions.setup.no_app 112 ok
+cli.permissions.setup.no_identity 150 ok
+cli.permissions.setup.explain 291 ok
+cli.permissions.setup.confirm 18 ok
+cli.permissions.setup.cancelled 34 ok
+cli.permissions.setup.failed 133 ok
+cli.permissions.setup.always_allow 77 ok
+cli.permissions.setup.done 162 ok
+problem_keys 0
+$ precedent counts in es catalogues excluding cli.permissions
+«: 1
+“: 32
+aplicación de escritorio: 6
+compilación: 27
+app de escritorio (case-insens, cli.permissions): 8
+build (cli.permissions): 1

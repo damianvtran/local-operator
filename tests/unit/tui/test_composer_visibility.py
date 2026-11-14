@@ -22,6 +22,7 @@ are bound by loop turns, never by the 2 s cadence (same harness as
 from __future__ import annotations
 
 import os
+import shlex
 
 import pytest
 from rich.text import Text
@@ -284,13 +285,23 @@ async def test_a_script_slower_than_its_interval_still_paints(monkeypatch, tmp_p
     """Ticks that land mid-run are skipped, not cancellations (review round 1, m2).
 
     The interval floor is clamped to 5 s, so the timer is driven by hand here:
-    two ticks fire while a 0.6 s script is running, and its output must still
+    two ticks fire while a slow script is running, and its output must still
     land.
     """
+    # The script waits on a gate file the test creates only after both ticks,
+    # instead of sleeping a fixed time. A wall-clock sleep raced the
+    # ``is_running`` check: ``pilot.pause()`` can itself take most of a second
+    # on a loaded CI runner (Textual's wait_for_idle max_sleep is 1 s), so a
+    # 0.6 s script finished before the assertion. Gating makes "still running
+    # at the check and across both ticks" structural rather than timing-luck.
+    gate = tmp_path / "status-script.gate"
+    # A missed gate cannot hang the test: status_command.TIMEOUT_S (10 s) ends
+    # the run and the band never shows the needle, failing the assertion.
+    script = f"until [ -e {shlex.quote(str(gate))} ]; do sleep 0.05; done; echo slow-but-done"
     app = _boot(monkeypatch, tmp_path)
     async with app.run_test(size=(140, 24)) as pilot:
         await _adopted(app, pilot)
-        _write_elsewhere(tmp_path, "display.composer.command", "sleep 0.6; echo slow-but-done")
+        _write_elsewhere(tmp_path, "display.composer.command", script)
         process_watcher(tmp_path).poll_now()
         await pilot.pause()
         first = app._status_command_running
@@ -298,6 +309,7 @@ async def test_a_script_slower_than_its_interval_still_paints(monkeypatch, tmp_p
         app._tick_status_command()
         app._tick_status_command()
         assert app._status_command_running is first, "a tick replaced the in-flight run"
+        gate.touch()
         await _band_shows(app, pilot, "slow-but-done")
 
 

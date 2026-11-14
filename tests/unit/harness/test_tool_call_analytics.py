@@ -1116,3 +1116,20 @@ async def test_a_static_violation_paired_with_a_vanished_tier_is_not_billed_to_t
         cwd=str(tmp_path),
     )
     assert _faults(recorded) == {"task": "execution"}
+
+
+@pytest.mark.asyncio
+async def test_a_long_hallucinated_name_is_clipped_before_analytics():
+    """The analytics hook is the one place a raw model name is clipped to 64.
+
+    A model can stream an arbitrarily long name; the durable result keeps it
+    whole and the compose frame clips at 200, so the ledger name is the only
+    bound that would otherwise grow without limit.
+    """
+    recorded = await _run(
+        _calls((0, "c1", "ghost" + "x" * 200, "{}")) + [StreamEndEvent(stop_reason="toolUse")],
+        [_ok_tool()],
+    )
+    name, _origin, fault, _ms = recorded[0]
+    assert name == ("ghost" + "x" * 200)[:64]
+    assert fault == "unknown_tool"

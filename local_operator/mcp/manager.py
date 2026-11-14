@@ -1366,9 +1366,32 @@ async def _stdio_transport(
     from mcp.client.stdio import get_default_environment
     from mcp.shared.message import SessionMessage
 
-    argv = build_stdio_argv(cfg.command, list(cfg.args))
+    from local_operator.mcp.uv_tool_exec import (
+        is_uvx_candidate,
+        resolve_uv_tool_command,
+    )
+
     env = get_default_environment() | CHILD_QUIET_ENV | dict(cfg.env or {})
     cwd = cfg.cwd or None
+    command, args = cfg.command, list(cfg.args)
+    # A bare `uvx <tool>` whose tool is installed is launched as the tool's own
+    # console script: `uvx` would otherwise stay alive as the server's parent
+    # holding ~/.cache/uv/.lock for the session's lifetime, and one holder per
+    # session blocks `uv cache prune` forever (see uv_tool_exec's docstring for
+    # the measurement and every fallback rule). Same args and cwd; the env gets
+    # the two keys uvx itself adds (tool bin/ prepended to PATH, UV). Off the
+    # event loop because the first lookup per (uv, env, cwd) runs `uv tool dir`,
+    # bounded at 5 s (UV_TOOL_DIR_TIMEOUT_S) and then cached; the pure-string
+    # pre-check keeps every non-uvx spawn free of a thread hop.
+    direct = None
+    if is_uvx_candidate(command, args):
+        direct = await anyio.to_thread.run_sync(
+            lambda: resolve_uv_tool_command(command, args, env=env, server_env=cfg.env, cwd=cwd)
+        )
+    if direct is not None:
+        command, args = direct.command, direct.args
+        env = env | direct.env
+    argv = build_stdio_argv(command, args)
 
     # stderr on a PIPE, never inherited. `stderr=None` handed the child the
     # parent's own fd 2, so a server's startup banner landed on top of the
@@ -1989,6 +2012,15 @@ class McpManager:
         # recovery TUI-toast-only) is the bug it fixes. Signature:
         # (server_name, registered_tool_count).
         self.on_recovery: Callable[[str, int], None] | None = None
+        # Session-installed USE clock: fired with (server_name, mcp_tool_name)
+        # every time a tools/call is attempted, whichever route resolved the
+        # tool (an advertised schema, the deferred fallback resolver, or eval's
+        # nested ``tool(...)``). ``wire_mcp_into_session`` stamps the origin's
+        # last-use run from it so the cold-boundary demotion never drops a
+        # schema the model is actively using. Installed by the OWNING session
+        # only; a borrowing child never replaces it, so a delegated call counts
+        # as use by the delegator — which is what kept the tool on the task.
+        self.on_tool_called: Callable[[str, str], None] | None = None
         # UI-installed sink fired when a server needs an OAuth login. The
         # startup toast only covers failures that land INSIDE the 250 ms gate;
         # HTTP OAuth servers connect AFTER it, so their auth failures (and
@@ -4524,6 +4556,12 @@ class McpManager:
     ) -> ToolResult:
         """One tools/call with arg hygiene, abort racing, and one retry."""
         tool_label = create_mcp_tool_name(server_name, mcp_tool_name)
+        use_hook = self.on_tool_called
+        if use_hook is not None:
+            try:
+                use_hook(server_name, mcp_tool_name)
+            except Exception:  # noqa: BLE001 — bookkeeping must never fail a call
+                logger.debug("MCP on_tool_called hook raised", exc_info=True)
         if context.job_id is not None and server_own_turn_only(self._configs.get(server_name)):
             # ``ownTurnOnly``: the call is running for DELEGATED work (a child
             # job), and the servers that declare this rule are the ones whose

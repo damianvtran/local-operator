@@ -66,6 +66,7 @@ from typing import Literal
 from local_operator.redaction_shapes import (
     ShapeHit,
     ShapeReport,
+    current_redaction_scope,
     is_registerable_component,
     scrub_known_json_string_values,
     scrub_secrets_with_hits,
@@ -1049,8 +1050,16 @@ class VariableStore:
         """
         protected, spans = self._extract_identifier_spans(text)
         values = self.redaction_values()
+        # See ``redaction_shapes.RedactionScope``: a details COPY masks in place
+        # without registering, and an identifier-shaped details string gets the
+        # exact values only.
+        scope = current_redaction_scope()
+        if scope == "values":
+            scrubbed = scrub_values(protected, values)
+            scrubbed = scrub_known_json_string_values(scrubbed, values)
+            return self._restore_identifier_spans(scrubbed, spans), ShapeReport()
         scrubbed, hits = scrub_secrets_with_hits(protected, values)
-        if hits:
+        if hits and scope == "full":
             self._register_shape_hits(hits)
         # The original shape judgement must run FIRST: a short known value can
         # occur inside an unknown credential, and pre-masking it would break the

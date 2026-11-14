@@ -10,6 +10,16 @@ written. Dimensions below follow the current CWS dashboard guidance reflected
 in the task brief; recheck the upload form before export because Google can
 change limits.
 
+## Historical regeneration inputs
+
+`assets/build_assets.py` expects the original browser-extension capture set at
+its legacy `docs/evidence/browser-extension/` input path. That set was already
+absent before the repository cleanup; no current screenshot is silently
+substituted. Retrieve the historical inputs from commit `39691ea0` into a
+scratch reproduction checkout when regenerating these assets. Do not commit
+those testing captures back to the product branch. Published store artwork
+under `docs/store/assets/` remains tracked and unchanged.
+
 ## Required assets
 
 | Asset | Exact size / format | Qty | Content and production notes |

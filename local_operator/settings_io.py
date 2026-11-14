@@ -435,6 +435,11 @@ class Setting:
     #: a desktop row with the rules that own it. Never authored twice — an
     #: empty string means "not a hotkey row".
     hotkey_scope: str = ""
+    #: Whether this HOTKEY row may be CLEARED to ``"none"`` (keymap.UNBOUND),
+    #: DERIVED from ``keymap.KeyAction.clearable`` like ``hotkey_scope`` —
+    #: never authored twice. Projected on the wire so the desktop app can
+    #: offer the Clear affordance only on rows that accept the sentinel.
+    clearable: bool = False
     #: SEARCH VOCABULARY for this row, never rendered: a query may match these
     #: words, but no surface ever draws them as a sentence — the settings page
     #: paints the row and, when it explains a match, names the word that hit.
@@ -1655,6 +1660,17 @@ def _validate_github_repositories(value: object) -> object:
     """
     if not isinstance(value, (list, tuple)):
         raise ValueError("GitHub repositories must be a list of owner/repo entries.")
+    # The SAME ceiling the mesh boundary carries (GitHub's App mint maximum): a
+    # longer designation could neither be minted nor delivered whole, so it is
+    # refused here, where a person can fix it, rather than truncated downstream.
+    # Lazy import: this module loads on every CLI start; the validator runs on write.
+    from local_operator.network.credentials.types import MAX_NARROWING_LIST_ENTRIES
+
+    if len(value) > MAX_NARROWING_LIST_ENTRIES:
+        raise ValueError(
+            f"at most {MAX_NARROWING_LIST_ENTRIES} GitHub repositories can be designated "
+            f"(GitHub's limit for one App token); got {len(value)}"
+        )
     for entry in value:
         text = str(entry).strip()
         owner, sep, repo = text.partition("/")
@@ -3258,6 +3274,7 @@ SETTINGS: tuple[Setting, ...] = (
             default=action.default,
             help=_keymap_copy(action, "help"),
             hotkey_scope=action.scope,
+            clearable=action.clearable,
             synonyms=_HOTKEY_SYNONYMS,
         )
         for action in _keymap.KEY_ACTIONS
@@ -3557,6 +3574,28 @@ SETTINGS: tuple[Setting, ...] = (
         validate_value=_validate_delegated_max_age_hours,
         gated_by="session.cleanup.delegated.enabled",
         synonyms=("retention", "expiry", "purge"),
+    ),
+    # -- temporary chats -------------------------------------------------------
+    # The idle window of a TEMPORARY chat (``session/temporary.py``). Read LIVE
+    # by every pass (``cleanup.policy_from_config``), never gated by
+    # ``session.cleanup.enabled``: the per-chat mark is the opt-in. An ENUM of
+    # the four presets the clients offer; ``cleanup`` clamps any other stored
+    # value UP to the next preset (kept longer, the fail-closed side).
+    Setting(
+        key="session.cleanup.temporary.idle_minutes",
+        path=("session", "cleanup", "temporary", "idle_minutes"),
+        section="session_cleanup",
+        label=_t(_ws.session_cleanup_temporary_idle_minutes_label()),
+        kind=Kind.ENUM,
+        default=30,
+        help=_t(_ws.session_cleanup_temporary_idle_minutes_help()),
+        choices=(
+            Choice(15, _t(_ws.session_cleanup_temporary_idle_minutes_choice_15m_label())),
+            Choice(30, _t(_ws.session_cleanup_temporary_idle_minutes_choice_30m_label())),
+            Choice(120, _t(_ws.session_cleanup_temporary_idle_minutes_choice_2h_label())),
+            Choice(1440, _t(_ws.session_cleanup_temporary_idle_minutes_choice_24h_label())),
+        ),
+        synonyms=("retention", "expiry", "ephemeral"),
     ),
     Setting(
         key="runtime.unattended_gate_timeout",
@@ -4469,6 +4508,43 @@ SETTINGS: tuple[Setting, ...] = (
             _t(_ws.compaction_mid_turn_enabled_choice_true_description()),
             _t(_ws.compaction_mid_turn_enabled_choice_false_description()),
         ),
+    ),
+    # Idle / pre-wake compaction (``compaction/idle.py``). Defaults are literals
+    # mirroring ``compaction.thresholds.DEFAULT_IDLE_*`` (importing that module
+    # here would pull the pass engine into every settings read); the consumer
+    # map in ``tests/unit/test_settings_io.py`` pins each pair.
+    Setting(
+        key="compaction.idle_enabled",
+        path=("compaction", "idle_enabled"),
+        section="compaction",
+        label=_t(_ws.compaction_idle_enabled_label()),
+        kind=Kind.BOOL,
+        default=True,
+        help=_t(_ws.compaction_idle_enabled_help()),
+        choices=_bool_choices(
+            _t(_ws.compaction_idle_enabled_choice_true_description()),
+            _t(_ws.compaction_idle_enabled_choice_false_description()),
+        ),
+    ),
+    Setting(
+        key="compaction.idle_threshold_tokens",
+        path=("compaction", "idle_threshold_tokens"),
+        section="compaction",
+        label=_t(_ws.compaction_idle_threshold_tokens_label()),
+        kind=Kind.INT,
+        default=200_000,
+        help=_t(_ws.compaction_idle_threshold_tokens_help()),
+        minimum=0,
+    ),
+    Setting(
+        key="compaction.idle_min_growth_tokens",
+        path=("compaction", "idle_min_growth_tokens"),
+        section="compaction",
+        label=_t(_ws.compaction_idle_min_growth_tokens_label()),
+        kind=Kind.INT,
+        default=60_000,
+        help=_t(_ws.compaction_idle_min_growth_tokens_help()),
+        minimum=1,
     ),
     # Opt-in cost trade for RESUMED contexts (#3448); see the field comment in
     # ``compaction/thresholds.py``. The help text must keep saying that earlier
@@ -5528,6 +5604,25 @@ SETTINGS: tuple[Setting, ...] = (
         help=(_t(_ws.network_credentials_grant_ttl_s_help())),
         synonyms=("auth", "expiry"),
     ),
+    # The offline hold (credentials/__init__.py ``OFFLINE_HOLD_S``; C5, approved by
+    # the operator 2026-11-13). Read on the owner (stated on each grant) and on the
+    # borrower (its own cap); the reader clamps to [grant_ttl_s, 24 h]. The minimum is
+    # the default grant TTL (900 s) rather than the TTL row's own 60 s floor (review
+    # R1-m3): a value below it was accepted and then silently read as the TTL, so the
+    # page offered a setting that did nothing. A TTL raised above 900 s still floors
+    # the hold at read time, which is the only side that can lengthen it.
+    Setting(
+        key="network.credentials.offline_hold_s",
+        path=("network", "credentials", "offline_hold_s"),
+        section="network",
+        label=_t(_ws.network_credentials_offline_hold_s_label()),
+        kind=Kind.FLOAT,
+        default=86400.0,
+        minimum=900.0,
+        maximum=86400.0,
+        help=(_t(_ws.network_credentials_offline_hold_s_help())),
+        synonyms=("auth", "expiry", "sleep", "lease"),
+    ),
     # The github adapter's allow-list (github.py's ``REPOSITORIES_PATH``; the same
     # key is read by the owner — the mint narrows to it and REFUSES when empty —
     # and by the borrower's git helper as its use-time backstop). Empty is a
@@ -6285,6 +6380,30 @@ SETTINGS: tuple[Setting, ...] = (
         maximum=100_000,
         unit="screenings",
     ),
+    # The one screening row that is NOT a ceiling, and the reason it is not a
+    # violation of the admission-gate invariant (
+    # ``test_no_setting_can_disable_the_admission_gate`` looks at it): it chooses
+    # which EVALUATED screener is tried first and cannot express "off".
+    # ``resolve_screening_chain`` only ever RE-ORDERS the vetted pairs for a
+    # value on the table; an off-table or empty value leaves the chain in its
+    # tested order, and the receiver's own default and fallback chains run
+    # behind the preference either way. So no value of this key can leave a
+    # machine unable to screen, which is the operator directive of 2026-11-04.
+    # TEXT rather than ENUM: the table of evaluated pairs lives in
+    # ``team_bridge.model_boundary`` and this module must not import it, and the
+    # desktop status route carries that vetted list to the renderer that draws
+    # the choice. ``empty_unsets`` because "" is a real choice (no preference),
+    # not a missing value to hide from the page.
+    Setting(
+        key="team_bridge.screening.model",
+        path=("team_bridge", "screening", "model"),
+        section="team_bridge",
+        label=_t(_ws.team_bridge_screening_model_label()),
+        kind=Kind.TEXT,
+        default="",
+        help=_t(_ws.team_bridge_screening_model_help()),
+        empty_unsets=True,
+    ),
     # -- asks ------------------------------------------------------------------
     # How long a LAPSED (timed-out, unanswered) ask stays shown, measured from
     # its deadline. Display only (D6): the late-answer window and the index
@@ -6589,6 +6708,13 @@ def coerce(setting: Setting, text: str) -> Any:
             raise ValueError(
                 'expected JSON, e.g. {"default": ["anthropic/claude-opus-5"]}'
             ) from None
+    if setting.kind is Kind.ENUM:
+        # An ENUM whose members are whole numbers (the temporary-chat window)
+        # stores ints, so typed text must become the member, not its digits.
+        for choice in setting.resolved_choices or ():
+            value = choice.value
+            if type(value) is int and text == str(value):
+                return value
     if setting.validate_value is validate_tier_value and text.startswith("{"):
         # A ``{model, effort}`` tier typed on the page or via ``lop config
         # edit`` (#2428): parsed here so the MAPPING is stored, never the JSON

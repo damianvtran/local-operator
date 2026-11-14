@@ -1,0 +1,54 @@
+# audit.log — actual command output, es/cli.permissions round 3, auditor session 41862228e657, 2026-11-09T19:56:59Z
+$ git rev-parse HEAD
+85fb35811f9d17fb6dfadfc2d5df3269db04bd12
+$ git status --short -- local_operator/i18n
+$ .venv/bin/python scripts/i18n/check.py --catalogues-only
+check.py: catalogue checks: 0 problem(s)
+exit=0
+$ shasum -a 256 <inputs>
+58e58c3b19a07c024b609f614e686cc9a72def77e3de704870f0557e84e7be41  local_operator/i18n/catalogues/en/cli.permissions.json
+6f8427bf5dd20f8fa252d0163387d59f4e53a30fe07cc9db4c5a5f55048fb1d2  local_operator/i18n/catalogues/en/cli.permissions.context.json
+79015a98dab229546400c491fcd6196d74977d6f6f2ae288975713ef168ee69e  local_operator/i18n/catalogues/es/cli.permissions.json
+$ git diff --stat 788cc399..85fb3581 -- es/ en/ catalogues
+ local_operator/i18n/catalogues/en/cli.permissions.context.json | 9 +++++++--
+ local_operator/i18n/catalogues/en/cli.permissions.json         | 5 +++--
+ local_operator/i18n/catalogues/es/cli.permissions.json         | 9 +++++----
+ 3 files changed, 15 insertions(+), 8 deletions(-)
+$ python mech (key parity, placeholders, backticks, quotes, R2 fixes, delta keys)
+keys en 39 es 39 diff set() order_same True
+mechanical problems 0
+status.screen.denied | en: Screen Recording (runtime preflight): not granted. Turn on "{row}" in System Settings > Privacy & Security > Screen & System Audio Recording.
+                     | es: ntalla (comprobación del runtime): no permitida. Activa “{row}” en Ajustes del Sistema > Privacidad y seguridad > Grabación de pantalla y del audio del sistema.
+status.scope | en: Only Screen Recording is checked. Files & Folders and the other privacy services use the same row.
+             | es: Solo se comprueba la grabación de pantalla. Archivos y carpetas y los demás servicios de privacidad usan la misma fila.
+setup.explain | en: ign to sign with this Developer ID key without asking. To undo it, open Keychain Access, select the key's private key, and remove codesign under Access Control.
+              | es: firmar con esta clave de Developer ID sin preguntar. Para deshacerlo, abre Acceso a Llaveros, selecciona su clave privada y quita codesign en Control de acceso.
+setup.already_signed | en: This Python build's runtime was already signed, so nothing was signed now and macOS had nothing to ask.
+                     | es: El runtime de esta compilación de Python ya estaba firmado, así que no se ha firmado nada ahora y macOS no tenía nada que preguntar.
+setup.always_allow_kept | en: Your earlier "Always Allow" answer for this key is kept.
+                        | es: Se conserva tu respuesta anterior de “Permitir siempre” para esta clave.
+R2-1 fixed: True
+R2-2 fixed: True
+Accesibilidad in status.scope: False
+Accesibilidad anywhere es: []
+Permitir siempre count: 3
+$ python apple label lookup (es / es_419 / en) on installed macOS
+ProductName:		macOS
+ProductVersion:		27.2
+BuildVersion:		26B123
+SecurityPrivacyExtension Localizable | ACCESSIBILITY | en: 'Device Control and Data Access' | es: 'Control de dispositivos y acceso a datos' | es_419: 'Control de dispositivos y acceso a los datos'
+SecurityPrivacyExtension Localizable | SCREEN_CAPTURE_HEADER | en: 'Screen & System Audio Recording' | es: 'Grabación de pantalla y del audio del sistema' | es_419: 'Grabación de audio del sistema y pantalla'
+SecurityPrivacyExtension Localizable | FILE_ACCESS_COMBINED | en: 'Files & Folders' | es: 'Archivos y carpetas' | es_419: 'Archivos y carpetas'
+SecurityPrivacyExtension Localizable | Allow | en: 'Allow' | es: 'Permitir' | es_419: 'Permitir'
+SecurityPrivacyExtension Localizable | SCREENANDAUDIOCAPTURE | en: 'Screen & System Audio Recording' | es: 'Grabación de pantalla y del audio del sistema' | es_419: 'Grabación de audio del sistema y pantalla'
+Keychain Access InfoPlist | CFBundleName | en: 'Keychain Access' | es: 'Acceso a Llaveros' | es_419: 'Acceso a Llaveros'
+Keychain Access InfoPlist | CFBundleDisplayName | en: 'Keychain Access' | es: 'Acceso a Llaveros' | es_419: 'Acceso a Llaveros'
+$ locate ConfirmAccess.loctable + System Settings InfoPlist (first lookup: ConfirmAccess path guessed wrong, System Settings key values not printed)
+/System/Applications/System Settings.app/Contents/Resources/InfoPlist.loctable | CFBundleName | en: None | es: 'Ajustes del Sistema' | es_419: 'Configuración del Sistema'
+/System/Applications/System Settings.app/Contents/Resources/InfoPlist.loctable | CFBundleDisplayName | en: None | es: 'Ajustes del Sistema' | es_419: 'Configuración del Sistema'
+$ find /System/Library -name ConfirmAccess.loctable (bounded) + Allow/Always Allow lookup
+found ['/System/Library/Frameworks/Security.framework/Versions/A/MachServices/SecurityAgent.bundle/Contents/Resources/ConfirmAccess.loctable']
+$ ConfirmAccess.loctable: locales present + keys whose en_GB/en value is Allow/Always Allow (previous lookup matched nothing: no plain "en" table)
+locales sample ['LocProvenance', 'ar', 'ca', 'cs', 'da', 'de', 'el', 'en_AU'] has en False
+ConfirmAccess | 100267.title | en*: 'Always Allow' | es: 'Permitir siempre' | es_419: 'Permitir siempre'
+ConfirmAccess | 100268.title | en*: 'Allow' | es: 'Permitir' | es_419: 'Permitir'

@@ -50,6 +50,7 @@ from typing import Any, Sequence
 from local_operator.harness.types import AgentMessage, Message
 
 from .cutpoint import task_boundary_floor
+from .idle import PARKED_ADVISOR_NOTE, PARKED_MIN_CONFIDENCE
 from .tokens import estimate_tokens
 
 logger = logging.getLogger(__name__)
@@ -203,6 +204,8 @@ def build_advisor_prompt(
     *,
     context_tokens: int,
     threshold_tokens: int,
+    parked: bool = False,
+    wake_pending: bool = False,
 ) -> str:
     """The user-role turn appended to the live conversation for one advisor call.
 
@@ -224,15 +227,31 @@ def build_advisor_prompt(
     (``scripts/measure_aside_tool_choice_cache.py`` measures why); the
     instructions block says it once, and the last line the model reads says
     it again where it decides how to answer.
+
+    ``parked`` (idle / pre-wake compaction, ``compaction/idle.py``) adds ONE
+    paragraph, still inside this appended turn so the prefix stays a cache
+    read: the agent is idle, so the advisor may anchor later than the last
+    user message, but must anchor at the start of still-open work. Off, the
+    output is byte-identical to the pre-idle prompt (a test pins it).
     """
     candidates = _candidate_messages(messages)
     lines = [f"- {message.id} ({message.role}): {_excerpt(message.text)}" for message in candidates]
     listing = "\n".join(lines) if lines else "(no candidates)"
+    if parked:
+        posture = (
+            "A wake is scheduled for later; the cache will have expired by then."
+            if wake_pending
+            else "No wake is scheduled; the next turn starts when the user returns."
+        )
+        parked_block = f"{PARKED_ADVISOR_NOTE}\n{posture}\n\n"
+    else:
+        parked_block = ""
     return (
         f"{ADVISOR_SYSTEM_PROMPT}\n\n"
         "A compaction decision is pending for the conversation above.\n\n"
         f"Context size: {context_tokens:,} tokens.\n"
         f"Automatic compaction threshold: {threshold_tokens:,} tokens.\n\n"
+        f"{parked_block}"
         "Candidate anchors, oldest first — `preserve_from` must be one of these ids:\n"
         f"{listing}\n\n"
         "Answer with the fenced JSON block described in your instructions and nothing else — "
@@ -275,6 +294,7 @@ def validate_hint(
     keep_recent_tokens: int,
     floor_cap: int,
     turn_index: int = 0,
+    parked: bool = False,
 ) -> CompactionHint | None:
     """A validated :class:`CompactionHint`, or ``None`` with the reason logged.
 
@@ -290,9 +310,21 @@ def validate_hint(
     blast radius of a hallucinating advisor to "an early compaction that kept
     more than it needed to", and it is why this function needs the messages
     rather than trusting the model's own token arithmetic.
+
+    ``parked`` (idle compaction only) is the ONE relaxation of widen-only, and
+    it is paid for with two stricter rules. The local floor drops to
+    ``keep_recent_tokens``: ``task_boundary_floor`` measures "since the last
+    genuine user turn", which while the agent is mid-task is the live work,
+    but once the agent is parked is often hours of FINISHED work the advisor
+    can see is done. In exchange the hint must say ``compact_now`` (a parked
+    "not now" is a decline, never a widening) and clear
+    ``max(min_confidence, PARKED_MIN_CONFIDENCE)``. Every non-idle caller
+    passes ``parked=False`` and keeps widen-only exactly.
     """
     if not payload:
         return None
+    if parked:
+        min_confidence = max(float(min_confidence), PARKED_MIN_CONFIDENCE)
 
     raw_id = payload.get("preserve_from")
     if not isinstance(raw_id, str) or not raw_id:
@@ -329,6 +361,9 @@ def validate_hint(
     if not isinstance(compact_now, bool):
         logger.debug("compaction advisor: rejected non-boolean compact_now")
         return None
+    if parked and not compact_now:
+        logger.debug("compaction advisor: parked advisor declined (compact_now=false)")
+        return None
 
     # The preserve window is measured from the REAL messages. A model asked to
     # count its own context tokens will confabulate a plausible number, and
@@ -347,10 +382,29 @@ def validate_hint(
         estimate_tokens(message) for message in messages[index:] if isinstance(message, Message)
     )
 
-    local_floor = max(
-        keep_recent_tokens,
-        task_boundary_floor(messages, genuine_user_ids, cap=floor_cap),
+    local_floor = (
+        keep_recent_tokens
+        if parked
+        else max(
+            keep_recent_tokens,
+            task_boundary_floor(messages, genuine_user_ids, cap=floor_cap),
+        )
     )
+    if parked and preserve_tokens < local_floor:
+        # CLAMP, never reject, on the parked path (PR #3753 QA round 1, Q2).
+        # A finished session's honest answer is "compact now, keep only the
+        # wrap-up tail", which anchors narrower than ``keep_recent_tokens``.
+        # Rejecting it journaled a decline and suppressed the session that
+        # most deserved a pass for G more growth. The floor is still kept:
+        # ``_plan_compaction(parked_hint=...)`` widens the cut to at least
+        # ``keep_recent_tokens`` (``max(keep_recent, ...)``), and the window is
+        # reported widened here too, so every reader sees the window that runs.
+        logger.debug(
+            "compaction advisor: parked hint widened to the recency floor (%d < %d tokens)",
+            preserve_tokens,
+            local_floor,
+        )
+        preserve_tokens = local_floor
     if preserve_tokens < local_floor:
         # WIDEN-ONLY. A hint that would keep LESS than the local rules already
         # keep is not advice, it is damage — and it is the only way a bad hint

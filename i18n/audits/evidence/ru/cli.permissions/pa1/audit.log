@@ -1,0 +1,5 @@
+$ .venv/bin/python scripts/i18n/check.py --catalogues-only
+check.py: catalogue checks: 0 problem(s)
+exit=0
+$ parity script (placeholders/backticks/trailing space)
+keys 28 28 same_order True mismatches []

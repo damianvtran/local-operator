@@ -1428,3 +1428,51 @@ def test_invalidating_a_message_also_evicts_its_derived_copies():
         estimate_messages_tokens([source])
     ] * len(copies)
     assert estimate_messages_tokens([source]) < 1000
+
+
+def test_invalidating_evicts_bounded_plus_normalised_copy():
+    """A copy rewritten by BOTH bound and normalise must not go stale.
+
+    The request builds ``<id>~rb~nm`` for a garbled call with oversized
+    arguments; evicting only ``<id>~rb`` and ``<id>~nm`` left its 1046-token
+    estimate in place after the source shrank, and the client kept refusing.
+    """
+    from local_operator.compaction.tokens import _ESTIMATE_CACHE, estimate_tokens
+    from local_operator.harness.replay_bound import bound_replay_payloads
+    from local_operator.harness.tool_names import normalise_replay_tool_names
+
+    source = Message(
+        role="assistant",
+        content=[TextContent(text="run")],
+        tool_calls=[
+            ToolCall(
+                id="c1",
+                name="bashLecture",
+                arguments={"command": "x" * 20000},
+                raw_arguments=None,
+            )
+        ],
+        usage=Usage(input_tokens=1, output_tokens=1),
+        stop_reason="toolUse",
+    )
+    combined = normalise_replay_tool_names(bound_replay_payloads([source]), ["bash"])[0]
+    assert combined.id == f"{source.id}~rb~nm"
+    assert estimate_tokens(combined) > 1000
+    assert combined.id in _ESTIMATE_CACHE
+
+    # The live message shrank in place and is invalidated, as the guard does.
+    source.tool_calls[0].arguments = {"command": "short"}
+    invalidate_message_cache(source)
+
+    # The composed id must be evicted, not just its single-suffix parents.
+    assert combined.id not in _ESTIMATE_CACHE
+    # And no stale size may be served for that id: a same-id copy carrying the
+    # shrunken content estimates small, not the old 1000+ figure.
+    shrunk = combined.model_copy(
+        update={
+            "tool_calls": [
+                combined.tool_calls[0].model_copy(update={"arguments": {"command": "short"}})
+            ]
+        }
+    )
+    assert estimate_tokens(shrunk) < 100

@@ -346,6 +346,43 @@ def test_a_session_on_a_third_device_is_refused_not_forwarded() -> None:
     assert granted.session_id == "s_local"
 
 
+@pytest.mark.parametrize("op", ["net_session_peek", "net_session_history"])
+def test_a_stray_inner_frame_cannot_launder_the_outer_session_id(op: str) -> None:
+    """PR #3831 review: the scope check read an inner ``frame`` dict for EVERY op,
+    while these handlers read the OUTER ``session_id`` — so an owned inner id
+    granted a frame whose outer id escaped ``sessions/``. Only the carriers are
+    judged by their inner frame now."""
+    authorizer, _audit = make(state=FakeState(sessions={"s_local"}))
+    viewer = link(capabilities={"list", "view"})
+    with pytest.raises(types.Refusal) as excinfo:
+        authorizer.check(
+            viewer,
+            {
+                "op": op,
+                "req": 1,
+                "session_id": "../outside",
+                "frame": {"session_id": "s_local"},
+            },
+        )
+    assert excinfo.value.code == "not_authorised"
+    granted = authorizer.check(
+        viewer, {"op": op, "req": 2, "session_id": "s_local", "frame": {"session_id": "x"}}
+    )
+    assert granted.session_id == "s_local"
+
+
+def test_a_stream_send_is_still_scoped_by_the_frame_it_carries() -> None:
+    """The other carrier keeps its inner read: a stream's ``send`` names no
+    outer session, and the frame it forwards is what reaches the owner."""
+    authorizer, _audit = make(state=FakeState(sessions={"s_local"}))
+    viewer = link(capabilities={"list", "view"})
+    frame = {"op": "net_stream", "req": 1, "action": "send", "stream": "st1"}
+    with pytest.raises(types.Refusal):
+        authorizer.check(viewer, {**frame, "frame": {"op": "x", "session_id": "s_other"}})
+    granted = authorizer.check(viewer, {**frame, "frame": {"op": "x", "session_id": "s_local"}})
+    assert granted.session_id == "s_local"
+
+
 # ---------------------------------------------------------------------------
 # Phases
 # ---------------------------------------------------------------------------

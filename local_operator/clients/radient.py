@@ -697,6 +697,35 @@ class SkillBundleDownload:
     not_modified: bool = False
 
 
+def _no_ambient_credential(request: requests.PreparedRequest) -> requests.PreparedRequest:
+    """``requests`` auth hook that leaves the request with NO ``Authorization``.
+
+    WHY. ``requests`` (``trust_env=True``, the default) consults ``~/.netrc`` --
+    or the file ``$NETRC`` names -- for every request that passes no ``auth``,
+    and attaches ``Authorization: Basic ...`` for a matching host. A bearer-less
+    request is therefore NOT credential-free on a machine with a netrc entry for
+    the hub's host. Passing any explicit ``auth`` turns that lookup off
+    (``Session.prepare_request``), and this hook additionally drops a header
+    that might have reached the request some other way.
+
+    CONSTRAINTS. Used where a caller needs the guarantee "this request carries
+    no credential, ever" -- the legacy public-scope probe, whose 200 is read as
+    PROOF that the hub serves a row publicly (a request that could have
+    authenticated proves nothing), and every hub-sync update check of a PUBLIC
+    team/agent link, which must neither leak a netrc secret to the hub nor
+    record a signed-in answer as the public one. It is deliberately NOT ``trust_env=False``:
+    that would also drop ``HTTP(S)_PROXY``/``NO_PROXY`` and ``REQUESTS_CA_BUNDLE``,
+    which people behind a corporate proxy rely on, and the probe must reach the
+    hub the same way the check does. Every caller of this hook also refuses
+    redirects (``get_team`` always; ``get_agent`` because ``credential_free``
+    implies it), so ``rebuild_auth``'s own netrc re-lookup on a redirect never
+    runs either.
+    """
+
+    request.headers.pop("Authorization", None)
+    return request
+
+
 class RadientClient:
     """Client for interacting with the Radient API.
 
@@ -891,6 +920,7 @@ class RadientClient:
         *,
         with_credential: bool = False,
         timeout: Optional[float] = None,
+        credential_free: bool = False,
     ) -> None:
         """
         Download an agent from the Radient Agent Hub.
@@ -907,10 +937,23 @@ class RadientClient:
             dest_path (Path): Path to save the downloaded ZIP file.
             with_credential (bool): Send this client's bearer with the request.
                 Defaults to the anonymous public download.
+            credential_free (bool): Guarantee the request carries NO
+                credential at all -- not even an ambient ``~/.netrc`` entry,
+                which ``requests`` would otherwise attach as Basic auth (see
+                :func:`_no_ambient_credential`) -- and refuse a redirect, whose
+                target ``requests`` would re-authenticate from netrc. The
+                hub-sync check of a PUBLIC agent falls back to this download
+                when its detail read fails or carries no instructions, and that
+                answer must be the public one, never a signed-in one. Off by
+                default, so interactive pulls keep ``requests``' environment
+                behaviour. Refused together with the bearer switch above.
 
         Raises:
             RuntimeError: If the download fails.
+            APIError: When ``credential_free`` refuses a redirect.
         """
+        if credential_free and with_credential:
+            raise ValueError("credential_free excludes with_credential")
         url = f"{self.base_url}/agents/{agent_id}/download"
         headers = self._get_headers(content_type=None, require_api_key=with_credential)
         try:
@@ -919,8 +962,13 @@ class RadientClient:
             # runner bounds every hub request (a stalled socket would otherwise
             # hold its tick, lock and lease, and a thread cannot be cancelled).
             extra: Dict[str, Any] = {} if timeout is None else {"timeout": timeout}
+            if credential_free:
+                extra["auth"] = _no_ambient_credential
+                extra["allow_redirects"] = False
             response = requests.get(url, headers=headers, stream=True, **extra)
             response.raise_for_status()
+            if credential_free:
+                self._refuse_redirect(response)
             with open(dest_path, "wb") as f:
                 for chunk in response.iter_content(chunk_size=8192):
                     if chunk:
@@ -933,7 +981,13 @@ class RadientClient:
             ) from e
 
     def get_agent(
-        self, agent_id: str, *, with_credential: bool = False
+        self,
+        agent_id: str,
+        *,
+        with_credential: bool = False,
+        timeout: Optional[float] = None,
+        refuse_redirects: bool = False,
+        credential_free: bool = False,
     ) -> Optional[Dict[str, Any]]:
         """Get agent details from the Radient Agent Hub by ID.
 
@@ -954,6 +1008,22 @@ class RadientClient:
                 ORGANIZATION row is answered 404 to anyone who cannot prove
                 membership (§8.2), so the org pull's tenant check passes
                 ``True`` and reads the row as the signed-in person.
+            timeout (float | None): Per-request socket timeout; ``None`` keeps
+                the historical unbounded read for existing callers.
+            refuse_redirects (bool): Raise on a 3xx instead of following it.
+                The legacy public-scope repair reads this answer as PROOF
+                that the configured hub serves the row publicly, and a
+                redirect means some other URL answered -- which proves
+                nothing about this one (``get_team`` refuses the same way).
+                Off by default so existing callers keep their behaviour.
+            credential_free (bool): Guarantee the request carries NO
+                credential at all -- not even an ambient ``~/.netrc`` entry,
+                which ``requests`` would otherwise attach as Basic auth (see
+                :func:`_no_ambient_credential`). For the public-scope probe,
+                whose answer is read as proof of public visibility, and for
+                hub-sync checks of public links. Off by default, so other
+                callers keep ``requests``' environment behaviour. Refused
+                together with ``with_credential``; implies ``refuse_redirects``.
 
         Returns:
             Optional[Dict[str, Any]]: The agent details as a dictionary if found,
@@ -962,14 +1032,26 @@ class RadientClient:
         Raises:
             RuntimeError: If the API request fails for reasons other than 404.
         """
+        if credential_free and with_credential:
+            raise ValueError("credential_free excludes with_credential")
+        # A followed redirect re-reads netrc for the new URL (``rebuild_auth``),
+        # so "no credential, ever" also means "no redirect, ever".
+        refuse_redirects = refuse_redirects or credential_free
         url = f"{self.base_url}/agents/{agent_id}"
         # Public by default: no credential unless the caller asks for one.
         headers = self._get_headers(
             content_type="application/json", require_api_key=with_credential
         )
+        extra: Dict[str, Any] = {} if timeout is None else {"timeout": timeout}
+        if refuse_redirects:
+            extra["allow_redirects"] = False
+        if credential_free:
+            extra["auth"] = _no_ambient_credential
         try:
-            response = requests.get(url, headers=headers)
+            response = requests.get(url, headers=headers, **extra)
             response.raise_for_status()  # Raise HTTPError for bad responses (4xx or 5xx)
+            if refuse_redirects:
+                self._refuse_redirect(response)
             return response.json()
         except requests.exceptions.HTTPError as e:
             # raise_for_status() always attaches the failing response, but HTTPError can
@@ -1581,6 +1663,7 @@ class RadientClient:
         *,
         timeout: Optional[float] = None,
         with_credential: bool = True,
+        credential_free: bool = False,
     ) -> Dict[str, Any]:
         """Pull one team by id (``GET /teams/:teamid``).
 
@@ -1598,6 +1681,13 @@ class RadientClient:
         rows to anonymous callers, and the CLI's no-``--org`` pull is anonymous by
         design so it needs no login and cannot read an org row by accident.
 
+        ``credential_free`` hardens that ``False`` into "no credential, ever":
+        ``requests`` would otherwise attach an ambient ``~/.netrc`` entry for
+        the hub's host as Basic auth (see :func:`_no_ambient_credential`). The
+        public-scope probe asks for it -- its 200 is read as PROOF of public
+        visibility -- and so does every hub-sync check of a public link; other
+        callers keep ``requests``' environment behaviour. Refused together with ``with_credential``.
+
         Returns:
             The team document: ``id``, ``tenant_id``, ``name``, ``description``,
             ``manager``, ``members``, ``instructions``, ``project``,
@@ -1607,12 +1697,16 @@ class RadientClient:
             APIError: When the hub refuses (404 ``team_not_found`` for a missing
                 team or a caller who may not read it; 403 ``team_plan_required``).
         """
+        if credential_free and with_credential:
+            raise ValueError("credential_free excludes with_credential")
         url = f"{self.base_url}/teams/{team_id}"
         headers = self._get_headers(
             content_type="application/json", require_api_key=with_credential
         )
         try:
             extra: Dict[str, Any] = {} if timeout is None else {"timeout": timeout}
+            if credential_free:
+                extra["auth"] = _no_ambient_credential
             response = requests.get(url, headers=headers, allow_redirects=False, **extra)
             response.raise_for_status()
             self._refuse_redirect(response)
@@ -1631,6 +1725,7 @@ class RadientClient:
         timeout: Optional[float] = None,
         with_credential: bool = True,
         if_none_match: Optional[str] = None,
+        credential_free: bool = False,
     ) -> Dict[str, Any]:
         """Pull one skill manifest by id (``GET /v1/skills/:skillid``).
 
@@ -1653,6 +1748,13 @@ class RadientClient:
         on purpose: "what revision do I hold" is link state (the baseline
         record), which a transport client must not be asked to know.
 
+        ``credential_free`` hardens the anonymous arm into "no credential,
+        ever", exactly as on :meth:`get_team`: ``requests`` would otherwise
+        attach an ambient ``~/.netrc`` entry for the hub's host as Basic auth
+        (see :func:`_no_ambient_credential`). The hub-sync check of a PUBLIC
+        skill link asks for it; redirects are already refused on every call.
+        Refused together with the bearer switch.
+
         Returns:
             The skill document: ``id``, ``tenant_id``, ``name``,
             ``description``, ``files`` (path/content pairs), ``version`` and the
@@ -1665,6 +1767,8 @@ class RadientClient:
                 who may not read it).
         """
 
+        if credential_free and with_credential:
+            raise ValueError("credential_free excludes with_credential")
         url = f"{self.base_url}/skills/{skill_id}"
         headers = self._get_headers(
             content_type="application/json", require_api_key=with_credential
@@ -1673,6 +1777,8 @@ class RadientClient:
             headers[IF_NONE_MATCH_HEADER] = if_none_match
         try:
             extra: Dict[str, Any] = {} if timeout is None else {"timeout": timeout}
+            if credential_free:
+                extra["auth"] = _no_ambient_credential
             response = requests.get(url, headers=headers, allow_redirects=False, **extra)
             response.raise_for_status()
             if response.status_code == HTTP_NOT_MODIFIED and if_none_match:

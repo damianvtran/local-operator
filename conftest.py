@@ -228,6 +228,7 @@ WHAT THIS DOES NOT AFFECT
 from __future__ import annotations
 
 import functools
+import json
 import os
 import pathlib
 import re
@@ -242,7 +243,12 @@ from collections.abc import Callable, Iterator
 
 import pytest
 
-from tests import shard_memory_dump, shard_stall_watchdog, tree_identity
+from tests import (
+    real_store_attribution,
+    shard_memory_dump,
+    shard_stall_watchdog,
+    tree_identity,
+)
 
 # ---------------------------------------------------------------------------
 # Real-store guard
@@ -261,6 +267,11 @@ _REAL_STORE_ENTRIES: frozenset[str] | None = None
 #: way a shrunken store does.
 _REAL_CONFIG: pathlib.Path | None = None
 _REAL_CONFIG_BYTES: bytes | None = None
+#: Evidence for ATTRIBUTING a shrink, taken with the entry snapshot: when it was
+#: taken and where the store's cleanup log stood. Only an explanation source —
+#: ``tests/real_store_attribution.py`` says why every gap in it fails closed.
+_REAL_STORE_SNAPSHOT_AT: float | None = None
+_REAL_STORE_LOG_MARK: real_store_attribution.LogMark | None = None
 
 
 def _resolve_real_store() -> pathlib.Path | None:
@@ -342,6 +353,7 @@ def _guarded(original, *, positions: tuple[int, ...]):
 
 def _install_real_store_guard() -> None:
     global _REAL_STORE, _REAL_STORE_ENTRIES, _REAL_CONFIG, _REAL_CONFIG_BYTES
+    global _REAL_STORE_SNAPSHOT_AT, _REAL_STORE_LOG_MARK
     _REAL_STORE = _resolve_real_store()
     if _REAL_STORE is None:
         return
@@ -351,6 +363,13 @@ def _install_real_store_guard() -> None:
         _REAL_CONFIG = config
     except OSError:
         _REAL_CONFIG = None
+    # ORDER MATTERS: time, then log mark, then the entry listing. A removal that
+    # lands between the mark and the listing is simply not in the snapshot; one
+    # whose row predates the mark would be missing with no appended row and so
+    # fail — never the reverse, an entry excused by a row the run did not see.
+    real_store_attribution.record_root()
+    _REAL_STORE_SNAPSHOT_AT = time.time()
+    _REAL_STORE_LOG_MARK = real_store_attribution.mark_log(_REAL_STORE)
     try:
         with os.scandir(_REAL_STORE) as entries:
             _REAL_STORE_ENTRIES = frozenset(entry.name for entry in entries)
@@ -805,13 +824,50 @@ def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
             )
             print(f"\n{message}", file=sys.stderr)
             pytest.exit(message, returncode=pytest.ExitCode.TESTS_FAILED)
+    _check_real_store_shrink(session, now)
+
+
+def _check_real_store_shrink(session: pytest.Session, now: frozenset[str]) -> None:
+    """Fail on any vanished entry an independent retention sweep does not explain.
+
+    Explained removals are printed, never dropped: a live ``lop`` reaping its
+    own stale sessions mid-run is expected, but the operator should still see
+    that the store moved under the run (test run ebc3f4ee0319 was failed for 24
+    such removals by pid 34093). The full list and each verdict also go to the
+    run's basetemp, because the message truncates and the real store is never a
+    place to write evidence.
+    """
+    assert _REAL_STORE is not None and _REAL_STORE_ENTRIES is not None
     missing = sorted(_REAL_STORE_ENTRIES - now)
-    if missing:
+    if not missing:
+        return
+    verdict = real_store_attribution.attribute(
+        missing,
+        store=_REAL_STORE,
+        mark=_REAL_STORE_LOG_MARK,
+        started_at=_REAL_STORE_SNAPSHOT_AT,
+        root=real_store_attribution.establish_root(),
+    )
+    evidence = _save_shrink_evidence(session, missing, verdict)
+    for name, row in verdict.explained.items():
+        print(
+            f"\nreal-store tripwire: {name} was removed by an INDEPENDENT retention sweep "
+            f"(pid {row.get('pid')}, actor={row.get('actor')}, policy={row.get('policy')}, "
+            f"at {row.get('at')}), not by this run.",
+            file=sys.stderr,
+        )
+    if verdict.unexplained:
+        unexplained = sorted(verdict.unexplained)
+        first = unexplained[0]
         message = (
-            f"REAL SESSION STORE SHRANK DURING THIS TEST RUN: {len(missing)} entr"
-            f"{'y' if len(missing) == 1 else 'ies'} of {_REAL_STORE} vanished: "
-            f"{', '.join(missing[:20])}{' ...' if len(missing) > 20 else ''}. "
-            "Something in this run (or running alongside it) removed them."
+            f"REAL SESSION STORE SHRANK DURING THIS TEST RUN: {len(unexplained)} entr"
+            f"{'y' if len(unexplained) == 1 else 'ies'} of {_REAL_STORE} vanished with no "
+            f"proof of an independent remover: "
+            f"{', '.join(unexplained[:20])}{' ...' if len(unexplained) > 20 else ''} "
+            f"(first: {verdict.unexplained[first]}). "
+            f"{len(verdict.explained)} other(s) were explained by an independent sweep. "
+            "Something in this run (or running alongside it) removed them. "
+            f"Evidence: {evidence or 'not saved (no basetemp yet)'}."
         )
         # ``pytest.exit`` is the one exception ``wrap_session`` catches around
         # this hook and turns into the exit status; anything else is reported
@@ -820,6 +876,40 @@ def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
         # shrink is reported by whichever process notices it first.
         print(f"\n{message}", file=sys.stderr)
         pytest.exit(message, returncode=pytest.ExitCode.TESTS_FAILED)
+
+
+def _save_shrink_evidence(
+    session: pytest.Session,
+    missing: list[str],
+    verdict: real_store_attribution.Attribution,
+) -> str | None:
+    """Write every missing id and its verdict under this run's basetemp.
+
+    Reads the basetemp the factory ALREADY computed and never calls
+    ``getbasetemp()``: on a factory that has not resolved one yet that call can
+    delete and recreate a directory (see ``_capture_session_basetemp`` in
+    ``tests/conftest.py``), which a session-end hook must not do. No basetemp
+    means no file, said so in the message; never a fallback into the store.
+    """
+    factory = getattr(session.config, "_tmp_path_factory", None)
+    basetemp = getattr(factory, "_basetemp", None)
+    if not isinstance(basetemp, pathlib.Path):
+        return None
+    worker = os.environ.get("PYTEST_XDIST_WORKER", "controller")
+    target = basetemp / f"real-store-shrink-{worker}.json"
+    record = {
+        "store": str(_REAL_STORE),
+        "snapshot_at": _REAL_STORE_SNAPSHOT_AT,
+        "pid": os.getpid(),
+        "missing": missing,
+        "explained": verdict.explained,
+        "unexplained": verdict.unexplained,
+    }
+    try:
+        target.write_text(json.dumps(record, indent=2, default=str), encoding="utf-8")
+    except OSError:
+        return None
+    return os.fspath(target)
 
 
 #: Divisor for the memory budget. This is a deliberately CONSERVATIVE ENVELOPE,

@@ -85,8 +85,31 @@ def python_argv(*args: str) -> list[str]:
     isolation flag is present and FIRST, since interpreter options are
     recognised only before ``-m``/``-c``.
 
-    ``sys.executable`` is read at call time and never cached: a runtime is
-    started by whichever interpreter is current, so an upgrade that replaces
-    the install under a long-lived parent is picked up by its next child.
+    ``sys.executable`` is read at call time, but remains this process's own
+    interpreter in an immutable install. Helpers belonging to a running session
+    must stay on that build; independent sessions use ``session_python_argv``.
     """
     return [sys.executable, SAFE_PATH_FLAG, *args]
+
+
+def session_python_argv(*args: str) -> list[str]:
+    """Start an independent session on current, without moving its parent.
+
+    Only generation-installed parents follow the pointer. Developer/editable
+    and legacy installs keep their own interpreter even when this machine also
+    has a stable install. Resolve current once per launch to a concrete path:
+    passing ``current/bin/python`` would let a later flip change a busy child's
+    lazy imports. Same-session helpers deliberately keep using ``python_argv``.
+
+    This code must already be loaded by the parent: installing it cannot patch
+    an older process's imported launch code. Such parents adopt it on their next
+    normal restart; no busy process or its import tree is rewritten here.
+    """
+    from local_operator import update
+
+    target = sys.executable
+    if update._is_generation_install():
+        candidate = update.current_interpreter()
+        if candidate is not None:
+            target = str(candidate)
+    return [target, SAFE_PATH_FLAG, *args]

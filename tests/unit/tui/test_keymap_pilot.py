@@ -147,6 +147,48 @@ async def test_an_unusable_key_on_disk_leaves_the_default_live() -> None:
 
 
 @pytest.mark.asyncio
+async def test_cleared_desktop_hotkeys_do_not_raise_or_warn() -> None:
+    """`none` stored for the dictation rows tolerates `set_keymap`.
+
+    Cleared is distinct from unusable: the resolver keeps `none` and never
+    lists the row as rejected, so no "ignoring unusable keymap" notice
+    appears and `set_keymap` does not raise (desktop ids have no Binding).
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        notices: list[str] = []
+        original = app._system_notice
+
+        def _capture(body: str, kind: Any = "info") -> None:
+            notices.append(body)
+            original(body, kind)
+
+        app._system_notice = _capture  # type: ignore[method-assign]
+        resolved, rejected = keymap.resolved_keymap(
+            {
+                "keymap.push_to_talk": "none",
+                "keymap.start_recording": "none",
+            }
+        )
+        assert resolved == {
+            "keymap.push_to_talk": "none",
+            "keymap.start_recording": "none",
+        }
+        assert rejected == []
+        app.set_keymap(resolved)  # must not raise
+        app._apply_keymap(
+            {
+                "keymap.push_to_talk": "none",
+                "keymap.start_recording": "none",
+            },
+            announce=True,
+        )
+        await pilot.pause()
+        assert not any("ignoring unusable" in notice for notice in notices), notices
+
+
+@pytest.mark.asyncio
 async def test_capture_mode_disarms_app_actions_in_both_directions() -> None:
     """With the gate ON a priority binding must not fire; with it OFF it must.
 

@@ -1,0 +1,203 @@
+# audit.log — actual command output, es/cli.permissions round 2, auditor session 9c0ff651f525, 2026-11-09T19:40:53Z
+$ git rev-parse HEAD
+788cc399410196b080cfc9f7e7bd558ccb713140
+$ git status --short -- local_operator/i18n
+$ .venv/bin/python scripts/i18n/check.py --catalogues-only
+check.py: catalogue checks: 0 problem(s)
+exit=0
+$ shasum -a 256 <inputs>
+d5eed4044348f0fa462e1238209230507a48eb5e018b22c7a8b971b518d3f186  local_operator/i18n/catalogues/en/cli.permissions.json
+f2d9ce73f2791f209b1be203b8f1e0d042eff7a348c0822ee28c5141a3cec099  local_operator/i18n/catalogues/en/cli.permissions.context.json
+bac7a6f7f3fe9a9eb8128ae5acf31ea3a0b6e589247e62f862c160f01ce4b3f7  local_operator/i18n/catalogues/es/cli.permissions.json
+$ python mech.py (parity/placeholder/backtick/newline/bullet/kept-token/quote + precedent counts)
+keys en 38 es 38 diff set() order_same True
+help.permissions 72 96 ok
+help.status 84 99 ok
+help.setup 94 116 ok
+status.not_macos 56 69 ok
+status.identity.team 78 109 ok
+status.identity.adhoc 68 84 ok
+status.identity.legacy 105 153 ok
+status.identity.none 79 96 ok
+status.image 13 14 ok
+status.optin.on 51 63 ok
+status.optin.off 78 116 ok
+status.optin.no_app 99 115 ok
+status.optin.unavailable 191 228 ok
+status.optin.blocked 52 57 ok
+status.reason.isolated_home 44 51 ok
+status.reason.runtime_root_override 34 41 ok
+status.reason.config_dir_override 60 59 ok
+status.reason.not_darwin 9 11 ok
+status.app.found 33 48 ok
+status.app.missing 26 38 ok
+status.screen.granted 45 59 ok
+status.screen.denied 141 171 ok
+status.screen.unknown 58 70 ok
+status.screen.no_image 72 95 ok
+status.scope 113 134 ok
+status.guide 79 85 ok
+setup.refused.tty 61 65 ok
+setup.refused.isolated 89 126 ok
+setup.no_app 88 126 ok
+setup.no_identity 131 150 ok
+setup.explain 627 813 ['bullets']
+setup.confirm 16 18 ok
+setup.cancelled 31 34 ok
+setup.failed 117 140 ok
+setup.always_allow 67 81 ok
+setup.already_signed 147 189 ok
+setup.done 130 169 ok
+setup.done_allow_once 219 265 ok
+problem_keys 1
+precedent outside cli.permissions: 'un terminal': 2 | in es cli.permissions: 3
+precedent outside cli.permissions: 'una terminal': 1 | in es cli.permissions: 0
+precedent outside cli.permissions: 'el terminal': 1 | in es cli.permissions: 0
+precedent outside cli.permissions: 'la terminal': 9 | in es cli.permissions: 0
+precedent outside cli.permissions: 'llavero': 0 | in es cli.permissions: 2
+precedent outside cli.permissions: 'Acceso a Llaveros': 0 | in es cli.permissions: 1
+precedent outside cli.permissions: 'Ajustes del Sistema': 0 | in es cli.permissions: 1
+precedent outside cli.permissions: 'Configuración del Sistema': 0 | in es cli.permissions: 0
+precedent outside cli.permissions: 'Grabación de pantalla': 0 | in es cli.permissions: 5
+precedent outside cli.permissions: 'carpeta de inicio': 0 | in es cli.permissions: 1
+precedent outside cli.permissions: 'editor de': 0 | in es cli.permissions: 1
+precedent outside cli.permissions: 'Permitir siempre': 0 | in es cli.permissions: 3
+$ bullet-line check for setup.explain (first 2 chars of lines 2..n)
+Traceback (most recent call last):
+  File "<string>", line 3, in <module>
+KeyError: 'setup'
+$ grep -rnoE "(un|una|el|la|en) terminal" es catalogues excl. cli.permissions
+local_operator/i18n/catalogues/es/mobile.setup.json:31:una terminal
+local_operator/i18n/catalogues/es/wire.settings.json:34:la terminal
+local_operator/i18n/catalogues/es/wire.settings.json:237:la terminal
+local_operator/i18n/catalogues/es/wire.settings.json:254:la terminal
+local_operator/i18n/catalogues/es/wire.notification_sound.json:36:del terminal
+local_operator/i18n/catalogues/es/relay.session.tags.json:6:la terminal
+local_operator/i18n/catalogues/es/cli.exec_help.json:20:un terminal
+local_operator/i18n/catalogues/es/tui.app.json:34:la terminal
+local_operator/i18n/catalogues/es/tui.app.json:38:la terminal
+local_operator/i18n/catalogues/es/wire.errors.desktop.json:71:la terminal
+local_operator/i18n/catalogues/es/wire.errors.desktop.json:78:la terminal
+local_operator/i18n/catalogues/es/cli.team_bridge.json:48:un terminal
+local_operator/i18n/catalogues/es/relay.asks.json:59:la terminal
+$ python apple_labels.py (Apple es/es_419 loctables, macOS 27.2 26B123)
+loctables: 134
+Applications/System Settings.app/Contents/Resources/Localizable.loctable | Privacy & Security | 'Privacy & Security' | es: 'Privacidad y seguridad' | es_419: 'Privacidad y seguridad'
+Applications/System Settings.app/Contents/Resources/Localizable.loctable | Accessibility | 'Accessibility' | es: 'Accesibilidad' | es_419: 'Accesibilidad'
+Library/CoreServices/Applications/Keychain Access.app/Contents/Resources/InfoPlist.loctable | CFBundleName | 'Keychain Access' | es: 'Acceso a Llaveros' | es_419: 'Acceso a Llaveros'
+Library/CoreServices/Applications/Keychain Access.app/Contents/Resources/InfoPlist.loctable | CFBundleDisplayName | 'Keychain Access' | es: 'Acceso a Llaveros' | es_419: 'Acceso a Llaveros'
+Library/CoreServices/Applications/Keychain Access.app/Contents/Resources/Localizable.loctable | Keychain Access | 'Keychain Access' | es: 'Acceso a Llaveros' | es_419: 'Acceso a Llaveros'
+Library/ExtensionKit/Extensions/SecurityPrivacyExtension.appex/Contents/Resources/InfoPlist.loctable | CFBundleDisplayName | 'Privacy & Security' | es: 'Privacidad y seguridad' | es_419: 'Privacidad y seguridad'
+Library/ExtensionKit/Extensions/SecurityPrivacyExtension.appex/Contents/Resources/InfoPlist.loctable | CFBundleName | 'Privacy & Security' | es: 'Privacidad y seguridad' | es_419: 'Privacidad y seguridad'
+Library/ExtensionKit/Extensions/SecurityPrivacyExtension.appex/Contents/Resources/Localizable.loctable | SCREEN_CAPTURE_HEADER | 'Screen & System Audio Recording' | es: 'Grabación de pantalla y del audio del sistema' | es_419: 'Grabación de audio del sistema y pantalla'
+Library/ExtensionKit/Extensions/SecurityPrivacyExtension.appex/Contents/Resources/Localizable.loctable | FILE_ACCESS_COMBINED | 'Files & Folders' | es: 'Archivos y carpetas' | es_419: 'Archivos y carpetas'
+Library/ExtensionKit/Extensions/SecurityPrivacyExtension.appex/Contents/Resources/Localizable.loctable | Allow | 'Allow' | es: 'Permitir' | es_419: 'Permitir'
+Library/ExtensionKit/Extensions/SecurityPrivacyExtension.appex/Contents/Resources/Localizable.loctable | SCREEN_CAPTURE | 'Screen Recording' | es: 'Grabación de pantalla' | es_419: 'Grabación de pantalla'
+Library/ExtensionKit/Extensions/SecurityPrivacyExtension.appex/Contents/Resources/Localizable.loctable | SCREENANDAUDIOCAPTURE | 'Screen & System Audio Recording' | es: 'Grabación de pantalla y del audio del sistema' | es_419: 'Grabación de audio del sistema y pantalla'
+Library/Frameworks/Security.framework/Resources/CloudKeychain.loctable | Allow | 'Allow' | es: 'Permitir' | es_419: 'Permitir'
+Library/Frameworks/Security.framework/Resources/authorization.buttons.loctable | com.apple.AOSNotification.FindMyMac.modify | 'Allow' | es: 'Permitir' | es_419: 'Permitir'
+Library/Frameworks/Security.framework/Resources/authorization.buttons.loctable | com.apple.security.sudo | 'Allow' | es: 'Permitir' | es_419: 'Permitir'
+Library/Frameworks/Security.framework/Versions/A/Resources/CloudKeychain.loctable | Allow | 'Allow' | es: 'Permitir' | es_419: 'Permitir'
+Library/Frameworks/Security.framework/Versions/A/Resources/authorization.buttons.loctable | com.apple.AOSNotification.FindMyMac.modify | 'Allow' | es: 'Permitir' | es_419: 'Permitir'
+Library/Frameworks/Security.framework/Versions/A/Resources/authorization.buttons.loctable | com.apple.security.sudo | 'Allow' | es: 'Permitir' | es_419: 'Permitir'
+Library/Frameworks/Security.framework/Versions/Current/Resources/CloudKeychain.loctable | Allow | 'Allow' | es: 'Permitir' | es_419: 'Permitir'
+Library/Frameworks/Security.framework/Versions/Current/Resources/authorization.buttons.loctable | com.apple.AOSNotification.FindMyMac.modify | 'Allow' | es: 'Permitir' | es_419: 'Permitir'
+Library/Frameworks/Security.framework/Versions/Current/Resources/authorization.buttons.loctable | com.apple.security.sudo | 'Allow' | es: 'Permitir' | es_419: 'Permitir'
+Traceback (most recent call last):
+  File "<stdin>", line 4, in <module>
+KeyError: 'en'
+/System/Library/CoreServices/SecurityAgentPlugins
+/System/Library/Frameworks/Security.framework/Versions/A/MachServices/SecurityAgent.bundle
+/System/Library/Frameworks/Security.framework/Versions/A/MachServices/authorizationhost.bundle
+/System/Library/Frameworks/Security.framework/Versions/A/XPCServices/TrustedPeersHelper.xpc
+/System/Library/Frameworks/Security.framework/Versions/A/XPCServices/XPCAcmeService.xpc
+/System/Library/Frameworks/Security.framework/Versions/A/XPCServices/XPCKeychainSandboxCheck.xpc
+/System/Library/Frameworks/Security.framework/Versions/A/XPCServices/XPCTimeStampingService.xpc
+/System/Library/Frameworks/Security.framework/Versions/A/XPCServices/authd.xpc
+/System/Library/Frameworks/Security.framework/Versions/A/XPCServices/com.apple.CodeSigningHelper.xpc
+/System/Library/Frameworks/Security.framework/Versions/A/MachServices/SecurityAgent.bundle/Contents/Resources/ConfirmAccess.loctable
+['el~appletv', 'en_GB~iphone', 'vi~applewatch', 'th~appletv', 'da~mac', 'it~iphone', 'sv~ipad', 'cs~applewatch']
+SysSettings InfoPlist | CFBundleDisplayName | en: None | es: 'Ajustes del Sistema' | es_419: 'Configuración del Sistema'
+SysSettings InfoPlist | CFBundleName | en: None | es: 'Ajustes del Sistema' | es_419: 'Configuración del Sistema'
+SysSettings InfoPlist | NSHumanReadableCopyright | en: None | es: 'Copyright © 2026 Apple Inc. Todos los derechos reservados.' | es_419: 'Copyright © 2026 Apple Inc.\nTodos los derechos reservados.'
+locales: ['LocProvenance', 'ar', 'ca', 'cs', 'da', 'de', 'el', 'en_AU', 'en_GB', 'en_PH', 'es', 'es_419', 'fi', 'fr', 'fr_CA', 'he', 'hi', 'hr', 'hu', 'id', 'it', 'ja', 'ko', 'ms', 'nl', 'no', 'pl', 'pt_BR', 'pt_PT', 'ro', 'ru', 'sk', 'sl', 'sv', 'th', 'tr', 'uk', 'vi', 'zh_CN', 'zh_HK', 'zh_TW']
+ConfirmAccess | '100267.title' | es: 'Permitir siempre' | es_419: 'Permitir siempre' | en_GB: 'Always Allow'
+ConfirmAccess | '100268.title' | es: 'Permitir' | es_419: 'Permitir' | en_GB: 'Allow'
+Base.lproj
+ConfirmAccess.loctable
+ar.lproj
+ca.lproj
+cs.lproj
+da.lproj
+de.lproj
+el.lproj
+en.lproj
+en_AU.lproj
+ACLEditor.loctable
+AddCertificatePanel.loctable
+Algorithms.loctable
+AppIcon.icns
+Assets.car
+Base.lproj
+CertificateDetachedView.loctable
+CertificatePrefEditor.loctable
+CertificatePrefPreview.loctable
+Defaults.plist
+Errors.loctable
+InfoPlist.loctable
+KCAPreferences.loctable
+KeyEditor.loctable
+KeyPreview.loctable
+KeychainFirstAid.loctable
+Localizable.loctable
+MainMenu.loctable
+MasterView.loctable
+NewCertificatePrefItem.loctable
+NewKeychainItem.loctable
+NoteEditor.loctable
+NotePreview.loctable
+PasswordEditor.loctable
+PasswordPreview.loctable
+ar.lproj
+ca.lproj
+configKeychain.loctable
+cs.lproj
+da.lproj
+de.lproj
+el.lproj
+en.lproj
+en_AU.lproj
+en_GB.lproj
+es.lproj
+es_419.lproj
+fi.lproj
+fr.lproj
+fr_CA.lproj
+ACLEditor.loctable | 100175.title | en_GB: 'Always allow access by these applications:' | es: 'Permitir siempre el acceso desde estas aplicaciones:' | es_419: 'Permitir siempre el acceso desde estas aplicaciones:'
+CertificatePrefEditor.loctable | 256.label | en_GB: 'Attributes' | es: 'Atributos' | es_419: 'Atributos'
+CertificatePrefEditor.loctable | 257.label | en_GB: 'Access Control' | es: 'Control de acceso' | es_419: 'Control de acceso'
+KeyEditor.loctable | 301.label | en_GB: 'Attributes' | es: 'Atributos' | es_419: 'Atributos'
+KeyEditor.loctable | 302.label | en_GB: 'Access Control' | es: 'Control de acceso' | es_419: 'Control de acceso'
+Localizable.loctable | Always allow access by these applications: | en_GB: 'Always allow access by these applications:' | es: 'Permitir siempre el acceso desde estas aplicaciones:' | es_419: 'Permitir siempre el acceso desde estas aplicaciones:'
+NoteEditor.loctable | 294.label | en_GB: 'Attributes' | es: 'Atributos' | es_419: 'Atributos'
+NoteEditor.loctable | 295.label | en_GB: 'Access Control' | es: 'Control de acceso' | es_419: 'Control de acceso'
+PasswordEditor.loctable | 256.label | en_GB: 'Attributes' | es: 'Atributos' | es_419: 'Atributos'
+PasswordEditor.loctable | 257.label | en_GB: 'Access Control' | es: 'Control de acceso' | es_419: 'Control de acceso'
+$ bullet-line check for setup.explain, rerun with flat key (previous attempt used nested key: KeyError above)
+['- ', '- '] ['- ', '- ']
+$ python: all es strings mentioning "audio del sistema" in SecurityPrivacyExtension Localizable.loctable + System Settings loctables
+Localizable.loctable | AUDIO_CAPTURE | es: 'Grabación del audio del sistema' | en: 'System Audio Recording' | es_419: 'Grabación de audio del sistema'
+Localizable.loctable | AUDIO_CAPTURE_HEADER | es: 'Solo grabación del audio del sistema' | en: 'System Audio Recording Only' | es_419: 'Sólo grabación de audio del sistema'
+Localizable.loctable | AUDIO_CAPTURE_SUMMARY | es: 'Permite a las aplicaciones siguientes acceder al audio del sistema y grabarlo.' | en: 'Allow the applications below to access and record your system audio.' | es_419: 'Permite que las siguientes apps accedan y graben el audio del sistema.'
+Localizable.loctable | SCREENANDAUDIOCAPTURE | es: 'Grabación de pantalla y del audio del sistema' | en: 'Screen & System Audio Recording' | es_419: 'Grabación de audio del sistema y pantalla'
+Localizable.loctable | SCREEN_CAPTURE_HEADER | es: 'Grabación de pantalla y del audio del sistema' | en: 'Screen & System Audio Recording' | es_419: 'Grabación de audio del sistema y pantalla'
+$ round-1 finding verification counts in es/cli.permissions.json
+«: 0
+»: 0
+“: 16
+app de escritorio: 0
+aplicación de escritorio: 8
+build: 0
+compilación: 2
+Ejecútala: 0
+Ejecuta el comando: 1

@@ -1,0 +1,12 @@
+{
+  "wire.hub_pull.ask.local_edits": "* contient vos propres modifications : elles sont conservées ou intégrées par merge, jamais écrasées.",
+  "wire.hub_pull.ask.more": "{names} et {count} de plus",
+  "wire.hub_pull.ask.new": "{count, plural, one {# nouvel élément} many {# de nouveaux éléments} other {# nouveaux éléments}} : {names}",
+  "wire.hub_pull.ask.option.not_now": "Pas maintenant",
+  "wire.hub_pull.ask.option.not_now.description": "Ne rien changer pour l’instant.",
+  "wire.hub_pull.ask.option.update": "Mettre à jour",
+  "wire.hub_pull.ask.option.update.description": "Ajouter les nouveaux éléments et mettre à jour ceux que vous avez déjà. Vos modifications sont conservées.",
+  "wire.hub_pull.ask.resubscribe": "{count, plural, one {# élément à nouveau tenu à jour} many {# d’éléments à nouveau tenus à jour} other {# éléments à nouveau tenus à jour}} : {names}",
+  "wire.hub_pull.ask.title": "Mettre à jour vos éléments {org} depuis le hub de votre organisation ?",
+  "wire.hub_pull.ask.updates": "{count, plural, one {# mise à jour} many {# de mises à jour} other {# mises à jour}} : {names}"
+}

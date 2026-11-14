@@ -3103,3 +3103,42 @@ def test_the_ladder_memo_enforces_its_bound_within_one_bucket(monkeypatch, tmp_p
     # The most recent writes survive; the oldest are what gets dropped.
     assert configure_mod._listing_effort("openrouter", "vendor/m299") == ("low", "high")
     assert configure_mod._listing_effort("openrouter", "vendor/m0") is None
+
+
+def test_a_radient_deepseek_model_gets_an_effort_control_from_the_borrowed_ladder(
+    monkeypatch, tmp_path
+) -> None:
+    """The reported gap, end to end through ``configure_model``.
+
+    Radient's listing states no ``reasoning`` object, so
+    ``radient/deepseek/deepseek-v4.1-flash`` resolved with no ladder and
+    ``reasoning=False`` and the composer offered no effort control, though the
+    route accepts every rung OpenRouter states for the id. The ladder borrowed
+    in discovery must reach the spec, flip ``reasoning`` on, and still seed
+    nothing: an aggregator sends an effort key only once the user picks a rung.
+    """
+    from local_operator.model import discovery as discovery_mod
+
+    model_id = "deepseek/deepseek-v4.1-flash"
+    monkeypatch.setattr(catalogue, "default_cache_dir", lambda: tmp_path)
+    monkeypatch.setattr(
+        discovery_mod,
+        "_relayed_effort_source_rows",
+        lambda **_kw: [_row(model_id, reasoning_efforts=("none", "low", "high", "max"))],
+    )
+    silent = [_row(model_id)]
+    assert silent[0].reasoning_efforts is None, "premise: Radient states nothing"
+    _stub_discovery(
+        monkeypatch,
+        lambda provider_id: discovery_mod._borrow_relayed_efforts(
+            provider_id, silent, cache_dir=tmp_path, client=None
+        ),
+    )
+    configure_mod.invalidate_model_info_cache()
+
+    spec = configure_mod.configure_model(hosting="radient", model_name=model_id).spec
+
+    assert spec.reasoning_efforts == ("none", "low", "high", "max")
+    assert spec.reasoning is True
+    assert spec.reasoning_effort is None
+    assert spec.reasoning_default_effort is None

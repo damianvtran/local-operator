@@ -10,8 +10,15 @@ import { formatElapsed } from "../lib/format";
 import { sessionHealth } from "../lib/session-health";
 import { messageRuntime } from "../store";
 import type { SessionProjection } from "../types";
+import { ChromeIcon } from "./ui/chrome-icon";
 
-export function SessionSubtitle({ projection, connected }: { projection: SessionProjection; connected: boolean }) {
+export function SessionSubtitle({ projection, connected, temporary = false }: {
+	projection: SessionProjection;
+	connected: boolean;
+	/** A temporary chat: the line reads `Temporary · <status>` behind the dashed
+	    mark, on the line that already exists, so the mark costs no height. */
+	temporary?: boolean;
+}) {
 	const lostAt = useRef<number | null>(connected ? null : Date.now());
 	const [now, setNow] = useState(Date.now());
 	const [elapsed, setElapsed] = useState(projection.activity_started_s ?? 0);
@@ -45,9 +52,17 @@ export function SessionSubtitle({ projection, connected }: { projection: Session
 		? messageRuntime.t("relay.chrome.session.subtitle.working_plain")
 		: messageRuntime.t("relay.chrome.session.subtitle.working", { elapsed: formatElapsed(elapsed) });
 	else label = messageRuntime.t("relay.chrome.session.subtitle.idle");
+	/* THE MARK AND THE WORD LEAD, so a narrow header truncates the status's
+	   tail ("Working · 12s" goes first) and "Temporary" is the last to go. */
+	if (temporary) label = messageRuntime.t("relay.session.temporary_subtitle", { status: label });
 	return <>
 		{/* No dot of its own: the header's status control draws the ONE dot
 		    beside this line (the link-down mark used to live here). */}
-		<span dir={contentDir(label)} className="block truncate text-meta text-ink-dim">{label}</span>
+		{temporary ? (
+			<span data-temporary="" className="flex min-w-0 items-center gap-1 text-meta text-ink-dim">
+				<ChromeIcon name="temporary" size={12} />
+				<span dir={contentDir(label)} className="block min-w-0 truncate">{label}</span>
+			</span>
+		) : <span dir={contentDir(label)} className="block truncate text-meta text-ink-dim">{label}</span>}
 	</>;
 }

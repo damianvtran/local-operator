@@ -1,0 +1,16 @@
+{
+  "audit_id": "frpm3",
+  "round": 3,
+  "findings": [],
+  "round2_findings": {
+    "FRPM2-1": "fixed",
+    "FRPM2-2": "fixed",
+    "FRPM2-N1": "applied",
+    "FRPM2-N2": "applied",
+    "FRPM2-N3": "applied",
+    "FRPM2-N4": "applied",
+    "FRPM2-S1": "resolved upstream (en)",
+    "FRPM2-S2": "resolved upstream (code+en)"
+  },
+  "note": "audit notes, not an execution log"
+}

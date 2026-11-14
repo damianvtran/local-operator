@@ -27,6 +27,7 @@ grows with the file.
 from __future__ import annotations
 
 import struct
+import zlib
 from dataclasses import dataclass
 
 #: What providers accept directly. Deliberately not a superset: a format we can
@@ -140,6 +141,65 @@ def _png_dimensions(data: bytes) -> tuple[int, int] | None:
         return None
     width, height = struct.unpack(">II", data[16:24])
     return width, height
+
+
+def png_structure_fault(data: bytes, *, verify_crc: bool) -> str | None:
+    """Why ``data`` is not a structurally complete PNG, or ``None`` when it is.
+
+    WHY THIS EXISTS. A provider decodes strictly and Pillow does not, so the two
+    disagree about damaged files and the disagreement used to end sessions.
+    Measured against DeepSeek on 2026-11-11 with 1-token requests: a PNG with
+    no ``IEND``, a chunk whose declared length runs past the end of the file,
+    or a chunk with a bad CRC is refused as ``unsupported image`` (HTTP 400),
+    while Pillow decodes all three happily — it never checks the IDAT CRC and
+    stops reading once it has enough rows. The ``read`` tool's verbatim rung
+    therefore forwarded such a file unchanged, the block entered the history,
+    and the next request failed. Colour type, size and aspect ratio were all
+    ACCEPTED in the same matrix (L, LA, P, 1-bit, I;16, RGB, RGBA; 1x1 to
+    2100px; 1:100), so structure is the property worth checking, not those.
+
+    Bytes AFTER ``IEND`` are deliberately not a fault: the same matrix showed
+    the provider ignores them, and flagging them would rewrite blocks it takes
+    as they are (a rewrite is a prompt-cache miss for nothing).
+
+    ``verify_crc`` is a cost switch, not a strictness preference. The
+    creation-time bound runs once per image and already pays a full decode, so
+    a CRC pass over the same bytes is noise there. The render-time history
+    repair runs on every image on every render, where a CRC over a session's
+    worth of megabyte screenshots is real CPU; the chunk walk alone is
+    O(chunks) and still catches every truncation, which is how damage arrives
+    in practice (a file read mid-write, a broken base64 round trip).
+
+    Never raises: callers are a bound that must fall through to a re-encode and
+    a history walk that must not fail a render over one block.
+    """
+    if not data.startswith(_PNG_MAGIC):
+        return "not a PNG signature"
+    offset = len(_PNG_MAGIC)
+    seen_idat = False
+    first = True
+    while True:
+        if offset + 12 > len(data):
+            return "truncated: no IEND chunk"
+        (length,) = struct.unpack(">I", data[offset : offset + 4])
+        kind = data[offset + 4 : offset + 8]
+        if not kind.isalpha() or not kind.isascii():
+            return f"invalid chunk type at byte {offset}"
+        end = offset + 12 + length
+        if end > len(data):
+            return f"chunk {kind.decode('ascii')} at byte {offset} runs past the end of the file"
+        if first and kind != b"IHDR":
+            return "first chunk is not IHDR"
+        first = False
+        if verify_crc:
+            (crc,) = struct.unpack(">I", data[end - 4 : end])
+            if zlib.crc32(data[offset + 4 : end - 4]) != crc:
+                return f"chunk {kind.decode('ascii')} at byte {offset} has a bad CRC"
+        if kind == b"IDAT":
+            seen_idat = True
+        elif kind == b"IEND":
+            return None if seen_idat else "no IDAT chunk before IEND"
+        offset = end
 
 
 def _gif_dimensions(data: bytes) -> tuple[int, int] | None:

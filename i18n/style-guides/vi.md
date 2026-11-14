@@ -100,3 +100,12 @@ catalogues before landing here.
   tip now agrees). snapshot → «ảnh chụp» — keep it distinct from «ảnh chụp
   màn hình» (screenshots). The cmux qualifier: the welcome tip leads with the
   `cmux:` label; the help uses «Dưới cmux» — both accepted (recheck-verified).
+- gateway: keep English «gateway» (relay gateway → «gateway chuyển tiếp»).
+  «cổng» is reserved for a network port, so the tunnel.status diagnosis
+  "another program holds the port, or the gateway is unhealthy" keeps its two
+  suspects distinct (audit a1 VI-02, PR #3931). tunnel likewise stays English
+  «tunnel», matching the shipped corpus (VI-01); «đường hầm» is not used.
+- node (mesh/cluster node): keep English «node», like «mesh» — «node mesh»,
+  «trình duyệt do node quản lý» (`cli.browser_node`, audited 2026-11-13).
+  Do not introduce «nút»; it is uncommon for a cluster node in vi dev
+  register. install record → «biên bản thiết lập» («hồ sơ» is profile).

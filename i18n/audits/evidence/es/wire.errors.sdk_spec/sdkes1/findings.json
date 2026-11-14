@@ -1,0 +1,63 @@
+{
+  "schema": 1,
+  "audit_id": "sdkes1",
+  "locale": "es",
+  "namespace": "wire.errors.sdk_spec",
+  "head_sha": "cf5c90bad0d1e6745d9bc7e0d85f9aee5c084b55",
+  "catalogue_sha256": "d95b92040e7b5aee30f8c10001f87208b279953909281df9c8f5975f0d6cecba",
+  "source_sha256": "a92bc479321cd0ee938d338cff05c1fced88590df3d43ec39d14f4d7b3cf5855",
+  "severity_counts": {
+    "blocker": 0,
+    "major": 4,
+    "minor": 1,
+    "nit": 0
+  },
+  "findings": [
+    {
+      "id": "ES1",
+      "key": "wire.errors.sdk_spec.approval_callback_gate_required",
+      "severity": "major",
+      "current": "ApprovalPolicy.callback() requiere un gate invocable",
+      "problem": "Untranslated prose gate is not an allowed kept-English term and is not the API parameter name (callback takes handler). No wire.errors sibling uses gate. Translate the concept, preserving the API.",
+      "suggested_value": "ApprovalPolicy.callback() requiere una función de aprobación invocable",
+      "precedent": "wire.errors.desktop.json:wire.errors.desktop.question_no_longer_pending uses aprobación; no sibling gate precedent; es style guide kept-English list excludes gate."
+    },
+    {
+      "id": "ES5",
+      "key": "wire.errors.sdk_spec.spawn_birth_effort_pair_required",
+      "severity": "minor",
+      "current": "birth_effort de una sesión nueva creada con spawn viaja con la muestra de creación y necesita el par hosting/model a su lado; indica los tres, o abre la sesión en el proceso actual (open_session) para fijar un nivel inicial sin par de modelo.",
+      "problem": "muestra de creación is decipherable but viaja con / a su lado is an English calque and obscures that the three fields form the initial configuration; use a concrete description.",
+      "suggested_value": "En una sesión nueva creada con spawn_session(), birth_effort forma parte de los parámetros iniciales y requiere también el par hosting/model; indica los tres valores, o abre la sesión en el proceso actual (open_session) para fijar un nivel inicial sin especificar ese par.",
+      "precedent": "No wire.errors sibling birth-sample precedent. sdk.py:_model_sample documents provider/model_id/reasoning_effort as one initial sample; wire.errors.sdk_startup.json:wire.errors.sdk_startup.attach_runtime_missing uses en este proceso."
+    },
+    {
+      "id": "ES4",
+      "key": "wire.errors.sdk_spec.spawn_fields_unsupported",
+      "severity": "major",
+      "current": "spawn_session() no puede entregar el estado posterior a la apertura a un nuevo runtime hijo; campos no admitidos en esta especificación: {fields}. Abre la sesión en el proceso actual (open_session), conecta lo que necesites, haz dispose y luego llama a spawn_session() con el mismo id: resume restaura lo conectado; o bien haz spawn sin estos campos.",
+      "problem": "haz dispose / haz spawn are untranslated English verbs in Spanish prose, not exact callable identifiers. This is neither native diagnostic copy nor covered by the kept-English list. Name the actual API for the remedy.",
+      "suggested_value": "spawn_session() no puede transferir el estado configurado tras la apertura a un nuevo runtime hijo; campos no admitidos en esta especificación: {fields}. Abre la sesión en el proceso actual (open_session), conecta lo que necesites, libera sus recursos con dispose() y luego llama a spawn_session() con el mismo id: resume restaura lo conectado; o bien llama a spawn_session() sin estos campos.",
+      "precedent": "wire.errors.sdk_startup.json:wire.errors.sdk_startup.attach_hosting_unconfigured preserves spawn_session()/deliver() and uses conéctate; no sibling dispose or prose spawn precedent. sdk.py:935-950 identifies dispose() as the exit operation."
+    },
+    {
+      "id": "ES3",
+      "key": "wire.errors.sdk_spec.spawn_model_pair_required",
+      "severity": "major",
+      "current": "spawn_session() envía hosting/model a un runtime NUEVO como una sola muestra de creación; indica ambos o ninguno (el hijo resolverá entonces su modelo a partir de la configuración de la raíz).",
+      "problem": "NUEVO translates NEW despite this key’s explicit sidecar/user preserved-token contract. Existing other-locale translations are not authority to waive this requirement.",
+      "suggested_value": "spawn_session() envía hosting/model a un runtime NEW como un único conjunto de parámetros iniciales; indica ambos o ninguno (el hijo resolverá entonces su modelo a partir de la configuración de la raíz).",
+      "precedent": "wire.errors.sdk_startup.json:wire.errors.sdk_startup.attach_runtime_missing endorses runtime; NEW requirement comes from en sidecar, not sibling wording."
+    },
+    {
+      "id": "ES2",
+      "key": "wire.errors.sdk_spec.yolo_approval_unreachable",
+      "severity": "major",
+      "current": "yolo=True hace inalcanzable un gate ApprovalPolicy.{approval_mode}(); usa ApprovalPolicy.auto() (o quita yolo) en su lugar",
+      "problem": "Untranslated prose gate repeats ES1; the restored technical Boolean-assignment token itself is exact and must stay untouched.",
+      "suggested_value": "yolo=True impide que se ejecute la función de aprobación de ApprovalPolicy.{approval_mode}(); usa ApprovalPolicy.auto() (o quita yolo) en su lugar",
+      "precedent": "wire.errors.desktop.json:wire.errors.desktop.question_no_longer_pending uses aprobación; no sibling gate precedent."
+    }
+  ],
+  "report_comment": "https://github.com/damianvtran/local-operator/pull/3708#issuecomment-6755952414"
+}

@@ -295,6 +295,7 @@ async def run_tui(
     resume_factory: Callable[[str | None], Awaitable[SessionProtocol]] | None = None,
     on_config_changed: Callable[[], None] | None = None,
     warm_session_imports: bool = True,
+    start_temporary: bool = False,
 ) -> int:
     """Run the full-screen TUI to completion; return a process exit code.
 
@@ -374,6 +375,7 @@ async def run_tui(
             resume_factory=resume_factory,
             on_config_changed=on_config_changed,
             warm_session_imports=warm_session_imports,
+            start_temporary=start_temporary,
         )
         # Register THIS process as a live lop session with the secret broker.
         # It covers the session the TUI OWNS: an in-process session's `bash`

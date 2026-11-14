@@ -13,6 +13,7 @@ would send, not the app's remembered choice.
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any, cast
 
 import pytest
@@ -1411,3 +1412,320 @@ async def test_the_effort_picker_prepends_auto_when_the_ladder_lacks_it() -> Non
         assert editor.picker.is_open()
         rows = [name for name, _ in editor.picker.suggestions()]
     assert rows == ["auto", "low", "medium", "high"], rows
+
+
+# ---------------------------------------------------------------------------
+# An attached viewer's switch no longer waits on the owner's turn work.
+#
+# ``AttachedSession.set_model`` sends ``defer_ok``: a current owner acks EVERY
+# such switch ``queued`` at once, idle or busy, before it runs. The viewer says
+# "queued — applies at the next step" only while the owner is streaming, stays
+# silent on success (the repaint shows it), and shows ONE refusal — from the
+# reply or from the later ``settings_result(s)`` push, never both.
+# ---------------------------------------------------------------------------
+
+
+def _attached_viewer(answer: Any) -> tuple[Any, list[dict[str, Any]], list[Any]]:
+    from local_operator.harness.types import ModelSpec
+    from local_operator.mobile.attach_client import AttachClient
+    from local_operator.session.attached import AttachedSession
+
+    sent: list[dict[str, Any]] = []
+    notices: list[Any] = []
+    current = ModelSpec(provider="openai", model_id="old", reasoning_efforts=("low", "high"))
+
+    class Client(AttachClient):
+        def __init__(self) -> None:
+            pass  # records the request; never opens a socket
+
+        async def set_model(  # type: ignore[override]
+            self,
+            provider: str,
+            model_id: str,
+            effort: str | None = None,
+            *,
+            defer_ok: bool = False,
+            request_id: str | None = None,
+        ) -> str:
+            sent.append(
+                {
+                    "provider": provider,
+                    "model_id": model_id,
+                    "effort": effort,
+                    "defer_ok": defer_ok,
+                    "request_id": request_id,
+                }
+            )
+            if isinstance(answer, BaseException):
+                raise answer
+            return answer
+
+    class Viewer(AttachedSession):
+        @property
+        def model(self) -> Any:
+            return current.model_copy()
+
+        def _require_owner_can_serve(self, provider: str) -> None:
+            return None
+
+    viewer = object.__new__(Viewer)
+    viewer._client = Client()
+    viewer._handlers = [notices.append]
+    viewer._streaming = True
+    return viewer, sent, notices
+
+
+async def _settle() -> None:
+    for _ in range(5):
+        await asyncio.sleep(0)
+
+
+@pytest.mark.asyncio
+async def test_a_queued_attached_switch_says_it_applies_at_the_next_step() -> None:
+    from local_operator.harness.types import ModelSpec
+
+    viewer, sent, notices = _attached_viewer("queued")
+    viewer.set_model(ModelSpec(provider="openai", model_id="new"), explicit=True)
+    await _settle()
+    assert sent and sent[0]["defer_ok"] is True
+    assert isinstance(sent[0]["request_id"], str) and sent[0]["request_id"]
+    assert [n.code for n in notices] == ["tui.notices.model_switch_queued"]
+    assert notices[0].kind == "info"
+    assert "openai/new" in notices[0].text and "next step" in notices[0].text
+    assert "busy" not in notices[0].text, "R1-M3: the ack says nothing about busyness"
+
+
+@pytest.mark.asyncio
+async def test_an_older_owner_answering_on_landing_adds_no_notice() -> None:
+    """An owner predating ``defer_ok`` replies with its receipt when it lands."""
+    from local_operator.harness.types import ModelSpec
+
+    viewer, sent, notices = _attached_viewer("model: openai/new")
+    viewer.set_model(ModelSpec(provider="openai", model_id="new"), explicit=True)
+    await _settle()
+    assert len(sent) == 1
+    assert notices == []
+    assert viewer._settings_pending == {}, "the reply WAS the outcome"
+
+
+@pytest.mark.asyncio
+async def test_an_idle_owner_queued_ack_shows_no_busy_line() -> None:
+    """R1-M3: the ack is not evidence of a busy session; idle stays silent."""
+    from local_operator.harness.types import ModelSpec
+
+    viewer, _sent, notices = _attached_viewer("queued")
+    viewer._streaming = False
+    viewer.set_model(ModelSpec(provider="openai", model_id="new"), explicit=True)
+    await _settle()
+    assert notices == []
+
+
+def _held_owner() -> tuple[Any, Any, list[tuple[str, str | None]]]:
+    """A REAL ``RuntimeServer`` whose set_model parks until released."""
+    import threading
+
+    from local_operator.session.runtime.server import RuntimeServer
+    from tests.unit.session.runtime.test_server import FakeHandle
+
+    release = threading.Event()
+    landed: list[tuple[str, str | None]] = []
+
+    class Held(FakeHandle):
+        async def set_model(self, provider, model_id, *, request_id=None):  # noqa: ANN001, ANN202
+            assert await asyncio.to_thread(release.wait, 10)
+            landed.append((model_id, request_id))
+            return f"model: {provider}/{model_id}"
+
+    return RuntimeServer(Held(), kind="tui"), release, landed
+
+
+async def _real_viewer(runtime: Any) -> tuple[Any, Any, list[Any]]:
+    from local_operator.harness.types import ModelSpec
+    from local_operator.mobile.attach_client import AttachClient
+    from local_operator.session.attached import AttachedSession
+    from tests.unit.session.runtime.test_server import _wait_record
+
+    notices: list[Any] = []
+    current = ModelSpec(provider="test", model_id="old")
+
+    class Viewer(AttachedSession):
+        @property
+        def model(self) -> Any:
+            return current.model_copy()
+
+        def _require_owner_can_serve(self, provider: str) -> None:
+            return None
+
+    record = await _wait_record()
+    client = AttachClient(lambda p: None, lambda reason: None)
+    await client.connect(record, "s1")
+    viewer = object.__new__(Viewer)
+    viewer._client = client
+    viewer._handlers = [notices.append]
+    viewer._streaming = True
+    return viewer, client, notices
+
+
+async def _until_true(predicate: Any, timeout: float = 5.0) -> None:
+    deadline = asyncio.get_running_loop().time() + timeout
+    while not predicate():
+        assert asyncio.get_running_loop().time() < deadline, "condition never held"
+        await asyncio.sleep(0.02)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("ok", [True, False])
+async def test_the_real_owner_sequence_yields_one_line_per_outcome(ok: bool) -> None:
+    """R1-M3 over the REAL reply contract, not a mocked impossible answer.
+
+    A real ``RuntimeServer`` acks the viewer's ``defer_ok`` switch ``queued``
+    while the switch body is still parked; the outcome then arrives as the
+    state push the owner publishes for that ``request_id``. Expected: one
+    neutral "queued" line (the owner is streaming), then NOTHING on success
+    (no duplicate of the owner's ``model: X`` receipt), or exactly ONE refusal.
+    """
+    from local_operator.harness.types import ModelSpec
+    from local_operator.session.frontend_state import FrontendSessionState
+
+    runtime, release, landed = _held_owner()
+    runtime.start()
+    client = None
+    try:
+        viewer, client, notices = await _real_viewer(runtime)
+        viewer.set_model(ModelSpec(provider="test", model_id="new"), explicit=True)
+        await _until_true(lambda: len(notices) == 1)
+        assert notices[0].code == "tui.notices.model_switch_queued"
+        assert "busy" not in notices[0].text and "selected" not in notices[0].text
+        assert landed == [], "the ack came before the switch ran"
+
+        release.set()
+        await _until_true(lambda: bool(landed))
+        request_id = landed[0][1]
+        assert request_id and request_id in viewer._settings_pending
+        outcome = {
+            "request_id": request_id,
+            "ok": ok,
+            "code": "applied" if ok else "model_unknown",
+            "message": "model: test/new" if ok else "test/new is not offered here",
+        }
+        state = FrontendSessionState.model_validate(
+            {
+                "session_id": "synthetic",
+                "epoch": "e",
+                "settings_result": outcome,
+                "settings_results": {"model": outcome},
+            }
+        )
+        viewer._consume_settings_result(state)
+        viewer._consume_settings_result(state)  # a replayed snapshot
+        if ok:
+            assert [n.code for n in notices] == ["tui.notices.model_switch_queued"]
+        else:
+            assert [n.code for n in notices] == [
+                "tui.notices.model_switch_queued",
+                "tui.notices.model_switch_refused",
+            ]
+            assert "test/new is not offered here" in notices[-1].text
+        assert viewer._settings_pending == {}
+    finally:
+        release.set()
+        if client is not None:
+            await client.detach()
+        runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_an_older_pending_switch_is_dropped_by_a_newer_one_of_the_same_kind() -> None:
+    """R1-m2: the pending map is bounded by kind (last-wins), never leaks."""
+    from local_operator.harness.types import ModelSpec
+
+    viewer, sent, _notices = _attached_viewer("queued")
+    viewer.set_model(ModelSpec(provider="openai", model_id="a"), explicit=True)
+    viewer.set_model(ModelSpec(provider="openai", model_id="b"), explicit=True)
+    await _settle()
+    assert list(viewer._settings_pending) == [sent[-1]["request_id"]]
+
+
+@pytest.mark.asyncio
+async def test_a_refusal_survives_a_later_other_kind_result_in_the_snapshot() -> None:
+    """R1-m2: a redial snapshot whose single slot holds a later effort result."""
+    from local_operator.harness.types import ModelSpec
+    from local_operator.session.frontend_state import FrontendSessionState
+
+    viewer, sent, notices = _attached_viewer("queued")
+    viewer._streaming = False
+    viewer.set_model(ModelSpec(provider="openai", model_id="new"), explicit=True)
+    await _settle()
+    refusal = {"request_id": sent[0]["request_id"], "ok": False, "message": "no credential"}
+    later = {"request_id": "someone-elses-effort", "ok": True, "code": "applied"}
+    state = FrontendSessionState.model_validate(
+        {
+            "session_id": "synthetic",
+            "epoch": "e",
+            "settings_result": later,
+            "settings_results": {"model": refusal, "effort": later},
+        }
+    )
+    viewer._consume_settings_result(state)
+    assert [n.code for n in notices] == ["tui.notices.model_switch_refused"]
+
+
+@pytest.mark.asyncio
+async def test_an_owner_refusal_of_an_attached_switch_is_shown_not_swallowed() -> None:
+    from local_operator.harness.types import ModelSpec
+
+    viewer, _sent, notices = _attached_viewer(RuntimeError("no such model here"))
+    viewer.set_model(ModelSpec(provider="openai", model_id="new"), explicit=True)
+    await _settle()
+    assert [n.code for n in notices] == ["tui.notices.model_switch_refused"]
+    assert notices[0].kind == "error"
+    assert "no such model here" in notices[0].text
+
+
+@pytest.mark.asyncio
+async def test_a_lost_owner_during_an_attached_switch_stays_quiet() -> None:
+    from local_operator.harness.types import ModelSpec
+
+    viewer, _sent, notices = _attached_viewer(ConnectionError("owner gone"))
+    viewer.set_model(ModelSpec(provider="openai", model_id="new"), explicit=True)
+    await _settle()
+    assert notices == []
+
+
+@pytest.mark.asyncio
+async def test_a_carried_level_that_queues_is_not_announced_as_the_users_change() -> None:
+    """No decision was made (an adoption/failover carry): no "queued" line."""
+    from local_operator.harness.types import ModelSpec
+
+    viewer, sent, notices = _attached_viewer("queued")
+    carried = ModelSpec(
+        provider="openai", model_id="old", reasoning_efforts=("low", "high"), reasoning_effort="low"
+    )
+    viewer.set_model(carried)
+    await _settle()
+    assert sent and sent[0]["effort"] is None and sent[0]["defer_ok"] is True
+    assert notices == []
+
+
+@pytest.mark.asyncio
+async def test_our_later_settings_outcome_is_consumed_once_and_other_viewers_ignored() -> None:
+    from local_operator.harness.types import ModelSpec
+    from local_operator.session.frontend_state import (
+        FrontendSessionState,
+        SettingsResultState,
+    )
+
+    viewer, sent, notices = _attached_viewer("queued")
+    viewer.set_model(ModelSpec(provider="openai", model_id="new"), explicit=True)
+    await _settle()
+    state = FrontendSessionState(session_id="synthetic", epoch="e")
+    state.settings_result = SettingsResultState(request_id="other", ok=False, message="other error")
+    viewer._consume_settings_result(state)
+    assert len(notices) == 1
+    state.settings_result = SettingsResultState(
+        request_id=sent[0]["request_id"], ok=False, code="invalid", message="refused later"
+    )
+    viewer._consume_settings_result(state)
+    viewer._consume_settings_result(state)
+    assert len(notices) == 2
+    assert notices[-1].kind == "error" and "refused later" in notices[-1].text

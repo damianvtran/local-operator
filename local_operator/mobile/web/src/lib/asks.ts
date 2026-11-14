@@ -367,6 +367,22 @@ export function headAsk(rows: PendingAsk[] | undefined | null): PendingAsk | nul
 	return head;
 }
 
+/** Every recommended row of a question, as indexes into its `options`.
+ *
+ *  A multi-select may recommend several rows, which the wire carries as
+ *  `recommended_all` beside the unchanged int `recommended` (the first pick).
+ *  A runtime or stored row without the set replays as the one row it always
+ *  showed. Validated, never clamped: a non-integer or negative index badges
+ *  nothing rather than a different row than the model meant. */
+export function recommendedRows(question: AskQuestion): number[] {
+	const all = question.recommended_all;
+	if (Array.isArray(all) && all.length > 0) {
+		return all.filter((row): row is number => Number.isInteger(row) && row >= 0);
+	}
+	const one = question.recommended;
+	return typeof one === "number" && Number.isInteger(one) && one >= 0 ? [one] : [];
+}
+
 /** The questions still to answer on this ask: the ones the log does not hold and
  *  the legacy draft has not taken. Mirrors `render.mirror_card`'s rule, because
  *  a phone that offered a question another surface already drafted would collect

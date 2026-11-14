@@ -29,6 +29,20 @@ from local_operator.team_bridge.client import (
 from local_operator.team_bridge.store import OwnerReceipt, Store, state_db_path
 from local_operator.team_bridge.types import OwnerSnapshot
 
+
+@pytest.fixture(autouse=True)
+def _review_held_off(monkeypatch: pytest.MonkeyPatch) -> None:
+    """This module pins the WORK-SCOPE class (B4b) in isolation.
+
+    ``team_bridge.review_held`` (default on, 2026-11-09) gives a ``model_hold``
+    its own review decision row; with it on, every "a model hold stays a plain
+    model hold" case here would see that row instead. The review class has its
+    own module (``test_review_held.py``).
+    """
+
+    monkeypatch.setattr(hr, "review_enabled", lambda _config_dir: False)
+
+
 CONVERSATION_ID = "bcv_abcdefgh"
 MESSAGE_ID = "bcmsg_abcdef01"
 BODY = "Ok can you send that to my aida so that she can have a team work on improving these"

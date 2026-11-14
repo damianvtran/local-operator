@@ -66,16 +66,32 @@ def _watch_turn_end(session: Any) -> asyncio.Event:
 
 
 async def _settle(
-    ended: asyncio.Event, handle: ServingSessionHandle, server: RuntimeServer, timeout: float = 5.0
+    ended: asyncio.Event,
+    handle: ServingSessionHandle,
+    server: RuntimeServer,
+    session: Any,
+    mark: int,
+    timeout: float = 5.0,
 ) -> None:
-    """Wait for the turn to END, then bounded-poll until the record agrees.
+    """Wait for the turn to END and its pipeline to SETTLE, then bounded-poll.
 
     Never a fixed sleep: the bit is expected to settle within a couple of loop
-    iterations of the turn ending, so the poll is on the record itself and the
-    deadline only bounds a genuine regression. On the unfixed tree the poll
-    runs to the deadline and the caller's assertion names the bit.
+    iterations of the pipeline settling, so the poll is on the record itself
+    and the deadline only bounds a genuine regression. On the unfixed tree the
+    poll runs to the deadline and the caller's assertion names the bit.
+
+    WHY both waits: the end event is flushed FIRST in ``_run_turn_pipeline``'s
+    ``finally``, and the rest of that tail (attention outcome → transcript
+    append + fsync, shell/journal/incident flushes) still runs under
+    ``_turn_lock`` — and ``is_busy()`` reads the lock. That tail is disk-bound,
+    so on a loaded CI host it alone outran the 0.5 s poll (main full-suite
+    42871819682). ``wait_turn_settled(mark)`` is the pipeline's own named
+    "last statement ran" signal, so the poll window now starts where the
+    contract says the bit settles, and is NOT widened. ``mark`` must be read
+    BEFORE the turn is triggered, or a fast turn could settle past it first.
     """
     await asyncio.wait_for(ended.wait(), timeout)
+    await asyncio.wait_for(session.wait_turn_settled(mark), timeout)
     loop = asyncio.get_running_loop()
     deadline = loop.time() + 0.5
     while loop.time() < deadline:
@@ -96,6 +112,7 @@ async def test_the_record_busy_bit_settles_for_every_turn_shape(tmp_path: Path, 
     """
     session, handle, server = await _rig(tmp_path / "sess")
     ended = _watch_turn_end(session)
+    mark = session.turns_settled
     try:
         if path == "prompt":
             await handle.prompt("hello", wait_complete=True)
@@ -107,7 +124,7 @@ async def test_the_record_busy_bit_settles_for_every_turn_shape(tmp_path: Path, 
             from local_operator.harness.types import Message
 
             session._spawn_background(session._prompt_messages([Message.user("bg")]))
-        await _settle(ended, handle, server)
+        await _settle(ended, handle, server, session, mark)
         assert handle.is_busy() is False
         assert server._busy is False, f"{path}: the record still says busy after the turn"
     finally:
@@ -188,9 +205,10 @@ async def test_on_turn_settled_fires_after_streaming_cleared_and_after_the_end_e
         )
 
     session.on_turn_settled = settled
+    mark = session.turns_settled
     try:
         await handle.receive_peer_message("wake up", mode="mailbox", wake=True)
-        await _settle(ended, handle, server)
+        await _settle(ended, handle, server, session, mark)
     finally:
         await session.dispose()
     assert seen == [

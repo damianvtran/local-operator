@@ -1,0 +1,54 @@
+{
+  "wire.hub_pull.ask.local_edits": {
+    "note": "Footnote under the preview lists. The leading '*' marks list entries that carry the user's own local edits; keep the '*' as the first character. Reassures that pulling never overwrites those edits.",
+    "role": "ask preview footnote",
+    "tone": "plain, reassuring"
+  },
+  "wire.hub_pull.ask.more": {
+    "note": "Ends a capped list. {names} is an already-joined, comma-separated list of item labels such as 'skill research (3→4)'; {count} is how many more items were left out (always 1 or more).",
+    "role": "list continuation",
+    "tone": "plain"
+  },
+  "wire.hub_pull.ask.new": {
+    "note": "Preview line: items shared by the organization that are not on this machine yet. {names} is a list of 'kind name' labels; kind words (agent, skill, team) are identifiers and stay English.",
+    "role": "ask preview line",
+    "tone": "plain"
+  },
+  "wire.hub_pull.ask.option.not_now": {
+    "maxCells": 24,
+    "note": "Decline option on the hub update ask. Choosing it changes nothing.",
+    "role": "ask option label",
+    "tone": "plain"
+  },
+  "wire.hub_pull.ask.option.not_now.description": {
+    "note": "One line under the decline option.",
+    "role": "ask option description",
+    "tone": "plain"
+  },
+  "wire.hub_pull.ask.option.update": {
+    "maxCells": 24,
+    "note": "Recommended option: approves pulling new organization items and updating already-pulled ones.",
+    "role": "ask option label",
+    "tone": "plain, action verb"
+  },
+  "wire.hub_pull.ask.option.update.description": {
+    "note": "One line under the approve option. 'the ones you already have' = items pulled earlier that have newer versions on the hub.",
+    "role": "ask option description",
+    "tone": "plain, reassuring"
+  },
+  "wire.hub_pull.ask.resubscribe": {
+    "note": "Preview line: items the user had stopped receiving updates for; approving makes them receive the organization's updates again. {names} as in ask.new.",
+    "role": "ask preview line",
+    "tone": "plain"
+  },
+  "wire.hub_pull.ask.title": {
+    "note": "First line of the ask, shown alone where the card has one row. {org} is the organization's display name. 'items' = agents, teams and skills the organization shares through its private Agent Hub.",
+    "role": "ask question",
+    "tone": "plain question"
+  },
+  "wire.hub_pull.ask.updates": {
+    "note": "Preview line: items already on this machine with a newer version on the hub. {names} lists 'kind name (old→new)' labels; the revisions are opaque identifiers.",
+    "role": "ask preview line",
+    "tone": "plain"
+  }
+}

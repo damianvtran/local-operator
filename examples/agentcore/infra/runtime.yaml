@@ -1,0 +1,170 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  Local Operator on Amazon Bedrock AgentCore - runtime stack. A least-privilege
+  execution role and an AgentCore Runtime running the image built by the build
+  stack.
+
+# Separate from the build stack because AWS::BedrockAgentCore::Runtime pulls its
+# image at create time: the image must exist in ECR first (deploy.sh builds it
+# between the two stacks).
+#
+# The execution role is the ONLY credential inside the microVM. lop's Bedrock
+# bridge signs with it (SigV4); there is no API key anywhere. Because lop's own
+# shell tool can also reach these credentials, the role grants nothing beyond
+# invoking the configured model(s), pulling this image and writing logs.
+
+Parameters:
+  RuntimeName:
+    Type: String
+    Description: AgentCore runtime name (letters, digits, underscores; deploy.sh derives it from the stack name).
+    AllowedPattern: "[a-zA-Z][a-zA-Z0-9_]{0,47}"
+  ImageUri:
+    Type: String
+    Description: Full ECR image URI including tag (built by the build stack).
+  RepositoryArn:
+    Type: String
+    Description: ARN of the ECR repository holding ImageUri (pull permission is scoped to it).
+  ModelId:
+    Type: String
+    Description: >-
+      Bedrock model id or system inference profile id, e.g.
+      global.anthropic.claude-sonnet-4-6 or us.anthropic.claude-haiku-4-5-20251001-v1:0.
+  FoundationModelId:
+    Type: String
+    Description: >-
+      The foundation model behind ModelId (ModelId without its geo prefix), e.g.
+      anthropic.claude-sonnet-4-6. Cross-region profiles route to the foundation
+      model in other regions, so the role needs both ARNs.
+  Approvals:
+    Type: String
+    Default: auto
+    Description: >-
+      lop approval policy inside the microVM - auto (approve every tool call),
+      refuse (gated tools fail) or a comma-separated tool list.
+  Tools:
+    Type: String
+    Default: ""
+    Description: Optional comma-separated lop tool allow-list (empty = lop's default tool set).
+  IdleTimeoutSeconds:
+    Type: Number
+    Default: 900
+    MinValue: 60
+    MaxValue: 28800
+    Description: A session's microVM is discarded after this long without an invocation.
+  MaxLifetimeSeconds:
+    Type: Number
+    Default: 28800
+    MinValue: 60
+    MaxValue: 28800
+    Description: Hard upper bound on one session's microVM lifetime.
+
+Resources:
+  ExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Description: Execution role for the Local Operator AgentCore runtime.
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: bedrock-agentcore.amazonaws.com
+            Action: sts:AssumeRole
+            # Confused-deputy guard: only AgentCore resources in THIS account
+            # may assume the role.
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+              ArnLike:
+                aws:SourceArn: !Sub "arn:${AWS::Partition}:bedrock-agentcore:${AWS::Region}:${AWS::AccountId}:*"
+      Policies:
+        - PolicyName: lop-agentcore-runtime
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              # Converse/ConverseStream authorise as InvokeModel /
+              # InvokeModelWithResponseStream. Scoped to the configured
+              # inference profile and the foundation model behind it; the
+              # region-less foundation-model ARN is what global profiles use.
+              - Sid: InvokeConfiguredModel
+                Effect: Allow
+                Action:
+                  - bedrock:InvokeModel
+                  - bedrock:InvokeModelWithResponseStream
+                Resource:
+                  - !Sub "arn:${AWS::Partition}:bedrock:${AWS::Region}:${AWS::AccountId}:inference-profile/${ModelId}"
+                  - !Sub "arn:${AWS::Partition}:bedrock:*::foundation-model/${FoundationModelId}"
+                  - !Sub "arn:${AWS::Partition}:bedrock:::foundation-model/${FoundationModelId}"
+              - Sid: PullRuntimeImage
+                Effect: Allow
+                Action: [ecr:BatchGetImage, ecr:GetDownloadUrlForLayer]
+                Resource: !Ref RepositoryArn
+              - Sid: EcrToken
+                Effect: Allow
+                Action: ecr:GetAuthorizationToken
+                Resource: "*"
+              - Sid: RuntimeLogGroups
+                Effect: Allow
+                Action: [logs:CreateLogGroup, logs:DescribeLogStreams]
+                Resource: !Sub "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/bedrock-agentcore/runtimes/*"
+              - Sid: DescribeLogGroups
+                Effect: Allow
+                Action: logs:DescribeLogGroups
+                Resource: !Sub "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:*"
+              - Sid: RuntimeLogStreams
+                Effect: Allow
+                Action: [logs:CreateLogStream, logs:PutLogEvents]
+                Resource: !Sub "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/bedrock-agentcore/runtimes/*:log-stream:*"
+              - Sid: RuntimeMetrics
+                Effect: Allow
+                Action: cloudwatch:PutMetricData
+                Resource: "*"
+                Condition:
+                  StringEquals:
+                    cloudwatch:namespace: bedrock-agentcore
+              # The runtime's workload identity (AgentCore Identity); scoped to
+              # this runtime's own workload in the default directory.
+              - Sid: WorkloadAccessToken
+                Effect: Allow
+                Action:
+                  - bedrock-agentcore:GetWorkloadAccessToken
+                  - bedrock-agentcore:GetWorkloadAccessTokenForJWT
+                  - bedrock-agentcore:GetWorkloadAccessTokenForUserId
+                Resource:
+                  - !Sub "arn:${AWS::Partition}:bedrock-agentcore:${AWS::Region}:${AWS::AccountId}:workload-identity-directory/default"
+                  - !Sub "arn:${AWS::Partition}:bedrock-agentcore:${AWS::Region}:${AWS::AccountId}:workload-identity-directory/default/workload-identity/${RuntimeName}-*"
+
+  Runtime:
+    Type: AWS::BedrockAgentCore::Runtime
+    Properties:
+      AgentRuntimeName: !Ref RuntimeName
+      Description: Local Operator (lop) headless agent, one microVM per session.
+      RoleArn: !GetAtt ExecutionRole.Arn
+      AgentRuntimeArtifact:
+        ContainerConfiguration:
+          ContainerUri: !Ref ImageUri
+      NetworkConfiguration:
+        # Public egress: the agent reaches Bedrock and, through its own tools,
+        # the internet. Use VPC mode to confine it to your network instead.
+        NetworkMode: PUBLIC
+      ProtocolConfiguration: HTTP
+      LifecycleConfiguration:
+        IdleRuntimeSessionTimeout: !Ref IdleTimeoutSeconds
+        MaxLifetime: !Ref MaxLifetimeSeconds
+      EnvironmentVariables:
+        LOP_MODEL_ID: !Ref ModelId
+        LOP_APPROVALS: !Ref Approvals
+        LOP_TOOLS: !Ref Tools
+        # Region for the bridge's Bedrock client; a dedicated name so it never
+        # collides with variables the platform manages.
+        LOP_BEDROCK_REGION: !Ref AWS::Region
+
+Outputs:
+  AgentRuntimeArn:
+    Value: !GetAtt Runtime.AgentRuntimeArn
+  AgentRuntimeId:
+    Value: !GetAtt Runtime.AgentRuntimeId
+  ExecutionRoleArn:
+    Value: !GetAtt ExecutionRole.Arn
+  ModelId:
+    Value: !Ref ModelId

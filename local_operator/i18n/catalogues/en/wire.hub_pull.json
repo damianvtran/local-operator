@@ -1,0 +1,12 @@
+{
+  "wire.hub_pull.ask.local_edits": "* has your own edits: they are kept or merged, never overwritten.",
+  "wire.hub_pull.ask.more": "{names}, and {count} more",
+  "wire.hub_pull.ask.new": "{count, plural, one {# new item} other {# new items}}: {names}",
+  "wire.hub_pull.ask.option.not_now": "Not now",
+  "wire.hub_pull.ask.option.not_now.description": "Change nothing for now.",
+  "wire.hub_pull.ask.option.update": "Update now",
+  "wire.hub_pull.ask.option.update.description": "Add the new items and update the ones you already have. Your own edits are kept.",
+  "wire.hub_pull.ask.resubscribe": "{count, plural, one {# item to keep up to date again} other {# items to keep up to date again}}: {names}",
+  "wire.hub_pull.ask.title": "Update your {org} items from your organization's hub?",
+  "wire.hub_pull.ask.updates": "{count, plural, one {# update} other {# updates}}: {names}"
+}

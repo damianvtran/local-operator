@@ -1,0 +1,23 @@
+{
+  "wire.errors.sdk_spec.agent_identity_conflict": "agent_name y agent_id son mutuamente excluyentes",
+  "wire.errors.sdk_spec.approval_callback_gate_required": "ApprovalPolicy.callback() requiere una función de aprobación invocable",
+  "wire.errors.sdk_spec.approval_declared_tools_empty": "ApprovalPolicy.declared() debe nombrar al menos una herramienta; usa ApprovalPolicy.refuse() para una sesión vinculada sin declaraciones",
+  "wire.errors.sdk_spec.approval_handler_wrong_mode": "ApprovalPolicy.handler solo tiene sentido en el modo ''callback'', no en {mode}",
+  "wire.errors.sdk_spec.approval_tools_wrong_mode": "ApprovalPolicy.tools solo tiene sentido en el modo ''declared'', no en {mode}",
+  "wire.errors.sdk_spec.attach_fields_unsupported": "mode=''attach'' abre un visor para spec.resume; no conecta equipos, perfiles, herramientas, nombres, objetivos ni políticas de aprobación: eso corresponde al propietario. Define solo resume en esta especificación (o usa mode=''own''). Campos no admitidos: {fields}.",
+  "wire.errors.sdk_spec.attach_output_unsupported": "no se puede definir la aplicación forzosa del formato de salida en una sesión conectada; lo decide el runtime propietario",
+  "wire.errors.sdk_spec.attach_resume_required": "mode=''attach'' necesita spec.resume: un visor se conecta a un id",
+  "wire.errors.sdk_spec.mode_invalid": "mode debe ser ''own'' o ''attach'', no {mode}",
+  "wire.errors.sdk_spec.output_format_invalid": "output_format debe ser uno de {formats}",
+  "wire.errors.sdk_spec.output_retries_range": "output_retries debe estar entre 0 y 5",
+  "wire.errors.sdk_spec.output_retries_requires_format": "output_retries requiere output_format",
+  "wire.errors.sdk_spec.output_schema_requires_format": "output_schema requiere output_format",
+  "wire.errors.sdk_spec.resume_empty": "resume debe ser un id de sesión o \"@latest\", no una cadena vacía",
+  "wire.errors.sdk_spec.spawn_birth_effort_pair_required": "En una sesión nueva creada con spawn_session(), birth_effort forma parte de los parámetros iniciales y requiere también el par hosting/model; indica los tres valores, o abre la sesión en el proceso actual (open_session) para fijar un nivel inicial sin especificar ese par.",
+  "wire.errors.sdk_spec.spawn_fields_unsupported": "spawn_session() no puede transferir el estado configurado tras la apertura a un nuevo runtime hijo; campos no admitidos en esta especificación: {fields}. Abre la sesión en el proceso actual (open_session), conecta lo que necesites, libera sus recursos con dispose() y luego llama a spawn_session() con el mismo id: resume restaura lo conectado; o bien llama a spawn_session() sin estos campos.",
+  "wire.errors.sdk_spec.spawn_model_pair_required": "spawn_session() envía hosting/model a un runtime NEW como un único conjunto de parámetros iniciales; indica ambos o ninguno (el hijo resolverá entonces su modelo a partir de la configuración de la raíz).",
+  "wire.errors.sdk_spec.spawn_output_unsupported": "spawn_session() no puede llevar la aplicación forzosa del formato de salida ({fields}); abre la sesión con open_session(..., mode=''own'') y actívala después",
+  "wire.errors.sdk_spec.tools_empty": "tools debe nombrar al menos una herramienta; déjalo en None para no aplicar restricciones",
+  "wire.errors.sdk_spec.world_root_empty": "world_root debe ser una ruta no vacía cuando se define",
+  "wire.errors.sdk_spec.yolo_approval_unreachable": "yolo=True deja inalcanzable la comprobación de aprobación de ApprovalPolicy.{approval_mode}(); usa ApprovalPolicy.auto() (o quita yolo) en su lugar"
+}

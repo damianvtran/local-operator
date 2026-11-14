@@ -24,6 +24,7 @@ from local_operator.compaction.mine import (
     Carry,
     carry_digest_lines,
     carry_is_empty,
+    last_role_header,
     merge_carry,
     mine_carry,
     parse_carry,
@@ -696,3 +697,56 @@ def test_digest_lines_are_bounded_and_tier_labelled():
     assert any(line.startswith("- Decisions:") for line in lines)
     assert any(line.startswith("- Identifiers:") for line in lines)
     assert len("\n".join(lines)) <= 1000
+
+
+def test_last_role_header_names_the_section_the_text_ends_in():
+    """Only the bare header comes back, never its same-line remainder.
+
+    snapcompact prefixes it to the dropped span so a long operator ask that
+    straddles the verbatim head edge is still mined as ``[User]`` text.
+    """
+    head = "[User] first ask\n[Assistant] reply\n[User] please keep the ledger and"
+    assert last_role_header(head) == "[User]"
+    assert last_role_header('[Tool result: bash] {"ok": 1}\nmore') == "[Tool result: bash]"
+    assert last_role_header("no header at all") is None
+    mined = mine_carry(f"{last_role_header(head)}\nplease also reconcile the finance report")
+    assert any("reconcile the finance report" in ask for ask in mined.asks)
+
+
+def test_last_role_header_stops_at_an_oldest_history_drop_marker():
+    """Text past a drop marker belongs to an unknown speaker (PR #3750, Q1).
+
+    A chained archive's head can end ``[User] … [... N chars … dropped]``: the
+    ``[User]`` header sits before a gap of hundreds of thousands of chars, so
+    it proves nothing about what follows and must not be returned. A header
+    glued after the marker is still the true speaker.
+    """
+    head = "[User]\nplease keep the ledger\n\n[... 304743 chars of oldest history dropped]"
+    assert last_role_header(head) is None
+    assert last_role_header(head + "\nmore body") is None
+    glued = "[User]\nask\n[... 12 chars of oldest history dropped][Assistant]\nreply"
+    assert last_role_header(glued) == "[Assistant]"
+
+
+def test_mine_carry_treats_drop_marker_as_section_break():
+    """The marker resets the role and exposes a header glued after it (Q1).
+
+    Before: ``[User]`` carried across the marker, the glued
+    ``…dropped][Assistant]`` line was not a header, and the assistant's reply
+    (and the marker itself) were mined as operator asks.
+    """
+    text = (
+        "[User]\n"
+        "please keep the ledger\n"
+        "[... 322632 chars of oldest history dropped][Assistant]\n"
+        "Four items, only two of them are other people's.\n"
+        "[... 528734 chars of oldest history dropped]cate_identity` resumed text\n"
+        "[User]\n"
+        "please also reconcile the finance report\n"
+    )
+    mined = mine_carry(text)
+    assert mined.asks == [
+        "please keep the ledger",
+        "please also reconcile the finance report",
+    ]
+    assert not any("dropped" in ask or "Four items" in ask for ask in mined.asks)

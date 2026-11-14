@@ -176,7 +176,7 @@ def test_a_dismissed_notice_says_so_and_still_says_proceed_without_it():
     text = render.timeout_text(_record(), now_ms=1_700_003_600_000, dismissed=True)
     assert text.startswith("[Ask timed out]")
     assert "The user dismissed it without answering." in text
-    assert "Proceed without it: use your recommended option or best judgment" in text
+    assert "Proceed without it: use your recommended option(s) or best judgment" in text
     # Still never "the user denied": a dismissal is not a no.
     assert "denied" not in text
 

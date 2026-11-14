@@ -1,0 +1,72 @@
+{
+  "locale": "zh-CN",
+  "namespace": "cli.permissions",
+  "audit_id": "zhp3",
+  "audit_round": 3,
+  "audit_date": "2026-11-09",
+  "key_count": 39,
+  "pr": "https://github.com/damianvtran/local-operator/pull/3691",
+  "source_audit_revision": "85fb35811f9d17fb6dfadfc2d5df3269db04bd12",
+  "previous_round_record": "i18n/audits/evidence/zh-CN/cli.permissions/zhp2/record.json",
+  "scope": "Round 2+: zhp2 findings Z8–Z11 and keys changed in 788cc399..85fb3581 (status.scope, setup.already_signed, new setup.always_allow_kept, 6 Z10 rename keys); unchanged approved keys not re-audited",
+  "auditor": {
+    "agent": "i18n-auditor (lopdev team subagent)",
+    "session": "e1cf8e96b473",
+    "model": "anthropic/claude-opus-5-5",
+    "date": "2026-11-09",
+    "independent_from_translator_session": true,
+    "independent_from_prior_auditors": [
+      "6b7e2046be3d",
+      "bb7ced26a175"
+    ],
+    "actual_model_source": "Host system prompt 'Model: anthropic/claude-opus-5-5' for this session; no fallback occurred",
+    "fallback": null
+  },
+  "translator": {
+    "agent": "i18n-translator (PR #3691 round-3 wave, commit 85fb35811f9)",
+    "session": "unrecorded (not in repo or brief)",
+    "model": "unrecorded",
+    "date": "2026-11-09"
+  },
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/cli.permissions.json",
+      "sha256": "58e58c3b19a07c024b609f614e686cc9a72def77e3de704870f0557e84e7be41"
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/cli.permissions.context.json",
+      "sha256": "6f8427bf5dd20f8fa252d0163387d59f4e53a30fe07cc9db4c5a5f55048fb1d2"
+    },
+    "zh-CN": {
+      "path": "local_operator/i18n/catalogues/zh-CN/cli.permissions.json",
+      "sha256": "7388180ea75d725c25a9b41334ccd309fd6fed62664883f47a24e452deb9e814"
+    }
+  },
+  "apple_label_source": "Installed macOS 27.2 (26B123) .loctable resources read with plistlib; table/key per label in report.md and audit.log",
+  "artifacts": {
+    "report.md": {
+      "path": "i18n/audits/evidence/zh-CN/cli.permissions/zhp3/report.md",
+      "sha256": "731e631fb33580ab05e3208cc23828810458649334628cf3a207ca6580ad90f8"
+    },
+    "audit.log": {
+      "path": "i18n/audits/evidence/zh-CN/cli.permissions/zhp3/audit.log",
+      "sha256": "d2b0b91a47fc1e45bceb458885f0c48ed61bebe3e84941baae1cbbd1207fd6f7"
+    }
+  },
+  "audit_log_is_execution_log": true,
+  "audit_notes_not_execution_log": "report.md is reasoning/findings; audit.log holds actual command output from session e1cf8e96b473 (check.py, shasum, sw_vers, own parity script, Apple .loctable lookups, ledger history-sha).",
+  "round2_resolution": {
+    "Z8": "fixed",
+    "Z9": "resolved (source no longer names Accessibility; zh-CN matches)",
+    "Z10": "applied",
+    "Z11": "applied"
+  },
+  "current_report_verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "finding_ids": [],
+    "severities": {}
+  },
+  "findings": [],
+  "ledger_note": "Independent zh-CN re-audit zhp3 @58e58c3b: passed, 0 findings; zhp2 Z8 (隐私与安全) fixed, Z9–Z11 resolved; new always_allow_kept verified vs macOS 27.2 tables. Record: i18n/audits/evidence/zh-CN/cli.permissions/zhp3/record.json"
+}

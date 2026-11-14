@@ -1,0 +1,55 @@
+{
+  "schema": 1,
+  "audit_id": "sdkfr1",
+  "locale": "fr",
+  "namespace": "wire.errors.sdk_spec",
+  "head_sha": "cf5c90bad0d1e6745d9bc7e0d85f9aee5c084b55",
+  "catalogue_sha256": "e50078912a982dd2bb1ee9d77874cd28b8b2899dffa866e5db70e5711106ebe4",
+  "source_sha256": "a92bc479321cd0ee938d338cff05c1fced88590df3d43ec39d14f4d7b3cf5855",
+  "severity_counts": {
+    "blocker": 0,
+    "major": 2,
+    "minor": 1,
+    "nit": 0
+  },
+  "findings": [
+    {
+      "id": "FR1",
+      "severity": "major",
+      "key": "wire.errors.sdk_spec.spawn_model_pair_required",
+      "current_text": "spawn_session() transmet hosting/model à un NOUVEAU runtime comme un seul échantillon de création ; indiquez les deux, ou aucun (l’enfant résout alors son modèle depuis la configuration de la racine).",
+      "problem": "The sidecar explicitly preserves the literal NEW; NOUVEAU does not preserve it. All five existing non-English peers also translate this marker, but precedent is not a waiver of the explicit preservation contract. No guard-side regression is claimed.",
+      "suggested_value": "spawn_session() transmet le couple hosting/model à un runtime NEW dans un même ensemble de paramètres initiaux ; indiquez les deux, ou aucun (l’enfant résout alors son modèle depuis la configuration de la racine).",
+      "evidence": "en/wire.errors.sdk_spec.context.json: spawn_model_pair_required, note: Preserve technical tokens: spawn_session(), hosting/model, NEW. Tiny byte check: rendered French is missing NEW.",
+      "terminology_precedent": "fr/wire.errors.sdk_startup.json:wire.errors.sdk_startup.attach_runtime_missing accepts runtime and spawn_session(); no sibling preserves NEW in this sense; NEW follows this key’s explicit sidecar."
+    },
+    {
+      "id": "FR2",
+      "severity": "major",
+      "key": "wire.errors.sdk_spec.spawn_birth_effort_pair_required",
+      "related_keys": [
+        "wire.errors.sdk_spec.spawn_model_pair_required"
+      ],
+      "current_text": "birth_effort d’une nouvelle session lancée voyage avec l’échantillon de création et exige le couple hosting/model à ses côtés ; indiquez les trois, ou ouvrez la session dans le processus courant (open_session) pour fixer un niveau initial sans couple de modèle.",
+      "related_current_text": "spawn_session() transmet hosting/model à un NOUVEAU runtime comme un seul échantillon de création ; indiquez les deux, ou aucun (l’enfant résout alors son modèle depuis la configuration de la racine).",
+      "problem": "“voyage avec l’échantillon de création” is a literal calque, not natural French developer copy. An “échantillon” normally means a sample/subset, whereas sdk.py describes the initial provider/model/effort selection carried together to the child. The companion model-pair key repeats the same unsupported rendering. Translate the concept as initial parameters, not a creation sample.",
+      "suggested_value": "birth_effort d’une nouvelle session lancée fait partie des paramètres initiaux et exige que le couple hosting/model soit également fourni ; indiquez les trois, ou ouvrez la session dans le processus courant (open_session) pour fixer un niveau initial sans couple de modèle.",
+      "related_suggested_values": {
+        "wire.errors.sdk_spec.spawn_model_pair_required": "spawn_session() transmet le couple hosting/model à un runtime NEW dans un même ensemble de paramètres initiaux ; indiquez les deux, ou aucun (l’enfant résout alors son modèle depuis la configuration de la racine)."
+      },
+      "evidence": "local_operator/sdk.py:1163–1170 and 1182–1204 describe WarmErrand carrying the birth sample/provider+model choice and enforcing the complete pair.",
+      "terminology_precedent": "No échantillon/birth-sample precedent in any other fr wire.errors.* file. fr/wire.errors.sdk_startup.json:wire.errors.sdk_startup.attach_hosting_unconfigured establishes racine and runtime; fr/wire.errors.desktop.json:wire.errors.desktop.agents_config_client_fields establishes modèle/configuration. Suggested paramètres initiaux is a contextual rendering, not a claimed shipped glossary entry."
+    },
+    {
+      "id": "FR3",
+      "severity": "minor",
+      "key": "wire.errors.sdk_spec.spawn_output_unsupported",
+      "current_text": "spawn_session() ne peut pas porter de contrainte de sortie ({fields}) ; ouvrez la session avec open_session(..., mode=''own'') puis mettez-la ensuite au travail",
+      "problem": "“mettez-la ensuite au travail” is understandable and idiomatic as a metaphor, but overly anthropomorphic for a terse SDK diagnostic; puis/ensuite are also redundant. Meaning remains recoverable, so this is non-gating.",
+      "suggested_value": "spawn_session() ne peut pas porter de contrainte de sortie ({fields}) ; ouvrez la session avec open_session(..., mode=''own'') puis confiez-lui une tâche",
+      "evidence": "English remedy is “open the session ... and engage it afterwards”, not a change to session ownership.",
+      "terminology_precedent": "fr/wire.errors.sdk_startup.json:wire.errors.sdk_startup.attach_runtime_missing uses ouvrez-le ... pour l’exécuter dans ce processus. No sibling requires the anthropomorphic phrase."
+    }
+  ],
+  "report_comment": "https://github.com/damianvtran/local-operator/pull/3708#issuecomment-6755882243"
+}

@@ -182,6 +182,14 @@ _RULES: list[tuple[str, tuple[Marker, ...]]] = [
         (
             "rate limit",
             "rate_limit",
+            # The hyphenated form is how a mesh owner's broker words a borrowed
+            # login's quota refusal ("'openai' on <device> is rate-limited for
+            # another 35 min …"). That sentence reaches the incident verbatim —
+            # no "rate limit or quota exceeded:" label in front — so without
+            # this marker the operator's card read "unknown:" (2026-11-12,
+            # PR #3900 QA Q1). Text-only on purpose: transcripts written by an
+            # older runtime carry the same sentence and classify alike.
+            "rate-limited",
             "429",
             "too many requests",
             "quota",

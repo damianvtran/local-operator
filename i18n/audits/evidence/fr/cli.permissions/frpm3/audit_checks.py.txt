@@ -1,0 +1,45 @@
+"""fr cli.permissions round-3 mechanical checks (auditor rig, read-only)."""
+import json, re, hashlib, unicodedata
+from rich.cells import cell_len
+R='local_operator/i18n/catalogues/'
+en=json.load(open(R+'en/cli.permissions.json')); import os; fr=json.load(open(os.environ.get('FR_OVERRIDE',R+'fr/cli.permissions.json')))  # FR_OVERRIDE: negative-control input only
+for p in ['en/cli.permissions.json','en/cli.permissions.context.json','fr/cli.permissions.json']:
+    print('sha256',p,hashlib.sha256(open(R+p,'rb').read()).hexdigest())
+print('keys en/fr',len(en),len(fr),'added',sorted(set(fr)-set(en)),'dropped',sorted(set(en)-set(fr)))
+ph=re.compile(r'\{[^{}]+\}'); code=re.compile(r'`[^`]*`')
+bad=0
+for k in en:
+    e,f=en[k],fr[k]; issues=[]
+    if sorted(ph.findall(e))!=sorted(ph.findall(f)): issues.append('placeholders %s vs %s'%(ph.findall(e),ph.findall(f)))
+    if sorted(code.findall(e))!=sorted(code.findall(f)): issues.append('code spans %s vs %s'%(code.findall(e),code.findall(f)))
+    for tok in ['guide://permissions','[y/N]','/update','codesign','LOCAL_OPERATOR_RUNTIME_ROOT','LOCAL_OPERATOR_CONFIG_DIR','~/.local-operator','HOME','Developer ID','Local Operator Runtime']:
+        if e.count(tok)!=f.count(tok): issues.append('token %r %d vs %d'%(tok,e.count(tok),f.count(tok)))
+    if e.count('\n')!=f.count('\n'): issues.append('newlines')
+    if [l.startswith('- ') for l in e.split('\n')]!=[l.startswith('- ') for l in f.split('\n')]: issues.append('bullet markers')
+    if e.endswith(' ')!=f.endswith(' '): issues.append('trailing space')
+    stripped=code.sub('',f)
+    if "'" in stripped: issues.append('ASCII apostrophe')
+    if '"' in stripped: issues.append('ASCII double quote')
+    for m in re.finditer(r'(.)([:;?!»])',stripped):
+        if m.group(2) in ':' and stripped[m.end():m.end()+2]=='//': continue
+        if m.group(1)!='\u202f' and not (m.group(2)==':' and m.group(1)=='{'): issues.append('no U+202F before %r at %d'%(m.group(2),m.start()))
+    for m in re.finditer(r'«(.)',stripped):
+        if m.group(1)!='\u202f': issues.append('no U+202F after «')
+    if '{' in f and re.search(r'\{\w+,\s*(plural|select)',f): issues.append('ICU')
+    if issues: bad+=1; print('FAIL',k,issues)
+print('mechanical failures:',bad)
+print('ICU plural/select in en:',sum(bool(re.search(r'\{\w+,\s*(plural|select)',v)) for v in en.values()))
+print('U+2019 count',sum(v.count('\u2019') for v in fr.values()),'U+202F count',sum(v.count('\u202f') for v in fr.values()))
+w=sorted(((max(cell_len(l) for l in fr[k].split('\n')),k) for k in fr),reverse=True)[:5]
+print('longest fr lines (cells):',w)
+print('non-NFC values:',[k for k,v in fr.items() if unicodedata.normalize('NFC',v)!=v])
+# round-3 additions: delta keys vs 788cc399, and Accessibility-name absence in status.scope
+import subprocess
+old=json.loads(subprocess.check_output(['git','show','788cc399:'+R+'fr/cli.permissions.json']))
+olden=json.loads(subprocess.check_output(['git','show','788cc399:'+R+'en/cli.permissions.json']))
+print('fr keys changed since 788cc399:',sorted(k for k in fr if old.get(k)!=fr[k]))
+print('en keys changed since 788cc399:',sorted(k for k in en if olden.get(k)!=en[k]))
+for k in ['cli.permissions.status.scope','cli.permissions.setup.already_signed','cli.permissions.setup.always_allow_kept']:
+    print(k,'| fr:',repr(fr[k]))
+print('status.scope mentions Accessibilit/Contrôle de l’appareil:',any(t in fr['cli.permissions.status.scope'] for t in ['Accessibilit','Contrôle de l’appareil']))
+print('already_signed mentions Toujours autoriser:','Toujours autoriser' in fr['cli.permissions.setup.already_signed'])

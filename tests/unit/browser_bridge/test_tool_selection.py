@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import asyncio
 import os
+from types import SimpleNamespace
 from typing import Any
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from pydantic import ValidationError
@@ -515,6 +517,36 @@ async def test_request_access_works_without_a_surface(monkeypatch) -> None:
     assert "pending" in result.text
     assert "extension popup" in result.text
     assert "await_access" in result.text
+
+
+@pytest.mark.asyncio
+async def test_request_access_on_a_headless_node_queues_no_invisible_prompt(monkeypatch) -> None:
+    """U1 (PR #3935 round 1): a node's prompt would sit in a popup nobody can
+    reach; the tool answers with the node sentence and never calls the bridge."""
+    from local_operator.browser_bridge import node_host
+
+    monkeypatch.setattr(builtin, "cmux_browser_available", lambda: False)
+    monkeypatch.setattr(builtin, "bridge_browser_available", lambda: True)
+    monkeypatch.setattr(node_host, "headless_node_once", lambda: True)
+
+    # Record, never raise: a raise inside the tool is wrapped as "Tool 'browser'
+    # failed unexpectedly: … headless node …", which satisfied the old text
+    # assertions with the node gate removed (round 2, R2-3).
+    calls: list[object] = []
+
+    async def fake_call(*args, **_kwargs):
+        calls.append(args)
+        return {"origin": "https://example.com", "state": "pending"}, None
+
+    monkeypatch.setattr(builtin, "_bridge_call", fake_call)
+    context = ToolContext(browser=BrowserSurface())
+    result = await builtin.execute_browser(
+        "t", {"action": "request_access", "url": "https://example.com"}, None, None, context
+    )
+    assert calls == []
+    assert result.details is not None and result.details["state"] == "unavailable_on_node"
+    assert "cannot open sites on a headless node" in result.text
+    assert "popup" not in result.text
 
 
 @pytest.mark.asyncio
@@ -1682,6 +1714,102 @@ def _availability(monkeypatch, *, cmux: bool, bridge: bool, ui: bool) -> None:
     monkeypatch.setattr(builtin, "ui_browser_available", lambda: ui)
     monkeypatch.setattr(builtin, "_bridge_liveness", lambda: (None, None))
     monkeypatch.setattr(builtin, "_ui_liveness", lambda: (None, None))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("host", ["ui", "bridge"])
+@pytest.mark.parametrize("typed", [False, True])
+async def test_held_tabs_preserves_actual_transport_failure(
+    monkeypatch, host: str, typed: bool
+) -> None:
+    from local_operator.browser_bridge.backend import BridgeError, BridgeUnreachable
+    from local_operator.browser_bridge.protocol import ErrorCode
+
+    _availability(monkeypatch, cmux=True, bridge=False, ui=False)
+    capability = host + ":23:synthetic-capability"
+    state = BrowserSurface()
+    state.surface_id = capability
+    client = builtin._client_for(host)
+    failure = (
+        BridgeError(ErrorCode.TAB_CLOSED, "synthetic held tab closed", {})
+        if typed
+        else BridgeUnreachable("synthetic pinned host unreachable; no command delivered")
+    )
+    call = AsyncMock(side_effect=failure)
+    monkeypatch.setattr(client, "call", call)
+    monkeypatch.setattr(builtin, "_client_for", lambda selected: client)
+    result = await builtin.execute_browser(
+        "t", {"action": "tabs"}, None, None, ToolContext(browser=state)
+    )
+    call.assert_awaited_once_with("tabs", {})
+    assert result.is_error
+    assert "synthetic" in result.text
+    assert "cmux" not in result.text
+    assert "Open a browser tab" not in result.text
+    assert state.surface_id == capability
+    if typed:
+        assert result.details is not None
+        assert result.details["error_code"] == "tab_closed"
+        assert "is gone" in result.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("host", ["ui:", "bridge:"])
+@pytest.mark.parametrize("owned", [False, True])
+@pytest.mark.parametrize("cmux", [False, True])
+@pytest.mark.parametrize("other_available", [False, True])
+@pytest.mark.parametrize("held_available", [False, True])
+@pytest.mark.parametrize("action", ["tabs", "read"])
+async def test_held_host_dispatch_ignores_discovery_probe(
+    monkeypatch,
+    host: str,
+    owned: bool,
+    cmux: bool,
+    other_available: bool,
+    held_available: bool,
+    action: str,
+) -> None:
+    # Availability selects NEW surfaces; an existing capability already chose its
+    # host. A failed discovery probe must not prevent that transport's bounded
+    # recovery, or an unrelated host's presence would decide whether tabs works.
+    _availability(
+        monkeypatch,
+        cmux=cmux,
+        bridge=other_available if host == "ui:" else held_available,
+        ui=other_available if host == "bridge:" else held_available,
+    )
+    capability = host + "23:synthetic-capability"
+    resource = None
+    if owned:
+        resource = SimpleNamespace(
+            generation="synthetic-generation",
+            host=host,
+            record={"surface_id": capability, "state": "allocated"},
+            lock=asyncio.Lock(),
+            initialize=MagicMock(),
+            ensure_recovered=AsyncMock(),
+            remember=MagicMock(),
+            pinned_host=MagicMock(return_value=host),
+        )
+    state = BrowserSurface(resource)
+    state.surface_id = capability
+    chosen = []
+
+    async def dispatch(*args, client=None, **kwargs):
+        chosen.append(client)
+        assert state.surface_id == capability
+        return builtin._text("t", "browser", "same held host reached")
+
+    monkeypatch.setattr(builtin, "_client_for", lambda selected: selected)
+    monkeypatch.setattr(builtin, "_bridge_tabs", dispatch)
+    monkeypatch.setattr(builtin, "_bridge_action", dispatch)
+    result = await builtin.execute_browser(
+        "t", {"action": action}, None, None, ToolContext(browser=state)
+    )
+    assert chosen == [host.rstrip(":")], result.text
+    assert result.text == "same held host reached"
+    assert not result.is_error
+    assert state.surface_id == capability
 
 
 @pytest.mark.asyncio

@@ -1,0 +1,12 @@
+{
+  "wire.hub_pull.ask.local_edits": "* — содержит ваши собственные правки: они сохраняются или проходят через merge, но никогда не перезаписываются.",
+  "wire.hub_pull.ask.more": "{names} и ещё {count}",
+  "wire.hub_pull.ask.new": "{count, plural, one {# новый элемент} few {# новых элемента} many {# новых элементов} other {# нового элемента}}: {names}",
+  "wire.hub_pull.ask.option.not_now": "Не сейчас",
+  "wire.hub_pull.ask.option.not_now.description": "Пока ничего не менять.",
+  "wire.hub_pull.ask.option.update": "Обновить сейчас",
+  "wire.hub_pull.ask.option.update.description": "Добавить новые элементы и обновить те, что у вас уже есть. Ваши правки сохранятся.",
+  "wire.hub_pull.ask.resubscribe": "{count, plural, one {# элемент снова будет обновляться} few {# элемента снова будут обновляться} many {# элементов снова будут обновляться} other {# элемента снова будут обновляться}}: {names}",
+  "wire.hub_pull.ask.title": "Обновить ваши элементы {org} из хаба вашей организации?",
+  "wire.hub_pull.ask.updates": "{count, plural, one {# обновление} few {# обновления} many {# обновлений} other {# обновления}}: {names}"
+}

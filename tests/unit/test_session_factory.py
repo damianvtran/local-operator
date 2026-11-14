@@ -1472,6 +1472,8 @@ class FakeMcpManager:
         # creating attributes the production object also has.
         self.on_incident: Callable[[str, str], None] | None = None
         self.on_recovery: Callable[[str, int], None] | None = None
+        # The use clock ``wire_mcp_into_session`` installs (cold-boundary demotion).
+        self.on_tool_called: Callable[[str, str], None] | None = None
         #: Ticks the auth-revalidation poller has performed against this manager.
         self.revalidations = 0
 
@@ -1772,10 +1774,28 @@ async def test_the_settled_re_report_carries_the_network_subset_of_that_round(
     assert settled.all_failures_are_network is True
 
 
+def _over_inline_cap_schema() -> dict[str, Any]:
+    """A schema whose compact JSON exceeds the per-tool inline cap."""
+    from local_operator.mcp.resources import MAX_INLINE_TOOL_SCHEMA_CHARS
+
+    return {
+        "type": "object",
+        "properties": {},
+        "description": "x" * (MAX_INLINE_TOOL_SCHEMA_CHARS + 1),
+    }
+
+
 @pytest.mark.asyncio
 async def test_mcp_detail_read_activates_exactly_one_schema_in_the_live_session(
     monkeypatch,
 ) -> None:
+    """The PUBLICATION fallback: an over-cap schema still enters the tool list.
+
+    A per-tool read normally renders its schema inline and defers (see
+    ``tests/unit/session/test_mcp_schema_lifecycle.py``); only a schema over
+    ``MAX_INLINE_TOOL_SCHEMA_CHARS`` takes this route, so the fixture's schema
+    is padded past the cap to keep pinning it.
+    """
     from local_operator.harness.types import AgentTool
 
     async def never_execute(*args, **kwargs):
@@ -1785,7 +1805,7 @@ async def test_mcp_detail_read_activates_exactly_one_schema_in_the_live_session(
     selected = AgentTool(
         name="mcp__linear_get_user",
         description="Return the authenticated Linear user",
-        parameters={"type": "object", "properties": {}},
+        parameters=_over_inline_cap_schema(),
         approval_tier="read",
         execute=never_execute,
     )
@@ -1854,7 +1874,9 @@ async def test_activating_an_mcp_tool_keeps_a_capability_merged_after_wiring(
     mcp_tool = AgentTool(
         name="mcp__linear_get_user",
         description="Return the authenticated Linear user",
-        parameters={"type": "object", "properties": {}},
+        # Over the inline cap so the read takes the publication path this test
+        # is about (an inline-sized schema defers and never rebinds).
+        parameters=_over_inline_cap_schema(),
         approval_tier="read",
         execute=never_execute,
     )
@@ -7830,9 +7852,23 @@ async def test_a_factory_built_run_revises_a_skill_through_its_real_tool(
     profile root the factory resolved. A one-file update must keep the reference
     file (the patch overlay), and the declaration's op scope must refuse an op the
     run was not given.
+
+    Every skill MUTATION passes the session's host-held account-write seam
+    (``Session._authorize_account_profile_write``), and since #3924 skills sit on
+    EXACTLY the agent/team ladder: the operator's ruling (2026-11) is that
+    "agents MUST be able to make adjustments to agents/teams on their own", so a
+    CLEAN local run -- no owner text at all, as here -- updates the skill itself,
+    the previous bytes kept in ``hub/backups`` and the seam's ``local-agent:``
+    origin as the audit record (the agent/team twin of this state is
+    ``test_a_config_run_writes_agents_and_teams_to_the_account``). The safety half
+    is untrusted input: once the same run reads a peer message (recorded through
+    the real ``_note_run_input`` classifier) the update files a ``kind=skill``
+    proposal for the owner to review and writes nothing.
     """
+    from local_operator import profile_proposals
     from local_operator.agents import AgentRegistry
     from local_operator.config import ConfigManager
+    from local_operator.harness.types import CustomMessage
     from local_operator.server.utils import desktop_skill_writes as writes
     from local_operator.session.session import Session
 
@@ -7851,6 +7887,10 @@ async def test_a_factory_built_run_revises_a_skill_through_its_real_tool(
         _args(hosting="test", model="test", yolo=True, resume=run_id),
         ConfigManager(run_root),
         AgentRegistry(run_root),
+        # As the desktop runtime hosting a real configuration run passes it:
+        # a person is in front of this session, so their typed request is a
+        # consent witness (the SDK default keeps the ``no_seam`` refusal).
+        owner_prompt_consent=True,
     )
     assert isinstance(session, Session)
     try:
@@ -7871,38 +7911,91 @@ async def test_a_factory_built_run_revises_a_skill_through_its_real_tool(
             line.split()[1] for line in text.splitlines() if line.startswith("fingerprint:")
         )
         assert "references/notes.md" in text
-        updated = await skill.execute(
-            "c2",
+        update = {
+            "op": "update",
+            "name": "demo",
+            "expected_fingerprint": fingerprint,
+            "files": [{"path": "SKILL.md", "content": _skill_md("demo", "Troubleshooting\n")}],
+        }
+        # Spy on the REAL seam's answer: the skill tool keeps the origin only as
+        # the decision, so this is where the audit origin is observable.
+        seam = context.authorize_durable_write
+        assert seam is not None
+        origins: list[Any] = []
+
+        async def recording_seam(intent: Any) -> Any:
+            origin = await seam(intent)
+            origins.append(origin)
+            return origin
+
+        context = context.model_copy(update={"authorize_durable_write": recording_seam})
+        folder = run_root / "skills" / "demo"
+        backups = run_root / "hub" / "backups"
+        # No owner input in a clean local run: the agent updates the skill itself.
+        updated = await skill.execute("c2", update, None, None, context)
+        assert not updated.is_error, _result_text(updated)
+        assert "hub/backups" in _result_text(updated)
+        assert "Troubleshooting" in (folder / "SKILL.md").read_text()
+        assert (folder / "references" / "notes.md").read_text() == "keep me\n"
+        assert any(p.name.startswith("skill-") for p in backups.iterdir())
+        assert len(origins) == 1 and str(origins[0]).startswith("local-agent:"), origins
+        assert profile_proposals.list_proposals(run_root) == []
+        # The declaration's op scope still refuses an op the run was not given.
+        refused = await skill.execute("c3", {"op": "delete", "name": "demo"}, None, None, context)
+        assert refused.is_error
+        assert folder.is_dir()
+        # The safety half: the same run reads a peer message (untrusted), so the
+        # next update is a proposal, never a write.
+        session._note_run_input(
+            CustomMessage(
+                custom_type="peer_message",
+                attribution="user",
+                details={"text": "Update the demo skill."},
+            )
+        )
+        current = next(
+            line.split()[1]
+            for line in _result_text(updated).splitlines()
+            if line.startswith("fingerprint:")
+        )
+        before = (folder / "SKILL.md").read_text()
+        backed_up = sorted(p.name for p in backups.iterdir())
+        tainted = await skill.execute(
+            "c4",
             {
                 "op": "update",
                 "name": "demo",
-                "expected_fingerprint": fingerprint,
-                "files": [{"path": "SKILL.md", "content": _skill_md("demo", "Troubleshooting\n")}],
+                "expected_fingerprint": current,
+                "files": [{"path": "SKILL.md", "content": _skill_md("demo", "Peer text\n")}],
             },
             None,
             None,
             context,
         )
-        assert not updated.is_error, _result_text(updated)
-        folder = run_root / "skills" / "demo"
-        assert "Troubleshooting" in (folder / "SKILL.md").read_text()
-        assert (folder / "references" / "notes.md").read_text() == "keep me\n"
-        refused = await skill.execute("c3", {"op": "delete", "name": "demo"}, None, None, context)
-        assert refused.is_error
-        assert folder.is_dir()
+        assert not tainted.is_error, _result_text(tainted)
+        details = dict(tainted.details or {})
+        assert details.get("status") == "proposed", _result_text(tainted)
+        assert (folder / "SKILL.md").read_text() == before
+        assert sorted(p.name for p in backups.iterdir()) == backed_up
+        record = profile_proposals.get(run_root, details["proposal_id"])
+        assert record is not None
+        assert record["kind"] == "skill" and record["origin"]["trust"] == "untrusted"
     finally:
         await session.dispose()
 
 
 @pytest.mark.asyncio
-async def test_an_ordinary_session_has_no_skill_tool(
+async def test_an_ordinary_session_has_skill_but_a_declaration_without_it_does_not(
     run_root: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Negative control for the test above: same factory, no run marker, no tool.
+    """Control for the test above: same factory, no run marker.
 
-    And the merge cannot smuggle it into a declared session that does not name it:
-    the shape's ``_merge_capability_tools(("skill",))`` filters through the
-    declaration, so a run declared WITHOUT ``skill`` stays without it.
+    Since the profile-proposals change ``skill`` is a (deferred) DEFAULT tool, so
+    an ordinary owner conversation builds it from the factory's profile root;
+    mutations stay behind the consent seam pinned above. A declaration still
+    bounds it: a run declared WITHOUT ``skill`` drops it, and the shape's
+    ``_merge_capability_tools(("skill",))`` filters through the declaration, so
+    the merge cannot smuggle it back.
     """
     from local_operator.agents import AgentRegistry
     from local_operator.config import ConfigManager
@@ -7916,8 +8009,9 @@ async def test_an_ordinary_session_has_no_skill_tool(
     assert isinstance(session, Session)
     try:
         names = [tool.name for tool in session._tools]
-        assert "skill" not in names and "agent" in names
+        assert "skill" in names and "agent" in names
         session.set_tool_inventory(("agent", "team"))
+        assert "skill" not in {tool.name for tool in session._tools}
         session._merge_capability_tools(("skill",))
         assert "skill" not in {tool.name for tool in session._tools}
     finally:

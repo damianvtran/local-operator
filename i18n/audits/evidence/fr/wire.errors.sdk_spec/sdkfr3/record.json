@@ -1,0 +1,153 @@
+{
+  "record_type": "i18n-audit-candidate-receipt",
+  "locale": "fr",
+  "namespace": "wire.errors.sdk_spec",
+  "head_sha": "255b798d112ca6a31f0eeaae59c069332c9e55c5",
+  "base_sha": "dfc7411cac4",
+  "scope": "dfc7411cac4..255b798d112",
+  "audit_date": "2026-11-09",
+  "audited_at": "2026-11-09",
+  "key_count": 21,
+  "translator": {
+    "agent": "i18n-translator",
+    "model": "anthropic/claude-sonnet-5-5",
+    "note": "revised twice after earlier audits by other auditors (round 3 final bytes)"
+  },
+  "auditor": {
+    "agent": "i18n-auditor",
+    "session": "7a9af2a8f0ea",
+    "model": "deepseek/deepseek-flash",
+    "actual_model_source": "session model header (deepseek/deepseek-flash); no fallback observed or used",
+    "independent_from_translator_session": true
+  },
+  "input_hashes": {
+    "target_fr": {
+      "path": "local_operator/i18n/catalogues/fr/wire.errors.sdk_spec.json",
+      "sha256": "e0b8217ba430c8d1b686f2bffc4581a3eef2eacc60071ae2e34c107bca76dd8e"
+    },
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/wire.errors.sdk_spec.json",
+      "sha256": "a92bc479321cd0ee938d338cff05c1fced88590df3d43ec39d14f4d7b3cf5855"
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/wire.errors.sdk_spec.context.json",
+      "sha256": "8735964058f901e1d97527801eb88f5a36585f0d7713c1e21f7f98ebaa55418e"
+    }
+  },
+  "target_sha256": "e0b8217ba430c8d1b686f2bffc4581a3eef2eacc60071ae2e34c107bca76dd8e",
+  "english_sha256": "a92bc479321cd0ee938d338cff05c1fced88590df3d43ec39d14f4d7b3cf5855",
+  "hash_method": "sha256 over `git show <head>:<path>` bytes",
+  "findings": [
+    {
+      "id": "F1",
+      "severity": "minor",
+      "key": "wire.errors.sdk_spec.spawn_fields_unsupported",
+      "current": "spawn_session() ne peut pas transmettre un état postérieur à l’ouverture à un nouveau processus enfant du runtime ; …",
+      "problem": "Two consecutive « à » phrases: « postérieur à l’ouverture » already opens a prepositional group, then the dative « à un nouveau processus enfant du runtime » has to close it. The reader backtracks to find where « transmettre » sends the state.",
+      "suggested": "spawn_session() ne peut pas transmettre d’état post-ouverture à un nouveau processus enfant du runtime ; champs non pris en charge dans ce spec : {fields}. …",
+      "meaning_at_risk": false
+    },
+    {
+      "id": "F2",
+      "severity": "minor",
+      "key": "wire.errors.sdk_spec.spawn_fields_unsupported",
+      "current": "attachez ce dont vous avez besoin, libérez-la (dispose), puis relancez … resume restaure ce qui a été attaché",
+      "problem": "The same attach operation is named « attacher » here and « rattacher » in the three attach_* keys of the same group (« il ne rattache ni équipes… », « un lecteur se rattache à un identifiant »). A reader cannot tell whether rattacher is a different mechanism from attacher.",
+      "suggested": "Align on the corpus/precedent verb « rattacher »: « rattachez ce dont vous avez besoin » and « resume restaure ce qui a été rattaché ».",
+      "meaning_at_risk": false
+    },
+    {
+      "id": "F3",
+      "severity": "nit",
+      "key": "wire.errors.sdk_spec.approval_callback_gate_required",
+      "current": "ApprovalPolicy.callback() exige un contrôle d’approbation appelable",
+      "problem": "« appelable » (callable) qualifies a function, not a check — mild category slip. The term « contrôle d’approbation » for approval gate is right (precedent fr cli.group_help.json:cli.group_help.operator).",
+      "suggested": "ApprovalPolicy.callback() exige une fonction de contrôle d’approbation appelable (optional; meaning is not at risk as written).",
+      "meaning_at_risk": false
+    },
+    {
+      "id": "F4",
+      "severity": "nit",
+      "key": "wire.errors.sdk_spec.attach_fields_unsupported",
+      "current": "mode=''attach'' ouvre un lecteur sur spec.resume / un lecteur se rattache à un identifiant (attach_resume_required)",
+      "problem": "« viewer » is rendered « visionneuse » in the shipped TUI (fr tui.viewer.json:tui.viewer.title « visionneuse de fichiers »); here it is « lecteur ». Different surfaces (SDK read-only session handle vs file viewer), so this may be deliberate.",
+      "suggested": "Keep « lecteur » if the SDK handle is deliberately not the TUI file viewer; otherwise « visionneuse » for corpus consistency.",
+      "meaning_at_risk": false
+    }
+  ],
+  "severity_counts": {
+    "blocker": 0,
+    "major": 0,
+    "minor": 2,
+    "nit": 2
+  },
+  "verdict": "clean-with-findings",
+  "per_key_audit": {
+    "wire.errors.sdk_spec.agent_identity_conflict": "pass",
+    "wire.errors.sdk_spec.approval_callback_gate_required": "pass-with-nit-F3",
+    "wire.errors.sdk_spec.approval_declared_tools_empty": "pass",
+    "wire.errors.sdk_spec.approval_handler_wrong_mode": "pass",
+    "wire.errors.sdk_spec.approval_tools_wrong_mode": "pass",
+    "wire.errors.sdk_spec.attach_fields_unsupported": "pass-with-nit-F4",
+    "wire.errors.sdk_spec.attach_output_unsupported": "pass",
+    "wire.errors.sdk_spec.attach_resume_required": "pass-with-nit-F4",
+    "wire.errors.sdk_spec.mode_invalid": "pass",
+    "wire.errors.sdk_spec.output_format_invalid": "pass",
+    "wire.errors.sdk_spec.output_retries_range": "pass",
+    "wire.errors.sdk_spec.output_retries_requires_format": "pass",
+    "wire.errors.sdk_spec.output_schema_requires_format": "pass",
+    "wire.errors.sdk_spec.resume_empty": "pass",
+    "wire.errors.sdk_spec.spawn_birth_effort_pair_required": "pass",
+    "wire.errors.sdk_spec.spawn_fields_unsupported": "pass-with-minor-F1-F2",
+    "wire.errors.sdk_spec.spawn_model_pair_required": "pass",
+    "wire.errors.sdk_spec.spawn_output_unsupported": "pass",
+    "wire.errors.sdk_spec.tools_empty": "pass",
+    "wire.errors.sdk_spec.world_root_empty": "pass",
+    "wire.errors.sdk_spec.yolo_approval_unreachable": "pass"
+  },
+  "checks": {
+    "validator": "~/local-operator/.venv/bin/python scripts/i18n/check.py --catalogues-only -> 'check.py: catalogue checks: 0 problem(s)'",
+    "key_parity": "21/21, no keys added or dropped",
+    "placeholders": "{mode} x3, {fields} x3, {formats} x1, {approval_mode} x1 — byte-identical to en, same counts",
+    "icu_escaping": "ASCII apostrophes appear only in doubled pairs (4 or 8 per affected key); rendered every value through local_operator.i18n.runtime.render_message(params, locale='fr') -> 0 errors, no surviving '' ; mode_invalid renders \"mode doit valoir 'own' ou 'attach', pas attach\"",
+    "apostrophe_delta": "attach_fields_unsupported en=10 fr=8 and spawn_model_pair_required en=2 fr=0: English possessives dropped, escapes intentionally fewer",
+    "typography": "16x U+202F, each preceding ; : ! ? ; 10x U+2019 all elisions; guillemets U+00AB U+202F @latest U+202F U+00BB; 2x em dash spaced; no U+00A0, no bidi controls, no ASCII straight quotes outside ICU pairs, no leading/trailing/double spaces",
+    "redaction_marker": "yolo_approval_unreachable begins with codepoints 121,111,108,111,61,84,114,117,101 (yolo=True); no '[' and no 'redacted' substring in any value",
+    "register": "vous throughout (utilisez, Définissez, Ouvrez, attachez, libérez, relancez, lancez, indiquez, laissez, retirez); no capitalised 'Vous', no 'Veuillez'",
+    "plural_select": "none in this group"
+  },
+  "terminology_decisions": {
+    "contrôle d’approbation = approval gate": "accepted — fr cli.group_help.json:cli.group_help.operator",
+    "rattacher = attach (mode)": "accepted — fr wire.errors.sdk_startup.json:wire.errors.sdk_startup.profile_attach_failed; fr wire.exec.json:wire.exec.session_pointer",
+    "runtime kept English": "accepted — i18n/style-guides/fr.md wave-1 addition",
+    "session, outil, modèle, identifiant, propriétaire": "accepted — i18n/glossary.md §2 and fr siblings (wire.errors.desktop.json, wire.errors.agents.json)",
+    "paramètres initiaux = birth sample; niveau initial = birth level": "accepted, consistent across the two spawn_* keys; gloss rather than a term, no corpus precedent",
+    "contrainte de sortie = output enforcement": "accepted, consistent across attach_output_unsupported and spawn_output_unsupported",
+    "spec kept English": "accepted — fr wire.errors.sdk_startup.json:wire.errors.sdk_startup.tool_inventory_mismatch uses the spec. token; no fr guide row, but it names the SessionSpec object",
+    "SESSION liée = bound session": "accepted — nearest corpus: fr cli.serve_help.json:cli.serve_help.listener_fd ('déjà liée'); deliberately distinct from rattachée (attached)",
+    "confiez-lui une tâche = engage it": "accepted — idiomatic rendering of 'engage'; adds no wrong action"
+  },
+  "independence_statement": "I read docs/I18N.md, the fr style guide, the glossary, the en source, the context sidecar and the fr siblings, and formed a view of all 21 values before opening any earlier audit receipt, PR comment or ledger row. I did not use any translation or MT service to compare or back-translate, and I did not edit the repository.",
+  "unverified": [
+    "No rendering/surface pass: these are SDK exception strings; no UI/terminal frame was captured, so no fit or truncation claim beyond 'no width cap in the sidecar'.",
+    "`scripts/i18n/check.py --audit-base origin/main` not run (ledger/append-only checks belong to the repo gate, and this audit intentionally writes no ledger row).",
+    "Did not execute the SDK invalid-input paths that raise these messages; render_message is the real formatting path but not the raise site.",
+    "Model identity is taken from the session header; I cannot independently attest the provider-side model id."
+  ],
+  "current_report_verdict": {
+    "status": "clean-with-findings",
+    "unresolved_blocker_major_count": 0,
+    "finding_ids": [
+      "F1",
+      "F2",
+      "F3",
+      "F4"
+    ]
+  },
+  "evidence_role": "candidate receipt written outside the repo at the requester's instruction; no ledger, audit-history or i18n/audits/evidence entry was created by this audit",
+  "report": {
+    "pr": "https://github.com/damianvtran/local-operator/pull/3708",
+    "comment_url": "https://github.com/damianvtran/local-operator/pull/3708#issuecomment-6757119153",
+    "posted_at": "2026-11-10T02:19:46Z"
+  }
+}

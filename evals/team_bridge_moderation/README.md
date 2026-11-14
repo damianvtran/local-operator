@@ -312,4 +312,4 @@ back as the peer account. On this head the fixture arm cannot observe a send at 
 (the product's authority gates refuse before the recorded client is reached), so its
 `0 leaks` means "nothing could leave" rather than "nothing left". The report names
 the arm and reports leak counts per arm, never summed. Runbook:
-[`../../docs/evidence/team-bridge-hub-arm.md`](../../docs/evidence/team-bridge-hub-arm.md).
+[`../../evals/team_bridge_moderation/HUB_ARM.md`](HUB_ARM.md).

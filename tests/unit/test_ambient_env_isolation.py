@@ -137,6 +137,10 @@ _HARMLESS: dict[str, str] = {
     "LOCAL_OPERATOR_IMAGES": "inline-image protocol switch",
     "LOCAL_OPERATOR_GREP_ENGINE": "rg vs python grep",
     "LOCAL_OPERATOR_MCP_TIMEOUT_MS": "a timeout",
+    "LOCAL_OPERATOR_MCP_UVX_DIRECT": (
+        "opt-out to keep raw uvx for stdio MCP servers; either value launches the "
+        "configured server's same program, and the resolver's tests set it explicitly"
+    ),
     "LOCAL_OPERATOR_SPILL_MAX_BYTES": "a size limit",
     "LOCAL_OPERATOR_INTERNAL_READ_LIMIT": "a size limit; 0 disables internal-URL shaping",
     "LOCAL_OPERATOR_SCHEDULED_TASK_TIMEOUT_SECONDS": "a timeout",
@@ -150,6 +154,10 @@ _HARMLESS: dict[str, str] = {
     "LOP_LANG": "language override in the resolved-language chain; picks a catalogue",
     "LOP_I18N": "per-run i18n escape hatch; picks a catalogue",
     "LOP_SESSION_GRACE_S": "runtime residency grace; a duration",
+    "LOP_SETTINGS_INTENT_BUDGET_S": (
+        "QA override of the settings-intent retry budget; a duration, and the "
+        "settings-intents tests delete it themselves"
+    ),
     "LOP_BUILD_SETTLE_S": "runtime self-refresh settle; a duration",
     "LOP_BUILD_STAGGER_S": "runtime self-refresh stagger; a duration",
     "LOP_RUNTIME_DEBUG_STACKS": "debug dump switch; on by default, 0 disables it",

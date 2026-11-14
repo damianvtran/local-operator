@@ -1,0 +1,64 @@
+{
+ "schema": 1,
+ "round": 2,
+ "locale": "hi",
+ "namespace": "relay.session",
+ "pr": "damianvtran/local-operator#3697",
+ "worktree": "/Users/damian/local-operator/.worktrees/settings-lane",
+ "head": "8d19c698e39f7a203596cdde8bf4099c502c25ff",
+ "merge_base": "ae1dd3e0a769fc0345dee7c21b4418f45b82cad3",
+ "catalogue_state": "committed at head (disk == HEAD blob)",
+ "source_sha256": "ec7a6967e1796478e88438cbd1951beda51e80c921940511b1347302f7393917",
+ "target_sha256": "edbddef1be672d2a9ea138484c8015ce502fdcc21be01f3106f33f1ddbf374f8",
+ "base_target_sha256": "cc68b691f28526ff8853f8981c4f43d08cc542b958a7ca9e36720bdc40208441",
+ "translator": {
+  "agent": "remediate-settings-lane (coder, lopdev) for the changed/new keys; coder-settings-lane for model_switch_refused",
+  "model": "anthropic/claude-opus-5-5, no fallback (per manager brief 2026-11-09)",
+  "date": "2026-11-09"
+ },
+ "auditor": {
+  "agent": "translation-auditor (lopdev reviewer role, session 1b1866b4f2ed; independent of PR author and translators)",
+  "session": "1b1866b4f2ed",
+  "model": "anthropic/claude-opus-5-5",
+  "fallback": "none observed in this session",
+  "date": "2026-11-09",
+  "result": "passed",
+  "findings": 0,
+  "unresolved_blocker_major": 0,
+  "minor": 0,
+  "nit": 0
+ },
+ "status": "passed",
+ "audit_kind": "whole carried namespace: changed/added keys read in full; unchanged keys carried by byte proof",
+ "audited_keys": [
+  "relay.session.model.queued",
+  "relay.session.model.refused"
+ ],
+ "keys_total": 19,
+ "semantic_checks": [
+  "queued copy makes no busy or 'selected' claim (context: shown only while a turn runs)",
+  "queued copy says the change takes effect at the next step (agent's next model call), not that it applied",
+  "refusal copy keeps {reason} whole, after the model label",
+  "placeholders and kept-Latin model labels intact"
+ ],
+ "carry_proof": {
+  "unchanged_keys_byte_identical_to_merge_base": true,
+  "added_keys_vs_base": [
+   "relay.session.model.queued",
+   "relay.session.model.refused"
+  ],
+  "base_ledger_row_status": "passed",
+  "base_ledger_source_sha256_equals_base_en": true
+ },
+ "verified": [
+  "key set equals en",
+  "placeholder names equal en",
+  "no bidi control characters",
+  "scripts/i18n/check.py --catalogues-only rc=0 at 8d19c698e39 (run_bounded 600s/1200MB)",
+  "target and en sha256 prefixes equal PR comment 6756429513"
+ ],
+ "findings": [],
+ "supersedes": "round-1 record core-records/hi/relay.session/record.json (older en bytes)",
+ "not_verified": "native-speaker review; rendered TUI/phone width and Urdu RTL",
+ "ledger_note_draft": "R2 2026-11-09 reviewer 1b1866b4f2ed (anthropic/claude-opus-5-5, no fallback): 2 keys read; 0 findings; 17 unchanged keys byte-identical to passed base row. Evidence: i18n/audits/evidence/hi/relay.session/settings-r2-1b1866b4f2ed/record.json"
+}

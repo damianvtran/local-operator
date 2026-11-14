@@ -1812,6 +1812,15 @@ async def test_a_local_credential_intent_never_reaches_vault_through_the_roster(
     secret_row = next(row for row in roster if row.name == "secret")
     classifier = _FakeClassifier(_Recommendation(resources=(secret_row,)))
     hooks.classifier = classifier
+    # This test asserts WHAT is delivered, not WHEN, so it must not ride the
+    # production 50 ms ``waitMs`` default: that is a wall-clock budget, and any
+    # event-loop stall longer than it between arming the wait and the seam's
+    # single step (a GC pass over the real tool surface built above, a preempted
+    # xdist worker) expires it. The answer then goes to the NEXT render by design,
+    # and this one returns "" (full-suite witness: job 130279051718). The fake
+    # answers in one step, so this generous wait ends when the task completes;
+    # the budget's own semantics are covered by the wait-budget tests above.
+    hooks.classification_wait_s = 5.0
     block = await session_factory._select_knowledge_block(
         hooks, "Keep this API key on my machine for later sessions", task_id="local-cred"
     )

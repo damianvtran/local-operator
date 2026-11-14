@@ -446,6 +446,7 @@ def render_systemd_unit(
     restart_prevent_exit_status: int | None = None,
     kill_mode: str | None = None,
     oom_score_adjust: int | None = None,
+    oom_policy: str | None = None,
     separate_sections: bool = True,
     wanted_by: str = "default.target",
 ) -> str:
@@ -466,6 +467,9 @@ def render_systemd_unit(
 
     ``oom_score_adjust`` follows the same rule: emitted only when a daemon names
     one (the relay, today), so every other unit renders byte-identically.
+
+    ``oom_policy`` too (``OOMPolicy=``, systemd 243+). The relay is its one
+    caller; why it is ``continue`` lives at ``network/relay.RELAY_OOM_POLICY``.
 
     ``restart_prevent_exit_status`` too. It is the other half of a
     ``restart="always"`` opt-out from the default above: the status a DELIBERATE
@@ -519,6 +523,13 @@ def render_systemd_unit(
         # above the manager's ``oom_score_adj_min`` take effect, and a lower one
         # is dropped by systemd without failing the unit.
         lines.append(f"OOMScoreAdjust={int(oom_score_adjust)}")
+    if oom_policy is not None:
+        # What the MANAGER does with the unit after the kernel OOM-kills one of
+        # its processes; the value's reasoning lives at the use site
+        # (``network/relay.py``'s ``RELAY_OOM_POLICY``). A manager older than 243
+        # does not know the key and loads the unit anyway ("Unknown key name …,
+        # ignoring"), which is also the behaviour it had: it never acted on OOM.
+        lines.append(f"OOMPolicy={oom_policy}")
     # THE CLEAN-NODE INCIDENT (2026-10-25): on a fresh Amazon Linux node uv
     # lived in ``~/.local/bin`` and the relay unit inherited the manager's PATH,
     # which lacked it, so the first supervised self-update (``lop network

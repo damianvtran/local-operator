@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import unicodedata
 import urllib.parse
 import uuid
 from collections.abc import Iterable
@@ -62,6 +63,7 @@ from pydantic import (
     model_serializer,
     model_validator,
 )
+from pydantic.json_schema import SkipJsonSchema
 
 # TypeVar comes from typing_extensions, NOT typing: the ``default=`` parameter
 # below is PEP 696, which landed in typing only in 3.13, while this package
@@ -945,7 +947,7 @@ class OneTurnSecretScopeError(ValueError):
 _AGENT_FORWARDING_TOOLS = frozenset({"task", "hub", "send", "sessions", "network"})
 _FORWARDING_READ_OPS: dict[str, frozenset[str]] = {
     "hub": frozenset({"list", "peek", "pause", "cancel"}),
-    "sessions": frozenset({"list", "info", "stop", "peek", "help"}),
+    "sessions": frozenset({"list", "info", "stop", "park", "peek", "help"}),
     "network": frozenset(
         {
             "status",
@@ -1010,6 +1012,50 @@ class ToolResult(BaseModel):
     # the native loop must consume it before hooks or events can publish the row.
     _one_turn_secret: SecretStr | None = PrivateAttr(default=None)
 
+    # The write/edit SOURCE EVIDENCE: the complete raw ``before``/``after``
+    # file texts plus the raw rendered diff preview, as
+    # ``(before, after, preview_rows)``. While it is attached,
+    # ``details['diff']`` holds only the withheld receipt. The native loop's
+    # seam (``AgentLoop._settle_write_diff``) redacts each COMPLETE side once,
+    # masks every preview row whose source line the redactor touched, then runs
+    # the ordinary per-hunk seam and publishes that. Hunks hold two context
+    # lines, so a registered multi-line value longer than the hunk window never
+    # appears whole in the diff and the per-hunk seam alone published its
+    # fragments (architect proof on dfc7411: 5 of 10 lines of an edited
+    # literal); only the whole file side carries the proof.
+    #
+    # RAW executor bytes, so it must never reach a public surface: a
+    # PrivateAttr is outside ``model_dump``/JSON, and the hooks below drop it
+    # from every copy (``model_copy``, ``copy``/``deepcopy``, pickle), because
+    # pydantic otherwise carries private state into all of them -- a retained
+    # event copy or deep-copied trajectory row would keep raw file text alive.
+    # Only the ORIGINAL object carries it; a result that never reaches the
+    # seam keeps the withheld receipt (fail-closed by construction).
+    _diff_source: tuple[str, str, tuple[str, ...]] | None = PrivateAttr(default=None)
+
+    def __copy__(self) -> "ToolResult":
+        copied = super().__copy__()
+        _drop_diff_source(copied)
+        return copied
+
+    def __deepcopy__(self, memo: dict[int, Any] | None = None) -> "ToolResult":
+        copied = super().__deepcopy__(memo)
+        _drop_diff_source(copied)
+        return copied
+
+    def __getstate__(self) -> dict[Any, Any]:
+        state = super().__getstate__()
+        private = state.get("__pydantic_private__")
+        if isinstance(private, dict) and private.get("_diff_source") is not None:
+            state = {**state, "__pydantic_private__": {**private, "_diff_source": None}}
+        return state
+
+    def take_diff_source(self) -> tuple[str, str, tuple[str, ...]] | None:
+        """Return and CLEAR the raw source-evidence carrier (single consumption)."""
+        source = self._diff_source
+        self._diff_source = None
+        return source
+
     @classmethod
     def one_turn_secret(
         cls,
@@ -1065,6 +1111,17 @@ class ToolResult(BaseModel):
     @property
     def text(self) -> str:
         return "".join(block.text for block in self.content if isinstance(block, TextContent))
+
+
+def _drop_diff_source(result: "ToolResult") -> None:
+    """Clear a copy's raw source-evidence carrier without touching the original's.
+
+    ``super().__copy__`` SHALLOW-copies the private dict, so the copy owns its
+    own dict and rewriting it here cannot clear the original's carrier.
+    """
+    private = getattr(result, "__pydantic_private__", None)
+    if isinstance(private, dict) and private.get("_diff_source") is not None:
+        object.__setattr__(result, "__pydantic_private__", {**private, "_diff_source": None})
 
 
 # ---------------------------------------------------------------------------
@@ -1718,9 +1775,17 @@ class BrowserSurface:
     own one without importing the tool layer.
     """
 
-    __slots__ = ("surface_id", "resource", "extension_update_notified")
+    __slots__ = (
+        "surface_id",
+        "resource",
+        "extension_update_notified",
+        "parent_session_id",
+        "handed",
+        "handed_to",
+        "late_handoff_to_parent",
+    )
 
-    def __init__(self, resource: Any = None) -> None:
+    def __init__(self, resource: Any = None, *, parent_session_id: str = "") -> None:
         self.surface_id = ""
         # Host-owned persistence stays outside the harness import graph.
         self.resource = resource
@@ -1734,6 +1799,59 @@ class BrowserSurface:
         # new member would make every other implementor fail its isinstance
         # check for a purely advisory flag.
         self.extension_update_notified = False
+        # CHILD → PARENT BROWSER HANDOFF (2026-11-11, session 363d303f3e48).
+        #
+        # A subagent that opened a tab for a HUMAN (a sign-in, a site approval)
+        # used to end, have its teardown close that tab, and still tell the
+        # operator "the tab is open" — twice in one evening the operator was sent
+        # to a tab that no longer existed. A child's lifetime is one task; a
+        # human's sign-in is not bounded by it. So a child's RETAINED surface is
+        # not closed when the child ends: it is handed to the parent session,
+        # which owns it from then on (lists it as its own, closes it, and closes
+        # it on its own teardown, or hands it further up if it is a child too).
+        #
+        # * ``parent_session_id`` — the session a retained tab is handed to when
+        #   this (child) session ends; "" for a top-level session, whose
+        #   teardown simply closes. The browser tool reads it to tell a child,
+        #   at open/retain time, exactly what will happen to its tab.
+        # * ``handed`` — surfaces children handed to THIS session: a list of
+        #   :class:`HandedBrowserSurface`. Each keeps the CHILD's ownership
+        #   resource, because the host fences owner calls on the scope's
+        #   ``requester``/``owner_proof``/``owner_generation`` params, not on the
+        #   connection, so the parent speaking with the child's record is
+        #   byte-identical to the child speaking — no host protocol change.
+        # * ``handed_to`` — set on the CHILD once its surface was handed, so its
+        #   own disposal does not close the tab the parent now owns.
+        # * ``late_handoff_to_parent`` — set on a CHILD by its runner once a live
+        #   parent took its handoff. A grandchild still RUNNING when this child
+        #   ends is cancelled by this child's dispose and hands its tab here
+        #   AFTER the handoff already ran (review R1); with this set, dispose
+        #   leaves those late arrivals in ``handed`` for the runner to pass up
+        #   (``subagent._hand_up_late_browser_surfaces``) instead of closing a
+        #   tab a human may be using. Unset (top-level, or no live parent),
+        #   dispose closes them, since nobody else would.
+        self.parent_session_id = parent_session_id
+        self.handed: list[HandedBrowserSurface] = []
+        self.handed_to = ""
+        self.late_handoff_to_parent = False
+
+
+@dataclass
+class HandedBrowserSurface:
+    """One browser surface a finished child handed to this (parent) session.
+
+    ``surface_id`` is the full capability token (never printed whole — see
+    ``public_surface_label``); ``resource`` is the child's
+    ``BrowserResource``, the only identity the host will accept owner calls
+    for this scope from; ``from_session`` is the child that opened it, named
+    in the parent's listing so the parent knows why it holds a tab it never
+    opened; ``reason`` is the retention reason the child recorded.
+    """
+
+    surface_id: str
+    resource: Any
+    from_session: str
+    reason: str = ""
 
 
 @runtime_checkable
@@ -1842,6 +1960,72 @@ class AskOption(BaseModel):
 #
 # The marker indexes `options` AS CARRIED, never the authored order: a consumer
 # that re-sorts the list and keeps the index moves the badge to the wrong row.
+#
+# A MULTI-select may recommend several rows, so the AUTHORED `recommended` is
+# `int | list[int]`. The wire keeps the old contract anyway: after validation
+# `recommended` is ALWAYS `int | None` (0 or None, never a list), so every
+# client and every stored row that only knows the int still shows the first
+# pick correctly. The rest of the set rides a second, derived field,
+# `recommended_all`, which is `[0..k-1]` and present only when k >= 2 — the
+# listed rows are hoisted to the top IN THE ORDER THE MODEL LISTED THEM (that
+# order is its ranking), then everything else in authored order. It is declared
+# (so `model_dump()` -> `model_validate()` is a fixed point; the model forbids
+# extras) but hidden from the published tool schema with `SkipJsonSchema`,
+# because it is derived output, not something the model should author. Nothing
+# is PRE-TICKED: on a multi-select the visible ticks are the answer, and the
+# user builds them (see the pinned picker test). Consumers read
+# `recommended_rows`, never `recommended`, so a set cannot be half-drawn.
+#: The longest suggested command an ask may carry, in characters (after strip).
+#: A one-liner the user is expected to READ before running it; the desktop's
+#: Run confirmation shows the exact bytes untruncated, so the cap keeps that
+#: dialog legible and bounds what a row adds to every frame that carries it.
+ASK_COMMAND_MAX_CHARS = 500
+
+#: Unicode categories a suggested command may not contain. ``Cc`` covers C0,
+#: DEL and C1 — newline, carriage return, tab and ESC — so one command can never
+#: smuggle a second line, an Enter, or a bracketed-paste terminator into the
+#: terminal it is typed into. ``Cf`` covers bidi overrides, zero-width
+#: characters and the BOM, which make the bytes a user reviews differ from the
+#: bytes that run (Trojan Source). ``Zl``/``Zp`` are line/paragraph separators
+#: some terminals and renderers treat as a newline.
+_ASK_COMMAND_REFUSED_CATEGORIES = frozenset({"Cc", "Cf", "Zl", "Zp"})
+
+#: ``Zs`` (space separators) is refused too, except the plain ASCII space. A
+#: NO-BREAK SPACE, an en/em space or an ideographic space reads as a word break
+#: in the dialog, but the shell does not split on it: ``echo<U+00A0>hi`` runs
+#: as one word and fails with "command not found". Same class as ``Cf`` — the
+#: bytes the user reads are not the bytes that run — so the same rule names the
+#: code point back to the model instead (round 1, Q3).
+_ASK_COMMAND_ALLOWED_SPACE = " "
+
+
+def ask_command_problem(command: str) -> str | None:
+    """Why ``command`` (already stripped) cannot ride an ask, or ``None``.
+
+    The ONE rule for the ``AskQuestion.command`` field, shared by the tool's
+    validator and by ``asks/queue._question_shape`` (which re-applies it to rows
+    that reach the queue without passing the tool, e.g. a hand-built or older
+    projection), so the two can never drift. Characters are REFUSED, never
+    stripped: the message goes back to the model, which can correct the
+    command, whereas silently rewriting it would put a command in front of the
+    user that nobody wrote.
+    """
+    if not command:
+        return "command is empty; omit it instead"
+    if len(command) > ASK_COMMAND_MAX_CHARS:
+        return f"command is longer than {ASK_COMMAND_MAX_CHARS} characters"
+    for char in command:
+        category = unicodedata.category(char)
+        if category in _ASK_COMMAND_REFUSED_CATEGORIES or (
+            category == "Zs" and char != _ASK_COMMAND_ALLOWED_SPACE
+        ):
+            return (
+                f"command must be one plain line: U+{ord(char):04X} "
+                f"({unicodedata.name(char, 'control character')}) is not allowed"
+            )
+    return None
+
+
 class AskQuestion(BaseModel):
     """One question the ``ask`` tool puts to the user."""
 
@@ -1859,12 +2043,15 @@ class AskQuestion(BaseModel):
     multi: bool = Field(
         default=False, description="True lets the user pick several options instead of one."
     )
-    recommended: int | None = Field(
+    recommended: int | list[int] | None = Field(
         default=None,
         description=(
-            "0-based index of the option you recommend; it is moved to the top and preselected."
+            "0-based index you recommend (multi-select: a list, best first); "
+            "moved to top, badged, not ticked."
         ),
     )
+    # Derived, never authored: see the comment above the class.
+    recommended_all: SkipJsonSchema[list[int] | None] = None
     secret: bool = Field(
         default=False,
         description=(
@@ -1880,8 +2067,78 @@ class AskQuestion(BaseModel):
         ),
     )
 
+    # A SUGGESTED terminal command for the user (e.g. `glab auth login`), so a
+    # surface can offer it as an action instead of the user copying inline code
+    # out of the prose: the desktop app types it into a NEW terminal tab on the
+    # device showing the card (Insert) or, after a confirmation dialog, types
+    # and runs it (Run). Nothing ever runs it without that click + confirm. One
+    # per question, not per option, to keep the card to one action row. Allowed
+    # with `secret` ("run `gh auth token`, paste the result"). The field is
+    # absent from a stored row unless supplied (`_question_shape`), and bridge
+    # rows never carry it: another team's agent may not hand the operator a
+    # command. The description is deliberately short — it rides every request's
+    # tools array (see the two ask ledgers in AGENTS.md "The ask queue").
+    command: str | None = Field(
+        default=None,
+        max_length=ASK_COMMAND_MAX_CHARS,
+        description=(
+            "Optional one-line shell command for the user to run; the app offers "
+            "it in a terminal. Include cd if the directory matters."
+        ),
+    )
+    # WHICH DEVICE the command is for. The desktop's terminal is a node-pty on
+    # the machine showing the card, which for a mesh-remote conversation is NOT
+    # the machine the agent works on: `glab auth login` meant for the agent's
+    # box would sign in the viewer's Mac instead. So the model names the
+    # target, and the desktop offers one-click Run only when the terminal it
+    # would type into IS that device (Insert/copy stay available everywhere).
+    # "agent" is the default because nearly every suggested command fixes the
+    # agent's own environment; "user" is for the operator's own computer
+    # ("glab is signed out on your Mac"). Only valid alongside `command`, and
+    # stamped "agent" on validation when omitted, so a stored row always
+    # carries an explicit target and a consumer never has to guess a default.
+    command_target: Literal["agent", "user"] | None = Field(
+        default=None,
+        description=(
+            "Where it must run: 'agent' (default: your machine) or 'user' (their "
+            "own computer). One-click run is offered only on the right device."
+        ),
+    )
+
+    @field_validator("command", mode="before")
+    @classmethod
+    def _strip_command(cls, value: object) -> object:
+        # Strip BEFORE the `max_length` constraint runs, so the cap is measured
+        # on the command the user will see — the same order the queue path
+        # (`asks/queue._carried_command`) uses. As a plain (after) validator the
+        # strip ran too late: `" " + "x" * 500` was refused by pydantic's
+        # length check though the stripped command is exactly at the cap
+        # (round 1, n1/Q2). `max_length` stays on the Field so the published
+        # schema's `maxLength` hint, and the ledgers measuring it, are unchanged.
+        return value.strip() if isinstance(value, str) else value
+
+    @field_validator("command")
+    @classmethod
+    def _one_line_command(cls, value: str | None) -> str | None:
+        # A field validator, not part of `_shape`: `_shape` returns early for a
+        # secret question, and the command rule applies to both kinds.
+        if value is None:
+            return None
+        value = value.strip()
+        problem = ask_command_problem(value)
+        if problem is not None:
+            raise ValueError(problem)
+        return value
+
     @model_validator(mode="after")
     def _shape(self) -> "AskQuestion":
+        # Command target first: `_shape` returns early for a secret question
+        # below, and a secret question may carry a command too.
+        if self.command is None:
+            if self.command_target is not None:
+                raise ValueError("command_target only applies with a command")
+        elif self.command_target is None:
+            self.command_target = "agent"
         if self.secret:
             # A secret question is a masked paste, not a picker. Options and
             # multi-select have no meaning there, and a recommended option
@@ -1891,7 +2148,7 @@ class AskQuestion(BaseModel):
                 raise ValueError("a secret question has no options; the answer is a pasted value")
             if self.multi:
                 raise ValueError("a secret question cannot be multi-select")
-            if self.recommended is not None:
+            if self.recommended is not None or self.recommended_all is not None:
                 raise ValueError("a secret question has no options to recommend")
             from local_operator.variables import normalize_credential_key
 
@@ -1908,21 +2165,63 @@ class AskQuestion(BaseModel):
             raise ValueError("persist only applies to a secret question")
         if len(self.options) < 2:
             raise ValueError("at least two answers to pick from")
-        if self.recommended is not None and not 0 <= self.recommended < len(self.options):
-            raise ValueError(
-                f"recommended must index options (0..{len(self.options) - 1}), "
-                f"got {self.recommended}"
-            )
-        if self.recommended is not None:
+        if self.recommended_all is not None:
+            # A previously normalised dump being re-validated. Only the exact
+            # shape `_shape` itself emits is accepted, so a hand-built row
+            # cannot smuggle in a set that disagrees with the hoisted order.
+            if (
+                self.recommended != 0
+                or len(self.recommended_all) < 2
+                or self.recommended_all != list(range(len(self.recommended_all)))
+            ):
+                raise ValueError(
+                    "recommended_all is derived: it must be [0..k-1] (k >= 2) with recommended 0"
+                )
+            picks = list(self.recommended_all)
+        elif isinstance(self.recommended, list):
+            picks = list(self.recommended)
+        elif self.recommended is not None:
+            picks = [self.recommended]
+        else:
+            picks = []
+        if isinstance(self.recommended, list) and not picks:
+            raise ValueError("recommended is an empty list; omit it instead")
+        if len(set(picks)) != len(picks):
+            raise ValueError(f"recommended lists an option twice: {picks}")
+        # Bounds first, before any reordering: see the comment above the class.
+        for pick in picks:
+            if not 0 <= pick < len(self.options):
+                raise ValueError(
+                    f"recommended must index options (0..{len(self.options) - 1}), got {pick}"
+                )
+        if len(picks) > 1 and not self.multi:
+            raise ValueError("several recommendations need multi=true; give one index")
+        if picks:
             # Rotate rather than swap: the authored order of everything the
             # model did NOT recommend is still its ranking, and a swap would
             # promote whatever happened to sit at index 0 over the rest of it.
-            # Rotating by 0 is the identity, so an already-normalised question
-            # passes through untouched however many times it is re-validated.
-            hoisted = self.options.pop(self.recommended)
-            self.options.insert(0, hoisted)
+            # Hoisting an already-normalised [0..k-1] set is the identity, so
+            # a question passes through untouched however many times it is
+            # re-validated.
+            hoisted = [self.options[pick] for pick in picks]
+            rest = [option for index, option in enumerate(self.options) if index not in picks]
+            self.options[:] = hoisted + rest
             self.recommended = 0
+            self.recommended_all = list(range(len(picks))) if len(picks) > 1 else None
         return self
+
+    @property
+    def recommended_rows(self) -> tuple[int, ...]:
+        """Every recommended row index, first pick first; ``()`` when none.
+
+        The one accessor consumers read, so a multi-select's set is drawn whole
+        and pyright never sees ``recommended``'s authored ``list`` arm.
+        """
+        if self.recommended_all:
+            return tuple(self.recommended_all)
+        if isinstance(self.recommended, int):
+            return (self.recommended,)
+        return ()
 
 
 # THE ROW SHAPE. The ask the TOOL takes and the ask a ROW stores are two shapes,
@@ -1993,17 +2292,55 @@ AskUserFn = Callable[[list[AskQuestion]], Awaitable[dict[str, list[str]] | None]
 
 
 @dataclass(frozen=True)
-class QueuedProfileWrite:
-    """Host-filed durable request, explicitly NOT a grant or a denial."""
+class ProposedProfileWrite:
+    """Host-filed profile PROPOSAL, explicitly NOT a grant or a denial.
 
-    approval_id: str
-    request_digest: str
-    expires_at: float
-    receipt_id: str
+    The consent seam returns this when the account write was not asked for by
+    the owner in their own words: the change is stored in
+    ``local_operator.profile_proposals`` and reviewed in Agents → <name>, or
+    applied with the ``profile_proposal`` tool after the user agrees.
+    """
+
+    proposal_id: str
     profile_kind: str
     profile_name: str
     changes: tuple[str, ...] = ()
     diff: tuple[str, ...] = ()
+    #: Bounded per-field lines (``instructions: +12 −3 lines``) computed by the
+    #: host from the filed record (``profile_proposals.summary_line``). The
+    #: receipt shows THESE, never ``diff``: a replaced brief's ``diff`` is the
+    #: whole new text, and an agent that saw it echoed it into its ask to the
+    #: user, which filled the conversation (operator report 2026-11-10).
+    summary: tuple[str, ...] = ()
+    #: The record's real state. ``pending`` for a fresh filing; an identical
+    #: re-filing of an already-decided or expired proposal reports that state
+    #: so the receipt never claims a pending proposal that does not exist.
+    state: str = "pending"
+
+
+#: Kept for one release so out-of-tree imports of the old name keep resolving;
+#: the signed mesh filing it described is gone (proposals live in Agents now).
+QueuedProfileWrite = ProposedProfileWrite
+
+
+@dataclass(frozen=True)
+class QueuedHubPull:
+    """The host filed a hub-pull consent ask: explicitly NOT a grant or a denial.
+
+    WHY a separate outcome. An org-hub pull is most often requested from a turn
+    with nobody attached to answer a card (a Team Bridge message, a peer, a
+    wake). Refusing there told users to run CLI commands they do not know. The
+    host instead queues ONE host-authored ask carrying the exact plan; the
+    user's affirmative answer, arriving as its own turn, is what the seam later
+    grants on (single use, bound to tenant and kinds). The tool reports this as
+    "asked — end the turn, retry when the answer arrives".
+    """
+
+    ask_id: str
+    tenant: str
+    #: True when an OPEN ask for the same tenant already existed and was reused,
+    #: so the model is not told it filed a second question.
+    reused: bool = False
 
 
 @dataclass(frozen=True)
@@ -2027,7 +2364,7 @@ class DurableWriteIntent:
     they land in the account store.
     """
 
-    kind: Literal["agent", "team"]
+    kind: Literal["agent", "team", "skill"]
     #: ``sync`` is here because syncing rewrites installed account rows and its
     #: hub arm fetches account definitions — both are account mutations the
     #: seam is asked about, even though the tool's own verb is a different one.
@@ -2036,8 +2373,23 @@ class DurableWriteIntent:
     #: surface can authorise it, which is exactly what the seam answers.
     #: ``revert`` restores a row from the backup a granted save took; it is an
     #: account write like any other, so it goes through the same seam.
+    #: ``hub_pull`` is the org-hub pull/update class (``org_pull`` with
+    #: ``on_conflict`` adopt-link|skip): new items linked without overwriting
+    #: anything, already-linked items updated through the sync merge with no
+    #: forced conflict, and links re-subscribed. It is a separate operation so
+    #: the consent it can earn (auto policy, the owner's request, an answered
+    #: host-filed ask) can never authorise hub-wins ``adopt``/``reconcile``,
+    #: which stay ``sync`` + ``confirm_replace``.
     operation: Literal[
-        "create", "update", "delete", "install", "reset", "sync", "promote", "revert"
+        "create",
+        "update",
+        "delete",
+        "install",
+        "reset",
+        "sync",
+        "promote",
+        "revert",
+        "hub_pull",
     ]
     name: str
     #: Always ``global`` today: a conversation-scoped write never asks. Kept
@@ -2059,6 +2411,12 @@ class DurableWriteIntent:
     #: binds session/anchor/expiry when filing the signed operation request.
     proposal: dict[str, Any] | None = None
     tool_call_id: str = ""
+    #: ``hub_pull`` only: the HOST-COMPUTED plan (tenant, kinds, new items,
+    #: linked items with an available update and their revisions, links to
+    #: re-subscribe). Built by the tool from the catalogue and the sync check,
+    #: never from a model parameter; the seam renders it on the ask/card and
+    #: binds a grant to its tenant and kinds. Shape: ``hub_org.consent``.
+    plan: dict[str, Any] | None = None
 
 
 class ToolContext(BaseModel):
@@ -2200,6 +2558,16 @@ class ToolContext(BaseModel):
     #: guardrail creation ledger writes a child's creations under these ids
     #: too, so a parent may clean up after its subagents.
     ancestor_session_ids: tuple[str, ...] = ()
+    #: The session's Team Bridge taint latch (``harness/bridge_egress.py``
+    #: ``BridgeTaintLatch``), owned by the session and injected per turn. The
+    #: loop's tier seam and the web tools' provider filter read it; ``None`` on
+    #: a host that does not track taint, which is then judged by the live
+    #: context alone. Never serialized: it is host state, not tool input.
+    bridge_taint: Any = Field(default=None, exclude=True, repr=False)
+    #: Set on a ``task`` child spawned from a latched session
+    #: (team-bridge-egress.md: "Propagation between sessions").
+    #: Tighten-only: a child inherits its parent's taint for life.
+    inherited_bridge_taint: bool = False
     # Human-readable title is display metadata only. Security-sensitive tools
     # must continue using ``session_id`` for identity and authorization.
     session_name: str = ""
@@ -2295,8 +2663,12 @@ class ToolContext(BaseModel):
         default=None, exclude=True
     )
     authorize_durable_write: (
-        Callable[[DurableWriteIntent], Awaitable[str | QueuedProfileWrite | None]] | None
+        Callable[[DurableWriteIntent], Awaitable[str | ProposedProfileWrite | None]] | None
     ) = Field(default=None, exclude=True, repr=False)
+    #: Host-held consent decision, never a model-supplied permission flag.
+    decide_profile_proposal: Callable[[str, str], Awaitable[str]] | None = Field(
+        default=None, exclude=True, repr=False
+    )
     # Session-named variables behind the list_variables / read_variable tools.
     # Values are never baked into the prompt; the model lists names and reads
     # single values on demand. ``None`` degrades those tools to the process
@@ -2428,6 +2800,12 @@ class ToolContext(BaseModel):
     # ``local_operator.video.records.build_record`` returns, and this module
     # must not import that module's way up the graph.
     journal_video_job: Callable[[dict[str, Any]], Awaitable[None]] | None = None
+    # Music journals before paid submit so an interrupted HTTP response can be
+    # replayed under the SAME idempotency key, never another purchase.
+    journal_music_job: Callable[[dict[str, Any]], Awaitable[None]] | None = None
+    # A lifecycle predicate, not a turn snapshot: teardown stops observation
+    # without authorizing upstream cancellation or discarding purchased audio.
+    session_disposed: Callable[[], bool] | None = Field(default=None, exclude=True)
     # The audio lane's late-settlement writer (``Session.journal_audio_settle``):
     # appends one ``audio_settle_v1`` bookkeeping row after a RUNNING cancel,
     # because a job refused cancellation may finish minutes later and the tool

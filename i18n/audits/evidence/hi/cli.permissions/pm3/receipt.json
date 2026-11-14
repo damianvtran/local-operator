@@ -1,0 +1,40 @@
+{
+  "schema": 1,
+  "record": "i18n/audits/evidence/hi/cli.permissions/pm3/record.json",
+  "companions": {
+    "record.json": "11e5a6ff49df40e4e48d32a0188dc8ce40d72a89ef69f42e14e07e4ab87593ca",
+    "report.md": "62633bf1d248b7954e1a2cd8ba4ae9659be268760dc4b1d4e050b41466df74c3",
+    "audit.log": "8179cd00ee0a0e0e18cd7b4dc01d68fb6540bb2af46be2f5d83cc056ccecb630",
+    "parity.py.txt": "7c38f21325118517957188592f213626ca62667885e5a09df238844aa0fdb6d9",
+    "apple_labels.py.txt": "8c464a799d87f636e9a51af5a520d09740c3d5e0f1f980268b17f8f6ba0cbe58"
+  },
+  "ledger": {
+    "path": "i18n/audit-history/hi/cli.permissions.json",
+    "expected_history_sha256_before": "5a2243a757a31d24dac7407058bde3ad6cba03917ed3046dcece77a3279e18ee",
+    "dry_run_output": "i18n/audit-history/hi/cli.permissions.json",
+    "apply_output": "i18n/audit-history/hi/cli.permissions.json",
+    "history_sha256_after_append": "e4abc8f04cc900bf806e5929c01eb6379ddbec8970246e93f7a7752527204158",
+    "row": {
+      "locale": "hi",
+      "namespace": "cli.permissions",
+      "source_sha256": "58e58c3b19a07c024b609f614e686cc9a72def77e3de704870f0557e84e7be41",
+      "translator": {
+        "agent": "i18n-translator (round-3 wave, commit 85fb35811f9)",
+        "session": null,
+        "model": null,
+        "date": "2026-11-09"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (lopdev team subagent)",
+        "session": "c77ef00ae239",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-09",
+        "result": "passed",
+        "findings": 1,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Independent R3 audit pm3 (session c77ef00ae239, anthropic/claude-opus-5-5): passed, 0B/0M/0m/1n. pm2 P1-P3 fixed; 5 changed keys match Apple hi labels; P4 quotes NIT optional. hi 40aa4904e2a0. Record: i18n/audits/evidence/hi/cli.permissions/pm3/record.json"
+    }
+  }
+}

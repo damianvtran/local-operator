@@ -1,0 +1,44 @@
+# frpm3 audit.log — captured command output, worktree .worktrees/runtime-privacy-identity
+$ git rev-parse HEAD
+85fb35811f9d17fb6dfadfc2d5df3269db04bd12
+$ python i18n/audits/evidence/fr/cli.permissions/frpm3/audit_checks.py.txt
+sha256 en/cli.permissions.json 58e58c3b19a07c024b609f614e686cc9a72def77e3de704870f0557e84e7be41
+sha256 en/cli.permissions.context.json 6f8427bf5dd20f8fa252d0163387d59f4e53a30fe07cc9db4c5a5f55048fb1d2
+sha256 fr/cli.permissions.json 2f36fa071929503a59f6b2ced74e93e90a53e3c8b63b45dc532631b3e805be07
+keys en/fr 39 39 added [] dropped []
+FAIL cli.permissions.setup.explain ["token 'Developer ID' 1 vs 2"]
+mechanical failures: 1
+ICU plural/select in en: 0
+U+2019 count 51 U+202F count 58
+longest fr lines (cells): [(370, 'cli.permissions.setup.explain'), (277, 'cli.permissions.setup.done_allow_once'), (230, 'cli.permissions.status.optin.unavailable'), (199, 'cli.permissions.status.screen.denied'), (179, 'cli.permissions.setup.done')]
+non-NFC values: []
+fr keys changed since 788cc399: ['cli.permissions.help.status', 'cli.permissions.setup.already_signed', 'cli.permissions.setup.always_allow_kept', 'cli.permissions.setup.explain', 'cli.permissions.status.optin.unavailable', 'cli.permissions.status.scope']
+en keys changed since 788cc399: ['cli.permissions.setup.already_signed', 'cli.permissions.setup.always_allow_kept', 'cli.permissions.status.scope']
+cli.permissions.status.scope | fr: 'Seul l’enregistrement de l’écran est vérifié. Les autres services de confidentialité, dont Fichiers et dossiers, utilisent la même ligne.'
+cli.permissions.setup.already_signed | fr: 'Le runtime de ce build Python était déjà signé\u202f: rien n’a donc été signé cette fois-ci et macOS n’avait rien à demander.'
+cli.permissions.setup.always_allow_kept | fr: 'Votre précédente réponse «\u202fToujours autoriser\u202f» pour cette clé est conservée.'
+status.scope mentions Accessibilit/Contrôle de l’appareil: False
+already_signed mentions Toujours autoriser: False
+$ FR_OVERRIDE=<scratch mutated copy: U+202F->space and ASCII ' in always_allow_kept; {team}->{équipe} in optin.unavailable> python i18n/audits/evidence/fr/cli.permissions/frpm3/audit_checks.py.txt  # negative control
+FAIL cli.permissions.status.optin.unavailable ["placeholders ['{team}'] vs ['{équipe}']"]
+FAIL cli.permissions.setup.explain ["token 'Developer ID' 1 vs 2"]
+FAIL cli.permissions.setup.always_allow_kept ["no U+202F before '»' at 45", 'no U+202F after «']
+mechanical failures: 3
+$ python i18n/audits/evidence/fr/cli.permissions/frpm3/apple_labels.py.txt
+System Settings.app :: InfoPlist.loctable :: CFBundleDisplayName :: en='System Settings' :: fr='Réglages\xa0Système'
+SecurityPrivacyExtension.appex :: InfoPlist.loctable :: CFBundleDisplayName :: en='Privacy & Security' :: fr='Confidentialité et sécurité'
+SecurityPrivacyExtension.appex :: Localizable.loctable :: SCREEN_CAPTURE :: en='Screen Recording' :: fr='Enregistrement de l’écran'
+SecurityPrivacyExtension.appex :: Localizable.loctable :: SCREEN_CAPTURE_HEADER :: en='Screen & System Audio Recording' :: fr='Enregistrement de l’écran et des sons du système'
+SecurityPrivacyExtension.appex :: Localizable.loctable :: SCREENANDAUDIOCAPTURE :: en='Screen & System Audio Recording' :: fr='Enregistrement de l’écran et des sons du système'
+SecurityPrivacyExtension.appex :: Localizable.loctable :: FILE_ACCESS_COMBINED :: en='Files & Folders' :: fr='Fichiers et dossiers'
+SecurityPrivacyExtension.appex :: Localizable.loctable :: ACCESSIBILITY :: en='Device Control and Data Access' :: fr='Contrôle de l’appareil et accès aux données'
+SecurityAgent.bundle :: ConfirmAccess.loctable :: 100268.title :: en='Allow' :: fr='Autoriser'
+SecurityAgent.bundle :: ConfirmAccess.loctable :: 100267.title :: en='Always Allow' :: fr='Toujours autoriser'
+SecurityAgent.bundle :: ConfirmAccess.loctable :: 100266.title :: en='Deny' :: fr='Refuser'
+Keychain Access.app :: InfoPlist.loctable :: CFBundleDisplayName :: en='Keychain Access' :: fr='Trousseaux d’accès'
+Keychain Access.app :: KeyEditor.loctable :: 302.label :: en='Access Control' :: fr='Contrôle d’accès'
+Keychain Access.app :: Localizable.loctable :: private key :: en='private key' :: fr='clé privée'
+Keychain Access.app :: ACLEditor.loctable :: 100175.title :: en='Always allow access by these applications:' :: fr='Toujours autoriser l’accès par ces applications\xa0:'
+$ python scripts/i18n/check.py --catalogues-only
+check.py: catalogue checks: 0 problem(s)
+exit=0

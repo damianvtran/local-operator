@@ -60,6 +60,9 @@ reaped by exact pid.
     ISO=$(mktemp -d)
     env -i HOME="$ISO" LOCAL_OPERATOR_CONFIG_DIR="$ISO/.local-operator" PATH="$PATH" \\
       .venv/bin/python scripts/bench_model_switch.py --condition parked
+    # the same probes opted into the deferred settings ack (``queued`` answers):
+    env -i HOME="$ISO" LOCAL_OPERATOR_CONFIG_DIR="$ISO/.local-operator" PATH="$PATH" \\
+      .venv/bin/python scripts/bench_model_switch.py --condition busy --defer
 """
 
 from __future__ import annotations
@@ -480,15 +483,23 @@ async def _parent_main(args: argparse.Namespace) -> dict[str, Any]:
                 name = f"{kind}-{index}"
                 tag(name)
                 await asyncio.sleep(0.02)
+                # ``--defer`` opts every probe into the deferred settings ack:
+                # a switch that cannot land within SETTINGS_INLINE_ACK_S is
+                # answered ``queued`` and ``ack_ms`` measures that answer.
+                defer: dict[str, Any] = {"defer_ok": True, "request_id": name} if args.defer else {}
                 t0 = time.perf_counter()
                 try:
                     if kind == "set_model":
                         detail = await client._request(
-                            "set_model", provider="test", model_id=models[index % 2], tag=name
+                            "set_model",
+                            provider="test",
+                            model_id=models[index % 2],
+                            tag=name,
+                            **defer,
                         )
                     elif kind == "set_effort":
                         detail = await client._request(
-                            "set_effort", effort=_LADDER[index % 3], tag=name
+                            "set_effort", effort=_LADDER[index % 3], tag=name, **defer
                         )
                     else:
                         detail = await client._request_payload(
@@ -497,7 +508,12 @@ async def _parent_main(args: argparse.Namespace) -> dict[str, Any]:
                             args=f"test/{models[(index + 1) % 2]}",
                             images=[],
                             tag=name,
+                            **defer,
                         )
+                        if detail is None and args.defer:
+                            # A queued answer is an ``ack``, which carries no
+                            # ``data`` (a landed slash answers ``result``).
+                            detail = "queued"
                     error = ""
                 except Exception as exc:  # noqa: BLE001 — recorded, not fatal
                     detail, error = "", f"{type(exc).__name__}: {exc}"
@@ -538,6 +554,11 @@ async def _parent_main(args: argparse.Namespace) -> dict[str, Any]:
     return {
         "imported": base._tree_identity(),
         "condition": args.condition,
+        "defer": bool(args.defer),
+        "queued": {
+            kind: sum(1 for r in rows if r["kind"] == kind and r["detail"] == "queued")
+            for kind in ("set_model", "set_effort", "slash_model")
+        },
         "lanes": args.lanes if busy else 0,
         "roster": args.roster if busy else 0,
         "transcript_mb": args.transcript_mb if busy else 0,
@@ -562,6 +583,11 @@ def main() -> int:
     parser.add_argument("--gap", type=float, default=0.2)
     parser.add_argument("--settle", type=float, default=3.0)
     parser.add_argument("--json", default="")
+    parser.add_argument(
+        "--defer",
+        action="store_true",
+        help="send defer_ok + request_id: measure the deferred settings ack",
+    )
     parser.add_argument("--child", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--report", default="", help=argparse.SUPPRESS)
     args = parser.parse_args()

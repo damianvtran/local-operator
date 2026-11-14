@@ -54,6 +54,213 @@ def _admit_peer(record: types.NetworkRecord, *, role: str = "drive") -> types.Me
     )
 
 
+def test_read_peer_cannot_mint_an_unknown_admin() -> None:
+    """The authenticated reader must not turn a table answer into an admission."""
+    record, _state = _record()
+    _admit_peer(record, role="read")
+    forged = types.MemberRecord(
+        device_id="d_" + "c" * 32,
+        public_key=wire.b64u(b"c" * 32),
+        role="admin",
+        capabilities=sorted(types.capabilities_for_role("admin")),
+        added_by=SELF,
+    ).to_json()
+    # Exact net_member_list answer rows: even a forged added_by is not evidence
+    # that the authenticated link's reader may speak for an unknown identity.
+    assert relay.adopt_members(record, [forged], sender_device_id=PEER) == (False, [])
+    assert record.member(forged["device_id"]) is None
+
+
+@pytest.mark.parametrize("role", ["read", "drive"])
+def test_member_cannot_promote_its_own_row(role: str) -> None:
+    record, _state = _record()
+    peer = _admit_peer(record, role=role)
+    forged = peer.to_json()
+    forged.update(role="admin", capabilities=sorted(types.capabilities_for_role("admin")))
+    forged["endpoints"] = ["127.0.0.1:43210"]
+    assert relay.adopt_members(record, [forged], sender_device_id=PEER) == (False, [])
+    assert peer.role == role
+    assert peer.endpoints == []
+
+
+def test_self_capability_increase_cannot_bootstrap_a_later_third_party_row() -> None:
+    record, _state = _record()
+    peer = _admit_peer(record, role="read")
+    forged_self = peer.to_json()
+    forged_self["capabilities"] = sorted(types.capabilities_for_role("admin"))
+    forged_other = dict(forged_self, device_id="d_" + "c" * 32)
+    assert relay.adopt_members(record, [forged_self, forged_other], sender_device_id=PEER) == (
+        False,
+        [],
+    )
+    assert peer.capabilities == sorted(types.capabilities_for_role("read"))
+    assert record.member(forged_other["device_id"]) is None
+
+
+def test_local_capability_revoke_does_not_block_owned_metadata_updates() -> None:
+    """A receiver-local revoke must not make a legitimate peer unreachable."""
+    record, _state = _record()
+    peer = _admit_peer(record, role="drive")
+    own = peer.to_json()
+    assert "prompt" in own["capabilities"]
+    relay.set_member_capabilities(record, device_id=PEER, revoke=["prompt"])
+    local_capabilities = list(peer.capabilities)
+    local_key = peer.public_key
+    own["name"] = "renamed-peer"
+    own["endpoints"] = ["127.0.0.1:43210"]
+    # The peer still declares its originally admitted capabilities. Accept its
+    # owned metadata, not its stale capability claim or a subsequent new identity.
+    forged = dict(own, device_id="d_" + "c" * 32)
+    assert relay.adopt_members(record, [own, forged], sender_device_id=PEER) == (True, [])
+    assert peer.name == "renamed-peer"
+    assert peer.endpoints == own["endpoints"]
+    assert peer.role == "drive"
+    assert peer.public_key == local_key
+    assert peer.capabilities == local_capabilities
+    assert "prompt" not in peer.capabilities
+    assert record.member(forged["device_id"]) is None
+
+
+THIRD = "d_" + "c" * 32
+_REFUSAL = "Refused member row"
+
+
+def _admit_third(record: types.NetworkRecord) -> types.MemberRecord:
+    third = relay.admit(
+        record,
+        device_id=THIRD,
+        public_key=wire.b64u(b"c" * 32),
+        name="phone",
+        role="read",
+        capabilities=sorted(types.capabilities_for_role("read")),
+        added_by=SELF,
+        added_via="invite",
+        root=None,
+        persist=False,
+    )
+    third.endpoints = ["10.0.0.1:4100"]
+    return third
+
+
+def _refusals(caplog: pytest.LogCaptureFixture) -> list[str]:
+    return [
+        r.getMessage()
+        for r in caplog.records
+        if r.name == "local_operator.network.relay" and r.getMessage().startswith(_REFUSAL)
+    ]
+
+
+def test_a_drive_supplier_relays_only_a_known_members_endpoint(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A relayed row for a known device moves its address and nothing that grants standing."""
+    record, _state = _record()
+    _admit_peer(record, role="drive")
+    third = _admit_third(record)
+    before = third.to_json()
+    forged = dict(
+        before,
+        endpoints=["10.0.0.2:4200"],
+        name="renamed-by-relay",
+        role="admin",
+        capabilities=sorted(types.capabilities_for_role("admin")),
+        public_key=wire.b64u(b"x" * 32),
+        previous_ids=[PEER],
+        added_by=PEER,
+        added_via="relay",
+    )
+    caplog.set_level("WARNING", logger="local_operator.network.relay")
+    assert relay.adopt_members(record, [forged], sender_device_id=PEER) == (True, [])
+    after = third.to_json()
+    assert after["endpoints"] == ["10.0.0.2:4200"]
+    # Everything except the address is exactly what this device held before.
+    assert {k: v for k, v in after.items() if k != "endpoints"} == {
+        k: v for k, v in before.items() if k != "endpoints"
+    }
+    supplier = record.member(PEER)
+    assert supplier is not None and supplier.active
+    assert _refusals(caplog) == []
+
+
+def test_the_receivers_own_row_from_a_drive_supplier_is_ignored_silently(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    record, _state = _record()
+    _admit_peer(record, role="drive")
+    own = record.member(SELF)
+    assert own is not None
+    before = own.to_json()
+    relayed = dict(before, endpoints=["10.9.9.9:1"], role="read", name="not-me")
+    caplog.set_level("WARNING", logger="local_operator.network.relay")
+    assert relay.adopt_members(record, [relayed], sender_device_id=PEER) == (False, [])
+    assert own.to_json() == before
+    assert _refusals(caplog) == []
+
+
+def test_an_unknown_third_row_from_a_drive_supplier_is_refused_once(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    record, _state = _record()
+    peer = _admit_peer(record, role="drive")
+    unknown = types.MemberRecord(
+        device_id=THIRD,
+        public_key=wire.b64u(b"c" * 32),
+        role="read",
+        capabilities=sorted(types.capabilities_for_role("read")),
+        endpoints=["10.0.0.2:4200"],
+    ).to_json()
+    caplog.set_level("WARNING", logger="local_operator.network.relay")
+    own = record.member(SELF)
+    assert own is not None
+    # A whole table, as a pull carries it: only the unknown row is a refusal.
+    rows = [own.to_json(), peer.to_json(), unknown]
+    assert relay.adopt_members(record, rows, sender_device_id=PEER) == (False, [])
+    assert record.member(THIRD) is None
+    assert _refusals(caplog) == [
+        "Refused member row: third-device assertion requires admin standing"
+    ]
+
+
+def test_joined_member_can_assert_its_own_admitted_row() -> None:
+    record, _state = _record()
+    peer = _admit_peer(record, role="read")
+    own = peer.to_json()
+    own["endpoints"] = ["127.0.0.1:43210"]
+    assert relay.adopt_members(record, [own], sender_device_id=PEER) == (True, [])
+    assert peer.endpoints == own["endpoints"]
+
+
+def test_admin_can_introduce_a_genuine_third_device_grant() -> None:
+    record, _state = _record()
+    _admit_peer(record, role="admin")
+    newcomer = types.MemberRecord(
+        device_id="d_" + "c" * 32,
+        public_key=wire.b64u(b"c" * 32),
+        role="drive",
+        capabilities=sorted(types.capabilities_for_role("drive")),
+    ).to_json()
+    # An unsolicited notification is not an answered membership pull, even from
+    # an admin. The subsequent pull may introduce this exact authorised row.
+    assert relay.adopt_members(record, [newcomer], sender_device_id=PEER, allow_new=False) == (
+        False,
+        [],
+    )
+    assert relay.adopt_members(record, [newcomer], sender_device_id=PEER) == (
+        True,
+        [newcomer["device_id"]],
+    )
+    adopted = record.member(newcomer["device_id"])
+    assert adopted is not None
+    assert adopted.role == "drive"
+
+
+def test_member_rows_without_authenticated_supplier_are_not_admissions() -> None:
+    record, _state = _record()
+    row = types.MemberRecord(device_id=PEER, role="admin").to_json()
+    assert relay.adopt_members(record, [row]) == (False, [])
+    assert record.member(PEER) is None
+
+
 # ---------------------------------------------------------------------------
 # Admission
 # ---------------------------------------------------------------------------
@@ -500,7 +707,10 @@ def test_a_rotation_statement_that_arrives_after_the_pull_is_a_no_op(root: Path)
         rotated_at=time.time(),
         added_via="invite",
     )
-    assert relay.adopt_members(record, [published.to_json()]) == (True, [new.device_id])
+    assert relay.adopt_members(record, [published.to_json()], sender_device_id=SELF) == (
+        True,
+        [new.device_id],
+    )
     assert record.member(old.device_id) is record.member(new.device_id)
 
     # NOW THE FRAME ARRIVES, exactly as it was queued, and finds its work already done.
@@ -618,7 +828,10 @@ def test_another_network_is_refused_even_when_this_one_already_applied_it(root: 
         rotated_at=time.time(),
         added_via="invite",
     )
-    assert relay.adopt_members(record, [published.to_json()]) == (True, [new.device_id])
+    assert relay.adopt_members(record, [published.to_json()], sender_device_id=SELF) == (
+        True,
+        [new.device_id],
+    )
     survivor = record.member(new.device_id)
     assert survivor is not None and survivor.rotation_proof == statement
     foreign = identity.rotation_statement(old, new, "n_ffffffffffffffffffffffff")
@@ -1014,7 +1227,7 @@ def test_a_peer_cannot_store_an_invalid_label_as_its_name() -> None:
         role="read",
         capabilities=sorted(types.capabilities_for_role("read")),
     ).to_json()
-    changed, added = relay.adopt_members(record, [newcomer], sender_device_id=PEER)
+    changed, added = relay.adopt_members(record, [newcomer], sender_device_id=SELF)
     assert added == [newcomer_id]
     newcomer_row = record.member(newcomer_id)
     assert newcomer_row is not None

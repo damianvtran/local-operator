@@ -136,6 +136,10 @@ async def test_a_wake_after_a_pass_leaves_the_compacted_context_and_no_second_pa
     assert _compaction_entries(session)[0].payload["summary"] == PRIOR_SUMMARY
     rendered_before = session._render_for_compaction()
 
+    # The talk() turns opened the operator quiet window: this test's subject is
+    # the wake turn's compaction behaviour, not deferral. Park nothing.
+    session._last_operator_turn_end = 0.0  # aged past W
+    assert not session._operator_active(), "aged stamp must read inactive"
     await session._deliver_wake(_due_wake())
     expected = len(compacted) + 2  # the wake delivery and the reply it runs
     await wait_for(lambda: len(session._context.messages) >= expected and not session._is_streaming)
@@ -192,6 +196,7 @@ async def test_a_wake_that_crosses_the_trigger_folds_its_span_onto_the_summary(t
         update={"threshold_tokens": 100}
     )
 
+    session._last_operator_turn_end = 0.0  # aged past W (see test above)
     await session._deliver_wake(_due_wake("wake up for the deploy"))
     await wait_for(lambda: len(_compaction_entries(session)) == 2)
 

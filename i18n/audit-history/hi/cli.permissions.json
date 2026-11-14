@@ -1,0 +1,74 @@
+{
+  "schema": 1,
+  "locale": "hi",
+  "namespace": "cli.permissions",
+  "history_sha256": "e4abc8f04cc900bf806e5929c01eb6379ddbec8970246e93f7a7752527204158",
+  "entries": [
+    {
+      "locale": "hi",
+      "namespace": "cli.permissions",
+      "source_sha256": "eba1e1dd19a618fa8c46a3744197afd2dfa4e84b6774f16b20e8de389f4dbf8f",
+      "translator": {
+        "agent": "i18n-translator (PR #3691 coder agent, job ad99821ab9e1)",
+        "session": "ad99821ab9e1",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-09"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (lopdev team subagent)",
+        "session": "d94d672abfb8",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-09",
+        "result": "changes_requested",
+        "findings": 5,
+        "unresolved_blocker_major": 1
+      },
+      "status": "changes_requested",
+      "note": "Independent audit pm1 (session d94d672abfb8, anthropic/claude-opus-5-5, not translator ad99821ab9e1): changes_requested, 0 blocker/1 major/2 minor/2 nit. H1 MAJOR setup.done 'सेशन' violates glossary सत्र. Record: i18n/audits/evidence/hi/cli.permissions/pm1/record.json"
+    },
+    {
+      "locale": "hi",
+      "namespace": "cli.permissions",
+      "source_sha256": "d5eed4044348f0fa462e1238209230507a48eb5e018b22c7a8b971b518d3f186",
+      "translator": {
+        "agent": "i18n-translator (round-2 wave, commit 788cc399410)",
+        "session": null,
+        "model": null,
+        "date": "2026-11-09"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (lopdev team subagent)",
+        "session": "d9395b58854d",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-09",
+        "result": "changes_requested",
+        "findings": 4,
+        "unresolved_blocker_major": 2
+      },
+      "status": "changes_requested",
+      "note": "Independent R2 audit pm2 (session d9395b58854d, anthropic/claude-opus-5-5): changes_requested, 0B/2M/1m/1n. P1 screen.denied सिस्टम सेटिंग्ज़≠Apple सिस्टम सेटिंग; P2 explain ऐक्सेस नियंत्रण≠ऐक्सेस कंट्रोल. Record: i18n/audits/evidence/hi/cli.permissions/pm2/record.json"
+    },
+    {
+      "locale": "hi",
+      "namespace": "cli.permissions",
+      "source_sha256": "58e58c3b19a07c024b609f614e686cc9a72def77e3de704870f0557e84e7be41",
+      "translator": {
+        "agent": "i18n-translator (round-3 wave, commit 85fb35811f9)",
+        "session": null,
+        "model": null,
+        "date": "2026-11-09"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (lopdev team subagent)",
+        "session": "c77ef00ae239",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-09",
+        "result": "passed",
+        "findings": 1,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Independent R3 audit pm3 (session c77ef00ae239, anthropic/claude-opus-5-5): passed, 0B/0M/0m/1n. pm2 P1-P3 fixed; 5 changed keys match Apple hi labels; P4 quotes NIT optional. hi 40aa4904e2a0. Record: i18n/audits/evidence/hi/cli.permissions/pm3/record.json"
+    }
+  ]
+}

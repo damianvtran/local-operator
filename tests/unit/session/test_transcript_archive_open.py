@@ -170,6 +170,9 @@ def test_an_undecodable_codec_names_the_archive_and_the_codec(
     # Force the cross-version case on any interpreter: the codec exists on disk,
     # this build has no decoder for it.
     monkeypatch.setattr(compression, "_zstd", None)
+    # Decoding has its own fallback (``backports.zstd``) since the field report
+    # of a 3.13 daemon reading a 3.14 store; "no decoder" means both are gone.
+    monkeypatch.setattr(compression, "_zstd_decoder", None)
 
     with pytest.raises(compression.ArchiveError) as raised:
         Transcript(directory)

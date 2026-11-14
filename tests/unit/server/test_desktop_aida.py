@@ -90,6 +90,42 @@ async def test_get_never_creates_the_session(client, isolated_root: Path) -> Non
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("enabled", [True, False])
+async def test_get_reads_her_state_off_the_event_loop(
+    client, isolated_root: Path, monkeypatch: pytest.MonkeyPatch, enabled: bool
+) -> None:
+    """The polled read never runs its synchronous file reads on the loop thread.
+
+    2026-11-11 loop rig: inline, ``_state`` (whose first-run predicate can scan
+    every session directory) held the event loop up to 5.3 s per poll on a
+    2,506-session store, queueing conversation opens behind it. Both branches
+    (enabled and the disabled-discovery answer) build the state, so both are
+    pinned.
+    """
+    import threading
+
+    from local_operator.server.routes import desktop_aida
+
+    if not enabled:
+        write_config(isolated_root, {"aida": {"enabled": False}})
+        app.state.config_manager = ConfigManager(config_dir=isolated_root)
+    loop_thread = threading.get_ident()
+    seen: list[int] = []
+    real_state = desktop_aida._state
+
+    def recording_state(root: Any):
+        seen.append(threading.get_ident())
+        return real_state(root)
+
+    monkeypatch.setattr(desktop_aida, "_state", recording_state)
+    async with client as http:
+        response = await http.get("/v1/desktop/aida")
+    assert response.status_code == 200
+    assert response.json()["result"]["enabled"] is enabled
+    assert seen and all(ident != loop_thread for ident in seen)
+
+
+@pytest.mark.asyncio
 async def test_open_creates_and_answers_the_frozen_shape(client, isolated_root: Path) -> None:
     async with client as http:
         response = await http.post("/v1/desktop/aida", json={"op": "open"})

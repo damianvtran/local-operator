@@ -300,6 +300,18 @@ class TeamBridgeSettingsPut(_Strict):
     consent_version: str | None = Field(default=None, max_length=128)
     consented_via: Literal["dialog", "settings"] | None = None
     label: str | None = Field(default=None, max_length=64)
+    #: The "Screening model" choice (LOCAL, never forwarded upstream). ``None``
+    #: leaves the stored choice alone, so a body that only renames or pauses does
+    #: not silently clear a choice the user made earlier; ``""`` clears it. The
+    #: value is one ``provider/model_id`` pair from the vetted list
+    #: ``GET /v1/desktop/team-bridge/settings`` carries under
+    #: ``screening.models[].value`` — a renderer has no other way to learn it.
+    #: An off-table or unparseable value is IGNORED rather than refused, exactly
+    #: as the chain ignores a stored one: the response echoes the value actually
+    #: in force, so a renderer sees the truth instead of a rejection it cannot
+    #: explain, and no screening key can ever become a validation cliff a client
+    #: has to engineer around.
+    screening_model: str | None = Field(default=None, max_length=192)
     #: The account this write was CAPTURED for (H1 review round 1, R6/Q1).
     #: REQUIRED on this plane: the body is ours on both ends, and without the
     #: guard a dialog captured for account A could enroll account B after a
@@ -324,9 +336,19 @@ class TeamBridgeSettingsPut(_Strict):
         # silently dropped instead of refused.
         if self.share_typing is None:
             raise ValueError("state is required")
-        hub_fields = (self.tenant_id, self.consent_version, self.consented_via, self.label)
-        if any(value is not None for value in hub_fields):
-            raise ValueError("a share_typing-only write carries no hub fields")
+        # ``screening_model`` is refused here too although it is local: the
+        # state-less branch writes ``share_typing`` and returns before the
+        # screening write, so accepting it would drop a choice silently. A
+        # screening choice rides a ``state`` write, its only reviewed contract.
+        other_fields = (
+            self.tenant_id,
+            self.consent_version,
+            self.consented_via,
+            self.label,
+            self.screening_model,
+        )
+        if any(value is not None for value in other_fields):
+            raise ValueError("a share_typing-only write carries no other fields")
         return self
 
 
@@ -712,6 +734,115 @@ def _refuse_write_scope(request: Request) -> None:
         _raise_read("invalid_request")
 
 
+def _screening_selector(pair: tuple[str, str] | None) -> str | None:
+    """The pair as the one string this plane accepts, or ``None`` for no choice.
+
+    ``None`` is a meaningful answer, not a placeholder: it says "no choice",
+    which is the shipped state and a perfectly good one (the chain's own tested
+    order). A renderer must be able to show Automatic as SELECTED, so the wire
+    needs a value that means it rather than an empty string that could equally
+    read as "unset by accident".
+
+    IT ALSO VALIDATES, which is what keeps this surface honest: a pair the chain
+    would IGNORE (off the evaluated table) reads as ``None`` here rather than as
+    a selected model that silently does nothing, and a login flavour is folded to
+    the table's own spelling so the value a renderer sends back is the value the
+    chain re-orders to. ``settings._screening_model`` upstream is shape only —
+    the table is the authority, and this is where it is applied.
+    """
+
+    if pair is None:
+        return None
+    from local_operator.team_bridge.model_boundary import evaluated_screening_pair
+
+    canonical = evaluated_screening_pair(*pair)
+    if canonical is None:
+        return None
+    provider, model_id = canonical
+    return f"{provider}/{model_id}"
+
+
+def _screening_models() -> list[dict[str, str]]:
+    """The vetted screening pairs, as the closed set a renderer may offer.
+
+    WHY THIS CROSSES THE WIRE: ``model_boundary.SCREENING_EVALUATED_MODELS`` is
+    the only authority on which models may be chosen -- each pair is there
+    because it carries an eval result -- and a renderer cannot import Python.
+    A renderer that hardcoded its own list would offer a model the chain then
+    ignores, i.e. a dropdown whose choice silently does nothing. ``value`` is
+    spelled exactly as a write accepts it, so the control and the write cannot
+    disagree about the encoding.
+    """
+
+    from local_operator.team_bridge.model_boundary import SCREENING_EVALUATED_MODELS
+
+    return [
+        {
+            "value": f"{provider}/{model_id}",
+            "provider": provider,
+            "model_id": model_id,
+        }
+        for provider, model_id in SCREENING_EVALUATED_MODELS
+    ]
+
+
+def _screening_view(preferred: tuple[str, str] | None) -> dict[str, Any]:
+    """The Screening model block both local reads answer with, once.
+
+    ONE function for the block itself, so the status answer and the settings
+    answer cannot disagree on its SHAPE or on the vetted list — the failure mode
+    a renderer hits as a dropdown that changes its mind between two reads, or
+    that offers a value the other route never shows. The caller supplies the
+    stored choice from ITS OWN source, deliberately: the settings route re-reads
+    the file, while the status route hands the process-watcher snapshot (which
+    re-parses on poll, so the two agree; on a malformed document only, the
+    watcher keeps last-good while a read yields ``None``). Both go through the
+    same selector, so what either route says is what screening does — including
+    the fail-closed cases (an off-table or unparseable stored value reads as
+    ``None``, exactly as the chain ignores it).
+    """
+
+    return {
+        "preferred": _screening_selector(preferred),
+        "models": _screening_models(),
+    }
+
+
+def _apply_screening_choice(config_dir: Path, value: str | None) -> str | None:
+    """Store the Screening model choice this body carried; return what is in force.
+
+    ``None`` (field absent) writes nothing: a rename, a pause or a consent write
+    must not clear a choice the user made on another request. ``""`` clears it.
+    An off-table or unparseable value is IGNORED -- the stored choice stands --
+    for the same reason the chain ignores one: the value space is an eval table
+    this plane does not own, and the response carries the effective value so the
+    caller learns what happened instead of receiving a rejection. Login
+    flavours (``anthropic-key``) are folded onto the canonical provider before
+    the check, so the same weights spelled two ways are one choice, and the
+    CANONICAL spelling is what gets stored.
+    """
+
+    from local_operator.team_bridge.model_boundary import evaluated_screening_pair
+    from local_operator.team_bridge.settings import (
+        _screening_model,
+        read_screening_model,
+        write_screening_model_choice,
+    )
+
+    if value is not None:
+        text = value.strip()
+        pair = _screening_model(text)
+        canonical = evaluated_screening_pair(*pair) if pair is not None else None
+        if text == "":
+            write_screening_model_choice(config_dir, "")
+        elif canonical is not None:
+            # The TABLE's spelling, not the caller's: a login flavour
+            # (``anthropic-key``) and its canonical provider are one choice, and
+            # the config file should say which entry is in force.
+            write_screening_model_choice(config_dir, f"{canonical[0]}/{canonical[1]}")
+    return _screening_selector(read_screening_model(config_dir))
+
+
 @router.get("/v1/desktop/team-bridge/status", response_model=CRUDResponse[Any])
 async def status(
     boundary: str = Query(default="surface_open"),
@@ -844,7 +975,22 @@ async def status(
         # this client, not a setting — no registered key can turn it off (a
         # test pins the registry against it) — and the receipt lets a surface
         # state that plainly instead of implying a toggle exists.
-        "screening": {"required": True},
+        "screening": {
+            "required": True,
+            # The ONE screening choice that exists: WHICH evaluated screener is
+            # tried first (``preferred``), and the vetted list to choose from
+            # (``models``). It crosses the wire because a renderer cannot import
+            # Python and ``model_boundary.SCREENING_EVALUATED_MODELS`` is the
+            # only authority on what may be chosen; a renderer that hardcoded
+            # its own list would offer a model the chain then ignores.
+            # ``preferred`` is null for "no choice": the chain's own tested
+            # order, which is exactly what this machine screened with before the
+            # key existed. A choice RE-ORDERS that chain and removes no hop, so
+            # ``required`` is true whatever ``preferred`` says. The block itself
+            # comes from the SAME function the settings route uses, handed this
+            # route's own source of the stored value (the watcher snapshot).
+            **_screening_view(local.screening_model),
+        },
         #: Whether the captured-account guard is ENFORCED on the mutation
         #: routes (review round 1, R6): the UI requires this receipt before an
         #: Enable, and it is only true because the client compares the
@@ -903,9 +1049,12 @@ def _connector_state(config_dir: Path) -> str:
     installation belongs to the commit, opt-out and surface-start events.
     """
 
-    from local_operator.team_bridge.connector.install import connector_state
+    # CACHED (~5 s): this runs on every status poll and the ``launchctl print``
+    # under it was ~32 ms of each Team Bridge open. It is a display state, and
+    # in-process installs/removals invalidate it — ``cached_connector_state``.
+    from local_operator.team_bridge.connector.install import cached_connector_state
 
-    return connector_state(config_dir)
+    return cached_connector_state(config_dir)
 
 
 def _locally_enrolled(config_manager: ConfigManager, check: Any) -> bool:
@@ -980,6 +1129,7 @@ async def get_settings(
         BridgeSignInRequired,
         TeamBridgeClient,
     )
+    from local_operator.team_bridge.settings import read_screening_model
 
     client = TeamBridgeClient(config_manager.config_dir)
     try:
@@ -998,6 +1148,12 @@ async def get_settings(
             "default_on": (
                 isinstance(consent, dict) and consent.get("consented_via") == "default_on"
             ),
+            # LOCAL, additive, and deliberately beside the hub's own fields (the
+            # same shape as ``default_on`` above): the Screening model choice is
+            # this machine's, so the page that edits it needs the same vetted
+            # list and current value the status answer carries. Without it a
+            # renderer could read one shape and write another.
+            "screening": _screening_view(read_screening_model(config_manager.config_dir)),
             # ADDITIVE and LOCAL: the typing-indicator sharing choice lives in
             # this machine's config, not on the hub (typing design §7).
             "share_typing": _read_share_typing(config_manager.config_dir),
@@ -1029,6 +1185,14 @@ async def put_settings(
         assert body.share_typing is not None
         _record_share_typing(config_manager.config_dir, body.share_typing)
         return reply({"share_typing": _read_share_typing(config_manager.config_dir)})
+    # THE ONE LOCAL FIELD ON THIS BODY. It is applied BEFORE the hub call, and
+    # deliberately not forwarded: which model screens incoming mail is this
+    # machine's business (the screener runs here), and the hub only shape-checks
+    # the id it is told about elsewhere. Writing it first means a hub refusal
+    # cannot throw away a choice the user already made and this machine can
+    # honour; if the hub call then fails the caller sees its error and the
+    # choice stands, which is the half this route could actually complete.
+    screening = _apply_screening_choice(config_manager.config_dir, body.screening_model)
     from local_operator.team_bridge.client import (
         BridgeRefusal,
         BridgeSignInRequired,
@@ -1085,7 +1249,14 @@ async def put_settings(
                 "team bridge: state saved upstream but share_typing was not saved locally"
             )
     if isinstance(payload, dict):
-        payload = {**payload, "share_typing": _read_share_typing(config_manager.config_dir)}
+        # The value ACTUALLY in force: for an ignored off-table value that is the
+        # stored choice, not the one just sent, so a renderer reconciles against
+        # this rather than against its own optimistic state.
+        payload = {
+            **payload,
+            "screening": {"preferred": screening, "models": _screening_models()},
+            "share_typing": _read_share_typing(config_manager.config_dir),
+        }
     return reply(payload)
 
 

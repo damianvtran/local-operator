@@ -50,7 +50,14 @@ from local_operator.team_bridge.types import (
 #: Hold codes the person is told about as "the screener was unsure / could not
 #: answer"; anything else that is not releasable is "waiting" (infrastructure).
 _SCREENING_KIND = frozenset(
-    {"model_hold", "model_refused", "reply_truncated", "parse_failed", "bounce_without_category"}
+    {
+        "model_hold",
+        "model_refused",
+        "reply_truncated",
+        "parse_failed",
+        "empty_reply",
+        "bounce_without_category",
+    }
 )
 
 
@@ -117,7 +124,12 @@ def list_holds(config_dir: Path, owner: Any, *, now: float | None = None) -> dic
 
     store = Store(config_dir)
     now = time.time() if now is None else float(now)
-    enabled = hr.enabled(config_dir)
+    # ``enabled`` is "any release path is open": the work-scope class
+    # (``hold_release``) or the owner review of cached answer holds
+    # (``review_held``, default on). Each item's own class is gated below.
+    enabled = hr.any_enabled(config_dir)
+    review_on = hr.review_enabled(config_dir)
+    work_scope_on = hr.enabled(config_dir)
     decisions = {str(d["message_id"]): d for d in store.work_scope_decisions(owner)}
     items: list[dict[str, Any]] = []
     for bare, row in sorted(
@@ -126,11 +138,12 @@ def list_holds(config_dir: Path, owner: Any, *, now: float | None = None) -> dic
         code = row["hold_code"]
         decision = decisions.get(bare)
         eligible = bool(
-            enabled
+            (review_on if code in hr.REVIEW_HOLD_CODES else work_scope_on)
             and code in hr.RELEASABLE_HOLD_CODES
             and decision is not None
+            and str(decision.get("hold_code") or "") == code
             and decision.get("eligible")
-            and decision.get("screener_preferred")
+            and hr.trusted_decision(decision)
         )
         held_at = float(decision["created_at"]) if decision is not None else row["created_at"]
         deliver_until = held_at + hr.DELIVER_WINDOW_S if eligible else None
@@ -193,7 +206,7 @@ def decide(
 
     if word not in hr.WORDS:
         raise HoldRefused(422, "invalid_request")
-    if not hr.enabled(config_dir):
+    if not hr.any_enabled(config_dir):
         raise HoldRefused(409, "hold_release_off")
     if not is_conversation_message_id(message_id):
         # The legacy pair lane (``bmsg_``) has its own ask/decide flow (DESIGN §1.2 rule 4).
@@ -213,12 +226,15 @@ def decide(
         or held["hold_code"] not in hr.RELEASABLE_HOLD_CODES
         or decision is None
         or not decision.get("eligible")
-        or not decision.get("screener_preferred")
+        or not hr.trusted_decision(decision)
     ):
         # One code for "no hold", "not this kind" and "not eligible": the
         # renderer offers buttons only on ``releasable``, so a forced call gets
         # no detail about why (a closed allowlist, D1).
         raise HoldRefused(409, "hold_not_releasable")
+    if not hr.enabled_for(config_dir, str(decision.get("hold_code") or "")):
+        # The class's own setting, checked once the decision names its class.
+        raise HoldRefused(409, "hold_release_off")
     if str(decision.get("conversation_id") or "") != conversation_id or (
         held["conversation_id"] and held["conversation_id"] != conversation_id
     ):
@@ -284,7 +300,7 @@ def decide(
     # The next connector pass picks it up: make the hold due now rather than
     # after its doubling backoff (DESIGN §9.5).
     try:
-        store.make_holds_due(owner, hr.WORK_SCOPE_HOLD, now=time.time())
+        store.make_holds_due(owner, str(decision["hold_code"]), now=time.time())
     except StoreRefused:
         pass
     return _receipt(row)

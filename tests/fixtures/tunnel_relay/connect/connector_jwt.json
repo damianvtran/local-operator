@@ -1,0 +1,23 @@
+{
+  "contract": "docs/TUNNEL_RELAY.md C2.3",
+  "protected_header": {
+    "alg": "RS256",
+    "kid": "<grant kid: handler.keyID()>",
+    "typ": "JWT"
+  },
+  "claims": {
+    "iss": "https://api.radienthq.com/v1/tunnels",
+    "sub": "acct_fixture_owner",
+    "aud": "wss://tunnels.radienthq.com/v1/connector",
+    "iat": 1762779600,
+    "exp": 1762780200,
+    "jti": "0d9c8b7a-6f5e-4d3c-9b2a-1f0e9d8c7b6a",
+    "token_use": "tunnel_connector",
+    "tunnel_id": "0123456789abcdef0123456789abcdef",
+    "version": 7,
+    "harnesses": [
+      "local-operator",
+      "opencode"
+    ]
+  }
+}

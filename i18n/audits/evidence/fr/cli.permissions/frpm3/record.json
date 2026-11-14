@@ -1,0 +1,98 @@
+{
+  "schema": 1,
+  "audit_id": "frpm3",
+  "round": 3,
+  "locale": "fr",
+  "namespace": "cli.permissions",
+  "audit_date": "2026-11-09",
+  "packaged_at_utc": "2026-11-09T19:58:08Z",
+  "key_count": 39,
+  "auditor": {
+    "agent": "i18n-auditor (lopdev team task subagent; did not translate or edit any copy)",
+    "session": "cf1ab574baf9",
+    "model": "anthropic/claude-opus-5-5",
+    "independent_from_translator_session": true,
+    "translator_session": null,
+    "translator_note": "round-3 fr translation landed in commit 85fb35811f9 (session not identifiable from the worktree). Independent of round-1 translator ad99821ab9e1 and prior auditors 144ca81a304c, c2890b9743dd.",
+    "actual_model_source": "this session's own system-prompt model header (Model: anthropic/claude-opus-5-5); no provider fallback observed during the audit"
+  },
+  "source_audit_revision": "85fb35811f9d17fb6dfadfc2d5df3269db04bd12",
+  "scope": "round 2+ rule: frpm2 findings + keys changed 788cc399..85fb3581",
+  "previous_round_record": "i18n/audits/evidence/fr/cli.permissions/frpm2/record.json",
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/cli.permissions.json",
+      "sha256": "58e58c3b19a07c024b609f614e686cc9a72def77e3de704870f0557e84e7be41"
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/cli.permissions.context.json",
+      "sha256": "6f8427bf5dd20f8fa252d0163387d59f4e53a30fe07cc9db4c5a5f55048fb1d2"
+    },
+    "fr": {
+      "path": "local_operator/i18n/catalogues/fr/cli.permissions.json",
+      "sha256": "2f36fa071929503a59f6b2ced74e93e90a53e3c8b63b45dc532631b3e805be07"
+    },
+    "style_guide": {
+      "path": "i18n/style-guides/fr.md",
+      "sha256": "5315e1ac10c2ce57aac631ba653d08de680ee70c9a022ed3a8345ce2f9902ee7"
+    },
+    "glossary": {
+      "path": "i18n/glossary.md",
+      "sha256": "0eb34437a8c3d6f564f278ef957a603b1d9f51bb07d5ddae5ea8f37deba962f8"
+    }
+  },
+  "macos_label_sources": "Apple .loctable resources on macOS 27.2: System Settings.app, SecurityPrivacyExtension.appex, SecurityAgent.bundle ConfirmAccess, Keychain Access.app; output in audit.log",
+  "current_report_verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "finding_ids": [],
+    "finding_counts": {
+      "blocker": 0,
+      "major": 0,
+      "minor": 0,
+      "nit": 0
+    },
+    "round2_findings": {
+      "FRPM2-1": "fixed",
+      "FRPM2-2": "fixed",
+      "FRPM2-N1": "applied",
+      "FRPM2-N2": "applied",
+      "FRPM2-N3": "applied",
+      "FRPM2-N4": "applied",
+      "FRPM2-S1": "resolved upstream (en)",
+      "FRPM2-S2": "resolved upstream (code+en)"
+    }
+  },
+  "audit_notes_not_execution_log": "report.md and findings.json are reasoning/notes; audit.log alone is captured command output.",
+  "limitations": [
+    "Independent LLM review, not native-speaker certification.",
+    "Scalar text only: no rendered terminal frame; plain print output with no declared width budget.",
+    "Round-2+ scope: unchanged keys carried from frpm2, not re-audited."
+  ],
+  "artifacts": [
+    {
+      "path": "i18n/audits/evidence/fr/cli.permissions/frpm3/audit_checks.py.txt",
+      "sha256": "17b372f50de7d5d16ec337c4bde16e4a0e65d68416e1b2583e0abab508d10243"
+    },
+    {
+      "path": "i18n/audits/evidence/fr/cli.permissions/frpm3/apple_labels.py.txt",
+      "sha256": "81539dc7ef8d838b6dd75d262e1b43f73fa0a3a005db717bbc5f1d91cc8fe1f2"
+    },
+    {
+      "path": "i18n/audits/evidence/fr/cli.permissions/frpm3/audit.log",
+      "sha256": "abc565013251828679844e2fcac131fd2314954e5af49ac49e8659066fc38f5a"
+    },
+    {
+      "path": "i18n/audits/evidence/fr/cli.permissions/frpm3/findings.json",
+      "sha256": "d9912716acf3869f423613181d8b1ec383fdb91fd7121a368879cb82ef9e67fa"
+    },
+    {
+      "path": "i18n/audits/evidence/fr/cli.permissions/frpm3/report.md",
+      "sha256": "eb51a160a0b4ed01543226b87032a4f46f4eade9ad8442d1f24ea89fe9ad3591"
+    },
+    {
+      "path": "i18n/audits/evidence/fr/cli.permissions/frpm3/receipt.json",
+      "sha256": "see receipt.json (hashes record.json; not self-hashed)"
+    }
+  ]
+}

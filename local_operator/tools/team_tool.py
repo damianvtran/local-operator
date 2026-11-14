@@ -42,6 +42,7 @@ from local_operator.profile_scope import (
     team_revision,
     update_profile_backup,
 )
+from local_operator.profile_text_edits import TextEdit
 from local_operator.projects import truncate_row
 from local_operator.teams import (
     MAX_TEAM_INSTRUCTIONS_CHARS,
@@ -167,11 +168,27 @@ class TeamParams(BaseModel):
             "team name or another team's alias."
         ),
     )
+    edits: list[TextEdit] | None = Field(
+        default=None,
+        description="update: patch/append long text losslessly.",
+    )
+    field: Literal["instructions", "project", "description"] | None = Field(
+        default=None, description="show: read this field page by page"
+    )
+    part: int | None = Field(default=None, ge=1, description="show: page, 1-based")
+    base_revision: str | None = Field(
+        default=None,
+        description="show/update: show's revision (CAS).",
+    )
+    replace: bool = Field(
+        default=False,
+        description="update: confirm a rewrite dropping lines.",
+    )
     scope: Literal["global", "session"] | None = Field(
         default=None,
         description=(
             "Default: this conversation if it has a store, else the account. "
-            "'global': the account, needs confirmation."
+            "'global': the account."
         ),
     )
     # ``as`` is a Python keyword, so the design's ``[as=Y]`` is ``as_name`` here
@@ -408,11 +425,24 @@ async def _op_list(context: ToolContext | None, tool_call_id: str) -> ToolResult
     return _text(tool_call_id, "team", text, details=spill or None)
 
 
-async def _op_show(context: ToolContext | None, tool_call_id: str, name: str) -> ToolResult:
+async def _op_show(
+    context: ToolContext | None,
+    tool_call_id: str,
+    name: str,
+    *,
+    field: str | None = None,
+    part: int | None = None,
+    base_revision: str | None = None,
+) -> ToolResult:
     registry = _registry(context)
     if registry is None:
         return _error(tool_call_id, "team", "no team registry attached to this session.")
     try:
+        # Disk, not the interval cache: the revision printed below is the CAS
+        # token an update echoes, and a cached row would print a stale one.
+        refresh = getattr(registry, "refresh", None)
+        if callable(refresh):
+            refresh()
         team = registry.get_team_by_name(name)
     except (TeamRegistryLockTimeout, TeamRegistryRecoveryError) as exc:
         return _error(tool_call_id, "team", str(exc))
@@ -426,11 +456,34 @@ async def _op_show(context: ToolContext | None, tool_call_id: str, name: str) ->
             "conversation starts with a copy of its teams.",
         )
     from local_operator.profile_scope import row_scope, scope_words
+    from local_operator.profile_text_edits import (
+        SHOW_RESULT_BUDGET_CHARS,
+        TextEditRefusal,
+        field_pointer,
+        render_field_page,
+    )
 
+    revision = team_revision(team)
+    if field is not None:
+        # The paged authoring read (``profile_text_edits`` rule 1): ONE page per
+        # result so no replay bound can clip it after the fact.
+        value = {
+            "instructions": team.instructions,
+            "project": team.project,
+            "description": team.description,
+        }[field] or ""
+        try:
+            page = render_field_page(field, value, part or 1, revision, base_revision=base_revision)
+        except TextEditRefusal as exc:
+            return _error(tool_call_id, "team", str(exc))
+        return _text(tool_call_id, "team", page, details={"complete": True, "field": field})
     header = [
         f"{identifier_text(context, display_form(team.name, team.label))}. "
         f"Led by {identifier_text(context, team.manager)}",
         f"scope: {scope_words(row_scope(registry, team))}",
+        # The CAS token an intentional whole-field shortening must echo back
+        # (``profile_text_edits``): printed only here, beside the full text.
+        f"revision: {team_revision(team)}",
         f"description: {team.description or '(unstated)'}",
     ]
     if team.aliases:
@@ -443,17 +496,30 @@ async def _op_show(context: ToolContext | None, tool_call_id: str, name: str) ->
     header.extend(team.roster_lines(lambda value: identifier_text(context, value)))
     header.extend(_override_lines(team, lambda value: identifier_text(context, value)))
     body = "\n".join(header)
-    if team.instructions.strip():
-        body += "\n\ncollaboration:\n" + team.instructions.strip()
-    else:
-        body += "\n\ncollaboration: (none)"
-    if team.project.strip():
-        body += "\n\nproject:\n" + team.project.strip()
-    else:
-        body += "\n\nproject: (none)"
+    # Inline only while the WHOLE result fits the replay-safe budget; a
+    # longer field becomes a pointer to its pages, and ``complete`` says so,
+    # because a clipped middle read back as the whole brief is how a
+    # 12.5k-char brief lost ~6k chars to one append (``profile_text_edits``).
+    paged: list[str] = []
+    for label, key, value in (
+        ("collaboration", "instructions", team.instructions),
+        ("project", "project", team.project),
+    ):
+        text = value.strip()
+        if not text:
+            body += f"\n\n{label}: (none)"
+        elif len(body) + len(text) + 2 * len(label) + 200 <= SHOW_RESULT_BUDGET_CHARS:
+            body += f"\n\n{label}:\n{text}"
+        else:
+            paged.append(key)
+            body += "\n\n" + field_pointer(key, value)
     body += f"\n\nlaunch with /team {identifier_text(context, team.name)} <request>."
-    text, spill = spill_truncate(body, "team", context)
-    return _text(tool_call_id, "team", text, details=spill or None)
+    return _text(
+        tool_call_id,
+        "team",
+        body,
+        details={"complete": not paged, **({"paged_fields": paged} if paged else {})},
+    )
 
 
 def _bounded_field(value: str | None, label: str) -> str | None:
@@ -481,6 +547,13 @@ async def _op_write(
         )
     name = (params.name or "").strip()
     try:
+        # Read disk, not the interval-cached snapshot: the before-image below
+        # becomes a proposal's CAS base, and a row another writer changed in
+        # the last few seconds (an Agents Accept, a verbal apply) would make
+        # that proposal stale at birth.
+        refresh = getattr(registry, "refresh", None)
+        if callable(refresh):
+            refresh()
         existing = registry.get_team_by_name(name)
     except (TeamRegistryLockTimeout, TeamRegistryRecoveryError) as exc:
         return _error(tool_call_id, "team", str(exc))
@@ -562,6 +635,18 @@ async def _op_write(
 
         if not model_may_choose_tier():
             return _error(tool_call_id, "team", _overrides_refusal())
+    if existing is not None:
+        # Lossless-edit rules (``profile_text_edits``) run on EVERY tool update,
+        # either store, before the consent decision: the proposal, the backup
+        # and the receipt must all describe the resolved whole-field values.
+        resolved = _resolve_text_edits(existing, params)
+        if isinstance(resolved, str):
+            return _error(tool_call_id, "team", resolved)
+        params = resolved
+    elif params.edits or params.base_revision or params.replace:
+        return _error(
+            tool_call_id, "team", "edits/base_revision apply to op='update' of an existing team."
+        )
     try:
         members = parse_members(params.members) if params.members is not None else None
         if members is not None:
@@ -609,10 +694,10 @@ async def _op_write(
             tool_call_id=tool_call_id,
         )
         authorized_by, reason = await durable_write_decision(context, intent)
-        if reason == "queued":
-            from local_operator.tools.agent_tool import _queued_profile_receipt
+        if reason == "proposed":
+            from local_operator.tools.agent_tool import _proposed_profile_receipt
 
-            return _queued_profile_receipt(tool_call_id, "team", authorized_by)
+            return _proposed_profile_receipt(tool_call_id, "team", authorized_by)
         if authorized_by is None:
             return _error(tool_call_id, "team", durable_write_refusal(intent, reason))
         if existing is not None:
@@ -643,11 +728,17 @@ async def _op_write(
             verb = "created"
         else:
             assert existing is not None  # guarded above
+            # The caller's own ``base_revision`` (a lossless-edit CAS) binds
+            # under the writer lock too, not just at the pre-check above.
+            # Narrowed into a local so the checker sees ``str`` at the call.
+            expected_revision = base_revision or params.base_revision
             team = registry.update_team(
                 existing.id,
                 fields,
                 precondition=(
-                    _revision_precondition(base_revision) if base_revision is not None else None
+                    _revision_precondition(expected_revision)
+                    if expected_revision is not None
+                    else None
                 ),
             )
             verb = "updated"
@@ -767,23 +858,49 @@ def _team_changes(existing: Any, params: TeamParams) -> tuple[tuple[str, ...], s
     changes = tuple(
         field for field in _TEAM_SAVE_FIELDS if getattr(params, field, None) is not None
     )
+    from local_operator.profile_text_edits import stats_heading
+
     lines: list[str] = []
+    # Long-text sections go LAST, headed by the canonical whole-field counts
+    # (``profile_diff_summary`` reads those and skips their bodies).
+    texts: list[str] = []
     for field in changes:
         new = getattr(params, field)
         old = getattr(existing, field, None) if existing is not None else None
-        if field == "instructions":
-            rendered, is_diff = _instruction_diff(
+        if field in ("instructions", "project"):
+            rendered, _is_diff = _instruction_diff(
                 str(old or ""), str(new or ""), fromfile="before", tofile="after"
             )
-            heading = "instructions" if is_diff else "instructions (replaced; new text)"
-            lines.append(f"{heading}:\n{rendered}")
+            texts.append(f"{stats_heading(field, str(old or ''), str(new or ''))}:\n{rendered}")
         elif field in ("members", "overrides"):
             lines.append(  # i18n: ignore Model-facing definition diff; policy fields stay English
                 f"{field} (roster and model/effort pins): replaced as given"
             )
         else:
             lines.append(f"{field}: {_format_field(old)} -> {_format_field(new)}")
-    return changes, "\n".join(lines)
+    return changes, "\n".join(lines + texts)
+
+
+def _resolve_text_edits(existing: Any, params: TeamParams) -> TeamParams | str:
+    """Apply ``edits``/``base_revision``/``replace`` (``profile_text_edits``).
+
+    Returns ``params`` with ``instructions``/``project`` set to the resolved
+    WHOLE values (so the diff, proposal, backup and receipt below all see one
+    before/after pair), or the refusal sentence.
+    """
+    from local_operator.profile_text_edits import resolve_text_fields
+
+    resolved = resolve_text_fields(
+        {"instructions": existing.instructions or "", "project": existing.project or ""},
+        whole={"instructions": params.instructions, "project": params.project},
+        edits=params.edits,
+        base_revision=params.base_revision,
+        current_revision=team_revision(existing),
+        replace=params.replace,
+    )
+    if isinstance(resolved, str):
+        return resolved
+    return params.model_copy(update={**resolved, "edits": None})
 
 
 def _moved_refusal(name: str) -> str:
@@ -924,10 +1041,10 @@ async def _op_revert(context: ToolContext | None, tool_call_id: str, backup_id: 
         tool_call_id=tool_call_id,
     )
     authorized_by, reason = await durable_write_decision(context, intent)
-    if reason == "queued":
-        from local_operator.tools.agent_tool import _queued_profile_receipt
+    if reason == "proposed":
+        from local_operator.tools.agent_tool import _proposed_profile_receipt
 
-        return _queued_profile_receipt(tool_call_id, "team", authorized_by)
+        return _proposed_profile_receipt(tool_call_id, "team", authorized_by)
     if authorized_by is None:
         return _error(tool_call_id, "team", durable_write_refusal(intent, reason))
     from pathlib import Path
@@ -1047,7 +1164,14 @@ async def execute_team(
     if params.op == "list":
         return await _op_list(context, tool_call_id)
     if params.op == "show":
-        return await _op_show(context, tool_call_id, str(params.name))
+        return await _op_show(
+            context,
+            tool_call_id,
+            str(params.name),
+            field=params.field,
+            part=params.part,
+            base_revision=params.base_revision,
+        )
     if params.op == "promote":
         return await _op_promote(context, tool_call_id, params)
     if params.op == "revert":

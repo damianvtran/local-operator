@@ -152,9 +152,10 @@ def format_question_block(questions: Sequence[Any]) -> str:
     recommended option is the hoisted ``options[0]`` the user-facing surfaces
     would show — the fork must see the ask as the user would have. Numbered
     options keep the model's answer space addressable ("Q1", "option 2") if it
-    deliberates, and ``(recommended)`` marks position 0 only when the model
-    actually gave a recommendation (``recommended is not None`` after the
-    validator's hoist; a question without one must not grow a marker).
+    deliberates, and ``(recommended)`` marks every recommended row (the hoisted
+    ``recommended_rows``: position 0 for one pick, the first k for a
+    multi-select's set) only when the model actually gave a recommendation (a
+    question without one must not grow a marker).
 
     Secret questions never reach here (the gate's step 3 refuses the whole ask),
     so no masking concern rides this path.
@@ -165,12 +166,13 @@ def format_question_block(questions: Sequence[Any]) -> str:
         if bool(getattr(question, "multi", False)):
             head += " [multi-select]"
         lines = [head]
-        recommended = getattr(question, "recommended", None)
+        # The set, not the int: `recommended` alone names only the first row.
+        recommended = frozenset(getattr(question, "recommended_rows", ()) or ())
         for option_index, option in enumerate(getattr(question, "options", ()) or ()):
             label = _option_text(option, "label")
             description = _option_text(option, "description")
             line = f"  {option_index + 1}. {label}"
-            if recommended is not None and option_index == recommended:
+            if option_index in recommended:
                 line += " (recommended)"
             if description:
                 line += f" — {description}"

@@ -232,6 +232,10 @@ class FakeJob:
         #: session", which is what a job carries between registration and
         #: ``attach``.
         self.queued = queued
+        #: Mirrors ``AsyncJob.effort``: a tier-only ``set_model`` switch
+        #: rewrites it on the live row (``comms.set_model``), so a fake
+        #: without it would hide whether that write happens.
+        self.effort: str | None = None
 
 
 class FakeJobs:

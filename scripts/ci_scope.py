@@ -461,10 +461,6 @@ UNGATED_JOBS: dict[str, str] = {
         "check: it must report on every run, and it passes skipped needs, so "
         "the classifier's skips flow through it rather than around it"
     ),
-    "report": (
-        "full-suite.yml's `if: always()` issue filer: it exists to report a "
-        "red or green main run, so no scope flag may skip it"
-    ),
     "merge-gate": (
         "full-suite.yml's `if: always()` aggregate, the second required check: "
         "it must report on every pull_request run and it passes skipped needs "

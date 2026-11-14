@@ -15,5 +15,6 @@
   "cli.global_help.propagated_resume": "按ID恢复之前的会话。不指定ID则恢复最近的会话。",
   "cli.global_help.propagated_hosting": "本次运行的托管平台（如anthropic、openai、openrouter）",
   "cli.global_help.propagated_model": "本次运行使用的模型",
-  "cli.global_help.propagated_run_in": "运行operator的工作目录"
+  "cli.global_help.propagated_run_in": "运行operator的工作目录",
+  "cli.global_help.temporary": "开始临时对话：不计入历史记录，闲置后删除（默认 30 分钟）。"
 }

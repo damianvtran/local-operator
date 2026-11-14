@@ -334,6 +334,34 @@ async def test_bash_streams_updates_while_running(tools, context) -> None:
 
 
 @pytest.mark.asyncio
+async def test_bash_live_view_says_a_terraform_plan_is_held(tools, context) -> None:
+    # PR #3756 round 2 (R2-1 (c)): a plan held whole for the sensitive-value
+    # check kept the card at "no output yet"; it now says why, live only.
+    script = (
+        "import sys, time\n"
+        'sys.stdout.write(\'before\\n{\\n  "format_version": "1.2",\\n'
+        '  "terraform_version": "1.9.5",\\n  "resource_changes": [\\n\')\n'
+        "sys.stdout.flush(); time.sleep(1.2)\n"
+        "sys.stdout.write('  ],\\n  \"planned_values\": {}\\n}\\nafter\\n')\n"
+    )
+    script_path = Path(context.cwd) / "plan.py"
+    script_path.write_text(script)
+    updates: list[str] = []
+
+    def on_update(update) -> None:
+        from local_operator.harness.types import TextContent
+
+        updates.append("".join(b.text for b in update.content if isinstance(b, TextContent)))
+
+    cmd = f"python3 {script_path}"
+    result = await tools["bash"].execute("c", {"command": cmd}, None, on_update, context)
+    assert result.is_error is False
+    assert any(builtin._LIVE_HELD_TEXT in u for u in updates)
+    assert builtin._LIVE_HELD_TEXT not in result.text
+    assert '"resource_changes"' in result.text and "after" in result.text
+
+
+@pytest.mark.asyncio
 async def test_bash_large_output_truncated(tools, context) -> None:
     # RT-12/RT-30: one combined budget, head+tail survive, marker present,
     # result never exceeds the limit.
@@ -8238,28 +8266,62 @@ def test_the_signature_is_linear_in_the_size_of_the_stderr(monkeypatch) -> None:
     assert elapsed < 2.0, f"signature scan took {elapsed:.3f}s on {len(noise)} chars"
 
 
+def _count_signature_scans(monkeypatch) -> list[int]:
+    """Spy on the signature regex so a test can assert it was never entered.
+
+    The cost guard in ``_missing_tool_notice`` is a substring precondition: the
+    grammar arms, and the regex that drives them, must not run at all for input
+    that cannot match. Counting ``.search`` calls observes that directly; a
+    wall-clock ceiling only observes how loaded the host was. Returns the list of
+    searched text lengths, so a test can assert both the count and the input.
+    """
+
+    class _CountingPattern:
+        def __init__(self, real) -> None:
+            self._real = real
+
+        def search(self, text, *args, **kwargs):
+            seen.append(len(text))
+            return self._real.search(text, *args, **kwargs)
+
+        def __getattr__(self, name):
+            return getattr(self._real, name)
+
+    seen: list[int] = []
+    counting = _CountingPattern(builtin._MISSING_TOOL_SIGNATURE)
+    monkeypatch.setattr(builtin, "_MISSING_TOOL_SIGNATURE", counting)
+    return seen
+
+
 def test_a_stderr_with_no_signature_phrase_is_never_scanned(monkeypatch) -> None:
     """The common case costs a substring search, and this holds that shape.
 
     Most bash calls produce stderr with no such phrase in it at all, so the four
     arms cannot match anything and running them is pure cost. The precondition in
-    ``_missing_tool_notice`` is what makes that case a C-speed ``in`` check, and
-    the separation is ~four orders of magnitude — microseconds against the
-    hundreds of milliseconds a full scan of this input costs — so the assertion
-    is about the CODE PATH rather than about the host: delete the precondition
-    and this fails on any machine, however fast or loaded, because the number
-    stops being a memchr.
+    ``_missing_tool_notice`` is what makes that case a C-speed ``in`` check.
+
+    ASSERTED BY NOT RUNNING THE SCAN, not by timing it. This used to be
+    ``elapsed < 0.05``, and 50 ms is inside the noise a loaded runner adds to any
+    call, so it was a future red shard whose subject had not changed. The claim
+    worth making is narrower and exactly checkable: the signature regex is never
+    ENTERED for phrase-free input, and it is entered for input that carries the
+    phrase — the second half is the control that proves the counter works. Cost
+    follows from the call count on every host, fast or loaded.
     """
     monkeypatch.setattr(builtin, "ui_console_advertisable", lambda: True)
     context = ToolContext(cwd=".", session_id="perf")
     clean = "progress: wrote 4096 bytes to out.bin\n" * 12000  # ~420 KB, no signature
+    scans = _count_signature_scans(monkeypatch)
 
-    start = time.perf_counter()
     notice = builtin._missing_tool_notice(clean, context)
-    elapsed = time.perf_counter() - start
 
     assert notice == ""
-    assert elapsed < 0.05, f"a signature-free stderr was scanned: {elapsed:.3f}s"
+    assert scans == [], "a signature-free stderr was scanned by the grammar arms"
+
+    # Control: the same bytes WITH the phrase reach the regex exactly once, so a
+    # counter that silently recorded nothing could not pass this test either.
+    assert builtin._missing_tool_notice(f"{clean}\nbash: nope: command not found\n", context)
+    assert len(scans) == 1, f"the signature scan ran {len(scans)} times for one phrase"
 
 
 @pytest.mark.asyncio

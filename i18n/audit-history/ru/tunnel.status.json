@@ -1,0 +1,31 @@
+{
+  "schema": 1,
+  "locale": "ru",
+  "namespace": "tunnel.status",
+  "history_sha256": "0de64c2959df7e3a70bf01781f39880b2ca11a4ee224151dd26f63ea5dcf96f1",
+  "entries": [
+    {
+      "locale": "ru",
+      "namespace": "tunnel.status",
+      "source_sha256": "e5e82a9ab8bc9bc5cfdf3d39d034056d822251f1d759582c8826b27c46d6218a",
+      "translator": {
+        "agent": "coder subagent (lopdev team) remediating PR #3931 round 1 — not an i18n-translator lane; its session id is named in neither the manager brief nor commit e95a77a5f3ac",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-13"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (lopdev team), independent `task` subagent, session 5469a14c00f5; did not translate or edit any value it judged",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-13",
+        "result": "passed",
+        "findings": 1,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "a1: independent i18n-auditor 5469a14c00f5 (anthropic/claude-opus-5-5) of coder-drafted copy (claude-opus-5-5): PASSED, 0 blocker/major, 1 minor/nit. Record i18n/audits/evidence/ru/tunnel.status/a1/record.json",
+      "evidence": "i18n/audits/evidence/ru/tunnel.status/a1/record.json",
+      "round": "a1",
+      "keys_audited": 13
+    }
+  ]
+}

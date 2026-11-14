@@ -231,8 +231,17 @@ def test_a_group_that_outlives_its_leader_is_reaped_with_no_bound_at_all(reap_ma
 
     result = _wrapper(["--", *_spawning_inner(token, linger=False)])
 
-    assert result.returncode == 0
-    assert _wait_until_gone(token) == [], "the leader exited and left its children running"
+    # STDERR IN THE MESSAGE (the #3368 precedent above, for the signal test): CI
+    # keeps only the assertion text, and pytest elides a CompletedProcess repr to
+    # its first and last ~100 characters. PR #3761 full-suite job 130208451068
+    # failed here with rc 126 -- the wrapper's EXIT_CLEANUP_UNPROVEN, not an exec
+    # failure -- and the elision cut the `[run_bounded] <phase> refused: <reason>`
+    # line, the only record of WHICH strict-cleanup proof was refused (the
+    # per-run JSON lives in the runner's tmp and is gone with it).
+    assert result.returncode == 0, f"rc={result.returncode}, stderr={result.stderr!r}"
+    assert (
+        _wait_until_gone(token) == []
+    ), f"the leader exited and left its children running; stderr={result.stderr!r}"
 
 
 @pytest.mark.parametrize("forwarded", [signal.SIGTERM, signal.SIGHUP])
@@ -708,10 +717,18 @@ if child == 0:
     null = os.open(os.devnull, os.O_RDWR)
     for fd in (0, 1, 2):
         os.dup2(null, fd)
+    # Publish the pid BEFORE allocating memory. Allocation/touching can cross
+    # the 120 MiB grant before the loop completes, and the wrapper's census
+    # (50 ms poll) may SIGKILL us then — so a pid written after
+    # the loop is lost whenever a sample lands in between (seen on loaded CI
+    # runners as FileNotFoundError on escaped.pid after rc 137). Writing first
+    # makes "pid observable" causally precede "over budget", so the stop can
+    # never outrun it, however slow the runner is.
+    with open(pidfile, "w") as fh:
+        fh.write(str(os.getpid()))
     buf = bytearray(240 * 1024 * 1024)
     for i in range(0, len(buf), 4096):
         buf[i] = 1
-    open(pidfile, "w").write(str(os.getpid()))
     time.sleep(60)
     os._exit(0)
 time.sleep(60)

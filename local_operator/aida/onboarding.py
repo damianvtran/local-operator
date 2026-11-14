@@ -617,7 +617,12 @@ def first_run_pending(config_dir: Path | str) -> bool:
     what makes "once per config root" true even if the store is wiped later.
     """
     try:
-        return fresh_install(config_dir) and not greeting_settled(config_dir)
+        # Ledger FIRST: a settled greeting answers False from one small file,
+        # while ``fresh_install`` opens every session's transcript. Same value
+        # either order (both are pure reads), but ``GET /v1/desktop/aida`` polls
+        # this, and on a 2,506-session store the scan cost seconds per poll for
+        # an answer the ledger already held.
+        return not greeting_settled(config_dir) and fresh_install(config_dir)
     except Exception:  # noqa: BLE001 — same posture as :func:`fresh_install`
         logger.warning("aida: first-run predicate failed", exc_info=True)
         return False

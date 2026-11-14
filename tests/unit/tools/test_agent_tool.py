@@ -97,7 +97,11 @@ def _edit_fields(**overrides: Any) -> AgentEditFields:
 
 
 async def call(context: ToolContext, **args) -> str:
-    result = await execute_agent("tc", args, None, None, context)
+    # Whole-field rewrites here model an agent that read the full ``show``
+    # (``_acked``); lossless editing itself is ``test_profile_autonomy``.
+    from tests.unit.session.test_account_profile_consent import _acked
+
+    result = await execute_agent("tc", _acked("agent", args, context), None, None, context)
     return result.text
 
 
@@ -209,10 +213,19 @@ async def test_search_finds_a_role_authored_a_moment_ago(context) -> None:
 
 @pytest.mark.asyncio
 async def test_show_returns_the_full_instructions(context) -> None:
+    """Long instructions come back page by page (``profile_text_edits`` rule 1),
+    not inline, so no replay bound can clip them -- packaged starters too."""
     body = await call(context, op="show", name="reviewer")
-    assert "instructions:" in body
-    assert "BLOCKER" in body
+    assert "instructions: NOT shown here" in body
     assert "not installed" in body
+    pages, part = [], 1
+    while True:
+        page = await call(context, op="show", name="reviewer", field="instructions", part=part)
+        pages.append(page.partition("\n---\n")[2])
+        if "last part" in page.partition("\n---\n")[0]:
+            break
+        part += 1
+    assert "BLOCKER" in "".join(pages)
 
 
 @pytest.mark.asyncio
@@ -2003,8 +2016,10 @@ async def test_an_account_update_with_consent_lands_and_keeps_the_origin(registr
     registry.global_registry.set_agent_system_prompt(row.id, "Original.")
     context, _ = _consenting(registry, origin="ask:42")
 
+    # An exact patch: a whole-field rewrite would need the read acknowledgement.
+    edit = {"field": "instructions", "old": "Original.", "new": "Changed."}
     result = await execute_agent(
-        "tc", {"op": "update", "name": "reviewer", "instructions": "Changed."}, None, None, context
+        "tc", {"op": "update", "name": "reviewer", "edits": [edit]}, None, None, context
     )
 
     assert not result.is_error

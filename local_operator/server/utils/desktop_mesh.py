@@ -746,6 +746,8 @@ def create_on_peer(
 
     implied_yolo = saved_tool_approval_is_auto(root)
 
+    from local_operator.network.relay import CREATE_CLIENT_BOUND_S
+
     def _create(yolo: bool) -> dict[str, Any]:
         # ONE BUILDER FOR BOTH ATTEMPTS, so the fallback differs in nothing but the
         # request itself. ``yolo`` is OMITTED when False — the attended body is
@@ -761,7 +763,9 @@ def create_on_peer(
             # PROMPTLESS create no longer waits for the spawn at all (the peer warms the
             # runtime in the background and answers with the id), so this budget is the
             # one that covers the prompt-ful case; see ``relay._op_session_create``.
-            timeout=120.0,
+            # ...plus the relay's confirm-by-key window after a lost reply
+            # (``relay.CREATE_CLIENT_BOUND_S``): giving up first loses the id.
+            timeout=CREATE_CLIENT_BOUND_S,
             **attempt,
         )
 

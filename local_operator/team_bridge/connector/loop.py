@@ -30,9 +30,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from local_operator.team_bridge.connector.batch_screen import (
     prescreen_conversation_refs,
@@ -149,6 +150,8 @@ _RETRY_ALONE_HOLD_CODES = frozenset(
         "model_refused",
         "reply_truncated",
         "parse_failed",
+        # A blank reply on every hop may be the body's doing too (2026-11-09).
+        "empty_reply",
         "bounce_without_category",
         # B4b: a converted work-scope bounce is the message's own doing too.
         "work_scope_hold",
@@ -257,6 +260,24 @@ _DIAGNOSTIC_FAILURE_CODES = frozenset(
 )
 
 
+#: A store refusal's ``code`` is a closed, machine-readable tag (snake_case)
+#: by contract; only that shape may ride a log line. Anything else could
+#: carry peer content, so it is dropped rather than written.
+_STORE_CODE_PATTERN = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
+
+
+def _store_code_suffix(failure: BaseException) -> str:
+    """`` store_code=<code>`` for a store refusal with a safe code, else ``"``."""
+    from local_operator.team_bridge.store import StoreRefused
+
+    if not isinstance(failure, StoreRefused):
+        return ""
+    code = getattr(failure, "code", None)
+    if isinstance(code, str) and _STORE_CODE_PATTERN.fullmatch(code):
+        return f" store_code={code}"
+    return ""
+
+
 def _log_delivery_failure(stage: str, failure: Exception) -> None:
     """Content-free diagnostic; the original exception still drives backoff."""
     code = getattr(failure, "code", None)
@@ -265,7 +286,8 @@ def _log_delivery_failure(stage: str, failure: Exception) -> None:
         if isinstance(code, str) and code in _DIAGNOSTIC_FAILURE_CODES
         else "unexpected_failure"
     )
-    logger.warning("bridge connector failure: stage=%s code=%s", stage, safe_code)
+    suffix = _store_code_suffix(failure) if safe_code == "unexpected_failure" else ""
+    logger.warning("bridge connector failure: stage=%s code=%s%s", stage, safe_code, suffix)
 
 
 def _iteration_failure_code(failure: BaseException) -> str:
@@ -368,6 +390,7 @@ async def retry_due_holds(
     auth_store: Any,
     settings: Any = None,
     limit: int = RETRY_BATCH_LIMIT,
+    review_holds: Literal["all", "skip", "only"] = "all",
 ) -> dict[str, Any]:
     """ONE bounded pass over DUE client-local holds (§13.4 retry-with-backoff).
 
@@ -394,13 +417,31 @@ async def retry_due_holds(
     Fail-closed: this path can never deliver or ack a held item itself; the
     spine's own laws decide (and a hold still never wakes). ``CancelledError``
     propagates — per-claim release lives in the spine's ``finally``.
+
+    ``review_holds`` partitions the OWNER-REVIEW class (``hold_release``'s
+    ``REVIEW_HOLD_CODES`` plus the work-scope hold): ``"all"`` (the default,
+    what every caller outside the loop uses) re-drives everything due;
+    ``"skip"`` leaves that class to a later pass; ``"only"`` does nothing but
+    it. The connector's iteration runs the two halves around the feed so a
+    review hold — which waits for a person, or for a delivery window up to
+    seven days — can never sit ahead of a message that just arrived. This is
+    ORDERING only: it never waives a hold, advances no retry and grants no
+    delivery authority.
     """
 
     import time as _time
 
     from local_operator.team_bridge.client import BridgeRefusal
+    from local_operator.team_bridge.hold_release import (
+        REVIEW_HOLD_CODES,
+        WORK_SCOPE_HOLD,
+    )
     from local_operator.team_bridge.store import Store, StoreRefused
 
+    # The owner-review class. ``work_scope_hold`` joins it because its release
+    # is the person's too (``hold_release.WORK_SCOPE_HOLD``): both wait on a
+    # decision or a window, never on this machine catching up.
+    review_codes = REVIEW_HOLD_CODES | {WORK_SCOPE_HOLD}
     store = Store(config_dir)
     _release_engaged_holds(store, owner, config_dir, now=_time.time())
     # The screener's bare ``bcmsg_`` duplicates go BEFORE the bounded read:
@@ -412,7 +453,13 @@ async def retry_due_holds(
         bare_retired = []  # fenced owner: the next live pass owns the rows
     for message_id in bare_retired:
         _RETRY_ATTEMPTS.pop(message_id, None)
-    due = store.due_screening_holds(owner, now=_time.time(), limit=limit)
+    due = store.due_screening_holds(
+        owner,
+        now=_time.time(),
+        limit=limit,
+        only_codes=review_codes if review_holds == "only" else None,
+        skip_codes=review_codes if review_holds == "skip" else (),
+    )
     # HELD MESSAGES ARE RE-SCREENED IN BATCHES TOO (PR #3400). A budget refill
     # makes a whole backlog due at once; re-driving it one model call per
     # message would spend one refilled unit per message and the backlog would
@@ -491,6 +538,10 @@ async def retry_due_holds(
                     # this re-drive releases the spine's own claim; under the
                     # park code that release would read as "done" and retire
                     # the only reference to the message.
+                    #
+                    # The re-code goes through ``StoreRefused`` handling of its
+                    # own (below) rather than ``_write_hold``: its refusal must
+                    # cancel the re-drive, not just skip a log line.
                     store.persist_hold(
                         owner,
                         message_id,
@@ -602,40 +653,41 @@ async def retry_due_holds(
             attempts = _RETRY_ATTEMPTS.get(message_id, 0)
             gap = min(RETRY_BASE_S * (2**attempts), RETRY_MAX_S)
             new_code = str(outcome.get("code") or "")[:64]
-            try:
-                # The row's code is what the owner sees (F8): a message first
-                # held ``open_chief_of_staff`` and then held for a NEW reason
-                # once the owner messaged the session must not keep telling
-                # them to message it. The row keeps its ``created_at`` (m9).
-                #
-                # An UPSERT, the same writer the ordinary ref path uses — not
-                # a conditional UPDATE (PR #3063 r7 matrix,
-                # ``cache_hit/none/rename+revoked/kill``): a re-drive that
-                # re-screens commits a receipt, and the receipt commit DELETES
-                # this message's hold row; the ACK the hub then refuses (a
-                # sender revoked while the device was off) came back as a hold
-                # with no row left to update, and the message was never
-                # retried. The spine said "hold" THIS pass, so writing the row
-                # can never resurrect a delivered message.
-                store.persist_hold(
-                    owner,
-                    message_id,
-                    new_code or "hold",
-                    retry_at=_hold_due(outcome.get("retry_at"), _time.time() + gap),
-                    # A conversation handler stamps its own tier; the pair
-                    # spine never does, and a pair message is addressed to this
-                    # agent by construction. Without this a pair row born from
-                    # a stale-claim park (no tier) stayed NULL and ranked last
-                    # for its whole retry life (#3400 R3-m1).
-                    tier=(
-                        outcome.get("tier")
-                        if parsed is not None
-                        else Store.SCREENING_TIER_ADDRESSED
-                    ),
-                    no_batch=bool(outcome.get("no_batch")),
-                )
-            except StoreRefused:
-                pass  # fenced owner: the next live pass owns the row
+            now = _time.time()
+            # The row's code is what the owner sees (F8): a message first held
+            # ``open_chief_of_staff`` and then held for a NEW reason once the
+            # owner messaged the session must not keep telling them to message
+            # it. The row keeps its ``created_at`` (m9). Written through the same
+            # UPSERT writer the ordinary ref path uses - not a conditional
+            # UPDATE (PR #3063 r7 matrix, ``cache_hit/none/rename+revoked/kill``):
+            # a re-drive that re-screens commits a receipt, and the receipt
+            # commit DELETES this message's hold row; the ACK the hub then refuses
+            # (a sender revoked while the device was off) came back as a hold with
+            # no row left to update, and the message was never retried. The spine
+            # said "hold" THIS pass, so writing the row can never resurrect a
+            # delivered message.
+            #
+            # Through ``_write_hold``: this is where most of the schedule's work
+            # happens, and it has to be in the same distribution as a first-time
+            # hold or that line measures only half the backoff.
+            _write_hold(
+                store,
+                owner,
+                message_id,
+                new_code or "hold",
+                due=_hold_due(outcome.get("retry_at"), now + gap),
+                attempts=attempts,
+                now=now,
+                # A conversation handler stamps its own tier; the pair
+                # spine never does, and a pair message is addressed to this
+                # agent by construction. Without this a pair row born from
+                # a stale-claim park (no tier) stayed NULL and ranked last
+                # for its whole retry life (#3400 R3-m1).
+                tier=(
+                    outcome.get("tier") if parsed is not None else Store.SCREENING_TIER_ADDRESSED
+                ),
+                no_batch=bool(outcome.get("no_batch")),
+            )
             _RETRY_ATTEMPTS[message_id] = min(attempts + 1, RETRY_MAX_ATTEMPTS)
         outcomes.append({"message_id": message_id, "action": action})
     if len(_RETRY_ATTEMPTS) > 512:
@@ -745,6 +797,67 @@ def _park_stale_claim(
     logger.info("bridge connector parked: stage=claim code=%s", HOLD_STALE_CLAIM)
 
 
+def _fold_retry_passes(first: dict[str, Any], second: dict[str, Any]) -> dict[str, Any]:
+    """One report for the iteration's two bounded retry passes.
+
+    The iteration runs the non-review half before the feed and the review half
+    after it (see ``_run_iteration_inner``); the result carries both, so the
+    iteration's own ``retries`` field keeps meaning "everything the retry
+    schedule did this turn" rather than silently half of it.
+    """
+
+    return {
+        "due": int(first.get("due", 0)) + int(second.get("due", 0)),
+        "outcomes": [*first.get("outcomes", ()), *second.get("outcomes", ())],
+    }
+
+
+def _write_hold(
+    store: Any,
+    owner: Any,
+    message_id: str,
+    code: str,
+    *,
+    due: float,
+    attempts: int,
+    now: float,
+    tier: Any = None,
+    no_batch: bool = False,
+) -> bool:
+    """Write/advance ONE hold row and record its schedule fact when it lands.
+
+    Every writer in this module that schedules a hold goes through here — the
+    feed paths (``_persist_hold_backoff``) and the re-drives inside
+    ``retry_due_holds`` — because the doubling gap lives in process memory and
+    this line is its only durable trace: without it the backoff can be judged
+    only by inference from hold ages, and the re-drives (most of the schedule's
+    actual work) were invisible.
+
+    Logged ONLY after the store accepted the write: a fenced owner's refused
+    write leaves no row, so a line for it would report a schedule that does not
+    exist. The code goes through ``closed_hold_code`` — a hub-supplied detail
+    after ``family:`` never reaches the log — and the line carries a code, a
+    count and a gap, never a message id or any content.
+
+    ``keep_existing`` parks (``_park_stale_claim``) deliberately keep their own
+    single line instead: they are not new schedule steps.
+    """
+
+    from local_operator.team_bridge.store import StoreRefused, closed_hold_code
+
+    try:
+        store.persist_hold(owner, message_id, code, retry_at=due, tier=tier, no_batch=no_batch)
+    except StoreRefused:
+        return False  # fenced owner: the next live pass owns the row
+    logger.info(
+        "bridge connector hold persisted: code=%s attempts=%d gap_s=%d",
+        closed_hold_code(code),
+        attempts,
+        max(0, int(due - now)),
+    )
+    return True
+
+
 def _persist_hold_backoff(
     store: Any,
     owner: Any,
@@ -765,16 +878,20 @@ def _persist_hold_backoff(
 
     import time as _time
 
-    from local_operator.team_bridge.store import StoreRefused
-
     attempts = _RETRY_ATTEMPTS.get(message_id, 0)
-    due = _hold_due(retry_at, _time.time() + min(RETRY_BASE_S * (2**attempts), RETRY_MAX_S))
-    try:
-        store.persist_hold(
-            owner, message_id, str(code)[:64] or "hold", retry_at=due, tier=tier, no_batch=no_batch
-        )
-    except StoreRefused:
-        pass  # fenced owner: the next live pass owns the row
+    now = _time.time()
+    due = _hold_due(retry_at, now + min(RETRY_BASE_S * (2**attempts), RETRY_MAX_S))
+    _write_hold(
+        store,
+        owner,
+        message_id,
+        str(code)[:64] or "hold",
+        due=due,
+        attempts=attempts,
+        now=now,
+        tier=tier,
+        no_batch=no_batch,
+    )
     _RETRY_ATTEMPTS[message_id] = min(attempts + 1, RETRY_MAX_ATTEMPTS)
 
 
@@ -883,15 +1000,27 @@ async def _run_iteration_inner(
     from local_operator.team_bridge import pull as _pull
     from local_operator.team_bridge.store import Store
 
-    # Held-item retries run FIRST and on every turn (their own `retry_at`
-    # gates them): a quarantine must not wait for fresh traffic to retry, and
-    # a 204 timeout is not a reason to skip it. Local metadata only.
+    # Held-item retries run on every turn (their own `retry_at` gates them): a
+    # quarantine must not wait for fresh traffic to retry, and a 204 timeout is
+    # not a reason to skip it. Local metadata only.
+    #
+    # FRESH WORK FIRST: the pass is split around the feed. This half SKIPS the
+    # OWNER-REVIEW class, which waits on a person (or on a delivery window up to
+    # seven days), so a burst of review holds can never spend a whole wake window
+    # before the message that just arrived is even pulled - a lid-closed Mac woke
+    # for ~10 s at a time and a fresh message waited behind five review holds.
+    # The review half runs after this iteration's pull and ref handling (and on
+    # the 204 path), so a window that closes during a quiet poll, or a pull that
+    # raises, DEFERS those re-drives to a later iteration rather than losing them.
+    # That is acceptable because a review re-drive can only re-notify the owner
+    # and only a person can clear the hold; nothing a receiver does advances it.
     retries = await retry_due_holds(
         owner,
         config_dir=config_dir,
         access=access,
         auth_store=auth_store,
         settings=settings,
+        review_holds="skip",
     )
     store = Store(config_dir)
     state = store.sync_state(owner)
@@ -912,12 +1041,24 @@ async def _run_iteration_inner(
     cursor = int(after) if batch is None else batch["cursor"]
     refs = _pull.drain_feed_refs(owner, config_dir=config_dir, upto_seq=cursor)
     if reissued and not refs:
+        # A 204 is not a reason to leave the review half unrun: with no fresh
+        # traffic it is the only thing this iteration does for held messages.
         return {
             "events": 0,
             "reissued": True,
             "resync": False,
             "handled": [],
-            "retries": retries,
+            "retries": _fold_retry_passes(
+                retries,
+                await retry_due_holds(
+                    owner,
+                    config_dir=config_dir,
+                    access=access,
+                    auth_store=auth_store,
+                    settings=settings,
+                    review_holds="only",
+                ),
+            ),
         }
     # H5e: the routing rule is stated ONCE (team_bridge.events) so the CoS
     # refresh consumer cannot drift from this loop: deliveries wake; the
@@ -1028,6 +1169,21 @@ async def _run_iteration_inner(
         return (conversation.encode() if conversation is not None else raw) in failed_refs
 
     store.delete_feed_refs(owner, [ref for ref in refs if not failed(ref)])
+    # OWNER-REVIEW HOLDS LAST, after this iteration's fresh work is consumed.
+    # Placed after the delete so a wake window that closes during a review
+    # re-drive cannot replay a ref this iteration already admitted; the review
+    # rows it did not reach are still due and the next wake picks them up.
+    retries = _fold_retry_passes(
+        retries,
+        await retry_due_holds(
+            owner,
+            config_dir=config_dir,
+            access=access,
+            auth_store=auth_store,
+            settings=settings,
+            review_holds="only",
+        ),
+    )
     if failures:
         raise failures[0][1]
     # A 204 is still NOT an inbox-resync signal. Keep the existing bootstrap /
@@ -1113,6 +1269,18 @@ async def run_forever(
             raise
         except Exception:  # noqa: BLE001
             logger.info("bridge connector: long-hold alert skipped code=hold_alert_failed")
+        # Retire the per-message review-hold inbox rows #3714 wrote, once per
+        # process per endpoint, so an inbox flooded before the upgrade clears
+        # without waiting for a new hold (operator report 2026-11-10). Here, not
+        # in the iteration, for the same reason as the alert: it needs no hub.
+        try:
+            from local_operator.team_bridge import hold_release
+
+            await asyncio.to_thread(hold_release.retire_review_notices_once, owner, config_dir)
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 — chrome; never stops the receiver
+            logger.info("bridge connector: review notice retire skipped code=failed")
         started = _time.monotonic()
         try:
             access = await access_provider()
@@ -1167,7 +1335,13 @@ async def run_forever(
                     budget=_failure_delay(failure, OWNER_RECHECK_S),
                 )
                 continue
-            logger.warning("bridge connector failure: stage=iteration code=%s", code)
+            # A store refusal outside the closed set names only its class
+            # above; its closed-shape code rides as ``store_code=`` so the
+            # refusal is diagnosable without ever logging the message. A
+            # code already in the closed set is the classification itself;
+            # repeating it as ``store_code=`` would only restate the line.
+            suffix = "" if code in _DIAGNOSTIC_FAILURE_CODES else _store_code_suffix(failure)
+            logger.warning("bridge connector failure: stage=iteration code=%s%s", code, suffix)
             await _pause(stop, _failure_delay(failure, backoff))
             backoff = min(backoff * 2.0, BACKOFF_MAX_S)
     return None

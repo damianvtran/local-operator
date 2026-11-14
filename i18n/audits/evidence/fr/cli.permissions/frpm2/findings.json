@@ -1,0 +1,67 @@
+{
+  "audit_id": "frpm2",
+  "findings": [
+    {
+      "id": "FRPM2-1",
+      "severity": "minor",
+      "key": "cli.permissions.setup.explain",
+      "current": "tout programme exécuté sous votre utilisateur macOS peut alors se servir de codesign…",
+      "problem": "« sous votre utilisateur macOS » calques ‘as your macOS user’; native fr is « sous votre compte utilisateur macOS ». Meaning survives; it is the key safety sentence, so it should read cleanly.",
+      "suggested": "tout programme exécuté sous votre compte utilisateur macOS peut alors se servir de codesign pour signer avec cette clé Developer ID sans rien demander."
+    },
+    {
+      "id": "FRPM2-2",
+      "severity": "minor",
+      "key": "cli.permissions.setup.explain",
+      "current": "Pour annuler, ouvrez Trousseaux d’accès, sélectionnez la clé privée de cette clé, puis retirez codesign dans Contrôle d’accès.",
+      "problem": "« la clé privée de cette clé » is a redundant calque of ‘the key's private key’ in a click instruction; « Pour annuler » reads as ‘to cancel’, not ‘to undo that choice’. Labels themselves are correct (Trousseaux d’accès, clé privée, Contrôle d’accès verified in Apple tables).",
+      "suggested": "Pour revenir sur ce choix, ouvrez Trousseaux d’accès, sélectionnez la clé privée de cette identité Developer ID, puis retirez codesign dans l’onglet Contrôle d’accès."
+    },
+    {
+      "id": "FRPM2-N1",
+      "severity": "nit",
+      "key": "cli.permissions.setup.explain",
+      "current": "Les prochains `lop update` lancés dans un terminal redemanderont ;",
+      "problem": "Intransitive « redemanderont » is colloquial.",
+      "suggested": "Les prochains `lop update` lancés dans un terminal reposeront la question ;"
+    },
+    {
+      "id": "FRPM2-N2",
+      "severity": "nit",
+      "key": "cli.permissions.setup.already_signed",
+      "current": "rien n’a donc été signé maintenant",
+      "problem": "« maintenant » with passé composé is stiff.",
+      "suggested": "rien n’a donc été signé cette fois-ci"
+    },
+    {
+      "id": "FRPM2-N3",
+      "severity": "nit",
+      "key": "cli.permissions.status.optin.unavailable",
+      "current": "…pour l’équipe {team}, qui n’est pas dans votre trousseau.",
+      "problem": "« qui » grammatically attaches to « l’équipe », not the key.",
+      "suggested": "Elle nécessite la clé « Developer ID Application » de l’éditeur de l’application de bureau (équipe {team}), absente de votre trousseau."
+    },
+    {
+      "id": "FRPM2-N4",
+      "severity": "nit",
+      "key": "cli.permissions.help.status",
+      "current": "Afficher l’identité qu’utilisent les runtimes et si l’enregistrement de l’écran est autorisé (lecture seule)",
+      "problem": "« Afficher … et si » is a slight zeugma.",
+      "suggested": "Afficher l’identité utilisée par les runtimes et indiquer si l’enregistrement de l’écran est autorisé (lecture seule)"
+    }
+  ],
+  "source_observations": [
+    {
+      "id": "FRPM2-S1",
+      "scope": "en source (not a fr finding)",
+      "key": "cli.permissions.status.scope + context note",
+      "detail": "On this Mac (macOS 27.2, 26B123) Privacy & Security names the Accessibility service ‘Device Control and Data Access’ (SecurityPrivacyExtension Localizable.loctable ACCESSIBILITY; fr ‘Contrôle de l’appareil et accès aux données’). en says ‘Accessibility’; fr ‘Accessibilité’ follows en and is right for macOS 15/26."
+    },
+    {
+      "id": "FRPM2-S2",
+      "scope": "en source/code (not a fr finding)",
+      "key": "cli.permissions.setup.already_signed",
+      "detail": "permissions_cli.py prints setup.already_signed whenever result.signed is False, even when kept is False; it then claims ‘Your earlier Always Allow answer is kept’ and also prints setup.done_allow_once. fr mirrors en faithfully."
+    }
+  ]
+}

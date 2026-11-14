@@ -59,30 +59,70 @@ Measured constraints, all of them the hard way:
   test "passes" and production then fails 100%. If you change this shape, loop
   your smoke test at least 20 times.
 
-ONE STABLE IMAGE PER PYTHON BUILD (the macOS privacy identity)
---------------------------------------------------------------
-macOS gate-keeps some resources per EXECUTABLE IMAGE PATH: an ad-hoc-signed
-binary is remembered by the path it was executed from plus its cdhash, so a
-second path is a second client and a second prompt. Measured on the operator's
-machine after a handful of updates: nine rows in App Management and Files &
-Folders — one per generation, plus the worktree venvs — because the branded
-hardlink lived at ``<venv>/bin/Local Operator`` and every new venv was a new
-path.
+ONE MACOS PRIVACY IDENTITY (bundle-wrapped runtime images)
+----------------------------------------------------------
+macOS's privacy database (TCC) keys a BARE Mach-O by the PATH it was executed
+from (plus its cdhash), so every new path is a new System Settings row and a
+new prompt. History: per-venv hardlinks (2026-10-09 → 10-18) made one row per
+generation and per worktree; one image per Python build (since 10-18) still
+made one row per Python build. ~13 "Local Operator" rows accumulated on the
+operator's host.
 
-The plant therefore builds ONE image per Python build and every venv links to
-it::
+Measured 2026-11-09 with tccd's ``AUTHREQ_SUBJECT`` (preflight only, child
+spawned disclaimed):
 
-    ~/.local/share/lop/runtime/<build-key>/bin/Local Operator   # APFS clone
-    ~/.local/share/lop/runtime/<build-key>/lib      -> <real>/../lib
-    ~/.local/share/lop/runtime/<build-key>/include  -> <real>/../include
-    <venv>/bin/Local Operator                       -> that image
+- the bare image, ad-hoc → subject is the PATH; signing a bare binary with
+  ``--identifier`` changes nothing (still the path);
+- the same bytes in ``X.app/Contents/MacOS/`` with a bound Info.plist → subject
+  is the BUNDLE ID, and an identical bundle at a second path is the SAME
+  subject; a non-``.app`` extension (``.lopruntime``) keys the same way;
+- a venv ``bin/Local Operator`` symlink to the bundle executable → subject is
+  the bundle id, ``sys.prefix`` is the venv, ``proc_pidpath`` is the bundle
+  executable.
+
+So every runtime image is now a bundle, and the row follows its id::
+
+    ~/.local/share/lop/runtime/<build-key>-<flavor>/
+        lib      -> <real>/../lib          # BESIDE the bundle, never inside
+        include  -> <real>/../include
+        source                             # the interpreter it was cloned from
+        image                              # "<size> <mtime_ns> <flavor> <id>"
+        Local Operator.lopruntime/Contents/
+            Info.plist                     # CFBundleIdentifier, LSBackgroundOnly
+            MacOS/Local Operator           # clone; LC_RPATH -> @loader_path/../../../lib
+            _CodeSignature/
+    <venv>/bin/Local Operator              -> …/MacOS/Local Operator
+
+Two flavors. ``adhoc`` (``com.local-operator.runtime``, "Local Operator
+Runtime") is what every spawn site plants: ad-hoc signing never reads a
+keychain, so it is safe on the session path and under an isolated ``HOME``.
+``team`` (``com.local-operator``, the desktop app's own id) is signed with the
+operator's Developer ID by :func:`publish_team_runtime` — only from ``lop
+update`` and ``lop permissions setup``, behind a recorded opt-in — and shares
+the APP's grant: one row for the app and every runtime (measured on the
+operator's host, see that function). A healthy team image is preferred; an
+ad-hoc image NEVER carries the app's id (a csreq mismatch could overwrite the
+app's grant). The disclaim and launchd ownership — what keeps runtimes alive
+when the UI dies — are untouched: they depend on process responsibility, not
+on the image's code identity, and no termination path in either repo selects a
+process by bundle id (``NSRunningApplication`` never lists a runtime; the
+bundle is never LaunchServices-registered).
+
+``lib`` sits beside the bundle and the interpreter's only ``LC_RPATH`` is
+rewritten in place (:func:`_rewrite_rpath`) because an out-of-bundle symlink in
+``Contents`` fails ``codesign --strict``; if a build's rpath does not fit, the
+ad-hoc flavor falls back to a ``Contents/lib`` link (still keyed by bundle id,
+not strict-clean) and the team flavor is refused. If the bundle cannot be
+built at all, the legacy ``<build-key>/bin/Local Operator`` image is published
+exactly as before — a cosmetic identity never fails a launch.
 
 ``<build-key>`` is ``<real.parent.parent.name>-<sha256(realpath, size,
 mtime_ns)[:10]>``: a new Python build is a new key, and a replaced interpreter
 cannot be mistaken for the one already published. Published directories are
 IMMUTABLE UNLESS CORRUPT and are never garbage-collected — a running process
-may still be executing one, and a key that is still on disk is one prompt that
-will not happen again. The one exception is a published directory whose image
+may still be executing one. A venv link naming the legacy image is stale and
+repoints at the bundle on its next start; the legacy tree itself stays on
+disk. The one exception to immutability is a published directory whose image
 fails the integrity check (:func:`_healthy_image`): nothing can be executing an
 image that cannot start, so it is replaced under the same key.
 
@@ -263,6 +303,40 @@ logger = logging.getLogger(__name__)
 #: created. A second inode nothing consumes is a maintenance liability and an
 #: extra staleness surface; add one only if a shebang consumer ever appears.
 BRAND = "Local Operator"
+
+#: The runtime image's bundle wrapper. TCC keys a bare Mach-O by PATH and a
+#: bundled one by ``CFBundleIdentifier`` (tccd ``AUTHREQ_SUBJECT``, measured
+#: 2026-11-09 — see "ONE MACOS PRIVACY IDENTITY" in the module docstring). The
+#: extension is deliberately NOT ``.app``: tccd still keys a ``.lopruntime`` by
+#: its bundle id, while LaunchServices never treats it as an application, so it
+#: is never registered, never offered by ``open -b``, and never an
+#: ``NSRunningApplication`` a bundle-id selector could pick (30+ execs measured,
+#: zero registrations).
+RUNTIME_BUNDLE_DIRNAME = "Local Operator.lopruntime"
+
+#: The desktop app's bundle id. Only a TEAM-SIGNED runtime may carry it: an
+#: image whose signature satisfies the app's designated requirement shares the
+#: app's privacy grant (one row). An AD-HOC image carrying it would collide
+#: with the app's row and a csreq mismatch can re-prompt and overwrite the
+#: APP's grant — that pairing is forbidden, and :func:`_bundle_identifier`
+#: is the one place that maps a flavor to an id so it cannot happen by typo.
+APP_BUNDLE_ID = "com.local-operator"
+
+#: The ad-hoc runtime's bundle id: "Local Operator Runtime", one row per host
+#: (re-toggled after a Python-build change, because an ad-hoc requirement is a
+#: cdhash). Never equal to :data:`APP_BUNDLE_ID`.
+RUNTIME_BUNDLE_ID = "com.local-operator.runtime"
+
+#: Display name of the ad-hoc runtime row in System Settings.
+RUNTIME_DISPLAY_NAME = "Local Operator Runtime"
+
+#: The two signing flavors of a runtime bundle, in PREFERENCE order. ``team``
+#: is published only by :func:`publish_team_runtime` (``lop update`` and
+#: ``lop permissions setup``, behind a recorded opt-in); ``adhoc`` is what the
+#: session path plants and never touches a keychain.
+FLAVOR_TEAM = "team"
+FLAVOR_ADHOC = "adhoc"
+_FLAVORS = (FLAVOR_TEAM, FLAVOR_ADHOC)
 
 #: ``p_comm`` holds 31 characters. ``ps -o ucomm`` truncates at 16, so a label
 #: must already be distinguishable within its first 16 characters. Both limits
@@ -597,6 +671,91 @@ def _real_interpreter_for(interpreter: str | os.PathLike[str]) -> Path | None:
 #: cloned from. See :func:`_source_for_image`.
 _SOURCE_MARKER = "source"
 
+#: Sidecar beside a bundle-flavor image: ``<size> <mtime_ns> <flavor>
+#: <identifier>`` of the SIGNED executable. The interpreter's size is no longer
+#: an integrity oracle for a bundle image — signing rewrites the signature
+#: blob (measured: an ad-hoc re-sign took a 49968-byte image to 49840) — so
+#: the bundle records its own final stat at publish time and health compares
+#: against that.
+_IMAGE_SIDECAR = "image"
+
+#: Beside a LEGACY ``<key>/`` tree: "the bundle flavor could not be built for
+#: this key". Without it a host whose bundle plant fails (no ``codesign``, a
+#: refusing filesystem) would retry the clone + sign on every startup, because
+#: the expected image would always be the unpublished bundle. Retried after
+#: :data:`_BUNDLE_RETRY_S`, so a transient failure (a full disk) heals.
+_BUNDLE_UNAVAILABLE = "bundle-unavailable"
+_BUNDLE_RETRY_S = 24 * 3600
+
+#: Absolute, never PATH-resolved: a ``codesign`` earlier on a session's PATH
+#: must not be what signs the shared runtime. Tests replace this attribute
+#: with a fake that records its argv.
+_CODESIGN = "/usr/bin/codesign"
+
+#: The interpreter's only ``LC_RPATH`` and its in-bundle replacement. From
+#: ``<key>/<bundle>/Contents/MacOS/`` three levels up is ``<key>/``, whose
+#: ``lib`` links the build's own ``lib``. 25 bytes + NUL fits the slot the
+#: 23-byte original occupies (load commands are 8-byte aligned, so that slot is
+#: 32 bytes); ``install_name_tool -add_rpath`` fails for lack of header pad,
+#: an in-place rewrite does not (measured). The rewrite is done here in Python
+#: rather than with ``install_name_tool`` because that tool is an Xcode
+#: Command Line Tools shim on a stock Mac — invoking it without the CLT
+#: installed raises the "install developer tools" dialog, which a startup path
+#: must never do.
+_RPATH_OLD = b"@executable_path/../lib"
+_RPATH_NEW = b"@loader_path/../../../lib"
+_LC_RPATH = 0x8000001C
+
+
+def _bundle_identifier(flavor: str) -> str:
+    """The ``CFBundleIdentifier`` for ``flavor``; ad-hoc NEVER gets the app's id."""
+    return APP_BUNDLE_ID if flavor == FLAVOR_TEAM else RUNTIME_BUNDLE_ID
+
+
+def _flavor_dir(root: Path, key: str, flavor: str) -> Path:
+    return root / f"{key}-{flavor}"
+
+
+def _bundle_image(root: Path, key: str, flavor: str) -> Path:
+    """``<root>/<key>-<flavor>/Local Operator.lopruntime/Contents/MacOS/Local Operator``."""
+    return _flavor_dir(root, key, flavor) / RUNTIME_BUNDLE_DIRNAME / "Contents" / "MacOS" / BRAND
+
+
+def _legacy_image(root: Path, key: str) -> Path:
+    """``<root>/<key>/bin/Local Operator`` — the pre-bundle, PATH-keyed shape."""
+    return root / key / "bin" / BRAND
+
+
+def _is_bundle_image(image: Path) -> bool:
+    """Does ``image`` sit at ``<home>/<bundle>/Contents/MacOS/<BRAND>``?"""
+    parents = image.parents
+    return (
+        len(parents) > 3
+        and image.name == BRAND
+        and parents[0].name == "MacOS"
+        and parents[1].name == "Contents"
+        and parents[2].name == RUNTIME_BUNDLE_DIRNAME
+    )
+
+
+def _image_home(image: Path) -> Path:
+    """The directory holding an image's ``lib``/``source``/``image`` sidecars.
+
+    Depth 4 for a bundle image (``<home>/<bundle>/Contents/MacOS/<BRAND>``),
+    depth 2 for every other shape (``<home>/bin/<BRAND>``, and a venv's own
+    ``bin/`` for the hardlink rung) — the rule this module always had.
+    """
+    return image.parents[3] if _is_bundle_image(image) else image.parent.parent
+
+
+def _bundle_flavor(image: Path) -> str | None:
+    """The flavor recorded in a bundle image's sidecar, or ``None``."""
+    try:
+        fields = (_image_home(image) / _IMAGE_SIDECAR).read_text(encoding="utf-8").split()
+    except (OSError, ValueError):
+        return None
+    return fields[2] if len(fields) >= 4 and fields[2] in _FLAVORS else None
+
 
 def _under(root: Path, path: Path) -> bool:
     """True when ``path`` is ``root`` or lies beneath it; both already resolved."""
@@ -645,10 +804,13 @@ def _source_for_image(path: Path) -> Path | None:
         published = Path(os.path.realpath(root))
     except OSError:
         return None
-    if image.name != BRAND or not _under(published, image.parent.parent):
+    # Depth 4 for a bundle image, 2 for the legacy ``<key>/bin`` shape: the
+    # marker lives in the build-key directory either way.
+    home = _image_home(image)
+    if image.name != BRAND or not _under(published, home):
         return None
     try:
-        recorded = Path((image.parent.parent / _SOURCE_MARKER).read_text(encoding="utf-8").strip())
+        recorded = Path((home / _SOURCE_MARKER).read_text(encoding="utf-8").strip())
     except (OSError, ValueError):
         return None
     try:
@@ -731,11 +893,48 @@ def _build_key(real: Path) -> str:
 
 
 def runtime_image(real: Path) -> Path | None:
-    """The stable image path for ``real``, whether or not it is planted yet."""
+    """The image a venv link for ``real`` SHOULD name, whether or not it is planted.
+
+    The selection, in order:
+
+    1. a healthy ``team`` bundle (``com.local-operator``, the app's own row) —
+       published only by :func:`publish_team_runtime`, so its presence IS the
+       recorded opt-in having taken effect;
+    2. the ``adhoc`` bundle (``com.local-operator.runtime``) — healthy or
+       not yet planted, it is what the session-path plant builds;
+    3. the legacy ``<key>/bin`` image, ONLY when a recent bundle attempt for
+       this key recorded that the bundle cannot be built here. Without that
+       marker a legacy link is stale, which is how an existing venv link
+       repoints at the bundle on its next start.
+
+    Steady-state cost on top of the key: one ``lexists`` for the team tree
+    (absent on almost every host) and the adhoc health check.
+    """
     root = runtime_root()
     if root is None:
         return None
-    return root / _build_key(real) / "bin" / BRAND
+    key = _build_key(real)
+    team = _bundle_image(root, key, FLAVOR_TEAM)
+    if os.path.lexists(_flavor_dir(root, key, FLAVOR_TEAM)) and _healthy_image(team, real):
+        return team
+    adhoc = _bundle_image(root, key, FLAVOR_ADHOC)
+    if _healthy_image(adhoc, real):
+        return adhoc
+    legacy = _legacy_image(root, key)
+    if _bundle_recently_unavailable(root, key) and _healthy_image(legacy, real):
+        return legacy
+    return adhoc
+
+
+def _bundle_recently_unavailable(root: Path, key: str) -> bool:
+    """Did a bundle plant for ``key`` fail within :data:`_BUNDLE_RETRY_S`?"""
+    import time
+
+    try:
+        stamp = (root / key / _BUNDLE_UNAVAILABLE).stat().st_mtime
+    except OSError:
+        return False
+    return time.time() - stamp < _BUNDLE_RETRY_S
 
 
 def _is_framework_build(real: Path) -> bool:
@@ -792,7 +991,11 @@ def _stdlib_through(image: Path) -> bool:
     our code runs.
     """
     try:
-        lib = image.parent.parent / "lib"
+        # A bundle image's ``lib`` sits beside the BUNDLE, in the build-key
+        # directory (``@loader_path/../../../lib``), never inside it: an
+        # out-of-bundle symlink in ``Contents`` fails ``codesign --strict``
+        # ("invalid destination for symbolic link in bundle", measured).
+        lib = _image_home(image) / "lib"
         return any(
             (entry / "encodings" / "__init__.py").is_file() for entry in lib.glob("python3*")
         )
@@ -836,8 +1039,25 @@ def _intact_copy(resolved: Path, real: Path | None) -> bool:
     them. Size and mtime catch an overwrite (a clone keeps its source's mtime,
     and a write stamps a new one); the Mach-O magic catches one whose size and
     mtime were put back, such as an equal-length script.
+
+    A BUNDLE image answers to its own sidecar instead of ``real``: signing
+    rewrote its bytes, so the interpreter's size and mtime are no longer what
+    an intact image has. A bundle with no readable sidecar is unhealthy — the
+    sidecar is the last thing a plant writes before publishing, so its absence
+    means a tree this module did not finish.
     """
-    if real is not None:
+    if _is_bundle_image(resolved):
+        try:
+            fields = (_image_home(resolved) / _IMAGE_SIDECAR).read_text(encoding="utf-8").split()
+            size, mtime_ns = int(fields[0]), int(fields[1])
+        except (IndexError, ValueError):
+            return False
+        image_stat = resolved.stat()
+        if image_stat.st_size != size:
+            return False
+        if abs(image_stat.st_mtime_ns - mtime_ns) >= _MTIME_SLACK_NS:
+            return False
+    elif real is not None:
         image_stat = resolved.stat()
         real_stat = real.stat()
         if image_stat.st_size != real_stat.st_size:
@@ -1275,67 +1495,637 @@ def _plant_runtime(real: Path, root: Path | None) -> Path | None:
     die in dyld. Either way the hardlink rung is the honest answer, so this
     returns ``None`` rather than publishing an image that aborts.
     """
-    import shutil
-
     try:
         if root is None:
             return None
         key = _build_key(real)
-        image = root / key / "bin" / BRAND
-        if _healthy_image(image, real):
+        team = _bundle_image(root, key, FLAVOR_TEAM)
+        if os.path.lexists(_flavor_dir(root, key, FLAVOR_TEAM)) and _healthy_image(team, real):
+            # Published by ``publish_team_runtime`` after the operator opted in;
+            # it shares the app's row, so it outranks anything planted here.
+            return team
+        image = _publish_tree(
+            real,
+            root,
+            _flavor_dir(root, key, FLAVOR_ADHOC).name,
+            _bundle_image(root, key, FLAVOR_ADHOC),
+            lambda staging, base: _populate_bundle(staging, real, base, FLAVOR_ADHOC, _sign_adhoc),
+        )
+        if image is not None:
             return image
-        if not _stdlib_through(real):
-            return None
-        base = real.parent.parent
-        name = _libpython_name_for(real)
-        if name is not None and not (base / "lib" / name).is_file():
-            return None
-        root.mkdir(parents=True, exist_ok=True)
-        # Ask before sweeping: a sweep forks a process (``procstate`` runs
-        # ``ps`` for its zombie probe) and this runs inside a spawn path. With
-        # no staging directory there is nothing to reclaim, and the common
-        # fresh plant must not pay for a probe of the machine.
-        if _has_plant_scratch(root):
-            _sweep_orphan_plants(root)
-        staging = root / f"{key}.tmp.{os.getpid()}.{_temp_thread_token()}"
-        try:
-            (staging / "bin").mkdir(parents=True)
-            _clone_or_copy(real, staging / "bin" / BRAND)
-            _write_source_marker(staging, real)
-            # The stdlib and the dylib are both resolved relative to the IMAGE
-            # directory, so both must resolve back into the interpreter's own
-            # tree. ``include`` is only needed by a build that ships headers.
-            os.symlink(base / "lib", staging / "lib")
-            if (base / "include").is_dir():
-                os.symlink(base / "include", staging / "include")
-        except OSError:
-            # A FAILED BUILD IS NOT A PUBLISHED IMAGE. This block used to fall
-            # through to the corrupt-directory branch below, which ``rename``d a
-            # staging tree holding an empty ``bin/`` (or a half-written clone,
-            # on ENOSPC) onto the build key. Nothing could ever call it healthy,
-            # but it published a key a reader can see and sent the next planter
-            # down the corrupt-repair path for a directory that never held an
-            # image. Remove it and answer rung 2.
-            shutil.rmtree(staging, ignore_errors=True)
-            return image if _healthy_image(image, real) else None
-        try:
-            os.rename(staging, root / key)
-        except OSError:
-            if _healthy_image(image, real):
-                # A concurrent planter published it first, and it is good.
-                shutil.rmtree(staging, ignore_errors=True)
-                return image
-            # The published directory is CORRUPT (a truncated or replaced
-            # image), not a race winner. Published directories are immutable
-            # unless corrupt: an image that does not execute cannot have a live
-            # process behind it, so it is ours to replace instead of downgrading
-            # every venv of this build to the fallback for the life of the
-            # machine.
-            return _replace_corrupt(root, key, staging, image, real)
-        return _settled_image(image, real)
+        # TODAY'S SHAPE IS THE FALLBACK, never a failed launch: the bundle could
+        # not be built (no ``codesign``, an unsigned-able filesystem, a Mach-O
+        # whose rpath we cannot place), so the PATH-keyed image is published
+        # exactly as before and the key is marked so the next start does not
+        # pay for the same failed attempt.
+        legacy = _publish_tree(
+            real,
+            root,
+            key,
+            _legacy_image(root, key),
+            lambda staging, base: _populate_legacy(staging, real, base),
+        )
+        if legacy is not None:
+            _mark_bundle_unavailable(root, key)
+        return legacy
     except Exception:  # noqa: BLE001 — rung 2 exists for exactly this
         logger.debug("runtime image unavailable", exc_info=True)
         return None
+
+
+def _mark_bundle_unavailable(root: Path, key: str) -> None:
+    try:
+        (root / key / _BUNDLE_UNAVAILABLE).write_text("", encoding="utf-8")
+    except OSError:
+        logger.debug("could not record a bundle failure", exc_info=True)
+
+
+def _populate_legacy(staging: Path, real: Path, base: Path) -> None:
+    """The pre-bundle tree: ``bin/<BRAND>`` clone plus ``lib``/``include`` links."""
+    # Darwin-only by construction (every caller is behind a darwin check), but
+    # restated here so the static cross-platform scan sees the guard at the
+    # ``os.symlink`` calls below: raising lands in ``_publish_tree``'s failure
+    # path, which never publishes a partial tree.
+    if sys.platform != "darwin":
+        raise OSError("runtime trees are built on macOS only")
+    (staging / "bin").mkdir(parents=True)
+    _clone_or_copy(real, staging / "bin" / BRAND)
+    _write_source_marker(staging, real)
+    # The stdlib and the dylib are both resolved relative to the IMAGE
+    # directory, so both must resolve back into the interpreter's own
+    # tree. ``include`` is only needed by a build that ships headers.
+    os.symlink(base / "lib", staging / "lib")
+    if (base / "include").is_dir():
+        os.symlink(base / "include", staging / "include")
+
+
+def _publish_tree(
+    real: Path,
+    root: Path,
+    dirname: str,
+    image: Path,
+    populate,  # Callable[[Path, Path], None]; raises on any failure
+) -> Path | None:
+    """Build ``root/dirname`` in staging with ``populate`` and publish it by rename.
+
+    The one publish protocol for every runtime tree shape (legacy and both
+    bundle flavors): a private staging directory, one ``os.rename``, a loser of
+    the race adopts the winner, a CORRUPT published tree is swapped aside.
+    ``image`` is the executable inside the published tree.
+    """
+    import shutil
+
+    if _healthy_image(image, real):
+        return image
+    if not _stdlib_through(real):
+        return None
+    base = real.parent.parent
+    name = _libpython_name_for(real)
+    if name is not None and not (base / "lib" / name).is_file():
+        return None
+    root.mkdir(parents=True, exist_ok=True)
+    # Ask before sweeping: a sweep forks a process (``procstate`` runs
+    # ``ps`` for its zombie probe) and this runs inside a spawn path. With
+    # no staging directory there is nothing to reclaim, and the common
+    # fresh plant must not pay for a probe of the machine.
+    if _has_plant_scratch(root):
+        _sweep_orphan_plants(root)
+    staging = root / f"{dirname}.tmp.{os.getpid()}.{_temp_thread_token()}"
+    try:
+        staging.mkdir(parents=True)
+        populate(staging, base)
+    except Exception:  # noqa: BLE001 — a failed build (OSError, codesign) is never published
+        # A FAILED BUILD IS NOT A PUBLISHED IMAGE. This block used to fall
+        # through to the corrupt-directory branch below, which ``rename``d a
+        # staging tree holding an empty ``bin/`` (or a half-written clone,
+        # on ENOSPC) onto the build key. Nothing could ever call it healthy,
+        # but it published a key a reader can see and sent the next planter
+        # down the corrupt-repair path for a directory that never held an
+        # image. Remove it and answer rung 2.
+        logger.debug("runtime tree %s not built", dirname, exc_info=True)
+        shutil.rmtree(staging, ignore_errors=True)
+        return image if _healthy_image(image, real) else None
+    try:
+        os.rename(staging, root / dirname)
+    except OSError:
+        if _healthy_image(image, real):
+            # A concurrent planter published it first, and it is good.
+            shutil.rmtree(staging, ignore_errors=True)
+            return image
+        # The published directory is CORRUPT (a truncated or replaced
+        # image), not a race winner. Published directories are immutable
+        # unless corrupt: an image that does not execute cannot have a live
+        # process behind it, so it is ours to replace instead of downgrading
+        # every venv of this build to the fallback for the life of the
+        # machine.
+        return _replace_corrupt(root, dirname, staging, image, real)
+    return _settled_image(image, real)
+
+
+def _rewrite_rpath(exe: Path) -> bool:
+    """Rewrite ``exe``'s ``LC_RPATH`` in place to reach ``lib`` beside the bundle.
+
+    True when every Mach-O slice had the expected ``@executable_path/../lib``
+    and the replacement fit its load command; False (nothing written) for any
+    other shape, which sends the caller to the in-bundle ``Contents/lib``
+    fallback. Writes only into ``exe``, which is a CLONE this plant created
+    (its own inode, checked), never the interpreter — the 2026-09-18 incident
+    (a write through a shared name truncated a machine-wide interpreter) is why
+    the link count is asserted before opening it for writing.
+    """
+    import struct
+
+    if os.stat(exe).st_nlink != 1:
+        return False
+    data = bytearray(exe.read_bytes())
+    slices: list[int] = []
+    magic = bytes(data[:4])
+    if magic in (bytes.fromhex("cafebabe"), bytes.fromhex("cafebabf")):
+        wide = magic == bytes.fromhex("cafebabf")
+        (count,) = struct.unpack_from(">I", data, 4)
+        entry = 32 if wide else 20
+        for index in range(count):
+            at = 8 + index * entry
+            offset = struct.unpack_from(">Q" if wide else ">I", data, at + 8)[0]
+            slices.append(int(offset))
+    else:
+        slices.append(0)
+    edits: list[tuple[int, bytes]] = []
+    for base in slices:
+        head = bytes(data[base : base + 4])
+        if head == bytes.fromhex("cffaedfe"):
+            endian, header = "<", 32
+        elif head == bytes.fromhex("feedfacf"):
+            endian, header = ">", 32
+        elif head == bytes.fromhex("cefaedfe"):
+            endian, header = "<", 28
+        elif head == bytes.fromhex("feedface"):
+            endian, header = ">", 28
+        else:
+            return False
+        (ncmds,) = struct.unpack_from(f"{endian}I", data, base + 16)
+        cursor = base + header
+        found = False
+        for _ in range(ncmds):
+            cmd, size = struct.unpack_from(f"{endian}II", data, cursor)
+            if cmd == _LC_RPATH:
+                (str_off,) = struct.unpack_from(f"{endian}I", data, cursor + 8)
+                start, stop = cursor + str_off, cursor + size
+                current = bytes(data[start:stop]).split(b"\0", 1)[0]
+                if current != _RPATH_OLD:
+                    return False  # an rpath we did not expect: do not guess
+                if len(_RPATH_NEW) + 1 > stop - start:
+                    return False  # does not fit the slot: the fallback shape
+                edits.append((start, _RPATH_NEW.ljust(stop - start, b"\0")))
+                found = True
+            if size <= 0:
+                return False
+            cursor += size
+        if not found:
+            return False
+    for start, payload in edits:
+        data[start : start + len(payload)] = payload
+    with open(exe, "r+b") as handle:
+        handle.write(data)
+    return True
+
+
+def _write_info_plist(contents: Path, flavor: str) -> None:
+    """The bundle's Info.plist; ``CFBundleIdentifier`` from :func:`_bundle_identifier`.
+
+    ``CFBundleShortVersionString`` is ``0`` so LaunchServices would rank this
+    below the real app even if an indexer ever registered it, and
+    ``LSBackgroundOnly``/``LSUIElement`` keep it out of the Dock and the
+    app switcher. ``CFBundleExecutable`` is the brand, so ``p_comm`` and
+    Activity Monitor keep saying "Local Operator".
+    """
+    import plistlib
+
+    display = BRAND if flavor == FLAVOR_TEAM else RUNTIME_DISPLAY_NAME
+    info = {
+        "CFBundleIdentifier": _bundle_identifier(flavor),
+        "CFBundleExecutable": BRAND,
+        "CFBundleName": display,
+        "CFBundleDisplayName": display,
+        "CFBundlePackageType": "APPL",
+        "CFBundleShortVersionString": "0",
+        "CFBundleVersion": "0",
+        "CFBundleInfoDictionaryVersion": "6.0",
+        "LSUIElement": True,
+        "LSBackgroundOnly": True,
+    }
+    with open(contents / "Info.plist", "wb") as handle:
+        plistlib.dump(info, handle)
+
+
+def _codesign_run(*args: str) -> tuple[bool, str]:
+    """Run ``codesign`` with ``args``: ``(ok, last stderr line)``. Bounded, stdin closed.
+
+    The stderr line is kept because ``lop permissions setup`` shows it when a
+    Developer ID signature fails: without it the operator only learned that
+    signing "did not finish" and the cause lived in a debug log (UX round 1, U5).
+    """
+    import subprocess
+
+    try:
+        result = subprocess.run(
+            [_CODESIGN, *args],
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            timeout=120,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        logger.debug("codesign could not run", exc_info=True)
+        return False, str(exc)
+    if result.returncode != 0:
+        logger.debug("codesign %s failed: %s", args[:-1], result.stderr[-400:])
+        lines = [
+            line.strip()
+            for line in (result.stderr or b"").decode("utf-8", "replace").splitlines()
+            if line.strip()
+        ]
+        return False, (lines[-1] if lines else f"codesign exited {result.returncode}")
+    return True, ""
+
+
+def _codesign(*args: str) -> bool:
+    """Run ``codesign`` with ``args``; True on exit 0. Bounded, stdin closed."""
+    return _codesign_run(*args)[0]
+
+
+def _sign_adhoc(bundle: Path) -> bool:
+    """Ad-hoc sign: ``--sign -`` NEVER reads a keychain, so it can run anywhere.
+
+    0.11 s measured. This is the only signing the session path ever does.
+    """
+    return _codesign("--force", "--sign", "-", "--identifier", RUNTIME_BUNDLE_ID, str(bundle))
+
+
+def _populate_bundle(staging: Path, real: Path, base: Path, flavor: str, sign) -> None:
+    """Build ``<staging>/Local Operator.lopruntime`` signed as ``flavor``; raise on failure.
+
+    Order matters: every byte change (rpath, plist) happens BEFORE signing,
+    and the sidecar is written last from the signed image's own stat, so a
+    tree is healthy only once it is complete.
+    """
+    # Darwin-only by construction (every caller is behind a darwin check), but
+    # restated here so the static cross-platform scan sees the guard at the
+    # ``os.symlink`` calls below: raising lands in ``_publish_tree``'s failure
+    # path, which never publishes a partial tree.
+    if sys.platform != "darwin":
+        raise OSError("runtime trees are built on macOS only")
+    _write_source_marker(staging, real)
+    # ``lib`` beside the bundle, never inside it (``--strict``, see
+    # ``_RPATH_NEW``); ``include`` as the legacy shape has it.
+    os.symlink(base / "lib", staging / "lib")
+    if (base / "include").is_dir():
+        os.symlink(base / "include", staging / "include")
+    bundle = staging / RUNTIME_BUNDLE_DIRNAME
+    contents = bundle / "Contents"
+    (contents / "MacOS").mkdir(parents=True)
+    exe = contents / "MacOS" / BRAND
+    _clone_or_copy(real, exe)
+    if not _rewrite_rpath(exe):
+        if flavor == FLAVOR_TEAM:
+            # The fallback below fails ``codesign --strict``, and the team
+            # image is verified strictly against the app's requirement.
+            raise OSError("rpath rewrite did not fit; no team image for this build")
+        # Still keyed by bundle id (measured), just not ``--strict`` clean.
+        os.symlink(base / "lib", contents / "lib")
+    _write_info_plist(contents, flavor)
+    if not sign(bundle):
+        raise OSError(f"codesign refused the {flavor} runtime bundle")
+    stat = exe.stat()
+    (staging / _IMAGE_SIDECAR).write_text(
+        f"{stat.st_size} {stat.st_mtime_ns} {flavor} {_bundle_identifier(flavor)}\n",
+        encoding="utf-8",
+    )
+
+
+#: The opt-in record ``lop permissions setup`` writes, under the config dir.
+#: ``{"identity": <SHA-1>, "team": <TeamIdentifier>, "always_allow_confirmed":
+#: bool}``. Its existence IS the consent to team signing: nothing else writes
+#: it, and :func:`publish_team_runtime` is a no-op without it.
+SIGNING_OPTIN_FILENAME = "runtime-signing.json"
+
+#: Where the desktop app may be installed; the first that exists is the one
+#: whose TeamIdentifier and designated requirement the team image must meet.
+_APP_CANDIDATES = ("/Applications/Local Operator.app", "~/Applications/Local Operator.app")
+
+
+def _passwd_home() -> Path | None:
+    try:
+        import pwd
+
+        home = Path(pwd.getpwuid(os.getuid()).pw_dir)
+    except Exception:  # noqa: BLE001 — no passwd entry: nowhere legitimate to sign for
+        return None
+    return home if home.is_absolute() else None
+
+
+def team_signing_refusal() -> str | None:
+    """Why team signing may NOT run in this process, or ``None`` when it may.
+
+    Machine codes (``not-darwin``, ``isolated-home``, ``runtime-root-override``,
+    ``config-dir-override``), never prose: the CLI renders them. Every guard
+    exists to keep a Developer ID signature — and the keychain dialog it can
+    raise — out of tests, sandboxes and rigs: an isolated ``HOME`` has no
+    login keychain, and macOS answers a keychain lookup there by asking the
+    operator to CREATE one (the measured 2026-09-18 rig incident).
+    """
+    if sys.platform != "darwin":
+        return "not-darwin"
+    home = _passwd_home()
+    if home is None or os.path.realpath(os.environ.get("HOME", "")) != os.path.realpath(home):
+        return "isolated-home"
+    if os.environ.get("LOCAL_OPERATOR_RUNTIME_ROOT"):
+        return "runtime-root-override"
+    config = os.environ.get("LOCAL_OPERATOR_CONFIG_DIR")
+    # Some launchers export the DEFAULT config dir explicitly (``paths.py``);
+    # only a relocated one is an isolated run.
+    if config and os.path.realpath(config) != os.path.realpath(home / ".local-operator"):
+        return "config-dir-override"
+    return None
+
+
+def _optin_path() -> Path | None:
+    home = _passwd_home()
+    return None if home is None else home / ".local-operator" / SIGNING_OPTIN_FILENAME
+
+
+def read_signing_optin() -> dict[str, object] | None:
+    """The recorded team-signing opt-in, validated, or ``None``."""
+    import json
+    import re
+
+    path = _optin_path()
+    if path is None:
+        return None
+    try:
+        record = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(record, dict):
+        return None
+    identity, team = record.get("identity"), record.get("team")
+    # A SHA-1 and a 10-character team id, nothing else: the identity is
+    # passed to codesign as an argument and must never be a name that could
+    # match some other certificate in the keychain.
+    if not isinstance(identity, str) or not re.fullmatch(r"[0-9A-F]{40}", identity):
+        return None
+    if not isinstance(team, str) or not re.fullmatch(r"[A-Z0-9]{10}", team):
+        return None
+    return record
+
+
+def write_signing_optin(identity: str, team: str, *, always_allow_confirmed: bool) -> Path:
+    """Record the opt-in. Called ONLY by ``lop permissions setup``; raises on failure."""
+    import json
+
+    path = _optin_path()
+    if path is None:
+        raise OSError("no passwd home")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "identity": identity.upper(),
+        "team": team,
+        "always_allow_confirmed": bool(always_allow_confirmed),
+    }
+    path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    return path
+
+
+def installed_app() -> Path | None:
+    """The installed desktop app bundle, or ``None``."""
+    for candidate in _APP_CANDIDATES:
+        path = Path(candidate).expanduser()
+        if path.is_dir():
+            return path
+    return None
+
+
+def _codesign_output(*args: str) -> tuple[int, str]:
+    """``codesign`` with ``args``; ``(returncode, stdout+stderr)``. Never raises."""
+    import subprocess
+
+    try:
+        result = subprocess.run(
+            [_CODESIGN, *args],
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return -1, ""
+    return result.returncode, (result.stdout or "") + (result.stderr or "")
+
+
+def code_identity(path: Path) -> dict[str, str]:
+    """``Identifier``/``TeamIdentifier``/``Signature`` of signed code at ``path``.
+
+    ``codesign -d`` reads the embedded signature only; it never touches a
+    keychain, so it is safe on any path, including ``lop permissions status``.
+    """
+    rc, text = _codesign_output("-d", "--verbose=2", str(path))
+    found: dict[str, str] = {}
+    if rc != 0:
+        return found
+    for line in text.splitlines():
+        name, sep, value = line.partition("=")
+        if sep and name in {"Identifier", "TeamIdentifier", "Signature", "Authority"}:
+            found.setdefault(name, value.strip())
+    return found
+
+
+def app_requirement(app: Path) -> str | None:
+    """The app's designated requirement text (``codesign -d -r-``), or ``None``."""
+    rc, text = _codesign_output("-d", "-r-", str(app))
+    if rc != 0:
+        return None
+    for line in text.splitlines():
+        if line.startswith("designated => "):
+            return line[len("designated => ") :].strip() or None
+    return None
+
+
+class TeamPublish:
+    """What :func:`publish_team_runtime_result` did, for callers that report it.
+
+    ``image`` is the team image (or ``None``). ``signed`` is True only when
+    THIS call ran a Developer ID signature — setup asks the "Always Allow"
+    question only then, because an image that already existed exercised no
+    keychain ACL (review round 1, R4). ``reason`` is a machine code for why no
+    image came back (``None`` on success); ``detail`` carries codesign's own
+    error line for ``signing-failed``.
+    """
+
+    # A plain class, not ``typing.NamedTuple``: this module sits on the
+    # interpreter's startup path and imports nothing beyond the stdlib core.
+    __slots__ = ("image", "signed", "reason", "detail")
+
+    def __init__(
+        self,
+        image: Path | None,
+        *,
+        signed: bool = False,
+        reason: str | None = None,
+        detail: str = "",
+    ) -> None:
+        self.image = image
+        self.signed = signed
+        self.reason = reason
+        self.detail = detail
+
+    def __repr__(self) -> str:
+        return (
+            f"TeamPublish(image={self.image!r}, signed={self.signed!r}, "
+            f"reason={self.reason!r}, detail={self.detail!r})"
+        )
+
+
+def publish_team_runtime(
+    interpreter: str | os.PathLike[str], *, interactive: bool = False, allow_prompt: bool = False
+) -> Path | None:
+    """Publish the TEAM-signed bundle (``com.local-operator``) for ``interpreter``'s build.
+
+    WHY: an image signed by the app's own team whose identifier is the app's
+    satisfies the app's designated requirement, and tccd then answers the
+    runtime with the APP's grant — one row shared by the desktop app and every
+    runtime. Measured on the operator's host 2026-11-09 (§6 consent check): the
+    disclaimed probe's tccd request read ``requesting={identifier=
+    com.local-operator, binary_path=…/Local Operator.lopruntime/Contents/MacOS/
+    Local Operator}`` with no responsible app, ``subject=com.local-operator``,
+    ``authValue=2``. Runtimes keep their own process identity (disclaimed or
+    launchd-owned), so sharing the grant adds no kill path from the UI.
+
+    NEVER on the session path. Only ``lop update`` (before the flip) and
+    ``lop permissions setup`` call this, because a Developer ID signature may
+    raise the keychain dialog. ``interactive`` is True only from setup.
+    Otherwise it signs only when the operator recorded that they chose
+    "Always Allow", or when ``allow_prompt`` is True AND stdin is a terminal:
+    ``allow_prompt`` is passed ONLY by the ``lop update`` CLI entry, because a
+    TTY alone is not consent — the TUI's ``/update`` runs with a TTY in the
+    middle of a live session (review round 1, R2), and a keychain dialog over
+    it, with codesign blocking up to 120 s, is exactly what this gate exists
+    to prevent. The signed bundle is verified with ``codesign --verify --strict
+    -R=<app DR>`` BEFORE it is published, so an image that would not share the
+    app's grant is never selected. Never raises; ``None`` means runtimes keep
+    the ad-hoc "Local Operator Runtime" flavor.
+    """
+    return publish_team_runtime_result(
+        interpreter, interactive=interactive, allow_prompt=allow_prompt
+    ).image
+
+
+def publish_team_runtime_result(
+    interpreter: str | os.PathLike[str], *, interactive: bool = False, allow_prompt: bool = False
+) -> TeamPublish:
+    """:func:`publish_team_runtime`, reporting whether it signed and why not.
+
+    Reason codes: ``refused:<team_signing_refusal code>``, ``not-opted-in``,
+    ``needs-always-allow`` (no recorded "Always Allow" and this caller may not
+    prompt), ``no-terminal``, ``unsupported-interpreter``, ``app-missing``,
+    ``team-mismatch``, ``no-requirement``, ``signing-failed``, ``error``.
+    Never raises.
+    """
+    try:
+        refusal = team_signing_refusal()
+        if refusal is not None:
+            return TeamPublish(None, reason=f"refused:{refusal}")
+        record = read_signing_optin()
+        if record is None:
+            return TeamPublish(None, reason="not-opted-in")
+        if not interactive and not record.get("always_allow_confirmed"):
+            if not allow_prompt:
+                return TeamPublish(None, reason="needs-always-allow")
+            try:
+                if not sys.stdin.isatty():
+                    return TeamPublish(None, reason="no-terminal")
+            except (AttributeError, ValueError):
+                return TeamPublish(None, reason="no-terminal")
+        real = _real_interpreter_for(interpreter)
+        root = runtime_root()
+        if real is None or root is None or _is_framework_build(real):
+            return TeamPublish(None, reason="unsupported-interpreter")
+        key = _build_key(real)
+        image = _bundle_image(root, key, FLAVOR_TEAM)
+        if os.path.lexists(_flavor_dir(root, key, FLAVOR_TEAM)) and _healthy_image(image, real):
+            return TeamPublish(image)
+        app = installed_app()
+        if app is None:
+            return TeamPublish(None, reason="app-missing")
+        if code_identity(app).get("TeamIdentifier") != record["team"]:
+            return TeamPublish(None, reason="team-mismatch")
+        requirement = app_requirement(app)
+        if requirement is None:
+            return TeamPublish(None, reason="no-requirement")
+        identity = str(record["identity"])
+        attempts: list[str] = []
+
+        def sign(bundle: Path) -> bool:
+            ok, error = _codesign_run(
+                "--force", "--sign", identity, "--identifier", APP_BUNDLE_ID, str(bundle)
+            )
+            attempts.append(error)
+            if not ok:
+                return False
+            ok, error = _codesign_run("--verify", "--strict", f"-R={requirement}", str(bundle))
+            if not ok:
+                attempts.append(error)
+            return ok
+
+        published = _publish_tree(
+            real,
+            root,
+            _flavor_dir(root, key, FLAVOR_TEAM).name,
+            image,
+            lambda staging, base: _populate_bundle(staging, real, base, FLAVOR_TEAM, sign),
+        )
+        # ``attempts`` non-empty means this call reached the Developer ID
+        # signature (a concurrent publisher that won the rename still means
+        # our codesign ran and any keychain dialog was answered).
+        if published is None:
+            failures = [error for error in attempts if error]
+            return TeamPublish(
+                None,
+                signed=bool(attempts),
+                reason="signing-failed",
+                detail=failures[-1] if failures else "",
+            )
+        return TeamPublish(published, signed=bool(attempts))
+    except Exception:  # noqa: BLE001 — an identity never fails an update
+        logger.debug("team runtime image not published", exc_info=True)
+        return TeamPublish(None, reason="error")
+
+
+def runtime_identity(interpreter: str | os.PathLike[str] | None = None) -> dict[str, object]:
+    """Read-only: which image and identity runtimes of this build resolve to.
+
+    For ``lop permissions status``. No plant, no signing, no keychain: stats,
+    one sidecar read, and ``codesign -d`` on the selected image.
+    """
+    info: dict[str, object] = {"platform": sys.platform}
+    try:
+        real = _real_interpreter_for(interpreter or sys.executable)
+        root = runtime_root()
+        info["interpreter"] = str(real) if real else None
+        if real is None or root is None:
+            return info
+        image = runtime_image(real)
+        info["image"] = str(image) if image else None
+        if image is None or not _healthy_image(image, real):
+            info["planted"] = False
+            return info
+        info["planted"] = True
+        info["flavor"] = _bundle_flavor(image) if _is_bundle_image(image) else "legacy"
+        if _is_bundle_image(image):
+            info.update({k.lower(): v for k, v in code_identity(image.parents[2]).items()})
+    except Exception:  # noqa: BLE001 — a status read never fails
+        logger.debug("runtime identity unreadable", exc_info=True)
+    return info
 
 
 def _replace_corrupt(root: Path, key: str, staging: Path, image: Path, real: Path) -> Path | None:
@@ -1368,7 +2158,9 @@ def _replace_corrupt(root: Path, key: str, staging: Path, image: Path, real: Pat
     except OSError:
         pass  # another planter moved it first, or it is already gone
     else:
-        if _healthy_image(aside / "bin" / BRAND, real):
+        # The image's place inside the tree, whichever shape it is (legacy
+        # ``bin/`` or a bundle's ``Contents/MacOS``).
+        if _healthy_image(aside / image.relative_to(published), real):
             try:
                 os.rename(aside, published)
             except OSError:

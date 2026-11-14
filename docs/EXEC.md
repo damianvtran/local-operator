@@ -528,6 +528,17 @@ guarantee. The trade is deliberate: the requirement is that killing the UI
 never kills sessions, and a session swept with the UI is the worse failure; the
 grant is a one-time, per-host decision.
 
+Runtimes therefore hold a privacy identity of their OWN rather than borrowing
+the app's by ancestry. Every runtime image is a bundle (`Local
+Operator.lopruntime`, see `procname.py` "ONE MACOS PRIVACY IDENTITY"), which
+tccd keys by bundle id, not path (measured 2026-11-09): on a host where the
+operator ran `lop permissions setup` it is team-signed as `com.local-operator`
+and shares the desktop app's grant (tccd `subject=com.local-operator`,
+`authValue=2`, no responsible app); everywhere else it is the ad-hoc
+`com.local-operator.runtime` ("Local Operator Runtime"), one row for every
+runtime. Neither changes the disclaim or launchd ownership, so runtimes still
+outlive the UI. Operator-facing: `guide://permissions`, `lop permissions status`.
+
 **Artifacts** (all best-effort; a failed write never changes a stop):
 
 * `<session dir>/runtime-signal.json` — a *runtime's* receipt of a termination

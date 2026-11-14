@@ -574,6 +574,36 @@ async def test_an_automatic_failure_still_says_so() -> None:
 
 
 @pytest.mark.asyncio
+async def test_an_idle_receipt_says_it_ran_while_idle() -> None:
+    """PR #3753 design D4 / UX U4: a pass nobody started, below the user's
+    threshold, must say why it happened; other triggers keep their copy."""
+    idle = compaction_receipt(CompactionEnded("idle", True, "context-full", 60_000, 30_000))
+    assert idle == "context compacted while idle · 60.0k → 30.0k tokens (50% smaller), via summary"
+    assert compaction_receipt(CompactionEnded("idle", True)) == "context compacted while idle"
+    assert compaction_receipt(CompactionEnded("context-window", True)) == "context compacted"
+
+
+@pytest.mark.asyncio
+async def test_a_failed_idle_pass_is_a_quiet_info_line_not_an_error() -> None:
+    """PR #3753 design D5: an idle pass the user never asked for failed with
+    the history untouched — nothing actionable, so no red error, but one quiet
+    line still closes the "compacting context…" notice."""
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _boot(pilot, app)
+        app.on_compaction_ended(CompactionEnded(reason="idle", success=False))
+        await pilot.pause()
+        blocks = [
+            block
+            for block in app.query_one(TranscriptView).blocks()
+            if isinstance(block, NoticeBlock) and "compaction" in block._text
+        ]
+
+    assert [block._text for block in blocks] == ["idle compaction skipped · nothing changed"]
+    assert blocks[0]._token == NoticeBlock._KIND_TOKENS["info"]
+
+
+@pytest.mark.asyncio
 async def test_a_second_press_is_refused_by_the_session_not_by_cancelling_the_first() -> None:
     """Concurrency is the SESSION's call (``already_running``), and the second
     press renders that refusal.

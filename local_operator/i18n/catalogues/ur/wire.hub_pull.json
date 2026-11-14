@@ -1,0 +1,12 @@
+{
+  "wire.hub_pull.ask.local_edits": "* میں آپ کی اپنی تبدیلیاں ہیں: وہ برقرار رکھی جاتی ہیں یا merge کی جاتی ہیں، کبھی اوور رائٹ نہیں ہوتیں۔",
+  "wire.hub_pull.ask.more": "{names}، اور {count} مزید",
+  "wire.hub_pull.ask.new": "{count, plural, one {# نیا آئٹم} other {# نئے آئٹمز}}: {names}",
+  "wire.hub_pull.ask.option.not_now": "ابھی نہیں",
+  "wire.hub_pull.ask.option.not_now.description": "فی الحال کچھ نہ بدلیں۔",
+  "wire.hub_pull.ask.option.update": "ابھی اپ ڈیٹ کریں",
+  "wire.hub_pull.ask.option.update.description": "نئے آئٹمز شامل کریں اور جو پہلے سے آپ کے پاس ہیں انہیں اپ ڈیٹ کریں۔ آپ کی اپنی تبدیلیاں برقرار رہیں گی۔",
+  "wire.hub_pull.ask.resubscribe": "{count, plural, one {# آئٹم دوبارہ اپ ڈیٹ ہوتا رہے گا} other {# آئٹمز دوبارہ اپ ڈیٹ ہوتے رہیں گے}}: {names}",
+  "wire.hub_pull.ask.title": "کیا اپنی تنظیم کے ہب سے اپنے {org} آئٹمز اپ ڈیٹ کریں؟",
+  "wire.hub_pull.ask.updates": "{count, plural, one {# اپ ڈیٹ} other {# اپ ڈیٹس}}: {names}"
+}

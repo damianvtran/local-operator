@@ -1,0 +1,23 @@
+"""Print en -> hi pairs from Apple's installed .loctable resources (hi audit, cli.permissions R2)."""
+import plistlib, glob, re, os, sys
+def get(d, loc):
+    r = dict(d.get(loc, {})); r.update(d.get(loc + '~mac', {})); return r
+def show(path, pred, label):
+    d = plistlib.load(open(path, 'rb')); en = get(d, 'en') or get(d, 'Base'); hi = get(d, 'hi')
+    n = 0
+    for k, v in en.items():
+        if isinstance(v, str) and pred(k, v):
+            print(f"{label} [{k}] en={v!r} hi={hi.get(k)!r}"); n += 1
+    if not n: print(f"{label}: no hits")
+SS = "/System/Applications/System Settings.app/Contents/Resources/"
+SP = "/System/Library/ExtensionKit/Extensions/SecurityPrivacyExtension.appex/Contents/Resources/"
+show(SS + 'InfoPlist.loctable', lambda k, v: k == 'CFBundleDisplayName', 'SystemSettings.app/InfoPlist.loctable')
+show(SP + 'InfoPlist.loctable', lambda k, v: k == 'CFBundleDisplayName', 'SecurityPrivacyExtension/InfoPlist.loctable')
+show(SP + 'Localizable.loctable', lambda k, v: k in ('SCREEN_CAPTURE_HEADER','SCREENANDAUDIOCAPTURE','SCREEN_CAPTURE','FILE_ACCESS_COMBINED') or v in ('Accessibility',), 'SecurityPrivacyExtension/Localizable.loctable')
+for f in glob.glob("/System/Library/ExtensionKit/Extensions/*ccessib*/Contents/Resources/InfoPlist.loctable"):
+    show(f, lambda k, v: k == 'CFBundleDisplayName', f.split('/')[5] + '/InfoPlist.loctable')
+KA = "/System/Applications/Utilities/Keychain Access.app/Contents/Resources/"
+for f in sorted(glob.glob(KA + '*.loctable')):
+    show(f, lambda k, v: k == 'CFBundleDisplayName' or v.strip() in ('Access Control', 'Keychain Access', 'Always Allow', 'Allow', 'Access Control:'), 'KeychainAccess/' + os.path.basename(f))
+for f in sorted(glob.glob('/System/Library/Frameworks/Security.framework/**/*.loctable', recursive=True)):
+    show(f, lambda k, v: v.strip() in ('Always Allow', 'Allow', 'Deny'), f.replace('/System/Library/Frameworks/', ''))

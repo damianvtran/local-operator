@@ -1,0 +1,14 @@
+{
+  "record": "i18n/audits/evidence/es/wire.errors.sdk_spec/sdkes2/record.json",
+  "audit_id": "sdkes2",
+  "auditor_session": "8b3d0ec1d217",
+  "model": "openai/gpt-6.1-sol",
+  "head_sha": "f990c30424edb03801b1ba2325f27092572c3a27",
+  "catalogue_sha256": "d3c6426e7842ae43906e674e6fe65d0cd1dc4475460195620d8dde8ce219ad44",
+  "report_comment": "https://github.com/damianvtran/local-operator/pull/3708#issuecomment-6756790373",
+  "companions": {
+    "record.json": "63dcaeffecd3befed805c20dcccfa9589706dea92a471d2a534b8f29f0adcd4d",
+    "findings.json": "6c449d04d842a236958078d2de5e022b9dc68fae1cc0ae0950ee978509f10514",
+    "report.md": "c6b327da4693a3017c0a86db4ba6c250f60d12991657725e725a2dfa4abb9bd2"
+  }
+}

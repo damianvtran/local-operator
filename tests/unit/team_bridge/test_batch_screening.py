@@ -890,14 +890,16 @@ def test_a_hostile_batch_mate_does_not_hold_the_innocent_ones(
         receipt = store.receipt_for_message(owner, message_id)
         assert receipt is not None and receipt["verdict"] == "allow"
     assert store.receipt_for_message(owner, posts[1].id) is None
-    # The retry pass never re-batches the trigger: its single answer is
-    # cached (the single path's own rule), so the retry costs no model call
-    # and no batch call ever carries it again.
+    # The retry pass never re-batches the trigger. Its unparsable single
+    # answer is NOT cached any more (operator report 2026-11-09: an unusable
+    # reply describes the draw, not the message), so the retry re-screens it
+    # ALONE (``parse_failed`` is a retry-alone code) -- never inside a batch.
     calls_before = len(runner.calls)
     clock.now += loop_mod.RETRY_MAX_S + 1
     rig._iterate(owner, config_dir)
     assert len([p for p in runner.calls if "Message ids are" in p]) == 1
-    assert len(runner.calls) == calls_before
+    retried = runner.calls[calls_before:]
+    assert retried and all(hostile in p and "Message ids are" not in p for p in retried)
     assert store.receipt_for_message(owner, posts[1].id) is None
 
 

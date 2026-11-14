@@ -170,6 +170,20 @@ def _contract(plan: dict[str, Any], *, local: bool) -> dict[str, Any]:
     connector = plan.get("connector")
     if isinstance(connector, dict):
         result["connector"] = {"state": connector.get("state")}
+    # Which connector carries this device's tunnel, for the desktop's setup
+    # copy (local-operator-ui C2). The live gateway answer wins; without one,
+    # the marker the service leaves after a /connect that offered the relay.
+    from local_operator.tunnels import config as tunnel_config
+
+    live = connector.get("transport") if isinstance(connector, dict) else None
+    if live in (tunnel_config.TRANSPORT_RELAY, tunnel_config.TRANSPORT_CLOUDFLARE):
+        result["transport"] = live
+    else:
+        result["transport"] = (
+            tunnel_config.TRANSPORT_RELAY
+            if tunnel_config.relay_offered()
+            else tunnel_config.TRANSPORT_CLOUDFLARE
+        )
     if result["verified"]:
         result["remedy"] = None
     return result

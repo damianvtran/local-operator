@@ -487,10 +487,15 @@ async def observe(selected: int | None = None) -> dict[str, Any]:
     # as a new enrollment. It still needs a fresh valid account and quote.
     if not fields["positive_balance"] and not pending:
         return _plan("balance", _t(ms.balance()), **fields)
-    try:
-        await asyncio.to_thread(_cloudflared_preflight, value.get("cloudflared_path"))
-    except (ValueError, OSError):
-        return _plan("cloudflared", _t(ms.cloudflared()), **fields)
+    # Optional once this device's last /connect offered the AWS relay (and the
+    # `tunnel.transport: cloudflare` kill switch is off): the built-in relay
+    # connector needs no external binary, so a missing cloudflared must not
+    # block setup. Without that marker the preflight is exactly as before.
+    if not await asyncio.to_thread(config.relay_offered):
+        try:
+            await asyncio.to_thread(_cloudflared_preflight, value.get("cloudflared_path"))
+        except (ValueError, OSError):
+            return _plan("cloudflared", _t(ms.cloudflared()), **fields)
     if supervisors.supervisor() is None:
         return _plan("supervisor", install.NO_SUPERVISOR_ERROR, **fields)
     if not await asyncio.to_thread(_mobile_preflight, value, pending):
