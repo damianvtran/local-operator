@@ -13,5 +13,7 @@
   "cli.mobile_help.devices_port": "موبائل ڈیمن کا پورٹ (ڈیفالٹ: ڈیمن کا اپنا ڈیفالٹ)",
   "cli.mobile_help.uninstall": "LaunchAgent ہٹائیں",
   "cli.mobile_help.uninstall_purge": "پاس ورڈ بھی حذف کریں",
-  "cli.mobile_help.serve": "ڈیمن چلائیں (فورگراؤنڈ)"
+  "cli.mobile_help.serve": "ڈیمن چلائیں (فورگراؤنڈ)",
+  "cli.mobile_help.doctor": "فون رسائی کی صرف پڑھنے والی تشخیص (شیئر کرنا محفوظ ہے)",
+  "cli.mobile_help.doctor_json": "تشخیص JSON کی صورت میں دکھائیں"
 }

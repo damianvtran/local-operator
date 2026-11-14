@@ -1075,6 +1075,12 @@ def build_cli_parser() -> LocalizedArgumentParser:
     mobile_subparsers = mobile_parser.add_subparsers(dest="mobile_command")
     mobile_subparsers.add_parser("install", help=_mb.install().envelope(locale=help_locale)["text"])
     mobile_subparsers.add_parser("status", help=_mb.status().envelope(locale=help_locale)["text"])
+    doctor_parser = mobile_subparsers.add_parser(
+        "doctor", help=_mb.doctor().envelope(locale=help_locale)["text"]
+    )
+    doctor_parser.add_argument(
+        "--json", action="store_true", help=_mb.doctor_json().envelope(locale=help_locale)["text"]
+    )
     for action in ("start", "stop", "restart"):
         mobile_subparsers.add_parser(
             action, help=_mb.daemon_action(action=action).envelope(locale=help_locale)["text"]
@@ -10845,6 +10851,23 @@ def mobile_command(args: argparse.Namespace) -> int:
 
     from local_operator.mobile import install as mobile_install
 
+    if command == "doctor":
+        # Read-only and redacted (see `mobile/doctor.py`): safe to paste into a
+        # support thread or relay over Team Bridge, where shell diagnostics are
+        # refused. Exit 0 whenever a report was produced — it reports, it does
+        # not alarm; the `overall` field carries the verdict.
+        import asyncio
+        import json as _json
+
+        from local_operator.mobile import doctor
+
+        report = asyncio.run(doctor.collect())
+        if getattr(args, "json", False):
+            print(_json.dumps(report, indent=2, ensure_ascii=False))
+        else:
+            print(doctor.text(report))
+        return 0
+
     if command == "install":
         from local_operator.mobile.auth import store_description
 
@@ -10892,8 +10915,34 @@ def mobile_command(args: argparse.Namespace) -> int:
                 else "no web sources to build from"
             )
             print(f"bundle:       not built ({detail})")
-        gate = "closed" if result["gate_closed"] else "OPEN (this is a boundary failure)"
+        from local_operator.i18n.keys import mobile_doctor as _md_keys
+        from local_operator.i18n.text import tr as _tr
+
+        _md_t = _tr("mobile.doctor")
+        # A daemon that is not running has no gate to be open: the probe merely
+        # failed to connect, and printing that as "OPEN (boundary failure)" sent
+        # people hunting a security fault on a machine that was simply asleep
+        # (probe 6d779936753a, fix #2).
+        if not result["healthy"]:
+            gate = _md_t(_md_keys.daemon_state_not_running())
+        else:
+            gate = "closed" if result["gate_closed"] else "OPEN (this is a boundary failure)"
         print(f"auth gate:    {gate}")
+        files = result.get("files")
+        if result["healthy"] and isinstance(files, dict):
+            # The daemon's descriptor headroom: the limit `mobile/fdlimit.py`
+            # raises at start, beside what is in use now.
+            used = files.get("open")
+            limit = files.get("soft")
+            print(
+                "open files:   "
+                + _md_t(
+                    _md_keys.files_status_line(
+                        open=str(used if used is not None else "?"),
+                        limit=str(limit if limit is not None else "unlimited"),
+                    )
+                )
+            )
         print(f"log:          {result['log']}")
         from local_operator.tunnels.request_log import render as render_requests
 
@@ -10912,7 +10961,9 @@ def mobile_command(args: argparse.Namespace) -> int:
                 f"  [{session['state']}] pid {session['pid']} · "
                 f"{session['kind']} · {name} · {session['model_label']}"
             )
-        return 0 if result["healthy"] else -1
+        # Never installed is not a failure of this command (fix #2): only a
+        # daemon that IS installed and does not answer exits non-zero.
+        return 0 if result["healthy"] or not result["installed"] else -1
 
     if command in ("start", "stop", "restart"):
         result = mobile_install.service_action(command)

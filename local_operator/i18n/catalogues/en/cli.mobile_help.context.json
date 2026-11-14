@@ -73,5 +73,15 @@
     "role": "lop CLI help text",
     "tone": "terse, operator-facing, describes a flag or command",
     "note": "help for the 'serve' argument; flag/command tokens stay in situ"
+  },
+  "cli.mobile_help.doctor": {
+    "role": "CLI subcommand help",
+    "tone": "short",
+    "note": "`lop mobile doctor`: read-only checks with secrets and the home path removed, so the output can be shared."
+  },
+  "cli.mobile_help.doctor_json": {
+    "role": "CLI flag help",
+    "tone": "short",
+    "note": "--json flag. JSON stays verbatim."
   }
 }

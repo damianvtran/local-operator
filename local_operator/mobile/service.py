@@ -37,6 +37,21 @@ async def amain(port: int = DEFAULT_PORT) -> int:
     # what a reader wants) would silently restore the flood.
     configure_console_logging()
     quiet_wire_clients()
+    # Before anything opens a descriptor in volume: launchd starts this job at a
+    # 256-descriptor soft limit, which a busy phone plus sessions can exhaust
+    # (the "Asleep / Not answering" + sqlite "unable to open database file"
+    # report). See `mobile/fdlimit.py` for the cap and why it is in-process.
+    from local_operator.mobile import fdlimit
+
+    limits = fdlimit.raise_soft_limit()
+    fdlimit.record(limits)
+    if limits["before"] != limits["soft"]:
+        logger.info(
+            "raised open-file soft limit from %s to %s (hard %s)",
+            limits["before"],
+            limits["soft"],
+            limits["hard"] if limits["hard"] is not None else "unlimited",
+        )
     password = load_password()
     if not password:
         # First-run is an operator action, not a silent default: the daemon
