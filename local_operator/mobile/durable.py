@@ -225,6 +225,14 @@ class DurableFoldState:
     #: forced onto the incremental path the fold leaked an injection. Carrying
     #: the ids makes the two paths agree by construction instead.
     injection_ids: set[str] = field(default_factory=set)
+    #: Ids of the history messages the newest compaction INJECTED at the head of
+    #: ``history`` (its marker, the preserved user turns re-served under their
+    #: original ids, the carried tier) rather than replayed from the kept window.
+    #: The forward history cursor (``daemon._forward_page``) reads it: those rows
+    #: sit at the render's head but are journal rows from BELOW the cut, so a
+    #: forward read anchored on one would splice older rows after it as if they
+    #: were newer. Empty when no compaction was replayed.
+    prefix_ids: frozenset[str] = frozenset()
     #: Newest-wins custom-entry details by type, mirroring the store's
     #: ``latest_custom``. The durable projection reads the subagent roster and
     #: a child's todo snapshot from here instead of re-parsing transcripts.
@@ -543,7 +551,9 @@ class DurableFoldCache:
             )
 
         state.injection_ids = _journal_injection_ids(entries)
-        state.history, state.keep_start_id = _replay(entries, at_bof=at_bof)
+        state.history, state.keep_start_id, state.prefix_ids = _replay_with_prefix(
+            entries, at_bof=at_bof
+        )
         state.scan_from_bof = at_bof
         state.render = _fold(state.history, state.directory)
         state.prunes = {
@@ -592,7 +602,20 @@ def _track_supplement(held: dict[str, dict[str, Any]], details: dict[str, Any]) 
 def _replay(
     entries: list[TranscriptEntry], *, at_bof: bool = True
 ) -> tuple[list[AgentMessage], str | None]:
+    """:func:`_replay_with_prefix` without the prefix ids (the shape existing
+    callers and tests read)."""
+    history, keep_start_id, _prefix_ids = _replay_with_prefix(entries, at_bof=at_bof)
+    return history, keep_start_id
+
+
+def _replay_with_prefix(
+    entries: list[TranscriptEntry], *, at_bof: bool = True
+) -> tuple[list[AgentMessage], str | None, frozenset[str]]:
     """``Transcript.build_llm_history`` semantics over parsed entries.
+
+    The third value is the ids of the injected compaction prefix
+    (:attr:`DurableFoldState.prefix_ids`), taken here because this is the one
+    place the prefix exists as its own list.
 
     Kept beside the cache rather than reused THROUGH a ``Transcript`` instance
     because constructing one mkdirs, takes an asyncio lock, and retains the raw
@@ -657,7 +680,7 @@ def _replay(
         if notice is not None and isinstance(message, Message):
             _apply_prune_to(message, notice)
         out.append(message)
-    return out, keep_start_id
+    return out, keep_start_id, frozenset(message.id for message in prefix)
 
 
 def _compaction_prefix(
@@ -769,6 +792,7 @@ def _rebuild_history_after_compaction(state: DurableFoldState, entry: Transcript
         if notice is not None and isinstance(message, Message):
             _apply_prune_to(message, notice)
     state.history = [*prefix, *kept]
+    state.prefix_ids = frozenset(message.id for message in prefix)
     return True
 
 
