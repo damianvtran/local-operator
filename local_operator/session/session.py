@@ -22984,6 +22984,7 @@ class Session:
         limits: "VerifierLimits | None" = None,
         on_started: "Callable[[dict[str, Any]], None] | None" = None,
         label: str = "Verify completion",
+        evidence: str | None = None,
     ) -> "VerifierVerdict":
         """Run the harness completion verifier against a claimed-finished task.
 
@@ -23005,7 +23006,15 @@ class Session:
           not by the ``verifier`` name (an operator role of that name keeps
           its own shell);
         * ``host_tools`` -- whatever lets it SEE the deliverable -- exist in
-          that child only, wrapped to count against ``max_commands``;
+          that child only, wrapped to count against ``max_commands``. Their
+          presence means the deliverable is on a remote target, so the
+          child's LOCAL read/glob/grep/bash are withdrawn (``verifier_ceiling``:
+          main33's host-confused verdicts); with none, the local read-only set
+          is unchanged;
+        * ``evidence`` -- the worker's recorded tool calls, so the check starts
+          from the claims instead of rediscovering them. ``None`` reads this
+          session's own most recent answered calls (``recent_tool_evidence``);
+          ``""`` sends none;
         * ``announce=False``: the result is returned here, never injected into
           this session's conversation;
         * bounded by :class:`VerifierLimits`: a spent command budget refuses
@@ -23027,13 +23036,14 @@ class Session:
             CANCEL_JOIN_S,
             REQUEST_BUDGET_REFUSAL,
             VERIFIER_ROLE,
-            VERIFIER_TOOL_ALLOWLIST,
             VerifierLimits,
             VerifierVerdict,
             build_verifier_prompt,
             counted_host_tools,
             find_verdict,
             parse_verdict,
+            recent_tool_evidence,
+            verifier_ceiling,
             verifier_profile,
         )
 
@@ -23145,7 +23155,8 @@ class Session:
         # itself, never by the ``verifier`` name (an operator's registry role
         # of that name must keep its own shell: review R2 / QA Q1).
         surface = ChildSurface(
-            ceiling=frozenset(VERIFIER_TOOL_ALLOWLIST),
+            # Grounding: a remote target channel withdraws the local tools.
+            ceiling=verifier_ceiling(host_names),
             host_tools=wrapped,
             readonly_shell=True,
             on_assistant_message=on_message,
@@ -23160,7 +23171,17 @@ class Session:
         if no_shell_sandbox:
             granted = granted - {"bash"}
         granted_tools = tuple(sorted(granted))
-        prompt = build_verifier_prompt(request=request, claim=claim, observation=observation)
+        if evidence is None:
+            # Read before launch, from this session's own context: the worker
+            # is parked (the caller awaits the verdict), so the list is stable.
+            evidence = recent_tool_evidence(list(self._context.messages))
+        prompt = build_verifier_prompt(
+            request=request,
+            claim=claim,
+            observation=observation,
+            evidence=evidence,
+            target_tools=tuple(sorted(host_names)),
+        )
         try:
             try:
                 job_id = run_subagent(
