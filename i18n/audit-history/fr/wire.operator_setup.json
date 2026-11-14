@@ -1,0 +1,35 @@
+{
+  "schema": 1,
+  "locale": "fr",
+  "namespace": "wire.operator_setup",
+  "history_sha256": "d3de51733d8d51b9d310d979026615b85d5d6a18b75ad422388917c40287882e",
+  "entries": [
+    {
+      "locale": "fr",
+      "namespace": "wire.operator_setup",
+      "source_sha256": "62f86da21178d7f9e2d808b2172fb37d31cc0c5f7a62cb79a50040d4ff0b0444",
+      "translator": {
+        "agent": "C3 coder session aa53a3349ddc (approvals-setup lane, branch feat/approvals-setup-no-terminal)",
+        "model": "anthropic/claude-opus-5-5",
+        "fallback": "none reported by the delegating manager",
+        "date": "2026-11-14"
+      },
+      "auditor": {
+        "agent": "independent i18n auditor (lopdev reviewer role, session 485bad0ccbf0; independent of translator session aa53a3349ddc — same model family, separate session)",
+        "session": "485bad0ccbf0",
+        "model": "anthropic/claude-opus-5-5",
+        "fallback": "none observed in this session",
+        "date": "2026-11-14",
+        "result": "passed",
+        "findings": 1,
+        "unresolved_blocker_major": 0,
+        "blocker": 0,
+        "major": 0,
+        "minor": 0,
+        "nit": 1
+      },
+      "status": "passed",
+      "note": "Round 1 audited all 21 keys at 3be60bb565e4 against en + context sidecar, i18n/glossary.md and i18n/style-guides/fr.md; mechanical: key parity, no placeholders, NFC, no Cc/Cf/bidi controls, verbatim 'Local Operator' and '/mobile approvals on', no anchor/sudo/pkexec/Radient, no ASCII apostrophe/ellipsis, fr U+202F; menu path in tui.anchor_clause matches desktop ui.settings.page.title/ui.providers.phone.heading; anchor_clause opens with the locale semicolon and has no final period (composed at serving.py:11540 / tui/app.py:60214). Remediation at 0ac607ad6437 applied every finding verbatim; round 2 verified all changed values byte-equal to the recommended strings, no other key changed; check.py --catalogues-only 0 problems. Target fr/wire.operator_setup.json sha256 b7703b12637944d1f206ad64797f27f695bd7f786d7fb4eecf470475d8ad3ae0. Findings: FR-1 NIT outcome.cancelled: gendered \"quand vous serez prêt\" -> \"quand vous le souhaitez\" (fixed). A second independent audit of the high-visibility prompt.* keys (shown inside the macOS password dialog) is running separately; this receipt does not stand in for it."
+    }
+  ]
+}

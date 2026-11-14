@@ -119,6 +119,9 @@ def test_shipped_wire_namespaces_exist() -> None:
         "wire.console",
         # The desktop phone-setup refusals (this PR's own namespace).
         "wire.tunnel_setup",
+        # Turning on phone approvals from the desktop/TUI (design v2 §6, C3):
+        # route outcomes, the OS-prompt purposes and the U17 remedy clause.
+        "wire.operator_setup",
         # Memory settings copy (LOH-25): the registry rows resolve through it.
         "wire.memory",
         # Music tools resolve their own shipped copy without changing audited

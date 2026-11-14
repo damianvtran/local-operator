@@ -1,0 +1,35 @@
+{
+  "schema": 1,
+  "locale": "es",
+  "namespace": "wire.operator_setup",
+  "history_sha256": "f4eb5ab1e089582bba839321c4da830ceeceac4b11762f568f72d4b707f483a1",
+  "entries": [
+    {
+      "locale": "es",
+      "namespace": "wire.operator_setup",
+      "source_sha256": "62f86da21178d7f9e2d808b2172fb37d31cc0c5f7a62cb79a50040d4ff0b0444",
+      "translator": {
+        "agent": "C3 coder session aa53a3349ddc (approvals-setup lane, branch feat/approvals-setup-no-terminal)",
+        "model": "anthropic/claude-opus-5-5",
+        "fallback": "none reported by the delegating manager",
+        "date": "2026-11-14"
+      },
+      "auditor": {
+        "agent": "independent i18n auditor (lopdev reviewer role, session 485bad0ccbf0; independent of translator session aa53a3349ddc — same model family, separate session)",
+        "session": "485bad0ccbf0",
+        "model": "anthropic/claude-opus-5-5",
+        "fallback": "none observed in this session",
+        "date": "2026-11-14",
+        "result": "passed",
+        "findings": 2,
+        "unresolved_blocker_major": 0,
+        "blocker": 0,
+        "major": 0,
+        "minor": 1,
+        "nit": 1
+      },
+      "status": "passed",
+      "note": "Round 1 audited all 21 keys at 3be60bb565e4 against en + context sidecar, i18n/glossary.md and i18n/style-guides/es.md; mechanical: key parity, no placeholders, NFC, no Cc/Cf/bidi controls, verbatim 'Local Operator' and '/mobile approvals on', no anchor/sudo/pkexec/Radient, no ASCII apostrophe/ellipsis, fr U+202F; menu path in tui.anchor_clause matches desktop ui.settings.page.title/ui.providers.phone.heading; anchor_clause opens with the locale semicolon and has no final period (composed at serving.py:11540 / tui/app.py:60214). Remediation at 0ac607ad6437 applied every finding verbatim; round 2 verified all changed values byte-equal to the recommended strings, no other key changed; check.py --catalogues-only 0 problems. Target es/wire.operator_setup.json sha256 a20eab33a2ce5f09be83c1c19ced32e55b7c15339d4fa1cb7f3ed6858f774dc6. Findings: ES-1 MINOR outcome.on (spec N5): \"seguirá pidiendo una vez\" read as \"will keep asking once\" -> \"Aun así, cada teléfono nuevo pedirá una vez…\" (fixed); ES-2 NIT refused.privileged: \"No se ha cambiado nada.\" -> \"No se cambió nada.\" for preterite consistency (fixed). Note (not a finding): \"ordenador\" kept, consistent with the shipped es corpus (20 ordenador / 0 computadora). A second independent audit of the high-visibility prompt.* keys (shown inside the macOS password dialog) is running separately; this receipt does not stand in for it."
+    }
+  ]
+}
