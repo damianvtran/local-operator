@@ -529,7 +529,11 @@ class TestMovedSessionReappliesItsTeamBrief:
         from datetime import datetime, timezone
 
         from local_operator.agents import AgentRegistry
-        from local_operator.harness.types import StreamEndEvent, StreamEvent, StreamTextDelta
+        from local_operator.harness.types import (
+            StreamEndEvent,
+            StreamEvent,
+            StreamTextDelta,
+        )
         from local_operator.network import definitions
         from local_operator.prompts_api import build_system_blocks
         from local_operator.resume import write_session_attachment
@@ -638,7 +642,11 @@ async def _answered_session(dest: Path, *, team: str = "", agent: str = "") -> t
     """A session on ``dest`` whose attachment names definitions this device lacks,
     answered once (so the late adoption is closed, as for every moved session)."""
     from local_operator.agents import AgentRegistry
-    from local_operator.harness.types import StreamEndEvent, StreamEvent, StreamTextDelta
+    from local_operator.harness.types import (
+        StreamEndEvent,
+        StreamEvent,
+        StreamTextDelta,
+    )
     from local_operator.prompts_api import build_system_blocks
     from local_operator.resume import write_session_attachment
     from local_operator.session.goal import GoalState
