@@ -718,6 +718,116 @@ class SessionArmError(RuntimeError):
 # The MCP declaration: one server, in the episode's own scratch root
 # ---------------------------------------------------------------------------
 
+#: The harness's ``run_command`` RPC deadline past the command's own
+#: ``timeout_s`` (``_make_run_command``). It must outlast the adapter's
+#: wall-clock bound on the guest reply (the OSWorld adapter's ``timeout_s + 10``)
+#: plus its lost-reply liveness probe (~4 s worst case), or the RPC deadline
+#: fires first and tears the channel down -- losing the episode the probe exists
+#: to keep. Named, not inline, because the action server's MCP request timeout
+#: is derived from it (:func:`action_server_mcp_timeout_s`).
+COMMAND_RPC_MARGIN_S = 20.0
+
+#: Slack between the ``run_command`` RPC deadline and the MCP client's request
+#: timeout for the episode action server. It covers what can still happen
+#: AFTER that deadline before the bridge's reply reaches the client: the RPC
+#: layer's 1 s cancel grace (``rpc.RpcClient.call``) and, on that poisoning
+#: path, the worker teardown (``_terminate_process_group``: up to
+#: ``TERM_GRACE_SECONDS`` for SIGTERM plus the same again after SIGKILL, then a
+#: 1 s drainer join -- 11 s at today's 5 s grace). The bridge -> stdio child ->
+#: MCP client hops are local and millisecond-scale. 30 s is ~2.5x that 12 s
+#: worst case; ``test_action_server_mcp_timeout_nests_*`` pins the inequality.
+ACTION_SERVER_REPLY_SLACK_S = 30.0
+
+
+def action_server_mcp_timeout_s() -> float:
+    """The MCP client request timeout the episode action server is declared with.
+
+    WHY THIS EXISTS. The MCP client bounds every request at
+    ``DEFAULT_MCP_TIMEOUT_MS`` (300 s) unless the server declares its own
+    ``timeout``, and ``run_command`` advertises a 300 s maximum
+    (``action_server.COMMAND_MAX_TIMEOUT_S``) whose downstream deadlines then
+    ADD margins (guest wrapper +5, adapter bound +10, harness RPC +20). So a
+    command near its advertised maximum was guaranteed to be cut by the MCP
+    client first: sealed episode ``t29a-t030-20261111-192648`` called
+    ``timeout_s: 300``, the client gave up at 305.06 s, the cancellation
+    poisoned the adapter session, and the episode was lost unscored.
+
+    The deadlines must NEST: each outer bound exceeds the inner one plus every
+    margin between them. Derived from the constants -- and read at call time,
+    not frozen at import -- so raising the command maximum (or the RPC margin)
+    moves this bound with it; the invariant test fails if anyone breaks that.
+
+    The GUI ``apply_actions`` tool shares this server and therefore this
+    timeout, which is >= the 300 s it had before, so nothing there tightens. A
+    GUI batch may legally declare up to 64 x 60 s of waits
+    (``deadlines.DECLARED_WORK_HEADROOM_S``), which no fixed MCP bound short of
+    an hour covers; that is tolerable because a GUI call cut by the client is
+    NOT forwarded as a cancellation (``action_server.forward_call`` half-closes
+    only for ``run_command``): the bridge finishes the batch, the reply is
+    lost, and the next call re-binds -- a lost reply, never a poisoned session.
+
+    WHAT THIS DOES NOT COVER: QUEUE TIME. The client's timer starts when the
+    request is SENT, but a ``run_command`` dispatches only once it holds the
+    bridge's single mutation lane -- behind an earlier command, a GUI batch, or
+    a command whose caller already left (``ActionBridge._handle`` detaches
+    those). This bound nests only the command's own deadlines; the bridge
+    closes the remainder itself by bounding the lane wait to the headroom this
+    bound leaves (:meth:`ActionBridge.call_command`), refusing an unsent
+    command instead of letting the client cut it, and by never dispatching a
+    command whose caller left while it was queued.
+    """
+
+    from local_operator.evaluation import action_server
+
+    return (
+        float(action_server.COMMAND_MAX_TIMEOUT_S)
+        + COMMAND_RPC_MARGIN_S
+        + ACTION_SERVER_REPLY_SLACK_S
+    )
+
+
+def action_server_client_timeout_s() -> float | None:
+    """The request bound the MCP client will ACTUALLY apply to the action server.
+
+    The declared per-server ``timeout`` run through the manager's own precedence
+    (``resolve_mcp_timeout_s``: ``LOCAL_OPERATOR_MCP_TIMEOUT_MS`` outranks it;
+    ``0`` disables it, ``None``). The episode's MCP client lives in THIS process
+    (``sdk.open_session``), so this process's environment is the client's.
+    Resolved here rather than restated so the precheck, the declaration and the
+    bridge's lane-wait bound can never disagree with the client.
+    """
+
+    from local_operator.mcp.config import MCPStdioServerConfig
+    from local_operator.mcp.manager import resolve_mcp_timeout_s
+
+    declared = MCPStdioServerConfig(timeout=int(action_server_mcp_timeout_s() * 1000))
+    return resolve_mcp_timeout_s(declared)
+
+
+def assert_action_server_timeout_nests(resolved_timeout: float | None = None) -> None:
+    """Refuse an episode whose MCP client would cut the longest legal command.
+
+    ``LOCAL_OPERATOR_MCP_TIMEOUT_MS`` outranks a per-server ``timeout``
+    (``resolve_mcp_timeout_s``), so an inherited env override could silently
+    undo the nesting the declaration sets and bring back the measured loss (a
+    300 s command cut by the MCP client, the session poisoned). It depends only
+    on the environment and constants, so ``run_session_episode`` calls it
+    BEFORE ``launch``/``prepare``: a refused run never provisions or resets a
+    target. ``assert_declaration_resolved`` repeats it on the DISCOVERED
+    config (``resolved_timeout``), proving the declaration that was actually
+    read resolves the same way.
+    """
+
+    if resolved_timeout is None:
+        resolved_timeout = action_server_client_timeout_s()
+    required_timeout = action_server_mcp_timeout_s()
+    if resolved_timeout is not None and resolved_timeout < required_timeout:
+        raise SessionArmError(
+            f"the action server's MCP request timeout resolves to {resolved_timeout:g} s, "
+            f"below the {required_timeout:g} s its longest command needs; "
+            "unset LOCAL_OPERATOR_MCP_TIMEOUT_MS (or raise it) for episode runs"
+        )
+
 
 @dataclass(frozen=True)
 class ActionServerDeclaration:
@@ -786,6 +896,12 @@ def declare_action_server(
         # reserves it for the episode's own turn -- children do not inherit it
         # and the harness refuses an execution carrying a child's job id.
         "ownTurnOnly": True,
+        # Per-server MCP request timeout (milliseconds), so the client's bound
+        # nests OUTSIDE every downstream command deadline instead of cutting a
+        # legitimate 300 s command at the 300 s client default. Scoped to this
+        # one server: ordinary sessions keep ``DEFAULT_MCP_TIMEOUT_MS``. See
+        # ``action_server_mcp_timeout_s`` for the derivation.
+        "timeout": int(action_server_mcp_timeout_s() * 1000),
     }
     if command:
         args.append("--command")
@@ -884,6 +1000,16 @@ def assert_declaration_resolved(
             f"the action server {server_name!r} was not discovered from {resolved_cwd}; "
             "the declaration and the session's cwd disagree"
         )
+    # The env-override refusal, re-checked on the config discovery actually
+    # read. ``run_session_episode`` already ran it before provisioning
+    # anything (``assert_action_server_timeout_nests``); this proves the
+    # discovered declaration resolves the same way.
+    if server_name == SERVER_NAME:
+        from local_operator.mcp.manager import resolve_mcp_timeout_s
+
+        resolved_timeout = resolve_mcp_timeout_s(configs[server_name])
+        if resolved_timeout is not None:
+            assert_action_server_timeout_nests(resolved_timeout)
     return sources
 
 
@@ -1221,6 +1347,9 @@ class ActionBridge:
         # world never admitted. No second ledger: its rows go to the same
         # RecordSink below.
         self._attempted_groups = 0
+        # Attempts include invalid/refused commands, not just target executions.
+        # This is telemetry only: a command is not a decision-budget unit.
+        self.command_attempts = 0
         self._attempted_keys: set[str] = set()
         #: The group currently being served -- its key, the outcome kind its
         #: row will carry, and whether that row was already written.
@@ -1920,19 +2049,123 @@ class ActionBridge:
         except OSError:
             pass
 
-    async def call_command(self, arguments: Mapping[str, Any]) -> dict[str, Any]:
+    async def call_command(
+        self,
+        arguments: Mapping[str, Any],
+        *,
+        caller_gone: asyncio.Event | None = None,
+    ) -> dict[str, Any]:
         """Run a negotiated text operation without consuming a screen token.
 
         Transport failures remain errors, not synthetic exit statuses. Recording
         metadata excludes output: sealed artifacts still identify exactly what ran.
+
+        ``caller_gone`` is set by :meth:`_handle` when the MCP caller left (a
+        client request timeout, an interrupted turn). Before dispatch the
+        command is then never sent (``cancelled_before_dispatch``); after
+        dispatch it is left to settle (see :meth:`_handle`) and its row is
+        sealed as the unknown outcome the caller was left with.
+
+        THE LANE WAIT IS BOUNDED. The MCP client's request timer runs from send,
+        so time spent queued here comes out of the budget
+        :func:`action_server_mcp_timeout_s` nested around the command's own
+        deadlines. A command may wait for the lane only as long as that bound
+        still leaves its full ``timeout_s + COMMAND_RPC_MARGIN_S +
+        ACTION_SERVER_REPLY_SLACK_S`` after dispatch -- i.e. the headroom below
+        the advertised maximum (``COMMAND_MAX_TIMEOUT_S - timeout_s`` at the
+        declared bound; none at the maximum itself). Past it the command is
+        refused UNSENT with a reply the caller still receives, instead of being
+        cut by the client as a generic timeout whose outcome the model cannot
+        know. No new number: the bound is derived from the deadlines already
+        nested, and an unbounded client (``LOCAL_OPERATOR_MCP_TIMEOUT_MS=0``)
+        leaves the wait unbounded.
         """
+        from local_operator.evaluation.action_server import (
+            COMMAND_DEFAULT_TIMEOUT_S,
+            COMMAND_MAX_TIMEOUT_S,
+        )
+
+        self.command_attempts += 1
+        requested = arguments.get("timeout_s", COMMAND_DEFAULT_TIMEOUT_S)
+        client_timeout = action_server_client_timeout_s()
+        lane_budget: float | None = None
+        if (
+            client_timeout is not None
+            and type(requested) is int
+            and 1 <= requested <= COMMAND_MAX_TIMEOUT_S
+        ):
+            # Invalid arguments get no budget: the locked path refuses them at
+            # once, and a bound computed from a malformed value means nothing.
+            lane_budget = client_timeout - (
+                requested + COMMAND_RPC_MARGIN_S + ACTION_SERVER_REPLY_SLACK_S
+            )
         # Screen actions, terminal admission and commands share ONE mutation
         # lane. Keep the ended-state check inside it so queued calls cannot run
         # after a finish accepted while they were waiting.
-        async with self._lock:
-            return await self._call_command_locked(arguments)
+        if lane_budget is None:
+            await self._lock.acquire()
+        else:
+            acquired = False
+            if lane_budget > 0:
+                try:
+                    await asyncio.wait_for(self._lock.acquire(), lane_budget)
+                    acquired = True
+                except TimeoutError:
+                    pass
+            elif not self._lock.locked():
+                # No headroom (a command at the advertised maximum): it may
+                # take a FREE lane, but cannot afford to wait for a busy one.
+                # ``wait_for(..., 0)`` would refuse even the free lane.
+                await self._lock.acquire()
+                acquired = True
+            if not acquired:
+                return self._refuse_unsent_command(
+                    arguments,
+                    outcome="refused_lane_busy",
+                    text=(
+                        "Not run: the remote computer is still busy with an earlier "
+                        f"call, and waiting for it would leave this command's "
+                        f"timeout_s of {requested} s too little time before the call "
+                        "itself times out. Nothing was sent. Earlier calls -- "
+                        "including one that was cut short and may still be running "
+                        "-- finish first; retry after they have, or with a smaller "
+                        "timeout_s."
+                    ),
+                )
+        try:
+            return await self._call_command_locked(arguments, caller_gone)
+        finally:
+            self._lock.release()
 
-    async def _call_command_locked(self, arguments: Mapping[str, Any]) -> dict[str, Any]:
+    def _refuse_unsent_command(
+        self, arguments: Mapping[str, Any], *, outcome: str, text: str
+    ) -> dict[str, Any]:
+        """Refuse a command that was NEVER sent, and say so in the record.
+
+        ``target_may_have_run: False`` is the point: unlike
+        ``cancelled_after_dispatch`` this command provably did not reach the
+        target, so a later reader (and a re-issue) need not treat it as an
+        unknown mutation. No ``command_started`` row precedes it -- that row
+        marks a dispatch.
+        """
+        if self.record is not None:
+            self.record(
+                "command",
+                {
+                    "call_id": f"command-{uuid.uuid4().hex[:12]}",
+                    "command": arguments.get("command"),
+                    "timeout_s": arguments.get("timeout_s"),
+                    "cancelled": outcome == "cancelled_before_dispatch",
+                    "dispatched": False,
+                    "outcome": outcome,
+                    "target_may_have_run": False,
+                },
+            )
+        return {"content": [TextContent(text=text)], "is_error": True}
+
+    async def _call_command_locked(
+        self, arguments: Mapping[str, Any], caller_gone: asyncio.Event | None = None
+    ) -> dict[str, Any]:
         from local_operator.evaluation.action_server import (
             COMMAND_DEFAULT_TIMEOUT_S,
             COMMAND_MAX_TIMEOUT_S,
@@ -1959,6 +2192,18 @@ class ActionBridge:
             return refusal(
                 "Invalid command arguments: supply a command and a bounded integer timeout_s."
             )
+        if caller_gone is not None and caller_gone.is_set():
+            # The caller left while this command was QUEUED on the lane (an
+            # interrupted turn, or a client timeout the lane bound could not
+            # prevent). It was told the call failed, so dispatching it now
+            # would mutate the target unseen -- and twice if it re-issues.
+            # Nothing is awaited between this check and dispatch below, so a
+            # caller leaving after it is the after-dispatch case.
+            return self._refuse_unsent_command(
+                arguments,
+                outcome="cancelled_before_dispatch",
+                text="Not run: the caller cancelled this command before it was sent.",
+            )
         row: dict[str, Any] = {
             "call_id": f"command-{uuid.uuid4().hex[:12]}",
             "command": command,
@@ -1969,7 +2214,7 @@ class ActionBridge:
         if self.record is not None:
             self.record("command_started", dict(row))
 
-        def record_cancellation() -> None:
+        def record_cancellation(settled: dict[str, Any] | None = None) -> None:
             row.update(
                 cancelled=True,
                 outcome="cancelled_after_dispatch",
@@ -1980,8 +2225,18 @@ class ActionBridge:
                 stderr_truncated=None,
                 error="CancelledError: command outcome unknown",
             )
+            # The harness-side settlement of a command whose caller left, kept
+            # BESIDE the model-facing fields rather than in them: the model was
+            # never shown this result, so the row's outcome stays the unknown
+            # it was left with (a late success must never read as green), while
+            # the record still says what the target actually answered.
+            if settled is not None:
+                row["settled_after_cancel"] = settled
             if self.record is not None:
                 self.record("command", row)
+
+        def caller_left() -> bool:
+            return caller_gone is not None and caller_gone.is_set()
 
         try:
             result = await self.run_command(command, float(timeout))
@@ -1999,6 +2254,9 @@ class ActionBridge:
             if task is not None and task.cancelling():
                 record_cancellation()
                 raise asyncio.CancelledError from error
+            if caller_left():
+                record_cancellation({"error": f"{type(error).__name__}: {error}"})
+                return refusal("The caller cancelled this command.")
             row.update(
                 exit_code=None,
                 timed_out=None,
@@ -2012,6 +2270,9 @@ class ActionBridge:
                 f"The target could not run the command ({type(error).__name__}: {error})."
             )
         details = result.model_dump(mode="json", exclude={"stdout", "stderr"})
+        if caller_left():
+            record_cancellation(details)
+            return refusal("The caller cancelled this command.")
         row.update(details)
         if self.record is not None:
             self.record("command", row)
@@ -2039,23 +2300,52 @@ class ActionBridge:
             line = await reader.readline()
             request = decode_call(line)
             if request["tool"] == "run_command":
-                operation = asyncio.create_task(self.call_command(request.get("arguments") or {}))
+                caller_gone = asyncio.Event()
+                operation = asyncio.create_task(
+                    self.call_command(request.get("arguments") or {}, caller_gone=caller_gone)
+                )
                 disconnect = asyncio.create_task(reader.read(1))
                 try:
                     done, _ = await asyncio.wait(
                         (operation, disconnect), return_when=asyncio.FIRST_COMPLETED
                     )
                     if disconnect in done:
-                        # The command client half-closes on cancellation. ACK
-                        # only after forwarding cancellation, so a caller that
-                        # releases a delayed HTTP reply cannot race this signal.
-                        operation.cancel()
-                        writer.write(encode_response([], is_error=True))
-                        await writer.drain()
+                        # The command client half-closes on cancellation (an
+                        # MCP request timeout, an interrupted turn). The command
+                        # is DETACHED, not cancelled: cancelling it could not
+                        # recall what the guest already runs, and cancelling
+                        # the in-flight adapter RPC poisons its channel
+                        # (``RpcClient.call``) and kills the worker -- the
+                        # measured loss, where one cut ``timeout_s: 300``
+                        # command failed every later call and ``score``.
+                        #
+                        # WHY HERE, and with no probe of its own. This is the
+                        # one layer that turns "the caller went away" into a
+                        # cancellation; below it the RPC cannot be cancelled
+                        # without poisoning, so no probe there could save the
+                        # session. Letting the bounded RPC settle (its own
+                        # deadline, ``timeout_s + COMMAND_RPC_MARGIN_S``) makes
+                        # the outcome KNOWN to the harness, and the existing
+                        # liveness rule already runs inside it: a lost guest
+                        # reply takes the adapter's one ``/platform`` probe --
+                        # live guest, an unknown-outcome answer carrying
+                        # ``UNKNOWN_OUTCOME_CAUTION`` and the session lives;
+                        # dead guest, the error escapes and ``_mutating_call``
+                        # poisons as before. Holding the mutation lane until it
+                        # settles keeps later calls (and ``finish``) ordered
+                        # behind it. This matches ``apply_actions``, whose
+                        # cut caller was never forwarded as a cancellation.
+                        # Only a cancellation of THIS handler (bridge teardown)
+                        # still cancels the operation, via ``finally``.
+                        caller_gone.set()
                         try:
-                            await operation
-                        except asyncio.CancelledError:
+                            writer.write(encode_response([], is_error=True))
+                            await writer.drain()
+                        except OSError:
+                            # The caller's bounded ACK wait already gave up;
+                            # the command must still settle, not be cancelled.
                             pass
+                        await operation
                         return
                     reply = await operation
                 finally:
@@ -3411,6 +3701,53 @@ def _agent_stop_terminal_reason(
 
 
 @dataclass(frozen=True)
+class SessionAccounting:
+    """Separate harness clocks; none is a claim of official benchmark steps.
+
+    Missing observations stay unknown (None), especially on setup failures or
+    arms without a verifier. Logical requests are deduplicated request finals,
+    not wire retries, and may be partial until the owning tree has joined.
+    """
+
+    decision_groups_used: int | None = None
+    decision_groups_limit: int | None = None
+    legacy_screen_epochs: int | None = None
+    command_attempts: int | None = None
+    logical_requests: int | None = None
+    verifier_requests: int | None = None
+    requests_complete: bool | None = None
+
+    def to_json(self) -> dict[str, int | bool | None]:
+        return {
+            "decision_groups_used": self.decision_groups_used,
+            "decision_groups_limit": self.decision_groups_limit,
+            "legacy_screen_epochs": self.legacy_screen_epochs,
+            "command_attempts": self.command_attempts,
+            "logical_requests": self.logical_requests,
+            "verifier_requests": self.verifier_requests,
+            "requests_complete": self.requests_complete,
+        }
+
+
+def _session_accounting(
+    bridge: ActionBridge | None,
+    handle: EpisodeSession | None,
+    *,
+    close_joined: bool | None,
+) -> SessionAccounting:
+    """Snapshot available sources, including partial runs, without a new ledger."""
+
+    return SessionAccounting(
+        decision_groups_used=bridge.attempted_groups if bridge is not None else None,
+        decision_groups_limit=bridge.max_steps if bridge is not None else None,
+        legacy_screen_epochs=bridge.steps if bridge is not None else None,
+        command_attempts=bridge.command_attempts if bridge is not None else None,
+        logical_requests=len(handle.request_rows) if handle is not None else None,
+        requests_complete=close_joined,
+    )
+
+
+@dataclass(frozen=True)
 class SessionArmOutcome:
     """What happened in the pilot arm, and where its record lives."""
 
@@ -3424,6 +3761,7 @@ class SessionArmOutcome:
     #: groups the admitted epoch never charged. ADDITIVE field -- historical
     #: rows and the ``steps`` semantics stay exactly as shipped.
     attempted_groups: int = 0
+    accounting: SessionAccounting = field(default_factory=SessionAccounting)
     #: The no-progress policy that was IN FORCE for this run, as
     #: :func:`~local_operator.evaluation.runner.guards.describe_progress_policy`
     #: states it (``{"on": bool, "guards": [{"code", "threshold"}, ...]}``).
@@ -3559,6 +3897,7 @@ async def run_session_episode(
     #: and the worker must NOT be released. Read by the cleanup paths and the
     #: closing ``_close_adapter_session``.
     retain_resources = False
+    close_joined: bool | None = None
     #: One re-join failure is recorded ONCE (R2 round 3): a sustained raise in
     #: the join surface must not flood the record, and must not end the join
     #: either -- the canonical task is still the thing being waited on, and a
@@ -3570,6 +3909,10 @@ async def run_session_episode(
         rescue_required = True
 
     try:
+        # Before ``launch``: a run whose MCP client would cut its longest
+        # command is refused while nothing is provisioned (QA round 1, Q2 --
+        # the check had run after prepare + reset, i.e. after an AWS VM was up).
+        assert_action_server_timeout_nests()
         # --- launch + prepare (mirrors EpisodeRunner._launch_and_prepare) ----
         supervisor = launch(selector)
         handshake: Handshake = await supervisor.handshake(timeout=config.handshake_timeout)
@@ -4237,6 +4580,7 @@ async def run_session_episode(
             score=score,
             steps=steps,
             attempted_groups=bridge.attempted_groups,
+            accounting=_session_accounting(bridge, handle, close_joined=close_joined),
             progress_guards=policy_stamp,
             terminal_reason=terminal_reason,
             diagnostic=diagnostic,
@@ -4325,6 +4669,7 @@ async def run_session_episode(
             status="failed_pre_bundle" if adapter_session is None else "failed",
             episode_id=spec.episode_id,
             record_root=record_root,
+            accounting=_session_accounting(bridge, handle, close_joined=close_joined),
             progress_guards=policy_stamp,
             terminal_reason=_failure_terminal_reason(error),
             diagnostic=f"{type(error).__name__}: {error}",
@@ -4356,6 +4701,17 @@ async def run_session_episode(
             config,
             rescue_required,
             retain_resources=retain_resources,
+        )
+
+    # The same typed snapshot reaches both the stream and sealed summary. Do
+    # not label the legacy screen epoch as the total decision budget consumed.
+    record.write("accounting", outcome.accounting.to_json())
+    accounting_failure = _first_record_failure(record, record_errors)
+    if accounting_failure is not None:
+        outcome = replace(
+            outcome,
+            record_incomplete=True,
+            record_diagnostic=outcome.record_diagnostic or _record_diagnostic(accounting_failure),
         )
 
     # --- the seal -----------------------------------------------------------
@@ -4726,8 +5082,10 @@ def _make_run_command(
             # answer and the poisoning error; at ``+ 15`` that answer would
             # land within ~1 s of this deadline, and a deadline that fires first
             # tears the RPC channel down -- losing the episode the probe exists
-            # to keep. ``+ 20`` leaves ~6 s of scheduling margin.
-            timeout=timeout_s + 20,
+            # to keep. ``+ 20`` leaves ~6 s of scheduling margin. Named
+            # (``COMMAND_RPC_MARGIN_S``) because the action server's MCP request
+            # timeout is derived from it and must stay outside it.
+            timeout=timeout_s + COMMAND_RPC_MARGIN_S,
         )
 
     return run
@@ -4998,6 +5356,7 @@ def _outcome_json(outcome: SessionArmOutcome) -> dict[str, Any]:
         "score": score_payload,
         "steps": outcome.steps,
         "attempted_groups": outcome.attempted_groups,
+        "accounting": outcome.accounting.to_json(),
         "progress_guards": dict(outcome.progress_guards),
         "terminal_reason": outcome.terminal_reason,
         "diagnostic": outcome.diagnostic,

@@ -21,23 +21,84 @@ Bridge" is the internal name used in code and on this page.
 ## The problem
 
 Team Bridge delivers text written by people outside this machine into a
-session: a `team_bridge_message` card, or the result of any `bridge` tool
-call. Screening is probabilistic. When an injected instruction got through,
-the read-tier web tools (`web_fetch`, `read https://…`, `web_search`,
-`web_read`) never reached the approval gate, so in `ask` mode a model could
-put a secret into a URL and nobody was asked.
+session: a `team_bridge_message` card, or a `bridge` tool result that carries
+inbound message or room text (see "What counts as a source"). A directory
+listing, a send receipt and an error notice do not. Screening is
+probabilistic. When an injected instruction got through, the read-tier web
+tools (`web_fetch`, `read https://…`, `web_search`, `web_read`) never reached
+the approval gate, so in `ask` mode a model could put a secret into a URL and
+nobody was asked.
 
 All of the code lives in `local_operator/harness/bridge_egress.py` (one leaf
 module); every other change is a call into it.
 
 ## Latch
 
-A session latches the first time bridge content reaches it and never
-unlatches. Only `/new` or a fresh session starts clean — not `/clear`,
-compaction, pruning, an approval or the end of a turn. The state is a
-`bridge_taint_latch` bookkeeping row in `transcript.jsonl` (never rendered to
-the model), so it survives resume, fork, `/move` and the prune-fold rewrite of
-the file; a full scan of the journal is the backstop.
+A session latches the first time inbound bridge content reaches it (a card, a
+mailbox body, a room or shared-history page) and never unlatches. Only `/new`
+or a fresh session starts clean — not `/clear`, compaction, pruning, an
+approval or the end of a turn. The state is a `bridge_taint_latch` bookkeeping
+row in `transcript.jsonl` (never rendered to the model), so it survives
+resume, fork, `/move` and the prune-fold rewrite of the file; a full scan of
+the journal is the backstop.
+
+**Already-latched sessions are not repaired.** The latch is monotonic, so a
+session that latched on a directory listing, a receipt or an error notice
+before the rule below narrowed stays latched; only `/new` or a fresh session
+starts clean. A session that has *not* latched yet is judged by the new rule
+on resume, because the scan reads each old `bridge` row's persisted `details`.
+
+## What counts as a source
+
+Until 2026-11-12 every `bridge` tool result latched the session, refusals
+included. That latched sessions that had read nothing a teammate wrote: a
+`directory` lookup, a DM receipt and an `owner_changed` refusal were enough.
+Now the result's persisted `details` shape decides, through one function,
+`bridge_result_is_inbound` in `local_operator/harness/bridge_egress.py`, used
+by both the live check and the resume scan. A `team_bridge_message` card
+always latches, as before.
+
+| Op / result | Latches? | Why |
+|---|---|---|
+| `team_bridge_message` card | yes | a screened teammate message |
+| `take_up` | yes | returns the full message body |
+| `channel_history`, `channel_thread` | yes | teammate message bodies |
+| `shared_history` | yes | teammate message bodies |
+| `shared_conversations` | yes | hub list of shared rooms: member-written names and topics |
+| `channels` | yes | room names and topics anyone in a room can write |
+| `react` | yes | the summary carries member-authored labels |
+| `directory` | no | names only, no bodies: members' chosen display and endpoint names |
+| `send`, `reply`, `dm`, `channel_post` | no | a receipt (`receipt_stage`), or the duplicate-send `skipped` result |
+| `ack` | no | `{state: working or done}` only |
+| `channel_create` | no | the room the caller just made (`state: created`) |
+| any refusal or error (`ok: false`) | no | a notice, no body |
+| a missing, empty or unrecognised `details` | yes | fails closed; a new op latches until it is classified |
+
+A directory listing or receipt is not an injection surface for this gate
+because it carries no message bodies. The gate defends against a body someone
+chose to send into this session, and a listing or receipt has none — though a
+listing does show display and endpoint names that other members chose, the
+accepted residual below. The `details` shapes that count as safe are a short
+allowlist (`ok: false` without `content`/`text`; `ok: true` with a
+`receipt_stage` string, `skipped: true`, an `ack` state, `state: created` with
+a `conversation_id`, or a `members` list). The tool's receipt builder
+(`_post_receipt` in `team_bridge/tool.py`) is load-bearing for it: an op that
+returns inbound text must never reuse those shapes.
+`tests/unit/harness/test_bridge_egress.py` carries the classification table
+that must name every op in `BRIDGE_OPS`;
+`tests/unit/team_bridge/test_bridge_taint_op_shapes.py` runs every op through
+the real predicate.
+
+### Known residual
+
+A directory listing shows display and endpoint names that other people chose,
+and refusal text can quote a hub-stored room name — a `channel_exists`
+refusal names a room. That is the same class as the directory names, and
+accepted. A short name can carry an instruction. This is accepted risk, on
+the operator's explicit instruction of 2026-11-12, to stop false positives.
+The listing is still wrapped in `BRIDGE_UNTRUSTED_CLAUSE`, so the model is
+told it is data, not instructions. A partial rule such as "latch on a long
+name" was rejected: an attack fits in 60 characters.
 
 ## Propagation between sessions
 
@@ -48,7 +109,14 @@ The latch follows bridge text wherever it is carried.
   the other, because a parent can write anything into a running child
   (`hub` send/steer are read-tier) and everything a child reports reaches its
   parent. A `hub` message from a latched session is stamped and latches the
-  child when it lands, even if the child is still queued.
+  child when it lands, even if the child is still queued. The link carries a
+  PULL too: a child that reads a latched session's journal (the pull rules
+  below) latches, and its parent latches with `source_kind`
+  `other_session` — the row says the content arrived through another session,
+  not as a card. A clean child (no bridge content, no pull, parent not
+  latched) never latches its parent: its `job_result` carries no bridge text,
+  so the parent stays clean after the delivery and after every commit that
+  follows it.
 - **Push to a peer.** `send`, `sessions` spawn/resume and `network` mutations
   are write-tier, so their cards carry the latch and ask in a latched session.
 - **Pull.** Any tool result that carries another session's transcript content
@@ -109,7 +177,11 @@ full request when its ordinary summary is clipped or does not show every
 argument verbatim. No mode change answers a parked card, and a viewer's
 background approval leaves it parked. Desktop and phone receive the
 `bridge_latched`/`taint_raised` flags and the notice as the first line of the
-description, whether the runtime or the TUI owns the gate.
+description, whether the runtime or the TUI owns the gate. A card parked
+while the session was clean is re-published with those fields, on the same
+request id, the moment the session latches, so every viewer redraws it as the
+Allow/Deny card. An attached terminal keeps a mirror of the owner's latch,
+marked from that flag, which drives the redraw only; the owner still enforces.
 
 The latch records which kind of source set it, and that kind picks only the
 wording of the card notice, the paused-auto notice and the refused-auto
@@ -133,13 +205,20 @@ survives resume.
 
 ## bridge_ack
 
-A routed `approvals auto` for a latched session needs the `bridge_ack` marker
-(sent by a desktop build that knows the latch; the TUI marks typed commands).
-Without it the command is refused with a receipt that says to type
-`/approvals auto` in the terminal, so an older desktop's "Set auto" escape
-cannot re-loosen a latched session. Today that includes the phone composer's
-typed `/approvals auto`: the phone has no `bridge_ack` path yet, so a latched
-session can be loosened only from the terminal (fail closed).
+A routed `approvals auto` or `approvals default auto` for a latched session
+needs the `bridge_ack` marker (sent by a desktop build that knows the latch;
+the TUI marks typed commands). Without it the command is refused with a
+receipt that says to type `/approvals auto` in the terminal, so an older
+desktop's "Set auto" escape cannot re-loosen a latched session. The `default`
+form is covered because global auto covers a latched session's cards (the
+accepted auto/yolo risk), so a stale card's `G` would otherwise loosen the gate
+in one press. A `default` form is judged by what it resolves to, not by its
+words (`approvals_default_may_loosen` in `harness/approval.py`): a bare
+`approvals default` keeps a TUI owner's current mode, and a suspended pre-latch
+session auto keeps that mode auto, so the bare form is refused while latched on
+both owner hosts. Name `default ask` to tighten. Today that includes the phone composer's typed `/approvals
+auto`: the phone has no `bridge_ack` path yet, so a latched session can be
+loosened only from the terminal (fail closed).
 
 ## Fail-closed
 

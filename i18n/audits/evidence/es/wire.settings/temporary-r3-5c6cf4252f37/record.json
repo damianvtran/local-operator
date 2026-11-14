@@ -1,0 +1,58 @@
+{
+  "schema": 1,
+  "audit_id": "temporary-r3-5c6cf4252f37",
+  "audit_kind": "independent semantic audit of the temporary-chat delta; unchanged keys carried by byte proof",
+  "locale": "es",
+  "namespace": "wire.settings",
+  "status": "passed",
+  "verdict": "passed",
+  "audit_task": "i18n-inpr-core",
+  "pr": "damianvtran/local-operator#3832",
+  "audited_revision": "367fbb857",
+  "catalogue_state": "catalogue bytes identical at 4f6f57986 (hashes recomputed from the shipped files)",
+  "scope": "all 6 key(s) the PR changed or added in wire.settings, read against i18n/glossary.md and i18n/style-guides/es.md; the other 859 key(s) are byte-identical to origin/main 27bfbdb21, whose last ledger row was passed and fresh",
+  "keys_audited": [
+    "wire.settings.session_cleanup_temporary_idle_minutes.choice.15m.label",
+    "wire.settings.session_cleanup_temporary_idle_minutes.choice.24h.label",
+    "wire.settings.session_cleanup_temporary_idle_minutes.choice.2h.label",
+    "wire.settings.session_cleanup_temporary_idle_minutes.choice.30m.label",
+    "wire.settings.session_cleanup_temporary_idle_minutes.help",
+    "wire.settings.session_cleanup_temporary_idle_minutes.label"
+  ],
+  "keys_total": 865,
+  "mechanical_checks": [
+    "placeholder parity",
+    "CLDR plural categories",
+    "vi NFC",
+    "no manual bidi controls",
+    "no ASCII ellipsis",
+    "fr U+202F before :;?!",
+    "maxCells via rich.cells.cell_len"
+  ],
+  "translator": {
+    "agent": "core-backend coder cf2843d74957; round-1 remediation coder 1c07b39051ed (lopdev coder role) — relayed from PR #3832 i18n audit comments 6811281029/6812645445, not independently verified",
+    "model": "anthropic/claude-opus-5-5",
+    "fallback": "none reported in the relayed source",
+    "date": "2026-11-11..2026-11-12 (git: 09839b6de, 75606914f, eaff8c7a9)"
+  },
+  "auditor": {
+    "agent": "independent i18n auditor (lopdev reviewer role, task i18n-inpr-core, session 5c6cf4252f37; independent of the translators and of the round-1/2 auditors 506f24a144fa/2d1500d56d0e, whose artifacts were not read)",
+    "session": "5c6cf4252f37",
+    "model": "anthropic/claude-opus-5-5",
+    "fallback": "none observed in this session",
+    "date": "2026-11-12",
+    "result": "passed",
+    "findings": 0,
+    "unresolved_blocker_major": 0,
+    "minor": 0,
+    "nit": 0
+  },
+  "findings_note": "no findings.",
+  "report": "https://github.com/damianvtran/local-operator/pull/3832#issuecomment-6813468699",
+  "source_sha256": "ffb9cf937f10d7298f9178f18286c2ac7669e578d595f30b4074a830b9667c13",
+  "target_sha256": "c8d58a331c959c35b163aeb419038073b304588af5a1f124a0fe15c0a9dce42a",
+  "input_paths": {
+    "en": "local_operator/i18n/catalogues/en/wire.settings.json",
+    "target": "local_operator/i18n/catalogues/es/wire.settings.json"
+  }
+}

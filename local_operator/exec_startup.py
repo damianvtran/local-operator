@@ -46,6 +46,9 @@ STARTUP_FIELDS = (
     # front end and silently lost, and the workstream the operator asked for
     # would come back hidden.
     "workstream",
+    # A temporary chat (``session/temporary.py``): like ``workstream`` it decides
+    # what the run IS to every listing, so a ``--background`` run must carry it.
+    "temporary",
     # The final-response output contract, appended here rather than in a
     # bespoke branch of ``build_worker_argv``: membership is what makes a
     # ``--background`` run the same request run elsewhere, AND what makes the
@@ -212,6 +215,11 @@ def add_startup_arguments(parser: argparse.ArgumentParser, *, help_locale: str =
         "--workstream",
         action="store_true",
         help=_eh.workstream().envelope(locale=help_locale)["text"],
+    )
+    parser.add_argument(
+        "--temporary",
+        action="store_true",
+        help=_eh.temporary().envelope(locale=help_locale)["text"],
     )
     parser.add_argument(
         "--output-format",

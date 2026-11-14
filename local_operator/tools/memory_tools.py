@@ -57,6 +57,30 @@ def store_for(context: ToolContext | None) -> MemoryStore:
     )
 
 
+#: Model-facing (an allowed i18n exemption): what a write outside session scope
+#: answers inside a temporary chat.
+TEMPORARY_MEMORY_REFUSAL = (
+    "This is a temporary chat; global memory is off here. Save to session scope, "
+    "or ask the user to keep the chat first."
+)
+
+
+def _refuse_durable_write_in_temporary(context: ToolContext | None, scope: str | None) -> None:
+    """Refuse a memory write that would outlive a TEMPORARY chat.
+
+    A temporary chat is deleted when idle; session memory goes with it, but a
+    global/team/agent fact would carry its content past the deletion the user
+    asked for. Only ``session`` scope is written here; reads are unaffected.
+    """
+    # An unscoped path is not a durable write; the writer refuses it on its own.
+    if not scope or scope == "session" or context is None or not context.session_dir:
+        return
+    from local_operator.session.temporary import is_marked_path
+
+    if is_marked_path(context.session_dir):
+        raise MemoryError(TEMPORARY_MEMORY_REFUSAL)
+
+
 def _recall_reference(name: str, path: Any) -> str | None:
     """The read call's ``q`` VALUE when it IS a structural reference, else ``None``.
 
@@ -193,6 +217,8 @@ def _run(name: str, args: dict[str, Any], context: ToolContext | None) -> str:
             "Unsupported memory argument; file ranges and filesystem controls do not apply."
         )
     scope, entity, query = parse_url(args["path"].strip())
+    if name != "read":
+        _refuse_durable_write_in_temporary(context, scope)
     # The parsed query carries the same single exemption, on its value: the q value is
     # emptied and no other key of this call is affected.
     guard_encoded(query if reference is None else {**query, "q": ""})
@@ -408,6 +434,7 @@ async def execute_fact_memory(call_id, args, signal=None, on_update=None, contex
         lifetime = _LIFETIMES[scope]
         path = "memory://" + scope
         if args["op"] == "store":
+            _refuse_durable_write_in_temporary(context, scope)
             guard(text, field="text")
             payload = {"title": _derived_title(text), "body": text}
             store_for(context).prepare_fact(payload)

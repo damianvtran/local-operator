@@ -127,6 +127,9 @@ from local_operator.session.runtime.types import (
     HEARTBEAT_INTERVAL_S,
     INPUT_MODE_CAPABILITY,
     LIVE_INBOX_CAPABILITY,
+    MESH_PEER_MESSAGE_CAPABILITY,
+    MESH_SENDER_DEVICE_ID_KEY,
+    MESH_SENDER_DEVICE_NAME_KEY,
     OPERATOR_SIGNATURE_CAPABILITY,
     PEER_MESSAGE_ID_CAPABILITY,
     QUEUED_MOVE_CAPABILITY,
@@ -2084,6 +2087,40 @@ class _ConnectionAuthority:
 
     locality: ClientLocality = "local"
     capabilities: frozenset[str] = frozenset()
+    #: ``{"device_id", "name"}`` of the device a RELAYED connection speaks for,
+    #: from the auth frame the owner's own relay wrote off its authenticated link
+    #: (``relay._peer_block``) — empty for a local dial. ``peer_message`` stamps it
+    #: onto the card (``_stamp_peer_sender``) so the receiver knows which device
+    #: wrote and can answer with ``send peer=``.
+    peer: Mapping[str, Any] = field(default_factory=dict)
+
+
+def _stamp_peer_sender(raw: Any, authority: "_ConnectionAuthority") -> dict[str, Any]:
+    """The sender dict a ``peer_message`` card carries, device stamped by the OWNER.
+
+    The frame's sender is ADVISORY (a session id and name the sending side read
+    off its own registry): it is display only. The device is a different kind of
+    fact — it decides where a reply goes — so it comes from the connection, never
+    the frame. Any frame-supplied device key is dropped first, for a local dial
+    too (a local caller must not be able to dress a note up as a mesh peer's),
+    and a remote connection then gets the link's identity plus the
+    ``remote_origin`` stamp a relayed ``prompt`` already carries. ``pid`` and
+    ``cwd`` of a remote sender name things on ANOTHER machine, which nothing
+    here can act on, so they are dropped rather than shown as if local.
+    """
+    sender = dict(raw) if isinstance(raw, Mapping) else {}
+    sender.pop(MESH_SENDER_DEVICE_ID_KEY, None)
+    sender.pop(MESH_SENDER_DEVICE_NAME_KEY, None)
+    if authority.locality == "local":
+        return sender
+    sender.pop("pid", None)
+    sender.pop("cwd", None)
+    sender["remote_origin"] = True
+    device_id = str(authority.peer.get("device_id") or "")
+    if device_id:
+        sender[MESH_SENDER_DEVICE_ID_KEY] = device_id
+        sender[MESH_SENDER_DEVICE_NAME_KEY] = str(authority.peer.get("name") or "")
+    return sender
 
 
 #: What a dispatch under no connection at all is treated as: the pre-existing
@@ -2589,6 +2626,34 @@ def has_durable_history(session: Any) -> bool:
     return durable_conversation_path(path)
 
 
+def _accepts_keyword(fn: Any, name: str) -> bool:
+    """Whether ``fn`` takes keyword ``name`` (a handle kind may predate it)."""
+    try:
+        return name in inspect.signature(fn).parameters
+    except (TypeError, ValueError):
+        return False
+
+
+def _serve_peer_bounded_history(payload: dict[str, Any], sync: Any, locality: str) -> None:
+    """Swap in the bounded page for a NON-LOCAL viewer whose exact page escalated.
+
+    ``full_required`` means "replay the transcript locally": exact for a viewer
+    on this machine, impossible for one on another device, whose facade then
+    refused the bind — and with it every mesh ``send``/``peek`` riding that
+    viewer — because ONE newest row was larger than a page. The session captured
+    the same cut's bounded page beside the exact one
+    (``FrontendSync._peer_display_history``); a local connection never sees it,
+    so a local viewer's frame is byte-for-byte what it was. The caller's strip
+    helpers run after this, so capability gating applies to the swapped page too.
+    """
+    if locality == "local":
+        return
+    bounded = getattr(sync, "_peer_display_history", None)
+    if bounded is None:
+        return
+    payload["display_history"] = bounded.model_dump(mode="json")
+
+
 class RuntimeServer:
     """One per interactive process. Construct, ``start()``, ``close()``."""
 
@@ -2919,6 +2984,15 @@ class RuntimeServer:
                 # drop the id cannot dedupe that retry -- so an owner that does
                 # not take the keyword must not advertise it.
                 + ([PEER_MESSAGE_ID_CAPABILITY] if receives_message_id(handle) else [])
+                # A MESH ``send`` MAY USE THE MAILBOX, gated on the handle that
+                # can receive one at all: the dispatch below stamps the relayed
+                # device on every remote ``peer_message``. See
+                # ``MESH_PEER_MESSAGE_CAPABILITY`` for why the sender gates on it.
+                + (
+                    [MESH_PEER_MESSAGE_CAPABILITY]
+                    if callable(getattr(handle, "receive_peer_message", None))
+                    else []
+                )
                 # THE LIVE INBOX DRAIN, gated on the flag the runtime child sets
                 # when it starts the watcher (``process._watch_live_inbox``): a
                 # sender that sees it may queue a message to ``inbox.jsonl``
@@ -4814,6 +4888,7 @@ class RuntimeServer:
             # ``job_trajectory``; see ``sync_wire_payload`` for why the frame
             # cannot carry them.
             sync_payload = sync_wire_payload(sync)
+            _serve_peer_bounded_history(sync_payload, sync, conn.locality)
             # The sync frame carries the FIRST display page, so it is one of
             # the THREE places the audit fields reach the wire (the others are
             # the ``history_page`` and ``frontend_sync`` RPCs). All three strip
@@ -8622,7 +8697,9 @@ class RuntimeServer:
         """
         kwargs: dict[str, Any] = {}
         if _accepts_kw(self._dispatch, "authority"):
-            kwargs["authority"] = _ConnectionAuthority(conn.locality, conn.capabilities)
+            kwargs["authority"] = _ConnectionAuthority(
+                conn.locality, conn.capabilities, dict(conn.peer)
+            )
         if deliver is not None and _accepts_kw(self._dispatch, "deliver"):
             kwargs["deliver"] = deliver
         return await self._dispatch(op, frame, **kwargs)
@@ -9167,7 +9244,9 @@ class RuntimeServer:
                 "text": frame["text"],
                 "mode": str(frame.get("mode", "mailbox")),
                 "wake": bool(frame.get("wake", False)),
-                "sender": frame.get("sender") or {},
+                # THE DEVICE COMES FROM THE LINK, not the frame — see
+                # ``_stamp_peer_sender`` (PR #3827 A1: mesh ``send`` lands here).
+                "sender": _stamp_peer_sender(frame.get("sender"), authority),
             }
             # SENDER-MINTED MESSAGE IDENTITY, probed exactly like ``command_id``
             # above: a handle from before the carriage never receives a keyword
@@ -9661,6 +9740,7 @@ class RuntimeServer:
             )
             try:
                 payload = sync_wire_payload(subscription.sync)
+                _serve_peer_bounded_history(payload, subscription.sync, locality)
                 # The THIRD wire route, and the one an old viewer uses most:
                 # ``AttachedSession._refresh_display_history`` calls this op on
                 # every history refresh, which fires whenever the frontend's
@@ -9736,7 +9816,14 @@ class RuntimeServer:
                 raise ValueError("invalid history page request")
             if len(before) > 4096 or len(anchor) > 512:
                 raise ValueError("invalid history page request")
-            result = fetch(before, anchor)
+            if locality != "local" and _accepts_keyword(fetch, "bound_oversized"):
+                # A NON-LOCAL VIEWER cannot perform the local replay a
+                # ``full_required`` page asks for, so an oversized older group
+                # rides bounded and marked instead (see
+                # ``_serve_peer_bounded_history``).
+                result = fetch(before, anchor, bound_oversized=True)
+            else:
+                result = fetch(before, anchor)
             payload = await result if inspect.isawaitable(result) else result
             # Same contract as the sync frame: a viewer that did not negotiate
             # the audit capability must not be handed fields its page model

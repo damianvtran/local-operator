@@ -98,5 +98,10 @@
     "role": "argparse exec argument help",
     "tone": "instructional, preserve the existing meaning",
     "note": "Help for workstream. Product names, commands, --flags, identifiers and literal examples are syntax: keep them stable. This message has ZERO ICU arguments; doubled apostrophes and individually quoted braces preserve literal text, including JSON Schema examples. Preserve argparse percent substitutions/escaping exactly; argparse performs its own interpolation after rendering. EN-only until an independent translation/audit wave carries this namespace; fallback must not change locale eligibility."
+  },
+  "cli.exec_help.temporary": {
+    "role": "CLI --help text for a flag",
+    "tone": "plain, full sentence like neighbours",
+    "note": "Help for the --temporary flag of 'lop exec'."
   }
 }

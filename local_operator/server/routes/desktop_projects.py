@@ -78,6 +78,7 @@ from local_operator.projects import (
     ProjectRegistry,
     ProjectRegistryLockTimeout,
     ProjectSchemaGuardError,
+    TemporarySessionError,
     build_project_view,
     closed_with_open_milestones,
     display_name,
@@ -172,6 +173,13 @@ def _not_found(registry: ProjectRegistry, key: str) -> HTTPException:
 
 def _refusal(exc: Exception, key: str) -> HTTPException:
     """Map one store refusal to the response the client can act on."""
+    if isinstance(exc, TemporarySessionError):
+        # A temporary chat cannot be linked until it is kept (UI remedy: Keep
+        # and link). The keyed sentence, not the model-facing exception text.
+        return HTTPException(
+            409,
+            _wd.session_temporary(session_id=exc.session_id).envelope(code="session_temporary"),
+        )
     if isinstance(exc, ProjectNameConflictError):
         # The name is taken (case-insensitive): a STATE conflict, not a
         # malformed value — the client's move is to pick another name or open

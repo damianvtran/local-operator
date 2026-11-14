@@ -205,6 +205,9 @@ CODE_NOT_ON_PATH = "not_on_path"
 CODE_NOT_AUTHENTICATED = "not_authenticated"
 #: Resilience (2026-10-21): under :data:`RESILIENCE_MIN_RAM_MB` of RAM and no swap.
 CODE_LOW_MEMORY = "low_memory"
+#: The peer's relay unit lets systemd stop the relay when the kernel OOM-kills
+#: any session process in its cgroup (``relay.RELAY_OOM_POLICY``).
+CODE_RELAY_OOM_POLICY = "relay_oom_policy"
 #: The peer has not granted this device the lifecycle capability net_restart
 #: requires. The remedy is a grant ON THE PEER, never a local gate bypass.
 CODE_UPDATE_GRANT_MISSING = "update_grant_missing"
@@ -349,8 +352,8 @@ def operator_fact() -> dict[str, Any]:
     }
 
 
-def _can_sign_here() -> bool:
-    """Whether THIS host holds the private half, probed without prompting.
+def _can_sign_here(expected_key_id: str | None = None) -> bool:
+    """Whether THIS host holds the ANCHOR's private half, probed without prompting.
 
     The probe is the operator module's own signer lookup (the anchor names the
     backend), and it is the ONLY sound question to ask: a keychain query from
@@ -359,6 +362,14 @@ def _can_sign_here() -> bool:
     that has one. ``False`` on every failure — a broken agent is "cannot sign
     NOW", which is the fact this answer is for — and the signer is closed
     immediately, because a probe must leave nothing running.
+
+    "A signer loads" is NOT the question (PR #3905 review r2, M3): a second Mac
+    that ran ``lop operator init`` holds ITS OWN operator key, and counting that
+    as authority made it author routing for the fleet and refuse the head's.
+    The loaded key must be the one the anchor pins: ``expected_key_id`` when the
+    caller already holds the anchor, else the installed anchor's own key id. With
+    no usable anchor and no expectation there is nothing to compare against, so
+    any loadable key answers (the pre-anchor "has a key at all" reading).
     """
     try:
         from local_operator.operator.keychain import choose_backend
@@ -366,15 +377,25 @@ def _can_sign_here() -> bool:
         from local_operator.paths import config_dir
 
         loaded = load_anchor()
-        backend_name = loaded.anchor.backend if loaded.usable and loaded.anchor else "auto"
+        anchor = loaded.anchor if loaded.usable else None
+        backend_name = anchor.backend if anchor else "auto"
+        if expected_key_id is None and anchor is not None:
+            expected_key_id = str(anchor.key_id or "")
         signer: Any = choose_backend(backend_name, config_root=config_dir()).load()
         if signer is None:
             return False
         try:
-            signer.close()
-        except Exception:  # noqa: BLE001 — closing a probe is best-effort
-            pass
-        return True
+            held = str(getattr(getattr(signer, "handle", None), "key_id", "") or "")
+        finally:
+            try:
+                signer.close()
+            except Exception:  # noqa: BLE001 — closing a probe is best-effort
+                pass
+        if expected_key_id is None:
+            return True
+        # An empty expectation (an anchor without a key id) matches nothing: fail
+        # closed rather than let any key stand in for an unnamed one.
+        return bool(expected_key_id) and held == expected_key_id
     except Exception:  # noqa: BLE001 — see above: "cannot sign", not a crash
         return False
 
@@ -1700,13 +1721,32 @@ def collect_peer_facts(
         "github": github_fact(root, home),
         "operator": operator_fact(),
         "memory": memory_fact(),
+        # ADDITIVE ON THE WIRE: what this device's relay unit says OOMPolicy is.
+        # A viewer built before this key ignores it; this build reads its ABSENCE
+        # (an older peer) as no claim, never as a gap.
+        "relay_unit": relay_unit_fact(),
         # ADDITIVE ON THE WIRE: a viewer built before this key ignores it, and a
         # viewer reading a peer built before it renders ``unknown`` — never ok.
         "serve_daemons": serve_daemons_fact(root),
         # ADDITIVE ON THE WIRE: an older viewer ignores it, and an older peer's
         # answer lacks it, which this build reads as "nothing to report" (no row).
         "custom_instructions": custom_instructions_fact(root),
+        # ADDITIVE ON THE WIRE: the fallback chain this device's default would
+        # actually walk, and whose it is (mirrored from the operator's device or
+        # this device's own). An older viewer ignores it; an older peer omits it
+        # and the model-credential row then reads byte-for-byte as before.
+        "failover": _failover_fact(root, model),
     }
+
+
+def _failover_fact(root: Path, model: Mapping[str, Any]) -> dict[str, Any] | None:
+    from local_operator.network import routing_sync
+
+    return routing_sync.failover_fact(
+        root,
+        hosting=str(model.get("hosting") or ""),
+        model_name=str(model.get("model_name") or ""),
+    )
 
 
 def custom_instructions_fact(root: Path) -> dict[str, Any] | None:
@@ -1778,11 +1818,90 @@ def custom_instructions_row(
     )
 
 
+def _attach_failover(row: dict[str, Any], facts: Mapping[str, Any], *, server: Any) -> None:
+    """Name the peer's effective fallback chain on its model-credential row.
+
+    WHY ON THIS ROW: "can the default be served" and "what happens when it is
+    rate-limited" are one question for an operator handing a node work — a node
+    whose chain is primary-only ends a turn on the first borrowed 429. Riding the
+    existing row (sentence + ``observed.failover``) instead of a new capability
+    keeps enrollment's closed capability set (``enrollment.public_report``)
+    untouched. Absent fact (an older peer) leaves the row exactly as it was.
+    """
+    fact = facts.get("failover")
+    if not isinstance(fact, Mapping):
+        return
+    from local_operator.network import routing_sync
+
+    origin = str(fact.get("origin") or "")
+    self_id = str(getattr(getattr(server, "identity", None), "device_id", "") or "")
+    label = ""
+    if origin:
+        label = (
+            _self_label(server)
+            if origin == self_id
+            else str(server._member_name(origin) or "")  # noqa: SLF001 — the mesh's own name
+        )
+    # The sentence only when the peer HAS routing to name: a bare peer's row keeps
+    # its existing words (its empty chain is still in ``observed``), so a viewer
+    # reading an unconfigured fleet sees no new prose on every row.
+    if fact.get("hops") or fact.get("model_fallback") is False:
+        sentence = routing_sync.failover_sentence(fact, origin_label=label)
+        detail = str(row.get("detail") or "")
+        # Q-1: a detail that does not already end a sentence gets one, or the
+        # failover sentence runs on from it ("... is refused Fails over to: ...").
+        if detail and not detail.rstrip().endswith((".", "!", "?")):
+            detail = detail.rstrip() + "."
+        row["detail"] = f"{detail} {sentence}".strip()
+    observed = dict(row.get("observed") or {})
+    observed["failover"] = {
+        key: fact.get(key)
+        for key in ("chain_key", "hops", "source", "origin", "model_fallback")
+        if key in fact
+    }
+    row["observed"] = observed
+
+
 #: The RAM below which a swapless member is reported as a resilience risk. 4 GB
 #: is the measured line, not a guess: cloud-node-1 at 2 GB with no swap OOM-killed
 #: its own relay running ordinary session work plus one Next.js build, and the
 #: same work fits on this family's 8 GB hosts with headroom.
 RESILIENCE_MIN_RAM_MB = 4096
+
+
+def relay_unit_fact() -> dict[str, Any]:
+    """This device's relay-unit OOM policy (``relay.installed_unit_oom_policy``).
+
+    No-raise: a readiness answer never fails on a diagnostic fact.
+    """
+    try:
+        from local_operator.network import relay as relay_mod
+
+        return relay_mod.installed_unit_oom_policy()
+    except Exception:  # noqa: BLE001 — a diagnostic fact degrades to unknown
+        return {"supervisor": None}
+
+
+def _relay_oom_policy_gap(facts: Mapping[str, Any]) -> bool:
+    """Whether the peer PROVED its installed relay unit lacks ``OOMPolicy=continue``."""
+    from local_operator.network import relay as relay_mod
+
+    unit = facts.get("relay_unit")
+    return (
+        isinstance(unit, Mapping)
+        and unit.get("supervisor") == "systemd"
+        and unit.get("installed") is True
+        and unit.get("readable") is True
+        and unit.get("oom_policy") != relay_mod.RELAY_OOM_POLICY
+    )
+
+
+def _relay_oom_policy_remedy(peer_label: str) -> str:
+    return (
+        f"on {peer_label}, run `lop network install`: it rewrites the relay unit with "
+        "OOMPolicy=continue and reloads systemd without restarting the relay (an "
+        "update does the same)"
+    )
 
 
 def memory_fact() -> dict[str, Any]:
@@ -1830,6 +1949,10 @@ def resilience_row(member: Any, facts: Mapping[str, Any], *, peer_label: str) ->
             source=SOURCE_UNKNOWN,
         )
     swapless = isinstance(swap, int) and not isinstance(swap, bool) and swap == 0
+    # 2026-11-11: a session child's OOM kill stopped the relay UNIT five times on
+    # a 15.7 GB node, because the unit ran on systemd's default OOMPolicy=stop.
+    # RAM alone does not answer this row; the unit's policy is the other half.
+    policy_gap = _relay_oom_policy_gap(facts)
     if total < RESILIENCE_MIN_RAM_MB and swapless:
         return _capability_row(
             device_id=member.device_id,
@@ -1847,9 +1970,30 @@ def resilience_row(member: Any, facts: Mapping[str, Any], *, peer_label: str) ->
                 f"host with at least {RESILIENCE_MIN_RAM_MB // 1024} GB of RAM",
                 f"run `lop update` on {peer_label} so its relay unit carries "
                 "OOMScoreAdjust and its runtimes refuse to start when memory is short",
+                *([_relay_oom_policy_remedy(peer_label)] if policy_gap else []),
             ],
             source=SOURCE_PEER,
             observed={"total_mb": total, "swap_total_mb": swap},
+        )
+    if policy_gap:
+        return _capability_row(
+            device_id=member.device_id,
+            device_name=peer_label,
+            capability=CAPABILITY_RESILIENCE,
+            ok=False,
+            code=CODE_RELAY_OOM_POLICY,
+            detail=(
+                f"{peer_label}'s relay service stops whenever the kernel OOM-kills any "
+                "session process there (its unit does not set OOMPolicy=continue), so "
+                "one heavy session takes the device off the mesh until the relay restarts"
+            ),
+            remedies=[_relay_oom_policy_remedy(peer_label)],
+            source=SOURCE_PEER,
+            observed={
+                "total_mb": total,
+                "swap_total_mb": swap,
+                "oom_policy": facts["relay_unit"].get("oom_policy"),
+            },
         )
     return _capability_row(
         device_id=member.device_id,
@@ -5693,7 +5837,9 @@ def _peer_checks(
     rows.append(git_row(member, facts, peer_label=peer_label, viewer=viewer))
     rows.append(repository_row(member, facts, peer_label=peer_label, repository=repository))
     rows.append(mcp_servers_row(member, facts, peer_label=peer_label))
-    rows.append(model_credential_row(member, facts, viewer=viewer, peer_label=peer_label))
+    credential_row = model_credential_row(member, facts, viewer=viewer, peer_label=peer_label)
+    _attach_failover(credential_row, facts, server=server)
+    rows.append(credential_row)
     switch_row = model_switch_row(
         member,
         facts,

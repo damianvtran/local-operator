@@ -612,7 +612,8 @@ def test_preview_reports_the_checkpoint_branch_and_text(home: Path) -> None:
     theirs = preview_tool_call(
         "bash", {"command": "rm -rf ~/theirs"}, ctx, settings=GuardSettings()
     )
-    assert theirs.builtin_risk == "HIGH" and "no evidence" in theirs.render()
+    assert theirs.builtin_risk == "HIGH" and "no history evidence" in theirs.render()
+    assert "ledger: no row for this session" in theirs.render()
     assert "cannot authorise a delete" in theirs.builtin_text
     crit = preview_tool_call(
         "bash", {"command": "rm -rf ~/.local-operator"}, ctx, settings=GuardSettings()
@@ -674,6 +675,11 @@ async def test_forked_judge_uses_the_session_prefix_and_falls_back() -> None:
         "sed -i s/a/b/ ~/.local-operator/sessions/aaaaaaaaaaaa/transcript.jsonl",
         "rm ~/.local-operator/sessions/aaaaaaaaaaaa/subagent-roster.v1.json",
         "echo x >> ~/.local-operator/sessions/*/transcript.jsonl",
+        # The temporary-chat mark: a planted mark would get another
+        # conversation deleted by the cleanup pass.
+        "echo x > ~/.local-operator/sessions/aaaaaaaaaaaa/temporary.json",
+        "mv /tmp/m ~/.local-operator/sessions/aaaaaaaaaaaa/temporary.json",
+        "rm ~/.local-operator/sessions/aaaaaaaaaaaa/temporary.json",
     ],
 )
 def test_writes_to_evidence_are_critical(home: Path, command: str) -> None:

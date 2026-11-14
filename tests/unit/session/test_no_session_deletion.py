@@ -797,6 +797,22 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "Removes only its own `relay-stop-requested.json.<pid>.tmp` staging FILE in "
         "<config>/run after a failed write or replace",
     ),
+    # The owner-side create-key index (`network/create_keys.py`): ONE fixed-name
+    # FILE, `<config>/network/create-keys.json`, rewritten atomically from a
+    # mkstemp sidecar in the same directory. A sibling of `sessions/`, never a
+    # parent of it, and never a directory.
+    (
+        "local_operator/network/create_keys.py::CreateKeyIndex._save",
+        "os.replace",
+        "Atomic replacement of the fixed config-root FILE <config>/network/create-keys.json "
+        "from this call's own mkstemp sidecar; never a directory and never under sessions/",
+    ),
+    (
+        "local_operator/network/create_keys.py::CreateKeyIndex._save",
+        "os.unlink",
+        "Removes only this call's own `.create-keys.*.tmp` mkstemp FILE in "
+        "<config>/network after a failed write or replace",
+    ),
     (
         "local_operator/network/relay.py::clear_deliberate_stop",
         "<path>.unlink",
@@ -891,6 +907,31 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
     # call minted. Every replace target and every unlink target is a regular FILE
     # (or a symlink planted in a sound's slot, unlinked as the link itself); no
     # call names a directory, and none can resolve under `sessions/`.
+    # `record_forwarding_origin`: the target is `_origins_path(root)` =
+    # <config>/remote-attention-origins.json (a fixed basename joined to the relay's
+    # config root, never a session id), and the source is the sibling
+    # `.remote-attention-origins.json.<pid>.tmp` FILE this same call created with
+    # O_CREAT. `os.replace` onto a regular file cannot displace a directory, and
+    # neither path can resolve under `sessions/`.
+    (
+        "local_operator/notifications/remote_attention.py::record_forwarding_origin",
+        "os.replace",
+        "Atomic replace of <config>/remote-attention-origins.json from its sibling "
+        "pid-suffixed tmp FILE; never a directory and never under sessions/",
+    ),
+    # `origin_baselines_ms`: the target is `Path(root) / BASELINES_FILE` =
+    # <config>/remote-attention-baselines.json (a fixed basename joined to the
+    # watcher's config root — tui/app.py and server/app.py pass their config dir,
+    # never a session id), and the source is the sibling
+    # `.remote-attention-baselines.json.<pid>.tmp` FILE this same call created
+    # with O_CREAT under the flock. `os.replace` onto a regular file cannot
+    # displace a directory, and neither path can resolve under `sessions/`.
+    (
+        "local_operator/notifications/remote_attention.py::origin_baselines_ms",
+        "os.replace",
+        "Atomic replace of <config>/remote-attention-baselines.json from its sibling "
+        "pid-suffixed tmp FILE; never a directory and never under sessions/",
+    ),
     (
         "local_operator/notifications/custom_sounds.py::_write_index",
         "os.replace",
@@ -1018,6 +1059,22 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "local_operator/session/archived.py::_write_archived",
         "<path>.unlink",
         "Removes only its own named temporary file after a failed atomic replacement",
+    ),
+    # -- the temporary-chat mark: one FILE inside the session's own directory ---
+    # The receiver is ``<sessions>/<id>/temporary.json`` and the source is this
+    # call's own mkstemp FILE in the same directory; neither can be a directory.
+    # "Keep" is a WRITE of ``temporary: false`` for this reason: the only removal
+    # in session/temporary.py is of its own temp file.
+    (
+        "local_operator/session/temporary.py::_write_mark_file",
+        "<path>.replace",
+        "Atomic replacement of temp FILE -> sessions/<id>/temporary.json; replace "
+        "onto a FILE name, never a directory",
+    ),
+    (
+        "local_operator/session/temporary.py::_write_mark_file",
+        "<path>.unlink",
+        "Removes only its own mkstemp temp FILE after a failed atomic replacement",
     ),
     # -- the mesh package: `<config>/network/` and the session STAMP ----------
     # THE MESH LEGITIMATELY WRITES AND REMOVES PLENTY — network records, invite
@@ -4633,6 +4690,7 @@ _NEAR_DISPLACERS: frozenset[str] = frozenset(
         "local_operator/session/transcript_index.py::write_index",  # tmp -> index FILE
         "local_operator/session/transcript_index.py::_publish_store",  # tmp -> snapshot FILE
         "local_operator/session/archived.py::_write_archived",  # tmp -> archive index FILE
+        "local_operator/session/temporary.py::_write_mark_file",  # tmp -> temporary.json FILE
         "local_operator/session/session.py::_write_roster_sidecar",  # tmp -> roster FILE
         # tmp -> runtime-stall-<pid>.deadline FILE. Both paths are log_dir() + an int
         # pid and nothing else (see the allow-list rows above): no session id, no
@@ -4802,3 +4860,65 @@ def test_the_guard_ignores_string_and_container_methods(source: str) -> None:
 @pytest.mark.parametrize("key", sorted(_ALLOWED))
 def test_every_allowed_entry_has_a_reason(key: str) -> None:
     assert _ALLOWED[key].strip(), key
+
+
+# -- the temporary-chat pass: the two companion assertions --------------------
+#
+# The module docstring's promise ("removes nothing when disabled") holds for a
+# store with no marks. The temporary pass is NOT gated by ``enabled`` (the mark
+# is the opt-in), so these two cells pin exactly what it may remove: nothing on
+# an unmarked store, and ONLY the expired, marked, unguarded ids on a store with
+# cleanup disabled.
+
+
+def _temporary_store(tmp_path: Path, count: int = 50) -> tuple[Path, float]:
+    import json as _json
+    import os as _os
+
+    from local_operator.session.cleanup import mark_store
+
+    sessions = tmp_path / "sessions"
+    sessions.mkdir(parents=True)
+    mark_store(sessions)
+    now = 2_000_000_000.0
+    for index in range(count):
+        directory = sessions / f"{index:012x}"
+        directory.mkdir()
+        transcript = directory / "transcript.jsonl"
+        transcript.write_text(_json.dumps({"type": "message"}) + "\n", encoding="utf-8")
+        stamp = now - 400 * 86400
+        _os.utime(transcript, (stamp, stamp))
+    return tmp_path, now
+
+
+def test_the_temporary_pass_removes_nothing_from_an_unmarked_store(tmp_path: Path) -> None:
+    from local_operator.session.cleanup import CleanupPolicy, run_temporary_pass
+
+    root, now = _temporary_store(tmp_path)
+    before = sorted(p.name for p in (root / "sessions").iterdir())
+    policy = CleanupPolicy(enabled=False, max_sessions=1, max_inactive_days=1, remove_empty=True)
+    result = run_temporary_pass(root, policy, actor="test", now=now)
+    assert result.expired == [] and result.children == []
+    assert sorted(p.name for p in (root / "sessions").iterdir()) == before
+
+
+def test_the_temporary_pass_removes_only_expired_marked_unguarded_ids(tmp_path: Path) -> None:
+    from local_operator.session import temporary
+    from local_operator.session.cleanup import (
+        CleanupPolicy,
+        run_temporary_pass,
+        set_hold,
+    )
+
+    root, now = _temporary_store(tmp_path)
+    marked = [f"{index:012x}" for index in (1, 2, 3)]
+    for session_id in marked:
+        assert temporary.write_mark(root, session_id, True, by="cli", now=now - 3600).ok
+    fresh = f"{4:012x}"
+    assert temporary.write_mark(root, fresh, True, by="cli", now=now - 60).ok
+    assert set_hold(root / "sessions", marked[2], reason="keep it", by="test")
+    policy = CleanupPolicy(enabled=False, delegated_enabled=False)
+    result = run_temporary_pass(root, policy, actor="test", now=now)
+    assert sorted(result.expired) == marked[:2], (result.held, result.errors)
+    left = {p.name for p in (root / "sessions").iterdir() if p.is_dir()}
+    assert left == {f"{index:012x}" for index in range(50)} - set(marked[:2])
