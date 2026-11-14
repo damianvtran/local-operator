@@ -156,7 +156,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Iterable, Mapping
 
-from local_operator.network import routing_sync
+from local_operator.network import mirror_authority, routing_sync
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from local_operator.network.relay import RelayServer
@@ -1095,7 +1095,9 @@ def _apply_subagent_tiers_locked(
     from the SAME origin; otherwise keep its tiers and record the conflict, which
     ``lop network definitions state`` and readiness read. A conflict never fails a
     push or a create: a node whose operator chose other models is a legitimate
-    state, and the push's agent/team rows must still land.
+    state, and the push's agent/team rows must still land. The caller has already
+    checked the sender is this node's operator-authority device
+    (``mirror_authority.accepts_from``), so ``origin`` here is always the operator.
     """
     incoming = digest_of(row)
     recorded_in = index.get(SUBAGENT_TIERS_INDEX_KEY)
@@ -1170,18 +1172,25 @@ def _apply_subagent_tiers_locked(
 
 
 def _tiers_to_send(
-    bundle: Mapping[str, Any], remote: Mapping[str, Any]
+    bundle: Mapping[str, Any], remote: Mapping[str, Any], *, root: Path
 ) -> tuple[dict[str, Any] | None, dict[str, Any]]:
     """``(row to send or None, report)`` for the tier singleton.
 
     :func:`_instructions_to_send`'s rules: only to a peer whose state reply
     carries the key (an older build would drop it), only when the digest differs,
     and not again for a revision the peer already refused while it still holds
-    its own tiers.
+    its own tiers. On top, the failover routing's direction rule
+    (``mirror_authority.may_send_to``): only the operator's signing device sends,
+    and only to a node holding its anchor verify-only. The row then carries
+    ``authority`` OUTSIDE the map the receiver validates and digests, so the
+    peer's ``digest`` still equals ``digest_of(ours)`` and nothing is re-sent.
     """
     remote_in = remote.get(SUBAGENT_TIERS_KIND)
     if not isinstance(remote_in, Mapping):
         return None, {"outcome": "unsupported"}
+    allowed, why = mirror_authority.may_send_to(root, remote_in.get("authority"))
+    if not allowed:
+        return None, {"outcome": "not_authority", "reason": why}
     withheld = str(bundle.get("subagent_tiers_withheld") or "")
     if withheld:
         return None, {"outcome": "withheld", "reason": withheld}
@@ -1202,7 +1211,7 @@ def _tiers_to_send(
             "reason": str(prior.get("reason") or ""),
             **({"code": str(prior["code"])} if prior.get("code") else {}),
         }
-    return dict(ours), {"outcome": "sent"}
+    return {**dict(ours), "authority": mirror_authority.claim(root)}, {"outcome": "sent"}
 
 
 def tiers_conflict_notice(conflict: Mapping[str, Any], *, peer_label: str) -> str:
@@ -1663,7 +1672,9 @@ def _apply_bundle_locked(
         # sender's build: known tier names, string ids, bounded size — the
         # strict builder is the one gate, and a row it refuses writes nothing.
         try:
-            if len(canonical(dict(raw_tiers)).encode("utf-8")) > MAX_SUBAGENT_TIERS_BYTES:
+            # The bound is on the map, not the sender's ``authority`` claim beside it.
+            sized = {key: value for key, value in raw_tiers.items() if key != "authority"}
+            if len(canonical(sized).encode("utf-8")) > MAX_SUBAGENT_TIERS_BYTES:
                 raise ValueError(f"the tier map is over {MAX_SUBAGENT_TIERS_BYTES} bytes")
             tiers = _subagent_tiers_row(raw_tiers.get("models"), raw_tiers.get("model_choice"))
             if tiers is None:
@@ -1672,6 +1683,12 @@ def _apply_bundle_locked(
             summary[SUBAGENT_TIERS_KIND] = {"outcome": "refused", "reason": str(exc)}
         else:
             label = _withheld(tiers)
+            # ONE-WAY, like the failover routing (``mirror_authority``, #3905 M1):
+            # only this node's operator-authority device authors its tiers. Without
+            # it a node's own map landed on an operator's device that had none, and
+            # on a third device whichever peer pushed first won for good. Checked
+            # before any disk read, so a refused row costs nothing and writes nothing.
+            accepted, not_accepted = mirror_authority.accepts_from(root, raw_tiers.get("authority"))
             if label:
                 summary[SUBAGENT_TIERS_KIND] = {
                     "outcome": "refused",
@@ -1680,6 +1697,8 @@ def _apply_bundle_locked(
                         "installed"
                     ),
                 }
+            elif not accepted:
+                summary[SUBAGENT_TIERS_KIND] = {"outcome": "refused", "reason": not_accepted}
             else:
                 try:
                     tiers_result = _apply_subagent_tiers_locked(root, tiers, origin, index)
@@ -2242,7 +2261,12 @@ def definition_state(
         # how a sender knows this build can hold it; an older peer omits it.
         routing_sync.ROUTING_KIND: routing_sync.routing_state(root),
         # Same presence contract: an older peer's reply lacks it and is never sent it.
-        SUBAGENT_TIERS_KIND: subagent_tiers_state(root),
+        # ``authority`` rides here, not in ``subagent_tiers_state``: readiness reads
+        # that state too, and has no use for a signer probe.
+        SUBAGENT_TIERS_KIND: {
+            **subagent_tiers_state(root),
+            "authority": mirror_authority.state_fact(root),
+        },
     }
 
 
@@ -2346,7 +2370,7 @@ def push_to_peer(
         origin=str(bundle.get("origin_device") or ""),
         root=server.root,
     )
-    tiers_out, tiers_report = _tiers_to_send(bundle, remote)
+    tiers_out, tiers_report = _tiers_to_send(bundle, remote, root=server.root)
     peer_label = _peer_sentence(server, device_id)
     if (
         not missing_agents

@@ -25,7 +25,8 @@ WHAT TRAVELS — "units", each mirrored and owned independently:
 DELIBERATELY NOT CARRIED: ``retry.enabled``/``maxRetries``/``baseDelayMs``/
 ``connectivity*`` (device-local transport tuning: a flaky cloud link wants a
 different patience than a Mac on wired ethernet), ``subagents.models`` (its own
-lane, PR #3869), and anything credential-shaped (a row whose text matches a
+lane: the ``subagent_tiers`` row in ``definitions``, PR #3869, under the same
+``mirror_authority`` direction rule), and anything credential-shaped (a row whose text matches a
 credential shape is withheld by the sender and refused by the receiver). Chain
 entries are provider/model/effort selectors; they name WHAT to try, never HOW to
 authenticate, so a node lacking a credential for a hop simply has the existing

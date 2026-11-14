@@ -16,7 +16,10 @@ one claim:
 * a malformed row (unknown tier, non-string id, oversize, bad model_choice) is
   refused on receipt and writes nothing;
 * nothing but the tier map travels: no other config key, and a credential-shaped
-  selector is withheld at the sender and refused at the receiver.
+  selector is withheld at the sender and refused at the receiver;
+* the map flows ONE way, by the failover routing's rule (``mirror_authority``,
+  #3905 M1): only the operator's signing device sends it, only a node holding the
+  operator's anchor verify-only takes it, and a node never authors the head's.
 
 The "peer" is a second config root behind a fake link routed to the real
 ``definition_state`` / ``apply_bundle``, as in the operator-instructions tests.
@@ -32,7 +35,7 @@ from typing import Any
 import pytest
 
 from local_operator.config import ConfigManager
-from local_operator.network import definitions
+from local_operator.network import definitions, mirror_authority
 
 HEAD_DEVICE = "d_" + "a" * 32
 NODE_DEVICE = "d_" + "b" * 32
@@ -44,6 +47,31 @@ HEAD_TIERS = {
 #: A credential SHAPE (GitHub classic PAT), synthetic. Used to prove nothing but the
 #: tier map leaves the head, and that a credential-shaped selector never travels.
 FAKE_TOKEN = "ghp_" + "A1b2C3d4E5" * 3 + "f6G7h8"
+
+#: The synthetic operator anchor every root is enrolled under, resolved from the
+#: root's directory name exactly as in ``test_definitions_routing``: ``head`` holds
+#: the private half (the operator's device), ``foreign`` another operator's anchor,
+#: ``unanchored`` none, and every other root the anchor verify-only (a node).
+OP_KEY = "k_" + "0" * 16
+SIGNING_ROOTS = {"head"}
+FOREIGN_ROOTS = {"foreign"}
+UNANCHORED_ROOTS = {"unanchored"}
+
+
+@pytest.fixture(autouse=True)
+def _operator_anchor(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The real probe reads the HOST's anchor, which a test running head and nodes
+    in one process cannot tell apart (and must never read off this machine)."""
+
+    def _resolve(root: Path) -> mirror_authority.Authority:
+        name = Path(root).name
+        if name in UNANCHORED_ROOTS:
+            return mirror_authority.Authority()
+        key = "k_" + "f" * 16 if name in FOREIGN_ROOTS else OP_KEY
+        return mirror_authority.Authority(key_id=key, signs=name in SIGNING_ROOTS)
+
+    monkeypatch.setattr(mirror_authority, "_resolve", _resolve)
+    mirror_authority.reset_cache()
 
 
 def _root(tmp_path: Path, name: str) -> Path:
@@ -267,7 +295,9 @@ def test_only_the_tier_map_travels_and_a_credential_shape_never_does(tmp_path: P
 
     assert _push(head, link)[definitions.SUBAGENT_TIERS_KIND] == {"outcome": "installed"}
     sent = link.applies()[0]["bundle"][definitions.SUBAGENT_TIERS_KIND]
-    assert set(sent) == {"kind", "name", "models"}, sent
+    # ``authority`` is the sender's anchor claim beside the map, never config.
+    assert set(sent) == {"kind", "name", "models", "authority"}, sent
+    assert sent["authority"] == OP_KEY, sent
     assert FAKE_TOKEN not in json.dumps(link.frames)
     assert "github_token" not in _subagents(node)
 
@@ -380,7 +410,12 @@ def _tiers_bundle(tiers: dict[str, Any], origin: str = HEAD_DEVICE) -> dict[str,
         "origin_device": origin,
         "agents": [],
         "teams": [],
-        definitions.SUBAGENT_TIERS_KIND: {"kind": definitions.SUBAGENT_TIERS_KIND, **tiers},
+        # Signed for by the operator's anchor, as the head's push sends it.
+        definitions.SUBAGENT_TIERS_KIND: {
+            "kind": definitions.SUBAGENT_TIERS_KIND,
+            "authority": OP_KEY,
+            **tiers,
+        },
     }
 
 
@@ -522,3 +557,99 @@ def test_an_in_sync_push_after_a_tiers_conflict_does_not_claim_the_same_definiti
     assert again["code"] == "in_sync", again
     assert again[definitions.SUBAGENT_TIERS_KIND]["outcome"] == "conflict", again
     assert again["message"].endswith("hold the same agent and team definitions"), again
+
+
+def test_a_node_with_an_empty_subagents_section_resolves_hi_after_a_push(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The lop-remote-node-2 shape exactly: ``subagents: {}`` on disk (not an absent
+    section). After the push the node's own resolvers, read against its root, see
+    the head's ``hi`` selector."""
+    from local_operator.harness.subagent import (
+        read_effort_tier_targets,
+        resolve_member_model,
+    )
+
+    head, node = _root(tmp_path, "head"), _root(tmp_path, "node")
+    _set_subagents(head, {"models": dict(HEAD_TIERS)})
+    (node / "config.yml").write_text("subagents: {}\n", encoding="utf-8")
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(node))
+    assert "hi" not in read_effort_tier_targets()
+    assert resolve_member_model("designer", launch_tier="hi").unavailable
+
+    result = _push(head, _PeerLink(node))
+    assert result[definitions.SUBAGENT_TIERS_KIND] == {"outcome": "installed"}, result
+
+    assert read_effort_tier_targets()["hi"][0] == HEAD_TIERS["hi"]
+    resolved = resolve_member_model("designer", launch_tier="hi")
+    assert resolved.unavailable == "" and resolved.selector == HEAD_TIERS["hi"], resolved
+
+
+def test_a_node_never_sends_its_tiers_to_the_operators_device(tmp_path: Path) -> None:
+    """#3905 M1 for this lane: an operator device with no tiers of its own used to
+    take a node's map on the node's cadence push. The node does not sign for the
+    anchor, so it sends nothing and the head's config is untouched."""
+    node, head = _root(tmp_path, "node"), _root(tmp_path, "head")
+    _set_subagents(node, {"models": {"hi": "openai/gpt-6"}})
+    link = _PeerLink(head)
+
+    result = definitions.push_to_peer(_Server(node, link), HEAD_DEVICE)  # type: ignore[arg-type]
+
+    report = result[definitions.SUBAGENT_TIERS_KIND]
+    assert report["outcome"] == "not_authority", report
+    assert "does not sign for the operator" in report["reason"], report
+    assert link.applies() == []
+    assert "models" not in _subagents(head)
+
+
+@pytest.mark.parametrize(
+    ("peer", "needle"),
+    [
+        ("unanchored", "does not hold this operator's authority"),
+        ("foreign", "does not hold this operator's authority"),
+    ],
+)
+def test_the_head_sends_only_to_a_node_under_its_own_anchor(
+    tmp_path: Path, peer: str, needle: str
+) -> None:
+    head, other = _root(tmp_path, "head"), _root(tmp_path, peer)
+    _set_subagents(head, {"models": dict(HEAD_TIERS)})
+    link = _PeerLink(other)
+
+    report = _push(head, link)[definitions.SUBAGENT_TIERS_KIND]
+
+    assert report["outcome"] == "not_authority" and needle in report["reason"], report
+    assert definitions.SUBAGENT_TIERS_KIND not in json.dumps(link.applies())
+    assert _subagents(other) == {}
+
+
+@pytest.mark.parametrize(
+    ("root_name", "claim", "needle"),
+    [
+        ("node", None, "does not sign for this device's operator"),
+        ("node", "k_" + "f" * 16, "does not sign for this device's operator"),
+        ("unanchored", OP_KEY, "no operator authority installed"),
+        ("head", OP_KEY, "signs for the operator itself"),
+    ],
+)
+def test_the_receiver_takes_tiers_only_from_its_operator_device(
+    tmp_path: Path, root_name: str, claim: str | None, needle: str
+) -> None:
+    """Receiver half, whatever the sender's build put on the wire: a missing or
+    foreign claim, a device with no anchor, and the operator's own device all
+    refuse, write nothing and record no conflict."""
+    root = _root(tmp_path, root_name)
+    bundle = _tiers_bundle({"models": dict(HEAD_TIERS)})
+    row = bundle[definitions.SUBAGENT_TIERS_KIND]
+    if claim is None:
+        row.pop("authority")
+    else:
+        row["authority"] = claim
+
+    summary = definitions.apply_bundle(root, bundle, origin_device=HEAD_DEVICE)
+
+    result = summary[definitions.SUBAGENT_TIERS_KIND]
+    assert result["outcome"] == "refused" and needle in result["reason"], result
+    assert "models" not in _subagents(root)
+    state = definitions.subagent_tiers_state(root)
+    assert state["status"] == "absent" and not state.get("conflict"), state
