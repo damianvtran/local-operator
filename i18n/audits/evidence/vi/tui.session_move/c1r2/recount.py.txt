@@ -1,0 +1,84 @@
+"""Recount shipped vi catalogue usage for the contested terms.
+
+Reads every shipped vi namespace file and reports, per term, the count of
+values containing it plus the (key, value) samples, so the auditor's
+adjudication rests on its own count rather than the translator's.
+"""
+
+from __future__ import annotations
+
+import json
+import pathlib
+import re
+from collections import Counter
+
+ROOT = pathlib.Path.home() / "local-operator/.worktrees/i18n-c1/local_operator/i18n/catalogues"
+
+TERMS = [
+    "thiết bị ngang hàng",
+    "thiết bị",
+    "shell",
+    "trình bao",
+    "mã thoát",
+    "lỗi thời",
+    "bài học",
+    "nhà cung cấp",
+    "bộ máy nén",
+    "cơ chế nén",
+    "nén",
+    "nhận diện",
+    "xác định",
+    "khóa",
+    "được thay thế",
+    "thay bằng",
+]
+
+
+def load(locale: str) -> dict[str, str]:
+    values: dict[str, str] = {}
+    for path in sorted((ROOT / locale).glob("*.json")):
+        if path.name.endswith(".context.json"):
+            continue
+        values.update(json.loads(path.read_text(encoding="utf-8")))
+    return values
+
+
+vi = load("vi")
+en = load("en")
+print(f"shipped vi values: {len(vi)}; en values: {len(en)}")
+
+for term in TERMS:
+    hits = [(k, v) for k, v in vi.items() if term.lower() in v.lower()]
+    print(f"\n== {term!r}: {len(hits)} value(s)")
+    for k, v in hits[:6]:
+        print(f"   {k}: {v[:150]}")
+    if len(hits) > 6:
+        print(f"   … {len(hits) - 6} more")
+
+# Which settings keys talk about compaction / deprecation in en, and what vi says.
+print("\n\n== en keys mentioning compaction / deprecated")
+for k, v in en.items():
+    if re.search(r"compaction|DEPRECATED", v, re.I):
+        print(f"  en {k}: {v[:160]}")
+        print(f"  vi {k}: {vi.get(k, '<missing>')[:160]}")
+
+# Angle-bracket placeholder style in shipped vi
+print("\n\n== angle-bracket placeholders in shipped vi")
+ang = re.compile(r"<([^<>]{1,40})>")
+seen = Counter()
+for k, v in vi.items():
+    for m in ang.findall(v):
+        seen[m] += 1
+for m, n in seen.most_common():
+    print(f"  {n:3d}  <{m}>")
+
+print("\n== underscore placeholders inside angle brackets")
+for k, v in vi.items():
+    for m in ang.findall(v):
+        if "_" in m:
+            print(f"  {k}: <{m}>  :: {v[:120]}")
+
+print("\n== peer / device wording in shipped vi")
+for k, v in vi.items():
+    if "ngang hàng" in v or "peer" in v:
+        print(f"  {k}: {v[:160]}")

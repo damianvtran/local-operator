@@ -1,0 +1,73 @@
+{
+  "schema": 1,
+  "locale": "fr",
+  "namespace": "tui.session_move",
+  "audit_date": "2026-11-11",
+  "key_count": 7,
+  "scope": "slice C1 / core English paths — new-key group; translation not yet in a shipped catalogue (pre-landing audit)",
+  "auditor": {
+    "agent": "i18n-auditor (lopdev team)",
+    "session": "58d8409a6284",
+    "model": "deepseek/deepseek-flash",
+    "independent_from_translator_session": true,
+    "actual_model_source": "served model reported by the harness for this session (deepseek/deepseek-flash); no fallback occurred"
+  },
+  "translator": {
+    "agent": "i18n-translator",
+    "model": "openai/gpt-6.1-sol",
+    "date": "2026-11-11"
+  },
+  "guides": [
+    "i18n/style-guides/fr.md",
+    "i18n/style-guides/en.md",
+    "i18n/glossary.md"
+  ],
+  "audited_revision": {
+    "head": "b188079f32e6d978ad78fac96edc5c3516d028ab",
+    "branch": "i18n/c1-core-english-paths"
+  },
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/tui.session_move.json",
+      "sha256": "f4dd682b3b50d64a4009eac5ac78a34f5734b5dd0a5ef379951065da326a913e"
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/tui.session_move.context.json",
+      "sha256": "09ed30a0b11969671c41e24fe255072c961fff1f90791a7b9f05cd998cbee573"
+    },
+    "target": {
+      "path": "<c1-prep>/fr.json (translation under audit; not in the tree)",
+      "sha256": "ff03aa6542bc2a79e4533c229399946eb07b578e22d564e97ed283b7b77495cc"
+    }
+  },
+  "artifacts": [
+    {
+      "path": "i18n/audits/evidence/fr/tui.session_move/c1a/report.md",
+      "sha256": "89c37c4227ba0c203351b5fc0891a7ce1b12558c6376bb0d4567e1c0cfdba9de"
+    },
+    {
+      "path": "i18n/audits/evidence/fr/tui.session_move/c1a/audit.log",
+      "sha256": "a7a2b5c339e9aede61c30f38020c0ffa3f6ad394db5d0bb92e226a6671f5c7a7"
+    }
+  ],
+  "current_report_verdict": {
+    "status": "clean-with-findings",
+    "unresolved_blocker_major_count": 0,
+    "finding_ids": [
+      "F-02",
+      "F-03"
+    ],
+    "counts": {
+      "blocker": 0,
+      "major": 0,
+      "minor": 2,
+      "nit": 0
+    }
+  },
+  "audit_notes_not_execution_log": "Bundle prose (report.md) records judgement and reasoning; audit.log is the actual command transcript and is the only execution evidence. Findings carry no line-level claim beyond the keys quoted.",
+  "execution_log": {
+    "path": "i18n/audits/evidence/fr/tui.session_move/c1a/audit.log",
+    "sha256": "a7a2b5c339e9aede61c30f38020c0ffa3f6ad394db5d0bb92e226a6671f5c7a7"
+  },
+  "durability_notes": "Prepared for the landing commit: the fr catalogues for these namespaces do not exist yet, so this record and the ledger row must be committed together with them."
+}

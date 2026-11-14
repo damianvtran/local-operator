@@ -1,0 +1,16 @@
+{
+  "schema": 1,
+  "audit_id": "c1r2",
+  "audit_round": 2,
+  "locale": "ru",
+  "namespace": "tui.session_move",
+  "files": {
+    "record.json": "53886ab7e941f3a3c9937732163d5bb89af80f1e9467b35e9cbca516b1e67d6f",
+    "report.md": "0ad71e93d085f2ffa33c96544e56ff670fd368d1d88e4fbb1fed05d554f5c5d6",
+    "round1-B-report.md": "eca39689b1103a1c8e8d86b420ad8c2a449a2ef3dd6487ec695a1baf3dbad525",
+    "verify.log": "8784aa76e2044aac4f4d0cb8c743dec779492007ee6e99b0cf0e879ed155784a"
+  },
+  "bundle": "i18n/audits/evidence/ru/tui.session_move/c1r2",
+  "generated_by": "integrator (coder, slice C1 phase 2); hashes of the files copied from the auditors' reports plus verify.log",
+  "generated_at": "2026-11-11"
+}

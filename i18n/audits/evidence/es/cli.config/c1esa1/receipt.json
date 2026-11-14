@@ -1,0 +1,15 @@
+{
+ "audit_id": "c1esa1",
+ "locale": "es",
+ "namespace": "cli.config",
+ "audited_revision": "b188079f32e6d978ad78fac96edc5c3516d028ab",
+ "files": {
+  "record.json": "e5601ec6a1f2519048cc4eb7e20c34bafcde7b241393714a7b08e339955fef9f",
+  "report.md": "f71b504340f468b5b650f18922af4983fc14505c335beec3435f35b8497894a9",
+  "audit.log": "b733dd97e97d87eb281824eca469cbcdb9819a425be7e31c53887064337f652c",
+  "checks.py.txt": "b42030e56ccaabd742c95798efe606528b7e3d5f85c9901ecc0c8f95ca64aba7"
+ },
+ "bundle": "i18n/audits/evidence/es/cli.config/c1esa1",
+ "generated_by": "c1-au-es-A (i18n-auditor), session 96bf9fded81d",
+ "generated_at": "2026-11-11"
+}

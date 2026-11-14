@@ -1,0 +1,130 @@
+{
+ "schema": 1,
+ "audit_id": "c1esa1",
+ "audit_round": 1,
+ "locale": "es",
+ "namespace": "cli.config",
+ "audit_date": "2026-11-11",
+ "audited_revision": "b188079f32e6d978ad78fac96edc5c3516d028ab",
+ "audited_revision_note": "Target es file is a PRE-MERGE shard outside the catalogue tree; HEAD does not bind its bytes. The exact audited on-disk target sha256 is recorded below.",
+ "key_count": {
+  "en": 15,
+  "target": 15,
+  "group_total": 22
+ },
+ "verdict": "passed",
+ "result": "no blocker, no major — status passed; verdict clean-with-findings (3 minor, 3 nit)",
+ "findings": [
+  {
+   "id": "M1",
+   "severity": "minor",
+   "key": "cli.config.running_sessions_unchanged",
+   "current": "Las sesiones en ejecución no cambian — escribir en la configuración no puede reducir sus requisitos de aprobación; escribe /approvals auto en cada sesión en la que quieras desactivarlos. Las sesiones nuevas se abren en modo auto.",
+   "problem": "Safety meaning survives (a config write cannot loosen a running session; the command must be typed per session; new sessions start at auto), but the same operation is named two ways inside one sentence — 'reducir sus requisitos de aprobación' then 'desactivarlos' (antecedent strained: the nearest plural is 'requisitos', not the session) — and neither matches the shipped sibling wire.settings.approvals.description, which names loosening as 'aflojar': 'Un cambio de configuración endurece todas las sesiones en ejecución a la vez; aflojar una requiere un cambio desde el propio proceso de esa sesión (/approvals auto en ella…)'. A reader who has seen the settings page meets a third word for the same action.",
+   "suggested": "Las sesiones en ejecución no cambian — escribir en la configuración no puede aflojar la de una sesión en ejecución; escribe /approvals auto en cada sesión que quieras dejar sin aprobación. Las sesiones nuevas se abren en modo auto."
+  },
+  {
+   "id": "M2",
+   "severity": "minor",
+   "key": "cli.config.list_desc_max_learnings_history",
+   "current": "[OBSOLETO — sustituido por la compactación] Número máximo de entradas de aprendizaje que conservar",
+   "problem": "Same object named two ways: the shipped label for this very setting is wire.settings.max_learnings_history.label = 'Historial máx. de aprendizajes' (the only occurrence of the term in the es catalogue), while this row — read directly under that setting's key — calls them 'entradas de aprendizaje'. The list row restates the setting for the same reader, so drift is visible in two adjacent surfaces, and the longer form costs cells in a boxed row.",
+   "suggested": "[OBSOLETO — sustituido por la compactación] Número máximo de aprendizajes que conservar"
+  },
+  {
+   "id": "M3",
+   "severity": "minor",
+   "key": "cli.config.list_desc_classification_notice",
+   "current": "[OBSOLETO] Las sugerencias inteligentes no muestran avisos en el chat; la llamada y su coste figuran en el registro de la sesión",
+   "problem": "en says the feature is SILENT in the chat ('Smart hints is silent in the chat'); es narrows that to 'no muestran avisos'. 'Aviso' is also this feature's own noun in the shipped label 'Aviso de sugerencias inteligentes', so the clause can be read as 'they do not show the notice' rather than 'they print nothing'. The shipped sibling already renders the same fact correctly: wire.settings.classification_notice.help = 'Obsoleto. Las sugerencias inteligentes no dicen nada en el chat; la llamada queda en el registro.'",
+   "suggested": "[OBSOLETO] Las sugerencias inteligentes no dicen nada en el chat; la llamada y su coste quedan en el registro de la sesión"
+  },
+  {
+   "id": "N1",
+   "severity": "nit",
+   "key": "cli.config.cleared",
+   "current": "Valor de {key} eliminado: vuelve a usarse el predeterminado",
+   "problem": "Meaning is right (the value is removed and the built-in default applies again) but 'el predeterminado' stands bare as a noun; the catalogue elsewhere uses it attributively ('editor predeterminado', 'predeterminado: 10'). The bare form reads slightly clipped.",
+   "suggested": "Valor de {key} eliminado: vuelve a aplicarse su valor predeterminado"
+  }
+ ],
+ "auditor": {
+  "agent": "i18n-auditor (lopdev team), c1-au-es-A",
+  "session": "96bf9fded81d",
+  "model": "deepseek/deepseek-flash",
+  "actual_model_source": "session model header (no model-switch notice observed this session)",
+  "independent_from_translator_session": true,
+  "translator": {
+   "agent": "i18n-translator",
+   "model": "openai/gpt-6.1-sol"
+  },
+  "date": "2026-11-11",
+  "independence": "I authored none of this copy: no translation was written, edited or proposed as a patch. Findings are reported only; the suggested wordings are for the translator/manager to apply."
+ },
+ "input_hashes": {
+  "en": {
+   "path": "local_operator/i18n/catalogues/en/cli.config.json",
+   "revision": "b188079f32e6d978ad78fac96edc5c3516d028ab",
+   "sha256": "40649e7419d144f7e8a550d5ae3c6d48defa7bb0b23f4a20ceac35f2b0fda5ac"
+  },
+  "context": {
+   "path": "local_operator/i18n/catalogues/en/cli.config.context.json",
+   "sha256": "9831a776d2f179969666f2271f9bc53ae7de8a18b8567732ba81bc8e2ca90e78"
+  },
+  "target_locale": {
+   "path": "<scratchpad>/c1-prep/es.json",
+   "sha256": "6efa2c270acc737b81e1d8596e387fc52e2598f787b4c83f2a512fee3803a1a1",
+   "tracked": false
+  },
+  "source_notes": {
+   "path": "<scratchpad>/c1-prep/keys.json",
+   "sha256": "ac35dc123a4241a3c1fdbd0f4f012636d9706695bacfb3601aa06eed2cae1ffc"
+  }
+ },
+ "artifacts": {
+  "report.md": "f71b504340f468b5b650f18922af4983fc14505c335beec3435f35b8497894a9",
+  "audit.log": "b733dd97e97d87eb281824eca469cbcdb9819a425be7e31c53887064337f652c",
+  "checks.py.txt": "b42030e56ccaabd742c95798efe606528b7e3d5f85c9901ecc0c8f95ca64aba7"
+ },
+ "current_report_verdict": {
+  "status": "passed",
+  "unresolved_blocker_major_count": 0,
+  "finding_ids": [
+   "M1",
+   "M2",
+   "M3",
+   "N1"
+  ],
+  "counts": {
+   "blocker": 0,
+   "major": 0,
+   "minor": 3,
+   "nit": 1
+  }
+ },
+ "check_output": [
+  {
+   "cmd": "python3 scripts/i18n/check.py",
+   "result": "ok — 217 file(s) scanned, 2540 literal(s) at or below the baseline, catalogues consistent; 83 advisory finding(s) (report-only until activated)"
+  },
+  {
+   "cmd": ".venv/bin/python <mechanical sweep, retained as checks.py.txt>",
+   "result": "22/22 keys; ordered parity with the en catalogues; placeholder name/kind parity; parse_message accepted all values; backtick spans identical; no invisible or edge-space characters; final-period and dash-spacing parity; widths measured"
+  },
+  {
+   "cmd": ".venv/bin/python -c 'runtime.render_message(<each es value>, sample params, \"es\")'",
+   "result": "all 22 render; samples recorded in audit.log"
+  },
+  {
+   "cmd": "python3 scripts/i18n/ledger.py append --dry-run (then --apply) --receipt …",
+   "result": "see receipt.json companions and audit.log tail"
+  }
+ ],
+ "auditor_note": "Independent audit of a pre-merge translation shard; I authored no es copy and edited no translation, catalogue, sidecar, ledger allowance or generated file. Ledger rows record this verdict for es/cli.config and es/tui.session_move.",
+ "limitations": [
+  "LLM semantic judgement; no native-speaker attestation.",
+  "No rendered terminal frames were captured: this group declares no maxCells, and the boxed/wrapping CLI lines were assessed by measured cell width, not by a screenshot.",
+  "The target file is a pre-merge shard outside the catalogue tree; its sha256 is recorded exactly and the catalogue bytes it becomes are not yet bound to this audit.",
+  "No translation/MT service was used for comparison or back-translation."
+ ]
+}

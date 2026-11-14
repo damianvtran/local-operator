@@ -1,0 +1,322 @@
+=== [1] python3 scripts/i18n/check.py (worktree ~/local-operator/.worktrees/i18n-c1 @ b188079f) ===
+advisory: local_operator/agent_profiles.py: 4 literal(s) against a ceiling of 3
+advisory: local_operator/compaction/resume_card.py: 6 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0
+advisory: local_operator/compaction/snapcompact.py: 12 literal(s) against a ceiling of 10
+advisory: local_operator/disk_cli.py: 10 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0
+advisory: local_operator/disk_pressure.py: 2 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0
+advisory: local_operator/evaluation/action_server.py: 5 literal(s) against a ceiling of 4
+advisory: local_operator/evaluation/runner/provider_client.py: 13 literal(s) against a ceiling of 9
+advisory: local_operator/evaluation/session_arm.py: 3 literal(s) against a ceiling of 1
+advisory: local_operator/evaluation/team_bridge_moderation/dataset.py: 1 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0
+advisory: local_operator/evaluation/team_bridge_moderation/fixture.py: 4 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0
+advisory: local_operator/evaluation/team_bridge_moderation/report.py: 32 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0
+advisory: local_operator/evaluation/team_bridge_moderation/runner.py: 6 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0
+advisory: local_operator/evaluation/team_bridge_moderation/screenbench.py: 3 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0
+advisory: local_operator/guardrails/check.py: 9 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0
+advisory: local_operator/guardrails/classify.py: 3 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0
+advisory: local_operator/guardrails/evidence.py: 1 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0
+advisory: local_operator/guardrails/judge.py: 10 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0
+advisory: local_operator/guardrails/preview.py: 14 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0
+advisory: local_operator/guardrails/provenance.py: 1 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0
+advisory: local_operator/guardrails/resolve.py: 16 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0
+advisory: local_operator/harness/rows.py: 3 literal(s) against a ceiling of 1
+advisory: local_operator/harness/subagent.py: 7 literal(s) against a ceiling of 4
+advisory: local_operator/harness_import/mapping.py: 7 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0
+advisory: local_operator/harness_import/memory.py: 1 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0
+advisory: local_operator/harness_import/service.py: 2 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0
+advisory: local_operator/harness_import/sources/claude.py: 1 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0
+advisory: local_operator/harness_import/sources/codex.py: 3 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0
+advisory: local_operator/hub_sync/service.py: 4 literal(s) against a ceiling of 1
+advisory: local_operator/librarian/proactive.py: 5 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0
+advisory: local_operator/library/metadata.py: 10 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0
+advisory: local_operator/library/store.py: 10 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0
+advisory: local_operator/memory.py: 1 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0
+advisory: local_operator/memory_cli.py: 81 literal(s) against a ceiling of 39
+advisory: local_operator/memory_guard.py: 1 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0
+advisory: local_operator/memory_maintenance.py: 3 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0
+advisory: local_operator/memory_triage.py: 10 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0
+advisory: local_operator/monitors/delivery.py: 29 literal(s) against a ceiling of 14
+advisory: local_operator/network/cli.py: 267 literal(s) against a ceiling of 228
+advisory: local_operator/network/credentials/finite_share.py: 3 literal(s) against a ceiling of 2
+advisory: local_operator/network/meshupdate.py: 3 literal(s) against a ceiling of 2
+advisory: local_operator/network/readiness.py: 24 literal(s) against a ceiling of 15
+advisory: local_operator/network/relay.py: 32 literal(s) against a ceiling of 31
+advisory: local_operator/network/tool.py: 24 literal(s) against a ceiling of 23
+advisory: local_operator/notifications/bulk.py: 5 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0
+advisory: local_operator/notifications/store.py: 8 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0
+advisory: local_operator/operator/cli.py: 26 literal(s) against a ceiling of 23
+advisory: local_operator/operator/handlers.py: 82 literal(s) against a ceiling of 69
+advisory: local_operator/operator/pair_handlers.py: 32 literal(s) against a ceiling of 23
+advisory: local_operator/procname.py: 1 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0
+advisory: local_operator/profile_scope.py: 1 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0
+advisory: local_operator/providers/auth_cli.py: 23 literal(s) against a ceiling of 20
+advisory: local_operator/saver/provenance.py: 1 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0
+advisory: local_operator/server/routes/desktop_imports.py: 9 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0
+advisory: local_operator/server/routes/desktop_librarian.py: 7 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0
+advisory: local_operator/server/routes/desktop_settings_intents.py: 3 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0
+advisory: local_operator/server/routes/desktop_team_bridge.py: 1 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0
+advisory: local_operator/server/routes/notification_sounds.py: 4 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0
+advisory: local_operator/server/utils/settings_intents.py: 1 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0
+advisory: local_operator/session/catalog.py: 3 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0
+advisory: local_operator/session/delegated_retention.py: 12 literal(s) against a ceiling of 6
+advisory: local_operator/session_factory.py: 16 literal(s) against a ceiling of 15
+advisory: local_operator/sound_cli.py: 1 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0
+advisory: local_operator/supervisors.py: 9 literal(s) against a ceiling of 6
+advisory: local_operator/supplements/sweep.py: 6 literal(s) against a ceiling of 5
+advisory: local_operator/supplements/validate.py: 22 literal(s) against a ceiling of 21
+advisory: local_operator/team_bridge/agent_file_reads.py: 16 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0
+advisory: local_operator/team_bridge/cli.py: 1 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0
+advisory: local_operator/team_bridge/connector/cli.py: 2 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0
+advisory: local_operator/team_bridge/connector/conversation.py: 13 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0
+advisory: local_operator/team_bridge/link_preview/extract.py: 2 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0
+advisory: local_operator/team_bridge/store.py: 3 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0
+advisory: local_operator/team_bridge/tool.py: 7 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0
+advisory: local_operator/tools/agent_tool.py: 7 literal(s) against a ceiling of 4
+advisory: local_operator/tools/artifact_data_tool.py: 1 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0
+advisory: local_operator/tools/builtin.py: 143 literal(s) against a ceiling of 118
+advisory: local_operator/tools/confinement.py: 2 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0
+advisory: local_operator/tools/secret_tool.py: 3 literal(s) against a ceiling of 1
+advisory: local_operator/tools/skill_tool.py: 7 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0
+advisory: local_operator/tui/session_move.py: 4 literal(s) against a ceiling of 3
+advisory: local_operator/tunnels/cli.py: 14 literal(s) against a ceiling of 13
+advisory: local_operator/update.py: 57 literal(s) against a ceiling of 53
+advisory: local_operator/wakes/supervisor.py: 8 literal(s) against a ceiling of 5
+advisory: local_operator/web_fetch/tool.py: 1 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0
+check.py: ok — 217 file(s) scanned, 2540 literal(s) at or below the baseline, catalogues consistent; 83 advisory finding(s) (report-only until activated)
+EXIT_FULL=0
+check.py: catalogue checks: 0 problem(s)
+EXIT_CAT=0
+
+=== [2] mechanical validator (own script; keys.json + hi.v2.json) ===
+=== NOTES ===
+ - keys=22 order_identical=True
+ - render cli.config.created: X पर नई कॉन्फ़िगरेशन फ़ाइल बनाई गई
+ - render cli.config.opened: X पर कॉन्फ़िगरेशन फ़ाइल खोली गई
+ - render cli.config.cleared: X का मान हटाया गया: अब फिर से इसका डिफ़ॉल्ट मान लागू है
+ - render cli.config.updated: X को X पर सेट कर दिया गया
+ - render cli.config.running_sessions_unchanged: चल रहे सत्रों में कोई बदलाव नहीं हुआ — कॉन्फ़िगरेशन में बदलाव सहेजने से उनकी स्वीकृति की शर्तें ढीली नहीं हो सकतीं; जिन सत्रों में आप बिना स्वीकृति के टूल चलाना चाहते हैं, उनमें से हर एक में /approvals auto टाइप करें। नए सत्र auto मोड में शुरू होते हैं।
+ - render cli.config.list_title: कॉन्फ़िगरेशन विकल्प
+ - render cli.config.list_description: विवरण: X
+ - render cli.config.list_unrecognised: पहचानी गई कुंजी नहीं है; प्रोग्राम में कहीं भी इसे पढ़ा नहीं जाता
+ - render cli.config.list_desc_hosting: AI प्रोवाइडर प्लेटफ़ॉर्म (जैसे radient, openai, deepseek, anthropic, openrouter)
+ - render cli.config.list_desc_model_name: बातचीत के लिए इस्तेमाल किया जाने वाला खास मॉडल
+ - render cli.config.list_desc_conversation_length: [अप्रचलित — अब इसकी जगह संपीडन है] बातचीत के इतिहास में रखे जाने वाले संदेशों की अधिकतम संख्या
+ - render cli.config.list_desc_detail_length: [अप्रचलित — अब इसकी जगह संपीडन है] बातचीत के इतिहास में हाल के जिन संदेशों का सारांश नहीं बनाया जाता, उनकी संख्या
+ - render cli.config.list_desc_max_learnings_history: [अप्रचलित — अब इसकी जगह संपीडन है] सहेजी जाने वाली लर्निंग्स प्रविष्टियों की अधिकतम संख्या
+ - render cli.config.list_desc_classification_notice: [अप्रचलित] स्मार्ट संकेत चैट में कुछ नहीं दिखाते; कॉल और उसकी लागत सत्र लॉग में दर्ज होते हैं
+ - render cli.config.list_desc_auto_save_conversation: बातचीत अपने-आप सहेजी जाए या नहीं
+ - render tui.session_move.ambiguous: कार्यशील डायरेक्टरी के लिए /move <पाथ> या सत्र को दूसरे डिवाइस पर ले जाने के लिए /move <सत्र> --to <पीयर> इस्तेमाल करें।
+ - render tui.session_move.to_needs_device: --to के लिए डिवाइस चाहिए: /move --to <पीयर|local>
+ - render tui.session_move.cannot_wait: इस दृश्य में प्रतीक्षा नहीं की जा सकती — शेल से चलाएँ: `lop sessions move <id> --to <to> --wait <seconds>`
+ - render tui.session_move.unsupported_flag: /move --to के साथ केवल --keep, --queue और --drop-session-roles इस्तेमाल कर सकते हैं, X नहीं
+ - render tui.session_move.cli_unavailable: CLI शुरू नहीं हो सका (X)
+ - render tui.session_move.deadline_exceeded: स्थानांतरण तय समय में पूरा नहीं हुआ; `lop sessions move X --to X` फिर से चलाने पर पता चलेगा कि यह कहाँ तक पहुँचा
+ - render tui.session_move.cli_no_answer: CLI बिना जवाब दिए एग्ज़िट कोड X के साथ बंद हो गया
+ - icu_plural_select_keys=none
+ - cli.config.list_title cells=12 en=21 (cap ~30)
+ - widest: cli.config.running_sessions_unchanged=177, tui.session_move.deadline_exceeded=99, tui.session_move.ambiguous=91, tui.session_move.cannot_wait=89
+ - en/cli.config keys=15 en/tui.session_move keys=7
+ - control check_catalogues problems=0
+ - candidate check_catalogues problems=0
+=== PROBLEMS ===
+none
+=== DIGEST ===
+{
+ "candidate_sha256": "d575bebe3038926f3b4eea6f17c945db3f4337f1d1e8de0d4b6a039edf6321c5",
+ "keys_json_sha256": "ac35dc123a4241a3c1fdbd0f4f012636d9706695bacfb3601aa06eed2cae1ffc"
+}
+RC_VALIDATE=0
+
+=== [3] production render path (local_operator.i18n.messages.render, locale=hi) ===
+[OK] cli.config.created -> ~/.local-operator/config.yml पर नई कॉन्फ़िगरेशन फ़ाइल बनाई गई
+[OK] cli.config.opened -> ~/.local-operator/config.yml पर कॉन्फ़िगरेशन फ़ाइल खोली गई
+[OK] cli.config.cleared -> display.terminal_title का मान हटाया गया: अब फिर से इसका डिफ़ॉल्ट मान लागू है
+[OK] cli.config.updated -> model_effort को auto पर सेट कर दिया गया
+[OK] cli.config.running_sessions_unchanged -> चल रहे सत्रों में कोई बदलाव नहीं हुआ — कॉन्फ़िगरेशन में बदलाव सहेजने से उनकी स्वीकृति की शर्तें ढीली नहीं हो सकतीं; जिन सत्रों में आप बिना स्वीकृति के टूल चलाना चाहते हैं, उनमें से हर एक में /approvals auto टाइप करें। नए सत्र auto मोड में शुरू होते हैं।
+[OK] cli.config.list_title -> कॉन्फ़िगरेशन विकल्प
+[OK] cli.config.list_description -> विवरण: बातचीत अपने-आप सहेजी जाए या नहीं
+[OK] cli.config.list_unrecognised -> पहचानी गई कुंजी नहीं है; प्रोग्राम में कहीं भी इसे पढ़ा नहीं जाता
+[OK] cli.config.list_desc_hosting -> AI प्रोवाइडर प्लेटफ़ॉर्म (जैसे radient, openai, deepseek, anthropic, openrouter)
+[OK] cli.config.list_desc_model_name -> बातचीत के लिए इस्तेमाल किया जाने वाला खास मॉडल
+[OK] cli.config.list_desc_conversation_length -> [अप्रचलित — अब इसकी जगह संपीडन है] बातचीत के इतिहास में रखे जाने वाले संदेशों की अधिकतम संख्या
+[OK] cli.config.list_desc_detail_length -> [अप्रचलित — अब इसकी जगह संपीडन है] बातचीत के इतिहास में हाल के जिन संदेशों का सारांश नहीं बनाया जाता, उनकी संख्या
+[OK] cli.config.list_desc_max_learnings_history -> [अप्रचलित — अब इसकी जगह संपीडन है] सहेजी जाने वाली लर्निंग्स प्रविष्टियों की अधिकतम संख्या
+[OK] cli.config.list_desc_classification_notice -> [अप्रचलित] स्मार्ट संकेत चैट में कुछ नहीं दिखाते; कॉल और उसकी लागत सत्र लॉग में दर्ज होते हैं
+[OK] cli.config.list_desc_auto_save_conversation -> बातचीत अपने-आप सहेजी जाए या नहीं
+[OK] tui.session_move.ambiguous -> कार्यशील डायरेक्टरी के लिए /move <पाथ> या सत्र को दूसरे डिवाइस पर ले जाने के लिए /move <सत्र> --to <पीयर> इस्तेमाल करें।
+[OK] tui.session_move.to_needs_device -> --to के लिए डिवाइस चाहिए: /move --to <पीयर|local>
+[OK] tui.session_move.cannot_wait -> इस दृश्य में प्रतीक्षा नहीं की जा सकती — शेल से चलाएँ: `lop sessions move <id> --to <to> --wait <seconds>`
+[OK] tui.session_move.unsupported_flag -> /move --to के साथ केवल --keep, --queue और --drop-session-roles इस्तेमाल कर सकते हैं, '--force' नहीं
+[OK] tui.session_move.cli_unavailable -> CLI शुरू नहीं हो सका ([Errno 2] No such file or directory)
+[OK] tui.session_move.deadline_exceeded -> स्थानांतरण तय समय में पूरा नहीं हुआ; `lop sessions move 3ef6295a5545 --to studio-mac` फिर से चलाने पर पता चलेगा कि यह कहाँ तक पहुँचा
+[OK] tui.session_move.cli_no_answer -> CLI बिना जवाब दिए एग्ज़िट कोड 2 के साथ बंद हो गया
+
+-- {value} shapes for cli.config.updated --
+[bool] display.nerd_icons को True पर सेट कर दिया गया
+[list] providers.openrouter.models को ['a', 'b'] पर सेट कर दिया गया
+[number] conversation_history.max_messages को 50 पर सेट कर दिया गया
+
+-- ASCII/Latin residue per rendered string --
+cli.config.created: ['local-operator/config.yml']
+cli.config.opened: ['local-operator/config.yml']
+cli.config.cleared: ['display.terminal_title']
+cli.config.updated: ['model_effort', 'auto']
+cli.config.running_sessions_unchanged: ['approvals', 'auto', 'auto']
+cli.config.list_title: []
+cli.config.list_description: []
+cli.config.list_unrecognised: []
+cli.config.list_desc_hosting: ['AI', 'radient,', 'openai,', 'deepseek,', 'anthropic,', 'openrouter)']
+cli.config.list_desc_model_name: []
+cli.config.list_desc_conversation_length: []
+cli.config.list_desc_detail_length: []
+cli.config.list_desc_max_learnings_history: []
+cli.config.list_desc_classification_notice: []
+cli.config.list_desc_auto_save_conversation: []
+tui.session_move.ambiguous: ['move', 'move', 'to']
+tui.session_move.to_needs_device: ['to', 'move', 'to', 'local>']
+tui.session_move.cannot_wait: ['lop', 'sessions', 'move', 'id>', 'to', 'to>', 'wait', 'seconds>']
+tui.session_move.unsupported_flag: ['move', 'to', 'keep,', 'queue', 'drop-session-roles', "force'"]
+tui.session_move.cli_unavailable: ['CLI', 'Errno', 'No', 'such', 'file', 'or', 'directory)']
+tui.session_move.deadline_exceeded: ['lop', 'sessions', 'move', 'ef6295a5545', 'to', 'studio-mac']
+tui.session_move.cli_no_answer: ['CLI']
+
+FAILURES: none
+RC_RENDER=0
+
+=== [4] shipped hi term recount (values only; 144 files, 3978 values) ===
+files: 144 values: 3978
+path_translit पाथ            11 hits /   9 files
+path_std पथ                   8 hits /   6 files
+provider प्रोवाइडर           63 hits /  17 files
+provider प्रदाता              1 hits /   1 files
+         cli.group_help.json cli.group_help.search :: अलग-अलग प्रदाताओं में लोड बाँटने वाली वेब खोज की सेटिंग करें और जाँचें
+exit एग्ज़िट                  5 hits /   4 files
+         cli.agents_help.json cli.agents_help.push :: Radient पर एजेंट push (अपलोड) करें; `--org` और `--hub-id` पूर्वावलोकन/पुष्टि प्रवाह से push करते हैं (एग्ज़िट कोड: 0 प्रकाशित, 1 त्रुटि, 2 केवल पूर्वा
+         cli.sessions_help.json cli.sessions_help.resume_description :: शेल लूप के बिना संग्रहीत सत्र फिर शुरू करें: `--paused` (interrupted/retired जोड़ी), `--failed` (error), या `--all` (हर संग्रहीत, गैर-लाइव सत्र — सबसे
+         cli.sessions_help.json cli.sessions_help.move_engage_on_arrival :: गंतव्य पर पहुँचते ही बातचीत शुरू करें, ताकि वह पहले प्रॉम्प्ट के बिना वहाँ लाइव हो; जिस बातचीत का टर्न चल रहा हो उसे ड्रेन करने के बजाय अब भी अस्वीकार
+         cli.teams_help.json cli.teams_help.push :: किसी टीम को संगठन या सार्वजनिक हब (Agent Hub) पर push करें; एग्ज़िट कोड: 0 प्रकाशित, 1 त्रुटि, 2 केवल पूर्वावलोकन (बदलाव लंबित), 3 अस्वीकृत, 130 रद्द
+         wire.remote_compute.json wire.remote_compute.finished_exit_code :: एग्ज़िट कोड: {exit_code}
+exit निकास                    0 hits /   0 files
+learnings लर्निंग्स           1 hits /   1 files
+         wire.settings.json wire.settings.max_learnings_history.label :: लर्निंग्स इतिहास अधिकतम
+learned सीखी                  0 hits /   0 files
+autoadv अपने-आप              34 hits /  10 files
+autoadv अपने आप               5 hits /   5 files
+         cli.team_bridge.json cli.team_bridge.status.isolated_note :: यह कॉन्फ़िगरेशन फ़ोल्डर आपका डिफ़ॉल्ट फ़ोल्डर नहीं है, इसलिए इसके लिए साझा रिसीवर सेवा कभी इंस्टॉल नहीं होती और कोई सत्र इसके एजेंट संदेश अपने आप प्रा
+         wire.errors.desktop.json wire.errors.desktop.conversations_unreadable :: अभी बातचीतें पढ़ी नहीं जा सकीं। यह अपने आप ठीक हो जाता है; थोड़ी देर में फिर कोशिश करें।
+         wire.memory.json wire.memory.capture.locators.help :: पथ, URL और ID भी रखें, लेकिन सिर्फ़ उसी अनुभाग में कैप्चर किए गए निर्णय, लक्ष्य या प्रगति नोट से जुड़े संदर्भ के रूप में; इन्हें अपने आप में तथ्य के र
+         wire.remote_compute.json wire.remote_compute.alone :: --remote-status और --remote-cancel अपने आप में पूरे कमांड हैं: इनमें से एक को अकेले चलाएँ, --remote या रन के दूसरे विकल्पों के बिना।
+         wire.settings.json wire.settings.session_compression.description :: इतिहास पूरा रखा जाता है; पुरानी ट्रांसक्रिप्ट कंप्रेस होकर संग्रहीत होती हैं और अपने आप वापस पढ़ी जाती हैं। बंद: हर ट्रांसक्रिप्ट साधारण फ़ाइल ही रहती
+move स्थानांतरण               3 hits /   1 files
+         cli.sessions_help.json cli.sessions_help.move_queue :: व्यस्त बातचीत को अस्वीकार करने के बजाय अगले सुरक्षित बिंदु की प्रतीक्षा करें: स्थानांतरण बातचीत के डिवाइस पर टिकाऊ ढंग से कतार में रहता है और टर्न खत्
+         cli.sessions_help.json cli.sessions_help.move_cancel_queued :: कतार में लगे उस स्थानांतरण को रद्द करें जो अभी शुरू नहीं हुआ; केवल बातचीत id लेता है, और कुछ नहीं
+         cli.sessions_help.json cli.sessions_help.move_engage_on_arrival :: गंतव्य पर पहुँचते ही बातचीत शुरू करें, ताकि वह पहले प्रॉम्प्ट के बिना वहाँ लाइव हो; जिस बातचीत का टर्न चल रहा हो उसे ड्रेन करने के बजाय अब भी अस्वीकार
+move भेजें                   24 hits /  17 files
+move ले जाएँ                  4 hits /   4 files
+         cli.qwencloud_help.json cli.qwencloud_help.migrate :: सादे टेक्स्ट टिकट को एन्क्रिप्टेड सीक्रेट स्टोर में ले जाएँ
+         cli.refresh_help.json cli.refresh_help.refresh :: चल रहे सत्रों से कहें कि अपनी अगली सीमा पर डिस्क पर मौजूद बिल्ड पर चले जाएँ (कोई सिग्नल नहीं)
+         cli.sessions_help.json cli.sessions_help.move :: किसी बातचीत को दूसरे डिवाइस पर ले जाएँ, या उसे वापस घर लाएँ
+         wire.settings.json wire.settings.retry_modelfallback.choice.true.description :: अगले हॉप पर चले जाएँ
+set पर सेट                    3 hits /   3 files
+         cli.team_bridge.json cli.team_bridge.status.enrolment :: एजेंट संदेश: {state, select, on{इस मशीन पर चालू हैं} off{इस मशीन पर बंद हैं} not_enrolled{इस मशीन पर सेटअप नहीं हुआ है} other{स्थिति पढ़ी नहीं जा सकी}
+         cli.vault.json cli.vault.no_endpoint :: एजेंट एक्सेस एजेंट संदेशों के ज़रिए काम करता है, जिनका इस मशीन पर सेटअप नहीं हुआ है। उन्हें Local Operator ऐप में चालू करें, फिर `lop team-bridge setu
+         mobile.setup.json mobile.setup.consent :: सक्रिय करने पर इस Radient खाते की टनल सदस्यता USD {amount}/माह पर सेट होती है, आपका फ़ोन पता आरक्षित होता है, और बैकग्राउंड कनेक्टर इंस्टॉल/शुरू होता 
+specific खास                  0 hits /   0 files
+specific विशिष्ट              1 hits /   1 files
+         cli.config_help.json cli.config_help.edit :: कॉन्फ़िग फ़ाइल में कोई विशिष्ट कॉन्फ़िगरेशन मान संपादित करें
+smarthints स्मार्ट संकेत      4 hits /   1 files
+         wire.settings.json wire.settings.classification.title :: स्मार्ट संकेत
+         wire.settings.json wire.settings.classification_auto.label :: स्मार्ट संकेत
+         wire.settings.json wire.settings.classification_notice.help :: अप्रचलित। स्मार्ट संकेत चैट में चुप रहते हैं; कॉल लॉग में दर्ज होती है।
+         wire.settings.json wire.settings.classification_notice.label :: स्मार्ट संकेत सूचना
+peer पीयर                    12 hits /   5 files
+device डिवाइस                46 hits /  19 files
+shell शेल                    17 hits /   7 files
+deprecated अप्रचलित           4 hits /   1 files
+         wire.settings.json wire.settings.classification_notice.help :: अप्रचलित। स्मार्ट संकेत चैट में चुप रहते हैं; कॉल लॉग में दर्ज होती है।
+         wire.settings.json wire.settings.conversation_length.help :: अप्रचलित। संपीडन इंजन इसे बदल चुका है।
+         wire.settings.json wire.settings.detail_length.help :: अप्रचलित। संपीडन इंजन इसे बदल चुका है।
+         wire.settings.json wire.settings.max_learnings_history.help :: अप्रचलित। संपीडन इंजन इसे बदल चुका है।
+compaction संपीडन            19 hits /   3 files
+approval स्वीकृति            50 hits /  18 files
+loosen ढीला                   2 hits /   1 files
+         wire.settings.json wire.settings.approvals.description :: क्या लिखने वाले और कमांड चलाने वाले टूल हर चल रहे सत्र में पूछते हैं। कॉन्फ़िग लिखने से हरेक चल रहा सत्र एक साथ सख़्त हो जाता है; किसी एक को ढीला करने
+         wire.settings.json wire.settings.tool_approval_mode.help :: ढीला करने के लिए इसी सत्र से लिखना पड़ेगा — /approvals auto।
+config कॉन्फ़िगरेशन          23 hits /   8 files
+chat चैट                      8 hits /   8 files
+history इतिहास               21 hits /  11 files
+platform प्लेटफ़ॉर्म          9 hits /   7 files
+entries प्रविष्टि             7 hits /   6 files
+
+--- boundary recount ---
+path_translit पाथ            11 hits /   9 files
+path_std पथ                   8 hits /   6 files
+provider प्रोवाइडर           62 hits /  17 files
+provider प्रदाता              0 hits /   0 files
+exit एग्ज़िट                  5 hits /   4 files
+exit निकास                    0 hits /   0 files
+learnings लर्निंग्स           1 hits /   1 files
+learned सीखी                  0 hits /   0 files
+autoadv अपने-आप              34 hits /  10 files
+autoadv अपने आप               5 hits /   5 files
+move स्थानांतरण               3 hits /   1 files
+move भेजें                   18 hits /  12 files
+move ले जाएँ                  2 hits /   2 files
+set पर सेट                    1 hits /   1 files
+specific खास                  0 hits /   0 files
+specific विशिष्ट              1 hits /   1 files
+smarthints स्मार्ट संकेत      4 hits /   1 files
+peer पीयर                    12 hits /   5 files
+device डिवाइस                45 hits /  19 files
+shell शेल                    17 hits /   7 files
+deprecated अप्रचलित           0 hits /   0 files
+compaction संपीडन            19 hits /   3 files
+approval स्वीकृति            36 hits /  15 files
+loosen ढीला                   2 hits /   1 files
+config कॉन्फ़िगरेशन          23 hits /   8 files
+chat चैट                      8 hits /   8 files
+history इतिहास               21 hits /  11 files
+platform प्लेटफ़ॉर्म          9 hits /   7 files
+entries प्रविष्टि             4 hits /   4 files
+RC_RECOUNT=0
+
+=== [5] v1 -> v2 delta ===
+changed keys: ['cli.config.updated', 'cli.config.running_sessions_unchanged', 'cli.config.list_desc_hosting', 'cli.config.list_desc_model_name', 'cli.config.list_desc_detail_length', 'cli.config.list_desc_max_learnings_history', 'cli.config.list_desc_classification_notice', 'cli.config.list_desc_auto_save_conversation', 'tui.session_move.cli_no_answer']
+unchanged: 13 of 22
+
+KEY cli.config.updated
+  v1: {key} का मान {value} कर दिया गया
+  v2: {key} को {value} पर सेट कर दिया गया
+
+KEY cli.config.running_sessions_unchanged
+  v1: चल रहे सत्रों में कोई बदलाव नहीं हुआ — कॉन्फ़िगरेशन में बदलाव करने से उनकी स्वीकृति की शर्तें कम नहीं होतीं; जिस सत्र में टूल चलाने के लिए स्वीकृति नहीं चाहिए, उसमें /approvals auto टाइप करें। नए सत्र auto मोड में शुरू होते हैं।
+  v2: चल रहे सत्रों में कोई बदलाव नहीं हुआ — कॉन्फ़िगरेशन में बदलाव सहेजने से उनकी स्वीकृति की शर्तें ढीली नहीं हो सकतीं; जिन सत्रों में आप बिना स्वीकृति के टूल चलाना चाहते हैं, उनमें से हर एक में /approvals auto टाइप करें। नए सत्र auto मोड में शुरू होते हैं।
+
+KEY cli.config.list_desc_hosting
+  v1: AI प्रदाता का प्लेटफ़ॉर्म (जैसे radient, openai, deepseek, anthropic, openrouter)
+  v2: AI प्रोवाइडर प्लेटफ़ॉर्म (जैसे radient, openai, deepseek, anthropic, openrouter)
+
+KEY cli.config.list_desc_model_name
+  v1: बातचीत के लिए इस्तेमाल किया जाने वाला मॉडल
+  v2: बातचीत के लिए इस्तेमाल किया जाने वाला खास मॉडल
+
+KEY cli.config.list_desc_detail_length
+  v1: [अप्रचलित — अब इसकी जगह संपीडन है] बातचीत के इतिहास में बिना सारांश बनाए रखे जाने वाले हाल के संदेशों की संख्या
+  v2: [अप्रचलित — अब इसकी जगह संपीडन है] बातचीत के इतिहास में हाल के जिन संदेशों का सारांश नहीं बनाया जाता, उनकी संख्या
+
+KEY cli.config.list_desc_max_learnings_history
+  v1: [अप्रचलित — अब इसकी जगह संपीडन है] सीखी गई बातों की सहेजी जाने वाली प्रविष्टियों की अधिकतम संख्या
+  v2: [अप्रचलित — अब इसकी जगह संपीडन है] सहेजी जाने वाली लर्निंग्स प्रविष्टियों की अधिकतम संख्या
+
+KEY cli.config.list_desc_classification_notice
+  v1: [अप्रचलित] स्मार्ट संकेत चैट में कुछ नहीं दिखाते; कॉल और उसकी लागत सत्र लॉग में दर्ज होती है
+  v2: [अप्रचलित] स्मार्ट संकेत चैट में कुछ नहीं दिखाते; कॉल और उसकी लागत सत्र लॉग में दर्ज होते हैं
+
+KEY cli.config.list_desc_auto_save_conversation
+  v1: बातचीत अपने आप सहेजी जाए या नहीं
+  v2: बातचीत अपने-आप सहेजी जाए या नहीं
+
+KEY tui.session_move.cli_no_answer
+  v1: CLI बिना जवाब दिए निकास कोड {code} के साथ बंद हो गया
+  v2: CLI बिना जवाब दिए एग्ज़िट कोड {code} के साथ बंद हो गया
+RC_DIFF=0

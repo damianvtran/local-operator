@@ -1,0 +1,111 @@
+{
+  "schema": 1,
+  "audit_id": "c1a",
+  "locale": "ru",
+  "namespace": "tui.session_move",
+  "slice": "C1 core CLI + TUI English paths",
+  "slice_suffix": "A",
+  "audit_date": "2026-11-11",
+  "key_count": 7,
+  "audited_keys": [
+    "tui.session_move.ambiguous",
+    "tui.session_move.to_needs_device",
+    "tui.session_move.cannot_wait",
+    "tui.session_move.unsupported_flag",
+    "tui.session_move.cli_unavailable",
+    "tui.session_move.deadline_exceeded",
+    "tui.session_move.cli_no_answer"
+  ],
+  "source_head": "b188079f32e6 (branch i18n/c1-core-english-paths)",
+  "auditor": {
+    "agent": "i18n-auditor (session e45ca4d0d71c)",
+    "session": "e45ca4d0d71c",
+    "model": "deepseek/deepseek-flash",
+    "actual_model_source": "this session's harness model line (\"Model: deepseek/deepseek-flash\"); no fallback was requested or used",
+    "independent_from_translator_session": true,
+    "translator_identity": "openai/gpt-6.1-sol, as stated in the manager's brief; the translator session id was not supplied to this auditor"
+  },
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/tui.session_move.json",
+      "sha256": "f4dd682b3b50d64a4009eac5ac78a34f5734b5dd0a5ef379951065da326a913e"
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/tui.session_move.context.json",
+      "sha256": "09ed30a0b11969671c41e24fe255072c961fff1f90791a7b9f05cd998cbee573"
+    },
+    "ru_audited_values": {
+      "path": "translator scratch c1-prep/ru.json (out of tree)",
+      "sha256": "d691d505003ee5dec761e2e94bbb5ba3de4c0ce9f32d69d3147bc20f997ff047",
+      "note": "the audited target values; no ru catalogue for this namespace exists in the tree yet, so this hash is not re-hashable after landing. Its per-key values are identical to what the landed catalogue must contain (verified key order equals the en catalogue order)."
+    },
+    "style_guide": {
+      "path": "i18n/style-guides/ru.md",
+      "sha256": "f20e1cafaf70578c17ce072c71725628808d228e4be5604329f8da30386f1fb5"
+    },
+    "glossary": {
+      "path": "i18n/glossary.md",
+      "sha256": "0eb34437a8c3d6f564f278ef957a603b1d9f51bb07d5ddae5ea8f37deba962f8"
+    }
+  },
+  "per_key_value_sha256": {
+    "tui.session_move.ambiguous": "aa36905ad48af8b66fcfd8fd802c9c1283bc57bfce26a759aa197260ff0afb07",
+    "tui.session_move.to_needs_device": "150cf15b54dc76b2e57a88c972037dcd516e4f9c702b7be6c31a64a8ce4a73a8",
+    "tui.session_move.cannot_wait": "26852023139f75cfc1398a7a7ef69693c524cea7625a1a2232c33671ef07627e",
+    "tui.session_move.unsupported_flag": "1179de492d6e5c8dbc000846e81d403c0afa1558712626a5134f29a27a452766",
+    "tui.session_move.cli_unavailable": "a638eb3ddd872475812b034341be444a32e4c1bf56ba0466a1138cd759691438",
+    "tui.session_move.deadline_exceeded": "dc55f2b1754e1047391581d537c3195a7f7367709f2077bb1255c50b486743d5",
+    "tui.session_move.cli_no_answer": "d7b89a4e7423d3bb2129e8ce0d46195ea202472491e312cff1b82ba7540d85f6"
+  },
+  "projected_target_catalogue": {
+    "path": "local_operator/i18n/catalogues/ru/tui.session_move.json",
+    "sha256_projected": "8bb32ae7520210d403853227f3da50dc689accc45632d68d80f850fb8afb9228",
+    "note": "PROJECTION, not a measurement: the audited values serialised the way the generator writes catalogues (json.dumps(indent=2, ensure_ascii=False) + trailing newline, key order = en order), checked by round-tripping en/cli.config.json byte-identically. Recompute from the written file at landing and bind that hash in the ledger row."
+  },
+  "current_report_verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "finding_ids": [
+      "M5",
+      "N5"
+    ],
+    "counts": {
+      "blocker": 0,
+      "major": 0,
+      "minor": 1,
+      "nit": 1
+    }
+  },
+  "ledger_row": {
+    "status": "passed",
+    "applied": true,
+    "shard_path": "i18n/audit-history/ru/tui.session_move.json",
+    "shard_sha256": "dbf55a78e058c07effc48b22ab1c7c666cd7f77cc5bed7534cab6bf00ebd3964",
+    "history_sha256": "195e44d8c63b95b934b4e45a9837b428afc900b6d82b77d39120737c2c0e5812",
+    "source_sha256": "f4dd682b3b50d64a4009eac5ac78a34f5734b5dd0a5ef379951065da326a913e",
+    "target_sha256_note": "not bound yet: measured from the ru catalogue when it lands in the same PR; projected value in this record",
+    "reason": "Applied. docs/I18N.md orders catalogue-then-receipt, but the wave convention (measured before appending: the es lanes' rows for these same two namespaces already exist with the same source_sha256 basis) appends the row at audit time with source_sha256 = the EN catalogue hash and the locale catalogue landing in the same PR. check.py --catalogues-only and generate.py --check stay green with the rows present, and ledger.py validate --base origin/main reports append-only.",
+    "prepared_row": "row-tui.session_move.json"
+  },
+  "audit_notes_not_execution_log": "report.md, report bodies and this record are notes written after the pass; audit.log is captured command output from the session (check.py, the repo ICU verifier, shasum, catalogue_sha256, history-sha, ledger append dry-run and apply). No CLI output is claimed that was not run.",
+  "original_lost_evidence": null,
+  "limitations": [
+    "Independent LLM review, not native-speaker certification.",
+    "Scalar text evidence only: no terminal frame was rendered for this group, so this is not rendered-layout proof (no cell cap applies to these keys).",
+    "The audited target bytes are the translator's scratch values; the committed catalogue does not exist yet."
+  ],
+  "artifacts": [
+    "audit.log",
+    "receipt.json",
+    "record.json",
+    "report.md",
+    "row-tui.session_move.json",
+    "slice-report.md"
+  ],
+  "bundle_companions": {
+    "report.md": "per-namespace findings (this bundle)",
+    "slice-report.md": "full slice report: both namespaces, hashes, commands, ledger reasoning",
+    "audit.log": "captured command output",
+    "row-tui.session_move.json": "the ledger row as appended to i18n/audit-history/ru/tui.session_move.json (see ledger_row)"
+  }
+}

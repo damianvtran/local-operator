@@ -1766,7 +1766,8 @@ async def test_sdk4_pre_root_refusals_never_construct_or_read_locale(
     source_calls = []
 
     def source_only(code, params, *, locale=None):
-        # Spec input diagnostics are keyed but stay English before isolation;
+        # Spec input diagnostics are keyed and render in the ACTIVE locale
+        # (English here: the autouse fixture restores it); before isolation
         # they must not resolve configuration or construct a scoped manager.
         assert locale == "en"
         source_calls.append(code)

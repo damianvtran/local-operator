@@ -28,9 +28,9 @@ from local_operator.session.catalog import CatalogEntry
 from local_operator.session.runtime.registry import scan as record_scan
 from local_operator.tui.app import OperatorApp
 from local_operator.tui.session_move import (
-    AMBIGUOUS_MOVE,
     MOVE_PHASE_ORDER,
     MoveTo,
+    ambiguous_move,
     parse_move_to,
 )
 from tests.unit.tui.test_app_pilot import FakeSession, _factory
@@ -66,9 +66,9 @@ def test_the_phase_order_is_the_contracts() -> None:
         ("--queue --keep --to local", MoveTo(to="local", keep=True, queue=True)),
         # Refusals, each by name.
         ("--to", MoveTo(error="--to needs a device: /move --to <peer|local>")),
-        ("~/src --to pixel-8", MoveTo(error=AMBIGUOUS_MOVE)),
-        ("./x --to local", MoveTo(error=AMBIGUOUS_MOVE)),
-        ("a b --to local", MoveTo(error=AMBIGUOUS_MOVE)),
+        ("~/src --to pixel-8", MoveTo(error=ambiguous_move())),
+        ("./x --to local", MoveTo(error=ambiguous_move())),
+        ("a b --to local", MoveTo(error=ambiguous_move())),
         # LOH-9 S2: the role-definition opt-out is accepted anywhere, and the
         # "only ..." refusal names it so a reader is not told the flag does not
         # exist by an error that omits it.

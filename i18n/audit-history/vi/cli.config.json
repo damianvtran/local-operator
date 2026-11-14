@@ -1,0 +1,72 @@
+{
+  "schema": 1,
+  "locale": "vi",
+  "namespace": "cli.config",
+  "history_sha256": "6d681bbe2bc41200f44f37cdb5c825d3f457807da79f7a15dbfa582264f4cea5",
+  "entries": [
+    {
+      "locale": "vi",
+      "namespace": "cli.config",
+      "source_sha256": "40649e7419d144f7e8a550d5ae3c6d48defa7bb0b23f4a20ceac35f2b0fda5ac",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-11"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-11-11",
+        "result": "passed",
+        "findings": 6,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "vi C1 `cli.config` independent full second-pass audit of the v2 bytes (sonnet): 0 BLOCKER/0 MAJOR/2 minor/4 nit (group-wide). The round-1 A pass was lost and is not claimed; round-1 B (sonnet, v1) 0M/3m/2n is preserved. Report: i18n/audits/evidence/vi/cli.config/c1r2/second-pass-report.md.",
+      "companions": [
+        {
+          "path": "i18n/audits/evidence/vi/cli.config/c1r2/second-pass-report.md",
+          "sha256": "5dbca6b4c99b35cf059f71ce6a23e49ff02755005ecef6edaa973d5df1eb75a4"
+        },
+        {
+          "path": "i18n/audits/evidence/vi/cli.config/c1r2/round1-B-report.md",
+          "sha256": "4947fed60a1436d15a20587f2935184ec908a8beaa44455c74116ec685a1de12"
+        }
+      ]
+    },
+    {
+      "locale": "vi",
+      "namespace": "cli.config",
+      "source_sha256": "40649e7419d144f7e8a550d5ae3c6d48defa7bb0b23f4a20ceac35f2b0fda5ac",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-11"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-11-11",
+        "result": "passed",
+        "findings": 2,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Round-2 delta over 9 changed keys (5 here): DEPRECATED tags now use shipped «bộ máy nén»; all 3 safety claims intact; 0 BLOCKER/0 MAJOR; 2 NIT carried. Target file sha256 23994e341d81; evidence i18n/audits/evidence/vi/cli.config/c1r2/record.json.",
+      "companions": [
+        {
+          "path": "i18n/audits/evidence/vi/cli.config/c1r2/record.json",
+          "sha256": "b34c8f1e67a7007464b5e2863e27c44146750d95015a7cea319b6791d53b3349"
+        },
+        {
+          "path": "i18n/audits/evidence/vi/cli.config/c1r2/report.md",
+          "sha256": "d8760013304f5183e8bdea2bf1d08514b54e1da3d58d02f3b2f05c6f300385e7"
+        },
+        {
+          "path": "i18n/audits/evidence/vi/cli.config/c1r2/audit.log",
+          "sha256": "b423071f53ad15ecce217b516097d565f2ebf2314b17ad801b9c5de9c3eab790"
+        }
+      ]
+    }
+  ]
+}

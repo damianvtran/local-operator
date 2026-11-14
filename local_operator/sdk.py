@@ -86,6 +86,7 @@ from local_operator.session.spec import (
     SessionRoots,
     SessionSpec,
     SessionSpecError,
+    spec_refusal_text,
 )
 
 if TYPE_CHECKING:  # the names `__getattr__` serves, for type checkers only
@@ -966,15 +967,13 @@ async def open_session(
         from local_operator.i18n.keys import wire_errors_sdk_spec
 
         raise SessionSpecError(
-            wire_errors_sdk_spec.mode_invalid(mode=repr(mode)).envelope(locale="en")["text"]
+            spec_refusal_text(wire_errors_sdk_spec.mode_invalid(mode=repr(mode)))
         )
     if mode == "attach":
         if spec.resume is None:
             from local_operator.i18n.keys import wire_errors_sdk_spec
 
-            raise SessionSpecError(
-                wire_errors_sdk_spec.attach_resume_required().envelope(locale="en")["text"]
-            )
+            raise SessionSpecError(spec_refusal_text(wire_errors_sdk_spec.attach_resume_required()))
         _refuse_attach_extras(spec)
     else:
         _guard_agent_shell()
@@ -1043,9 +1042,7 @@ def _refuse_attach_extras(spec: SessionSpec) -> None:
         # failure shape this surface refuses to have.
         from local_operator.i18n.keys import wire_errors_sdk_spec
 
-        raise SessionSpecError(
-            wire_errors_sdk_spec.attach_output_unsupported().envelope(locale="en")["text"]
-        )
+        raise SessionSpecError(spec_refusal_text(wire_errors_sdk_spec.attach_output_unsupported()))
     # Value equality, deliberately: ``refuse()`` is the default, so a caller
     # who spells it out is indistinguishable from one who does not — and every
     # other preset (auto/declared/callback) is refused, each enum value covered
@@ -1056,9 +1053,11 @@ def _refuse_attach_extras(spec: SessionSpec) -> None:
         from local_operator.i18n.keys import wire_errors_sdk_spec
 
         raise SessionSpecError(
-            wire_errors_sdk_spec.attach_fields_unsupported(
-                fields=", ".join(set_fields) if set_fields else "yolo/train/workstream"
-            ).envelope(locale="en")["text"]
+            spec_refusal_text(
+                wire_errors_sdk_spec.attach_fields_unsupported(
+                    fields=", ".join(set_fields) if set_fields else "yolo/train/workstream"
+                )
+            )
         )
 
 
@@ -1108,9 +1107,9 @@ def _refuse_spawn_extras(spec: SessionSpec) -> None:
         from local_operator.i18n.keys import wire_errors_sdk_spec
 
         raise SessionSpecError(
-            wire_errors_sdk_spec.spawn_output_unsupported(fields=", ".join(output_fields)).envelope(
-                locale="en"
-            )["text"]
+            spec_refusal_text(
+                wire_errors_sdk_spec.spawn_output_unsupported(fields=", ".join(output_fields))
+            )
         )
     if spec.yolo:
         blockers.append("yolo")
@@ -1124,9 +1123,9 @@ def _refuse_spawn_extras(spec: SessionSpec) -> None:
         from local_operator.i18n.keys import wire_errors_sdk_spec
 
         raise SessionSpecError(
-            wire_errors_sdk_spec.spawn_fields_unsupported(fields=", ".join(blockers)).envelope(
-                locale="en"
-            )["text"]
+            spec_refusal_text(
+                wire_errors_sdk_spec.spawn_fields_unsupported(fields=", ".join(blockers))
+            )
         )
 
 
@@ -1203,15 +1202,13 @@ async def spawn_session(
                 from local_operator.i18n.keys import wire_errors_sdk_spec
 
                 raise SessionSpecError(
-                    wire_errors_sdk_spec.spawn_model_pair_required().envelope(locale="en")["text"]
+                    spec_refusal_text(wire_errors_sdk_spec.spawn_model_pair_required())
                 )
             if spec.birth_effort and not (spec.hosting and spec.model):
                 from local_operator.i18n.keys import wire_errors_sdk_spec
 
                 raise SessionSpecError(
-                    wire_errors_sdk_spec.spawn_birth_effort_pair_required().envelope(locale="en")[
-                        "text"
-                    ]
+                    spec_refusal_text(wire_errors_sdk_spec.spawn_birth_effort_pair_required())
                 )
             session_id = uuid.uuid4().hex[:12]
         else:

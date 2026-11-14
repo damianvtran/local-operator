@@ -1,0 +1,17 @@
+{
+  "cli.config.created": "Đã tạo tệp cấu hình mới tại {path}",
+  "cli.config.opened": "Đã mở tệp cấu hình tại {path}",
+  "cli.config.cleared": "Đã xóa giá trị của {key}: cài đặt này lại dùng giá trị mặc định",
+  "cli.config.updated": "Đã cập nhật {key} thành {value}",
+  "cli.config.running_sessions_unchanged": "Các phiên đang chạy không thay đổi — ghi cấu hình không thể nới lỏng yêu cầu phê duyệt của các phiên này; gõ /approvals auto trong từng phiên muốn bỏ yêu cầu phê duyệt công cụ. Phiên mới bắt đầu ở chế độ auto.",
+  "cli.config.list_title": "Tùy chọn cấu hình",
+  "cli.config.list_description": "Mô tả: {description}",
+  "cli.config.list_unrecognised": "khóa không xác định; không có gì đọc khóa này",
+  "cli.config.list_desc_hosting": "Nền tảng của nhà cung cấp AI (ví dụ: radient, openai, deepseek, anthropic, openrouter)",
+  "cli.config.list_desc_model_name": "Mô hình cụ thể dùng để tương tác",
+  "cli.config.list_desc_conversation_length": "[ĐÃ LỖI THỜI — được thay bằng bộ máy nén] Số tin nhắn tối đa giữ lại trong lịch sử trò chuyện",
+  "cli.config.list_desc_detail_length": "[ĐÃ LỖI THỜI — được thay bằng bộ máy nén] Số tin nhắn gần đây giữ nguyên, không tóm tắt, trong lịch sử trò chuyện",
+  "cli.config.list_desc_max_learnings_history": "[ĐÃ LỖI THỜI — được thay bằng bộ máy nén] Số bài học tối đa giữ lại",
+  "cli.config.list_desc_classification_notice": "[ĐÃ LỖI THỜI] Gợi ý thông minh không hiện thông báo trong cuộc trò chuyện; lệnh gọi và chi phí nằm trong nhật ký phiên",
+  "cli.config.list_desc_auto_save_conversation": "Có tự động lưu cuộc trò chuyện hay không"
+}

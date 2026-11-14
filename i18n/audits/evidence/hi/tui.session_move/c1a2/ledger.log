@@ -1,0 +1,28 @@
+=== audit-ledger append (round 2, hi) ===
+run at: 2026-11-11T08:06:35Z
+
+$ python3 scripts/i18n/ledger.py history-sha --locale hi --namespace cli.config   # before: 62413e97013dc685c30945b1a9f8d71f448c2dc9acfa6e961cb3c28cff3b0e99
+$ python3 scripts/i18n/ledger.py append --receipt rows/cli.config.json --expected-history-sha 62413e97… --apply
+c8f76bb65de8e52341549510d9c0ec77b306342a7fea98a85e20b8c0abf7c5f0
+
+--- cli.config companions on disk vs row ---
+row status passed | findings 0 | note chars 243
+MATCH   i18n/audits/evidence/hi/cli.config/c1a2/record.json 09c2e0ed375c
+MATCH   i18n/audits/evidence/hi/cli.config/c1a2/report.md 42028b9a6fe5
+MATCH   i18n/audits/evidence/hi/cli.config/c1a2/audit.log 515f6a69cbea
+MATCH   i18n/audits/evidence/hi/cli.config/c1a2/target-candidate.json d575bebe3038
+history_sha256 now: c8f76bb65de8e52341549510d9c0ec77b306342a7fea98a85e20b8c0abf7c5f0
+entries: 2
+
+--- tui.session_move companions on disk vs row ---
+row status passed | findings 0 | note chars 254
+MATCH   i18n/audits/evidence/hi/tui.session_move/c1a2/record.json 89c2a364858e
+MATCH   i18n/audits/evidence/hi/tui.session_move/c1a2/report.md 42028b9a6fe5
+MATCH   i18n/audits/evidence/hi/tui.session_move/c1a2/audit.log 515f6a69cbea
+MATCH   i18n/audits/evidence/hi/tui.session_move/c1a2/target-candidate.json d575bebe3038
+history_sha256 now: 1415b671dd28b3a95ac8369c226fdaf447ef6c4b0486d70dfbe1d1371fcb51de
+entries: 2
+
+$ python3 scripts/i18n/ledger.py validate --base HEAD
+audit history: valid and append-only
+RC_VALIDATE_LEDGER=0

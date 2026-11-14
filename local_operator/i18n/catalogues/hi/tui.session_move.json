@@ -1,0 +1,9 @@
+{
+  "tui.session_move.ambiguous": "कार्यशील डायरेक्टरी के लिए /move <पाथ> या सत्र को दूसरे डिवाइस पर ले जाने के लिए /move <सत्र> --to <पीयर> इस्तेमाल करें।",
+  "tui.session_move.to_needs_device": "--to के लिए डिवाइस चाहिए: /move --to <पीयर|local>",
+  "tui.session_move.cannot_wait": "इस दृश्य में प्रतीक्षा नहीं की जा सकती — शेल से चलाएँ: `lop sessions move <id> --to <to> --wait <seconds>`",
+  "tui.session_move.unsupported_flag": "/move --to के साथ केवल --keep, --queue और --drop-session-roles इस्तेमाल कर सकते हैं, {flag} नहीं",
+  "tui.session_move.cli_unavailable": "CLI शुरू नहीं हो सका ({reason})",
+  "tui.session_move.deadline_exceeded": "स्थानांतरण तय समय में पूरा नहीं हुआ; `lop sessions move {session} --to {to}` फिर से चलाने पर पता चलेगा कि यह कहाँ तक पहुँचा",
+  "tui.session_move.cli_no_answer": "CLI बिना जवाब दिए एग्ज़िट कोड {code} के साथ बंद हो गया"
+}

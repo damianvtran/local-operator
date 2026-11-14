@@ -1,0 +1,114 @@
+"""Reproduction: mechanical checks for es Slice C1 (cli.config.* + tui.session_move.*).
+
+Run from the i18n-c1 worktree with its venv:
+    .venv/bin/python <this file>
+Inputs are the auditor's read-only copies of the English sidecar (keys.json) and the
+translation under audit (es.json). Writes nothing.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+sys.path.insert(0, ".")
+from rich.cells import cell_len  # noqa: E402
+
+from local_operator.i18n import runtime as rt  # noqa: E402
+
+PREP = Path("<scratchpad>/c1-prep")
+keys = json.loads((PREP / "keys.json").read_text())
+es = json.loads((PREP / "es.json").read_text())
+
+print("AUDIT c1-au-es-A locale=es group=core CLI+TUI (cli.config.* 15 + tui.session_move.* 7)")
+print(
+    "worktree HEAD:",
+    subprocess.run(["git", "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip(),
+)
+print("json parses: keys=%d target=%d" % (len(keys), len(es)))
+
+enc: dict[str, str] = {}
+for ns in ("cli.config", "tui.session_move"):
+    enc.update(json.loads(Path(f"local_operator/i18n/catalogues/en/{ns}.json").read_text()))
+print("en catalogue keys:", len(enc), "shard keys:", len(es))
+print("shard-only:", sorted(set(es) - set(enc)), "catalogue-only:", sorted(set(enc) - set(es)))
+
+bad = 0
+for k, v in es.items():
+    en = keys[k]["en"]
+    pa = [n for n, _ in rt.message_arguments(v)]
+    ea = [n for n, _ in rt.message_arguments(en)]
+    if pa != ea:
+        print("ARGMISMATCH", k, pa, ea)
+        bad += 1
+    if re.findall(r"`[^`]*`", v) != re.findall(r"`[^`]*`", en):
+        print("BACKTICK", k)
+        bad += 1
+    if v.count("`") % 2:
+        print("UNEVEN-BACKTICKS", k)
+        bad += 1
+    if v != v.strip():
+        print("EDGE-SPACE", k)
+        bad += 1
+    if "  " in v:
+        print("DOUBLE-SPACE", k)
+        bad += 1
+    if not v.strip():
+        print("EMPTY", k)
+        bad += 1
+    if v == en:
+        print("IDENTICAL-EN", k)
+        bad += 1
+    for ch in v:
+        if ord(ch) in (
+            0x00A0, 0x2007, 0x202F, 0x200B, 0x200C, 0x200E, 0x200F,
+            0x2060, 0xFEFF, 0x2028, 0x2029,
+        ):
+            print("INVISIBLE", k, hex(ord(ch)))
+            bad += 1
+    if v.endswith(".") != en.endswith("."):
+        print("FINAL-PERIOD-DIFF", k)
+        bad += 1
+    if (" — " in v) != (" — " in en):
+        print("DASH-SPACING", k)
+        bad += 1
+    rt.parse_message(v)
+print("mechanical bad:", bad)
+
+print("\nwidths (rich.cells.cell_len):")
+for k, v in es.items():
+    print(
+        f"  {k:52s} en={cell_len(keys[k]['en']):3d} es={cell_len(v):3d} "
+        f"delta={cell_len(v) - cell_len(keys[k]['en']):+d}"
+    )
+
+print("\nrender probes (sample params):")
+sample = {
+    "path": "/Users/d/.local-operator/config.yml",
+    "key": "tool_approval_mode",
+    "value": "auto",
+    "description": "x",
+    "flag": "'--force'",
+    "reason": "FileNotFoundError",
+    "session": "ab12",
+    "to": "phone",
+    "code": 2,
+}
+for k, v in es.items():
+    args = [n for n, _ in rt.message_arguments(v)]
+    print("  ", k, "->", rt.render_message(v, {n: sample[n] for n in args}, "es"))
+
+print("\nsha256 inputs:")
+for path in (
+    "local_operator/i18n/catalogues/en/cli.config.json",
+    "local_operator/i18n/catalogues/en/cli.config.context.json",
+    "local_operator/i18n/catalogues/en/tui.session_move.json",
+    "local_operator/i18n/catalogues/en/tui.session_move.context.json",
+    str(PREP / "keys.json"),
+    str(PREP / "es.json"),
+):
+    print(hashlib.sha256(Path(path).read_bytes()).hexdigest(), path)

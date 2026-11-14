@@ -1,0 +1,34 @@
+{
+  "locale": "fr",
+  "namespace": "cli.config",
+  "source_sha256": "40649e7419d144f7e8a550d5ae3c6d48defa7bb0b23f4a20ceac35f2b0fda5ac",
+  "translator": {
+    "agent": "i18n-translator",
+    "model": "openai/gpt-6.1-sol",
+    "date": "2026-11-11"
+  },
+  "auditor": {
+    "agent": "i18n-auditor (lopdev team)",
+    "model": "deepseek/deepseek-flash",
+    "date": "2026-11-11",
+    "result": "passed",
+    "findings": 5,
+    "unresolved_blocker_major": 0
+  },
+  "status": "passed",
+  "note": "fr C1 `cli.config` (15 keys). Evidence: i18n/audits/evidence/fr/cli.config/c1a/record.json. Auditor deepseek/deepseek-flash; 2 minor, 3 nit: key agreement, unrecognised-key phrase, created/opened locative, 'specific' dropped; no blocker/major gate.",
+  "companions": [
+    {
+      "path": "i18n/audits/evidence/fr/cli.config/c1a/record.json",
+      "sha256": "c401928d21c8bc4551d15e906d1e3ae12b5649485c1f9517acf0c732a2ba7caa"
+    },
+    {
+      "path": "i18n/audits/evidence/fr/cli.config/c1a/report.md",
+      "sha256": "89c37c4227ba0c203351b5fc0891a7ce1b12558c6376bb0d4567e1c0cfdba9de"
+    },
+    {
+      "path": "i18n/audits/evidence/fr/cli.config/c1a/audit.log",
+      "sha256": "a7a2b5c339e9aede61c30f38020c0ffa3f6ad394db5d0bb92e226a6671f5c7a7"
+    }
+  ]
+}

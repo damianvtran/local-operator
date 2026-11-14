@@ -1,0 +1,19 @@
+{
+  "audit_id": "c1r2",
+  "locale": "vi",
+  "namespace": "tui.session_move",
+  "audit_date": "2026-11-11",
+  "auditor": {
+    "agent": "i18n-auditor",
+    "session": "c04c7cb774d2",
+    "model": "deepseek/deepseek-flash",
+    "independent_from_translator_session": true,
+    "actual_model_source": "session header of this auditing session (deepseek/deepseek-flash); no model-fallback notice appeared in this transcript"
+  },
+  "companions": {
+    "record.json": "98ba8fe28a8d7e28ac5199cd788cef5a645d2b3cdf65315d2b56b8e6dd89cb91",
+    "report.md": "d8760013304f5183e8bdea2bf1d08514b54e1da3d58d02f3b2f05c6f300385e7",
+    "audit.log": "b423071f53ad15ecce217b516097d565f2ebf2314b17ad801b9c5de9c3eab790",
+    "ledger-row.json": "65925e79c315668b871e401c6ad4db27a69b991f14fec7275150753ddf8a9453"
+  }
+}

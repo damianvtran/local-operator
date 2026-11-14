@@ -1,0 +1,37 @@
+{
+  "tui.session_move.ambiguous": {
+    "role": "TUI system notice (error tier) refusing an ambiguous /move command typed in the composer",
+    "tone": "plain, instructive, one sentence; tells the user the two valid forms",
+    "note": "/move and --to are typed slash-command and flag tokens: keep verbatim. <path>, <session> and <peer> are placeholder words shown to the user inside angle brackets: translate the word inside the brackets (they are not ICU placeholders) but keep the angle brackets. 'working directory' = the folder the session runs in; 'session' = a conversation."
+  },
+  "tui.session_move.to_needs_device": {
+    "role": "TUI system notice (error tier) refusing /move --to with no target",
+    "tone": "terse, imperative-descriptive; a usage hint",
+    "note": "Keep '--to' and the usage '/move --to <peer|local>' verbatim, except that the words peer and local inside the angle brackets are the literal accepted values: 'local' MUST stay English (it is typed), 'peer' may be translated as a hint only if you keep the vertical bar and brackets. 'device' = another computer or phone on the user's mesh."
+  },
+  "tui.session_move.cannot_wait": {
+    "role": "TUI system notice (error tier) refusing the --wait flag on /move inside the TUI",
+    "tone": "plain, factual; points to the shell route",
+    "note": "The backticked command is a runnable shell command: keep every character verbatim, including --wait and the <id>, <to> and <seconds> placeholders. 'this view' = the TUI screen the user is typing in, which cannot block waiting for the move."
+  },
+  "tui.session_move.unsupported_flag": {
+    "role": "TUI system notice (error tier) refusing an unknown flag after /move --to",
+    "tone": "plain, factual, one sentence",
+    "note": "--keep, --queue, --drop-session-roles and /move --to are typed tokens: keep verbatim. {flag} is the offending argument already quoted (for example '--force'); insert verbatim."
+  },
+  "tui.session_move.cli_unavailable": {
+    "role": "Refusal message line shown after /move --to when the CLI subprocess could not be started",
+    "tone": "plain, factual, lowercase clause; no blame",
+    "note": "'the CLI' is the lop command-line program. {reason} is the operating system's error text (may be English; insert verbatim)."
+  },
+  "tui.session_move.deadline_exceeded": {
+    "role": "Refusal message line shown after /move --to when the move outlived its time bound",
+    "tone": "plain, reassuring-factual; says the outcome is unknown and how to check",
+    "note": "The backticked command is runnable: keep it verbatim, with {session} (a session id) and {to} (a device name) inserted verbatim. Meaning: the move did not complete within the allowed time, and running the same command again will report how far it got. Do not say it failed or succeeded."
+  },
+  "tui.session_move.cli_no_answer": {
+    "role": "Refusal message line shown after /move --to when the CLI exited without a usable answer",
+    "tone": "plain, factual, lowercase clause",
+    "note": "{code} is a numeric process exit status. 'the CLI' is the lop command-line program."
+  }
+}

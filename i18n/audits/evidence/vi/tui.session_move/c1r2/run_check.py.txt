@@ -1,0 +1,34 @@
+"""Run the repo catalogue validator against the scratch v2 candidate fixture.
+
+The candidate is untracked (not yet inserted into a catalogue by the
+integration owner), so the fixture root is monkeypatched in: check.py's
+check_catalogues() reads through local_operator.i18n.catalogues.catalogue_root(),
+which is the module attribute tests already monkeypatch.
+"""
+
+from __future__ import annotations
+
+import os
+import pathlib
+import sys
+
+REPO = pathlib.Path.home() / "local-operator/.worktrees/i18n-c1"
+FIXTURE = pathlib.Path(os.environ["LOCAL_OPERATOR_SCRATCHPAD"]) / "c1-a2-vi/catalogues"
+sys.path.insert(0, str(REPO))
+
+from local_operator.i18n import catalogues  # noqa: E402
+
+catalogues._CATALOGUES = FIXTURE
+print("catalogue root:", catalogues.catalogue_root())
+print("locales seen:", catalogues.locales())
+print("vi namespaces:", len(catalogues.namespaces("vi")))
+print("cli.config present:", (FIXTURE / "vi/cli.config.json").is_file())
+print("tui.session_move present:", (FIXTURE / "vi/tui.session_move.json").is_file())
+
+from scripts.i18n import check  # noqa: E402
+
+problems = check.check_catalogues()
+for line in problems:
+    print("PROBLEM:", line)
+print(f"check.py check_catalogues(): {len(problems)} problem(s)")
+sys.exit(1 if problems else 0)

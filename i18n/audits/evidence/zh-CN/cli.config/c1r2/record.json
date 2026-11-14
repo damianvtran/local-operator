@@ -1,0 +1,72 @@
+{
+  "schema": 1,
+  "audit_id": "c1r2",
+  "audit_round": 2,
+  "audit_kind": "same-history delta audit of the translator's v2 revision of an already round-1-audited group",
+  "locale": "zh-CN",
+  "namespace": "cli.config",
+  "audit_date": "2026-11-11",
+  "key_count": {
+    "namespace": 15,
+    "group_total": 22
+  },
+  "auditor": {
+    "agent": "i18n-auditor",
+    "session": "d9a52b06834b",
+    "model": "anthropic/claude-sonnet-5-5",
+    "independent_from_translator": true,
+    "actual_model_source": "served model quoted in the auditor's own report header; no fallback reported",
+    "fallback_used": false
+  },
+  "translator": {
+    "agent": "i18n-translator",
+    "model": "openai/gpt-6.1-sol",
+    "record": "c1-prep/zh-CN.v2-changes.md"
+  },
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/cli.config.json",
+      "sha256": "40649e7419d144f7e8a550d5ae3c6d48defa7bb0b23f4a20ceac35f2b0fda5ac"
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/cli.config.context.json",
+      "sha256": "9831a776d2f179969666f2271f9bc53ae7de8a18b8567732ba81bc8e2ca90e78"
+    },
+    "target": {
+      "path": "local_operator/i18n/catalogues/zh-CN/cli.config.json",
+      "sha256": "c79f88f972e4416b375cbeec509d38bb269ad1313a340f7b8fb8f976f90f313b"
+    },
+    "v2_candidate_all_22_keys": {
+      "path": "c1-prep/zh-CN.v2.json",
+      "sha256": "61adaca428a8f6dda453555b1081edf2c4c11af5b9fdbc81640dc1503b98d1be"
+    }
+  },
+  "current_bytes_match_audited_hashes": true,
+  "current_bytes_note": "verify.log (integrator, not the auditor) shows every shipped value is byte-equal to the audited v2 candidate",
+  "current_report_verdict": {
+    "status": "passed",
+    "blocker": 0,
+    "major": 0,
+    "minor": 0,
+    "nit": 2,
+    "unresolved_blocker_major_count": 0
+  },
+  "limits": [
+    "The round-2 auditor was a read-only reading role and kept no command log; verify.log is the integrator's mechanical re-verification of the shipped bytes, not the auditor's output.",
+    "No rendered terminal frame, no native-speaker review."
+  ],
+  "artifacts": [
+    {
+      "path": "report.md",
+      "sha256": "f4871100e8a9836593daa01617598559cff012fe5baca79c0a4118ddd87d915b"
+    },
+    {
+      "path": "round1-B-report.md",
+      "sha256": "cb7e62d60767cd1ea27d67e00f3070f691ae0dc02c208444f7568fbcbf00213f"
+    },
+    {
+      "path": "verify.log",
+      "sha256": "5a16ebabfdbe724bba4dddc1153ed7efe80d35b0a62462cee8bb9f197455496c"
+    }
+  ]
+}

@@ -1,0 +1,9 @@
+{
+  "tui.session_move.ambiguous": "ورکنگ ڈائریکٹری کے لیے /move <پاتھ> استعمال کریں، یا سیشن منتقل کرنے کے لیے /move <سیشن> --to <پیر> چلائیں۔",
+  "tui.session_move.to_needs_device": "--to کے لیے ڈیوائس بتانا ضروری ہے: /move --to <پیر|local>",
+  "tui.session_move.cannot_wait": "اس اسکرین پر انتظار ممکن نہیں — شیل سے چلائیں: `lop sessions move <id> --to <to> --wait <seconds>`",
+  "tui.session_move.unsupported_flag": "/move --to میں صرف --keep، --queue اور --drop-session-roles استعمال ہو سکتے ہیں، {flag} نہیں",
+  "tui.session_move.cli_unavailable": "CLI شروع نہیں ہو سکی ({reason})",
+  "tui.session_move.deadline_exceeded": "مقررہ وقت تک منتقلی کا نتیجہ معلوم نہیں ہو سکا؛ `lop sessions move {session} --to {to}` دوبارہ چلانے سے پتا چلے گا کہ کہاں تک پہنچی",
+  "tui.session_move.cli_no_answer": "CLI ایگزٹ کوڈ {code} کے ساتھ، بغیر جواب دیے بند ہو گئی"
+}

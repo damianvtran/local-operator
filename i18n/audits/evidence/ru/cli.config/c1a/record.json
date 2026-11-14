@@ -1,0 +1,133 @@
+{
+  "schema": 1,
+  "audit_id": "c1a",
+  "locale": "ru",
+  "namespace": "cli.config",
+  "slice": "C1 core CLI + TUI English paths",
+  "slice_suffix": "A",
+  "audit_date": "2026-11-11",
+  "key_count": 15,
+  "audited_keys": [
+    "cli.config.created",
+    "cli.config.opened",
+    "cli.config.cleared",
+    "cli.config.updated",
+    "cli.config.running_sessions_unchanged",
+    "cli.config.list_title",
+    "cli.config.list_description",
+    "cli.config.list_unrecognised",
+    "cli.config.list_desc_hosting",
+    "cli.config.list_desc_model_name",
+    "cli.config.list_desc_conversation_length",
+    "cli.config.list_desc_detail_length",
+    "cli.config.list_desc_max_learnings_history",
+    "cli.config.list_desc_classification_notice",
+    "cli.config.list_desc_auto_save_conversation"
+  ],
+  "source_head": "b188079f32e6 (branch i18n/c1-core-english-paths)",
+  "auditor": {
+    "agent": "i18n-auditor (session e45ca4d0d71c)",
+    "session": "e45ca4d0d71c",
+    "model": "deepseek/deepseek-flash",
+    "actual_model_source": "this session's harness model line (\"Model: deepseek/deepseek-flash\"); no fallback was requested or used",
+    "independent_from_translator_session": true,
+    "translator_identity": "openai/gpt-6.1-sol, as stated in the manager's brief; the translator session id was not supplied to this auditor"
+  },
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/cli.config.json",
+      "sha256": "40649e7419d144f7e8a550d5ae3c6d48defa7bb0b23f4a20ceac35f2b0fda5ac"
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/cli.config.context.json",
+      "sha256": "9831a776d2f179969666f2271f9bc53ae7de8a18b8567732ba81bc8e2ca90e78"
+    },
+    "ru_audited_values": {
+      "path": "translator scratch c1-prep/ru.json (out of tree)",
+      "sha256": "d691d505003ee5dec761e2e94bbb5ba3de4c0ce9f32d69d3147bc20f997ff047",
+      "note": "the audited target values; no ru catalogue for this namespace exists in the tree yet, so this hash is not re-hashable after landing. Its per-key values are identical to what the landed catalogue must contain (verified key order equals the en catalogue order)."
+    },
+    "style_guide": {
+      "path": "i18n/style-guides/ru.md",
+      "sha256": "f20e1cafaf70578c17ce072c71725628808d228e4be5604329f8da30386f1fb5"
+    },
+    "glossary": {
+      "path": "i18n/glossary.md",
+      "sha256": "0eb34437a8c3d6f564f278ef957a603b1d9f51bb07d5ddae5ea8f37deba962f8"
+    }
+  },
+  "per_key_value_sha256": {
+    "cli.config.created": "f3999d6a50c302a3d29db7d40f2d28dcd44743636ee8cec6680b6ea69c37edf6",
+    "cli.config.opened": "8d2324e59b1668dbb650018b6cb013d5c97ee181d02ab3fc10149db28281af52",
+    "cli.config.cleared": "cf78ed8b03ac6cb6ef6c710bd211cff8b4dd8f490cedf04fc9acf9acb7c0d53a",
+    "cli.config.updated": "1ea019d211db06fb706108708f43f30ee9309d26a57762b1cdecae920bc7fdcf",
+    "cli.config.running_sessions_unchanged": "9a17f2f1246475b89183563c9da57559294c5ebff14c39b25e19ce0b5b0e4330",
+    "cli.config.list_title": "cce38f14b2ca27850cf887dd5b6ff50f5e71a62579798d0b682b80224137accb",
+    "cli.config.list_description": "c3c57be55d1dc0d5f89f6c6307165f42da081cf1b63d530c38ad600b921fc3b3",
+    "cli.config.list_unrecognised": "1f6f1d9859634db79b180f4ab7f5278dd76a10ccc9cbc176a55db3fc25b08f2a",
+    "cli.config.list_desc_hosting": "f62cfa09eb5c7127e3324f674309b5dbb1d5ae91e72f01710636bdd988b60813",
+    "cli.config.list_desc_model_name": "83ade740422bfad5e3e357160861842b78ded522c277c3563ece05c104935db1",
+    "cli.config.list_desc_conversation_length": "ba12dd2bc4384092d069cac7e3d716f602f3ac761c076a9bea7dfffcb54ff452",
+    "cli.config.list_desc_detail_length": "40313610fd42b2a41b5160295275bc6a2d09df24c971330561e57595ee23b038",
+    "cli.config.list_desc_max_learnings_history": "edcee4ef93c5ba4a5d24101c90500b9d24a36715033696dcce570e1171105181",
+    "cli.config.list_desc_classification_notice": "3cda47ba564154ef507d98ba84f3e9928d12d72bfd6e71ad9908ae9de18d6df7",
+    "cli.config.list_desc_auto_save_conversation": "1c9946c30ed0c884fbdc73218af92bef65adfebe5ccf85559bb1cd5dc70b1081"
+  },
+  "projected_target_catalogue": {
+    "path": "local_operator/i18n/catalogues/ru/cli.config.json",
+    "sha256_projected": "1480bc908eb4bc56c943c8d79e295db33b0ca12f451e66b446f1d57d49bcaddd",
+    "note": "PROJECTION, not a measurement: the audited values serialised the way the generator writes catalogues (json.dumps(indent=2, ensure_ascii=False) + trailing newline, key order = en order), checked by round-tripping en/cli.config.json byte-identically. Recompute from the written file at landing and bind that hash in the ledger row."
+  },
+  "current_report_verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "finding_ids": [
+      "M1",
+      "M2",
+      "M3",
+      "M4",
+      "N1",
+      "N2",
+      "N3",
+      "N4"
+    ],
+    "counts": {
+      "blocker": 0,
+      "major": 0,
+      "minor": 4,
+      "nit": 4
+    }
+  },
+  "ledger_row": {
+    "status": "passed",
+    "applied": true,
+    "shard_path": "i18n/audit-history/ru/cli.config.json",
+    "shard_sha256": "14876b63f9ffe437c0e52626126962ce6beb7671f98163a4fde26527083be094",
+    "history_sha256": "52f08b3981ba857c8091885e8421326e73ddd73cf182c219cb00b6f4b57781fc",
+    "source_sha256": "40649e7419d144f7e8a550d5ae3c6d48defa7bb0b23f4a20ceac35f2b0fda5ac",
+    "target_sha256_note": "not bound yet: measured from the ru catalogue when it lands in the same PR; projected value in this record",
+    "reason": "Applied. docs/I18N.md orders catalogue-then-receipt, but the wave convention (measured before appending: the es lanes' rows for these same two namespaces already exist with the same source_sha256 basis) appends the row at audit time with source_sha256 = the EN catalogue hash and the locale catalogue landing in the same PR. check.py --catalogues-only and generate.py --check stay green with the rows present, and ledger.py validate --base origin/main reports append-only.",
+    "prepared_row": "row-cli.config.json"
+  },
+  "audit_notes_not_execution_log": "report.md, report bodies and this record are notes written after the pass; audit.log is captured command output from the session (check.py, the repo ICU verifier, shasum, catalogue_sha256, history-sha, ledger append dry-run and apply). No CLI output is claimed that was not run.",
+  "original_lost_evidence": null,
+  "limitations": [
+    "Independent LLM review, not native-speaker certification.",
+    "Scalar text evidence only: no terminal frame was rendered for this group, so this is not rendered-layout proof (no cell cap applies to these keys).",
+    "The audited target bytes are the translator's scratch values; the committed catalogue does not exist yet."
+  ],
+  "artifacts": [
+    "audit.log",
+    "receipt.json",
+    "record.json",
+    "report.md",
+    "row-cli.config.json",
+    "slice-report.md"
+  ],
+  "bundle_companions": {
+    "report.md": "per-namespace findings (this bundle)",
+    "slice-report.md": "full slice report: both namespaces, hashes, commands, ledger reasoning",
+    "audit.log": "captured command output",
+    "row-cli.config.json": "the ledger row as appended to i18n/audit-history/ru/cli.config.json (see ledger_row)"
+  }
+}
