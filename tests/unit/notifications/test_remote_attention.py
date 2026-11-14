@@ -1088,7 +1088,11 @@ def test_r1_4_the_forwarded_title_is_capped_like_the_local_inbox(tmp_path: Path)
 
     owner = _owner(tmp_path)
     _queue_ask(owner, "k7", "Why? " * 200)
-    [block] = ra.open_ask_notices(owner, SID)
+    blocks = ra.open_ask_notices(owner, SID)
+    # ``None`` means the ask log was unreadable — a distinct failure from an
+    # empty list, so narrow it explicitly rather than let the unpack hide it.
+    assert blocks is not None, "the ask log read as unknown"
+    [block] = blocks
     assert len(block["title"]) <= 120
     assert block["title"] == items.excerpt(
         items.first_question({"questions": [{"question": "Why? " * 200}]}), 120
@@ -1129,19 +1133,29 @@ def test_r1_3_a_blocking_gate_still_parks_beside_a_queued_ask() -> None:
 def test_q2_the_notify_tool_refuses_a_remote_ask_key() -> None:
     """Q2: the ask namespace is refused at the tool, not merely kept off the wire."""
     import json
-    from types import SimpleNamespace
 
+    from local_operator.harness.types import ToolContext
     from local_operator.tools import builtin
 
     async def door(**_kwargs: Any) -> str:
         raise AssertionError("a reserved key reached the inbox")
 
-    result = asyncio.run(
-        builtin.execute_notify(  # type: ignore[call-arg]
+    # ``@_guard`` types the executor as the positional ``ToolExecutor``
+    # callable, so call it positionally with a real ``ToolContext`` — the same
+    # shape the loop uses (and test_notify_title_guard.py's ``_notify``).
+    # ``ToolExecutor`` returns an ``Awaitable``, which ``asyncio.run`` will not
+    # take, so await it inside a coroutine.
+    context = ToolContext(cwd=".", notify_inbox=door)
+
+    async def notify() -> Any:
+        return await builtin.execute_notify(
             "call-1",
             {"title": "Answer me?", "key": f"{ra.ASK_NOTICE_PREFIX}zz"},
-            context=SimpleNamespace(notify_inbox=door),
+            None,
+            None,
+            context,
         )
-    )
+
+    result = asyncio.run(notify())
     text = json.dumps(getattr(result, "content", str(result)), default=str)
     assert "reserved" in text and ra.ASK_NOTICE_PREFIX in text
