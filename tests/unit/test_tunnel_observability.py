@@ -40,9 +40,20 @@ def test_a_control_plane_5xx_is_a_transient_server_error_not_a_refusal(status):
         assert authorization_failure_reason(outer) == gateway.SERVER_UNAVAILABLE
 
 
-@pytest.mark.parametrize("status", [401, 403, 409])
+@pytest.mark.parametrize("status", [401, 409])
 def test_a_4xx_still_reads_as_a_refusal(status):
     assert authorization_failure_reason(_server_error(status)) == gateway.REFUSED
+
+
+@pytest.mark.parametrize(
+    "status,reason", [(403, gateway.TUNNEL_INACTIVE), (402, gateway.BILLING_INACTIVE)]
+)
+def test_a_403_or_402_names_the_inactive_tunnel_not_the_login(status, reason):
+    # `/connect` answers 403 for any non-active tunnel (402 is billing): before
+    # this reason they read as `REFUSED`, whose remedy is a sign-in that cannot
+    # clear billing or a console state.
+    assert authorization_failure_reason(_server_error(status)) == reason
+    assert classify_failure(_server_error(status)).reason == reason
 
 
 def test_the_server_unavailable_reason_has_every_surface_entry():

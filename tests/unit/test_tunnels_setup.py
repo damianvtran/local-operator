@@ -992,3 +992,151 @@ async def test_a_409_adoption_never_matches_a_nameless_record():
         await cli._adopt_conflicting_create(renamed.as_api(), pending)
     exact = _ListingApi([{"id": "tun-a", "device_id": "dev-1", "name": "mac"}])
     assert (await cli._adopt_conflicting_create(exact.as_api(), pending))["id"] == "tun-a"
+
+
+# --- Inactive-tunnel remedies and the unattended no-spend run -----------------
+#
+# A teammate signed in and his phone said the tunnel "isn't active": every
+# surface pointed at a sign-in that cannot clear billing or a console state. The
+# plan now names the actual blocker, and the post-sign-in run (`--no-spend`) may
+# reconnect or reinstall but must NEVER reach `/billing/activate`.
+
+
+def _no_spend_args(*extra: str) -> argparse.Namespace:
+    parser = argparse.ArgumentParser()
+    add_parser(parser.add_subparsers(dest="command"))
+    return parser.parse_args(
+        ["tunnel", "setup", "apply", "--credential-id", "17", "--no-spend", "--json", *extra]
+    )
+
+
+@pytest.mark.asyncio
+async def test_lapsed_billing_is_add_credit_not_a_second_quote(rig):
+    save(rig[1])
+    _unserve(rig)
+    rig[0].update(eligible=False, active=True, balance_usd=0)
+    plan = await setup.observe(17)
+    assert plan["step"] == "billing_lapsed"
+    assert plan["ready"] is False
+    assert "Add credit" in plan["remedy"]
+
+
+@pytest.mark.asyncio
+async def test_never_activated_billing_still_asks_for_the_exact_quote(rig):
+    rig[0].update(eligible=False, active=False, monthly_price_usd="0.05")
+    plan = await setup.observe(17)
+    assert plan["step"] == "quote" and plan["activation_required"] is True
+
+
+@pytest.mark.asyncio
+async def test_a_console_disabled_tunnel_points_at_the_console_and_is_not_ready(rig):
+    save(rig[1])
+    rig[1]["enabled"] = False
+    rig[1]["status"] = "disabled"
+    plan = await setup.observe(17)
+    assert plan["step"] == "disabled" and plan["ready"] is False
+    assert "console.radienthq.com" in plan["remedy"]
+
+
+@pytest.mark.asyncio
+async def test_suspended_with_billing_in_order_is_a_ready_reconnect(rig):
+    save(rig[1])
+    rig[1]["status"] = "suspended"
+    plan = await setup.observe(17)
+    assert plan["step"] == "reconnect" and plan["ready"] is True
+    assert plan["activation_required"] is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "failure,step",
+    [
+        (lambda: __import__("httpx").ConnectError("down"), "network"),
+        (lambda: __import__("httpx").ReadTimeout("slow"), "network"),
+        (lambda: api.RequestFailed("Radient tunnel request failed (HTTP 503).", status=503),
+         "radient_unavailable"),
+        (lambda: api.RequestFailed("Radient tunnel request failed (HTTP 400).", status=400),
+         "account"),
+    ],
+)
+async def test_an_unreadable_fresh_read_says_wait_rather_than_check_account(
+    rig, monkeypatch, failure, step
+):
+    async def request(self, method, path="", **kwargs):
+        raise failure()
+
+    monkeypatch.setattr(setup.RadientTunnels, "request", request)
+    plan = await setup.observe(17)
+    assert plan["step"] == step
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "scenario",
+    ["never_activated", "never_activated_configured", "lapsed", "suspended_billing_ok"],
+)
+async def test_no_spend_run_makes_zero_billing_activate_requests(rig, monkeypatch, scenario):
+    """REQUIRED: the post-sign-in run can never spend, in any billing state.
+
+    The REAL `cli.dispatch` runs (create/configure/activate would reach the fake
+    control plane and be recorded); only the service install is stubbed, since
+    it would address launchd. Every request the run makes is in `rig[2]`.
+    """
+    from local_operator.tunnels import cli
+
+    quote, record, calls = rig
+    if scenario != "never_activated":
+        save(record)
+        _unserve(rig)
+    if scenario.startswith("never_activated"):
+        quote.update(eligible=False, active=False, monthly_price_usd="0.05", balance_usd=5)
+    if scenario == "never_activated_configured":
+        record["status"] = "suspended"
+    if scenario == "lapsed":
+        quote.update(eligible=False, active=True, balance_usd=0)
+        record["status"] = "suspended"
+    if scenario == "suspended_billing_ok":
+        record["status"] = "suspended"
+    real_dispatch = cli.dispatch
+    dispatched: list[argparse.Namespace] = []
+
+    async def dispatch(args):
+        dispatched.append(args)
+        if args.tunnel_command in {"install", "start", "restart"}:
+            return "stubbed service step"
+        return await real_dispatch(args)
+
+    monkeypatch.setattr(cli, "dispatch", dispatch)
+    try:
+        await setup.command(_no_spend_args())
+    except ValueError:
+        pass  # a fake-record shape refusal is fine; spending is not
+    if scenario == "suspended_billing_ok":
+        # The run DID reach a billing-capable stage (the real `tunnel configure`,
+        # which calls `_ensure_billing`), so the zero below is not vacuous.
+        assert [a.tunnel_command for a in dispatched][:1] == ["configure"]
+    assert ("POST", "/billing/activate") not in calls, calls
+    assert all(a.tunnel_command != "activate" for a in dispatched)
+    assert all(getattr(a, "accept_monthly_price", None) is None for a in dispatched)
+    journal = json.loads((config.directory() / "auto-setup.json").read_text())
+    assert journal["state"] in {"finished", "failed"}
+
+
+def test_no_spend_and_an_accepted_price_are_mutually_exclusive():
+    with pytest.raises(SystemExit):
+        _no_spend_args("--accept-monthly-price", "0.05")
+
+
+@pytest.mark.asyncio
+async def test_the_journal_and_a_held_lock_read_as_reconnecting(rig):
+    from local_operator.config_writer import nonblocking_file_claim
+    from local_operator.tunnels import autosetup
+
+    assert autosetup.auto_reconnecting() is False
+    autosetup.write_journal({"state": "running"})
+    # The journal alone is not liveness: a crashed run leaves it behind.
+    assert autosetup.auto_reconnecting() is False
+    with nonblocking_file_claim(config.directory() / "setup.lock") as acquired:
+        assert acquired
+        assert autosetup.auto_reconnecting() is True
+    assert autosetup.auto_reconnecting() is False

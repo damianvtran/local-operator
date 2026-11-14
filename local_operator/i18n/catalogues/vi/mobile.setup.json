@@ -77,5 +77,12 @@
   "mobile.setup.corrupt_intent": "Yêu cầu thiết lập điện thoại đã lưu không hợp lệ. Giữ nguyên create.json và nhờ tác nhân của bạn khôi phục yêu cầu gốc trước khi thử lại. Thiết lập chưa thay đổi gì.",
   "mobile.setup.title_repoint": "Truy cập điện thoại cần kết nối lại với lần đăng nhập mới hơn trên thiết bị này",
   "mobile.setup.repoint": "Thiết bị này đã có lần đăng nhập mới hơn vào cùng tài khoản Radient. Hãy kết nối lại truy cập điện thoại với lần đăng nhập đó — cùng tài khoản, cùng địa chỉ điện thoại.",
-  "mobile.setup.repointed": "Đã kết nối lại truy cập điện thoại với lần đăng nhập mới hơn trên thiết bị này cho cùng tài khoản (thông tin xác thực {id})."
+  "mobile.setup.repointed": "Đã kết nối lại truy cập điện thoại với lần đăng nhập mới hơn trên thiết bị này cho cùng tài khoản (thông tin xác thực {id}).",
+  "mobile.setup.disabled": "Tunnel này đang bị tắt trong bảng điều khiển Radient. Hãy bật lại tại https://console.radienthq.com/dashboard/tunnels; tunnel sẽ tự kết nối lại, và thiết lập sẽ không ghi đè lựa chọn đó.",
+  "mobile.setup.billing_lapsed": "Thanh toán cho tunnel này đã hết hiệu lực vì số dư Radient đã cạn. Hãy nạp tín dụng tại https://console.radienthq.com/dashboard/tunnels; thiết lập không bao giờ tự mua tín dụng, và tunnel sẽ tự kết nối lại khi số dư được khôi phục.",
+  "mobile.setup.reconnect": "Radient đã tạm dừng tunnel này, dù việc thanh toán vẫn ổn. Hãy kết nối lại để khôi phục truy cập điện thoại; không mất phí.",
+  "mobile.setup.network": "Máy tính này không kết nối được tới Radient (có thể mạng đã thay đổi hoặc bị mất). Truy cập điện thoại sẽ tự kết nối lại khi có mạng trở lại; bạn không cần làm gì.",
+  "mobile.setup.radient_unavailable": "Radient đã trả về một lỗi máy chủ tạm thời. Máy tính này và thông tin đăng nhập của nó không có vấn đề gì; truy cập điện thoại sẽ tự kết nối lại khi Radient hoạt động trở lại.",
+  "mobile.setup.reconnecting": "Truy cập điện thoại đang được kết nối lại ở chế độ nền sau khi bạn đăng nhập. Không mất phí; thông báo này sẽ tự biến mất sau một hai phút.",
+  "mobile.setup.login_offer": "Truy cập máy tính này từ ứng dụng điện thoại: chạy /mobile enable. Mọi mức giá hằng tháng đều được hiển thị cho bạn trước khi bắt đầu tính phí."
 }

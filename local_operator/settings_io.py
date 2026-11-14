@@ -70,6 +70,7 @@ from local_operator.i18n.keys import wire_guardrails as _gr
 from local_operator.i18n.keys import wire_host_speed as _hs
 from local_operator.i18n.keys import wire_memory as _mm
 from local_operator.i18n.keys import wire_notification_sound as _ns
+from local_operator.i18n.keys import wire_phone_access as _pa
 from local_operator.i18n.keys import wire_radient_saver as _rsv
 from local_operator.i18n.keys import wire_settings as _ws
 from local_operator.i18n.keys import wire_settings_account_policy as _ap
@@ -923,6 +924,9 @@ SECTIONS: tuple[Section, ...] = (
         Scope.LIVE,
         _t(_ws.desktop_description()),
     ),
+    # LIVE: the one key here is read by the credential-write hook at the moment
+    # a sign-in lands (`tunnels.install.auto_setup_enabled`), never cached.
+    Section("phone_access", _t(_pa.title()), Scope.LIVE, _t(_pa.description())),
     # The static file routes' served roots (``server/utils/static_roots.py``).
     # LIVE: the roots are rebuilt from the config on every request, so an edit
     # lands on the next thumbnail or preview with no restart.
@@ -6449,6 +6453,19 @@ SETTINGS: tuple[Setting, ...] = (
             _t(_ws.remote_compute_enabled_choice_true_description()),
             _t(_ws.remote_compute_enabled_choice_false_description()),
         ),
+    ),
+    Setting(
+        # The reversible switch for the post-sign-in no-spend setup run
+        # (`tunnels.install.auto_setup_after_login`). The literal mirrors
+        # `install.AUTO_SETUP_DEFAULT`; `test_every_default_matches_its_consumer`
+        # holds them equal (settings_io stays off the tunnels import path).
+        key="tunnel.auto_setup_after_login",
+        path=("tunnel", "auto_setup_after_login"),
+        section="phone_access",
+        label=_t(_pa.auto_setup_label()),
+        help=_t(_pa.auto_setup_help()),
+        kind=Kind.BOOL,
+        default=True,
     ),
 )
 

@@ -10,6 +10,22 @@ from __future__ import annotations
 from ..messages import Msg
 
 
+def billing_inactive_detail() -> Msg:
+    return Msg("tunnel.status.billing_inactive.detail", {})
+
+
+def billing_inactive_label() -> Msg:
+    return Msg("tunnel.status.billing_inactive.label", {})
+
+
+def billing_lapsed_detail(*, url: str) -> Msg:
+    return Msg("tunnel.status.billing_lapsed.detail", {"url": url})
+
+
+def billing_lapsed_label() -> Msg:
+    return Msg("tunnel.status.billing_lapsed.label", {})
+
+
 def create_conflict_unmatched() -> Msg:
     return Msg("tunnel.status.create.conflict_unmatched", {})
 
@@ -60,3 +76,19 @@ def server_unavailable_relay() -> Msg:
 
 def server_unavailable_terminal() -> Msg:
     return Msg("tunnel.status.server_unavailable.terminal", {})
+
+
+def tunnel_disabled_detail(*, url: str) -> Msg:
+    return Msg("tunnel.status.tunnel_disabled.detail", {"url": url})
+
+
+def tunnel_disabled_label() -> Msg:
+    return Msg("tunnel.status.tunnel_disabled.label", {})
+
+
+def tunnel_inactive_detail(*, url: str) -> Msg:
+    return Msg("tunnel.status.tunnel_inactive.detail", {"url": url})
+
+
+def tunnel_inactive_label() -> Msg:
+    return Msg("tunnel.status.tunnel_inactive.label", {})

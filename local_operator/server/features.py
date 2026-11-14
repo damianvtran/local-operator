@@ -887,6 +887,13 @@ def static_feature_flags() -> dict[str, Any]:
         # retain health/sign-in behavior; only this key admits the new account-
         # pinned quote/run affordance, never an automatic poll-side mutation.
         "tunnel_setup": 1,
+        # `remedy.kind` on `GET /v1/desktop/tunnel`, the setup route's new kinds
+        # (`open_console`, `wait_network`, `wait_radient`) and the reconnect /
+        # lapsed-billing steps, plus `kind` on the gateway's 503 body. ABSENT ⇒
+        # the renderer keeps its command/url-only remedy handling: an older
+        # backend sends no `kind` there, and a renderer that guessed one from a
+        # sentence would offer a button the backend never promised.
+        "tunnel_remedy_kinds": 1,
         # THE MESH, and both keys gate AFFORDANCES rather than shapes.
         #
         # `peers` is the peer catalogue's key (mesh-session-mobility.md
