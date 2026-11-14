@@ -48,6 +48,7 @@ from local_operator.harness.types import (
     StreamToolCallDelta,
     ToolCall,
     ToolExecutionEndEvent,
+    ToolResult,
 )
 from local_operator.redaction_shapes import REDACTION_MARKER, scrub_secrets
 from local_operator.tools.builtin import (
@@ -170,7 +171,9 @@ def _results(events: list[Any]) -> list[Message]:
     return [m for m in end.messages if isinstance(m, Message) and m.role == "tool"]
 
 
-def _result_text(message: Message) -> str:
+def _result_text(message: Message | ToolResult) -> str:
+    # Both a transcript ``Message`` and a direct tool call's ``ToolResult`` carry
+    # their text as ``content`` blocks; the bash rig reads the latter.
     return "".join(getattr(block, "text", "") for block in message.content)
 
 
@@ -541,7 +544,7 @@ class TestBashMarkerWriteSteer:
             f"cat > rig.py <<'EOF'\nH = {REDACTION_MARKER}\nEOF",
             f"echo {REDACTION_MARKER} | tee rig.py",
             f"sed -i '' 's/x/{REDACTION_MARKER}/' rig.py",
-            f"python3 -c 'open(\"r\",\"w\").write(\"{REDACTION_MARKER}\")'",
+            f'python3 -c \'open("r","w").write("{REDACTION_MARKER}")\'',
         ],
     )
     def test_a_file_write_with_the_marker_is_steered(self, command: str) -> None:
@@ -572,7 +575,7 @@ class TestBashMarkerWriteSteer:
 
         target = tmp_path / "rig.txt"
         result = await execute_bash(
-            "b1", {"command": f"printf '%s' '{REDACTION_MARKER}' > '{target}'"}
+            "b1", {"command": f"printf '%s' '{REDACTION_MARKER}' > '{target}'"}, None, None, None
         )
         assert target.read_bytes() == MARKER_BYTES, "bash must never be blocked"
         assert "mask for text hidden from your view" in _result_text(result)
