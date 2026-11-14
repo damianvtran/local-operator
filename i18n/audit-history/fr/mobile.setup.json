@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "fr",
   "namespace": "mobile.setup",
-  "history_sha256": "68a61881f9aa733aca1008421c258a81261a8b8246cc74605751244b32036459",
+  "history_sha256": "5b3c18ac55abe4bb3fca1f556f0f19f2cb6d716bf2ea475962eda47a67cd656a",
   "entries": [
     {
       "locale": "fr",
@@ -71,6 +71,29 @@
       "note": "a2: independent i18n-auditor 117e988422ff (anthropic/claude-opus-5-5) of i18n-translator c0c9e9803405 values, #3945 r1 remediation on 7c0fc7bf2: PASSED, 0 blocker/major (FR-01 nit); 12 keys. Evidence: i18n/audits/evidence/fr/mobile.setup/a2/record.json",
       "evidence": "i18n/audits/evidence/fr/mobile.setup/a2/record.json",
       "round": "a2",
+      "keys_audited": 12
+    },
+    {
+      "locale": "fr",
+      "namespace": "mobile.setup",
+      "source_sha256": "3025a3af72d2a082766ca7b4c72100db41f2504f48404697af453121b0b6e427",
+      "translator": {
+        "agent": "coder subagent of host Local Operator session 25fe8dfbf610 (values committed in 01113e5aa on fix/tunnel-remedy-no-commands); FR3-01..04 remediation committed in 14b76faf by a #3958 remediation lane whose session was not disclosed to this auditor",
+        "model": null,
+        "date": "2026-11-14"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team), independent Local Operator session 375851fcc4e9; neither the translator/coder (25fe8dfbf610) nor the previous fr auditor (9054cd229d3f); edited no catalogue value",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-14",
+        "result": "passed",
+        "findings": 2,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "a3r2: independent fr re-audit by translation-auditor 375851fcc4e9 (anthropic/claude-opus-5-5) of #3958 values at 14b76fafa after the a3 fr FAIL (9054cd229d3f, FR3-01 MAJOR U+0020 before ';', not receipted): PASSED, 0 blocker/major (FR4-N1, FR4-N2 nits, deferred to the PR thread); FR3-01..04 verified fixed in the bytes; 12 new *_plain keys. Evidence: i18n/audits/evidence/fr/mobile.setup/a3r2/record.json",
+      "evidence": "i18n/audits/evidence/fr/mobile.setup/a3r2/record.json",
+      "round": "a3r2",
       "keys_audited": 12
     }
   ]
