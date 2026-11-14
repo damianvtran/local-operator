@@ -24,6 +24,7 @@ import base64
 import hashlib
 import json
 import os
+import re
 import time
 import uuid
 from pathlib import Path
@@ -50,6 +51,7 @@ from local_operator.operator.elevate import ElevationResult
 from local_operator.server import desktop
 from local_operator.server.routes import desktop_approvals as approval_routes
 from local_operator.server.routes import desktop_credentials as operation_routes
+from local_operator.network.wire import crockford
 from local_operator.server.utils.desktop_sessions import DesktopSessions
 from tests.unit.network.test_approvals_store import _make_key, _sign
 from tests.unit.network.test_approvals_store import root as approvals_root  # noqa: F401
@@ -65,6 +67,25 @@ def _b64(raw: bytes) -> str:
 
 def _unb64(text: str) -> bytes:
     return base64.urlsafe_b64decode(text + "=" * (-len(text) % 4))
+
+
+# The request-id contract shared with the PWA (Q48-1). This phone used to mint
+# "req_" + uuid4().hex, a shape the PWA never sent, so the suite stayed green while
+# every PWA filing was refused. It now mints the shape the PWA's generator is pinned
+# to by the SAME fixture (src/lib/pair-request-id.contract.test.ts is the other half).
+REQUEST_ID_CONTRACT = json.loads(
+    (
+        Path(__file__).resolve().parents[3]
+        / "local_operator/mobile/web/src/fixtures/pair-request-id.contract.json"
+    ).read_text()
+)
+
+
+def _pwa_request_id() -> str:
+    """A fresh id in the PWA generator's shape: ``req_`` + Crockford(8 random bytes)."""
+    request_id = "req_" + crockford(os.urandom(8))
+    assert re.fullmatch(REQUEST_ID_CONTRACT["pattern"], request_id), request_id
+    return request_id
 
 
 # ---------------------------------------------------------------------------
@@ -85,7 +106,7 @@ class Phone:
         self.spki = _b64(self.point)
         self.device_id = devices.new_device_id(self.point)
         self.np = os.urandom(32)
-        self.request_id = "req_" + uuid.uuid4().hex
+        self.request_id = _pwa_request_id()
         self.claim: dict[str, Any] = {}
         self.name = "Ben\u2019s iPhone"
         self.platform = "ios"
@@ -384,6 +405,48 @@ def _pair(rig: Rig, phone: Phone) -> str:
 
 
 # ---------------------------------------------------------------------------
+# The request-id contract (Q48-1)
+# ---------------------------------------------------------------------------
+
+
+def test_the_request_id_contract_is_the_computers_own_generator() -> None:
+    """The PWA's samples are byte-identical to this computer's encoder over the same
+    bytes, and the computer's own minting matches the pinned pattern."""
+    pattern = re.compile(REQUEST_ID_CONTRACT["pattern"])
+    assert len(REQUEST_ID_CONTRACT["samples"]) >= 3
+    for sample in REQUEST_ID_CONTRACT["samples"]:
+        assert "req_" + crockford(bytes.fromhex(sample["bytes_hex"])) == sample["request_id"]
+    for _ in range(50):
+        assert pattern.fullmatch(A.new_request_id())
+    for refused in REQUEST_ID_CONTRACT["refused"]:
+        assert not pattern.fullmatch(refused)
+
+
+@pytest.mark.parametrize(
+    "sample", REQUEST_ID_CONTRACT["samples"], ids=lambda sample: sample["request_id"]
+)
+def test_a_pwa_built_request_id_files_through_the_real_relay(rig: Rig, sample: Any) -> None:
+    """Each id the PWA's generator produces (pinned by the vitest half) is accepted."""
+    _install_authority(rig)
+    phone = Phone(rig.relay)
+    phone.request_id = sample["request_id"]
+    filed = phone.file()
+    assert filed.status_code == 201, filed.text
+    assert filed.json()["request_id"] == sample["request_id"]
+
+
+def test_the_shape_the_pwa_used_to_send_is_refused(rig: Rig) -> None:
+    """Negative control: the 32-hex id from Q48-1 is still refused, so the contract
+    test above is discriminating rather than a server that accepts anything."""
+    _install_authority(rig)
+    phone = Phone(rig.relay)
+    phone.request_id = REQUEST_ID_CONTRACT["refused"][0]
+    filed = phone.file()
+    assert filed.status_code == 422, filed.text
+    assert filed.json()["code"] == "approval_invalid"
+
+
+# ---------------------------------------------------------------------------
 # Step 2 + the attested row
 # ---------------------------------------------------------------------------
 
@@ -655,7 +718,7 @@ def test_remove_cancelled_is_removing_then_finishes_and_the_phone_rekeys(rig: Ri
 
     # U15: the revoked key stays revoked forever...
     old_id = phone.device_id
-    phone.np, phone.request_id = os.urandom(32), "req_" + uuid.uuid4().hex
+    phone.np, phone.request_id = os.urandom(32), _pwa_request_id()
     refiled = phone.file()
     assert refiled.status_code == 422 and refiled.json()["code"] == "pair_device_revoked"
     # ...so the phone re-keys and a NEW approval issues a different device id.

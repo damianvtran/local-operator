@@ -18,6 +18,10 @@ def busy_cancel_earlier() -> Msg:
     return Msg("relay.pairing.busy.cancel_earlier", {})
 
 
+def busy_maybe_this_phone() -> Msg:
+    return Msg("relay.pairing.busy.maybe_this_phone", {})
+
+
 def busy_other() -> Msg:
     return Msg("relay.pairing.busy.other", {})
 
@@ -48,6 +52,14 @@ def error_network() -> Msg:
 
 def error_no_crypto() -> Msg:
     return Msg("relay.pairing.error.no_crypto", {})
+
+
+def error_refused() -> Msg:
+    return Msg("relay.pairing.error.refused", {})
+
+
+def error_support_code(*, code: str) -> Msg:
+    return Msg("relay.pairing.error.support_code", {"code": code})
 
 
 def expired() -> Msg:
@@ -110,6 +122,10 @@ def rate_limited_later() -> Msg:
     return Msg("relay.pairing.rate_limited_later", {})
 
 
+def rate_limited_over() -> Msg:
+    return Msg("relay.pairing.rate_limited_over", {})
+
+
 def refused_signature() -> Msg:
     return Msg("relay.pairing.refused_signature", {})
 
@@ -144,10 +160,6 @@ def screen_title() -> Msg:
 
 def signing() -> Msg:
     return Msg("relay.pairing.signing", {})
-
-
-def start_again() -> Msg:
-    return Msg("relay.pairing.start_again", {})
 
 
 def strikes_exhausted() -> Msg:

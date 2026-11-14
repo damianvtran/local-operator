@@ -386,8 +386,12 @@ export function PendingCard({
 			setPolicyNotice(`${said} ${messageRuntime.t("relay.approvals.card.still_needs_answer")}`);
 		} catch (failure) {
 			if (failure instanceof NotPairedError) {
+				/* U4: the in-place pairing sheet IS the explanation, so no
+				   "not paired" line goes on the card. It used to, and nothing
+				   cleared it until the next tap, so after pairing the card still
+				   said in red that the phone was not paired while the sheet said
+				   it was. */
 				openPairingSheet({ purpose: "choose" });
-				setPolicyError(messageRuntime.t("relay.asks.gate.not_paired_error"));
 				return;
 			}
 			if (failure instanceof HttpError && failure.code === "operator_device_revoked") {

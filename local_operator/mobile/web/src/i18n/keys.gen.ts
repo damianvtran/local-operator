@@ -329,6 +329,7 @@ export type MessageParams = {
   "relay.notifications.title": undefined;
   "relay.pairing.back": undefined;
   "relay.pairing.busy.cancel_earlier": undefined;
+  "relay.pairing.busy.maybe_this_phone": undefined;
   "relay.pairing.busy.other": undefined;
   "relay.pairing.busy.resume": undefined;
   "relay.pairing.busy.same_key": undefined;
@@ -337,6 +338,8 @@ export type MessageParams = {
   "relay.pairing.denied": undefined;
   "relay.pairing.error.network": undefined;
   "relay.pairing.error.no_crypto": undefined;
+  "relay.pairing.error.refused": undefined;
+  "relay.pairing.error.support_code": { "code": string };
   "relay.pairing.expired": undefined;
   "relay.pairing.failed_retryable": undefined;
   "relay.pairing.filing": undefined;
@@ -352,6 +355,7 @@ export type MessageParams = {
   "relay.pairing.paired.title": undefined;
   "relay.pairing.rate_limited": { "countdown": string };
   "relay.pairing.rate_limited_later": undefined;
+  "relay.pairing.rate_limited_over": undefined;
   "relay.pairing.refused_signature": undefined;
   "relay.pairing.retry": undefined;
   "relay.pairing.return.approve": undefined;
@@ -361,7 +365,6 @@ export type MessageParams = {
   "relay.pairing.revoked": undefined;
   "relay.pairing.screen_title": undefined;
   "relay.pairing.signing": undefined;
-  "relay.pairing.start_again": undefined;
   "relay.pairing.strikes_exhausted": undefined;
   "relay.pairing.terminal.code_intro": { "command": string };
   "relay.pairing.terminal.code_label": undefined;

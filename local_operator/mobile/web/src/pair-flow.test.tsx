@@ -6,8 +6,9 @@
 // extras are exercised exactly as production parses them. The device key and
 // the SAS are real WebCrypto, so the six digits on screen are checked against an
 // independent recomputation from what the phone actually sent.
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, configure, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import requestIdContract from "./fixtures/pair-request-id.contract.json";
 import vectors from "./fixtures/pair-sas-vectors.json";
 import { derSignatureToRaw, hexToBytes, storedCertificate } from "./lib/operator-device";
 import { base64UrlToBytes, groupSas, sasCode } from "./lib/pair-sas";
@@ -17,6 +18,13 @@ import {
 	PairingSheetHost,
 	PairPromptSheet,
 } from "./screens/pair";
+
+/* The sheet's polite live region (U5b) repeats the in-step status lines for
+   screen readers; text queries read the visible copy, and the region is
+   asserted on its own through `liveRegion()`. */
+configure({ defaultIgnore: "script, style, [data-pair-live]" });
+
+const liveRegion = () => document.querySelector("[data-pair-live]") as HTMLElement;
 
 const COMPUTER_PUB = vectors.vectors[0].operator_spki;
 const ND = vectors.vectors[0].nd;
@@ -136,7 +144,9 @@ describe("terminal-free pairing", () => {
 		// The claim carries only the commit; np is revealed in the second call.
 		expect(claims()[0].body).not.toHaveProperty("np");
 		expect(filed()[0].body).toMatchObject({ platform: "web", commit: claims()[0].body.commit });
-		expect(String(filed()[0].body.request_id)).toMatch(/^[0-9a-f]{32}$/);
+		// Q48-1: the id the computer accepts, pinned by the contract fixture both
+		// sides read (this used to assert the 32-hex shape the computer refuses).
+		expect(String(filed()[0].body.request_id)).toMatch(new RegExp(requestIdContract.pattern));
 		const code = await expectedSas();
 		expect(screen.getByText(groupSas(code)).getAttribute("aria-label")).toBe(
 			`Pairing code ${code.split("").join(" ")}`,
@@ -202,7 +212,11 @@ describe("terminal-free pairing", () => {
 	it("409 another key: says another phone is asking", async () => {
 		relay({ file: () => json(409, { error: "x", code: "pair_request_pending", same_key: false }) });
 		openSheet();
-		await screen.findByText(/Another phone is asking to pair with your computer right now/);
+		await screen.findByText(
+			"Another phone is already asking to pair with your computer. If it isn’t yours, deny it on your computer, then try again.",
+		);
+		// U3: Safari and the Home Screen app hold separate keys on one phone.
+		expect(screen.getByText("This might be this phone in another browser or the Home Screen app.")).toBeTruthy();
 	});
 
 	it("429: counts down in m:ss and holds Try again until it reaches zero", async () => {
@@ -235,7 +249,7 @@ describe("terminal-free pairing", () => {
 		fireEvent.click(screen.getByText("Cancel"));
 		await screen.findByText("Your computer is already confirming. Finish or cancel it there.");
 		fireEvent.click(screen.getByText("Cancel"));
-		await screen.findByText("Request cancelled.");
+		await screen.findByText("Pairing cancelled.");
 		expect(localStorage.getItem("lo-mobile-pair-request")).toBeNull();
 	});
 
@@ -284,7 +298,7 @@ describe("return to the action (D15/U14)", () => {
 		fireEvent.click(screen.getByText("Pair this phone"));
 		await screen.findByText("Check that your computer shows the same code, then approve it there.");
 		await tick(2000);
-		await screen.findByText("Paired. Tap Approve again to finish — nothing has been approved yet.");
+		await screen.findByText("Tap Approve again to finish — nothing has been approved yet.");
 		expect(calls.some((call) => call.path.includes("/command"))).toBe(false);
 		fireEvent.click(screen.getByText("Back to the request"));
 		await waitFor(() => expect(screen.queryByText("This phone is paired")).toBeNull());
@@ -319,5 +333,136 @@ describe("return to the action (D15/U14)", () => {
 		relay({});
 		render(<PairPromptSheet open onClose={() => undefined} />);
 		expect(screen.getByText(/pairing was lost when the browser cleared its storage/)).toBeTruthy();
+	});
+});
+
+describe("round-2 remediation (PR #3949 QA/design/UX round 1)", () => {
+	it("Q48-2/U1: a refusal the computer answered is not called a connection problem", async () => {
+		relay({
+			file: () =>
+				json(422, {
+					error: "the request id is minted by the requesting surface as 'req_<crockford>'",
+					code: "approval_invalid",
+				}),
+		});
+		openSheet();
+		await screen.findByText(
+			"Your computer couldn’t start pairing. Try again, or update Local Operator on your computer.",
+		);
+		expect(screen.getByText(/^Error code: .*approval_invalid/)).toBeTruthy();
+		expect(screen.queryByText(/Couldn’t reach your computer/)).toBeNull();
+		expect(screen.getByText("Not now")).toBeTruthy();
+	});
+
+	it("Q48-2/U1: no answer at all keeps the connection sentence, with no code", async () => {
+		relay({
+			file: () => {
+				throw new TypeError("Failed to fetch");
+			},
+		});
+		openSheet();
+		await screen.findByText("Couldn’t reach your computer. Check the connection and try again.");
+		expect(screen.queryByText(/^Error code:/)).toBeNull();
+	});
+
+	it("U2: Try again after a failed certificate fetch resumes the saved request and never files again", async () => {
+		relay({ reasons: ["paired"] });
+		const base = handler;
+		let certFails = true;
+		handler = (call) => {
+			if (call.path === "/api/pair/dev-test" && certFails) {
+				certFails = false;
+				throw new TypeError("Failed to fetch");
+			}
+			return base(call);
+		};
+		openSheet();
+		await screen.findByText("Check that your computer shows the same code, then approve it there.");
+		await tick(2000);
+		await screen.findByText("Couldn’t reach your computer. Check the connection and try again.");
+		expect(localStorage.getItem("lo-mobile-pair-request")).not.toBeNull();
+		fireEvent.click(screen.getByText("Try again"));
+		await screen.findByText("This phone is paired");
+		expect(filed()).toHaveLength(1);
+		expect(claims()).toHaveLength(1);
+		expect(storedCertificate()).toEqual({ certificate: "CERT", keyId: "KID" });
+	});
+
+	it("D1/N2: a declined pairing names pairing, and the way on is Pair again", async () => {
+		relay({ reasons: ["denied_by_user"] });
+		openSheet();
+		await screen.findByText("Check that your computer shows the same code, then approve it there.");
+		await tick(2000);
+		await screen.findByText("Pairing was turned down on your computer. Nothing was approved.");
+		expect(screen.queryByText(/The request was declined/)).toBeNull();
+		expect(screen.getByText("Pair again")).toBeTruthy();
+		expect(screen.getByText("Not now")).toBeTruthy();
+	});
+
+	it("N2: wrong codes are said to have been typed on the computer", async () => {
+		relay({ reasons: ["strikes_exhausted"] });
+		openSheet();
+		await screen.findByText("Check that your computer shows the same code, then approve it there.");
+		await tick(2000);
+		await screen.findByText("The code was typed wrong three times on your computer. Pair again for a new code.");
+	});
+
+	it("D2: the opener says later computers trust this phone too", () => {
+		render(<PairPromptSheet open onClose={() => undefined} />);
+		expect(screen.getByText(/Computers that join this one later will trust it too\.$/)).toBeTruthy();
+	});
+
+	it("U5a/U5b: focus moves to each new step's lead line; one persistent live region carries the code", async () => {
+		relay({ reasons: ["signing"] });
+		render(<PairPromptSheet open onClose={() => undefined} />);
+		const region = liveRegion();
+		expect(region.getAttribute("aria-live")).toBe("polite");
+		fireEvent.click(screen.getByText("Pair this phone"));
+		await screen.findByText("Check that your computer shows the same code, then approve it there.");
+		await waitFor(() => expect(document.activeElement?.textContent).toBe("Open Local Operator on your computer"));
+		const code = await expectedSas();
+		// The same node, its text changed: announced, unlike a region mounted full.
+		expect(liveRegion()).toBe(region);
+		expect(region.textContent).toBe(`Pairing code ${code.split("").join(" ")}`);
+		await tick(2000);
+		await waitFor(() =>
+			expect(region.textContent).toBe("Your computer is confirming — enter your password there."),
+		);
+		expect(liveRegion()).toBe(region);
+	});
+
+	it("U5c: the rate-limit countdown is announced at most once a minute", async () => {
+		relay({ file: () => json(429, { error: "x", code: "pair_filing_rate_limited", retry_after_s: 150 }) });
+		openSheet();
+		await screen.findByText("Too many pairing requests. Try again in 2:30.");
+		const said: { at: number; text: string }[] = [{ at: 0, text: liveRegion().textContent ?? "" }];
+		for (let second = 1; second <= 155; second += 1) {
+			await tick(1000);
+			const text = liveRegion().textContent ?? "";
+			if (text !== said.at(-1)!.text) said.push({ at: second, text });
+		}
+		expect(said[0].text).toBe("Too many pairing requests. Try again in 2:30.");
+		expect(said.at(-1)!.text).toBe("You can try again now.");
+		// The visible line ticked ~150 times; the region changed only per minute.
+		expect(said).toHaveLength(4);
+		for (let index = 1; index < said.length - 1; index += 1) {
+			expect(said[index].at - said[index - 1].at).toBeGreaterThanOrEqual(29);
+		}
+		expect(said[2].at - said[1].at).toBeGreaterThanOrEqual(59);
+		expect(screen.getByText("Not now")).toBeTruthy();
+	});
+
+	it("D6/D7: the code is a step larger than the title; the command is set as code", async () => {
+		relay({ via: { route: "local" } });
+		render(<PairPromptSheet open onClose={() => undefined} />);
+		fireEvent.click(screen.getByText("Using a terminal?").closest("button")!);
+		const command = document.querySelector("[data-pair-terminal] code") as HTMLElement;
+		expect(command.textContent).toContain("lop pair");
+		expect(command.parentElement!.textContent).toMatch(/^Or run .*lop pair.* on your computer and enter the code it prints here\.$/);
+		fireEvent.click(screen.getByText("Pair this phone"));
+		await screen.findByText("Type this code on your computer when it asks.");
+		const digits = screen.getByText(groupSas(await expectedSas()));
+		expect(digits.className).toContain("text-display");
+		expect(digits.className).not.toContain("text-title");
 	});
 });

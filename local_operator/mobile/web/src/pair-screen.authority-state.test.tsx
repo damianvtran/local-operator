@@ -129,7 +129,9 @@ describe("the terminal pairing path's failure copy", () => {
 		localStorage.setItem("lo-mobile-operator-device-cert", "old-cert");
 		localStorage.setItem("lo-mobile-operator-device-key-id", "old-kid");
 		await pairAway();
-		await screen.findByText(/Couldn’t reach your computer/, undefined, { timeout: 5000 });
+		// The computer answered (403), so this is a refusal, not a connection
+		// failure (Q48-2/U1).
+		await screen.findByText(/Your computer couldn’t start pairing/, undefined, { timeout: 5000 });
 		expect(screen.queryByText("This phone was removed from your computer. Ask again to pair it.")).toBeNull();
 		expect(localStorage.getItem("lo-mobile-operator-device-cert")).toBe("old-cert");
 		expect(localStorage.getItem("lo-mobile-operator-device-key-id")).toBe("old-kid");

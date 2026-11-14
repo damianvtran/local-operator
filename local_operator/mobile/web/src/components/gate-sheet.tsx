@@ -230,7 +230,8 @@ export function GateSheet({
 				   choice is not retried when pairing finishes — the person chooses
 				   again, so pairing never changes the gate by itself. */
 				openPairingSheet({ purpose: "choose" });
-				setError(messageRuntime.t("relay.asks.gate.not_paired_error"));
+				/* U4: no "not paired" line here either — the pairing sheet is the
+				   explanation, and a line set now would outlive the pairing. */
 				return;
 			}
 			if (failure instanceof HttpError && failure.code === "operator_device_revoked") {

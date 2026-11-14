@@ -82,7 +82,9 @@ type Step =
 	| { kind: "busy_other" }
 	| { kind: "rate_limited"; until: number | null }
 	| { kind: "revoked" }
-	| { kind: "error"; message: string };
+	/* `code` is the refusal's machine code (or HTTP status) shown small for
+	   support; empty for a transport failure, which has none. */
+	| { kind: "error"; message: string; code: string };
 
 const ENDED_BY_REASON: Record<string, Ended> = {
 	denied_by_user: "denied",
@@ -101,10 +103,38 @@ function defaultDeviceName(): string {
 	return `${model} (${new Date().toISOString().slice(0, 10)})`;
 }
 
+/**
+ * The sentence for a failure the flow does not model as its own step.
+ *
+ * TRANSPORT VS REFUSAL (QA Q48-2, UX U1). Every failure used to read "Couldn't
+ * reach your computer. Check the connection…", including a 422 the computer
+ * answered within milliseconds — so a person toggled Wi-Fi and tapped Try again
+ * into the same refusal forever. An `HttpError` means the computer ANSWERED, so
+ * it gets the refusal sentence (try again, or update the computer); the network
+ * sentence is kept for failures where no answer arrived (fetch's TypeError, an
+ * abort, a timeout).
+ */
 function humanizeFailure(error: unknown): string {
 	const message = String((error as Error)?.message ?? error);
 	if (message.toLowerCase().includes("subtle")) return messageRuntime.t("relay.pairing.error.no_crypto");
+	if (error instanceof HttpError) return messageRuntime.t("relay.pairing.error.refused");
 	return messageRuntime.t("relay.pairing.error.network");
+}
+
+/** The refusal's code for support, or its HTTP status when it carried none. */
+function supportCode(error: unknown): string {
+	if (!(error instanceof HttpError)) return "";
+	return error.code || String(error.status);
+}
+
+function errorStep(error: unknown): Step {
+	return { kind: "error", message: humanizeFailure(error), code: supportCode(error) };
+}
+
+/** Minutes left, rounded up: the rate-limit announcement changes only when
+    this does (U5c), so a screen reader hears it at most once a minute. */
+function minuteBucket(seconds: number): number {
+	return Math.max(0, Math.ceil(seconds / 60));
 }
 
 /** One clock for the countdowns, ticking only while a screen shows one. */
@@ -147,6 +177,21 @@ export function PairFlow({
 		if (alive.current) setStep(next);
 	};
 
+	/* U5a: each step REPLACES the sheet body, so the button the person just
+	   pressed unmounts and focus would fall to <body> inside the modal, leaving a
+	   screen-reader user to hunt for where they are. Move focus to the new step's
+	   lead line (`data-step-heading`) on every step change after the first — on
+	   open, the Sheet's own focus on its close button stays the entry point. */
+	const bodyRef = useRef<HTMLDivElement>(null);
+	const firstStep = useRef(true);
+	useEffect(() => {
+		if (firstStep.current) {
+			firstStep.current = false;
+			return;
+		}
+		bodyRef.current?.querySelector<HTMLElement>("[data-step-heading]")?.focus();
+	}, [step.kind]);
+
 	/* A request filed before a reload is resumed, not orphaned: the computer is
 	   still showing it, and filing a second one would be refused as busy. */
 	useEffect(() => {
@@ -155,7 +200,10 @@ export function PairFlow({
 		// eslint-disable-next-line react-hooks/exhaustive-deps
 	}, []);
 
-	async function resume(saved: PendingPair) {
+	/* `reportFailure`: a resume the person ASKED for (Try again after a failure)
+	   says why it failed and keeps the saved request; the silent resume on open
+	   drops an unreadable request instead of greeting the person with an error. */
+	async function resume(saved: PendingPair, reportFailure = false) {
 		try {
 			const status = await pollStatus(saved.requestId);
 			if (TERMINAL_REASONS.has(status.reason)) {
@@ -169,11 +217,27 @@ export function PairFlow({
 				reason: status.reason,
 				since: Date.now(),
 			});
-		} catch {
+		} catch (error) {
+			if (reportFailure) {
+				set(errorStep(error));
+				return;
+			}
 			/* An unreadable request is not worth a scary error on open: drop it
 			   and let the person start again from the intro. */
 			clearPendingPair();
 		}
+	}
+
+	/* U2: "Try again" after a failure RESUMES a request this phone still holds
+	   rather than filing a new one. The common case is the certificate fetch
+	   failing after the computer already admitted the phone (`settle` keeps the
+	   saved request until `completePairing` succeeds): filing again would send
+	   the person back to the computer for a second approval and password for a
+	   pairing that already happened. Files only when nothing is pending. */
+	function retry() {
+		const saved = savedPendingPair();
+		if (saved) void resume(saved, true);
+		else void start();
 	}
 
 	async function settle(pending: PendingPair, reason: string) {
@@ -182,7 +246,7 @@ export function PairFlow({
 				const done = await completePairing(pending.deviceId);
 				set({ kind: "paired", authorityReady: done.authorityReady });
 			} catch (error) {
-				set({ kind: "error", message: humanizeFailure(error) });
+				set(errorStep(error));
 			}
 			return;
 		}
@@ -198,7 +262,7 @@ export function PairFlow({
 			if (availability === "unavailable") return set({ kind: "unavailable" });
 			await file();
 		} catch (error) {
-			set({ kind: "error", message: humanizeFailure(error) });
+			set(errorStep(error));
 		}
 	}
 
@@ -234,7 +298,7 @@ export function PairFlow({
 					return set({ kind: "unavailable" });
 			}
 		} catch (error) {
-			set({ kind: "error", message: humanizeFailure(error) });
+			set(errorStep(error));
 		}
 	}
 
@@ -317,195 +381,259 @@ export function PairFlow({
 	const terminalPath = (
 		<TerminalDisclosure onPaired={(authorityReady) => set({ kind: "paired", authorityReady })} />
 	);
+	/* N3: every step that is not mid-request offers the same text exit, so
+	   leaving never depends on reading ✕ as "leave". */
+	const notNow = (
+		<Button variant="ghost" onClick={onDismiss}>
+			{messageRuntime.t("relay.pairing.intro.not_now")}
+		</Button>
+	);
 
-	switch (step.kind) {
-		case "intro": {
-			const lead =
-				notice === "refused"
-					? messageRuntime.t("relay.pairing.refused_signature")
-					: deviceKeyWasLost()
-						? messageRuntime.t("relay.pairing.key_lost")
-						: "";
-			return (
-				<FlowBody>
-					{lead ? <p className="text-body-sm text-danger">{lead}</p> : null}
-					<p className="text-body-sm text-ink-muted">{messageRuntime.t("relay.pairing.intro.body")}</p>
-					<div className="flex flex-col gap-2">
+	/* U5b/U5c: ONE polite live region that exists for the sheet's whole life and
+	   whose TEXT changes. A `role="status"` node that mounts already holding its
+	   text is often not announced at all, so the step lines below are plain text
+	   (focus moves to each step's lead line instead, above) and this region
+	   carries what changes WITHOUT a step change: the code appearing, the computer
+	   confirming, a retryable failure, and the rate limit. The rate-limit
+	   countdown on screen ticks every second, but the announcement is pinned to
+	   the minute (`minuteBucket`), so it is spoken at most once a minute and once
+	   more when Try again unlocks. */
+	const rateLeft = step.kind === "rate_limited" && step.until !== null ? (step.until - now) / 1000 : 0;
+	const rateBucket = step.kind === "rate_limited" && step.until !== null ? minuteBucket(rateLeft) : -1;
+	const [rateSaid, setRateSaid] = useState({ bucket: -1, text: "" });
+	if (rateBucket !== rateSaid.bucket) {
+		setRateSaid({
+			bucket: rateBucket,
+			text:
+				rateBucket < 0
+					? ""
+					: rateBucket === 0
+						? messageRuntime.t("relay.pairing.rate_limited_over")
+						: messageRuntime.t("relay.pairing.rate_limited", { countdown: formatCountdown(rateLeft) }),
+		});
+	}
+	const stepAnnouncement =
+		step.kind === "waiting"
+			? step.reason === "signing" || step.reason === "admin_prompt_open"
+				? messageRuntime.t("relay.pairing.signing")
+				: step.reason === "failed_retryable"
+					? messageRuntime.t("relay.pairing.failed_retryable")
+					: messageRuntime.t("relay.pairing.code.aria", { digits: step.sas.split("").join(" ") })
+			: step.kind === "rate_limited"
+				? step.until === null
+					? messageRuntime.t("relay.pairing.rate_limited_later")
+					: rateSaid.text
+				: "";
+	/* A cancel that did not go through is said where the person is looking AND
+	   announced, since it changes nothing else on screen. */
+	const announcement = cancelNote || stepAnnouncement;
+
+	return (
+		<div ref={bodyRef}>
+			<p className="sr-only" role="status" aria-live="polite" data-pair-live="">
+				{announcement}
+			</p>
+			{renderStep()}
+		</div>
+	);
+
+	function renderStep(): ReactNode {
+		switch (step.kind) {
+			case "intro": {
+				const lead =
+					notice === "refused"
+						? messageRuntime.t("relay.pairing.refused_signature")
+						: deviceKeyWasLost()
+							? messageRuntime.t("relay.pairing.key_lost")
+							: "";
+				return (
+					<FlowBody>
+						{lead ? <p className="text-body-sm text-danger">{lead}</p> : null}
+						<Lead className="text-body-sm text-ink-muted">{messageRuntime.t("relay.pairing.intro.body")}</Lead>
+						<div className="flex flex-col gap-2">
+							<Button variant="primary" onClick={() => void start()}>
+								{messageRuntime.t("relay.pairing.intro.pair")}
+							</Button>
+							{notNow}
+						</div>
+						{terminalPath}
+					</FlowBody>
+				);
+			}
+			case "checking":
+			case "filing":
+				return (
+					<FlowBody>
+						<Lead className="text-body-sm text-ink-muted">
+							{step.kind === "checking"
+								? messageRuntime.t("relay.pairing.checking")
+								: messageRuntime.t("relay.pairing.filing")}
+						</Lead>
+					</FlowBody>
+				);
+			case "unavailable":
+				return (
+					<FlowBody>
+						<Lead className="text-body-sm">{messageRuntime.t("relay.pairing.unavailable.body")}</Lead>
+						<p className="text-body-sm text-ink-muted">{messageRuntime.t("relay.pairing.unavailable.waiting")}</p>
+						{notNow}
+						<TerminalDisclosure approvalsTip />
+					</FlowBody>
+				);
+			case "unsupported":
+				return (
+					<FlowBody>
+						<Lead className="text-body-sm">{messageRuntime.t("relay.pairing.unsupported.body")}</Lead>
+						<Button onClick={() => void start()}>{messageRuntime.t("relay.pairing.retry")}</Button>
+						{notNow}
+						{terminalPath}
+					</FlowBody>
+				);
+			case "waiting": {
+				const confirming = step.reason === "signing" || step.reason === "admin_prompt_open";
+				const remaining = step.pending.expiresAt ? step.pending.expiresAt - now / 1000 : 0;
+				return (
+					<FlowBody>
+						<Lead as="h2" className="text-body font-medium">
+							{messageRuntime.t("relay.pairing.waiting.title")}
+						</Lead>
+						<SasCode code={step.sas} />
+						{confirming ? (
+							<p className="text-body-sm">{messageRuntime.t("relay.pairing.signing")}</p>
+						) : (
+							<>
+								{step.reason === "failed_retryable" ? (
+									<p className="text-body-sm text-danger">{messageRuntime.t("relay.pairing.failed_retryable")}</p>
+								) : null}
+								<p className="text-body-sm">
+									{step.pending.mode === "confirm"
+										? messageRuntime.t("relay.pairing.waiting.confirm_body")
+										: messageRuntime.t("relay.pairing.waiting.code_body")}
+								</p>
+								<p className="text-body-sm text-ink-muted">{messageRuntime.t("relay.pairing.waiting.password")}</p>
+								{/* The countdown hides while the computer is confirming: the
+								    window bounds the DECISION, not a decision already made (U11). */}
+								{remaining > 0 ? (
+									<p className="text-meta text-ink-muted tabular-nums">
+										{messageRuntime.t("relay.pairing.waiting.expires", {
+											countdown: formatCountdown(remaining),
+										})}
+									</p>
+								) : null}
+								{now - step.since >= NOT_SEEN_HINT_MS ? (
+									<p className="text-meta text-ink-muted">{messageRuntime.t("relay.pairing.waiting.not_seen")}</p>
+								) : null}
+							</>
+						)}
+						{cancelNote ? <p className="text-body-sm text-danger">{cancelNote}</p> : null}
+						<Button variant="ghost" onClick={() => void cancel(step.pending.requestId, false)}>
+							{messageRuntime.t("relay.pairing.waiting.cancel")}
+						</Button>
+					</FlowBody>
+				);
+			}
+			case "ended": {
+				const key = {
+					denied: "relay.pairing.denied",
+					expired: "relay.pairing.expired",
+					withdrawn: "relay.pairing.withdrawn",
+					strikes: "relay.pairing.strikes_exhausted",
+				} as const;
+				return (
+					<FlowBody>
+						<Lead className="text-body-sm">{messageRuntime.t(key[step.why])}</Lead>
 						<Button variant="primary" onClick={() => void start()}>
-							{messageRuntime.t("relay.pairing.intro.pair")}
+							{messageRuntime.t("relay.pairing.pair_again")}
 						</Button>
-						<Button variant="ghost" onClick={onDismiss}>
-							{messageRuntime.t("relay.pairing.intro.not_now")}
+						{notNow}
+					</FlowBody>
+				);
+			}
+			case "paired":
+				return (
+					<PairedBody
+						authorityReady={step.authorityReady}
+						purpose={purpose}
+						actionGone={actionGone}
+						onDismiss={onDismiss}
+					/>
+				);
+			case "busy_same":
+				return (
+					<FlowBody>
+						<Lead className="text-body-sm">{messageRuntime.t("relay.pairing.busy.same_key")}</Lead>
+						{step.resumable ? (
+							<Button
+								variant="primary"
+								onClick={() => {
+									const saved = savedPendingPair();
+									if (saved) void resume(saved);
+								}}
+							>
+								{messageRuntime.t("relay.pairing.busy.resume")}
+							</Button>
+						) : null}
+						<Button onClick={() => void cancel(step.requestId, true)}>
+							{messageRuntime.t("relay.pairing.busy.cancel_earlier")}
 						</Button>
-					</div>
-					{terminalPath}
-				</FlowBody>
-			);
-		}
-		case "checking":
-		case "filing":
-			return (
-				<FlowBody>
-					<p role="status" className="text-body-sm text-ink-muted">
-						{step.kind === "checking"
-							? messageRuntime.t("relay.pairing.checking")
-							: messageRuntime.t("relay.pairing.filing")}
-					</p>
-				</FlowBody>
-			);
-		case "unavailable":
-			return (
-				<FlowBody>
-					<p className="text-body-sm">{messageRuntime.t("relay.pairing.unavailable.body")}</p>
-					<p role="status" className="text-body-sm text-ink-muted">
-						{messageRuntime.t("relay.pairing.unavailable.waiting")}
-					</p>
-					<TerminalDisclosure approvalsTip />
-				</FlowBody>
-			);
-		case "unsupported":
-			return (
-				<FlowBody>
-					<p className="text-body-sm">{messageRuntime.t("relay.pairing.unsupported.body")}</p>
-					<Button onClick={() => void start()}>{messageRuntime.t("relay.pairing.retry")}</Button>
-					{terminalPath}
-				</FlowBody>
-			);
-		case "waiting": {
-			const confirming = step.reason === "signing" || step.reason === "admin_prompt_open";
-			const remaining = step.pending.expiresAt ? step.pending.expiresAt - now / 1000 : 0;
-			return (
-				<FlowBody>
-					<h2 className="text-body font-medium">{messageRuntime.t("relay.pairing.waiting.title")}</h2>
-					<SasCode code={step.sas} />
-					{confirming ? (
-						<p role="status" className="text-body-sm">
-							{messageRuntime.t("relay.pairing.signing")}
-						</p>
-					) : (
-						<>
-							{step.reason === "failed_retryable" ? (
-								<p role="status" className="text-body-sm text-danger">
-									{messageRuntime.t("relay.pairing.failed_retryable")}
-								</p>
-							) : null}
-							<p className="text-body-sm">
-								{step.pending.mode === "confirm"
-									? messageRuntime.t("relay.pairing.waiting.confirm_body")
-									: messageRuntime.t("relay.pairing.waiting.code_body")}
+						{cancelNote ? <p className="text-body-sm text-danger">{cancelNote}</p> : null}
+						{notNow}
+					</FlowBody>
+				);
+			case "busy_other":
+				return (
+					<FlowBody>
+						<Lead className="text-body-sm">{messageRuntime.t("relay.pairing.busy.other")}</Lead>
+						{/* U3: Safari and a Home Screen web app keep separate storage on
+						    iOS, so the same phone pairing from both holds two different
+						    keys. The computer cannot tell that apart from a second phone
+						    (any "same phone" signal would be a fingerprint disclosed to a
+						    different key, which this refusal must not do), so the hint is
+						    always shown, hedged with "might". */}
+						<p className="text-body-sm text-ink-muted">{messageRuntime.t("relay.pairing.busy.maybe_this_phone")}</p>
+						<Button onClick={() => void start()}>{messageRuntime.t("relay.pairing.retry")}</Button>
+						{notNow}
+					</FlowBody>
+				);
+			case "rate_limited":
+				return (
+					<FlowBody>
+						<Lead className="text-body-sm tabular-nums">
+							{step.until === null
+								? messageRuntime.t("relay.pairing.rate_limited_later")
+								: messageRuntime.t("relay.pairing.rate_limited", { countdown: formatCountdown(rateLeft) })}
+						</Lead>
+						<Button disabled={rateLeft > 0} onClick={() => void start()}>
+							{messageRuntime.t("relay.pairing.retry")}
+						</Button>
+						{notNow}
+					</FlowBody>
+				);
+			case "revoked":
+				return (
+					<FlowBody>
+						<Lead className="text-body-sm">{messageRuntime.t("relay.pairing.revoked")}</Lead>
+						<Button variant="primary" onClick={() => void start()}>
+							{messageRuntime.t("relay.pairing.pair_again")}
+						</Button>
+						{notNow}
+					</FlowBody>
+				);
+			case "error":
+				return (
+					<FlowBody>
+						<Lead className="text-body-sm text-danger">{step.message}</Lead>
+						{step.code ? (
+							<p className="text-meta text-ink-muted">
+								{messageRuntime.t("relay.pairing.error.support_code", { code: isolate(step.code) })}
 							</p>
-							<p className="text-body-sm text-ink-muted">{messageRuntime.t("relay.pairing.waiting.password")}</p>
-							{/* The countdown hides while the computer is confirming: the
-							    window bounds the DECISION, not a decision already made (U11). */}
-							{remaining > 0 ? (
-								<p className="text-meta text-ink-muted tabular-nums">
-									{messageRuntime.t("relay.pairing.waiting.expires", {
-										countdown: formatCountdown(remaining),
-									})}
-								</p>
-							) : null}
-							{now - step.since >= NOT_SEEN_HINT_MS ? (
-								<p className="text-meta text-ink-muted">{messageRuntime.t("relay.pairing.waiting.not_seen")}</p>
-							) : null}
-						</>
-					)}
-					{cancelNote ? <p className="text-body-sm text-danger">{cancelNote}</p> : null}
-					<Button variant="ghost" onClick={() => void cancel(step.pending.requestId, false)}>
-						{messageRuntime.t("relay.pairing.waiting.cancel")}
-					</Button>
-				</FlowBody>
-			);
+						) : null}
+						<Button onClick={retry}>{messageRuntime.t("relay.pairing.retry")}</Button>
+						{notNow}
+						{terminalPath}
+					</FlowBody>
+				);
 		}
-		case "ended": {
-			const key = {
-				denied: "relay.pairing.denied",
-				expired: "relay.pairing.expired",
-				withdrawn: "relay.pairing.withdrawn",
-				strikes: "relay.pairing.strikes_exhausted",
-			} as const;
-			return (
-				<FlowBody>
-					<p role="status" className="text-body-sm">
-						{messageRuntime.t(key[step.why])}
-					</p>
-					<Button variant="primary" onClick={() => void start()}>
-						{messageRuntime.t("relay.pairing.start_again")}
-					</Button>
-					<Button variant="ghost" onClick={onDismiss}>
-						{messageRuntime.t("relay.pairing.intro.not_now")}
-					</Button>
-				</FlowBody>
-			);
-		}
-		case "paired":
-			return (
-				<PairedBody
-					authorityReady={step.authorityReady}
-					purpose={purpose}
-					actionGone={actionGone}
-					onDismiss={onDismiss}
-				/>
-			);
-		case "busy_same":
-			return (
-				<FlowBody>
-					<p className="text-body-sm">{messageRuntime.t("relay.pairing.busy.same_key")}</p>
-					{step.resumable ? (
-						<Button
-							variant="primary"
-							onClick={() => {
-								const saved = savedPendingPair();
-								if (saved) void resume(saved);
-							}}
-						>
-							{messageRuntime.t("relay.pairing.busy.resume")}
-						</Button>
-					) : null}
-					<Button onClick={() => void cancel(step.requestId, true)}>
-						{messageRuntime.t("relay.pairing.busy.cancel_earlier")}
-					</Button>
-					{cancelNote ? <p className="text-body-sm text-danger">{cancelNote}</p> : null}
-				</FlowBody>
-			);
-		case "busy_other":
-			return (
-				<FlowBody>
-					<p className="text-body-sm">{messageRuntime.t("relay.pairing.busy.other")}</p>
-					<Button onClick={() => void start()}>{messageRuntime.t("relay.pairing.retry")}</Button>
-				</FlowBody>
-			);
-		case "rate_limited": {
-			const left = step.until === null ? 0 : (step.until - now) / 1000;
-			return (
-				<FlowBody>
-					<p role="status" className="text-body-sm tabular-nums">
-						{step.until === null
-							? messageRuntime.t("relay.pairing.rate_limited_later")
-							: messageRuntime.t("relay.pairing.rate_limited", { countdown: formatCountdown(left) })}
-					</p>
-					<Button disabled={left > 0} onClick={() => void start()}>
-						{messageRuntime.t("relay.pairing.retry")}
-					</Button>
-				</FlowBody>
-			);
-		}
-		case "revoked":
-			return (
-				<FlowBody>
-					<p className="text-body-sm">{messageRuntime.t("relay.pairing.revoked")}</p>
-					<Button variant="primary" onClick={() => void start()}>
-						{messageRuntime.t("relay.pairing.pair_again")}
-					</Button>
-				</FlowBody>
-			);
-		case "error":
-			return (
-				<FlowBody>
-					<p className="text-body-sm text-danger">{step.message}</p>
-					<Button onClick={() => void start()}>{messageRuntime.t("relay.pairing.retry")}</Button>
-					{terminalPath}
-				</FlowBody>
-			);
 	}
 }
 
@@ -513,12 +641,26 @@ function FlowBody({ children }: { children: ReactNode }) {
 	return <div className="flex flex-col gap-3">{children}</div>;
 }
 
+/** A step's lead line: where focus lands when the step appears (U5a).
+    `tabIndex={-1}` makes it focusable by script only, never a tab stop. */
+function Lead({ as = "p", className, children }: { as?: "p" | "h2"; className: string; children: ReactNode }) {
+	const Tag = as;
+	return (
+		<Tag data-step-heading="" tabIndex={-1} className={`${className} outline-none`}>
+			{children}
+		</Tag>
+	);
+}
+
 /** The six digits, grouped as the computer draws them, read digit by digit by a
     screen reader (a "four hundred eighty-two thousand…" reading cannot be compared). */
 function SasCode({ code }: { code: string }) {
 	return (
 		<p
-			className="rounded-sm bg-sunken px-3 py-2 text-center font-mono text-title tracking-widest tabular-nums"
+			/* D6: one step above the sheet title (text-display, 28 px): the code is
+			   the thing the person compares with a second screen, so it is the
+			   hero of this step. */
+			className="rounded-sm bg-sunken px-3 py-2 text-center font-mono text-display tracking-widest tabular-nums"
 			dir="ltr"
 			aria-label={messageRuntime.t("relay.pairing.code.aria", { digits: code.split("").join(" ") })}
 		>
@@ -552,9 +694,7 @@ function PairedBody({
 			: messageRuntime.t("relay.pairing.paired.done");
 	return (
 		<FlowBody>
-			<p role="status" className="text-body font-medium">
-				{messageRuntime.t("relay.pairing.paired.title")}
-			</p>
+			<Lead className="text-body font-medium">{messageRuntime.t("relay.pairing.paired.title")}</Lead>
 			<p className="text-body-sm text-ink-muted">
 				{authorityReady
 					? messageRuntime.t("relay.pairing.paired.body")
@@ -607,15 +747,44 @@ function TerminalDisclosure({
 							{/* ISOLATED (i18n audit, ur): a command's leading `/` is a neutral
 							   character, so inside right-to-left copy it detaches to the far end
 							   of the run unless the command is its own isolate (lib/bidi.ts). */}
-							{messageRuntime.t("relay.pairing.terminal.turn_on_approving", {
-								command: isolate(APPROVALS_SLASH_COMMAND),
-							})}
+							<WithCommand messageKey="relay.pairing.terminal.turn_on_approving" command={APPROVALS_SLASH_COMMAND} />
 						</p>
 					) : null}
 					{onPaired ? <CodeEntry onPaired={onPaired} /> : null}
 				</div>
 			</Disclosure>
 		</div>
+	);
+}
+
+/** Splits a message on this private-use marker to put an element where its
+    `{command}` placeholder was; never a character a catalogue can contain. */
+const COMMAND_SLOT = "\uE000";
+
+/**
+ * A disclosure sentence with its `{command}` drawn as a command (D7): the
+ * monospace inline-code run the transcript uses for code, so `lop pair` reads as
+ * something to type rather than as words in the sentence. The catalogue keeps
+ * the whole sentence (translators move the placeholder where their grammar puts
+ * it); only the render splits it. The command stays its own bidi isolate inside
+ * the element, as the ur audit required (lib/bidi.ts).
+ */
+function WithCommand({
+	messageKey,
+	command,
+}: {
+	messageKey: "relay.pairing.terminal.code_intro" | "relay.pairing.terminal.turn_on_approving";
+	command: string;
+}) {
+	const [before, after = ""] = messageRuntime.t(messageKey, { command: COMMAND_SLOT }).split(COMMAND_SLOT);
+	return (
+		<>
+			{before}
+			<code dir="ltr" className="rounded-xs bg-sunken px-0.5 font-mono text-mono-sm text-ink">
+				{isolate(command)}
+			</code>
+			{after}
+		</>
 	);
 }
 
@@ -698,7 +867,7 @@ function CodeEntry({ onPaired }: { onPaired: (authorityReady: boolean) => void }
 	return (
 		<>
 			<p className="text-body-sm text-ink-muted">
-				{messageRuntime.t("relay.pairing.terminal.code_intro", { command: isolate(PAIR_SHELL_COMMAND) })}
+				<WithCommand messageKey="relay.pairing.terminal.code_intro" command={PAIR_SHELL_COMMAND} />
 			</p>
 			<label className="flex flex-col gap-1 text-body-sm">
 				<span className="text-ink-muted">{messageRuntime.t("relay.pairing.terminal.code_label")}</span>

@@ -85,13 +85,41 @@ function savePendingPair(pending: PendingPair): void {
 	localStorage.setItem(PENDING_KEY, JSON.stringify(pending));
 }
 
-/** 32 lowercase hex chars, the contract's client-generated request id. */
-export function newRequestId(): string {
-	let out = "";
-	for (const byte of crypto.getRandomValues(new Uint8Array(16))) {
-		out += byte.toString(16).padStart(2, "0");
+/** Lowercase Crockford base32 — the computer's alphabet (`network/wire.py`
+    `_CROCKFORD`), which drops i, l, o and u. */
+const CROCKFORD = "0123456789abcdefghjkmnpqrstvwxyz";
+
+/**
+ * `req_<crockford(bytes)>`, unpadded — byte for byte what the computer's
+ * `approvals.new_request_id` produces from the same bytes.
+ *
+ * WHY THIS SHAPE. The computer refuses a filing whose request id does not start
+ * with `req_` (`network/approvals.py` `file_request`, 422 `approval_invalid`).
+ * This used to send 32 bare hex chars, so every terminal-free pairing from the
+ * PWA was refused (PR #3949 QA Q48-1) while both test suites stayed green: each
+ * side asserted its own idea of the shape. Both now pin
+ * `fixtures/pair-request-id.contract.json`. Split from `newRequestId` so the
+ * contract test can feed fixed bytes.
+ */
+export function requestIdFromBytes(bytes: Uint8Array): string {
+	let bits = 0;
+	let value = 0;
+	let out = "req_";
+	for (const byte of bytes) {
+		value = ((value << 8) | byte) & 0xffff;
+		bits += 8;
+		while (bits >= 5) {
+			bits -= 5;
+			out += CROCKFORD[(value >> bits) & 0x1f];
+		}
 	}
+	if (bits) out += CROCKFORD[(value << (5 - bits)) & 0x1f];
 	return out;
+}
+
+/** The client-minted request id: 8 random bytes, the computer's own width. */
+export function newRequestId(): string {
+	return requestIdFromBytes(crypto.getRandomValues(new Uint8Array(8)));
 }
 
 /** The record's `via` says whether the computer will show the code for the

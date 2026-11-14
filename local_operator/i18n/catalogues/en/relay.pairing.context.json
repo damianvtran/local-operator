@@ -25,7 +25,7 @@
   "relay.pairing.intro.body": {
     "role": "pairing intro body",
     "tone": "plain, calm, non-technical",
-    "note": "Explains the grant (this phone gains the power to approve actions) and that the computer confirms with its own (computer login) password, not a Radient password."
+    "note": "Explains the grant (this phone gains the power to approve actions), that the computer confirms with its own (computer login) password, not a Radient password, and the scope of the grant: computers that later join this computer's network will trust the phone too (consent disclosure, design A2/D14)."
   },
   "relay.pairing.intro.pair": {
     "role": "primary button",
@@ -126,28 +126,22 @@
   "relay.pairing.strikes_exhausted": {
     "role": "terminal status",
     "tone": "plain, calm, non-technical",
-    "note": "The person typed the wrong code on the computer three times; the request is closed."
+    "note": "The person typed the wrong code on the COMPUTER three times; the pairing request is closed. 'Pair again' is the button below."
   },
   "relay.pairing.denied": {
     "role": "terminal status",
     "tone": "plain, calm, non-technical",
-    "note": "Someone chose Deny on the computer."
+    "note": "Someone chose Deny on the computer for the PAIRING. Must name pairing, not 'the request': the sheet sits over an action card whose own request is still pending."
   },
   "relay.pairing.expired": {
     "role": "terminal status",
     "tone": "plain, calm, non-technical",
-    "note": "The request window closed without an answer."
+    "note": "The pairing window closed without an answer. Name pairing, not 'the request' (the action is still pending)."
   },
   "relay.pairing.withdrawn": {
     "role": "terminal status",
     "tone": "plain, calm, non-technical",
-    "note": "This phone's request was withdrawn (by this phone's Cancel)."
-  },
-  "relay.pairing.start_again": {
-    "role": "button",
-    "tone": "plain, calm, non-technical",
-    "maxCells": 16,
-    "note": "Files a fresh pairing request after a closed one."
+    "note": "This phone's pairing request was withdrawn (by this phone's Cancel). Name pairing, not 'the request'."
   },
   "relay.pairing.withdraw_in_progress": {
     "role": "notice",
@@ -227,7 +221,7 @@
   "relay.pairing.busy.other": {
     "role": "busy notice",
     "tone": "plain, calm, non-technical",
-    "note": "A different phone's request is open on the computer; only one can be open at a time."
+    "note": "A different phone's request is open on the computer; only one can be open at a time. Tells the person to deny it on the computer if it isn't theirs (safety)."
   },
   "relay.pairing.rate_limited": {
     "role": "rate-limit notice",
@@ -324,5 +318,25 @@
     "role": "error",
     "tone": "plain, calm, non-technical",
     "note": "The pasted code was refused."
+  },
+  "relay.pairing.busy.maybe_this_phone": {
+    "role": "busy hint",
+    "tone": "plain, calm, non-technical",
+    "note": "Shown under busy.other. On iPhones, Safari and the Home Screen web app keep separate storage, so the same phone pairing from both looks like a second phone to the computer. Hedged ('might'): the phone cannot tell for sure."
+  },
+  "relay.pairing.error.refused": {
+    "role": "error",
+    "tone": "plain, calm, non-technical",
+    "note": "The computer answered but refused to start pairing (an unexpected refusal, often an older or mismatched Local Operator). Distinct from error.network: the connection works, so do not mention it."
+  },
+  "relay.pairing.error.support_code": {
+    "role": "support detail",
+    "tone": "plain, calm, non-technical",
+    "note": "Small text under an error. {code} is a technical identifier such as approval_invalid or 500; keep it untranslated."
+  },
+  "relay.pairing.rate_limited_over": {
+    "role": "screen-reader announcement",
+    "tone": "plain, calm, non-technical",
+    "note": "Spoken (polite live region) when the rate-limit wait ends and Try again unlocks."
   }
 }
