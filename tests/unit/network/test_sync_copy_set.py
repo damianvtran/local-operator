@@ -333,6 +333,15 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "inside a session directory -- so no session copy carries it. Device-local by "
         "design: the credential row ids it names are local to this device's auth.db.",
     ),
+    "local_operator/tunnels/request_log.py": (
+        2,
+        "``REQUEST_LOG_NAME`` ('requests.log') is the per-DEVICE HTTP request log, "
+        "written in the tunnel's config directory (<config>/tunnel/, beside service.log); "
+        "the mobile daemon's counterpart is 'mobile-requests.log' in its log directory "
+        "(mobile/install.py); neither is inside a session directory. ``PROBE_ID_PREFIX`` "
+        "('lop-probe-') is an ``x-request-id`` value prefix marking the package's own "
+        "loopback probe, not a path. None is a session entry to copy or exclude.",
+    ),
     "local_operator/network/credentials/refresh.py": (
         2,
         "``DOC_FILENAME`` ('refresh.json') and ``LOCK_FILENAME`` ('.refresh.lock') sit in "
