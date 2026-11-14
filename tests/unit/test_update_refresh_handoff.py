@@ -267,3 +267,263 @@ def test_an_unwritable_run_directory_falls_back_to_the_in_process_body(
     monkeypatch.setattr(update_mod, "_started_as_refresh_child", lambda: True)
     with patch.object(update_mod, "_hand_off_when_slow", side_effect=PermissionError("ro")):
         assert update_mod._run_refresh_child(lambda: 3, unit="mobile", bound_s=1.0) == 3
+
+
+# --- PR #4004 round-1 remediation -------------------------------------------------
+
+_SLOW_RELAY_WORKER = (
+    "import time\nprint('refreshing: network relay :: lop network install', flush=True)\n"
+    "time.sleep({sleep})\n"
+    'print(\'daemon_report: {{"name":"network relay","status":"refreshed"}}\', flush=True)\n'
+)
+
+
+def _hand_off_in_process(
+    tmp_path: Path, worker: str, *, unit: str, bound: float, handoff_in: float, **kwargs: object
+) -> tuple[int, str, str]:
+    out, err = io.StringIO(), io.StringIO()
+    with redirect_stdout(out), redirect_stderr(err):
+        rc = update_mod._hand_off_when_slow(
+            unit=unit,
+            argv=[sys.executable, "-c", worker],
+            executable=sys.executable,
+            bound_s=bound,
+            handoff_at=time.time() + handoff_in,
+            runs_root=tmp_path,
+            **kwargs,  # type: ignore[arg-type]
+        )
+    return rc, out.getvalue(), err.getvalue()
+
+
+def _reap_watchdog(run: Path) -> None:
+    """The in-process hand-off makes the watchdog OUR child: reap it, by exact pid."""
+    pid = update_mod._read_json(run / "spec.json").get("watchdog_pid")
+    if isinstance(pid, int):
+        try:
+            os.waitpid(pid, 0)
+        except ChildProcessError:
+            pass
+
+
+def test_an_old_parent_hears_from_the_mobile_child_that_it_is_not_done_yet(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R1-1 / Q1: the pre-hand-off parent (no hand-off time passed) words rc 0 as
+    "mobile daemon restarted" \u2014 measured against the real v0.103.0 parent in review
+    round 1 \u2014 so the child's own line must say the bounce is still running."""
+    monkeypatch.delenv(update_mod._REFRESH_ROLE_ENV, raising=False)
+    worker = "import time\ntime.sleep(2)\n"
+    rc, old, _ = _hand_off_in_process(
+        tmp_path, worker, unit="mobile", bound=10.0, handoff_in=0.5, parent_knows_pending=False
+    )
+    assert rc == 0
+    assert "mobile: still restarting" in old
+    assert "an older updater may report it as restarted before it has" in old
+    assert "lop services status" in old
+    rc, new, _ = _hand_off_in_process(tmp_path, worker, unit="mobile", bound=10.0, handoff_in=0.5)
+    assert rc == 0 and "mobile: still restarting" in new and "older updater" not in new
+    for run in update_mod._refresh_runs(tmp_path, "mobile"):
+        _reap_watchdog(run)
+        assert (run / "result.json").is_file()
+
+
+def test_only_a_parent_that_passed_no_hand_off_time_is_treated_as_old(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv(update_mod._REFRESH_ROLE_ENV, raising=False)
+    monkeypatch.setattr(update_mod, "_started_as_refresh_child", lambda: True)
+    seen: list[object] = []
+    with patch.object(
+        update_mod,
+        "_hand_off_when_slow",
+        side_effect=lambda **kw: seen.append(kw["parent_knows_pending"]) or 0,
+    ):
+        monkeypatch.delenv(update_mod._REFRESH_HANDOFF_ENV, raising=False)
+        update_mod._run_refresh_child(lambda: 9, unit="mobile", bound_s=1.0)
+        monkeypatch.setenv(update_mod._REFRESH_HANDOFF_ENV, f"{time.time() + 5:.3f}")
+        update_mod._run_refresh_child(lambda: 9, unit="mobile", bound_s=1.0)
+    assert seen == [False, True]
+
+
+def test_a_dead_watchdog_reads_failed_and_its_run_is_pruned(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R1-2: SIGKILL the watchdog (and its worker) mid-run: no record will ever come,
+    so status must not say "still running" forever, and pruning must remove it."""
+    import signal
+
+    monkeypatch.setattr(update_mod, "_refresh_runs_root", lambda: tmp_path)
+    monkeypatch.delenv(update_mod._REFRESH_ROLE_ENV, raising=False)
+    rc, _, _ = _hand_off_in_process(
+        tmp_path, "import time\ntime.sleep(60)\n", unit="services", bound=120.0, handoff_in=0.3
+    )
+    assert rc == 0
+    (run,) = update_mod._refresh_runs(tmp_path, "services")
+    pid = update_mod._read_json(run / "spec.json")["watchdog_pid"]
+    assert isinstance(pid, int)
+    # Its own session, so its pgid is its pid: the worker goes with it.
+    os.killpg(pid, signal.SIGKILL)
+    os.waitpid(pid, 0)
+    (line,) = update_mod.background_refresh_lines()
+    assert line.startswith("background services refresh: FAILED"), line
+    assert "no record" in line and "`lop services restart`" in line
+    monkeypatch.setattr(update_mod, "_REFRESH_RUNS_KEPT", 0)
+    update_mod._prune_refresh_runs(tmp_path, "services")
+    assert not run.exists()
+
+
+def test_a_run_past_its_bound_with_a_live_pid_is_abandoned_but_a_fresh_one_is_running(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R1-2's clock backstop: a pid the OS reused looks alive, so age decides."""
+    monkeypatch.setattr(update_mod, "_refresh_runs_root", lambda: tmp_path)
+    now = time.time()
+    old = tmp_path / f"services-{update_mod._run_stamp(now - 1000)}-a"
+    fresh = tmp_path / f"services-{update_mod._run_stamp(now)}-b"
+    for run, started in ((old, now - 1000), (fresh, now)):
+        run.mkdir()
+        meta = {"unit": "services", "started_at": started, "bound_s": 240.0}
+        update_mod._write_run_meta(run, {**meta, "watchdog_pid": os.getpid()})
+    assert update_mod._run_abandoned(old) is True
+    assert update_mod._run_abandoned(fresh) is False
+    assert update_mod.background_refresh_lines() == [
+        f"background services refresh: still running ({fresh})"
+    ]
+    monkeypatch.setattr(update_mod, "_REFRESH_RUNS_KEPT", 0)
+    update_mod._prune_refresh_runs(tmp_path, "services")
+    assert not old.exists() and fresh.exists(), "a running run is never pruned"
+
+
+def test_the_latest_run_is_the_latest_started_not_the_latest_finished(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R1-3: run A starts, run B starts, A finishes (bumping its dir mtime) \u2014 B is
+    still the latest run."""
+    monkeypatch.setattr(update_mod, "_refresh_runs_root", lambda: tmp_path)
+    now = time.time()
+    a = tmp_path / f"services-{update_mod._run_stamp(now - 0.5)}-zzz"
+    b = tmp_path / f"services-{update_mod._run_stamp(now)}-aaa"
+    for run, started in ((a, now - 0.5), (b, now)):
+        run.mkdir()
+        update_mod._write_run_meta(
+            run,
+            {
+                "unit": "services",
+                "started_at": started,
+                "bound_s": 240.0,
+                "watchdog_pid": os.getpid(),
+            },
+        )
+    time.sleep(0.05)
+    (a / "result.json").write_text(json.dumps({"rc": 0, "finished_at": time.time()}))
+    assert a.stat().st_mtime > b.stat().st_mtime, "the precondition of the old bug"
+    assert update_mod.background_refresh_lines() == [
+        f"background services refresh: still running ({b})"
+    ]
+    # Stamps sort as text in start order, across a second boundary too.
+    assert update_mod._run_stamp(1.999999) < update_mod._run_stamp(2.0)
+
+
+def test_a_worker_finishing_while_the_logs_are_read_is_never_relayed_stale(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R1-4: the verdict is taken BEFORE the logs. Force the race: the stdout read
+    returns the announcement, then waits for the worker to finish. Read in the old
+    order, that stale announcement was relayed as a FINISHED run, and the parent
+    words an announced-but-unreported daemon ``failed``."""
+    monkeypatch.delenv(update_mod._REFRESH_ROLE_ENV, raising=False)
+    real_read = update_mod._read_text
+
+    def racing_read(path: Path) -> str:
+        text = real_read(path)
+        if path.name == "stdout.log":
+            deadline = time.monotonic() + 15.0
+            while not (path.parent / "result.json").exists() and time.monotonic() < deadline:
+                time.sleep(0.05)
+        return text
+
+    monkeypatch.setattr(update_mod, "_read_text", racing_read)
+    rc, out, _ = _hand_off_in_process(
+        tmp_path, _SLOW_RELAY_WORKER.format(sleep=1.5), unit="services", bound=30.0, handoff_in=0.5
+    )
+    assert rc == 0
+    statuses = update_mod._child_daemon_statuses(out)
+    assert DaemonStatus("network relay", "failed") not in statuses, out
+    assert statuses == (DaemonStatus("network relay", "pending"),)
+    (run,) = update_mod._refresh_runs(tmp_path, "services")
+    _reap_watchdog(run)
+
+
+def test_a_nested_refresh_child_never_inherits_the_worker_role(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """R1-5 / Q2: the services worker of a hand run bounces mobile through a nested
+    child; with the role inherited it ran in-process and was killed at 30 s."""
+    monkeypatch.setenv(update_mod._REFRESH_ROLE_ENV, "worker")
+    env = update_mod._refresh_child_env(30.0)
+    assert update_mod._REFRESH_ROLE_ENV not in env
+    assert update_mod._REFRESH_HANDOFF_ENV in env
+    assert os.environ[update_mod._REFRESH_ROLE_ENV] == "worker", "only the child's copy"
+
+
+@pytest.mark.parametrize(
+    ("mobile", "expected"),
+    [
+        (MobileRefresh(kind="failed", error="timed out"), 1),
+        (MobileRefresh(kind="restarting"), 0),
+        (MobileRefresh(kind="restarted"), 0),
+    ],
+)
+def test_a_hand_run_fails_when_its_mobile_half_failed(
+    mobile: MobileRefresh, expected: int, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """R1-5 / Q2: the hand run's exit code is the background record, so a mobile
+    timeout must not exit 0 (status said ``ok``)."""
+    with (
+        patch.object(update_mod, "daemons_refresh_command", return_value=0),
+        patch.object(update_mod, "_repair_refusal", return_value=None),
+        patch.object(update_mod, "refresh_mobile_after_upgrade", return_value=mobile),
+    ):
+        assert update_mod._run_daemon_repair(services_only=False) == expected
+    capsys.readouterr()
+
+
+def test_status_names_the_workers_last_word_on_a_nonzero_exit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Q2: a mobile timeout inside a services run carries no daemon report; status
+    names it from the worker's stderr rather than a bare ``exit 1``."""
+    monkeypatch.setattr(update_mod, "_refresh_runs_root", lambda: tmp_path)
+    run = tmp_path / f"services-{update_mod._run_stamp(time.time())}-x"
+    run.mkdir()
+    (run / "stderr.log").write_text(
+        "warning: mobile daemon did not restart: timed out; run lop mobile restart\n"
+    )
+    (run / "result.json").write_text(json.dumps({"rc": 1, "finished_at": time.time()}))
+    (line,) = update_mod.background_refresh_lines()
+    assert "FAILED" in line and "exit 1 (warning: mobile daemon did not restart: timed out" in line
+
+
+def test_a_worker_stopped_at_its_bound_is_one_warning_with_its_recovery(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Q3: the child's line is quoted inside the parent's own ``warning:`` sentence,
+    so it carries no prefix of its own, and it names the in-flight daemon's command."""
+    monkeypatch.delenv(update_mod._REFRESH_ROLE_ENV, raising=False)
+    rc, _, err = _hand_off_in_process(
+        tmp_path, _SLOW_RELAY_WORKER.format(sleep=30), unit="services", bound=1.0, handoff_in=8.0
+    )
+    assert rc == 1
+    last = err.strip().splitlines()[-1]
+    assert not last.startswith("warning:"), last
+    assert "did not finish within 1s and was stopped" in last
+    assert "`lop network install`" in last
+    (run,) = update_mod._refresh_runs(tmp_path, "services")
+    _reap_watchdog(run)
+    completed = subprocess.CompletedProcess([], 1, stdout="", stderr=err)
+    with (
+        patch.object(update_mod, "_installed_daemon_plists", return_value=[Path("/tmp/x")]),
+        patch("subprocess.run", return_value=completed),
+    ):
+        (warning,) = update_mod.refresh_service_daemons_after_upgrade().warnings
+    assert warning.count("warning:") == 1, warning

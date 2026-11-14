@@ -508,6 +508,13 @@ _MIN_STAGE_BOUND_S = 1.0
 # * the worker is WEDGED → the watchdog kills it at the unit's own background
 #   bound and records ``failed`` (hang protection kept, just larger and per unit).
 #
+# ONE-RELEASE TRANSITION: the pre-upgrade parent that installs this release does
+# not know ``pending``. A service daemon handed off is absent from its report (not
+# ``failed``), but a handed-off MOBILE bounce exits 0, which that parent words
+# "mobile daemon restarted" / ``refreshed`` while it is still running — no exit
+# code can make it say otherwise. The child's own line says so on that update
+# (see ``_hand_off_when_slow``); every later update reads ``pending``.
+#
 # The parent's own kill stays as the safety net for a child that cannot hand off
 # (a downgrade to a wheel without this code, or a wedged launcher).
 # ---------------------------------------------------------------------------
@@ -522,7 +529,9 @@ _REFRESH_ROLE_ENV = "LOCAL_OPERATOR_REFRESH_ROLE"
 _REFRESH_HANDOFF_ENV = "LOCAL_OPERATOR_REFRESH_HANDOFF_AT"
 
 #: When no hand-off time is passed — the PRE-upgrade parent that installs this
-#: release knows nothing of it — the child hands off this long after it starts.
+#: release knows nothing of it — the child hands off this long after
+#: ``_run_refresh_child`` runs, i.e. AFTER its interpreter start and imports, which
+#: have already come out of that parent's 30 s by then.
 #: That parent kills its child at ``min(own bound, what is left of the 30 s
 #: stage)``, measured from the stage start, before the child's interpreter
 #: start and imports; 15 s leaves the other half of that budget for exactly those
@@ -557,6 +566,15 @@ _REFRESH_POLL_S = 0.1
 #: status`` and post-mortems; older finished runs are pruned when a new one starts
 #: so a machine that updates daily does not accrete log directories.
 _REFRESH_RUNS_KEPT = 5
+
+#: How long past its bound a run with no ``result.json`` may sit before it is
+#: read as ABANDONED (its watchdog died: SIGKILL, logout, a full disk). After the
+#: bound fires the watchdog only SIGKILLs and reaps the worker and writes one small
+#: file — QA measured the record landing at the bound itself (PR #4004 QA R1, row
+#: 4a: killed at 8.0 s on an 8 s bound) — so 60 s is far beyond any honest gap.
+#: This is the BACKSTOP: a watchdog pid that is gone is read as abandoned at once;
+#: the clock covers a pid the OS has since reused for something else.
+_REFRESH_ABANDON_GRACE_S = 60.0
 
 #: The watchdog, as a stdlib-only script run with ``python -I -c``. Stdlib-only
 #: and inline ON PURPOSE: it must run whatever wheel is installed (an import of
@@ -7227,7 +7245,14 @@ def _refresh_child_env(timeout: float) -> dict[str, str]:
     earlier than now: a stage already out of budget asks for an immediate hand-off.
     """
     handoff_at = time.time() + max(timeout - _REFRESH_HANDOFF_MARGIN_S, 0.0)
-    return {**os.environ, _REFRESH_HANDOFF_ENV: f"{handoff_at:.3f}"}
+    env = {**os.environ, _REFRESH_HANDOFF_ENV: f"{handoff_at:.3f}"}
+    # NEVER the worker role: a hand-run `lop update --refresh-daemons` bounces
+    # mobile from INSIDE its services worker, and a nested child that inherited
+    # the marker would run in-process and be killed at this parent's bound — the
+    # very bug the hand-off fixes (PR #4004 review R1-5 / QA Q2). The nested child
+    # is a refresh child in its own right and hands off under its own watchdog.
+    env.pop(_REFRESH_ROLE_ENV, None)
+    return env
 
 
 def _refresh_runs_root() -> Path:
@@ -7259,18 +7284,84 @@ def _handoff_at() -> float:
         return time.time() + _REFRESH_HANDOFF_DEFAULT_S
 
 
-def _prune_refresh_runs(root: Path, unit: str) -> None:
-    """Drop all but the newest :data:`_REFRESH_RUNS_KEPT` FINISHED runs of ``unit``.
+def _run_stamp(at: float) -> str:
+    """A run directory's start stamp: UTC to the microsecond, sortable as text.
 
-    A run without ``result.json`` is still going (or its watchdog died, which a
-    reader reports as such) and is never removed from under its watchdog.
+    The run's ORDER is its name, never the directory's mtime: writing
+    ``result.json`` bumps the mtime, so an older run finishing after a newer one
+    started would read as the latest (PR #4004 review R1-3). UTC so a DST change
+    cannot reorder runs; microseconds so two runs in one second still sort.
+    """
+    whole = time.strftime("%Y%m%dT%H%M%S", time.gmtime(at))
+    return f"{whole}{int((at % 1) * 1_000_000):06d}Z"
+
+
+def _refresh_runs(root: Path, unit: str) -> list[Path]:
+    """``unit``'s run directories, oldest START first (see :func:`_run_stamp`)."""
+    return sorted((p for p in root.glob(f"{unit}-*") if p.is_dir()), key=lambda p: p.name)
+
+
+def _read_json(path: Path) -> dict[str, Any]:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except OSError:
+        # EPERM: SOMETHING owns that pid. Possibly a reuse, which the clock in
+        # :func:`_run_abandoned` catches; never read as dead on a guess.
+        return True
+    return True
+
+
+def _run_abandoned(run: Path) -> bool:
+    """Whether ``run`` has no record and never will: its watchdog is gone.
+
+    ``spec.json`` is written BEFORE the watchdog is spawned (``started_at``,
+    ``bound_s``) and rewritten with ``watchdog_pid`` after. Gone means the pid is
+    no longer running, or the run is past its bound plus
+    :data:`_REFRESH_ABANDON_GRACE_S` (a reused pid). ``result.json`` is checked
+    LAST, so a watchdog that wrote its record and exited is never called gone.
+    A directory with no spec at all (the spawn never happened) is abandoned once
+    the grace has passed since it was made.
+    """
+    spec = _read_json(run / "spec.json")
+    started, bound = spec.get("started_at"), spec.get("bound_s")
+    now = time.time()
+    if not isinstance(started, (int, float)) or not isinstance(bound, (int, float)):
+        try:
+            gone = now > run.stat().st_mtime + _REFRESH_ABANDON_GRACE_S
+        except OSError:
+            return False
+    else:
+        pid = spec.get("watchdog_pid")
+        gone = (isinstance(pid, int) and not _pid_alive(pid)) or (
+            now > started + bound + _REFRESH_ABANDON_GRACE_S
+        )
+    return gone and not (run / "result.json").exists()
+
+
+def _prune_refresh_runs(root: Path, unit: str) -> None:
+    """Drop all but the newest :data:`_REFRESH_RUNS_KEPT` ENDED runs of ``unit``.
+
+    Ended = finished (``result.json``) or abandoned (:func:`_run_abandoned`). A
+    run still going is never removed from under its watchdog.
     """
     try:
-        finished = sorted(
-            (p for p in root.glob(f"{unit}-*") if (p / "result.json").is_file()),
-            key=lambda p: p.stat().st_mtime,
-        )
-        for stale in finished[:-_REFRESH_RUNS_KEPT]:
+        ended = [
+            p
+            for p in _refresh_runs(root, unit)
+            if (p / "result.json").is_file() or _run_abandoned(p)
+        ]
+        # Not ``ended[:-KEPT]``: that slice is EMPTY when KEPT is 0.
+        for stale in ended[: max(len(ended) - _REFRESH_RUNS_KEPT, 0)]:
             shutil.rmtree(stale, ignore_errors=True)
     except OSError:
         pass
@@ -7289,6 +7380,29 @@ def _read_text(path: Path) -> str:
         return ""
 
 
+def _write_run_meta(run_dir: Path, meta: Mapping[str, Any]) -> None:
+    """Write ``spec.json`` atomically: a reader never sees half a spec."""
+    tmp = run_dir / "spec.json.tmp"
+    tmp.write_text(json.dumps(dict(meta)), encoding="utf-8")
+    os.replace(tmp, run_dir / "spec.json")
+
+
+def _background_stopped_sentence(unit: str, out: str, bound_s: float) -> str:
+    """The child's last stderr line when the watchdog had to stop its worker.
+
+    Names the recovery the way the parent's own bound sentence does (the daemons
+    the worker had announced but not finished, each with its command), because
+    the parent only quotes this line — it cannot re-derive which daemon was
+    mid-repair. Kept short: the parent clips the quoted line at 200 characters.
+    """
+    stopped = f"the {unit} refresh did not finish within {_bound_label(bound_s)} and was stopped"
+    if unit == "mobile":
+        # The parent's mobile sentence appends `run lop mobile restart` itself.
+        return stopped
+    commands = ", ".join(f"`{recovery}`" for _daemon, recovery in _in_flight_daemons(out))
+    return f"{stopped}; run {commands or '`lop services restart`'} to bring it back"
+
+
 def _hand_off_when_slow(
     *,
     unit: str,
@@ -7298,6 +7412,7 @@ def _hand_off_when_slow(
     handoff_at: float,
     runs_root: Path,
     worker_env: Mapping[str, str] | None = None,
+    parent_knows_pending: bool = True,
 ) -> int:
     """Run ``argv`` as a watched background worker; relay it, or hand it off.
 
@@ -7311,9 +7426,18 @@ def _hand_off_when_slow(
     A parent reads an announced-but-unreported daemon as KILLED and words it
     ``failed`` \u2014 and the pre-upgrade parent that installs this release does not
     know the ``pending`` status, so it would do exactly that. Without the
-    announcement that parent reports nothing for the daemon, and prints the
+    announcement that parent reports nothing for a SERVICE daemon, and prints the
     "still restarting" line this child wrote; a parent with this code reads the
     ``pending`` report.
+
+    MOBILE IS DIFFERENT UNDER THAT OLD PARENT, and no child can fix it: the
+    pre-upgrade ``refresh_mobile_after_upgrade`` knows only rc!=0 (``failed`` —
+    the bug this fixes), an ``already`` report (equally untrue) and rc 0, which it
+    words "mobile daemon restarted" and reports ``refreshed`` while the bounce is
+    still running here. So on that one transition update the mobile line below
+    says so itself (``parent_knows_pending`` False: no hand-off time was passed,
+    which only a pre-hand-off parent omits), and the release notes disclose it
+    (PR #4004 review R1-1, measured against the real v0.103.0 parent).
 
     Raises only BEFORE the watchdog exists (the run directory or the spawn), so
     the caller can fall back to the in-process body without running it twice.
@@ -7322,9 +7446,13 @@ def _hand_off_when_slow(
 
     runs_root.mkdir(parents=True, exist_ok=True)
     _prune_refresh_runs(runs_root, unit)
-    run_dir = Path(
-        tempfile.mkdtemp(prefix=f"{unit}-{time.strftime('%Y%m%dT%H%M%S')}-", dir=runs_root)
-    )
+    started_at = time.time()
+    run_dir = Path(tempfile.mkdtemp(prefix=f"{unit}-{_run_stamp(started_at)}-", dir=runs_root))
+    # Written BEFORE the spawn, so a run whose watchdog never started or later
+    # died can be told from one still going (:func:`_run_abandoned`); raising
+    # here is still before the watchdog exists, so the caller's fallback holds.
+    run_meta: dict[str, Any] = {"unit": unit, "started_at": started_at, "bound_s": bound_s}
+    _write_run_meta(run_dir, run_meta)
     spec = {
         "unit": unit,
         "run_dir": str(run_dir),
@@ -7336,7 +7464,7 @@ def _hand_off_when_slow(
         # told apart from a daemon the worker never reached.
         "env": {**(worker_env or {}), _REFRESH_ROLE_ENV: "worker", "PYTHONUNBUFFERED": "1"},
     }
-    subprocess.Popen(
+    watchdog = subprocess.Popen(
         [sys.executable, "-I", "-c", _REFRESH_WATCHDOG_SOURCE, json.dumps(spec)],
         stdin=subprocess.DEVNULL,
         # NEVER this process's stdout/stderr: the parent reads them to EOF, and a
@@ -7350,26 +7478,32 @@ def _hand_off_when_slow(
         start_new_session=True,
         close_fds=True,
     )
+    try:
+        _write_run_meta(run_dir, {**run_meta, "watchdog_pid": watchdog.pid})
+    except OSError:
+        # Past the spawn nothing may raise (the fallback would run the body a
+        # second time); without the pid the clock alone detects a dead watchdog.
+        pass
     result_path = run_dir / "result.json"
     while not result_path.exists() and time.time() < handoff_at:
         time.sleep(_REFRESH_POLL_S)
+    # The verdict BEFORE the logs (PR #4004 review R1-4): read the other way round,
+    # a worker finishing in between left stale logs (an announcement without its
+    # report) relayed as a FINISHED run, which the parent words ``failed``.
+    finished = result_path.exists()
     out = _read_text(run_dir / "stdout.log")
     err = _read_text(run_dir / "stderr.log")
-    if result_path.exists():
-        try:
-            record = json.loads(result_path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            record = {}
+    if finished:
+        record = _read_json(result_path)
         sys.stdout.write(out)
         sys.stderr.write(err)
         sys.stdout.flush()
         sys.stderr.flush()
+        # No "warning:" prefix on these: the parent wraps the child's last stderr
+        # line in its own warning sentence (PR #4004 QA Q3: it read "warning: …
+        # warning: …"), and they carry the recovery the parent cannot know.
         if record.get("timed_out"):
-            print(
-                f"warning: the {unit} refresh did not finish within "
-                f"{_bound_label(bound_s)} and was stopped",
-                file=sys.stderr,
-            )
+            print(_background_stopped_sentence(unit, out, bound_s), file=sys.stderr)
             return 1
         rc = record.get("rc")
         if isinstance(rc, int) and rc < 0:
@@ -7378,7 +7512,7 @@ def _hand_off_when_slow(
             return 1
         if not isinstance(rc, int):
             print(
-                f"warning: the {unit} refresh could not run: {record.get('error') or 'no result'}",
+                f"the {unit} refresh could not run: {record.get('error') or 'no result'}",
                 file=sys.stderr,
             )
             return 1
@@ -7396,6 +7530,15 @@ def _hand_off_when_slow(
     bound = _bound_label(bound_s)
     for daemon, _recovery in in_flight:
         print(_daemon_report_line(daemon, "pending"))
+        if daemon == "mobile" and not parent_knows_pending:
+            # See the docstring: the parent about to print "mobile daemon
+            # restarted" predates the hand-off, so this line says it first.
+            print(
+                f"mobile: still restarting \u2014 finishing in the background (bounded at "
+                f"{bound}); an older updater may report it as restarted before it has \u2014 "
+                "run `lop services status` to see when it lands"
+            )
+            continue
         print(
             f"{daemon}: still restarting \u2014 finishing in the background (bounded at "
             f"{bound}); run `lop services status` to see when it lands"
@@ -7433,6 +7576,9 @@ def _run_refresh_child(body: Callable[[], int], *, unit: str, bound_s: float) ->
             bound_s=bound_s,
             handoff_at=handoff_at,
             runs_root=runs_root,
+            # Every parent with the hand-off passes its time; only the
+            # pre-hand-off build that installs this release does not.
+            parent_knows_pending=_REFRESH_HANDOFF_ENV in os.environ,
         )
     except OSError:
         return body()
@@ -7451,7 +7597,8 @@ def background_refresh_lines() -> list[str]:
     recovery = {"services": "lop services restart", "mobile": "lop mobile restart"}
     for unit in ("services", "mobile"):
         try:
-            runs = sorted(root.glob(f"{unit}-*"), key=lambda p: p.stat().st_mtime)
+            # Latest by START (the name), not mtime: see :func:`_run_stamp`.
+            runs = _refresh_runs(root, unit)
         except OSError:
             continue
         if not runs:
@@ -7459,12 +7606,21 @@ def background_refresh_lines() -> list[str]:
         latest = runs[-1]
         result = latest / "result.json"
         if not result.exists():
-            lines.append(f"background {unit} refresh: still running ({latest})")
+            if _run_abandoned(latest):
+                started = _read_json(latest / "spec.json").get("started_at")
+                when = time.strftime(
+                    "%Y-%m-%d %H:%M",
+                    time.localtime(started if isinstance(started, (int, float)) else 0),
+                )
+                lines.append(
+                    f"background {unit} refresh: FAILED {when} \u2014 no record (its watchdog "
+                    f"stopped before the restart finished); run `{recovery[unit]}` "
+                    f"(log: {latest})"
+                )
+            else:
+                lines.append(f"background {unit} refresh: still running ({latest})")
             continue
-        try:
-            record = json.loads(result.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            record = {}
+        record = _read_json(result)
         when = time.strftime("%Y-%m-%d %H:%M", time.localtime(record.get("finished_at") or 0))
         failed_daemons = [
             s.name
@@ -7481,7 +7637,11 @@ def background_refresh_lines() -> list[str]:
         elif failed_daemons:
             why = f"{', '.join(failed_daemons)} failed"
         else:
-            why = f"exit {record.get('rc')}"
+            # The worker's own last word, when it left one: a hand-run services
+            # refresh that also bounced mobile fails on the mobile half with no
+            # daemon report, and "exit 1" alone would not say which daemon.
+            tail = [ln for ln in _read_text(latest / "stderr.log").splitlines() if ln.strip()]
+            why = f"exit {record.get('rc')}" + (f" ({tail[-1].strip()[:200]})" if tail else "")
         lines.append(
             f"background {unit} refresh: FAILED {when} \u2014 {why}; run `{recovery[unit]}` "
             f"(log: {latest})"
@@ -8636,8 +8796,15 @@ def _run_daemon_repair(*, services_only: bool) -> int:
     code = daemons_refresh_command()
     if services_only or _repair_refusal() is not None:
         return code
-    _print_daemon_refreshes([_mobile_daemon_refresh(refresh_mobile_after_upgrade())])
-    return code
+    mobile = refresh_mobile_after_upgrade()
+    _print_daemon_refreshes([_mobile_daemon_refresh(mobile)])
+    # A FAILED mobile half fails the hand run. Only a hand run gets here (every
+    # parent passes ``--services-only``, v0.103.0 included), and since the
+    # hand-off that run is a background worker whose exit code is the record
+    # ``lop services status`` reads: exiting 0 over a mobile timeout made it say
+    # "ok" (PR #4004 QA Q2). ``restarting`` is not a failure — the nested child
+    # handed the bounce to its own watchdog, which records it as its own run.
+    return code or (1 if mobile.kind == "failed" else 0)
 
 
 def mobile_refresh_command() -> int:
