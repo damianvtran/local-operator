@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "ru",
   "namespace": "mobile.setup",
-  "history_sha256": "8de9b41ea78ac3b7801389f850834da7b84a98bbe3b7daf3d428eac3f9f8de4a",
+  "history_sha256": "a09e117c517e7f7d1efb41303152f87d66c7092a7cbaa3d63ff406da2ecd9c89",
   "entries": [
     {
       "locale": "ru",
@@ -71,6 +71,29 @@
       "note": "a2: independent i18n-auditor 117e988422ff (anthropic/claude-opus-5-5) of i18n-translator c0c9e9803405 values, #3945 r1 remediation on 7c0fc7bf2: PASSED, 0 blocker/major (no findings); 12 keys. Evidence: i18n/audits/evidence/ru/mobile.setup/a2/record.json",
       "evidence": "i18n/audits/evidence/ru/mobile.setup/a2/record.json",
       "round": "a2",
+      "keys_audited": 12
+    },
+    {
+      "locale": "ru",
+      "namespace": "mobile.setup",
+      "source_sha256": "3025a3af72d2a082766ca7b4c72100db41f2504f48404697af453121b0b6e427",
+      "translator": {
+        "agent": "coder subagent of host Local Operator session 25fe8dfbf610 (values committed in 01113e5aa on fix/tunnel-remedy-no-commands; English source by the same coder)",
+        "model": null,
+        "date": "2026-11-14"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team), independent Local Operator session 9054cd229d3f; not the translator/coder of host session 25fe8dfbf610; edited no catalogue value",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-14",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "a3: independent translation-auditor 9054cd229d3f (anthropic/claude-opus-5-5) of #3958 coder (host session 25fe8dfbf610) values at 01113e5aa: PASSED, 0 blocker/major (0 minor/nit, deferred to the PR thread); 12 new *_plain keys. Evidence: i18n/audits/evidence/ru/mobile.setup/a3/record.json",
+      "evidence": "i18n/audits/evidence/ru/mobile.setup/a3/record.json",
+      "round": "a3",
       "keys_audited": 12
     }
   ]
