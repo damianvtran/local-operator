@@ -603,6 +603,31 @@ def write_excluded(root: Path | None, entries: Sequence[str]) -> None:
     )
 
 
+def enumeration_failure_words(error: str) -> str:
+    """Fixed local words, never GitHub reply text, for any public listing failure.
+
+    Older caches contain ``kind: upstream detail``. Only the owned discriminator
+    is read; unknown values get a generic sentence. Already-rendered values are
+    idempotent so cache replay, readiness, CLI JSON and borrower refusals share
+    one safe boundary rather than each trusting a different error string.
+    """
+    earlier_login = "the saved list is for an earlier GitHub login"
+    words = {
+        "auth": "GitHub refused that login",
+        "offline": "GitHub could not be reached",
+        "server": "GitHub returned an error",
+        "coverage": "GitHub could not list every pushable repository",
+        "unknown": "GitHub repository listing failed",
+        "not fetched yet": "the repository list has not been fetched yet",
+        earlier_login: earlier_login,
+    }
+    if not error:
+        return ""
+    if error in words.values():
+        return error
+    return words.get(error.partition(":")[0].strip(), words["unknown"])
+
+
 @dataclasses.dataclass(frozen=True)
 class Designation:
     """The list a grant is narrowed to, and where it came from.
@@ -623,6 +648,11 @@ class Designation:
     #: The candidate NAMES before the opt-outs, so ``exclude`` can tell a typo
     #: from a real repository (UX round 1, U1).
     listed: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        # This object crosses human/peer boundaries (including JSON), so raw API
+        # detail must not survive even a direct constructor or legacy cache read.
+        object.__setattr__(self, "error", enumeration_failure_words(self.error))
 
     def age_s(self, now: float | None = None) -> float:
         if not self.fetched_at:
@@ -846,16 +876,39 @@ def designation(
     error = str(cache.get("error") or "") if ours else ""
     if not ours and not allow_fetch and cache.get("arm") == source and cached:
         error = "the saved list is for an earlier GitHub login"
+    # Failure-only metadata does not replace another account's last-good list.
+    # It lets read-only readiness explain a first failed listing without lending
+    # any repository or re-fetching. No raw provider text is stored here.
+    failure = cache.get("last_failure")
+    if isinstance(failure, dict) and failure.get("arm") == source:
+        failure_matches = (
+            failure.get("identity") == identity
+            if allow_fetch
+            else bool(hint) and failure.get("hint") == hint
+        )
+        if failure_matches:
+            error = enumeration_failure_words(str(failure.get("error") or ""))
     if allow_fetch and (refresh or not fresh):
         try:
             listed = _enumerate(source, token=token, app=app, minter=minter)
         except GithubApiError as exc:
-            error = f"{exc.kind}: {exc}"
-            logger.warning("github: enumerating pushable repositories failed: %s", error)
+            error = enumeration_failure_words(exc.kind)
+            # Raw reply/exception detail is diagnostic only on this OWNER's log,
+            # never a borrower sentence, public JSON value or cached UI detail.
+            logger.warning(
+                "github: enumerating pushable repositories failed (%s): %r", exc.kind, str(exc)
+            )
+            record = dict(cache)
+            record["last_failure"] = {
+                "arm": source,
+                "identity": identity,
+                "hint": hint,
+                "error": error,
+                "at": moment,
+            }
             if ours:
-                record = dict(cache)
                 record.update({"error": error, "error_at": moment})
-                _safe_write_cache(root, record)
+            _safe_write_cache(root, record)
         else:
             _safe_write_cache(
                 root,

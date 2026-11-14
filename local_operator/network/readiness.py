@@ -3135,7 +3135,9 @@ def _designation_phrase(fact: Mapping[str, Any], where: str) -> str:
     except (TypeError, ValueError):
         excluded = 0
     opted = f", {excluded} opted out" if excluded else ""
-    error = str(fact.get("repositories_error") or "")
+    # Older peers/cache records may carry API text; only local kind wording is
+    # suitable for a readiness surface, just like the owner's refusal boundary.
+    error = github_mod.enumeration_failure_words(str(fact.get("repositories_error") or ""))
     if not count:
         if origin == "unavailable":
             why = f" ({error})" if error else ""
@@ -3154,8 +3156,8 @@ def _designation_phrase(fact: Mapping[str, Any], where: str) -> str:
     elif origin == "last_good":
         why = f": {error}" if error else ""
         source = (
-            f"the list fetched {ago}{opted} — that device could not reach GitHub at its "
-            f"last check{why}"
+            f"the list fetched {ago}{opted} — that device could not list GitHub repositories "
+            f"at its last check{why}"
         )
     else:
         source = f"every repository its login can push to, listed {ago}{opted}"

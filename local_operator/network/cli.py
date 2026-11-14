@@ -3705,8 +3705,8 @@ def _designation_source(designated: Any) -> str:
     if designated.origin == github_mod.ORIGIN_LAST_GOOD:
         why = f" ({designated.error})" if designated.error else ""
         return (
-            f"the list fetched {ago} — GitHub couldn't be reached just now{why}, so it may "
-            "be out of date"
+            f"the list fetched {ago} — GitHub repositories couldn't be listed "
+            f"just now{why}, so it may be out of date"
         )
     return f"every repository this device's GitHub login can push to, listed {ago}"
 

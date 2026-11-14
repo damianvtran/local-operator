@@ -103,6 +103,7 @@ class _Forge:
     user_repos: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
     installation_repos: list[dict[str, Any]] = field(default_factory=list)
     fail_status: int = 0
+    fail_message: str = "forced failure"
     #: Fail only this page of a listing (the walk breaks partway through).
     fail_page: int = 0
     #: Answer this many revokes with 500 before honouring one.
@@ -146,7 +147,7 @@ class _FakeGithubApi:
                 with lock:
                     forge.gets.append(self.path)
                 if forge.fail_status:
-                    self._json(forge.fail_status, {"message": "forced failure"})
+                    self._json(forge.fail_status, {"message": forge.fail_message})
                     return
                 query = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
                 if forge.fail_page and query.get("page") == [str(forge.fail_page)]:
@@ -320,6 +321,98 @@ def _age_cache(root: Path, seconds: float) -> None:
 # ---------------------------------------------------------------------------
 # RED on main: an unset designation refused; now it is enumerated
 # ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("kind", "words"),
+    [
+        ("auth", "GitHub refused that login"),
+        ("server", "GitHub returned an error"),
+        ("offline", "GitHub could not be reached"),
+        ("coverage", "GitHub could not list every pushable repository"),
+        ("unknown", "GitHub repository listing failed"),
+    ],
+)
+def test_r5_unavailable_reasons_never_export_upstream_details(kind: str, words: str) -> None:
+    marker = "UPSTREAM_LISTING_MARKER_3842"
+    designated = github_mod.Designation(
+        repositories=(), origin=github_mod.ORIGIN_UNAVAILABLE, error=f"{kind}: {marker}"
+    )
+    assert marker not in designated.refusal()
+    assert words in designated.refusal()
+    assert marker not in designated.error and f"{kind}:" not in designated.error
+
+
+@pytest.mark.parametrize(
+    ("status", "words"), [(401, "GitHub refused that login"), (503, "GitHub returned an error")]
+)
+def test_r5_two_relays_keep_raw_listing_detail_out_of_borrower_and_owner_outputs(
+    request: pytest.FixtureRequest,
+    api: _FakeGithubApi,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    caplog: pytest.LogCaptureFixture,
+    status: int,
+    words: str,
+) -> None:
+    from local_operator.network.credentials.client import MeshCredentialClient
+
+    mesh = request.getfixturevalue("github_mesh")
+    owner, node = mesh.a.root, mesh.b.root
+    _config(owner)
+    # The shared paired fixture stubs the PAT value, but not stored account
+    # metadata. Readiness must still match a real synthetic account hint; never
+    # loosen the production unknown-hint fence just to make this probe pass.
+    _seed_secret(owner, github_mod.TOKEN_SECRET_NAME, "synthetic-pat")
+    api.forge.fail_status = status
+    api.forge.fail_message = "UPSTREAM_LISTING_MARKER_3842"
+    monkeypatch.setattr(github_mod, "default_minter", api.minter)
+    client = MeshCredentialClient.for_this_device(node)
+    assert client is not None
+    reply = client.request_grant_sync("github")
+    assert isinstance(reply, cred_types.BrokerError), type(reply)
+    wire_json = json.dumps(reply.to_detail())
+    assert api.forge.fail_message not in reply.message
+    assert api.forge.fail_message not in wire_json
+    assert words in reply.message
+    assert "--refresh" in reply.message
+    assert api.forge.fail_message in caplog.text, "raw detail belongs only in the owner log"
+
+    monkeypatch.setenv(CONFIG_DIR_ENV, str(owner))
+    capsys.readouterr()
+    assert _cli("credential", "github", "repos", "--refresh") == 0
+    text = capsys.readouterr().out
+    assert words in text and api.forge.fail_message not in text, text
+    assert _cli("credential", "github", "repos", "--json") == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert words in payload["error"] and api.forge.fail_message not in json.dumps(payload)
+    cache = github_mod.read_enumeration_cache(owner)
+    assert api.forge.fail_message not in json.dumps(cache), cache
+    gets_before = len(api.forge.gets)
+    fact = readiness.github_fact(owner)
+    assert len(api.forge.gets) == gets_before, "readiness must stay read-only"
+    assert words in fact.get("repositories_error", ""), fact
+    assert api.forge.fail_message not in json.dumps(fact)
+    assert words in readiness._github_scope_clause(fact, "owner")  # noqa: SLF001
+
+
+def test_r5_old_cache_error_is_not_replayed_as_public_prose(env: _Env, api: _FakeGithubApi) -> None:
+    _token_arm(env, api, [_repo("me/a")])
+    with _broker(env, api) as broker:
+        _granted(broker)
+    cache = github_mod.read_enumeration_cache(env.root)
+    cache["error"] = "server: UPSTREAM_LISTING_MARKER_3842"
+    github_mod._write_enumeration_cache(env.root, cache)  # noqa: SLF001 — legacy metadata fixture
+    designated = github_mod.designation(env.root, source=github_mod.SOURCE_TOKEN, allow_fetch=False)
+    assert designated.error == "GitHub returned an error"
+    fact = readiness.github_fact(env.root, env.home)
+    assert "UPSTREAM_LISTING_MARKER_3842" not in json.dumps(fact)
+    # An older peer can still send the legacy fact shape; its raw error is not
+    # trusted merely because it arrived through the readiness wire protocol.
+    fact["repositories_error"] = "server: UPSTREAM_LISTING_MARKER_3842"
+    clause = readiness._github_scope_clause(fact, "owner")  # noqa: SLF001
+    assert "UPSTREAM_LISTING_MARKER_3842" not in clause
+    assert "GitHub returned an error" in clause
 
 
 def test_an_unset_designation_mints_the_app_narrowed_to_the_installation_list(
@@ -610,12 +703,13 @@ def test_a_failed_refresh_keeps_the_last_good_list_and_says_so(
     assert detail["narrowing"]["repositories"] == ["me/a", "me/b"]
     designated = github_mod.designation(env.root, source=github_mod.SOURCE_TOKEN, allow_fetch=False)
     assert designated.origin == github_mod.ORIGIN_LAST_GOOD
-    assert "503" in designated.error or "forced failure" in designated.error
+    assert designated.error == "GitHub returned an error"
     fact = readiness.github_fact(env.root, env.home)
     assert fact["repositories_origin"] == "last_good"
     clause = readiness._github_scope_clause(fact, "owner-laptop")  # noqa: SLF001
     assert "the list fetched 6 h ago" in clause, clause
-    assert "could not reach GitHub at its last check" in clause, clause
+    assert "could not list GitHub repositories at its last check" in clause, clause
+    assert "GitHub returned an error" in clause, clause
     assert "full list: lop network credential github repos on owner-laptop" in clause, clause
 
 
@@ -639,11 +733,20 @@ def test_another_accounts_list_is_never_served_as_last_good(env: _Env, api: _Fak
     _token_arm(env, api, [_repo("me/a")])
     with _broker(env, api) as broker:
         _granted(broker)
+    saved = github_mod.read_enumeration_cache(env.root)
     _seed_secret(env.root, github_mod.TOKEN_SECRET_NAME, OTHER_TOKEN)
     api.forge.fail_status = 503
     with _broker(env, api) as broker:
         reply = _refused(broker)
     assert reply["code"] == github_mod.CODE_REPOSITORIES_UNSET
+    cache = github_mod.read_enumeration_cache(env.root)
+    assert cache["repositories"] == saved["repositories"]
+    assert (
+        cache["identity"] == saved["identity"]
+    ), "a failure must not replace another account's list"
+    fact = readiness.github_fact(env.root, env.home)
+    assert fact["repositories"] == []
+    assert fact["repositories_error"] == "GitHub returned an error"
 
 
 def test_opting_everything_out_refuses_with_that_reason(env: _Env, api: _FakeGithubApi) -> None:
@@ -957,7 +1060,7 @@ def test_u3_one_age_wording_and_no_config_keys_or_capitals_in_human_text(
     )
     lines = net_cli._designation_lines(last_good, "token", receipt=False)  # noqa: SLF001
     assert lines[0].startswith("GitHub repositories lent for: 1 — the list fetched 30 h ago"), lines
-    assert "GitHub couldn't be reached just now (server: forced failure)" in lines[0]
+    assert "GitHub repositories couldn't be listed just now (GitHub returned an error)" in lines[0]
     texts = [
         *lines,
         *net_cli._designation_lines(explicit_empty, "token", receipt=False),  # noqa: SLF001
