@@ -73,6 +73,7 @@ from local_operator.evaluation.adapters.api import (
     SecretRef,
 )
 from local_operator.evaluation.adapters.supervisor import AdapterSupervisor
+from local_operator.evaluation.completion_verifier import CompletionVerifierConfig
 from local_operator.evaluation.evidence.models import RouteIdentity
 from local_operator.evaluation.receipts import (
     BUDGET_RESOURCES,
@@ -613,6 +614,7 @@ def build_config(
     execution_overhead_seconds_per_action: float = 0.0,
     completion_gate: bool = True,
     premature_terminal_gate: bool = True,
+    completion_verifier_rounds: int = 0,
 ) -> Any:
     """Roots under ONE durable directory; timeouts sized for a real worker.
 
@@ -659,6 +661,7 @@ def build_config(
         max_cycle_cost_micros=max_cycle_usd_micros,
         completion_gate=completion_gate,
         premature_terminal_gate=premature_terminal_gate,
+        completion_verifier=CompletionVerifierConfig(rounds=completion_verifier_rounds),
     )
 
 
@@ -971,6 +974,16 @@ def build_parser(*, internal_test_support: bool = False) -> argparse.ArgumentPar
         "any action has executed: the episode ends on that first declaration. A "
         "campaign's CONTROL ARM like --no-completion-gate, stamped on the manifest "
         "either way",
+    )
+    parser.add_argument(
+        "--completion-verifier-rounds",
+        type=int,
+        choices=(0, 1, 2),
+        default=0,
+        help="session arm only: verify up to N `finish status=done` claims with an "
+        "independent read-only verifier child before accepting them (a FAIL becomes "
+        "the completion challenge, with its findings). 0 (default) is today's arm; a "
+        "non-zero value is a different arm and is stamped on the manifest",
     )
     parser.add_argument(
         "--progress-guards",
@@ -2001,6 +2014,7 @@ async def run(
             ),
             completion_gate=not args.no_completion_gate,
             premature_terminal_gate=not args.no_premature_terminal_gate,
+            completion_verifier_rounds=getattr(args, "completion_verifier_rounds", 0),
         )
     except VolatileRootError as error:
         print(str(error), file=sys.stderr)
@@ -2058,6 +2072,15 @@ async def run(
             # executed was challenged once. Same reasoning as the stamp above:
             # it changes what the model is asked, so the arm rides the score.
             "premature_terminal_gate": not args.no_premature_terminal_gate,
+            # The completion verifier changes what the model is told after a
+            # `done` claim, so it is an arm. Stamped only when ON: rounds=0 is
+            # today's arm, and its manifest stays byte-identical to one written
+            # before the flag existed (absent == 0).
+            **(
+                {"completion_verifier": config.completion_verifier.stamp()}
+                if config.completion_verifier.enabled
+                else {}
+            ),
             # Whether the session arm ran the runner's no-progress guards. Like
             # the completion gate it changes how an episode can END, so a score
             # must carry it; the reply arm always runs them. Stamped

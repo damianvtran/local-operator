@@ -122,12 +122,21 @@ from local_operator.evaluation.adapters.supervisor import (
     persist_rescue,
     run_rescue,
 )
+from local_operator.evaluation.completion_verifier import (
+    RUN_COMMAND_SLACK_S,
+    verdict_disposition,
+)
 from local_operator.evaluation.lifecycle import (
     CleanupAction,
     CleanupPlan,
     aggregate_cleanup,
 )
-from local_operator.evaluation.protocol import ActionBatch, AskUserAction, Observation
+from local_operator.evaluation.protocol import (
+    ActionBatch,
+    AskUserAction,
+    FinishAction,
+    Observation,
+)
 from local_operator.evaluation.receipts import BudgetAuthorization
 from local_operator.evaluation.record_sink import RecordSink, RecordSinkError
 from local_operator.evaluation.runner.action_tool import (
@@ -725,7 +734,9 @@ class SessionArmError(RuntimeError):
 #: fires first and tears the channel down -- losing the episode the probe exists
 #: to keep. Named, not inline, because the action server's MCP request timeout
 #: is derived from it (:func:`action_server_mcp_timeout_s`).
-COMMAND_RPC_MARGIN_S = 20.0
+# Keep the action server's nested deadlines and the verifier's guest-read
+# envelope on one margin: both use the same adapter RPC path.
+COMMAND_RPC_MARGIN_S = RUN_COMMAND_SLACK_S
 
 #: Slack between the ``run_command`` RPC deadline and the MCP client's request
 #: timeout for the episode action server. It covers what can still happen
@@ -1327,6 +1338,24 @@ class ActionBridge:
     #: Kept apart from ``end_requested`` so the driver maps a guard stop to
     #: ``truncated`` without hard-coding the guard vocabulary.
     progress_stop_code: str | None = None
+    #: THE COMPLETION VERIFIER (``evaluation/completion_verifier.py``): called
+    #: with ``(claim, observation, round)`` on a ``done`` claim while rounds
+    #: remain, and returns a ``VerifierVerdict``. ``None`` -- the default, and
+    #: what ``rounds=0`` leaves -- is today's finish branch exactly. Injected by
+    #: the driver after the session opens (the verifier is a child of that
+    #: session), so the bridge never holds a session reference itself.
+    verifier: Callable[[FinishAction, Observation, int], Awaitable[Any]] | None = None
+    verifier_rounds: int = 0
+    #: The verifier's worst-case envelope (``completion_verifier
+    #: .verifier_envelope_s``: probe + wall cap + cancel join, review M2): the
+    #: claim is only verified when the episode's remaining wall
+    #: (``wall_remaining``) can hold ALL of it, because a check that outlives
+    #: the episode would cost the finish it is checking.
+    verifier_envelope_s: float = 0.0
+    wall_remaining: Callable[[], float | None] | None = None
+    #: Unprefixed record writer for the ``verifier_*`` rows (the ``record``
+    #: seam above prefixes ``action_``); ``None`` records nothing.
+    record_event: Callable[[str, dict[str, Any]], None] | None = None
 
     def __post_init__(self) -> None:
         # The token is armed with observation zero, which only exists once the
@@ -1368,6 +1397,12 @@ class ActionBridge:
         #: ``PREMATURE_TERMINAL_CHALLENGES`` and kept apart from
         #: ``_completion_fired`` so it never spends the ``done`` budget.
         self._premature_fired = 0
+        #: Verifications started (bounded by ``verifier_rounds``), and the round
+        #: currently running -- the window ``inspect_command`` is gated on. Set
+        #: only while ``call`` holds ``_lock`` awaiting the verdict, so the
+        #: worker's turn is parked and nothing else drives the guest.
+        self._verifier_fired = 0
+        self._verifying: int | None = None
         #: Non-terminal batches dispatched to the adapter -- the runner's
         #: ``_steps_taken`` analogue (see the increment for why at dispatch).
         #: ``_steps`` cannot serve: it counts admitted output epochs, which a
@@ -1513,6 +1548,134 @@ class ActionBridge:
         """
 
         return self._steps + 2 <= self.max_steps and self._attempted_groups + 1 <= self.max_steps
+
+    @property
+    def verification_round(self) -> int | None:
+        """The verifier round running now, else ``None`` -- ``inspect_command``'s gate."""
+
+        return None if self._closed or self.end_requested is not None else self._verifying
+
+    def _record_verifier(self, kind: str, payload: dict[str, Any]) -> None:
+        if self.record_event is not None:
+            self.record_event(kind, payload)
+
+    async def _maybe_verify(self, claim: FinishAction, pending: Observation) -> Any:
+        """Run the completion verifier on this claim, or return ``None``.
+
+        ``None`` means "today's finish path": no verifier, a non-``done`` claim
+        (premature/failed/infeasible keep their own rules), rounds spent, a
+        budget that cannot hold the exchange, or a verifier that never ran.
+        Every case but the first two is RECORDED (``verifier_skipped``): a
+        silently skipped check reads exactly like one that was never armed.
+
+        The fit test is the premature gate's (``_challenge_epoch_pair_fits``:
+        a FAIL must be able to pay for its challenge AND the worker's next
+        finish) plus the episode wall, which must hold the verifier's whole
+        envelope (probe + wall cap + cancel join) -- no extra margin is
+        invented here; what remains after the check is the worker's.
+
+        Runs with ``_lock`` HELD (from ``call``): that is what parks the worker
+        and keeps the guest quiescent, and why the verifier's guest reads go
+        through the lock-free ``inspect_command`` instead of ``call_command``.
+        """
+
+        if self.verifier is None or claim.status != "done":
+            return None
+        if self._verifier_fired >= self.verifier_rounds:
+            return None
+        round_ = self._verifier_fired + 1
+        reason: str | None = None
+        if not self._challenge_epoch_pair_fits():
+            reason = "step-budget"
+        elif self.wall_remaining is not None:
+            remaining = self.wall_remaining()
+            if remaining is not None and remaining <= self.verifier_envelope_s:
+                reason = "wall"
+        if reason is not None:
+            self._record_verifier(
+                "verifier_skipped",
+                {
+                    "round": round_,
+                    "reason": reason,
+                    "steps": self._steps,
+                    "max_steps": self.max_steps,
+                },
+            )
+            return None
+        self._verifier_fired = round_
+        self._verifying = round_
+        try:
+            verdict = await self.verifier(claim, pending, round_)
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:  # noqa: BLE001 -- a broken check must not cost the finish
+            self._record_verifier(
+                "verifier_skipped",
+                {"round": round_, "reason": "error", "detail": f"{type(error).__name__}: {error}"},
+            )
+            return None
+        finally:
+            self._verifying = None
+        if verdict.ended_by == "refused":
+            self._record_verifier(
+                "verifier_skipped",
+                {"round": round_, "reason": "refused", "detail": verdict.findings},
+            )
+            return None
+        self._record_verifier(
+            "verifier_verdict",
+            {
+                "round": round_,
+                **verdict.as_record(),
+                "disposition": verdict_disposition(verdict.status),
+            },
+        )
+        return verdict
+
+    def _verifier_challenge(
+        self, claim: FinishAction, pending: Observation, verdict: Any
+    ) -> dict[str, Any]:
+        """A FAIL/INCONCLUSIVE verdict, delivered as this claim's challenge.
+
+        Accounted EXACTLY as the self-check challenge (one admitted epoch, one
+        ``completion_challenges`` unit, the same group kind and terminal
+        detail), so the clocks and the outcome's challenge count cannot tell
+        the two apart except by the row's ``trigger``. The findings ride AHEAD
+        of the standard challenge text, so the challenge's own wording (and
+        its closing reply sentence) stays the shared builder's.
+        """
+
+        self._consume_output_epoch("finish-challenged")
+        self._mark_group_kind("finish-challenged")
+        self._completion_fired += 1
+        challenge = build_completion_challenge(
+            claim=claim,
+            instruction=self.instruction,
+            observation=pending,
+            reply_guidance=self.reply_guidance,
+        )
+        findings = verdict.findings.strip() or "(no findings text)"
+        challenge = (
+            f"An independent check of your deliverable reported ({verdict.status}):\n"
+            f"{findings}\n\n{challenge}"
+        )
+        if self.record is not None:
+            self.record(
+                "completion_challenged",
+                {
+                    "status": claim.status,
+                    "reason": claim.reason,
+                    "challenge": challenge,
+                    "observation_id": pending.observation_id,
+                    "trigger": "verifier",
+                    "verdict": verdict.status,
+                },
+            )
+        return {
+            "content": [TextContent(text=challenge), *self._shown_blocks(pending)],
+            "is_error": False,
+            "details": {"terminal": "completion-challenged"},
+        }
 
     def _group_key(self) -> str:
         """The canonical key of the output group being served.
@@ -2512,6 +2675,15 @@ class ActionBridge:
             terminal = _terminal_kind(batch)
             if terminal == "finish":
                 claim = finish_claim(batch)
+                # The completion verifier runs FIRST, on a ``done`` claim only
+                # (``_maybe_verify``): a FAIL/INCONCLUSIVE becomes this call's
+                # challenge, a PASS falls through to the accept path below with
+                # the self-check challenge suppressed -- an independent read of
+                # the deliverable already agreed, so re-asking the worker adds
+                # nothing. ``None`` (off, rounds spent, skipped) is today's path.
+                check = await self._maybe_verify(claim, pending)
+                if check is not None and verdict_disposition(check.status) == "challenged":
+                    return self._verifier_challenge(claim, pending, check)
                 # The rule is the runner's (``runner.completion.challenge_kind``);
                 # only the counters are this bridge's.
                 kind = challenge_kind(
@@ -2525,6 +2697,8 @@ class ActionBridge:
                         and self._premature_fired < PREMATURE_TERMINAL_CHALLENGES
                     ),
                 )
+                if check is not None:
+                    kind = None
                 if kind == "premature-terminal" and not self._challenge_epoch_pair_fits():
                     # A challenge the budget cannot see through is worse than no
                     # challenge: it would spend the last epoch and lose the very
@@ -2620,6 +2794,9 @@ class ActionBridge:
                             "reason": claim.reason,
                             "actions": len(batch.actions),
                             "completion_challenged": self._completion_fired > 0,
+                            # Present only when a verifier passed this claim,
+                            # so an arm without one writes today's row.
+                            **({"verified": check.status} if check is not None else {}),
                         },
                     )
                 return {
@@ -3303,6 +3480,10 @@ class EpisodeSession:
     #: loop).
     request_rows: list[dict[str, Any]] = field(default_factory=list, repr=False)
     request_usages: list[Any] = field(default_factory=list, repr=False)
+    #: Job ids of the harness completion verifier's children, added at
+    #: ``verifier_started`` (``_arm_completion_verifier``): the ONLY selector
+    #: for the cost row's ``verifier`` share. Empty when the verifier is off.
+    verifier_job_ids: set[str] = field(default_factory=set, repr=False)
 
     @property
     def tool_names(self) -> tuple[str, ...]:
@@ -3794,6 +3975,9 @@ class SessionArmOutcome:
     record_incomplete: bool = False
     record_diagnostic: str | None = None
     duration_ms: int = 0
+    #: The completion verifier's summary (``_verifier_summary``), or ``None``
+    #: for an arm that ran without one -- the outcome then carries no key.
+    completion_verifier: Mapping[str, Any] | None = None
 
 
 async def run_session_episode(
@@ -4100,6 +4284,12 @@ async def run_session_episode(
         #: fact -- the abort reason never rides the end event -- and the
         #: terminal-reason classifier reads it after the turn.
         wall_fired = False
+        #: The completion verifier's per-episode state (``None`` when the arm
+        #: runs without one, which keeps every record byte-identical), and the
+        #: loop time the wall bound started at, which the verifier's fit check
+        #: reads (``ActionBridge.wall_remaining``).
+        verifier_state: dict[str, Any] | None = None
+        wall_started: list[float] = []
         #: The LAST ``agent_end`` the sink saw: the shared statement of why the
         #: episode's final turn ended, captured outside the record path so a
         #: torn record cannot cost the outcome its reason.
@@ -4260,6 +4450,22 @@ async def run_session_episode(
                 )
             tool_names = handle.tool_names
             record.write("tools", {"names": list(tool_names)})
+            if config.completion_verifier.enabled:
+                verifier_state = _arm_completion_verifier(
+                    bridge=bridge,
+                    handle=handle,
+                    record=record,
+                    config=config.completion_verifier,
+                    wall_remaining=(
+                        None
+                        if max_wall_s is None
+                        else lambda: (
+                            max_wall_s - (asyncio.get_running_loop().time() - wall_started[0])
+                            if wall_started
+                            else float(max_wall_s)
+                        )
+                    ),
+                )
             # The first screen's blocks come from the bridge: ``arm`` rendered
             # it once and the completion challenge re-attaches the same blocks,
             # so rendering again here would append a duplicate turn to the
@@ -4292,6 +4498,7 @@ async def run_session_episode(
                 # so the record keeps the shape every other end has. The timer
                 # is cancelled the moment the turn ends on its own.
                 wall_timer = asyncio.get_running_loop().call_later(max_wall_s, _on_wall)
+                wall_started.append(asyncio.get_running_loop().time())
             try:
                 await handle.session.prompt(prompt, images=images or None)
                 # THE PROTOCOL'S ASK_USER CONTINUATION. Upstream OSWorld
@@ -4409,6 +4616,10 @@ async def run_session_episode(
             except BaseException as error:  # noqa: BLE001 - a close-out must complete
                 if not record_errors:
                     record_errors.append(error)
+            if verifier_state is not None:
+                # After the close: the verifier children are disposed by now,
+                # so their transcripts are complete on disk.
+                _copy_verifier_transcripts(record_root, verifier_state, record)
 
         steps = bridge.steps
         terminal_reason = bridge.end_requested
@@ -4593,6 +4804,7 @@ async def run_session_episode(
             tool_names=tool_names,
             resolved_sources=resolved_sources,
             duration_ms=int(time.time() * 1000) - started_ms,
+            completion_verifier=_verifier_summary(verifier_state),
         )
     except BaseException as error:
         # Every failure still tears the worker down; a leaked cloud resource is
@@ -5030,9 +5242,40 @@ def _flush_request_observation(
         coverage_counts[coverage] = coverage_counts.get(coverage, 0) + 1
         if row.get("usage") is None:
             missing_usage_request_ids.append(str(row.get("request_id") or ""))
+    # The completion verifier's share, beside the whole-tree totals it is
+    # already part of (its rows are this tree's; nothing is excluded above).
+    # Present only when a verifier made requests, so an arm without one
+    # writes today's row byte for byte.
+    #
+    # Selected by the job ids the arm recorded at ``verifier_started``
+    # (``handle.verifier_job_ids``), NOT by ``actor_role == "verifier"``
+    # (review round 2, m3): the worker has ``task`` and may launch its own
+    # ``task(agent="verifier")``, whose rows carry the same role name. Those
+    # are the worker's spend, and with the verifier off they must not add a
+    # ``verifier`` key to a record that is otherwise byte-identical.
+    verifier_share: dict[str, Any] = {}
+    verifier_ids = frozenset(getattr(handle, "verifier_job_ids", ()) or ())
+    verifier_rows = [row for row in rows if row.get("job_id") in verifier_ids]
+    if verifier_rows:
+        from local_operator.harness.types import Usage
+
+        verifier_usages = [
+            Usage.model_validate(row["usage"]) for row in verifier_rows if row.get("usage")
+        ]
+        v_recorded, v_recorded_unknown = cost_summary(verifier_usages, recorded_only=True)
+        v_estimated, v_estimated_unknown = cost_summary(verifier_usages, recorded_only=False)
+        verifier_share["verifier"] = {
+            "count": len(verifier_rows),
+            "job_ids": sorted({str(row.get("job_id")) for row in verifier_rows}),
+            "recorded_usd": v_recorded,
+            "recorded_unknown": v_recorded_unknown,
+            "estimated_usd": v_estimated,
+            "estimated_unknown": v_estimated_unknown,
+        }
     record.write(
         "requests",
         {
+            **verifier_share,
             "count": len(rows),
             "purpose_counts": purposes,
             "usage_coverage_counts": coverage_counts,
@@ -5058,6 +5301,169 @@ def _on_event(record: RecordSink, bridge: ActionBridge, event: AgentEvent) -> No
 
     bridge.fold(event)
     record.write("agent_event", {"event": printable_event(event)})
+
+
+def _arm_completion_verifier(
+    *,
+    bridge: ActionBridge,
+    handle: EpisodeSession,
+    record: RecordSink,
+    config: Any,
+    wall_remaining: Callable[[], float | None] | None,
+) -> dict[str, Any]:
+    """Wire the completion verifier into this episode; return its state.
+
+    Called once, after the session opened (the verifier is that session's
+    child, launched through ``Session.verify_completion`` -- the generic
+    primitive, not an OSWorld hook) and before the first prompt. The ONLY
+    episode-specific piece is the host tool: a lock-free ``inspect_command``
+    (``evaluation/completion_verifier.py``) gated on the bridge's verification
+    window. The verifier is told the reset instruction the worker saw
+    (``bridge.instruction``), the worker's claim and the last observation's
+    text -- never adapter or evaluator fields, which the bridge does not hold.
+
+    A target without the command capability gets NO verifier: the check could
+    not see a remote deliverable, so it would be a cost with no reach. That is
+    recorded once as ``verifier_skipped`` rather than left implicit.
+    """
+
+    from local_operator.evaluation.completion_verifier import (
+        VerifierInspector,
+        verifier_envelope_s,
+    )
+    from local_operator.harness.verifier import CANCEL_JOIN_S
+
+    state: dict[str, Any] = {
+        "config": config.stamp(),
+        "verdicts": [],
+        "transcripts": {},
+        "readonly_enforcement": None,
+        "skipped": [],
+    }
+    record.write("completion_verifier", config.stamp())
+    run_command = bridge.run_command
+    if run_command is None:
+        record.write("verifier_skipped", {"round": None, "reason": "no-command-capability"})
+        state["skipped"].append({"round": None, "reason": "no-command-capability"})
+        return state
+
+    current_job: dict[str, str | None] = {"id": None}
+    inspector = VerifierInspector(
+        run_command=run_command,
+        window=lambda: bridge.verification_round,
+        record_event=record.write,
+        job_id=lambda: current_job["id"],
+    )
+
+    def record_event(kind: str, payload: dict[str, Any]) -> None:
+        if kind == "verifier_skipped":
+            state["skipped"].append(
+                {"round": payload.get("round"), "reason": payload.get("reason")}
+            )
+        record.write(kind, payload)
+
+    async def verify(claim: FinishAction, pending: Observation, round_: int) -> Any:
+        mode = await inspector.ensure_mode()
+        state["readonly_enforcement"] = mode
+        current_job["id"] = None
+
+        def started(info: dict[str, Any]) -> None:
+            current_job["id"] = info.get("job_id")
+            if info.get("job_id"):
+                # The cost share's selector (``_flush_request_observation``).
+                handle.verifier_job_ids.add(str(info["job_id"]))
+            record.write(
+                "verifier_started", {"round": round_, **info, "readonly_enforcement": mode}
+            )
+
+        observation_text = (
+            pending.text if pending.text and pending.text != bridge.instruction else None
+        )
+        # The verification's hard deadline: ``verify_completion`` returns by
+        # its own start + wall + cancel join, and every guest read is clipped
+        # to settle by this one (taken earlier, so no later than that).
+        inspector.begin(time.monotonic() + float(config.wall_s) + CANCEL_JOIN_S)
+        try:
+            verdict = await handle.session.verify_completion(
+                request=bridge.instruction,
+                claim=f"status: {claim.status}\nreason: {claim.reason}",
+                observation=observation_text,
+                host_tools=[inspector.tool()],
+                limits=config.limits(),
+                on_started=started,
+            )
+        finally:
+            # Before the worker resumes (the bridge still holds its lock): a
+            # read the cap abandoned is still running on the guest, and is
+            # awaited, never cancelled -- a cancelled adapter RPC poisons the
+            # session (live ``t31v-t003``: the worker's next command failed).
+            await inspector.drain()
+        state["verdicts"].append(
+            {
+                "round": round_,
+                "status": verdict.status,
+                "ended_by": verdict.ended_by,
+                "job_id": verdict.job_id,
+                "requests": verdict.requests,
+                "commands": verdict.commands,
+                "disposition": verdict_disposition(verdict.status),
+            }
+        )
+        if verdict.job_id and verdict.transcript_dir:
+            state["transcripts"][verdict.job_id] = verdict.transcript_dir
+        return verdict
+
+    bridge.verifier = verify
+    bridge.verifier_rounds = config.rounds
+    bridge.verifier_envelope_s = verifier_envelope_s(config.wall_s)
+    bridge.wall_remaining = wall_remaining
+    bridge.record_event = record_event
+    return state
+
+
+def _copy_verifier_transcripts(
+    record_root: Path, state: dict[str, Any], record: RecordSink
+) -> None:
+    """Copy each verifier child's transcript into the bundle as ``verifier/<job>.jsonl``.
+
+    The child's session directory lives in the episode's config store, which
+    is scratch; the bundle is what a reader keeps, and a verdict without the
+    reasoning behind it cannot be audited. A failed copy is recorded, never
+    raised: the episode's own outcome must not depend on it.
+    """
+
+    import shutil
+
+    copied: dict[str, str] = {}
+    for job_id, directory in sorted(state.get("transcripts", {}).items()):
+        source = Path(directory) / "transcript.jsonl"
+        target = record_root / "verifier" / f"{job_id}.jsonl"
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(source, target)
+            copied[job_id] = str(target.relative_to(record_root))
+        except OSError as error:
+            record.write(
+                "error",
+                {
+                    "scope": "verifier_transcript",
+                    "job_id": job_id,
+                    "diagnostic": f"{type(error).__name__}: {error}",
+                },
+            )
+    state["bundle_transcripts"] = copied
+
+
+def _verifier_summary(state: dict[str, Any] | None) -> dict[str, Any] | None:
+    if state is None:
+        return None
+    return {
+        "config": state.get("config"),
+        "readonly_enforcement": state.get("readonly_enforcement"),
+        "verdicts": list(state.get("verdicts", ())),
+        "skipped": list(state.get("skipped", ())),
+        "transcripts": dict(state.get("bundle_transcripts", {})),
+    }
 
 
 def _make_run_command(
@@ -5367,4 +5773,11 @@ def _outcome_json(outcome: SessionArmOutcome) -> dict[str, Any]:
         "tool_names": list(outcome.tool_names),
         "resolved_sources": {name: str(path) for name, path in outcome.resolved_sources.items()},
         "duration_ms": outcome.duration_ms,
+        # Only an arm that ran with a verifier carries the key (rounds=0 is
+        # today's outcome, byte for byte).
+        **(
+            {"completion_verifier": dict(outcome.completion_verifier)}
+            if outcome.completion_verifier is not None
+            else {}
+        ),
     }

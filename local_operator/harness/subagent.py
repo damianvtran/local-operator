@@ -157,8 +157,10 @@ from local_operator.harness.types import (
     SubagentEndEvent,
     SubagentProgressEvent,
     SubagentStartEvent,
+    TextContent,
     ToolExecutionEndEvent,
     ToolExecutionStartEvent,
+    ToolResult,
     Usage,
 )
 from local_operator.harness.wip_checkpoint import WipCheckpointer, restore_hint
@@ -1009,7 +1011,82 @@ def _with_network_floor(
 #: and :data:`READ_ONLY_TOOLS` is left without ``bash``, so no other role
 #: inherits a shell through that list. ``reviewer``/``architect``/
 #: ``qa-tester`` are NOT here: they need network and write test caches.
+#: The harness completion verifier is deliberately NOT here: a name in this
+#: set confines EVERY session of that name, including an operator's own
+#: registry role of the same name and any ``task(agent=...)`` naming it (PR
+#: #3837 review R2 / QA Q1: this machine already has a ``verifier`` role that
+#: needs ``gh``/``curl``). It is confined by its launch instead
+#: (:attr:`ChildSurface.readonly_shell`), which only harness code can set.
 READ_ONLY_SHELL_ROLES = frozenset({"scout"})
+
+
+@dataclass(frozen=True)
+class ChildSurface:
+    """A HARNESS-chosen bound on one child's tools, beyond its role allowlist.
+
+    Only harness code builds one (``Session.verify_completion`` today); the
+    ``task`` tool never does, so nothing a model says can widen a child here.
+
+    ``ceiling`` is the set of names the child may hold at all, applied as the
+    child's FIRST tool declaration (``Session.set_tool_inventory``), so it is
+    enforced at every later inventory write -- lazy MCP discovery and the
+    capability merges included -- not only on the construction-time list. It
+    is intersected with the parent's own declaration when one is in force,
+    so it can only narrow. It exists because a role-limited child is ALWAYS
+    handed the ``web_*`` network floor (:func:`_with_network_floor`), and a
+    harness-launched check must not gain a reach its launcher never had.
+
+    ``host_tools`` are in-process tools the embedding code supplies for this
+    one child (the OSWorld arm's lock-free ``inspect_command``). They join
+    the declaration by name: the embedder that declared the parent's surface
+    is the one handing them over, and they never enter the parent's own
+    inventory, so the model that launched nothing cannot reach them.
+
+    ``readonly_shell`` confines THIS child's ``bash`` exactly as a
+    :data:`READ_ONLY_SHELL_ROLES` child's (writes only to its own scratchpad,
+    no network, no shell at all without a sandbox). It rides the launch, not
+    the role name, so it binds only the child the harness built -- a registry
+    row or a ``task`` launch that happens to share the name is untouched.
+
+    ``on_assistant_message(text, tool_names)`` is called synchronously from
+    the child's relay at every finished assistant message. The launcher of a
+    bounded child needs the answer itself, not just the job's settled
+    result: a cap may cancel the job between the answer message and the
+    settle, and the cancelled job's ``result_text`` is then empty (PR #3837
+    round 3: a ``VERDICT: PASS`` on the request after the cap was discarded).
+    The tool names say whether the message was an answer or another step;
+    ``stop_reason`` says whether it was FINISHED: a provider error mid-answer
+    still ends the message (``stop_reason="error"``) with its partial text,
+    which must never be read as an answer (PR #3837 round 3, M1).
+
+    ``tool_gate`` is asked before every one of the child's OWN tools runs
+    (host tools gate themselves); a string refuses the call with that text as
+    the tool result. A bounded launcher uses it to give the same "answer now"
+    cue on its last request whichever tool the child reaches for, instead of
+    cancelling a child that was never warned (round 3, m1).
+    """
+
+    ceiling: frozenset[str] | None = None
+    host_tools: tuple["AgentTool", ...] = ()
+    readonly_shell: bool = False
+    on_assistant_message: Callable[[str, tuple[str, ...], str | None], None] | None = None
+    tool_gate: Callable[[], str | None] | None = None
+
+    @property
+    def host_tool_names(self) -> frozenset[str]:
+        return frozenset(tool.name for tool in self.host_tools)
+
+    def declaration(self, parent_declared: "frozenset[str] | None") -> "frozenset[str] | None":
+        """The child's first declaration, or ``None`` to inherit as before."""
+
+        if self.ceiling is None:
+            if parent_declared is None or not self.host_tools:
+                return parent_declared
+            return frozenset(parent_declared) | self.host_tool_names
+        base = frozenset(self.ceiling)
+        if parent_declared is not None:
+            base &= frozenset(parent_declared)
+        return base | self.host_tool_names
 
 
 def is_readonly_shell_role(*names: "str | None") -> bool:
@@ -1052,6 +1129,7 @@ async def _readonly_shell_root(
     profile: "AgentProfile | None",
     parent_session: "Session",
     session_dir: "Path",
+    surface: "ChildSurface | None" = None,
 ) -> "tuple[bool, str | None]":
     """Whether this child is write-confined, and its shell root if it may HAVE one.
 
@@ -1079,6 +1157,9 @@ async def _readonly_shell_root(
 
     confined = (
         is_readonly_shell_role(agent, profile.name if profile is not None else None)
+        # A harness launch's own confinement (``ChildSurface``), keyed on the
+        # launch so no same-named registry role inherits it.
+        or bool(surface is not None and surface.readonly_shell)
         or bool(getattr(parent_session, "_shell_write_root", None))
         or bool(getattr(parent_session, "_readonly_shell", False))
     )
@@ -1113,6 +1194,28 @@ def readonly_shell_floor_names(
     if shell_root is not None and "bash" not in floored:
         floored = (*floored, "bash")
     return floored
+
+
+def _gated_tool(tool: "AgentTool", gate: Callable[[], str | None]) -> "AgentTool":
+    """``tool`` refusing (``is_error``, the gate's text) whenever ``gate()``
+    returns a string; see :attr:`ChildSurface.tool_gate`."""
+
+    inner = tool.execute
+
+    async def execute(  # type: ignore[no-untyped-def]
+        tool_call_id, args, signal=None, on_update=None, context: Any = None
+    ):
+        refusal = gate()
+        if refusal is not None:
+            return ToolResult(
+                tool_call_id=tool_call_id,
+                tool_name=tool.name,
+                content=[TextContent(text=refusal)],
+                is_error=True,
+            )
+        return await inner(tool_call_id, args, signal, on_update, context)
+
+    return tool.model_copy(update={"execute": execute})
 
 
 def _with_readonly_shell_floor(
@@ -1673,6 +1776,9 @@ def run_subagent(
     restricted: bool = False,
     inherited_model: ModelSpec | None = None,
     target: LaunchTarget | None = None,
+    profile_override: "AgentProfile | None" = None,
+    surface: ChildSurface | None = None,
+    announce: bool = True,
 ) -> str:
     """Register one child-session run as a background job; return the job id.
 
@@ -1708,6 +1814,16 @@ def run_subagent(
     ``model_spec`` because it is not a pin: ``owns_model`` stays False and a
     failure is not described as a pinned model's. ``None`` means the child
     inherits ``parent_session``'s own model, as on every launch.
+
+    The last three exist for a HARNESS-launched child (``Session
+    .verify_completion``), never the ``task`` tool. ``profile_override`` is a
+    code-defined role used verbatim: no registry lookup (an operator row of
+    the same name cannot widen it, and an unresolvable name cannot degrade it
+    into a full child) and no team stamping (the check is not a team member,
+    and its prompt must hold only what the launcher put in it). ``surface`` is
+    the :class:`ChildSurface` bound. ``announce=False`` marks the job consumed
+    at registration, so its result is never delivered into the parent's
+    conversation: the launcher awaits it and decides what the parent sees.
     """
     if target is None:
         # Every launch resolves its team and depth, including a direct caller
@@ -1719,7 +1835,10 @@ def run_subagent(
         # roster name, a different case), so the row says what it is and a
         # resume re-enters the team path (BEN-7-D2).
         agent = f"{TEAM_LAUNCH_PREFIX}{target.team.name}"
-    effective_prompt, profile = _effective_prompt(prompt, agent, parent_session, target)
+    if profile_override is not None:
+        effective_prompt, profile = profile_override.preamble + prompt, profile_override
+    else:
+        effective_prompt, profile = _effective_prompt(prompt, agent, parent_session, target)
     queued = jobs_manager.at_capacity()
     job_id = jobs_manager.register(
         "task",
@@ -1737,9 +1856,14 @@ def run_subagent(
             restricted=restricted,
             inherited_model=inherited_model,
             target=target,
+            surface=surface,
         ),
         queued=queued,
     )
+    if not announce:
+        # Before the runner can settle it: a delivery that raced this line
+        # would inject the result the launcher is about to interpret itself.
+        jobs_manager.mark_consumed(job_id)
     job = jobs_manager.get(job_id)
     launch_message_id = f"subagent-launch:{job_id}"
     if job is not None:
@@ -2173,6 +2297,7 @@ def _make_runner(
     restricted: bool = False,
     inherited_model: ModelSpec | None = None,
     target: LaunchTarget | None = None,
+    surface: ChildSurface | None = None,
 ) -> Callable[[str, Any, Callable[[str], None]], Awaitable[str | None]]:
     """Build the JobRunFn for one child run (closure over its launch args)."""
     # The parent seam is private-attribute access on purpose: this module is
@@ -2230,6 +2355,7 @@ def _make_runner(
                 restricted=restricted,
                 target=target,
                 profile_lineage=profile_lineage,
+                surface=surface,
             )
             try:
                 interval = float(os.environ.get("LOCAL_OPERATOR_SUBAGENT_WIP_INTERVAL_S", "30"))
@@ -2443,6 +2569,9 @@ def _make_runner(
                     parent_session.jobs,
                     comms,
                     on_tool_end=on_tool_end,
+                    on_assistant_message=(
+                        surface.on_assistant_message if surface is not None else None
+                    ),
                 )
             )
             bridge = asyncio.create_task(_abort_bridge(signal, child))
@@ -3129,6 +3258,7 @@ def _make_relay(
     owner_jobs: Any = None,
     comms: Any = None,
     on_tool_end: Callable[[str, str, bool], Awaitable[None]] | None = None,
+    on_assistant_message: Callable[[str, tuple[str, ...], str | None], None] | None = None,
 ) -> Callable[[AgentEvent], Awaitable[None]]:
     """The child-stream handler: trajectory + throttled parent relay.
 
@@ -3319,6 +3449,15 @@ def _make_relay(
             if isinstance(message, Message) and message.role == "assistant":
                 # Capture the last assistant text as the job's result.
                 final["text"] = message.text
+                if on_assistant_message is not None:
+                    # A launcher's observer (``ChildSurface``) must not break
+                    # the relay that settles the job it is observing.
+                    with contextlib.suppress(Exception):
+                        on_assistant_message(
+                            message.text or "",
+                            tuple(call.name for call in message.tool_calls),
+                            message.stop_reason,
+                        )
                 _accumulate_usage(job, message.usage)
                 note_usage_changed = getattr(owner_jobs, "note_usage_changed", None)
                 if callable(note_usage_changed):
@@ -3876,6 +4015,7 @@ async def _build_child_session(
     restricted: bool = False,
     target: LaunchTarget | None = None,
     profile_lineage: tuple[bool, bool] | None = None,
+    surface: ChildSurface | None = None,
 ) -> "Session":
     """Transfer child resource ownership only after construction succeeds.
 
@@ -3898,6 +4038,7 @@ async def _build_child_session(
             target=target,
             cleanup=cleanup,
             profile_lineage=profile_lineage,
+            surface=surface,
         )
     except BaseException:
         await _settle_child_cleanup(asyncio.create_task(cleanup.aclose()))
@@ -4121,6 +4262,7 @@ async def _construct_child_session(
     cleanup: contextlib.AsyncExitStack,
     target: LaunchTarget | None = None,
     profile_lineage: tuple[bool, bool] | None = None,
+    surface: ChildSurface | None = None,
 ) -> "Session":
     """Compose the child Session directly (see module docstring for why the
     factory is not reused, and for the full inherit/do-not-inherit list).
@@ -4294,7 +4436,11 @@ async def _construct_child_session(
     # ``read`` approval tier, and the child ``Session`` below must carry the
     # SAME root so the executor wraps what the schema promised.
     readonly_shell, shell_write_root = await _readonly_shell_root(
-        agent=agent, profile=profile, parent_session=parent_session, session_dir=session_dir
+        agent=agent,
+        profile=profile,
+        parent_session=parent_session,
+        session_dir=session_dir,
+        surface=surface,
     )
     tool_context = ToolContext(
         team_id=target.team_lineage[-1] if target and target.team_lineage else "",
@@ -4428,6 +4574,20 @@ async def _construct_child_session(
     # resolver refuses to activate anything new.
     if mcp is not None:
         tools = tools + mcp.tools
+    if surface is not None and surface.host_tools:
+        # Last, after every allowlist and spare above: these are the embedder's
+        # own tools for this one child (see ``ChildSurface``), and the declaration
+        # below names them so no later inventory write drops them.
+        present_names = {tool.name for tool in tools}
+        tools = list(tools) + [t for t in surface.host_tools if t.name not in present_names]
+    if surface is not None and surface.tool_gate is not None:
+        # After every addition above, so no own tool escapes the gate; the
+        # host tools are skipped because their wrapper already asks it.
+        host_names = surface.host_tool_names
+        tools = [
+            tool if tool.name in host_names else _gated_tool(tool, surface.tool_gate)
+            for tool in tools
+        ]
 
     parent_provider = getattr(parent_session, "_system_blocks_provider", None)
     repo_guidance = getattr(parent_provider, "repo_guidance", "")
@@ -4886,6 +5046,12 @@ async def _construct_child_session(
     # false one hop down. Read the same way, and ``None`` for a parent that
     # declared no scope means "every op", exactly as it does on the parent.
     declared = getattr(parent_session, "_declared_tools", None)
+    if surface is not None:
+        # The harness bound narrows (never widens) whatever the parent declared,
+        # and is this child's FIRST declaration, so ``set_tool_inventory``'s
+        # one-way rule then holds it for the child's life (``ChildSurface``).
+        bounded = surface.declaration(declared)
+        declared = tuple(sorted(bounded)) if bounded is not None else None
     if declared is not None and hasattr(child, "set_tool_inventory"):
         child.set_tool_inventory(
             declared,
