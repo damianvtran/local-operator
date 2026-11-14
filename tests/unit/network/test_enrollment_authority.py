@@ -692,3 +692,128 @@ def test_verify_accepts_the_non_gating_skills_row(skills_ok):
         }
     )
     assert terminal["equipment_warnings"] == expected
+
+
+def _verify_report(*extra: dict[str, Any]) -> dict[str, Any]:
+    """The minimal report verify accepts (reachability + build + operator) plus ``extra``."""
+    return {
+        "ok": False,
+        "identity_present": True,
+        "checks": [
+            {
+                "check": "reachability",
+                "class": "admission",
+                "device_id": "d_target",
+                "ok": True,
+                "observed": {"outcome": "connected"},
+            },
+            {
+                "check": "readiness",
+                "class": "admission",
+                "device_id": "d_target",
+                "ok": True,
+                "capability": "build",
+                "source": "peer",
+            },
+            {
+                "check": "readiness",
+                "class": "equipment",
+                "device_id": "d_target",
+                "ok": True,
+                "capability": "operator_authority",
+                "source": "peer",
+            },
+            *extra,
+        ],
+    }
+
+
+def _row(capability: str, *, ok: bool, code: str = "", device: str = "d_target") -> dict[str, Any]:
+    return {
+        "check": "readiness",
+        "class": "equipment",
+        "device_id": device,
+        "ok": ok,
+        "capability": capability,
+        "source": "peer",
+        "code": code,
+    }
+
+
+#: Rows readiness gained after the hand-kept enrollment allowlist was written,
+#: with the code each emits when it fails. Any peer reporting one used to fail
+#: verify with "The network enrollment authority is invalid".
+_LATER_ROWS = (
+    ("custom_instructions", "kept_own"),
+    ("model_switch", "session_scoped_share"),
+    ("subagent_tiers", "kept_own"),
+)
+
+
+def test_verify_and_receipt_accept_every_later_readiness_row():
+    from local_operator.network import readiness
+
+    extra = []
+    for capability, code in _LATER_ROWS:
+        extra += [
+            _row(capability, ok=True),
+            _row(capability, ok=False, code=code),
+            # ``ready`` reports every peer, not only the one enrolling.
+            _row(capability, ok=False, code=code, device="d_other_peer"),
+        ]
+    warnings = e.ready_evidence(_verify_report(*extra), device_id="d_target", network_id="n")
+    # Only the TARGET's failed rows are warnings; none of them is evidence.
+    assert warnings == [{"capability": c, "code": code} for c, code in _LATER_ROWS]
+    terminal = e.public_report(
+        {
+            "enrollment_verified": True,
+            "ready_ok": False,
+            "task_ready": False,
+            "equipment_warnings": warnings,
+        }
+    )
+    assert terminal["equipment_warnings"] == warnings
+    # Every code those rows emit is a named readiness constant (the receipt's rule).
+    codes = {v for k, v in vars(readiness).items() if k.startswith("CODE_")}
+    assert {code for _, code in _LATER_ROWS} <= codes
+
+
+def test_every_readiness_capability_is_admitted_by_enrollment():
+    """Guard: a new readiness row must never break enrollment verify again."""
+    from pathlib import Path
+
+    from local_operator.network import readiness
+
+    constants = {
+        value
+        for key, value in vars(readiness).items()
+        if key.startswith("CAPABILITY_") and isinstance(value, str)
+    }
+    assert constants <= e.enrollment_capabilities()
+    assert readiness.NON_GATING_EQUIPMENT <= e.enrollment_capabilities()
+    assert set(readiness.PEER_SIDE_CHECKS) <= e.enrollment_capabilities()
+    assert e.EVIDENCE_CAPABILITIES <= e.enrollment_capabilities()
+    # The derivation only sees constants, so a row spelled as a literal would
+    # slip past it (``selected_model_credential`` was one): none may remain.
+    source = Path(readiness.__file__).read_text(encoding="utf-8")
+    assert 'capability="' not in source
+    # Likewise the receipt admits only ``CODE_*`` values: no literal failure code.
+    import re
+
+    assert re.findall(r'\bcode="[a-z_]+"', source) == []
+
+
+def test_an_unknown_capability_is_still_refused():
+    unknown = _row("not_a_readiness_row", ok=False, code="")
+    with pytest.raises(MeshRefusal):
+        e.ready_evidence(_verify_report(unknown), device_id="d_target", network_id="n")
+    for capability in ("not_a_readiness_row", "build", "operator_authority"):
+        with pytest.raises(MeshRefusal):
+            e.public_report(
+                {
+                    "enrollment_verified": True,
+                    "ready_ok": False,
+                    "task_ready": False,
+                    "equipment_warnings": [{"capability": capability, "code": ""}],
+                }
+            )

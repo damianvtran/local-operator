@@ -1,8 +1,8 @@
 """Who may AUTHOR a mirrored setting on a mesh peer: the operator's own device.
 
 WHY THIS EXISTS (PR #3905 review round 1, M1). Settings mirrored over the
-definitions sync (failover routing here; subagent tiers in PR #3869 follow the same
-mirror pattern) must flow ONE way: from the operator's device to the nodes it
+definitions sync (failover routing here, and the subagent model tiers row in
+``definitions``, PR #3869) must flow ONE way: from the operator's device to the nodes it
 hands work to. An admin capability does not say which way that is. The operator
 pairs their own machines as ``admin`` in both directions, so "may write
 definitions on me" holds node→head as much as head→node. Gating on it alone let a
