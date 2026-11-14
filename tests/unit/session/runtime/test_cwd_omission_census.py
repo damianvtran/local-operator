@@ -31,6 +31,10 @@ SAFE_DEFAULTS = {
         "resolves a write/edit path exactly as the file tools do (base or process cwd) "
         "to refuse evidence writes; never a spawn cwd"
     ),
+    # Cleanup follow-on (PR 3992): HOME only rewrites a leading ~ before regexes are built.
+    ("guardrails/check.py", "credential_path_masks"): (
+        "HOME expands ~ in credential path values to build redaction masks; never a spawn cwd"
+    ),
     ("guardrails/provenance.py", "plan_creations"): (
         "HOME is a protected-path root for deciding what may be recorded as created"
     ),
