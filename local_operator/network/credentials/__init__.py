@@ -433,6 +433,10 @@ def _stop_slice(server: RelayServer) -> None:
 
     owner_mod.stop_broker_for_relay(server)
     sync_mod.stop_engine_for_relay(server)
+    # A pending renew nudge must not fire into a relay that is going away.
+    from local_operator.network.credentials import renew_push
+
+    renew_push.stop(server)
 
 
 def install(server: RelayServer) -> None:
@@ -464,6 +468,11 @@ def install(server: RelayServer) -> None:
     from local_operator.network.credentials import share_push as share_push_mod
 
     share_push_mod.install()
+    # THE RENEW-ON-RECONNECT WAKE CHECK rides the same tick (``renew_push.wake_step``);
+    # its link-up half is the ``on_link_up`` hook registered below.
+    from local_operator.network.credentials import renew_push as renew_push_mod
+
+    renew_push_mod.install()
     handler = owner_mod.MeshCredentialBroker.relay_handler(server)
     ops = _LocalOps(server)
     server.register_ops(
@@ -482,4 +491,7 @@ def install(server: RelayServer) -> None:
         # where the ops (and therefore the lazily built owners) first become
         # reachable from a relay.
         on_stop={"mesh-credentials": lambda: _stop_slice(server)},
+        # An owner's return (start, wake, re-link) renews what it lends that member,
+        # so a daily owner login restarts an idle node's offline hold.
+        on_link_up={"mesh-credentials-renew": lambda link: renew_push_mod.on_link_up(server, link)},
     )

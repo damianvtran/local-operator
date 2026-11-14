@@ -427,6 +427,13 @@ async def test_the_served_session_band_stays_ok_while_held_and_blocks_at_lease_e
 
     pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="fixture-held-band")
     monkeypatch.setattr(serving, "_switch_executor_pool", pool)
+    # THIS SESSION'S OWN HOLD is what the band is pinned against. The owner's
+    # link-up renewal (``renew_push``) lands a relay grant a moment after this
+    # borrow and would rightly extend the hold past ``_hold_end(grant)``; its own
+    # contract is pinned in ``test_credentials_renew_on_reconnect``.
+    from local_operator.network.credentials import renew_push
+
+    monkeypatch.setattr(renew_push, "on_link_up", lambda *_a, **_k: None)
     from tests.unit.network.test_owner_return_clears_access_band import _band, _settle
     from tests.unit.session.runtime.test_serving import _AccessSession
 
