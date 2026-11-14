@@ -416,3 +416,81 @@ def test_glob_of_only_own_detached_trees_is_low(home: Path, repo: Path) -> None:
     _attr3880(home, repo)
     risk, reason = _rank(home, "rm -rf ~/local-operator/.worktrees/attr*")
     assert risk is Risk.LOW, reason
+
+
+# -- rebase onto #3835 (foreign-ledger rows): both rules hold together --------
+
+
+@pytest.mark.parametrize("command", FIELD_COMMANDS)
+def test_own_scratch_tree_holding_another_sessions_dir_is_high(
+    home: Path, repo: Path, command: str
+) -> None:
+    """Stricter wins: #3835 ranks a target holding foreign live work HIGH.
+
+    The scratch waiver must not lower it: another session's directory inside
+    this session's own detached tree would be deleted with it. What keeps it
+    HIGH is ``owned_record``'s ``_foreign_inside`` bar (any other owner's row
+    at or under the target, live or not, related or not), which is stricter
+    than ``ForeignCreations``' "holds" rule, so the waiver is never reached.
+    """
+    wt = _attr3880(home, repo)
+    _run_recorded(home, f"mkdir {wt}/theirs", sid=S2)
+    assert prov.owned_record(str(wt), S) is None
+    risk, reason = _rank(home, command)
+    assert risk is Risk.HIGH, (command, reason)
+    assert "own-created detached worktree" not in reason, reason
+
+
+def _bump_worktree_dir_stamp(wt: Path) -> None:
+    """Simulate Linux: the worktree DIR's ctime stamp moved; its ``.git`` row did not."""
+    import sqlite3
+
+    conn = sqlite3.connect(prov.ledger_path())
+    try:
+        conn.execute(
+            "UPDATE created SET stamp = stamp + 1 WHERE path = ? AND kind = 'worktree'",
+            (os.path.realpath(wt),),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def test_foreign_match_keeps_own_worktree_nearest_through_git_file(home: Path, repo: Path) -> None:
+    """Nearest owner (#3835) uses the same ``.git`` witness as ``owned_record``.
+
+    Another session made the pool directory; this session's detached tree
+    sits inside it. Once the tree's dir stamp moves (Linux ctime), its own row
+    must still be the nearest live owner, or the broader foreign pool row
+    makes this session's own file read as another session's work.
+    """
+    _run_recorded(home, "cd ~/local-operator && mkdir .worktrees/pool", sid=S2)
+    wt = _attr3880(home, repo, name="pool/wt")
+    _bump_worktree_dir_stamp(wt)
+    assert prov.owned_record(str(wt), S) is not None
+    foreign = prov.ForeignCreations(S)
+    try:
+        assert foreign.match([str(wt / "a.py")]) is None
+        hit = foreign.match([str(repo / ".worktrees" / "pool")])
+        assert hit is not None and hit.owner == S2  # the pool itself stays foreign
+    finally:
+        foreign.close()
+
+
+def test_foreign_match_without_git_file_witness_falls_to_the_foreign_pool(
+    home: Path, repo: Path
+) -> None:
+    """Negative control: a new ``.git`` inode generation is no witness."""
+    _run_recorded(home, "cd ~/local-operator && mkdir .worktrees/pool", sid=S2)
+    wt = _attr3880(home, repo, name="pool/wt")
+    _bump_worktree_dir_stamp(wt)
+    gitfile = wt / ".git"
+    body = gitfile.read_text()
+    gitfile.unlink()
+    gitfile.write_text(body)
+    foreign = prov.ForeignCreations(S)
+    try:
+        hit = foreign.match([str(wt / "a.py")])
+        assert hit is not None and hit.owner == S2 and hit.relation == "inside"
+    finally:
+        foreign.close()
