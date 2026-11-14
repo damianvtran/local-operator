@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import errno
 import json
 import os
+import stat
 import subprocess
 import sys
 from concurrent.futures import ThreadPoolExecutor
@@ -98,6 +100,49 @@ async def test_rpc_failure_keeps_pin_and_rule(tmp_path, backend):
     second = await request(ctx, "https://second.trycloudflare.com")
     assert second.details["code"] == "preview_origin_changed"
     assert backend.await_count == 1
+
+
+@pytest.mark.parametrize("failed_kind", ["file", "directory"])
+@pytest.mark.asyncio
+async def test_repeated_sync_failure_never_authorizes_rpc(
+    tmp_path, backend, monkeypatch, failed_kind
+):
+    from local_operator.browser_bridge import preview_origin as policy
+
+    root = session(tmp_path, "root")
+    child = session(tmp_path, "child", "root")
+    real_fsync = os.fsync
+    failed_syncs = []
+
+    def fail_sync(fd):
+        kind = "directory" if stat.S_ISDIR(os.fstat(fd).st_mode) else "file"
+        if kind == failed_kind:
+            failed_syncs.append(kind)
+            raise OSError(errno.EIO, "injected persistent sync failure")
+        return real_fsync(fd)
+
+    monkeypatch.setattr(policy.os, "fsync", fail_sync)
+    pin_path = Path(root.session_dir) / "browser-preview-origin.json"
+    pin_bytes = None
+    for ctx in (root, root, child):
+        result = await request(ctx, "https://first.trycloudflare.com")
+        assert result.details["code"] == "preview_origin_unavailable"
+        assert result.details["approval_request_sent"] is False
+        backend.assert_not_awaited()
+        if pin_bytes is None:
+            pin_bytes = pin_path.read_bytes()
+        assert pin_path.read_bytes() == pin_bytes
+    assert failed_syncs == [failed_kind] * 3
+    assert not (Path(child.session_dir) / pin_path.name).exists()
+
+    # Clearing the fault commits the same identity, not a replacement pin.
+    monkeypatch.setattr(policy.os, "fsync", real_fsync)
+    assert not (await request(child, "https://first.trycloudflare.com")).is_error
+    assert backend.await_count == 1
+    changed = await request(root, "https://second.trycloudflare.com")
+    assert changed.details["code"] == "preview_origin_changed"
+    assert backend.await_count == 1
+    assert pin_path.read_bytes() == pin_bytes
 
 
 @pytest.mark.parametrize(
@@ -217,9 +262,7 @@ def test_atomic_competing_threads_and_persisted_process_resume(tmp_path):
         check=True,
     )
     assert result.stdout.strip() == f"{winner} True"
-    assert (
-        os.stat(Path(ctx.session_dir) / "browser-preview-origin.json").st_mode & 0o777 == 0o600
-    )
+    assert os.stat(Path(ctx.session_dir) / "browser-preview-origin.json").st_mode & 0o777 == 0o600
 
 
 @pytest.mark.asyncio
@@ -270,8 +313,7 @@ async def test_second_browser_alias_has_zero_rpcs(tmp_path, backend, url):
 def test_nontransitional_idna_and_nonquick_international_domains():
     assert quick_tunnel_origin("https://ß.trycloudflare.com")[0] == "xn--zca.trycloudflare.com"
     assert (
-        quick_tunnel_origin("https://xn--zca.trycloudflare.com")[0]
-        == "xn--zca.trycloudflare.com"
+        quick_tunnel_origin("https://xn--zca.trycloudflare.com")[0] == "xn--zca.trycloudflare.com"
     )
     assert quick_tunnel_origin("https://ss.trycloudflare.com")[0] == "ss.trycloudflare.com"
     for url in ("https://bücher.example", "https://ß.example", "https://example。com"):
@@ -280,8 +322,8 @@ def test_nontransitional_idna_and_nonquick_international_domains():
 
 @pytest.mark.asyncio
 async def test_registry_survives_missing_creator_marker(tmp_path, backend):
-    from local_operator.resume import mark_session_origin
     from local_operator.guardrails.provenance import read_lineage
+    from local_operator.resume import mark_session_origin
 
     store = tmp_path / "sessions"
     root = session(store, "familyroot")
@@ -409,7 +451,10 @@ def test_competing_processes_share_first_durable_pin(tmp_path):
     processes = [
         subprocess.Popen(
             [sys.executable, "-c", code, directory, host],
-            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
         )
         for directory, host in (
             (ctx.session_dir, "a.trycloudflare.com"),

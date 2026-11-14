@@ -137,10 +137,10 @@ def _family_root(session_dir: Path, ancestors: tuple[str, ...] = ()) -> Iterator
                     yield fd
                     with _directory(store) as verify_store:
                         check = os.stat(current, dir_fd=verify_store, follow_symlinks=False)
-                        if (
-                            _identity(verify_store) != _identity(store_fd)
-                            or (check.st_dev, check.st_ino) != _identity(fd)
-                        ):
+                        if _identity(verify_store) != _identity(store_fd) or (
+                            check.st_dev,
+                            check.st_ino,
+                        ) != _identity(fd):
                             raise ValueError("session ancestry changed")
                     return
                 current = known.pop()
@@ -191,8 +191,11 @@ def pin_quick_tunnel(
                 row = {"host": host, "origin": origin}
                 fh.write(json.dumps(row))
                 fh.flush()
-                os.fsync(fh.fileno())
-                os.fsync(root_fd)
+            # Nonempty JSON is not proof a previous writer committed it: either
+            # sync may have failed after the write. Retry both while locked on
+            # every access so an unsynced pin can never authorize a later RPC.
+            os.fsync(fh.fileno())
+            os.fsync(root_fd)
             check = os.stat("browser-preview-origin.json", dir_fd=root_fd, follow_symlinks=False)
             if (check.st_dev, check.st_ino) != _identity(fh.fileno()):
                 raise ValueError("preview pin changed during access")
