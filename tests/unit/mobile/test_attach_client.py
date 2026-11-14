@@ -2053,12 +2053,19 @@ async def test_a_reset_after_a_cause_bearing_bind_failed_keeps_the_cause() -> No
     client = AttachClient(lambda p: None, disconnected.append)
     reader = asyncio.StreamReader()
     client._reader = reader
+    # ``bind_failed`` records its reason in a pump local, so nothing on the
+    # client observes its consumption. A sentinel ``aside_delta`` queued behind
+    # it does: the pump reads frames in order, so the sentinel's sink firing
+    # proves ``bind_failed`` was already consumed (the delta leaves ``reason``
+    # untouched, as the no-announcement control below shows).
+    consumed: list[str] = []
+    client._delta_sinks[1] = consumed.append
     pump = asyncio.create_task(client._pump())
 
     _feed(reader, {"op": "bind_failed", "message": "profile store locked"})
+    _feed(reader, {"op": "aside_delta", "req": 1, "data": {"delta": "sentinel"}})
     # The reset lands only after the frame has been consumed.
-    await _wait_until(lambda: reader.at_eof() or not reader._buffer)
-    await asyncio.sleep(0)
+    await _wait_until(lambda: consumed == ["sentinel"])
     reader.set_exception(ConnectionResetError("peer reset"))
     await asyncio.wait_for(pump, timeout=5)
 
