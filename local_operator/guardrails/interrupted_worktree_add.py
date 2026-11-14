@@ -114,15 +114,16 @@ class SpawnSnapshot:
        in PR #3980 round 1). With one thread the leader's counters are the
        process's, and it cannot grow a thread without running itself;
     3. at settle the pid has the same start time (same process, not a reused
-       pid) and the same context-switch total, and it was not ``State: R`` at
-       either read. ``State: S`` only says "declared asleep": a task sets it
-       just BEFORE calling ``schedule()``, so it is not proof of being off
-       the CPU. What proves it did not run is the count: the kernel bumps a
-       task's count each time it is switched OUT (``__schedule``, prev !=
-       next), so a process that ran after the snapshot has been switched out
-       since — and changed the count — unless it is still on the CPU at the
-       settle's read. ``State`` is printed before the counts in one read, so
-       a wake-up between them cannot pass.
+       pid) and the same schedstat run count (``ProcMark.runs``), and the
+       same context-switch total, and it was not ``State: R`` at either read.
+       The run count is the proof that it did not run: the kernel bumps it
+       at switch-IN, before the task executes an instruction, and each mark
+       reads it before and after ``status`` and must see it unchanged. A
+       process that was off the CPU when the snapshot read it and has run
+       since has been switched in since, and so changed it. ``State: S``
+       alone proves nothing (a task sets it just BEFORE ``schedule()``), nor
+       does the switch total (bumped only at switch-OUT, so it lags a task
+       that has just run): PR #3980 round 2 reproduced both lags.
 
     Anything else (a pid absent from the snapshot, a changed counter, a
     second thread, a ``State: R`` read, an unreadable mark, a target that
@@ -130,10 +131,13 @@ class SpawnSnapshot:
     actor renaming or bind-mounting an existing directory — one a hidden
     process already sits in — onto the absent target path during the call,
     which needs no ``chdir`` by that process (step 1 assumes the tree's
-    directories are new); (b) a process that ran during the call and is
-    still on the CPU, caught at the settle's single read between declaring
-    sleep and being switched out — one read cannot tell "about to sleep"
-    from "asleep". The remaining window — a process that ``chdir``s in after
+    directories are new); (b) a process that held its CPU without a single
+    switch in or out from before the snapshot until after the settle, yet
+    read ``State: S`` at both: each read caught in the instant between
+    declaring sleep and either sleeping or cancelling it, with the first
+    cancelled. The ``State: R`` checks do not catch it (it reads ``S``); an
+    unchanged run count means it never left the CPU for the whole call. The
+    remaining window — a process that ``chdir``s in after
     the settle's inventory — is the one the inventory always had.
     """
 
@@ -154,6 +158,7 @@ class SpawnSnapshot:
             and not before.on_cpu
             and not now.on_cpu
             and now.start == before.start
+            and now.runs == before.runs
             and now.switches == before.switches
         )
 
@@ -178,7 +183,7 @@ def snapshot_before_spawn(
     ``None`` (no proof available) unless this is a Linux ``/proc`` host and
     the command names a ``worktree`` add target that does not exist yet. Only
     same-uid pids whose cwd is hidden get a mark, so the cost is one
-    ``/proc`` scan plus two small reads per hidden pid.
+    ``/proc`` scan plus four small reads per hidden pid.
     """
     if os.name != "posix" or "worktree" not in command or "--lock" in command:
         return None

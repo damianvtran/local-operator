@@ -978,8 +978,20 @@ class ProcMark(NamedTuple):
     ``start`` (``/proc/<pid>/stat`` field 22, clock ticks since boot) pins the
     process identity across pid reuse; ``switches`` is the sum of its
     voluntary and involuntary context switches; ``on_cpu`` is ``State: R``;
-    ``threads`` is ``Threads:``. Both files stay readable for a non-dumpable
-    process whose cwd is not.
+    ``threads`` is ``Threads:``; ``runs`` is ``/proc/<pid>/schedstat`` field
+    3 (``sched_info.pcount``), the number of times it has been switched IN.
+    All three files stay readable for a non-dumpable process whose cwd is not
+    (``(sd-pam)`` reads ``204612 0 1``; measured on PR #3980 round 2).
+
+    WHY ``runs`` as well as ``switches``: the switch counts move when a task
+    is switched OUT, and ``State: S`` shows as soon as a task declares sleep,
+    before ``schedule()`` switches it out — so a process that has just run
+    (and ``chdir``-ed) reads ``S`` with its old counts for a moment (PR #3980
+    round 2 reproduced 49/15,000 and 26/150,000 false clears). ``pcount`` is
+    bumped at switch-IN (``sched_info_arrive``; v6.18 ``kernel/sched/stats.h``)
+    before the task executes anything, so it has already moved by the time
+    the task could run a ``chdir``. Field 1 (``sum_exec_runtime``) is updated
+    only on a tick or at dequeue, lags the same way, and is not used.
 
     ``State`` and both switch counts belong to the thread-group LEADER only,
     while the cwd is shared by every thread (``CLONE_FS``): a mark speaks for
@@ -991,21 +1003,39 @@ class ProcMark(NamedTuple):
     switches: int
     on_cpu: bool
     threads: int
+    runs: int
 
 
 def _proc_mark(pid: int) -> ProcMark | None:
-    """The :class:`ProcMark` of ``pid`` now; ``None`` if it cannot be read.
+    """The :class:`ProcMark` of ``pid`` now; ``None`` if it cannot be proved.
 
-    ORDER matters. ``status`` prints ``State`` and ``Threads`` before the
-    switch counts, all from one read, and ``stat`` (the start time) is read
-    last: a pid reused between the two reads then shows a different start
-    time, which never matches a snapshot.
+    ORDER matters. ``schedstat`` is read before AND after ``status``, and the
+    mark exists only if both lines are identical: no switch-in happened while
+    ``status`` was read, so whichever side of a wake-up ``status`` landed on,
+    the bracketing ``runs`` covers it (a ``status`` caught between declaring
+    sleep and switching out comes after the switch-in that let it run, which
+    the first read or the settle's own reads already count). ``status``
+    prints ``State`` and ``Threads`` before the switch counts in one read.
+    ``stat`` (the start time) is read last: a pid reused before it then shows
+    a different start time, which never matches a snapshot.
+
+    ``None`` — no proof, so never cleared — when any file is unreadable or
+    malformed, the two ``schedstat`` lines differ, or ``runs`` is 0: a kernel
+    without ``CONFIG_SCHED_INFO`` prints ``0 0 0``, and a process that exists
+    has been switched in at least once.
     """
     try:
+        with open(f"/proc/{pid}/schedstat", encoding="utf-8") as fh:
+            sched_first = fh.read()
         with open(f"/proc/{pid}/status", encoding="utf-8") as fh:
             status = fh.read()
+        with open(f"/proc/{pid}/schedstat", encoding="utf-8") as fh:
+            sched_last = fh.read()
         with open(f"/proc/{pid}/stat", encoding="utf-8") as fh:
             stat_line = fh.read()
+        runs = int(sched_first.split()[2])
+        if sched_first != sched_last or runs <= 0:
+            return None
         fields: dict[str, str] = {}
         for line in status.splitlines():
             key, _, value = line.partition(":")
@@ -1016,7 +1046,7 @@ def _proc_mark(pid: int) -> ProcMark | None:
             fields["nonvoluntary_ctxt_switches"]
         )
         return ProcMark(
-            start, switches, fields["State"].startswith("R"), int(fields["Threads"])
+            start, switches, fields["State"].startswith("R"), int(fields["Threads"]), runs
         )
     except (OSError, ValueError, KeyError, IndexError, UnicodeError):
         return None
