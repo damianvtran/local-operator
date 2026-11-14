@@ -3224,7 +3224,51 @@ class _Walker:
         operands, flags = _operands(args, frozenset({"-t", "--target-directory"}))
         if not (_has_short(flags, "s") or "--symbolic" in flags) or len(operands) < 2:
             return
-        link = operands[-1]
+        for link, pointee in self._loop_links(operands[-1], operands[0]):
+            self._ln_one(link, pointee, args, operands, flags)
+
+    def _loop_links(self, link: Expanded, pointee: Expanded) -> list[tuple[Expanded, Expanded]]:
+        """Every ``(link, pointee)`` pair a ``for`` body's ``ln -s`` makes, in loop order.
+
+        WHY (cleanup follow-on, item F). The body is walked once, with each
+        loop variable bound to its FIRST value, so ``for n in a b; do ln -sfn
+        ~/.local-operator ~/w/link-$n; done; rm -f ~/w/link-b/config.yml``
+        recorded only ``link-a``: the later ``rm`` through ``link-b`` was an
+        ordinary path (LOW) while the kernel deletes the state root's
+        ``config.yml``. Each iteration's link is fanned out with the same
+        ``_iterations``/``_fan_out`` machinery targets use, so every link is in
+        ``linked`` and, when literal, in ``link_targets`` (last iteration wins,
+        as in bash).
+
+        Fail closed, never ordinary: past ``_MAX_FOR_COMBINATIONS``, or when
+        the pointee names a loop variable the link does not (its value per
+        iteration is then not paired), only the first pair is recorded as a
+        link and the link's whole DIRECTORY joins ``linked``, so every later
+        target under it is opaque (HIGH, or CRITICAL by protected ancestry).
+        """
+        pairs = [(link, pointee)]
+        loop_refs = {r[0] for r in link.refs if r[0] in self.for_lists}
+        pointee_refs = {r[0] for r in pointee.refs if r[0] in self.for_lists}
+        if not loop_refs and not pointee_refs:
+            return pairs
+        iterations = self._iterations(link) if loop_refs else None
+        if iterations is None or not pointee_refs <= loop_refs:
+            path, _ = _absolute(link.text, self.state.cwd)
+            if path is not None:
+                self.linked.add(os.path.dirname(path.rstrip("/")) or "/")
+            return pairs
+        pairs.extend((_fan_out(link, v), _fan_out(pointee, v)) for _roots, v in iterations)
+        return pairs
+
+    def _ln_one(
+        self,
+        link: Expanded,
+        pointee: Expanded,
+        args: list[Expanded],
+        operands: list[Expanded],
+        flags: list[str],
+    ) -> None:
+        """One ``ln -s`` link (one loop iteration's, see :meth:`_loop_links`)."""
         path, _ = _absolute(link.text, self.state.cwd)
         if path is not None:
             self.linked.add(path.rstrip("/"))
@@ -3251,7 +3295,7 @@ class _Walker:
         # path itself before storing, so this order invalidates the stale
         # target and keeps the new one.
         if len(operands) == 2:
-            self._record_link(link, operands[0], flags)
+            self._record_link(link, pointee, flags)
 
     def _find(self, args: list[Expanded]) -> None:
         roots: list[Expanded] = []
@@ -3658,13 +3702,7 @@ class _Walker:
         target = _target(exp, op, program, self.state)
         target.selected = selected
         self._unpin_relinked(target, exp.text)
-        if target.path is not None:
-            stripped = target.path.rstrip("/") or "/"
-            if any(stripped == ln or stripped.startswith(ln + "/") for ln in self.linked):
-                # S7: a symlink made earlier in this same command — its pointee
-                # is decided at run time.
-                target.opaque = True
-                target.opaque_contained = False
+        self._through_new_link(target)
         self.result.targets.append(target)
         # R6: a literal ``for`` list binds its variable to each value in turn.
         # Only the spans the word's own ``$VAR`` references filled are
@@ -3682,7 +3720,44 @@ class _Walker:
             extra = _target(fanned, op, program, self.state)
             extra.selected = selected
             self._unpin_relinked(extra, fanned.text)
+            # Each iteration's target can pass through a link this command
+            # made (item F): the S7 test applies per fanned target, not only
+            # to the first iteration's.
+            self._through_new_link(extra)
             self.result.targets.append(extra)
+
+    def _through_new_link(self, target: Target) -> None:
+        """S7: a target at or under a symlink an earlier part of THIS command made.
+
+        Its pointee is decided at run time, so the target is opaque — unless
+        every such link was made from a LITERAL target this command recorded
+        (``link_targets``) and the target lies strictly UNDER it: then the
+        kernel's landing is known and is ranked alongside the lexical path
+        (``Target.landings``; the worse reading wins), which is what lets
+        ``ln -sfn ~/.local-operator L; rm -f L/config.yml`` rank CRITICAL
+        instead of a generic opaque HIGH (item F). The link entry itself
+        (``rm -rf L/``) keeps the opaque reading: whether that follows the
+        link is platform behaviour, not something the landing walk models.
+        """
+        if target.path is None:
+            return
+        stripped = target.path.rstrip("/") or "/"
+        covering = [
+            ln for ln in self.linked if stripped == ln or stripped.startswith(ln.rstrip("/") + "/")
+        ]
+        if not covering:
+            return
+        known = (
+            target.raw_path is not None
+            and not target.landings
+            and all(stripped != ln and self._landing(ln) in self.link_targets for ln in covering)
+        )
+        landing = self._landing(target.raw_path) if known and target.raw_path else None
+        if landing is not None and landing != stripped:
+            target.landings = (landing,)
+            return
+        target.opaque = True
+        target.opaque_contained = False
 
     def _unpin_relinked(self, target: Target, text: str) -> None:
         """Mark ``target`` unpinned when a component before one of its ``..``
