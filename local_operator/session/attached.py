@@ -4980,9 +4980,42 @@ class AttachedSession:
         # reported as "could not start a runtime" and nothing ever starts the
         # successor: a refresh-cold viewer stayed disconnected until the next
         # keystroke (CI witness: #3823, job 131924458441). One re-engage, inside
-        # this bind's own budget, and only after a LEAVING answer — a record
-        # that vanished with no such answer keeps today's error.
+        # this bind's own budget.
+        #
+        # TWO TRIGGERS, because two retirement paths reach this window (QA r1
+        # Q1 on #3939):
+        #
+        # 1. A LEAVING answer. Only the DRAIN paths mark the record ``leaving``
+        #    (``RuntimeServer.note_leaving`` via ``_announce_retiring_on_loop``).
+        # 2. The UPDATE-WINDOW retirement of an idle owner (the witness's path,
+        #    ``process.py``'s ``announce("stale-build")`` then ``begin_retire``)
+        #    publishes ``updating`` and never ``leaving``, so its record answers
+        #    a plain ``runtime ready`` with nothing spawned. The evidence there
+        #    is the owner's own ``runtime-exit.json``: a ``retiring ...`` reason,
+        #    not ``requested``, covering the run this viewer was last bound to —
+        #    exactly :meth:`_lost_owner_retired_for_refresh`, the guard the
+        #    refresh path already acts on. It is read LAZILY, only once the
+        #    record has actually vanished with no lease holder.
+        #
+        # Why this and not the alternatives QA offered: publishing ``leaving``
+        # from the update window changes an owner-side protocol that every
+        # ``leaving`` reader (drain admission, surfaces, the engage itself)
+        # would then see on the ~1 s update handover; answering LEAVING for an
+        # ``updating`` record would mis-answer a window that ABORTS and keeps
+        # serving (``end_update``), since ``updating`` is published before the
+        # idle latch decides. Re-engaging after ANY no-spawn answer would
+        # silently restart a runtime the user just stopped, or one that
+        # crashed. Requiring the exit record keeps both of those on today's
+        # error: a stop writes ``requested=True`` and a crash writes nothing.
+        # A bind with no prior run (``_runtime_record`` is None) cannot match.
         reengage_pending = getattr(outcome, "detail", None) == LEAVING_DETAIL
+        # Trigger 2 is only a CANDIDATE until the record vanishes: a local
+        # owner found a live record and spawned nothing. A remote seam returns
+        # None, and its exit record is not on this machine anyway.
+        retired_candidate = (
+            not reengage_pending and outcome is not None and not getattr(outcome, "spawned", True)
+        )
+        retired_run = self._runtime_record
         # Re-checked AFTER the engage, which is the long await here (a
         # spawn plus up to ~2 s of construction). The TUI engages at mount
         # now, so `/resume` or `/new` typed in that first second disposes
@@ -5064,6 +5097,11 @@ class AttachedSession:
                 # candidate doomed to lose the race while telling the user their
                 # session has no runtime.
                 record = await asyncio.to_thread(dialable_owner_record, self._config_dir, owner)
+            if record is None and owner is None and retired_candidate:
+                # Spent here whatever the answer, so the exit record is read at
+                # most once per bind and the re-engage below stays single.
+                retired_candidate = False
+                reengage_pending = await self._lost_owner_retired_for_refresh(retired_run)
             if record is None and owner is None and reengage_pending:
                 # The retiring owner's unpublish (see ``reengage_pending``):
                 # no record and no lease holder, so this engage spawns the
