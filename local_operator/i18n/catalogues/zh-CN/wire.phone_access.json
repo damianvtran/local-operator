@@ -1,0 +1,6 @@
+{
+  "wire.phone_access.title": "手机访问",
+  "wire.phone_access.description": "这台电脑如何为手机应用保持其Radient隧道正常工作。更改将在下次登录时生效。",
+  "wire.phone_access.auto_setup.label": "登录后重新连接手机访问",
+  "wire.phone_access.auto_setup.help": "在已开通手机访问的电脑上登录Radient时，会在后台重新连接或修复其隧道。此操作绝不会激活计费或消耗点数；如有任何价格或点数不足，都会改为向你展示。"
+}

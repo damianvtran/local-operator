@@ -1,0 +1,85 @@
+{
+ "schema": 1,
+ "audit_id": "a2",
+ "audit_kind": "independent_translation_audit",
+ "locale": "ur",
+ "namespace": "mobile.setup",
+ "source_sha256": "0d245737d539f4d2fe54cf3a2c2174b0aa64820d2eb387e94ea16f65d1b487d7",
+ "target_sha256": "c838d9d3983006c4b33dd15d0294eb34f3dbee6cc7644f96bedf0ebfcce1f03c",
+ "round": 2,
+ "audit_date": "2026-11-14",
+ "key_count": 94,
+ "keys_audited": 94,
+ "keys_in_scope": 12,
+ "keys_new_in_scope": 8,
+ "keys_changed_in_scope": 4,
+ "scope_keys": [
+  "mobile.setup.disabled",
+  "mobile.setup.billing_lapsed",
+  "mobile.setup.reconnect",
+  "mobile.setup.network",
+  "mobile.setup.title_reconnect",
+  "mobile.setup.title_billing_lapsed",
+  "mobile.setup.title_disabled",
+  "mobile.setup.title_network",
+  "mobile.setup.title_radient_unavailable",
+  "mobile.setup.title_reconnecting",
+  "mobile.setup.action_add_credit",
+  "mobile.setup.action_open_console"
+ ],
+ "source_audit_revision": "7c0fc7bf22aade04f78c367c906374b73a1914d7",
+ "scope": "7c0fc7bf2..working tree (uncommitted #3945 round-1 remediation catalogue changes)",
+ "prior_audit": "i18n/audits/evidence/ur/mobile.setup/a1/record.json",
+ "pr": "https://github.com/damianvtran/local-operator/pull/3945 (round-1 remediation, branch fix/tunnel-remedies-auto-up)",
+ "translator": {
+  "agent": "i18n-translator subagent, Local Operator session c0c9e9803405 (#3945 round-1 remediation, uncommitted on 7c0fc7bf2); English source drafted by coder session 889b9f67edf5",
+  "model": "anthropic/claude-opus-5-5 (read from session c0c9e9803405 transcript metadata; not otherwise verified)",
+  "date": "2026-11-14"
+ },
+ "auditor": {
+  "agent": "i18n-auditor, independent `task` subagent, session dff33b90744d; neither the i18n-translator (c0c9e9803405) nor the English-drafting coder (889b9f67edf5); did not edit any value",
+  "session": "dff33b90744d",
+  "model": "anthropic/claude-opus-5-5",
+  "independent_from_translator_session": true,
+  "actual_model_source": "harness system prompt of session dff33b90744d (`Model: anthropic/claude-opus-5-5`); no provider fallback disclosed during the audit"
+ },
+ "input_hashes": {
+  "en": {
+   "path": "local_operator/i18n/catalogues/en/mobile.setup.json",
+   "sha256": "0d245737d539f4d2fe54cf3a2c2174b0aa64820d2eb387e94ea16f65d1b487d7"
+  },
+  "context": {
+   "path": "local_operator/i18n/catalogues/en/mobile.setup.context.json",
+   "sha256": "b1c0c11a269077507f7d22256f3874d7f5fd1a363f5c13f412014de70c7f038f"
+  },
+  "target": {
+   "path": "local_operator/i18n/catalogues/ur/mobile.setup.json",
+   "sha256": "c838d9d3983006c4b33dd15d0294eb34f3dbee6cc7644f96bedf0ebfcce1f03c"
+  },
+  "glossary": {
+   "path": "i18n/glossary.md",
+   "sha256": "a576d5a4b2718ba79a70a42600e3b6233ea28d716b1e2d996a208ac8dd7fabdb"
+  },
+  "style_guide": {
+   "path": "i18n/style-guides/ur.md",
+   "sha256": "7276e96210fe5f23fd82a39ae4cc0c88b2c1009d3a551d914efc3f61516eddc4"
+  }
+ },
+ "artifacts": {
+  "report.md": "014ce6d2d977b4ea62aef225aaf7b2f63ef56ba9771cea5365137720a3bff704",
+  "audit.log": "fa7d8efe96c02aafe7634e1a4a5bbc07585470214bb5fdf7daea79d97f941929"
+ },
+ "audit_notes_not_execution_log": "report.md is reasoning; audit.log is the captured stdout/stderr of the commands it lists (git rev-parse, git diff --stat, sha256sum, check.py --catalogues-only, mech.py, ledger.py history-sha). dryrun.log is the captured ledger.py append --dry-run output. mech.py is session-scratch tooling; its source is not retained here.",
+ "current_report_verdict": {
+  "status": "passed",
+  "unresolved_blocker_major_count": 0,
+  "finding_ids": [],
+  "findings_by_severity": {
+   "blocker": 0,
+   "major": 0,
+   "minor": 0,
+   "nit": 0
+  }
+ },
+ "staged_not_committed": true
+}

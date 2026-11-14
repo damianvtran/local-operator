@@ -2812,6 +2812,22 @@ class AuthStore:
             return
         if note:
             logger.info("%s (provider=%s)", note, provider)
+        if verified_login:
+            # AFTER the heal and re-arm, and only for a VERIFIED sign-in (a token
+            # refresh writes this row too, and must never start a setup run): the
+            # unattended no-spend setup brings back a tunnel that is merely
+            # suspended or half-installed. Skipped when the heal acted (it
+            # returned above: the connector is already restarting on the moved
+            # pin) and when the re-arm did, for the same reason. Every other
+            # guard — phone access wanted, no stop or park, the config switch,
+            # real home — is `auto_setup_after_login`'s own; it never raises.
+            started = (
+                ""
+                if note
+                else install.auto_setup_after_login(provider=provider, credential_id=credential_id)
+            )
+            if started:
+                logger.info("%s (provider=%s)", started, provider)
 
     def _reread_after_write(self, credential_id: int | None) -> StoredCredential:
         """Re-read a row this connection just wrote.

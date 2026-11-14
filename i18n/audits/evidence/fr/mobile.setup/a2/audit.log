@@ -1,0 +1,37 @@
+$ git rev-parse HEAD
+7c0fc7bf22aade04f78c367c906374b73a1914d7
+exit=0
+$ git diff --stat -- local_operator/i18n/catalogues/en/mobile.setup.json local_operator/i18n/catalogues/en/mobile.setup.context.json local_operator/i18n/catalogues/fr/mobile.setup.json
+ .../i18n/catalogues/en/mobile.setup.context.json   | 40 ++++++++++++++++++++++
+ .../i18n/catalogues/en/mobile.setup.json           | 18 +++++++---
+ .../i18n/catalogues/fr/mobile.setup.json           | 18 +++++++---
+ 3 files changed, 66 insertions(+), 10 deletions(-)
+exit=0
+$ sha256sum local_operator/i18n/catalogues/en/mobile.setup.json local_operator/i18n/catalogues/en/mobile.setup.context.json local_operator/i18n/catalogues/fr/mobile.setup.json i18n/glossary.md i18n/style-guides/fr.md
+0d245737d539f4d2fe54cf3a2c2174b0aa64820d2eb387e94ea16f65d1b487d7  local_operator/i18n/catalogues/en/mobile.setup.json
+b1c0c11a269077507f7d22256f3874d7f5fd1a363f5c13f412014de70c7f038f  local_operator/i18n/catalogues/en/mobile.setup.context.json
+0be4a710581f092ab486d21920e02e80f6c4fba0ce5eda27c27a2a0074117117  local_operator/i18n/catalogues/fr/mobile.setup.json
+a576d5a4b2718ba79a70a42600e3b6233ea28d716b1e2d996a208ac8dd7fabdb  i18n/glossary.md
+5315e1ac10c2ce57aac631ba653d08de680ee70c9a022ed3a8345ce2f9902ee7  i18n/style-guides/fr.md
+exit=0
+$ .venv/bin/python scripts/i18n/check.py --catalogues-only
+check.py: catalogue checks: 0 problem(s)
+exit=0
+$ .venv/bin/python scripts/i18n/ledger.py history-sha --locale fr --namespace mobile.setup
+1cc42e73235c6959d43a00fed45f4d153e7d1295bc81cedf1f972903c7cc368a
+exit=0
+$ .venv/bin/python $SCRATCH/audit-es-fr-ru/mech.py fr mobile.setup  # mechanical checks over the 12 in-scope keys
+keys en=94 fr=94 parity=OK
+mobile.setup.disabled: placeholders=OK verbatim=Radient=OK barred_terms=none phone_access_term=OK len_ratio=1.18 nnbsp_before_punct=OK ascii_apostrophe=0
+mobile.setup.billing_lapsed: placeholders=OK verbatim=Radient=OK barred_terms=none phone_access_term=OK len_ratio=1.21 nnbsp_before_punct=OK ascii_apostrophe=0
+mobile.setup.reconnect: placeholders=OK verbatim=Radient=OK barred_terms=none phone_access_term=OK len_ratio=1.11 nnbsp_before_punct=OK ascii_apostrophe=0
+mobile.setup.network: placeholders=OK verbatim=Radient=OK barred_terms=none phone_access_term=OK len_ratio=1.07 nnbsp_before_punct=OK ascii_apostrophe=0
+mobile.setup.title_reconnect: placeholders=OK verbatim=Radient=OK barred_terms=none phone_access_term=OK len_ratio=1.27 nnbsp_before_punct=OK ascii_apostrophe=0
+mobile.setup.title_billing_lapsed: placeholders=OK verbatim=Radient=OK barred_terms=none phone_access_term=OK len_ratio=1.32 nnbsp_before_punct=OK ascii_apostrophe=0
+mobile.setup.title_disabled: placeholders=OK verbatim=Radient=OK barred_terms=none phone_access_term=OK len_ratio=1.12 nnbsp_before_punct=OK ascii_apostrophe=0
+mobile.setup.title_network: placeholders=OK verbatim=none barred_terms=none phone_access_term=OK len_ratio=0.87 nnbsp_before_punct=OK ascii_apostrophe=0
+mobile.setup.title_radient_unavailable: placeholders=OK verbatim=Radient=OK barred_terms=none phone_access_term=OK len_ratio=0.91 nnbsp_before_punct=OK ascii_apostrophe=0
+mobile.setup.title_reconnecting: placeholders=OK verbatim=none barred_terms=none phone_access_term=OK len_ratio=1.11 nnbsp_before_punct=OK ascii_apostrophe=0
+mobile.setup.action_add_credit: placeholders=OK verbatim=Radient=OK barred_terms=none phone_access_term=n/a len_ratio=1.23 nnbsp_before_punct=OK ascii_apostrophe=0
+mobile.setup.action_open_console: placeholders=OK verbatim=Radient=OK barred_terms=none phone_access_term=OK len_ratio=1.07 nnbsp_before_punct=OK ascii_apostrophe=0
+exit=0

@@ -1,0 +1,94 @@
+{
+ "schema": 1,
+ "audit_id": "a4",
+ "audit_kind": "independent_translation_audit",
+ "locale": "vi",
+ "namespace": "tunnel.status",
+ "source_sha256": "e2bc8c63d3124c363252511306fd3951917ab9f93a2398c49cac8c79302aa8f9",
+ "target_sha256": "3d545d4f6534d8d5584f5d0eb7fd069a352272dcade75ecec9cb00cc400e1132",
+ "round": 4,
+ "audit_date": "2026-11-14",
+ "key_count": 24,
+ "keys_audited": 8,
+ "keys_new_in_scope": 3,
+ "keys_in_scope": [
+  "tunnel.status.tunnel_inactive.label",
+  "tunnel.status.tunnel_inactive.detail",
+  "tunnel.status.tunnel_disabled.detail",
+  "tunnel.status.billing_lapsed.detail",
+  "tunnel.status.billing_inactive.detail",
+  "tunnel.status.card_paused",
+  "tunnel.status.card_add_credit",
+  "tunnel.status.card_open_console"
+ ],
+ "source_audit_revision": "7c0fc7bf22aade04f78c367c906374b73a1914d7 + uncommitted working-tree catalogue changes",
+ "scope": "git diff HEAD -- local_operator/i18n/catalogues/ (round-1 remediation, uncommitted)",
+ "prior_audit": "i18n/audits/evidence/vi/tunnel.status/a3/record.json",
+ "pr": "damianvtran/local-operator PR #3945 (round-1 remediation)",
+ "translator": {
+  "agent": "i18n-translator subagent, Local Operator session c0c9e9803405 (round-1 remediation values, uncommitted working tree on HEAD 7c0fc7bf2; English drafted by coder session 889b9f67edf5)",
+  "model": "anthropic/claude-opus-5-5 (read from translator session c0c9e9803405 transcript: `Model: anthropic/claude-opus-5-5`)",
+  "date": "2026-11-14"
+ },
+ "auditor": {
+  "agent": "i18n-auditor, independent `task` subagent, session 4d11fabf1ca7; not the translating i18n-translator (c0c9e9803405) nor the English-drafting coder (889b9f67edf5); did not edit any value",
+  "session": "4d11fabf1ca7",
+  "model": "anthropic/claude-opus-5-5",
+  "independent_from_translator_session": true,
+  "actual_model_source": "harness system prompt of session 4d11fabf1ca7 (`Model: anthropic/claude-opus-5-5`); no provider fallback disclosed during the audit"
+ },
+ "input_hashes": {
+  "en": {
+   "path": "local_operator/i18n/catalogues/en/tunnel.status.json",
+   "sha256": "e2bc8c63d3124c363252511306fd3951917ab9f93a2398c49cac8c79302aa8f9"
+  },
+  "context": {
+   "path": "local_operator/i18n/catalogues/en/tunnel.status.context.json",
+   "sha256": "78580b806d2acc2c0c84bcf2655b62ea5ae847bf206c43134762e288bba8695d"
+  },
+  "target": {
+   "path": "local_operator/i18n/catalogues/vi/tunnel.status.json",
+   "sha256": "3d545d4f6534d8d5584f5d0eb7fd069a352272dcade75ecec9cb00cc400e1132"
+  },
+  "glossary": {
+   "path": "i18n/glossary.md",
+   "sha256": "a576d5a4b2718ba79a70a42600e3b6233ea28d716b1e2d996a208ac8dd7fabdb"
+  },
+  "style_guide": {
+   "path": "i18n/style-guides/vi.md",
+   "sha256": "f550e01392de0a313d5efd626fcc7dbdd1c86df64c2324bac37eebc7ff06e6e9"
+  }
+ },
+ "artifacts": {
+  "report.md": "acea1ee6ed78ac236fac89e0f6356a207aca7acf1123cd0a20c5d96d77ac7a2e",
+  "audit.log": "5e367d1f76975d5719d23ad02f9f8b30622d547c15465e10a59a4283396ce5a4"
+ },
+ "audit_notes_not_execution_log": "report.md is reasoning; audit.log is the captured stdout of the commands it lists (git rev-parse/status/diff --stat, check.py --catalogues-only, mech.py, ledger.py history-sha, prior-row and input-hash checks). dryrun.log is the captured ledger.py append --dry-run output.",
+ "current_report_verdict": {
+  "status": "passed",
+  "unresolved_blocker_major_count": 0,
+  "finding_ids": [
+   "VI-01",
+   "VI-02",
+   "VI-03"
+  ],
+  "findings": [
+   {
+    "id": "VI-01",
+    "severity": "minor",
+    "key": "tunnel.status.card_add_credit, tunnel.status.card_open_console"
+   },
+   {
+    "id": "VI-02",
+    "severity": "minor",
+    "key": "tunnel.status.tunnel_inactive.detail"
+   },
+   {
+    "id": "VI-03",
+    "severity": "nit",
+    "key": "tunnel.status.tunnel_disabled.detail, tunnel.status.billing_lapsed.detail"
+   }
+  ]
+ },
+ "staged_not_committed": true
+}

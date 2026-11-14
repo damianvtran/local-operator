@@ -1,0 +1,82 @@
+{
+ "schema": 1,
+ "audit_id": "a1",
+ "audit_kind": "independent_translation_audit",
+ "locale": "es",
+ "namespace": "mobile.setup",
+ "round": 1,
+ "audit_date": "2026-11-14",
+ "key_count": 86,
+ "keys_audited": 86,
+ "keys_new_in_scope": 7,
+ "new_keys": [
+  "mobile.setup.disabled",
+  "mobile.setup.billing_lapsed",
+  "mobile.setup.reconnect",
+  "mobile.setup.network",
+  "mobile.setup.radient_unavailable",
+  "mobile.setup.reconnecting",
+  "mobile.setup.login_offer"
+ ],
+ "source_audit_revision": "1fce7ecb1f5fb587e7b91ef2f9c7fe658521e0d0",
+ "scope": "1fce7ecb1f5f^..1fce7ecb1f5f",
+ "prior_audits_on_disk": [
+  "i18n/audits/evidence/es/mobile.setup/r1/record.json",
+  "i18n/audits/evidence/es/mobile.setup/w5a1/record.json"
+ ],
+ "pr": "not yet opened (branch fix/tunnel-remedies-auto-up)",
+ "translator": {
+  "agent": "i18n-translator subagent, Local Operator session 7af08d89b259 (values in commit 1fce7ecb1f5f; English source drafted by coder session b0300e2c2c7f)",
+  "model": "anthropic/claude-opus-5-5 (as stated by the coordinator brief; not independently verified)",
+  "date": "2026-11-14"
+ },
+ "auditor": {
+  "agent": "i18n-auditor, independent `task` subagent on node lop-remote-node-2, session 110287e9c4f3; not the translator (7af08d89b259) nor the English-drafting coder (b0300e2c2c7f); did not edit any value",
+  "session": "110287e9c4f3",
+  "model": "anthropic/claude-opus-5-5",
+  "independent_from_translator_session": true,
+  "actual_model_source": "harness system prompt of session 110287e9c4f3 (`Model: anthropic/claude-opus-5-5`); no provider fallback disclosed during the audit"
+ },
+ "input_hashes": {
+  "en": {
+   "path": "local_operator/i18n/catalogues/en/mobile.setup.json",
+   "sha256": "6883f92e94dfcec4be0af6041a0531c974fbf18294f7094a132cc555a2ad2065"
+  },
+  "context": {
+   "path": "local_operator/i18n/catalogues/en/mobile.setup.context.json",
+   "sha256": "0286efeb90731f6bf23c47cb1e80deb873b99302cc3ad0f41de60ddace171176"
+  },
+  "target": {
+   "path": "local_operator/i18n/catalogues/es/mobile.setup.json",
+   "sha256": "4519a62b46386d65f1fa5dd1d89e30e83f04ca7755ad83b00dba61d1ff7d80c7"
+  },
+  "glossary": {
+   "path": "i18n/glossary.md",
+   "sha256": "a576d5a4b2718ba79a70a42600e3b6233ea28d716b1e2d996a208ac8dd7fabdb"
+  },
+  "style_guide": {
+   "path": "i18n/style-guides/es.md",
+   "sha256": "4a6f6270f028e5f5fbca7156a8f5099077f92585db94c14653482e9b188248a6"
+  }
+ },
+ "artifacts": {
+  "report.md": "923fdb9044eeda29b02a93551b7920c7cb719c69f2b2b60f881f18ac75026790",
+  "audit.log": "bfbf7e5d18fc4af3c4a87eab064bc5d3d008944806d3e74e755372ec4249f356"
+ },
+ "audit_notes_not_execution_log": "report.md is reasoning; audit.log is the captured stdout of the commands it lists (git rev-parse, sha256sum, check.py --catalogues-only, ledger.py history-sha, the mech() check in audit_gen.py). dryrun.log is the captured ledger.py append --dry-run output.",
+ "current_report_verdict": {
+  "status": "passed",
+  "unresolved_blocker_major_count": 0,
+  "finding_ids": [
+   "ES-01",
+   "ES-02",
+   "ES-03"
+  ],
+  "finding_severities": {
+   "ES-01": "minor",
+   "ES-02": "minor",
+   "ES-03": "nit"
+  }
+ },
+ "staged_not_committed": true
+}

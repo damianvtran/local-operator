@@ -1,0 +1,31 @@
+{
+  "schema": 1,
+  "locale": "es",
+  "namespace": "wire.phone_access",
+  "history_sha256": "2d987230bdd2b5ea72ad5183d431d93d8b2cecbf5f6289835e7f6d2b17329258",
+  "entries": [
+    {
+      "locale": "es",
+      "namespace": "wire.phone_access",
+      "source_sha256": "2979b226db50db768fcad68f5f7376854f2185b08e6b0af08eb8e72bdb470f58",
+      "translator": {
+        "agent": "i18n-translator subagent, Local Operator session 7af08d89b259 (values in commit 1fce7ecb1f5f; English source drafted by coder session b0300e2c2c7f)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-14"
+      },
+      "auditor": {
+        "agent": "i18n-auditor, independent `task` subagent on node lop-remote-node-2, session 110287e9c4f3; not the translator (7af08d89b259) nor the English-drafting coder (b0300e2c2c7f); did not edit any value",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-14",
+        "result": "passed",
+        "findings": 2,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "a1: independent i18n-auditor 110287e9c4f3 (anthropic/claude-opus-5-5) of i18n-translator 7af08d89b259 (claude-opus-5-5) values at 1fce7ecb1f5f: PASSED, 0 blocker/major (ES-01 minor, ES-03 nit); whole namespace (4 keys) at new en source. Record i18n/audits/evidence/es/wire.phone_access/a1/record.json",
+      "evidence": "i18n/audits/evidence/es/wire.phone_access/a1/record.json",
+      "round": "a1",
+      "keys_audited": 4
+    }
+  ]
+}

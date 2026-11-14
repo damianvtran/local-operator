@@ -49,7 +49,15 @@ def add_parser(subparsers: Any, *, help_locale: str | None = None) -> None:
     setup = actions.add_parser("setup", help="Observe mobile setup; only apply makes changes")
     setup.add_argument("setup_action", nargs="?", choices=("plan", "apply"), default="plan")
     setup.add_argument("--credential-id", type=int)
-    setup.add_argument("--accept-monthly-price", help="Accept the exact fresh activation quote")
+    # The two are exclusive: `--no-spend` is the unattended run (the post-sign-in
+    # hook in `providers/auth_store.py`), which must never carry an acceptance.
+    spend = setup.add_mutually_exclusive_group()
+    spend.add_argument("--accept-monthly-price", help="Accept the exact fresh activation quote")
+    spend.add_argument(
+        "--no-spend",
+        action="store_true",
+        help="Never activate billing: reconnect or reinstall only, stop at any price",
+    )
     setup.add_argument("--json", action="store_true")
     billing = actions.add_parser("billing", help="Show the server's current monthly cost and price")
     billing.add_argument("--credential-id", type=int)

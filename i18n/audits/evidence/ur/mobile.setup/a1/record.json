@@ -1,0 +1,72 @@
+{
+ "schema": 1,
+ "audit_id": "a1",
+ "audit_kind": "independent_translation_audit",
+ "locale": "ur",
+ "namespace": "mobile.setup",
+ "source_sha256": "6883f92e94dfcec4be0af6041a0531c974fbf18294f7094a132cc555a2ad2065",
+ "target_sha256": "f3eed93e8e47535340535584b4e5320ec506e9f7d315dfb9655da4c2b1fb472d",
+ "round": 1,
+ "audit_date": "2026-11-14",
+ "key_count": 86,
+ "keys_audited": 86,
+ "keys_new_in_scope": 7,
+ "source_audit_revision": "1fce7ecb1f5fb587e7b91ef2f9c7fe658521e0d0",
+ "scope": "1fce7ecb1f5f^..1fce7ecb1f5f",
+ "prior_audit": "i18n/audits/evidence/ur/mobile.setup/r1/record.json",
+ "pr": "fix/tunnel-remedies-auto-up (extends https://github.com/damianvtran/local-operator/pull/3931)",
+ "translator": {
+  "agent": "i18n-translator subagent, Local Operator session 7af08d89b259 (commit 1fce7ecb1f5f); English source drafted by coder session b0300e2c2c7f",
+  "model": "anthropic/claude-opus-5-5 (as stated by the delegating brief; not independently verified)",
+  "date": "2026-11-14"
+ },
+ "auditor": {
+  "agent": "i18n-auditor, independent `task` subagent, session 4aaeb39ddb2f; neither the i18n-translator (7af08d89b259) nor the English-drafting coder (b0300e2c2c7f); did not edit any value",
+  "session": "4aaeb39ddb2f",
+  "model": "anthropic/claude-opus-5-5",
+  "independent_from_translator_session": true,
+  "actual_model_source": "harness system prompt of session 4aaeb39ddb2f (`Model: anthropic/claude-opus-5-5`); no provider fallback disclosed during the audit"
+ },
+ "input_hashes": {
+  "en": {
+   "path": "local_operator/i18n/catalogues/en/mobile.setup.json",
+   "sha256": "6883f92e94dfcec4be0af6041a0531c974fbf18294f7094a132cc555a2ad2065"
+  },
+  "context": {
+   "path": "local_operator/i18n/catalogues/en/mobile.setup.context.json",
+   "sha256": "0286efeb90731f6bf23c47cb1e80deb873b99302cc3ad0f41de60ddace171176"
+  },
+  "target": {
+   "path": "local_operator/i18n/catalogues/ur/mobile.setup.json",
+   "sha256": "f3eed93e8e47535340535584b4e5320ec506e9f7d315dfb9655da4c2b1fb472d"
+  },
+  "glossary": {
+   "path": "i18n/glossary.md",
+   "sha256": "a576d5a4b2718ba79a70a42600e3b6233ea28d716b1e2d996a208ac8dd7fabdb"
+  },
+  "style_guide": {
+   "path": "i18n/style-guides/ur.md",
+   "sha256": "7276e96210fe5f23fd82a39ae4cc0c88b2c1009d3a551d914efc3f61516eddc4"
+  }
+ },
+ "artifacts": {
+  "report.md": "83db32861c613641466504ed46d4901eb7dd73224ddb12ad9f65f13cfd16c699",
+  "audit.log": "973a581a908d06c9905a3c1d7675197888117b7d64a55e166110ce5aebe5928f"
+ },
+ "audit_notes_not_execution_log": "report.md is reasoning; audit.log is the captured stdout of the commands it lists (git rev-parse/show --stat, check.py --catalogues-only, mech.py, ledger.py history-sha). dryrun.log is the captured ledger.py append --dry-run output.",
+ "current_report_verdict": {
+  "status": "passed",
+  "unresolved_blocker_major_count": 0,
+  "finding_ids": [
+   "UR-01",
+   "UR-05"
+  ]
+ },
+ "staged_not_committed": true,
+ "amended_after_audit": {
+  "by": "coordinator b0300e2c2c7f (not the auditor)",
+  "what": "added top-level source_sha256/target_sha256 restating input_hashes (en/target); appended the Evidence pointer to the ledger row note",
+  "unchanged": "verdict, findings, artifacts hashes",
+  "disclosed_by": "#3945 review round 1, N3 (remediation session 889b9f67edf5)"
+ }
+}

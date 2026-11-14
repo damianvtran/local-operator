@@ -1,0 +1,6 @@
+{
+  "wire.phone_access.title": "Phone access",
+  "wire.phone_access.description": "How this computer keeps its Radient tunnel for the phone app working. Changes apply to the next sign-in.",
+  "wire.phone_access.auto_setup.label": "Reconnect phone access after signing in",
+  "wire.phone_access.auto_setup.help": "When you sign in to Radient on a computer that already has phone access, reconnect or repair its tunnel in the background. It never activates billing or spends credit; any price or missing credit is shown to you instead."
+}

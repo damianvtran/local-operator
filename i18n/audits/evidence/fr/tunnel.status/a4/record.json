@@ -1,0 +1,90 @@
+{
+ "schema": 1,
+ "audit_id": "a4",
+ "audit_kind": "independent_translation_audit",
+ "locale": "fr",
+ "namespace": "tunnel.status",
+ "source_sha256": "e2bc8c63d3124c363252511306fd3951917ab9f93a2398c49cac8c79302aa8f9",
+ "target_sha256": "7d1f849749155980cccd2d9c219369cd18c280608b42e430cfeccae8b794a87c",
+ "round": 4,
+ "audit_date": "2026-11-14",
+ "key_count": 24,
+ "keys_audited": 8,
+ "keys_new_in_scope": 3,
+ "new_keys": [
+  "tunnel.status.card_paused",
+  "tunnel.status.card_add_credit",
+  "tunnel.status.card_open_console"
+ ],
+ "changed_keys": [
+  "tunnel.status.tunnel_inactive.label",
+  "tunnel.status.tunnel_inactive.detail",
+  "tunnel.status.tunnel_disabled.detail",
+  "tunnel.status.billing_lapsed.detail",
+  "tunnel.status.billing_inactive.detail"
+ ],
+ "source_audit_revision": "7c0fc7bf22aade04f78c367c906374b73a1914d7",
+ "working_tree_uncommitted": true,
+ "scope": "7c0fc7bf22aa..working-tree (git diff -- local_operator/i18n/catalogues/); unchanged keys passed in earlier rounds, not re-audited",
+ "prior_audits_on_disk": [
+  "i18n/audits/evidence/fr/tunnel.status/a1/record.json",
+  "i18n/audits/evidence/fr/tunnel.status/a2/record.json",
+  "i18n/audits/evidence/fr/tunnel.status/a3/record.json"
+ ],
+ "pr": "#3945 round-1 remediation (branch fix/tunnel-remedies-auto-up)",
+ "translator": {
+  "agent": "i18n-translator subagent, Local Operator session c0c9e9803405 (uncommitted working-tree values on 7c0fc7bf2; English source drafted by coder session 889b9f67edf5)",
+  "model": "anthropic/claude-opus-5-5 (from that session's transcript metadata; not otherwise verified)",
+  "date": "2026-11-14"
+ },
+ "auditor": {
+  "agent": "i18n-auditor, independent `task` subagent (audit-es-fr-ru) on host ip-172-31-18-0, session 117e988422ff; not the translator (c0c9e9803405) nor the English-drafting coder (889b9f67edf5); did not edit any value",
+  "session": "117e988422ff",
+  "model": "anthropic/claude-opus-5-5",
+  "independent_from_translator_session": true,
+  "actual_model_source": "harness system prompt of session 117e988422ff (`Model: anthropic/claude-opus-5-5`); no provider fallback disclosed during the audit"
+ },
+ "input_hashes": {
+  "en": {
+   "path": "local_operator/i18n/catalogues/en/tunnel.status.json",
+   "sha256": "e2bc8c63d3124c363252511306fd3951917ab9f93a2398c49cac8c79302aa8f9"
+  },
+  "context": {
+   "path": "local_operator/i18n/catalogues/en/tunnel.status.context.json",
+   "sha256": "78580b806d2acc2c0c84bcf2655b62ea5ae847bf206c43134762e288bba8695d"
+  },
+  "target": {
+   "path": "local_operator/i18n/catalogues/fr/tunnel.status.json",
+   "sha256": "7d1f849749155980cccd2d9c219369cd18c280608b42e430cfeccae8b794a87c"
+  },
+  "glossary": {
+   "path": "i18n/glossary.md",
+   "sha256": "a576d5a4b2718ba79a70a42600e3b6233ea28d716b1e2d996a208ac8dd7fabdb"
+  },
+  "style_guide": {
+   "path": "i18n/style-guides/fr.md",
+   "sha256": "5315e1ac10c2ce57aac631ba653d08de680ee70c9a022ed3a8345ce2f9902ee7"
+  }
+ },
+ "artifacts": {
+  "report.md": "ee9d9e314574dfc3898dd0be2c5c67523056b95e2608103008c80009b0c5d6fe",
+  "audit.log": "31b85825774652684d7e7280229e11d5b8f61900f7a928229cedfb636fca1be6"
+ },
+ "reproduction_script": {
+  "path": "~/.local-operator/sessions/117e988422ff/scratchpad/audit-es-fr-ru/mech.py",
+  "sha256": "4d443df225a7ba2cc72c19134e8b7687cd75f568b5d91dfdf08e20f7c370d23c",
+  "note": "session scratch, outside the repo; its stdout is captured in audit.log"
+ },
+ "audit_notes_not_execution_log": "report.md is reasoning; audit.log is the captured stdout of the commands it lists (git rev-parse, git diff --stat, sha256sum, check.py --catalogues-only, ledger.py history-sha, mech.py). dryrun.log is the captured ledger.py append --dry-run output.",
+ "current_report_verdict": {
+  "status": "changes_requested",
+  "unresolved_blocker_major_count": 1,
+  "finding_ids": [
+   "FR-01"
+  ],
+  "finding_severities": {
+   "FR-01": "major"
+  }
+ },
+ "staged_not_committed": true
+}

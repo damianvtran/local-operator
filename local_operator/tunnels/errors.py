@@ -83,3 +83,25 @@ class RequestFailed(ValueError):
     def __init__(self, message: str, *, status: int) -> None:
         super().__init__(message)
         self.status = status
+
+
+class TunnelInactive(ValueError):
+    """Radient declined to serve this tunnel, refined to the cause that blocks it.
+
+    Raised by the connector's cold start when `/connect` answers 402/403 or an
+    inactive record, AFTER it has read `/billing` (and the tunnel record) to tell
+    the four causes apart — see `gateway.TUNNEL_INACTIVE` and its siblings. The
+    refinement happens where an async client and the owner-pinned login are
+    already open, so the classifier that reads this (`service.classify_failure`,
+    which is synchronous and does no I/O) only has to read ``reason`` off the
+    chain.
+
+    The sentence stays a fixed literal (never a provider body), and the type stays
+    a ``ValueError`` so `service.main`'s existing retrying arm handles it: every
+    one of these causes clears from outside this process, so the connector keeps
+    its 10-second retry floor rather than parking.
+    """
+
+    def __init__(self, reason: str) -> None:
+        super().__init__("Radient is not serving this tunnel.")
+        self.reason = reason

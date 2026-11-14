@@ -1,0 +1,22 @@
+{
+  "wire.phone_access.title": {
+    "role": "Settings section title",
+    "tone": "Short noun phrase",
+    "note": "'Phone access' is the product feature letting the mobile app reach this computer through a Radient tunnel."
+  },
+  "wire.phone_access.description": {
+    "role": "Settings section description",
+    "tone": "Plain, one or two sentences",
+    "note": "Radient is a product name and stays verbatim."
+  },
+  "wire.phone_access.auto_setup.label": {
+    "role": "Settings toggle label",
+    "tone": "Short imperative-free phrase",
+    "note": "Boolean switch, default on."
+  },
+  "wire.phone_access.auto_setup.help": {
+    "role": "Settings toggle help text",
+    "tone": "Plain, reassuring about money",
+    "note": "The safety meaning must survive translation: the background run NEVER activates billing or spends credit."
+  }
+}

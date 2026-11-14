@@ -288,6 +288,7 @@ def test_cli_fallback_and_remedy_name_the_re_point_when_the_heal_did_not_run(san
         "remedy": {"command": "lop login radient", "url": gateway.CONSOLE_URL},
     }
     expected = {
+        "kind": "run",
         "command": gateway.TERMINAL_REMEDY[gateway.LOGIN_SUPERSEDED],
         "url": gateway.CONSOLE_URL,
     }

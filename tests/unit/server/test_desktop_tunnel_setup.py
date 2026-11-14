@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import threading
 from contextlib import closing
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -636,3 +637,109 @@ async def test_the_desktop_poll_and_run_repoint_a_dead_pin(desktop, upstream, mo
         f"Reconnected phone access to this device’s newer sign-in for the same "
         f"account (credential {fresh})."
     )
+
+
+# --- Remedy kinds and the background reconnect (U10, D5) ----------------------
+
+
+@pytest.mark.parametrize(
+    "step,blocked_on,kind,has_url",
+    [
+        ("disabled", "disabled", "open_console", True),
+        ("network", "network", "wait_network", False),
+        ("radient_unavailable", "radient_unavailable", "wait_radient", False),
+        ("billing_lapsed", "balance", "add_credit", True),
+        ("balance", "balance", "add_credit", True),
+        ("reconnect", "none", "run", False),
+        ("quote", "quote", "accept_quote", False),
+        ("reconnecting", "reconnecting", "wait_reconnect", False),
+    ],
+)
+def test_each_new_step_maps_to_its_remedy_kind(monkeypatch, step, blocked_on, kind, has_url):
+    monkeypatch.setattr(setup, "local_credential_choices", lambda: [])
+    result = routes._contract(
+        {"step": step, "ready": False, "remedy": "sentence", "receipts": []}, local=True
+    )
+    assert result["blocked_on"] == blocked_on
+    assert result["remedy"]["kind"] == kind
+    # D5: add credit and the console carry the console URL as DATA, so the UI
+    # never guesses one.
+    assert (result["remedy"]["url"] == routes._CONSOLE_URL) is has_url
+
+
+def test_the_route_console_url_mirrors_the_gateway():
+    from local_operator.tunnels import gateway
+
+    assert routes._CONSOLE_URL == gateway.CONSOLE_URL
+
+
+def _hold_background_run():
+    """The post-sign-in run's two facts: its journal, and the held lock."""
+    from local_operator.tunnels import autosetup
+
+    autosetup.write_journal({"state": "running", "pid": os.getpid()})
+    return nonblocking_file_claim(config.directory() / "setup.lock")
+
+
+@pytest.mark.asyncio
+async def test_a_poll_during_the_background_run_reads_reconnecting(desktop):
+    client, _app, _tmp = desktop
+    with _hold_background_run() as acquired:
+        assert acquired
+        result = (await client.get(PATH)).json()["result"]
+    assert result["step"] == "reconnecting"
+    assert result["remedy"]["kind"] == "wait_reconnect"
+    assert result["ready"] is False
+
+
+@pytest.mark.asyncio
+async def test_a_run_posted_during_the_background_run_answers_reconnecting_not_409(
+    desktop, upstream
+):
+    client, _app, _tmp = desktop
+    with _hold_background_run() as acquired:
+        assert acquired
+        response = await client.post(PATH, json={"action": "run", "credential_id": 17})
+    assert response.status_code == 200, response.text
+    result = response.json()["result"]
+    assert result["step"] == "reconnecting"
+    assert result["remedy"]["kind"] == "wait_reconnect"
+
+
+@pytest.mark.asyncio
+async def test_a_lock_held_by_someone_else_is_still_setup_in_progress(desktop, upstream):
+    """Without the run's journal, a held lock is another owner: unchanged 409."""
+    client, _app, _tmp = desktop
+    with nonblocking_file_claim(config.directory() / "setup.lock") as acquired:
+        assert acquired
+        response = await client.post(PATH, json={"action": "run", "credential_id": 17})
+    assert response.status_code in (200, 409)
+    if response.status_code == 200:
+        assert response.json()["result"]["step"] != "reconnecting"
+
+
+@pytest.mark.asyncio
+async def test_a_reconnecting_reply_never_echoes_an_unknown_credential_id(desktop, upstream):
+    """Q4: the identity comes from the local plan; an id this device lacks is refused."""
+    client, _app, _tmp = desktop
+    with _hold_background_run() as acquired:
+        assert acquired
+        unknown = await client.post(PATH, json={"action": "plan", "credential_id": 999})
+        known = await client.post(PATH, json={"action": "plan", "credential_id": 17})
+    assert unknown.status_code == 200, unknown.text
+    refused = unknown.json()["result"]
+    assert refused["step"] == "owner_choice"
+    assert refused["credential_id"] is None
+    assert "999" not in unknown.text
+    assert known.json()["result"]["step"] == "reconnecting"
+    assert known.json()["result"]["credential_id"] == 17
+
+
+def test_setup_text_kinds_match_the_route(monkeypatch):
+    """One vocabulary: the text surfaces' kind per step equals the route's."""
+    monkeypatch.setattr(setup, "local_credential_choices", lambda: [])
+    for step, kind in setup.STEP_REMEDY_KIND.items():
+        result = routes._contract(
+            {"step": step, "ready": False, "remedy": "sentence", "receipts": []}, local=True
+        )
+        assert result["remedy"]["kind"] == kind, step

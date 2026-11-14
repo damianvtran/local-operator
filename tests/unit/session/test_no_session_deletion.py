@@ -3323,6 +3323,27 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "Removes only the park FILE tunnel/state.json under the config dir; "
         "never a directory, never under sessions/",
     ),
+    # The tunnel remedies' own config-dir files (#3945, 2026-11-14). Both paths
+    # are the tunnel `config.directory()` plus a FIXED basename, exactly like
+    # `state.clear` above — never a session id, never caller input, never under
+    # `sessions/`. `invalidate_refinement` drops the cached inactive-cause FILE
+    # (`inactive-cause.json`) once a connect succeeds or setup runs, so a stale
+    # "suspended"/"billing" cause cannot outlive the state it described.
+    # `_bound_auto_setup_log` rotates `auto-setup.log` -> `.1` before each
+    # post-sign-in spawn (the child writes the file directly, so no logging
+    # handler can rotate it); source and target are both that fixed basename.
+    (
+        "local_operator/tunnels/service.py::invalidate_refinement",
+        "<path>.unlink",
+        "Removes only the inactive-cause.json cache FILE under the tunnel config dir; "
+        "never a directory, never under sessions/",
+    ),
+    (
+        "local_operator/tunnels/install.py::_bound_auto_setup_log",
+        "os.replace",
+        "Rotates the auto-setup.log FILE to auto-setup.log.N under the tunnel config dir; "
+        "never a directory, never under sessions/",
+    ),
     # The stall watchdog's own dump files (2026-09-20). `dump_path` composes
     # these from `paths.log_dir()` and an int pid ALONE — never a session id,
     # never a `sessions/` path, never caller input — so neither call can name a

@@ -1,0 +1,62 @@
+{
+ "schema": 1,
+ "audit_id": "a1",
+ "audit_kind": "independent_translation_audit",
+ "locale": "zh-CN",
+ "namespace": "mobile.setup",
+ "round": 1,
+ "audit_date": "2026-11-14",
+ "key_count": 86,
+ "keys_audited": 86,
+ "keys_new_in_scope": 7,
+ "source_audit_revision": "1fce7ecb1f5fb587e7b91ef2f9c7fe658521e0d0",
+ "scope": "1fce7ecb1f5f~1..1fce7ecb1f5f",
+ "prior_audit": "zh-CN mobile.setup last row r1 (passed, source f38364c1…); this round covers the 7 new keys and re-reads the unchanged keys for consistency only (git diff shows the only removed lines are trailing-comma rewrites).",
+ "pr": "branch fix/tunnel-remedies-auto-up (PR number not given in the delegation brief)",
+ "translator": {
+  "agent": "i18n-translator subagent, Local Operator session 7af08d89b259 (values introduced in commit 1fce7ecb1f5f; English drafted by coder session b0300e2c2c7f)",
+  "model": "anthropic/claude-opus-5-5 (as stated by the delegation brief; not independently verified)",
+  "date": "2026-11-14"
+ },
+ "auditor": {
+  "agent": "i18n-auditor, independent `task` subagent, session ede889388023 (node lop-remote-node-2); not the translating i18n-translator (7af08d89b259) nor the English-drafting coder (b0300e2c2c7f); did not edit any value",
+  "session": "ede889388023",
+  "model": "anthropic/claude-opus-5-5",
+  "independent_from_translator_session": true,
+  "actual_model_source": "harness system prompt of session ede889388023 (`Model: anthropic/claude-opus-5-5`); no provider fallback disclosed during the audit"
+ },
+ "input_hashes": {
+  "en": {
+   "path": "local_operator/i18n/catalogues/en/mobile.setup.json",
+   "sha256": "6883f92e94dfcec4be0af6041a0531c974fbf18294f7094a132cc555a2ad2065"
+  },
+  "context": {
+   "path": "local_operator/i18n/catalogues/en/mobile.setup.context.json",
+   "sha256": "0286efeb90731f6bf23c47cb1e80deb873b99302cc3ad0f41de60ddace171176"
+  },
+  "target": {
+   "path": "local_operator/i18n/catalogues/zh-CN/mobile.setup.json",
+   "sha256": "c696f2ea4828c70b8f8e542aa8beba0e7a41de1169f0138627500a04f0f076fc"
+  },
+  "glossary": {
+   "path": "i18n/glossary.md",
+   "sha256": "a576d5a4b2718ba79a70a42600e3b6233ea28d716b1e2d996a208ac8dd7fabdb"
+  },
+  "style_guide": {
+   "path": "i18n/style-guides/zh-CN.md",
+   "sha256": "8f95d89debbd0af848e72e4805e256ef9566632e520a5c6d9b37928cd617142c"
+  }
+ },
+ "artifacts": {
+  "report.md": "9ae78a7823a49d769f63843249da23584d2473538bb31fe1e2bb860c6b43ff08",
+  "audit.log": "f7d907622bd1fcae91f3241d8e6f309563c129434c75141c68e3e8568d801e1a"
+ },
+ "audit_notes_not_execution_log": "report.md is reasoning; audit.log is the captured stdout of the commands it lists (git rev-parse/diff --stat, check.py --catalogues-only, mech.py, ledger.py history-sha, prior-row and removed-line checks). dryrun.log is the captured ledger.py append --dry-run output.",
+ "current_report_verdict": {
+  "status": "passed",
+  "unresolved_blocker_major_count": 0,
+  "finding_ids": [],
+  "findings": []
+ },
+ "staged_not_committed": true
+}

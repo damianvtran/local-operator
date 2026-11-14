@@ -1,0 +1,6 @@
+{
+  "wire.phone_access.title": "Acceso telefónico",
+  "wire.phone_access.description": "Cómo mantiene este equipo en funcionamiento su túnel de Radient para la aplicación del teléfono. Los cambios se aplican en el próximo inicio de sesión.",
+  "wire.phone_access.auto_setup.label": "Reconectar el acceso telefónico tras iniciar sesión",
+  "wire.phone_access.auto_setup.help": "Cuando inicias sesión en Radient en un equipo que ya tiene acceso telefónico, su túnel se reconecta o se repara en segundo plano. Nunca activa la facturación ni gasta crédito; en su lugar, se te muestra cualquier precio o la falta de crédito."
+}
