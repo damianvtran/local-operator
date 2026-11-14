@@ -147,18 +147,40 @@ def test_unconfigured_tier_refusal_names_the_mesh_fix(tmp_path, monkeypatch):
     returns must name the fix; ``reason`` stays the bare fact the desktop
     ``/effective`` contract keys on."""
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    (tmp_path / "config").mkdir(parents=True)
+    (tmp_path / "config" / "config.yml").write_text(yaml.safe_dump({"values": {"subagents": {}}}))
+    session = make_session(tmp_path)
+
+    with pytest.raises(SubagentModelUnavailable) as caught:
+        session._launch_subagent(label="review", prompt="review it", effort="hi")
+    assert caught.value.reason == "no model configured at subagents.models.hi"
+    # The command runs as printed: a bare ``definitions push`` is refused
+    # (``peer_required``, review round 1 m1).
+    assert str(caught.value) == (
+        "effort tier 'hi' is unavailable: no model configured at subagents.models.hi. "
+        "To fix: run `lop network definitions push --all-peers` on the operator's device "
+        "(the one that signs for the operator; only it sends the subagent tier models "
+        "to mesh nodes), or set subagents.models.hi on this device"
+    )
+
+
+def test_unconfigured_tier_refusal_on_a_node_keeping_its_own_map_skips_the_push(
+    tmp_path, monkeypatch
+):
+    """Review m3 / QA Q-2: #3869 never installs over a node's own tier map, so
+    the launch refusal there gives the readiness row's own-map remedy, not a
+    push that changes nothing."""
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
     write_tiers(tmp_path / "config", lo="openrouter/moonshotai/kimi-k3")
     session = make_session(tmp_path)
 
     with pytest.raises(SubagentModelUnavailable) as caught:
         session._launch_subagent(label="review", prompt="review it", effort="hi")
     assert caught.value.reason == "no model configured at subagents.models.hi"
-    assert str(caught.value) == (
-        "effort tier 'hi' is unavailable: no model configured at subagents.models.hi. "
-        "To fix: run `lop network definitions push` on the operator's device (the one "
-        "that signs for the operator; only it sends the subagent tier models to mesh "
-        "nodes), or set "
-        "subagents.models.hi on this device"
+    assert caught.value.remedy == (
+        "To fix: set subagents.models.hi on this device, or clear its subagents.models "
+        "and subagents.model_choice (whichever are set) to receive the operator's tiers; "
+        "it keeps its own tier map, so `lop network definitions push` does not replace it"
     )
 
 
@@ -670,6 +692,34 @@ async def test_task_tool_tells_the_model_not_to_retry_on_another_tier(tmp_path, 
     assert "effort tier 'hi' is unavailable" in text
     assert "Do NOT retry at a different effort tier" in text
     assert "subagents.models.hi" in text
+    # This call passed ``effort``, so dropping it is a real alternative.
+    assert "launch without 'effort'" in text
+
+
+@pytest.mark.asyncio
+async def test_task_tool_does_not_offer_inherit_for_a_role_pinned_tier(tmp_path, monkeypatch):
+    """QA round 1, Q-1: a role-pinned launch passed no ``effort``, so "launch
+    without 'effort'" is no action (the pin refuses again) and reads as the
+    ``model=inherit`` workaround the sessions guide rules out."""
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    write_tiers(tmp_path / "config", hi="anthropic/claude-opus-5")
+
+    def launcher(label, prompt, *, agent="task", effort=None, model=None):
+        raise SubagentModelUnavailable("hi", "no model configured at subagents.models.hi")
+
+    context = ToolContext(subagent_launcher=launcher)
+    result = await execute_task(
+        "call-1",
+        {"label": "design", "prompt": "review it", "agent": "designer"},
+        None,
+        None,
+        context,
+    )
+    text = "".join(block.text for block in result.content if isinstance(block, TextContent))
+    assert result.is_error
+    assert "Do NOT retry at a different effort tier" in text
+    assert "launch without 'effort'" not in text and "inherits" not in text, text
+    assert "pinned by the role or its roster slot" in text
 
 
 # ---------------------------------------------------------------------------

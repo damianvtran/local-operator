@@ -796,6 +796,17 @@ _DECLARED_RAW_READS: dict[tuple[str, str, str], tuple[int, str]] = {
     # resource record's ``retention``, written only in this process: the browser
     # tool's ``retain`` action (the agent's own ``text``), "pending site
     # approval", or the subagent runner's "paused scope" — never a peer's prose.
+    # ``harness/subagent.py`` entered this scan when the tier-refusal remedy began
+    # reading this device's tier state (``keeps_own_tier_map`` imports
+    # ``local_operator.network.definitions``, PR #3951). Its two reads predate that
+    # and are the child's own provider-failover edge, not a peer value.
+    ("local_operator/harness/subagent.py", "_make_relay", "reason"): (
+        2,
+        "``ModelSwitchEvent.reason``: this process's own provider-failover reason "
+        "for a pinned child's model hop, recorded on the job row and rendered in "
+        "the fallback notice; authored by the local failover chain, never a mesh "
+        "or peer token",
+    ),
     ("local_operator/tools/builtin.py", "_format_bridge_tab", "reason"): (
         1,
         "the handed tab's retain reason — the child's own resource record "

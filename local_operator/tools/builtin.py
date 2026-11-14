@@ -33355,12 +33355,22 @@ async def execute_task(
             # something it has to infer from a bare exception string.
             tier = getattr(exc, "tier", None)
             if tier is not None:
+                # "Launch without 'effort'" is an action only when THIS call
+                # passed one. A role- or roster-pinned tier (no ``effort`` here)
+                # refuses again without it, and the only other way round it is
+                # ``model=inherit``, which the sessions guide says a tier refusal
+                # is never worked around with unless the operator asks (QA Q-1).
+                alternative = (
+                    f"Either fix subagents.models.{tier} or launch without 'effort' "
+                    "and state that the child inherits this session's model."
+                    if item.effort is not None
+                    else f"The tier is pinned by the role or its roster slot: fix "
+                    f"subagents.models.{tier}, or report the refusal to the operator."
+                )
                 failures.append(
                     f"{item.label}: {exc}. Do NOT retry at a different effort tier — "
                     f"that runs the child on a different model than {tier!r} was "
-                    f"chosen for. Either fix subagents.models.{tier} or launch "
-                    f"without 'effort' and state that the child inherits this "
-                    f"session's model."
+                    f"chosen for. {alternative}"
                 )
             else:
                 failures.append(f"{item.label}: {exc}")

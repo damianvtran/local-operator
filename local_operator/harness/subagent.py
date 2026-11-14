@@ -208,13 +208,20 @@ class SubagentModelUnavailable(RuntimeError):
         self.remedy = remedy
 
 
-def missing_tier_remedy(tier: str, *, where: str = "this device") -> str:
+def missing_tier_remedy(
+    tier: str,
+    *,
+    where: str = "this device",
+    push_peer: str = "",
+    keeps_own_map: bool = False,
+) -> str:
     """The fix for a tier that is simply NOT configured on this device.
 
     One sentence shared by the launch refusal (:class:`SubagentModelUnavailable`)
-    and the tool-argument refusal (:func:`effort_tier_rejection`), and echoed by
-    the peer readiness row (``readiness.subagent_tier_pins_row``), so the model
-    and the operator read the same remedy wherever the gap surfaces.
+    and the tool-argument refusal (:func:`effort_tier_rejection`), both through
+    :func:`local_missing_tier_remedy`, and by the peer readiness row
+    (``readiness.subagent_tier_pins_row``), so the model and the operator read
+    the same remedy wherever the gap surfaces.
 
     WHY IT NAMES THE MESH PUSH FIRST: the common way to land here is a mesh node
     whose ``config.yml`` keeps the shipped ``subagents: {}`` while the roles it
@@ -226,17 +233,57 @@ def missing_tier_remedy(tier: str, *, where: str = "this device") -> str:
     the operator": #3869 sends tiers ONLY from the device holding the operator
     anchor's private half (``may_send_to``), so a push from any other device —
     including a credential "owner device", a different concept — sends nothing.
-    The push installs only on a node holding no tier map of its own; a node that
-    keeps its own is told so by ``readiness.subagent_tier_pins_row``. Model-facing and
-    operator-facing technical text (a command and a config key), English by
-    design like the rest of this refusal. ``where`` names the device for a
-    reader on ANOTHER device (the readiness viewer names the peer).
+
+    THE COMMAND MUST RUN AS PRINTED: a bare ``definitions push`` is refused
+    (``peer_required``), so it names ``--peer <push_peer>`` when the caller
+    knows the node (the readiness viewer does) and ``--all-peers`` otherwise
+    (a node does not know the name the operator's device files it under).
+
+    ``keeps_own_map`` (the node's tier state is ``authored``/``edited``): #3869's
+    apply never installs over a node's own map, so the push changes nothing
+    there and is NOT offered. The node may hold its own map through
+    ``subagents.model_choice`` alone, so the clear advice names both keys.
+
+    Model-facing and operator-facing technical text (a command and a config
+    key), English by design like the rest of this refusal. ``where`` names the
+    device for a reader on ANOTHER device (the readiness viewer names the peer).
     """
+    if keeps_own_map:
+        return (
+            f"To fix: set subagents.models.{tier} on {where}, or clear its "
+            "subagents.models and subagents.model_choice (whichever are set) to receive "
+            "the operator's tiers; it keeps its own tier map, so `lop network "
+            "definitions push` does not replace it"
+        )
+    target = f"--peer {push_peer}" if push_peer else "--all-peers"
     return (
-        f"To fix: run `lop network definitions push` on the operator's device (the one "
-        f"that signs for the operator; only it sends the subagent tier models to mesh "
-        f"nodes), or set subagents.models.{tier} on {where}"
+        f"To fix: run `lop network definitions push {target}` on the operator's device "
+        f"(the one that signs for the operator; only it sends the subagent tier models "
+        f"to mesh nodes), or set subagents.models.{tier} on {where}"
     )
+
+
+def keeps_own_tier_map(root: Path | None = None) -> bool:
+    """Whether THIS device holds a tier map of its own (``authored``/``edited``).
+
+    The same status the peer readiness row keys its remedy on
+    (``definitions.subagent_tiers_state``), read here so the launch refusal on
+    that node gives the same advice (review m3 / QA Q-2). ``False`` when the
+    state cannot be read: the push remedy is the right default for the
+    ``subagents: {}`` node this exists for, and a refusal must not fail on it.
+    """
+    try:
+        from local_operator.network import definitions
+
+        state = definitions.subagent_tiers_state(root if root is not None else config_dir())
+    except Exception:  # noqa: BLE001 — advice only; never fail a refusal on it
+        return False
+    return str(state.get("status") or "") in ("authored", "edited")
+
+
+def local_missing_tier_remedy(tier: str) -> str:
+    """:func:`missing_tier_remedy` for a refusal on THIS device, own-map aware."""
+    return missing_tier_remedy(tier, keeps_own_map=keeps_own_tier_map())
 
 
 # ``CANONICAL_EFFORT_TIERS`` is imported above from ``local_operator.model.effort``
@@ -871,7 +918,7 @@ def effort_tier_rejection(tier: str, *, session_model_label: str | None = None) 
             )
         return (
             f"effort tier {tier!r} is unavailable: no tiers are configured under "
-            f"subagents.models; {inherit}. {missing_tier_remedy(tier)}"
+            f"subagents.models; {inherit}. {local_missing_tier_remedy(tier)}"
         )
     try:
         raw = read_effort_tier_selectors().get(tier)
@@ -887,7 +934,7 @@ def effort_tier_rejection(tier: str, *, session_model_label: str | None = None) 
     )
     # The remedy only for a MISSING tier: a present-but-malformed value is fixed
     # by correcting it, and a push would not name that.
-    remedy = "" if raw not in (None, "") else f". {missing_tier_remedy(tier)}"
+    remedy = "" if raw not in (None, "") else f". {local_missing_tier_remedy(tier)}"
     return (
         f"effort tier {tier!r} is unavailable: {why} "
         f"(configured: {describe_effort_tiers(tiers, session_model_label=session_model_label)}); "

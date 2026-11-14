@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import configparser
 import json
+import math
 import os
 import re
 import shlex
@@ -1953,6 +1954,34 @@ MAX_TIER_PIN_ROLES = 32
 MAX_TIER_PIN_NAME_CHARS = 64
 
 
+class _ScannedRegistry:
+    """An ``AgentRegistry`` frozen at the scan it was built with, for one probe.
+
+    Forwards every read, but has no ``refresh_now`` (``_row_effort_tier`` skips
+    the per-launch refresh when the attribute is absent) and answers
+    ``require_complete_metadata`` from one check made here, so resolving N roles
+    costs one tree scan, not N. Valid only because the probe is a single
+    point-in-time answer: a launch must keep the real, refreshing registry.
+    """
+
+    def __init__(self, registry: Any) -> None:
+        self._registry = registry
+        self._incomplete: Exception | None = None
+        try:
+            registry.require_complete_metadata()
+        except Exception as exc:  # noqa: BLE001 — re-raised per role, as a launch would
+            self._incomplete = exc
+
+    def require_complete_metadata(self) -> None:
+        if self._incomplete is not None:
+            raise self._incomplete
+
+    def __getattr__(self, name: str) -> Any:
+        if name == "refresh_now":
+            raise AttributeError(name)
+        return getattr(self._registry, name)
+
+
 def subagent_tier_pins_fact(root: Path) -> dict[str, Any] | None:
     """The role-pinned effort tiers this device cannot resolve, by tier.
 
@@ -1983,9 +2012,11 @@ def subagent_tier_pins_fact(root: Path) -> dict[str, Any] | None:
         # GUARD BEFORE ``read_effort_tier_targets`` CONSTRUCTS A MANAGER (#3869's
         # Q-2 rule, ``definitions._subagent_tiers_on_disk``): ``ConfigManager``
         # renames a malformed config.yml aside and loads defaults, and this runs
-        # on a PEER's read-only probe. Unreadable → ``None`` (no pins row; the
-        # ``subagent_tiers`` row already reports the node as ``unreadable``). No
-        # file → no tiers, without constructing a manager that would write one.
+        # on a PEER's read-only probe. Unreadable → ``None``: no pins row, and
+        # the viewer learns of the broken config from the ``model_credential``
+        # row (and, once a push has recorded the refusal, the ``subagent_tiers``
+        # row), not from this one. No file → no tiers, without constructing a
+        # manager that would write one.
         config_file = root / "config.yml"
         if config_file.exists():
             settings_io.require_readable_config_path(config_file)
@@ -1994,7 +2025,17 @@ def subagent_tier_pins_fact(root: Path) -> dict[str, Any] | None:
             targets = {}
         # ``initialize``/``migrate`` off: a readiness probe must not create or
         # migrate the peer's role store as a side effect of reading it.
-        registry = AgentRegistry(root, initialize=False, migrate=False)
+        # ONE SCAN FOR EVERY ROLE (review round 1, M1). ``resolve_member_model``
+        # is the launch's resolver, and a launch re-reads the registry per call
+        # (``_row_effort_tier`` → ``refresh_now``; ``require_complete_metadata``
+        # rescans an incomplete tree). Here that ran once PER ROLE: 60 rescans of
+        # 72 agent.yml files took 7.6-8.8 s, past ``READINESS_OP_TIMEOUT_S``, so
+        # the viewer lost EVERY row for the peer, on the link reader thread. An
+        # infinite interval keeps the constructor's scan for the whole probe,
+        # and ``_ScannedRegistry`` answers the two per-launch refreshes from it.
+        registry = _ScannedRegistry(
+            AgentRegistry(root, refresh_interval=math.inf, initialize=False, migrate=False)
+        )
         # Packaged seeds too: ``resolve_profile`` falls through to them, so a
         # seed's pin is what a launch of that name would honour.
         names = {str(agent.name) for agent in registry.list_agents() if is_role(agent)}
@@ -2058,23 +2099,27 @@ def subagent_tier_pins_row(
     # apply never installs over a node's own map (``_apply_subagent_tiers_locked``:
     # authored/edited keep theirs). Advising the push there sends the operator
     # round a loop that changes nothing, so a node holding its own map gets the
-    # remedy that works on it instead. Keyed on the
-    # node's STATUS, not on a recorded conflict: a node that authored its own map
-    # refuses the push before any conflict exists. An older peer omits the fact
-    # and keeps the push remedy (true for the ``subagents: {}`` node it targets).
-    # An UNREADABLE node draws no pins row at all (the fact is ``None`` there),
-    # so the (l) row's "could not read its own config" stands alone.
+    # remedy that works on it instead (the launch refusal there says the same,
+    # ``local_missing_tier_remedy``). Keyed on the node's STATUS, not on a
+    # recorded conflict: a node that authored its own map refuses the push
+    # before any conflict exists. An older peer omits the fact and keeps the push
+    # remedy (true for the ``subagents: {}`` node it targets). An UNREADABLE node
+    # draws no pins row at all (the fact is ``None`` there); the broken config
+    # shows in ``model_credential``, and in the (l) row only once a push has
+    # recorded the refusal.
     tiers_fact = facts.get("subagent_tiers")
     tiers_status = str(tiers_fact.get("status") or "") if isinstance(tiers_fact, Mapping) else ""
+    keeps_own = tiers_status in ("authored", "edited")
+    # ``--peer`` takes a name or a device id (``RelayServer._resolve_peer``); the
+    # name reads better, but only a single shell-safe token is printed as one, so
+    # the command still runs as printed for a name with spaces or quotes.
+    name = str(getattr(member, "name", "") or "")
+    push_peer = name if re.fullmatch(r"[A-Za-z0-9._-]+", name) else str(member.device_id)
 
     def unconfigured_remedy(tier: str) -> str:
-        if tiers_status in ("authored", "edited"):
-            return (
-                f"Set subagents.models.{tier} on {peer_label}, or clear subagents.models "
-                "there to receive the operator's tiers (it keeps its own tier map, so "
-                "`lop network definitions push` does not replace it)"
-            )
-        return missing_tier_remedy(tier, where=peer_label)
+        return missing_tier_remedy(
+            tier, where=peer_label, push_peer=push_peer, keeps_own_map=keeps_own
+        )
 
     clauses: list[str] = []
     remedies: list[str] = []

@@ -62,9 +62,11 @@ with `task` subagents (`agent='reviewer'`, `'qa-tester'`, `'designer'`,
 another manager's lane at their request, and then ONE host session per lane,
 never one per round or per reviewer. A role refused with "effort tier 'hi' is
 unavailable" is a node missing `subagents.models.<tier>`: run `lop network
-definitions push` from the operator's device — the one that signs for the
-operator, the only one that sends tiers — (or set the tier on the node), not a
-`model=inherit` or session workaround.
+definitions push --peer <node>` (or `--all-peers`) from the operator's device —
+the one that signs for the operator, the only one that sends tiers — or set the
+tier on the node; a node keeping its own tier map needs the tier set there. It
+is never worked around with `model=inherit` or a session unless the operator
+asks.
 
 ## Visibility: `spawn` is listed by default
 

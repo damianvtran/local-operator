@@ -1174,21 +1174,31 @@ async def test_the_task_tool_refuses_the_inherit_sentinel_as_a_tier(config_dir, 
 def test_rejection_of_a_missing_tier_names_the_mesh_fix(config_dir) -> None:
     """The tool-argument refusal carries the same remedy as the launch refusal,
     both when no tiers exist (a mesh node's ``subagents: {}``) and when only the
-    asked-for tier is missing."""
-    remedy = (
-        "To fix: run `lop network definitions push` on the operator's device (the one "
-        "that signs for the operator; only it sends the subagent tier models to mesh "
-        "nodes), or set "
-        "subagents.models.hi on this device"
+    asked-for tier is missing. The push is offered only to a node holding no
+    tier map of its own; one that keeps its own (models, or ``model_choice``
+    alone, review m2) is told to set or clear both keys there."""
+    push = (
+        "To fix: run `lop network definitions push --all-peers` on the operator's device "
+        "(the one that signs for the operator; only it sends the subagent tier models "
+        "to mesh nodes), or set subagents.models.hi on this device"
     )
-    write_tiers(config_dir, None)
+    own = (
+        "To fix: set subagents.models.hi on this device, or clear its subagents.models "
+        "and subagents.model_choice (whichever are set) to receive the operator's tiers; "
+        "it keeps its own tier map, so `lop network definitions push` does not replace it"
+    )
+    write_tiers(config_dir, None, model_choice=None)
     rejection = effort_tier_rejection("hi")
-    assert rejection is not None and rejection.endswith(remedy)
+    assert rejection is not None and rejection.endswith(push)
     assert "no tiers are configured under subagents.models" in rejection
+
+    write_tiers(config_dir, None)  # ``model_choice`` alone is a map of its own
+    rejection = effort_tier_rejection("hi")
+    assert rejection is not None and rejection.endswith(own), rejection
 
     write_tiers(config_dir, {"lo": THREE["lo"]})
     rejection = effort_tier_rejection("hi")
-    assert rejection is not None and rejection.endswith(remedy)
+    assert rejection is not None and rejection.endswith(own)
     assert "not configured at subagents.models.hi" in rejection
 
 

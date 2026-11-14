@@ -23169,7 +23169,7 @@ class Session:
         """
         from local_operator.harness.subagent import (
             SubagentModelUnavailable,
-            missing_tier_remedy,
+            local_missing_tier_remedy,
             resolve_member_model,
         )
 
@@ -23292,7 +23292,7 @@ class Session:
                 raise SubagentModelUnavailable(
                     wanted,
                     reason,
-                    remedy=missing_tier_remedy(str(wanted)) if quiet else "",
+                    remedy=local_missing_tier_remedy(str(wanted)) if quiet else "",
                 )
             if not quiet:
                 logger.warning("subagent model tier %r: %s; using session model", wanted, reason)

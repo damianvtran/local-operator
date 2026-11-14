@@ -696,7 +696,10 @@ def test_the_mesh_front_doors_are_in_the_sessions_and_peer_messaging_guides() ->
     # and name the tier fix (2026-11-14).
     assert "with `task` subagents" in flat
     assert "ONE host session per lane, never one per round or per reviewer" in flat
-    assert "run `lop network definitions push` from the operator's device" in flat
+    # The command as printed must run: a bare `definitions push` is refused
+    # (`peer_required`), review round 1 m1.
+    assert "run `lop network definitions push --peer <node>` (or `--all-peers`)" in flat
+    assert "unless the operator asks" in flat
 
     messaging = resolver("guide://peer-messaging")
     assert messaging is not None

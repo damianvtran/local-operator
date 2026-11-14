@@ -4762,11 +4762,11 @@ def test_tier_pins_row_names_roles_pinned_to_a_tier_the_peer_cannot_resolve(
     assert readiness.CAPABILITY_SUBAGENT_TIER_PINS in readiness.NON_GATING_EQUIPMENT
     assert "tier 'hi' is not configured (pinned by designer, ux-reviewer)" in row["detail"]
     assert "tier 'lo' is not configured (pinned by scout)" in row["detail"]
+    # The command runs as printed and names the node (review round 1, m1).
     assert row["remedies"][0] == (
-        "To fix: run `lop network definitions push` on the operator's device (the one "
-        "that signs for the operator; only it sends the subagent tier models to mesh "
-        "nodes), or set "
-        "subagents.models.hi on cloud-node-1"
+        "To fix: run `lop network definitions push --peer cloud-node-1` on the operator's "
+        "device (the one that signs for the operator; only it sends the subagent tier "
+        "models to mesh nodes), or set subagents.models.hi on cloud-node-1"
     )
     assert "subagents.models.lo on cloud-node-1" in row["remedies"][1]
     assert row["observed"]["unresolved"][0] == {
@@ -4836,17 +4836,78 @@ def test_tier_pins_row_does_not_offer_the_push_to_a_node_keeping_its_own_tiers(
     tiers = readiness.subagent_tiers_row(_member(), facts, peer_label="cloud-node-1")
     assert pins is not None and tiers is not None
     assert tiers["capability"] == readiness.CAPABILITY_SUBAGENT_TIERS
+    # Both keys: a node may keep its own map through ``model_choice`` alone, and
+    # clearing ``subagents.models`` there changes nothing (review round 1, m2).
     assert pins["remedies"] == [
-        "Set subagents.models.hi on cloud-node-1, or clear subagents.models there to "
-        "receive the operator's tiers (it keeps its own tier map, so "
-        "`lop network definitions push` does not replace it)"
+        "To fix: set subagents.models.hi on cloud-node-1, or clear its subagents.models "
+        "and subagents.model_choice (whichever are set) to receive the operator's tiers; "
+        "it keeps its own tier map, so `lop network definitions push` does not replace it"
     ]
-    # Mirror state (or a peer too old to say) keeps the push remedy.
+    # Mirror state (or a peer too old to say) keeps the push remedy. A name that
+    # is not one shell token is printed as the device id, so the command runs.
     for tiers_fact in ({"status": "mirror", "origin": "d_operator", "conflict": None}, None):
         mirrored = {**facts, "subagent_tiers": tiers_fact}
         row = readiness.subagent_tier_pins_row(_member(), mirrored, peer_label="cloud-node-1")
         assert row is not None
-        assert row["remedies"][0].startswith("To fix: run `lop network definitions push`")
+        assert row["remedies"][0].startswith(
+            "To fix: run `lop network definitions push --peer cloud-node-1`"
+        )
+        spaced = _member(name="Damian's node")
+        row = readiness.subagent_tier_pins_row(spaced, mirrored, peer_label="Damian's node")
+        assert row is not None
+        assert row["remedies"][0].startswith(
+            f"To fix: run `lop network definitions push --peer {PEER}`"
+        )
+
+
+def test_a_model_choice_only_node_is_one_keeping_its_own_tiers(tmp_path: Path) -> None:
+    """Review round 1, m2: ``subagents: {model_choice: model}`` is ``authored``,
+    and #3869 refuses to install over it, so the row says to clear both keys."""
+    from local_operator.network import definitions
+
+    node = tmp_path / "node"
+    _write_subagents(node, {"model_choice": "model"})
+    _pin_role(node, "designer", "hi")
+    assert definitions.subagent_tiers_state(node)["status"] == "authored"
+    facts = readiness.collect_peer_facts(node, home=tmp_path)
+    row = readiness.subagent_tier_pins_row(_member(), facts, peer_label="cloud-node-1")
+    assert row is not None
+    assert "clear its subagents.models and subagents.model_choice" in row["remedies"][0]
+    assert "definitions push --" not in row["remedies"][0]
+
+
+@pytest.mark.parametrize("roles", [2, 12])
+def test_tier_pins_fact_scans_the_registry_once_whatever_the_role_count(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, roles: int
+) -> None:
+    """Review round 1, M1: resolving each role through the launch resolver
+    re-read every agent.yml per role (quadratic; 7.6-8.8 s at 72 agents, past
+    ``READINESS_OP_TIMEOUT_S``, blanking every row for the peer). The probe
+    must scan a constant number of times, including on an incomplete tree,
+    where ``require_complete_metadata`` rescans on every call."""
+    from local_operator.agents import AgentRegistry
+
+    node = tmp_path / "node"
+    _write_subagents(node, {})
+    for index in range(roles):
+        _pin_role(node, f"role-{index:02d}", "hi")
+    # An unreadable definition: the incomplete-tree rescan path.
+    broken = node / "agents" / "broken"
+    broken.mkdir(parents=True)
+    (broken / "agent.yml").write_text("name: [unclosed\n")
+
+    scans = 0
+    real_scan = AgentRegistry._scan_agents_metadata
+
+    def counting_scan(self: AgentRegistry) -> Any:
+        nonlocal scans
+        scans += 1
+        return real_scan(self)
+
+    monkeypatch.setattr(AgentRegistry, "_scan_agents_metadata", counting_scan)
+    fact = readiness.subagent_tier_pins_fact(node)
+    assert fact is not None
+    assert scans <= 2, scans
 
 
 def test_tier_pins_fact_is_collected_with_the_peer_facts(tmp_path: Path) -> None:
