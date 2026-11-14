@@ -1031,7 +1031,11 @@ async def _dangerous_delete(
     if branch == BUILTIN_PASS:
         # Ordinary delete: runs with zero model calls. Still marked destructive
         # so a timeout mid-delete tells the agent to check before retrying.
-        return GuardOutcome(blocked=False, destructive=True) if verdict.targets else None
+        if not verdict.targets:
+            return None
+        # A LOW that rests on proven facts (a finished foreign worktree) says
+        # so, briefly, so the agent can see what was removed and why.
+        return GuardOutcome(blocked=False, destructive=True, warnings=list(verdict.warnings))
     targets = _targets_text(verdict)
     risk = verdict.risk
     if branch == BUILTIN_REFUSE_CRITICAL:

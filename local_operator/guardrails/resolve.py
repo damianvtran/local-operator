@@ -2405,9 +2405,11 @@ class _Walker:
         # key file ranks by where it lands (CRITICAL under a protected root)
         # instead of a refusal no answer lifts. Anything else keeps the mark.
         private_env = {
-            name: (credential_path(value, home) or CREDENTIAL_MARK)
-            if is_credential_shaped(name)
-            else value
+            name: (
+                (credential_path(value, home) or CREDENTIAL_MARK)
+                if is_credential_shaped(name)
+                else value
+            )
             for name, value in env.items()
         }
         self.state = _State(env=private_env, cwd=cwd, home=home)

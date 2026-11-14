@@ -707,6 +707,18 @@ class ForeignCreations:
         self._tried = False
         self._tree: dict[str, bool] = {}
         self._identity: dict[str, tuple[int, int, int] | None] = {}
+        #: Per-classification state of the finished-foreign-worktree route
+        #: (item A of the cleanup follow-on). It lives on this object because
+        #: this is the one thing ``classify`` already creates once per call
+        #: and threads through every ``_rank``: ``finished`` memoises
+        #: :func:`finished_foreign_worktree` (no duplicate git/forge lookups for
+        #: a tree reached twice), ``cleared`` holds roots it proved safe, whose
+        #: own ledger row must not re-raise the objection the predicate just
+        #: settled, and ``notices`` are the warnings the LOW result carries.
+        #: Never reused across calls: an owner can start between two calls.
+        self.finished: dict[str, FinishedForeign] = {}
+        self.cleared: set[str] = set()
+        self.notices: list[str] = []
 
     def close(self) -> None:
         if self._conn is not None:
@@ -768,6 +780,12 @@ class ForeignCreations:
         for owner, *fields in rows:
             rec = CreationRecord(*fields)
             if rec.stamp is None or self._live(rec.path) != (rec.dev, rec.ino, rec.stamp):
+                continue
+            if rec.path in self.cleared:
+                # Exactly a worktree root ``finished_foreign_worktree`` proved
+                # safe in this classification: its creator's row is the very
+                # objection that predicate settles. Rows INSIDE or ABOVE it are
+                # still matched, so other foreign data stays protected.
                 continue
             live.setdefault(rec.path, (set(), rec))[0].add(owner)
 
@@ -1086,12 +1104,14 @@ def commit_creations(
 # -- git worktrees -------------------------------------------------------------
 
 
-def _git(args: Sequence[str], cwd: str, *, timeout: float = _GIT_TIMEOUT_S) -> str | None:
+def _git_proc(
+    args: Sequence[str], cwd: str, *, timeout: float = _GIT_TIMEOUT_S
+) -> subprocess.CompletedProcess[str] | None:
     env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
     # Read-only probes: no prompts, no index refresh writes, no credential helper.
     env.update(GIT_TERMINAL_PROMPT="0", GIT_OPTIONAL_LOCKS="0")
     try:
-        proc = subprocess.run(
+        return subprocess.run(
             ["git", "-C", cwd, *args],
             capture_output=True,
             text=True,
@@ -1101,7 +1121,11 @@ def _git(args: Sequence[str], cwd: str, *, timeout: float = _GIT_TIMEOUT_S) -> s
         )
     except (OSError, subprocess.SubprocessError):
         return None
-    return proc.stdout if proc.returncode == 0 else None
+
+
+def _git(args: Sequence[str], cwd: str, *, timeout: float = _GIT_TIMEOUT_S) -> str | None:
+    proc = _git_proc(args, cwd, timeout=timeout)
+    return proc.stdout if proc is not None and proc.returncode == 0 else None
 
 
 #: Ignored entries a clean-worktree removal may take with it: build and
@@ -1269,7 +1293,7 @@ def _only_regenerable(directory: str) -> bool:
     return True
 
 
-def worktree_state(path: str, *, own: bool = False) -> str:
+def worktree_state(path: str, *, own: bool = False, facts: dict[str, bool] | None = None) -> str:
     """The removal-relevant state of a worktree path.
 
     ``own``: the caller proved (creation ledger) that this session or its
@@ -1382,6 +1406,11 @@ def worktree_state(path: str, *, own: bool = False) -> str:
         return "unknown"
     if any(ln and not ln.startswith("!! ") for ln in ignored.splitlines()):
         return "dirty"  # a tracked change or an untracked (``??``) entry
+    if facts is not None:
+        # For ``finished_foreign_worktree``, which may not rest on basenames
+        # (``.venv/private-backup.json`` passes ``_regenerable``): ANY ignored
+        # entry, read from this same status call rather than a second one.
+        facts["ignored"] = any(ln.startswith("!! ") for ln in ignored.splitlines())
     for line in ignored.splitlines():
         if not line.startswith("!! "):
             continue
@@ -2163,6 +2192,163 @@ def worktree_activity(path: str, session_id: str = "") -> WorktreeActivity:
             newest=newest,
         )
     return WorktreeActivity(branch, "none", pr_label=label, owners_running=owners, newest=newest)
+
+
+@dataclass(frozen=True)
+class FinishedForeign:
+    """Whether a FOREIGN linked worktree is finished work that is safe to remove.
+
+    ``verdict``: ``safe`` / ``not-safe`` / ``unknown``; only ``safe`` earns the
+    route. ``reasons``: value-free codes (the positive facts when safe, the
+    first failed fact otherwise), so a caller can journal or show them without
+    leaking branch names or paths. ``state`` and ``activity`` are the
+    ``worktree_state``/``worktree_activity`` readings it used, kept so the
+    judge brief of an unsafe tree reuses them instead of looking twice.
+    """
+
+    verdict: str
+    reasons: tuple[str, ...]
+    state: str = "unknown"
+    activity: WorktreeActivity | None = None
+
+    @property
+    def safe(self) -> bool:
+        return self.verdict == "safe"
+
+    def warning(self, root: str) -> str:
+        """The short steering note a LOW from this route carries (``GuardOutcome.warnings``)."""
+        return (
+            f"Guardrail {_DANGEROUS_DELETE}: finished worktree {root} removed without review — "
+            "registered linked tree, HEAD on its branch and merged into origin's default "
+            "branch, no open PR, no running owner, clean with no ignored files. "
+            "Its branch ref is kept."
+        )
+
+
+#: The rule name, spelled here to avoid importing ``check`` (it imports us).
+_DANGEROUS_DELETE = "dangerous-delete"
+#: The positive facts a ``safe`` :class:`FinishedForeign` lists.
+_FINISHED_FACTS = (
+    "registered-linked",
+    "branch-retained",
+    "merged-on-origin",
+    "no-open-pr",
+    "owner-idle",
+    "clean-no-ignored",
+)
+
+
+def finished_foreign_worktree(
+    path: str, session_id: str, *, activity: WorktreeActivity | None = None
+) -> FinishedForeign:
+    """Prove a worktree another (finished) session made is safe to remove, or say why not.
+
+    WHY (operator request, cleanup follow-on): "the guardrails are not allowing
+    agents to clean up after themselves on obviously safe directories and
+    worktree folders". A tree is often made by a subagent or an earlier
+    session and finished later; every such foreign tree went to the judge.
+    Operator decision (ask a-891c, "Yes, rank it LOW"): a clean, merged-on-
+    origin, idle worktree with no open PR is LOW even when another, finished
+    session created it. Every fact below must be POSITIVELY established; a
+    failed or unreadable check is ``unknown``, never safe:
+
+    1. registered linked tree, clean, no lock, no live cwd (``worktree_state``)
+       and NO ignored entry at all \u2014 a basename (``.venv``, ``build``) is not
+       proof the content is regenerable, so such trees stay with the judge;
+    2. HEAD on a named branch whose ref equals HEAD (detached \u2192 not-safe);
+    3. HEAD is an ancestor of the SHA origin ADVERTISES for its default branch
+       (``ls-remote --symref``: never a hardcoded ``main``, never a fetch),
+       and the local ``refs/remotes/origin/<default>`` equals it, since the
+       ancestry walk needs that object locally. A squash/rebase merge has no
+       ancestry and stays with the judge \u2014 a merged-PR badge proves nothing
+       about later commits;
+    4. no open PR/MR (``worktree_activity`` says ``none``; ``unknown`` fails);
+    5. no running owner, VERIFIED: ``_running_owners(strict=True)`` raises on
+       an unreadable ledger/registry or a tree with no ledger creator row
+       (pre-ledger trees therefore stay with the judge);
+    6. HEAD unchanged at the end (a commit during the checks fails closed).
+
+    COST: reuses ``_git`` (``_GIT_TIMEOUT_S``) and ``worktree_state``'s status
+    bound, plus one forge lookup; callers run it inside their own deadline
+    (``classify._bounded_lookups``) and memoise it per classification. No
+    timeout of its own. Pass ``activity`` when the caller already has it.
+    """
+
+    def no(code: str, state: str = "unknown") -> FinishedForeign:
+        return FinishedForeign("not-safe", (code,), state, activity)
+
+    def unknown(code: str, state: str = "unknown") -> FinishedForeign:
+        return FinishedForeign("unknown", (code,), state, activity)
+
+    real = os.path.realpath(path)
+    facts: dict[str, bool] = {}
+    state = worktree_state(real, facts=facts)
+    if state in ("not-linked", "dirty", "locked", "stale-initializing", "busy"):
+        return no(f"state-{state}", state)
+    if state != "clean":
+        return unknown("state-unknown", state)
+    if facts.get("ignored", True):
+        return no("ignored-content", state)
+    ref = (_git(["symbolic-ref", "--quiet", "HEAD"], real) or "").strip()
+    if not ref.startswith("refs/heads/"):
+        return no("detached", state)
+    heads = (_git(["rev-parse", "HEAD", ref], real) or "").split()
+    if len(heads) != 2:
+        return unknown("branch-unreadable", state)
+    if heads[0] != heads[1]:
+        return no("branch-moved", state)
+    head = heads[0]
+    try:
+        owners = _running_owners(real, session_id, strict=True)
+    except Exception:  # noqa: BLE001 — incomplete owner facts are unknown, not idle
+        return unknown("owner-unknown", state)
+    if owners:
+        return no("owner-running", state)
+    # Prompts and credential helpers off: the guard never asks for, or reads,
+    # a credential. ``BatchMode`` stops ssh from prompting for a passphrase.
+    advert = _git(
+        [
+            "-c",
+            "credential.helper=",
+            "-c",
+            "core.sshCommand=ssh -o BatchMode=yes",
+            "ls-remote",
+            "--symref",
+            "origin",
+            "HEAD",
+        ],
+        real,
+    )
+    if advert is None:
+        return unknown("origin-unreachable", state)
+    default, advertised = None, None
+    for line in advert.splitlines():
+        left, _, right = line.partition("\t")
+        if left.startswith("ref: refs/heads/") and right == "HEAD":
+            default = left[len("ref: refs/heads/") :]
+        elif right == "HEAD" and re.fullmatch(r"[0-9a-f]{40,64}", left):
+            advertised = left
+    if not default or not advertised:
+        return unknown("origin-default-unknown", state)
+    local = _git(["rev-parse", "--verify", "--quiet", f"refs/remotes/origin/{default}"], real)
+    if (local or "").strip() != advertised:
+        # Stale or missing local copy of what origin advertises: the caller
+        # may fetch and retry; the guard never fetches.
+        return unknown("origin-ref-stale", state)
+    proc = _git_proc(["merge-base", "--is-ancestor", head, advertised], real)
+    if proc is None or proc.returncode not in (0, 1):
+        return unknown("ancestry-unknown", state)
+    if proc.returncode == 1:
+        return no("not-merged", state)
+    if activity is None:
+        activity = worktree_activity(real, session_id)
+    if activity.pr_state == "open":
+        return no("open-pr", state)
+    if activity.pr_state != "none" or activity.branch != ref[len("refs/heads/") :]:
+        return unknown("pr-unknown", state)
+    if (_git(["rev-parse", "--verify", "HEAD"], real) or "").strip() != head:
+        return unknown("head-moved", state)
+    return FinishedForeign("safe", _FINISHED_FACTS, state, activity)
 
 
 def _ignored_unregenerable(real: str) -> bool:

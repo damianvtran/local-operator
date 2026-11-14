@@ -88,6 +88,9 @@ class Verdict:
     risk: Risk
     targets: list[RankedTarget] = field(default_factory=list)
     reasons: list[str] = field(default_factory=list)
+    #: Steering notes a LOW verdict carries to the agent (``GuardOutcome.warnings``):
+    #: today the facts behind a finished-foreign-worktree LOW (item A).
+    warnings: list[str] = field(default_factory=list)
 
     @property
     def critical_targets(self) -> list[RankedTarget]:
@@ -1287,6 +1290,17 @@ def _rank(
                 )
             if idle and state == "clean" and not target.forced:
                 return RankedTarget(target, Risk.LOW, f"a clean linked git worktree ({facts})")
+            if own is None and idle and state == "clean" and target.forced:
+                # ``--force`` on ANOTHER session's clean tree: LOW only when the
+                # finished-worktree predicate proves it merged and unused
+                # (operator decision a-891c); otherwise the ordinary ranking
+                # below and its foreign-ledger HIGH apply as before.
+                finished = _finished(path, session_id, foreign, activity)
+                if finished.safe:
+                    _clear_finished(foreign, path, finished)
+                    return RankedTarget(
+                        target, Risk.LOW, f"a finished, merged linked git worktree ({facts})"
+                    )
             if idle and state == "stale-initializing" and target.force_count == 2:
                 return RankedTarget(
                     target,
@@ -1325,7 +1339,13 @@ def _rank(
             notes.append(worktree_note)
     if not target.worktree_remove and target.op == "delete" and not target.selected:
         reached = _reached_worktrees(
-            target, path, prot, session_id, globstar=globstar, through_link=link is None
+            target,
+            path,
+            prot,
+            session_id,
+            globstar=globstar,
+            through_link=link is None,
+            foreign_rows=foreign,
         )
         if reached is not None:
             return reached
@@ -1460,6 +1480,7 @@ def _reached_worktrees(
     *,
     globstar: bool = False,
     through_link: bool = False,
+    foreign_rows: ForeignCreations | None = None,
 ) -> RankedTarget | None:
     """Rank a delete by the linked worktrees it reaches, or ``None`` if it reaches none.
 
@@ -1489,6 +1510,8 @@ def _reached_worktrees(
     """
     from local_operator.guardrails import provenance as prov
 
+    candidates: list[str] = []
+    scan = path
     if target.pattern is not None:
         matches = _expand_glob(target.pattern, globstar=globstar)
         if matches is None:
@@ -1507,7 +1530,6 @@ def _reached_worktrees(
         ]
         roots = prov.linked_worktrees_reached(candidates, resolved=True)
     else:
-        scan = path
         if through_link and os.path.islink(path):
             # MAJOR-1 (restack of #3802): ``path`` is slash-stripped, so for
             # ``rm -rf link/`` it names the LINK, which
@@ -1539,7 +1561,9 @@ def _reached_worktrees(
         jobs[f"state:{root}"] = lambda r=root: prov.worktree_state(r, own=True)
         jobs[f"activity:{root}"] = lambda r=root: prov.worktree_activity(r, session_id)
     for root in foreign[:_MAX_FOREIGN_STATES]:
-        jobs[f"fstate:{root}"] = lambda r=root: prov.worktree_state(r)
+        # The finished-worktree predicate (item A) reads the same state plus
+        # the facts that can clear a foreign tree; one lookup, memoised.
+        jobs[f"fstate:{root}"] = lambda r=root: _finished(r, session_id, foreign_rows)
     deadline = time.monotonic() + _REACH_LOOKUP_BUDGET_S
     looked = _bounded_lookups(jobs, deadline)
     held: list[str] = []
@@ -1577,15 +1601,40 @@ def _reached_worktrees(
         )
     if not foreign and not held:
         return None
+    finished = {root: looked.get(f"fstate:{root}") for root in foreign[:_MAX_FOREIGN_STATES]}
+    if (
+        not held
+        and len(foreign) <= _MAX_FOREIGN_STATES
+        and all(f is not None and f.safe for f in finished.values())
+    ):
+        # Every foreign tree reached is a finished, merged, idle one (item A):
+        # that objection is settled, and ONLY that one. A delete of exactly
+        # those roots (the tree itself, or a glob matching only proven roots)
+        # is LOW; an enclosing delete continues to the ordinary ranking, so
+        # parent data, other sessions' rows and protected names still count.
+        for root in foreign:
+            _clear_finished(foreign_rows, root, finished[root])
+        exact = set(candidates) if target.pattern is not None else {os.path.realpath(scan)}
+        if exact and exact <= set(roots):
+            return RankedTarget(target, Risk.LOW, "finished, merged linked git worktrees")
+        return None
     parts = list(held)
     states = {
-        root: looked.get(f"fstate:{root}", "unknown") for root in foreign[:_MAX_FOREIGN_STATES]
+        root: (f.state if (f := finished.get(root)) is not None else "unknown")
+        for root in foreign[:_MAX_FOREIGN_STATES]
     }
     # Work at risk first: a dirty/locked/busy tree is what the judge must see.
     foreign.sort(key=lambda r: states.get(r, "not read") == "clean")
     shown = foreign[:_MAX_FOREIGN_SHOWN]
-    activities = _bounded_lookups(
-        {root: (lambda r=root: prov.worktree_activity(r, session_id)) for root in shown},
+    known = {
+        root: f.activity for root in shown if (f := finished.get(root)) and f.activity is not None
+    }
+    activities = known | _bounded_lookups(
+        {
+            root: (lambda r=root: prov.worktree_activity(r, session_id))
+            for root in shown
+            if root not in known
+        },
         deadline,
     )
     for root in shown:
@@ -1608,6 +1657,39 @@ def _reached_worktrees(
         parts.append(f"… and {len(foreign) - _MAX_FOREIGN_SHOWN} more foreign linked worktrees")
     head = f"deletes {len(roots)} linked worktree{'s' if len(roots) != 1 else ''}"
     return RankedTarget(target, Risk.HIGH, f"{head}: " + " | ".join(parts))
+
+
+def _finished(
+    root: str,
+    session_id: str,
+    rows: ForeignCreations | None,
+    activity: Any = None,
+) -> Any:
+    """``provenance.finished_foreign_worktree`` for ``root``, memoised per classification.
+
+    The memo lives on the call's ``ForeignCreations`` (see its ``finished``),
+    so a tree reached by two targets of one command is checked once, and
+    never across calls (an owner may start in between).
+    """
+    from local_operator.guardrails import provenance as prov
+
+    real = os.path.realpath(root)
+    memo = rows.finished if rows is not None else {}
+    if real not in memo:
+        memo[real] = prov.finished_foreign_worktree(real, session_id, activity=activity)
+    return memo[real]
+
+
+def _clear_finished(rows: ForeignCreations | None, root: str, finished: Any) -> None:
+    """Record a proven finished tree: its ledger row stops objecting, and the
+    LOW result carries the facts as a warning (``Verdict.warnings``)."""
+    if rows is None:
+        return
+    real = os.path.realpath(root)
+    rows.cleared.add(real)
+    note = finished.warning(real)
+    if note not in rows.notices:
+        rows.notices.append(note)
 
 
 #: Glob matches ``_foreign_reason`` compares one by one; past it the glob's
@@ -1824,7 +1906,7 @@ def classify_targets(
     if opaque_reasons:
         risk = max(risk, Risk.HIGH)
     reasons = [r.reason for r in ranked if r.risk is not Risk.LOW] + list(opaque_reasons)
-    return Verdict(risk=risk, targets=ranked, reasons=reasons)
+    return Verdict(risk=risk, targets=ranked, reasons=reasons, warnings=list(foreign.notices))
 
 
 def classify_bash(

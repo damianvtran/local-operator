@@ -377,6 +377,10 @@ async def test_a_builtin_judge_call_is_not_reported_as_allowed(
     assert denied.rule == "dangerous-delete"
 
 
+#: A synthetic token-shaped value (no credential): not a path, so it stays masked.
+_AWS_EXAMPLE_KEY = "synthetic-secret-" + "0" * 24
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("command", "branch"),
@@ -401,7 +405,10 @@ async def test_the_builtin_branch_is_what_the_checkpoint_does(
     ctx = _context(tmp_path, home=guarded_home, state=state)
     ctx = CallContext(
         cwd=ctx.cwd,
-        env={**ctx.env, "AWS_SECRET_ACCESS_KEY": str(guarded_home)},
+        # A TOKEN value: since the cleanup follow-on (item C) a credential
+        # variable holding a plain path resolves like that literal path (HOME
+        # here would be CRITICAL), so the credential branch needs a real token.
+        env={**ctx.env, "AWS_SECRET_ACCESS_KEY": _AWS_EXAMPLE_KEY},
         scratchpad=ctx.scratchpad,
         session_id=ctx.session_id,
     )
@@ -432,7 +439,7 @@ async def test_the_builtin_branch_is_what_the_checkpoint_does(
         assert "no `ask` or approval can lift" in allowed.text
         assert "literal path" in allowed.text
         assert "ask the operator" not in allowed.text
-        assert str(guarded_home) not in allowed.text, "the variable's value must not be shown"
+        assert _AWS_EXAMPLE_KEY not in allowed.text, "the variable's value must not be shown"
         assert ctx.cwd is not None
         assert ctx.cwd not in allowed.text, "the cwd is not the target"
     else:
