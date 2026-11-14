@@ -1922,6 +1922,21 @@ module itself — `local_operator/session/open_frame.py` is a pure function of
 it the day its fold has a bounded suffix to fold from. Until then the daemon
 keeps `DurableFoldCache` and the mobile plane is unchanged by this contract.
 
+**Nested write/edit diff bindings (`diff_bindings: 1`).** A `write`/`edit` run
+inside an `eval` cell is journaled as a host `custom` row,
+`tool_call_diff_binding_v1`, which the open frame drops by default (an older
+client cannot paint it, so it must not spend that client's row budget). A
+viewer that can paint it sends `diff_bindings=1` on the snapshot, `/history`
+(open-frame) and `/events` routes; the initial SSE snapshot frame honours the
+same declaration. Each surviving row is rebuilt from validated fields only —
+`details: {v, session_id, outer_call_id, call_id, tool: "write"|"edit",
+diff_full: {v, state, rows?, digest?}}` — and is served only when it binds
+**the viewed session** (exact ids, `v`, and the nested id carrying its
+`<outer_call_id>:` prefix as a consistency check, never as authority). Any
+forged, malformed or extra-field row is dropped. The full diff itself is then
+fetched through the existing scoped full-diff GET, unchanged. `diff_bindings=0`
+(the default) serves exactly the pre-flag rows and counts.
+
 ### Admission and retry semantics
 
 A200 message receipt means the canonical runtime acknowledged admission, not
