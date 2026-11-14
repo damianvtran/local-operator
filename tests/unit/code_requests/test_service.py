@@ -314,6 +314,29 @@ async def test_401_re_resolves_once_then_degrades_to_link_only(tmp_path: Path, m
     assert view["fetch_state"] == "unauthenticated"
 
 
+@pytest.mark.asyncio
+async def test_a_rejected_borrowed_login_names_its_lender(tmp_path: Path, monkeypatch) -> None:
+    """A mesh node's 401 on a BROKERED token: the sign-in lives on the lender,
+    so the row says so instead of "sign in again with gh/glab" here."""
+
+    def fake_resolve(host, forge, *, home=None, config_dir=None, fresh=False):
+        return code_credentials.Token(
+            host=host, forge=forge, value="tok", source="brokered", lender="studio-mac"
+        )
+
+    async def unauthorized(ref, validators, token, *, stored=None, client=None):
+        raise base.ForgeHTTPError("unauthorized", "summary", 401)
+
+    monkeypatch.setattr(service, "resolve", fake_resolve)
+    _patch_fetch(monkeypatch, unauthorized)
+    await service.refresh_keys(tmp_path, [REF])
+    view = service.view_for_ref(tmp_path, REF)
+    assert view is not None and view["link_only"] is True
+    assert "borrowed from studio-mac expired" in view["link_only_reason"]
+    assert "gh/glab" not in view["link_only_reason"]
+    assert view["fetch_state"] == "unauthenticated"
+
+
 # ---------------------------------------------------------------------------
 # the read side
 # ---------------------------------------------------------------------------

@@ -19,8 +19,15 @@ from local_operator.network.credentials import github as gh_credentials
 
 
 @pytest.fixture(autouse=True)
-def _clean_cache():
+def _clean_cache(monkeypatch):
     credentials._reset_for_tests()
+    # ISOLATION FROM THE HOST: the github.com ladder now asks the mesh broker and
+    # the env BEFORE gh's own login, so an unpatched test would read this
+    # device's real placement (and a session's injected GH_TOKEN). Tests that
+    # exercise either arm opt back in explicitly.
+    monkeypatch.setattr(gh_credentials, "_client_for", lambda root: None)
+    monkeypatch.delenv("GH_TOKEN", raising=False)
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
     yield
     credentials._reset_for_tests()
 
@@ -325,3 +332,140 @@ def test_no_login_anywhere_is_still_absent(tmp_path: Path, monkeypatch) -> None:
         credentials.resolve("github.com", "github")
     assert caught.value.kind == "absent"
     assert "gh auth login" in caught.value.message
+
+
+# ---------------------------------------------------------------------------
+# Mesh-brokered github.com login (lop-remote-node-2: bash's `gh pr view` worked
+# on the borrowed GH_TOKEN while code_requests refused "could not be read")
+# ---------------------------------------------------------------------------
+
+
+class _Grant:
+    def __init__(self, token: str) -> None:
+        self.access_token = token
+        self.grant_expires_at_ms = 0
+
+
+class _FakeBorrowClient:
+    """The ``MeshCredentialClient`` surface ``borrowed_git_env`` and the
+    resolver touch: a holder of a github credential owned by ``owner``."""
+
+    self_device = "node-device"
+    network_id = "net-synthetic"
+
+    def __init__(self, answer, *, holder: bool = True, owner: str = "studio-mac") -> None:
+        self.answer = answer
+        self.holder = holder
+        self.owner = owner
+        self.asked = 0
+
+    def should_borrow(self, key: str) -> bool:
+        return self.holder
+
+    def owner_label(self, key: str) -> str:
+        return self.owner
+
+    def request_grant_sync(self, key: str, **kwargs):
+        self.asked += 1
+        return self.answer
+
+    def cached_refusal(self, key: str):
+        from local_operator.network.credentials.types import BrokerError
+
+        return self.answer if isinstance(self.answer, BrokerError) else None
+
+
+def _node_without_gh_login(tmp_path: Path, monkeypatch) -> Path:
+    """The node as measured: hosts.yml is ``{}`` (gh logged out) and the gh on
+    PATH exits 1 for ``auth token`` \u2014 ``read_gh_token`` calls that
+    "unusable"."""
+    home = tmp_path / "home"
+    (home / ".config" / "gh").mkdir(parents=True)
+    (home / ".config" / "gh" / "hosts.yml").write_text("{}\n")
+    exe = _script(tmp_path, "fake-gh", "#!/bin/sh\necho 'no oauth token' >&2\nexit 1\n")
+    monkeypatch.setattr(gh_credentials, "find_gh", lambda home: exe)
+    # The self-revoke timer would DELETE the synthetic token at GitHub.
+    monkeypatch.setattr(gh_credentials, "_schedule_self_revoke", lambda token, exp: None)
+    return home
+
+
+def test_brokered_login_resolves_when_the_node_has_no_gh_login(tmp_path: Path, monkeypatch) -> None:
+    home = _node_without_gh_login(tmp_path, monkeypatch)
+    client = _FakeBorrowClient(_Grant("ghs_synthetic_borrowed_1"))
+    monkeypatch.setattr(gh_credentials, "_client_for", lambda root: client)
+    token = credentials.resolve("github.com", "github", home=home)
+    assert token.source == "brokered" and token.value == "ghs_synthetic_borrowed_1"
+    assert token.lender == "studio-mac"
+    assert "ghs_synthetic_borrowed_1" not in repr(token)
+
+
+def test_a_borrowed_login_never_vouches_for_ghes(tmp_path: Path, monkeypatch) -> None:
+    _node_without_gh_login(tmp_path, monkeypatch)
+    client = _FakeBorrowClient(_Grant("ghs_synthetic_borrowed_2"))
+    monkeypatch.setattr(gh_credentials, "_client_for", lambda root: client)
+    with pytest.raises(credentials.CredentialError):
+        credentials.resolve("ghe.example.com", "github", home=tmp_path / "home")
+    assert client.asked == 0
+
+
+def test_env_gh_token_beats_an_unreadable_gh_login(tmp_path: Path, monkeypatch) -> None:
+    """gh's own precedence: GH_TOKEN before hosts.yml \u2014 a failing gh must not
+    short-circuit the env arm."""
+    home = _node_without_gh_login(tmp_path, monkeypatch)
+    monkeypatch.setenv("GH_TOKEN", "env-synthetic-token")
+    token = credentials.resolve("github.com", "github", home=home)
+    assert token.source == "env" and token.value == "env-synthetic-token"
+
+
+def test_a_logged_out_hosts_file_is_absent_not_unreadable(tmp_path: Path, monkeypatch) -> None:
+    home = _node_without_gh_login(tmp_path, monkeypatch)
+    with pytest.raises(credentials.CredentialError) as caught:
+        credentials.resolve("github.com", "github", home=home)
+    assert caught.value.kind == "absent"
+    assert "could not be read" not in caught.value.message
+    assert "`gh auth login`" in caught.value.message
+
+
+def test_a_stored_but_unreadable_gh_login_still_says_so(tmp_path: Path, monkeypatch) -> None:
+    """The "could not be read" sentence stays for a login that IS stored."""
+    home = _node_without_gh_login(tmp_path, monkeypatch)
+    (home / ".config" / "gh" / "hosts.yml").write_text("github.com:\n  user: someone\n")
+    with pytest.raises(credentials.CredentialError) as caught:
+        credentials.resolve("github.com", "github", home=home)
+    assert caught.value.kind == "unusable"
+    assert "could not be read" in caught.value.message
+
+
+def test_a_lapsed_borrow_names_the_lender_and_expiry(tmp_path: Path, monkeypatch) -> None:
+    from local_operator.network.credentials.types import BrokerError
+
+    home = _node_without_gh_login(tmp_path, monkeypatch)
+    refusal = BrokerError(code="no_local_credential", key="github", owner_device_name="studio-mac")
+    monkeypatch.setattr(gh_credentials, "_client_for", lambda root: _FakeBorrowClient(refusal))
+    with pytest.raises(credentials.CredentialError) as caught:
+        credentials.resolve("github.com", "github", home=home)
+    message = caught.value.message
+    assert "borrowed from studio-mac expired" in message
+    assert "sign in again on studio-mac" in message
+    assert "could not be read on this device" not in message
+
+
+def test_an_unreachable_lender_says_reconnect(tmp_path: Path, monkeypatch) -> None:
+    from local_operator.network.credentials.types import BrokerError
+
+    home = _node_without_gh_login(tmp_path, monkeypatch)
+    refusal = BrokerError(code="owner_offline", key="github", owner_device_name="studio-mac")
+    monkeypatch.setattr(gh_credentials, "_client_for", lambda root: _FakeBorrowClient(refusal))
+    with pytest.raises(credentials.CredentialError) as caught:
+        credentials.resolve("github.com", "github", home=home)
+    assert "could not be reached; reconnect studio-mac" in caught.value.message
+
+
+def test_a_refused_borrow_still_falls_back_to_an_env_token(tmp_path: Path, monkeypatch) -> None:
+    from local_operator.network.credentials.types import BrokerError
+
+    home = _node_without_gh_login(tmp_path, monkeypatch)
+    refusal = BrokerError(code="owner_offline", key="github")
+    monkeypatch.setattr(gh_credentials, "_client_for", lambda root: _FakeBorrowClient(refusal))
+    monkeypatch.setenv("GITHUB_TOKEN", "env-synthetic-fallback")
+    assert credentials.resolve("github.com", "github", home=home).source == "env"

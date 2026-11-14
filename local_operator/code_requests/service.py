@@ -58,7 +58,12 @@ from local_operator.code_requests.adapters.base import (
     ForgeHTTPError,
     merge_comments,
 )
-from local_operator.code_requests.credentials import CredentialError, Token, resolve
+from local_operator.code_requests.credentials import (
+    CredentialError,
+    Token,
+    borrowed_expired_message,
+    resolve,
+)
 from local_operator.code_requests.refs import Ref
 
 logger = logging.getLogger(__name__)
@@ -977,7 +982,9 @@ async def _handle_fetch_error(
         try:
             fresh = await asyncio.to_thread(resolve, ref.host, ref.forge, fresh=True)
         except CredentialError:
-            changed = _record_failure(config_dir, ref, prior, _REJECTED, kind="credential")
+            changed = _record_failure(
+                config_dir, ref, prior, _rejected_message(token), kind="credential"
+            )
             fetch_cache.note_key_failure(ref.key)
             return changed
         adapter = adapter_for(ref)
@@ -991,7 +998,9 @@ async def _handle_fetch_error(
             )
         except ForgeHTTPError as second:
             if second.kind == "unauthorized":
-                changed = _record_failure(config_dir, ref, prior, _REJECTED, kind="credential")
+                changed = _record_failure(
+                    config_dir, ref, prior, _rejected_message(fresh), kind="credential"
+                )
                 fetch_cache.note_key_failure(ref.key)
                 return changed
             return await _handle_fetch_error(config_dir, ref, prior, second, fresh)
@@ -1029,6 +1038,18 @@ async def _handle_fetch_error(
 
 
 _REJECTED = "credential rejected — sign in again with gh/glab, then refresh"
+
+
+def _rejected_message(token: Token) -> str:
+    """The 401 sentence for ``token``: a BORROWED login names its lender.
+
+    "Sign in again with gh" is the wrong remedy on a mesh node — the login the
+    forge rejected lives on the device that lent it, and a local sign-in would
+    only shadow the arrangement. Every local arm keeps :data:`_REJECTED`.
+    """
+    if token.source == "brokered":
+        return borrowed_expired_message(token.lender)
+    return _REJECTED
 
 
 def _validators_of(prior: Mapping[str, Any] | None) -> dict[str, dict[str, str]]:
