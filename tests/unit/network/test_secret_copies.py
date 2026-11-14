@@ -26,6 +26,8 @@ process, two roots).
 from __future__ import annotations
 
 import json
+import logging
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -46,6 +48,8 @@ from tests.unit.network.test_relay_e2e import (  # noqa: F401 — fixtures by im
     _pair,
     devices,
 )
+
+_LOG = logging.getLogger(__name__)
 
 # The unit run takes the keyfile fallback: no session is registered, so a
 # broker would deny every read. The autouse gate stays on -- review round 2
@@ -83,6 +87,115 @@ def _member_value(root: Path, name: str) -> bytes | None:
 
 def _member_has(root: Path, name: str) -> bool:
     return _member_value(root, name) is not None
+
+
+def _probe(fn: Any) -> str:
+    """One diagnostic read, rendered; a failing probe names its exception type only.
+
+    WHY: the snapshot runs while a wait has ALREADY failed, on a mesh that may be
+    half torn down. A probe that raised would replace the original failure with
+    its own and defeat the point, so every read reports ``<unavailable: Type>``
+    instead (the type, never ``str(exc)``: an exception message can carry a path
+    or a value).
+    """
+    try:
+        return str(fn())
+    except Exception as exc:  # noqa: BLE001 — diagnostics never mask the real failure
+        return f"<unavailable: {type(exc).__name__}>"
+
+
+def _link_summary(server: Any) -> list[str]:
+    """Per live link: peer short id, phase, frames received, seconds since last frame."""
+    now = time.time()
+    with server._links_lock:
+        links = list(server.links.items())
+    return [
+        f"{str(device)[-8:]}:{getattr(link, 'phase', '?')}"
+        f"/frames_in={getattr(link, 'frames_in', '?')}"
+        f"/idle={now - float(getattr(link, 'last_frame_at', now)):.1f}s"
+        for device, link in links
+    ]
+
+
+def _engine_summary(engine: Any) -> str:
+    """The sync engine's scheduling state: in-flight guards and the loop thread's life.
+
+    ``inflight_members`` still holding the member after a long wait means the
+    exchange coroutine never finished (stuck dial/serve); an empty set with no
+    ack means it finished without delivering. ``loop_thread_alive`` False means
+    nothing could have run the scheduled work at all.
+    """
+    loop = engine._loop
+    thread = getattr(loop, "_thread", None)
+    return (
+        f"inflight_members={len(engine._inflight_members)} pulling={len(engine._pulling)} "
+        f"closed={engine._closed} loop_started={loop is not None} "
+        f"loop_thread_alive={thread.is_alive() if thread is not None else None}"
+    )
+
+
+def _ledger_summary(mesh: Any) -> str:
+    """Owner ledger (generation + the member's ack) and the member's applied row.
+
+    Reads the sync documents from disk exactly as the product does. Only ints
+    and field NAMES are rendered: the ack/applied rows carry digests and record
+    ids, which stay out of the log.
+    """
+    owner_state = SyncState.load(mesh.network_id, mesh.a.root)
+    member_state = SyncState.load(mesh.network_id, mesh.b.root)
+    generation = owner_state.generation(KEY) or {}
+    ack = owner_state.ack_for(mesh.member, KEY)
+    applied = member_state.applied_for(KEY)
+    ack_text = "none" if ack is None else f"gen={ack.get('gen')} fields={sorted(ack)}"
+    applied_text = "none" if applied is None else f"gen={applied.get('gen')}"
+    return (
+        f"owner_gen={generation.get('gen')} owner_ack_for_member={ack_text} "
+        f"member_applied={applied_text} owner_mark={owner_state.mark_for(KEY) or 'none'!r}"
+    )
+
+
+def _store_names(root: Path) -> list[str]:
+    """Secret NAMES held under ``root`` — the listing returns metadata, never values."""
+    return sorted(record.name for record in _secret_store(root).list())
+
+
+def _sync_snapshot(mesh: Any, step_code: Any = None, started: float | None = None) -> str:
+    """A compact, REDACTED account of where a copy stalled, for an expired wait.
+
+    Built lazily (only as an ``assert`` message, i.e. on failure) and also logged
+    at ERROR so it lands in CI's "Captured log call" next to conftest's
+    "net wait expired" line. One expiry of the member-has wait in
+    ``test_a_shared_secret_copies_re_sealed_and_marked`` (CI run 43570943897)
+    left no evidence to tell a loaded runner from a lost wake from a delivery
+    defect; each section below answers one of those:
+
+    - ``step``: what ``credentials_sync_step`` returned (scheduled/in_sync/...);
+    - ``owner_engine`` / ``member_engine``: was the exchange still in flight, and
+      was the loop thread that runs it alive;
+    - ``owner_links`` / ``member_links``: is the relay link up, and is it still
+      carrying frames (idle seconds);
+    - ``ledger``: did the owner record a generation and an ack, did the member
+      record an applied row (a value without an applied row = the ack/ledger
+      write lagged, the sibling wait's race);
+    - ``member_store_names``: what the member's store holds, names only;
+    - ``elapsed``: seconds since ``started`` when the caller passes it.
+
+    NEVER add values, keys, tokens or digests here: names, counts, states and
+    generations only. To extend, add one more ``_probe(lambda: ...)`` entry.
+    """
+    parts = [
+        f"step={step_code!r}",
+        f"elapsed={'n/a' if started is None else '%.1fs' % (time.monotonic() - started)}",
+        f"owner_engine=[{_probe(lambda: _engine_summary(mesh.engine_a))}]",
+        f"member_engine=[{_probe(lambda: _engine_summary(mesh.engine_b))}]",
+        f"owner_links={_probe(lambda: _link_summary(mesh.a))}",
+        f"member_links={_probe(lambda: _link_summary(mesh.b))}",
+        f"ledger=[{_probe(lambda: _ledger_summary(mesh))}]",
+        f"member_store_names={_probe(lambda: _store_names(mesh.b.root))}",
+    ]
+    text = "sync snapshot: " + " ".join(parts)
+    _LOG.error("%s", text)
+    return text
 
 
 @pytest.fixture()
@@ -185,7 +298,9 @@ def test_a_shared_secret_copies_re_sealed_and_marked(secret_mesh: Any) -> None:
     mesh = secret_mesh
     code = sync.credentials_sync_step(mesh.a, mesh.member)
     assert code in ("scheduled", "in_sync"), code
-    assert net_fixtures.wait_for(lambda: _member_has(mesh.b.root, SECRET_NAME))
+    assert net_fixtures.wait_for(
+        lambda: _member_has(mesh.b.root, SECRET_NAME)
+    ), _sync_snapshot(mesh, code)
 
     member_store = _secret_store(mesh.b.root)
     record, value = member_store.read_for_copy(SECRET_NAME)
@@ -222,12 +337,16 @@ def test_a_rotated_value_reaches_the_member_as_a_new_generation(secret_mesh: Any
     mesh = secret_mesh
     code = sync.credentials_sync_step(mesh.a, mesh.member)
     assert code in ("scheduled", "in_sync"), code
-    assert net_fixtures.wait_for(lambda: _member_value(mesh.b.root, SECRET_NAME) == VALUE_1)
+    assert net_fixtures.wait_for(
+        lambda: _member_value(mesh.b.root, SECRET_NAME) == VALUE_1
+    ), _sync_snapshot(mesh, code)
 
     mesh.store_a.update(SECRET_NAME, VALUE_2)
     code = sync.credentials_sync_step(mesh.a, mesh.member)
     assert code in ("scheduled", "in_sync"), code
-    assert net_fixtures.wait_for(lambda: _member_value(mesh.b.root, SECRET_NAME) == VALUE_2)
+    assert net_fixtures.wait_for(
+        lambda: _member_value(mesh.b.root, SECRET_NAME) == VALUE_2
+    ), _sync_snapshot(mesh, code)
     # WHY wait on the ledger, not just the value: the copy path writes the
     # member's store first and the applied-generation ledger second
     # (``_pull_blocking``: ``_apply_value`` then ``record_applied``), so the
@@ -241,7 +360,7 @@ def test_a_rotated_value_reaches_the_member_as_a_new_generation(secret_mesh: Any
             (SyncState.load(mesh.network_id, mesh.b.root).applied_for(KEY) or {}).get("gen") or 0
         )
         >= 2
-    )
+    ), _sync_snapshot(mesh, code)
     applied = SyncState.load(mesh.network_id, mesh.b.root).applied_for(KEY) or {}
     assert int(applied.get("gen") or 0) >= 2
     assert str(applied.get("record_id") or ""), "the class-2 record id rides the sidecar"
@@ -380,3 +499,63 @@ def test_the_bare_secret_name_resolves_for_share_and_revoke(secret_mesh: Any) ->
 
     restore_finite(mesh.a.root, SECRET_NAME, mesh.b.identity.name)
     assert _holder(), "the bare name did not share the store secret"
+
+
+# -- the expiry diagnostics themselves ---------------------------------------
+
+
+def test_an_expired_copy_wait_carries_a_redacted_snapshot(
+    secret_mesh: Any, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A forced expiry fails with the snapshot, logs it, and leaks no secret material.
+
+    The predicate never holds and the budget is tiny, so the wait expires in
+    ~0.2 s. The ``assert ..., msg`` form is what the real cells use; the cell
+    runs it and inspects the AssertionError. It also proves the message is
+    built only on expiry: a passing wait never calls the helper.
+    """
+    from local_operator.secrets.keys import load_master_key
+
+    mesh = secret_mesh
+    code = sync.credentials_sync_step(mesh.a, mesh.member)
+    calls: list[int] = []
+
+    # PASSING PATH: the message expression must not run (laziness of assert msg).
+    assert net_fixtures.wait_for(lambda: True, timeout_s=0.2), calls.append(1)
+    assert calls == []
+
+    caplog.set_level(logging.ERROR)
+    with pytest.raises(AssertionError) as failure:
+        assert net_fixtures.wait_for(lambda: False, timeout_s=0.2), _sync_snapshot(mesh, code)
+    message = str(failure.value)
+    for field in (
+        "sync snapshot:",
+        f"step={code!r}",
+        "owner_engine=[",
+        "member_engine=[",
+        "owner_links=",
+        "member_links=",
+        "ledger=[",
+        "owner_gen=",
+        "member_store_names=",
+        "net wait EXPIRED",
+    ):
+        assert field in message, (field, message)
+    assert any("sync snapshot:" in record.getMessage() for record in caplog.records)
+
+    # REDACTION: neither the value, nor either master key, nor the owner's
+    # device-id-free secret record content appears in the message or the log.
+    haystack = message + "\n" + caplog.text
+    assert VALUE_1.decode() not in haystack
+    assert VALUE_2.decode() not in haystack
+    for root in (mesh.a.root, mesh.b.root):
+        key = bytes(load_master_key(root))
+        assert key.hex() not in haystack
+        assert key.decode("latin-1") not in haystack
+
+
+def test_the_snapshot_survives_a_half_built_mesh() -> None:
+    """Every probe is guarded: a broken mesh yields ``<unavailable: Type>``, never a raise."""
+    text = _sync_snapshot(SimpleNamespace(), step_code=None)
+    assert text.startswith("sync snapshot:")
+    assert text.count("<unavailable: AttributeError>") >= 5, text
