@@ -333,8 +333,10 @@ _DECLARED_RAW_READS: dict[tuple[str, str, str], tuple[int, str]] = {
     # stored as the receipt's ``receipt`` and printed as ``<peer>: <sentence>``. Kept
     # raw because an EMPTY reply must stay empty (``mailbox_receipt_lines`` prints
     # nothing then) and ``peer_reason_words`` never returns empty — it would print
-    # "it did not answer" under a message that was delivered.
-    ("local_operator/network/cli.py", "_pilot_mailbox", "detail"): (
+    # "it did not answer" under a message that was delivered. Read in
+    # ``_deliver_mailbox``, the one delivery helper both the viewer and the
+    # view-free mailbox paths share.
+    ("local_operator/network/cli.py", "_deliver_mailbox", "detail"): (
         1,
         "the owner's own mailbox-delivery sentence, attributed to the peer; empty "
         "stays empty, which the never-empty gloss cannot express",
