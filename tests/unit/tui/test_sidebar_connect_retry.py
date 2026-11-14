@@ -178,7 +178,9 @@ class RecoveringRemote(AttachedSession):
     def display_history_revision(self) -> int:
         return 1
 
-    async def _ensure_bound(self, *, foreground: bool = True) -> None:
+    async def _ensure_bound(
+        self, *, foreground: bool = True, deadline: float | None = None
+    ) -> None:
         self.bind_calls += 1
         if self._heals_after is not None and self.bind_calls >= self._heals_after:
             self._cold = False
@@ -208,7 +210,9 @@ class UnreachableRemote(RecoveringRemote):
         self._display_heals_after = heals_after
         self.display_calls = 0
 
-    async def _ensure_bound(self, *, foreground: bool = True) -> None:
+    async def _ensure_bound(
+        self, *, foreground: bool = True, deadline: float | None = None
+    ) -> None:
         self.bind_calls += 1
 
     async def ensure_display_current(self) -> None:
@@ -545,7 +549,9 @@ class BindsThenLosesItsOwner(RecoveringRemote):
         super().__init__(session_id, heals_after=None)
         self._cold = False
 
-    async def _ensure_bound(self, *, foreground: bool = True) -> None:
+    async def _ensure_bound(
+        self, *, foreground: bool = True, deadline: float | None = None
+    ) -> None:
         self.bind_calls += 1
 
     def go_cold(self) -> None:
@@ -1210,7 +1216,9 @@ class _LostDuringPreparation(RecoveringRemote):
         super().__init__(session_id)
         self._cold = False
 
-    async def _ensure_bound(self, *, foreground: bool = True) -> None:
+    async def _ensure_bound(
+        self, *, foreground: bool = True, deadline: float | None = None
+    ) -> None:
         self.bind_calls += 1
 
     async def ensure_display_current(self) -> None:
@@ -1442,7 +1450,9 @@ class PrewarmRemote(RecoveringRemote):
         self._disposed = False
         self.dials = 0
 
-    async def _ensure_bound(self, *, foreground: bool = True) -> None:
+    async def _ensure_bound(
+        self, *, foreground: bool = True, deadline: float | None = None
+    ) -> None:
         self.bind_calls += 1
         if not self._can_go_cold or self._disposed:
             return
@@ -1717,7 +1727,9 @@ class RefreshNotSyncedRemote(RecoveringRemote):
         # restated it as a flag is how MAJOR-1 stayed invisible.
         return self._client is None or not self._client.connected or not self._ready_for_events
 
-    async def _ensure_bound(self, *, foreground: bool = True) -> None:
+    async def _ensure_bound(
+        self, *, foreground: bool = True, deadline: float | None = None
+    ) -> None:
         self.bind_calls += 1
         # The refresh COMPLETING, not a dial, and on the round after the one that
         # finds the window open — which is the shape under test: the first round
@@ -1802,7 +1814,9 @@ class StoppedOwnerRemote(RecoveringRemote):
         self._can_go_cold = True
         self.dials = 0
 
-    async def _ensure_bound(self, *, foreground: bool = True) -> None:
+    async def _ensure_bound(
+        self, *, foreground: bool = True, deadline: float | None = None
+    ) -> None:
         self.bind_calls += 1
         # The measured shape: a record that exists with nothing listening, so
         # every round fails the dial rather than returning from a guard.

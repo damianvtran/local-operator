@@ -83,6 +83,7 @@ from local_operator.i18n.keys import tui_notices as _nt
 from local_operator.i18n.messages import Msg
 from local_operator.incidents import format_cut_off_notice
 from local_operator.mobile.attach_client import (
+    BIND_FAILED_REASON,
     MOVED_REASON,
     QUEUED_DETAIL,
     RETIRING_REASON,
@@ -654,6 +655,33 @@ class RuntimeUnresponsiveError(ConnectionError):
     #: check over importing the class (the TUI reads it with ``getattr``, the
     #: same shape it already uses for ``actionable``).
     runtime_alive = True
+
+
+class RuntimeBindFailedError(ConnectionError):
+    """The runtime ANSWERED that it could not prepare this connection (``bind_failed``).
+
+    The far side sends ``bind_failed`` before it closes a connection whose
+    canonical state it could not produce in time (``runtime/server.py``
+    ``_announce_bind_failure``): the process is alive and only this connection
+    was dropped, which is what :data:`BIND_FAILED_REASON` already says in words.
+    The TYPE is new so a caller that must tell "busy" from "gone" can ask instead
+    of comparing sentences: a remote ``lop network sessions --send`` reported this
+    as a dial that "produced no session" and pointed at ``network doctor`` for a
+    link that was up (the owner's audit showed every stream opened and none
+    refused).
+
+    Deliberately NOT ``runtime_alive``: that marker changes the TUI's notice
+    register (``tui/app.py``), and this class must not move any surface that
+    already handled the plain ``ConnectionError`` it replaces. The text is
+    unchanged, so every existing reader prints exactly what it printed before.
+    """
+
+
+def _sync_disconnect_error(reason: str) -> ConnectionError:
+    """The error a sync wait fails with when its connection closes first."""
+    if reason == BIND_FAILED_REASON:
+        return RuntimeBindFailedError(reason)
+    return ConnectionError(reason)
 
 
 class OwnerReconnectingError(ConnectionError):
@@ -3732,9 +3760,26 @@ class AttachedSession:
             fields["files"] = files
         return await client.request_ack_with_duplicate("steer" if steer else "prompt", **fields)
 
-    async def bind_runtime(self) -> None:
-        """Bind a viewer before an explicitly requested owner control operation."""
-        await self._ensure_bound()
+    async def bind_runtime(self, *, deadline: float | None = None) -> None:
+        """Bind a viewer before an explicitly requested owner control operation.
+
+        ``deadline`` (``time.monotonic()``) replaces the foreground envelope with
+        the CALLER's own. Only a one-shot caller with its own budget passes it:
+        the remote pilot (``network/cli.py``, ``PILOT_BIND_TIMEOUT_S``), which has
+        no "next keystroke rejoins it" and whose failure means the act was not
+        delivered. Everyone else keeps the short foreground default.
+        """
+        if deadline is None:
+            # THE DEFAULT CALL SHAPE IS main's, EXACTLY: ``_ensure_bound()``. The TUI
+            # and every desktop route call ``bind_runtime()`` bare, and the viewers
+            # that specialise this seam (the recovering/racing doubles the sidebar
+            # retry and desktop warm suites drive) take the historical signature.
+            # Forwarding ``deadline=None`` made each of those binds raise
+            # ``TypeError`` instantly, so a retry budget burned in 0 s (#3725 gate
+            # 43112570841). Only a caller with its own budget changes the shape.
+            await self._ensure_bound()
+            return
+        await self._ensure_bound(deadline=deadline)
 
     async def update_desktop_watch(
         self, *, visible: bool, can_notify: bool, timeout: float | None = None
@@ -4744,7 +4789,9 @@ class AttachedSession:
         except Exception:  # noqa: BLE001 — the real prompt reports the failure
             logger.debug("warm engage failed for %s", self._session_id, exc_info=True)
 
-    async def _ensure_bound(self, *, foreground: bool = True) -> None:
+    async def _ensure_bound(
+        self, *, foreground: bool = True, deadline: float | None = None
+    ) -> None:
         """Attach to a runtime, starting one if none exists. Idempotent.
 
         The seam between "looking at a session" and "working in one", and the
@@ -4809,7 +4856,13 @@ class AttachedSession:
                 # ``set_working_directory`` closes by calling this method (agent
                 # review round 1, m4). Best-effort by that method's own contract.
                 self._publish_working_directory(self._cwd)
-            await self._bind_under_lock(foreground=foreground)
+            if deadline is None:
+                # main's call shape, exactly (see ``bind_runtime``): the desktop warm
+                # suites park this seam with a ``(*, foreground)`` double, and an
+                # unconditional ``deadline=None`` made every warm raise TypeError.
+                await self._bind_under_lock(foreground=foreground)
+            else:
+                await self._bind_under_lock(foreground=foreground, deadline=deadline)
             # Cover every winning-owner path, including another attach/recovery
             # completing during an await. A failed model RPC is not a failed
             # socket bind and must remain a visible, retryable pending intent.
@@ -4891,7 +4944,7 @@ class AttachedSession:
                 if not self._foreground_waiting:
                     self._foreground_arrived.clear()
 
-    async def _bind_under_lock(self, *, foreground: bool) -> None:
+    async def _bind_under_lock(self, *, foreground: bool, deadline: float | None = None) -> None:
         """The engage/retry body of :meth:`_ensure_bound`, holding ``_bind_lock``.
 
         Split out so the waiter accounting around the acquire reads as one
@@ -4974,6 +5027,16 @@ class AttachedSession:
             return
         sync_timeout = FRONTEND_SYNC_FOREGROUND_S if foreground else FRONTEND_SYNC_BACKSTOP_S
         budget = _FOREGROUND_BIND_BUDGET_S if foreground else _BACKGROUND_BIND_BUDGET_S
+        if deadline is not None:
+            # A CALLER'S OWN DEADLINE IS BOTH THE ENVELOPE AND THE BUDGET. The
+            # 15 s foreground cap exists because the budgets of a WATCHED bind
+            # compose and the runtime keeps running for the next keystroke; a
+            # one-shot pilot act has neither, so the cap silently turned its
+            # 120 s bind budget into 15 s and a busy runtime into an undelivered
+            # message. The deadline is absolute, so the engage above already
+            # spent part of it and the caller's outer bound still fires last.
+            budget = max(0.0, deadline - time.monotonic())
+            sync_timeout = budget
         deadline = time.monotonic() + budget
 
         def _effective_deadline() -> float:
@@ -5596,7 +5659,7 @@ class AttachedSession:
             # reason string is carried into the error so the copy the pump
             # produced actually reaches a surface instead of only a log line.
             if not pending_sync.done():
-                pending_sync.set_exception(ConnectionError(reason))
+                pending_sync.set_exception(_sync_disconnect_error(reason))
             # Closing a failed binding schedules the old pump's final callback.
             # It must not mark a retried/newer binding as recovering.
             if self._client is client:

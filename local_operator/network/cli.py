@@ -6954,6 +6954,23 @@ _STOP_REMEDIES: dict[str, str] = {
 #: socket default. It is the same reason the TUI grants a peer call 260 s.
 PILOT_BIND_TIMEOUT_S = 120.0
 
+#: How much of :data:`PILOT_BIND_TIMEOUT_S` the BIND hands back before its own
+#: outer bound fires. The viewer is given the bind budget as an absolute deadline
+#: (``AttachedSession.bind_runtime(deadline=...)``) so a busy runtime gets the
+#: whole window rather than the TUI's 15 s foreground envelope; ending the inner
+#: wait this much earlier makes the viewer's own typed answer (busy, refused,
+#: stopped) the one that is reported, not the outer ``wait_for``'s bare timeout.
+_PILOT_BIND_SLACK_S = 2.0
+
+#: What a busy runtime's refusal says was NOT done, per act, so the sentence names
+#: the person's own action rather than the transport's.
+_PILOT_UNDONE: dict[str, str] = {
+    "send": "the message was not delivered",
+    "steer": "the steer was not delivered",
+    "slash": "the command was not run",
+    "peek": "nothing was read",
+}
+
 #: How long ``--send`` waits for the owner's TERMINAL outcome once the prompt is
 #: admitted. ADMISSION IS NOT COMPLETION (``AttachedSession.prompt_and_wait``
 #: says exactly that), and a turn is unbounded work on a machine nobody here
@@ -7270,6 +7287,50 @@ def _pilot_dial_refusal(
         "nothing about that conversation is known from here: `lop network doctor "
         f"--peer {peer}` tells a link that is down from a runtime that stopped, and "
         "the session itself is untouched either way",
+    )
+
+
+def _pilot_runtime_busy(exc: BaseException) -> bool:
+    """True when the runtime was REACHED and is alive, but did not answer in time.
+
+    ONE CLASSIFICATION, THE LADDER'S: the desktop control ladder decides "busy" by
+    ``RuntimeUnresponsiveError`` or the duck-checked ``owner_alive`` mark
+    (``server/routes/desktop_sessions.py::_owner_busy``), and every busy
+    ``ConnectionError`` main defines carries that mark: ``OwnerAckTimeout``, the
+    late welcome (``OwnerWelcomeTimeout``) and the reconnect refusal
+    (``OwnerReconnectingError``). Reading the MARK rather than listing classes is
+    what keeps this verb from drifting when a new busy shape lands; a list here
+    missed the late welcome, which the pilot's own bind raises, and called a busy
+    session a device that "produced no session". The one addition is
+    ``RuntimeBindFailedError`` (the runtime announced it could not prepare this
+    connection), which is deliberately left unmarked so the desktop ladder keeps
+    its existing answer for it. All of these are ``ConnectionError``s, and
+    ``OwnerAckTimeout`` is ALSO a ``TimeoutError``, so this must be asked before
+    either sibling rung.
+    """
+    from local_operator.session.attached import (
+        RuntimeBindFailedError,
+        RuntimeUnresponsiveError,
+    )
+
+    if isinstance(exc, (RuntimeUnresponsiveError, RuntimeBindFailedError)):
+        return True
+    return bool(getattr(exc, "owner_alive", False))
+
+
+def _pilot_busy_sentence(verb: str, session_id: str, device: str, waited_s: float) -> str:
+    """The refusal for a runtime that is alive and too busy to answer this act.
+
+    Says the three things the person acts on: the session is still running over
+    there, this act did NOT happen, and the remedy is to retry. It does not send
+    them to ``network doctor``: the link worked, the stream opened, and the
+    runtime spoke — a link diagnosis would send them after a fault that is not
+    there.
+    """
+    undone = _PILOT_UNDONE.get(verb, "nothing was done")
+    return (
+        f"{session_id} is running on {device}, but its runtime was too busy to answer "
+        f"within {max(1, int(waited_s))}s, so {undone}; retry when its current work settles"
     )
 
 
@@ -7661,18 +7722,36 @@ async def _pilot_act(
         # viewer for a conversation this device does not hold.
         raise MeshRefusal("session_unknown", f"{session_id} is no longer a session held by {peer}")
     try:
+        bind_started = time.monotonic()
         try:
             # The cold-to-working seam: the first act that needs the runtime binds
             # it, which is where a stored session on the peer ENGAGES a runtime.
-            await asyncio.wait_for(viewer.bind_runtime(), timeout=PILOT_BIND_TIMEOUT_S)
-        except TimeoutError as exc:
-            raise MeshRefusal(
-                "session_unreachable",
-                f"{peer} did not answer for {session_id} within "
-                f"{PILOT_BIND_TIMEOUT_S:.0f}s — its runtime may be starting, or wedged; "
-                f"`lop network doctor --peer {peer}` diagnoses the link",
-            ) from exc
-        except ConnectionError as exc:
+            # The viewer gets THIS verb's budget as its deadline; without it the
+            # bind kept the TUI's 15 s foreground envelope inside a 120 s bound.
+            await asyncio.wait_for(
+                viewer.bind_runtime(
+                    deadline=bind_started + PILOT_BIND_TIMEOUT_S - _PILOT_BIND_SLACK_S
+                ),
+                timeout=PILOT_BIND_TIMEOUT_S,
+            )
+        except (TimeoutError, ConnectionError) as exc:
+            # ONE HANDLER, THREE RUNGS, ASKED IN THIS ORDER. A runtime that was
+            # REACHED and is merely busy comes first: two of its three shapes are
+            # ``ConnectionError``s and one is also a ``TimeoutError``, so either
+            # sibling rung would otherwise claim it — which is how a busy session
+            # on a healthy link read as a device that "produced no session".
+            if _pilot_runtime_busy(exc):
+                raise MeshRefusal(
+                    "session_unreachable",
+                    _pilot_busy_sentence(verb, session_id, device, time.monotonic() - bind_started),
+                ) from exc
+            if isinstance(exc, TimeoutError):
+                raise MeshRefusal(
+                    "session_unreachable",
+                    f"{peer} did not answer for {session_id} within "
+                    f"{PILOT_BIND_TIMEOUT_S:.0f}s — its runtime may be starting, or wedged; "
+                    f"`lop network doctor --peer {peer}` diagnoses the link",
+                ) from exc
             # A DIAL THAT PRODUCED NO STREAM IS THE DEVICE, whichever rung noticed:
             # this is the one CI's stopped-peer case lands on (the viewer is cold
             # until ``bind_runtime``, so the dial that produces no welcome frame
