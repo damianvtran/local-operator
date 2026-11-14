@@ -37,7 +37,7 @@ import fnmatch
 import itertools
 import os
 import re
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 
 from local_operator.tools.search_guard import (
@@ -3241,7 +3241,7 @@ class _Walker:
             and not _cluster_value(args, "t", "--target-directory")
             and not link.text.endswith("/")
         ):
-            self._create("symlink", self._literal_dir(link))
+            self._create("symlink", link)
         # AFTER the provenance record, never before: ``_create`` calls
         # ``_name``, which drops any ``link_targets`` entry for the path it
         # names. Run second, it erased the target ``_record_link`` had just
@@ -3521,15 +3521,43 @@ class _Walker:
         path, _unknown = _absolute(exp.text, base if base is not None else self.state.cwd)
         return path
 
-    def _create(self, kind: str, path: str | None) -> None:
-        if path is not None:
-            self.result.created.append(Creation(kind=kind, path=path))
-            self._name(path)
+    def _create(
+        self,
+        kind: str,
+        exp: Expanded,
+        base: str | None = None,
+        *,
+        name_of: Callable[[Expanded], Expanded | None] | None = None,
+    ) -> None:
+        """Record a creation candidate for ``exp`` and every ``for`` value it takes.
+
+        A creation inside a loop makes one directory per loop value, so it
+        records one candidate per value, exactly as ``_add`` fans a delete
+        target out. Recording only the first value (session 3ef6295a5545:
+        ``for n in a b; do git worktree add .worktrees/i18n-$n; done`` got a
+        ledger row for ``i18n-a`` alone) sent the creator's own later removal
+        of ``i18n-b`` to the judge, which refused it. Over-listing is safe:
+        ``provenance.commit_creations`` records only paths absent before the
+        call and present as directories after it. An unenumerable loop
+        (``_iterations`` is ``None``) records nothing at all — fail-closed, an
+        unrecorded directory is merely judged rather than trusted. ``name_of``
+        derives the created word from each fanned-out word (clone's URL to
+        default directory name); ``None`` from it skips that value.
+        """
+        iterations = self._iterations(exp)
+        if iterations is None:
+            return
+        for word in [exp] + [_fan_out(exp, values) for _roots, values in iterations]:
+            named = name_of(word) if name_of is not None else word
+            path = self._literal_dir(named, base) if named is not None else None
+            if path is not None:
+                self.result.created.append(Creation(kind=kind, path=path))
+                self._name(path)
 
     def _mkdir(self, args: list[Expanded]) -> None:
         operands, _flags = _operands(args, _MKDIR_VALUE_FLAGS)
         for w in operands:
-            self._create("mkdir", self._literal_dir(w))
+            self._create("mkdir", w)
 
     def _mktemp(self, args: list[Expanded]) -> None:
         operands, flags = _operands(args, _MKTEMP_VALUE_FLAGS)
@@ -3568,16 +3596,19 @@ class _Walker:
             if not operands:
                 return
             if len(operands) >= 2:
-                self._create("clone", self._literal_dir(operands[1], base))
+                self._create("clone", operands[1], base)
                 return
             url = operands[0]
             if url.opaque or url.pattern is not None:
                 return
-            # git's own default: the URL's last component minus ``.git``.
-            name = re.split(r"[/:]", url.text.rstrip("/"))[-1]
-            name = name[:-4] if name.endswith(".git") else name
-            if name and name not in (".", ".."):
-                self._create("clone", self._literal_dir(Expanded(text=name), base))
+
+            def default_name(word: Expanded) -> Expanded | None:
+                # git's own default: the URL's last component minus ``.git``.
+                name = re.split(r"[/:]", word.text.rstrip("/"))[-1]
+                name = name[:-4] if name.endswith(".git") else name
+                return Expanded(text=name) if name and name not in (".", "..") else None
+
+            self._create("clone", url, base, name_of=default_name)
             return
         if len(args) < 2:
             return
@@ -3585,7 +3616,7 @@ class _Walker:
         if sub == "add":
             operands, _ = _operands(args[2:], _GIT_WORKTREE_ADD_VALUE_FLAGS)
             if operands:
-                self._create("worktree", self._literal_dir(operands[0], base))
+                self._create("worktree", operands[0], base)
         elif sub == "remove":
             operands, flags = _operands(args[2:])
             forced = _has_short(flags, "f") or "--force" in flags
