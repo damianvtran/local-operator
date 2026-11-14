@@ -63,14 +63,24 @@ Radient for 24 h from the last time the Mac was reachable. In the morning the Ma
 reconnects, takes back the newest login without a prompt, and shows "node2 renewed
 your Anthropic login 3 times while this Mac was away (last 06:41 UTC)".
 
-**What it costs (plain words, for the PR body; full delta in §B.7).** Today a stolen
+**What it costs (plain words, for B1's PR body, §D D7; full delta in §B.8).** Today a stolen
 node holds an Anthropic login for at most ~8 h (a Radient one for ~1 h). With
 renewal it holds one until custody ends: 24 h after the node last heard from the
 Mac, or sooner on panic, share revoke or sign-out, whichever comes first. A node
 compromised *and* cut off keeps renewing for up to 24 h. A thief who copies the
 renewal token off the disk can use it until the provider ends the login family
 (Anthropic: 30 days from sign-in, `oauth/anthropic.py:14-15,66`) or until a renewal
-by someone else rotates it out from under them.
+by someone else rotates it out from under them. The remedy is `lop network panic`
+plus a provider-side sign-out.
+
+**Decisions of 2026-11-14 (§D) are folded in:**
+- the renewer is chosen automatically;
+- both providers are treated as family-revoking, with no live probe;
+- the Mac's wait is visible and names the node;
+- logout revokes at the provider;
+- a sealed return-only copy is kept for up to 7 days;
+- only lop-native sign-ins are lent;
+- MCP refresh tokens stay out of scope.
 
 ---
 
@@ -168,12 +178,13 @@ honestly and is not re-served.
 | `openai` | merges a new one if sent (`oauth/openai.py:422-423`) | not measured | — | ~10 days. **Not needed:** the 24 h hold already covers it (`credentials/__init__.py:64-65`) |
 | `kimi` | rotates (delegation design §6) | — | — | **Excluded:** device-bound, never brokered (`types.py:196`) |
 
-**Rule for B:** treat both in-scope providers with the **strictest** class
-("reuse revokes the family") until the §6.1 experiment of
-`mesh-refresh-delegation.md` is recorded for Anthropic (present a pre-refresh token
-after one refresh and record rejected-only vs family-revoked). Radient is
-measured strict. Nothing in B relies on Anthropic being lenient. §B.4 R4 is the one
-place a measured-lenient class would allow a cheaper rule.
+**Rule for B (decided 2026-11-14, §D D2/D3):** treat **both** in-scope providers as
+the strictest class, "reuse revokes the family", **permanently in this design**.
+There is **no live measurement** with the operator's real tokens: a reuse probe is
+the very POST that could sign him out. The evidence is what already exists: the
+auth store's two Radient measurements and the public Anthropic reports above.
+Nothing in B relies on either provider being lenient, and Radient is one family
+with no reuse grace (Radient server changes are out of scope).
 
 ### B.2 What already exists on `main` and is reused
 
@@ -199,7 +210,7 @@ authority for a *lend* becomes the owner's device identity on the authenticated
 link, plus the setting in §B.6. That is what `net_broker` already trusts for every grant.
 The signed mode stays as an opt-in (`network.credentials.renewal_authority:
 signed`) for operators who want a human gesture per delegation. This is the one
-deliberate step down from slice 1, and the PR must name it (§B.7).
+deliberate step down from slice 1, and the PR must name it (§B.8).
 
 ### B.3 The protocol: one renewer at a time
 
@@ -208,16 +219,35 @@ family epoch. **Custody** = the node's sealed copy and its record. **Claim** = t
 owner asking the node "are you renewing? give me the newest". **Write-back** =
 the node returning a newer pair.
 
-**R1 — one renewing node per login.** Renewal is lent to at most **one** node per
-`(owner, credential_id)`: the first eligible device-scoped holder that asks. It
-stays that node until custody ends. Other holders of the same login keep today's
+**R1 — one renewing node per login, chosen automatically (§D D1).** Renewal is lent
+to at most **one** node per `(owner, credential_id)`: **the node that currently
+holds the lent login**, meaning the one whose grant requests for it carry live
+sessions running turns. Nobody picks. Other holders of the same login keep today's
 access-only hold. Enforced owner-side by the existing "one live record"
 refusal in `mint_refresh_delegation` (`owner.py:2343-2370`), now in the automatic
-path. Eligible means all of these: the provider is in `RENEWABLE_PROVIDERS =
-{"anthropic", "radient"}`; the placement row is device-scoped (sessions have no
-rail identity, `github.py:57-63`'s argument); the node's hello advertised
-`credential-renewal-v1`; the network is trusted; the setting is on (§B.6). A
-mismatch on any of these is not an error: the node simply gets no renewal token.
+path.
+
+**The renewer moves only through the owner.** If another node becomes the active
+holder while the owner is reachable, the owner first claims back from the current
+renewer (R3; a write-back if that node renewed), and only then lends to the new one.
+While the owner is away the renewer cannot change: a second node keeps the
+access-only hold. So two renewers can never coexist.
+
+Eligible means all of these:
+
+- the provider is in `RENEWABLE_PROVIDERS = {"anthropic", "radient"}`;
+- the login is a **lop-native sign-in** (§D D5). The owner row carries a native
+  login incarnation (`auth_store.py:2589` `native_login_incarnation`; only explicit
+  AuthStore login writes stamp one, `lifecycle.py:990`). An imported or
+  externally shared row has none and is never lent. This replaces slice 1's
+  operator-asserted `exclusivity_confirmed` (`owner.py:2349`);
+- the placement row is device-scoped (sessions have no rail identity, the argument
+  at `github.py:57-63`);
+- the node's hello advertised `credential-renewal-v1`;
+- the network is trusted;
+- the setting is on (§B.6).
+
+A mismatch on any of these is not an error: the node simply gets no renewal token.
 
 **R2 — the node renews only while the owner has gone quiet.** The node's renewal
 gate (extend `client.py:2697` `refresh_fence`; every check runs before **each**
@@ -279,26 +309,33 @@ The wake-to-link-up distribution must be measured in QA before this ships (§C).
 - If the owner heard from the node less than `L` ago, the node cannot have taken
   over yet. But a POST now would leave the node a stale copy that it could present
   after `L`. The owner therefore **does not present**. Its turn waits like
-  `owner_wait` does, and the status reads: "Your Anthropic login is lent to
-  **node2** for renewal and node2 is out of reach. It will come back when node2
-  reconnects (by 07:15 UTC at the latest), or sign in again here."
-- At `last_node_contact + offline_hold_s + margin` the node has certainly dropped
-  custody (R2.2). The owner resumes renewing on its own, with no prompt. If the node
-  renewed and never wrote back, the owner's copy is spent. The owner's POST then
-  earns `invalid_grant`, and for Radient that also kills the family. That is the
-  one unavoidable sign-out: the node renewed and was never heard from again for a
-  day.
+  `owner_wait` does.
+- **R4 is visible (§D D2).** The Mac's status row and the turn's notice name the
+  node and the state: **"Waiting for node2 to hand back your Anthropic login."**
+  The remedy line reads: "It comes back as soon as node2 reconnects. Or sign in again
+  here." Wire it as a new `effective_state` value, `awaiting_handback`, beside
+  `held_offline`. It is published by the owner fence when it refuses, and read by
+  the model row in `readiness.py` (`:1598-1620`, the pattern #3922 added). Desktop and
+  mobile read it through the same effective-access fact.
+- **When the wait clears on its own.** It clears on write-back (adopt, then no prompt),
+  or on a claim answer that shows no renewal. Without a contact it clears only when
+  the node has certainly deleted everything that could be newer than the Mac's
+  copy. With D4's return-only copy that is the **7-day return cap**, not 24 h.
+  Clearing at 24 h would present a token the node may have rotated, which is the
+  sign-out D4 exists to prevent (see the reconciliation note under §D). Past the cap
+  the owner resumes renewing with no prompt. If the node renewed and never
+  wrote back, the owner's copy is spent and its POST signs the Mac out (both
+  providers are treated as family-revoking). That is the one unavoidable sign-out:
+  the node renewed and was never heard from again for 7 days.
 - **"Sign in again here"** is always available and starts a new family
   (`login_incarnation` moves). The node's custody of the old family is dropped at
   the next contact (§B.5), and `adopt_refresh_handback` refuses its write-back by
   incarnation (`auth_store.py:3818-3850`).
 
-This is deliberately **safety-first for the owner's own presentation**. The
-alternative, owner-first (POST anyway), lets an owner refresh during a link
-outage be followed by a node takeover with the spent token. That is the
-reuse-detection POST that revokes a Radient family on both machines. Only an
-Anthropic measurement showing "rejected only, family survives" (§B.1) would justify
-owner-first for Anthropic. That is open question Q2.
+This is deliberately **safety-first for the owner's own presentation**, for both
+providers (§D D2). The alternative, owner-first (POST anyway), lets an owner
+refresh during a link outage be followed by a node takeover with the spent token.
+That is the reuse-detection POST that revokes the family on both machines.
 
 **Why a lease and not "the node renews whenever the owner is unreachable".**
 "Unreachable" is not a shared fact: during a link outage each side sees the other
@@ -390,9 +427,46 @@ line for the same property; a test greps captured logs for the fake IdP's tokens
 | Panic (raised or received) | the `relay.py:3635` `set_trust` / `:3747` `panic` latch → a wipe hook in the credentials slice; the fence also refuses on `_NETWORK_UNTRUSTED` | immediate on the node that hears it |
 | Share revoke | `should_borrow` false on the next pull or the owner's answer (`client.py:896-907`); the owner also ends its lend record | next contact or pull (the node keeps renewing at most until then, ≤ custody end) |
 | Membership loss | `_self_membership_active` false (`client.py:1437`) | next check (every POST) |
-| 24 h without owner contact | R2.2 (two clocks); the wipe runs on the first check past the deadline and at relay start | ≤ 24 h |
-| Owner signs out or signs in again | the owner's row tombstone or incarnation change rides the lifecycle generation (`network/credentials/lifecycle.py`, `credential-lifecycle-v1`); the node drops on a mismatch | next contact. **Signing out on the Mac does not end the family at the provider** (Q3) |
+| 24 h without owner contact | R2.2 (two clocks). **Authority ends**: nothing is served or renewed past this point. If the node has **not** renewed since the last contact (`epoch == lent epoch`), the row is wiped. If it **has**, the newest pair moves to the **return-only copy** below. The check runs on every gate and at relay start | ≤ 24 h |
+| Return-only copy written back, or 7 days old | see "Return-only copy" below: deleted the moment the owner acknowledges adoption (or refuses it as stale), hard cap 7 days from the last owner contact on both clocks | write-back, or ≤ 7 days |
+| Owner signs out or signs in again | the owner's row tombstone or incarnation change rides the lifecycle generation (`network/credentials/lifecycle.py`, `credential-lifecycle-v1`); the node drops custody **and** any return-only copy on a mismatch. On `lop logout` the owner **also revokes at the provider** (§D D3, below) | provider revoke: immediate where an endpoint exists; node: next contact |
 | The node's own `invalid_grant` | slice 1's family-moved stop: wipe, report, never retry (`client.py:2909`) | immediate |
+
+**Panic, share revoke and membership loss drop the return-only copy too** (§D D4),
+at once. The cost, stated: if the node had renewed, the Mac's copy is spent and the
+Mac needs "sign in again". Revocation wins over convenience.
+
+**Return-only copy (§D D4).** The copy exists only because dropping a rotated pair
+before write-back would sign the Mac out.
+
+- **Shape.** The same sealed row, with `state = "return_only"` in the slice-1
+  delegation document (`refresh.py` `STATES` gains it). Inside the fence it is
+  **terminal for serving and renewing**: `refresh_fence` refuses every POST for it,
+  and the node's grant path never serves its access token. The only reader is the
+  write-back sender (§B.4), which sends it on the first owner contact.
+- **When it is deleted.**
+  - after the owner's adoption ack, or after a `renewal_stale` refusal (the owner
+    has something newer);
+  - at once on panic, share revoke or membership loss;
+  - at **7 days** after the last owner contact, on both clocks. This is a hard cap.
+    It is enforced at every relay start and on the lifecycle tick, so it does not
+    depend on a later serve.
+
+**Provider revoke on logout (§D D3).**
+
+- `lop logout` (`cli.py:16094` `logout_command` → `auth_store.py:2894`
+  `delete_credential`) of a login that is or was lent calls a new optional registry
+  hook, `revoke_token=`, beside `refresh_token=` (`providers/registry.py:473`,
+  `:490`), *before* deleting the row. Its outcome is recorded as
+  `credential.provider_revoked {credential_key, provider, outcome}`.
+- **Neither `oauth/anthropic.py` nor `oauth/radient.py` has a revoke call today**
+  (checked: no `revoke` in either module). The hook is implemented for a provider
+  only against a documented endpoint (RFC 7009 or the provider's own). It is
+  verified against a throwaway test account or the fake IdP, **never** the
+  operator's real login (§D B0).
+- Where no endpoint exists, logout still recalls custody at the next contact and
+  says so in plain words: "node2 can keep using this login until it reconnects or
+  for 24 h; to end it now, sign out of Anthropic on claude.ai".
 
 ### B.6 Settings, cap and UX
 
@@ -438,20 +512,29 @@ also holds the **renewal token** for that login:
 
 - **A node cut off from the Mac** keeps Anthropic and Radient working for up to 24 h
   after it last heard from the Mac, instead of until the current token expires.
-- **A stolen or compromised node** gives the attacker a renewable login until custody
-  ends (panic, share revoke, sign-out reaching it, or 24 h of silence), and the copied
-  renewal token keeps working after that until the provider ends the family
-  (Anthropic: 30 days from sign-in) or someone rotates it. Panic wipes the node's copy
-  but cannot un-copy a token that was already stolen. Ending the family needs a
-  provider-side sign-out (Q3).
-- **Signing his Mac out** is possible in exactly one case: the node renews and is
-  never heard from again for 24 h (or loses its write-back). The Mac never
-  presents a token the node may have rotated (R3/R4), and the node never presents one
-  the Mac rotated (claim plus `awaiting`). For Radient, a token presented twice ends
-  the family on both machines.
-- **The Mac may wait** for a lent login when the node is unreachable at the moment the
-  Mac needs to renew. It waits up to 24 h, with a one-click "sign in again here"
-  way out. Before, the Mac never depended on a node.
+- **A stolen or compromised node.** Today it exposes about 8 h of Anthropic (one
+  access token) and about 55 min of Radient. After this change it exposes **a
+  renewable login for up to the family's life unless revoked at the provider**
+  (Anthropic: 30 days from sign-in). Within lop, custody still ends on panic, share
+  revoke, sign-out reaching the node, or 24 h of silence (7 days for a return-only
+  copy). But a renewal token copied off the disk keeps working until the provider
+  ends the family. Panic wipes the node's copy; it cannot un-copy a stolen one.
+  **Remedy: run `lop network panic`, then sign out at the provider (`lop logout
+  <provider>` on the Mac revokes there where an endpoint exists; otherwise sign out
+  on claude.ai or radient).** This paragraph and the remedy go verbatim in **B1's PR
+  body** (§D D7).
+- **Signing his Mac out** is possible in two cases:
+  - the node renews and is then never heard from for 7 days (the return-only cap);
+  - a panic, share revoke or membership loss drops a renewed pair before write-back.
+  
+  The Mac never presents a token the node may have rotated (R3/R4). The node never
+  presents one the Mac rotated (claim plus `awaiting`). Both providers are treated as
+  ending the family on a token presented twice.
+- **The Mac may wait** for a lent login when the node holds a lapsed lease and is
+  unreachable at the moment the Mac needs to renew. Its status says "Waiting for
+  node2 to hand back your Anthropic login". There is a one-click "sign in again here"
+  way out, and the wait clears on its own on reconnect or at the 7-day return cap.
+  Before this change, the Mac never depended on a node.
 - **Authority is automatic.** A lend needs the owner device's key on the link and
   the operator's standing setting, not a per-delegation operator signature as
   slice 1 required. That signature remains available as `renewal_authority: signed`.
@@ -462,10 +545,10 @@ also holds the **renewal token** for that login:
 
 | PR | Scope | Product lines (est.) | Depends on |
 |---|---|---|---|
-| **A** `feat(mesh): hold borrowed GitHub and MCP logins for the offline hold` | A1–A6 | ~150–250 | #3922 merged |
-| **B0** evidence only, no code | the §B.1 experiment for Anthropic (refresh once, re-present the old token: rejected-only vs family revoked), plus the wake-to-link-up distribution (`n`, median, max) that sizes `W` | 0 | — |
-| **B1** `feat(mesh): lend the renewal token to one node; owner claims before it renews` | owner side: R1 eligibility and automatic lend over `refresh_take`; `lent` state in `_delegated`; owner fence plus local op `credential_claim`; write-back adoption with the `parent_fp` CAS and the conflict rule; `awaiting_writeback` instead of a tombstone; settings and cap; owner audit events and notification. The node only *stores* (no renewal yet), so B1 is safe alone | ~350–400 | A (copy patterns), B0 for `W` |
-| **B2** `feat(mesh): a node renews a lent login while its owner is away` | node side: the R2 gate in `refresh_fence`; the lease and `awaiting` fields in `refresh.py`; sealed refresh field; `auth.db` confinement; the wipe hooks table (§B.5); node audit events; status copy | ~350–400 | B1, renew-on-reconnect's link-up hook |
+| **A** `feat(mesh): hold borrowed GitHub and MCP logins for the offline hold` | A1–A6 | ~150–250 | stacked on #3922 (coder hosted on node2 by the manager, 2026-11-14) |
+| **B0** evidence only, no code, **no live token probe** (§D B0) | cite the existing evidence (§B.1: the auth store's Radient measurements, public Anthropic reports) on B1's PR. Measure the wake-to-link-up distribution (`n`, median, max) that sizes `W`; this needs no tokens | 0 | — |
+| **B1** `feat(mesh): lend the renewal token to one node; owner claims before it renews` | owner side: R1 eligibility and automatic lend over `refresh_take`; `lent` state in `_delegated`; owner fence plus local op `credential_claim`; write-back adoption with the `parent_fp` CAS and the conflict rule; `awaiting_writeback` instead of a tombstone; settings and cap; owner audit events and notification. The node only *stores* (no renewal yet), so B1 is safe alone Also in B1: the lop-native eligibility check (D5); the `awaiting_handback` status and copy (D2); `revoke_token=` on logout (D3). **The PR body carries §B.8's stolen-node paragraph and remedy verbatim (D7).** | ~350–400 | A (copy patterns), B0 for `W` |
+| **B2** `feat(mesh): a node renews a lent login while its owner is away` | node side: the R2 gate in `refresh_fence`; the lease and `awaiting` fields in `refresh.py`; sealed refresh field; `auth.db` confinement; the wipe hooks table (§B.5); node audit events; status copy Also in B2: the `return_only` state with its write-back-only reader, the 7-day cap and the panic, revoke and membership drops (D4); moving the renewer through the owner (D1). | ~350–400 | B1, renew-on-reconnect's link-up hook |
 
 Each is C5 (credentials and the security boundary). The design doc for the gate is this
 file, read with `mesh-refresh-delegation.md`.
@@ -488,7 +571,12 @@ file, read with `mesh-refresh-delegation.md`.
 - **Negative controls (B):**
   - **panic** on the node mid-custody → the row is wiped, the next fence refuses, and no POST follows;
   - **share revoke** → wipe at next contact;
-  - **custody past 24 h** (fake sleep-inclusive clock) → wipe and no POST;
+  - **custody past 24 h** (fake sleep-inclusive clock), not renewed → wipe and no POST; renewed → `return_only`, with no serve and no POST. The next contact writes it back, the owner adopts, and the copy is deleted;
+  - **return-only copy past 7 days** (each clock stepped alone) → deleted at relay start and on the tick, with no contact needed;
+  - **panic, revoke or membership loss with a return-only copy** → deleted at once, nothing is sent, and the owner shows "sign in again";
+  - **R4 visibility** → with the node unreachable on a lapsed lease, the owner's status row reads "Waiting for node2 to hand back your Anthropic login". The owner makes no POST (`posts` empty), and the state clears on reconnect;
+  - **imported (non-native) login** → never lent (D5);
+  - **logout** → the fake IdP's revoke endpoint is called once, and the node drops custody at the next contact (D3);
   - **owner sign-in again** → write-back refused by incarnation;
   - **stale write-back after adoption** (replay the earlier `done` frame) → `renewal_stale`, row unchanged, and the IdP sees no POST of the old token;
   - **second node** asking for a lend → access-only;
@@ -496,40 +584,54 @@ file, read with `mesh-refresh-delegation.md`.
 
 ---
 
-## D. Open questions
+## D. Decisions 2026-11-14
 
-- **Q1 — Multiple nodes.** R1 lends renewal to one node per login, and other nodes keep
-  the access-only hold. Is "the first eligible node" right, or should the operator
-  pick one (`lop network credential share anthropic --with node2 --renew`)?
-  *Recommendation:* automatic first-come, with the flag as an override in B2.
-- **Q2 — Anthropic owner-first?** If B0 shows Anthropic only rejects the old token and
-  keeps the family alive, R4 could let the Mac renew anyway when the node is unreachable,
-  so the Mac never waits. Radient stays safety-first.
-  *Recommendation:* decide on B0's evidence; keep safety-first until then.
-- **Q3 — Signing out should end the family at the provider.** Does Anthropic or Radient
-  expose token revocation (RFC 7009) we can call on `lop logout` of a lent login,
-  and does a fresh sign-in invalidate the old family (delegation design §6.2)?
-  Radient is ours, so we could add revoke and a reuse grace server-side. A
-  Radient token-exchange that mints a separate child family for the node would remove
-  the sign-out risk for Radient entirely.
-- **Q4 — Keep a write-back-only copy past 24 h?** The brief says custody is dropped at 24 h. If the
-  node renewed and the Mac stays away more than 24 h, dropping makes a Mac sign-in
-  certain. Keeping a sealed copy that can only be returned (never served or
-  renewed), for example up to 7 days, avoids that at the cost of a longer-lived secret.
-  *Recommendation:* drop at 24 h as briefed.
-- **Q5 — Logins shared with external tools.** A lop login imported from Claude Code's
-  own credentials would race Claude Code itself. Slice 1's `exclusivity_confirmed`
-  gate (`owner.py:2356-2361`) should become "only lop-native sign-ins are lent";
-  the row provenance needed to tell them apart has not been checked.
-- **Q6 — MCP renewal.** A holds MCP only to the access token's end (often ~1 h).
-  Lending MCP refresh tokens is a different refresher (`mcp/auth.py`
-  `ensure_mcp_oauth_fresh`, lock-file single-flight) with per-server rotation
-  unknown. Not in scope here.
+Decided by the lopdev manager (session `79bddc262663`) within the operator's 2026-11-13
+approval; folded into §B above. Each item names where it landed.
+
+- **D1, was Q1: automatic, no picking.** The renewer is the node that currently holds
+  the lent login (the one running turns on it), with one renewer per credential at a
+  time. Any move goes through the owner (claim back, then lend). → §B.3 R1.
+- **D2, was Q2: no owner-first.** Both providers are assumed to revoke the whole
+  family until proven otherwise. R4 is accepted: the Mac waits on a node that holds a
+  lapsed lease, with the "sign in again here" escape. It is made visible: the Mac's
+  status names the node, "Waiting for node2 to hand back your Anthropic login"
+  (`awaiting_handback`). → §B.1, §B.3 R4.
+- **B0: no live measurement with the operator's real tokens.** A reuse probe could sign
+  him out. The evidence is limited to the auth store's existing Radient measurements
+  and the public Anthropic reports; the design is defensive. → §B.1, §C.
+- **D3, was Q3: revoke at the provider on logout.** It goes through a new
+  `revoke_token=` registry hook, implemented per provider only against a documented
+  endpoint and verified on a throwaway account or the fake IdP. Radient is one
+  family with no reuse grace; Radient server changes are out of scope. → §B.5.
+- **D4, was Q4: keep a sealed return-only copy.** It is never used to serve or
+  renew. It exists until it is written back, then it is deleted, with a hard cap of 7
+  days. It is dropped at once on panic, revoke or membership loss. Why: dropping a
+  rotated pair before write-back would sign the Mac out. → §B.5.
+- **D5, was Q5: lop-native sign-ins only** (`native_login_incarnation`). → §B.3 R1.
+- **D6, was Q6: MCP refresh tokens are out of scope.** A holds MCP to its access
+  token's end.
+- **D7, §B.8: the stolen-node exposure goes in B1's PR body in plain words.** That
+  is up to the family's life unless revoked at the provider, versus about 8 h
+  today, plus the remedy: panic, then provider sign-out. → §B.8, §C.
+
+**Reconciliation note (architect, for the manager to confirm).** D2's "auto-clear
+on reconnect or at 24 h" and D4's return-only copy conflict at the 24 h point.
+Suppose the node renewed and holds a return-only pair at hour 24. If the Mac then
+resumes on its own, it presents its spent token. Under D2's family-revocation
+assumption that signs the Mac out **and** kills the node's newer pair, which is
+exactly the loss D4 exists to prevent. The Mac cannot tell from its side whether the
+node renewed. So this doc makes the wait clear automatically on reconnect (write-back
+or a claim answer) or at the **7-day** return cap, with "sign in again here" always
+available (§B.3 R4). If 24 h is preferred anyway, the cost is a possible Mac sign-out
+whenever the node renewed and stays unreachable past 24 h. It is a one-line
+constant either way.
 
 ## E. Risks to watch during rollout
 
 - An owner waiting on an unreachable node (R4) reads as "Anthropic broken on my
-  Mac". Watch for `credential_claim` timeouts in the owner audit, and make sure the
+  Mac" (mitigated by the D2 status naming the node and offering the escape; it clears
+  on its own at the latest at the 7-day return cap). Watch for `credential_claim` timeouts in the owner audit, and make sure the
   copy names the node and the way out.
 - `L` too short means early node takeovers during short link outages, which only
   costs claims later. `L` too long means node sessions stall for up to `L` when the
