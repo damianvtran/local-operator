@@ -37,17 +37,11 @@ WHY THE CELLS ARE SHAPED THIS WAY.
   The sibling precedent is ``tests/unit/test_exec_mode.py``'s SIGTERM worker
   test, whose comment records this exact failure ("the child took SIGTERM before
   installing the handler, died with rc=-15"). So this test waits for the child's
-  own ``SIGUSR1`` task dump (``LOP_RUNTIME_DEBUG_STACKS=1``, on by default
-  since 2026-09-20 and set explicitly here, armed later in ``amain`` than the
-  SIGHUP handler) before it sends
-  anything.
-  ``SIGUSR1``'s default disposition is fatal too, so the PROBE is made harmless
-  at the source rather than in the product: this process sets ``SIGUSR1`` to
-  ``SIG_IGN`` before spawning, and CPython's ``subprocess`` restores only
-  ``SIGPIPE``/``SIGXFZ``/``SIGXFSZ`` to ``SIG_DFL`` in the child, so the child
-  inherits the ignore and its own ``add_signal_handler`` replaces it once armed.
-  That inheritance touches ``SIGUSR1`` only — never ``SIGHUP`` — so it cannot
-  make the SIGHUP assertion pass on a tree that lacks the handler.
+  own "signal handlers ready" line, which ``amain`` logs after its whole signal
+  block (the SIGHUP ignore included), before it sends anything. It is READ, not
+  provoked: an earlier revision provoked readiness with a ``SIGUSR1`` every
+  0.2 s, and that storm is what killed the child with SIGSEGV on CI — see
+  ``_READINESS_LINE``.
 
 Isolation: a scratch ``HOME`` and ``LOCAL_OPERATOR_CONFIG_DIR``, with every
 inherited ``LOP_*``/``CMUX_*``/``HERDR_*`` variable stripped before the spawn,
@@ -85,6 +79,24 @@ _SESSION_ID = "sighupdetach01"
 #: Long enough that a HUP storm cannot fill the log, short enough to fail loudly
 #: rather than hang the worker (there is no pytest-timeout in this suite).
 _WAIT_S = 30.0
+
+#: The child's own statement that its signal block ran (``process.amain``).
+#:
+#: THIS REPLACES A SIGNAL STORM, AND THE STORM WAS THIS CELL'S SIGSEGV. The cell
+#: used to send ``SIGUSR1`` every 0.2 s from spawn until the child's task dump
+#: appeared: ~75 signals through boot on a quiet host. From the stall watchdog's
+#: arm onward ``SIGUSR1`` is ``faulthandler.register``-ed, so every one of them
+#: was a C-level frame walk taken in signal context at whatever instruction the
+#: receiving thread was on — the walk python/cpython#116008 shows can fault
+#: (no 3.12 fix). A walk that faults leaves exactly the shape this cell kept
+#: producing on CI (run 43216387297, job 131190694002, Python 3.12.16):
+#: "Fatal Python error: Segmentation fault", NO frames, then the extension
+#: list — faulthandler's fatal report finds its reentrancy latch still held by
+#: the user-signal dump it interrupted, so it skips the stack. The sibling cell in
+#: ``test_runtime_stall_watchdog.py`` retired the same storm in #2706; this one
+#: was missed. The line is logged after the SIGHUP ignore, so it is the same
+#: proof of readiness with no signal sent.
+_READINESS_LINE = "signal handlers ready"
 
 
 def _seed(config_dir: Path) -> Path:
@@ -125,13 +137,6 @@ def _isolate(monkeypatch: pytest.MonkeyPatch, config_dir: Path) -> None:
     # unviewed runtime would exit on its own and every "is it still alive"
     # assertion below would be measuring the reaper instead of the signal.
     monkeypatch.setenv("LOP_SESSION_GRACE_S", "600")
-    # The arming gate: this installs the SIGUSR1 task dump, which `amain` arms
-    # after the SIGHUP handler (see the module docstring), so observing it is
-    # proof the disposition under test is installed too. Set EXPLICITLY even
-    # though the dump is now on by default (it stopped being opt-in on
-    # 2026-09-20, see `process.amain`): this test's readiness gate must not
-    # depend on a default that another change could flip back.
-    monkeypatch.setenv("LOP_RUNTIME_DEBUG_STACKS", "1")
     # Defence in depth for the WORKSPACE families the loop above already
     # removed: nothing in this module may address a real pane.
     monkeypatch.setenv("LOCAL_OPERATOR_NO_NOTIFICATIONS", "1")
@@ -313,12 +318,6 @@ def test_a_detached_runtime_survives_a_terminal_hangup(
     # engages only on a fatal signal; the readiness gate below is untouched and a
     # death still reds the cell.
     monkeypatch.setenv("PYTHONFAULTHANDLER", "1")
-    # The probe's own disposition, set on THIS process so the child inherits it.
-    # CPython restores only SIGPIPE/SIGXFZ/SIGXFSZ in a child before exec, so a
-    # SIG_IGN set here reaches the child as SIG_IGN, where the runtime's own
-    # add_signal_handler replaces it the moment it is armed. Without this, a
-    # probe that landed one moment early would kill the child it is asking.
-    previous_usr1 = signal.signal(signal.SIGUSR1, signal.SIG_IGN)
     child = None
     try:
         child = launch_module._spawn_runtime(
@@ -343,27 +342,25 @@ def test_a_detached_runtime_survives_a_terminal_hangup(
             os.getpgid(pid) == pid
         ), f"runtime {pid} is not its own group leader: pgid={os.getpgid(pid)}"
 
-        # READINESS, by the child's own hand. The SIGUSR1 dump is armed later in
-        # ``amain`` than the SIGHUP handler, so seeing it is proof that the
-        # disposition under test is installed. Sent in a bounded loop because a
-        # probe that arrives before arming is discarded by the inherited SIG_IGN
-        # rather than queued.
+        # READINESS, by the child's own hand: a FACT the child states, never a
+        # condition this cell manufactures. ``amain`` logs "signal handlers ready"
+        # after its whole signal block, the SIGHUP ignore included, so the line is
+        # proof that the disposition under test is installed. NOTHING IS SENT TO
+        # THE CHILD BEFORE IT: see ``_READINESS_LINE`` for the storm this replaced
+        # and the SIGSEGV that storm produced.
         deadline = time.monotonic() + _WAIT_S
-        while "state: streaming=" not in _log_text(config_dir):
+        while _READINESS_LINE not in _log_text(config_dir):
             assert child.poll() is None, (
                 f"the runtime {_exit_summary(child)}, before it armed its signal "
-                f"handlers. Readiness is the child's own SIGUSR1 dump, and a probe "
-                f"sent before arming is discarded by the inherited SIG_IGN — so "
-                f"this is a DEATH before arming, distinct from the never-armed shape "
-                f"below. Capture and log:\n{_capture_text(child)}\n"
-                f"{_log_text(config_dir)[-2000:]}"
+                f"handlers (no {_READINESS_LINE!r} line). Nothing was sent to it "
+                f"before that line, so this death is the child's own. Capture and "
+                f"log:\n{_capture_text(child)}\n{_log_text(config_dir)[-2000:]}"
             )
             assert time.monotonic() < deadline, (
-                "the runtime never armed (no SIGUSR1 dump in its log); the debug hook "
-                f"is gone or the block never ran:\n{_log_text(config_dir)[-2000:]}"
+                f"the runtime never armed (no {_READINESS_LINE!r} line in its log); "
+                f"the signal block never ran:\n{_log_text(config_dir)[-2000:]}"
             )
-            os.kill(pid, signal.SIGUSR1)
-            time.sleep(0.2)
+            time.sleep(0.1)
 
         record = _wait_for_record(config_dir, child=child)
         assert int(record.pid) == pid, (record.pid, pid)
@@ -432,7 +429,6 @@ def test_a_detached_runtime_survives_a_terminal_hangup(
     finally:
         if child is not None:
             _reap(child, config_dir)
-        signal.signal(signal.SIGUSR1, previous_usr1)
 
 
 # ---------------------------------------------------------------------------
