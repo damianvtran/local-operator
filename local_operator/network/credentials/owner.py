@@ -410,6 +410,15 @@ class MeshCredentialBroker:
         #: operator key.
         self._refresh_signer: Any = None
         self._github_lender: github_app.GithubLender | None = None
+        #: ``(key, holder) -> hold_until_ms`` of the LATEST-ending GitHub grant this
+        #: relay lent, both arms. Kept so a ``credential revoke`` receipt can state
+        #: what was actually lent (review #3947 R2-m2): lowering
+        #: ``github_token_hold_s`` only affects later grants, so the current setting
+        #: would understate the residual on a node that cannot hear the revoke. In
+        #: memory only (no token, one int per holder); a restarted relay knows
+        #: nothing and the receipt then states the 24 h ceiling instead.
+        self._lent_github_holds: dict[tuple[str, str], int] = {}
+        self._lent_github_lock = threading.Lock()
         self._loop = _BrokerLoop(self_device[-8:] or "owner")
         self._inflight: dict[tuple[Any, ...], asyncio.Future[Any]] = {}
         #: ``{(credential_id, login_incarnation): monotonic}`` — ONE WINDOW PER
@@ -1593,7 +1602,11 @@ class MeshCredentialBroker:
             return scope_refusal
         source = github_app.resolve_source(self.root)
         if source == github_app.SOURCE_APP:
-            return await self._serve_github_app(key=key, provider=provider, by=by, common=common)
+            return self._note_lent_hold(
+                key,
+                by,
+                await self._serve_github_app(key=key, provider=provider, by=by, common=common),
+            )
         if source == github_app.SOURCE_UNREADABLE:
             # THE LADDER STOPS HERE (M1): the store exists but cannot be read, so
             # a narrower arm may be hiding in it — serving anything wider (the gh
@@ -1643,12 +1656,35 @@ class MeshCredentialBroker:
             scope_refusal = self._github_scope_refusal(key, by)
             if scope_refusal is not None:
                 return scope_refusal
-            return self._grant_from_owner_token(
-                token=token, key=key, provider=provider, common=common
+            return self._note_lent_hold(
+                key,
+                by,
+                self._grant_from_owner_token(
+                    token=token, key=key, provider=provider, common=common
+                ),
             )
         return BrokerError(
             code="no_local_credential", message=github_app.no_source_message(), **common
         )
+
+    def _note_lent_hold(self, key: str, holder: str, outcome: Any) -> Any:
+        """Remember the hold a GitHub grant was lent with; return ``outcome`` unchanged."""
+        until = int(getattr(outcome, "hold_until_ms", 0) or 0)
+        if until:
+            now_ms = int(time.time() * 1000)
+            with self._lent_github_lock:
+                # Pruned on write: an ended hold says nothing a receipt needs.
+                for pair in [p for p, end in self._lent_github_holds.items() if end <= now_ms]:
+                    del self._lent_github_holds[pair]
+                current = self._lent_github_holds.get((key, holder), 0)
+                self._lent_github_holds[(key, holder)] = max(current, until)
+        return outcome
+
+    def lent_hold_until_ms(self, key: str, holder: str) -> int:
+        """The latest hold end of a GitHub grant lent to ``holder`` still running, or ``0``."""
+        with self._lent_github_lock:
+            until = self._lent_github_holds.get((key, holder), 0)
+        return until if until > int(time.time() * 1000) else 0
 
     async def _serve_github_app(
         self, *, key: str, provider: str, by: str, common: dict[str, Any]

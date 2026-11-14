@@ -3067,26 +3067,34 @@ def _shareable_providers(self_device: str) -> list[dict[str, Any]]:
     return rows
 
 
-def _github_hold_bound_s(source: str) -> int:
-    """How long a node that cannot hear a revoke may keep using a lent GitHub grant.
+def _github_residual(source: str, lent_hold_until_ms: int = 0) -> tuple[int, str]:
+    """``(seconds, words)``: how long a node that cannot hear a revoke may keep a GitHub grant.
 
     THE OFFLINE HOLD (2026-11-14, "Yes, GitHub and MCP"): a node keeps a lent grant
     while it cannot reach the owner, and a revoke or panic only stops a node that
-    HEARS it. The bound is therefore the hold, per arm (review #3947 M1): an App
-    token ends at its own 60-minute ceiling (and is DELETEd at GitHub when the
-    revoke can be delivered); a PAT or ``gh`` token has no revoke endpoint, so it is
-    held for ``github_token_hold_s`` (default: the whole hold, 24 h — the
-    operator's "Full 24 h for personal tokens too").
-    """
-    from local_operator.network.credentials import github as github_mod
-    from local_operator.network.credentials import github_token_hold_s, offline_hold_s
+    HEARS it (review #3947 M1).
 
-    root = _config_dir()
-    if source == github_mod.SOURCE_APP:
-        return int(min(3600.0, offline_hold_s(root)))
-    if source in (github_mod.SOURCE_TOKEN, github_mod.SOURCE_GH):
-        return int(github_token_hold_s(root))
-    return int(offline_hold_s(root))
+    STATED FROM WHAT WAS LENT (review #3947 R2-m2): ``lent_hold_until_ms`` is the
+    latest hold end this relay stated on a grant to that holder (the revoke op's
+    ``lent_hold_until_ms``). Lowering ``github_token_hold_s`` only affects later
+    grants, so the CURRENT setting would understate the residual. When the relay did
+    not answer, or restarted since it lent, nothing is known, and the receipt states
+    the ceiling instead: an App token's own 60 minutes, else the 24 h hold maximum
+    (``OFFLINE_HOLD_MAX_S``, which every borrower also caps at), counted from the
+    node's last grant.
+    """
+    from local_operator.network.credentials import OFFLINE_HOLD_MAX_S
+    from local_operator.network.credentials import github as github_mod
+
+    now = time.time()
+    if lent_hold_until_ms and lent_hold_until_ms / 1000.0 > now:
+        until = lent_hold_until_ms / 1000.0
+        return (
+            int(until - now + 0.999),
+            time.strftime("until %H:%M UTC (the hold it was lent with)", time.gmtime(until)),
+        )
+    ceiling = 3600 if source == github_mod.SOURCE_APP else int(OFFLINE_HOLD_MAX_S)
+    return ceiling, f"for up to {_duration_words(ceiling)} after its last grant"
 
 
 def _duration_words(seconds: int) -> str:
@@ -3098,7 +3106,9 @@ def _duration_words(seconds: int) -> str:
     return f"{seconds} s"
 
 
-def _github_revocation_payload(revoked_now: int | None, ttl_s: int, source: str) -> dict[str, Any]:
+def _github_revocation_payload(
+    revoked_now: int | None, ttl_s: int, source: str, *, lent_hold_until_ms: int = 0
+) -> dict[str, Any]:
     """The ``github`` revoke receipt's payload — ONE spelling for lines and ``--json``.
 
     Per-source (§3.3): only the App arm has a server-side revoke handle. A
@@ -3112,7 +3122,7 @@ def _github_revocation_payload(revoked_now: int | None, ttl_s: int, source: str)
     """
     from local_operator.network.credentials import github as github_mod
 
-    bound = _github_hold_bound_s(source)
+    bound, residual = _github_residual(source, lent_hold_until_ms)
     if source == github_mod.SOURCE_APP:
         copied = (
             "revoked at GitHub immediately when this revoke ran, via DELETE "
@@ -3126,8 +3136,7 @@ def _github_revocation_payload(revoked_now: int | None, ttl_s: int, source: str)
             "server-side revoke here — it keeps working at GitHub until it expires "
             "or is revoked there (Settings -> Developer settings -> Personal access "
             "tokens); a node that hears this revoke stops using it at once, one that "
-            f"cannot (lost, stolen or offline) may keep using it for up to "
-            f"{_duration_words(bound)}"
+            f"cannot (lost, stolen or offline) may keep using it {residual}"
         )
     elif source == github_mod.SOURCE_GH:
         copied = (
@@ -3136,13 +3145,13 @@ def _github_revocation_payload(revoked_now: int | None, ttl_s: int, source: str)
             "(Settings -> Applications -> Authorized OAuth Apps; `gh auth logout` only "
             "forgets it locally) to end it; a node that hears this revoke "
             "stops using it at once, one that cannot (lost, stolen or offline) may keep "
-            f"using it for up to {_duration_words(bound)}"
+            f"using it {residual}"
         )
     elif source == github_mod.SOURCE_UNREADABLE:
         copied = (
             "the secret store on this device could not be read, so the serving arm "
             "could not be determined — a node that hears this revoke stops using what it "
-            f"holds at once, one that cannot may keep it for up to {_duration_words(bound)}; "
+            f"holds at once, one that cannot may keep it {residual}; "
             "repair the store before the next revoke"
         )
     else:
@@ -3154,6 +3163,8 @@ def _github_revocation_payload(revoked_now: int | None, ttl_s: int, source: str)
     return {
         "new_grants": "refused now",
         "lent_grant_max_s": bound,
+        # Epoch seconds of the hold actually lent, or ``None`` when not known.
+        "lent_hold_until": (lent_hold_until_ms / 1000.0) if lent_hold_until_ms else None,
         "grant_window_s": ttl_s,
         "minted_tokens_revoked": revoked_now,
         "source": source,
@@ -3161,7 +3172,9 @@ def _github_revocation_payload(revoked_now: int | None, ttl_s: int, source: str)
     }
 
 
-def _github_revoke_lines(name: str, revoked_now: int | None, source: str) -> list[str]:
+def _github_revoke_lines(
+    name: str, revoked_now: int | None, source: str, *, lent_hold_until_ms: int = 0
+) -> list[str]:
     """The receipt's operator-visible lines, per serving arm (§3.3).
 
     App arm: line 1 holds the CONDITIONAL, line 2 says which branch actually
@@ -3176,7 +3189,7 @@ def _github_revoke_lines(name: str, revoked_now: int | None, source: str) -> lis
     """
     from local_operator.network.credentials import github as github_mod
 
-    bound = _duration_words(_github_hold_bound_s(source))
+    _seconds, residual = _github_residual(source, lent_hold_until_ms)
     if source == github_mod.SOURCE_APP:
         if revoked_now is None:
             delivered = (
@@ -3219,7 +3232,7 @@ def _github_revoke_lines(name: str, revoked_now: int | None, source: str) -> lis
                 f"new borrows by {name}: refused now; {served} was not minted here, so "
                 f"there is no DELETE and nothing for this device to revoke — {name} stops "
                 f"using a lent grant as soon as it hears this revoke, but if it cannot "
-                f"(lost, stolen or offline) it may keep using it for up to {bound}"
+                f"(lost, stolen or offline) it may keep using it {residual}"
             ),
             (
                 f"to end the token itself now, {end}; it keeps working at GitHub until "
@@ -3234,7 +3247,7 @@ def _github_revoke_lines(name: str, revoked_now: int | None, source: str) -> lis
             ),
             (
                 f"a token already lent is dropped by {name} as soon as it hears this "
-                f"revoke, or within {bound} if it cannot; repair the store here and "
+                f"revoke, or keeps it {residual} if it cannot; repair the store here and "
                 "re-run the revoke for the per-arm receipt"
             ),
         ]
@@ -3907,6 +3920,7 @@ def _cmd_credential(args: argparse.Namespace) -> int:
         # (the borrowing device's own window-end self-revoke, then the token's
         # 60-minute ceiling).
         revoked_now: int | None = None
+        lent_hold_until_ms = 0
         if github_mod.is_github_key(key):
             detail = _relay_call(
                 "credential_revoke",
@@ -3919,6 +3933,11 @@ def _cmd_credential(args: argparse.Namespace) -> int:
             if isinstance(detail, dict):
                 revoked_now = int(detail.get("revoked") or 0)
                 payload["minted_tokens_revoked"] = revoked_now
+                # What this relay lent the holder (#3947 R2-m2); an older relay
+                # omits it and the receipt states the ceiling instead.
+                from local_operator.network.credentials.types import peer_int
+
+                lent_hold_until_ms = peer_int(detail.get("lent_hold_until_ms"))
         if is_secret_key(key):
             # CLASS-2 COPIES END BY WIPE, not by a broker TTL (S4, §4.3): the receipt says
             # which happened — a queued notice, an already-wiped copy, or no RECORDED copy —
@@ -3959,8 +3978,14 @@ def _cmd_credential(args: argparse.Namespace) -> int:
             # PER-SOURCE (§3.3): resolved at THIS moment — the receipt describes
             # the arm that serves now, and says plainly when nothing does.
             source = github_mod.resolve_source(_config_dir())
-            payload["revocation"] = _github_revocation_payload(revoked_now, ttl_s, source)
-            lines.extend(_github_revoke_lines(name, revoked_now, source))
+            payload["revocation"] = _github_revocation_payload(
+                revoked_now, ttl_s, source, lent_hold_until_ms=lent_hold_until_ms
+            )
+            lines.extend(
+                _github_revoke_lines(
+                    name, revoked_now, source, lent_hold_until_ms=lent_hold_until_ms
+                )
+            )
             return _emit(args, payload, lines)
         copied = (
             "valid at the provider until the key is rotated there (a static key never expires)"
