@@ -1258,23 +1258,34 @@ _CWD_INVENTORY_TIMEOUT_S = 20.0
 #: the owning-session check (``worktree_activity``) reads the session
 #: registry fresh on every call. Failures are never cached.
 _CWD_INVENTORY_TTL_S = 30.0
-_cwd_inventory_cache: tuple[float, tuple[str, ...]] | None = None
+_cwd_inventory_cache: tuple[float, tuple[tuple[int, str], ...]] | None = None
+#: Why the last inventory failed, for the judge (operator directive
+#: 2026-11-14: never a bare "busy"). Empty after a success.
+_cwd_inventory_error = ""
 
 
-def _cwd_inventory() -> tuple[str, ...] | None:
-    """Realpaths of every cwd this uid's processes hold, or ``None`` if unknown.
+def _cwd_entries(*, fresh: bool = False) -> tuple[tuple[int, str], ...] | None:
+    """``(pid, realpath of cwd)`` for every process of this uid, or ``None``.
 
     lsof's cwd inventory is read-only and avoids probing process command lines
     (which may carry secrets). Linux exposes the same data under /proc. A
-    disappearing process no longer owns a cwd; other inspection errors give
-    ``None``. A success is cached for :data:`_CWD_INVENTORY_TTL_S`.
+    disappearing process no longer owns a cwd; any other inspection error
+    (an unreadable ``/proc``, a ``cwd`` link this uid may not read, lsof
+    missing, failing or timing out) gives ``None`` and leaves the reason in
+    :data:`_cwd_inventory_error` — fail closed, but named. A success is cached
+    for :data:`_CWD_INVENTORY_TTL_S` unless ``fresh``.
+
+    ``hidepid``: ``/proc`` mounted ``hidepid=1|2|invisible`` hides OTHER uids'
+    processes only, and this inventory reads this uid's alone, so it is
+    unaffected; a per-pid ``EACCES`` on this uid's ``cwd`` link (a
+    non-dumpable process) is the case that fails closed, by pid.
     """
-    global _cwd_inventory_cache
+    global _cwd_inventory_cache, _cwd_inventory_error
     now = time.monotonic()
     cached = _cwd_inventory_cache
-    if cached is not None and now - cached[0] < _CWD_INVENTORY_TTL_S:
+    if not fresh and cached is not None and now - cached[0] < _CWD_INVENTORY_TTL_S:
         return cached[1]
-    paths: list[str] = []
+    entries: list[tuple[int, str]] = []
     if os.path.isdir("/proc/self"):
         try:
             for entry in os.scandir("/proc"):
@@ -1283,43 +1294,258 @@ def _cwd_inventory() -> tuple[str, ...] | None:
                 try:
                     if entry.stat().st_uid != os.getuid():
                         continue
-                    paths.append(os.readlink(os.path.join(entry.path, "cwd")))
+                    entries.append((int(entry.name), os.readlink(os.path.join(entry.path, "cwd"))))
                 except FileNotFoundError:
                     continue
-        except OSError:
+                except OSError as exc:
+                    _cwd_inventory_error = (
+                        f"cwd of pid {entry.name} unreadable ({exc.strerror or exc})"
+                    )
+                    return None
+        except OSError as exc:
+            _cwd_inventory_error = f"/proc unreadable ({exc.strerror or exc})"
             return None
     else:
         try:
             proc = subprocess.run(
-                ["lsof", "-a", "-u", str(os.getuid()), "-d", "cwd", "-Fn", "-w"],
+                ["lsof", "-a", "-u", str(os.getuid()), "-d", "cwd", "-Fpn", "-w"],
                 capture_output=True,
                 text=True,
                 timeout=_CWD_INVENTORY_TIMEOUT_S,
                 check=False,
             )
-        except (OSError, subprocess.SubprocessError):
+        except subprocess.TimeoutExpired:
+            _cwd_inventory_error = f"lsof timed out after {_CWD_INVENTORY_TIMEOUT_S:g} s"
+            return None
+        except (OSError, subprocess.SubprocessError) as exc:
+            _cwd_inventory_error = f"lsof unavailable ({exc})"
             return None
         if proc.returncode != 0:
+            _cwd_inventory_error = f"lsof exited {proc.returncode}"
             return None
-        paths = [line[1:] for line in proc.stdout.splitlines() if line.startswith("n/")]
-        if not paths:
-            return None  # this process alone holds a cwd: an empty list is a failed read
-    inventory = tuple(os.path.realpath(p) for p in paths)
+        pid = 0
+        for line in proc.stdout.splitlines():
+            if line.startswith("p") and line[1:].isdecimal():
+                pid = int(line[1:])
+            elif line.startswith("n/"):
+                entries.append((pid, line[1:]))
+        if not entries:
+            # This process alone holds a cwd: an empty list is a failed read.
+            _cwd_inventory_error = "lsof listed no process cwd"
+            return None
+    inventory = tuple((pid, os.path.realpath(cwd)) for pid, cwd in entries)
     _cwd_inventory_cache = (now, inventory)
+    _cwd_inventory_error = ""
     return inventory
+
+
+def _cwd_inventory() -> tuple[str, ...] | None:
+    """Realpaths of every cwd this uid's processes hold, or ``None`` if unknown."""
+    entries = _cwd_entries()
+    return None if entries is None else tuple(cwd for _pid, cwd in entries)
+
+
+def _inside(cwd: str, real: str) -> bool:
+    return cwd == real or cwd.startswith(real + os.sep)
 
 
 def _live_cwd_inside(real: str) -> bool | None:
     """Whether a live process uses this tree; unknown never grants an exemption.
 
-    Reads :func:`_cwd_inventory` (bounded, cached per process). ``None`` —
+    Reads :func:`_cwd_entries` (bounded, cached per process). ``None`` —
     timeout or an unreadable inventory — fails closed in ``worktree_state``.
     This protects ordinary clean removals as well as abandoned adds.
+
+    A HIT from the cache is re-read fresh before it is believed (operator
+    directive 2026-11-14): a holder that exited inside the 30 s TTL — an eval
+    kernel restarted, a ``git`` that finished — must not keep the tree "busy".
+    A cached miss is still reused (the TTL's documented price).
     """
-    inventory = _cwd_inventory()
-    if inventory is None:
+    cached = _cwd_inventory_cache
+    from_cache = cached is not None and time.monotonic() - cached[0] < _CWD_INVENTORY_TTL_S
+    entries = _cwd_entries()
+    if entries is None:
         return None
-    return any(cwd == real or cwd.startswith(real + os.sep) for cwd in inventory)
+    if from_cache and any(_inside(cwd, real) for _pid, cwd in entries):
+        entries = _cwd_entries(fresh=True)
+        if entries is None:
+            return None
+    return any(_inside(cwd, real) for _pid, cwd in entries)
+
+
+#: Ancestry walk bound for :func:`cwd_holders` (far deeper than any real tree).
+_PARENT_WALK_MAX = 64
+#: Shown command length: a basename, never arguments (they may carry secrets).
+_HOLDER_COMMAND_MAX = 40
+
+
+@dataclass(frozen=True)
+class CwdHolder:
+    """One live process whose cwd is inside a worktree, and whose it is.
+
+    ``family``: the process descends (by parent pid) from the deleting
+    session's own harness process or a registry record of that session or of
+    an ancestor/descendant in its subagent tree. ``owner`` is the judge-facing
+    attribution ("this session", "session <id> (another session)", "no
+    session record").
+    """
+
+    pid: int
+    command: str
+    owner: str
+    family: bool
+
+    def describe(self) -> str:
+        return f"pid {self.pid} {self.command or '?'} ({self.owner})"
+
+
+def _process_table() -> dict[int, tuple[int, str]] | None:
+    """``pid -> (parent pid, command basename)`` for every visible process.
+
+    Linux: ``/proc/<pid>/stat`` (parent) and ``/proc/<pid>/comm`` (the kernel's
+    16-byte name — never ``cmdline``, which may carry secrets). Elsewhere:
+    ``ps -axo pid=,ppid=,comm=`` (executable path, no arguments). ``None`` when
+    neither is readable: ownership is then unknown and the tree stays busy.
+    """
+    table: dict[int, tuple[int, str]] = {}
+    if os.path.isdir("/proc/self"):
+        try:
+            names = [e.name for e in os.scandir("/proc") if e.name.isdecimal()]
+        except OSError:
+            return None
+        for name in names:
+            try:
+                with open(f"/proc/{name}/stat", encoding="utf-8", errors="replace") as fh:
+                    raw = fh.read()
+            except OSError:
+                continue  # exited, or another uid's under hidepid: not a holder here
+            # ``comm`` sits in parentheses and may itself hold ")": split on the LAST.
+            head, _, tail = raw.rpartition(")")
+            fields = tail.split()
+            if len(fields) < 2 or not fields[1].isdecimal():
+                continue
+            comm = head.partition("(")[2]
+            table[int(name)] = (int(fields[1]), comm)
+        return table or None
+    try:
+        proc = subprocess.run(
+            ["ps", "-axo", "pid=,ppid=,comm="],
+            capture_output=True,
+            text=True,
+            timeout=_CWD_INVENTORY_TIMEOUT_S,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if proc.returncode != 0:
+        return None
+    for line in proc.stdout.splitlines():
+        parts = line.split(None, 2)
+        if len(parts) >= 2 and parts[0].isdecimal() and parts[1].isdecimal():
+            comm = os.path.basename(parts[2].strip()) if len(parts) == 3 else ""
+            table[int(parts[0])] = (int(parts[1]), comm)
+    return table or None
+
+
+def _session_pids(session_id: str) -> tuple[dict[int, str], dict[int, str]]:
+    """``(family, others)``: harness pid -> label, from the session registry.
+
+    Family = the caller's own record, records of its ancestors/descendants in
+    one subagent tree (``same_task_tree``), and THIS process — the guard runs
+    inside the deleting session's harness, and a process hosts one session
+    (``SessionRecord``) — unless a record says this pid is another session's.
+    Siblings are other work and count as others. Records, never text: a
+    process's environment or command line is not consulted.
+    """
+    family: dict[int, str] = {}
+    others: dict[int, str] = {}
+    try:
+        from local_operator.session.runtime import registry
+
+        for rec, state in registry.scan(None, reap=False):
+            sid = str(getattr(rec, "session_id", "") or "")
+            pid = getattr(rec, "pid", None)
+            if not sid or not isinstance(pid, int) or state == "stale":
+                continue
+            if sid == session_id:
+                family[pid] = "this session"
+                continue
+            relation = same_task_tree(session_id, sid) if session_id else ""
+            if relation in ("ancestor", "descendant"):
+                family[pid] = f"this session's {relation} {sid}"
+            else:
+                others[pid] = f"session {sid}, another session"
+    except Exception:  # noqa: BLE001 — an unreadable registry attributes nothing
+        logger.debug("session registry unreadable", exc_info=True)
+    me = os.getpid()
+    if me not in others:
+        family.setdefault(me, "this session")
+    return family, others
+
+
+def cwd_holders(real: str, session_id: str) -> tuple[CwdHolder, ...] | None:
+    """Every live process with its cwd inside ``real``, attributed; ``None`` if unknown.
+
+    WHY (operator directive 2026-11-14, field case ``attr3880-ci`` on
+    lop-remote-node-2): a session's own eval kernel or bash child with its cwd
+    in its own tree made ``git worktree remove --force`` read "busy", and the
+    judge refused the creator's cleanup. Attribution is by parent-pid ancestry
+    to the runtime's own records (:func:`_session_pids`). A process whose
+    ancestry reaches no family pid — another session's, or an orphan
+    reparented to init — is foreign. ``None`` (inventory or process table
+    unreadable) means ownership is unknown: the caller keeps the tree busy.
+    """
+    entries = _cwd_entries(fresh=True)
+    if entries is None:
+        return None
+    inside = [(pid, cwd) for pid, cwd in entries if _inside(cwd, real)]
+    if not inside:
+        return ()
+    table = _process_table()
+    if table is None:
+        return None
+    family, others = _session_pids(session_id)
+    holders: list[CwdHolder] = []
+    for pid, _cwd in inside:
+        owner, is_family = "no session record; unknown process", False
+        node, seen = pid, 0
+        while node > 1 and seen < _PARENT_WALK_MAX:
+            if node in family:
+                owner, is_family = family[node], True
+                break
+            if node in others:
+                owner = others[node]
+                break
+            node = table.get(node, (0, ""))[0]
+            seen += 1
+        command = table.get(pid, (0, ""))[1][:_HOLDER_COMMAND_MAX]
+        holders.append(CwdHolder(pid, command, owner, is_family))
+    return tuple(holders)
+
+
+def busy_phrase(path: str, session_id: str = "") -> str:
+    """The judge-facing account of WHY a tree reads busy: holders, or why unknown.
+
+    Never a bare "busy" (operator directive 2026-11-14): the field refusal
+    named "busy" with no process, so nobody could tell an agent's own shell
+    from another session's work.
+    """
+    real = os.path.realpath(path)
+    holders = cwd_holders(real, session_id)
+    if holders is None:
+        reason = _cwd_inventory_error or "process table unreadable"
+        return (
+            f"busy=unknown: process inventory unreadable ({reason}); "
+            "a live process inside cannot be ruled out"
+        )
+    if not holders:
+        return "busy: the holder exited before it could be named"
+    return "busy: cwd held by " + ", ".join(h.describe() for h in holders)
+
+
+def state_phrase(path: str, state: str, session_id: str = "") -> str:
+    """``state``, with the holders spelled out when it is ``busy``."""
+    return busy_phrase(path, session_id) if state == "busy" else state
 
 
 def _only_regenerable(directory: str) -> bool:
@@ -1361,7 +1587,7 @@ def _only_regenerable(directory: str) -> bool:
     return True
 
 
-def worktree_state(path: str, *, own: bool = False) -> str:
+def worktree_state(path: str, *, own: bool = False, session_id: str = "") -> str:
     """The removal-relevant state of a worktree path.
 
     ``own``: the caller proved (creation ledger) that this session or its
@@ -1377,7 +1603,9 @@ def worktree_state(path: str, *, own: bool = False) -> str:
 
     One of ``clean``, ``dirty``, ``locked``, ``stale-initializing`` (locked
     "initializing" for over an hour, otherwise clean), ``busy`` (a live process
-    cwd is inside it, or the inventory could not be read), ``not-linked`` or
+    cwd is inside it, or the inventory could not be read — with ``own`` and
+    ``session_id``, holders from the deleting session's own family do not
+    count; :func:`busy_phrase` names the holders), ``not-linked`` or
     ``unknown``.
 
     Linked = its ``.git`` is a FILE, its git-dir differs from the common dir
@@ -1451,7 +1679,18 @@ def worktree_state(path: str, *, own: bool = False) -> str:
         pass
     except (OSError, UnicodeError):
         return "unknown"
-    if _live_cwd_inside(real) is not False:
+    live = _live_cwd_inside(real)
+    if live is True and own and session_id:
+        # OWN tree, held only by this session's family (operator directive
+        # 2026-11-14, field case ``attr3880-ci``): the creator's own eval
+        # kernel, bash child or subagent sitting in the tree is not someone
+        # else's work in progress, so it does not make the tree busy. Any
+        # foreign holder, an empty fresh read (the holder cannot be named)
+        # or an unreadable process table keeps it busy — fail closed.
+        holders = cwd_holders(real, session_id)
+        if holders and all(h.family for h in holders):
+            live = False
+    if live is not False:
         return "busy"  # unknown process inventory also fails closed
     # ``git worktree remove`` deletes IGNORED content too (review R1-MAJOR-4 /
     # QA Q1: an ignored ``.env`` and an ignored nested repo with the only copy

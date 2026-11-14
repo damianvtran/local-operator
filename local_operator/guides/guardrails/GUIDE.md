@@ -125,7 +125,12 @@ three routes the checkpoint can verify. Everything CRITICAL is still refused.
   be lost and no commit is lost, so what goes is your own scratch (a
   `merge-tree`/`read-tree` index, edited files). A detached tree whose HEAD
   no ref contains (commits made only there), a repository nested inside it,
-  or a lock, live cwd or other running session keeps the judge. Ignored
+  or a lock, live cwd or other running session keeps the judge. A live cwd
+  counts only when it is someone else's: your own harness, eval kernel, bash
+  children and subagents (by parent pid from the session registry) do not make
+  your own tree busy. A foreign process, an orphan with no session record, or
+  a process table that cannot be read keeps it busy, and the judge is told
+  each holder's pid, command and session, or why the inventory failed. Ignored
   entries (`.expo/`, `.pnpm-store/`, a `node_modules` symlink, an ignored `.env`
   or local config) never count against your own tree: removing it deletes them
   with no judge call, exactly as `git worktree remove` does — move a secret you

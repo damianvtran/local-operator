@@ -806,7 +806,12 @@ def build_delete_case(verdict: Verdict, ctx: CallContext) -> DeleteCase:
         )
         tree = ""
         if not os.path.islink(path) and os.path.exists(os.path.join(path, ".git")):
-            tree = f"; git: {prov.worktree_state(path, own=record is not None)}"
+            state = prov.worktree_state(
+                path, own=record is not None, session_id=ctx.session_id if record else ""
+            )
+            # Never a bare "busy" (operator directive 2026-11-14): name each
+            # holder's pid, command and session, or why the inventory failed.
+            tree = f"; git: {prov.state_phrase(path, state, ctx.session_id)}"
             if prov.is_primary_checkout(path):
                 tree += f" (primary checkout; as a clone: {prov.clone_state(path)})"
             else:

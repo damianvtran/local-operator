@@ -1224,6 +1224,7 @@ def _rank(
         # unknown ranks HIGH with that state named (the one fact the agent can
         # act on); not-linked takes the ordinary ranking below.
         from local_operator.guardrails.provenance import (
+            state_phrase,
             worktree_activity,
             worktree_state,
         )
@@ -1235,7 +1236,10 @@ def _rank(
         # returned HIGH below before the ledger check was ever reached, and
         # the judge saw no ledger fact, so finished own trees were refused.
         own = _owned_by_session(target, path, prot, session_id)
-        state = worktree_state(path, own=own is not None)
+        state = worktree_state(path, own=own is not None, session_id=session_id)
+        # Never a bare "busy" (operator directive 2026-11-14): the reason names
+        # each holder (pid, command, session) or why the inventory failed.
+        state_text = state_phrase(path, state, session_id)
         if state != "not-linked":
             # Clean is not idle (operator incident 2026-11-09: a clean worktree
             # whose branch had an OPEN PR under QA was removed, deleting 34
@@ -1317,7 +1321,7 @@ def _rank(
                 return RankedTarget(
                     target,
                     Risk.HIGH,
-                    f"a git repository root; linked worktree state: {state}; {facts}",
+                    f"a git repository root; linked worktree state: {state_text}; {facts}",
                 )
             if state not in ("clean", "stale-initializing"):
                 # QA round 3 (Q3-OBS): dirty, locked, busy, unknown or timeout
@@ -1332,13 +1336,16 @@ def _rank(
                     target,
                     Risk.HIGH,
                     "; ".join(
-                        [f"a git repository root; linked worktree state: {state}; {facts}", *notes]
+                        [
+                            f"a git repository root; linked worktree state: {state_text}; {facts}",
+                            *notes,
+                        ]
                     ),
                 )
             # Clean but forced, or stale-initializing without ``-f -f`` (git
             # refuses that itself): nothing uncommitted to lose, so the ordinary
             # ranking applies, but the state stays in whatever reason it gives.
-            worktree_note = f"linked worktree state: {state}; {facts}"
+            worktree_note = f"linked worktree state: {state_text}; {facts}"
             notes.append(worktree_note)
     if not target.worktree_remove and target.op == "delete" and not target.selected:
         reached = _reached_worktrees(
@@ -1553,7 +1560,9 @@ def _reached_worktrees(
     checked, unchecked = own[:_MAX_OWN_CHECKED], own[_MAX_OWN_CHECKED:]
     jobs: dict[str, Any] = {}
     for root in checked:
-        jobs[f"state:{root}"] = lambda r=root: prov.worktree_state(r, own=True)
+        jobs[f"state:{root}"] = lambda r=root: prov.worktree_state(
+            r, own=True, session_id=session_id
+        )
         jobs[f"activity:{root}"] = lambda r=root: prov.worktree_activity(r, session_id)
     for root in foreign[:_MAX_FOREIGN_STATES]:
         jobs[f"fstate:{root}"] = lambda r=root: prov.worktree_state(r)
@@ -1591,7 +1600,8 @@ def _reached_worktrees(
         if state != "clean" or not idle:
             changes = f"; {prov.describe_changes(root)}" if state == "dirty" else ""
             held.append(
-                f"{root}: created by this session; linked worktree state: {state}{changes}; {facts}"
+                f"{root}: created by this session; linked worktree state: "
+                f"{prov.state_phrase(root, state, session_id)}{changes}; {facts}"
             )
     if unchecked:
         held.append(
@@ -1626,7 +1636,8 @@ def _reached_worktrees(
             who = "not created by this session (not in the ledger)"
         activity = activities.get(root)
         facts = activity.facts() if activity is not None else "PR state unknown (lookup timed out)"
-        parts.append(f"{root}: {who}; linked worktree state: {state}{changes}; {facts}")
+        state_text = prov.state_phrase(root, state, session_id)
+        parts.append(f"{root}: {who}; linked worktree state: {state_text}{changes}; {facts}")
     if len(foreign) > _MAX_FOREIGN_SHOWN:
         parts.append(f"… and {len(foreign) - _MAX_FOREIGN_SHOWN} more foreign linked worktrees")
     head = f"deletes {len(roots)} linked worktree{'s' if len(roots) != 1 else ''}"
