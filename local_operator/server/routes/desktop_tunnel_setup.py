@@ -78,71 +78,81 @@ def _refusal(status: int, code: str) -> HTTPException:
     return HTTPException(status, messages[code]().envelope(code=code))
 
 
+#: Each plan step's `blocked_on`. Module-level so the remedy-text tests can
+#: iterate every step this route knows rather than a hand-kept list.
+_BLOCKERS = {
+    "complete": "none",
+    "apply": "none",
+    "owner_choice": "choose_account",
+    "owner_missing": "owner_missing",
+    "repoint": "repoint",
+    "login": "login",
+    "quote": "quote",
+    "quote_changed": "quote",
+    "quote_unread": "quote_unread",
+    "account": "account",
+    "cloudflared": "cloudflared",
+    "mobile_bundle": "mobile_bundle",
+    "supervisor": "supervisor",
+    "balance": "balance",
+    "stopped": "stopped",
+    "verification": "verification",
+    "failed": "failed",
+    # A suspended tunnel with billing in order: the same primary run as
+    # `apply` (an older renderer keeps showing its button), with its own
+    # step and copy so the desktop can say "Reconnect".
+    "reconnect": "none",
+    # Lapsed billing reuses `balance` so a renderer that predates the split
+    # still shows its add-credit callout; `step` carries the distinction.
+    "billing_lapsed": "balance",
+    "disabled": "disabled",
+    "network": "network",
+    "radient_unavailable": "radient_unavailable",
+    "reconnecting": "reconnecting",
+}
+
+#: Each `blocked_on`'s `remedy.kind` (the button the desktop renders).
+_KINDS = {
+    "login": "sign_in",
+    "choose_account": "choose_account",
+    "owner_missing": "restore_owner",
+    # `run` is the ONE kind that makes the desktop render its primary action
+    # button (posting the plan's own credential_id), which is what turns the
+    # re-point from a sentence into something the operator can do.
+    "repoint": "run",
+    "quote": "accept_quote",
+    "quote_unread": "check_quote",
+    "account": "check_account",
+    "cloudflared": "install_cloudflared",
+    "mobile_bundle": "prepare_mobile",
+    "supervisor": "enable_supervisor",
+    "balance": "add_credit",
+    "verification": "check_status",
+    "failed": "check_status",
+    # Deliberately stopped: the run button turns it back on (the route's
+    # POST is a click, `setup_action` below). It was `resume_explicitly`,
+    # which answered not-ready with a `lop tunnel start` sentence, so the
+    # desktop's button could never work (#3945 U1).
+    "stopped": "run",
+    "none": "run",
+    # The kinds `features.tunnel_remedy_kinds` advertises, shared with
+    # `gateway.REMEDY_KIND` (the phone's 503 and `GET /v1/desktop/tunnel`):
+    # a console toggle is a link, and the two waits render no button because
+    # they recover by themselves.
+    "disabled": "open_console",
+    "network": "wait_network",
+    "radient_unavailable": "wait_radient",
+    # The post-sign-in no-spend run holds `setup.lock` (U10): no button,
+    # the desktop polls until it settles.
+    "reconnecting": "wait_reconnect",
+}
+
+
 def _contract(plan: dict[str, Any], *, local: bool) -> dict[str, Any]:
     # Whitelist the transport. Neither connector park detail nor cached/cloud
     # records, token-bearing provider responses or exception text can leak here.
     step = str(plan["step"])
-    blockers = {
-        "complete": "none",
-        "apply": "none",
-        "owner_choice": "choose_account",
-        "owner_missing": "owner_missing",
-        "repoint": "repoint",
-        "login": "login",
-        "quote": "quote",
-        "quote_changed": "quote",
-        "quote_unread": "quote_unread",
-        "account": "account",
-        "cloudflared": "cloudflared",
-        "mobile_bundle": "mobile_bundle",
-        "supervisor": "supervisor",
-        "balance": "balance",
-        "stopped": "stopped",
-        "verification": "verification",
-        "failed": "failed",
-        # A suspended tunnel with billing in order: the same primary run as
-        # `apply` (an older renderer keeps showing its button), with its own
-        # step and copy so the desktop can say "Reconnect".
-        "reconnect": "none",
-        # Lapsed billing reuses `balance` so a renderer that predates the split
-        # still shows its add-credit callout; `step` carries the distinction.
-        "billing_lapsed": "balance",
-        "disabled": "disabled",
-        "network": "network",
-        "radient_unavailable": "radient_unavailable",
-        "reconnecting": "reconnecting",
-    }
-    blocker = blockers.get(step, "failed")
-    kinds = {
-        "login": "sign_in",
-        "choose_account": "choose_account",
-        "owner_missing": "restore_owner",
-        # `run` is the ONE kind that makes the desktop render its primary action
-        # button (posting the plan's own credential_id), which is what turns the
-        # re-point from a sentence into something the operator can do.
-        "repoint": "run",
-        "quote": "accept_quote",
-        "quote_unread": "check_quote",
-        "account": "check_account",
-        "cloudflared": "install_cloudflared",
-        "mobile_bundle": "prepare_mobile",
-        "supervisor": "enable_supervisor",
-        "balance": "add_credit",
-        "verification": "check_status",
-        "failed": "check_status",
-        "stopped": "resume_explicitly",
-        "none": "run",
-        # The kinds `features.tunnel_remedy_kinds` advertises, shared with
-        # `gateway.REMEDY_KIND` (the phone's 503 and `GET /v1/desktop/tunnel`):
-        # a console toggle is a link, and the two waits render no button because
-        # they recover by themselves.
-        "disabled": "open_console",
-        "network": "wait_network",
-        "radient_unavailable": "wait_radient",
-        # The post-sign-in no-spend run holds `setup.lock` (U10): no button,
-        # the desktop polls until it settles.
-        "reconnecting": "wait_reconnect",
-    }
+    blocker = _BLOCKERS.get(step, "failed")
     quote = None
     if not local and plan.get("account_valid"):
         quote = {
@@ -178,8 +188,10 @@ def _contract(plan: dict[str, Any], *, local: bool) -> dict[str, Any]:
         "receipts": receipts,
         "done": [r["step"] for r in receipts],
         "remedy": {
-            "kind": kinds.get(blocker, "check_status"),
-            "text": plan["remedy"],
+            "kind": _KINDS.get(blocker, "check_status"),
+            # Never `plan["remedy"]`: that is the CLI's sentence and names
+            # terminal commands; the desktop renders this text verbatim.
+            "text": setup.plain_remedy(plan),
             "command": plan.get("apply_command"),
             # The console is the whole remedy for these two, so the link
             # travels as data rather than only inside the sentence.
@@ -329,8 +341,17 @@ async def setup_action(body: SetupRequest, request: Request) -> CRUDResponse[Any
         if body.action == "plan":
             plan = await setup.observe(body.credential_id)
         else:
+            # `resume_stopped=True`: this POST is a person's click on the setup
+            # card, so it may turn a deliberately stopped tunnel back on. The
+            # renderer never posts on a timer (its polls are the read-only GET),
+            # and the post-sign-in auto-hook never comes through here — it runs
+            # the CLI's `setup apply --no-spend`, which never sets the signal.
+            # Resuming is still gated on the price like any run: no purchase.
             plan = await setup.apply(
-                body.credential_id, body.accept_monthly_price, progress=progress
+                body.credential_id,
+                body.accept_monthly_price,
+                progress=progress,
+                resume_stopped=True,
             )
         result = _contract(plan, local=False)
         result["request_timeout_ms"] = deadline * 1000

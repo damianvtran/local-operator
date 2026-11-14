@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "fr",
   "namespace": "mobile.setup",
-  "history_sha256": "68a61881f9aa733aca1008421c258a81261a8b8246cc74605751244b32036459",
+  "history_sha256": "8c4895411637cea98a7319dccad04679d16455b5f161fafd0b3c4f7832238a27",
   "entries": [
     {
       "locale": "fr",
@@ -72,6 +72,52 @@
       "evidence": "i18n/audits/evidence/fr/mobile.setup/a2/record.json",
       "round": "a2",
       "keys_audited": 12
+    },
+    {
+      "locale": "fr",
+      "namespace": "mobile.setup",
+      "source_sha256": "3025a3af72d2a082766ca7b4c72100db41f2504f48404697af453121b0b6e427",
+      "translator": {
+        "agent": "coder subagent of host Local Operator session 25fe8dfbf610 (values committed in 01113e5aa on fix/tunnel-remedy-no-commands); FR3-01..04 remediation committed in 14b76faf by a #3958 remediation lane whose session was not disclosed to this auditor",
+        "model": null,
+        "date": "2026-11-14"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team), independent Local Operator session 375851fcc4e9; neither the translator/coder (25fe8dfbf610) nor the previous fr auditor (9054cd229d3f); edited no catalogue value",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-14",
+        "result": "passed",
+        "findings": 2,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "a3r2: independent fr re-audit by translation-auditor 375851fcc4e9 (anthropic/claude-opus-5-5) of #3958 values at 14b76fafa after the a3 fr FAIL (9054cd229d3f, FR3-01 MAJOR U+0020 before ';', not receipted): PASSED, 0 blocker/major (FR4-N1, FR4-N2 nits, deferred to the PR thread); FR3-01..04 verified fixed in the bytes; 12 new *_plain keys. Evidence: i18n/audits/evidence/fr/mobile.setup/a3r2/record.json",
+      "evidence": "i18n/audits/evidence/fr/mobile.setup/a3r2/record.json",
+      "round": "a3r2",
+      "keys_audited": 12
+    },
+    {
+      "locale": "fr",
+      "namespace": "mobile.setup",
+      "source_sha256": "d99fe54d374c3e0548c1c1f0775b99039a85c8b3085c097a443d12872e36429b",
+      "translator": {
+        "agent": "coder subagent of host Local Operator session 25fe8dfbf610 (values committed in 139bca903 on fix/tunnel-remedy-no-commands; English source by the same coder)",
+        "model": null,
+        "date": "2026-11-14"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team), independent Local Operator session b3a764eb5573; not the translator/coder (25fe8dfbf610); edited no catalogue value",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-14",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "a4: independent fr audit by translation-auditor b3a764eb5573 (anthropic/claude-opus-5-5) of #3958 values at 139bca903: PASSED, 0 blocker/major; 3 new keys (operation_failed_tui, disabled_resume, billing_lapsed_resume), mobile_bundle_tui removal verified. Evidence: i18n/audits/evidence/fr/mobile.setup/a4/record.json",
+      "evidence": "i18n/audits/evidence/fr/mobile.setup/a4/record.json",
+      "round": "a4",
+      "keys_audited": 3
     }
   ]
 }
