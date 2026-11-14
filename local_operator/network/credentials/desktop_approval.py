@@ -476,8 +476,15 @@ def _validated(
 
 def _require_requested(record: Mapping[str, Any]) -> None:
     expires = record.get("expires_at")
+    now = time.time()
+    # THE SIGNING GAP (pairing design v2 §2.1 item 1): a decision-scoped card whose person
+    # decided inside the window may still be signed while the signer's own presence bound
+    # runs; ``expiry_deferred`` answers that from the record (False for every other op).
     if record.get("state") == approvals.STATE_EXPIRED or (
-        isinstance(expires, (int, float)) and expires and time.time() >= float(expires)
+        isinstance(expires, (int, float))
+        and expires
+        and now >= float(expires)
+        and not approvals.expiry_deferred(record, now)
     ):
         raise _refuse(
             "approval_expired",
@@ -631,6 +638,15 @@ def _approve_locked(
         refusal = _policy_refusal(op, level)
         if refusal is not None:
             raise refusal
+        if op == "pair_phone":
+            # THE DECISION GUARD BEFORE THE SIGNER (pairing design v2 §2): the store's
+            # ``require_acked`` refuses an un-acked pairing at WRITE time, but that is
+            # after ``sign_decision`` has already spent a Touch ID gesture on a card
+            # nobody confirmed. Asking the same predicate here first keeps a refused
+            # approve from costing a gesture; the write-side check stays as the lock.
+            from local_operator.operator import pair_op
+
+            pair_op.require_acked(record)
         _admit(approval_id)
         decided_at = time.time()
         try:

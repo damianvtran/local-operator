@@ -348,6 +348,11 @@ class StoredDevice:
     not_after: int
     operator_key_id: str
     certificate: str
+    #: The platform the phone stated when it filed its pairing request (``"web"`` for
+    #: the PWA, round-1 Q4). Display-only and optional: records written before it
+    #: existed read as ``""``, and the Paired-phones row then falls back to a linked
+    #: push row's platform.
+    platform: str = ""
 
     def as_json(self) -> dict[str, Any]:
         """The on-disk record. ``certificate`` is the exact string the phone
@@ -366,6 +371,8 @@ class StoredDevice:
             "exp": self.not_after,
             "operator_key_id": self.operator_key_id,
             "certificate": self.certificate,
+            # Only when known, so a record without one keeps its pre-Q4 bytes.
+            **({"platform": self.platform} if self.platform else {}),
         }
 
 
@@ -377,6 +384,7 @@ def write_device_cert(
     operator_key_id: str,
     name: str = "",
     scope: tuple[str, ...] = DEVICE_SCOPES,
+    platform: str = "",
 ) -> StoredDevice:
     """Install a paired device's certificate. 0644 under a 0700 directory.
 
@@ -397,6 +405,7 @@ def write_device_cert(
         not_after=parsed.not_after,
         operator_key_id=operator_key_id,
         certificate=certificate,
+        platform=platform,
     )
     path = device_path(config_root, device_id)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -433,6 +442,7 @@ def read_device(config_root: Path, device_id: str) -> StoredDevice | None:
         not_after=int(body.get("exp") or 0),
         operator_key_id=str(body.get("operator_key_id") or ""),
         certificate=certificate,
+        platform=str(body.get("platform") or ""),
     )
 
 
@@ -658,11 +668,40 @@ def record_revocation(config_root: Path, device_id: str) -> None:
         listed.append(device_id)
     body["devices"] = listed
     body["operator_key_id"] = _installed_key_id()
+    # WHO THE ROW WAS, kept before the certificate goes (round-1 Q4). The certificate is
+    # the only place the phone's name, pairing time and platform live, and deleting it
+    # is what makes the refusal true -- so without this a ``removing``/``revoked`` row
+    # (the one that offers "Finish removing") could no longer name the phone. Display
+    # facts only, in this owner-private file; the ``devices`` list stays the authority.
+    stored = read_device(config_root, device_id)
+    if stored is not None:
+        phones = body.get("phones")
+        if not isinstance(phones, dict):
+            phones = {}
+        phones[device_id] = {
+            "name": stored.name,
+            "paired_at": stored.issued_at or None,
+            "platform": stored.platform,
+        }
+        body["phones"] = phones
     _write_private(path, json.dumps(body).encode("utf-8"))
     try:
         device_path(config_root, device_id).unlink()
     except OSError:
         pass
+
+
+def revoked_phone(config_root: Path, device_id: str) -> dict[str, Any]:
+    """The display facts :func:`record_revocation` kept for a revoked phone, or ``{}``.
+
+    ``{name, paired_at, platform}`` as they were on the certificate when it was
+    revoked (round-1 Q4); empty for a revocation recorded before they were kept, or
+    one made for an id with no stored certificate.
+    """
+    body = _read_json(revoked_path(config_root))
+    phones = body.get("phones") if body else None
+    entry = phones.get(device_id) if isinstance(phones, dict) else None
+    return dict(entry) if isinstance(entry, dict) else {}
 
 
 def forget_revocation(config_root: Path, device_id: str) -> bool:
@@ -685,6 +724,9 @@ def forget_revocation(config_root: Path, device_id: str) -> bool:
     if not isinstance(listed, list) or device_id not in listed:
         return False
     remaining = [entry for entry in listed if entry != device_id]
+    phones = body.get("phones")
+    if isinstance(phones, dict):
+        phones.pop(device_id, None)
     if remaining:
         body["devices"] = remaining
         _write_private(path, json.dumps(body).encode("utf-8"))

@@ -65,6 +65,28 @@ OP = "pair_phone"
 #: strike count, the decision guard below, and the card's own progress lines.
 STEP_ACK = "pair_code"
 
+#: The receipt step of a CONFIRM-mode match (pairing design v2 §1 item 3): the person
+#: compared the six digits on both screens and pressed "Codes match" on a card whose
+#: request the Radient edge attested. Its own step, never a ``pair_code`` with no code:
+#: :func:`require_acked` accepts it ONLY on an attested record, and the strike count
+#: (``pair_code`` failures) must never be fed by a button press.
+STEP_CONFIRM = "pair_confirm"
+
+#: The receipt written IMMEDIATELY BEFORE ``admit_device`` raises the OS admin prompt
+#: (design v2 §2, §2.2): the phone's status route reads it as ``admin_prompt_open``
+#: ("enter your password there"), which is otherwise invisible from outside the run.
+STEP_ADMIT = "pair_admit"
+
+#: The ``via.attested`` value the daemon writes only after re-verifying the Radient
+#: edge's RS256 assertion for this exact filing (``mobile/pair_requests._route``).
+#: Versioned so a later evidence format is a new value an old build refuses to state.
+ATTESTED_EDGE_V1 = "edge-v1"
+
+#: The two decision modes (design v2 §1): ``confirm`` = compare the digits and tap,
+#: offered ONLY on an attested request; ``code`` = type the phone's digits (today's).
+MODE_CONFIRM = "confirm"
+MODE_CODE = "code"
+
 #: The receipt step of the certificate install.
 STEP_INSTALL = "pair_cert"
 
@@ -102,7 +124,10 @@ _DEVICE_KEYS = frozenset({"device_id", "spki", "key_fp", "name", "platform"})
 _SAS_KEYS = frozenset({"commit", "nd", "np"})
 _REQUESTED_BY = frozenset({"surface", "device_id", "session_id"})
 
-DISCLOSURE_VERSION = 1
+#: 2 (design v2 §1 item 2): the disclosure carries ``mode`` and ``via`` may carry
+#: ``attested``. A desktop built for version 1 rejects it (fail closed) rather than
+#: rendering a confirm-mode card as if it were the typed one.
+DISCLOSURE_VERSION = 2
 
 #: Every surface's sentence for "this card is not the exact shape this build can state".
 #: The desktop card, the CLI's card lines and the generic approvers all answer with it, so
@@ -116,6 +141,18 @@ PAYLOAD_INVALID_SENTENCE = (
 
 def _refuse(code: str, message: str) -> MeshRefusal:
     return MeshRefusal(code, message)
+
+
+def _copy(name: str) -> str:
+    """One keyed sentence of design v2's new copy (``operator.pairing``), in the active locale.
+
+    The sentences this module had before v2 stay as they were (this module is not yet an
+    extracted i18n area); everything v2 adds is keyed from the start.
+    """
+    from local_operator.i18n.keys import operator_pairing
+    from local_operator.i18n.text import tr
+
+    return tr("operator.pairing")(getattr(operator_pairing, name)())
 
 
 def payload_invalid() -> MeshRefusal:
@@ -264,18 +301,43 @@ def exact_shape(record: Mapping[str, Any]) -> bool:
 
 
 def _valid_via(value: Any) -> bool:
-    """``{route, account}`` or ``{route}`` -- the two shapes v1 can state, nothing else."""
+    """The three route shapes this build can state, nothing else.
+
+    ``{route: custom}``; ``{route: radient, account}`` (the v1 ATTRIBUTION HINT, still
+    typed mode); ``{route: radient, account, attested: "edge-v1"}`` (design v2 §1: the
+    daemon re-verified the edge's assertion for this filing, so the card may be
+    confirmed rather than typed). ``attested`` is the only key that changes the mode,
+    so its value is pinned: an unknown evidence version is undescribable, not "close
+    enough".
+    """
     if not isinstance(value, dict) or value.get("route") not in _VIA_ROUTES:
         return False
     if value["route"] == "custom":
         return set(value) == {"route"}
     account = value.get("account")
+    keys = set(value)
+    if keys == {"route", "account", "attested"}:
+        if value["attested"] != ATTESTED_EDGE_V1:
+            return False
+    elif keys != {"route", "account"}:
+        return False
+    return isinstance(account, str) and 0 < len(account) <= 64 and account.isprintable()
+
+
+def is_attested(record: Mapping[str, Any]) -> bool:
+    """Whether this record's route is edge-attested (the only records confirm mode may sign)."""
+    data = intent(record)
+    via = data.get("via") if data is not None else None
     return (
-        set(value) == {"route", "account"}
-        and isinstance(account, str)
-        and 0 < len(account) <= 64
-        and account.isprintable()
+        isinstance(via, Mapping)
+        and via.get("route") == "radient"
+        and via.get("attested") == ATTESTED_EDGE_V1
     )
+
+
+def mode(record: Mapping[str, Any]) -> str:
+    """``confirm`` for an attested record, else ``code`` (design v2 §1's table)."""
+    return MODE_CONFIRM if is_attested(record) else MODE_CODE
 
 
 def _valid_sas(value: Any) -> tuple[bytes, bytes] | None:
@@ -355,6 +417,9 @@ def disclosure(record: dict[str, Any]) -> dict[str, Any]:
     try:
         return {
             "version": DISCLOSURE_VERSION,
+            # The decision mode is a disclosed fact, so the digest a confirm press echoes
+            # binds it: a card rendered as "type the code" cannot be answered as "confirm".
+            "mode": mode(record),
             "operation": OP,
             "approval_id": str(record.get("approval_id") or ""),
             "op": OP,
@@ -471,7 +536,7 @@ def require_acked(record: Mapping[str, Any]) -> None:
     discipline, not a boundary; on a file-only key the boundary is absent by the operator's
     own decision (a-2a8b), and on a presence key it is the OS prompt.
     """
-    if not _ack_ok(record):
+    if not (_ack_ok(record) or (is_attested(record) and _confirm_ok(record))):
         raise _refuse(
             "pair_code_required",
             "A phone pairing is approved by typing the code the phone shows, so the computer "
@@ -481,10 +546,111 @@ def require_acked(record: Mapping[str, Any]) -> None:
 
 
 def _ack_ok(record: Mapping[str, Any]) -> bool:
+    return _decision_receipt_at(record, (STEP_ACK,)) is not None
+
+
+def _confirm_ok(record: Mapping[str, Any]) -> bool:
+    return _decision_receipt_at(record, (STEP_CONFIRM,)) is not None
+
+
+def _decision_receipt_at(record: Mapping[str, Any], steps: tuple[str, ...]) -> float | None:
+    """The ``at`` of the first successful receipt of ``steps``, or ``None``."""
     for receipt in record.get("receipts") or []:
-        if isinstance(receipt, Mapping) and receipt.get("step") == STEP_ACK and receipt.get("ok"):
-            return True
-    return False
+        if (
+            isinstance(receipt, Mapping)
+            and receipt.get("step") in steps
+            and receipt.get("ok") is True
+            and isinstance(receipt.get("at"), (int, float))
+        ):
+            return float(receipt["at"])
+    return None
+
+
+def decision_at(record: Mapping[str, Any]) -> float | None:
+    """The person's decision moment: the ok code receipt, or (attested only) the confirm."""
+    steps = (STEP_ACK, STEP_CONFIRM) if is_attested(record) else (STEP_ACK,)
+    return _decision_receipt_at(record, steps)
+
+
+#: The phone-facing ``reason`` vocabulary (design v2 §2.2, U5). Closed: the phone's copy
+#: keys on it, so a value outside this set is a contract break, not a new screen.
+REASON_WAITING = "waiting"
+REASON_SIGNING = "signing"
+REASON_ADMIN_PROMPT_OPEN = "admin_prompt_open"
+REASON_FAILED_RETRYABLE = "failed_retryable"
+REASON_STRIKES_EXHAUSTED = "strikes_exhausted"
+REASON_DENIED_BY_USER = "denied_by_user"
+REASON_WITHDRAWN = "withdrawn"
+REASON_EXPIRED = "expired"
+REASON_PAIRED = "paired"
+#: The three reasons a LIVE card can show (the desktop row's ``progress``).
+LIVE_PROGRESS = (REASON_WAITING, REASON_SIGNING, REASON_ADMIN_PROMPT_OPEN)
+
+
+def progress(record: Mapping[str, Any], now: float | None = None) -> str:
+    """One record's ``reason``, from durable facts only (design v2 §2.2's table).
+
+    Read through :func:`approvals.presented` so the expiry fold (and its decision-scope
+    exemption) is the store's, never re-derived here. SUCCESS MEANS ADMITTED: only
+    ``connected`` -- which ``apply`` reaches after ``admit_device`` returned ``ADMIT_OK``
+    and the certificate was written -- answers ``paired``.
+    """
+    view = approvals.presented(record, time.time() if now is None else now)
+    state = str(view.get("state") or "")
+    receipts = [r for r in view.get("receipts") or [] if isinstance(r, Mapping)]
+    if state == approvals.STATE_REQUESTED:
+        return REASON_SIGNING if decision_at(view) is not None else REASON_WAITING
+    if state in (approvals.STATE_APPROVED, approvals.STATE_CONNECTING):
+        newest = receipts[-1].get("step") if receipts else None
+        if state == approvals.STATE_CONNECTING and newest == STEP_ADMIT:
+            return REASON_ADMIN_PROMPT_OPEN
+        return REASON_SIGNING
+    if state == approvals.STATE_FAILED:
+        # ``presented`` already folded a failed record past its window to ``expired``,
+        # so a ``failed`` view is one whose window is still open: retryable.
+        return REASON_FAILED_RETRYABLE
+    if state == approvals.STATE_DENIED:
+        return REASON_STRIKES_EXHAUSTED if _strikes(view) >= MAX_STRIKES else REASON_DENIED_BY_USER
+    if state == approvals.STATE_CONNECTED:
+        return REASON_PAIRED
+    if state == approvals.STATE_WITHDRAWN:
+        return REASON_WITHDRAWN
+    return REASON_EXPIRED
+
+
+def decision_pending(record: Mapping[str, Any], now: float) -> bool:
+    """Whether a ``requested`` card is inside its SIGNING GAP (design v2 §2.1 item 1).
+
+    The person decided (code matched, or codes-match pressed) before ``expires_at``,
+    and the signer's presence prompt that decision started may still be up: ``now`` is
+    no later than the decision plus ``keyagent.SIGN_TIMEOUT_SECONDS`` (180 s), the bound
+    the signer itself enforces: the desktop route signs with ``timeout=None`` and the
+    presence backend resolves that to this constant (``keychain.py``), so it is the
+    longest a desktop prompt can stay up. Past it no prompt can still be open, so the
+    window applies again.
+    No new number: both bounds are the record's own ``expires_at`` and the signer's.
+    """
+    deadline = decision_deadline(record)
+    return deadline is not None and now <= deadline
+
+
+def decision_deadline(record: Mapping[str, Any]) -> float | None:
+    """When a ``requested`` card's signing gap ends, or ``None`` when it has none.
+
+    The same bound :func:`decision_pending` tests, exposed as an instant so a reader
+    that caches on "nothing was written" (``approvals.approval_snapshot``) can schedule
+    its own recheck: the gap ends with NO write (round-1 R1), so a cache keyed only on
+    the directory fingerprint would otherwise serve the dead card indefinitely.
+    """
+    if str(record.get("state") or "") != approvals.STATE_REQUESTED:
+        return None
+    at = decision_at(record)
+    expires_at = record.get("expires_at")
+    if at is None or not isinstance(expires_at, (int, float)) or at >= float(expires_at):
+        return None
+    from local_operator.operator.macos.keyagent import SIGN_TIMEOUT_SECONDS
+
+    return at + SIGN_TIMEOUT_SECONDS
 
 
 def _strikes(record: Mapping[str, Any]) -> int:
@@ -578,6 +744,69 @@ def check_ack(approval_id: str, *, code: str, root: Path | None = None) -> None:
     )
 
 
+def confirm_match(
+    approval_id: str,
+    *,
+    request_digest: str,
+    disclosure_digest: str,
+    root: Path | None = None,
+) -> None:
+    """Record a CONFIRM-mode decision ("Codes match — Approve"), before any signer runs.
+
+    Pairing design v2 §1 item 3. Only an ATTESTED record may be confirmed: the Radient
+    edge proved the filer is the owner's account, so the residual a typed code buys
+    against (a phished concurrent request on a custom tunnel) is closed by the route
+    instead; anything else answers ``pair_code_required`` and the card stays typed.
+
+    BOTH DIGESTS ARE ECHOED, so the decision is bound to exactly the card on screen: a
+    second key racing in cannot be the one confirmed (one live request, and its device
+    block is inside ``request_digest``), and a disclosure that changed since it was
+    rendered (``mode``, name, code material) refuses rather than confirms. Writes one
+    ``pair_confirm`` receipt and an audit row; no signer, no strike.
+    """
+    with approvals._record_lock(approval_id, root):
+        record = approvals._load_raw(approval_id, root)
+        if str(record.get("kind") or "") != approvals.KIND_OPERATOR_DEVICE_PAIR:
+            raise _refuse(
+                "pair_operation_mismatch",
+                "This card is not a phone pairing request. Nothing was approved.",
+            )
+        _require_checkable(record)
+        if not exact_shape(record):
+            raise payload_invalid()
+        if not is_attested(record):
+            raise _refuse("pair_code_required", _copy("refusal_confirm_needs_code"))
+        from local_operator.network.credentials.desktop_approval import (
+            disclosure_digest as digest_of,
+        )
+
+        if request_digest != str(record.get("request_digest") or "") or disclosure_digest != (
+            digest_of(disclosure(dict(record)))
+        ):
+            raise _refuse("pair_request_changed", _copy("refusal_request_changed"))
+        record.setdefault("receipts", []).append(
+            {
+                "run_id": "",
+                "step": STEP_CONFIRM,
+                "at": time.time(),
+                "ok": True,
+                "detail": "",
+                "digest": "",
+            }
+        )
+        _write(record, root)
+    _audit(
+        "device_pair.desktop_confirm",
+        approval_id=approval_id,
+        root=root,
+        detail={
+            "surface": "desktop",
+            "device_id": str((record.get("device") or {}).get("device_id") or ""),
+            "via": "radient:" + ATTESTED_EDGE_V1,
+        },
+    )
+
+
 def _require_checkable(record: Mapping[str, Any]) -> None:
     """Refuse a card in a state where a code check would mean nothing."""
     state = str(record.get("state") or "")
@@ -642,6 +871,163 @@ def _deny_after_strikes(approval_id: str, root: Path | None) -> None:
         # A concurrent deny/withdraw/expiry won the write-once race; the record is in the
         # state that race chose, which is still "this card cannot be approved".
         pass
+
+
+# ---------------------------------------------------------------------------
+# The desktop's half (design v2 §2): the row's ``pairing`` block and ``pair-ack``
+# ---------------------------------------------------------------------------
+
+#: The display cap for a phone-sent name on a card (design v2 §4.2, D2). The full value
+#: stays in the record and the disclosure; this is only what a card line shows.
+PHONE_NAME_DISPLAY_CHARS = 40
+
+
+#: The one FORMAT character a phone name keeps: ZERO WIDTH JOINER (round-1 R7). It glues
+#: emoji sequences (a family, a skin-toned profession, a flag) into one glyph, so
+#: stripping it split "👨‍👩‍👧" into three faces; it cannot reorder or hide surrounding
+#: text, which is the attack the Cf strip exists for. Every other Cf is still removed.
+_KEPT_FORMAT_CHARS = frozenset({"\u200d"})
+
+
+def display_name(text: Any, limit: int = PHONE_NAME_DISPLAY_CHARS) -> str:
+    """A phone-sent name safe to show on a decision card or a Paired-phones row (D2).
+
+    Strips every control and FORMAT character (Unicode categories Cc/Cf: bidi
+    embeddings, overrides and isolates U+202A-202E/U+2066-2069, the marks U+200E/F and
+    U+061C, zero-width spaces, the BOM) except the ZWJ (:data:`_KEPT_FORMAT_CHARS`), so
+    a name cannot reorder or hide the text around it -- a phishing name like
+    "iPhone\u202e..." would otherwise render as something the person did not read.
+    Capped at ``limit`` code points (:data:`PHONE_NAME_DISPLAY_CHARS` on a card line; a
+    caller showing the whole name passes the filing bound), an approximation of
+    graphemes that never splits inside a surrogate, since these are already code points.
+    """
+    import unicodedata
+
+    kept = "".join(
+        ch
+        for ch in str(text or "")
+        if ch in _KEPT_FORMAT_CHARS or unicodedata.category(ch) not in {"Cc", "Cf"}
+    )
+    return " ".join(kept.split())[:limit]
+
+
+def row_pairing(record: Mapping[str, Any], root: Path | None = None) -> dict[str, Any] | None:
+    """The keyless, additive ``pairing`` block on a ``pair_phone`` approvals row.
+
+    Everything the desktop needs to draw the confirm or typed card without parsing the
+    record: the mode, the sanitised name, the six digits (CONFIRM MODE ONLY -- in typed
+    mode the desktop must never render them, or typing them proves nothing), the live
+    progress, both digests to echo, the host's assurance, and the gesture sentence from
+    its one source (``elevate.confirm_card_copy``). ``None`` for every other kind, and
+    for a record this build cannot describe (its row keeps ``typed_approval``'s
+    refusal instead).
+    """
+    if str(record.get("kind") or "") != approvals.KIND_OPERATOR_DEVICE_PAIR:
+        return None
+    if intent(record) is None or not exact_shape(record):
+        return None
+    from local_operator.network.credentials import desktop_approval
+    from local_operator.operator import elevate
+
+    facts = disclosure(dict(record))
+    device = record["device"]
+    current = progress(record)
+    attested = is_attested(record)
+    block: dict[str, Any] = {
+        "mode": mode(record),
+        "phone_name": display_name(device.get("name")),
+        # The whole name, through the SAME sanitiser as ``phone_name`` (round-1 R2):
+        # ``_plain`` strips only C0/C1, so bidi overrides reached the desktop here.
+        "phone_name_full": display_name(device.get("name"), limit=64),
+        "platform": str(device.get("platform") or ""),
+        "key_fingerprint": str(device.get("key_fp") or ""),
+        "sas": None,
+        "expires_at": record.get("expires_at"),
+        "progress": current if current in LIVE_PROGRESS else None,
+        "reason": current,
+        "tries_left": max(0, MAX_STRIKES - _strikes(record)),
+        # The attested account (``sub`` = this computer's owner account). The owner's
+        # EMAIL is not in the record -- the assertion is never stored -- so the desktop
+        # renders its own signed-in Radient email beside it (same account by the check).
+        "account": str(facts["via"].get("account") or "") if attested else None,
+        "account_email": None,
+        "request_digest": str(record.get("request_digest") or ""),
+        "disclosure_digest": desktop_approval.disclosure_digest(facts),
+        "assurance": desktop_approval.assurance()[0],
+        "gesture": elevate.confirm_card_copy()[2],
+    }
+    if attested and current == REASON_WAITING:
+        block["sas"] = _expected_code(record, root)
+    return block
+
+
+def _expected_code(record: Mapping[str, Any], root: Path | None) -> str | None:
+    """The six digits for a CONFIRM card, from the record and the LOCAL anchor."""
+    from local_operator.operator import devices
+
+    trio = approvals.local_anchor_trio(_config_root(root))
+    data = intent(record)
+    nonces = _valid_sas(data["sas"]) if data is not None else None
+    spki = devices.decode_spki((record.get("device") or {}).get("spki"))
+    if trio is None or nonces is None or spki is None:
+        return None
+    return sas_code(
+        np=nonces[0],
+        nd=nonces[1],
+        device_spki=spki,
+        operator_spki=trio["spki"],
+        approval_id=str(record.get("approval_id") or ""),
+    )
+
+
+def desktop_ack(
+    approval_id: str,
+    *,
+    request_digest: str,
+    disclosure_digest: str,
+    code: str | None,
+    root: Path | None = None,
+) -> dict[str, Any]:
+    """``POST /v1/desktop/approvals/{id}/pair-ack``: the person's decision, before any signer.
+
+    With ``code``: the typed check (:func:`check_ack`, strikes and all). Without:
+    :func:`confirm_match`, which only an edge-attested record accepts (else 409
+    ``pair_code_required``). Either way BOTH digests are checked first and a mismatch
+    burns no strike: a stale card is not a guess at the code. No signer runs here; the
+    signature is ``approve-operation``'s, and ``require_acked`` there reads the receipt
+    this writes.
+    """
+    from local_operator.network.credentials.desktop_approval import (
+        disclosure_digest as digest_of,
+    )
+
+    record = approvals._load_raw(approval_id, root)
+    if str(record.get("kind") or "") != approvals.KIND_OPERATOR_DEVICE_PAIR:
+        raise _refuse(
+            "pair_operation_mismatch",
+            "This card is not a phone pairing request. Nothing was approved.",
+        )
+    _require_checkable(record)
+    if request_digest != str(record.get("request_digest") or "") or disclosure_digest != (
+        digest_of(disclosure(dict(record)))
+    ):
+        raise _refuse("pair_request_changed", _copy("refusal_request_changed"))
+    if code is not None and str(code).strip():
+        check_ack(approval_id, code=str(code), root=root)
+    else:
+        confirm_match(
+            approval_id,
+            request_digest=request_digest,
+            disclosure_digest=disclosure_digest,
+            root=root,
+        )
+    after = approvals._load_raw(approval_id, root)
+    return {
+        "approval_id": approval_id,
+        "acked": True,
+        "mode": mode(after),
+        "progress": progress(after),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -799,6 +1185,18 @@ def _apply(approval_id: str, expected_block: dict[str, Any], root: Path | None) 
                 code="",
             )
             created_pending = True
+        # OBSERVABLE BEFORE THE PROMPT (design v2 §2): the receipt lands immediately
+        # before ``admit_device`` reaches ``run_elevated``, so the phone's status route
+        # reads ``admin_prompt_open`` while the OS asks for the computer's password --
+        # the one wait in this flow the person must act on, on the OTHER device.
+        approvals.append_receipt(
+            approval_id,
+            run_id=run_id,
+            step=STEP_ADMIT,
+            ok=True,
+            detail="the computer is asking for its administrator password",
+            root=config_root,
+        )
         admitted = admit_device(config_root, device_id)
         if admitted != ADMIT_OK:
             raise _refuse(ADMIT_REFUSED[admitted][0], ADMIT_REFUSED[admitted][1])
@@ -838,6 +1236,9 @@ def _apply(approval_id: str, expected_block: dict[str, Any], root: Path | None) 
             operator_key_id=str(trio["key_id"]),
             name=_plain(device["name"]),
             scope=tuple(devices.DEVICE_SCOPES),
+            # The filing's platform (``_PLATFORMS``-checked by ``exact_shape``), so a PWA
+            # phone's row says "web" before any push link exists (round-1 Q4).
+            platform=str(device.get("platform") or ""),
         )
         # The relay's pairing request is settled by the install: leaving it would offer the
         # same phone a second, unchecked install path (``lop pair``'s watcher).
@@ -1091,6 +1492,15 @@ class _PairOp:
     kind = approvals.KIND_OPERATOR_DEVICE_PAIR
     file_only_signing = True
     cli_approvable = False
+    #: Design v2 §2.1 (U11): the 300 s window bounds the person's decision, not the run
+    #: it starts. Only this op declares it, so onboarding's 60 min records are unchanged.
+    expiry_scope = approval_ops.EXPIRY_SCOPE_DECISION
+
+    def decision_pending(self, record: Mapping[str, Any], now: float) -> bool:
+        return decision_pending(record, now)
+
+    def decision_deadline(self, record: Mapping[str, Any]) -> float | None:
+        return decision_deadline(record)
 
     def intent(self, record: dict[str, Any]) -> dict[str, Any] | None:
         return intent(record)

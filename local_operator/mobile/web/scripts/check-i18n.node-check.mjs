@@ -126,12 +126,19 @@ test("the activated asks/cards surfaces are exactly the reviewed scope", () => {
 		"src/lib/asks.ts",
 	];
 	for (const scope of asksScope) assert(ENFORCED.includes(scope), `${scope} must be activated`);
-	assert(!ENFORCED.includes("src/screens/pair.tsx"), "pair is a later namespace");
 	assert(!ENFORCED.includes("src/screens/agent-view.tsx"), "agent-view is a later namespace");
 	const baseline = JSON.parse(readFileSync(join(root, "i18n-baseline.json"), "utf8"));
 	// This slice extracts the files completely, so any allowance row left behind
 	// would be exactly the file exemption the gate forbids.
 	for (const scope of asksScope) assert.deepEqual(baseline.legacy[scope], {}, `${scope} must carry no residual allowance`);
+});
+test("the pairing screen is activated with no residual allowance (relay.pairing)", () => {
+	// Terminal-free pairing (design v2 A1/A2) extracted pair.tsx completely into
+	// relay.pairing; a residual allowance would let a hardcoded sentence — or a
+	// terminal command outside the disclosure (D16) — back in unnoticed.
+	assert(ENFORCED.includes("src/screens/pair.tsx"), "pair.tsx must be activated");
+	const baseline = JSON.parse(readFileSync(join(root, "i18n-baseline.json"), "utf8"));
+	assert.equal(Object.keys(baseline.legacy["src/screens/pair.tsx"] ?? {}).length, 0, "pair.tsx must carry no residual allowance");
 });
 test("the generated owned-copy bundle is not counted as app debt", () => {
 	const rig = fixture("");

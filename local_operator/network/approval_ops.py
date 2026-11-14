@@ -231,6 +231,35 @@ def file_only_signing() -> dict[str, bool]:
     return {operation.op: operation.file_only_signing for operation in registered()}
 
 
+#: What an approval's ``expires_at`` bounds (pairing design v2 §2.1, U11).
+#: ``window`` (every op unless it says otherwise): the whole life of the card --
+#: request, decision AND run -- so a record still live past the window folds to
+#: ``expired``. ``decision``: the window bounds the PERSON'S DECISION only; once
+#: that decision landed inside the window, a run that is still alive is not
+#: expired out from under its own OS prompt. An optional attribute so ops written
+#: before it (and test doubles) keep ``window`` without declaring it.
+EXPIRY_SCOPE_WINDOW = "window"
+EXPIRY_SCOPE_DECISION = "decision"
+
+
+def for_kind(kind: str) -> ApprovalOp | None:
+    """The op whose records ride approvals KIND ``kind`` exclusively, or ``None``.
+
+    Only a kind with exactly ONE registered op answers: the credential ops share
+    ``device_onboard`` storage with onboarding, so a kind-level question (the
+    expiry scope) must never let one of them speak for all records of that kind.
+    """
+    matches = [operation for operation in registered() if operation.kind == kind]
+    return matches[0] if len(matches) == 1 else None
+
+
+def expiry_scope(kind: str) -> str:
+    """The registered expiry scope of records of ``kind``; ``window`` unless declared."""
+    operation = for_kind(kind)
+    scope = getattr(operation, "expiry_scope", EXPIRY_SCOPE_WINDOW) if operation else None
+    return scope if scope == EXPIRY_SCOPE_DECISION else EXPIRY_SCOPE_WINDOW
+
+
 def typed_required(approval_id: str) -> MeshRefusal:
     """The default generic-approver refusal for a typed op with no frozen sentence."""
     return MeshRefusal(

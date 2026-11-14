@@ -909,15 +909,15 @@ def test_a_deny_during_the_signing_prompt_installs_nothing_and_spends_no_request
     assert stops and stops[-1]["ok"] is False and stops[-1]["detail"] == "approval_denied"
 
 
-def test_a_record_that_expires_during_the_prompt_keeps_the_real_refusal(
+def test_a_window_passing_during_the_prompt_keeps_the_real_refusal(
     root: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Round 4 m2: the release must not replace the refusal that stopped the run.
+    """Round 4 m2, re-pinned for design v2 §2.1 (the window bounds the decision).
 
-    At `308269650273` a record that EXPIRED while the administrator prompt was up made
-    `mark_failed` raise `approval_decision_conflict` (``expired -> failed`` is no matrix
-    row) from inside the release, and that store error reached the caller in place of
-    the admit's own refusal and its sentence.
+    The release must not replace the refusal that stopped the run. Since v2 a writer's
+    sweep during the prompt no longer expires a decided, live run (its lease pid is
+    this process), so the cancel settles THIS run as a retryable ``failed`` and the
+    caller still sees the admit's own refusal and sentence.
     """
     from local_operator.operator import handlers
 
@@ -930,9 +930,9 @@ def test_a_record_that_expires_during_the_prompt_keeps_the_real_refusal(
     _approve(root, record)
 
     def end_while_prompting(config_root: Path, phone_id: str) -> int:
-        # Any writer's sweep lands the expiry while the person reads the prompt.
-        A.sweep(root=root, now=time.time() + 10 * 24 * 3600)
-        assert A.load_record(approval_id, root=root)["state"] == A.STATE_EXPIRED
+        # Any writer's sweep runs while the person reads the prompt, past the window.
+        A.sweep(root=root, now=float(record["expires_at"]) + 1)
+        assert A.load_record(approval_id, root=root)["state"] == A.STATE_CONNECTING
         return handlers.ADMIT_CANCELLED
 
     monkeypatch.setattr(handlers, "admit_device", end_while_prompting)
@@ -942,7 +942,44 @@ def test_a_record_that_expires_during_the_prompt_keeps_the_real_refusal(
 
     code, sentence = handlers.ADMIT_REFUSED[handlers.ADMIT_CANCELLED]
     assert (raised.value.code, raised.value.sentence) == (code, sentence), raised.value.code
-    assert A.load_record(approval_id, root=root)["state"] == A.STATE_EXPIRED
+    assert A.load_record(approval_id, root=root)["state"] == A.STATE_FAILED
+
+
+def test_the_window_passing_during_a_stubbed_admin_prompt_still_pairs(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Design v2 §2.1 regression row: expiry during the admin prompt ends ``connected``."""
+    from local_operator.operator import handlers
+
+    _make_key(root)
+    _level(monkeypatch, FILE_ONLY)
+    record = _file(root)
+    approval_id = str(record["approval_id"])
+    pair_op.check_ack(approval_id, code=_phone_code(record, root), root=root)
+    _counted_signer(root, monkeypatch)
+    _approve(root, record)
+    real_now = time.time
+    seen: list[str] = []
+
+    def admit_after_the_window(config_root: Path, phone_id: str) -> int:
+        # The prompt is observable as ``admin_prompt_open`` while it is up...
+        seen.append(pair_op.progress(A.load_record(approval_id, root=root)))
+        # ...and the person answers it after the 300 s window has passed.
+        late = float(record["expires_at"]) + 5
+        monkeypatch.setattr(time, "time", lambda: late)
+        A.sweep(root=root, now=late)
+        return handlers.ADMIT_OK
+
+    monkeypatch.setattr(handlers, "admit_device", admit_after_the_window)
+    monkeypatch.setattr(handlers, "ADMIT_OK", handlers.ADMIT_OK)
+    result = pair_op.apply(
+        approval_id, pair_op.expected(A.load_record(approval_id, root=root)), root
+    )
+    monkeypatch.setattr(time, "time", real_now)
+    assert seen == [pair_op.REASON_ADMIN_PROMPT_OPEN]
+    assert result["state"] == A.STATE_CONNECTED
+    assert A.load_record(approval_id, root=root)["state"] == A.STATE_CONNECTED
+    assert pair_op.progress(A.load_record(approval_id, root=root)) == pair_op.REASON_PAIRED
 
 
 # ---------------------------------------------------------------------------

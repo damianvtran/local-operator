@@ -1,0 +1,72 @@
+{
+  "operator.pairing.gesture.mac": {
+    "role": "Phone pairing (approve a phone from this computer)",
+    "tone": "Plain, calm, non-technical",
+    "note": "Shown on the desktop pairing card just before the macOS admin/Touch ID prompt. Must say it is the Mac's own password, NOT the Radient account password (D13)."
+  },
+  "operator.pairing.gesture.windows": {
+    "role": "Phone pairing (approve a phone from this computer)",
+    "tone": "Plain, calm, non-technical",
+    "note": "Windows variant of gesture.mac (UAC prompt)."
+  },
+  "operator.pairing.gesture.other": {
+    "role": "Phone pairing (approve a phone from this computer)",
+    "tone": "Plain, calm, non-technical",
+    "note": "Linux variant of gesture.mac (pkexec/sudo prompt)."
+  },
+  "operator.pairing.prompt.confirm": {
+    "role": "Phone pairing (approve a phone from this computer)",
+    "tone": "Plain, calm, non-technical",
+    "note": "Text inside the macOS administrator-password dialog when confirming (adding) a phone. Keep it one sentence; no quotes (it is embedded in AppleScript)."
+  },
+  "operator.pairing.prompt.remove": {
+    "role": "Phone pairing (approve a phone from this computer)",
+    "tone": "Plain, calm, non-technical",
+    "note": "macOS administrator-password dialog text when REMOVING a phone. One sentence; no double quotes."
+  },
+  "operator.pairing.prompt.setup": {
+    "role": "Phone pairing (approve a phone from this computer)",
+    "tone": "Plain, calm, non-technical",
+    "note": "macOS administrator-password dialog text when turning on phone approvals (operator authority setup). One sentence; no double quotes."
+  },
+  "operator.pairing.refusal.confirm_needs_code": {
+    "role": "Phone pairing (approve a phone from this computer)",
+    "tone": "Plain, calm, non-technical",
+    "note": "Desktop refusal: the request was not verified as coming through the owner's Radient account, so the person must type the phone's six-digit code instead of tapping 'Codes match'."
+  },
+  "operator.pairing.refusal.request_changed": {
+    "role": "Phone pairing (approve a phone from this computer)",
+    "tone": "Plain, calm, non-technical",
+    "note": "Desktop refusal: the pairing card's content changed between rendering and the decision."
+  },
+  "operator.pairing.refusal.unknown_request": {
+    "role": "Phone pairing (approve a phone from this computer)",
+    "tone": "Plain, calm, non-technical",
+    "note": "Phone-facing: the pairing request id it asked about does not exist."
+  },
+  "operator.pairing.refusal.withdraw_invalid": {
+    "role": "Phone pairing (approve a phone from this computer)",
+    "tone": "Plain, calm, non-technical",
+    "note": "Phone-facing: malformed cancel request."
+  },
+  "operator.pairing.refusal.withdraw_forbidden": {
+    "role": "Phone pairing (approve a phone from this computer)",
+    "tone": "Plain, calm, non-technical",
+    "note": "Phone-facing: the cancel was signed by a different phone key."
+  },
+  "operator.pairing.refusal.in_progress": {
+    "role": "Phone pairing (approve a phone from this computer)",
+    "tone": "Plain, calm, non-technical",
+    "note": "Phone-facing: the computer is already signing/confirming; the phone cannot cancel now."
+  },
+  "operator.pairing.refusal.bad_device_id": {
+    "role": "Phone pairing (approve a phone from this computer)",
+    "tone": "Plain, calm, non-technical",
+    "note": "Desktop refusal for a malformed phone id in Remove."
+  },
+  "operator.pairing.revoke.unfinished": {
+    "role": "Phone pairing (approve a phone from this computer)",
+    "tone": "Plain, calm, non-technical",
+    "note": "Terminal message after `lop operator devices --revoke` when the OS prompt was cancelled: the phone is blocked but the privileged step is unfinished."
+  }
+}

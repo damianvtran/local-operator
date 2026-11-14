@@ -1,0 +1,16 @@
+{
+  "operator.pairing.gesture.mac": "Tu Mac te pedirá Touch ID o su contraseña de inicio de sesión: es tu Mac quien confirma, no tu contraseña de Radient.",
+  "operator.pairing.gesture.windows": "Windows te pedirá que lo permitas: es Windows quien confirma, no tu contraseña de Radient.",
+  "operator.pairing.gesture.other": "Tu ordenador te pedirá su propia contraseña: es tu ordenador quien confirma, no tu contraseña de Radient.",
+  "operator.pairing.prompt.confirm": "Local Operator necesita tu aprobación para confirmar un teléfono en este ordenador.",
+  "operator.pairing.prompt.remove": "Local Operator necesita tu aprobación para quitar un teléfono de este ordenador.",
+  "operator.pairing.prompt.setup": "Local Operator necesita tu aprobación para activar las aprobaciones desde el teléfono en este ordenador.",
+  "operator.pairing.refusal.confirm_needs_code": "Este teléfono no hizo la solicitud a través de tu cuenta de Radient, así que este ordenador no puede confirmarlo comparando códigos. No se ha aprobado nada; en su lugar, escribe los seis dígitos que muestra el teléfono.",
+  "operator.pairing.refusal.request_changed": "Esta tarjeta de emparejamiento cambió después de mostrarse. No se ha aprobado nada; revísala de nuevo.",
+  "operator.pairing.refusal.unknown_request": "No hay ninguna solicitud de emparejamiento con ese identificador.",
+  "operator.pairing.refusal.withdraw_invalid": "Para retirar la solicitud hace falta la firma del teléfono y nada más.",
+  "operator.pairing.refusal.withdraw_forbidden": "Esa firma no es del teléfono que pidió emparejarse. No se ha retirado nada.",
+  "operator.pairing.refusal.in_progress": "Tu ordenador ya está confirmando este emparejamiento, así que ahora no se puede cancelar desde el teléfono. Recházalo en el ordenador.",
+  "operator.pairing.refusal.bad_device_id": "Ese no es un identificador de dispositivo emitido por este ordenador.",
+  "operator.pairing.revoke.unfinished": "Este teléfono ya no puede aprobar aquí ni recibir notificaciones, pero no se terminó de quitar de la lista de dispositivos del operador. Vuelve a ejecutar el mismo comando para terminar de quitarlo."
+}

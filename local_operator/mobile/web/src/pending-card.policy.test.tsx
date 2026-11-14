@@ -14,9 +14,11 @@
 //
 // Rendered through the REAL SessionScreen (the render site that keys the card and
 // hands it the pid), not PendingCard in isolation.
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { HttpError } from "./api";
+import { NotPairedError } from "./lib/operator-device";
+import { closePairingSheet, PairingSheetHost } from "./screens/pair";
 import { SessionScreen } from "./screens/session-view";
 import type { PendingRequest, SessionProjection } from "./types";
 
@@ -263,6 +265,20 @@ describe("the pending card's approval-policy links", () => {
 		const deny = screen.getByRole("button", { name: "deny" }) as HTMLButtonElement;
 		expect(deny.disabled).toBe(false);
 		expect(answerFrames()).toHaveLength(0);
+	});
+
+	it("U4: an unpaired phone's Set auto opens pairing and leaves no 'not paired' line on the card", async () => {
+		mocks.operatorFieldsFor.mockRejectedValueOnce(new NotPairedError());
+		await renderCard();
+		render(<PairingSheetHost />);
+		fireEvent.click(screen.getByRole("button", { name: "Set auto for this session" }));
+		// The sheet is the explanation...
+		await screen.findByText("Pair this phone to approve from here");
+		// ...so the card carries no line that would outlive the pairing.
+		expect(screen.queryByText(/not paired with that machine/)).toBeNull();
+		expect(screen.queryByRole("alert")).toBeNull();
+		expect(mocks.sendCommandWithProof).not.toHaveBeenCalled();
+		act(() => closePairingSheet());
 	});
 
 	it("does not offer the mode links on an ask card", async () => {

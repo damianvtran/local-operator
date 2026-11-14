@@ -1,0 +1,16 @@
+{
+  "operator.pairing.gesture.mac": "Votre Mac va demander Touch ID ou son mot de passe de session — c’est votre Mac qui confirme, pas votre mot de passe Radient.",
+  "operator.pairing.gesture.windows": "Windows va vous demander d’autoriser cette action — c’est Windows qui confirme, pas votre mot de passe Radient.",
+  "operator.pairing.gesture.other": "Votre ordinateur va demander son propre mot de passe — c’est votre ordinateur qui confirme, pas votre mot de passe Radient.",
+  "operator.pairing.prompt.confirm": "Local Operator a besoin de votre accord pour confirmer un téléphone sur cet ordinateur.",
+  "operator.pairing.prompt.remove": "Local Operator a besoin de votre accord pour retirer un téléphone de cet ordinateur.",
+  "operator.pairing.prompt.setup": "Local Operator a besoin de votre accord pour activer les approbations depuis le téléphone sur cet ordinateur.",
+  "operator.pairing.refusal.confirm_needs_code": "Ce téléphone n’a pas fait sa demande via votre compte Radient, donc cet ordinateur ne peut pas le confirmer en comparant les codes. Rien n’a été approuvé ; saisissez plutôt les six chiffres affichés sur le téléphone.",
+  "operator.pairing.refusal.request_changed": "Cette carte d’appairage a changé depuis son affichage. Rien n’a été approuvé ; examinez-la à nouveau.",
+  "operator.pairing.refusal.unknown_request": "Aucune demande d’appairage ne porte cet identifiant.",
+  "operator.pairing.refusal.withdraw_invalid": "Une annulation doit contenir la signature du téléphone, et rien d’autre.",
+  "operator.pairing.refusal.withdraw_forbidden": "Cette signature ne provient pas du téléphone qui a demandé l’appairage. Rien n’a été annulé.",
+  "operator.pairing.refusal.in_progress": "Votre ordinateur est déjà en train de confirmer cet appairage, il ne peut donc plus être annulé depuis le téléphone. Refusez-le plutôt sur l’ordinateur.",
+  "operator.pairing.refusal.bad_device_id": "Ce n’est pas un identifiant d’appareil émis par cet ordinateur.",
+  "operator.pairing.revoke.unfinished": "Ce téléphone ne peut plus approuver ici ni recevoir de notifications, mais son retrait de la liste des appareils de l’opérateur n’a pas abouti. Relancez la même commande pour terminer le retrait."
+}

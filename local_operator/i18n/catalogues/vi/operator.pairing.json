@@ -1,0 +1,16 @@
+{
+  "operator.pairing.gesture.mac": "Mac sẽ yêu cầu Touch ID hoặc mật khẩu đăng nhập — đó là Mac của bạn xác nhận, không phải mật khẩu Radient của bạn.",
+  "operator.pairing.gesture.windows": "Windows sẽ yêu cầu bạn cho phép — đó là Windows xác nhận, không phải mật khẩu Radient của bạn.",
+  "operator.pairing.gesture.other": "Máy tính sẽ hỏi mật khẩu của chính nó — đó là máy tính của bạn xác nhận, không phải mật khẩu Radient của bạn.",
+  "operator.pairing.prompt.confirm": "Local Operator cần bạn cho phép để xác nhận một điện thoại trên máy tính này.",
+  "operator.pairing.prompt.remove": "Local Operator cần bạn cho phép để gỡ một điện thoại khỏi máy tính này.",
+  "operator.pairing.prompt.setup": "Local Operator cần bạn cho phép để bật phê duyệt từ điện thoại trên máy tính này.",
+  "operator.pairing.refusal.confirm_needs_code": "Điện thoại này không gửi yêu cầu qua tài khoản Radient của bạn, nên máy tính này không thể xác nhận bằng cách so sánh mã. Chưa có gì được phê duyệt; hãy nhập sáu chữ số mà điện thoại hiển thị.",
+  "operator.pairing.refusal.request_changed": "Thẻ ghép nối này đã thay đổi kể từ khi hiển thị. Chưa có gì được phê duyệt; hãy xem lại.",
+  "operator.pairing.refusal.unknown_request": "Không có yêu cầu ghép nối nào với mã định danh đó.",
+  "operator.pairing.refusal.withdraw_invalid": "Yêu cầu rút lại chỉ được chứa đúng chữ ký của điện thoại.",
+  "operator.pairing.refusal.withdraw_forbidden": "Chữ ký đó không phải của điện thoại đã yêu cầu ghép nối. Không có gì bị rút lại.",
+  "operator.pairing.refusal.in_progress": "Máy tính đang xác nhận việc ghép nối này, nên giờ không thể hủy từ điện thoại. Hãy từ chối trên máy tính.",
+  "operator.pairing.refusal.bad_device_id": "Đó không phải mã định danh thiết bị do máy tính này cấp.",
+  "operator.pairing.revoke.unfinished": "Điện thoại này không còn phê duyệt ở đây hay nhận thông báo được nữa, nhưng việc gỡ nó khỏi danh sách thiết bị của người vận hành chưa hoàn tất. Hãy chạy lại cùng lệnh đó để gỡ xong."
+}

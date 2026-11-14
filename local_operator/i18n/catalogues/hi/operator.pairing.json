@@ -1,0 +1,16 @@
+{
+  "operator.pairing.gesture.mac": "आपका Mac, Touch ID या अपना लॉगिन पासवर्ड माँगेगा — यह आपका Mac पुष्टि कर रहा है, यह आपका Radient पासवर्ड नहीं है।",
+  "operator.pairing.gesture.windows": "Windows आपसे इसकी अनुमति माँगेगा — यह Windows पुष्टि कर रहा है, यह आपका Radient पासवर्ड नहीं है।",
+  "operator.pairing.gesture.other": "आपका कंप्यूटर अपना पासवर्ड माँगेगा — यह आपका कंप्यूटर पुष्टि कर रहा है, यह आपका Radient पासवर्ड नहीं है।",
+  "operator.pairing.prompt.confirm": "इस कंप्यूटर पर एक फ़ोन की पुष्टि करने के लिए Local Operator को आपकी अनुमति चाहिए।",
+  "operator.pairing.prompt.remove": "इस कंप्यूटर से एक फ़ोन हटाने के लिए Local Operator को आपकी अनुमति चाहिए।",
+  "operator.pairing.prompt.setup": "इस कंप्यूटर पर फ़ोन से स्वीकृतियाँ चालू करने के लिए Local Operator को आपकी अनुमति चाहिए।",
+  "operator.pairing.refusal.confirm_needs_code": "इस फ़ोन ने आपके Radient खाते के ज़रिए अनुरोध नहीं किया, इसलिए यह कंप्यूटर कोड मिलाकर इसकी पुष्टि नहीं कर सकता। कुछ भी स्वीकृत नहीं हुआ; इसके बजाय फ़ोन पर दिख रहे छह अंक टाइप करें।",
+  "operator.pairing.refusal.request_changed": "जोड़ने का यह कार्ड दिखाए जाने के बाद बदल गया। कुछ भी स्वीकृत नहीं हुआ; इसे फिर से देखें।",
+  "operator.pairing.refusal.unknown_request": "इस आईडी वाला जोड़ने का कोई अनुरोध नहीं है।",
+  "operator.pairing.refusal.withdraw_invalid": "अनुरोध वापस लेने के लिए सिर्फ़ फ़ोन का हस्ताक्षर चाहिए, और कुछ नहीं।",
+  "operator.pairing.refusal.withdraw_forbidden": "यह हस्ताक्षर उस फ़ोन का नहीं है जिसने जुड़ने का अनुरोध किया था। कुछ भी वापस नहीं लिया गया।",
+  "operator.pairing.refusal.in_progress": "आपका कंप्यूटर पहले से इस जुड़ाव की पुष्टि कर रहा है, इसलिए अब इसे फ़ोन से रद्द नहीं किया जा सकता। इसके बजाय कंप्यूटर पर इसे अस्वीकार करें।",
+  "operator.pairing.refusal.bad_device_id": "यह ऐसी डिवाइस आईडी नहीं है जो यह कंप्यूटर जारी करता हो।",
+  "operator.pairing.revoke.unfinished": "यह फ़ोन अब यहाँ स्वीकृति नहीं दे सकता और न ही सूचनाएँ पा सकता है, लेकिन ऑपरेटर की डिवाइस सूची से इसे हटाने का काम पूरा नहीं हुआ। हटाना पूरा करने के लिए वही कमांड फिर से चलाएँ।"
+}

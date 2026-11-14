@@ -27,7 +27,7 @@ import sys
 import time
 from dataclasses import replace
 from pathlib import Path
-from typing import Any
+from typing import Any, TextIO
 
 from local_operator.operator import (
     LEVEL_ANCHOR_UNPINNED,
@@ -502,13 +502,26 @@ def _admission_install(
     sudo_secret: str,
     runner: Any = None,
     announce: bool = False,
+    purpose: str = "",
+    out: TextIO | None = None,
 ) -> int:
     """Install with both old and new digests pinned across the OS prompt.
+
+    ``out`` receives every sentence this function prints (``None``: the process's own
+    stdout/stderr, as the CLI always had). A server caller passes its own stream, so
+    nothing has to swap the process-wide ``sys.stdout``/``sys.stderr`` from a worker
+    thread to keep these lines out of other threads' output (round-1 R3).
+
+    ``purpose`` is the elevation prompt's fixed purpose (``elevate.PURPOSE_*``); empty
+    means "confirm a phone", the admission this was written for. The unified revoke
+    (``devices_revoke``) passes ``remove`` so its prompt says what it does.
 
     ``announce`` prints the gesture sentence on stdout just before the prompt. Only the
     CLI verb asks for it: the desktop apply route runs in a server whose card already
     renders the same sentence from ``confirm_card_copy``.
     """
+    say = out if out is not None else sys.stdout
+    err = out if out is not None else sys.stderr
     if sudo_secret:
         # `install_anchor` prints its own refusal and answers with its own codes; map
         # them onto THIS function's one-code-per-cause set, so a caller cannot read a
@@ -531,7 +544,7 @@ def _admission_install(
         print(
             f"the operator anchor cannot be installed on this computer: {refusal}; "
             "nothing was confirmed",
-            file=sys.stderr,
+            file=err,
         )
         return ADMIT_INSTALL_FAILED
     try:
@@ -545,7 +558,7 @@ def _admission_install(
         hashlib.sha256(expected_old).hexdigest(),
     )
     if print_only:
-        print(format_install_commands(command))
+        print(format_install_commands(command), file=say)
         return ADMIT_OK
     if runner is None:
         from local_operator.operator.elevate import confirm_card_copy, prompt_refusal
@@ -563,11 +576,16 @@ def _admission_install(
                 trust_module.staging_path(root).unlink()
             except OSError:
                 pass
-            print(cannot, file=sys.stderr)
+            print(cannot, file=err)
             return ADMIT_NO_PROMPT
         if announce:
-            print(confirm_card_copy()[2])
-    result = run_elevated(command) if runner is None else runner(command)
+            print(confirm_card_copy()[2], file=say)
+    if runner is not None:
+        result = runner(command)
+    elif purpose:
+        result = run_elevated(command, purpose=purpose)
+    else:
+        result = run_elevated(command)
     if result.cancelled or result.exit_code != 0:
         # S3 signs the certificate only after a zero result, so a failed prompt can
         # never reach certificate issuance. The staged statement goes on ANY
@@ -584,7 +602,7 @@ def _admission_install(
         # card promises a gesture; a run in which none happened and nothing was
         # said is the one outcome a person cannot tell from success.
         if result.refusal:
-            print(result.refusal, file=sys.stderr)
+            print(result.refusal, file=err)
             return ADMIT_NO_PROMPT
         # NO CLAIM ABOUT WHAT THE PHONE CAN DO NOW (design round 2, D10): after a
         # cancelled migration `--confirm` the pre-rule phones keep working, and on a
@@ -594,16 +612,16 @@ def _admission_install(
             print(
                 "You cancelled the approval, so nothing was confirmed. Run the same "
                 "command again when you are ready.",
-                file=sys.stderr,
+                file=err,
             )
             return ADMIT_CANCELLED
         # The script's own reason first, then the retry (agent review round 4, m3).
         if result.diagnosis:
-            print(result.diagnosis, file=sys.stderr)
+            print(result.diagnosis, file=err)
         print(
             "The approval did not complete, so nothing was confirmed. Run the same "
             "command again to retry.",
-            file=sys.stderr,
+            file=err,
         )
         return ADMIT_INSTALL_FAILED
     try:
