@@ -2567,10 +2567,18 @@ def test_the_makefile_typed_gate_is_the_same_command_as_the_job() -> None:
         if match:
             ci_heaps.append(match)
     assert ci_heaps, "ci.yml's type-check job no longer sets a node old-space NODE_OPTIONS"
-    assert local_heap == int(ci_heaps[0].group(1)), (
+    # CI may exceed the local cap (local runs are deliberately memory-bounded;
+    # CI was raised to 8192 after a 6 GB OOM, run 42991603157) but must never
+    # drop below it, or the scoped fallback would be stricter than the gate.
+    assert int(ci_heaps[0].group(1)) >= local_heap, (
         f"the wrapper raises node's heap to {local_heap} MB while ci.yml "
-        f"sets {ci_heaps[0].group(1)} MB — the same drift the bound guard exists for"
+        f"sets only {ci_heaps[0].group(1)} MB — CI must not fall below the local floor"
     )
+    # The pyright step's recorded cap must match the NODE_OPTIONS it measures against.
+    pyright_step = next(s for s in _steps("type-check") if s.get("name") == "Run pyright")
+    assert (
+        f"heap_mb={ci_heaps[0].group(1)}\n" in pyright_step["run"]
+    ), "the pyright step's heap_mb warning threshold drifted from its NODE_OPTIONS"
     assert job_tokens[-1] == ".", "both spellings stay whole-tree"
 
 

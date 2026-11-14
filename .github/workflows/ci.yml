@@ -641,12 +641,51 @@ jobs:
 
       # Node's default V8 old-space cap is ~4 GB; pyright's whole-tree analyzer
       # OOMed at heap 3885 MB on the 16 GB ubuntu-latest runner (run
-      # 36521602567, job 109266609131). Give node 6 GB of
-      # old-space headroom. Orthogonal to the version-pin comment above (unchanged).
+      # 36521602567, job 109266609131), so it was raised to 6 GB. That has
+      # since been outgrown: PR #3762's merge ref died with "Mark-Compact
+      # 5979 (6172) -> 5965 MB ... Ineffective mark-compacts near heap limit"
+      # (exit 250, no type error; run 42991603157, job 130447238465), and
+      # several other PR-branch runs failed the same way while main still
+      # passed, i.e. main sits close to the 6 GB ceiling. 8192 MB leaves
+      # ~2 GB headroom and still fits in the runner's 16 GB. The step also
+      # records pyright's peak RSS and wall time (job summary + log) so the
+      # headroom is observable instead of guessed. Local runs stay at
+      # run_bounded.NODE_HEAP_MB (deliberately memory-bounded). Orthogonal to
+      # the version-pin comment above (unchanged).
       - name: Run pyright
+        shell: bash
         env:
-          NODE_OPTIONS: "--max-old-space-size=6144"
-        run: pyright
+          NODE_OPTIONS: "--max-old-space-size=8192"
+        run: |
+          # No pipe, and the exit status is captured explicitly (`|| rc=$?`
+          # defeats the runner's implicit -e only for this one command), so
+          # pyright's status is what the step returns. /usr/bin/time writes
+          # to a file via -o, keeping pyright's stdout/stderr untouched.
+          # Without GNU time we still run pyright, just unmeasured.
+          heap_mb=8192
+          time_log="$RUNNER_TEMP/pyright-time.txt"
+          start=$SECONDS
+          rc=0
+          if [ -x /usr/bin/time ]; then
+            /usr/bin/time -v -o "$time_log" pyright || rc=$?
+          else
+            pyright || rc=$?
+          fi
+          wall=$((SECONDS - start))
+          peak_kb=$(awk -F': ' '/Maximum resident set size/ {print $2}' "$time_log" 2>/dev/null || true)
+          if [ -n "$peak_kb" ]; then
+            peak_mb=$((peak_kb / 1024))
+            msg="pyright peak RSS ${peak_mb} MB (heap cap ${heap_mb} MB), wall ${wall}s, exit ${rc}"
+            if [ $((peak_mb * 100)) -gt $((heap_mb * 75)) ]; then
+              echo "::warning::${msg}: above 75% of the configured heap; raise it before the next OOM"
+            fi
+          else
+            msg="pyright peak RSS unavailable (no GNU time), wall ${wall}s, exit ${rc}"
+          fi
+          echo "$msg"
+          echo "### pyright resource use" >> "$GITHUB_STEP_SUMMARY"
+          echo "$msg" >> "$GITHUB_STEP_SUMMARY"
+          exit "$rc"
 
       # These are standalone, zero-spend benchmark controls. An empty HOME and
       # allowlisted environment prevent a test from inheriting CI credentials;
