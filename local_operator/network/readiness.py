@@ -117,18 +117,24 @@ CAPABILITY_CUSTOM_INSTRUCTIONS = "custom_instructions"
 #: peer. Informational (non-gating): the cadence repairs it within a minute, and
 #: the create path pushes first.
 CAPABILITY_SKILLS = "skills"
-#: (m) the operator's subagent model tiers (``subagents.models``): did this peer
+#: (m) the node-managed browser: would a session offloaded to this peer get a
+#: ``browser`` tool? Added 2026-11-13: sessions on headless nodes had none and
+#: nothing said so until a visual/E2E lane failed there. ``n/a`` where a user's
+#: desktop app or extension serves the device (the node-managed browser is for
+#: headless nodes only — guide://browser "Headless nodes").
+CAPABILITY_BROWSER = "browser"
+#: (n) the operator's subagent model tiers (``subagents.models``): did this peer
 #: keep its own map over another device's
 #: (``definitions._apply_subagent_tiers_locked``)? The (k) row's twin, for the
 #: same reason: a pinned role resolving against a different (or missing) tier on
 #: the node is the consequence, and the operator reads this report. Non-gating.
 CAPABILITY_SUBAGENT_TIERS = "subagent_tiers"
-#: (n) whether the model a session SELECTED (not the device default) has a
+#: (o) whether the model a session SELECTED (not the device default) has a
 #: usable credential on this peer. A named constant like every other row, so
 #: ``enrollment``'s capability allowlist — derived from these constants — can
 #: never miss it (it used to be the only row spelled as a literal).
 CAPABILITY_SELECTED_MODEL_CREDENTIAL = "selected_model_credential"
-#: (o) subagent tier pins: can this peer resolve every effort tier a role on it
+#: (p) subagent tier pins: can this peer resolve every effort tier a role on it
 #: pins (``effort: lo|med|hi`` on the role row)? Added 2026-11-14: a node whose
 #: ``config.yml`` kept ``subagents: {}`` refused every designer/ux-reviewer/
 #: architect launch with "effort tier 'hi' is unavailable", and its sessions then
@@ -192,6 +198,10 @@ NON_GATING_EQUIPMENT: frozenset[str] = frozenset(
         # A missing skill is a sync in flight or a skill that cannot travel; the
         # row names which, and nothing about onboarding depends on it.
         CAPABILITY_SKILLS,
+        # A node without a browser IS onboarded; visual/E2E work is the point of
+        # use, and installing one needs the operator's authorisation, so the row
+        # names the gap and the authorised remedy rather than gating.
+        CAPABILITY_BROWSER,
         # A node keeping its own tier map is the node operator's choice, never a gate.
         CAPABILITY_SUBAGENT_TIERS,
         # Sessions there still run; only the roles pinned to the missing tier
@@ -216,6 +226,7 @@ PEER_SIDE_CHECKS: tuple[str, ...] = (
     CAPABILITY_TOOLING,
     CAPABILITY_RESILIENCE,
     CAPABILITY_SERVE_DAEMON,
+    CAPABILITY_BROWSER,
 )
 
 #: Failure codes. OK rows carry no code; a code is a machine token for a
@@ -258,7 +269,7 @@ CODE_SKILLS_NOT_SYNCED = "skills_not_synced"
 #: but a login session holds it (Linux: a ``session-*.scope``, not a unit).
 CODE_SERVE_STALE = "serve_stale"
 CODE_UNSUPERVISED = "unsupervised"
-#: Rows (k)/(m): the node kept its own custom instructions / tier map over a
+#: Rows (k)/(n): the node kept its own custom instructions / tier map over a
 #: mirror. Named, like (j)'s and the MCP grant's below, because enrollment's
 #: receipt (``enrollment.public_report``) admits only ``CODE_*`` values — a
 #: literal code there made a mesh with such a peer fail enrollment verify.
@@ -1832,6 +1843,10 @@ def collect_peer_facts(
         # this device's own). An older viewer ignores it; an older peer omits it
         # and the model-credential row then reads byte-for-byte as before.
         "failover": _failover_fact(root, model),
+        # ADDITIVE ON THE WIRE (2026-11-13): an older viewer ignores it; this
+        # build reads its ABSENCE (an older peer) as ``peer_too_old`` on the
+        # browser row, never as "no browser".
+        "browser": browser_fact(),
         # Same additive contract as ``custom_instructions``.
         "subagent_tiers": subagent_tiers_fact(root),
         # ADDITIVE ON THE WIRE: which role-pinned tiers this device cannot
@@ -2068,7 +2083,7 @@ def subagent_tier_pins_fact(root: Path) -> dict[str, Any] | None:
 def subagent_tier_pins_row(
     member: Any, facts: Mapping[str, Any], *, peer_label: str
 ) -> dict[str, Any] | None:
-    """(o) Can this peer launch every role whose profile pins an effort tier?
+    """(p) Can this peer launch every role whose profile pins an effort tier?
 
     ``None`` (no row) when the peer did not answer the fact (older build, or an
     unreadable registry) or every pinned tier resolves — the healthy case adds no
@@ -2092,7 +2107,7 @@ def subagent_tier_pins_row(
         return None
     from local_operator.harness.subagent import missing_tier_remedy
 
-    # INTERPLAY WITH THE (l) ``subagent_tiers`` ROW (PR #3869). That row says
+    # INTERPLAY WITH THE (n) ``subagent_tiers`` ROW (PR #3869). That row says
     # WHOSE tier map the node holds (it kept its own over the operator's); this
     # one says WHICH ROLES cannot launch. Both may be drawn for one node, so they
     # must not contradict: the shared remedy names the mesh push, but #3869's
@@ -2105,7 +2120,7 @@ def subagent_tier_pins_row(
     # before any conflict exists. An older peer omits the fact and keeps the push
     # remedy (true for the ``subagents: {}`` node it targets). An UNREADABLE node
     # draws no pins row at all (the fact is ``None`` there); the broken config
-    # shows in ``model_credential``, and in the (l) row only once a push has
+    # shows in ``model_credential``, and in the (n) row only once a push has
     # recorded the refusal.
     tiers_fact = facts.get("subagent_tiers")
     tiers_status = str(tiers_fact.get("status") or "") if isinstance(tiers_fact, Mapping) else ""
@@ -2310,7 +2325,7 @@ def subagent_tiers_fact(root: Path) -> dict[str, Any] | None:
 def subagent_tiers_row(
     member: Any, facts: Mapping[str, Any], *, peer_label: str
 ) -> dict[str, Any] | None:
-    """(m) Did this peer keep its own subagent tier map over another device's?
+    """(n) Did this peer keep its own subagent tier map over another device's?
 
     :func:`custom_instructions_row`'s rules: no row for an older peer, a mirror,
     no map, or a refusal about a map that is gone; a refusal still standing is a
@@ -4327,6 +4342,179 @@ def tooling_row(member: Any, facts: Mapping[str, Any], *, peer_label: str) -> di
         source=SOURCE_PEER,
         observed={"absent": absent, "off_path": off_path, "unknown": unknown, "gh_login": login},
     )
+
+
+def browser_fact() -> dict[str, Any]:
+    """This device's browser hosting, as facts (see ``node_host.browser_fact``).
+
+    Lazy import and a defensive wrapper: the readiness op must answer even if the
+    browser module cannot load, and an unreadable fact says ``unknown``.
+    """
+    try:
+        from local_operator.browser_bridge.node_host import browser_fact as _fact
+
+        return _fact()
+    except Exception as error:  # noqa: BLE001 - a fact that cannot be read says so
+        return {"host": "unknown", "error": str(error)[:200]}
+
+
+def browser_row(member: Any, facts: Mapping[str, Any], *, peer_label: str) -> dict[str, Any]:
+    """(l) Would a session offloaded to this peer get a ``browser`` tool?
+
+    Non-gating equipment (``NON_GATING_EQUIPMENT``). Four readings:
+
+    * ``n/a`` — a user's desktop app or extension serves this device; the
+      node-managed browser is never installed on a user's machine;
+    * ``ok`` — the node-managed Chrome unit is active, the bridge daemon healthy
+      and the extension paired;
+    * ``warn`` not installed — the remedy names the command AND that it needs
+      the operator's authorisation (installing software on a node is theirs to
+      decide, so the row never reads as an instruction to go and do it);
+    * ``warn`` installed but unusable (unit down, daemon down, unpaired) — the
+      remedy is ``--repair``, which re-applies only what is no longer in place.
+    """
+    fact = facts.get("browser")
+    if not isinstance(fact, Mapping):
+        # Worded like the neighbouring rows for a missing fact (tooling,
+        # operator_authority): every 0.102.x peer DOES answer readiness and
+        # simply predates this one check, so "predates readiness reporting"
+        # was untrue of it (round 1, U6). The update remedy stays.
+        return _capability_row(
+            device_id=member.device_id,
+            device_name=peer_label,
+            capability=CAPABILITY_BROWSER,
+            ok=False,
+            code=CODE_UNKNOWN,
+            detail="the peer's answer did not carry this check",
+            remedies=[f"update lop on {peer_label}, then re-check"],
+            source=SOURCE_UNKNOWN,
+        )
+    host = str(fact.get("host") or "")
+    # Every n/a detail below states WHY without repeating "n/a": the state
+    # column already prints it (round 1, U10).
+    if host == "user":
+        return _capability_row(
+            device_id=member.device_id,
+            device_name=peer_label,
+            capability=CAPABILITY_BROWSER,
+            ok=True,
+            detail=(
+                f"a user's browser host (desktop app or extension) serves {peer_label}; "
+                "the node-managed browser is for headless nodes only"
+            ),
+            source=SOURCE_PEER,
+            observed={"not_applicable": True, "host": "user"},
+        )
+    if host in ("unsupported_platform", "unsupported_distro"):
+        # A host setup would refuse reads n/a, never "not installed": that
+        # row's remedy is the very command that refuses (round 1, R1-6).
+        if host == "unsupported_distro":
+            detail = (
+                f"the node-managed browser needs a dnf/rpm distribution, and {peer_label} "
+                "is not one"
+            )
+        else:
+            platform_name = _safe_text(str(fact.get("platform") or "not Linux x86_64"), limit=60)
+            detail = (
+                f"the node-managed browser supports Linux x86_64 only, and {peer_label} is "
+                f"{platform_name}; other devices use the extension or the desktop app"
+            )
+        return _capability_row(
+            device_id=member.device_id,
+            device_name=peer_label,
+            capability=CAPABILITY_BROWSER,
+            ok=True,
+            detail=detail,
+            source=SOURCE_PEER,
+            observed={"not_applicable": True, "host": host},
+        )
+    if host == "node":
+        unit_active = bool(fact.get("unit_active"))
+        daemon_healthy = bool(fact.get("daemon_healthy"))
+        paired = bool(fact.get("paired"))
+        observed = {
+            "host": "node",
+            "unit_active": unit_active,
+            "unit_state": str(fact.get("unit_state") or ""),
+            "daemon_healthy": daemon_healthy,
+            "paired": paired,
+        }
+        chrome = str(fact.get("chrome_version") or "").removeprefix("Google ").strip()
+        extension = str(fact.get("extension_version") or "")
+        if unit_active and daemon_healthy and paired:
+            return _capability_row(
+                device_id=member.device_id,
+                device_name=peer_label,
+                capability=CAPABILITY_BROWSER,
+                ok=True,
+                detail=(
+                    f"{chrome or 'Chrome'} (node-managed, headless), extension {extension} paired"
+                ),
+                source=SOURCE_PEER,
+                observed=observed,
+            )
+        problems: list[str] = []
+        if not unit_active:
+            problems.append(f"its Chrome unit is {observed['unit_state'] or 'not active'}")
+        if not daemon_healthy:
+            problems.append("its browser bridge daemon is not answering")
+        if not paired:
+            problems.append("its extension is not paired")
+        return _capability_row(
+            device_id=member.device_id,
+            device_name=peer_label,
+            capability=CAPABILITY_BROWSER,
+            ok=False,
+            code=CODE_UNUSABLE,
+            detail=(
+                f"{peer_label} has the node-managed browser installed but unusable: "
+                + "; ".join(problems)
+                + ": sessions there have no browser tool"
+            ),
+            remedies=[
+                f"on {peer_label}: "
+                "`lop browser setup --node --repair --authorised-by '<who, when>'`"
+            ],
+            source=SOURCE_PEER,
+            observed=observed,
+        )
+    if host == "none":
+        return _capability_row(
+            device_id=member.device_id,
+            device_name=peer_label,
+            capability=CAPABILITY_BROWSER,
+            ok=False,
+            code=CODE_NOT_INSTALLED,
+            detail=f"sessions on {peer_label} have no browser tool",
+            remedies=[
+                f"on {peer_label}: `lop browser setup --node --authorised-by '<who, when>'` "
+                "(operator authorisation required; guide://browser 'Headless nodes')"
+            ],
+            source=SOURCE_PEER,
+            observed={"host": "none"},
+        )
+    return _capability_row(
+        device_id=member.device_id,
+        device_name=peer_label,
+        capability=CAPABILITY_BROWSER,
+        ok=False,
+        code=CODE_UNKNOWN,
+        detail=(
+            f"{peer_label} could not read its browser hosting "
+            f"({fact.get('error') or 'no answer'})"
+        ),
+        remedies=[f"on {peer_label}: run `lop browser setup --node --dry-run` and re-check"],
+        source=SOURCE_PEER,
+        observed={"host": host or "unknown"},
+    )
+
+
+def _peer_too_old_rows_for(member: Any, capability: str) -> dict[str, Any]:
+    """The ``peer_too_old`` row for ONE capability a peer's answer lacked."""
+    for row in _peer_too_old_rows(member):
+        if row["capability"] == capability:
+            return row
+    raise ValueError(capability)  # pragma: no cover - capability is in PEER_SIDE_CHECKS
 
 
 def _holder_names(placement: Mapping[str, Any]) -> list[str]:
@@ -6363,6 +6551,7 @@ def _peer_checks(
         )
         selected_row.update(row)
     rows.append(tooling_row(member, facts, peer_label=peer_label))
+    rows.append(browser_row(member, facts, peer_label=peer_label))
     rows.append(resilience_row(member, facts, peer_label=peer_label))
     instructions_row = custom_instructions_row(
         member,
@@ -6561,7 +6750,7 @@ def row_state(row: Mapping[str, Any]) -> str:
     """
     observed = row.get("observed")
     observed = observed if isinstance(observed, Mapping) else {}
-    if observed.get("out_of_scope"):
+    if observed.get("out_of_scope") or observed.get("not_applicable"):
         return ROW_STATE_NOT_APPLICABLE
     if row.get("ok"):
         return ROW_STATE_OK

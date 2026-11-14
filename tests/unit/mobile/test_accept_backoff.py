@@ -15,6 +15,7 @@ import logging
 import socket
 import sys
 import time
+from asyncio import trsock
 from typing import Any
 
 import pytest
@@ -25,15 +26,26 @@ pytestmark = pytest.mark.skipif(sys.platform == "win32", reason="selector loop p
 
 
 class _FlakyListener(socket.socket):
-    """A real listening socket whose accept() reports EMFILE while ``exhausted``."""
+    """A real listening socket whose accept() reports EMFILE while ``exhausted``.
+
+    With ``abort_next`` set, the next accept() plays a client that gave up
+    before being accepted: it takes the connection off the backlog and reports
+    ``ConnectionAbortedError``, so the following accept() sees EAGAIN.
+    """
 
     exhausted = True
+    abort_next = False
     calls = 0
 
     def accept(self):  # type: ignore[override]
         self.calls += 1
         if self.exhausted:
             raise OSError(errno.EMFILE, "Too many open files")
+        if self.abort_next:
+            self.abort_next = False
+            conn, _addr = super().accept()
+            conn.close()
+            raise ConnectionAbortedError(errno.ECONNABORTED, "Software caused connection abort")
         return super().accept()
 
 
@@ -102,6 +114,8 @@ def test_an_exhausted_listener_backs_off_and_logs_one_episode():
         assert len(calls) == 1
         assert calls[0]["message"] == "socket.accept() out of system resource"
         assert calls[0]["exception"].errno == errno.EMFILE
+        # Stdlib parity: handlers get the read-only wrapper, never the listener.
+        assert isinstance(calls[0]["socket"], trsock.TransportSocket)
         assert _Proto.made == []  # nothing accepted, and nothing accepted-and-closed
         client.close()
         server.close()
@@ -134,6 +148,56 @@ def test_a_waiting_connection_is_accepted_once_descriptors_free(caplog):
         loop.run_until_complete(server.wait_closed())
     finally:
         loop.close()
+
+
+def test_a_resume_that_accepts_nothing_still_ends_the_episode(caplog):
+    """Regression (#3954 review R1): a resume wakeup whose waiting client
+    aborted accepts nothing; the pause must still end, or the next episode is
+    never logged and the recovery line reports the wrong duration."""
+    loop = accept_backoff.BackoffSelectorEventLoop()
+    try:
+        calls = _handler_calls(loop)
+        sock = _listener()
+        server = _serve(loop, sock)
+        client = _connect(sock)
+        _run(loop, 0.02)  # first episode: logged, pause pending
+        assert len(calls) == 1
+        assert loop._accept_pauses  # type: ignore[attr-defined]
+        sock.exhausted = False
+        sock.abort_next = True
+        with caplog.at_level(logging.WARNING, logger=accept_backoff.__name__):
+            _run(loop, accept_backoff.MAX_DELAY_S + 0.2)  # the resume fires
+        assert not sock.abort_next, "the resume never reached accept()"
+        assert loop._accept_pauses == {}  # type: ignore[attr-defined]
+        assert not any("accepting connections again" in r.getMessage() for r in caplog.records)
+        # The consequence the stale entry hid: a later episode is logged again.
+        sock.exhausted = True
+        later = _connect(sock)
+        _run(loop, 0.02)
+        assert len(calls) == 2, calls
+        later.close()
+        client.close()
+        server.close()
+        loop.run_until_complete(server.wait_closed())
+    finally:
+        loop.close()
+
+
+def test_the_accept_proxy_forwards_every_other_attribute():
+    """Only accept() is intercepted (#3954 review R2): if a future stdlib batch
+    touches another socket attribute, it must reach the real socket instead
+    of raising AttributeError on every wakeup."""
+    sock = _listener()
+    try:
+        guarded = accept_backoff._GuardedListener(sock)
+        assert guarded.fileno() == sock.fileno()
+        assert guarded.getsockname() == sock.getsockname()
+        assert guarded.family == sock.family
+        with pytest.raises(BlockingIOError):
+            guarded.accept()  # the resource error becomes "nothing to accept"
+        assert guarded.exhausted is not None and guarded.exhausted.errno == errno.EMFILE
+    finally:
+        sock.close()
 
 
 def test_a_server_closed_while_paused_is_not_rearmed():

@@ -1,0 +1,33 @@
+{
+  "schema": 1,
+  "locale": "es",
+  "namespace": "cli.browser_node",
+  "history_sha256": "12a27d0562831829763a79073b593bc050ecfb2d053c871e307e7127134283ab",
+  "entries": [
+    {
+      "locale": "es",
+      "namespace": "cli.browser_node",
+      "source_sha256": "eb0c290dafcb97865482eefe6b8b23f36ba46ecb611411a883096a42596de0fe",
+      "translator": {
+        "agent": "translator agent (lopdev team; round-1 session b13ba60eb27b at 6cde8a773; round-2 delta commit 59e45e7cf, session id not relayed) + coder agent (lopdev team) for audit fixes in 52aba8c48 (vi record, hi help_uninstall_node)",
+        "model": "anthropic/claude-opus-5-5",
+        "fallback": "none reported",
+        "date": "2026-11-13"
+      },
+      "auditor": {
+        "agent": "translation-auditor agent (lopdev team, session bef06ef49ecf; independent of the translator and coder)",
+        "session": "bef06ef49ecf",
+        "model": "anthropic/claude-opus-5-5",
+        "fallback": "none observed in this session",
+        "date": "2026-11-13",
+        "result": "passed",
+        "findings": 2,
+        "unresolved_blocker_major": 0,
+        "minor": 1,
+        "nit": 1
+      },
+      "status": "passed",
+      "note": "Translation audit round 2 (delta) of PR #3935 at 59e45e7cf, 2026-11-13. Target es/cli.browser_node.json sha256 e0447f3e64ab820fd87041a6dc492e1c3e30373bcb78753c3b48b5dbfa5365df (43/43 keys). Semantic read of the 20 values changed since round 1 (6cde8a773): 5 re-translated English keys (refuse_sudo, refuse_no_record, refuse_authorisation, paired_yes, failed_tail), 14 added keys and es N5 fix (refuse_not_member); the remaining 23 values are byte-identical to 6cde8a773, passed in round 1 (comment 6865398297), with unchanged English. Whole file re-checked mechanically: key set/order, placeholders, backtick spans, guide:// refs, flags, step-row indent, NFC, no bidi controls, locale punctuation. Safety copy: meaning preserved in this locale for refuse_authorisation, refuse_uninstall_authorisation (operator authorisation required; rerun with --authorised-by; text recorded verbatim), help_authorised_by (required unless --dry-run) and refuse_user_machine (refused on a user's machine; the browser tool drives that person's own Chrome); nothing weakened or inverted. Single independent audit on the same model family as the translator; no second/cross-model or native-speaker audit claimed. Non-gating findings: m1 (MINOR, remove-verb drift quitar/eliminar), n3 (NIT, purge_with_node «la desinstalación del nodo»). Comment: see PR #3935 '### Translation audit — round 2'. Second independent safety-copy audit PASS 42/42 cells: https://github.com/damianvtran/local-operator/pull/3935#issuecomment-6867724037 (translation-auditor, anthropic/claude-opus-5-5)"
+    }
+  ]
+}
