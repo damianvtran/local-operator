@@ -1416,19 +1416,31 @@ out-of-queue releases happened. A `send` is not observable to a session that
 was not listening, so it cannot be the lock. An open PR whose title starts
 `chore(release):` — first `claim release window`, later
 `bump version to X.Y.Z` — is observable to everyone through the forge, so it
-is; the search below keys on the prefix, so the retitle does not drop the lock. The lock is opened *before* the number is known — the bump
+is. The lookup below keys on the PR's *branch* (`release-next*`), not its
+title, so the retitle does not drop the lock. The lock is opened *before* the number is known — the bump
 is decided from the window's contents, which do not exist yet when the lock
 is taken — so it starts life as a claim and becomes the bump once decided.
 
 Before starting a release, every agent does the same things, in this order:
 
-1. **Look for the lock.**
-   `gh pr list --search '"chore(release)" in:title' --state open`.
-   An open bump PR means the window is owned: its body names
-   the owning session's pid, so `send` that session (by `pid`) your PR's
-   number, merge SHA and `Release:` line, and let it aggregate. Do not start a
-   second release. (Quote the phrase — `gh`'s search passes it to GitHub,
-   which treats bare parentheses as syntax and returns nothing.)
+1. **Look for the lock — by branch, not by title.**
+   ```sh
+   gh pr list --state open --limit 500 --json number,title,headRefName,createdAt \
+     --jq '.[] | select(.headRefName | startswith("release-next") or startswith("release/claim"))'
+   ```
+   ANY line of output means the window has an owner — claim or bump PR alike.
+   Its body names the owning session's pid, so `send` that session (by `pid`)
+   your PR's number, merge SHA and `Release:` line, and let it aggregate. Do not
+   start a second release. Why not a title search: a claim PR is a draft titled
+   `chore(release): claim release window`, and a `--search` on `chore(release)`
+   matches it only when the phrase is quoted exactly right — unquoted, GitHub
+   reads the parentheses as syntax and returns nothing, which reads as "no
+   owner" (measured 2026-11-14 on local-operator-ui: `chore(release)` and
+   `chore(release) in:title` returned nothing while claim PR #1908 was open).
+   In local-operator-ui, sessions that searched titles nearly claimed the
+   windows #1908 and #1878 already held. The branch name is the lock;
+   `--limit 500` because `gh pr list` stops at 30 by default and this repo
+   routinely has more open PRs (70 on 2026-11-14).
 2. **Take the lock by opening the claim PR.** If nothing is open, the
    release owner's *first* act — before collecting anything — is pushing
    branch `release-next` with one empty commit and opening a draft PR titled
@@ -1657,8 +1669,9 @@ git -C ~/local-operator fetch origin
 git -C ~/local-operator log --oneline "$(git -C ~/local-operator describe --tags --abbrev=0 origin/main)..origin/main"
 
 # 2. Take the lock: an empty claim commit in a throwaway worktree, opened as
-#    a draft PR. (No open chore(release) PR was found in step 1 of "One
-#    release owner per window".) The number is not known yet.
+#    a draft PR. (No open release-next*/release/claim* PR was found by the
+#    branch lookup in step 1 of "One release owner per window".) The number is
+#    not known yet.
 git -C ~/local-operator worktree add ~/local-operator/.worktrees/release-next origin/main
 git -C ~/local-operator/.worktrees/release-next checkout -b release-next
 git -C ~/local-operator/.worktrees/release-next commit --allow-empty -m 'chore(release): claim release window'

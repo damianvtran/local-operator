@@ -119,11 +119,13 @@ they are vulnerable with no version to move to.
 1. Merge the fix PR to `main` once the gate is clean.
 2. **Get the fix into a release window; never bump `pyproject.toml` yourself.**
    Releases here are combined and cut by one release owner per window, and the
-   lock on a window is an open `chore(release):` PR — see "One release owner
+   lock on a window is an open PR from a `release-next*` branch — see "One release owner
    per window" in `AGENTS.md` for the mechanics, which this runbook does not
    repeat. What the advisory handler does:
-   - Look for the lock:
-     `gh pr list --search '"chore(release)" in:title' --state open`.
+   - Look for the lock by branch, not title (a title search misses claim
+     PRs when the phrase is not quoted exactly):
+     `gh pr list --state open --limit 500 --json number,title,headRefName --jq '.[] | select(.headRefName | startswith("release-next") or startswith("release/claim"))'`.
+     Any output means the window has an owner.
    - If a window is owned, `send` the owner (the pid named in that PR's body)
      the fix PR number, its merge SHA and its `Release:` line, and wait for
      that window's tag and PyPI upload. Tell the owner it is a security fix so
