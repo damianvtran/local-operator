@@ -4912,6 +4912,7 @@ class AttachedSession:
             return
         from local_operator.mobile.attach_client import dialable_owner_record
         from local_operator.session.runtime.launch import (
+            DEFAULT_DEADLINE_S as _ENGAGE_DEADLINE_CAP_S,
             ActionableConnectionError,
             RuntimeStartupError,
             WarmErrand,
@@ -4927,7 +4928,7 @@ class AttachedSession:
         # None.
         preempt = None if foreground else self._foreground_arrived
 
-        async def _engage_owner() -> None:
+        async def _engage_owner(deadline_s: float | None = None) -> None:
             """One engage through the owner seam, failures mapped to ``ConnectionError``.
 
             A closure so the vanished-record arm below re-engages through the
@@ -4951,6 +4952,9 @@ class AttachedSession:
                     # shortened deadline rather than a cancellation.
                     preempt=preempt,
                     preempt_budget_s=_BACKGROUND_YIELD_BUDGET_S,
+                    # Only the re-engage passes one; the first engage keeps the
+                    # owner's default so its behaviour is unchanged.
+                    **({} if deadline_s is None else {"deadline_s": deadline_s}),
                 )
             except TimeoutError as error:
                 # The engage ran out of deadline — either its own 30 s or, when a
@@ -5075,10 +5079,24 @@ class AttachedSession:
                         break
                     reengages += 1
                     try:
-                        await asyncio.wait_for(_engage_owner(), timeout=remaining)
-                    except TimeoutError:
-                        # Out of this bind's budget; a candidate the engage
-                        # spawned keeps constructing for the next engage.
+                        # NOT ``wait_for(_engage_owner())``: that CANCELS
+                        # ``engage_runtime`` mid-flight, which its docstring rules
+                        # out (a cancelled engage leaks the capture tempfile and
+                        # loses the child's reason). The remaining budget rides in
+                        # as the engage's own deadline, so it expires through its
+                        # normal TimeoutError path. Capped at the default 30 s so
+                        # a generous background budget does not lengthen a
+                        # re-engage beyond the first.
+                        await _engage_owner(min(remaining, _ENGAGE_DEADLINE_CAP_S))
+                    except ConnectionError as error:
+                        # ``_engage_owner`` maps the engage's own TimeoutError to
+                        # ConnectionError, so a deadline expiry arrives as that
+                        # with the TimeoutError as its cause. Out of this bind's
+                        # budget: a candidate the engage spawned keeps
+                        # constructing for the next engage. Any other engage
+                        # failure (startup, actionable) propagates unchanged.
+                        if not isinstance(error.__cause__, TimeoutError):
+                            raise
                         break
                     if self._disposed:
                         return

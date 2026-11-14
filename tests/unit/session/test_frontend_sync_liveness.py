@@ -1387,3 +1387,49 @@ async def test_a_record_that_never_appears_still_raises_after_bounded_re_engages
 
     assert engages == 1 + remote_module._BIND_REENGAGE_ATTEMPTS
     await viewer.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_re_engage_is_bounded_by_its_deadline_never_cancelled(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The re-engage hands its remaining budget to the engage as ``deadline_s``.
+
+    ``wait_for`` around the engage cancelled ``engage_runtime`` mid-flight, which
+    leaks its capture tempfile. Here the re-engage must (a) receive a finite
+    ``deadline_s`` no larger than the first engage's default, (b) never be
+    cancelled, and (c) treat its own deadline expiry as "out of budget" and end
+    in the usual unavailable error rather than leaking a TimeoutError.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    _claim(tmp_path)
+    viewer = await AttachedSession.cold(
+        "s1", config_dir=tmp_path, cwd=str(tmp_path), takeover_factory=_never
+    )
+    calls: list[float | None] = []
+    cancelled = False
+
+    async def engage(session_id, cwd, work, **kwargs):
+        nonlocal cancelled
+        calls.append(kwargs.get("deadline_s"))
+        if len(calls) > 1:
+            try:
+                await asyncio.sleep(0)
+            except asyncio.CancelledError:
+                cancelled = True
+                raise
+            raise TimeoutError("engage deadline")
+
+    monkeypatch.setattr("local_operator.session.runtime.launch.engage_runtime", engage)
+    monkeypatch.setattr(
+        "local_operator.mobile.attach_client.find_runtime_record",
+        lambda config_dir, session_id: (None, None),
+    )
+
+    with pytest.raises(ConnectionError, match="could not start a runtime for this session"):
+        await asyncio.wait_for(viewer._ensure_bound(), timeout=20)
+
+    assert calls[0] is None, "the first engage keeps the engage default"
+    assert calls[1] is not None and 0 < calls[1] <= 30.0
+    assert not cancelled
+    await viewer.dispose()
