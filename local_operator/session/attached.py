@@ -4913,6 +4913,8 @@ class AttachedSession:
         from local_operator.mobile.attach_client import dialable_owner_record
         from local_operator.session.runtime.launch import (
             DEFAULT_DEADLINE_S as _ENGAGE_DEADLINE_CAP_S,
+        )
+        from local_operator.session.runtime.launch import (
             ActionableConnectionError,
             RuntimeStartupError,
             WarmErrand,

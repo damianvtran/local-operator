@@ -25631,7 +25631,9 @@ class OperatorApp(App[None]):
                 # so the silence here stays the default it is documented to be.
                 logger.debug("runtime engage failed (%s)", reason, exc_info=True)
                 self._warm_engage_started = False
-                from local_operator.session.runtime.launch import ActionableConnectionError
+                from local_operator.session.runtime.launch import (
+                    ActionableConnectionError,
+                )
 
                 # ONE BOUNDED RETRY for the refresh-triggered engage. Nothing
                 # else re-arms it: the refresh is nobody's keystroke, so a plain
