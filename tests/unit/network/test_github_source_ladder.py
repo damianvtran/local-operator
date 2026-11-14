@@ -482,13 +482,23 @@ def test_clearing_the_list_through_the_settings_seam_reaches_token_arm_borrowers
     assert "password=" not in reply, "a cleared designation must refuse every repository"
 
 
-def test_an_owner_that_never_lent_a_list_still_sends_nothing(env: _Env) -> None:
-    """The marker is set only by a NON-EMPTY delivery: a device that never lent a
-    designation keeps saying nothing, so a borrower's hand-set backstop survives."""
+def test_resolved_defaults_do_not_create_a_hand_picked_clear_marker(env: _Env) -> None:
+    """The token helper takes the caller's resolved list, not an optional re-read.
+
+    Preserve the legacy unset/cleared distinction without calling its removed
+    dead fallback: an enumerated default must not become a hand-picked fence.
+    """
     (env.root / "config.yml").write_text(yaml.safe_dump({"values": {}}), encoding="utf-8")
-    assert owner_mod._token_arm_narrowing(env.root) == {}  # noqa: SLF001
+    repositories, explicit = github_mod.owner_designation(env.root)
+    assert github_mod.grant_narrowing(repositories, explicit=explicit) == {}
+    resolved = owner_mod._token_arm_narrowing(env.root, ["acme/one"])  # noqa: SLF001
+    assert resolved["repositories"] == ["acme/one"]
+    assert github_mod.owner_designation(env.root) == ((), False)
     github_mod.mark_designation_delivered(env.root)
-    assert owner_mod._token_arm_narrowing(env.root)["repositories"] == []  # noqa: SLF001
+    cleared = github_mod.explicit_repositories(env.root)
+    assert cleared is not None
+    assert cleared == ()
+    assert owner_mod._token_arm_narrowing(env.root, cleared)["repositories"] == []  # noqa: SLF001
 
 
 def test_the_gh_arm_serves_the_login_the_cli_already_holds(
