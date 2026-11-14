@@ -36694,6 +36694,19 @@ async def execute_notify(
             f"refused: keys starting with `{_RESERVED_NOTIFY_KEY_PREFIX}` are reserved for "
             "agent-message notices; nothing was posted. Use a different key.",
         )
+    from local_operator.notifications.remote_attention import ASK_NOTICE_PREFIX
+
+    if params.key.strip().startswith(ASK_NOTICE_PREFIX):
+        # PR #3934 Q2: the namespace of an open ask forwarded to the session's
+        # origin device. It is already kept off the wire, but posting it here
+        # would mint a local row that LOOKS like a forwarded question, so the
+        # tool refuses it outright, the ``team-bridge-`` way.
+        return _error(
+            tool_call_id,
+            "notify",
+            f"refused: keys starting with `{ASK_NOTICE_PREFIX}` are reserved for forwarded "
+            "questions; nothing was posted. Use a different key.",
+        )
     door = getattr(context, "notify_inbox", None) if context is not None else None
     if door is None:
         return _error(

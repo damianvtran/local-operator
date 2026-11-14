@@ -8885,6 +8885,13 @@ class RelayServer:
                     "subagents_queued": record.subagents_queued,
                     "busy": record.busy,
                     "pending": record.pending if state == "live" else None,
+                    # Only when TRUE: an older viewer ignores the key, and its
+                    # absence means "a gate" (every older owner's meaning).
+                    **(
+                        {"pending_queued": True}
+                        if state == "live" and record.pending and record.pending_queued
+                        else {}
+                    ),
                     "detached": record.detached,
                     # THE RECORD'S EPOCH, NOT ITS ``started`` BOOL (operator
                     # report). ``record.started`` is "has run at

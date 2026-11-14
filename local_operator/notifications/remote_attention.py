@@ -78,7 +78,9 @@ A FORWARDED NOTICE MUST BE NEW AND THE OPERATOR'S. Three filters, same date:
   and the origin raises only a notice newer than its persisted first-contact
   baseline for that device (:func:`origin_baseline_ms`), writing the row with
   the owner's timestamp rather than "now". A notice with no ``at`` (an owner
-  older than this rule) cannot prove it is new, so it is not raised.
+  older than this rule) cannot prove it is new, so it is not raised. A
+  forwarded OPEN ASK (``remote-ask:``) is exempt: it is still awaiting the
+  operator, not history (QA round 3, Q3-1; see ``RemoteAttentionWatcher.observe``).
 
 A notice passes its own priority through, so a ``high`` notice on the node is a
 banner-eligible ``high`` row here, raised through the item ladder
@@ -127,6 +129,10 @@ NOT_FORWARDED_PREFIXES: tuple[str, ...] = (
     f"{DONE_PREFIX}:",
     f"{NOTICE_PREFIX}:",
     "team-bridge-",
+    # Reserved for :func:`open_ask_notices` below: an agent ``notify`` that
+    # happened to use this key would otherwise be mistaken on the origin for a
+    # forwarded ask, and retired when it left the listing.
+    "remote-ask:",
 )
 
 #: ``origin.kind`` on a mesh stamp for a session an AGENT created on this device
@@ -135,6 +141,13 @@ NOT_FORWARDED_PREFIXES: tuple[str, ...] = (
 #: never forwarded: see the module doc, "A FORWARDED NOTICE MUST BE NEW AND THE
 #: OPERATOR'S". Every other kind (``user``, the default, and moves) forwards.
 AGENT_ORIGIN_KIND = "agent"
+
+#: The OWNER-side key namespace of a forwarded open ask, inside the existing
+#: ``notices`` wire block: ``remote-ask:<ask id>``. Distinct from the store's
+#: ``ask:`` read-mark refs (``store.ASK_REF_PREFIX``) and from every prefix
+#: above. The origin row is therefore ``remote-notice:<dev>:<sess>:remote-ask:<id>``
+#: and :func:`settle_unlisted_ask_items` finds it by this infix.
+ASK_NOTICE_PREFIX = "remote-ask:"
 
 #: How many notices one row carries for its origin, newest first (review round 1,
 #: M2: carrying only the newest lost every earlier unread notice, ``high`` ones
@@ -247,9 +260,21 @@ def stamp_rows_for_viewer(
             # spawned with ``peer=``) reports to that agent, so its ``notify``
             # items stay in this device's inbox and are never put on the wire.
             continue
-        notices = _newest_notices(store, session_id) if store is not None else []
+        # Open asks FIRST: a question the agent is waiting on outranks an
+        # informational notice for the bounded slots (``NOTICES_ON_WIRE``).
+        asks = open_ask_notices(Path(root), session_id)
+        if asks is None:
+            # A FAILED ASK READ IS NOT "NO OPEN ASKS" (PR #3934 review R1-2),
+            # the ``attention_unknown`` rule: the origin retires a forwarded ask
+            # by its absence, so a missing ask here must say "unknown" or an
+            # EIO would dismiss a question that is still owed — for good, since
+            # the row's revision never changes and re-raising it is a no-op.
+            row["asks_unknown"] = True
+        notices = list(asks or [])
+        if store is not None:
+            notices += _newest_notices(store, session_id)
         if notices:
-            row["notices"] = notices
+            row["notices"] = notices[:NOTICES_ON_WIRE]
 
 
 def _newest_notices(store: Any, session_id: str) -> list[dict[str, Any]]:
@@ -286,6 +311,80 @@ def _newest_notices(store: Any, session_id: str) -> list[dict[str, Any]]:
         if len(out) >= NOTICES_ON_WIRE:
             break
     return out
+
+
+def open_ask_notices(root: Path, session_id: str) -> list[dict[str, Any]] | None:
+    """``session_id``'s OPEN queued asks as ``notices`` wire blocks, oldest first.
+
+    ``None`` — not ``[]`` — when the ask log could not be read: the caller
+    stamps ``asks_unknown`` so the origin settles nothing on that listing.
+
+    WHY (2026-11-13). A queued ask is not a ``NotificationStore`` row on the
+    device it was asked on — the local inbox merges open asks from the ask
+    index (``notifications/items.py``) — so :func:`_newest_notices` never saw
+    one, and a session running on a mesh node asked its question where nobody
+    was looking. Riding the EXISTING ``notices`` block (rather than a new wire
+    field) means the origin's shipped watcher (:func:`raise_notice_item`, its
+    ``high`` banner, the inbox row that deep-links to the session) carries it
+    with no new parse, and an origin that predates this change still shows it.
+
+    READ FROM DISK, not from the runtime: the session's own ``asks.jsonl``
+    folded at "now", so an ask stays forwarded while the runtime is cold and a
+    past-deadline ask folds to ``timed_out`` and drops out like an answered one.
+    NOT through ``Session.notify``: the open-ask dedupe (``asks/dedupe.py``)
+    would fold it into the ask and mark it read, and read items never travel.
+
+    NO NEW AUTHORITY: the block is a fact (id + question text). Answering
+    happens in the session the row opens, over the permissioned ``ask_respond``
+    wire op (or the signed ``bridge_decide`` for a mirrored ask) — never here.
+    Generic on purpose: any open ask in the queue (a browser-site question
+    included) reaches the origin through this one function. Never raises.
+
+    The title is the local inbox's own (``items.ask_item``: the first question,
+    excerpted to the store's 120-char cap) and so is the priority: the wire
+    sizing under ``NOTICES_ON_WIRE`` assumes bounded titles (review R1-4).
+    """
+    try:
+        from local_operator.asks import store as ask_store
+        from local_operator.notifications.items import (
+            ASK_PRIORITY,
+            excerpt,
+            first_question,
+        )
+
+        events = ask_store.read_events(ask_store.session_dir(root, session_id), strict=True)
+    except Exception:  # noqa: BLE001 — unknown, never "none" (R1-2)
+        logger.debug("remote attention: ask read failed for %s", session_id, exc_info=True)
+        return None
+    try:
+        if not events:
+            return []
+        records = ask_store.fold(events, ask_store.now_ms(), session_id=session_id)
+        out: list[dict[str, Any]] = []
+        for record in ask_store.outstanding_asks(records):
+            ask_id = str(record.get("ask_id") or "")
+            title = excerpt(first_question(record), 120)
+            if not ask_id or not title:
+                continue
+            out.append(
+                {
+                    "key": f"{ASK_NOTICE_PREFIX}{ask_id}",
+                    # An ask's question does not change once queued (a
+                    # revision rewrites the ANSWER), so one episode per ask.
+                    "revision": 1,
+                    "priority": ASK_PRIORITY,
+                    "title": title,
+                    # The ask's OWN queue time, like ``_newest_notices``'s
+                    # ``at``: the origin drops a notice with no time (or one
+                    # older than its first contact, "NO BACKFILL", PR #3902), so
+                    # an ask block without it would never be raised there.
+                    "at": int(record.get("created_at") or 0),
+                }
+            )
+        return out[:NOTICES_ON_WIRE]
+    except Exception:  # noqa: BLE001 — a listing whose asks did not fold says "unknown"
+        logger.debug("remote attention: ask fold failed for %s", session_id, exc_info=True)
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -400,6 +499,81 @@ def settle_unclaimed_done_items(
         return settled
     except Exception:  # noqa: BLE001
         logger.debug("remote attention: done settle failed", exc_info=True)
+        return 0
+
+
+def settle_unlisted_ask_items(
+    root: Path, rows: Iterable[Any], *, listed_at_ms: int | None = None
+) -> int:
+    """Retire (dismiss) every unread forwarded ASK row the listing no longer carries.
+
+    A forwarded notice is never settled by its absence — the owner's unread
+    notice just aged out of the bounded list — but an ask's absence IS its
+    answer (or decline, dismissal, timeout): it is no longer owed, and the row
+    must stop asking, the way a local answered ask leaves the inbox. Dismissed
+    rather than read for that reason.
+
+    Absence is trusted only when it can mean that: the session IS in this
+    listing (a silent device or a deleted session settles nothing), the owner
+    could read its ask log (``asks_unknown``, R1-2), its ``notices`` list is
+    not full OF ASKS (asks are stamped first, so a full list that still carries
+    any non-ask claim proves every open ask fit — and a busy session's list is
+    full on every read, its notifies never being read on the node; R1-1), and
+    the listing's read started after the row was last written
+    (``listed_at_ms``; the done settle's Q3 rule — a cached listing older than
+    the row predates the ask rather than answering it). ``None`` settles
+    nothing. Returns how many rows were dismissed. Never raises.
+    """
+    if listed_at_ms is None:
+        return 0
+    try:
+        listed: dict[tuple[str, str], set[str]] = {}
+        for row in rows:
+            device_id = str(getattr(row, "owner_device", "") or "")
+            session_id = str(getattr(row, "id", "") or "")
+            if not device_id or not session_id:
+                continue
+            if getattr(row, "remote_asks_unknown", False):
+                continue
+            claims = tuple(getattr(row, "remote_notices", None) or ())
+            if len(claims) >= NOTICES_ON_WIRE and all(
+                claim and str(claim[0]).startswith(ASK_NOTICE_PREFIX) for claim in claims
+            ):
+                continue
+            listed[(device_id, session_id)] = {str(claim[0]) for claim in claims if claim}
+        if not listed:
+            return 0
+        from local_operator.notifications.store import NotificationStore
+
+        store = NotificationStore(root)
+        settled = 0
+        for item in store.unread_with_key_prefix(f"{NOTICE_PREFIX}:"):
+            key = str(item.get("key") or "")
+            infix = key.find(f":{ASK_NOTICE_PREFIX}")
+            if infix < 0:
+                continue
+            # ``remote-notice:<device>:<session>:remote-ask:<id>`` — the
+            # session is the row's own column, so the device is what precedes it.
+            owner_key = key[infix + 1 :]
+            session_id = str(item.get("session_id") or "")
+            middle = key[len(NOTICE_PREFIX) + 1 : infix]
+            if not session_id or not middle.endswith(f":{session_id}"):
+                continue
+            device_id = middle[: -(len(session_id) + 1)]
+            still = listed.get((device_id, session_id))
+            if still is None or owner_key in still:
+                continue
+            if int(item.get("updated_at") or 0) >= int(listed_at_ms):
+                continue
+            result: Any = store.apply(
+                "dismiss",
+                ids=[(str(item["id"]), int(item["revision"]))],
+                via="remote-attention",
+            )
+            settled += int(bool(result.changed))
+        return settled
+    except Exception:  # noqa: BLE001
+        logger.debug("remote attention: ask settle failed", exc_info=True)
         return 0
 
 
@@ -566,6 +740,9 @@ class RemoteAttentionWatcher:
             # only marks an older build's ``remote-done:`` row read once the
             # owner acknowledged it, and never writes one.
             settle_unclaimed_done_items(self.root, rows, listed_at_ms=listed_at_ms)
+            # Before raising: a row raised by THIS read is newer than the
+            # listing, so the settle could not touch it anyway (Q3 rule).
+            settle_unlisted_ask_items(self.root, rows, listed_at_ms=listed_at_ms)
             notices, notice_state = notice_edges(self._notice, rows, unanswered=silent)
             self._notice = notice_state
             # FIRST CONTACT is the listing, not the first notice (R1-1): every
@@ -578,10 +755,27 @@ class RemoteAttentionWatcher:
                 baseline = baselines.get(notice.device_id)
                 if baseline is None:
                     baseline = origin_baseline_ms(self.root, notice.device_id)
-                if notice.at_ms <= 0 or notice.at_ms < baseline:
+                if not notice.key.startswith(ASK_NOTICE_PREFIX) and (
+                    notice.at_ms <= 0 or notice.at_ms < baseline
+                ):
                     # NO BACKFILL: posted before this device first watched
                     # that one (or by an owner too old to say when). Skipped
                     # deterministically, so a restart skips it again.
+                    #
+                    # A FORWARDED OPEN ASK IS EXEMPT (QA round 3, Q3-1). The
+                    # rule targets FINISHED notices — history the operator
+                    # never asked to see; an ask in the listing is still
+                    # waiting on the operator now, however long ago it was
+                    # queued. Judged by the ask's ``created_at`` it was dropped
+                    # forever whenever it predated the first listing (the
+                    # baseline only ever moves earlier) or whenever the owner's
+                    # clock ran behind this one — the time comparison mixes two
+                    # clocks, so the exemption is also what makes asks
+                    # skew-immune. Bounded without it: an ask rides the wire
+                    # only while the owner lists it as outstanding, the settle
+                    # above retires it once a fresh listing drops it, and
+                    # ``raise_notice_item``'s revision check keeps one row per
+                    # ask across watchers and restarts.
                     continue
                 raise_notice_item(
                     self.root,
