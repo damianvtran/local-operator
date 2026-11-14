@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 from types import SimpleNamespace
+from typing import Any, cast
 
 import pytest
 
@@ -47,14 +48,24 @@ async def test_arm_transfers_verified_frames_or_records_an_inconclusive_refusal(
     written = []
     state = _arm_completion_verifier(
         bridge=bridge,
-        handle=SimpleNamespace(
-            session=SimpleNamespace(verify_completion=verify_completion), verifier_job_ids=set()
+        # Duck-typed fakes for EpisodeSession/RecordSink: the arm touches only
+        # these attributes, so cast rather than build the real session stack.
+        handle=cast(
+            Any,
+            SimpleNamespace(
+                session=SimpleNamespace(verify_completion=verify_completion),
+                verifier_job_ids=set(),
+            ),
         ),
-        record=SimpleNamespace(write=lambda kind, payload: written.append((kind, payload))),
+        record=cast(
+            Any, SimpleNamespace(write=lambda kind, payload: written.append((kind, payload)))
+        ),
         config=CompletionVerifierConfig(rounds=1),
         artifact_root=root,
         wall_remaining=None,
     )
+    # Arming installs the hook; a None here means the arm skipped the verifier.
+    assert bridge.verifier is not None
     verdict = await bridge.verifier(
         FinishAction(observation_id=pending.observation_id, status="done", reason="claim"),
         pending,
