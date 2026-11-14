@@ -42,7 +42,7 @@ from local_operator.i18n.messages import render
 from local_operator.notifications import bulk
 from local_operator.notifications import items as inbox
 from local_operator.notifications import reconcile
-from local_operator.notifications.store import NotificationStore
+from local_operator.notifications.store import SESSION_ID_PATTERN, NotificationStore
 from local_operator.server.desktop import require_desktop
 from local_operator.server.models.schemas import CRUDResponse
 from local_operator.server.routes.desktop_sessions import Input, errors, reply
@@ -69,7 +69,12 @@ router = APIRouter(tags=["Desktop notifications"], dependencies=[Depends(require
 _ITEM_ID_PATTERN = r"^(n_[a-z2-7]{16}|ask:[a-f0-9]{12}:[A-Za-z0-9_-]{1,64})$"
 ItemID = Annotated[str, Field(pattern=_ITEM_ID_PATTERN)]
 _ITEM_ID_RE = re.compile(_ITEM_ID_PATTERN)
-SessionID = Annotated[str, Field(pattern=r"^[a-f0-9]{12}$")]
+#: A session id on every notifications route: a conversation (12 hex) or one
+#: of the store's allowlisted core pseudo-sessions (``store.PSEUDO_SESSION_IDS``,
+#: e.g. ``network-credentials``). ONE grammar for the list filter, the scope
+#: counts, the PATCH target and the seen evidence: the 12-hex-only version made
+#: "Dismiss all" on a pseudo-session's rows a 422 ("Invalid desktop operation").
+SessionID = Annotated[str, Field(pattern=SESSION_ID_PATTERN)]
 
 
 def _text(message: Any) -> str:
@@ -118,10 +123,11 @@ class NotificationsQuery(BaseModel):
     state: Literal["unread", "all", "dismissed"] = "unread"
     source: Literal["notify", "ask"] | None = None
     priority: Literal["high", "normal", "low"] | None = None
-    session_id: Annotated[str | None, Field(pattern=r"^[a-f0-9]{12}$")] = None
+    session_id: Annotated[str | None, Field(pattern=SESSION_ID_PATTERN)] = None
     cursor: Annotated[CursorQuery, Field(max_length=80)] = None
     through_seq: Annotated[int | None, Field(ge=0)] = None
     limit: Annotated[int, Field(ge=1, le=inbox.LIST_LIMIT_MAX)] = inbox.LIST_LIMIT_DEFAULT
+    include_session_counts: bool = False
 
 
 def _bulk_scope(request: Request) -> str:
@@ -153,7 +159,7 @@ async def list_notifications(
     state: Literal["unread", "all", "dismissed"] = "unread",
     source: Literal["notify", "ask"] | None = None,
     priority: Literal["high", "normal", "low"] | None = None,
-    session_id: Annotated[str | None, Query(pattern=r"^[a-f0-9]{12}$")] = None,
+    session_id: Annotated[str | None, Query(pattern=SESSION_ID_PATTERN)] = None,
     cursor: Annotated[CursorQuery, Query(max_length=80)] = None,
     through_seq: Annotated[int | None, Query(ge=0)] = None,
     limit: Annotated[int, Query(ge=1, le=inbox.LIST_LIMIT_MAX)] = inbox.LIST_LIMIT_DEFAULT,
@@ -164,8 +170,20 @@ async def list_notifications(
     count_session_ids: Annotated[list[SessionID] | None, Query(max_length=50)] = None,
     selection_token: Annotated[str | None, Query(pattern=r"^[A-Za-z0-9_-]{43}$")] = None,
     excluded_ids: Annotated[list[ItemID] | None, Query(max_length=500)] = None,
+    include_session_counts: bool = False,
 ):
-    """One page of items, newest content first; ``waiting`` on the first page only."""
+    """One page of items, newest content first; ``waiting`` on the first page only.
+
+    ``include_session_counts=true`` (additive; absent otherwise) adds
+    ``session_counts: {<session_id>: {"undismissed": int, "unread": int}}``:
+    for EVERY session with at least one undismissed ``notify`` row in the whole
+    inbox, that count and its unread subset. It ignores this page's
+    ``state``/``source``/``priority``/``session_id`` filters and its paging,
+    never counts open asks (the reel cannot dismiss one), and is taken under
+    the response's own ``high_water`` — the scope "Dismiss all from this
+    conversation" will act on. One grouped SQL read, replacing the app's
+    walk of the whole store page by page.
+    """
     async with errors(request, notifications_refusal):
         root = _config_dir(request)
         window = _lapsed_window(root)
@@ -230,6 +248,7 @@ async def list_notifications(
             limit=limit,
             lapsed_visible_ms=window,
             through_seq=through_seq,
+            include_session_counts=include_session_counts,
         )
         return reply(page)
 
