@@ -3,8 +3,12 @@
 WHY THIS EXISTS, AND WHY IT IS NOT ``network/credentials``. The mesh adapters there
 resolve credentials to LEND them to other devices; this resolver only needs its own
 device's login for a read on the operator's behalf, so it borrows their discovery
-patterns without their delivery machinery (no broker, no env construction, no grant
-narrowing). The design (§B.4) names the two ladders:
+patterns without their delivery machinery (no env construction, no grant narrowing
+of its own). The one broker call it makes is the BORROWER's: on a mesh node whose
+github.com login is lent by another device, the session's bash authenticates with
+that lent ``GH_TOKEN``, so this resolver asks for it through the same
+``borrowed_git_env`` call (see :func:`_borrow_github`). The design (§B.4) names
+the two ladders:
 
 * **GitHub** — the same ladder ``network/credentials/github.py`` walks, reusing its
   ``read_gh_token`` for ``github.com`` and its off-PATH ``find_gh`` probe for a
@@ -108,10 +112,15 @@ _CANONICAL_HOSTS = {"github": "github.com", "gitlab": "gitlab.com"}
 class CredentialError(Exception):
     """No usable credential, with a message safe to show (never a value)."""
 
-    def __init__(self, kind: CredentialKind, message: str) -> None:
+    def __init__(self, kind: CredentialKind, message: str, *, lender: str = "") -> None:
         super().__init__(message)
         self.kind = kind
         self.message = message
+        #: Set when the refusal is about a mesh-LENT login (:func:`_borrowed_refusal`):
+        #: the message then already names the remedy on the lender, so a caller
+        #: must not append the generic "sign in with the gh CLI" hint after it
+        #: (QA round 1, Q1). A device label only, never a value.
+        self.lender = lender
 
 
 @dataclass(frozen=True)
@@ -126,6 +135,10 @@ class Token:
     #: whether a credential exists" is about the WIRE; this is for logs that
     #: name a remedy).
     source: str = ""
+    #: For ``source == "brokered"``: the display name of the mesh device that
+    #: LENT the login, so a later 401 can name where the sign-in lives
+    #: (:func:`borrowed_rejected_message`). Empty for every local arm.
+    lender: str = ""
 
 
 _CACHE: dict[tuple[str, str], Token] = {}
@@ -190,18 +203,32 @@ def resolve(
         raise CredentialError(
             "absent", f"no credential path exists for {forge} (detect-and-link host)"
         )
+    if token.source == "brokered":
+        # A LENT TOKEN IS NEVER MEMOISED HERE (review round 1, R1-1). Its right
+        # to be used is the owner's, re-checked on every borrow by
+        # ``borrowed_git_env`` (``should_borrow`` for a revoked share or withdrawn
+        # consent, ``live_grant`` for membership/panic and grant expiry) — the
+        # same fences bash re-runs per command. A process-lifetime cache entry
+        # would skip all of them, and a PAT/owner-gh lend has no forge-side
+        # revoke to produce the 401 that would otherwise evict it. The grant
+        # cache behind ``borrowed_git_env`` is already the memo, so not caching
+        # costs a dict lookup per resolve, not an owner round-trip. The value is
+        # still registered for scrubbing before any caller can use it.
+        _register_for_scrubbing(token.value)
+        return token
     return _remember(token)
 
 
 def _resolve_github(host: str, home: Path | None) -> Token:
     """GitHub's ladder — and the host-authentication gate for GHES.
 
-    ``github.com`` goes through ``read_gh_token`` — its two-step resolution
-    (hosts file, then ``gh auth token``) is the tested one, and duplicating it
-    here would be a second implementation to drift. When that reports
-    ``absent``, an env-only ``GH_TOKEN``/``GITHUB_TOKEN`` still counts: a
-    headless device authenticated by environment IS signed in to github.com,
-    and only to github.com (QA round 1, Q5).
+    ``github.com`` walks gh's own precedence as the session's bash sees it: a
+    mesh-BORROWED login (the ``GH_TOKEN`` bash children receive), then an env
+    ``GH_TOKEN``/``GITHUB_TOKEN`` (a headless device authenticated by
+    environment IS signed in to github.com, and only to github.com — QA round
+    1, Q5), then ``read_gh_token`` — its two-step resolution (hosts file, then
+    ``gh auth token``) is the tested one, and duplicating it here would be a
+    second implementation to drift.
 
     A GHES host is served ONLY by the gh CLI's own stored login for that exact
     host: the probe runs with every ``*_TOKEN`` environment variable stripped
@@ -212,15 +239,46 @@ def _resolve_github(host: str, home: Path | None) -> Token:
     from local_operator.network.credentials import github as github_credentials
 
     if host == "github.com":
+        # THE ORDER IS gh's OWN, AS THE SESSION'S BASH SEES IT. A ``gh pr view`` in
+        # bash authenticates with ``GH_TOKEN`` before ``hosts.yml``, and on a mesh
+        # node that ``GH_TOKEN`` is the BROKERED one: ``tools/builtin.py``
+        # (``_github_git_injections``) borrows it per bash child and writes it
+        # over the inherited env — it never exists in THIS process's environment.
+        # Before this order, a node whose own gh had no login (hosts.yml ``{}``,
+        # ``gh auth token`` exit 1) refused here with "the gh CLI login could not
+        # be read" while the very same session's bash used the borrowed login
+        # (measured on lop-remote-node-2). So: borrowed login, then the process
+        # env token, then gh's own stored login — github.com only, never a GHES
+        # host (the borrowed bearer is a github.com credential; its git helper
+        # refuses every other host for the same reason).
+        borrow = _borrow_github()
+        if borrow.token:
+            return Token(
+                host=host,
+                forge="github",
+                value=borrow.token,
+                source="brokered",
+                lender=borrow.owner,
+            )
+        value = _env_token("github")
+        if value:
+            return Token(host=host, forge="github", value=value, source="env")
         try:
             value = github_credentials.read_gh_token(home)
             return Token(host=host, forge="github", value=value, source="gh")
         except github_credentials.GithubGhError as exc:
-            if exc.kind != "absent":
+            if borrow.arranged:
+                # This device is SUPPOSED to use a lent login and the lender did
+                # not deliver one; its own gh state is beside the point, and
+                # "sign in with gh here" would be the wrong remedy.
+                raise _borrowed_refusal(borrow) from exc
+            # ``read_gh_token`` says "unusable" when gh merely failed to produce
+            # a token — including for a hosts file with NO github.com entry
+            # (``{}`` after ``gh auth logout``), which is plain absence. Only a
+            # login that is actually stored (or a file that cannot be parsed)
+            # earns the "could not be read" sentence.
+            if exc.kind != "absent" and github_credentials.gh_login_present(home):
                 raise _github_refusal(exc.kind) from exc
-        value = _env_token("github")
-        if value:
-            return Token(host=host, forge="github", value=value, source="env")
         # ASK GH ITSELF when its DEFAULT hosts file has nothing (cross-round
         # finding X2): gh honours ``GH_CONFIG_DIR``, the OS keyring and its own
         # defaults, and its answer can only come from THIS host's stored login
@@ -243,6 +301,8 @@ def _resolve_github(host: str, home: Path | None) -> Token:
                 value = ""
             if value:
                 return Token(host=host, forge="github", value=value, source="gh")
+        if borrow.arranged:
+            raise _borrowed_refusal(borrow)
         raise _github_refusal("absent")
 
     exe = github_credentials.find_gh(home)
@@ -274,6 +334,126 @@ def _env_token(forge: str) -> str:
         if value:
             return value
     return ""
+
+
+#: The ``session_id`` this module's borrows carry: the fetches are process-wide
+#: (no one session asked), so a fixed label names the SURFACE on the owner's
+#: audit rows. Attribution only — it authorises nothing.
+BORROW_ATTRIBUTION = "code_requests"
+
+
+@dataclass(frozen=True)
+class _Borrow:
+    """What the mesh broker said about this device's github.com login.
+
+    ``arranged`` — this device is a HOLDER of a github credential another
+    device owns (``should_borrow``), i.e. the session's bash gets its gh login
+    from ``owner``. ``token`` is the lent bearer, empty when the borrow did
+    not deliver; ``cause`` is the refusal's ``healing.cause_for_code`` class
+    when the client recorded one.
+    """
+
+    arranged: bool = False
+    token: str = field(default="", repr=False)
+    owner: str = ""
+    cause: str = ""
+
+
+def _borrow_github() -> _Borrow:
+    """The brokered github.com login, through the SAME call bash's spawn uses.
+
+    ``github.borrowed_git_env`` is reused rather than re-implemented: it owns
+    the grant cache, the owner's repository narrowing and the self-revoke at
+    grant expiry, and a second borrow path here would drift from the one the
+    session's ``gh`` actually rides. ``root=None`` and the cached client are
+    bash's own arguments, so both surfaces see one grant. Never raises: a
+    device that borrows nothing (no placement, not a holder) is a file read
+    and an empty answer, exactly as on the bash path.
+    """
+    try:
+        from local_operator.network.credentials import github as github_credentials
+
+        client = github_credentials._client_for(None)
+        key = github_credentials.GITHUB_KEY
+        if client is None or not client.should_borrow(key):
+            return _Borrow()
+        owner = client.owner_label(key)
+    except Exception:  # noqa: BLE001 - no mesh here is "not borrowing"
+        logger.debug("github borrow arrangement could not be read", exc_info=True)
+        return _Borrow()
+    try:
+        # ``session_id`` is ATTRIBUTION only (the owner's audit ``for_session``
+        # and this device's grant-cache partition, per ``borrowed_git_env``):
+        # a fixed label makes these process-wide reads legible on the owner's
+        # audit rows instead of a blank (review round 1, R1-4).
+        _env, token = github_credentials.borrowed_git_env(
+            client=client, session_id=BORROW_ATTRIBUTION
+        )
+    except Exception:  # noqa: BLE001 - borrowed_git_env never raises; belt and braces
+        token = ""
+    if token:
+        return _Borrow(arranged=True, token=token, owner=owner)
+    cause = ""
+    try:
+        from local_operator.network.credentials.healing import cause_for_code
+
+        refusal = client.cached_refusal(key)
+        if refusal is not None:
+            cause = cause_for_code(refusal.code)
+    except Exception:  # noqa: BLE001 - a diagnosis must never mask the refusal
+        logger.debug("github borrow refusal could not be classified", exc_info=True)
+    return _Borrow(arranged=True, owner=owner, cause=cause)
+
+
+def _borrowed_refusal(borrow: _Borrow) -> CredentialError:
+    """The sentence for a lent login that did not arrive, naming the lender.
+
+    One sentence per provable cause (``healing.CAUSES``): the owner cannot be
+    reached (reconnect it), this device is no longer permitted to borrow (re-share
+    or sign in here), or the owner's own gh login lapsed — the borrowed login
+    expired, which is fixed ON the owner. Anything else — a broker or version
+    fault (``internal``, ``unsupported``, ``malformed_frame``, ``quota_blocked``
+    all classify ``unknown``) or no recorded refusal at all — proves nothing
+    about anyone's login, so it gets a neutral retry sentence rather than
+    sending the operator to re-login on the owner (review round 1, R1-3).
+    Never a value, never a token name: only the device the operator named.
+    """
+    from local_operator.network.credentials.types import (
+        CAUSE_GRANT,
+        CAUSE_OWNER_LOGIN,
+        CAUSE_UNREACHABLE,
+    )
+
+    owner = borrow.owner or "the owner device"
+    if borrow.cause == CAUSE_UNREACHABLE:
+        message = (
+            f"Can't refresh — the GitHub login borrowed from {owner} could not be "
+            f"reached; reconnect {owner}, then refresh."
+        )
+    elif borrow.cause == CAUSE_GRANT:
+        message = (
+            f"Can't refresh — {owner} no longer lends its GitHub login to this device; "
+            "share it again from there, or sign in here with `gh auth login`, then refresh."
+        )
+    elif borrow.cause == CAUSE_OWNER_LOGIN:
+        message = borrowed_expired_message(owner)
+    else:
+        message = (
+            f"Can't refresh — the GitHub login borrowed from {owner} is not available "
+            "right now; try again shortly."
+        )
+    return CredentialError("unusable", message, lender=owner)
+
+
+def borrowed_expired_message(owner: str) -> str:
+    """The borrowed-login-expired sentence: a lapsed lend, or a lent token GitHub
+    rejected. The remedy lives on the LENDER — signing in here would only
+    shadow the arrangement, so it is not offered."""
+    owner = owner or "the owner device"
+    return (
+        f"Can't refresh — the GitHub login borrowed from {owner} expired; "
+        f"sign in again on {owner} with `gh auth login`, then refresh."
+    )
 
 
 def _github_refusal(kind: str) -> CredentialError:
@@ -450,4 +630,4 @@ def _reset_for_tests() -> None:
         _CACHE.clear()
 
 
-__all__ = ["CredentialError", "CredentialKind", "Token", "resolve"]
+__all__ = ["CredentialError", "CredentialKind", "Token", "borrowed_expired_message", "resolve"]
