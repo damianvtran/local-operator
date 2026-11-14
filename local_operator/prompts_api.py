@@ -26,6 +26,7 @@ well-defined.
 
 from __future__ import annotations
 
+import functools
 import re
 from collections.abc import Collection, Mapping, Sequence
 from importlib.resources import files
@@ -429,7 +430,7 @@ def render_tool_inventory_block(
     # Same prohibition either way; only the DIAGNOSIS differs. See the
     # three-state comment in build_system_blocks and _ROLE_HAS_NO_BROWSER_NOTE.
     if not any(tool.name == "browser" for tool in tools):
-        block += _ROLE_HAS_NO_BROWSER_NOTE if host_has_browser else _NO_BROWSER_NOTE
+        block += _ROLE_HAS_NO_BROWSER_NOTE if host_has_browser else _no_browser_note()
     if not any(tool.name == "console" for tool in tools):
         if host_has_console is None:
             host_has_console = _host_console_available()
@@ -487,25 +488,87 @@ def _render_tool_inventory(tools: Sequence[AgentTool], deferred: Collection[str]
     return f"{listed}\n\n{render_deferred_tools_line(deferred_held)}"
 
 
-#: Appended to the tool inventory when the session has no browser tool. The
-#: builder is createIf-gated (a browser needs cmux, and this package ships no
-#: browser engine), so on a host without cmux the model can only observe an
-#: ABSENCE — and an absence reads as "arrange your own". Measured: asked for
+#: Appended to the tool inventory when the session has no browser tool and the
+#: HOST has no browser host either (no desktop-app tab, no paired extension, no
+#: cmux panel). An absence reads as "arrange your own". Measured: asked for
 #: before/after screenshots of a local dev server, a session wrote a playwright
 #: script and spent 23 s on ``playwright install chromium``. A downloaded
 #: browser cannot carry the user's logins and the user cannot reach into it, so
 #: it is not a smaller version of the real thing; it is a dead end that looks
 #: like progress. Naming the absence and the reason costs three lines and only
 #: ships when the tool is genuinely missing — the inventory is never told about
-#: a tool that cannot work.
+#: a tool that cannot work. (It used to say only cmux could host a browser; the
+#: desktop app and the extension have hosted one since, so it names all three.)
 _NO_BROWSER_NOTE = (
-    "\n\nThis session has NO browser tool: browser automation here runs through "
-    "the cmux terminal, and no cmux CLI is reachable on this host. Do not "
+    "\n\nThis session has NO browser tool: no browser host is connected on this "
+    "host (the desktop app's tab, a paired extension or a cmux panel). Do not "
     "substitute one — never install or script a browser engine (playwright, "
     "puppeteer, a downloaded Chromium) to load a page or capture a screenshot. "
     "For page text use `bash` with curl; when a task genuinely needs a rendered "
     "screenshot, say it is unavailable and why."
 )
+
+#: The same absence on a HEADLESS MESH NODE (Linux, a mesh member, no desktop
+#: discovery record, no graphical session). The user-machine rule above protects
+#: a person's browser, logins and screen; a node has none of those, and it has
+#: exactly ONE sanctioned browser — the node-managed one ``lop browser setup
+#: --node`` installs (signed vendor package, pinned, supervised, loopback-only),
+#: which the operator must authorise because it installs software on their
+#: node. The "never" stays for everything else: a playwright download on a node
+#: is just as unsupervised and unpinned as on a laptop. And the browser tool is
+#: createIf-gated at session construction, so a session that predates the setup
+#: never gets it — the note says to start a new one rather than leaving the
+#: model to wonder why a working install does not show up.
+#:
+#: Round 1 (PR #3935) added three clauses, each closing a dead end measured in
+#: review: what counts as the operator's authorisation (U3 — it was never
+#: defined, so an agent would stall or author it itself); a fresh install runs
+#: for minutes, longer than a default `bash` timeout (U2); and no site can be
+#: opened yet, because a headless Chrome cannot present an approval (U1).
+#: Round 2 (U14): the operator asked for agents to "be able to install a
+#: browser when needed for visual testing", so a STANDING instruction to that
+#: effect counts as well as one naming this node — quoted with its date, since
+#: the install record is the audit trail.
+_NO_BROWSER_NODE_NOTE = (
+    "\n\nThis session has NO browser tool. This is a headless node: its only "
+    "sanctioned browser is the node-managed one — `lop browser setup --node` "
+    "(guide://browser 'Headless nodes'), run only with the operator's "
+    "authorisation: an explicit instruction naming this node, or a standing "
+    "operator instruction that agents on the mesh's nodes may install the "
+    "node-managed browser when visual or end-to-end testing needs one; quote it "
+    "and its date in `--authorised-by '<who, when>'`. A fresh install takes "
+    "minutes: run it with a timeout of at least 900 s or in the background. A "
+    "session started before setup never gets the tool, so start a new one after; "
+    "even then no site can be opened yet (this build cannot open sites on a "
+    "headless node; a later update adds operator approval from their device). "
+    "Never install or script any other browser engine (playwright, puppeteer, a "
+    "downloaded Chromium)."
+)
+
+
+@functools.lru_cache(maxsize=1)
+def _host_is_headless_node() -> bool:
+    """Whether this host is a headless mesh node, read ONCE per process.
+
+    Cached for the reason :func:`host_capability_probes` is read once: the
+    inventory note reaches a cached prompt prefix, and a probe that moved
+    between renders would reprice live sessions. Node-ness (Linux, mesh
+    membership, no desktop) does not change under a running process in any way
+    a session should observe mid-flight. Never raises: a probe failure answers
+    "not a node", which ships the user-machine note — the stricter text.
+    """
+    try:
+        from local_operator.browser_bridge.node_host import is_headless_node
+
+        return bool(is_headless_node())
+    except Exception:  # noqa: BLE001 — prompt rendering must never break
+        return False
+
+
+def _no_browser_note() -> str:
+    """The host-has-no-browser note for THIS host: the node or the user variant."""
+    return _NO_BROWSER_NODE_NOTE if _host_is_headless_node() else _NO_BROWSER_NOTE
+
 
 #: The same prohibition for a session whose ROLE was not given the browser
 #: tool on a host that HAS one — a ``reviewer``/``scout``/``manager``/
@@ -1563,7 +1626,7 @@ STATE_SECTION_HEADINGS: dict[str, str] = {
 #: rather than by scanning for prose.
 _INVENTORY_NOTES_REVERSED: tuple[tuple[str, ...], ...] = (
     (_NO_CONSOLE_NOTE, _ROLE_HAS_NO_CONSOLE_NOTE),
-    (_NO_BROWSER_NOTE, _ROLE_HAS_NO_BROWSER_NOTE),
+    (_NO_BROWSER_NOTE, _NO_BROWSER_NODE_NOTE, _ROLE_HAS_NO_BROWSER_NOTE),
 )
 
 

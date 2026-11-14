@@ -86,6 +86,11 @@ await cp(resolve(root, "src/options/options.css"), resolve(dist, "options/option
 await cp(resolve(root, "src/pair/pair.html"), resolve(dist, "pair/pair.html"));
 await cp(resolve(root, "src/pair/pair.css"), resolve(dist, "pair/pair.css"));
 await cp(resolve(root, "icons"), resolve(dist, "icons"), { recursive: true });
+// The managed-storage schema (manifest `storage.managed_schema`). Chrome only
+// delivers policy keys a schema declares; this one carries the headless-node
+// pairing code (src/managed-pairing.ts). Shipped in every build so the store
+// artifact and an off-store node CRX are the same extension.
+await cp(resolve(root, "managed_schema.json"), resolve(dist, "managed_schema.json"));
 if (isStore) {
   const target = resolve(root, "local-operator-extension.zip");
   await rm(target, { force: true });

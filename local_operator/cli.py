@@ -67,6 +67,7 @@ from local_operator.i18n.keys import cli_agents_help as _ag
 from local_operator.i18n.keys import cli_aida_help as _ad
 from local_operator.i18n.keys import cli_browser as _b
 from local_operator.i18n.keys import cli_browser_help as _bh
+from local_operator.i18n.keys import cli_browser_node as _bn
 from local_operator.i18n.keys import cli_config_help as _cf
 from local_operator.i18n.keys import cli_credential_help as _cr
 from local_operator.i18n.keys import cli_exec_help as _eh
@@ -164,6 +165,7 @@ def _positive_seconds(text: str) -> float:
 #: the exec refusals this module prints).
 _t = tr("wire.exec")
 _bt = tr("cli.browser")
+_bnt = tr("cli.browser_node")
 _spt = tr("cli.skills_push")
 
 
@@ -1240,6 +1242,43 @@ def build_cli_parser() -> LocalizedArgumentParser:
         "install", help=_bh.install().envelope(locale=help_locale)["text"]
     )
     install_browser.add_argument("--port", type=int, default=4099)
+    # `lop browser setup --node`: the node-managed browser on a headless mesh
+    # node (browser_bridge/node_host.py). `--node` is required rather than
+    # implied so a user machine can never reach this path by accident; the
+    # module refuses one anyway.
+    setup_browser = browser_subparsers.add_parser(
+        "setup", help=_bn.help_setup().envelope(locale=help_locale)["text"]
+    )
+    setup_browser.add_argument(
+        "--node", action="store_true", help=_bn.help_node().envelope(locale=help_locale)["text"]
+    )
+    setup_browser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help=_bn.help_dry_run().envelope(locale=help_locale)["text"],
+    )
+    setup_browser.add_argument(
+        "--repair", action="store_true", help=_bn.help_repair().envelope(locale=help_locale)["text"]
+    )
+    setup_browser.add_argument(
+        "--upgrade",
+        action="store_true",
+        help=_bn.help_upgrade().envelope(locale=help_locale)["text"],
+    )
+    setup_browser.add_argument(
+        "--extension-dir",
+        metavar="PATH",
+        help=_bn.help_extension_dir().envelope(locale=help_locale)["text"],
+    )
+    setup_browser.add_argument(
+        "--authorised-by",
+        metavar="TEXT",
+        default="",
+        help=_bn.help_authorised_by().envelope(locale=help_locale)["text"],
+    )
+    setup_browser.add_argument(
+        "--json", action="store_true", help=_bn.help_json().envelope(locale=help_locale)["text"]
+    )
     status_browser = browser_subparsers.add_parser(
         "status", help=_bh.status().envelope(locale=help_locale)["text"]
     )
@@ -1303,6 +1342,25 @@ def build_cli_parser() -> LocalizedArgumentParser:
         "--purge",
         action="store_true",
         help=_bh.uninstall_purge().envelope(locale=help_locale)["text"],
+    )
+    uninstall_browser.add_argument(
+        "--node",
+        action="store_true",
+        help=_bn.help_uninstall_node().envelope(locale=help_locale)["text"],
+    )
+    uninstall_browser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help=_bn.help_dry_run().envelope(locale=help_locale)["text"],
+    )
+    uninstall_browser.add_argument(
+        "--authorised-by",
+        metavar="TEXT",
+        default="",
+        help=_bn.help_authorised_by().envelope(locale=help_locale)["text"],
+    )
+    uninstall_browser.add_argument(
+        "--json", action="store_true", help=_bn.help_json().envelope(locale=help_locale)["text"]
     )
     serve_browser = browser_subparsers.add_parser(
         "serve", help=_bh.serve().envelope(locale=help_locale)["text"]
@@ -3779,6 +3837,176 @@ def _print_identities(
                 )
 
 
+def _node_refusal_line(refusal: Mapping[str, Any], *, uninstalling: bool) -> str:
+    """The keyed sentence for a node_host refusal (namespace ``cli.browser_node``)."""
+    from local_operator.browser_bridge import node_host
+
+    code = str(refusal.get("code"))
+    args_ = refusal.get("args") or {}
+    # The authorisation refusal is two sentences: removing is not installing
+    # (round 1, U4a / Q2 — the uninstall refusal used to say "installing").
+    authorisation = _bn.refuse_uninstall_authorisation if uninstalling else _bn.refuse_authorisation
+    message = {
+        node_host.REFUSE_PLATFORM: lambda: _bn.refuse_platform(
+            system=str(args_.get("system", "")), machine=str(args_.get("machine", ""))
+        ),
+        node_host.REFUSE_DISTRO: _bn.refuse_distro,
+        node_host.REFUSE_USER_MACHINE: lambda: _bn.refuse_user_machine(
+            reason=str(args_.get("reason", ""))
+        ),
+        node_host.REFUSE_NOT_MEMBER: _bn.refuse_not_member,
+        node_host.REFUSE_SUDO: lambda: _bn.refuse_sudo(steps=str(args_.get("steps", ""))),
+        node_host.REFUSE_NO_RECORD: lambda: _bn.refuse_no_record(path=str(args_.get("path", ""))),
+        node_host.REFUSE_NOT_INSTALLED: lambda: _bn.refuse_nothing_to_uninstall(
+            path=str(args_.get("path", ""))
+        ),
+        node_host.REFUSE_AUTHORISATION: authorisation,
+    }.get(code)
+    if message is None:
+        return str(refusal.get("message", ""))  # i18n: ignore unknown-code passthrough
+    return _bnt(message())
+
+
+def _node_step_line(step: Mapping[str, Any], *, uninstalling: bool) -> str | None:
+    """One step row. Step ids and details are technical evidence and stay verbatim.
+
+    A privileged step is tagged ``(root)`` wherever it would run or did run:
+    "what will this change, and with sudo?" is the operator's question before
+    authorising, and the JSON's ``privileged`` was the only place it was
+    answered (round 1, U5b). Uninstall rows say remove/removed/already absent
+    rather than setup's apply vocabulary (U12).
+    """
+    from local_operator.browser_bridge import node_host
+
+    state = str(step.get("state"))
+    step_id = str(step.get("id", ""))
+    detail = str(step.get("detail", ""))
+    label = step_id
+    if step.get("privileged") and state != node_host.STATE_IN_PLACE:
+        label = _bnt(_bn.step_root(step=step_id))
+    if uninstalling:
+        bare = {
+            node_host.STATE_IN_PLACE: _bn.step_already_absent,
+            node_host.STATE_WOULD_APPLY: _bn.step_would_remove,
+            node_host.STATE_APPLIED: _bn.step_removed,
+        }.get(state)
+        if bare is not None:
+            return _bnt(bare(step=label))
+    if state == node_host.STATE_SKIPPED:
+        return _bnt(_bn.step_skipped(step=label))
+    if state == node_host.STATE_NOT_RUN:
+        return _bnt(_bn.step_not_run(step=label))
+    row = {
+        node_host.STATE_IN_PLACE: _bn.step_in_place,
+        node_host.STATE_WOULD_APPLY: _bn.step_would_apply,
+        node_host.STATE_WOULD_FAIL: _bn.step_would_fail,
+        node_host.STATE_APPLIED: _bn.step_applied,
+        node_host.STATE_FAILED: _bn.step_failed,
+    }.get(state)
+    return None if row is None else _bnt(row(step=label, detail=detail))
+
+
+def _render_node_tail(
+    payload: Mapping[str, Any], *, uninstalling: bool, dry_run: bool, streamed: bool
+) -> None:
+    """Everything after the streamed step rows; the JSON carries the same facts."""
+    refusal = payload.get("refusal")
+    if not streamed:
+        # A refusal before any step (preflight): its sentence is the output.
+        if isinstance(refusal, Mapping):
+            print(_node_refusal_line(refusal, uninstalling=uninstalling))
+        return
+    if uninstalling:
+        print(_bnt(_bn.uninstall_kept()))
+    elif payload.get("paired") is not None:
+        print(_bnt(_bn.paired_yes() if payload.get("paired") else _bn.paired_no()))
+    # `record` is set only when the record was written this run (round 1, U4b).
+    if payload.get("record") and not dry_run:
+        print(_bnt(_bn.record(path=str(payload["record"]))))
+    if isinstance(refusal, Mapping):
+        # Last, so the terminal ends on the remedy, not on a row (round 2, U16).
+        print(_node_refusal_line(refusal, uninstalling=uninstalling))
+        return
+    if payload.get("ok"):
+        return
+    if dry_run:
+        print(_bnt(_bn.dry_run_would_fail()))
+    elif not uninstalling:
+        print(_bnt(_bn.failed_tail() if payload.get("record") else _bn.stopped_unchanged()))
+
+
+def _browser_node_command(args: argparse.Namespace) -> int:
+    """`lop browser setup --node` / `lop browser uninstall --node`.
+
+    STREAMED (round 1, U2): a fresh install runs for minutes and its usual
+    caller is an agent's shell call with a timeout, so each step's row prints
+    (flushed) the moment it is known rather than all at once at the end — a
+    killed call still shows which steps landed. ``--json`` keeps stdout ONE
+    final document and streams the same rows as JSON lines on stderr
+    (``{"event": "step", "step": {...}}``).
+    """
+    import json as _json
+
+    from local_operator.browser_bridge import node_host
+
+    uninstalling = args.browser_command == "uninstall"
+    if not uninstalling and not getattr(args, "node", False):
+        # `setup` exists only for nodes today; a bare `setup` is a usage error
+        # rather than a guess at what a user machine wanted — and the message
+        # names `--node` and the user-machine command (round 1, U8 / Q3).
+        print(_bnt(_bn.setup_needs_node()))
+        return 2
+    if uninstalling and getattr(args, "purge", False):
+        # --purge removes the bridge daemon and its pairing state; the node
+        # uninstall keeps both. Silently ignoring it read as done (U12).
+        print(_bnt(_bn.purge_with_node()))
+        return 2
+    extension_dir = getattr(args, "extension_dir", None)
+    options = node_host.Options(
+        dry_run=bool(args.dry_run),
+        repair=bool(getattr(args, "repair", False)),
+        upgrade=bool(getattr(args, "upgrade", False)),
+        extension_dir=Path(extension_dir).expanduser().resolve() if extension_dir else None,
+        authorised_by=str(getattr(args, "authorised_by", "") or ""),
+    )
+    node = node_host.node_name()
+    streamed = False
+
+    def on_step(step: Any, outcome: Any) -> None:
+        nonlocal streamed
+        if args.json:
+            print(
+                _json.dumps({"event": "step", "step": step.as_json()}), file=sys.stderr, flush=True
+            )
+            return
+        if not streamed:
+            streamed = True
+            # A refusal that still lists rows (sudo would prompt) prints AFTER
+            # them, in `_render_node_tail`: printed here its remedy scrolled
+            # off above 15 `not run (refused)` rows (round 2, U16).
+            if uninstalling:
+                heading = (
+                    _bn.heading_uninstall_dry_run if options.dry_run else _bn.heading_uninstall
+                )
+            else:
+                heading = _bn.heading_dry_run if options.dry_run else _bn.heading_apply
+            print(_bnt(heading(node=node)), flush=True)
+        line = _node_step_line(step.as_json(), uninstalling=uninstalling)
+        if line is not None:
+            print(line, flush=True)
+
+    run = node_host.uninstall if uninstalling else node_host.setup
+    outcome = run(options, on_step=on_step)
+    payload = outcome.as_json()
+    if args.json:
+        print(_json.dumps(payload, indent=2))
+    else:
+        _render_node_tail(
+            payload, uninstalling=uninstalling, dry_run=options.dry_run, streamed=streamed
+        )
+    return 0 if payload["ok"] else 1
+
+
 def browser_command(args: argparse.Namespace) -> int:
     """Dispatch ``lop browser …`` without importing the daemon at CLI startup."""
     command = getattr(args, "browser_command", None)
@@ -4344,7 +4572,22 @@ def browser_command(args: argparse.Namespace) -> int:
                 _bt(_b.cannot_run(command=command_line[0], location=browser_install.log_location()))
             )
             return 1
+    if command == "setup" or (command == "uninstall" and getattr(args, "node", False)):
+        return _browser_node_command(args)
     if command == "uninstall":
+        # getattr, like the `--node` read above: a programmatic Namespace (the
+        # install tests, any embedding caller) built before these flags existed
+        # carries none of them, and must reach the plain route unchanged.
+        if (
+            getattr(args, "dry_run", False)
+            or getattr(args, "authorised_by", "")
+            or getattr(args, "json", False)
+        ):
+            # These flags exist for `--node` only. The plain route ignored them,
+            # so `uninstall --dry-run --purge` ran a REAL purge despite its help
+            # text promising "change nothing" (round 1, R1-1).
+            print(_bnt(_bn.uninstall_flags_need_node()))
+            return 2
         result = browser_install.uninstall(purge=args.purge)
         steps = result.get("steps", [])
         assert isinstance(steps, list)
@@ -17806,6 +18049,20 @@ def _exec_temporary_refusal(args: argparse.Namespace) -> str | None:
     return None
 
 
+def _exit_quietly_on_broken_pipe() -> int:
+    """Exit status for a reader that went away (`lop browser status | head`).
+
+    That is the reader's choice, not a crash, and main()'s traceback panel
+    used to print for it. Point stdout at devnull so the interpreter's own
+    flush at exit does not raise a second time, and exit the way a SIGPIPE'd
+    filter does by convention — quietly, non-zero (the Python docs' "Note on
+    SIGPIPE" recipe).
+    """
+    devnull = os.open(os.devnull, os.O_WRONLY)
+    os.dup2(devnull, sys.stdout.fileno())
+    return 1
+
+
 def main() -> int:
     # Name this process in the OS process listing. On Linux this is a
     # ~microsecond `prctl` on the current process and nothing else happens; the
@@ -19410,6 +19667,13 @@ def main() -> int:
             )
         )
     except Exception as e:
+        # Checked inside the one handler rather than as its own `except
+        # BrokenPipeError:` clause: a second handler on this try adds flow
+        # edges from every statement in main()'s body, which tipped pyright
+        # into "Code is too complex to analyze" for main(). Same behaviour —
+        # BrokenPipeError is an Exception subclass and is tested first.
+        if isinstance(e, BrokenPipeError):
+            return _exit_quietly_on_broken_pipe()
         # U5-1 (narrow re-check): if the failure is teams-registry lock
         # contention — an expected recoverable state, not a defect — present
         # one concise line instead of the traceback panel below, which reads

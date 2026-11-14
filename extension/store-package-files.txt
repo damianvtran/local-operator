@@ -2,6 +2,7 @@ icons/icon-128.png
 icons/icon-16.png
 icons/icon-32.png
 icons/icon-48.png
+managed_schema.json
 manifest.json
 options/options.css
 options/options.html

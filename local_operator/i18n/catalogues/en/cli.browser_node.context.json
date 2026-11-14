@@ -1,0 +1,217 @@
+{
+  "cli.browser_node.heading_dry_run": {
+    "role": "lop browser setup/uninstall --node CLI output",
+    "tone": "terse, factual, operator-facing; commands, flags, paths and guide:// names stay verbatim",
+    "note": "heading above the step list for `--dry-run`; {node} is the device name"
+  },
+  "cli.browser_node.heading_apply": {
+    "role": "lop browser setup/uninstall --node CLI output",
+    "tone": "terse, factual, operator-facing; commands, flags, paths and guide:// names stay verbatim",
+    "note": "heading above the step list when setup applies changes; {node} is the device name"
+  },
+  "cli.browser_node.heading_uninstall_dry_run": {
+    "role": "lop browser setup/uninstall --node CLI output",
+    "tone": "terse, factual, operator-facing; commands, flags, paths and guide:// names stay verbatim",
+    "note": "heading for `lop browser uninstall --node --dry-run`"
+  },
+  "cli.browser_node.heading_uninstall": {
+    "role": "lop browser setup/uninstall --node CLI output",
+    "tone": "terse, factual, operator-facing; commands, flags, paths and guide:// names stay verbatim",
+    "note": "heading for `lop browser uninstall --node`"
+  },
+  "cli.browser_node.step_in_place": {
+    "role": "lop browser setup/uninstall --node CLI output",
+    "tone": "terse, factual, operator-facing; commands, flags, paths and guide:// names stay verbatim",
+    "note": "one step row; {step} is a technical step id (e.g. chrome_unit), {detail} is technical evidence (package, path, version)"
+  },
+  "cli.browser_node.step_would_apply": {
+    "role": "lop browser setup/uninstall --node CLI output",
+    "tone": "terse, factual, operator-facing; commands, flags, paths and guide:// names stay verbatim",
+    "note": "one step row in a dry run; {detail} says what is missing"
+  },
+  "cli.browser_node.step_applied": {
+    "role": "lop browser setup/uninstall --node CLI output",
+    "tone": "terse, factual, operator-facing; commands, flags, paths and guide:// names stay verbatim",
+    "note": "one step row that was just changed"
+  },
+  "cli.browser_node.step_failed": {
+    "role": "lop browser setup/uninstall --node CLI output",
+    "tone": "terse, factual, operator-facing; commands, flags, paths and guide:// names stay verbatim",
+    "note": "one step row that failed; {detail} is the technical error"
+  },
+  "cli.browser_node.step_skipped": {
+    "role": "lop browser setup/uninstall --node CLI output",
+    "tone": "terse, factual, operator-facing; commands, flags, paths and guide:// names stay verbatim",
+    "note": "one step row not attempted"
+  },
+  "cli.browser_node.refuse_platform": {
+    "role": "lop browser setup/uninstall --node CLI output",
+    "tone": "terse, factual, operator-facing; commands, flags, paths and guide:// names stay verbatim",
+    "note": "refusal; {system}/{machine} are platform identifiers"
+  },
+  "cli.browser_node.refuse_distro": {
+    "role": "lop browser setup/uninstall --node CLI output",
+    "tone": "terse, factual, operator-facing; commands, flags, paths and guide:// names stay verbatim",
+    "note": "refusal on an unsupported distribution"
+  },
+  "cli.browser_node.refuse_user_machine": {
+    "role": "lop browser setup/uninstall --node CLI output",
+    "tone": "terse, factual, operator-facing; commands, flags, paths and guide:// names stay verbatim",
+    "note": "refusal; {reason} is a technical clause naming the signal found"
+  },
+  "cli.browser_node.refuse_not_member": {
+    "role": "lop browser setup/uninstall --node CLI output",
+    "tone": "terse, factual, operator-facing; commands, flags, paths and guide:// names stay verbatim",
+    "note": "refusal when the device has no network record"
+  },
+  "cli.browser_node.refuse_sudo": {
+    "role": "lop browser setup/uninstall --node CLI output",
+    "tone": "terse, factual, operator-facing; commands, flags, paths and guide:// names stay verbatim",
+    "note": "refusal; {steps} is a comma-separated list of technical step ids"
+  },
+  "cli.browser_node.refuse_no_record": {
+    "role": "lop browser setup/uninstall --node CLI output",
+    "tone": "terse, factual, operator-facing; commands, flags, paths and guide:// names stay verbatim",
+    "note": "refusal for --repair with no install record; {path} is a file path"
+  },
+  "cli.browser_node.refuse_authorisation": {
+    "role": "lop browser setup/uninstall --node CLI output",
+    "tone": "terse, factual, operator-facing; commands, flags, paths and guide:// names stay verbatim",
+    "note": "refusal when --authorised-by is missing"
+  },
+  "cli.browser_node.paired_yes": {
+    "role": "lop browser setup/uninstall --node CLI output",
+    "tone": "terse, factual, operator-facing; commands, flags, paths and guide:// names stay verbatim",
+    "note": "summary after setup when the extension is paired"
+  },
+  "cli.browser_node.paired_no": {
+    "role": "lop browser setup/uninstall --node CLI output",
+    "tone": "terse, factual, operator-facing; commands, flags, paths and guide:// names stay verbatim",
+    "note": "summary when the extension is not paired"
+  },
+  "cli.browser_node.record": {
+    "role": "lop browser setup/uninstall --node CLI output",
+    "tone": "terse, factual, operator-facing; commands, flags, paths and guide:// names stay verbatim",
+    "note": "where the install record was written; {path} is a file path"
+  },
+  "cli.browser_node.failed_tail": {
+    "role": "lop browser setup/uninstall --node CLI output",
+    "tone": "terse, factual, operator-facing; commands, flags, paths and guide:// names stay verbatim",
+    "note": "closing line after a failed step"
+  },
+  "cli.browser_node.help_setup": {
+    "role": "lop browser --help text",
+    "tone": "argparse help: short, imperative-free noun phrase or clause; flags verbatim",
+    "note": "help for `lop browser setup`"
+  },
+  "cli.browser_node.help_node": {
+    "role": "lop browser --help text",
+    "tone": "argparse help: short, imperative-free noun phrase or clause; flags verbatim",
+    "note": "help for `--node` on setup"
+  },
+  "cli.browser_node.help_dry_run": {
+    "role": "lop browser --help text",
+    "tone": "argparse help: short, imperative-free noun phrase or clause; flags verbatim",
+    "note": "help for `--dry-run`"
+  },
+  "cli.browser_node.help_repair": {
+    "role": "lop browser --help text",
+    "tone": "argparse help: short, imperative-free noun phrase or clause; flags verbatim",
+    "note": "help for `--repair`"
+  },
+  "cli.browser_node.help_upgrade": {
+    "role": "lop browser --help text",
+    "tone": "argparse help: short, imperative-free noun phrase or clause; flags verbatim",
+    "note": "help for `--upgrade`"
+  },
+  "cli.browser_node.help_extension_dir": {
+    "role": "lop browser --help text",
+    "tone": "argparse help: short, imperative-free noun phrase or clause; flags verbatim",
+    "note": "help for `--extension-dir PATH`"
+  },
+  "cli.browser_node.help_json": {
+    "role": "lop browser --help text",
+    "tone": "argparse help: short, imperative-free noun phrase or clause; flags verbatim",
+    "note": "help for `--json`"
+  },
+  "cli.browser_node.help_authorised_by": {
+    "role": "lop browser --help text",
+    "tone": "argparse help: short, imperative-free noun phrase or clause; flags verbatim",
+    "note": "help for `--authorised-by TEXT`"
+  },
+  "cli.browser_node.help_uninstall_node": {
+    "role": "lop browser --help text",
+    "tone": "argparse help: short, imperative-free noun phrase or clause; flags verbatim",
+    "note": "help for `lop browser uninstall --node`"
+  },
+  "cli.browser_node.step_root": {
+    "role": "lop browser setup/uninstall --node CLI output",
+    "tone": "terse, factual, operator-facing; commands, flags, paths and guide:// names stay verbatim",
+    "note": "a step id tagged as running through sudo; {step} is the technical step id. Used as the {step} value of the other step rows, so keep it short; `root` is the Unix account name"
+  },
+  "cli.browser_node.step_would_fail": {
+    "role": "lop browser setup/uninstall --node CLI output",
+    "tone": "terse, factual, operator-facing; commands, flags, paths and guide:// names stay verbatim",
+    "note": "dry-run step row: applying would refuse or fail this step as things stand; {detail} is technical evidence"
+  },
+  "cli.browser_node.step_not_run": {
+    "role": "lop browser setup/uninstall --node CLI output",
+    "tone": "terse, factual, operator-facing; commands, flags, paths and guide:// names stay verbatim",
+    "note": "a step that was not run because the run was refused before any change (not because another step failed)"
+  },
+  "cli.browser_node.step_would_remove": {
+    "role": "lop browser setup/uninstall --node CLI output",
+    "tone": "terse, factual, operator-facing; commands, flags, paths and guide:// names stay verbatim",
+    "note": "uninstall dry-run row: this part would be removed"
+  },
+  "cli.browser_node.step_removed": {
+    "role": "lop browser setup/uninstall --node CLI output",
+    "tone": "terse, factual, operator-facing; commands, flags, paths and guide:// names stay verbatim",
+    "note": "uninstall row: this part was removed"
+  },
+  "cli.browser_node.step_already_absent": {
+    "role": "lop browser setup/uninstall --node CLI output",
+    "tone": "terse, factual, operator-facing; commands, flags, paths and guide:// names stay verbatim",
+    "note": "uninstall row: this part was not there, nothing to remove"
+  },
+  "cli.browser_node.uninstall_kept": {
+    "role": "lop browser setup/uninstall --node CLI output",
+    "tone": "terse, factual, operator-facing; commands, flags, paths and guide:// names stay verbatim",
+    "note": "printed after the uninstall rows: what uninstall deliberately leaves in place"
+  },
+  "cli.browser_node.refuse_uninstall_authorisation": {
+    "role": "lop browser setup/uninstall --node CLI output",
+    "tone": "terse, factual, operator-facing; commands, flags, paths and guide:// names stay verbatim",
+    "note": "uninstall refused because --authorised-by was not given"
+  },
+  "cli.browser_node.refuse_nothing_to_uninstall": {
+    "role": "lop browser setup/uninstall --node CLI output",
+    "tone": "terse, factual, operator-facing; commands, flags, paths and guide:// names stay verbatim",
+    "note": "uninstall refused because lop has no record of installing the node browser here; {path} is the install record's path"
+  },
+  "cli.browser_node.dry_run_would_fail": {
+    "role": "lop browser setup/uninstall --node CLI output",
+    "tone": "terse, factual, operator-facing; commands, flags, paths and guide:// names stay verbatim",
+    "note": "after a dry run in which some step would fail; \"would fail\" quotes the row text step_would_fail, keep it matching that translation"
+  },
+  "cli.browser_node.stopped_unchanged": {
+    "role": "lop browser setup/uninstall --node CLI output",
+    "tone": "terse, factual, operator-facing; commands, flags, paths and guide:// names stay verbatim",
+    "note": "apply stopped before changing anything because a step was certain to fail"
+  },
+  "cli.browser_node.setup_needs_node": {
+    "role": "lop browser setup/uninstall --node CLI output",
+    "tone": "terse, factual, operator-facing; commands, flags, paths and guide:// names stay verbatim",
+    "note": "usage error for `lop browser setup` without --node"
+  },
+  "cli.browser_node.purge_with_node": {
+    "role": "lop browser setup/uninstall --node CLI output",
+    "tone": "terse, factual, operator-facing; commands, flags, paths and guide:// names stay verbatim",
+    "note": "usage error: --purge combined with --node"
+  },
+  "cli.browser_node.uninstall_flags_need_node": {
+    "role": "lop browser setup/uninstall --node CLI output",
+    "tone": "terse, factual, operator-facing; commands, flags, paths and guide:// names stay verbatim",
+    "note": "usage error: node-only flags given to the plain `lop browser uninstall`"
+  }
+}

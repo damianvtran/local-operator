@@ -1,0 +1,10 @@
+{
+  "type": "object",
+  "properties": {
+    "pairingCode": {
+      "title": "Local Operator pairing code",
+      "description": "Written only by `lop browser setup --node` on a headless node, removed once paired. Never set this by hand.",
+      "type": "string"
+    }
+  }
+}

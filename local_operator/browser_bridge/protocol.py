@@ -98,12 +98,20 @@ def proto_supported(
 #: 0.1.26 is the first tree with the pairing TAB (`pair/pair.html`): a normal
 #: extension page that survives focus loss, opened by the `show_pairing` event
 #: `lop browser pair` sends, and on first install.
-EXPECTED_EXTENSION_VERSION = "0.1.26"
+#: 0.1.27 is the first tree that pairs from Chrome managed policy
+#: (`storage.managed_schema`, `src/managed-pairing.ts`): the headless-node path,
+#: where `lop browser setup --node` delivers the code because nobody can type it.
+EXPECTED_EXTENSION_VERSION = "0.1.27"
 
 #: The first extension version that opens its pairing tab on `show_pairing`.
 #: An older install ignores the event, so `lop browser pair` tells its user to
 #: click the toolbar icon instead of pointing at a tab that never opened.
 SHOW_PAIRING_MIN_EXTENSION_VERSION = "0.1.26"
+
+#: The first extension version that reads a pairing code from managed policy.
+#: `lop browser setup --node` refuses to pack an older tree: its CRX would
+#: install and then sit unpaired forever on a node where nobody can type a code.
+MANAGED_PAIRING_MIN_EXTENSION_VERSION = "0.1.27"
 
 #: The first extension version that serves each capability-gated method.
 #:

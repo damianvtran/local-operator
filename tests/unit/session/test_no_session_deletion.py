@@ -2476,6 +2476,38 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "plist/unit FILEs; state_store.remove()",
     ),
     ("local_operator/browser_bridge/state.py::remove", "<path>.unlink", "bridge state FILE"),
+    # node_host.py (`lop browser setup/uninstall` on a headless mesh node).
+    # Every path it writes or removes is a FILE under `<config>/browser/`,
+    # `~/.config/systemd/user/`, or a mkstemp/mkdtemp in the system temp dir —
+    # none is derived from a session id or the sessions/ tree.
+    (
+        "local_operator/browser_bridge/node_host.py::_write_private",
+        "os.replace",
+        "mkstemp temp FILE onto the node record/unit/update manifest/signing key "
+        "(<config>/browser/… or ~/.config/systemd/user/…); os.replace rejects a "
+        "directory target",
+    ),
+    (
+        "local_operator/browser_bridge/node_host.py::_write_private",
+        "os.unlink",
+        "its own mkstemp temp FILE, on a failed write",
+    ),
+    (
+        "local_operator/browser_bridge/node_host.py::_Plan._sudo_install_file",
+        "os.unlink",
+        "its own NamedTemporaryFile in the system temp dir, after `sudo install`",
+    ),
+    (
+        "local_operator/browser_bridge/node_host.py::setup",
+        "shutil.rmtree",
+        "the run's own tempfile.mkdtemp(prefix='lop-node-ext-') extension unpack "
+        "dirs (plan.scratch), in the system temp dir",
+    ),
+    (
+        "local_operator/browser_bridge/node_host.py::uninstall._remove_unit",
+        "<path>.unlink",
+        "the node browser's systemd user unit FILE (~/.config/systemd/user/…)",
+    ),
     (
         "local_operator/evaluation/adapters/supervisor.py::discard_rescue",
         "os.unlink",

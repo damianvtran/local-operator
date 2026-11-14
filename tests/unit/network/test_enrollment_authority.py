@@ -692,3 +692,22 @@ def test_verify_accepts_the_non_gating_skills_row(skills_ok):
         }
     )
     assert terminal["equipment_warnings"] == expected
+
+
+def test_every_peer_side_readiness_row_is_accepted_by_enrollment_verification() -> None:
+    """Every row a peer's ready report carries must be accepted by
+    ``ready_evidence`` and publishable by ``public_report``: the enrollment
+    sets are CLOSED, so a new ``readiness.PEER_SIDE_CHECKS`` capability missing
+    from them rejects every report. The node-managed ``browser`` row did exactly
+    that (signed desktop onboarding failed with "enrollment authority is
+    invalid"); this pins the two lists together. ``operator_authority`` is the
+    one positive (admission-side) capability, read outside the warning set."""
+    from local_operator.network import readiness
+
+    missing = set(readiness.PEER_SIDE_CHECKS) - e.WARNING_CAPABILITIES - {"operator_authority"}
+    assert missing == set()
+    assert readiness.CAPABILITY_BROWSER in e.WARNING_CAPABILITIES
+    # ``skills`` (PR #3839) rides every peer report but is appended by
+    # ``_peer_checks`` outside ``PEER_SIDE_CHECKS``, so the set difference above
+    # cannot see it; pin it by name.
+    assert readiness.CAPABILITY_SKILLS in e.WARNING_CAPABILITIES

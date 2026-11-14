@@ -520,6 +520,36 @@ async def test_request_access_works_without_a_surface(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
+async def test_request_access_on_a_headless_node_queues_no_invisible_prompt(monkeypatch) -> None:
+    """U1 (PR #3935 round 1): a node's prompt would sit in a popup nobody can
+    reach; the tool answers with the node sentence and never calls the bridge."""
+    from local_operator.browser_bridge import node_host
+
+    monkeypatch.setattr(builtin, "cmux_browser_available", lambda: False)
+    monkeypatch.setattr(builtin, "bridge_browser_available", lambda: True)
+    monkeypatch.setattr(node_host, "headless_node_once", lambda: True)
+
+    # Record, never raise: a raise inside the tool is wrapped as "Tool 'browser'
+    # failed unexpectedly: … headless node …", which satisfied the old text
+    # assertions with the node gate removed (round 2, R2-3).
+    calls: list[object] = []
+
+    async def fake_call(*args, **_kwargs):
+        calls.append(args)
+        return {"origin": "https://example.com", "state": "pending"}, None
+
+    monkeypatch.setattr(builtin, "_bridge_call", fake_call)
+    context = ToolContext(browser=BrowserSurface())
+    result = await builtin.execute_browser(
+        "t", {"action": "request_access", "url": "https://example.com"}, None, None, context
+    )
+    assert calls == []
+    assert result.details is not None and result.details["state"] == "unavailable_on_node"
+    assert "cannot open sites on a headless node" in result.text
+    assert "popup" not in result.text
+
+
+@pytest.mark.asyncio
 async def test_request_access_reports_already_allowed(monkeypatch) -> None:
     monkeypatch.setattr(builtin, "cmux_browser_available", lambda: False)
     monkeypatch.setattr(builtin, "bridge_browser_available", lambda: True)
