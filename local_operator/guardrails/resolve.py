@@ -5853,12 +5853,17 @@ def _walk_once(
 
 def _union_ranked(into: Resolution, extra: Resolution) -> None:
     """Add every ranked fact of ``extra`` missing from ``into`` (not ``created``)."""
-    for mine, theirs in (
-        (into.targets, extra.targets),
-        (into.touched, extra.touched),
+    # Two loops, one per element type, rather than one tuple of mixed pairs:
+    # a heterogeneous tuple widens each pair to ``list[Target] | list[str]`` and
+    # pyright then rejects the append. Same pairs, same order, same dedupe.
+    for mine_t, theirs_t in ((into.targets, extra.targets), (into.touched, extra.touched)):
+        for target in theirs_t:
+            if target not in mine_t:
+                mine_t.append(target)
+    for mine_s, theirs_s in (
         (into.blind, extra.blind),
         (into.opaque_reasons, extra.opaque_reasons),
     ):
-        for item in theirs:
-            if item not in mine:
-                mine.append(item)
+        for reason in theirs_s:
+            if reason not in mine_s:
+                mine_s.append(reason)

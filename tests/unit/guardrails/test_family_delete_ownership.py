@@ -111,6 +111,13 @@ def _set_running(monkeypatch: pytest.MonkeyPatch, running: dict[str, str]) -> No
     monkeypatch.setattr(registry, "scan", lambda *a, **k: list(records))
 
 
+def _path_key(path: str | None) -> str:
+    # ``Target.path`` is Optional, so a bare ``sorted()`` does not type-check.
+    # Sort by key rather than filtering: a ``None`` stays in the list and still
+    # fails the equality against the all-``str`` expectation, as before.
+    return path or ""
+
+
 def _env(home: Path) -> dict[str, str]:
     return {"HOME": str(home), "LOCAL_OPERATOR_CONFIG_DIR": str(home / ".local-operator")}
 
@@ -250,7 +257,7 @@ FIELD_REMOVE = (
 
 def test_field_loop_creation_lists_every_repository(home: Path, infra: Path) -> None:
     created = resolve_command(FIELD_CREATE, cwd=str(home), env=_env(home), home=str(home)).created
-    assert sorted(c.path for c in created) == sorted(
+    assert sorted((c.path for c in created), key=_path_key) == sorted(
         str(infra / r / ".worktrees" / "tfc-acm-sbx-auth") for r in REPOS
     )
 
@@ -325,12 +332,14 @@ def test_absolute_loop_cwds_fan_without_a_subshell(home: Path, infra: Path) -> N
         f"for r in {infra}/services {infra}/terraform-cloud-bootstrap; do cd $r; mkdir m; done"
     )
     created = resolve_command(command, cwd=str(home), env=_env(home), home=str(home)).created
-    assert sorted(c.path for c in created) == sorted(str(infra / r / "m") for r in REPOS)
+    assert sorted((c.path for c in created), key=_path_key) == sorted(
+        str(infra / r / "m") for r in REPOS
+    )
 
 
 def test_field_removal_loop_resolves_both_literal_paths(home: Path, infra: Path) -> None:
     targets = resolve_command(FIELD_REMOVE, cwd=str(home), env=_env(home), home=str(home)).targets
-    assert sorted(t.path for t in targets if t.op == "delete") == sorted(
+    assert sorted((t.path for t in targets if t.op == "delete"), key=_path_key) == sorted(
         str(infra / r / ".worktrees" / "tfc-acm-sbx-auth") for r in REPOS
     )
 
@@ -661,7 +670,7 @@ def test_inner_loop_cd_over_ordinary_dirs_moves_the_fan(home: Path) -> None:
     walked = resolve_module._walk_once(
         command, cwd=str(home), env=_env(home), home=str(home), model=resolve_module._CwdModel()
     )
-    paths = sorted(t.path for t in walked.resolution.targets)
+    paths = sorted((t.path for t in walked.resolution.targets), key=_path_key)
     assert paths == [str(home / "a" / "build"), str(home / "b" / "build")]
     targets = resolve_command(command, cwd=str(home), env=_env(home), home=str(home)).targets
     assert {str(home / "a" / "build"), str(home / "b" / "build")} <= {t.path for t in targets}
