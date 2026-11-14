@@ -298,9 +298,9 @@ def test_a_shared_secret_copies_re_sealed_and_marked(secret_mesh: Any) -> None:
     mesh = secret_mesh
     code = sync.credentials_sync_step(mesh.a, mesh.member)
     assert code in ("scheduled", "in_sync"), code
-    assert net_fixtures.wait_for(
-        lambda: _member_has(mesh.b.root, SECRET_NAME)
-    ), _sync_snapshot(mesh, code)
+    assert net_fixtures.wait_for(lambda: _member_has(mesh.b.root, SECRET_NAME)), _sync_snapshot(
+        mesh, code
+    )
 
     member_store = _secret_store(mesh.b.root)
     record, value = member_store.read_for_copy(SECRET_NAME)
