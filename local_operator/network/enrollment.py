@@ -324,6 +324,10 @@ def ready_evidence(report: Any, *, device_id: str, network_id: str) -> list[dict
         # a peer row the verify step must accept and report as a warning.
         "serve_daemon",
         "selected_model_credential",
+        # Non-gating equipment (readiness.CAPABILITY_SKILLS, PR #3839): the
+        # mesh skill sync appends one per peer to every ready report, so verify
+        # must know it or every enrollment from that build ends ``failed``.
+        "skills",
     }
     required: set[str] = set()
     warnings: list[dict[str, str]] = []
@@ -421,6 +425,9 @@ def public_report(data: Mapping[str, Any]) -> dict[str, Any]:
                 "peer_restart",
                 "serve_daemon",
                 "selected_model_credential",
+                # Mirrors ready_evidence's allowlist: a not-yet-synced skills
+                # row is a warning the terminal receipt must carry, not refuse.
+                "skills",
             }
             and row.get("code", "") in codes
         )

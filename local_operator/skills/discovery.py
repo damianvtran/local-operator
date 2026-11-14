@@ -41,7 +41,7 @@ from __future__ import annotations
 
 import os
 import stat as stat_module
-from collections.abc import Iterator, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from contextlib import nullcontext
 from functools import cache
 from pathlib import Path, PureWindowsPath
@@ -122,6 +122,20 @@ def parse_frontmatter(text: str) -> dict[str, object]:
     return data if isinstance(data, dict) else {}
 
 
+def skill_name_from_meta(meta: Mapping[str, object], base_dir: Path) -> str:
+    """The name a skill registers under: its frontmatter ``name``, else its folder.
+
+    Public because the mesh skill sync (``network/skillsync.py``) must key a
+    receiver's own skills EXACTLY as discovery does, or a peer copy installed
+    beside one shadows it unasked (PR #3839 review round 3, M1: a ``name``-less
+    own skill was invisible to a frontmatter-only check). One rule, one place.
+    """
+    name = meta.get("name")
+    if not isinstance(name, str) or not name.strip():
+        return base_dir.name
+    return name.strip()
+
+
 def _skill_from_file(skill_md: Path, base_dir: Path, source: str) -> Skill | None:
     """Build one Skill from a SKILL.md, or None when it must be skipped.
 
@@ -150,11 +164,7 @@ def _skill_from_file(skill_md: Path, base_dir: Path, source: str) -> Skill | Non
     if not isinstance(description, str) or not description.strip():
         return None
 
-    name = meta.get("name")
-    if not isinstance(name, str) or not name.strip():
-        name = base_dir.name
-    else:
-        name = name.strip()
+    name = skill_name_from_meta(meta, base_dir)
 
     hide = bool(meta.get("hide")) or bool(meta.get("disable-model-invocation"))
     return Skill(
