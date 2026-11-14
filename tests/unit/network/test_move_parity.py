@@ -41,6 +41,19 @@ class TestMonitorCwds:
         mapped = carry.translate_host_path("/Users/nobody-here/local-operator/sub", home=str(home))
         assert mapped == str(home / "local-operator" / "sub")
 
+    def test_a_missing_path_under_this_home_is_left_alone(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Review r1 m2: a non-moved session's removed worktree keeps failing loudly
+        instead of silently re-arming at the session cwd."""
+        home = tmp_path / "home" / "damian"
+        (home / "local-operator").mkdir(parents=True)
+        monkeypatch.setenv("HOME", str(home))
+        gone = str(home / "local-operator" / ".worktrees" / "gone-xyz")
+        rows, counts = carry.translate_monitor_cwds([{"cwd": gone}], session_cwd=str(tmp_path))
+        assert rows == [{"cwd": gone}]
+        assert counts == {"translated": 0, "fallback": 0}
+
     def test_rows_are_translated_or_fall_back_and_counted(self, tmp_path: Path) -> None:
         home = tmp_path / "h"
         home.mkdir()
@@ -127,6 +140,92 @@ class TestProjectCarry:
         assert carry.linked_project_rows(tmp_path, SID) == []
         assert carry.adopt_projects(tmp_path, SID, []) == {}
 
+    def test_the_receiver_bounds_an_oversized_history(self, tmp_path: Path) -> None:
+        """Review r1 M1, the reproduced 14 MB row: 700 × 20 KB entries from a peer."""
+        from local_operator.projects import PROGRESS_MAX
+
+        row = {
+            "id": "a" * 32,
+            "name": "p1",
+            "updates": [
+                {
+                    "at": f"2026-11-13T00:{i // 60:02d}:{i % 60:02d}Z",
+                    "text": "x" * 20_000,
+                }
+                for i in range(700)
+            ],
+        }
+        block = carry.adopt_projects(tmp_path, SID, [row])
+
+        assert block["created"] == ["p1"] and block["truncated"] == ["p1"]
+        assert f"newest {carry.CARRIED_UPDATES_MAX} entries" in block["limits"]
+        stored = ProjectRegistry(tmp_path).get_project_by_name("p1")
+        assert stored is not None
+        assert len(stored.updates) == carry.CARRIED_UPDATES_MAX
+        assert {len(entry.text) for entry in stored.updates} == {PROGRESS_MAX}
+        # The NEWEST entries were kept.
+        assert stored.updates[-1].at.startswith("2026-11-13T00:11:39")
+        size = sum(p.stat().st_size for p in (tmp_path / "projects").rglob("*.json"))
+        assert size < carry.CARRIED_PROJECT_BYTES_MAX
+
+    def test_a_row_over_the_byte_cap_is_refused_and_said(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(carry, "CARRIED_PROJECT_BYTES_MAX", 2_000)
+        rows = [
+            {
+                "id": "b" * 32,
+                "name": "big",
+                "updates": [{"at": "2026-11-13T00:00:00Z", "text": "y" * 900}] * 3,
+            },
+            {"id": "c" * 32, "name": "small", "updates": []},
+        ]
+        block = carry.adopt_projects(tmp_path, SID, rows)
+        assert block["refused"] == ["big"] and block["created"] == ["small"]
+        assert "big not adopted" in block["limits"]
+        assert ProjectRegistry(tmp_path).get_project_by_name("big") is None
+
+    def test_rows_past_the_count_cap_are_counted_on_the_receipt(self, tmp_path: Path) -> None:
+        rows = [{"id": f"{i:032x}", "name": f"p{i}", "updates": []} for i in range(10)]
+        block = carry.adopt_projects(tmp_path, SID, rows)
+        assert len(block["created"]) == carry.CARRIED_PROJECTS_MAX
+        assert "2 more linked projects not carried" in block["limits"]
+
+    def test_a_merge_keeps_the_history_cap(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The merge path applies the append's text-only UPDATES_MAX trim."""
+        from local_operator import projects
+
+        _make_project(tmp_path, "p1", sessions=[], progress="dest-old")
+        monkeypatch.setattr(projects, "UPDATES_MAX", 3)
+        row = {
+            "id": "d" * 32,
+            "name": "p1",
+            # Dated in the future so the carried entries sort AFTER today's "dest-old".
+            "updates": [{"at": f"2999-01-01T00:00:0{i}Z", "text": f"t{i}"} for i in range(5)],
+        }
+        assert carry.adopt_projects(tmp_path, SID, [row])["merged"] == ["p1"]
+        stored = ProjectRegistry(tmp_path).get_project_by_name("p1")
+        assert stored is not None and [e.text for e in stored.updates] == [
+            "t2",
+            "t3",
+            "t4",
+        ]
+        # The oldest (text-only) entry, dest-old, was the one trimmed.
+
+    def test_a_full_project_is_named_unlinked_not_merged(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Review r1 N2: no silent "merged" when the session could not be linked."""
+        from local_operator import projects
+
+        _make_project(tmp_path, "p1", sessions=["aaaaaaaaaaaa"], progress="dest-old")
+        monkeypatch.setattr(projects, "SESSIONS_MAX", 1)
+        block = carry.adopt_projects(tmp_path, SID, [{"id": "e" * 32, "name": "p1", "updates": []}])
+        assert block["unlinked"] == ["p1"] and "merged" not in block
+        assert "could not be linked to p1" in block["limits"]
+
 
 # -- (c) team brief ----------------------------------------------------------
 
@@ -154,7 +253,39 @@ class TestTeamResolution:
             teams.TeamRegistry, "get_team_by_name", lambda self, name, **kw: object()
         )
         block = carry.attachment_resolution(tmp_path, self._session(tmp_path, "lopdev"))
-        assert block == {"name": "lopdev", "resolved": True}
+        assert block == {"name": "lopdev", "resolved": True, "applied": True}
+
+    def test_an_incomplete_registry_reports_not_applied(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Review r1 m4: the restore attaches nothing while the profile registry is
+        incomplete, so a resolving name must not read as an applied brief."""
+        from local_operator import agents, teams
+        from local_operator.session.errors import ProfileRegistryUnavailable
+
+        monkeypatch.setattr(
+            teams.TeamRegistry, "get_team_by_name", lambda self, name, **kw: object()
+        )
+
+        def incomplete(self: Any) -> None:
+            raise ProfileRegistryUnavailable("agent rows were skipped as corrupt")
+
+        monkeypatch.setattr(agents.AgentRegistry, "require_complete_metadata", incomplete)
+        block = carry.attachment_resolution(tmp_path, self._session(tmp_path, "lopdev"))
+        assert block["resolved"] is True and block["applied"] is False
+        assert "skipped as corrupt" in block["notice"]
+
+    def test_a_stored_agent_beside_a_team_is_not_named_missing(self, tmp_path: Path) -> None:
+        """Review r1 N1: a team owns the agent slot, so the stored agent is superseded."""
+        directory = tmp_path / "sessions" / SID
+        directory.mkdir(parents=True)
+        (directory / "attachment.json").write_text(
+            json.dumps({"team": "lopdev", "agent": "ghost", "goal": ""}),
+            encoding="utf-8",
+        )
+        block = carry.attachment_resolution(tmp_path, directory)
+        assert "agent" not in block and "ghost" not in block["notice"]
+        assert "team 'lopdev'" in block["notice"]
 
     def test_no_attachment_reports_nothing(self, tmp_path: Path) -> None:
         assert carry.attachment_resolution(tmp_path, tmp_path) == {}
@@ -341,3 +472,98 @@ class TestRebuiltIndexTranslatesMonitorCwds:
         assert report["monitor_cwds"] == {"translated": 1, "fallback": 1}
         index = monitor_store.read_entry(tmp_path, SID) or {}
         assert [row["cwd"] for row in index["monitors"]] == [str(home), str(home)]
+
+
+class TestMovedSessionReappliesItsTeamBrief:
+    """(c) root cause, from the moved session on lop-remote-node-2 (ce6fcb93c28a).
+
+    ``attachment.json`` travelled (``{team: "lopdev"}``) and the node listed
+    ``lopdev`` as a MIRRORED team, yet the conversation's prompt had no brief: the
+    restore runs only at construction, and a moved (answered) conversation never
+    re-adopts. A runtime that opened before the mirror resolved must pick the brief
+    up on its next turn.
+    """
+
+    @pytest.mark.asyncio
+    async def test_a_mirrored_team_that_lands_after_the_runtime_briefs_the_next_turn(
+        self, tmp_path: Path
+    ) -> None:
+        from datetime import datetime, timezone
+
+        from local_operator.agents import AgentRegistry
+        from local_operator.harness.types import StreamEndEvent, StreamTextDelta
+        from local_operator.network import definitions
+        from local_operator.prompts_api import build_system_blocks
+        from local_operator.resume import write_session_attachment
+        from local_operator.session.goal import GoalState
+        from local_operator.session.session import Session
+        from local_operator.session.transcript import Transcript
+        from local_operator.teams import Team, TeamRegistry
+        from tests.unit.session.test_session import MODEL, ScriptedStream
+
+        source, dest = tmp_path / "src", tmp_path / "dst"
+        session_dir = dest / "sessions" / SID
+        session_dir.mkdir(parents=True)
+        write_session_attachment(session_dir, team="lopdev", agent="", goal="")
+
+        goal_state = GoalState()
+
+        def provider() -> list[str]:
+            return build_system_blocks(
+                [],
+                "<skills/>",
+                "test environment",
+                "2026-11-13",
+                team_brief=goal_state.team_brief,
+                agent_brief=goal_state.agent_brief,
+            )
+
+        setattr(provider, "append_only_state", True)
+        reply = [StreamTextDelta(delta="ok"), StreamEndEvent(stop_reason="stop")]
+        stream = ScriptedStream([reply, reply])
+        teams = TeamRegistry(dest)
+        session = Session(
+            model=MODEL,
+            stream_fn=stream,
+            tools=[],
+            transcript=Transcript(session_dir),
+            system_blocks_provider=provider,
+            goal_state=goal_state,
+            agent_registry=AgentRegistry(dest),
+            team_registry=teams,
+        )
+        try:
+            # The runtime opened before the team resolved here: recorded as a miss.
+            assert session.active_team is None
+            assert session._unresolved_team == "lopdev"
+            await session.prompt("answered before the definitions landed")
+            assert "[team: lopdev]" not in "\n".join(stream.requests[0].system_blocks)
+
+            # The definitions push lands: lopdev is installed as a MIRROR of the
+            # source's row (provenance index names the origin device).
+            TeamRegistry(source).save_team(
+                Team(
+                    id="t-lopdev",
+                    name="lopdev",
+                    created_date=datetime.now(timezone.utc),
+                    manager="manager",
+                    instructions="Ship reviewed work.",
+                    project="local-operator",
+                )
+            )
+            applied = definitions.apply_bundle(
+                dest, definitions.local_bundle(source), origin_device="dev-source"
+            )
+            assert "lopdev" in json.dumps(applied)
+            assert "lopdev" in json.dumps(definitions.read_index(dest).get("teams") or {})
+
+            await session.prompt("the next turn after the move")
+            assert session.active_team_name == "lopdev"
+            assert session._unresolved_team == ""
+            # The prefix froze on the first turn, so the brief rides that request's
+            # authoritative state delta (``[session-state]``) — what the model reads.
+            sent = stream.requests[1].model_dump_json()
+            assert "[team: lopdev]" in sent
+            assert "[team: lopdev]" not in stream.requests[0].model_dump_json()
+        finally:
+            await session.dispose()

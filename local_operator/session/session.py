@@ -4379,6 +4379,10 @@ class Session:
         #: :meth:`_persist_attachment`.
         self._unresolved_team: str = ""
         self._unresolved_agent: str = ""
+        #: Monotonic time of the last re-resolve attempt for those names (see
+        #: :meth:`_reresolve_unresolved_attachment`); ``None`` until the first.
+        self._attachment_reresolved_at: float | None = None
+        self._attachment_reresolve_fingerprint: tuple[int, ...] = ()
         # The conversation's title. A holder rather than a plain string for
         # the same reason the goal is one: the title arrives on a DETACHED
         # naming task after the host already built its status chrome, and
@@ -7179,6 +7183,12 @@ class Session:
         # conversation has an assistant reply — see
         # :meth:`_adopt_stored_attachment`.
         self._adopt_stored_attachment()
+        # A stored team/agent this runtime could NOT resolve when it opened (a
+        # moved session whose definitions landed after its runtime, or a mirror
+        # the cached registry snapshot predates) is retried here, so the brief
+        # joins the next prompt instead of waiting for a reopen. See
+        # :meth:`_reresolve_unresolved_attachment`.
+        self._reresolve_unresolved_attachment()
         desired = self._system_blocks(model)
         if inspect.isawaitable(desired):
             desired = await desired
@@ -9060,6 +9070,100 @@ class Session:
         if self._transcript_has_assistant_message():
             return
         self._restore_attachment()
+
+    #: Minimum seconds between two re-resolve attempts of an unresolved stored
+    #: attachment when the registries expose no root to fingerprint.
+    #: ``_prepare_system_blocks`` runs at every provider step, and a team that is
+    #: genuinely gone would otherwise force a registry rescan per step.
+    _ATTACHMENT_RERESOLVE_INTERVAL_S = 15.0
+
+    def _reresolve_unresolved_attachment(self) -> dict[str, bool] | None:
+        """Re-apply a stored team/agent brief this LIVE runtime failed to resolve.
+
+        WHY (2026-11-13, PR #3937 round 1, session ce6fcb93c28a on
+        lop-remote-node-2): a session moved with ``attachment.json`` =
+        ``{team: "lopdev"}``, and the node listed ``lopdev`` as a mirrored team,
+        yet the moved conversation's system prompt had no ``[team: lopdev]``
+        brief. The brief is applied only by :meth:`_restore_attachment`, which
+        runs at construction (and, via :meth:`_adopt_stored_attachment`, once
+        more before an UNANSWERED conversation's first turn). A moved session is
+        answered by definition, so when its runtime opened before the team
+        resolved here — the definitions push landing after the runtime, or a
+        registry snapshot (5 s cache) taken before the mirror was installed —
+        the miss was recorded in ``_unresolved_team`` and nothing ever retried it.
+
+        The trigger is that recorded miss and nothing else: the name is still
+        this session's intended attachment (a ``/team`` or ``/agent`` mutation
+        clears it — see :meth:`_persist_attachment`), so re-applying it can never
+        resurrect something the user detached, which is the reason the late
+        adoption refuses answered conversations. Registries are force-refreshed
+        first (the cached snapshot is the stale-mirror case), then the ordinary
+        restore runs through the same resolvers ``/team`` uses, mirrored rows
+        included. A failed attempt is retried only once a registry root's mtime
+        moves (or, unfingerprintable, after :data:`_ATTACHMENT_RERESOLVE_INTERVAL_S`).
+
+        Returns ``{"resolved": bool, "applied": bool}`` when an attempt ran, else
+        ``None``. Never raises: a turn must not fail over a brief.
+        """
+        pending_team = self._unresolved_team and self.active_team is None
+        pending_agent = self._unresolved_agent and not self._goal_state.agent_name
+        if not (pending_team or pending_agent):
+            return None
+        # Retry only when something could have changed: a definitions install
+        # creates a row directory, which moves its registry root's mtime. Where a
+        # (scoped) registry does not expose its root, fall back to a time throttle.
+        fingerprint: list[int] = []
+        for registry, attr in (
+            (self.team_registry, "teams_dir"),
+            (self.agent_registry, "agents_dir"),
+        ):
+            root = getattr(registry, attr, None)
+            if root is None:
+                fingerprint = []
+                break
+            try:
+                fingerprint.append(os.stat(root).st_mtime_ns)
+            except OSError:
+                fingerprint.append(0)
+        now = time.monotonic()
+        last = self._attachment_reresolved_at
+        if last is not None:
+            if fingerprint and tuple(fingerprint) == self._attachment_reresolve_fingerprint:
+                return None
+            if not fingerprint and now - last < self._ATTACHMENT_RERESOLVE_INTERVAL_S:
+                return None
+        self._attachment_reresolved_at = now
+        self._attachment_reresolve_fingerprint = tuple(fingerprint)
+        for registry in (self.team_registry, self.agent_registry):
+            refresh = getattr(registry, "refresh", None)
+            if callable(refresh):
+                try:
+                    refresh()
+                except Exception:  # noqa: BLE001 — the restore reports a bad registry
+                    logger.debug("attachment re-resolve: refresh failed", exc_info=True)
+        wanted_team = self._unresolved_team
+        try:
+            self._restore_attachment()
+        except Exception:  # noqa: BLE001 — see the docstring
+            logger.debug("attachment re-resolve failed", exc_info=True)
+        applied = bool(
+            (wanted_team and self.active_team is not None)
+            or (not wanted_team and self._goal_state.agent_name)
+        )
+        if applied:
+            # The restore records misses but never clears them (that is a user
+            # action's job); this miss is now resolved, so the band and the next
+            # journal write must stop carrying it as pending.
+            # Both slots: an applied team owns the agent slot (a stored agent
+            # beside it is superseded, issue #2014), and an applied agent is the one.
+            self._unresolved_team = ""
+            self._unresolved_agent = ""
+            self.attachment_restore_notice = ""
+            logger.info(
+                "attachment re-resolve: applied %s",
+                f"team {wanted_team!r}" if wanted_team else "agent",
+            )
+        return {"resolved": applied, "applied": applied}
 
     def _transcript_has_assistant_message(self) -> bool:
         """Whether the DURABLE conversation has produced any assistant reply.

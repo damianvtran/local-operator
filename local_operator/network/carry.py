@@ -243,6 +243,12 @@ def translate_host_path(recorded: str, *, home: str = "") -> str:
     return ""
 
 
+def _under(path: str, root: str) -> bool:
+    """Whether ``path`` is ``root`` or below it (string-wise; ``path`` may not exist)."""
+    path = os.path.normpath(path)
+    return path == root or path.startswith(root.rstrip("/") + "/")
+
+
 def translate_monitor_cwds(
     specs: Sequence[Mapping[str, Any]], *, session_cwd: str, home: str = ""
 ) -> tuple[list[dict[str, Any]], dict[str, int]]:
@@ -259,13 +265,30 @@ def translate_monitor_cwds(
     receipt can say so rather than leaving a monitor that fails every tick.
     Returns ``(rows, {"translated": n, "fallback": n})``; rows whose cwd already
     fits are returned unchanged, so a second pass is a no-op.
+
+    LOCAL PATHS ARE NEVER TRANSLATED (review r1 m2). The session-load seat runs
+    this for EVERY session, moved or not, so a cwd under THIS host's own home is
+    this host's path: a missing one (a removed worktree) is a real local failure
+    that must keep failing loudly, not silently re-arm somewhere else. Only a cwd
+    outside this home — another device's ``/Users/<u>`` or ``/home/<u>`` — is
+    foreign and mapped.
     """
     rows: list[dict[str, Any]] = []
     counts = {"translated": 0, "fallback": 0}
+    raw_home = home or os.path.expanduser("~")
+    # Both spellings: a symlinked home (macOS ``/var`` → ``/private/var``) must not
+    # make this host's own path read as foreign.
+    local_homes = {os.path.normpath(raw_home), os.path.realpath(raw_home)}
     for raw in specs:
         row = dict(raw)
         cwd = row.get("cwd")
-        if isinstance(cwd, str) and cwd and os.path.isabs(cwd) and not os.path.exists(cwd):
+        if (
+            isinstance(cwd, str)
+            and cwd
+            and os.path.isabs(cwd)
+            and not os.path.exists(cwd)
+            and not any(_under(cwd, local) for local in local_homes)
+        ):
             mapped = translate_host_path(cwd, home=home)
             if mapped:
                 counts["translated"] += 1
@@ -706,6 +729,11 @@ def monitor_count(config_dir: Path, session_id: str) -> int:
 #: so the newest entries are carried and the count is stated in the receipt.
 CARRIED_PROJECTS_MAX = 8
 CARRIED_UPDATES_MAX = 100
+#: Receiver-side byte caps (review r1 M1). After the entry trims above, an honest
+#: row is ~100 KB at most (100 × 1000-character entries plus bounded fields), so
+#: 256 KB a row and 1 MB a carry refuse only rows no current sender produces.
+CARRIED_PROJECT_BYTES_MAX = 256 * 1024
+CARRIED_TOTAL_BYTES_MAX = 1024 * 1024
 
 
 def linked_project_rows(config_dir: Path, session_id: str) -> list[dict[str, Any]]:
@@ -744,33 +772,110 @@ def adopt_projects(config_dir: Path, session_id: str, rows: Any) -> dict[str, An
     """The DESTINATION half: merge carried rows into this device's project store.
 
     Returns the receipt block ``{"created": [names], "merged": [names],
-    "failed": [names], "attachments": "not carried"}`` (keys present only when
-    non-empty), or ``{}`` when nothing was carried. A row that cannot merge (for
-    example one written by a newer build) is named under ``failed`` rather than
-    failing the promote of a verified copy.
+    "unlinked": [names], "failed": [names], "refused": [names], "truncated":
+    [names], "attachments": "not carried", "limits": "<sentence>"}`` (keys present
+    only when non-empty), or ``{}`` when nothing was carried. A row that cannot
+    merge (for example one written by a newer build) is named under ``failed``
+    rather than failing the promote of a verified copy.
+
+    RECEIVER-SIDE CAPS (review r1 M1, reproduced: one carried row of 700 × 20 KB
+    entries stored as a 14 MB project). The rows arrive from a peer, so the
+    sender's bounds in :func:`linked_project_rows` are re-applied HERE rather than
+    trusted: at most :data:`CARRIED_PROJECTS_MAX` rows, the newest
+    :data:`CARRIED_UPDATES_MAX` history entries per row with each text cut to
+    ``projects.PROGRESS_MAX`` (named under ``truncated``), and a row still larger
+    than :data:`CARRIED_PROJECT_BYTES_MAX` — or one that would take the carry past
+    :data:`CARRIED_TOTAL_BYTES_MAX` — is not adopted at all (named under
+    ``refused``). Anything trimmed or refused is stated in ``limits`` so the
+    receipt never implies the whole history arrived.
     """
     if not isinstance(rows, list) or not rows:
         return {}
-    from local_operator.projects import ProjectRegistry
+    from local_operator.projects import PROGRESS_MAX, ProjectRegistry
 
     registry = ProjectRegistry(Path(config_dir))
-    report: dict[str, list[str]] = {"created": [], "merged": [], "failed": []}
+    report: dict[str, list[str]] = {
+        "created": [],
+        "merged": [],
+        "unlinked": [],
+        "failed": [],
+        "refused": [],
+        "truncated": [],
+    }
     attachments_dropped = False
-    for row in rows[:CARRIED_PROJECTS_MAX]:
-        if not isinstance(row, Mapping):
+    candidates = [row for row in rows if isinstance(row, Mapping)]
+    over_count = max(0, len(candidates) - CARRIED_PROJECTS_MAX)
+    total_bytes = 0
+    for raw in candidates[:CARRIED_PROJECTS_MAX]:
+        name = str(raw.get("name") or "")
+        attachments_dropped = attachments_dropped or bool(raw.get("attachments_not_carried"))
+        entries = [entry for entry in (raw.get("updates") or []) if isinstance(entry, Mapping)]
+        kept = entries[-CARRIED_UPDATES_MAX:]
+        trimmed = len(entries) != len(kept)
+        bounded: list[dict[str, Any]] = []
+        for entry in kept:
+            text = str(entry.get("text") or "")
+            if len(text) > PROGRESS_MAX:
+                trimmed = True
+                text = text[:PROGRESS_MAX]
+            bounded.append({**dict(entry), "text": text})
+        row = {**dict(raw), "updates": bounded}
+        try:
+            size = len(json.dumps(row, default=str).encode("utf-8"))
+        except (TypeError, ValueError):
+            report["failed"].append(name)
             continue
-        name = str(row.get("name") or "")
-        attachments_dropped = attachments_dropped or bool(row.get("attachments_not_carried"))
+        if size > CARRIED_PROJECT_BYTES_MAX or total_bytes + size > CARRIED_TOTAL_BYTES_MAX:
+            logger.warning(
+                "carry: refused project %r for %s (%d bytes after trimming)",
+                name,
+                session_id,
+                size,
+            )
+            report["refused"].append(name)
+            continue
+        total_bytes += size
+        if trimmed:
+            report["truncated"].append(name)
         try:
             _project, action = registry.adopt_carried(row, session_id)
         except Exception:  # noqa: BLE001 — named in the receipt, never a failed promote
             logger.warning("carry: could not adopt project %r for %s", name, exc_info=True)
             report["failed"].append(name)
             continue
-        report["created" if action == "created" else "merged"].append(name)
+        if action == "created":
+            report["created"].append(name)
+        elif action == "unlinked":
+            report["unlinked"].append(name)
+        else:
+            report["merged"].append(name)
     block: dict[str, Any] = {key: value for key, value in report.items() if value}
     if block and attachments_dropped:
         block["attachments"] = "not carried"
+    limits: list[str] = []
+    if report["truncated"]:
+        limits.append(
+            f"history kept to the newest {CARRIED_UPDATES_MAX} entries of up to "
+            f"{PROGRESS_MAX} characters for {', '.join(report['truncated'])}"
+        )
+    if report["refused"]:
+        limits.append(
+            f"{', '.join(report['refused'])} not adopted: larger than this device "
+            f"accepts ({CARRIED_PROJECT_BYTES_MAX // 1024} KB a project, "
+            f"{CARRIED_TOTAL_BYTES_MAX // 1024} KB in total)"
+        )
+    if over_count:
+        limits.append(
+            f"{over_count} more linked project{'s' if over_count != 1 else ''} not carried "
+            f"(at most {CARRIED_PROJECTS_MAX})"
+        )
+    if report["unlinked"]:
+        limits.append(
+            f"this session could not be linked to {', '.join(report['unlinked'])}: "
+            "it already holds the most linked sessions a project may"
+        )
+    if limits:
+        block["limits"] = "; ".join(limits)
     return block
 
 
@@ -810,7 +915,10 @@ def attachment_resolution(config_dir: Path, session_dir: Path) -> dict[str, Any]
         block["resolved"] = resolved
         if not resolved:
             missing.append(f"team {stored.team!r}")
-    if stored.agent:
+    else:
+        # Review r1 N1: only when NO team is stored. A stored team owns the agent
+        # slot, so ``Session._apply_stored_attachment`` treats a stored agent beside
+        # it as superseded, never missing — naming it here would blame the wrong cause.
         try:
             from local_operator.agent_profiles import resolve_profile_or_specialist
             from local_operator.agents import AgentRegistry
@@ -818,18 +926,44 @@ def attachment_resolution(config_dir: Path, session_dir: Path) -> dict[str, Any]
             kind = resolve_profile_or_specialist(
                 stored.agent, registry=AgentRegistry(Path(config_dir))
             )[0]
-            agent_resolved = kind is not None
+            resolved = kind is not None
         except Exception:  # noqa: BLE001 — unreadable registry reads as unresolved
             logger.warning("carry: could not resolve agent %r", stored.agent, exc_info=True)
-            agent_resolved = False
+            resolved = False
         block["agent"] = stored.agent
-        block["agent_resolved"] = agent_resolved
-        if not agent_resolved:
+        block["agent_resolved"] = resolved
+        if not resolved:
             missing.append(f"agent {stored.agent!r}")
-    if missing:
+    # Review r1 m4: the session's restore refuses to attach anything while the
+    # profile registry is incomplete (``require_complete_metadata`` raising
+    # ``ProfileRegistryUnavailable``), even for a name that resolves. Mirror that
+    # gate, so ``applied`` is the answer the runtime's restore will actually reach.
+    gate_error = ""
+    try:
+        from local_operator.agents import AgentRegistry
+        from local_operator.session.errors import ProfileRegistryUnavailable
+
+        try:
+            AgentRegistry(Path(config_dir)).require_complete_metadata()
+        except ProfileRegistryUnavailable as error:
+            gate_error = str(error) or "the agent registry is incomplete"
+    except Exception:  # noqa: BLE001 — a gate this cannot run is not a refusal
+        logger.debug("carry: could not run the registry metadata gate", exc_info=True)
+    # ``applied``: whether the brief is in the conversation's prompt when it opens
+    # here. The runtime starts AFTER this promote (the engage does not cross the
+    # done frame), so this is the restore's own decision computed against the same
+    # registries; a runtime that opened unresolved re-resolves before each turn
+    # (``Session._reresolve_unresolved_attachment``), so a definition that arrives
+    # later is picked up without a reopen.
+    block["applied"] = bool(resolved) and not gate_error
+    if gate_error:
         block["notice"] = (
-            f"{' and '.join(missing)} {'is' if len(missing) == 1 else 'are'} not defined on "
-            "this device, so the conversation opens without that brief; send it with "
-            "`lop network definitions push` from the device that has it, then reopen"
+            f"the {'team' if stored.team else 'agent'} brief is not applied yet: {gate_error}"
+        )
+    elif missing:
+        block["notice"] = (
+            f"{missing[0]} is not defined on this device, so the conversation opens "
+            "without that brief; send it with `lop network definitions push` from the "
+            "device that has it — the conversation picks it up on its next turn"
         )
     return block
