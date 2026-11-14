@@ -13,8 +13,8 @@ Read guide://delivery. Round 1: the full in-scope QA matrix; early BLOCKER
 alerts are incomplete. Round 2+: re-test only prior FAIL/BLOCKED rows and
 potential diff impacts (map each file -> surface); others stay `retained
 (<sha>)`, never re-run. MECHANICAL `### Rebase proof` or deltas touching no
-QA'd surface keep freshness. Real BLOCKER/MAJOR still block; MINOR/NIT never
-force another round.
+QA'd surface keep freshness. Real BLOCKER/MAJOR still block; 
+MINOR/NIT never force another round.
 
 Before costly native/browser/hardware dispatch, preflight ONE written matrix
 per guide://delivery: surfaces, dependencies, commands, compiled source
