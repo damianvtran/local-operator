@@ -383,6 +383,28 @@ async def test_the_health_payload_says_reconnecting_while_the_run_holds_the_lock
     assert json.dumps(during)
 
 
+def test_the_journal_liveness_probe_never_signals_on_windows(monkeypatch):
+    # `os.kill(pid, 0)` is TerminateProcess on Windows: a liveness probe that
+    # calls it kills the setup run it asks about (xplat `static.posix_attributes`
+    # fatal on #3945). The journal must ask through `procstate`, whose win32
+    # branch uses OpenProcess, so with Windows simulated `os.kill` is never hit.
+    from local_operator import procstate
+    from local_operator.tunnels import autosetup
+
+    def _no_kill(*_args: object) -> None:
+        raise AssertionError("os.kill must not be the liveness probe on Windows")
+
+    monkeypatch.setattr(procstate, "is_windows", lambda: True)
+    monkeypatch.setattr(procstate, "_windows_liveness", lambda pid: pid == 4242)
+    monkeypatch.setattr(os, "kill", _no_kill)
+    assert autosetup._pid_alive(4242) is True
+    assert autosetup._pid_alive(4243) is False
+    # Malformed journal pids are still "not live" without asking anyone.
+    assert autosetup._pid_alive(None) is False
+    assert autosetup._pid_alive(True) is False
+    assert autosetup._pid_alive(0) is False
+
+
 # --- #3945 round-1 remediation ------------------------------------------------
 
 
