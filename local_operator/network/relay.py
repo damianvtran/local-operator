@@ -536,6 +536,10 @@ SLICE_LOCAL_OPS: frozenset[str] = frozenset(
         "credential_revoke",
         # The share push: ``credential share`` hands the new row to its holder now.
         "credential_share_push",
+        # The renewal claim and the owner's push after renewing a lent login
+        # (mesh-credential-renewal §B.3 R3). Local: the link lives in the relay.
+        "credential_claim",
+        "credential_lend_push",
         # The member-side repair pull (mesh-mcp-credentials.md §4): the CLI asks
         # THIS device's relay to pull one copy from its owner NOW. Local for the
         # same reason the rest of the family is: the pull needs a link, and the
@@ -14308,6 +14312,13 @@ class RelayServer:
         )
         for link in links:
             link.close("we-closed")
+        # LEAVING ENDS EVERY RENEWAL LEND IN IT (#3955 M1): no node of a network this
+        # device left can be asked again, so its own lent logins renew on their own.
+        from local_operator.network.credentials import owner as owner_mod
+
+        owner_mod._end_renewal_lends(  # noqa: SLF001
+            self, resolved.network_id, devices=None, cause="left"
+        )
         secrets_file = store.secrets_path(resolved.network_id, self.root)
         if secrets_file.exists():
             secrets_file.unlink()
@@ -15676,6 +15687,8 @@ def _owning_document(op: str) -> str:
         "credential_placement": "mesh-credentials.md",
         "credential_revoke": "mesh-credentials.md",
         "credential_share_push": "mesh-credentials.md",
+        "credential_claim": "mesh-credential-renewal.md",
+        "credential_lend_push": "mesh-credential-renewal.md",
     }
     return owners.get(op, "the design documents")
 

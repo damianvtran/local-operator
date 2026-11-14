@@ -236,6 +236,30 @@ GRANT_DEAD_AT_KEY = "grant_dead_at"
 #: not through a second hop that a future edit could forget to take.
 REFRESH_DELEGATE_KEY = "refresh_delegate"
 
+#: Payload key (epoch ms): this row's login is LENT for renewal to a node
+#: (``network/credentials/renewal.py``, state ``lent``) and the IdP refused the
+#: owner's own refresh token. That is NOT a dead grant while a write-back is still
+#: possible — the node may have renewed the family and be about to hand it back
+#: (design mesh-credential-renewal §B.4). So the tombstone is withheld, the row
+#: refuses to present again (``RefreshDelegatedError``), and the node's write-back
+#: clears it. Only a lent row ever carries it.
+AWAITING_WRITEBACK_KEY = "awaiting_writeback_at"
+
+#: How long :data:`AWAITING_WRITEBACK_KEY` may hold a lent login (ms). Equal to
+#: ``network/credentials/renewal.RETURN_CAP_S`` (a test pins the equality; this
+#: module cannot import the network package): past it the node has certainly
+#: dropped anything newer, so the refused token was the family's last and the row
+#: reads as signed out ("sign in again") instead of waiting for ever (#3955 M2).
+AWAITING_WRITEBACK_CAP_MS = 7 * 86_400_000
+
+#: Payload key: this row is a node's CUSTODY of a login another device lent it
+#: (``renewal.node_store``), named ``<owner device>:<credential key>``. It gives
+#: the row its OWN dedupe identity (:func:`_identity_key_for`), so a lent pair can
+#: never land on — and overwrite — the node's own sign-in to the same account
+#: (#3955 M4). The node's own login keeps its account identity; the two rows
+#: never meet.
+MESH_CUSTODY_IDENTITY_KEY = "mesh_custody_identity"
+
 #: Payload key: this login's family has MOVED — a delegated node reported that the
 #: family was refreshed somewhere this device cannot see (§3.5). A tombstone with
 #: the tombstone's semantics and its own NAME, so a surface can say "being refreshed
@@ -770,6 +794,18 @@ class RefreshDelegatedError(AuthStoreError):
         self.not_after = not_after
 
 
+class LendClaimPendingError(RefreshDelegatedError):
+    """The OWNER did not present a LENT login's refresh token yet (mesh-credential-
+    renewal §B.3 R3/R4): the node holding it is being asked, or has not answered.
+
+    A separate class so :meth:`AuthStore.get_api_key` can tell it from a refusal
+    that is about the login (#3955 Q2): "checking with <node>" is a question in
+    flight, not a broken credential, and the 60 s backoff a real refusal earns
+    would keep the login unusable long after the node answered. Nothing was
+    presented; the next request re-asks the fence, which is a row read.
+    """
+
+
 @dataclasses.dataclass
 class StoredCredential:
     """One row of ``auth_credentials`` with its parsed payload."""
@@ -1181,6 +1217,11 @@ def _identity_key_for(provider: str, credential: dict[str, Any]) -> str | None:
     """
     if credential.get("type") == "api_key" or credential.get("source") == "login":
         return None
+    custody = credential.get(MESH_CUSTODY_IDENTITY_KEY)
+    if isinstance(custody, str) and custody:
+        # A lent pair held for another device: never the node's own account row,
+        # whatever email/account fields the owner's payload carries (#3955 M4).
+        return f"mesh-custody:{custody}"
     if provider == "radient":
         binding = _radient_account_identity(credential)
         if binding is not None:
@@ -1555,6 +1596,8 @@ class AuthStore:
         #: ``None`` is every ordinary construction site, and it is what keeps this
         #: module's behaviour unchanged for a device that holds no delegation.
         self._refresh_fence: Callable[[int, dict[str, Any]], str | None] | None = None
+        #: The OWNER-side fence for a login lent for renewal (see :meth:`set_lend_fence`).
+        self._lend_fence: Any = None
         #: The outcome half of the same seam (see :meth:`set_refresh_fence`).
         self._refresh_watch: Any = None
         self._store_uid: str | None = None
@@ -2087,6 +2130,19 @@ class AuthStore:
         self._refresh_fence = fence
         self._refresh_watch = watch
 
+    def set_lend_fence(self, fence: Any) -> None:
+        """Install the owner's fence for LENT logins (mesh-credential-renewal §B.3 R3).
+
+        ``fence(credential_id, data)`` returns ``None`` to allow this OWNER's POST of
+        a lent login's refresh token, or a sentence to refuse it; ``fence.posted(
+        credential_id, data)`` (optional) runs after a successful POST so the new
+        pair reaches the renewing node. Consulted ONLY for a row whose
+        :data:`REFRESH_DELEGATE_KEY` record is in state ``lent``: every other row
+        is untouched. A lent row with NO fence installed is refused (fail closed) —
+        presenting it unasked could burn a family the node already rotated.
+        """
+        self._lend_fence = fence
+
     def set_fallback_resolver(
         self, provider: str, resolver: Callable[[str], str | None] | None
     ) -> None:
@@ -2464,7 +2520,13 @@ class AuthStore:
                 "AND identity_key = ? ORDER BY id",
                 (provider, identity),
             ).fetchone()
-            if provider == "radient" and credential_type == "oauth":
+            if (
+                provider == "radient"
+                and credential_type == "oauth"
+                # A custody row has its own namespace; Radient's account-binding
+                # upgrade would otherwise match (and refuse) the node's own login.
+                and not payload.get(MESH_CUSTODY_IDENTITY_KEY)
+            ):
                 binding = _radient_account_identity(payload)
                 if row is not None and binding is None:
                     previous = self.get_credential(row[0])
@@ -3578,6 +3640,15 @@ class AuthStore:
                         credential_id,
                     )
                     return False
+            record = data.get(REFRESH_DELEGATE_KEY)
+            if isinstance(record, dict) and record.get("state") == "lent":
+                # A LENT login (renewal.LENT_STATE): the node may hold a newer pair of
+                # this family, so the refusal is not yet a verdict. Wait for its
+                # write-back instead of tombstoning (§B.4); the read gate below
+                # refuses to present the rejected token again meanwhile.
+                data[AWAITING_WRITEBACK_KEY] = self._now_ms()
+                data.pop(REFRESH_SEND_UNCONFIRMED_KEY, None)
+                return True
             data[GRANT_DEAD_AT_KEY] = self._now_ms()
             # The refusal IS the definitive answer to the send marker: the IdP
             # told us what happened to the presented token, so there is nothing
@@ -3976,7 +4047,57 @@ class AuthStore:
                 f"the family may have moved with it, so the copy frozen here is not presented "
                 f"and cannot be refreshed; run /login {row.provider} to sign in again"
             )
+        awaiting = creds.get(AWAITING_WRITEBACK_KEY)
+        if awaiting and self._needs_refresh(creds, force=force):
+            # The IdP refused this LENT login's token and the node's write-back is
+            # still possible (AWAITING_WRITEBACK_KEY): presenting the same token
+            # again could only be refused again — or, if the node renewed, burn the
+            # family it is about to return.
+            try:
+                waited_ms = self._now_ms() - int(awaiting)
+            except (TypeError, ValueError):
+                waited_ms = 0
+            if waited_ms >= AWAITING_WRITEBACK_CAP_MS:
+                # THE CAP (#3955 M2), a pure read like ``_delegated``'s ceiling: past
+                # it no write-back can still arrive, so the refusal was final.
+                raise CredentialInvalidError(
+                    f"OAuth grant for '{row.provider}' was refused by the provider and "
+                    f"the device it was lent to never handed back a newer one; run "
+                    f"/login {row.provider} to sign in again"
+                )
+            record = creds.get(REFRESH_DELEGATE_KEY)
+            node = str((record or {}).get("device_name") or (record or {}).get("device") or "")
+            # ASK THE NODE (#3955 M2): only its answer ends this wait while it stays
+            # connected — a write-back adopts, a "nothing newer" proves the refusal
+            # was final. Without this nudge nothing would ask, because the claim
+            # fence below is never reached from here. Background, never raising.
+            nudge = getattr(self._lend_fence, "nudge", None)
+            if nudge is not None:
+                try:
+                    nudge(row.id, creds)
+                except Exception:  # noqa: BLE001 — the wait still stands
+                    logger.debug("lend fence nudge failed", exc_info=True)
+            raise LendClaimPendingError(
+                f"Waiting for {node or 'the node'} to hand back your {row.provider} login. "
+                f"It comes back as soon as {node or 'that device'} reconnects. Or sign in "
+                f"again here (/login {row.provider}).",
+                device=str((record or {}).get("device") or ""),
+            )
         delegated = self._delegated(creds, now_ms=self._now_ms())
+        if (
+            delegated is not None
+            and delegated.get("custody")
+            and self._needs_refresh(creds, force=force)
+        ):
+            # A node's CUSTODY of a lent login (renewal B1): plain words, because
+            # nothing here was signed by anyone (#3955 Q5).
+            owner = str(delegated.get("device") or "the device that lent it")
+            raise RefreshDelegatedError(
+                f"OAuth refresh for '{row.provider}' was not attempted on this device: "
+                f"{owner} lent this login here and renews it itself, so this device "
+                "only keeps a copy",
+                device=str(delegated.get("device") or ""),
+            )
         if delegated is not None and self._needs_refresh(creds, force=force):
             raise RefreshDelegatedError(
                 f"OAuth refresh for '{row.provider}' was not attempted: "
@@ -4150,6 +4271,30 @@ class AuthStore:
                         f"{self_clearing_window()}; sign in again only if it persists "
                         "past that"
                     )
+                lent = fresh.get(REFRESH_DELEGATE_KEY)
+                if presented and isinstance(lent, dict) and lent.get("state") == "lent":
+                    # THE OWNER'S CLAIM FENCE (mesh-credential-renewal §B.3 R3): this
+                    # login is lent for renewal, so the node that holds it is asked
+                    # first. Off the event loop for the same reason as the node fence.
+                    lend_fence = self._lend_fence
+                    if lend_fence is None:
+                        raise LendClaimPendingError(
+                            f"OAuth refresh for '{row.provider}' was not attempted: this "
+                            "login is lent for renewal and this process cannot ask the "
+                            "device holding it first; nothing about the login has changed",
+                            device=str(lent.get("device") or ""),
+                        )
+                    try:
+                        lend_refusal = await asyncio.to_thread(lend_fence, row.id, fresh)
+                    except Exception as exc:  # noqa: BLE001 — cannot tell = stop
+                        lend_refusal = (
+                            "the lent login could not be checked with the device holding it "
+                            f"({type(exc).__name__}), so it was not presented"
+                        )
+                    if lend_refusal is not None:
+                        raise LendClaimPendingError(
+                            str(lend_refusal), device=str(lent.get("device") or "")
+                        )
                 if presented:
                     # THE NODE'S PRE-POST FENCE (§3.4), and here rather than
                     # earlier on purpose: this is the last statement before the
@@ -4160,7 +4305,12 @@ class AuthStore:
                     fence = self._refresh_fence
                     if fence is not None:
                         try:
-                            refusal = fence(row.id, fresh)
+                            # OFF THE EVENT LOOP: the owner-side fence of a LENT login
+                            # may wait (bounded, ``renewal.CLAIM_INLINE_S``) for the
+                            # renewing node's claim answer, and that wait must not
+                            # stall every other coroutine of this process. The node
+                            # fence is a file read either way.
+                            refusal = await asyncio.to_thread(fence, row.id, fresh)
                         except Exception as exc:  # noqa: BLE001 — cannot tell = stop
                             refusal = (
                                 "the delegated refresh could not be re-checked before "
@@ -4373,6 +4523,19 @@ class AuthStore:
                         watch.posted(row.id, merged)
                     except Exception:  # noqa: BLE001
                         logger.debug("refresh watch.posted failed", exc_info=True)
+                lent_now = merged.get(REFRESH_DELEGATE_KEY)
+                posted_hook = getattr(self._lend_fence, "posted", None)
+                if (
+                    posted_hook is not None
+                    and isinstance(lent_now, dict)
+                    and lent_now.get("state") == "lent"
+                ):
+                    # The owner renewed a LENT login: bump its epoch and push the new
+                    # pair to the node, whose copy is now spent (§B.3 R3).
+                    try:
+                        posted_hook(row.id, merged)
+                    except Exception:  # noqa: BLE001
+                        logger.debug("lend fence posted hook failed", exc_info=True)
                 return merged
             finally:
                 self._release_refresh_lease(row.id)
@@ -5999,6 +6162,10 @@ class AuthStore:
         ):
             try:
                 creds = await self._ensure_oauth_fresh(row, force=force_refresh)
+            except LendClaimPendingError:
+                # A question in flight, not a bad login (#3955 Q2): no backoff, so the
+                # first request after the node's answer gets the key.
+                continue
             except AuthStoreError:
                 if not read_only:
                     self.block_credential(row.id, provider)  # try a sibling

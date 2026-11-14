@@ -389,6 +389,32 @@ class _LocalOps:
             "lent_hold_until_ms": lent_until,
         }
 
+    def claim(self, frame: dict[str, Any]) -> dict[str, Any]:
+        """Answer a ``credential_claim``: ask the renewing node before this owner renews.
+
+        Blocking for up to ``renewal.CLAIM_WAIT_S`` (R4's ``W``) on this control
+        worker; the asking process never waits that long itself (it gives up after
+        ``renewal.CLAIM_INLINE_S`` and reads the outcome off the row later).
+        """
+        from local_operator.network.credentials import owner as owner_mod
+        from local_operator.network.credentials import renewal as renewal_mod
+
+        key = str(frame.get("key") or "")
+        broker = owner_mod.broker_for_relay(self._server)
+        if broker is None:
+            return {"kind": "ack", "key": key, "state": "not_lent"}
+        return {"kind": "ack", "key": key, **renewal_mod.owner_claim(broker, key)}
+
+    def lend_push(self, frame: dict[str, Any]) -> dict[str, Any]:
+        """Answer a ``credential_lend_push``: send the owner's new pair to the renewing node."""
+        from local_operator.network.credentials import owner as owner_mod
+        from local_operator.network.credentials import renewal as renewal_mod
+
+        key = str(frame.get("key") or "")
+        broker = owner_mod.broker_for_relay(self._server)
+        pushed = broker is not None and renewal_mod.push_to_node(broker, key)
+        return {"kind": "ack", "key": key, "pushed": bool(pushed)}
+
     def share_push(self, frame: dict[str, Any]) -> dict[str, Any]:
         """Push one just-shared placement row to its holder now (``share_push``).
 
@@ -513,6 +539,8 @@ def install(server: RelayServer) -> None:
             "credential_placement": ops.placement,
             "credential_revoke": ops.revoke,
             "credential_share_push": ops.share_push,
+            "credential_claim": ops.claim,
+            "credential_lend_push": ops.lend_push,
             "credential_sync_pull": ops.sync_pull,
         },
         slow={"net_broker": BROKER_OP_DEADLINE_S},

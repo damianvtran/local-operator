@@ -230,6 +230,25 @@ class MeshAwareAuthStore:
         # device holds no delegation, which is every install and every 0-peer run —
         # the store's refresh path then costs one attribute read and is unchanged.
         self._install_refresh_fence()
+        self._install_lend_fence()
+
+    def _install_lend_fence(self) -> None:
+        """Install the OWNER's claim fence for logins lent for renewal (§B.3 R3).
+
+        Always, and cheaply: the store consults it only for a row whose delegation
+        record is ``lent``, and a lent row with no fence is refused (fail closed),
+        so a session constructed BEFORE its owner's relay lent the login is still
+        covered. Silent on failure, like the node fence.
+        """
+        try:
+            installer = getattr(self._local, "set_lend_fence", None)
+            if installer is None:  # pragma: no cover — a store build without the seam
+                return
+            from local_operator.network.credentials.renewal import OwnerLendFence
+
+            installer(OwnerLendFence(self.config_dir))
+        except Exception:  # noqa: BLE001 — a construct-time fence must not fail a session
+            return
 
     def _install_refresh_fence(self) -> bool:
         """Point the local auth store's fence at this client's, if this device has a
