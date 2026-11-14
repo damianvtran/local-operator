@@ -41,7 +41,7 @@ def env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, str]:
     monkeypatch.setenv("GIT_TERMINAL_PROMPT", "0")
     # No live process ever holds a cwd in these fixtures; the lsof inventory
     # is exercised by its own provenance tests.
-    monkeypatch.setattr(iwa, "_live_cwd_inside", lambda _tree, _snapshot=None: False)
+    monkeypatch.setattr(iwa, "_live_cwd_inside", lambda _tree: False)
     return dict(os.environ)
 
 
@@ -113,7 +113,11 @@ def test_complete_checkout_is_only_unlocked(repo, env):
         "other-path",
     ],
 )
-def test_anything_not_provably_this_calls_add_is_untouched(repo, env, case):
+@pytest.mark.parametrize("live", [False, None])
+def test_anything_not_provably_this_calls_add_is_untouched(repo, env, monkeypatch, case, live):
+    # `live=None` (a hidden cwd, PR #3980): the unlock-only path must not
+    # reach a user's `--lock` or a lock this call did not write either.
+    monkeypatch.setattr(iwa, "_live_cwd_inside", lambda _tree: live)
     started = time.time() - 1
     reason = "keep me" if case == "other-reason" else "initializing"
     tree = _add(repo, "c", killed=True, reason=reason)
@@ -158,12 +162,32 @@ def test_spawn_stamp_marks_only_worktree_commands_and_falls_back(monkeypatch, tm
 
 
 @pytest.mark.parametrize("live", [True, None])
-def test_a_live_or_unknown_cwd_inside_the_tree_blocks_removal(repo, env, monkeypatch, live):
-    # An escaped (setsid/nohup) add would still be checking out; unknown fails closed.
-    monkeypatch.setattr(iwa, "_live_cwd_inside", lambda _tree, _snapshot=None: live)
+def test_a_live_or_unknown_cwd_inside_the_tree_only_unlocks(repo, env, monkeypatch, live):
+    # An escaped (setsid/nohup) add might still be checking out, and a hidden
+    # cwd (PR #3980: `(sd-pam)`) cannot be proved outside: delete nothing, only
+    # drop git's lock so the tree is not stranded `locked`, and tell the agent.
+    monkeypatch.setattr(iwa, "_live_cwd_inside", lambda _tree: live)
+    started = time.time() - 1
     tree = _add(repo, "d", killed=True)
-    assert iwa.settle_after_kill(_cmd(repo, "d"), cwd=None, env=env, spawned_at=0) == []
-    assert tree.is_dir()
+    files = sorted(p.name for p in tree.iterdir())
+    done = iwa.settle_after_kill(_cmd(repo, "d"), cwd=None, env=env, spawned_at=started)
+    assert done == [f"unlocked, left in place: {tree}"]
+    assert sorted(p.name for p in tree.iterdir()) == files  # nothing deleted
+    admin = repo / ".git" / "worktrees" / "d"
+    assert (admin / "gitdir").is_file() and (admin / "index.lock").is_file()
+    assert f"worktree {tree}\n" in _porcelain(repo)
+    assert "locked" not in _porcelain(repo)
+    notice = iwa.left_in_place_notice(done)
+    assert notice is not None
+    assert f"git worktree remove --force {tree}" in notice
+    assert "unlocked but left in place" in notice
+    # ...and that command, the one the notice gives the agent, cleans it up.
+    _git("-C", str(repo), "worktree", "remove", "--force", str(tree))
+    assert not tree.exists() and not admin.exists()
+
+
+def test_removal_and_unlock_entries_carry_no_notice():
+    assert iwa.left_in_place_notice(["removed /r/a", "unlocked /r/b"]) is None
 
 
 def test_a_registration_not_pointing_back_is_untouched(repo, env):
@@ -269,3 +293,37 @@ async def test_bash_timeout_kill_of_a_real_add_leaves_no_lock(tmp_path, env, mon
                 os.kill(hold_pid, signal.SIGKILL)
             except ProcessLookupError:
                 pass
+
+
+@pytest.mark.asyncio
+async def test_bash_result_tells_the_agent_about_a_tree_left_in_place(tmp_path, env, monkeypatch):
+    """PR #3980: a hidden cwd blocks deletion, so the notice must reach THIS result.
+
+    The settle runs on a daemon thread after `_kill`; the bash tail waits for it
+    (bounded) so the agent learns, in the result of the very call that made the
+    tree, that it must remove it. A smudge filter holds the checkout so the
+    kill deterministically lands mid-checkout (no `index` yet).
+    """
+    from local_operator.tools.builtin import execute_bash
+
+    monkeypatch.setattr(iwa, "_live_cwd_inside", lambda _tree: None)  # e.g. (sd-pam)
+    # No spawn-time shim: execute_bash's real `spawn_stamp` (#3975) puts the
+    # spawn mark on the file clock git stamps `locked` with, so the settle
+    # admits this call's own lock without help.
+    held = tmp_path / "held"
+    held.mkdir()
+    _git("init", "-q", str(held))
+    (held / ".gitattributes").write_text("*.txt filter=hold\n")
+    (held / "a.txt").write_text("a\n")
+    _git("add", "-A", cwd=held)
+    _git("-c", "user.name=t", "-c", "user.email=t@x", "commit", "-qm", "init", cwd=held)
+    _git("-C", str(held), "config", "filter.hold.smudge", "sleep 30")
+    tree = held / ".worktrees" / "x"
+    result = await execute_bash("t", {"command": _cmd(held, "x"), "timeout": 1}, None, None, None)
+    text = "".join(getattr(c, "text", "") for c in result.content)
+    assert "TIMEOUT" in text
+    assert f"left a half-made worktree at {tree}" in text
+    assert f"git worktree remove --force {tree}" in text
+    assert tree.is_dir()
+    assert f"worktree {tree}\n" in _porcelain(held)
+    assert "locked" not in _porcelain(held)
