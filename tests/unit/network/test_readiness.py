@@ -4713,7 +4713,7 @@ def _pin_role(root: Path, name: str, tier: str) -> None:
     sync installs the operator's designer/ux-reviewer/architect on a node."""
     from local_operator.agents import AgentEditFields, AgentRegistry
 
-    fields = {field: None for field in AgentEditFields.model_fields}
+    fields: dict[str, Any] = {field: None for field in AgentEditFields.model_fields}
     fields.update(name=name, description=f"{name} role", tags=["role", f"effort:{tier}"])
     AgentRegistry(root).create_agent(AgentEditFields(**fields))
 
