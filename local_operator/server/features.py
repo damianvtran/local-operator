@@ -47,6 +47,12 @@ DESKTOP_ONLY_FEATURES = frozenset(
         # client must not be told it can read the portal password it signs in
         # with (routes/desktop_mobile_password.py).
         "mobile_password_read",
+        # Same class: the phone relay serves no `/v1/desktop/mobile/doctor`, so
+        # advertising the key from the relay would point a phone client at a
+        # route that 404s. The doctor is the DESKTOP's "Copy diagnostics" button
+        # (routes/desktop_mobile_doctor.py); a phone reads `lop mobile doctor`
+        # output through the operator, never through the relay.
+        "mobile_doctor",
     }
 )
 

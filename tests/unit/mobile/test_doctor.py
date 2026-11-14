@@ -364,6 +364,19 @@ async def test_the_route_needs_the_desktop_bearer_and_serves_the_report(rig, mon
     assert static_feature_flags()["mobile_doctor"] == 1
 
 
+def test_the_capability_is_advertised_to_the_desktop_only(monkeypatch):
+    """The relay republishes the feature map minus DESKTOP_ONLY_FEATURES; it
+    serves no doctor route, so it must not advertise one (mirrors the
+    `mobile_password_read` guard in test_desktop_mobile_password.py)."""
+    from local_operator.mobile import daemon
+    from local_operator.server.features import feature_flags
+
+    assert feature_flags()["mobile_doctor"] == 1
+    # Drop the process memo so the relay re-reads the map under test.
+    monkeypatch.setattr(daemon, "_FEATURE_FLAGS_MEMO", None)
+    assert "mobile_doctor" not in daemon._feature_flags()
+
+
 def test_the_log_scan_adds_back_what_the_collapse_suppressed(rig):
     """A collapsed accept failure is ONE written traceback plus a count; the
     doctor reports every occurrence, not one line a minute."""
