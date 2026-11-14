@@ -1,0 +1,117 @@
+{
+  "schema": 1,
+  "audit_id": "a2",
+  "audit_kind": "independent_translation_audit_remediation_delta",
+  "locale": "ru",
+  "namespace": "mobile.doctor",
+  "audit_date": "2026-11-14",
+  "verdict": "passed",
+  "status": "passed",
+  "scope": "PR #3953 round-1 remediation: 14 changed + 9 new keys judged side by side with English and context; 8 unchanged keys verified byte-identical to 52c0e1c93 and cross-read for glossary; tunnel.problem verified removed",
+  "key_count": 31,
+  "keys_audited": 23,
+  "changed_keys": [
+    "mobile.doctor.daemon.gate_open",
+    "mobile.doctor.daemon.not_answering",
+    "mobile.doctor.daemon.not_installed",
+    "mobile.doctor.daemon.not_running",
+    "mobile.doctor.daemon.slow",
+    "mobile.doctor.daemon.state_not_answering",
+    "mobile.doctor.files.at_limit",
+    "mobile.doctor.files.near",
+    "mobile.doctor.files.unknown",
+    "mobile.doctor.login.missing",
+    "mobile.doctor.logs.clean",
+    "mobile.doctor.logs.errors",
+    "mobile.doctor.tunnel.connecting",
+    "mobile.doctor.tunnel.duplicates",
+    "mobile.doctor.tunnel.list_skipped",
+    "mobile.doctor.tunnel.list_unchecked",
+    "mobile.doctor.tunnel.login_needed",
+    "mobile.doctor.tunnel.not_configured",
+    "mobile.doctor.tunnel.not_running",
+    "mobile.doctor.tunnel.offline",
+    "mobile.doctor.tunnel.ok",
+    "mobile.doctor.tunnel.setup_again",
+    "mobile.doctor.tunnel.turned_off"
+  ],
+  "source_sha256": "0428c5c217967add291b75b8a493b08083cffe5270a6f8600c0fd0a82d89afe9",
+  "target_sha256": "97ed65e49b31d383acc64835e77fe953d77f9c89ea5ccc6162be41c321a01c0e",
+  "source_audit_revision": "1505e6d2f8dc51f219ddeba76ca0cc344c73806a",
+  "base_revision": "52c0e1c93",
+  "worktree": "~/local-operator/.worktrees/mobile-doctor",
+  "branch": "feat/mobile-doctor",
+  "translator": {
+    "agent": "coder subagent of host session 25fe8dfbf610 (round-1 remediation of PR #3953, commit 1505e6d2f; wrote the English source and all 7 translations)",
+    "model": "not reported in the commit; host session 25fe8dfbf610 runs anthropic/claude-opus-5-5, the coder child's served model is unverified",
+    "date": "2026-11-14"
+  },
+  "auditor": {
+    "agent": "translation-auditor, lopdev team member (independent `task` subagent), session 11bf5c282289; did not translate or edit any catalogue value, did not author the remediation",
+    "model": "anthropic/claude-opus-5-5 (served model of this session; no provider fallback observed)",
+    "date": "2026-11-14",
+    "independent_from_translator": true
+  },
+  "input_hashes": {
+    "en": "0428c5c217967add291b75b8a493b08083cffe5270a6f8600c0fd0a82d89afe9",
+    "context": "be9bc29ee9b33fd9a8350f8fbfe12153c59ea68c29b629038787fbfe3c8d5467",
+    "glossary": "a576d5a4b2718ba79a70a42600e3b6233ea28d716b1e2d996a208ac8dd7fabdb",
+    "style_guide": "f20e1cafaf70578c17ce072c71725628808d228e4be5604329f8da30386f1fb5"
+  },
+  "counts": {
+    "blocker": 0,
+    "major": 0,
+    "minor": 4,
+    "nit": 1
+  },
+  "findings": [
+    {
+      "id": "RU-R1",
+      "severity": "minor",
+      "key": "mobile.doctor.logs.errors",
+      "current": "За последние сутки служба доступа с телефона упиралась в лимит открытых файлов {emfile} раз и не смогла открыть базу данных {sqlite} раз. Перезапустите её командой lop mobile restart; если это повторится, отправьте этот отчёт в поддержку.",
+      "proposed": "За последние сутки служба доступа с телефона упиралась в лимит открытых файлов (случаев: {emfile}) и не могла открыть базу данных (случаев: {sqlite}). Перезапустите её командой lop mobile restart; если это повторится, отправьте этот отчёт в поддержку.",
+      "reason": "“{n} раз” is ungrammatical for 2–4, 22–24… (“3 раз” → “3 раза”); the counts arrive as pre-formatted strings (doctor.py:398), so no plural arm is possible and the namespace’s own “label: {n}” pattern (files.ok, tunnel.duplicates) is the number-agnostic form."
+    },
+    {
+      "id": "RU-R2",
+      "severity": "minor",
+      "key": "mobile.doctor.daemon.not_answering",
+      "current": "Служба доступа с телефона запущена, но не отвечает, поэтому мобильное приложение показывает этот компьютер как не отвечающий. Перезапустите её командой lop mobile restart или перезагрузите компьютер.",
+      "proposed": "Служба доступа с телефона запущена, но не отвечает, поэтому мобильное приложение показывает, что этот компьютер не отвечает. Перезапустите её командой lop mobile restart или перезагрузите компьютер.",
+      "reason": "“показывает … как не отвечающий” calques “shows as not answering” (and a bare participle with не would be written together); “показывает, что … не отвечает” is the native construction."
+    },
+    {
+      "id": "RU-R2",
+      "severity": "minor",
+      "key": "mobile.doctor.daemon.slow",
+      "current": "Служба доступа с телефона ответила за {ms} мс, и мобильное приложение может показать её как не отвечающую. Перезапустите её командой lop mobile restart; если это повторится, отправьте этот отчёт в поддержку.",
+      "proposed": "Служба доступа с телефона ответила за {ms} мс, и мобильное приложение может показать, что она не отвечает. Перезапустите её командой lop mobile restart; если это повторится, отправьте этот отчёт в поддержку.",
+      "reason": "“показывает … как не отвечающий” calques “shows as not answering” (and a bare participle with не would be written together); “показывает, что … не отвечает” is the native construction."
+    },
+    {
+      "id": "RU-R2",
+      "severity": "minor",
+      "key": "mobile.doctor.files.unknown",
+      "current": "Не удалось подсчитать открытые файлы службы доступа с телефона на этом компьютере. Если мобильное приложение показывает её как не отвечающую, перезапустите её командой lop mobile restart и отправьте этот отчёт в поддержку.",
+      "proposed": "Не удалось подсчитать открытые файлы службы доступа с телефона на этом компьютере. Если мобильное приложение показывает, что она не отвечает, перезапустите её командой lop mobile restart и отправьте этот отчёт в поддержку.",
+      "reason": "“показывает … как не отвечающий” calques “shows as not answering” (and a bare participle with не would be written together); “показывает, что … не отвечает” is the native construction."
+    },
+    {
+      "id": "RU-R3",
+      "severity": "nit",
+      "key": "mobile.doctor.tunnel.connecting",
+      "current": "Доступ с телефона через Radient ещё подключается. Подождите несколько минут; если подключение не появится, перезапустите его командой lop tunnel restart.",
+      "proposed": "Доступ с телефона через Radient ещё подключается. Подождите несколько минут; если подключиться не удастся, перезапустите его командой lop tunnel restart.",
+      "reason": "“подключение не появится” (“the connection does not appear”) is slightly off; “если подключиться не удастся” is the idiomatic “if it does not connect”."
+    }
+  ],
+  "checks": [
+    "placeholder multiset identical to English for all 23 keys",
+    "every `lop … …` command byte-identical",
+    "no ASCII apostrophe, no bidi control characters",
+    "Providers page label matches local-operator-ui ui.settings.model.provider_callout.providers_link",
+    "Tunnels kept verbatim"
+  ],
+  "limits": "LLM audit, same model family as the coder (disclosed); no native-speaker pass and no rendered terminal/desktop frame claimed."
+}

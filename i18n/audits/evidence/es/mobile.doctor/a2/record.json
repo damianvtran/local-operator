@@ -1,0 +1,93 @@
+{
+  "schema": 1,
+  "audit_id": "a2",
+  "audit_kind": "independent_translation_audit_remediation_delta",
+  "locale": "es",
+  "namespace": "mobile.doctor",
+  "audit_date": "2026-11-14",
+  "verdict": "passed",
+  "status": "passed",
+  "scope": "PR #3953 round-1 remediation: 14 changed + 9 new keys judged side by side with English and context; 8 unchanged keys verified byte-identical to 52c0e1c93 and cross-read for glossary; tunnel.problem verified removed",
+  "key_count": 31,
+  "keys_audited": 23,
+  "changed_keys": [
+    "mobile.doctor.daemon.gate_open",
+    "mobile.doctor.daemon.not_answering",
+    "mobile.doctor.daemon.not_installed",
+    "mobile.doctor.daemon.not_running",
+    "mobile.doctor.daemon.slow",
+    "mobile.doctor.daemon.state_not_answering",
+    "mobile.doctor.files.at_limit",
+    "mobile.doctor.files.near",
+    "mobile.doctor.files.unknown",
+    "mobile.doctor.login.missing",
+    "mobile.doctor.logs.clean",
+    "mobile.doctor.logs.errors",
+    "mobile.doctor.tunnel.connecting",
+    "mobile.doctor.tunnel.duplicates",
+    "mobile.doctor.tunnel.list_skipped",
+    "mobile.doctor.tunnel.list_unchecked",
+    "mobile.doctor.tunnel.login_needed",
+    "mobile.doctor.tunnel.not_configured",
+    "mobile.doctor.tunnel.not_running",
+    "mobile.doctor.tunnel.offline",
+    "mobile.doctor.tunnel.ok",
+    "mobile.doctor.tunnel.setup_again",
+    "mobile.doctor.tunnel.turned_off"
+  ],
+  "source_sha256": "0428c5c217967add291b75b8a493b08083cffe5270a6f8600c0fd0a82d89afe9",
+  "target_sha256": "a5fc89676cfee915066b5d77056129bfdb601c91eea17aeb1f834b40636bb6d2",
+  "source_audit_revision": "1505e6d2f8dc51f219ddeba76ca0cc344c73806a",
+  "base_revision": "52c0e1c93",
+  "worktree": "~/local-operator/.worktrees/mobile-doctor",
+  "branch": "feat/mobile-doctor",
+  "translator": {
+    "agent": "coder subagent of host session 25fe8dfbf610 (round-1 remediation of PR #3953, commit 1505e6d2f; wrote the English source and all 7 translations)",
+    "model": "not reported in the commit; host session 25fe8dfbf610 runs anthropic/claude-opus-5-5, the coder child's served model is unverified",
+    "date": "2026-11-14"
+  },
+  "auditor": {
+    "agent": "translation-auditor, lopdev team member (independent `task` subagent), session 11bf5c282289; did not translate or edit any catalogue value, did not author the remediation",
+    "model": "anthropic/claude-opus-5-5 (served model of this session; no provider fallback observed)",
+    "date": "2026-11-14",
+    "independent_from_translator": true
+  },
+  "input_hashes": {
+    "en": "0428c5c217967add291b75b8a493b08083cffe5270a6f8600c0fd0a82d89afe9",
+    "context": "be9bc29ee9b33fd9a8350f8fbfe12153c59ea68c29b629038787fbfe3c8d5467",
+    "glossary": "a576d5a4b2718ba79a70a42600e3b6233ea28d716b1e2d996a208ac8dd7fabdb",
+    "style_guide": "4a6f6270f028e5f5fbca7156a8f5099077f92585db94c14653482e9b188248a6"
+  },
+  "counts": {
+    "blocker": 0,
+    "major": 0,
+    "minor": 2,
+    "nit": 0
+  },
+  "findings": [
+    {
+      "id": "ES-R1",
+      "severity": "minor",
+      "key": "mobile.doctor.daemon.slow",
+      "current": "El servicio de acceso telefónico tardó {ms} ms en responder, y la aplicación móvil puede mostrarlo como que no responde. Reinícialo con lop mobile restart; si vuelve a pasar, envía este informe al soporte.",
+      "proposed": "El servicio de acceso telefónico tardó {ms} ms en responder, por lo que la aplicación móvil puede mostrar que no responde. Reinícialo con lop mobile restart; si vuelve a pasar, envía este informe al soporte.",
+      "reason": "“mostrarlo como que no responde” is a colloquial calque of “show it as”; the sibling daemon.not_answering already uses the natural “muestra que … no responde”."
+    },
+    {
+      "id": "ES-R2",
+      "severity": "minor",
+      "key": "mobile.doctor.logs.errors",
+      "current": "En el último día, el servicio de acceso telefónico llegó a su límite de archivos abiertos {emfile} veces y no pudo abrir una base de datos {sqlite} veces. Reinícialo con lop mobile restart; si vuelve a pasar, envía este informe al soporte.",
+      "proposed": "(follows S1)",
+      "reason": "“{emfile} veces” renders “1 veces” when a count is 1; this mirrors the English source’s own “1 times” (S1) and is fixed with it, not in the translation."
+    }
+  ],
+  "checks": [
+    "placeholder multiset identical to English for all 23 keys",
+    "every `lop … …` command byte-identical",
+    "no ASCII apostrophe, no bidi control characters",
+    "Providers page label matches local-operator-ui ui.settings.model.provider_callout.providers_link",
+    "Tunnels kept verbatim"
+  ],
+  "limits": "LLM audit, same model family as the coder (disclosed); no native-speaker pass and no rendered terminal/desktop frame claimed."
+}

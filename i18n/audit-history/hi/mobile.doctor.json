@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "hi",
   "namespace": "mobile.doctor",
-  "history_sha256": "22af56f79d0f36bf11b68179acffe75b52c87de08decf5a310f497c682ca5f8a",
+  "history_sha256": "9442d482d5e49ce3ee716ba76ea44831ad9b251fa1adea8d6f448733f94f6a67",
   "entries": [
     {
       "locale": "hi",
@@ -26,6 +26,29 @@
       "note": "Independent audit a1 of mobile.doctor (new namespace, all 23 keys judged) at target sha256 56377a70658d… in a3722be7dada: PASSED, 0 blocker / 0 major / 0 minor / 3 nit (HI-D01, HI-D02, HI-D03; all adjudicated, none asks for a change). Real path exercised with LOP_LANG lop mobile doctor/--help; no native-speaker pass, no rendered frame. Evidence: i18n/audits/evidence/hi/mobile.doctor/a1/record.json",
       "evidence": "i18n/audits/evidence/hi/mobile.doctor/a1/record.json",
       "round": "a1",
+      "keys_audited": 23
+    },
+    {
+      "locale": "hi",
+      "namespace": "mobile.doctor",
+      "source_sha256": "0428c5c217967add291b75b8a493b08083cffe5270a6f8600c0fd0a82d89afe9",
+      "translator": {
+        "agent": "coder subagent of host session 25fe8dfbf610 (round-1 remediation of PR #3953, commit 1505e6d2f; wrote the English source and all 7 translations)",
+        "model": "not reported in the commit; host session 25fe8dfbf610 runs anthropic/claude-opus-5-5, the coder child's served model is unverified",
+        "date": "2026-11-14"
+      },
+      "auditor": {
+        "agent": "translation-auditor, lopdev team member (independent `task` subagent), session 11bf5c282289; did not translate or edit any catalogue value, did not author the remediation",
+        "model": "anthropic/claude-opus-5-5 (served model of this session; no provider fallback observed)",
+        "date": "2026-11-14",
+        "result": "passed",
+        "findings": 2,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "PR #3953 round-1 remediation audit a2 PASSED: 23 changed/new keys, 0 blocker / 0 major / 1 minor / 1 nit. Findings: HI-R1 minor (daemon.slow); HI-R2 nit (daemon.state_not_running). Translator model unverified; auditor anthropic/claude-opus-5-5 (disclosed). Not verified: native-speaker review, rendered frame. Evidence: i18n/audits/evidence/hi/mobile.doctor/a2/record.json",
+      "evidence": "i18n/audits/evidence/hi/mobile.doctor/a2/record.json",
+      "round": "a2",
       "keys_audited": 23
     }
   ]
