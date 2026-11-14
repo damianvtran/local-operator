@@ -242,6 +242,8 @@ def test_the_ask_wire_carries_every_field_the_picker_reads() -> None:
         approval_mode="ask",
         approval_provenance="session",
         approval_global_mode="auto",
+        taint_raised=True,
+        bridge_latched=True,
     )
     approval_payload = SessionProjection(session_id="s1", pid=0, pending=approval).to_json()
     approval_received = _projection_from_json(approval_payload, _record())
@@ -250,6 +252,15 @@ def test_the_ask_wire_carries_every_field_the_picker_reads() -> None:
     assert approval_received.pending.approval_provenance == "session"
     assert approval_received.pending.approval_global_mode == "auto"
     assert approval_payload["pending"]["approval_global_mode"] == "auto"
+    # Team Bridge flags: host-set on a gate card only. A dropped
+    # ``bridge_latched`` would let a viewer offer allow-all on a card that must
+    # reach a person, so both rebuilds must carry them NON-DEFAULT.
+    assert approval_received.pending.taint_raised is True
+    assert approval_received.pending.bridge_latched is True
+    approval_from_gate = _pending_request(PendingGateState(**approval_payload["pending"]))
+    assert approval_from_gate is not None
+    assert approval_from_gate.taint_raised is True
+    assert approval_from_gate.bridge_latched is True
 
     # The fields this question cannot exercise, each with why. `secret` and
     # `persist` are covered non-default by the secret test below, which is the
@@ -264,6 +275,10 @@ def test_the_ask_wire_carries_every_field_the_picker_reads() -> None:
         "approval_mode",
         "approval_provenance",
         "approval_global_mode",
+        # Team Bridge gate flags: never set on an ask; asserted non-default
+        # through both approval rebuilds above.
+        "taint_raised",
+        "bridge_latched",
     }
     assert set(derived) | not_derivable_here == set(defaults), (
         "a PendingRequest field is neither asserted with a derived value nor "
@@ -317,7 +332,13 @@ def test_the_ask_wire_carries_every_field_the_picker_reads() -> None:
     # `recommended_all` rides with `multi`: the set only exists on a multi-select,
     # which this wire cannot express, so the phone keeps the int contract
     # (`recommended=0`, the first pick) and the set is not carried.
-    deliberately_dropped = {"id", "multi", "recommended_all"}
+    # `command` is FOLDED into `title` (`mobile.types._title_with_command`)
+    # rather than carried as its own slot: the legacy card's readers are old
+    # clients that know only `title`, and the field would be invisible to them.
+    # `command_target` only steers the desktop's one-click Run, which no legacy
+    # card offers, so it is not carried (see
+    # test_the_legacy_ask_title_carries_the_suggested_command).
+    deliberately_dropped = {"id", "multi", "recommended_all", "command", "command_target"}
     # `question` is the one deliberate RENAME: AskQuestion.question is carried
     # as PendingRequest.title.
     assert ask_fields - deliberately_dropped <= expected | {"question"}, (
@@ -774,3 +795,24 @@ def test_a_recommendation_set_reaches_the_phone_as_the_first_pick_only() -> None
     assert "recommended_all" not in wire
     assert [option.label for option in rebuilt.options] == ["Beta", "Gamma", "Alpha"]
     assert rebuilt.recommended == 0
+
+
+def test_the_legacy_ask_title_carries_the_suggested_command() -> None:
+    """``ask_pending_request`` is the single-slot card old clients and the
+    blocking arm read: ``AskQuestion.command`` would vanish there without the
+    title fold."""
+    question = AskQuestion(
+        id="signin",
+        question="Sign in to GitLab first?",
+        options=[AskOption(label="Done"), AskOption(label="Skip")],
+        command="glab auth login",
+    )
+    request = ask_pending_request("r1", question)
+    assert request.title == "Sign in to GitLab first?\n\nglab auth login"
+    # Without one, the title is exactly the question, as before.
+    plain = AskQuestion(
+        id="signin",
+        question="Sign in to GitLab first?",
+        options=[AskOption(label="Done"), AskOption(label="Skip")],
+    )
+    assert ask_pending_request("r1", plain).title == "Sign in to GitLab first?"

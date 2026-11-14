@@ -14,9 +14,14 @@ of actions and the wrong one for a shell command: the sealed run
 ``t27b-t003-20261108-090532`` lost an entire episode -- every later tool call
 and ``score`` -- because the target had SIGTERM'd this wrapper and answered
 ``returncode: -15``, and this layer raised on that answer. A command's failure
-is an outcome the model reads and reacts to. Only a reply that never arrived (a
-genuine channel failure) may still raise, because a command that may already
-have run must not be replayed.
+is an outcome the model reads and reacts to. Only a reply that never arrived
+FROM A GUEST THAT THEN FAILS A LIVENESS PROBE may still raise: a command that
+may already have run must not be replayed, and a dead environment is the
+session's to end. A lost reply from a guest that still answers is an unknown
+command outcome, not a dead environment (``reply_lost_answer``; sealed runs
+``t29a-t002-20261111-185136`` and ``t29a-t004-20261111-185213`` each lost a
+whole episode, score included, to one lost reply on a trivial ``grep``/
+``pdffonts``).
 
 A DEAD WRAPPER DOES NOT STOP THE COMMAND. Its child runs in its own session
 (``start_new_session=True``), so whatever kills the wrapper leaves the shell
@@ -352,6 +357,30 @@ def payload_for(params: RunCommandParams) -> dict[str, Any]:
         "shell": False,
         "timeout": params.timeout_s + 5,
     }
+
+
+def reply_lost_answer(kind: str, deadline_s: float) -> RunCommandResult:
+    """A command whose reply was LOST, from a guest that still answers.
+
+    The caller (``AwsProvider.run_command``) builds this only after the guest's
+    liveness endpoint answered a probe taken right after the loss, so the
+    environment is demonstrably alive and only THIS reply is gone. That is the
+    same fact ``_unrun`` already states for a wrapper that died without
+    reporting: the shell may have run, may still be running, or may never have
+    started, and nothing here can say which. Ending the session instead cost
+    two whole episodes and their scores on the main29 arm, which is a far worse
+    answer than an unknown command outcome the model can work around.
+
+    ``kind`` is the transport exception's TYPE name only, never its text: a
+    ``requests`` message embeds the guest's address (``HTTPConnectionPool(host=
+    ...)``), which no answer to the model may carry.
+    """
+
+    return _unrun(
+        f"the target's reply to this command was lost ({kind}; no complete answer "
+        f"within {deadline_s:g} s), although its control server answered a "
+        "liveness check right afterwards, so the session continues"
+    )
 
 
 def unreadable_answer(reason: object) -> RunCommandResult:

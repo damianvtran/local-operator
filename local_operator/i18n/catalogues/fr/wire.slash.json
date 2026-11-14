@@ -50,5 +50,6 @@
   "wire.slash.theme": "Changer de thème ; aperçu direct avec les flèches",
   "wire.slash.unarchive": "Réafficher cette conversation dans les listes",
   "wire.slash.update": "Mettre à jour depuis PyPI et relancer",
-  "wire.slash.usage": "Quota d’utilisation du fournisseur"
+  "wire.slash.usage": "Quota d’utilisation du fournisseur",
+  "wire.slash.temporary": "Rendre temporaire ou conserver (on, off, status)"
 }

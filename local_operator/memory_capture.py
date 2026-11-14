@@ -273,6 +273,25 @@ def policy(config: Path) -> dict[str, Any]:
     }
 
 
+def auto_capture_skipped(session_dir: str | Path | None) -> bool:
+    """Whether automatic capture must skip this session's transcript.
+
+    Two reasons, both suppress-only: an import marked it
+    (:func:`import_capture_disabled`), or it is a TEMPORARY chat
+    (``session/temporary.py``), which is deleted when idle — capturing it
+    would carry its content into durable memory past the deletion the user
+    asked for. The temporary read is the exact-schema one, so a damaged mark
+    keeps capture on, as an ordinary chat.
+    """
+    if import_capture_disabled(session_dir):
+        return True
+    if not session_dir:
+        return False
+    from local_operator.session.temporary import is_marked_path
+
+    return is_marked_path(session_dir)
+
+
 def import_capture_disabled(session_dir: str | Path | None) -> bool:
     """True for a session an import marked ``capture_memory: false``.
 

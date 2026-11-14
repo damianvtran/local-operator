@@ -386,6 +386,45 @@ def _search_digest_key(
     )
 
 
+def tainted_provider_allowlist(
+    context: ToolContext | None, settings: WebSearchSettings
+) -> frozenset[str] | None:
+    """The index-only provider set while the session is Team Bridge latched.
+
+    ``None`` for a clean session (unrestricted). Keyed on the LATCH, not on the
+    approval gate, so it holds in every mode including auto and yolo, and no
+    approval widens it (team-bridge-egress.md: "Search providers", S-53). The latch lookup itself
+    fails closed.
+    """
+    from local_operator.harness.bridge_egress import (
+        context_is_latched,
+        filter_index_only,
+    )
+
+    if not context_is_latched(context):
+        return None
+    chain = WebSearchService(settings, config_dir()).resolve()
+    return frozenset(
+        filter_index_only(chain, searxng_endpoint=getattr(settings, "searxng_endpoint", None))
+    )
+
+
+def _tainted_search_chain(context: Any) -> tuple[list[str], Any]:
+    """The seam's view of the resolved chain (``bridge_egress`` resolver)."""
+    settings = load_search_settings(ConfigManager(config_dir()))
+    chain: list[str] = [str(p) for p in WebSearchService(settings, config_dir()).resolve()]
+    return chain, getattr(settings, "searxng_endpoint", None)
+
+
+def _install_tainted_chain_resolver() -> None:
+    from local_operator.harness.bridge_egress import install_search_chain_resolver
+
+    install_search_chain_resolver(_tainted_search_chain)
+
+
+_install_tainted_chain_resolver()
+
+
 async def execute_web_search(
     tool_call_id: str,
     args: dict[str, Any],
@@ -423,11 +462,13 @@ async def execute_web_search(
     # use, so no new parse cost and no new malformed-file exposure.
     if not settings.enabled:
         return _result(tool_call_id, WEB_SEARCH_DISABLED_MESSAGE, error=True)
+    restrict_to = tainted_provider_allowlist(context, settings)
     service = WebSearchService(
         settings,
         config_dir(),
         tavily_oauth_search=_tavily_oauth_delegate(context, signal, on_update),
         io=context.web_io if context is not None else None,
+        restrict_to=restrict_to,
     )
 
     async def search() -> SearchResponse:
@@ -442,7 +483,10 @@ async def execute_web_search(
         # independent calls rather than borrowing another caller's lifecycle.
         io = context.web_io if context is not None else None
         if io is not None and service.tavily_oauth_search is None:
-            key = _search_digest_key(service, settings, params)
+            # The restriction is part of the key: a latched session's query
+            # must never coalesce onto (or lend its query to) an unrestricted
+            # call walking an answer engine.
+            key = (*_search_digest_key(service, settings, params), restrict_to)
             work = io.singleflight(key, search)
         else:
             work = search()

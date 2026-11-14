@@ -217,8 +217,19 @@ async def test_real_http_partial_music_keeps_charge_identity_audio_and_restart(
         return MusicClient(base_url=base)
 
     try:
-        await runner(context, record, client_factory=factory)("watcher", None, progress.append)
+        text = await runner(context, record, client_factory=factory)(
+            "watcher", None, progress.append
+        )
         final = records[-1]
+        # The completion text is what the model reads (job delivery and wait):
+        # the saved file's digest, each track's outcome and the billed total.
+        saved = final["artifacts"][0]
+        assert f"attachment {saved['digest']}" in text and saved["name"] in text
+        assert '- Track 1 "Piano": completed' in text and "cost $0.0075 billed" in text
+        assert "- Track 2: failed (audio_failed); cost $0.00 billed." in text
+        assert "Total billed: $0.0075." in text
+        assert "Attribution: Authorized fixture attribution" in text
+        assert "?sig=" not in text and "http" not in text
         assert final["state"] == "completed"
         assert len(final["tracks"]) == 2 and final["tracks"][1]["error_type"] == "audio_failed"
         assert len(final["artifacts"]) == 1

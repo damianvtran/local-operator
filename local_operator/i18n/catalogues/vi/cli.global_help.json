@@ -15,5 +15,6 @@
   "cli.global_help.propagated_resume": "Tiếp tục một phiên trước đó theo id. Không kèm id để lấy phiên gần nhất.",
   "cli.global_help.propagated_hosting": "Nhà cung cấp cho lần chạy này (ví dụ: anthropic, openai, openrouter)",
   "cli.global_help.propagated_model": "Mô hình sẽ dùng cho lần chạy này",
-  "cli.global_help.propagated_run_in": "Thư mục làm việc để chạy operator"
+  "cli.global_help.propagated_run_in": "Thư mục làm việc để chạy operator",
+  "cli.global_help.temporary": "Bắt đầu cuộc trò chuyện tạm thời: không lưu vào lịch sử và bị xóa sau khi không hoạt động (mặc định 30 phút)."
 }

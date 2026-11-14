@@ -791,6 +791,120 @@ async def test_a_peer_bound_command_carries_its_image_to_the_owner(
 
 
 @pytest.mark.asyncio
+async def test_a_desktop_effort_pick_on_a_peers_session_lands_on_the_owner(
+    peer_pair: Devices, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Operator report 2026-11-11: the desktop's effort chip on a session a mesh
+    peer runs answered "Couldn't set effort to …: Requested session, profile, team
+    or subscription not found" — the settings-intents POST's door only knew a
+    ``sessions/<id>/`` on THIS disk.
+
+    Driven end to end: the desktop's own two routers on device A, the REAL
+    applier with the REAL ``BridgeDriver`` over the REAL pool, two real relays,
+    and a real runtime on owner B. What is asserted is what the OWNER's runtime
+    now runs at, plus that A never grew a local session directory for B's id.
+    The ``/commands`` door is driven too, for the strip's typed ``/effort`` and
+    ``/rename``: both must land on B, never the shared 404.
+    """
+    from local_operator.server.routes import desktop_settings_intents
+
+    created = await asyncio.to_thread(
+        _create_named_session_on_a_real_peer,
+        peer_pair,
+        monkeypatch,
+        name="desktop-effort",
+        prompt="warm up",
+    )
+    try:
+        await asyncio.to_thread(clear_cache)
+        monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(created.server_a.root))
+        app, client = await _desktop_route_client(created.server_a.root, monkeypatch)
+        app.include_router(desktop_settings_intents.router)
+        await asyncio.to_thread(created.owner.wait_for_turn)
+        # The rig's mock model publishes no effort ladder, so the owner would
+        # (correctly) refuse every level. Give the OWNER's model a real ladder, on
+        # the owner's own loop, the way a reasoning model's catalogue row does.
+        session = created.owner.session
+
+        async def give_ladder() -> None:
+            session.set_model(
+                session.model.model_copy(
+                    update={
+                        "reasoning_efforts": ("low", "medium", "high"),
+                        "reasoning_effort": "high",
+                    }
+                )
+            )
+
+        await asyncio.to_thread(created.owner.on_session_loop, give_ladder())
+        before, target = "high", "medium"
+        assert created.owner.session.model.reasoning_effort == before
+        sid = created.session_id
+        async with client:
+            # The desktop has the conversation OPEN (its snapshot), which is what
+            # keeps the peer bridge resident for the applier's confirmation read.
+            opened = await client.get(f"/v1/desktop/sessions/{sid}")
+            assert opened.status_code == 200, opened.text
+            posted = await client.post(
+                f"/v1/desktop/sessions/{sid}/settings-intents",
+                json={
+                    "request_id": str(uuid.uuid4()),
+                    "kind": "effort",
+                    "value": target,
+                },
+            )
+            print(f"INTENT POST: {posted.status_code} {posted.text[:240]}")
+            assert posted.status_code == 202, posted.text
+            assert not (created.server_a.root / "sessions" / sid).exists()
+            landed = await _wait(lambda: created.owner.session.model.reasoning_effort == target)
+            assert landed, (before, created.owner.session.model.reasoning_effort)
+
+            async def slot_state() -> str | None:
+                listed = await client.get(
+                    "/v1/desktop/settings-intents", params={"session_id": sid}
+                )
+                slot = listed.json()["result"]["intents"].get(sid, {}).get("effort")
+                return slot and slot["state"]
+
+            deadline = time.monotonic() + net_fixtures.NET_WAIT_BUDGET_S
+            state = await slot_state()
+            while state not in {"applied", None, "failed"} and time.monotonic() < deadline:
+                await asyncio.sleep(0.1)
+                state = await slot_state()
+            print(
+                f"INTENT SLOT: {state} owner effort={created.owner.session.model.reasoning_effort}"
+            )
+            assert state in {"applied", None}, state
+
+            # THE /commands DOOR: the strip's typed form, and a rename.
+            typed = await client.post(
+                f"/v1/desktop/sessions/{sid}/commands",
+                json={
+                    "request_id": str(uuid.uuid4()),
+                    "command": "effort",
+                    "args": before,
+                },
+            )
+            print(f"COMMAND /effort: {typed.status_code} {typed.text[:240]}")
+            assert typed.status_code == 200, typed.text
+            assert await _wait(lambda: created.owner.session.model.reasoning_effort == before)
+            renamed = await client.post(
+                f"/v1/desktop/sessions/{sid}/commands",
+                json={
+                    "request_id": str(uuid.uuid4()),
+                    "command": "rename",
+                    "args": "from A",
+                },
+            )
+            assert renamed.status_code == 200, renamed.text
+            assert await _wait(lambda: created.owner.session.conversation_name == "from A")
+            applier = app.state.settings_applier
+            await applier.close()
+    finally:
+        await asyncio.to_thread(created.stop)
+
+
+@pytest.mark.asyncio
 async def test_the_remote_client_mirrors_the_input_mode_carriage_gate(
     peer_pair: Devices, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -73,9 +73,12 @@ working backend, and ``lop services status`` still reports the drift.
 from __future__ import annotations
 
 import asyncio
+import ctypes
 import logging
 import os
 import signal
+import sys
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -487,7 +490,7 @@ class ReloadWatch:
             finally:
                 hub.end_reload()
 
-    def plan(self) -> ReloadPlan:
+    def plan(self, *, allow_same_build: bool = False) -> ReloadPlan:
         """Resolve what the replacement will be, or refuse with the reason.
 
         NO WORK IS DONE HERE, deliberately: this is the half a test can drive on
@@ -496,39 +499,7 @@ class ReloadWatch:
         separate from the drain means a refusal is decided before anything is
         interrupted.
         """
-        from local_operator import update
-        from local_operator.server import registry as serve_registry
-
-        fd = listener_fd(self.app)
-        if fd is None:
-            raise ReloadRefusal(
-                "this daemon has no listening socket of its own to carry across an "
-                "exec (a --reload child's port belongs to its supervisor)"
-            )
-        announced = serve_registry.advertised_address(self.app)
-        if announced is None:
-            raise ReloadRefusal("this daemon was never told which address it is serving on")
-        interpreter = update.current_interpreter()
-        if interpreter is None:
-            raise ReloadRefusal(
-                "the install pointer resolves to nothing, so there is no build to move onto; "
-                "run `lop update` or `lop-update` first"
-            )
-        target_root = update.current_install_root()
-        loaded_root = Path(update.process_install_root())
-        if target_root is not None and _same_tree(loaded_root, target_root):
-            raise ReloadRefusal(
-                f"this daemon is already running the build the pointer names ({loaded_root})"
-            )
-        host, port = announced
-        return ReloadPlan(
-            interpreter=Path(interpreter),
-            target_root=target_root or Path(interpreter).parent.parent,
-            loaded_root=loaded_root,
-            listener_fd=fd,
-            host=host,
-            port=int(port),
-        )
+        return plan_for(self.app, allow_same_build=allow_same_build)
 
     async def drain(self) -> None:
         """Wait for the narrow set of things a reload must not cut. Bounded.
@@ -556,64 +527,200 @@ class ReloadWatch:
 
     def blocker(self) -> str | None:
         """Positive local work inventory; unreadable/unsupported always defers."""
-        state = getattr(self.app, "state", None)
-        try:
-            pool = getattr(state, "desktop_sessions", None)
-            if pool is not None:
-                check = getattr(pool, "reload_blocker", None)
-                if not callable(check):
-                    return "desktop reload safety capability is unavailable"
-                reason = check()
-                if reason is not None and not isinstance(reason, str):
-                    return "desktop reload safety probe is unreadable"
-                if reason:
-                    return reason
-            if getattr(state, FENCE_ATTR, False) is not True:
-                return "request admission inventory is unavailable"
-            # An ABSENT counter under a live fence is still unreadable inventory,
-            # not "zero requests": a fixture or a rebuilt app can leave the fence
-            # set and the counter gone, and reading that as 0 would let a reload
-            # exec over work it cannot see. Same fail-closed direction as the
-            # fence guard above.
-            requests = getattr(state, REQUESTS_ATTR, None)
-            if requests is None:
-                return "request admission inventory is unavailable"
-            if int(requests):
-                return f"{requests} daemon-owned request(s)"
-            scheduler = getattr(state, "scheduler_service", None)
-            if scheduler is not None:
-                check = getattr(scheduler, "reload_blocker", None)
-                if not callable(check):
-                    return "scheduler reload safety capability is unavailable"
-                reason = check()
-                if reason is not None and not isinstance(reason, str):
-                    return "scheduler reload safety probe is unreadable"
-                if reason:
-                    return reason
-            manager = getattr(state, "job_manager", None)
-            if manager is not None:
-                for job in manager.jobs.values():
-                    task = getattr(job, "task", None)
-                    if task is not None and not task.done():
-                        return "daemon-owned legacy job is active"
-                    if getattr(job, "status", None) in ("pending", "processing"):
-                        return "daemon-owned legacy job is pending"
-            hub = getattr(state, "hub_sync", None)
-            check = getattr(hub, "reload_blocker", None)
+        return work_blocker(self.app)
+
+
+def work_blocker(app: Any, *, count_requests: bool = True) -> str | None:
+    """The reload drain's inventory of work a re-exec must not cut, or ``None``.
+
+    A module function rather than only ``ReloadWatch.blocker`` so the loop
+    watchdog (``server/loop_watchdog.py``) applies the SAME rules from its own
+    thread. Every probe it calls is a read (counters, ``task.done()``, a lock's
+    ``locked()``), so reading it off the loop can only see a slightly stale
+    value — never mutate one — and the exec it gates re-reads nothing after.
+
+    ``count_requests=False`` is the watchdog's one exception, and only it uses
+    it: on a wedged loop the in-flight requests are the work that CANNOT finish,
+    so counting them would refuse the restart in exactly the state it exists
+    for. Everything unrecoverable (a runtime mid-spawn, scheduler runs, legacy
+    jobs, hub work, the Aida bootstrap) still blocks.
+    """
+    state = getattr(app, "state", None)
+    try:
+        pool = getattr(state, "desktop_sessions", None)
+        if pool is not None:
+            check = getattr(pool, "reload_blocker", None)
             if not callable(check):
-                return "hub continuity is unsupported; handoff deferred"
+                return "desktop reload safety capability is unavailable"
             reason = check()
             if reason is not None and not isinstance(reason, str):
-                return "hub reload safety probe is unreadable"
+                return "desktop reload safety probe is unreadable"
             if reason:
                 return reason
-            boot = getattr(state, "aida_boot_task", None)
-            if boot is not None and not boot.done():
-                return "daemon bootstrap work is active"
-        except Exception:  # noqa: BLE001 — unreadable is never permission to exec
-            logger.warning("serve reload: local work inventory is unreadable", exc_info=True)
-            return "daemon-owned work inventory is unreadable; handoff deferred"
-        return None
+        if getattr(state, FENCE_ATTR, False) is not True:
+            return "request admission inventory is unavailable"
+        # An ABSENT counter under a live fence is still unreadable inventory,
+        # not "zero requests": a fixture or a rebuilt app can leave the fence
+        # set and the counter gone, and reading that as 0 would let a reload
+        # exec over work it cannot see. Same fail-closed direction as the
+        # fence guard above.
+        requests = getattr(state, REQUESTS_ATTR, None)
+        if requests is None:
+            return "request admission inventory is unavailable"
+        if count_requests and int(requests):
+            return f"{requests} daemon-owned request(s)"
+        scheduler = getattr(state, "scheduler_service", None)
+        if scheduler is not None:
+            check = getattr(scheduler, "reload_blocker", None)
+            if not callable(check):
+                return "scheduler reload safety capability is unavailable"
+            reason = check()
+            if reason is not None and not isinstance(reason, str):
+                return "scheduler reload safety probe is unreadable"
+            if reason:
+                return reason
+        manager = getattr(state, "job_manager", None)
+        if manager is not None:
+            for job in manager.jobs.values():
+                task = getattr(job, "task", None)
+                if task is not None and not task.done():
+                    return "daemon-owned legacy job is active"
+                if getattr(job, "status", None) in ("pending", "processing"):
+                    return "daemon-owned legacy job is pending"
+        hub = getattr(state, "hub_sync", None)
+        check = getattr(hub, "reload_blocker", None)
+        if not callable(check):
+            return "hub continuity is unsupported; handoff deferred"
+        reason = check()
+        if reason is not None and not isinstance(reason, str):
+            return "hub reload safety probe is unreadable"
+        if reason:
+            return reason
+        boot = getattr(state, "aida_boot_task", None)
+        if boot is not None and not boot.done():
+            return "daemon bootstrap work is active"
+    except Exception:  # noqa: BLE001 — unreadable is never permission to exec
+        logger.warning("serve reload: local work inventory is unreadable", exc_info=True)
+        return "daemon-owned work inventory is unreadable; handoff deferred"
+    return None
+
+
+def plan_for(app: Any, *, allow_same_build: bool = False) -> ReloadPlan:
+    """``ReloadWatch.plan`` as a function, so the loop watchdog can plan without a watch."""
+    from local_operator import update
+    from local_operator.server import registry as serve_registry
+
+    fd = listener_fd(app)
+    if fd is None:
+        raise ReloadRefusal(
+            "this daemon has no listening socket of its own to carry across an "
+            "exec (a --reload child's port belongs to its supervisor)"
+        )
+    announced = serve_registry.advertised_address(app)
+    if announced is None:
+        raise ReloadRefusal("this daemon was never told which address it is serving on")
+    interpreter = update.current_interpreter()
+    if interpreter is None and allow_same_build:
+        # The emergency restart's only question is "a build that can start",
+        # and the loaded one can: an editable or rig run has no pointer.
+        interpreter = sys.executable
+    if interpreter is None:
+        raise ReloadRefusal(
+            "the install pointer resolves to nothing, so there is no build to move onto; "
+            "run `lop update` or `lop-update` first"
+        )
+    target_root = update.current_install_root()
+    loaded_root = Path(update.process_install_root())
+    if not allow_same_build and target_root is not None and _same_tree(loaded_root, target_root):
+        raise ReloadRefusal(
+            f"this daemon is already running the build the pointer names ({loaded_root})"
+        )
+    host, port = announced
+    return ReloadPlan(
+        interpreter=Path(interpreter),
+        target_root=target_root or Path(interpreter).parent.parent,
+        loaded_root=loaded_root,
+        listener_fd=fd,
+        host=host,
+        port=int(port),
+    )
+
+
+def restart_blocker(app: Any) -> str | None:
+    """Why the loop watchdog's emergency restart must not happen now, or ``None``.
+
+    A requested reload that is pending or mid-drain owns this process's exit
+    (its admission fence is closed and it will exec or refuse on its own), so
+    the watchdog never races it. Otherwise: :func:`work_blocker` minus the
+    request count, for the reason that function's docstring gives.
+    """
+    state = getattr(app, "state", None)
+    if getattr(state, PENDING_ATTR, False) or getattr(state, ADMISSION_ATTR, False):
+        return "a requested reload is pending or draining; it owns this exit"
+    return work_blocker(app, count_requests=False)
+
+
+def emergency_restart(app: Any) -> str | None:
+    """Re-exec this stalled daemon onto the current build; returns why not on refusal.
+
+    THE SAME EXEC AN OPERATOR'S RELOAD PERFORMS (same pid, inherited listener,
+    piped bearer, ``SIG_IGN`` across the boot window), with two deliberate
+    differences, both because the caller is ``loop_watchdog``'s thread and the
+    loop it watches is not turning:
+
+    * no drain loop and no smoke: both await on the stalled loop. The gate is
+      :func:`restart_blocker`, sampled by the caller immediately before this;
+    * the loaded build is an acceptable target: the point is a fresh image of a
+      build that can start, not a move, so "already running it" is not a refusal.
+
+    Never raises: a refusal or a failed exec is returned as the sentence to log,
+    and the daemon keeps running exactly as it was (fail closed).
+    """
+    try:
+        resolved = plan_for(app, allow_same_build=True)
+    except ReloadRefusal as refusal:
+        return str(refusal)
+    except Exception as error:  # noqa: BLE001 — an unplannable restart keeps the daemon
+        return f"restart plan unreadable: {error!r}"
+    logger.warning(
+        "serve loop watchdog: pid %d re-executing onto %s (interpreter %s, listener fd %d)",
+        os.getpid(),
+        resolved.target_root,
+        resolved.interpreter,
+        resolved.listener_fd,
+    )
+    try:
+        _exec(resolved)
+    except OSError as error:
+        return f"re-exec failed: {error!r}"
+    return "re-exec returned without replacing the process"  # pragma: no cover
+
+
+def _ignore_reload_signal() -> Any:
+    """Set :data:`RELOAD_SIGNAL` to ``SIG_IGN`` for the exec; return the restorer.
+
+    ``signal.signal`` works only on the main thread, and the loop watchdog execs
+    from its own thread while the main (loop) thread is stalled. The
+    disposition is process-wide either way, so off the main thread the C
+    library's ``signal`` sets it directly; the restorer puts back the exact
+    handler pointer it replaced (only reached when the exec FAILED).
+    """
+    # Bind the narrowed value locally: the restorer lambdas would otherwise
+    # re-read the module global, which the type checker cannot narrow.
+    signum = RELOAD_SIGNAL
+    if signum is None:
+        return lambda: None
+    if threading.current_thread() is threading.main_thread():
+        previous = signal.getsignal(signum)
+        signal.signal(signum, signal.SIG_IGN)
+        return lambda: signal.signal(signum, previous)
+    # ``ctypes`` is imported at module scope (review N1): this runs inside a
+    # wedged process, where taking the import machinery is one more lock.
+    libc = ctypes.CDLL(None, use_errno=True)
+    libc.signal.restype = ctypes.c_void_p
+    libc.signal.argtypes = (ctypes.c_int, ctypes.c_void_p)
+    raw = libc.signal(int(signum), 1)  # 1 == SIG_IGN on POSIX
+    return lambda: libc.signal(int(signum), raw)
 
 
 def _same_tree(left: Path, right: Path) -> bool:
@@ -680,9 +787,7 @@ def _exec(plan: ReloadPlan) -> None:
     # it, unlike handlers), so the successor starts deaf and
     # ``add_signal_handler`` then installs the real handler. That closes the
     # window by construction rather than by timing.
-    previous = signal.getsignal(RELOAD_SIGNAL) if RELOAD_SIGNAL is not None else None
-    if RELOAD_SIGNAL is not None:
-        signal.signal(RELOAD_SIGNAL, signal.SIG_IGN)
+    previous = _ignore_reload_signal()
     argv = [
         str(plan.interpreter),
         SAFE_PATH_FLAG,
@@ -720,8 +825,7 @@ def _exec(plan: ReloadPlan) -> None:
         # every child it later spawns, including the runtime spawns that are its
         # whole purpose.
         try:
-            if RELOAD_SIGNAL is not None:
-                signal.signal(RELOAD_SIGNAL, previous)
+            previous()
         finally:
             os.set_inheritable(fd, False)
 

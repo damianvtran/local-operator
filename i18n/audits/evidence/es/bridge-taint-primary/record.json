@@ -1,0 +1,61 @@
+{
+  "schema": 1,
+  "audit_id": "primary-c1597c6444c3",
+  "audit_kind": "bounded_namespace_independent_semantic_audit",
+  "locale": "es",
+  "namespace": "wire.bridge_taint",
+  "audit_date": "2026-11-11",
+  "audited_revision": "635f122e065af8f59940bee9673ae4b4ef18d8ea",
+  "key_count": {
+    "en": 5,
+    "target": 5,
+    "context": 5
+  },
+  "auditor": {
+    "agent": "reviewer (radientdev team) / independent i18n-auditor",
+    "session": "c1597c6444c3",
+    "model": "anthropic/claude-opus-5-5",
+    "actual_model_source": "session model header",
+    "fallback": "none",
+    "independent_from_translator_session": true,
+    "independence": "No authorship or remediation of audited catalogue/context bytes; translator was a task lane on anthropic/claude-opus-5-5 (commit ed2d88c8d868). Same model as the translator: agent-independent, not model-independent."
+  },
+  "translator": {
+    "agent": "task lane (i18n translator), commit ed2d88c8d868",
+    "model": "anthropic/claude-opus-5-5",
+    "date": "2026-11-11"
+  },
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/wire.bridge_taint.json",
+      "sha256": "b1a7ea572ef3fcd5cec4a980daaa5d038977321171cff04971b3c6da9ab6a5c7"
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/wire.bridge_taint.context.json",
+      "sha256": "bca00094e3a6ab6f2689e8a62bac3f3e9e2bc128346989715816d1a2a01dfbcd"
+    },
+    "target": {
+      "path": "local_operator/i18n/catalogues/es/wire.bridge_taint.json",
+      "sha256": "5f1b0acef6dd02a8073299703d618a0f18667597747edd81880b6ef9a9f30533"
+    }
+  },
+  "current_bytes_match_audited_hashes": true,
+  "current_report_verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "finding_ids": [],
+    "deferred_non_gating_finding_ids": [
+      "N2"
+    ]
+  },
+  "semantic_reason": "'agente de un compañero de equipo' = another person's agent; 'en la terminal' kept; 'en pausa' = paused; 'sigue desactivada' = still off; 'no se puede activar desde aquí' = can't be turned on from here; tú register; “Allow all” and modo auto Latin; title 'Mensajes de agentes' exact. N2: 'Cada llamada a herramientas' vs existing singular 'llamada a herramienta' — non-gating.",
+  "context_comparison": "passed; all 5 keys read against wire.bridge_taint.context.json notes (teammate's agent = another person's agent; title match; /approvals auto, /new, {request} verbatim; 'in the terminal' deliberate)",
+  "safety_classification": "high-visibility/safety copy (approval-gate egress latch); docs/I18N.md step 3 requires a SECOND independent audit. This record is the FIRST audit only; no second-audit approval is claimed or manufactured.",
+  "artifacts": [
+    {
+      "path": "~/.local-operator/sessions/c1597c6444c3/scratchpad/bridge-taint-audit/report.md",
+      "sha256": "a15cdf5fa2fb00d227c95e8fbe5a9f05788c2ad4c570b86d268d592c848c4459"
+    }
+  ],
+  "limitations": "Linguistic/copy audit only; no native rendered-flow/RTL paint proof for target locales. Second independent audit pending."
+}

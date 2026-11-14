@@ -40,7 +40,12 @@ from local_operator.tui.widgets.editor import (
     SHELL_PLACEHOLDER,
     Editor,
 )
-from local_operator.tui.widgets.transcript import NoticeBlock, TranscriptView, UserBlock
+from local_operator.tui.widgets.transcript import (
+    TAIL_TOLERANCE_ROWS,
+    NoticeBlock,
+    TranscriptView,
+    UserBlock,
+)
 from tests.unit.tui.test_app_pilot import FakeSession, _factory, _renderable_plain
 from tests.unit.tui.waiting import settle
 
@@ -142,7 +147,8 @@ async def _open_with_question(pilot, app: OperatorApp, question: str) -> AsidePa
     Two product workers stand between the keystroke and the state every caller
     reads, and a fixed number of ``pause()`` calls was a bet on both (CI lost it:
     ``aside_calls == []`` on #3720, ``forked == []`` on #3732; a 0.4 s delay
-    injected at either boundary reproduces both exactly):
+    injected at the boot or the aside boundary reproduces the first exactly,
+    while the second needs the delay at the ``aside-fork`` boundary instead):
 
     * the BOOT worker (group ``session``) must have adopted the session, or
       ``_ask_aside`` answers "the session is still starting…" on the card and
@@ -548,11 +554,21 @@ async def test_a_reader_scrolled_back_is_not_yanked_to_the_tail_on_close() -> No
     session = AsideSession(answer="\n\n".join(f"para {i} " * 20 for i in range(20)))
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(120, 24)) as pilot:
-        await pilot.pause()
+        # Boot adoption calls ``follow_tail`` (via ``project_settled_rows``).
+        # If it lands AFTER the reader parks at y=3 below, the next
+        # ``_scroll_to_tail`` drags the view to the end and the premise reads
+        # ``68 < 68`` -- CI run 43279222834. Wait on the adoption edge first.
+        await _settle_boot(pilot, app, session)
         for i in range(40):
             app._append_block(UserBlock(f"question number {i:02d} about the codebase"))
-        await pilot.pause()
         transcript = app._transcript_view()
+        # Park only once the appended rows are laid out past y=3 by more than
+        # the tail tolerance; otherwise y=3 could still count as "at the tail".
+        await settle(
+            pilot,
+            lambda: transcript.max_scroll_y > 3 + TAIL_TOLERANCE_ROWS,
+            what="the 40 appended rows are laid out past the parked offset",
+        )
 
         # Scroll back to re-read something, the gesture the docstring names.
         transcript.note_user_scroll()
@@ -814,13 +830,16 @@ async def test_forking_mid_turn_queues_the_aside_and_mounts_nothing_yet() -> Non
 
         await pilot.press("ctrl+f")
         # ^f only schedules the `aside-fork` worker; `adopt_aside` runs in it.
-        # Join that group, and wait on the product's own ^f gate going false
-        # (the worker consumed the card), so a worker that starts and finishes
-        # inside one pause is still covered. Five pauses lost this race on CI.
+        # Join that group, and wait on the session having been handed the pair
+        # (`adopt_aside` ran), so a worker that starts and finishes inside one
+        # pause is still covered. Five pauses lost this race on CI. Not
+        # `not app._aside_can_fork()`: that gate includes `not panel.is_open`,
+        # so a card left open would time out here instead of failing the
+        # `is_open` assertion below at its own line (#3783 R1-m1).
         await settle(
             pilot,
-            lambda: not app._aside_can_fork(),
-            what="the ^f fork worker consumed the aside",
+            lambda: bool(session.forked),
+            what="the ^f fork worker handed the pair to the session",
             workers=("aside-fork",),
         )
 

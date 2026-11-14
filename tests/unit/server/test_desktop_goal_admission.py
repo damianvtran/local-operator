@@ -155,13 +155,21 @@ class FakeRemote:
         self.ack_error: BaseException | None = None
         self.fail_after_park: BaseException | None = None
         self.routed: list[tuple[str, str]] = []
+        self.bridge_acks: list[bool | None] = []
         self.admissions: list[tuple[str, str]] = []
         self.steered: list[bool] = []
 
     async def bind_runtime(self) -> None:
         self.binds += 1
 
-    async def route_shared_slash(self, command: str, args: str, images: Any = None):
+    async def route_shared_slash(
+        self, command: str, args: str, images: Any = None, *, bridge_ack: bool | None = None
+    ):
+        # ``bridge_ack`` mirrors the RuntimeSession protocol keyword. The
+        # ``None`` default is this fake's own sentinel for "the route did not
+        # pass it", so a test can prove an unmarked command keeps the old call
+        # shape rather than sending ``bridge_ack=False``.
+        self.bridge_acks.append(bridge_ack)
         self.routed.append((command, args))
         return dict(self.receipt)
 
@@ -364,6 +372,33 @@ async def test_a_goal_command_admits_its_argument_as_a_user_turn(desktop) -> Non
     # The ARGUMENT, with the caller's own request id: a second submission under
     # a fresh id would be a second turn the user never asked for.
     assert remote.admissions == [("Preserve one identity", REQUEST_ID)]
+
+
+@pytest.mark.asyncio
+async def test_bridge_ack_reaches_the_remote_only_when_the_client_set_it(desktop) -> None:
+    """Gate regression (PR #3796): the route forwarded ``bridge_ack=False`` on
+    every command, so any remote whose ``route_shared_slash`` predates the
+    keyword answered each ordinary slash with a TypeError. Unmarked commands keep
+    the pre-taint call shape; a marked one still carries the marker, and absence
+    stays the owner's fail-closed "not acknowledged".
+    """
+    client, remote, _bridge = desktop
+
+    unmarked = await _goal(client, "Preserve one identity")
+    marked = await client.post(
+        f"/v1/desktop/sessions/{SESSION}/commands",
+        json={
+            "request_id": "0b1d9e2a-3c4f-4a5b-8c6d-7e8f9a0b1c2d",
+            "command": "goal",
+            "args": "Preserve one identity",
+            "images": [],
+            "bridge_ack": True,
+        },
+    )
+
+    assert unmarked.status_code == 200, unmarked.text
+    assert marked.status_code == 200, marked.text
+    assert remote.bridge_acks == [None, True]
 
 
 @pytest.mark.asyncio

@@ -1,0 +1,58 @@
+{
+  "schema": 1,
+  "locale": "ru",
+  "namespace": "relay.chrome",
+  "history_sha256": "ee15a3f294aa8f47e96cab64924df3e24794a7514b09ec2e3a5d5697dc19d32b",
+  "entries": [
+    {
+      "locale": "ru",
+      "namespace": "relay.chrome",
+      "source_sha256": "10555fc5b4ec44a909ca3d9ddb7624c5eceedc3350599282428bbeeba5f55982",
+      "translator": {
+        "agent": "relay-web coder bbcd725a2ca0; round-1 remediation coder 1c07b39051ed (lopdev coder role) — relayed from PR #3832 i18n audit comments 6811281029/6812645445, not independently verified",
+        "model": "anthropic/claude-opus-5-5",
+        "fallback": "none reported in the relayed source",
+        "date": "2026-11-11..2026-11-12 (git: 09839b6de, 75606914f, eaff8c7a9)"
+      },
+      "auditor": {
+        "agent": "independent i18n auditor (lopdev reviewer role, task i18n-inpr-core, session 5c6cf4252f37; independent of the translators and of the round-1/2 auditors 506f24a144fa/2d1500d56d0e, whose artifacts were not read)",
+        "session": "5c6cf4252f37",
+        "model": "anthropic/claude-opus-5-5",
+        "fallback": "none observed in this session",
+        "date": "2026-11-12",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0,
+        "minor": 0,
+        "nit": 0
+      },
+      "status": "passed",
+      "note": "Round 3 (in-PR apply) 2026-11-12, reviewer 5c6cf4252f37 (anthropic/claude-opus-5-5, no fallback): read all 13 changed/added key(s) against i18n/glossary.md and i18n/style-guides/ru.md; mechanical: placeholders, CLDR plural arms, NFC/bidi/ellipsis/fr U+202F, maxCells via rich cell_len; 85 unchanged key(s) byte-identical to the passed, fresh base row at origin/main 27bfbdb21. Target ru/relay.chrome.json sha256 070479279f0df5af37df04e284920d27f49ea5495774fba2d7c3af43c23a66d7. Dispositions: no findings."
+    },
+    {
+      "locale": "ru",
+      "namespace": "relay.chrome",
+      "source_sha256": "10555fc5b4ec44a909ca3d9ddb7624c5eceedc3350599282428bbeeba5f55982",
+      "translator": {
+        "agent": "relay-web coder bbcd725a2ca0; round-1 remediation coder 1c07b39051ed (lopdev coder role) — relayed from PR #3832 i18n audit comments 6811281029/6812645445, not independently verified",
+        "model": "anthropic/claude-opus-5-5",
+        "fallback": "none reported in the relayed source",
+        "date": "2026-11-11..2026-11-12 (git: 09839b6de, 75606914f, eaff8c7a9)"
+      },
+      "auditor": {
+        "agent": "independent i18n auditor (lopdev reviewer role, task i18n-inpr-core, session 5c6cf4252f37; independent of the translators and of the round-1/2 auditors 506f24a144fa/2d1500d56d0e, whose artifacts were not read)",
+        "session": "5c6cf4252f37",
+        "model": "anthropic/claude-opus-5-5",
+        "fallback": "none observed in this session",
+        "date": "2026-11-12",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0,
+        "minor": 0,
+        "nit": 0
+      },
+      "status": "passed",
+      "note": "Round 3 evidence binding 2026-11-12, reviewer 5c6cf4252f37 (anthropic/claude-opus-5-5, no fallback): same audit and verdict as the preceding row, re-appended so the cg1 byte pin moves to a committed record. Source 10555fc5b4ec44a909ca3d9ddb7624c5eceedc3350599282428bbeeba5f55982 and target 070479279f0df5af37df04e284920d27f49ea5495774fba2d7c3af43c23a66d7 recomputed from the shipped files at 4f6f57986. Evidence: i18n/audits/evidence/ru/relay.chrome/temporary-r3-5c6cf4252f37/record.json"
+    }
+  ]
+}

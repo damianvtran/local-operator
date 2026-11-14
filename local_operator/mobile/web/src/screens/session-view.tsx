@@ -25,7 +25,7 @@
 import { contentDir } from "../lib/content-direction";
 import { flushSync } from "react-dom";
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
-import { setSessionPin } from "../api";
+import { HttpError, setSessionPin, setSessionTemporary, startSession } from "../api";
 import { AskDock } from "../components/ask-dock";
 import { AsksSheet } from "../components/asks-sheet";
 import { ModelSheet } from "../components/model-sheet";
@@ -46,7 +46,17 @@ import { Chip } from "../components/ui/chip";
 import { cn } from "../lib/cn";
 import { COLUMN_HEIGHT_VAR, COLUMN_TOP_VAR, SHORT_COLUMN_PX } from "../lib/column";
 import { navigate, parseHash } from "../router";
-import { consumePendingFocus } from "../lib/pending-focus";
+import { consumePendingFocus, markPendingFocus } from "../lib/pending-focus";
+import { clampRefusalReason, refusalReason } from "../lib/refusal";
+import {
+	SESSION_TEMPORARY_CODE,
+	SESSION_TEMPORARY_DELETED_CODE,
+	makeTemporaryNeedsConfirm,
+	readTemporary,
+	sessionTemporary,
+	temporaryChatsEnabled,
+} from "../lib/temporary";
+import { ChromeIcon } from "../components/ui/chrome-icon";
 import { pinRefusalText } from "../lib/pin-refusal";
 import { useCompletionView } from "../use-completion-view";
 import { usePendingEchoes } from "../pending-echo";
@@ -54,7 +64,13 @@ import { AgentScreen } from "./agent-view";
 import {
 	applySessionPin,
 	clearSessionPinMark,
+	getDraft,
 	messageRuntime,
+	noteViewedSession,
+	recordTemporaryTombstone,
+	setDraft,
+	useCapabilities,
+	useTemporaryTombstone,
 	retainProjectionStream,
 	retainSessionListStream,
 	usePinMarks,
@@ -181,7 +197,7 @@ function Header({
 	   below clears it on the next projection that carries a message, and leaves
 	   refusals that were never about emptiness (a network failure on a
 	   conversation with history) alone. */
-	const [pinRefusal, setPinRefusal] = useState<{ text: string; empty: boolean } | null>(
+	const [pinRefusal, setPinRefusal] = useState<{ text: string; empty: boolean; keepAndPin?: boolean } | null>(
 		null,
 	);
 	/* THE PIN STATE COMES FROM THE LIST STORE, which is the same row the daemon
@@ -205,6 +221,42 @@ function Header({
 	   `avatar.url` goes null again if the image fails to load, which removes the
 	   button below -- a 404 leaves the header exactly as it is without a picture. */
 	const avatar = useAgentAvatar(row?.agent_id, row?.avatar_sha256);
+	/* TEMPORARY CHAT STATE (contract §2.3). The capability is the gate; the mark
+	   comes from the events frame when it carries one, else the list row (the
+	   list stream asks for temporary rows exactly when the capability is there).
+	   `temporaryMark` is the state the toggle route READ BACK, held only until a
+	   frame agrees, so the control answers the press at once without claiming a
+	   state the daemon did not confirm. */
+	const temporaryEnabled = temporaryChatsEnabled(useCapabilities());
+	const temporaryInfo = sessionTemporary(temporaryEnabled, projection.temporary, row);
+	const [temporaryMark, setTemporaryMark] = useState<boolean | null>(null);
+	const [temporaryBusy, setTemporaryBusy] = useState(false);
+	const [temporaryRefusal, setTemporaryRefusal] = useState("");
+	const isTemporary = temporaryEnabled && (temporaryMark ?? temporaryInfo !== null);
+	useEffect(() => {
+		if (temporaryMark !== null && temporaryMark === (temporaryInfo !== null)) setTemporaryMark(null);
+	}, [temporaryMark, temporaryInfo]);
+	const setTemporary = async (on: boolean): Promise<boolean> => {
+		if (!temporaryEnabled) return false;
+		setTemporaryBusy(true);
+		setTemporaryRefusal("");
+		try {
+			const saved = await setSessionTemporary(sessionId, on);
+			setTemporaryMark(readTemporary(saved.temporary) !== null);
+			return true;
+		} catch (error) {
+			if (error instanceof HttpError && error.code === SESSION_TEMPORARY_DELETED_CODE) {
+				recordTemporaryTombstone(sessionId, null);
+			} else {
+				/* The daemon's own keyed sentence (`session_pinned`,
+				   `session_in_project`, …), in the pin refusal's strip. */
+				setTemporaryRefusal(clampRefusalReason(refusalReason(error)));
+			}
+			return false;
+		} finally {
+			setTemporaryBusy(false);
+		}
+	};
 	const [avatarHint, setAvatarHint] = useState(false);
 	useEffect(() => {
 		if (!avatarHint) return;
@@ -241,8 +293,24 @@ function Header({
 			setPinRefusal({
 				text: pinRefusalText(error),
 				empty: projection.transcript.length === 0,
+				/* A temporary chat cannot be pinned until it is kept (409
+				   `session_temporary`): offer the one-tap remedy beside the reason. */
+				keepAndPin: next && error instanceof HttpError && error.code === SESSION_TEMPORARY_CODE,
 			});
 			return false;
+		}
+	};
+	const keepAndPin = async () => {
+		if (await setTemporary(false)) {
+			setPinRefusal(null);
+			applySessionPin(sessionId, true);
+			try {
+				const saved = await setSessionPin(sessionId, true);
+				if (!saved.pinned) clearSessionPinMark(sessionId);
+			} catch (error) {
+				clearSessionPinMark(sessionId);
+				setPinRefusal({ text: pinRefusalText(error), empty: false });
+			}
 		}
 	};
 	/* The 409's own exit, taken as soon as it is true (U17): the next projection
@@ -295,6 +363,7 @@ function Header({
 					open={healthOpen}
 					onOpenChange={setHealthOpen}
 					resume={resume}
+					temporary={isTemporary}
 				>
 					{/* THE NAME TRUNCATES, THE FACT DOES NOT (operator finding B): a long
 					    conversation title is cut with an ellipsis here, so the whole string
@@ -314,6 +383,30 @@ function Header({
 			    second unlabelled door on a width-starved row. The ask dock above
 			    the composer is the labelled ask door and is always present when
 			    asks exist, so the `? N` duplicate is gone rather than moved. */}
+			{temporaryEnabled && projection.transcript.length === 0 ? (
+				/* THE TEMPORARY TOGGLE, LEFT OF ⋮, ON AN EMPTY SESSION ONLY: the relay
+				   starts a backend session on ＋ New, so the choice is offered on the
+				   empty view, where nothing exists yet to delete (no confirmation).
+				   After the first message the subtitle carries the mark and the ⋮
+				   menu carries the toggle. The pressed state is the relay's own
+				   pressed pair (`session-group-toggle.tsx`): the accent wash
+				   ground plus accent ink, so ON is not carried by hue alone. */
+				<button
+					type="button"
+					data-temporary-toggle=""
+					disabled={temporaryBusy}
+					aria-pressed={isTemporary}
+					aria-label={messageRuntime.t("relay.session.temporary_toggle")}
+					title={messageRuntime.t("relay.session.temporary_toggle")}
+					onClick={() => void setTemporary(!isTemporary)}
+					className={cn(
+						HEADER_CONTROL,
+						isTemporary ? "bg-accent-wash text-accent" : "text-ink-muted",
+					)}
+				>
+					<ChromeIcon name="temporary" />
+				</button>
+			) : null}
 			<button
 				ref={menuButtonRef}
 				type="button"
@@ -348,6 +441,12 @@ function Header({
 				} : undefined}
 				resuming={resume.busy}
 				returnFocusRef={menuButtonRef}
+				temporary={temporaryEnabled ? {
+					on: isTemporary,
+					confirm: makeTemporaryNeedsConfirm(projection.transcript.length),
+					busy: temporaryBusy,
+					onSet: (on) => void setTemporary(on),
+				} : undefined}
 			/>
 			<GateSheet
 				open={gateOpen}
@@ -392,6 +491,21 @@ function Header({
 				className="bg-elevated px-2 py-1 text-meta break-words text-danger"
 			>
 				{pinRefusal.text}
+				{pinRefusal.keepAndPin ? (
+					<button
+						type="button"
+						disabled={temporaryBusy}
+						onClick={() => void keepAndPin()}
+						className="ms-2 min-h-11 font-medium text-accent underline"
+					>
+						{messageRuntime.t("relay.session.keep_and_pin")}
+					</button>
+				) : null}
+			</p>
+		) : null}
+		{temporaryRefusal ? (
+			<p role="alert" className="bg-elevated px-2 py-1 text-meta break-words text-danger">
+				{temporaryRefusal}
 			</p>
 		) : null}
 		</>
@@ -409,6 +523,8 @@ export function SessionScreen({
 	   snapshot is the ONE locale authority, so subscribing repaints it (QA Q-1). */
 	useLocaleSnapshot();
 	const { projection, connected } = useProjection(sessionId);
+	const tombstone = useTemporaryTombstone(sessionId);
+	useEffect(() => noteViewedSession(sessionId), [sessionId]);
 	/* THE ROUTE'S OWN TAB TITLE (U4, batch 2). A phone's task switcher and share
 	 * sheet read `document.title`, and a session wearing the list's `(3) local
 	 * operator` described the wrong screen. The session route names the
@@ -716,6 +832,7 @@ export function SessionScreen({
 	   (`session-view.health.test.tsx` pins that decision — U11). Nothing can be
 	   "synced" yet, so the ladder keeps its existing rule: it speaks once there
 	   is something to have fallen back from. */
+	if (tombstone !== undefined) return <TemporaryTombstone sessionId={sessionId} />;
 	if (!projection) {
 		return (
 			<div
@@ -1017,6 +1134,77 @@ export function SessionScreen({
 				currentSessionId={sessionId}
 			/>
 			</>}
+		</div>
+	);
+}
+
+/** THE TOMBSTONE: a temporary chat the machine deleted (404
+    `session_temporary_deleted`), shown in place of the conversation whether it
+    was deleted while open or reached later from a stale link. One sentence and
+    two ways out. The cached transcript is already gone (the store drops it with
+    the tombstone); the UNSENT DRAFT is not — it is shown here and moves into the
+    new temporary chat, because losing what the reader was typing is the one
+    loss this screen can prevent. */
+export function TemporaryTombstone({ sessionId }: { sessionId: string }) {
+	const enabled = temporaryChatsEnabled(useCapabilities());
+	const [draft] = useState(() => getDraft(sessionId));
+	const [starting, setStarting] = useState(false);
+	const [error, setError] = useState("");
+	const startNew = async () => {
+		if (starting || !enabled) return;
+		setStarting(true);
+		setError("");
+		try {
+			const res = await startSession({ temporary: true });
+			if (draft) setDraft(res.session_id, draft);
+			setDraft(sessionId, "");
+			markPendingFocus(res.session_id);
+			navigate(`/s/${encodeURIComponent(res.session_id)}`);
+		} catch (e) {
+			setError(clampRefusalReason(refusalReason(e)));
+			setStarting(false);
+		}
+	};
+	return (
+		<div data-temporary-tombstone="" className="relative mx-auto flex h-dvh w-full max-w-[var(--lo-column-max,28rem)] flex-col overflow-hidden">
+			<header className="flex h-[calc(56px+env(safe-area-inset-top))] shrink-0 items-center gap-2 px-1 pt-[env(safe-area-inset-top)]">
+				<button
+					type="button"
+					onClick={() => navigate("/")}
+					aria-label={messageRuntime.t("relay.session.back_to_chats")}
+					className={cn(HEADER_CONTROL, "text-ink-muted")}
+				>
+					<span aria-hidden dir="ltr" className="lo-directional">‹</span>
+				</button>
+			</header>
+			<div className="flex min-h-0 flex-1 flex-col items-center justify-center gap-3 px-6 text-center">
+				<span className="text-ink-dim"><ChromeIcon name="temporary" size={28} /></span>
+				<h2 className="text-heading font-semibold">{messageRuntime.t("relay.session.temporary_deleted_title")}</h2>
+				<p className="text-body-sm text-ink-muted">{messageRuntime.t("relay.session.temporary_deleted_detail")}</p>
+				{draft ? (
+					<blockquote dir={contentDir(draft)} data-draft="" className="w-full rounded-sm bg-surface px-3 py-2 text-start text-body-sm break-words whitespace-pre-wrap text-ink">
+						{draft}
+					</blockquote>
+				) : null}
+				{error ? <p role="alert" className="text-body-sm break-words text-danger">{error}</p> : null}
+				<div className="flex flex-col items-stretch gap-2 pt-2">
+					{enabled ? (
+						<button
+							type="button"
+							onClick={() => void startNew()}
+							disabled={starting}
+							aria-busy={starting}
+							className="flex min-h-11 items-center justify-center gap-2 rounded-sm bg-accent-wash px-4 text-body font-medium text-accent"
+						>
+							<ChromeIcon name="temporary" size={16} />
+							{messageRuntime.t("relay.session.temporary_new")}
+						</button>
+					) : null}
+					<button type="button" onClick={() => navigate("/")} className="min-h-11 px-4 text-body text-ink-muted">
+						{messageRuntime.t("relay.session.back_to_chats")}
+					</button>
+				</div>
+			</div>
 		</div>
 	);
 }

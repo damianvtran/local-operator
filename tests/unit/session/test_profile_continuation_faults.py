@@ -83,17 +83,17 @@ async def file_legacy_signed_receipt(session: Session, directory: Path, call_id:
         captured.append(intent)
         return None  # Refuse: this call only derives the authored proposal.
 
+    from tests.unit.session.test_account_profile_consent import _acked
+
+    capture_context = ToolContext(
+        cwd=".",
+        session_dir=str(directory),
+        agent_registry=session.agent_registry,
+        authorize_durable_write=capture,
+    )
+    # The whole-field rewrite is an acknowledged one (lossless-edit rule).
     await execute_agent(
-        call_id,
-        args,
-        None,
-        None,
-        ToolContext(
-            cwd=".",
-            session_dir=str(directory),
-            agent_registry=session.agent_registry,
-            authorize_durable_write=capture,
-        ),
+        call_id, _acked("agent", args, capture_context), None, None, capture_context
     )
     [intent] = captured
     assert intent.proposal is not None, "a bounded update must carry a proposal"
@@ -143,17 +143,19 @@ async def test_busy_actual_socket_hint_has_one_owned_continuation(root, monkeypa
     # The CURRENT host files this unasked update as an Agents proposal, never a
     # signed mesh request -- pinned here so the legacy rig below cannot drift
     # into describing the live path.
+    from tests.unit.session.test_account_profile_consent import _acked
+
+    # Untrusted run: since the 2026-11 ruling only such a run still files a
+    # proposal (a clean one writes directly); the whole-field rewrite is acked.
+    session._run_untrusted_input = True
+    current_context = ToolContext(
+        cwd=".",
+        session_dir=str(directory),
+        agent_registry=session.agent_registry,
+        authorize_durable_write=session._authorize_durable_write,
+    )
     current = await execute_agent(
-        "busy-current-call",
-        args,
-        None,
-        None,
-        ToolContext(
-            cwd=".",
-            session_dir=str(directory),
-            agent_registry=session.agent_registry,
-            authorize_durable_write=session._authorize_durable_write,
-        ),
+        "busy-current-call", _acked("agent", args, current_context), None, None, current_context
     )
     assert current.details is not None and current.details["status"] == "proposed"
     assert "approval_id" not in current.details and "receipt_id" not in current.details

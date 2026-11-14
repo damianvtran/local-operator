@@ -72,10 +72,17 @@ class BrokeredBearerAuth(httpx2.Auth):
         self._client = client
 
     def _live_bearer(self) -> str:
-        """The cached grant's bearer while the grant is live, else ``""``. No I/O."""
+        """The cached grant's bearer while the grant is live AND servable, else ``""``.
+
+        No network I/O. Through ``live_grant``, not the raw cache: an MCP OAuth
+        bearer has no issuer-side revoke, so after a panic this read is the only
+        thing between the held slot and every MCP request until the grant expires
+        (PR #3920 review M1). A refusal reads as ``""`` and the caller's borrow
+        then records why.
+        """
         from local_operator.network.credentials.types import Grant
 
-        grant = self._client.grants.get(self.key, "")
+        grant = self._client.live_grant(self.key, "")
         return grant.access_token if isinstance(grant, Grant) else ""
 
     def _blocking_bearer(self) -> str:

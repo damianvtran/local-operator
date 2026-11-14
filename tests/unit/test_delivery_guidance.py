@@ -50,14 +50,18 @@ def _fields(**overrides):
 # paragraph (the coder's pinned `MINOR/NIT never force another round` sentence
 # stays: a test asserts it). Trimming here would mean dropping a merge
 # invariant to keep a budget, which is the wrong trade.
+# Worktree hygiene (2026-11-13) gave every reader seed the site and removal
+# duty for an exception worktree (+80 chars each, measured the same way:
+# reviewer 3655 -> 3735, qa-tester 2694 -> 2774); readers had left checkouts
+# behind and 33 in session pads because no reader surface said where or when.
 BUDGETS = {
     "coder": 2800,
-    "reviewer": 3660,
+    "reviewer": 3740,
     "manager": 3750,
     "designer": 5650,
     "ux-reviewer": 4650,
     "aida": 8000,
-    "qa-tester": 2700,
+    "qa-tester": 2780,
 }
 
 
@@ -297,6 +301,27 @@ def test_delivery_guide_owns_the_shared_worktree_rule():
         "isolated HOME/config",
     ):
         assert required in policy
+
+
+def test_reader_worktrees_are_sited_and_removed_and_receipts_committed():
+    # 2026-11-13 hygiene receipts: reader checkouts left behind, 33 worktrees in
+    # session scratchpads and superseded receipts left `??` after merge. Every
+    # reader-facing surface names the site and the creator's removal duty.
+    policy = " ".join((ROOT / "local_operator/guides/delivery/GUIDE.md").read_text().split())
+    for required in (
+        "detached-SHA worktree in `<repo>/.worktrees/` (never a scratchpad or /tmp)",
+        "its creator removes it before reporting",
+        "a merged tree is `git status` clean",
+    ):
+        assert required in policy, required
+    assert "`<repo>/.worktrees/`, never a scratchpad" in DELIVERY_POINTER
+    assert "remove your own when the round ends" in DELIVERY_POINTER
+    for name in ("reviewer", "qa-tester", "designer", "ux-reviewer"):
+        seed = load_seed(name)
+        assert seed is not None
+        body = " ".join(seed.instructions.split())
+        assert "`.worktrees/`, never a scratchpad" in body, name
+        assert "remove your own when the round ends" in body, name
 
 
 def test_stale_copy_reviewer_gets_the_pointer_with_worktree_rule(tmp_path):

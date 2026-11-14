@@ -10,12 +10,36 @@ from __future__ import annotations
 from ..messages import Msg
 
 
+def approval_park_local(*, address: str) -> Msg:
+    return Msg("wire.sessions.approval_park_local", {"address": address})
+
+
+def approval_park_self() -> Msg:
+    return Msg("wire.sessions.approval_park_self", {})
+
+
 def approval_stop_local(*, address: str) -> Msg:
     return Msg("wire.sessions.approval_stop_local", {"address": address})
 
 
 def approval_stop_peer(*, address: str, peer: str) -> Msg:
     return Msg("wire.sessions.approval_stop_peer", {"address": address, "peer": peer})
+
+
+def park_done(*, name: str, wakes: int | float, monitors: int | float) -> Msg:
+    return Msg("wire.sessions.park_done", {"name": name, "wakes": wakes, "monitors": monitors})
+
+
+def park_self_refused_busy() -> Msg:
+    return Msg("wire.sessions.park_self_refused_busy", {})
+
+
+def park_self_scheduled(*, wakes: int | float, monitors: int | float) -> Msg:
+    return Msg("wire.sessions.park_self_scheduled", {"wakes": wakes, "monitors": monitors})
+
+
+def stop_dormant_hint() -> Msg:
+    return Msg("wire.sessions.stop_dormant_hint", {})
 
 
 def stop_pending(*, name: str, seconds: str) -> Msg:

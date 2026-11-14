@@ -9,5 +9,8 @@
   "cli.exec_runtime.model_returned": "[dim]se volvió a {selector}[/dim]",
   "cli.exec_runtime.compacting": "[dim]compactando contexto…[/dim]",
   "cli.exec_runtime.error": "Error: {sentence}",
-  "cli.exec_runtime.aborted": "[red]abortado[/red]"
+  "cli.exec_runtime.aborted": "[red]abortado[/red]",
+  "cli.exec_runtime.temporary_agent_shell_refused": "un chat temporal lo inicias tú; no se puede iniciar desde el shell de un agente",
+  "cli.exec_runtime.temporary_conflicts_resume": "--temporary inicia un chat nuevo, así que no se puede combinar con --resume",
+  "cli.exec_runtime.temporary_conflicts_workstream": "--temporary no se puede combinar con --workstream: un workstream se conserva"
 }

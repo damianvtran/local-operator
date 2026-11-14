@@ -1,0 +1,32 @@
+#!/usr/bin/env python3
+"""Reproduction: mechanical + containment checks for one locale of
+wire.bridge_taint against the frozen English source. Read-only."""
+import json, hashlib, unicodedata, re, sys, pathlib
+root = pathlib.Path('/Users/damian/local-operator/.worktrees/cos-egress')
+cat = root/'local_operator/i18n/catalogues'
+loc = sys.argv[1]
+en_b = (cat/'en/wire.bridge_taint.json').read_bytes()
+en = json.loads(en_b)
+tgt_b = (cat/loc/'wire.bridge_taint.json').read_bytes()
+tgt = json.loads(tgt_b)
+title = json.loads((cat/loc/'wire.settings.json').read_text())['wire.settings.team_bridge.title']
+BIDI = set(range(0x202A,0x202F)) | set(range(0x2066,0x206A)) | {0x200E,0x200F,0x061C,0x200B,0x200C,0x200D,0xFEFF,0x2060}
+print('locale', loc)
+print('en sha256', hashlib.sha256(en_b).hexdigest())
+print('context sha256', hashlib.sha256((cat/'en/wire.bridge_taint.context.json').read_bytes()).hexdigest())
+print('target sha256', hashlib.sha256(tgt_b).hexdigest())
+print('key_count en/target', len(en), len(tgt), 'order_equal', list(en)==list(tgt))
+print('nfc_all', all(unicodedata.is_normalized('NFC', v) for v in tgt.values()))
+print('bidi_or_zero_width', [k for k,v in tgt.items() if any(ord(c) in BIDI for c in v)] or 'none')
+print('ascii_apostrophes', [k for k,v in tgt.items() if "'" in v] or 'none')
+for tok in ('{request}', '/approvals auto', '/new'):
+    print(f'token {tok!r} count_equal_en', all(tgt[k].count(tok)==en[k].count(tok) for k in en))
+print('title', repr(title), 'byte_contained_in', [k for k in tgt if title in tgt[k]])
+print('quoted_spans', [m.group(1) for v in tgt.values() for m in re.finditer(r'[“«]([^”»]*)[”»]', v)])
+print('unbalanced_parens', [k for k,v in tgt.items() if v.count('(')!=v.count(')') or v.count('（')!=v.count('）')] or 'none')
+print('unbalanced_quotes', [k for k,v in tgt.items() if v.count('“')!=v.count('”') or v.count('«')!=v.count('»')] or 'none')
+print('u202f', sum(v.count('\u202f') for v in tgt.values()), 'u00a0', sum(v.count('\u00a0') for v in tgt.values()))
+print('space_before_punct', [(k,m.group(0)) for k,v in tgt.items() for m in re.finditer(r'\s+[,.;:!?،؛؟۔]', v)] or 'none')
+term = {'es': '.', 'fr': '.', 'ru': '.', 'vi': '.', 'hi': '।', 'ur': '۔', 'zh-CN': '。'}[loc]
+print('sentence_terminators en/target (en ".", target locale terminator)',
+      {k: (en[k].count('.'), tgt[k].count(term)) for k in en})

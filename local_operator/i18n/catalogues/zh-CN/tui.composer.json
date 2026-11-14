@@ -1,3 +1,4 @@
 {
-  "tui.composer.placeholder_default": "给Local Operator发消息……"
+  "tui.composer.placeholder_default": "给Local Operator发消息……",
+  "tui.composer.temporary_placeholder": "消息（临时对话——不保留）……"
 }

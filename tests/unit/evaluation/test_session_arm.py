@@ -507,6 +507,107 @@ class TestResolution:
             assert_declaration_resolved(cwd=work, config_dir=config, scratch_root=home)
 
 
+class TestActionServerDeadlineNesting:
+    """The MCP client's request bound must nest OUTSIDE every command deadline.
+
+    Sealed episode ``t29a-t030-20261111-192648``: a ``timeout_s: 300`` command
+    (the advertised maximum) was cut by the MCP client at 305.06 s -- the 300 s
+    client default -- before the harness's own ``timeout_s + 20`` RPC deadline,
+    and the cancellation poisoned the session. These tests fail if the
+    declaration stops carrying a timeout, or if anyone raises the command
+    maximum (or the RPC margin) without the MCP bound following.
+    """
+
+    @staticmethod
+    def _declared_timeout_ms(tmp_path: Path) -> float:
+        config = tmp_path / "config"
+        config.mkdir(exist_ok=True)
+        declare_action_server(
+            config_dir=config, endpoint=tmp_path / "b.sock", surface=ActionSurface(), command=True
+        )
+        document = json.loads((config / "mcp.json").read_text(encoding="utf-8"))
+        return float(document["mcpServers"]["episode-actions"]["timeout"])
+
+    @staticmethod
+    def _floor_s(command_max_s: float) -> float:
+        from local_operator.evaluation.adapters.supervisor import TERM_GRACE_SECONDS
+        from local_operator.evaluation.session_arm import COMMAND_RPC_MARGIN_S
+
+        # RPC deadline, then its 1 s cancel grace, the poison's SIGTERM and
+        # post-SIGKILL waits and a 1 s drainer join -- everything that can still
+        # happen before the bridge replies (``ACTION_SERVER_REPLY_SLACK_S``).
+        return command_max_s + COMMAND_RPC_MARGIN_S + 1.0 + 2 * TERM_GRACE_SECONDS + 1.0
+
+    def test_action_server_mcp_timeout_nests_outside_the_longest_command(
+        self, tmp_path: Path
+    ) -> None:
+        from local_operator.evaluation import action_server
+        from local_operator.mcp.manager import DEFAULT_MCP_TIMEOUT_MS
+
+        declared_s = self._declared_timeout_ms(tmp_path) / 1000.0
+        assert declared_s > self._floor_s(action_server.COMMAND_MAX_TIMEOUT_S)
+        # The measured defect: the client default sat AT the command maximum.
+        assert declared_s > DEFAULT_MCP_TIMEOUT_MS / 1000.0
+        # The ordinary-session default is untouched by this per-server bound.
+        assert DEFAULT_MCP_TIMEOUT_MS == 300_000.0
+
+    def test_action_server_mcp_timeout_nests_when_the_command_max_is_raised(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from local_operator.evaluation import action_server
+
+        monkeypatch.setattr(action_server, "COMMAND_MAX_TIMEOUT_S", 900)
+        assert self._declared_timeout_ms(tmp_path) / 1000.0 > self._floor_s(900)
+
+    def test_the_resolved_client_bound_is_the_declared_one(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from local_operator.evaluation import action_server
+        from local_operator.mcp.config import load_all_mcp_configs
+        from local_operator.mcp.manager import resolve_mcp_timeout_s
+
+        home = tmp_path / "home"
+        config = home / ".local-operator"
+        work = home / "work"
+        config.mkdir(parents=True)
+        work.mkdir()
+        declare_action_server(
+            config_dir=config, endpoint=tmp_path / "b.sock", surface=ActionSurface()
+        )
+        monkeypatch.setenv("HOME", str(home))
+        monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(config))
+        monkeypatch.delenv("LOCAL_OPERATOR_MCP_TIMEOUT_MS", raising=False)
+        configs, _ = load_all_mcp_configs(work)
+        resolved = resolve_mcp_timeout_s(configs["episode-actions"])
+        assert resolved is not None
+        assert resolved > self._floor_s(action_server.COMMAND_MAX_TIMEOUT_S)
+        assert_declaration_resolved(cwd=work, config_dir=config, scratch_root=home)
+
+    @pytest.mark.parametrize(("env_ms", "refused"), [("300000", True), ("0", False)])
+    def test_an_env_override_below_the_nesting_bound_is_refused(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, env_ms: str, refused: bool
+    ) -> None:
+        # ``LOCAL_OPERATOR_MCP_TIMEOUT_MS`` outranks the per-server timeout, so
+        # an inherited 300 s override would silently restore the measured loss;
+        # ``0`` disables the client bound entirely and nests trivially.
+        home = tmp_path / "home"
+        config = home / ".local-operator"
+        work = home / "work"
+        config.mkdir(parents=True)
+        work.mkdir()
+        declare_action_server(
+            config_dir=config, endpoint=tmp_path / "b.sock", surface=ActionSurface()
+        )
+        monkeypatch.setenv("HOME", str(home))
+        monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(config))
+        monkeypatch.setenv("LOCAL_OPERATOR_MCP_TIMEOUT_MS", env_ms)
+        if refused:
+            with pytest.raises(SessionArmError, match="MCP request timeout resolves to 300 s"):
+                assert_declaration_resolved(cwd=work, config_dir=config, scratch_root=home)
+        else:
+            assert_declaration_resolved(cwd=work, config_dir=config, scratch_root=home)
+
+
 class TestBridgeDiscipline:
     @pytest.mark.asyncio
     async def test_one_batch_per_observation_until_the_turn_ends(self, tmp_path: Path) -> None:
@@ -1383,187 +1484,438 @@ class TestProseClaimDetector:
         assert prose_claims_completion(text) is True
 
 
-class TestProseCompletionGate:
-    """The gate's answer-side arm: a terminal PROSE claim earns the one challenge.
+#: The shape of arm main29's ``t29a-t003`` final message (row 14728,
+#: ``stop_reason: stop``, no tool call): completion claimed in prose that the
+#: old regex trigger did not recognise, so the episode ended where upstream
+#: OSWorld's loop would have continued.
+T003_PROSE = (
+    "Both slides verified in LibreOffice. Summary of what was done: the title "
+    "slide background was changed and the image on slide 2 was set to 40%."
+)
 
-    WHY THIS EXISTS. The gate landed in #1696 fires inside ``ActionBridge.call``,
-    so it only sees TOOL-mediated claims. The first field run of arm 1748
-    (task_003) ended its final answer as prose -- "Done. Summary of what I
-    determined and did: ..." with NO tool call -- and the turn simply ended:
-    the gate never fired and the run reads as an unverified finish, exactly the
-    case the gate exists to prevent. These tests pin both sides of the fix:
 
-    * a terminal message that CLAIMS completion earns the SAME one challenge a
-      finish call earns -- the same shared budget, the same challenge text,
-      delivered against the state the model last saw;
-    * everything else -- the mid-work narration classes (including the eight
-      adversarial shapes the round-1 review found; the predicate's tables
-      above pin them), empty terminal messages (the silent-provider ending
-      class 005/006 exhibit), messages that carry a tool call, and any episode
-      that already ended -- does not fire.
+class TestTextOnlyContinuation:
+    """Every text-only terminal turn gets the protocol's ASK_USER continuation.
+
+    WHY. Upstream OSWorld's loop (``lib_run_single.py``'s ``if not actions:``
+    branch) answers ANY response without actions -- with the task's user
+    simulator, else ``DEFAULT_USER_RESPONSE`` -- counts one step and loops. The
+    arm used to continue only when a regex recognised a completion claim, and
+    ``t29a-t003`` ended on prose the regex missed. These tests pin the
+    replacement: no phrasing dependence, one step per continuation, the
+    simulator's answer when there is one, the existing ask-loop guard as the
+    bound, and a record row for every continuation.
     """
 
     @pytest.mark.asyncio
-    async def test_a_terminal_prose_claim_is_challenged_and_recorded(self, tmp_path: Path) -> None:
-        from local_operator.evaluation.session_arm import CHALLENGE_REPLY_GUIDANCE
+    async def test_prose_matching_no_claim_pattern_is_continued_with_the_default(
+        self, tmp_path: Path
+    ) -> None:
+        from local_operator.evaluation.session_arm import OSWORLD_DEFAULT_USER_RESPONSE
+
+        # The discriminating precondition: the old trigger would NOT have fired.
+        assert prose_claims_completion(T003_PROSE) is False
+        events: list[tuple[str, dict[str, Any]]] = []
+        bridge = _bridge(tmp_path, record=lambda kind, payload: events.append((kind, payload)))
+        _fold_assistant_message(bridge, T003_PROSE)
+        bridge.fold(TurnEndEvent())
+
+        continuation = await bridge.text_only_continuation()
+
+        assert continuation is not None
+        assert continuation[0].text == OSWORLD_DEFAULT_USER_RESPONSE
+        # Upstream's DEFAULT_USER_RESPONSE, verbatim (lib_run_single.py L17-19).
+        assert OSWORLD_DEFAULT_USER_RESPONSE == (
+            "I have no further information to provide. I trust you can figure it out "
+            "based on the current observation and the instruction. Please proceed with "
+            "the next action. DO NOT ask me any more questions for this task."
+        )
+        # The screen the model must bind its next call to rides with it, after
+        # the note that tells its ``Step:`` line from the budget count (Q-2).
+        from local_operator.evaluation.session_arm import CONTINUATION_SCREEN_NOTE
+
+        assert continuation[1].text == CONTINUATION_SCREEN_NOTE
+        assert '"Step:" line numbers that screen' in CONTINUATION_SCREEN_NOTE
+        assert continuation[2].text == "seen 0"
+        # ONE step on the official clock, as upstream's ``step_idx += 1``.
+        assert bridge.steps == 1
+        assert bridge.end_requested is None and bridge.terminal is False
+        rows = [payload for kind, payload in events if kind == "text_only_continuation"]
+        assert len(rows) == 1
+        assert rows[0]["answer_source"] == "default-user-response"
+        assert rows[0]["answer"] == OSWORLD_DEFAULT_USER_RESPONSE
+        assert rows[0]["question"] == T003_PROSE
+        # No adapter-owned ask seam on this bridge: no exchange was attempted.
+        assert rows[0]["ask_exchange"] == "none"
+        assert rows[0]["delivered"] is True
+        assert rows[0]["steps"] == 1
+        assert "completion_challenged" not in [kind for kind, _ in events]
+
+    @pytest.mark.asyncio
+    async def test_the_session_continues_to_a_later_finish(self, tmp_path: Path) -> None:
+        bridge = _bridge(tmp_path)
+        _fold_assistant_message(bridge, T003_PROSE)
+        bridge.fold(TurnEndEvent())
+        assert await bridge.text_only_continuation() is not None
+        # The token stayed armed on the same screen: the model's next call
+        # binds to it, and its finish meets the completion gate as usual.
+        claim = {"actions": [{"kind": "finish", "status": "done", "reason": "verified"}]}
+        challenged = await bridge.call(claim)
+        assert challenged["details"]["terminal"] == "completion-challenged"
+        accepted = await bridge.call(claim)
+        assert accepted["details"]["terminal"] == "finish"
+        assert bridge.end_requested == "finish"
+        # continuation + challenged claim + accepted finish
+        assert bridge.steps == 3
+
+    @pytest.mark.asyncio
+    async def test_the_user_simulator_answers_when_the_episode_has_one(
+        self, tmp_path: Path
+    ) -> None:
+        asked: list[Any] = []
+
+        async def ask(batch: Any) -> str:
+            asked.append(batch)
+            return "Use the second sheet."
 
         events: list[tuple[str, dict[str, Any]]] = []
-        obs = _observation()
         bridge = _bridge(
             tmp_path,
-            observation=obs,
+            ask=ask,
             record=lambda kind, payload: events.append((kind, payload)),
-            reply_guidance=CHALLENGE_REPLY_GUIDANCE.format(tool_name="apply_actions"),
         )
-        claim = "Done. Summary of what I determined and did: both composites were applied"
-        _fold_assistant_message(bridge, claim)
-        challenge = bridge.prose_completion_challenge()
-        assert challenge is not None
-        text = challenge[0].text
-        assert "That declaration is a CLAIM" in text
-        assert claim in text
-        assert "the task as stated" in text
-        assert "Reply with a single `apply_actions` call" in text
-        # The state the model was last shown rides WITH the challenge: the same
-        # rendered blocks, attached -- never re-rendered.
-        assert len(challenge) == 2
-        assert challenge[1].text == "seen 0"
-        assert bridge.end_requested is None
-        assert bridge.terminal is False
-        assert bridge.steps == 0
-        # The record names WHICH arm of the gate fired; the finish-call arm's
-        # row keeps its own historical shape.
-        assert [kind for kind, _ in events] == ["completion_challenged"]
-        assert events[0][1]["trigger"] == "terminal-message"
-        assert events[0][1]["reason"] == claim
-        assert events[0][1]["observation_id"] == obs.observation_id
+        _fold_assistant_message(bridge, "Which sheet should hold the totals?")
+
+        continuation = await bridge.text_only_continuation()
+
+        assert continuation is not None
+        assert continuation[0].text == "Use the second sheet."
+        # The prose IS the question, as upstream passes ``response``, and the
+        # turn is one ask_user batch on the shown screen.
+        assert len(asked) == 1
+        (action,) = asked[0].actions
+        assert action.kind == "ask_user"
+        assert action.question == "Which sheet should hold the totals?"
+        rows = [payload for kind, payload in events if kind == "text_only_continuation"]
+        assert rows[0]["answer_source"] == "user-simulator"
+        assert rows[0]["ask_exchange"] == "answered"
+        assert bridge.steps == 1
 
     @pytest.mark.asyncio
-    async def test_the_prose_challenge_re_attaches_the_last_executed_screen(
+    async def test_a_declining_simulator_falls_back_to_the_default(self, tmp_path: Path) -> None:
+        from local_operator.evaluation.session_arm import OSWORLD_DEFAULT_USER_RESPONSE
+
+        async def ask(batch: Any) -> None:
+            del batch
+            return None
+
+        events: list[tuple[str, dict[str, Any]]] = []
+        bridge = _bridge(
+            tmp_path,
+            ask=ask,
+            record=lambda kind, payload: events.append((kind, payload)),
+        )
+        _fold_assistant_message(bridge, T003_PROSE)
+        continuation = await bridge.text_only_continuation()
+        assert continuation is not None
+        assert continuation[0].text == OSWORLD_DEFAULT_USER_RESPONSE
+        rows = [payload for kind, payload in events if kind == "text_only_continuation"]
+        assert rows[0]["answer_source"] == "default-user-response"
+        assert rows[0]["ask_exchange"] == "declined"
+
+    @pytest.mark.asyncio
+    async def test_a_failed_simulator_exchange_ends_legibly_without_inventing_an_answer(
         self, tmp_path: Path
     ) -> None:
-        bridge = _bridge(tmp_path)
-        executed = await bridge.call({"actions": [{"kind": "wait", "duration_ms": 50}]})
-        assert executed["is_error"] is False
-        # The turn boundary re-arms the token, exactly as the live loop delivers
-        # it; the prose arm reads the state from the same seam.
-        bridge.fold(TurnEndEvent())
-        _fold_assistant_message(bridge, "Done. Summary of what I determined and did: X")
-        challenge = bridge.prose_completion_challenge()
-        assert challenge is not None
-        assert challenge[1].text == "seen 1"
+        async def ask(batch: Any) -> str:
+            del batch
+            raise RuntimeError("simulator unreachable")
+
+        events: list[tuple[str, dict[str, Any]]] = []
+        bridge = _bridge(
+            tmp_path,
+            ask=ask,
+            record=lambda kind, payload: events.append((kind, payload)),
+        )
+        _fold_assistant_message(bridge, T003_PROSE)
+        assert await bridge.text_only_continuation() is None
+        rows = [payload for kind, payload in events if kind == "text_only_continuation"]
+        assert rows[0]["delivered"] is False
+        assert rows[0]["stopped"] == "ask-exchange-failed"
+        assert "simulator unreachable" in rows[0]["error"]
 
     @pytest.mark.asyncio
-    async def test_the_prose_challenge_is_byte_identical_to_the_finish_call_challenge(
+    async def test_an_empty_text_turn_is_still_put_to_the_simulator(self, tmp_path: Path) -> None:
+        # Upstream calls ``respond("")`` for an empty response whenever the
+        # task has a simulator (lib_run_single.py L747-749); the wire refuses
+        # an empty question, so the stand-in is asked and the row keeps "".
+        from local_operator.evaluation.session_arm import EMPTY_REPLY_QUESTION
+
+        asked: list[Any] = []
+
+        async def ask(batch: Any) -> str:
+            asked.append(batch)
+            return "Carry on with the export."
+
+        events: list[tuple[str, dict[str, Any]]] = []
+        bridge = _bridge(
+            tmp_path, ask=ask, record=lambda kind, payload: events.append((kind, payload))
+        )
+        _fold_assistant_message(bridge, "")
+        continuation = await bridge.text_only_continuation()
+        assert continuation is not None
+        assert continuation[0].text == "Carry on with the export."
+        assert len(asked) == 1
+        (action,) = asked[0].actions
+        assert action.question == EMPTY_REPLY_QUESTION
+        rows = [payload for kind, payload in events if kind == "text_only_continuation"]
+        assert rows[0]["question"] == ""
+        assert rows[0]["ask_exchange"] == "answered"
+        assert rows[0]["answer_source"] == "user-simulator"
+
+    @pytest.mark.asyncio
+    async def test_an_empty_text_turn_the_simulator_declines_gets_the_default(
         self, tmp_path: Path
     ) -> None:
-        """The two arms quote the SAME challenge for the same claim and screen.
+        # A ``None`` answer is substituted with the default on purpose: the
+        # model must be handed text (upstream would pass ``None`` on).
+        from local_operator.evaluation.session_arm import OSWORLD_DEFAULT_USER_RESPONSE
 
-        The widening must not change the challenge's kind: for a claim stated
-        in the same words against the same observation, the prose arm's user
-        turn is byte-identical to the finish-call arm's tool result -- same
-        builder, same channel sentence.
-        """
-        from local_operator.evaluation.session_arm import CHALLENGE_REPLY_GUIDANCE
+        asked: list[Any] = []
 
-        guidance = CHALLENGE_REPLY_GUIDANCE.format(tool_name="apply_actions")
-        claim_text = "Done. everything was applied"
-        via_call = _bridge(tmp_path, reply_guidance=guidance)
-        call_reply = await via_call.call(
-            {"actions": [{"kind": "finish", "status": "done", "reason": claim_text}]}
+        async def ask(batch: Any) -> None:
+            asked.append(batch)
+            return None
+
+        events: list[tuple[str, dict[str, Any]]] = []
+        bridge = _bridge(
+            tmp_path, ask=ask, record=lambda kind, payload: events.append((kind, payload))
         )
-        via_prose = _bridge(tmp_path, reply_guidance=guidance)
-        _fold_assistant_message(via_prose, claim_text)
-        prose = via_prose.prose_completion_challenge()
-        assert prose is not None
-        assert prose[0].text == call_reply["content"][0].text
-        assert prose[1].text == call_reply["content"][1].text
+        _fold_assistant_message(bridge, "")
+        continuation = await bridge.text_only_continuation()
+        assert continuation is not None
+        assert continuation[0].text == OSWORLD_DEFAULT_USER_RESPONSE
+        assert len(asked) == 1
+        rows = [payload for kind, payload in events if kind == "text_only_continuation"]
+        assert rows[0]["ask_exchange"] == "declined"
+        assert rows[0]["answer_source"] == "default-user-response"
 
     @pytest.mark.asyncio
-    async def test_a_finish_after_the_prose_challenge_is_accepted(self, tmp_path: Path) -> None:
-        bridge = _bridge(tmp_path)
-        _fold_assistant_message(bridge, "Done. Summary of what I determined and did: X")
-        assert bridge.prose_completion_challenge() is not None
-        # ONE budget for both arms: the re-declaration is the episode's second
-        # declaration, so it is accepted rather than challenged again -- the
-        # gate cannot loop across the two paths.
-        reply = await bridge.call(
-            {"actions": [{"kind": "finish", "status": "done", "reason": "re-checked"}]}
+    async def test_a_halt_while_the_answer_was_obtained_delivers_nothing(
+        self, tmp_path: Path
+    ) -> None:
+        # R1-1 at the bridge: the kill switch is re-read once the answer is
+        # in hand, so a wall that fired during the exchange is honoured.
+        halted_now: list[bool] = [False]
+
+        async def ask(batch: Any) -> str:
+            del batch
+            halted_now[0] = True  # the wall fires while the simulator answers
+            return "Use the second sheet."
+
+        events: list[tuple[str, dict[str, Any]]] = []
+        bridge = _bridge(
+            tmp_path, ask=ask, record=lambda kind, payload: events.append((kind, payload))
         )
-        assert reply["details"]["terminal"] == "finish"
-        assert bridge.end_requested == "finish"
+        _fold_assistant_message(bridge, "Which sheet should hold the totals?")
+        continuation = await bridge.text_only_continuation(
+            halted=lambda: "wall-bound" if halted_now[0] else None
+        )
+        assert continuation is None
+        rows = [payload for kind, payload in events if kind == "text_only_continuation"]
+        assert len(rows) == 1
+        assert rows[0]["delivered"] is False
+        assert rows[0]["stopped"] == "wall-bound"
+        # The step was spent obtaining the answer; it stays on the clock.
+        assert bridge.steps == 1
 
     @pytest.mark.asyncio
-    async def test_a_spent_finish_budget_blocks_the_prose_arm(self, tmp_path: Path) -> None:
+    async def test_one_continuation_per_message(self, tmp_path: Path) -> None:
         bridge = _bridge(tmp_path)
-        await bridge.call({"actions": [{"kind": "finish", "status": "done", "reason": "claimed"}]})
-        _fold_assistant_message(bridge, "Done. Summary of what I determined and did: X")
-        assert bridge.prose_completion_challenge() is None
+        _fold_assistant_message(bridge, T003_PROSE)
+        assert await bridge.text_only_continuation() is not None
+        # A delivery that produced no new assistant message cannot spin.
+        assert await bridge.text_only_continuation() is None
+        assert bridge.steps == 1
 
     @pytest.mark.asyncio
-    async def test_the_prose_arm_does_not_fire_once_the_episode_ended(self, tmp_path: Path) -> None:
-        bridge = _bridge(tmp_path)
+    async def test_no_continuation_once_the_episode_ended(self, tmp_path: Path) -> None:
+        events: list[tuple[str, dict[str, Any]]] = []
+        bridge = _bridge(tmp_path, record=lambda kind, payload: events.append((kind, payload)))
         claim = {"actions": [{"kind": "finish", "status": "done", "reason": "done"}]}
         await bridge.call(claim)
-        accepted = await bridge.call(claim)  # the second declaration always stands
+        accepted = await bridge.call(claim)
         assert accepted["details"]["terminal"] == "finish"
-        # Every completed run in the corpus ends with exactly this shape: a
-        # summary prose message AFTER the accepted finish. It must not earn a
-        # second exchange.
+        steps = bridge.steps
+        # Every completed run ends with a summary prose message AFTER the
+        # accepted finish; it must not earn an exchange or a step.
         _fold_assistant_message(bridge, "Done. Summary of what I determined and did: X")
-        assert bridge.prose_completion_challenge() is None
-
-    @pytest.mark.parametrize(
-        ("gate", "challenges"),
-        [(False, 1), (True, 0)],
-        ids=["gate-disabled", "zero-budget"],
-    )
-    @pytest.mark.asyncio
-    async def test_the_prose_arm_obeys_the_gate_controls(
-        self, tmp_path: Path, gate: bool, challenges: int
-    ) -> None:
-        bridge = _bridge(tmp_path, completion_gate=gate, completion_challenges=challenges)
-        _fold_assistant_message(bridge, "Done. Summary of what I determined and did: X")
-        assert bridge.prose_completion_challenge() is None
+        assert await bridge.text_only_continuation() is None
+        assert bridge.steps == steps
+        assert "text_only_continuation" not in [kind for kind, _ in events]
 
     @pytest.mark.asyncio
-    async def test_an_empty_terminal_message_is_never_a_claim(self, tmp_path: Path) -> None:
-        # The silent-provider ending class (005/006): the model's next response
-        # came back EMPTY and the loop ended. There is no claim to answer.
-        bridge = _bridge(tmp_path)
-        _fold_assistant_message(bridge, "")
-        assert bridge.prose_completion_challenge() is None
-
-    @pytest.mark.asyncio
-    async def test_mid_work_narration_is_never_a_claim(self, tmp_path: Path) -> None:
-        # Arm 1716's 005/006 ended after exactly these texts: a mid-work report
-        # plus what was about to be done. They are the discriminating case for
-        # the predicate -- a wider rule would trip on them.
-        bridge = _bridge(tmp_path)
-        _fold_assistant_message(
-            bridge,
-            "Filenames corrected. Opening all 12 numbered document scans as an eog collection "
-            "in fullscreen.",
-        )
-        assert bridge.prose_completion_challenge() is None
-        _fold_assistant_message(
-            bridge,
-            "Downloads mostly succeeded. Now fix #20 (Drive confirm page), inspect #15, "
-            "extract PDF text with pdftotext, and find CV links in the homepages.",
-        )
-        assert bridge.prose_completion_challenge() is None
-
-    @pytest.mark.asyncio
-    async def test_a_message_that_carries_a_tool_call_is_not_this_arms_business(
+    async def test_a_message_that_carries_a_tool_call_is_not_continued(
         self, tmp_path: Path
     ) -> None:
         bridge = _bridge(tmp_path)
         _fold_assistant_message(
             bridge,
-            "Done. Summary of what I determined and did: X",
+            T003_PROSE,
             tool_calls=[ToolCall(id="call-1", name="apply_actions", arguments={})],
         )
-        assert bridge.prose_completion_challenge() is None
+        assert await bridge.text_only_continuation() is None
+        assert bridge.steps == 0
+
+    @pytest.mark.asyncio
+    async def test_a_faulted_message_is_not_continued(self, tmp_path: Path) -> None:
+        bridge = _bridge(tmp_path)
+        bridge.fold(
+            MessageEndEvent(message=Message(role="assistant", content=[], stop_reason="error"))
+        )
+        assert await bridge.text_only_continuation() is None
+        assert bridge.steps == 0
+
+    @pytest.mark.asyncio
+    async def test_a_spent_group_clock_ends_without_a_continuation(self, tmp_path: Path) -> None:
+        # The prose message itself took the last attempted output group: there
+        # is no step left to answer it with, so nothing is charged and the row
+        # says why the episode did not go on.
+        events: list[tuple[str, dict[str, Any]]] = []
+        bridge = _bridge(
+            tmp_path,
+            max_steps=2,
+            record=lambda kind, payload: events.append((kind, payload)),
+        )
+        await bridge.call({"actions": [{"kind": "wait", "duration_ms": 10}]})
+        bridge.fold(TurnEndEvent())
+        _fold_assistant_message(bridge, T003_PROSE)
+        assert bridge.attempted_groups == 2
+        assert await bridge.text_only_continuation() is None
+        assert bridge.steps == 1
+        rows = [payload for kind, payload in events if kind == "text_only_continuation"]
+        assert len(rows) == 1
+        assert rows[0]["stopped"] == "max-steps" and rows[0]["delivered"] is False
+        assert "steps" in rows[0] and rows[0]["steps"] == 1
+        # The ending is NAMED as the budget, matching the row (R1-2): the
+        # official clock (1) is under the budget, so only this names it.
+        assert bridge.end_requested == "max-steps"
+        assert bridge.terminal is True
+
+    @pytest.mark.asyncio
+    async def test_the_step_that_exhausts_the_budget_ends_max_steps(self, tmp_path: Path) -> None:
+        # The fail-closed branch: the group clock still has room but the
+        # continuation's own step is the last one. Upstream's ``step_idx += 1``
+        # reaching ``max_steps`` exits its loop, so the answer is never read.
+        events: list[tuple[str, dict[str, Any]]] = []
+        bridge = _bridge(
+            tmp_path,
+            max_steps=2,
+            record=lambda kind, payload: events.append((kind, payload)),
+        )
+        await bridge.call({"actions": [{"kind": "wait", "duration_ms": 10}]})
+        bridge.fold(TurnEndEvent())
+        _fold_assistant_message(bridge, T003_PROSE)
+        bridge._attempted_groups = 1  # the group clock under the official one
+        assert await bridge.text_only_continuation() is None
+        assert bridge.steps == 2
+        assert bridge.end_requested == "max-steps"
+        assert bridge.terminal is True
+        rows = [payload for kind, payload in events if kind == "text_only_continuation"]
+        assert rows[0]["stopped"] == "max-steps" and rows[0]["delivered"] is False
+
+
+def _fold_turn_message(bridge: ActionBridge, text: str) -> None:
+    """One text-only turn: the message and its turn boundary, as the loop emits them."""
+
+    _fold_assistant_message(bridge, text)
+    bridge.fold(TurnEndEvent())
+
+
+class TestTextOnlyContinuationAskLoop:
+    """The repeat bound is the EXISTING ask-loop guard, not a new counter."""
+
+    def _guarded(self, tmp_path: Path, **kwargs: Any) -> tuple[ActionBridge, list[Any]]:
+        from local_operator.evaluation.runner.guards import progress_guards
+        from tests.unit.evaluation.runner.conftest import build_spec
+
+        events: list[tuple[str, Any]] = []
+        bridge = ActionBridge(
+            endpoint=tmp_path / "b.sock",
+            surface=ActionSurface(),
+            render=lambda observation: [TextContent(text=f"seen {observation.sequence}")],
+            execute=kwargs.pop("execute"),
+            max_steps=kwargs.pop("max_steps", 30),
+            record=lambda kind, payload: events.append((kind, payload)),
+            progress_guards=progress_guards(),
+            progress_budget=build_spec("ep-session-arm").budget,
+        )
+        bridge.arm(_observation())
+        return bridge, events
+
+    @staticmethod
+    def _moving_world() -> Any:
+        state = {"step": 0}
+
+        async def execute(batch: Any) -> ExecuteResult:
+            del batch
+            state["step"] += 1
+            before = _observation(sequence=state["step"] - 1, text=f"screen {state['step'] - 1}")
+            after = _observation(sequence=state["step"], text=f"screen {state['step']}")
+            return _result(input_observation=before, output_observation=after)
+
+        return execute
+
+    @pytest.mark.asyncio
+    async def test_repeated_text_only_turns_stop_at_the_ask_loop_threshold(
+        self, tmp_path: Path
+    ) -> None:
+        from local_operator.evaluation.runner.guards import AskLoopGuard
+
+        bridge, events = self._guarded(tmp_path, execute=self._moving_world())
+        threshold = AskLoopGuard().describe()["threshold"]
+        delivered = 0
+        for index in range(threshold + 2):
+            _fold_turn_message(bridge, f"{T003_PROSE} ({index})")
+            if await bridge.text_only_continuation() is None:
+                break
+            delivered += 1
+        # The guard reads the continuation as the ask_user batch it is: the
+        # threshold-th consecutive one is charged and then truncates, before
+        # any answer is spent on it.
+        assert delivered == threshold - 1
+        assert bridge.steps == threshold
+        assert bridge.end_requested == "ask-loop"
+        assert bridge.progress_stop_code == "ask-loop"
+        assert bridge.terminal is True
+        rows = [payload for kind, payload in events if kind == "text_only_continuation"]
+        assert [row["delivered"] for row in rows] == [True] * (threshold - 1) + [False]
+        assert rows[-1]["stopped"] == "ask-loop"
+        stops = [payload for kind, payload in events if kind == "progress_stop"]
+        assert stops == [
+            {
+                "code": "ask-loop",
+                "detail": f"{threshold} consecutive ask_user turns",
+                "steps": 3,
+            }
+        ]
+
+    @pytest.mark.asyncio
+    async def test_an_executed_batch_between_text_only_turns_resets_the_chain(
+        self, tmp_path: Path
+    ) -> None:
+        bridge, _ = self._guarded(tmp_path, execute=self._moving_world())
+        for _ in range(2):
+            _fold_turn_message(bridge, T003_PROSE)
+            assert await bridge.text_only_continuation() is not None
+        reply = await bridge.call({"actions": [{"kind": "wait", "duration_ms": 10}]})
+        assert reply["is_error"] is False
+        bridge.fold(TurnEndEvent())
+        for _ in range(2):
+            _fold_turn_message(bridge, T003_PROSE)
+            assert await bridge.text_only_continuation() is not None
+        assert bridge.end_requested is None
+        assert bridge.steps == 5
 
 
 def _confinement_fake_opener(installed: list[Any]) -> Any:
@@ -2987,6 +3339,12 @@ class _WedgeAdapter(FakeAdapter):
         super().__init__(*args, **kwargs)
         self.fail_executes = fail_executes
         self.recoverable = recoverable
+        #: What the task's user simulator answers an ask with; ``None`` is a
+        #: task without one.
+        self.simulator_answer: str | None = None
+        #: How long the simulator takes to answer -- long enough, in the wall
+        #: tests, for the episode wall to fire mid-exchange (R1-1).
+        self.ask_delay_s = 0.0
         self.executes = 0
         self.observes = 0
 
@@ -3000,6 +3358,21 @@ class _WedgeAdapter(FakeAdapter):
         )
 
     async def _call_raw(self, method: Any, params: Any, result_type: Any, **kwargs: Any) -> Any:
+        if method == "ask_user_exchange":
+            # The OSWorld adapter's answer for a task with NO user simulator
+            # (``adapter.ask_user_exchange``): a clean decline. The base fake's
+            # ``accepted=True`` with no answer is invalid for adapter-owned
+            # asks and poisons the session -- a shape no real adapter sends.
+            from local_operator.evaluation.adapters.api import AskUserExchangeResult
+
+            if self.ask_delay_s:
+                await asyncio.sleep(self.ask_delay_s)
+            return AskUserExchangeResult(
+                ask_id=params.ask_id,
+                request_digest=params.request_digest,
+                accepted=self.simulator_answer is not None,
+                answer=self.simulator_answer,
+            )
         if method == "execute":
             self.executes += 1
             if self.executes <= self.fail_executes:
@@ -3671,6 +4044,7 @@ class TestAgentStopOutcome:
         hold_s: float = 0.0,
         max_wall_s: float | None = None,
         confinement_root: Path | None = None,
+        session: _ScriptedSession | None = None,
     ) -> tuple[Any, _ScriptedSession, Any]:
         home = scratch_root / "home"
         config_dir = home / ".local-operator"
@@ -3697,7 +4071,7 @@ class TestAgentStopOutcome:
             recoverable=True,
             score=ScoreArtifact(status="scored", binary=0),
         )
-        session = _ScriptedSession(
+        session = session or _ScriptedSession(
             scratch_root,
             script,
             terminal_message=terminal_message,
@@ -3768,9 +4142,11 @@ class TestAgentStopOutcome:
         assert len(session.replies) == 1
 
     @pytest.mark.asyncio
-    async def test_a_completion_claim_ending_says_so_after_the_challenge(
+    async def test_a_completion_claim_ending_is_continued_then_named(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, short_scratch: Path
     ) -> None:
+        from local_operator.evaluation.session_arm import OSWORLD_DEFAULT_USER_RESPONSE
+
         claim = "Done. Summary of what I determined and did: everything checks out."
         run, session, adapter = self._fixture(
             tmp_path=tmp_path,
@@ -3784,15 +4160,17 @@ class TestAgentStopOutcome:
         )
         outcome = await run()
 
+        # The protocol's continuation was delivered (harness-injected), and
+        # this double re-emits the SAME message on every prompt, so the
+        # one-per-message rule ends it: the ending still names itself.
+        assert [prompt[1] for prompt in session.prompts] == [False, True]
+        assert session.prompts[1][0].startswith(OSWORLD_DEFAULT_USER_RESPONSE)
         assert outcome.status == "agent_stop"
         assert outcome.terminal_reason == "completion-claim"
         assert outcome.diagnostic is not None
         assert "claims completion" in outcome.diagnostic
-        assert "challenged it 1 time(s)" in outcome.diagnostic
-        # The gate really delivered: the claim got its re-prompt, and the
-        # episode still ended without a batch.
-        assert [prompt[1] for prompt in session.prompts] == [False, True]
-        assert outcome.steps == 1
+        # The wait and the continuation: one step each.
+        assert outcome.steps == 2
         assert adapter.calls.count("execute") == 1
 
     @pytest.mark.asyncio
@@ -3903,6 +4281,317 @@ class TestAgentStopOutcome:
         first = await self._first_prompt(tmp_path, monkeypatch, short_scratch, installed_at_open="")
         assert "run in a local workspace on a different machine" in first
         assert "isolated" not in first
+
+
+class _TurnScriptedSession(_ScriptedSession):
+    """A scripted session whose EVERY prompt has its own turn.
+
+    ``turns[i]`` answers the i-th ``prompt``: the action batches the model
+    sends over the real bridge socket, then the terminal assistant message
+    (a FRESH message each turn, as a live model produces) and a clean
+    ``agent_end``. Lets a test script the conversation across the
+    harness-injected continuation instead of replaying one ending.
+    """
+
+    def __init__(
+        self,
+        scratch_root: Path,
+        turns: list[tuple[list[list[dict[str, Any]]], str]],
+        *,
+        cancel_ends_aborted: bool = False,
+    ) -> None:
+        super().__init__(scratch_root, [])
+        self._turns = list(turns)
+        #: End a turn ``aborted`` once a graceful cancel was requested in it,
+        #: as the real ``Session`` does even for a completed text-only reply
+        #: (QA round 1, Q-1, measured on the real session).
+        self._cancel_ends_aborted = cancel_ends_aborted
+
+    async def prompt(
+        self, text: str, *, images: Any = None, harness_injected: bool = False
+    ) -> None:
+        del images
+        self.prompts.append((text, harness_injected))
+        if not self._turns:
+            return
+        script, final_text = self._turns.pop(0)
+        endpoint = next(iter(sorted(self._scratch_root.glob("b-*.sock"))))
+        for actions in script:
+            reply = await self._call(endpoint, actions)
+            self.replies.append(reply)
+            self._emit(TurnEndEvent())
+            if self.cancels:
+                break
+        self._emit(
+            MessageEndEvent(
+                message=Message(
+                    role="assistant",
+                    content=[TextContent(text=final_text)] if final_text else [],
+                    stop_reason="stop",
+                )
+            )
+        )
+        self._emit(AgentEndEvent(aborted=self._cancel_ends_aborted and bool(self.cancels)))
+
+
+def _record_kinds(outcome: Any) -> list[str]:
+    """The ``kind`` sequence of an episode's ``events.jsonl``."""
+
+    lines = (outcome.record_root / "events.jsonl").read_text(encoding="utf-8").splitlines()
+    return [json.loads(line)["kind"] for line in lines if line.strip()]
+
+
+class TestTextOnlyContinuationThroughTheDriver:
+    """The continuation through ``run_session_episode``, on the real bridge socket."""
+
+    _fixture = TestAgentStopOutcome._fixture
+
+    @pytest.mark.asyncio
+    async def test_a_t003_shaped_prose_ending_continues_to_a_later_finish(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, short_scratch: Path
+    ) -> None:
+        from local_operator.evaluation.session_arm import OSWORLD_DEFAULT_USER_RESPONSE
+
+        assert prose_claims_completion(T003_PROSE) is False
+        finish = [{"kind": "finish", "status": "done", "reason": "verified at the source"}]
+        session = _TurnScriptedSession(
+            short_scratch,
+            [
+                ([[{"kind": "wait", "duration_ms": 10}]], T003_PROSE),
+                # The continuation's turn: the finish is challenged once (the
+                # completion gate), then the re-declaration stands.
+                ([finish, finish], "Finished."),
+            ],
+        )
+        run, session, adapter = self._fixture(
+            tmp_path=tmp_path,
+            monkeypatch=monkeypatch,
+            scratch_root=short_scratch,
+            script=[],
+            session=session,
+        )
+        outcome = await run()
+
+        assert outcome.status == "completed", outcome
+        assert outcome.terminal_reason == "finish"
+        # wait (1) + the continuation (1) + the challenged finish (1) + the
+        # accepted finish (1): the continuation is ONE step on the clock.
+        assert outcome.steps == 4
+        assert [injected for _, injected in session.prompts] == [False, True]
+        assert session.prompts[1][0].startswith(OSWORLD_DEFAULT_USER_RESPONSE)
+        events = [
+            json.loads(line)
+            for line in (outcome.record_root / "events.jsonl").read_text().splitlines()
+            if line.strip()
+        ]
+        rows = [row for row in events if row["kind"] == "action_text_only_continuation"]
+        assert len(rows) == 1
+        assert rows[0]["delivered"] is True
+        assert rows[0]["question"] == T003_PROSE
+        assert rows[0]["answer"] == OSWORLD_DEFAULT_USER_RESPONSE
+        # The summary prose after the ACCEPTED finish earns nothing.
+        assert len(session.prompts) == 2
+        assert adapter.calls.count("execute") == 1
+
+    @pytest.mark.asyncio
+    async def test_the_task_simulator_answers_through_the_adapter(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, short_scratch: Path
+    ) -> None:
+        finish = [{"kind": "finish", "status": "done", "reason": "verified"}]
+        session = _TurnScriptedSession(
+            short_scratch,
+            [
+                (
+                    [[{"kind": "wait", "duration_ms": 10}]],
+                    "Should the totals include tax?",
+                ),
+                ([finish, finish], "Finished."),
+            ],
+        )
+        run, session, adapter = self._fixture(
+            tmp_path=tmp_path,
+            monkeypatch=monkeypatch,
+            scratch_root=short_scratch,
+            script=[],
+            session=session,
+        )
+        adapter.simulator_answer = "Yes, include tax."
+        outcome = await run()
+
+        assert outcome.status == "completed", outcome
+        assert session.prompts[1][0].startswith("Yes, include tax.")
+        assert session.prompts[1][1] is True
+        events = [
+            json.loads(line)
+            for line in (outcome.record_root / "events.jsonl").read_text().splitlines()
+            if line.strip()
+        ]
+        rows = [row for row in events if row["kind"] == "action_text_only_continuation"]
+        assert rows[0]["answer_source"] == "user-simulator"
+        assert rows[0]["question"] == "Should the totals include tax?"
+        # The exchange's canonical receipt is recorded like a model ask's.
+        assert [row["kind"] for row in events].count("action_ask_exchange") == 1
+
+    @pytest.mark.asyncio
+    async def test_a_wall_that_fires_during_the_answer_ends_the_episode_wall_bound(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, short_scratch: Path
+    ) -> None:
+        """R1-1: no continuation turn runs past the episode wall.
+
+        The wall fires while the simulator is still answering. Before the fix
+        the driver checked the wall only at its loop head, so the abort landed
+        on an idle session and the continuation's turn ran two more executes,
+        recorded ``truncated`` / ``max-steps`` (the reviewer's repro, here at
+        0.3 s / 1.0 s instead of 1.5 s / 3 s).
+        """
+
+        wait = [{"kind": "wait", "duration_ms": 10}]
+        session = _TurnScriptedSession(
+            short_scratch,
+            [([wait], "Should I keep going?"), ([wait, wait], "More work.")],
+        )
+        run, session, adapter = self._fixture(
+            tmp_path=tmp_path,
+            monkeypatch=monkeypatch,
+            scratch_root=short_scratch,
+            script=[],
+            session=session,
+            max_wall_s=0.3,
+        )
+        adapter.simulator_answer = "Yes, keep going."
+        adapter.ask_delay_s = 1.0
+        outcome = await run()
+
+        assert session.aborts == ["episode wall budget"]
+        assert len(session.prompts) == 1, session.prompts
+        assert adapter.calls.count("execute") == 1
+        assert outcome.status == "agent_stop", outcome
+        assert outcome.terminal_reason == "wall-bound"
+        events = [
+            json.loads(line)
+            for line in (outcome.record_root / "events.jsonl").read_text().splitlines()
+            if line.strip()
+        ]
+        rows = [row for row in events if row["kind"] == "action_text_only_continuation"]
+        assert len(rows) == 1
+        assert rows[0]["delivered"] is False
+        assert rows[0]["stopped"] == "wall-bound"
+        assert rows[0]["answer"] == "Yes, keep going."
+
+    @pytest.mark.parametrize("cancel_ends_aborted", [False, True], ids=["clean-end", "aborted-end"])
+    @pytest.mark.asyncio
+    async def test_prose_on_the_last_attempted_group_ends_max_steps(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        short_scratch: Path,
+        cancel_ends_aborted: bool,
+    ) -> None:
+        """R1-2 and Q-1: the budget ending is named, and its row is written.
+
+        A refused group charges only the attempted clock, so the prose message
+        can take the last attempted group (4 of 4) while two steps remain.
+        ``clean-end`` is the reviewer's repro (row said ``max-steps``, outcome
+        ``agent_stop`` / ``completion-claim``); ``aborted-end`` is QA's real
+        session shape, where the budget cancel ends the turn ``aborted`` (no
+        row at all, outcome ``agent_stop`` / ``aborted``).
+        """
+
+        wait = [{"kind": "wait", "duration_ms": 10}]
+        session = _TurnScriptedSession(
+            short_scratch,
+            [([[{"kind": "bogus"}], wait, wait], "All done, the task is complete.")],
+            cancel_ends_aborted=cancel_ends_aborted,
+        )
+        run, session, adapter = self._fixture(
+            tmp_path=tmp_path,
+            monkeypatch=monkeypatch,
+            scratch_root=short_scratch,
+            script=[],
+            session=session,
+        )
+        outcome = await run()
+
+        assert outcome.steps == 2
+        assert outcome.status == "truncated", outcome
+        assert outcome.terminal_reason == "max-steps"
+        assert len(session.prompts) == 1
+        kinds = _record_kinds(outcome)
+        assert "budget_stop" in kinds
+        events = [
+            json.loads(line)
+            for line in (outcome.record_root / "events.jsonl").read_text().splitlines()
+            if line.strip()
+        ]
+        rows = [row for row in events if row["kind"] == "action_text_only_continuation"]
+        assert len(rows) == 1
+        assert rows[0]["delivered"] is False
+        assert rows[0]["stopped"] == "max-steps"
+
+    @pytest.mark.asyncio
+    async def test_a_normal_finish_run_records_the_base_event_sequence(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, short_scratch: Path
+    ) -> None:
+        """A run that calls finish normally is unchanged by the continuation.
+
+        The expected sequence was captured from this same scripted run on the
+        base commit (``371ce48ace08``, before the continuation existed); the
+        only path the change adds is unreachable once a finish is accepted.
+        """
+
+        finish = [{"kind": "finish", "status": "done", "reason": "verified"}]
+        session = _TurnScriptedSession(
+            short_scratch,
+            [([[{"kind": "wait", "duration_ms": 10}], finish, finish], "All done.")],
+        )
+        run, session, _ = self._fixture(
+            tmp_path=tmp_path,
+            monkeypatch=monkeypatch,
+            scratch_root=short_scratch,
+            script=[],
+            session=session,
+        )
+        outcome = await run()
+
+        assert outcome.status == "completed"
+        assert len(session.prompts) == 1
+        kinds = _record_kinds(outcome)
+        assert "action_text_only_continuation" not in kinds
+        assert kinds == BASE_FINISH_EVENT_KINDS
+
+
+#: Captured from the identical scripted run on the base commit ``371ce48ace08``
+#: (see the test's docstring); pinned so a later change to this path is a
+#: visible diff here rather than a silent drift.
+#:
+#: Deliberate drift since that capture: the trailing ``accounting`` row (PR
+#: #3887). ``run_session_episode`` writes it once, after the ``finally`` that
+#: stops the bridge and closes the adapter session (so after ``shutdown``) and
+#: before the seal, carrying the same typed snapshot as ``outcome.json``. It is
+#: additive and terminal: no earlier row moved, and the continuation's
+#: ``action_text_only_continuation`` is still absent on a normal finish.
+BASE_FINISH_EVENT_KINDS: list[str] = [
+    "reset",
+    "declaration",
+    "progress_guards",
+    "mcp_settle",
+    "tools",
+    "action_output_epoch",
+    "action_batch",
+    "agent_event",
+    "action_output_epoch",
+    "action_completion_challenged",
+    "agent_event",
+    "action_output_epoch",
+    "action_finish",
+    "agent_event",
+    "agent_event",
+    "action_attempted_group",
+    "agent_event",
+    "requests",
+    "shutdown",
+    "accounting",
+]
 
 
 class TestRenderPromptHeader:
@@ -4687,6 +5376,54 @@ def _tool_delta(model: str, calls: list[tuple[str, dict[str, Any]]]) -> dict[str
     }
 
 
+class TestSessionAccounting:
+    def test_legacy_two_epochs_are_not_two_of_the_decision_budget(self) -> None:
+        from local_operator.evaluation.session_arm import (
+            SessionAccounting,
+            SessionArmOutcome,
+            _outcome_json,
+        )
+
+        outcome = SessionArmOutcome(
+            status="agent_stop",
+            episode_id="synthetic",
+            record_root=None,
+            steps=2,
+            attempted_groups=40,
+            accounting=SessionAccounting(
+                decision_groups_used=40,
+                decision_groups_limit=500,
+                legacy_screen_epochs=2,
+                command_attempts=37,
+            ),
+        )
+        payload = _outcome_json(outcome)
+        assert payload["steps"] == 2
+        assert payload["attempted_groups"] == 40
+        assert payload["accounting"]["decision_groups_used"] == 40
+        assert payload["accounting"]["decision_groups_limit"] == 500
+        assert payload["accounting"]["legacy_screen_epochs"] == 2
+        assert payload["accounting"]["command_attempts"] == 37
+        assert payload["accounting"]["logical_requests"] is None
+        assert payload["accounting"]["verifier_requests"] is None
+
+    def test_missing_run_counters_are_unknown_not_zero(self) -> None:
+        from local_operator.evaluation.session_arm import (
+            SessionArmOutcome,
+            _outcome_json,
+        )
+
+        payload = _outcome_json(
+            SessionArmOutcome(
+                status="failed_pre_bundle",
+                episode_id="synthetic",
+                record_root=None,
+            )
+        )
+        assert all(value is None for value in payload["accounting"].values())
+        assert payload["steps"] == 0  # retained legacy default, not new telemetry
+
+
 class TestTheStreamCompletedStopBoundary:
     """R1 C1: a stream-completed Nth group must stop the NEXT ROOT REQUEST.
 
@@ -4736,6 +5473,7 @@ class TestTheStreamCompletedStopBoundary:
         max_steps: int,
         progress_guards: Any = None,
         frozen: bool = False,
+        commands: bool = False,
     ) -> tuple[list[dict[str, Any]], Any, str]:
         """One real episode; returns (wire calls, outcome, record text).
 
@@ -4797,7 +5535,7 @@ class TestTheStreamCompletedStopBoundary:
             async def handshake(self, *, timeout: float = 10.0) -> Any:
                 base = await super().handshake(timeout=timeout)
                 capabilities = base.metadata.capabilities.model_copy(
-                    update={"ask_user_answer_owner": "adapter"}
+                    update={"ask_user_answer_owner": "adapter", "command": commands}
                 )
                 return base.model_copy(
                     update={
@@ -4814,6 +5552,20 @@ class TestTheStreamCompletedStopBoundary:
         spec = build_spec("ep-stop-boundary")
         config = build_config(short_scratch, observation_retry_delay=0.0, max_steps=max_steps)
         adapter = _AskOwnerAdapter(short_scratch, spec.episode_id)
+        if commands:
+            original_call = adapter._call_raw
+
+            async def call_raw(method: Any, params: Any, result_type: Any, **kwargs: Any) -> Any:
+                if method != "run_command":
+                    return await original_call(method, params, result_type, **kwargs)
+                # A durable target-side effect distinguishes execution from a
+                # merely requested/refused N+1 command; no shell or VM needed.
+                marker = world / "commands.jsonl"
+                with marker.open("a", encoding="utf-8") as sink:
+                    sink.write(json.dumps(params.command) + "\n")
+                return _command_result()
+
+            monkeypatch.setattr(adapter, "_call_raw", call_raw)
         session_spec = SessionSpec(
             hosting="test",
             model="mock",
@@ -4920,6 +5672,63 @@ class TestTheStreamCompletedStopBoundary:
         assert outcome.attempted_groups == 1
         assert outcome.steps == 0
         assert text.count("tool_execution_end") == 2  # both paired
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("calls_per_group", [1, 2])
+    async def test_command_groups_report_the_enforced_clock_and_never_run_n_plus_one(
+        self, real_arm_scratch: Path, monkeypatch: pytest.MonkeyPatch, calls_per_group: int
+    ) -> None:
+        from local_operator.evaluation.session_arm import _outcome_json
+
+        command = "mcp__episode_actions_run_command"
+        script = [
+            [
+                (command, {"command": f"group-{group}-call-{call}"})
+                for call in range(calls_per_group)
+            ]
+            for group in range(4)
+        ]
+        wire, outcome, text = await self._run(
+            real_arm_scratch, monkeypatch, script=script, max_steps=3, commands=True
+        )
+        print(
+            json.dumps(
+                {
+                    "status": outcome.status,
+                    "terminal_reason": outcome.terminal_reason,
+                    "diagnostic": outcome.diagnostic,
+                    "accounting": outcome.accounting.to_json(),
+                }
+            )
+        )
+        # The existing command-only close-out labels graceful budget stops as
+        # agent_stop/aborted (unlike screen-epoch exhaustion). Reporting must
+        # neither change that legacy status nor mistake it for lost enforcement.
+        assert outcome.status == "agent_stop", (outcome, text)
+        assert outcome.terminal_reason == "aborted"
+        assert len(wire) == 3
+        assert outcome.steps == 0  # commands never claimed a screen epoch
+        assert outcome.attempted_groups == 3
+        effects = (real_arm_scratch / "world" / "commands.jsonl").read_text().splitlines()
+        assert [json.loads(row) for row in effects] == [
+            f"group-{group}-call-{call}" for group in range(3) for call in range(calls_per_group)
+        ]
+        accounting = _outcome_json(outcome)["accounting"]
+        assert accounting == {
+            "decision_groups_used": 3,
+            "decision_groups_limit": 3,
+            "legacy_screen_epochs": 0,
+            "command_attempts": 3 * calls_per_group,
+            "logical_requests": 3,
+            "verifier_requests": None,
+            "requests_complete": True,
+        }
+        sealed = json.loads((outcome.record_root / "outcome.json").read_text())
+        assert sealed["accounting"] == accounting
+        assert sealed["steps"] == 0
+        event_rows = [json.loads(line) for line in text.splitlines()]
+        assert any(row.get("kind") == "accounting" for row in event_rows)
+        print(json.dumps({"accounting": accounting, "target_effects": len(effects)}))
 
     @staticmethod
     def _policy_stamp_from_record(outcome: Any) -> tuple[dict[str, Any], list[dict[str, Any]]]:
@@ -5737,9 +6546,18 @@ async def test_pending_command_serializes_finish(tmp_path: Path) -> None:
 @pytest.mark.asyncio
 @pytest.mark.parametrize("native", [False, True])
 @pytest.mark.parametrize("late_error", [False, True])
-async def test_mcp_cancellation_seals_unknown_even_after_late_success(
+async def test_mcp_cancellation_detaches_and_seals_unknown_even_after_late_success(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, native: bool, late_error: bool
 ) -> None:
+    """A caller cancelled after dispatch DETACHES the command; it never cancels it.
+
+    Cancelling the in-flight command used to cancel the adapter RPC, which
+    poisons its channel and kills the worker (sealed episode
+    ``t29a-t030-20261111-192648``: every later call and ``score`` failed). The
+    command now settles under its own deadline. The row still seals the
+    UNKNOWN outcome the caller was left with -- a late success must never read
+    as green -- and records what the target actually answered beside it.
+    """
     from mcp import types
 
     from local_operator.evaluation.action_server import (
@@ -5787,20 +6605,27 @@ async def test_mcp_cancellation_seals_unknown_even_after_late_success(
             await writer.wait_closed()
 
     async def run(command: str, timeout: float) -> Any:
-        remote = asyncio.create_task(http_request())
-        while True:
-            try:
-                return await asyncio.shield(remote)
-            except asyncio.CancelledError:
-                if remote.cancelled():
-                    raise
-                # Publish only once the bridge operation has observed cancellation.
-                # Native socket teardown can cancel it again while it collects the
-                # late reply; keep shielding on EVERY await so that teardown cannot
-                # cancel the independent HTTP task before the handshake releases it.
-                cancelled.set()
+        try:
+            return await http_request()
+        except asyncio.CancelledError:
+            # The defect this test guards: the caller's cancellation reaching
+            # the dispatched command (and with it the adapter RPC).
+            cancelled.set()
+            raise
 
     bridge.run_command = run
+    # Observe the bridge's detach signal, so the late reply is released only
+    # once the caller's cancellation has reached the bridge (the MCP cancel is
+    # an asynchronous notification across the stdio transport).
+    detached: list[asyncio.Event] = []
+    original_call_command = bridge.call_command
+
+    async def spy_call_command(arguments: Any, **kwargs: Any) -> Any:
+        if kwargs.get("caller_gone") is not None:
+            detached.append(kwargs["caller_gone"])
+        return await original_call_command(arguments, **kwargs)
+
+    monkeypatch.setattr(bridge, "call_command", spy_call_command)
     await bridge.start()
     server = build_mcp_server(str(bridge.endpoint), ActionSurface(), timeout=5, command=True)
     entry = server.get_request_handler("tools/call")
@@ -5839,19 +6664,28 @@ async def test_mcp_cancellation_seals_unknown_even_after_late_success(
 
     task = asyncio.create_task(invoke())
     try:
-        await admitted.wait()
+        await asyncio.wait_for(admitted.wait(), 10)
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task
         # MCP cancellation is a notification across a subprocess transport,
-        # not a synchronous remote ACK. Hold the actual HTTP reply until
-        # cancellation reaches the operation, then deliver its late success.
-        await asyncio.wait_for(cancelled.wait(), 2)
+        # not a synchronous remote ACK. Hold the actual HTTP reply until the
+        # bridge has seen the caller leave, then deliver its late answer.
+        for _ in range(200):
+            if detached and detached[0].is_set():
+                break
+            await asyncio.sleep(0.01)
+        assert detached and detached[0].is_set(), "caller cancellation never reached the bridge"
         release.set()
         await asyncio.wait_for(completed.wait(), 2)
         await asyncio.wait_for(recorded.wait(), 2)
-        assert cancelled.is_set(), "caller cancellation never reached the bridge operation"
+        assert not cancelled.is_set(), "caller cancellation reached the dispatched command"
         row = [p for k, p in rows if k == "command"][0]
+        settled = (
+            {"error": "ValueError: late reply could not be decoded"}
+            if late_error
+            else _command_result().model_dump(mode="json", exclude={"stdout", "stderr"})
+        )
         assert row == {
             "call_id": row["call_id"],
             "command": "late success",
@@ -5864,7 +6698,9 @@ async def test_mcp_cancellation_seals_unknown_even_after_late_success(
             "stdout_truncated": None,
             "stderr_truncated": None,
             "error": "CancelledError: command outcome unknown",
+            "settled_after_cancel": settled,
         }
+        assert len([k for k, _ in rows if k == "command"]) == 1
     finally:
         release.set()
         if manager is not None:
@@ -5872,3 +6708,394 @@ async def test_mcp_cancellation_seals_unknown_even_after_late_success(
         await bridge.stop()
         target.close()
         await target.wait_closed()
+
+
+@pytest.mark.asyncio
+async def test_a_command_at_the_advertised_maximum_is_not_cut_by_the_mcp_client(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The measured loss, scaled down and driven through the real MCP client.
+
+    Sealed episode ``t29a-t030-20261111-192648``: ``timeout_s: 300`` (the
+    advertised maximum) met the client's 300 s default request timeout and was
+    cut at 305.06 s. Here the client default is scaled to 0.5 s and the command
+    takes 1 s (its own deadline plus downstream margins, scaled): without the
+    per-server bound the declaration now carries, the client cuts it exactly as
+    the sealed run did; with it, the command's real answer reaches the caller.
+    """
+
+    from local_operator.mcp import manager as manager_mod
+
+    monkeypatch.setattr(manager_mod, "DEFAULT_MCP_TIMEOUT_MS", 500.0)
+    monkeypatch.delenv("LOCAL_OPERATOR_MCP_TIMEOUT_MS", raising=False)
+    bridge = _bridge(tmp_path)
+
+    async def run(command: str, timeout: float) -> Any:
+        await asyncio.sleep(1.0)
+        return _command_result(stdout="trained\n", stdout_bytes=8)
+
+    bridge.run_command = run
+    await bridge.start()
+    config = tmp_path / "config"
+    config.mkdir()
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(config))
+    decl = declare_action_server(
+        config_dir=config,
+        endpoint=bridge.endpoint,
+        surface=ActionSurface(),
+        python_executable=sys.executable,
+        cwd=Path(__file__).resolve().parents[3],
+        command=True,
+    )
+    manager = McpManager(str(tmp_path))
+    try:
+        await manager.discover_and_connect()
+        await manager.wait_settled(20)
+        tool = next(t for t in manager.get_tools() if t.name == decl.command_tool_name)
+        result = await asyncio.wait_for(
+            tool.execute(
+                "max-timeout",
+                {"command": "python train.py", "timeout_s": 300},
+                None,
+                None,
+                ToolContext(),
+            ),
+            30,
+        )
+        text = "".join(getattr(block, "text", "") for block in result.content)
+        assert "timed out" not in text, text
+        assert "exit_code: 0" in text and "trained" in text, text
+    finally:
+        await manager.disconnect_all()
+        await bridge.stop()
+
+
+# ---------------------------------------------------------------------------
+# PR #3836 round 1 (R1 = Q1, m1, m2, Q2): a command never runs after its caller
+# left while it was still QUEUED on the mutation lane, and the lane wait is
+# bounded so the MCP client's from-send timer cannot cut a queued command.
+# ---------------------------------------------------------------------------
+
+
+async def _forward_command(bridge: ActionBridge, arguments: dict[str, Any]) -> dict[str, Any]:
+    """The REAL client half of the wire (``action_server.forward_call``)."""
+
+    from local_operator.evaluation.action_server import COMMAND_TOOL_NAME, forward_call
+
+    return await forward_call(str(bridge.endpoint), arguments, timeout=None, tool=COMMAND_TOOL_NAME)
+
+
+def _text_of(reply: Any) -> str:
+    content = reply["content"] if isinstance(reply, dict) else reply.content
+    return "".join(
+        (block.get("text", "") if isinstance(block, dict) else getattr(block, "text", ""))
+        for block in content
+    )
+
+
+def _dispatch_recorder(
+    hold_s: float,
+) -> tuple[list[str], Any]:
+    dispatched: list[str] = []
+
+    async def run(command: str, timeout: float) -> Any:
+        del timeout
+        dispatched.append(command)
+        if command.startswith("first"):
+            await asyncio.sleep(hold_s)
+        return _command_result(stdout=f"{command}\n", stdout_bytes=len(command) + 1)
+
+    return dispatched, run
+
+
+@pytest.mark.asyncio
+async def test_a_command_cancelled_while_queued_is_never_dispatched(tmp_path: Path) -> None:
+    """QA row 9 / review R1: A holds the lane, B queues, B's caller leaves.
+
+    Before the fix B ran once the lane freed (``DISPATCHED: ['first',
+    'second']``, a ``command_started`` row and ``cancelled_after_dispatch``),
+    mutating the target after its caller had been told the call failed.
+    """
+
+    rows: list[tuple[str, dict[str, Any]]] = []
+    bridge = _bridge(tmp_path, record=lambda kind, payload: rows.append((kind, payload)))
+    dispatched, bridge.run_command = _dispatch_recorder(hold_s=1.0)
+    await bridge.start()
+    try:
+        first = asyncio.create_task(_forward_command(bridge, {"command": "first; sleep"}))
+        await asyncio.sleep(0.2)
+        second = asyncio.create_task(_forward_command(bridge, {"command": "second > marker"}))
+        await asyncio.sleep(0.3)
+        assert dispatched == ["first; sleep"], "second must still be queued"
+        second.cancel()  # the interrupted turn: forward_call half-closes
+        with pytest.raises(asyncio.CancelledError):
+            await second
+        reply = await asyncio.wait_for(first, 5)
+        assert "exit_code: 0" in _text_of(reply)
+        for _ in range(100):
+            if any(p.get("command") == "second > marker" for k, p in rows if k == "command"):
+                break
+            await asyncio.sleep(0.02)
+        assert dispatched == ["first; sleep"], f"a queued, cancelled command ran: {dispatched}"
+        started = [p["command"] for k, p in rows if k == "command_started"]
+        assert started == ["first; sleep"]
+        refused = [p for k, p in rows if k == "command" and p["command"] == "second > marker"]
+        assert refused == [
+            {
+                "call_id": refused[0]["call_id"],
+                "command": "second > marker",
+                "timeout_s": None,
+                "cancelled": True,
+                "dispatched": False,
+                "outcome": "cancelled_before_dispatch",
+                "target_may_have_run": False,
+            }
+        ]
+        # The lane is healthy: a later command runs normally.
+        later = await asyncio.wait_for(_forward_command(bridge, {"command": "later"}), 5)
+        assert "later" in _text_of(later)
+    finally:
+        await bridge.stop()
+
+
+@pytest.mark.asyncio
+async def test_parallel_commands_at_the_maximum_are_refused_unsent_not_cut(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """QA's parallel shape: MCP tools run ``concurrency="shared"``.
+
+    Three ``timeout_s: 300`` calls in one turn at the REAL declared bound
+    (350 s): before the fix the second and third queued for up to 600 s, the
+    client's from-send timer cut them, and they ran anyway. At the maximum the
+    nesting leaves no queue headroom, so a busy lane refuses them at once with
+    a reply the caller actually receives -- and nothing is sent.
+    """
+
+    monkeypatch.delenv("LOCAL_OPERATOR_MCP_TIMEOUT_MS", raising=False)
+    rows: list[tuple[str, dict[str, Any]]] = []
+    bridge = _bridge(tmp_path, record=lambda kind, payload: rows.append((kind, payload)))
+    dispatched, bridge.run_command = _dispatch_recorder(hold_s=0.5)
+    await bridge.start()
+    try:
+        first = asyncio.create_task(
+            _forward_command(bridge, {"command": "first", "timeout_s": 300})
+        )
+        await asyncio.sleep(0.1)
+        started = time.monotonic()
+        others = await asyncio.wait_for(
+            asyncio.gather(
+                _forward_command(bridge, {"command": "second", "timeout_s": 300}),
+                _forward_command(bridge, {"command": "third", "timeout_s": 300}),
+            ),
+            5,
+        )
+        assert time.monotonic() - started < 0.4, "a no-headroom command waited for the lane"
+        for reply in others:
+            assert reply["is_error"] is True
+            assert _text_of(reply).startswith("Not run:"), _text_of(reply)
+            assert "Nothing was sent" in _text_of(reply)
+        assert "exit_code: 0" in _text_of(await asyncio.wait_for(first, 5))
+        assert dispatched == ["first"]
+        outcomes = sorted(
+            (p["command"], p["outcome"], p["target_may_have_run"])
+            for k, p in rows
+            if k == "command" and p.get("dispatched") is False
+        )
+        assert outcomes == [
+            ("second", "refused_lane_busy", False),
+            ("third", "refused_lane_busy", False),
+        ]
+        # At the maximum a FREE lane is still taken: no headroom is not no lane.
+        free = await asyncio.wait_for(
+            _forward_command(bridge, {"command": "alone", "timeout_s": 300}), 5
+        )
+        assert "exit_code: 0" in _text_of(free)
+    finally:
+        await bridge.stop()
+
+
+@pytest.mark.asyncio
+async def test_a_queued_command_waits_only_within_the_headroom_the_bound_leaves(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The lane bound is derived, not invented: client bound minus the command's
+    own nested budget. Scaled through the env override the client itself reads:
+    1 s command, client bound 51.4 s -> 51.4 - (1 + 20 + 30) = 0.4 s of queue.
+    """
+
+    from local_operator.evaluation import session_arm
+
+    monkeypatch.setenv("LOCAL_OPERATOR_MCP_TIMEOUT_MS", "51400")
+    assert session_arm.action_server_client_timeout_s() == pytest.approx(51.4)
+    bridge = _bridge(tmp_path)
+    dispatched, bridge.run_command = _dispatch_recorder(hold_s=1.5)
+    await bridge.start()
+    try:
+        first = asyncio.create_task(_forward_command(bridge, {"command": "first", "timeout_s": 1}))
+        await asyncio.sleep(0.1)
+        started = time.monotonic()
+        late = await asyncio.wait_for(
+            _forward_command(bridge, {"command": "queued", "timeout_s": 1}), 5
+        )
+        waited = time.monotonic() - started
+        assert _text_of(late).startswith("Not run:"), _text_of(late)
+        assert 0.3 < waited < 1.2, waited
+        await asyncio.wait_for(first, 5)
+        assert dispatched == ["first"]
+        # Within the headroom a queued command waits and runs.
+        first = asyncio.create_task(_forward_command(bridge, {"command": "first", "timeout_s": 1}))
+        await asyncio.sleep(0.1)
+        monkeypatch.setenv("LOCAL_OPERATOR_MCP_TIMEOUT_MS", "53000")  # 2 s of headroom
+        ok = await asyncio.wait_for(
+            _forward_command(bridge, {"command": "fits", "timeout_s": 1}), 5
+        )
+        assert "exit_code: 0" in _text_of(ok)
+        await asyncio.wait_for(first, 5)
+        assert dispatched == ["first", "first", "fits"]
+    finally:
+        await bridge.stop()
+
+
+@pytest.mark.asyncio
+async def test_a_queued_command_cut_by_the_mcp_client_is_never_dispatched(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """QA row 2b through the REAL MCP client and stdio action server.
+
+    A per-server ``timeout: 1000`` the bridge's lane bound does not know about
+    (the case the bound cannot prevent): both calls are cut at 1 s; the first
+    was dispatched and settles detached, the second was still queued and must
+    never reach the target. Before the fix it ran (``settled_after_cancel
+    exit 0``).
+    """
+
+    monkeypatch.delenv("LOCAL_OPERATOR_MCP_TIMEOUT_MS", raising=False)
+    rows: list[tuple[str, dict[str, Any]]] = []
+    bridge = _bridge(tmp_path, record=lambda kind, payload: rows.append((kind, payload)))
+    dispatched, bridge.run_command = _dispatch_recorder(hold_s=2.0)
+    await bridge.start()
+    config = tmp_path / "config"
+    config.mkdir()
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(config))
+    decl = declare_action_server(
+        config_dir=config,
+        endpoint=bridge.endpoint,
+        surface=ActionSurface(),
+        python_executable=sys.executable,
+        cwd=Path(__file__).resolve().parents[3],
+        command=True,
+    )
+    document = json.loads(decl.config_path.read_text(encoding="utf-8"))
+    document["mcpServers"]["episode-actions"]["timeout"] = 1000
+    decl.config_path.write_text(json.dumps(document), encoding="utf-8")
+    manager = McpManager(str(tmp_path))
+    try:
+        # Connect under a generous budget, cut the CALLS at 1 s. The per-server
+        # ``timeout`` also becomes the session's read timeout for
+        # ``initialize`` and ``tools/list``, and a cold stdio action server
+        # (a fresh interpreter importing local_operator) can take over 1 s to
+        # answer on a loaded runner: CI saw no tool listed (StopIteration
+        # below), reproduced here with a 1.5 s interpreter-start delay. The
+        # env override outranks the config only while connecting; ``call_tool``
+        # resolves the timeout per call, so once it is dropped both calls read
+        # the per-server 1000 ms this test is about.
+        monkeypatch.setenv("LOCAL_OPERATOR_MCP_TIMEOUT_MS", "20000")
+        await manager.discover_and_connect()
+        await manager.wait_settled(20)
+        monkeypatch.delenv("LOCAL_OPERATOR_MCP_TIMEOUT_MS")
+        tools = {t.name: t for t in manager.get_tools()}
+        assert decl.command_tool_name in tools, f"action server not listed: {sorted(tools)}"
+        tool = tools[decl.command_tool_name]
+
+        async def call(call_id: str, command: str) -> Any:
+            return await tool.execute(call_id, {"command": command}, None, None, ToolContext())
+
+        first = asyncio.create_task(call("a", "first; sleep"))
+        await asyncio.sleep(0.3)
+        second = await asyncio.wait_for(call("b", "second > marker"), 10)
+        assert "timed out" in _text_of(second), _text_of(second)
+        await asyncio.wait_for(first, 10)
+        for _ in range(200):
+            if any(p.get("command") == "second > marker" for k, p in rows if k == "command"):
+                break
+            await asyncio.sleep(0.02)
+        assert dispatched == ["first; sleep"], f"a queued, cut command ran: {dispatched}"
+        outcome = [
+            p["outcome"] for k, p in rows if k == "command" and p["command"] == "second > marker"
+        ]
+        assert outcome == ["cancelled_before_dispatch"]
+    finally:
+        await manager.disconnect_all()
+        await bridge.stop()
+
+
+@pytest.mark.parametrize(("env_ms", "refused"), [("1000", True), ("349999", True), ("0", False)])
+def test_the_env_refusal_needs_no_provisioning(
+    monkeypatch: pytest.MonkeyPatch, env_ms: str, refused: bool
+) -> None:
+    """QA Q2: the refusal reads only env + constants, so it can run first."""
+
+    from local_operator.evaluation.session_arm import assert_action_server_timeout_nests
+
+    monkeypatch.setenv("LOCAL_OPERATOR_MCP_TIMEOUT_MS", env_ms)
+    if refused:
+        with pytest.raises(SessionArmError, match="MCP request timeout resolves to"):
+            assert_action_server_timeout_nests()
+    else:
+        assert_action_server_timeout_nests()
+
+
+@pytest.mark.asyncio
+async def test_a_refused_env_override_never_launches_the_adapter(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, short_scratch: Path
+) -> None:
+    """QA Q2: the refused run's record was ``["reset", "error"]`` -- prepare and
+    reset (an AWS VM) had already happened. Now ``launch`` is never called."""
+
+    monkeypatch.setenv("LOCAL_OPERATOR_MCP_TIMEOUT_MS", "1000")
+    home = short_scratch / "home"
+    for path in (home / ".local-operator", home / "lh", home / "work"):
+        path.mkdir(parents=True, exist_ok=True)
+    launched: list[Any] = []
+
+    def launch(selected: Any) -> Any:
+        launched.append(selected)
+        raise AssertionError("launch must not run for a refused episode")
+
+    async def rescue(descriptor: Any, **kwargs: Any) -> Any:
+        del descriptor, kwargs
+        return SimpleNamespace(complete=True, receipts=(), rescue_required=False)
+
+    outcome = await run_session_episode(
+        spec=build_spec("ep-env-refused"),
+        config=build_config(tmp_path, observation_retry_delay=0.0),
+        selector=selector(tmp_path),
+        roots=SessionRoots(
+            config_dir=home / ".local-operator",
+            agent_home=home / "lh",
+            cwd=home / "work",
+            allow_volatile=True,
+        ),
+        scratch_root=short_scratch,
+        session_spec=SessionSpec(
+            hosting="test",
+            model="mock",
+            world_root=tmp_path / "world",
+            tools=EPISODE_TOOL_SURFACE,
+            approvals=ApprovalPolicy.declared(EPISODE_TOOL_SURFACE),
+            name="arm-env-refused",
+        ),
+        secrets=(),
+        launch=launch,
+        rescue=rescue,
+    )
+    assert launched == []
+    assert outcome.terminal_reason == "session-arm", outcome
+    assert "LOCAL_OPERATOR_MCP_TIMEOUT_MS" in (outcome.diagnostic or "")
+    assert outcome.record_root is not None
+    kinds = [
+        json.loads(line)["kind"]
+        for line in (outcome.record_root / "events.jsonl").read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert "reset" not in kinds, kinds

@@ -86,6 +86,42 @@ def _unknown_session() -> HTTPException:
     return HTTPException(404, _wd.requested_not_found().envelope(code="session_unknown"))
 
 
+async def _admit_peer_session(applier: SettingsApplier, session_id: str, kind: str) -> None:
+    """Admit a pick for a conversation a MESH PEER holds, or refuse it by name.
+
+    WHY (operator report, 2026-11-11): the effort chip on a session running on
+    ``cloud-node-1`` answered "Couldn't set effort to Medium: Requested session,
+    profile, team or subscription not found". This POST's door only knew
+    ``sessions/<id>/`` on THIS disk, which a peer's conversation never has, so
+    every model/effort/fast pick for a peer was the shared 404 about a
+    conversation the user can see. The applier itself already drives the pool's
+    bridge, which opens a peer's id as its remote viewer and sends the switch to
+    the OWNER's runtime — only the door and the store's location were local-only.
+
+    The lookup is ``desktop_mesh.remote_owner``, the one the archive, receipt and
+    remote-write routes ask (cache-first; one relay read only for an id with no
+    local directory). An id no device claims stays the 404.
+
+    ``cwd`` IS REFUSED with the family's named 409 rather than recorded: the
+    target is a path on the OWNER's disk while ``_validate_cwd`` resolves it on
+    this one, and moving a peer's conversation is the mobility verbs' job.
+    """
+    from local_operator.server.utils import desktop_mesh
+
+    owner = await asyncio.to_thread(desktop_mesh.remote_owner, applier.store.config_dir, session_id)
+    if owner is None:
+        raise _unknown_session()
+    if kind == "cwd":
+        device_id, device_name = owner
+        raise HTTPException(
+            409,
+            _wd.session_is_remote_write(
+                noun="working directory", session_id=session_id, label=device_name or device_id
+            ).envelope(code="session_is_remote"),
+        )
+    await asyncio.to_thread(applier.store.adopt_peer, session_id)
+
+
 def _generation_moved() -> HTTPException:
     return HTTPException(
         409, _wd.settings_intent_generation_moved().envelope(code="generation_moved")
@@ -225,8 +261,9 @@ async def submit_settings_intent(session_id: str, body: SettingsIntentRequest, r
     to neither ``base`` nor the pick means someone else changed it.
     """
     applier = ensure_applier(request.app)
-    if not applier.store.exists(session_id):
-        raise _unknown_session()
+    peer = not applier.store.local(session_id)
+    if peer:
+        await _admit_peer_session(applier, session_id, body.kind)
     existing = (await applier.snapshot(session_id)).get(session_id, {})
     replay = existing.get(body.kind)
     if replay is None or replay["request_id"] != body.request_id:
@@ -265,7 +302,14 @@ async def submit_settings_intent(session_id: str, body: SettingsIntentRequest, r
         if model_slot and model_slot.get("state") in ACTIVE_STATES
         else current.model
     )
-    if body.kind == "model":
+    if peer:
+        # THE OWNER IS THE CATALOGUE AUTHORITY for its own runtime: the peer may
+        # run a provider this device has no catalogue (or no credential) for, so
+        # the local checks below would refuse picks the owner can take. The
+        # owner's own refusal (unknown model, effort off the ladder, no fast
+        # tier) comes back through the applier as the slot's terminal failure.
+        pass
+    elif body.kind == "model":
         await _validate_model(str(value), body.effort)
     elif body.kind == "effort":
         if target:

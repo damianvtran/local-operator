@@ -1680,6 +1680,97 @@ def test_refresh_unit_migrates_a_pre_oom_unit(
     assert outcome.kind == "current", outcome
 
 
+# OOMPolicy (2026-11-11, the Linux node) ----------------------------------
+
+
+def test_render_systemd_keeps_the_unit_up_when_a_session_child_is_oom_killed() -> None:
+    """The relay unit says OOMPolicy=continue, beside KillMode=process.
+
+    systemd's default ``stop`` acts on an OOM kill of ANY process in the unit's
+    cgroup: a session's 4-7 GB ``node`` build stopped the relay five times
+    (23:31-23:33Z) while the relay itself was never the kernel's victim.
+    """
+    text = relay.render_systemd(4097)
+    assert "OOMPolicy=continue\n" in text, text
+    service = text.split("[Service]\n", 1)[1].split("[Install]", 1)[0]
+    assert "OOMPolicy=continue" in service and "KillMode=process" in service
+    # Never ``kill``: that SIGKILLs every session runtime left in the cgroup.
+    assert "OOMPolicy=kill" not in text
+    assert relay.RELAY_OOM_POLICY == "continue"
+
+
+def test_other_daemons_render_byte_identically_without_oom_policy() -> None:
+    """The parameter is opt-in: no unit that predates it gains the line."""
+    text = supervisors.render_systemd_unit(description="x", exec_start="/bin/true")
+    assert "OOMPolicy" not in text
+
+
+def test_refresh_unit_migrates_a_pre_oom_policy_unit(
+    linux_host: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An installed unit without OOMPolicy is rewritten and reloaded, not restarted.
+
+    This is the path the operator's rollout takes (``lop update`` / the mesh roll
+    reach ``refresh_unit_if_stale``), so no manual step is needed: the
+    ``daemon-reload`` makes the policy effective on the RUNNING unit.
+    """
+    _shim_rig(tmp_path, monkeypatch)
+    unit = _unit(linux_host)
+    unit.parent.mkdir(parents=True, exist_ok=True)
+    legacy = relay.render_systemd().replace("OOMPolicy=continue\n", "")
+    assert "OOMPolicy" not in legacy and "KillMode=process\n" in legacy
+    unit.write_text(legacy, encoding="utf-8")
+    monkeypatch.setattr(supervisors, "systemd_unit_is_addressable", lambda name: True)
+    calls, record = _manager_recorder()
+    monkeypatch.setattr(supervisors, "systemctl_user", record)
+    _pin_supervision(monkeypatch, managed=_Script(111), record=_RelayRecordScript(111))
+    monkeypatch.setattr(update_mod, "stale_generation_of_process", lambda pid: None)
+
+    outcome = relay.refresh_unit_if_stale()
+
+    assert calls == [("daemon-reload",)], calls
+    written = unit.read_text(encoding="utf-8")
+    assert "OOMPolicy=continue\n" in written, "the migration is the point"
+    assert written == relay.render_systemd()
+    assert outcome.kind == "current", outcome
+
+
+def test_installed_unit_oom_policy_reads_the_unit_and_its_drop_ins(
+    linux_host: Path,
+) -> None:
+    """The readiness fact: disk truth in systemd's order, unknowns never a gap."""
+    unit = _unit(linux_host)
+    assert relay.installed_unit_oom_policy() == {"supervisor": "systemd", "installed": False}
+    unit.parent.mkdir(parents=True, exist_ok=True)
+    unit.write_text(relay.render_systemd(), encoding="utf-8")
+    fact = relay.installed_unit_oom_policy()
+    assert fact["oom_policy"] == "continue" and fact["readable"] is True, fact
+
+    legacy = relay.render_systemd().replace("OOMPolicy=continue\n", "")
+    unit.write_text(legacy, encoding="utf-8")
+    assert relay.installed_unit_oom_policy()["oom_policy"] is None  # the default: stop
+
+    # A drop-in is read after the unit, lexically, and the last assignment wins
+    # (this node already carries ``uv-path.conf``); an empty one resets.
+    dropins = unit.parent / f"{unit.name}.d"
+    dropins.mkdir()
+    (dropins / "a.conf").write_text("[Service]\nOOMPolicy=continue\n", encoding="utf-8")
+    (dropins / "b.conf").write_text("[Service]\nOOMPolicy=stop\n", encoding="utf-8")
+    assert relay.installed_unit_oom_policy()["oom_policy"] == "stop"
+    (dropins / "c.conf").write_text("[Service]\nOOMPolicy=\n", encoding="utf-8")
+    assert relay.installed_unit_oom_policy()["oom_policy"] is None
+    # A key outside [Service] is not the service's policy.
+    (dropins / "c.conf").write_text("[Unit]\nOOMPolicy=continue\n", encoding="utf-8")
+    assert relay.installed_unit_oom_policy()["oom_policy"] == "stop"
+
+
+def test_installed_unit_oom_policy_makes_no_claim_off_systemd(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(relay.sys, "platform", "darwin")
+    assert relay.installed_unit_oom_policy() == {"supervisor": None}
+
+
 def test_refresh_unit_repoints_a_generation_pinned_unit_to_the_shim(
     linux_host: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

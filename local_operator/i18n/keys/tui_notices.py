@@ -118,6 +118,46 @@ def stopped_session_held() -> Msg:
     return Msg("tui.notices.stopped_session_held", {})
 
 
+def temporary_confirm() -> Msg:
+    return Msg("tui.notices.temporary_confirm", {})
+
+
+def temporary_deleted(*, session_id: str) -> Msg:
+    return Msg("tui.notices.temporary_deleted", {"session_id": session_id})
+
+
+def temporary_new_hint() -> Msg:
+    return Msg("tui.notices.temporary_new_hint", {})
+
+
+def temporary_off() -> Msg:
+    return Msg("tui.notices.temporary_off", {})
+
+
+def temporary_on(*, minutes: str) -> Msg:
+    return Msg("tui.notices.temporary_on", {"minutes": minutes})
+
+
+def temporary_refused(*, reason: str) -> Msg:
+    return Msg("tui.notices.temporary_refused", {"reason": reason})
+
+
+def temporary_refused_pinned() -> Msg:
+    return Msg("tui.notices.temporary_refused_pinned", {})
+
+
+def temporary_refused_project() -> Msg:
+    return Msg("tui.notices.temporary_refused_project", {})
+
+
+def temporary_status_off() -> Msg:
+    return Msg("tui.notices.temporary_status_off", {})
+
+
+def temporary_status_on(*, deletes_in: str) -> Msg:
+    return Msg("tui.notices.temporary_status_on", {"deletes_in": deletes_in})
+
+
 def too_large_images_removed() -> Msg:
     return Msg("tui.notices.too_large_images_removed", {})
 

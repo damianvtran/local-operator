@@ -3516,14 +3516,7 @@ def test_merge_gate_aggregates_every_full_suite_job() -> None:
     assert not gate.get(
         "continue-on-error"
     ), "continue-on-error makes a required check report success for a red run"
-    run = gate["steps"][-1]["run"]
-    assert (
-        '"failure"' in run and '"cancelled"' in run and "exit 1" in run
-    ), "the aggregate must fail on a failed or cancelled need"
-    assert '"skipped"' not in run, (
-        "a classifier skip must pass the gate: a docs-only head legitimately "
-        "skips the matrix and must still be mergeable"
-    )
+    _assert_gate_allowlists_results(gate["steps"][-1]["run"])
 
 
 def test_no_merge_gate_job_is_conditional_on_the_label_name() -> None:
@@ -4338,6 +4331,72 @@ def test_guards_job_reads_the_one_guard_list() -> None:
     assert "tests/unit/" not in run, "the guard list must not be re-spelled in ci.yml"
 
 
+# The two required aggregates (`CI Gate`, `Merge gate (full suite)`) must FAIL
+# CLOSED: a need passes only on exactly `success` or `skipped`. They used to
+# reject only `failure`/`cancelled`, and during GitHub's 2026-11-11 Actions
+# incident both reported SUCCESS on PR #3804 over jobs whose result was
+# `abandoned` (never ran). A text pin cannot tell an allowlist from a denylist
+# that happens to mention the same words, so the behavioural test below runs
+# the REAL step script, extracted from the workflow, under bash with jq.
+_GATE_PASSING_RESULTS = ("success", "skipped")
+
+
+def _assert_gate_allowlists_results(run: str) -> None:
+    assert (
+        '.value.result != "success" and .value.result != "skipped"' in run
+    ), "the aggregate must allowlist success/skipped, not denylist failures"
+    assert "exit 1" in run
+    assert '== "failure"' not in run and '== "cancelled"' not in run, (
+        "a denylist of bad results passes any result it does not name "
+        "(`abandoned`, empty, future values)"
+    )
+
+
+def _gate_step_runs() -> dict[str, str]:
+    ci = yaml.safe_load(CI_YML.read_text())["jobs"]["ci-gate"]
+    full = yaml.safe_load(FULL_SUITE_YML.read_text())["jobs"]["merge-gate"]
+    return {"ci-gate": ci["steps"][-1]["run"], "merge-gate": full["steps"][-1]["run"]}
+
+
+@pytest.mark.skipif(
+    shutil.which("jq") is None or shutil.which("bash") is None,
+    reason="the real gate script needs bash and jq",
+)
+@pytest.mark.parametrize("gate", ["ci-gate", "merge-gate"])
+@pytest.mark.parametrize(
+    ("results", "passes"),
+    [
+        ({"a": "success", "b": "skipped"}, True),
+        ({"a": "success"}, True),
+        ({"a": "success", "b": "abandoned"}, False),
+        ({"a": "success", "b": "failure"}, False),
+        ({"a": "skipped", "b": "cancelled"}, False),
+        ({"a": "success", "b": ""}, False),
+        ({"a": "success", "b": None}, False),
+        ({"a": "success", "b": "some-future-result"}, False),
+    ],
+)
+def test_required_gate_script_fails_closed_on_non_success_results(
+    gate: str, results: dict[str, str | None], passes: bool
+) -> None:
+    """Run the gate's own step script against a synthetic `toJSON(needs)`."""
+    needs = {key: {"result": value, "outputs": {}} for key, value in results.items()}
+    proc = subprocess.run(
+        ["bash", "-c", _gate_step_runs()[gate]],
+        env={"PATH": os.environ.get("PATH", ""), "NEEDS": json.dumps(needs)},
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert (proc.returncode == 0) is passes, (proc.returncode, proc.stdout, proc.stderr)
+    if not passes:
+        bad = {k: v for k, v in results.items() if v not in _GATE_PASSING_RESULTS}
+        for key, value in bad.items():
+            # The error must name the job AND its result, so a reader of the
+            # check sees `b=abandoned`, not just a red gate.
+            assert f"{key}={'null' if value is None else value}" in proc.stdout
+
+
 def test_ci_gate_aggregates_every_pr_job() -> None:
     """`CI Gate` is the single required check: it must see every job."""
     jobs = _pr_jobs()
@@ -4345,6 +4404,4 @@ def test_ci_gate_aggregates_every_pr_job() -> None:
     assert gate["name"] == "CI Gate"
     assert gate["if"] == "always()"
     assert set(gate["needs"]) == set(jobs) - {"ci-gate"}
-    run = gate["steps"][-1]["run"]
-    assert '"failure"' in run and '"cancelled"' in run and "exit 1" in run
-    assert '"skipped"' not in run, "a classifier skip must pass the gate"
+    _assert_gate_allowlists_results(gate["steps"][-1]["run"])

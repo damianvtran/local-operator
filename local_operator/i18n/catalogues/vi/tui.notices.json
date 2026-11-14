@@ -30,5 +30,15 @@
   "tui.notices.effort_default_changed": "mặc định nỗ lực suy luận đã đổi cho các phiên mới ({effort}); /model saved sẽ áp dụng nó ở đây",
   "tui.notices.effort_default_changed_headline": "Đã đổi mặc định nỗ lực",
   "tui.notices.model_switch_queued": "Đã xếp hàng chuyển sang {model} — có hiệu lực ở bước tiếp theo",
-  "tui.notices.model_switch_refused": "Không áp dụng được {model}: {reason}"
+  "tui.notices.model_switch_refused": "Không áp dụng được {model}: {reason}",
+  "tui.notices.temporary_on": "cuộc trò chuyện tạm thời: không lưu vào lịch sử và bị xóa sau {minutes} phút không hoạt động — /temporary off để giữ lại",
+  "tui.notices.temporary_off": "đã giữ lại: cuộc trò chuyện này không còn tạm thời và vẫn nằm trong lịch sử của bạn",
+  "tui.notices.temporary_status_on": "cuộc trò chuyện tạm thời — {deletes_in} (/temporary off để giữ lại)",
+  "tui.notices.temporary_status_off": "cuộc trò chuyện này được giữ trong lịch sử của bạn (không tạm thời)",
+  "tui.notices.temporary_confirm": "đặt cuộc trò chuyện này là tạm thời? Tin nhắn, tệp trong scratchpad và bộ nhớ phiên của nó sẽ bị xóa sau khi không hoạt động; những gì bạn đã lưu ở nơi khác vẫn được giữ. Gõ lại /temporary on trong vòng 30 giây để xác nhận.",
+  "tui.notices.temporary_refused_pinned": "cuộc trò chuyện này đang được ghim nên không thể chuyển thành tạm thời — hãy bỏ ghim trước",
+  "tui.notices.temporary_refused_project": "cuộc trò chuyện này được liên kết với một dự án nên không thể chuyển thành tạm thời — hãy hủy liên kết trước",
+  "tui.notices.temporary_deleted": "cuộc trò chuyện tạm thời {session_id} đã bị xóa sau khi không hoạt động. Bắt đầu cuộc mới: lop --temporary",
+  "tui.notices.temporary_new_hint": "/new temporary [tin nhắn] bắt đầu một cuộc trò chuyện tạm thời, không lưu vào lịch sử và bị xóa khi không hoạt động",
+  "tui.notices.temporary_refused": "cuộc trò chuyện này không thể chuyển thành tạm thời: {reason}"
 }

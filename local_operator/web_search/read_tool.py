@@ -287,9 +287,16 @@ async def execute_web_read(
         # it cannot fail the way the old `"deepseek" in settings.providers` gate
         # guarded against. Exclusion still wins, because a pin must not override an
         # explicit "never".
+        from local_operator.web_search.tool import tainted_provider_allowlist
+
+        # While the session holds Team Bridge content the DeepSeek pin is
+        # dropped and the chain filtered to index-only providers: DeepSeek is
+        # a model turn that can fetch, the sink S-43 is about.
+        restrict_to = tainted_provider_allowlist(context, settings)
         forced = (
             "deepseek"
-            if provider_available("deepseek", config_dir_path, settings)
+            if restrict_to is None
+            and provider_available("deepseek", config_dir_path, settings)
             and "deepseek" not in settings.excluded_providers
             else None
         )
@@ -297,6 +304,7 @@ async def execute_web_read(
             settings,
             config_dir_path,
             io=context.web_io if context is not None else None,
+            restrict_to=restrict_to,
         )
         try:
             response = await _abortable(

@@ -120,6 +120,9 @@ PREFIXES_TEXT_POLICY = {
     # sentence after it stays prose. Kept False deliberately: narrowing the
     # refusal is the safe direction, and `/fast` "means" the toggle.
     "fast": False,
+    # `/fast`'s shape and reason: a toggle with an optional on/off/status word,
+    # so a sentence after it stays prose.
+    "temporary": False,
     "provider": False,
     # The PAGE is the receipt; these take no argument at all, so any trailing
     # text is by definition not theirs.
@@ -239,6 +242,8 @@ ARGUMENT_SHAPE_POLICY = {
     "resume": ArgumentShape.WORD,
     # The on/off choice the desktop's picker offers.
     "fast": ArgumentShape.WORD,
+    # One on/off/status word, `/fast`'s shape: a sentence stays a message.
+    "temporary": ArgumentShape.WORD,
     "provider": ArgumentShape.WORD,
     "settings": ArgumentShape.WORD,
     # The import page owns its subcommand vocabulary (`list`, `preview …`,

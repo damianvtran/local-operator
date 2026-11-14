@@ -89,6 +89,7 @@ def _entry_owners() -> dict[str, str]:
         STOP_MARKER_NAME,
         TURN_JOURNAL_NAME,
     )
+    from local_operator.session.temporary import MARK_NAME as TEMPORARY_MARK_NAME
     from local_operator.session_lease import LEASE_NAME, MIRROR_NAME, RECOVERY_LOCK_NAME
     from local_operator.tools.eval import KERNEL_MARKER_NAME
     from local_operator.wakes.lock import WAKE_LOCK_NAME
@@ -118,6 +119,9 @@ def _entry_owners() -> dict[str, str]:
         RUN_RECORD_NAME: "session.runtime.journal",
         INBOX_NAME: "session.runtime.inbox",
         FORK_BOUNDARY_NAME: "fork",
+        # The temporary-chat mark travels: a moved temporary chat must still be
+        # deleted on its new device, not silently retained there.
+        TEMPORARY_MARK_NAME: "session.temporary",
         DESKTOP_MARKER_NAME: "session.retention",
         MESH_STAMP_NAME: "session.placement",
         LIVE_MARKER_NAME: "session.retention",
@@ -288,6 +292,23 @@ _PATH_SHAPED = re.compile(r"^(?!\.\.?(?:/|$))[A-Za-z0-9._-]+(?:/(?!\.\.?(?:/|$))
 #: the way the import list was. Every module with at least one candidate appears here, so
 #: "a module I did not think about" is itself a failing state.
 _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
+    "local_operator/session/temporary.py": (
+        3,
+        "``TOMBSTONES_NAME`` ('.temporary-tombstones.json'), ``STATE_NAME`` "
+        "('.temporary-state.json') and ``CHANGES_NAME`` ('.temporary-changed', the "
+        "empty change stamp a mark or Keep touches) are STORE-level records beside the "
+        "session directories (sessions/<file>), written on this device, never an entry "
+        "of a session directory. The per-session mark (``MARK_NAME``) is in "
+        "sync.COPY_SET_NAMES and travels.",
+    ),
+    "local_operator/harness/bridge_egress.py": (
+        1,
+        "``BRIDGE_TOOL_NAME`` ('bridge') is the Team Bridge TOOL's registered name, "
+        "matched against a journal row's ``tool_name`` to find a taint source -- not a "
+        "file or directory name. The taint it detects is re-derived from the session's "
+        "own journal (which already travels), so nothing under this name is a session "
+        "entry to copy or exclude.",
+    ),
     "local_operator/vault_agent/eligibility.py": (
         2,
         "``ELIGIBILITY_NAME`` ('eligibility.json') and ``GRANT_NAME`` "
@@ -311,6 +332,15 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "the per-DEVICE tunnel directory (<config>/tunnel/, beside config.json), never "
         "inside a session directory -- so no session copy carries it. Device-local by "
         "design: the credential row ids it names are local to this device's auth.db.",
+    ),
+    "local_operator/tunnels/request_log.py": (
+        2,
+        "``REQUEST_LOG_NAME`` ('requests.log') is the per-DEVICE HTTP request log, "
+        "written in the tunnel's config directory (<config>/tunnel/, beside service.log); "
+        "the mobile daemon's counterpart is 'mobile-requests.log' in its log directory "
+        "(mobile/install.py); neither is inside a session directory. ``PROBE_ID_PREFIX`` "
+        "('lop-probe-') is an ``x-request-id`` value prefix marking the package's own "
+        "loopback probe, not a path. None is a session entry to copy or exclude.",
     ),
     "local_operator/network/credentials/refresh.py": (
         2,
@@ -409,7 +439,29 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "else. A copy that carried any of them would hand a peer a path to a host that does "
         "not exist there.",
     ),
+    "local_operator/session/runtime/control.py": (
+        2,
+        "``STOP_MARKER`` ('stopped_at') and ``PARK_MARKER`` ('parked_at') are JSON KEYS a "
+        "stop or park stamps inside a wake/monitor INDEX entry (``write_entry``'s "
+        "``preserve``), not file or directory names. The entry file is the session's own "
+        "derived index and is classified by name in the copy set; the stamp is state "
+        "INSIDE it, so nothing under either spelling is an entry of a session directory to "
+        "copy or exclude -- a copy carries the entry, keys and all, and the session's own "
+        "open-time rewrite clears the stamp.",
+    ),
     # ---- this install's CONFIG, LOG and STORE surface (outside ``sessions/``) ----
+    "local_operator/server/utils/settings_intents.py": (
+        1,
+        "``PEER_INTENTS_DIRNAME`` ('peer-session-intents'): a CONFIG-ROOT sibling of "
+        "sessions/ (<config>/peer-session-intents/<id>/) holding THIS viewing device's "
+        "pending desktop settings picks for a conversation a MESH PEER owns -- never an "
+        "entry of a session directory, so no session copy carries it. It must not travel: "
+        "the picks are this viewer's requests about somebody else's runtime, applied "
+        "through this device's peer bridge, and the directory sits outside sessions/ "
+        "precisely so no reader mistakes the peer's id for a local session (the "
+        "two-writer case mesh-session-mobility.md 3.4 forbids). The module's other "
+        "constant, ``INTENT_FILE``, IS a session entry and is classified in the copy set.",
+    ),
     "local_operator/disk_pressure.py": (
         1,
         "``RECEIPT_DIRNAME`` ('disk-reclaim-receipts'): lives at the DEVICE-level "
@@ -432,6 +484,13 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "before the commit deletes the session directory. Deliberately a sibling of "
         "``sessions/``, never an entry inside one: the copy set must not carry it, no "
         "retention/cleanup path may walk it, and its only removal path is the user's",
+    ),
+    "local_operator/network/routing_sync.py": (
+        1,
+        "``CHAIN_PREFIX`` ('fallbackChains.') prefixes a dotted settings KEY -- one "
+        "routing unit per ``retry.fallbackChains`` key, mirrored between devices by the "
+        "definitions sync -- never a path in a session directory, so nothing under it "
+        "is a session entry to copy or exclude.",
     ),
     "local_operator/session/cold_metadata.py": (
         1,
@@ -536,6 +595,11 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         1,
         "``CENSUS_NAME`` ('.session-census.json'): the store's audit baseline "
         "beside the session directories, never an entry of a session",
+    ),
+    "local_operator/server/loop_watchdog.py": (
+        1,
+        "``DUMP_SIGNAL_NAME`` ('SIGUSR2'): the ``signal`` attribute name serve's "
+        "watchdog registers faulthandler on, not a pathname or a session entry",
     ),
     "local_operator/server/utils/local_tokens.py": (
         1,
@@ -862,13 +926,15 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
     "local_operator/secrets/legacy_env.py": (1, "the legacy credentials file at the store root"),
     "local_operator/secrets/protocol.py": (2, "the secret broker's socket and lock"),
     "local_operator/session/cleanup.py": (
-        5,
+        6,
         "the cleanup log, the value-hold index and the last-cleanup record (all at the "
         "sessions root), the store marker that gates removal, and ``HANDED_AWAY_DIRNAME`` "
         "— the ``<config>/network/handed-away/`` quarantine a committed mesh move renames "
-        "its directory into. That last one is a CONFIG-LEVEL directory: it is where a "
+        "its directory into. That one is a CONFIG-LEVEL directory: it is where a "
         "session tree goes to stop being one, so it can never be an entry of a session "
-        "directory, and none of the five is a file a session directory holds",
+        "directory. ``TEMPORARY_LOCK_NAME`` is the temporary-chat sweep's cross-process "
+        "lock, beside the delegated sweep's at the config root. None of the six is a file "
+        "a session directory holds",
     ),
     "local_operator/session/delegated_retention.py": (
         5,
@@ -947,6 +1013,24 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "``.corrupt`` fragment suffixed onto a quarantined store file",
     ),
     "local_operator/network/projection.py": (1, "the tombstone list under ``network/``"),
+    "local_operator/network/skillsync.py": (
+        1,
+        "``RECEIPTS_NAME`` (``skills-sync.json``): the sender's last-push receipt per "
+        "peer at ``<config>/network/``, beside the extraction stage "
+        "(``<config>/network/skill-stage``, built inline, not a constant) and next to the "
+        "``<config>/skills/`` root it fills -- per-DEVICE config-root state, never an "
+        "entry of a session directory (apply refuses any path under ``sessions/``). It "
+        "must NOT travel with a session: the receipt describes THIS device's pushes to "
+        "its peers, and skills are synced to the config root by their own channel",
+    ),
+    "local_operator/network/create_keys.py": (
+        1,
+        "``INDEX_FILENAME`` (``create-keys.json``): the OWNER device's per-device "
+        "create-idempotency index under ``<config>/network`` -- it binds a requesting "
+        "device's create_key to the session THIS device created, so it describes this "
+        "device's mesh state, never an entry of a session directory, and must not "
+        "travel with a session",
+    ),
     "local_operator/network/relay.py": (
         1,
         "``DELIBERATE_STOP_MARKER`` (``relay-stop-requested.json``): the relay's "
@@ -1033,11 +1117,16 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "``sessions/``, never an entry a session directory holds",
     ),
     "local_operator/network/credentials/github.py": (
-        2,
+        4,
         "``APP_SECRET_NAME`` and ``TOKEN_SECRET_NAME``: the secret-store NAMES the "
         "owner's ladder arms live under (the GitHub App key; the GITHUB_TOKEN-class "
         "token) — the identifier-not-a-path case this file's docstring names (the "
-        "reply-channel/action-tool precedent), never a file in a session directory",
+        "reply-channel/action-tool precedent), never a file in a session directory; "
+        "``NARROWING_STATE_NAME`` and ``OWNER_DESIGNATION_MARKER``: per-device files "
+        "under the config root's ``network/`` directory (this device's repository "
+        "narrowing; the marker that a designation, including a cleared one, was "
+        "delivered) — device state that must stay on the device, never a file in a "
+        "session directory, so it never travels with a session",
     ),
     "local_operator/network/credentials/gitlab.py": (
         1,
@@ -1342,6 +1431,24 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "(``mesh-repair:<network>:<credential key>:<generation>``, see "
         "``repair_inbox.item_key``): a primary key inside SQLite, never a path on disk "
         "and never a session directory entry, so there is nothing for the copy to carry",
+    ),
+    "local_operator/notifications/remote_attention.py": (
+        4,
+        "``remote-done`` and ``remote-notice`` (``DONE_PREFIX``/``NOTICE_PREFIX``) prefix "
+        "a forwarded completion's/notice's row KEY in ``notifications.db``: primary "
+        "keys inside SQLite, never paths on disk. "
+        "``ORIGINS_FILE`` ('remote-attention-origins.json') lives ONLY at the config "
+        "root (``_origins_path(root)``, root = the relay's config dir): a per-device "
+        "record of which mesh viewers collect this node's forwarded items. It is never "
+        "an entry of a session directory and must not travel with one -- a moved "
+        "session would carry another device's viewer list to a node those viewers "
+        "never collected from. "
+        "``BASELINES_FILE`` ('remote-attention-baselines.json', plus its "
+        "``.remote-attention-baselines.json.lock`` flock sidecar, derived from the path "
+        "rather than a separate constant) likewise lives ONLY at the config root: the "
+        "head/origin-side per-device first-contact baselines. It is never a session "
+        "directory entry and must not travel with a moved session -- it describes this "
+        "device's view of other devices",
     ),
     "local_operator/notifications/remote_park.py": (
         1,
@@ -1828,6 +1935,64 @@ def test_an_unlisted_entry_refuses_a_deleting_move(tmp_path: Path) -> None:
     assert refusal.value.code == "unlisted_content"
     assert "a-file-from-the-future.dat" in refusal.value.message
     assert (directory / "a-file-from-the-future.dat").exists()
+
+
+def test_finder_metadata_does_not_block_a_move_and_is_dropped_at_the_root(
+    tmp_path: Path,
+) -> None:
+    """A Mac session someone browsed in Finder moves (2026-11-13 offload refusal).
+
+    ``lop sessions move d5aaf8ba6ba5 --to lop-remote-node-2 --queue`` refused with
+    ``unlisted_content`` for ``.DS_Store``. The root copy is DROPPED (view state, not
+    content); inside ``scratchpad/`` the tree travels byte for byte, so it is carried.
+    """
+    source = tmp_path / "owner"
+    source.mkdir()
+    directory = _seeded(source)
+    for name in sync.OS_METADATA_NAMES:
+        (directory / name).write_bytes(b"\x00\x00\x00\x01Bud1")
+    (directory / "scratchpad" / ".DS_Store").write_bytes(b"\x00\x00\x00\x01Bud1")
+
+    assert sync.unlisted_entries(directory) == []
+    sync.assert_complete(directory)
+    plan = _move_manifest(source, "abc123")
+    assert "scratchpad/.DS_Store" in plan["trees"]
+    for name in sync.OS_METADATA_NAMES:
+        assert name not in plan["members"], f"{name} must not be carried"
+
+    dest = tmp_path / "holder"
+    sync.sync_from(source, "abc123", ask=_ask(source), into=dest)
+    for name in sync.OS_METADATA_NAMES:
+        assert not (dest / name).exists(), f"{name} was dropped, not carried"
+    assert (dest / "scratchpad" / ".DS_Store").read_bytes() == b"\x00\x00\x00\x01Bud1"
+
+
+@pytest.mark.parametrize("shape", ["symlink", "directory"])
+def test_os_metadata_names_still_refuse_when_not_a_regular_file(tmp_path: Path, shape: str) -> None:
+    """Only the regular file the shell writes is dropped; any other shape still refuses.
+
+    A ``.DS_Store`` symlink at the root is a pointer out of the session, not view
+    state, so dropping it silently would be the deletion ``assert_complete`` guards.
+    An unknown name beside a real ``.DS_Store`` still refuses too.
+    """
+    directory = tmp_path / "sessions" / "abc123"
+    directory.mkdir(parents=True)
+    (directory / "transcript.jsonl").write_text("{}\n", encoding="utf-8")
+    (directory / "Thumbs.db").write_bytes(b"thumbs")
+    (directory / "a-file-from-the-future.dat").write_bytes(b"\x00")
+    if shape == "symlink":
+        outside = tmp_path / "outside"
+        outside.write_bytes(b"x")
+        (directory / ".DS_Store").symlink_to(outside)
+    else:
+        (directory / ".DS_Store").mkdir()
+
+    with pytest.raises(sync.SyncRefused) as refusal:
+        sync.assert_complete(directory)
+    assert refusal.value.code == "unlisted_content"
+    assert ".DS_Store" in refusal.value.message
+    assert "a-file-from-the-future.dat" in refusal.value.message
+    assert "Thumbs.db" not in refusal.value.message
 
 
 def test_an_irregular_entry_in_a_tree_refuses_a_deleting_move(tmp_path: Path) -> None:

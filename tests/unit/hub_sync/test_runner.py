@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import threading
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -410,15 +412,111 @@ async def test_a_refusal_names_when_a_dead_holders_lease_expires(
     assert other.remaining_s() is None  # released -> no file -> nothing to wait for
 
 
+class _LeaseClock:
+    """A wall clock for ``RunnerLease`` that only moves when the test moves it.
+
+    WHY: the lease's expiry is ``time.time()``-based while its heartbeat is a
+    daemon thread renewing every ``ttl / 3``. With a real clock and a 0.3 s TTL
+    the thread had 0.2 s of slack to be scheduled, so a loaded CI runner that
+    left it unscheduled for longer let a contender take a lease whose holder
+    was alive (main run 43070238783, ``test (3.13, 3)``). Holding the lease's
+    clock still and advancing it only once a renewal has landed asserts the
+    same property -- the heartbeat, not the TTL, keeps the lease -- without
+    depending on how promptly the OS runs the thread.
+
+    The frozen clock deliberately decouples the heartbeat's REAL cadence from
+    lease time, so it cannot by itself catch a heartbeat slower than the TTL;
+    ``test_the_lease_heartbeat_outlives_its_ttl`` pins that cadence separately
+    by spying on the heartbeat's own wait timeouts.
+
+    ``gen`` counts advances. A renewal records the generation it STARTED in:
+    the expiry it writes is read after that, so it is stamped no earlier than
+    that generation's time.
+    """
+
+    def __init__(self) -> None:
+        self.now = 1_000_000.0
+        self.gen = 0
+        self._renewed_gen = -1
+        self._cond = threading.Condition()
+
+    def time(self) -> float:
+        return self.now
+
+    def advance(self, seconds: float) -> int:
+        with self._cond:
+            self.now += seconds
+            self.gen += 1
+            return self.gen
+
+    def renewed(self, gen: int) -> None:
+        with self._cond:
+            self._renewed_gen = max(self._renewed_gen, gen)
+            self._cond.notify_all()
+
+    def wait_renewed(self, gen: int, timeout: float) -> bool:
+        with self._cond:
+            return self._cond.wait_for(lambda: self._renewed_gen >= gen, timeout)
+
+
 @pytest.mark.asyncio
-async def test_the_lease_heartbeat_outlives_its_ttl(tmp_path: Path) -> None:
+async def test_the_lease_heartbeat_outlives_its_ttl(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    clock = _LeaseClock()
+    # Only the store's view of the clock: monotonic deadlines and real sleeps
+    # (the heartbeat's own ``ttl / 3`` cadence) stay real.
+    monkeypatch.setattr(
+        st, "time", SimpleNamespace(time=clock.time, monotonic=time.monotonic, sleep=time.sleep)
+    )
     lease = st.RunnerLease(tmp_path, ttl_s=0.3)
+    real_renew = lease.renew
+
+    def renew() -> bool:
+        started_in = clock.gen
+        ok = real_renew()
+        if ok:
+            clock.renewed(started_in)
+        return ok
+
+    monkeypatch.setattr(lease, "renew", renew)
+
+    # The frozen clock only checks that renewals land, not how often: a
+    # heartbeat waiting ``ttl * 3`` between renewals still lands every one of
+    # them, just late, and on a real clock its lease would lapse between beats.
+    # So record the timeout of every wait the heartbeat thread makes and pin it
+    # below the TTL. Patched on the class, so it sees the heartbeat's wait
+    # however the Event reached it. Filtered by thread name AND by this lease's
+    # own stop event: a heartbeat leaked by another test in the same xdist
+    # worker (test_store.py leaves a default-TTL lease that waits 60 s) carries
+    # the same thread name, and recording its wait would fail the bound below
+    # for a reason unrelated to this lease. ``_beat_stop`` is assigned before
+    # the heartbeat thread starts, so the lease's first wait is never missed.
+    beat_waits: list[float | None] = []
+    real_wait = threading.Event.wait
+
+    def spy_wait(self: threading.Event, timeout: float | None = None) -> bool:
+        if threading.current_thread().name == "hub-lease-heartbeat" and self is lease._beat_stop:
+            beat_waits.append(timeout)
+        return real_wait(self, timeout)
+
+    monkeypatch.setattr(threading.Event, "wait", spy_wait)
     assert lease.acquire()
     try:
-        await asyncio.sleep(0.8)  # > 2 TTLs
+        # Five half-TTL steps: 2.5 TTLs of lease time (> 2 TTLs, as before),
+        # each one survived only because the heartbeat renewed after it. The
+        # 10 s bound is a hang guard for a heartbeat that never runs, not a
+        # tolerance: a healthy one renews within ~0.1 s.
+        for _ in range(5):
+            gen = clock.advance(0.3 / 2)
+            assert await asyncio.to_thread(clock.wait_renewed, gen, 10.0)
         assert not st.RunnerLease(tmp_path, ttl_s=0.3).acquire()
     finally:
         lease.release()
+    # At most half a TTL between beats leaves a full missed-or-late beat of
+    # margin before expiry; ``>= ttl`` would let the lease lapse between them.
+    assert beat_waits, "the heartbeat never waited on its stop event"
+    assert all(t is not None and t <= 0.3 / 2 for t in beat_waits), beat_waits
     contender = st.RunnerLease(tmp_path, ttl_s=0.3)
     assert contender.acquire()
     contender.release()

@@ -462,3 +462,26 @@ def test_no_registry_fixture_is_silently_unguarded(name: str) -> None:
     assert (
         "same_as" in fixture or "body_required" in fixture
     ), f"{name} declares no deny list and no exact-set body: nothing guards this shape"
+
+
+def test_the_cloud_routes_and_accept_envelope_are_pinned() -> None:
+    """S7's cloud literals (agent-server docs/SESSION-PUSH.md §1).
+
+    The three routes the transport posts to. The 202's ``{msg, result}``
+    envelope is asserted through the real transport in
+    ``test_push_transport.py`` (an accept with it, a refusal without it), not
+    restated here as a literal the test builds itself (review round 1, R5).
+    """
+    from local_operator.mobile.push_credentials import (
+        REPORT_EMIT_ROUTE,
+        REPORT_HEARTBEAT_ROUTE,
+        REPORT_REGISTER_ROUTE,
+    )
+    from local_operator.mobile.push_payload import EMIT_ROUTE, IDEMPOTENCY_HEADER
+
+    assert EMIT_ROUTE == REPORT_EMIT_ROUTE == "/v1/tunnels/{tunnel_id}/push/events"
+    assert REPORT_REGISTER_ROUTE == "/v1/push/register"
+    assert REPORT_HEARTBEAT_ROUTE == "/v1/push/credentials"
+    assert IDEMPOTENCY_HEADER == "Idempotency-Key"
+    for name in ("emit-completion.json", "emit-attention.json", "emit-digest.json"):
+        assert _fixture(name)["route"] == EMIT_ROUTE

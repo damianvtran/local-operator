@@ -252,6 +252,11 @@ COPY_SET_NAMES: tuple[str, ...] = (
     # the record sits unjoined in analytics (design §4.2's fallback exists so
     # the case is visible, and a move must not be the thing that hides it).
     "channel_pending.jsonl",
+    # THE TEMPORARY-CHAT MARK (``session/temporary.MARK_NAME``). It must travel:
+    # a moved temporary chat that arrived unmarked would be RETAINED silently,
+    # breaking the deletion the user asked for, and an unlisted file makes a
+    # deleting move refuse with ``unlisted_content``.
+    "temporary.json",
 )
 
 #: Directories a session directory may hold whose FILES are the user's own
@@ -582,7 +587,31 @@ EXCLUDED_ENTRIES: dict[str, str] = {
     # that used the approvals feature refused with `unlisted_content` and told
     # the user to delete the record (round-4 review, blocker).
     OVERRIDE_FILENAME: "the conversation's own approval choice; a copy must start without it",
+    # OPERATING-SYSTEM FOLDER METADATA (``OS_METADATA_NAMES`` below). Finder writes
+    # ``.DS_Store`` into every folder a user opens, so before this entry a deleting move
+    # of any Mac session someone had browsed refused with ``unlisted_content`` and told
+    # the user to remove it (2026-11-13: ``lop sessions move d5aaf8ba6ba5 --to
+    # lop-remote-node-2 --queue`` refused for ``.DS_Store``; 18 session directories on
+    # the operator's Mac held one at depth <= 2). They are view state the shell rebuilds
+    # (icon positions, window size, thumbnail cache), never session content, so they
+    # are DROPPED rather than carried or refused. Windows Explorer's ``Thumbs.db`` and
+    # ``desktop.ini`` are the same class and exact names, so they ride the same rule;
+    # AppleDouble ``._*`` files are a prefix pattern, not a name, and stay unlisted.
+    ".DS_Store": "Finder's per-folder view state, rebuilt by the destination's shell",
+    "Thumbs.db": "Windows Explorer's thumbnail cache, rebuilt by the destination's shell",
+    "desktop.ini": "Windows Explorer's per-folder view settings, not session content",
 }
+
+#: The ``EXCLUDED_ENTRIES`` rows that are OS folder metadata. Kept as their own tuple
+#: because their exclusion is conditional on SHAPE, unlike the store files above (whose
+#: reason is whose state the file is, so a symlinked one keeps its exclusion —
+#: ``test_a_symlinked_store_file_keeps_its_exclusion``): the shell only ever writes a
+#: REGULAR file under these names, so a symlink or a directory wearing one is not
+#: metadata and ``unlisted_entries`` refuses it rather than dropping it unseen. Only the
+#: session ROOT is affected: inside a content tree (``scratchpad/.DS_Store``) the tree
+#: travels byte for byte as it always has — harmless, and it keeps the tree walk and its
+#: digest identical on builds before and after this rule, so mixed-version peers agree.
+OS_METADATA_NAMES: tuple[str, ...] = (".DS_Store", "Thumbs.db", "desktop.ini")
 
 #: The tuple the code branches on. Kept as a tuple (rather than reading
 #: ``EXCLUDED_ENTRIES`` everywhere) because these are the names a fan-out of
@@ -947,6 +976,10 @@ def unlisted_entries(directory: Path) -> list[str]:
     found: list[str] = []
     for child in children:
         name = child.name
+        # Dropped only as the regular file the OS writes (see ``OS_METADATA_NAMES``).
+        if name in OS_METADATA_NAMES and (child.is_symlink() or not child.is_file()):
+            found.append(name)
+            continue
         if child.is_symlink() and name in listed and name not in NEVER_COPIED:
             found.append(name)
             continue
@@ -3025,11 +3058,19 @@ def _opened_regular(fd: int, before: os.stat_result, name: str) -> int:
     return fd
 
 
-def _open_directory(scope: _WriteScope, relative: Path, name: str) -> int:
-    """Open every parent no-follow from the stable anchor, never a derived root."""
+def _open_directory(scope: _WriteScope, relative: Path, name: str, *, create: bool = True) -> int:
+    """Open every parent no-follow from the stable anchor, never a derived root.
+
+    ``create=False`` is the READ mode a peer-named path needs (``network/files.py``):
+    a missing component is ``SyncRefused("missing", …)``, never a ``mkdir``. The write
+    paths create their parents by design; a read that did the same would hand a
+    read-only peer a directory-creation primitive inside the owner's session state
+    (#3794 review R1-1), because the path it names need not exist.
+    """
     flags = os.O_RDONLY | _O_BINARY | _O_NOFOLLOW | getattr(os, "O_DIRECTORY", 0)
     _assert_contained(scope, scope.allowed_root / relative, leaf_link=False)
-    scope.allowed_root.mkdir(parents=True, exist_ok=True)
+    if create:
+        scope.allowed_root.mkdir(parents=True, exist_ok=True)
     # The anchor is already resolved, so its own spelling is not a link question;
     # only a root that is not a real directory (or was swapped for one) refuses.
     if scope.anchor.is_symlink() or not scope.anchor.is_dir():
@@ -3052,8 +3093,14 @@ def _open_directory(scope: _WriteScope, relative: Path, name: str) -> int:
                     os.close(child)
                     raise _refuse_io(name, f"parent component {part!r} changed during open.")
             except FileNotFoundError:
+                if not create:
+                    raise SyncRefused("missing", f"{name} does not exist") from None
                 os.mkdir(part, dir_fd=fd)
                 child = os.open(part, flags, dir_fd=fd)
+            except NotADirectoryError:
+                if not create:
+                    raise SyncRefused("missing", f"{name} does not exist") from None
+                raise _refuse_io(name, f"parent component {part!r} is not a directory.") from None
             except OSError as error:
                 raise _refuse_io(name, f"parent component {part!r} is unsafe: {error}.") from error
             os.close(fd)
@@ -3064,14 +3111,37 @@ def _open_directory(scope: _WriteScope, relative: Path, name: str) -> int:
         raise
 
 
-def _open_for_read(path: Path, scope: _WriteScope) -> int:
+def _open_for_read(path: Path, scope: _WriteScope, *, nonblock: bool = False) -> int:
+    """Open ``path`` no-follow, regular-only, from the scope's anchor.
+
+    ``nonblock=True`` is the PEER-NAMED read (``network/files.py``): it also never
+    creates a parent (see ``_open_directory``'s ``create``), and a missing leaf or
+    parent is ``SyncRefused("missing", …)`` so the caller can say "not found" rather
+    than "unsafe".
+    """
     _assert_contained(scope, path, leaf_link=False)
-    parent = _open_directory(scope, scope.relative_in(path.parent), path.name)
+    parent = _open_directory(scope, scope.relative_in(path.parent), path.name, create=not nonblock)
     try:
         try:
-            before = os.stat(path.name, dir_fd=parent, follow_symlinks=False)
+            try:
+                before = os.stat(path.name, dir_fd=parent, follow_symlinks=False)
+            except FileNotFoundError:
+                if nonblock:
+                    raise SyncRefused("missing", f"{path.name} does not exist") from None
+                raise
+            flags = os.O_RDONLY | _O_BINARY | _O_NOFOLLOW
+            if nonblock:
+                # A PEER NAMES THIS FILE (``network/files.py``), so the open itself must
+                # not be a wait the peer controls: a FIFO opened read-only blocks until a
+                # writer appears, parking a slow worker indefinitely, and opening a device
+                # can have side effects. Refuse a non-regular leaf BEFORE opening it, and
+                # open non-blocking so a swap in the window between stat and open cannot
+                # block either; ``_opened_regular`` then refuses whatever was opened.
+                if not stat.S_ISREG(before.st_mode):
+                    raise _refuse_io(path.name, "it is not a regular file.")
+                flags |= getattr(os, "O_NONBLOCK", 0)
             return _opened_regular(
-                os.open(path.name, os.O_RDONLY | _O_BINARY | _O_NOFOLLOW, dir_fd=parent),
+                os.open(path.name, flags, dir_fd=parent),
                 before,
                 path.name,
             )
@@ -3144,6 +3214,22 @@ def _symlink_at(target: str, root: Path, name: str, scope: _WriteScope) -> None:
         os.symlink(target, name, dir_fd=parent)
     finally:
         os.close(parent)
+
+
+#: PUBLIC NAMES for the containment primitives, for ``network/files.py``
+#: (docs/design/mesh-file-transfer.md, S1). ONE implementation of "open no-follow
+#: from a trusted anchor, refuse links and non-regular files, rename dirfd-relative"
+#: is the point: a second copy in the file-transfer slice would be a second set of
+#: rules to keep in step with this one, and the first divergence would be a hole.
+#: Aliases rather than renames, so the sync code's own call sites stay untouched.
+WriteScope = _WriteScope
+write_scope = _write_scope
+open_directory = _open_directory
+opened_regular = _opened_regular
+open_for_read = _open_for_read
+replace_at = _replace_at
+unlink_at = _unlink_at
+stream_digest = _stream_digest
 
 
 def _copy_contained(source: Path, destination: Path, scope: _WriteScope) -> None:
@@ -3993,17 +4079,26 @@ class SyncWatcher(threading.Thread):
         self._server = server
         self._settings = settings or SyncSettings.from_config(server.root)
         self._seen: dict[str, _Watched] = {}
-        self._stop = threading.Event()
+        # ``_halt``, NOT ``_stop``: ``threading.Thread`` has a private ``_stop()``
+        # METHOD that CPython 3.12's ``join()``/``is_alive()`` call once the thread
+        # has ended (``_wait_for_tstate_lock``). An Event under that name made both
+        # raise ``TypeError: 'Event' object is not callable`` for a finished
+        # thread, so no stop could ever be joined or confirmed (3.13+ no longer
+        # calls it; 3.12 is the floor and CI's interpreter).
+        self._halt = threading.Event()
 
     def stop(self) -> None:
-        self._stop.set()
+        self._halt.set()
 
     def run(self) -> None:  # pragma: no cover — the tick is what tests drive
-        while not self._stop.wait(self._settings.tick_s):
-            try:
-                self.tick(now=time.time())
-            except Exception:  # noqa: BLE001 — a watcher must never kill the relay
-                logger.debug("sync: watcher tick failed", exc_info=True)
+        try:
+            while not self._halt.wait(self._settings.tick_s):
+                try:
+                    self.tick(now=time.time())
+                except Exception:  # noqa: BLE001 — a watcher must never kill the relay
+                    logger.debug("sync: watcher tick failed", exc_info=True)
+        finally:
+            _release_registration("watcher", self._server, self)
 
     def tick(self, *, now: float) -> list[tuple[str, str]]:
         """One pass. Returns ``(session_id, reason)`` per push, so cadence is testable.
@@ -4153,10 +4248,12 @@ class ReplicaRefresher(threading.Thread):
         self._marked: dict[str, str] = {}
         self._running: set[str] = set()
         self._again: set[str] = set()
-        self._stop = threading.Event()
+        # ``_halt``, NOT ``_stop``: it would shadow ``threading.Thread._stop()``,
+        # which 3.12's ``join()``/``is_alive()`` call (see :class:`SyncWatcher`).
+        self._halt = threading.Event()
 
     def stop(self) -> None:
-        self._stop.set()
+        self._halt.set()
 
     def mark(self, session_id: str, reason: str) -> None:
         """Note that this device's copy of ``session_id`` is behind."""
@@ -4167,11 +4264,14 @@ class ReplicaRefresher(threading.Thread):
                 self._marked[session_id] = reason
 
     def run(self) -> None:  # pragma: no cover — the tick is what tests drive
-        while not self._stop.wait(self._settings.tick_s):
-            try:
-                self.tick()
-            except Exception:  # noqa: BLE001 — a refresher must never kill the relay
-                logger.debug("sync: replica refresh tick failed", exc_info=True)
+        try:
+            while not self._halt.wait(self._settings.tick_s):
+                try:
+                    self.tick()
+                except Exception:  # noqa: BLE001 — a refresher must never kill the relay
+                    logger.debug("sync: replica refresh tick failed", exc_info=True)
+        finally:
+            _release_registration("refresher", self._server, self)
 
     def tick(self) -> list[tuple[str, str]]:
         """One pass. Returns ``(session_id, outcome)`` per attempt, so it is testable.
@@ -4238,6 +4338,14 @@ def ensure_refresher(server: "RelayServer") -> ReplicaRefresher:
     would mean a thread per relay in a suite that builds hundreds it never starts.
     """
     with _refresher_lock:
+        if _relay_stopped(server):
+            # A push or pull already in flight when ``stop()`` ran its hooks must
+            # not start a fresh thread afterwards: that thread would be the leak
+            # this module's ``on_stop`` closes, re-opened. An unstarted, UNREGISTERED
+            # instance keeps the caller's ``.mark()`` harmless and holds nothing.
+            # Defaults, not ``from_config``: it never ticks, so reading
+            # ``config.yml`` for it was disk I/O on every late push.
+            return ReplicaRefresher(server, settings=SyncSettings())
         existing = _refreshers.get(id(server))
         if existing is not None and existing.is_alive():
             return existing
@@ -4263,6 +4371,13 @@ def ensure_watcher(server: "RelayServer") -> SyncWatcher:
     relay in a test suite that builds hundreds of relays it never starts.
     """
     with _watcher_lock:
+        if _relay_stopped(server):
+            # A push or pull already in flight when ``stop()`` ran its hooks must
+            # not start a fresh thread afterwards: that thread would be the leak
+            # this module's ``on_stop`` closes, re-opened. An unstarted, UNREGISTERED
+            # instance keeps the caller's ``.mark()`` harmless and holds nothing.
+            # Defaults, not ``from_config``, for the refresher's reason.
+            return SyncWatcher(server, settings=SyncSettings())
         existing = _watchers.get(id(server))
         if existing is not None and existing.is_alive():
             return existing
@@ -4270,6 +4385,99 @@ def ensure_watcher(server: "RelayServer") -> SyncWatcher:
         _watchers[id(server)] = watcher
         watcher.start()
         return watcher
+
+
+#: Bounded join for :func:`stop_threads`: the bound ``rollouts.stop_driver`` and
+#: ``definitions.stop_syncer`` already use, for their reason. Between ticks both
+#: threads wait on an Event, so a stop is seen at once; only a tick already in
+#: flight can delay it, and a tick may be mid-dial (the watcher's ``available``
+#: push, the refresher's ``sync_from``). ``stop()`` must not inherit a peer's
+#: latency, and the threads are daemons, so this bounds promptness, not a leak.
+SYNC_THREAD_STOP_JOIN_S = 5.0
+
+#: A survivor is named in ONE warning per episode, keyed like the registries.
+_survivor_warned: dict[tuple[str, int], threading.Thread] = {}
+
+
+def _relay_stopped(server: "RelayServer") -> bool:
+    stopped = getattr(server, "_stop", None)
+    return bool(stopped is not None and stopped.is_set())
+
+
+def stop_threads(server: "RelayServer", *, timeout: float = SYNC_THREAD_STOP_JOIN_S) -> None:
+    """Stop and reap this relay's watcher and refresher, if it started them.
+
+    Wired into ``RelayServer.stop()`` through this slice's ``on_stop`` hook. WHY:
+    both threads hold their relay, and the registries below hold both threads, so
+    without it they kept ticking after ``stop()`` and a stopped relay stayed pinned
+    for the life of the process (a slow leak on a long-running ``lop network
+    serve``; a cross-test isolation source in CI). A stopped relay must be
+    collectable.
+
+    Both are signalled before either is joined, so the worst case is one bound,
+    not two. THE REGISTRY ENTRY IS REMOVED ONLY ONCE THE THREAD IS KNOWN STOPPED,
+    identity-checked (the rule ``stop_driver``/``stop_syncer`` follow): popping
+    first would leave a still-running thread no caller could reach. A survivor is
+    reported once per episode and its entry is KEPT, so a later stop retries it.
+    """
+    key = id(server)
+    tables = (
+        ("watcher", _watcher_lock, _watchers),
+        ("refresher", _refresher_lock, _refreshers),
+    )
+    running: list[tuple[str, threading.Lock, dict[int, Any], Any]] = []
+    for kind, lock, table in tables:
+        with lock:
+            thread = table.get(key)
+        if thread is not None:
+            thread.stop()
+            running.append((kind, lock, table, thread))
+    deadline = time.monotonic() + timeout
+    for kind, lock, table, thread in running:
+        thread.join(timeout=max(0.0, deadline - time.monotonic()))
+        if thread.is_alive():
+            with lock:
+                warned = _survivor_warned.get((kind, key)) is thread
+                _survivor_warned[(kind, key)] = thread
+            if not warned:
+                logger.warning(
+                    "sync: %s for %s did not stop within the %.1fs timeout and is "
+                    "still running; it was not killed and its entry is kept so a "
+                    "later stop can retry it",
+                    kind,
+                    getattr(server, "root", "<unknown>"),
+                    timeout,
+                )
+            continue
+        with lock:
+            if table.get(key) is thread:
+                del table[key]
+            _survivor_warned.pop((kind, key), None)
+
+
+def _release_registration(kind: str, server: "RelayServer", thread: threading.Thread) -> None:
+    """A sync thread's exit drops its OWN registry entry (and its warning row).
+
+    WHY (#3719 review R1-1): :func:`stop_threads` keeps a survivor's entry so a later
+    stop can retry it, but on the normal path no later stop comes — and a tick can
+    legitimately outlive the join (a ``_push`` to a wedged peer: links close only
+    after the stop hooks run). When that tick finally returned, the exited thread
+    stayed in the registry, holding its ``_server``, and the stopped relay was
+    pinned for the life of the process: the leak ``on_stop`` exists to close.
+
+    IDENTITY-MATCHED UNDER THE LOCK: an entry that is no longer this thread (a
+    restart registered a successor) is not this thread's to drop. Runs from
+    ``run``'s ``finally``, so an unstarted stand-in never reaches it.
+    """
+    lock, table = (
+        (_watcher_lock, _watchers) if kind == "watcher" else (_refresher_lock, _refreshers)
+    )
+    key = id(server)
+    with lock:
+        if table.get(key) is thread:
+            del table[key]
+        if _survivor_warned.get((kind, key)) is thread:
+            del _survivor_warned[(kind, key)]
 
 
 # ---------------------------------------------------------------------------
@@ -4554,4 +4762,7 @@ def install(server: RelayServer) -> None:
         {"net_sync": make_handler(server)},
         local_handlers={"session_sync": local_sync_handler(server)},
         slow={"net_sync": SYNC_OP_DEADLINE_S},
+        # The lazily started threads must not outlive the relay (see
+        # :func:`stop_threads`). A no-op for a relay that never pushed or pulled.
+        on_stop={"mesh-sync": lambda: stop_threads(server)},
     )

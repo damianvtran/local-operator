@@ -82,6 +82,10 @@ def team() -> Msg:
     return Msg("cli.exec_help.team", {})
 
 
+def temporary() -> Msg:
+    return Msg("cli.exec_help.temporary", {})
+
+
 def tools() -> Msg:
     return Msg("cli.exec_help.tools", {})
 

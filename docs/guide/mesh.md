@@ -148,7 +148,13 @@ bounded grant (`network.credentials.grant_ttl_s`, fifteen minutes by default),
 and `lop network credentials` shows who owns what and what this device borrows.
 A refresh belongs to the device that owns the credential — it lends a short-lived
 access token and never its refresh token, which is why a token is never refreshed
-on a device that does not own it. `kimi` is the one provider that can never be
+on a device that does not own it. While the owner is unreachable (a laptop
+closed overnight), a peer keeps using the login it already borrowed for up to
+24 hours (`network.credentials.offline_hold_s`), counted from the last grant it
+received (a working peer asks again every grant period), so an owner that comes
+online once a day keeps remote work going. The hold never outlives the access token itself: a token that
+expires sooner (Anthropic OAuth after about 8 hours, Radient after about an
+hour) stops working at its own expiry until the owner is back. `kimi` is the one provider that can never be
 lent: its grants are signed with the fingerprint of the device that made them.
 
 **The desktop app has its own view of it.**

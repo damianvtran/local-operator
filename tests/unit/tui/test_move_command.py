@@ -280,12 +280,22 @@ async def test_choosing_a_row_in_the_picker_moves_there(tmp_path: Path) -> None:
 
         screen = app.screen
         assert isinstance(screen, MovePickerScreen)
-        # Row 0 is the current directory, so move down to a real destination.
-        index = next(i for i, row in enumerate(screen.visible_rows) if row.path != str(tmp_path))
+        # Move down to the child this test made, not to "the first row that
+        # is not here". WHY: the rows above it are environment-dependent. The
+        # only `recent` row in a test is this app's OWN registry record,
+        # published by the `lop-mobile-registrant` thread, so on a loaded
+        # runner it may not have landed yet and the first non-current row is
+        # the home tier instead -- and the band renders the home directory as
+        # `~/.`, never its absolute path (main run 43070238783,
+        # `test (3.13, 3)`). The child sits under `tmp_path`, outside the
+        # per-test HOME, so it is offered and spelled in full in the band
+        # whichever of those rows exist.
+        index = next(i for i, row in enumerate(screen.visible_rows) if row.path == str(child))
         for _ in range(index):
             await pilot.press("down")
             await pilot.pause()
         chosen = screen.selected_path()
+        assert chosen == str(child)
         await pilot.press("enter")
         for _ in range(6):
             await pilot.pause()

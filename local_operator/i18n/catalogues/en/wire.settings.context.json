@@ -305,5 +305,35 @@
     "note": "Three claims to preserve. (1) The choice is tried FIRST, so it RE-ORDERS the tested list (Sonnet first, then Opus) and never narrows it. (2) Empty means the tested order, which is the safest default — say that, because an unset row is a real recommendation, not a missing value. (3) A choice can never block delivery: if the chosen model is unavailable or out of quota, this machine's own configured model and its fallbacks still screen. Do not transliterate model ids or numbers into this copy. No ICU arguments.",
     "role": "Settings row help",
     "tone": "concise, neutral"
+  },
+  "wire.settings.session_cleanup_temporary_idle_minutes.choice.15m.label": {
+    "role": "settings choice label",
+    "tone": "plain",
+    "note": "Duration option."
+  },
+  "wire.settings.session_cleanup_temporary_idle_minutes.choice.24h.label": {
+    "role": "settings choice label",
+    "tone": "plain",
+    "note": "Duration option."
+  },
+  "wire.settings.session_cleanup_temporary_idle_minutes.choice.2h.label": {
+    "role": "settings choice label",
+    "tone": "plain",
+    "note": "Duration option."
+  },
+  "wire.settings.session_cleanup_temporary_idle_minutes.choice.30m.label": {
+    "role": "settings choice label",
+    "tone": "plain",
+    "note": "Duration option; the default."
+  },
+  "wire.settings.session_cleanup_temporary_idle_minutes.help": {
+    "role": "settings row help",
+    "tone": "plain, precise",
+    "note": "Explains the idle window for temporary chats. Do not imply that normal chats are affected."
+  },
+  "wire.settings.session_cleanup_temporary_idle_minutes.label": {
+    "role": "settings row label",
+    "tone": "plain",
+    "note": "A 'temporary chat' is a conversation that is not kept: it is left out of history and deleted automatically once idle for this long. Followed by a duration choice."
   }
 }

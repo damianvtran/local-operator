@@ -61,9 +61,21 @@ async def execute_profile_proposal(tool_call_id, args, signal=None, on_update=No
         if params.op == "show":
             if context.decide_profile_proposal:
                 await context.decide_profile_proposal(params.id, "show")
+            from local_operator.profile_text_edits import stats_heading
+
             detail = P.detail(root, proposal)
+            # Long-text fields carry the canonical whole-field counts (the same
+            # ``field_line_stats`` the write receipt uses) and go LAST, which is
+            # how ``profile_diff_summary`` keeps their bodies out of the count.
+            long_text = {"instructions", "project"}
+            rows = sorted(detail["changes"], key=lambda c: c["field"] in long_text)
             diff = "\n".join(
-                f"{c['label']}:\n"
+                (
+                    stats_heading(c["field"], c["before_text"], c["after_text"])
+                    if c["field"] in long_text
+                    else c["label"]
+                )
+                + ":\n"
                 + "\n".join(
                     difflib.unified_diff(
                         c["before_text"].splitlines(),
@@ -73,7 +85,7 @@ async def execute_profile_proposal(tool_call_id, args, signal=None, on_update=No
                         lineterm="",
                     )
                 )
-                for c in detail["changes"]
+                for c in rows
             )
             # Per-field line counts, not the diff: the model relays this text
             # into its ask, and a full brief there filled the user's screen.
@@ -98,14 +110,17 @@ async def execute_profile_proposal(tool_call_id, args, signal=None, on_update=No
             )
         decide = context.decide_profile_proposal
         decision = await decide(params.id, params.op) if decide else "refused"
-        if decision not in {"granted", "card"}:
+        if decision not in {"granted", "card", "autonomous"}:
             return _error(
                 tool_call_id,
                 "profile_proposal",
                 f"Not applied: owner confirmation is required. The user can review it "
                 f"in Agents → {proposal['name']}.",
             )
-        actor = f"conversation:{context.session_id}"
+        # The audit actor says who decided: ``agent:`` for a clean local agent
+        # applying a trusted proposal itself, ``conversation:`` for the person.
+        prefix = "agent" if decision == "autonomous" else "conversation"
+        actor = f"{prefix}:{context.session_id}"
         if params.op == "reject":
             result = P.reject(root, params.id, actor=actor)
             return _text(
@@ -122,6 +137,10 @@ async def execute_profile_proposal(tool_call_id, args, signal=None, on_update=No
             text += (
                 f" Backup {backup}; revert with {proposal['kind']} op=revert backup_id={backup}."
             )
+        elif proposal["kind"] == "skill":
+            # Skills have no op=revert: the skill storage keeps the previous
+            # bytes in hub/backups, as a direct ``skill`` tool edit does.
+            text += " The previous version is kept in the profile's hub/backups folder."
         return _text(
             tool_call_id,
             "profile_proposal",

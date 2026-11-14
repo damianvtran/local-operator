@@ -6,6 +6,7 @@ through HTTP requests instead of CLI.
 """
 
 import asyncio
+import logging
 import secrets
 from collections.abc import AsyncIterator, Iterable, Iterator
 from contextlib import asynccontextmanager
@@ -29,13 +30,11 @@ from local_operator.console import VerbosityLevel
 from local_operator.env import get_env_config
 from local_operator.helpers import setup_cross_platform_environment
 from local_operator.jobs import JobManager
-from local_operator.logger import (
-    configure_console_logging,
-    get_logger,
-    quiet_wire_clients,
-)
+from local_operator.logger import get_logger, quiet_wire_clients
 from local_operator.scheduler_service import SchedulerService
+from local_operator.serve_logging import ServeLogHandler, configure_serve_logging
 from local_operator.server import early_paint_hold
+from local_operator.server import loop_watchdog as serve_loop_watchdog
 from local_operator.server import registry as serve_registry
 from local_operator.server import reload as serve_reload
 from local_operator.server import retire as serve_retire
@@ -62,6 +61,7 @@ from local_operator.server.routes import (
     desktop_link_preview,
     desktop_mcp,
     desktop_mesh,
+    desktop_mobile_password,
     desktop_monitors,
     desktop_notifications,
     desktop_preferences,
@@ -107,7 +107,7 @@ from local_operator.server.utils.static_roots import (
 from local_operator.session.runtime import registry as session_registry
 from local_operator.types import OperatorType
 
-# NO logging configuration at import. `configure_console_logging` REPLACES the
+# NO logging configuration at import. Logging configuration REPLACES the
 # root logger's handlers, so calling it here made merely importing this module
 # — which `generate_openapi`, the test suite's collection phase and any
 # tooling that wants `app.openapi()` all do — reconfigure logging for the whole
@@ -121,6 +121,22 @@ logger = get_logger("local_operator.server")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    # CLI serve already owns the sink; embedded/reloader starts own one here.
+    # Repeat routing after uvicorn config has installed its named handlers.
+    existing = any(
+        isinstance(h, ServeLogHandler) and not h.stopped for h in logging.getLogger().handlers
+    )
+    handler = configure_serve_logging()
+    try:
+        async with _lifespan(app):
+            yield
+    finally:
+        if not existing:
+            handler.close()
+
+
+@asynccontextmanager
+async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     """Initialize and clean up application state.
 
     This function is called when the application starts up and shuts down.
@@ -129,12 +145,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     Args:
         app: The FastAPI application instance
     """
-    # Console logging for the server process, at the same level (LOG_LEVEL,
-    # default WARNING) and format the old import-time call used. uvicorn has
-    # already configured its own named loggers by the time startup runs, and
-    # this only touches the root logger, so the two do not fight.
-    configure_console_logging()
-    # AFTER the console call, which resets the wire clients to the root level.
+    # Preserve the wire-client policy independently of the asynchronous sink.
     # At LOG_LEVEL=INFO httpx otherwise logs one ``HTTP Request: <full url>``
     # line per outbound call, and this process builds TeamBridgeClient and the
     # provider clients (security round 2 on #3587, S-r2-1). Every other entry
@@ -223,6 +234,19 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         ensure_started(config_dir)
     except Exception:  # noqa: BLE001 — indexing must never be the failure
         logger.debug("library indexer unavailable at startup", exc_info=True)
+
+    # THE INBOX PROJECT SNAPSHOT, warmed with the same rule as the warms above.
+    # The Notifications list/detail read related projects from one shared
+    # snapshot whose first build parses every ``projects/*.json`` (2.9 s
+    # measured on 905 rows); without this the click that opens Notifications
+    # right after a boot pays it. Fire-and-forget; a failure is logged and the
+    # first request retries the build lazily (failures are never cached).
+    try:
+        from local_operator.notifications.items import warm_shared_project_registry
+
+        warm_shared_project_registry(config_dir)
+    except Exception:  # noqa: BLE001 — a warm-up must never be the failure
+        logger.debug("inbox project warm unavailable at startup", exc_info=True)
 
     # Honour LOCAL_OPERATOR_HOME and create it at the point of use, matching the
     # CLI session path. The literal ``~/local-operator-home`` here ignored the
@@ -545,6 +569,20 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                 reload_task.add_done_callback(serve_reload.observe_reload)
                 app.state.serve_reload = reload_task
 
+    # THE EVENT-LOOP WATCHDOG (serve wedges of pids 11196 and 9633, 2026-11-11):
+    # a thread that dumps every thread's traceback when the loop stops beating
+    # and, past a hard bound, re-execs this daemon in place (``loop_watchdog``
+    # carries the thresholds' measurement and the drain invariants). Only on an
+    # ANNOUNCED daemon: an unannounced boot (tests, ad-hoc apps) has no record a
+    # client relies on and no address a re-exec could re-serve.
+    loop_beat: asyncio.Task[None] | None = None
+    loop_guard: serve_loop_watchdog.LoopWatchdog | None = None
+    if announced is not None:
+        try:
+            loop_guard, loop_beat = serve_loop_watchdog.install(app, config_dir)
+        except Exception:  # noqa: BLE001 — a diagnostic must never fail startup
+            logger.warning("serve loop watchdog could not start", exc_info=True)
+
     # THE HUB UPDATE RUNNER: one asyncio task per daemon, started AFTER the serve
     # record and the reload task so readiness is never delayed by it (its first
     # tick waits ~45 s; see ``hub_sync.runner``). It runs for a bare-uvicorn daemon
@@ -575,6 +613,20 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     except Exception:  # noqa: BLE001 - auto-update is optional; the daemon is not
         logger.warning("hub update runner could not start", exc_info=True)
         app.state.hub_sync = None
+
+    # THE TEMPORARY-CHAT SWEEPER. Hosted here too (not only by session
+    # processes) so a temporary chat still expires when the desktop is open and
+    # every runtime has gone: the delegated sweep runs only inside a session.
+    # One daemon thread; the first pass waits a full cadence.
+    temporary_sweeper_started = False
+    try:
+        from local_operator.session.cleanup import start_temporary_sweeper
+
+        temporary_sweeper_started = start_temporary_sweeper(
+            app.state.config_manager, config_dir, actor="desktop-server"
+        )
+    except Exception:  # noqa: BLE001 - housekeeping never fails the daemon
+        logger.warning("temporary-chat sweeper could not start", exc_info=True)
 
     # THE ORG AGENT HUB GATE at daemon start: refresh the cached Radient Team
     # eligibility and enrol new org items, on a daemon thread so readiness
@@ -609,6 +661,22 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     except Exception:  # noqa: BLE001 — a resume failure must never fail startup
         logger.warning("settings intents could not be resumed", exc_info=True)
 
+    # REMOTE ATTENTION, hosted where no TUI is needed (remote-session parity): a
+    # turn that finishes, or a ``notify``, on a mesh node reaches THIS device's
+    # inbox when this device started that session. The TUI hosts the same
+    # watcher; the store's episode digest keeps the two to one row. A device in
+    # no mesh pays one directory check per poll (``peer_rows`` short-circuits).
+    remote_attention_task: asyncio.Task[None] | None = None
+    try:
+        from local_operator.notifications import remote_attention
+
+        remote_attention_task = asyncio.create_task(
+            remote_attention.run_forever(app.state.config_manager.config_dir),
+            name="remote-attention-watch",
+        )
+    except Exception:  # noqa: BLE001 — a forwarder must never fail startup
+        logger.warning("remote attention watch could not start", exc_info=True)
+
     # ONE HUB CONNECTION POOL FOR THE SERVER LOOP. Every desktop Team Bridge
     # read used to open its own TLS connection to the hub (41-124 ms each,
     # bridge-instant-load); binding a pool here lets them reuse sockets. The
@@ -619,6 +687,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     bind_hub_pool()
     yield
+    if remote_attention_task is not None:
+        remote_attention_task.cancel()
+        await asyncio.gather(remote_attention_task, return_exceptions=True)
     try:
         # Stop the settings-intent workers before the session pool closes under
         # them; an in-flight move is shielded and finishes on its own.
@@ -638,6 +709,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             await cancel_prewarm()
         except Exception:  # noqa: BLE001 — teardown of a warm-up must never be the failure
             logger.debug("prewarm cancellation failed at shutdown", exc_info=True)
+        if temporary_sweeper_started:
+            try:
+                from local_operator.session.cleanup import stop_temporary_sweeper
+
+                stop_temporary_sweeper()
+            except Exception:  # noqa: BLE001 — teardown never raises
+                logger.debug("temporary sweeper stop failed", exc_info=True)
         if hub_sync_task is not None:
             if app.state.hub_sync is not None:
                 app.state.hub_sync.stop()
@@ -709,6 +787,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         # on the way out with a handover that the shutdown then makes. `stop`
         # ends a poll parked in its notice wait; the cancel covers one parked in
         # its check sleep, where the event is not what it awaits.
+        # The loop watchdog stops FIRST: a teardown can legitimately hold the
+        # loop for longer than the stall bound, and a re-exec mid-teardown would
+        # resurrect a daemon its operator just stopped.
+        if loop_guard is not None:
+            loop_guard.stop()
+        if loop_beat is not None:
+            loop_beat.cancel()
         if retire_stop is not None:
             retire_stop.set()
         if reload_stop is not None:
@@ -1011,6 +1096,9 @@ app.include_router(desktop_account_profile.router)
 # template that could swallow it.
 app.include_router(desktop_tunnel.router)
 app.include_router(desktop_tunnel_setup.router)
+# `/v1/desktop/mobile/password` (capability `features.mobile_password_read`):
+# a literal path, beside the tunnel block it serves ("Using your own tunnel?").
+app.include_router(desktop_mobile_password.router)
 # Agent messages (Team Bridge, capability `features.team_bridge`):
 # `/v1/desktop/team-bridge/{status,settings,allowlist}`. Registered after the
 # tunnel block for the reason every block here gives -- FastAPI matches in

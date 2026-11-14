@@ -1063,6 +1063,7 @@ def project_settled_rows(
     display_records: dict[str, Any] | None = None,
     proof_history: list[Any] | None = None,
     proof_transcript: Any = None,
+    follow: bool = True,
 ) -> bool:
     """Mount settled transcript rows through the ONE role-aware renderer.
 
@@ -1124,6 +1125,13 @@ def project_settled_rows(
     wasted build rather than a visible defect — recorded in the PR's "not
     addressed" list, and it cannot be fixed from here because a hint applied at
     append arrives after the rows exist.
+
+    ``follow`` decides whether a projection that appended rows re-acquires the
+    tail anchor. It defaults to True because every replay that OPENS a view
+    (cold resume, the sidebar top-up, a reset reconciliation) means "land the
+    reader on the newest turn". The reconnect gap replay passes the reader's
+    own anchor state instead: those rows arrive under a reader who may have
+    scrolled back, and an unconditional follow yanked them to the tail.
     """
     from contextlib import nullcontext
 
@@ -2261,7 +2269,10 @@ def project_settled_rows(
         # the latest turn and ARM the anchor there, so the first thing the
         # resumed session streams carries them with it rather than growing
         # off the bottom of a viewport pinned to the replay's last frame.
-        transcript.follow_tail()
+        # `follow=False` is the caller saying the reader is elsewhere (see
+        # the docstring): leave the anchor and the offset exactly as they are.
+        if follow:
+            transcript.follow_tail()
     return appended
 
 

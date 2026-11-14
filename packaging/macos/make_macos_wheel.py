@@ -60,6 +60,11 @@ PLATFORM_TAG = "macosx_11_0_universal2"
 _EXECUTABLE = 0o755
 _REGULAR = 0o644
 
+# Retagging rewrites the entire ZIP: use the slimmer's lossless level rather than
+# undoing its savings. This preserves all extracted bytes and executable modes;
+# storage headroom must not come from deleting runtime help or raising budgets.
+_COMPRESSION_LEVEL = 9
+
 
 def _record_row(path: str, data: bytes) -> tuple[str, str, str]:
     digest = base64.urlsafe_b64encode(hashlib.sha256(data).digest()).rstrip(b"=").decode()
@@ -149,10 +154,14 @@ def retag(wheel: Path, app: Path, out_dir: Path) -> Path:
             info = zipfile.ZipInfo(entry, date_time=(1980, 1, 1, 0, 0, 0))
             info.external_attr = (mode & 0xFFFF) << 16
             info.compress_type = zipfile.ZIP_DEFLATED
-            dst.writestr(info, data)
+            dst.writestr(info, data, compresslevel=_COMPRESSION_LEVEL)
         info = zipfile.ZipInfo(record_name, date_time=(1980, 1, 1, 0, 0, 0))
         info.external_attr = _REGULAR << 16
-        dst.writestr(info, record)
+        # ZipInfo defaults to STORED, even inside a DEFLATED ZipFile. RECORD is
+        # hundreds of KB in the real wheel; leaving only this entry uncompressed
+        # erased most of the macOS release's headroom without adding any safety.
+        info.compress_type = zipfile.ZIP_DEFLATED
+        dst.writestr(info, record, compresslevel=_COMPRESSION_LEVEL)
     return destination
 
 

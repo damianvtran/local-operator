@@ -841,8 +841,18 @@ def check_items(
     # caller reads already carries the confirmed link.
     source = prov.canonical_hub_source(ctx.config_manager)
     if source:
-        for c in out:
+        for index, c in enumerate(out):
             attach_served_origin(ctx, c, source=source)
+            # THE PROVEN-PUBLIC REPAIR runs here, once per row per check, for the
+            # same reason the origin repair does: the check pass is the one place
+            # every linked row is visited, and the fold below should already see
+            # the repaired link. It costs a request ONLY for an unidentified row
+            # that still carries a tenant (pre-fix public pulls) -- an identified
+            # row is refused before any I/O, so an ordinary check sends nothing
+            # new.
+            repaired = repair_proven_public_scope(ctx, c, source=source)
+            if repaired is not None:
+                out[index] = repaired
     if record:
         # PRUNE ONLY ON A FULL CHECK, AND ONLY WHAT IT COVERED. ``live`` is a
         # GLOBAL set: ``prune_items`` deletes every stored key it does not name,
@@ -933,6 +943,239 @@ def attach_served_origin(ctx: HubSyncContext, c: chk.ItemCheck, *, source: str |
         )
         return False
     return True
+
+
+#: How long a DEFINITIVE "not served publicly" answer (a 404 to the
+#: credential-free probe) suppresses the next probe of the same hub row.
+#: WHY A STORED DAY, NOT A PER-PROCESS MEMO (review round 1, R2): a genuine
+#: legacy ORGANIZATION row (tenant, no identity) answers 404 every time, and
+#: without a memory it paid one extra GET -- up to ``REQUEST_TIMEOUT_S``,
+#: serially inside ``check_items`` -- on EVERY check, forever. A per-process
+#: memo would not bound that: every ``lop teams check``/``lop agents check``
+#: is a fresh process, and so is each desktop backend restart. A timestamp in
+#: the status store bounds it to one probe per row per day across all of
+#: them. A day, because the only thing that turns that 404 into a 200 is the
+#: publisher making the row public -- a rare, human-paced change -- while the
+#: default check runs every 15 minutes (``settings.DEFAULT_CHECK_INTERVAL_MIN``):
+#: unremembered, one org row cost up to 96 probes a day (24 h / 15 min);
+#: remembered, one. The verdict is keyed by the configured source too, so
+#: pointing at another hub probes afresh, and it is a backoff, not a ruling: once it lapses
+#: the next check probes again and a 200 repairs the row as usual.
+#: Only a 404 is remembered. A timeout, 5xx, transport error, redirect or a
+#: mismatched document is "unproven" and retried on the next check: those are
+#: about the network or the hub's health, not the row, and remembering one
+#: would delay the operator's repair by a day after a passing outage.
+PUBLIC_PROBE_BACKOFF = timedelta(days=1)
+
+#: Status-store key for the probe verdicts above:
+#: ``{"<kind>:<hub_id>": {"source": <hub source>, "not_public_at": <iso>}}``.
+PUBLIC_PROBE_STORE_KEY = "public_scope_probes"
+
+PublicProbe = Literal["public", "not-public", "unproven"]
+
+
+def _probe_public_scope(client: Any, kind: str, hub_id: str) -> PublicProbe:
+    """Whether the hub serves ``hub_id`` to a request carrying NO credential.
+
+    The hub's detail routes are optional-auth and scope-resolved from the ROW:
+    a public row is answered to anyone, an organization row only to an entitled
+    member and 404 to everyone else. So a 200 to a credential-less request is
+    the route's own definition of public, and it is the only answer read as
+    ``"public"``. A 404 is ``"not-public"`` (an org row, or gone) -- the one
+    definitive "no", which :data:`PUBLIC_PROBE_BACKOFF` remembers. Everything
+    else -- a 5xx, a timeout, a transport error, a redirect (some other URL
+    answered) or a document naming a different id -- is ``"unproven"``. The
+    caller changes nothing on either "no".
+
+    ``with_credential=False`` is passed explicitly even though the caller hands
+    in the public (key-less) client: the probe must never send a bearer, and
+    that must not depend on which client a context happens to supply.
+    ``credential_free=True`` closes the other door (review round 1, R1):
+    ``requests`` would otherwise attach an ambient ``~/.netrc`` entry for the
+    hub's host as Basic auth, and a 200 to a request that could have
+    authenticated proves nothing about public visibility.
+    """
+
+    try:
+        if kind == "team":
+            document: Any = client.get_team(
+                hub_id,
+                with_credential=False,
+                credential_free=True,
+                timeout=chk.REQUEST_TIMEOUT_S,
+            )
+        elif kind == "agent":
+            document = client.get_agent(
+                hub_id,
+                with_credential=False,
+                credential_free=True,
+                timeout=chk.REQUEST_TIMEOUT_S,
+                refuse_redirects=True,
+            )
+        else:
+            return "unproven"
+    except Exception as exc:  # noqa: BLE001 - any failure proves nothing, so nothing changes
+        logger.debug("public-scope probe failed for %s %s", kind, hub_id, exc_info=True)
+        return "not-public" if getattr(exc, "status_code", None) == 404 else "unproven"
+    if document is None:
+        # ``get_agent`` reads a 404 as "not found" and returns None.
+        return "not-public" if kind == "agent" else "unproven"
+    if isinstance(document, Mapping) and isinstance(document.get("result"), Mapping):
+        # The agent detail route answers in the API-wide envelope; the team
+        # client unwraps it already.
+        document = document["result"]
+    if isinstance(document, Mapping) and str(document.get("id") or "") == hub_id:
+        return "public"
+    return "unproven"
+
+
+def _probe_key(kind: str, hub_id: str) -> str:
+    return f"{kind}:{hub_id}"
+
+
+def _probe_backed_off(ctx: HubSyncContext, kind: str, hub_id: str, source: str) -> bool:
+    """True while a remembered 404 for this row and source is younger than a day."""
+
+    entry = (ctx.store().load().get(PUBLIC_PROBE_STORE_KEY) or {}).get(_probe_key(kind, hub_id))
+    if not isinstance(entry, Mapping) or entry.get("source") != source:
+        return False
+    try:
+        at = datetime.strptime(str(entry.get("not_public_at")), "%Y-%m-%dT%H:%M:%SZ")
+    except ValueError:
+        return False  # an unreadable stamp suppresses nothing
+    age = datetime.now(timezone.utc) - at.replace(tzinfo=timezone.utc)
+    # A stamp from the future (clock moved back) is read as stale, not as forever.
+    return timedelta(0) <= age < PUBLIC_PROBE_BACKOFF
+
+
+def _remember_probe(
+    ctx: HubSyncContext, kind: str, hub_id: str, source: str, verdict: PublicProbe
+) -> None:
+    """Stamp a 404 verdict; clear the entry once the row is proven public."""
+
+    if verdict == "unproven":
+        return
+    key = _probe_key(kind, hub_id)
+
+    def fold(doc: dict[str, Any]) -> None:
+        probes = doc.get(PUBLIC_PROBE_STORE_KEY)
+        if not isinstance(probes, dict):
+            probes = doc[PUBLIC_PROBE_STORE_KEY] = {}
+        if verdict == "public":
+            probes.pop(key, None)
+            if not probes:
+                doc.pop(PUBLIC_PROBE_STORE_KEY, None)
+        else:
+            probes[key] = {"source": source, "not_public_at": prov.now_iso()}
+
+    ctx.store().mutate(fold)
+
+
+def repair_proven_public_scope(
+    ctx: HubSyncContext, c: chk.ItemCheck, *, source: str | None
+) -> chk.ItemCheck | None:
+    """Relink a legacy tenant-carrying row to PUBLIC once the hub proves it public.
+
+    WHY. Before the public pull stopped recording the document's ``tenant_id``
+    (the PUBLISHER's, which a public row carries), a public pull wrote that
+    tenant into the baseline. Such a row has a tenant and no identity, and every
+    other path refuses it on purpose: :func:`attach_served_origin` will not
+    certify a tenant row from an optional-auth read, and :func:`resolve_source`
+    refuses Public against a known org scope. Those refusals are right for a
+    GUESS; this is not one. A 200 to a credential-free GET of the exact hub id is
+    the public route's definition of public, so the stored tenant was never a
+    scope and the row is repaired to the identity a fresh public pull mints.
+
+    Fail-closed guards, each a no-op that leaves the record byte-identical:
+
+    * agent/team only, and only the configured hub (``source``);
+    * only a record with NO identity and a truthy tenant (an identified row is
+      refused before any request, so an ordinary check sends nothing new);
+    * only the public client the context supplies (``client_for_tenant(None)``),
+      addressing the configured base, with no credential on the request;
+    * only a 200 whose document names the same id -- see
+      :func:`_probe_public_scope` for what counts as "not proven";
+    * at most one probe per row per day after a 404 (:data:`PUBLIC_PROBE_BACKOFF`);
+    * one direction only: unproven-org becomes proven-public, never the reverse.
+
+    The repair is NOT an integration: merge-base fields, fingerprint, remote
+    revision, lineage, outbound receipt and ``recorded_by`` are kept exactly.
+    PRIVACY: the new identity has a new ``link_id`` with no stored policy and no
+    public egress grant, so its policy is the creation default
+    (``auto_push=False``) and :func:`_eligibility` answers
+    ``unsafe-publication`` until the operator gives destination-specific
+    consent (``policies.update_policy(confirm_public_egress=True)``). Nothing
+    here can enable an outbound write.
+
+    Returns the check re-read under the repaired scope (so the store fold
+    records the public link), or ``None`` when nothing changed.
+    """
+
+    if c.kind not in ("agent", "team") or not source:
+        return None
+    record = prov.read_baseline(ctx.config_dir, c.kind, c.local_id)
+    if record is None or record.identity is not None or not record.tenant_id:
+        return None
+    if record.hub_id != c.hub_id:
+        return None
+    client = ctx.client_for_tenant(None)
+    if client is None or chk._served_by(client) != source:
+        return None
+    if _probe_backed_off(ctx, c.kind, record.hub_id, source):
+        return None
+    verdict = _probe_public_scope(client, c.kind, record.hub_id)
+    if verdict != "public":
+        _remember_probe(ctx, c.kind, record.hub_id, source, verdict)
+        return None
+    origin = link_origin(source, "public", None)
+    identity = prov.link_identity(c.kind, c.local_id, record.hub_id, origin=origin)
+    if identity is None:
+        return None
+    repaired = replace(record, tenant_id=None, scope_known=True, identity=identity)
+    try:
+        prov.write_baseline(ctx.config_dir, repaired, proven_public_rescope=True)
+    except (prov.BaselineError, OSError, ValueError):
+        logger.warning(
+            "could not repair the legacy hub scope of %s %s; the link stays unresolved",
+            c.kind,
+            c.local_id,
+            exc_info=True,
+        )
+        return None
+    # A row once answered 404 and now public must not keep a stale stamp.
+    _remember_probe(ctx, c.kind, record.hub_id, source, "public")
+    # The tenant is deliberately absent from this line: it is the publisher's.
+    logger.info(
+        "repaired legacy hub scope to public for %s %s (hub %s)",
+        c.kind,
+        c.local_id,
+        record.hub_id,
+    )
+    # Re-read this one row under its repaired (tenant-free) scope so the fold
+    # records what the public client is now served, not the stale org-scoped
+    # answer -- often ``no-credential`` when nobody is signed in. One more
+    # GET (two for an agent whose detail read falls to the zip download), once
+    # per repaired row, never on later checks. It is the ORDINARY public check:
+    # its team/agent detail read (``check._detail_read_auth``) and the agent's
+    # public zip fallback are both ``credential_free`` -- no credential, not
+    # even an ambient ``~/.netrc`` entry ``requests`` would attach as Basic
+    # auth, and no redirect -- otherwise this fold could record a signed-in
+    # answer as what the public is served, and leak the netrc secret to the hub.
+    try:
+        if c.kind == "team":
+            again = chk.check_hub_teams(
+                ctx.teams(), client_for_tenant=ctx.client_for_tenant, only_ids={c.local_id}
+            )
+        else:
+            again = chk.check_hub_agents(
+                ctx.agents(), client_for_tenant=ctx.client_for_tenant, only_ids={c.local_id}
+            )
+    except Exception:  # noqa: BLE001 - the repair stands; the fold keeps the scope fix
+        logger.debug("re-check after scope repair failed for %s", c.local_id, exc_info=True)
+        again = []
+    if again:
+        return again[0]
+    return replace(c, tenant_id=None, link_id=identity.link_id)
 
 
 def _specs(kind: str) -> list[tuple[str, str, int | None, int | None]]:

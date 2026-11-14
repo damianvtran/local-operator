@@ -137,6 +137,10 @@ _HARMLESS: dict[str, str] = {
     "LOCAL_OPERATOR_IMAGES": "inline-image protocol switch",
     "LOCAL_OPERATOR_GREP_ENGINE": "rg vs python grep",
     "LOCAL_OPERATOR_MCP_TIMEOUT_MS": "a timeout",
+    "LOCAL_OPERATOR_MCP_UVX_DIRECT": (
+        "opt-out to keep raw uvx for stdio MCP servers; either value launches the "
+        "configured server's same program, and the resolver's tests set it explicitly"
+    ),
     "LOCAL_OPERATOR_SPILL_MAX_BYTES": "a size limit",
     "LOCAL_OPERATOR_INTERNAL_READ_LIMIT": "a size limit; 0 disables internal-URL shaping",
     "LOCAL_OPERATOR_SCHEDULED_TASK_TIMEOUT_SECONDS": "a timeout",

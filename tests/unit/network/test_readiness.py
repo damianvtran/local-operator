@@ -4640,3 +4640,64 @@ def test_model_switch_row_reads_the_peers_network_not_the_first_one(
         )
     finally:
         viewer.close()
+
+
+# Resilience: the relay unit's OOMPolicy (2026-11-11, the Linux node) ---------
+
+
+def _resilience(relay_unit: Any = None, *, total: int = 15704, swap: int = 0) -> dict[str, Any]:
+    facts: dict[str, Any] = {"memory": {"total_mb": total, "swap_total_mb": swap}}
+    if relay_unit is not None:
+        facts["relay_unit"] = relay_unit
+    member = SimpleNamespace(device_id="d_node", name="node")
+    return readiness.resilience_row(member, facts, peer_label="node")
+
+
+_GAP = {"supervisor": "systemd", "installed": True, "readable": True, "oom_policy": None}
+
+
+def test_a_relay_unit_that_stops_on_a_child_oom_is_a_warning_with_the_fix() -> None:
+    """The node's 15.7 GB of RAM read ``ok`` while its unit ran on OOMPolicy=stop."""
+    row = _resilience(_GAP)
+    assert row["ok"] is False and row["code"] == readiness.CODE_RELAY_OOM_POLICY, row
+    assert "OOMPolicy=continue" in row["detail"]
+    assert any("lop network install" in remedy for remedy in row["remedies"]), row
+    assert row["observed"]["oom_policy"] is None
+    # A warning, never an onboarding failure: the row stays non-gating equipment.
+    assert readiness.CAPABILITY_RESILIENCE in readiness.NON_GATING_EQUIPMENT
+    explicit_stop = _resilience({**_GAP, "oom_policy": "stop"})
+    assert explicit_stop["code"] == readiness.CODE_RELAY_OOM_POLICY
+
+
+@pytest.mark.parametrize(
+    "relay_unit",
+    [
+        {**_GAP, "oom_policy": "continue"},
+        None,  # an older peer: no fact, no claim
+        {"supervisor": None},  # macOS / no systemctl
+        {"supervisor": "systemd", "installed": False},
+        {"supervisor": "systemd", "installed": True, "readable": False},
+    ],
+)
+def test_no_oom_policy_claim_without_proof_of_the_gap(relay_unit: Any) -> None:
+    row = _resilience(relay_unit)
+    assert row["ok"] is True and "code" not in row, row
+
+
+def test_a_small_node_with_the_gap_keeps_low_memory_and_gains_the_unit_fix() -> None:
+    row = _resilience(_GAP, total=2048, swap=0)
+    assert row["code"] == readiness.CODE_LOW_MEMORY, row
+    assert any("OOMPolicy=continue" in remedy for remedy in row["remedies"]), row
+
+
+def test_the_peer_answer_carries_the_relay_unit_fact(monkeypatch: pytest.MonkeyPatch) -> None:
+    from local_operator.network import relay as relay_mod
+
+    monkeypatch.setattr(relay_mod, "installed_unit_oom_policy", lambda: dict(_GAP))
+    assert readiness.relay_unit_fact() == _GAP
+
+    def _boom() -> Any:
+        raise RuntimeError("probe failed")
+
+    monkeypatch.setattr(relay_mod, "installed_unit_oom_policy", _boom)
+    assert readiness.relay_unit_fact() == {"supervisor": None}

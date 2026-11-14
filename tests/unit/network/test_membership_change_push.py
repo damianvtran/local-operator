@@ -1,15 +1,20 @@
 """Change pushes must replace the old convergence clock, not merely slow it."""
 
 import copy
+import sys
 import threading
 import time
-from typing import Any
+from contextlib import contextmanager
+from typing import Any, Iterator
 
 import pytest
 
-from local_operator.network import identity, relay, store, wire
+from local_operator.network import identity, relay, store, types, wire
 from tests.unit.network import conftest as net_fixtures
 from tests.unit.network.test_membership_convergence import (
+    _join,
+    _make,
+    _MembershipClocks,
     _rename_own_row,
     _row,
     _settled_pair,
@@ -184,6 +189,12 @@ def test_push_converges_without_a_pull_and_does_not_forge_answer_age(
     assert net_fixtures.wait_for(
         lambda: (row := _row(a, c.device_id)) is not None and row.name == "changed-by-push"
     )
+    # Disk visibility is earlier than completion: the reader still has to mark
+    # the pushed table unverified after adopting its rows. An ack on the same
+    # TCP link proves that dispatch finished before checking answer-age truth.
+    reverse = c.server._link_for(a.device_id, network_id=network_id)
+    assert reverse is not None
+    _wire_barrier(c.server, reverse)
     assert link.member_pulled_at == stamp
     report = a.server.refresh_membership()[network_id]
     assert not report.answered
@@ -351,3 +362,245 @@ def test_an_inflight_answer_cannot_revert_a_newer_push(
     assert link.member_pulled_at == stamp
     assert link.member_push_unverified
     assert link.member_pull_interval_s == relay.MEMBERSHIP_PULL_MIN_INTERVAL_S
+
+
+@pytest.mark.parametrize("supplier_role", ["read", "admin"])
+def test_new_rows_require_a_solicited_answer_and_supplier_standing(
+    devices: Any, monkeypatch: pytest.MonkeyPatch, supplier_role: str
+) -> None:
+    """Real encrypted pushes cannot admit; their subsequent pull is peer-bound."""
+    a, c, network_id, link = _settled_pair(devices, monkeypatch)
+    reverse = _negotiated_pair(a, c, network_id, link)
+    pull = a.server._pull_members
+    # Disable the background rescue path before publishing: the push assertion
+    # must not accidentally observe an admission made by a concurrent pull.
+    monkeypatch.setattr(a.server, "_pull_members", lambda link: "no_answer")
+    with store.mutate(network_id, a.root) as record:
+        supplier = record.member(c.device_id)
+        assert supplier is not None
+        supplier.role = supplier_role
+        supplier.capabilities = sorted(types.capabilities_for_role(supplier_role))
+        store.save(record, a.root)
+    newcomer = identity.mint(c.root / "asserted-device", name="asserted")
+    with store.mutate(network_id, c.root) as record:
+        row = types.MemberRecord(
+            device_id=newcomer.device_id,
+            public_key=newcomer.public_key,
+            role="admin",
+            capabilities=sorted(types.capabilities_for_role("admin")),
+            added_by=a.device_id,  # Claimed provenance cannot replace link standing.
+        )
+        record.members.append(row)
+        store.save(record, c.root)
+    assert reverse.send(_change_frame(record))
+    _wire_barrier(c.server, reverse)
+    assert store.load(network_id, a.root).member(newcomer.device_id) is None
+    assert pull(link) == ""
+    adopted = store.load(network_id, a.root).member(newcomer.device_id)
+    print("BOUND_TABLE_ANSWER", supplier_role, "adopted", adopted is not None)
+    if supplier_role == "admin":
+        assert adopted is not None and adopted.role == "admin"
+    else:
+        assert adopted is None
+
+
+@contextmanager
+def _fenced_endpoint_tables(
+    a: Any, c: Any, network_id: str, link: Any, monkeypatch: pytest.MonkeyPatch
+) -> Iterator[None]:
+    """Park both writers, then drain both directions BEFORE conflicting setup.
+
+    Stubbing A's rescue pull alone leaves the independent publisher free to send
+    A's OLD third-member endpoint to C between the two fixture writes. C then
+    answers the measured pull with OLD, truthfully (#3879 attribution). A clock
+    fence joins in-flight writer calls; same-link ping barriers drain their queued
+    publications. Neither the incoming handler nor either real pull is stubbed.
+    The nested monkeypatch context restores every clock seam when this scope ends.
+    """
+    reverse = _negotiated_pair(a, c, network_id, link)
+    with monkeypatch.context() as seams:
+        _MembershipClocks([a.server, c.server], seams).park()
+        _wire_barrier(a.server, link)
+        _wire_barrier(c.server, reverse)
+        yield
+
+
+def _set_endpoint_fixture(
+    a: Any, c: Any, network_id: str, third: Any, *, supplier_endpoint: str
+) -> None:
+    """Synthetic known third member; call only inside the writer/drain fence."""
+    for root, endpoints in ((a.root, ["10.0.0.1:4100"]), (c.root, [supplier_endpoint])):
+        with store.mutate(network_id, root) as record:
+            supplier = record.member(c.device_id)
+            assert supplier is not None
+            # Both tables agree C is a drive member, so its own row is a
+            # consistent self assertion and any refusal logged is a real one.
+            supplier.role = "drive"
+            supplier.capabilities = sorted(types.capabilities_for_role("drive"))
+            known = record.member(third.device_id)
+            if known is None:
+                record.members.append(
+                    types.MemberRecord(
+                        device_id=third.device_id,
+                        public_key=third.public_key,
+                        name="third",
+                        role="read",
+                        capabilities=sorted(types.capabilities_for_role("read")),
+                        endpoints=endpoints,
+                        added_by=c.device_id,
+                    )
+                )
+            else:
+                known.endpoints = endpoints
+            store.save(record, root)
+
+
+def test_a_known_members_moved_endpoint_relays_through_a_drive_supplier(
+    devices: Any, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Endpoint relay is how a peer learns a moved device's address.
+
+    Three members: A (receiver), C (a DRIVE supplier) and T, a third member A
+    already holds. T moves; C learns it; A pulls C's table. A must take T's new
+    endpoint (the declaring device's answer, relayed) and nothing else — and an
+    ordinary pull of a healthy table must not log a refusal for A's own row or
+    T's, because nothing was refused.
+    """
+    a, c, network_id, link = _settled_pair(devices, monkeypatch)
+    with _fenced_endpoint_tables(a, c, network_id, link, monkeypatch):
+        third = identity.mint(c.root / "third-device", name="third")
+        _set_endpoint_fixture(a, c, network_id, third, supplier_endpoint="10.0.0.2:4200")
+        caplog.set_level("WARNING", logger="local_operator.network.relay")
+        caplog.clear()
+        assert a.server._pull_members(link) == ""
+        adopted = store.load(network_id, a.root).member(third.device_id)
+        # Link-lifecycle warnings share this logger; only membership refusals count.
+        refusals = [
+            r
+            for r in caplog.records
+            if r.name == "local_operator.network.relay"
+            and r.getMessage().startswith("Refused member row")
+        ]
+        print("ENDPOINT_RELAY", adopted and adopted.endpoints, "relay_warnings", len(refusals))
+        assert adopted is not None
+        assert adopted.endpoints == ["10.0.0.2:4200"]
+        assert adopted.role == "read"
+        assert refusals == []
+
+
+def test_a_delayed_old_publication_is_drained_before_the_new_supplier_fixture(
+    devices: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The control that distinguishes a drained fixture from lucky scheduling.
+
+    Capture the REAL publisher's OLD frame while both sides agree on OLD. Model
+    its writer queue holding that frame until the drain ping is queued behind it.
+    Without the setup drain it arrives after C=NEW and the final pull returns OLD
+    (the exact gate failure); with the drain it arrives BEFORE the conflicting
+    fixture is installed. No production request/merge is bypassed or fabricated.
+    """
+    a, c, network_id, link = _settled_pair(devices, monkeypatch)
+    original_seams = [
+        (server, server.refresh_membership, server._publish_member_changes)
+        for server in (a.server, c.server)
+    ]
+    with _fenced_endpoint_tables(a, c, network_id, link, monkeypatch):
+        third = identity.mint(c.root / "delayed-third", name="third")
+        _set_endpoint_fixture(a, c, network_id, third, supplier_endpoint="10.0.0.1:4100")
+        send = link.send
+        queued: list[dict[str, Any]] = []
+
+        def hold(frame: dict[str, Any]) -> bool:
+            if frame.get("op") == "net_member_list" and "changed_members" in frame:
+                queued.append(copy.deepcopy(frame))
+                return True
+            return bool(send(frame))
+
+        with monkeypatch.context() as held_writer:
+            held_writer.setattr(link, "send", hold)
+            a.server._publish_member_changes()
+        assert len(queued) == 1, "the real OLD publication was not captured"
+        old_row = next(
+            row for row in queued[0]["changed_members"] if row["device_id"] == third.device_id
+        )
+        assert old_row["endpoints"] == ["10.0.0.1:4100"]
+        barrier = _wire_barrier
+        drained: list[bool] = []
+
+        def flush_before_ping(server: Any, current: Any) -> None:
+            if server is a.server and queued:
+                assert send(queued.pop())
+                drained.append(True)
+            barrier(server, current)
+
+        # Nest the REAL setup fence; restore this queue shim on exit as well.
+        with monkeypatch.context() as queue:
+            queue.setattr(sys.modules[__name__], "_wire_barrier", flush_before_ping)
+            with _fenced_endpoint_tables(a, c, network_id, link, monkeypatch):
+                _set_endpoint_fixture(a, c, network_id, third, supplier_endpoint="10.0.0.2:4200")
+                # Negative control: if the fixture omitted its drain, the pending
+                # OLD frame would now arrive after NEW, not silently disappear.
+                if queued:
+                    assert send(queued.pop())
+                    barrier(a.server, link)
+                assert a.server._pull_members(link) == ""
+                adopted = store.load(network_id, a.root).member(third.device_id)
+                assert adopted is not None
+                assert adopted.endpoints == ["10.0.0.2:4200"]
+                assert drained == [True], "setup never drained its pending publication"
+    for server, refresh, publish in original_seams:
+        assert server.refresh_membership == refresh
+        assert server._publish_member_changes == publish
+    assert link.send == send and _wire_barrier == barrier
+
+
+def test_removal_and_epoch_still_reach_every_peer(
+    devices: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    a, c, network_id, link = _settled_pair(devices, monkeypatch)
+    removed = _make(devices, "removed")
+    assert _join(removed, inviter=c, monkeypatch=monkeypatch)["device_id"] == removed.device_id
+    # Pairing uses a short-lived CLI connection. Establish the relay's own link
+    # before removal, so the removed device can receive its epoch notification.
+    removed_link, reason = removed.server.dial(network_id, host=f"{c.host}:{c.port}", epoch=1)
+    assert removed_link is not None, reason
+    assert net_fixtures.wait_for(
+        lambda: (live := c.server._link_for(removed.device_id)) is not None and live.alive
+    )
+    assert a.server._pull_members(link) == ""
+    assert store.load(network_id, a.root).member(removed.device_id) is not None
+    old_secret = store.load_secrets(network_id, removed.root).secret
+    result = c.server._ctl_member_rm({"network": network_id, "device_id": removed.device_id})
+    assert result["epoch"] == 2
+
+    def all_removed() -> bool:
+        records = [store.load(network_id, peer.root) for peer in (a, c, removed)]
+        # WAIT ON THE ASSERTED STATE, NOT A PROXY. ``apply_epoch`` (relay.py
+        # ~2864-2871) and ``rotate_epoch`` (~2750-2762) save the record BEFORE the
+        # secrets file, so a lock-free ``store.load`` can see ``epoch == 2`` while the
+        # remaining peer's secret file still holds epoch 1 (seen in CI run
+        # 42667056271 and on main's code with this test). That write order is a
+        # product decision left untouched here; the wait must cover the secret too.
+        rotated = store.load_secrets(network_id, c.root).secret
+        return (
+            all(
+                record.epoch == 2
+                and removed.device_id in record.removed_ids
+                and (row := record.member(removed.device_id)) is not None
+                and not row.active
+                for record in records
+            )
+            and store.load_secrets(network_id, a.root).secret == rotated
+        )
+
+    assert net_fixtures.wait_for(all_removed)
+    assert (
+        store.load_secrets(network_id, a.root).secret
+        == store.load_secrets(network_id, c.root).secret
+    )
+    assert store.load_secrets(network_id, removed.root).secret == old_secret
+    print(
+        "REMOVAL_ALL_PEERS",
+        "epochs",
+        [store.load(network_id, p.root).epoch for p in (a, c, removed)],
+    )
