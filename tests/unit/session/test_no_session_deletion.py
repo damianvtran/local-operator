@@ -103,6 +103,15 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "<path>.unlink",
         "Cleans only this call's mkstemp .json FILE; unlink rejects directories.",
     ),
+    # ``spawn_stamp`` reads the filesystem clock off a marker it creates with
+    # ``tempfile.mkstemp`` (no ``dir``: the temp dir) and removes it at once;
+    # the path is never caller-supplied and is always that regular FILE.
+    (
+        "local_operator/guardrails/interrupted_worktree_add.py::spawn_stamp",
+        "os.unlink",
+        "Unlinks only the .lop-spawn-stamp-* mkstemp FILE this call just created in the "
+        "temp dir; unlink rejects directories.",
+    ),
     # Build output is the one `lop disk reclaim` category the module deletes
     # itself: no tool owns the removal of a `target`/`.next`/`build`/`dist`
     # tree, and the module docstring documents the single guarded remover that
