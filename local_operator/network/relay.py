@@ -14312,6 +14312,13 @@ class RelayServer:
         )
         for link in links:
             link.close("we-closed")
+        # LEAVING ENDS EVERY RENEWAL LEND IN IT (#3955 M1): no node of a network this
+        # device left can be asked again, so its own lent logins renew on their own.
+        from local_operator.network.credentials import owner as owner_mod
+
+        owner_mod._end_renewal_lends(  # noqa: SLF001
+            self, resolved.network_id, devices=None, cause="left"
+        )
         secrets_file = store.secrets_path(resolved.network_id, self.root)
         if secrets_file.exists():
             secrets_file.unlink()

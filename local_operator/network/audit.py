@@ -199,6 +199,8 @@ EVENT_KINDS: frozenset[str] = frozenset(
         "credential.renewed_by_peer",
         "credential.renewal_conflict",
         "credential.renewal_stale",
+        # The owner ended a renewal lend (revoke, removal, panic, leave: #3955 Q1).
+        "credential.renewal_ended",
         # ``lop logout`` of a lent login: the provider-side revoke's outcome (§D D3).
         "credential.provider_revoked",
         "credential.finite_requested",
@@ -571,6 +573,7 @@ DETAIL_KEYS: dict[str, frozenset[str]] = {
     "credential.renewed_by_peer": frozenset({"credential_key", "act", "sub", "epoch", "at"}),
     "credential.renewal_conflict": frozenset({"credential_key", "act", "sub", "epoch", "code"}),
     "credential.renewal_stale": frozenset({"credential_key", "act", "sub", "epoch", "code"}),
+    "credential.renewal_ended": frozenset({"credential_key", "act", "sub", "cause"}),
     "credential.provider_revoked": frozenset({"credential_key", "provider", "outcome"}),
     "credential.refresh_returned": frozenset({"credential_key", "act", "sub", "grant_id", "epoch"}),
     "credential.refresh_refused": frozenset({"credential_key", "act", "sub", "grant_id", "cause"}),

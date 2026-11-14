@@ -3612,6 +3612,9 @@ def revoke_lent_on_panic(server: Any, network_id: str) -> int:
     A broker for another network is left alone — the panic is per network. Never
     raises: the panic's own latch and broadcast must not depend on GitHub answering.
     """
+    # THE RENEWAL LENDS END TOO (#3955 Q1), broker or not: the lent record lives in
+    # auth.db, and a relay restarted since the lend has no broker yet.
+    _end_renewal_lends(server, network_id, devices=None, cause="panic")
     broker = getattr(server, _BROKER_ATTR, None)
     # An EMPTY ``network_id`` revokes this relay's broker network on purpose: an
     # incident whose scope is unknown fails closed (revoke), never open. Only a
@@ -3643,6 +3646,8 @@ def revoke_lent_on_removal(server: Any, network_id: str, device_ids: Iterable[st
     """
     from local_operator.network.credentials import github as github_app
 
+    # A removed or departed node's renewal lend ends here as well (#3955 Q1).
+    _end_renewal_lends(server, network_id, devices=list(device_ids), cause="member_removed")
     broker = getattr(server, _BROKER_ATTR, None)
     if broker is None or (network_id and broker.network_id != network_id):
         return 0
@@ -3655,6 +3660,24 @@ def revoke_lent_on_removal(server: Any, network_id: str, device_ids: Iterable[st
         except Exception:  # noqa: BLE001 — the tombstone holds; the token's hour bounds it
             logger.warning("member removal: revoking lent GitHub tokens failed", exc_info=True)
     return revoked
+
+
+def _end_renewal_lends(
+    server: Any, network_id: str, *, devices: list[str] | None, cause: str
+) -> None:
+    """``renewal.end_lends`` on the relay's root and audit log. Never raises."""
+    try:
+        from local_operator.network.credentials import renewal as renewal_mod
+
+        renewal_mod.end_lends(
+            getattr(server, "root", None),
+            network_id,
+            devices=devices,
+            cause=cause,
+            audit=getattr(server, "audit", None),
+        )
+    except Exception:  # noqa: BLE001 — the incident already committed
+        logger.warning("ending renewal lends failed (%s)", cause, exc_info=True)
 
 
 def broker_for_relay(server: Any) -> MeshCredentialBroker | None:

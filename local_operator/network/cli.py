@@ -3757,6 +3757,14 @@ def _cmd_credential(args: argparse.Namespace) -> int:
             {"credential_key": key},
             "owner-revoke:" + str(_clock.time_ns()),
         )
+        # A REVOKED NODE IS NO LONGER THE RENEWER (#3955 Q1): end the lend here, in
+        # this process, so the owner renews on its own at once — even with no relay
+        # running to hear about it.
+        from local_operator.network.credentials import renewal as renewal_mod
+
+        renewal_mod.end_lends(
+            _config_dir(), record.network_id, devices=[device], key=key, cause="revoked"
+        )
         entry_json = reduced["entry"] or {}
         action = "revoked"
     elif finite_result is not None:
