@@ -1344,6 +1344,24 @@ def restore_active_locale() -> Iterator[None]:
         text.set_active_locale("en")
 
 
+@pytest.fixture(autouse=True)
+def no_real_pkexec(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No test may launch the machine's real pkexec.
+
+    ``elevate.pkexec_path`` resolves pkexec from FIXED system paths, not ``PATH``
+    (agent review R1-5 on #3950), so the old way of hiding it — patching
+    ``shutil.which`` — no longer does, and on a host with ``/usr/bin/pkexec`` (and
+    passwordless sudo) a test that reached ``run_elevated`` would raise a real
+    privileged prompt. The test-launcher-only seam is pinned to a path that does
+    not exist; a test that wants a pkexec host points it at a shim of its own.
+    """
+    from local_operator.operator import elevate
+
+    monkeypatch.setattr(
+        elevate, "_PKEXEC_CANDIDATES_OVERRIDE", ("/nonexistent/lop-test-no-real-pkexec",)
+    )
+
+
 @pytest.fixture
 def monkeypatch(restore_active_locale: None) -> Iterator[pytest.MonkeyPatch]:
     """Keep pytest's standard patch API, but declare locale teardown ordering.

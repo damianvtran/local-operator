@@ -22,6 +22,10 @@ def outcome_cancelled() -> Msg:
     return Msg("wire.operator_setup.outcome.cancelled", {})
 
 
+def outcome_changed_elsewhere() -> Msg:
+    return Msg("wire.operator_setup.outcome.changed_elsewhere", {})
+
+
 def outcome_failed() -> Msg:
     return Msg("wire.operator_setup.outcome.failed", {})
 
@@ -70,6 +74,14 @@ def refused_privileged() -> Msg:
     return Msg("wire.operator_setup.refused.privileged", {})
 
 
+def refused_terminal_cannot_prompt() -> Msg:
+    return Msg("wire.operator_setup.refused.terminal_cannot_prompt", {})
+
+
+def refused_unsafe_staging() -> Msg:
+    return Msg("wire.operator_setup.refused.unsafe_staging", {})
+
+
 def title_confirm_phone() -> Msg:
     return Msg("wire.operator_setup.title.confirm_phone", {})
 
@@ -82,8 +94,11 @@ def title_remove_phone() -> Msg:
     return Msg("wire.operator_setup.title.remove_phone", {})
 
 
-def tui_anchor_clause() -> Msg:
-    return Msg("wire.operator_setup.tui.anchor_clause", {})
+def tui_approvals_report_not_set_up(*, live: str, saved: str) -> Msg:
+    return Msg(
+        "wire.operator_setup.tui.approvals_report_not_set_up",
+        {"live": live, "saved": saved},
+    )
 
 
 def tui_starting() -> Msg:
