@@ -265,10 +265,14 @@ def test_owner_rm_rf_of_locked_busy_or_unknown_own_worktree_is_high(
     assert _rank(home, command, S).risk is Risk.HIGH
     _git("worktree", "unlock", str(wt), cwd=mobile)
 
-    monkeypatch.setattr(prov, "_live_cwd_inside", lambda _: True)
+    # An OWN tree's busy answer comes from a fresh ``cwd_holders`` inventory
+    # (PR #3987), not the cached ``_live_cwd_inside``: a holder outside this
+    # session's family keeps it busy.
+    foreign_holder = prov.CwdHolder(4242, "vim", "session 222222222222 (another session)", False)
+    monkeypatch.setattr(prov, "cwd_holders", lambda real, sid: [foreign_holder])
     v = _rank(home, command, S)
     assert v.risk is Risk.HIGH and "busy" in v.targets[0].reason
-    monkeypatch.setattr(prov, "_live_cwd_inside", lambda _: False)
+    monkeypatch.setattr(prov, "cwd_holders", lambda real, sid: [])
 
     real_git = prov._git
 
