@@ -317,12 +317,27 @@ class _ProbeEnv:
                 ).get_config_value("web_fetch", None)
             except Exception:  # noqa: BLE001 — unreadable config: the tool's defaults
                 self._web_fetch_settings = None
+        # A REDACTION LEDGER, because the lent github login rides on one. Bash hands
+        # a child the mesh-borrowed ``GH_TOKEN`` only when its context can scrub it
+        # (``github.lent_github_env``: no scrubber, no bearer), and this context used
+        # to carry no ``variables`` store at all — so every parked ``gh`` tick ran
+        # unauthenticated, failed with "set the GH_TOKEN environment variable", and
+        # engaged the session it was meant to leave parked. A fresh, empty store per
+        # context is the session's equivalent here: a parked session holds no session
+        # credentials (they are per-process memory), and this store's ``redact``
+        # masks the lent token in the tick's output before it is hashed. Built here,
+        # not at the call site, so a context-built tool (``TOOL_BUILDERS``) sees the
+        # same ledger as the call itself.
+        from local_operator.variables import VariableStore
+
+        cwd = spec.cwd or self.cwd
         return ToolContext(
-            cwd=spec.cwd or self.cwd,
+            cwd=cwd,
             monitor_check=True,
             session_id=self.session_id,
             session_dir=str(self.config_dir / "sessions" / self.session_id),
             web_fetch_settings=self._web_fetch_settings,
+            variables=VariableStore(cwd=cwd),
         )
 
     async def resolve(self, spec: Any) -> _Resolved:
