@@ -919,6 +919,22 @@ def test_ready_flips_a_blocked_peer_to_ready_as_each_condition_is_fixed(
     hosts.parent.mkdir(parents=True)
     hosts.write_text("github.com:\n    user: octocat\n", encoding="utf-8")
     monkeypatch.setenv("PATH", str(tool_bin))
+    # The browser row (2026-11-13) reads the runner's own browser hosting; a
+    # provisioned node-managed browser is the "every row ok" state this test
+    # walks to, so the fact is pinned rather than read from the runner.
+    monkeypatch.setattr(
+        readiness,
+        "browser_fact",
+        lambda: {
+            "host": "node",
+            "chrome_version": "Google Chrome 157.0.8103.78",
+            "extension_version": "0.1.27",
+            "unit_active": True,
+            "unit_state": "active",
+            "daemon_healthy": True,
+            "paired": True,
+        },
+    )
     monkeypatch.setattr(
         "local_operator.operator.operator_authority_report",
         lambda **kwargs: {

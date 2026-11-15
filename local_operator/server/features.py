@@ -39,7 +39,15 @@ from local_operator.supplements.contract import (
 #: checking ``notification_bulk_selection``; the relay's ``extra="ignore"`` query
 #: drops ``include_ask_reads`` and answers the same plain first page.
 DESKTOP_ONLY_FEATURES = frozenset(
-    {"notification_bulk_selection", "notification_bulk_ask_read", "profile_proposals"}
+    {
+        "notification_bulk_selection",
+        "notification_bulk_ask_read",
+        "profile_proposals",
+        # The phone relay serves no `/v1/desktop/mobile/password`; a phone
+        # client must not be told it can read the portal password it signs in
+        # with (routes/desktop_mobile_password.py).
+        "mobile_password_read",
+    }
 )
 
 
@@ -887,6 +895,21 @@ def static_feature_flags() -> dict[str, Any]:
         # retain health/sign-in behavior; only this key admits the new account-
         # pinned quote/run affordance, never an automatic poll-side mutation.
         "tunnel_setup": 1,
+        # `GET /v1/desktop/mobile/password`: the desktop's "Show phone
+        # password" under "Using your own tunnel?". Its own key because the
+        # route is new and additive: an older backend has no way to answer,
+        # so ABSENT ⇒ the renderer keeps pointing at `lop mobile password` in
+        # a terminal rather than showing a button that 404s. The read is on
+        # click only, never cached or prefetched (see the route's module doc
+        # for why the desktop bearer may read this secret at all).
+        "mobile_password_read": 1,
+        # `remedy.kind` on `GET /v1/desktop/tunnel`, the setup route's new kinds
+        # (`open_console`, `wait_network`, `wait_radient`) and the reconnect /
+        # lapsed-billing steps, plus `kind` on the gateway's 503 body. ABSENT ⇒
+        # the renderer keeps its command/url-only remedy handling: an older
+        # backend sends no `kind` there, and a renderer that guessed one from a
+        # sentence would offer a button the backend never promised.
+        "tunnel_remedy_kinds": 1,
         # THE MESH, and both keys gate AFFORDANCES rather than shapes.
         #
         # `peers` is the peer catalogue's key (mesh-session-mobility.md
@@ -980,6 +1003,12 @@ def static_feature_flags() -> dict[str, Any]:
         # without it keeps the CLI-remedy card (`can_approve_here: False`) and never
         # POSTs a body this backend would not understand.
         "credential_approvals": 1,
+        # PHONE PAIRING BY APPROVAL (pairing design v2 §1-§2): the `pairing` block on a
+        # `pair_phone` row, `POST /v1/desktop/approvals/{id}/pair-ack` (typed code or,
+        # on an edge-attested request, "codes match"), `GET`/`DELETE
+        # /v1/desktop/devices`, and the feed's `approvals.pair_request`. Its own key so
+        # a renderer that lacks it never posts a pair-ack body an older backend 404s.
+        "phone_pairing": 1,
         # Signed profile continuations disclose/apply through the same inbox.
         "profile_approvals": 1,
         "profile_proposals": 1,

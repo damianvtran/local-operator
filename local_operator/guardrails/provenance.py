@@ -51,6 +51,7 @@ a parent cleaning up after its subagents needs no lineage lookup at read time.
 from __future__ import annotations
 
 import fnmatch
+import functools
 import glob as _glob
 import itertools
 import json
@@ -75,6 +76,19 @@ LEDGER_FILENAME = "created.sqlite"
 #: a held lock past this is a stuck writer, and the guard degrades to "no
 #: provenance" (the old ranking) rather than stalling a turn.
 _DB_TIMEOUT_S = 2.0
+#: Busy wait for the foreign-ledger lookup (``ForeignCreations``), which runs
+#: on every LOW delete classify. Readers only wait on an EXCLUSIVE writer
+#: (rollback journal: RESERVED/PENDING never block a reader's shared lock
+#: until commit); a commit of these tiny rows takes milliseconds, so a lock
+#: still held after this is not worth stalling the turn for — the lookup
+#: gives up and the rank stays what it was before the rule existed (m5,
+#: review round 2 of PR #3835: the 2 s wait measured 3.86 s per classify).
+#: This is the busy wait handed to SQLite, not the lookup's wall time: SQLite's
+#: own lock-reporting latency dominates under an EXCLUSIVE lock (QA measured
+#: the lookup at 0.74-0.79 s; a bare stdlib ``connect(timeout=0.25)`` took
+#: ~1.3 s to report "locked" on a loaded box). Still bounded, and well under
+#: the 2 s path.
+_DB_READ_TIMEOUT_S = 0.25
 #: Bound on every git probe. Measured on this machine's worktrees (n=12,
 #: ``git status --porcelain --untracked-files=all`` on local-operator linked
 #: worktrees, 2026-11-07): median 0.015 s, max 0.86 s. 10 s is far above that and still
@@ -391,14 +405,27 @@ _SCHEMA = (
 )
 
 
-def _connect(path: Path, *, create: bool) -> sqlite3.Connection | None:
+#: ``ForeignCreations`` looks rows up by path (``_foreign_query``); the
+#: primary key leads with ``owner`` and cannot serve that. ``IF NOT EXISTS``
+#: adds it to ledgers written before it existed, on their next WRITE open
+#: only (m5): creating it is a write, and a read-only ledger (or one a writer
+#: holds) must keep serving lookups — unindexed until the next recording
+#: call, which SQLite answers with a table scan, never an error.
+_PATH_INDEX = "CREATE INDEX IF NOT EXISTS created_path ON created (path)"
+
+
+def _connect(
+    path: Path, *, create: bool, timeout: float = _DB_TIMEOUT_S
+) -> sqlite3.Connection | None:
     if not create and not path.exists():
         return None
     if create:
         path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(path), timeout=_DB_TIMEOUT_S)
+    conn = sqlite3.connect(str(path), timeout=timeout)
     try:
         conn.execute(_SCHEMA)
+        if create:
+            conn.execute(_PATH_INDEX)
         # A ledger written before the stamp column existed: add it (old rows
         # keep NULL and so never match — fail closed).
         columns = {row[1] for row in conn.execute("PRAGMA table_info(created)")}
@@ -520,6 +547,248 @@ def owned_record(
     if best is not None and _foreign_inside(real, session_id, state_root=state_root):
         return None
     return best
+
+
+@functools.lru_cache(maxsize=1)
+def _path_max() -> int:
+    r"""Longest path a ledger row can hold (``_foreign_query``'s M3 bound).
+
+    ``os.pathconf`` is POSIX-only and simply absent on Windows, where this
+    module still has to import (CI ``xplat-probe-windows`` caught an
+    ``AttributeError: module 'os' has no attribute 'pathconf'`` at import
+    time), so it is looked up, never called unguarded. Without it each
+    platform keeps its own ceiling: an NTFS extended-length (``\\?\``) path
+    runs to 32767 characters and a realpath'd ledger row can legitimately
+    reach that, so a smaller Windows bound would silently drop ancestors;
+    1024 is the conservative floor everywhere else.
+
+    Cached and lazy on purpose: importing the module must not probe the
+    filesystem or be able to fail, and the answer cannot change in a process.
+    """
+    pathconf = getattr(os, "pathconf", None)
+    if pathconf is None:
+        return 32767 if os.name == "nt" else 1024
+    try:
+        value = pathconf("/", "PC_PATH_MAX")
+    except (OSError, ValueError):
+        return 1024
+    return value if value > 0 else 1024
+
+
+#: Most ancestors bound per target; see ``_foreign_query``.
+_MAX_ANCESTORS = 512
+
+
+def _bindable(text: str) -> bool:
+    try:
+        text.encode("utf-8")
+    except UnicodeEncodeError:
+        return False
+    return True
+
+
+def _foreign_query(paths: Iterable[str]) -> tuple[str, list[str]]:
+    """SQL selecting only the ledger rows that can relate to ``paths``.
+
+    m3 (review of PR #3835): reading the whole table (``ORDER BY created_at``,
+    no index) cost 230-890 ms per classify at 20k rows, on every LOW delete.
+    A row relates to a target only when its path is the target or one of its
+    ancestors (an exact ``IN`` list) or lies under it (a half-open range: every
+    string starting ``t/`` sorts in ``[t/, t0)`` because ``'0'`` follows
+    ``'/'`` in the BINARY collation SQLite compares ``path`` with). Both shapes
+    are served by the ``created_path`` index, so the read stays millisecond-
+    scale however large the never-pruned ledger grows.
+
+    BOUNDS (M3, review round 2). Keeping every prefix of ``real`` costs
+    Σ len(prefix) = O(L²): a single 20k-component token in a command OOMs the
+    classifier. No stored row can be longer than ``PATH_MAX`` (rows are
+    realpaths of directories that existed), so only ancestors within it are
+    bound, and the prefixes are sliced from separator offsets rather than
+    built by repeated ``dirname``. Under a huge ``PATH_MAX`` the shallowest
+    ``_MAX_ANCESTORS`` still cap the list; deeper ancestors (and a target too
+    long to be a row) add no foreign info — the rank stays what it was
+    without this rule. Paths SQLite cannot bind (a lone surrogate from a
+    surrogateescape'd name, m6) are dropped the same way; their encodable
+    ancestors still match.
+    """
+    ancestors: dict[str, None] = {}
+    ranges: list[str] = []
+    path_max = _path_max()
+    for real in paths:
+        ends = [1] if real.startswith("/") else []  # "/" itself
+        ends += [i for i, ch in enumerate(real) if ch == "/" and 0 < i <= path_max]
+        if len(real) <= path_max:
+            ends.append(len(real))
+        kept = 0
+        for end in dict.fromkeys(ends):
+            if kept >= _MAX_ANCESTORS:
+                break
+            if _bindable(node := real[:end]):
+                ancestors[node] = None
+                kept += 1
+        prefix = real.rstrip("/") + "/"
+        # Rows under the target: only when the target itself was bound (not
+        # past PATH_MAX or the cap, and encodable), so beyond the bound means
+        # no foreign info for the whole subtree, consistently.
+        if real in ancestors:
+            ranges += [prefix, prefix[:-1] + "0"]
+    clauses = []
+    if ancestors:
+        clauses.append(f"path IN ({','.join('?' * len(ancestors))})")
+    clauses += ["(path >= ? AND path < ?)"] * (len(ranges) // 2)
+    sql = (
+        "SELECT owner, path, dev, ino, created_at, creator, kind, command, stamp"
+        f" FROM created WHERE kind != 'symlink' AND ({' OR '.join(clauses) or '0'})"
+    )
+    return sql, [*ancestors, *ranges]
+
+
+@dataclass(frozen=True)
+class ForeignHit:
+    """A live directory another session created, related to a delete target."""
+
+    #: The session named to the judge: the row's ``creator`` (the session that
+    #: ran the creating command), never an ancestor copy of the row.
+    owner: str
+    record: CreationRecord
+    #: ``"at"`` (the target is that directory), ``"inside"`` (the target is
+    #: within it) or ``"holds"`` (the target contains it).
+    relation: str
+
+
+class ForeignCreations:
+    """Another session's live ledger rows, for one classify call.
+
+    WHY (operator incident, osworld): ``rm -rf ~/worktrees/osworld/osworld-21/runs``
+    deleted another session's sealed benchmark evidence. A deep non-git
+    directory under HOME is an "ordinary path" (LOW), so nothing asked. The
+    creation ledger already knew a different session made that tree; this
+    surfaces that fact so ``classify._rank`` sends the delete to the judge
+    (HIGH) with the owning session named.
+
+    Constraints:
+
+    * LIVE IDENTITY. A row counts only while its directory is that same inode
+      generation (dev, ino and ``creation_stamp``, as ``owned_record``
+      checks). Rows are grouped by path AND identity: a dead row at a reused
+      path (``runs``, ``/tmp/qa``) neither excuses the live directory as this
+      session's nor gets named as its owner (review M1).
+    * NEAREST OWNER. ``mkdir -p a/b`` records only the topmost new component,
+      so the first session into a shared parent "owns" it. For a target at or
+      inside recorded directories, only the DEEPEST live one decides: this
+      session's ``~/shared/mine`` inside another's ``~/shared`` stays this
+      session's (review M2). A target that HOLDS a foreign live directory is
+      HIGH whoever owns the target, since deleting it destroys that work.
+    * A row any owner of which is this session, or a session in its subagent
+      tree (``same_task_tree``), is not foreign: the ledger copies a child's
+      creation to its ancestors, and a manager may remove its child's work and
+      vice versa. Lineage reads run only after the cheap ``stat`` identity
+      check passes, memoised per owner.
+    * One connection per classify call, opened on first use; the caller
+      closes it (``close``). Only rows related to the target are read
+      (``_foreign_query``), so no row cap is needed.
+    * Unreadable ledger (locked, corrupt, missing): ``match`` returns ``None``
+      and the caller adds nothing. Failing "HIGH" there would turn every
+      delete on the machine into a judge call while one writer holds the DB.
+    * Linux: ``creation_stamp`` falls back to ``st_ctime_ns``, which moves
+      whenever an entry is added to the directory, so a foreign row there
+      stops matching once its directory changes after the recording call —
+      this rule fails OPEN on Linux (ranking returns to what it was before
+      it existed). The guarantee is macOS/BSD-only, where birth time is used.
+    * Symlink rows are skipped: they vouch for a link entry, never a tree.
+    """
+
+    def __init__(
+        self, session_id: str, *, state_root: str | os.PathLike[str] | None = None
+    ) -> None:
+        self.session_id = session_id
+        self.state_root = state_root
+        self._conn: sqlite3.Connection | None = None
+        self._tried = False
+        self._tree: dict[str, bool] = {}
+        self._identity: dict[str, tuple[int, int, int] | None] = {}
+
+    def close(self) -> None:
+        if self._conn is not None:
+            self._conn.close()
+            self._conn = None
+
+    def _connection(self) -> sqlite3.Connection | None:
+        """The cached connection; ``None`` with no ledger or an unreadable one."""
+        if not self._tried:
+            self._tried = True
+            try:
+                self._conn = _connect(
+                    ledger_path(self.state_root), create=False, timeout=_DB_READ_TIMEOUT_S
+                )
+            except (OSError, sqlite3.Error):
+                logger.debug("guardrail ledger unreadable", exc_info=True)
+        return self._conn
+
+    def _live(self, path: str) -> tuple[int, int, int] | None:
+        if path not in self._identity:
+            try:
+                st = os.stat(path)
+            except OSError:
+                self._identity[path] = None
+            else:
+                self._identity[path] = (st.st_dev, st.st_ino, creation_stamp(st))
+        return self._identity[path]
+
+    def _related(self, owner: str) -> bool:
+        if owner == self.session_id:
+            return True
+        if owner not in self._tree:
+            self._tree[owner] = bool(
+                same_task_tree(self.session_id, owner, state_root=self.state_root)
+            )
+        return self._tree[owner]
+
+    def match(self, paths: Iterable[str]) -> ForeignHit | None:
+        """The foreign live directory at, under or above any of ``paths``.
+
+        ``None`` when nothing foreign relates — or when the ledger is unreadable.
+        """
+        reals = sorted({os.path.realpath(p).rstrip("/") or "/" for p in paths if p})
+        conn = self._connection()
+        if not reals or conn is None:
+            return None
+        try:
+            sql, params = _foreign_query(reals)
+            rows = conn.execute(sql, params).fetchall()
+        # ValueError covers UnicodeEncodeError: a lone surrogate SQLite cannot
+        # bind (m6). ``_foreign_query`` already drops such parameters; this
+        # keeps any other unbindable input at "no foreign info" (the rank
+        # main gives), never a guardrail-error hard block.
+        except (sqlite3.Error, ValueError):
+            logger.debug("guardrail ledger unreadable", exc_info=True)
+            return None
+        # path -> (owners, row) over rows of the LIVE generation only.
+        live: dict[str, tuple[set[str], CreationRecord]] = {}
+        for owner, *fields in rows:
+            rec = CreationRecord(*fields)
+            if rec.stamp is None or self._live(rec.path) != (rec.dev, rec.ino, rec.stamp):
+                continue
+            live.setdefault(rec.path, (set(), rec))[0].add(owner)
+
+        def foreign(path: str) -> CreationRecord | None:
+            owners, rec = live[path]
+            return None if any(self._related(o) for o in owners) else rec
+
+        for real in reals:
+            covering = [p for p in live if p == real or real.startswith(p.rstrip("/") + "/")]
+            if covering:
+                nearest = max(covering, key=len)
+                rec = foreign(nearest)
+                if rec is not None:
+                    relation = "at" if nearest == real else "inside"
+                    return ForeignHit(rec.creator, rec, relation)
+            prefix = real.rstrip("/") + "/"
+            for p in sorted(p for p in live if p.startswith(prefix)):
+                rec = foreign(p)
+                if rec is not None:
+                    return ForeignHit(rec.creator, rec, "holds")
+        return None
 
 
 def link_path(path: str) -> str:

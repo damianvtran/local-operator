@@ -1092,6 +1092,53 @@ def revoke_device_everywhere(
     return changed
 
 
+def withdraw_rows_lent_by(
+    network_id: str,
+    owner_device: str,
+    *,
+    holder_device: str,
+    root: Path | None = None,
+) -> list[str]:
+    """Delete every row ``owner_device`` owns that names ``holder_device``. Returns the keys.
+
+    THE BORROWER'S HALF OF A CONNECTED REVOKE (#3922 QA round 1, Q2). ``credential
+    revoke`` takes ``broker_credential`` off the borrower's member row on the owner
+    when it holds nothing else, so the owner's authoriser refuses the borrower's
+    placement pull before the document that carries the revoke can be served. The
+    borrower therefore never merged the revoke: an idle node kept its holder row
+    and served its held grant through the offline hold after the owner slept. That
+    refusal is itself the owner's authenticated statement that this device may
+    borrow nothing from it, so the caller (``MeshCredentialClient.pull_placement``)
+    applies it here.
+
+    WHY DELETE, NOT STRIP THE HOLDER. A local strip has to bump ``doc_rev`` on a
+    copy the owner never saw, and the owner's next real revision of that row then
+    arrives at an equal ``doc_rev`` and ``merge`` drops it as a replay (the hazard
+    ``revoke_device_everywhere``'s ``only_owner`` documents). An absent row is
+    admitted by the next merge at any ``doc_rev``, so a later re-share — or a
+    ``broker_credential`` re-grant with no share change — converges on its own.
+
+    It can only reduce access: rows of other owners, and rows of this owner that do
+    not name ``holder_device``, are left byte-identical.
+    """
+    root = _config_root(root)
+    path = placement_path(network_id, root)
+    if not owner_device or not holder_device or owner_device == holder_device:
+        return []
+    if not path.exists():
+        return []
+    withdrawn: list[str] = []
+    with _document_lock(path, root=root):
+        document = PlacementDocument.load(network_id, root, self_device=holder_device)
+        for key, entry in sorted(document.entries.items()):
+            if str(entry.owner_device) == owner_device and entry.is_holder(holder_device):
+                del document.entries[key]
+                withdrawn.append(key)
+        if withdrawn:
+            document.save()
+    return withdrawn
+
+
 def grant_key_set(
     document: PlacementDocument,
     *,

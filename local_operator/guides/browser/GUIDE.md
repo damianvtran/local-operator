@@ -43,6 +43,12 @@ this project deliberately does not ship. If the extension truly cannot be set
 up and no cmux panel exists, say a rendered screenshot is unavailable and why —
 do not build a second browser stack.
 
+**One narrow exception: a headless mesh node** (no desktop, no user browser, no
+screen) may carry the *node-managed* browser that `lop browser setup --node`
+installs, with the operator's authorisation — see "Headless nodes: the
+node-managed browser" below. It is the only sanctioned browser on a node; the
+"never" above still applies to everything else there.
+
 ## Focus safety — never steal the user's focus
 
 The agent often browses in the background while the user works in another
@@ -354,6 +360,126 @@ flow. `lop browser pair --reset` revokes every pairing first.
 Re-run `lop browser status`; you want `extension connected: yes` and
 `paired: yes`. The `browser` tool now appears — use it. From here on the user
 does nothing: pairing persists across restarts, so future sessions just work.
+
+## Headless nodes: the node-managed browser
+
+**Why a node differs.** The rule above protects a USER's machine: their
+browser, their logins, their screen. A headless mesh node has none of those —
+no desktop, no user browser, no screen, no logins to protect — so sessions
+offloaded there simply had no `browser` tool, and visual, end-to-end or
+screenshot work could not run there. The node-managed browser fills that gap
+without weakening the rule: it is ONE supervised, pinned browser, installed by
+a reviewed command, never a per-task download.
+
+**The command** (on the node; it needs the operator's authorisation, recorded
+verbatim in the install record):
+
+```sh
+lop browser setup --node --dry-run                     # every step, nothing changed
+lop browser setup --node --authorised-by '<who, when>' # install (idempotent)
+lop browser setup --node --repair --authorised-by '<who, when>'  # re-apply what drifted
+lop browser setup --node --upgrade --authorised-by '<who, when>' # the only path that moves the pin
+lop browser uninstall --node --authorised-by '<who, when>'
+```
+
+**Getting the authorisation.** It is the operator's to give, never yours to
+write. Either of these counts:
+
+- an explicit instruction naming THIS node; or
+- a standing operator instruction that agents on the mesh's nodes may install
+  the node-managed browser when visual or end-to-end testing needs one — and
+  your task genuinely needs a browser for that.
+
+Quote the instruction and its date in `--authorised-by`, e.g.
+`--authorised-by '<operator>, 2026-11-13, via ask: "yes, set up the browser on
+<node>"'` or `--authorised-by '<operator>, standing instruction of <date>:
+"<their words>"'`. Without either, ask them (`ask`, or `hub` to your delegator
+when no interface is attached), naming the node and what changes: sudo,
+Google's Chrome rpm and repository, fonts, a user unit and a Chrome policy
+file. A standing instruction never applies on a user's own machine (setup
+refuses there anyway), and it covers the install only: per-site approvals stay
+the operator's.
+
+**How long it takes.** A fresh install runs for several minutes (a ~110 MB
+download, then bounded waits of up to 120 s each for the extension to load
+and pair). Run it with a timeout of at least 900 s (`bash` with
+`timeout: 900`) or in the background (`background: true`); each step's row
+prints as it completes (`--json`: one final document on stdout, progress lines
+on stderr), so a cut-off run still shows what landed. The install record is
+updated after every step that lands, so after a cut-off run either re-run
+setup to finish or `uninstall --node` to back out. A re-run on a provisioned
+node takes seconds.
+
+**Why the timeout matters.** Ctrl-C, a hangup or SIGTERM unwind cleanly: setup
+takes the pairing code back out of Chrome's policy on the way out. lop's own
+`bash` tool does not send those — when a command times out, is aborted or a
+background job is cancelled, it kills the whole process group outright
+(SIGKILL), which no cleanup survives. A run killed that way mid-pairing leaves
+the pairing code in the policy until the next setup run or until the code
+expires. The 900 s timeout (or `background: true`) is what prevents that.
+
+Re-running on a provisioned node reports every step "already in place" and
+changes nothing. Privileged steps run through `sudo -n` (rows tagged `(root)`);
+when sudo would prompt, setup refuses before changing anything and names the
+steps that need root, and `--dry-run` already reports them as `would fail`. It
+also refuses on a user's machine (the desktop app's discovery record or a
+graphical session), off Linux x86_64, on a non-dnf/rpm distribution, and on a
+device that is not in a mesh network. `uninstall --node` runs the same host
+checks and removes only what the install record says setup installed; it keeps
+the extension signing key, Google's key, the fonts, the bridge daemon and the
+record.
+
+**What it installs.** Google Chrome from Google's signed rpm repository (key
+fingerprint checked before import, `rpm -K` on the downloaded package, sha256
+recorded), pinned with `dnf versionlock`; fonts for ordinary pages; the bridge
+daemon (`lop browser install`); the Local Operator extension, packed to a CRX
+with the node's own persistent key (so its id never changes) and
+force-installed by Chrome policy; and a user unit running Chrome
+`--headless=new` under `MemoryMax=2G`, sandbox on, **no remote-debugging port**,
+talking only to the daemon on 127.0.0.1. The extension comes from the newest
+GitHub Release that carries it (checked against the release asset's sha256
+digest), or from `--extension-dir` for a built tree. Everything lands in
+`<config_dir>/browser/node-host.json`.
+
+**Pairing without a popup.** Nobody can type a code into a headless Chrome, so
+setup mints one through the daemon's own route (the one `lop browser pair`
+uses) and delivers it through Chrome managed policy, readable only by this
+extension; the extension submits it exactly as the popup would, and setup
+removes it from the policy the moment the daemon reports `paired: yes`. The
+daemon still checks the code — no extension id is trusted automatically.
+
+**What it does not change.**
+
+- **No site can be opened yet.** Per-site approvals stay default-deny and are
+  the operator's decision, and on a user's machine they are granted in the
+  extension popup — which nobody can reach in a headless Chrome. This build
+  cannot open sites on a headless node yet (a later update adds operator
+  approval from their own device), so every `open` on a node returns
+  `origin_not_allowed` and `request_access` queues nothing: tell the operator
+  which site you needed and why, and stop the browser part of the task; never
+  work around it.
+- **Node-side boundaries are advisory where sudo is passwordless.** On a node
+  whose account has NOPASSWD sudo, the policy file's root ownership and the
+  unit's limits are audited, not enforced against that account: anything
+  running as it could rewrite them. They guard against mistakes, not against
+  the account itself.
+- **Nobody signs in by hand there.** The node's Chrome has no user cookies and
+  no one at its screen; for a login, type credentials with `secret_ref` only.
+- **Fidelity is a server's, not a designer's laptop**: fonts are Linux fonts,
+  there is no GPU, and the window is headless. Fine for E2E flows and
+  regressions; say so when a pixel-exact comparison matters.
+- **Memory is capped.** Chrome's unit is capped at 2 GB and carries a raised
+  OOM score, so under pressure Chrome is reclaimed before the rest of the node;
+  a tab that dies that way reports `tab_closed` — re-open it rather than
+  retrying the action.
+- **A session started before setup never gets the tool**: the tool list is
+  fixed when a session starts. Start a new session after setup.
+
+**Checking from anywhere:** `lop network ready` carries a `browser` row per
+peer — `ok` (Chrome, extension, paired), `warn` with the setup remedy when it
+is not installed, `warn` with the `--repair` remedy when it is installed but
+unusable, `n/a` where a user's own browser host serves the device. The row
+never holds the onboarding verdict.
 
 ## What to ask the user for
 

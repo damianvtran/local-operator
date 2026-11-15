@@ -1,0 +1,16 @@
+{
+  "operator.pairing.gesture.mac": "你的Mac会请求Touch ID或登录密码——这是Mac本身在确认，并非你的Radient密码。",
+  "operator.pairing.gesture.windows": "Windows会请求你允许此操作——这是Windows在确认，并非你的Radient密码。",
+  "operator.pairing.gesture.other": "电脑会请求输入它自己的密码——这是电脑在确认，并非你的Radient密码。",
+  "operator.pairing.prompt.confirm": "Local Operator需要你的批准，才能在这台电脑上确认一部手机。",
+  "operator.pairing.prompt.remove": "Local Operator需要你的批准，才能从这台电脑移除一部手机。",
+  "operator.pairing.prompt.setup": "Local Operator需要你的批准，才能在这台电脑上开启手机审批。",
+  "operator.pairing.refusal.confirm_needs_code": "此手机并非通过你的Radient账户发出请求，因此这台电脑无法通过比对代码来确认它。未批准任何内容；请改为输入手机上显示的六位数字。",
+  "operator.pairing.refusal.request_changed": "此配对卡片在显示后已发生变化。未批准任何内容；请重新查看。",
+  "operator.pairing.refusal.unknown_request": "不存在该ID的配对请求。",
+  "operator.pairing.refusal.withdraw_invalid": "撤回请求只能包含手机的签名。",
+  "operator.pairing.refusal.withdraw_forbidden": "该签名并非来自发起配对的手机。未撤回任何内容。",
+  "operator.pairing.refusal.in_progress": "电脑已在确认此配对，因此现在无法从手机取消。请改为在电脑上拒绝。",
+  "operator.pairing.refusal.bad_device_id": "这不是这台电脑签发的设备ID。",
+  "operator.pairing.revoke.unfinished": "此手机已无法在这里批准，也收不到通知，但从操作员设备列表中移除的步骤没有完成。请再次运行同一命令以完成移除。"
+}

@@ -1,0 +1,4 @@
+{
+  "tui.boot_prompt.returned_to_composer": "Votre prompt de démarrage n’a pas été envoyé — il se trouve dans la zone de saisie.",
+  "tui.boot_prompt.not_sent_kept_draft": "Votre prompt de démarrage n’a pas été envoyé : {prompt}"
+}

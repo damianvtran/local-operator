@@ -1,0 +1,23 @@
+{
+ "schema": 1,
+ "audit_id": "a3",
+ "locale": "ru",
+ "namespace": "tunnel.status",
+ "record": "i18n/audits/evidence/ru/tunnel.status/a3/record.json",
+ "source_sha256": "e2bc8c63d3124c363252511306fd3951917ab9f93a2398c49cac8c79302aa8f9",
+ "target_sha256": "b6b7cdba17644b965655dbf19c52cf0c42fd3b806a6026f3fce9e12e7e26d6e4",
+ "verdict": "changes_requested",
+ "auditor": {
+  "agent": "i18n-auditor, independent `task` subagent (audit-es-fr-ru) on host ip-172-31-18-0, session 117e988422ff; not the translator (c0c9e9803405) nor the English-drafting coder (889b9f67edf5); did not edit any value",
+  "model": "anthropic/claude-opus-5-5"
+ },
+ "hashes": {
+  "record.json": "75486c85d6450253743ecf99c78b99fa51b187cff5a17a5b14392201f26580a3",
+  "report.md": "16224fd11fd13b977619405e074d08f33fdaaf555dec94567d599e868e64845a",
+  "audit.log": "48be183ecf418bf54cb41c3ce8d1d2ed4b9b2ca53b383522bff9aabddbf25638",
+  "dryrun.log": "d83b9da0c3cdfa1983efdb1e815e40ae86dd4e044a59f7566a5b2933636d6a9a"
+ },
+ "ledger_receipt_staged": "~/.local-operator/sessions/117e988422ff/scratchpad/audit-es-fr-ru/ledger/ru.tunnel.status.json",
+ "ledger_receipt_sha256": "206b8dcbf09c31dd4945e536971578764e7a715d073575b4c78d0192ef9d991d",
+ "ledger_expected_history_sha": "e5b460825f62f10385462cf330e3f21d2216054b94482f977558cd183a485422"
+}

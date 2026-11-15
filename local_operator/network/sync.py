@@ -428,6 +428,13 @@ EXCLUDED_ENTRIES: dict[str, str] = {
     "runtime-run.json": (
         "this device's latest-run marker; the destination writes its own at the next boot"
     ),
+    # THE RUNTIME'S BIND-FAILURE RECORD (``journal.BIND_FAILURES_NAME``): the last
+    # few times THIS device's runtime could not bind a viewer. Unlike the exit
+    # record it does not travel: it describes this device's process failing this
+    # device's binds (pids, tracebacks from this install), and on a destination it
+    # would read as the new owner's own failures, sending a reader after a fault
+    # that never happened there. The destination records its own if it fails.
+    "bind-failures.json": ("this device's runtime bind failures; the destination records its own"),
     # THE OWN-CWD MOVE INTENT (``session.cwd_move.MOVE_MARKER_NAME``): a request for
     # THIS device's runtime to relocate its own session, naming an absolute path on
     # this device and the pid that asked. Neither means anything on a peer, and

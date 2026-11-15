@@ -35,6 +35,7 @@ from typing import Any
 
 import pytest
 
+from local_operator.mobile import attach_client as attach_client_mod
 from local_operator.mobile.attach_client import OwnerAckTimeout
 from local_operator.network import cli as net_cli
 from local_operator.session import attached as attached_mod
@@ -182,17 +183,48 @@ def test_a_runtime_that_syncs_after_the_tui_envelope_is_served_inside_the_pilots
     assert "session_unreachable" not in printed and "peer_unreachable" not in printed, printed
 
 
+@pytest.mark.parametrize("verb", ["send", "steer", "peek"])
 def test_a_bind_failed_announcement_is_busy_not_a_dial_that_produced_no_session(
-    runtime: Any, capsys: pytest.CaptureFixture[str]
+    verb: str, runtime: Any, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """The incident's exact sentence came from this shape: the runtime SPOKE."""
+    """These acts prepare a view; only ``--send --mailbox`` bypasses that gate.
+
+    Keep the real owner's cause-bearing announcement: replacing it with the
+    legacy bare sentence would hide the disposition lost by an exact comparison.
+    Mailbox delivery has its own view-free real-link cells in test_session_plane.
+    """
     runtime(_RefusingHandle())
-    assert _run(["sessions", "--json", "--peer", PEER, "--send", SESSION, "hi"]) == 1
+    argv = ["sessions", "--json", "--peer", PEER, f"--{verb}", SESSION]
+    if verb != "peek":
+        argv.append("hi")
+    assert _run(argv) == 1
     payload = _payload(capsys.readouterr().out)
     assert payload["code"] == "session_unreachable", payload
     assert "produced no session" not in payload["message"], payload
     assert "doctor" not in payload["message"], payload
     assert "too busy" in payload["message"], payload
+
+
+@pytest.mark.parametrize(
+    ("reason", "announced_bind"),
+    [
+        (attach_client_mod.BIND_FAILED_REASON, True),
+        (attach_client_mod.bind_failed_reason("the frontend bind could not complete (test)"), True),
+        (attach_client_mod.STOPPED_REASON, False),
+        (attach_client_mod.RETIRING_REASON, False),
+        ("owner connection reset", False),
+        ("an unrelated cause mentions owner could not prepare this view", False),
+    ],
+    ids=["legacy", "cause-bearing", "stopped", "retiring", "reset", "unrelated-text"],
+)
+def test_only_the_canonical_bind_announcement_keeps_its_typed_disposition(
+    reason: str, announced_bind: bool
+) -> None:
+    """Cause retention must not turn death, retirement or arbitrary prose into busy."""
+    error = attached_mod._sync_disconnect_error(reason)
+    assert isinstance(error, attached_mod.RuntimeBindFailedError) is announced_bind
+    assert isinstance(error, ConnectionError)
+    assert str(error) == reason
 
 
 class _AckTimeoutViewer(_FakeViewer):
