@@ -238,7 +238,7 @@
   "wire.settings.display_nerd_icons.label": "Glifos de Nerd Font",
   "wire.settings.display_notification_session_name.choice.false.description": "sin nombres en los avisos",
   "wire.settings.display_notification_session_name.choice.true.description": "nombrar la sesión",
-  "wire.settings.display_notification_session_name.help": "El nombre de la sesión, su última línea y las causas de error aparecen en los avisos, incluida la pantalla de bloqueo.",
+  "wire.settings.display_notification_session_name.help": "El nombre de la sesión, su última línea y las causas de error aparecen en los avisos, incluidas la pantalla de bloqueo y las notificaciones de los teléfonos emparejados, que les llegan a través del servicio push de Radient.",
   "wire.settings.display_notification_session_name.label": "Nombres de sesión en notificaciones",
   "wire.settings.display_notifications.choice.false.description": "no notificar nunca",
   "wire.settings.display_notifications.choice.true.description": "notificar sin foco",

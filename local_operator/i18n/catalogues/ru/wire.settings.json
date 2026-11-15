@@ -238,7 +238,7 @@
   "wire.settings.display_nerd_icons.label": "Глифы Nerd Font",
   "wire.settings.display_notification_session_name.choice.false.description": "не выводить имена на баннерах",
   "wire.settings.display_notification_session_name.choice.true.description": "указывать имя сессии",
-  "wire.settings.display_notification_session_name.help": "Имя сессии, последняя строка и причины ошибок появляются на баннерах, включая экран блокировки.",
+  "wire.settings.display_notification_session_name.help": "Имя сессии, последняя строка и причины ошибок появляются на баннерах, включая экран блокировки и уведомления сопряжённых телефонов, доставляемые на них через push-сервис Radient.",
   "wire.settings.display_notification_session_name.label": "Имена сессий в уведомлениях",
   "wire.settings.display_notifications.choice.false.description": "никогда не уведомлять",
   "wire.settings.display_notifications.choice.true.description": "уведомлять, когда не в фокусе",
