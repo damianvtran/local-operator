@@ -1,0 +1,28 @@
+{
+  "actual_nested_executable_names": [
+    "Docker Desktop"
+  ],
+  "desktop_started": false,
+  "free_bytes": 102197645312,
+  "host_all_process_rss_sum_bytes": 14723178496,
+  "kind": "execution-preflight-stop",
+  "manifest": {
+    "entries_checked": 536,
+    "errors": [],
+    "sha256": "07fd177c4158910272ed808428e69cd248a69e2fb707a7e306e92c7bf71cebbc"
+  },
+  "native_dispatch_started": false,
+  "original_receipt_sha256": "dbbf242301eee3c777d9721e7d459d4da72b3e1725476eef66e900f83064ecf2",
+  "pulls": 0,
+  "raw_allocated_before_start_bytes": 6036152320,
+  "recorded_at_utc": "2026-11-15T03:37:47.219458+00:00",
+  "resolver_attempts": 0,
+  "source_head": "95c13d9ad8bf97809fd4eb6ea31f1873c60b990e",
+  "status": "blocked-approved-desktop-executable-missing",
+  "swap_raw": "vm.swapusage: total = 8192.00M  used = 6718.44M  free = 1473.56M  (encrypted)",
+  "wheel": {
+    "bytes": 17389450,
+    "matches_pin": true,
+    "sha256": "e18a57b8b352eb7c8feb317b9f6f533c8f0ad9673fd6cf34bbe3cf1a9f6a8984"
+  }
+}

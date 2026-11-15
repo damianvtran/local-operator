@@ -47,6 +47,18 @@
     "vm_helper_attribution_required": true,
     "whole_owned_desktop_lifecycle_required": true
   },
+  "desktop_layout": {
+    "default_executable": "/Applications/Docker.app/Contents/MacOS/Docker Desktop.app/Contents/MacOS/Docker Desktop",
+    "explicit_relative_layouts": [
+      "Contents/MacOS/Docker",
+      "Contents/MacOS/Docker Desktop",
+      "Contents/MacOS/Docker Desktop.app/Contents/MacOS/Docker Desktop"
+    ],
+    "native_launch_qualified": false,
+    "provenance": "desktop-layout-provenance.json",
+    "required_team": "9BNSXJN65R",
+    "signature_anchor": "apple generic"
+  },
   "dev_extra_included": false,
   "execution_authorized": false,
   "historical_extras_exactly_known": false,

@@ -1,0 +1,15 @@
+test_explicit_nested_and_both_flat_layouts (test_desktop_layout.LayoutTests.test_explicit_nested_and_both_flat_layouts) ... FAIL
+
+======================================================================
+FAIL: test_explicit_nested_and_both_flat_layouts (test_desktop_layout.LayoutTests.test_explicit_nested_and_both_flat_layouts)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "~/local-operator/.worktrees/benchmark-reconstruction-20261114/benchmarks/harness_cost/reconstruction/2026-11-14-source-only/test_desktop_layout.py", line 27, in test_explicit_nested_and_both_flat_layouts
+    self.assertTrue(hasattr(target,'validate_desktop_layout'),'missing static layout gate')
+    ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: False is not true : missing static layout gate
+
+----------------------------------------------------------------------
+Ran 1 test in 0.079s
+
+FAILED (failures=1)

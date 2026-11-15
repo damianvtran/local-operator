@@ -30,6 +30,21 @@ no old GO may be reused after this source change. Existing raw-growth <=5 GiB,
 free >=25 GiB, start free >=30 GiB and all VM/container limits remain unchanged.
 See REMEDIATION-R9.md and the safe preflight-stop-public.json; neither is GO.
 
+## R10 static layout amendment — current GO RELEASED, no runtime approval
+
+The default is now the explicit signed nested entry:
+`/Applications/Docker.app/Contents/MacOS/Docker Desktop.app/Contents/MacOS/Docker Desktop`.
+Only that path and the two explicit legacy flat paths are eligible; there is no
+search, alternate launcher, alias or symlink fallback. Each path must match its
+outer/inner CFBundleExecutable and identifier. Local codesign verification requires
+Apple anchoring and Docker Team 9BNSXJN65R, not merely a familiar filename.
+See desktop-layout-provenance.json and REMEDIATION-R10.md. Static validation of
+the installed 4.43.1 bundles passed; NO app, backend or VM helper was launched.
+Existing PID/start/exe ownership, new-helper attribution and cleanup gates remain
+unchanged. Readiness, reparenting, selected VM backend (including unqualified
+com.docker.krun), caps and cleanup remain native qualification gates.
+A fresh independent review and NEW desk GO are mandatory; prior GO is not reused.
+
 ## Prerequisites and disk-desk packet — CONDITIONAL SLOT, NO GO
 
 The old 2026-11-14 17:00–18:15 UTC slot was RELEASED. No fresh slot or

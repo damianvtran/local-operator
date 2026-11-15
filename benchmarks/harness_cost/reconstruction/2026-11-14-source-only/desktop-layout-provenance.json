@@ -1,0 +1,98 @@
+{
+  "bundles": [
+    {
+      "bundle": "/Applications/Docker.app",
+      "entrypoint": "com.docker.backend",
+      "identifier": "com.docker.docker",
+      "local_signature_verified": true,
+      "plist_sha256": "e724116af8735b73399fa021ed40ff6e0187235cd420a7ccc8e573a0619e7684",
+      "team": "9BNSXJN65R",
+      "version": "4.43.1"
+    },
+    {
+      "bundle": "/Applications/Docker.app/Contents/MacOS/Docker Desktop.app",
+      "entrypoint": "Docker Desktop",
+      "identifier": "com.electron.dockerdesktop",
+      "local_signature_verified": true,
+      "plist_sha256": "a354eaeab525a6330445a00d6da0d0ff5d7ffb5986115c1c9d95c9b676f294ba",
+      "team": "9BNSXJN65R",
+      "version": "4.43.1"
+    }
+  ],
+  "commands": [
+    {
+      "argv": [
+        "/usr/bin/codesign",
+        "--verify",
+        "--strict",
+        "-R",
+        "=anchor apple generic and certificate leaf[subject.OU] = \"9BNSXJN65R\"",
+        "/Applications/Docker.app"
+      ],
+      "exit": 0,
+      "stderr": "",
+      "stdout": ""
+    },
+    {
+      "argv": [
+        "/usr/bin/codesign",
+        "-d",
+        "--verbose=2",
+        "/Applications/Docker.app"
+      ],
+      "exit": 0,
+      "stderr": "Executable=/Applications/Docker.app/Contents/MacOS/com.docker.backend\nIdentifier=com.docker.docker\nFormat=app bundle with Mach-O thin (arm64)\nCodeDirectory v=20500 size=1349789 flags=0x10000(runtime) hashes=42170+7 location=embedded\nSignature size=8971\nAuthority=Developer ID Application: Docker Inc (9BNSXJN65R)\nAuthority=Developer ID Certification Authority\nAuthority=Apple Root CA\nTimestamp=Jul 4, 2025 at 1:41:37\u202fAM\nInfo.plist entries=31\nTeamIdentifier=9BNSXJN65R\nRuntime Version=14.5.0\nSealed Resources version=2 rules=13 files=71\nInternal requirements count=1 size=180\nTotal signatures=1\nChosen signature=1\n",
+      "stdout": ""
+    },
+    {
+      "argv": [
+        "/usr/bin/codesign",
+        "--verify",
+        "--strict",
+        "-R",
+        "=anchor apple generic and certificate leaf[subject.OU] = \"9BNSXJN65R\"",
+        "/Applications/Docker.app/Contents/MacOS/Docker Desktop.app"
+      ],
+      "exit": 0,
+      "stderr": "",
+      "stdout": ""
+    },
+    {
+      "argv": [
+        "/usr/bin/codesign",
+        "-d",
+        "--verbose=2",
+        "/Applications/Docker.app/Contents/MacOS/Docker Desktop.app"
+      ],
+      "exit": 0,
+      "stderr": "Executable=/Applications/Docker.app/Contents/MacOS/Docker Desktop.app/Contents/MacOS/Docker Desktop\nIdentifier=com.electron.dockerdesktop\nFormat=app bundle with Mach-O thin (arm64)\nCodeDirectory v=20500 size=774 flags=0x10000(runtime) hashes=13+7 location=embedded\nSignature size=8970\nAuthority=Developer ID Application: Docker Inc (9BNSXJN65R)\nAuthority=Developer ID Certification Authority\nAuthority=Apple Root CA\nTimestamp=Jul 4, 2025 at 1:39:34\u202fAM\nInfo.plist entries=31\nTeamIdentifier=9BNSXJN65R\nRuntime Version=15.1.0\nSealed Resources version=2 rules=13 files=43\nInternal requirements count=1 size=188\nTotal signatures=1\nChosen signature=1\n",
+      "stdout": ""
+    }
+  ],
+  "executable": "/Applications/Docker.app/Contents/MacOS/Docker Desktop.app/Contents/MacOS/Docker Desktop",
+  "initial_static_requirement_syntax_error": [
+    {
+      "argv": [
+        "/usr/bin/codesign",
+        "--verify",
+        "--strict",
+        "-R",
+        "anchor apple generic and certificate leaf[subject.OU] = \"9BNSXJN65R\"",
+        "/Applications/Docker.app"
+      ],
+      "exit": 1,
+      "stderr": "anchor apple generic and certificate leaf[subject.OU] = \"9BNSXJN65R\": No such file or directory\ninvalid requirement specification\n",
+      "stdout": ""
+    }
+  ],
+  "launch_performed": false,
+  "no_app_launch": true,
+  "recognized_helpers_present": {
+    "com.apple.Virtualization.VirtualMachine": false,
+    "com.docker.virtualization": true,
+    "qemu-system-aarch64": true,
+    "qemu-system-x86_64": false
+  },
+  "recorded_at": "2026-11-15T03:45:35.326274+00:00",
+  "unqualified_installed_alternative": "com.docker.krun exists but is NOT added to helper allowlist; selected backend remains a native qualification gate"
+}

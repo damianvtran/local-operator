@@ -52,6 +52,21 @@ silently changes to 12 GiB. Native swap/image/cleanup behavior is NOT qualified 
 stub tests. NEW independent review and NEW desk GO are mandatory before runtime;
 all previous slots/GO/signoff are non-reusable after this patch.
 
+## R10 static layout amendment — current GO RELEASED, no runtime approval
+
+The default is now the explicit signed nested entry:
+`/Applications/Docker.app/Contents/MacOS/Docker Desktop.app/Contents/MacOS/Docker Desktop`.
+Only that path and the two explicit legacy flat paths are eligible; there is no
+search, alternate launcher, alias or symlink fallback. Each path must match its
+outer/inner CFBundleExecutable and identifier. Local codesign verification requires
+Apple anchoring and Docker Team 9BNSXJN65R, not merely a familiar filename.
+See desktop-layout-provenance.json and REMEDIATION-R10.md. Static validation of
+the installed 4.43.1 bundles passed; NO app, backend or VM helper was launched.
+Existing PID/start/exe ownership, new-helper attribution and cleanup gates remain
+unchanged. Readiness, reparenting, selected VM backend (including unqualified
+com.docker.krun), caps and cleanup remain native qualification gates.
+A fresh independent review and NEW desk GO are mandatory; prior GO is not reused.
+
 ## Operator acknowledgement, not fabricated verification
 
 Operator answer **a-7072**, relayed via desk 5170, verbatim:

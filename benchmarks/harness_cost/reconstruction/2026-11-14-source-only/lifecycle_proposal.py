@@ -15,6 +15,7 @@ import hashlib
 import json
 import re
 import pwd
+import plistlib
 from decimal import Decimal, ROUND_CEILING
 from pathlib import Path
 import signal
@@ -31,6 +32,44 @@ HELPERS = {'com.apple.Virtualization.VirtualMachine', 'com.docker.virtualization
 def require(condition, message):
     if not condition:
         raise RuntimeError('STOP: ' + message)
+
+
+DOCKER_BUNDLE=Path('/Applications/Docker.app')
+DESKTOP_LAYOUTS=('Contents/MacOS/Docker','Contents/MacOS/Docker Desktop',
+                 'Contents/MacOS/Docker Desktop.app/Contents/MacOS/Docker Desktop')
+DEFAULT_DESKTOP=DOCKER_BUNDLE/DESKTOP_LAYOUTS[2]
+
+
+def validate_desktop_layout(executable,run):
+    """Only explicit Docker-signed layouts; never discover/launch arbitrary paths.
+
+    Docker 4.43.1's outer bundle runs com.docker.backend and contains a separately
+    signed Desktop UI bundle. Bind BOTH plists/signatures, not just a familiar
+    filename. Flat legacy layouts remain explicit, not automatic fallbacks.
+    """
+    executable=Path(executable)
+    require(executable in {DOCKER_BUNDLE/p for p in DESKTOP_LAYOUTS},'unapproved Desktop executable')
+    nested=executable==DOCKER_BUNDLE/DESKTOP_LAYOUTS[2]
+    bundles=[(DOCKER_BUNDLE,'com.docker.docker','com.docker.backend' if nested else executable.name)]
+    if nested:bundles.append((DOCKER_BUNDLE/'Contents/MacOS/Docker Desktop.app','com.electron.dockerdesktop','Docker Desktop'))
+    evidence=[]
+    for bundle,identifier,entry in bundles:
+        require(bundle.resolve(strict=True)==bundle,'bundle symlink/escape forbidden')
+        info=bundle/'Contents/Info.plist'
+        require(info.resolve(strict=True)==info,'plist symlink/escape forbidden')
+        data=plistlib.loads(info.read_bytes())
+        require(data.get('CFBundleIdentifier')==identifier and data.get('CFBundleExecutable')==entry,'bundle identifier/entrypoint mismatch or escape')
+        binary=bundle/'Contents/MacOS'/entry
+        require(binary.is_file() and binary.resolve(strict=True)==binary and os.access(binary,os.X_OK),'bundle executable missing/untrusted alias')
+        code,_,_=run(['/usr/bin/codesign','--verify','--strict','-R','=anchor apple generic and certificate leaf[subject.OU] = "9BNSXJN65R"',str(bundle)])
+        require(code==0,'Docker signature verification failed')
+        _,out,err=run(['/usr/bin/codesign','-d','--verbose=2',str(bundle)])
+        fields=dict(line.split('=',1) for line in (out+'\n'+err).splitlines() if line.startswith(('TeamIdentifier=','Identifier=')))
+        require(fields.get('TeamIdentifier')=='9BNSXJN65R' and fields.get('Identifier')==identifier,'untrusted Docker signing identity')
+        evidence.append({'bundle':str(bundle),'identifier':identifier,'entrypoint':entry,'version':data.get('CFBundleShortVersionString'),'plist_sha256':hashlib.sha256(info.read_bytes()).hexdigest(),'team':'9BNSXJN65R','local_signature_verified':True})
+    require(executable.is_file() and executable.resolve(strict=True)==executable,'Desktop executable symlink/escape')
+    if nested:require(evidence[0]['version']==evidence[1]['version'],'mixed outer/inner bundle versions')
+    return {'executable':str(executable),'bundles':evidence,'launch_performed':False}
 
 
 SWAP_LIMIT_BYTES=12_000_000_000  # New desk admission, NOT a rounded GiB limit.
@@ -199,7 +238,7 @@ class NativeOps:
     def __init__(self, admission, pins):
         self.a=admission;self.p=pins;self.owner=None;self.proc=None;self.resolver=None;self.directory=None
         self.root=Path.home()/'benchmark-runs/reconstruction-20261114-source-v1'
-        self.desktop=Path(admission.get('desktop_executable','/Applications/Docker.app/Contents/MacOS/Docker Desktop'))
+        self.desktop=Path(admission.get('desktop_executable',str(DEFAULT_DESKTOP)))
         self.app_root='/Applications/Docker.app/'
         self.raw=Path(admission.get('docker_raw_path','/INVALID'))
         self.deadline=0;self.next_rss=0;self.samples=[];self.helpers={};self.before=[]
@@ -267,7 +306,7 @@ class NativeOps:
         require(review.get('clean') is True and review.get('source_commit')==head and review['reviewer']!='70ba7562e541','full-scope clean independent current-head review missing')
         for name in ('lifecycle_proposal.py','RESOLVER-COMMAND.md','resolver-pins.json'):
             require(review.get('file_sha256',{}).get(name)==hashlib.sha256((HERE/name).read_bytes()).hexdigest(),'reviewed file hash mismatch')
-        require(str(self.desktop) in {'/Applications/Docker.app/Contents/MacOS/Docker Desktop','/Applications/Docker.app/Contents/MacOS/Docker'},'unapproved Desktop executable')
+        self.desktop_layout=validate_desktop_layout(self.desktop,self.command)
         require(self.root.is_dir() and self.a.get('docker_raw_path') and self.raw.is_absolute() and self.raw.name=='Docker.raw','registered root/approved raw path missing')
         fs=os.statvfs(self.root);require(fs.f_bavail*fs.f_frsize >= 30*1024**3,'fresh free disk below 30 GiB')
         initial=self.raw.stat() if self.raw.exists() else None
@@ -600,7 +639,7 @@ class NativeOps:
         final_swap_error=None
         try:self.sample_swap('final')
         except BaseException as error:final_swap_error=type(error).__name__+': '+str(error);value['status']='swap-final-unverified-or-over-limit'
-        value.update(asset_ownership=self.asset_receipt,final_swap_error=final_swap_error)
+        value.update(asset_ownership=self.asset_receipt,final_swap_error=final_swap_error,desktop_layout=getattr(self,'desktop_layout',None))
         fs=os.statvfs(self.root)
         if self.startup_uncertain:value['status']='cleanup-unverified-startup-identity'
         value.update(operator_ack_quote=ACK_QUOTE,source_head=self.a['full_scope_review']['source_commit'],samples=self.samples,after={'allocated_bytes':self.raw.stat().st_blocks*512 if self.raw.exists() else 0,'free_bytes':fs.f_bavail*fs.f_frsize})
