@@ -141,3 +141,32 @@ def test_guardrails_extraction_slots_reuse_audited_bytes_in_every_locale() -> No
             assert messages.render(dest, {}, locale=locale).encode("utf-8") == child[src].encode(
                 "utf-8"
             ), (locale, dest)
+
+
+def test_no_registry_string_is_its_own_code() -> None:
+    """A label, help, title or description that renders as its message CODE is a miss.
+
+    `_t` degrades to the code when the message's namespace is not among the ones
+    it reads (`wire.settings` + `_CHILD_SETTINGS_NAMESPACES`). The golden above
+    cannot catch that on its own — it was regenerated once with the raw codes in
+    it (#3945 round 1, D1/Q1: the Phone access section printed
+    `wire.phone_access.auto_setup.label`) — so this asserts the property itself
+    over every registry string that carries its message.
+    """
+    leaked: list[tuple[str, str]] = []
+
+    def check(where: str, value: object) -> None:
+        message = getattr(value, "message", None)
+        if message is not None and str(value) == message.code:
+            leaked.append((where, message.code))
+
+    for setting in settings_io.SETTINGS:
+        for field in ("label", "help", "warning", "placeholder"):
+            check(f"{setting.key}.{field}", getattr(setting, field, None))
+        for choice in setting.choices:
+            check(f"{setting.key}.choice.{choice.value}.label", choice.label)
+            check(f"{setting.key}.choice.{choice.value}.description", choice.description)
+    for section in settings_io.SECTIONS:
+        check(f"section {section.name}.title", section.title)
+        check(f"section {section.name}.description", section.description)
+    assert not leaked, f"registry strings rendering as their own code: {leaked[:10]}"
