@@ -191,6 +191,23 @@ async def test_typed_error_still_maps_to_bridge_error(
     assert excinfo.value.code == ErrorCode.ORIGIN_DENIED
 
 
+def test_origin_not_allowed_on_a_headless_node_sends_nobody_to_a_popup(monkeypatch) -> None:
+    """U1 (PR #3935 round 1): on a node nobody can reach the extension popup, so
+    the teaching error must not script the popup dance."""
+    from local_operator.browser_bridge import node_host
+
+    monkeypatch.setattr(node_host, "headless_node_once", lambda: True)
+    error = BridgeError(
+        ErrorCode.ORIGIN_NOT_ALLOWED,
+        "site https://example.com is not allowed yet",
+        {"origin": "https://example.com", "url": "https://example.com/page"},
+    )
+    text = format_error(error, action="open")
+    assert "popup" not in text
+    assert "request_access" not in text
+    assert "headless node" in text and "operator" in text
+
+
 def test_origin_not_allowed_error_teaches_the_access_flow() -> None:
     # The early-fail error is the agent's ONLY discovery path for the approval
     # dance mid-session, so it must name both follow-up actions and echo the

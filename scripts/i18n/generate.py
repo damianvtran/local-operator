@@ -229,6 +229,11 @@ OWNED_SPA_NAMESPACES = (
     # sheet's existing copy and every locale's passed ledger row for it must not
     # stale. en-only at landing; the translator/auditor wave fills the rest.
     "relay.usage_reset",
+    # Terminal-free phone pairing (design v2 A1/A2): the pairing screen and the
+    # in-place sheet an approval opens on an unpaired phone. Its own namespace
+    # so relay.asks' passed ledger rows do not stale, and because its copy must
+    # carry no shell command outside the "Using a terminal?" disclosure (D16).
+    "relay.pairing",
 )
 
 GENERATED_HEADER = (

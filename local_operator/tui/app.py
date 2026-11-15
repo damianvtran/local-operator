@@ -142,6 +142,7 @@ from local_operator.harness.types import (
 from local_operator.harness.wake import WAKE_PROMPT_MESSAGE_TYPE
 from local_operator.i18n.keys import tui_app as _x
 from local_operator.i18n.keys import tui_asks as _ask_keys
+from local_operator.i18n.keys import tui_boot_prompt as _boot_prompt_keys
 from local_operator.i18n.keys import tui_library
 from local_operator.i18n.keys import tui_notification_kinds as _kind_keys
 from local_operator.i18n.keys import tui_projects as _pc
@@ -627,6 +628,7 @@ _t = tr("tui.app")
 #: twin (`session/runtime/serving.py`) renders the SAME words; resolved per call.
 _lang_t = tr("wire.language_receipts")
 _kind_t = tr("tui.notification_kinds")
+_boot_prompt_t = tr("tui.boot_prompt")
 #: `/update`'s progress notices. Their own namespace because they carry the
 #: reassurance the operator asked for (2026-11-03): an update does not stop a
 #: running session. Session runtimes are detached processes
@@ -1775,6 +1777,28 @@ def remote_park_notice_owner(device_id: str, session_id: str) -> tuple[str, str,
 #: reason needs no entry to be told to the user honestly.
 TUNNEL_CARD_COMMANDS = {"lop login radient": "/login radient"}
 
+#: Shell commands whose WHOLE family maps to one in-app verb (U12): every
+#: `lop tunnel setup …` remedy (bare, `apply`, with a credential id) is what
+#: `/mobile enable` runs here, and printing the shell spelling would send a TUI
+#: user to a terminal for something this app does itself.
+TUNNEL_CARD_COMMAND_PREFIXES = (("lop tunnel setup", "/mobile enable"),)
+
+
+def tunnel_card_command(command: str) -> str:
+    """The in-app spelling of a tunnel remedy command, or the command as it stands.
+
+    Exact entries first (`TUNNEL_CARD_COMMANDS`), then the prefix families; a
+    command in neither is returned unchanged, which keeps the table's rule that
+    a new remedy needs no entry to be told honestly.
+    """
+    if command in TUNNEL_CARD_COMMANDS:
+        return TUNNEL_CARD_COMMANDS[command]
+    for prefix, verb in TUNNEL_CARD_COMMAND_PREFIXES:
+        if command == prefix or command.startswith(prefix + " "):
+            return verb
+    return command
+
+
 #: What the card calls each parked reason, as the TAIL of the line.
 #:
 #: The card leads with the COMMAND and puts the reason after it, which is the
@@ -1812,23 +1836,51 @@ def tunnel_park_card(reason: str, command: str) -> str:
     same mark, which is what makes the card findable at a glance rather than only
     readable once it has been found.
     """
-    mapped = TUNNEL_CARD_COMMANDS.get(command, command)
-    tail = TUNNEL_CARD_REASONS.get(reason) or _park_reason_label(reason)
+    tail = TUNNEL_CARD_REASONS.get(reason)
+    if tail is None:
+        return _kind_card(reason, command)
+    # The three park reasons keep their own wording and command, and import
+    # nothing heavy onto the poll's loop (`test_a_poll_tick_imports_nothing…`).
+    mapped = tunnel_card_command(command)
     if not mapped:
         return f"{ICON_APPROVALS} {tail}"
     return f"{ICON_APPROVALS} {mapped} — {tail}"
 
 
-def _park_reason_label(reason: str) -> str:
-    """`gateway.reason_label` for a code this app has no card wording for.
+def _kind_card(reason: str, command: str) -> str:
+    """The card for a reason with no hand-written tail, keyed on its remedy KIND.
 
-    A lazy import for the reason the poll's own import is lazy: `tunnels.gateway`
-    drags httpx and starlette, and this module is on the boot path of every
-    session — including the ones that will never see a park.
+    Keyed on the kind, not on the command or the reason (#3945 round 1,
+    D4/Q2): a console fix names the console and NO command (setup can neither
+    add credit nor override an owner's switch-off), and a wait names nothing to
+    run. Only the action kinds keep a command, mapped to the in-app verb; a
+    retrying notice carries none, so the reason's `TERMINAL_REMEDY` supplies it.
+    `gateway` is imported here, once a card for such a reason is actually
+    raised, never on an idle poll tick.
     """
+    from local_operator.i18n.keys import tunnel_status as _ts_keys
+    from local_operator.i18n.text import tr
     from local_operator.tunnels import gateway
 
-    return gateway.reason_label(reason)
+    kind = gateway.remedy_kind(reason)
+    status = tr("tunnel.status")
+    if kind == "add_credit":
+        return f"{ICON_APPROVALS} {status(_ts_keys.card_add_credit())}"
+    if kind == "open_console":
+        return f"{ICON_APPROVALS} {status(_ts_keys.card_open_console())}"
+    if kind in gateway.WAITING_KINDS:
+        mapped = ""
+    else:
+        mapped = tunnel_card_command(command or gateway.TERMINAL_REMEDY.get(reason, ""))
+    if reason == gateway.TUNNEL_INACTIVE:
+        # Its label ("paused by Radient — reconnecting") is a status-line phrase
+        # and one cell over the card's 50; the card's own tail says the cause.
+        tail = status(_ts_keys.card_paused())
+    else:
+        tail = gateway.reason_label(reason)
+    if not mapped:
+        return f"{ICON_APPROVALS} {tail}"
+    return f"{ICON_APPROVALS} {mapped} — {tail}"
 
 
 #: Bucket the dock's expiry clock to this many seconds. Rows whose settle
@@ -6109,6 +6161,17 @@ class OperatorApp(App[None]):
         #: here so the seam's consumption is a no-op on an app that never ran
         #: ``/aida``; without it the FIRST adoption of any kind raised.
         self._pending_aida_prompt: tuple[str, str, Any] | None = None
+        #: Bumped by EVERY ``_adopt_session`` — the one place a session becomes
+        #: current. ``_boot_session`` reads it before construction and steps
+        #: aside when it moved, because boot's sidebar ``navigation_generation``
+        #: fence never sees a ``/resume``: a ``/resume <id>`` typed while boot
+        #: was still building used to land and then be OVERWRITTEN by boot's
+        #: fresh session, so the user's next prompt went to the wrong
+        #: conversation (architect's in-process reproduction on d0301a22fba2).
+        #: An epoch rather than another generation bump at each resume site
+        #: because adoption is the single seam every transition funnels through;
+        #: a counter at the seam cannot miss a path the way per-caller bumps can.
+        self._adoption_epoch = 0
         #: The scheduled first-run Aida ensure `run_tui` starts — never awaited
         #: there (see `_schedule_aida_boot_ensure`). Held so the task cannot be
         #: garbage-collected mid-flight; ``None`` until a CLI boot starts one.
@@ -13001,6 +13064,8 @@ class OperatorApp(App[None]):
         precondition. Anything genuinely slow belongs in a worker, the way
         :meth:`_measure_preloaded_context` already puts its measurement in one.
         """
+        # See `_adoption_epoch`: boot's step-aside fence reads this.
+        self._adoption_epoch += 1
         self._invalidate_pending_frontend_state()
         # A new conversation's supplement registries start empty: the previous
         # session's blocks went with the cleared ledger, and its read/seen sets
@@ -14390,6 +14455,68 @@ class OperatorApp(App[None]):
         if text.strip():
             self._submit_prompt(text)
 
+    def _return_unsent_boot_prompts(self, session: Any) -> None:
+        """Hand back the prompts a stepped-aside boot would have sent.
+
+        Boot steps aside (see `_boot_session`) when the user navigated or
+        resumed elsewhere while it was building; an in-process swap
+        (`_reload_session`) steps aside the same way on a sidebar click, and
+        hands its replacement's prompts back through here too. Its stashed
+        prompts — a ``/fork``'s opening message (the sidecar
+        `_submit_boot_prompt` consumes) and an ``/aida <request>`` stashed for
+        boot's own session — were written for a conversation that is no
+        longer on screen.
+
+        PRODUCT DECISION (Team Bridge manager, session 2c6111e02b16): NEVER
+        send such a prompt — sending into the conversation the user switched
+        to would be a turn they did not ask for — and NEVER drop it silently,
+        which is what this branch did before. If the current composer is empty
+        the prompt becomes an UNSENT draft there plus one notice; if the user
+        already typed something, their draft is left untouched and the
+        prompt's text rides the notice so it is not lost.
+
+        The sidecar is consumed here on purpose: left on disk it would fire
+        on that fork's next resume, breaking the restore-and-idle rule
+        `fork.consume_boot_prompt` exists to keep.
+        """
+        texts: list[str] = []
+        session_id = getattr(session, "session_id", "") or ""
+        if session_id:
+            try:
+                from local_operator.fork import consume_boot_prompt
+                from local_operator.paths import config_dir
+
+                texts.append(consume_boot_prompt(config_dir() / "sessions" / session_id))
+            except Exception:
+                # Same best-effort rule as `_submit_boot_prompt`: an unreadable
+                # sidecar must not fail the step-aside.
+                logger.debug("boot step-aside: boot prompt unreadable", exc_info=True)
+        pending = self._pending_aida_prompt
+        # Only HER stash for boot's OWN session belongs to this boot; a stash
+        # for another id belongs to a transition still in flight and stays.
+        if pending is not None and session_id and pending[0] == session_id:
+            self._pending_aida_prompt = None
+            texts.append(pending[1])
+        text = "\n\n".join(part for part in texts if part.strip())
+        if not text:
+            return
+        editor = self._editor()
+        if not editor.text.strip() and not editor.attachments():
+            # The restore funnel, so the caret lands AFTER the text the way a
+            # returned draft does: the gesture is "read, edit, Enter".
+            self._load_editor_draft(SessionDraft(text=text))
+            self._system_notice(_boot_prompt_t(_boot_prompt_keys.returned_to_composer()), "warning")
+            return
+        # Quoted in FULL, never truncated: the sidecar is already consumed and
+        # the user's draft wins the composer, so this notice is the prompt's
+        # ONLY remaining copy. Any cap would drop its tail for good — exactly
+        # the silent loss the product rule forbids. A long notice scrolls in
+        # the transcript like any other long row; that cost is recoverable,
+        # lost text is not.
+        self._system_notice(
+            _boot_prompt_t(_boot_prompt_keys.not_sent_kept_draft(prompt=text)), "warning"
+        )
+
     async def _preflight_usage(self, session: Any) -> None:
         """Warm the provider's quota reading once the app is already painted.
 
@@ -14489,6 +14616,7 @@ class OperatorApp(App[None]):
         # thing on screen her conversation, exactly as the setup exit does.
         await self._route_first_run_boot()
         navigation_generation = self._sidebar_navigation.generation
+        adoption_epoch = self._adoption_epoch
         built = asyncio.ensure_future(self._construct_session())
         try:
             session = await built
@@ -14500,9 +14628,23 @@ class OperatorApp(App[None]):
             self._temporary_pending = None
             self._on_boot_failed(error)
             return
-        if navigation_generation != self._sidebar_navigation.generation:
+        # STEP ASIDE when the user moved while boot was building: a sidebar
+        # click bumps `navigation_generation`, and a `/resume` (or any other
+        # transition) that already LANDED bumps `_adoption_epoch`. Either way
+        # the conversation on screen is the one the user chose, and adopting
+        # boot's session now would replace it. A `/resume` still dialling when
+        # boot finishes has not adopted, so boot adopts as before and the
+        # resume replaces it through its own swap path.
+        if (
+            navigation_generation != self._sidebar_navigation.generation
+            or adoption_epoch != self._adoption_epoch
+        ):
+            # ``lop --temporary`` armed the mark for THIS boot's session only;
+            # boot is discarding that session, so the mark must not land on
+            # the conversation the user moved to instead.
             self._temporary_pending = None
             if session is not self._session:
+                self._return_unsent_boot_prompts(session)
                 await session.dispose()
             return
         self._adopt_session(session)
@@ -18014,6 +18156,16 @@ class OperatorApp(App[None]):
             else:
                 if navigation_generation != self._sidebar_navigation.generation:
                     if session is not self._session:
+                        # Same step-aside class as `_boot_session`: the
+                        # replacement this swap built (a `/fork <message>`
+                        # in switch mode, or a `/resume` carrying an `/aida
+                        # <request>`) holds a prompt the success branch below
+                        # would submit. Disposing it bare dropped that prompt
+                        # silently and left the fork sidecar to fire on the
+                        # fork's next resume. The requester's decision (see
+                        # `_return_unsent_boot_prompts`) covers every such
+                        # branch: never send it, never drop it — hand it back.
+                        self._return_unsent_boot_prompts(session)
                         await session.dispose()
                     return
                 carried_spend = self._reset_ledger_for_swap()
@@ -38754,7 +38906,12 @@ class OperatorApp(App[None]):
         """
         from local_operator.tunnels import state
 
-        notice = state.nag()
+        # The inactive-tunnel causes never park (they clear from outside this
+        # machine), so the park file alone left the card unreachable for them
+        # (#3945 round 1, D4). A current retrying exit for one of them raises the
+        # same card: a bounded local tail read in `state`, never the network and
+        # nothing heavy imported onto this loop.
+        notice = state.nag() or state.retrying_notice()
         reason = str(notice.get("reason") or "") if notice else ""
         self._assert_tunnel_band(bool(reason))
         if not reason:
@@ -57675,6 +57832,37 @@ class OperatorApp(App[None]):
         except Exception:  # noqa: BLE001 — an unreadable state is assumed busy
             return False
 
+    async def _offer_phone_access(self, notice: Callable[..., Awaitable[None]]) -> None:
+        """One line after a Radient sign-in on a machine with NO phone access.
+
+        WHY: teammates signed in and never learned the phone app needed one more
+        step. This names the existing in-app verb (`/mobile enable`) and says a
+        price is always shown first; it creates nothing — a machine that already
+        wanted phone access is reconnected by the post-sign-in run instead
+        (`tunnels.install.auto_setup_after_login`), so the two never overlap.
+        Once per credential (`autosetup.login_offer_due`): recording it at show
+        time is the dismissal. Off the loop, since it reads the credential store.
+        A failure here must never disturb the sign-in it follows.
+        """
+        try:
+            from local_operator.i18n.keys import mobile_setup as _ms_keys
+            from local_operator.tunnels import autosetup
+
+            due = await asyncio.to_thread(autosetup.login_offer_due)
+            if due is None:
+                return
+            await asyncio.to_thread(autosetup.record_login_offer, due)
+            # The command is accented in the inline-code ink (design round 1, D6):
+            # it is the one actionable token in an otherwise muted note. The
+            # literal is the slash command itself, verbatim in every locale.
+            self._append_block(
+                NoticeBlock(
+                    tr("mobile.setup")(_ms_keys.login_offer()), "note", accent="/mobile enable"
+                )
+            )
+        except Exception:  # noqa: BLE001 — an offer must not fail a completed sign-in
+            logger.debug("phone access offer skipped", exc_info=True)
+
     async def _login_flow(self, provider: str) -> None:
         """Run the login on the event loop, reporting into the transcript.
 
@@ -57728,6 +57916,8 @@ class OperatorApp(App[None]):
             self._providers.set_login_callbacks(self._login_callbacks)
             message = await self._providers.login(provider, signal=signal)
             await notice(message, "success")
+            if provider == "radient":
+                await self._offer_phone_access(notice)
             # Make the fresh login usable as the boot default when nothing is
             # configured yet: set hosting to this provider and model_name to its
             # default. Without this, `/login` stored the credential but left
