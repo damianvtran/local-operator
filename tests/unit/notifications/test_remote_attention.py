@@ -1717,3 +1717,163 @@ def test_default_deny_the_create_attestation_is_never_defaulted() -> None:
     assert _started_by_claim({"started_by": "root"}) == {}
     assert ra.started_by_for_origin("user") == ra.OPERATOR_STARTED
     assert ra.started_by_for_origin("agent") == ra.AGENT_ORIGIN_KIND
+
+
+# ---------------------------------------------------------------------------
+# Operator-signed cards from an agent's child (manager rule, 2026-11-15)
+# ---------------------------------------------------------------------------
+# "human-only signed cards (site approvals, any card only the operator's
+# signature can answer) forward to the bound operator device even from
+# agent-origin and stampless sessions. Ordinary agent-child asks keep their
+# current routing, and notifications stay per #4001." Reproduced live: session
+# 1c31cfff075b on a node, spawned by an agent on the operator's Mac (origin
+# kind=agent, source_device=the Mac), raised two site cards the Mac never saw.
+
+CO = "d_co"
+
+
+def _site_question() -> dict[str, Any]:
+    from local_operator.browser_bridge import site_approval
+
+    return site_approval.site_ask_question(
+        origin="https://example.com", node_name="node", node_device_id=NODE, entry_id="e-1"
+    )
+
+
+def _queue_raw(node: Path, ask_id: str, questions: list[dict[str, Any]]) -> None:
+    from local_operator.asks import store as ask_store
+
+    now = ask_store.now_ms()
+    ask_store.append_event(
+        ask_store.session_dir(node, SID),
+        {
+            "v": ask_store.EVENT_SCHEMA,
+            "kind": ask_store.EVENT_QUEUED,
+            "at": now,
+            "ask_id": ask_id,
+            "expires_at": now + 3_600_000,
+            "questions": questions,
+        },
+    )
+
+
+def _agent_child_node(
+    tmp_path: Path, origin: dict[str, Any] | None, *, site_card: bool = True
+) -> Path:
+    """A node holding SID (stamped ``origin``) with an ordinary ask, a notify item
+    and, when ``site_card``, a real site card built by ``site_approval`` itself."""
+    node = tmp_path / "node"
+    (node / "sessions" / SID).mkdir(parents=True)
+    if origin is not None:
+        write_stamp(
+            node,
+            MeshStamp(
+                session_id=SID,
+                network_id="n_test",
+                home_device=NODE,
+                placement=SessionPlacement(
+                    mode="peer", network_id="n_test", home_device=NODE, stamp_revision=1
+                ),
+                origin=origin,
+            ),
+        )
+    _queue_raw(node, "a-plain", [{"id": "q0", "question": "Which branch?", "options": []}])
+    if site_card:
+        _queue_raw(node, "a-site", [_site_question()])
+    NotificationStore(node).notify(SID, title="Build done", priority="high", key="build")
+    return node
+
+
+def _wire(
+    node: Path, origin: dict[str, Any] | None, viewer: str, *, operator_viewer: bool
+) -> dict[str, Any]:
+    row: dict[str, Any] = {"session_id": SID, "state": "stored", "origin": origin}
+    ra.stamp_rows_for_viewer(
+        node, [row], viewer, operator_viewer=operator_viewer, self_device_id=NODE
+    )
+    return row
+
+
+def _keys(row: dict[str, Any]) -> list[str]:
+    return [n["key"] for n in row.get("notices") or ()]
+
+
+def _agent(source: str) -> dict[str, Any]:
+    return {"kind": ra.AGENT_ORIGIN_KIND, "source_device": source, "source_session_id": "s_p"}
+
+
+def test_only_a_site_question_is_an_operator_signed_card() -> None:
+    assert ra.is_operator_signed_card({"questions": [_site_question()]})
+    # human_required alone is answerable by any human at any surface: not one.
+    plain = {"id": "q0", "question": "Ship?", "human_required": True, "question_id": "x:1"}
+    assert not ra.is_operator_signed_card({"questions": [plain]})
+    assert not ra.is_operator_signed_card({"questions": None})
+    assert not ra.is_operator_signed_card(None)
+
+
+@pytest.mark.parametrize("source", [HEAD, "", NODE, CO])
+def test_an_agent_childs_site_card_reaches_the_bound_operator_only(
+    tmp_path: Path, source: str
+) -> None:
+    """The site card (and nothing else) reaches the VERIFIED operator link, wherever
+    the child was placed from: by the operator's Mac (the live repro), started
+    here, or placed by a co-member."""
+    origin = _agent(source)
+    node = _agent_child_node(tmp_path, origin)
+    row = _wire(node, origin, HEAD, operator_viewer=True)
+    assert _keys(row) == [f"{ra.ASK_NOTICE_PREFIX}a-site"]
+    if source != HEAD:
+        # A child the operator's device did not place gets no completion badge here.
+        assert "attention" not in row and "attention_unknown" not in row
+    # The notify verdict is unchanged: the child's notify items stay on the node.
+    assert ra.notice_forwarding(node, SID)[0] == ra.LOCAL_ONLY
+    assert "build" not in _keys(row)
+
+
+@pytest.mark.parametrize("source", [HEAD, "", NODE, CO])
+def test_an_agent_childs_ordinary_ask_and_notify_still_reach_nobody(
+    tmp_path: Path, source: str
+) -> None:
+    origin = _agent(source)
+    node = _agent_child_node(tmp_path, origin, site_card=False)
+    for viewer, bound in ((HEAD, True), (HEAD, False), (CO, False)):
+        assert "notices" not in _wire(node, origin, viewer, operator_viewer=bound), viewer
+    assert ra.notice_forwarding(node, SID)[0] == ra.LOCAL_ONLY
+
+
+@pytest.mark.parametrize("source", [HEAD, CO])
+def test_a_viewer_the_origin_names_but_not_bound_gets_no_site_card(
+    tmp_path: Path, source: str
+) -> None:
+    """Never "any viewer that matches the origin": the source device itself gets
+    nothing unless its link is the verified operator's."""
+    origin = _agent(source)
+    node = _agent_child_node(tmp_path, origin)
+    assert "notices" not in _wire(node, origin, source, operator_viewer=False)
+    # A non-operator member that is not the source gets nothing either.
+    other = CO if source == HEAD else HEAD
+    assert "notices" not in _wire(node, origin, other, operator_viewer=False)
+
+
+def test_a_stampless_agent_started_session_keeps_forwarding_every_ask(tmp_path: Path) -> None:
+    """Unchanged routing: a node session with no stamp and a subagent marker already
+    sends ALL its open asks over the binding (asks always travel); only notify
+    stays here (:func:`ra.is_non_agent_session`)."""
+    node = _agent_child_node(tmp_path, None)
+    (node / "sessions" / SID / "origin.json").write_text('{"origin": "subagent"}', "utf-8")
+    row = _wire(node, None, HEAD, operator_viewer=True)
+    assert sorted(_keys(row)) == [f"{ra.ASK_NOTICE_PREFIX}a-plain", f"{ra.ASK_NOTICE_PREFIX}a-site"]
+    assert "notices" not in _wire(node, None, CO, operator_viewer=False)
+
+
+def test_an_unreadable_ask_log_on_an_agent_child_says_unknown(tmp_path: Path) -> None:
+    """The R1-2 rule holds on the new leg: a failed read never retires a card."""
+    from local_operator.asks import store as ask_store
+
+    origin = _agent(HEAD)
+    node = tmp_path / "node"
+    (node / "sessions" / SID).mkdir(parents=True)
+    ask_store.asks_log_path(ask_store.session_dir(node, SID)).mkdir(parents=True)
+    row = _wire(node, origin, HEAD, operator_viewer=True)
+    assert row.get("asks_unknown") is True and "notices" not in row
+    assert "asks_unknown" not in _wire(node, origin, HEAD, operator_viewer=False)
