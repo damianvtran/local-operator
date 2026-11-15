@@ -315,16 +315,35 @@ def test_a_recognised_launch_leaves_no_bearer_in_the_exec_time_environment(
     the launch an operator would and reads it with ``ps eww``.
     """
 
+    import json
     import socket
     import subprocess
     import time
     import urllib.error
     import urllib.request
 
-    port_probe = socket.socket()
-    port_probe.bind(("127.0.0.1", 0))
-    port = port_probe.getsockname()[1]
-    port_probe.close()
+    # Port selection: the child binds ``--port 0`` ITSELF and reports the port it
+    # actually got in its serve record. The previous shape bound port 0 here,
+    # read the number, CLOSED the socket and passed it as ``--port``: a
+    # bind/close/reuse window in which any other process could take the port, so
+    # ``/health`` and the bearer/``ps``/auth assertions could be answered by (or
+    # about) a process that is not the child (CI saw ``[Errno 98]`` on a
+    # busy port). ``serve`` outside ``--reload`` binds before uvicorn starts, so
+    # there is no probe/close on this path; the lifespan then publishes
+    # ``<config>/run/serve/<pid>.json`` with ``port`` (the port ACTUALLY bound)
+    # and ``instance_id`` (also returned by ``/health``). The record, not the
+    # log, is the channel: the log line goes to a block-buffered file sink.
+    # Same mechanism as tests/e2e/test_serve_build_announcement.py. This is a
+    # startup wait only -- there is deliberately no retry/fresh-port on a bind
+    # failure; the child would exit and the loop below fails with the log tail.
+    #
+    # Collision control: the test OWNS a listening ephemeral socket for the whole
+    # case. The kernel never hands a listening port out twice, so the child's
+    # port must differ from it; asserted below as documentation of the control.
+    incumbent = socket.socket()
+    incumbent.bind(("127.0.0.1", 0))
+    incumbent.listen(1)
+    incumbent_port = incumbent.getsockname()[1]
 
     root = Path(__file__).resolve().parents[3]
     home = tmp_path / "home"
@@ -355,30 +374,66 @@ def test_a_recognised_launch_leaves_no_bearer_in_the_exec_time_environment(
         desktop.TOKEN_ENV: token,
     }
     log = tmp_path / "serve.log"
-    with log.open("wb") as sink:
-        process = subprocess.Popen(
-            [sys.executable, *target, "serve", "--host", "127.0.0.1", "--port", str(port)],
-            env=env,
-            stdout=sink,
-            stderr=subprocess.STDOUT,
-            # ``-Es`` ignores every PYTHON* variable, so the package has to resolve
-            # from the working directory for that shape: ``-m`` prepends it.
-            cwd=str(root),
-        )
+    try:
+        with log.open("wb") as sink:
+            process = subprocess.Popen(
+                [sys.executable, *target, "serve", "--host", "127.0.0.1", "--port", "0"],
+                env=env,
+                stdout=sink,
+                stderr=subprocess.STDOUT,
+                # ``-Es`` ignores every PYTHON* variable, so the package has to resolve
+                # from the working directory for that shape: ``-m`` prepends it.
+                cwd=str(root),
+            )
+    except BaseException:
+        incumbent.close()
+        raise
     started = process.pid
+    record_path = config / "run" / "serve" / f"{started}.json"
     try:
         deadline = time.monotonic() + 90
         healthy = False
+        port = 0
+        record: dict[str, Any] = {}  # heterogeneous serve-record JSON (str/int/None)
+        # Bound before the loop: ``healthy`` gates every read of ``body``, but the
+        # type checker cannot see that; a no-response run still fails closed on
+        # the ``assert healthy`` below.
+        body: dict[str, Any] = {}
         while time.monotonic() < deadline:
             if process.poll() is not None:
                 break
+            if not port:
+                # Only "not published yet" / "being staged" are transient. The
+                # record holds the access token: never print it.
+                try:
+                    record = json.loads(record_path.read_text())
+                except (FileNotFoundError, json.JSONDecodeError):
+                    time.sleep(0.5)
+                    continue
+                port = int(record.get("port") or 0)
+                if not port:
+                    time.sleep(0.5)
+                    continue
             try:
-                with urllib.request.urlopen(f"http://127.0.0.1:{port}/health", timeout=2):
-                    healthy = True
-                    break
+                with urllib.request.urlopen(f"http://127.0.0.1:{port}/health", timeout=2) as answer:
+                    body = json.loads(answer.read())
+                healthy = True
+                break
             except (urllib.error.URLError, OSError):
                 time.sleep(0.5)
         assert healthy, f"[{label}] " + log.read_text()[-4000:]
+        record_pid = record.get("pid")
+        assert record_pid == started, f"[{label}] the record is not the child's"
+        assert port != incumbent_port, f"[{label}] child shares the owned incumbent's port"
+        # Identity, not just 200: the answer must come from THIS child.
+        # ``/health`` nests its payload under ``result``. Compare plain strings so
+        # a failure never has pytest repr the record (it holds the access token).
+        published_id = str(record.get("instance_id") or "")
+        answered_id = str((body.get("result") or {}).get("instance_id") or "")
+        assert published_id and answered_id == published_id, (
+            f"[{label}] /health instance_id does not match the child's serve record "
+            f"(port={port}, pid={started}, record_has_id={bool(published_id)})"
+        )
 
         listing = subprocess.run(
             ["ps", "eww", "-p", str(started)], capture_output=True, text=True, timeout=30
@@ -399,6 +454,7 @@ def test_a_recognised_launch_leaves_no_bearer_in_the_exec_time_environment(
         assert status({"Authorization": f"Bearer {token}"}) == 200
         assert status({}) == 401
     finally:
+        incumbent.close()
         assert process.pid == started, "an exec must not hand the pid to another process"
         process.terminate()
         try:
