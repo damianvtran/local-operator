@@ -5131,7 +5131,7 @@ def _invite_locally(args: argparse.Namespace, hosts: list[str]) -> tuple[dict[st
         device_id=args.device,
     )
     # Same rule as the relay's mint: dead entries go with the write that adds one.
-    expired = store.prune_invites(record)
+    expired = store.prune_invites(record, keep=store.binding_invite_ids())
     record.invites.append(minted.record)
     store.save(record)
     store.forget_invite_tokens(expired)
