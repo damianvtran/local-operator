@@ -62,6 +62,13 @@ ROSTER = 2_000
 #: ``history_cursor`` plus the inline build), so 300 ms discriminates by ~2.5x
 #: while leaving ~1.7x headroom over the fixed code on a loaded CI runner. The
 #: deterministic half of the guard is the thread assertion beside it.
+#: UNDER ``--cov`` (CI's shard invocation) the cold open's bound is still this
+#: one, re-measured for the full-suite gate (run 43701985694, 323 ms on CI): the
+#: worst tick was the page cache's ``retained_bytes`` walk on the loop, which
+#: line tracing inflates ~2.4x. With that walk moved into the read worker the
+#: fixed tree reads 7-11 ms (16-29 ms under ``--cov``, 15-20 ms pinned to one
+#: core beside a burner) against the base tree's 866-892 ms (2411-2528 ms
+#: under ``--cov``), 5 runs each -- base still fails by >8x.
 MAX_LAG_S = 0.3
 #: The cold open's WALL-CLOCK bound, asserted beside the CPU bound in the same
 #: GC-paused window (R-t8-1, PR #4012). ``thread_time`` cannot see a loop
