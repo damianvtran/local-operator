@@ -12,6 +12,7 @@ pinned against a hand-drawn approximation of a row is a rule about the test.
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from typing import Any
 
 import pytest
@@ -504,33 +505,65 @@ def _memo_rows() -> list[dict[str, Any]]:
     ]
 
 
-def test_a_strip_memo_returns_the_plain_strip_and_strips_each_row_once(monkeypatch: Any) -> None:
+@pytest.mark.parametrize(
+    "diff_bindings", [None, "memo-session"], ids=["default-off", "explicit-on"]
+)
+def test_a_strip_memo_returns_the_plain_strip_and_strips_each_row_once(
+    monkeypatch: Any, diff_bindings: str | None
+) -> None:
     """``StripMemo`` is a cache, never a second rule: every helper answers exactly
     what it answers without one, and a row is stripped once however many cuts read
     it (openframe-cpu: ~1,310 strips for ~200 rows per open before the memo)."""
     rows = _memo_rows()
-    plain_kept, plain_reached = of.align_page(rows, 3, extra_rows=2)
-    plain_paintable = of.paintable(rows)
-    plain_frame = of.build_frame(plain_kept, has_more=True)
+    rows.insert(
+        -1,
+        custom(
+            "binding",
+            "tool_call_diff_binding_v1",
+            {
+                "v": 1,
+                "session_id": "memo-session",
+                "outer_call_id": "outer",
+                "call_id": "outer:write",
+                "tool": "write",
+                "diff_full": {"v": 1, "state": "archived", "rows": 2, "digest": "a" * 32},
+            },
+        ),
+    )
+    plain_kept, plain_reached = of.align_page(rows, 3, extra_rows=2, diff_bindings=diff_bindings)
+    plain_paintable = of.paintable(rows, diff_bindings=diff_bindings)
+    plain_frame = of.build_frame(plain_kept, has_more=True, diff_bindings=diff_bindings)
 
     calls: list[str] = []
+    binding_options: list[str | None] = []
     real = of.strip_entry
 
-    def counted(entry: Any, *, supplements: bool = False) -> Any:
+    def counted(
+        entry: Mapping[str, Any],
+        *,
+        supplements: bool = False,
+        diff_bindings: str | None = None,
+    ) -> dict[str, Any] | None:
         calls.append(str(entry.get("id")))
-        return real(entry, supplements=supplements)
+        binding_options.append(diff_bindings)
+        return real(entry, supplements=supplements, diff_bindings=diff_bindings)
 
     monkeypatch.setattr(of, "strip_entry", counted)
-    memo = of.StripMemo()
-    kept, reached = of.align_page(rows, 3, extra_rows=2, memo=memo)
+    memo = of.StripMemo() if diff_bindings is None else of.StripMemo(diff_bindings=diff_bindings)
+    kept, reached = of.align_page(rows, 3, extra_rows=2, memo=memo, diff_bindings=diff_bindings)
     for _ in range(2):  # the hunt re-cuts the whole page on every attempt
-        assert of.align_page(rows, 3, extra_rows=2, memo=memo) == (kept, reached)
-        assert of.paintable(rows, memo=memo) == plain_paintable
-    frame = of.build_frame(kept, has_more=True, memo=memo)
+        assert of.align_page(rows, 3, extra_rows=2, memo=memo, diff_bindings=diff_bindings) == (
+            kept,
+            reached,
+        )
+        assert of.paintable(rows, memo=memo, diff_bindings=diff_bindings) == plain_paintable
+    frame = of.build_frame(kept, has_more=True, memo=memo, diff_bindings=diff_bindings)
+    assert ("binding" in {entry["id"] for entry in frame.entries}) is (diff_bindings is not None)
     assert (kept, reached) == (plain_kept, plain_reached)
     assert json.dumps(frame.entries) == json.dumps(plain_frame.entries)
     assert (frame.dropped_rows, frame.raw_rows) == (plain_frame.dropped_rows, plain_frame.raw_rows)
     assert sorted(calls) == sorted(str(r["id"]) for r in rows)
+    assert binding_options == [diff_bindings] * len(rows)
 
 
 def test_a_strip_memo_keys_by_identity_not_equality() -> None:

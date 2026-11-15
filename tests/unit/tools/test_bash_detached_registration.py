@@ -116,7 +116,12 @@ CHILD = """import json,os,time
 from pathlib import Path
 root=Path(__file__).parent
 deadline=time.monotonic()+15
-(root/'ready.json').write_text(json.dumps({'pid':os.getpid(),'pgid':os.getpgid(0)}))
+# Publish atomically: the parent polls ready.json with exists() and then reads
+# it, and Path.write_text truncates before writing, so a bare write exposed an
+# empty file (JSONDecodeError in CI). os.replace within one dir is atomic.
+tmp=root/'ready.json.tmp'
+tmp.write_text(json.dumps({'pid':os.getpid(),'pgid':os.getpgid(0)}))
+os.replace(tmp,root/'ready.json')
 try:
  while (root/'keep-running').exists() and time.monotonic()<deadline: time.sleep(.02)
 finally:

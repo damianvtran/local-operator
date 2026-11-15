@@ -7,11 +7,18 @@ from typing import TYPE_CHECKING, Any
 import pytest
 
 from local_operator.harness.types import AgentTool, ToolContext
+
+# Taken at import, before the autouse fixture pins the module attribute.
 from local_operator.prompts_api import (
     CHANNEL_ASK,
     CHANNEL_HUB,
     CHANNEL_NONE,
     TOOL_INVENTORY_HEADING,
+)
+from local_operator.prompts_api import (  # noqa: E402
+    _host_is_headless_node as _REAL_HOST_IS_NODE,
+)
+from local_operator.prompts_api import (
     assemble_system_block_sections,
     build_system_blocks,
     render_string,
@@ -67,6 +74,13 @@ def _force_browser_available(monkeypatch):
     monkeypatch.setattr(
         image_tool.image_availability, "image_provider_reachable", lambda *args, **kwargs: True
     )
+    # Node-ness is pinned OFF for the same reason the app's host is: run on a
+    # headless mesh node, the no-browser note would flip to its node variant
+    # from a probe that has nothing to do with the test. Tests that need it ON
+    # say so themselves.
+    import local_operator.prompts_api as prompts_api_module
+
+    monkeypatch.setattr(prompts_api_module, "_host_is_headless_node", lambda: False)
 
 
 if TYPE_CHECKING:
@@ -936,6 +950,64 @@ def test_inventory_explains_a_missing_browser_instead_of_leaving_a_hole(monkeypa
     # The note is a capability statement, not a fake inventory entry: the
     # ordering test reads every "- " line as a tool name.
     assert not any(line.startswith("- ") and "browser" in line for line in inventory.splitlines())
+
+
+def test_headless_node_gets_the_node_managed_browser_note(monkeypatch) -> None:
+    """On a headless mesh node the absence note names the ONE sanctioned path
+    (`lop browser setup --node`, operator-authorised), the new-session rule, and
+    keeps the "never" for every other engine — and drops the user-machine
+    diagnosis, which talks about hosts a node does not have."""
+    import local_operator.prompts_api as prompts_api_module
+
+    monkeypatch.setattr(builtin, "cmux_browser_available", lambda: False)
+    monkeypatch.setattr(builtin, "bridge_browser_advertisable", lambda: False)
+    monkeypatch.setattr(prompts_api_module, "_host_is_headless_node", lambda: True)
+    inventory = build_system_blocks(TOOLS, SKILLS, ENV, DATE)[1]
+    assert "NO browser tool. This is a headless node" in inventory
+    assert "`lop browser setup --node`" in inventory
+    assert "operator's authorisation" in inventory
+    assert "start a new one after" in inventory
+    assert "Never install or script any other browser engine" in inventory
+    assert "playwright" in inventory
+    assert "no browser host is connected on this host" not in inventory
+    # Round 1 (U1, U2, U3): the note says no site opens yet, how long setup
+    # runs, and what counts as the operator's authorisation.
+    assert "no site can be opened" in inventory
+    assert "900" in inventory and "background" in inventory
+    assert "naming this node" in inventory
+    # Round 2 (U14): the operator's standing instruction for visual testing
+    # counts too, quoted with its date; (U18) no "signed decision" jargon.
+    assert "standing operator instruction" in inventory
+    assert "visual or end-to-end testing" in inventory
+    assert "signed decision" not in inventory
+    # The note still strips cleanly as a note (prompt-section split).
+    assert split_inventory_sections(inventory)["notes"].startswith("This session has NO browser")
+
+
+def test_user_machine_note_no_longer_claims_only_cmux_can_host() -> None:
+    """The old note said "browser automation here runs through the cmux
+    terminal" — false since the desktop app and the extension host browsers."""
+    import local_operator.prompts_api as prompts_api_module
+
+    note = prompts_api_module._NO_BROWSER_NOTE  # noqa: SLF001
+    assert "runs through the cmux terminal" not in note
+    assert "the desktop app's tab, a paired extension or a cmux panel" in note
+    assert "never install or script a browser engine" in note
+
+
+def test_host_is_headless_node_never_raises(monkeypatch) -> None:
+    """A probe that raises answers "not a node": the stricter user-machine note."""
+    from local_operator.browser_bridge import node_host
+
+    def boom() -> bool:
+        raise RuntimeError("probe failed")
+
+    monkeypatch.setattr(node_host, "is_headless_node", boom)
+    _REAL_HOST_IS_NODE.cache_clear()
+    try:
+        assert _REAL_HOST_IS_NODE() is False
+    finally:
+        _REAL_HOST_IS_NODE.cache_clear()
 
 
 def test_inventory_note_is_absent_when_a_browser_tool_exists() -> None:

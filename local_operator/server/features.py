@@ -903,6 +903,13 @@ def static_feature_flags() -> dict[str, Any]:
         # click only, never cached or prefetched (see the route's module doc
         # for why the desktop bearer may read this secret at all).
         "mobile_password_read": 1,
+        # `remedy.kind` on `GET /v1/desktop/tunnel`, the setup route's new kinds
+        # (`open_console`, `wait_network`, `wait_radient`) and the reconnect /
+        # lapsed-billing steps, plus `kind` on the gateway's 503 body. ABSENT ⇒
+        # the renderer keeps its command/url-only remedy handling: an older
+        # backend sends no `kind` there, and a renderer that guessed one from a
+        # sentence would offer a button the backend never promised.
+        "tunnel_remedy_kinds": 1,
         # THE MESH, and both keys gate AFFORDANCES rather than shapes.
         #
         # `peers` is the peer catalogue's key (mesh-session-mobility.md
@@ -996,6 +1003,12 @@ def static_feature_flags() -> dict[str, Any]:
         # without it keeps the CLI-remedy card (`can_approve_here: False`) and never
         # POSTs a body this backend would not understand.
         "credential_approvals": 1,
+        # PHONE PAIRING BY APPROVAL (pairing design v2 §1-§2): the `pairing` block on a
+        # `pair_phone` row, `POST /v1/desktop/approvals/{id}/pair-ack` (typed code or,
+        # on an edge-attested request, "codes match"), `GET`/`DELETE
+        # /v1/desktop/devices`, and the feed's `approvals.pair_request`. Its own key so
+        # a renderer that lacks it never posts a pair-ack body an older backend 404s.
+        "phone_pairing": 1,
         # Signed profile continuations disclose/apply through the same inbox.
         "profile_approvals": 1,
         "profile_proposals": 1,

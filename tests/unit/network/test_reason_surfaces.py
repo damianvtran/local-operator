@@ -94,6 +94,26 @@ _DECLARED_RAW_READS: dict[tuple[str, str, str], tuple[int, str]] = {
         1,
         "the local browser daemon's own transport error, in brackets after a sentence",
     ),
+    # `lop browser setup/uninstall --node` (browser_bridge/node_host.py). The module
+    # imports the mesh only to ask "is this device a member?"; none of these values
+    # comes from a peer or relay. ``_wait_for_code`` reads the SAME local pairing
+    # answer as ``_browser_pair`` above (``browser_install.request_pairing_codes``
+    # on 127.0.0.1) into a step's evidence; the refusal ``reason`` is this
+    # machine's own user-machine detection prose; a step ``detail`` is
+    # node_host's own technical evidence (package versions, paths), shown
+    # verbatim by design inside a keyed row sentence.
+    ("local_operator/browser_bridge/node_host.py", "_Plan._wait_for_code", "reason"): (
+        1,
+        "the local browser daemon's pairing answer, inside a step's evidence",
+    ),
+    ("local_operator/cli.py", "_node_refusal_line", "reason"): (
+        1,
+        "this machine's own user-machine detection prose, in a keyed refusal sentence",
+    ),
+    ("local_operator/cli.py", "_node_step_line", "detail"): (
+        1,
+        "node_host's own step evidence for this machine, in a keyed row sentence",
+    ),
     # The delegated content layer's per-pad row — the same class of prose as
     # ``_cleanup_row`` above: ``merged-clean clone past the window`` /
     # ``stale output past the window``, composed by
@@ -333,8 +353,10 @@ _DECLARED_RAW_READS: dict[tuple[str, str, str], tuple[int, str]] = {
     # stored as the receipt's ``receipt`` and printed as ``<peer>: <sentence>``. Kept
     # raw because an EMPTY reply must stay empty (``mailbox_receipt_lines`` prints
     # nothing then) and ``peer_reason_words`` never returns empty — it would print
-    # "it did not answer" under a message that was delivered.
-    ("local_operator/network/cli.py", "_pilot_mailbox", "detail"): (
+    # "it did not answer" under a message that was delivered. Read in
+    # ``_deliver_mailbox``, the one delivery helper both the viewer and the
+    # view-free mailbox paths share.
+    ("local_operator/network/cli.py", "_deliver_mailbox", "detail"): (
         1,
         "the owner's own mailbox-delivery sentence, attributed to the peer; empty "
         "stays empty, which the never-empty gloss cannot express",

@@ -1,0 +1,26 @@
+$ git rev-parse HEAD
+1fce7ecb1f5fb587e7b91ef2f9c7fe658521e0d0
+exit=0
+$ sha256sum local_operator/i18n/catalogues/en/tunnel.status.json local_operator/i18n/catalogues/en/tunnel.status.context.json local_operator/i18n/catalogues/fr/tunnel.status.json i18n/glossary.md i18n/style-guides/fr.md
+b368acfb0cdee89c8de5a210fc9956251701a9f3f73c88b1096611d0c1f9063f  local_operator/i18n/catalogues/en/tunnel.status.json
+a9821f16689aae33c2eee4d2734bf5d508bc9b93037699883f78677d636d98a8  local_operator/i18n/catalogues/en/tunnel.status.context.json
+6ec2bf10d1ba2f03ab7949c43ea75c44ad6375e9492549e51bc56ec63e8cd243  local_operator/i18n/catalogues/fr/tunnel.status.json
+a576d5a4b2718ba79a70a42600e3b6233ea28d716b1e2d996a208ac8dd7fabdb  i18n/glossary.md
+5315e1ac10c2ce57aac631ba653d08de680ee70c9a022ed3a8345ce2f9902ee7  i18n/style-guides/fr.md
+exit=0
+$ .venv/bin/python scripts/i18n/check.py --catalogues-only
+check.py: catalogue checks: 0 problem(s)
+exit=0
+$ .venv/bin/python scripts/i18n/ledger.py history-sha --locale fr --namespace tunnel.status
+20467a09e24e966389a0266d0b1ca0f822354167f956eadec46b18c8e0a536ef
+exit=0
+$ .venv/bin/python $SCRATCH/audit_gen.py  # mech(fr, tunnel.status) over the 8 new keys
+keys en=21 fr=21 parity=OK
+tunnel.status.tunnel_inactive.label: placeholders=OK urls=OK commands=OK terminal_cmd=NONE len_ratio=0.82 space_before_punct=[] ascii_apostrophe=0
+tunnel.status.tunnel_inactive.detail: placeholders=OK urls=OK commands=OK terminal_cmd=NONE len_ratio=1.14 space_before_punct=['0x202f'] ascii_apostrophe=0
+tunnel.status.tunnel_disabled.label: placeholders=OK urls=OK commands=OK terminal_cmd=NONE len_ratio=1.00 space_before_punct=[] ascii_apostrophe=0
+tunnel.status.tunnel_disabled.detail: placeholders=OK urls=OK commands=OK terminal_cmd=NONE len_ratio=1.17 space_before_punct=[] ascii_apostrophe=0
+tunnel.status.billing_inactive.label: placeholders=OK urls=OK commands=OK terminal_cmd=NONE len_ratio=1.10 space_before_punct=[] ascii_apostrophe=0
+tunnel.status.billing_inactive.detail: placeholders=OK urls=OK commands=OK terminal_cmd=NONE len_ratio=1.17 space_before_punct=[] ascii_apostrophe=0
+tunnel.status.billing_lapsed.label: placeholders=OK urls=OK commands=OK terminal_cmd=NONE len_ratio=1.64 space_before_punct=[] ascii_apostrophe=0
+tunnel.status.billing_lapsed.detail: placeholders=OK urls=OK commands=OK terminal_cmd=NONE len_ratio=1.17 space_before_punct=['0x202f', '0x202f'] ascii_apostrophe=0

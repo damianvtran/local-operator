@@ -28,6 +28,7 @@ import argparse
 import asyncio
 import concurrent.futures
 import contextlib
+import functools
 import gc
 import json
 import logging
@@ -4143,6 +4144,52 @@ class _StreamClient:
             pass
 
 
+def _await_frontend_sync(client: _StreamClient, *, cap_s: float = 60.0) -> dict[str, Any]:
+    """Read until THIS connection's canonical ``frontend_sync`` frame arrives.
+
+    WHY. The runtime refuses every non-priority op while a connection's canonical
+    sync is pending — "this viewer is still connecting to the session; the request
+    was not run — retry once the interface has connected" (the gate in
+    ``RuntimeServer``'s frame handler, ``server.py`` ~7008). The flag is set when
+    the connection asks for frontend state and is cleared in the ``finally`` of
+    ``RuntimeServer._serve_frontend_sync`` (~5025), the per-connection BIND task.
+    The welcome is sent before that task finishes, so a viewer that prompts the
+    instant the welcome lands races the bind; it lost once in a full CI run
+    (PR #3885's gate, job 132034534860).
+
+    WHY THIS FRAME, NOT A QUIET INTERVAL. While the bind runs nothing reaches the
+    connection — updates are parked in ``frontend_pending`` and events wait on
+    ``events_ready`` (~4976-4984) — so "the owner went quiet for 0.5 s" is exactly
+    what a SLOW bind looks like, and that heuristic sent the prompt early whenever
+    the bind outlasted its interval (measured red with 0.8 s and 1.0 s holds,
+    PR #3933's QA round 1). The ``frontend_sync`` frame is the bind's own
+    completion signal: built at ~4917 and written at ~4975, and the only await
+    between that write and the ``finally`` that clears the flag is the socket
+    ``drain``, which does not suspend unless the transport is paused. By the time
+    the frame has crossed both relays to this socket the gate is open. The real
+    client works the same way: its dial waits for ``frontend_sync`` before it
+    lets anyone act.
+
+    The cap only stops a broken bind from hanging the test; it is NOT the
+    synchronisation, so it is generous, and running out fails loudly naming every
+    op seen rather than letting the prompt race on.
+    """
+    deadline = time.monotonic() + cap_s
+    seen: list[str] = []
+    while (remaining := deadline - time.monotonic()) > 0:
+        frame = client.recv(timeout=remaining)
+        if frame is None:
+            break
+        op = str(frame.get("op"))
+        if op == "frontend_sync":
+            return frame
+        seen.append(op)
+    raise AssertionError(
+        f"no 'frontend_sync' frame within {cap_s:.0f}s on the stream "
+        f"(frames seen before giving up, by op: {seen})"
+    )
+
+
 def test_the_stream_is_a_pass_through_and_quitting_it_leaves_the_peer_running(
     peer_pair: Devices, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -4185,6 +4232,13 @@ def test_the_stream_is_a_pass_through_and_quitting_it_leaves_the_peer_running(
         welcome = client.recv()
         assert welcome is not None and welcome["op"] == "welcome", welcome
         assert welcome["data"]["session_id"] == SESSION
+        # The welcome is sent BEFORE the owner's bind task finishes, and until it
+        # does the runtime refuses a ``prompt`` ("this viewer is still connecting
+        # ..."). Wait for THIS connection's ``frontend_sync`` frame — written at
+        # server.py ~4975, just before the ``finally`` at ~5025 that clears the
+        # gate checked at ~7008 — exactly as the real client does, rather than
+        # betting on a quiet interval a slow bind also produces.
+        _await_frontend_sync(client)
 
         client.send(
             {
@@ -4512,6 +4566,123 @@ def test_a_viewer_leaving_releases_the_owner_s_stream(
             child.kill()
             child.wait(timeout=20)
         _stop_all(served)
+
+
+@pytest.mark.asyncio
+async def test_a_mailbox_send_lands_on_an_owner_too_busy_to_prepare_a_view(
+    peer_pair: Devices, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The live bounce (2026-11-14, 0.102.5), over two real relays and a real session.
+
+    The owner's session loop is held busy, the state a long, mid-turn session is
+    in. CONTROL: a viewer's bind on that owner is refused with ``bind_failed`` —
+    a remote viewer negotiates a display window, which the owner must capture on
+    that loop within ``_REMOTE_HISTORY_BIND_WAIT_S`` — so the pilot's old mailbox
+    path, which bound a viewer first, could never write the message. THE ACT: the
+    same owner, still busy past that 2 s cliff, takes a mailbox send through the
+    view-free dial, and the receipt says delivered only once the owner's
+    admission ack arrives (it cannot while the loop is held: the send is still
+    pending at release). The row is then in the OWNER's transcript.
+    """
+    from local_operator.network import cli as net_cli
+    from local_operator.session.remote_open import open_remote_viewer
+    from local_operator.session.runtime.server import RuntimeServer
+
+    # THE SERVING PLANE ON ITS OWN THREAD, as ``process.amain`` runs it in
+    # production (``runtime.start()``): the shared rig serves in-process, where a
+    # held session loop also parks the welcome and the dial fails a rung earlier
+    # ("did not answer") than the live bounce did. The live owner WELCOMED every
+    # dial (``session_stream_opened role=owner``) and then refused the bind.
+    async def _serve_on_its_own_thread(self: RuntimeServer) -> None:
+        self.start()
+        assert await self.wait_until_published(), "the runtime never published"
+
+    monkeypatch.setattr(RuntimeServer, "start_in_process", _serve_on_its_own_thread)
+
+    created = await asyncio.to_thread(
+        _create_named_session_on_a_real_peer, peer_pair, monkeypatch, name="busy", prompt="first"
+    )
+    release = threading.Event()
+    try:
+        # An ENGAGED session, as the live one was: the owner refuses a peer
+        # message into a conversation whose owner has not typed yet.
+        await asyncio.to_thread(created.owner.wait_for_turn)
+        monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(created.server_a.root))
+        entered = threading.Event()
+
+        def _hold_owner_loop() -> None:
+            entered.set()
+            release.wait(net_fixtures.NET_WAIT_BUDGET_S)
+
+        created.owner._loop.call_soon_threadsafe(_hold_owner_loop)  # noqa: SLF001
+        assert await asyncio.to_thread(
+            entered.wait, net_fixtures.NET_WAIT_BUDGET_S
+        ), "the owner loop was not held"
+
+        async def _never() -> Any:
+            raise AssertionError("a remote viewer never takes over")
+
+        viewer = await open_remote_viewer(
+            created.session_id, config_dir=created.server_a.root, takeover=_never
+        )
+        assert viewer is not None
+        try:
+            with pytest.raises(ConnectionError, match="could not prepare this view"):
+                await viewer.bind_runtime()
+        finally:
+            await viewer.dispose()
+
+        # THE FRAME REACHING THE OWNER is the event this waits on, not a clock:
+        # the handle's receiver is entered on the serving thread before it hops
+        # to the held session loop, so seeing it proves the message got past the
+        # point the viewer path never left, while the loop still cannot ack.
+        arrived = threading.Event()
+        receive = created.owner.handle.receive_peer_message
+
+        @functools.wraps(receive)
+        async def _observed(*args: Any, **kwargs: Any) -> Any:
+            arrived.set()
+            return await receive(*args, **kwargs)
+
+        monkeypatch.setattr(created.owner.handle, "receive_peer_message", _observed)
+
+        act = asyncio.create_task(
+            net_cli._pilot_act(  # noqa: SLF001 — the act the CLI and the tool both run
+                verb="send",
+                session_id=created.session_id,
+                peer=created.server_b.identity.device_id,
+                text="mailbox while the owner is busy",
+                config_dir=created.server_a.root,
+                mailbox=net_cli._MailboxMode(wake=False, now=False),  # noqa: SLF001
+            )
+        )
+        assert await asyncio.to_thread(
+            net_fixtures.wait_for, arrived.is_set
+        ), "the mailbox frame never reached the owner"
+        # Still held, so no admission yet: "delivered" must wait for the ACK.
+        assert not act.done(), act.result() if act.done() else None
+        release.set()
+        payload, _lines = await asyncio.wait_for(act, net_fixtures.NET_WAIT_BUDGET_S)
+        assert payload["ok"] is True and payload["outcome"] == "delivered", payload
+        assert payload["delivery_path"] == "mailbox" and "fallback" not in payload
+        assert not payload["delivery"].get("duplicate"), payload
+        assert await asyncio.to_thread(
+            net_fixtures.wait_for,
+            lambda: "mailbox while the owner is busy"
+            in json.dumps(created.owner.transcript_entries()),
+        ), "the owner acked a message its transcript does not hold"
+    finally:
+        release.set()
+        # The threaded serving plane closes from any thread (``close``); the
+        # rig's own teardown then has no in-process runtime left to ``aclose``.
+        runtime = created.owner.runtime
+        await asyncio.to_thread(runtime.close)
+
+        async def _already_closed() -> None:
+            return None
+
+        monkeypatch.setattr(runtime, "aclose", _already_closed)
+        await asyncio.to_thread(_stop_real, created.served)
 
 
 def test_a_refused_stream_open_writes_no_close_row(

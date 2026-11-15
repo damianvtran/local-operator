@@ -673,3 +673,148 @@ def test_ci_run_admits_full_suite_and_rejects_other_workflows(
     # Past the workflow gate: it now fails on the (empty) shard matrix instead.
     with pytest.raises(ValueError, match="no unit shard jobs"):
         generator.ci_run(1, 1, tmp_path)
+
+
+# One partition serves both matrix legs, so `--python 3.12 --python 3.13` weighs
+# each file at the slower leg's p75 (shard 3.12-0 ran out of time on a 3.12-only
+# weight that 3.13 data had not raised, and vice versa is equally possible).
+@pytest.mark.parametrize("pythons", [[], ["3.12", "3.13"]])
+def test_python_legs_take_the_per_file_max_of_each_legs_p75(
+    pythons: list[str], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    measured = {
+        # 3.12 p75 of (1, 5, 9) is 7; 3.13 p75 of (2, 2, 4) is 3 -> 7.
+        "3.12": {"tests/unit/test_a.py": [1.0, 5.0, 9.0], "tests/unit/test_b.py": [1.0, 1.0, 1.0]},
+        # 3.12 p75 of b is 1; 3.13 p75 of (10, 20, 30) is 25 -> 25.
+        "3.13": {
+            "tests/unit/test_a.py": [2.0, 2.0, 4.0],
+            "tests/unit/test_b.py": [10.0, 20.0, 30.0],
+        },
+    }
+    calls: list[tuple[int, str]] = []
+
+    def fake_ci_run(run_id: int, attempt: int, cache: Path, python: str = "3.12"):
+        calls.append((run_id, python))
+        totals = {path: values[run_id - 1] for path, values in measured[python].items()}
+        return totals, {"run_id": run_id, "attempt": attempt, "python": python, "shards": []}
+
+    monkeypatch.setattr(generator, "ci_run", fake_ci_run)
+    out = tmp_path / "durations.json"
+    args = ["--cache-dir", str(tmp_path), "--out", str(out)]
+    for run_id in (1, 2, 3):
+        args.extend(["--ci-run", f"{run_id}:1"])
+    for python in pythons:
+        args.extend(["--python", python])
+    assert generator.main(args) == 0
+    manifest = generator.json.loads(out.read_text())
+    provenance = manifest["_provenance"]
+    if not pythons:
+        # The default stays the #3284 single-leg route, byte-compatible.
+        assert calls == [(1, "3.12"), (2, "3.12"), (3, "3.12")]
+        assert manifest["durations"] == {"tests/unit/test_a.py": 7.0, "tests/unit/test_b.py": 1.0}
+        assert provenance["method"] == "p75-inclusive-per-run-file-total"
+        assert "pythons" not in provenance
+        assert provenance["samples_per_file"] == {
+            "tests/unit/test_a.py": 3,
+            "tests/unit/test_b.py": 3,
+        }
+        return
+    assert sorted(calls) == [(r, p) for r in (1, 2, 3) for p in ("3.12", "3.13")]
+    assert manifest["durations"] == {"tests/unit/test_a.py": 7.0, "tests/unit/test_b.py": 25.0}
+    assert provenance["method"] == "max-over-python-of-p75-inclusive-per-run-file-total"
+    assert provenance["pythons"] == ["3.12", "3.13"]
+    assert [(r["run_id"], r["python"]) for r in provenance["runs"]] == [
+        (r, p) for p in ("3.12", "3.13") for r in (1, 2, 3)
+    ]
+    assert provenance["samples_per_file"] == {"tests/unit/test_a.py": 6, "tests/unit/test_b.py": 6}
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        ["--python", "3.12", "--python", "3.12"],  # a repeated leg would bias nothing but is a typo
+        ["--python", "py3.13"],
+        ["--python", "3.13; rm"],
+    ],
+)
+def test_python_legs_are_validated_before_fetching(
+    extra: list[str], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fetch = Mock()
+    monkeypatch.setattr(generator, "ci_run", fetch)
+    args = ["--cache-dir", str(tmp_path), *extra]
+    for run_id in (1, 2, 3):
+        args.extend(["--ci-run", f"{run_id}:1"])
+    with pytest.raises(SystemExit) as error:
+        generator.main(args)
+    assert error.value.code == 2
+    fetch.assert_not_called()
+
+
+def test_python_applies_only_to_ci_mode(tmp_path: Path) -> None:
+    report = tmp_path / "report.xml"
+    report.write_text(
+        '<testsuite><testcase classname="tests.unit.test_paths" time="2"/></testsuite>'
+    )
+    with pytest.raises(SystemExit) as error:
+        generator.main(["--junit", str(report), "--python", "3.13", "--out", str(tmp_path / "o")])
+    assert error.value.code == 2
+    assert not (tmp_path / "o").exists()
+
+
+def test_a_313_leg_reads_only_its_own_jobs_and_artifacts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Both legs share a run; the 3.13 leg must never fold in a 3.12 shard.
+    monkeypatch.setattr(generator, "_source_matrix", lambda *_: ([0, 1], {}))
+    jobs, artifacts = [], []
+    for leg_index, python in enumerate(("3.12", "3.13")):
+        for shard in (0, 1):
+            jobs.append(
+                {
+                    "id": 100 + 10 * leg_index + shard,
+                    "name": f"test ({python}, {shard})",
+                    "conclusion": "success",
+                    "started_at": "2026-11-01T01:00:00Z",
+                    "completed_at": "2026-11-01T02:00:00Z",
+                }
+            )
+            artifacts.append(
+                {
+                    "id": 1000 + 10 * leg_index + shard,
+                    "name": f"junit-timings-{python}-{shard}-attempt-1",
+                    "created_at": "2026-11-01T01:30:00Z",
+                    "expired": False,
+                }
+            )
+    responses = iter(
+        [
+            {
+                "status": "completed",
+                "conclusion": "success",
+                "head_sha": "abc",
+                "path": ".github/workflows/full-suite.yml",
+            },
+            {"jobs": jobs},
+            {"total_count": len(artifacts), "artifacts": artifacts},
+        ]
+    )
+    monkeypatch.setattr(generator, "_gh_json", lambda _: next(responses))
+    archive = io.BytesIO()
+    with zipfile.ZipFile(archive, "w") as zipped:
+        for filename in [
+            "junit-3.13-0.xml",
+            "junit-3.13-1.xml",
+            "junit-serial-controls-3.13-0.xml",
+        ]:
+            zipped.writestr(
+                filename,
+                '<testsuite><testcase classname="tests.unit.test_paths" time="3"/></testsuite>',
+            )
+    download = Mock(return_value=archive.getvalue())
+    monkeypatch.setattr(generator.subprocess, "check_output", download)
+    totals, provenance = generator.ci_run(123, 1, tmp_path, "3.13")
+    assert totals == {"tests/unit/test_paths.py": 9.0}  # two shards + shard-0 serial controls
+    assert provenance["python"] == "3.13"
+    assert [s["artifact_id"] for s in provenance["shards"]] == [1010, 1011]
+    assert [s["job_id"] for s in provenance["shards"]] == [110, 111]
