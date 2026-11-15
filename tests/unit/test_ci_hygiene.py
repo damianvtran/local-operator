@@ -4258,6 +4258,22 @@ def test_full_suite_changes_job_matches_ci() -> None:
         "python3 scripts/gate_merge_base.py apply",
     ]
     full["steps"] = [s for s in full["steps"] if s not in gate_steps]
+    # #4074: the affected-lane planner step and its `lane*` outputs are the
+    # third and last full-suite-only addition. Pinned exactly (one step, the
+    # five outputs) so the strip cannot hide a drifting classifier.
+    lane_steps = [s for s in full["steps"] if s.get("id") == "lane"]
+    assert len(lane_steps) == 1 and "scripts/fixture_lane.py" in lane_steps[0]["run"]
+    full["steps"] = [s for s in full["steps"] if s not in lane_steps]
+    lane_outputs = sorted(k for k in full["outputs"] if k.startswith("lane"))
+    assert lane_outputs == [
+        "lane",
+        "lane_planner_base",
+        "lane_planner_blob",
+        "lane_reason",
+        "lane_targets",
+    ]
+    for key in lane_outputs:
+        del full["outputs"][key]
     assert full == _pr_jobs()["changes"]
 
 
@@ -4312,7 +4328,11 @@ def test_every_full_suite_checkout_is_rebuilt_on_the_run_main_tip() -> None:
         "id": "gate_base",
         "run": "python3 scripts/gate_merge_base.py resolve",
     }
-    assert jobs["test"]["outputs"] == {"gate_base": "${{ needs.changes.outputs.gate_base }}"}
+    assert jobs["test"]["outputs"] == {
+        "gate_base": "${{ needs.changes.outputs.gate_base }}",
+        # #4074: pass-through so `coverage-report` (needs: test only) can skip itself
+        "lane": "${{ needs.changes.outputs.lane }}",
+    }
     # The greppable per-job line the requester asked for, and the comment
     # that tells a log reader how to check it.
     from scripts import gate_merge_base
