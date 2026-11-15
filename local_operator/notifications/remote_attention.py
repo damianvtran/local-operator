@@ -108,6 +108,7 @@ BEST-EFFORT BY CONTRACT, like the park module: nothing here raises.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import threading
@@ -199,35 +200,77 @@ def origin_is_operator_started(origin: Any) -> bool:
     return str(origin.get(STARTED_BY_FIELD) or "") == OPERATOR_STARTED
 
 
-#: ``(path, size, mtime_ns) -> {child: origin}`` for the lineage registry: a
+#: ``path -> (stamp, {child: origin} | None)`` for the lineage registry: a
 #: listing classifies every row, and the registry is append-only, so it is
-#: re-read only when it grows or changes.
-_lineage_memo: dict[str, tuple[tuple[int, int], dict[str, str]]] = {}
+#: re-read only when its stat stamp moves. ``None`` is a registry that EXISTS
+#: but cannot be trusted (S6-r3), which classifies every session as an agent's.
+#: The stamp carries ``st_ctime_ns`` and ``st_mode`` because a ``chmod`` changes
+#: neither size nor mtime, and a memo keyed on those alone would keep serving
+#: the rows read before the registry was made unreadable.
+_lineage_memo: dict[str, tuple[tuple[int, int, int, int, int], dict[str, str] | None]] = {}
+
+
+def _read_lineage_strict(path: Path) -> dict[str, str] | None:
+    """``{child: origin}`` from an EXISTING registry, or ``None`` if it is not trustworthy.
+
+    ``provenance.read_lineage`` deliberately swallows every error (a spawn's
+    adoption logic must never fail on it), which here would read "no agent rows"
+    — the permissive answer. This reader distinguishes the cases S6-r3 needs:
+    an open/read error (permission, IO, a symlink refused by ``O_NOFOLLOW``),
+    a 0-byte file and a file with no parseable row all answer ``None``.
+    ``record_lineage`` only ever appends complete JSON rows and never truncates,
+    so none of those is a state the harness itself leaves behind. Same
+    first-row-wins semantics as ``provenance.read_lineage``.
+    """
+    out: dict[str, str] = {}
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+        with os.fdopen(fd, encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                try:
+                    row = json.loads(line)
+                except ValueError:
+                    continue
+                child = row.get("child") if isinstance(row, dict) else None
+                if isinstance(child, str) and child and child not in out:
+                    out[child] = str(row.get("origin") or "")
+    except OSError:
+        return None
+    return out or None
 
 
 def _lineage_says_agent(root: Path, session_id: str) -> bool:
     """The harness lineage registry records ``session_id`` as agent-opened (S6).
 
-    An unreadable registry says nothing (the ``origin.json`` rule then decides,
-    as before); only a recorded agent origin flips the answer, toward deny.
+    FAIL CLOSED (security review S6-r3, manager direction): a registry that
+    EXISTS but cannot be read, is empty, or has no parseable row is evidence of
+    tampering — the session's own approved interpreter call can reach the file
+    (HIGH), and emptying or ``chmod 000``-ing it would otherwise erase every
+    agent row and let an agent session's ``notify`` travel. Such a registry
+    answers "agent" for every session. Only an ABSENT registry (a fresh install
+    whose first spawn has not happened) says nothing, and the ``origin.json``
+    rule decides as in round 2. Asks never reach this function's verdict.
     """
     from local_operator.guardrails import provenance
 
     path = provenance.lineage_path(root)
     try:
-        info = os.stat(path)
-    except OSError:
+        info = os.lstat(path)
+    except FileNotFoundError:
         return False
-    stamp = (info.st_size, info.st_mtime_ns)
+    except OSError:
+        return True
+    stamp = (info.st_size, info.st_mtime_ns, info.st_ctime_ns, info.st_mode, info.st_ino)
     cached = _lineage_memo.get(str(path))
     if cached is None or cached[0] != stamp:
-        rows = provenance.read_lineage(root)
-        origins = {child: str(row.get("origin") or "") for child, row in rows.items()}
         if len(_lineage_memo) > 16:
             _lineage_memo.clear()
-        _lineage_memo[str(path)] = (stamp, origins)
+        _lineage_memo[str(path)] = (stamp, _read_lineage_strict(path))
         cached = _lineage_memo[str(path)]
-    origin = cached[1].get(session_id)
+    origins = cached[1]
+    if origins is None:
+        return True
+    origin = origins.get(session_id)
     return origin is not None and origin not in provenance._HUMAN_ORIGINS  # noqa: SLF001
 
 

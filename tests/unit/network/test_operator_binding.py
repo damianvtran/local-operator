@@ -1220,3 +1220,155 @@ def test_the_dry_run_names_a_card_it_could_not_check(rig: Rig) -> None:
         }
     ]
     assert ob.own_proofs(rig.mac, NET, for_device=NODE) == [], "fails closed"
+
+
+# ---------------------------------------------------------------------------
+# Round 3: the Mac's trusted-node set (Q4) and a tampered registry (S6-r3)
+# ---------------------------------------------------------------------------
+
+
+def _mac_listing(rig: Rig, owner: str, row: dict[str, Any]) -> list[Any]:
+    """The Mac's REAL listing path (``peer_rows.peer_session_rows``) over ``row``.
+
+    Only the relay catalogue is a double; the Mac's ``bound_nodes`` read runs
+    against its own root, as in production.
+    """
+    from local_operator.network.projection import PeerRow
+    from local_operator.session import peer_rows
+
+    class _Peer:
+        device_id = owner
+        name = "node"
+        network_id = NET
+        reachable = True
+        reason = ""
+
+    class _Catalog:
+        def peers(self) -> list[Any]:
+            return [_Peer()]
+
+        def rows(self) -> list[Any]:
+            return [PeerRow.from_json(row, device_id=owner)]
+
+    return list(peer_rows.peer_session_rows(rig.mac, ttl_s=0, catalog=_Catalog()))
+
+
+def _notice_keys(rows: list[Any]) -> list[str]:
+    [row] = rows
+    return [str(claim[0]) for claim in (row.remote_notices or ())]
+
+
+def test_q4_a_card_bound_nodes_notify_passes_the_macs_real_listing(rig: Rig) -> None:
+    """Q4: a node bound only by a signed card (no onboarding record) gets its notify raised.
+
+    Before the fix the Mac's filter read ``onboarded_devices`` alone, so the
+    node said "will be forwarded" (it accepted the card) while the Mac dropped
+    the notify.
+    """
+    _card(rig)
+    assert ob.onboarded_devices(rig.mac) == {}
+    [proof] = ob.own_proofs(rig.mac, NET, for_device=NODE)
+    assert ob.accept_presented(rig.node, rig.link(rig.mac_id), {"proofs": [proof]})["accepted"]
+    assert ob.bound_devices(rig.mac) == frozenset({NODE})
+    assert ob.bound_devices(rig.mac, NET) == frozenset({NODE})
+    assert ob.bound_devices(rig.mac, "n_other") == frozenset()
+    _node_started_session(rig.node)
+    assert ob.operator_device(rig.node) == (rig.mac_id, NET), "the node's side says bound"
+    keys = _notice_keys(_mac_listing(rig, NODE, _listing(rig, rig.mac_id)))
+    assert "build" in keys, "the node said forwarded; the Mac must raise it"
+    assert any(key.startswith(ra.ASK_NOTICE_PREFIX) for key in keys)
+
+
+def test_q4_a_co_members_notify_does_not_pass_the_macs_filter(rig: Rig) -> None:
+    """A co-member with no card and no onboarding record raises asks only."""
+    _card(rig)  # NODE is bound; CO is not
+    [proof] = ob.own_proofs(rig.mac, NET, for_device=NODE)
+    assert ob.accept_presented(rig.node, rig.link(rig.mac_id), {"proofs": [proof]})["accepted"]
+    assert CO not in ob.bound_devices(rig.mac)
+    _node_started_session(rig.node)
+    # The bytes a (hostile or misconfigured) co-member could put on its own row:
+    # the bound node's own listing, replayed as CO's.
+    forged = _listing(rig, rig.mac_id)
+    keys = _notice_keys(_mac_listing(rig, CO, forged))
+    assert "build" not in keys
+    assert any(key.startswith(ra.ASK_NOTICE_PREFIX) for key in keys), "asks still travel"
+
+
+@pytest.mark.parametrize("bound_by", ["card", "onboarding"])
+def test_q4_a_removed_nodes_notify_does_not_pass_the_macs_filter(rig: Rig, bound_by: str) -> None:
+    """Membership is the revocation lever on the Mac's side too, for either binding."""
+    if bound_by == "card":
+        _card(rig)
+    else:
+        _onboard(rig)
+    assert NODE in ob.bound_devices(rig.mac)
+    [proof, *_] = ob.own_proofs(rig.mac, NET, for_device=NODE)
+    assert ob.accept_presented(rig.node, rig.link(rig.mac_id), {"proofs": [proof]})["accepted"]
+    _node_started_session(rig.node)
+    row = _listing(rig, rig.mac_id)
+    assert "build" in _notice_keys(_mac_listing(rig, NODE, row)), "bound: raised"
+    network = net_store.load(NET, rig.mac)
+    for member in network.members:
+        if member.device_id == NODE:
+            member.lifecycle = "expired"
+            member.removed_at = time.time()
+    net_store.save(network, rig.mac)
+    assert NODE not in ob.bound_devices(rig.mac)
+    assert "build" not in _notice_keys(_mac_listing(rig, NODE, row))
+
+
+def _agent_classification_after(rig: Rig, tamper: Any) -> None:
+    """A recorded agent session, ``origin.json`` absent, registry tampered by ``tamper``."""
+    from local_operator.guardrails import provenance
+    from local_operator.resume import ORIGIN_NAME
+
+    _bind(rig)
+    _node_started_session(rig.node)
+    assert not (rig.node / "sessions" / SID / ORIGIN_NAME).exists()
+    provenance.record_lineage(SID, origin="subagent", parent="s_parent", state_root=rig.node)
+    assert not ra.is_non_agent_session(rig.node, SID, None, started_here=True)  # memo primed
+    tamper(provenance.lineage_path(rig.node))
+    assert not ra.is_non_agent_session(rig.node, SID, None, started_here=True)
+    # Any session, not only the one the registry named: the rows are gone.
+    assert not ra.is_non_agent_session(rig.node, "s_unrecorded", None, started_here=True)
+    row = _listing(rig, rig.mac_id)
+    assert "build" not in json.dumps(row.get("notices", {})), "notify stays node-only"
+    assert "remote-ask:" in json.dumps(row.get("notices", {})), "its ask still travels"
+
+
+@pytest.mark.skipif(
+    hasattr(__import__("os"), "geteuid") and __import__("os").geteuid() == 0,
+    reason="root reads a mode-000 file",
+)
+def test_s6_r3_an_unreadable_registry_fails_closed(rig: Rig) -> None:
+    import os
+
+    path_holder: list[Path] = []
+
+    def lock(path: Path) -> None:
+        path_holder.append(path)
+        os.chmod(path, 0)
+
+    try:
+        _agent_classification_after(rig, lock)
+    finally:
+        for path in path_holder:
+            os.chmod(path, 0o600)
+
+
+@pytest.mark.parametrize("how", ["emptied", "garbage"])
+def test_s6_r3_an_emptied_or_unparseable_registry_fails_closed(rig: Rig, how: str) -> None:
+    def tamper(path: Path) -> None:
+        path.write_text("" if how == "emptied" else "not json\n{\n", encoding="utf-8")
+
+    _agent_classification_after(rig, tamper)
+
+
+def test_s6_r3_an_absent_registry_keeps_the_round_2_baseline(rig: Rig) -> None:
+    from local_operator.guardrails import provenance
+
+    _bind(rig)
+    _node_started_session(rig.node)
+    assert not provenance.lineage_path(rig.node).exists()
+    assert ra.is_non_agent_session(rig.node, SID, None, started_here=True)
+    assert "build" in json.dumps(_listing(rig, rig.mac_id).get("notices", {}))

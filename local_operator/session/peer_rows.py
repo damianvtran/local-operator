@@ -631,8 +631,9 @@ def _attested_notices(
     no owner build before the binding put notices on such a row, so the legacy
     flood this filter guards against cannot arrive on one. Its ``notify`` items
     pass — only from an owner this device presented its proof to
-    (``bound_nodes``: ``operator_binding.onboarded_devices``, the nodes this
-    Mac onboarded, so a co-member it never bound cannot raise one) and unless
+    (``bound_nodes``: ``operator_binding.bound_devices``, the active nodes this
+    Mac onboarded or holds a signed credential card for, so a co-member it
+    never bound cannot raise one) and unless
     the row itself says an agent started it. The owner already
     applied ``remote_attention.is_non_agent_session`` (manager rule,
     2026-11-15: ``notify`` from operator- or node-started NON-AGENT sessions
@@ -657,11 +658,16 @@ def _attested_notices(
 
 
 def _bound_nodes(root: Path) -> frozenset[str]:
-    """Mesh ids this device onboarded (its operator-binding presentees). Never raises."""
-    try:
-        from local_operator.network.operator_binding import onboarded_devices
+    """Mesh ids this device binds (its operator-binding presentees). Never raises.
 
-        return frozenset(device for _network, device in onboarded_devices(root).values())
+    ``bound_devices``, not ``onboarded_devices`` (PR #4030 QA R3, Q4): a node
+    bound by a credential card has no onboarding record, and must not be told
+    "forwarded" by its binding while this listing drops its notify.
+    """
+    try:
+        from local_operator.network.operator_binding import bound_devices
+
+        return bound_devices(root)
     except Exception:  # noqa: BLE001 — no binding, no started-on-owner notices
         return frozenset()
 

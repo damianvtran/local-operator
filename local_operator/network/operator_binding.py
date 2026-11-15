@@ -683,6 +683,40 @@ def _presentable(
     return out
 
 
+def bound_devices(root: Path | None, network_id: str = "") -> frozenset[str]:
+    """Mesh ids this Mac BINDS: the devices it presents a proof to. Never raises.
+
+    WHY (PR #4030 QA R3, Q4). The Mac's listing accepts a started-on-owner
+    ``notify`` only from a node it is the operator for. It used to read that set
+    from :func:`onboarded_devices` alone — but a node joined by invite and bound
+    through a signed credential CARD has no onboarding record by design, so the
+    node told its session "will be forwarded" (it accepted the card) while the
+    Mac dropped every notify it sent. The trusted set must be exactly what this
+    Mac PRESENTS, so the two ends cannot disagree: the union of the
+    onboarding-recorded nodes and the signed card recipients, each still an
+    ACTIVE, unburned member here (:func:`_presentable` applies that check live,
+    so a removed or burned node raises nothing). A co-member with neither
+    record is never in it. ``network_id`` narrows to one network; ``""`` is
+    every network (the listing's rows do not carry which membership they came
+    over).
+    """
+    try:
+        presentable = _presentable(root)
+        out = {device for net, device in presentable if not network_id or net == network_id}
+        # An onboarding record whose approval was pruned or is unreadable still
+        # names a node this Mac's runner admitted; keep it, under the same
+        # live active-member check the presentable set applies.
+        for net, device in onboarded_devices(root).values():
+            if network_id and net != network_id:
+                continue
+            if device not in out and _active_member(root, net, device):
+                out.add(device)
+        return frozenset(out)
+    except Exception:  # noqa: BLE001 — no readable binding, no started-on-owner notices
+        logger.debug("operator binding: bound devices unreadable", exc_info=True)
+        return frozenset()
+
+
 def _refused_cards(root: Path | None) -> list[dict[str, Any]]:
     """Own, operator-signed credential cards that are NOT proofs, and why (ids only).
 
