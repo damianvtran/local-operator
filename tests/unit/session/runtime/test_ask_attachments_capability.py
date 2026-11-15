@@ -130,7 +130,9 @@ async def test_a_text_only_frame_calls_the_handle_exactly_as_it_always_did() -> 
 
     legacy = LegacyHandle()
     await _server(legacy)._dispatch("ask_respond", _frame())
-    assert legacy.ask_calls == [("a-1", {"q1": ["see this"]}, "desktop")]
+    # The frame says ``desktop``; a direct ``_dispatch`` proves no capability, so
+    # the runtime stamps ``unverified`` (``asks/surfaces.stamp_answer_surface``).
+    assert legacy.ask_calls == [("a-1", {"q1": ["see this"]}, "unverified")]
 
 
 @pytest.mark.asyncio

@@ -73,6 +73,12 @@ _FS_MODULES = frozenset({"os", "shutil", "pathlib"})
 #: count with a reason, and a removed one fails as stale.
 _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
     (
+        "local_operator/network/credentials/github.py::use_default_repositories",
+        "<path>.unlink",
+        "Explicit owner opt-in removes only network/github-designation-delivered.json, "
+        "the fixed device-local clear marker, never a session member; unlink refuses directories.",
+    ),
+    (
         "local_operator/definition_transaction.py::_durable_json",
         "os.replace",
         "Publishes the O_EXCL-created regular JSON temp file; "
@@ -102,6 +108,15 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "local_operator/profile_scope.py::save_profile_backup",
         "<path>.unlink",
         "Cleans only this call's mkstemp .json FILE; unlink rejects directories.",
+    ),
+    # ``spawn_stamp`` reads the filesystem clock off a marker it creates with
+    # ``tempfile.mkstemp`` (no ``dir``: the temp dir) and removes it at once;
+    # the path is never caller-supplied and is always that regular FILE.
+    (
+        "local_operator/guardrails/interrupted_worktree_add.py::spawn_stamp",
+        "os.unlink",
+        "Unlinks only the .lop-spawn-stamp-* mkstemp FILE this call just created in the "
+        "temp dir; unlink rejects directories.",
     ),
     # Build output is the one `lop disk reclaim` category the module deletes
     # itself: no tool owns the removal of a `target`/`.next`/`build`/`dist`
@@ -2050,6 +2065,18 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "os.unlink",
         "that temp FILE, only while the write above is failing",
     ),
+    # The daemon's file-descriptor limits record (`mobile/fdlimit.py`), read back
+    # by `lop mobile doctor`. `record` writes `<path>.tmp` then atomically replaces
+    # `limits_path()`, which takes NO arguments and is always
+    # `config_dir() / "mobile" / "daemon-limits.json"` — a fixed basename in the
+    # mobile config subdirectory, with no session id and no caller input, so
+    # neither the temp nor the target can name a path under `sessions/`.
+    (
+        "local_operator/mobile/fdlimit.py::record",
+        "os.replace",
+        "temp FILE -> <config_dir>/mobile/daemon-limits.json; both names are "
+        "config-root-derived with a fixed basename",
+    ),
     ("local_operator/mobile/seen.py::SeenStore._persist_locked", "os.replace", "temp FILE"),
     ("local_operator/mobile/seen.py::SeenStore._persist_locked", "os.unlink", "temp FILE"),
     # The push device registry (`mobile/push_devices.py`): one JSON store at a fixed
@@ -2476,6 +2503,38 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "plist/unit FILEs; state_store.remove()",
     ),
     ("local_operator/browser_bridge/state.py::remove", "<path>.unlink", "bridge state FILE"),
+    # node_host.py (`lop browser setup/uninstall` on a headless mesh node).
+    # Every path it writes or removes is a FILE under `<config>/browser/`,
+    # `~/.config/systemd/user/`, or a mkstemp/mkdtemp in the system temp dir —
+    # none is derived from a session id or the sessions/ tree.
+    (
+        "local_operator/browser_bridge/node_host.py::_write_private",
+        "os.replace",
+        "mkstemp temp FILE onto the node record/unit/update manifest/signing key "
+        "(<config>/browser/… or ~/.config/systemd/user/…); os.replace rejects a "
+        "directory target",
+    ),
+    (
+        "local_operator/browser_bridge/node_host.py::_write_private",
+        "os.unlink",
+        "its own mkstemp temp FILE, on a failed write",
+    ),
+    (
+        "local_operator/browser_bridge/node_host.py::_Plan._sudo_install_file",
+        "os.unlink",
+        "its own NamedTemporaryFile in the system temp dir, after `sudo install`",
+    ),
+    (
+        "local_operator/browser_bridge/node_host.py::setup",
+        "shutil.rmtree",
+        "the run's own tempfile.mkdtemp(prefix='lop-node-ext-') extension unpack "
+        "dirs (plan.scratch), in the system temp dir",
+    ),
+    (
+        "local_operator/browser_bridge/node_host.py::uninstall._remove_unit",
+        "<path>.unlink",
+        "the node browser's systemd user unit FILE (~/.config/systemd/user/…)",
+    ),
     (
         "local_operator/evaluation/adapters/supervisor.py::discard_rescue",
         "os.unlink",
@@ -2798,6 +2857,36 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
     # i.e. a sibling of the reserved name. A record's ``install_root`` is only
     # ever read to ADD to ``wanted`` (protecting a generation), never to choose
     # a path to delete, which is why a hostile record cannot redirect it.
+    # The BTM launcher plant: every path is ``launcher_bundle_path()`` (a fixed
+    # name under ``<stable root>/bin``) or a ``mkdtemp`` staging dir this call
+    # created beside it. No session id, config dir or caller input reaches them.
+    (
+        "local_operator/update.py::ensure_daemon_launcher",
+        "os.rename",
+        "Swaps <stable>/bin/Local Operator.lopruntime with this call's own staging "
+        "copy (aside, publish, and restore on failure)",
+        3,
+    ),
+    (
+        "local_operator/update.py::ensure_daemon_launcher",
+        "shutil.rmtree",
+        "Removes this call's own mkdtemp staging dir under <stable>/bin",
+        1,
+    ),
+    (
+        "local_operator/update.py::_sweep_legacy_episode_plists",
+        "<path>.unlink",
+        "Deletes a ~/Library/LaunchAgents/com.damian.lop-episode.*.plist FILE "
+        "(globbed by fixed prefix, never a directory, never under sessions/)",
+        1,
+    ),
+    (
+        "local_operator/procname.py::publish_team_runtime_result",
+        "os.rename",
+        "Moves an unmarked <runtime root>/<key>-team tree aside to <key>-team.dead.<pid>."
+        "<thread>, the plant-scratch name _sweep_orphan_plants reclaims",
+        1,
+    ),
     (
         "local_operator/update.py::_remove_tree_unlocked",
         "shutil.rmtree",
@@ -2939,6 +3028,28 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
     ),
     ("local_operator/update.py::_write_cache", "<path>.replace", "temp FILE -> update cache FILE"),
     ("local_operator/update.py::_write_cache", "<path>.unlink", "temp FILE -> update cache FILE"),
+    # The background daemon-refresh hand-off (PR #4004). Its run directories live
+    # under ``_refresh_runs_root()`` = ``<config>/update/refresh``, created by
+    # ``tempfile.mkdtemp(dir=<that root>)``; no session id or caller-supplied path
+    # names either target. The rmtree is confined IN the function, not by its
+    # caller: it refuses a symlink, anything whose resolved parent is not the
+    # resolved runs root, and any name that is not ``<unit>-<stamp>-<suffix>``
+    # for the unit being pruned (``test_update_refresh_handoff.py`` pins each
+    # refusal with a crafted path).
+    (
+        "local_operator/update.py::_remove_refresh_run",
+        "shutil.rmtree",
+        "<config>/update/refresh/<unit>-<stamp>-<suffix> ENDED run dir only; refuses symlinks, "
+        "non-children of the resolved runs root and non-run names — never under sessions/",
+        1,
+    ),
+    (
+        "local_operator/update.py::_write_run_meta",
+        "os.replace",
+        "<run dir>/spec.json.tmp FILE -> <run dir>/spec.json FILE inside the refresh run dir "
+        "this update just mkdtemp'd under <config>/update/refresh; replace cannot remove a dir",
+        1,
+    ),
     # The install-provenance marker, written atomically after an upgrade. Both
     # calls are confined to the temp file this function itself created with
     # ``mkstemp`` inside the INSTALL prefix (a uv tool root), and the rename
@@ -3321,6 +3432,27 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "local_operator/tunnels/state.py::clear",
         "<path>.unlink",
         "Removes only the park FILE tunnel/state.json under the config dir; "
+        "never a directory, never under sessions/",
+    ),
+    # The tunnel remedies' own config-dir files (#3945, 2026-11-14). Both paths
+    # are the tunnel `config.directory()` plus a FIXED basename, exactly like
+    # `state.clear` above — never a session id, never caller input, never under
+    # `sessions/`. `invalidate_refinement` drops the cached inactive-cause FILE
+    # (`inactive-cause.json`) once a connect succeeds or setup runs, so a stale
+    # "suspended"/"billing" cause cannot outlive the state it described.
+    # `_bound_auto_setup_log` rotates `auto-setup.log` -> `.1` before each
+    # post-sign-in spawn (the child writes the file directly, so no logging
+    # handler can rotate it); source and target are both that fixed basename.
+    (
+        "local_operator/tunnels/service.py::invalidate_refinement",
+        "<path>.unlink",
+        "Removes only the inactive-cause.json cache FILE under the tunnel config dir; "
+        "never a directory, never under sessions/",
+    ),
+    (
+        "local_operator/tunnels/install.py::_bound_auto_setup_log",
+        "os.replace",
+        "Rotates the auto-setup.log FILE to auto-setup.log.N under the tunnel config dir; "
         "never a directory, never under sessions/",
     ),
     # The stall watchdog's own dump files (2026-09-20). `dump_path` composes

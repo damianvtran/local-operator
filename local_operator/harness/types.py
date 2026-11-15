@@ -976,6 +976,10 @@ def is_agent_forwarding_call(tool_name: str, arguments: Mapping[str, Any]) -> bo
     return operation not in _FORWARDING_READ_OPS.get(tool_name, frozenset())
 
 
+#: ``(before, after, preview_rows, full)`` -- see ``ToolResult._diff_source``.
+DiffSourceCarrier = tuple[str, str, tuple[str, ...], tuple[str, ...] | str | None]
+
+
 class ToolResult(BaseModel):
     """The outcome of executing one ``ToolCall``.
 
@@ -1014,7 +1018,10 @@ class ToolResult(BaseModel):
 
     # The write/edit SOURCE EVIDENCE: the complete raw ``before``/``after``
     # file texts plus the raw rendered diff preview, as
-    # ``(before, after, preview_rows)``. While it is attached,
+    # ``(before, after, preview_rows, full)``. ``full`` is the COMPLETE raw
+    # diff the preview was cut from (``None`` when nothing was cut, the string
+    # ``"oversized"`` past the archive ceiling); the seam archives its
+    # source-redacted form (``tools/diff_archive``). While it is attached,
     # ``details['diff']`` holds only the withheld receipt. The native loop's
     # seam (``AgentLoop._settle_write_diff``) redacts each COMPLETE side once,
     # masks every preview row whose source line the redactor touched, then runs
@@ -1031,7 +1038,7 @@ class ToolResult(BaseModel):
     # event copy or deep-copied trajectory row would keep raw file text alive.
     # Only the ORIGINAL object carries it; a result that never reaches the
     # seam keeps the withheld receipt (fail-closed by construction).
-    _diff_source: tuple[str, str, tuple[str, ...]] | None = PrivateAttr(default=None)
+    _diff_source: DiffSourceCarrier | None = PrivateAttr(default=None)
 
     def __copy__(self) -> "ToolResult":
         copied = super().__copy__()
@@ -1050,7 +1057,7 @@ class ToolResult(BaseModel):
             state = {**state, "__pydantic_private__": {**private, "_diff_source": None}}
         return state
 
-    def take_diff_source(self) -> tuple[str, str, tuple[str, ...]] | None:
+    def take_diff_source(self) -> DiffSourceCarrier | None:
         """Return and CLEAR the raw source-evidence carrier (single consumption)."""
         source = self._diff_source
         self._diff_source = None
@@ -2270,6 +2277,10 @@ class AskRowQuestion(AskQuestion):
     human_required: bool = False
     #: The authority block frozen at issuance (S-3), present only when supplied.
     bridge: dict[str, Any] | None = None
+    #: A headless node's site approval: the inputs its ``site:v1:`` question id
+    #: binds, so the SIGNER can rebuild the id and the card it shows
+    #: (``browser_bridge/site_approval.verify_site_card``). Present only then.
+    site: dict[str, Any] | None = None
     # The row's options are the strict option PLUS the carriage's id, so the
     # field narrows to the seat-bearing subclass. A list is mutable and therefore
     # invariant, which pyright reports even though every ``AskRowOption`` IS an
@@ -2868,6 +2879,21 @@ class ToolContext(BaseModel):
     #: :attr:`enqueue_ask`: a plain callable returning ``{"ok", "text"/"error",
     #: "details"}``, resolved once per session turn.
     withdraw_ask: Callable[..., Mapping[str, Any]] | None = None
+    #: A headless node's site cards (``browser_bridge/site_approval.py``):
+    #: ``withdraw_site_asks(origin, keep_question_id="")`` settles (``moot``)
+    #: every OPEN site card in this session for ``origin`` except the one bound
+    #: to ``keep_question_id``, and returns the ask ids it withdrew. The browser
+    #: tool calls it on ``cancel_access`` and before raising a fresh card, so a
+    #: card bound to a dead extension entry never blocks the live one (review
+    #: U3/Q1). Bound beside :attr:`withdraw_ask`, ``None`` where it is.
+    withdraw_site_asks: Callable[..., list[str]] | None = None
+    #: ``site_ask_lapses(origin)``: how many of this session's site cards for
+    #: ``origin`` lapsed unanswered since the operator's last admitted chat
+    #: message. ``request_access`` refuses a further card past the one re-raise
+    #: (review U15); an operator reply re-opens one card plus one re-raise
+    #: (review R4-1). Bound beside
+    #: :attr:`withdraw_site_asks`, ``None`` where it is.
+    site_ask_lapses: Callable[[str], int] | None = None
     #: THE ASK GATE'S DOOR (design docs/design/ask-gate.md §2.2). Async — the
     #: tool awaits one forked clearance check BEFORE the unchanged enqueue.
     #: Bound under the same two conditions as :attr:`enqueue_ask` and ``None``
@@ -4159,6 +4185,16 @@ class LoopConfig(BaseModel):
     #: should hold to; anything that touches disk, a lock or a socket belongs on
     #: the far side of a queue, not here.
     capture_prepared_write: Callable[[ToolCall, ToolResult], None] | None = None
+    #: Durably bind a NESTED (``eval`` -> ``tool('write'|'edit')``) archived
+    #: full diff to this session as ``(outer_call_id, call_id, tool_name,
+    #: descriptor)``; returns ``True`` only once the binding is written. AWAITED
+    #: by the eval bridge before the descriptor reaches the nested end event or
+    #: the cell (see ``tools.diff_archive.NESTED_DIFF_BINDING_TYPE``): a nested
+    #: call has no tool row of its own, so this host-written journal entry is
+    #: what the diff routes prove membership with. ``None`` (a host without a
+    #: journal) or ``False`` downgrades the descriptor to ``unavailable``
+    #: rather than advertise an archive no route could serve.
+    bind_nested_diff: Callable[[str, str, str, dict[str, Any]], Awaitable[bool]] | None = None
     #: The session's divergence observer (``local_operator.divergence.
     #: DivergenceJudge``), or ``None`` for a host that does not wire one.
     #:
@@ -4873,6 +4909,25 @@ class ChatRequest(BaseModel):
     top_p: float | None = None
     stop_sequences: list[str] = Field(default_factory=list)
     tool_choice: Literal["auto", "none", "required"] = "auto"
+    # Opt-in transport invariant, not a role-name special case. Failover must
+    # recheck it against the model and content it actually dispatches.
+    required_image_count: int = Field(default=0, ge=0)
+
+    def validate_required_images(self) -> None:
+        if not self.required_image_count:
+            return
+        count = sum(
+            isinstance(block, ImageContent)
+            for message in self.messages
+            for block in message.content
+        )
+        if (
+            not self.model.supports_images
+            or not self.model.supports_images_stated
+            or count < self.required_image_count
+        ):
+            raise ValueError("required image evidence cannot be sent to the serving model")
+
     # A reasoning-effort ceiling the harness set DELIBERATELY (an empty
     # truncation retry stepped the effort down one rung). The session's
     # frozen auto-effort override must not raise the request back above it:

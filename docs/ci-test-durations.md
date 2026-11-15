@@ -3,9 +3,53 @@
 The unit matrix has **six** shards and retains its **38-minute** job timeout,
 coverage commands, complete file selection, serial-control receipts and watchdogs.
 Only scheduling weights and the number of partitions change. More shards spend
-additional fleet capacity. The 2026-11-13 refresh below projects every shard
+additional fleet capacity. The 2026-11-13 refresh below (re-weighed over both
+Python legs on 2026-11-14) projects every shard
 under 38/1.15 = 33.0 minutes of job wall; that projection is the margin claim,
 and the PR gate run of the refresh is its first post-change observation.
+
+## 2026-11-14 regeneration: #3941's runs, max over both Python legs
+
+Two changes landed in parallel: #3941 (2026-11-13, below) refreshed the weights
+from three six-shard `main` runs using the 3.12 leg only, and #3843 (2026-11-12,
+below) taught the generator to weigh each file by the **max of the per-leg p75**
+over every `--python` leg it is given. Converging #3843 onto `main` regenerated
+`tests/durations.json` with #3843's generator from #3941's same three runs, both
+legs (the command under "Reproduce"); nothing was hand-edited.
+
+Checks on that regeneration (all on the merged tree):
+
+- Run with `--python 3.12` alone, the converged generator reproduces #3941's
+  committed manifest **byte-identically** (`cmp`), so the only change is the
+  second leg.
+- Every committed weight equals `max(p75 3.12, p75 3.13)` for its file (0
+  mismatches over 2,312 files); no weight fell below #3941's. 349 files take
+  their weight from the 3.13 leg. `test_attach_frame_size.py` stays 2337.1 s
+  (3.12; its 3.13 p75 is 1342.4 s).
+- `samples_per_file` counts (run, leg) observations: 2,297 files have all 6,
+  13 have 4, 2 have 2. A second regeneration was byte-identical.
+- `python scripts/shard_tests.py --report`: 2,334 files, 22 unmeasured
+  (fallback 31.6 s), 106.5 test-min per shard (#3941's manifest: 105.4–105.5).
+
+Both LPT assignments of the merged tree, rescored with each input run's
+measured per-file totals per leg (in-sample; unobserved files contribute 0).
+Job wall uses #3941's 3.12 conversion, test-min × 0.306 + 1.10; it was measured
+on 3.12 jobs only, so the 3.13 walls are indicative:
+
+| Run | Leg | #3941 assignment, test-min (job wall) | Converged assignment, test-min (job wall) |
+|---|---|---|---|
+| 43461090162 | 3.12 | 94.3 / 96.2 / 88.7 / 91.8 / 84.6 / 81.7 (30.0 / 30.5 / 28.2 / 29.2 / 27.0 / 26.1) | 94.9 / 93.6 / 86.1 / 91.8 / 82.2 / 88.7 (30.1 / 29.7 / 27.4 / 29.2 / 26.3 / 28.2) |
+| 43426228826 | 3.12 | 77.5 / 93.8 / 99.1 / 95.9 / 97.4 / 94.4 (24.8 / 29.8 / 31.4 / 30.4 / 30.9 / 30.0) | 77.5 / 95.1 / 99.9 / 94.9 / 97.1 / 93.5 (24.8 / 30.2 / 31.7 / 30.2 / 30.8 / 29.7) |
+| 43329220708 | 3.12 | 94.2 / 81.6 / 87.8 / 87.7 / 83.6 / 95.6 (29.9 / 26.1 / 28.0 / 27.9 / 26.7 / 30.3) | 95.5 / 83.9 / 86.4 / 88.1 / 84.7 / 91.8 (30.3 / 26.8 / 27.5 / 28.1 / 27.0 / 29.2) |
+| 43461090162 | 3.13 | 71.4 / 86.1 / 79.6 / 88.4 / 84.1 / 83.1 (22.9 / 27.5 / 25.5 / 28.1 / 26.8 / 26.5) | 72.3 / 85.6 / 79.0 / 86.0 / 82.9 / 86.8 (23.2 / 27.3 / 25.3 / 27.4 / 26.5 / 27.7) |
+| 43426228826 | 3.13 | 64.9 / 73.1 / 74.8 / 72.8 / 70.2 / 70.6 (21.0 / 23.5 / 24.0 / 23.4 / 22.6 / 22.7) | 64.9 / 73.1 / 73.1 / 73.3 / 69.1 / 72.9 (21.0 / 23.5 / 23.5 / 23.5 / 22.3 / 23.4) |
+| 43329220708 | 3.13 | 72.8 / 85.5 / 79.8 / 83.2 / 71.6 / 76.9 (23.4 / 27.3 / 25.5 / 26.6 / 23.0 / 24.6) | 75.5 / 84.8 / 77.9 / 81.3 / 69.3 / 80.9 (24.2 / 27.1 / 24.9 / 26.0 / 22.3 / 25.8) |
+
+In these three runs 3.13 was the faster leg overall, so the max-over-legs
+weights change little: the worst shard of any row moves from 31.4 to 31.7
+minutes projected, inside the 33.0-minute bar. The method matters when a file
+is slower on 3.13, as `test_attach_frame_size.py` was in #3843's sample; it
+plans for whichever leg is slower per file instead of trusting 3.12.
 
 ## Why the weights were refreshed (2026-11-13)
 
@@ -23,22 +67,88 @@ changed in #3236, #3251, #3269 and #3697 after the old sample). Unmeasured files
 were NOT the cause: they take a pessimistic p90 fallback that over-budgets them.
 The fix is fresh weights from complete six-shard runs, keeping the 38-minute cap.
 
+## #3843 record (2026-11-12): why a file weighs the max over both Python legs
+
+This section records the input that introduced the max-over-legs method. Its
+manifest was superseded on 2026-11-14 (above); the method and its rationale stand.
+
+**Why.** One partition serves both matrix legs, but #3284 weighed files with
+3.12 data from three PR runs of 11-01. By 11-11 shard `test (3.12, 0)` sat at the
+cap (walls 38:09 cancelled with every test passed, 34:21, 35:27; PR #3719
+diagnostic). The largest drift is `tests/unit/session/test_attach_frame_size.py`,
+weighted 1315.7 s while these six runs measured it at 1165-2170 s on 3.12 and
+1207-2491 s on 3.13 (p75 2071.1 s and 2180.8 s). 261 current files were also
+absent from the old manifest and ran at the 30.0 s fallback.
+
+**Method.** Six successful `main` full-suite runs (all twelve shard jobs of
+attempt 1 green), both legs of each. Each leg takes its own inclusive p75 of
+per-run file totals (as before); a file weighs the **max of the two legs'
+p75**, so whichever leg is slower for that file is the one the partition plans
+for. Pooling both legs into one p75 would let the faster leg dilute the slower.
+`samples_per_file` counts (run, leg) observations: 2,237 files have all 12, and
+the 22 with fewer are files that were added or removed during the window.
+
+| Run | Attempt | Event | Head | Workflow blob |
+|---|---:|---|---|---|
+| 43040596560 | 1 | push | `d756665e377df9b5500eeb348d2b5246aa487b91` | `18002e9d72f97a79f8adf5f8d1d1373ba7939391` |
+| 42978914635 | 1 | schedule | `ec4b40fa656a8000524c1234b6c8e28206f86a4b` | `ada0d8f35f1a3473e25a479f574802e9577c0cee` |
+| 42932909817 | 1 | push | `966b5954a794204e861a3a055e109bdd6c6aecb9` | `5fe5313ec8ec24d827db89da9cace528c3bfaf2b` |
+| 42862349942 | 1 | push | `e457f8424e0c32a76566ddd1bb7be5a4d5c2cabb` | `37c237dc40f124d1d97c0a8ff0320d08a7685074` |
+| 42852373405 | 1 | push | `6f2cee87a4d11d5888b2e8dd21163003456b6a76` | `37c237dc40f124d1d97c0a8ff0320d08a7685074` |
+| 42831360242 | 1 | push | `c9ad434a03b6684ef6ef73646f1a75bb75cc0846` | `37c237dc40f124d1d97c0a8ff0320d08a7685074` |
+
+**Projection, both legs, on the 2,272-file tree at `dee55f697`.** The table scores
+each manifest's LPT assignment three ways: by the manifest itself (what
+`shard_tests.py --report` prints), by each leg's measured p75, and by the worst
+single run of that leg. Values are test-minutes. The wall column turns the
+largest shard into minutes using the lowest test-seconds-per-wall-second seen in
+the ordinary pytest step across all 72 shard jobs of these runs (3.23; median
+3.41), plus the largest non-pytest job time seen (81 s). It is a projection, not
+a measurement.
+
+| Assignment | Scored by | s0 | s1 | s2 | s3 | s4 | s5 | max | wall of max | vs 38:00 |
+|---|---|--:|--:|--:|--:|--:|--:|--:|--:|--:|
+| before (#3284) | manifest | 106.3 | 106.3 | 106.3 | 106.3 | 106.3 | 106.3 | 106.3 | 34.3 | +3.7 |
+| before (#3284) | p75 3.12 | 106.6 | 83.2 | 99.3 | 101.3 | 96.7 | 96.0 | 106.6 | 34.4 | +3.6 |
+| before (#3284) | worst run 3.12 | 111.5 | 97.4 | 105.7 | 101.2 | 96.1 | 97.1 | 111.5 | 35.9 | +2.1 |
+| before (#3284) | p75 3.13 | 108.8 | 100.7 | 107.6 | 98.4 | 95.6 | 93.6 | 108.8 | 35.1 | +2.9 |
+| before (#3284) | worst run 3.13 | 112.6 | 102.2 | 108.5 | 98.3 | 97.8 | 101.2 | 112.6 | 36.2 | +1.8 |
+| after | manifest | 105.4 | 105.4 | 105.4 | 105.4 | 105.4 | 105.4 | 105.4 | 34.0 | +4.0 |
+| after | p75 3.12 | 100.0 | 94.0 | 95.1 | 97.0 | 98.2 | 98.9 | 100.0 | 32.3 | +5.7 |
+| after | worst run 3.12 | 96.0 | 94.6 | 92.6 | 93.9 | 95.2 | 95.0 | 96.0 | 31.1 | +6.9 |
+| after | p75 3.13 | 100.3 | 100.5 | 102.2 | 98.5 | 101.5 | 101.8 | 102.2 | 33.0 | +5.0 |
+| after | worst run 3.13 | 98.2 | 99.2 | 101.5 | 94.7 | 98.6 | 107.8 | 107.8 | 34.7 | +3.3 |
+
+Shard 0 holds `test_attach_frame_size.py` in both assignments. At the highest
+3.12 cost the diagnostic saw for that file (2619 s), shard 0's 3.12 p75 load
+becomes 115.7 test-min before (37.2 min projected) and 109.1 after (35.2 min).
+
+**Limits.** These numbers are in-sample: the same runs supply the weights and
+the scores. The suite is ~100 test-minutes per shard at about 3.2-3.4x
+effective concurrency, so even a perfect balance leaves six shards at about 32
+minutes. Reweighting removes the skew; it does not create more than about 4-7
+minutes of margin. If CI keeps landing near the cap after this change, the next
+lever is the per-test cost (the year-long state in `test_attach_frame_size.py`)
+or a seventh shard, not the timeout.
+
 ## Reproduce the committed manifest
 
-Run from the repository root with Python, the repository's existing PyYAML
-dependency and authenticated `gh` (no pytest run, dependency install or build):
+Run from the repository root with Python 3.11+ (the job-log timestamps carry
+seven fractional digits, which 3.9's `datetime.fromisoformat` rejects), the
+repository's existing PyYAML dependency and authenticated `gh` (no pytest run,
+dependency install or build). The cache holds raw junit XML, ~45 MB per run and
+leg, so point it outside a size-capped session scratchpad:
 
 ```sh
-python scripts/gen_test_durations.py --cache-dir "$LOCAL_OPERATOR_SCRATCHPAD/timing-cache" \
+.venv/bin/python scripts/gen_test_durations.py --cache-dir /path/outside/scratchpad/timing-cache \
+  --python 3.12 --python 3.13 \
   --ci-run 43461090162:1 --ci-run 43426228826:1 --ci-run 43329220708:1
 ```
 
-The raw XML cache is ~190 MB; point `--cache-dir` outside a size-capped
-scratchpad (for example a worktree's ignored `.rig/`).
-
 The generator fetches attempt-specific jobs and downloads artifacts by immutable
-ID. It requires a completed successful CI run and the **exact** complete Python
-3.12 shard matrix declared by its immutable execution-source workflow, then binds
+ID. It requires a completed successful CI run and, for every `--python` leg
+(default 3.12 alone), the **exact** complete shard matrix declared by its
+immutable execution-source workflow, then binds
 artifact creation time to each job's execution interval. A six-shard source with
 only jobs 0–4 is incomplete, not a historical five-shard run. Missing or ambiguous
 artifacts are fatal.
@@ -103,17 +213,18 @@ Per-file testcase seconds are summed **within each run** before taking inclusive
 p75 (linear interpolation; with three samples, halfway between the two largest).
 Files absent from another run are not zero-cost observations. Each positive
 weight and the p90 fallback has a one-second floor. Unobserved current files
-still run with the fallback (31.0 s); the regenerated manifest has 2,312
-observed files (2,297 in all three runs, 13 in two, 2 in one), and 7 files of
-the 2,319-file tree at this head are unobserved. Source changes after this
+still run with the fallback (31.6 s since 2026-11-14; 31.0 s in #3941's 3.12-only
+manifest); the manifest has 2,312 observed files (2,297 in all three runs, 13 in
+two, 2 in one), and 22 files of the 2,334-file tree at the 2026-11-14 merge are
+unobserved (7 of 2,319 at #3941's head). Source changes after this
 snapshot can add more.
 
-## Source selection and limitations
+## #3941 record: source selection and limitations
 
 The generator admits only completed, successful `full-suite.yml` runs from
 `push`, `schedule` or `workflow_dispatch` (see `SHARD_WORKFLOWS`), so the inputs
 are the three latest such runs with a complete six-shard 3.12 matrix, all
-`push` to `main`:
+`push` to `main` (both their 3.12 and 3.13 legs feed the 2026-11-14 manifest):
 
 | Run | Attempt | Created | Head |
 |---|---:|---|---|
@@ -128,7 +239,7 @@ runs superseded in the `full-suite-main` concurrency group) and are likewise
 excluded. The three inputs span
 about seventeen hours and differ slightly in test content.
 
-## Projections against the 38-minute cap
+## #3941 record: 3.12-only projections against the 38-minute cap
 
 `python scripts/shard_tests.py --report` at this head (2,319 files):
 
@@ -163,7 +274,7 @@ lands its full pessimistic budget. These are projections from five runs; if a
 post-change shard exceeds 33.0, regenerate from fresh runs first, and report
 evidence for a seventh shard rather than raising the timeout or dropping tests.
 
-## Measured per-shard wall and testcase totals (same run/job)
+## #3941 record: measured per-shard wall and testcase totals (same run/job)
 
 Job and pytest-step walls come from the attempt-specific GitHub Jobs API
 (`started_at` to `completed_at`); testcase minutes are the shard's ordinary

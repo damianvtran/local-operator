@@ -314,6 +314,112 @@ async def test_401_re_resolves_once_then_degrades_to_link_only(tmp_path: Path, m
     assert view["fetch_state"] == "unauthenticated"
 
 
+@pytest.mark.asyncio
+async def test_a_rejected_borrowed_login_names_its_lender(tmp_path: Path, monkeypatch) -> None:
+    """A mesh node's 401 on a BROKERED token: the sign-in lives on the lender,
+    so the row says so instead of "sign in again with gh/glab" here."""
+
+    def fake_resolve(host, forge, *, home=None, config_dir=None, fresh=False):
+        return code_credentials.Token(
+            host=host, forge=forge, value="tok", source="brokered", lender="studio-mac"
+        )
+
+    async def unauthorized(ref, validators, token, *, stored=None, client=None):
+        raise base.ForgeHTTPError("unauthorized", "summary", 401)
+
+    monkeypatch.setattr(service, "resolve", fake_resolve)
+    _patch_fetch(monkeypatch, unauthorized)
+    await service.refresh_keys(tmp_path, [REF])
+    view = service.view_for_ref(tmp_path, REF)
+    assert view is not None and view["link_only"] is True
+    assert "borrowed from studio-mac expired" in view["link_only_reason"]
+    assert "gh/glab" not in view["link_only_reason"]
+    assert view["fetch_state"] == "unauthenticated"
+
+
+@pytest.mark.asyncio
+async def test_a_lent_login_401_keeps_the_re_resolve_cause(tmp_path: Path, monkeypatch) -> None:
+    """Review round 1, R1-2: a 401 on a BROKERED token whose re-resolve fails
+    (owner went offline) records WHY, not a blanket "expired"."""
+    calls = {"n": 0}
+
+    def fake_resolve(host, forge, *, home=None, config_dir=None, fresh=False):
+        calls["n"] += 1
+        if fresh:
+            raise code_credentials.CredentialError(
+                "unusable",
+                "Can't refresh \u2014 the GitHub login borrowed from studio-mac could not be "
+                "reached; reconnect studio-mac, then refresh.",
+                lender="studio-mac",
+            )
+        return code_credentials.Token(
+            host=host, forge=forge, value="tok", source="brokered", lender="studio-mac"
+        )
+
+    async def unauthorized(ref, validators, token, *, stored=None, client=None):
+        raise base.ForgeHTTPError("unauthorized", "summary", 401)
+
+    monkeypatch.setattr(service, "resolve", fake_resolve)
+    _patch_fetch(monkeypatch, unauthorized)
+    await service.refresh_keys(tmp_path, [REF])
+    view = service.view_for_ref(tmp_path, REF)
+    assert view is not None and calls["n"] == 2
+    assert "could not be reached; reconnect studio-mac" in view["link_only_reason"]
+    assert "expired" not in view["link_only_reason"]
+
+
+@pytest.mark.asyncio
+async def test_a_lent_login_failure_carries_no_contradicting_sign_in_hint(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """QA round 1, Q1: the lent-login sentence names the remedy on the lender;
+    the generic "sign in with the gh CLI" hint must not follow it."""
+
+    def fake_resolve(host, forge, *, home=None, config_dir=None, fresh=False):
+        raise code_credentials.CredentialError(
+            "unusable",
+            code_credentials.borrowed_expired_message("studio-mac"),
+            lender="studio-mac",
+        )
+
+    monkeypatch.setattr(service, "resolve", fake_resolve)
+    await service.refresh_keys(tmp_path, [REF])
+    view = service.view_for_ref(tmp_path, REF)
+    assert view is not None and "borrowed from studio-mac" in view["link_only_reason"]
+    assert "link_only_hint" not in view
+    row = service.view_row(ROW, cache.read_entry(tmp_path, REF))
+    assert "link_only_hint" not in row
+
+
+@pytest.mark.asyncio
+async def test_a_local_login_failure_keeps_the_sign_in_hint(tmp_path: Path, monkeypatch) -> None:
+    """The control for Q1: a device's OWN missing login still gets the hint,
+    and a later local failure clears an earlier lent provenance."""
+    lent = code_credentials.CredentialError(
+        "unusable", code_credentials.borrowed_expired_message("studio-mac"), lender="studio-mac"
+    )
+    local = code_credentials.CredentialError(
+        "absent", "Can't refresh \u2014 sign in with the gh CLI (`gh auth login`), then refresh."
+    )
+    errors = [lent, local]
+
+    def fake_resolve(host, forge, *, home=None, config_dir=None, fresh=False):
+        raise errors.pop(0)
+
+    monkeypatch.setattr(service, "resolve", fake_resolve)
+    # ``_fetch_one`` directly: the pass-level per-key backoff would (rightly)
+    # skip the second attempt this test needs.
+    await service._fetch_one(tmp_path, REF)
+    entry = cache.read_entry(tmp_path, REF)
+    assert entry is not None and "lent_by" in entry
+    await service._fetch_one(tmp_path, REF)
+    entry = cache.read_entry(tmp_path, REF)
+    assert entry is not None and "lent_by" not in entry
+    view = service.view_for_ref(tmp_path, REF)
+    assert view is not None and "gh auth login" in view["link_only_reason"]
+    assert view["link_only_hint"] == "Link only \u2014 sign in with the gh CLI to track this one."
+
+
 # ---------------------------------------------------------------------------
 # the read side
 # ---------------------------------------------------------------------------

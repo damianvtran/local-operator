@@ -1,0 +1,4 @@
+{
+  "tui.boot_prompt.returned_to_composer": "Стартовый промпт не отправлен — он в поле ввода.",
+  "tui.boot_prompt.not_sent_kept_draft": "Стартовый промпт не отправлен: {prompt}"
+}

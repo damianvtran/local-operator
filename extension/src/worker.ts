@@ -1,4 +1,11 @@
-import { awaitAccess, cancelAccessCommand, requestAccess } from "./commands/access";
+import {
+  awaitAccess,
+  cancelAccessCommand,
+  listAccess,
+  requestAccess,
+  revokeAccess,
+  submitSignedDecision,
+} from "./commands/access";
 import { close, goto, open, status, tabs } from "./commands/nav";
 import { click, typeText } from "./commands/input";
 import { readPage } from "./commands/read";
@@ -19,6 +26,7 @@ import { clearAllAccessGrants, revokeExactOrigin, revokeLoopbackHost, revokeSite
 import { ACCESS_EXPIRY_ALARM, allowAllPending } from "./approval-store";
 import { expireAccessRequest, resolveOrigin, restoreAccessQueue, setPendingObserver } from "./origins";
 import { DEFAULT_PORT, getLocal, isRedactedToken, touchSurface } from "./state";
+import { pairFromManagedPolicy } from "./managed-pairing";
 import { reconcileCommandTab, retitle } from "./tab-groups";
 import { reclaimRemovedTab } from "./tab-lifecycle";
 import { withOwnership } from "./ownership";
@@ -90,6 +98,15 @@ const HANDLERS: Record<
   request_access: requestAccess,
   await_access: awaitAccess,
   cancel_access: cancelAccessCommand,
+  // Headless-node site approval: the operator's SIGNED answer, verified here
+  // against the managed-policy anchor before it decides anything
+  // (signed-decision.ts explains why the extension, not only the runtime).
+  submit_signed_decision: submitSignedDecision,
+  // The stored per-site decisions and their removal (node-site-decisions.ts):
+  // a headless node has no Settings page, so `lop browser sites` lists and
+  // revokes through these. Removal only ever reduces what is allowed.
+  list_access: listAccess,
+  revoke_access: revokeAccess,
   // Presentation-only rename of an already-open tab's group, for a session
   // title that arrived after the tab was created. It drives no tab and reads
   // no page, so unlike every other handler it needs no surface admission.
@@ -791,6 +808,32 @@ chrome.alarms.onAlarm.addListener((alarm) => {
   // deadline. No caller owns this alarm independently.
   if (alarm.name === ACCESS_EXPIRY_ALARM) guarded(expireAccessRequest, "access expiry sweep");
 });
+// HEADLESS-NODE PAIRING (see managed-pairing.ts). A node-managed Chrome has
+// nobody to type a code, so `lop browser setup --node` delivers one through
+// managed policy. Checked at every worker start, whenever the managed area
+// changes (setup writes the code into a running Chrome), and on the reconnect
+// alarm (the code may land before the daemon answers). Without a policy each
+// check is one storage read that finds nothing. Never surfaces the code.
+function pairFromPolicy(): void {
+  guarded(async () => {
+    const result = await pairFromManagedPolicy({
+      managed: chrome.storage?.managed,
+      readLocal: async () => {
+        const { token, port } = await getLocal();
+        return { token, port };
+      },
+      writeToken: (token) => chrome.storage.local.set({ token }),
+      defaultPort: DEFAULT_PORT,
+    });
+    // The pair socket evicted ours (close 4000) and the worker re-dials on
+    // its own; this only covers a worker that was not connected at all.
+    if (result === "paired" && !connected && !connecting) await connect();
+  }, "managed-policy pairing");
+}
+pairFromPolicy();
+chrome.alarms.onAlarm.addListener((alarm) => {
+  if (alarm.name === RECONNECT_ALARM_NAME) pairFromPolicy();
+});
 chrome.runtime.onStartup.addListener(() => {
   alive = true;
   ensureReconnectAlarm();
@@ -897,6 +940,7 @@ chrome.tabs.onReplaced.addListener((_addedTabId, removedTabId) => {
 });
 
 chrome.storage.onChanged.addListener((changes, area) => {
+  if (area === "managed" && changes.pairingCode) pairFromPolicy();
   if (area === "session" && changes.accessQueue) {
     // With no popup open there is no receiver for this message, and MV3 rejects
     // the send with "Could not establish connection. Receiving end does not

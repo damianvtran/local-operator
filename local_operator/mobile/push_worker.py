@@ -86,6 +86,7 @@ import uuid
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Protocol
 
 from local_operator.config import read_config_values
@@ -94,6 +95,8 @@ from local_operator.mobile import push_handles
 from local_operator.mobile.push_credentials import with_sound_readiness
 from local_operator.mobile.push_payload import (
     SOUND_CUSTOM_FIELD,
+    TYPE_COMPLETION,
+    TYPE_DIGEST,
     attention_emit_key,
     attention_payload,
     completion_emit_key,
@@ -144,6 +147,13 @@ PRESENCE_RECHECK_S = PRESENCE_TTL_S
 EMIT_RETRY_ATTEMPTS = 3
 EMIT_RETRY_WINDOW_S = 2 * 60
 EMIT_RETRY_INTERVAL_S = EMIT_RETRY_WINDOW_S / (EMIT_RETRY_ATTEMPTS - 1)
+
+#: The most ``exclude`` ids the cloud accepts on one emit. Not a tuning knob: it
+#: mirrors agent-server's ``internal/sessionpush/wire.go`` ``validateExclude``,
+#: which refuses a longer list outright (``400 exclude/max_10``), so an emit
+#: carrying 11 ids is not narrowed by the cloud but lost. ``_preference_gate``
+#: keeps every body it sends within it.
+MAX_EXCLUDE_IDS = 10
 
 #: The three kinds of emit this worker composes. A DIGEST is the coalesced
 #: catch-up of more than ``BURST_LIMIT`` eligible rows (§2.1); an ATTENTION emit
@@ -386,7 +396,7 @@ class PushWorker:
         presence: Callable[[], bool] | None = None,
         live_devices: Callable[[], Sequence[str]] | None = None,
         report_block: Callable[[], Sequence[Mapping[str, Any]]] | None = None,
-        unread_count: Callable[[], int] | None = None,
+        unread_count: Callable[[], int | None] | None = None,
     ) -> None:
         """``computer`` is the opaque per-account handle §3.2 carries.
 
@@ -401,6 +411,16 @@ class PushWorker:
         than a yes/no, because S6 has a second question for the same read: which
         devices a correction would actually reach once §3.2's ``exclude`` has
         been subtracted (`[]` is "no device this machine may deliver to").
+
+        ``unread_count`` is the DAEMON'S LISTING count
+        (``SessionTable.listing_unread_count``) whenever a daemon composes this
+        worker — the lane passes it — so the push's number is the badge's number.
+        It answers ``None`` when the listing could not be read, and the alert
+        then makes no count claim (``push_payload.wire_count``). Leaving it
+        unset falls back to :meth:`_store_count`, which is for a daemon-less
+        caller ONLY: on 2026-11-14 the production lane left it unset and the
+        operator's first push read "Task complete · 47502 conversations need
+        you" — that census over a long-lived machine's lifetime history.
 
         ``report_block`` is the S4c coalescer's ``piggyback(CARRIER_EMIT)``. It
         is OPTIONAL and the body falls back to the bare §3.2 payload rather than
@@ -786,7 +806,56 @@ class PushWorker:
         is a property of the computer rather than of the row.
         """
         state = self.store.state(conversation)
-        return bool(state.get("unseen")) and bool(state.get("notify"))
+        if not (bool(state.get("unseen")) and bool(state.get("notify"))):
+            return False
+        return self._desktop_would_announce(conversation, state.get("kind"))
+
+    def _desktop_would_announce(self, conversation: str, kind: Any) -> bool:
+        """The desktop banner's OWN gates, asked of a pushed completion (parity).
+
+        WHY: the operator, 2026-11-14 — "only notify under the same circumstances
+        that the UI notifies … It seems to be now giving me notification spam on
+        every single completed task". The store's ``notify`` flag (gate 2 above)
+        already settles wake/monitor triggers, peer-only runs, ``no_reply`` quiet
+        ends and the proactive veto, but the desktop's completion banner
+        (``serving.SessionRuntime._announce_completion``) refuses three more
+        cases the push lane never asked about, and on a machine running dozens
+        of delegated agent sessions the second one is the spam:
+
+        1. ``notifications_enabled()`` False — the env kill switch or the
+           config flag (``tui/notify.py``);
+        2. ``session_may_announce`` False — a session the operator's own
+           listings hide (subagent, exec worker, agent-opened run), judged by
+           ``resume.is_user_session`` on the transcript dir's ``origin.json``;
+        3. ``kind`` outside ``BRIDGE_NOTIFIABLE_KINDS`` (complete/error/retired).
+
+        Each is the SAME function or constant the desktop calls, never a
+        re-derivation, so the two surfaces cannot drift. The session handle the
+        desktop predicate takes is shaped here from ``<config>/sessions/<id>`` —
+        the layout ``mobile.daemon._durable_user_session_dir`` and the listing
+        address — and a conversation that is not a ``session/<id>`` identity has
+        no directory: ``session_may_announce``'s own documented answer for that
+        is YES ("a question that cannot be put must not silence a banner"), so it
+        is followed here rather than invented. Runs on the worker's thread with
+        a config read and one small file read; nothing touches the loop.
+        """
+        from local_operator.server.utils.desktop_sessions import BRIDGE_NOTIFIABLE_KINDS
+        from local_operator.session.runtime.serving import session_may_announce
+        from local_operator.tui.notify import notifications_enabled
+
+        if kind not in BRIDGE_NOTIFIABLE_KINDS:
+            return False
+        if not notifications_enabled():
+            return False
+        session_id = _session_id_of(conversation)
+        directory = (
+            self.config_dir / "sessions" / session_id
+            # The daemon's own traversal guard (``_durable_user_session_dir``).
+            if session_id not in (None, "", ".", "..") and Path(session_id).name == session_id
+            else None
+        )
+        handle = SimpleNamespace(transcript=SimpleNamespace(directory=directory))
+        return session_may_announce(handle)
 
     def _add_completion(
         self,
@@ -1076,6 +1145,9 @@ class PushWorker:
         count = self._count()
         emit_id = item.emit_id or uuid.uuid4().hex
         payload: dict[str, Any]
+        # The digest's member kinds, for the preference gate below; empty for
+        # the other two forms (a completion carries its own ``kind``).
+        digest_kinds: Sequence[str] = ()
         sound, sound_custom = self._sound()
         if item.kind == EVENT_COMPLETION:
             conversation_identity = item.conversations[0] if item.conversations else ""
@@ -1093,13 +1165,22 @@ class PushWorker:
                 # construction. Resolved, not re-keyed — the move that changed
                 # the content has its own cursor read and its own emit.
                 return None
+            # FLOOR AT 1 (PR #3989 review R1). The snapshot ``count`` reads was
+            # built before this tick collected the item, so a completion
+            # published in between is missing from it — and when it is the only
+            # unread conversation the banner would read "0 conversations need
+            # you". The candidacy gate already proved THIS conversation is
+            # unseen and listed, so 1 is a true lower bound. ``None`` (the
+            # degraded read) stays ``None``: inventing a number there is exactly
+            # what the degraded form refuses.
+            completion_count = None if count is None else max(1, count)
             payload = completion_payload(
                 computer=self.computer,
                 conversation=handle,
                 completion_token=token,
                 kind=kind,
                 emit_id=emit_id,
-                count=count,
+                count=completion_count,
                 sound=sound,
                 sound_custom=sound_custom,
             )
@@ -1115,6 +1196,7 @@ class PushWorker:
                 member_kind = self.store.state(conversation).get("kind")
                 if isinstance(member_kind, str):
                     kinds.append(member_kind)
+            digest_kinds = kinds
             payload = digest_payload(
                 computer=self.computer,
                 count=count,
@@ -1135,6 +1217,10 @@ class PushWorker:
                 # detected change has nothing here at all.
                 exclude=list(item.exclude) if item.exclude else None,
             )
+        gated = self._preference_gate(payload, digest_kinds)
+        if gated is None:
+            return None
+        payload = gated
         rows = list(self._report_block()) if self._report_block is not None else None
         if SOUND_CUSTOM_FIELD in payload:
             # The cloud picks the custom file PER DEVICE, so an emit naming one
@@ -1324,6 +1410,114 @@ class PushWorker:
 
     # -- the machine-local gates --------------------------------------------
 
+    def _preference_gate(
+        self, payload: dict[str, Any], digest_kinds: Sequence[str]
+    ) -> dict[str, Any] | None:
+        """Apply the devices' push preferences to one composed payload.
+
+        Returns the payload to send (possibly with a widened ``exclude``), or
+        ``None`` when no live device wants it — the caller then resolves the
+        item exactly as it does a stale one, so the cursor still moves.
+
+        Why: the operator asked for it verbatim — "there should be notification
+        preferences in the settings, I have no way to turn off notifications or
+        turn off certain types of notifications so now I just have to deal with
+        notification spam until this setting is available". iOS cannot filter a
+        remote push on the device, so the filter lives here, where the emit is
+        decided. The switches and their defaults are
+        ``push_devices.PREFERENCE_KEYS``.
+
+        Category mapping: a completion's ``kind`` ``error`` is ``errors``; every
+        other kind (``complete``, ``retired``, and also ``interrupted`` and
+        ``closed``) is ``completions``. A digest is the set of its members'
+        categories (no readable member kind counts as ``completions``). The
+        attention correction belongs to no category: only ``enabled`` governs it.
+
+        THE PER-COMPUTER LIMITATION, stated rather than implied: the cloud's
+        wire forbids ``exclude`` on a completion emit (§3.2), and the cloud fans
+        a completion out to every device of the computer. So a completion is
+        gated per COMPUTER: skipped when NO live device wants its category, sent
+        as today when at least one does — which means a device that turned a
+        category off still receives it while another device of the same
+        computer keeps it on. True per-device filtering of completions needs a
+        cloud change and is deferred to it. The attention and digest forms DO
+        permit §3.2's ``exclude`` ("the devices that must NOT be woken"), so
+        there the devices that do not want the emit are added to it, and the
+        emit is skipped only when nobody is left.
+
+        THE EXCLUDE CAP: the cloud refuses more than ``MAX_EXCLUDE_IDS``
+        exclude ids. When widening would cross it, the emit falls back to the
+        per-computer rule above for that one emit: it goes out carrying only
+        the ack-hint excludes it already had (capped too), so a device that
+        opted out may be woken, rather than the whole emit being refused.
+
+        Kept apart from ``_is_candidate`` and the count on purpose: those are
+        the store's gates, these are the device's. A missing or unreadable
+        registry imposes no preference (the pre-preferences behaviour) rather
+        than silencing the phone; gate 4's live list still decides whether
+        there is a device at all, and since that list reads the same registry,
+        an unreadable registry leaves it empty and the item resolves unsent.
+
+        Only rows in gate 4's live list are consulted: ``live`` comes from
+        :meth:`_live_device_ids`, which keeps ``STATE_LIVE`` rows alone, so a
+        row the unpair path tombstoned (``revoke_linked`` sets ``revoked_at``)
+        is never counted as a device that wants a push, whatever its switches.
+        """
+        preferences: dict[str, dict[str, bool]]
+        try:
+            preferences = mobile_push_devices.device_preferences(self.config_dir)
+        except (mobile_push_devices.PushRegistryCorrupt, OSError):
+            preferences = {}
+        everything: dict[str, bool] = dict.fromkeys(mobile_push_devices.PREFERENCE_KEYS, True)
+        live = self._live_devices()
+        emit_type = payload.get("type")
+
+        def wants(device: str, categories: set[str]) -> bool:
+            switches = preferences.get(device, everything)
+            return switches["enabled"] and any(switches[name] for name in categories)
+
+        categories: set[str]
+        if emit_type == TYPE_COMPLETION:
+            categories = {_preference_category(str(payload.get("kind", "")))}
+            return payload if any(wants(device, categories) for device in live) else None
+        if emit_type == TYPE_DIGEST:
+            categories = {_preference_category(kind) for kind in digest_kinds} or {"completions"}
+        else:
+            # Attention: no category, the master switch alone. An empty set
+            # would make ``wants`` always False, so the switch is asked direct.
+            categories = set()
+        excluded: set[str] = {str(device) for device in payload.get("exclude") or ()}
+        for device in live:
+            if device in excluded:
+                continue
+            keep = (
+                wants(device, categories)
+                if categories
+                else preferences.get(device, everything)["enabled"]
+            )
+            if not keep:
+                excluded.add(device)
+        if not [device for device in live if device not in excluded]:
+            return None
+        if len(excluded) > MAX_EXCLUDE_IDS:
+            # A body past the cloud's cap is refused whole (``exclude/max_10``),
+            # which would silence the devices that DO want it. Degrade instead to
+            # the per-computer rule the completion form already lives with: the
+            # gate above has proved some live device wants this emit, so send it
+            # with just the ack-hint excludes, themselves capped. The cost is an
+            # opted-out device possibly being woken, which beats dropping a
+            # wanted emit. Sorted before the cut so the kept ids are stable.
+            hinted = sorted({str(device) for device in payload.get("exclude") or ()})
+            trimmed = {key: value for key, value in payload.items() if key != "exclude"}
+            if hinted:
+                trimmed["exclude"] = hinted[:MAX_EXCLUDE_IDS]
+            return trimmed
+        if excluded:
+            # Sorted for a stable body: the body is kept across retries, but a
+            # deterministic order keeps two composes of one item identical.
+            return {**payload, "exclude": sorted(excluded)}
+        return payload
+
     def _live_device_ids(self) -> list[str]:
         """Gate 4 of §2.3: which devices this machine may deliver to.
 
@@ -1355,12 +1549,27 @@ class PushWorker:
             and bool(fact.get("credential_live"))
         ]
 
-    def _count(self) -> int:
-        """§3.2's ``count``: the machine's unread count at composition time."""
-        return max(0, int(self._unread_count()))
+    def _count(self) -> int | None:
+        """§3.2's ``count``: the machine's unread count at composition time.
+
+        ``None`` is "unknown" (a degraded listing), carried through to the
+        payload builders rather than coerced here: a coerced 0 would print
+        "0 conversations need you" on a banner announcing a completion.
+        """
+        value = self._unread_count()
+        if value is None:
+            return None
+        return max(0, int(value))
 
     def _store_count(self) -> int:
-        """The default unread count: a census over this machine's own store.
+        """The no-daemon fallback unread count: a census over this machine's own store.
+
+        NEVER THE PRODUCTION SOURCE. The census counts every conversation the
+        store has ever published a completion for and not acked — on a
+        long-lived machine that is lifetime history, and it is how the
+        2026-11-14 banner came to read "47502 conversations need you" when the
+        operator's real unread count was a handful. ``PushLane`` now passes the
+        listing count; this stays only so the worker runs with no daemon.
 
         INTERIM, and named as such: §1.4's badge population is the LISTING's rows
         in the listing's snapshot, and the daemon already has that implementation
@@ -1439,6 +1648,16 @@ class PushWorker:
             except OSError:
                 pass
             raise
+
+
+def _preference_category(kind: str) -> str:
+    """The preference switch a completion ``kind`` answers to.
+
+    ``error`` is the only ``errors`` kind; ``complete``/``retired`` are
+    completions by the contract, and ``interrupted``/``closed`` ride the
+    ``completions`` switch too (documented on ``push_devices.PREFERENCE_KEYS``).
+    """
+    return "errors" if kind == "error" else "completions"
 
 
 def _desktop_attended() -> bool:

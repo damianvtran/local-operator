@@ -62,11 +62,14 @@ import re
 import sqlite3
 import stat
 import subprocess
+import sys
 import time
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, NamedTuple
+
+from local_operator.guardrails import spawned
 
 logger = logging.getLogger(__name__)
 
@@ -526,8 +529,11 @@ def owned_record(
         logger.debug("guardrail ledger unreadable", exc_info=True)
         return None
     best: CreationRecord | None = None
-    for row in rows:
-        rec = CreationRecord(*row)
+    records = [CreationRecord(*row) for row in rows]
+    gitfiles = {r.path: r for r in records if r.kind == WORKTREE_GITFILE_KIND}
+    for rec in records:
+        if rec.kind == WORKTREE_GITFILE_KIND:
+            continue  # a stamp companion, never a covering row (see the kind)
         if rec.kind == "symlink":
             # A link row vouches for removing that link entry only
             # (``owned_link``), never for its pointee or anything under it.
@@ -540,7 +546,9 @@ def owned_record(
             continue
         if (st.st_dev, st.st_ino) != (rec.dev, rec.ino):
             continue
-        if rec.stamp is None or creation_stamp(st) != rec.stamp:
+        if rec.stamp is None or (
+            creation_stamp(st) != rec.stamp and not _gitfile_generation_holds(rec, gitfiles)
+        ):
             continue  # same inode number, different generation (or unstamped)
         if best is None or len(rec.path) > len(best.path):
             best = rec
@@ -694,7 +702,9 @@ class ForeignCreations:
       whenever an entry is added to the directory, so a foreign row there
       stops matching once its directory changes after the recording call —
       this rule fails OPEN on Linux (ranking returns to what it was before
-      it existed). The guarantee is macOS/BSD-only, where birth time is used.
+      it existed). The guarantee is macOS/BSD-only, where birth time is used —
+      except a ``worktree`` row, kept live by its ``.git`` companion row
+      (``_gitfile_holds``) as ``owned_record`` does.
     * Symlink rows are skipped: they vouch for a link entry, never a tree.
     """
 
@@ -747,6 +757,47 @@ class ForeignCreations:
                 self._identity[path] = (st.st_dev, st.st_ino, creation_stamp(st))
         return self._identity[path]
 
+    def _gitfile_holds(self, conn: sqlite3.Connection, rec: CreationRecord, owner: str) -> bool:
+        """A ``worktree`` row whose dir stamp moved is still live via its ``.git`` row.
+
+        WHY (rebase of PR #3987 onto #3835): ``owned_record`` already accepts
+        the ``WORKTREE_GITFILE_KIND`` companion as the generation witness on
+        Linux, where the directory's ctime stamp moves on every root-level
+        change. Without the same rule here the nearest-owner walk dropped a
+        session's OWN worktree row after its first checkout, so a broader
+        foreign ancestor row became "nearest" and the session's own tree read
+        HIGH; and another session's worktree row failed open.
+
+        The companion must belong to the SAME ``owner`` as ``rec`` (R-C1, as
+        ``owned_record`` scopes it with ``WHERE owner = ?``). Ledger rows are
+        never pruned, and ext4/xfs reuse a freed inode number, so a dead
+        worktree row of session A can share dev+ino with session B's new
+        worktree at the same path. Accepting B's ``.git`` row as A's witness
+        revived A's dead row, put A among the owners of B's live tree, and
+        dropped ``rm -rf <B's wt>/sub`` from HIGH to an ordinary path.
+        Owner-scoped, a companion only vouches for its own owner's row, so
+        it can keep a genuinely live row live but never adds a dead owner
+        to a live path. Companions are written under the same owners as
+        their worktree row (``commit_creations``), so no real hold is lost.
+        The companion is read by exact path because ``_foreign_query`` binds
+        only ancestors of and rows under the target, never ``<wt>/.git``
+        when the target is inside ``<wt>``.
+        """
+        if rec.kind != "worktree":
+            return False
+        gitfile = os.path.join(rec.path, ".git")
+        try:
+            companions = conn.execute(
+                "SELECT path, dev, ino, created_at, creator, kind, command, stamp"
+                " FROM created WHERE path = ? AND kind = ? AND owner = ?",
+                (gitfile, WORKTREE_GITFILE_KIND, owner),
+            ).fetchall()
+        except (sqlite3.Error, ValueError):
+            return False
+        return any(
+            _gitfile_generation_holds(rec, {gitfile: CreationRecord(*row)}) for row in companions
+        )
+
     def _related(self, owner: str) -> bool:
         if owner == self.session_id:
             return True
@@ -765,6 +816,7 @@ class ForeignCreations:
         live = self._live_rows(reals)
         if live is None:
             return None
+
 
         def foreign(path: str) -> CreationRecord | None:
             owners, rec = live[path]
@@ -832,7 +884,16 @@ class ForeignCreations:
         live: dict[str, tuple[set[str], CreationRecord]] = {}
         for owner, *fields in rows:
             rec = CreationRecord(*fields)
-            if rec.stamp is None or self._live(rec.path) != (rec.dev, rec.ino, rec.stamp):
+            if rec.stamp is None:
+                continue
+            identity = self._live(rec.path)
+            # Keep upstream's owner-scoped gitfile witness in the shared loader:
+            # root ctime changes must not erase a live foreign ownership hold.
+            if identity != (rec.dev, rec.ino, rec.stamp) and not (
+                identity is not None
+                and identity[:2] == (rec.dev, rec.ino)
+                and self._gitfile_holds(conn, rec, owner)
+            ):
                 continue
             if rec.path in self.cleared:
                 # Exactly a worktree root ``finished_foreign_worktree`` proved
@@ -844,6 +905,46 @@ class ForeignCreations:
                 continue
             live.setdefault(rec.path, (set(), rec))[0].add(owner)
         return live
+
+
+#: Ledger kind of the companion row ``commit_creations`` writes for a
+#: recorded worktree's ``.git`` FILE. WHY: on Linux ``creation_stamp`` is the
+#: directory's ``st_ctime_ns`` (no birth time), which moves whenever an entry
+#: is added, removed or renamed in the worktree ROOT — and git rewrites root
+#: files by unlink+create on checkout/read-tree -u/merge. So on a Linux host
+#: (every headless mesh node, e.g. lop-remote-node-2, Amazon Linux) the
+#: worktree row stopped matching after the session's first root-level change
+#: and its own tree read as foreign (operator directive 2026-11-14, field case
+#: attr3880-ci). The ``.git`` file git writes once at ``worktree add`` is not
+#: rewritten by any of those (only ``worktree repair``/``move``, which then
+#: fail closed), so its inode generation is a stable second witness that the
+#: directory is the one this session created. Never a covering row itself.
+WORKTREE_GITFILE_KIND = "worktree-gitfile"
+
+
+def _gitfile_generation_holds(rec: CreationRecord, gitfiles: Mapping[str, CreationRecord]) -> bool:
+    """A ``worktree`` row whose dir stamp moved still matches via its ``.git`` file.
+
+    Only ``kind == "worktree"`` (the directory's dev+ino already matched in
+    the caller); the companion must match dev, ino AND ``creation_stamp``.
+    """
+    if rec.kind != "worktree":
+        return False
+    gitfile = os.path.join(rec.path, ".git")
+    companion = gitfiles.get(gitfile)
+    if companion is None or companion.stamp is None:
+        return False
+    try:
+        st = os.lstat(gitfile)
+    except OSError:
+        return False
+    if not stat.S_ISREG(st.st_mode):
+        return False
+    return (st.st_dev, st.st_ino, creation_stamp(st)) == (
+        companion.dev,
+        companion.ino,
+        companion.stamp,
+    )
 
 
 def link_path(path: str) -> str:
@@ -1109,6 +1210,13 @@ def commit_creations(
                 # vouch for a work tree inside it (``_foreign_inside``), so
                 # the session's own worktree needs its own row (QA Q7).
                 entries.append((os.path.realpath(path), kind))
+            if kind == "worktree" and os.path.isfile(os.path.join(path, ".git")):
+                # A second generation stamp for Linux hosts (headless mesh
+                # nodes such as lop-remote-node-2 run Linux): see
+                # ``WORKTREE_GITFILE_KIND``.
+                entries.append(
+                    (os.path.join(os.path.realpath(path), ".git"), WORKTREE_GITFILE_KIND)
+                )
         for parent, pattern, before in pending.patterned:
             now = _glob.glob(os.path.join(_glob.escape(parent), pattern))
             for match in now:
@@ -1227,23 +1335,61 @@ _CWD_INVENTORY_TIMEOUT_S = 20.0
 #: the owning-session check (``worktree_activity``) reads the session
 #: registry fresh on every call. Failures are never cached.
 _CWD_INVENTORY_TTL_S = 30.0
-_cwd_inventory_cache: tuple[float, tuple[str, ...]] | None = None
 
 
-def _cwd_inventory() -> tuple[str, ...] | None:
-    """Realpaths of every cwd this uid's processes hold, or ``None`` if unknown.
+class CwdInventory(NamedTuple):
+    """One process-cwd inventory: the cwds it could read and the pids it could not.
+
+    ``hidden`` WHY (2026-11-14, found by QA on PR #3975): on Linux the kernel
+    refuses ``readlink /proc/<pid>/cwd`` (EACCES) for a same-uid process that
+    is non-dumpable — ``(sd-pam)``, the systemd user-session helper, is one on
+    every host with a systemd user session, and ``ssh-agent`` makes itself
+    one. That single refusal used to void the whole inventory (``None``), so
+    every caller read "unknown" on such hosts. A hidden pid is now reported
+    instead, and it still counts as "might be inside" (see
+    :func:`_live_cwd_inside`): no caller deletes on its account.
+    """
+
+    cwds: tuple[str, ...]
+    hidden: tuple[int, ...] = ()
+
+
+#: One raw inventory row: ``(pid, realpath of its cwd)``, or ``(pid, None)``
+#: for a same-uid pid whose cwd the kernel hides (see :class:`CwdInventory`).
+#: Pids ride along so :func:`cwd_holders` can attribute each holder (PR
+#: #3987); hidden pids ride in the same rows so one cache serves both views.
+CwdEntry = tuple[int, str | None]
+_cwd_inventory_cache: tuple[float, tuple[CwdEntry, ...]] | None = None
+#: Why the last inventory failed, for the judge (operator directive
+#: 2026-11-14: never a bare "busy"). Empty after a success.
+_cwd_inventory_error = ""
+
+
+def _cwd_entries(*, fresh: bool = False) -> tuple[CwdEntry, ...] | None:
+    """``(pid, realpath of cwd)`` for every process of this uid, or ``None``.
 
     lsof's cwd inventory is read-only and avoids probing process command lines
     (which may carry secrets). Linux exposes the same data under /proc. A
-    disappearing process no longer owns a cwd; other inspection errors give
-    ``None``. A success is cached for :data:`_CWD_INVENTORY_TTL_S`.
+    disappearing process no longer owns a cwd; a same-uid process whose cwd the
+    kernel will not reveal (EACCES) is kept as ``(pid, None)`` rather than
+    voiding the inventory (PR #3980). Any other inspection error (an
+    unreadable ``/proc``, lsof missing, failing or timing out) gives ``None``
+    and leaves the reason in :data:`_cwd_inventory_error` — fail closed, but
+    named. A success is cached for :data:`_CWD_INVENTORY_TTL_S` unless
+    ``fresh``.
+
+    ``hidepid``: ``/proc`` mounted ``hidepid=1|2|invisible`` hides OTHER uids'
+    processes only, and this inventory reads this uid's alone, so it is
+    unaffected; a per-pid ``EACCES`` on this uid's ``cwd`` link (a
+    non-dumpable process) is the hidden case above, and every consumer still
+    fails closed on it.
     """
-    global _cwd_inventory_cache
+    global _cwd_inventory_cache, _cwd_inventory_error
     now = time.monotonic()
     cached = _cwd_inventory_cache
-    if cached is not None and now - cached[0] < _CWD_INVENTORY_TTL_S:
+    if not fresh and cached is not None and now - cached[0] < _CWD_INVENTORY_TTL_S:
         return cached[1]
-    paths: list[str] = []
+    entries: list[tuple[int, str | None]] = []
     if os.path.isdir("/proc/self"):
         try:
             for entry in os.scandir("/proc"):
@@ -1252,43 +1398,313 @@ def _cwd_inventory() -> tuple[str, ...] | None:
                 try:
                     if entry.stat().st_uid != os.getuid():
                         continue
-                    paths.append(os.readlink(os.path.join(entry.path, "cwd")))
-                except FileNotFoundError:
-                    continue
-        except OSError:
+                    entries.append((int(entry.name), os.readlink(os.path.join(entry.path, "cwd"))))
+                except (FileNotFoundError, ProcessLookupError):
+                    continue  # exited mid-scan: it holds no cwd any more
+                except PermissionError:
+                    entries.append((int(entry.name), None))
+                except OSError as exc:
+                    _cwd_inventory_error = (
+                        f"cwd of pid {entry.name} unreadable ({exc.strerror or exc})"
+                    )
+                    return None
+        except OSError as exc:
+            _cwd_inventory_error = f"/proc unreadable ({exc.strerror or exc})"
             return None
     else:
         try:
             proc = subprocess.run(
-                ["lsof", "-a", "-u", str(os.getuid()), "-d", "cwd", "-Fn", "-w"],
+                ["lsof", "-a", "-u", str(os.getuid()), "-d", "cwd", "-Fpn", "-w"],
                 capture_output=True,
                 text=True,
                 timeout=_CWD_INVENTORY_TIMEOUT_S,
                 check=False,
             )
-        except (OSError, subprocess.SubprocessError):
+        except subprocess.TimeoutExpired:
+            _cwd_inventory_error = f"lsof timed out after {_CWD_INVENTORY_TIMEOUT_S:g} s"
+            return None
+        except (OSError, subprocess.SubprocessError) as exc:
+            _cwd_inventory_error = f"lsof unavailable ({exc})"
             return None
         if proc.returncode != 0:
+            _cwd_inventory_error = f"lsof exited {proc.returncode}"
             return None
-        paths = [line[1:] for line in proc.stdout.splitlines() if line.startswith("n/")]
-        if not paths:
-            return None  # this process alone holds a cwd: an empty list is a failed read
-    inventory = tuple(os.path.realpath(p) for p in paths)
+        pid = 0
+        for line in proc.stdout.splitlines():
+            if line.startswith("p") and line[1:].isdecimal():
+                pid = int(line[1:])
+            elif line.startswith("n/"):
+                entries.append((pid, line[1:]))
+        if not entries:
+            # This process alone holds a cwd: an empty list is a failed read.
+            _cwd_inventory_error = "lsof listed no process cwd"
+            return None
+    inventory = tuple((pid, None if cwd is None else os.path.realpath(cwd)) for pid, cwd in entries)
     _cwd_inventory_cache = (now, inventory)
+    _cwd_inventory_error = ""
     return inventory
+
+
+def _cwd_inventory() -> CwdInventory | None:
+    """Every cwd this uid's processes hold, or ``None`` if there is no inventory.
+
+    The pid-free view of :func:`_cwd_entries` (same scan, same cache): readable
+    cwds, plus the pids whose cwd the kernel hides.
+    """
+    entries = _cwd_entries()
+    if entries is None:
+        return None
+    return CwdInventory(
+        tuple(cwd for _pid, cwd in entries if cwd is not None),
+        tuple(pid for pid, cwd in entries if cwd is None),
+    )
+
+
+def _inside(cwd: str | None, real: str) -> bool:
+    """A readable cwd at or under ``real``; a hidden cwd (``None``) is never a definite yes."""
+    return cwd is not None and (cwd == real or cwd.startswith(real + os.sep))
 
 
 def _live_cwd_inside(real: str) -> bool | None:
     """Whether a live process uses this tree; unknown never grants an exemption.
 
-    Reads :func:`_cwd_inventory` (bounded, cached per process). ``None`` —
+    Reads :func:`_cwd_entries` (bounded, cached per process). ``None`` —
     timeout or an unreadable inventory — fails closed in ``worktree_state``.
     This protects ordinary clean removals as well as abandoned adds.
+
+    A HIT from the cache is re-read fresh before it is believed (operator
+    directive 2026-11-14): a holder that exited inside the 30 s TTL — an eval
+    kernel restarted, a ``git`` that finished — must not keep the tree "busy".
+    A cached miss is still reused (the TTL's documented price).
+
+    A hidden pid (cwd unreadable) might be inside, so it also answers ``None``.
+    Every caller treats ``None`` like ``True`` (``busy`` / never delete): PR
+    #3980 rounds 1-3 found no sound way to prove such a process outside a tree.
     """
-    inventory = _cwd_inventory()
-    if inventory is None:
+    cached = _cwd_inventory_cache
+    from_cache = cached is not None and time.monotonic() - cached[0] < _CWD_INVENTORY_TTL_S
+    entries = _cwd_entries()
+    if entries is None:
         return None
-    return any(cwd == real or cwd.startswith(real + os.sep) for cwd in inventory)
+    if from_cache and any(_inside(cwd, real) for _pid, cwd in entries):
+        entries = _cwd_entries(fresh=True)
+        if entries is None:
+            return None
+    if any(_inside(cwd, real) for _pid, cwd in entries):
+        return True
+    if any(cwd is None for _pid, cwd in entries):
+        return None
+    return False
+
+
+#: Ancestry walk bound for :func:`cwd_holders` (far deeper than any real tree).
+_PARENT_WALK_MAX = 64
+#: Shown command length: a basename, never arguments (they may carry secrets).
+_HOLDER_COMMAND_MAX = 40
+
+
+@dataclass(frozen=True)
+class CwdHolder:
+    """One live process whose cwd is inside a worktree, and whose it is.
+
+    ``family``: the process descends (by parent pid) from the deleting
+    session's own harness process or a registry record of that session or of
+    an ancestor/descendant in its subagent tree — except a bash child or eval
+    kernel of this harness, which is attributed to the session that spawned
+    it (:mod:`.spawned`; in-process siblings share the pid). ``owner`` is the judge-facing
+    attribution ("this session", "session <id> (another session)", "no
+    session record").
+    """
+
+    pid: int
+    command: str
+    owner: str
+    family: bool
+
+    def describe(self) -> str:
+        return f"pid {self.pid} {self.command or '?'} ({self.owner})"
+
+
+def _process_table() -> dict[int, tuple[int, str]] | None:
+    """``pid -> (parent pid, command basename)`` for every visible process.
+
+    Linux: ``/proc/<pid>/stat`` (parent) and ``/proc/<pid>/comm`` (the kernel's
+    16-byte name — never ``cmdline``, which may carry secrets). Elsewhere:
+    ``ps -axo pid=,ppid=,comm=`` (executable path, no arguments). ``None`` when
+    neither is readable: ownership is then unknown and the tree stays busy.
+    """
+    table: dict[int, tuple[int, str]] = {}
+    if os.path.isdir("/proc/self"):
+        try:
+            names = [e.name for e in os.scandir("/proc") if e.name.isdecimal()]
+        except OSError:
+            return None
+        for name in names:
+            try:
+                with open(f"/proc/{name}/stat", encoding="utf-8", errors="replace") as fh:
+                    raw = fh.read()
+            except OSError:
+                continue  # exited, or another uid's under hidepid: not a holder here
+            # ``comm`` sits in parentheses and may itself hold ")": split on the LAST.
+            head, _, tail = raw.rpartition(")")
+            fields = tail.split()
+            if len(fields) < 2 or not fields[1].isdecimal():
+                continue
+            comm = head.partition("(")[2]
+            table[int(name)] = (int(fields[1]), comm)
+        return table or None
+    try:
+        proc = subprocess.run(
+            ["ps", "-axo", "pid=,ppid=,comm="],
+            capture_output=True,
+            text=True,
+            timeout=_CWD_INVENTORY_TIMEOUT_S,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if proc.returncode != 0:
+        return None
+    for line in proc.stdout.splitlines():
+        parts = line.split(None, 2)
+        if len(parts) >= 2 and parts[0].isdecimal() and parts[1].isdecimal():
+            comm = os.path.basename(parts[2].strip()) if len(parts) == 3 else ""
+            table[int(parts[0])] = (int(parts[1]), comm)
+    return table or None
+
+
+def _session_pids(session_id: str) -> tuple[dict[int, str], dict[int, str]]:
+    """``(family, others)``: harness pid -> label, from the session registry.
+
+    Family = the caller's own record, records of its ancestors/descendants in
+    one subagent tree (``same_task_tree``), and THIS process — the guard runs
+    inside the deleting session's harness — unless a record says this pid is
+    another session's. Siblings in separate processes count as others. THIS
+    process may also host sibling subagents (in-process ``Session``s share the
+    harness pid; review m1, PR #3987), so its family label covers only what no
+    session spawned: :func:`cwd_holders` attributes the harness's bash
+    children and eval kernels by the session that spawned them
+    (:mod:`.spawned`), not by this pid. Records, never text: a process's
+    environment or command line is not consulted.
+    """
+    family: dict[int, str] = {}
+    others: dict[int, str] = {}
+    try:
+        from local_operator.session.runtime import registry
+
+        for rec, state in registry.scan(None, reap=False):
+            sid = str(getattr(rec, "session_id", "") or "")
+            pid = getattr(rec, "pid", None)
+            if not sid or not isinstance(pid, int) or state == "stale":
+                continue
+            if sid == session_id:
+                family[pid] = "this session"
+                continue
+            relation = same_task_tree(session_id, sid) if session_id else ""
+            if relation in ("ancestor", "descendant"):
+                family[pid] = f"this session's {relation} {sid}"
+            else:
+                others[pid] = f"session {sid}, another session"
+    except Exception:  # noqa: BLE001 — an unreadable registry attributes nothing
+        logger.debug("session registry unreadable", exc_info=True)
+    me = os.getpid()
+    if me not in others:
+        family.setdefault(me, "this session")
+    return family, others
+
+
+def cwd_holders(real: str, session_id: str) -> tuple[CwdHolder, ...] | None:
+    """Every live process with its cwd inside ``real``, attributed; ``None`` if unknown.
+
+    WHY (operator directive 2026-11-14, field case ``attr3880-ci`` on
+    lop-remote-node-2): a session's own eval kernel or bash child with its cwd
+    in its own tree made ``git worktree remove --force`` read "busy", and the
+    judge refused the creator's cleanup. Attribution is by parent-pid ancestry
+    to the runtime's own records (:func:`_session_pids`). A process whose
+    ancestry reaches no family pid — another session's, or an orphan
+    reparented to init — is foreign. ``None`` (inventory or process table
+    unreadable) means ownership is unknown: the caller keeps the tree busy.
+    """
+    global _cwd_inventory_error
+    entries = _cwd_entries(fresh=True)
+    if entries is None:
+        return None
+    hidden = [pid for pid, cwd in entries if cwd is None]
+    if hidden:
+        # A pid whose cwd the kernel hides (PR #3980) might be inside, and no
+        # holder can be named for it: ownership is unknown, so the caller
+        # keeps the tree busy, and busy_phrase names the hidden pids rather
+        # than a bare "busy" (operator directive 2026-11-14).
+        _cwd_inventory_error = "cwd of pid {} unreadable (Permission denied)".format(
+            ", ".join(map(str, hidden[:5])) + (", ..." if len(hidden) > 5 else "")
+        )
+        return None
+    inside = [(pid, cwd) for pid, cwd in entries if _inside(cwd, real)]
+    if not inside:
+        return ()
+    table = _process_table()
+    if table is None:
+        return None
+    family, others = _session_pids(session_id)
+    me = os.getpid()
+    holders: list[CwdHolder] = []
+    for pid, _cwd in inside:
+        owner, is_family = "no session record; unknown process", False
+        node, below, seen = pid, 0, 0
+        while node > 1 and seen < _PARENT_WALK_MAX:
+            spawner = spawned.session_of(below) if node == me and below else None
+            if spawner is not None:
+                # A bash child or eval kernel of THIS harness: in-process
+                # subagents share its pid, so the spawning session decides
+                # (review m1, PR #3987) — a sibling's shell is foreign.
+                owner, is_family = _spawner_owner(session_id, spawner)
+                break
+            if node in family:
+                owner, is_family = family[node], True
+                break
+            if node in others:
+                owner = others[node]
+                break
+            below, node = node, table.get(node, (0, ""))[0]
+            seen += 1
+        command = table.get(pid, (0, ""))[1][:_HOLDER_COMMAND_MAX]
+        holders.append(CwdHolder(pid, command, owner, is_family))
+    return tuple(holders)
+
+
+def _spawner_owner(session_id: str, spawner: str) -> tuple[str, bool]:
+    """``(owner label, family?)`` for a harness child spawned by session ``spawner``."""
+    if session_id and spawner == session_id:
+        return "this session", True
+    relation = same_task_tree(session_id, spawner) if session_id else ""
+    if relation in ("ancestor", "descendant"):
+        return f"this session's {relation} {spawner}", True
+    return f"session {spawner}, another session in this harness process", False
+
+
+def busy_phrase(path: str, session_id: str = "") -> str:
+    """The judge-facing account of WHY a tree reads busy: holders, or why unknown.
+
+    Never a bare "busy" (operator directive 2026-11-14): the field refusal
+    named "busy" with no process, so nobody could tell an agent's own shell
+    from another session's work.
+    """
+    real = os.path.realpath(path)
+    holders = cwd_holders(real, session_id)
+    if holders is None:
+        reason = _cwd_inventory_error or "process table unreadable"
+        return (
+            f"busy=unknown: process inventory unreadable ({reason}); "
+            "a live process inside cannot be ruled out"
+        )
+    if not holders:
+        return "busy: the holder exited before it could be named"
+    return "busy: cwd held by " + ", ".join(h.describe() for h in holders)
+
+
+def state_phrase(path: str, state: str, session_id: str = "") -> str:
+    """``state``, with the holders spelled out when it is ``busy``."""
+    return busy_phrase(path, session_id) if state == "busy" else state
 
 
 def _only_regenerable(directory: str) -> bool:
@@ -1330,7 +1746,9 @@ def _only_regenerable(directory: str) -> bool:
     return True
 
 
-def worktree_state(path: str, *, own: bool = False, facts: dict[str, bool] | None = None) -> str:
+def worktree_state(
+    path: str, *, own: bool = False, session_id: str = "", facts: dict[str, bool] | None = None
+) -> str:
     """The removal-relevant state of a worktree path.
 
     ``own``: the caller proved (creation ledger) that this session or its
@@ -1346,7 +1764,9 @@ def worktree_state(path: str, *, own: bool = False, facts: dict[str, bool] | Non
 
     One of ``clean``, ``dirty``, ``locked``, ``stale-initializing`` (locked
     "initializing" for over an hour, otherwise clean), ``busy`` (a live process
-    cwd is inside it, or the inventory could not be read), ``not-linked`` or
+    cwd is inside it, or the inventory could not be read — with ``own`` and
+    ``session_id``, holders from the deleting session's own family do not
+    count; :func:`busy_phrase` names the holders), ``not-linked`` or
     ``unknown``.
 
     Linked = its ``.git`` is a FILE, its git-dir differs from the common dir
@@ -1420,7 +1840,23 @@ def worktree_state(path: str, *, own: bool = False, facts: dict[str, bool] | Non
         pass
     except (OSError, UnicodeError):
         return "unknown"
-    if _live_cwd_inside(real) is not False:
+    live: bool | None
+    if own and session_id:
+        # OWN tree: ALWAYS a fresh inventory (QA Q1, PR #3987). This answer
+        # is what lets an own tree rank LOW (clean, or detached scratch), and
+        # the 30 s cache's "nobody inside" is no proof: a foreign process that
+        # entered after the cached scan was missed, the own dirty detached
+        # tree ranked LOW with no judge call, and ``git worktree remove
+        # --force`` deleted it under that process. Holders from this
+        # session's own family (operator directive 2026-11-14, field case
+        # ``attr3880-ci``: the creator's eval kernel, bash child or subagent)
+        # do not make it busy; any foreign holder, or an inventory or process
+        # table that cannot be read (``None``), keeps it busy — fail closed.
+        holders = cwd_holders(real, session_id)
+        live = None if holders is None else any(not h.family for h in holders)
+    else:
+        live = _live_cwd_inside(real)
+    if live is not False:
         return "busy"  # unknown process inventory also fails closed
     # ``git worktree remove`` deletes IGNORED content too (review R1-MAJOR-4 /
     # QA Q1: an ignored ``.env`` and an ignored nested repo with the only copy
@@ -1478,6 +1914,105 @@ def worktree_state(path: str, *, own: bool = False, facts: dict[str, bool] | Non
         if not (refs or "").strip():
             return "dirty"
     return "stale-initializing" if stale_initializing else "clean"
+
+
+def detached_head(path: str) -> tuple[str, str | None] | None:
+    """``(short HEAD, ref containing it)`` for a DETACHED tree, else ``None``.
+
+    ``None`` = HEAD is on a branch, or git could not answer (fail closed: the
+    caller then keeps its ordinary ranking). The ref is ``None`` when no
+    branch, remote-tracking ref or tag contains HEAD — commits made in the
+    detached tree that only its own HEAD file names, which removal loses.
+    """
+    real = os.path.realpath(path)
+    if _git(["symbolic-ref", "-q", "HEAD"], real) is not None:
+        return None  # on a branch
+    head = _git(["rev-parse", "--short", "HEAD"], real)
+    if not (head or "").strip():
+        return None
+    refs = _git(
+        [
+            "for-each-ref",
+            "--count=1",
+            "--format=%(refname:short)",
+            "--contains",
+            "HEAD",
+            "refs/heads",
+            "refs/remotes",
+            "refs/tags",
+        ],
+        real,
+    )
+    if refs is None:
+        return None  # unknown reachability is not "reachable"
+    return (head or "").strip(), (refs.strip() or None)
+
+
+def own_detached_scratch(path: str) -> str | None:
+    """A fact phrase when an OWN dirty linked tree is disposable scratch, else ``None``.
+
+    WHY (operator directive 2026-11-14, relayed by Aida: "the safety guards
+    should never refuse being able to clean up uncommitted files that look
+    like scratch, safe to delete, etc. … this sort of ask should never come
+    up again"). Field case, mesh node lop-remote-node-2, session
+    99ffc68d3d05: it ran ``git worktree add --detach .worktrees/attr3880-ci``,
+    then ``git merge-tree`` + ``git read-tree`` left an uncommitted index and
+    working-tree changes; ``git worktree remove --force`` of that path went
+    to the judge as an own DIRTY tree and the judge refused ("busy detached
+    worktree with substantial uncommitted changes" — judge wording, no
+    deterministic branch writes it).
+
+    What makes such a tree safe for its creator to drop: there is NO branch,
+    so nobody's branch work can be lost, and HEAD itself is contained in a
+    ref, so no commit is lost either. What remains — the uncommitted index
+    and files — is what the creating session itself put there.
+
+    CONSTRAINTS, each a fail-closed ``None``:
+    - only called for a tree the creation ledger already proves own
+      (``classify._owned_by_session`` / ``owned_record``) and whose state is
+      ``dirty`` — locked/busy/unknown keep their ranking;
+    - HEAD on a branch → ``None`` (branch work is the judge's to weigh);
+    - HEAD reachable from no ref → ``None`` (dangling commits made in the
+      tree are lost with it; treated like unpushed work);
+    - a nested repository in any untracked or ignored entry → ``None`` (its
+      commits may exist nowhere else; ``worktree_state`` holds the same line).
+    """
+    real = os.path.realpath(path)
+    detached = detached_head(real)
+    if detached is None or detached[1] is None:
+        return None
+    # ``-z`` (review m3, PR #3987): without it git C-quotes special names
+    # (``?? "caf\303\251/"``), the quoted spelling is no directory, and the
+    # nested-repo check below was silently skipped for exactly those names.
+    # With ``-z`` each record is ``XY <path>`` NUL-terminated, verbatim; a
+    # rename's extra source record follows its ``R``/``C`` entry and is
+    # skipped (only ``??``/``!!`` records are read, and they never have one).
+    status = _git(
+        ["status", "--porcelain", "-z", "--ignored", "--untracked-files=normal"],
+        real,
+        timeout=_WORKTREE_STATUS_TIMEOUT_S,
+    )
+    if status is None:
+        return None
+    records = status.split("\0")
+    skip_next = False
+    for record in records:
+        if skip_next:
+            skip_next = False
+            continue
+        if record[:1] in ("R", "C") or record[1:2] in ("R", "C"):
+            skip_next = True  # the rename/copy source path follows as its own record
+            continue
+        if not (record.startswith("?? ") or record.startswith("!! ")):
+            continue
+        entry = os.path.join(real, record[3:].rstrip("/"))
+        if os.path.isdir(entry) and _holds_git(entry):
+            return None
+    head, ref = detached
+    return (
+        f"own-created detached worktree (no branch; HEAD {head} is kept by {ref}): "
+        "removal loses only this session's uncommitted scratch"
+    )
 
 
 #: Bounds on :func:`linked_worktrees_reached`. ``_REACH_MAX_LEVELS``:
@@ -2637,6 +3172,13 @@ class OperatorWords:
     #: (``_approved_text``): the yes/no question the operator said yes to, or
     #: the picked options. ``DeleteCase.evidence_basis`` settles on it.
     approved: str = ""
+    #: Labels of the options the operator did NOT pick, in the questions this
+    #: answer kept. A judge's ``ask=`` citation never verifies a path only
+    #: these reach (review R2-m6, :func:`ask_citation_covers`).
+    unpicked: str = ""
+    #: The picked labels plus any typed answer: a path these name is the
+    #: operator's pick even when an unpicked option names it too.
+    picked: str = ""
 
 
 @dataclass
@@ -2734,23 +3276,24 @@ def _ask_words(record: Mapping[str, Any], session_id: str) -> OperatorWords | No
     answers = record.get("answers") or {}
     parts: list[str] = []
     approved: list[str] = []
+    picked: list[str] = []
+    unpicked: list[str] = []
     for q in questions:
         if q.get("secret"):
             continue
-        chosen = [str(v) for v in (answers.get(str(q.get("id") or "")) or [])]
-        opts = [o for o in (q.get("options") or []) if isinstance(o, Mapping)]
-        labels = [str(o.get("label") or "") for o in opts]
-        if not chosen or any(_answer_declines(v, labels) for v in chosen):
+        chosen = _kept_answer(q, answers)
+        if chosen is None:
             # Deterministic veto (review R1-MINOR-3): a declining answer is
             # never consent, whatever a judge that read the history concludes.
             continue
-        options = "; ".join(labels)
-        parts.append(
-            f"Q: {q.get('question') or ''}"
-            + (f" [options: {options}]" if options else "")
-            + f" -> operator answered: {', '.join(chosen)}"
-        )
+        opts = [o for o in (q.get("options") or []) if isinstance(o, Mapping)]
+        labels = [str(o.get("label") or "") for o in opts]
+        # The consent rendering, which the refusal side also reads for every
+        # question this answer kept (``unanswered_asks``, review R2-M3).
+        parts.append(f"{_ask_question_text(q)} -> operator answered: {', '.join(chosen)}")
         approved.extend(_approved_text(q, opts, labels, chosen))
+        picked.extend(chosen)
+        unpicked.extend(lbl for lbl in labels if lbl not in chosen)
     if not parts:
         return None
     return OperatorWords(
@@ -2759,7 +3302,122 @@ def _ask_words(record: Mapping[str, Any], session_id: str) -> OperatorWords | No
         ask_id=ask_id,
         session_id=session_id,
         approved="\n".join(approved),
+        unpicked="\n".join(unpicked),
+        picked="\n".join(picked),
     )
+
+
+def _kept_answer(q: Mapping[str, Any], answers: Mapping[str, Any]) -> list[str] | None:
+    """The operator's answer to ``q`` when it can be consent, else None.
+
+    None for a secret question, no answer, or any declining answer. The ONE
+    test both :func:`_ask_words` (consent) and :func:`unanswered_asks`
+    (refusal) apply per question, so the two never disagree on which
+    questions a trusted answer kept.
+    """
+    if q.get("secret"):
+        return None
+    chosen = [str(v) for v in (answers.get(str(q.get("id") or "")) or [])]
+    labels = [str(o.get("label") or "") for o in q.get("options") or [] if isinstance(o, Mapping)]
+    if not chosen or any(_answer_declines(v, labels) for v in chosen):
+        return None
+    return chosen
+
+
+def _ask_question_text(q: Mapping[str, Any], *, descriptions: bool = False) -> str:
+    """One question as text: the question, its option labels, optionally descriptions.
+
+    The ONE rendering consent (:func:`_ask_words`) and refusal
+    (:func:`unanswered_asks`) read. Consent reads question + labels: an
+    option's description names nothing (live ask a-1d54, review R2-M1). The
+    refusal side adds descriptions only for questions with no trusted,
+    non-declining answer (review m4/QA Q2 vs R2-M3). No closing bracket after
+    the last option: ``_PATHISH`` would keep it on a trailing glob
+    (``~/osworld/runs*]``), which then matches nothing.
+
+    The suggested terminal command (``AskQuestion.command``, PR #3926; stored
+    on the question only, never per option) rides with ``descriptions``: it
+    is the agent's proposal, like a description, not words the operator
+    approved. So it names a path on the REFUSAL side (``rm -rf ~/bench/rigs``
+    suggested, then the ask timed out: refuse, not LOW), but a trusted yes
+    never lifts a path named only there — consent reads question + labels
+    (review R2-M3), and a kept question's refusal text matches it, so such a
+    path keeps its base rank, exactly as a description-only path does.
+    """
+    options = "; ".join(
+        (
+            f"{o.get('label') or ''} ({o.get('description')})"
+            if descriptions and o.get("description")
+            else str(o.get("label") or "")
+        )
+        for o in q.get("options") or []
+        if isinstance(o, Mapping)
+    )
+    command = q.get("command")
+    suggested = (
+        f" | suggested command: {command}" if descriptions and isinstance(command, str) else ""
+    )
+    # Before the options: the text keeps ending on the last option (see above).
+    return f"Q: {q.get('question') or ''}{suggested} | options: {options}"
+
+
+def ask_citation_covers(
+    words: OperatorWords,
+    path: str,
+    *,
+    home: str,
+    cwd: str | None = None,
+    protected: Iterable[str] = (),
+) -> bool:
+    """May a judge's ``ask=<id>`` citation of ``words`` verify deleting ``path``?
+
+    The answer's text must name the path (question or labels, never a
+    description), AND the path must not be one that only an option the
+    operator did NOT pick reaches. WHY (review R2-m6, PR #3966): with
+    "Delete ~/A" picked and "Delete ~/B" not, a judge citing the ask for
+    ``~/B`` passed the verifier, which read every label. The question still
+    counts ("Delete ~/A and ~/B?" answered "Both"), unless an unpicked option
+    claims the path and no pick or typed answer names it.
+    """
+    protected = tuple(protected)
+    if not names_path(words.text, path, home=home, cwd=cwd, protected=protected):
+        return False
+    if not words.unpicked:
+        return True
+    reach = ask_reach(words.unpicked, path, home=home, cwd=cwd, protected=protected)
+    if reach is None or reach[0] not in ("exact", "under"):
+        return True
+    return names_path(words.picked, path, home=home, cwd=cwd, protected=protected)
+
+
+def ask_answer_covers(
+    words: OperatorWords,
+    path: str,
+    *,
+    home: str,
+    cwd: str | None = None,
+    protected: Iterable[str] = (),
+) -> bool:
+    """Would an ``ask=`` citation of ``words`` verify ``path`` or a dir above it?
+
+    The rank side of :func:`ask_citation_covers`: a path inside a tree the
+    operator's answer covers (``~/m/.worktrees/x/node_modules`` under an
+    answered "Delete all five" naming ``~/m/.worktrees/{x,…}``) is not lifted
+    out of its base rank by that ask. Only ancestors below ``$HOME`` count,
+    so an answer that names ``~`` covers nothing beneath it.
+    """
+    protected = tuple(protected)
+    home_real = os.path.realpath(home)
+    for spelled in dict.fromkeys([os.path.normpath(path), os.path.realpath(path)]):
+        current = spelled
+        while True:
+            if ask_citation_covers(words, current, home=home, cwd=cwd, protected=protected):
+                return True
+            parent = os.path.dirname(current)
+            if parent == current or parent in (home, home_real) or len(parent) <= len(home_real):
+                break
+            current = parent
+    return False
 
 
 def _approved_text(
@@ -2869,6 +3527,188 @@ def lineage_asks(
     return out
 
 
+@dataclass(frozen=True)
+class UnansweredAsk:
+    """An ask in the family whose end state is NOT consent for what it names.
+
+    Despite the name (kept for its callers) this is every ask that names
+    paths and is not a trusted operator answer approving them: never answered
+    (open, timed out, expired, withdrawn, dismissed), declined, or answered in
+    a way :func:`_ask_words` refuses (the agent's own ``answered_in_chat``, a
+    relay or bridge row, a declining pick such as "Keep everything").
+    """
+
+    ask_id: str
+    session_id: str
+    #: The fold's status (``timed_out``, ``answered``, ``declined``, ...).
+    status: str
+    #: Question text and option labels, plus descriptions for every question
+    #: the operator's trusted answer did not keep: wider than consent's naming
+    #: bar there on purpose, since that text is only ever matched to REFUSE.
+    #: A kept question reads exactly as consent reads it (review R2-M3).
+    text: str
+    #: Why it is not consent, for the judge fact and the refusal text.
+    label: str = ""
+    #: What a trusted operator answer approved without a judge
+    #: (``OperatorWords.approved``); a path it reaches is consented, not
+    #: blocked (:func:`ask_consents`). Empty for every non-answer.
+    approved: str = ""
+    #: ``created_at`` (ms) of the ask; :data:`ASK_ESCALATION_MAX_AGE_MS` bounds it.
+    created_at: int = 0
+    #: True when the operator never answered (open/timed out/expired/...),
+    #: False when an answer exists but does not approve the path.
+    never_answered: bool = True
+    #: The operator's trusted, non-declining answer (:func:`_ask_words`), or
+    #: None. A path that answer's text reaches but did not approve
+    #: deterministically goes to the judge, never to the refusal (review
+    #: R2-M3): only an ask with no trusted yes may refuse outright.
+    answer: OperatorWords | None = None
+
+
+#: Statuses that mean "the operator never answered".
+_UNANSWERED_LABEL = {
+    "timed_out": "TIMED OUT with no answer",
+    "expired": "expired with no answer",
+    "withdrawn": "withdrawn by the agent, never answered",
+    "dismissed": "dismissed by the user without an answer",
+    "open": "still open, not yet answered",
+}
+
+#: An ask stops lifting paths out of LOW once it is this old (review R1-M2,
+#: PR #3966). WHY 7 days: the longest ask timeout is 24 h
+#: (``asks.policy.MAX_TIMEOUT_S``) and a cleanup that follows an ask runs
+#: within hours of its notice (incident a-20fc: one hour); a week covers a
+#: session resumed after a weekend with margin, while an ask about some path
+#: last Tuesday no longer stands between a session family and ordinary work
+#: under that path forever. Only escalation is bounded: the not-consent FACT
+#: still reaches the judge for any target that ranks HIGH on its own.
+ASK_ESCALATION_MAX_AGE_MS = 7 * 24 * 3600 * 1000
+
+
+def unanswered_label(status: str) -> str:
+    return _UNANSWERED_LABEL.get(status, "never answered")
+
+
+def _not_consent_label(record: Mapping[str, Any], status: str) -> str:
+    """Why a folded ask that HAS an end state still is not consent."""
+    if status in _UNANSWERED_LABEL:
+        return _UNANSWERED_LABEL[status]
+    if status == "declined":
+        return "declined"
+    surface = str((record.get("answered_by") or {}).get("surface") or "")
+    if status in ("answered", "late") and surface not in TRUSTED_ASK_SURFACES:
+        # ``answered_in_chat`` is written by the AGENT (surface ``chat``); a
+        # relay row is another session's carriage. Neither is the operator.
+        return f"answered on the '{surface or 'unknown'}' surface, not by the operator"
+    return "answered without approving it"
+
+
+def unanswered_asks(
+    session_id: str,
+    *,
+    state_root: str | os.PathLike[str] | None = None,
+    now_ms: int | None = None,
+) -> list[UnansweredAsk]:
+    """Asks in ``session_id``'s family that the store does NOT prove as consent.
+
+    WHY (incident 2026-11-14, session 1faad822298d, ask a-20fc): an ask naming
+    rig and benchmark paths timed out unanswered, the timeout notice said
+    "proceed … use your recommended option(s)", and the session deleted them.
+    :func:`verified_ask` already refused that ask as consent, but nothing said
+    so. This lists those asks so the checkpoint can (a) tell the judge each one
+    is NOT consent and (b) refuse deterministically when such an ask is the
+    only thing pointing at a path (``check.DeleteCase.lapsed_only``).
+
+    Review R1-M1 (PR #3966): listing only never-answered STATUSES let the
+    agent's own ``ask_withdraw answered_in_chat`` after the deadline (folded
+    ``late``, surface ``chat``), a relay answer, a bare ``declined`` and a
+    trusted "Keep everything" pick drop the ask from this list, so the path
+    fell back to LOW. Now: blocks = asks naming the path − asks granting
+    consent for it. Every ask is listed unless it has no visible question;
+    a trusted answer carries its ``approved`` text, and :func:`ask_consents`
+    lifts only the paths that text reaches. Never a source of consent.
+    """
+    try:
+        from local_operator.asks import store
+        from local_operator.paths import config_dir
+
+        root = Path(state_root) if state_root is not None else config_dir()
+        lineage = session_family(session_id, state_root=root)
+        now = now_ms if now_ms is not None else store.now_ms()
+    except Exception:  # noqa: BLE001 — unreadable: nothing extra to report
+        logger.debug("guardrail: unanswered asks unreadable", exc_info=True)
+        return []
+    out: list[UnansweredAsk] = []
+    for sid in lineage or [session_id]:
+        try:
+            directory = store.session_dir(root, sid)
+            if not directory.is_dir():
+                continue
+            records = store.fold(store.read_events(directory), now)
+        except Exception:  # noqa: BLE001
+            continue
+        for record in records:
+            status = str(record.get("status") or "")
+            questions = [q for q in record.get("questions") or [] if isinstance(q, Mapping)]
+            words = _ask_words(record, sid)
+            answers = record.get("answers") or {}
+            # One parser for consent and refusal (review R2-M3): a question
+            # the operator's trusted answer kept is read exactly as consent
+            # reads it (question + labels), so a path named only in its
+            # description is neither approved nor refused (main's rank, the
+            # same as consent sees it). Every other question keeps its
+            # descriptions (review m4/QA Q2): with no trusted yes, a path
+            # named only there must still refuse.
+            parts = [
+                _ask_question_text(
+                    q, descriptions=words is None or _kept_answer(q, answers) is None
+                )
+                for q in questions
+                if not q.get("secret")
+            ]
+            if not parts:
+                continue
+            out.append(
+                UnansweredAsk(
+                    ask_id=str(record.get("ask_id") or ""),
+                    session_id=sid,
+                    status=status,
+                    text="\n".join(parts),
+                    label=(
+                        "answered by the operator with no picked label approving this path"
+                        if words is not None
+                        else _not_consent_label(record, status)
+                    ),
+                    approved=words.approved if words is not None else "",
+                    answer=words,
+                    created_at=int(record.get("created_at") or 0),
+                    never_answered=status in _UNANSWERED_LABEL,
+                )
+            )
+    return out
+
+
+def ask_consents(
+    ask: UnansweredAsk,
+    path: str,
+    *,
+    home: str,
+    cwd: str | None = None,
+    protected: Iterable[str] = (),
+) -> bool:
+    """Did the operator's trusted answer to ``ask`` approve ``path`` (equal or under)?
+
+    The approved text is the label(s) the operator picked (or the question, for
+    a bare yes to a yes/no ask). A path inside an approved tree is approved
+    (``rm -rf ~/osworld/runs-3/raw`` under an approved ``~/osworld/runs*``); a
+    path ABOVE it is not — approving ``~/x/build`` never approves ``~/x``.
+    """
+    if not ask.approved:
+        return False
+    kind = ask_reach(ask.approved, path, home=home, cwd=cwd, protected=protected)
+    return kind is not None and kind[0] in ("exact", "under")
+
+
 def _text_of(message: Any) -> str:
     text = getattr(message, "text", None)
     if isinstance(text, str):
@@ -2955,6 +3795,39 @@ def session_lineage(
     return lineage, operator_opened
 
 
+def session_family(
+    session_id: str, *, state_root: str | os.PathLike[str] | None = None
+) -> list[str]:
+    """``session_id``, its ancestors (:func:`session_lineage`) and its descendants.
+
+    WHY descendants too (incident 2026-11-14 follow-up): an ask a subagent
+    raised and nobody answered still means "the operator has not said yes" to
+    the manager that spawned it, and the reverse. Descendants come from the
+    harness lineage registry (``read_lineage``: ``parent``/``opener`` rows),
+    followed down to a fixpoint; ``origin.json`` files are not scanned (that
+    would read every session on disk per call). Bounded at 64 sessions.
+    """
+    from local_operator.paths import config_dir
+
+    root = Path(state_root) if state_root is not None else config_dir()
+    lineage, _ = session_lineage(session_id, state_root=root)
+    family = list(lineage or [session_id])
+    registry = read_lineage(root)
+    below = {session_id}
+    grew = True
+    while grew and len(family) < 64:
+        grew = False
+        for child, row in registry.items():
+            if child in below or len(family) >= 64:
+                continue
+            if row.get("parent") in below or row.get("opener") in below:
+                below.add(child)
+                if child not in family:
+                    family.append(child)
+                grew = True
+    return family
+
+
 def task_tree_root(session_id: str, *, state_root: str | os.PathLike[str] | None = None) -> str:
     """The top of ``session_id``'s SUBAGENT tree: ``parent`` links only.
 
@@ -2963,6 +3836,26 @@ def task_tree_root(session_id: str, *, state_root: str | os.PathLike[str] | None
     agent-opened workstream (``opened_by``) is a separate task, so every
     workstream an assistant ever opened never becomes one tree. The registry
     row is read first (``read_lineage``), then ``origin.json``.
+    """
+    chain = subagent_ancestors(session_id, state_root=state_root)
+    return chain[-1] if chain else session_id
+
+
+def subagent_ancestors(
+    session_id: str, *, state_root: str | os.PathLike[str] | None = None
+) -> list[str]:
+    """``session_id``'s launchers, nearest first: ``parent`` links only, self excluded.
+
+    WHY (field report 2026-11-12, child fbd3094083f4 of a7450d93932d): one
+    subagent lineage is one owner's working state, so ``classify._tree_read``
+    lets an unresolvable read of an ancestor's or a descendant's pad rank LOW
+    (a descendant is a session whose chain contains the caller). That credit
+    must come from authoritative metadata, never text:
+    the harness-written registry row first (``read_lineage``, first row wins),
+    then ``origin.json`` — both guard evidence a session cannot forge
+    (``_touch_reason`` ranks a write to either CRITICAL). ``opener`` links are
+    NOT followed: an agent-opened workstream is a separate task. A sibling is
+    in neither session's chain, so it inherits nothing.
     """
     from local_operator.paths import config_dir
 
@@ -2978,7 +3871,7 @@ def task_tree_root(session_id: str, *, state_root: str | os.PathLike[str] | None
         if not isinstance(parent, str) or not parent:
             break
         sid = parent
-    return seen[-1] if seen else session_id
+    return seen[1:]
 
 
 def same_task_tree(a: str, b: str, *, state_root: str | os.PathLike[str] | None = None) -> str:
@@ -3221,6 +4114,134 @@ def _path_readings(text: str) -> list[tuple[str, bool]]:
         if len(stripped) > 1:
             out.append((stripped, False))
     return out
+
+
+def ask_reaches(
+    text: str,
+    path: str,
+    *,
+    home: str,
+    cwd: str | None = None,
+    protected: Iterable[str] = (),
+) -> bool:
+    """Does an ask's ``text`` name ``path``, a path above it, or one inside it?
+
+    A boolean view of :func:`ask_reach`; see there for the rules.
+    """
+    return ask_reach(text, path, home=home, cwd=cwd, protected=protected) is not None
+
+
+def ask_reach(
+    text: str,
+    path: str,
+    *,
+    home: str,
+    cwd: str | None = None,
+    protected: Iterable[str] = (),
+) -> tuple[str, str] | None:
+    """HOW an ask's ``text`` reaches ``path``: ``(kind, named path)`` or ``None``.
+
+    WHY (incident 2026-11-14, ask a-20fc, rows 302/320/365): the session asked
+    which rig, build and benchmark trees to delete, got no answer, and removed
+    the deep ones anyway — ``~/hyperplane-cpp/build`` and the benchmark raw
+    data ranked LOW, so no check ever ran. Asking about a path is the agent's
+    own admission that removing it needs the operator; silence cannot turn it
+    back into LOW. So this match is deliberately WIDER than consent's
+    :func:`names_path`. It lifts or keeps escalation and refusals; the callers
+    that subtract consent with it (:func:`ask_consents` on the operator's
+    approved labels, :func:`ask_citation_covers` on unpicked options) can at
+    most return a target to its base rank, never below it (over-matching on
+    the refusal side fails closed):
+
+    - ``("exact", path)``: :func:`names_path` names ``path`` itself, literally
+      or by its glob (``~/osworld/runs*`` names ``~/osworld/runs-3``);
+    - ``("under", ancestor)``: it names an ancestor of ``path`` below
+      ``$HOME`` (same glob and brace-list rules). The caller needs the
+      ancestor: under a BROAD named dir (``~/workspace``) the target goes to
+      the judge instead of a deterministic refusal (review R1-M2);
+    - ``("above", named)``: ``path`` is an ancestor of a named path, or of a
+      glob's literal parent directory (``rm -rf ~/osworld`` removes every ``runs*``).
+
+    ``$HOME``, its ancestors and the protected roots are never treated as
+    "named" for the under-direction: an ask that merely mentions ``~`` or the
+    state root must not make every deep delete in the session refusable.
+
+    Case (review R1-m1): macOS volumes are case-insensitive by default, so
+    ``rm -rf ~/Workspace/Harness-Cost-Bench`` deletes the tree an ask spelled
+    ``~/workspace/harness-cost-bench``. On Darwin every spelling is compared
+    casefolded. On a case-SENSITIVE Darwin volume that can over-match two
+    distinct paths; that may lift only the escalation it added, never take a
+    target below its base rank.
+    """
+    if not text or not path:
+        return None
+    protected = tuple(protected)
+    spellings = list(dict.fromkeys([os.path.realpath(path), os.path.normpath(path)]))
+    if sys.platform == "darwin":
+        text = text.casefold()
+        home = home.casefold()
+        cwd = cwd.casefold() if cwd else cwd
+        protected = tuple(p.casefold() for p in protected)
+        spellings = list(dict.fromkeys(s.casefold() for s in spellings))
+    for spelled in spellings:
+        if names_path(text, spelled, home=home, cwd=cwd, protected=protected):
+            return ("exact", spelled)
+    home_n = os.path.normpath(home)
+    stops = {os.path.normpath(p) for p in protected} | {home_n, "/"}
+    for spelled in spellings:
+        anc = os.path.dirname(spelled)
+        while anc and anc not in stops and not home_n.startswith(anc.rstrip("/") + "/"):
+            if names_path(text, anc, home=home, cwd=cwd, protected=protected):
+                return ("under", anc)
+            parent = os.path.dirname(anc)
+            if parent == anc:
+                break
+            anc = parent
+    for word, _ in _path_readings(text):
+        expanded = _expand_word(word, home, cwd) if word else None
+        if not expanded:
+            continue
+        wild = _GLOBISH.search(expanded)
+        named = expanded if wild is None else expanded[: wild.start()].rsplit("/", 1)[0]
+        named = os.path.normpath(named or "/")
+        if any(named == s or named.startswith(s.rstrip("/") + "/") for s in spellings):
+            return ("above", named)
+    return None
+
+
+#: A named dir with more entries than this is "broad" (review R1-M2): an ask
+#: mentioning it ("~/workspace or ~/Documents?") is too wide a net to refuse
+#: everything under it without a judge. 1000 entries is far above a project
+#: tree's top level and the incident's rig/bench dirs (tens of entries) yet
+#: below a home-wide workspace or Downloads folder; the count stops at
+#: ``_BROAD_ASK_DIR_ENTRIES + 1`` so the check stays bounded.
+_BROAD_ASK_DIR_ENTRIES = 1000
+
+
+def broad_ask_dir(named: str, *, home: str) -> bool:
+    """Is ``named`` too broad for an ask about it to refuse paths UNDER it outright?
+
+    Broad: a direct child of ``$HOME`` (``~/workspace``, ``~/Documents``) or
+    any directory holding more than :data:`_BROAD_ASK_DIR_ENTRIES` entries.
+    Paths under a broad named dir still rank HIGH and reach the judge with the
+    not-consent fact; only the exact named path (or its glob matches) and
+    paths above it keep the deterministic refusal.
+    """
+    norm = os.path.normpath(named)
+    homes = {os.path.normpath(home), os.path.realpath(home)}
+    if sys.platform == "darwin":
+        norm = norm.casefold()
+        homes = {h.casefold() for h in homes}
+    if os.path.dirname(norm) in homes:
+        return True
+    try:
+        with os.scandir(named) as it:
+            for n, _ in enumerate(it, 1):
+                if n > _BROAD_ASK_DIR_ENTRIES:
+                    return True
+    except OSError:
+        return False
+    return False
 
 
 def names_path(

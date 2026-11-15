@@ -46,9 +46,12 @@ from local_operator.tools.search_guard import (
     _MAX_PEEL_DEPTH,
     _SHELL_C_WORDS,
     _WRAPPER_LONG_VALUE_FLAGS,
+    _WRAPPER_OWN_LONG_VALUE_FLAGS,
     _WRAPPER_VALUE_FLAGS,
+    HEREDOC_UNREADABLE,
     WRAPPER_WORDS,
     _unquote,
+    heredoc_opener,
     lex,
 )
 
@@ -113,18 +116,76 @@ class _RawWord:
             self.parts.append(_Part(kind, text))
 
 
-def _read_sub(text: str, i: int) -> tuple[str, int, bool]:
+def _skip_heredoc_bodies(text: str, j: int, delimiters: list[str]) -> int:
+    """Index of the newline ending the last of ``delimiters``' bodies; -1 if any is missing.
+
+    ``text[j]`` is the newline after the opener line. Bodies follow in opener
+    order, each ending at a line equal to its delimiter (``<<-`` strips tabs;
+    the strip here matches :func:`lex`, so the two readers agree).
+
+    ``line.strip() == delim`` is deliberately looser in matching than bash
+    (which ends a body only on the exact line, or tab-stripped for ``<<-``),
+    so it can only end a body EARLIER than bash does. An early end exposes
+    body lines as commands to the walk, which is stricter, never a hidden
+    command. That holds because :func:`heredoc_opener` strips the word too
+    (round 2 M2/N1, PR #3962): before it did, a quoted word with outer
+    whitespace (``<<'EOF '``) or a trailing CR (``<<EOF\r`` in CRLF text)
+    never equalled a stripped line, so its body never ended at all — still
+    fail-closed (-1), but one rank lower than bash's real behaviour warrants.
+    """
+    pos = j + 1
+    n = len(text)
+    end = j
+    for delim in delimiters:
+        while True:
+            if pos > n:
+                return -1
+            end = text.find("\n", pos)
+            line = text[pos : end if end != -1 else n]
+            if line.strip() == delim:
+                break
+            if end == -1:
+                return -1
+            pos = end + 1
+        if end == -1:
+            return n
+        pos = end + 1
+    return end
+
+
+def _read_sub(text: str, i: int, *, heredocs: bool = True) -> tuple[str, int, bool]:
     """Body of a ``$(`` substitution starting at ``text[i]`` (just past ``$(``).
 
     Depth-counted and quote-aware so a nested substitution stays one word.
     Returns ``(body, index_after, balanced)``.
+
+    Heredoc-aware, like the shared :func:`lex`: a ``<<WORD`` opener's body
+    lines are data to this reader, so an apostrophe, paren or backtick in them
+    never opens a phantom quote or closes the substitution. Without this, the
+    field command ``gh pr comment N --body "$(cat <<'EOF' … it's … EOF)"``
+    (a reviewer's comment, PR #3960) left a phantom quote open, the body ran to
+    the end of the line, and the prose's word "remove" plus the open text made
+    the walk rank HIGH as an unresolvable delete. The body text is still
+    RETURNED, so the inner walk's :func:`lex` decides what it is: data for a
+    quoted heredoc fed to ``cat``, a script for ``bash <<EOF``, and live
+    ``$(…)`` for an unquoted heredoc. ``heredocs=False`` is for ``$((``
+    arithmetic, where ``<<`` is a shift.
     """
     depth = 1
     quote: str | None = None
+    pending: list[str] = []
     j = i
     n = len(text)
     while j < n:
         ch = text[j]
+        if not quote and ch == "\n" and pending:
+            end = _skip_heredoc_bodies(text, j, pending)
+            pending = []
+            if end == -1:
+                # No delimiter line: bash would keep reading (fail closed).
+                return text[i:], n, False
+            j = end + 1
+            continue
         if quote:
             if ch == "\\" and quote == '"':
                 j += 2
@@ -136,6 +197,25 @@ def _read_sub(text: str, i: int) -> tuple[str, int, bool]:
         elif ch == "\\":
             j += 2
             continue
+        elif ch == "$" and text.startswith("$[", j):
+            # Legacy arithmetic ``$[1<<E]`` (round 2 M1, PR #3962): ``<<`` is
+            # a shift, as in ``$((``, so the bracketed span is skipped whole
+            # rather than offered to the heredoc reader. Unbalanced: fail closed.
+            close = _match_bracket(text, j + 2)
+            if close == -1:
+                return text[i:], n, False
+            j = close + 1
+            continue
+        elif heredocs and ch == "<" and text.startswith("<<", j) and not text.startswith("<<<", j):
+            opener = heredoc_opener(text, j)
+            if opener is not None and opener[0] == HEREDOC_UNREADABLE:
+                # Delimiter word we will not guess at (R1, PR #3962): fail
+                # closed rather than skip a body bash may end elsewhere.
+                return text[i:], n, False
+            if opener is not None:
+                pending.append(opener[0])
+                j = opener[1]
+                continue
         elif ch == "(":
             depth += 1
         elif ch == ")":
@@ -157,7 +237,7 @@ def _read_dollar(text: str, i: int, word: _RawWord, kind: str) -> int:
         return j
     if nxt == "(":
         # $(( arithmetic )) — evaluates to a number, never a path we can know.
-        body, j, ok = _read_sub(text, i + 2)
+        body, j, ok = _read_sub(text, i + 2, heredocs=False)
         word.add("sub", "\x01arith")
         word.broken |= not ok
         return j
@@ -178,6 +258,22 @@ def _read_dollar(text: str, i: int, word: _RawWord, kind: str) -> int:
         return i + 2
     word.add(kind, "$")
     return i + 1
+
+
+def _match_bracket(text: str, i: int) -> int:
+    """Index of the ``]`` closing a ``$[`` whose body starts at ``i``; -1 if none.
+
+    Depth-counted so a subscript (``$[a[1]<<2]``) stays inside the span.
+    """
+    depth = 1
+    for j in range(i, len(text)):
+        if text[j] == "[":
+            depth += 1
+        elif text[j] == "]":
+            depth -= 1
+            if depth == 0:
+                return j
+    return -1
 
 
 def _match_brace(text: str, i: int) -> int:
@@ -862,7 +958,9 @@ class Target:
     #: ``sqlite3 FILE``, a copy INTO a directory). It is ranked only where the
     #: write itself is the danger: the guard's own evidence (transcripts,
     #: lineage, ask store, ledger) — see ``classify._evidence_reason``.
-    op: str  # "delete" | "move" | "overwrite" | "clean" | "append"
+    #: ``unprotect`` is a recursive write grant / immutable-flag clear that
+    #: unlocks a tree for removal (``_unprotected_operands``).
+    op: str  # "delete" | "move" | "overwrite" | "clean" | "append" | "unprotect"
     program: str
     pattern: str | None = None
     empty: list[str] = field(default_factory=list)
@@ -955,9 +1053,22 @@ class Target:
     #: rank a read of a same-task-tree session's scratch LOW (incident
     #: 2026-11-13); it never lowers a delete, a write or a stranger's pad.
     read_only_code: bool = False
+    #: A ``touch`` handed to ``python -c CODE`` that ``read_only_code`` did
+    #: NOT prove (``_python_inline_code``): #3918's proof refused the code or
+    #: could not pin the interpreter, so ``classify._tree_read`` gives it no
+    #: lineage credit either (convergence of #3906 with #3918).
+    unproven_code: bool = False
     #: The mention sits in a word the command names as an OUTPUT (``-o``,
     #: ``--out*``, ``--write*``, glued or as the next word): never a read.
     as_output: bool = False
+    #: The program may run code this check cannot see on the mention (a
+    #: ``sed`` with ``e``/``s///e``/``-f``, ``_sed_executes``): never a read,
+    #: so ``classify._tree_read`` gives it no lineage credit (QA Q2, #3906).
+    executes: bool = False
+    #: The mention is the value of an environment assignment, inline
+    #: (``A=<p> cmd``) or an ``env`` operand (``env A=<p> cmd``): that NAME.
+    #: Told to the judge, never a ranking input (PR #3906 round 1, case C).
+    assigned: str | None = None
 
 
 @dataclass(frozen=True)
@@ -1451,6 +1562,72 @@ _OUTPUT_FLAG_RE = re.compile(r"(?:-o|-i|--out[\w-]*|--write[\w-]*|--in-?place)")
 _OUTPUT_GLUED_RE = re.compile(r"(?:-o.|-i.|--out[\w-]*=|--write[\w-]*=|--in-?place=)")
 
 
+#: CPython's long options (``Python/getopt.c``, 3.12–3.14). The valued one
+#: takes its value from the NEXT word only (getopt matches the whole word, so
+#: ``--opt=value`` is not this option and fails closed as unknown).
+_PY_VALUED_LONG_OPTS = frozenset({"--check-hash-based-pycs"})
+_PY_FLAG_LONG_OPTS = frozenset(
+    {"--help", "--help-env", "--help-xoptions", "--help-all", "--version"}
+)
+
+
+def _python_inline_code(name: str, words: list[Expanded]) -> bool:
+    """Does this ``python`` run inline CODE (``-c``, glued or clustered)?
+
+    WHY (convergence of PR #3906 with #3918, 2026-11-13): #3918 made
+    ``python -c`` a PROOF-carrying lane — its CODE is visible, so a read of a
+    task-tree pad earns LOW only when :func:`python_code_read_only` proves it
+    and the interpreter is pinned (``Target.read_only_code``). #3906's lineage
+    credit (``classify._tree_read``) grants LOW to code it cannot see at all
+    (``node -e``, a script file); without this flag it also credited an
+    UNPROVEN ``python -c`` — a ``write_text``/``unlink`` the proof had just
+    refused, or proven code under a repathed interpreter — so #3918's HIGH
+    rows ranked LOW on a child's pad. Such a target carries
+    ``Target.unproven_code`` and gets no lineage credit.
+
+    Parses the option prefix the way CPython does: ``-c`` (alone, glued
+    ``-cCODE`` or clustered ``-Ic``) means inline code; ``-m`` or the first
+    non-option word (a script, ``-`` for stdin) ends the scan; ``-W``/``-X``
+    take a value. An opaque word in the prefix fails closed (``True``).
+
+    ``words[0]`` must be the INTERPRETER word: callers holding a wrapped argv
+    (``env``/``command``/``nice``/``xargs python3 -c …``) slice the wrapper
+    prefix off first, or ``python3`` itself reads as a script and ends the
+    scan (convergence review m1). Long options (m2): CPython's valued one
+    (``--check-hash-based-pycs <mode>``) skips its value, so the mode is not
+    taken for a script; the flag-only ones (``--help``, ``--version`` …) are
+    stepped over; any OTHER ``--`` word fails closed (``True``) — a spelling
+    this table does not model (a ``=`` glued value, a future option) must not
+    turn ``-c`` code into a credited script file.
+    """
+    if not _INTERPRETER_RE.fullmatch(name) or name.startswith("node"):
+        return False
+    i = 1
+    while i < len(words):
+        if words[i].opaque:
+            return True
+        text = words[i].text
+        if text == "--" or text == "-" or not text.startswith("-"):
+            return False
+        if text.startswith("--"):
+            if text in _PY_VALUED_LONG_OPTS:
+                i += 1  # the value is the next word, never the script
+            elif text not in _PY_FLAG_LONG_OPTS:
+                return True
+        else:
+            flags = text[1:]
+            for j, ch in enumerate(flags):
+                if ch == "c":
+                    return True
+                if ch == "m":
+                    return False
+                if ch in "WX":
+                    i += j == len(flags) - 1  # the value is the next word
+                    break
+        i += 1
+    return False
+
+
 def _interpreter_script(name: str, words: list[Expanded], cwd: str | None) -> str | None:
     """The script ``node``/``python`` runs, as an absolute path, else ``None``.
 
@@ -1516,6 +1693,130 @@ def _has_short(flags: list[str], letters: str) -> bool:
 #: Programs whose operands are removed. ``grm``/``gunlink`` are the GNU names on
 #: a Homebrew coreutils install.
 DELETE_PROGRAMS = frozenset({"rm", "grm", "rmdir", "unlink", "gunlink", "shred"})
+#: Permission changes that strip the protection a tree's owner put on it.
+#:
+#: WHY (incident 2026-11-14, session 1faad822298d): ``rm -rf`` of a deep
+#: benchmark tree failed with ``Permission denied`` on its write-protected raw
+#: results; the next call ran ``chmod -R u+w <tree>`` and then ``rm -rf`` again,
+#: and both ranked LOW because ``chmod`` was modelled as metadata only. Write
+#: protection is the owner saying "do not remove this", so unlocking it on a
+#: path the session did not create is a FORCED removal and is judged as one
+#: (``classify._high_reason``, op ``unprotect``).
+_UNPROTECT_PROGRAMS = frozenset({"chmod", "gchmod", "chflags", "chattr", "setfacl"})
+#: ``setfacl`` options that take the NEXT word as their value (an ACL spec or file).
+_SETFACL_VALUE_LETTERS = frozenset("mMxX")
+_SETFACL_VALUE_LONG = frozenset(
+    {"--modify", "--modify-file", "--remove", "--remove-file", "--set", "--set-file"}
+)
+#: ``chflags`` words that clear an immutable / append-only / no-unlink flag.
+_CHFLAGS_UNLOCK = frozenset(
+    {
+        "nouchg",
+        "nouchange",
+        "nouimmutable",
+        "noschg",
+        "noschange",
+        "nosimmutable",
+        "nouappnd",
+        "nouappend",
+        "nosappnd",
+        "nosappend",
+        "nouunlnk",
+        "nouunlink",
+        "nosunlnk",
+        "nosunlink",
+        "0",
+    }
+)
+#: chmod value flags (GNU ``--reference=F`` is glued; BSD has none).
+_CHMOD_VALUE_FLAGS: frozenset[str] = frozenset()
+#: A symbolic chmod clause that grants write: ``u+w``, ``+w``, ``a=rwX``, ``go+rw``.
+_CHMOD_GRANTS_WRITE_RE = re.compile(r"^[ugoa]*[+=][rwxXst]*w[rwxXst]*$")
+
+
+def _chmod_grants_write(mode: str) -> bool:
+    """Does ``mode`` give the OWNER write permission (symbolic or octal)?
+
+    Octal sets the whole mode, so ``755``/``644``/``777`` unlock a read-only
+    file exactly as ``u+w`` does; ``555``/``444`` do not. A symbolic mode is
+    read clause by clause (``u+w,go-w``); a clause naming only ``g``/``o``
+    does not reach the owner, whose permission is what blocks ``rm``.
+    """
+    if re.fullmatch(r"[0-7]{3,4}", mode):
+        return bool(int(mode[-3]) & 2)
+    for clause in mode.split(","):
+        if not _CHMOD_GRANTS_WRITE_RE.match(clause):
+            continue
+        who = re.match(r"^[ugoa]*", clause).group(0)  # type: ignore[union-attr]
+        if not who or "u" in who or "a" in who:
+            return True
+    return False
+
+
+def _unprotected_operands(
+    name: str, args: list[Expanded], *, recursive: bool = False
+) -> list[Expanded]:
+    """The paths a permission change UNLOCKS for removal, else ``[]``.
+
+    ``chmod`` counts only RECURSIVE (``-R``) grants of owner write: a
+    single-file ``chmod u+w f`` to edit it is routine, while unlocking a whole
+    tree is how the incident got past ``rm``'s refusal. ``chflags`` clearing
+    an immutable or append-only flag counts with or without ``-R``: nothing
+    but a removal or rewrite needs that. ``chattr -i``/``-a`` (Linux) the same.
+
+    Review R1-m2 (PR #3966), the same unlock spelled differently:
+    ``recursive=True`` is passed for ``find -exec chmod`` (find walks the
+    tree for it); macOS ``chmod -R -N`` strips every ACL entry, deny-delete
+    ones included, and takes no mode operand; ``setfacl -R`` rewrites the
+    ACLs of a whole tree.
+    """
+    if name in ("chmod", "gchmod"):
+        operands, flags = _operands(args, _CHMOD_VALUE_FLAGS)
+        if not (recursive or _has_short(flags, "R") or "--recursive" in flags):
+            return []
+        if _has_short(flags, "N"):
+            return operands
+        if len(operands) < 2:
+            return []
+        return operands[1:] if _chmod_grants_write(operands[0].text) else []
+    if name == "setfacl":
+        files: list[Expanded] = []
+        rec = recursive
+        skip = False
+        for w in args:
+            if skip:
+                skip = False
+                continue
+            t = w.text
+            if t.startswith("--"):
+                rec = rec or t == "--recursive"
+                skip = t in _SETFACL_VALUE_LONG
+                continue
+            if t.startswith("-") and len(t) > 1 and not w.opaque:
+                rec = rec or "R" in t[1:]
+                # ``-Rm spec``: a value letter LAST in the cluster takes the next word.
+                skip = t[-1] in _SETFACL_VALUE_LETTERS
+                continue
+            if not w.vanished:
+                files.append(w)
+        return files if rec else []
+    if name == "chflags":
+        operands, _ = _operands(args)
+        if len(operands) < 2:
+            return []
+        words = {f.strip().lower() for f in operands[0].text.split(",")}
+        return operands[1:] if words & _CHFLAGS_UNLOCK else []
+    if name == "chattr":
+        unlock = any(
+            w.text.startswith("-") and len(w.text) > 1 and set(w.text[1:]) & {"i", "a"}
+            for w in args
+        )
+        if not unlock:
+            return []
+        return [w for w in args if not w.text.startswith(("-", "+", "=")) and not w.vanished]
+    return []
+
+
 #: Words that run the REST of the segment as a command (beyond search_guard's list).
 _EXTRA_WRAPPERS = frozenset({"builtin", "exec", "doas", "caffeinate", "stdbuf", "ionice"})
 _RM_VALUE_FLAGS: frozenset[str] = frozenset()
@@ -1594,7 +1895,14 @@ def _peel_wrappers(words: list[Expanded]) -> tuple[list[Expanded], bool]:
         while rest:
             t = rest[0].text
             if t.startswith("-") and t != "-":
-                takes = (len(t) == 2 and t[1] in value_flags) or t in _WRAPPER_LONG_VALUE_FLAGS
+                takes = (
+                    (len(t) == 2 and t[1] in value_flags)
+                    or t in _WRAPPER_LONG_VALUE_FLAGS
+                    or t in _WRAPPER_OWN_LONG_VALUE_FLAGS.get(name, ())
+                    # env clusters too (``-iC /tmp``), with the rule
+                    # ``_env_split`` uses, so both agree on the program word.
+                    or (name == "env" and _env_takes_next_word(t))
+                )
                 rest = rest[2:] if takes else rest[1:]
                 continue
             if _DURATION_RE.match(t) or (_ASSIGN_RE.match(t) and name == "env"):
@@ -2162,7 +2470,13 @@ def _cwd_shadows_imports(cwd: str) -> bool:
 
 
 def _in_place_edit(name: str, args: list[Expanded]) -> bool:
-    """``sed -i``/``--in-place``, or perl with ``i`` in a short cluster (``-pi``)."""
+    """``sed -i``/``-I``/``--in-place``, or perl with ``i`` in a short cluster (``-pi``).
+
+    BSD sed's ``-I`` (review F1 on PR #3906) edits in place exactly like
+    ``-i`` (suffix glued or as the next word), so it is a write too; without
+    it ``sed -I '' 's/a/b/' <file>`` fell through to an unmodelled mention.
+    """
+    in_place = "iI" if name in ("sed", "gsed") else "i"
     for w in args:
         t = w.text
         if t.startswith("--in-place"):
@@ -2172,9 +2486,125 @@ def _in_place_edit(name: str, args: list[Expanded]) -> bool:
             # — but only BEFORE the first script letter (R4-2): in
             # ``-e's/in/out/'`` everything after ``e`` is the script text.
             flags, _script = _split_cluster(name, t[1:])
-            if "i" in flags:
+            if any(ch in flags for ch in in_place):
                 return True
     return False
+
+
+#: ``env``'s short options that take a value (GNU ``-u``/``-C``/``-a``, BSD
+#: ``-u``/``-P``/``-L``/``-U``), and the long ones. ONE table, owned by
+#: ``search_guard`` and read by both ``_peel_wrappers`` and ``_env_split``: a
+#: private copy here once let ``-C <dir>`` skip its value in the ``-S`` finder
+#: while the peel took ``<dir>`` for the program (QA Q-3-1 on PR #3906).
+_ENV_VALUE_LETTERS = _WRAPPER_VALUE_FLAGS["env"]
+_ENV_LONG_VALUE_FLAGS = _WRAPPER_OWN_LONG_VALUE_FLAGS["env"]
+#: How many ``env -S "env -S '…'"`` layers are spliced before failing closed.
+_MAX_ENV_SPLIT_DEPTH = 4
+
+
+def _env_split_words(text: str) -> str:
+    """Rewrite env's ``-S`` word separator ``\\_`` as a space, outside single quotes.
+
+    env splits its ``-S`` value with its own grammar, not the shell's:
+    ``env -S 'rm\\_-rf\\_x'`` runs ``rm -rf x``, while ``scan()`` read the
+    whole thing as one word named ``rm\\_-rf\\_x`` (review R3-1 on PR #3906).
+    Inside double quotes env makes ``\\_`` a literal space, which is the same
+    thing once ``scan()`` honours the quotes; inside single quotes it stays
+    literal.
+
+    This, plus ``scan()``, only APPROXIMATES env's ``-S`` rules (review R3-2):
+    ``\\c`` truncation is not modelled and ``;``/``&&``/``|`` are split as
+    shell operators where env passes them on as literal words. Each of those
+    over-ranks (more programs and targets than env would run), never under.
+    """
+    out: list[str] = []
+    quote = ""
+    i = 0
+    while i < len(text):
+        ch = text[i]
+        if quote == "'":
+            if ch == "'":
+                quote = ""
+            out.append(ch)
+            i += 1
+            continue
+        if ch == "\\" and i + 1 < len(text):
+            if text[i + 1] == "_":
+                out.append(" ")
+            else:
+                out.append(text[i : i + 2])
+            i += 2
+            continue
+        if ch in "'\"":
+            quote = "" if quote == ch else (quote or ch)
+        out.append(ch)
+        i += 1
+    return "".join(out)
+
+
+def _env_takes_next_word(t: str) -> bool:
+    """Does env option word ``t`` take the NEXT word as its value?
+
+    A short cluster takes it when its first valued letter ends the word
+    (``-C``, ``-iC``); anything after that letter is a glued value
+    (``-C/tmp``). Long options take it only without ``=``.
+    """
+    if t.startswith("--"):
+        return "=" not in t and t in _ENV_LONG_VALUE_FLAGS
+    for k, ch in enumerate(t[1:], start=1):
+        if ch in _ENV_VALUE_LETTERS:
+            return k == len(t) - 1
+    return False
+
+
+def _env_split(
+    args: list[Expanded],
+) -> tuple[list[Expanded], Expanded | None, list[Expanded]] | None:
+    """Find ``-S``/``--split-string`` in ``env args…``'s option prefix.
+
+    Returns ``(options before it, its value word, words after the value)``, or
+    ``None`` when env carries no ``-S``. A missing value is ``None`` in the
+    middle slot. Flags clustered before ``S`` (``-iS``) come back as their own
+    option word so the caller keeps them.
+
+    WHY (review on PR #3906): the check used to look at the first two words
+    only, so ``env -u FOO -S 'rm -rf …'`` hid its command string behind a
+    valued flag. Every option word up to the first operand or ``--`` is
+    scanned, valued flags skip their value, and ``S`` anywhere in a short
+    cluster counts; the rest of the cluster (``-S'rm -rf ~'``) is the value.
+    """
+    i = 0
+    while i < len(args):
+        t = args[i].text
+        start = i
+        i += 1
+        if t == "--" or t == "-" or not t.startswith("-"):
+            return None
+        if t.startswith("--"):
+            key, eq, value = t.partition("=")
+            if key == "--split-string":
+                if eq:
+                    return args[:start], Expanded(text=value, opaque=args[start].opaque), args[i:]
+                value_word = args[i] if i < len(args) else None
+                return args[:start], value_word, args[i + 1 :]
+            if key in _ENV_LONG_VALUE_FLAGS and not eq:
+                i += 1
+            continue
+        for k, ch in enumerate(t[1:], start=1):
+            if ch == "S":
+                before = list(args[:start])
+                if k > 1:
+                    before.append(Expanded(text=t[:k]))
+                if k < len(t) - 1:
+                    glued = Expanded(text=t[k + 1 :], opaque=args[start].opaque)
+                    return before, glued, args[i:]
+                value_word = args[i] if i < len(args) else None
+                return before, value_word, args[i + 1 :]
+            if ch in _ENV_VALUE_LETTERS:
+                if _env_takes_next_word(t):
+                    i += 1  # the value is the next word
+                break  # otherwise the rest of the word is the value
+    return None
 
 
 def _split_cluster(name: str, cluster: str) -> tuple[str, str | None]:
@@ -2712,6 +3142,62 @@ class _Walker:
                     self._restore(groups.pop())
 
     # -- one segment ---------------------------------------------------------
+    def _splice_env_split(
+        self,
+        words: list[Expanded],
+        split: tuple[list[Expanded], Expanded | None, list[Expanded]],
+    ) -> list[Expanded]:
+        """Replace ``env``'s ``-S`` value with the words env will run.
+
+        Three rules, all from review R3-1 on PR #3906:
+
+        * The raw ``-S`` text is scanned for a delete word FIRST, every layer,
+          whatever the splice makes of it. That is round 2's floor: a splice
+          that mis-splits (env's grammar is not the shell's) can lower a
+          mention, never this reason.
+        * env's own separator ``\\_`` is honoured (``_env_split_words``).
+        * A spliced ``env … -S …`` is spliced again, up to
+          ``_MAX_ENV_SPLIT_DEPTH`` layers; deeper nesting fails closed as an
+          opaque command string, since a bounded walk is the only kind the
+          model cannot stretch.
+
+        ``$VAR``/``${VAR}`` and ``~`` are expanded shell-style: env expands
+        ``${VAR}`` itself and leaves ``~`` alone, so this pins nothing it should
+        not and can only over-rank.
+        """
+        head = [words[0]]
+        inner = words[1:]
+        for _depth in range(_MAX_ENV_SPLIT_DEPTH):
+            before, value, after = split
+            raw = value.text if value is not None else " ".join(w.text for w in inner)
+            if _DELETE_WORD_RE.search(raw):
+                self.result.opaque_reasons.append("env -S runs a command string")
+            if value is None or value.opaque:
+                # Unknowable value: fall through to the peel and the backstop.
+                return [*head, *inner]
+            split_words, split_redirects = scan(_env_split_words(value.text))
+            spliced: list[Expanded] = []
+            for raw_word in split_words:
+                spliced.extend(expand_all(raw_word, self.state.env, self.state.home))
+            # env passes ``>``/``|`` through as literal words; keep the
+            # operands visible rather than drop them.
+            for _op, raw_word in split_redirects:
+                spliced.extend(expand_all(raw_word, self.state.env, self.state.home))
+            head = [*head, *before]
+            inner = [*spliced, *after]
+            nested = (
+                _env_split(inner[1:])
+                if inner and os.path.basename(inner[0].text) == "env"
+                else None
+            )
+            if nested is None:
+                return [*head, *inner]
+            head = [*head, inner[0]]
+            inner = inner[1:]
+            split = nested
+        self.result.opaque_reasons.append("env -S nested too deep to resolve")
+        return [*head, *inner]
+
     def _segment(
         self,
         text: str,
@@ -2734,6 +3220,7 @@ class _Walker:
             for body in w.substitutions:
                 if body.strip() and body.strip() not in _EMPTY_BODIES:
                     self._isolated_walk(body, depth + 1)
+        self._walk_heredoc_substitutions(redirects, heredocs or [], depth)
         herestrings: list[str] = []
         for op, raw in redirects:
             if op in (">", ">|", ">>", ">&", "<>"):
@@ -2797,14 +3284,17 @@ class _Walker:
                 if not w.text.startswith("-"):
                     st.env[w.text] = OPAQUE_MARK
             return
-        if name == "env" and any(
-            w.text in ("-S", "--split-string") or w.text.startswith("-S") for w in words[1:3]
-        ):
-            # S6: ``env -S 'cmd …'`` runs its argument as a command line.
-            joined = " ".join(w.text for w in words[1:])
-            if _DELETE_WORD_RE.search(joined):
-                self.result.opaque_reasons.append("env -S runs a command string")
-            return
+        split = _env_split(words[1:]) if name == "env" else None
+        if split is not None:
+            # S6 / review R2-1 on PR #3906: ``env -S 'cmd …'`` splits its value
+            # into words and runs them as if they had been env's own argv, so
+            # the split words are spliced in place of ``-S`` and the segment
+            # carries on as a plain ``env``: options and assignments around it
+            # still peel, and the real program's targets and mentions are
+            # ranked. Returning early here once dropped non-delete commands
+            # (``env -i -u A -S 'node x <stranger pad>'``) to LOW. Tilde and
+            # ``${VAR}`` are expanded shell-style, which can only over-rank.
+            words = self._splice_env_split(words, split)
         # Kept for the backstop: a wrapper's own flags can carry a path
         # (``env -Q<path>``, ``xargs -a <path>``) that peeling would hide.
         unpeeled = words
@@ -2821,7 +3311,10 @@ class _Walker:
             exempt = self._touch(name, args) | _read_inputs(name, args)
             # The program word too: after ``env``/``xargs`` peeling a path can
             # BE the program (``xargs -Q <path>``).
-            self._backstop(name, unpeeled, raw_assigns, exempt)
+            executes = name in ("sed", "gsed") and _sed_executes(args)
+            self._backstop(
+                name, unpeeled, raw_assigns, exempt, executes, len(unpeeled) - len(words)
+            )
         if name in _SHELL_C_WORDS:
             self._shell(
                 args,
@@ -2873,6 +3366,18 @@ class _Walker:
         if name in ("ln", "gln"):
             self._ln(args)
             return
+        if name in _UNPROTECT_PROGRAMS:
+            # No ``return``: a permission change keeps whatever other handling
+            # it had (the write-surface backstop); this only ADDS targets.
+            for w in _unprotected_operands(name, args):
+                self._add(w, "unprotect", name)
+            # ``… | xargs chmod u+w`` (review R1-m2): the files arrive on
+            # stdin, typically a whole ``find`` walk, so it is read as
+            # recursive; a stand-in operand asks "would this unlock its files?".
+            if stdin_fed and _unprotected_operands(
+                name, [*args, Expanded(text="{}")], recursive=True
+            ):
+                self._add_stdin(name, op="unprotect")
         if name in DELETE_PROGRAMS:
             flags_with_value = _SHRED_VALUE_FLAGS if name == "shred" else _RM_VALUE_FLAGS
             operands, _flags = _operands(args, flags_with_value)
@@ -3024,7 +3529,9 @@ class _Walker:
                         gnu_files.append(args[k + 2])
                     k += 2
                     continue
-                k += 1
+                # R2-2: BSD ``-I`` ending a cluster takes the next word as its
+                # suffix (``-I .bak``, ``-EI ''``); it is not the script.
+                k += 2 if name in ("sed", "gsed") and t.endswith("I") else 1
                 continue
             if t.startswith("--"):
                 k += 1
@@ -3151,6 +3658,42 @@ class _Walker:
                 self._fetched_script(stdin_piped, feed)
                 return
         self._unseen_script(segment, stdin_piped, pipeline, feed)
+
+    def _walk_heredoc_substitutions(
+        self, redirects: list[tuple[str, _RawWord]], bodies: list[str], depth: int
+    ) -> None:
+        """Walk the ``$(…)``/backtick commands an UNQUOTED heredoc body runs.
+
+        Bash expands an unquoted-delimiter heredoc (``<<EOF``) before the reader
+        sees it, so ``cat <<EOF`` with ``$(rm -rf ~/x)`` in its body runs that
+        ``rm`` whatever ``cat`` does. A quoted delimiter (``<<'EOF'``,
+        ``<<"EOF"``, ``<<\\EOF``) makes the body literal data: never walked
+        here, so prose in a ``gh pr comment --body "$(cat <<'EOF' …)"`` is not
+        a command. Bodies pair with the segment's ``<<`` openers in order; if
+        the counts disagree (an opener sat inside a split substitution, R10)
+        the pairing is a guess, so every body is walked (fails toward scrutiny).
+        """
+        delimiters = [raw for op, raw in redirects if op in ("<<", "<<-")]
+        if not bodies:
+            return
+        if len(delimiters) == len(bodies):
+            active = [
+                body
+                for delimiter, body in zip(delimiters, bodies)
+                if all(part.kind == "bare" for part in delimiter.parts)
+            ]
+        else:
+            active = list(bodies)
+        st = self.state
+        for data in active:
+            if "$" not in data and "`" not in data:
+                continue
+            data_words, _ = scan(data, heredoc=True)
+            for w in data_words:
+                for exp in expand_all(w, st.env, st.home):
+                    for body in exp.substitutions:
+                        if body.strip() and body.strip() not in _EMPTY_BODIES:
+                            self._isolated_walk(body, depth + 1)
 
     def _walk_stdin_bodies(self, heredocs: list[str], herestrings: list[str], depth: int) -> None:
         for body in list(herestrings) + list(heredocs):
@@ -3510,6 +4053,21 @@ class _Walker:
             i += 1
         rest = args[i:]
         texts = [w.text for w in rest]
+        # ``find <tree> -exec chmod u+w {} +`` (review R1-m2) unlocks every
+        # file find walks: the same forced removal as ``chmod -R u+w <tree>``.
+        for j, t in enumerate(texts):
+            if t not in _FIND_EXEC or j + 1 >= len(texts):
+                continue
+            prog = os.path.basename(texts[j + 1])
+            if prog not in _UNPROTECT_PROGRAMS:
+                continue
+            end = next(
+                (k for k in range(j + 2, len(texts)) if texts[k] in (";", "\\;", "+")),
+                len(texts),
+            )
+            if _unprotected_operands(prog, rest[j + 2 : end], recursive=True):
+                for w in roots or [Expanded(text=".")]:
+                    self._add(w, "unprotect", f"find -exec {prog}")
         destructive = "-delete" in texts
         for j, t in enumerate(texts):
             if t in _FIND_EXEC and j + 1 < len(texts):
@@ -3692,7 +4250,13 @@ class _Walker:
         return python_code_read_only(code.text)
 
     def _backstop(
-        self, name: str, args: list[Expanded], assigns: list[str], exempt: set[int]
+        self,
+        name: str,
+        args: list[Expanded],
+        assigns: list[str],
+        exempt: set[int],
+        executes: bool = False,
+        prefix: int = 0,
     ) -> None:
         """THE INVARIANT (review R5): a non-read-only call that MENTIONS
         protected state ranks at least HIGH.
@@ -3713,13 +4277,27 @@ class _Walker:
         st = self.state
         script = _interpreter_script(name, args, st.cwd)
         read_only_code = self._inline_read_only(name, args, assigns)
+        # ``args[prefix]`` is the interpreter word: ``args`` is the UNPEELED
+        # argv, so without the slice a wrapper (``env python3 -c …``) hides
+        # the ``-c`` and the write earns lineage credit (review m1).
+        unproven_code = not read_only_code and _python_inline_code(name, args[prefix:])
         self.programs_run += 1
         outputs = _output_word_ids(args)
         words = [w for w in args if id(w) not in exempt]
-        texts = [(w.text, id(w) in outputs) for w in words] + [
-            (a.split("=", 1)[1], False) for a in assigns if "=" in a
-        ]
-        for text, as_output in texts:
+        # ``prefix``: how many leading words are wrappers (``env -u X A=…``)
+        # before the program, so an ``A=…`` among them is an assignment, as
+        # is a shell inline one. Recorded on the Target (``assigned``) so the
+        # judge is told the path only arrives as an environment value.
+        lead = {id(w) for w in args[:prefix]}
+        texts = [
+            (
+                w.text,
+                id(w) in outputs,
+                (m.group(1) if id(w) in lead and (m := _ASSIGN_RE.match(w.text)) else None),
+            )
+            for w in words
+        ] + [(a.split("=", 1)[1], False, a.split("=", 1)[0]) for a in assigns if "=" in a]
+        for text, as_output, assigned in texts:
             for raw in _MENTION_RE.findall(text):
                 if OPAQUE_MARK in raw or TEMP_MARK in raw:
                     continue  # an opaque part: the word itself is added below
@@ -3745,7 +4323,10 @@ class _Walker:
                             program=name or "a program",
                             script=script,
                             read_only_code=read_only_code and not as_output,
+                            unproven_code=unproven_code,
                             as_output=as_output,
+                            executes=executes,
+                            assigned=assigned,
                         )
                     )
             if st.cwd is None:
@@ -4274,11 +4855,11 @@ class _Walker:
                 self._add(Expanded(text=landed), "append", program)
                 self._carry_link(landed, state)
 
-    def _add_stdin(self, program: str) -> None:
+    def _add_stdin(self, program: str, op: str = "delete") -> None:
         self.result.targets.append(
             Target(
                 path=self.state.cwd,
-                op="delete",
+                op=op,
                 program=f"xargs {program}",
                 credential_derived=self.state.private_cwd,
                 opaque=True,
@@ -4519,6 +5100,42 @@ def _read_inputs(name: str, args: list[Expanded]) -> set[int]:
     return out
 
 
+def _sed_read_only(argv: list[str]) -> bool:
+    """Is this ``sed`` call provably a pure read (prints, never writes)?
+
+    WHY (field report 2026-11-12, case B): ``sed -n '1,135p' <file>`` is how
+    agents page a file, yet sed was never trusted, so every path it named hit
+    the backstop as "handed to sed" and a reviewer could not read the frozen
+    files it was reviewing. Trusted only when every flag is a known non-writing
+    one (no ``-i``, no ``-f``, no unknown or abbreviated long option) and the
+    script — the ``-e`` values or the first operand, never the input files
+    (``_sed_script_text``) — holds no ``w``/``W``/``e`` at all. That letter
+    test is deliberately crude: it also rejects ``s/we/x/p``, which costs a
+    judge call, never a missed ``w FILE`` or ``s///e``.
+    """
+    words = [Expanded(text=a) for a in argv]
+    script = _sed_script_text(words)
+    if script is None or _SED_WRITES_RE.search(script):
+        return False
+    return _flags_known(words, _SED_READ_FLAGS)
+
+
+def _sed_executes(words: list[Expanded]) -> bool:
+    """May this ``sed`` run code this check cannot see (``e``, ``s///e``, ``-f``)?
+
+    WHY (QA Q2 on PR #3906): a sed that is not provably read-only reaches the
+    backstop, and its FILE operands then looked like plain reads, so from a
+    lineage caller ``sed 's/x/rm -rf ~/e' <parent file>`` or ``sed -f ~/x
+    <parent file>`` earned ``classify._tree_read``'s read credit. Such a sed is
+    an executor, not a reader: the caller marks its mentions ``executes`` and
+    they get no lineage credit. Crude like ``_sed_read_only``: ANY ``e`` in the
+    script counts (``/needle/p`` included), which costs a judge call, never a
+    missed ``e`` command; a script in a file (``-f``/``--file``) is unknowable.
+    """
+    script = _sed_script_text(words)
+    return script is None or "e" in script
+
+
 def _identify_read_only(argv: list[str]) -> bool:
     return not any(a.lstrip("+-").startswith("write") or _MAGICK_CODER_RE.match(a) for a in argv)
 
@@ -4533,6 +5150,8 @@ def read_only_argv(name: str, argv: list[str], *, assigned: Sequence[str] = ()) 
         return _identify_read_only(argv)
     if name == "magick":
         return bool(argv) and argv[0] == "identify" and _identify_read_only(argv[1:])
+    if name in ("sed", "gsed"):
+        return _sed_read_only(argv)
     if name == "find":
         return not any(a in _FIND_WRITES for a in argv)
     if name == "git":
@@ -4830,7 +5449,7 @@ _MV_FLAGS = _Flags(
 )
 _TEE_FLAGS = _Flags("aip", frozenset({"--append", "--ignore-interrupts"}))
 _SED_FLAGS = _Flags(
-    "nEreisuz",
+    "nEreiIsuz",
     frozenset(
         {
             "--quiet",
@@ -4845,6 +5464,25 @@ _SED_FLAGS = _Flags(
     ),
     frozenset({"-e", "--expression", "-f", "--file", "-l"}),
 )
+#: ``sed`` flags that never write: ``_SED_FLAGS`` without ``-i``/``--in-place``
+#: and without ``-f`` (a script file cannot be inspected here).
+_SED_READ_FLAGS = _Flags(
+    "nErsuz",
+    frozenset(
+        {
+            "--quiet",
+            "--silent",
+            "--regexp-extended",
+            "--separate",
+            "--unbuffered",
+            "--null-data",
+            "--posix",
+        }
+    ),
+    frozenset({"-e", "--expression", "-l", "--line-length"}),
+)
+
+
 #: A sed script that writes a file of its own (``w FILE``, ``s/a/b/w FILE``).
 _SED_WRITES_RE = re.compile(r"[wWe]")
 #: A path-looking filename after a ``w``/``W`` (``1w /x``, ``s/a/b/gw ~/x``).
@@ -4900,6 +5538,65 @@ def _copy_dest(args: list[Expanded], spec: _Flags) -> list[Expanded]:
     return operands[-1:] if len(operands) >= 2 else []
 
 
+def _sed_script_text(args: list[Expanded]) -> str | None:
+    """The text of sed's SCRIPT only, or ``None`` when it comes from a file.
+
+    WHY (field report 2026-11-12): the write check used to scan every
+    non-flag word, FILE operands included, so the ``e`` in ``…/sessions/…``
+    matched ``_SED_WRITES_RE`` and a pure ``sed -n '1,135p' <pad file>`` was
+    never fully modelled — the path went to the backstop as "handed to sed".
+    The script is each ``-e``/``--expression`` value, else the first operand;
+    every later operand is an input file. ``-f`` (script in a file) is
+    unknowable, so the caller keeps the conservative ranking.
+    """
+    scripts: list[str] = []
+    operands: list[str] = []
+    i = 0
+    while i < len(args):
+        t = args[i].text
+        i += 1
+        if t == "--":
+            operands.extend(w.text for w in args[i:])
+            break
+        if t.startswith("--"):
+            key, eq, value = t.partition("=")
+            if key in ("--file",):
+                return None
+            if key == "--expression":
+                if eq:
+                    scripts.append(value)
+                elif i < len(args):
+                    scripts.append(args[i].text)
+                    i += 1
+            elif key == "--line-length" and not eq:
+                i += 1
+            continue
+        if t.startswith("-") and t != "-":
+            for k, ch in enumerate(t[1:], start=1):
+                if ch in "efl":
+                    if ch == "f":
+                        return None
+                    glued = t[k + 1 :]
+                    if glued:
+                        value = glued
+                    elif i < len(args):
+                        value = args[i].text
+                        i += 1
+                    else:
+                        value = ""
+                    if ch == "e":
+                        scripts.append(value)
+                    break
+            else:
+                if t.endswith("I"):
+                    i += 1  # R2-2: BSD ``-I <suffix>``; the suffix is no script
+            continue
+        operands.append(t)
+    if not scripts and operands:
+        scripts.append(operands[0])
+    return " ".join(scripts)
+
+
 def _write_surface(
     name: str, args: list[Expanded], home: str
 ) -> tuple[list[Expanded], bool] | None:
@@ -4932,7 +5629,7 @@ def _write_surface(
         return [], _flags_known(args, _META_FLAGS)  # metadata only, no content
     if name in ("sed", "gsed"):
         # ``-i`` operands are resolver targets; a script's own ``w`` is not.
-        scripts = " ".join(w.text for w in args if not w.text.startswith("-"))
+        scripts = _sed_script_text(args)
         # Its own ``w``/``W`` commands write: a parseable filename there is a
         # destination (review R5-MINOR-1); a script that is not a provably
         # read-only one is never fully modelled, so the backstop sees it.
@@ -4940,6 +5637,9 @@ def _write_surface(
             Expanded(text=_tilde_value(m, home))
             for m in _SED_W_PATH_RE.findall(" ".join(w.text for w in args))
         ]
+        if scripts is None:
+            # ``-f FILE``: the script is a file this check cannot read.
+            return dests, False
         return dests, _flags_known(args, _SED_FLAGS) and not _SED_WRITES_RE.search(scripts)
     if name in ("cp", "gcp"):
         return _copy_dest(args, _CP_FLAGS), _flags_known(args, _CP_FLAGS)

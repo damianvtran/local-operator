@@ -153,7 +153,7 @@ def test_a_revoked_device_cannot_re_pair(tmp_path: Path, monkeypatch) -> None:
         },
     )
     assert reply.status_code == 403, reply.text
-    assert reply.json() == {"error": "this device has been revoked"}
+    assert reply.json() == {"error": "this device has been revoked", "code": "pair_device_revoked"}
     assert devices.list_pending(tmp_path) == []
 
 
@@ -576,7 +576,10 @@ def test_a_revocation_recorded_only_in_the_ANCHOR_still_stops_a_re_pair(
         },
     )
     assert reply.status_code == 403, reply.text
-    assert reply.json() == {"error": "this device has been revoked"}, reply.text
+    assert reply.json() == {
+        "error": "this device has been revoked",
+        "code": "pair_device_revoked",
+    }, reply.text
     assert devices.list_pending(tmp_path) == []
 
 

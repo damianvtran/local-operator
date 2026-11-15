@@ -860,9 +860,11 @@ backend exists — Darwin today. command-status keeps the bound, the forwarded
 signals, the leader-exit sweep and the memory grant, signals the group only
 while its leader is unreaped, and always reports `cleanup=unknown`; it never
 certifies cleanup (`docs/design/run-bounded-contract.md`). The recipe also gives the node child
-ci.yml's heap headroom — `NODE_OPTIONS=--max-old-space-size=6144`, raised only
-when the caller's `NODE_OPTIONS` has no `--max-old-space-size` or a smaller
-one, a larger value passing through — because a bare run otherwise inherits
+heap headroom — local `run_bounded` uses a 6144 MB floor
+(`scripts/run_bounded.py` `NODE_HEAP_MB`, `NODE_OPTIONS=--max-old-space-size=6144`)
+while CI's pyright step uses 8192 on the 16 GB runner (`ci.yml`); the local value
+is raised only when the caller's `NODE_OPTIONS` has no `--max-old-space-size` or
+a smaller one, a larger value passing through — because a bare run otherwise inherits
 node's ~4 GB default cap, which OOMed the analyzer under fleet load.
 
 **1800 s, deliberately NOT the 900 s that would mirror that job's
@@ -3045,6 +3047,47 @@ consumes — `tests/` included — gets at least a delta check, and any executab
 change, minor fixes included, gets a numbered
 `### Agent review — round <N>` delta round scoped `<prev-head>..<head>` by an
 independent reviewer, plus QA if a QA'd surface moved.
+
+## macOS login items: Background Task Management attribution
+
+macOS lists every LaunchAgent under System Settings > Login Items and posts
+"… can run in the background" when one appears. Background Task Management
+(BTM) names the item after the code at the plist's **`Program`**, not
+`ProgramArguments[0]`, `Label` or the file name (measured on macOS 27.2,
+2026-11-14): an unsigned `Program` is named after its file name ("python3",
+"python3.12") with no developer, and every such item notifies on its own; a
+Developer-ID-signed `Program` is named after its bundle and grouped under the
+certificate's developer name, and once that developer has been notified,
+further items from it register silently. Ordinary tool-call child processes
+(bash, eval, python) create no BTM items at all — only launchd plists do.
+
+So every plist names the CI-signed launcher
+(`packaging/macos/lop-launcher/launcher.c`, planted at
+`~/.local/share/lop/bin/Local Operator.lopruntime`), which execs the `python3`
+shim beside it; `update.daemon_program()` selects it only after `codesign`
+verifies team `SHA2U6KT7V` AND the exact leaf `Developer ID Application:
+Radient Inc. (SHA2U6KT7V)`, and falls back to the shim otherwise (pure wheel,
+pip/pipx/source installs). Per-episode jobs (`com.local-operator.episode.<id>`)
+use the launcher's `LOP_LAUNCHER_TARGET` mode so their own interpreter still runs.
+Expect **one** "Software from "Radient Inc." can run in the background"
+notification per Mac at rollout.
+
+Rules that follow from it:
+
+- **Only the Radient Inc. organization identity signs Local Operator code.**
+  The team id survived the individual-to-organization conversion, so a team
+  check alone also accepts the retired individual certificate — and BTM would
+  show its personal name. `procname.SIGNING_AUTHORITY` is the one pin; CI
+  asserts it on the finished signature, and the local runtime-signing opt-in
+  refuses any other leaf (runtimes then stay ad-hoc).
+- **Never run `sfltool`** to inspect BTM (it raises an admin/Touch ID dialog on
+  the operator's screen); read the `BackgroundTaskManagementAgent` "Posting
+  advisory" lines with `log show` instead.
+- Tests and rigs create no plists in the real `~/Library/LaunchAgents`; use an
+  isolated `HOME` ("Isolating a run").
+- **Linux** (systemd user units) has no BTM equivalent: nothing to do.
+  **Windows** would need an Authenticode-signed launcher `.exe` (a separate
+  certificate); deferred, and nothing notifies there today.
 
 ## Security advisories
 

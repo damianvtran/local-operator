@@ -1,0 +1,55 @@
+{
+  "schema": 1,
+  "audit_id": "primary-58fe18b8416a",
+  "audit_kind": "bounded_namespace_independent_semantic_audit",
+  "locale": "vi",
+  "namespace": "tui.boot_prompt",
+  "audit_date": "2026-11-11",
+  "audited_revision": "56e6248f5da248fa6748d1eb50f21ddbe8ecc00f",
+  "key_count": {
+    "en": 2,
+    "target": 2,
+    "context": 2
+  },
+  "auditor": {
+    "agent": "qa-tester / independent i18n-auditor",
+    "session": "58fe18b8416a",
+    "model": "anthropic/claude-opus-5-5",
+    "actual_model_source": "session model header",
+    "fallback": "none",
+    "independent_from_translator_session": true,
+    "independence": "No authorship or remediation of audited catalogue/context bytes; translator was coder session 5463be22cea4."
+  },
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/tui.boot_prompt.json",
+      "sha256": "23eb874bbb69dcf392648bd45b71e68b43027b7da583661d7b474fffdba09d7f"
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/tui.boot_prompt.context.json",
+      "sha256": "1ba56a565d3d03fbdbe793075f60f4a727ea450b51c096c119a44b4c461105cc"
+    },
+    "target": {
+      "path": "local_operator/i18n/catalogues/vi/tui.boot_prompt.json",
+      "sha256": "ff5a9b7d0b3c6499b50844816841d095d4aa52811bb51eace57012d080c54a0e"
+    }
+  },
+  "current_bytes_match_audited_hashes": true,
+  "current_report_verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "finding_ids": [],
+    "deferred_non_gating_finding_ids": [
+      "N3"
+    ]
+  },
+  "semantic_reason": "'chưa được gửi' = has not been sent (fits an unsent draft); 'đang nằm trong khung soạn thảo' = is in the composer, matching tui.library.ask_seeded/copy_note; glossary keeps 'prompt'. N3: second clause repeats 'prompt'; '— đang nằm trong khung soạn thảo' would be tighter per pronoun-drop guidance; non-gating.",
+  "context_comparison": "passed; both keys read against tui.boot_prompt.context.json notes (not sent, returned unsent to composer / user draft kept, {prompt} verbatim after colon)",
+  "artifacts": [
+    {
+      "path": "~/.local-operator/sessions/58fe18b8416a/scratchpad/boot-prompt-audit/report.md",
+      "sha256": "f927e4d72642eccb9763ec1f3dc741ec5fdc1798ec4b26736cff53ae6c0b82e4"
+    }
+  ],
+  "limitations": "Linguistic/copy audit only; no native rendered-flow/RTL paint proof for target locales; classified not high-visibility/safety copy, so no second audit claimed or required by this auditor."
+}

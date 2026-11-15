@@ -30,6 +30,14 @@ def devices_port() -> Msg:
     return Msg("cli.mobile_help.devices_port", {})
 
 
+def doctor() -> Msg:
+    return Msg("cli.mobile_help.doctor", {})
+
+
+def doctor_json() -> Msg:
+    return Msg("cli.mobile_help.doctor_json", {})
+
+
 def install() -> Msg:
     return Msg("cli.mobile_help.install", {})
 

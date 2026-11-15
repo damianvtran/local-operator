@@ -54,7 +54,9 @@ from local_operator.guardrails.check import (
     builtin_branch,
     credential_path_masks,
     credential_refusal_text,
+    escalate_asked_targets,
     evidence_write_verdict,
+    lapsed_refusal_reason,
     mask_credential_paths,
     read_settings,
     review_text,
@@ -69,7 +71,11 @@ from local_operator.guardrails.rules import call_text, load_rules
 #: and is the only value a *rule* decision can report; every other value is the
 #: branch ``check.builtin_branch`` chose, imported rather than re-spelled so the
 #: preview cannot hold a second copy of the checkpoint's precedence.
-_REFUSING = frozenset({BUILTIN_REFUSE_CRITICAL, BUILTIN_REFUSE_CREDENTIAL})
+#: Preview-only name for ``_dangerous_delete``'s ``case.lapsed_only`` branch:
+#: ``builtin_branch`` says "judge", but the checkpoint refuses these paths
+#: before any model when only a non-consenting ask points at them.
+BUILTIN_REFUSE_LAPSED = "refuse-lapsed-ask"
+_REFUSING = frozenset({BUILTIN_REFUSE_CRITICAL, BUILTIN_REFUSE_CREDENTIAL, BUILTIN_REFUSE_LAPSED})
 
 _LIMITS = (
     "not proven: this is ONE call against the rule files this preview loaded "
@@ -269,6 +275,9 @@ _EFFECT_WORDS = {
     BUILTIN_REFUSE_CREDENTIAL: (
         "refused outright — a target comes from a secret, so no consent is possible"
     ),
+    BUILTIN_REFUSE_LAPSED: (
+        "refused outright, no model call — an ask names it and no operator answer approves it"
+    ),
 }
 
 
@@ -332,6 +341,8 @@ def preview_tool_call(
                 scratchpad=context.scratchpad,
                 session_id=context.session_id,
             )
+            # Same ranking the checkpoint applies (unanswered asks lift LOW).
+            verdict = escalate_asked_targets(verdict, context)
             effect = builtin_branch(verdict, critical_override=live.critical_override)
             if effect == BUILTIN_REFUSE_CRITICAL:
                 builtin_text = _critical_text(verdict)
@@ -348,6 +359,17 @@ def preview_tool_call(
                     # (``DeleteCase.evidence_basis``); report that branch.
                     effect = BUILTIN_PASS
                     builtin_facts += (f"allowed without the judge: {proven}",)
+                elif case.lapsed_only:
+                    # The checkpoint refuses a path only a non-consenting ask
+                    # points at before any judge runs (QA R1-Q1): say so,
+                    # rather than naming a judge that never runs.
+                    effect = BUILTIN_REFUSE_LAPSED
+                    builtin_text = review_text(
+                        DANGEROUS_DELETE_RULE,
+                        lapsed_refusal_reason(case),
+                        _targets_text(verdict),
+                        worktree=worktree_flagged(verdict),
+                    )
                 else:
                     builtin_text = review_text(
                         DANGEROUS_DELETE_RULE,
@@ -453,6 +475,7 @@ __all__ = [
     "BUILTIN_PASS",
     "BUILTIN_REFUSE_CREDENTIAL",
     "BUILTIN_REFUSE_CRITICAL",
+    "BUILTIN_REFUSE_LAPSED",
     "PreviewReport",
     "RulePreview",
     "preview_tool_call",

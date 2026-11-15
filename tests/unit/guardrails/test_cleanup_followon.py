@@ -851,6 +851,61 @@ async def test_r3_1_rewalked_credential_text_stays_opaque(
     assert CANARY not in text
 
 
+@pytest.mark.parametrize("creator", [DONE, "ccccccccccc3"], ids=["creator", "third-session"])
+def test_convergence_gitfile_witness_preserves_foreign_inside_gate(
+    home: Path, repo: Path, monkeypatch: pytest.MonkeyPatch, creator: str
+) -> None:
+    """Moving Linux root ctime must preserve root ownership and third-session holds."""
+    monkeypatch.setattr(prov, "creation_stamp", lambda st: int(st.st_ctime_ns))
+    wt = _row_inside(home, repo, creator)
+    prov.write_records(
+        [(str(wt / ".git"), prov.WORKTREE_GITFILE_KIND)],
+        owners=[DONE],
+        creator=DONE,
+        command=f"git worktree add {wt}",
+        state_root=home / ".local-operator",
+    )
+    before = prov.creation_stamp(wt.stat())
+    transient = wt / "ctime-only-change"
+    transient.write_text("scratch\n")
+    transient.unlink()
+    assert prov.creation_stamp(wt.stat()) != before
+    rows = prov.ForeignCreations(ME)
+    try:
+        root = rows.match([str(wt)])
+        assert root is not None and root.record.path == str(wt)
+        got = cls._no_ledger_inside(rows, str(wt), prov.finished_foreign_worktree(str(wt), ME))
+    finally:
+        rows.close()
+    assert got.safe is (creator == DONE), got
+    if creator != DONE:
+        assert got.reasons == ("foreign-ledger-inside",)
+    expected = Risk.LOW if creator == DONE else Risk.HIGH
+    for command in (f"rm -rf {wt}", f"git worktree remove --force {wt}"):
+        assert _rank(home, command).risk is expected, command
+
+
+@pytest.mark.parametrize("live", [None, True], ids=["unreadable", "busy"])
+def test_convergence_foreign_cwd_never_uses_own_process_exemptions(
+    home: Path, repo: Path, monkeypatch: pytest.MonkeyPatch, live: bool | None
+) -> None:
+    """The upstream own-family exemption is not evidence a foreign tree is idle."""
+    wt = _finished_tree(home, repo, "done")
+    monkeypatch.setattr(prov, "_live_cwd_inside", lambda _: live)
+
+    def own_only(*args: Any, **kwargs: Any) -> Any:
+        pytest.fail("foreign finished-tree proof called the own-session cwd exemption")
+
+    monkeypatch.setattr(prov, "cwd_holders", own_only)
+    got = prov.finished_foreign_worktree(str(wt), ME)
+    assert not got.safe and got.reasons == ("state-busy",), got
+    # The HIGH diagnostic may ask for holder names. Even an empty diagnostic
+    # answer must not override the unknown/busy foreign-tree safety predicate.
+    monkeypatch.setattr(prov, "cwd_holders", lambda *args, **kwargs: ())
+    for command in (f"rm -rf {wt}", f"git worktree remove --force {wt}"):
+        assert _rank(home, command).risk is Risk.HIGH, command
+
+
 def test_r3_1_literal_eval_ranks_as_on_base(home: Path) -> None:
     """Control: an ``eval`` of literal text that only EXTENDS the value (no
     variable) is still re-walked and ranks like the bare command (LOW)."""

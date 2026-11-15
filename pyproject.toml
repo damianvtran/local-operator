@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "local-operator"
-version = "0.103.0"
+version = "0.105.1"
 description = "A team of proactive AI assistants that can work together behind the scenes to help you get mundane tasks done so you can focus on the fun stuff."
 readme = "README.md"
 authors = [{ name = "Radient Inc.", email = "contact@radienthq.com" }]
@@ -451,10 +451,11 @@ local_operator = [
     # ever shipped again; tests/unit/mobile/test_web_package_data.py still
     # requires every asset any src file imports to be covered here.
     "mobile/web/src/fixtures/*.json",
-    # Read with `readFileSync` by src/lib/format.test.ts instead of imported,
-    # so `tsc` never names it: the same missing build input, failing one step
-    # later and only in the shipped tree's own suite. It still ships, because a
-    # source snapshot that is missing files it references is not one.
+    # `parity-sources.json` and any future non-fixture JSON the lib reads. The
+    # cross-client `*.parity.json` fixtures this glob also matches are read only
+    # by the `*.test.ts` files beside them (with `readFileSync`, so `tsc` never
+    # names them) and by CI's condense-parity checks, so they are dropped again
+    # by the exclude-package-data table below, together with those tests.
     "mobile/web/src/lib/*.json",
     # The chrome brand artwork, imported by components/ui/brand-mark.tsx and the
     # chrome test. One directory, one extension: the `.png` glob is deliberate so
@@ -488,8 +489,38 @@ local_operator = [
 # to every package, which is safe only while every `*.test.ts(x)` under
 # `local_operator/` lives in the relay web's `src/` — the package-data test
 # asserts that, so a test file anywhere else has to be decided on first.
+#
+# THE PARITY FIXTURES FOLLOW THEIR TESTS OUT. 2026-11-15: main's slimmed wheel
+# measured 18,389,125 bytes, 39,045 over the same 17.5 MiB budget, red on main
+# and every merge train. `src/lib/*.parity.json` (five cross-client fixtures,
+# ~69 KB compressed; condense.parity.json alone is ~1 MB raw) is test DATA:
+# its only readers are the excluded `*.test.ts` files (`readFileSync`) and the
+# condense-parity scripts that mobile-web.yml / condense-parity-freshness.yml
+# run from a git checkout. No shipped source imports one, `tsc -b` only
+# compiles JSON a source imports, no Python module opens one, and the
+# installed repair runs `pnpm install` + `pnpm build`, never `pnpm check`/
+# `pnpm test`. The package-data test pins every parity fixture out and
+# `parity-sources.json` still in. Same `"*"` reach rule as the tests: a
+# `*.parity.json` anywhere else in `local_operator/` fails that test first.
+# The cost, stated so nobody trips on it: `pnpm check` / `pnpm test` run from
+# an INSTALLED copy now fail on the missing tests and fixtures. They were never
+# a supported path there; run them from a git checkout.
+#
+# THE `*.context.json` TRANSLATOR SIDECARS STAY IN GIT TOO. Same day: with
+# the parity fixtures out, main merged with this branch measured 18,338,581
+# bytes, only 11,499 under the 17.5 MiB budget, and queued merge trains add
+# ~26 KB each. The 145 sidecars (144 under `i18n/catalogues/en/`, plus the
+# relay web's `src/lib/peer-cycles.context.json`) were ~184 KB compressed.
+# They are authoring metadata (role/tone/maxCells/notes per key): the only
+# caller of `i18n.catalogues.context()` is `scripts/i18n/check.py`, which CI
+# and the release gate run from a git checkout; namespace listing already
+# skips the suffix, so the /v1/i18n route, the content hash and the TUI never
+# saw them; `context()` returns `{}` when one is absent; and the relay web's
+# sidecar is imported only by the excluded `peer-cycles.test.ts`. The
+# package-data test pins all of that, and that no runtime module calls
+# `context()`. Message catalogues (`*/<namespace>.json`) still ship.
 [tool.setuptools.exclude-package-data]
-"*" = ["*.test.ts", "*.test.tsx"]
+"*" = ["*.test.ts", "*.test.tsx", "*.parity.json", "*.context.json"]
 
 [project.urls]
 Homepage = "https://github.com/damianvtran/local-operator"

@@ -29,7 +29,8 @@
   "device_optional": {
     "name": "str",
     "credential_live": "bool",
-    "last_authenticated_at": "int"
+    "last_authenticated_at": "int",
+    "preferences": "object"
   },
   "states": [
     "live",
@@ -74,6 +75,7 @@
     "environment and install_id are deliberately NOT here: the record carries them for the cloud's routing, the phone renders them nowhere, and the wire is a contract, not the store's dump.",
     "NOTHING SECRET LEAVES THIS ROUTE — not the push token (never stored here), not the per-device device_key (the register response that mints it is its only carrier), not the machine's operator key.",
     "``name`` HERE IS THE DEVICE'S LABEL, not a conversation name: the app supplies it at register time and Settings renders it. It shares a spelling with a field the PAYLOAD deny list forbids (payload-forbidden-fields.json, which is scoped to the emits) because a phone's label and a conversation's name are different facts on different shapes — not the same field spelled twice.",
+    "preferences (added 2026-11-14, gated by the list payload's capabilities.push_preferences) is the device's RESOLVED push switches {enabled, completions, errors}, each a bool, absence resolved to true. Optional in this allow-list because a relay predating the capability omits it; a relay advertising the capability renders it on every row. The app's row schema is a looseObject, so an older app ignores it.",
     "state and precedence are ONE vocabulary: the state is the shared precedence resolver's answer on that row, and the precedence string is rendered from the same table, so no two surfaces can read one row as two states."
   ]
 }

@@ -1479,6 +1479,36 @@ class SessionTable:
             return {"degraded": [DECORATION_ATTENTION]}
         return snapshot
 
+    def listing_unread_count(self) -> int | None:
+        """The listing's unread count for the push lane, or ``None`` when unknown.
+
+        THE BADGE'S NUMBER, read from the same snapshot :meth:`unread_block`
+        serves, so a push banner's "N conversations need you" equals the phone's
+        badge (ADR 0006 §1.4/§3.2). The lane used to fall back to the worker's
+        store census instead, and on 2026-11-14 the operator's first real push
+        read "Task complete · 47502 conversations need you" — lifetime history,
+        not his handful of unread conversations.
+
+        ``None`` is the degraded shape (``count`` absent: a failed read, or no
+        build yet). The census is deliberately NOT the fallback — it is the
+        defect — and neither is 0, which this module already refuses to claim
+        for a store it could not read; the payload drops the count term instead
+        (``push_payload.wire_count``).
+
+        THREADING: the push worker calls this from its ``to_thread`` pass, off
+        the loop. It is a plain attribute read and nothing else: the snapshot is
+        published by ONE reference assignment in :meth:`summaries` and never
+        mutated afterwards, so a worker thread sees either the old dict or the
+        new one, whole. No lock, no I/O and no loop hop — keeping it fresh is the
+        scan's job (``MobileDaemon._refresh_push_count``), on the loop, before
+        the worker's pass starts.
+        """
+        snapshot = self.unread_snapshot()
+        count = snapshot.get("count")
+        if snapshot.get("degraded") or not isinstance(count, int) or isinstance(count, bool):
+            return None
+        return count
+
     def unread_block(self) -> dict[str, Any]:
         """The list payload's ``unread`` block: the aggregate minus its rows.
 
@@ -3877,11 +3907,166 @@ def _history_response(page: list[Any], has_more: bool) -> dict[str, Any]:
     return body
 
 
+class _ResetPage(list[Any]):
+    """An EMPTY forward page that means "your cursor is gone; read from scratch".
+
+    The forward cursor (``?after=``, delta-sync Phase 2b) answers "the rows
+    newer than the newest one I hold". When that row cannot be placed — the id
+    was never this conversation's, the journal was replaced, a compaction moved
+    it into the injected prefix, or the transcript is not readable — an empty
+    list would read as "you are already current", which is the one answer that
+    silently loses rows. This type is still a list (so the page plumbing stays
+    one shape) and carries the reason the route turns into ``409`` +
+    ``{"reset": true}``: the client drops its cursor and takes a full read.
+    """
+
+    def __init__(self, reason: str) -> None:
+        super().__init__()
+        self.reset = reason
+
+
+def _forward_page(state: Any, after: str, limit: int) -> tuple[list[Any], bool] | None:
+    """The render rows strictly NEWER than ``after``, oldest first, or ``None``.
+
+    WHY THE RENDER AND NOT THE JOURNAL (the backward cursor's source). A forward
+    cursor is the newest row a phone holds, so the rows newer than it are the
+    conversation's TAIL — exactly the stretch the render replays in journal
+    order (the kept window after the newest compaction). The render's only
+    out-of-journal-order stretch is its HEAD: the compaction marker, the
+    preserved user turns re-injected under their original ids, and the carried
+    tier (``DurableFoldState.prefix_ids``). A cursor naming one of those means a
+    compaction landed after the phone's newest row; slicing after it would hand
+    back older kept-window rows as "newer", so it answers ``None`` (reset)
+    instead, and so does an id the render does not hold at all. ``None`` is
+    always safe: it costs the client one full read, never a lost row.
+
+    ``has_more`` is true when rows beyond this page remain; the client pages on
+    with the id of the last row it was given. The cursor row itself is not
+    re-served: its newer state (a tool call that finished) rides the live
+    projection the client opens beside this read.
+    """
+    from local_operator.mobile.durable import _cursor_candidates
+
+    render = state.render
+    # From the tail: a forward cursor is, by construction, near the newest end.
+    index = next((i for i in range(len(render) - 1, -1, -1) if render[i].id == after), None)
+    if index is None:
+        return None
+    prefix_ids = getattr(state, "prefix_ids", frozenset())
+    if prefix_ids and any(candidate in prefix_ids for candidate in _cursor_candidates(after)):
+        return None
+    start = index + 1
+    page = list(render[start : start + limit])
+    return page, len(render) > start + limit
+
+
+#: Top-level projection fields that move with the CLOCK rather than with the
+#: conversation: ``version`` bumps on every repaint, ``activity_started_s`` is
+#: an age re-dated at every serialization (``advance_received_age``). Hashing
+#: them would make a digest that never matches, so they are left out of the
+#: digest and carried on the ``unchanged`` frame instead — the client patches
+#: them onto the copy it keeps, and its version rule keeps working.
+_PROJECTION_CLOCK_FIELDS: tuple[str, ...] = ("version", "activity_started_s")
+
+
+def _frame_digest(frame: dict[str, Any], clock_fields: tuple[str, ...] = ()) -> str:
+    """The seed-elision digest (delta-sync Phase 2a): cheap and deterministic.
+
+    sha256 over the frame's canonical JSON (sorted keys, compact separators),
+    minus ``clock_fields``, truncated to 128 bits (32 hex). Canonical rather
+    than the wire bytes because the same projection reaches this function from
+    two producers (a live registrant's dict and a durable rebuild) whose key
+    ORDER can differ while the content does not. Computed from the CAPPED frame
+    — the one the phone actually holds — so a digest match means the phone's
+    copy equals what would have been sent. One extra serialization per frame,
+    and only on connections that opted in with ``?have=``.
+    """
+    body = {key: value for key, value in frame.items() if key not in clock_fields}
+    canonical = json.dumps(body, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:32]
+
+
+def _projection_seed_event(frame: dict[str, Any], have: str | None) -> str:
+    """The first SSE event of a session stream, honouring ``?have=``.
+
+    ``have`` is ``None`` when the client did not send the parameter: a legacy
+    phone, which receives the byte-identical ``projection`` event it always
+    did. Any value (including empty, the opt-in with nothing cached) puts the
+    ``digest`` on the frame; a value EQUAL to the current digest is answered
+    with the tiny ``unchanged`` event instead of the full snapshot.
+    """
+    if have is None:
+        return _sse("projection", frame)
+    digest = _frame_digest(frame, _PROJECTION_CLOCK_FIELDS)
+    if have == digest:
+        unchanged: dict[str, Any] = {"digest": digest}
+        for key in _PROJECTION_CLOCK_FIELDS:
+            if key in frame:
+                unchanged[key] = frame[key]
+        return _sse("unchanged", unchanged)
+    return _sse("projection", {**frame, "digest": digest})
+
+
+def _projection_live_event(frame: dict[str, Any], have: str | None) -> str:
+    """A live repaint: unchanged for legacy streams, digest-stamped for opted-in
+    ones so the client always knows the digest of the copy it holds."""
+    if have is None:
+        return _sse("projection", frame)
+    return _sse(
+        "projection",
+        {**frame, "digest": _frame_digest(frame, _PROJECTION_CLOCK_FIELDS)},
+    )
+
+
+class _ListEvent:
+    """One shared session-list build: the legacy wire event plus a lazily
+    built digest-stamped twin for streams that opted in with ``?have=``.
+
+    Shared across subscribers like the string it replaces (see
+    ``_shared_list_event``), so the digest is computed at most once per ring,
+    and never at all while only legacy phones are connected.
+    """
+
+    __slots__ = ("_digest", "event", "frame")
+
+    def __init__(self, frame: dict[str, Any]) -> None:
+        self.frame = frame
+        self.event = _sse("sessions", frame)
+        self._digest: str | None = None
+
+    @property
+    def digest(self) -> str:
+        if self._digest is None:
+            self._digest = _frame_digest(self.frame)
+        return self._digest
+
+    def for_have(self, have: str | None, *, seed: bool) -> str:
+        """The event for a subscriber: legacy bytes without ``have``; on the
+        seed, ``unchanged`` when ``have`` matches; else the stamped frame."""
+        if have is None:
+            return self.event
+        digest = self.digest
+        if seed and have == digest:
+            return _sse("unchanged", {"digest": digest})
+        return _sse("sessions", {**self.frame, "digest": digest})
+
+
 def _history_page(
-    session_id: str, before: str | None, limit: int, *, durable_only: bool = True
+    session_id: str,
+    before: str | None,
+    limit: int,
+    *,
+    durable_only: bool = True,
+    after: str | None = None,
 ) -> tuple[list[Any], bool]:
     """Return the page of folded entries immediately OLDER than ``before``
     (chronological within the page) plus whether more history exists beyond it.
+
+    With ``after`` instead (the forward cursor, delta-sync Phase 2b) it is the
+    page immediately NEWER than that row (:func:`_forward_page`), and every way
+    of not answering — no transcript, an unreadable fold, an unplaceable id —
+    is a :class:`_ResetPage`, never a plain empty list: for a forward reader an
+    empty page means "already current".
 
     THE EMPTINESS IS SPELLED WHEN IT IS A FAILURE (review round 3, m-3). A page
     that could not be read is an :class:`_UnavailablePage` — empty, like an honest
@@ -3936,7 +4121,7 @@ def _history_page(
     from local_operator.session import compression
 
     if directory is None or not compression.has_transcript(directory):
-        return [], False
+        return (_ResetPage("no transcript") if after else []), False
     try:
         state = _durable_fold_cache().load(directory)
     except compression.ArchiveError as exc:
@@ -3948,11 +4133,14 @@ def _history_page(
         )
         return _UnavailablePage(str(exc)), False
     except FileNotFoundError:
-        return [], False
+        return (_ResetPage("no transcript") if after else []), False
     except Exception:  # noqa: BLE001 — an odd transcript yields no history, not a 500
         logger.exception("history fold failed for session %s", session_id)
-        return [], False
+        return (_ResetPage("fold failed") if after else []), False
 
+    if after:
+        forward = _forward_page(state, after, limit)
+        return forward if forward is not None else (_ResetPage("cursor not found"), False)
     if before:
         # Every cursor page comes from the journal: the render's order is not the
         # journal's, and its head re-serves rows whose originals sit below the
@@ -4328,10 +4516,15 @@ class MobileDaemon:
         push_worker: PushWorker | None = None,
         push_lane: PushLane | None = None,
         push_lane_factory: Callable[[], PushLane | None] | None = None,
+        table: SessionTable | None = None,
     ) -> None:
         self.port = port
         self.password = password
-        self.table = SessionTable()
+        # Injectable because the push lane is built BEFORE the daemon (service
+        # ``amain``) and needs this table's ``listing_unread_count`` at
+        # construction: the service makes the table, hands its reader to the
+        # lane and the table itself here, so both read one snapshot.
+        self.table = table if table is not None else SessionTable()
         #: Subscribers to ``/api/config/events`` (wave-5 slice D, the relay's
         #: half of the settings doorbell): one queue per open SSE response.
         #: Doorbell-style — a watcher listener hands the change over, the
@@ -4370,6 +4563,9 @@ class MobileDaemon:
         # tunnel config from the scan.
         self._push_lane_factory = push_lane_factory
         self._push_lane_tried_at: float | None = None
+        #: The attention revision the push count's listing snapshot was last
+        #: rebuilt at (``_refresh_push_count``); ``None`` forces the first one.
+        self._push_count_revision: Any = None
         # Stamp the build THIS process loaded, before any lazy import can meet a
         # replaced tree: every later comparison in ``_log_import_failure`` is
         # against this value.
@@ -5212,6 +5408,7 @@ class MobileDaemon:
         await self._maybe_arm_push_lane()
         push_worker = self.push_worker
         if push_worker is not None:
+            await self._refresh_push_count()
             try:
                 # BOUNDED (review round 1, m3). The transport is required to
                 # bound its own call — that is stated where the Protocol is — and
@@ -5242,6 +5439,44 @@ class MobileDaemon:
                 )
             except Exception:  # noqa: BLE001 — a push fault must not cost the tick
                 logger.warning("push heartbeat failed", exc_info=True)
+
+    async def _refresh_push_count(self) -> None:
+        """Rebuild the listing snapshot the push count reads, when it can have moved.
+
+        The push worker's count is ``SessionTable.listing_unread_count``, a read
+        of the snapshot the LAST listing build published — and nothing builds
+        the listing while no phone is looking, which is exactly when pushes go
+        out. So the scan rebuilds it here, on the loop and before the worker's
+        off-loop pass, whenever the attention revision differs from the one the
+        snapshot was last built at (and once on the first armed scan). The
+        invariant: unread state is a function of the attention store, so a
+        snapshot built at the current revision is current for every emit this
+        pass composes — a deferred digest included — without a rebuild per
+        scan. The build is ``summaries()`` itself (its disk work is already off
+        the loop), never a second implementation of the count.
+
+        A failed build is logged and leaves the revision unrecorded, so the next
+        scan retries; the worker then reads whatever the table holds, and a
+        degraded snapshot drops the count term rather than inventing one.
+
+        The revision is read FRESH here, immediately before the worker's tick,
+        not taken from the start of the scan pass (PR #3989 review R1): the
+        registry scan and projection captures sit between the two, and a
+        completion published in that window would otherwise be counted against
+        a snapshot that predates it. The window left (this read to the tick's
+        collect) is closed by the worker flooring a completion's count at 1.
+        """
+        from local_operator.session.attention import AttentionStore
+
+        revision = await asyncio.to_thread(AttentionStore().revision)
+        if revision == self._push_count_revision:
+            return
+        try:
+            await self.table.summaries()
+        except Exception:  # noqa: BLE001 — a push fault must not cost the tick
+            logger.warning("push count refresh failed", exc_info=True)
+            return
+        self._push_count_revision = revision
 
     async def _maybe_arm_push_lane(self) -> None:
         """Build the push lane once a tunnel appears after start (late arming).
@@ -6842,6 +7077,21 @@ def build_app(daemon: MobileDaemon):
                 # Authenticated build support, not a claim that receipt storage
                 # is writable right now. Typed refusals preserve the same key.
                 "session_start": dict(START_CAPABILITY),
+                # DELTA RESUME (delta-sync Phase 2, docs/mobile.md "Delta
+                # resume"). RELAY capabilities like ``session_tags``: an older
+                # daemon lacks the keys, and on it ``?after=`` is IGNORED (it
+                # answers the newest page) and ``?have=`` is ignored (it sends
+                # the full seed) — so a client must feature-detect, never probe.
+                "history_after": {"available": True},
+                "seed_digest": {"available": True},
+                # Per-device push preferences (Settings → Notifications): the
+                # register body accepts ``preferences`` and the push worker
+                # gates emits on them (``push_devices.PREFERENCE_KEYS``). A
+                # RELAY capability like ``notification_sounds``, and it is what
+                # an app MUST check before sending the field: ``POST
+                # /api/push/register`` refuses unknown fields, so an older
+                # daemon would refuse the whole registration.
+                "push_preferences": {"available": True},
                 # Conditional because this build may predate the Library module:
                 # the phone's footer shows the destination iff the key is here,
                 # and a missing key means "this relay cannot serve it".
@@ -7060,6 +7310,12 @@ def build_app(daemon: MobileDaemon):
             gone = await asyncio.to_thread(_temporary_deleted_response, session_id)
             if gone is not None:
                 return gone
+        # SEED ELISION (delta-sync Phase 2a, ``capabilities.seed_digest``): the
+        # digest of the frame the phone already holds. A query parameter, not
+        # ``If-None-Match``, because header pass-through on an SSE request via
+        # the gateway and every RN fetch path is unverified. ``None`` (absent)
+        # keeps the legacy byte-identical stream.
+        have = request.query_params.get("have")
 
         # A response whose headers fail to send never began viewing. Own the
         # queue only inside the iterator — registration happens on the first
@@ -7147,7 +7403,15 @@ def build_app(daemon: MobileDaemon):
                 loop = asyncio.get_running_loop()
                 sent_at: float | None = None
                 if projection is not None:
-                    yield _sse("projection", stamp_temporary(_projection_frame(projection)))
+                    # Stamp FIRST, digest SECOND (convergence with #3832): the
+                    # phone holds the ``temporary``-stamped frame, so the seed
+                    # digest must cover it. ``temporary`` carries absolute times
+                    # (``marked_at``/``deletes_at``), not a countdown, so it is
+                    # stable between repaints; a mark, Keep or activity that
+                    # moves it is a real change the phone must receive in full.
+                    yield _projection_seed_event(
+                        stamp_temporary(_projection_frame(projection)), have
+                    )
                     sent_at = loop.time()
                 while True:
                     try:
@@ -7164,8 +7428,8 @@ def build_app(daemon: MobileDaemon):
                         wait = PROJECTION_FRAME_INTERVAL_S - (loop.time() - sent_at)
                         if wait > 0:
                             await asyncio.sleep(wait)
-                    yield _sse(
-                        "projection", stamp_temporary(_latest_projection_frame(queue, frame))
+                    yield _projection_live_event(
+                        stamp_temporary(_latest_projection_frame(queue, frame)), have
                     )
                     sent_at = loop.time()
             finally:
@@ -7304,15 +7568,17 @@ def build_app(daemon: MobileDaemon):
     #: The newest serialized list event per ``include_peers`` flag, with the
     #: ring revision observed BEFORE its build began: ``(revision, event)``.
     # Keyed by the subscriber's flags ``(include_peers, include_temporary)``:
-    # each combination is its own serialized answer.
-    list_events: dict[tuple[bool, bool], tuple[int, str]] = {}
+    # each combination is its own serialized answer. The cached value is a
+    # ``_ListEvent`` (delta-sync Phase 2a), so the per-``have`` digest twin is
+    # also built once per flag combination, never per subscriber.
+    list_events: dict[tuple[bool, bool], tuple[int, _ListEvent]] = {}
     list_event_locks = {
         (peers, temp): asyncio.Lock() for peers in (False, True) for temp in (False, True)
     }
 
     async def _shared_list_event(
         include_peers: bool, needed: int | None, include_temporary: bool = False
-    ) -> str:
+    ) -> _ListEvent:
         """One serialized ``sessions`` event that reflects ring ``needed``.
 
         A cached build is reusable iff its build began at or after that ring
@@ -7334,9 +7600,8 @@ def build_app(daemon: MobileDaemon):
             if needed is not None and cached is not None and cached[0] >= needed:
                 return cached[1]
             revision = daemon.table.list_revision
-            event = _sse(
-                "sessions",
-                await _list_frame(include_peers=include_peers, include_temporary=include_temporary),
+            event = _ListEvent(
+                await _list_frame(include_peers=include_peers, include_temporary=include_temporary)
             )
             newest = list_events.get(flags)
             if newest is None or newest[0] <= revision:
@@ -7357,6 +7622,9 @@ def build_app(daemon: MobileDaemon):
         if denied is not None:
             return denied
         include_peers = _query_flag(request, "include_peers")
+        # Seed elision for the list (delta-sync Phase 2a): the same ``have``
+        # contract as the session stream; see ``api_session_events``.
+        have = request.query_params.get("have")
         # Read once at open, like ``include_peers`` and for the same reason.
         include_temporary = _query_flag(request, "include_temporary")
         queue: asyncio.Queue[None] = asyncio.Queue(maxsize=1)
@@ -7370,7 +7638,7 @@ def build_app(daemon: MobileDaemon):
             try:
                 loop = asyncio.get_running_loop()
                 last = await _shared_list_event(include_peers, None, include_temporary)
-                yield last
+                yield last.for_have(have, seed=True)
                 sent_at = wrote_at = loop.time()
                 while True:
                     # The keepalive clock runs from the last WRITE, not from
@@ -7398,12 +7666,12 @@ def build_app(daemon: MobileDaemon):
                         include_peers, daemon.table.list_revision, include_temporary
                     )
                     sent_at = loop.time()
-                    if event == last:
+                    if event.event == last.event:
                         # A ring is "something MAY have changed"; most rings
                         # during streaming move nothing the list renders.
                         continue
                     last = event
-                    yield event
+                    yield event.for_have(have, seed=False)
                     wrote_at = loop.time()
             finally:
                 await _cleanup_stream(release)
@@ -8196,13 +8464,34 @@ def build_app(daemon: MobileDaemon):
                 {"error": "unknown session"}, status_code=404
             )
         before = request.query_params.get("before")
+        # FORWARD CURSOR (delta-sync Phase 2b, ``capabilities.history_after``):
+        # the rows NEWER than the newest one the phone holds, so a resume reads
+        # one forward page instead of healing backwards from the live tail.
+        after = request.query_params.get("after")
+        if before and after:
+            return JSONResponse({"error": "before and after are exclusive"}, status_code=400)
         try:
             limit = max(1, min(int(request.query_params.get("limit", "80")), 200))
         except ValueError:
             limit = 80
         page, has_more = await asyncio.to_thread(
-            _history_page, session_id, before, limit, durable_only=entry is None
+            _history_page,
+            session_id,
+            before,
+            limit,
+            durable_only=entry is None,
+            after=after,
         )
+        reset = getattr(page, "reset", "")
+        if reset:
+            # 409, not an empty 200: the cursor no longer names a row this
+            # conversation can continue from, and the client's only correct
+            # move is a full (cursor-less) read. ``reset`` is in the body too so
+            # a client that reads bodies before statuses sees the same answer.
+            return JSONResponse(
+                {"error": "history cursor not found", "reset": True, "reason": reset},
+                status_code=409,
+            )
         return JSONResponse(_history_response(page, has_more))
 
     async def api_session_checkpoints(request: Request) -> Response:
@@ -9127,7 +9416,12 @@ def build_app(daemon: MobileDaemon):
                 from local_operator.session.runtime.launch import AskErrand
 
                 ask_id = str(body.get("ask_id") or "")
-                by = str(body.get("by") or "")
+                # The body's ``by`` is NOT forwarded: anyone holding the portal
+                # cookie writes this body, and the runtime stamps the surface
+                # itself (``asks/surfaces``). This client never opts into the
+                # operator proof either, so a portal answer is recorded, never
+                # read as a local operator's consent.
+                by = ""
                 answers = {
                     str(key): [str(item) for item in (value or [])]
                     for key, value in (body.get("answers") or {}).items()
@@ -9147,8 +9441,11 @@ def build_app(daemon: MobileDaemon):
                     # nothing here may shorten it by dropping the engage, because
                     # a refusal that arrives without a runtime is the bug this
                     # arm exists to fix.
+                    # ``remote``: a portal answer is a relayed answer, so the
+                    # runtime records it as ``remote`` (``asks.surfaces``), the
+                    # label the live daemon route already gets — not consent.
                     client, _ = await engage_session_client(
-                        config_dir(), session_id, AskErrand(ask_id=ask_id)
+                        config_dir(), session_id, AskErrand(ask_id=ask_id), locality="remote"
                     )
                     try:
                         if op == "ask_respond":
@@ -9377,7 +9674,13 @@ def build_app(daemon: MobileDaemon):
             # which is the documented way to revoke a device whose certificate
             # this machine still holds — left the local record silent. Measured
             # before the fix: that device re-paired on a fresh code with HTTP 200.
-            return JSONResponse({"error": "this device has been revoked"}, status_code=403)
+            # The typed ``code`` (round-1 R5) is what the PWA keys its re-key on: it
+            # deletes the device key and certificate, so it must never fire on prose.
+            # ``error`` keeps its exact sentence for builds that match it.
+            return JSONResponse(
+                {"error": "this device has been revoked", "code": "pair_device_revoked"},
+                status_code=403,
+            )
         name = str(body.get("name") or "")[:64]
         devices.write_pending(
             root,
@@ -9392,10 +9695,87 @@ def build_app(daemon: MobileDaemon):
         """File a typed phone pairing request; never decide or apply one.
 
         The imported filer reaches only ``approvals.create_request``. There is no
-        approve, deny, signer, or apply route here: the person on the desktop must
-        enter the SAS through the typed engine, whose persistent three-strike burn
-        and ``pair_code_required`` decision guard remain the only approval path.
+        approve, deny, signer, or apply route here: the person on the desktop
+        decides through the typed engine (the six-digit code, or -- on an
+        edge-attested request only -- "Codes match" after comparing both screens),
+        and ``pair_op.require_acked`` stays the decision guard either way.
+
+        THE ROUTE IS EVIDENCE NOW (pairing design v2 §1): the gateway forwards the
+        Radient edge's verified assertion under ``x-lop-radient-assertion`` for this
+        one path, and ``pair_requests.attested_route`` re-verifies it against the raw
+        body bytes. Anything that does not verify files as the custom route.
         """
+        denied = gate(request)
+        if denied is not None:
+            return denied
+        raw = await request.body()
+        try:
+            body = json.loads(raw or b"null")
+        except ValueError:
+            return JSONResponse({"error": "invalid JSON"}, status_code=400)
+        if not isinstance(body, dict):
+            return JSONResponse({"error": "request body must be an object"}, status_code=400)
+        from local_operator.mobile import pair_requests
+        from local_operator.paths import config_dir
+
+        route = None
+        if "np" in body:
+            route = await pair_requests.attested_route(
+                request.headers.get(pair_requests.ASSERTION_HEADER),
+                host=request.headers.get("host", ""),
+                body=raw,
+            )
+        try:
+            record = await pair_requests.file_request(body, config_dir(), route=route)
+        except MeshRefusal as exc:
+            status = 422
+            if exc.code == "pair_filing_rate_limited":
+                status = 429
+            elif exc.code == "pair_request_pending":
+                status = 409
+            payload: dict[str, Any] = {"error": str(exc), "code": exc.code}
+            payload.update(getattr(exc, "extras", {}) or {})
+            return JSONResponse(payload, status_code=status)
+        return JSONResponse(record, status_code=201 if "approval_id" in record else 200)
+
+    async def api_pair_availability(request: Request) -> Response:
+        """Whether this computer can take a phone pairing request at all (design v2 §2.2).
+
+        Registered BEFORE ``/api/pair/{device_id}`` so ``availability`` is never read
+        as a device id. A pre-C2 daemon 404s here, which the phone reads as "do not
+        offer pairing" -- so no claim is ever made against a computer that has no
+        operator authority to issue a certificate with.
+        """
+        denied = gate(request)
+        if denied is not None:
+            return denied
+        from local_operator.mobile import pair_requests
+
+        return JSONResponse(pair_requests.availability())
+
+    async def api_pair_request_status(request: Request) -> Response:
+        """The phone's poll of ONE filed request: ``{state, reason, mode, ...}``.
+
+        Keyed by the phone-chosen ``request_id`` it already holds; the answer names
+        nothing the filer did not send or cannot already derive, and decides
+        nothing.
+        """
+        denied = gate(request)
+        if denied is not None:
+            return denied
+        from local_operator.mobile import pair_requests
+        from local_operator.paths import config_dir
+
+        answer = pair_requests.request_status(str(request.path_params["request_id"]), config_dir())
+        if answer is None:
+            return JSONResponse(
+                {"error": "no pairing request with that id", "code": "unknown_request"},
+                status_code=404,
+            )
+        return JSONResponse(answer)
+
+    async def api_pair_request_withdraw(request: Request) -> Response:
+        """The phone's Cancel (U6): a key-signed, idempotent withdraw of its OWN request."""
         denied = gate(request)
         if denied is not None:
             return denied
@@ -9409,15 +9789,17 @@ def build_app(daemon: MobileDaemon):
         from local_operator.paths import config_dir
 
         try:
-            record = await pair_requests.file_request(body, config_dir())
+            answer = pair_requests.withdraw_request(
+                str(request.path_params["request_id"]), body, config_dir()
+            )
         except MeshRefusal as exc:
-            status = 422
-            if exc.code == "pair_filing_rate_limited":
-                status = 429
-            elif exc.code == "pair_request_pending":
-                status = 409
+            status = {
+                "unknown_request": 404,
+                "pair_withdraw_forbidden": 403,
+                "approval_in_progress": 409,
+            }.get(exc.code, 422)
             return JSONResponse({"error": str(exc), "code": exc.code}, status_code=status)
-        return JSONResponse(record, status_code=201 if "approval_id" in record else 200)
+        return JSONResponse(answer)
 
     async def api_pair_status(request: Request) -> Response:
         """Whether the operator has approved a claimed code yet.
@@ -11780,6 +12162,16 @@ def build_app(daemon: MobileDaemon):
         ),
         Route("/api/pair", api_pair, methods=["POST"]),
         Route("/api/pair/request", api_pair_request, methods=["POST"]),
+        # Literal paths BEFORE the ``{device_id}`` capture (design v2 §2.2): Starlette
+        # matches in order, so ``/api/pair/availability`` placed after it would be a
+        # certificate lookup for a device named "availability".
+        Route("/api/pair/availability", api_pair_availability),
+        Route("/api/pair/request/{request_id:str}", api_pair_request_status),
+        Route(
+            "/api/pair/request/{request_id:str}/withdraw",
+            api_pair_request_withdraw,
+            methods=["POST"],
+        ),
         Route("/api/pair/{device_id:str}", api_pair_status),
         Route("/api/asks", api_asks),
         # The inbox (docs/design/notifications-inbox.md §5.4): the reel, one

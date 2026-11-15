@@ -5,7 +5,8 @@
  */
 import { useEffect } from "react";
 import { useRoute } from "./router";
-import { PairScreen } from "./screens/pair";
+import { PairingSheetHost, PairScreen } from "./screens/pair";
+import { reconcileDeviceKey } from "./lib/operator-device";
 import { AccountRoutingScreen } from "./screens/account-routing";
 import { LibraryScreen } from "./screens/library";
 import { LibraryAssetScreen } from "./screens/library-asset";
@@ -22,6 +23,24 @@ export function App() {
 	   language for EVERY screen (a session view shows it as much as the list),
 	   so it is retained at the root rather than per screen. */
 	useEffect(() => retainConfigStream(), []);
+	/* U16, on load: a certificate whose key the browser evicted is a pairing that
+	   can no longer sign. Clearing it now makes every surface read "not paired"
+	   (and offer pairing) instead of signing with a fresh key and being refused. */
+	useEffect(() => {
+		void reconcileDeviceKey().catch(() => undefined);
+	}, []);
+	/* The pairing sheet lives here, above every screen, so an approval card that
+	   unmounts mid-pairing (its request answered elsewhere) does not take the
+	   sheet with it (D15). */
+	return (
+		<>
+			<Screen route={route} />
+			<PairingSheetHost />
+		</>
+	);
+}
+
+function Screen({ route }: { route: ReturnType<typeof useRoute> }) {
 	switch (route.name) {
 		case "account-routing":
 			return <AccountRoutingScreen />;

@@ -1,0 +1,4 @@
+{
+  "tui.boot_prompt.returned_to_composer": "启动时的提示词未发送，已放回输入框。",
+  "tui.boot_prompt.not_sent_kept_draft": "启动时的提示词未发送：{prompt}"
+}
