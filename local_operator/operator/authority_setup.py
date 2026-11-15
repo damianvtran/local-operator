@@ -78,6 +78,7 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any, Literal
 
+from local_operator import procstate
 from local_operator.i18n.keys import wire_operator_setup as _ws
 from local_operator.i18n.messages import Msg
 
@@ -234,13 +235,11 @@ def in_progress(root: Path) -> bool:
         return False
     if pid == os.getpid():
         return False
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except OSError:
-        return True  # alive, owned by someone else
-    return True
+    # The shared probe, never a bare `os.kill(pid, 0)`: on Windows signal 0 is
+    # TerminateProcess, so a status poll would KILL the attempt it asks about.
+    # `pid_alive` asks OpenProcess there and keeps the same POSIX answers (ESRCH is
+    # dead; EPERM or any other doubt is alive, the safe side for "already running").
+    return procstate.pid_alive(pid)
 
 
 def _write_private(path: Path, text: str, *, append: bool) -> None:
@@ -666,9 +665,7 @@ def _run(
     ):
         receipt("verified", False, OUTCOME_NOT_VERIFIED)
         return finish(OUTCOME_NOT_VERIFIED)
-    receipt(
-        "verified", True, "verified", key_id=installed.key_id, admission=installed.admission
-    )
+    receipt("verified", True, "verified", key_id=installed.key_id, admission=installed.admission)
     return finish(OUTCOME_ON)
 
 

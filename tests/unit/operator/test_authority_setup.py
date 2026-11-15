@@ -227,6 +227,59 @@ def test_a_second_attempt_while_one_runs_is_refused(host: SimpleNamespace) -> No
     assert authority_setup.in_progress(host.root) is False
 
 
+def _write_running_marker(root: Path, pid: int) -> None:
+    (root / "operator").mkdir(parents=True, exist_ok=True)
+    (root / "operator" / "authority-setup.running").write_text(str(pid), encoding="utf-8")
+
+
+def test_in_progress_never_signals_the_marker_pid_on_windows(
+    host: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The status poll must not KILL the attempt it asks about (CI xplat probe).
+
+    On Windows ``os.kill(pid, 0)`` is TerminateProcess, so ``in_progress`` asks the
+    shared ``procstate.pid_alive`` (OpenProcess there). Pinned with a Windows host
+    simulated and ``os.kill`` made to fail the test if anything reaches it.
+    """
+    from local_operator import procstate
+
+    asked: list[int] = []
+
+    def no_signal(*_args: object) -> None:
+        raise AssertionError("os.kill reached on the Windows path")
+
+    def liveness(pid: int) -> bool:
+        asked.append(pid)
+        return pid == 4242
+
+    monkeypatch.setattr(procstate, "is_windows", lambda: True)
+    monkeypatch.setattr(procstate, "_windows_liveness", liveness)
+    monkeypatch.setattr(authority_setup.os, "kill", no_signal)
+    _write_running_marker(host.root, 4242)
+    assert authority_setup.in_progress(host.root) is True
+    _write_running_marker(host.root, 4343)
+    assert authority_setup.in_progress(host.root) is False
+    assert asked == [4242, 4343]
+
+
+def test_in_progress_reads_a_dead_marker_pid_as_stale_on_posix(host: SimpleNamespace) -> None:
+    """A crashed attempt's marker does not block the next one; a live owner does."""
+    import os
+    import subprocess
+
+    # `os.name`, not `sys.platform`: the `host` fixture pins sys.platform to linux.
+    if os.name == "nt":
+        pytest.skip("POSIX liveness answers; the Windows path is pinned above")
+
+    child = subprocess.Popen([sys.executable, "-c", "pass"])
+    child.wait()
+    _write_running_marker(host.root, child.pid)
+    assert authority_setup.in_progress(host.root) is False
+    # pid 1 is always alive and never ours: EPERM (or success as root) reads alive.
+    _write_running_marker(host.root, 1)
+    assert authority_setup.in_progress(host.root) is True
+
+
 def test_os_prompt_reason_follows_the_purpose(monkeypatch: pytest.MonkeyPatch) -> None:
     command = [["sudo", "install", "-m", "0644", "/a", "/b"]]
     purposes = (elevate.PURPOSE_CONFIRM, elevate.PURPOSE_REMOVE, elevate.PURPOSE_SETUP)

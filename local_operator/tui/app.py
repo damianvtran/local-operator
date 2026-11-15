@@ -55482,7 +55482,9 @@ class OperatorApp(App[None]):
             return
         if getattr(self, "_operator_setup_busy", False):
             # An in-pane second attempt is still an attempt: audited (QA Q1).
-            from local_operator.operator.authority_setup import record_in_progress_refusal
+            from local_operator.operator.authority_setup import (
+                record_in_progress_refusal,
+            )
             from local_operator.paths import config_dir
 
             record_in_progress_refusal(config_dir(), "tui")
@@ -60259,9 +60261,7 @@ class OperatorApp(App[None]):
                 # UX round 6 U4): the clause here was "or let this session's runtime
                 # retire and reopen the session here", which is the deleted remedy
                 # on the surface a reader consults BEFORE being refused.
-                keyed = (
-                    None if self._approve_all else self._uninstalled_anchor_report(live, saved)
-                )
+                keyed = None if self._approve_all else self._uninstalled_anchor_report(live, saved)
                 if keyed is not None:
                     return SlashResult(kind="notice", text=keyed, style="info")
             return SlashResult(
