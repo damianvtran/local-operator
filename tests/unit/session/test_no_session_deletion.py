@@ -2192,6 +2192,14 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "os.unlink",
         "that same temp FILE, only while the replace above is failing",
     ),
+    # The phone's remote-session viewer refcount: `RemoteView.queues` is a
+    # `set[asyncio.Queue]` of live phone subscribers, so `.remove` is set.remove
+    # of one subscriber queue (guarded by `in`), never a filesystem path.
+    (
+        "local_operator/mobile/remote_sessions.py::RemoteViews.release",
+        "<path>.remove",
+        "set.remove of a subscriber asyncio.Queue from RemoteView.queues; no filesystem path",
+    ),
     (
         "local_operator/multiplexer/markers.py::_FileBackend.publish",
         "os.replace",

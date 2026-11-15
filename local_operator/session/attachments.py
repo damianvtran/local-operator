@@ -456,6 +456,24 @@ class AttachmentStore:
             return None
         return base64.b64encode(raw).decode("ascii"), mime_type
 
+    def mime_type_for(self, digest: str) -> str | None:
+        """Read retained MIME metadata without loading a whole media object.
+
+        A chunked session-media reader still validates the content hash itself;
+        this is metadata, not proof of integrity or permission to read a digest.
+        Keep sidecar addressing here so bounded readers cannot invent a second
+        store layout or silently relabel an unknown-type WebM as MP4.
+        """
+        if len(digest) != _DIGEST_CHARS or any(char not in "0123456789abcdef" for char in digest):
+            return None
+        try:
+            meta = json.loads(self._meta_path(digest).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+        if not isinstance(meta, dict):
+            return None
+        return str(meta.get("mime_type", "application/octet-stream"))
+
     def get_bytes(self, digest: str) -> tuple[bytes, str] | None:
         """``(decoded bytes, mime_type)`` for ``digest``, or ``None``.
 
