@@ -1,0 +1,478 @@
+[
+  {
+    "key": "wire.github.progress",
+    "raw_cells": 55,
+    "pseudo_cells": 88,
+    "width": 80,
+    "no_clipping": true
+  },
+  {
+    "key": "wire.github.opt_out_none",
+    "raw_cells": 15,
+    "pseudo_cells": 29,
+    "width": 80,
+    "no_clipping": true
+  },
+  {
+    "key": "wire.github.opt_out_names",
+    "raw_cells": 113,
+    "pseudo_cells": 135,
+    "width": 80,
+    "no_clipping": true
+  },
+  {
+    "key": "wire.github.share_empty",
+    "raw_cells": 103,
+    "pseudo_cells": 164,
+    "width": 80,
+    "no_clipping": true
+  },
+  {
+    "key": "wire.github.repos_empty",
+    "raw_cells": 42,
+    "pseudo_cells": 55,
+    "width": 80,
+    "no_clipping": true
+  },
+  {
+    "key": "wire.github.repos_head",
+    "raw_cells": 40,
+    "pseudo_cells": 56,
+    "width": 80,
+    "no_clipping": true
+  },
+  {
+    "key": "wire.github.opted_suffix",
+    "raw_cells": 19,
+    "pseudo_cells": 34,
+    "width": 80,
+    "no_clipping": true
+  },
+  {
+    "key": "wire.github.more",
+    "raw_cells": 80,
+    "pseudo_cells": 99,
+    "width": 80,
+    "no_clipping": true
+  },
+  {
+    "key": "wire.github.capacity",
+    "raw_cells": 181,
+    "pseudo_cells": 306,
+    "width": 80,
+    "no_clipping": true
+  },
+  {
+    "key": "wire.github.opt_out_step",
+    "raw_cells": 157,
+    "pseudo_cells": 231,
+    "width": 80,
+    "no_clipping": true
+  },
+  {
+    "key": "wire.github.source_explicit",
+    "raw_cells": 60,
+    "pseudo_cells": 100,
+    "width": 80,
+    "no_clipping": true
+  },
+  {
+    "key": "wire.github.source_last_good",
+    "raw_cells": 96,
+    "pseudo_cells": 159,
+    "width": 80,
+    "no_clipping": true
+  },
+  {
+    "key": "wire.github.source_enumerated",
+    "raw_cells": 67,
+    "pseudo_cells": 106,
+    "width": 80,
+    "no_clipping": true
+  },
+  {
+    "key": "wire.github.which_explicit",
+    "raw_cells": 26,
+    "pseudo_cells": 49,
+    "width": 80,
+    "no_clipping": true
+  },
+  {
+    "key": "wire.github.which_enumerated",
+    "raw_cells": 47,
+    "pseudo_cells": 77,
+    "width": 80,
+    "no_clipping": true
+  },
+  {
+    "key": "wire.github.exclude_already",
+    "raw_cells": 38,
+    "pseudo_cells": 58,
+    "width": 80,
+    "no_clipping": true
+  },
+  {
+    "key": "wire.github.exclude_typo",
+    "raw_cells": 101,
+    "pseudo_cells": 161,
+    "width": 80,
+    "no_clipping": true
+  },
+  {
+    "key": "wire.github.exclude_unchecked",
+    "raw_cells": 97,
+    "pseudo_cells": 159,
+    "width": 80,
+    "no_clipping": true
+  },
+  {
+    "key": "wire.github.exclude_added",
+    "raw_cells": 115,
+    "pseudo_cells": 187,
+    "width": 80,
+    "no_clipping": true
+  },
+  {
+    "key": "wire.github.include_unchanged",
+    "raw_cells": 34,
+    "pseudo_cells": 50,
+    "width": 80,
+    "no_clipping": true
+  },
+  {
+    "key": "wire.github.include_typo",
+    "raw_cells": 84,
+    "pseudo_cells": 132,
+    "width": 80,
+    "no_clipping": true
+  },
+  {
+    "key": "wire.github.include_unchecked",
+    "raw_cells": 82,
+    "pseudo_cells": 130,
+    "width": 80,
+    "no_clipping": true
+  },
+  {
+    "key": "wire.github.include_added",
+    "raw_cells": 118,
+    "pseudo_cells": 192,
+    "width": 80,
+    "no_clipping": true
+  },
+  {
+    "key": "wire.github.reason_explicit",
+    "raw_cells": 89,
+    "pseudo_cells": 151,
+    "width": 80,
+    "no_clipping": true
+  },
+  {
+    "key": "wire.github.reason_unavailable_local",
+    "raw_cells": 130,
+    "pseudo_cells": 221,
+    "width": 80,
+    "no_clipping": true
+  },
+  {
+    "key": "wire.github.reason_unavailable_remote",
+    "raw_cells": 120,
+    "pseudo_cells": 203,
+    "width": 80,
+    "no_clipping": true
+  },
+  {
+    "key": "wire.github.reason_excluded_local",
+    "raw_cells": 72,
+    "pseudo_cells": 115,
+    "width": 80,
+    "no_clipping": true
+  },
+  {
+    "key": "wire.github.reason_excluded_remote",
+    "raw_cells": 62,
+    "pseudo_cells": 97,
+    "width": 80,
+    "no_clipping": true
+  },
+  {
+    "key": "wire.github.reason_no_repos_local",
+    "raw_cells": 54,
+    "pseudo_cells": 86,
+    "width": 80,
+    "no_clipping": true
+  },
+  {
+    "key": "wire.github.reason_no_repos_remote",
+    "raw_cells": 44,
+    "pseudo_cells": 68,
+    "width": 80,
+    "no_clipping": true
+  },
+  {
+    "key": "wire.github.remedy_explicit",
+    "raw_cells": 197,
+    "pseudo_cells": 288,
+    "width": 80,
+    "no_clipping": true
+  },
+  {
+    "key": "wire.github.remedy_unavailable",
+    "raw_cells": 81,
+    "pseudo_cells": 103,
+    "width": 80,
+    "no_clipping": true
+  },
+  {
+    "key": "wire.github.remedy_excluded",
+    "raw_cells": 69,
+    "pseudo_cells": 87,
+    "width": 80,
+    "no_clipping": true
+  },
+  {
+    "key": "wire.github.remedy_no_repos",
+    "raw_cells": 50,
+    "pseudo_cells": 79,
+    "width": 80,
+    "no_clipping": true
+  },
+  {
+    "key": "wire.github.refusal_detail",
+    "raw_cells": 15,
+    "pseudo_cells": 17,
+    "width": 80,
+    "no_clipping": true
+  },
+  {
+    "key": "wire.github.age_unknown",
+    "raw_cells": 18,
+    "pseudo_cells": 35,
+    "width": 80,
+    "no_clipping": true
+  },
+  {
+    "key": "wire.github.age_now",
+    "raw_cells": 8,
+    "pseudo_cells": 17,
+    "width": 80,
+    "no_clipping": true
+  },
+  {
+    "key": "wire.github.age_minutes",
+    "raw_cells": 9,
+    "pseudo_cells": 17,
+    "width": 80,
+    "no_clipping": true
+  },
+  {
+    "key": "wire.github.age_hours",
+    "raw_cells": 7,
+    "pseudo_cells": 13,
+    "width": 80,
+    "no_clipping": true
+  },
+  {
+    "key": "wire.github.age_days",
+    "raw_cells": 10,
+    "pseudo_cells": 19,
+    "width": 80,
+    "no_clipping": true
+  },
+  {
+    "key": "wire.github.ttl",
+    "raw_cells": 12,
+    "pseudo_cells": 23,
+    "width": 80,
+    "no_clipping": true
+  },
+  {
+    "key": "wire.github.failure_auth",
+    "raw_cells": 25,
+    "pseudo_cells": 43,
+    "width": 80,
+    "no_clipping": true
+  },
+  {
+    "key": "wire.github.failure_offline",
+    "raw_cells": 27,
+    "pseudo_cells": 46,
+    "width": 80,
+    "no_clipping": true
+  },
+  {
+    "key": "wire.github.failure_server",
+    "raw_cells": 24,
+    "pseudo_cells": 41,
+    "width": 80,
+    "no_clipping": true
+  },
+  {
+    "key": "wire.github.failure_coverage",
+    "raw_cells": 47,
+    "pseudo_cells": 75,
+    "width": 80,
+    "no_clipping": true
+  },
+  {
+    "key": "wire.github.failure_unknown",
+    "raw_cells": 32,
+    "pseudo_cells": 52,
+    "width": 80,
+    "no_clipping": true
+  },
+  {
+    "key": "wire.github.failure_unfetched",
+    "raw_cells": 44,
+    "pseudo_cells": 78,
+    "width": 80,
+    "no_clipping": true
+  },
+  {
+    "key": "wire.github.failure_earlier_login",
+    "raw_cells": 45,
+    "pseudo_cells": 78,
+    "width": 80,
+    "no_clipping": true
+  },
+  {
+    "key": "wire.github.failure_unknown_login",
+    "raw_cells": 46,
+    "pseudo_cells": 80,
+    "width": 80,
+    "no_clipping": true
+  },
+  {
+    "key": "wire.github.readiness_unavailable",
+    "raw_cells": 103,
+    "pseudo_cells": 177,
+    "width": 80,
+    "no_clipping": true
+  },
+  {
+    "key": "wire.github.readiness_empty",
+    "raw_cells": 55,
+    "pseudo_cells": 97,
+    "width": 80,
+    "no_clipping": true
+  },
+  {
+    "key": "wire.github.readiness_opted",
+    "raw_cells": 13,
+    "pseudo_cells": 23,
+    "width": 80,
+    "no_clipping": true
+  },
+  {
+    "key": "wire.github.readiness_more",
+    "raw_cells": 6,
+    "pseudo_cells": 12,
+    "width": 80,
+    "no_clipping": true
+  },
+  {
+    "key": "wire.github.readiness_explicit",
+    "raw_cells": 29,
+    "pseudo_cells": 55,
+    "width": 80,
+    "no_clipping": true
+  },
+  {
+    "key": "wire.github.readiness_last_good",
+    "raw_cells": 87,
+    "pseudo_cells": 146,
+    "width": 80,
+    "no_clipping": true
+  },
+  {
+    "key": "wire.github.readiness_enumerated",
+    "raw_cells": 50,
+    "pseudo_cells": 81,
+    "width": 80,
+    "no_clipping": true
+  },
+  {
+    "key": "wire.github.readiness_pointer",
+    "raw_cells": 76,
+    "pseudo_cells": 88,
+    "width": 80,
+    "no_clipping": true
+  },
+  {
+    "key": "wire.github.readiness_list",
+    "raw_cells": 46,
+    "pseudo_cells": 51,
+    "width": 80,
+    "no_clipping": true
+  },
+  {
+    "key": "wire.github.borrower_unset",
+    "raw_cells": 105,
+    "pseudo_cells": 156,
+    "width": 80,
+    "no_clipping": true
+  },
+  {
+    "key": "wire.github.borrower_unset_default",
+    "raw_cells": 146,
+    "pseudo_cells": 197,
+    "width": 80,
+    "no_clipping": true
+  },
+  {
+    "key": "wire.github.borrower_overflow",
+    "raw_cells": 263,
+    "pseudo_cells": 381,
+    "width": 80,
+    "no_clipping": true
+  },
+  {
+    "key": "wire.github.wrapper_denied",
+    "raw_cells": 240,
+    "pseudo_cells": 370,
+    "width": 80,
+    "no_clipping": true
+  },
+  {
+    "key": "wire.github.usage_repo",
+    "raw_cells": 65,
+    "pseudo_cells": 84,
+    "width": 80,
+    "no_clipping": true
+  },
+  {
+    "key": "wire.github.usage_repos_args",
+    "raw_cells": 25,
+    "pseudo_cells": 39,
+    "width": 80,
+    "no_clipping": true
+  },
+  {
+    "key": "wire.github.usage_default",
+    "raw_cells": 35,
+    "pseudo_cells": 50,
+    "width": 80,
+    "no_clipping": true
+  },
+  {
+    "key": "wire.github.usage_refresh",
+    "raw_cells": 31,
+    "pseudo_cells": 46,
+    "width": 80,
+    "no_clipping": true
+  },
+  {
+    "key": "wire.github.owner_overflow",
+    "raw_cells": 45,
+    "pseudo_cells": 76,
+    "width": 80,
+    "no_clipping": true
+  },
+  {
+    "key": "wire.github.reset_failed",
+    "raw_cells": 194,
+    "pseudo_cells": 289,
+    "width": 80,
+    "no_clipping": true
+  }
+]

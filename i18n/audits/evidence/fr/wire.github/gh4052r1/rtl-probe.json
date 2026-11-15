@@ -1,0 +1,11 @@
+{
+  "raw": "octo-org/website، مستعار دینے والے ڈیوائس کی فراہم کردہ ریپوزیٹری فہرست میں نہیں ہے (ممکن ہے یہ خارج ہو یا وہاں سے push ممکن نہ ہو)۔ مستعار دینے والے ڈیوائس پر lop network credential github repos جانچیں۔ صرف وہی آلہ بدل سکتا ہے کہ وہ کیا مستعار دیتا ہے۔",
+  "projected": "⁧⁦octo-org/website⁩، مستعار دینے والے ڈیوائس کی فراہم کردہ ریپوزیٹری فہرست میں نہیں ہے (ممکن ہے یہ خارج ہو یا وہاں سے push ممکن نہ ہو)۔ مستعار دینے والے ڈیوائس پر ⁦lop network credential github repos⁩ جانچیں۔ صرف وہی آلہ بدل سکتا ہے کہ وہ کیا مستعار دیتا ہے۔⁩",
+  "isolate_counts": {
+    "LRI": 2,
+    "RLI": 1,
+    "PDI": 3
+  },
+  "native_terminal_shaping_verified": false,
+  "plain_cli_adapter_use_claimed": false
+}

@@ -1,0 +1,35 @@
+{
+  "record_reference": "i18n/audits/evidence/ru/wire.github/gh4052r1/record.json",
+  "execution": [
+    {
+      "command": [
+        "/opt/homebrew/opt/python@3.14/bin/python3.14",
+        "scripts/i18n/ledger.py",
+        "append",
+        "--receipt",
+        "/Users/damian/.local-operator/sessions/91d1e05d2d82/scratchpad/4052-ru-failed-receipt.json",
+        "--expected-history-sha",
+        "810690b1dacc7bbc0f44ed5b3c686a369f7c7168272f25b44a95629be63d1d6e",
+        "--dry-run"
+      ],
+      "exit_code": 0,
+      "stdout": "i18n/audit-history/ru/wire.github.json\n",
+      "stderr": ""
+    },
+    {
+      "command": [
+        "/opt/homebrew/opt/python@3.14/bin/python3.14",
+        "scripts/i18n/ledger.py",
+        "append",
+        "--receipt",
+        "/Users/damian/.local-operator/sessions/91d1e05d2d82/scratchpad/4052-ru-failed-receipt.json",
+        "--expected-history-sha",
+        "810690b1dacc7bbc0f44ed5b3c686a369f7c7168272f25b44a95629be63d1d6e",
+        "--apply"
+      ],
+      "exit_code": 0,
+      "stdout": "i18n/audit-history/ru/wire.github.json\n",
+      "stderr": ""
+    }
+  ]
+}
