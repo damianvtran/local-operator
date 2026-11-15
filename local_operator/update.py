@@ -7310,15 +7310,18 @@ def _read_json(path: Path) -> dict[str, Any]:
 
 
 def _pid_alive(pid: int) -> bool:
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except OSError:
-        # EPERM: SOMETHING owns that pid. Possibly a reuse, which the clock in
-        # :func:`_run_abandoned` catches; never read as dead on a guess.
-        return True
-    return True
+    """Whether the watchdog ``pid`` still runs; doubt answers True.
+
+    The shared :func:`local_operator.procstate.pid_alive`, never a bare
+    ``os.kill(pid, 0)``: on Windows that call is ``TerminateProcess`` — it would
+    KILL the watchdog it was asking about (PR #4004 CI, xplat
+    ``static.posix_attributes``). Fails closed like the probe it replaces: a
+    pid owned by another account (EPERM) reads alive, and a reused pid is
+    caught by the clock in :func:`_run_abandoned`, never read as dead on a guess.
+    """
+    from local_operator.procstate import pid_alive
+
+    return pid_alive(pid)
 
 
 def _run_abandoned(run: Path) -> bool:
@@ -7362,9 +7365,50 @@ def _prune_refresh_runs(root: Path, unit: str) -> None:
         ]
         # Not ``ended[:-KEPT]``: that slice is EMPTY when KEPT is 0.
         for stale in ended[: max(len(ended) - _REFRESH_RUNS_KEPT, 0)]:
-            shutil.rmtree(stale, ignore_errors=True)
+            _remove_refresh_run(root, unit, stale)
     except OSError:
         pass
+
+
+#: A run directory's name as :func:`_hand_off_when_slow` creates it:
+#: ``<unit>-<_run_stamp>-<tempfile.mkdtemp suffix>``. ``mkdtemp``'s suffix is
+#: drawn from ``[a-z0-9_]`` (``tempfile._RandomNameSequence``), eight characters
+#: today; the length is not pinned so a stdlib change cannot strand old runs.
+_REFRESH_RUN_NAME_RE = re.compile(r"(?P<unit>[a-z]+)-\d{8}T\d{12}Z-[a-z0-9_]+")
+
+
+def _remove_refresh_run(root: Path, unit: str, run: Path) -> bool:
+    """``rmtree`` one ended run directory — only if it provably IS one.
+
+    The one directory removal in the refresh hand-off, so it is confined here
+    rather than trusted to its caller's glob (the session-deletion census,
+    ``tests/unit/session/test_no_session_deletion.py``, keys on this function).
+    Refused, returning False, unless ALL hold:
+
+    * ``run`` is not a symlink — a planted ``services-…`` link to a session
+      directory must never be followed (``shutil.rmtree`` also refuses a link at
+      the top, but that refusal is an error swallowed by ``ignore_errors``, not
+      a guarantee anyone reads);
+    * its resolved parent IS the resolved runs root — a direct child, so no
+      ``..`` or absolute path can climb out of it;
+    * its name is a run name (:data:`_REFRESH_RUN_NAME_RE`) for THIS ``unit``.
+
+    ``root`` is :func:`_refresh_runs_root` (``<config>/update/refresh``) in
+    production; tests pass a scratch root. No caller-supplied path reaches here
+    except through :func:`_refresh_runs`, a glob of that root.
+    """
+    try:
+        if run.is_symlink() or not run.is_dir():
+            return False
+        if run.resolve().parent != root.resolve():
+            return False
+    except OSError:
+        return False
+    match = _REFRESH_RUN_NAME_RE.fullmatch(run.name)
+    if match is None or match.group("unit") != unit:
+        return False
+    shutil.rmtree(run, ignore_errors=True)
+    return True
 
 
 def _complete_lines(text: str) -> str:

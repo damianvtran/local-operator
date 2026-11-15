@@ -394,6 +394,48 @@ def test_a_run_past_its_bound_with_a_live_pid_is_abandoned_but_a_fresh_one_is_ru
     assert not old.exists() and fresh.exists(), "a running run is never pruned"
 
 
+def _ended_run(path: Path) -> Path:
+    """A directory that looks like a FINISHED run (so pruning would remove it)."""
+    path.mkdir(parents=True)
+    (path / "result.json").write_text("{}", encoding="utf-8")
+    (path / "precious.txt").write_text("keep", encoding="utf-8")
+    return path
+
+
+def test_run_removal_refuses_every_path_that_is_not_a_run_of_this_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """CI census (PR #4004): the hand-off's one ``rmtree`` must not be steerable.
+
+    Each crafted target is a FINISHED run in shape (``result.json`` present), so
+    only the guard in ``_remove_refresh_run`` stands between it and deletion.
+    """
+    root = tmp_path / "update" / "refresh"
+    root.mkdir(parents=True)
+    stamp = update_mod._run_stamp(time.time())
+    outside = _ended_run(tmp_path / "sessions" / f"services-{stamp}-x1")
+    nested = _ended_run(root / "nested" / f"services-{stamp}-x2")
+    wrong_unit = _ended_run(root / f"mobile-{stamp}-x3")
+    not_a_run = _ended_run(root / "services-notastamp")
+    link = root / f"services-{stamp}-x4"
+    link.symlink_to(outside, target_is_directory=True)
+    climbing = root / ".." / ".." / "sessions" / outside.name
+
+    for target in (outside, nested, wrong_unit, not_a_run, link, climbing):
+        assert update_mod._remove_refresh_run(root, "services", target) is False, target
+    # The whole prune path, too: the symlink and the misnamed dir match the glob.
+    monkeypatch.setattr(update_mod, "_REFRESH_RUNS_KEPT", 0)
+    update_mod._prune_refresh_runs(root, "services")
+    for kept in (outside, nested, wrong_unit, not_a_run):
+        assert (kept / "precious.txt").read_text(encoding="utf-8") == "keep", kept
+    assert link.is_symlink()
+
+    # The positive control: a genuine ended run of this unit IS removed.
+    real = _ended_run(root / f"services-{stamp}-ok_1")
+    assert update_mod._remove_refresh_run(root, "services", real) is True
+    assert not real.exists()
+
+
 def test_the_latest_run_is_the_latest_started_not_the_latest_finished(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
