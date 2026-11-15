@@ -1669,6 +1669,16 @@ _EDGE_HEADER_VALUE = re.compile(r"[A-Za-z0-9][A-Za-z0-9 ./;=+_-]{0,63}")
 TRACE_HEADER = "X-Amzn-Trace-Id"
 _TRACE_ROOT = re.compile(r"1-[0-9a-f]{8}-[0-9a-f]{24}")
 
+#: Cloudflare's ray id: 16 lowercase hex, optionally ``-<IATA colo>``. Checked
+#: against its OWN shape, not the generic edge alphabet (review R1-3 / S-2 /
+#: QA Q-3): the generic alphabet admits ``;`` ``=`` and spaces, so a responder
+#: could set ``cf-ray: IGNORE.PRIOR;code=ok;trace=1-0-a`` and plant a second,
+#: forged ``trace=`` / ``code=`` pair in the refusal footer — defeating the
+#: point of a correlation id. Anything else is DROPPED, never repaired: the raw
+#: header value must match as sent, with no whitespace stripping, so the id we
+#: quote is one the edge really issued.
+_CF_RAY = re.compile(r"[0-9a-f]{16}(-[A-Z]{3})?")
+
 
 def new_trace_header() -> str:
     """A fresh ``X-Amzn-Trace-Id`` value: ``Root=1-<epoch hex>-<random hex>``."""
@@ -1718,12 +1728,15 @@ def _edge_blocked(response: httpx.Response) -> BridgeRefusal:
     for header, key in (
         ("content-type", "content_type"),
         ("server", "server"),
-        # Cloudflare's own id for the hop, when the block came back through it.
-        ("cf-ray", "cf_ray"),
     ):
         value = _edge_header(response, header)
         if value:
             details[key] = value
+    # Cloudflare's own id for the hop, when the block came back through it —
+    # only in its exact shape (see ``_CF_RAY``).
+    ray = response.headers.get("cf-ray", "")
+    if _CF_RAY.fullmatch(ray):
+        details["cf_ray"] = ray
     # The client correlation id this request carried (see ``TRACE_HEADER``):
     # the one id an edge_blocked report can always quote.
     trace = _request_trace_root(response)
