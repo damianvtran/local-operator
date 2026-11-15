@@ -74,9 +74,18 @@ def _network(root: Path, self_id: str, members: tuple[str, ...], network_id: str
 
 
 def _onboard(
-    rig: Rig, *, network: str = NET, host: str = "node.test", at: float = 0.0
+    rig: Rig,
+    *,
+    network: str = NET,
+    host: str = "node.test",
+    at: float = 0.0,
+    admitted: str = NODE,
 ) -> dict[str, Any]:
-    """The operator files and SIGNS one onboarding card on the Mac (real path)."""
+    """The operator files and SIGNS one onboarding card on the Mac (real path).
+
+    ``admitted`` is the mesh id the onboarding RUNNER records once it admits the
+    node (``onboard._record_operator_binding_target``); ``""`` records nothing.
+    """
     from local_operator.network.onboard_approvals import request_device
 
     record = request_device(
@@ -89,7 +98,14 @@ def _onboard(
     )
     decided_at = at or time.time()
     sig = _sign_decision(rig.mac, record, "approve", decided_at)
-    return A.approve(record["approval_id"], signature_hex=sig, decided_at=decided_at, root=rig.mac)
+    approved = A.approve(
+        record["approval_id"], signature_hex=sig, decided_at=decided_at, root=rig.mac
+    )
+    if admitted:
+        assert ob.record_onboarded(
+            rig.mac, approval_id=record["approval_id"], network_id=network, device_id=admitted
+        )
+    return approved
 
 
 @pytest.fixture
@@ -224,54 +240,87 @@ def test_the_network_only_kind_is_a_proof_too(rig: Rig) -> None:
     # flat at ``what.network_id``, which is the path the binding reads.
     raw = json.loads(A.record_path(record["approval_id"], rig.mac).read_text())
     assert raw["record"]["what"]["network_id"] == NET
-    proofs = ob.own_proofs(rig.mac, NET)
+    assert ob.own_proofs(rig.mac, NET, for_device=NODE) == []
+    ob.record_onboarded(rig.mac, approval_id=record["approval_id"], network_id=NET, device_id=NODE)
+    proofs = ob.own_proofs(rig.mac, NET, for_device=NODE)
     assert proofs and proofs[0]["kind"] == enrollment.KIND
     assert proofs[0]["request"]["what"]["network_id"] == NET
     assert ob.verify_proof(rig.node, proofs[0], network_id=NET, device_id=rig.mac_id) == (True, "")
 
 
-def test_the_proof_for_that_node_is_preferred_over_another_nodes(rig: Rig) -> None:
-    """M3: the decision that onboarded THIS node first; another node's only as fallback."""
-    from local_operator.network.onboard_approvals import request_device
+def test_each_onboarded_node_gets_exactly_its_own_proof(rig: Rig) -> None:
+    """S1: the decision that onboarded THAT node, and no other node's, ever."""
+    other = _onboard(rig, host="other.test", at=time.time() + 5, admitted="d_other")
+    mine = _onboard(rig, host="node.test")
+    [proof] = ob.own_proofs(rig.mac, NET, for_device=NODE)
+    assert proof["approval_id"] == mine["approval_id"]
+    assert proof["request"]["device"]["host"] == "node.test"
+    [theirs] = ob.own_proofs(rig.mac, NET, for_device="d_other")
+    assert theirs["approval_id"] == other["approval_id"]
+    # No fallback to the newest proof for the network: an un-onboarded peer, the
+    # wrong network or no device at all gets nothing.
+    assert ob.own_proofs(rig.mac, NET, for_device=CO) == []
+    assert ob.own_proofs(rig.mac, "n_other", for_device=NODE) == []
+    assert ob.own_proofs(rig.mac, NET) == []
 
-    other = request_device(
-        host="other.test",
-        user="ec2-user",
-        host_key_fp="SHA256:fixture",
-        device_id="d_other",
-        network=NET,
-        root=rig.mac,
-    )
-    t = time.time()
-    A.approve(
-        other["approval_id"],
-        signature_hex=_sign_decision(rig.mac, other, "approve", t + 5),
-        decided_at=t + 5,
-        root=rig.mac,
-    )
-    mine = request_device(
-        host="node.test",
-        user="ec2-user",
-        host_key_fp="SHA256:fixture",
-        device_id=NODE,
-        network=NET,
-        root=rig.mac,
-    )
-    A.approve(
-        mine["approval_id"],
-        signature_hex=_sign_decision(rig.mac, mine, "approve", t),
-        decided_at=t,
-        root=rig.mac,
-    )
-    assert ob.own_proofs(rig.mac, NET, for_device=NODE)[0]["approval_id"] == mine["approval_id"]
-    assert ob.own_proofs(rig.mac, NET, for_device="d_x")[0]["approval_id"] == other["approval_id"]
+
+class _WireLink:
+    """A link whose ``request`` records every frame the Mac would put on the wire."""
+
+    def __init__(self, device_id: str, caps: frozenset[str] = CAPS) -> None:
+        self.device_id = device_id
+        self.network_id = NET
+        self.capabilities = caps
+        self.frames: list[dict[str, Any]] = []
+
+    def request(self, frame: dict[str, Any], **_kw: Any) -> dict[str, Any]:
+        self.frames.append(frame)
+        return {"op": "ack", "detail": {}}
+
+
+def _mac_server(rig: Rig) -> Any:
+    return SimpleNamespace(root=rig.mac, _next_relay_req=lambda: 7)
+
+
+def test_s1_a_co_member_is_sent_no_proof_even_for_a_device_id_less_card(rig: Rig) -> None:
+    """S1: ``request_device`` files ``device.device_id`` empty; no fallback reaches CO."""
+    approved = _onboard(rig)
+    assert approved["device"]["device_id"] == ""  # the filing shape this guards
+    co = _WireLink(CO)
+    assert ob.present(_mac_server(rig), co) is None
+    assert co.frames == []
+    # Not even with NOTHING recorded at all (a pre-upgrade onboarding).
+    _onboard(rig, host="legacy.test", at=time.time() + 5, admitted="")
+    assert ob.present(_mac_server(rig), co) is None
+    assert co.frames == []
+    # The onboarded node gets one frame carrying exactly its own proof.
+    node = _WireLink(NODE)
+    ob.present(_mac_server(rig), node)
+    [frame] = node.frames
+    assert frame["op"] == ob.OP
+    assert [p["approval_id"] for p in frame["proofs"]] == [approved["approval_id"]]
+
+
+def test_r1_n1_a_node_without_the_capability_is_sent_nothing(rig: Rig) -> None:
+    _onboard(rig)
+    old = _WireLink(NODE, caps=frozenset({wire.REMOTE_ATTENTION_V1}))
+    assert ob.present(_mac_server(rig), old) is None
+    assert old.frames == []
+
+
+def test_record_onboarded_refuses_path_shaped_ids(rig: Rig) -> None:
+    for bad in ("..", "../x", "a/b", ""):
+        assert not ob.record_onboarded(rig.mac, approval_id="ap_x", network_id=NET, device_id=bad)
+        assert not ob.record_onboarded(rig.mac, approval_id=bad, network_id=NET, device_id=NODE)
+    assert ob.onboarded_devices(rig.mac) == {}
 
 
 def test_the_binding_proof_in_use_survives_the_30_day_prune(rig: Rig) -> None:
-    """M1: the newest signed onboarding per network is exempt; an older one is pruned."""
+    """M1: the decision presented to each onboarded node is exempt; others prune."""
     old = _onboard(rig, host="old.test", at=time.time() - 1000)
     new = _onboard(rig, host="new.test")
-    for record in (old, new):
+    unrecorded = _onboard(rig, host="never.test", at=time.time() + 5, admitted="")
+    for record in (old, new, unrecorded):
         path = A.record_path(record["approval_id"], rig.mac)
         raw = json.loads(path.read_text())
         raw["state"] = A.STATE_CONNECTED  # terminal
@@ -279,8 +328,11 @@ def test_the_binding_proof_in_use_survives_the_30_day_prune(rig: Rig) -> None:
         path.write_text(json.dumps(raw))
     A.sweep(root=rig.mac)
     assert not A.record_path(old["approval_id"], rig.mac).exists()
+    assert not A.record_path(unrecorded["approval_id"], rig.mac).exists()
     assert A.record_path(new["approval_id"], rig.mac).exists()
-    assert [p["approval_id"] for p in ob.own_proofs(rig.mac, NET)] == [new["approval_id"]]
+    assert [p["approval_id"] for p in ob.own_proofs(rig.mac, NET, for_device=NODE)] == [
+        new["approval_id"]
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -311,43 +363,52 @@ def test_a_proof_replayed_on_another_network_is_refused(rig: Rig) -> None:
     reply = ob.accept_presented(rig.node, rig.link(rig.mac_id, "n_other"), {"proofs": [proof]})
     assert reply == {"accepted": False, "reason": "network_mismatch"}
     # Planted by a same-uid writer under the other network's name: still refused.
-    source, planted = ob._stored_path(rig.node, NET), ob._stored_path(rig.node, "n_other")
+    source = ob._stored_path(rig.node, NET, rig.mac_id)
+    planted = ob._stored_path(rig.node, "n_other", rig.mac_id)
     assert source is not None and planted is not None
+    planted.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy(source, planted)
     assert not ob.is_operator_link(rig.node, rig.link(rig.mac_id, "n_other"))
 
 
-def test_a_removed_or_revoked_mac_binds_nothing(rig: Rig) -> None:
+@pytest.mark.parametrize("how", ["removed", "burned"])
+def test_a_removed_or_burned_mac_binds_nothing(rig: Rig, how: str) -> None:
+    """S3: network membership is THE revocation lever, read live on every use."""
     _bind(rig)
     record = net_store.load(NET, rig.node)
-    record.removed_ids.append(rig.mac_id)
+    if how == "burned":
+        record.removed_ids.append(rig.mac_id)
+    else:
+        for member in record.members:
+            if member.device_id == rig.mac_id:
+                member.lifecycle = "expired"
+                member.removed_at = time.time()
     net_store.save(record, rig.node)
     assert not ob.is_operator_link(rig.node, rig.link(rig.mac_id))
     _node_only(rig, rig.mac_id)
 
 
-def test_a_device_the_anchor_revokes_binds_nothing(rig: Rig) -> None:
-    _bind(rig)
-    revoked = dataclasses.replace(rig.anchor, devices=({"device_id": rig.mac_id, "revoked": True},))
-    rig.install_anchor(revoked)
-    assert ob.verify_proof(
-        rig.node, ob.load_stored(rig.node, NET), network_id=NET, device_id=rig.mac_id
-    ) == (False, "device_revoked")
-    _node_only(rig, rig.mac_id)
+def test_s3_the_anchor_device_list_is_not_consulted(rig: Rig) -> None:
+    """The anchor's ``devices`` holds operator KEY ids, never mesh ids: not a lever."""
+    proof = _bind(rig)
+    listed = dataclasses.replace(rig.anchor, devices=({"device_id": rig.mac_id, "revoked": True},))
+    rig.install_anchor(listed)
+    # Same verdict as without the entry; revocation goes through membership above.
+    assert ob.verify_proof(rig.node, proof, network_id=NET, device_id=rig.mac_id) == (True, "")
 
 
 def test_an_old_signer_is_refused_after_a_re_anchor(rig: Rig, tmp_path: Path) -> None:
     _bind(rig)
     rig.install_anchor(_make_key(tmp_path / "other-operator"))
     assert ob.verify_proof(
-        rig.node, ob.load_stored(rig.node, NET), network_id=NET, device_id=rig.mac_id
+        rig.node, ob.load_stored(rig.node, NET, rig.mac_id), network_id=NET, device_id=rig.mac_id
     ) == (False, "old_signer")
     _node_only(rig, rig.mac_id)
 
 
 def test_a_tampered_stored_proof_is_refused_on_next_use(rig: Rig) -> None:
     _bind(rig)
-    path = ob._stored_path(rig.node, NET)
+    path = ob._stored_path(rig.node, NET, rig.mac_id)
     assert path is not None and oct(path.stat().st_mode & 0o777) == "0o600"
     proof = json.loads(path.read_text())
     proof["request"]["device"]["host"] = "elsewhere.test"
@@ -359,7 +420,7 @@ def test_a_tampered_stored_proof_is_refused_on_next_use(rig: Rig) -> None:
 def test_a_co_member_cannot_claim_the_macs_proof(rig: Rig) -> None:
     """Presented by CO: ``requested_by`` names the Mac, and editing it breaks the digest."""
     _onboard(rig)
-    proof = ob.own_proofs(rig.mac, NET)[0]
+    proof = ob.own_proofs(rig.mac, NET, for_device=NODE)[0]
     reply = ob.accept_presented(rig.node, rig.link(CO), {"proofs": [proof]})
     assert reply == {"accepted": False, "reason": "device_mismatch"}
     forged = json.loads(json.dumps(proof))
@@ -398,6 +459,91 @@ def test_an_old_mac_without_the_capability_gets_node_only(rig: Rig) -> None:
     assert not ob.is_operator_link(rig.node, old)
 
 
+def test_r1_m1_a_downgraded_mac_gets_the_node_only_sentence(rig: Rig) -> None:
+    """Bound and collecting, then back as an older build: tool text follows the catalogue."""
+    _bind(rig)
+    _node_started_session(rig.node)
+    assert "notices" in _listing(rig, rig.mac_id)
+    assert ra.notice_forwarding(rig.node, SID) == (ra.FORWARDED, rig.mac_id)
+    old = rig.link(rig.mac_id, caps=frozenset({wire.REMOTE_ATTENTION_V1}))
+    row = {"session_id": SID, "state": "stored", "origin": None}
+    ra.stamp_rows_for_viewer(
+        rig.node,
+        [row],
+        rig.mac_id,
+        operator_viewer=ob.is_operator_link(rig.node, old),
+        self_device_id=NODE,
+    )
+    assert "notices" not in row
+    assert ra.notice_forwarding(rig.node, SID) == (ra.LOCAL_ONLY, "")
+    assert "only" in ra.forwarded_notice_sentence(rig.node, SID)
+    # Upgraded again: forwarding (and the sentence) come back.
+    assert "notices" in _listing(rig, rig.mac_id)
+    assert ra.notice_forwarding(rig.node, SID) == (ra.FORWARDED, rig.mac_id)
+
+
+def test_r1_m2_two_bound_devices_keep_separate_slots(rig: Rig, tmp_path: Path) -> None:
+    """Each device's link-up stores into its own slot; neither displaces the other."""
+    _bind(rig)
+    second = tmp_path / "second"
+    second.mkdir()
+    rig.monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(second))
+    from tests.unit.network.test_approvals_store import _sign_decision as sign
+
+    second_id = load_or_mint(second).device_id
+    shutil.copytree(rig.mac / "operator", second / "operator", dirs_exist_ok=True)
+    _network(second, second_id, (second_id, NODE, rig.mac_id))
+    record = net_store.load(NET, rig.node)
+    record.members.append(MemberRecord(device_id=second_id, name="second-box"))
+    net_store.save(record, rig.node)
+    from local_operator.network.onboard_approvals import request_device
+
+    card = request_device(
+        host="node.test", user="ec2-user", host_key_fp="SHA256:fixture", network=NET, root=second
+    )
+    at = time.time()
+    A.approve(
+        card["approval_id"],
+        signature_hex=sign(second, card, "approve", at),
+        decided_at=at,
+        root=second,
+    )
+    ob.record_onboarded(second, approval_id=card["approval_id"], network_id=NET, device_id=NODE)
+    proofs = ob.own_proofs(second, NET, for_device=NODE)
+    reply = ob.accept_presented(rig.node, rig.link(second_id), {"proofs": proofs})
+    assert reply == {"accepted": True, "reason": ""}
+    # Both stay bound, whatever order their links come up in.
+    for _ in range(2):
+        assert ob.is_operator_link(rig.node, rig.link(rig.mac_id))
+        assert ob.is_operator_link(rig.node, rig.link(second_id))
+    assert ob.load_stored(rig.node, NET, rig.mac_id) is not None
+    assert ob.load_stored(rig.node, NET, second_id) is not None
+
+
+def test_r1_m3_concurrent_stores_never_collide(rig: Rig) -> None:
+    import threading
+
+    proof = _bind(rig)
+    errors: list[BaseException] = []
+
+    def write() -> None:
+        try:
+            for _ in range(25):
+                ob._store(rig.node, NET, rig.mac_id, proof)
+        except BaseException as exc:  # noqa: BLE001
+            errors.append(exc)
+
+    threads = [threading.Thread(target=write) for _ in range(6)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert errors == []
+    assert ob.load_stored(rig.node, NET, rig.mac_id) == proof
+    leftovers = list(ob._bindings_dir(rig.node).rglob("*.tmp"))
+    assert leftovers == []
+
+
 def test_agent_children_and_co_member_placed_rows_are_unchanged(rig: Rig) -> None:
     _bind(rig)
     agent = {"kind": ra.AGENT_ORIGIN_KIND, "source_device": NODE, "source_session_id": "s_p"}
@@ -422,6 +568,63 @@ def test_only_the_onboarding_kinds_and_approvals_are_proofs(rig: Rig) -> None:
         False,
         "kind_not_allowed",
     )
+
+
+def test_s2_a_credential_share_shaped_device_onboard_is_no_proof(rig: Rig) -> None:
+    """``device_onboard`` filed by the credential flows: refused by SHAPE on both sides.
+
+    Worst case on purpose: the card names the network (what keeps it out today
+    is only that it does not), carries the Mac as requester, and the operator
+    really signed it.
+    """
+    from local_operator.network.approvals import _immutable_request
+
+    trio = A.local_anchor_trio(rig.mac)
+    assert trio is not None
+    now = time.time()
+    card = A.create_request(
+        kind=A.KIND_DEVICE_ONBOARD,
+        request_id=A.new_request_id(),
+        requested_by={"device_id": rig.mac_id, "session_id": "", "surface": "cli"},
+        device={"device_id": CO, "name": "co", "fingerprint": "fp"},
+        what={
+            "credential_finite_share": {"ref": "x"},
+            "anchor": {k: trio[k] for k in ("key_id", "spki_fp", "statement_digest")},
+            "network_id": NET,
+        },
+        credential_ref=None,
+        created_at=now,
+        expires_at=now + 3600,
+        root=rig.mac,
+    )
+    approved = A.approve(
+        card["approval_id"],
+        signature_hex=_sign_decision(rig.mac, card, "approve", now),
+        decided_at=now,
+        root=rig.mac,
+    )
+    ob.record_onboarded(rig.mac, approval_id=card["approval_id"], network_id=NET, device_id=NODE)
+    # The Mac never selects it ...
+    assert ob.proof_from_record(approved, own_device_id=rig.mac_id) is None
+    assert ob.own_proofs(rig.mac, NET, for_device=NODE) == []
+    # ... and a node handed it anyway (a validly signed proof) refuses it.
+    forged = {
+        "v": ob.PROOF_VERSION,
+        "kind": approved["kind"],
+        "approval_id": approved["approval_id"],
+        "request_id": approved["request_id"],
+        "request": _immutable_request(approved),
+        "decided_at": now,
+        "sig": approved["signature"]["sig"],
+        "key_id": approved["signature"]["key_id"],
+    }
+    assert ob.verify_proof(rig.node, forged, network_id=NET, device_id=rig.mac_id) == (
+        False,
+        "not_onboarding",
+    )
+    reply = ob.accept_presented(rig.node, rig.link(rig.mac_id), {"proofs": [forged]})
+    assert reply == {"accepted": False, "reason": "not_onboarding"}
+    assert not ob.is_operator_link(rig.node, rig.link(rig.mac_id))
 
 
 # ---------------------------------------------------------------------------

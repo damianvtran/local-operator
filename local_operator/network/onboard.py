@@ -1724,6 +1724,7 @@ class OnboardRun:
             after = self._node_json("lop network identity show", timeout=60.0)
             device_id = str((after or {}).get("device_id") or payload.get("device_id") or "")
             fingerprint = str((after or {}).get("fingerprint") or payload.get("fingerprint") or "")
+            self._record_operator_binding_target(invite_id=self.invite_id)
             return _StepOutcome(
                 True,
                 f"joined {payload.get('name') or 'the network'} as {device_id}"
@@ -1753,6 +1754,44 @@ class OnboardRun:
             self._remote_lop(f"rm -f {shlex.quote(remote_path)}", timeout=30.0)
         except MeshRefusal:
             pass
+
+    def _record_operator_binding_target(self, *, invite_id: str = "", member_id: str = "") -> None:
+        """Note which mesh id THIS onboarding admitted, for the operator binding.
+
+        WHY (PR #4030 security review S1): this Mac presents the operator's
+        signed onboarding decision — whose preimage names the node's SSH host,
+        user and credential ref — only to the node that onboarding admitted
+        (``operator_binding.own_proofs``). The signed card cannot name that id
+        (the node mints it mid-run), so the runner records it here, Mac-local,
+        the moment it is known: from the invite's ``redeemed_by`` (written by
+        this device's relay from the handshake-authenticated id — never the
+        node's self-report), or, on the already-active path, the id both sides
+        just confirmed active. Exact, ACTIVE member rows only; anything less
+        records nothing, and the node then simply gets no proof. Never raises:
+        a missing record costs forwarding, never the onboarding.
+        """
+        network_id = str(self.view.what.get("network_id") or "")
+        if not network_id:
+            return
+        try:
+            from local_operator.network import operator_binding
+            from local_operator.network import store as network_store
+
+            record = network_store.load(network_id, self.root)
+            device_id = member_id
+            if invite_id:
+                invite = record.invite(invite_id)
+                device_id = invite.redeemed_by if invite is not None else ""
+            if not device_id or not any(m.device_id == device_id for m in record.active_members()):
+                return
+            operator_binding.record_onboarded(
+                self.root,
+                approval_id=self.approval_id,
+                network_id=network_id,
+                device_id=device_id,
+            )
+        except Exception:  # noqa: BLE001 — forwarding is optional; the run is not
+            return
 
     def _join_already_active(self, node_device_id: str) -> _StepOutcome | None:
         """``join``'s question, when local reads already answer it (slice A).
@@ -1838,6 +1877,8 @@ class OnboardRun:
             return None
         if row_epoch != epoch:
             return None
+        # Both sides already confirmed this id as an ACTIVE member above.
+        self._record_operator_binding_target(member_id=node_device_id)
         where = str(self.view.device.get("name") or "").strip() or "that machine"
         label = target[1] or target[0] or "the network this join is for"
         return _StepOutcome(

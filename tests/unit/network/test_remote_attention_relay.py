@@ -432,6 +432,14 @@ def test_a_node_started_ask_and_notify_reach_the_operator_bound_by_its_signature
         root=server_b.root,
     )
 
+    # The onboarding RUNNER on B records the mesh id that run admitted (S1):
+    # only that node is ever presented this proof.
+    assert ob.record_onboarded(
+        server_b.root,
+        approval_id=card["approval_id"],
+        network_id=network.network_id,
+        device_id=server_a.identity.device_id,
+    )
     # A fresh link: B's link-up hook presents the proof by itself.
     link = server_b.dial(network.network_id, host=f"{_host}:{_port}", epoch=network.epoch)[0]
     assert link is not None
@@ -439,7 +447,7 @@ def test_a_node_started_ask_and_notify_reach_the_operator_bound_by_its_signature
         stored = None
         deadline = time.time() + 10.0
         while time.time() < deadline and stored is None:
-            stored = ob.load_stored(server_a.root, network.network_id)
+            stored = ob.load_stored(server_a.root, network.network_id, server_b.identity.device_id)
             time.sleep(0.05)
         assert stored is not None, "the link-up presentation never reached the node"
         assert wire.OPERATOR_BINDING_V1 in link.capabilities
@@ -483,3 +491,92 @@ def test_a_node_started_ask_and_notify_reach_the_operator_bound_by_its_signature
     assert sorted(item["key"] for item in items) == sorted(
         [ra.notice_key(owner, SID, "build"), ra.notice_key(owner, SID, ask_key_q9)]
     )
+
+
+def test_s1_a_peer_the_mac_did_not_onboard_gets_no_proof_bytes_on_the_wire(
+    pair: Devices, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """PR #4030 security review S1, over REAL relays and the real link-up hook.
+
+    B (the operator's Mac) holds a signed onboarding decision for the network,
+    filed the way ``request_device`` files it (``device.device_id`` empty), but
+    its records show no onboarding that admitted A: to B, A is a co-member. Every
+    frame B's links SEAL for the wire is captured (``PeerLink._write``, the last
+    step before the codec): no ``net_operator_binding`` frame and none of the
+    preimage's bytes (SSH host, credential-ref name) may appear. Before the fix
+    the "newest proof for the network" fallback put them on A's link.
+    """
+    import json
+    import threading
+
+    from local_operator.network import operator_binding as ob
+    from local_operator.network.approvals import approve
+    from local_operator.network.onboard_approvals import request_device
+    from local_operator.network.store import list_networks
+    from local_operator.operator import trust
+    from tests.unit.network.test_approvals_store import _make_key, _sign_decision
+
+    server_a, server_b, _host, _port = pair
+    _record, warm = _live_link(pair, monkeypatch)
+    warm.close("test")
+    anchor = _make_key(server_b.root)
+
+    def installed(uid: Any = None) -> Any:
+        return trust.AnchorLoad(
+            anchor=anchor, path=trust.anchor_path(uid), root_owned=True, reason="", exists=True
+        )
+
+    monkeypatch.setattr(trust, "load_anchor", installed)
+    ob._reset_caches()
+    [network] = list_networks(server_b.root)
+    card = request_device(
+        host="secret-node.test",
+        user="ec2-user",
+        host_key_fp="SHA256:fixture",
+        network=network.network_id,
+        credential_ref="ssh-secret-ref",
+        root=server_b.root,
+    )
+    assert card["device"]["device_id"] == ""
+    decided_at = time.time()
+    approve(
+        card["approval_id"],
+        signature_hex=_sign_decision(server_b.root, card, "approve", decided_at),
+        decided_at=decided_at,
+        root=server_b.root,
+    )
+
+    sealed: list[dict[str, Any]] = []
+    real_write = relay.PeerLink._write
+
+    def capture(self: relay.PeerLink, frame: dict[str, Any]) -> None:
+        sealed.append(frame)
+        real_write(self, frame)
+
+    monkeypatch.setattr(relay.PeerLink, "_write", capture)
+    presented = threading.Event()
+    real_present = ob.present
+
+    def watched(server: Any, link: Any) -> Any:
+        try:
+            return real_present(server, link)
+        finally:
+            if server is server_b:
+                presented.set()
+
+    monkeypatch.setattr(ob, "present", watched)
+    link = server_b.dial(network.network_id, host=f"{_host}:{_port}", epoch=network.epoch)[0]
+    assert link is not None
+    try:
+        assert wire.OPERATOR_BINDING_V1 in link.capabilities
+        # B's link-up hook ran its presentation decision (off-thread).
+        assert presented.wait(10.0), "the link-up presenter never ran"
+        reply = link.request({"op": "net_catalog", "req": 41, "locality": "remote"})
+        assert reply is not None
+    finally:
+        link.close("test")
+    wire_text = json.dumps(sealed, default=str)
+    assert not [f for f in sealed if f.get("op") == ob.OP]
+    for secret in ("secret-node.test", "ssh-secret-ref", "SHA256:fixture"):
+        assert secret not in wire_text
+    assert ob.load_stored(server_a.root, network.network_id, server_b.identity.device_id) is None

@@ -577,10 +577,10 @@ The flow keeps the same three calls; only who answers, and where, changes:
    reaches the operator's own device when this session was started from that
    device. A session started directly on the node reaches it too when the
    node has verified which linked device is the operator's: the operator's
-   Mac presents the onboarding approval they already signed for this network,
-   and the node checks it against its installed operator anchor. Without that
-   (a network nobody onboarded through a signed card, an older Mac, a node
-   re-anchored to a new key), the card shows only on the node, where nobody
+   Mac presents the onboarding approval they signed for THIS node, and the
+   node checks it against its installed operator anchor. Without that (a node
+   not onboarded through a signed card on a build that records it, an older
+   Mac, a node re-anchored to a new key), the card shows only on the node, where nobody
    can sign — the `notify` result says "Shown on <node> only" in that case;
    tell the operator. On a node whose user has passwordless sudo this binding
    is advisory, as site approvals are: root there could replace the anchor.

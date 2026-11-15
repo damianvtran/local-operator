@@ -35,7 +35,14 @@ WHAT IS REFUSED, and where (every step fails closed — see :func:`verify_proof`
 
 * a forged admin role — roles are never read here;
 * a proof replayed on another network — ``what.network_id`` is inside the digest;
-* a device removed from the network, or revoked on the anchor;
+* a device removed from (or burned in) the network — the live membership read on
+  every use is THE revocation lever. The anchor's ``devices`` list is not one:
+  it holds operator-device KEY ids (phones), a different namespace from mesh
+  ``d_…`` ids, so it can never name the Mac (security review S3);
+* a decision that is not an onboarding — ``device_onboard`` is also filed by the
+  credential share/inheritance flows with a caller-chosen ``requested_by``, so a
+  proof must also carry the onboarding SHAPE (:func:`_is_onboarding_shape`), not
+  just the kind;
 * an old signer — the signature must verify under the CURRENT anchor's key, so a
   node re-anchored to a new key drops every proof signed by the old one;
 * a tampered stored proof — the store holds the raw proof and every use
@@ -54,14 +61,22 @@ already owns every byte this forwards.
 DISCLOSURE. The proof carries the onboarding request's preimage — the onboarded
 node's SSH host/user, its host-key fingerprint and the credential REFERENCE name
 (never material) — because the signature covers them: stripping any field breaks
-verification. It is presented only to nodes in the SAME network, the proof that
-onboarded THAT node first (manager decision M3).
+verification. So the Mac presents a proof ONLY to the node that very onboarding
+admitted, and only that node's own proof: the onboarding runner records the
+admitted mesh id beside the approval in Mac-local metadata
+(:func:`record_onboarded`, never in the signed record), and :func:`own_proofs`
+matches it exactly. A peer the Mac did not onboard — a co-member, or a node
+onboarded before this build recorded anything — is sent nothing at all
+(security review S1: the earlier "newest proof for the network" fallback put
+the operator's SSH host, user and credential-ref name on every co-member's link).
 
 R5 — COST. ES256 verification stays out of the per-listing loop: a verdict is
 cached keyed by the proof's bytes, the anchor's bytes and the local-key state,
 so a catalogue listing pays one dict lookup plus one membership read; a changed
-anchor, a revocation (it changes the anchor bytes) or an edited proof misses the
-cache and is re-verified.
+anchor or an edited proof misses the cache and is re-verified. (ECDSA is
+malleable: ``(r, n-s)`` of a valid signature also verifies, so one signed
+decision can have two byte forms and two cache entries. Benign — both bind the
+identical signed content — so no low-s canonicalisation; security review S4.)
 """
 
 from __future__ import annotations
@@ -73,6 +88,7 @@ import os
 import re
 import threading
 import time
+import uuid
 from collections.abc import Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -85,9 +101,14 @@ logger = logging.getLogger(__name__)
 #: The peer op: the Mac presents, the node verifies and stores.
 OP = "net_operator_binding"
 
-#: ONLY these kinds are evidence. Both are filed exclusively by
-#: ``onboard_approvals.request_device``, which computes ``requested_by`` from this
-#: install's own identity. Kinds a REMOTE peer files into the store
+#: ONLY these kinds are evidence — necessary, not sufficient. An ONBOARDING of
+#: either kind is filed by ``onboard_approvals.request_device``, which computes
+#: ``requested_by`` from this install's own identity. ``device_onboard`` is ALSO
+#: filed by ``credentials/finite_share.py`` and ``credentials/inheritance.py``
+#: with a CLI-chosen ``requested_by``; those are kept out by the onboarding shape
+#: (:func:`_is_onboarding_shape`), checked on both the Mac's selection and the
+#: node's verification, not by their happening to lack ``what.network_id``
+#: (security review S2). Kinds a REMOTE peer files into the store
 #: (``operator_device_pair`` via ``mobile/pair_requests``) or that name no network
 #: (``profile_save``, ``local_authority``) are excluded by this allow-list, not by
 #: a deny-list a new kind could slip past.
@@ -102,7 +123,12 @@ PROOF_VERSION = 1
 #: larger is not one this build minted.
 MAX_PROOFS = 4
 MAX_PROOF_BYTES = 16 * 1024
-_NETWORK_ID = re.compile(r"[A-Za-z0-9_.-]{1,128}\Z")
+#: Network ids, mesh device ids and approval ids all become FILE NAMES here.
+_NETWORK_ID = re.compile(r"[A-Za-z0-9_-][A-Za-z0-9_.-]{0,127}\Z")
+#: Keys a credential share/inheritance card carries in ``what``; their presence
+#: makes a ``device_onboard`` record a credential operation, never an onboarding
+#: (the same predicate ``server/utils/desktop_onboard.py`` uses).
+_CREDENTIAL_OPERATION_KEYS = ("credential_inheritance", "credential_finite_share")
 _HEX = re.compile(r"[0-9a-f]{16,512}\Z")
 
 #: The anchor read is a few syscalls, but a listing loop on a busy relay should
@@ -112,6 +138,50 @@ ANCHOR_TTL_S = 5.0
 _lock = threading.Lock()
 _verdicts: dict[tuple[str, ...], tuple[bool, str]] = {}
 _anchor_memo: tuple[float, Any] | None = None
+#: The last link verdict written per ``(root, network, device)``, so a listing
+#: loop rewrites the verdict file only when the verdict CHANGES.
+_link_memo: dict[tuple[str, str, str], bool] = {}
+
+
+def _atomic_write(path: Path, payload: Mapping[str, Any]) -> None:
+    """0600 write-then-replace with a tmp name unique PER WRITE.
+
+    Presentations run inline on per-link reader threads, so two links of one
+    process can write at once; a per-process tmp name let them interleave or
+    lose the replace (review R1-m3).
+    """
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(json.dumps(dict(payload), sort_keys=True))
+        os.replace(tmp, path)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
+
+
+def _is_onboarding_shape(request: Any) -> bool:
+    """The record is a real SSH ONBOARDING, not a credential operation (S2).
+
+    ``request_device`` always writes ``what.connect``/``what.install`` true and an
+    ``ssh`` device block; the credential share/inheritance cards that reuse the
+    ``device_onboard`` kind carry their operation key in ``what`` instead. All of
+    these fields are inside the signed digest, so the shape cannot be dressed up
+    after signing.
+    """
+    if not isinstance(request, Mapping):
+        return False
+    what = request.get("what")
+    device = request.get("device")
+    if not isinstance(what, Mapping) or not isinstance(device, Mapping):
+        return False
+    if device.get("transport") != "ssh":
+        return False
+    if what.get("connect") is not True or what.get("install") is not True:
+        return False
+    return not any(key in what for key in _CREDENTIAL_OPERATION_KEYS)
 
 
 # ---------------------------------------------------------------------------
@@ -156,7 +226,7 @@ def proof_from_record(record: Mapping[str, Any], *, own_device_id: str) -> dict[
     requested_by = record.get("requested_by")
     if not isinstance(requested_by, Mapping) or requested_by.get("device_id") != own_device_id:
         return None
-    if not own_device_id or not _network_of(record):
+    if not own_device_id or not _network_of(record) or not _is_onboarding_shape(record):
         return None
     decided_at = record.get("decided_at")
     if not isinstance(decided_at, (int, float)) or isinstance(decided_at, bool):
@@ -210,50 +280,112 @@ def _own_proofs_by_record(root: Path | None) -> list[tuple[dict[str, Any], dict[
     return out
 
 
+def _onboarded_dir(root: Path | None) -> Path:
+    from local_operator.network.identity import network_root
+
+    return network_root(root) / "operator-onboarded"
+
+
+def record_onboarded(
+    root: Path | None, *, approval_id: str, network_id: str, device_id: str
+) -> bool:
+    """Mac side: note that onboarding ``approval_id`` admitted mesh device ``device_id``.
+
+    WHY (security review S1, 2026-11-15). The signed card cannot say which mesh id
+    the node will have: ``request_device`` files ``device.device_id`` empty (the
+    node mints its identity during the run), so the Mac had no way to tell the
+    node it onboarded from any co-member and presented to everyone. The onboarding
+    RUNNER learns the id when it admits the node (the invite's ``redeemed_by``,
+    which the relay wrote from the handshake-authenticated id), and records it
+    here. Mac-LOCAL metadata beside the approval, deliberately NOT in the signed
+    record: it only decides where this Mac discloses, never what a node trusts
+    (the node still verifies the operator's signature and binds the FILER).
+
+    Returns whether a record was written. Never raises.
+    """
+    for value in (approval_id, network_id, device_id):
+        if not _NETWORK_ID.fullmatch(value or ""):
+            return False
+    try:
+        _atomic_write(
+            _onboarded_dir(root) / f"{approval_id}.json",
+            {
+                "approval_id": approval_id,
+                "network_id": network_id,
+                "device_id": device_id,
+                "at": time.time(),
+            },
+        )
+    except OSError:
+        logger.debug("operator binding: could not record the onboarded node", exc_info=True)
+        return False
+    return True
+
+
+def onboarded_devices(root: Path | None) -> dict[str, tuple[str, str]]:
+    """``{approval_id: (network_id, device_id)}`` the runner recorded. Never raises."""
+    out: dict[str, tuple[str, str]] = {}
+    try:
+        directory = _onboarded_dir(root)
+        if not directory.is_dir():
+            return out
+        for path in directory.glob("*.json"):
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            if not isinstance(data, Mapping) or data.get("approval_id") != path.stem:
+                continue
+            network_id, device_id = data.get("network_id"), data.get("device_id")
+            if isinstance(network_id, str) and isinstance(device_id, str):
+                out[path.stem] = (network_id, device_id)
+    except OSError:
+        logger.debug("operator binding: onboarded records unreadable", exc_info=True)
+    return out
+
+
+def _presentable(root: Path | None) -> dict[tuple[str, str], dict[str, Any]]:
+    """The NEWEST own proof per ``(network, onboarded device)`` the runner recorded."""
+    admitted = onboarded_devices(root)
+    best: dict[tuple[str, str], dict[str, Any]] = {}
+    for _record, proof in _own_proofs_by_record(root):
+        target = admitted.get(proof["approval_id"])
+        if target is None or target[0] != _network_of(proof["request"]):
+            continue
+        current = best.get(target)
+        if current is None or proof["decided_at"] > current["decided_at"]:
+            best[target] = proof
+    return best
+
+
 def retained_approval_ids(root: Path | None) -> frozenset[str]:
     """Approval ids the 30-day prune must keep: the binding proofs in use.
 
     Manager decision M1 (2026-11-15): ``approvals._sweep_namespace`` deletes
     terminal records after 30 days, and a pruned decision is a binding nobody can
-    present again without a fresh onboarding. Keep exactly the NEWEST eligible
-    decision per network — the one :func:`own_proofs` falls back to, so every
-    node in that network can still be presented a proof (M3). Older decisions
-    prune as before: retention is bounded by the number of networks, not by
-    how many onboardings ever happened.
+    present again without a fresh onboarding. Keep exactly the decision
+    :func:`own_proofs` presents to each onboarded node — the newest per
+    ``(network, node)``. Older decisions, and ones with no recorded node (never
+    presented to anyone), prune as before: retention is bounded by the number
+    of onboarded nodes.
     """
-    newest: dict[str, tuple[float, str]] = {}
-    for _record, proof in _own_proofs_by_record(root):
-        network_id = _network_of(proof["request"])
-        best = newest.get(network_id)
-        if best is None or proof["decided_at"] > best[0]:
-            newest[network_id] = (proof["decided_at"], proof["approval_id"])
-    return frozenset(aid for _at, aid in newest.values())
-
-
-def _onboarded_device(proof: Mapping[str, Any]) -> str:
-    request = proof.get("request")
-    device = request.get("device") if isinstance(request, Mapping) else None
-    value = device.get("device_id") if isinstance(device, Mapping) else ""
-    return value if isinstance(value, str) else ""
+    return frozenset(proof["approval_id"] for proof in _presentable(root).values())
 
 
 def own_proofs(root: Path | None, network_id: str, *, for_device: str = "") -> list[dict[str, Any]]:
     """The proof to present to ``for_device`` in ``network_id``: at most one.
 
-    The decision that onboarded THAT device first, else the newest one for the
-    network (M3: another node of the operator's own, same network). One proof
-    is enough to bind; sending more would only disclose more.
+    ONLY the decision whose onboarding admitted exactly that mesh device in
+    exactly that network (:func:`record_onboarded`). Anything else — a
+    co-member, a node this Mac did not onboard, an empty ``for_device`` — gets
+    ``[]``: the preimage discloses the node's SSH host/user and credential-ref
+    name, and M3 allows it only to the operator's own nodes, which the Mac can
+    establish only from its own records (security review S1).
     """
-    candidates = [
-        proof
-        for _record, proof in _own_proofs_by_record(root)
-        if _network_of(proof["request"]) == network_id
-    ]
-    if not candidates:
+    if not network_id or not for_device:
         return []
-    exact = [proof for proof in candidates if for_device and _onboarded_device(proof) == for_device]
-    pool = exact or candidates
-    return [max(pool, key=lambda proof: proof["decided_at"])]
+    proof = _presentable(root).get((network_id, for_device))
+    return [proof] if proof is not None else []
 
 
 # ---------------------------------------------------------------------------
@@ -287,6 +419,7 @@ def _reset_caches() -> None:
     with _lock:
         _anchor_memo = None
         _verdicts.clear()
+        _link_memo.clear()
 
 
 def _key_file_state(config_root: Path) -> str:
@@ -350,6 +483,11 @@ def _check_signature(
     request = proof.get("request")
     if not isinstance(request, Mapping) or request.get("kind") != proof.get("kind"):
         return False, "malformed", anchor
+    if not _is_onboarding_shape(request):
+        # A credential share/inheritance card the operator signed is a
+        # ``device_onboard`` too; its signature says nothing about which device
+        # is the operator's (S2).
+        return False, "not_onboarding", anchor
     try:
         digest = _digest_for(proof)
         signature = bytes.fromhex(str(proof.get("sig") or ""))
@@ -403,7 +541,7 @@ def verify_proof(
     caller's (:func:`is_operator_link` / :func:`operator_device`), because it
     changes without the anchor changing.
     """
-    from local_operator.operator.trust import anchor_bytes, device_is_revoked
+    from local_operator.operator.trust import anchor_bytes
 
     if not _well_formed(proof):
         return False, "malformed"
@@ -433,8 +571,10 @@ def verify_proof(
         return False, "network_mismatch"
     if bound_device(proof) != device_id:
         return False, "device_mismatch"
-    if loaded.anchor is not None and device_is_revoked(loaded.anchor, device_id):
-        return False, "device_revoked"
+    # NO anchor-revocation check here (security review S3): the anchor's
+    # ``devices`` list holds operator-device KEY ids, never mesh ids, so it could
+    # not match. Revoking the operator's device for this purpose is removing (or
+    # burning) it in the network: :func:`_active_member`, read live on every use.
     return True, ""
 
 
@@ -444,15 +584,21 @@ def _bindings_dir(root: Path) -> Path:
     return network_root(root) / "operator-bindings"
 
 
-def _stored_path(root: Path, network_id: str) -> Path | None:
-    if not _NETWORK_ID.fullmatch(network_id or ""):
+def _stored_path(root: Path, network_id: str, device_id: str) -> Path | None:
+    """``operator-bindings/<network>/<device>.json``: one slot PER BOUND DEVICE.
+
+    One slot per network made two legitimately bound devices (an anchored node
+    may onboard machines too) overwrite each other on every link-up, so which
+    one got the asks depended on link order (review R1-m2).
+    """
+    if not _NETWORK_ID.fullmatch(network_id or "") or not _NETWORK_ID.fullmatch(device_id or ""):
         return None
-    return _bindings_dir(root) / f"{network_id}.json"
+    return _bindings_dir(root) / network_id / f"{device_id}.json"
 
 
-def load_stored(root: Path, network_id: str) -> dict[str, Any] | None:
-    """The RAW stored proof for a network. Untrusted until :func:`verify_proof`."""
-    path = _stored_path(root, network_id)
+def load_stored(root: Path, network_id: str, device_id: str) -> dict[str, Any] | None:
+    """The RAW stored proof for one device in one network; untrusted until verified."""
+    path = _stored_path(root, network_id, device_id)
     if path is None:
         return None
     try:
@@ -464,16 +610,55 @@ def load_stored(root: Path, network_id: str) -> dict[str, Any] | None:
     return data if isinstance(data, dict) else None
 
 
-def _store(root: Path, network_id: str, proof: Mapping[str, Any]) -> None:
-    path = _stored_path(root, network_id)
+def _store(root: Path, network_id: str, device_id: str, proof: Mapping[str, Any]) -> None:
+    path = _stored_path(root, network_id, device_id)
     if path is None:
         return
-    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w", encoding="utf-8") as handle:
-        handle.write(json.dumps(dict(proof), sort_keys=True))
-    os.replace(tmp, path)
+    _atomic_write(path, proof)
+
+
+def _links_path(root: Path) -> Path:
+    from local_operator.network.identity import network_root
+
+    return network_root(root) / "operator-binding-links.json"
+
+
+def _link_verdicts(root: Path) -> dict[str, bool]:
+    try:
+        data = json.loads(_links_path(root).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    return {str(k): v for k, v in data.items() if isinstance(v, bool)}
+
+
+def _record_link_verdict(root: Path, network_id: str, device_id: str, ok: bool) -> None:
+    """Persist the listing leg's verdict for a BOUND device's link. Never raises.
+
+    WHY (review R1-m1 / QA Q1). The ``notify`` sentence is decided in the
+    session's process, which cannot see the relay's links; it trusted the stored
+    proof alone, so a bound Mac that reconnected as an older build (no
+    ``operator-binding-v1``, so the catalogue carries nothing) still got "will be
+    forwarded ... the operator's device". The relay now records what its last
+    listing for that device decided, and :func:`operator_device` requires it.
+    Written only when the verdict CHANGES (memoized per process), so a listing
+    loop costs a dict lookup, not a write.
+    """
+    memo_key = (str(root), network_id, device_id)
+    with _lock:
+        if _link_memo.get(memo_key) is ok:
+            return
+    try:
+        with _lock:
+            verdicts = _link_verdicts(root)
+            entry = f"{network_id}/{device_id}"
+            if verdicts.get(entry) is not ok:
+                verdicts[entry] = ok
+                _atomic_write(_links_path(root), verdicts)
+            _link_memo[memo_key] = ok
+    except OSError:
+        logger.debug("operator binding: could not record the link verdict", exc_info=True)
 
 
 def _active_member(root: Path, network_id: str, device_id: str) -> bool:
@@ -516,7 +701,7 @@ def accept_presented(root: Path, link: Any, frame: Mapping[str, Any]) -> dict[st
         ok, reason = verify_proof(root, proof, network_id=network_id, device_id=device_id)
         if ok:
             try:
-                _store(root, network_id, proof)
+                _store(root, network_id, device_id, proof)
             except OSError as exc:
                 return {"accepted": False, "reason": f"store_failed: {exc.strerror}"}
             _audit(root, "operator_binding_accepted", network_id, device_id)
@@ -544,20 +729,25 @@ def is_operator_link(root: Path, link: Any) -> bool:
     Requires the peer to advertise the capability (an old Mac never presented, and
     a downgraded one must not ride a proof it can no longer refresh), a stored
     proof that verifies for the link's own network and device id, and an active
-    membership row for that id.
+    membership row for that id. For a device with a stored proof the verdict is
+    recorded (:func:`_record_link_verdict`) so the ``notify`` sentence agrees.
     """
     try:
         from local_operator.network import wire
 
-        if wire.OPERATOR_BINDING_V1 not in getattr(link, "capabilities", ()):
-            return False
         network_id = str(getattr(link, "network_id", "") or "")
         device_id = str(getattr(link, "device_id", "") or "")
-        proof = load_stored(Path(root), network_id)
+        proof = load_stored(Path(root), network_id, device_id)
         if proof is None:
             return False
-        ok, _reason = verify_proof(Path(root), proof, network_id=network_id, device_id=device_id)
-        return ok and _active_member(Path(root), network_id, device_id)
+        ok = wire.OPERATOR_BINDING_V1 in getattr(link, "capabilities", ())
+        if ok:
+            ok, _reason = verify_proof(
+                Path(root), proof, network_id=network_id, device_id=device_id
+            )
+            ok = ok and _active_member(Path(root), network_id, device_id)
+        _record_link_verdict(Path(root), network_id, device_id, ok)
+        return ok
     except Exception:  # noqa: BLE001 — a listing never fails on this
         logger.debug("operator binding: link check failed", exc_info=True)
         return False
@@ -567,27 +757,35 @@ def operator_device(root: Path) -> tuple[str, str]:
     """``(device_id, network_id)`` of a verified operator device for this node, or ``("", "")``.
 
     The session-side half (``remote_attention.notice_forwarding``): a ``notify``
-    result may say "forwarded" only when a stored proof still verifies for an
-    active member. Never raises.
+    result may say "forwarded" only when the catalogue leg would carry it: a
+    stored proof that still verifies for an active member AND whose link's last
+    listing verdict was positive (capability present; R1-m1). With several bound
+    devices, the newest signed decision names the one the sentence reports.
+    Never raises.
     """
+    best: tuple[float, str, str] | None = None
     try:
         directory = _bindings_dir(Path(root))
         if not directory.is_dir():
             return "", ""
-        for path in sorted(directory.glob("*.json")):
-            network_id = path.stem
-            proof = load_stored(Path(root), network_id)
+        verdicts = _link_verdicts(Path(root))
+        for path in sorted(directory.glob("*/*.json")):
+            network_id, device_id = path.parent.name, path.stem
+            if verdicts.get(f"{network_id}/{device_id}") is not True:
+                continue
+            proof = load_stored(Path(root), network_id, device_id)
             if proof is None:
                 continue
-            device_id = bound_device(proof)
             ok, _reason = verify_proof(
                 Path(root), proof, network_id=network_id, device_id=device_id
             )
             if ok and _active_member(Path(root), network_id, device_id):
-                return device_id, network_id
+                at = float(proof["decided_at"])
+                if best is None or at > best[0]:
+                    best = (at, device_id, network_id)
     except Exception:  # noqa: BLE001
         logger.debug("operator binding: device lookup failed", exc_info=True)
-    return "", ""
+    return (best[1], best[2]) if best is not None else ("", "")
 
 
 # ---------------------------------------------------------------------------
@@ -603,7 +801,11 @@ def make_handler(server: "RelayServer") -> Any:
 
 
 def present(server: "RelayServer", link: Any) -> dict[str, Any] | None:
-    """Mac side: send this device's proof for the link's network, if it has one."""
+    """Mac side: send the peer ITS OWN onboarding proof, or nothing at all.
+
+    Nothing is sent — not even an empty frame — to a peer without the capability
+    or one this Mac's records do not show it onboarded (:func:`own_proofs`).
+    """
     from local_operator.network import wire
 
     if wire.OPERATOR_BINDING_V1 not in getattr(link, "capabilities", ()):
