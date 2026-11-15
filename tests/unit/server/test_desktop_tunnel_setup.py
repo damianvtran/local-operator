@@ -839,7 +839,7 @@ def test_the_two_reported_steps_are_plain_and_actionable(monkeypatch, step):
 async def test_a_posted_run_is_a_click_and_the_poll_never_applies(desktop, monkeypatch):
     """The route is the click: its POST carries `resume_stopped`, its GET never applies."""
     client, _app, _tmp = desktop
-    seen: list[dict] = []
+    seen: list[dict[str, object]] = []
     stopped = {
         "step": "stopped",
         "ready": True,
