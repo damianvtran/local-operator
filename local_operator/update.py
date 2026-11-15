@@ -9087,6 +9087,12 @@ def daemons_refresh_command() -> int:
         # "nothing needed repairing" and "this process is not allowed to".
         print(f"warning: {refusal}", file=sys.stderr)
         return 0
+    # The parent is the PRE-upgrade build: on the first upgrade introducing a
+    # signed launcher its installer can only plant the old shim. Reconcile from
+    # this new-wheel child before any plist chooses its Program. The install
+    # mutation lock serializes this with the independently owned mobile child.
+    if _HOST_IS_MACOS:
+        ensure_daemon_image()
     if sys.platform == "darwin":
         # Before the daemons, and independent of them: it touches only idle
         # legacy episode jobs (see the sweep for every guard).
@@ -9240,6 +9246,11 @@ def mobile_refresh_command() -> int:
     if refusal is not None:
         print(f"warning: {refusal}", file=sys.stderr)
         return 0
+    # This child can race the services child, or run without it. Plant from the
+    # newly installed wheel here too, before mobile renders its own plist; the
+    # old updater cannot know about newly introduced machine-level artifacts.
+    if _HOST_IS_MACOS:
+        ensure_daemon_image()
     from local_operator.mobile import install as mobile_install
 
     outcome = mobile_install.refresh_plist_if_stale()

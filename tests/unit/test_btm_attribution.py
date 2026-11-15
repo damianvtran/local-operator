@@ -143,6 +143,96 @@ def test_ensure_daemon_launcher_copies_only_a_verified_source(
 
 
 # ---------------------------------------------------------------------------
+# First upgrade: an old installer plants only the shim, then NEW code repairs
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("child", ["services", "mobile"])
+@pytest.mark.parametrize("wheel_launcher", ["signed", "unsigned", "missing"])
+def test_refresh_child_plants_launcher_before_rendering(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    child: str,
+    wheel_launcher: str,
+) -> None:
+    """New-wheel children must not depend on the old installer knowing this hook.
+
+    The pre-feature parent leaves a valid pointer and shim, but no launcher.
+    Exercise both independently spawned repair entrypoints, including the real
+    plant and plist Program selection; only signature answers and service I/O
+    are replaced. Native signed-bundle handoff evidence is recorded on the PR.
+    """
+    generation = tmp_path / "lop" / "generations" / "new"
+    package = generation / "tools" / "local-operator" / "lib" / "python3.12"
+    package = package / "site-packages" / "local_operator"
+    package.mkdir(parents=True)
+    pointer = tmp_path / "lop" / "current"
+    pointer.symlink_to(generation, target_is_directory=True)
+    bin_dir = tmp_path / "lop" / "bin"
+    bin_dir.mkdir()
+    shim = bin_dir / "python3"
+    shim.write_text(update._DAEMON_SHIM)
+    shim.chmod(0o755)
+    source = package.parent / update.LAUNCHER_PACKAGE_PATH
+    if wheel_launcher != "missing":
+        executable = update.launcher_executable(source)
+        executable.parent.mkdir(parents=True)
+        executable.write_bytes(b"launcher")
+        executable.chmod(0o755)
+    monkeypatch.setattr(update, "_STABLE_ROOT", str(tmp_path / "lop"))
+    monkeypatch.setattr(update, "process_install_root", lambda: package.parents[3])
+    monkeypatch.setattr(update, "__file__", str(package / "update.py"))
+    monkeypatch.setattr(update, "_HOST_IS_MACOS", True)
+    monkeypatch.setattr(update, "generation_layout_supported", lambda: True)
+    monkeypatch.setattr(update, "_repair_refusal", lambda: None)
+    monkeypatch.setattr(update, "_sweep_legacy_episode_plists", lambda: ())
+    monkeypatch.setattr(update, "_LAUNCHER_VERDICTS", {})
+    _signature(monkeypatch, _good() if wheel_launcher == "signed" else None)
+    assert update.daemon_program() == shim
+
+    rendered: list[dict[str, object]] = []
+
+    def render() -> launchd.PlistRefresh:
+        job = procname.launchd_job("local_operator.wakes.supervisor", label="Local Operator")
+        # Round-trip a real plist rather than inspecting an unrendered mock.
+        rendered.append(plistlib.loads(plistlib.dumps(job)))
+        return launchd.PlistRefresh(name=child, kind="current")
+
+    if child == "services":
+        monkeypatch.setattr(update, "_platform_refresh_steps", lambda: ((child, "", render),))
+        assert update.daemons_refresh_command() == 0
+    else:
+        from local_operator.mobile import install as mobile_install
+
+        monkeypatch.setattr(mobile_install, "refresh_plist_if_stale", render)
+        monkeypatch.setattr(mobile_install, "_supervised_pid", lambda: 12345)
+        monkeypatch.setattr(update, "generation_staleness_of_process", lambda _pid: False)
+        assert update.mobile_refresh_command() == 0
+    expected = (
+        update.launcher_executable(bin_dir / update.LAUNCHER_BUNDLE_DIRNAME)
+        if wheel_launcher == "signed"
+        else shim
+    )
+    assert len(rendered) == 1
+    assert rendered[0]["Program"] == str(expected)
+    assert rendered[0]["AssociatedBundleIdentifiers"] == ["com.local-operator"]
+    assert (bin_dir / update.LAUNCHER_BUNDLE_DIRNAME).exists() == (wheel_launcher == "signed")
+
+
+@pytest.mark.parametrize("child", [update.daemons_refresh_command, update.mobile_refresh_command])
+def test_refused_refresh_does_not_plant_launcher(
+    monkeypatch: pytest.MonkeyPatch, child: Any
+) -> None:
+    monkeypatch.setattr(update, "_repair_refusal", lambda: "source checkout")
+
+    def forbidden() -> None:
+        pytest.fail("a refused refresh must not mutate the stable installation")
+
+    monkeypatch.setattr(update, "ensure_daemon_image", forbidden)
+    assert child() == 0
+
+
+# ---------------------------------------------------------------------------
 # The plist shape every installer gets through launchd_job
 # ---------------------------------------------------------------------------
 
