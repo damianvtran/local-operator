@@ -16,7 +16,8 @@ for translators and the auditor.
 - 请 marks the directive in zh-CN — a blocking dialog, a refusal or error body
   that tells the reader the next step, or a field prompt — whether or not the
   English says "please". English imperatives are unmarked, while a bare
-  Chinese imperative in an error body reads as blunt; that is also why this
+  Chinese imperative in an error body reads curt next to the 请-led bodies
+  that surround it (house practice, not a grammar rule); that is also why this
   guide does not carry `i18n/style-guides/en.md`'s ban on "please" outside
   blocking dialogs. Use 请, not a bare imperative, on the first next-step
   clause of such a body; later verbs chained in that clause do not repeat it
@@ -24,28 +25,37 @@ for translators and the auditor.
   Decide per value, not per surface — neighbouring values legitimately differ.
 - Keep it at the head of the directive clause: value-, ICU-arm- or
   sentence-initial, or after ，；：—— or after a short lead-in (…前, …后,
-  因此, 或, 详情) when a statement comes first — 接受前请审核更改内容。,
-  恢复连接后请重试。, 会话未及时响应——请重试。,
-  详情请运行`lop team-bridge receiver status`。 — never mid-predicate.
+  因此, 或) or a fronted topic noun (详情请…, 描述请控制在…以内) when a
+  statement comes first — 接受前请审核更改内容。 / 恢复连接后请重试。 /
+  会话未及时响应——请重试。 / 详情请运行`lop team-bridge receiver status`。 —
+  never mid-predicate.
 - At most once per clause: one 请 governs a chain of verbs, while a separate
   directive after ； or in a condition clause may carry its own
-  (请重试；如果问题持续出现，请重新安装应用。;
+  (请重试；如果问题持续出现，请重新安装应用。 /
   请重试，若问题仍然存在，请联系支持团队。) — never two 请 in one clause.
 - Not on buttons, menu items, bare state labels (已过期, 已连接) or
   single-sentence headings. A status line or a multi-sentence heading that
   carries a next step is an error body and takes it
-  (你的Radient登录已过期。请登录以重新连接到{subject}。).
+  (你的Radient登录已过期。请登录以重新连接到{subject}。). A placeholder or
+  filter hint inside an input takes no 请 at all (搜索对话……, 输入以筛选);
+  "field prompt" means the label, instruction or validation sentence around a
+  field (请输入整数。).
 - Prohibitions: 请勿 in prose bodies (请勿重复发送); bare 不要 is fine in a
-  safety refusal where blunt is intended (不要重试，并告知运行该智能体的人);
-  never stack 请 and 不要 in one sentence.
-- 请 with a person as its object is the verb "ask (someone) to…", not the
-  directive 请 above: a third party is the subject and the value reports that
-  party's request (都会在Chrome中请你点击Allow允许访问。; 智能体读取前会请你
-  批准。; 会请其他每个活跃成员也移到同一构建), or the reader is the subject
-  and it is a plain instruction to ask someone (或请成员邀请你; 请让组织所有者
-  邀请你). Translate the English verb ask/invite with it and keep it as
-  written — do not rewrite it as 让/要求; the position, once-per-clause and
-  no-button limits do not apply to it. A directive to the reader never takes a
+  safety refusal where blunt is intended (不要重试，并告知运行该智能体的人).
+  Never write 请不要; a plain 不要 clause may follow a 请 clause when it is the
+  "do A, not B" half of the same instruction (请先检查账户再重试，不要假定
+  操作已回滚。).
+- 请 introducing a request clause is often the verb "ask (someone) to…", not
+  the directive 请 above: a third party is the subject and the value reports
+  that party's request (都会在Chrome中请你点击Allow允许访问。 /
+  智能体读取前会请你批准。 / 会请其他每个活跃成员也移到同一构建), or the
+  reader is the subject and it is a plain instruction to ask someone
+  (或请成员邀请你). English "Ask X to…" is rendered 请X… (lexical ask, exempt
+  from the limits below) or 请让X… (directive 请 + 让: 请让组织所有者邀请你,
+  请让手机重新发起配对, which stays under the head-of-clause and
+  once-per-clause limits). Keep the 请 either way; do not replace it with a
+  bare 让 or with 要求. For the lexical form the position, once-per-clause and
+  no-button limits do not apply. A directive to the reader never takes a
   pronoun: 请点击……, not 请你点击……. 请求 (request, asks for) is a different
   word, out of scope for this rule.
 - Existing values predate this rule: re-audit its 请 usage when you touch a
