@@ -16,10 +16,12 @@ lives in ``test_push_wire_contract.py``.
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import importlib
 import json
 import re
+import textwrap
 from pathlib import Path
 from typing import Any
 
@@ -865,6 +867,50 @@ def test_a_cut_inside_a_redaction_marker_drops_the_partial_marker(
     assert hit, "the sweep never put the cut inside the marker"
     # Positive control: user text that merely LOOKS like a marker prefix is kept.
     assert _COMPOSE._marker_safe_cut("a" * 10 + marker[:3], 13) == 13
+
+
+#: A PEM-SHAPED block the size of an RSA-8192 key (~6.4 KB of body), longer than
+#: the N-3 margin. NOT a key: non-repeating base64 filler (sha256 digests of the
+#: integers) between real armour lines, assembled at runtime so this file carries
+#: no credential-shaped literal. Non-repeating, so any 8-character run of the body
+#: in the output is evidence of THIS block.
+_LONG_PEM_BODY = "\n".join(
+    textwrap.wrap(
+        "".join(
+            base64.b64encode(hashlib.sha256(str(i).encode()).digest()).decode().rstrip("=")
+            for i in range(160)
+        )[:6400],
+        64,
+    )
+)
+_LONG_PEM = (
+    "-----" + "BEGIN PRIVATE KEY-----\n" + _LONG_PEM_BODY + "\n-----END PRIVATE KEY" + "-----"
+)
+
+
+def test_a_pem_key_longer_than_the_scrub_window_never_reaches_the_banner(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """S-9 (security review r4): the N-3 window held the BEGIN line but not the
+    END of an 8192-bit-sized key, so the window scrub left the block whole and
+    its header and first body line reached the push bytes and the toast. A
+    surviving multi-line opener now forces the whole-reply scrub."""
+    _names_on(monkeypatch)
+    raw = "Here is the key:\n" + _LONG_PEM + "\nDone."
+    # Preconditions: the block outruns the window, and a whole-text scrub
+    # matches this shape (so the fallback has something to fall back to).
+    assert len(_LONG_PEM) > _COMPOSE._SCRUB_MARGIN_CHARS + BACKGROUND_SNIPPET_MAX_CHARS
+    assert "BEGIN PRIVATE KEY" not in _COMPOSE._scrubbed(raw)
+    body_runs = {run for line in _LONG_PEM_BODY.splitlines() for run in _fragments(line)}
+    session = _session(tmp_path, assistant=raw, title="Deploy")
+    composed = compose("complete", session_dir=session)
+    assert "BEGIN PRIVATE KEY" not in composed.body
+    assert not [run for run in body_runs if run in composed.body]
+    assert REDACTION_MARKER in composed.body
+    _payload, emitted = _emit_bytes(session, "complete", previews=True)
+    text = emitted.decode("utf-8")
+    assert "BEGIN PRIVATE KEY" not in text
+    assert not [run for run in body_runs if run in text]
 
 
 def test_compose_scrubs_before_its_own_clamp(

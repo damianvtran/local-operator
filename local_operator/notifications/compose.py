@@ -444,7 +444,8 @@ def _scrubbed(text: str) -> str:
 #: matches as it would on the full text. :func:`_scrubbed_snippet` re-checks
 #: that after scrubbing and falls back to the whole text when redactions or
 #: whitespace ate the margin. 4 KiB also covers a 4096-bit RSA PEM block
-#: (~3.2 KB) that starts at the cut.
+#: (~3.2 KB) that starts at the cut; a longer multi-line block (an 8192-bit
+#: key, ~6.4 KB) is caught by its surviving opener instead (S-9).
 _SCRUB_MARGIN_CHARS = 4096
 
 
@@ -463,6 +464,32 @@ def _flat_end(text: str, count: int) -> int | None:
     return None
 
 
+def _multi_line_opener_survives(scrubbed: str) -> bool:
+    """Whether a multi-line secret's opener is still in ``scrubbed`` (S-9).
+
+    WHY (security review r4, S-9). A PEM private key matches only as a complete
+    BEGIN … END block, and the margin covers a 4096-bit RSA key but not an
+    8192-bit one (~6.4 KB): its END line fell past the window, the window scrub
+    saw an unterminated block and left it, and ``-----BEGIN PRIVATE KEY-----``
+    plus the first body line reached the push bytes and the toast. Whole-reply
+    scrubbing (the pre-N-3 behaviour) redacted it. A surviving opener therefore
+    sends the caller back to the whole reply: rare, and correct beats fast.
+
+    The openers are ``redaction_shapes``'s own list, so a new multi-line shape
+    there is covered here without a second copy of its grammar. An opener that
+    survives a WHOLE-text scrub (no END anywhere) costs one extra scan and
+    nothing more. Fails closed: if the check itself breaks, rescan.
+    """
+    try:
+        from local_operator.redaction_shapes import MULTI_LINE_SECRET_OPENERS
+
+        upper = scrubbed.upper()
+        return any(opener.search(upper) for opener in MULTI_LINE_SECRET_OPENERS)
+    except Exception:  # noqa: BLE001 — a rescan is the safe answer
+        logger.debug("multi-line opener check failed; rescanning", exc_info=True)
+        return True
+
+
 def _scrubbed_snippet(raw: str, max_chars: int) -> str:
     """``raw`` scrubbed and condensed to ``max_chars``, scrubbing only what can show.
 
@@ -470,7 +497,8 @@ def _scrubbed_snippet(raw: str, max_chars: int) -> str:
     structure the shape rules read is intact; only the text no snippet could
     reach is left out (N-3). ``max_chars + 1`` flattened characters decide
     whether :func:`~local_operator.resume._condense` cuts at all, so the window
-    reaches that far plus :data:`_SCRUB_MARGIN_CHARS`.
+    reaches that far plus :data:`_SCRUB_MARGIN_CHARS`. A multi-line secret whose
+    opener survives the window scrub forces the whole-reply scrub (S-9).
     """
     from local_operator.resume import _condense
 
@@ -481,7 +509,11 @@ def _scrubbed_snippet(raw: str, max_chars: int) -> str:
         # Redactions shorten text and pull the shown end toward the window's
         # edge; once it is within half the margin, a credential that touches
         # the shown text could be cut by the window. Correct beats fast.
-        if shown_end is None or shown_end > len(window) - _SCRUB_MARGIN_CHARS // 2:
+        if (
+            shown_end is None
+            or shown_end > len(window) - _SCRUB_MARGIN_CHARS // 2
+            or _multi_line_opener_survives(window)
+        ):
             window = _scrubbed(raw)
     else:
         window = _scrubbed(raw)
