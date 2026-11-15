@@ -207,6 +207,20 @@ def is_bind_failed_reason(reason: str) -> bool:
     return reason == BIND_FAILED_REASON or reason.startswith(_BIND_FAILED_CAUSE_PREFIX)
 
 
+def bind_failed_cause(reason: str) -> str:
+    """Return only the canonical announcement's already-sanitized cause.
+
+    A one-shot CLI needs its own retry wording; parsing arbitrary exception prose
+    there would confuse unrelated disconnects with an announced bind failure.
+    Keep this inverse beside the formatter, without changing other surfaces' copy.
+    """
+    if not reason.startswith(_BIND_FAILED_CAUSE_PREFIX):
+        return ""
+    return reason[len(_BIND_FAILED_CAUSE_PREFIX) :].removesuffix(
+        "; the session is alive — reconnect to retry"
+    )
+
+
 def bind_failed_reason(message: object) -> str:
     """The disconnect reason for a ``bind_failed`` frame, naming the owner's cause.
 
@@ -391,6 +405,16 @@ class OwnerAckTimeout(ConnectionError, TimeoutError):
     #: The owner holds a live connection; an unacknowledged request is worth
     #: resending. Read through ``getattr`` by ``server/routes/desktop_sessions.py``.
     owner_alive = True
+
+
+class RemoteStreamUnresponsiveError(ConnectionError):
+    """An admitted remote stream stopped answering, not proof of runtime load.
+
+    The owner relay reads the runtime's welcome before acknowledging the stream.
+    Losing its forwarded welcome (or hearing nothing after it) therefore cannot
+    inherit the local socket's owner_alive/busy inference. Keep the connection
+    observation typed so callers do not claim that no session was ever reached.
+    """
 
 
 class OwnerWelcomeTimeout(ConnectionError):

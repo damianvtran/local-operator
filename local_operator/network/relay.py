@@ -12552,7 +12552,14 @@ class RelayServer:
             # REFUSING device's durable `authorisation_refused` (authorizer._refused),
             # and the opener is answered with the refusal's sentence.
             self._discard_unopened_stream(stream_id)
-            return {"op": "error", "req": req, "message": message}, None
+            failure = {"op": "error", "req": req, "message": message}
+            # The peer has answered, possibly after authorizing a handler that
+            # could not reach this session's runtime. Preserve its existing code
+            # through the local control hop; a semantic refusal is not no answer.
+            code = (reply or {}).get("code")
+            if isinstance(code, str) and code:
+                failure["code"] = code
+            return failure, None
         self.audit.record(
             AuditEvent(
                 event="session_stream_opened",

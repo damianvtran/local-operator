@@ -682,18 +682,22 @@ acting on one (QA round 5, Q-R5-1):
 - `session_unreachable` — the peer accepted the act and then its runtime stopped
   answering WITHIN THE TIME THIS VERB ALLOWS: a bind that ran out of its own budget
   (that runtime may be starting, or wedged), the act as a whole running out of
-  `PILOT_ACT_TIMEOUT_S`, or a runtime that is ALIVE and too busy to answer (it
-  accepted the connection and did not produce its state in time). The busy
-  sentence says the act was not delivered and to retry; it does not point at
-  `network doctor`. An explicit `bind_failed` keeps the same code but prints the
-  runtime's own refusal/cause, not an invented timed load diagnosis. Only that
-  cause is carried verbatim; this side adds the session/device and the fact that
-  the act was not delivered. A remote pipe that goes silent after its welcome,
-  with no subsequent runtime frame, cannot establish that the runtime is still
-  answering: it takes the link/doctor rung, not the busy sentence. A dial that
-  produced NO stream at all is `peer_unreachable` (or `relay_unavailable` with no
-  local relay) even when the rung that noticed was the bind; a stopped device and
-  a stopped runtime can look identical from here.
+  `PILOT_ACT_TIMEOUT_S`, or a runtime that is ALIVE and too busy to answer. The
+  sentence states that the act was not delivered before asking you to re-run the
+  command. An explicit connection refusal keeps the runtime's own reason, not an
+  invented timed load diagnosis. If the other device answers that it could not
+  reach or start this session's runtime, that is also `session_unreachable`:
+  the reason is shown and the next step is to re-run the command, not diagnose a
+  device that already answered.
+
+  A connection that goes quiet after it is accepted is different. The session's
+  initial state may have been lost in transit, or nothing may have answered after
+  it. Neither proves the runtime is busy. This is `peer_unreachable`; the sentence
+  says the act was not delivered and points to `lop network doctor --peer <peer>`
+  to distinguish a lost connection from a stopped runtime. It does not claim no
+  session was reached. A dial that produced NO stream at all remains
+  `peer_unreachable` (or `relay_unavailable` with no local relay), even when the
+  rung that noticed was the bind.
 - `session_ambiguous` — the named device ANSWERED and holds SEVERAL conversations
   the target matches (a conversation name is not unique by design): the sentence
   lists the candidate rows with the id each is retypeable as, and NOTHING was sent.

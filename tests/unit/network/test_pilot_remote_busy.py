@@ -101,7 +101,7 @@ class _FaultRuntime(RuntimeServer):
         await super()._send_to(conn, frame)
 
 
-def _cli(root: Path, home: Path, peer: str) -> tuple[int, dict[str, Any], str]:
+def _cli(root: Path, home: Path, peer: str, verb: str = "send") -> tuple[int, dict[str, Any], str]:
     tree = Path(__file__).resolve().parents[3]
     # Scale only existing clocks: the same production CLI, real remote facade,
     # framing and classification run unchanged. No 120-second rig is needed.
@@ -146,9 +146,9 @@ runpy.run_module('local_operator.cli',run_name='__main__')
             "--json",
             "--peer",
             peer,
-            "--send",
+            f"--{verb}",
             SESSION,
-            "not delivered by this fixture",
+            *([] if verb == "peek" else ["not delivered by this fixture"]),
         ],
         env=env,
         cwd=home,
@@ -173,12 +173,16 @@ runpy.run_module('local_operator.cli',run_name='__main__')
     return process.returncode, json.loads(rows[-1]), err
 
 
-@pytest.mark.parametrize("mode", ["late-welcome", "busy", "fast-refusal", "half-dead"])
+@pytest.mark.parametrize(
+    "mode", ["late-welcome", "busy", "fast-refusal", "half-dead", "owner-refused", "stopped"]
+)
+@pytest.mark.parametrize("verb", ["send", "steer", "peek"])
 def test_the_real_pilot_distinguishes_runtime_evidence(
     request: pytest.FixtureRequest,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     mode: str,
+    verb: str,
 ) -> None:
     pair = request.getfixturevalue("devices")
     owner, borrower, _host, _port = pair
@@ -236,37 +240,76 @@ def test_the_real_pilot_distinguishes_runtime_evidence(
     runtime.start()
     try:
         _await_record(owner.root)
-        rc, payload, _err = _cli(borrower.root, home, owner.identity.device_id)
+        wire_refusals: list[dict[str, Any]] = []
+        if mode == "owner-refused":
+            from local_operator.network import dial, relay
+
+            def refuse(*_args: Any, **_kwargs: Any) -> Any:
+                raise dial.OwnerUnreachable("synthetic runtime could not start this connection")
+
+            request_peer = relay.PeerLink.request
+
+            def capture(link: Any, frame: dict[str, Any], **kwargs: Any) -> Any:
+                reply = request_peer(link, frame, **kwargs)
+                if frame.get("op") == "net_stream" and frame.get("action") == "open":
+                    assert reply is not None
+                    wire_refusals.append(reply)
+                return reply
+
+            monkeypatch.setattr(dial, "dial_owner", refuse)
+            monkeypatch.setattr(relay.PeerLink, "request", capture)
+        elif mode == "stopped":
+            owner.stop()
+        rc, payload, _err = _cli(borrower.root, home, owner.identity.device_id, verb)
         receipt = {
             "case": mode,
+            "verb": verb,
             "rc": rc,
             "reply": payload,
             "welcomes": runtime.welcomes,
             "post_welcome_frames": runtime.after_welcome,
             "owner_prompt_calls": len(handle.prompts()),
+            "wire_refusals": wire_refusals,
         }
         (tmp_path / "pilot-receipt.json").write_text(json.dumps(receipt, indent=2))
         print(json.dumps(receipt))
         assert rc == 1, payload
         assert not handle.prompts(), "a failed bind must never deliver the user's turn"
-        if mode == "half-dead":
-            assert runtime.welcomes > 0 and runtime.after_welcome == 0
+        undone = "nothing was read" if verb == "peek" else "was not delivered"
+        if mode != "stopped":
+            assert owner.identity.name in payload["message"], payload
+        if mode == "stopped":
             assert payload["code"] == "peer_unreachable", payload
             assert "doctor" in payload["message"] and "too busy" not in payload["message"]
+        elif mode in ("half-dead", "late-welcome"):
+            assert runtime.welcomes > 0
+            if mode == "half-dead":
+                assert runtime.after_welcome == 0
+            assert payload["code"] == "peer_unreachable", payload
+            assert "doctor" in payload["message"] and "too busy" not in payload["message"]
+            assert undone in payload["message"], payload
+            assert "produced no session" not in payload["message"], payload
         else:
-            if mode == "late-welcome":
-                assert runtime.welcomes > 0, "the owner must have admitted a real runtime pipe"
             assert payload["code"] == "session_unreachable", payload
             assert "doctor" not in payload["message"], payload
-            if mode == "fast-refusal":
+            assert undone in payload["message"], payload
+            assert "Re-run the command" in payload["message"], payload
+            if mode == "owner-refused":
+                assert wire_refusals and all(
+                    reply.get("code") == "session_unreachable" for reply in wire_refusals
+                )
+                assert "synthetic runtime could not start this connection" in payload["message"]
+                assert "produced no session" not in payload["message"], payload
+                assert "too busy" not in payload["message"], payload
+            elif mode == "fast-refusal":
                 assert "synthetic owner cannot prepare the canonical view" in payload["message"]
                 assert "too busy" not in payload["message"], payload
                 assert "within 1s" not in payload["message"], payload
+                assert "reconnect" not in payload["message"], payload
+                assert "owner could not prepare this view" not in payload["message"], payload
             else:
                 assert "too busy" in payload["message"], payload
-                assert "was not delivered" in payload["message"], payload
-                if mode == "busy":
-                    assert runtime.after_welcome > 0
+                assert runtime.after_welcome > 0
     finally:
         if isinstance(handle, _HeldHandle) and runtime._loop is not None:
             asyncio.run_coroutine_threadsafe(handle.cancel_binds(), runtime._loop).result(timeout=5)

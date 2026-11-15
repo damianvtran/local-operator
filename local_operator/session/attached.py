@@ -6092,7 +6092,11 @@ class AttachedSession:
             if self.runtime_locality == "another-machine" and not bool(
                 getattr(self._client, "received_after_welcome", False)
             ):
-                raise ConnectionError(_SYNC_UNRESPONSIVE_REASON) from exc
+                from local_operator.mobile.attach_client import (
+                    RemoteStreamUnresponsiveError,
+                )
+
+                raise RemoteStreamUnresponsiveError(_SYNC_UNRESPONSIVE_REASON) from exc
             raise RuntimeUnresponsiveError(_SYNC_UNRESPONSIVE_REASON) from exc
 
     async def _await_frontend_preemptible(

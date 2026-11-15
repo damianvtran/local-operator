@@ -204,6 +204,9 @@ def test_a_bind_failed_announcement_keeps_the_runtime_refusal_without_calling_it
     assert "produced no session" not in payload["message"], payload
     assert "doctor" not in payload["message"], payload
     assert "the frontend bind could not complete (test)" in payload["message"], payload
+    assert "Re-run the command" in payload["message"], payload
+    assert "reconnect" not in payload["message"], payload
+    assert "owner could not prepare this view" not in payload["message"], payload
     assert "too busy" not in payload["message"], payload
     assert "within 1s" not in payload["message"], payload
 
