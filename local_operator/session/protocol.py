@@ -855,8 +855,11 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
     otherwise have silently defaulted the latch read, 156 once the desktop
     bridge needed ``frontend_state_reference`` and ``subscribe_frontend_updates``
     — ``serve`` builds a large session's cold snapshot from the canonical
-    reference on a worker and relays updates without the joining clone, and a
-    duck probe would have degraded a rename to the slow on-loop path), so
+    reference on a worker and relays updates without the joining clone; serve
+    still reads them through ``getattr``, so a rename there degrades silently to
+    the slow on-loop path, and what catches it is the census test in
+    ``test_viewer_protocol.py``, which reads those ``getattr`` literals and fails
+    on a probe of an undeclared name — not the declaration alone), so
     recompute it
     rather
     than adjusting it by the size of your own change.

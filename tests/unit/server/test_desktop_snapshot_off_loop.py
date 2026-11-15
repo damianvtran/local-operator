@@ -63,6 +63,19 @@ ROSTER = 2_000
 #: while leaving ~1.7x headroom over the fixed code on a loaded CI runner. The
 #: deterministic half of the guard is the thread assertion beside it.
 MAX_LAG_S = 0.3
+#: The cold open's WALL-CLOCK bound, asserted beside the CPU bound in the same
+#: GC-paused window (R-t8-1, PR #4012). ``thread_time`` cannot see a loop
+#: thread that is BLOCKED rather than computing -- a cold disk read, a lock
+#: wait, an inline fsync -- so a stall of that kind would pass the CPU bound
+#: untouched; wall time between ticks does see it. Measured by review on the
+#: dev host (5 runs each, GC paused): pre-fix 05c4e2502 854-1014 ms; fixed
+#: 53-67 ms, 115-130 ms on one core shared with a CPU burner. 500 ms fails the
+#: fastest pre-fix run by 1.7x and leaves ~3.8x headroom over the burner case.
+#: GC stays paused for this bound too: with collections running the fixed code
+#: reads 195-226 ms (424-470 ms under the burner) because a gen-2 pass the
+#: WORKER's allocations trigger holds the GIL -- runner-heap noise, not loop
+#: work, owned by the deferred ``gc.freeze`` follow-up rather than this guard.
+MAX_COLD_WALL_S = 0.5
 TICK_S = 0.01
 
 
@@ -166,7 +179,9 @@ async def _max_loop_cpu(work: Any) -> tuple[Any, float, float]:
 
     So this measures what the guard claims: CPU the LOOP THREAD burned between
     two ticks (``time.thread_time`` read on the loop's own thread), which
-    excludes time spent descheduled or waiting for the GIL. GC is paused for
+    excludes time spent descheduled or waiting for the GIL. The caller asserts
+    the wall-clock worst tick too, for stalls that block rather than compute
+    (``MAX_COLD_WALL_S``). GC is paused for
     the window so a collection the generational threshold happens to trip on
     the loop thread is not charged to whichever callback tripped it; it is
     re-enabled and run before returning. The pre-fix code (05c4e2502) still
@@ -437,12 +452,15 @@ async def test_a_cold_open_of_a_large_session_does_not_hold_the_event_loop(
     # The checkpoint's validation by THREAD, the deterministic half for the step
     # the CPU bound below is too coarse to single out (CI train t8): the roster
     # only rides the durable checkpoint, so a 2,000-job payload is that call.
-    validated_on: list[str] = []
+    # Thread IDENTS, compared with the ident captured on the running loop
+    # below, not the main thread's name: the loop's thread is whatever thread
+    # the runner's pytest-asyncio drives it on (R-t8-2).
+    validated_on: list[int] = []
     validate = FrontendSessionState.model_validate.__func__  # type: ignore[attr-defined]
 
     def recorded_validate(cls: Any, obj: Any, *args: Any, **kwargs: Any) -> Any:
         if isinstance(obj, dict) and len(obj.get("jobs") or ()) == ROSTER:
-            validated_on.append(threading.current_thread().name)
+            validated_on.append(threading.get_ident())
         return validate(cls, obj, *args, **kwargs)
 
     monkeypatch.setattr(FrontendSessionState, "model_validate", classmethod(recorded_validate))
@@ -459,21 +477,32 @@ async def test_a_cold_open_of_a_large_session_does_not_hold_the_event_loop(
                 await stream.aclose()
         raise AssertionError("the stream ended without a snapshot")
 
+    loop_thread = threading.get_ident()  # this coroutine runs on the loop's thread
     try:
         jobs, wall, cpu = await _max_loop_cpu(cold_open())
     finally:
         await pool.close()
 
     assert jobs == ROSTER, "the guard must measure a cold open that restored the roster"
-    assert validated_on and threading.main_thread().name not in validated_on, (
-        f"the durable checkpoint was validated on {validated_on}; a 2,000-job "
-        "model_validate must not run on the serving loop's thread"
+    assert validated_on and loop_thread not in validated_on, (
+        f"the durable checkpoint was validated on thread(s) {validated_on}, including the "
+        f"serving loop's thread {loop_thread}; a 2,000-job model_validate must run off it"
     )
+    # Two bounds over ONE GC-paused window (see MAX_COLD_WALL_S): CPU is the
+    # discriminator that ignores runner scheduling noise; wall clock is the
+    # backstop for a loop thread that stalls without computing.
+    numbers = f"worst tick: {cpu * 1000:.0f} ms loop-thread CPU, {wall * 1000:.0f} ms wall clock"
     assert cpu < MAX_LAG_S, (
-        f"the cold open ran {cpu * 1000:.0f} ms of CPU on the event loop's thread between "
-        f"two ticks (worst wall-clock tick {wall * 1000:.0f} ms); the checkpoint's "
+        f"the cold open ran too much CPU on the event loop's thread between two ticks "
+        f"({numbers}; CPU bound {MAX_LAG_S * 1000:.0f} ms); the checkpoint's "
         "validation, the cold install's freeze, the jobs facade copies and the joining "
         "clones must stay off the loop (PR #4012, QA round 1, Q1; CI train t8)"
+    )
+    assert wall < MAX_COLD_WALL_S, (
+        f"the cold open held the event loop too long in wall-clock time ({numbers}; "
+        f"wall bound {MAX_COLD_WALL_S * 1000:.0f} ms); a loop thread blocked rather than "
+        "computing -- a disk read, a lock wait, an inline fsync -- still stalls every route "
+        "(PR #4012, R-t8-1)"
     )
 
 
