@@ -1,0 +1,107 @@
+{
+  "schema": 1,
+  "locale": "ur",
+  "namespace": "wire.settings",
+  "pr": "damianvtran/local-operator#3872",
+  "round": 2,
+  "worktree": "/home/ec2-user/local-operator/.worktrees/remote-files-parity",
+  "head": "14d8601fd1e63b335edc689c137f2c3ae6bf216f",
+  "prev_head": "9a6ef566184f4fd1bc373b14694841b0bf3b3a31",
+  "merge_base": "89678ffc7aa536076cc3c16d9d204829a4e83a97",
+  "audit_date": "2026-11-12",
+  "input_hashes": {
+    "en": "5ddafb0e761c12afdcaaa7743ddb584927bdc874bf7eecefb34009574d4a7152",
+    "target": "d74ae8e4990fec484faa1321df1f185f65011e17709b042aad0f420166889028",
+    "en_at_prev": "5ddafb0e761c12afdcaaa7743ddb584927bdc874bf7eecefb34009574d4a7152",
+    "target_at_prev": "02de3d7ba6d824cb7e9a4acb796a8c0e00e20f4380850f86fa03815d767fe7f6",
+    "en_at_merge_base": "00b3277b15a0295d59120f3d5bbc595127cef93523095260fba139d51696c0da",
+    "target_at_merge_base": "ea272afda3c1aca91f26a7d97fe02f535842d50ae527c12bb72dfd0fba0da1f9"
+  },
+  "translator": {
+    "agent": "coder (PR #3872 core implementer, lopdev, job 485ea7afeea9)",
+    "session": "f4c08c15c058",
+    "model": "anthropic/claude-opus-5-5",
+    "date": "2026-11-12",
+    "provenance_source": "manager ce618964c88e subagent-roster.v1.json record 485ea7afeea9 (model_label)"
+  },
+  "translators_other": [
+    {
+      "agent": "round-1 i18n auditor (I1-4 corrected values)",
+      "session": "a3fade2429f4",
+      "model": "anthropic/claude-opus-5-5",
+      "date": "2026-11-12"
+    },
+    {
+      "agent": "coder (PR #3872 core round-1 remediation, lopdev, job b449e9fdc5b7)",
+      "session": "e06b4314cec3",
+      "model": "anthropic/claude-opus-5-5",
+      "date": "2026-11-12",
+      "provenance_source": "self-reported served model, no fallback: PR #3872 issuecomment-6831178771"
+    }
+  ],
+  "auditor": {
+    "agent": "i18n auditor (lopdev reviewer role, task core-r2-i18n-audit, job 52eba838ea60; independent of translators f4c08c15c058/e06b4314cec3 and of round-1 auditor a3fade2429f4)",
+    "session": "187b766ab67d",
+    "model": "anthropic/claude-opus-5-5",
+    "fallback": "none observed in this session",
+    "date": "2026-11-12",
+    "result": "passed",
+    "unresolved_blocker_major": 0,
+    "findings": 0
+  },
+  "prior_audit": {
+    "agent": "round-1 i18n auditor",
+    "session": "a3fade2429f4",
+    "model": "anthropic/claude-opus-5-5",
+    "date": "2026-11-12",
+    "result": "passed",
+    "comment": "damianvtran/local-operator#3872 issuecomment-6830034892"
+  },
+  "independence": "auditor 187b766ab67d is a different instance from f4c08c15c058 (original coder), e06b4314cec3 (remediation coder/translator) and a3fade2429f4 (round-1 auditor)",
+  "audit_kind": "delta audit: en-changed/new keys since 9a6ef5661 + I1-4 corrections + re-read of all PR-added keys; mechanical carry of keys unchanged since merge base",
+  "audited_keys": [
+    "wire.settings.desktop_remote_files_cache_bytes.help",
+    "wire.settings.desktop_remote_files_cache_bytes.label"
+  ],
+  "en_changed_keys": [],
+  "i1_4": [
+    {
+      "finding": "I1-4d",
+      "key": "wire.settings.desktop_remote_files_cache_bytes.help",
+      "en_changed_since_r1": false,
+      "check": "byte-exact"
+    }
+  ],
+  "audited_values": {
+    "wire.settings.desktop_remote_files_cache_bytes.help": {
+      "en": "Disk space for copies of files from conversations held on other devices, so they open fast here. Oldest copies are removed first. 0 keeps nothing after showing it.",
+      "target": "دوسری ڈیوائسز پر موجود گفتگوؤں کی فائلوں کی کاپیوں کے لیے ڈسک کی جگہ، تاکہ وہ یہاں جلدی کھلیں۔ سب سے پرانی کاپیاں پہلے ہٹائی جاتی ہیں۔ 0 دکھانے کے بعد کچھ نہیں رکھتا۔"
+    },
+    "wire.settings.desktop_remote_files_cache_bytes.label": {
+      "en": "remote files cache (bytes)",
+      "target": "ریموٹ فائلوں کا کیش (بائٹس)"
+    }
+  },
+  "verified": [
+    "key set equals en",
+    "placeholder multiset equals en per message; select selector, arm names/order and per-arm placeholders equal en (attachment_owner_refused: not_referenced/missing/not_allowed/integrity/other; session_files_remote_unreadable: 6 arms)",
+    "braces balanced",
+    "backtick code spans byte-identical (`lop network update {peer}`)",
+    "numbers byte-identical (256, 99)",
+    "NFC",
+    "no bidi control characters (ur guide §RTL: logical order, no manual controls)",
+    "keys unchanged in en since 9a6ef5661 and not in I1-4 are byte-identical to 9a6ef5661; keys unchanged since merge base byte-identical to merge base",
+    "I1-4 corrected values on en-unchanged keys byte-exact to corrections.json; I1-4 terminology carried into retranslated en-changed keys (no residual old term)",
+    "glossary.md and locale style guide checked; reason codes emitted by peer_refusal_reason() (server/utils/desktop_sessions.py:6834-6849) are exactly the 5 arms"
+  ],
+  "findings": [],
+  "not_verified": "native-speaker review; rendered desktop/phone width; RTL rendering (string-level bidi rules only)",
+  "second_audit": {
+    "agent": "i18n auditor (lopdev reviewer role, task core-r2-i18n-audit, job 52eba838ea60; independent of translators f4c08c15c058/e06b4314cec3 and of round-1 auditor a3fade2429f4)",
+    "session": "187b766ab67d",
+    "model": "anthropic/claude-opus-5-5",
+    "date": "2026-11-12",
+    "result": "passed",
+    "scope": "the 1 auditor-corrected value(s) (I1-4) in local_operator/i18n/catalogues/ur/wire.settings.json, read against en, glossary.md and the ur style guide"
+  }
+}

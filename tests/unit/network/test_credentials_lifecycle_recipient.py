@@ -462,6 +462,8 @@ def test_every_advertised_op_capability_has_a_registered_handler(rig):
         wire.MESH_RESTART_V1: "net_restart",
         # The single-file pull (network/files.py; mesh-file-transfer.md S1).
         wire.MESH_FILE_V1: "net_file_get",
+        # A peer session's Files index (network/file_index.py; remote-files-parity §2).
+        wire.MESH_FILE_INDEX_V1: "net_session_files",
         "peer-journal-source-v1": "net_session_history",
         # The remote peek (network/peek.py) is a real new peer op, not a pure feature:
         # advertising it promises an owner that answers ``net_session_peek``.
@@ -473,6 +475,9 @@ def test_every_advertised_op_capability_has_a_registered_handler(rig):
         # fields on the existing catalogue answer (``RelayServer._rows_for_viewer``),
         # so advertising it promises an owner whose ``net_catalog`` handler stamps them.
         wire.REMOTE_ATTENTION_V1: "net_catalog",
+        # Advertising the binding promises verification/storage of the signed
+        # onboarding proof through this dedicated peer op, not just a wire feature.
+        wire.OPERATOR_BINDING_V1: "net_operator_binding",
     }
     pure_features = {
         # Reserved pool feature: no compute-pool op or dispatch contract exists yet.

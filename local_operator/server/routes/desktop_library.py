@@ -20,7 +20,7 @@ import asyncio
 import logging
 import re
 from pathlib import Path
-from typing import Annotated, Iterator
+from typing import Annotated
 from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -53,6 +53,7 @@ from local_operator.server.models.desktop_library import (
 )
 from local_operator.server.models.schemas import CRUDResponse
 from local_operator.server.routes.desktop_sessions import reply
+from local_operator.server.utils import byte_range
 
 logger = logging.getLogger(__name__)
 
@@ -61,8 +62,6 @@ router = APIRouter(tags=["Desktop library"], dependencies=[Depends(require_deskt
 AssetID = Annotated[str, PathParam(pattern=r"^la_[0-9a-f]{16}$")]
 TagID = Annotated[str, PathParam(pattern=r"^[a-f0-9]{10}$")]
 SessionIDShape = re.compile(r"^[a-f0-9]{12}$")
-
-_CHUNK = 64 * 1024
 
 
 def _config_dir(request: Request) -> Path:
@@ -355,45 +354,10 @@ async def put_library_asset_tags(asset_id: AssetID, body: LibraryTagsWrite, requ
     return reply(row)
 
 
-def _stream(path: Path, start: int, length: int) -> Iterator[bytes]:
-    with path.open("rb") as handle:
-        handle.seek(start)
-        remaining = length
-        while remaining > 0:
-            chunk = handle.read(min(_CHUNK, remaining))
-            if not chunk:
-                break
-            remaining -= len(chunk)
-            yield chunk
-
-
-def _parse_range(header: str, size: int) -> tuple[int, int] | None:
-    """``(start, end)`` inclusive for one satisfiable byte range, else ``None``.
-
-    Only a single ``bytes=`` range is honoured. Multi-range answers are legal
-    multipart responses, but no Library surface asks for one and a wrong
-    multipart body is worse than a clean 200 whole-file answer.
-    """
-    if not header.startswith("bytes=") or "," in header:
-        return None
-    spec = header[6:].strip()
-    if "-" not in spec:
-        return None
-    raw_start, raw_end = spec.split("-", 1)
-    try:
-        if raw_start == "":
-            suffix = int(raw_end)
-            if suffix <= 0:
-                return None
-            start = max(0, size - suffix)
-            return start, size - 1
-        start = int(raw_start)
-        end = int(raw_end) if raw_end else size - 1
-    except ValueError:
-        return None
-    if start < 0 or start > end or start >= size:
-        return None
-    return start, min(end, size - 1)
+# ONE implementation, shared with the session attachment routes (remote files
+# parity §1): the names stay so this module's call sites read as before.
+_stream = byte_range.stream_path
+_parse_range = byte_range.parse_range
 
 
 @router.get("/v1/desktop/library/assets/{asset_id}/content")
@@ -416,6 +380,8 @@ async def library_content(
     except service.AssetNotFound:
         raise _asset_not_found() from None
     except service.ContentUnavailable as error:
+        if error.code == "content_remote":
+            return await _remote_content(request, config, asset_id, download)
         message = (
             _wd.library_content_denied()
             if error.code == "content_denied"
@@ -425,6 +391,11 @@ async def library_content(
             404 if error.code != "content_denied" else 403,
             message.envelope(code=f"library_{error.code}"),
         ) from None
+    if content.remote:
+        # Cached bytes of a peer's file: the same allowlist + sandbox and the same
+        # open-before-answering as an uncached open (QA r2 Q2-1/Q2-2). The lookup
+        # finds the cache first, so this never dials while the bytes are here.
+        return await _remote_content(request, config, asset_id, download)
     try:
         size = content.path.stat().st_size  # type: ignore[union-attr]
     except OSError:
@@ -468,6 +439,22 @@ async def library_content(
     )
 
 
+async def _remote_content(request: Request, config: Path, asset_id: str, download: bool):
+    """Remote files parity §5: ONLY an explicit open (lightbox, player, download)
+    of a peer-held asset fetches, through §1's fetch-on-miss, with §1's statuses
+    (504 retryable, 409 permanent)."""
+    from local_operator.server.routes.desktop_sessions import errors
+    from local_operator.server.utils import remote_session_files
+
+    async with errors(request):
+        return await remote_session_files.library_content(
+            config,
+            asset_id,
+            range_header=request.headers.get("range"),
+            download=download,
+        )
+
+
 @router.get("/v1/desktop/library/assets/{asset_id}/thumbnail")
 async def library_thumbnail(
     asset_id: AssetID,
@@ -498,14 +485,16 @@ async def library_thumbnail(
             404,
             _wd.library_content_missing().envelope(code="library_content_missing"),
         ) from None
-    return StreamingResponse(
-        iter((data,)),
-        media_type=content.content_type,
-        headers={
-            "X-Content-Type-Options": "nosniff",
-            "Cache-Control": "private, max-age=86400",
-        },
-    )
+    headers = {"X-Content-Type-Options": "nosniff", "Cache-Control": "private, max-age=86400"}
+    media_type = content.content_type
+    if content.remote:
+        from local_operator.server.utils.remote_session_files import servable_type
+
+        # A peer's cached original carries the OWNER's declared type: the content
+        # route's allowlist and sandbox, not that type inline (#3872 R3-3).
+        media_type = servable_type(media_type)
+        headers["Content-Security-Policy"] = "sandbox"
+    return StreamingResponse(iter((data,)), media_type=media_type, headers=headers)
 
 
 @router.get("/v1/desktop/library/assets/{asset_id}/waveform")

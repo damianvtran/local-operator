@@ -206,6 +206,10 @@ def _preview(asset: library_index.Asset) -> dict[str, Any]:
 
 
 def _exists(config_dir: Path, asset: library_index.Asset) -> bool:
+    if asset.remote is not None:
+        # The owner listed it; whether its bytes are cached HERE is not existence,
+        # and asking the owner per row is the per-view fetch §5 forbids.
+        return True
     if asset.digest:
         return AttachmentStore(Path(config_dir) / "attachments").path_for(asset.digest).exists()
     if not asset.path:
@@ -301,6 +305,9 @@ def _row(
         "locked": bool(metadata.get("locked")) if metadata else False,
         "favorite": bool(metadata.get("favorite")) if metadata else False,
         "archived": bool(metadata.get("archived")) if metadata else False,
+        # Remote files parity §5: every occurrence is a peer session's. ``ref.path`` is
+        # then null by construction; the content route fetches through the owner.
+        "remote": dict(asset.remote) if asset.remote is not None else None,
     }
 
 
@@ -774,6 +781,10 @@ class ContentRef:
     name: str
     digest: bool = False
     modified_at: float = 0.0
+    #: The bytes are this device's copy of ANOTHER device's file (the remote-files
+    #: cache), so ``content_type`` is the owner's declaration, not ours. The
+    #: content route must serve it the way it serves an uncached remote open.
+    remote: bool = False
 
 
 def _catalog_asset(config: Path, asset_id: str) -> library_index.Asset:
@@ -806,7 +817,26 @@ def resolve_content(config_dir: str | Path, asset_id: str) -> ContentRef:
         root = AttachmentStore(config / "attachments")
         path = root.path_for(asset.digest)
         if not path.is_file():
-            raise ContentUnavailable("content_missing")
+            from local_operator.remote_files.cache import cache_root
+
+            cached = cache_root(config) / f"{asset.digest}.bin"
+            if cached.is_file():
+                # Thumbnails and waveforms read the cached bytes without dialing;
+                # the content ROUTE sees ``remote`` and takes the remote path.
+                return ContentRef(
+                    path=cached,
+                    content_type=asset.content_type,
+                    name=name,
+                    digest=True,
+                    modified_at=cached.stat().st_mtime,
+                    remote=True,
+                )
+            elif _remote_occurrence(config, asset_id) is not None:
+                # Not here; a peer session holds it. The ROUTE fetches (async, §1),
+                # never this resolver, so a thumbnail or list read can never dial.
+                raise ContentUnavailable("content_remote")
+            else:
+                raise ContentUnavailable("content_missing")
         return ContentRef(
             path=path,
             content_type=asset.content_type,
@@ -815,6 +845,8 @@ def resolve_content(config_dir: str | Path, asset_id: str) -> ContentRef:
             modified_at=path.stat().st_mtime,
         )
     if not asset.path:
+        if asset.key.startswith("r:"):
+            raise ContentUnavailable("content_remote")
         raise ContentUnavailable("content_missing")
     # Re-check the sensitive-path denylist on EVERY read. A path that passed
     # when it was indexed can become sensitive later (a config dir moved, a
@@ -838,6 +870,26 @@ def resolve_content(config_dir: str | Path, asset_id: str) -> ContentRef:
         digest=False,
         modified_at=info.st_mtime,
     )
+
+
+def _remote_occurrence(config: Path, asset_id: str) -> dict[str, Any] | None:
+    """One peer occurrence of ``asset_id`` (``session_id``, ``child_id``,
+    ``origin_device``, ``remote_file_id``), or ``None``. Index read only."""
+    try:
+        with LibraryStore(config).read() as connection:
+            row = connection.execute(
+                "SELECT session_id, child_id, origin_device, remote_file_id FROM "
+                "idx_occurrences WHERE asset_id = ? AND origin_device != '' "
+                "ORDER BY last_ts DESC LIMIT 1",
+                (asset_id,),
+            ).fetchone()
+    except library_store.IndexUnavailable:
+        return None
+    return dict(row) if row is not None else None
+
+
+def remote_occurrence(config_dir: str | Path, asset_id: str) -> dict[str, Any] | None:
+    return _remote_occurrence(Path(config_dir), asset_id)
 
 
 def thumbnail(config_dir: str | Path, asset_id: str, width: int = THUMB_MAX_WIDTH) -> ContentRef:
@@ -876,7 +928,14 @@ def thumbnail(config_dir: str | Path, asset_id: str, width: int = THUMB_MAX_WIDT
             modified_at=live.stat().st_mtime,
         )
     ensure_started(config).enqueue_thumbnail(asset_id, width)
-    return resolve_content(config, asset_id)
+    try:
+        return resolve_content(config, asset_id)
+    except ContentUnavailable as error:
+        # A peer's image whose bytes are not here yet is the designed 404 (the card
+        # shows its glyph): a thumbnail read never dials the owner (§5, I5-2).
+        if error.code == "content_remote":
+            raise ContentUnavailable("content_missing") from None
+        raise
 
 
 def _waveform_shape(raw: Any) -> dict[str, Any] | None:

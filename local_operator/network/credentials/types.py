@@ -68,6 +68,11 @@ LOCAL_CREDENTIAL_OPS: tuple[str, ...] = (
     # The share push (``share_push``): ``credential share`` asks THIS device's relay
     # to hand the row it just wrote to the new holder over the relay's own link.
     "credential_share_push",
+    # The renewal claim (mesh-credential-renewal §B.3 R3): an owner PROCESS about to
+    # present a lent login's refresh token asks THIS device's relay to ask the
+    # renewing node first; and, after it renewed, to push the new pair to that node.
+    "credential_claim",
+    "credential_lend_push",
 )
 
 #: Leg 2 (relay → owner relay). ONE peer op with a ``kind`` discriminator, as the
@@ -98,9 +103,28 @@ REFRESH_CAP_STRING = "credential-refresh-v1"
 #: ``refresh_take`` (node → owner) asks for the material under a signed
 #: delegation; ``refresh_return`` (node → owner, three frames) is the handback.
 #: Two kinds, no new op and no new capability row (§7.10's rule, unchanged).
-BrokerKind = Literal["grant", "report", "placement", "refresh_take", "refresh_return"]
+BrokerKind = Literal[
+    "grant",
+    "report",
+    "placement",
+    "refresh_take",
+    "refresh_return",
+    "renewal_claim",
+    "renewal_push",
+]
+#: ``renewal_claim`` / ``renewal_push`` (owner -> renewing node, design
+#: mesh-credential-renewal §B.3 R3): "are you renewing?" and "here is the pair I just
+#: renewed". Gated on ``renewal.RENEWAL_CAP_STRING`` by the sender.
 BROKER_KINDS: frozenset[str] = frozenset(
-    {"grant", "report", "placement", "refresh_take", "refresh_return"}
+    {
+        "grant",
+        "report",
+        "placement",
+        "refresh_take",
+        "refresh_return",
+        "renewal_claim",
+        "renewal_push",
+    }
 )
 
 #: The three ``sub`` messages of the ordered handback (design §3.3 Rule A).

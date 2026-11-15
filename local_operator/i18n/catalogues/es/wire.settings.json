@@ -161,6 +161,8 @@
   "wire.settings.desktop_launch_command.help": "Vacío = detectar la aplicación (local-operator-ui y luego la aplicación de macOS). '{'session'}' es el ID de la sesión.",
   "wire.settings.desktop_launch_command.label": "comando de lanzamiento",
   "wire.settings.desktop_launch_command.placeholder": "local-operator-ui --open-session '{'session'}'",
+  "wire.settings.desktop_remote_files_cache_bytes.help": "Espacio en disco para copias de archivos de conversaciones que están en otros dispositivos, para que se abran rápido aquí. Las copias más antiguas se eliminan primero. 0 no guarda nada después de mostrarlo.",
+  "wire.settings.desktop_remote_files_cache_bytes.label": "caché de archivos remotos (bytes)",
   "wire.settings.detail_length.help": "Obsoleto. Sustituido por el motor de compactación.",
   "wire.settings.detail_length.label": "Longitud de detalle",
   "wire.settings.display_comfortable_rows.choice.false.description": "compactas, más historial",

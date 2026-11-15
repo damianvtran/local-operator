@@ -540,6 +540,11 @@ def request_device(
             "for this machine (one approval and one admin password prompt), then file the request",
         )
     network_id = _resolve(network, root=root).network_id if network else ""
+    # SECURITY INVARIANT R1 (``network.operator_binding``): ``requested_by.device_id``
+    # is THIS install's own mesh id, computed here and never taken from a caller.
+    # The operator's signature over this card is later presented to the mesh as
+    # "this device is the operator's" — a filing path that let a peer name the
+    # requester would let a co-member mint that binding. Pinned by a test.
     try:
         requester = load_or_mint(root).device_id
     except (OSError, ValueError):

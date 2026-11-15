@@ -161,6 +161,8 @@
   "wire.settings.desktop_launch_command.help": "Vide = détecter l’application (local-operator-ui, puis l’application macOS). '{'session'}' est l’ID de session.",
   "wire.settings.desktop_launch_command.label": "commande de lancement",
   "wire.settings.desktop_launch_command.placeholder": "local-operator-ui --open-session '{'session'}'",
+  "wire.settings.desktop_remote_files_cache_bytes.help": "Espace disque pour les copies de fichiers des conversations détenues par d’autres appareils, afin qu’elles s’ouvrent vite ici. Les copies les plus anciennes sont supprimées en premier. 0 ne garde rien après l’affichage.",
+  "wire.settings.desktop_remote_files_cache_bytes.label": "cache des fichiers distants (octets)",
   "wire.settings.detail_length.help": "Obsolète. Remplacé par le moteur de compactage.",
   "wire.settings.detail_length.label": "Longueur du détail",
   "wire.settings.display_comfortable_rows.choice.false.description": "compact, plus d’historique",
