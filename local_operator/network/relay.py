@@ -18528,13 +18528,21 @@ def _names_the_shim(image: Path) -> bool:
     """
     from local_operator import update
 
-    shim = update.daemon_image_path()
-    if image == shim:
-        return True
-    try:
-        return image.resolve() == shim.resolve()
-    except OSError:
-        return False
+    # The signed launcher counts as the shim: it execs ``<bin>/python3`` with argv
+    # unchanged, and on a macOS wheel it is what the plist's ``Program`` names
+    # (``update.daemon_program``), so a restart through it resolves ``current`` too.
+    for stable in (
+        update.daemon_image_path(),
+        update.launcher_executable(update.launcher_bundle_path()),
+    ):
+        if image == stable:
+            return True
+        try:
+            if image.resolve() == stable.resolve():
+                return True
+        except OSError:
+            continue
+    return False
 
 
 def _named_generation(image: Path) -> Path | None:

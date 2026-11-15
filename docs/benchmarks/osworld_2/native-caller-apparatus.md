@@ -285,7 +285,7 @@ remain a separate, unproven route), and the Darwin job runs with
 `KeepAlive=false` so a crashed owner is never re-run -- a restart can never
 re-allocate an episode.
 
-Owner jobs are session-unique (`com.damian.lop-episode.<owner_id>` under the
+Owner jobs are session-unique (`com.local-operator.episode.<owner_id>` under the
 real passwd home's `~/Library/LaunchAgents`) and are cleaned up by exact
 label once terminal. Secrets never ride argv, the plist, the environment or
 the status file: values travel once through a 0600 handoff file under the

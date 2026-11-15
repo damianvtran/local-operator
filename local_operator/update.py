@@ -3424,7 +3424,217 @@ def ensure_daemon_image(generation: Path | None = None) -> Path | None:
         # transient read failure cannot silently skip the write.
         return None
     path = daemon_image_path()
-    return path if _write_executable(path, _DAEMON_SHIM) else None
+    if not _write_executable(path, _DAEMON_SHIM):
+        return None
+    if _HOST_IS_MACOS:
+        # After the shim, never before: the launcher execs the shim, so a launcher
+        # planted beside a missing shim would be a Program guaranteed to exit 78.
+        ensure_daemon_launcher(generation)
+    return path
+
+
+# ---------------------------------------------------------------------------
+# The CI-signed launcher: the `Program` of every LaunchAgent on a macOS wheel.
+#
+# WHY. Background Task Management (System Settings > Login Items and the
+# "… can run in the background" banner) names a legacy LaunchAgent after the code
+# at its plist's `Program`. Measured on macOS 27.2, 2026-11-14 (AGENTS.md, "BTM
+# attribution"): an unsigned Program is named after its FILE NAME — the shim above
+# made six items read "python3", each notifying separately — while a Program signed
+# with a Developer ID is named after its bundle and grouped under the certificate's
+# developer, and once that developer group has been notified, more items from it
+# register silently. So the launcher (packaging/macos/lop-launcher/launcher.c) is
+# signed in CI with the Radient Inc. organization identity and every plist names
+# it: one "Radient Inc." notification per Mac, ever, and "Local Operator" rows.
+#
+# THE SHIM STAYS THE RESOLVER. The launcher only execs `/bin/sh <bin>/python3`
+# with argv passed through, so generation resolution, the branded-image choice and
+# prune survival all remain in `_DAEMON_SHIM`, unchanged and tested.
+#
+# FALLBACK IS THE OLD SHAPE, EXACTLY. pip/pipx/source installs and the pure wheel
+# carry no launcher; a launcher that fails verification (ad-hoc, another team, the
+# retired individual certificate, a tampered file) is never named either. In both
+# cases `daemon_program()` answers the shim and every plist is what it was before.
+# Linux (systemd units) has no BTM and always gets the shim. Windows would need an
+# Authenticode-signed launcher .exe — deferred; nothing notifies there today.
+# ---------------------------------------------------------------------------
+
+#: The bundle's directory name, beside the shim in ``<stable>/bin``. The
+#: ``.lopruntime`` extension keeps LaunchServices from registering it (see
+#: ``procname.RUNTIME_BUNDLE_DIRNAME``); the display name BTM shows comes from the
+#: bundle's own Info.plist.
+LAUNCHER_BUNDLE_DIRNAME = "Local Operator.lopruntime"
+
+#: The launcher's code identifier, pinned at signing (assemble_launcher_bundle.sh)
+#: and verified here. A child of the desktop app's ``com.local-operator`` and never
+#: that id itself, which the app owns.
+LAUNCHER_BUNDLE_ID = "com.local-operator.launcher"
+
+#: The executable inside the bundle — the path a plist's ``Program`` names.
+LAUNCHER_EXECUTABLE = "Local Operator"
+
+#: Plist EnvironmentVariables key that switches the launcher into "exec THIS
+#: absolute path with my argv" mode. Used only by ``owned_process`` for episode
+#: jobs, whose argv[0] is a specific venv interpreter the shim must not replace.
+LAUNCHER_TARGET_ENV = "LOP_LAUNCHER_TARGET"
+
+#: Where the macOS wheel carries the bundle, relative to ``site-packages``
+#: (packaging/macos/make_macos_wheel.py ``LAUNCHER_DEST`` must agree).
+LAUNCHER_PACKAGE_PATH = Path("local_operator") / "operator" / "macos" / LAUNCHER_BUNDLE_DIRNAME
+
+#: ``(path, inode, size, mtime_ns) -> verdict``. ``codesign --verify`` costs tens of
+#: milliseconds and an installer renders several plists per run; a file whose stat
+#: is unchanged has the same signature.
+_LAUNCHER_VERDICTS: dict[tuple[str, int, int, int], bool] = {}
+
+
+def launcher_bundle_path() -> Path:
+    """``<stable>/bin/Local Operator.lopruntime`` — where the launcher is planted."""
+    return daemon_image_path().parent / LAUNCHER_BUNDLE_DIRNAME
+
+
+def launcher_executable(bundle: Path) -> Path:
+    return bundle / "Contents" / "MacOS" / LAUNCHER_EXECUTABLE
+
+
+def _launcher_signature(bundle: Path) -> dict[str, str] | None:
+    """The signature fields of ``bundle`` once it verifies strictly, else ``None``.
+
+    ``codesign -d`` and ``--verify`` read the embedded signature only; neither
+    touches a keychain, so this is safe in a status command or an isolated rig.
+    """
+    from local_operator import procname
+
+    rc, _text = procname._codesign_output("--verify", "--strict", str(bundle))
+    if rc != 0:
+        return None
+    return procname.code_identity(bundle)
+
+
+def launcher_verified(bundle: Path) -> bool:
+    """Is ``bundle`` OUR launcher, signed by the organization? Never raises.
+
+    All three are required: the identifier (it is the launcher, not some other
+    signed bundle dropped at this path), the team, and the exact Radient Inc. leaf
+    (the team alone also matches the retired individual certificate).
+    """
+    from local_operator import procname
+
+    if not _HOST_IS_MACOS:
+        return False
+    try:
+        exe = launcher_executable(bundle)
+        stat = exe.stat()
+        if not os.access(exe, os.X_OK):
+            return False
+        key = (str(bundle), stat.st_ino, stat.st_size, stat.st_mtime_ns)
+        cached = _LAUNCHER_VERDICTS.get(key)
+        if cached is not None:
+            return cached
+        signature = _launcher_signature(bundle)
+        verdict = bool(
+            signature
+            and signature.get("Identifier") == LAUNCHER_BUNDLE_ID
+            and signature.get("TeamIdentifier") == procname.SIGNING_TEAM_ID
+            and procname.signing_authority_allowed(signature.get("Authority"))
+        )
+        _LAUNCHER_VERDICTS[key] = verdict
+        return verdict
+    except OSError:
+        return False
+
+
+def daemon_program() -> Path | None:
+    """The path a LaunchAgent's ``Program`` should name, or ``None``.
+
+    The verified CI-signed launcher when one is planted, else the shim
+    (:func:`daemon_image`) exactly as before — so ``None`` still means "no
+    generation layout" and every caller's fallback is unchanged.
+    """
+    shim = daemon_image()
+    if shim is None:
+        return None
+    return signed_launcher() or shim
+
+
+def signed_launcher() -> Path | None:
+    """The planted launcher's executable when it verifies, else ``None``.
+
+    Independent of THIS process's install kind on purpose: ``owned_process`` runs
+    from a developer venv (which :func:`daemon_image` rightly answers ``None``
+    for) and uses the launcher only in its target mode, which execs the job's own
+    interpreter and never the shim.
+    """
+    if not _HOST_IS_MACOS:
+        return None
+    bundle = launcher_bundle_path()
+    return launcher_executable(bundle) if launcher_verified(bundle) else None
+
+
+def _tree_digest(root: Path) -> str | None:
+    """sha256 over ``root``'s relative paths, modes and bytes; ``None`` if unreadable."""
+    try:
+        digest = hashlib.sha256()
+        for path in sorted(p for p in root.rglob("*") if p.is_file()):
+            digest.update(path.relative_to(root).as_posix().encode())
+            digest.update(str(path.stat().st_mode & 0o777).encode())
+            digest.update(path.read_bytes())
+        return digest.hexdigest()
+    except OSError:
+        return None
+
+
+def ensure_daemon_launcher(generation: Path | None = None) -> Path | None:
+    """Plant the launcher from ``generation``'s wheel beside the shim; the bundle or ``None``.
+
+    Copies only a source bundle that itself verifies (:func:`launcher_verified`),
+    so an unsigned or wrongly signed build can never displace a good launcher.
+    Replaces by staging + rename in the same directory, so launchd never execs a
+    half-copied bundle; an unchanged tree is not rewritten (a new inode would only
+    churn the verification cache). A wheel without the launcher leaves any planted
+    one in place: it still just execs the shim, which belongs to no generation.
+    Never raises — the shim is a working fallback.
+    """
+    try:
+        if generation is not None:
+            site = _site_packages(_generation_install_root(generation))
+            if site is None:
+                return None
+            source = site / LAUNCHER_PACKAGE_PATH
+        else:
+            source = Path(__file__).resolve().parent.parent / LAUNCHER_PACKAGE_PATH
+        dest = launcher_bundle_path()
+        if not source.is_dir():
+            return dest if launcher_verified(dest) else None
+        if not launcher_verified(source):
+            logger.warning(
+                "the launcher bundle in %s does not carry the organization signature; "
+                "LaunchAgents keep naming the shim",
+                source,
+            )
+            return dest if launcher_verified(dest) else None
+        wanted = _tree_digest(source)
+        if dest.is_dir() and wanted is not None and _tree_digest(dest) == wanted:
+            return dest
+        staging = Path(tempfile.mkdtemp(dir=str(dest.parent), prefix=".launcher."))
+        aside: Path | None = None
+        try:
+            staged = staging / LAUNCHER_BUNDLE_DIRNAME
+            shutil.copytree(source, staged, symlinks=True)
+            if dest.exists():
+                aside = staging / "previous"
+                os.rename(dest, aside)
+            os.rename(staged, dest)
+        except OSError:
+            if aside is not None and not dest.exists():
+                os.rename(aside, dest)
+            raise
+        finally:
+            shutil.rmtree(staging, ignore_errors=True)
+        return dest if launcher_verified(dest) else None
+    except OSError:
+        logger.debug("launcher not planted", exc_info=True)
+        return None
 
 
 def _is_generation_install(root: Path | None = None) -> bool:
@@ -7304,6 +7514,83 @@ def _installed_daemon_plists() -> list[Path]:
     return found
 
 
+#: MIGRATION MATCHER, and the one place the retired personal prefix is still
+#: spelled: per-episode owner jobs were labelled ``com.damian.lop-episode.<id>``
+#: until the label moved into the product namespace
+#: (``owned_process.JOB_LABEL_PREFIX``). Only plists under THIS prefix are swept,
+#: and only when they also carry ``--owned-host`` (below) — every other
+#: ``com.damian.*`` plist on the machine is the operator's own tooling and is
+#: never read, let alone deleted.
+_LEGACY_EPISODE_LABEL_PREFIX = "com.damian.lop-episode."
+
+#: The owner-host flag ``scripts/run_episode.py`` puts in every episode job's
+#: argv. A plist that matches the prefix but not this is not one we wrote.
+_EPISODE_HOST_FLAG = "--owned-host"
+
+
+def _sweep_legacy_episode_plists(*, runner: Callable[..., object] | None = None) -> list[Path]:
+    """Delete leftover legacy episode plists that are provably ours and provably idle.
+
+    WHY. ``owned_process`` writes one LaunchAgent per episode and retires it on
+    close-out; a crashed episode left its plist behind, and each one is a
+    Background Task Management item named "python3.12". The label namespace has
+    moved, so nothing will ever retire the old ones. Runs from
+    :func:`daemons_refresh_command`, i.e. on every ``lop update``.
+
+    ALL of these must hold, or the plist is left untouched:
+
+    - the file name is ``com.damian.lop-episode.<id>.plist`` and its ``Label`` is
+      exactly that stem (a hand-written plist under the prefix is not ours);
+    - ``ProgramArguments`` contains ``--owned-host``;
+    - launchd's one observation (:func:`launchd.observe_job`) says ABSENT — not
+      registered, or registered and stopped. LIVE is a running episode; UNKNOWN
+      (timeout, refusal, a redirected ``HOME``) is never permission to delete;
+    - a registered-but-stopped job is booted out first, and only a successful
+      bootout lets the file go.
+
+    Scanned under ``Path.home()``, like :func:`_installed_daemon_plists`, so a test
+    or sandbox with a redirected home sees its own directory; ``observe_job``'s own
+    real-home check keeps such a run from addressing the operator's launchd.
+    Never raises; returns the plists it removed.
+    """
+    from local_operator.owned_process import launchctl_runner
+
+    run = runner or launchctl_runner
+    removed: list[Path] = []
+    try:
+        directory = Path.home() / "Library" / "LaunchAgents"
+        candidates = sorted(directory.glob(f"{_LEGACY_EPISODE_LABEL_PREFIX}*.plist"))
+    except OSError:
+        return removed
+    for path in candidates:
+        try:
+            label = path.name[: -len(".plist")]
+            data = launchd.load(path)
+            if data is None or data.get("Label") != label:
+                continue
+            argv = data.get("ProgramArguments")
+            if not isinstance(argv, list) or _EPISODE_HOST_FLAG not in argv:
+                continue
+            observed = launchd.observe_job(label=label, path=path, run=run)
+            if observed.state is not launchd.JobState.ABSENT:
+                continue
+            # ABSENT covers two launchd answers: rc 113 (nothing registered, so the
+            # file is all that is left) and "registered but stopped", which must be
+            # booted out first — a bootout of an unregistered label fails, so the
+            # two cannot share one path.
+            if observed.reason != "registration is absent" and not launchd.bootout_job(
+                label=label, path=path, runner=run
+            ):
+                continue
+            path.unlink()
+            removed.append(path)
+        except (
+            Exception
+        ):  # noqa: BLE001, PERF203 — one bad plist must not stop the sweep or an update
+            logger.debug("legacy episode plist %s left in place", path, exc_info=True)
+    return removed
+
+
 def _linux_relay_unit_installed() -> bool:
     """The Linux half of the scan: is the relay's systemd user unit installed?
 
@@ -8110,6 +8397,13 @@ def daemons_refresh_command() -> int:
         # "nothing needed repairing" and "this process is not allowed to".
         print(f"warning: {refusal}", file=sys.stderr)
         return 0
+    if sys.platform == "darwin":
+        # Before the daemons, and independent of them: it touches only idle
+        # legacy episode jobs (see the sweep for every guard).
+        # A developer log line, not printed output: the update summary stays what
+        # it was, and only a machine that had leftovers has anything to record.
+        for removed in _sweep_legacy_episode_plists():
+            logger.info("removed leftover episode job %s", removed.name)
     steps = _platform_refresh_steps()
     # ONE LOCK AROUND THE CHILD'S OUTPUT. The repairs run in threads, and an
     # interleaved announcement would read as two half lines — the parent parses
