@@ -338,6 +338,97 @@ def _write_private_json(target: Path, payload: Any) -> Path:
         return _stage_private(target, emit)
 
 
+def _sync_private_directory(directory: Path) -> None:
+    """Strict opt-in directory durability; legacy writers deliberately do not call it."""
+    if not hasattr(os, "O_DIRECTORY") or not hasattr(os, "O_NOFOLLOW"):
+        raise OSError("file_device_durability_unavailable")
+    fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def _ensure_private_directory_durable(directory: Path) -> None:
+    """Persist every new directory entry, not just the final file's rename.
+
+    The file-device authority owner opts into host-crash durability. Existing
+    network stores retain their documented process-durability semantics. A
+    failure is propagated: callers must treat it as potentially committed,
+    never as proof that nothing changed on disk.
+    """
+    missing: list[Path] = []
+    current = directory
+    while not current.exists():
+        missing.append(current)
+        current = current.parent
+    _sync_private_directory(current)
+    for child in reversed(missing):
+        try:
+            child.mkdir(mode=0o700)
+        except FileExistsError:
+            pass  # Another creator still has to pass the no-follow directory open.
+        _sync_private_directory(child)
+        _sync_private_directory(child.parent)
+
+
+def _read_private_json_durable(target: Path, *, max_bytes: int | None = None) -> Any:
+    """Read back and sync the exact current inode and containing entry.
+
+    Used for explicit recovery/readback of new security state, not a positive
+    reconstruction from approval history. No absent file/directory is created.
+    """
+    import stat
+
+    fd = os.open(target, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_mode & 0o077:
+            raise OSError("file_device_state_unconfirmed")
+
+        def unique_pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+            result: dict[str, Any] = {}
+            for key, value in pairs:
+                if key in result:
+                    raise ValueError("file_device_state_duplicate_key")
+                result[key] = value
+            return result
+
+        with os.fdopen(os.dup(fd), "rb") as handle:
+            raw = handle.read() if max_bytes is None else handle.read(max_bytes + 1)
+        if max_bytes is not None and len(raw) > max_bytes:
+            raise ValueError("file_device_state_over_limit")
+        result = json.loads(raw, object_pairs_hook=unique_pairs)
+        os.fsync(fd)
+        _sync_private_directory(target.parent)
+        current = target.stat(follow_symlinks=False)
+        if (current.st_dev, current.st_ino) != (info.st_dev, info.st_ino):
+            raise OSError("file_device_state_unconfirmed")
+        return result
+    finally:
+        os.close(fd)
+
+
+def _write_private_json_durable(target: Path, payload: Any) -> Path:
+    """Narrow file-authority opt-in; the old writer and its defaults stay intact.
+
+    Reuse its staging/rename and reentrant per-target lock, then require file
+    metadata, parent entries and exact readback before acknowledging success.
+    An exception AFTER rename is indeterminate, not a rollback. Retrying must
+    reconcile that same signed generation rather than mint another operation.
+    """
+    expected = json.dumps(payload, ensure_ascii=False, sort_keys=True, allow_nan=False)
+    with _write_lock(target):
+        _ensure_private_directory_durable(target.parent)
+        if target.is_symlink():
+            raise OSError("file_device_state_unconfirmed")
+        _write_private_json(target, payload)
+        actual = _read_private_json_durable(target)
+        if json.dumps(actual, ensure_ascii=False, sort_keys=True, allow_nan=False) != expected:
+            raise OSError("file_device_state_unconfirmed")
+    return target
+
+
 def _write_private_text(target: Path, text: str) -> Path:
     """Staged 0600 text write, then rename — the invite token's path.
 

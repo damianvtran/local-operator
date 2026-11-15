@@ -15708,6 +15708,13 @@ class RelayServer:
                     "phase": link.phase,
                     "frames_in": link.frames_in,
                     "frames_out": link.frames_out,
+                    # Append-only same-owner status. This role is connection
+                    # direction (listener/dialer), NOT MemberRole/admin policy.
+                    # Preserve old rows even for an incomplete link: only the
+                    # new file consumer denies absent/unknown live evidence.
+                    "role": getattr(getattr(link, "result", None), "role", None),
+                    "alive": getattr(link, "alive", None),
+                    "closing": getattr(link, "closing", None),
                 }
                 for link in self.links.values()
             ],
