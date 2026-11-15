@@ -1,0 +1,3 @@
+$ .venv/bin/python scripts/i18n/ledger.py append --receipt $SCRATCH/audit-es-fr-ru/ledger/es.mobile.setup.json --expected-history-sha 6b6e475e99394425657771f57247e3a744937978ee7b71bfc3f4021a7634e1d0 --dry-run
+i18n/audit-history/es/mobile.setup.json
+exit=0
