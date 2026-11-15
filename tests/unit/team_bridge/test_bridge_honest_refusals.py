@@ -488,3 +488,162 @@ def test_the_vault_sentence_never_states_the_handoff_as_working() -> None:
     assert "not available to agents yet" in refused["error"]
     assert "The way to share one is" not in refused["error"]
     assert refused["error"].count("Vault") == VAULT_HANDOFF_SENTENCE.count("Vault")
+
+
+# --- B2 client follow-ups (deferred from #3430: S-5, N-3, Q-O2) --------------
+
+#: Digit runs built from parts so no literal sits in the file for a redactor.
+_DIGITS10 = "".join(str(i % 10) for i in range(1, 11))
+_FULLWIDTH10 = "".join(chr(0xFF10 + int(c)) for c in _DIGITS10)
+_ARABIC_INDIC10 = "".join(chr(0x0660 + int(c)) for c in _DIGITS10)
+
+
+@pytest.mark.parametrize("body", [f"TOKENS: {_DIGITS10}", f'"tokens": {_DIGITS10}'])
+def test_the_count_release_is_case_and_quote_tolerant(body: str) -> None:
+    """The m3 release still covers the count under its other common spellings."""
+
+    assert credential_classes(body) == []
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        f"password: {_DIGITS10[:8]}",  # QA Q-O2
+        f"api_key={_DIGITS10 * 3}{_DIGITS10[:2]}",
+        f"client_secret:{_DIGITS10 * 4}",
+        f"token: {_DIGITS10 * 3}",
+        f"api_tokens: {_DIGITS10}",
+    ],
+)
+def test_an_all_digit_value_under_a_credential_name_is_refused(body: str) -> None:
+    """Security S-5 / QA Q-O2 on #3430: the all-digit release is keyed on the
+    count name ``tokens``, not on the rule, so a numeric secret under any other
+    credential name is refused again."""
+
+    assert credential_classes(body) == ["credential-assignment"]
+
+
+@pytest.mark.parametrize("body", [f"tokens: {_FULLWIDTH10}", f"password: {_ARABIC_INDIC10}"])
+def test_a_non_ascii_digit_run_is_never_released(body: str) -> None:
+    """Security S-5: ``str.isdigit`` is Unicode-wide; the release is ASCII only."""
+
+    assert credential_classes(body) == ["credential-assignment"]
+
+
+def test_a_scanner_fault_logs_its_qualified_type(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Security N-3: ``re.error`` is logged as ``re.error``, not the bare word."""
+
+    from local_operator.team_bridge import secret_guard
+
+    def broken(*args: Any, **kwargs: Any) -> Any:
+        raise re.error("bad pattern")
+
+    monkeypatch.setattr(secret_guard, "scrub_shapes_with_hits", broken)
+    with caplog.at_level("WARNING"):
+        refused = secret_guard.refuse_secret_in("dm", "an ordinary hello")
+    assert refused is not None and refused["code"] == "secret_scan_unavailable"
+    assert "credential scan failed (re.error)" in caplog.text
+    assert "bad pattern" not in caplog.text
+
+
+# --- edge_blocked traceability (radient-infra #113) --------------------------
+
+_TRACE_SHAPE = re.compile(r"Root=1-[0-9a-f]{8}-[0-9a-f]{24}")
+
+
+def _edge_403(request: httpx.Request, **headers: str) -> httpx.Response:
+    return httpx.Response(
+        403,
+        text=WAF_PAGE,
+        headers={"content-type": "text/html", "server": "awselb/2.0", **headers},
+        request=request,
+    )
+
+
+def test_the_trace_header_is_the_xray_shape_and_fresh_each_time() -> None:
+    from local_operator.team_bridge.client import new_trace_header
+
+    first, second = new_trace_header(), new_trace_header()
+    assert _TRACE_SHAPE.fullmatch(first) and _TRACE_SHAPE.fullmatch(second)
+    assert first != second
+
+
+def test_the_edge_refusal_carries_the_requests_trace_root_and_cf_ray() -> None:
+    root = "1-6737a1b2-" + "ab" * 12
+    request = httpx.Request("POST", "https://hub.example/v1/messaging/messages")
+    request.headers["X-Amzn-Trace-Id"] = f"Root={root}"
+    refusal = _refusal(_edge_403(request, **{"cf-ray": "8e1f2a3b4c5d6e7f-YYZ"}))
+    assert refusal.code == "edge_blocked"
+    assert refusal.details["trace"] == root
+    assert refusal.details["cf_ray"] == "8e1f2a3b4c5d6e7f-YYZ"
+
+
+def test_a_foreign_trace_value_is_not_echoed() -> None:
+    request = httpx.Request("POST", "https://hub.example/v1/messaging/messages")
+    request.headers["X-Amzn-Trace-Id"] = "Root=../../etc;Self=x"
+    refusal = _refusal(_edge_403(request))
+    assert "trace" not in refusal.details
+
+
+@pytest.mark.asyncio
+async def test_a_real_send_mints_a_trace_id_and_the_edge_refusal_repeats_it() -> None:
+    """The real client over a transport answering the edge's HTML 403: the
+    request carries ``X-Amzn-Trace-Id`` and the refusal quotes its root."""
+
+    from local_operator.team_bridge import client as tb_client
+    from tests.unit.team_bridge.test_client import FakeStore
+
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return _edge_403(request)
+
+    tb_client_obj = tb_client.TeamBridgeClient(
+        None,
+        base_url="https://hub.example/v1",
+        store=FakeStore(),
+        transport=httpx.MockTransport(handler),
+    )
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(tb_client, "org_oauth_destination_allowed", lambda base: True)
+        with pytest.raises(BridgeRefusal) as refused:
+            await tb_client_obj.send(
+                tenant_id="ten_1",
+                to={"account_id": "acc_2"},
+                type="note",
+                text="hello there",
+                client_ref="9f8a7b6c-1234-4abc-9def-0123456789ab",
+            )
+    assert len(seen) == 1
+    header = seen[0].headers["X-Amzn-Trace-Id"]
+    assert _TRACE_SHAPE.fullmatch(header)
+    assert refused.value.code == "edge_blocked"
+    assert refused.value.details["trace"] == header.removeprefix("Root=")
+
+
+@pytest.mark.asyncio
+async def test_the_edge_footer_names_the_trace_and_ray_but_never_the_rule(
+    tmp_path: Path,
+) -> None:
+    root = "1-6737a1b2-" + "cd" * 12
+    request = httpx.Request("POST", "https://hub.example/v1/conversations")
+    request.headers["X-Amzn-Trace-Id"] = f"Root={root}"
+    edge = _refusal(_edge_403(request, **{"cf-ray": "8e1f2a3b4c5d6e7f-YYZ"}))
+
+    class EdgeClient(RecordingClient):
+        async def conversation_send(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+            raise edge
+
+    outcome = await execute_bridge(
+        _admitted(EdgeClient(), tmp_path),
+        {"op": "channel_post", "channel_id": "bcv_abcd1234", "body": "hello"},
+    )
+    assert outcome["error"].endswith(
+        "[refusal code=edge_blocked status=403 server=awselb/2.0 content_type=text/html "
+        f"trace={root} cf_ray=8e1f2a3b4c5d6e7f-YYZ]"
+    )
+    for rule_word in ("GenericLFI", "LFI", "AWSManagedRules", "rule="):
+        assert rule_word not in outcome["error"]

@@ -23,12 +23,18 @@ result; a refusal that over-fires blocks a message the agent meant to send:
   followed by ANY upper-case run (it is tuned to mask fragments), so the word
   ``ASIAN`` matched it (measured). Here a key id must be the full 20-character
   shape, ``(AKIA|ASIA)[0-9A-Z]{16}``.
-* an ALL-DIGIT value never counts as a credential-named assignment. A prose
-  count under a plural label (``tokens: 1234567890``, ``total tokens: …``) is
-  a usage figure an agent reports all the time; the shared table's count
-  judgement covers the identifier spelling (``max_tokens=``) but not a spaced
-  prose label (review m3). The accepted cost: a purely numeric password under
-  a ``password:`` label passes this guard.
+* an ASCII ALL-DIGIT value under the bare plural label ``tokens`` never counts
+  as a credential-named assignment. A prose count (``tokens: 1234567890``,
+  ``total tokens: …``, ``used tokens=…``) is a usage figure an agent reports
+  all the time; the shared table's count judgement covers the identifier
+  spelling (``max_tokens=``) but not a spaced prose label (review m3). The
+  release is keyed on that NAME, not on the rule (security review S-5 / QA
+  Q-O2 on #3430): an all-digit ``password:``, ``api_key=``,
+  ``client_secret:``, ``token:`` or ``api_tokens:`` value is still refused —
+  numeric PINs, passwords and keys exist, and nothing needs them released.
+  ASCII only, because ``str.isdigit`` also accepts full-width and other
+  Unicode digit runs, which no usage count is spelled in. The accepted cost: a
+  numeric credential under a label literally named ``tokens`` passes.
 * ONE extra rule for the AWS secret access key under the SDK and
   ``aws configure`` labels the shared table does not spell: run-together
   ``SecretAccessKey`` (``"SecretAccessKey": "…"`` is the shape ``aws sts
@@ -121,12 +127,16 @@ def _below_floor(label: str, value: str, match: Match[str]) -> bool:
     finds an anchor word, and a spliced id is no anchor, so a spliced id with
     no other anchor in the text is never scanned at all — the gap is the
     prefilter's, not this floor's. A credential-named assignment whose value
-    is all digits is a count, not a credential (module docstring, m3).
+    is all ASCII digits AND is named exactly ``tokens`` (any case) is a count,
+    not a credential (module docstring, m3 narrowed by S-5). The ``name`` group
+    is the shared table's assignment-name group, common to both
+    ``credential-assignment`` spellings (``redaction_shapes._ASSIGNMENT_NAME_GROUP``).
     """
 
-    del match
     if label == "credential-assignment":
-        return value.strip().isdigit()
+        name = (match.groupdict().get("name") or "").lower()
+        digits = value.strip()
+        return name == "tokens" and digits.isascii() and digits.isdigit()
     if label != "aws-access-key-id":
         return False
     return _AWS_KEY_ID.fullmatch(value.replace("'", "").replace('"', "")) is None
@@ -169,11 +179,14 @@ def refuse_secret_in(op: str, text: Any) -> dict[str, Any] | None:
     try:
         classes = credential_classes(text)
     except Exception as failure:  # any scanner fault must refuse, never fail open
-        # Type name only: an exception's text could quote the input.
+        # Type name only: an exception's text could quote the input. Qualified
+        # by module (review N-3): a bare ``__name__`` logs ``re.error`` as the
+        # word ``error``, which reads as no type at all.
         logger.warning(
-            "team bridge %s refused before send: credential scan failed (%s)",
+            "team bridge %s refused before send: credential scan failed (%s.%s)",
             op,
-            type(failure).__name__,
+            type(failure).__module__,
+            type(failure).__qualname__,
         )
         return {
             "ok": False,
