@@ -432,13 +432,15 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "directory entry; session transfer must not copy every conversation's inbox.",
     ),
     "local_operator/owned_process.py": (
-        2,
+        3,
         "``_OWNER_DIR`` ('owner'): the run-root segment a managed owner's lease and "
         "status live under. The run root is the caller's own durable ``--run-root`` "
         "(refused when volatile) and never a session directory; the segment carries no "
         "translated text -- machine state about ONE managed process, not a session entry. "
         "``ENV_LEASE_PATH`` is the nonsecret environment-variable NAME for that exact "
-        "lease path, not a pathname or a translated/copyable session entry",
+        "lease path, not a pathname or a translated/copyable session entry. "
+        "``JOB_LABEL_PREFIX`` ('com.local-operator.episode.'): the per-episode "
+        "LaunchAgent label namespace in the user's launchd domain, never a session entry",
     ),
     "local_operator/session/runtime/session_host.py": (
         4,
@@ -687,9 +689,11 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "``agent_seeds/`` directory. None is an entry of a session directory.",
     ),
     "local_operator/update.py": (
-        2,
+        3,
         "the distribution name and the PyPI version cache: names in the update "
-        "channel, never a file in a session",
+        "channel, never a file in a session. ``_LEGACY_EPISODE_LABEL_PREFIX``: the "
+        "retired episode LaunchAgent label prefix the lop-update sweep matches in "
+        "~/Library/LaunchAgents, never a session entry",
     ),
     "local_operator/install_transaction.py": (
         3,
@@ -702,7 +706,7 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "the attempt file beside it.",
     ),
     "local_operator/procname.py": (
-        3,
+        4,
         "``_SOURCE_MARKER`` ('source') and ``_IMAGE_SIDECAR`` ('image'): the "
         "sidecars a published runtime image carries inside ``<stable root>/runtime/"
         "<build key>[-<flavor>]/``, naming the interpreter it was cloned from and the "
@@ -713,7 +717,9 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "('runtime-signing.json'): the team-signing opt-in ``lop permissions setup`` "
         "writes under the passwd home's config dir, naming a keychain identity of "
         "THIS machine — machine-local consent, never a session-directory entry and "
-        "never meaningful on a peer",
+        "never meaningful on a peer. ``_TEAM_SIGNER_MARKER`` ('signer'): the "
+        "organization-signer marker inside the same team runtime tree, install-level "
+        "state beside the image, never a session entry",
     ),
     "local_operator/harness/reply_channel.py": (1, "the structured-reply TOOL's name"),
     "local_operator/cross_session.py": (
