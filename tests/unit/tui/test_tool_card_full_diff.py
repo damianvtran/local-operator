@@ -441,12 +441,15 @@ async def test_a_header_refresh_on_the_whole_diff_does_not_repaint_the_body(monk
     """Q1: hovering an 8 000-row whole diff re-renders the rows on screen, not all of them.
 
     Measured on the base: every hover re-rendered all 8 002 rows (0.35-0.95 s
-    of a frozen loop on this host). Pinned two ways: the rows the card renders
-    for one header refresh are bounded by the viewport, and that refresh costs
-    less than ONE full render of the same card on the same machine.
+    of a frozen loop on this host). Pinned by COUNTING the rows the card hands
+    to ``Visual.to_strips``, never by timing it: a duration on a shared runner
+    measures the machine (the earlier ``hover < one full render`` comparison
+    timed a hover plus three event-loop turns against one synchronous render
+    and failed on loaded CI at 1.07 vs 0.88 s while only ~31 rows were painted).
+    The rows for one header refresh are bounded by the viewport height, and a
+    control through the same counting seam proves the counter sees a full paint
+    (8 002 rows), so the bound cannot pass vacuously.
     """
-    import time
-
     from textual.content import Content
     from textual.visual import Visual
 
@@ -486,16 +489,18 @@ async def test_a_header_refresh_on_the_whole_diff_does_not_repaint_the_body(monk
             return strips
 
         monkeypatch.setattr(Visual, "to_strips", classmethod(counting))
-        started = time.perf_counter()
         card._set_hovered(True)
         for _ in range(3):
             await pilot.pause()
-        hover = time.perf_counter() - started
+        hover_rows = sum(painted)
         assert EXPAND_HINT not in card._build_content(110).plain.split("\n")[0]
-        assert 0 < sum(painted) <= 40, f"rendered {sum(painted)} rows for one hint"
-        monkeypatch.setattr(Visual, "to_strips", classmethod(real))
-        started = time.perf_counter()
+        viewport = pilot.app.size.height
+        assert 0 < hover_rows <= viewport, f"rendered {hover_rows} rows for one hint"
+        # Control: the same seam, fed the whole card, counts every row — so the
+        # bound above fails if a hover ever repaints the body again.
+        painted.clear()
         whole = Content.from_rich_text(card._build_content(card.size.width))
         Visual.to_strips(card, whole, card.size.width, None, card.visual_style)
-        full_render = time.perf_counter() - started
-        assert hover < full_render, (hover, full_render)
+        full_rows = sum(painted)
+        assert full_rows == card.size.height == total + 2, full_rows
+        assert hover_rows * 100 < full_rows, (hover_rows, full_rows)

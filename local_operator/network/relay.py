@@ -505,6 +505,7 @@ SLICE_PEER_OPS: frozenset[str] = frozenset(
         "net_session_move",
         "net_sync",
         "net_file_get",
+        "net_session_files",
         "net_broker",
         "net_session_lifecycle",
         "net_session_receipt",
@@ -524,6 +525,9 @@ SLICE_PEER_OPS: frozenset[str] = frozenset(
         # readers on its own journal. Slow by registration — a deep search may
         # take seconds and must not hold the link reader.
         "net_session_peek",
+        # The operator binding (network/operator_binding.py): verify-and-store of
+        # a signed onboarding decision. Inline: one cached ES256 verify.
+        "net_operator_binding",
     }
 )
 
@@ -534,6 +538,7 @@ SLICE_LOCAL_OPS: frozenset[str] = frozenset(
         "session_move",
         "session_sync",
         "session_file_pull",
+        "peer_session_files",
         "session_lifecycle",
         "session_receipt",
         "credential_grant",
@@ -543,6 +548,10 @@ SLICE_LOCAL_OPS: frozenset[str] = frozenset(
         "credential_revoke",
         # The share push: ``credential share`` hands the new row to its holder now.
         "credential_share_push",
+        # The renewal claim and the owner's push after renewing a lent login
+        # (mesh-credential-renewal §B.3 R3). Local: the link lives in the relay.
+        "credential_claim",
+        "credential_lend_push",
         # The member-side repair pull (mesh-mcp-credentials.md §4): the CLI asks
         # THIS device's relay to pull one copy from its owner NOW. Local for the
         # same reason the rest of the family is: the pull needs a link, and the
@@ -595,6 +604,8 @@ SLICE_MODULES: tuple[str, ...] = (
     "local_operator.network.rollouts",
     # The remote peek: one slow peer op plus its local half, no threads.
     "local_operator.network.peek",
+    # The operator binding: one inline peer op plus a link-up presenter.
+    "local_operator.network.operator_binding",
 )
 
 #: Which link, if any, THIS thread is currently serving a request for.
@@ -8961,11 +8972,22 @@ class RelayServer:
         """
         rows = self.local_session_rows()
         if wire.REMOTE_ATTENTION_V1 in link.capabilities:
+            from local_operator.network.operator_binding import is_operator_link
             from local_operator.notifications.remote_attention import (
                 stamp_rows_for_viewer,
             )
 
-            stamp_rows_for_viewer(self.root, rows, str(link.device_id or ""))
+            # A VERIFIED operator link also collects the notices of sessions
+            # STARTED here (no origin of their own). The verdict is the
+            # operator's signature checked against this device's root-owned
+            # anchor — cached, so one ES256 verify per proof, not per listing.
+            stamp_rows_for_viewer(
+                self.root,
+                rows,
+                str(link.device_id or ""),
+                operator_viewer=is_operator_link(self.root, link),
+                self_device_id=str(self.identity.device_id or ""),
+            )
         return rows
 
     def local_session_rows(self) -> list[dict[str, Any]]:
@@ -13928,6 +13950,7 @@ class RelayServer:
         # rotation all write, so the read is inside the lock: minting from a
         # snapshot would revert whatever they wrote in between.
         resolved = self._require_network(str(frame.get("network") or ""))
+        binding_keep = store.binding_invite_ids(self.root)
         with store.mutate(resolved.network_id, self.root) as record:
             state = store.require_secrets(record.network_id, self.root)
             minted: MintedInvite = mint_invite(
@@ -13954,7 +13977,9 @@ class RelayServer:
             # the same locked write that adds a row drops the ones past their own
             # expiry and the retention window (``store.prune_invites``), so repeated
             # pairing attempts no longer accumulate ``minted`` rows forever.
-            expired = store.prune_invites(record)
+            # ``binding_keep`` (computed before the lock): admitted rows a retained
+            # signed onboarding names stay, so that node stays bindable (#4030).
+            expired = store.prune_invites(record, keep=binding_keep)
             record.invites.append(minted.record)
             store.save(record, self.root)
             path = store.save_invite_token(minted.record.invite_id, minted.token, self.root)
@@ -14586,6 +14611,13 @@ class RelayServer:
         )
         for link in links:
             link.close("we-closed")
+        # LEAVING ENDS EVERY RENEWAL LEND IN IT (#3955 M1): no node of a network this
+        # device left can be asked again, so its own lent logins renew on their own.
+        from local_operator.network.credentials import owner as owner_mod
+
+        owner_mod._end_renewal_lends(  # noqa: SLF001
+            self, resolved.network_id, devices=None, cause="left"
+        )
         secrets_file = store.secrets_path(resolved.network_id, self.root)
         if secrets_file.exists():
             secrets_file.unlink()
@@ -16001,6 +16033,7 @@ def _owning_document(op: str) -> str:
         "net_forward": "mesh-session-mobility.md",
         "net_sync": "mesh-session-mobility.md (R22)",
         "net_file_get": "mesh-file-transfer.md (S1)",
+        "net_session_files": "remote-files-parity.md (§2)",
         "net_broker": "mesh-credentials.md",
         "net_session_lifecycle": "mesh-session-mobility.md",
         "net_session_receipt": "mesh-session-mobility.md",
@@ -16012,6 +16045,7 @@ def _owning_document(op: str) -> str:
         "session_move": "mesh-session-mobility.md",
         "session_sync": "mesh-session-mobility.md (R22)",
         "session_file_pull": "mesh-file-transfer.md (S1)",
+        "peer_session_files": "remote-files-parity.md (§2)",
         "session_lifecycle": "mesh-session-mobility.md",
         "session_receipt": "mesh-session-mobility.md",
         "credential_grant": "mesh-credentials.md",
@@ -16019,6 +16053,8 @@ def _owning_document(op: str) -> str:
         "credential_placement": "mesh-credentials.md",
         "credential_revoke": "mesh-credentials.md",
         "credential_share_push": "mesh-credentials.md",
+        "credential_claim": "mesh-credential-renewal.md",
+        "credential_lend_push": "mesh-credential-renewal.md",
     }
     return owners.get(op, "the design documents")
 

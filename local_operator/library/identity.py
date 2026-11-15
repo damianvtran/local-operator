@@ -70,3 +70,17 @@ def key_for(path: str | None, digest: str | None) -> str:
     if path:
         return path_key(path)
     raise ValueError("a reference needs a path or a digest")
+
+
+def remote_key(device_id: str, session_id: str, display_path: str) -> str:
+    """``r:<device>:<session>:<display path>`` for a PEER session's path row.
+
+    Remote files parity §5 (I5-1): a path on another device's disk is never a
+    ``p:`` key, because ``path_key`` would ``realpath`` it on THIS disk — the owner's
+    ``~/x.png`` would then be identified with (and resolve to) an unrelated local
+    file. Its occurrence stores ``path`` NULL; the content route reaches the bytes
+    through the owner's Files-index row id instead.
+    """
+    if not device_id or not session_id or not display_path:
+        raise ValueError("a remote key needs a device, a session and a path")
+    return f"r:{device_id}:{session_id}:{display_path}"

@@ -1823,7 +1823,12 @@ class MeshCredentialClient:
             serves, tally["pending"], tally["last"] = tally["pending"], 0, now
         # The durable twin of this receipt in ``placement.state.json`` (mesh lane
         # 64949): a lapse can then be dated from the state row alone.
-        self.state.note_held_serve(key, int(grant.held_until_ms))
+        self.state.note_held_serve(
+            key,
+            int(grant.held_until_ms),
+            grant_id=gid,
+            grant_expires_at_ms=int(grant.grant_expires_at_ms),
+        )
         self._save_state()
         self._held_audit(
             "credential.held_served",

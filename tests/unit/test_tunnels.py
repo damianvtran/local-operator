@@ -1166,7 +1166,8 @@ def test_mobile_enable_uses_shared_setup_and_preserves_its_receipts(monkeypatch)
     )
     monkeypatch.setattr(setup, "apply", runner)
     receipt = cli.mobile_action("enable", "0.05")
-    runner.assert_awaited_once_with(None, "0.05", progress=None)
+    # A typed `/mobile enable` is the person: it may resume a deliberate stop.
+    runner.assert_awaited_once_with(None, "0.05", progress=None, resume_stopped=True)
     assert "Reservation saved" in receipt
     assert "/mobile status" in receipt and "/mobile enable" in receipt
 

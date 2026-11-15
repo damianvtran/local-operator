@@ -424,22 +424,53 @@ def test_the_node_notify_sentence_promises_only_what_the_origin_collects(
 ) -> None:
     """Review round 1 m2 + QA Q2: "forwarded" only to an origin known to collect."""
     owner = _owner(tmp_path)
+    _join_mesh(owner)
     # Not yet recorded (an older origin, or one that has not read this device
     # since updating): the item stays here, and the model is told so.
     before = ra.forwarded_notice_sentence(owner, SID)
     assert "will be forwarded" not in before
-    assert "stays on this device" in before
-    # Q2: a non-member origin is named in words, never by its raw device id.
-    assert HEAD not in before and "its origin device" in before
+    assert "stays on node-box" in before and "d_head-box" in before
     # The owner's catalogue op records an origin that advertised the capability.
     ra.stamp_rows_for_viewer(owner, [_catalog_row()], HEAD)
     assert HEAD in ra.forwarding_origins(owner)
     after = ra.forwarded_notice_sentence(owner, SID)
-    assert "will be forwarded to its origin device" in after
+    assert "will be forwarded to d_head-box" in after
     # A key this module never forwards gets no clause at all.
     assert ra.forwarded_notice_sentence(owner, SID, "gate:approval:w1") == ""
     local = tmp_path / "local"
     assert ra.forwarded_notice_sentence(local, SID) == ""
+
+
+def test_r2_1_an_origin_that_is_no_active_member_is_never_promised(tmp_path: Path) -> None:
+    """PR #4029 R2-1: a collector marker alone never makes "will be forwarded".
+
+    The origin left (removed / burned), or the network is no longer trusted: no
+    link will carry the item, so a mesh node says node-only and a device in no
+    mesh keeps its bare result. The raw device id is never printed (Q2).
+    """
+    from local_operator.network import store as net_store
+
+    owner = _owner(tmp_path)
+    ra.record_forwarding_origin(owner, HEAD)
+    # No network at all here: nothing to forward over, nothing to say.
+    assert ra.notice_forwarding(owner, SID) == (ra.NOT_APPLICABLE, "")
+    assert ra.forwarded_notice_sentence(owner, SID) == ""
+    # A mesh node whose OTHER member is not the origin: node-only, honestly.
+    _join_mesh(owner, peers=("d_other",))
+    assert ra.notice_forwarding(owner, SID) == (ra.LOCAL_ONLY, "")
+    sentence = ra.forwarded_notice_sentence(owner, SID)
+    assert sentence == " Shown on node-box only; it was not forwarded to your other devices."
+    assert HEAD not in sentence
+    # The origin removed (burned) from a network it was in.
+    _join_mesh(owner, peers=(HEAD, "d_other"))
+    record = net_store.load("n_test", owner)
+    record.removed_ids.append(HEAD)
+    net_store.save(record, owner)
+    assert ra.notice_forwarding(owner, SID) == (ra.LOCAL_ONLY, "")
+    # A disconnected (untrusted) network: no mesh node either.
+    _join_mesh(owner, trust="untrusted")
+    assert ra.notice_forwarding(owner, SID) == (ra.NOT_APPLICABLE, "")
+    assert ra.forwarded_notice_sentence(owner, SID) == ""
 
 
 def _join_mesh(
@@ -1594,6 +1625,7 @@ def test_default_deny_the_node_reply_matches_the_owner_forward_filter(
     """QA r2 Q1: the node's ``notify`` reply applies the owner's own forward
     predicate, so "will be forwarded" is said exactly when the item travels."""
     owner = _owner(tmp_path)
+    _join_mesh(owner)
     _restamp(owner, origin)
     # The head has read this node, so it IS recorded as collecting forwards:
     # the old reply said "will be forwarded" here regardless of the stamp.
@@ -1603,11 +1635,11 @@ def test_default_deny_the_node_reply_matches_the_owner_forward_filter(
     sentence = ra.forwarded_notice_sentence(owner, SID)
     keys = [n["key"] for n in rows[0].get("notices") or ()]
     if forwarded:
-        assert "will be forwarded to its origin device" in sentence, sentence
+        assert "will be forwarded to d_head-box" in sentence, sentence
         assert keys == ["deploy"]
     else:
         assert "will be forwarded" not in sentence, sentence
-        assert "it stays on this device" in sentence and "moved, forked" in sentence
+        assert "it stays on node-box" in sentence and "moved, forked" in sentence
         assert keys == [], "the head inbox gets nothing from an unattested stamp"
 
 
@@ -1625,11 +1657,14 @@ def test_a_reused_tmp_path_still_records_its_forwarding_origin(tmp_path: Path) -
 def test_a_session_brought_home_keeps_its_reply_byte_for_byte(tmp_path: Path) -> None:
     """A session moved HOME (its source device never reads this one, so it is not
     a recorded forwarding origin): the reply is unchanged from before Q1."""
-    owner = _owner(tmp_path, origin=NODE)
-    _restamp(owner, {"kind": "moved", "source_device": NODE, "source_session_id": ""})
-    assert NODE not in ra.forwarding_origins(owner)
+    # PR #4030 rebase: the origin must be an ACTIVE member here (#4029 R2-1),
+    # so the device it came home from is one; the wording is #4001's, unchanged.
+    owner = _owner(tmp_path, origin="d_away")
+    _join_mesh(owner, peers=(HEAD, "d_away"))
+    _restamp(owner, {"kind": "moved", "source_device": "d_away", "source_session_id": ""})
+    assert "d_away" not in ra.forwarding_origins(owner)
     assert ra.forwarded_notice_sentence(owner, SID) == (
-        " Posted on this device; it stays on this device, because its origin device,"
+        " Posted on node-box; it stays on node-box, because d_away-box,"
         " where this session started, is not known to collect forwarded notices."
     )
 
@@ -1682,3 +1717,203 @@ def test_default_deny_the_create_attestation_is_never_defaulted() -> None:
     assert _started_by_claim({"started_by": "root"}) == {}
     assert ra.started_by_for_origin("user") == ra.OPERATOR_STARTED
     assert ra.started_by_for_origin("agent") == ra.AGENT_ORIGIN_KIND
+
+
+# ---------------------------------------------------------------------------
+# Operator-signed cards from an agent's child (manager rule, 2026-11-15)
+# ---------------------------------------------------------------------------
+# "human-only signed cards (site approvals, any card only the operator's
+# signature can answer) forward to the bound operator device even from
+# agent-origin and stampless sessions. Ordinary agent-child asks keep their
+# current routing, and notifications stay per #4001." Reproduced live: session
+# 1c31cfff075b on a node, spawned by an agent on the operator's Mac (origin
+# kind=agent, source_device=the Mac), raised two site cards the Mac never saw.
+
+CO = "d_co"
+
+
+def _site_question() -> dict[str, Any]:
+    from local_operator.browser_bridge import site_approval
+
+    return site_approval.site_ask_question(
+        origin="https://example.com", node_name="node", node_device_id=NODE, entry_id="e-1"
+    )
+
+
+def _queue_raw(node: Path, ask_id: str, questions: list[dict[str, Any]]) -> None:
+    from local_operator.asks import store as ask_store
+
+    now = ask_store.now_ms()
+    ask_store.append_event(
+        ask_store.session_dir(node, SID),
+        {
+            "v": ask_store.EVENT_SCHEMA,
+            "kind": ask_store.EVENT_QUEUED,
+            "at": now,
+            "ask_id": ask_id,
+            "expires_at": now + 3_600_000,
+            "questions": questions,
+        },
+    )
+
+
+def _agent_child_node(
+    tmp_path: Path, origin: dict[str, Any] | None, *, site_card: bool = True
+) -> Path:
+    """A node holding SID (stamped ``origin``) with an ordinary ask, a notify item
+    and, when ``site_card``, a real site card built by ``site_approval`` itself."""
+    node = tmp_path / "node"
+    (node / "sessions" / SID).mkdir(parents=True)
+    if origin is not None:
+        write_stamp(
+            node,
+            MeshStamp(
+                session_id=SID,
+                network_id="n_test",
+                home_device=NODE,
+                placement=SessionPlacement(
+                    mode="peer", network_id="n_test", home_device=NODE, stamp_revision=1
+                ),
+                origin=origin,
+            ),
+        )
+    _queue_raw(node, "a-plain", [{"id": "q0", "question": "Which branch?", "options": []}])
+    if site_card:
+        _queue_raw(node, "a-site", [_site_question()])
+    NotificationStore(node).notify(SID, title="Build done", priority="high", key="build")
+    return node
+
+
+def _wire(
+    node: Path, origin: dict[str, Any] | None, viewer: str, *, operator_viewer: bool
+) -> dict[str, Any]:
+    row: dict[str, Any] = {"session_id": SID, "state": "stored", "origin": origin}
+    ra.stamp_rows_for_viewer(
+        node, [row], viewer, operator_viewer=operator_viewer, self_device_id=NODE
+    )
+    return row
+
+
+def _keys(row: dict[str, Any]) -> list[str]:
+    return [n["key"] for n in row.get("notices") or ()]
+
+
+def _agent(source: str) -> dict[str, Any]:
+    return {"kind": ra.AGENT_ORIGIN_KIND, "source_device": source, "source_session_id": "s_p"}
+
+
+def test_only_a_site_question_is_an_operator_signed_card() -> None:
+    assert ra.is_operator_signed_card({"questions": [_site_question()]})
+    # human_required alone is answerable by any human at any surface: not one.
+    plain = {"id": "q0", "question": "Ship?", "human_required": True, "question_id": "x:1"}
+    assert not ra.is_operator_signed_card({"questions": [plain]})
+    assert not ra.is_operator_signed_card({"questions": None})
+    assert not ra.is_operator_signed_card(None)
+
+
+def _forged_site_questions() -> list[tuple[str, dict[str, Any]]]:
+    """Site-prefixed questions whose id is NOT the digest of their own block."""
+    real = _site_question()
+    no_block = {k: v for k, v in real.items() if k != "site"}
+    return [
+        ("prefix-only id", {**real, "question_id": "site:v1:not-a-digest"}),
+        ("no site block", no_block),
+        (
+            "block for another origin",
+            {**real, "site": {**real["site"], "origin": "https://evil.test"}},
+        ),
+        ("block for another entry", {**real, "site": {**real["site"], "entry_id": "e-2"}}),
+        ("non-string block field", {**real, "site": {**real["site"], "scope": None}}),
+        ("block not a mapping", {**real, "site": "origin"}),
+    ]
+
+
+@pytest.mark.parametrize("case", [name for name, _ in _forged_site_questions()])
+def test_a_forged_site_id_is_not_an_operator_signed_card(case: str) -> None:
+    """Security review S1-1: the ``site:v1:`` prefix alone is mintable by any writer
+    of the node's ask log; only an id equal to its block's digest counts."""
+    question = dict(_forged_site_questions())[case]
+    assert not ra.is_operator_signed_card({"questions": [question]})
+
+
+@pytest.mark.parametrize("case", [name for name, _ in _forged_site_questions()])
+def test_a_forged_site_card_from_an_agent_child_never_forwards(tmp_path: Path, case: str) -> None:
+    """S1-1 end to end: the forged card stays on the node even over the binding."""
+    origin = _agent(HEAD)
+    node = _agent_child_node(tmp_path, origin, site_card=False)
+    _queue_raw(node, "a-forged", [dict(_forged_site_questions())[case]])
+    assert "notices" not in _wire(node, origin, HEAD, operator_viewer=True)
+
+
+@pytest.mark.parametrize("source", [HEAD, "", NODE, CO])
+def test_an_agent_childs_site_card_reaches_the_bound_operator_only(
+    tmp_path: Path, source: str
+) -> None:
+    """The site card (and nothing else) reaches the VERIFIED operator link, wherever
+    the child was placed from: by the operator's Mac (the live repro), started
+    here, or placed by a co-member."""
+    origin = _agent(source)
+    node = _agent_child_node(tmp_path, origin)
+    # A REAL completion (review R1-1): without one, "no badge" holds vacuously.
+    AttentionStore(node / "attention.db").publish(f"session/{SID}", TOK1, "a1", "complete")
+    row = _wire(node, origin, HEAD, operator_viewer=True)
+    assert _keys(row) == [f"{ra.ASK_NOTICE_PREFIX}a-site"]
+    if source == HEAD:
+        # The Mac placed the child: its completion badge reaches the Mac, as before.
+        assert row["attention"] == {"token": TOK1, "outcome": "complete"}
+    else:
+        # A child the operator's device did not place: the site card rides the
+        # cards-only leg, and its completion stays here.
+        assert "attention" not in row and "attention_unknown" not in row
+    # The notify verdict is unchanged: the child's notify items stay on the node.
+    assert ra.notice_forwarding(node, SID)[0] == ra.LOCAL_ONLY
+    assert "build" not in _keys(row)
+
+
+@pytest.mark.parametrize("source", [HEAD, "", NODE, CO])
+def test_an_agent_childs_ordinary_ask_and_notify_still_reach_nobody(
+    tmp_path: Path, source: str
+) -> None:
+    origin = _agent(source)
+    node = _agent_child_node(tmp_path, origin, site_card=False)
+    for viewer, bound in ((HEAD, True), (HEAD, False), (CO, False)):
+        assert "notices" not in _wire(node, origin, viewer, operator_viewer=bound), viewer
+    assert ra.notice_forwarding(node, SID)[0] == ra.LOCAL_ONLY
+
+
+@pytest.mark.parametrize("source", [HEAD, CO])
+def test_a_viewer_the_origin_names_but_not_bound_gets_no_site_card(
+    tmp_path: Path, source: str
+) -> None:
+    """Never "any viewer that matches the origin": the source device itself gets
+    nothing unless its link is the verified operator's."""
+    origin = _agent(source)
+    node = _agent_child_node(tmp_path, origin)
+    assert "notices" not in _wire(node, origin, source, operator_viewer=False)
+    # A non-operator member that is not the source gets nothing either.
+    other = CO if source == HEAD else HEAD
+    assert "notices" not in _wire(node, origin, other, operator_viewer=False)
+
+
+def test_a_stampless_agent_started_session_keeps_forwarding_every_ask(tmp_path: Path) -> None:
+    """Unchanged routing: a node session with no stamp and a subagent marker already
+    sends ALL its open asks over the binding (asks always travel); only notify
+    stays here (:func:`ra.is_non_agent_session`)."""
+    node = _agent_child_node(tmp_path, None)
+    (node / "sessions" / SID / "origin.json").write_text('{"origin": "subagent"}', "utf-8")
+    row = _wire(node, None, HEAD, operator_viewer=True)
+    assert sorted(_keys(row)) == [f"{ra.ASK_NOTICE_PREFIX}a-plain", f"{ra.ASK_NOTICE_PREFIX}a-site"]
+    assert "notices" not in _wire(node, None, CO, operator_viewer=False)
+
+
+def test_an_unreadable_ask_log_on_an_agent_child_says_unknown(tmp_path: Path) -> None:
+    """The R1-2 rule holds on the new leg: a failed read never retires a card."""
+    from local_operator.asks import store as ask_store
+
+    origin = _agent(HEAD)
+    node = tmp_path / "node"
+    (node / "sessions" / SID).mkdir(parents=True)
+    ask_store.asks_log_path(ask_store.session_dir(node, SID)).mkdir(parents=True)
+    row = _wire(node, origin, HEAD, operator_viewer=True)
+    assert row.get("asks_unknown") is True and "notices" not in row
+    assert "asks_unknown" not in _wire(node, origin, HEAD, operator_viewer=False)
