@@ -523,6 +523,33 @@ def test_an_all_digit_value_under_a_credential_name_is_refused(body: str) -> Non
     assert credential_classes(body) == ["credential-assignment"]
 
 
+@pytest.mark.parametrize(
+    "front", ["access", "Secret", "API", "auth", "bearer", "session", "refresh"]
+)
+@pytest.mark.parametrize("sep", [": ", "=", "  :"])
+def test_a_credential_word_in_front_of_tokens_is_refused(front: str, sep: str) -> None:
+    """Security S-1: ``name`` is only the last word of a spaced label, so the
+    release reaches ``<word> tokens``; a credential front word is refused."""
+
+    body = f"{front} tokens{sep}{_DIGITS10}" if sep != "  :" else f"{front}  tokens: {_DIGITS10}"
+    assert credential_classes(body) == ["credential-assignment"]
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        f"total tokens: {_DIGITS10}",
+        f"used tokens={_DIGITS10}",
+        f"output tokens: {_DIGITS10}",
+        f"accessible tokens: {_DIGITS10}",  # a whole word, not a prefix match
+    ],
+)
+def test_a_non_credential_word_in_front_of_tokens_is_still_a_count(body: str) -> None:
+    """Security S-1: the documented release — one ordinary word in front."""
+
+    assert credential_classes(body) == []
+
+
 @pytest.mark.parametrize("body", [f"tokens: {_FULLWIDTH10}", f"password: {_ARABIC_INDIC10}"])
 def test_a_non_ascii_digit_run_is_never_released(body: str) -> None:
     """Security S-5: ``str.isdigit`` is Unicode-wide; the release is ASCII only."""

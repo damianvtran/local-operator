@@ -33,8 +33,15 @@ result; a refusal that over-fires blocks a message the agent meant to send:
   ``client_secret:``, ``token:`` or ``api_tokens:`` value is still refused —
   numeric PINs, passwords and keys exist, and nothing needs them released.
   ASCII only, because ``str.isdigit`` also accepts full-width and other
-  Unicode digit runs, which no usage count is spelled in. The accepted cost: a
-  numeric credential under a label literally named ``tokens`` passes.
+  Unicode digit runs, which no usage count is spelled in. WHAT THE RELEASE
+  ACTUALLY COVERS (security S-1): the shared table's ``name`` group cannot hold
+  a space, so it captures only the LAST word of a spaced label — the release
+  therefore covers a bare ``tokens`` AND ``tokens`` with one word in front of
+  it (``total tokens:``, ``used tokens=``). That front word is checked: when it
+  is a credential word (``access``, ``secret``, ``api``, ``auth``, ``bearer``,
+  ``session``, ``refresh``), the value is refused, so ``access tokens: <digits>``
+  is not a count. The accepted cost: a numeric credential under a bare
+  ``tokens`` label, or one behind a non-credential word, passes.
 * ONE extra rule for the AWS secret access key under the SDK and
   ``aws configure`` labels the shared table does not spell: run-together
   ``SecretAccessKey`` (``"SecretAccessKey": "…"`` is the shape ``aws sts
@@ -116,6 +123,15 @@ VAULT_HANDOFF_SENTENCE = (  # i18n: ignore model-facing refusal sentence
 )
 
 
+#: The word directly in front of a spaced ``tokens`` label (security S-1),
+#: searched only up to where ``name`` starts, and the front words that make the
+#: label a credential rather than a usage count.
+_FRONT_WORD = re.compile(r"([A-Za-z]+)[ \t]+$")
+_CREDENTIAL_FRONT_WORDS = frozenset(
+    {"access", "secret", "api", "auth", "bearer", "session", "refresh"}
+)
+
+
 def _below_floor(label: str, value: str, match: Match[str]) -> bool:
     """The bridge's confidence floor over the shared table (``reject`` hook).
 
@@ -127,8 +143,9 @@ def _below_floor(label: str, value: str, match: Match[str]) -> bool:
     finds an anchor word, and a spliced id is no anchor, so a spliced id with
     no other anchor in the text is never scanned at all — the gap is the
     prefilter's, not this floor's. A credential-named assignment whose value
-    is all ASCII digits AND is named exactly ``tokens`` (any case) is a count,
-    not a credential (module docstring, m3 narrowed by S-5). The ``name`` group
+    is all ASCII digits AND is named ``tokens`` (any case), bare or behind one
+    non-credential word, is a count, not a credential (module docstring, m3
+    narrowed by S-5 and S-1). The ``name`` group
     is the shared table's assignment-name group, common to both
     ``credential-assignment`` spellings (``redaction_shapes._ASSIGNMENT_NAME_GROUP``).
     """
@@ -136,7 +153,13 @@ def _below_floor(label: str, value: str, match: Match[str]) -> bool:
     if label == "credential-assignment":
         name = (match.groupdict().get("name") or "").lower()
         digits = value.strip()
-        return name == "tokens" and digits.isascii() and digits.isdigit()
+        if not (name == "tokens" and digits.isascii() and digits.isdigit()):
+            return False
+        # Security S-1: ``name`` is only the last word of a spaced label, so
+        # ``access tokens: <digits>`` reaches here as ``tokens``. Refuse when
+        # the word in front of it names a credential (module docstring).
+        front = _FRONT_WORD.search(match.string, 0, match.start("name"))
+        return not (front and front.group(1).lower() in _CREDENTIAL_FRONT_WORDS)
     if label != "aws-access-key-id":
         return False
     return _AWS_KEY_ID.fullmatch(value.replace("'", "").replace('"', "")) is None
