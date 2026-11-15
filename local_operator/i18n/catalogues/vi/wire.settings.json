@@ -240,7 +240,7 @@
   "wire.settings.display_nerd_icons.label": "Glyph Nerd Font",
   "wire.settings.display_notification_session_name.choice.false.description": "không đưa tên lên banner",
   "wire.settings.display_notification_session_name.choice.true.description": "ghi tên phiên",
-  "wire.settings.display_notification_session_name.help": "Tên phiên, dòng cuối và nguyên nhân lỗi xuất hiện trên banner, kể cả màn hình khóa.",
+  "wire.settings.display_notification_session_name.help": "Tên phiên, dòng cuối và nguyên nhân lỗi xuất hiện trên banner, kể cả màn hình khóa và thông báo trên điện thoại đã ghép nối, được gửi tới điện thoại qua dịch vụ push của Radient.",
   "wire.settings.display_notification_session_name.label": "Tên phiên trong thông báo",
   "wire.settings.display_notifications.choice.false.description": "không bao giờ thông báo",
   "wire.settings.display_notifications.choice.true.description": "thông báo khi không có tiêu điểm",
