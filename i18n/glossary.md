@@ -21,12 +21,24 @@ Two ground rules for reading a row:
 | Term | Decision |
 |---|---|
 | Local Operator | keep as-is — the product name |
+| Radient Console | keep as-is — the full product name in every app and locale; capital `R` and `C`, with one internal ASCII space (`U+0020`) |
 | `lop`, `lo` | keep as-is (commands) |
 | `omp` / oh-my-pi | keep as-is (external product) |
 | tool names (`bash`, `read`, `edit`, `wake`, `monitor`, …) | keep as-is — the model's vocabulary |
 | `--flags`, config keys, file paths, identifiers, URLs | keep as-is |
 | namespaces/keys (`wire.errors.…`, `tui.…`), event types, `--json` keys | keep as-is — machine tokens |
 | technology names (Python, Node, JSON, YAML, Git, GitHub, macOS, Windows, Linux) | keep their official spelling |
+
+**Radient Console is a deliberately named brand**, per the operator's product-name
+decision: “Yes, product name (Radient Console)”. Preserve the full name exactly:
+do not translate, inflect or replace it with a generic term. This overrides the
+general citation-form inflection rule above for this brand. Translate surrounding
+prose with locale-appropriate syntax and grammar, restructuring the sentence as
+needed to keep the name intact. Generic console and terminal concepts still
+translate; the brand exception does not preserve English surrounding prose.
+Its proper-noun capitalization is an exception to sentence case: sentence case
+is an English authoring convention, not a rule for translating other locales.
+This does not rename Local Operator or change commands, URLs or identifiers.
 
 When a name and a concept collide, the *form* decides: the tool invocation
 `wake` in a tool card or a command stays English; prose about waking
