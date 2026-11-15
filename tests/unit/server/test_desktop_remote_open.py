@@ -733,6 +733,18 @@ async def test_a_peer_completion_is_read_from_the_peer_not_from_a_local_store(
         ),
         raising=True,
     )
+    # The snapshot reads the facade's CANONICAL state without the clone
+    # (``frontend_state_reference``, PR #4012), so the owner's answer is
+    # injected through that seam as well as the cloning property.
+    monkeypatch.setattr(
+        AttachedSession,
+        "frontend_state_reference",
+        lambda self: (
+            None,
+            FrontendSessionState(session_id=OTHER, epoch="e1", attention=dict(wire_attention)),
+        ),
+        raising=True,
+    )
 
     response = await client.get(f"/v1/desktop/sessions/{OTHER}")
     assert response.status_code == 200, response.text

@@ -10,7 +10,9 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import concurrent.futures
 import contextlib
+import copy
 import functools
 import json
 import logging
@@ -393,6 +395,135 @@ _LEASE_WARM_POLL_S = 1.0
 #: is ~1 ms, so this is only ever spent against a writer holding the lock; the
 #: refresh keeps going and publishes an ``attention`` frame when it lands.
 ATTENTION_SNAPSHOT_WAIT_S = 0.05
+
+#: Worker threads that build desktop snapshot frames (the canonical-state clone
+#: plus ``sync_wire_payload``) OFF the serving event loop.
+#:
+#: WHY A DEDICATED, SMALL POOL rather than ``asyncio.to_thread``: the build is
+#: proportional to the session (seconds for a 30 MB history with a large frozen
+#: roster), and N viewers opening one huge session would otherwise park N of the
+#: default executor's threads behind it -- the same pool every other route's
+#: short ``to_thread`` read (attention, asks, store reads) queues on. Two
+#: workers keep two different sessions' opens independent while bounding the
+#: GIL share a burst of opens can take from the loop; opens of the SAME state
+#: coalesce onto one build (``DesktopSessionBridge._wire_state_off_loop``).
+SNAPSHOT_BUILD_WORKERS: Final = 2
+_snapshot_executor: concurrent.futures.ThreadPoolExecutor | None = None
+
+
+def _snapshot_pool() -> concurrent.futures.ThreadPoolExecutor:
+    """The process-wide snapshot build pool, created on first use.
+
+    Lazy so importing this module (every ``lop`` command that touches the
+    desktop plane) starts no threads. The workers are NOT daemon threads: the
+    interpreter joins them at exit after any queued work, so the serve's own
+    stop calls :func:`shutdown_snapshot_pool`, which drops queued builds and
+    lets only a running one finish (review round 1, R1-n1).
+    """
+    global _snapshot_executor
+    if _snapshot_executor is None:
+        _snapshot_executor = concurrent.futures.ThreadPoolExecutor(
+            max_workers=SNAPSHOT_BUILD_WORKERS, thread_name_prefix="lop-desktop-snapshot"
+        )
+    return _snapshot_executor
+
+
+def shutdown_snapshot_pool(*, wait: bool = False) -> None:
+    """Stop the snapshot pool, dropping builds still queued on it.
+
+    Called when the desktop session host closes (``lop serve`` stopping), so
+    builds nobody will read do not delay the exit; ``wait=True`` also joins the
+    workers (tests use it so no pool thread outlives them). A later
+    :func:`_snapshot_pool` call starts a fresh pool.
+    """
+    global _snapshot_executor
+    executor, _snapshot_executor = _snapshot_executor, None
+    if executor is not None:
+        executor.shutdown(wait=wait, cancel_futures=True)
+
+
+@dataclass(slots=True)
+class _WireBuild:
+    """One in-flight snapshot build and how many opens are awaiting it.
+
+    ``work`` is the pool's own future (cancellable only while queued);
+    ``future`` is its loop-side wrapper the waiters shield. ``waiters`` is only
+    touched on the serving loop, so it needs no lock.
+    """
+
+    capture: "_WireCapture"
+    work: concurrent.futures.Future[dict[str, Any]]
+    future: asyncio.Future[dict[str, Any]]
+    waiters: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class _WireCapture:
+    """Everything a snapshot frame's ``frontend`` is built from, read on the loop.
+
+    ``reference`` is the store's canonical (never-mutated) state object; a test
+    double without a store hands over its already caller-owned
+    ``frontend_state``. ``attention`` is a private copy, so a receipt landing on
+    the loop mid-build cannot change the dict a worker is serializing.
+    """
+
+    reference: Any
+    attention: dict[str, Any]
+
+
+def _wire_state_of(capture: _WireCapture) -> dict[str, Any]:
+    """Build the bounded ``FrontendSync`` wire payload from one capture.
+
+    Thread-safe by construction: it reads only the capture (an immutable state
+    object and private copies) and writes only objects it creates. The single
+    spelling of the build, used inline by ``state()`` and off-loop by the
+    snapshot, so the two can never serve different bytes.
+    """
+    # THE REFERENCE IS SERIALIZED AS IS, NOT CLONED FIRST. ``state()`` used to go
+    # through ``frontend_state`` -- a deep clone of every job so a caller may
+    # mutate its copy -- and then only DUMP it. A dump does not mutate, and the
+    # canonical object never changes after install, so the clone bought nothing
+    # here; dropping it measured 599 -> 343 ms per build and 454 -> 145 GC
+    # collections on a 2,000-job roster (GC passes hold the GIL whatever thread
+    # triggers them, which is what still reached ``/health`` from the worker).
+    # The bytes are identical: ``test_desktop_snapshot_off_loop`` compares the
+    # two builds. ``model_copy`` is shallow and builds a new object.
+    state = capture.reference.model_copy(update={"attention": capture.attention})
+    return sync_wire_payload(
+        FrontendSync(
+            epoch=state.epoch,
+            sequence=state.sequence,
+            snapshot=state,
+            live_cursor=state.history_cursor,
+        )
+    )
+
+
+def _wire_entries(entries: Sequence[Any]) -> list[dict[str, Any]]:
+    """A local journal page's rows as wire dicts (``history``); thread-safe.
+
+    Reads only the page's rows, which the page cache shares read-only, and
+    builds new dicts.
+    """
+    return visible_transcript_rows(
+        [{**json.loads(row.to_json()), "ts_source": "entry"} for row in entries]
+    )
+
+
+def _own_wire_state(shared: dict[str, Any]) -> dict[str, Any]:
+    """A caller-owned view of a (possibly coalesced) wire payload.
+
+    Copies the two levels the snapshot's callers write -- the cold-ask override
+    sets and pops TOP-LEVEL keys of ``snapshot`` only (``asks``, ``asks_open``,
+    ``asks_truncated``) -- so two viewers sharing one build cannot see each
+    other's overrides. Everything deeper is read-only after the build.
+    """
+    owned = dict(shared)
+    snapshot = owned.get("snapshot")
+    if isinstance(snapshot, dict):
+        owned["snapshot"] = dict(snapshot)
+    return owned
+
 
 #: The completion kinds the DESKTOP BRIDGE may put on the wire as a
 #: ``notification`` frame. Narrower than ``NotificationKind`` on purpose.
@@ -1494,6 +1625,14 @@ class DesktopSubscription:
     #: to the transport. Before that the queue holds only frames the snapshot
     #: supersedes, so a full queue is EVICTION, not failure (see ``publish``).
     opened: bool = False
+    #: True once the snapshot this subscriber waits for has CAPTURED its state
+    #: and watermark but is still being built off the loop (``snapshot``'s
+    #: ``on_capture``). Frames published from here on are ABOVE that watermark
+    #: -- not superseded -- so ``publish`` must treat a full queue as it does
+    #: for an opened reader (fold, else gap), never evict them. ``events``
+    #: empties the queue of the superseded frames at that same instant, so the
+    #: build starts with the whole queue budget free.
+    captured: bool = False
     #: True once this subscription has lost its transport but is still holding
     #: the bridge open (see ``_arm_dwell``). A dwelling subscription has no
     #: reader, so ``publish`` skips it, it keeps its place in ``subscribers``
@@ -1574,6 +1713,9 @@ class DesktopSessionBridge:
         # tests', a reduced app's — is an ordinary admitting bridge.
         self.retiring_probe = retiring or _never_retiring
         self.remote: AttachedSession | None = None
+        #: The one off-loop snapshot build in flight, keyed by what it was
+        #: built from (see ``_wire_state_off_loop``).
+        self._wire_inflight: _WireBuild | None = None
         self.epoch = uuid.uuid4().hex
         self.sequence = 0
         self.replay: deque[tuple[dict[str, Any], int]] = deque()
@@ -2243,7 +2385,7 @@ class DesktopSessionBridge:
             remote.set_local_cwd_callback(lambda _cwd: self.publish_frontend_replace())
             self.unsubscribers = [
                 remote.subscribe(self._event),
-                remote.subscribe_frontend(self._frontend).unsubscribe,
+                self._subscribe_frontend_updates(remote),
             ]
         return self.remote
 
@@ -2786,7 +2928,10 @@ class DesktopSessionBridge:
                     stripped_size = len(json.dumps(stripped_frame, separators=(",", ":")).encode())
                 wire_frame, wire_size = stripped_frame, stripped_size
             if sub.queue.full() or sub.queued_bytes + wire_size > REPLAY_BYTES:
-                if sub.opened:
+                # ``captured``: the snapshot's watermark is already read and its
+                # frame is being built off the loop, so this queue now holds
+                # frames ABOVE it -- evicting one would lose it, not supersede it.
+                if sub.opened or sub.captured:
                     # A READER that is behind: first try to FOLD the queued
                     # delta runs (``_compact_subscriber_queue``) -- the
                     # families that in fact overflow this queue fold under
@@ -2876,7 +3021,7 @@ class DesktopSessionBridge:
             # eviction, not folding (see ``publish``). This frame is not itself
             # a foldable family, but the queue it lands on may hold runs that
             # are, so the attempt is the same one.
-            if sub.opened and self._compact_subscriber_queue(sub, size):
+            if (sub.opened or sub.captured) and self._compact_subscriber_queue(sub, size):
                 sub.queue.put_nowait((frame, size))
                 sub.queued_bytes += size
                 return True
@@ -3262,6 +3407,21 @@ class DesktopSessionBridge:
             **window,
         }
 
+    def _subscribe_frontend_updates(self, remote: Any) -> Callable[[], None]:
+        """Relay ``remote``'s frontend updates to ``_frontend``; returns the unsubscribe.
+
+        Update-only where the facade offers it: this bridge paints every first
+        frame from its own off-loop snapshot and never read the joining
+        snapshot ``subscribe_frontend`` clones, which on a 2,000-job roster was
+        ~0.28 s of every cold open on the serving loop (PR #4012, QA round 1,
+        Q1). A facade without the method (peer viewers' doubles in tests) keeps
+        the original call.
+        """
+        updates = getattr(remote, "subscribe_frontend_updates", None)
+        if updates is not None:
+            return cast(Callable[[], None], updates(self._frontend))
+        return cast(Callable[[], None], remote.subscribe_frontend(self._frontend).unsubscribe)
+
     def _frontend(self, update: FrontendUpdate) -> None:
         # Keep the runtime's field deltas, not a full snapshot per streamed token.
         # Large roster/usage fields still pass through the shared wire budget; the
@@ -3396,7 +3556,10 @@ class DesktopSessionBridge:
             remote = self.remote
             if remote is None:
                 return {}
-            return dict(getattr(remote.frontend_state, "attention", {}) or {})
+            # The canonical object, not ``frontend_state`` (a clone of the whole
+            # roster, on the loop, once per attention poll): see
+            # ``_canonical_state``. Deep-copied because the caller owns the result.
+            return copy.deepcopy(dict(getattr(self._canonical_state(), "attention", {}) or {}))
         return await asyncio.to_thread(
             AttentionStore(self.root / "attention.db").state, f"session/{self.session_id}"
         )
@@ -3497,7 +3660,7 @@ class DesktopSessionBridge:
             remote = self.remote
             session_name = ""
             if remote is not None:
-                session_name = getattr(remote.frontend_state, "conversation_title", "") or ""
+                session_name = getattr(self._canonical_state(), "conversation_title", "") or ""
             # `compose` reads up to 128 KiB for the title and 64 KB for the
             # preview, and `refresh_attention` runs on the event loop. Off-loop
             # for the same reason the store read above is.
@@ -3592,7 +3755,44 @@ class DesktopSessionBridge:
             await asyncio.sleep(1)
 
     def state(self) -> dict[str, Any]:
-        assert self.remote is not None
+        return _wire_state_of(self._capture_wire_state())
+
+    def _canonical_state(self) -> Any:
+        """The facade's current state for reading a FEW FIELDS, without the clone.
+
+        ``AttachedSession.frontend_state`` deep-copies every job and usage row
+        so a caller can keep and mutate it; a reader of one immutable field
+        (a cursor, a title) or one it copies itself (attention) pays that for
+        nothing, on the serving loop. The canonical object is never mutated in
+        place (``FrontendStateStore.state_reference``), so reading a field off
+        it is safe; a caller that needs a mutable sub-object must copy it.
+        A remote without the accessor (test doubles) answers as before.
+        """
+        remote = self.remote
+        assert remote is not None
+        reader: Any = getattr(remote, "frontend_state_reference", None)
+        if reader is not None:
+            return reader()[1]
+        return remote.frontend_state
+
+    def _capture_wire_state(self) -> _WireCapture:
+        """What ``state()`` serializes, read now, without the clone or the dump.
+
+        O(attention) on the caller's thread: the canonical state is taken by
+        REFERENCE (``AttachedSession.frontend_state_reference``), so a caller on
+        the serving loop can read it in the same synchronous step as the bridge's
+        sequence watermark and leave the work proportional to the session to
+        :func:`_wire_state_of` on a worker.
+        """
+        remote = self.remote
+        assert remote is not None
+        reader: Any = getattr(remote, "frontend_state_reference", None)
+        if reader is not None:
+            _store, reference = reader()
+        else:
+            # A remote with no store accessor (test doubles) already hands out a
+            # caller-owned clone; serialize that as before.
+            reference = remote.frontend_state
         # A PEER'S ATTENTION IS THE OWNER'S, NOT THIS DEVICE'S LAST READ. The
         # override below publishes the RECEIPT state, and for a remote conversation
         # the author of that state is the peer's runtime: this bridge's own
@@ -3600,20 +3800,79 @@ class DesktopSessionBridge:
         # ``_read_attention``), so reading it through would be a copy of a copy --
         # one sync behind at the exact moment a completion moves it, which is the
         # moment the renderer paints its unread mark.
-        attention = (
-            dict(getattr(self.remote.frontend_state, "attention", {}) or {})
+        #
+        # Deep-copied either way: the worker serializes it later, and the
+        # bridge's own ``attention`` is replaced by receipt reads on the loop.
+        attention = copy.deepcopy(
+            dict(getattr(reference, "attention", {}) or {})
             if self.remote_row is not None
             else self.attention
         )
-        state = self.remote.frontend_state.model_copy(update={"attention": attention})
-        return sync_wire_payload(
-            FrontendSync(
-                epoch=state.epoch,
-                sequence=state.sequence,
-                snapshot=state,
-                live_cursor=state.history_cursor,
-            )
-        )
+        return _WireCapture(reference=reference, attention=attention)
+
+    async def _wire_state_off_loop(self, capture: _WireCapture) -> dict[str, Any]:
+        """:func:`_wire_state_of` on the snapshot pool, coalesced per state.
+
+        Opens that captured the SAME canonical object and the same attention
+        share one build (a reconnect storm or several windows on one huge
+        session would otherwise each pay the whole clone and dump); each gets
+        its own top two levels (:func:`_own_wire_state`). Shielded, so one
+        viewer disconnecting mid-build cannot cancel the build another viewer
+        is waiting on.
+
+        ABANDONED BUILDS ARE WITHDRAWN (review round 1, R1-m1). Each build
+        counts its waiters; when the LAST one leaves (the viewer disconnected or
+        the open was cancelled) a build still QUEUED on the pool is cancelled,
+        because nobody will read it and a busy session installs a new state on
+        almost every event, so successive opens rarely coalesce -- in a
+        reconnect storm a live viewer's open otherwise waited behind several
+        abandoned multi-second builds (repro: 6 cancelled opens left 4 queued).
+        A build already RUNNING is let finish: a pool thread cannot be
+        interrupted, and the entry stays coalescable for the next open of the
+        same state meanwhile.
+        """
+        inflight = self._wire_inflight
+        if (
+            inflight is not None
+            and not inflight.future.done()
+            # A withdrawn build settles its loop-side wrapper one callback
+            # later; joining it in that window would hand this open a
+            # CancelledError it never asked for.
+            and not inflight.work.cancelled()
+            and inflight.capture.reference is capture.reference
+            and inflight.capture.attention == capture.attention
+        ):
+            entry = inflight
+            future = entry.future
+        else:
+            work = _snapshot_pool().submit(_wire_state_of, capture)
+            future = asyncio.wrap_future(work)
+            entry = _WireBuild(capture=capture, work=work, future=future)
+            self._wire_inflight = entry
+
+            def settled(done: asyncio.Future[dict[str, Any]]) -> None:
+                # Drop the entry so a finished build does not pin a large state
+                # object (and its payload) on the bridge until the next open.
+                if self._wire_inflight is entry:
+                    self._wire_inflight = None
+                # A build nobody awaits any more must not log "exception never
+                # retrieved".
+                if not done.cancelled():
+                    done.exception()
+
+            future.add_done_callback(settled)
+        entry.waiters += 1
+        try:
+            built = await asyncio.shield(future)
+        finally:
+            entry.waiters -= 1
+            if entry.waiters == 0 and not future.done():
+                # ``Future.cancel`` on the pool's own future succeeds only while
+                # the item is still queued; ``wrap_future`` then cancels
+                # ``future`` and ``settled`` drops the entry. A running build
+                # refuses and finishes normally.
+                entry.work.cancel()
+        return _own_wire_state(built)
 
     def _cold_verdict(self) -> bool:
         """Whether this bridge's facade is COLD, read now, with no I/O.
@@ -3709,7 +3968,14 @@ class DesktopSessionBridge:
         peer_journal_source: bool = False,
         supplements: bool = False,
         diff_bindings: bool = False,
+        on_capture: Callable[[int], None] | None = None,
     ) -> dict[str, Any]:
+        """The authoritative snapshot frame.
+
+        ``on_capture`` is called with the frame's ``seq`` the instant the state
+        and watermark are captured, BEFORE the off-loop build (see the capture
+        comment below); ``events`` uses it to stop evicting a pre-open queue.
+        """
         # THE FRAME'S DEADLINE STARTS HERE, at the request, not at its own read:
         # everything this method does before the page (the attention glance, the
         # canonical state) is time the renderer pays for too, so it comes out of
@@ -3751,7 +4017,11 @@ class DesktopSessionBridge:
         # (``session/attached.py``) and ``history_cursor`` is a real field on it,
         # so this is the same predicate the clone answered.
         remote = self.remote
-        cursor = remote.frontend_state.history_cursor if remote is not None else None
+        # ``_canonical_state``, NOT ``remote.frontend_state``: on an
+        # ``AttachedSession`` that property is a deep clone of every job (the
+        # serve stall's second on-loop cost, measured ~1 s for a 2,000-job
+        # roster), paid here for one string.
+        cursor = self._canonical_state().history_cursor if remote is not None else None
         history: dict[str, Any] = {"entries": [], "has_more": False, "cursor_missing": False}
         # The gate is about the STATE, not about bounding the page, and the empty
         # page it produces is a signal a reader ACTS on: "no history cursor, so
@@ -3843,14 +4113,25 @@ class DesktopSessionBridge:
         # its own construction -- and a subscriber that dropped everything at or
         # below it would have dropped frames the snapshot does not contain.
         #
-        # That ordering is what makes the pre-open supersession in :meth:`events`
-        # provably lossless rather than merely plausible: at the moment this
-        # returns, every frame still in a subscriber's queue was published before
-        # the ``self.state()`` below (no await follows it, so ``publish`` cannot
-        # interleave), hence every one of them has ``seq <= this frame's seq`` and
-        # is already inside ``frontend``. Do NOT introduce an await between these
-        # two lines and the ``return``; ``tests/unit/server/test_desktop_sessions.py``
-        # pins it.
+        # THE CAPTURE IS ATOMIC; THE BUILD IS NOT ON THE LOOP (serve stall,
+        # 2026-11-15). The state is captured BY REFERENCE (``_capture_wire_state``,
+        # O(1)) in the same synchronous step as ``self.sequence`` -- so every
+        # frame published before the capture is ``<= seq`` and inside the
+        # captured state, exactly as before. The clone and ``sync_wire_payload``
+        # (seconds on a large session, which held the loop until ``/health``
+        # timed out) then run on the snapshot pool, and the loop keeps
+        # publishing meanwhile. Those frames are ``> seq`` -- NOT in this
+        # snapshot -- and must reach the subscriber after it: ``on_capture``
+        # lets ``events`` drain the superseded frames at the capture instant
+        # and switch the queue's overflow policy from eviction to backpressure
+        # (``DesktopSubscription.captured``), and its post-snapshot drain keeps
+        # every frame above the watermark. The captured object never changes
+        # (the store installs new objects; see
+        # ``FrontendStateStore.state_reference``), so the worker serializes the
+        # state AS OF the watermark however long it takes.
+        # ``tests/unit/server/test_desktop_sessions.py`` pins the capture order;
+        # ``tests/unit/server/test_desktop_snapshot_off_loop.py`` pins the
+        # off-loop build and the frames published during it.
         # COLD ASK ROWS COME FROM THE DURABLE INDEX (#1363 QA Q-1, SA-D8).
         #
         # A COLD FACADE'S ASK FOLD IS NOT DERIVABLE AND NOT TRUSTWORTHY. Two
@@ -3864,9 +4145,9 @@ class DesktopSessionBridge:
         # writes and what ``GET /v1/desktop/asks`` reads, and this method's own
         # ``cold`` verdict is exactly "no verified owner to ask".
         #
-        # READ BEFORE ``state()``, and that ordering is the contract above rather
-        # than tidiness: no await may sit between the state read, the watermark
-        # read and the return, or a subscriber's queued frame could be dropped as
+        # READ BEFORE THE CAPTURE, and that ordering is the contract above rather
+        # than tidiness: no await may sit between the state capture and the
+        # watermark read, or a subscriber's queued frame could be dropped as
         # superseded on a watermark that never contained it. ``_cold_ask_rows`` is
         # the one await, so it happens first. An index with no entry for this
         # session leaves the facade's own values alone: absence of the file is
@@ -3874,15 +4155,23 @@ class DesktopSessionBridge:
         # is empty, and a runtime that never ran the engine must keep reading as a
         # host that cannot answer (``asks_open`` absent).
         cold_asks = await self._cold_ask_rows()
-        state = self.state()
+        capture = self._capture_wire_state()
         # THE VERDICT IS ASKED AGAIN HERE, not carried over (review round 1, m1).
         # The read above yields the loop twice, and a facade can finish a resync
         # in that window; applying rows judged "cold" a moment ago would then lay
         # index rows OVER a live owner's own fold — and a delta at or below this
         # frame's watermark would be dropped as superseded while the frame carried
         # the older rows. The verdict is three local reads, so it is cheap to ask
-        # again, and this is the last look before the assignment.
-        if cold_asks is not None and self._cold_verdict():
+        # again, and it is asked AT THE CAPTURE, with the cold fields, so the
+        # verdict describes the captured state rather than whatever the facade
+        # became while the build ran off the loop.
+        apply_cold_asks = cold_asks is not None and self._cold_verdict()
+        cold_fields = self._cold_fields()
+        seq, epoch = self.sequence, self.epoch
+        if on_capture is not None:
+            on_capture(seq)
+        state = await self._wire_state_off_loop(capture)
+        if apply_cold_asks and cold_asks is not None:
             rows, open_count = cold_asks
             snapshot = state.get("snapshot")
             if isinstance(snapshot, dict):
@@ -3903,7 +4192,6 @@ class DesktopSessionBridge:
                 # the rows this frame carries.
                 snapshot.pop("asks_truncated", None)
                 bound_ask_snapshot_in_place(snapshot)
-        seq, epoch = self.sequence, self.epoch
         if open_trace.enabled():
             open_trace.mark(
                 "a.snap.total", (time.monotonic() - started) * 1000, session=self.session_id
@@ -3916,7 +4204,7 @@ class DesktopSessionBridge:
             "payload": {
                 "frontend": state,
                 "history": history,
-                **self._cold_fields(),
+                **cold_fields,
             },
         }
 
@@ -4183,9 +4471,10 @@ class DesktopSessionBridge:
             # reason a LOCAL page needs no negotiation to be honest. Stamped here
             # rather than left to a model default so the wire says so on every row
             # a consumer might branch on.
-            "entries": visible_transcript_rows(
-                [{**json.loads(row.to_json()), "ts_source": "entry"} for row in page.entries]
-            ),
+            # Encoded in a thread: a page of fat rows (whole tool results) is
+            # tens of ms of JSON round trip, and the snapshot asks for one on
+            # every open (serve stall, 2026-11-15 real-path sampler).
+            "entries": await asyncio.to_thread(_wire_entries, page.entries),
             "has_more": page.has_more,
             "cursor_missing": page.reconciled,
             "has_newer": page.has_newer,
@@ -6751,6 +7040,48 @@ class DesktopSessionBridge:
                 if not gap
                 else []
             )
+            disconnected = False
+            # NOT `pending`: `events`'s `finally` uses that name for the
+            # exception still propagating through it (main's C5 diagnostic), and
+            # two different values under one name in one function is the kind of
+            # trap a reader pays for later.
+            pending_frames: list[dict[str, Any]] = []
+            replayed_sequences = {prior["seq"] for prior in replay}
+
+            def drain(watermark: int) -> None:
+                nonlocal disconnected
+                while not disconnected:
+                    try:
+                        item = sub.queue.get_nowait()
+                    except asyncio.QueueEmpty:
+                        break
+                    if item is None:  # ``close()``/``_disconnect`` ran mid-build
+                        disconnected = True
+                        break
+                    frame, size = item
+                    sub.queued_bytes -= size
+                    # Source metadata is not folded into frontend and a bounded
+                    # snapshot need not carry its IDs. Preserve it through cutover
+                    # unless this exact frame is already in the initial replay;
+                    # ordinary frontend facts retain their existing supersession.
+                    order_fact = (
+                        sub.journal_order
+                        and frame.get("type") == "event"
+                        and frame.get("payload", {}).get("type") == JOURNAL_ORDER_EVENT
+                    )
+                    already_replayed = frame["seq"] in replayed_sequences
+                    if frame["seq"] > watermark or (order_fact and not already_replayed):
+                        pending_frames.append(frame)
+
+            def captured(watermark: int) -> None:
+                # THE CAPTURE INSTANT (``snapshot``'s ``on_capture``), still on the
+                # loop and in the same synchronous step as the watermark read: every
+                # frame queued so far is ``<= watermark`` and superseded, so drop it
+                # now and stop EVICTING -- what the queue receives while the frame
+                # is built off the loop is above the watermark and must be kept.
+                drain(watermark)
+                sub.captured = True
+
             snapshot = await self.snapshot(
                 entry_times=entry_times,
                 open_frame=open_frame,
@@ -6761,6 +7092,7 @@ class DesktopSessionBridge:
                     "DiffBindingReadOptions",
                     {"diff_bindings": True} if sub.diff_bindings else {},
                 ),
+                on_capture=captured,
             )
             if open_trace.enabled():
                 open_trace.mark(
@@ -6770,50 +7102,22 @@ class DesktopSessionBridge:
                     open_frame=open_frame,
                 )
             # THE PRE-OPEN WINDOW ENDS HERE, AND IT IS CLOSED SYNCHRONOUSLY.
-            # ``snapshot()``'s state and sequence are its last reads with nothing
-            # awaiting between them, so no frame can have been published after
-            # the watermark this loop compares against -- which is what makes the
-            # split below exact rather than a race: everything at or below the
+            # ``snapshot()`` captures its state and sequence with nothing
+            # awaiting between them, and the frames published while it then
+            # built the frame off the loop carry ``seq`` above that watermark --
+            # which is what makes the split below exact rather than a race:
+            # everything at or below the
             # watermark is already inside ``frontend`` and is dropped as
             # superseded, and anything above it is newer than the snapshot and
             # must be delivered after it. Order corrections are the exception:
             # they are not frontend state and their IDs may be outside both the
             # bounded page and order_ids lookup; the drain below preserves them.
             #
-            # The frames are drained BEFORE ``open`` is yielded, and ``opened``
-            # is set before the first yield of the handshake, so the overflow
-            # policy switches to backpressure at the same moment the subscriber
-            # stops being able to lose anything by eviction.
-            disconnected = False
-            # NOT `pending`: `events`'s `finally` uses that name for the
-            # exception still propagating through it (main's C5 diagnostic), and
-            # two different values under one name in one function is the kind of
-            # trap a reader pays for later. The rename is this branch's, so
-            # main's block stays byte-identical.
-            pending_frames: list[dict[str, Any]] = []
-            replayed_sequences = {prior["seq"] for prior in replay}
-            while True:
-                try:
-                    item = sub.queue.get_nowait()
-                except asyncio.QueueEmpty:
-                    break
-                if item is None:  # ``close()``/``_disconnect`` ran mid-build
-                    disconnected = True
-                    break
-                frame, size = item
-                sub.queued_bytes -= size
-                # Source metadata is not folded into frontend and a bounded
-                # snapshot need not carry its IDs. Preserve it through cutover
-                # unless this exact frame is already in the initial replay;
-                # ordinary frontend facts retain their existing supersession.
-                order_fact = (
-                    sub.journal_order
-                    and frame.get("type") == "event"
-                    and frame.get("payload", {}).get("type") == JOURNAL_ORDER_EVENT
-                )
-                already_replayed = frame["seq"] in replayed_sequences
-                if frame["seq"] > snapshot["seq"] or (order_fact and not already_replayed):
-                    pending_frames.append(frame)
+            # The frames are drained BEFORE ``open`` is yielded. The overflow
+            # policy switched to backpressure at the capture (``captured``),
+            # the moment the queue started receiving frames the snapshot does
+            # not contain; ``opened`` below keeps it there.
+            drain(snapshot["seq"])
             sub.opened = True
             open_payload: dict[str, Any] = {
                 "subscription_id": sub.id,
@@ -10894,3 +11198,6 @@ class DesktopSessions:
     async def close(self) -> None:
         await asyncio.gather(*(bridge.close() for bridge in self.bridges.values()))
         self.bridges.clear()
+        # Every bridge is gone, so no open can await a build any more; drop the
+        # queued ones rather than let the interpreter's exit join run them.
+        shutdown_snapshot_pool()
