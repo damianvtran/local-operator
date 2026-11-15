@@ -1,0 +1,42 @@
+{
+  "note": "Pinned SAS vectors for pair_op.sas_code (HKDF-SHA256, info=lop-pair-sas-v1, 8-byte OKM mod 10^6) and sas_commit (sha256(np)). Shared by tests/unit/operator/test_pair_sas_vectors.py and the PWA (src/lib/pair-sas.test.ts); the phone apps pin the same file; all values base64url unpadded; spki = uncompressed P-256 point.",
+  "label": "lop-pair-sas-v1",
+  "vectors": [
+    {
+      "np": "js63R1QrLI3sByQEgbj0d38_g1Cj2vVCxHoDP_TThGQ",
+      "nd": "zwGNQ0FvfX5T-DpqaylXZQGSXwelFz9NT4-3zdAgSRw",
+      "device_spki": "BLj6GkrL2QC3iP8fhSTM__HdKj1skX5ACa9gT71AbbcCmlzDLRT8g3JmhEUnSB9_BstPs0czskypLoYfcsx8rjc",
+      "operator_spki": "BFY94YFdRexHIFm27sXgemWjr8I5DdPaaU-qLd81qH4l_E8CpL4zKH285hSVGt2B60axSMR2kv_0RcgL5E4c-y4",
+      "approval_id": "appr_vector_0",
+      "commit": "89pkOuJC4hr1ILIOw2sF5TrcvKXE5oa_QK74acP5-2A",
+      "sas": "476852"
+    },
+    {
+      "np": "DWI6_ZpbrVnzs8DyaqcqTqoixOdUeUwsi1BG6YC2u-I",
+      "nd": "3F3cVhde5yQHZdWhd3ljBnw7J9wW0myZmGFom56GSgw",
+      "device_spki": "BMz3qHvlyhbqwAiSPaseKLgSMQWqPM2ZGHBSIspdOnzGuycuqOVTCPkCUslqLpVr6LY25XjjLTZj_1tv_l6dbLI",
+      "operator_spki": "BL_CQ5RxNYtqXzlWWIw78z9dE8C5eiedSBfL-N2ejgps3UTbh-pBQQfOKLVThdGAcRAtYh9eA8qCNGGk5UBBFNY",
+      "approval_id": "appr_vector_1",
+      "commit": "5OSLwEWv1Hk1c8n3_g4kXpJFZsIA-1aAtgPzJVh5nmQ",
+      "sas": "513182"
+    },
+    {
+      "np": "yKPmk2--NWIQ_zlCHCAoPdJObu6vrMHS8WaZI_xSWvo",
+      "nd": "gQlVPAQ9sMd46Dh9BdjRI5yNmgP6Qhdjwe5xL74DVYA",
+      "device_spki": "BPcoxX5HEV8uIMwNy_loChqawpMJ_CiSivfqAc02tLe5FON4SMOmrrqQheMUJiBnHamiRuQb9u89pqTGEub0nCk",
+      "operator_spki": "BBg4229cCG6PVFH6degX5yM2nGVC5Yl6vWmkRCpYpfCTfxRMHjLzJ11IENQUAxwzR4b7SgriT8XrQ7X6CjSh0o0",
+      "approval_id": "appr_vector_2",
+      "commit": "IY_MPCJhxoKREuA_IZNu8QE7NqIhhojaORIOD_6lQMo",
+      "sas": "115952"
+    },
+    {
+      "np": "n1lNnlPKr2lpizQhuXpkFwYQEl_RomG2lbRwdKjdqHM",
+      "nd": "Iwq-ED3rH_ymWAs6WQHQa9KSY9qCYfCDy3isToE9T1k",
+      "device_spki": "BASUvqYA0PZM8mNaSbrNv3iBctjrcgh4JPCOhU1zjly5yDzeKYFFhVFXeDnf2JItju2e0UyU_2iOqXkLu-XnJFM",
+      "operator_spki": "BMm8V0zTcPywqJJupy9lV8JNCO6W5B7C3UBZuvg1fLDZw_vSKLT8wkbXf34VUhV1qaOW8RrP-_uxbUf3EBWTZEM",
+      "approval_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "commit": "w7PawCPzNid2rjZDNGtX1tVZm4MFMTFLS3HzTvK69uU",
+      "sas": "996347"
+    }
+  ]
+}
