@@ -161,6 +161,8 @@
   "wire.settings.desktop_launch_command.help": "Пусто = найти приложение (local-operator-ui, затем приложение macOS). '{'session'}' — это ID сессии.",
   "wire.settings.desktop_launch_command.label": "команда запуска",
   "wire.settings.desktop_launch_command.placeholder": "local-operator-ui --open-session '{'session'}'",
+  "wire.settings.desktop_remote_files_cache_bytes.help": "Место на диске для копий файлов из разговоров, которые хранятся на других устройствах, чтобы они быстро открывались здесь. Самые старые копии удаляются первыми. 0 — ничего не хранить после показа.",
+  "wire.settings.desktop_remote_files_cache_bytes.label": "кэш удалённых файлов (байты)",
   "wire.settings.detail_length.help": "Устарело. Заменено движком сжатия.",
   "wire.settings.detail_length.label": "Длина детализации",
   "wire.settings.display_comfortable_rows.choice.false.description": "компактно, больше истории",
