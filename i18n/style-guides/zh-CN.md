@@ -12,8 +12,16 @@ for translators and the auditor.
 - Terse: four-to-eight character lines where possible; verbs for actions
   (保存, 继续, 重试, 取消).
 - No sentence-final 。 on short labels and statuses; full sentences keep it.
-- No 啦 / 哦 / 呀 particles, no ！ in status copy. "请" only where the English
-  says "please" (blocking dialogs).
+- No 啦 / 哦 / 呀 particles, no ！ in status copy.
+- "请" opens what the reader must do — a blocking dialog, a refusal or error
+  body telling them the next step, a field prompt — whether or not the
+  English says "please". Keep it at the head of that clause (value- or
+  sentence-initial, or after ，；： when a statement comes first), at most
+  once per sentence; not on buttons, menu items, statuses or headings.
+- "请" + a person (请你的智能体…, 请你点击…) reports someone else's request;
+  that verb is not the directive form and stays as written.
+- Existing values predate this rule: re-audit a namespace when you touch it
+  rather than sweeping the catalogues to comply.
 - No 您/你 repetition: Chinese drops pronouns naturally — prefer verb-forward
   phrasing ("会话已保存" over "你的会话已被保存").
 
