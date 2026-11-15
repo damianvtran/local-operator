@@ -6775,15 +6775,28 @@ def _job_lifecycle(jobs: Sequence[JobState]) -> tuple[tuple[str, str, bool], ...
     return tuple((job.id, job.status, job.queued) for job in jobs)
 
 
-def _process_cpu_s() -> float:
-    """Process CPU seconds, for the slow-apply diagnostic's wall-vs-CPU split.
+def _resolve_process_cpu_clock(clock: Any = time) -> Callable[[], float]:
+    """The process-CPU-seconds reader for the slow-apply diagnostic's wall-vs-CPU split.
 
-    The same quantity as :func:`time.process_time`, read through
-    ``clock_gettime`` because it is paid on EVERY apply, slow or not: on this
-    macOS host (load ~60) ``process_time`` measured ~2.2 us a read against
-    ~0.9 us for ``CLOCK_PROCESS_CPUTIME_ID`` (best of 5 x 200k).
+    Prefers ``clock_gettime(CLOCK_PROCESS_CPUTIME_ID)`` because the read is paid
+    on EVERY apply, slow or not: on this macOS host (load ~60)
+    ``process_time`` measured ~2.2 us a read against ~0.9 us for the
+    ``clock_gettime`` form (best of 5 x 200k). Both ``clock_gettime`` and the
+    constant are Unix-only (absent on Windows CPython), so this falls back to
+    :func:`time.process_time` -- the same quantity -- rather than raising on
+    every apply there (review R1-B1). Resolved once at import, like the guards
+    in ``network/credentials/client.py`` and ``session/runtime/boot_cost.py``,
+    so the per-apply cost stays a single call. ``clock`` is injectable only so
+    a test can resolve against a Windows-shaped ``time`` module.
     """
-    return time.clock_gettime(time.CLOCK_PROCESS_CPUTIME_ID)
+    clock_id = getattr(clock, "CLOCK_PROCESS_CPUTIME_ID", None)
+    if clock_id is None or not hasattr(clock, "clock_gettime"):
+        return cast("Callable[[], float]", clock.process_time)
+    gettime = clock.clock_gettime
+    return lambda: gettime(clock_id)
+
+
+_process_cpu_s: Callable[[], float] = _resolve_process_cpu_clock()
 
 
 class FrontendStateStore:
@@ -7328,10 +7341,9 @@ class FrontendStateStore:
     # The under-threshold cost is the clock reads alone (perf_counter at start,
     # before and after the fan-out, plus one process-CPU read at start; ~1.1 us
     # total, see ``_process_cpu_s``). The line carries changed-field NAMES and
-    # counts only, never values: changes hold conversation content. (Labelled
-    # ``fields=``, not ``change_keys=``: an agent reading this line through
-    # lop's tool output saw ``change_keys=<a>,<b>`` masked as a credential
-    # pair, which would hide the one field the line exists to show.)
+    # counts only, never values: changes hold conversation content. (lop's
+    # own tool-output view may mask ``key=value``-shaped text such as this
+    # line when an agent reads it; the product log file is written unmasked.)
     # Rate-limited per store so a stalled
     # host emitting a slow delta every tick yields one line per window with a
     # suppressed count, not a log flood. Class attributes rather than
@@ -7389,17 +7401,29 @@ class FrontendStateStore:
         suppressed, self._slow_apply_suppressed = self._slow_apply_suppressed, 0
         self._slow_apply_logged_at = now
         # Developer diagnostic, English and i18n-exempt (AGENTS.md: log lines
-        # are not user-visible copy). Keys of ``changes`` are state field names;
-        # job ids (``job_deltas`` keys) are deliberately counted, not listed.
+        # are not user-visible copy). ``changes`` keys are logged only when they
+        # are declared ``FrontendSessionState`` fields: ``apply_update`` takes
+        # any key off the wire, so an undeclared one is counted
+        # (``fields_other``), never named, keeping "names only" a local
+        # guarantee rather than a trust in the leader (review R1-m1).
+        # ``job_deltas`` is ``{"upserted": [rows], "removed": [ids],
+        # "roster_size": n, "order": [ids]}``; the count is the job ROWS it
+        # moves (upserted + removed), the roster-size dimension the reducer cost
+        # scales with -- not its 1-4 dict keys (review R1-M1). Job ids are
+        # counted, never listed.
+        declared = FrontendSessionState.model_fields
+        field_names = sorted(key for key in update.changes if key in declared)
         logger.warning(
             "frontend state: slow apply site=%s session=%s subscribers=%d "
-            "fields=%s job_deltas=%d appends=%d degraded=%s "
+            "fields=%s fields_other=%d job_deltas=%d appends=%d degraded=%s "
             "wall_ms=%.1f reducer_ms=%.1f fanout_ms=%.1f cpu_ms=%.1f suppressed=%d",
             site,
             self._state.session_id,
             subscriber_count,
-            ",".join(sorted(update.changes)) or "-",
-            len(update.job_deltas),
+            ",".join(field_names) or "-",
+            len(update.changes) - len(field_names),
+            len(update.job_deltas.get("upserted") or ())
+            + len(update.job_deltas.get("removed") or ()),
             sum(len(rows) for rows in update.job_trajectory_appends.values()),
             update.degraded,
             (reducer_s + fanout_s) * 1000,

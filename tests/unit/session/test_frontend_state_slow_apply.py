@@ -25,6 +25,7 @@ from local_operator.session.frontend_state import (
     FrontendSessionState,
     FrontendStateStore,
     FrontendUpdate,
+    JobState,
 )
 
 _LOGGER = frontend_state.logger.name
@@ -177,3 +178,97 @@ def test_under_threshold_stays_silent(clock: _Clock, caplog: pytest.LogCaptureFi
         store.apply_update(FrontendUpdate(epoch="e1", sequence=2, changes={"goal": "x"}))
 
     assert _slow_lines(caplog) == []
+
+
+def test_windows_shaped_time_module_falls_back_to_process_time(
+    clock: _Clock, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Review R1-B1: ``clock_gettime`` and its CPU clock id are Unix-only.
+
+    Windows CPython has neither, so the module's ``time`` binding is swapped
+    for one without them (as the fixture does for the fake wall clock) and the
+    CPU reader is re-resolved against it, the way import resolves it there.
+    Every apply must still succeed and the slow line must still carry cpu_ms.
+    """
+    windows_time = SimpleNamespace(perf_counter=clock.perf_counter, process_time=lambda: 7.0)
+    monkeypatch.setattr(frontend_state, "time", windows_time)
+    monkeypatch.setattr(
+        frontend_state,
+        "_process_cpu_s",
+        frontend_state._resolve_process_cpu_clock(windows_time),
+    )
+    store = _store()
+    store.subscribe(_slow_subscriber(clock, 0.060))
+
+    with caplog.at_level(logging.WARNING, logger=_LOGGER):
+        store.mutate(goal="windows")
+        clock.now += 10
+        store.apply_update(FrontendUpdate(epoch="e1", sequence=2, changes={"goal": "y"}))
+
+    assert store.state.goal == "y"
+    lines = [record.getMessage() for record in _slow_lines(caplog)]
+    assert len(lines) == 2
+    assert all("cpu_ms=0.0" in line for line in lines)
+
+
+def test_unix_time_module_resolves_the_cpu_clock() -> None:
+    reader = frontend_state._resolve_process_cpu_clock(
+        SimpleNamespace(
+            clock_gettime=lambda clock_id: float(clock_id),
+            CLOCK_PROCESS_CPUTIME_ID=12,
+            process_time=lambda: -1.0,
+        )
+    )
+    assert reader() == 12.0
+
+
+def _job_deltas_value(message: str) -> int:
+    return int(message.split("job_deltas=", 1)[1].split()[0])
+
+
+def test_job_deltas_counts_roster_rows_not_dict_keys(
+    clock: _Clock, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Review R1-M1: ``job_deltas`` is a dict of arms; the line counts rows."""
+    store = _store()
+    store.subscribe(_slow_subscriber(clock, 0.060))
+    roster = [
+        JobState(id=f"child-{index:02d}", type="task", label=f"child {index}")
+        for index in range(50)
+    ]
+
+    with caplog.at_level(logging.WARNING, logger=_LOGGER):
+        seed = store.mutate(jobs=roster)
+        clock.now += 10
+        # 30 rows change, 20 leave.
+        moved = store.mutate(
+            jobs=[job.model_copy(update={"label": f"moved {job.id}"}) for job in roster[:30]]
+        )
+
+    assert len(seed.job_deltas["upserted"]) == 50
+    assert (len(moved.job_deltas["upserted"]), len(moved.job_deltas["removed"])) == (30, 20)
+    first, second = (record.getMessage() for record in _slow_lines(caplog))
+    assert _job_deltas_value(first) == 50
+    assert _job_deltas_value(second) == 50
+    assert "child-0" not in first + second  # ids are counted, never listed
+
+
+def test_undeclared_change_keys_are_counted_not_named(
+    clock: _Clock, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Review R1-m1: ``apply_update`` takes any key off the wire."""
+    store = _store()
+    store.subscribe(_slow_subscriber(clock, 0.060))
+
+    with caplog.at_level(logging.WARNING, logger=_LOGGER):
+        store.apply_update(
+            FrontendUpdate(
+                epoch="e1", sequence=1, changes={"goal": "x", "user secret text": _SECRET}
+            )
+        )
+
+    [record] = _slow_lines(caplog)
+    message = record.getMessage()
+    assert "user secret text" not in message
+    assert _SECRET not in message
+    assert "fields=goal fields_other=1 " in message
