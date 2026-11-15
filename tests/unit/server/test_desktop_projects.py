@@ -823,13 +823,15 @@ async def test_forced_done_is_true_only_for_the_call_that_made_the_transition(ap
     assert reclosed.json()["result"]["forced_done"] is True
 
 
-def _write_paged_row(root: Path, project_id: str, name: str, *, stamp_ns: int) -> None:
+def _write_paged_row(
+    root: Path, project_id: str, name: str, *, stamp_ns: int, **fields: Any
+) -> None:
     """Write one valid row straight into the route's store with a stated mtime."""
     from local_operator.projects import Project
 
     projects_dir = root / "projects"
     projects_dir.mkdir(parents=True, exist_ok=True)
-    row = Project(id=project_id, name=name)
+    row = Project(id=project_id, name=name, **fields)
     path = projects_dir / f"{project_id}.json"
     path.write_text(json.dumps(row.model_dump(mode="json", by_alias=True)))
     os.utime(path, ns=(stamp_ns, stamp_ns))
@@ -971,7 +973,13 @@ async def test_session_projects_is_empty_for_unlinked_and_unknown_sessions(api) 
     for session_id in (SESSION_B, "ffffffffffff"):
         answer = await client.get(f"/v1/desktop/sessions/{session_id}/projects")
         assert answer.status_code == 200
-        assert answer.json()["result"] == {"session_id": session_id, "projects": []}
+        assert answer.json()["result"] == {
+            "session_id": session_id,
+            "projects": [],
+            "total_rows": 1,
+            "loaded_rows": 1,
+            "truncated": False,
+        }
 
     # Unlinking empties it again: the read is live, not a cached index.
     await client.delete(f"/v1/desktop/projects/{project_id}/links/{SESSION_A}")
@@ -979,18 +987,73 @@ async def test_session_projects_is_empty_for_unlinked_and_unknown_sessions(api) 
     assert after.json()["result"]["projects"] == []
 
 
-@pytest.mark.parametrize(
-    "bad",
-    ["nope", "ABCDEF012345", "0123456789abc", "..%2F..%2Fetc", "0123456789a%2F"],
-)
+@pytest.mark.parametrize("bad", ["nope", "ABCDEF012345", "0123456789abc"])
 async def test_session_projects_refuses_malformed_ids(api, bad: str) -> None:
+    """A single path segment that only the pattern can refuse is exactly a 422."""
     client, _root = api
     refused = await client.get(f"/v1/desktop/sessions/{bad}/projects")
-    # 422 from the path pattern; an encoded slash may instead fail to route
-    # (404). Either way no handler ran and nothing was read for that id.
+    assert refused.status_code == 422
+    assert refused.json().get("result") is None
+
+
+@pytest.mark.parametrize("bad", ["..%2F..%2Fetc", "0123456789a%2F"])
+async def test_session_projects_refuses_traversal_shaped_ids(api, bad: str) -> None:
+    # An encoded slash may decode before routing and fail to match the route at
+    # all (404) rather than reach the pattern (422). Either way no handler ran
+    # and nothing was read for that id.
+    client, _root = api
+    refused = await client.get(f"/v1/desktop/sessions/{bad}/projects")
     assert refused.status_code in (404, 422)
-    if refused.status_code == 422:
-        assert "result" not in refused.json() or refused.json().get("result") is None
+    assert refused.json().get("result") is None
+
+
+async def test_session_projects_returns_links_past_the_recency_page(api, monkeypatch) -> None:
+    """Q1: a linked row that aged off the page is still in the chat's tab.
+
+    The board is page-scoped by design; the chat tab's contract is ANY linked
+    project. Two dormant rows are linked (one work link, one coordination
+    link), one dormant row only MENTIONS the id in its description (the
+    substring prefilter must not admit it), and newer rows fill the page.
+    """
+    from local_operator import projects as projects_module
+
+    client, root = api
+    monkeypatch.setattr(projects_module, "_MAX_ROWS", 2)
+    base = 1_700_000_000_000_000_000
+    _write_paged_row(
+        root, "old-work", "old-work", stamp_ns=base, sessions=[SESSION_A], updated_at=1.0
+    )
+    _write_paged_row(
+        root,
+        "old-filed",
+        "old-filed",
+        stamp_ns=base + 1,
+        coordination_sessions=[SESSION_A],
+        updated_at=2.0,
+    )
+    _write_paged_row(
+        root, "old-mention", "old-mention", stamp_ns=base + 2, description=f"see {SESSION_A}"
+    )
+    _write_paged_row(
+        root, "new-linked", "new-linked", stamp_ns=base + 10, sessions=[SESSION_A], updated_at=3.0
+    )
+    _write_paged_row(root, "new-other", "new-other", stamp_ns=base + 11, sessions=[SESSION_B])
+
+    listed = (await client.get("/v1/desktop/projects")).json()["result"]
+    assert {row["id"] for row in listed["projects"]} == {"new-linked", "new-other"}
+
+    answer = await client.get(f"/v1/desktop/sessions/{SESSION_A}/projects")
+    assert answer.status_code == 200
+    result = answer.json()["result"]
+    ids = [row["id"] for row in result["projects"]]
+    assert sorted(ids) == ["new-linked", "old-filed", "old-work"]
+    # Listing order (status rank, then newest first) across page and off-page.
+    assert ids == ["new-linked", "old-filed", "old-work"]
+    assert (result["total_rows"], result["loaded_rows"], result["truncated"]) == (5, 2, True)
+
+    # The other session's only link is on the page; nothing off-page leaks in.
+    other = (await client.get(f"/v1/desktop/sessions/{SESSION_B}/projects")).json()["result"]
+    assert [row["id"] for row in other["projects"]] == ["new-other"]
 
 
 async def test_session_projects_requires_the_desktop_token(api) -> None:

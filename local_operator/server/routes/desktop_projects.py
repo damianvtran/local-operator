@@ -69,9 +69,9 @@ read from files, exactly as the tool's view is.
 from __future__ import annotations
 
 import asyncio
-from typing import Annotated, Any
+from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import ValidationError
 
 from local_operator.i18n.keys import wire_errors_desktop as _wd
@@ -119,17 +119,15 @@ from local_operator.server.models.desktop_projects import (
 )
 from local_operator.server.models.schemas import CRUDResponse
 from local_operator.server.request_update import request_updates
+
+# The session-id path alias is SHARED with the catalogue routes rather than
+# copied: one pattern (twelve lowercase hex, ``projects._SESSION_ID_RE``), so a
+# malformed or traversal-shaped id is a 422 before any handler runs, and the
+# two routes cannot drift apart on what a session id is.
+from local_operator.server.routes.desktop_catalogues import SessionID
 from local_operator.server.routes.desktop_sessions import errors, reply
 
 router = APIRouter(tags=["Desktop projects"], dependencies=[Depends(require_desktop)])
-
-#: A session id as the store admits it (``projects._SESSION_ID_RE``: twelve
-#: lowercase hex). Declared on the path, the sibling session routes' way
-#: (``desktop_catalogues``, ``desktop_session_files``), so a malformed or
-#: traversal-shaped id is a 422 before any handler runs — and an id the store
-#: could never have linked is refused rather than answered with a misleading
-#: "no projects".
-SessionID = Annotated[str, Path(pattern=r"^[a-f0-9]{12}$")]
 
 
 def _registry(request: Request) -> ProjectRegistry:
@@ -307,6 +305,15 @@ async def session_projects(session_id: SessionID, request: Request) -> CRUDRespo
     sees it. The registry sorts that set by name; it is re-sorted here with
     ``_listing_order`` so the tab and the sidebar board agree on order.
 
+    NOT page-scoped, unlike the board: the operator's contract for the chat
+    tab is ANY linked project, and a dormant row a chat filed long ago is the
+    one the recency page drops first (QA round 1, Q1). When the page is
+    truncated the off-page rows linked to this session are read from disk
+    (``projects_linked_off_page``, a substring-prefiltered scan, off the event
+    loop like every read here) and merged before ordering. The page fields are
+    still declared so a client can see the store was paged; ``projects`` is
+    complete either way.
+
     An unknown or never-linked id answers 200 with ``projects: []``: the store
     keeps no session index to 404 against, and "this chat has no projects" is
     the truthful answer for both. Gated by the ``projects_by_session``
@@ -316,14 +323,25 @@ async def session_projects(session_id: SessionID, request: Request) -> CRUDRespo
 
         def read() -> SessionProjects:
             registry = _registry(request)
-            linked = _listing_order(registry.projects_for_session(session_id))
+            on_page = registry.projects_for_session(session_id)
+            counts = registry.page_counts
+            if counts.truncated:
+                seen = {project.id for project in on_page}
+                on_page += [
+                    project
+                    for project in registry.projects_linked_off_page(session_id)
+                    if project.id not in seen
+                ]
+            linked = _listing_order(on_page)
             live = _live_counts(registry, linked)
             window = _window(registry)
             rows = [
                 project_summary(project, live_sessions=live.get(project.id, 0), window=window)
                 for project in linked
             ]
-            return SessionProjects(session_id=session_id, projects=rows)
+            return SessionProjects(
+                session_id=session_id, projects=rows, **_page_fields(registry, counts)
+            )
 
         return reply(await asyncio.to_thread(read))
 
