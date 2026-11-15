@@ -60,6 +60,20 @@ LATE_LEAD = (
     "the answer changes your work.\n\n"
 )
 
+#: Appended to every non-secret timeout notice. A timeout is the operator NOT
+#: answering, so it can settle only what is safe to get wrong: a reversible
+#: choice. Incident 2026-11-14 (session 1faad822298d, ask a-20fc): the notice
+#: said only "use your recommended option(s)", the recommendation was three
+#: delete buckets, and the session deleted them, an on-hold benchmark's only
+#: raw data included. The guardrail refuses such deletes too
+#: (``guardrails/check.py``, ``DeleteCase.lapsed_only``); this is the half that
+#: stops the agent trying.
+TIMEOUT_NOT_CONSENT = (
+    "A timeout is NOT consent: take your recommendation only where it is reversible. "
+    "Leave every delete, overwrite or otherwise irreversible option undone and report it "
+    "as awaiting the user's answer."
+)
+
 #: The timeout notice. "Proceed without it" is the actionable half — the point of
 #: the deadline is that the session must not stall forever. It used to end "The ask
 #: stays open for the user; if they answer later you will be told", which stopped
@@ -69,8 +83,8 @@ LATE_LEAD = (
 TIMEOUT_NOTICE = (
     "[Ask timed out] No reply to ask {ask_id} arrived within {waited} (asked {asked}). "
     "{questions}\n"
-    "Proceed without it: use your recommended option(s) or best judgment and state the "
-    "assumption in your report."
+    "Proceed without it: for a reversible choice, use your recommended option(s) or best "
+    "judgment and state the assumption in your report. " + TIMEOUT_NOT_CONSENT
 )
 
 #: Added when the ask was urgent (``timeout <= 15 min``). An urgent ask whose
@@ -111,8 +125,8 @@ TIMEOUT_NOTICE_DISMISSED = (
     "[Ask timed out] No reply to ask {ask_id} arrived within {waited} (asked {asked}). "
     "{questions}\n"
     "The user dismissed it without answering.\n"
-    "Proceed without it: use your recommended option(s) or best judgment and state the "
-    "assumption in your report."
+    "Proceed without it: for a reversible choice, use your recommended option(s) or best "
+    "judgment and state the assumption in your report. " + TIMEOUT_NOT_CONSENT
 )
 
 #: The same row for a SECRET ask: names the key and nothing else (see
@@ -121,6 +135,47 @@ TIMEOUT_SECRET_DISMISSED = (
     "[Ask timed out] No reply to ask {ask_id} arrived within {waited} (asked {asked}). "
     "The credential {keys} was not provided. The user dismissed it without answering. "
     "Do not run anything that needed it; report what was left undone."
+)
+
+#: The timeout notice for a browser SITE CARD (``browser_bridge/site_approval``:
+#: ``request_access`` on a headless node queues it). Its own sentence set, not
+#: :data:`TIMEOUT_NOTICE` plus clauses, because every generic instruction is wrong
+#: here. Incident 2026-11-15 (session 1c31cfff075b on lop-remote-node-2, ask
+#: a-652b): the generic notice told the agent to "use your recommended option(s)
+#: or best judgment" and, since the card was urgent, to "delegate the question to
+#: a `task` subagent ... and decide on its answer". A site card is
+#: ``human_required`` and is answered only by the operator SIGNING it on their own
+#: device (``bridge_decide``), so both sentences invite the agent to decide a
+#: grant it can never decide — the approval model is default-deny and an agent
+#: must never self-approve. :data:`TIMEOUT_URGENT` is therefore never appended on
+#: this path, whatever ``urgent`` says.
+#:
+#: The next step mirrors guide://browser ("On a headless node", step 4): one
+#: re-raise with ``request_access``, and the tool itself refuses a third card
+#: once two lapsed unanswered; past that the operator hears it in chat. "Not an
+#: approval" is :data:`TIMEOUT_NOT_CONSENT`'s point, said for this card's only
+#: decision — there is no recommendation to take, reversible or not.
+TIMEOUT_SITE_CARD = (
+    "[Ask timed out] The operator did not answer the site card for {origin} (ask "
+    "{ask_id}) within {waited} (asked {asked}). A timeout is not an approval.\n"
+    "Only the operator can approve a site, by signing the card on their own device: do "
+    "not decide it yourself or through a subagent. You may re-raise it once with "
+    "`request_access` (guide://browser); otherwise tell the operator in chat which site "
+    "you need, and carry on without it."
+)
+
+#: The same notice for a site card the operator DISMISSED without answering
+#: (fork A, see :data:`TIMEOUT_NOTICE_DISMISSED`). One added sentence, the rest
+#: byte-identical, so the two cannot drift. A dismissal is still not a Deny: a
+#: Deny is a signed decision the node remembers, a dismissal is putting a card away.
+TIMEOUT_SITE_CARD_DISMISSED = (
+    "[Ask timed out] The operator did not answer the site card for {origin} (ask "
+    "{ask_id}) within {waited} (asked {asked}). A timeout is not an approval.\n"
+    "The user dismissed it without answering.\n"
+    "Only the operator can approve a site, by signing the card on their own device: do "
+    "not decide it yourself or through a subagent. You may re-raise it once with "
+    "`request_access` (guide://browser); otherwise tell the operator in chat which site "
+    "you need, and carry on without it."
 )
 
 #: When a secret answer was stored but the session restarted before the response
@@ -269,11 +324,39 @@ def _timeout_listing_line(question: Mapping[str, Any]) -> str:
     them here would be exactly the un-framed re-serve §11.1 forbids.
     """
 
+    # A SITE card also carries a ``question_id`` (it routes answers through the
+    # signed decide door), but its words are OURS — built by
+    # ``site_approval.site_ask_question`` from the origin — not another
+    # organization's. Labelling it with the bridge's untrusted clause was a false
+    # positive of the "any question_id is a bridge request" heuristic (incident
+    # 2026-11-15, ask a-652b), so it is checked first.
+    if _is_site_question(question):
+        return f"{question.get('id')} — site card for {_site_origin(question)}"
     if str(question.get("question_id") or ""):
         from local_operator.harness.message_types import BRIDGE_UNTRUSTED_CLAUSE
 
         return f"{question.get('id')} — {BRIDGE_UNTRUSTED_CLAUSE}"
     return _clip(str(question.get("question") or ""), 200)
+
+
+def _is_site_question(question: Mapping[str, Any]) -> bool:
+    """Whether ``question`` is a browser site card (``site_approval``'s builder)."""
+    from local_operator.browser_bridge.site_approval import is_site_question_id
+
+    return is_site_question_id(question.get("question_id"))
+
+
+def _site_origin(question: Mapping[str, Any]) -> str:
+    """The origin a site card asks about, for the timeout notice.
+
+    Read from the card's structured ``site`` block (``site_binding``), which the
+    builder fills from the same origin the card's sentence names. Clipped because
+    the row crossed the node's multi-writer ask log; the question id stands in
+    when the block is missing, so the notice always names SOMETHING to re-raise.
+    """
+    site = question.get("site")
+    origin = str(site.get("origin") or "") if isinstance(site, Mapping) else ""
+    return _clip(origin or str(question.get("question_id") or ""), 200)
 
 
 def timeout_text(
@@ -299,11 +382,29 @@ def timeout_text(
     same notice with one added sentence saying the user put the ask away. It is a
     FLAG rather than the caller swapping templates, so the two variants cannot
     drift from the notices they are variants of.
+
+    A browser SITE card (every question a ``site_approval`` question) gets
+    :data:`TIMEOUT_SITE_CARD` instead: only the operator's signature can decide
+    it, so it never carries the "best judgment" half or :data:`TIMEOUT_URGENT`.
     """
     questions = list(record.get("questions") or [])
     expires_at = int(record.get("expires_at") or 0)
     waited = _span(max(0, now_ms - int(record.get("created_at") or expires_at)) / 1000.0)
     asked = _stamp(record.get("created_at"))
+    if questions and all(_is_site_question(q) for q in questions):
+        # Site cards: only the operator's signature decides them, so neither the
+        # generic "best judgment" half nor TIMEOUT_URGENT's "delegate and decide"
+        # may reach the agent (see TIMEOUT_SITE_CARD).
+        template = TIMEOUT_SITE_CARD_DISMISSED if dismissed else TIMEOUT_SITE_CARD
+        text = template.format(
+            ask_id=record.get("ask_id", ""),
+            waited=waited,
+            asked=asked,
+            origin=", ".join(_site_origin(q) for q in questions),
+        )
+        if lapsed_while_stopped:
+            text = f"{text}\n{TIMEOUT_LAPSED_WHILE_STOPPED}"
+        return text
     if any(q.get("secret") for q in questions):
         keys = ", ".join(str(q.get("id")) for q in questions if q.get("secret")) or "requested"
         template = TIMEOUT_SECRET_DISMISSED if dismissed else TIMEOUT_SECRET
@@ -395,7 +496,10 @@ def refusal_copy(record: Mapping[str, Any] | None) -> str:
         )
     if status == store.STATUS_ANSWERED:
         by = (record.get("answered_by") or {}).get("surface")
-        if not by or by in ROLE_BY_WORDS:
+        if not by or by in ROLE_BY_WORDS or by == "unverified":
+            # ``unverified`` is the runtime's stamp for an answer whose surface
+            # it could not prove (``asks/surfaces``) — a fact about the proof,
+            # not a place the user would recognise, so it reads unattributed.
             return "already answered."
         return f"already answered by {by}."
     return "this ask is no longer open."
@@ -833,6 +937,11 @@ def mirror_card(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any] | None:
         "secret": bool(question.get("secret")),
         "recommended": question.get("recommended"),
         "persist": bool(question.get("persist")),
+        # The suggested terminal command, only when the row carries one (the
+        # row already applied the rule in `queue._question_shape`), so a card
+        # for an ask without one keeps its exact prior keys. The legacy title
+        # folds it in (`mobile.types.ask_mirror_request`).
+        **({"command": question["command"]} if isinstance(question.get("command"), str) else {}),
     }
 
 

@@ -2315,6 +2315,62 @@ def test_the_definitions_cadence_dials_a_member_it_holds_no_link_to(
     assert syncer.tick() == []
 
 
+def test_the_cadence_mirrors_the_heads_failover_chain_onto_a_real_peer(
+    devices: tuple[relay.RelayServer, relay.RelayServer, str, int],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``retry.fallbackChains`` reaches a paired node over a real socket.
+
+    The gap this closes: the chain never left the head, so a node's effective
+    chain was primary-only and a borrowed rate limit ended its turn. A FRESH relay
+    (nothing in memory, as after an update or restart) runs one cadence tick and
+    the node's ``config.yml`` then carries the head's chain as a recorded mirror,
+    while the node's own transport tuning is left alone.
+    """
+    import yaml
+
+    from local_operator.config import read_config_values
+    from local_operator.network import definitions, routing_sync
+
+    server_a, server_b, _host, _port = devices
+    _dialable_devices(devices, monkeypatch)
+    chain = ["anthropic/claude-opus-5-5", "openai/gpt-6.1-sol", "deepseek/deepseek-flash", "auto"]
+    (server_a.root / "config.yml").write_text(
+        yaml.safe_dump(
+            {
+                "values": {
+                    "retry": {"fallbackChains": {"default": chain}, "usageAwareFallback": True}
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    (server_b.root / "config.yml").write_text(
+        yaml.safe_dump({"values": {"retry": {"maxRetries": 4}}}), encoding="utf-8"
+    )
+    # One synthetic operator anchor: device A holds its private half (the
+    # operator's Mac), device B holds it verify-only (a node). Never the host's.
+    from local_operator.network import mirror_authority
+
+    monkeypatch.setattr(
+        mirror_authority,
+        "_resolve",
+        lambda root: mirror_authority.Authority(key_id="k_op", signs=root == server_a.root),
+    )
+    mirror_authority.reset_cache()
+    fresh_a = _fresh_relay(server_a)
+
+    outcomes = definitions.DefinitionsSyncer(fresh_a).tick()
+
+    assert outcomes == [(server_b.identity.device_id, "applied")], outcomes
+    retry = (read_config_values(server_b.root) or {}).get("retry") or {}
+    assert retry.get("fallbackChains") == {"default": chain}, retry
+    assert retry.get("usageAwareFallback") is True, retry
+    assert retry.get("maxRetries") == 4, retry
+    unit = routing_sync.routing_state(server_b.root)["units"]["fallbackChains.default"]
+    assert unit == {"source": "mirror", "origin": server_a.identity.device_id}, unit
+
+
 # ---------------------------------------------------------------------------
 # The incident plane: what the PEERS did, on a real pair
 # ---------------------------------------------------------------------------

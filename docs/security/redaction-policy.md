@@ -166,6 +166,31 @@ a digit-bearing hyphenated token after `--secret` stays masked (§6), and
 4. The sanctioned public-copy route (§4) is the only place a result may reach
    the model without the normal result pass. It is keyed to the tool identity
    `read_public_copy`, never to an argument a caller supplies.
+5. **Ordinary words are never promoted.** A value a shape rule matched that is
+   an ordinary word or a plain identifier built from them — ASCII letters in one
+   case (`internal`, `Staging`, `READONLY`), or lowercase words joined by `-`/`_`,
+   at most 16 characters — is masked **in place** where the rule saw it and is
+   never registered into the session-wide set (`is_ordinary_word_value` in
+   `redaction_shapes.py`, gated in `is_registerable_component`, for every rule
+   label). Why: a promoted word is masked everywhere afterwards, including inside
+   identifiers, because the exact-value pass treats `-` as a word boundary.
+   minervaai core-svc `d20e5acb` is the incident — `x-alert-disposition-<word>-key`
+   was shown with the marker in the middle, the agent copied it into a test rig,
+   and the rig sent a 34-byte header name where the client sends 32 (a 401). A
+   digit, mixed case inside a part, any other symbol, or more than 16 characters
+   is credential character and keeps containment. Values the session **knows**
+   are secrets (injected session credentials, broker retrievals via
+   `lop secret get`, the eval ledger) are not judged by shape and stay masked
+   whatever they look like.
+6. **A placeholder never round-trips into a file.** `[redacted]` means "hidden from
+   your view; the original is unavailable". `write` and `edit` refuse content
+   that would ADD `[redacted]` markers the target file does not already contain
+   (a count comparison against the file's current bytes, so docs and fixtures
+   that already hold the marker stay editable). The refusal tells the agent to
+   reference a secret via env/`lop secret get`, copy ordinary text from its
+   source with `sed`/`cp`, or spell a deliberate marker without the literal.
+   `bash` is never refused for it: a command that writes the literal marker to
+   a file gets one steering line in its result (`_bash_marker_write_steer`).
 
 ## 4. Sanctioned read path for redacted-but-public copy
 
@@ -434,6 +459,16 @@ comment.
   or a UUID as a password, and leaves `-p` to `kubectl` when `kubectl` is the
   last command word before it (`kubectl logs -p <pod>`).
 
+* A weak password that is a single ordinary word (`--password <word>`) is
+  masked where a rule sees it but is no longer contained in a later bare
+  occurrence (§3.5). Mixed case, a digit, a symbol or more than 16 letters
+  restores containment; a stored secret retrieved through the broker is
+  masked regardless.
+* A KNOWN secret whose value is an ordinary word is still masked on letter-run
+  boundaries, so it is masked inside a hyphen- or underscore-joined identifier
+  too. That fails toward masking for a real secret; the `write`/`edit` refusal
+  (§3.6) keeps such a mask from reaching a file.
+
 ## 7. Enforcement map
 
 | Concern | Where |
@@ -443,4 +478,6 @@ comment.
 | Live stream / seam | `local_operator/tools/builtin.py` (`_stream_redaction_values`, `_REDACTION_SEAM_BROKEN`) |
 | Result/argument hooks | `local_operator/harness/loop.py` (`_redact_content`, `_redact_details`) |
 | Public-copy route | `local_operator/tools/public_copy.py`, `local_operator/tools/registry.py` |
+| Ordinary-word promotion gate | `local_operator/redaction_shapes.py` (`is_ordinary_word_value`, `is_registerable_component`) |
+| Placeholder round-trip guard | `local_operator/tools/builtin.py` (`_marker_introduced`, `_marker_introduced_refusal`, `_bash_marker_write_steer`) |
 | Policy tests | `tests/unit/secrets/test_redaction_policy.py` |

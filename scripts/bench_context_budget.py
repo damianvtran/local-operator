@@ -1894,7 +1894,20 @@ CHARS_PER_BILLED_TOKEN = 2.78
 # These are estimates at2.78 chars/token, NOT a provider invoice. Admit the
 # requested async music capability with600 tokens of slack (half the unchanged
 # tighten band), rather than weakening availability or hiding its context cost.
-BUDGET_BILLED_TOKENS = 37_218
+# RAISED 37,218 -> 37,245 for the SESSIONS ``park`` OP (PR #3850), found at the
+# convergence merge with origin/main 5c4adec8c9c: each side passed alone and the
+# union did not. Measured with THIS script, ISOLATED HOME, top kind:
+#   merge-base 5795d706581e                 103,328 chars = ~37,168 billed
+#   PR head d35f30b5757d (park only)        103,403 chars = ~37,195 billed (+27)
+#   origin/main 5c4adec8c9c (main only)     103,410 chars = ~37,198 billed (+30)
+#   merged head (both)                      103,485 chars = ~37,225 billed
+# The PR's +75 chars is the ``park`` op itself — its ``op`` Literal member, its
+# op-field row and its schema copy — a new documented capability, so the cost is
+# deliberate. The raise is exactly that +27, which leaves the merged head 20 under
+# the ceiling: the headroom origin/main already sat at, so the next addition finds
+# the ratchet as tight as this one did. The child ceiling does not move (the
+# merged head passes ``--kind child`` with 55 of headroom).
+BUDGET_BILLED_TOKENS = 37_245
 
 #: The SUBAGENT ceiling (``--kind child``), in billed tokens. Same ratchet rules
 #: as ``BUDGET_BILLED_TOKENS`` above. It is a separate number because a child's

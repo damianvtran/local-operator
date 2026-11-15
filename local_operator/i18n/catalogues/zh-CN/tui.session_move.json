@@ -1,0 +1,9 @@
+{
+  "tui.session_move.ambiguous": "更改工作目录用/move <路径>，移动会话用/move <会话> --to <对等设备>。",
+  "tui.session_move.to_needs_device": "--to需指定设备：/move --to <对等设备|local>",
+  "tui.session_move.cannot_wait": "当前界面无法等待，需在shell中运行：`lop sessions move <id> --to <to> --wait <seconds>`",
+  "tui.session_move.unsupported_flag": "/move --to仅支持--keep、--queue和--drop-session-roles，不支持{flag}",
+  "tui.session_move.cli_unavailable": "无法启动CLI（{reason}）",
+  "tui.session_move.deadline_exceeded": "移动超时，结果尚不明确；再次运行`lop sessions move {session} --to {to}`可查看当前进度",
+  "tui.session_move.cli_no_answer": "CLI已退出，退出码为{code}，未返回结果"
+}

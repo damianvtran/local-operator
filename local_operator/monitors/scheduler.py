@@ -45,7 +45,7 @@ import random
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, TypedDict
+from typing import Any, Literal, TypedDict
 
 from local_operator.monitors import state as monitor_state
 from local_operator.monitors.classify import (
@@ -293,6 +293,88 @@ class MonitorRuntime:
 
     spec: MonitorSpec
     counters: dict[str, Any] = field(default_factory=dict)
+
+
+def normalize_result(text: str, spec: MonitorSpec, settings: MonitorSettings) -> str:
+    """The comparable form of one check's text — the left side of every hash.
+
+    Module-level so the wake supervisor's parked-session probe
+    (:mod:`local_operator.monitors.parked`) hashes a result with EXACTLY the
+    pipeline this scheduler uses; a second spelling could drift and make a
+    parked watch read "changed" (a wasted reopen) or, worse, "unchanged".
+    """
+    return normalize(
+        text,
+        sort_lines=spec.sort_lines,
+        ignore=spec.ignore,
+        normalize_timestamps=settings.normalize_timestamps,
+    )
+
+
+def advance_due(
+    spec: MonitorSpec, now: int, uniform: Callable[[float, float], float] = random.uniform
+) -> int | None:
+    """The next due instant: now + every + positive-only jitter (§11.2).
+
+    Clamped at ``until_at``. Shared with the parked-session probe for the same
+    reason as :func:`normalize_result`: a quiet tick advanced outside a session
+    must schedule the next one exactly as the session would have.
+    """
+    jitter_cap = float(min(5_000, spec.every_ms // 10))
+    candidate = now + spec.every_ms + int(uniform(0.0, jitter_cap))
+    if spec.until_at is not None:
+        return min(candidate, spec.until_at)
+    return candidate
+
+
+#: What :func:`apply_unavailable_tick` says the tick OWES beyond the counters:
+#: ``gone`` = the 24 h episode limit is reached and the monitor must be
+#: disabled with its notice; ``stalled`` = the 30-minute stall notice is due.
+UnavailableOwed = Literal["gone", "stalled"]
+
+
+def apply_unavailable_tick(
+    counters: dict[str, Any], spec: MonitorSpec, error: str, now: int
+) -> UnavailableOwed | None:
+    """Apply one UNAVAILABLE tick's counter arithmetic; return what it owes.
+
+    The pure half of ``MonitorScheduler._apply_failure(kind="unavailable")``:
+    no strike, the diff accounting untouched, ``unavailable_since`` stamped at
+    the episode's ENTER edge, ``unavailable_ticks`` bumped and ``next_due_at``
+    on the capped exponential ladder. The two side effects that only a session
+    can perform — disabling with a notice, sending the stall notice — are
+    RETURNED, not performed.
+
+    Module-level for the same reason as :func:`advance_due`: the wake
+    supervisor's parked-session probe (:mod:`local_operator.monitors.parked`)
+    commits an unavailable tick for a parked session whose MCP server is
+    unreachable, and a second spelling of this ladder would let a parked watch
+    drift from the one the session runs (a different retry cadence, a stall
+    notice at a different minute). On ``gone`` the counters are left before
+    the ``next_due_at`` step, exactly where the scheduler's disable path took
+    them; on ``stalled`` the latch is NOT set (the sender settles it after
+    delivery — review round 1, R2).
+    """
+    counters["last_error"] = str(error)[:500]
+    if not counters.get("unavailable_since"):
+        counters["unavailable_since"] = now
+        # Recorded at the ENTER edge for the same reason as the blind and
+        # failing episodes record theirs: ``_restored_notice`` runs AFTER the
+        # successful check adopted its baseline, so by then the answer to "was
+        # there one?" is always yes (QA round 2, Q-R2-5).
+        counters["restored_no_baseline"] = not bool(counters.get("content_hash"))
+    counters["unavailable_ticks"] = int(counters.get("unavailable_ticks") or 0) + 1
+    counters["last_note"] = "tool unavailable — retrying"
+    ticks = int(counters["unavailable_ticks"])
+    if now - int(counters["unavailable_since"]) >= UNAVAILABLE_GONE_MS:
+        return "gone"
+    counters["next_due_at"] = now + min(RETRY_CAP_MS, spec.every_ms * (2 ** max(0, ticks - 1)))
+    if (
+        not counters.get("unavailable_notified")
+        and now - int(counters["unavailable_since"]) >= UNAVAILABLE_STALL_MS
+    ):
+        return "stalled"
+    return None
 
 
 def fresh_counters(monitor_id: str, next_due_at: int | None) -> dict[str, Any]:
@@ -1161,12 +1243,7 @@ class MonitorScheduler:
         # ``_classify_change``). A source that changes shape mid-stream is
         # handled by the basis check below, not by this flag.
         record_view = is_record_log(text)
-        normalized = normalize(
-            text,
-            sort_lines=spec.sort_lines,
-            ignore=spec.ignore,
-            normalize_timestamps=self._settings.normalize_timestamps,
-        )
+        normalized = normalize_result(text, spec, self._settings)
         new_hash = content_hash(normalized)
         old_hash = str(counters.get("content_hash") or "")
         pure_addition = False
@@ -1526,26 +1603,14 @@ class MonitorScheduler:
         counters = entry.counters
         counters["last_error"] = str(error)[:500]
         if kind == "unavailable":
-            if not counters.get("unavailable_since"):
-                counters["unavailable_since"] = now
-                # Recorded at the ENTER edge for the same reason as the blind and
-                # failing episodes record theirs: ``_restored_notice`` runs AFTER
-                # the successful check adopted its baseline, so by then the answer
-                # to "was there one?" is always yes (QA round 2, Q-R2-5).
-                counters["restored_no_baseline"] = not bool(counters.get("content_hash"))
-            counters["unavailable_ticks"] = int(counters.get("unavailable_ticks") or 0) + 1
-            counters["last_note"] = "tool unavailable — retrying"
+            # The arithmetic is shared with the parked-session probe (see
+            # ``apply_unavailable_tick``); only the owed side effects live here.
+            owed = apply_unavailable_tick(counters, entry.spec, error, now)
             ticks = int(counters["unavailable_ticks"])
-            if now - int(counters["unavailable_since"]) >= UNAVAILABLE_GONE_MS:
+            if owed == "gone":
                 self._disable(entry, "tool unavailable for 24h", now, kind="unreachable")
                 return self._disable_notice(entry, now, failures=ticks)
-            counters["next_due_at"] = now + min(
-                RETRY_CAP_MS, entry.spec.every_ms * (2 ** max(0, ticks - 1))
-            )
-            if (
-                not counters.get("unavailable_notified")
-                and now - int(counters["unavailable_since"]) >= UNAVAILABLE_STALL_MS
-            ):
+            if owed == "stalled":
                 # The LATCH IS NOT SET HERE: ``_send_notice`` settles it after
                 # the sink returned, exactly as the disable latch is settled, so
                 # a stall notice that never reached a session is retried on the
@@ -2012,11 +2077,7 @@ class MonitorScheduler:
         Clamped at ``until_at`` (a monitor never checks past its stop time);
         the due scan treats "next_due ≥ until" as expired.
         """
-        jitter_cap = float(min(5_000, spec.every_ms // 10))
-        candidate = now + spec.every_ms + int(self._uniform(0.0, jitter_cap))
-        if spec.until_at is not None:
-            return min(candidate, spec.until_at)
-        return candidate
+        return advance_due(spec, now, self._uniform)
 
     # -- internals ----------------------------------------------------------
 

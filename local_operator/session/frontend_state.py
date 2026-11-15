@@ -40,6 +40,7 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    PrivateAttr,
     SerializationInfo,
     SerializerFunctionWrapHandler,
     TypeAdapter,
@@ -4338,6 +4339,12 @@ class FrontendSync(BaseModel):
     snapshot: FrontendSessionState
     live_cursor: str | None = None
     display_history: DisplayHistoryWindow | None = None
+    #: The SAME cut's bounded page (``history_window.bounded_display_message``),
+    #: present only when ``display_history`` escalated to ``full_required``. A
+    #: PRIVATE attribute so it never serializes: the runtime swaps it into the
+    #: frame only for a non-local viewer, which cannot perform the local replay
+    #: ``full_required`` asks for; a local viewer's frame is unchanged.
+    _peer_display_history: DisplayHistoryWindow | None = PrivateAttr(default=None)
 
 
 class FrontendUpdate(BaseModel):
@@ -5022,6 +5029,11 @@ def bound_ask_rows(
             options = [dict(option) for option in raw_options]
             questions.append({**question, "options": options})
             charge += len(str(question.get("question") or ""))
+            # The suggested terminal command (`AskQuestion.command`, up to 500
+            # chars) rides the same frame, so it spends the same budget: an
+            # uncharged field would let a tail of command-bearing rows outgrow
+            # the bound this function exists to keep.
+            charge += len(str(question.get("command") or ""))
             charge += sum(
                 len(str(option.get("label") or "")) + len(str(option.get("description") or ""))
                 for option in options
@@ -6650,6 +6662,92 @@ def _fold_goal_status(session: Any) -> str:
     return "active" if str(getattr(session, "goal", "") or "") else ""
 
 
+class PublicStateView:
+    """One canonical state, cloned field by field as it is READ.
+
+    WHY IT EXISTS. :attr:`FrontendStateStore.state` clones the WHOLE state —
+    every job shell (``_public_job``), ``usage_components``, ``child_costs``,
+    the slash catalogue — and :meth:`FrontendStateStore.apply_update` returned
+    that clone for every delta. Its one production caller,
+    ``AttachedSession._on_frontend_update``, runs on the serve event loop and
+    reads about a dozen fields, re-reading ``jobs`` only when the roster moved.
+    Measured 2026-11-14 on a store seeded from a live orchestrator's newest
+    checkpoint (346 jobs, 10 running children with 200 tool rows each, 3.16 MB
+    of state JSON): a scalar delta cost 14.3 ms p50 / 43.4 ms p95 CPU, of which
+    the clone was 13.6 / 42.4 ms and the reducer 0.7 / 1.1 ms. With ~13 live
+    conversations streaming at token cadence that clone is what the loop
+    watchdog caught the serve thread inside (``copy.deepcopy`` under
+    ``_public_state``) during 23-37 s stalls, while sidebar opens waited.
+
+    THE GUARANTEES ARE THE ONES ``_public_state`` GIVES, per field:
+
+    * ONE reference. The canonical object is captured once, so every field read
+      through the view describes the same published state, never a mix of two —
+      the same point ``_public_state``'s docstring makes. Canonical states are
+      replaced by ``_install``, never mutated in place, so holding the
+      reference is a snapshot.
+    * No shared owning instance. A field on :data:`_SHAREABLE_STATE_FIELDS`
+      (deeply immutable scalars) is returned as is; ``jobs`` is detached with
+      ``_public_job`` exactly as ``state`` does; anything else is deep-copied.
+      A caller mutating what it read cannot reach the store.
+    * Stable per view. Each field is cloned at most once and cached, so two
+      reads of ``view.selected_model`` return the same caller-owned object, as
+      two reads of one ``state`` snapshot did.
+
+    Only model fields and wire extras are served; methods and properties of the
+    model (``model_dump``, ``model_label``) are refused rather than bound to the
+    canonical instance, where they could hand out its own objects. A caller
+    that needs the whole model asks :meth:`materialize` (the full clone).
+    """
+
+    __slots__ = ("_canonical", "_cloned")
+
+    def __init__(self, canonical: "FrontendSessionState") -> None:
+        self._canonical = canonical
+        self._cloned: dict[str, Any] = {}
+
+    def __getattr__(self, name: str) -> Any:
+        # Only reached for names that are not slots, so ``_canonical`` and
+        # ``_cloned`` never recurse here once ``__init__`` has run.
+        cloned = self._cloned
+        if name in cloned:
+            return cloned[name]
+        canonical = self._canonical
+        if name in _SHAREABLE_STATE_FIELDS:
+            return getattr(canonical, name)
+        if name not in type(canonical).model_fields and name not in (canonical.model_extra or {}):
+            raise AttributeError(
+                f"{name!r} is not a state field; PublicStateView serves fields only "
+                "(call materialize() for the whole model)"
+            )
+        if name == "jobs":
+            value: Any = _FrozenSequence(_public_job(job) for job in canonical.jobs)
+        else:
+            value = copy.deepcopy(getattr(canonical, name))
+        cloned[name] = value
+        return value
+
+    def canonical_jobs_for_facades(self) -> Sequence[JobState]:
+        """The store's OWN frozen job rows, for the two facades that detach them.
+
+        The one deliberate exception to "no shared owning instance", and it is
+        narrow: ``SnapshotJobs.replace`` and ``SnapshotSubagentComms.replace``
+        were written to receive CANONICAL rows. Both keep a per-row memo keyed
+        on the row's identity (``_reusable_job`` keeps every unchanged row's
+        object across deltas), ``SnapshotJobs`` detaches with ``_public_job``
+        before anything leaves it, and the comms facade projects scalars into
+        its nodes. Fed the detached ``jobs`` instead, every row is a fresh
+        object, the memo never hits, and a roster tick detaches the whole
+        roster twice more — measured 9.3 ms p50 per roster delta at 346 jobs
+        where the reducer itself is ~2 ms. Any other reader uses ``jobs``.
+        """
+        return self._canonical.jobs
+
+    def materialize(self) -> "FrontendSessionState":
+        """The whole caller-owned state, as :attr:`FrontendStateStore.state` builds it."""
+        return FrontendStateStore._public_state(self._canonical)
+
+
 class FrontendRevision(NamedTuple):
     """What :meth:`FrontendStateStore.revision` returns; compare for equality.
 
@@ -6803,7 +6901,8 @@ class FrontendStateStore:
         """
         return copy.deepcopy(dict(self._state.attention))
 
-    def _public_state(self, state: FrontendSessionState) -> FrontendSessionState:
+    @staticmethod
+    def _public_state(state: FrontendSessionState) -> FrontendSessionState:
         """A caller-owned clone of ONE canonical state object.
 
         Takes the object rather than reading ``self._state`` twice, and that is
@@ -7196,6 +7295,27 @@ class FrontendStateStore:
             subscriber(update.model_copy(deep=True))
 
     def apply_update(self, update: FrontendUpdate) -> FrontendSessionState:
+        """Apply ``update`` and return a whole caller-owned clone of the result.
+
+        Pays the full ``state`` clone on every call; a per-delta caller on the
+        event loop wants :meth:`apply_update_view` (see :class:`PublicStateView`
+        for the measured cost).
+        """
+        self._apply_update(update)
+        return self.state
+
+    def apply_update_view(self, update: FrontendUpdate) -> PublicStateView:
+        """Apply ``update`` and return the result cloned lazily, field by field.
+
+        The same reducer, the same subscriber publication and the same
+        exceptions as :meth:`apply_update`; only the returned value differs. The
+        view captures the canonical state installed when the reducer returns,
+        which is the object ``apply_update``'s trailing ``state`` read clones.
+        """
+        self._apply_update(update)
+        return PublicStateView(self._state)
+
+    def _apply_update(self, update: FrontendUpdate) -> None:
         """Apply one already-validated ordered delta from the runtime.
 
         A DEGRADED delta advances the sequence and touches nothing else. The
@@ -7238,7 +7358,7 @@ class FrontendStateStore:
             )
             for subscriber in subscribers:
                 subscriber(update.model_copy(deep=True))
-            return self.state
+            return
         # The roster is copied PER ROW below, and only for rows that changed: a
         # whole-``changes`` deep copy was ~2.5 ms of a 252-row delta on its own,
         # almost all of it rows the delta merely repeated.
@@ -7469,7 +7589,6 @@ class FrontendStateStore:
         self._todo_sequences = todo_sequences
         for subscriber in subscribers:
             subscriber(update.model_copy(deep=True))
-        return self.state
 
     def _reusable_job(
         self, job_id: str, prior: JobState | None, received: Any, update: FrontendUpdate

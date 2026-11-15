@@ -1924,6 +1924,21 @@ module itself — `local_operator/session/open_frame.py` is a pure function of
 it the day its fold has a bounded suffix to fold from. Until then the daemon
 keeps `DurableFoldCache` and the mobile plane is unchanged by this contract.
 
+**Nested write/edit diff bindings (`diff_bindings: 1`).** A `write`/`edit` run
+inside an `eval` cell is journaled as a host `custom` row,
+`tool_call_diff_binding_v1`, which the open frame drops by default (an older
+client cannot paint it, so it must not spend that client's row budget). A
+viewer that can paint it sends `diff_bindings=1` on the snapshot, `/history`
+(open-frame) and `/events` routes; the initial SSE snapshot frame honours the
+same declaration. Each surviving row is rebuilt from validated fields only —
+`details: {v, session_id, outer_call_id, call_id, tool: "write"|"edit",
+diff_full: {v, state, rows?, digest?}}` — and is served only when it binds
+**the viewed session** (exact ids, `v`, and the nested id carrying its
+`<outer_call_id>:` prefix as a consistency check, never as authority). Any
+forged, malformed or extra-field row is dropped. The full diff itself is then
+fetched through the existing scoped full-diff GET, unchanged. `diff_bindings=0`
+(the default) serves exactly the pre-flag rows and counts.
+
 ### Admission and retry semantics
 
 A200 message receipt means the canonical runtime acknowledged admission, not
@@ -3012,7 +3027,7 @@ to.
             "attention":{"session/<id>":{ /* AttentionState */ }},
             "attention_status":{"session/<id>":{"code":"complete","revision":3}},
             "notifications":{"revision":42,"unread_count":3,"waiting_count":1,"waiting_unread_count":0},
-            "approvals_pending":false}}
+            "approvals_pending":false,"approvals_pair_request":null}}
 {"epoch":"…","seq":13,"type":"attention","session_id":"<12 hex>","payload":{ /* AttentionState */ }}
 {"epoch":"…","seq":14,"type":"notification","session_id":"<12 hex>","payload":{ /* per-session payload */ }}
 {"epoch":"…","seq":15,"type":"catalogue","payload":{"revision":98124}}
@@ -3036,7 +3051,11 @@ to.
   the `notifications` frame below; `null` means the inbox authority could not be
   read, not a verified zero. `open.approvals_pending` is the existing local
   approval store's expiry-folded requested-state boolean, or `null` when that
-  optional authority is unreadable. Missing fields likewise mean unsupported or
+  optional authority is unreadable. `open.approvals_pair_request` is the one live
+  phone-pairing approval id from the same read (the `approvals` frame's
+  `pair_request`), so a window that connects mid-request can raise the pairing
+  card without waiting for a change frame; `null` when none is live or the read
+  failed. Missing fields likewise mean unsupported or
   unknown, not empty. The open receipt cursor is reserved before snapshot reads,
   so level edges queued during those reads remain newer than the snapshot.
 - **`approvals` is a device-local level, not a notification.** Its boolean

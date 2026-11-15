@@ -58,12 +58,17 @@ from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
 from local_operator.asks import policy, render, store
+from local_operator.asks.surfaces import UNVERIFIED, weakest_surface
 from local_operator.harness.message_types import (
     ASK_RELAY_MESSAGE_TYPE,
     ASK_RESPONSE_MESSAGE_TYPE,
     ASK_TIMEOUT_MESSAGE_TYPE,
 )
-from local_operator.harness.types import CustomMessage, ImageContent
+from local_operator.harness.types import (
+    CustomMessage,
+    ImageContent,
+    ask_command_problem,
+)
 from local_operator.team_bridge.ask_issuance import bridge_scope_digest
 
 logger = logging.getLogger(__name__)
@@ -180,6 +185,15 @@ class AskQueue:
         #: a runtime death simply returns the ask to its open state, which is the
         #: truthful outcome for a partial answer nobody finished submitting.
         self._drafts: dict[str, dict[str, list[str]]] = {}
+        #: WHO WROTE EACH DRAFT CELL (agent review round 1, R1-2): question id
+        #: -> the runtime-stamped surface of the tap that answered it. The draft
+        #: settles as ONE row, so without this the last tap's label would cover
+        #: every earlier cell — an unproven tap on "Delete ~/X?" completed by a
+        #: proved tap on a harmless second question read as proved consent. The
+        #: settle stamps the WEAKEST (``asks.surfaces.weakest_surface``): whole-
+        #: ask, fail-closed, because the guard reads consent per ask, not per
+        #: question. Kept beside ``_drafts`` and dropped with it everywhere.
+        self._draft_surfaces: dict[str, dict[str, str]] = {}
 
     # -- paths -------------------------------------------------------------
 
@@ -1365,18 +1379,22 @@ class AskQueue:
                 "answer the questions still waiting.",
             }
         draft[key] = [str(item) for item in (values or ())]
+        self._draft_surfaces.setdefault(ask_id, {})[key] = str(by)
         waiting = [qid for qid in ids if qid not in draft]
         if waiting:
             # Publish the partial so the mirrored card advances to the next
             # question: the draft is what ``mirror_card`` reads to choose it.
             self._refresh(now)
             return {"ok": True, "settled": False, "waiting": waiting}
-        outcome = self.respond(ask_id, draft, by=by)
+        cells_by = self._draft_surfaces.get(ask_id, {})
+        settle_by = weakest_surface(*(cells_by.get(qid, UNVERIFIED) for qid in ids))
+        outcome = self.respond(ask_id, draft, by=settle_by)
         if not outcome.get("ok"):
             # A refusal at settle time (a lost race against another surface)
             # discards the draft with it: keeping it would let the next tap
             # settle an ask the log has already closed.
             self._drafts.pop(ask_id, None)
+            self._draft_surfaces.pop(ask_id, None)
             return outcome
         return {"ok": True, "settled": True, "waiting": []}
 
@@ -1712,6 +1730,7 @@ class AskQueue:
         # became the log's answers or the ask was declined/dismissed out from
         # under it, and keeping it would advance a card for a closed ask.
         self._drafts.pop(str(ask_id), None)
+        self._draft_surfaces.pop(str(ask_id), None)
         self._refresh()
         self._kick()
 
@@ -1730,6 +1749,7 @@ class AskQueue:
         for record in records:
             if record.get("status") != store.STATUS_OPEN:
                 self._drafts.pop(str(record.get("ask_id")), None)
+                self._draft_surfaces.pop(str(record.get("ask_id")), None)
 
     def _kick(self) -> None:
         """Ask the session to reconcile soon. Best-effort, no loop required.
@@ -3110,6 +3130,13 @@ def _question_shape(question: Any) -> dict[str, Any]:
         # when present — an ask without it keeps the exact pre-scope shape, so
         # existing logs fold and serialize byte-identically.
         shape["bridge"] = dict(bridge)
+    site = raw.get("site")
+    if isinstance(site, Mapping):
+        # A headless node's site approval carries the inputs its ``site:v1:``
+        # question id binds, so the signer can check the card before signing
+        # (``browser_bridge/site_approval.verify_site_card``). Key added only
+        # when present, like ``bridge``: other asks keep their exact shape.
+        shape["site"] = dict(site)
     recommended_all = raw.get("recommended_all")
     if recommended_all is not None:
         # A multi-select's recommendation SET (`AskQuestion.recommended_all`),
@@ -3117,7 +3144,45 @@ def _question_shape(question: Any) -> dict[str, Any]:
         # always carried, and every ask without a set keeps the exact prior
         # shape, so existing logs fold byte-identically. Never emit it as None.
         shape["recommended_all"] = list(recommended_all)
+    command = _carried_command(raw, shape)
+    if command is not None:
+        # The suggested terminal command (`AskQuestion.command`) and the device
+        # it is meant for, added ONLY when present — same rule as
+        # `bridge`/`recommended_all`, so every ask without one keeps the exact
+        # prior shape and existing logs fold byte-identically. Both ride to the
+        # desktop/fleet frames unchanged. The target is ALWAYS stamped with the
+        # command, so a surface deciding whether to offer one-click Run never
+        # has to guess a default; anything but an explicit "user" reads as
+        # "agent" (the tool's own default).
+        shape["command"] = command
+        shape["command_target"] = "user" if raw.get("command_target") == "user" else "agent"
     return shape
+
+
+def _carried_command(raw: Mapping[str, Any], shape: Mapping[str, Any]) -> str | None:
+    """The command a stored row may carry for ``raw``, or ``None``.
+
+    Two refusals on top of "absent":
+
+    * A BRIDGE row (another team's agent asking through the carriage — the same
+      structural reading as ``tui/app._is_bridge_ask_row``: a ``bridge`` block
+      or a carriage ``question_id``) never carries one. The desktop offers the
+      command as a one-click terminal action, and the operator must not be
+      handed a command by an agent outside their own team.
+    * A value that fails ``ask_command_problem`` is dropped rather than stored.
+      The tool's validator already refused it on the normal path; this covers a
+      question that reaches the queue as a plain mapping without passing
+      ``AskQuestion``, so the row a surface renders is always within the rule.
+    """
+    command = raw.get("command")
+    if not isinstance(command, str):
+        return None
+    if shape.get("bridge") or str(shape.get("question_id") or "").strip():
+        return None
+    command = command.strip()
+    if ask_command_problem(command) is not None:
+        return None
+    return command
 
 
 __all__ = ["AskQueue"]

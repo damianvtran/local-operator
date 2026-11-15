@@ -79,7 +79,9 @@ if TYPE_CHECKING:
 
     from local_operator.harness.types import AudioContent, DocumentContent, ImageContent
 
+from local_operator.asks.surfaces import stamp_answer_surface
 from local_operator.harness.approval import (
+    ASK_ANSWER_OPS,
     AUTHORITY_OPS,
     admit_increasing,
     frame_authority,
@@ -386,6 +388,14 @@ def document_blocks(
         out.append(block)
     return out
 
+
+#: How much of a bind failure's exception text (head of the message, tail of
+#: the traceback) is scrubbed for secrets before the final clips (400 / 4000
+#: characters). The scrub runs on the runtime's event loop and is linear in its
+#: input: measured in review round 1 of PR #3873, a 1 MB message held the loop
+#: ~0.2 s and the traceback pass about doubled it. 16 KiB is 40x the message
+#: clip and 4x the traceback clip, so nothing that could be kept is cut first.
+_BIND_FAILURE_SCRUB_WINDOW = 16 * 1024
 
 #: A prompt payload past 1 MB is a bug, not a prompt — the line limit the
 #: control socket reader enforces.
@@ -2093,6 +2103,17 @@ class _ConnectionAuthority:
     #: onto the card (``_stamp_peer_sender``) so the receiver knows which device
     #: wrote and can answer with ``send peer=``.
     peer: Mapping[str, Any] = field(default_factory=dict)
+    #: Whether THIS frame proved the operator capability for THIS connection
+    #: (``request_proof_ok``). Computed by the reader that holds the connection
+    #: (``_dispatch_with_authority``), only for :data:`ASK_ANSWER_OPS`, and read
+    #: only to stamp an ask answer's surface. ``False`` by default, so a direct
+    #: ``_dispatch`` with no connection records a non-consent label.
+    operator_proved: bool = False
+    #: The connection's server-decided surface (``desktop``/``terminal``) and
+    #: kind (``attach``/``daemon``): what a PROVED answer is labelled with, and
+    #: how an unproven one is told apart (``asks/surfaces.stamp_answer_surface``).
+    surface: str = ""
+    kind: str = ""
 
 
 def _stamp_peer_sender(raw: Any, authority: "_ConnectionAuthority") -> dict[str, Any]:
@@ -2626,6 +2647,50 @@ def has_durable_history(session: Any) -> bool:
     return durable_conversation_path(path)
 
 
+def _accepts_keyword(fn: Any, name: str) -> bool:
+    """Whether ``fn`` takes keyword ``name`` (a handle kind may predate it)."""
+    try:
+        return name in inspect.signature(fn).parameters
+    except (TypeError, ValueError):
+        return False
+
+
+def _serve_peer_bounded_history(payload: dict[str, Any], sync: Any, locality: str) -> None:
+    """Swap in the bounded page for a NON-LOCAL viewer whose exact page escalated.
+
+    ``full_required`` means "replay the transcript locally": exact for a viewer
+    on this machine, impossible for one on another device, whose facade then
+    refused the bind — and with it every mesh ``send``/``peek`` riding that
+    viewer — because ONE newest row was larger than a page. The session captured
+    the same cut's bounded page beside the exact one
+    (``FrontendSync._peer_display_history``); a local connection never sees it,
+    so a local viewer's frame is byte-for-byte what it was. The caller's strip
+    helpers run after this, so capability gating applies to the swapped page too.
+    """
+    if locality == "local":
+        return
+    bounded = getattr(sync, "_peer_display_history", None)
+    if bounded is None:
+        return
+    payload["display_history"] = bounded.model_dump(mode="json")
+
+
+def _is_site_decide_target(request_id: str) -> bool:
+    """Whether a ``decide`` request id (``ask#question#word``) names a headless
+    node's ``site:v1:`` card (``browser_bridge/site_approval.py``)."""
+    from local_operator.browser_bridge.site_approval import SITE_QUESTION_PREFIX
+
+    return f"#{SITE_QUESTION_PREFIX}" in str(request_id)
+
+
+def _site_old_signer_refusal() -> str:
+    """The keyed sentence for a site card answer this device cannot sign."""
+    from local_operator.i18n.keys import browser_site_approval as _keys
+    from local_operator.i18n.messages import render_resolved
+
+    return render_resolved(_keys.refused_old_signer())
+
+
 class RuntimeServer:
     """One per interactive process. Construct, ``start()``, ``close()``."""
 
@@ -2697,6 +2762,7 @@ class RuntimeServer:
         #: than read off the record so the publish is one assignment and the
         #: fields have a defined value before the record exists.
         self._pending: str | None = None
+        self._pending_queued = False
         #: True once this session has run at least one real turn. Starts
         #: False for every fresh boot (a ``/new`` session sitting in the
         #: composer) and flips True the first time a turn actually runs — the
@@ -4860,6 +4926,7 @@ class RuntimeServer:
             # ``job_trajectory``; see ``sync_wire_payload`` for why the frame
             # cannot carry them.
             sync_payload = sync_wire_payload(sync)
+            _serve_peer_bounded_history(sync_payload, sync, conn.locality)
             # The sync frame carries the FIRST display page, so it is one of
             # the THREE places the audit fields reach the wire (the others are
             # the ``history_page`` and ``frontend_sync`` RPCs). All three strip
@@ -5008,10 +5075,105 @@ class RuntimeServer:
         Best-effort: a failure to announce must never stop the drop that
         follows, and the send path drops the client itself when the write fails.
         """
+        # EVERYTHING HERE IS GUARDED (review M1 / QA Q1): the caller drops the
+        # connection only after this returns, so a raise from rendering the
+        # exception (a broken ``__str__``) or from the scrub would skip that
+        # drop and leave the viewer on a dead, still-registered connection
+        # until its 15 s sync timeout. Each step degrades instead of raising.
+        message = self._bind_failure_message(exc)
+        # REMOTE COORDINATORS WERE BLIND HERE (2026-11-12): the viewer dropped
+        # this message and the traceback went only to the shared rotating
+        # runtime.log, gone within minutes. The client now surfaces the message;
+        # this keeps a durable per-session record on the owner as well. Written
+        # before the announce so it exists even when the socket write fails.
+        # ``_record_bind_failure`` never raises.
+        self._record_bind_failure(conn, exc, message)
         try:
-            await self._send_to(conn, {"op": "bind_failed", "message": str(exc)[:400]})
+            await self._send_to(conn, {"op": "bind_failed", "message": message})
         except Exception:  # noqa: BLE001 — announcing is best-effort
             logger.debug("bind-failure announcement write failed", exc_info=True)
+
+    def _bind_failure_message(self, exc: BaseException) -> str:
+        """The redacted, clipped message a bind failure is announced with. Never raises.
+
+        ``str(exc)`` can itself raise (an exception with bad args or a broken
+        override); the type name then stands in, which still tells the viewer
+        more than nothing. Should the scrub fail, the type name is sent too,
+        never the unscrubbed text.
+        """
+        try:
+            text = str(exc)
+        except Exception:  # noqa: BLE001 — an unprintable exception still gets named
+            logger.debug("bind-failure exception text unavailable", exc_info=True)
+            return type(exc).__name__
+        try:
+            # Pre-clipped HEAD first (review m1): the scrub is linear in its
+            # input and runs on the event loop — 1 MB held it ~0.2 s. Only the
+            # first 400 characters survive the final clip anyway.
+            return self._redacted_bind_failure_text(text[:_BIND_FAILURE_SCRUB_WINDOW])[:400]
+        except Exception:  # noqa: BLE001 — fall back to a name, never to raw text
+            logger.debug("bind-failure message scrub failed", exc_info=True)
+            return type(exc).__name__
+
+    def _redacted_bind_failure_text(self, text: str) -> str:
+        """``text`` with known secret values and credential shapes masked.
+
+        The exception text LEAVES THIS PROCESS (to a viewer, possibly on another
+        device) and lands on disk, so it gets the same side-effect-free passes
+        ``supplements._metadata_text`` uses: the runtime's retrieved-secret
+        ledger, then the shape scrubber. Not the session's tool-result redactor,
+        which also writes report rows into the transcript.
+        """
+        import sys
+
+        from local_operator.redaction_shapes import scrub_shapes
+
+        safe = text
+        runtime = sys.modules.get("local_operator.secrets.runtime")
+        if runtime is not None:
+            try:
+                safe = runtime.scrub(safe)
+            except Exception:  # noqa: BLE001 — the shape pass below still runs
+                logger.debug("bind-failure secret scrub failed", exc_info=True)
+        return scrub_shapes(safe)
+
+    def _record_bind_failure(self, conn: _ClientConn, exc: BaseException, message: str) -> None:
+        """Persist this bind failure beside ``runtime-exit.json`` (best-effort)."""
+        try:
+            import traceback
+            from pathlib import Path
+
+            from local_operator.session.runtime import journal
+
+            session = getattr(self._handle, "_session", None)
+            directory = getattr(getattr(session, "_transcript", None), "directory", None)
+            if directory is None:
+                return
+            from local_operator.ansi import sanitize_prompt_line
+
+            try:
+                tb = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
+                # The TAIL is what the record keeps (the raising frame and the
+                # exception line), so pre-clip to it before the on-loop scrub
+                # (review m1), as the message pre-clips its head.
+                tb = self._redacted_bind_failure_text(tb[-_BIND_FAILURE_SCRUB_WINDOW:])
+            except Exception:  # noqa: BLE001 — keep the row; the traceback is a bonus
+                logger.debug("bind-failure traceback render failed", exc_info=True)
+                tb = ""
+            journal.record_bind_failure(
+                Path(directory),
+                session_id=str(getattr(session, "session_id", "") or ""),
+                exc_type=type(exc).__name__,
+                # One line, control sequences stripped (QA Q2): a future reader
+                # printing the record must not be repainted or line-forged by
+                # it. The traceback stays multi-line by nature; its reader
+                # must render it as a block.
+                message=sanitize_prompt_line(message, limit=400),
+                traceback_text=tb,
+                surface=str(getattr(conn, "surface", "") or ""),
+            )
+        except Exception:  # noqa: BLE001 — an instrument never breaks the drop
+            logger.debug("bind-failure record write failed", exc_info=True)
 
     def _release_when_landed(self, bind_task: asyncio.Task[Any]) -> None:
         """Release a bind's eventual subscription once nothing will receive it.
@@ -5751,7 +5913,7 @@ class RuntimeServer:
         except Exception:  # noqa: BLE001
             pass
 
-    def set_record_pending(self, pending: str | None) -> None:
+    def set_record_pending(self, pending: str | None, *, queued: bool = False) -> None:
         """Record that this session is waiting for a PERSON (or no longer is).
 
         Named for the RECORD it writes, distinct from ``set_pending`` below,
@@ -5763,10 +5925,16 @@ class RuntimeServer:
         than waiting for the 15 s heartbeat, because the whole value of the
         field is that a user hunting for "what is that 283 MB process doing"
         finds the answer at once.
+
+        ``queued`` marks the claim as the ask QUEUE's (an open queued ask, no
+        gate parked): a peer badges it but raises no park row
+        (``SessionRecord.pending_queued``).
         """
-        if self._pending == pending:
+        queued = bool(queued and pending)
+        if self._pending == pending and getattr(self, "_pending_queued", False) == queued:
             return
         self._pending = pending
+        self._pending_queued = queued
         self._republish()
 
     def _republish_detached(self) -> None:
@@ -6081,6 +6249,7 @@ class RuntimeServer:
         try:
             publisher.heartbeat(
                 pending=self._pending,
+                pending_queued=getattr(self, "_pending_queued", False),
                 busy=self._busy,
                 leaving=self._leaving,
                 started=self._started,
@@ -6617,7 +6786,7 @@ class RuntimeServer:
             client_nonce=conn.operator_nonce,
             server_salt=conn.operator_salt,
         )
-        signature = self._operator_signature_verdict(frame, conn)
+        signature, challenge = self._operator_signature_check(frame, conn)
         admitted = admit_increasing(capability=capability, signature=signature)
         if admitted and frame.get("op") == "bridge_decide":
             # TB-02 P1: the one-shot ask-bound grant the decision needs is
@@ -6627,11 +6796,31 @@ class RuntimeServer:
             # Memory-only; see approval.py's grant table.
             from local_operator.harness.approval import mint_bridge_decide_grant
 
+            # The signed PROOF rides with the grant ONLY when the signature
+            # verdict is True: a headless node's extension re-verifies it before
+            # approving a site (``browser_bridge/site_approval.py``). A
+            # capability admission (the node's own console) carries none, which
+            # the extension refuses as ``unsigned_decision`` — the operator, not
+            # whoever holds the node, decides a site. Nor does an answer signed
+            # by a DEVICE certificate (a paired phone): the extension knows only
+            # the anchor point, so it could only call that signature "bad";
+            # without proof it says "answer from your own computer", which is
+            # the remedy (review R1-4).
+            proof = (
+                {
+                    "operator_sig": str(frame.get("operator_sig") or ""),
+                    "operator_key_id": str(frame.get("operator_key_id") or ""),
+                    "challenge": challenge,
+                }
+                if signature is True and challenge and frame.get("operator_cert") is None
+                else None
+            )
             mint_bridge_decide_grant(
                 session_id=str(self._record.session_id),
                 ask_id=str(frame.get("ask_id") or ""),
                 question_id=str(frame.get("question_id") or ""),
                 word=str(frame.get("word") or ""),
+                proof=proof,
             )
         if not admitted:
             # Logged because the two refusals have different causes and only
@@ -6649,7 +6838,16 @@ class RuntimeServer:
         return admitted
 
     def _operator_signature_verdict(self, frame: dict[str, Any], conn: _ClientConn) -> bool | None:
-        """``True``/``False`` when a signature was offered, ``None`` when not.
+        """The verdict alone; see :meth:`_operator_signature_check`."""
+        return self._operator_signature_check(frame, conn)[0]
+
+    def _operator_signature_check(
+        self, frame: dict[str, Any], conn: _ClientConn
+    ) -> tuple[bool | None, str]:
+        """``(verdict, challenge)``: ``True``/``False`` when a signature was
+        offered, ``None`` when not; the challenge it consumed (``""`` when none
+        was), which a site approval's proof needs because the extension
+        re-verifies the same signed message.
 
         THE CHALLENGE IS CONSUMED HERE, before verification, and that is the
         replay defence rather than a detail: a popped challenge cannot be
@@ -6666,17 +6864,17 @@ class RuntimeServer:
         """
         target = signature_target(frame)
         if target is None:
-            return None
+            return None, ""
         supplied = frame.get("operator_sig")
         if supplied is None:
-            return None
+            return None, ""
         action, request_id = target
         entry = conn.operator_challenges.pop((action, request_id), None)
         if entry is None:
-            return False
+            return False, ""
         challenge, expires_at = entry
         if time.monotonic() > expires_at:
-            return False
+            return False, ""
         # The runtime-wide count follows the CONSUME as well as the mint: a
         # challenge handed back here is spent, and leaving it in the aggregate
         # would let a subject that never signs slowly fill the runtime's budget
@@ -6685,7 +6883,7 @@ class RuntimeServer:
         loaded = self._anchor_cache.get()
         anchor = loaded.anchor if loaded.usable else None
         device_spki = self._device_cert_point(frame.get("operator_cert"), anchor)
-        return operator_verify.signature_verdict(
+        verdict = operator_verify.signature_verdict(
             action=action,
             session_id=self._record.session_id,
             request_id=request_id,
@@ -6697,6 +6895,7 @@ class RuntimeServer:
             device_spki=device_spki,
             now=int(time.time()),
         )
+        return verdict, str(challenge)
 
     def _device_cert_point(self, certificate: object, anchor: Any) -> bytes | None:
         """The device point behind a certificate, verified once per TTL.
@@ -7056,6 +7255,15 @@ class RuntimeServer:
                 # decide this caller could not be admitted, read from the same
                 # cached load, so the sentence and the decision cannot disagree.
                 anchored = self._anchor_cache.get().usable
+                if op == "bridge_decide" and _is_site_decide_target(
+                    f"#{frame.get('question_id') or ''}"
+                ):
+                    # A node site card answered unsigned: in practice an older
+                    # build or a phone that was refused its challenge above. The
+                    # generic "not proved" sentence (rebuilt by the CLIENT from
+                    # its own catalogue) would name remedies that cannot sign
+                    # a site card; this one says which device can (review U5).
+                    raise ValueError(_site_old_signer_refusal())
                 raise (
                     OperatorAuthorityRequired(trigger=op)
                     if anchored
@@ -7426,6 +7634,18 @@ class RuntimeServer:
                 request_id = frame.get("request_id", "")
                 if not isinstance(request_id, str):
                     raise ValueError("request_id must be a string")
+                if action == "decide" and _is_site_decide_target(request_id):
+                    # OLD SIGNERS FAIL CLOSED (review U5). A headless node's
+                    # site card is signed only by a client that checked it
+                    # against its ``site`` block first, and says so with this
+                    # marker (``asks/decision.py`` → ``attach_client``). A build
+                    # from before that check — or a phone, which cannot run it
+                    # — gets no challenge, so it cannot sign a card it never
+                    # verified. The marker is unsigned: it stops honest old
+                    # clients, not an attacker who controls the signer (one
+                    # who does holds the operator key anyway).
+                    if frame.get("site_card_verified") is not True:
+                        raise ValueError(_site_old_signer_refusal())
                 now = time.monotonic()
                 self._expire_challenges(conn, now)
                 if len(conn.operator_challenges) >= _MAX_CHALLENGES_PER_CONN:
@@ -8668,8 +8888,24 @@ class RuntimeServer:
         """
         kwargs: dict[str, Any] = {}
         if _accepts_kw(self._dispatch, "authority"):
+            # THE ASK-ANSWER PROOF (forged-surface fix). An ask answer is an
+            # ORDINARY op — the record key alone may settle it — but the label it
+            # records is read by the guard as operator consent, so whether this
+            # frame proved the capability travels down as a value, exactly like
+            # locality: ``_dispatch`` holds no ``conn`` and must not.
+            proved = op in ASK_ANSWER_OPS and request_proof_ok(
+                supplied=frame.get("operator_cap"),
+                held=self._operator_cap,
+                client_nonce=conn.operator_nonce,
+                server_salt=conn.operator_salt,
+            )
             kwargs["authority"] = _ConnectionAuthority(
-                conn.locality, conn.capabilities, dict(conn.peer)
+                conn.locality,
+                conn.capabilities,
+                dict(conn.peer),
+                operator_proved=proved,
+                surface=conn.surface,
+                kind=conn.kind,
             )
         if deliver is not None and _accepts_kw(self._dispatch, "deliver"):
             kwargs["deliver"] = deliver
@@ -9084,6 +9320,17 @@ class RuntimeServer:
                     "this session's runtime predates queued asks; update the runtime "
                     "to answer them"
                 )
+            # THE SURFACE IS STAMPED HERE, NEVER READ OFF THE FRAME. ``by`` used
+            # to be copied verbatim, so anyone holding the record key (a model's
+            # own ``bash``, any same-uid process) or a mesh peer with ``prompt``
+            # could record ``desktop`` and the guard took it as delete consent.
+            # The frame's ``by`` is ignored; see ``asks/surfaces``.
+            stamped_by = stamp_answer_surface(
+                proved=authority.operator_proved,
+                surface=authority.surface,
+                locality=authority.locality,
+                kind=authority.kind,
+            )
             if op in ("ask_respond", "ask_revise"):
                 raw = frame.get("answers") or {}
                 if not isinstance(raw, dict):
@@ -9109,7 +9356,7 @@ class RuntimeServer:
                 outcome = method(
                     str(frame.get("ask_id", "")),
                     answers,
-                    by=str(frame.get("by", "")),
+                    by=stamped_by,
                     **ask_kwargs,
                 )
             elif op == "ask_dismiss" and frame.get("reason"):
@@ -9117,11 +9364,11 @@ class RuntimeServer:
                 # ``ask_dismiss`` predates ``reason`` is still called as before.
                 outcome = method(
                     str(frame.get("ask_id", "")),
-                    by=str(frame.get("by", "")),
+                    by=stamped_by,
                     reason=str(frame["reason"]),
                 )
             else:
-                outcome = method(str(frame.get("ask_id", "")), by=str(frame.get("by", "")))
+                outcome = method(str(frame.get("ask_id", "")), by=stamped_by)
             # ``method`` came from a getattr probe, so what it returns is not
             # statically known to be awaitable; the same spelling the
             # ``adopt_aside`` arm below uses.
@@ -9154,11 +9401,20 @@ class RuntimeServer:
             # pre-guard behaviour.
             raw_index = frame.get("question_index")
             question_index = int(raw_index) if isinstance(raw_index, (int, float)) else None
-            return await h.ask_answer(
-                frame["request_id"],
-                frame["value"],
-                question_index=question_index,
-            )
+            answer_kwargs: dict[str, Any] = {"question_index": question_index}
+            if _accepts_kw(h.ask_answer, "by"):
+                # The legacy mirrored card used to stamp ``mirror`` (a trusted
+                # label) for ANY caller. The handle now records what this seam
+                # decides; a handle without the keyword is a test double or an
+                # owner that never mirrors queued asks.
+                answer_kwargs["by"] = stamp_answer_surface(
+                    proved=authority.operator_proved,
+                    surface=authority.surface,
+                    locality=authority.locality,
+                    kind=authority.kind,
+                    mirror=True,
+                )
+            return await h.ask_answer(frame["request_id"], frame["value"], **answer_kwargs)
         if op == "adopt_aside":
             adopt = getattr(h, "adopt_aside", None)
             if not callable(adopt):
@@ -9711,6 +9967,7 @@ class RuntimeServer:
             )
             try:
                 payload = sync_wire_payload(subscription.sync)
+                _serve_peer_bounded_history(payload, subscription.sync, locality)
                 # The THIRD wire route, and the one an old viewer uses most:
                 # ``AttachedSession._refresh_display_history`` calls this op on
                 # every history refresh, which fires whenever the frontend's
@@ -9786,7 +10043,14 @@ class RuntimeServer:
                 raise ValueError("invalid history page request")
             if len(before) > 4096 or len(anchor) > 512:
                 raise ValueError("invalid history page request")
-            result = fetch(before, anchor)
+            if locality != "local" and _accepts_keyword(fetch, "bound_oversized"):
+                # A NON-LOCAL VIEWER cannot perform the local replay a
+                # ``full_required`` page asks for, so an oversized older group
+                # rides bounded and marked instead (see
+                # ``_serve_peer_bounded_history``).
+                result = fetch(before, anchor, bound_oversized=True)
+            else:
+                result = fetch(before, anchor)
             payload = await result if inspect.isawaitable(result) else result
             # Same contract as the sync frame: a viewer that did not negotiate
             # the audit capability must not be handed fields its page model

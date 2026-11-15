@@ -46,6 +46,7 @@ from local_operator.mobile.auth import (
 )
 from local_operator.mobile.daemon import DEFAULT_PORT
 from local_operator.paths import CONFIG_DIR_ENV, config_dir, log_dir
+from local_operator.tunnels.request_log import read_tail
 
 LABEL = "com.local-operator.mobile"
 
@@ -1655,6 +1656,15 @@ def log_path() -> Path:
     return log_dir() / "mobile.log"
 
 
+def request_log_path() -> Path:
+    """The daemon's bounded per-request log (`tunnels/request_log.py`).
+
+    Its own name rather than `requests.log`: `log_dir()` is shared by every
+    daemon on this machine, and the tunnel gateway writes its own file.
+    """
+    return log_dir() / "mobile-requests.log"
+
+
 def render_plist(port: int = DEFAULT_PORT) -> dict[str, object]:
     """The whole supervised-unit plan in one pure function — every consumer
     (install, status, tests) reads the same rendering.
@@ -2004,7 +2014,13 @@ def health(port: int = DEFAULT_PORT, timeout: float = 3.0) -> dict[str, object] 
 def gate_closed(port: int = DEFAULT_PORT, timeout: float = 3.0) -> bool:
     """Assert the AUTH gate, not mere liveness: a daemon that serves the API
     without a cookie is a boundary failure, however healthy its process."""
-    request = urllib.request.Request(f"http://127.0.0.1:{port}/api/sessions")
+    # Tagged as a probe so the daemon's request log (`tunnels/request_log.py`)
+    # leaves it out: `lop mobile status` runs this every time, and its expected
+    # 401 would otherwise read as a phone being refused.
+    request = urllib.request.Request(
+        f"http://127.0.0.1:{port}/api/sessions",
+        headers={"X-Request-Id": "lop-probe-gate"},
+    )
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
             return response.status == 401
@@ -2390,8 +2406,13 @@ def status(port: int = DEFAULT_PORT) -> dict[str, object]:
         "healthy": probe is not None,
         "gate_closed": gate_closed(port),
         "health": probe,
+        # Open descriptors vs the daemon's soft limit (`mobile/fdlimit.py`).
+        "files": _daemon_files(port) if probe is not None else None,
         "port": port,
         "log": str(log_path()),
+        # The last relayed requests and their status classes (bounded tail read),
+        # so "phone says Not answering" can be told apart from "nothing arrived".
+        "requests": read_tail(request_log_path()),
         "sessions": [
             {
                 "pid": record.pid,
@@ -2404,6 +2425,16 @@ def status(port: int = DEFAULT_PORT) -> dict[str, object]:
             for record, state in records
         ],
     }
+
+
+def _daemon_files(port: int) -> dict[str, object] | None:
+    """The running daemon's open-file count and limit, for `status` (never raises)."""
+    from local_operator.mobile import doctor
+
+    try:
+        return doctor.open_files(doctor.daemon_pid(port))
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return None
 
 
 def _registration_path() -> Path | None:

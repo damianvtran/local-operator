@@ -1,0 +1,15 @@
+{
+ "audit_id": "c1esa1",
+ "locale": "es",
+ "namespace": "tui.session_move",
+ "audited_revision": "b188079f32e6d978ad78fac96edc5c3516d028ab",
+ "files": {
+  "record.json": "a1d1d8468004e0774d80bcd876c7bb29ce57e3d9a9a28afcce4d02dc27f910b8",
+  "report.md": "1e15f7b2cffa5cb1d5f2be49876f7090921a19ee29ec120a7ebb4faa02fe1936",
+  "audit.log": "b733dd97e97d87eb281824eca469cbcdb9819a425be7e31c53887064337f652c",
+  "checks.py.txt": "b42030e56ccaabd742c95798efe606528b7e3d5f85c9901ecc0c8f95ca64aba7"
+ },
+ "bundle": "i18n/audits/evidence/es/tui.session_move/c1esa1",
+ "generated_by": "c1-au-es-A (i18n-auditor), session 96bf9fded81d",
+ "generated_at": "2026-11-11"
+}

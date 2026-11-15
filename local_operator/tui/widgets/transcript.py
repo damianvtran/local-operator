@@ -1964,8 +1964,16 @@ class NoticeBlock(TranscriptBlock):
         "error": "danger",
     }
 
-    def __init__(self, text: str, kind: NoticeKind = "info", *, fold_width: int = 0) -> None:
+    def __init__(
+        self, text: str, kind: NoticeKind = "info", *, fold_width: int = 0, accent: str = ""
+    ) -> None:
         """``fold_width``: the width this notice is about to be given.
+
+        ``accent``: one literal token (a slash command) drawn in the inline-code
+        ink (`signal`, `markdown.code`'s token) so the ONE actionable word in a
+        muted sentence is findable (#3945 design round 1, D6). Only whole
+        occurrences inside a row are accented; a token the fold splits across
+        two rows stays plain rather than half-coloured.
 
         Same reason ``UserBlock.__init__`` documents at length — a notice wraps
         itself in ``_build``, so the hint has to be set before the rows exist or
@@ -1977,6 +1985,7 @@ class NoticeBlock(TranscriptBlock):
         super().__init__()
         self.add_class("notice-block")
         self._text = text
+        self._accent = accent
         self.notice_kind = kind
         self._token = self._KIND_TOKENS.get(kind, "dim")
         self._glyph = NOTICE_GLYPHS.get(kind, "·")
@@ -2309,7 +2318,16 @@ class NoticeBlock(TranscriptBlock):
             else:
                 line.append(indent, style=style)
                 line.append(f"{self._glyph} ", style=style)
-            line.append(row, style=style)
+            accent = getattr(self, "_accent", "")
+            if accent and accent in row:
+                code = Style(color=theme_mod.semantic_color("signal"))
+                pieces = row.split(accent)
+                for at, piece in enumerate(pieces):
+                    if at:
+                        line.append(accent, style=code)
+                    line.append(piece, style=style)
+            else:
+                line.append(row, style=style)
         return line
 
 
@@ -7943,6 +7961,44 @@ class TranscriptView(ScrollableContainer):
         with self._tail_anchor.programmatic_scroll():
             self.scroll_to(y=max(0.0, top), animate=False, immediate=True)
         return True
+
+    def block_row_on_screen(self, block: TranscriptBlock, row: int) -> int | None:
+        """The viewport row ``block``'s content line ``row`` is painted on, or ``None``.
+
+        ``None`` when the block is not a child of this view or that line is
+        scrolled out of the viewport -- there is no on-screen position to hold.
+        """
+        if block.parent is not self:
+            return None
+        at = block.virtual_region.y + block.styles.gutter.top + row - round(self.scroll_y)
+        if 0 <= at < self.scrollable_content_region.height:
+            return at
+        return None
+
+    def hold_block_row(self, block: TranscriptBlock, row: int, screen_row: int) -> None:
+        """Keep ``block``'s line ``row`` on viewport row ``screen_row`` as it grows.
+
+        For a block that grows DOWNWARD from a line the reader is looking at
+        (a diff preview's ``… N more`` marker becoming the first new row): the
+        rows above it keep their screen rows and the new ones appear exactly
+        where the reader asked for them. Like :meth:`reveal_block` it is a
+        reader-initiated move, so the tail stops following -- otherwise the
+        anchor would hold the BOTTOM and slide the new rows away under them.
+        Applied now and again after the growth is laid out.
+        """
+        if block.parent is not self:
+            return
+        self._tail_anchor.release()
+
+        def settle() -> None:
+            if block.parent is not self:
+                return
+            top = block.virtual_region.y + block.styles.gutter.top
+            with self._tail_anchor.programmatic_scroll():
+                self.scroll_to(y=max(0, top + row - screen_row), animate=False, immediate=True)
+
+        settle()
+        self.call_after_refresh(settle)
 
     def refresh_gap_after(self, block: TranscriptBlock) -> None:
         """Re-decide the gap for the first real block below ``block``.

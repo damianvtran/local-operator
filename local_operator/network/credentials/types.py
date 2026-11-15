@@ -368,18 +368,12 @@ def peer_affinity(value: Any) -> tuple[int, int] | None:
     return (account_id, created_at)
 
 
-#: The longest narrowing LIST a peer may carry. 500 is GitHub's own ceiling on
-#: ``repositories`` in ``POST /app/installations/{id}/access_tokens`` (the App
-#: mint maximum), so no designation the owner can actually lend is longer. It was
-#: 64, which silently truncated a longer list here while the owner had digested the
-#: whole one — every delivery then failed its digest and the borrower kept its
-#: standing list forever (PR #3841 mesh-lane m2). The settings validator refuses a
-#: designation over this same number where a person types it
-#: (``settings_io._validate_github_repositories``), so the two cannot drift; a
-#: hand-edited longer list still truncates here and is REFUSED, receipted, on the
-#: borrower (``too_many_entries``), never applied as a partial list. Size: 500 x
-#: 200 chars is ~100 KB, far inside the 8 MiB session frame.
-MAX_NARROWING_LIST_ENTRIES = 500
+#: The largest list one ``Grant.narrowing`` entry may carry across the peer
+#: boundary. Equal to ``github.MAX_DESIGNATED_REPOSITORIES`` (a unit test pins
+#: them equal): the owner refuses a longer designation, so an honest owner never
+#: reaches this bound. 2000 entries of at most 200 characters stay far inside the
+#: 8 MiB record ceiling.
+MAX_NARROWING_LIST_ENTRIES = 2000
 
 
 def _bounded_narrowing(value: Any) -> dict[str, Any]:
@@ -401,8 +395,15 @@ def _bounded_narrowing(value: Any) -> dict[str, Any]:
         if isinstance(item, str):
             out[name] = item[:200]
         elif isinstance(item, (list, tuple)):
+            # NEVER CUT A LIST: a truncated allow-list is a DIFFERENT designation
+            # (it silently drops repos, and a digest delivered beside it cannot
+            # verify). Over the bound the entry is dropped whole, which reads as
+            # "nothing delivered": the borrower keeps its standing list, the
+            # fail-closed direction. This replaced a silent ``[:64]``.
+            if len(item) > MAX_NARROWING_LIST_ENTRIES:
+                continue
             entries = [entry[:200] for entry in item if isinstance(entry, str) and entry]
-            out[name] = entries[:MAX_NARROWING_LIST_ENTRIES]
+            out[name] = entries
     return out
 
 
@@ -540,6 +541,10 @@ BROKER_ERROR_TTL_MS: dict[str, int] = {
     "device_scope_required": 60_000,
     "github_app_unusable": 300_000,
     "github_repositories_unset": 300_000,
+    # A designation larger than one grant can carry (the App mint's 500, the
+    # wire's MAX_NARROWING_LIST_ENTRIES): refused rather than cut, and repaired
+    # by the operator on the owner (an opt-out or an explicit list).
+    "github_repositories_overflow": 300_000,
     "github_repo_refused": 0,
     # The forge ladder's token arms (mesh-consent-provisioning §3.2): a source
     # that RESOLVED but could not be read refuses by arm rather than falling
@@ -791,6 +796,43 @@ class Grant:
     #: ``effective.note_resolution`` say ``held_offline`` instead of claiming a fresh
     #: owner resolve.
     held_offline: bool = dataclasses.field(default=False, compare=False)
+    #: ON THE WIRE, set by the OWNER: the latest moment (epoch ms) the owner allows
+    #: this grant to be served from the borrower's memory while the owner cannot be
+    #: reached — ``min(token expiry, owner_now + offline_hold_s)``, never below
+    #: ``grant_expires_at_ms``. ``0`` = an older owner that states no hold, which
+    #: gets NO extension (the hold ends at ``grant_expires_at_ms``, today's bound).
+    #: Approved 2026-11-13 (C5); see ``credentials.OFFLINE_HOLD_S``.
+    hold_until_ms: int = 0
+    #: PROCESS-LOCAL receipt stamps, never on the wire (``GrantCache.put`` sets
+    #: them once): THIS device's wall clock and sleep-inclusive clock when the grant
+    #: arrived. The borrower's own cap on the hold is measured from these, so an
+    #: owner clock far ahead, a hostile ``hold_until_ms``, a wall clock stepped back
+    #: or a laptop sleeping through the window cannot stretch it (R4-m1, R1-B1).
+    received_wall: float = dataclasses.field(default=0.0, compare=False)
+    received_boot: float = dataclasses.field(default=0.0, compare=False)
+    #: PROCESS-LOCAL: the hold end this serve was licensed under, set only on the
+    #: copy ``_held_or`` returns, so ``effective.note_resolution`` publishes the
+    #: lapse at the hold end rather than at the (earlier) grant end.
+    held_until_ms: int = dataclasses.field(default=0, compare=False)
+
+    def hold_end_ms(self, local_cap_s: float, now_boot: float) -> int:
+        """Until when (epoch ms) this grant may be served while the owner is away.
+
+        ``min(owner-stated hold or grant end, token expiry, received_wall + cap)``,
+        and ``0`` once ``cap`` has passed on the sleep-inclusive clock. A grant this
+        process never stamped on receipt gets no extension: without a borrower-side
+        receipt there is nothing to cap the owner's number against.
+        """
+        end = self.grant_expires_at_ms
+        if not (self.received_wall and self.received_boot):
+            return end
+        if now_boot - self.received_boot >= local_cap_s:
+            return 0
+        if self.hold_until_ms > end:
+            end = self.hold_until_ms
+        if self.token_expires_at_ms:
+            end = min(end, self.token_expires_at_ms)
+        return min(end, int(self.received_wall * 1000 + local_cap_s * 1000))
 
     def usable_at(self, now_ms: float | None = None) -> bool:
         """Whether this grant may still be handed to a request right now."""
@@ -822,6 +864,9 @@ class Grant:
             detail["identity"] = dict(self.identity)
         if self.narrowing:
             detail["narrowing"] = dict(self.narrowing)
+        if self.hold_until_ms:
+            # Only when stated, so the frame to/from an older peer is unchanged.
+            detail["hold_until_ms"] = self.hold_until_ms
         return detail
 
     @classmethod
@@ -847,6 +892,8 @@ class Grant:
             # holds the grant: the failure is a re-ask, not a bearer kept forever.
             token_expires_at_ms=peer_int(detail.get("token_expires_at_ms")),
             grant_expires_at_ms=peer_int(detail.get("grant_expires_at_ms")),
+            # Garbled or absent reads as 0 = no hold stated = no extension.
+            hold_until_ms=peer_int(detail.get("hold_until_ms")),
             credential_ref=CredentialRef(
                 owner_device=str(ref_row.get("owner_device") or ""),
                 owner_device_name=str(ref_row.get("owner_device_name") or ""),

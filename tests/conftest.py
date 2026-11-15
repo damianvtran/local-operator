@@ -71,6 +71,11 @@ _AMBIENT_VARS = (
     # an operator's inherited ``=0`` would waive the refusal the admission cells
     # assert, so it is scrubbed; a cell that needs a floor sets its own.
     "LOCAL_OPERATOR_ADMISSION_FLOOR_MB",
+    # The SIGINFO sensor's off-switch (``siginfo``): an inherited ``off`` would
+    # disable the sensor in every cell, silently waiving what the sensor cells
+    # assert. Scrubbed; the sensor-specific cells set it explicitly via
+    # monkeypatch.
+    "LOCAL_OPERATOR_SIGINFO_SENSOR",
     # The open-frame trace names a real output file, read once at import.
     # Inheriting it could append test timings to the operator's trace; tests
     # that exercise tracing must opt in with their own isolated output path.
@@ -230,6 +235,16 @@ _AMBIENT_VARS = (
     # and the cells would keep passing while testing a window nothing ships.
     "LOP_UPDATE_LOCK_S",
     "LOP_UPDATE_LOCK_HEARTBEAT_S",
+    # The daemon-refresh hand-off's process markers (``update._REFRESH_ROLE_ENV``
+    # and ``_REFRESH_HANDOFF_ENV``). ROLE=worker is a SWITCH: it makes
+    # ``_run_refresh_child`` skip the hand-off and run the refresh body
+    # in-process, so a value inherited from an update the operator has running
+    # would put every hand-off cell on the worker branch while it still looked
+    # like it tested the hand-off. HANDOFF_AT moves the instant a child hands off
+    # by. Cells that mean either set it through ``monkeypatch`` or an explicit
+    # env map.
+    "LOCAL_OPERATOR_REFRESH_ROLE",
+    "LOCAL_OPERATOR_REFRESH_HANDOFF_AT",
     # The runtime standby's own off switch (`session/runtime/standby.py`,
     # ``DISABLE_ENV``), which the suite SETS for the processes it starts
     # (``_PROCESS_DESKTOP_GATES`` below) and must therefore also SCRUB. An

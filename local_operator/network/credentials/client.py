@@ -53,6 +53,7 @@ from local_operator.network.credentials.placement import (
     placement_for_store,
     placement_path,
     placement_state_path,
+    withdraw_rows_lent_by,
 )
 from local_operator.network.credentials.state import PlacementState
 from local_operator.network.credentials.types import (
@@ -80,6 +81,29 @@ _HOLDABLE_REFUSALS: frozenset[str] = frozenset({"owner_offline", "owner_unreacha
 #: longer a live member". Not a broker code: each caller answers it with the
 #: network-wide ``_invalidate_membership_scope``, never a per-key deny.
 _MEMBERSHIP_LOST = "<membership-lost>"
+
+#: :meth:`MeshCredentialClient._hold_admission`'s verdict for "this device's network
+#: is not trusted" (a panic received or raised, ``lop network trust untrusted``).
+#: Not a broker code and NOT a durable deny: the held grants are dropped and the
+#: transport refusal stands, so restoring trust needs only the owner's next grant.
+#: Design review M1 (2026-11-13): a panic closes the links, the next dial reads
+#: ``owner_offline``, and before this fence the hold served the bearer anyway.
+_NETWORK_UNTRUSTED = "<network-untrusted>"
+
+
+def _retire_code(verdict: str) -> str:
+    """The evidence code a ``held`` row is retired with for an admission ``verdict``.
+
+    The sentinels are internal markers, never a code a renderer knows: a panic
+    reads as ``revoked`` (access to this network's credentials was withdrawn),
+    a lost membership as ``member_not_active``; an owner code passes through.
+    """
+    if verdict == _NETWORK_UNTRUSTED:
+        return "revoked"
+    if verdict == _MEMBERSHIP_LOST:
+        return "member_not_active"
+    return verdict
+
 
 #: Outcomes that are not an owner answer about permission either, so they neither
 #: serve nor drop a held grant: a local broker fault, a busy owner, a quota rest.
@@ -133,6 +157,48 @@ CLIENT_DEADLINE_S = 8.0
 #: must never be the component that discovers an expiry, so it asks early enough
 #: that the owner's refresh (if any) happens on the owner's clock.
 REASK_MARGIN_MS = 120_000
+
+
+def _renewal_from_reply(reply: Any) -> tuple[Grant, Any] | None:
+    """The relay's ``held_renewal`` on an owner-unreachable reply, as a stamped Grant.
+
+    The receipt stamps are back-dated by the relay's ``held_age_s`` (its receipt
+    age on the sleep-inclusive clock), so the session's hold is capped from the
+    RELAY's receipt — adopting it never restarts the window by itself. Anything
+    malformed reads as no renewal.
+    """
+    detail = reply.get("detail") if isinstance(reply, dict) else None
+    raw = detail.get("held_renewal") if isinstance(detail, dict) else None
+    if not isinstance(raw, dict) or raw.get("kind") != "grant":
+        return None
+    age = raw.get("held_age_s")
+    if isinstance(age, bool) or not isinstance(age, (int, float)) or not 0 <= age < 10**7:
+        return None
+    try:
+        grant = Grant.from_detail(raw)
+    except Exception:  # noqa: BLE001 — a garbled renewal is no renewal
+        return None
+    if not grant.access_token:
+        return None
+    from local_operator.network.credentials.held_policy import Stamp
+
+    raw_stamp = raw.get("policy_stamp")
+    if not isinstance(raw_stamp, dict):
+        # No fetch-time policy stamp, nothing to fence the adoption with: refuse.
+        return None
+    try:
+        stamp = Stamp(
+            incarnation=str(raw_stamp["incarnation"]),
+            network_generation=int(raw_stamp["network_generation"]),
+            owner=str(raw_stamp["owner"]),
+            key=str(raw_stamp["key"]),
+            key_generation=int(raw_stamp["key_generation"]),
+        )
+    except (KeyError, TypeError, ValueError):
+        return None
+    grant.received_wall = time.time() - float(age)
+    grant.received_boot = _sleep_inclusive_clock() - float(age)
+    return grant, stamp
 
 
 def _sleep_inclusive_clock() -> float:
@@ -217,8 +283,8 @@ class GrantCache:
         hand out a grant inside the margin.
 
         ONE CALLER DOES SERVE FROM HERE: ``_held_or``, the owner-unreachable path.
-        It applies its own ``Grant.usable_at`` check, which has no margin, so it
-        serves a grant marked ``held_offline`` right up to the grant's expiry.
+        It applies its own ``Grant.hold_end_ms`` check, which has no margin, so it
+        serves a grant marked ``held_offline`` right up to the hold's end.
         """
         with self._lock:
             return self._grants.get((key, session_id))
@@ -233,6 +299,13 @@ class GrantCache:
         lifecycle_fence: Any = None,
         selection: Any = None,
     ) -> None:
+        if not grant.received_wall:
+            # THE RECEIPT STAMP the offline hold is capped from (``Grant.hold_end_ms``):
+            # this device's clocks, once, at the moment the grant entered memory.
+            # A grant put again keeps its first stamp, so a re-put cannot restart
+            # the operator-approved window.
+            grant.received_wall = time.time()
+            grant.received_boot = _sleep_inclusive_clock()
         with self._lock:
             self._grants[(key, session_id)] = grant
             self._policy_fences[(key, session_id)] = policy_fence
@@ -262,16 +335,25 @@ class GrantCache:
         with self._lock:
             return self._policy_fences.get((key, session_id))
 
-    def drop_borrowed(self, self_device: str) -> None:
-        """One client owns one root/network; local-owned sentinels are unrelated."""
+    def drop_borrowed(self, self_device: str) -> list[Grant]:
+        """One client owns one root/network; local-owned sentinels are unrelated.
+
+        Returns the grants it dropped, so a caller ending access for a SECURITY
+        reason can revoke what it just forgot (``_revoke_dropped_github``).
+        """
+        dropped: list[Grant] = []
         with self._lock:
             for pair, grant in list(self._grants.items()):
                 if grant.credential_ref.owner_device != self_device:
+                    dropped.append(grant)
                     del self._grants[pair]
                     self._policy_fences.pop(pair, None)
                     self._reuse.pop(pair, None)
+        return dropped
 
-    def invalidate_policy(self, key: str, session_id: str, fence: str) -> bool:
+    def invalidate_policy(
+        self, key: str, session_id: str, fence: str, *, dropped: list[Grant] | None = None
+    ) -> bool:
         """Drop ALL old slots, not just the session that first hears the refusal.
 
         Compare opaque generations, never the remote owner's clock. A fresh
@@ -286,23 +368,32 @@ class GrantCache:
             ]
             requested = (key, session_id) in stale
             for pair in stale:
+                if dropped is not None:
+                    # The caller revokes these when the new generation is a
+                    # restriction (#3947 m1); it decides, this only reports.
+                    dropped.append(self._grants[pair])
                 del self._grants[pair]
                 self._policy_fences.pop(pair, None)
                 self._reuse.pop(pair, None)
             return requested
 
-    def drop(self, key: str, session_id: str = "") -> None:
-        """Forget one grant, or every session's grant for ``key`` when unnamed."""
+    def drop(self, key: str, session_id: str = "") -> list[Grant]:
+        """Forget one grant, or every session's grant for ``key`` when unnamed.
+
+        Returns what was dropped (see :meth:`drop_borrowed`); most callers ignore it.
+        """
         with self._lock:
             if session_id:
-                self._grants.pop((key, session_id), None)
+                gone = self._grants.pop((key, session_id), None)
                 self._policy_fences.pop((key, session_id), None)
                 self._reuse.pop((key, session_id), None)
-                return
+                return [gone] if gone is not None else []
+            dropped: list[Grant] = []
             for pair in [p for p in self._grants if p[0] == key]:
-                del self._grants[pair]
+                dropped.append(self._grants.pop(pair))
                 self._policy_fences.pop(pair, None)
                 self._reuse.pop(pair, None)
+            return dropped
 
     def find_by_token(self, key: str, bearer: str) -> tuple[str, str] | None:
         """The ``(key, session_id)`` a bearer belongs to, for attributing a failure.
@@ -333,11 +424,14 @@ class GrantCache:
         with self._lock:
             return sorted({key for key, _session in self._grants})
 
-    def clear(self) -> None:
+    def clear(self) -> list[Grant]:
+        """Forget every grant; returns them (see :meth:`drop_borrowed`)."""
         with self._lock:
+            dropped = list(self._grants.values())
             self._grants.clear()
             self._policy_fences.clear()
             self._reuse.clear()
+        return dropped
 
 
 class MeshCredentialClient:
@@ -385,6 +479,10 @@ class MeshCredentialClient:
         #: :class:`_RefreshOutcomeHold` for what ends one.
         self._refresh_holds: dict[tuple[str, int], _RefreshOutcomeHold] = {}
         self._refresh_holds_lock = threading.Lock()
+        #: Per grant id: the offline-hold receipt tally (:meth:`_note_held_serve`).
+        #: Counts and ids only, process memory only, like the grant it describes.
+        self._held_receipts: dict[str, dict[str, Any]] = {}
+        self._held_receipts_lock = threading.Lock()
 
     # -- construction -------------------------------------------------------
 
@@ -481,8 +579,11 @@ class MeshCredentialClient:
         stamp = self._stat_placement()
         if stamp == self._placement_stamp:
             return self._placement
+        dropped: list[Grant] = []
+        changed = False
         with self._placement_lock:
             if stamp != self._placement_stamp:
+                changed = True
                 self._placement = (
                     PlacementDocument.load(self.network_id, self.root, self_device=self.self_device)
                     if stamp is not None
@@ -490,8 +591,19 @@ class MeshCredentialClient:
                 )
                 # Changed/deleted placement invalidates permission and generation;
                 # never serve a cached bearer across a withdrawal.
-                self.grants.clear()
+                dropped = self.grants.clear()
                 self._placement_stamp = stamp
+        if changed:
+            # A SHARE REVOKE reaches a session process as this placement change
+            # (the relay's pull rewrites the file), so this is where a held login
+            # ends: its durable ``held`` reading for EVERY withdrawn key (#3947
+            # R2-m1 — the MCP row kept saying "held until" after the pull), and a
+            # GitHub App token at once rather than at the hold end (2026-11-14).
+            # Only for keys actually withdrawn: an unrelated edit to the document
+            # must not kill a token a push is using right now.
+            self._retire_withdrawn_holds()
+            if dropped:
+                self._revoke_withdrawn_github(dropped)
         return self._placement
 
     def _stat_placement(self) -> tuple[int, int] | None:
@@ -566,6 +678,26 @@ class MeshCredentialClient:
             granted = self.state.last_grant_from(device)
             if granted:
                 stamps.append(granted)
+        seen = self.owner_seen_at(device)
+        if seen is not None:
+            stamps.append(seen)
+        if not stamps:
+            return None
+        return max(0.0, time.time() - max(stamps))
+
+    def owner_seen_at(self, device: str) -> float | None:
+        """When this device's relay last saw a LINK frame from ``device``, or ``None``.
+
+        ``member.last_seen_at`` across this device's networks: the relay writes it
+        when it admits the owner's link (forced) and, throttled, as frames arrive
+        (``RelayServer.note_link_activity``). Deliberately WITHOUT the last grant
+        :meth:`owner_last_seen_s` also counts: a turn waiting for the owner
+        (``store._OwnerWait``) makes no grants, so only a link frame can mean "the
+        owner is back". File reads only; never a dial.
+        """
+        if not device:
+            return None
+        stamps: list[float] = []
         try:
             from local_operator.network import store
 
@@ -574,10 +706,8 @@ class MeshCredentialClient:
                 if member is not None and member.last_seen_at:
                     stamps.append(float(member.last_seen_at))
         except Exception:  # noqa: BLE001 — a missing observation is not a failure
-            pass
-        if not stamps:
             return None
-        return max(0.0, time.time() - max(stamps))
+        return max(stamps) if stamps else None
 
     # -- refusal cache ------------------------------------------------------
 
@@ -749,7 +879,18 @@ class MeshCredentialClient:
         from local_operator.network.credentials.effective import note_resolution
 
         note_resolution(self.root, key, grant)
-        self.state.note_grant(key, grant.grant_id, owner_device=grant.credential_ref.owner_device)
+        # The owner answered again, so any offline hold on this key is over: its
+        # last serves since the previous receipt are written now, not lost.
+        if self._held_receipts:
+            self._flush_held_receipts(key)
+        self.state.note_grant(
+            key,
+            grant.grant_id,
+            owner_device=grant.credential_ref.owner_device,
+            grant_expires_at_ms=grant.grant_expires_at_ms,
+            hold_until_ms=grant.hold_until_ms,
+            held_offline=grant.held_offline,
+        )
         # THE DURABLE HALF OF A SUCCESSFUL BORROW. The grant itself lives only in
         # memory (``GrantCache``), so without this row a restarted session has no
         # way to say "this server works because <owner> signed in" — it would read
@@ -852,7 +993,18 @@ class MeshCredentialClient:
         # a login-negative cache: the owner may have signed in since the last
         # request. Forced refresh therefore always reaches the sole refresh owner.
         if not self.should_borrow(key):
-            self.grants.drop(key)
+            # A share revoke ends a held GitHub token at once (2026-11-14), and its
+            # durable ``held`` reading with it (#3947 m2).
+            dropped_now = self.grants.drop(key)
+            # UNCONDITIONAL (#3947 R2-m1): the placement hook may already have
+            # cleared the slot, so an empty drop is no evidence that nothing was
+            # held. ``retire_held`` only rewrites ``held`` rows, so this is idempotent.
+            self._retire_held([key], "not_a_holder")
+            self._revoke_dropped_github(dropped_now)
+            if self._held_receipts:
+                # A revoke heard while the hold was serving (now also through the
+                # pull's withdrawal, #3922 Q2) ends it here: write its last serves.
+                self._flush_held_receipts(key)
             return BrokerError(
                 code="not_a_holder",
                 key=key,
@@ -870,7 +1022,7 @@ class MeshCredentialClient:
             from local_operator.network.credentials.github import is_github_key
 
             if is_github_key(key):
-                cached = self.grants.get(key, session_id)
+                cached = self.live_grant(key, session_id)
                 if cached is not None:
                     return cached
             else:
@@ -913,6 +1065,8 @@ class MeshCredentialClient:
                     session_id,
                     force_refresh=force_refresh,
                     prior_status=prior_status,
+                    label=label,
+                    resting=resting,
                 )
             extra: dict[str, Any] = {}
             if excluded:
@@ -956,7 +1110,14 @@ class MeshCredentialClient:
         )
         if isinstance(outcome, BrokerError):
             return self._held_or(
-                outcome, key, session_id, force_refresh=force_refresh, prior_status=prior_status
+                outcome,
+                key,
+                session_id,
+                force_refresh=force_refresh,
+                prior_status=prior_status,
+                label=label,
+                resting=resting,
+                renewal=_renewal_from_reply(reply),
             )
         # The owner LENT a ``grant_invalid``-held login (the only kind left visible to
         # the ask, because the owner's cascade refuses a dead grant on its own): it
@@ -1064,15 +1225,63 @@ class MeshCredentialClient:
         a fence added to one is a fence on both. ``verdict`` is ``""`` when the
         grant may be considered, :data:`_MEMBERSHIP_LOST`, or a refusal code.
         """
+        # TODO(#3920): route this trust read through ``MeshCredentialClient.live_grant``
+        # once #3920 (the panic hotfix) merges, so the hold and the hot read share its
+        # one trust check; until then ``_network_trusted`` below is that check.
         stamp = policy.stamp(document, self.owner_of(key), key)
         restriction = self._lifecycle_restriction(key)
         # The final membership read MUST use the same invalidation helper as the
         # first, before any successful hold is visible.
         if not self._self_membership_active():
             return _MEMBERSHIP_LOST, stamp
+        if not self._network_trusted():
+            return _NETWORK_UNTRUSTED, stamp
         if not self.should_borrow(key) or restriction:
             return restriction or "not_a_holder", stamp
         return "", stamp
+
+    def live_grant(self, key: str, session_id: str) -> Grant | BrokerError | None:
+        """The cached grant for ``(key, session_id)`` IF this device may still serve it.
+
+        THE ONE DOOR FOR EVERY NO-DIAL CACHE SERVE (PR #3920 review M1 / QA
+        Q-R1-1). A panic (raised here or received) only latches ``record.trust``;
+        nothing tells an in-process :class:`GrantCache` about it, so a serve that
+        read the cache directly — the ``github`` gate in :meth:`request_grant_sync`,
+        MCP's ``BrokeredBearerAuth._live_bearer`` — kept handing out a live bearer
+        for up to the grant's expiry after the panic. Every cached-grant read that
+        may hand a bearer to a caller goes through here; a new one must too.
+
+        Returns ``None`` when nothing usable is cached (the caller dials, as
+        before), the grant when the slot is live AND :meth:`_self_membership_active`
+        holds, and otherwise the persistent network deny
+        (:meth:`_invalidate_membership_scope`, which drops every slot this device
+        borrowed) as a :class:`BrokerError`.
+
+        The store read happens only on a cache hit, so a miss costs nothing new.
+        The no-dial paths keep their own later checks (``_hold_admission`` inside
+        the policy transaction for the provider hot read and the hold); this is
+        the fence that must hold BEFORE anything is served. PR #3922 (offline
+        lease) adds a trust check in ``_hold_admission``: it should route its cache
+        read through this helper rather than add a parallel one — keep the name.
+        """
+        from local_operator.network.credentials.effective import note_resolution
+        from local_operator.network.credentials.held_policy import PolicyUnknown
+
+        cached = self.grants.get(key, session_id)
+        if cached is None:
+            return None
+        if self._self_membership_active():
+            return cached
+        try:
+            lost = self._invalidate_membership_scope(key)
+        except PolicyUnknown:
+            # The persistent deny could not be written; the in-process slots
+            # still go, so this process serves nothing either way (fail closed).
+            self._revoke_dropped_github(self.grants.drop_borrowed(self.self_device))
+            self._retire_held(None, "member_not_active")
+            lost = self._policy_error(key, "not_a_holder")
+        note_resolution(self.root, key, lost)
+        return lost
 
     def _serve_cached(
         self, key: str, session_id: str, *, model_id: str, selection: dict[str, Any]
@@ -1117,7 +1326,9 @@ class MeshCredentialClient:
 
         if is_mcp_key(key) or is_device_bound_provider(key):
             return None
-        held = self.grants.get(key, session_id)
+        held = self.live_grant(key, session_id)
+        if isinstance(held, BrokerError):
+            return held
         reuse = self.grants.reuse_stamp(key, session_id)
         if held is None or reuse is None:
             return None
@@ -1145,9 +1356,20 @@ class MeshCredentialClient:
                     note_resolution(self.root, key, lost)
                     return lost
                 if verdict:
-                    self.grants.drop(key)
+                    # ONE RULE WITH ``_held_or`` (review #3947 m1): ``_hold_admission``
+                    # is the shared fence, so every non-empty verdict — a panic, a
+                    # withdrawn share, an owner-stated restriction such as
+                    # ``consent_withdrawn`` or ``consent_unverifiable`` — means the
+                    # cached token is no longer this device's to use, and a GitHub
+                    # App token dies now rather than at the hold end.
+                    self._revoke_dropped_github(self.grants.drop(key))
+                    self._retire_held([key], _retire_code(verdict))
                     return None
-                if self.grants.invalidate_policy(key, session_id, stamp):
+                invalidated: list[Grant] = []
+                if self.grants.invalidate_policy(key, session_id, stamp, dropped=invalidated):
+                    if policy.code(document, self.owner_of(key), key):
+                        # Same rule as ``_held_or``: a restriction ends them (#3947 m1).
+                        self._revoke_dropped_github(invalidated)
                     return None
                 if self._lifecycle_fence(key) != fence:
                     # Dial, but KEEP the slot: if the owner is unreachable the
@@ -1200,10 +1422,16 @@ class MeshCredentialClient:
         if document is None:
             with policy.transaction() as row:
                 policy.deny_network(row)
-                self.grants.drop_borrowed(self.self_device)
+                dropped = self.grants.drop_borrowed(self.self_device)
         else:
             policy.deny_network(document)
-            self.grants.drop_borrowed(self.self_device)
+            dropped = self.grants.drop_borrowed(self.self_device)
+        # Membership loss AND a panic (an untrusted network fails
+        # ``_self_membership_active``) both land here: a held GitHub token dies at
+        # once, not at the hold end (2026-11-14). Started off-thread, so the
+        # policy transaction this may run inside is not held across a DELETE.
+        self._revoke_dropped_github(dropped)
+        self._retire_held(None, "member_not_active")
         return self._policy_error(key, "not_a_holder")
 
     def _adopt_online(
@@ -1276,6 +1504,70 @@ class MeshCredentialClient:
         note_resolution(self.root, key, denied)
         return denied
 
+    def _revoke_dropped_github(self, dropped: list[Grant]) -> None:
+        """DELETE the GitHub installation tokens in ``dropped`` now. Never raises.
+
+        Called ONLY where a grant is dropped for a security reason — a panic, a
+        withdrawn share, a lost membership. Since 2026-11-14 a node holds a lent
+        GitHub token for its whole hour (the offline hold), and in those cases the
+        owner may be the device that is away, so this device's own DELETE is the
+        one that ends it. A hold that simply lapses is NOT routed here: the
+        scheduled belt fires at the hold end, and the token's ceiling is under both.
+        Grants of other keys in ``dropped`` are ignored (``is_installation_grant``).
+        """
+        if not dropped:
+            return
+        try:
+            from local_operator.network.credentials.github import revoke_now
+
+            revoke_now(dropped)
+        except Exception:  # noqa: BLE001 — a revoke is a belt; the drop already happened
+            logger.debug("immediate github revoke failed", exc_info=True)
+
+    def _retire_held(self, keys: list[str] | None, code: str) -> None:
+        """End the durable ``held`` reading for ``keys`` (``None``: all) after a drop for cause.
+
+        The status surfaces read ``held`` rows from disk (another process), so a hold
+        a panic, revoke or lost membership just ended must be rewritten here, or they
+        keep saying "held until HH:MM UTC" (review #3947 m2). Never raises.
+        """
+        mcp_state.retire_held(self.network_id, keys, code=code, root=self.root)
+
+    def _retire_withdrawn_holds(self) -> None:
+        """Retire the ``held`` evidence row of every key this device may no longer borrow.
+
+        Read from the evidence file, not the grant cache: the cache is per process
+        and is cleared on any placement change, while the ``held`` row is shared by
+        every surface on the device (#3947 R2-m1). One file read per placement change.
+        Never raises.
+        """
+        try:
+            withdrawn = [
+                key
+                for key, row in mcp_state.load(self.network_id, self.root).items()
+                if row.get("state") == "held" and not self.should_borrow(key)
+            ]
+            if withdrawn:
+                self._retire_held(withdrawn, "not_a_holder")
+        except Exception:  # noqa: BLE001 — status copy; serving is already refused
+            logger.debug("held-row retirement after a placement change failed", exc_info=True)
+
+    def _revoke_withdrawn_github(self, dropped: list[Grant]) -> None:
+        """:meth:`_revoke_dropped_github` after a placement change, IF GitHub was withdrawn."""
+        try:
+            from local_operator.network.credentials.github import (
+                GITHUB_KEY,
+                is_installation_grant,
+            )
+
+            if self.should_borrow(GITHUB_KEY):
+                return
+            tokens = [grant for grant in dropped if is_installation_grant(grant)]
+            if tokens:
+                self._revoke_dropped_github(tokens)
+        except Exception:  # noqa: BLE001 — see _revoke_dropped_github
+            logger.debug("github withdrawal check failed", exc_info=True)
+
     def _held_or(
         self,
         refusal: BrokerError,
@@ -1284,13 +1576,55 @@ class MeshCredentialClient:
         *,
         force_refresh: bool,
         prior_status: str = "",
+        label: str = "",
+        resting: list[dict[str, Any]] | None = None,
+        renewal: tuple[Grant, Any] | None = None,
     ) -> Grant | BrokerError:
-        """A CURRENT immutable stamp + original owner lease, never a retry-cache vote."""
+        """A CURRENT immutable stamp + the owner's stated hold, never a retry-cache vote.
+
+        ``renewal`` is the grant this device's RELAY fetched when the owner last
+        returned (``renew_push``), attached to the relay's owner-unreachable answer.
+        It replaces this session's held grant only when its hold ends later, and
+        only inside the same admission below, so every fence applies to it unchanged.
+
+        THE OFFLINE HOLD (operator-approved 2026-11-13, C5): while the owner is
+        unreachable, the grant this session already holds keeps serving until
+        :meth:`Grant.hold_end_ms` — the owner's ``hold_until_ms`` (token expiry,
+        at most ``offline_hold_s``) capped by THIS device's receipt clocks. An
+        older owner states no hold, so its grant ends at ``grant_expires_at_ms``
+        exactly as before. Nothing new is minted or refreshed here.
+
+        A HELD LOGIN THE PROVIDER IS RESTING still answers ``quota_blocked``
+        (``resting`` is the caller's cooldown read for this model): a held bearer
+        the provider just 429'd would otherwise be re-served for up to a day, and
+        the synced failover chain (#3900) moves on only on a quota refusal. The slot
+        is kept, because the rest can end inside the hold.
+
+        GITHUB AND MCP ARE HELD TOO (operator decision 2026-11-14, "Yes, GitHub and
+        MCP"; design ``mesh-credential-renewal.md`` §A). ``e70f7643c`` excluded them
+        out of caution, and GitHub for a concrete hazard: the borrower's belt
+        (``github._schedule_self_revoke``) and the owner's lender both DELETEd the
+        installation token at the 15-minute grant window, so a held serve would
+        have handed out a token already killed. Both DELETEs now fire at the hold
+        end (``github.belt_revoke_at_ms``, ``owner._serve_github_app``), and a panic,
+        a share revoke or a lost membership DELETEs it at once
+        (:meth:`_revoke_dropped_github`). The token's own expiry still wins inside
+        :meth:`Grant.hold_end_ms`: an App installation token (1 h) or an MCP access
+        token (the server's ``expires_in``) ends the hold early; a PAT or ``gh``
+        token rides the full hold. An MCP refresh token never leaves the owner, and
+        an MCP 401 drops the slot before it re-asks (``BrokeredBearerAuth``), so a
+        bearer the server refused is never served from the hold again.
+        DEVICE-BOUND providers stay excluded: their login cannot be brokered at all.
+
+        Every offline serve is counted in a ``credential.held_served`` receipt and
+        a hold that ends with the owner still away writes ``credential.held_lapsed``
+        (:meth:`_note_held_serve`); neither carries the token.
+        """
+        from local_operator.network.credentials import offline_hold_s
         from local_operator.network.credentials.effective import note_resolution
-        from local_operator.network.credentials.github import is_github_key
         from local_operator.network.credentials.held_policy import PolicyUnknown
 
-        if is_mcp_key(key) or is_device_bound_provider(key) or is_github_key(key):
+        if is_device_bound_provider(key):
             note_resolution(self.root, key, refusal)
             return refusal
         if refusal.code not in _HOLDABLE_REFUSALS:
@@ -1298,42 +1632,304 @@ class MeshCredentialClient:
                 self.grants.drop(key)
             return refusal
         outcome: Grant | BrokerError = refusal
+        lapsed: Grant | None = None
+        lapsed_bound = ""
+        #: Set on every arm that DROPS the held grant without a lapse, so its pending
+        #: offline serves are written (``_flush_held_receipts``) rather than lost with
+        #: the slot (review R1-m2): the receipt promises every offline serve is counted.
+        dropped = False
         try:
             if not self._self_membership_active():
                 outcome = self._invalidate_membership_scope(key)
+                dropped = True
             else:
                 policy = self._policy()
                 with policy.transaction() as document:
                     verdict, stamp = self._hold_admission(policy, document, key)
                     if verdict == _MEMBERSHIP_LOST:
                         outcome = self._invalidate_membership_scope(key, document)
+                        dropped = True
+                    elif verdict == _NETWORK_UNTRUSTED:
+                        # A panic ends a held GitHub token at once (2026-11-14).
+                        self._revoke_dropped_github(self.grants.drop(key))
+                        self._retire_held(None, _retire_code(verdict))
+                        dropped = True
                     elif verdict:
                         code = verdict
                         policy.deny(document, self.owner_of(key), key, code)
-                        self.grants.drop(key)
+                        # A withdrawn share or an owner-stated restriction: the held
+                        # token is no longer this device's to use, so it dies now.
+                        self._revoke_dropped_github(self.grants.drop(key))
+                        self._retire_held([key], _retire_code(code))
+                        dropped = True
                         outcome = self._policy_error(key, code)
                     else:
-                        stale = self.grants.invalidate_policy(key, session_id, stamp)
+                        if renewal is not None and not force_refresh:
+                            self._adopt_renewal(key, session_id, renewal, stamp)
+                        invalidated: list[Grant] = []
+                        stale = self.grants.invalidate_policy(
+                            key, session_id, stamp, dropped=invalidated
+                        )
                         held = self.grants.peek(key, session_id)
                         if stale or held is None:
                             code = policy.code(document, self.owner_of(key), key)
                             if code:
                                 outcome = self._policy_error(key, code)
-                        elif not held.usable_at():
-                            self.grants.drop(key, session_id)
-                        elif not force_refresh:
-                            outcome = dataclasses.replace(held, held_offline=True)
-                            # Positive publication is part of this linearized
-                            # read, not a callback after releasing the deny lock.
-                            note_resolution(self.root, key, outcome)
-                            return outcome
+                                # A restriction another process recorded (e.g.
+                                # ``consent_withdrawn``) ends the slots it fenced
+                                # out the same way a verdict does (#3947 m1).
+                                self._revoke_dropped_github(invalidated)
+                                self._retire_held([key], code)
+                        elif force_refresh:
+                            # A repair of the bearer is never answered from memory,
+                            # and does not end the hold for the next plain call.
+                            pass
+                        else:
+                            hold_end = held.hold_end_ms(
+                                offline_hold_s(self.root), _sleep_inclusive_clock()
+                            )
+                            cooling = [
+                                row
+                                for row in resting or ()
+                                if int(row.get("credential_id") or 0)
+                                == held.credential_ref.credential_id
+                            ]
+                            if time.time() * 1000.0 >= hold_end:
+                                self.grants.drop(key, session_id)
+                                lapsed = held
+                                # The bound is read from the hold end THIS serve
+                                # computed (review R1-m1 / QA Q1): the cached grant
+                                # never carries ``held_until_ms``, so it always read
+                                # as ``grant``. ``0`` is the borrower's own cap on
+                                # the sleep-inclusive clock — unless the owner
+                                # stated no hold, when the grant end is the limit.
+                                lapsed_bound = self._lapse_bound(
+                                    held, hold_end, offline_hold_s(self.root)
+                                )
+                            elif cooling:
+                                outcome = self._resting_refusal(key, label or key, cooling)
+                            else:
+                                outcome = dataclasses.replace(
+                                    held, held_offline=True, held_until_ms=hold_end
+                                )
+                                # Positive publication is part of this linearized
+                                # read, not a callback after releasing the deny lock.
+                                note_resolution(self.root, key, outcome)
         except PolicyUnknown:
             self.grants.drop(key)
+            dropped = True
             outcome = self._policy_error(key, "consent_unverifiable")
+        if dropped and self._held_receipts:
+            self._flush_held_receipts(key)
+        if isinstance(outcome, Grant):
+            # The receipt is written OUTSIDE the policy lock: an audit append is
+            # disk I/O, and the decision it records is already final.
+            self._note_held_serve(key, outcome)
+            from local_operator.network.credentials.github import is_github_key
+
+            if is_mcp_key(key) or is_github_key(key):
+                # THE MCP AND GITHUB STATUS SURFACES READ DURABLE EVIDENCE, not this
+                # process's in-memory receipts (``/mcp``, ``lop network mcp
+                # credentials`` and readiness's ``github_fact`` all run in another
+                # process). The dial just wrote ``unavailable`` for the
+                # ``owner_offline``; a held serve replaces it with ``held`` and its
+                # end, so they say "held until HH:MM UTC" instead of "the owner is
+                # unreachable" while the server or push works (2026-11-14). Model
+                # keys keep their own published-claim path and are not written here.
+                mcp_state.record(
+                    self.network_id,
+                    key,
+                    state="held",
+                    code=refusal.code,
+                    owner_device=outcome.credential_ref.owner_device or self.owner_of(key),
+                    owner_name=outcome.credential_ref.owner_device_name or self.owner_label(key),
+                    until=outcome.held_until_ms / 1000.0,
+                    root=self.root,
+                )
+            return outcome
+        if lapsed is not None:
+            self._note_held_lapsed(key, lapsed, bound=lapsed_bound)
+        if outcome.code == "quota_blocked":
+            # Not a publication: the login is still lent and the rest is this
+            # device's own record (``_resting_refusal``), exactly as on the dial path.
+            return outcome
         # Commit a discovered deny BEFORE publication. The successful path never
         # publishes an intermediate owner_unavailable or changes grant clocks.
         note_resolution(self.root, key, outcome)
         return outcome
+
+    def _adopt_renewal(
+        self, key: str, session_id: str, renewal: tuple[Grant, Any], stamp: Any
+    ) -> None:
+        """Put the relay's renewal in this session's slot when it holds out longer.
+
+        Called inside :meth:`_held_or`'s admitted branch, so the policy stamp it is
+        fenced with is the one that branch just verified. Only a renewal lent by the
+        CURRENT owner of ``key`` is considered; the comparison is on hold ends, both
+        computed on this device's clocks from their receipts.
+        """
+        from local_operator.network.credentials import offline_hold_s
+
+        grant, fetch_stamp = renewal
+        if grant.credential_ref.owner_device != self.owner_of(key):
+            return
+        if fetch_stamp != stamp:
+            # THE HELD POLICY MOVED SINCE THE RELAY FETCHED IT (review m3): a deny
+            # (even one since cleared) was recorded after the fetch. Fencing that
+            # renewal with today's stamp would serve what a session's own grant of
+            # the same age would be refused, so it is not adopted.
+            return
+        renewal_grant = grant
+        cap = offline_hold_s(self.root)
+        now_boot = _sleep_inclusive_clock()
+        held = self.grants.peek(key, session_id)
+        if held is not None and held.hold_end_ms(cap, now_boot) >= renewal_grant.hold_end_ms(
+            cap, now_boot
+        ):
+            return
+        self.grants.put(key, session_id, renewal_grant, policy_fence=stamp)
+
+    #: One coalesced ``credential.held_served`` record per grant at most this often
+    #: (seconds, sleep-inclusive). A held model session calls every few seconds; a
+    #: record per serve would be ~720 an hour against the audit log's 8 MB cap.
+    HELD_RECEIPT_INTERVAL_S = 60.0
+
+    def _note_held_serve(self, key: str, grant: Grant) -> None:
+        """Count one offline serve; write the first at once, then one per minute.
+
+        WHY A DURABLE RECEIPT: the 2026-11-13 incident had to be reconstructed by
+        scraping transcripts, because ``held_offline`` lived only in memory. Each
+        record names the grant (id, never the token) and how many serves it covers,
+        so every offline serve is accounted for: the pending count is flushed by
+        the next per-minute record, by ``held_lapsed``, or when the owner answers
+        again (:meth:`_flush_held_receipts`).
+        """
+        now = _sleep_inclusive_clock()
+        gid = grant.grant_id
+        with self._held_receipts_lock:
+            tally = self._held_receipts.get(gid)
+            if tally is None:
+                tally = self._held_receipts[gid] = {
+                    "key": key,
+                    "owner": grant.credential_ref.owner_device,
+                    "pending": 0,
+                    "total": 0,
+                    "last": -float("inf"),
+                }
+            tally["pending"] += 1
+            tally["total"] += 1
+            if now - tally["last"] < self.HELD_RECEIPT_INTERVAL_S:
+                return
+            serves, tally["pending"], tally["last"] = tally["pending"], 0, now
+        # The durable twin of this receipt in ``placement.state.json`` (mesh lane
+        # 64949): a lapse can then be dated from the state row alone.
+        self.state.note_held_serve(key, int(grant.held_until_ms))
+        self._save_state()
+        self._held_audit(
+            "credential.held_served",
+            key,
+            grant.credential_ref.owner_device,
+            grant_id=gid,
+            hold_until=int(grant.held_until_ms),
+            bound=self._hold_bound(grant),
+            serves=serves,
+        )
+
+    def _note_held_lapsed(self, key: str, grant: Grant, *, bound: str = "") -> None:
+        """The hold ended with the owner still away: flush the count, say it ended.
+
+        Only for a grant that was actually served from the hold, so an outage that
+        began after the hold's end (nothing was ever served unasked) writes nothing.
+        """
+        with self._held_receipts_lock:
+            tally = self._held_receipts.pop(grant.grant_id, None)
+        if tally is None:
+            return
+        self._held_audit(
+            "credential.held_lapsed",
+            key,
+            grant.credential_ref.owner_device,
+            grant_id=grant.grant_id,
+            serves=int(tally["total"]),
+            pending=int(tally["pending"]),
+            bound=bound or self._hold_bound(grant),
+        )
+
+    def _flush_held_receipts(self, key: str) -> None:
+        """Close out this key's holds with their last count.
+
+        Called when the owner answers again, and on every path that drops a held
+        grant without a lapse — a provider 401, an untrusted network, a policy deny
+        (review R1-m2) — so no offline serve is left counted only in memory.
+        """
+        with self._held_receipts_lock:
+            done = [
+                (gid, tally) for gid, tally in self._held_receipts.items() if tally["key"] == key
+            ]
+            for gid, _tally in done:
+                del self._held_receipts[gid]
+        for gid, tally in done:
+            if tally["pending"]:
+                self._held_audit(
+                    "credential.held_served",
+                    key,
+                    str(tally["owner"]),
+                    grant_id=gid,
+                    serves=int(tally["pending"]),
+                )
+
+    @classmethod
+    def _lapse_bound(cls, held: Grant, hold_end: int, cap_s: float) -> str:
+        """Which limit ended a hold, for ``credential.held_lapsed`` (review R1-m1).
+
+        ``hold_end`` is ``0`` once the cap has passed on the sleep-inclusive clock,
+        which is also true of every hold whose wall-clock end simply went by first.
+        So the wall-clock end is recomputed as if no time had passed on that clock;
+        only when that end is still ahead did the boot-clock ``cap`` end it (a sleep
+        or a wall clock stepped back). Otherwise the bound is the one the serves
+        were held to, which is what their ``held_served`` rows already said.
+        """
+        end = hold_end or held.hold_end_ms(cap_s, held.received_boot)
+        if not hold_end and time.time() * 1000.0 < end:
+            return "cap"
+        return cls._hold_bound(dataclasses.replace(held, held_until_ms=end))
+
+    @staticmethod
+    def _hold_bound(grant: Grant) -> str:
+        """Which limit the hold end is: ``token`` expiry, the owner's ``hold``
+        (``offline_hold_s``), the borrower's own ``cap``, or the plain ``grant``
+        end (an older owner that states no hold)."""
+        end = grant.held_until_ms or grant.grant_expires_at_ms
+        if not grant.hold_until_ms or end <= grant.grant_expires_at_ms:
+            return "grant"
+        if grant.token_expires_at_ms and end >= grant.token_expires_at_ms:
+            return "token"
+        if end >= grant.hold_until_ms:
+            return "hold"
+        return "cap"
+
+    def _held_audit(self, event: str, key: str, owner: str, **detail: Any) -> None:
+        """One ``credential.held_*`` record on THIS device's audit log. Best effort.
+
+        ``audit.write_event`` because a session process has no long-lived audit sink;
+        it is an O_APPEND writer any process may use. ``act`` is the owner whose
+        login was served, ``sub`` this device, matching ``credential.grant``.
+        """
+        try:
+            from local_operator.network import audit
+
+            audit.write_event(
+                self.root,
+                event=event,
+                actor=self.self_device,
+                actor_kind="device",
+                network_id=self.network_id,
+                subject=owner,
+                cause="owner_offline",
+                detail={"credential_key": key, "act": owner, "sub": self.self_device, **detail},
+            )
+        except Exception:  # noqa: BLE001 — a receipt that cannot be written is not a refusal
+            logger.debug("could not write a held-credential receipt", exc_info=True)
 
     def _resting_refusal(self, key: str, label: str, resting: list[dict[str, Any]]) -> BrokerError:
         """``quota_blocked`` built from this device's own cooldowns. Not cached.
@@ -1436,7 +2032,61 @@ class MeshCredentialClient:
                 excluded=bool(exclude_credential_ids),
                 request_stamp=request_stamp,
             )
-        return self._detail_error(self._render(self._offline(key, label, owner=owner), key, label))
+        offline = self._detail_error(
+            self._render(self._offline(key, label, owner=owner), key, label)
+        )
+        renewal = self._held_renewal(key, owner)
+        if renewal is not None:
+            # THE RELAY'S RENEWAL rides the owner-unreachable answer (``renew_push``):
+            # the asking session adopts it into its own hold when it is newer than
+            # what that session holds, so an idle session's window restarts at the
+            # owner's last return rather than at its own last ask.
+            offline["held_renewal"] = renewal
+        return offline
+
+    def _sweep_relay_renewals(self) -> None:
+        """Drop the relay's renewed logins this device may no longer hold, NOW.
+
+        Runs at every placement reconcile (``revoke_local_grants``), which is where
+        a revoke lands on this device (the pull's merge or its withdrawal). Before,
+        a revoked renewal sat in relay memory until an owner-unreachable ask for
+        that key (review m1); it was never served, but a revoke's promise is now.
+        """
+        if self._relay is None:
+            return
+        from local_operator.network.credentials import renew_push
+
+        keys = renew_push.held_keys(self._relay)
+        if not keys:
+            return
+        if not (self._self_membership_active() and self._network_trusted()):
+            renew_push.drop_held(self._relay)
+            return
+        for key in keys:
+            if not self.should_borrow(key):
+                renew_push.drop_held(self._relay, key)
+
+    def _held_renewal(self, key: str, owner: str) -> dict[str, Any] | None:
+        """The renewal this relay holds for ``key``, if it may still be offered.
+
+        Re-checks this device's own standing first (holder of ``key`` from that
+        owner, member, trusted network): a renewal fetched before a revoke or panic
+        must not be offered after it. The session's ``_held_or`` admission runs its
+        own fences again before serving anything.
+        """
+        if self._relay is None:
+            return None
+        from local_operator.network.credentials import renew_push
+
+        if not (
+            self.should_borrow(key)
+            and self.owner_of(key) == owner
+            and self._self_membership_active()
+            and self._network_trusted()
+        ):
+            renew_push.drop_held(self._relay, key)
+            return None
+        return renew_push.held_renewal(self._relay, key, owner)
 
     def fetch_catalogue_metadata(
         self, key: str, *, provider: str = "openai", ttl: int = 60, validator: str = ""
@@ -1608,6 +2258,8 @@ class MeshCredentialClient:
         validates it against its own id space and falls back to the first-row pick
         only when the field is absent (an older peer, or no grant left to attribute).
         """
+        from local_operator.network.credentials.effective import note_held_dropped
+
         if not self.should_borrow(key):
             return None
         # The caller's attribution (the FAILING bearer's row, ``store._lent_row_for``)
@@ -1624,6 +2276,9 @@ class MeshCredentialClient:
                 # only coalesce, repeated on every provider retry. The failed
                 # bearer is still dropped so it is never served again.
                 self.grants.drop(key)
+                note_held_dropped(self.root, key)
+                if self._held_receipts:
+                    self._flush_held_receipts(key)
                 return held
         if kind == "quota":
             self._cool_lent_row(
@@ -1635,6 +2290,10 @@ class MeshCredentialClient:
                 block_scope=block_scope,
             )
         self.grants.drop(key)
+        note_held_dropped(self.root, key)
+        if self._held_receipts:
+            # A rejected held bearer's serves are written now (review R1-m2).
+            self._flush_held_receipts(key)
         try:
             from local_operator.network import store
             from local_operator.network.relay import control_request
@@ -2074,6 +2733,34 @@ class MeshCredentialClient:
                 code = reply.get("code")
                 if not code and isinstance(detail, dict):
                     code = detail.get("code")
+                sentence = str(reply.get("message") or "") if reply.get("op") == "error" else ""
+                if not code and sentence and _transport_refusal_code(sentence) == "not_a_holder":
+                    # A CONNECTED REVOKE REACHES AN IDLE BORROWER HERE (#3922 Q2).
+                    # The authoriser's codeless refusal naming ``broker_credential``
+                    # is the owner saying, over the link it authenticated, that this
+                    # device may borrow nothing from it — ``credential revoke`` removed
+                    # that capability with the last share, which is also why the
+                    # revoked document can never be pulled. Before this the refusal
+                    # was only counted, the holder row stayed, and the offline hold
+                    # served the revoked grant once the owner slept. The rows are
+                    # withdrawn now, so ``should_borrow`` — the predicate every serve,
+                    # held ones included (``_hold_admission``), reads from the file —
+                    # turns false in every process, and ``revoke_local_grants`` below
+                    # drops this process's grants with a ``revoked`` record.
+                    code = "not_a_holder"
+                    try:
+                        changed.extend(
+                            withdraw_rows_lent_by(
+                                self.network_id,
+                                device,
+                                holder_device=self.self_device,
+                                root=self.root,
+                            )
+                        )
+                    except (OSError, MeshRefusal):
+                        # The placement lock's bounded timeout: retried on the next
+                        # pull, which meets the same refusal.
+                        skipped.append({"device": device, "reason": "busy"})
                 refused_codes[device] = str(code or "")
                 continue
             if conditional and isinstance(reply, dict) and not isinstance(document, dict):
@@ -2767,6 +3454,7 @@ class MeshCredentialClient:
         reconcile must be captured before that read. ``None`` means "whatever the
         cache holds now".
         """
+        self._sweep_relay_renewals()
         candidates = list(self.grants.keys()) if keys is None else list(dict.fromkeys(keys))
         if not candidates:
             return []
@@ -2777,7 +3465,8 @@ class MeshCredentialClient:
                 continue
             owner = self.owner_of(key)
             owner_name = self.owner_label(key)
-            self.grants.drop(key)
+            # Reconcile's revoke/membership-loss drop: a GitHub token dies now.
+            self._revoke_dropped_github(self.grants.drop(key))
             mcp_state.record(
                 self.network_id,
                 key,
@@ -2790,12 +3479,28 @@ class MeshCredentialClient:
             dropped.append(key)
         return dropped
 
+    def self_membership_active(self) -> bool:
+        """Public read of :meth:`_self_membership_active`, for the owner-wait hint."""
+        return self._self_membership_active()
+
     def _self_membership_active(self) -> bool:
         """Whether this device is still a live member of its network.
 
         No record, an unreadable store, a missing self row or an inactive one all
         answer ``False``: the question is permission to keep using a bearer, and
         every failure mode of the proof must fail closed.
+
+        A network this device no longer TRUSTS answers ``False`` too. ``lop network
+        panic`` (raised here, or received from a peer) only latches
+        ``record.trust = "untrusted"``; it never touches membership, so a check on
+        ``member.active`` alone let the owner-unreachable hold keep serving the held
+        bearer until its own expiry — and after a panic the owner IS unreachable,
+        because the latch closes every link. Anything but exactly ``"active"``
+        (``untrusted``, an unknown future state) fails closed: the panic's promise
+        is that this network's credentials stop now, and re-trusting
+        (``lop network trust --active``) brings fresh grants via the online path
+        rather than resurrecting the held ones (the deny this verdict triggers is
+        persistent by design).
         """
         if not self.network_id:
             return True
@@ -2805,8 +3510,30 @@ class MeshCredentialClient:
             for record in store.list_networks(self.root):
                 if record.network_id != self.network_id:
                     continue
+                if record.trust != "active":
+                    return False
                 member = record.self_member()
                 return bool(member is not None and member.active)
+            return False
+        except Exception:  # noqa: BLE001 — a store we cannot read proves nothing
+            return False
+
+    def _network_trusted(self) -> bool:
+        """Whether this device's network record is ``trust == "active"``. Fails closed.
+
+        Separate from :meth:`_self_membership_active` on purpose: an untrusted network
+        (panic) is a pause the operator can lift, not a lost membership, so it must
+        not run the network-wide membership invalidation. Read by
+        :meth:`_hold_admission`, the ONE fence both no-dial serves share.
+        """
+        if not self.network_id:
+            return True
+        try:
+            from local_operator.network import store
+
+            for record in store.list_networks(self.root):
+                if record.network_id == self.network_id:
+                    return record.trust == "active"
             return False
         except Exception:  # noqa: BLE001 — a store we cannot read proves nothing
             return False

@@ -1,0 +1,167 @@
+{
+ "schema": 1,
+ "audit_id": "a1",
+ "audit_kind": "independent_translation_audit",
+ "locale": "ru",
+ "namespace": "mobile.doctor",
+ "round": 1,
+ "audit_date": "2026-11-14",
+ "packaged_at_utc": "2026-11-14T01:38:35Z",
+ "verdict": "passed",
+ "status": "passed",
+ "scope": "complete NEW namespace, all 23 keys judged semantically",
+ "key_count": 23,
+ "keys_audited": 23,
+ "new_keys": [
+  "mobile.doctor.versions.ok",
+  "mobile.doctor.daemon.not_installed",
+  "mobile.doctor.daemon.not_running",
+  "mobile.doctor.daemon.ok",
+  "mobile.doctor.daemon.slow",
+  "mobile.doctor.daemon.gate_open",
+  "mobile.doctor.daemon.state_not_running",
+  "mobile.doctor.files.ok",
+  "mobile.doctor.files.near",
+  "mobile.doctor.files.unknown",
+  "mobile.doctor.files.status_line",
+  "mobile.doctor.logs.clean",
+  "mobile.doctor.logs.errors",
+  "mobile.doctor.tunnel.not_configured",
+  "mobile.doctor.tunnel.ok",
+  "mobile.doctor.tunnel.problem",
+  "mobile.doctor.tunnel.single",
+  "mobile.doctor.tunnel.duplicates",
+  "mobile.doctor.tunnel.list_unchecked",
+  "mobile.doctor.login.ok",
+  "mobile.doctor.login.missing",
+  "mobile.doctor.files.not_running",
+  "mobile.doctor.daemon.not_answering"
+ ],
+ "source_sha256": "0ca00b276fdea066228394e3fee336042b1e149c9e7df3ea31be11a24f0beb72",
+ "target_sha256": "edc8a2061e4496bf731faa0106c044fb2bd2e8faa33b6356039b5551120a8e4a",
+ "source_audit_revision": "a3722be7dadacaf140a2587a0100bd3b26c2ab50",
+ "worktree": "~/local-operator/.worktrees/mobile-doctor",
+ "branch": "feat/mobile-doctor",
+ "node": "lop-remote-node-2",
+ "translator": {
+  "agent": "i18n-translator subagent, session 398cdb26808f (English drafted by coder session b0300e2c2c7f)",
+  "model": "anthropic/claude-opus-5-5",
+  "date": "2026-11-14"
+ },
+ "auditor": {
+  "agent": "i18n-auditor, independent `task` subagent (C4 i18n-auditor es fr ru), session 5e5b8d070b27; did not translate or edit any value it judged",
+  "model": "anthropic/claude-opus-5-5 (served model reported by the session; no provider fallback observed)",
+  "date": "2026-11-14",
+  "independent_from_translator": true,
+  "independence": "Different session (5e5b8d070b27) from the translator (398cdb26808f) and the English drafter (b0300e2c2c7f); never edited a catalogue value. Translator and auditor ran the same model (anthropic/claude-opus-5-5) — disclosed; no native-speaker pass is claimed."
+ },
+ "input_hashes": {
+  "en": "0ca00b276fdea066228394e3fee336042b1e149c9e7df3ea31be11a24f0beb72",
+  "context": "c6baa99bc539ef2d2e03bf7b6b11e83edac37139eede8db82034f5fad98d4614",
+  "target": "edc8a2061e4496bf731faa0106c044fb2bd2e8faa33b6356039b5551120a8e4a",
+  "glossary": "a576d5a4b2718ba79a70a42600e3b6233ea28d716b1e2d996a208ac8dd7fabdb",
+  "style_guide": "f20e1cafaf70578c17ce072c71725628808d228e4be5604329f8da30386f1fb5"
+ },
+ "input_paths": {
+  "en": "local_operator/i18n/catalogues/en/mobile.doctor.json",
+  "context": "local_operator/i18n/catalogues/en/mobile.doctor.context.json",
+  "target": "local_operator/i18n/catalogues/ru/mobile.doctor.json",
+  "glossary": "i18n/glossary.md",
+  "style_guide": "i18n/style-guides/ru.md"
+ },
+ "counts": {
+  "blocker": 0,
+  "major": 0,
+  "minor": 0,
+  "nit": 0
+ },
+ "unresolved_blocker_major": 0,
+ "findings": [],
+ "translator_questions": {
+  "Q2": {
+   "question": "ru tunnel.duplicates colon pattern",
+   "adjudication": "PASS — «туннелей для этого компьютера: {count}» is the established label-colon pattern that avoids plural agreement (same as files.ok «открыто файлов: {open} из {limit}»); natural for count ≥ 2."
+  },
+  "Q5": {
+   "question": "ru/es daemon.state_not_running fragment",
+   "adjudication": "PASS — «не запущен» (masculine) reads naturally after «auth gate:» (шлюз/демон are masculine)."
+  },
+  "Q6": {
+   "question": "«asleep» renderings",
+   "adjudication": "«в спящем режиме» idiomatic; not verified against the phone app's own label."
+  }
+ },
+ "per_key": {
+  "mobile.doctor.versions.ok": "ok",
+  "mobile.doctor.daemon.not_installed": "ok",
+  "mobile.doctor.daemon.not_running": "ok",
+  "mobile.doctor.daemon.ok": "ok",
+  "mobile.doctor.daemon.slow": "ok",
+  "mobile.doctor.daemon.gate_open": "ok",
+  "mobile.doctor.daemon.state_not_running": "ok",
+  "mobile.doctor.files.ok": "ok",
+  "mobile.doctor.files.near": "ok",
+  "mobile.doctor.files.unknown": "ok",
+  "mobile.doctor.files.status_line": "ok",
+  "mobile.doctor.logs.clean": "ok",
+  "mobile.doctor.logs.errors": "ok",
+  "mobile.doctor.tunnel.not_configured": "ok",
+  "mobile.doctor.tunnel.ok": "ok",
+  "mobile.doctor.tunnel.problem": "ok",
+  "mobile.doctor.tunnel.single": "ok",
+  "mobile.doctor.tunnel.duplicates": "ok",
+  "mobile.doctor.tunnel.list_unchecked": "ok",
+  "mobile.doctor.login.ok": "ok",
+  "mobile.doctor.login.missing": "ok",
+  "mobile.doctor.files.not_running": "ok",
+  "mobile.doctor.daemon.not_answering": "ok"
+ },
+ "mechanical_checks": [
+  {
+   "check": "key parity (same set and order)",
+   "result": "pass"
+  },
+  {
+   "check": "ICU argument names identical",
+   "result": "pass"
+  },
+  {
+   "check": "select branch labels identical",
+   "result": "pass"
+  },
+  {
+   "check": "no command named that English does not name",
+   "result": "pass"
+  },
+  {
+   "check": "final period mirrors English",
+   "result": "pass"
+  },
+  {
+   "check": "rendered through Msg.envelope(locale=ru) without error (23/23 keys present in render)",
+   "result": "pass"
+  },
+  {
+   "check": "no silent English fallback in render",
+   "result": "pass"
+  }
+ ],
+ "must_survive": {
+  "no command named": "verified (no added `lop …`/backticks)",
+  "calm factual tone": "verified by reading",
+  "placeholders verbatim": "verified (ICU argument names identical)"
+ },
+ "evidence_files": [
+  "record.json",
+  "report.md",
+  "rendered.txt",
+  "audit.log",
+  "dryrun.log",
+  "receipt.json"
+ ],
+ "not_verified": [
+  "native-speaker review",
+  "terminal/desktop rendered frame (text render only)",
+  "the phone app's own localized 'asleep'/'not answering' labels (separate repository)"
+ ]
+}

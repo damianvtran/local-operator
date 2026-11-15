@@ -49,6 +49,7 @@ for one tool share a single row. Both cells below fail on that older key.
 from __future__ import annotations
 
 import asyncio
+import json
 from pathlib import Path
 from typing import Any
 
@@ -370,6 +371,117 @@ async def test_a_parked_gate_raises_exactly_one_banner(
     parked.cancel()
     await asyncio.gather(parked, return_exceptions=True)
     await handle.dispose()
+
+
+@pytest.mark.parametrize("spawner", ["workstream", "mesh-agent"])
+@pytest.mark.asyncio
+async def test_an_agent_spawned_session_still_raises_its_gate_rows(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, spawner: str
+) -> None:
+    """Review round 1, R1-2 / QA Q1: losing ``notify`` must not lose the asks.
+
+    The operator rule withholds the ``notify`` TOOL from a session another
+    agent started (a ``sessions spawn`` workstream, or a mesh session stamped
+    ``origin.kind == "agent"``). Its parked approvals and asks are still the
+    operator's to answer, so each park writes its ``gate:`` row exactly as on a
+    session the operator opened. Fails when the exclusion sits in the shared
+    door (``_notify_inbox_callable``) that ``raise_gate_item`` reuses.
+    """
+    import json
+
+    from local_operator.resume import ORIGIN_AGENT_WORKSTREAM, mark_session_origin
+    from local_operator.session.placement import MESH_STAMP_NAME
+
+    config_root = _inbox_root(tmp_path, monkeypatch)
+    session = make_session(tmp_path / "spawned", RecordingStream())
+    directory = Path(session.transcript.directory)
+    if spawner == "workstream":
+        mark_session_origin(directory, ORIGIN_AGENT_WORKSTREAM)
+    else:
+        (directory / MESH_STAMP_NAME).write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "session_id": "s",
+                    "home_device": "d_node",
+                    "origin": {"kind": "agent", "source_device": "d_head"},
+                }
+            ),
+            encoding="utf-8",
+        )
+    # The precondition: the tool is gone for this session.
+    assert session._build_tool_context().notify_inbox is None
+
+    await session.raise_gate_item("approval", "bash", "rm -rf build/", "wait-ws-approval")
+    await session.raise_gate_item("ask", "Which branch?", "main or dev", "wait-ws-ask")
+
+    keys = sorted(item["key"] for item in _all_items(config_root))
+    assert keys == ["gate:approval:wait-ws-approval", "gate:ask:wait-ws-ask"], keys
+
+
+@pytest.mark.parametrize(
+    ("stamp", "mounted"),
+    [
+        # A top-level local session: no stamp at all.
+        (None, True),
+        # LEGACY peer-placed session (pre-attestation; the owner defaulted the
+        # kind to ``user``): default-deny withholds the tool.
+        ({"mode": "peer", "origin": {"kind": "user", "source_device": "d_head"}}, False),
+        (
+            {
+                "mode": "peer",
+                "origin": {"kind": "user", "source_device": "d_head", "started_by": "operator"},
+            },
+            True,
+        ),
+        # A session the operator BROUGHT here (``move --to local`` writes mode
+        # ``peer``, kind ``moved``/``fork``, no ``started_by``) keeps the tool:
+        # it is the operator's own device (review r1, M1).
+        ({"mode": "peer", "origin": {"kind": "moved", "source_device": "d_head"}}, True),
+        ({"mode": "peer", "origin": {"kind": "fork", "source_device": "d_head"}}, True),
+        # An AGENT's peer create stays withheld, attested or not.
+        (
+            {
+                "mode": "peer",
+                "origin": {"kind": "agent", "source_device": "d_head", "started_by": "agent"},
+            },
+            False,
+        ),
+        # A LOCAL placement (a recovered replica) is the operator's own device.
+        ({"mode": "local", "origin": {"kind": "replica", "source_device": "d_head"}}, True),
+    ],
+)
+def test_notify_is_mounted_only_for_local_or_attested_operator_sessions(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stamp: dict[str, Any] | None, mounted: bool
+) -> None:
+    """DEFAULT-DENY on the node (operator rule 2026-11-14): a session another
+    device placed here keeps ``notify`` only when its stamp says the operator
+    started it; the owner would refuse to forward its items anyway."""
+    from local_operator.session.placement import (
+        MESH_STAMP_NAME,
+        MeshStamp,
+        SessionPlacement,
+    )
+
+    _inbox_root(tmp_path, monkeypatch)
+    session = make_session(tmp_path / "placed", RecordingStream())
+    directory = Path(session.transcript.directory)
+    if stamp is not None:
+        (directory / MESH_STAMP_NAME).write_text(
+            json.dumps(
+                MeshStamp(
+                    session_id="s",
+                    network_id="n_test",
+                    home_device="d_node",
+                    placement=SessionPlacement(
+                        mode=stamp["mode"], network_id="n_test", home_device="d_node"
+                    ),
+                    origin=stamp["origin"],
+                ).to_json()
+            ),
+            encoding="utf-8",
+        )
+    assert (session._build_tool_context().notify_inbox is not None) is mounted, stamp
 
 
 @pytest.mark.asyncio

@@ -145,6 +145,12 @@ from local_operator.network.types import (
     capabilities_for_role,
     trust_state,
 )
+from local_operator.notifications.remote_attention import (
+    AGENT_ORIGIN_KIND,
+    OPERATOR_STARTED,
+    STARTED_BY_FIELD,
+    started_by_for_origin,
+)
 from local_operator.paths import CONFIG_DIR_ENV, config_dir, log_dir
 from local_operator.session import open_trace
 from local_operator.session.runtime.types import (
@@ -506,6 +512,7 @@ SLICE_PEER_OPS: frozenset[str] = frozenset(
         "net_definitions",
         "net_readiness",
         "net_mcp_defs",
+        "net_skills",
         "net_memory",
         # The single-peer update (meshupdate.py; S1 of mesh-rolling-updates.md
         # §8.2). Slow by registration below: the handler may run a real install
@@ -546,6 +553,7 @@ SLICE_LOCAL_OPS: frozenset[str] = frozenset(
         "definitions_sync",
         "peer_readiness",
         "mcp_defs_sync",
+        "skills_sync",
         # The single-peer update's local half — a viewer asking ITS OWN relay to
         # ask a peer (the ``peer_*`` boundary rule; the peer-scope half is
         # ``net_update``).
@@ -573,6 +581,8 @@ SLICE_MODULES: tuple[str, ...] = (
     # registers a tick step there), so it is installed after that module but
     # starts no thread of its own.
     "local_operator.network.mcpdefs",
+    # User skills ride the same definitions cadence (a tick step), no thread.
+    "local_operator.network.skillsync",
     "local_operator.network.memory",
     # S1 of the mesh rolling updates: the ``update`` capability's op halves. It
     # starts no thread of its own (the S3 rollout driver is a different slice).
@@ -4344,16 +4354,96 @@ def session_history_reply_bytes(req: Any, detail: dict[str, Any]) -> int:
     )
 
 
+def bounded_history_entry(entry: Any, max_bytes: int) -> Any:
+    """One stored-journal row cut to fit ``max_bytes``, with its identity kept.
+
+    The wire row is ``{id, ts, type, payload, …}``; everything but ``payload`` is
+    small coordinates and is kept verbatim, so ``before_id`` paging and dedupe by
+    id are unaffected. A message payload keeps its role, id, timestamp and the
+    tool-call/tool-result identity the renderer pairs cards by, and its body
+    becomes a text preview plus the same marker the live view uses
+    (``history_window.TRUNCATED_ENTRY_MARKER``) — one sentence for one condition,
+    whichever path served the row. Any other payload (a ``CustomMessage``) keeps
+    only its identity — ``kind``, ``custom_type``, ``attribution``, ``id`` — and carries
+    the marker in ``details`` (and in ``content`` when that was a string). Never
+    mutates ``entry``.
+    """
+    from local_operator.session.history_window import (
+        TRUNCATED_ENTRY_MARKER,
+        _text_prefix_within,
+    )
+
+    if not isinstance(entry, dict) or not isinstance(entry.get("payload"), dict):
+        return entry
+    payload = entry["payload"]
+    size = len(json.dumps(entry, separators=(",", ":"), ensure_ascii=False).encode("utf-8"))
+    marker = TRUNCATED_ENTRY_MARKER.format(size=size)
+    if "role" in payload:
+        text = "".join(
+            str(block.get("text") or "")
+            for block in payload.get("content") or []
+            # The journal encoder omits a block's DEFAULT ``type`` ("text"),
+            # so an absent type is a text block too.
+            if isinstance(block, dict) and block.get("type", "text") == "text"
+        )
+        preview = _text_prefix_within(text, max(0, max_bytes // 2))
+        kept = {
+            key: payload[key]
+            for key in (
+                "role",
+                "id",
+                "timestamp",
+                "tool_call_id",
+                "tool_name",
+                "is_error",
+                "stop_reason",
+            )
+            if key in payload
+        }
+        kept["content"] = [
+            {"type": "text", "text": f"{preview}\n\n{marker}" if preview else marker}
+        ]
+        calls = payload.get("tool_calls")
+        if isinstance(calls, list):
+            kept["tool_calls"] = [
+                {"id": call.get("id"), "name": call.get("name"), "arguments": {}}
+                for call in calls
+                if isinstance(call, dict)
+            ]
+        cut = kept
+    else:
+        # AN ALLOW-LIST, like the role branch above, not "everything but
+        # details": a ``CustomMessage`` is ``extra="allow"``, so its bulk can
+        # sit in a list ``content`` or any extra key. Keeping those would leave
+        # the row oversized and surface as the misleading "metadata is too
+        # large" refusal; only identity is needed to render and page past it.
+        # ``kind`` IS part of that identity: a stored ``CustomMessage`` row is
+        # ``type: "message"`` with ``payload.kind: "custom"``, and both readers
+        # (``transcript._entry_to_message`` and the desktop reducer) default a
+        # missing kind to a plain message — the row then fails to decode and
+        # vanishes instead of showing the marker (R2-1).
+        cut = {
+            key: payload[key]
+            for key in ("kind", "custom_type", "attribution", "id")
+            if key in payload
+        }
+        cut["details"] = {"truncated": marker}
+        if isinstance(payload.get("content"), str):
+            cut["content"] = marker
+    return {**entry, "payload": cut}
+
+
 def fit_session_history_reply(req: Any, detail: dict[str, Any]) -> dict[str, Any]:
     """``detail`` cut to as many of its entries as fit ONE link record (R1-1).
 
     Keeps the NEWEST rows: the page is the TAIL of the requested window, so the
     rows dropped are its oldest and the reader reaches them with the same
     ``before_id`` cursor it pages with — a partial page with ``has_more: True``
-    and no gap. If not even the newest single row fits, this raises a NAMED
-    per-op refusal (``page_too_large``): the reader cannot be served rows this
-    frame physically cannot carry, and the one answer that must never come back
-    is a torn-down link.
+    and no gap. If not even the newest single row fits, that row is served in
+    a bounded, marked form (:func:`bounded_history_entry`) rather than refusing
+    the page; only metadata that cannot fit raises the NAMED per-op refusal
+    (``page_too_large``), and the one answer that must never come back is a
+    torn-down link.
 
     A page that already fits — every ordinary page — is returned untouched.
     """
@@ -4366,31 +4456,46 @@ def fit_session_history_reply(req: Any, detail: dict[str, Any]) -> dict[str, Any
         raise MeshRefusal(
             "page_too_large", "this page's metadata is too large to serve over the mesh"
         )
-    # Trimming means older rows are being left behind, and ``has_more`` must say
-    # so rather than let the reader believe it reached the end of the window.
-    bounded = {**detail, "has_more": True}
-    if (
-        session_history_reply_bytes(req, {**bounded, "entries": entries[-1:]})
-        > SESSION_HISTORY_REPLY_BUDGET_BYTES
-    ):
-        raise MeshRefusal(
-            "page_too_large",
-            "this conversation has a single entry too large to serve over the mesh; "
-            "open it on the device that holds it",
-        )
-    # MONOTONE in the rows kept, so the largest fitting suffix is found in
-    # O(log limit) serializations rather than one per row.
+    # HONEST ``has_more``: true when older rows are left behind (the reader pages
+    # back for them with the same ``before_id`` cursor) or the window already had
+    # more. Truncating the newest row in place drops NO row, so a page that keeps
+    # every entry must not claim more — a reader would page back into nothing.
+    # Each candidate is sized WITH the value it would ship, so the reply measured
+    # is byte-for-byte the reply sent (``true``/``false`` differ by one byte).
+    already_more = bool(detail.get("has_more"))
+
+    def candidate(kept: int) -> dict[str, Any]:
+        return {
+            **detail,
+            "has_more": already_more or kept < len(entries),
+            "entries": entries[-kept:],
+        }
+
+    if session_history_reply_bytes(req, candidate(1)) > SESSION_HISTORY_REPLY_BUDGET_BYTES:
+        # ONE ROW LARGER THAN THE RECORD used to refuse the WHOLE page, so a
+        # conversation whose newest entry was a huge paste or tool result could
+        # not be read from any other device at all. The row is served instead
+        # in a bounded, explicitly marked form (identity kept, body cut — see
+        # ``bounded_history_entry``): the reader still pages from its id, so
+        # the window stays gap-free, and the marker names the remedy.
+        entries[-1] = bounded_history_entry(entries[-1], SESSION_HISTORY_REPLY_BUDGET_BYTES // 4)
+        if session_history_reply_bytes(req, candidate(1)) > SESSION_HISTORY_REPLY_BUDGET_BYTES:
+            # Only the envelope can still be too large here (the bounded row
+            # is ≤ budget/4), which is the metadata refusal above in another hat.
+            raise MeshRefusal(
+                "page_too_large", "this page's metadata is too large to serve over the mesh"
+            )
+    # MONOTONE in the rows kept (a row outweighs the one-byte ``has_more``
+    # flip), so the largest fitting suffix is found in O(log limit)
+    # serializations rather than one per row.
     low, high = 1, len(entries)
     while low < high:
         mid = (low + high + 1) // 2
-        if (
-            session_history_reply_bytes(req, {**bounded, "entries": entries[-mid:]})
-            <= SESSION_HISTORY_REPLY_BUDGET_BYTES
-        ):
+        if session_history_reply_bytes(req, candidate(mid)) <= SESSION_HISTORY_REPLY_BUDGET_BYTES:
             low = mid
         else:
             high = mid - 1
-    return {**bounded, "entries": entries[-low:]}
+    return candidate(low)
 
 
 #: How long the OWNING relay waits for a created session's first turn to settle
@@ -5456,6 +5561,18 @@ def _model_credential_refusal(root: Path, model: Any, birth: Any) -> str:
     )
 
 
+def _started_by_claim(frame: dict[str, Any]) -> dict[str, str]:
+    """``{"started_by": <value>}`` when the create frame attested one, else ``{}``.
+
+    Only the two values ``remote_attention.started_by_for_origin`` writes are
+    kept; anything else (absent from an origin older than the attestation, or
+    garbage) stamps nothing, which the owner and the origin read as NOT
+    operator-started — the default-deny the operator rule asks for.
+    """
+    value = str(frame.get(STARTED_BY_FIELD) or "")
+    return {STARTED_BY_FIELD: value} if value in (OPERATOR_STARTED, AGENT_ORIGIN_KIND) else {}
+
+
 def _resolve_peer_cwd(cwd: str, *, owner: str) -> str:
     """The working directory a peer create names, or a refusal naming ``owner``.
 
@@ -5545,6 +5662,40 @@ def warm_open_frame_strip_now() -> None:
 #: the link round trip, not work — and the device just failed to answer once.
 CREATE_LOOKUP_TIMEOUT_S = 10.0
 
+#: How long a requester KEEPS TRYING to confirm a create by its key after the
+#: create's reply was lost, across every lookup, dial and pause inside it.
+#:
+#: WHY A WINDOW AND NOT ONE LOOKUP (2026-11-14, 535b1f3bb8df): a reply is most often
+#: lost because the LINK dropped — and a single lookup asked straight after the
+#: drop finds that same link still down, so the caller printed "could not be asked"
+#: for a session the owner had created AND bound to the caller's key. The owner's
+#: audit for that create: ``link_closed cause=error`` 38.5 s in, the link back
+#: 22.7 s later.
+#:
+#: MEASURED, NOT GUESSED: every ``link_closed`` -> next ``link_opened`` gap for the
+#: same peer in a long-running node's ``network/audit.jsonl`` (2026-11-05 ..
+#: 2026-11-14; n=155): median 2.1 s; 144 of 155 (93%) back within 60 s, the
+#: largest of those 44.4 s; the rest form a separate tail at 90 s, 119 s, 181 s
+#: and then 1100-5500 s (a device offline, ``cause=timeout``), which no bounded
+#: wait can cover. 60 s sits above the whole short-gap cluster with room for the
+#: redial and one lookup after the link returns, and fits the client bounds
+#: (``CREATE_CLIENT_BOUND_S`` below, the ``sessions`` tool's 180 s child).
+CREATE_CONFIRM_WINDOW_S = 60.0
+
+#: Pause between confirm attempts while the owner cannot be asked (link down) or
+#: says the create is still ``pending``. The measured median re-establishment is
+#: 2.1 s, so polling faster than this mostly re-dials a link not yet back.
+CREATE_CONFIRM_POLL_S = 2.0
+
+#: The control-socket budget a CLIENT gives ``peer_session_create`` (the CLI and
+#: the desktop surface). It was 120 s while the relay asked once for 10 s after a
+#: lost reply; it grows by EXACTLY what the confirm window added, so the client
+#: never gives up while its relay is still confirming — a client that gave up
+#: first would print "the relay did not answer" and lose the id the window found.
+#: Stays below the ``sessions`` tool's 180 s child bound
+#: (``tools.builtin._MESH_CREATE_ENGAGE_TIMEOUT_S``; a test pins the order).
+CREATE_CLIENT_BOUND_S = 120.0 + (CREATE_CONFIRM_WINDOW_S - CREATE_LOOKUP_TIMEOUT_S)
+
 
 class _PeerNoReply(MeshRefusal):
     """A peer op whose request was sent and whose reply never arrived.
@@ -5553,6 +5704,23 @@ class _PeerNoReply(MeshRefusal):
     type so a caller whose op may have ACTED on the far side (a create) can tell
     "no answer" from "never asked".
     """
+
+
+#: Guards every relay's single-flight dial table (:meth:`RelayServer._ensure_link_with_probe`).
+#: Module-level, not per instance, because the table itself is created lazily: test
+#: rigs build a relay with ``object.__new__`` and never run ``__init__``. Held only
+#: to read or write the table — never across a dial.
+_DIAL_FLIGHTS_LOCK = threading.Lock()
+
+
+@dataclass
+class _DialFlight:
+    """One in-flight dial that concurrent same-peer callers share."""
+
+    deadline: float | None
+    done: threading.Event = field(default_factory=threading.Event)
+    result: tuple[Any, str, list[CandidateAttempt]] = field(default_factory=lambda: (None, "", []))
+    error: BaseException | None = None
 
 
 class RelayServer:
@@ -5822,6 +5990,10 @@ class RelayServer:
         #: metadata again on every heartbeat would be a per-15-seconds import for a
         #: string that cannot change while this process lives.
         self.build = build_stamp()
+        #: Where this process's output really goes, read once (fd 1 cannot be
+        #: re-pointed under a running relay), falling back to this process's own
+        #: config-derived path when stdout is not a file.
+        self.output_log = _own_output_path() or str(log_path())
 
     # -- lifecycle ----------------------------------------------------------
 
@@ -7100,6 +7272,7 @@ class RelayServer:
             capabilities=list(wire.LINK_CAPABILITIES),
             version=build.get("version", ""),
             source_ref=build.get("source_ref", ""),
+            log_path=self.output_log,
             started_at=self.started_at,
         )
 
@@ -8754,6 +8927,13 @@ class RelayServer:
                     "subagents_queued": record.subagents_queued,
                     "busy": record.busy,
                     "pending": record.pending if state == "live" else None,
+                    # Only when TRUE: an older viewer ignores the key, and its
+                    # absence means "a gate" (every older owner's meaning).
+                    **(
+                        {"pending_queued": True}
+                        if state == "live" and record.pending and record.pending_queued
+                        else {}
+                    ),
                     "detached": record.detached,
                     # THE RECORD'S EPOCH, NOT ITS ``started`` BOOL (operator
                     # report). ``record.started`` is "has run at
@@ -9174,6 +9354,7 @@ class RelayServer:
         # block exits) and ``_rehandshake_network`` touches ``self.links`` alone, so
         # nothing it needed was being protected here.
         rehandshake = False
+        removed_here: list[str] = []
         with store.mutate(link.network_id, self.root) as record:
             if incoming == record.epoch and str(
                 frame.get("rotation_id") or ""
@@ -9234,6 +9415,11 @@ class RelayServer:
                     )
                 )
                 rehandshake = True
+                removed_here = [
+                    str(device)
+                    for device in frame.get("removed") or []
+                    if str(device) != record.self_device_id
+                ]
         if rehandshake:
             # THE LINK'S NETWORK ID, NOT THE RECORD'S, and deliberately: after the move
             # above this call sits OUTSIDE the ``store.mutate`` block, so a record bound
@@ -9246,6 +9432,10 @@ class RelayServer:
             # FROM that field), so the two are equal today and the link is the one that
             # stays right if they ever are not.
             self._rehandshake_network(link.network_id, reason="epoch_stale")
+            # A removal another admin made reaches this owner as the rotation that
+            # names it: revoke what this device lent the removed ones (#3947 M2).
+            if removed_here:
+                self._revoke_lent_on_removal(link.network_id, removed_here)
         return {
             "op": "ack",
             "req": frame.get("req"),
@@ -9371,6 +9561,8 @@ class RelayServer:
                 )
         if outcome is not None:
             self._broadcast_epoch(record, state, reason="member_left", removed=outcome.removed)
+        # A device that left keeps no lent GitHub token either (#3947 M2).
+        self._revoke_lent_on_removal(link.network_id, [link.device_id])
         return {"op": "ack", "req": frame.get("req"), "detail": {"left": link.device_id}}
 
     def _op_panic(self, link: PeerLink, frame: dict[str, Any]) -> dict[str, Any] | None:
@@ -9410,6 +9602,10 @@ class RelayServer:
                     root=self.root,
                 )
                 epoch_after = record.epoch
+                # A panic, trust change or disconnect ends this network's credentials NOW:
+                # the login the relay renewed on the owner's return must not outlive it in
+                # memory until the next ask (``renew_push``; PR #3946 review m1).
+                self._drop_renewed_logins()
             # The snapshot is taken HERE, inside the section that wrote the state.
             victims = [
                 other
@@ -9470,6 +9666,7 @@ class RelayServer:
         for other in victims:
             other.send({"op": "net_bye", "reason": "untrusted"})
             other.close("we-closed")
+        self._revoke_lent_on_panic(record.network_id)
         # ``None`` rather than the frame above: the dispatcher's own ack would be a
         # second reply with the same ``req``, queued after the link is closed so it
         # can never be written, and a duplicate reply on the wire is the shape the
@@ -9484,7 +9681,21 @@ class RelayServer:
         # writes inside the lock.
         with store.mutate(link.network_id, self.root) as record:
             set_trust(record, trust=trust, reason=f"set by {link.device_id}", root=self.root)
+            if record.trust != "active":
+                # A panic, trust change or disconnect ends this network's credentials NOW:
+                # the login the relay renewed on the owner's return must not outlive it in
+                # memory until the next ask (``renew_push``; PR #3946 review m1).
+                self._drop_renewed_logins()
         return {"op": "ack", "req": frame.get("req"), "detail": {"trust": trust}}
+
+    def _drop_renewed_logins(self) -> None:
+        """Forget every login this relay renewed for its sessions (best effort)."""
+        try:
+            from local_operator.network.credentials import renew_push
+
+            renew_push.drop_held(self)
+        except Exception:  # noqa: BLE001 — a trust change must never fail on this
+            logger.debug("mesh relay: dropping renewed logins failed", exc_info=True)
 
     def _op_identity_rotate(self, link: PeerLink, frame: dict[str, Any]) -> dict[str, Any]:
         record = self.store_view.network(link.network_id)
@@ -9897,6 +10108,12 @@ class RelayServer:
                     "kind": str(frame.get("origin") or "user"),
                     "source_device": link.device_id,
                     "source_session_id": "",
+                    # THE ATTESTATION, copied only when the asking origin sent one
+                    # (``_ctl_peer_create``). Never defaulted: ``kind`` above defaults
+                    # to ``user`` for an origin that predates attribution, and a
+                    # default here would let that legacy guess forward ``notify``
+                    # items again (``remote_attention.STARTED_BY_FIELD``).
+                    **_started_by_claim(frame),
                 },
                 # CARRIED AUTO AUTHORITY (§6 defect 2): the accepted grant travels ON
                 # THE SESSION, so the runtime this create engages — and every runtime a
@@ -12044,7 +12261,82 @@ class RelayServer:
         probe_timeout_s: float | None = None,
         network_id: str | None = None,
     ) -> tuple["PeerLink | None", str, list[CandidateAttempt]]:
-        """``_ensure_link`` plus WHY it failed, for a surface that must say so.
+        """``_ensure_link`` plus WHY it failed — SINGLE-FLIGHT per peer.
+
+        ONE DIAL PER PEER AT A TIME. Two callers that both found no live link used
+        to dial the same peer concurrently (the definitions syncer and the CLI's
+        ``definitions_sync``, say). The peer's duplicate-identity rule keeps the
+        NEWEST link and closes the other (``_admit_link``, ``"replaced"``), so the
+        caller holding the loser sent its request into a closing link and reported
+        ``no_answer`` for a peer that was up — measured 5 of 6 concurrent pushes
+        with no prior link (#3849's gate, ``test_two_config_roots_…``). So callers
+        for the SAME ``(device, network)`` share ONE in-flight dial and its result:
+        the link, or the same refusal code. Callers for DIFFERENT peers never wait
+        on each other — the table is keyed, and the lock guards only the table.
+
+        Constraints: a failed or timed-out dial releases every waiter with that
+        failure and leaves nothing behind, so the next call dials fresh; a waiter
+        with its own probe budget waits no longer than that budget
+        (``not_attempted``, as an unprobed member reads). A real session op (no
+        deadline) behind a budget-limited listing probe dials for itself after a
+        failure rather than inheriting a claim about someone else's clock.
+        """
+        found = self._link_for(device_id)
+        if found is not None:
+            return found, "", []
+        if probe_timeout_s is not None and probe_timeout_s <= 0:
+            return None, NOT_ATTEMPTED_REASON, []
+        deadline = None if probe_timeout_s is None else time.monotonic() + probe_timeout_s
+        key = (device_id, network_id)
+        while True:
+            with _DIAL_FLIGHTS_LOCK:
+                flights: dict[tuple[str, str | None], _DialFlight] = self.__dict__.setdefault(
+                    "_dial_flights", {}
+                )
+                flight = flights.get(key)
+                leading = flight is None
+                if leading:
+                    flight = _DialFlight(deadline=deadline)
+                    flights[key] = flight
+            assert flight is not None
+            if leading:
+                try:
+                    flight.result = self._dial_for_link(
+                        device_id, probe_timeout_s=probe_timeout_s, network_id=network_id
+                    )
+                except BaseException as exc:
+                    flight.error = exc
+                    raise
+                finally:
+                    with _DIAL_FLIGHTS_LOCK:
+                        if flights.get(key) is flight:
+                            del flights[key]
+                    flight.done.set()
+                return flight.result
+            # A WAITER. Unbounded only when the caller is: the leader's own dial
+            # is bounded (per-candidate connect cap plus the handshake timeout).
+            remaining = None if deadline is None else deadline - time.monotonic()
+            if not flight.done.wait(remaining):
+                return None, NOT_ATTEMPTED_REASON, []
+            if flight.error is not None:
+                raise flight.error
+            link, reason, attempts = flight.result
+            if link is not None:
+                # Prefer what the table holds NOW: the shared link may have been
+                # superseded by an inbound one while this caller was waking.
+                return self._link_for(device_id) or link, "", list(attempts)
+            if flight.deadline is not None and deadline is None:
+                continue  # a listing's budget ran out; this caller has none, so it dials
+            return None, reason, list(attempts)
+
+    def _dial_for_link(
+        self,
+        device_id: str,
+        *,
+        probe_timeout_s: float | None = None,
+        network_id: str | None = None,
+    ) -> tuple["PeerLink | None", str, list[CandidateAttempt]]:
+        """The dial behind :meth:`_ensure_link_with_probe`; call that, not this.
 
         A listing that reports ``reachable: false`` with no reason is the
         dead-instrument failure this repo warns about: it cannot be told from
@@ -13663,6 +13955,8 @@ class RelayServer:
             )
         self._broadcast_epoch(record, state, reason="member_removed", removed=outcome.removed)
         self._rehandshake_network(record.network_id, reason="epoch_stale")
+        # The owner half of "membership loss ends a held GitHub token" (#3947 M2).
+        self._revoke_lent_on_removal(record.network_id, [device_id])
         return {
             "network_id": record.network_id,
             "removed": device_id,
@@ -13737,6 +14031,11 @@ class RelayServer:
                 reason=str(frame.get("reason") or "operator"),
                 root=self.root,
             )
+            if record.trust != "active":
+                # A panic, trust change or disconnect ends this network's credentials NOW:
+                # the login the relay renewed on the owner's return must not outlive it in
+                # memory until the next ask (``renew_push``; PR #3946 review m1).
+                self._drop_renewed_logins()
             self.audit.record(
                 AuditEvent(
                     event="trust_changed",
@@ -14068,6 +14367,10 @@ class RelayServer:
                     reason="this device raised a panic",
                     root=self.root,
                 )
+                # A panic, trust change or disconnect ends this network's credentials NOW:
+                # the login the relay renewed on the owner's return must not outlive it in
+                # memory until the next ask (``renew_push``; PR #3946 review m1).
+                self._drop_renewed_logins()
                 self.audit.record(
                     AuditEvent(
                         event="panic_raised",
@@ -14102,6 +14405,7 @@ class RelayServer:
         self._audit_incident_delivery("panic", reports)
         for link in victims:
             link.close("we-closed")
+        self._revoke_lent_on_panic(resolved.network_id)
         tally = self._incident_tally(reports)
         return {
             "network_id": resolved.network_id,
@@ -14110,6 +14414,57 @@ class RelayServer:
             **tally,
             "peers": reports,
         }
+
+    def _revoke_lent_on_removal(self, network_id: str, device_ids: list[str]) -> threading.Thread:
+        """DELETE the GitHub tokens this owner lent to removed devices, off-thread.
+
+        The removal twin of :meth:`_revoke_lent_on_panic` (review #3947 M2): since the
+        offline hold the lender's scheduled DELETE fires at the hold end (an App
+        token's hour), so a removed node's token must be revoked here rather than
+        left to it. Off-thread for the same reasons — the received path runs on a
+        link reader and a receipt must not wait on GitHub's API. Never raises.
+        """
+        from local_operator.network.credentials import owner as owner_mod
+
+        thread = threading.Thread(
+            target=owner_mod.revoke_lent_on_removal,
+            args=(self, network_id, list(device_ids)),
+            name="mesh-removal-revoke",
+            daemon=True,
+        )
+        try:
+            thread.start()
+        except RuntimeError:
+            logger.warning("member removal: could not start the lent-token revoke", exc_info=True)
+        return thread
+
+    def _revoke_lent_on_panic(self, network_id: str) -> threading.Thread:
+        """DELETE the GitHub tokens this owner lent in ``network_id``, off-thread.
+
+        BOTH panic paths call this after their trust latch (lease review M1): the
+        latch closes links, but a minted GitHub token keeps working on its holder
+        for up to its hour unless the issuer revokes it. ON ITS OWN THREAD because
+        the received-panic handler runs on the link's reader thread, which must stay
+        short, and the raised panic's receipt must not wait on GitHub's API. The
+        thread is returned so a test can join it; callers ignore it.
+        """
+        from local_operator.network.credentials import owner as owner_mod
+
+        thread = threading.Thread(
+            target=owner_mod.revoke_lent_on_panic,
+            args=(self, network_id),
+            name="mesh-panic-revoke",
+            daemon=True,
+        )
+        try:
+            thread.start()
+        except RuntimeError:
+            # Interpreter shutdown refuses new threads. The panic's latch and
+            # broadcast already ran; this hook promises never to raise into them
+            # (the received path is on a link reader). Each token's own hour still
+            # bounds it. Review #3920 n1.
+            logger.warning("mesh panic: could not start the lent-token revoke", exc_info=True)
+        return thread
 
     @staticmethod
     def _incident_fields(frame: dict[str, Any]) -> dict[str, Any]:
@@ -14158,6 +14513,10 @@ class RelayServer:
                 reason="this device disconnected",
                 root=self.root,
             )
+            # A panic, trust change or disconnect ends this network's credentials NOW:
+            # the login the relay renewed on the owner's return must not outlive it in
+            # memory until the next ask (``renew_push``; PR #3946 review m1).
+            self._drop_renewed_logins()
             self.audit.record(
                 AuditEvent(
                     event="disconnect_initiated",
@@ -14249,9 +14608,16 @@ class RelayServer:
         The owner may have created the session (observed live 2026-11-11, where
         "stopped answering before it replied" was printed for a session that
         existed), so "unreachable" is the one answer this must never give. Asks
-        the owner ONCE, by the key the create carried, on a short read-sized
-        bound: a device that just failed to answer is not given another full
-        create budget.
+        the owner by the key the create carried, each ask on a short read-sized
+        bound, and KEEPS ASKING for up to ``CREATE_CONFIRM_WINDOW_S`` while the
+        owner cannot be reached or still says ``pending``: a lost reply usually
+        means a dropped link, and the first ask lands while it is still down
+        (2026-11-14, 535b1f3bb8df — see ``CREATE_CONFIRM_WINDOW_S``).
+
+        NEVER RE-SENDS THE CREATE. Only the read-only lookup is repeated: an owner
+        older than create keys ignores the key, so a re-sent create would be a
+        second session there, and such an owner answers the lookup ``unknown_op``,
+        which ends this at once rather than being retried.
 
         Returns the detail of a confirmed create (the id, marked
         ``create_unconfirmed`` because the create's own reply — and with it the
@@ -14271,30 +14637,57 @@ class RelayServer:
             f"`lop network sessions --peer {peer} --create --create-key {create_key}` with "
             "the same options — returns that session instead of making a second one"
         )
-        try:
-            found = self._local_peer_call(
-                "net_session_create_lookup",
-                peer,
-                timeout=CREATE_LOOKUP_TIMEOUT_S,
-                create_key=create_key,
-            )
-        except MeshRefusal as refusal:
-            # An older owner answers ``unknown_op`` (and ignored the key, so a
-            # retry WOULD duplicate there); a dead link answers nothing. Either
-            # way nothing is known, and the sentence says exactly that.
-            logging.getLogger(__name__).info(
-                "create lookup on %s failed: %s %s",
-                peer,
-                refusal.code,
-                refusal.sentence,
-            )
-            raise MeshRefusal(
-                "create_unconfirmed",
-                f"{label} stopped answering before it replied to the create, and could "
-                f"not be asked whether it made the session — it may have been created; {check}",
-            ) from None
-        state = str(found.get("state") or "")
-        session_id = str(found.get("session_id") or "")
+        cannot_ask = MeshRefusal(
+            "create_unconfirmed",
+            f"{label} stopped answering before it replied to the create, and could "
+            f"not be asked whether it made the session — it may have been created; {check}",
+        )
+        deadline = time.monotonic() + CREATE_CONFIRM_WINDOW_S
+        found: dict[str, Any] | None = None
+        state = session_id = ""
+        while True:
+            remaining = deadline - time.monotonic()
+            try:
+                found = self._local_peer_call(
+                    "net_session_create_lookup",
+                    peer,
+                    timeout=max(0.1, min(CREATE_LOOKUP_TIMEOUT_S, remaining)),
+                    create_key=create_key,
+                )
+            except MeshRefusal as refusal:
+                logging.getLogger(__name__).info(
+                    "create lookup on %s failed: %s %s",
+                    peer,
+                    refusal.code,
+                    refusal.sentence,
+                )
+                # ONLY "COULD NOT BE ASKED" IS WORTH WAITING OUT: a link that is
+                # down (no link, or no answer on it) comes back within the window
+                # in 93% of measured drops. Any answer the owner DID give —
+                # ``unknown_op`` from an owner older than create keys (which also
+                # ignored the key, so nothing may be re-sent), a policy refusal —
+                # will not change by asking again.
+                if refusal.code != "peer_unreachable":
+                    raise cannot_ask from None
+                # ``found`` keeps the owner's LAST answer (a ``pending`` seen before
+                # the link dropped again still says more than "never asked").
+                # A dial inside ``_local_peer_call`` is bounded by the handshake
+                # budget, not by ``remaining``, so the window can overrun by one
+                # dial (10 s); ``CREATE_CLIENT_BOUND_S`` keeps slack above it.
+            else:
+                state = str(found.get("state") or "")
+                session_id = str(found.get("session_id") or "")
+                # ``pending`` is the owner between its reservation and its mkdir —
+                # the bind follows within that create — so it is waited out too.
+                # Anything else (created, or a key the owner never saw) is final.
+                if state != "pending":
+                    break
+            remaining = deadline - time.monotonic()
+            if remaining <= CREATE_CONFIRM_POLL_S:
+                break
+            time.sleep(CREATE_CONFIRM_POLL_S)
+        if found is None:
+            raise cannot_ask
         if state == "created" and session_id:
             return {
                 "session_id": session_id,
@@ -14514,6 +14907,24 @@ class RelayServer:
                 "pinned": {name: digest for name, digest in sorted(pinned_names.items())},
                 "unpinned": unpinned,
             }
+        # SKILLS TRAVEL BEFORE THE CREATE, so a brief that names ``skill://x`` resolves
+        # on the session's FIRST turn rather than after the next cadence tick (up to
+        # a minute later). Unconditional — unlike definitions, nothing in the frame
+        # names which skills a session will read — and BOUNDED
+        # (``skillsync.CREATE_PUSH_BUDGET_S``): a large first sync continues in the
+        # background and the receipt says so, so it can never stall the create.
+        # Best-effort: a peer that is unreachable or predates skill sync answers the
+        # create exactly as before, with the reason on the receipt.
+        skills_receipt: dict[str, Any] = {}
+        try:
+            from local_operator.network import skillsync
+
+            skills_receipt = skillsync.push_for_create(self, self._resolve_peer(peer))
+        except MeshRefusal:
+            skills_receipt = {}  # an unknown peer is refused by the create itself below
+        except Exception as exc:  # noqa: BLE001 — a skills push must never fail a create
+            logger.debug("peer create: skills push failed", exc_info=True)
+            skills_receipt = {"ok": False, "code": "failed", "message": str(exc)}
         fields: dict[str, Any] = {
             "cwd": str(frame.get("cwd") or ""),
             "model": frame.get("model"),
@@ -14521,6 +14932,12 @@ class RelayServer:
             "prompt": str(frame.get("prompt") or ""),
             "images": list(frame.get("images") or []),
             "origin": str(frame.get("origin") or "user"),
+            # WHO ASKED, attested HERE where it was decided: ``origin`` comes from
+            # ``network/cli._create_origin`` (agent shell / ``--origin``) or is
+            # absent for the desktop's operator route, which means ``user``. The
+            # owner stamps it verbatim and forwards ``notify`` items only for
+            # ``operator`` (default-deny, ``remote_attention.STARTED_BY_FIELD``).
+            "started_by": started_by_for_origin(str(frame.get("origin") or "user")),
             # THE REQUEST TRAVELS WITH THE FRAME, and the answer comes from the
             # owner: it accepts only against its own ``unattended`` grant
             # (``_op_session_create``), which is the fact this side cannot read.
@@ -14568,11 +14985,14 @@ class RelayServer:
                 # half); ``message`` is the wire frame's name for it, not the exception's.
                 raise MeshRefusal(refusal.code, f"{refusal.sentence} ({push_reason})") from None
             raise
+        extra: dict[str, Any] = {}
         if instructions_notice:
-            detail = {**detail, "custom_instructions_notice": instructions_notice}
+            extra["custom_instructions_notice"] = instructions_notice
         if reconciliation:
-            return {**detail, "definitions": reconciliation}
-        return detail
+            extra["definitions"] = reconciliation
+        if skills_receipt:
+            extra["skills"] = skills_receipt
+        return {**detail, **extra} if extra else detail
 
     def _ctl_peer_engage(self, frame: dict[str, Any]) -> dict[str, Any]:
         return self._local_peer_call(
@@ -15188,7 +15608,7 @@ class RelayServer:
             "audit_published_through": self.audit.published_through,
             "audit_recorded_through": self.audit.recorded_through,
             "audit_path": str(store.audit_path(self.root)),
-            "log_path": str(log_path()),
+            "log_path": self.output_log,
             "uptime_s": round(time.time() - self.started_at, 1),
         }
 
@@ -16011,6 +16431,48 @@ RELAY_OOM_POLICY = "continue"
 
 def log_path() -> Path:
     return log_dir() / "network.log"
+
+
+def _own_output_path() -> str:
+    """The regular file THIS process's stdout is appended to, or ``""``.
+
+    The ground truth for "where does the relay log": launchd's
+    ``StandardOutPath`` and systemd's ``StandardOutput=append:`` are opened by the
+    supervisor before exec, from whatever path was rendered into the unit at
+    install time, so neither this process's environment nor a reader's can be
+    trusted to recompute it. The kernel knows: ``/proc/self/fd/1`` on Linux,
+    ``F_GETPATH`` on macOS. Anything that is not a regular file (a terminal, the
+    journal's socket, a pipe) has no path a person could open, so it is ``""``.
+    Never raises: this is decoration on a status row.
+    """
+    import stat as stat_mod
+
+    try:
+        if not stat_mod.S_ISREG(os.fstat(1).st_mode):
+            return ""
+        if sys.platform.startswith("linux"):
+            return os.readlink("/proc/self/fd/1")
+        if sys.platform == "darwin":
+            import fcntl
+
+            raw = fcntl.fcntl(1, getattr(fcntl, "F_GETPATH", 50), b"\0" * 1024)
+            return bytes(raw).split(b"\0", 1)[0].decode("utf-8", "replace")
+    except (OSError, ValueError):
+        return ""
+    return ""
+
+
+def reported_log_path(live: Mapping[str, Any] | None, record: Any) -> str:
+    """The log path to SHOW: the running relay's own word first, then a guess.
+
+    Order: what the answering relay reports (its fd), what its record says (a
+    wedged relay still has one), and only then this READER's ``log_path()``,
+    which is right for a relay this process would start and wrong for one an
+    install with another config dir started.
+    """
+    told = str((live or {}).get("log_path") or "") if isinstance(live, Mapping) else ""
+    recorded = str(getattr(record, "log_path", "") or "") if record is not None else ""
+    return told or recorded or str(log_path())
 
 
 def ensure_log_parent(*, strict: bool = True) -> None:
@@ -18154,13 +18616,21 @@ def _names_the_shim(image: Path) -> bool:
     """
     from local_operator import update
 
-    shim = update.daemon_image_path()
-    if image == shim:
-        return True
-    try:
-        return image.resolve() == shim.resolve()
-    except OSError:
-        return False
+    # The signed launcher counts as the shim: it execs ``<bin>/python3`` with argv
+    # unchanged, and on a macOS wheel it is what the plist's ``Program`` names
+    # (``update.daemon_program``), so a restart through it resolves ``current`` too.
+    for stable in (
+        update.daemon_image_path(),
+        update.launcher_executable(update.launcher_bundle_path()),
+    ):
+        if image == stable:
+            return True
+        try:
+            if image.resolve() == stable.resolve():
+                return True
+        except OSError:
+            continue
+    return False
 
 
 def _named_generation(image: Path) -> Path | None:
@@ -18299,7 +18769,17 @@ def generation_reading(pid: int | None) -> dict[str, Any]:
                         update.generation_version(target_generation) or None
                     )
                 if isinstance(pid, int) and pid > 0:
-                    reading["relay_generation_stale"] = update.generation_staleness_of_process(pid)
+                    stale = update.generation_staleness_of_process(pid)
+                    if stale is True and update.process_build_matches_current(pid):
+                        # A DIFFERENT GENERATION OF THE SAME BUILD IS NOT BEHIND.
+                        # Reinstalling one wheel makes a new generation directory,
+                        # so the name comparison says "behind" and the row told the
+                        # operator to restart onto byte-identical code. Only the
+                        # SURFACE is corrected here: the repair and the reapers keep
+                        # the name comparison, which also moves a process off a
+                        # generation that pruning may remove.
+                        stale = False
+                    reading["relay_generation_stale"] = stale
             else:
                 reading["installed_build"] = update.version_of_image(target_image) or None
                 pinned = _named_generation(target_image)
@@ -18450,7 +18930,8 @@ def status(port: int = DEFAULT_PORT, *, refresh: bool = False) -> dict[str, Any]
         "relay": live,
         "record": record.to_json() if record is not None else None,
         "port": port,
-        "log": str(log_path()),
+        # THE RUNNING RELAY'S path, not this reader's: see ``reported_log_path``.
+        "log": reported_log_path(live, record),
         "listening": live.get("listen") if live else None,
         "identity_present": (store.network_root() / "identity" / "device.json").exists(),
         # Local records when no relay is running: this command is most useful

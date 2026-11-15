@@ -296,12 +296,51 @@ async def test_dispose_with_parked_wake_leaves_no_pending_task(tmp_path, monkeyp
 @pytest.mark.asyncio
 async def test_parked_wake_emits_no_receipt_until_delivery(tmp_path, monkeypatch):
     """MAJOR-1: a parked wake paints no ``WakeDeliveredEvent`` (and no TUI wake
-    line) until it actually delivers; delivery emits exactly one."""
+    line) until it actually delivers; delivery emits exactly one.
+
+    THE QUIET WINDOW IS DRIVEN BY THE TEST, NOT THE WALL CLOCK. This test used
+    a real 0.3 s window and sampled "no receipt yet" 0.05 s after the wake;
+    under a loaded CI runner the scheduler stall between ``prompt()`` ending
+    and the sample exceeded the window, the deadline delivered first and the
+    test reported a receipt "before delivery" that was in fact the delivery
+    (CI run 43364456591; reproduced 5/5 with a 260 ms stall before
+    ``_deliver_wake``). So W is a hang ceiling (no runner stalls an hour, so
+    the wake parks and stays parked however slow the host), and the deadline
+    task's own sleep toward ``last_end + W`` is held on an event the test sets:
+    "the window has elapsed" is a step the test takes, not a race it hopes to
+    win. The assertion is stronger than the sampled one: "no receipt" is read
+    while the deadline is PROVEN armed and holding the batch, and the held
+    delay proves the deadline aims at the quiet window, not the cap.
+    """
+    import sys
+
     import local_operator.session.session as sess_mod
     from local_operator.harness.types import WakeDeliveredEvent
 
-    monkeypatch.setattr(sess_mod, "WAKE_OPERATOR_QUIET_S", 0.3)
-    monkeypatch.setattr(sess_mod, "WAKE_PARK_CAP_S", 5.0)
+    quiet_s = 3600.0
+    monkeypatch.setattr(sess_mod, "WAKE_OPERATOR_QUIET_S", quiet_s)
+    # Cap well past the window so the deadline's target is the quiet window.
+    monkeypatch.setattr(sess_mod, "WAKE_PARK_CAP_S", 2 * quiet_s)
+
+    window_elapsed = asyncio.Event()
+    deadline_armed = asyncio.Event()
+    held_delays: list[float] = []
+    real_sleep = asyncio.sleep
+
+    async def _hold_until_window_elapses(delay: float) -> None:
+        held_delays.append(delay)
+        deadline_armed.set()
+        await window_elapsed.wait()
+
+    def _sleep(delay: float, *args, **kwargs):
+        # Only the parked-wake deadline's sleep is held, identified by its
+        # caller frame so the session's other sleeps (and this test's) keep
+        # real timing. A plain function, so frame 1 IS the awaiting coroutine.
+        if sys._getframe(1).f_code.co_name == "_parked_wake_deadline":
+            return _hold_until_window_elapses(delay)
+        return real_sleep(delay, *args, **kwargs)
+
+    monkeypatch.setattr(asyncio, "sleep", _sleep)
 
     stream = ScriptedStream(
         [
@@ -316,11 +355,17 @@ async def test_parked_wake_emits_no_receipt_until_delivery(tmp_path, monkeypatch
     await session.prompt("q")
     events.clear()
     await session._deliver_wake(_due())
-    await asyncio.sleep(0.05)
+    assert session._parked_wakes, "expected the wake to park"
+    await asyncio.wait_for(deadline_armed.wait(), timeout=10.0)
+    # Aimed at last_end + W (the cap is 2W away); the margin is only how long
+    # this test took between prompt() ending and the deadline arming.
+    assert quiet_s - 60 < held_delays[0] <= quiet_s, held_delays
     assert not [
         e for e in events if isinstance(e, WakeDeliveredEvent)
     ], "parked wake emitted a receipt before delivery"
+    assert len(stream.requests) == 1, "parked wake spawned a turn before delivery"
 
+    window_elapsed.set()
     await wait_for(lambda: len(stream.requests) == 2, timeout=3.0)
     receipts = [e for e in events if isinstance(e, WakeDeliveredEvent)]
     assert len(receipts) == 1, f"expected 1 receipt at delivery, got {len(receipts)}"

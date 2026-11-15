@@ -76,5 +76,9 @@
   "relay.asks.duration.less_than_minute": "<1 мин",
   "relay.asks.duration.minutes": "{count, number} мин",
   "relay.asks.duration.hours": "{count, number} ч",
-  "relay.asks.duration.days": "{count, number} д"
+  "relay.asks.duration.days": "{count, number} д",
+  "relay.asks.card.command.label": "Предлагаемая команда",
+  "relay.asks.card.command.copy": "Копировать",
+  "relay.asks.card.command.copied": "Скопировано",
+  "relay.asks.card.command.copy_failed": "Не удалось скопировать — команда выделена, скопируйте её оттуда"
 }

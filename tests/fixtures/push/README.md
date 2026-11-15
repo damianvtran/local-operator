@@ -54,7 +54,7 @@ there is one digest pin to follow.)
 | `registry-register-rotation.json` | the same route, re-registered | `device_id`/`registered_at` stable, `device_key` **new** (Q29: the first key stops matching) |
 | `registry-register-refusal-device-revoked.json` | 403 | `device_revoked` + its sentence, refused before anything is written |
 | `registry-register-refusal-device-unpaired.json` | 403 | `device_unpaired` + its sentence, which names the **computer** |
-| `registry-list-response.json` | `GET /api/push/devices` → 200 | the row allow-list (`state`, the optional `name`/`credential_live`/`last_authenticated_at`) and the `precedence` sentence; **no `device_key`, no token** |
+| `registry-list-response.json` | `GET /api/push/devices` → 200 | the row allow-list (`state`, the optional `name`/`credential_live`/`last_authenticated_at`/`preferences`) and the `precedence` sentence; **no `device_key`, no token** |
 | `registry-unrevoke-success.json` | `POST /api/push/devices/{id}/unrevoke` → 200 | `{ok, device_id}`; every marker cleared, no token and no credential restored |
 | `registry-unrevoke-refusal-machine-only.json` | 403 | `machine_only` + its sentence — the operators-only gate |
 | `registry-unrevoke-refusal-device-absent.json` | 404 | `device_absent` + the sentence naming the id asked about |

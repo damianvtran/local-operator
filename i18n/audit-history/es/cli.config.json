@@ -1,0 +1,52 @@
+{
+  "schema": 1,
+  "locale": "es",
+  "namespace": "cli.config",
+  "history_sha256": "faf793455ff1e72ed66d2094b51d5756e6c5c5cb50c1466eeb8073f999f05615",
+  "entries": [
+    {
+      "locale": "es",
+      "namespace": "cli.config",
+      "source_sha256": "40649e7419d144f7e8a550d5ae3c6d48defa7bb0b23f4a20ceac35f2b0fda5ac",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-11",
+        "fallback_used": false
+      },
+      "auditor": {
+        "agent": "i18n-auditor (lopdev team), c1-au-es-A",
+        "session": "96bf9fded81d",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-11-11",
+        "result": "passed",
+        "findings": 4,
+        "fallback_used": false
+      },
+      "status": "passed",
+      "note": "Pre-merge C1 shard audit: 22-key group (cli.config 15, tui.session_move 7), mechanical+idiom pass, second pass done. 0 blocker/major; 3 minor + 3 nit in i18n/audits/evidence/es/cli.config/c1esa1/record.json (group report in both bundles)."
+    },
+    {
+      "locale": "es",
+      "namespace": "cli.config",
+      "source_sha256": "40649e7419d144f7e8a550d5ae3c6d48defa7bb0b23f4a20ceac35f2b0fda5ac",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-11",
+        "fallback_used": false
+      },
+      "auditor": {
+        "agent": "i18n-auditor (lopdev team), c1esa2",
+        "session": "95b953e7b8fd",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-11-11",
+        "result": "passed",
+        "findings": 1,
+        "fallback_used": false
+      },
+      "status": "passed",
+      "note": "R2 delta audit c1esa2: 9 changed keys over 22 (5 here); 0 blocker/major/minor, 1 nit (R2-N1 cli.config.cleared). Safety lines re-verified. Record: i18n/audits/evidence/es/cli.config/c1esa2/record.json"
+    }
+  ]
+}

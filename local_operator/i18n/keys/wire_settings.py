@@ -1658,6 +1658,14 @@ def network_credentials_grant_ttl_s_label() -> Msg:
     return Msg("wire.settings.network_credentials_grant_ttl_s.label", {})
 
 
+def network_credentials_offline_hold_s_help() -> Msg:
+    return Msg("wire.settings.network_credentials_offline_hold_s.help", {})
+
+
+def network_credentials_offline_hold_s_label() -> Msg:
+    return Msg("wire.settings.network_credentials_offline_hold_s.label", {})
+
+
 def network_listen_address_help() -> Msg:
     return Msg("wire.settings.network_listen_address.help", {})
 

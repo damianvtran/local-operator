@@ -1,0 +1,98 @@
+{
+  "audit_id": "c1r2",
+  "locale": "vi",
+  "namespace": "tui.session_move",
+  "audit_date": "2026-11-11",
+  "round": 2,
+  "key_count": 7,
+  "changed_key_count": 4,
+  "scope": "round-2 delta: the 9 keys changed between vi.json and vi.v2.json (plus the unchanged neighbours those changes contradict)",
+  "auditor": {
+    "agent": "i18n-auditor",
+    "session": "c04c7cb774d2",
+    "model": "deepseek/deepseek-flash",
+    "independent_from_translator_session": true,
+    "actual_model_source": "session header of this auditing session (deepseek/deepseek-flash); no model-fallback notice appeared in this transcript"
+  },
+  "input_hashes": {
+    "source_keys": {
+      "path": "c1-prep/keys.json",
+      "sha256": "ac35dc123a4241a3c1fdbd0f4f012636d9706695bacfb3601aa06eed2cae1ffc"
+    },
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/tui.session_move.json",
+      "sha256": "f4dd682b3b50d64a4009eac5ac78a34f5734b5dd0a5ef379951065da326a913e"
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/tui.session_move.context.json",
+      "sha256": "09ed30a0b11969671c41e24fe255072c961fff1f90791a7b9f05cd998cbee573"
+    },
+    "v1_translation": {
+      "path": "c1-prep/vi.json",
+      "sha256": "df73c7edeff08d42d468705e294ba51ddebb55035cff92c9484284a8d62a70b7"
+    },
+    "v2_translation_candidate": {
+      "path": "c1-a2-vi/catalogues/vi/tui.session_move.json",
+      "sha256": "14378b10be5e34d5f660e7778dd66095d145136ef3e54ed8b0632d92a368c172"
+    },
+    "translator_dispositions": {
+      "path": "c1-prep/vi.v2-changes.md",
+      "sha256": "ba67386f2989fbac44382b6602128ffa7dc5ed2e9d0accc6521935327ddd88f6"
+    }
+  },
+  "artifacts": [
+    {
+      "path": "report.md",
+      "sha256": "d8760013304f5183e8bdea2bf1d08514b54e1da3d58d02f3b2f05c6f300385e7"
+    },
+    {
+      "path": "audit.log",
+      "sha256": "b423071f53ad15ecce217b516097d565f2ebf2314b17ad801b9c5de9c3eab790"
+    },
+    {
+      "path": "verify_mechanical.py.txt",
+      "sha256": "d9740480d572f4bffb2bc7bd365ab87a7793237dc4a31753eb84f3be36f77550"
+    },
+    {
+      "path": "recount.py.txt",
+      "sha256": "11d5ef66a4f66b5b5250e8f7399793025e569c2a08dc4667e7fd2237f3799e7f"
+    },
+    {
+      "path": "run_check.py.txt",
+      "sha256": "43e0b8cbed122647bf9486e8e3eabefa33b88bb6d2e61cc9447fa41cc16736a8"
+    }
+  ],
+  "current_report_verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "finding_ids": [],
+    "findings_by_severity": {
+      "BLOCKER": 0,
+      "MAJOR": 0,
+      "MINOR": 0,
+      "NIT": 0
+    }
+  },
+  "ledger": {
+    "status": "passed",
+    "note": "Round-2 delta: 4 changed keys. Timeout notice reports an UNKNOWN outcome with the rerun command byte-identical; bracket placeholders no longer look typed. 0 BLOCKER/0 MAJOR, 0 findings.",
+    "note_chars": 185,
+    "recorded": false,
+    "why_not_recorded": "The v2 bytes are an unintegrated candidate: no vi catalogue file for this namespace exists on the branch yet, so an append now would pin a status for bytes the tree does not ship. Append this row with the landing commit, using the note above."
+  },
+  "execution_evidence": {
+    "audit.log": "actual command output (repo validator over a fixture root, mechanical verifier, shipped-usage recount)",
+    "audit_notes_not_execution_log": [
+      "This record's prose, and report.md, are notes — not command logs.",
+      "The validator run used a monkeypatched catalogue root over an en+vi fixture; it is NOT the repo's own post-insertion run, which the integration owner must perform."
+    ]
+  },
+  "coverage_limits": [
+    "Round-1 auditor A's report for THIS slice was unavailable; its two observations reach the record only as the translator's quotations (labelled A-summary-1/A-summary-2 in vi.v2-changes.md). The only audit-vi-A.md on this machine (session 2b8bafe5512c) audits the mobile M1 slice, not these 22 keys.",
+    "Unchanged approved keys were not re-audited; they were read once for the safety claims and for contradictions with the changed keys.",
+    "No rendered TUI frame was captured (no rendered-frame surface in this run). Widths are rich.cells.cell_len measurements; no key in the group carries a maxCells hint.",
+    "Round-1 auditor B's verdict (clean-with-findings, 0 BLOCKER/0 MAJOR) is the only full independent pass available; this report is the delta pass over it."
+  ],
+  "original_lost_evidence": null,
+  "integration_note": "Landed with the catalogue insertion. Reproduction scripts are retained as .py.txt; second-pass-report.md (sonnet full pass over the v2 bytes) and round1-B-report.md (sonnet round 1 over v1) are preserved beside this round-2 delta audit. The round-1 A pass for vi was lost and is not claimed."
+}

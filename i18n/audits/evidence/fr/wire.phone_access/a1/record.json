@@ -1,0 +1,74 @@
+{
+ "schema": 1,
+ "audit_id": "a1",
+ "audit_kind": "independent_translation_audit",
+ "locale": "fr",
+ "namespace": "wire.phone_access",
+ "round": 1,
+ "audit_date": "2026-11-14",
+ "key_count": 4,
+ "keys_audited": 4,
+ "keys_new_in_scope": 4,
+ "new_keys": [
+  "wire.phone_access.title",
+  "wire.phone_access.description",
+  "wire.phone_access.auto_setup.label",
+  "wire.phone_access.auto_setup.help"
+ ],
+ "source_audit_revision": "1fce7ecb1f5fb587e7b91ef2f9c7fe658521e0d0",
+ "scope": "1fce7ecb1f5f^..1fce7ecb1f5f",
+ "prior_audits_on_disk": [],
+ "pr": "not yet opened (branch fix/tunnel-remedies-auto-up)",
+ "translator": {
+  "agent": "i18n-translator subagent, Local Operator session 7af08d89b259 (values in commit 1fce7ecb1f5f; English source drafted by coder session b0300e2c2c7f)",
+  "model": "anthropic/claude-opus-5-5 (as stated by the coordinator brief; not independently verified)",
+  "date": "2026-11-14"
+ },
+ "auditor": {
+  "agent": "i18n-auditor, independent `task` subagent on node lop-remote-node-2, session 110287e9c4f3; not the translator (7af08d89b259) nor the English-drafting coder (b0300e2c2c7f); did not edit any value",
+  "session": "110287e9c4f3",
+  "model": "anthropic/claude-opus-5-5",
+  "independent_from_translator_session": true,
+  "actual_model_source": "harness system prompt of session 110287e9c4f3 (`Model: anthropic/claude-opus-5-5`); no provider fallback disclosed during the audit"
+ },
+ "input_hashes": {
+  "en": {
+   "path": "local_operator/i18n/catalogues/en/wire.phone_access.json",
+   "sha256": "2979b226db50db768fcad68f5f7376854f2185b08e6b0af08eb8e72bdb470f58"
+  },
+  "context": {
+   "path": "local_operator/i18n/catalogues/en/wire.phone_access.context.json",
+   "sha256": "6c6205a570d71c9482dc038aa5995a5e0c3bd5e78f61e4ae896c64f4bc70202f"
+  },
+  "target": {
+   "path": "local_operator/i18n/catalogues/fr/wire.phone_access.json",
+   "sha256": "d00794f915939230570c0c8474043e3c4bc4c75996ed90bd7862485db13c91a3"
+  },
+  "glossary": {
+   "path": "i18n/glossary.md",
+   "sha256": "a576d5a4b2718ba79a70a42600e3b6233ea28d716b1e2d996a208ac8dd7fabdb"
+  },
+  "style_guide": {
+   "path": "i18n/style-guides/fr.md",
+   "sha256": "5315e1ac10c2ce57aac631ba653d08de680ee70c9a022ed3a8345ce2f9902ee7"
+  }
+ },
+ "artifacts": {
+  "report.md": "05f83b4b00ad0345bf22138f2416360f7c82620afc53b8c4d5b946bd4a4defc0",
+  "audit.log": "96231f0d67a255ec58601c6fccde10226ac058a221727cc0ee5dc1494a72c895"
+ },
+ "audit_notes_not_execution_log": "report.md is reasoning; audit.log is the captured stdout of the commands it lists (git rev-parse, sha256sum, check.py --catalogues-only, ledger.py history-sha, the mech() check in audit_gen.py). dryrun.log is the captured ledger.py append --dry-run output.",
+ "current_report_verdict": {
+  "status": "passed",
+  "unresolved_blocker_major_count": 0,
+  "finding_ids": [
+   "FR-N2",
+   "FR-N3"
+  ],
+  "finding_severities": {
+   "FR-N2": "nit",
+   "FR-N3": "nit"
+  }
+ },
+ "staged_not_committed": true
+}

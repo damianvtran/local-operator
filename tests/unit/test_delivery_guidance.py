@@ -17,6 +17,7 @@ from local_operator.agent_profiles import (
     sync_installed_seeds,
 )
 from local_operator.agents import AgentEditFields, AgentRegistry
+from local_operator.guides import discover_guides, make_guide_resolver
 from local_operator.skills.discovery import discover_skills, packaged_skill_root
 from local_operator.teams import Team
 
@@ -50,14 +51,18 @@ def _fields(**overrides):
 # paragraph (the coder's pinned `MINOR/NIT never force another round` sentence
 # stays: a test asserts it). Trimming here would mean dropping a merge
 # invariant to keep a budget, which is the wrong trade.
+# Worktree hygiene (2026-11-13) gave every reader seed the site and removal
+# duty for an exception worktree (+80 chars each, measured the same way:
+# reviewer 3655 -> 3735, qa-tester 2694 -> 2774); readers had left checkouts
+# behind and 33 in session pads because no reader surface said where or when.
 BUDGETS = {
     "coder": 2800,
-    "reviewer": 3660,
+    "reviewer": 3740,
     "manager": 3750,
     "designer": 5650,
     "ux-reviewer": 4650,
     "aida": 8000,
-    "qa-tester": 2700,
+    "qa-tester": 2780,
 }
 
 
@@ -71,6 +76,31 @@ def test_loaded_role_routes_to_bounded_delivery_authority(name, budget):
     assert body == raw.split("---", 2)[2].strip()
     assert len(body) <= budget
     assert "guide://delivery" in body
+    if name in {"designer", "qa-tester"}:
+        # Compress explanations, not safety policy, to fit the existing budgets.
+        # Exercise the packaged read route alongside the raw, unclipped role:
+        # an unresolved authority pointer must not disguise missing guidance.
+        resolver = make_guide_resolver({guide.name: guide for guide in discover_guides()})
+        policy = resolver("guide://delivery")
+        assert policy is not None and "# Bounded delivery" in policy
+        for required in (
+            "Fixed-origin rule: serve test builds on ONE fixed origin per task",
+            "one fixed port, or a stable preview URL",
+            "manager/child/sibling agents",
+            "handoff",
+            "site approvals",
+            "localhost origin may need approval once",
+            "Never create fresh",
+            "trycloudflare.com quick-tunnel hosts",
+            "bypass a refusal",
+            "kill -0 <pid>",
+            "Never pkill",
+            "shared deps",
+            "`.worktrees/`",
+            "never a scratchpad",
+        ):
+            assert required in " ".join(body.split()), (name, required)
+        assert "remove" in body and "round end" in body
 
 
 def test_delivery_authority_keeps_cost_and_safety_controls_together():
@@ -120,7 +150,16 @@ def test_delivery_authority_keeps_cost_and_safety_controls_together():
     # Raised to 12700 for the reader `evidence` sentence (+88 measured with
     # `len(read_text())`, 12559 -> 12647): without it a reviewer has no
     # sanctioned way to file the receipt its repository mandates, and refuses.
-    assert len(policy) < 12700
+    #
+    # Raised to 12900 for the subagent-lanes pointer (+148 measured with
+    # `len(read_text())`, 12647 -> 12795): mesh-node managers, refused a pinned
+    # tier, ran review/QA as parallel sessions or on `model=inherit`. The rule
+    # itself lives in guide://sessions; this policy, which every engineering role
+    # loads, carries only the one line that sends a reader there.
+    assert len(policy) < 12900
+    flat = " ".join(policy.split())
+    assert "review/QA/design/UX are `task` subagents, on mesh nodes too" in flat
+    assert "`guide://sessions`" in flat
 
 
 def test_root_instructions_link_detail_instead_of_duplicating_it():
@@ -297,6 +336,27 @@ def test_delivery_guide_owns_the_shared_worktree_rule():
         "isolated HOME/config",
     ):
         assert required in policy
+
+
+def test_reader_worktrees_are_sited_and_removed_and_receipts_committed():
+    # 2026-11-13 hygiene receipts: reader checkouts left behind, 33 worktrees in
+    # session scratchpads and superseded receipts left `??` after merge. Every
+    # reader-facing surface names the site and the creator's removal duty.
+    policy = " ".join((ROOT / "local_operator/guides/delivery/GUIDE.md").read_text().split())
+    for required in (
+        "detached-SHA worktree in `<repo>/.worktrees/` (never a scratchpad or /tmp)",
+        "its creator removes it before reporting",
+        "a merged tree is `git status` clean",
+    ):
+        assert required in policy, required
+    assert "`<repo>/.worktrees/`, never a scratchpad" in DELIVERY_POINTER
+    assert "remove your own when the round ends" in DELIVERY_POINTER
+    for name in ("reviewer", "qa-tester", "designer", "ux-reviewer"):
+        seed = load_seed(name)
+        assert seed is not None
+        body = " ".join(seed.instructions.split())
+        assert "`.worktrees/`, never a scratchpad" in body, name
+        assert "remove your own when the round ends" in body, name
 
 
 def test_stale_copy_reviewer_gets_the_pointer_with_worktree_rule(tmp_path):

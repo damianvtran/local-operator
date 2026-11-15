@@ -393,6 +393,19 @@
       "references": {
         "session/catalog.py": 2
       }
+    },
+    "wire.sessions": {
+      "reason": "sessions tool receipts/approval prompts rendered in-process by tools/builtin.py (_sessions_copy = tr(\"wire.sessions\")) and returned as finished tool text",
+      "render_points": [
+        {
+          "path": "local_operator/tools/builtin.py",
+          "symbol": "tools.builtin (_sessions_copy)",
+          "note": "sessions tool stop/park receipts, refusals and approval prompts; returned as ToolResult text and approval-prompt strings, never as a key"
+        }
+      ],
+      "references": {
+        "tools/builtin.py": 19
+      }
     }
   }
 }

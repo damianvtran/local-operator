@@ -295,10 +295,12 @@ merge-gate: ## Re-arm the full-suite merge gate on PR=<number>
 # whose default V8 old-space cap is ~4 GB (4192 MB measured on this host), and a
 # bare local run can cross it under fleet load — measured: OOMed ~116 s in,
 # `rc=250` out of the pyright wrapper. ci.yml's type-check job sets
-# `NODE_OPTIONS=--max-old-space-size=6144` for the same reason (its 16 GB runner
-# OOMed at heap 3885 MB). run_bounded sizes node's heap for BOTH this recipe
-# and the scoped runner, raising a smaller caller cap without lowering a larger
-# operator-set value; its constant is guarded against ci.yml's value by tests.
+# `NODE_OPTIONS=--max-old-space-size=8192` for the same reason (its 16 GB runner
+# OOMed at heap 3885 MB, and later at 6 GB; CI's cap is larger than this local
+# one on purpose, local runs stay memory-bounded). run_bounded sizes node's
+# heap for BOTH this recipe and the scoped runner, raising a smaller caller cap
+# without lowering a larger operator-set value; its constant is guarded by
+# tests as a floor that ci.yml must not fall below.
 BOUND_TIMEOUT ?= 1800
 
 # --contract=command-status: the gate needs pyright's STATUS, not a cleanup

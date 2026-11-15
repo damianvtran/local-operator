@@ -273,12 +273,42 @@ class PlacementState:
             "retry_after_ms": int(retry_after_ms or DEFAULT_OBSERVATION_TTL_MS),
             "last_grant_id": self._observations.get(key, {}).get("last_grant_id", ""),
             "last_grant_at": self._observations.get(key, {}).get("last_grant_at", 0.0),
+            # The last grant's receipt outlives the refusals after it: a lapse is
+            # dated AFTER the owner stopped answering, which is exactly when this
+            # arm runs, so dropping the expiry here would erase the evidence.
+            **{
+                field: self._observations.get(key, {})[field]
+                for field in self.GRANT_RECEIPT_FIELDS
+                if field in self._observations.get(key, {})
+            },
         }
         if owner_retry_after_ms:
             row["owner_retry_after_ms"] = int(owner_retry_after_ms)
         self._observations[key] = row
 
-    def note_grant(self, key: str, grant_id: str, *, owner_device: str = "") -> None:
+    #: The durable receipt of the last grant beside ``last_grant_at``: its end
+    #: (``grant_expires_at_ms``), the owner-stated offline hold (``hold_until_ms``)
+    #: and whether it was served from the offline hold. WHY (mesh lane 64949): a
+    #: node's GitHub access lapsed 23:20-23:28Z and the only durable fact was
+    #: ``last_grant_at``; the grant's own end lived in a process that was gone, so
+    #: whether the lapse was the grant ending, the hold ending or a refusal could
+    #: not be dated. Epoch ms and a bool only, never material.
+    GRANT_RECEIPT_FIELDS: tuple[str, ...] = (
+        "last_grant_expires_at_ms",
+        "last_grant_hold_until_ms",
+        "last_grant_held_offline",
+    )
+
+    def note_grant(
+        self,
+        key: str,
+        grant_id: str,
+        *,
+        owner_device: str = "",
+        grant_expires_at_ms: int = 0,
+        hold_until_ms: int = 0,
+        held_offline: bool = False,
+    ) -> None:
         """Record a successful borrow. Clears any refusal standing against ``key``.
 
         THE POSITIVE OBSERVATION IS THE POINT: the refusal cache is a cache, and a
@@ -286,6 +316,10 @@ class PlacementState:
         usable. Leaving a ``not_a_holder`` row in place for the rest of its TTL after
         a successful grant would make the operator's own ``share`` appear not to have
         taken effect for a minute.
+
+        ``grant_expires_at_ms`` / ``hold_until_ms`` / ``held_offline`` are the
+        :data:`GRANT_RECEIPT_FIELDS`; ``0``/``False`` from a caller that does not
+        know them (an older call site) still writes the row, so the shape is stable.
         """
         self._observations[key] = {
             **self._held_fence_fields(key),
@@ -298,7 +332,24 @@ class PlacementState:
             "retry_after_ms": DEFAULT_OBSERVATION_TTL_MS,
             "last_grant_id": grant_id,
             "last_grant_at": time.time(),
+            "last_grant_expires_at_ms": int(grant_expires_at_ms or 0),
+            "last_grant_hold_until_ms": int(hold_until_ms or 0),
+            "last_grant_held_offline": bool(held_offline),
         }
+
+    def note_held_serve(self, key: str, held_until_ms: int) -> None:
+        """Mark the last grant for ``key`` as now served from the offline hold.
+
+        Only updates an existing grant row (a hold serves a grant this device
+        received, so one exists); the status and refusal fields are untouched,
+        because a held serve is not an owner answer. Called at the coalesced
+        ``credential.held_served`` cadence, never per serve.
+        """
+        row = self._observations.get(key)
+        if row is None or not row.get("last_grant_at"):
+            return
+        row["last_grant_held_offline"] = True
+        row["last_grant_hold_until_ms"] = int(held_until_ms or 0)
 
     #: The fields a policy deny writes and ``held_policy_fence`` documents as
     #: DELIBERATELY outliving the retry cache. ``clear`` must not take them with it:

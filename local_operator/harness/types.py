@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import unicodedata
 import urllib.parse
 import uuid
 from collections.abc import Iterable
@@ -946,7 +947,7 @@ class OneTurnSecretScopeError(ValueError):
 _AGENT_FORWARDING_TOOLS = frozenset({"task", "hub", "send", "sessions", "network"})
 _FORWARDING_READ_OPS: dict[str, frozenset[str]] = {
     "hub": frozenset({"list", "peek", "pause", "cancel"}),
-    "sessions": frozenset({"list", "info", "stop", "peek", "help"}),
+    "sessions": frozenset({"list", "info", "stop", "park", "peek", "help"}),
     "network": frozenset(
         {
             "status",
@@ -973,6 +974,10 @@ def is_agent_forwarding_call(tool_name: str, arguments: Mapping[str, Any]) -> bo
             arguments.get(field) for field in ("create", "engage", "send", "steer", "slash", "text")
         )
     return operation not in _FORWARDING_READ_OPS.get(tool_name, frozenset())
+
+
+#: ``(before, after, preview_rows, full)`` -- see ``ToolResult._diff_source``.
+DiffSourceCarrier = tuple[str, str, tuple[str, ...], tuple[str, ...] | str | None]
 
 
 class ToolResult(BaseModel):
@@ -1013,7 +1018,10 @@ class ToolResult(BaseModel):
 
     # The write/edit SOURCE EVIDENCE: the complete raw ``before``/``after``
     # file texts plus the raw rendered diff preview, as
-    # ``(before, after, preview_rows)``. While it is attached,
+    # ``(before, after, preview_rows, full)``. ``full`` is the COMPLETE raw
+    # diff the preview was cut from (``None`` when nothing was cut, the string
+    # ``"oversized"`` past the archive ceiling); the seam archives its
+    # source-redacted form (``tools/diff_archive``). While it is attached,
     # ``details['diff']`` holds only the withheld receipt. The native loop's
     # seam (``AgentLoop._settle_write_diff``) redacts each COMPLETE side once,
     # masks every preview row whose source line the redactor touched, then runs
@@ -1030,7 +1038,7 @@ class ToolResult(BaseModel):
     # event copy or deep-copied trajectory row would keep raw file text alive.
     # Only the ORIGINAL object carries it; a result that never reaches the
     # seam keeps the withheld receipt (fail-closed by construction).
-    _diff_source: tuple[str, str, tuple[str, ...]] | None = PrivateAttr(default=None)
+    _diff_source: DiffSourceCarrier | None = PrivateAttr(default=None)
 
     def __copy__(self) -> "ToolResult":
         copied = super().__copy__()
@@ -1049,7 +1057,7 @@ class ToolResult(BaseModel):
             state = {**state, "__pydantic_private__": {**private, "_diff_source": None}}
         return state
 
-    def take_diff_source(self) -> tuple[str, str, tuple[str, ...]] | None:
+    def take_diff_source(self) -> DiffSourceCarrier | None:
         """Return and CLEAR the raw source-evidence carrier (single consumption)."""
         source = self._diff_source
         self._diff_source = None
@@ -1974,6 +1982,57 @@ class AskOption(BaseModel):
 # is PRE-TICKED: on a multi-select the visible ticks are the answer, and the
 # user builds them (see the pinned picker test). Consumers read
 # `recommended_rows`, never `recommended`, so a set cannot be half-drawn.
+#: The longest suggested command an ask may carry, in characters (after strip).
+#: A one-liner the user is expected to READ before running it; the desktop's
+#: Run confirmation shows the exact bytes untruncated, so the cap keeps that
+#: dialog legible and bounds what a row adds to every frame that carries it.
+ASK_COMMAND_MAX_CHARS = 500
+
+#: Unicode categories a suggested command may not contain. ``Cc`` covers C0,
+#: DEL and C1 — newline, carriage return, tab and ESC — so one command can never
+#: smuggle a second line, an Enter, or a bracketed-paste terminator into the
+#: terminal it is typed into. ``Cf`` covers bidi overrides, zero-width
+#: characters and the BOM, which make the bytes a user reviews differ from the
+#: bytes that run (Trojan Source). ``Zl``/``Zp`` are line/paragraph separators
+#: some terminals and renderers treat as a newline.
+_ASK_COMMAND_REFUSED_CATEGORIES = frozenset({"Cc", "Cf", "Zl", "Zp"})
+
+#: ``Zs`` (space separators) is refused too, except the plain ASCII space. A
+#: NO-BREAK SPACE, an en/em space or an ideographic space reads as a word break
+#: in the dialog, but the shell does not split on it: ``echo<U+00A0>hi`` runs
+#: as one word and fails with "command not found". Same class as ``Cf`` — the
+#: bytes the user reads are not the bytes that run — so the same rule names the
+#: code point back to the model instead (round 1, Q3).
+_ASK_COMMAND_ALLOWED_SPACE = " "
+
+
+def ask_command_problem(command: str) -> str | None:
+    """Why ``command`` (already stripped) cannot ride an ask, or ``None``.
+
+    The ONE rule for the ``AskQuestion.command`` field, shared by the tool's
+    validator and by ``asks/queue._question_shape`` (which re-applies it to rows
+    that reach the queue without passing the tool, e.g. a hand-built or older
+    projection), so the two can never drift. Characters are REFUSED, never
+    stripped: the message goes back to the model, which can correct the
+    command, whereas silently rewriting it would put a command in front of the
+    user that nobody wrote.
+    """
+    if not command:
+        return "command is empty; omit it instead"
+    if len(command) > ASK_COMMAND_MAX_CHARS:
+        return f"command is longer than {ASK_COMMAND_MAX_CHARS} characters"
+    for char in command:
+        category = unicodedata.category(char)
+        if category in _ASK_COMMAND_REFUSED_CATEGORIES or (
+            category == "Zs" and char != _ASK_COMMAND_ALLOWED_SPACE
+        ):
+            return (
+                f"command must be one plain line: U+{ord(char):04X} "
+                f"({unicodedata.name(char, 'control character')}) is not allowed"
+            )
+    return None
+
+
 class AskQuestion(BaseModel):
     """One question the ``ask`` tool puts to the user."""
 
@@ -2015,8 +2074,78 @@ class AskQuestion(BaseModel):
         ),
     )
 
+    # A SUGGESTED terminal command for the user (e.g. `glab auth login`), so a
+    # surface can offer it as an action instead of the user copying inline code
+    # out of the prose: the desktop app types it into a NEW terminal tab on the
+    # device showing the card (Insert) or, after a confirmation dialog, types
+    # and runs it (Run). Nothing ever runs it without that click + confirm. One
+    # per question, not per option, to keep the card to one action row. Allowed
+    # with `secret` ("run `gh auth token`, paste the result"). The field is
+    # absent from a stored row unless supplied (`_question_shape`), and bridge
+    # rows never carry it: another team's agent may not hand the operator a
+    # command. The description is deliberately short — it rides every request's
+    # tools array (see the two ask ledgers in AGENTS.md "The ask queue").
+    command: str | None = Field(
+        default=None,
+        max_length=ASK_COMMAND_MAX_CHARS,
+        description=(
+            "Optional one-line shell command for the user to run; the app offers "
+            "it in a terminal. Include cd if the directory matters."
+        ),
+    )
+    # WHICH DEVICE the command is for. The desktop's terminal is a node-pty on
+    # the machine showing the card, which for a mesh-remote conversation is NOT
+    # the machine the agent works on: `glab auth login` meant for the agent's
+    # box would sign in the viewer's Mac instead. So the model names the
+    # target, and the desktop offers one-click Run only when the terminal it
+    # would type into IS that device (Insert/copy stay available everywhere).
+    # "agent" is the default because nearly every suggested command fixes the
+    # agent's own environment; "user" is for the operator's own computer
+    # ("glab is signed out on your Mac"). Only valid alongside `command`, and
+    # stamped "agent" on validation when omitted, so a stored row always
+    # carries an explicit target and a consumer never has to guess a default.
+    command_target: Literal["agent", "user"] | None = Field(
+        default=None,
+        description=(
+            "Where it must run: 'agent' (default: your machine) or 'user' (their "
+            "own computer). One-click run is offered only on the right device."
+        ),
+    )
+
+    @field_validator("command", mode="before")
+    @classmethod
+    def _strip_command(cls, value: object) -> object:
+        # Strip BEFORE the `max_length` constraint runs, so the cap is measured
+        # on the command the user will see — the same order the queue path
+        # (`asks/queue._carried_command`) uses. As a plain (after) validator the
+        # strip ran too late: `" " + "x" * 500` was refused by pydantic's
+        # length check though the stripped command is exactly at the cap
+        # (round 1, n1/Q2). `max_length` stays on the Field so the published
+        # schema's `maxLength` hint, and the ledgers measuring it, are unchanged.
+        return value.strip() if isinstance(value, str) else value
+
+    @field_validator("command")
+    @classmethod
+    def _one_line_command(cls, value: str | None) -> str | None:
+        # A field validator, not part of `_shape`: `_shape` returns early for a
+        # secret question, and the command rule applies to both kinds.
+        if value is None:
+            return None
+        value = value.strip()
+        problem = ask_command_problem(value)
+        if problem is not None:
+            raise ValueError(problem)
+        return value
+
     @model_validator(mode="after")
     def _shape(self) -> "AskQuestion":
+        # Command target first: `_shape` returns early for a secret question
+        # below, and a secret question may carry a command too.
+        if self.command is None:
+            if self.command_target is not None:
+                raise ValueError("command_target only applies with a command")
+        elif self.command_target is None:
+            self.command_target = "agent"
         if self.secret:
             # A secret question is a masked paste, not a picker. Options and
             # multi-select have no meaning there, and a recommended option
@@ -2148,6 +2277,10 @@ class AskRowQuestion(AskQuestion):
     human_required: bool = False
     #: The authority block frozen at issuance (S-3), present only when supplied.
     bridge: dict[str, Any] | None = None
+    #: A headless node's site approval: the inputs its ``site:v1:`` question id
+    #: binds, so the SIGNER can rebuild the id and the card it shows
+    #: (``browser_bridge/site_approval.verify_site_card``). Present only then.
+    site: dict[str, Any] | None = None
     # The row's options are the strict option PLUS the carriage's id, so the
     # field narrows to the seat-bearing subclass. A list is mutable and therefore
     # invariant, which pyright reports even though every ``AskRowOption`` IS an
@@ -2746,6 +2879,21 @@ class ToolContext(BaseModel):
     #: :attr:`enqueue_ask`: a plain callable returning ``{"ok", "text"/"error",
     #: "details"}``, resolved once per session turn.
     withdraw_ask: Callable[..., Mapping[str, Any]] | None = None
+    #: A headless node's site cards (``browser_bridge/site_approval.py``):
+    #: ``withdraw_site_asks(origin, keep_question_id="")`` settles (``moot``)
+    #: every OPEN site card in this session for ``origin`` except the one bound
+    #: to ``keep_question_id``, and returns the ask ids it withdrew. The browser
+    #: tool calls it on ``cancel_access`` and before raising a fresh card, so a
+    #: card bound to a dead extension entry never blocks the live one (review
+    #: U3/Q1). Bound beside :attr:`withdraw_ask`, ``None`` where it is.
+    withdraw_site_asks: Callable[..., list[str]] | None = None
+    #: ``site_ask_lapses(origin)``: how many of this session's site cards for
+    #: ``origin`` lapsed unanswered since the operator's last admitted chat
+    #: message. ``request_access`` refuses a further card past the one re-raise
+    #: (review U15); an operator reply re-opens one card plus one re-raise
+    #: (review R4-1). Bound beside
+    #: :attr:`withdraw_site_asks`, ``None`` where it is.
+    site_ask_lapses: Callable[[str], int] | None = None
     #: THE ASK GATE'S DOOR (design docs/design/ask-gate.md §2.2). Async — the
     #: tool awaits one forked clearance check BEFORE the unchanged enqueue.
     #: Bound under the same two conditions as :attr:`enqueue_ask` and ``None``
@@ -4037,6 +4185,16 @@ class LoopConfig(BaseModel):
     #: should hold to; anything that touches disk, a lock or a socket belongs on
     #: the far side of a queue, not here.
     capture_prepared_write: Callable[[ToolCall, ToolResult], None] | None = None
+    #: Durably bind a NESTED (``eval`` -> ``tool('write'|'edit')``) archived
+    #: full diff to this session as ``(outer_call_id, call_id, tool_name,
+    #: descriptor)``; returns ``True`` only once the binding is written. AWAITED
+    #: by the eval bridge before the descriptor reaches the nested end event or
+    #: the cell (see ``tools.diff_archive.NESTED_DIFF_BINDING_TYPE``): a nested
+    #: call has no tool row of its own, so this host-written journal entry is
+    #: what the diff routes prove membership with. ``None`` (a host without a
+    #: journal) or ``False`` downgrades the descriptor to ``unavailable``
+    #: rather than advertise an archive no route could serve.
+    bind_nested_diff: Callable[[str, str, str, dict[str, Any]], Awaitable[bool]] | None = None
     #: The session's divergence observer (``local_operator.divergence.
     #: DivergenceJudge``), or ``None`` for a host that does not wire one.
     #:
@@ -4751,6 +4909,25 @@ class ChatRequest(BaseModel):
     top_p: float | None = None
     stop_sequences: list[str] = Field(default_factory=list)
     tool_choice: Literal["auto", "none", "required"] = "auto"
+    # Opt-in transport invariant, not a role-name special case. Failover must
+    # recheck it against the model and content it actually dispatches.
+    required_image_count: int = Field(default=0, ge=0)
+
+    def validate_required_images(self) -> None:
+        if not self.required_image_count:
+            return
+        count = sum(
+            isinstance(block, ImageContent)
+            for message in self.messages
+            for block in message.content
+        )
+        if (
+            not self.model.supports_images
+            or not self.model.supports_images_stated
+            or count < self.required_image_count
+        ):
+            raise ValueError("required image evidence cannot be sent to the serving model")
+
     # A reasoning-effort ceiling the harness set DELIBERATELY (an empty
     # truncation retry stepped the effort down one rung). The session's
     # frozen auto-effort override must not raise the request back above it:

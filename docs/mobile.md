@@ -514,6 +514,66 @@ a 200. The list's SSE stream takes the same flag
 between the two answers on its next repaint; without the flag both answers are
 byte-identical to what they were before.
 
+### Delta resume — forward history and skip-unchanged seeds
+
+A phone returning from the background already holds a cached copy of the list
+and of the conversation it was viewing. Two additive contracts let it fetch only
+what moved instead of the whole seed (up to ~700 KB for a long session) plus a
+backward heal. Both are RELAY capabilities on the list frame, so a client
+feature-detects them and never probes: an older relay **ignores** both
+parameters (it answers `?after=` with the newest page and `?have=` with the full
+seed), which is indistinguishable from success without the flag.
+
+| Capability | Contract |
+|---|---|
+| `capabilities.history_after = {"available": true}` | forward history cursor |
+| `capabilities.seed_digest = {"available": true}` | `?have=` seed elision on both SSE streams |
+
+**Forward history — `GET /api/sessions/{id}/history?after=<row id>&limit=`.**
+Answers `{entries, has_more}` with the rows strictly NEWER than `after`, oldest
+first, at most `limit` (the route's existing 1–200 bound, default 80). Page on
+with the last returned row's id while `has_more` is true. The cursor row itself
+is not re-served: its newer state (a tool call that finished) arrives on the
+live projection the client opens alongside. `after` at the newest row is a
+valid **empty** page (`200 {"entries": [], "has_more": false}`) — the client is
+current.
+
+A cursor the relay cannot continue from answers **`409 {"error", "reset":
+true, "reason"}`**, never an empty 200 (a forward reader would read an empty 200
+as "already current" and silently lose rows). The client drops its cursor and
+takes a full (cursor-less) read. Reasons: the id is not in the conversation's
+render (never this conversation's, a replaced journal, a reasoning row the
+journal never holds), the id is a row the newest compaction re-injected at the
+render's head (its marker, a preserved user turn, the carried tier — journal
+rows from below the cut, so "the rows after it" would include older rows), or
+the transcript is missing or failed to fold. A transcript this build cannot
+decode keeps the existing `200 {"entries": [], "unavailable": …}`. `before` and
+`after` together are a `400`. Requests without `after` are byte-identical to
+before.
+
+**Seed elision — `?have=<digest>` on `GET /api/sessions/{id}/events` and
+`GET /api/sessions/events`.** A query parameter, not `If-None-Match`, because
+header pass-through on an SSE request through the gateway and every React
+Native fetch path is unverified.
+
+- **Absent:** the stream is byte-identical to a relay without the feature.
+- **Present (any value, including empty — the opt-in with nothing cached):**
+  every `projection`/`sessions` frame on that connection carries `digest`.
+- **Equal to the current digest:** the FIRST event is `event: unchanged` with
+  `{"digest"}` (list) or `{"digest", "version", "activity_started_s"}`
+  (session) instead of the full snapshot. The client keeps its hydrated copy as
+  authoritative for the connection, patching the session's clock fields onto
+  it; later repaints arrive as ordinary stamped frames.
+
+The digest is the first 32 hex characters (128 bits) of sha256 over the frame's
+canonical JSON (sorted keys, `,`/`:` separators) — the CAPPED frame the phone
+actually receives, without `digest` itself. The session frame's clock fields
+(`version`, which bumps every repaint, and `activity_started_s`, an age
+re-dated at every serialization) are excluded, which is why the session's
+`unchanged` event carries their current values. A digest that does not match
+for any reason (including a field that moves with time) costs only the full
+seed the legacy path always sent; it can never elide a changed frame.
+
 ### The transfer verb — a conversation's move (`POST /api/sessions/{id}/transfer`)
 
 The write half, and the relay's half of

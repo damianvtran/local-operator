@@ -240,6 +240,31 @@ def peer_session_row(session_id: str, root: Path | None = None) -> SessionRow | 
     return None
 
 
+def peer_session_holders(session_id: str, root: Path | None = None) -> list[SessionRow]:
+    """EVERY cached remote row for ``session_id``, one per holding device.
+
+    Cache-only, like :func:`peer_session_row`, which answers "is it remote?"
+    with the FIRST match. A caller about to ACT on the answer — the ``send``
+    tool delivering to the holder without an explicit ``peer`` — needs to know
+    whether that first match is the only one: two devices reporting one id
+    (a stale row after a move, or a collision) is ambiguity it must refuse, not
+    a choice it may make. Rows without an owning device are not a holder
+    anyone could be routed to and are skipped.
+    """
+    cached = _CACHE.get("" if root is None else str(root))
+    if cached is None:
+        return []
+    holders: list[SessionRow] = []
+    seen: set[str] = set()
+    for row in cached[1]:
+        device = str(row.owner_device or "")
+        if row.id != session_id or not row.is_remote or not device or device in seen:
+            continue
+        seen.add(device)
+        holders.append(row)
+    return holders
+
+
 def seed_peer_row(root: Path | None, row: SessionRow) -> None:
     """Merge a KNOWINGLY-LIVE peer row into the cache, for resolutions to find.
 
@@ -469,6 +494,15 @@ def park_edges(
         kind = str(row.pending or "")
         if not kind or not row.live_state:
             continue
+        if getattr(row, "pending_queued", False):
+            # The ask QUEUE's claim (``_sync_queued_ask_pending``), not a parked
+            # gate: a listing fact for the "needs" badge, never a park (PR #3934
+            # Q1). A park here paged EVERY member with a TUI for a question on
+            # a session it did not start; the origin is told instead by the
+            # forwarded ``remote-ask:`` rows, one per ask. Keyed on the owner's
+            # flag rather than on the forwarded notices so a BLOCKING gate that
+            # parks beside open queued asks still parks (R1-3).
+            continue
         key = (str(row.owner_device or ""), row.id)
         current[key] = kind
         fresh[key] = RemotePark(
@@ -487,17 +521,6 @@ def park_edges(
     return edges, state
 
 
-class RemoteCompletion(NamedTuple):
-    """One NEW finished turn on a peer, for a session THIS device started."""
-
-    session_id: str
-    device_id: str
-    device_name: str
-    token: str
-    outcome: str
-    name: str
-
-
 class RemoteNotice(NamedTuple):
     """One NEW (or newly revised) ``notify`` item on a peer, for that session."""
 
@@ -509,6 +532,10 @@ class RemoteNotice(NamedTuple):
     priority: str
     title: str
     name: str
+    #: The owner item's own time (epoch ms, the owner's clock), or 0 when the
+    #: owner did not say (an older build). The origin raises only a notice newer
+    #: than its first-seen baseline and writes it at this time (2026-11-13).
+    at_ms: int = 0
 
 
 def _carry_silent(
@@ -531,44 +558,6 @@ def _carry_silent(
             state[key] = value
 
 
-def completion_edges(
-    previous: Mapping[tuple[str, str], str],
-    rows: Iterable[SessionRow],
-    *,
-    unanswered: Iterable[str] = (),
-) -> tuple[tuple[RemoteCompletion, ...], dict[tuple[str, str], str]]:
-    """New completion EPISODES among ``rows``, and the map to pass back next read.
-
-    Pure, and keyed exactly as :func:`park_edges` is — ``(device, session)`` —
-    for the same cross-device reason. The episode identity is the owner's
-    completion TOKEN: a new token is a new finished turn (fire once); the same
-    token on the next read is no edge; a key that leaves the map (the owner
-    acknowledged it — the operator opened the conversation somewhere) is the
-    caller's to settle. Unlike a park, a completion is a STORED fact, so a
-    stored row's claim counts as much as a live one's.
-    """
-    current: dict[tuple[str, str], object] = {}
-    fresh: dict[tuple[str, str], RemoteCompletion] = {}
-    for row in rows:
-        claim = row.remote_attention
-        if not claim or not claim[0]:
-            continue
-        key = (str(row.owner_device or ""), row.id)
-        current[key] = claim[0]
-        fresh[key] = RemoteCompletion(
-            session_id=row.id,
-            device_id=key[0],
-            device_name=str(row.owner_device_name or ""),
-            token=claim[0],
-            outcome=claim[1] or "complete",
-            name=_chosen_name(row),
-        )
-    state = dict(current)
-    _carry_silent(previous, state, unanswered)
-    edges = tuple(fresh[key] for key, token in current.items() if previous.get(key) != token)
-    return edges, {key: str(value) for key, value in state.items()}
-
-
 #: One tracked notice: ``(device, session, owner item key)``.
 NoticeKey = tuple[str, str, str]
 
@@ -586,7 +575,7 @@ def notice_edges(
     items, and each is its own episode: keying per session made two notices
     inside one listing TTL replace each other, so a ``high`` "Tests failed"
     followed by a ``normal`` "Deploy done" lost the high one. The silence rule
-    is :func:`completion_edges`' (``_carry_silent`` reads ``key[0]``, the
+    is the one ``_carry_silent`` applies (it reads ``key[0]``, the
     device, which this key keeps first). A notice that leaves the map is NOT
     settled by the caller: the owner's item going read there says nothing about
     whether the operator saw the forwarded row here, so the origin's row keeps
@@ -613,11 +602,41 @@ def notice_edges(
                 priority=claim[2] or "normal",
                 title=claim[3],
                 name=_chosen_name(row),
+                # A 4-tuple (a parse older than ``at``) has no time: 0.
+                at_ms=int(claim[4]) if len(claim) > 4 else 0,
             )
     state: dict[NoticeKey, int] = dict(current)
     _carry_silent(previous, state, unanswered)
     edges = tuple(fresh[key] for key, value in current.items() if previous.get(key) != value)
     return edges, state
+
+
+def _attested_notices(peer_row: Any) -> tuple[tuple[str, int, str, str, int], ...] | None:
+    """The row's forwarded notices, minus ``notify`` items it may not raise here.
+
+    THE ORIGIN RE-APPLIES THE OWNER'S DEFAULT-DENY (operator rule, 2026-11-14:
+    only a deliberate ``notify`` or an ask reaches the dashboard; agent/worker
+    session progress must not). The owner filters in
+    ``remote_attention.stamp_rows_for_viewer``, but the owner is another device
+    and may run a build older than that filter — which is exactly how five
+    agent-lane workers on lop-remote-node-2 reached this inbox after v0.103.0.
+    Applying the same predicate to the row's own ``origin`` here makes the rule
+    hold as soon as THIS device updates. Open asks (``remote-ask:``) always
+    pass: a question still waiting on the operator is never withheld.
+    """
+    notices = getattr(peer_row, "notices", None)
+    if not notices:
+        return notices
+    from local_operator.notifications.remote_attention import (
+        ASK_NOTICE_PREFIX,
+        origin_is_operator_started,
+    )
+
+    if origin_is_operator_started(getattr(peer_row, "origin", None)):
+        return notices
+    return tuple(
+        claim for claim in notices if claim and str(claim[0]).startswith(ASK_NOTICE_PREFIX)
+    )
 
 
 def _chosen_name(row: SessionRow) -> str:
@@ -813,8 +832,10 @@ def _read(
                 # catalogue double or an older parse has neither attribute, which
                 # is no claim.
                 remote_attention=getattr(peer_row, "attention", None),
-                remote_notices=getattr(peer_row, "notices", None),
+                remote_notices=_attested_notices(peer_row),
                 remote_attention_unknown=bool(getattr(peer_row, "attention_unknown", False)),
+                pending_queued=bool(getattr(peer_row, "pending_queued", False)),
+                remote_asks_unknown=bool(getattr(peer_row, "asks_unknown", False)),
             )
         )
     # THE PEERS THAT DID NOT ANSWER, and the exclusion is by DEVICE rather than

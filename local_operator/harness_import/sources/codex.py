@@ -7,9 +7,10 @@ imported by inventing a conversation from the title.
 
 SQLite is read through a private snapshot (see ``store.sqlite_snapshot``) so
 opening a WAL database cannot create a ``-shm`` in the foreign root. Rollout
-``.jsonl.zst`` is supported only when the runtime has ``compression.zstd``
-(Python 3.14); on older Pythons those rows are listed ``unsupported`` rather
-than shelling out to ``zstd``.
+``.jsonl.zst`` is supported when the runtime can decode zstd: stdlib
+``compression.zstd`` on 3.14, ``backports.zstd`` on 3.12/3.13 (resolved once in
+``session.compression.zstd_decoder``); with neither, those rows are listed
+``unsupported`` rather than shelling out to ``zstd``.
 
 Codex compaction semantics differ from lop's: a ``compacted`` record may have
 pruned its pre-cut messages and retained only ``replacement_history``. We import
@@ -90,13 +91,24 @@ def _resolve_body(root: Path, rollout: str | None, source_id: str) -> Path | Non
     return _archived_body(root, source_id)
 
 
+_ZSTD_UNAVAILABLE = "zstd rollout requires compression.zstd (3.14+) or backports.zstd"
+
+
+def _zstd_decoder() -> Any:
+    """The zstd module to decode with, or ``None`` (see the module docstring)."""
+    from local_operator.session.compression import zstd_decoder
+
+    return zstd_decoder()
+
+
 @contextmanager
 def _text_handle(path: Path) -> Iterator[TextIO]:
     if path.suffix == ".zst":
-        try:
-            from compression import zstd  # type: ignore
-        except (ImportError, AttributeError) as exc:  # pragma: no cover - py<3.14
-            raise UnsupportedBody("zstd rollout requires Python 3.14 compression.zstd") from exc
+        # Same stdlib-then-backport resolution as session transcripts, so a
+        # 3.12/3.13 runtime with ``backports.zstd`` imports Codex rollouts too.
+        zstd = _zstd_decoder()
+        if zstd is None:
+            raise UnsupportedBody(_ZSTD_UNAVAILABLE)
         try:
             opener = getattr(zstd, "open", None)
             if opener is not None:
@@ -356,12 +368,9 @@ class CodexAdapter(SourceAdapter):
                 # bounded again while reading).
                 availability = "unsupported"
                 warning = f"rollout exceeds the {store.MAX_SOURCE_BYTES} byte import cap"
-            elif body.suffix == ".zst":
-                try:
-                    from compression import zstd  # type: ignore  # noqa: F401
-                except (ImportError, AttributeError):
-                    availability = "unsupported"
-                    warning = "zstd rollout requires Python 3.14 compression.zstd"
+            elif body.suffix == ".zst" and _zstd_decoder() is None:
+                availability = "unsupported"
+                warning = _ZSTD_UNAVAILABLE
             rows[source_id] = SourceSession(
                 source="codex",
                 source_id=source_id,
