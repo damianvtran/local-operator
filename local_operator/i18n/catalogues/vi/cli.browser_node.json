@@ -15,7 +15,7 @@
   "cli.browser_node.refuse_sudo": "Bị từ chối: các bước này cần quyền root và `sudo -n` sẽ cần mật khẩu: {steps}. Hãy chạy từ một tài khoản có sudo không tương tác; hoặc, trong một terminal tương tác, chạy `sudo -v` trước rồi chạy lại lệnh này trong cùng terminal đó (guide://browser, “Headless nodes”).",
   "cli.browser_node.refuse_no_record": "Bị từ chối: không có gì để sửa, vì {path} không tồn tại. Hãy cài trình duyệt bằng `lop browser setup --node --authorised-by '<who, when>'`.",
   "cli.browser_node.refuse_authorisation": "Bị từ chối: cài trình duyệt lên một node cần người vận hành ủy quyền. Chạy lại với `--authorised-by '<who, when>'`; nội dung được ghi nguyên văn.",
-  "cli.browser_node.paired_yes": "Đã ghép nối: có. Phiên mới trên node này có công cụ browser (các phiên đang chạy từ trước thì không), nhưng hiện chưa thể mở trang web nào ở đó: trên node không màn hình, việc phê duyệt từng trang cần quyết định có chữ ký của người vận hành, mà bản dựng này chưa hỗ trợ.",
+  "cli.browser_node.paired_yes": "Đã ghép nối: có. Phiên mới trên node này có công cụ browser (các phiên đang chạy từ trước thì không). Mỗi trang web mà chúng mở đều cần người vận hành phê duyệt; người vận hành trả lời và ký trên thiết bị của chính họ.",
   "cli.browser_node.paired_no": "Đã ghép nối: không.",
   "cli.browser_node.record": "Biên bản thiết lập: {path}",
   "cli.browser_node.failed_tail": "Quá trình thiết lập dừng ở bước thất bại. Hãy sửa lỗi, rồi chạy `lop browser setup --node --repair --authorised-by '<who, when>'`.",

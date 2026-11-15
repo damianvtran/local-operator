@@ -15,7 +15,7 @@
   "cli.browser_node.refuse_sudo": "Rechazado: estos pasos necesitan root y `sudo -n` pediría contraseña: {steps}. Ejecútalo desde una cuenta con sudo no interactivo; o bien, en una terminal interactiva, ejecuta primero `sudo -v` y luego vuelve a ejecutar este comando en la misma terminal (guide://browser, “Headless nodes”).",
   "cli.browser_node.refuse_no_record": "Rechazado: no hay nada que reparar, porque {path} no existe. Instala el navegador con `lop browser setup --node --authorised-by '<who, when>'`.",
   "cli.browser_node.refuse_authorisation": "Rechazado: instalar un navegador en un nodo requiere la autorización del operador. Vuelve a ejecutarlo con `--authorised-by '<who, when>'`; el texto se registra tal cual.",
-  "cli.browser_node.paired_yes": "Emparejado: sí. Las sesiones nuevas en este nodo tienen la herramienta de navegador (las que ya estaban en marcha, no), pero todavía no se puede abrir ningún sitio en él: en un nodo sin pantalla, la aprobación por sitio requiere una decisión firmada del operador, con la que esta versión no cuenta.",
+  "cli.browser_node.paired_yes": "Emparejado: sí. Las sesiones nuevas en este nodo tienen la herramienta de navegador (las que ya estaban en marcha, no). Cada sitio que abran necesita la aprobación del operador, que responde y firma en su propio dispositivo.",
   "cli.browser_node.paired_no": "Emparejado: no.",
   "cli.browser_node.record": "Registro de instalación: {path}",
   "cli.browser_node.failed_tail": "La configuración se detuvo en el paso que falló. Corrígelo y luego ejecuta `lop browser setup --node --repair --authorised-by '<who, when>'`.",
