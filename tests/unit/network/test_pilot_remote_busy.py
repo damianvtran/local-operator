@@ -39,6 +39,25 @@ def test_pilot_and_mobile_share_the_same_refusal_identity() -> None:
     assert RemoteStreamRefused is RemoteStreamRefusal
 
 
+def test_typed_owner_silence_stays_on_the_pilot_transport_rung(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from local_operator.network import cli, store
+    from local_operator.network.projection import RemoteStreamRefusal
+
+    monkeypatch.setattr(store, "find_own_relay", lambda _root: object())
+    code, sentence = cli._pilot_dial_refusal(
+        SESSION,
+        "synthetic-peer",
+        RemoteStreamRefusal("peer_unreachable", "synthetic no owner answer"),
+        tmp_path,
+        verb="send",
+        device="synthetic-owner",
+    )
+    assert code == "peer_unreachable"
+    assert "doctor" in sentence and "was refused" not in sentence
+
+
 class _HeldHandle(_Handle):
     def __init__(self, session_id: str) -> None:
         super().__init__(session_id)

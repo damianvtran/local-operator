@@ -1569,10 +1569,13 @@ class RemoteSessionClient(AttachClient):
         if not isinstance(opening, dict) or opening.get("op") != "ack":
             failure = opening if isinstance(opening, dict) else {}
             message = str(failure.get("message") or "the relay refused to open that stream")
-            code = failure.get("code")
-            if isinstance(code, str) and code:
-                raise RemoteStreamRefused(code, message)
-            raise ConnectionError(message)
+            if not isinstance(opening, dict):
+                raise ConnectionError(message)
+            # A received codeless refusal is the owner's deliberately opaque
+            # permission answer. The local relay now labels silence explicitly,
+            # so defaulting THIS answer to not_authorised does not turn a dead
+            # transport into a phone permission error (#4057 / #4060 M1).
+            raise RemoteStreamRefused(str(failure.get("code") or "not_authorised"), message)
         raw_detail = opening.get("detail")
         detail: dict[str, Any] = raw_detail if isinstance(raw_detail, dict) else {}
         self._stream_id = str(detail.get("stream") or "")

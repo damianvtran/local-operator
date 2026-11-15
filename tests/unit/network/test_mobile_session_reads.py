@@ -30,6 +30,100 @@ from local_operator.session.transcript import Transcript
 from tests.unit.network.test_relay_e2e import _dialable_devices, devices  # noqa: F401
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("outcome", ["lost-view", "no-answer", "no-link"])
+async def test_codeless_lost_view_stream_refusal_stays_mobile_forbidden(
+    peer_pair: Any, monkeypatch: Any, outcome: str
+) -> None:
+    """An actual owner authorizer refusal is not a missing transport answer.
+
+    Use a fresh stream, not the already-shared viewer in the subscriber test:
+    that test can refuse its prompt on an earlier coded admission path.
+    """
+    import json
+
+    from local_operator.mobile.remote_sessions import public_error
+    from local_operator.network.projection import (
+        RemoteSessionClient,
+        RemoteSessionFacts,
+    )
+    from tests.unit.network.test_relay_e2e import _pair_settled
+
+    owner, borrower, _host, _port = peer_pair
+    borrower.bind()
+    borrower.bind_control()
+    borrower.start()
+    record, _host, _port = _pair_settled(
+        peer_pair,
+        monkeypatch,
+        role="drive",
+        settings=relay.NetworkSettings(port=borrower.settings.port, listen_address="127.0.0.1"),
+    )
+    with store.mutate(record.network_id, owner.root) as current:
+        relay.set_member_capabilities(
+            current, device_id=borrower.identity.device_id, revoke=("view",)
+        )
+        store.save(current, owner.root)
+    answers: list[dict[str, Any]] = []
+    original = relay.PeerLink.request
+
+    def capture(link: Any, frame: dict[str, Any], **kwargs: Any) -> Any:
+        reply = original(link, frame, **kwargs)
+        if frame.get("op") == "net_stream" and frame.get("action") == "open":
+            assert isinstance(reply, dict)
+            answers.append(reply)
+            if outcome == "no-answer":
+                # Lose only this reply after the REAL owner refused it. The
+                # borrower must distinguish no answer from that codeless answer.
+                return None
+        return reply
+
+    monkeypatch.setattr(relay.PeerLink, "request", capture)
+    if outcome == "no-link":
+        monkeypatch.setattr(borrower, "_ensure_link", lambda _peer: None)
+    local = store.find_own_relay(borrower.root)
+    assert local is not None
+    facts = RemoteSessionFacts(
+        session_id="synthetic-codeless-view",
+        device_id=owner.identity.device_id,
+        device_name=owner.identity.name,
+        protocol=2,
+        control_port=local.control_port,
+        control_key=local.control_key,
+    )
+    client = RemoteSessionClient(lambda _: None, lambda _: None, facts=facts)
+    try:
+        with pytest.raises(ConnectionError) as caught:
+            await client.connect(facts.record(), facts.session_id)
+        if outcome == "no-link":
+            assert answers == []
+        else:
+            assert len(answers) == 1 and answers[0]["op"] == "error"
+            assert "code" not in answers[0], "control must be the actual codeless authorizer reply"
+        read = public_error(caught.value)
+        command = public_error(caught.value, command=True)
+        print(
+            "CODELESS_MOBILE_RESULT",
+            json.dumps(
+                {
+                    "outcome": outcome,
+                    "read": [read.status, read.code],
+                    "command": [command.status, command.code],
+                    "peer_reply_has_code": False,
+                }
+            ),
+        )
+        if outcome == "lost-view":
+            assert (read.status, read.code) == (403, "remote_forbidden")
+            assert (command.status, command.code) == (403, "remote_forbidden")
+        else:
+            assert getattr(caught.value, "code", None) == "peer_unreachable"
+            assert (read.status, read.code) == (503, "remote_unreachable")
+            assert (command.status, command.code) == (503, "remote_unreachable")
+    finally:
+        client.close()
+
+
 @pytest.fixture()
 def peer_pair(request: pytest.FixtureRequest) -> Any:
     return request.getfixturevalue("devices")

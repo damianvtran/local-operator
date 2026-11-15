@@ -7791,7 +7791,9 @@ def _pilot_dial_refusal(
 
     undone = _PILOT_UNDONE.get(verb, "nothing was done")
     label = device or peer
-    if isinstance(message, RemoteStreamRefused):
+    # The local relay labels a missing owner answer explicitly; that typed
+    # observation still belongs to the doctor/transport rung, not refusal copy.
+    if isinstance(message, RemoteStreamRefused) and message.code != "peer_unreachable":
         detail = sanitize_prompt_line(scrub_shapes(str(message)), limit=300)
         if message.code == "session_unreachable":
             sentence = f"{session_id} on {label} could not be reached: {detail}; {undone}. "
