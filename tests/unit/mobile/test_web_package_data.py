@@ -248,7 +248,7 @@ def test_relay_web_unit_tests_are_kept_out_of_the_wheel() -> None:
     both directions: every relay-web unit test is excluded, the compile-only
     ``keys.type-test.ts`` the build runs still ships, and the exclusion cannot
     silently reach a ``.test.ts(x)`` anywhere else in the package."""
-    assert sorted(_excluded_patterns()) == ["*.test.ts", "*.test.tsx"]
+    assert sorted(_excluded_patterns()) == ["*.parity.json", "*.test.ts", "*.test.tsx"]
     globs = _package_data_globs()
     tests = [relative for relative in _tree_files() if relative.endswith((".test.ts", ".test.tsx"))]
     assert tests, "no relay web unit tests found; this check would be vacuous"
@@ -267,6 +267,37 @@ def test_relay_web_unit_tests_are_kept_out_of_the_wheel() -> None:
         if WEB_SRC not in path.parents and "node_modules" not in path.parts
     ]
     assert not elsewhere, f"test files outside mobile/web/src would be excluded too: {elsewhere}"
+
+
+def test_parity_fixtures_follow_their_tests_out_of_the_wheel() -> None:
+    """The ``*.parity.json`` cross-client fixtures are test data (2026-11-15:
+    dropping them took main's slimmed wheel back under the 17.5 MiB budget).
+    Pinned both ways: every fixture is excluded, no shipped source reads one
+    (only the excluded tests and CI's condense-parity scripts do), the pin table
+    beside them still ships, and the ``"*"`` reach cannot silently drop a
+    ``*.parity.json`` outside the relay web's ``src/lib``."""
+    globs = _package_data_globs()
+    fixtures = [relative for relative in _tree_files() if relative.endswith(".parity.json")]
+    assert fixtures, "no parity fixtures found; this check would be vacuous"
+    assert not [relative for relative in fixtures if _shipped(relative, globs)]
+    assert _shipped("mobile/web/src/lib/parity-sources.json", globs)
+
+    readers = [
+        path.relative_to(WEB_SRC).as_posix()
+        for path in WEB_SRC.rglob("*")
+        if path.is_file()
+        and path.suffix in SOURCE_SUFFIXES
+        and not _excluded(path.name)
+        and re.search(r"""['"][^'"]*\.parity\.json['"]""", path.read_text(encoding="utf-8"))
+    ]
+    assert not readers, f"shipped sources name a parity fixture the wheel drops: {readers}"
+
+    elsewhere = [
+        path.relative_to(PACKAGE_DIR).as_posix()
+        for path in PACKAGE_DIR.rglob("*.parity.json")
+        if path.parent != WEB_SRC / "lib" and "node_modules" not in path.parts
+    ]
+    assert not elsewhere, f"parity fixtures outside mobile/web/src/lib would be excluded too: {elsewhere}"
 
 
 def test_no_shipped_source_imports_an_unshipped_test_file() -> None:
