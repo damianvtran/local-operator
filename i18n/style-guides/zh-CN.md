@@ -13,15 +13,43 @@ for translators and the auditor.
   (保存, 继续, 重试, 取消).
 - No sentence-final 。 on short labels and statuses; full sentences keep it.
 - No 啦 / 哦 / 呀 particles, no ！ in status copy.
-- "请" opens what the reader must do — a blocking dialog, a refusal or error
-  body telling them the next step, a field prompt — whether or not the
-  English says "please". Keep it at the head of that clause (value- or
-  sentence-initial, or after ，；： when a statement comes first), at most
-  once per sentence; not on buttons, menu items, statuses or headings.
-- "请" + a person (请你的智能体…, 请你点击…) reports someone else's request;
-  that verb is not the directive form and stays as written.
-- Existing values predate this rule: re-audit a namespace when you touch it
-  rather than sweeping the catalogues to comply.
+- 请 marks the directive in zh-CN — a blocking dialog, a refusal or error body
+  that tells the reader the next step, or a field prompt — whether or not the
+  English says "please". English imperatives are unmarked, while a bare
+  Chinese imperative in an error body reads as blunt; that is also why this
+  guide does not carry `i18n/style-guides/en.md`'s ban on "please" outside
+  blocking dialogs. Use 请, not a bare imperative, on the first next-step
+  clause of such a body; later verbs chained in that clause do not repeat it
+  (请在那台电脑上打开Local Operator，确认手机访问已开启，然后轻点“重试”。).
+  Decide per value, not per surface — neighbouring values legitimately differ.
+- Keep it at the head of the directive clause: value-, ICU-arm- or
+  sentence-initial, or after ，；：—— or after a short lead-in (…前, …后,
+  因此, 或, 详情) when a statement comes first — 接受前请审核更改内容。,
+  恢复连接后请重试。, 会话未及时响应——请重试。,
+  详情请运行`lop team-bridge receiver status`。 — never mid-predicate.
+- At most once per clause: one 请 governs a chain of verbs, while a separate
+  directive after ； or in a condition clause may carry its own
+  (请重试；如果问题持续出现，请重新安装应用。;
+  请重试，若问题仍然存在，请联系支持团队。) — never two 请 in one clause.
+- Not on buttons, menu items, bare state labels (已过期, 已连接) or
+  single-sentence headings. A status line or a multi-sentence heading that
+  carries a next step is an error body and takes it
+  (你的Radient登录已过期。请登录以重新连接到{subject}。).
+- Prohibitions: 请勿 in prose bodies (请勿重复发送); bare 不要 is fine in a
+  safety refusal where blunt is intended (不要重试，并告知运行该智能体的人);
+  never stack 请 and 不要 in one sentence.
+- 请 with a person as its object is the verb "ask (someone) to…", not the
+  directive 请 above: a third party is the subject and the value reports that
+  party's request (都会在Chrome中请你点击Allow允许访问。; 智能体读取前会请你
+  批准。; 会请其他每个活跃成员也移到同一构建), or the reader is the subject
+  and it is a plain instruction to ask someone (或请成员邀请你; 请让组织所有者
+  邀请你). Translate the English verb ask/invite with it and keep it as
+  written — do not rewrite it as 让/要求; the position, once-per-clause and
+  no-button limits do not apply to it. A directive to the reader never takes a
+  pronoun: 请点击……, not 请你点击……. 请求 (request, asks for) is a different
+  word, out of scope for this rule.
+- Existing values predate this rule: re-audit its 请 usage when you touch a
+  namespace rather than sweeping the catalogues to comply.
 - No 您/你 repetition: Chinese drops pronouns naturally — prefer verb-forward
   phrasing ("会话已保存" over "你的会话已被保存").
 
