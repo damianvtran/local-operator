@@ -394,7 +394,11 @@ def test_a_recognised_launch_leaves_no_bearer_in_the_exec_time_environment(
         deadline = time.monotonic() + 90
         healthy = False
         port = 0
-        record: dict = {}
+        record: dict[str, Any] = {}  # heterogeneous serve-record JSON (str/int/None)
+        # Bound before the loop: ``healthy`` gates every read of ``body``, but the
+        # type checker cannot see that; a no-response run still fails closed on
+        # the ``assert healthy`` below.
+        body: dict[str, Any] = {}
         while time.monotonic() < deadline:
             if process.poll() is not None:
                 break
