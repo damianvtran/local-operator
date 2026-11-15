@@ -835,17 +835,23 @@ class AskQueue:
             return {"ok": False, "error": render.RELAY_REMOTE_SETTLED.format(device=device)}
         if verdict == remote_attention.RESURFACE_PUT_AWAY:
             return {"ok": False, "error": render.RELAY_REMOTE_PUT_AWAY.format(device=device)}
-        if verdict != remote_attention.RESURFACED:
+        if verdict == remote_attention.RESURFACE_UNREADABLE:
+            return {"ok": False, "error": render.RELAY_REMOTE_UNREADABLE}
+        if verdict == remote_attention.RESURFACE_PENDING:
+            receipt, status = render.RELAY_REMOTE_PENDING, "pending"
+        elif verdict == remote_attention.RESURFACED:
+            receipt, status = render.RELAY_REMOTE_RECEIPT, "resurfaced"
+        else:
             return {"ok": False, "error": render.RELAY_ORIGIN_UNKNOWN}
         return {
             "ok": True,
-            "text": render.RELAY_REMOTE_RECEIPT.format(
+            "text": receipt.format(
                 origin_ask=origin_ask, origin_session=origin_session, device=device
             ),
             "details": {
                 # No ``ask_id``: nothing was queued here, and a surface that keyed
                 # a card on one would show a row this log does not hold.
-                "status": "resurfaced",
+                "status": status,
                 "relay": {
                     "session_id": origin_session,
                     "ask_id": origin_ask,

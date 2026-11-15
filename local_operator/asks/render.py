@@ -841,6 +841,29 @@ RELAY_REMOTE_RECEIPT = (
 )
 
 
+#: The forwarded card is still unread in the operator's inbox, so the relay
+#: wrote nothing (a relay loop must not churn the row; PR #4082 review round 1,
+#: R1-2). Same answer-elsewhere terms as :data:`RELAY_REMOTE_RECEIPT`.
+RELAY_REMOTE_PENDING = (
+    "Card {origin_ask} from session {origin_session} on {device} is already "
+    "pending, unread, in the operator's inbox — left as it is; no relay row was "
+    "created here. It is answered there: the desktop app or lop on the operator's "
+    "computer (a browser site card cannot be signed from the phone). The answer "
+    "goes to the ORIGINAL session on {device}; this session will NOT receive it as "
+    "an ask answer, holds no copy, and cannot withdraw it. A PENDING CARD IS NOT "
+    "CONSENT: do not wait on it or run anything the card was meant to authorise."
+)
+
+#: The inbox (or the network store) could not be read, so whether the ref names
+#: a forwarded card is unknown — distinct from :data:`RELAY_ORIGIN_UNKNOWN`,
+#: which would teach the model the id is wrong (R1-4).
+RELAY_REMOTE_UNREADABLE = (
+    "this device's inbox could not be read just now, so it is not known whether "
+    "that ref names a card forwarded from another device — nothing was relayed; "
+    "try the relay again shortly."
+)
+
+
 def relay_refused_by_origin(origin_session: str, origin_ask: str, copy: str) -> str:
     """The origin's refusal, labelled so the human knows which ask refused (#2520).
 

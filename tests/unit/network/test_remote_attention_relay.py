@@ -700,6 +700,9 @@ def test_a_head_relay_of_a_forwarded_node_site_card_resurfaces_it_and_the_node_a
         watcher.observe(_origin_rows(_catalog_row(link)), listed_at_ms=ra_now())
         raised = NotificationStore(head).get_by_key(SID, key)
         assert raised is not None and not raised["dismissed_at"]
+        # The operator glanced at it; a relay of a still-unread row writes
+        # nothing (R1-2), so read it first to exercise the re-surface.
+        NotificationStore(head).apply("read", ids=[(raised["id"], raised["revision"])], via="test")
 
         relayed = coordinator.enqueue_relay(f"{SID}/{ask_id}")
         assert relayed["ok"], relayed
