@@ -122,6 +122,7 @@ from local_operator.session.frontend_state import (
     FrontendUsage,
     JobState,
     MonitorState,
+    PublicStateView,
     SnapshotJobs,
     SnapshotMcpManager,
     SnapshotMonitorScheduler,
@@ -7707,7 +7708,12 @@ class AttachedSession:
             return
         if self._frontend_store is None:
             raise ConnectionError("frontend update arrived before synchronization")
-        state = self._frontend_store.apply_update(update)
+        # The VIEW, not ``apply_update``'s whole-state clone: this runs on the
+        # serve loop once per delta of every attached conversation, and reads a
+        # dozen fields (``jobs`` only when the roster moved). Cloning all of it
+        # measured 13.6 ms p50 / 42.4 ms p95 CPU per delta on a live 346-job
+        # orchestrator, against a 0.7 ms reducer; see ``PublicStateView``.
+        state = self._frontend_store.apply_update_view(update)
         # A per-ROW roster delta moves the roster just as surely as a full
         # replacement does, and the facades are keyed by FIELD name: without
         # this, ``apply_update`` merged the rows into canonical state and the
@@ -7771,7 +7777,7 @@ class AttachedSession:
 
     def _apply_frontend_facades(
         self,
-        state: FrontendSessionState,
+        state: FrontendSessionState | PublicStateView,
         *,
         changed_fields: set[str] | None = None,
         restored: bool = False,
@@ -7843,8 +7849,16 @@ class AttachedSession:
                 fast_mode=bool(selected.fast_mode and selected.supports_fast_mode),
             )
         if changed_fields is None or "jobs" in changed_fields:
-            self.jobs.replace(state.jobs)
-            self._subagent_comms.replace(state.jobs)
+            # Both facades detach on their own and memoise by row identity, so a
+            # delta hands them the canonical rows; a full install's clone has no
+            # canonical rows to give, and pays one detach per row as before.
+            rows = (
+                state.canonical_jobs_for_facades()
+                if isinstance(state, PublicStateView)
+                else state.jobs
+            )
+            self.jobs.replace(rows)
+            self._subagent_comms.replace(rows)
         if changed_fields is None or "wakes" in changed_fields:
             self.wake_scheduler.replace(state.wakes)
         if changed_fields is None or "monitors" in changed_fields:
@@ -10347,7 +10361,7 @@ class AttachedSession:
         else:
             self._switch_on_owner(client, model, announce=True)
 
-    def _consume_settings_result(self, state: FrontendSessionState) -> None:
+    def _consume_settings_result(self, state: FrontendSessionState | PublicStateView) -> None:
         """Render OUR switch outcomes once: a refusal as an error, success silently.
 
         SUCCESS IS SILENT (PR #3697 review R1-M3). The ``selected_model`` repaint
