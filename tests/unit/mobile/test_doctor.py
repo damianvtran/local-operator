@@ -525,6 +525,27 @@ def test_a_real_emfile_episode_counts_once_beside_its_recovery_line(rig):
 
 
 @pytest.mark.parametrize(
+    "line",
+    [
+        "pausing accept() while EMFILE/ENFILE pressure clears",
+        "retrying; last error was not EMFILE",
+        "OSError: [Errno 55] No buffer space available (handled like EMFILE)",
+    ],
+)
+def test_a_line_that_only_names_emfile_is_not_an_occurrence(rig, line):
+    """R5-1: EMFILE is classified by the errno a line reports ("[Errno 24]" /
+    "Too many open files"), not by the word, so ANY prose naming it (not
+    just today's recovery line) leaves the check passing."""
+    stamp = time.strftime("%Y-%m-%d %H:%M:%S")
+    (rig / ".local-operator" / "logs" / "mobile.log").write_text(
+        f"{stamp},001 [WARNING] local_operator.mobile.example: {line}\n"
+    )
+    logs = doctor.check_logs()
+    assert logs["data"]["emfile"] == 0
+    assert logs["status"] == "pass"
+
+
+@pytest.mark.parametrize(
     "connector,stopped,expected,status",
     [
         ({"state": "parked", "reason": "login_required"}, False, "tunnel_login_needed", "fail"),
