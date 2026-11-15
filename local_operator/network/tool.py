@@ -581,7 +581,12 @@ def _argv_for(params: NetworkParams) -> tuple[list[str], str]:
             ], ""
         argv = ["network", "sessions"]
         if "create" in verbs:
-            argv += ["--create"]
+            # ``--origin agent``: this is the agent-facing ``network`` tool, and its
+            # subprocess carries no agent-shell marker, so without the flag
+            # ``network/cli._create_origin`` read the create as the OPERATOR's and
+            # the owner forwarded the worker's ``notify`` items to the inbox
+            # (operator rule 2026-11-14; ``remote_attention.STARTED_BY_FIELD``).
+            argv += ["--create", "--origin", "agent"]
             if params.prompt.strip():
                 argv += ["--prompt", params.prompt.strip()]
         if "engage" in verbs:

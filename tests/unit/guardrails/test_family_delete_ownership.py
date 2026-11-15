@@ -85,6 +85,10 @@ def home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     # remote whose MRs are merged (as in the field), nobody running unless a
     # test says so through ``running``.
     monkeypatch.setattr(prov, "_live_cwd_inside", lambda _: False)
+    # Own-tree checks now bypass the cached inventory (#3987). Keep this
+    # synthetic idle fixture idle for both paths; hidden-pid fail-closed
+    # behavior is exercised by test_cwd_inventory_hidden_pid.
+    monkeypatch.setattr(prov, "_cwd_entries", lambda *, fresh=False: ())
     monkeypatch.setattr(prov, "_cwd_inventory_cache", None)
     monkeypatch.setattr(prov, "_github_repo", lambda _: None)
     monkeypatch.setattr(prov, "_gitlab_repo", lambda _: "minerva/infrastructure")
@@ -689,3 +693,52 @@ def test_cd_dash_after_a_clearing_cd_in_a_loop_is_unresolved(home: Path) -> None
         targets = resolve_command(command, cwd=str(home), env=_env(home), home=str(home)).targets
         assert None in [t.path for t in targets], command
         assert _rank(home, command, U).risk >= Risk.HIGH, command
+
+
+def test_family_gitfile_witness_cannot_revive_another_owners_stale_row(
+    home: Path, infra: Path
+) -> None:
+    """Convergence #3987: family eligibility never shares inode-generation proof.
+
+    Simulate a reused directory inode: the ancestor's covering row is stale,
+    while a sibling has a current .git witness. Neither may vouch for the
+    other's row even though both belong to the caller's trusted family.
+    """
+    import sqlite3
+
+    wt = _add_tree(home, infra / REPOS[0], K)
+    with sqlite3.connect(prov.ledger_path()) as conn:
+        conn.execute(
+            "DELETE FROM created WHERE owner = ? AND kind = ?", (P, prov.WORKTREE_GITFILE_KIND)
+        )
+        # The creation planner also records a newly made .worktrees container;
+        # remove those covering rows so this isolates the exact stale leaf.
+        conn.execute(
+            "DELETE FROM created WHERE kind != ? AND path != ?",
+            (prov.WORKTREE_GITFILE_KIND, str(wt)),
+        )
+        conn.execute("DELETE FROM created WHERE owner = ? AND kind = 'worktree'", (K,))
+        conn.execute(
+            "UPDATE created SET stamp = ? WHERE owner = ? AND path = ?",
+            (prov.creation_stamp(os.stat(wt)) + 1, P, str(wt)),
+        )
+    assert prov.owned_record(str(wt), C, kin=True) is None
+    assert prov.owned_record(str(wt), C, family=False) is None
+
+
+@pytest.mark.parametrize(
+    "command", ["git worktree remove", "git worktree remove --force", "rm -rf"]
+)
+def test_dirty_detached_scratch_waiver_is_caller_only(
+    home: Path, infra: Path, command: str
+) -> None:
+    """#3987's own-scratch waiver must not widen family cleanup to dirty work."""
+    repo = infra / REPOS[0]
+    wt = repo / ".worktrees" / "detached"
+    _run_recorded(home, f"git -C {repo} worktree add --detach {wt} HEAD", P)
+    (wt / "main.tf").write_text("# unfinished ancestor work\n")
+    cmd = f"{command} {wt}"
+    family = _rank(home, cmd, C)
+    own = _rank(home, cmd, P)
+    assert family.risk is Risk.HIGH, family
+    assert own.risk is Risk.LOW, own

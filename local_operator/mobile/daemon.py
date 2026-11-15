@@ -7084,6 +7084,14 @@ def build_app(daemon: MobileDaemon):
                 # the full seed) — so a client must feature-detect, never probe.
                 "history_after": {"available": True},
                 "seed_digest": {"available": True},
+                # Per-device push preferences (Settings → Notifications): the
+                # register body accepts ``preferences`` and the push worker
+                # gates emits on them (``push_devices.PREFERENCE_KEYS``). A
+                # RELAY capability like ``notification_sounds``, and it is what
+                # an app MUST check before sending the field: ``POST
+                # /api/push/register`` refuses unknown fields, so an older
+                # daemon would refuse the whole registration.
+                "push_preferences": {"available": True},
                 # Conditional because this build may predate the Library module:
                 # the phone's footer shows the destination iff the key is here,
                 # and a missing key means "this relay cannot serve it".

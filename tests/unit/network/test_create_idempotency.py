@@ -434,3 +434,53 @@ def test_the_client_bounds_outlast_the_relay_and_fit_the_tool_child() -> None:
     relay_worst = relay.engage_hop_bound_s() + relay.CREATE_CONFIRM_WINDOW_S
     assert relay.CREATE_CLIENT_BOUND_S > relay_worst
     assert relay.CREATE_CLIENT_BOUND_S < builtin._MESH_CREATE_ENGAGE_TIMEOUT_S  # noqa: SLF001
+
+
+@pytest.mark.parametrize(
+    ("asked", "started_by"),
+    [
+        # The desktop's "run on device" route sends no ``origin``: the operator's
+        # own gesture, attested ``operator``.
+        (None, "operator"),
+        ("user", "operator"),
+        # ``sessions spawn peer=`` / the ``network`` tool / an agent's shell.
+        ("agent", "agent"),
+    ],
+)
+def test_a_create_stamps_the_attested_starter_on_the_owner(
+    pair: tuple[Any, Any, _Wire], asked: str | None, started_by: str
+) -> None:
+    """DEFAULT-DENY (operator rule 2026-11-14): the owner forwards ``notify`` items
+    only for ``started_by: operator``, so the real ctl → owner path must write it
+    for every operator create and never for an agent's."""
+    import json
+
+    owner, requester, wire = pair
+    frame: dict[str, Any] = {"peer": "node-2"}
+    if asked is not None:
+        frame["origin"] = asked
+    created = requester._ctl_peer_create(frame)  # noqa: SLF001
+    stamp = json.loads(
+        (owner.root / "sessions" / created["session_id"] / "mesh.json").read_text("utf-8")
+    )
+    assert stamp["origin"]["started_by"] == started_by, stamp["origin"]
+    assert stamp["origin"]["kind"] == (asked or "user")
+
+
+def test_a_create_from_an_origin_without_the_attestation_stamps_none(
+    pair: tuple[Any, Any, _Wire],
+) -> None:
+    """An origin older than the attestation sends ``origin`` but no ``started_by``;
+    the owner keeps its legacy ``kind`` default and writes NO attestation, which
+    every reader takes as not operator-started."""
+    import json
+
+    owner, _requester, _wire = pair
+    detail = owner._op_session_create(  # noqa: SLF001
+        _owner_link(), {"op": "net_session_create", "origin": "user"}
+    )
+    stamp = json.loads(
+        (owner.root / "sessions" / detail["session_id"] / "mesh.json").read_text("utf-8")
+    )
+    assert "started_by" not in stamp["origin"], stamp["origin"]
+    assert stamp["origin"]["kind"] == "user"

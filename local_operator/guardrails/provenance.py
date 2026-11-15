@@ -69,6 +69,8 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, NamedTuple
 
+from local_operator.guardrails import spawned
+
 logger = logging.getLogger(__name__)
 
 LEDGER_DIRNAME = "guardrails"
@@ -567,6 +569,10 @@ def owned_record(
     try:
         real = os.path.realpath(path)
         prefixes = _covering_paths(real)
+        # Family lookup is path-bounded, unlike the caller-only ledger scan on
+        # main. Include each covering directory's .git companion so a root
+        # ctime change keeps #3987's generation proof available on Linux.
+        prefixes += [os.path.join(prefix, ".git") for prefix in prefixes]
         conn = _connect(ledger_path(state_root), create=False)
         if conn is None:
             return None
@@ -588,11 +594,19 @@ def owned_record(
     )
     best: CreationRecord | None = None
     rank = {"": 0, "ancestor": 1, "kin": 2}
+    # A family row may grant ownership, but only its own owner's .git witness
+    # may vouch for its generation. A relative's companion must never revive
+    # another owner's stale directory row.
+    gitfiles_by_owner: dict[str, dict[str, CreationRecord]] = {}
+    for row in rows:
+        if relation_of(row[8], row[4]) is not None and row[5] == WORKTREE_GITFILE_KIND:
+            gitfiles_by_owner.setdefault(row[8], {})[row[0]] = CreationRecord(*row[:8])
     for row in rows:
         relation = relation_of(row[8], row[4])
-        if relation is None:
+        if relation is None or row[5] == WORKTREE_GITFILE_KIND:
             continue
         rec = CreationRecord(*row[:8], relation=relation)
+        gitfiles = gitfiles_by_owner.get(row[8], {})
         if rec.kind == "symlink":
             # A link row vouches for removing that link entry only
             # (``owned_link``), never for its pointee or anything under it.
@@ -605,7 +619,9 @@ def owned_record(
             continue
         if (st.st_dev, st.st_ino) != (rec.dev, rec.ino):
             continue
-        if rec.stamp is None or creation_stamp(st) != rec.stamp:
+        if rec.stamp is None or (
+            creation_stamp(st) != rec.stamp and not _gitfile_generation_holds(rec, gitfiles)
+        ):
             continue  # same inode number, different generation (or unstamped)
         # The deepest row wins; at one depth the closest relation does.
         if (
@@ -802,7 +818,9 @@ class ForeignCreations:
       whenever an entry is added to the directory, so a foreign row there
       stops matching once its directory changes after the recording call —
       this rule fails OPEN on Linux (ranking returns to what it was before
-      it existed). The guarantee is macOS/BSD-only, where birth time is used.
+      it existed). The guarantee is macOS/BSD-only, where birth time is used —
+      except a ``worktree`` row, kept live by its ``.git`` companion row
+      (``_gitfile_holds``) as ``owned_record`` does.
     * Symlink rows are skipped: they vouch for a link entry, never a tree.
     """
 
@@ -843,6 +861,47 @@ class ForeignCreations:
                 self._identity[path] = (st.st_dev, st.st_ino, creation_stamp(st))
         return self._identity[path]
 
+    def _gitfile_holds(self, conn: sqlite3.Connection, rec: CreationRecord, owner: str) -> bool:
+        """A ``worktree`` row whose dir stamp moved is still live via its ``.git`` row.
+
+        WHY (rebase of PR #3987 onto #3835): ``owned_record`` already accepts
+        the ``WORKTREE_GITFILE_KIND`` companion as the generation witness on
+        Linux, where the directory's ctime stamp moves on every root-level
+        change. Without the same rule here the nearest-owner walk dropped a
+        session's OWN worktree row after its first checkout, so a broader
+        foreign ancestor row became "nearest" and the session's own tree read
+        HIGH; and another session's worktree row failed open.
+
+        The companion must belong to the SAME ``owner`` as ``rec`` (R-C1, as
+        ``owned_record`` scopes it with ``WHERE owner = ?``). Ledger rows are
+        never pruned, and ext4/xfs reuse a freed inode number, so a dead
+        worktree row of session A can share dev+ino with session B's new
+        worktree at the same path. Accepting B's ``.git`` row as A's witness
+        revived A's dead row, put A among the owners of B's live tree, and
+        dropped ``rm -rf <B's wt>/sub`` from HIGH to an ordinary path.
+        Owner-scoped, a companion only vouches for its own owner's row, so
+        it can keep a genuinely live row live but never adds a dead owner
+        to a live path. Companions are written under the same owners as
+        their worktree row (``commit_creations``), so no real hold is lost.
+        The companion is read by exact path because ``_foreign_query`` binds
+        only ancestors of and rows under the target, never ``<wt>/.git``
+        when the target is inside ``<wt>``.
+        """
+        if rec.kind != "worktree":
+            return False
+        gitfile = os.path.join(rec.path, ".git")
+        try:
+            companions = conn.execute(
+                "SELECT path, dev, ino, created_at, creator, kind, command, stamp"
+                " FROM created WHERE path = ? AND kind = ? AND owner = ?",
+                (gitfile, WORKTREE_GITFILE_KIND, owner),
+            ).fetchall()
+        except (sqlite3.Error, ValueError):
+            return False
+        return any(
+            _gitfile_generation_holds(rec, {gitfile: CreationRecord(*row)}) for row in companions
+        )
+
     def _related(self, owner: str) -> bool:
         if owner == self.session_id:
             return True
@@ -875,7 +934,14 @@ class ForeignCreations:
         live: dict[str, tuple[set[str], CreationRecord]] = {}
         for owner, *fields in rows:
             rec = CreationRecord(*fields)
-            if rec.stamp is None or self._live(rec.path) != (rec.dev, rec.ino, rec.stamp):
+            if rec.stamp is None:
+                continue
+            identity = self._live(rec.path)
+            if identity != (rec.dev, rec.ino, rec.stamp) and not (
+                identity is not None
+                and identity[:2] == (rec.dev, rec.ino)
+                and self._gitfile_holds(conn, rec, owner)
+            ):
                 continue
             live.setdefault(rec.path, (set(), rec))[0].add(owner)
 
@@ -897,6 +963,46 @@ class ForeignCreations:
                 if rec is not None:
                     return ForeignHit(rec.creator, rec, "holds")
         return None
+
+
+#: Ledger kind of the companion row ``commit_creations`` writes for a
+#: recorded worktree's ``.git`` FILE. WHY: on Linux ``creation_stamp`` is the
+#: directory's ``st_ctime_ns`` (no birth time), which moves whenever an entry
+#: is added, removed or renamed in the worktree ROOT — and git rewrites root
+#: files by unlink+create on checkout/read-tree -u/merge. So on a Linux host
+#: (every headless mesh node, e.g. lop-remote-node-2, Amazon Linux) the
+#: worktree row stopped matching after the session's first root-level change
+#: and its own tree read as foreign (operator directive 2026-11-14, field case
+#: attr3880-ci). The ``.git`` file git writes once at ``worktree add`` is not
+#: rewritten by any of those (only ``worktree repair``/``move``, which then
+#: fail closed), so its inode generation is a stable second witness that the
+#: directory is the one this session created. Never a covering row itself.
+WORKTREE_GITFILE_KIND = "worktree-gitfile"
+
+
+def _gitfile_generation_holds(rec: CreationRecord, gitfiles: Mapping[str, CreationRecord]) -> bool:
+    """A ``worktree`` row whose dir stamp moved still matches via its ``.git`` file.
+
+    Only ``kind == "worktree"`` (the directory's dev+ino already matched in
+    the caller); the companion must match dev, ino AND ``creation_stamp``.
+    """
+    if rec.kind != "worktree":
+        return False
+    gitfile = os.path.join(rec.path, ".git")
+    companion = gitfiles.get(gitfile)
+    if companion is None or companion.stamp is None:
+        return False
+    try:
+        st = os.lstat(gitfile)
+    except OSError:
+        return False
+    if not stat.S_ISREG(st.st_mode):
+        return False
+    return (st.st_dev, st.st_ino, creation_stamp(st)) == (
+        companion.dev,
+        companion.ino,
+        companion.stamp,
+    )
 
 
 def link_path(path: str) -> str:
@@ -1177,6 +1283,13 @@ def commit_creations(
                 # vouch for a work tree inside it (``_foreign_inside``), so
                 # the session's own worktree needs its own row (QA Q7).
                 entries.append((os.path.realpath(path), kind))
+            if kind == "worktree" and os.path.isfile(os.path.join(path, ".git")):
+                # A second generation stamp for Linux hosts (headless mesh
+                # nodes such as lop-remote-node-2 run Linux): see
+                # ``WORKTREE_GITFILE_KIND``.
+                entries.append(
+                    (os.path.join(os.path.realpath(path), ".git"), WORKTREE_GITFILE_KIND)
+                )
         for parent, pattern, before in pending.patterned:
             now = _glob.glob(os.path.join(_glob.escape(parent), pattern))
             for match in now:
@@ -1308,26 +1421,42 @@ class CwdInventory(NamedTuple):
     hidden: tuple[int, ...] = ()
 
 
-_cwd_inventory_cache: tuple[float, CwdInventory] | None = None
+#: One raw inventory row: ``(pid, realpath of its cwd)``, or ``(pid, None)``
+#: for a same-uid pid whose cwd the kernel hides (see :class:`CwdInventory`).
+#: Pids ride along so :func:`cwd_holders` can attribute each holder (PR
+#: #3987); hidden pids ride in the same rows so one cache serves both views.
+CwdEntry = tuple[int, str | None]
+_cwd_inventory_cache: tuple[float, tuple[CwdEntry, ...]] | None = None
+#: Why the last inventory failed, for the judge (operator directive
+#: 2026-11-14: never a bare "busy"). Empty after a success.
+_cwd_inventory_error = ""
 
 
-def _cwd_inventory() -> CwdInventory | None:
-    """Every cwd this uid's processes hold, or ``None`` if there is no inventory.
+def _cwd_entries(*, fresh: bool = False) -> tuple[CwdEntry, ...] | None:
+    """``(pid, realpath of cwd)`` for every process of this uid, or ``None``.
 
     lsof's cwd inventory is read-only and avoids probing process command lines
     (which may carry secrets). Linux exposes the same data under /proc. A
     disappearing process no longer owns a cwd; a same-uid process whose cwd the
-    kernel will not reveal is listed in ``hidden`` rather than voiding the
-    inventory. Other inspection errors give ``None``. A success is cached for
-    :data:`_CWD_INVENTORY_TTL_S`.
+    kernel will not reveal (EACCES) is kept as ``(pid, None)`` rather than
+    voiding the inventory (PR #3980). Any other inspection error (an
+    unreadable ``/proc``, lsof missing, failing or timing out) gives ``None``
+    and leaves the reason in :data:`_cwd_inventory_error` — fail closed, but
+    named. A success is cached for :data:`_CWD_INVENTORY_TTL_S` unless
+    ``fresh``.
+
+    ``hidepid``: ``/proc`` mounted ``hidepid=1|2|invisible`` hides OTHER uids'
+    processes only, and this inventory reads this uid's alone, so it is
+    unaffected; a per-pid ``EACCES`` on this uid's ``cwd`` link (a
+    non-dumpable process) is the hidden case above, and every consumer still
+    fails closed on it.
     """
-    global _cwd_inventory_cache
+    global _cwd_inventory_cache, _cwd_inventory_error
     now = time.monotonic()
     cached = _cwd_inventory_cache
-    if cached is not None and now - cached[0] < _CWD_INVENTORY_TTL_S:
+    if not fresh and cached is not None and now - cached[0] < _CWD_INVENTORY_TTL_S:
         return cached[1]
-    paths: list[str] = []
-    hidden: list[int] = []
+    entries: list[tuple[int, str | None]] = []
     if os.path.isdir("/proc/self"):
         try:
             for entry in os.scandir("/proc"):
@@ -1336,53 +1465,313 @@ def _cwd_inventory() -> CwdInventory | None:
                 try:
                     if entry.stat().st_uid != os.getuid():
                         continue
-                    paths.append(os.readlink(os.path.join(entry.path, "cwd")))
+                    entries.append((int(entry.name), os.readlink(os.path.join(entry.path, "cwd"))))
                 except (FileNotFoundError, ProcessLookupError):
                     continue  # exited mid-scan: it holds no cwd any more
                 except PermissionError:
-                    hidden.append(int(entry.name))
-        except OSError:
+                    entries.append((int(entry.name), None))
+                except OSError as exc:
+                    _cwd_inventory_error = (
+                        f"cwd of pid {entry.name} unreadable ({exc.strerror or exc})"
+                    )
+                    return None
+        except OSError as exc:
+            _cwd_inventory_error = f"/proc unreadable ({exc.strerror or exc})"
             return None
     else:
         try:
             proc = subprocess.run(
-                ["lsof", "-a", "-u", str(os.getuid()), "-d", "cwd", "-Fn", "-w"],
+                ["lsof", "-a", "-u", str(os.getuid()), "-d", "cwd", "-Fpn", "-w"],
                 capture_output=True,
                 text=True,
                 timeout=_CWD_INVENTORY_TIMEOUT_S,
                 check=False,
             )
-        except (OSError, subprocess.SubprocessError):
+        except subprocess.TimeoutExpired:
+            _cwd_inventory_error = f"lsof timed out after {_CWD_INVENTORY_TIMEOUT_S:g} s"
+            return None
+        except (OSError, subprocess.SubprocessError) as exc:
+            _cwd_inventory_error = f"lsof unavailable ({exc})"
             return None
         if proc.returncode != 0:
+            _cwd_inventory_error = f"lsof exited {proc.returncode}"
             return None
-        paths = [line[1:] for line in proc.stdout.splitlines() if line.startswith("n/")]
-        if not paths:
-            return None  # this process alone holds a cwd: an empty list is a failed read
-    inventory = CwdInventory(tuple(os.path.realpath(p) for p in paths), tuple(hidden))
+        pid = 0
+        for line in proc.stdout.splitlines():
+            if line.startswith("p") and line[1:].isdecimal():
+                pid = int(line[1:])
+            elif line.startswith("n/"):
+                entries.append((pid, line[1:]))
+        if not entries:
+            # This process alone holds a cwd: an empty list is a failed read.
+            _cwd_inventory_error = "lsof listed no process cwd"
+            return None
+    inventory = tuple((pid, None if cwd is None else os.path.realpath(cwd)) for pid, cwd in entries)
     _cwd_inventory_cache = (now, inventory)
+    _cwd_inventory_error = ""
     return inventory
+
+
+def _cwd_inventory() -> CwdInventory | None:
+    """Every cwd this uid's processes hold, or ``None`` if there is no inventory.
+
+    The pid-free view of :func:`_cwd_entries` (same scan, same cache): readable
+    cwds, plus the pids whose cwd the kernel hides.
+    """
+    entries = _cwd_entries()
+    if entries is None:
+        return None
+    return CwdInventory(
+        tuple(cwd for _pid, cwd in entries if cwd is not None),
+        tuple(pid for pid, cwd in entries if cwd is None),
+    )
+
+
+def _inside(cwd: str | None, real: str) -> bool:
+    """A readable cwd at or under ``real``; a hidden cwd (``None``) is never a definite yes."""
+    return cwd is not None and (cwd == real or cwd.startswith(real + os.sep))
 
 
 def _live_cwd_inside(real: str) -> bool | None:
     """Whether a live process uses this tree; unknown never grants an exemption.
 
-    Reads :func:`_cwd_inventory` (bounded, cached per process). ``None`` —
+    Reads :func:`_cwd_entries` (bounded, cached per process). ``None`` —
     timeout or an unreadable inventory — fails closed in ``worktree_state``.
     This protects ordinary clean removals as well as abandoned adds.
+
+    A HIT from the cache is re-read fresh before it is believed (operator
+    directive 2026-11-14): a holder that exited inside the 30 s TTL — an eval
+    kernel restarted, a ``git`` that finished — must not keep the tree "busy".
+    A cached miss is still reused (the TTL's documented price).
 
     A hidden pid (cwd unreadable) might be inside, so it also answers ``None``.
     Every caller treats ``None`` like ``True`` (``busy`` / never delete): PR
     #3980 rounds 1-3 found no sound way to prove such a process outside a tree.
     """
-    inventory = _cwd_inventory()
-    if inventory is None:
+    cached = _cwd_inventory_cache
+    from_cache = cached is not None and time.monotonic() - cached[0] < _CWD_INVENTORY_TTL_S
+    entries = _cwd_entries()
+    if entries is None:
         return None
-    if any(cwd == real or cwd.startswith(real + os.sep) for cwd in inventory.cwds):
+    if from_cache and any(_inside(cwd, real) for _pid, cwd in entries):
+        entries = _cwd_entries(fresh=True)
+        if entries is None:
+            return None
+    if any(_inside(cwd, real) for _pid, cwd in entries):
         return True
-    if inventory.hidden:
+    if any(cwd is None for _pid, cwd in entries):
         return None
     return False
+
+
+#: Ancestry walk bound for :func:`cwd_holders` (far deeper than any real tree).
+_PARENT_WALK_MAX = 64
+#: Shown command length: a basename, never arguments (they may carry secrets).
+_HOLDER_COMMAND_MAX = 40
+
+
+@dataclass(frozen=True)
+class CwdHolder:
+    """One live process whose cwd is inside a worktree, and whose it is.
+
+    ``family``: the process descends (by parent pid) from the deleting
+    session's own harness process or a registry record of that session or of
+    an ancestor/descendant in its subagent tree — except a bash child or eval
+    kernel of this harness, which is attributed to the session that spawned
+    it (:mod:`.spawned`; in-process siblings share the pid). ``owner`` is the judge-facing
+    attribution ("this session", "session <id> (another session)", "no
+    session record").
+    """
+
+    pid: int
+    command: str
+    owner: str
+    family: bool
+
+    def describe(self) -> str:
+        return f"pid {self.pid} {self.command or '?'} ({self.owner})"
+
+
+def _process_table() -> dict[int, tuple[int, str]] | None:
+    """``pid -> (parent pid, command basename)`` for every visible process.
+
+    Linux: ``/proc/<pid>/stat`` (parent) and ``/proc/<pid>/comm`` (the kernel's
+    16-byte name — never ``cmdline``, which may carry secrets). Elsewhere:
+    ``ps -axo pid=,ppid=,comm=`` (executable path, no arguments). ``None`` when
+    neither is readable: ownership is then unknown and the tree stays busy.
+    """
+    table: dict[int, tuple[int, str]] = {}
+    if os.path.isdir("/proc/self"):
+        try:
+            names = [e.name for e in os.scandir("/proc") if e.name.isdecimal()]
+        except OSError:
+            return None
+        for name in names:
+            try:
+                with open(f"/proc/{name}/stat", encoding="utf-8", errors="replace") as fh:
+                    raw = fh.read()
+            except OSError:
+                continue  # exited, or another uid's under hidepid: not a holder here
+            # ``comm`` sits in parentheses and may itself hold ")": split on the LAST.
+            head, _, tail = raw.rpartition(")")
+            fields = tail.split()
+            if len(fields) < 2 or not fields[1].isdecimal():
+                continue
+            comm = head.partition("(")[2]
+            table[int(name)] = (int(fields[1]), comm)
+        return table or None
+    try:
+        proc = subprocess.run(
+            ["ps", "-axo", "pid=,ppid=,comm="],
+            capture_output=True,
+            text=True,
+            timeout=_CWD_INVENTORY_TIMEOUT_S,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if proc.returncode != 0:
+        return None
+    for line in proc.stdout.splitlines():
+        parts = line.split(None, 2)
+        if len(parts) >= 2 and parts[0].isdecimal() and parts[1].isdecimal():
+            comm = os.path.basename(parts[2].strip()) if len(parts) == 3 else ""
+            table[int(parts[0])] = (int(parts[1]), comm)
+    return table or None
+
+
+def _session_pids(session_id: str) -> tuple[dict[int, str], dict[int, str]]:
+    """``(family, others)``: harness pid -> label, from the session registry.
+
+    Family = the caller's own record, records of its ancestors/descendants in
+    one subagent tree (``same_task_tree``), and THIS process — the guard runs
+    inside the deleting session's harness — unless a record says this pid is
+    another session's. Siblings in separate processes count as others. THIS
+    process may also host sibling subagents (in-process ``Session``s share the
+    harness pid; review m1, PR #3987), so its family label covers only what no
+    session spawned: :func:`cwd_holders` attributes the harness's bash
+    children and eval kernels by the session that spawned them
+    (:mod:`.spawned`), not by this pid. Records, never text: a process's
+    environment or command line is not consulted.
+    """
+    family: dict[int, str] = {}
+    others: dict[int, str] = {}
+    try:
+        from local_operator.session.runtime import registry
+
+        for rec, state in registry.scan(None, reap=False):
+            sid = str(getattr(rec, "session_id", "") or "")
+            pid = getattr(rec, "pid", None)
+            if not sid or not isinstance(pid, int) or state == "stale":
+                continue
+            if sid == session_id:
+                family[pid] = "this session"
+                continue
+            relation = same_task_tree(session_id, sid) if session_id else ""
+            if relation in ("ancestor", "descendant"):
+                family[pid] = f"this session's {relation} {sid}"
+            else:
+                others[pid] = f"session {sid}, another session"
+    except Exception:  # noqa: BLE001 — an unreadable registry attributes nothing
+        logger.debug("session registry unreadable", exc_info=True)
+    me = os.getpid()
+    if me not in others:
+        family.setdefault(me, "this session")
+    return family, others
+
+
+def cwd_holders(real: str, session_id: str) -> tuple[CwdHolder, ...] | None:
+    """Every live process with its cwd inside ``real``, attributed; ``None`` if unknown.
+
+    WHY (operator directive 2026-11-14, field case ``attr3880-ci`` on
+    lop-remote-node-2): a session's own eval kernel or bash child with its cwd
+    in its own tree made ``git worktree remove --force`` read "busy", and the
+    judge refused the creator's cleanup. Attribution is by parent-pid ancestry
+    to the runtime's own records (:func:`_session_pids`). A process whose
+    ancestry reaches no family pid — another session's, or an orphan
+    reparented to init — is foreign. ``None`` (inventory or process table
+    unreadable) means ownership is unknown: the caller keeps the tree busy.
+    """
+    global _cwd_inventory_error
+    entries = _cwd_entries(fresh=True)
+    if entries is None:
+        return None
+    hidden = [pid for pid, cwd in entries if cwd is None]
+    if hidden:
+        # A pid whose cwd the kernel hides (PR #3980) might be inside, and no
+        # holder can be named for it: ownership is unknown, so the caller
+        # keeps the tree busy, and busy_phrase names the hidden pids rather
+        # than a bare "busy" (operator directive 2026-11-14).
+        _cwd_inventory_error = "cwd of pid {} unreadable (Permission denied)".format(
+            ", ".join(map(str, hidden[:5])) + (", ..." if len(hidden) > 5 else "")
+        )
+        return None
+    inside = [(pid, cwd) for pid, cwd in entries if _inside(cwd, real)]
+    if not inside:
+        return ()
+    table = _process_table()
+    if table is None:
+        return None
+    family, others = _session_pids(session_id)
+    me = os.getpid()
+    holders: list[CwdHolder] = []
+    for pid, _cwd in inside:
+        owner, is_family = "no session record; unknown process", False
+        node, below, seen = pid, 0, 0
+        while node > 1 and seen < _PARENT_WALK_MAX:
+            spawner = spawned.session_of(below) if node == me and below else None
+            if spawner is not None:
+                # A bash child or eval kernel of THIS harness: in-process
+                # subagents share its pid, so the spawning session decides
+                # (review m1, PR #3987) — a sibling's shell is foreign.
+                owner, is_family = _spawner_owner(session_id, spawner)
+                break
+            if node in family:
+                owner, is_family = family[node], True
+                break
+            if node in others:
+                owner = others[node]
+                break
+            below, node = node, table.get(node, (0, ""))[0]
+            seen += 1
+        command = table.get(pid, (0, ""))[1][:_HOLDER_COMMAND_MAX]
+        holders.append(CwdHolder(pid, command, owner, is_family))
+    return tuple(holders)
+
+
+def _spawner_owner(session_id: str, spawner: str) -> tuple[str, bool]:
+    """``(owner label, family?)`` for a harness child spawned by session ``spawner``."""
+    if session_id and spawner == session_id:
+        return "this session", True
+    relation = same_task_tree(session_id, spawner) if session_id else ""
+    if relation in ("ancestor", "descendant"):
+        return f"this session's {relation} {spawner}", True
+    return f"session {spawner}, another session in this harness process", False
+
+
+def busy_phrase(path: str, session_id: str = "") -> str:
+    """The judge-facing account of WHY a tree reads busy: holders, or why unknown.
+
+    Never a bare "busy" (operator directive 2026-11-14): the field refusal
+    named "busy" with no process, so nobody could tell an agent's own shell
+    from another session's work.
+    """
+    real = os.path.realpath(path)
+    holders = cwd_holders(real, session_id)
+    if holders is None:
+        reason = _cwd_inventory_error or "process table unreadable"
+        return (
+            f"busy=unknown: process inventory unreadable ({reason}); "
+            "a live process inside cannot be ruled out"
+        )
+    if not holders:
+        return "busy: the holder exited before it could be named"
+    return "busy: cwd held by " + ", ".join(h.describe() for h in holders)
+
+
+def state_phrase(path: str, state: str, session_id: str = "") -> str:
+    """``state``, with the holders spelled out when it is ``busy``."""
+    return busy_phrase(path, session_id) if state == "busy" else state
 
 
 def _only_regenerable(directory: str) -> bool:
@@ -1424,7 +1813,7 @@ def _only_regenerable(directory: str) -> bool:
     return True
 
 
-def worktree_state(path: str, *, own: bool = False) -> str:
+def worktree_state(path: str, *, own: bool = False, session_id: str = "") -> str:
     """The removal-relevant state of a worktree path.
 
     ``own``: the caller proved (creation ledger) that this session or its
@@ -1440,7 +1829,9 @@ def worktree_state(path: str, *, own: bool = False) -> str:
 
     One of ``clean``, ``dirty``, ``locked``, ``stale-initializing`` (locked
     "initializing" for over an hour, otherwise clean), ``busy`` (a live process
-    cwd is inside it, or the inventory could not be read), ``not-linked`` or
+    cwd is inside it, or the inventory could not be read — with ``own`` and
+    ``session_id``, holders from the deleting session's own family do not
+    count; :func:`busy_phrase` names the holders), ``not-linked`` or
     ``unknown``.
 
     Linked = its ``.git`` is a FILE, its git-dir differs from the common dir
@@ -1514,7 +1905,23 @@ def worktree_state(path: str, *, own: bool = False) -> str:
         pass
     except (OSError, UnicodeError):
         return "unknown"
-    if _live_cwd_inside(real) is not False:
+    live: bool | None
+    if own and session_id:
+        # OWN tree: ALWAYS a fresh inventory (QA Q1, PR #3987). This answer
+        # is what lets an own tree rank LOW (clean, or detached scratch), and
+        # the 30 s cache's "nobody inside" is no proof: a foreign process that
+        # entered after the cached scan was missed, the own dirty detached
+        # tree ranked LOW with no judge call, and ``git worktree remove
+        # --force`` deleted it under that process. Holders from this
+        # session's own family (operator directive 2026-11-14, field case
+        # ``attr3880-ci``: the creator's eval kernel, bash child or subagent)
+        # do not make it busy; any foreign holder, or an inventory or process
+        # table that cannot be read (``None``), keeps it busy — fail closed.
+        holders = cwd_holders(real, session_id)
+        live = None if holders is None else any(not h.family for h in holders)
+    else:
+        live = _live_cwd_inside(real)
+    if live is not False:
         return "busy"  # unknown process inventory also fails closed
     # ``git worktree remove`` deletes IGNORED content too (review R1-MAJOR-4 /
     # QA Q1: an ignored ``.env`` and an ignored nested repo with the only copy
@@ -1567,6 +1974,105 @@ def worktree_state(path: str, *, own: bool = False) -> str:
         if not (refs or "").strip():
             return "dirty"
     return "stale-initializing" if stale_initializing else "clean"
+
+
+def detached_head(path: str) -> tuple[str, str | None] | None:
+    """``(short HEAD, ref containing it)`` for a DETACHED tree, else ``None``.
+
+    ``None`` = HEAD is on a branch, or git could not answer (fail closed: the
+    caller then keeps its ordinary ranking). The ref is ``None`` when no
+    branch, remote-tracking ref or tag contains HEAD — commits made in the
+    detached tree that only its own HEAD file names, which removal loses.
+    """
+    real = os.path.realpath(path)
+    if _git(["symbolic-ref", "-q", "HEAD"], real) is not None:
+        return None  # on a branch
+    head = _git(["rev-parse", "--short", "HEAD"], real)
+    if not (head or "").strip():
+        return None
+    refs = _git(
+        [
+            "for-each-ref",
+            "--count=1",
+            "--format=%(refname:short)",
+            "--contains",
+            "HEAD",
+            "refs/heads",
+            "refs/remotes",
+            "refs/tags",
+        ],
+        real,
+    )
+    if refs is None:
+        return None  # unknown reachability is not "reachable"
+    return (head or "").strip(), (refs.strip() or None)
+
+
+def own_detached_scratch(path: str) -> str | None:
+    """A fact phrase when an OWN dirty linked tree is disposable scratch, else ``None``.
+
+    WHY (operator directive 2026-11-14, relayed by Aida: "the safety guards
+    should never refuse being able to clean up uncommitted files that look
+    like scratch, safe to delete, etc. … this sort of ask should never come
+    up again"). Field case, mesh node lop-remote-node-2, session
+    99ffc68d3d05: it ran ``git worktree add --detach .worktrees/attr3880-ci``,
+    then ``git merge-tree`` + ``git read-tree`` left an uncommitted index and
+    working-tree changes; ``git worktree remove --force`` of that path went
+    to the judge as an own DIRTY tree and the judge refused ("busy detached
+    worktree with substantial uncommitted changes" — judge wording, no
+    deterministic branch writes it).
+
+    What makes such a tree safe for its creator to drop: there is NO branch,
+    so nobody's branch work can be lost, and HEAD itself is contained in a
+    ref, so no commit is lost either. What remains — the uncommitted index
+    and files — is what the creating session itself put there.
+
+    CONSTRAINTS, each a fail-closed ``None``:
+    - only called for a tree the creation ledger already proves own
+      (``classify._owned_by_session`` / ``owned_record``) and whose state is
+      ``dirty`` — locked/busy/unknown keep their ranking;
+    - HEAD on a branch → ``None`` (branch work is the judge's to weigh);
+    - HEAD reachable from no ref → ``None`` (dangling commits made in the
+      tree are lost with it; treated like unpushed work);
+    - a nested repository in any untracked or ignored entry → ``None`` (its
+      commits may exist nowhere else; ``worktree_state`` holds the same line).
+    """
+    real = os.path.realpath(path)
+    detached = detached_head(real)
+    if detached is None or detached[1] is None:
+        return None
+    # ``-z`` (review m3, PR #3987): without it git C-quotes special names
+    # (``?? "caf\303\251/"``), the quoted spelling is no directory, and the
+    # nested-repo check below was silently skipped for exactly those names.
+    # With ``-z`` each record is ``XY <path>`` NUL-terminated, verbatim; a
+    # rename's extra source record follows its ``R``/``C`` entry and is
+    # skipped (only ``??``/``!!`` records are read, and they never have one).
+    status = _git(
+        ["status", "--porcelain", "-z", "--ignored", "--untracked-files=normal"],
+        real,
+        timeout=_WORKTREE_STATUS_TIMEOUT_S,
+    )
+    if status is None:
+        return None
+    records = status.split("\0")
+    skip_next = False
+    for record in records:
+        if skip_next:
+            skip_next = False
+            continue
+        if record[:1] in ("R", "C") or record[1:2] in ("R", "C"):
+            skip_next = True  # the rename/copy source path follows as its own record
+            continue
+        if not (record.startswith("?? ") or record.startswith("!! ")):
+            continue
+        entry = os.path.join(real, record[3:].rstrip("/"))
+        if os.path.isdir(entry) and _holds_git(entry):
+            return None
+    head, ref = detached
+    return (
+        f"own-created detached worktree (no branch; HEAD {head} is kept by {ref}): "
+        "removal loses only this session's uncommitted scratch"
+    )
 
 
 #: Bounds on :func:`linked_worktrees_reached`. ``_REACH_MAX_LEVELS``:

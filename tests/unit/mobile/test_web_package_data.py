@@ -248,7 +248,12 @@ def test_relay_web_unit_tests_are_kept_out_of_the_wheel() -> None:
     both directions: every relay-web unit test is excluded, the compile-only
     ``keys.type-test.ts`` the build runs still ships, and the exclusion cannot
     silently reach a ``.test.ts(x)`` anywhere else in the package."""
-    assert sorted(_excluded_patterns()) == ["*.test.ts", "*.test.tsx"]
+    assert sorted(_excluded_patterns()) == [
+        "*.context.json",
+        "*.parity.json",
+        "*.test.ts",
+        "*.test.tsx",
+    ]
     globs = _package_data_globs()
     tests = [relative for relative in _tree_files() if relative.endswith((".test.ts", ".test.tsx"))]
     assert tests, "no relay web unit tests found; this check would be vacuous"
@@ -269,6 +274,89 @@ def test_relay_web_unit_tests_are_kept_out_of_the_wheel() -> None:
     assert not elsewhere, f"test files outside mobile/web/src would be excluded too: {elsewhere}"
 
 
+def test_parity_fixtures_follow_their_tests_out_of_the_wheel() -> None:
+    """The ``*.parity.json`` cross-client fixtures are test data (2026-11-15:
+    dropping them took main's slimmed wheel back under the 17.5 MiB budget).
+    Pinned both ways: every fixture is excluded, no shipped source reads one
+    (only the excluded tests and CI's condense-parity scripts do), the pin table
+    beside them still ships, and the ``"*"`` reach cannot silently drop a
+    ``*.parity.json`` outside the relay web's ``src/lib``."""
+    globs = _package_data_globs()
+    fixtures = [relative for relative in _tree_files() if relative.endswith(".parity.json")]
+    assert fixtures, "no parity fixtures found; this check would be vacuous"
+    assert not [relative for relative in fixtures if _shipped(relative, globs)]
+    assert _shipped("mobile/web/src/lib/parity-sources.json", globs)
+
+    readers = [
+        path.relative_to(WEB_SRC).as_posix()
+        for path in WEB_SRC.rglob("*")
+        if path.is_file()
+        and path.suffix in SOURCE_SUFFIXES
+        and not _excluded(path.name)
+        and re.search(r"""['"][^'"]*\.parity\.json['"]""", path.read_text(encoding="utf-8"))
+    ]
+    assert not readers, f"shipped sources name a parity fixture the wheel drops: {readers}"
+
+    elsewhere = [
+        path.relative_to(PACKAGE_DIR).as_posix()
+        for path in PACKAGE_DIR.rglob("*.parity.json")
+        if path.parent != WEB_SRC / "lib" and "node_modules" not in path.parts
+    ]
+    assert not elsewhere, f"parity fixtures outside mobile/web/src/lib dropped: {elsewhere}"
+
+
+#: The ONE runtime-side definition allowed to read a translator sidecar: the
+#: accessor `scripts/i18n/check.py` calls from a git checkout.
+CONTEXT_ACCESSOR = PACKAGE_DIR / "i18n" / "catalogues.py"
+
+
+def test_translator_context_sidecars_stay_out_of_the_wheel() -> None:
+    """The ``*.context.json`` sidecars are authoring metadata (2026-11-15:
+    ~184 KB compressed, the headroom merge trains needed under the 17.5 MiB
+    budget). Pinned both ways: every sidecar is excluded while the message
+    catalogues beside it still ship; no runtime module calls
+    ``catalogues.context()`` (only ``scripts/i18n/check.py`` does, from git);
+    namespace listing never surfaces a sidecar, so nothing served changes; and
+    no shipped relay-web source imports one."""
+    from local_operator.i18n import catalogues
+
+    globs = _package_data_globs()
+    sidecars = sorted(
+        path.relative_to(PACKAGE_DIR).as_posix()
+        for path in PACKAGE_DIR.rglob("*.context.json")
+        if "node_modules" not in path.parts
+    )
+    assert any(s.startswith("i18n/catalogues/en/") for s in sidecars), "vacuous: no sidecars"
+    assert not [s for s in sidecars if _shipped(s, globs)]
+    assert _shipped("i18n/catalogues/en/tui.welcome.json", globs)
+    # The `"*"` reach: only the catalogue tree and the relay web's lib hold one.
+    assert all(
+        s.startswith("i18n/catalogues/") or s.startswith("mobile/web/src/lib/") for s in sidecars
+    ), sidecars
+
+    callers = [
+        path.relative_to(PACKAGE_DIR).as_posix()
+        for path in PACKAGE_DIR.rglob("*.py")
+        if path != CONTEXT_ACCESSOR
+        and re.search(
+            r"catalogues\.context\(|from [\w.]*catalogues import[^\n]*\bcontext\b",
+            path.read_text("utf-8"),
+        )
+    ]
+    assert not callers, f"runtime code reads a sidecar the wheel drops: {callers}"
+    assert not [ns for ns in catalogues.namespaces("en") if ns.endswith(".context")]
+
+    readers = [
+        path.relative_to(WEB_SRC).as_posix()
+        for path in WEB_SRC.rglob("*")
+        if path.is_file()
+        and path.suffix in SOURCE_SUFFIXES
+        and not _excluded(path.name)
+        and re.search(r"""['"][^'"]*\.context\.json['"]""", path.read_text(encoding="utf-8"))
+    ]
+    assert not readers, f"shipped sources name a context sidecar the wheel drops: {readers}"
+
+
 def test_no_shipped_source_imports_an_unshipped_test_file() -> None:
     """The installed tree's `tsc -b` compiles whatever `src` holds; with the
     tests excluded, a non-test source importing one would fail that repair
@@ -287,6 +375,11 @@ def test_every_asset_the_sources_import_is_shipped() -> None:
     globs = _package_data_globs()
     problems: list[str] = []
     for importer, spec in _imported_specs():
+        # An excluded importer (a `*.test.ts(x)`) is not in the installed tree,
+        # so nothing there resolves its imports: `peer-cycles.test.ts` imports
+        # `peer-cycles.context.json`, and both stay in git together.
+        if _excluded(importer):
+            continue
         resolved = _resolve(WEB_SRC / importer, spec)
         if resolved is None:
             problems.append(f"{importer} imports {spec!r}, which is not in the tree")

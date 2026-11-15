@@ -135,14 +135,47 @@ class _LatchingSession(GatedSession):
         return self.bridge_taint_latch.latched
 
 
+#: The ONLY files the approval path can write, read from the product code:
+#: ``approvals.json`` (``session.approval_policy.OVERRIDE_FILENAME``, written by
+#: ``write_override`` into the conversation's session dir -- what ``S`` persists)
+#: and ``config.yml`` (``config.CONFIG_FILE_NAME``, the ``tool_approval_mode``
+#: default -- what ``G`` persists). The snapshot used to rglob EVERY
+#: json/toml/yaml under the config dir, so an unrelated background writer (the
+#: hub org-catalogue eligibility refresh rewrites ``hub/org_catalogue.json``
+#: from its own thread) landing between two snapshots failed these tests
+#: spuriously (CI run 43570111259). To cover a new approval-path writer, add its
+#: file name here -- do NOT widen this back to "every settings-shaped file".
+_APPROVAL_RECORD_NAMES = frozenset({"approvals.json", "config.yml"})
+
+
 def _approvals_records(config_dir: Path) -> dict[str, bytes]:
-    # Every settings-shaped file: ``S`` writes the conversation's
-    # ``approvals.json``, ``G`` the machine default in the config.
     return {
         str(p.relative_to(config_dir)): p.read_bytes()
         for p in config_dir.rglob("*")
-        if p.is_file() and p.suffix in {".json", ".toml", ".yaml", ".yml"}
+        if p.is_file() and p.name in _APPROVAL_RECORD_NAMES
     }
+
+
+def test_approvals_snapshot_ignores_background_writers_but_sees_approval_writes(
+    tmp_path: Path,
+) -> None:
+    """Scope control: the snapshot is blind to the catalogue refresh and to
+    nothing the approval path writes (a hidden ``S``/``G`` write must still fail)."""
+    (tmp_path / "config.yml").write_text("values: {tool_approval_mode: ask}\n")
+    session_dir = tmp_path / "sessions" / "abc"
+    session_dir.mkdir(parents=True)
+    before = _approvals_records(tmp_path)
+
+    (tmp_path / "hub").mkdir()
+    (tmp_path / "hub" / "org_catalogue.json").write_text('{"orgs": []}')
+    assert _approvals_records(tmp_path) == before, "a background writer tripped the scope"
+
+    (session_dir / "approvals.json").write_text('{"mode": "auto"}')
+    assert _approvals_records(tmp_path) != before, "a conversation approvals write is invisible"
+    before = _approvals_records(tmp_path)
+
+    (tmp_path / "config.yml").write_text("values: {tool_approval_mode: auto}\n")
+    assert _approvals_records(tmp_path) != before, "a config default write is invisible"
 
 
 async def _latched_egress_still_asks(pilot, app: OperatorApp, gate) -> None:

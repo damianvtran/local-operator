@@ -2857,6 +2857,36 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
     # i.e. a sibling of the reserved name. A record's ``install_root`` is only
     # ever read to ADD to ``wanted`` (protecting a generation), never to choose
     # a path to delete, which is why a hostile record cannot redirect it.
+    # The BTM launcher plant: every path is ``launcher_bundle_path()`` (a fixed
+    # name under ``<stable root>/bin``) or a ``mkdtemp`` staging dir this call
+    # created beside it. No session id, config dir or caller input reaches them.
+    (
+        "local_operator/update.py::ensure_daemon_launcher",
+        "os.rename",
+        "Swaps <stable>/bin/Local Operator.lopruntime with this call's own staging "
+        "copy (aside, publish, and restore on failure)",
+        3,
+    ),
+    (
+        "local_operator/update.py::ensure_daemon_launcher",
+        "shutil.rmtree",
+        "Removes this call's own mkdtemp staging dir under <stable>/bin",
+        1,
+    ),
+    (
+        "local_operator/update.py::_sweep_legacy_episode_plists",
+        "<path>.unlink",
+        "Deletes a ~/Library/LaunchAgents/com.damian.lop-episode.*.plist FILE "
+        "(globbed by fixed prefix, never a directory, never under sessions/)",
+        1,
+    ),
+    (
+        "local_operator/procname.py::publish_team_runtime_result",
+        "os.rename",
+        "Moves an unmarked <runtime root>/<key>-team tree aside to <key>-team.dead.<pid>."
+        "<thread>, the plant-scratch name _sweep_orphan_plants reclaims",
+        1,
+    ),
     (
         "local_operator/update.py::_remove_tree_unlocked",
         "shutil.rmtree",
@@ -2998,6 +3028,28 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
     ),
     ("local_operator/update.py::_write_cache", "<path>.replace", "temp FILE -> update cache FILE"),
     ("local_operator/update.py::_write_cache", "<path>.unlink", "temp FILE -> update cache FILE"),
+    # The background daemon-refresh hand-off (PR #4004). Its run directories live
+    # under ``_refresh_runs_root()`` = ``<config>/update/refresh``, created by
+    # ``tempfile.mkdtemp(dir=<that root>)``; no session id or caller-supplied path
+    # names either target. The rmtree is confined IN the function, not by its
+    # caller: it refuses a symlink, anything whose resolved parent is not the
+    # resolved runs root, and any name that is not ``<unit>-<stamp>-<suffix>``
+    # for the unit being pruned (``test_update_refresh_handoff.py`` pins each
+    # refusal with a crafted path).
+    (
+        "local_operator/update.py::_remove_refresh_run",
+        "shutil.rmtree",
+        "<config>/update/refresh/<unit>-<stamp>-<suffix> ENDED run dir only; refuses symlinks, "
+        "non-children of the resolved runs root and non-run names — never under sessions/",
+        1,
+    ),
+    (
+        "local_operator/update.py::_write_run_meta",
+        "os.replace",
+        "<run dir>/spec.json.tmp FILE -> <run dir>/spec.json FILE inside the refresh run dir "
+        "this update just mkdtemp'd under <config>/update/refresh; replace cannot remove a dir",
+        1,
+    ),
     # The install-provenance marker, written atomically after an upgrade. Both
     # calls are confined to the temp file this function itself created with
     # ``mkstemp`` inside the INSTALL prefix (a uv tool root), and the rename

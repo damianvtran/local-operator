@@ -442,7 +442,12 @@ def test_build_named_dir_under_arbitrary_ignored_parent_is_walked(home: Path, re
 
 
 def test_cwd_inventory_is_bounded_and_cached_per_process(monkeypatch: pytest.MonkeyPatch) -> None:
-    """QA Q-1: one inventory serves 30 s; a failure is never cached."""
+    """QA Q-1: one inventory serves 30 s; a failure is never cached.
+
+    A cached HIT is re-read before it is believed (PR #3987 remediation,
+    field case ``attr3880-ci``): a holder that exited inside the TTL must not
+    keep a tree busy. A cached miss is reused, and a fresh hit is not re-read.
+    """
     monkeypatch.setattr(prov, "_cwd_inventory_cache", None)
     real_isdir = os.path.isdir
     monkeypatch.setattr(
@@ -465,11 +470,15 @@ def test_cwd_inventory_is_bounded_and_cached_per_process(monkeypatch: pytest.Mon
     assert prov._live_cwd_inside("/synthetic/tree") is True  # failure was not cached
     assert prov._live_cwd_inside("/synthetic/other") is False
     clock["t"] += prov._CWD_INVENTORY_TTL_S - 1
+    assert calls == [20.0, 20.0]  # a fresh hit and a cached miss: no extra probe
     assert prov._live_cwd_inside("/synthetic/tree") is True
-    assert calls == [20.0, 20.0]  # two probes for four questions
-    clock["t"] += 2
-    prov._live_cwd_inside("/synthetic/tree")
-    assert len(calls) == 3  # expired: re-read
+    assert calls == [20.0, 20.0, 20.0]  # a cached hit is re-verified once
+    outcome["fail"] = True
+    assert prov._live_cwd_inside("/synthetic/other") is False  # cached miss: no probe
+    assert len(calls) == 3
+    clock["t"] += prov._CWD_INVENTORY_TTL_S + 1
+    assert prov._live_cwd_inside("/synthetic/other") is None  # expired: re-read (fails)
+    assert len(calls) == 4
 
 
 def test_open_pr_refuses_any_linked_worktree_outright(

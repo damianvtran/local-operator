@@ -84,6 +84,7 @@ from local_operator import memory_guard
 from local_operator.agent_shell import AGENT_SHELL_ENV, MAY_DELEGATE_ENV
 from local_operator.config import CONFIG_FILE_NAME, ConfigManager
 from local_operator.guardrails import interrupted_worktree_add
+from local_operator.guardrails import spawned as guard_spawned
 from local_operator.harness.approval import (
     APPROVAL_UNAVAILABLE_NOTICE,
     ApprovalUnavailableError,
@@ -4291,29 +4292,26 @@ async def _github_git_injections(context: ToolContext | None) -> dict[str, str]:
     Fetch-on-use, off the event loop (the borrow dials this device's relay and
     can sit through one bounded owner round trip), and never raising: a failed
     borrow makes the child behave exactly as it did before brokering existed.
-    The token is registered in the session's redaction ledger BEFORE the env is
-    returned — an injected bearer the session cannot scrub is a plaintext
-    result waiting to happen (design §D5; the T8e ``printenv`` invariant).
+    The borrow, the "no ledger, no injection" rule and the register-before-
+    return ordering all live in ``github.lent_github_env`` — the one door the
+    monitor ticks and the code-request resolver take too — so this only hands
+    it the session's ledger. Every bash child goes through here, including a
+    monitor's tick, in session or in the parked-session probe: a context that
+    must reach the lent login has to carry a ``variables`` store.
     """
     if context is None:
         return {}
     store = getattr(context, "variables", None)
-    register = getattr(store, "register_redaction", None)
-    if not callable(register):
-        # No ledger, no injection: the masking control is what makes the env
-        # deliverable, so a host without it gets the pre-brokering behaviour.
-        return {}
     try:
         from local_operator.network.credentials import github
 
-        env, token = await asyncio.to_thread(
-            github.borrowed_git_env, session_id=context.session_id or ""
+        env, _token = await asyncio.to_thread(
+            github.lent_github_env,
+            session_id=context.session_id or "",
+            register=getattr(store, "register_redaction", None),
         )
     except Exception:  # noqa: BLE001 — a broker fault must not fail a command
         return {}
-    if not env or not token:
-        return {}
-    register(token)
     return env
 
 
@@ -4720,6 +4718,12 @@ async def execute_bash(
             # kwargs that really detach on the host, and is exactly
             # `start_new_session=True` on POSIX.
             **spawn_options,
+        )
+        # Which in-process session started this child (review m1, PR #3987):
+        # subagents share the harness pid, so the delete guard needs this
+        # runtime record to tell this session's shell from a sibling's.
+        guard_spawned.record(
+            process.pid, getattr(context, "session_id", None) if context else None, process
         )
     except OSError as exc:
         # A `bash.shell` pointing at a missing or non-executable file made the
@@ -26921,11 +26925,77 @@ async def _bridge_access(
     delegated = _delegated_here(context)
     if action == "request_access":
         from local_operator.browser_bridge import backend as _bridge_backend
+        from local_operator.browser_bridge.preview_origin import (
+            fixed_origin_instruction,
+            pin_quick_tunnel,
+            quick_tunnel_origin,
+        )
 
+        instruction = ""
+        pinned_origin = ""
+        quick_origin = quick_tunnel_origin(url)
+        if quick_origin is not None:
+            # Pin BEFORE the RPC: the remote host may notify the operator as soon
+            # as it receives a request. Host-owned durable ancestry, never args,
+            # binds manager, children and siblings even across runtime restarts.
+            # Remote unavailability retains this first binding: a failed approval
+            # must not let the family rotate hosts and raise another site card.
+            host_name, requested_origin = quick_origin
+            try:
+                if context is None or not context.session_id:
+                    raise ValueError("missing session identity")
+                directory = (
+                    Path(context.session_dir)
+                    if context.session_dir
+                    else config_dir() / "sessions" / context.session_id
+                )
+                pin = await asyncio.to_thread(
+                    pin_quick_tunnel,
+                    directory,
+                    host_name,
+                    requested_origin,
+                    context.ancestor_session_ids,
+                )
+            except (OSError, ValueError):
+                return _error(
+                    # i18n: ignore model-facing tool recovery instruction
+                    tool_call_id,
+                    "browser",
+                    f"Refused preview origin {requested_origin}. No new approval request "
+                    "was sent; this attempt did not notify the user. Do not await this "
+                    "attempt. The durable session-family pin could not be verified. Reuse "
+                    "one fixed localhost port or stable preview URL; existing site "
+                    "approvals still apply. Do not mint another quick-tunnel host.",
+                    details={
+                        "code": "preview_origin_unavailable",
+                        "state": "refused",
+                        "approval_request_sent": False,
+                    },
+                )
+            pinned_origin = pin.origin
+            instruction = fixed_origin_instruction(pinned_origin)
+            if not pin.allowed:
+                return _error(
+                    # i18n: ignore model-facing local approval outcome and recovery policy
+                    tool_call_id,
+                    "browser",
+                    f"Refused preview origin {requested_origin}. No new approval request "
+                    "was sent; this attempt did not notify the user. Do not await this "
+                    f"attempt.\n\n{instruction}",
+                    details={
+                        "code": "preview_origin_changed",
+                        "approval_request_sent": False,
+                        "state": "refused",
+                        "origin": requested_origin,
+                        "pinned_origin": pin.origin,
+                    },
+                )
         result, problem = await _bridge_call(
             tool_call_id, "request_access", {"url": url, **identity}, client=client
         )
         if problem is not None:
+            if instruction:
+                problem.content.append(TextContent(text=f"\n\n{instruction}"))
             return problem
         assert result is not None
         state_value = str(result.get("state", ""))
@@ -26934,9 +27004,12 @@ async def _bridge_access(
             # A HEADLESS NODE's extension answered (``site_approval.py``): no
             # person can click its popup, so the popup copy below would send the
             # agent to wait on nothing.
-            return await _node_site_access(
+            node_result = await _node_site_access(
                 tool_call_id, context, result, url, origin, client=client
             )
+            if instruction:
+                node_result.content.append(TextContent(text=f"\n\n{instruction}"))
+            return node_result
         # `host` is the handle spelling here (`bridge`/`ui`); a node's managed
         # Chrome is always the bridge (extension) host.
         on_node = host != HOST_UI_PREFIX and _bridge_backend._on_headless_node()  # noqa: SLF001
@@ -26949,7 +27022,8 @@ async def _bridge_access(
             return _text(
                 tool_call_id,
                 "browser",
-                _node_access_result_text(state_value, origin, url),
+                _node_access_result_text(state_value, origin, url)
+                + (f"\n\n{instruction}" if instruction else ""),
                 details={"origin": origin, "state": state_value},
             )
         if on_node:
@@ -26965,7 +27039,8 @@ async def _bridge_access(
             return _text(
                 tool_call_id,
                 "browser",
-                _wrap_receipt(_bridge_backend.node_approval_unavailable(origin)),
+                _wrap_receipt(_bridge_backend.node_approval_unavailable(origin))
+                + (f"\n\n{instruction}" if instruction else ""),
                 details={"origin": origin, "state": "unavailable_on_node"},
             )
         return _text(
@@ -26980,6 +27055,11 @@ async def _bridge_access(
                 attached=_attached_here(context),
                 notify=notify,
                 delegated=delegated,
+            )
+            + (
+                f"\n\n{fixed_origin_instruction(pinned_origin, denied=state_value == 'denied')}"
+                if instruction
+                else ""
             ),
             details={
                 "origin": origin,
@@ -27113,10 +27193,18 @@ async def _bridge_access(
         node_origin = str(result.get("origin") or node_origin)
         if state_value != "pending" and await_on_node:
             origin = str(result.get("origin", url))
+            # The extension's sweep reports an EXPIRED entry as "cancelled"
+            # (``approval-store.ts`` ``sweepQueue``), so the cancel_access wording
+            # ("your request ... was withdrawn") told an agent whose card lapsed
+            # that someone withdrew it (incident 2026-11-15, session
+            # 1c31cfff075b). From await, "cancelled" cannot tell expiry from a
+            # withdrawal, so it reads as "no live request", which names both and
+            # carries guide://browser's re-raise step.
+            text_state = "none" if state_value == "cancelled" else state_value
             return _text(
                 tool_call_id,
                 "browser",
-                _node_access_result_text(state_value, origin, url),
+                _node_access_result_text(text_state, origin, url),
                 details={"origin": origin, "state": state_value},
             )
         if state_value != "pending":
@@ -30193,7 +30281,13 @@ async def _execute_browser_owned(
                     resource.record.pop("pending_access_host", None)
                 if access_state == "pending":
                     resource.record["retention"] = "pending site approval"
-                elif access_state and resource.record.get("retention") == "pending site approval":
+                elif (
+                    access_state
+                    # A local preview-policy refusal did not send a new RPC and
+                    # cannot settle an older prompt's ownership obligation.
+                    and (result.details or {}).get("approval_request_sent") is not False
+                    and resource.record.get("retention") == "pending site approval"
+                ):
                     await resource.client().call("owner_release", resource.params())
                     resource.record["retention"] = ""
             return _browser_update_note(state, result)

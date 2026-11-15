@@ -52,7 +52,7 @@ from local_operator.guardrails import provenance as prov
 from local_operator.guardrails import resolve as resolve_mod
 from local_operator.guardrails.classify import Risk, classify_bash
 
-BASE = "673b54936a93"
+BASE = "7f275a788083a5b42e404dd7ce01ffa206f7770e"
 OWNER = "aaaaaaaaaaaa"  # creates the layout's directories (and PARENT in the corpus)
 UNRELATED = "999999999999"
 REPO = Path(__file__).resolve().parents[3]

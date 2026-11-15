@@ -71,7 +71,15 @@ def _own_session(owner: relay.RelayServer, origin_device: str) -> None:
                 home_device=owner.identity.device_id,
                 stamp_revision=1,
             ),
-            origin={"kind": "user", "source_device": origin_device, "source_session_id": ""},
+            # ``started_by: operator`` is the attestation an operator-started
+            # create stamps (#4001): notify items are default-deny without it,
+            # so this fixture models the attested case the relay tests cover.
+            origin={
+                "kind": "user",
+                "source_device": origin_device,
+                "source_session_id": "",
+                "started_by": "operator",
+            },
         ),
     )
     AttentionStore(owner.root / "attention.db").publish(

@@ -2230,7 +2230,10 @@ def _durable_record(
       shared it again. ``granted_at`` is the owner's clock, so a few seconds of skew
       is the residual; the record carries no ``doc_rev`` to compare instead.
     """
-    if not evidence or str(evidence.get("state") or "") == "synced":
+    # ``held`` is not a failure either: the owner is away and the token it lent is
+    # still serving through the offline hold (2026-11-14). The listing's live
+    # columns already say the borrow works; a failure record here would contradict it.
+    if not evidence or str(evidence.get("state") or "") in ("synced", "held"):
         return None
     recorded_owner = str(evidence.get("owner_device") or "")
     if recorded_owner and owner_device and recorded_owner != owner_device:
@@ -3133,42 +3136,92 @@ def _shareable_providers(self_device: str) -> list[dict[str, Any]]:
     return rows
 
 
-def _github_revocation_payload(revoked_now: int | None, ttl_s: int, source: str) -> dict[str, Any]:
+def _github_residual(source: str, lent_hold_until_ms: int = 0) -> tuple[int, str]:
+    """``(seconds, words)``: how long a node that cannot hear a revoke may keep a GitHub grant.
+
+    THE OFFLINE HOLD (2026-11-14, "Yes, GitHub and MCP"): a node keeps a lent grant
+    while it cannot reach the owner, and a revoke or panic only stops a node that
+    HEARS it (review #3947 M1).
+
+    STATED FROM WHAT WAS LENT (review #3947 R2-m2): ``lent_hold_until_ms`` is the
+    latest hold end this relay stated on a grant to that holder (the revoke op's
+    ``lent_hold_until_ms``). Lowering ``github_token_hold_s`` only affects later
+    grants, so the CURRENT setting would understate the residual. When the relay did
+    not answer, or restarted since it lent, nothing is known, and the receipt states
+    the ceiling instead: an App token's own 60 minutes, else the 24 h hold maximum
+    (``OFFLINE_HOLD_MAX_S``, which every borrower also caps at), counted from the
+    node's last grant.
+    """
+    from local_operator.network.credentials import OFFLINE_HOLD_MAX_S
+    from local_operator.network.credentials import github as github_mod
+
+    now = time.time()
+    if lent_hold_until_ms and lent_hold_until_ms / 1000.0 > now:
+        until = lent_hold_until_ms / 1000.0
+        return (
+            int(until - now + 0.999),
+            time.strftime("until %H:%M UTC (the hold it was lent with)", time.gmtime(until)),
+        )
+    ceiling = 3600 if source == github_mod.SOURCE_APP else int(OFFLINE_HOLD_MAX_S)
+    return ceiling, f"for up to {_duration_words(ceiling)} after its last grant"
+
+
+def _duration_words(seconds: int) -> str:
+    """``"24 h"`` / ``"60 min"`` — the unit a person reads an incident bound in."""
+    if seconds >= 3600 and seconds % 3600 == 0:
+        return f"{seconds // 3600} h"
+    if seconds >= 60:
+        return f"{round(seconds / 60)} min"
+    return f"{seconds} s"
+
+
+def _github_revocation_payload(
+    revoked_now: int | None, ttl_s: int, source: str, *, lent_hold_until_ms: int = 0
+) -> dict[str, Any]:
     """The ``github`` revoke receipt's payload — ONE spelling for lines and ``--json``.
 
     Per-source (§3.3): only the App arm has a server-side revoke handle. A
     token arm was not minted here, so no DELETE was run and the sentence names
     the forge as the place the token actually ends — an incident reader must
     not believe "revoked" means "dead" for a bearer lop never minted.
+
+    ``lent_grant_max_s`` is the OFFLINE-HOLD bound (review #3947 M1), not the
+    grant window: a node that cannot hear this revoke may keep using what it holds
+    that long. ``ttl_s`` (the grant window) is kept as ``grant_window_s``.
     """
     from local_operator.network.credentials import github as github_mod
 
+    bound, residual = _github_residual(source, lent_hold_until_ms)
     if source == github_mod.SOURCE_APP:
         copied = (
-            "revoked at GitHub at the grant's window end — and immediately when "
-            "this revoke ran — via DELETE /installation/token (204; idempotent); "
-            "only if no revoke can be delivered does the token fall back to its "
-            "own 60-minute ceiling"
+            "revoked at GitHub immediately when this revoke ran, via DELETE "
+            "/installation/token (204; idempotent); if no revoke can be delivered the "
+            "token ends at its own 60-minute ceiling, and a node that cannot hear this "
+            "revoke may keep using it until then"
         )
     elif source == github_mod.SOURCE_TOKEN:
         copied = (
             "a GITHUB_TOKEN-class PAT is not minted by this device: there is no "
             "server-side revoke here — it keeps working at GitHub until it expires "
             "or is revoked there (Settings -> Developer settings -> Personal access "
-            "tokens); a grant already lent is dropped by the borrower at its window end"
+            "tokens); a node that hears this revoke stops using it at once, one that "
+            f"cannot (lost, stolen or offline) may keep using it {residual}"
         )
     elif source == github_mod.SOURCE_GH:
         copied = (
             "the gh CLI login is a user token this device did not mint: there is no "
-            "server-side revoke here — sign out of the gh CLI or revoke the token at "
-            "GitHub (Settings -> Applications) to end it; a grant already lent is "
-            "dropped by the borrower at its window end"
+            "server-side revoke here — revoke the GitHub CLI's access at GitHub "
+            "(Settings -> Applications -> Authorized OAuth Apps; `gh auth logout` only "
+            "forgets it locally) to end it; a node that hears this revoke "
+            "stops using it at once, one that cannot (lost, stolen or offline) may keep "
+            f"using it {residual}"
         )
     elif source == github_mod.SOURCE_UNREADABLE:
         copied = (
             "the secret store on this device could not be read, so the serving arm "
-            "could not be determined — any grant already lent is dropped by the borrower "
-            "at its window end; repair the store before the next revoke"
+            "could not be determined — a node that hears this revoke stops using what it "
+            f"holds at once, one that cannot may keep it {residual}; "
+            "repair the store before the next revoke"
         )
     else:
         copied = (
@@ -3178,42 +3231,52 @@ def _github_revocation_payload(revoked_now: int | None, ttl_s: int, source: str)
         )
     return {
         "new_grants": "refused now",
-        "lent_grant_max_s": ttl_s,
+        "lent_grant_max_s": bound,
+        # Epoch seconds of the hold actually lent, or ``None`` when not known.
+        "lent_hold_until": (lent_hold_until_ms / 1000.0) if lent_hold_until_ms else None,
+        "grant_window_s": ttl_s,
         "minted_tokens_revoked": revoked_now,
         "source": source,
         "copied_bearer": copied,
     }
 
 
-def _github_revoke_lines(name: str, revoked_now: int | None, source: str) -> list[str]:
+def _github_revoke_lines(
+    name: str, revoked_now: int | None, source: str, *, lent_hold_until_ms: int = 0
+) -> list[str]:
     """The receipt's operator-visible lines, per serving arm (§3.3).
 
-    App arm: the mint-revoke wording (M1, restated), unchanged — line 1 holds
-    the CONDITIONAL inside it, line 2 says which branch actually happened. The
-    token arms say the plainer truth: this device minted nothing, there is no
-    DELETE to run, and the end at the forge is where the operator goes. ``""``
-    (no source configured at revoke time) gets the neutral pair.
+    App arm: line 1 holds the CONDITIONAL, line 2 says which branch actually
+    happened. The token arms say the plainer truth: this device minted nothing,
+    there is no DELETE to run, and the end at the forge is where the operator goes.
+    ``""`` (no source configured at revoke time) gets the neutral pair.
+
+    THE HOLD BOUND (review #3947 M1): since 2026-11-14 a node keeps a lent grant
+    through the offline hold, and a revoke only stops a node that HEARS it. These
+    lines name that bound instead of the old "window end", because an incident
+    response that believed "revoked" meant "dead" would stop looking too early.
     """
     from local_operator.network.credentials import github as github_mod
 
+    _seconds, residual = _github_residual(source, lent_hold_until_ms)
     if source == github_mod.SOURCE_APP:
         if revoked_now is None:
             delivered = (
                 "no immediate DELETE could be delivered (this device's relay is not "
                 "running): the token dies at GitHub at its own 60-minute ceiling unless "
-                "the borrowing device's window-end self-revoke lands first"
+                f"{name} revokes it first when it hears this revoke"
             )
         else:
             delivered = (
                 f"the immediate DELETE ran: {revoked_now} outstanding token(s) revoked at "
-                "GitHub just now (a retry closes anything the call missed; the window-end "
-                "revoke still stands)"
+                "GitHub just now (a retry closes anything the call missed)"
             )
         return [
             (
                 f"new borrows by {name}: refused now; the outstanding GitHub token is "
-                "revoked at GitHub at its window end, and on this revoke's DELETE when it "
-                "can be delivered — via `DELETE /installation/token` (204; idempotent)"
+                "revoked at GitHub on this revoke's DELETE when it can be delivered — via "
+                "`DELETE /installation/token` (204; idempotent) — and otherwise ends at its "
+                "own 60-minute ceiling"
             ),
             delivered,
         ]
@@ -3226,14 +3289,19 @@ def _github_revoke_lines(name: str, revoked_now: int | None, source: str) -> lis
         end = (
             "revoke the PAT at GitHub (Settings -> Developer settings -> Personal " "access tokens)"
             if source == github_mod.SOURCE_TOKEN
-            else "sign out of the gh CLI on the owner, or revoke the token at GitHub "
-            "(Settings -> Applications)"
+            # ``gh auth logout`` only forgets the token locally (cli.github.com
+            # manual): revoking the GitHub CLI's OAuth access is what ends it, and
+            # it signs the gh CLI out on every device that uses that login.
+            else "revoke the GitHub CLI's access at GitHub (Settings -> Applications -> "
+            "Authorized OAuth Apps; this signs gh out everywhere — `gh auth logout` "
+            "only forgets the token locally)"
         )
         return [
             (
                 f"new borrows by {name}: refused now; {served} was not minted here, so "
-                "there is no window-end DELETE and nothing for this device to revoke — a "
-                f"grant already lent is dropped by {name} at its own window end"
+                f"there is no DELETE and nothing for this device to revoke — {name} stops "
+                f"using a lent grant as soon as it hears this revoke, but if it cannot "
+                f"(lost, stolen or offline) it may keep using it {residual}"
             ),
             (
                 f"to end the token itself now, {end}; it keeps working at GitHub until "
@@ -3247,8 +3315,9 @@ def _github_revoke_lines(name: str, revoked_now: int | None, source: str) -> lis
                 "not be read, so the serving arm could not be determined"
             ),
             (
-                f"a token already lent is dropped by {name} at its window end; repair "
-                "the store here and re-run the revoke for the per-arm receipt"
+                f"a token already lent is dropped by {name} as soon as it hears this "
+                f"revoke, or keeps it {residual} if it cannot; repair the store here and "
+                "re-run the revoke for the per-arm receipt"
             ),
         ]
     return [
@@ -4217,6 +4286,7 @@ def _cmd_credential(args: argparse.Namespace) -> int:
         # (the borrowing device's own window-end self-revoke, then the token's
         # 60-minute ceiling).
         revoked_now: int | None = None
+        lent_hold_until_ms = 0
         if github_mod.is_github_key(key):
             detail = _relay_call(
                 "credential_revoke",
@@ -4229,6 +4299,11 @@ def _cmd_credential(args: argparse.Namespace) -> int:
             if isinstance(detail, dict):
                 revoked_now = int(detail.get("revoked") or 0)
                 payload["minted_tokens_revoked"] = revoked_now
+                # What this relay lent the holder (#3947 R2-m2); an older relay
+                # omits it and the receipt states the ceiling instead.
+                from local_operator.network.credentials.types import peer_int
+
+                lent_hold_until_ms = peer_int(detail.get("lent_hold_until_ms"))
         if is_secret_key(key):
             # CLASS-2 COPIES END BY WIPE, not by a broker TTL (S4, §4.3): the receipt says
             # which happened — a queued notice, an already-wiped copy, or no RECORDED copy —
@@ -4268,15 +4343,23 @@ def _cmd_credential(args: argparse.Namespace) -> int:
                 )
             )
         if github_mod.is_github_key(key):
-            # THE M1-RESTATED COPY, to match the mechanism (mint-revoke at the
-            # window end + on this revoke; the 60-minute figure is the fallback).
+            # THE M1-RESTATED COPY, to match the mechanism (an App token is DELETEd
+            # on this revoke, else ends at its 60-minute ceiling; since the offline
+            # hold, 2026-11-14, a node that cannot hear the revoke keeps a PAT/gh
+            # grant up to ``github_token_hold_s`` — #3947 M1).
             # Both halves live in helpers so the copy has ONE home (the tests
             # assert against the same strings the receipt prints).
             # PER-SOURCE (§3.3): resolved at THIS moment — the receipt describes
             # the arm that serves now, and says plainly when nothing does.
             source = github_mod.resolve_source(_config_dir())
-            payload["revocation"] = _github_revocation_payload(revoked_now, ttl_s, source)
-            lines.extend(_github_revoke_lines(name, revoked_now, source))
+            payload["revocation"] = _github_revocation_payload(
+                revoked_now, ttl_s, source, lent_hold_until_ms=lent_hold_until_ms
+            )
+            lines.extend(
+                _github_revoke_lines(
+                    name, revoked_now, source, lent_hold_until_ms=lent_hold_until_ms
+                )
+            )
             return _emit(args, payload, lines)
         copied = (
             "valid at the provider until the key is rotated there (a static key never expires)"
@@ -7306,6 +7389,23 @@ _STOP_REMEDIES: dict[str, str] = {
 #: socket default. It is the same reason the TUI grants a peer call 260 s.
 PILOT_BIND_TIMEOUT_S = 120.0
 
+#: How much of :data:`PILOT_BIND_TIMEOUT_S` the BIND hands back before its own
+#: outer bound fires. The viewer is given the bind budget as an absolute deadline
+#: (``AttachedSession.bind_runtime(deadline=...)``) so a busy runtime gets the
+#: whole window rather than the TUI's 15 s foreground envelope; ending the inner
+#: wait this much earlier makes the viewer's own typed answer (busy, refused,
+#: stopped) the one that is reported, not the outer ``wait_for``'s bare timeout.
+_PILOT_BIND_SLACK_S = 2.0
+
+#: What a busy runtime's refusal says was NOT done, per act, so the sentence names
+#: the person's own action rather than the transport's.
+_PILOT_UNDONE: dict[str, str] = {
+    "send": "the message was not delivered",
+    "steer": "the steer was not delivered",
+    "slash": "the command was not run",
+    "peek": "nothing was read",
+}
+
 #: How long ``--send`` waits for the owner's TERMINAL outcome once the prompt is
 #: admitted. ADMISSION IS NOT COMPLETION (``AttachedSession.prompt_and_wait``
 #: says exactly that), and a turn is unbounded work on a machine nobody here
@@ -7622,6 +7722,50 @@ def _pilot_dial_refusal(
         "nothing about that conversation is known from here: `lop network doctor "
         f"--peer {peer}` tells a link that is down from a runtime that stopped, and "
         "the session itself is untouched either way",
+    )
+
+
+def _pilot_runtime_busy(exc: BaseException) -> bool:
+    """True when the runtime was REACHED and is alive, but did not answer in time.
+
+    ONE CLASSIFICATION, THE LADDER'S: the desktop control ladder decides "busy" by
+    ``RuntimeUnresponsiveError`` or the duck-checked ``owner_alive`` mark
+    (``server/routes/desktop_sessions.py::_owner_busy``), and every busy
+    ``ConnectionError`` main defines carries that mark: ``OwnerAckTimeout``, the
+    late welcome (``OwnerWelcomeTimeout``) and the reconnect refusal
+    (``OwnerReconnectingError``). Reading the MARK rather than listing classes is
+    what keeps this verb from drifting when a new busy shape lands; a list here
+    missed the late welcome, which the pilot's own bind raises, and called a busy
+    session a device that "produced no session". The one addition is
+    ``RuntimeBindFailedError`` (the runtime announced it could not prepare this
+    connection), which is deliberately left unmarked so the desktop ladder keeps
+    its existing answer for it. All of these are ``ConnectionError``s, and
+    ``OwnerAckTimeout`` is ALSO a ``TimeoutError``, so this must be asked before
+    either sibling rung.
+    """
+    from local_operator.session.attached import (
+        RuntimeBindFailedError,
+        RuntimeUnresponsiveError,
+    )
+
+    if isinstance(exc, (RuntimeUnresponsiveError, RuntimeBindFailedError)):
+        return True
+    return bool(getattr(exc, "owner_alive", False))
+
+
+def _pilot_busy_sentence(verb: str, session_id: str, device: str, waited_s: float) -> str:
+    """The refusal for a runtime that is alive and too busy to answer this act.
+
+    Says the three things the person acts on: the session is still running over
+    there, this act did NOT happen, and the remedy is to retry. It does not send
+    them to ``network doctor``: the link worked, the stream opened, and the
+    runtime spoke — a link diagnosis would send them after a fault that is not
+    there.
+    """
+    undone = _PILOT_UNDONE.get(verb, "nothing was done")
+    return (
+        f"{session_id} is running on {device}, but its runtime was too busy to answer "
+        f"within {max(1, int(waited_s))}s, so {undone}; retry when its current work settles"
     )
 
 
@@ -8026,18 +8170,36 @@ async def _pilot_act(
         # viewer for a conversation this device does not hold.
         raise MeshRefusal("session_unknown", f"{session_id} is no longer a session held by {peer}")
     try:
+        bind_started = time.monotonic()
         try:
             # The cold-to-working seam: the first act that needs the runtime binds
             # it, which is where a stored session on the peer ENGAGES a runtime.
-            await asyncio.wait_for(viewer.bind_runtime(), timeout=PILOT_BIND_TIMEOUT_S)
-        except TimeoutError as exc:
-            raise MeshRefusal(
-                "session_unreachable",
-                f"{peer} did not answer for {session_id} within "
-                f"{PILOT_BIND_TIMEOUT_S:.0f}s — its runtime may be starting, or wedged; "
-                f"`lop network doctor --peer {peer}` diagnoses the link",
-            ) from exc
-        except ConnectionError as exc:
+            # The viewer gets THIS verb's budget as its deadline; without it the
+            # bind kept the TUI's 15 s foreground envelope inside a 120 s bound.
+            await asyncio.wait_for(
+                viewer.bind_runtime(
+                    deadline=bind_started + PILOT_BIND_TIMEOUT_S - _PILOT_BIND_SLACK_S
+                ),
+                timeout=PILOT_BIND_TIMEOUT_S,
+            )
+        except (TimeoutError, ConnectionError) as exc:
+            # ONE HANDLER, THREE RUNGS, ASKED IN THIS ORDER. A runtime that was
+            # REACHED and is merely busy comes first: two of its three shapes are
+            # ``ConnectionError``s and one is also a ``TimeoutError``, so either
+            # sibling rung would otherwise claim it — which is how a busy session
+            # on a healthy link read as a device that "produced no session".
+            if _pilot_runtime_busy(exc):
+                raise MeshRefusal(
+                    "session_unreachable",
+                    _pilot_busy_sentence(verb, session_id, device, time.monotonic() - bind_started),
+                ) from exc
+            if isinstance(exc, TimeoutError):
+                raise MeshRefusal(
+                    "session_unreachable",
+                    f"{peer} did not answer for {session_id} within "
+                    f"{PILOT_BIND_TIMEOUT_S:.0f}s — its runtime may be starting, or wedged; "
+                    f"`lop network doctor --peer {peer}` diagnoses the link",
+                ) from exc
             # A DIAL THAT PRODUCED NO STREAM IS THE DEVICE, whichever rung noticed:
             # this is the one CI's stopped-peer case lands on (the viewer is cold
             # until ``bind_runtime``, so the dial that produces no welcome frame

@@ -89,8 +89,13 @@ three routes the checkpoint can verify. Everything CRITICAL is still refused.
 
 - **Creation ledger.** After every bash call the loop records the directories it
   created: `mkdir [-p]` (the topmost new component), `mktemp -d TEMPLATE`,
-  `git worktree add <path>`, `git clone <url> [<dir>]` — inside a `for` loop, one
-  candidate per loop value (a `$(…)` or unknown loop list records nothing). Rows live in
+  `git worktree add [--detach|-d] <path>` (also `git -C <repo> worktree add …`),
+  `git clone <url> [<dir>]` — inside a `for` loop, one candidate per loop value
+  (a `$(…)` or unknown loop list records nothing). Every host records the same
+  way — a headless or mesh-spawned session included; nothing is gated on a
+  desktop surface. A worktree also gets a row for its `.git` file: on Linux a
+  directory's stamp is its ctime, which moves whenever an entry in the tree
+  root changes, and the `.git` file keeps the row matching after that. Rows live in
   `<config_dir>/guardrails/created.sqlite`, keyed by session id + realpath +
   inode, written under the creator and every ancestor session, so a parent may
   delete what its subagents made. Overwriting or deleting the ledger is CRITICAL.
@@ -163,7 +168,28 @@ three routes the checkpoint can verify. Everything CRITICAL is still refused.
   out) does not hold your own clean tree: removal keeps the branch, so nothing
   is lost and neither the forge nor the judge is asked. A known open PR or MR is
   refused outright; any other shortfall (dirty, locked, busy, `git status`
-  failed or timed out, another running session) goes to the judge. Ignored
+  failed or timed out, another running session) goes to the judge — with one
+  exception: a **detached** own worktree (`git worktree add --detach`, no
+  branch) under the repository's `.worktrees/` directory, whose HEAD some branch,
+  remote-tracking ref or tag still contains, ranks LOW even with uncommitted
+  changes, for `git worktree remove [--force] <exact path>` and `rm -rf` of
+  its path — or a glob that matches only your own trees, as ledger LOW does
+  elsewhere; a glob that also reaches someone else's tree still holds. There
+  is no branch whose work could be lost and no commit is lost, so what goes
+  is your own scratch (a `merge-tree`/`read-tree` index, edited files). The
+  same tree anywhere else, a detached tree whose HEAD no ref contains
+  (commits made only there — `git tag` or `git branch` it first), a
+  repository nested inside it, or a lock, live cwd or other running session
+  keeps the judge. For your own tree the process inventory is always read
+  fresh, never from the 30-second cache, and a live cwd counts only when it
+  is someone else's: your own eval kernel and bash children (recorded by the
+  session that spawned them, since subagents share one harness process), your
+  ancestor's and descendant's, and processes of your registry-recorded harness
+  that no session spawned do not make your own tree busy. A sibling
+  subagent's shell or kernel, another session's process, an orphan with no
+  session record, or an inventory or process table that cannot be read keeps
+  it busy, and the judge is told each holder's pid, command and session, or
+  why the inventory failed. Ignored
   entries (`.expo/`, `.pnpm-store/`, a `node_modules` symlink, an ignored `.env`
   or local config) never count against your own tree: removing it deletes them
   with no judge call, exactly as `git worktree remove` does — move a secret you
