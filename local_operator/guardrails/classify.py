@@ -1249,7 +1249,7 @@ def _rank(
             # running owner or an unknown PR state only withholds the LOW, so
             # the judge sees those facts. ``worktree_activity`` explains both.
             activity = worktree_activity(path, session_id)
-            facts = activity.facts()
+            facts = _with_scan_note(activity.facts(), path)
             if activity.pr_state == "open":
                 return RankedTarget(
                     target,
@@ -1304,7 +1304,8 @@ def _rank(
                 return RankedTarget(
                     target,
                     Risk.HIGH,
-                    f"{own[0]}; linked worktree state: dirty; {_changes_phrase(path)}; {facts}",
+                    f"{own[0]}; linked worktree state: dirty; {_changes_phrase(path)}"
+                    f"{_dangling_phrase(path)}; {facts}",
                 )
             if idle and state == "clean" and not target.forced:
                 return RankedTarget(target, Risk.LOW, f"a clean linked git worktree ({facts})")
@@ -1414,6 +1415,40 @@ def _rank(
         # Never discard the worktree state the branch above recorded.
         return RankedTarget(target, Risk.LOW, f"ordinary path; {worktree_note}")
     return RankedTarget(target, Risk.LOW, "ordinary path")
+
+
+def _dangling_phrase(path: str) -> str:
+    """``; HEAD: … reachable from NO ref …`` for a detached tree no ref keeps, else "".
+
+    WHY (QA Q4, PR #3987): the refusal guidance tells the agent to act on
+    "HEAD reachable from no ref" by tagging or branching first, but only the
+    judge's brief carried that fact; the deterministic reason the agent sees
+    said just ``dirty … (detached HEAD)``. Same wording as the judge's line
+    (``check.py``), so both name one fact.
+    """
+    from local_operator.guardrails.provenance import detached_head
+
+    detached = detached_head(path)
+    if detached is None or detached[1] is not None:
+        return ""
+    return (
+        f"; HEAD: detached at {detached[0]}, reachable from NO ref (commits made in "
+        "it are lost with the tree: keep them with git tag or git branch first)"
+    )
+
+
+def _with_scan_note(facts: str, path: str) -> str:
+    """``facts`` plus the cwd-unreadable processes the scan ignored for ``path``.
+
+    WHY (operator directive 2026-11-14): a process whose cwd this uid may not
+    read no longer fails the whole holder scan closed
+    (``provenance._unreadable_cwd_evidence``); the judge, the agent and the
+    operator still see that it was there and why it did not count.
+    """
+    from local_operator.guardrails.provenance import cwd_scan_note
+
+    note = cwd_scan_note(path)
+    return f"{facts}; {note}" if note else facts
 
 
 def _scratch_location(path: str) -> bool:
@@ -1616,7 +1651,7 @@ def _reached_worktrees(
         if state is None or activity is None:
             held.append(f"{root}: created by this session; not checked in time (state unknown)")
             continue
-        facts = activity.facts()
+        facts = _with_scan_note(activity.facts(), root)
         if activity.pr_state == "open":
             return RankedTarget(
                 target,
@@ -1649,7 +1684,11 @@ def _reached_worktrees(
                 scratch.append(f"{root}: {phrase}")
             continue
         if state != "clean" or not idle:
-            changes = f"; {prov.describe_changes(root)}" if state == "dirty" else ""
+            changes = (
+                f"; {prov.describe_changes(root)}{_dangling_phrase(root)}"
+                if state == "dirty"
+                else ""
+            )
             held.append(
                 f"{root}: created by this session; linked worktree state: "
                 f"{prov.state_phrase(root, state, session_id)}{changes}; {facts}"
