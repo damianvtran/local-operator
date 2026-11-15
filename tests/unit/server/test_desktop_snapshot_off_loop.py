@@ -66,6 +66,20 @@ MAX_LAG_S = 0.3
 TICK_S = 0.01
 
 
+@pytest.fixture(autouse=True)
+def _fresh_snapshot_pool() -> Any:
+    """Each test gets its own snapshot pool, joined at teardown.
+
+    The pool is process-wide and lazily created; without this its worker
+    thread outlives the test and the thread-leak reporter flags it (review
+    round 1, R1-n2 / QA Q3), and one test's queued builds could leak into the
+    next test's pool.
+    """
+    module.shutdown_snapshot_pool(wait=True)
+    yield
+    module.shutdown_snapshot_pool(wait=True)
+
+
 def _large_state(session_id: str, cwd: str) -> FrontendSessionState:
     """A frozen roster shaped like the stalled session's: many jobs, each with usage."""
     usage = Usage(input_tokens=1000, output_tokens=200)
@@ -314,3 +328,155 @@ async def test_concurrent_opens_of_one_state_share_one_build(
     assert front_one == front_two
     assert front_one is not front_two and front_one["snapshot"] is not front_two["snapshot"]
     assert bridge._wire_inflight is None, "a settled build must not stay pinned on the bridge"
+
+
+async def _seed_cold_session(root: Path, session_id: str) -> None:
+    """A journal whose durable checkpoint carries the large roster, as a cold open meets it."""
+    from local_operator.harness.types import Message, TextContent
+    from local_operator.session.frontend_state import FRONTEND_CHECKPOINT_CUSTOM_TYPE
+    from local_operator.session.transcript import Transcript
+
+    directory = root / "sessions" / session_id
+    directory.mkdir(parents=True)
+    (directory / "created_at.json").write_text(str(time.time()))
+    transcript = Transcript(directory)
+    await transcript.append_custom(
+        "selected_model",
+        {"version": 2, "selector": "test/mock", "effort": None, "boot": "test/mock"},
+    )
+    await transcript.append_messages(
+        [
+            Message(role="user", content=[TextContent(text="hello")]),
+            Message(role="assistant", content=[TextContent(text="hi")], stop_reason="stop"),
+        ]
+    )
+    state = _large_state(session_id, str(root))
+    await transcript.append_custom(
+        FRONTEND_CHECKPOINT_CUSTOM_TYPE,
+        {"checkpoint_id": "c1", "state": state.model_dump(mode="json")},
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_cold_open_of_a_large_session_does_not_hold_the_event_loop(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The FIRST open after a respawn -- the app's reconnect -- builds the facade off the loop.
+
+    PR #4012 QA round 1, Q1: a cold facade's install froze the 2,000-job
+    roster, detached the jobs facade's copies, and cloned the whole state twice
+    more (``_finish_sync``'s ``live_events`` read and the bridge's joining
+    snapshot), all on the serving loop -- 1.2 s held at 30 MB, so ``/health``
+    missed its p95 on exactly the reconnect. Driven through the pool's real
+    door, so every step a stream open takes before its snapshot is measured.
+    """
+    root = tmp_path / "home" / ".local-operator"
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(root))
+    await _seed_cold_session(root, "c01d00000001")
+    pool = module.DesktopSessions(root)
+    gc.collect()
+
+    async def cold_open() -> int:
+        async with pool.session("c01d00000001", read=True, allow_draft=True) as bridge:
+            sub = bridge.subscribe()
+            stream = bridge.events(sub, epoch=None, after_seq=0)
+            try:
+                async for frame in stream:
+                    if frame["type"] == "snapshot":
+                        return len(frame["payload"]["frontend"]["snapshot"]["jobs"])
+            finally:
+                await stream.aclose()
+        raise AssertionError("the stream ended without a snapshot")
+
+    try:
+        jobs, lag = await _max_loop_lag(cold_open())
+    finally:
+        await pool.close()
+
+    assert jobs == ROSTER, "the guard must measure a cold open that restored the roster"
+    assert lag < MAX_LAG_S, (
+        f"the cold open held the event loop for {lag * 1000:.0f} ms; the cold install's "
+        "freeze, the jobs facade copies and the joining clones must stay off the loop "
+        "(PR #4012, QA round 1, Q1)"
+    )
+
+
+@pytest.mark.asyncio
+async def test_abandoned_opens_leave_no_queued_builds(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Six cancelled opens of a changing state withdraw their queued builds (R1-m1).
+
+    Both pool workers are busy, so every open's build is QUEUED; a busy session
+    installs a new state between opens, so none coalesce. Once every viewer has
+    left, nothing may still be waiting to run, or a live viewer's next open
+    queues behind abandoned multi-second builds.
+    """
+    bridge = _bridge(tmp_path)
+    builds: list[str] = []
+    original = module._wire_state_of
+
+    def counted(capture: Any) -> dict[str, Any]:
+        builds.append(threading.current_thread().name)
+        return original(capture)
+
+    monkeypatch.setattr(module, "_wire_state_of", counted)
+    pool = module._snapshot_pool()
+    hold = threading.Event()
+    blockers = [pool.submit(hold.wait, 10) for _ in range(module.SNAPSHOT_BUILD_WORKERS)]
+    try:
+        for index in range(6):
+            bridge.remote._install_frontend(
+                FrontendSessionState(
+                    session_id="s1",
+                    epoch="e-small",
+                    cwd=str(tmp_path),
+                    conversation_title=f"t{index}",
+                ),
+                publish=True,
+            )
+            reference = bridge.remote.frontend_state_reference()[1]
+            opening = asyncio.ensure_future(bridge.snapshot())
+            for _ in range(500):
+                entry = bridge._wire_inflight
+                if entry is not None and entry.capture.reference is reference:
+                    break
+                await asyncio.sleep(0.01)
+            else:
+                raise AssertionError("the open never queued its build")
+            assert entry.waiters == 1 and not entry.work.running()
+            opening.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await opening
+            assert entry.work.cancelled(), "the last waiter left but its queued build stayed"
+        await asyncio.sleep(0)
+        assert bridge._wire_inflight is None, "a withdrawn build must not stay pinned"
+    finally:
+        hold.set()
+        for blocker in blockers:
+            blocker.result(10)
+    module.shutdown_snapshot_pool(wait=True)
+    assert builds == [], f"{len(builds)} abandoned builds still ran"
+
+
+@pytest.mark.asyncio
+async def test_a_running_build_is_let_finish_for_the_next_open(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Only QUEUED work is withdrawn: a running build stays coalescable (R1-m1)."""
+    bridge = _bridge(tmp_path)
+    held = _HeldBuild(monkeypatch)
+    first = asyncio.ensure_future(bridge.snapshot())
+    await held.wait_started()
+    first.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await first
+    entry = bridge._wire_inflight
+    assert entry is not None and entry.waiters == 0 and not entry.work.cancelled()
+    second = asyncio.ensure_future(bridge.snapshot())
+    await asyncio.sleep(0.5)
+    held.release.set()
+    snapshot = await second
+    assert held.builds == 1, "the next open of the same state must join the running build"
+    assert snapshot["type"] == "snapshot"

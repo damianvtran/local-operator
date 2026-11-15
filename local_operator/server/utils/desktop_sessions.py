@@ -415,8 +415,10 @@ def _snapshot_pool() -> concurrent.futures.ThreadPoolExecutor:
     """The process-wide snapshot build pool, created on first use.
 
     Lazy so importing this module (every ``lop`` command that touches the
-    desktop plane) starts no threads; idle pool threads are daemon-like and
-    exit with the interpreter.
+    desktop plane) starts no threads. The workers are NOT daemon threads: the
+    interpreter joins them at exit after any queued work, so the serve's own
+    stop calls :func:`shutdown_snapshot_pool`, which drops queued builds and
+    lets only a running one finish (review round 1, R1-n1).
     """
     global _snapshot_executor
     if _snapshot_executor is None:
@@ -424,6 +426,35 @@ def _snapshot_pool() -> concurrent.futures.ThreadPoolExecutor:
             max_workers=SNAPSHOT_BUILD_WORKERS, thread_name_prefix="lop-desktop-snapshot"
         )
     return _snapshot_executor
+
+
+def shutdown_snapshot_pool(*, wait: bool = False) -> None:
+    """Stop the snapshot pool, dropping builds still queued on it.
+
+    Called when the desktop session host closes (``lop serve`` stopping), so
+    builds nobody will read do not delay the exit; ``wait=True`` also joins the
+    workers (tests use it so no pool thread outlives them). A later
+    :func:`_snapshot_pool` call starts a fresh pool.
+    """
+    global _snapshot_executor
+    executor, _snapshot_executor = _snapshot_executor, None
+    if executor is not None:
+        executor.shutdown(wait=wait, cancel_futures=True)
+
+
+@dataclass(slots=True)
+class _WireBuild:
+    """One in-flight snapshot build and how many opens are awaiting it.
+
+    ``work`` is the pool's own future (cancellable only while queued);
+    ``future`` is its loop-side wrapper the waiters shield. ``waiters`` is only
+    touched on the serving loop, so it needs no lock.
+    """
+
+    capture: "_WireCapture"
+    work: concurrent.futures.Future[dict[str, Any]]
+    future: asyncio.Future[dict[str, Any]]
+    waiters: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -1684,7 +1715,7 @@ class DesktopSessionBridge:
         self.remote: AttachedSession | None = None
         #: The one off-loop snapshot build in flight, keyed by what it was
         #: built from (see ``_wire_state_off_loop``).
-        self._wire_inflight: tuple[_WireCapture, asyncio.Future[dict[str, Any]]] | None = None
+        self._wire_inflight: _WireBuild | None = None
         self.epoch = uuid.uuid4().hex
         self.sequence = 0
         self.replay: deque[tuple[dict[str, Any], int]] = deque()
@@ -2354,7 +2385,7 @@ class DesktopSessionBridge:
             remote.set_local_cwd_callback(lambda _cwd: self.publish_frontend_replace())
             self.unsubscribers = [
                 remote.subscribe(self._event),
-                remote.subscribe_frontend(self._frontend).unsubscribe,
+                self._subscribe_frontend_updates(remote),
             ]
         return self.remote
 
@@ -3376,6 +3407,21 @@ class DesktopSessionBridge:
             **window,
         }
 
+    def _subscribe_frontend_updates(self, remote: Any) -> Callable[[], None]:
+        """Relay ``remote``'s frontend updates to ``_frontend``; returns the unsubscribe.
+
+        Update-only where the facade offers it: this bridge paints every first
+        frame from its own off-loop snapshot and never read the joining
+        snapshot ``subscribe_frontend`` clones, which on a 2,000-job roster was
+        ~0.28 s of every cold open on the serving loop (PR #4012, QA round 1,
+        Q1). A facade without the method (peer viewers' doubles in tests) keeps
+        the original call.
+        """
+        updates = getattr(remote, "subscribe_frontend_updates", None)
+        if updates is not None:
+            return cast(Callable[[], None], updates(self._frontend))
+        return cast(Callable[[], None], remote.subscribe_frontend(self._frontend).unsubscribe)
+
     def _frontend(self, update: FrontendUpdate) -> None:
         # Keep the runtime's field deltas, not a full snapshot per streamed token.
         # Large roster/usage fields still pass through the shared wire budget; the
@@ -3772,20 +3818,36 @@ class DesktopSessionBridge:
         session would otherwise each pay the whole clone and dump); each gets
         its own top two levels (:func:`_own_wire_state`). Shielded, so one
         viewer disconnecting mid-build cannot cancel the build another viewer
-        is waiting on; the pool thread finishes it either way.
+        is waiting on.
+
+        ABANDONED BUILDS ARE WITHDRAWN (review round 1, R1-m1). Each build
+        counts its waiters; when the LAST one leaves (the viewer disconnected or
+        the open was cancelled) a build still QUEUED on the pool is cancelled,
+        because nobody will read it and a busy session installs a new state on
+        almost every event, so successive opens rarely coalesce -- in a
+        reconnect storm a live viewer's open otherwise waited behind several
+        abandoned multi-second builds (repro: 6 cancelled opens left 4 queued).
+        A build already RUNNING is let finish: a pool thread cannot be
+        interrupted, and the entry stays coalescable for the next open of the
+        same state meanwhile.
         """
         inflight = self._wire_inflight
         if (
             inflight is not None
-            and not inflight[1].done()
-            and inflight[0].reference is capture.reference
-            and inflight[0].attention == capture.attention
+            and not inflight.future.done()
+            # A withdrawn build settles its loop-side wrapper one callback
+            # later; joining it in that window would hand this open a
+            # CancelledError it never asked for.
+            and not inflight.work.cancelled()
+            and inflight.capture.reference is capture.reference
+            and inflight.capture.attention == capture.attention
         ):
-            future = inflight[1]
+            entry = inflight
+            future = entry.future
         else:
-            loop = asyncio.get_running_loop()
-            future = loop.run_in_executor(_snapshot_pool(), _wire_state_of, capture)
-            entry = (capture, future)
+            work = _snapshot_pool().submit(_wire_state_of, capture)
+            future = asyncio.wrap_future(work)
+            entry = _WireBuild(capture=capture, work=work, future=future)
             self._wire_inflight = entry
 
             def settled(done: asyncio.Future[dict[str, Any]]) -> None:
@@ -3799,7 +3861,18 @@ class DesktopSessionBridge:
                     done.exception()
 
             future.add_done_callback(settled)
-        return _own_wire_state(await asyncio.shield(future))
+        entry.waiters += 1
+        try:
+            built = await asyncio.shield(future)
+        finally:
+            entry.waiters -= 1
+            if entry.waiters == 0 and not future.done():
+                # ``Future.cancel`` on the pool's own future succeeds only while
+                # the item is still queued; ``wrap_future`` then cancels
+                # ``future`` and ``settled`` drops the entry. A running build
+                # refuses and finishes normally.
+                entry.work.cancel()
+        return _own_wire_state(built)
 
     def _cold_verdict(self) -> bool:
         """Whether this bridge's facade is COLD, read now, with no I/O.
@@ -11125,3 +11198,6 @@ class DesktopSessions:
     async def close(self) -> None:
         await asyncio.gather(*(bridge.close() for bridge in self.bridges.values()))
         self.bridges.clear()
+        # Every bridge is gone, so no open can await a build any more; drop the
+        # queued ones rather than let the interpreter's exit join run them.
+        shutdown_snapshot_pool()
