@@ -386,6 +386,21 @@ def _spawn_interpreter() -> str:
     return str(candidate) if candidate is not None else sys.executable
 
 
+def _prime_login_path() -> None:
+    """Adopt the operator's login-shell PATH into THIS process, once per lineage.
+
+    A seam of its own so the suite can neutralise it in one place
+    (``tests/conftest.py``): unit cells that build a runtime env must not shell
+    out to a login shell or have their own ``PATH`` rewritten under them. The
+    cells that assert the prime itself restore the real function. Mutating
+    ``os.environ`` (rather than only the child mapping) is deliberate: it sets
+    the marker, so this daemon pays the round-trip once, not on every engage.
+    """
+    from local_operator.helpers import setup_cross_platform_environment
+
+    setup_cross_platform_environment()
+
+
 def _runtime_env(
     session_id: str,
     cwd: str,
@@ -410,7 +425,32 @@ def _runtime_env(
     independence §2): launchd gives it a bare ``PATH``, so the engaging
     surface's environment — Homebrew, nvm, cargo — has to travel with the ask.
     See :func:`_spawn_runtime_local` for the rationale of each value written.
+
+    THE ENGAGING SURFACE IS NOT ALWAYS PRIMED, so the PATH is primed HERE.
+    That paragraph used to assume the engager already carried the operator's
+    login PATH. True for ``lop`` itself, the API server and the wake supervisor
+    (each calls ``helpers.setup_cross_platform_environment`` at startup), but
+    not for the other ``python -m`` daemons that engage runtimes: the team-bridge
+    connector, the mesh relay, the mobile service. launchd starts those with
+    ``PATH=/usr/bin:/bin:/usr/sbin:/sbin`` and a systemd user manager with its
+    own minimal default (``supervisors.py``'s unit PATH), and a runtime they
+    engaged inherited exactly that, so its bash tool could not find ``gh``,
+    ``brew`` or anything else under ``/opt/homebrew/bin`` (Aida's runtime after
+    a restart, 2026-11-15). Priming at this one builder covers every spawn
+    route, local and hosted, whichever daemon engaged, instead of relying on
+    each daemon's ``__main__`` remembering to.
+
+    Cost: the prime is idempotent per lineage through ``helpers.PATH_PRIMED_ENV``.
+    A primed engager (the CLI, or a daemon after its first engage) returns at
+    the marker check with no subprocess, so the bulk-resume startup work that
+    made inheritance the cache is not paid again. Only the first engage from an
+    unprimed daemon pays the login-shell round-trip (about a second, bounded by
+    ``get_posix_shell_path``'s timeout); it runs on the engage's worker thread
+    (``engage_runtime`` calls ``_spawn_runtime`` via ``asyncio.to_thread``), not
+    on an event loop. A failed capture leaves the marker unset and the inherited
+    PATH in place, so the next engage retries rather than pinning a bare PATH.
     """
+    _prime_login_path()
     env = dict(os.environ)
     # The session runtime never reads the daemon's desktop bearer, and anything it
     # holds its tool children can read (``ps -E`` showed it in cell 14 on #3002), so

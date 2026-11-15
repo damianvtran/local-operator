@@ -50,7 +50,7 @@ foreign lease, or a label launchd does not run as this pid is refused before
 any work starts.
 
 BACKENDS. ``launchd`` (Darwin production): a per-owner LaunchAgent
-``com.damian.lop-episode.<owner_id>`` -- ``RunAtLoad`` + ``KeepAlive=false`` --
+``com.local-operator.episode.<owner_id>`` -- ``RunAtLoad`` + ``KeepAlive=false`` --
 written to the REAL passwd home's ``Library/LaunchAgents`` (``launchd.real_home``
 derives the home from the uid, never ``$HOME``, so a redirected home cannot
 address or write the operator's jobs and vice versa). ``detached`` (POSIX
@@ -442,9 +442,53 @@ def _lease_payload(
     }
 
 
+#: The per-episode label namespace. Product code, so the product's reverse-DNS
+#: prefix: the old spelling carried a personal name into every user's
+#: ``launchctl list``. Jobs left under the OLD prefix are swept
+#: on ``lop update`` by ``update._sweep_legacy_episode_plists``, which is the one
+#: place that still spells it.
+JOB_LABEL_PREFIX = "com.local-operator.episode."
+
+
 def job_label_for(owner_id: str) -> str:
     """The per-owner LaunchAgent label. Unique per episode by construction."""
-    return f"com.damian.lop-episode.{owner_id}"
+    return f"{JOB_LABEL_PREFIX}{owner_id}"
+
+
+def _attributed_program(argv: tuple[str, ...]) -> tuple[dict[str, object], dict[str, str]]:
+    """``(plist keys, environment)`` attributing an episode job; ``({}, {})`` keeps the old shape.
+
+    WHY. Background Task Management names a LaunchAgent after its ``Program``;
+    with none, after ``ProgramArguments[0]`` — here a venv interpreter, which is
+    why every episode raised its own "python3.12 can run in the background"
+    banner. With the CI-signed launcher as ``Program`` the item reads "Local
+    Operator" under "Radient Inc." and, that developer group already notified,
+    registers silently (measured 2026-11-14; see ``update`` "The CI-signed
+    launcher").
+
+    THE INTERPRETER MUST NOT CHANGE. ``argv[0]`` is a specific venv's python, and
+    the launcher's default mode would run the installed generation's instead, so
+    the launcher is put in TARGET mode: ``LOP_LAUNCHER_TARGET`` = ``argv[0]``, and it
+    execs exactly that with ``ProgramArguments`` unchanged (argv[0] included).
+    A relative ``argv[0]`` cannot be a target (the launcher refuses it), so it
+    keeps the old shape. No verified launcher (pure wheel, source install, Linux):
+    nothing is added, and the plist is byte-for-byte what it was.
+    """
+    if not argv or not os.path.isabs(argv[0]):
+        return {}, {}
+    try:
+        from local_operator import update
+
+        launcher = update.signed_launcher()
+    except Exception:  # noqa: BLE001 — attribution is cosmetic; the old shape still runs
+        return {}, {}
+    if launcher is None:
+        return {}, {}
+    keys: dict[str, object] = {
+        "Program": str(launcher),
+        "AssociatedBundleIdentifiers": ["com.local-operator"],
+    }
+    return keys, {update.LAUNCHER_TARGET_ENV: argv[0]}
 
 
 #: Every ``launchctl`` call is BOUNDED. The startup wait promises a real
@@ -838,11 +882,16 @@ def _start_launchd(
         raise OwnedProcessRefused("owner registration already exists; choose a fresh owner id")
     if existing_job.returncode != 113:
         raise OwnedProcessRefused("launchd absence is unverified; no owner start attempted")
+    attributed, target_env = _attributed_program(spec.argv)
     plist = {
         "Label": job_label,
+        **attributed,
         "ProgramArguments": list(spec.argv),
         "WorkingDirectory": str(spec.cwd),
-        "EnvironmentVariables": {key: str(value) for key, value in env.items()},
+        "EnvironmentVariables": {
+            **{key: str(value) for key, value in env.items()},
+            **target_env,
+        },
         "RunAtLoad": True,
         "KeepAlive": False,
         "StandardOutPath": str(paths.stdout_path),

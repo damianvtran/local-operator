@@ -227,7 +227,7 @@ def test_a_hung_preflight_is_bounded_and_reaped(tmp_path, monkeypatch):
     [
         ([], "publisher's", "lop permissions setup"),
         (
-            [(_SHA1, f"Developer ID Application: Example ({_TEAM})")],
+            [(_SHA1, procname.SIGNING_AUTHORITY)],
             "lop permissions setup",
             "publisher's",
         ),
@@ -268,7 +268,7 @@ class _Setup:
         monkeypatch.setattr(
             permissions_cli,
             "_developer_identities",
-            lambda team: [(_SHA1, f"Developer ID Application: Example ({_TEAM})")],
+            lambda team: [(_SHA1, procname.SIGNING_AUTHORITY)],
         )
         monkeypatch.setattr(procname, "publish_team_runtime_result", lambda *a, **k: self.result)
         monkeypatch.setattr(procname, "ensure_branded_interpreter", lambda: None)
@@ -292,7 +292,9 @@ class _Setup:
         return record["always_allow_confirmed"]
 
     def prior(self, identity: str, always: bool) -> None:
-        procname.write_signing_optin(identity, _TEAM, always_allow_confirmed=always)
+        procname.write_signing_optin(
+            identity, _TEAM, always_allow_confirmed=always, name=procname.SIGNING_AUTHORITY
+        )
 
 
 @darwin_only

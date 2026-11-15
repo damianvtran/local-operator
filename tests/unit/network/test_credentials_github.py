@@ -76,6 +76,9 @@ from local_operator.network.credentials.types import (
     GrantScope,
 )
 from local_operator.paths import CONFIG_DIR_ENV
+from tests.unit.network.self_revoke_guard import (  # noqa: F401 — autouse fixture by import
+    no_self_revoke_outlives_its_cell,
+)
 
 OWNER_DEVICE = "d_00000000000000000000000000000031"
 BORROWER_DEVICE = "d_00000000000000000000000000000032"
@@ -961,16 +964,22 @@ def test_revoke_deletes_the_outstanding_token_now(owner: Any, github_api: _FakeG
     assert github_api.revoke_requests == [token]
 
 
-def test_window_end_revokes_on_the_broker_loop(
+def test_hold_end_revokes_on_the_broker_loop(
     owner: Any, github_api: _FakeGithub, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """T3(a): the broker's own loop issues the DELETE at ``grant_expires_at``.
+    """T3(a): the broker's own loop issues the DELETE at the grant's HOLD end.
 
-    The window is shortened by patching the TTL reader the broker uses — the
-    mechanism under test is the REVOKER (registration, scheduling on the loop,
-    the DELETE), not the number of seconds a config says.
+    Since 2026-11-14 the scheduled DELETE fires at ``hold_until_ms`` (a borrower may
+    serve the token from the offline hold after the window), not ``grant_expires_at``.
+    Both are shortened by patching the readers the broker uses — the mechanism under
+    test is the REVOKER (registration, scheduling on the loop, the DELETE), not the
+    number of seconds a config says. The window-vs-hold timing itself is pinned in
+    ``test_credentials_hold_github_mcp.py``.
     """
     monkeypatch.setattr(owner_mod, "_grant_ttl_s", lambda root: 1.0)
+    monkeypatch.setattr(
+        owner_mod, "_offline_hold_until_ms", lambda root, now_ms, token_ms, grant_ms: now_ms + 1500
+    )
     audited = threading.Event()
     audit_sink = owner.broker._github_audit_sink
 
@@ -984,7 +993,7 @@ def test_window_end_revokes_on_the_broker_loop(
     monkeypatch.setattr(owner.broker, "_github_audit_sink", record)
     token = _ask_grant(owner, BORROWER_DEVICE)["access_token"]
     assert github_api.live(token)
-    assert audited.wait(timeout=10.0), "the window-end revoke audit never completed"
+    assert audited.wait(timeout=10.0), "the hold-end revoke audit never completed"
     assert github_api.revoke_requests == [token]
     assert not github_api.live(token)
     rows = _audit_rows(owner, "credential.revoke")
@@ -1558,6 +1567,43 @@ def test_the_printenv_invariant_masks_the_injected_token(
     assert "[redacted]" in result.text, "the result did not show the masking at all"
 
 
+def test_lent_github_env_is_the_one_door_no_scrubber_no_bearer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The shared door bash, monitor ticks and code requests all take.
+
+    No sink → no borrow at all; a sink that raises → nothing handed out (an
+    unmaskable bearer is withheld); otherwise the token is registered BEFORE the
+    env is returned, and the borrow is ``borrowed_git_env``'s, arguments intact.
+    """
+    token = f"ghs_door_{os.urandom(4).hex()}"
+    injected = github_mod.git_env_for_token(token)
+    calls: list[dict[str, Any]] = []
+
+    def borrow(**kwargs: Any) -> tuple[dict[str, str], str]:
+        calls.append(kwargs)
+        return dict(injected), token
+
+    monkeypatch.setattr(github_mod, "borrowed_git_env", borrow)
+
+    assert github_mod.lent_github_env(session_id="s1", register=None) == ({}, "")
+    assert calls == [], "a caller that cannot scrub must not even trigger a borrow"
+
+    def refuse(_value: str) -> None:
+        raise RuntimeError("ledger full")
+
+    assert github_mod.lent_github_env(session_id="s1", register=refuse) == ({}, "")
+
+    registered: list[str] = []
+    client = object()
+    env_out, served = github_mod.lent_github_env(
+        session_id="s2", register=registered.append, client=client
+    )
+    assert (env_out, served) == (injected, token)
+    assert registered == [token]
+    assert calls[-1] == {"session_id": "s2", "client": client}
+
+
 def test_the_github_refusal_codes_are_in_the_catalogue_and_carry_ttls() -> None:
     """T8d: the four new codes are wired into the shared refusal catalogue.
 
@@ -1641,7 +1687,12 @@ def test_the_revoke_op_deletes_now_and_the_receipt_carries_the_mint_revoke_copy(
     monkeypatch.setattr(owner_mod, "broker_for_relay", lambda server: owner.broker)
     ops = _LocalOps(server=object())
     acked = ops.revoke({"credential_key": github_mod.GITHUB_KEY, "holder": BORROWER_DEVICE})
-    assert acked == {"kind": "ack", "key": github_mod.GITHUB_KEY, "revoked": 1}
+    # ``lent_hold_until_ms`` (#3947 R2-m2) is pinned in test_credentials_hold_github_mcp.
+    assert {k: v for k, v in acked.items() if k != "lent_hold_until_ms"} == {
+        "kind": "ack",
+        "key": github_mod.GITHUB_KEY,
+        "revoked": 1,
+    }
     assert github_api.revoke_requests == [token]
     assert not github_api.live(token)
 

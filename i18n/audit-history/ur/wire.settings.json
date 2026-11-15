@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "ur",
   "namespace": "wire.settings",
-  "history_sha256": "7f08fb87f0b13481648205482ee8a1b34ee2709be3f548b66f85ce8fdf836b3b",
+  "history_sha256": "a421ddc502688728ee29b31c7e5056ad751afd7858a5344d8bb2014119456e20",
   "entries": [
     {
       "locale": "ur",
@@ -269,6 +269,197 @@
     {
       "locale": "ur",
       "namespace": "wire.settings",
+      "source_sha256": "5ddafb0e761c12afdcaaa7743ddb584927bdc874bf7eecefb34009574d4a7152",
+      "target_sha256": "d74ae8e4990fec484faa1321df1f185f65011e17709b042aad0f420166889028",
+      "translator": {
+        "agent": "coder (PR #3872 core implementer, lopdev, job 485ea7afeea9)",
+        "session": "f4c08c15c058",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-12",
+        "provenance_source": "manager ce618964c88e subagent-roster.v1.json record 485ea7afeea9 (model_label)"
+      },
+      "translators_other": [
+        {
+          "agent": "round-1 i18n auditor (I1-4 corrected values)",
+          "session": "a3fade2429f4",
+          "model": "anthropic/claude-opus-5-5",
+          "date": "2026-11-12"
+        },
+        {
+          "agent": "coder (PR #3872 core round-1 remediation, lopdev, job b449e9fdc5b7)",
+          "session": "e06b4314cec3",
+          "model": "anthropic/claude-opus-5-5",
+          "date": "2026-11-12",
+          "provenance_source": "self-reported served model, no fallback: PR #3872 issuecomment-6831178771"
+        }
+      ],
+      "auditor": {
+        "agent": "i18n auditor (lopdev reviewer role, task core-r2-i18n-audit, job 52eba838ea60; independent of translators f4c08c15c058/e06b4314cec3 and of round-1 auditor a3fade2429f4)",
+        "session": "187b766ab67d",
+        "model": "anthropic/claude-opus-5-5",
+        "fallback": "none observed in this session",
+        "date": "2026-11-12",
+        "result": "passed",
+        "unresolved_blocker_major": 0,
+        "findings": 0
+      },
+      "status": "passed",
+      "prior_audit": {
+        "agent": "round-1 i18n auditor",
+        "session": "a3fade2429f4",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-12",
+        "result": "passed",
+        "comment": "damianvtran/local-operator#3872 issuecomment-6830034892"
+      },
+      "note": "PR #3872 r2 audit 187b766ab67d (claude-opus-5-5, no fallback) at 14d8601fd: 1 I1-4 correction(s) verified (second independent read) + 2 PR-added key(s) re-read; 0 finding(s), 0 blocker/major. Target d74ae8e4990f. Evidence: i18n/audits/evidence/ur/wire.settings/rfp-187b766ab67d/record.json",
+      "second_audit": {
+        "agent": "i18n auditor (lopdev reviewer role, task core-r2-i18n-audit, job 52eba838ea60; independent of translators f4c08c15c058/e06b4314cec3 and of round-1 auditor a3fade2429f4)",
+        "session": "187b766ab67d",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-12",
+        "result": "passed",
+        "scope": "the 1 auditor-corrected value(s) (I1-4) in local_operator/i18n/catalogues/ur/wire.settings.json, read against en, glossary.md and the ur style guide"
+      }
+    },
+    {
+      "locale": "ur",
+      "namespace": "wire.settings",
+      "source_sha256": "20259ccabe0c6deaf984d4d86667c86ac29cf016d9e161da94c53de611a9ddc4",
+      "target_sha256": "d0fe768be13af764db17a4a02c21721cc2fe6f5df2d0f68d2232959eff8e21ba",
+      "translator": {
+        "agent": "coder (PR #3872 core implementer, lopdev, job 485ea7afeea9)",
+        "session": "f4c08c15c058",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-12",
+        "provenance_source": "manager ce618964c88e subagent-roster.v1.json record 485ea7afeea9 (model_label)"
+      },
+      "composition_translators": [
+        {
+          "side": "feature",
+          "provenance": {
+            "agent": "coder (PR #3872 core implementer, lopdev, job 485ea7afeea9)",
+            "session": "f4c08c15c058",
+            "model": "anthropic/claude-opus-5-5",
+            "date": "2026-11-12",
+            "provenance_source": "manager ce618964c88e subagent-roster.v1.json record 485ea7afeea9 (model_label)"
+          },
+          "additional": [
+            {
+              "agent": "round-1 i18n auditor (I1-4 corrected values)",
+              "session": "a3fade2429f4",
+              "model": "anthropic/claude-opus-5-5",
+              "date": "2026-11-12"
+            },
+            {
+              "agent": "coder (PR #3872 core round-1 remediation, lopdev, job b449e9fdc5b7)",
+              "session": "e06b4314cec3",
+              "model": "anthropic/claude-opus-5-5",
+              "date": "2026-11-12",
+              "provenance_source": "self-reported served model, no fallback: PR #3872 issuecomment-6831178771"
+            }
+          ]
+        },
+        {
+          "side": "main",
+          "provenance": {
+            "agent": "core-backend coder cf2843d74957; round-1 remediation coder 1c07b39051ed (lopdev coder role) — relayed from PR #3832 i18n audit comments 6811281029/6812645445, not independently verified",
+            "model": "anthropic/claude-opus-5-5",
+            "fallback": "none reported in the relayed source",
+            "date": "2026-11-11..2026-11-12 (git: 09839b6de, 75606914f, eaff8c7a9)"
+          },
+          "additional": []
+        }
+      ],
+      "auditor": {
+        "agent": "independent i18n compatibility auditor (lopdev reviewer, resumed existing core i18n stream)",
+        "session": "187b766ab67d",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-13",
+        "fallback": "none during this resumed audit",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "composition_audit": {
+        "source_head": "84892ed59f03b85ca52e8c3ea63d55d0f4abd713",
+        "common_base": "4d113fc6c23b3fbb2afa426c0c6747ee0c399467",
+        "parent_revisions": [
+          "145a2ac1ad7846b1ebcaafb8661f6db865d2de1f",
+          "9a98146e1a1e5a518f67371203d30ea6ccf18e11"
+        ],
+        "evidence": "i18n/audits/evidence/ur/wire.settings/merged-compat-187b766ab67d-84892ed59/record.json"
+      },
+      "note": "Genuine independent merged-source semantic/context compatibility audit, 2026-11-13, 187b766ab67d, openai/gpt-6.1-sol, no fallback in this audit. Exact disjoint parent key/value composition; 2 feature + 6 upstream keys semantically read; unchanged keys carried by current-byte parent evidence. Historical provenance preserved as reported, not relabelled. Evidence: i18n/audits/evidence/ur/wire.settings/merged-compat-187b766ab67d-84892ed59/record.json"
+    },
+    {
+      "locale": "ur",
+      "namespace": "wire.settings",
+      "source_sha256": "99abc7c2ebaaf0d498650af7f32e9ab51e4ee25dc79ae0285408314ad4453e64",
+      "target_sha256": "5d53dc309c7323a2bf727bd742ee158c94f981e63b7949ed733a82511e422b01",
+      "translator": {
+        "agent": "coder (PR #3872 core implementer, lopdev, job 485ea7afeea9)",
+        "session": "f4c08c15c058",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-12",
+        "provenance_source": "manager ce618964c88e subagent-roster.v1.json record 485ea7afeea9 (model_label)"
+      },
+      "composition_translators": [
+        {
+          "side": "feature",
+          "provenance": {
+            "agent": "coder (PR #3872 core implementer, lopdev, job 485ea7afeea9)",
+            "session": "f4c08c15c058",
+            "model": "anthropic/claude-opus-5-5",
+            "date": "2026-11-12",
+            "provenance_source": "manager ce618964c88e subagent-roster.v1.json record 485ea7afeea9 (model_label)"
+          },
+          "additional_reported": null
+        },
+        {
+          "side": "main",
+          "provenance": {
+            "agent": "i18n-translator subagent, job d5aeddae9573 under manager session 79bddc262663 (commit 1c956878e5d3) — relayed by the manager, not independently verified",
+            "model": "anthropic/claude-opus-5-5",
+            "fallback": "none (as relayed by the manager)",
+            "date": "2026-11-13"
+          },
+          "additional_reported": null
+        }
+      ],
+      "auditor": {
+        "agent": "independent i18n compatibility auditor (existing PR3872 core-i18n stream; merged-source binding2)",
+        "session": "187b766ab67d",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-15",
+        "fallback": "none in this audit",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "composition_audit": {
+        "source_head": "da01272464c1ec3747d3ed18501d7c0e877f2fb7",
+        "parent_revisions": [
+          "801bdd93ff71c5d11209922ec9ba72393e826366",
+          "aa051d55925b483175388edcbae9dff315ca49f1"
+        ],
+        "common_base": "39b692a4bb7ec06e2305318d79b31a478661c87d",
+        "evidence": "i18n/audits/evidence/ur/wire.settings/merged-compat2-187b766ab67d-da012724/record.json"
+      },
+      "retained_upstream_findings": [
+        {
+          "id": "I-ur-1",
+          "severity": "NIT",
+          "disposition": "retained deferred colloquial lesser-value phrase"
+        }
+      ],
+      "note": "Independent merged-source binding2 audit 2026-11-15, 187b766ab67d, openai/gpt-6.1-sol, no fallback. Actual source 99abc7c2ebaaf0d498650af7f32e9ab51e4ee25dc79ae0285408314ad4453e64; exact disjoint parent-key composition (2 remote cache + 2 offline-hold keys), semantics/context freshly read, remaining 865 keys carried by verified fresh parent evidence. No translations/history rewritten. Evidence: i18n/audits/evidence/ur/wire.settings/merged-compat2-187b766ab67d-da012724/record.json"
+    },
+    {
+      "locale": "ur",
+      "namespace": "wire.settings",
       "source_sha256": "413b00d1f41ccf1377d2320cc7c7a4c375a675ad5c7985ba736c9030659bfb51",
       "translator": {
         "agent": "i18n-translator subagent (role task) under the radientdev manager (commit 66ce330dd739) — relayed by the manager, not independently verified",
@@ -328,6 +519,133 @@
         "first_audit_session": "d62d8ba8b744",
         "note": "0 blocker/0 major, 1 nit. Verdict formed before reading the first-audit note. Safety meaning checked for a user deciding whether to keep the setting on: the text says session name, last line and error causes reach the lock screen and paired phones, and that phone delivery goes through Radient's push service. Fidelity: all four elements present; 'جو ان تک Radient کی push سروس کے ذریعے پہنچتی ہیں' makes the Radient relay explicit (جو agrees with اطلاعات, ان = phones). NIT C2 (no change): 'لاک اسکرین اور جوڑے ہوئے فونز کی اطلاعات بھی شامل' is elliptical (omits ہیں); readable and meaning intact. سیشن per glossary; Arabic-script RTL with Latin islands Radient/push; Urdu ، and ۔; no Cf/bidi controls (U+200E/F, U+202A-E, U+2066-9, U+061C absent). No ICU placeholders (0=0); no Cf/bidi controls; copy_scan 0 findings. Same model family as translator and first auditor (claude-opus-5-5): disclosed."
       }
+    },
+    {
+      "locale": "ur",
+      "namespace": "wire.settings",
+      "source_sha256": "f5c40bc8a0762c3ffa8fea5ca6ab7c377f9fba8644fefed9153d760823a05da7",
+      "target_sha256": "83fae67082d56be7c3eb3ded7fe1f2f082e48f4b47dc2d61cbea407b8f1a7783",
+      "translator": {
+        "agent": "i18n-translator subagent (role task) under the radientdev manager (commit 66ce330dd739) — relayed by the manager, not independently verified",
+        "model": "anthropic/claude-opus-5-5",
+        "fallback": "none (as relayed by the manager)",
+        "date": "2026-11-15"
+      },
+      "composition_translators": [
+        {
+          "side": "feature (PR #3990)",
+          "provenance": {
+            "agent": "i18n-translator subagent (role task) under the radientdev manager (commit 66ce330dd739) — relayed by the manager, not independently verified",
+            "model": "anthropic/claude-opus-5-5",
+            "fallback": "none (as relayed by the manager)",
+            "date": "2026-11-15"
+          },
+          "keys": [
+            "wire.settings.display_notification_session_name.help"
+          ]
+        },
+        {
+          "side": "main",
+          "provenance": {
+            "agent": "coder (PR #3872 core implementer, lopdev, job 485ea7afeea9)",
+            "session": "f4c08c15c058",
+            "model": "anthropic/claude-opus-5-5",
+            "date": "2026-11-12",
+            "provenance_source": "manager ce618964c88e subagent-roster.v1.json record 485ea7afeea9 (model_label)"
+          },
+          "composition_translators": [
+            {
+              "side": "feature",
+              "provenance": {
+                "agent": "coder (PR #3872 core implementer, lopdev, job 485ea7afeea9)",
+                "session": "f4c08c15c058",
+                "model": "anthropic/claude-opus-5-5",
+                "date": "2026-11-12",
+                "provenance_source": "manager ce618964c88e subagent-roster.v1.json record 485ea7afeea9 (model_label)"
+              },
+              "additional_reported": null
+            },
+            {
+              "side": "main",
+              "provenance": {
+                "agent": "i18n-translator subagent, job d5aeddae9573 under manager session 79bddc262663 (commit 1c956878e5d3) — relayed by the manager, not independently verified",
+                "model": "anthropic/claude-opus-5-5",
+                "fallback": "none (as relayed by the manager)",
+                "date": "2026-11-13"
+              },
+              "additional_reported": null
+            }
+          ],
+          "keys": [
+            "wire.settings.desktop_remote_files_cache_bytes.help",
+            "wire.settings.desktop_remote_files_cache_bytes.label"
+          ]
+        }
+      ],
+      "auditor": {
+        "agent": "copy-reviewer (radientdev team, role task) — merged-source binding audit for PR #3990; not a translator or first/second auditor of either parent change in this session",
+        "session": "5b334e35ef01",
+        "model": "anthropic/claude-opus-5-5",
+        "fallback": "none observed in this session",
+        "date": "2026-11-15",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "composition_audit": {
+        "source_head": "uncommitted merge cb85fcb96216 into 2bf600c2edc8, staged tree 6c436a4d7646",
+        "parent_revisions": [
+          "2bf600c2edc81a0273b722515d0604a00e99b564",
+          "cb85fcb96216c14f43c5c35e2472609c59dd4ccd"
+        ],
+        "common_base": "058c3c456abd654ac600752bcb12b12af3e82b12",
+        "evidence": "i18n/audits/evidence/ur/wire.settings/merged-bind-5b334e35ef01-f5c40bc8/record.json",
+        "evidence_sha256": "9870d89ffe8fba9a0c197ef2c7309aedd9ce58ccd19eb193ae56809201362883",
+        "parent_receipts": [
+          {
+            "side": "feature (PR #3990)",
+            "source_sha256": "413b00d1f41ccf1377d2320cc7c7a4c375a675ad5c7985ba736c9030659bfb51",
+            "target_sha256": "8a0cf32c308b8bd59934eb2e0be97672e304e7e4935ed0599eda7a53d112946e",
+            "receipt_canonical_sha256": "3bae927a428f5d945c7c60a5240f936ca577a766825455ef55c7371d57ee738d",
+            "first_audit_receipt_canonical_sha256": "05c44f9f52186bf99391b73b88a58ae891b41f0b030848471596765cc84dffcd",
+            "keys": [
+              "wire.settings.display_notification_session_name.help"
+            ],
+            "auditor_session": "d62d8ba8b744",
+            "second_audit_session": "937c6ecbae86"
+          },
+          {
+            "side": "main",
+            "source_sha256": "99abc7c2ebaaf0d498650af7f32e9ab51e4ee25dc79ae0285408314ad4453e64",
+            "target_sha256": "5d53dc309c7323a2bf727bd742ee158c94f981e63b7949ed733a82511e422b01",
+            "receipt_canonical_sha256": "a274835ca7c4ad147a24f9eb00878f2a8ce4b33ab85bec769dd2442dd73517fe",
+            "keys": [
+              "wire.settings.desktop_remote_files_cache_bytes.help",
+              "wire.settings.desktop_remote_files_cache_bytes.label"
+            ],
+            "auditor_session": "187b766ab67d",
+            "evidence": "i18n/audits/evidence/ur/wire.settings/merged-compat2-187b766ab67d-da012724/record.json",
+            "evidence_sha256": "f4b14707d94f07bc26b4814cc17a110e9089581762ebb53b1821a7eccc06d31b"
+          }
+        ]
+      },
+      "second_audit": {
+        "status": "passed",
+        "agent": "copy-reviewer (radientdev team member, second independent i18n-auditor; not the translator and not the first auditor)",
+        "session": "937c6ecbae86",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-15",
+        "fallback": "none",
+        "scope": "1 key wire.settings.display_notification_session_name.help at en source 413b00d1f41c, target bytes 8a0cf32c308b; PR #3990 at 51f41a416a52 (translation 66ce330dd739)",
+        "findings": 1,
+        "unresolved_blocker_major": 0,
+        "first_audit_session": "d62d8ba8b744",
+        "note": "0 blocker/0 major, 1 nit. Verdict formed before reading the first-audit note. Safety meaning checked for a user deciding whether to keep the setting on: the text says session name, last line and error causes reach the lock screen and paired phones, and that phone delivery goes through Radient's push service. Fidelity: all four elements present; 'جو ان تک Radient کی push سروس کے ذریعے پہنچتی ہیں' makes the Radient relay explicit (جو agrees with اطلاعات, ان = phones). NIT C2 (no change): 'لاک اسکرین اور جوڑے ہوئے فونز کی اطلاعات بھی شامل' is elliptical (omits ہیں); readable and meaning intact. سیشن per glossary; Arabic-script RTL with Latin islands Radient/push; Urdu ، and ۔; no Cf/bidi controls (U+200E/F, U+202A-E, U+2066-9, U+061C absent). No ICU placeholders (0=0); no Cf/bidi controls; copy_scan 0 findings. Same model family as translator and first auditor (claude-opus-5-5): disclosed.",
+        "retained_from": "PR #3990 parent receipt (source 413b00d1); covers only wire.settings.display_notification_session_name.help, carried unchanged into this source — not a second audit of this binding"
+      },
+      "retained_upstream_findings": [],
+      "note": "Merged-source binding 2026-11-15, copy-reviewer session 5b334e35ef01 (anthropic/claude-opus-5-5, no fallback). Source f5c40bc8a076 = base 2baf6804bc41 + PR #3990 delta (1 key: display_notification_session_name.help; passed d62d8ba8b744 + second audit 937c6ecbae86) + main delta (2 keys: desktop_remote_files_cache_bytes.label/help; passed binding2 187b766ab67d, openai/gpt-6.1-sol). Exact key-disjoint value composition in en and ur; 866 other keys byte-identical to base. No translation changed, no history rewritten, no new native review claimed. Single binding audit only. Evidence: i18n/audits/evidence/ur/wire.settings/merged-bind-5b334e35ef01-f5c40bc8/record.json"
     }
   ]
 }

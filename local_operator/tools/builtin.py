@@ -84,6 +84,7 @@ from local_operator import memory_guard
 from local_operator.agent_shell import AGENT_SHELL_ENV, MAY_DELEGATE_ENV
 from local_operator.config import CONFIG_FILE_NAME, ConfigManager
 from local_operator.guardrails import interrupted_worktree_add
+from local_operator.guardrails import spawned as guard_spawned
 from local_operator.harness.approval import (
     APPROVAL_UNAVAILABLE_NOTICE,
     ApprovalUnavailableError,
@@ -4291,29 +4292,26 @@ async def _github_git_injections(context: ToolContext | None) -> dict[str, str]:
     Fetch-on-use, off the event loop (the borrow dials this device's relay and
     can sit through one bounded owner round trip), and never raising: a failed
     borrow makes the child behave exactly as it did before brokering existed.
-    The token is registered in the session's redaction ledger BEFORE the env is
-    returned — an injected bearer the session cannot scrub is a plaintext
-    result waiting to happen (design §D5; the T8e ``printenv`` invariant).
+    The borrow, the "no ledger, no injection" rule and the register-before-
+    return ordering all live in ``github.lent_github_env`` — the one door the
+    monitor ticks and the code-request resolver take too — so this only hands
+    it the session's ledger. Every bash child goes through here, including a
+    monitor's tick, in session or in the parked-session probe: a context that
+    must reach the lent login has to carry a ``variables`` store.
     """
     if context is None:
         return {}
     store = getattr(context, "variables", None)
-    register = getattr(store, "register_redaction", None)
-    if not callable(register):
-        # No ledger, no injection: the masking control is what makes the env
-        # deliverable, so a host without it gets the pre-brokering behaviour.
-        return {}
     try:
         from local_operator.network.credentials import github
 
-        env, token = await asyncio.to_thread(
-            github.borrowed_git_env, session_id=context.session_id or ""
+        env, _token = await asyncio.to_thread(
+            github.lent_github_env,
+            session_id=context.session_id or "",
+            register=getattr(store, "register_redaction", None),
         )
     except Exception:  # noqa: BLE001 — a broker fault must not fail a command
         return {}
-    if not env or not token:
-        return {}
-    register(token)
     return env
 
 
@@ -4705,22 +4703,30 @@ async def execute_bash(
     # lock git writes during this call (guardrails/interrupted_worktree_add.py).
     spawned_at = interrupted_worktree_add.spawn_stamp(params.command)
     try:
-        process = await asyncio.create_subprocess_exec(
-            *shell_argv,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            cwd=cwd,
-            env=env,
-            # Detachment is platform-specific and `start_new_session=True`,
-            # which this used to pass unconditionally, is SILENTLY IGNORED on
-            # Windows (subprocess documents it "(POSIX only)" and names the
-            # Windows parameter `unused_start_new_session`) — so a Ctrl-C in
-            # the operator's console reached the command and a console close
-            # could take it down. procstate.detached_popen_kwargs() returns the
-            # kwargs that really detach on the host, and is exactly
-            # `start_new_session=True` on POSIX.
-            **spawn_options,
-        )
+        # In flight until recorded (QA Q3, PR #3987): see ``spawned.spawning``.
+        with guard_spawned.spawning():
+            process = await asyncio.create_subprocess_exec(
+                *shell_argv,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                cwd=cwd,
+                env=env,
+                # Detachment is platform-specific and `start_new_session=True`,
+                # which this used to pass unconditionally, is SILENTLY IGNORED on
+                # Windows (subprocess documents it "(POSIX only)" and names the
+                # Windows parameter `unused_start_new_session`) — so a Ctrl-C in
+                # the operator's console reached the command and a console close
+                # could take it down. procstate.detached_popen_kwargs() returns the
+                # kwargs that really detach on the host, and is exactly
+                # `start_new_session=True` on POSIX.
+                **spawn_options,
+            )
+            # Which in-process session started this child (review m1, PR #3987):
+            # subagents share the harness pid, so the delete guard needs this
+            # runtime record to tell this session's shell from a sibling's.
+            guard_spawned.record(
+                process.pid, getattr(context, "session_id", None) if context else None, process
+            )
     except OSError as exc:
         # A `bash.shell` pointing at a missing or non-executable file made the
         # spawn raise out of the tool, and the generic tool boundary rendered
@@ -14065,6 +14071,7 @@ async def _ripgrep_scan(
     context_lines: int,
     signal: AbortSignal | None,
     max_filesize: int = GREP_FILE_LIMIT_BYTES,
+    session_id: str | None = None,
 ) -> _GrepScan | None:
     """Native ripgrep scan; None means "fall back to the Python engine".
 
@@ -14128,12 +14135,18 @@ async def _ripgrep_scan(
         # call (the "Tool 'grep' failed unexpectedly" crash on minified bundles).
         # No ``limit=`` here for that reason: with ``read`` it is only the default
         # flow-control watermark, never a cap on a line.
-        proc = await asyncio.create_subprocess_exec(
-            *argv,
-            cwd=str(base),
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.DEVNULL,
-        )
+        # ``rg`` runs with its cwd at an agent-chosen path, so the delete
+        # guard must know which session started it (review R2-m1, PR #3987):
+        # unrecorded, a sibling subagent's search inside this session's tree
+        # read as this session's own process.
+        with guard_spawned.spawning():
+            proc = await asyncio.create_subprocess_exec(
+                *argv,
+                cwd=str(base),
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            guard_spawned.record(proc.pid, session_id, proc)
     except (OSError, ValueError):
         return None
 
@@ -14445,6 +14458,7 @@ async def execute_grep(
             params.context_lines,
             signal,
             max_filesize,
+            session_id=getattr(context, "session_id", None) if context else None,
         )
     if scan_result is not None:
         records = scan_result.records
@@ -20341,6 +20355,13 @@ def _sessions_open_env(context: object | None) -> dict[str, str]:
     return shell_env.child_environment(parent=parent, injections=injections)
 
 
+#: The session whose ``sessions`` call is launching a CLI child, read by
+#: ``_sessions_launch`` for the delete guard's spawn record (review R2-m1,
+#: PR #3987). A ContextVar rather than a parameter so the launcher keeps its
+#: ``(argv, env, cwd)`` seam, which tests replace wholesale.
+_LAUNCHING_SESSION: ContextVar[str | None] = ContextVar("sessions_launching", default=None)
+
+
 async def _sessions_launch(
     argv: list[str], env: dict[str, str], cwd: str | None
 ) -> tuple[int, str]:
@@ -20358,15 +20379,20 @@ async def _sessions_launch(
     tree; ``stdin`` is /dev/null because an exec run is never interactive
     (``--control`` is deliberately not exposed by this tool).
     """
-    process = await asyncio.create_subprocess_exec(
-        *session_python_argv(*_SESSIONS_CLI, *argv),
-        stdin=asyncio.subprocess.DEVNULL,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-        env=env,
-        cwd=cwd,
-        start_new_session=True,
-    )
+    # The launcher's cwd is the caller's working directory, so the delete
+    # guard must attribute it to the launching session (review R2-m1, PR
+    # #3987); unrecorded it read as every in-process session's own.
+    with guard_spawned.spawning():
+        process = await asyncio.create_subprocess_exec(
+            *session_python_argv(*_SESSIONS_CLI, *argv),
+            stdin=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=env,
+            cwd=cwd,
+            start_new_session=True,
+        )
+        guard_spawned.record(process.pid, _LAUNCHING_SESSION.get(), process)
     try:
         _out, err = await asyncio.wait_for(process.communicate(), SESSIONS_LAUNCH_TIMEOUT_S)
     except (asyncio.TimeoutError, TimeoutError):
@@ -20374,6 +20400,17 @@ async def _sessions_launch(
         await process.wait()
         raise
     return int(process.returncode or 0), err.decode("utf-8", "replace")
+
+
+async def _sessions_launch_as(
+    session_id: str | None, argv: list[str], env: dict[str, str], cwd: str | None
+) -> tuple[int, str]:
+    """``_sessions_launch`` with ``session_id`` as the launching session (R2-m1)."""
+    token = _LAUNCHING_SESSION.set(session_id)
+    try:
+        return await _sessions_launch(argv, env, cwd)
+    finally:
+        _LAUNCHING_SESSION.reset(token)
 
 
 def _sessions_kill_group(process: "asyncio.subprocess.Process") -> None:
@@ -21027,7 +21064,12 @@ async def _sessions_open(
     argv = _sessions_open_argv(params, resume_id=resume_id)
     env = _sessions_open_env(context)
     try:
-        code, err = await _sessions_launch(argv, env, _sessions_child_cwd(context))
+        code, err = await _sessions_launch_as(
+            getattr(context, "session_id", None) if context else None,
+            argv,
+            env,
+            _sessions_child_cwd(context),
+        )
     except (asyncio.TimeoutError, TimeoutError):
         return _error(
             tool_call_id,
@@ -26545,11 +26587,17 @@ def _access_result_text(
 
 #: Where a headless node's site approval is decided, said once so the texts
 #: below cannot drift: the card reaches the operator's device through the
-#: forwarded-ask path, which covers sessions that device started.
+#: forwarded-ask path, which covers sessions that device started and — once the
+#: node has verified the operator's device (``network.operator_binding``, #4030)
+#: — sessions started on the node, an agent-spawned one included (#4035: its
+#: site cards only). guide://browser carries the same rule; keep them in step.
 _NODE_APPROVAL_REACH = (
     "The card reaches the operator's own device when this session was started "
-    "from it; a session started directly on the node shows it only on the node, "
-    "where nobody can sign — say so if that is your case."
+    "from it, or when the node has verified which linked device is the "
+    "operator's (a card they signed naming this node) — that also covers a "
+    "session started on the node, or spawned here by another agent. Without "
+    "that, the card shows only on the node, where nobody can sign — say so if "
+    "that is your case."
 )
 
 #: THE CARD IS THE NOTIFICATION (review U10): the tool description's generic
@@ -26921,11 +26969,77 @@ async def _bridge_access(
     delegated = _delegated_here(context)
     if action == "request_access":
         from local_operator.browser_bridge import backend as _bridge_backend
+        from local_operator.browser_bridge.preview_origin import (
+            fixed_origin_instruction,
+            pin_quick_tunnel,
+            quick_tunnel_origin,
+        )
 
+        instruction = ""
+        pinned_origin = ""
+        quick_origin = quick_tunnel_origin(url)
+        if quick_origin is not None:
+            # Pin BEFORE the RPC: the remote host may notify the operator as soon
+            # as it receives a request. Host-owned durable ancestry, never args,
+            # binds manager, children and siblings even across runtime restarts.
+            # Remote unavailability retains this first binding: a failed approval
+            # must not let the family rotate hosts and raise another site card.
+            host_name, requested_origin = quick_origin
+            try:
+                if context is None or not context.session_id:
+                    raise ValueError("missing session identity")
+                directory = (
+                    Path(context.session_dir)
+                    if context.session_dir
+                    else config_dir() / "sessions" / context.session_id
+                )
+                pin = await asyncio.to_thread(
+                    pin_quick_tunnel,
+                    directory,
+                    host_name,
+                    requested_origin,
+                    context.ancestor_session_ids,
+                )
+            except (OSError, ValueError):
+                return _error(
+                    # i18n: ignore model-facing tool recovery instruction
+                    tool_call_id,
+                    "browser",
+                    f"Refused preview origin {requested_origin}. No new approval request "
+                    "was sent; this attempt did not notify the user. Do not await this "
+                    "attempt. The durable session-family pin could not be verified. Reuse "
+                    "one fixed localhost port or stable preview URL; existing site "
+                    "approvals still apply. Do not mint another quick-tunnel host.",
+                    details={
+                        "code": "preview_origin_unavailable",
+                        "state": "refused",
+                        "approval_request_sent": False,
+                    },
+                )
+            pinned_origin = pin.origin
+            instruction = fixed_origin_instruction(pinned_origin)
+            if not pin.allowed:
+                return _error(
+                    # i18n: ignore model-facing local approval outcome and recovery policy
+                    tool_call_id,
+                    "browser",
+                    f"Refused preview origin {requested_origin}. No new approval request "
+                    "was sent; this attempt did not notify the user. Do not await this "
+                    f"attempt.\n\n{instruction}",
+                    details={
+                        "code": "preview_origin_changed",
+                        "approval_request_sent": False,
+                        "state": "refused",
+                        "origin": requested_origin,
+                        "pinned_origin": pin.origin,
+                    },
+                )
         result, problem = await _bridge_call(
             tool_call_id, "request_access", {"url": url, **identity}, client=client
         )
         if problem is not None:
+            if instruction:
+                problem.content.append(TextContent(text=f"\n\n{instruction}"))
             return problem
         assert result is not None
         state_value = str(result.get("state", ""))
@@ -26934,9 +27048,12 @@ async def _bridge_access(
             # A HEADLESS NODE's extension answered (``site_approval.py``): no
             # person can click its popup, so the popup copy below would send the
             # agent to wait on nothing.
-            return await _node_site_access(
+            node_result = await _node_site_access(
                 tool_call_id, context, result, url, origin, client=client
             )
+            if instruction:
+                node_result.content.append(TextContent(text=f"\n\n{instruction}"))
+            return node_result
         # `host` is the handle spelling here (`bridge`/`ui`); a node's managed
         # Chrome is always the bridge (extension) host.
         on_node = host != HOST_UI_PREFIX and _bridge_backend._on_headless_node()  # noqa: SLF001
@@ -26949,7 +27066,8 @@ async def _bridge_access(
             return _text(
                 tool_call_id,
                 "browser",
-                _node_access_result_text(state_value, origin, url),
+                _node_access_result_text(state_value, origin, url)
+                + (f"\n\n{instruction}" if instruction else ""),
                 details={"origin": origin, "state": state_value},
             )
         if on_node:
@@ -26965,7 +27083,8 @@ async def _bridge_access(
             return _text(
                 tool_call_id,
                 "browser",
-                _wrap_receipt(_bridge_backend.node_approval_unavailable(origin)),
+                _wrap_receipt(_bridge_backend.node_approval_unavailable(origin))
+                + (f"\n\n{instruction}" if instruction else ""),
                 details={"origin": origin, "state": "unavailable_on_node"},
             )
         return _text(
@@ -26980,6 +27099,11 @@ async def _bridge_access(
                 attached=_attached_here(context),
                 notify=notify,
                 delegated=delegated,
+            )
+            + (
+                f"\n\n{fixed_origin_instruction(pinned_origin, denied=state_value == 'denied')}"
+                if instruction
+                else ""
             ),
             details={
                 "origin": origin,
@@ -27113,10 +27237,18 @@ async def _bridge_access(
         node_origin = str(result.get("origin") or node_origin)
         if state_value != "pending" and await_on_node:
             origin = str(result.get("origin", url))
+            # The extension's sweep reports an EXPIRED entry as "cancelled"
+            # (``approval-store.ts`` ``sweepQueue``), so the cancel_access wording
+            # ("your request ... was withdrawn") told an agent whose card lapsed
+            # that someone withdrew it (incident 2026-11-15, session
+            # 1c31cfff075b). From await, "cancelled" cannot tell expiry from a
+            # withdrawal, so it reads as "no live request", which names both and
+            # carries guide://browser's re-raise step.
+            text_state = "none" if state_value == "cancelled" else state_value
             return _text(
                 tool_call_id,
                 "browser",
-                _node_access_result_text(state_value, origin, url),
+                _node_access_result_text(text_state, origin, url),
                 details={"origin": origin, "state": state_value},
             )
         if state_value != "pending":
@@ -30193,7 +30325,13 @@ async def _execute_browser_owned(
                     resource.record.pop("pending_access_host", None)
                 if access_state == "pending":
                     resource.record["retention"] = "pending site approval"
-                elif access_state and resource.record.get("retention") == "pending site approval":
+                elif (
+                    access_state
+                    # A local preview-policy refusal did not send a new RPC and
+                    # cannot settle an older prompt's ownership obligation.
+                    and (result.details or {}).get("approval_request_sent") is not False
+                    and resource.record.get("retention") == "pending site approval"
+                ):
                     await resource.client().call("owner_release", resource.params())
                     resource.record["retention"] = ""
             return _browser_update_note(state, result)

@@ -89,8 +89,17 @@ three routes the checkpoint can verify. Everything CRITICAL is still refused.
 
 - **Creation ledger.** After every bash call the loop records the directories it
   created: `mkdir [-p]` (the topmost new component), `mktemp -d TEMPLATE`,
-  `git worktree add <path>`, `git clone <url> [<dir>]` — inside a `for` loop, one
-  candidate per loop value (a `$(…)` or unknown loop list records nothing). Rows live in
+  `git worktree add [--detach|-d] <path>` (also `git -C <repo> worktree add …`),
+  `git clone <url> [<dir>]` — inside a `for` loop, one candidate per loop value
+  (a `$(…)` or unknown loop list records nothing). Every host records the same
+  way — a headless or mesh-spawned session included; nothing is gated on a
+  desktop surface. A worktree also gets a row for its `.git` file: on Linux a
+  directory's stamp is its ctime, which moves whenever an entry in the tree
+  root changes, and the `.git` file keeps the row matching after that. A
+  worktree row with no such companion (written by an older runtime) or no
+  stamp at all still matches while the tree's `.git` gitdir file is older than
+  the row itself: any later `git worktree add` at that inode writes a newer
+  one, and a moved, relinked or rewritten `.git` fails closed. Rows live in
   `<config_dir>/guardrails/created.sqlite`, keyed by session id + realpath +
   inode, written under the creator and every ancestor session, so a parent may
   delete what its subagents made. Overwriting or deleting the ledger is CRITICAL.
@@ -108,14 +117,20 @@ three routes the checkpoint can verify. Everything CRITICAL is still refused.
 - **Clean linked worktree.** `git worktree remove <exact path>` (no `--force`)
   is LOW when the path is a registered linked worktree with no tracked or
   untracked change, no ignored entry beyond regenerable output (`node_modules`,
-  `.venv`, `__pycache__`, `build`, `dist` …) and no repository nested inside
+  `.venv`, `__pycache__`, `build`, `dist`, `dist-ssr` …) and no repository nested inside
   that output, and HEAD on a branch or in some
   ref — AND it is idle: no running session other than yours owns it (created
   it, or has its cwd inside) and its branch has no open PR (GitHub) or MR (GitLab) on the
   repo's remote. An open PR or MR is refused outright, at any state and even with an earlier
   answered ask: finish or close it first. A running owner, or (for a tree that is
   not your own) a PR state nobody could read (no GitHub or GitLab remote, `gh`/`glab` failed
-  or timed out), goes to the judge with those facts. An interrupted delete can leave a half-removed tree
+  or timed out), goes to the judge with those facts. When `gh`/`glab` fails,
+  git decides instead: one bounded `git ls-remote origin` (8 s; plus a bounded
+  `git fetch` of the default branch if its tip is not local), or the
+  already-fetched refs if origin cannot be reached. The PR state reads "none"
+  only when the branch tip is an ancestor of `origin/<default>` AND the
+  remote branch, if any, is too; a squash-merged branch, a remote branch with
+  newer commits, or stale refs that do not prove it stay unknown. An interrupted delete can leave a half-removed tree
   (tracked files gone, registration still present), so treat a failed
   removal as damage to report, not a step to retry. Anything else takes the
   ordinary ranking. Prefer this to
@@ -138,7 +153,37 @@ three routes the checkpoint can verify. Everything CRITICAL is still refused.
   out) does not hold your own clean tree: removal keeps the branch, so nothing
   is lost and neither the forge nor the judge is asked. A known open PR or MR is
   refused outright; any other shortfall (dirty, locked, busy, `git status`
-  failed or timed out, another running session) goes to the judge. Ignored
+  failed or timed out, another running session) goes to the judge — with one
+  exception: a **detached** own worktree (`git worktree add --detach`, no
+  branch) under the repository's `.worktrees/` directory, whose HEAD some branch,
+  remote-tracking ref or tag still contains, ranks LOW even with uncommitted
+  changes, for `git worktree remove [--force] <exact path>` and `rm -rf` of
+  its path — or a glob that matches only your own trees, as ledger LOW does
+  elsewhere; a glob that also reaches someone else's tree still holds. There
+  is no branch whose work could be lost and no commit is lost, so what goes
+  is your own scratch (a `merge-tree`/`read-tree` index, edited files). The
+  same tree anywhere else, a detached tree whose HEAD no ref contains
+  (commits made only there — `git tag` or `git branch` it first), a
+  repository nested inside it, or a lock, live cwd or other running session
+  keeps the judge. For your own tree the process inventory is always read
+  fresh, never from the 30-second cache, and a live cwd counts only when it
+  is someone else's: your own eval kernel and bash children (recorded by the
+  session that spawned them, since subagents share one harness process), your
+  ancestor's and descendant's, and processes of your registry-recorded harness
+  that no session spawned do not make your own tree busy. A sibling
+  subagent's shell or kernel, another session's process, an orphan with no
+  session record, or an inventory or process table that cannot be read keeps
+  it busy, and the judge is told each holder's pid, command and session, or
+  why the inventory failed. On Linux a same-user process whose
+  `/proc/<pid>/cwd` reads "Permission denied" (non-dumpable — Chromium and
+  Electron helpers — or set-id/capability-privileged, such as `(sd-pam)`) is
+  not attributable: it counts as a holder only when its readable open files
+  or mappings point inside the tree, and is otherwise ignored and named in the
+  facts ("N same-user processes had an unreadable cwd …; ignored"). Their
+  `fd/` and `maps` sit behind the same kernel check, so such a process with
+  only its cwd inside a tree is not seen — an accepted residual risk: these
+  are system and sandbox processes, not agent work. An unreadable `/proc`
+  still fails closed. Ignored
   entries (`.expo/`, `.pnpm-store/`, a `node_modules` symlink, an ignored `.env`
   or local config) never count against your own tree: removing it deletes them
   with no judge call, exactly as `git worktree remove` does — move a secret you

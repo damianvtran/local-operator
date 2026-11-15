@@ -1507,30 +1507,66 @@ async def test_a_same_id_stale_engage_cannot_paint_over_its_successor(
     the successor's. Reachable only through the takeover path, which `lop` does
     not use, so this is the structural half of R6 rather than a production repro.
 
-    The successor's engage fails BELOW the patience threshold on purpose: it is
-    silent by design, so any notice at all on this screen can only be the
-    departed binding's, and the assertion is "none" rather than "not that
-    sentence".
+    Event-driven, not timed. This case used to set the patience to 50 ms and
+    rely on the successor's quick failure landing UNDER it, so the screen stayed
+    silent and "any notice at all" could only be the departed binding's. On a
+    slow runner the successor took longer than 50 ms and painted its own,
+    legitimate "may still be starting" notice, which the test then blamed on the
+    departed binding (merge-gate run 43684514925, ``test (3.12, 2)``). So the
+    order is now fixed by events and the clock is taken out of play:
+
+    * the patience is 0, so EVERY failure clears it and only the binding gate
+      (``_report_start_engage_failure``'s token check) can keep a notice off
+      screen — which is the gate under test;
+    * both engages are held open on their own events, and each report call is
+      awaited through a recording wrapper rather than inferred from elapsed time;
+    * the departed engage fails FIRST, while the successor is still pending and
+      has not reported: that is R6's scenario (the latch is empty, so the token
+      check is the only thing standing between the stale failure and the
+      screen). The screen must stay silent. Only then does the successor fail,
+      and its own notice is asserted by its sentence, distinct from the departed
+      one's ``RuntimeUnresponsiveError`` sentence ("not answering yet").
+
+    With the token check removed the departed binding paints "not answering yet"
+    at the first assertion, so the case still catches the regression it exists
+    for.
     """
-    monkeypatch.setattr("local_operator.tui.app.START_ENGAGE_PATIENCE_S", 0.05)
+    monkeypatch.setattr("local_operator.tui.app.START_ENGAGE_PATIENCE_S", 0.0)
 
     from local_operator.session.attached import RuntimeUnresponsiveError
 
     attempts: list[str] = []
     release_first = asyncio.Event()
+    release_second = asyncio.Event()
 
     async def same_id_failure(
         session_id, cwd, work, *, config_dir, deadline_s=30.0, preempt=None, preempt_budget_s=0.0
     ):  # noqa: ANN001
         attempts.append(str(session_id))
         if len(attempts) == 1:
-            # The departing binding's engage, held open across the swap.
+            # The departing binding's engage, held open across the swap. Its
+            # error is the `runtime_alive` one, so its sentence ("not answering
+            # yet") is distinguishable from the successor's.
             await release_first.wait()
             raise RuntimeUnresponsiveError("the runtime is not responding")
-        # The arriving binding's engage: a quick failure, silent by design.
+        # The arriving binding's engage, held until the departed one has been
+        # handled, so it cannot have reported (and filled the latch) first.
+        await release_second.wait()
         raise ConnectionError("the runtime is reconnecting")
 
     app, viewer = await _app_with_engage(tmp_path, monkeypatch, same_id_failure, session_id="same")
+    # Every report call, departed or not, recorded AFTER the report returns:
+    # the event to wait on, instead of a time window it should have fit inside.
+    reports: list[tuple[int, str]] = []
+    report = app._report_start_engage_failure
+
+    def recording_report(**kwargs: Any) -> None:
+        report(**kwargs)
+        reports.append(kwargs["binding_token"])
+
+    app._report_start_engage_failure = recording_report
+    departed_sentence = "the session is not answering yet — send a message to retry"
+    successor_sentence = "the session may still be starting — send a message to retry"
     try:
         async with app.run_test(size=(100, 30)) as pilot:
             assert await _pump_until(pilot, lambda: attempts == ["same"])
@@ -1546,14 +1582,35 @@ async def test_a_same_id_stale_engage_cannot_paint_over_its_successor(
                 app._adopt_session(successor)
                 app._engage_runtime_eagerly()
                 assert await _pump_until(pilot, lambda: len(attempts) == 2)
+                # Neither engage has failed yet: both are parked on their events.
+                assert reports == []
                 release_first.set()
-                assert await _pump_until(pilot, lambda: app._warm_engage_started is False)
+                assert await _pump_until(pilot, lambda: len(reports) == 1)
+                departed_token = reports[0]
+                assert departed_token[1] == "same"
+                assert departed_token != (app._binding_epoch, "same"), (
+                    "the first report is the successor's, not the departed binding's: "
+                    f"{reports!r}"
+                )
                 for _ in range(10):
                     await pilot.pause()
                 texts = _notice_texts(app)
                 assert (
                     texts == []
                 ), f"a same-id departed binding painted over its successor: {texts!r}"
+
+                # The successor's own failure is NOT gated by the departed one:
+                # it reports, in its own sentence, and nothing else is painted.
+                release_second.set()
+                assert await _pump_until(pilot, lambda: len(reports) == 2)
+                assert await _pump_until(pilot, lambda: len(_notice_texts(app)) >= 1)
+                for _ in range(10):
+                    await pilot.pause()
+                texts = _notice_texts(app)
+                assert (
+                    departed_sentence not in texts
+                ), f"a same-id departed binding painted over its successor: {texts!r}"
+                assert texts == [successor_sentence], texts
             finally:
                 await successor.dispose()
     finally:

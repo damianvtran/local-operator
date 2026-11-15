@@ -65,6 +65,7 @@ from local_operator.harness.verifier import (
     DEFAULT_LOCAL_TOOL_ALLOWANCE,
     VerifierLimits,
 )
+from local_operator.harness.verifier_evidence import VerifierEvidence
 
 #: Per-command bound for the verifier's guest reads. A read that needs more
 #: than this is not a read; the worker's own commands keep their 300 s.
@@ -367,6 +368,8 @@ class VerifierInspector:
         self._reported: set[str] = set()
         self._inflight: set[asyncio.Task[Any]] = set()
         self._deadline: float | None = None
+        # Set from this round's verified observation, never from model paths.
+        self.evidence: VerifierEvidence | None = None
 
     def begin(self, deadline: float) -> None:
         """Open one verification: guest calls must settle by ``deadline``
@@ -570,7 +573,50 @@ class VerifierInspector:
         async def execute(  # type: ignore[no-untyped-def]
             tool_call_id, args, signal=None, on_update=None, context=None
         ):
-            text, is_error = await self.inspect(dict(args or {}))
+            arguments = dict(args or {})
+            if "artifact_id" in arguments:
+                item = (
+                    next(
+                        (
+                            item
+                            for item in self.evidence.items
+                            if item.evidence_id == arguments["artifact_id"]
+                        ),
+                        None,
+                    )
+                    if self.evidence is not None
+                    else None
+                )
+                if (
+                    self._window() is None
+                    or set(arguments) != {"artifact_id"}
+                    or item is None
+                    or (self._deadline is not None and time.monotonic() >= self._deadline)
+                ):
+                    return ToolResult(
+                        tool_call_id=tool_call_id,
+                        tool_name="inspect_command",
+                        content=[
+                            TextContent(
+                                text="Unavailable artifact ID or invalid arguments. Use only a "
+                                "registered evidence ID, without command/timeout_s."
+                            )
+                        ],
+                        is_error=True,
+                    )
+                self._emit(
+                    {
+                        "job_id": self._job_id(),
+                        "round": self._window(),
+                        "artifact_id": item.evidence_id,
+                    }
+                )
+                return ToolResult(
+                    tool_call_id=tool_call_id,
+                    tool_name="inspect_command",
+                    content=[TextContent(text=f"Evidence ID: {item.evidence_id}"), item.content],
+                )
+            text, is_error = await self.inspect(arguments)
             return ToolResult(
                 tool_call_id=tool_call_id,
                 tool_name="inspect_command",
@@ -584,19 +630,25 @@ class VerifierInspector:
             description=(
                 "Run a READ-ONLY shell command on the machine where the task was done "
                 "(cat, ls, python3 -c to read a file, pdftotext, unzip -p ...). "
-                f"Never change anything. timeout_s 1-{INSPECT_MAX_TIMEOUT_S}."
+                f"Never change anything. timeout_s 1-{INSPECT_MAX_TIMEOUT_S}. "
+                "Alternatively supply only artifact_id to inspect registered typed evidence; "
+                "never a path or URL. The same inspection budget applies."
             ),
             parameters={
                 "type": "object",
                 "properties": {
                     "command": {"type": "string", "description": "The shell command."},
+                    "artifact_id": {
+                        "type": "string",
+                        "description": "A registered evidence ID; mutually exclusive with "
+                        "command and timeout_s.",
+                    },
                     "timeout_s": {
                         "type": "integer",
                         "minimum": 1,
                         "maximum": INSPECT_MAX_TIMEOUT_S,
                     },
                 },
-                "required": ["command"],
                 "additionalProperties": False,
             },
             approval_tier="read",

@@ -959,6 +959,11 @@ def load_local_anchor(config_root: Path | None = None) -> OperatorAnchor | None:
     return load_staged_anchor(config_root if config_root is not None else config_dir())
 
 
+#: The ``expected_old_hex`` sentinel meaning "the target must not exist". Not hex,
+#: so it can never collide with a real sha256 pin.
+EXPECT_ABSENT = "absent"
+
+
 #: The privileged half of a POSIX install, run as ``sh -c <this> lop-anchor-install
 #: <staged> <target> <sha256-hex> <group>``. Every value arrives as a POSITIONAL
 #: argument, never interpolated into the script, so no path or digest is ever
@@ -977,7 +982,13 @@ _POSIX_INSTALL_SCRIPT = (
     # Admission writes pin BOTH sides. Onboarding has no installed statement;
     # admission has one, and replacing a different statement than the human saw
     # would turn an elevation prompt into approval for an unread write.
-    'if [ -n "$old" ]; then '
+    # EXPECT_ABSENT pins "there is no anchor yet": a first install must not
+    # replace one that landed while its prompt was open (R1-4 on #3950).
+    'if [ "$old" = "absent" ]; then '
+    'if [ -e "$target" ] || [ -L "$target" ]; then '
+    "echo 'an anchor was installed after it was read; nothing was installed' >&2; "
+    "exit 3; fi; "
+    'elif [ -n "$old" ]; then '
     'if [ ! -f "$target" ]; then '
     "echo 'the installed anchor is missing; nothing was installed' >&2; exit 3; fi; "
     'before="$({hash} "$target" | cut -d " " -f 1)"; '
@@ -1118,13 +1129,14 @@ $hd=LopDir $dir
 $old=LopOpen $target 0x20080 3 7 ([IntPtr]::Zero) $false $true
 if($old){
 try{
+if($expectedOld -eq 'absent'){throw 'an anchor was installed after it was read; nothing was installed'}
 if($expectedOld){
 $stream=[IO.FileStream]::new([Microsoft.Win32.SafeHandles.SafeFileHandle]::new($old,$false),[IO.FileAccess]::Read)
 try{$before=-join([Security.Cryptography.SHA256]::Create().ComputeHash($stream)|ForEach-Object{$_.ToString('x2')})}finally{$stream.Dispose()}
 if($before -ne $expectedOld){throw 'the installed anchor changed after it was read; nothing was installed'}
 }
 }finally{[void]$LopNative::CloseHandle($old)}
-}elseif($expectedOld){throw 'the installed anchor is missing; nothing was installed'}
+}elseif($expectedOld -and $expectedOld -ne 'absent'){throw 'the installed anchor is missing; nothing was installed'}
 $stale=LopOpen $tmp 0x10080 3 7 ([IntPtr]::Zero) $false $true
 if($stale){[void]$LopNative::CloseHandle($stale);[IO.File]::Delete($tmp)}
 $bytes=[IO.File]::ReadAllBytes($staged)
@@ -1310,6 +1322,11 @@ def install_commands(
     ``digest_hex`` is the sha256 of the staged bytes AS THE CALLER READ THEM; the
     privileged step installs only content with that digest (see
     :data:`_POSIX_INSTALL_SCRIPT` for the race it closes).
+
+    ``expected_old_hex`` pins the TARGET the caller read: the sha256 of the
+    installed statement, or :data:`EXPECT_ABSENT` for "no anchor is installed"
+    (a first install that must not replace one landing while its prompt is open),
+    or ``""`` for no pin (the CLI onboarding paths, unchanged).
 
     Windows takes one command, which the operator runs and approves at the UAC
     prompt — lop never runs it itself. The elevated script travels as

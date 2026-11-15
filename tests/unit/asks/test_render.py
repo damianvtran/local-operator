@@ -276,6 +276,91 @@ def test_a_long_question_is_clipped_in_the_notice():
     assert "…" in text
 
 
+# --- the site card's timeout notice (incident 2026-11-15, ask a-652b) -------
+
+
+def _site_record(**overrides) -> dict[str, Any]:
+    """A site-card ask built by the REAL node builder, urgent like the incident's."""
+    from local_operator.browser_bridge import site_approval
+
+    question = site_approval.site_ask_question(
+        origin="https://example.com",
+        node_name="lop-remote-node-2",
+        node_device_id="dev-synthetic-1",
+        entry_id="entry-synthetic-1",
+    )
+    return _record(urgent=True, questions=[question], **overrides)
+
+
+def _assert_site_notice(text: str) -> None:
+    from local_operator.harness.message_types import BRIDGE_UNTRUSTED_CLAUSE
+
+    assert text.startswith("[Ask timed out]")
+    assert "site card for https://example.com" in text
+    # Only the operator's signature decides a site: nothing may invite the agent
+    # (or a subagent it delegates to) to decide it.
+    assert "delegate" not in text
+    assert "best judgment" not in text
+    assert "recommended option" not in text
+    assert render.TIMEOUT_URGENT not in text
+    assert "do not decide it yourself or through a subagent" in text
+    assert "signing the card on their own device" in text
+    assert "re-raise it once with `request_access`" in text
+    assert "tell the operator in chat which site you need" in text
+    assert "A timeout is not an approval." in text
+    # Our own harness-written card, not another organization's words.
+    assert BRIDGE_UNTRUSTED_CLAUSE not in text
+
+
+def test_an_urgent_site_card_gets_the_site_notice_not_delegate_or_judgment():
+    text = render.timeout_text(_site_record(), now_ms=1_700_003_600_000)
+    _assert_site_notice(text)
+    assert "a-7f3" in text and "1h" in text
+    assert "dismissed" not in text
+
+
+def test_a_dismissed_site_card_keeps_the_site_notice_and_says_so():
+    text = render.timeout_text(_site_record(), now_ms=1_700_003_600_000, dismissed=True)
+    _assert_site_notice(text)
+    assert "The user dismissed it without answering." in text
+
+
+def test_a_site_card_lapsed_while_stopped_keeps_the_site_notice():
+    text = render.timeout_text(_site_record(), now_ms=1_700_003_600_000, lapsed_while_stopped=True)
+    _assert_site_notice(text)
+    assert text.endswith(render.TIMEOUT_LAPSED_WHILE_STOPPED)
+
+
+def test_a_site_card_without_its_site_block_names_the_question_id():
+    record = _site_record()
+    question = dict(record["questions"][0])
+    question.pop("site")
+    record["questions"] = [question]
+    text = render.timeout_text(record, now_ms=1_700_003_600_000)
+    assert f"site card for {question['question_id']}" in text
+    assert "delegate" not in text
+
+
+def test_a_plain_urgent_ask_still_gets_the_urgent_clause():
+    """The site path must not swallow the ordinary urgent behaviour."""
+    text = render.timeout_text(_record(urgent=True), now_ms=1_700_003_600_000)
+    assert text.endswith(render.TIMEOUT_URGENT)
+    assert "best judgment" in text
+
+
+def test_an_urgent_bridge_question_keeps_the_untrusted_clause():
+    """A real bridge question id (not ``site_approval``'s prefix) is unchanged."""
+    from local_operator.harness.message_types import BRIDGE_UNTRUSTED_CLAUSE
+
+    record = _record(
+        urgent=True,
+        questions=[{"id": "bridge-bmsg_1", "question": "x", "question_id": "bmsg_1"}],
+    )
+    text = render.timeout_text(record, now_ms=1_700_003_600_000)
+    assert f"bridge-bmsg_1 — {BRIDGE_UNTRUSTED_CLAUSE}" in text
+    assert render.TIMEOUT_URGENT in text
+
+
 # --- refusal copy -----------------------------------------------------------
 
 

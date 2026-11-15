@@ -129,13 +129,19 @@ def team_host_but_isolated(tmp_path, monkeypatch):
     app = tmp_path / "Local Operator.app"
     app.mkdir()
     monkeypatch.setattr(procname, "installed_app", lambda: app)
-    monkeypatch.setattr(procname, "code_identity", lambda path: {"TeamIdentifier": _FAKE_TEAM})
+    monkeypatch.setattr(
+        procname,
+        "code_identity",
+        lambda path: {"TeamIdentifier": _FAKE_TEAM, "Authority": procname.SIGNING_AUTHORITY},
+    )
     monkeypatch.setattr(
         procname,
         "app_requirement",
         lambda path: f'identifier "{procname.APP_BUNDLE_ID}" and anchor apple generic',
     )
-    procname.write_signing_optin(_FAKE_SHA1, _FAKE_TEAM, always_allow_confirmed=True)
+    procname.write_signing_optin(
+        _FAKE_SHA1, _FAKE_TEAM, always_allow_confirmed=True, name=procname.SIGNING_AUTHORITY
+    )
     return optin
 
 
@@ -364,7 +370,9 @@ class TestTeamFlavor:
     def test_a_non_tty_update_without_always_allow_does_not_sign(
         self, tmp_path, fake_codesign, opted_in_host, monkeypatch
     ):
-        procname.write_signing_optin(_FAKE_SHA1, _FAKE_TEAM, always_allow_confirmed=False)
+        procname.write_signing_optin(
+            _FAKE_SHA1, _FAKE_TEAM, always_allow_confirmed=False, name=procname.SIGNING_AUTHORITY
+        )
         monkeypatch.setattr(sys, "stdin", open(os.devnull))
         real = _copied_interpreter(tmp_path)
         assert procname.publish_team_runtime(real) is None
@@ -418,7 +426,9 @@ class TestTeamFlavor:
         self, tmp_path, fake_codesign, opted_in_host, monkeypatch
     ):
         """R2: the TUI's ``/update`` has a TTY mid-session; only ``lop update`` may prompt."""
-        procname.write_signing_optin(_FAKE_SHA1, _FAKE_TEAM, always_allow_confirmed=False)
+        procname.write_signing_optin(
+            _FAKE_SHA1, _FAKE_TEAM, always_allow_confirmed=False, name=procname.SIGNING_AUTHORITY
+        )
         monkeypatch.setattr(sys, "stdin", _TtyStdin())
         real = _copied_interpreter(tmp_path)
 
@@ -431,7 +441,9 @@ class TestTeamFlavor:
     def test_the_cli_update_may_prompt_from_a_terminal(
         self, tmp_path, fake_codesign, opted_in_host, monkeypatch
     ):
-        procname.write_signing_optin(_FAKE_SHA1, _FAKE_TEAM, always_allow_confirmed=False)
+        procname.write_signing_optin(
+            _FAKE_SHA1, _FAKE_TEAM, always_allow_confirmed=False, name=procname.SIGNING_AUTHORITY
+        )
         monkeypatch.setattr(sys, "stdin", _TtyStdin())
         real = _copied_interpreter(tmp_path)
 
@@ -443,7 +455,9 @@ class TestTeamFlavor:
     def test_a_cli_update_with_no_terminal_still_does_not_sign(
         self, tmp_path, fake_codesign, opted_in_host, monkeypatch
     ):
-        procname.write_signing_optin(_FAKE_SHA1, _FAKE_TEAM, always_allow_confirmed=False)
+        procname.write_signing_optin(
+            _FAKE_SHA1, _FAKE_TEAM, always_allow_confirmed=False, name=procname.SIGNING_AUTHORITY
+        )
         monkeypatch.setattr(sys, "stdin", open(os.devnull))
         real = _copied_interpreter(tmp_path)
 

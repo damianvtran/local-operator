@@ -66,9 +66,12 @@ class RefusalBoundary:
                     entry["done"] = True
                     self.condition.notify_all()
 
-        def admission(link: relay.PeerLink) -> str:
+        def admission(link: relay.PeerLink, *, outbound: bool = False) -> str:
+            # Mirror _admit_link's keyword exactly: dial() passes outbound=True so the
+            # duplicate fence knows which links this device dialled. Dropping it here
+            # would either crash the dial (TypeError) or silently admit as inbound.
             endpoints = (link.sock.getsockname(), link.sock.getpeername())
-            verdict = admit(link)
+            verdict = admit(link, outbound=outbound)
             with self.condition:
                 self.admissions.append(
                     dict(

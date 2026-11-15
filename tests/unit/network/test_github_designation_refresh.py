@@ -34,6 +34,9 @@ from local_operator.network import store
 from local_operator.network.credentials import github as github_mod
 from local_operator.network.credentials import placement as placement_mod
 from local_operator.network.credentials.types import Grant
+from tests.unit.network.self_revoke_guard import (  # noqa: F401 — autouse fixture by import
+    no_self_revoke_outlives_its_cell,
+)
 from tests.unit.network.test_credentials_github import (  # noqa: F401 — fixtures by import
     BORROWER_DEVICE,
     OWNER_DEVICE,

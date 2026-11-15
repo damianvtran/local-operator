@@ -1350,6 +1350,7 @@ def _rank(
         # unknown ranks HIGH with that state named (the one fact the agent can
         # act on); not-linked takes the ordinary ranking below.
         from local_operator.guardrails.provenance import (
+            state_phrase,
             worktree_activity,
             worktree_state,
         )
@@ -1361,7 +1362,10 @@ def _rank(
         # returned HIGH below before the ledger check was ever reached, and
         # the judge saw no ledger fact, so finished own trees were refused.
         own = _owned_by_session(target, path, prot, session_id)
-        state = worktree_state(path, own=own is not None)
+        state = worktree_state(path, own=own is not None, session_id=session_id)
+        # Never a bare "busy" (operator directive 2026-11-14): the reason names
+        # each holder (pid, command, session) or why the inventory failed.
+        state_text = state_phrase(path, state, session_id)
         if state != "not-linked":
             # Clean is not idle (operator incident 2026-11-09: a clean worktree
             # whose branch had an OPEN PR under QA was removed, deleting 34
@@ -1371,7 +1375,7 @@ def _rank(
             # running owner or an unknown PR state only withholds the LOW, so
             # the judge sees those facts. ``worktree_activity`` explains both.
             activity = worktree_activity(path, session_id)
-            facts = activity.facts()
+            facts = _with_scan_note(activity.facts(), path)
             if activity.pr_state == "open":
                 return RankedTarget(
                     target,
@@ -1402,6 +1406,23 @@ def _rank(
                     Risk.LOW,
                     f"{own[0]}; linked worktree with no uncommitted change ({facts})",
                 )
+            if own is not None and own_idle and state == "dirty":
+                # OWN + DETACHED + DIRTY (operator directive 2026-11-14, field
+                # case attr3880-ci on lop-remote-node-2; see
+                # ``provenance.own_detached_scratch``): no branch to lose and
+                # HEAD kept by a ref, so the uncommitted changes are the
+                # creator's own scratch — LOW for ``remove`` with or without
+                # ``--force``. A branch, a dangling HEAD or a nested repo
+                # returns ``None`` and falls to the judge below.
+                from local_operator.guardrails.provenance import own_detached_scratch
+
+                scratch = own_detached_scratch(path) if _scratch_location(path) else None
+                if scratch is not None:
+                    return RankedTarget(
+                        target,
+                        Risk.LOW,
+                        f"{own[0]}; {scratch}; {_changes_phrase(path)}; {facts}",
+                    )
             if own is not None and state == "dirty":
                 # Real tracked/untracked work in an OWN tree: the judge decides
                 # with the ledger row and the exact entries (``build_delete_case``
@@ -1409,7 +1430,8 @@ def _rank(
                 return RankedTarget(
                     target,
                     Risk.HIGH,
-                    f"{own[0]}; linked worktree state: dirty; {_changes_phrase(path)}; {facts}",
+                    f"{own[0]}; linked worktree state: dirty; {_changes_phrase(path)}"
+                    f"{_dangling_phrase(path)}; {facts}",
                 )
             if idle and state == "clean" and not target.forced:
                 return RankedTarget(target, Risk.LOW, f"a clean linked git worktree ({facts})")
@@ -1426,7 +1448,7 @@ def _rank(
                 return RankedTarget(
                     target,
                     Risk.HIGH,
-                    f"a git repository root; linked worktree state: {state}; {facts}",
+                    f"a git repository root; linked worktree state: {state_text}; {facts}",
                 )
             if state not in ("clean", "stale-initializing"):
                 # QA round 3 (Q3-OBS): dirty, locked, busy, unknown or timeout
@@ -1441,17 +1463,27 @@ def _rank(
                     target,
                     Risk.HIGH,
                     "; ".join(
-                        [f"a git repository root; linked worktree state: {state}; {facts}", *notes]
+                        [
+                            f"a git repository root; linked worktree state: {state_text}; {facts}",
+                            *notes,
+                        ]
                     ),
                 )
             # Clean but forced, or stale-initializing without ``-f -f`` (git
             # refuses that itself): nothing uncommitted to lose, so the ordinary
             # ranking applies, but the state stays in whatever reason it gives.
-            worktree_note = f"linked worktree state: {state}; {facts}"
+            worktree_note = f"linked worktree state: {state_text}; {facts}"
             notes.append(worktree_note)
+    scratch_facts: list[str] = []
     if not target.worktree_remove and target.op == "delete" and not target.selected:
         reached = _reached_worktrees(
-            target, path, prot, session_id, globstar=globstar, through_link=link is None
+            target,
+            path,
+            prot,
+            session_id,
+            globstar=globstar,
+            through_link=link is None,
+            scratch=scratch_facts,
         )
         if reached is not None:
             return reached
@@ -1486,6 +1518,8 @@ def _rank(
         # open PR); a bare ``rm link`` removes only the entry.
         if owned is not None:
             reason, matches = owned
+            if scratch_facts:
+                reason = "; ".join([reason, *scratch_facts])
             shown = ""
             if target.pattern is not None:
                 shown = ", ".join(matches[:4]) + (
@@ -1507,6 +1541,68 @@ def _rank(
         # Never discard the worktree state the branch above recorded.
         return RankedTarget(target, Risk.LOW, f"ordinary path; {worktree_note}")
     return RankedTarget(target, Risk.LOW, "ordinary path")
+
+
+def _dangling_phrase(path: str) -> str:
+    """``; HEAD: … reachable from NO ref …`` for a detached tree no ref keeps, else "".
+
+    WHY (QA Q4, PR #3987): the refusal guidance tells the agent to act on
+    "HEAD reachable from no ref" by tagging or branching first, but only the
+    judge's brief carried that fact; the deterministic reason the agent sees
+    said just ``dirty … (detached HEAD)``. Same wording as the judge's line
+    (``check.py``), so both name one fact.
+    """
+    from local_operator.guardrails.provenance import detached_head
+
+    detached = detached_head(path)
+    if detached is None or detached[1] is not None:
+        return ""
+    return (
+        f"; HEAD: detached at {detached[0]}, reachable from NO ref (commits made in "
+        "it are lost with the tree: keep them with git tag or git branch first)"
+    )
+
+
+def _with_scan_note(facts: str, path: str) -> str:
+    """``facts`` plus the cwd-unreadable processes the scan ignored for ``path``.
+
+    WHY (operator directive 2026-11-14): a process whose cwd this uid may not
+    read no longer fails the whole holder scan closed
+    (``provenance._unreadable_cwd_evidence``); the judge, the agent and the
+    operator still see that it was there and why it did not count.
+    """
+    from local_operator.guardrails.provenance import cwd_scan_note
+
+    note = cwd_scan_note(path)
+    return f"{facts}; {note}" if note else facts
+
+
+def _scratch_location(path: str) -> bool:
+    """May an own detached tree at ``path`` rank as disposable scratch, by WHERE it is?
+
+    WHY (QA Q2, PR #3987): the operator's waiver covers the place agents put
+    throwaway trees — under the repository's own ``.worktrees/`` directory
+    (``<main checkout>/.worktrees/...``). An own detached tree anywhere else
+    (``~/outside-wt``) keeps the ordinary ranking: its location says nothing
+    about it being scratch, so its uncommitted changes go to the judge.
+
+    A session scratchpad is the brief's other location, but no tree there
+    reaches this check: ``_owned_by_session`` refuses every path under a
+    state root (another session's files), so the ledger never vouches for a
+    scratchpad tree and it stays HIGH (unchanged from base). Widening that
+    bar is a separate, security-relevant change, not this waiver's.
+
+    Lexical on the realpath; an unreadable ``.git`` answers ``False`` (fail
+    closed to the base rank).
+    """
+    from local_operator.guardrails import provenance as prov
+
+    real = os.path.realpath(path)
+    common = prov._common_dir(real)
+    if not common or os.path.basename(common.rstrip(os.sep)) != ".git":
+        return False  # a bare common dir has no main checkout to hold ``.worktrees/``
+    holder = os.path.join(os.path.realpath(os.path.dirname(common.rstrip(os.sep))), ".worktrees")
+    return real.startswith(holder + os.sep)
 
 
 def _changes_phrase(path: str) -> str:
@@ -1586,8 +1682,12 @@ def _reached_worktrees(
     *,
     globstar: bool = False,
     through_link: bool = False,
+    scratch: list[str] | None = None,
 ) -> RankedTarget | None:
     """Rank a delete by the linked worktrees it reaches, or ``None`` if it reaches none.
+
+    ``scratch`` collects the fact phrase of each own detached scratch tree
+    let through (``provenance.own_detached_scratch``), for the LOW reason.
 
     WHY (security review of PR #3800): a linked worktree is ranked as one
     however the delete reaches it — its literal path, a glob match
@@ -1662,7 +1762,9 @@ def _reached_worktrees(
     checked, unchecked = own[:_MAX_OWN_CHECKED], own[_MAX_OWN_CHECKED:]
     jobs: dict[str, Any] = {}
     for root in checked:
-        jobs[f"state:{root}"] = lambda r=root: prov.worktree_state(r, own=True)
+        jobs[f"state:{root}"] = lambda r=root: prov.worktree_state(
+            r, own=True, session_id=session_id
+        )
         jobs[f"activity:{root}"] = lambda r=root: prov.worktree_activity(r, session_id)
     for root in foreign[:_MAX_FOREIGN_STATES]:
         jobs[f"fstate:{root}"] = lambda r=root: prov.worktree_state(r)
@@ -1675,7 +1777,7 @@ def _reached_worktrees(
         if state is None or activity is None:
             held.append(f"{root}: created by this session; not checked in time (state unknown)")
             continue
-        facts = activity.facts()
+        facts = _with_scan_note(activity.facts(), root)
         if activity.pr_state == "open":
             return RankedTarget(
                 target,
@@ -1691,10 +1793,31 @@ def _reached_worktrees(
         idle = activity.pr_state in ("none", "unknown") and not activity.owners_running
         # Strictly ``clean``: a stale ``initializing`` lock is LOW only for
         # ``git worktree remove -f -f``, which says so; ``rm -rf`` goes to the judge.
+        if (
+            state == "dirty"
+            and idle
+            and _scratch_location(root)
+            and (phrase := prov.own_detached_scratch(root)) is not None
+        ):
+            # ``rm -rf`` of an own detached dirty tree: the same waiver ``git
+            # worktree remove`` gets in ``_rank`` (operator directive
+            # 2026-11-14, field case attr3880-ci). Not held, so the ordinary
+            # ranking below gives the ledger LOW — for a literal path, or a
+            # glob reaching only own trees (review n1, PR #3987: consistent
+            # with ledger LOW elsewhere; a foreign match still holds). The
+            # detached/kept-by fact rides into that reason (review n2).
+            if scratch is not None:
+                scratch.append(f"{root}: {phrase}")
+            continue
         if state != "clean" or not idle:
-            changes = f"; {prov.describe_changes(root)}" if state == "dirty" else ""
+            changes = (
+                f"; {prov.describe_changes(root)}{_dangling_phrase(root)}"
+                if state == "dirty"
+                else ""
+            )
             held.append(
-                f"{root}: created by this session; linked worktree state: {state}{changes}; {facts}"
+                f"{root}: created by this session; linked worktree state: "
+                f"{prov.state_phrase(root, state, session_id)}{changes}; {facts}"
             )
     if unchecked:
         held.append(
@@ -1729,7 +1852,8 @@ def _reached_worktrees(
             who = "not created by this session (not in the ledger)"
         activity = activities.get(root)
         facts = activity.facts() if activity is not None else "PR state unknown (lookup timed out)"
-        parts.append(f"{root}: {who}; linked worktree state: {state}{changes}; {facts}")
+        state_text = prov.state_phrase(root, state, session_id)
+        parts.append(f"{root}: {who}; linked worktree state: {state_text}{changes}; {facts}")
     if len(foreign) > _MAX_FOREIGN_SHOWN:
         parts.append(f"… and {len(foreign) - _MAX_FOREIGN_SHOWN} more foreign linked worktrees")
     head = f"deletes {len(roots)} linked worktree{'s' if len(roots) != 1 else ''}"

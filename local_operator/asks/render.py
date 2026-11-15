@@ -137,6 +137,47 @@ TIMEOUT_SECRET_DISMISSED = (
     "Do not run anything that needed it; report what was left undone."
 )
 
+#: The timeout notice for a browser SITE CARD (``browser_bridge/site_approval``:
+#: ``request_access`` on a headless node queues it). Its own sentence set, not
+#: :data:`TIMEOUT_NOTICE` plus clauses, because every generic instruction is wrong
+#: here. Incident 2026-11-15 (session 1c31cfff075b on lop-remote-node-2, ask
+#: a-652b): the generic notice told the agent to "use your recommended option(s)
+#: or best judgment" and, since the card was urgent, to "delegate the question to
+#: a `task` subagent ... and decide on its answer". A site card is
+#: ``human_required`` and is answered only by the operator SIGNING it on their own
+#: device (``bridge_decide``), so both sentences invite the agent to decide a
+#: grant it can never decide — the approval model is default-deny and an agent
+#: must never self-approve. :data:`TIMEOUT_URGENT` is therefore never appended on
+#: this path, whatever ``urgent`` says.
+#:
+#: The next step mirrors guide://browser ("On a headless node", step 4): one
+#: re-raise with ``request_access``, and the tool itself refuses a third card
+#: once two lapsed unanswered; past that the operator hears it in chat. "Not an
+#: approval" is :data:`TIMEOUT_NOT_CONSENT`'s point, said for this card's only
+#: decision — there is no recommendation to take, reversible or not.
+TIMEOUT_SITE_CARD = (
+    "[Ask timed out] The operator did not answer the site card for {origin} (ask "
+    "{ask_id}) within {waited} (asked {asked}). A timeout is not an approval.\n"
+    "Only the operator can approve a site, by signing the card on their own device: do "
+    "not decide it yourself or through a subagent. You may re-raise it once with "
+    "`request_access` (guide://browser); otherwise tell the operator in chat which site "
+    "you need, and carry on without it."
+)
+
+#: The same notice for a site card the operator DISMISSED without answering
+#: (fork A, see :data:`TIMEOUT_NOTICE_DISMISSED`). One added sentence, the rest
+#: byte-identical, so the two cannot drift. A dismissal is still not a Deny: a
+#: Deny is a signed decision the node remembers, a dismissal is putting a card away.
+TIMEOUT_SITE_CARD_DISMISSED = (
+    "[Ask timed out] The operator did not answer the site card for {origin} (ask "
+    "{ask_id}) within {waited} (asked {asked}). A timeout is not an approval.\n"
+    "The user dismissed it without answering.\n"
+    "Only the operator can approve a site, by signing the card on their own device: do "
+    "not decide it yourself or through a subagent. You may re-raise it once with "
+    "`request_access` (guide://browser); otherwise tell the operator in chat which site "
+    "you need, and carry on without it."
+)
+
 #: When a secret answer was stored but the session restarted before the response
 #: was delivered, the value is gone (session-memory only, ``persist`` excepted).
 #: This is the one path where the user answered and the agent still cannot
@@ -283,11 +324,39 @@ def _timeout_listing_line(question: Mapping[str, Any]) -> str:
     them here would be exactly the un-framed re-serve §11.1 forbids.
     """
 
+    # A SITE card also carries a ``question_id`` (it routes answers through the
+    # signed decide door), but its words are OURS — built by
+    # ``site_approval.site_ask_question`` from the origin — not another
+    # organization's. Labelling it with the bridge's untrusted clause was a false
+    # positive of the "any question_id is a bridge request" heuristic (incident
+    # 2026-11-15, ask a-652b), so it is checked first.
+    if _is_site_question(question):
+        return f"{question.get('id')} — site card for {_site_origin(question)}"
     if str(question.get("question_id") or ""):
         from local_operator.harness.message_types import BRIDGE_UNTRUSTED_CLAUSE
 
         return f"{question.get('id')} — {BRIDGE_UNTRUSTED_CLAUSE}"
     return _clip(str(question.get("question") or ""), 200)
+
+
+def _is_site_question(question: Mapping[str, Any]) -> bool:
+    """Whether ``question`` is a browser site card (``site_approval``'s builder)."""
+    from local_operator.browser_bridge.site_approval import is_site_question_id
+
+    return is_site_question_id(question.get("question_id"))
+
+
+def _site_origin(question: Mapping[str, Any]) -> str:
+    """The origin a site card asks about, for the timeout notice.
+
+    Read from the card's structured ``site`` block (``site_binding``), which the
+    builder fills from the same origin the card's sentence names. Clipped because
+    the row crossed the node's multi-writer ask log; the question id stands in
+    when the block is missing, so the notice always names SOMETHING to re-raise.
+    """
+    site = question.get("site")
+    origin = str(site.get("origin") or "") if isinstance(site, Mapping) else ""
+    return _clip(origin or str(question.get("question_id") or ""), 200)
 
 
 def timeout_text(
@@ -313,11 +382,29 @@ def timeout_text(
     same notice with one added sentence saying the user put the ask away. It is a
     FLAG rather than the caller swapping templates, so the two variants cannot
     drift from the notices they are variants of.
+
+    A browser SITE card (every question a ``site_approval`` question) gets
+    :data:`TIMEOUT_SITE_CARD` instead: only the operator's signature can decide
+    it, so it never carries the "best judgment" half or :data:`TIMEOUT_URGENT`.
     """
     questions = list(record.get("questions") or [])
     expires_at = int(record.get("expires_at") or 0)
     waited = _span(max(0, now_ms - int(record.get("created_at") or expires_at)) / 1000.0)
     asked = _stamp(record.get("created_at"))
+    if questions and all(_is_site_question(q) for q in questions):
+        # Site cards: only the operator's signature decides them, so neither the
+        # generic "best judgment" half nor TIMEOUT_URGENT's "delegate and decide"
+        # may reach the agent (see TIMEOUT_SITE_CARD).
+        template = TIMEOUT_SITE_CARD_DISMISSED if dismissed else TIMEOUT_SITE_CARD
+        text = template.format(
+            ask_id=record.get("ask_id", ""),
+            waited=waited,
+            asked=asked,
+            origin=", ".join(_site_origin(q) for q in questions),
+        )
+        if lapsed_while_stopped:
+            text = f"{text}\n{TIMEOUT_LAPSED_WHILE_STOPPED}"
+        return text
     if any(q.get("secret") for q in questions):
         keys = ", ".join(str(q.get("id")) for q in questions if q.get("secret")) or "requested"
         template = TIMEOUT_SECRET_DISMISSED if dismissed else TIMEOUT_SECRET

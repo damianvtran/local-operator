@@ -55,6 +55,18 @@ _GLOSSES = frozenset({"peer_reason_words", "doctor_detail_words", "table_reason_
 #: person's problem)``. The count is part of the key on purpose: a second raw read
 #: inside an already-declared function is a new site and must be looked at.
 _DECLARED_RAW_READS: dict[tuple[str, str, str], tuple[int, str]] = {
+    # Backfill parses this device's stored invite receipt to recover the minted
+    # id; the coerced detail is regex input, never a rendered peer refusal.
+    ("local_operator/network/operator_binding.py", "_invite_ids", "detail"): (
+        1,
+        "local approval receipt parsed for an invite id, not displayed",
+    ),
+    # This coercion builds the per-approval log-deduplication key. The other
+    # reason read feeds LOGGER directly; neither constructs a human mesh surface.
+    ("local_operator/network/operator_binding.py", "_log_backfill", "reason"): (
+        1,
+        "backfill outcome cache key used only to deduplicate developer log lines",
+    ),
     # This is a bound formatter CALL, not a read of a peer's reason field.
     # Designation.reason() authors the empty-list clause locally (explicit list,
     # unavailable enumeration, all opted out, or no push access); refusal() adds
@@ -81,6 +93,12 @@ _DECLARED_RAW_READS: dict[tuple[str, str, str], tuple[int, str]] = {
     ("local_operator/network/credentials/approval_copy.py", "last_failure", "detail"): (
         1,
         "the stored refusal code, mapped to approval_copy's sentence before any surface",
+    ),
+    # node_take preserves the owner's refusal token in its machine result; it
+    # does not print it. B1 calls this helper only from the custody contract tests.
+    ("local_operator/network/credentials/renewal.py", "node_take", "reason"): (
+        1,
+        "owner refusal token forwarded in the machine result, not rendered",
     ),
     # Exact executed-step discriminator for retaining signed intent; compared
     # internally, never rendered as a reason or substituted for signature proof.

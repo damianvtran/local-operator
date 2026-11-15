@@ -314,11 +314,19 @@ def test_real_leave_handler_rotates_despite_cache_failure(
     )
     audits: list[str] = []
     broadcasts: list[str] = []
+    revoked: list[tuple[str, list[str]]] = []
     server: Any = SimpleNamespace(
         root=isolated_root,
         store_view=SimpleNamespace(network=lambda _id: store.load(NETWORK, isolated_root)),
         audit=SimpleNamespace(record=lambda event: audits.append(event.event)),
         _broadcast_epoch=lambda _record, _state, **kw: broadcasts.append(kw["reason"]),
+        # The leave handler's owner half (#3947 M2): a device that left keeps no lent
+        # GitHub token, so the real handler asks the relay to revoke what it lent.
+        # Recorded, not run — the relay method's own behaviour is pinned in
+        # test_credentials_hold_github_mcp.py.
+        _revoke_lent_on_removal=lambda network_id, device_ids: revoked.append(
+            (network_id, list(device_ids))
+        ),
     )
     caplog.set_level(logging.WARNING, logger=relay.logger.name)
     link: Any = SimpleNamespace(network_id=NETWORK, device_id=OWNER)
@@ -333,6 +341,8 @@ def test_real_leave_handler_rotates_despite_cache_failure(
     assert saved is not None and saved.epoch == 2
     assert store.require_secrets(NETWORK, isolated_root).epoch == 2
     assert audits == broadcasts == ["member_left"]
+    # A cache failure must not cost the departed device's revoke either.
+    assert revoked == [(NETWORK, [OWNER])], revoked
     if failure == "symlink":
         assert refusals == ["credential_path_invalid"], "the real namespace guard must still refuse"
     warnings = [

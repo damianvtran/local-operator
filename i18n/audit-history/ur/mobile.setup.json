@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "ur",
   "namespace": "mobile.setup",
-  "history_sha256": "7bb5a93279c57a67bb6383d9bc69a5c2a099c7ea1c6db11bf1fd2b43f0fbadfa",
+  "history_sha256": "46d3923f79b0f35865aa51e53226fec601e8eb0d1303f4e197bf0ba51859dc30",
   "entries": [
     {
       "locale": "ur",
@@ -73,6 +73,52 @@
       "evidence": "i18n/audits/evidence/ur/mobile.setup/a2/record.json",
       "round": "a2",
       "keys_audited": 94
+    },
+    {
+      "locale": "ur",
+      "namespace": "mobile.setup",
+      "source_sha256": "3025a3af72d2a082766ca7b4c72100db41f2504f48404697af453121b0b6e427",
+      "translator": {
+        "agent": "coder subagent of host Local Operator session 25fe8dfbf610 (values committed in 01113e5aa on fix/tunnel-remedy-no-commands; English source by the same coder)",
+        "model": null,
+        "date": "2026-11-14"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team), independent Local Operator session 9054cd229d3f; not the translator/coder of host session 25fe8dfbf610; edited no catalogue value",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-14",
+        "result": "passed",
+        "findings": 2,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "a3: independent translation-auditor 9054cd229d3f (anthropic/claude-opus-5-5) of #3958 coder (host session 25fe8dfbf610) values at 01113e5aa: PASSED, 0 blocker/major (2 minor/nit, deferred to the PR thread); 12 new *_plain keys. Evidence: i18n/audits/evidence/ur/mobile.setup/a3/record.json",
+      "evidence": "i18n/audits/evidence/ur/mobile.setup/a3/record.json",
+      "round": "a3",
+      "keys_audited": 12
+    },
+    {
+      "locale": "ur",
+      "namespace": "mobile.setup",
+      "source_sha256": "d99fe54d374c3e0548c1c1f0775b99039a85c8b3085c097a443d12872e36429b",
+      "translator": {
+        "agent": "coder subagent of host Local Operator session 25fe8dfbf610 (values committed in 139bca903 on fix/tunnel-remedy-no-commands; English source by the same coder)",
+        "model": null,
+        "date": "2026-11-14"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team), independent Local Operator session b3a764eb5573; not the translator/coder (25fe8dfbf610); edited no catalogue value",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-14",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "a4: independent ur audit by translation-auditor b3a764eb5573 (anthropic/claude-opus-5-5) of #3958 values at 139bca903: PASSED, 0 blocker/major; 3 new keys (operation_failed_tui, disabled_resume, billing_lapsed_resume), mobile_bundle_tui removal verified. Evidence: i18n/audits/evidence/ur/mobile.setup/a4/record.json",
+      "evidence": "i18n/audits/evidence/ur/mobile.setup/a4/record.json",
+      "round": "a4",
+      "keys_audited": 3
     }
   ]
 }
