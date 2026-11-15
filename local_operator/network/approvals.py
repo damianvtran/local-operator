@@ -2274,6 +2274,21 @@ def _sweep_namespace(
     materialized = pruned = 0
     tombstones = 0
     directory = approvals_dir(root, enrollment_only=enrollment_only)
+    # The operator-binding proofs in use (manager decision M1, 2026-11-15): the
+    # newest signed onboarding decision per network is what this device presents
+    # to its nodes as "the operator's device" (``network.operator_binding``).
+    # Pruning it would silently turn every node in that network back to "shown
+    # on this node only" until the next onboarding, so it is exempt from the
+    # 30-day terminal prune; older decisions still go. Computed BEFORE the loop:
+    # it reads records without their locks, and the loop holds one lock at a time.
+    binding_ids: frozenset[str] = frozenset()
+    if directory.is_dir():
+        try:
+            from local_operator.network.operator_binding import retained_approval_ids
+
+            binding_ids = retained_approval_ids(root)
+        except Exception:  # noqa: BLE001 — a failed read keeps nothing extra, prunes as before
+            binding_ids = frozenset()
     if directory.is_dir():
         for path in sorted(directory.glob("apn_*.json" if enrollment_only else "ap_*.json")):
             data = _read_json(path)
@@ -2308,6 +2323,7 @@ def _sweep_namespace(
                     )
                     if (
                         not permission_source
+                        and approval_id not in binding_ids
                         and record.get("state") in TERMINAL_STATES
                         and (moment - _terminal_at(record) >= TERMINAL_PRUNE_AGE_S)
                     ):

@@ -771,8 +771,14 @@ def pull_file(
     session_id: str,
     path: str = "",
     attachment: str = "",
+    land: str = "store",
 ) -> dict[str, Any]:
     """Pull one file from ``peer``'s session into THIS device's attachment store.
+
+    ``land="cache"`` files it in the viewer's bounded remote-files cache instead
+    (``remote_files.cache``, docs/design/remote-files-parity.md §4): the desktop's
+    fetch-on-miss lands there so eviction can never delete a local session's only
+    copy from the authoritative store. ``"store"`` keeps S1's CLI receipt.
 
     Returns the receipt ``{ok, peer, device_id, session_id, name, path, bytes,
     sha256, attachment, mime, verified, resumed_bytes}``; raises :class:`MeshRefusal`
@@ -783,6 +789,8 @@ def pull_file(
 
     if not session_id:
         raise _refuse("bad_request", "a file pull names the session it reads from")
+    if land not in ("store", "cache"):
+        raise _refuse("bad_request", f"a file pull lands in 'store' or 'cache', not {land!r}")
     if bool(path) == bool(attachment):
         raise _refuse(
             "bad_request",
@@ -809,6 +817,30 @@ def pull_file(
     asker = _Asker(server, link, label, session_id, source)
     meta = _validated_stat(asker.ask(phase="stat"), label)
     root = Path(server.root)
+    if land == "cache":
+        from local_operator.remote_files.cache import cache_root, touch
+
+        # A PATH source is keyed by the owner's stat sha256 only after this phase, so
+        # the viewer cannot look the cache up first; the bytes may already be here
+        # (content-addressed, verified when they landed). Skip the transfer then.
+        digest = meta["sha256"][len("sha256:") :][:32]
+        cached = cache_root(root) / f"{digest}.bin"
+        if cached.is_file():
+            touch(cached)
+            return {
+                "ok": True,
+                "peer": label,
+                "device_id": device_id,
+                "session_id": session_id,
+                "name": meta["name"],
+                "path": str(cached),
+                "bytes": meta["bytes"],
+                "sha256": meta["sha256"],
+                "attachment": digest,
+                "mime": meta["mime"],
+                "verified": True,
+                "resumed_bytes": 0,
+            }
     try:
         scope = sync.write_scope(root, staging_root(root))
     except sync.SyncRefused:
@@ -864,7 +896,12 @@ def pull_file(
                 raise
             os.close(fd)
             break
-        store = AttachmentStore(root / ATTACHMENTS_DIRNAME)
+        if land == "cache":
+            from local_operator.remote_files.cache import cache_root
+
+            store = AttachmentStore(cache_root(root))
+        else:
+            store = AttachmentStore(root / ATTACHMENTS_DIRNAME)
         # The store re-hashes while adopting: its own gate is what makes a file
         # visible under a content name, and it must not rest on a caller's check.
         ref = store.adopt_file(part, meta["mime"], expected_sha256=meta["sha256"])
@@ -875,6 +912,13 @@ def pull_file(
                 "the pulled file verified but could not be filed in this device's attachment "
                 "store; nothing was saved",
             )
+        if land == "cache":
+            # An existing blob is not re-written by ``adopt_file``, so its mtime is
+            # whenever it first landed: bump it, or the eviction pass that follows
+            # this landing would treat the file just asked for as the oldest.
+            from local_operator.remote_files.cache import touch
+
+            touch(store.root / f"{ref.digest}.bin")
     return {
         "ok": True,
         "peer": label,
@@ -901,6 +945,7 @@ def local_pull_handler(server: "RelayServer") -> Callable[[dict[str, Any]], dict
             session_id=str(frame.get("session_id") or ""),
             path=str(frame.get("path") or ""),
             attachment=str(frame.get("attachment") or ""),
+            land=str(frame.get("land") or "store"),
         )
 
     return _handle
@@ -908,8 +953,21 @@ def local_pull_handler(server: "RelayServer") -> Callable[[dict[str, Any]], dict
 
 def install(server: "RelayServer") -> None:
     """Register ``net_file_get`` (slow: a stat hashes up to 256 MiB) and the local verb."""
+    from local_operator.network import file_index
+
     server.register_ops(
-        {"net_file_get": make_handler(server)},
-        local_handlers={"session_file_pull": local_pull_handler(server)},
-        slow={"net_file_get": FILE_OP_DEADLINE_S},
+        {
+            "net_file_get": make_handler(server),
+            # The Files index rides this module's install so SLICE_MODULES is untouched
+            # (remote-files-parity.md §2): same family, same view capability.
+            "net_session_files": file_index.make_handler(server),
+        },
+        local_handlers={
+            "session_file_pull": local_pull_handler(server),
+            "peer_session_files": file_index.local_handler(server),
+        },
+        slow={
+            "net_file_get": FILE_OP_DEADLINE_S,
+            "net_session_files": file_index.INDEX_OP_DEADLINE_S,
+        },
     )

@@ -73,6 +73,18 @@ _FS_MODULES = frozenset({"os", "shutil", "pathlib"})
 #: count with a reason, and a removed one fails as stale.
 _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
     (
+        "local_operator/remote_files/cache.py::evict",
+        "os.unlink",
+        "Removes only 32-hex digest blobs/sidecars relative to a held cache/remote-files "
+        "directory fd, opened no-follow from the config root; never sessions or attachments.",
+    ),
+    (
+        "local_operator/server/utils/remote_session_files.py::land",
+        "<path>.unlink",
+        "Removes only this call's fixed-prefix, random O_EXCL-created download temp FILE; "
+        "creation failure never enters cleanup, and unlink rejects directories.",
+    ),
+    (
         "local_operator/network/credentials/github.py::use_default_repositories",
         "<path>.unlink",
         "Explicit owner opt-in removes only network/github-designation-delivered.json, "
@@ -846,6 +858,25 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "os.unlink",
         "Removes only this call's own `.create-keys.*.tmp` mkstemp FILE in "
         "<config>/network after a failed write or replace",
+    ),
+    # The operator binding's private files (`network/operator_binding.py`, PR
+    # #4030): every path `_atomic_write` is given is composed under
+    # `<config>/network/` (`operator-bindings/<net>/<dev>.json`,
+    # `operator-onboarded/<approval>.json`, `operator-binding-links.json`), with
+    # ids regex-checked to one path component. The tmp FILE is a sibling of its
+    # target, named per write (pid + uuid4, O_EXCL), so neither call can name a
+    # directory, let alone one under sessions/.
+    (
+        "local_operator/network/operator_binding.py::_atomic_write",
+        "os.replace",
+        "Atomic replacement of one operator-binding FILE under <config>/network/ from this "
+        "call's own O_EXCL sibling tmp file; never a directory and never under sessions/",
+    ),
+    (
+        "local_operator/network/operator_binding.py::_atomic_write",
+        "<path>.unlink",
+        "Removes only this call's own `.<name>.<pid>.<uuid>.tmp` FILE beside an "
+        "operator-binding file under <config>/network/ after a failed write or replace",
     ),
     (
         "local_operator/network/relay.py::clear_deliberate_stop",
@@ -2160,6 +2191,14 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "local_operator/mobile/transfer_receipts.py::TransferReceipts._write",
         "os.unlink",
         "that same temp FILE, only while the replace above is failing",
+    ),
+    # The phone's remote-session viewer refcount: `RemoteView.queues` is a
+    # `set[asyncio.Queue]` of live phone subscribers, so `.remove` is set.remove
+    # of one subscriber queue (guarded by `in`), never a filesystem path.
+    (
+        "local_operator/mobile/remote_sessions.py::RemoteViews.release",
+        "<path>.remove",
+        "set.remove of a subscriber asyncio.Queue from RemoteView.queues; no filesystem path",
     ),
     (
         "local_operator/multiplexer/markers.py::_FileBackend.publish",

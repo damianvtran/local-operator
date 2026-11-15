@@ -658,6 +658,14 @@ def desktop_launch_command_placeholder() -> Msg:
     return Msg("wire.settings.desktop_launch_command.placeholder", {})
 
 
+def desktop_remote_files_cache_bytes_help() -> Msg:
+    return Msg("wire.settings.desktop_remote_files_cache_bytes.help", {})
+
+
+def desktop_remote_files_cache_bytes_label() -> Msg:
+    return Msg("wire.settings.desktop_remote_files_cache_bytes.label", {})
+
+
 def detail_length_help() -> Msg:
     return Msg("wire.settings.detail_length.help", {})
 

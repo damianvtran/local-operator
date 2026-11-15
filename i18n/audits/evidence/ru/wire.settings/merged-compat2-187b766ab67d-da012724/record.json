@@ -1,0 +1,203 @@
+{
+  "schema": 1,
+  "audit_id": "merged-compat2-187b766ab67d-da012724",
+  "audit_kind": "genuine independent current-source semantic/context compatibility read of disjoint parent additions; namespace carry by verified parent bytes",
+  "locale": "ru",
+  "namespace": "wire.settings",
+  "audit_date": "2026-11-15",
+  "auditor": {
+    "agent": "independent i18n compatibility auditor (existing PR3872 core-i18n stream; merged-source binding2)",
+    "session": "187b766ab67d",
+    "model": "openai/gpt-6.1-sol",
+    "date": "2026-11-15",
+    "fallback": "none in this audit",
+    "result": "passed",
+    "findings": 0,
+    "unresolved_blocker_major": 0
+  },
+  "status": "passed",
+  "binding_state": "Independent semantic audit completed for exact da012 source; record published with genuine receipt via sanctioned append during manager-authorized metadata stage.",
+  "source_head": "da01272464c1ec3747d3ed18501d7c0e877f2fb7",
+  "parent_revisions": [
+    "801bdd93ff71c5d11209922ec9ba72393e826366",
+    "aa051d55925b483175388edcbae9dff315ca49f1"
+  ],
+  "common_base": "39b692a4bb7ec06e2305318d79b31a478661c87d",
+  "source_path": "local_operator/i18n/catalogues/en/wire.settings.json",
+  "source_sha256": "99abc7c2ebaaf0d498650af7f32e9ab51e4ee25dc79ae0285408314ad4453e64",
+  "target_path": "local_operator/i18n/catalogues/ru/wire.settings.json",
+  "target_sha256": "e11c92135087ebd6453b795772431ab219af241d25999584019d6905df44a721",
+  "context_path": "local_operator/i18n/catalogues/en/wire.settings.context.json",
+  "context_sha256": "c059d93a54699fa40303866de980c2841284b2328b1f253dd67d2d7e45ea6ff8",
+  "parents": [
+    {
+      "side": "feature",
+      "revision": "801bdd93ff71c5d11209922ec9ba72393e826366",
+      "source_sha256": "20259ccabe0c6deaf984d4d86667c86ac29cf016d9e161da94c53de611a9ddc4",
+      "target_sha256": "9427751044d1422284fce834f54a6bd1cb07fd07704191fb84d4764edbd01d9f",
+      "evidence_path": "i18n/audits/evidence/ru/wire.settings/merged-compat-187b766ab67d-84892ed59/record.json",
+      "evidence_sha256": "cbff57cd6813252e55c2fb29e31359a3c948bedff8c5ab48f23d02acb0eed419",
+      "receipt": {
+        "locale": "ru",
+        "namespace": "wire.settings",
+        "source_sha256": "20259ccabe0c6deaf984d4d86667c86ac29cf016d9e161da94c53de611a9ddc4",
+        "target_sha256": "9427751044d1422284fce834f54a6bd1cb07fd07704191fb84d4764edbd01d9f",
+        "translator": {
+          "agent": "coder (PR #3872 core implementer, lopdev)",
+          "session": "f4c08c15c058",
+          "model": "anthropic/claude-opus-5-5",
+          "date": "2026-11-12"
+        },
+        "composition_translators": [
+          {
+            "side": "feature",
+            "provenance": {
+              "agent": "coder (PR #3872 core implementer, lopdev)",
+              "session": "f4c08c15c058",
+              "model": "anthropic/claude-opus-5-5",
+              "date": "2026-11-12"
+            },
+            "additional": []
+          },
+          {
+            "side": "main",
+            "provenance": {
+              "agent": "core-backend coder cf2843d74957; round-1 remediation coder 1c07b39051ed (lopdev coder role) — relayed from PR #3832 i18n audit comments 6811281029/6812645445, not independently verified",
+              "model": "anthropic/claude-opus-5-5",
+              "fallback": "none reported in the relayed source",
+              "date": "2026-11-11..2026-11-12 (git: 09839b6de, 75606914f, eaff8c7a9)"
+            },
+            "additional": []
+          }
+        ],
+        "auditor": {
+          "agent": "independent i18n compatibility auditor (lopdev reviewer, resumed existing core i18n stream)",
+          "session": "187b766ab67d",
+          "model": "openai/gpt-6.1-sol",
+          "date": "2026-11-13",
+          "fallback": "none during this resumed audit",
+          "result": "passed",
+          "findings": 0,
+          "unresolved_blocker_major": 0
+        },
+        "status": "passed",
+        "composition_audit": {
+          "source_head": "84892ed59f03b85ca52e8c3ea63d55d0f4abd713",
+          "common_base": "4d113fc6c23b3fbb2afa426c0c6747ee0c399467",
+          "parent_revisions": [
+            "145a2ac1ad7846b1ebcaafb8661f6db865d2de1f",
+            "9a98146e1a1e5a518f67371203d30ea6ccf18e11"
+          ],
+          "evidence": "i18n/audits/evidence/ru/wire.settings/merged-compat-187b766ab67d-84892ed59/record.json"
+        },
+        "note": "Genuine independent merged-source semantic/context compatibility audit, 2026-11-13, 187b766ab67d, openai/gpt-6.1-sol, no fallback in this audit. Exact disjoint parent key/value composition; 2 feature + 6 upstream keys semantically read; unchanged keys carried by current-byte parent evidence. Historical provenance preserved as reported, not relabelled. Evidence: i18n/audits/evidence/ru/wire.settings/merged-compat-187b766ab67d-84892ed59/record.json"
+      },
+      "added_keys_covered": [
+        "wire.settings.desktop_remote_files_cache_bytes.help",
+        "wire.settings.desktop_remote_files_cache_bytes.label"
+      ]
+    },
+    {
+      "side": "main",
+      "revision": "aa051d55925b483175388edcbae9dff315ca49f1",
+      "source_sha256": "2baf6804bc41b53ac92db5e10ad4ade04a8f0ce7ceed3702af6be1ab42aa4b24",
+      "target_sha256": "7418cbf5c3664084f2cb49c87c7cef64df87bab6b8b144de556a96eb7254e55d",
+      "evidence_path": "i18n/audits/evidence/ru/wire.settings/oh3922r1/record.json",
+      "evidence_sha256": "2776885cfe8be7056c925eb5cc6707296b31fc3d1bd46a9c16ceb6da2c28f8be",
+      "receipt": {
+        "locale": "ru",
+        "namespace": "wire.settings",
+        "source_sha256": "2baf6804bc41b53ac92db5e10ad4ade04a8f0ce7ceed3702af6be1ab42aa4b24",
+        "translator": {
+          "agent": "i18n-translator subagent, job d5aeddae9573 under manager session 79bddc262663 (commit 1c956878e5d3) — relayed by the manager, not independently verified",
+          "model": "anthropic/claude-opus-5-5",
+          "fallback": "none (as relayed by the manager)",
+          "date": "2026-11-13"
+        },
+        "auditor": {
+          "agent": "i18n-auditor (lopdev team), session d25b77f53a23",
+          "session": "d25b77f53a23",
+          "model": "anthropic/claude-opus-5-5",
+          "fallback": "none observed in this session",
+          "date": "2026-11-13",
+          "result": "passed",
+          "findings": 2,
+          "unresolved_blocker_major": 0,
+          "minor": 1,
+          "nit": 1
+        },
+        "status": "passed",
+        "note": "#3922 r1 2026-11-13 i18n-auditor d25b77f53a23 (anthropic/claude-opus-5-5, no fallback): 2 new offline_hold keys passed, 0 open blocker/major; findings I-ru-1,I-ru-2. Rest byte-identical to f1e8d6410. Evidence: i18n/audits/evidence/ru/wire.settings/oh3922r1/record.json"
+      },
+      "added_keys_covered": [
+        "wire.settings.network_credentials_offline_hold_s.help",
+        "wire.settings.network_credentials_offline_hold_s.label"
+      ],
+      "verified_artifacts": [
+        {
+          "path": "i18n/audits/evidence/ru/wire.settings/oh3922r1/report.md",
+          "sha256": "8ca20ae4332d087c9c61b197cd92ab6e37d74c9b439703c2ce81910426b97878"
+        },
+        {
+          "path": "i18n/audits/evidence/ru/wire.settings/oh3922r1/audit.log",
+          "sha256": "597004b7acc4f19d7956834fd5e92bd393e66d3547ac501de14969235b7e589e"
+        }
+      ]
+    }
+  ],
+  "proof": {
+    "key_count": 869,
+    "common_base_keys_carried": 865,
+    "feature_additions": [
+      "wire.settings.desktop_remote_files_cache_bytes.help",
+      "wire.settings.desktop_remote_files_cache_bytes.label"
+    ],
+    "main_additions": [
+      "wire.settings.network_credentials_offline_hold_s.help",
+      "wire.settings.network_credentials_offline_hold_s.label"
+    ],
+    "collision_count": 0,
+    "existing_value_change_count": 0,
+    "whole_namespace_key_parity": true,
+    "NFC": true,
+    "manual_bidi_controls": false,
+    "new_keys_placeholders_and_icu": "all four additions have none in en and every locale; inherited ICU/CLDR branches preserved exactly from current-byte passed parents",
+    "new_keys_code_and_digit_parity": true,
+    "history_preservation": "exact full main suffix plus unchanged feature-exclusive receipts; all records canonical-identical; no duplicates"
+  },
+  "semantic_compatibility": "Help retains заимствованным логином, unavailable owner, token bound and smaller value wins. The already-deferred label omission of borrowed and slight wins calque are unchanged; no new semantic conflict with file-cache disk budget.",
+  "scope_semantically_read": [
+    "wire.settings.desktop_remote_files_cache_bytes.help",
+    "wire.settings.desktop_remote_files_cache_bytes.label",
+    "wire.settings.network_credentials_offline_hold_s.help",
+    "wire.settings.network_credentials_offline_hold_s.label"
+  ],
+  "retained_upstream_findings": [
+    {
+      "id": "I-ru-1",
+      "severity": "MINOR",
+      "disposition": "retained deferred from upstream parent audit; label omits borrowed but help/neighbour disambiguate"
+    },
+    {
+      "id": "I-ru-2",
+      "severity": "NIT",
+      "disposition": "retained deferred wins calque"
+    }
+  ],
+  "new_findings": [],
+  "provenance": "Historical parents preserved as reported, including relayed translator identities/models. This audit is 2026-11-15 openai/gpt-6.1-sol, no fallback; no historical fields rewritten or inferred. Source-composition coder is not this independent auditor.",
+  "context_note": "offline_hold additions have no per-key sidecar in either current/main; this is unchanged from their passed parent audit, not a new context omission; adjacent grant_ttl copy supplies scope",
+  "not_verified": [
+    "native-speaker certification",
+    "new rendered/RTL evidence",
+    "generator or ledger execution",
+    "all-locale shipping restoration",
+    "other namespaces or whole-product QA"
+  ],
+  "write_handoff": {
+    "date": "2026-11-15",
+    "scope": "seven wire.settings bindings plus required generation/census metadata only",
+    "source_head": "da01272464c1ec3747d3ed18501d7c0e877f2fb7",
+    "base": "aa051d55925b483175388edcbae9dff315ca49f1"
+  }
+}

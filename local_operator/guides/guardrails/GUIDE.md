@@ -85,7 +85,8 @@ into HIGH — a judge decision, never a pass. Rules only ADD restriction.
 ## Cleaning up what you made
 
 Deleting your own rig directories and worktrees works without asking, through
-three routes the checkpoint can verify. Everything CRITICAL is still refused.
+the routes below the checkpoint can verify; so does a finished worktree another
+session made. Everything CRITICAL is still refused.
 
 - **Creation ledger.** After every bash call the loop records the directories it
   created: `mkdir [-p]` (the topmost new component), `mktemp -d TEMPLATE`,
@@ -95,7 +96,11 @@ three routes the checkpoint can verify. Everything CRITICAL is still refused.
   way — a headless or mesh-spawned session included; nothing is gated on a
   desktop surface. A worktree also gets a row for its `.git` file: on Linux a
   directory's stamp is its ctime, which moves whenever an entry in the tree
-  root changes, and the `.git` file keeps the row matching after that. Rows live in
+  root changes, and the `.git` file keeps the row matching after that. A
+  worktree row with no such companion (written by an older runtime) or no
+  stamp at all still matches while the tree's `.git` gitdir file is older than
+  the row itself: any later `git worktree add` at that inode writes a newer
+  one, and a moved, relinked or rewritten `.git` fails closed. Rows live in
   `<config_dir>/guardrails/created.sqlite`, keyed by session id + realpath +
   inode, written under the creator and every ancestor session, so a parent may
   delete what its subagents made. Overwriting or deleting the ledger is CRITICAL.
@@ -113,14 +118,20 @@ three routes the checkpoint can verify. Everything CRITICAL is still refused.
 - **Clean linked worktree.** `git worktree remove <exact path>` (no `--force`)
   is LOW when the path is a registered linked worktree with no tracked or
   untracked change, no ignored entry beyond regenerable output (`node_modules`,
-  `.venv`, `__pycache__`, `build`, `dist` …) and no repository nested inside
+  `.venv`, `__pycache__`, `build`, `dist`, `dist-ssr` …) and no repository nested inside
   that output, and HEAD on a branch or in some
   ref — AND it is idle: no running session other than yours owns it (created
   it, or has its cwd inside) and its branch has no open PR (GitHub) or MR (GitLab) on the
   repo's remote. An open PR or MR is refused outright, at any state and even with an earlier
   answered ask: finish or close it first. A running owner, or (for a tree that is
   not your own) a PR state nobody could read (no GitHub or GitLab remote, `gh`/`glab` failed
-  or timed out), goes to the judge with those facts. An interrupted delete can leave a half-removed tree
+  or timed out), goes to the judge with those facts. When `gh`/`glab` fails,
+  git decides instead: one bounded `git ls-remote origin` (8 s; plus a bounded
+  `git fetch` of the default branch if its tip is not local), or the
+  already-fetched refs if origin cannot be reached. The PR state reads "none"
+  only when the branch tip is an ancestor of `origin/<default>` AND the
+  remote branch, if any, is too; a squash-merged branch, a remote branch with
+  newer commits, or stale refs that do not prove it stay unknown. An interrupted delete can leave a half-removed tree
   (tracked files gone, registration still present), so treat a failed
   removal as damage to report, not a step to retry. Anything else takes the
   ordinary ranking. Prefer this to
@@ -164,7 +175,16 @@ three routes the checkpoint can verify. Everything CRITICAL is still refused.
   subagent's shell or kernel, another session's process, an orphan with no
   session record, or an inventory or process table that cannot be read keeps
   it busy, and the judge is told each holder's pid, command and session, or
-  why the inventory failed. Ignored
+  why the inventory failed. On Linux a same-user process whose
+  `/proc/<pid>/cwd` reads "Permission denied" (non-dumpable — Chromium and
+  Electron helpers — or set-id/capability-privileged, such as `(sd-pam)`) is
+  not attributable: it counts as a holder only when its readable open files
+  or mappings point inside the tree, and is otherwise ignored and named in the
+  facts ("N same-user processes had an unreadable cwd …; ignored"). Their
+  `fd/` and `maps` sit behind the same kernel check, so such a process with
+  only its cwd inside a tree is not seen — an accepted residual risk: these
+  are system and sandbox processes, not agent work. An unreadable `/proc`
+  still fails closed. Ignored
   entries (`.expo/`, `.pnpm-store/`, a `node_modules` symlink, an ignored `.env`
   or local config) never count against your own tree: removing it deletes them
   with no judge call, exactly as `git worktree remove` does — move a secret you
@@ -178,6 +198,29 @@ three routes the checkpoint can verify. Everything CRITICAL is still refused.
   (`~/repo/.worktrees/{a,b}` works); a relative `.worktrees/a`, or a path only
   in an option's description, names nothing (live ask a-1d54, 2026-11-11). Another session's
   worktree, a primary checkout, `$HOME` and the state root keep their ranking.
+- **A finished worktree another session made.** `git worktree remove --force`,
+  `rm -rf` of the exact tree, or a glob matching only such trees ranks LOW with
+  no judge call, plus a short warning listing the facts, when ALL hold: a
+  registered linked tree, clean (no tracked, untracked or ANY ignored entry —
+  a `.venv` or `node_modules` name proves nothing about its contents), not
+  locked, no live cwd; HEAD on a named branch that points at it; HEAD an
+  ancestor of the commit origin advertises for its default branch (read with
+  `git ls-remote --symref origin HEAD`, no fetch; your local
+  `origin/<default>` must equal it — run `git fetch` first if it is stale); no
+  open PR or MR (an unreadable forge fails, even when git alone proves the
+  branch merged: that fallback never earns this route); and no running owner, with the
+  creation ledger and session registry both readable. A parent directory
+  holding only such trees loses that objection and is ranked on its own data.
+  Not covered, by design: squash- or rebase-merged branches (no ancestry),
+  trees with ignored content, trees with no ledger creator row (pre-ledger),
+  detached HEADs — those go to the judge, or to an `ask` naming each exact path.
+- **Path-valued credential variables.** A credential-named variable whose whole
+  value is one absolute or `~/` path (`GOOGLE_APPLICATION_CREDENTIALS`) resolves
+  like that literal path, so `rm -f "$GOOGLE_APPLICATION_CREDENTIALS"` of an old
+  key file is ranked by where it lands (CRITICAL under a protected root). Every
+  refusal, judge brief, journal line and preview shows it as
+  `$NAME <credential path>`, never the path. Token values, URLs, relative words
+  and shell syntax keep the credential refusal: spell the path literally.
 - **In-place edits are writes, not deletes.** `sed -i` / `perl -i` rewrite a
   file's content and remove no path, so they rank like any write: CRITICAL on
   the state root, `config.yml`, `secrets/` and session evidence, LOW elsewhere

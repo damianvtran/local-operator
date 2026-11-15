@@ -388,7 +388,7 @@ class DurableFoldCache:
                     # incrementally so a later marker on this path sheds exactly
                     # what the full rebuild would.
                     state.injection_ids.add(entry.id)
-                message = _entry_to_message(entry, _attachments())
+                message = _entry_to_message(entry, _attachments(state.directory))
                 if message is None:
                     continue
                 notice = state.prunes.get(entry.id)
@@ -552,7 +552,7 @@ class DurableFoldCache:
 
         state.injection_ids = _journal_injection_ids(entries)
         state.history, state.keep_start_id, state.prefix_ids = _replay_with_prefix(
-            entries, at_bof=at_bof
+            entries, at_bof=at_bof, directory=state.directory
         )
         state.scan_from_bof = at_bof
         state.render = _fold(state.history, state.directory)
@@ -609,7 +609,7 @@ def _replay(
 
 
 def _replay_with_prefix(
-    entries: list[TranscriptEntry], *, at_bof: bool = True
+    entries: list[TranscriptEntry], *, at_bof: bool = True, directory: Path | None = None
 ) -> tuple[list[AgentMessage], str | None, frozenset[str]]:
     """``Transcript.build_llm_history`` semantics over parsed entries.
 
@@ -673,7 +673,7 @@ def _replay_with_prefix(
     for entry in entries[start:]:
         if entry.type != ENTRY_MESSAGE:
             continue
-        message = _entry_to_message(entry, _attachments())
+        message = _entry_to_message(entry, _attachments(directory))
         if message is None:
             continue
         notice = prunes.get(entry.id)
@@ -988,7 +988,7 @@ def _journal_prunes(directory: Path, *, fallback: Mapping[str, str]) -> dict[str
 
 
 def _page_messages(
-    entries: Sequence[TranscriptEntry], prunes: Mapping[str, str]
+    entries: Sequence[TranscriptEntry], prunes: Mapping[str, str], directory: Path | None = None
 ) -> list[AgentMessage]:
     """Rehydrate one journal range into the messages the fold walks.
 
@@ -1008,7 +1008,7 @@ def _page_messages(
             continue
         if entry.type != ENTRY_MESSAGE:
             continue
-        message = _entry_to_message(entry, _attachments())
+        message = _entry_to_message(entry, _attachments(directory))
         if message is None:
             continue
         notice = prunes.get(entry.id)
@@ -1022,6 +1022,7 @@ def _pairing_messages(
     newer: Sequence[TranscriptEntry],
     page: Sequence[AgentMessage],
     prunes: Mapping[str, str],
+    directory: Path | None = None,
 ) -> list[AgentMessage]:
     """The newer rows that answer the page's calls, for folding but not serving.
 
@@ -1054,7 +1055,7 @@ def _pairing_messages(
         return []
     return [
         message
-        for message in _page_messages(newer, prunes)
+        for message in _page_messages(newer, prunes, directory)
         if isinstance(message, Message)
         and message.role == "tool"
         and str(message.tool_call_id or "") in wanted
@@ -1170,9 +1171,9 @@ def journal_rows_older_than(
         older = list(page.entries[:anchor])
         newer = list(page.entries[anchor:])
         entry_ids.update(entry.id for entry in page.entries)
-        messages = _page_messages(older, prunes)
+        messages = _page_messages(older, prunes, directory)
         if messages:
-            messages += _pairing_messages(newer, messages, prunes)
+            messages += _pairing_messages(newer, messages, prunes, directory)
             rows = _fold(messages, directory) + rows
         if not recovered and candidate != before_id:
             # THE CALLER'S ID WAS ONE OF A MESSAGE'S CALL ROWS, so the page it is
@@ -1195,8 +1196,8 @@ def journal_rows_older_than(
             # ONLY when the id was narrowed to reach this entry: had the caller
             # named the entry itself, its own row is the caller's to hold, and
             # serving it back would put a repeat in every page.
-            anchor_messages = _page_messages([page.entries[anchor]], prunes)
-            anchor_messages += _pairing_messages(newer, anchor_messages, prunes)
+            anchor_messages = _page_messages([page.entries[anchor]], prunes, directory)
+            anchor_messages += _pairing_messages(newer, anchor_messages, prunes, directory)
             above = _fold(anchor_messages, directory)
             stop = next((i for i, row in enumerate(above) if str(row.id) == before_id), None)
             # ONLY when the caller's id really is one of that message's rows. If
@@ -1392,13 +1393,19 @@ _ATTACHMENT_STORES: dict[str, AttachmentStore] = {}
 _ATTACHMENT_LOCK = threading.Lock()
 
 
-def _attachments() -> AttachmentStore:
+def _attachments(directory: Path | None = None) -> AttachmentStore:
     from local_operator.paths import config_dir
+    from local_operator.session.attachments import store_for_transcript_dir
 
-    key = str(config_dir())
+    # A relay may read an explicitly rooted owner. Derive its store from the
+    # journal, never from process-global config (nor a phone-supplied path).
+    root = directory.parent.parent if directory is not None else config_dir()
+    key = str(root)
     with _ATTACHMENT_LOCK:
         store = _ATTACHMENT_STORES.get(key)
         if store is None:
-            store = AttachmentStore()
+            store = (
+                store_for_transcript_dir(directory) if directory is not None else AttachmentStore()
+            )
             _ATTACHMENT_STORES[key] = store
         return store

@@ -647,7 +647,9 @@ def notice_edges(
     return edges, state
 
 
-def _attested_notices(peer_row: Any) -> tuple[tuple[str, int, str, str, int], ...] | None:
+def _attested_notices(
+    peer_row: Any, owner_device: str = "", bound_nodes: frozenset[str] = frozenset()
+) -> tuple[tuple[str, int, str, str, int], ...] | None:
     """The row's forwarded notices, minus ``notify`` items it may not raise here.
 
     THE ORIGIN RE-APPLIES THE OWNER'S DEFAULT-DENY (operator rule, 2026-11-14:
@@ -659,6 +661,19 @@ def _attested_notices(peer_row: Any) -> tuple[tuple[str, int, str, str, int], ..
     Applying the same predicate to the row's own ``origin`` here makes the rule
     hold as soon as THIS device updates. Open asks (``remote-ask:``) always
     pass: a question still waiting on the operator is never withheld.
+
+    A SESSION STARTED ON ITS OWNER (no foreign ``origin.source_device``) reaches
+    this device only over the operator binding (``network.operator_binding``):
+    no owner build before the binding put notices on such a row, so the legacy
+    flood this filter guards against cannot arrive on one. Its ``notify`` items
+    pass — only from an owner this device presented its proof to
+    (``bound_nodes``: ``operator_binding.bound_devices``, the active nodes this
+    Mac onboarded or holds a signed credential card for, so a co-member it
+    never bound cannot raise one) and unless
+    the row itself says an agent started it. The owner already
+    applied ``remote_attention.is_non_agent_session`` (manager rule,
+    2026-11-15: ``notify`` from operator- or node-started NON-AGENT sessions
+    reaches the operator's device; agent-started stays on the node).
     """
     notices = getattr(peer_row, "notices", None)
     if not notices:
@@ -668,11 +683,52 @@ def _attested_notices(peer_row: Any) -> tuple[tuple[str, int, str, str, int], ..
         origin_is_operator_started,
     )
 
-    if origin_is_operator_started(getattr(peer_row, "origin", None)):
+    origin = getattr(peer_row, "origin", None)
+    if origin_is_operator_started(origin):
+        return notices
+    if owner_device in bound_nodes and _started_on_owner(origin, owner_device):
         return notices
     return tuple(
         claim for claim in notices if claim and str(claim[0]).startswith(ASK_NOTICE_PREFIX)
     )
+
+
+def _bound_nodes(root: Path) -> frozenset[str]:
+    """Mesh ids this device binds (its operator-binding presentees). Never raises.
+
+    ``bound_devices``, not ``onboarded_devices`` (PR #4030 QA R3, Q4): a node
+    bound by a credential card has no onboarding record, and must not be told
+    "forwarded" by its binding while this listing drops its notify.
+    """
+    try:
+        from local_operator.network.operator_binding import bound_devices
+
+        return bound_devices(root)
+    except Exception:  # noqa: BLE001 — no binding, no started-on-owner notices
+        return frozenset()
+
+
+def _started_on_owner(origin: Any, owner_device: str) -> bool:
+    """A row the owner itself started, and nothing on it says an AGENT did.
+
+    ``origin`` empty (no stamp) or naming the owner as its source; an agent
+    kind or a ``started_by: agent`` attestation denies (default-deny, #4001).
+    """
+    from local_operator.notifications.remote_attention import (
+        AGENT_ORIGIN_KIND,
+        STARTED_BY_FIELD,
+    )
+
+    if not origin:
+        return True
+    if not isinstance(origin, dict):
+        return False
+    if str(origin.get("kind") or "") == AGENT_ORIGIN_KIND:
+        return False
+    if str(origin.get(STARTED_BY_FIELD) or "") == AGENT_ORIGIN_KIND:
+        return False
+    source = str(origin.get("source_device") or "")
+    return not source or (bool(owner_device) and source == owner_device)
 
 
 def _chosen_name(row: SessionRow) -> str:
@@ -791,6 +847,7 @@ def _read(
     # must not wander into the developer's real store; production always names
     # its root.
     network_names = _network_names(root) if root is not None else {}
+    bound_nodes = _bound_nodes(root) if root is not None else frozenset()
     rows: list[SessionRow] = []
     # Key by (owner_device, session_id), not id alone: a cross-device collision
     # is a routing ambiguity the reader must see, not silently collapse. Within
@@ -868,7 +925,7 @@ def _read(
                 # catalogue double or an older parse has neither attribute, which
                 # is no claim.
                 remote_attention=getattr(peer_row, "attention", None),
-                remote_notices=_attested_notices(peer_row),
+                remote_notices=_attested_notices(peer_row, facts.device_id, bound_nodes),
                 remote_attention_unknown=bool(getattr(peer_row, "attention_unknown", False)),
                 pending_queued=bool(getattr(peer_row, "pending_queued", False)),
                 remote_asks_unknown=bool(getattr(peer_row, "asks_unknown", False)),

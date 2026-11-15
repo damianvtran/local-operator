@@ -1353,8 +1353,8 @@ def remote_owner_for(
     return RemoteOwner(config_dir=config_dir, session_id=session_id, facts=facts, root=root)
 
 
-class RemoteStreamRefused(ConnectionError):
-    """The owner relay answered stream_open with a typed semantic refusal.
+class RemoteStreamRefusal(ConnectionError):
+    """An explicit mesh rejection, not an ambiguous missing owner ack.
 
     This is not a failed dial: dropping its code made an answered runtime refusal
     look like an unreachable device. It remains a ConnectionError so existing
@@ -1364,6 +1364,12 @@ class RemoteStreamRefused(ConnectionError):
     def __init__(self, code: str, message: str) -> None:
         super().__init__(message)
         self.code = code
+
+
+# #4057 mobile readers and #4060 pilot reporting must recognize ONE refusal:
+# retaining the reviewed pilot spelling as an alias preserves both callers'
+# isinstance checks, including errors raised by mobile's reply-error hook.
+RemoteStreamRefused = RemoteStreamRefusal
 
 
 class RemoteSessionClient(AttachClient):
@@ -1405,6 +1411,12 @@ class RemoteSessionClient(AttachClient):
         #: retained domain — a viewer that declared nothing can never vouch,
         #: and a local client with no such property reads False.
         self.peer_journal_source_declared = False
+
+    def _raise_for_reply_error(self, reply: dict[str, Any]) -> None:
+        code = reply.get("mesh_refusal_code")
+        if reply.get("op") == "error" and isinstance(code, str) and code:
+            raise RemoteStreamRefusal(code, str(reply.get("message") or "mesh refusal"))
+        super()._raise_for_reply_error(reply)
 
     async def connect(self, record: SessionRecord, session_id: str) -> None:
         """Open a forwarded stream to the owner and consume its welcome.

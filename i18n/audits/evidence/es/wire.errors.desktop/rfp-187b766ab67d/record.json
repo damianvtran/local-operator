@@ -1,0 +1,134 @@
+{
+  "schema": 1,
+  "locale": "es",
+  "namespace": "wire.errors.desktop",
+  "pr": "damianvtran/local-operator#3872",
+  "round": 2,
+  "worktree": "/home/ec2-user/local-operator/.worktrees/remote-files-parity",
+  "head": "14d8601fd1e63b335edc689c137f2c3ae6bf216f",
+  "prev_head": "9a6ef566184f4fd1bc373b14694841b0bf3b3a31",
+  "merge_base": "89678ffc7aa536076cc3c16d9d204829a4e83a97",
+  "audit_date": "2026-11-12",
+  "input_hashes": {
+    "en": "32c48d06ac2670b076f2915584de4bfbe8363cf923b622ce934305d1f72474e3",
+    "target": "5a3021c1d6c7a6b87c7e34016df4db76d16d1438e4a5f4e79c30193ce4a5144b",
+    "en_at_prev": "dea429ca25a083cea9b035794fc0c9acce13e2aa15932314ef63fa713fcc7982",
+    "target_at_prev": "93907847d27723e9872e86cb3508c3efa1c1abf93bba53dfd48b724519318762",
+    "en_at_merge_base": "b2bef8965912381f5516ff9ce75f91ad8a4ba6a332ca2a8c89c84a075f08b482",
+    "target_at_merge_base": "0d3918ccf54b2df43c364684cbc90e7e5a1b6c041c5d1573ebe3cd7a01f84dc5"
+  },
+  "translator": {
+    "agent": "coder (PR #3872 core round-1 remediation, lopdev, job b449e9fdc5b7)",
+    "session": "e06b4314cec3",
+    "model": "anthropic/claude-opus-5-5",
+    "date": "2026-11-12",
+    "provenance_source": "self-reported served model, no fallback: PR #3872 issuecomment-6831178771"
+  },
+  "translators_other": [
+    {
+      "agent": "coder (PR #3872 core implementer, lopdev, job 485ea7afeea9)",
+      "session": "f4c08c15c058",
+      "model": "anthropic/claude-opus-5-5",
+      "date": "2026-11-12",
+      "provenance_source": "manager ce618964c88e subagent-roster.v1.json record 485ea7afeea9 (model_label)"
+    },
+    {
+      "agent": "round-1 i18n auditor (I1-4 corrected values)",
+      "session": "a3fade2429f4",
+      "model": "anthropic/claude-opus-5-5",
+      "date": "2026-11-12"
+    }
+  ],
+  "auditor": {
+    "agent": "i18n auditor (lopdev reviewer role, task core-r2-i18n-audit, job 52eba838ea60; independent of translators f4c08c15c058/e06b4314cec3 and of round-1 auditor a3fade2429f4)",
+    "session": "187b766ab67d",
+    "model": "anthropic/claude-opus-5-5",
+    "fallback": "none observed in this session",
+    "date": "2026-11-12",
+    "result": "passed",
+    "unresolved_blocker_major": 0,
+    "findings": 0
+  },
+  "prior_audit": {
+    "agent": "round-1 i18n auditor",
+    "session": "a3fade2429f4",
+    "model": "anthropic/claude-opus-5-5",
+    "date": "2026-11-12",
+    "result": "passed",
+    "comment": "damianvtran/local-operator#3872 issuecomment-6830034892"
+  },
+  "independence": "auditor 187b766ab67d is a different instance from f4c08c15c058 (original coder), e06b4314cec3 (remediation coder/translator) and a3fade2429f4 (round-1 auditor)",
+  "audit_kind": "delta audit: en-changed/new keys since 9a6ef5661 + I1-4 corrections + re-read of all PR-added keys; mechanical carry of keys unchanged since merge base",
+  "audited_keys": [
+    "wire.errors.desktop.attachment_fetch_pending",
+    "wire.errors.desktop.attachment_owner_refused",
+    "wire.errors.desktop.attachment_owner_unreachable",
+    "wire.errors.desktop.attachment_peer_outdated",
+    "wire.errors.desktop.session_files_download_exhausted",
+    "wire.errors.desktop.session_files_download_mismatch",
+    "wire.errors.desktop.session_files_owner_unreachable",
+    "wire.errors.desktop.session_files_remote_unreadable",
+    "wire.errors.desktop.session_files_sensitive_name"
+  ],
+  "en_changed_keys": [
+    "wire.errors.desktop.attachment_fetch_pending",
+    "wire.errors.desktop.attachment_owner_refused",
+    "wire.errors.desktop.attachment_owner_unreachable",
+    "wire.errors.desktop.attachment_peer_outdated",
+    "wire.errors.desktop.session_files_owner_unreachable",
+    "wire.errors.desktop.session_files_remote_unreadable"
+  ],
+  "i1_4": [],
+  "audited_values": {
+    "wire.errors.desktop.attachment_fetch_pending": {
+      "en": "This file is still on its way from {device}. Try again in a moment.",
+      "target": "Este archivo todavía se está transfiriendo desde {device}. Vuelve a intentarlo en un momento."
+    },
+    "wire.errors.desktop.attachment_owner_refused": {
+      "en": "This file cannot be shown here: {reason, select, not_referenced {the conversation on {device} no longer refers to it.} missing {it is no longer on {device}.} not_allowed {{device} no longer lets this device read that conversation.} integrity {the copy {device} sent did not match its contents.} other {{device} did not send it.}}",
+      "target": "Este archivo no se puede mostrar aquí: {reason, select, not_referenced {la conversación en {device} ya no hace referencia a él.} missing {ya no existe en {device}.} not_allowed {{device} ya no permite que este dispositivo lea esa conversación.} integrity {la copia que envió {device} no coincidía con su contenido.} other {{device} no lo envió.}}"
+    },
+    "wire.errors.desktop.attachment_owner_unreachable": {
+      "en": "{device} is not answering. Try again when it is online.",
+      "target": "{device} no responde. Vuelve a intentarlo cuando esté en línea."
+    },
+    "wire.errors.desktop.attachment_peer_outdated": {
+      "en": "{device} runs a version that cannot send files yet. Update it with `lop network update {peer}`, then try again.",
+      "target": "{device} usa una versión que todavía no puede enviar archivos. Actualízalo con `lop network update {peer}` y vuelve a intentarlo."
+    },
+    "wire.errors.desktop.session_files_download_exhausted": {
+      "en": "{name} and 99 numbered copies of it already exist in {folder}, so nothing was saved.",
+      "target": "{name} y 99 copias numeradas ya existen en {folder}, así que no se guardó nada."
+    },
+    "wire.errors.desktop.session_files_download_mismatch": {
+      "en": "The copy from {device} did not match the file it announced, so nothing was saved. Try again.",
+      "target": "La copia de {device} no coincide con el archivo que anunció, así que no se guardó nada. Vuelve a intentarlo."
+    },
+    "wire.errors.desktop.session_files_owner_unreachable": {
+      "en": "{device} is not answering, so this conversation's files cannot be listed. Try again when it is online.",
+      "target": "{device} no responde, así que no se pueden mostrar los archivos de esta conversación. Vuelve a intentarlo cuando esté en línea."
+    },
+    "wire.errors.desktop.session_files_remote_unreadable": {
+      "en": "This file cannot be opened from this device: {reason, select, outside_session_files {it lives in {device}'s workspace, outside the conversation's scratchpad. Ask the conversation to copy it to its scratchpad.} missing {it no longer exists on {device}.} too_large {it is larger than 256 MiB, the most one device can send another.} sensitive {it is a hidden file or looks like a credential, so {device} does not send it.} not_referenced {the conversation on {device} no longer refers to it.} other {{device} does not share it with this device.}}",
+      "target": "Este archivo no se puede abrir desde este dispositivo: {reason, select, outside_session_files {está en el espacio de trabajo de {device}, fuera del scratchpad de la conversación. Pide a la conversación que lo copie a su scratchpad.} missing {ya no existe en {device}.} too_large {supera los 256 MiB, el máximo que un dispositivo puede enviar a otro.} sensitive {es un archivo oculto o parece una credencial, así que {device} no lo envía.} not_referenced {la conversación en {device} ya no hace referencia a él.} other {{device} no lo comparte con este dispositivo.}}"
+    },
+    "wire.errors.desktop.session_files_sensitive_name": {
+      "en": "{name} looks like a credential file, so it was not saved to this device.",
+      "target": "{name} parece un archivo de credenciales, así que no se guardó en este dispositivo."
+    }
+  },
+  "verified": [
+    "key set equals en",
+    "placeholder multiset equals en per message; select selector, arm names/order and per-arm placeholders equal en (attachment_owner_refused: not_referenced/missing/not_allowed/integrity/other; session_files_remote_unreadable: 6 arms)",
+    "braces balanced",
+    "backtick code spans byte-identical (`lop network update {peer}`)",
+    "numbers byte-identical (256, 99)",
+    "NFC",
+    "no bidi control characters (ur guide §RTL: logical order, no manual controls)",
+    "keys unchanged in en since 9a6ef5661 and not in I1-4 are byte-identical to 9a6ef5661; keys unchanged since merge base byte-identical to merge base",
+    "I1-4 corrected values on en-unchanged keys byte-exact to corrections.json; I1-4 terminology carried into retranslated en-changed keys (no residual old term)",
+    "glossary.md and locale style guide checked; reason codes emitted by peer_refusal_reason() (server/utils/desktop_sessions.py:6834-6849) are exactly the 5 arms"
+  ],
+  "findings": [],
+  "not_verified": "native-speaker review; rendered desktop/phone width; RTL rendering (string-level bidi rules only)"
+}

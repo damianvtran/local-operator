@@ -505,6 +505,7 @@ SLICE_PEER_OPS: frozenset[str] = frozenset(
         "net_session_move",
         "net_sync",
         "net_file_get",
+        "net_session_files",
         "net_broker",
         "net_session_lifecycle",
         "net_session_receipt",
@@ -524,6 +525,9 @@ SLICE_PEER_OPS: frozenset[str] = frozenset(
         # readers on its own journal. Slow by registration — a deep search may
         # take seconds and must not hold the link reader.
         "net_session_peek",
+        # The operator binding (network/operator_binding.py): verify-and-store of
+        # a signed onboarding decision. Inline: one cached ES256 verify.
+        "net_operator_binding",
     }
 )
 
@@ -534,6 +538,7 @@ SLICE_LOCAL_OPS: frozenset[str] = frozenset(
         "session_move",
         "session_sync",
         "session_file_pull",
+        "peer_session_files",
         "session_lifecycle",
         "session_receipt",
         "credential_grant",
@@ -543,6 +548,10 @@ SLICE_LOCAL_OPS: frozenset[str] = frozenset(
         "credential_revoke",
         # The share push: ``credential share`` hands the new row to its holder now.
         "credential_share_push",
+        # The renewal claim and the owner's push after renewing a lent login
+        # (mesh-credential-renewal §B.3 R3). Local: the link lives in the relay.
+        "credential_claim",
+        "credential_lend_push",
         # The member-side repair pull (mesh-mcp-credentials.md §4): the CLI asks
         # THIS device's relay to pull one copy from its owner NOW. Local for the
         # same reason the rest of the family is: the pull needs a link, and the
@@ -595,6 +604,8 @@ SLICE_MODULES: tuple[str, ...] = (
     "local_operator.network.rollouts",
     # The remote peek: one slow peer op plus its local half, no threads.
     "local_operator.network.peek",
+    # The operator binding: one inline peer op plus a link-up presenter.
+    "local_operator.network.operator_binding",
 )
 
 #: Which link, if any, THIS thread is currently serving a request for.
@@ -4431,7 +4442,12 @@ def bounded_history_entry(entry: Any, max_bytes: int) -> Any:
     return {**entry, "payload": cut}
 
 
-def fit_session_history_reply(req: Any, detail: dict[str, Any]) -> dict[str, Any]:
+def fit_session_history_reply(
+    req: Any,
+    detail: dict[str, Any],
+    *,
+    entry_bounder: Callable[[dict[str, Any], int], dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     """``detail`` cut to as many of its entries as fit ONE link record (R1-1).
 
     Keeps the NEWEST rows: the page is the TAIL of the requested window, so the
@@ -4476,7 +4492,11 @@ def fit_session_history_reply(req: Any, detail: dict[str, Any]) -> dict[str, Any
         # in a bounded, explicitly marked form (identity kept, body cut — see
         # ``bounded_history_entry``): the reader still pages from its id, so
         # the window stays gap-free, and the marker names the remedy.
-        entries[-1] = bounded_history_entry(entries[-1], SESSION_HISTORY_REPLY_BUDGET_BYTES // 4)
+        # Mobile rows are not desktop journal envelopes. Their negotiated
+        # carrier supplies the mobile cap so oversized text is marked as an
+        # incomplete mobile row, rather than adding an irrelevant payload key.
+        bound = entry_bounder if entry_bounder is not None else bounded_history_entry
+        entries[-1] = bound(entries[-1], SESSION_HISTORY_REPLY_BUDGET_BYTES // 4)
         if session_history_reply_bytes(req, candidate(1)) > SESSION_HISTORY_REPLY_BUDGET_BYTES:
             # Only the envelope can still be too large here (the bounded row
             # is ≤ budget/4), which is the metadata refusal above in another hat.
@@ -8961,11 +8981,22 @@ class RelayServer:
         """
         rows = self.local_session_rows()
         if wire.REMOTE_ATTENTION_V1 in link.capabilities:
+            from local_operator.network.operator_binding import is_operator_link
             from local_operator.notifications.remote_attention import (
                 stamp_rows_for_viewer,
             )
 
-            stamp_rows_for_viewer(self.root, rows, str(link.device_id or ""))
+            # A VERIFIED operator link also collects the notices of sessions
+            # STARTED here (no origin of their own). The verdict is the
+            # operator's signature checked against this device's root-owned
+            # anchor — cached, so one ES256 verify per proof, not per listing.
+            stamp_rows_for_viewer(
+                self.root,
+                rows,
+                str(link.device_id or ""),
+                operator_viewer=is_operator_link(self.root, link),
+                self_device_id=str(self.identity.device_id or ""),
+            )
         return rows
 
     def local_session_rows(self) -> list[dict[str, Any]]:
@@ -10613,6 +10644,18 @@ class RelayServer:
         raw_before = frame.get("before_id")
         before_id = str(raw_before) if raw_before else None
         limit = validate_history_limit(frame.get("limit"))
+        if frame.get("mobile_session_read") is not None:
+            # The existing session-history authorizer has already checked this
+            # peer's view grant and exact owner/session binding. Fold AT THE
+            # OWNER so refs, compaction and forward cursors have local semantics.
+            from local_operator.mobile.remote_sessions import (
+                READ_CAPABILITY,
+                owner_read,
+            )
+
+            if READ_CAPABILITY not in link.capabilities:
+                raise MeshRefusal("unsupported", READ_CAPABILITY)
+            return owner_read(self.root, session_id, frame)
         journal_order, order_ids = validate_journal_order(
             frame.get("journal_order"), frame.get("order_ids")
         )
@@ -12596,7 +12639,21 @@ class RelayServer:
             message = str(
                 (reply or {}).get("message") or "the device holding that session stopped answering"
             )
-            stream.write_to_viewer({"op": "error", "req": frame.get("req"), "message": message})
+            stream.write_to_viewer(
+                {
+                    "op": "error",
+                    "req": frame.get("req"),
+                    "message": message,
+                    # Keep an explicit mesh refusal distinct from a lost ack. A
+                    # phone must not call either a password expiration, nor retry
+                    # an ambiguous command as though the owner refused it.
+                    **(
+                        {"mesh_refusal_code": reply.get("code") or "not_authorised"}
+                        if reply is not None and reply.get("op") == "error"
+                        else {}
+                    ),
+                }
+            )
             self._close_stream(stream.stream_id, cause="peer-stopped-answering")
 
     def _stream_for(self, link: PeerLink, stream_id: str) -> "_Stream | None":
@@ -13935,6 +13992,7 @@ class RelayServer:
         # rotation all write, so the read is inside the lock: minting from a
         # snapshot would revert whatever they wrote in between.
         resolved = self._require_network(str(frame.get("network") or ""))
+        binding_keep = store.binding_invite_ids(self.root)
         with store.mutate(resolved.network_id, self.root) as record:
             state = store.require_secrets(record.network_id, self.root)
             minted: MintedInvite = mint_invite(
@@ -13961,7 +14019,9 @@ class RelayServer:
             # the same locked write that adds a row drops the ones past their own
             # expiry and the retention window (``store.prune_invites``), so repeated
             # pairing attempts no longer accumulate ``minted`` rows forever.
-            expired = store.prune_invites(record)
+            # ``binding_keep`` (computed before the lock): admitted rows a retained
+            # signed onboarding names stay, so that node stays bindable (#4030).
+            expired = store.prune_invites(record, keep=binding_keep)
             record.invites.append(minted.record)
             store.save(record, self.root)
             path = store.save_invite_token(minted.record.invite_id, minted.token, self.root)
@@ -14593,6 +14653,13 @@ class RelayServer:
         )
         for link in links:
             link.close("we-closed")
+        # LEAVING ENDS EVERY RENEWAL LEND IN IT (#3955 M1): no node of a network this
+        # device left can be asked again, so its own lent logins renew on their own.
+        from local_operator.network.credentials import owner as owner_mod
+
+        owner_mod._end_renewal_lends(  # noqa: SLF001
+            self, resolved.network_id, devices=None, cause="left"
+        )
         secrets_file = store.secrets_path(resolved.network_id, self.root)
         if secrets_file.exists():
             secrets_file.unlink()
@@ -15134,6 +15201,36 @@ class RelayServer:
         on the frame below for why "no" has no spelling of its own.
         """
         limit = validate_history_limit(frame.get("limit"))
+        mobile_read = frame.get("mobile_session_read")
+        if mobile_read is not None:
+            from local_operator.mobile.remote_sessions import validate_read
+
+            validate_read(frame)
+            link = self._ensure_link(self._resolve_peer(str(frame.get("peer") or "")))
+            if link is not None and "mobile-session-read-v1" not in link.capabilities:
+                raise MeshRefusal("unsupported", "mobile-session-read-v1")
+            return self._local_peer_call(
+                "net_session_history",
+                str(frame.get("peer") or ""),
+                timeout=session_history_hop_bound_s(),
+                session_id=str(frame.get("session_id") or ""),
+                mobile_session_read=mobile_read,
+                limit=limit,
+                **{
+                    key: frame[key]
+                    for key in (
+                        "before_id",
+                        "after_id",
+                        "entry_id",
+                        "index",
+                        "kind",
+                        "offset",
+                        "length",
+                        "expected_media_id",
+                    )
+                    if key in frame
+                },
+            )
         open_frame = validate_open_frame(frame.get("open_frame"))
         journal_order, order_ids = validate_journal_order(
             frame.get("journal_order"), frame.get("order_ids")
@@ -16008,6 +16105,7 @@ def _owning_document(op: str) -> str:
         "net_forward": "mesh-session-mobility.md",
         "net_sync": "mesh-session-mobility.md (R22)",
         "net_file_get": "mesh-file-transfer.md (S1)",
+        "net_session_files": "remote-files-parity.md (§2)",
         "net_broker": "mesh-credentials.md",
         "net_session_lifecycle": "mesh-session-mobility.md",
         "net_session_receipt": "mesh-session-mobility.md",
@@ -16019,6 +16117,7 @@ def _owning_document(op: str) -> str:
         "session_move": "mesh-session-mobility.md",
         "session_sync": "mesh-session-mobility.md (R22)",
         "session_file_pull": "mesh-file-transfer.md (S1)",
+        "peer_session_files": "remote-files-parity.md (§2)",
         "session_lifecycle": "mesh-session-mobility.md",
         "session_receipt": "mesh-session-mobility.md",
         "credential_grant": "mesh-credentials.md",
@@ -16026,6 +16125,8 @@ def _owning_document(op: str) -> str:
         "credential_placement": "mesh-credentials.md",
         "credential_revoke": "mesh-credentials.md",
         "credential_share_push": "mesh-credentials.md",
+        "credential_claim": "mesh-credential-renewal.md",
+        "credential_lend_push": "mesh-credential-renewal.md",
     }
     return owners.get(op, "the design documents")
 
@@ -19049,6 +19150,53 @@ def status(port: int = DEFAULT_PORT, *, refresh: bool = False) -> dict[str, Any]
     # :func:`generation_reading`.
     payload.update(generation_reading(served_pid))
     return payload
+
+
+async def async_control_request(
+    record: PeerRecord, op: str, *, timeout: float = 5.0, **fields: Any
+) -> dict[str, Any] | None:
+    """The cancellable counterpart of :func:`control_request` for HTTP reads.
+
+    Same loopback authentication, frame bound and one-request/no-retry contract.
+    Owning the socket in the request's coroutine matters: cancelling a worker
+    thread cannot close its blocking socket, so a disconnected media consumer
+    would otherwise keep an unnecessary local courier read alive to its deadline.
+    An owner read already dispatched through the courier may finish, but no next
+    byte window is requested and this viewer's socket is closed immediately.
+    """
+    writer = None
+    try:
+        async with asyncio.timeout(timeout):
+            reader, writer = await asyncio.open_connection(
+                "127.0.0.1",
+                record.control_port,
+                limit=session_dial.MAX_SESSION_FRAME_BYTES,
+            )
+            writer.write(wire.encode_line({"key": record.control_key, "client": "cli"}))
+            writer.write(wire.encode_line({"op": op, "req": 1, **fields}))
+            await writer.drain()
+            try:
+                raw = await reader.readline()
+            except ValueError as exc:
+                raise MeshRefusal("frame_too_large", "control reply exceeds frame bound") from exc
+            if not raw or not raw.endswith(b"\n"):
+                return None
+            try:
+                reply = json.loads(raw)
+            except (ValueError, UnicodeDecodeError) as exc:
+                raise MeshRefusal("frame_unreadable", "invalid control reply") from exc
+            if not isinstance(reply, dict):
+                raise MeshRefusal("frame_unreadable", "invalid control reply")
+            return reply
+    except (OSError, ConnectionError, TimeoutError):
+        return None
+    finally:
+        if writer is not None:
+            writer.close()
+            try:
+                await writer.wait_closed()
+            except OSError:
+                pass
 
 
 def control_request(

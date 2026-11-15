@@ -30,6 +30,15 @@ from tests.unit.network.test_relay_e2e import (  # noqa: F401 — fixture regist
 from tests.unit.network.test_session_plane import SESSION, _Handle, _listen, _seed
 
 
+def test_pilot_and_mobile_share_the_same_refusal_identity() -> None:
+    from local_operator.network.projection import (
+        RemoteStreamRefusal,
+        RemoteStreamRefused,
+    )
+
+    assert RemoteStreamRefused is RemoteStreamRefusal
+
+
 class _HeldHandle(_Handle):
     def __init__(self, session_id: str) -> None:
         super().__init__(session_id)
