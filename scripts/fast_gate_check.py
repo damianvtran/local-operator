@@ -17,7 +17,8 @@ WHAT IT DECIDES, by event (the job passes ``--event``):
   branch and repository must be green. A carrier PR's ``pull_request`` run
   tests ``refs/pull/<n>/merge`` -- a different tree -- so it never counts.
 * ``push`` to ``main``: no fast-CI wait. After a bounded settle, if a newer
-  non-release, untagged ``main`` tip exists (every tag ref is resolved, annotated ones peeled) that descends from this SHA AND
+  non-release, untagged ``main`` tip exists (every tag ref is resolved,
+  annotated ones peeled) that descends from this SHA AND
   that tip has its own full-suite run, this run is ``superseded`` (heavy jobs
   skip, the aggregate reports grey). Anything unknown -> run in full.
 * ``schedule`` and anything else: never gated, always full (the nightly is the
@@ -29,9 +30,10 @@ fork/PR association is "not green" (exit 1) for the PR/dispatch gates, and
 the only way through is a green ``CI Gate`` on that exact head.
 
 TRUST. The workflow downloads THIS file from `gate_base` (the live main tip the
-run tests against; PR events) or the run's own SHA (other events) through the contents API, never from the PR
-checkout, so a pull request cannot rewrite its own cost gate while holding the
-token. The token is the job's read-only ``GITHUB_TOKEN``; this module only
+run tests against; PR events) or the run's own SHA (other events) through the
+contents API, never from the PR checkout, so a pull request cannot rewrite its
+own cost gate while holding the token. The token is the job's read-only
+``GITHUB_TOKEN``; this module only
 issues GET requests and needs nothing beyond the standard library, so a broken
 install can never decide the gate.
 
@@ -279,7 +281,8 @@ def check_pull_request(
     """Fast CI must be green for THIS PR head. Unbound runs (forks) are ignored."""
     runs = _paged(
         fetch,
-        f"/repos/{repo}/actions/workflows/{CI_WORKFLOW}/runs?head_sha={head_sha}&event=pull_request",
+        f"/repos/{repo}/actions/workflows/{CI_WORKFLOW}/runs?"
+        f"head_sha={head_sha}&event=pull_request",
         "workflow_runs",
     )
     bound = [
