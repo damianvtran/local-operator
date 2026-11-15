@@ -231,7 +231,10 @@ R = pathlib.Path.cwd().resolve()
 import runpy
 source_gate=runpy.run_path(str(R.parents[1]/'source_generation.py'))
 source_generation=source_gate['validate_selection'](os.environ.get('BENCH_SOURCE_GENERATION'),os.environ.get('BENCH_SOURCE_GENERATION_SHA256'))
-source_gate['require_execution_authority']()
+from final_attempt_admission import consume_resolver_handoff
+fd_text=os.environ.get('BENCH_FINAL_PERMIT_FD','')
+if not fd_text.isdecimal():raise ValueError('final03 admission: inherited one-use pipe missing')
+admission=consume_resolver_handoff(int(fd_text),pathlib.Path(os.environ['BENCH_SOURCE_GENERATION']),os.environ['BENCH_SOURCE_GENERATION_SHA256'],pathlib.Path(os.environ['BENCH_ADMISSION_PATH']))
 # Exact standalone source identity, not an unavailable/moving Git HEAD.
 source_head='generation:'+source_generation['overlay_sha256']
 pins = json.loads((R / 'resolver-pins.json').read_text())
@@ -243,7 +246,7 @@ assert S.exists() and stat.S_ISSOCK(S.stat().st_mode), 'STOP: approved LOCAL dae
 from lifecycle_proposal import validated_registered_root, validated_admission_path
 import re
 ROOT = validated_registered_root(os.environ['BENCH_REGISTERED_ROOT'])
-admission=json.loads(validated_admission_path(os.environ['BENCH_ADMISSION_PATH'],ROOT,pathlib.Path(os.environ['BENCH_ADMISSION_PATH']).stem).read_text())
+validated_admission_path(os.environ['BENCH_ADMISSION_PATH'],ROOT,admission['attempt_id'])  # same claim-bound data, not another env-selected JSON
 now=datetime.datetime.now(datetime.UTC)
 begin=datetime.datetime.fromisoformat(admission['slot_start_utc'])
 end=datetime.datetime.fromisoformat(admission['slot_end_utc'])

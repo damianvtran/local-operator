@@ -25,11 +25,16 @@ import time
 from launch_services_broker import CausalLaunch
 from owned_session_launch import OwnedSessionLaunch, KIND as SESSION_KIND
 from darwin_process_identity import DarwinIdentity
+import final_attempt_admission as final_admission
 
 HERE = Path(__file__).resolve().parent
 ACK = 'a-7072'
 ACK_QUOTE = "Find a way around this that doesn't require my manual involvement, validate in other ways or skip that validation with acknowledgement but make sure the code analysis and review is thorough"
+# Configured VM capacity is NOT resident usage: the operator accepted 8.2GB/14CPU,
+# while the desk retained the original4.3GB attributed-RSS abort threshold.
 CAP = 4_300_000_000
+CONFIGURED_MEMORY_CAP = 8_600_000_000
+CONFIGURED_CPU_CAP = 14
 HELPERS = {'com.apple.Virtualization.VirtualMachine', 'com.docker.virtualization', 'qemu-system-aarch64', 'qemu-system-x86_64'}
 
 
@@ -148,8 +153,9 @@ def anonymous_cli_environment(directory):
 
 
 def verify_caps(info):
+    require(type(info) is dict, 'malformed configured docker info')
     memory, cpus = info.get('MemTotal'), info.get('NCPU')
-    require(type(memory) is int and type(cpus) is int and 0 < memory <= CAP and 0 < cpus <= 2, 'observed docker info exceeds 4.3 GB/2 CPUs or is invalid')
+    require(type(memory) is int and type(cpus) is int and 0 < memory <= CONFIGURED_MEMORY_CAP and 0 < cpus <= CONFIGURED_CPU_CAP, 'observed docker info exceeds configured8.6 GB/14 CPUs or is invalid')
     return {'phase':'post-start-readiness-probe', 'MemTotal':memory, 'NCPU':cpus}
 
 
@@ -252,7 +258,8 @@ def run_lifecycle(ops, admission, pins, require_runtime_scope=True):
 
 class NativeOps:
     """Future LOCAL adapter. No settings reads/writes or broad process kills."""
-    def __init__(self, admission, pins):
+    def __init__(self, admission, pins, final_permit=None):
+        self.final_permit=final_permit
         self.a=admission;self.p=pins;self.owner=None;self.proc=None;self.resolver=None;self.directory=None
         self.root=Path.home()/'benchmark-runs/reconstruction-20261114-source-v1'
         self.desktop=Path(admission.get('desktop_executable',str(DEFAULT_DESKTOP)))
@@ -352,7 +359,7 @@ class NativeOps:
         import runpy
         gate=runpy.run_path(str(HERE.parents[1]/'source_generation.py'))
         self.source_generation=gate['validate_selection'](self.a.get('_source_generation'),self.a.get('_source_generation_sha256'))
-        gate['require_execution_authority']()
+        final_admission.validate_controller(getattr(self,'final_permit',None),starting=True)
         validated_registered_root(str(self.root))  # Reject bad roots before any startup/work.
         self.admission_path=validated_admission_path(self.a['_admission_path'],self.root,self.a['attempt_id'])
         require(self.p.get('r15_topology_admission',{}).get('ready') is True and self.p.get('launch_authority')==SESSION_KIND,'R15 actual ancestor/sibling topology remains unproven without reviewed created-session authority')
@@ -568,6 +575,8 @@ class NativeOps:
             if helpers and (not self.monitor_enabled or self.now()>=self.next_rss):
                 helper=self.vm_helper(owner);require(helper['rss_bytes']<=CAP,'attributed startup VM RSS over cap')
     def start_owned(self):
+        # Time/claim/GO are rechecked immediately before any owned app launch.
+        final_admission.begin_native_start(self.final_permit)
         self.startup_active=True
         now=datetime.datetime.now(datetime.UTC)
         require(now<=datetime.datetime.fromisoformat(self.a.get('start_by_utc',self.a['slot_end_utc'])),'hard startup start-by expired')
@@ -894,11 +903,15 @@ class NativeOps:
         code=(HERE/'RESOLVER-COMMAND.md').read_text().split('```python\n',1)[1].split('\n```',1)[0]
         path=self.directory/'resolver-supervisor.py';path.write_text(code)
         env=dict(anonymous_cli_environment(self.directory),BENCH_REGISTERED_ROOT=str(registered),BENCH_ADMISSION_PATH=str(self.admission_path),BENCH_LIFECYCLE_DIR=str(self.directory),PYTHONPATH=str(HERE),BENCH_SOURCE_GENERATION=str(self.a['_source_generation']),BENCH_SOURCE_GENERATION_SHA256=self.a['_source_generation_sha256'])
+        permit_fd=final_admission.issue_resolver_handoff(self.final_permit)
+        env['BENCH_FINAL_PERMIT_FD']=str(permit_fd)  # locator only; capability bytes stay in one-use pipe
         blocked={signal.SIGTERM,signal.SIGINT};mask=signal.pthread_sigmask(signal.SIG_BLOCK,blocked)
         try:
-            self.resolver=subprocess.Popen([sys.executable,'-B',str(path)],cwd=HERE,env=env,stdin=subprocess.DEVNULL,start_new_session=True,
+            self.resolver=subprocess.Popen([sys.executable,'-B',str(path)],cwd=HERE,env=env,stdin=subprocess.DEVNULL,start_new_session=True,pass_fds=(permit_fd,),
                                            preexec_fn=lambda:signal.pthread_sigmask(signal.SIG_UNBLOCK,blocked))
-        finally:signal.pthread_sigmask(signal.SIG_SETMASK,mask)
+        finally:
+            os.close(permit_fd)
+            signal.pthread_sigmask(signal.SIG_SETMASK,mask)
     def resolver_done(self):
         code=self.resolver.poll()
         if code is None:return False
@@ -1022,6 +1035,8 @@ def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--execute',action='store_true')
     parser.add_argument('--admission',type=Path)
+    parser.add_argument('--admission-sha256')
+    parser.add_argument('--reviewed-source-head')
     parser.add_argument('--verify-source',action='store_true')
     parser.add_argument('--source-generation',type=Path)
     parser.add_argument('--source-generation-sha256')
@@ -1033,23 +1048,28 @@ def main():
         require(not (args.verify_source and args.execute),'source-only verification cannot execute')
         if args.verify_source:
             print(json.dumps(verified,sort_keys=True));return
-        gate['require_execution_authority']()
     if not args.execute:
         print('PROPOSAL ONLY: no fresh slot/full-scope approval; no execution');return
     require(args.admission is not None,'explicit desk admission path required')
     root=validated_registered_root(str(Path.home()/'benchmark-runs/reconstruction-20261114-source-v1'))
     path=validated_admission_path(str(args.admission),root,args.admission.stem)
-    admission=json.loads(path.read_text());require(admission.get('attempt_id')==path.stem,'admission namespace mismatch')
-    admission['_source_generation']=str(args.source_generation);admission['_source_generation_sha256']=args.source_generation_sha256
-    admission['_admission_path']=str(path);pins=json.loads((HERE/'resolver-pins.json').read_text())
-    def terminate(signum,frame):raise KeyboardInterrupt('termination requested')
-    previous={s:signal.getsignal(s) for s in (signal.SIGTERM,signal.SIGINT,signal.SIGALRM)}
-    for s in previous:signal.signal(s,terminate)
-    signal.alarm(840)  # Work deadline also interrupts blocked host-side queries.
-    try:run_lifecycle(NativeOps(admission,pins),admission,pins)
+    # Exclusive persistent consumption occurs before NativeOps construction.
+    # No error path deletes/releases this last-attempt claim.
+    admission,final_permit=final_admission.claim_final_attempt(path,args.admission_sha256,args.source_generation,args.source_generation_sha256,args.reviewed_source_head)
+    try:
+        final_admission.begin_controller(final_permit)  # consume before constructing the effect adapter
+        admission['_source_generation']=str(args.source_generation);admission['_source_generation_sha256']=args.source_generation_sha256
+        admission['_admission_path']=str(path);pins=json.loads((HERE/'resolver-pins.json').read_text())
+        def terminate(signum,frame):raise KeyboardInterrupt('termination requested')
+        previous={s:signal.getsignal(s) for s in (signal.SIGTERM,signal.SIGINT,signal.SIGALRM)}
+        for s in previous:signal.signal(s,terminate)
+        signal.alarm(840)  # Work deadline also interrupts blocked host-side queries.
+        try:run_lifecycle(NativeOps(admission,pins,final_permit),admission,pins)
+        finally:
+            signal.alarm(0)
+            for s,handler in previous.items():signal.signal(s,handler)
     finally:
-        signal.alarm(0)
-        for s,handler in previous.items():signal.signal(s,handler)
+        final_admission.retire_permit(final_permit)  # NEVER remove/release the persistent claim.
 
 
 if __name__=='__main__':main()

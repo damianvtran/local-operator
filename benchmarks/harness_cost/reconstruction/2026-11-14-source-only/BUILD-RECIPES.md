@@ -1,6 +1,17 @@
 # Source-only build recipes — DRAFT, execution blocked
 
-## Mandatory source-generation gate — no old-default build admission
+## v3 scope clarification — general builds still HOLD
+
+The operator decisions authorize ONLY final resolver attempt linux-amd64-03,
+not any general recipe below. Current source proof uses generation-overlay-v3.json
+and FINAL-ATTEMPT-ADMISSION-v3.md. Old v2 commands/hold descriptions below remain
+historical; they cannot be used as current admission. Paid/container/legacy
+campaign gates still reject execution. Configured VM8.6GB/14CPU acceptance does
+NOT raise actual attributed-RSS4.3GB or container1CPU/2GiB limits. Fresh full-scope
+review, protected hash-bound desk GO and permanent one-shot claim are required.
+No native command is authorized by this source-only update.
+
+## Historical v2 source-generation gate — no old-default build admission
 
 Before ANY sequence below, run the exact independently reviewed standalone
 source-generation command in `GENERATION-VALIDATION-v2.md`, explicitly selecting

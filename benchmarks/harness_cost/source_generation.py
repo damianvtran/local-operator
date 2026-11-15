@@ -23,22 +23,31 @@ METER_SHA = '23ee793b1c8a4ed71cba1a677bced86f7017899979e787f744ba4619f7270376'
 METER_TEST_SHA = '972bad24e91a73e68fc3d0656699965b6b7818dc7afa6a91c16538df2b4bebcc'
 METER = 'experimental/meter_proxy.py'
 METER_TEST = 'experimental/test_meter_privacy.py'
-OVERLAY = R + 'generation-overlay-v2.json'
+OVERLAY = R + 'generation-overlay-v3.json'
 DERIVED = R + 'SHA256SUMS'
-GENERATION = 'reconstruction-20261114-source-v1-meter-privacy-v2'
+GENERATION = 'reconstruction-20261114-source-v1-final-attempt-v3'
 # These are the ONLY baseline edits: the reviewed meter fix and minimal gate
 # entrypoint/recipe wiring. All other baseline files must remain byte-identical.
 WIRING = frozenset({'experimental/coding/driver.py', 'experimental/runner_v2.py',
-    R+'lifecycle_proposal.py', R+'RESOLVER-COMMAND.md', R+'BUILD-RECIPES.md'})
+    R+'lifecycle_proposal.py', R+'RESOLVER-COMMAND.md', R+'BUILD-RECIPES.md',
+    R+'resolver-pins.json', R+'test_lifecycle_proposal.py'})
 # Existing-file wiring is exact too: resealing an overlay must not authorize
 # additional lifecycle/runner behavior beyond this independently reviewed delta.
-WIRING_SHA256 = {'experimental/coding/driver.py': 'c74867dbe56502592a9510178728501f06c084608273672d8e745bfb33534c8a', 'experimental/runner_v2.py': '0c398062d4f93815fd4a95187445f729b4e07d75d5c674f2533a55df5f935549', 'reconstruction/2026-11-14-source-only/BUILD-RECIPES.md': '679e0575b406a5738508ec091a190010d2cdf3282e20ae312975c37741ae20e0', 'reconstruction/2026-11-14-source-only/RESOLVER-COMMAND.md': '0b133fdfc5138672aceab9c329baf1c12ef20861db245a18fcfc5b9c48175ec0', 'reconstruction/2026-11-14-source-only/lifecycle_proposal.py': '5e1c47d06716524f0ef24b995aaf03b13cda142a420f750f2745679976b46113'}
+WIRING_SHA256 = {'experimental/coding/driver.py': 'c74867dbe56502592a9510178728501f06c084608273672d8e745bfb33534c8a',
+ 'experimental/runner_v2.py': '0c398062d4f93815fd4a95187445f729b4e07d75d5c674f2533a55df5f935549',
+ 'reconstruction/2026-11-14-source-only/BUILD-RECIPES.md': 'b8c1d61905a48c363b7541210ec6a3da75ebe50e42e0b9ec082d2f19c399abca',
+ 'reconstruction/2026-11-14-source-only/RESOLVER-COMMAND.md': 'e18912d08889a4adc2e2e893295084b816d0c904ab10bcff095044cd8ecfdd85',
+ 'reconstruction/2026-11-14-source-only/lifecycle_proposal.py': 'e8b1fc846d7baf18c9ca43f6130c73ff969804474a4b0427f50c118ffce299b7',
+ 'reconstruction/2026-11-14-source-only/resolver-pins.json': '184ef7ffb66c0cb5a612f1d16645df015fedf9e0d57ec9d4129506e2e610932e',
+ 'reconstruction/2026-11-14-source-only/test_lifecycle_proposal.py': '32038b7ae3985c2ad3aef87e136bf907f50dacfd7a331387a35c38b230078744'}
 ADDITIONS = frozenset({METER_TEST, 'source_generation.py',
     'experimental/test_source_generation.py', BASELINE, HISTORICAL, OVERLAY,
     R+'METER-PROVIDER-PRIVACY-v1.md', R+'PROSPECTIVE-METER-PRIVACY-v1.json',
     R+'PROVIDER-PRIVACY-RED-v1.txt', R+'PROVIDER-PRIVACY-GREEN-v1.txt',
     R+'PROVIDER-PRIVACY-STATIC-v1.json', R+'GENERATION-VALIDATION-v2.md',
-    R+'GENERATION-VALIDATION-v2-RESULTS.txt'})
+    R+'GENERATION-VALIDATION-v2-RESULTS.txt', R+'generation-overlay-v2.json',
+    R+'final_attempt_admission.py', R+'test_final_attempt_admission.py',
+    R+'FINAL-ATTEMPT-ADMISSION-v3.md', R+'FINAL-ATTEMPT-ADMISSION-v3-RESULTS.txt'})
 PRIVATE_FIXTURE = R+'payloads/sanitize-git-repo/tests/test_outputs.py'
 PRIVATE_FIXTURE_SHA = '57e4904177acac5807b51f7c32444bde1968ba0445855fa4333d9eb73865b59e'
 
@@ -95,7 +104,7 @@ def validate(root, manifest, expected_sha256):
     require(type(overlay) is dict and set(overlay) == {'schema_version','generation','base_commit',
             'baseline_sha256','historical_meter_sha256','runtime_qualified',
             'execution_authorized','changes','files'}, 'unknown overlay record/schema')
-    require(type(overlay['schema_version']) is int and overlay['schema_version'] == 2,
+    require(type(overlay['schema_version']) is int and overlay['schema_version'] == 3,
             'unsupported generation schema')
     require(overlay['generation'] == GENERATION and overlay['base_commit'] == BASE_COMMIT,
             'unknown generation or wrong base')
@@ -139,7 +148,7 @@ def validate(root, manifest, expected_sha256):
     recon = root/R
     paths = sorted(name for name in expected_paths if name.startswith(R) and name != DERIVED)
     expected = ''.join(digest((root/name).read_bytes())+'  '+name[len(R):]+'\n' for name in paths)
-    require((root/DERIVED).read_text() == expected, 'derived source manifest mismatch')
+    require((root/DERIVED).read_bytes() == expected.encode('utf-8'), 'derived source manifest mismatch')
     return {'generation':GENERATION,'overlay_sha256':expected_sha256,'source_verified':True,
             'baseline_files':len(baseline['files']),'current_files':len(expected_paths),
             'runtime_qualified':False,'execution_authorized':False,'git_required':False}
@@ -149,8 +158,9 @@ def validate_selection(manifest, expected_sha256):
     return validate(ROOT, manifest, expected_sha256)
 
 def require_execution_authority():
-    # Source proof cannot waive either unresolved operator decision or the6h hold.
-    raise ValueError('native6h budget exhausted: a-d2d2 extension AND a-9509/a-1ca7 resource answer, independent review and NEW desk GO required; candidate execution blocked')
+    # The accepted extension is scoped ONLY to final03's protected lifecycle.
+    # It cannot authorize paid trials, accounts, models or general builds here.
+    raise ValueError('paid/general execution remains HOLD; final03 is permitted only through its reviewed one-shot lifecycle admission, never a source receipt or allow flag')
 
 
 def main():

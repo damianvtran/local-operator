@@ -1,0 +1,142 @@
+SOURCE-ONLY final03 admission v3 — no native qualification/GO/registered claim.
+Base e4c934242565f32bc29216880a031f3508662e80. Operator decisions supplied explicitly by parent/user; not a desk GO.
+Targeted lease only: existing repo .venv/bin/python -B, no installs.
+42 tests: 27 final-admission/lifecycle +15 source-generation.
+Initial source-supervisor fixture lacked producer PYTHONPATH; fixed fixture to match actual producer. Final source test path passes; no runtime setup attempted.
+
+COMMAND (cwd reconstruction/2026-11-14-source-only): python -B -m unittest -v test_final_attempt_admission test_lifecycle_proposal
+test_actual_lifecycle_configured_overcap_and_rss_overcap_before_pull_or_container (test_final_attempt_admission.CapacityTests.test_actual_lifecycle_configured_overcap_and_rss_overcap_before_pull_or_container) ... ok
+test_configured_int_bounds_do_not_change_rss_cap (test_final_attempt_admission.CapacityTests.test_configured_int_bounds_do_not_change_rss_cap) ... ok
+test_exact_rss_boundary_allowed_with_larger_configured_capacity (test_final_attempt_admission.CapacityTests.test_exact_rss_boundary_allowed_with_larger_configured_capacity) ... ok
+test_actual_cli_missing_and_forged_go_have_zero_native_construction (test_final_attempt_admission.FinalAttemptTests.test_actual_cli_missing_and_forged_go_have_zero_native_construction) ... ok
+test_actual_cli_with_inert_driver_claims_once_and_missing_go_never_constructs_native (test_final_attempt_admission.FinalAttemptTests.test_actual_cli_with_inert_driver_claims_once_and_missing_go_never_constructs_native) ... ok
+test_cancellation_burns_claim_without_retry (test_final_attempt_admission.FinalAttemptTests.test_cancellation_burns_claim_without_retry) ... ok
+test_concurrent_claim_has_exactly_one_winner (test_final_attempt_admission.FinalAttemptTests.test_concurrent_claim_has_exactly_one_winner) ... ok
+test_existing_partial_claim_and_symlink_are_terminal (test_final_attempt_admission.FinalAttemptTests.test_existing_partial_claim_and_symlink_are_terminal) ... ok
+test_go_mutation_private_modes_and_forged_permit_reject (test_final_attempt_admission.FinalAttemptTests.test_go_mutation_private_modes_and_forged_permit_reject) ... ok
+test_invalid_go_decisions_namespace_scope_digest_head_expiry_no_effect (test_final_attempt_admission.FinalAttemptTests.test_invalid_go_decisions_namespace_scope_digest_head_expiry_no_effect) ... ok
+test_one_correct_claim_once_across_restart_and_exception (test_final_attempt_admission.FinalAttemptTests.test_one_correct_claim_once_across_restart_and_exception) ... ok
+test_one_use_pipe_bound_to_controller_and_current_go (test_final_attempt_admission.FinalAttemptTests.test_one_use_pipe_bound_to_controller_and_current_go) ... ok
+test_symlinked_admission_cannot_mint_claim (test_final_attempt_admission.FinalAttemptTests.test_symlinked_admission_cannot_mint_claim) ... ok
+test_unfilled_forged_pipe_is_nonblocking_and_wrong_parent_rejected (test_final_attempt_admission.FinalAttemptTests.test_unfilled_forged_pipe_is_nonblocking_and_wrong_parent_rejected) ... ok
+test_cleanup_ownership_failure_is_not_reported_success (test_lifecycle_proposal.LifecycleTests.test_cleanup_ownership_failure_is_not_reported_success) ... ok
+test_concrete_quit_refuses_changed_owner_before_any_signal (test_lifecycle_proposal.LifecycleTests.test_concrete_quit_refuses_changed_owner_before_any_signal) ... ok
+test_cpu_overcap_missing_wheel_and_work_deadline_abort (test_lifecycle_proposal.LifecycleTests.test_cpu_overcap_missing_wheel_and_work_deadline_abort) ... ok
+test_default_no_pull_and_missing_artifact_aborts (test_lifecycle_proposal.LifecycleTests.test_default_no_pull_and_missing_artifact_aborts) ... ok
+test_digest_and_wheel_hash_mismatch_never_installs (test_lifecycle_proposal.LifecycleTests.test_digest_and_wheel_hash_mismatch_never_installs) ... ok
+test_existing_desktop_is_neither_started_nor_quit (test_lifecycle_proposal.LifecycleTests.test_existing_desktop_is_neither_started_nor_quit) ... ok
+test_no_full_scope_review_has_no_effects (test_lifecycle_proposal.LifecycleTests.test_no_full_scope_review_has_no_effects) ... ok
+test_optional_digest_pull_requires_full_scope_signoff (test_lifecycle_proposal.LifecycleTests.test_optional_digest_pull_requires_full_scope_signoff) ... ok
+test_overcap_aborts_and_quits_only_owned_without_container (test_lifecycle_proposal.LifecycleTests.test_overcap_aborts_and_quits_only_owned_without_container) ... ok
+test_rss_overcap_and_termination_cleanup (test_lifecycle_proposal.LifecycleTests.test_rss_overcap_and_termination_cleanup) ... ok
+test_termination_during_resolver_start_still_requests_owned_cleanup (test_lifecycle_proposal.LifecycleTests.test_termination_during_resolver_start_still_requests_owned_cleanup) ... ok
+test_unidentified_vm_fails_closed (test_lifecycle_proposal.LifecycleTests.test_unidentified_vm_fails_closed) ... ok
+test_vm_attribution_excludes_unrelated_and_rejects_ambiguity (test_lifecycle_proposal.LifecycleTests.test_vm_attribution_excludes_unrelated_and_rejects_ambiguity) ... ok
+
+----------------------------------------------------------------------
+Ran 27 tests in 7.497s
+
+OK
+
+COMMAND (cwd experimental): python -B -m unittest -v test_source_generation
+test_actual_crlf_file_normalizes_in_old_read_text_but_new_gate_rejects (test_source_generation.GenerationTests.test_actual_crlf_file_normalizes_in_old_read_text_but_new_gate_rejects) ... ok
+test_actual_driver_preflight_rejects_receipt_before_legacy_dispatch (test_source_generation.GenerationTests.test_actual_driver_preflight_rejects_receipt_before_legacy_dispatch) ... ok
+test_actual_extracted_supervisor_rejects_missing_gate_before_socket_or_commands (test_source_generation.GenerationTests.test_actual_extracted_supervisor_rejects_missing_gate_before_socket_or_commands) ... ok
+test_actual_extracted_supervisor_valid_source_still_stops_before_runtime (test_source_generation.GenerationTests.test_actual_extracted_supervisor_valid_source_still_stops_before_runtime) ... ok
+test_actual_native_preflight_ignores_forged_receipt_and_requires_live_permit (test_source_generation.GenerationTests.test_actual_native_preflight_ignores_forged_receipt_and_requires_live_permit) ... ok
+test_duplicate_json_and_unlisted_overlay_delta_reject (test_source_generation.GenerationTests.test_duplicate_json_and_unlisted_overlay_delta_reject) ... ok
+test_exact_standalone_source_without_git (test_source_generation.GenerationTests.test_exact_standalone_source_without_git) ... ok
+test_missing_file_unknown_inventory_or_derived_manifest_reject (test_source_generation.GenerationTests.test_missing_file_unknown_inventory_or_derived_manifest_reject) ... ok
+test_missing_unknown_selection_and_receipt_boolean_cannot_admit (test_source_generation.GenerationTests.test_missing_unknown_selection_and_receipt_boolean_cannot_admit) ... ok
+test_native_execute_missing_protected_final_go_has_no_admission (test_source_generation.GenerationTests.test_native_execute_missing_protected_final_go_has_no_admission) ... ok
+test_new_meter_new_tests_runtime_and_historical_tamper_reject (test_source_generation.GenerationTests.test_new_meter_new_tests_runtime_and_historical_tamper_reject) ... ok
+test_overlay_record_digest_unknown_version_generation_and_wrong_base_reject (test_source_generation.GenerationTests.test_overlay_record_digest_unknown_version_generation_and_wrong_base_reject) ... ok
+test_real_verify_only_clis_and_default_missing_selection (test_source_generation.GenerationTests.test_real_verify_only_clis_and_default_missing_selection) ... ok
+test_resealed_unrelated_runtime_and_restricted_source_still_reject (test_source_generation.GenerationTests.test_resealed_unrelated_runtime_and_restricted_source_still_reject) ... ok
+test_resealed_wiring_change_is_not_a_new_admission (test_source_generation.GenerationTests.test_resealed_wiring_change_is_not_a_new_admission) ... ok
+
+----------------------------------------------------------------------
+Ran 15 tests in 2.693s
+
+OK
+
+Actual AST/byte guard proofs versus e4c9342:
+{
+  "container_flags_unchanged": [
+    "--pull=never",
+    "--platform=linux/amd64",
+    "--cpus=1",
+    "--memory=2g",
+    "--memory-swap=2g",
+    "--pids-limit=128"
+  ],
+  "container_inner_code_unchanged": true,
+  "module_byte_proofs": {
+    "experimental/coding/driver.py": "c74867dbe56502592a9510178728501f06c084608273672d8e745bfb33534c8a",
+    "experimental/meter_proxy.py": "23ee793b1c8a4ed71cba1a677bced86f7017899979e787f744ba4619f7270376",
+    "experimental/runner_v2.py": "0c398062d4f93815fd4a95187445f729b4e07d75d5c674f2533a55df5f935549",
+    "experimental/test_meter_privacy.py": "972bad24e91a73e68fc3d0656699965b6b7818dc7afa6a91c16538df2b4bebcc",
+    "reconstruction/2026-11-14-source-only/darwin_process_identity.py": "36eeb136e4c3d34d1c4ffb241f1736f3bc870d9d3308624c489abfd1d96fd058",
+    "reconstruction/2026-11-14-source-only/generation-baseline-v1.json": "a27405d15656ba385fed1c8b3bfb4752a7658a301483a950c9cb737fe3ad412b",
+    "reconstruction/2026-11-14-source-only/generation-overlay-v2.json": "a16417be430a644142072aa2893334208b776d0d356b69cac6a96bc9de846a73",
+    "reconstruction/2026-11-14-source-only/historical-meter-pre-privacy.py.txt": "e5d5d626e36e89dc7544eac3f826623fbd264e285dc35f2431fdf35540e7cc5a",
+    "reconstruction/2026-11-14-source-only/launch_services_broker.py": "a67a323555b37080de2ac35a73f73833d910bc169f0a2b611b32a596cdb22282",
+    "reconstruction/2026-11-14-source-only/owned_session_launch.py": "d9a6f462cb9f407007f903f017fcb5ee3431d45d4fda40ffc0ec757d44fc2ed8"
+  },
+  "native_methods_ast_unchanged": [
+    "now",
+    "sleep",
+    "command",
+    "snapshot",
+    "desktop_records",
+    "existing_desktop",
+    "startup_event",
+    "has_cleanup_authority",
+    "ownership_event",
+    "verify_owned_path",
+    "observe_owned",
+    "verify_session_path",
+    "_observe_owned_session",
+    "_observe_owned",
+    "effective_owner",
+    "startup_guard",
+    "startup_time_guard",
+    "startup_resource_guard",
+    "_startup_guard",
+    "query_engine_info",
+    "info",
+    "cleanup_pending_launch",
+    "quit_broker_owned",
+    "vm_helper",
+    "sample_swap",
+    "check_disk",
+    "check_cleanup_resources",
+    "asset_inventory",
+    "snapshot_assets",
+    "cleanup_owned_image",
+    "cached_carrier",
+    "pull",
+    "wheel_hash",
+    "resolver_done",
+    "begin_cleanup",
+    "recover_owned_container",
+    "stop_owned_resolver",
+    "quit_owned",
+    "record"
+  ],
+  "native_methods_unchanged_count": 39,
+  "rss_CAP_unchanged_bytes": 4300000000,
+  "run_lifecycle_ast_unchanged": true,
+  "start_owned_original_body_unchanged_after_new_permit_guard": true
+}
+Historical verification MUST remain FAIL, not suppressed:
+{
+  "errors": [
+    "historical source changed: experimental/coding/driver.py",
+    "historical source changed: experimental/coding/../meter_proxy.py",
+    "historical source changed: experimental/coding/driver.py"
+  ],
+  "privacy_pattern_hits": [],
+  "returncode": 1
+}
+Runtime_qualified=false; no real GO/admission/final03 claim created. Native2 failures, final extension narrowly approved but fresh independent review and NEW desk GO still required. Last-attempt failure/cancel means STOP.

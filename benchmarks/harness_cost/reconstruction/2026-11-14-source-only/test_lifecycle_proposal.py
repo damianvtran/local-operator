@@ -44,7 +44,7 @@ class LifecycleTests(unittest.TestCase):
         self.assertIsNotNone(target, 'new lifecycle contract absent')
         return target.run_lifecycle(ops, admission(**kwargs), {'base_image':'python@sha256:'+'a'*64,'uv_wheel':{'sha256':'c'*64}}, require_runtime_scope=False)
     def test_overcap_aborts_and_quits_only_owned_without_container(self):
-        ops=StubOps(memory=4_300_000_001)
+        ops=StubOps(memory=8_600_000_001)
         with self.assertRaises(RuntimeError): self.run_case(ops)
         self.assertIn('quit-owned',ops.events);self.assertNotIn('resolver',ops.events)
     def test_unidentified_vm_fails_closed(self):
@@ -78,7 +78,7 @@ class LifecycleTests(unittest.TestCase):
         with self.assertRaises(KeyboardInterrupt):self.run_case(ops)
         self.assertIn('stop-resolver',ops.events);self.assertIn('quit-owned',ops.events)
     def test_cpu_overcap_missing_wheel_and_work_deadline_abort(self):
-        ops=StubOps();ops.info=lambda:{'MemTotal':4_000_000_000,'NCPU':3}
+        ops=StubOps();ops.info=lambda:{'MemTotal':4_000_000_000,'NCPU':15}
         with self.assertRaises(RuntimeError):self.run_case(ops)
         self.assertNotIn('resolver',ops.events)
         ops=StubOps();ops.wheel_hash=lambda:(_ for _ in ()).throw(FileNotFoundError('missing staged wheel'))
