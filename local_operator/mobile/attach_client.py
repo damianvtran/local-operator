@@ -181,6 +181,53 @@ MOVED_REASON = "owner moved this conversation to another device"
 #: nothing to do. Review round 3, UX U3.
 BIND_FAILED_REASON = "owner could not prepare this view; the session is alive — reconnect to retry"
 
+#: How much of the owner's ``bind_failed`` message a reason may carry. The owner
+#: already clips at 400; this is the VIEWER's own bound, because the sentence it
+#: lands in is printed by ``lop network --peek``/``--send`` refusals and the
+#: sessions tool, and an owner (older, or hostile) is untrusted input here.
+_BIND_FAILED_DETAIL_LIMIT = 300
+
+#: The head of a ``bind_failed`` reason that names the owner's cause. Named so
+#: :func:`_reset_reason` can recognise the announcement: the cause makes the
+#: sentence dynamic, so it can no longer sit in ``_ANNOUNCED_REASONS`` as an
+#: exact string. Only :func:`bind_failed_reason` builds a reason with this head.
+_BIND_FAILED_CAUSE_PREFIX = "owner could not prepare this view: "
+
+
+def bind_failed_reason(message: object) -> str:
+    """The disconnect reason for a ``bind_failed`` frame, naming the owner's cause.
+
+    WHY THE CAUSE RIDES ALONG (2026-11-12): a coordinator on a node dialing a
+    session on another Mac got "owner could not prepare this view" and nothing
+    else. The owner HAD sent the exception text, but this client dropped it, and
+    the owner's traceback lived only in a shared rotating ``runtime.log`` that
+    was overwritten within minutes — so the cause was unrecoverable from either
+    end. Every consumer (the pilot refusal in ``network/cli``, the sessions
+    tool, the attached host) prints this string verbatim, so carrying the cause
+    HERE is what reaches all of them without each learning a new field.
+
+    The message is untrusted text from another process (possibly another
+    device): credential SHAPES are masked (the owner scrubs too, but an older
+    owner did not), control sequences and newlines are flattened so it cannot
+    repaint a terminal or forge a second line, and it is clipped. Absent or
+    empty — an older owner, or a frame without the key — keeps the exact
+    historical sentence so nothing that already reads it changes.
+
+    This pass is NOT complete on its own: an owner on 0.101.x or older sends its
+    raw ``str(exc)``, which a new viewer now displays, and the viewer can mask
+    credential shapes but not that owner's retrieved-secret ledger values.
+    """
+    if not isinstance(message, str) or not message.strip():
+        return BIND_FAILED_REASON
+    from local_operator.ansi import sanitize_prompt_line
+    from local_operator.redaction_shapes import scrub_shapes
+
+    detail = sanitize_prompt_line(scrub_shapes(message), limit=_BIND_FAILED_DETAIL_LIMIT)
+    if not detail:
+        return BIND_FAILED_REASON
+    return f"{_BIND_FAILED_CAUSE_PREFIX}{detail}; the session is alive — reconnect to retry"
+
+
 #: Maximum bytes in one frame. Must equal the server's ``_MAX_LINE_BYTES``:
 #: the writer refuses to exceed it and the reader refuses to read past it, so
 #: two different numbers would mean a frame the owner considers sendable is one
@@ -232,8 +279,18 @@ _ANNOUNCED_REASONS = frozenset({STOPPED_REASON, RETIRING_REASON, MOVED_REASON, B
 
 
 def _reset_reason(announced: str) -> str:
-    """The disconnect reason for a transport reset, keeping an announced one."""
-    return announced if announced in _ANNOUNCED_REASONS else "owner connection reset"
+    """The disconnect reason for a transport reset, keeping an announced one.
+
+    A ``bind_failed`` frame that names its cause yields a reason built per
+    message (:func:`bind_failed_reason`), so it is matched by its head rather
+    than by the exact-string set. Without that, the same RST that the set
+    guards against for a bare ``bind_failed`` replaced a cause-bearing one with
+    ``"owner connection reset"`` — telling the person their session died and
+    discarding the very cause the owner sent.
+    """
+    if announced in _ANNOUNCED_REASONS or announced.startswith(_BIND_FAILED_CAUSE_PREFIX):
+        return announced
+    return "owner connection reset"
 
 
 logger = logging.getLogger(__name__)
@@ -1602,8 +1659,9 @@ class AttachClient:
                     # moments away and every consumer already reads that string.
                     # What it buys is the truth — without it the close fell
                     # through to the pump's default and the person was told
-                    # their session had died.
-                    reason = BIND_FAILED_REASON
+                    # their session had died. The owner's message names the
+                    # CAUSE (see ``bind_failed_reason`` for why it is kept).
+                    reason = bind_failed_reason(frame.get("message"))
                 elif op == "aside_delta":
                     # One chunk of an off-record aside's answer, streamed while the
                     # request that asked for it is still in flight. LIVE ONLY by

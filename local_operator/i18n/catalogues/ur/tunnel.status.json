@@ -1,0 +1,15 @@
+{
+  "tunnel.status.create.conflict_unmatched": "Radient کے مطابق اس درخواست کے لیے ایک ٹنل پہلے سے موجود ہے، لیکن اس لاگ اِن کی ٹنل فہرست میں کوئی ایک مماثل ریکارڈ نہیں ہے۔ lop tunnel list دیکھیں، پھر lop tunnel connect --tunnel-id <id> سے اسے جوڑیں۔",
+  "tunnel.status.gateway.listening_http_status": "ریلے گیٹ وے پورٹ 127.0.0.1:{port} پر کوئی سن رہا ہے، لیکن اس نے صحت کی جانچ کا جواب HTTP {status} سے دیا: ممکن ہے کوئی اور پروگرام اس پورٹ کو استعمال کر رہا ہو، یا گیٹ وے ٹھیک کام نہیں کر رہا۔ دوبارہ انسٹال کرنے سے فائدہ نہیں ہوگا۔",
+  "tunnel.status.gateway.listening_timed_out": "مقامی ریلے گیٹ وے 127.0.0.1:{port} پر سن رہا ہے، لیکن صحت کی جانچ کا جواب وقت پر نہیں آیا؛ دوبارہ انسٹال کرنے سے فائدہ نہیں ہوگا۔",
+  "tunnel.status.gateway.listening_unreadable": "مقامی ریلے گیٹ وے 127.0.0.1:{port} پر سن رہا ہے، لیکن صحت کی جانچ کا جواب پڑھا نہیں جا سکا؛ دوبارہ انسٹال کرنے سے فائدہ نہیں ہوگا۔",
+  "tunnel.status.last_exit.at": "کنیکٹر آخری بار بند ہوا: {label} ({at} پر)",
+  "tunnel.status.last_exit.plain": "کنیکٹر آخری بار بند ہوا: {label}",
+  "tunnel.status.login.deferred_retried": "لاگ اِن: ریفریش مؤخر — خودکار طور پر دوبارہ کوشش ہوگی۔",
+  "tunnel.status.login.unchecked": "لاگ اِن: جانچ نہیں ہو سکی (ریفریش Radient تک نہیں پہنچ سکا)۔",
+  "tunnel.status.requests.heading": "درخواستیں (آخری {window}): {tally}",
+  "tunnel.status.requests.no_response": "کوئی جواب نہیں",
+  "tunnel.status.server_unavailable.label": "Radient سرور کی خرابی",
+  "tunnel.status.server_unavailable.relay": "Radient نے اس کمپیوٹر کی ریلے اجازت کی جانچ کا جواب ایک عارضی سرور خرابی سے دیا۔ لاگ اِن یا اس کمپیوٹر میں کوئی مسئلہ نہیں؛ Radient بحال ہوتے ہی یہ خود اجازت دوبارہ حاصل کر لیتا ہے۔",
+  "tunnel.status.server_unavailable.terminal": "Radient نے کنیکٹر کی اجازت کی جانچ کا جواب ایک عارضی سرور خرابی (HTTP 5xx) سے دیا، اس لیے نہ لاگ اِن میں خرابی ہے اور نہ اس کمپیوٹر میں۔ یہ ہر 10 سیکنڈ بعد دوبارہ کوشش کرتا ہے اور Radient بحال ہوتے ہی خود اجازت دوبارہ حاصل کر لیتا ہے؛ کسی مقامی کمانڈ کی ضرورت نہیں۔"
+}

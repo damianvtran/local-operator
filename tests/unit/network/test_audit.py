@@ -166,9 +166,24 @@ def test_every_literal_event_a_call_site_names_is_registered() -> None:
         f"guard's scope (found {emitters})"
     )
     package = Path(audit_mod.__file__).resolve().parent
+    # FORWARDERS OUTSIDE THE PACKAGE (PR #3949 CI round 4): ``AuditEvent`` stays inside
+    # ``network/``, but ``operator/pair_op.py`` wraps ``approvals._audit`` in its own
+    # ``_audit`` helper and passes literal names into this same log. Scanning only
+    # ``network/`` missed ``device_pair.desktop_confirm`` (emitted unregistered, so its
+    # detail was dropped); any module that forwards to ``approvals._audit`` is an
+    # emitter of this log and is walked too.
+    forwarders = sorted(
+        path
+        for path in package.parent.rglob("*.py")
+        if package not in path.parents and "approvals._audit(" in path.read_text(encoding="utf-8")
+    )
+    assert any(path.name == "pair_op.py" for path in forwarders), (
+        f"the forwarder walk no longer finds operator/pair_op.py (found {forwarders}); "
+        "it is not looking where it thinks"
+    )
     literals: set[str] = set()
     computed = 0
-    for source_path in sorted(package.rglob("*.py")):
+    for source_path in sorted(package.rglob("*.py")) + forwarders:
         tree = ast.parse(source_path.read_text(encoding="utf-8"))
         for node in ast.walk(tree):
             if not isinstance(node, ast.Call):
@@ -195,6 +210,7 @@ def test_every_literal_event_a_call_site_names_is_registered() -> None:
     # The walk's own instrument check: it must be reading real call sites, or the
     # empty-set pass below would be vacuous.
     assert {"member_removed", "credential.copy", "credential.copy_wiped"} <= literals
+    assert "device_pair.desktop_ack" in literals, "the forwarder modules were not walked"
     assert computed > 0, "no computed event names found; the walk is not looking where it thinks"
     unknown = sorted(name for name in literals if name not in audit_mod.EVENT_KINDS)
     assert unknown == [], (

@@ -489,6 +489,13 @@ class _CardLayout:
     #: not afford). Composed once in ``tui/notify.py``; fitted to the card's
     #: width by :meth:`AskPickerScreen._remote_hint_text`.
     remote_hint: str
+    #: The question's suggested terminal command (``AskQuestion.command``) as
+    #: ``$ <command>`` rows: one line fitted to the width, or — under the
+    #: ``ctrl+e`` reveal — the whole command wrapped. ``()`` when the question
+    #: carries none (or the budget could not afford it). Display only: the TUI
+    #: offers no action for it (the desktop app does); see
+    #: :meth:`AskPickerScreen._command_lines`.
+    command_lines: tuple[str, ...]
     #: The title and its rule, which are shown or dropped together.
     show_title: bool
     space_above: bool
@@ -1634,6 +1641,50 @@ class AskPickerScreen(Container):
                 return rung
         return truncate_cells(rungs[-1], max(1, width))
 
+    def _command_text(self, width: int) -> str:
+        """The question's suggested command as one ``$ <command>`` line, or ``""``.
+
+        ``AskQuestion.command`` is a one-line shell command the agent suggests
+        the user run (core refuses control and format characters, so it is a
+        single printable line). The TUI only SHOWS it — in ``dim``, under the
+        question, where inline code in the prose used to be the only trace —
+        and offers no action: running it is the desktop app's confirmed flow.
+        ``$`` is the universal shell-prompt mark, not copy, so the line needs no
+        catalogue key. A command wider than the card is cut with the card's own
+        ``truncate_cells`` mark rather than wrapped, so a long one never pushes
+        the options down; ``ctrl+e`` reveals it whole (:meth:`_command_lines`).
+
+        Read with ``getattr``: a question that predates the field (or a
+        duck-typed test stand-in) has no attribute, and must draw exactly as
+        before.
+        """
+        command = getattr(self.question, "command", None)
+        if not isinstance(command, str) or not command.strip():
+            return ""
+        line = f"$ {command.strip()}"
+        if cell_len(line) <= width:
+            return line
+        return truncate_cells(line, max(1, width))
+
+    def _command_lines(self, width: int, *, reveal: bool) -> tuple[str, ...]:
+        """The command as the rows the card draws: one cut line, or all of it.
+
+        Collapsed, this is :meth:`_command_text`'s single line, so a long
+        command never pushes the options down. Under the ``ctrl+e`` reveal —
+        the card's existing "show me everything" gesture — it is the WHOLE
+        command, word-wrapped by cells (:func:`wrap_cells`, which breaks an
+        over-long token rather than overhanging) with continuation rows hung
+        under the text after ``$ ``. Without this a command wider than the card
+        could not be read in full anywhere on the TUI, and a clipped command
+        cannot be retyped as shown (round 1, D3).
+        """
+        line = self._command_text(width)
+        command = str(getattr(self.question, "command", "") or "").strip()
+        if not line or not reveal or cell_len(f"$ {command}") <= width:
+            return (line,) if line else ()
+        rows = wrap_cells(command, max(1, width - 2))
+        return tuple(("$ " if i == 0 else "  ") + row for i, row in enumerate(rows))
+
     def _question_lines(self, width: int, *, reveal: bool) -> list[str]:
         """The question, wrapped and bounded by what the BODY can spare.
 
@@ -1966,6 +2017,8 @@ class AskPickerScreen(Container):
             + len(line_list)  # every option's label and its capped description
             + 1  # the windowing line, where the list turns out to need one
             + 1  # the footer
+            # `$ <command>`, all of it under the reveal
+            + len(self._command_lines(self._card_width(), reveal=self.state.revealed))
         )
         return min(room, wanted)
 
@@ -2278,6 +2331,7 @@ class AskPickerScreen(Container):
                 content_width=width,
                 question=tuple(first),
                 remote_hint="",
+                command_lines=(),
                 show_title=False,
                 space_above=False,
                 space_below=False,
@@ -2327,6 +2381,46 @@ class AskPickerScreen(Container):
             remaining -= 1
         else:
             hint = ""
+        # 6c. The question's suggested command, bought on the same terms as the
+        # remote hint and after it: it helps the user act on the question but
+        # must never cost the card an answer, its title, or the line saying
+        # where the gate lives. `_body_rows` counts it in `wanted`, so on any
+        # terminal with room it is drawn. A question without one computes ""
+        # here, so every frame drawn before the field existed is byte-identical.
+        #
+        # One exception to "never costs an answer": a list that WINDOWS ANYWAY
+        # (taller than every row the plan could give it, even with the command
+        # absent). There the last visible option row is not an answer the card
+        # would otherwise show whole — the rest of the list is already behind
+        # the scroll, a `↓` or a `1-9` jump away — while this line is the only
+        # place the TUI shows the command at all. So the command takes that one
+        # row from the scrolled viewport (never the guaranteed first row, the
+        # `1` in `1 + extra`). Before this, 80x24 and 100x22 bought `extra` to
+        # the last row, found `remaining == 0` here and drew no command, the
+        # frame byte-identical to a question without one (round 1, D2/Q1).
+        command_lines = self._command_lines(width, reveal=reveal)
+        needed = (
+            len(
+                self._build_line_list(
+                    range(self.row_count), width, revealed=reveal, selected=self.state.selected
+                )[0]
+            )
+            if command_lines
+            else 0
+        )
+        if command_lines and remaining >= 1:
+            # A revealed command wraps to several rows; it takes what is left
+            # and marks its own cut, like the question's budget cut above.
+            if len(command_lines) > remaining:
+                cut = list(command_lines[:remaining])
+                cut[-1] = truncate_cells(f"{cut[-1]} …", max(1, width))
+                command_lines = tuple(cut)
+            remaining -= len(command_lines)
+        elif command_lines and extra >= 1 and needed > (1 + extra) + remaining:
+            command_lines = (self._command_text(width),)
+            extra -= 1
+        else:
+            command_lines = ()
         # 7a is GONE. The reveal is no longer a constant-height block bought
         # here out of the option rows' remainder; it is a per-row cap LIFT on
         # the SELECTED row inside the ONE line viewport (§4, :meth:`_cap_for_row`).
@@ -2349,6 +2443,39 @@ class AskPickerScreen(Container):
         space_below = remaining - 1 >= 0
         if space_below:
             remaining -= 1
+        if command_lines:
+            # 8b. The command line must never turn a list that FITS into one
+            # that windows (measured: at 100x30 the plain card shows all three
+            # rows, and an unconditional command line scrolled `Other` off).
+            # So when giving back the spacers — rhythm and nothing else — and,
+            # failing that, the command line itself would make the list fit,
+            # they yield in that order (the full command is still in the ask's
+            # tool call). When even all three rows could not make it fit, the
+            # list windows regardless: nothing yields, so the card keeps its
+            # rhythm and the command, which has no other home on the TUI (6c
+            # may already have taken a scrolled row for it — round 1, D2/Q1/n2).
+            # Only a question WITH a command reaches this branch, so every other
+            # frame is unchanged.
+            spare = int(space_above) + int(space_below) + len(command_lines)
+            deficit = needed - ((1 + extra) + remaining)
+            if 0 < deficit <= spare:
+                for spacer in ("below", "above"):
+                    if needed <= (1 + extra) + remaining:
+                        break
+                    if spacer == "below" and space_below:
+                        space_below = False
+                        remaining += 1
+                    elif spacer == "above" and space_above:
+                        space_above = False
+                        remaining += 1
+                # A revealed command first folds back to its one cut line,
+                # then yields whole.
+                if needed > (1 + extra) + remaining and len(command_lines) > 1:
+                    remaining += len(command_lines) - 1
+                    command_lines = (self._command_text(width),)
+                if needed > (1 + extra) + remaining:
+                    remaining += len(command_lines)
+                    command_lines = ()
         # 9. The option list is a fixed-height LINE VIEWPORT, not a row window.
         # ``body_line_budget`` is the label rows step 3+7 bought PLUS whatever
         # ``remaining`` the chrome left — the full height the viewport draws
@@ -2447,6 +2574,7 @@ class AskPickerScreen(Container):
             content_width=content_width,
             question=tuple(kept),
             remote_hint=hint,
+            command_lines=command_lines,
             show_title=show_title,
             space_above=space_above,
             space_below=space_below,
@@ -2956,6 +3084,15 @@ class AskPickerScreen(Container):
             # ink). One row, shed whole-clause in `_remote_hint_text`.
             newline(None)
             out.append(layout.remote_hint, style=muted)
+        if layout.command_lines:
+            # The suggested command, `muted`: reference text the user reads to
+            # type or paste, so a misread character is a wrong command. `dim`
+            # measured 3.43:1 on the card (#837c6d on #302a20), below AA;
+            # `muted` is 6.51:1 and still quieter than the question (11.3:1),
+            # with the `$ ` prefix setting it apart (round 1, D1).
+            for row in layout.command_lines:
+                newline(None)
+                out.append(row, style=muted)
         if layout.space_above:
             newline(None)
 
@@ -3935,6 +4072,12 @@ class AskPickerScreen(Container):
         # Asked of the two plans' drawn question text, for the same reason the
         # row disjunct is: what matters is the FRAME, not the wrap.
         if len(revealed.question) > len(default.question):
+            return True
+        # A THIRD target, same shape: a suggested command cut at the card edge
+        # wraps in full under the reveal (:meth:`_command_lines`, round 1 D3).
+        # Without this disjunct the footer would not offer `^e` for it, and
+        # `action_toggle_reveal` refuses a key the footer does not name.
+        if len(revealed.command_lines) > len(default.command_lines):
             return True
         # More of the selected row's OWN prose than the default clamp shows?
         if len(self._reveal_wrap(selected, width)) <= DEFAULT_DESC_CAP:

@@ -144,6 +144,9 @@ from local_operator.session.runtime.types import (
 from local_operator.session.store_failures import store_failure
 from local_operator.tui.sidebar_pins import PINS_FILE, read_pins, set_pin
 
+# stdlib-only module (no httpx/starlette), unlike `tunnels.gateway` below.
+from local_operator.tunnels.request_log import note_reason
+
 logger = logging.getLogger(__name__)
 #: The gateway's own spelling (``tunnels.gateway.STREAM_CLEANUP_FAILED``): one
 #: name for the one failure class, with the logger name carrying the surface.
@@ -1919,12 +1922,44 @@ def _bootstrap_mobile_attention() -> None:
     # Match the relay's bounded recent-history surface. Older conversations are
     # imported when a real Session loads them, avoiding an unbounded boot scan.
     live = {record.session_id for record, state in registry.scan() if state == "live"}
-    directories = sorted(root.iterdir(), key=lambda path: path.stat().st_mtime, reverse=True)
+
+    def _mtime(path: Path) -> float:
+        # A directory deleted between ``iterdir`` and ``stat`` would otherwise
+        # raise out of ``sorted`` and abort the sweep the same way an
+        # unreadable transcript did; it sorts last and is skipped below.
+        try:
+            return path.stat().st_mtime
+        except OSError:
+            return 0.0
+
+    directories = sorted(root.iterdir(), key=_mtime, reverse=True)
+    skipped = 0
     for directory in directories[:100]:
         if directory.name in live:
             continue
-        if _durable_user_session_dir(directory.name) is not None:
-            bootstrap_transcript(Transcript(directory, defer_materialise=True))
+        # ONE unreadable session must never abort the sweep. The caller marks
+        # ``_attention_bootstrapped`` only after this returns, so a raise here
+        # re-ran the whole sweep on every 2 s scan forever (57k+ warnings in
+        # the field, phone stuck on "Not answering"). The field case was a
+        # ``.zst`` archive written by a 3.14 runtime and read by a 3.13 daemon
+        # (``ArchiveUnavailable``), but a truncated archive, a permission
+        # error or a malformed journal line fail the same way, so the guard is
+        # deliberately broad: a skipped session is still migrated later when a
+        # real Session opens it. The log names only the session id and the
+        # exception class — never transcript content — and is one line per
+        # skipped session, bounded by the 100-directory window above.
+        try:
+            if _durable_user_session_dir(directory.name) is not None:
+                bootstrap_transcript(Transcript(directory, defer_materialise=True))
+        except Exception as exc:  # noqa: BLE001 — see the comment above
+            skipped += 1
+            logger.warning(
+                "mobile attention bootstrap skipped session %s: %s",
+                directory.name,
+                type(exc).__name__,
+            )
+    if skipped:
+        logger.info("mobile attention bootstrap finished with %d skipped session(s)", skipped)
 
 
 #: The outcome types the runtime NAMES as a completed mutation, and therefore the
@@ -6564,6 +6599,7 @@ def build_app(daemon: MobileDaemon):
         if (
             origin is not None and origin not in {f"http://{host}", f"https://{host}"}
         ) or request.headers.get("sec-fetch-site") == "cross-site":
+            note_reason(request.scope, "cross_origin")
             return JSONResponse({"error": "same-origin request required"}, status_code=403)
         return None
 
@@ -6576,6 +6612,9 @@ def build_app(daemon: MobileDaemon):
         if authed(request):
             return None
         if request.url.path.startswith("/api/"):
+            # A reason code on the request log's entry (QA round 1, Q3): a 401
+            # with an empty reason could not be told apart from a handler's own.
+            note_reason(request.scope, "unauthorized")
             return JSONResponse({"error": "authentication required"}, status_code=401)
         return RedirectResponse("/login", status_code=303)
 
@@ -6611,6 +6650,7 @@ def build_app(daemon: MobileDaemon):
         form = await request.form()
         candidate = str(form.get("password", ""))
         if not daemon.password or not check_password(candidate, daemon.password):
+            note_reason(request.scope, "login_failed")
             return HTMLResponse(
                 await asyncio.to_thread(_render_login_html, error=True),
                 status_code=401,
@@ -6895,6 +6935,7 @@ def build_app(daemon: MobileDaemon):
         if origin_denied is not None:
             return origin_denied
         if not authed(request):
+            note_reason(request.scope, "unauthorized")
             return JSONResponse({"error": "authentication required"}, status_code=401)
         from local_operator import agent_avatar
         from local_operator.i18n.http import etag_matches
@@ -9336,7 +9377,13 @@ def build_app(daemon: MobileDaemon):
             # which is the documented way to revoke a device whose certificate
             # this machine still holds — left the local record silent. Measured
             # before the fix: that device re-paired on a fresh code with HTTP 200.
-            return JSONResponse({"error": "this device has been revoked"}, status_code=403)
+            # The typed ``code`` (round-1 R5) is what the PWA keys its re-key on: it
+            # deletes the device key and certificate, so it must never fire on prose.
+            # ``error`` keeps its exact sentence for builds that match it.
+            return JSONResponse(
+                {"error": "this device has been revoked", "code": "pair_device_revoked"},
+                status_code=403,
+            )
         name = str(body.get("name") or "")[:64]
         devices.write_pending(
             root,
@@ -9351,10 +9398,87 @@ def build_app(daemon: MobileDaemon):
         """File a typed phone pairing request; never decide or apply one.
 
         The imported filer reaches only ``approvals.create_request``. There is no
-        approve, deny, signer, or apply route here: the person on the desktop must
-        enter the SAS through the typed engine, whose persistent three-strike burn
-        and ``pair_code_required`` decision guard remain the only approval path.
+        approve, deny, signer, or apply route here: the person on the desktop
+        decides through the typed engine (the six-digit code, or -- on an
+        edge-attested request only -- "Codes match" after comparing both screens),
+        and ``pair_op.require_acked`` stays the decision guard either way.
+
+        THE ROUTE IS EVIDENCE NOW (pairing design v2 §1): the gateway forwards the
+        Radient edge's verified assertion under ``x-lop-radient-assertion`` for this
+        one path, and ``pair_requests.attested_route`` re-verifies it against the raw
+        body bytes. Anything that does not verify files as the custom route.
         """
+        denied = gate(request)
+        if denied is not None:
+            return denied
+        raw = await request.body()
+        try:
+            body = json.loads(raw or b"null")
+        except ValueError:
+            return JSONResponse({"error": "invalid JSON"}, status_code=400)
+        if not isinstance(body, dict):
+            return JSONResponse({"error": "request body must be an object"}, status_code=400)
+        from local_operator.mobile import pair_requests
+        from local_operator.paths import config_dir
+
+        route = None
+        if "np" in body:
+            route = await pair_requests.attested_route(
+                request.headers.get(pair_requests.ASSERTION_HEADER),
+                host=request.headers.get("host", ""),
+                body=raw,
+            )
+        try:
+            record = await pair_requests.file_request(body, config_dir(), route=route)
+        except MeshRefusal as exc:
+            status = 422
+            if exc.code == "pair_filing_rate_limited":
+                status = 429
+            elif exc.code == "pair_request_pending":
+                status = 409
+            payload: dict[str, Any] = {"error": str(exc), "code": exc.code}
+            payload.update(getattr(exc, "extras", {}) or {})
+            return JSONResponse(payload, status_code=status)
+        return JSONResponse(record, status_code=201 if "approval_id" in record else 200)
+
+    async def api_pair_availability(request: Request) -> Response:
+        """Whether this computer can take a phone pairing request at all (design v2 §2.2).
+
+        Registered BEFORE ``/api/pair/{device_id}`` so ``availability`` is never read
+        as a device id. A pre-C2 daemon 404s here, which the phone reads as "do not
+        offer pairing" -- so no claim is ever made against a computer that has no
+        operator authority to issue a certificate with.
+        """
+        denied = gate(request)
+        if denied is not None:
+            return denied
+        from local_operator.mobile import pair_requests
+
+        return JSONResponse(pair_requests.availability())
+
+    async def api_pair_request_status(request: Request) -> Response:
+        """The phone's poll of ONE filed request: ``{state, reason, mode, ...}``.
+
+        Keyed by the phone-chosen ``request_id`` it already holds; the answer names
+        nothing the filer did not send or cannot already derive, and decides
+        nothing.
+        """
+        denied = gate(request)
+        if denied is not None:
+            return denied
+        from local_operator.mobile import pair_requests
+        from local_operator.paths import config_dir
+
+        answer = pair_requests.request_status(str(request.path_params["request_id"]), config_dir())
+        if answer is None:
+            return JSONResponse(
+                {"error": "no pairing request with that id", "code": "unknown_request"},
+                status_code=404,
+            )
+        return JSONResponse(answer)
+
+    async def api_pair_request_withdraw(request: Request) -> Response:
+        """The phone's Cancel (U6): a key-signed, idempotent withdraw of its OWN request."""
         denied = gate(request)
         if denied is not None:
             return denied
@@ -9368,15 +9492,17 @@ def build_app(daemon: MobileDaemon):
         from local_operator.paths import config_dir
 
         try:
-            record = await pair_requests.file_request(body, config_dir())
+            answer = pair_requests.withdraw_request(
+                str(request.path_params["request_id"]), body, config_dir()
+            )
         except MeshRefusal as exc:
-            status = 422
-            if exc.code == "pair_filing_rate_limited":
-                status = 429
-            elif exc.code == "pair_request_pending":
-                status = 409
+            status = {
+                "unknown_request": 404,
+                "pair_withdraw_forbidden": 403,
+                "approval_in_progress": 409,
+            }.get(exc.code, 422)
             return JSONResponse({"error": str(exc), "code": exc.code}, status_code=status)
-        return JSONResponse(record, status_code=201 if "approval_id" in record else 200)
+        return JSONResponse(answer)
 
     async def api_pair_status(request: Request) -> Response:
         """Whether the operator has approved a claimed code yet.
@@ -9522,6 +9648,7 @@ def build_app(daemon: MobileDaemon):
                 limit=query.limit,
                 lapsed_visible_ms=window,
                 through_seq=query.through_seq,
+                include_session_counts=query.include_session_counts,
             )
         except ValueError:
             return JSONResponse({"error": "invalid cursor"}, status_code=422)
@@ -11738,6 +11865,16 @@ def build_app(daemon: MobileDaemon):
         ),
         Route("/api/pair", api_pair, methods=["POST"]),
         Route("/api/pair/request", api_pair_request, methods=["POST"]),
+        # Literal paths BEFORE the ``{device_id}`` capture (design v2 §2.2): Starlette
+        # matches in order, so ``/api/pair/availability`` placed after it would be a
+        # certificate lookup for a device named "availability".
+        Route("/api/pair/availability", api_pair_availability),
+        Route("/api/pair/request/{request_id:str}", api_pair_request_status),
+        Route(
+            "/api/pair/request/{request_id:str}/withdraw",
+            api_pair_request_withdraw,
+            methods=["POST"],
+        ),
         Route("/api/pair/{device_id:str}", api_pair_status),
         Route("/api/asks", api_asks),
         # The inbox (docs/design/notifications-inbox.md §5.4): the reel, one

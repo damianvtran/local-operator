@@ -110,6 +110,18 @@ CAPABILITY_MODEL_SWITCH = "model_switch"
 #: report — so a node silently ran without the head's review and release rules.
 #: Emitted only when there is a refusal to name; never in ``PEER_SIDE_CHECKS``.
 CAPABILITY_CUSTOM_INSTRUCTIONS = "custom_instructions"
+#: (l) user skills: does the peer hold this device's own skills at the revision
+#: this device has (``skillsync.py``)? Added 2026-11-11 with the mesh skill sync:
+#: a brief naming ``skill://x`` resolves on the head and, before that sync, on no
+#: peer. Informational (non-gating): the cadence repairs it within a minute, and
+#: the create path pushes first.
+CAPABILITY_SKILLS = "skills"
+#: (m) the node-managed browser: would a session offloaded to this peer get a
+#: ``browser`` tool? Added 2026-11-13: sessions on headless nodes had none and
+#: nothing said so until a visual/E2E lane failed there. ``n/a`` where a user's
+#: desktop app or extension serves the device (the node-managed browser is for
+#: headless nodes only — guide://browser "Headless nodes").
+CAPABILITY_BROWSER = "browser"
 
 #: The class a readiness row carries (F8 ruling, 2026-10-04). "The device is
 #: onboarded" and "the equipment on it is set up" are DIFFERENT questions:
@@ -160,6 +172,13 @@ NON_GATING_EQUIPMENT: frozenset[str] = frozenset(
         # operator wrote them there); the row names it with the remedy and never
         # holds the verdict, as the create and the move never refuse on it.
         CAPABILITY_CUSTOM_INSTRUCTIONS,
+        # A missing skill is a sync in flight or a skill that cannot travel; the
+        # row names which, and nothing about onboarding depends on it.
+        CAPABILITY_SKILLS,
+        # A node without a browser IS onboarded; visual/E2E work is the point of
+        # use, and installing one needs the operator's authorisation, so the row
+        # names the gap and the authorised remedy rather than gating.
+        CAPABILITY_BROWSER,
     }
 )
 
@@ -178,6 +197,7 @@ PEER_SIDE_CHECKS: tuple[str, ...] = (
     CAPABILITY_TOOLING,
     CAPABILITY_RESILIENCE,
     CAPABILITY_SERVE_DAEMON,
+    CAPABILITY_BROWSER,
 )
 
 #: Failure codes. OK rows carry no code; a code is a machine token for a
@@ -211,6 +231,11 @@ CODE_RELAY_OOM_POLICY = "relay_oom_policy"
 #: The peer has not granted this device the lifecycle capability net_restart
 #: requires. The remedy is a grant ON THE PEER, never a local gate bypass.
 CODE_UPDATE_GRANT_MISSING = "update_grant_missing"
+#: The peer lacks some of this device's skills at this device's revision. A
+#: named constant (not a literal at the emit site) because enrollment's
+#: ``public_report`` admits only ``CODE_*`` values: a bare literal made a failed
+#: ``skills`` row refuse the whole terminal receipt (PR #3839).
+CODE_SKILLS_NOT_SYNCED = "skills_not_synced"
 #: Serve daemon (2026-10-28): its build differs from the install's, or nothing
 #: but a login session holds it (Linux: a ``session-*.scope``, not a unit).
 CODE_SERVE_STALE = "serve_stale"
@@ -1595,12 +1620,30 @@ def selected_model_row(
             (f"sign in to {provider} on {peer_label}, or choose another model",),
         ),
     }
-    if state not in readings and state != "held_offline":
+    # A HELD GRANT is access the owner lent BEFORE it became unreachable, served
+    # from the borrower's memory until the offline hold ends (up to 24 hours since
+    # 2026-11-13). Reading it as a fresh resolve ("the next request verifies the
+    # owner again") was wrong for that whole window (design review m1), so it says
+    # what it is and when it stops. The end is the receipt's
+    # ``last_grant_expires_at`` (the hold end, ``effective.note_resolution``),
+    # rendered in UTC because the reader may sit in another time zone.
+    held_until = fact.get("last_grant_expires_at")
+    until = (
+        time.strftime(" until %H:%M UTC", time.gmtime(held_until))
+        if isinstance(held_until, (int, float)) and not isinstance(held_until, bool)
+        else ""
+    )
+    readings["held_offline"] = (
+        f"{peer_label} is using {provider} access {owner} lent before it went "
+        f"offline{until}; nothing is refreshed until {owner} is back",
+        (
+            f"continue on {peer_label}; reconnect {owner} before then, or sign in to "
+            f"{provider} on {peer_label} to stop depending on it",
+        ),
+    )
+    if state not in readings:
         state = "pending"
-    # A held grant is borrowed access the owner lent (``held_offline``): the same
-    # reading as a resolved borrow, whose "the next request verifies the owner again"
-    # is exactly what the client does. Its own CODE stays on the row below.
-    detail, remedies = readings["effective_borrow" if state == "held_offline" else state]
+    detail, remedies = readings[state]
     if state == "expired" and observer_is_admin and getattr(member, "role", "") == "admin":
         import shlex
 
@@ -1728,6 +1771,9 @@ def collect_peer_facts(
         # ADDITIVE ON THE WIRE: a viewer built before this key ignores it, and a
         # viewer reading a peer built before it renders ``unknown`` — never ok.
         "serve_daemons": serve_daemons_fact(root),
+        # ADDITIVE ON THE WIRE (2026-11-11): names, tree hashes and mirror origin of
+        # this device's user skills — never content. Absent from older peers.
+        "skills": skills_fact(root),
         # ADDITIVE ON THE WIRE: an older viewer ignores it, and an older peer's
         # answer lacks it, which this build reads as "nothing to report" (no row).
         "custom_instructions": custom_instructions_fact(root),
@@ -1736,7 +1782,118 @@ def collect_peer_facts(
         # this device's own). An older viewer ignores it; an older peer omits it
         # and the model-credential row then reads byte-for-byte as before.
         "failover": _failover_fact(root, model),
+        # ADDITIVE ON THE WIRE (2026-11-13): an older viewer ignores it; this
+        # build reads its ABSENCE (an older peer) as ``peer_too_old`` on the
+        # browser row, never as "no browser".
+        "browser": browser_fact(),
     }
+
+
+def skills_fact(root: Path) -> dict[str, Any] | None:
+    """This device's user skills as the skill sync sees them; ``None`` if unreadable."""
+    try:
+        from local_operator.network import skillsync
+
+        return {"skills": skillsync.skill_state(root)["skills"]}
+    except Exception:  # noqa: BLE001 — a fact is not a gate; the row reads None as unknown
+        return None
+
+
+def skills_row(
+    member: Any,
+    facts: Mapping[str, Any],
+    *,
+    peer_label: str,
+    local: Sequence[Any],
+    own_device_id: str,
+) -> dict[str, Any]:
+    """(k) Does the peer hold this device's own skills, current? Informational.
+
+    ``local`` is this device's ``skillsync.authored_skills`` (the only skills it
+    sends); ``facts["skills"]`` is the peer's own ``skill_state``. Every skill
+    that will not travel is NAMED with its reason, so an oversize skill is never
+    a silent absence on the far side.
+    """
+    fact = facts.get("skills")
+    held_in = fact.get("skills") if isinstance(fact, Mapping) else None
+    if not isinstance(held_in, Mapping):
+        return _capability_row(
+            device_id=member.device_id,
+            device_name=peer_label,
+            capability=CAPABILITY_SKILLS,
+            ok=False,
+            code=CODE_UNKNOWN,
+            detail="the peer's answer did not carry its skills (it may predate skill sync)",
+            # The remedy push/tick/state already give for an old peer, so this
+            # row is not the one surface that leaves the operator guessing
+            # (QA round 1, Q-4).
+            remedies=[f"run `lop-update` on {peer_label}, then re-check"],
+            source=SOURCE_UNKNOWN,
+        )
+    current: list[str] = []
+    kept: list[str] = []
+    shadowed: list[str] = []
+    missing: list[str] = []
+    untravelled: list[str] = []
+    for skill in local:
+        name = str(getattr(skill, "name", "") or "")
+        if getattr(skill, "status", "") != "ready":
+            untravelled.append(f"{name} ({getattr(skill, 'reason', '') or 'cannot travel'})")
+            continue
+        held = held_in.get(name)
+        held = held if isinstance(held, Mapping) else None
+        if held is not None and str(held.get("tree_hash") or "") == getattr(skill, "tree_hash", ""):
+            current.append(name)
+        elif held is not None and held.get("mirror_wins"):
+            # The peer owns this name elsewhere, yet this device's EARLIER copy
+            # still sits in its skills/<name> and wins there; "kept as its own"
+            # would be false (QA round 3, Q-8). Counted as kept for the sums.
+            shadowed.append(name)
+        elif held is not None and (
+            not held.get("origin") or held.get("origin") != own_device_id or held.get("edited")
+        ):
+            kept.append(name)
+        else:
+            missing.append(name)
+    sendable = len(current) + len(kept) + len(shadowed) + len(missing)
+    parts = [f"{peer_label} holds {len(current)} of this device's {sendable} sendable skills"]
+    if kept:
+        parts.append(f"kept as its own: {_name_list(kept)}")
+    if shadowed:
+        parts.append(
+            f"has its own {_name_list(shadowed)}, but an earlier synced copy still wins "
+            f"there; delete skills/<name> on {peer_label} to use its own"
+        )
+    if missing:
+        parts.append(f"not synced yet: {_name_list(missing)}")
+    if untravelled:
+        parts.append(f"will not travel: {'; '.join(untravelled)}")
+    return _capability_row(
+        device_id=member.device_id,
+        device_name=peer_label,
+        capability=CAPABILITY_SKILLS,
+        ok=not missing,
+        code="" if not missing else CODE_SKILLS_NOT_SYNCED,
+        detail="; ".join(parts),
+        remedies=(
+            [
+                "the mesh syncs skills about once a minute; to do it now, run "
+                f"`lop network skills push --peer {peer_label}`"
+            ]
+            if missing
+            else []
+        ),
+        source=SOURCE_PEER,
+        observed={
+            "current": current,
+            "kept": kept,
+            "shadowed": shadowed,
+            "missing": missing,
+            "untravelled": [
+                str(getattr(s, "name", "")) for s in local if getattr(s, "status", "") != "ready"
+            ],
+        },
+    )
 
 
 def _failover_fact(root: Path, model: Mapping[str, Any]) -> dict[str, Any] | None:
@@ -3847,6 +4004,179 @@ def tooling_row(member: Any, facts: Mapping[str, Any], *, peer_label: str) -> di
     )
 
 
+def browser_fact() -> dict[str, Any]:
+    """This device's browser hosting, as facts (see ``node_host.browser_fact``).
+
+    Lazy import and a defensive wrapper: the readiness op must answer even if the
+    browser module cannot load, and an unreadable fact says ``unknown``.
+    """
+    try:
+        from local_operator.browser_bridge.node_host import browser_fact as _fact
+
+        return _fact()
+    except Exception as error:  # noqa: BLE001 - a fact that cannot be read says so
+        return {"host": "unknown", "error": str(error)[:200]}
+
+
+def browser_row(member: Any, facts: Mapping[str, Any], *, peer_label: str) -> dict[str, Any]:
+    """(l) Would a session offloaded to this peer get a ``browser`` tool?
+
+    Non-gating equipment (``NON_GATING_EQUIPMENT``). Four readings:
+
+    * ``n/a`` — a user's desktop app or extension serves this device; the
+      node-managed browser is never installed on a user's machine;
+    * ``ok`` — the node-managed Chrome unit is active, the bridge daemon healthy
+      and the extension paired;
+    * ``warn`` not installed — the remedy names the command AND that it needs
+      the operator's authorisation (installing software on a node is theirs to
+      decide, so the row never reads as an instruction to go and do it);
+    * ``warn`` installed but unusable (unit down, daemon down, unpaired) — the
+      remedy is ``--repair``, which re-applies only what is no longer in place.
+    """
+    fact = facts.get("browser")
+    if not isinstance(fact, Mapping):
+        # Worded like the neighbouring rows for a missing fact (tooling,
+        # operator_authority): every 0.102.x peer DOES answer readiness and
+        # simply predates this one check, so "predates readiness reporting"
+        # was untrue of it (round 1, U6). The update remedy stays.
+        return _capability_row(
+            device_id=member.device_id,
+            device_name=peer_label,
+            capability=CAPABILITY_BROWSER,
+            ok=False,
+            code=CODE_UNKNOWN,
+            detail="the peer's answer did not carry this check",
+            remedies=[f"update lop on {peer_label}, then re-check"],
+            source=SOURCE_UNKNOWN,
+        )
+    host = str(fact.get("host") or "")
+    # Every n/a detail below states WHY without repeating "n/a": the state
+    # column already prints it (round 1, U10).
+    if host == "user":
+        return _capability_row(
+            device_id=member.device_id,
+            device_name=peer_label,
+            capability=CAPABILITY_BROWSER,
+            ok=True,
+            detail=(
+                f"a user's browser host (desktop app or extension) serves {peer_label}; "
+                "the node-managed browser is for headless nodes only"
+            ),
+            source=SOURCE_PEER,
+            observed={"not_applicable": True, "host": "user"},
+        )
+    if host in ("unsupported_platform", "unsupported_distro"):
+        # A host setup would refuse reads n/a, never "not installed": that
+        # row's remedy is the very command that refuses (round 1, R1-6).
+        if host == "unsupported_distro":
+            detail = (
+                f"the node-managed browser needs a dnf/rpm distribution, and {peer_label} "
+                "is not one"
+            )
+        else:
+            platform_name = _safe_text(str(fact.get("platform") or "not Linux x86_64"), limit=60)
+            detail = (
+                f"the node-managed browser supports Linux x86_64 only, and {peer_label} is "
+                f"{platform_name}; other devices use the extension or the desktop app"
+            )
+        return _capability_row(
+            device_id=member.device_id,
+            device_name=peer_label,
+            capability=CAPABILITY_BROWSER,
+            ok=True,
+            detail=detail,
+            source=SOURCE_PEER,
+            observed={"not_applicable": True, "host": host},
+        )
+    if host == "node":
+        unit_active = bool(fact.get("unit_active"))
+        daemon_healthy = bool(fact.get("daemon_healthy"))
+        paired = bool(fact.get("paired"))
+        observed = {
+            "host": "node",
+            "unit_active": unit_active,
+            "unit_state": str(fact.get("unit_state") or ""),
+            "daemon_healthy": daemon_healthy,
+            "paired": paired,
+        }
+        chrome = str(fact.get("chrome_version") or "").removeprefix("Google ").strip()
+        extension = str(fact.get("extension_version") or "")
+        if unit_active and daemon_healthy and paired:
+            return _capability_row(
+                device_id=member.device_id,
+                device_name=peer_label,
+                capability=CAPABILITY_BROWSER,
+                ok=True,
+                detail=(
+                    f"{chrome or 'Chrome'} (node-managed, headless), extension {extension} paired"
+                ),
+                source=SOURCE_PEER,
+                observed=observed,
+            )
+        problems: list[str] = []
+        if not unit_active:
+            problems.append(f"its Chrome unit is {observed['unit_state'] or 'not active'}")
+        if not daemon_healthy:
+            problems.append("its browser bridge daemon is not answering")
+        if not paired:
+            problems.append("its extension is not paired")
+        return _capability_row(
+            device_id=member.device_id,
+            device_name=peer_label,
+            capability=CAPABILITY_BROWSER,
+            ok=False,
+            code=CODE_UNUSABLE,
+            detail=(
+                f"{peer_label} has the node-managed browser installed but unusable: "
+                + "; ".join(problems)
+                + ": sessions there have no browser tool"
+            ),
+            remedies=[
+                f"on {peer_label}: "
+                "`lop browser setup --node --repair --authorised-by '<who, when>'`"
+            ],
+            source=SOURCE_PEER,
+            observed=observed,
+        )
+    if host == "none":
+        return _capability_row(
+            device_id=member.device_id,
+            device_name=peer_label,
+            capability=CAPABILITY_BROWSER,
+            ok=False,
+            code=CODE_NOT_INSTALLED,
+            detail=f"sessions on {peer_label} have no browser tool",
+            remedies=[
+                f"on {peer_label}: `lop browser setup --node --authorised-by '<who, when>'` "
+                "(operator authorisation required; guide://browser 'Headless nodes')"
+            ],
+            source=SOURCE_PEER,
+            observed={"host": "none"},
+        )
+    return _capability_row(
+        device_id=member.device_id,
+        device_name=peer_label,
+        capability=CAPABILITY_BROWSER,
+        ok=False,
+        code=CODE_UNKNOWN,
+        detail=(
+            f"{peer_label} could not read its browser hosting "
+            f"({fact.get('error') or 'no answer'})"
+        ),
+        remedies=[f"on {peer_label}: run `lop browser setup --node --dry-run` and re-check"],
+        source=SOURCE_PEER,
+        observed={"host": host or "unknown"},
+    )
+
+
+def _peer_too_old_rows_for(member: Any, capability: str) -> dict[str, Any]:
+    """The ``peer_too_old`` row for ONE capability a peer's answer lacked."""
+    for row in _peer_too_old_rows(member):
+        if row["capability"] == capability:
+            return row
+    raise ValueError(capability)  # pragma: no cover - capability is in PEER_SIDE_CHECKS
+
+
 def _holder_names(placement: Mapping[str, Any]) -> list[str]:
     names: list[str] = []
     for row in placement.get("holders") or []:
@@ -5837,6 +6167,21 @@ def _peer_checks(
     rows.append(git_row(member, facts, peer_label=peer_label, viewer=viewer))
     rows.append(repository_row(member, facts, peer_label=peer_label, repository=repository))
     rows.append(mcp_servers_row(member, facts, peer_label=peer_label))
+    try:
+        from local_operator.network import skillsync
+
+        own_skills: list[Any] = list(skillsync.authored_skills(server.root))
+    except Exception:  # noqa: BLE001 — this device's own skills unreadable: compare none
+        own_skills = []
+    rows.append(
+        skills_row(
+            member,
+            facts,
+            peer_label=peer_label,
+            local=own_skills,
+            own_device_id=str(getattr(getattr(server, "identity", None), "device_id", "") or ""),
+        )
+    )
     credential_row = model_credential_row(member, facts, viewer=viewer, peer_label=peer_label)
     _attach_failover(credential_row, facts, server=server)
     rows.append(credential_row)
@@ -5866,6 +6211,7 @@ def _peer_checks(
         )
         selected_row.update(row)
     rows.append(tooling_row(member, facts, peer_label=peer_label))
+    rows.append(browser_row(member, facts, peer_label=peer_label))
     rows.append(resilience_row(member, facts, peer_label=peer_label))
     instructions_row = custom_instructions_row(
         member,
@@ -6058,7 +6404,7 @@ def row_state(row: Mapping[str, Any]) -> str:
     """
     observed = row.get("observed")
     observed = observed if isinstance(observed, Mapping) else {}
-    if observed.get("out_of_scope"):
+    if observed.get("out_of_scope") or observed.get("not_applicable"):
         return ROW_STATE_NOT_APPLICABLE
     if row.get("ok"):
         return ROW_STATE_OK

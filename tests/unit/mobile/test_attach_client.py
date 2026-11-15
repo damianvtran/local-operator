@@ -1787,3 +1787,288 @@ async def test_a_reset_with_no_announcement_is_still_a_reset() -> None:
     await asyncio.wait_for(pump, timeout=5)
 
     assert disconnected == ["owner connection reset"], disconnected
+
+
+# ---------------------------------------------------------------------------
+# bind_failed carries its cause (2026-11-12)
+# ---------------------------------------------------------------------------
+#
+# A coordinator on a mesh node was refused with "owner could not prepare this
+# view" and no cause: the client dropped the owner's message and the owner's
+# traceback lived only in a rotating shared log. These pin both halves — the
+# viewer surfaces the (sanitised, redacted) message, and the owner keeps a
+# bounded per-session record.
+
+
+async def _bind_fail_then_drop(
+    r: RuntimeServer, messages: list[BaseException] | None, *, raw: dict[str, Any] | None = None
+) -> None:
+    """On the owner's loop: announce each failure (or send ``raw``), then drop.
+
+    The real emitter (``_announce_bind_failure``) and the real drop, in the order
+    ``_serve_frontend_sync``'s failure branch runs them.
+    """
+    conn = next(c for c in r._clients.values() if c.kind == "attach")
+
+    async def run() -> None:
+        if raw is not None:
+            await r._send_to(conn, raw)
+        for exc in messages or ():
+            await r._announce_bind_failure(conn, exc)
+        r._drop_client(conn, reason="frontend bind failed")
+
+    await _on_runtime_loop(r, run())
+
+
+async def _await_disconnect(disconnected: list[str]) -> None:
+    deadline = asyncio.get_running_loop().time() + _STRUCTURAL_WAIT_S
+    while asyncio.get_running_loop().time() < deadline and not disconnected:
+        await asyncio.sleep(0.05)
+
+
+@pytest.mark.asyncio
+async def test_bind_failed_reason_names_the_owner_cause(config: Path) -> None:
+    handle = FakeHandle("sess-a")
+    r = RuntimeServer(handle, kind="tui")
+    r.start()
+    try:
+        record = await _wait_record()
+        disconnected: list[str] = []
+        client = AttachClient(lambda p: None, disconnected.append)
+        await client.connect(record, "sess-a")
+        secret = "ghp_" + "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8"
+        await _bind_fail_then_drop(
+            r,
+            [RuntimeError(f"profile store locked\x1b[2J\nby pid 4242 token {secret}" + "x" * 900)],
+        )
+        await _await_disconnect(disconnected)
+        assert len(disconnected) == 1, disconnected
+        reason = disconnected[0]
+        assert reason.startswith("owner could not prepare this view: profile store locked"), reason
+        assert "by pid 4242" in reason
+        assert reason.endswith("; the session is alive — reconnect to retry"), reason
+        # Untrusted text: no control bytes, no line break, no credential, bounded.
+        assert "\x1b" not in reason and "\n" not in reason
+        assert secret not in reason
+        detail = reason.split(": ", 1)[1].rsplit("; the session is alive", 1)[0]
+        assert len(detail) <= attach_client._BIND_FAILED_DETAIL_LIMIT
+    finally:
+        r.close()
+
+
+@pytest.mark.asyncio
+async def test_bind_failed_without_message_keeps_the_old_reason(config: Path) -> None:
+    """An older owner sends the op with no ``message``: the sentence is unchanged."""
+    handle = FakeHandle("sess-a")
+    r = RuntimeServer(handle, kind="tui")
+    r.start()
+    try:
+        record = await _wait_record()
+        disconnected: list[str] = []
+        client = AttachClient(lambda p: None, disconnected.append)
+        await client.connect(record, "sess-a")
+        await _bind_fail_then_drop(r, None, raw={"op": "bind_failed"})
+        await _await_disconnect(disconnected)
+        assert disconnected == [attach_client.BIND_FAILED_REASON], disconnected
+        # Blank/non-string messages are the same "absent" case.
+        assert attach_client.bind_failed_reason("  ") == attach_client.BIND_FAILED_REASON
+        assert attach_client.bind_failed_reason(None) == attach_client.BIND_FAILED_REASON
+        assert attach_client.bind_failed_reason(42) == attach_client.BIND_FAILED_REASON
+    finally:
+        r.close()
+
+
+@pytest.mark.asyncio
+async def test_owner_records_bind_failures_bounded(config: Path, tmp_path: Path) -> None:
+    """Each bind failure lands in ``bind-failures.json``; only the newest N are kept."""
+    from types import SimpleNamespace
+
+    from local_operator.session.runtime import journal
+
+    conv = tmp_path / "conv" / "sess-a"
+    conv.mkdir(parents=True)
+    handle = FakeHandle("sess-a")
+    handle._session = SimpleNamespace(  # type: ignore[attr-defined]
+        session_id="sess-a", _transcript=SimpleNamespace(directory=conv)
+    )
+    r = RuntimeServer(handle, kind="tui")
+    r.start()
+    try:
+        record = await _wait_record()
+        disconnected: list[str] = []
+        client = AttachClient(lambda p: None, disconnected.append)
+        await client.connect(record, "sess-a")
+        secret = "ghp_" + "Z9y8X7w6V5u4T3s2R1q0P9o8N7m6L5k4J3i2"
+        failures: list[BaseException] = []
+        for i in range(journal.BIND_FAILURES_KEEP + 2):
+            try:
+                raise ValueError(f"bind failure {i} with {secret}")
+            except ValueError as exc:  # a real traceback, as the bind path has
+                failures.append(exc)
+        await _bind_fail_then_drop(r, failures)
+        await _await_disconnect(disconnected)
+
+        path = conv / journal.BIND_FAILURES_NAME
+        data = json.loads(path.read_text())
+        assert data["kind"] == journal.BIND_FAILURES_KIND
+        assert data["session_id"] == "sess-a"
+        rows = data["failures"]
+        assert len(rows) == journal.BIND_FAILURES_KEEP
+        # Newest last; the two oldest were dropped.
+        assert [row["message"].split(" with ")[0] for row in rows] == [
+            f"bind failure {i}" for i in range(2, journal.BIND_FAILURES_KEEP + 2)
+        ]
+        for row in rows:
+            assert row["exc_type"] == "ValueError"
+            assert isinstance(row["ts"], float)
+            assert "Traceback" in row["traceback"] and "ValueError" in row["traceback"]
+        assert secret not in path.read_text()
+        assert (path.stat().st_mode & 0o777) == 0o600
+        assert journal.read_bind_failures(conv) == rows
+    finally:
+        r.close()
+
+
+class _UnprintableError(RuntimeError):
+    """An exception whose ``str()`` itself raises (bad args, a broken override).
+
+    Third-party and unpickled exceptions do this. ``str(exc)`` on the failure
+    path must not be what stops the owner dropping the connection.
+    """
+
+    def __str__(self) -> str:
+        raise ValueError("broken __str__")
+
+
+@pytest.mark.asyncio
+async def test_unprintable_bind_failure_still_refuses_and_drops(config: Path) -> None:
+    """Review M1 / QA Q1: a raising ``__str__`` must not skip the drop.
+
+    Drives the REAL failure branch of ``_serve_frontend_sync`` (announce, then
+    drop). Before the fix ``str(exc)`` ran outside the announce's guard, the
+    announce raised, ``_drop_client`` never ran, and the viewer sat on a dead,
+    still-registered connection until its sync timeout.
+    """
+
+    handle = FakeHandle("sess-a")
+    r = RuntimeServer(handle, kind="tui")
+    r.start()
+    try:
+        record = await _wait_record()
+        disconnected: list[str] = []
+        client = AttachClient(lambda p: None, disconnected.append)
+        await client.connect(record, "sess-a")
+        conn = next(c for c in r._clients.values() if c.kind == "attach")
+
+        def subscribe_frontend(*_args: Any, **_kwargs: Any) -> Any:
+            raise _UnprintableError("unprintable")
+
+        await _on_runtime_loop(r, r._serve_frontend_sync(conn, {}, subscribe_frontend))
+        await _await_disconnect(disconnected)
+        assert disconnected, "viewer was never refused"
+        reason = disconnected[0]
+        assert reason.startswith("owner could not prepare this view"), reason
+        # The fallback names the exception type rather than its (unprintable) text.
+        assert "_UnprintableError" in reason, reason
+        assert conn not in r._clients.values(), "owner kept the dead connection registered"
+    finally:
+        r.close()
+
+
+@pytest.mark.asyncio
+async def test_owner_masks_ledger_secret_before_wire_and_record(
+    config: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review m2: the OWNER masks a ledger-only secret, not just the viewer.
+
+    The value has no credential shape, so the viewer's ``scrub_shapes`` cannot
+    mask it; only the owner's retrieved-secret ledger pass can. Asserted on the
+    frame the owner hands to ``_send_to`` and on the record it writes.
+    """
+    from types import SimpleNamespace
+
+    from local_operator.secrets import runtime as secrets_runtime
+    from local_operator.session.runtime import journal
+
+    ledger = secrets_runtime._RedactionLedger()
+    monkeypatch.setattr(secrets_runtime, "_LEDGER", ledger)
+    # Shape-less on purpose: no credential prefix or entropy pattern, so only
+    # the ledger pass can mask it. Built from parts so no literal sits here.
+    secret = "-".join(["ledger", "only", "mango", "tangerine", "41"])
+    ledger.register(secret)
+
+    conv = tmp_path / "conv" / "sess-a"
+    conv.mkdir(parents=True)
+    handle = FakeHandle("sess-a")
+    handle._session = SimpleNamespace(  # type: ignore[attr-defined]
+        session_id="sess-a", _transcript=SimpleNamespace(directory=conv)
+    )
+    r = RuntimeServer(handle, kind="tui")
+    sent: list[dict[str, Any]] = []
+    real_send = r._send_to
+
+    async def capture(conn: Any, frame: dict[str, Any]) -> Any:
+        if frame.get("op") == "bind_failed":
+            sent.append(frame)
+        return await real_send(conn, frame)
+
+    monkeypatch.setattr(r, "_send_to", capture)
+    r.start()
+    try:
+        record = await _wait_record()
+        disconnected: list[str] = []
+        client = AttachClient(lambda p: None, disconnected.append)
+        await client.connect(record, "sess-a")
+        try:
+            raise RuntimeError(f"store refused key {secret}\x1b[2J\nsecond line")
+        except RuntimeError as exc:
+            failure = exc
+        await _bind_fail_then_drop(r, [failure])
+        await _await_disconnect(disconnected)
+
+        assert len(sent) == 1, sent
+        assert secret not in sent[0]["message"], sent[0]
+        assert "[redacted]" in sent[0]["message"], sent[0]
+        raw = (conv / journal.BIND_FAILURES_NAME).read_text()
+        assert secret not in raw
+        (row,) = journal.read_bind_failures(conv)
+        assert "[redacted]" in row["message"] and "[redacted]" in row["traceback"]
+        # QA Q2: the record's message is one sanitised line, like the reason.
+        assert "\n" not in row["message"] and "\x1b" not in row["message"], row
+        assert disconnected and secret not in disconnected[0], disconnected
+    finally:
+        r.close()
+
+
+@pytest.mark.asyncio
+async def test_a_reset_after_a_cause_bearing_bind_failed_keeps_the_cause() -> None:
+    """A reset after a ``bind_failed`` that names its cause must not erase it.
+
+    Convergence of this PR with #3797: ``_ANNOUNCED_REASONS`` matches exact
+    strings, and the cause makes the bind-failure reason dynamic, so the RST that
+    follows the owner's ``_drop_client`` replaced the cause with
+    ``"owner connection reset"``. Same sequence as the retiring witness above.
+    """
+    disconnected: list[str] = []
+    client = AttachClient(lambda p: None, disconnected.append)
+    reader = asyncio.StreamReader()
+    client._reader = reader
+    # ``bind_failed`` records its reason in a pump local, so nothing on the
+    # client observes its consumption. A sentinel ``aside_delta`` queued behind
+    # it does: the pump reads frames in order, so the sentinel's sink firing
+    # proves ``bind_failed`` was already consumed (the delta leaves ``reason``
+    # untouched, as the no-announcement control below shows).
+    consumed: list[str] = []
+    client._delta_sinks[1] = consumed.append
+    pump = asyncio.create_task(client._pump())
+
+    _feed(reader, {"op": "bind_failed", "message": "profile store locked"})
+    _feed(reader, {"op": "aside_delta", "req": 1, "data": {"delta": "sentinel"}})
+    # The reset lands only after the frame has been consumed.
+    await _wait_until(lambda: consumed == ["sentinel"])
+    reader.set_exception(ConnectionResetError("peer reset"))
+    await asyncio.wait_for(pump, timeout=5)
+
+    expected = attach_client.bind_failed_reason("profile store locked")
+    assert expected.startswith("owner could not prepare this view: profile store locked")
+    assert disconnected == [expected], disconnected

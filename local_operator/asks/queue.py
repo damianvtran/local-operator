@@ -63,7 +63,11 @@ from local_operator.harness.message_types import (
     ASK_RESPONSE_MESSAGE_TYPE,
     ASK_TIMEOUT_MESSAGE_TYPE,
 )
-from local_operator.harness.types import CustomMessage, ImageContent
+from local_operator.harness.types import (
+    CustomMessage,
+    ImageContent,
+    ask_command_problem,
+)
 from local_operator.team_bridge.ask_issuance import bridge_scope_digest
 
 logger = logging.getLogger(__name__)
@@ -3117,7 +3121,45 @@ def _question_shape(question: Any) -> dict[str, Any]:
         # always carried, and every ask without a set keeps the exact prior
         # shape, so existing logs fold byte-identically. Never emit it as None.
         shape["recommended_all"] = list(recommended_all)
+    command = _carried_command(raw, shape)
+    if command is not None:
+        # The suggested terminal command (`AskQuestion.command`) and the device
+        # it is meant for, added ONLY when present — same rule as
+        # `bridge`/`recommended_all`, so every ask without one keeps the exact
+        # prior shape and existing logs fold byte-identically. Both ride to the
+        # desktop/fleet frames unchanged. The target is ALWAYS stamped with the
+        # command, so a surface deciding whether to offer one-click Run never
+        # has to guess a default; anything but an explicit "user" reads as
+        # "agent" (the tool's own default).
+        shape["command"] = command
+        shape["command_target"] = "user" if raw.get("command_target") == "user" else "agent"
     return shape
+
+
+def _carried_command(raw: Mapping[str, Any], shape: Mapping[str, Any]) -> str | None:
+    """The command a stored row may carry for ``raw``, or ``None``.
+
+    Two refusals on top of "absent":
+
+    * A BRIDGE row (another team's agent asking through the carriage — the same
+      structural reading as ``tui/app._is_bridge_ask_row``: a ``bridge`` block
+      or a carriage ``question_id``) never carries one. The desktop offers the
+      command as a one-click terminal action, and the operator must not be
+      handed a command by an agent outside their own team.
+    * A value that fails ``ask_command_problem`` is dropped rather than stored.
+      The tool's validator already refused it on the normal path; this covers a
+      question that reaches the queue as a plain mapping without passing
+      ``AskQuestion``, so the row a surface renders is always within the rule.
+    """
+    command = raw.get("command")
+    if not isinstance(command, str):
+        return None
+    if shape.get("bridge") or str(shape.get("question_id") or "").strip():
+        return None
+    command = command.strip()
+    if ask_command_problem(command) is not None:
+        return None
+    return command
 
 
 __all__ = ["AskQueue"]

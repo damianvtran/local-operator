@@ -46,6 +46,12 @@ SAFE_DEFAULTS = {
     ("guardrails/evidence.py", "_names_full_path"): (
         "HOME spells the ~-form of a target to compare against call text"
     ),
+    # The killed call's spawn env may lack HOME, and the resolver still needs a
+    # root for ~. The follow-up git runs by --git-dir with no cwd argument.
+    ("guardrails/interrupted_worktree_add.py", "settle_after_kill"): (
+        "HOME expands ~ while re-resolving the killed call's own git worktree add "
+        "targets; static resolution only, never a spawn cwd or session metadata"
+    ),
     ("harness/loop.py", "_guardrail_outcome"): (
         "execution-time cwd for inspecting an already-planned call; "
         "does not write startup/session metadata or erase spawn omission"

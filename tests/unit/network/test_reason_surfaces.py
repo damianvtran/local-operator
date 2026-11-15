@@ -94,6 +94,26 @@ _DECLARED_RAW_READS: dict[tuple[str, str, str], tuple[int, str]] = {
         1,
         "the local browser daemon's own transport error, in brackets after a sentence",
     ),
+    # `lop browser setup/uninstall --node` (browser_bridge/node_host.py). The module
+    # imports the mesh only to ask "is this device a member?"; none of these values
+    # comes from a peer or relay. ``_wait_for_code`` reads the SAME local pairing
+    # answer as ``_browser_pair`` above (``browser_install.request_pairing_codes``
+    # on 127.0.0.1) into a step's evidence; the refusal ``reason`` is this
+    # machine's own user-machine detection prose; a step ``detail`` is
+    # node_host's own technical evidence (package versions, paths), shown
+    # verbatim by design inside a keyed row sentence.
+    ("local_operator/browser_bridge/node_host.py", "_Plan._wait_for_code", "reason"): (
+        1,
+        "the local browser daemon's pairing answer, inside a step's evidence",
+    ),
+    ("local_operator/cli.py", "_node_refusal_line", "reason"): (
+        1,
+        "this machine's own user-machine detection prose, in a keyed refusal sentence",
+    ),
+    ("local_operator/cli.py", "_node_step_line", "detail"): (
+        1,
+        "node_host's own step evidence for this machine, in a keyed row sentence",
+    ),
     # The delegated content layer's per-pad row — the same class of prose as
     # ``_cleanup_row`` above: ``merged-clean clone past the window`` /
     # ``stale output past the window``, composed by
@@ -393,6 +413,25 @@ _DECLARED_RAW_READS: dict[tuple[str, str, str], tuple[int, str]] = {
     ("local_operator/network/cli.py", "_cmd_mcp", "reason"): (
         2,
         "the peer's own conflict and refusal sentences, printed verbatim",
+    ),
+    # The skill bundle (network/skillsync.py) mirrors the MCP bundle: every ``reason``
+    # it carries is a composed sentence, never a machine token -- the receiver's
+    # ``_refused``/``_decide``/``_ownership_reason`` prose, the sender's own "kept"
+    # sentences, a scan's ``LocalSkill.reason``, or an exception's message.
+    # ``_push_locked`` copies the peer's sentence into the per-peer outcome row;
+    # ``_describe`` and ``_cmd_skills`` (push report + local listing) print it.
+    ("local_operator/network/skillsync.py", "_push_locked", "reason"): (
+        1,
+        "carries the peer's own refusal/conflict sentence into the outcome row verbatim",
+    ),
+    ("local_operator/network/skillsync.py", "_describe", "reason"): (
+        1,
+        "the peer's or this device's refusal sentence, rendered as ``name (reason)``",
+    ),
+    ("local_operator/network/cli.py", "_cmd_skills", "reason"): (
+        2,
+        "the push report's per-skill sentence and the local listing's composed "
+        "will-not-travel sentence, printed verbatim",
     ),
     # The MCP credential repair verb reads its OWN skip vocabulary. The rows come
     # from ``placement.grant_key_set`` and this handler's ``local-only`` check in

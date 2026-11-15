@@ -1,0 +1,15 @@
+{
+  "tunnel.status.create.conflict_unmatched": "Radient के अनुसार इस अनुरोध के लिए एक टनल पहले से मौजूद है, लेकिन इस लॉगिन की टनल सूची में कोई एक मेल खाता रिकॉर्ड नहीं है। lop tunnel list देखें, फिर lop tunnel connect --tunnel-id <id> से उसे जोड़ें।",
+  "tunnel.status.gateway.listening_http_status": "रिले गेटवे पोर्ट 127.0.0.1:{port} पर कुछ सुन रहा है, लेकिन उसने स्वास्थ्य जाँच का जवाब HTTP {status} से दिया: हो सकता है कोई दूसरा प्रोग्राम इस पोर्ट का उपयोग कर रहा हो, या गेटवे ठीक से काम नहीं कर रहा। दोबारा इंस्टॉल करने से कोई फ़ायदा नहीं होगा।",
+  "tunnel.status.gateway.listening_timed_out": "स्थानीय रिले गेटवे 127.0.0.1:{port} पर सुन रहा है, लेकिन उसकी स्वास्थ्य जाँच का जवाब समय पर नहीं आया; दोबारा इंस्टॉल करने से कोई फ़ायदा नहीं होगा।",
+  "tunnel.status.gateway.listening_unreadable": "स्थानीय रिले गेटवे 127.0.0.1:{port} पर सुन रहा है, लेकिन उसकी स्वास्थ्य जाँच का जवाब पढ़ा नहीं जा सका; दोबारा इंस्टॉल करने से कोई फ़ायदा नहीं होगा।",
+  "tunnel.status.last_exit.at": "कनेक्टर पिछली बार बंद हुआ: {label} ({at} पर)",
+  "tunnel.status.last_exit.plain": "कनेक्टर पिछली बार बंद हुआ: {label}",
+  "tunnel.status.login.deferred_retried": "लॉगिन: रीफ़्रेश स्थगित — अपने-आप फिर से कोशिश होगी।",
+  "tunnel.status.login.unchecked": "लॉगिन: जाँच नहीं हो सकी (रीफ़्रेश Radient तक नहीं पहुँच सका)।",
+  "tunnel.status.requests.heading": "अनुरोध (पिछले {window}): {tally}",
+  "tunnel.status.requests.no_response": "कोई जवाब नहीं",
+  "tunnel.status.server_unavailable.label": "Radient सर्वर त्रुटि",
+  "tunnel.status.server_unavailable.relay": "Radient ने इस कंप्यूटर की रिले अनुमति जाँच का जवाब एक अस्थायी सर्वर त्रुटि से दिया। लॉगिन या इस कंप्यूटर में कोई समस्या नहीं है; Radient के ठीक होते ही यह अपने-आप दोबारा अनुमति ले लेता है।",
+  "tunnel.status.server_unavailable.terminal": "Radient ने कनेक्टर की अनुमति जाँच का जवाब एक अस्थायी सर्वर त्रुटि (HTTP 5xx) से दिया, इसलिए ग़लती न लॉगिन की है और न इस कंप्यूटर की। यह हर 10 सेकंड में फिर से कोशिश करता है और Radient के ठीक होते ही अपने-आप दोबारा अनुमति ले लेता है; किसी स्थानीय कमांड की ज़रूरत नहीं है।"
+}

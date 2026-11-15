@@ -1,0 +1,67 @@
+{
+  "tunnel.status.create.conflict_unmatched": {
+    "role": "lop tunnel create failure sentence",
+    "tone": "Plain, actionable",
+    "note": "Printed when Radient answers 409 (already exists) to a retried create and no single tunnel on this login matches the pending request. Commands (lop …), 127.0.0.1:{port}, HTTP, 5xx and <id> stay verbatim."
+  },
+  "tunnel.status.gateway.listening_http_status": {
+    "role": "lop tunnel status connector detail",
+    "tone": "Plain, diagnostic",
+    "note": "The gateway port answered its health route with a non-200 HTTP status. {port} is a TCP port; {status} is an HTTP status code such as 500 (both pre-formatted). Commands (lop …), 127.0.0.1:{port}, HTTP, 5xx and <id> stay verbatim."
+  },
+  "tunnel.status.gateway.listening_timed_out": {
+    "role": "lop tunnel status connector detail",
+    "tone": "Plain, diagnostic",
+    "note": "The gateway port accepted a connection but its health route did not answer in time. {port} is a TCP port number (pre-formatted, no grouping). Commands (lop …), 127.0.0.1:{port}, HTTP, 5xx and <id> stay verbatim."
+  },
+  "tunnel.status.gateway.listening_unreadable": {
+    "role": "lop tunnel status connector detail",
+    "tone": "Plain, diagnostic",
+    "note": "The gateway port answered with something that is not a health payload. {port} is a TCP port number (pre-formatted). Commands (lop …), 127.0.0.1:{port}, HTTP, 5xx and <id> stay verbatim."
+  },
+  "tunnel.status.last_exit.at": {
+    "role": "lop tunnel status row",
+    "tone": "Terse label: value",
+    "note": "{label} is a short reason label; {at} is a clock time (HH:MM) or date and time (YYYY-MM-DD HH:MM), already formatted. History of the connector's last retrying exit, which may be old."
+  },
+  "tunnel.status.last_exit.plain": {
+    "role": "lop tunnel status row",
+    "tone": "Terse label: value",
+    "note": "{label} is an already-localized short reason label (e.g. 'Radient server error'). Used when the exit time is unknown."
+  },
+  "tunnel.status.login.deferred_retried": {
+    "role": "lop tunnel status Login row",
+    "tone": "Terse label: state",
+    "note": "Shown when a sign-in refresh was deferred and the connector row above already explains the wait. 'Login:' is the row label; keep it as a label."
+  },
+  "tunnel.status.login.unchecked": {
+    "role": "lop tunnel status Login row",
+    "tone": "Terse label: state",
+    "note": "The login check could not run (network). Must never read as an expired sign-in. 'Login:' is the row label."
+  },
+  "tunnel.status.requests.heading": {
+    "role": "Diagnostic heading in lop tunnel status / lop mobile status",
+    "tone": "Terse",
+    "note": "{window} is how many request-log entries were read (pre-formatted integer); {tally} is a machine tally such as '2xx=4 5xx=1' and stays verbatim."
+  },
+  "tunnel.status.requests.no_response": {
+    "role": "Status cell in a request-log row",
+    "tone": "Terse",
+    "note": "Shown in place of an HTTP status for a request that ended without any response (what the phone reports as Not answering)."
+  },
+  "tunnel.status.server_unavailable.label": {
+    "role": "Short reason label",
+    "tone": "Terse noun phrase",
+    "note": "Label for reason code server_unavailable: Radient answered with HTTP 5xx. Shown after 'Last connector exit:' and in status rows."
+  },
+  "tunnel.status.server_unavailable.relay": {
+    "role": "Phone-facing 503 body detail",
+    "tone": "Reassuring, factual",
+    "note": "Shown on the phone when the computer's gateway refuses relayed requests because Radient answered with a server error. Names no command (the phone cannot run one)."
+  },
+  "tunnel.status.server_unavailable.terminal": {
+    "role": "lop tunnel status / desktop connector detail",
+    "tone": "Reassuring, factual",
+    "note": "The connector's authorization check got HTTP 5xx from Radient. Self-clearing; must not suggest signing in again. Commands (lop …), 127.0.0.1:{port}, HTTP, 5xx and <id> stay verbatim."
+  }
+}

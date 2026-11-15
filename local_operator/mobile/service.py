@@ -107,6 +107,13 @@ async def amain(port: int = DEFAULT_PORT) -> int:
     if not dial:
         logger.warning("mobile daemon running in no-dial observer mode")
     app = build_app(daemon)
+    # Bounded, redacted per-request log beside mobile.log (`tunnels/request_log.py`):
+    # the evidence for "phone says Not answering while this Mac looks healthy".
+    from local_operator.mobile.install import request_log_path
+    from local_operator.tunnels.request_log import RequestLog
+
+    request_log = RequestLog(request_log_path())
+    app = request_log.middleware(app, skip=frozenset({"/healthz"}))
 
     import uvicorn
 
@@ -161,7 +168,11 @@ async def amain(port: int = DEFAULT_PORT) -> int:
 
 def main(port: int = DEFAULT_PORT) -> int:
     try:
-        return asyncio.run(amain(port))
+        # The backoff loop: at the descriptor limit the stdlib accept path spins
+        # a core and floods the log (see `mobile/accept_backoff.py`).
+        from local_operator.mobile.accept_backoff import loop_factory
+
+        return asyncio.run(amain(port), loop_factory=loop_factory)
     except KeyboardInterrupt:
         return 0
 

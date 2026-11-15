@@ -341,6 +341,16 @@ export interface AskQuestion {
 	/** For a secret question, save it to the operator's long-term store rather
 	    than only session memory. The flag rides; the value never does. */
 	persist: boolean;
+	/** A suggested one-line terminal command (`AskQuestion.command`): present
+	    only when the agent supplied one, never on a bridge row, and already
+	    refused in core when it holds control/format characters. The phone has
+	    no terminal, so it only SHOWS and copies it — running it is a desktop
+	    action behind a confirmation. */
+	command?: string;
+	/** Which device `command` is meant for: `"agent"` (the machine the agent
+	    works on, the default core stamps) or `"user"` (the operator's own
+	    computer). Rides with `command`; the phone reads it for nothing yet. */
+	command_target?: "agent" | "user";
 }
 
 /** The effective approval mode a conversation is running under. */

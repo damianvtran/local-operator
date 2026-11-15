@@ -453,6 +453,7 @@ def test_every_advertised_op_capability_has_a_registered_handler(rig):
         "credential-refresh-v1": "net_broker",
         "peer-readiness-v1": "net_readiness",
         "mcp-defs-v1": "net_mcp_defs",
+        wire.SKILLS_SYNC_V1: "net_skills",
         "memory-sync-v1": "net_memory",
         "mesh-update-v1": "net_update",
         wire.MESH_RESTART_V1: "net_restart",
