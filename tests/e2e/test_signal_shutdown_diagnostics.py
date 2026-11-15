@@ -7,6 +7,7 @@ import json
 import subprocess
 import sys
 from pathlib import Path
+from typing import Any
 
 import pytest
 import yaml
@@ -142,7 +143,7 @@ def _ips(pid: int = _PID, *, bug_type: str = "309", frames: int = 3, proc: str =
     return json.dumps(header) + "\n" + json.dumps(body)
 
 
-def _find(directory: Path, started: float = 0.0, pid: int = _PID) -> dict:
+def _find(directory: Path, started: float = 0.0, pid: int = _PID) -> dict[str, Any]:
     return diag.find_native_report(
         directory, pid=pid, started_wall=started, poll_budget_s=0.0, sleep=lambda _s: None
     )
@@ -181,7 +182,8 @@ def test_native_report_negatives_never_return_another_processs_data(
     }[case]
     path.write_text(text)
     started = 1_000_000.0
-    os.utime(path, (started - 100 if case == "stale" else started + 5,) * 2)
+    mtime = started - 100 if case == "stale" else started + 5
+    os.utime(path, (mtime, mtime))  # exactly (atime, mtime): the stub wants a fixed pair
     found = _find(tmp_path, started=started)
     assert found["found"] is False and found["reason"]
     assert "sym0" not in json.dumps(found) and "SIGSEGV" not in json.dumps(found)
@@ -211,7 +213,9 @@ def test_native_report_refuses_symlinks_and_missing_directory(tmp_path: Path) ->
         (7, "Darwin", {"CI": "true", "GITHUB_ACTIONS": "true"}, False),
     ],
 )
-def test_native_report_guard(code: int, system: str, environ: dict, expected: bool) -> None:
+def test_native_report_guard(
+    code: int, system: str, environ: dict[str, str], expected: bool
+) -> None:
     assert diag.native_report_enabled(code, system=system, environ=environ) is expected
 
 

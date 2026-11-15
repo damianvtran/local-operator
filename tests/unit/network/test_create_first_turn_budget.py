@@ -440,9 +440,9 @@ def _turn_of(reply: Any, context: Any) -> dict[str, Any]:
     assert reply is not None, f"no reply to the create (context={context!r})"
     detail = reply.get("detail") if isinstance(reply, dict) else None
     turn = detail.get("turn") if isinstance(detail, dict) else None
-    assert isinstance(turn, dict), (
-        f"the create's reply carried no first-turn receipt: reply={reply!r} context={context!r}"
-    )
+    assert isinstance(
+        turn, dict
+    ), f"the create's reply carried no first-turn receipt: reply={reply!r} context={context!r}"
     return turn
 
 
