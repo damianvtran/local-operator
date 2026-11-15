@@ -2313,7 +2313,7 @@ def _temporary_deleted_response(session_id: str) -> "JSONResponse | None":
     return _temporary_refusal(CODE_DELETED, session_id, deleted_at=stamp)
 
 
-def _durable_user_session_dir(session_id: str) -> Path | None:
+def _durable_user_session_dir(session_id: str, *, root: Path | None = None) -> Path | None:
     """Return a strictly addressed durable user conversation, if it exists.
 
     Mobile routes are public identifiers, not filesystem paths. Checking the
@@ -2325,7 +2325,7 @@ def _durable_user_session_dir(session_id: str) -> Path | None:
 
     if session_id in ("", ".", "..") or Path(session_id).name != session_id:
         return None
-    directory = config_dir() / "sessions" / session_id
+    directory = (root if root is not None else config_dir()) / "sessions" / session_id
     from local_operator.session import compression
 
     # Both forms: judging only the plain name hid every compressed session from
@@ -2578,7 +2578,7 @@ _COLD_TODO_CHILD_LIMIT = 96
 
 
 def _durable_projection(
-    session_id: str, *, lapsed_visible_ms: int | None = None
+    session_id: str, *, lapsed_visible_ms: int | None = None, root: Path | None = None
 ) -> SessionProjection | None:
     """Fold a user conversation and its routable child lineage from disk.
 
@@ -2615,7 +2615,7 @@ def _durable_projection(
     from local_operator.session.attention import AttentionStore
     from local_operator.tools.builtin import todo_snapshot
 
-    directory = _durable_user_session_dir(session_id)
+    directory = _durable_user_session_dir(session_id, root=root)
     if directory is None:
         return None
     try:
@@ -2645,7 +2645,9 @@ def _durable_projection(
         pid=0,
         kind="daemon",
         conversation_name=stored_session_title(directory),
-        attention=AttentionStore().state(f"session/{session_id}"),
+        attention=AttentionStore(root / "attention.db" if root is not None else None).state(
+            f"session/{session_id}"
+        ),
     )
     # Model/effort/cwd from the journal, so a session with no attached runtime
     # opens with the same identity its list row shows instead of ``n/a``. A live
@@ -2796,14 +2798,13 @@ def _durable_projection(
     from local_operator.asks.visibility import lapsed_visible_ms as _lapsed_visible_ms
     from local_operator.paths import config_dir
 
-    window = (
-        lapsed_visible_ms if lapsed_visible_ms is not None else _lapsed_visible_ms(config_dir())
-    )
-    ask_rows = ask_store.session_asks(config_dir(), session_id, lapsed_visible_ms=window)
+    read_root = root if root is not None else config_dir()
+    window = lapsed_visible_ms if lapsed_visible_ms is not None else _lapsed_visible_ms(read_root)
+    ask_rows = ask_store.session_asks(read_root, session_id, lapsed_visible_ms=window)
     if ask_rows:
         outstanding = sum(1 for row in ask_rows if ask_store.is_outstanding(row.get("status")))
         fold.set_asks(ask_rows[:PROJECTION_CAP], outstanding)
-    elif ask_store.read_entry(config_dir(), session_id) is not None:
+    elif ask_store.read_entry(read_root, session_id) is not None:
         # AN ENTRY WHOSE ROWS ARE ALL HIDDEN still installs its (empty) fold.
         # Skipping ``set_asks`` here left this frame one version BELOW the frame
         # a viewed screen retained when it still had rows, and
@@ -4058,6 +4059,7 @@ def _history_page(
     *,
     durable_only: bool = True,
     after: str | None = None,
+    root: Path | None = None,
 ) -> tuple[list[Any], bool]:
     """Return the page of folded entries immediately OLDER than ``before``
     (chronological within the page) plus whether more history exists beyond it.
@@ -4106,7 +4108,7 @@ def _history_page(
     position, in journal order.
     """
     if durable_only:
-        directory = _durable_user_session_dir(session_id)
+        directory = _durable_user_session_dir(session_id, root=root)
     else:
         # A live SessionEntry already established the route's identity. Keep
         # the pre-existing live behavior (including non-user hosts) while still
@@ -4299,22 +4301,33 @@ def _range_window(header: str, size: int) -> tuple[int, int] | Literal["unsatisf
     if match is None:
         return None
     first_txt, last_txt = match.groups()
+
+    def number(text: str) -> int:
+        # HTTP coordinates never need exceed the representation's length.
+        # Compare decimal strings before int(): a huge valid Range must yield
+        # its normal 206/416, not Python's integer-string-limit ValueError/500.
+        digits = text.lstrip("0") or "0"
+        ceiling = str(size)
+        if len(digits) > len(ceiling) or (len(digits) == len(ceiling) and digits > ceiling):
+            return size
+        return int(digits)
+
     if not first_txt and not last_txt:
         return None  # ``bytes=-``: not one of the grammar's forms; ignore.
     if first_txt:
-        first = int(first_txt)
+        first = number(first_txt)
         if first >= size:
             return "unsatisfiable"
         if not last_txt:
             return (first, size - 1)
-        last = int(last_txt)
+        last = number(last_txt)
         if last < first:
             return None  # An inverted pair is invalid; ignore the header.
         return (first, min(last, size - 1))
     # Suffix form: the LAST N bytes. A suffix at or past EOF is the whole
     # representation (206 with everything), never an error; ``-0`` selects
     # nothing and is unsatisfiable by definition.
-    length = int(last_txt)
+    length = number(last_txt)
     if length == 0:
         return "unsatisfiable"
     if length >= size:
@@ -6811,6 +6824,113 @@ def build_app(daemon: MobileDaemon):
                 await _cleanup_stream(getattr(self.body_iterator, "aclose", None))
                 await _cleanup_stream(self._release)
 
+    from local_operator.mobile.remote_sessions import RemoteSessionError, RemoteViews
+    from local_operator.mobile.remote_sessions import (
+        admit_command as admit_remote_command,
+    )
+    from local_operator.mobile.remote_sessions import mesh_read as remote_read
+    from local_operator.mobile.remote_sessions import (
+        public_error as remote_public_error,
+    )
+    from local_operator.mobile.remote_sessions import (
+        resolve_owner as resolve_remote_owner,
+    )
+    from local_operator.paths import config_dir as _relay_config_dir
+
+    relay_root = _relay_config_dir()
+    remote_views = RemoteViews()
+
+    async def remote_row(session_id: str) -> Any:
+        # Existing local identity wins. Never place a peer's PID in SessionTable:
+        # PIDs are device-local and would alias an unrelated local conversation.
+        if _entry_for_session(daemon, session_id) is not None:
+            return None
+        if (
+            await asyncio.to_thread(_durable_user_session_dir, session_id, root=relay_root)
+            is not None
+        ):
+            return None
+        return await asyncio.to_thread(resolve_remote_owner, relay_root, session_id)
+
+    def remote_failure(error: Exception, *, command: bool = False) -> Response:
+        failure = remote_public_error(error, command=command)
+        return JSONResponse(failure.payload(), status_code=failure.status)
+
+    async def remote_media_response(request: Request, owner_row: Any, kind: str) -> Response:
+        from local_operator.mobile.remote_sessions import async_media_chunk
+        from local_operator.network.sync import SYNC_CHUNK_BYTES
+
+        entry_id = request.query_params.get("entry", "")
+        if not entry_id or kind not in ("image", "video", "file"):
+            return JSONResponse({"error": "invalid_media_reference"}, status_code=400)
+        try:
+            index = int(request.query_params.get("i", "0"))
+            if index < 0:
+                raise ValueError
+        except ValueError:
+            return JSONResponse({"error": "invalid_media_index"}, status_code=400)
+        root = relay_root
+        try:
+            metadata, first_byte = await async_media_chunk(
+                root,
+                owner_row,
+                entry_id=entry_id,
+                index=index,
+                kind=kind,
+                offset=0,
+                length=1,
+            )
+        except (RemoteSessionError, MeshRefusal, ConnectionError, TimeoutError) as exc:
+            return remote_failure(exc)
+        total = metadata["total"]
+        window = _range_window(request.headers.get("range", ""), total)
+        headers = {
+            "Accept-Ranges": "bytes",
+            "Cache-Control": "private, max-age=31536000, immutable",
+            "X-Content-Type-Options": "nosniff",
+            "Content-Security-Policy": "default-src 'none'; sandbox",
+        }
+        if kind == "file":
+            headers["Content-Disposition"] = "attachment"
+        if window == "unsatisfiable":
+            headers["Content-Range"] = f"bytes */{total}"
+            return Response(status_code=416, headers=headers)
+        start, end = window if window is not None else (0, total - 1)
+        if window is not None:
+            headers["Content-Range"] = f"bytes {start}-{end}/{total}"
+        headers["Content-Length"] = str(max(0, end - start + 1))
+
+        async def chunks():
+            offset = start
+            if offset == 0 and first_byte and end >= 0:
+                yield first_byte
+                offset = 1
+            while offset <= end:
+                # One bounded request at a time. Cancellation closes this
+                # coroutine-owned courier socket, not an uncancellable worker
+                # thread; no next byte window is requested after disconnect.
+                reply, data = await async_media_chunk(
+                    root,
+                    owner_row,
+                    entry_id=entry_id,
+                    index=index,
+                    kind=kind,
+                    offset=offset,
+                    length=min(SYNC_CHUNK_BYTES, end - offset + 1),
+                    expected_media_id=metadata["media_id"],
+                )
+                if reply["total"] != total or reply["mime"] != metadata["mime"]:
+                    raise RemoteSessionError("remote_media_changed", 409)
+                yield data
+                offset += len(data)
+
+        return SessionEventResponse(
+            chunks(),
+            status_code=206 if window is not None else 200,
+            media_type=metadata["mime"],
+            headers=headers,
+        )
+
     # -- auth helpers -----------------------------------------------------------
 
     def authed(request: Request) -> bool:
@@ -7061,6 +7181,23 @@ def build_app(daemon: MobileDaemon):
                 # contract, not this app's routing table (see the i18n note
                 # above), and the two must not be conflated.
                 "session_tags": {"available": True},
+                # Rollout requires the complete remote baseline. Partial backend
+                # builds explicitly declare their operations; old phones ignore
+                # this object, new ones do not mistake local support for mesh.
+                "remote_sessions": {
+                    "available": True,
+                    "version": 1,
+                    "view": True,
+                    "history": True,
+                    "supported_command_ops": ["prompt", "steer"],
+                    "media": True,
+                    "supported_media_kinds": ["image", "video", "file"],
+                    "file_sources": ["retained_document"],
+                    "document_upload": False,
+                    "audio_upload": False,
+                    "skill_invocation": False,
+                    "supplements": False,
+                },
                 # THE ``$skill`` CONTRACT (SKM-D3). Three things travel together
                 # and this key gates all of them: the catalogue route
                 # (``GET /api/skills``), the ``expand_skills`` body flag on
@@ -7304,6 +7441,54 @@ def build_app(daemon: MobileDaemon):
         if denied is not None:
             return denied
         session_id = str(request.path_params["session_id"])
+        try:
+            owner_row = await remote_row(session_id)
+            if owner_row is not None:
+                view, remote_queue = await remote_views.acquire(relay_root, owner_row)
+
+                def release_remote() -> None:
+                    remote_views.release(view, remote_queue)
+
+                async def remote_stream():
+                    try:
+                        if view.frame is not None:
+                            yield _projection_seed_event(
+                                view.frame, request.query_params.get("have")
+                            )
+                        while True:
+                            try:
+                                frame = await asyncio.wait_for(remote_queue.get(), SSE_KEEPALIVE_S)
+                            except TimeoutError:
+                                # locate observes a runtime started elsewhere;
+                                # reading never calls the peer's engage door.
+                                try:
+                                    await view.connect()
+                                except (
+                                    RemoteSessionError,
+                                    MeshRefusal,
+                                    ConnectionError,
+                                    TimeoutError,
+                                ) as exc:
+                                    view.publish(remote_public_error(exc).payload())
+                                yield ": keepalive\n\n"
+                                continue
+                            if frame.get("remote"):
+                                yield "event: remote_error\ndata: " + json.dumps(frame) + "\n\n"
+                            else:
+                                yield _projection_live_event(
+                                    frame, request.query_params.get("have")
+                                )
+                    finally:
+                        release_remote()
+
+                return SessionEventResponse(
+                    remote_stream(),
+                    release=release_remote,
+                    media_type="text/event-stream",
+                    headers={"Cache-Control": "no-cache, no-transform", "X-Accel-Buffering": "no"},
+                )
+        except (RemoteSessionError, MeshRefusal, ConnectionError, TimeoutError) as exc:
+            return remote_failure(exc)
         # A DELETED TEMPORARY CHAT closes the stream with its own 404, so the
         # phone shows the tombstone screen instead of an endless reconnect.
         if _entry_for_session(daemon, session_id) is None:
@@ -8459,7 +8644,11 @@ def build_app(daemon: MobileDaemon):
         # the same public route and page directly from their durable transcript.
         # Live sessions retain the existing eligibility path; durable-only
         # routes must prove they are user sessions before any filesystem read.
-        if entry is None and _durable_user_session_dir(session_id) is None:
+        try:
+            owner_row = await remote_row(session_id) if entry is None else None
+        except (RemoteSessionError, MeshRefusal) as exc:
+            return remote_failure(exc)
+        if entry is None and owner_row is None and _durable_user_session_dir(session_id) is None:
             return _temporary_deleted_response(session_id) or JSONResponse(
                 {"error": "unknown session"}, status_code=404
             )
@@ -8474,6 +8663,21 @@ def build_app(daemon: MobileDaemon):
             limit = max(1, min(int(request.query_params.get("limit", "80")), 200))
         except ValueError:
             limit = 80
+        if owner_row is not None:
+            try:
+                result = await asyncio.to_thread(
+                    remote_read,
+                    relay_root,
+                    owner_row,
+                    "history",
+                    before_id=before,
+                    after_id=after,
+                    limit=limit,
+                )
+            except (RemoteSessionError, MeshRefusal) as exc:
+                return remote_failure(exc)
+            result.pop("mobile_session_read", None)
+            return JSONResponse(result, status_code=409 if result.get("reset") else 200)
         page, has_more = await asyncio.to_thread(
             _history_page,
             session_id,
@@ -8605,6 +8809,12 @@ def build_app(daemon: MobileDaemon):
         session_id = str(request.path_params["session_id"])
         entry = _entry_for_session(daemon, session_id)
         if entry is None:
+            try:
+                owner_row = await remote_row(session_id)
+                if owner_row is not None:
+                    return await remote_media_response(request, owner_row, "image")
+            except (RemoteSessionError, MeshRefusal) as exc:
+                return remote_failure(exc)
             return JSONResponse({"error": "unknown session"}, status_code=404)
         entry_id = request.query_params.get("entry", "")
         try:
@@ -8644,7 +8854,47 @@ def build_app(daemon: MobileDaemon):
             return denied
         session_id = str(request.path_params["session_id"])
         entry = _entry_for_session(daemon, session_id)
+        # File references are shared by local/remote mobile projections. Keep
+        # the local half routable too, using the same retained-row resolver;
+        # no client-supplied origin or stored path becomes a byte authority.
+        if request.query_params.get("kind") == "file":
+            directory = await asyncio.to_thread(
+                _durable_user_session_dir, session_id, root=relay_root
+            )
+            if directory is not None:
+                from local_operator.session.media import session_media
+
+                try:
+                    index = int(request.query_params.get("i", "0"))
+                except ValueError:
+                    return JSONResponse({"error": "invalid_media_index"}, status_code=400)
+                source = await asyncio.to_thread(
+                    session_media,
+                    relay_root,
+                    session_id,
+                    request.query_params.get("entry", ""),
+                    index,
+                    "file",
+                )
+                if source is None:
+                    return JSONResponse({"error": "media_missing"}, status_code=404)
+                headers = {
+                    "Cache-Control": "private, max-age=31536000, immutable",
+                    "X-Content-Type-Options": "nosniff",
+                    "Content-Disposition": "attachment",
+                }
+                if source.path is not None:
+                    return FileResponse(source.path, media_type=source.mime, headers=headers)
+                return _ranged_media_response(request, source.data or b"", source.mime, headers)
         if entry is None:
+            try:
+                owner_row = await remote_row(session_id)
+                if owner_row is not None:
+                    return await remote_media_response(
+                        request, owner_row, request.query_params.get("kind", "")
+                    )
+            except (RemoteSessionError, MeshRefusal) as exc:
+                return remote_failure(exc)
             return JSONResponse({"error": "unknown session"}, status_code=404)
         entry_id = request.query_params.get("entry", "")
         if not entry_id:
@@ -9175,6 +9425,28 @@ def build_app(daemon: MobileDaemon):
         # sends one learns nothing about the field's shape — and so the
         # endpoint's error surface is unchanged for every ordinary request.
         body.pop("operator_cap", None)
+        # Remote commands go to the resolved owner before any local continuation
+        # admission. In particular an unresolved mesh id can NEVER enter spawn.
+        try:
+            owner_row = await remote_row(session_id)
+            if owner_row is not None:
+                remote_op = body.pop("op", None)
+                if not isinstance(remote_op, str) or not remote_op:
+                    return JSONResponse({"error": "invalid_op"}, status_code=422)
+                denied = _device_refusal(body.get("operator_cert"))
+                if denied is not None:
+                    return denied
+                if body.pop("expand_skills", False):
+                    return remote_failure(RemoteSessionError("remote_unsupported", 409))
+                try:
+                    answer = await admit_remote_command(relay_root, owner_row, remote_op, body)
+                except ValueError:
+                    return JSONResponse({"error": "invalid_command"}, status_code=422)
+                except Exception as exc:
+                    return remote_failure(exc, command=True)
+                return JSONResponse(answer)
+        except (RemoteSessionError, MeshRefusal) as exc:
+            return remote_failure(exc, command=True)
         # ...AND THE SIGNATURE FIELDS ARE ADMITTED (stage D, revision 2 §2.4,
         # §4.2). This is the NARROWING the earlier revision's comment marked as
         # its own reversal point, and the direction is the whole design: the

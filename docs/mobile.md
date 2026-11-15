@@ -514,6 +514,92 @@ a 200. The list's SSE stream takes the same flag
 between the two answers on its next repaint; without the flag both answers are
 byte-identical to what they were before.
 
+### Remote conversations — owner-bound view, history, commands and media
+
+A remote row opens through the **same** `/api/sessions/{id}/events`, `/history`,
+`/command`, `/image` and `/attachment` routes as a local conversation. Opening is
+not recall: the session and its runtime remain on their owner. Explicit transfer
+remains a separate action. The phone supplies a session id, never a peer URL,
+control key, attachment digest or filesystem path. The relay resolves the owner
+through the same trusted mesh catalogue as the desktop and retains that
+owner/session binding for each operation and upstream viewer.
+
+Feature-detect this object on the authenticated capabilities payload:
+
+```json
+{"remote_sessions":{"available":true,"version":1,"view":true,"history":true,
+"supported_command_ops":["prompt","steer"],"media":true,
+"supported_media_kinds":["image","video","file"],"file_sources":["retained_document"],
+"document_upload":false,"audio_upload":false,"skill_invocation":false,"supplements":false}}
+```
+
+`available` describes this relay's implemented baseline, **not** every peer's
+build or grants. Owner reads separately negotiate `mobile-session-read-v1` on
+the authenticated mesh link. An old peer is unsupported, not an empty chat.
+Only `prompt` and `steer` are currently admitted remotely; model/slash/stop/ask
+controls must not be enabled by this capability. Prompts/steers carry their
+original `command_id` UUID and inline image bytes through existing owner
+admission and staging. A retry retains that UUID; a missing acknowledgement is
+ambiguous and must not cause automatic resubmission. Remote skill expansion,
+audio and document **upload** are explicitly unsupported; the UI must not drop
+these payloads or infer support from a local capability. Generated-file callouts
+and executable Highlights/supplement previews remain a different source/contract
+(`supplements:false`), not retained document media. Disable those remote actions;
+they are not made safe by supplying an owner's filesystem path to the phone.
+
+Reading a stopped conversation does not engage a runtime. History is folded at
+the owner using the mobile schema and the existing durable/journal reader,
+including backward pagination across compactions and forward `after` cursors.
+Desktop journal envelopes are never passed through as mobile transcript rows.
+A live view uses `RemoteSessionClient` projections, with one upstream reader per
+owner/session shared by active HTTP viewers. The final SSE release closes that
+reader, including cancellation before headers or while sending a body. A cold
+stream can observe a runtime subsequently started elsewhere without starting
+one merely to read. `?have=` retains the existing projection seed contract.
+
+Media references are row id plus family-specific index. Images use `/image`;
+video uses `/attachment?kind=video`; retained input documents add sparse
+`files:[{index,filename,mime_type,bytes}]` transcript refs and use
+`/attachment?kind=file`. Files are downloads, not remote document-upload
+support. No reference exposes an origin path, retained path or digest as byte
+access authority. The owner resolves the exact user-session transcript block
+(including tool-row ids), honors prune markers, then reads retained bytes. A
+missing object is a media miss, never a request to read the original file path.
+
+The mesh courier reuses the session-view-authorized history carrier with an
+explicit `mobile_session_read` purpose (`history`, `projection`, `media`). Media
+requests carry only `entry_id,index,kind,offset,length,expected_media_id?` beside
+the session. Coordinates are exact integers, not booleans; chunks reuse the
+existing mesh sync chunk bound, and the actual encoded acknowledgement must fit
+the existing history reply budget. Responses bind session, entry, index, kind,
+content identity, MIME, total, offset and base64 bytes. Subsequent chunks must
+match that identity; the HTTP relay validates every answer before yielding it.
+Video bodies are streamed through bounded chunks, not buffered as whole videos.
+The existing Range parser supplies full `200`, exact single-range `206`, and
+unsatisfiable `416` with `Content-Range`; malformed/multipart ranges retain its
+full-body fallback. Cancellation closes the request-owned local courier socket
+and stops further chunk requests. An owner read already dispatched may finish
+within the existing bounded mesh deadline; it owns no persistent media viewer.
+
+Remote failures carry `{error:<code>,code:<code>,remote:true}`. Preserve loaded
+content on these errors; SSE sends `remote_error` rather than replacing the
+projection with an empty one.
+
+| Status | Remote code | Meaning |
+|---|---|---|
+| 503 | `remote_owner_unresolved`, `remote_unreachable` | ownership or transport could not be established; retry without recall |
+| 409 | `remote_unsupported` | owner build/operation does not implement this contract |
+| 403 | `remote_forbidden` | the authenticated mesh member lacks this operation's grant |
+| 404 | `remote_session_missing`, `remote_media_missing` | owner session or retained object is missing |
+| 409 | `remote_cursor_missing` (`reset:true`) | discard the history cursor and reload |
+| 409 | `remote_media_changed` | byte identity/coordinates changed; do not concatenate versions |
+| 409 | `remote_command_ambiguous` | no reliable admission acknowledgement; retain the UUID |
+
+A genuine phone authentication failure remains HTTP **401**. No peer permission,
+old-build or offline result is translated into phone logout. A view grant does
+not grant drive: the existing mesh authorizer checks every history/media read,
+and every forwarded control frame independently.
+
 ### Delta resume — forward history and skip-unchanged seeds
 
 A phone returning from the background already holds a cached copy of the list

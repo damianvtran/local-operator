@@ -195,6 +195,9 @@ LINK_CAPABILITIES: tuple[str, ...] = (
     "peer-journal-source-v1",
     # The remote peek (``network/peek.py``): see SESSION_PEEK_V1 below.
     "session-peek-v1",
+    # Owner-folded mobile history/projection; never infer this schema from a
+    # legacy journal page whose entries use the desktop transcript vocabulary.
+    "mobile-session-read-v1",
     # Conditional member-table pull; see MEMBER_LIST_DIGEST_V1 below for why.
     "member-list-digest-v1",
     # Change-only member tables permit a long anti-entropy interval, without
