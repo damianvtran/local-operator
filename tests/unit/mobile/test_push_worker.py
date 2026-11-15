@@ -527,6 +527,9 @@ def test_the_completion_alert_is_composed_from_the_conversations_own_directory(
     import json as _json
 
     monkeypatch.setattr("local_operator.tui.notify.settings_get", lambda key, default=None: True)
+    # Real registry rows for the live phones: a live id with NO row counts as
+    # previews off (N-1), so the harness's bare stub ids would read generic.
+    _devices_with(harness, None, None)
     session = harness.root / "sessions" / "named-one"
     session.mkdir(parents=True, exist_ok=True)
     row = {
@@ -1930,14 +1933,76 @@ def test_an_unreadable_registry_fails_closed_to_the_generic_banner(
     text at stake is kept by the cloud for 14 days, so consent is never assumed."""
     monkeypatch.setattr("local_operator.tui.notify.settings_get", lambda key, default=None: True)
 
-    def corrupt(_config_dir: object) -> dict[str, dict[str, bool]]:
+    def corrupt(_config_dir: object, **_kwargs: object) -> tuple[list[str], dict[str, bool]]:
         raise worker_module.mobile_push_devices.PushRegistryCorrupt("corrupt")
 
-    monkeypatch.setattr(worker_module.mobile_push_devices, "device_preferences", corrupt)
+    monkeypatch.setattr(worker_module.mobile_push_devices, "preview_snapshot", corrupt)
     assert harness.worker._previews_allowed() is False
     harness.devices.ids = []
     monkeypatch.undo()
     assert harness.worker._previews_allowed() is False, "no live device: never vacuously true"
+
+
+def test_a_live_device_with_no_preferences_row_counts_as_previews_off(harness: Harness) -> None:
+    """N-1 (security review r2): a device live in gate 4 with NO row in the
+    registry snapshot — the state a registration racing the gate used to leave —
+    makes the banner generic rather than defaulting to "on"."""
+    (registered,) = _devices_with(harness, {"previews": True})
+    harness.devices.ids = [registered, "device-registered-mid-gate"]
+    assert harness.worker._previews_allowed() is False
+    harness.devices.ids = [registered]
+    assert harness.worker._previews_allowed() is True
+
+
+def test_a_row_without_a_previews_key_is_still_previews_on(harness: Harness) -> None:
+    """The distinction N-1's fix must keep: a row that EXISTS but carries no
+    ``previews`` key (an older app's register, or none of the switches sent) is
+    default-ON per the operator's rule — only a missing ROW is off."""
+    _devices_with(harness, None, {"enabled": True, "completions": True})
+    assert harness.worker._previews_allowed() is True
+
+
+def test_the_production_preview_gate_reads_the_registry_once(
+    harness: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """N-1: with gate 4 NOT injected, the live list and the switches come from
+    one registry load, so no registration can land between them."""
+    expires = int(time.time()) + 3600
+
+    def register(install: int, preferences: dict[str, bool] | None) -> None:
+        body: dict[str, Any] = {
+            "platform": "ios",
+            "token": "ab" * 32,
+            "environment": "production",
+            "app_version": "1.0.0 (449)",
+            "install_id": str(uuid.UUID(int=install)),
+        }
+        if preferences is not None:
+            body["preferences"] = preferences
+        push_devices.register(harness.root, body, credential_expires_at=expires)
+
+    register(7, None)
+    register(8, {"previews": False})
+    worker = PushWorker(
+        store=harness.store,
+        transport=harness.plane,
+        config_dir=harness.root,
+        computer=COMPUTER,
+        clock=harness.clock,
+        presence=harness.presence,
+    )
+    loads: list[object] = []
+    real_load = push_devices._load
+
+    def counting_load(config_dir: Path) -> list[dict[str, Any]]:
+        loads.append(config_dir)
+        return real_load(config_dir)
+
+    monkeypatch.setattr(push_devices, "_load", counting_load)
+    assert worker._previews_allowed() is False, "the live phone with previews off decides"
+    assert len(loads) == 1
+    register(8, {"previews": True})
+    assert worker._previews_allowed() is True
 
 
 def test_a_widened_exclude_past_the_cap_with_no_hint_sends_no_exclude(

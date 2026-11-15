@@ -322,8 +322,12 @@ _ELLIPSIS = "\u2026"
 #: suggested ``\u200b-\u200f``: ZWNJ is orthographic in Urdu, Hindi and Persian
 #: text (two of this product's locales), and ZWJ glues emoji sequences — a
 #: family emoji stripped of it renders as four people. Neither reorders text,
-#: which is the spoofing this guards; LRM/RLM (U+200E/F) can, and go.
-_INVISIBLE_FORMAT_CHARS = re.compile("[\u200b\u200e\u200f\u202a-\u202e\u2066-\u2069\ufeff]")
+#: which is the spoofing this guards; LRM/RLM (U+200E/F) can, and go. So does
+#: U+061C ARABIC LETTER MARK (security review r2, S-7): bidi class AL, a strong
+#: right-to-left implicit mark of the same kind as RLM. The tag block
+#: (U+E0000-E007F) is deliberately NOT stripped: subdivision-flag emoji are
+#: built from it.
+_INVISIBLE_FORMAT_CHARS = re.compile("[\u061c\u200b\u200e\u200f\u202a-\u202e\u2066-\u2069\ufeff]")
 
 
 def _bounded_alert_text(text: str, fallback: str) -> str:
@@ -333,9 +337,17 @@ def _bounded_alert_text(text: str, fallback: str) -> str:
     cloud for 14 days and through APNs/FCM, so a reply that quotes an API key or
     a ``Bearer`` header must not carry it verbatim. ``scrub_secrets`` is the
     repo's central credential-shape pass; it runs before the empty-check and the
-    clamp so a fully redacted string still falls back and a clamp can never cut
-    a redaction marker open to expose part of a value. The fallback (house
-    text) is scrubbed too, for uniformity — it is a catalogue string today.
+    clamp so a fully redacted string still falls back and THIS clamp can never
+    cut a value open. The fallback (house text) is scrubbed too, for
+    uniformity — it is a catalogue string today.
+
+    A SECOND LAYER, not the first: compose clamps the title (80) and snippet
+    (120) itself, and a credential straddling that cut loses the length its
+    shape needs, so scrubbing here alone leaked prefixes (security review r2,
+    S-6). Compose therefore scrubs its session-derived text BEFORE its own
+    clamp (``notifications.compose._scrubbed``); this pass stays for text that
+    reaches the push some other way, and so that a change to compose cannot
+    silently drop the only scrub on text leaving the machine.
 
     NEVER EMPTY: an empty (or whitespace-only) string is replaced by
     ``fallback``, the house sentence, because the cloud refuses an empty alert

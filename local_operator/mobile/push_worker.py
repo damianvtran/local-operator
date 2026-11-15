@@ -435,6 +435,10 @@ class PushWorker:
         self._clock = clock
         self._presence = presence if presence is not None else _desktop_attended
         self._live_devices = live_devices if live_devices is not None else self._live_device_ids
+        # Whether gate 4 was injected (a test seam). The preview gate derives the
+        # live list from its own single registry load in production
+        # (:meth:`_previews_allowed`); only an injected list overrides that.
+        self._live_devices_injected = live_devices is not None
         self._report_block = report_block
         self._unread_count = unread_count if unread_count is not None else self._store_count
         self._cursors = WorkerCursors()
@@ -1545,16 +1549,24 @@ class PushWorker:
         an unreadable registry, or no live device at all, answers False. (No
         live device means the emit is not sent anyway; False keeps the answer
         from being a vacuous "all of none agreed".)
+
+        ONE REGISTRY LOAD (security review r2, N-1): the live list and the
+        switches come from the same :func:`push_devices.preview_snapshot`, so a
+        registration landing mid-gate cannot produce a live device with no
+        switch on record. Should a live device still have no row (an injected
+        gate-4 list, or a foreign registry), it counts as previews OFF — the
+        race defaults to the generic banner. That is NOT the same as a row
+        that exists without a ``previews`` key: such a row is an older app's,
+        and the operator's rule keeps it on (``resolved_preferences``).
         """
         try:
-            preferences = mobile_push_devices.device_preferences(self.config_dir)
+            live_rows, previews = mobile_push_devices.preview_snapshot(self.config_dir)
         except (mobile_push_devices.PushRegistryCorrupt, OSError):
             return False
-        live = self._live_devices()
+        live = list(self._live_devices()) if self._live_devices_injected else live_rows
         if not live:
             return False
-        everything: dict[str, bool] = dict.fromkeys(mobile_push_devices.PREFERENCE_KEYS, True)
-        return all(preferences.get(str(device), everything)["previews"] for device in live)
+        return all(previews.get(str(device), False) for device in live)
 
     def _live_device_ids(self) -> list[str]:
         """Gate 4 of §2.3: which devices this machine may deliver to.

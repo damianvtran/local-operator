@@ -316,9 +316,10 @@ def _compose_title(
         # The opt-out keeps the BRAND, which is exactly what a user who turned
         # this off is asking for: no statement about their sessions at all.
         return APP_NAME, False
-    name = sanitize_text(session_name, MAX_TITLE_CHARS)
+    # Scrubbed BEFORE the clamp: see :func:`_scrubbed`.
+    name = sanitize_text(_scrubbed(session_name), MAX_TITLE_CHARS)
     if not name and session_dir is not None:
-        name = sanitize_text(_stored_title(session_dir), MAX_TITLE_CHARS)
+        name = sanitize_text(_scrubbed(_stored_title(session_dir)), MAX_TITLE_CHARS)
     if name:
         return name, True
     if kind in ("ask", "approval"):
@@ -399,6 +400,35 @@ def _compose_body(
     return BODIES.get("complete", _notify.BODY_COMPLETE), False, False
 
 
+def _scrubbed(text: str) -> str:
+    """``text`` with credential shapes and values redacted, or ``""`` on failure.
+
+    WHY BEFORE THE CLAMP (security review r2, S-6). A token's shape needs its
+    full length to match — ``ghp_`` is 36 characters of base62 — so a clamp that
+    runs first and lands mid-token leaves a prefix the scrubber no longer
+    recognises, and the push path (``mobile.push_payload._bounded_alert_text``)
+    could only scrub after compose had already cut. Measured: up to ~20
+    characters of a ``ghp_`` token, 10 of an ``sk-proj-`` key, and a JWT's
+    header and claims reached the emit. Scrubbing here, before any cut, also
+    protects the desktop toast, the TUI notifier and the OS fallback that read
+    the same composition.
+
+    Imported lazily: ``redaction_shapes`` is a large regex module, and this one
+    is imported by the detached runtime's gate path where most calls never
+    compose a session-derived string. FAILS CLOSED to ``""``: every caller then
+    degrades to the house vocabulary, which asserts nothing and leaks nothing.
+    """
+    if not text:
+        return ""
+    try:
+        from local_operator.redaction_shapes import scrub_secrets
+
+        return scrub_secrets(text)
+    except Exception:  # noqa: BLE001 — chrome; an unscrubbed string must not ship
+        logger.debug("notification text scrub failed; dropping the text", exc_info=True)
+        return ""
+
+
 def _stored_title(session_dir: Path) -> str:
     """The session's stored title, or ``""`` for anything that goes wrong.
 
@@ -423,9 +453,15 @@ def _failure(session_dir: Path) -> str:
     read of an already-warm 64 KiB region rather than a second scan strategy.
     """
     try:
-        from local_operator.resume import session_failure_summary
+        from local_operator.resume import (
+            PREVIEW_SCAN_BYTES,
+            _condense,
+            session_failure_summary,
+        )
 
-        return session_failure_summary(session_dir, max_chars=BACKGROUND_SNIPPET_MAX_CHARS)
+        # Read unclamped, scrub, THEN condense — see :func:`_preview`.
+        raw = session_failure_summary(session_dir, max_chars=PREVIEW_SCAN_BYTES)
+        return _condense(_scrubbed(raw), BACKGROUND_SNIPPET_MAX_CHARS)
     except Exception:  # noqa: BLE001 — a body is chrome; delivery is not
         logger.debug("notification failure text unavailable for %s", session_dir, exc_info=True)
         return ""
@@ -440,9 +476,20 @@ def _preview(session_dir: Path) -> str:
     something unexpected, a directory that vanished between the two calls.
     """
     try:
-        from local_operator.resume import session_preview
+        from local_operator.resume import PREVIEW_SCAN_BYTES, _condense, session_preview
 
-        return session_preview(session_dir, max_chars=BACKGROUND_SNIPPET_MAX_CHARS)
+        # Read UNCLAMPED, scrub, THEN condense, so :func:`_scrubbed` sees every
+        # credential whole (S-6). The reader parses a tail window of
+        # ``PREVIEW_SCAN_BYTES`` bytes and N bytes decode to at most N
+        # characters, so asking for that many means "never cut at the source"
+        # — the invariant, not a guessed size. Cost: an ARCHIVE's listing
+        # sidecar holds only 200 characters, so it is bypassed for the
+        # archive's memoised tail read; a banner for an archived session is
+        # rare, and correct beats fast for text that leaves the machine.
+        # ``_condense`` is the reader's own word-boundary ellipsis rule, reused
+        # so the banner cuts exactly where it always did.
+        raw = session_preview(session_dir, max_chars=PREVIEW_SCAN_BYTES)
+        return _condense(_scrubbed(raw), BACKGROUND_SNIPPET_MAX_CHARS)
     except Exception:  # noqa: BLE001 — a body is chrome; delivery is not
         logger.debug("notification preview unavailable for %s", session_dir, exc_info=True)
         return ""

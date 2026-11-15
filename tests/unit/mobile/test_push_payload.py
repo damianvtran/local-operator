@@ -681,14 +681,86 @@ def test_credential_shaped_text_is_scrubbed_before_it_leaves_the_machine(
     assert push_payload._bounded_alert_text(_FAKE_KEY, "house")
 
 
+#: High-entropy credentials for the straddle sweep, built at runtime (no
+#: credential-shaped literal in this file) and non-repeating, so any 8-character
+#: window of one is evidence of THAT secret rather than of a repeated filler.
+_ENTROPY = "Qm7Xv2Lr9KpT4wZc8NbF3hJd6YsG1aEu5RtV0oPiMnBq"
+_STRADDLE_SECRETS = {
+    "github-pat": "ghp_" + _ENTROPY[:36],
+    "openai-project-key": "sk-" + "proj-" + _ENTROPY + _ENTROPY[::-1][:4],
+    "bare-jwt": (
+        "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9"
+        + ".eyJzdWIiOiJ1c2VyLTc3MzEiLCJlbWFpbCI6ImFAYi5jIn0"
+        + "."
+        + _ENTROPY[:43]
+    ),
+}
+
+
+def _fragments(secret: str, width: int = 8) -> set[str]:
+    return {secret[start : start + width] for start in range(len(secret) - width + 1)}
+
+
+@pytest.mark.parametrize("field", ["title", "body", "failure"])
+@pytest.mark.parametrize("shape", sorted(_STRADDLE_SECRETS))
+def test_a_secret_straddling_compose_s_clamp_leaves_no_fragment_in_the_emit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, shape: str, field: str
+) -> None:
+    """S-6 (security review r2; QA Q-1): compose clamps the title at 80 and the
+    snippet/failure line at 120. Scrubbing only AFTER that cut let a token cut
+    mid-way slip past its own pattern (up to ~20 chars of ``ghp_``, a JWT's
+    header and claims). The secret is slid across padding 20-139 — both sides
+    of both cuts — through the real ``completion_payload`` → ``emit_body`` bytes,
+    and no 8-character window of it may survive anywhere in them."""
+    _names_on(monkeypatch)
+    secret = _STRADDLE_SECRETS[shape]
+    fragments = _fragments(secret)
+    for pad in range(20, 140):
+        # Words then a space, so the secret starts on a word boundary exactly at
+        # ``pad`` — the position a real reply quoting a key would put it.
+        padding = ("note " * 40)[: pad - 1] + " "
+        text = padding + secret + " and the rest of the line"
+        root = tmp_path / f"{field}-{pad}"
+        if field == "title":
+            session, kind = _session(root, assistant="Done.", title=text), "complete"
+        elif field == "body":
+            session, kind = _session(root, assistant=text, title="Deploy"), "complete"
+        else:
+            session, kind = _session(root, assistant="x", title="Deploy"), "error"
+            _incident(session, text)
+        _payload, raw = _emit_bytes(session, kind, previews=True)
+        decoded = raw.decode("utf-8")
+        leaked = sorted(fragment for fragment in fragments if fragment in decoded)
+        assert not leaked, (shape, field, pad, leaked[:3])
+
+
+def test_compose_scrubs_before_its_own_clamp(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The fix is at the SOURCE: the desktop toast (compose's other readers)
+    gets the scrubbed text too, not only the push. A ``ghp_`` token starting at
+    column 100 of the reply straddles the 120 cut and must be gone from compose
+    itself, before ``_bounded_alert_text`` ever runs."""
+    _names_on(monkeypatch)
+    secret = _STRADDLE_SECRETS["github-pat"]
+    session = _session(tmp_path, assistant=("note " * 20)[:99] + " " + secret, title="Deploy")
+    composed = compose("complete", session_dir=session)
+    assert composed.body_is_snippet
+    assert not [fragment for fragment in _fragments(secret) if fragment in composed.body]
+
+
 def test_bidi_and_zero_width_characters_are_stripped(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """S-3: no reordering/invisible format characters on a lock screen."""
-    spoofers = "\u200b\u200e\u200f\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069\ufeff"
+    # U+061C ARABIC LETTER MARK is a strong RTL implicit mark like RLM (S-7).
+    spoofers = (
+        "\u061c\u200b\u200e\u200f\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069\ufeff"
+    )
     cleaned = push_payload._bounded_alert_text(f"Title \u202eevil\u202c{spoofers}x", "house")
     assert cleaned == "Title evilx"
     assert not set(cleaned) & set(spoofers)
+    assert push_payload._bounded_alert_text("left\u061cright", "house") == "leftright"
     # ZWNJ (Urdu/Hindi orthography) and ZWJ (emoji sequences) are kept.
     assert push_payload._bounded_alert_text("a\u200cb\u200dc", "house") == "a\u200cb\u200dc"
     # Only spoofers: falls back rather than sending an empty string.

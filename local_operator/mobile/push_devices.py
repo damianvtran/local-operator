@@ -1018,6 +1018,43 @@ def device_preferences(config_dir: Path) -> dict[str, dict[str, bool]]:
     return preferences
 
 
+def preview_snapshot(
+    config_dir: Path, *, now: float | None = None
+) -> tuple[list[str], dict[str, bool]]:
+    """READ-ONLY ``(live device ids, {device_id: previews})`` from ONE load.
+
+    The preview gate (``push_worker._previews_allowed``) needs two facts about
+    the same devices — which are live, and what each one's ``previews`` switch
+    says — and reading them through :func:`credential_facts` and
+    :func:`device_preferences` loaded the registry twice. A phone that
+    registered with ``previews: false`` between those loads appeared live with
+    no switch on record, and fell back to "on" (security review r2, N-1). One
+    load answers both, so in production a live device always has its row.
+
+    "Live" is spelled exactly as gate 4 spells it
+    (``push_worker._live_device_ids``): ``STATE_LIVE`` and a credential live at
+    ``now``. ``previews`` is resolved through :func:`resolved_preferences`, so a
+    row WITHOUT the key is still on — the operator's default-on rule for rows an
+    older app wrote — while a device with no row at all is simply absent from
+    the map, which the gate reads as OFF.
+    """
+    stamp = float(time.time() if now is None else now)
+    with _LOCK:
+        records = _load(config_dir)
+    live: list[str] = []
+    previews: dict[str, bool] = {}
+    for record in records:
+        device = str(record["device_id"])
+        if device in previews:
+            # A duplicate id (only a foreign file can hold one) keeps its first
+            # row, as :func:`device_preferences` and :func:`_by_id` do.
+            continue
+        previews[device] = resolved_preferences(record)["previews"]
+        if device_state(record) == STATE_LIVE and credential_live_at(record, stamp):
+            live.append(device)
+    return live, previews
+
+
 def credential_facts(config_dir: Path, *, now: float | None = None) -> list[dict[str, Any]]:
     """READ-ONLY per-device credential facts — the emit path's only input.
 
