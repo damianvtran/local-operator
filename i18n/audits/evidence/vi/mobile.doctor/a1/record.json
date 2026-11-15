@@ -1,0 +1,111 @@
+{
+ "schema": 1,
+ "audit_id": "a1",
+ "audit_kind": "independent_translation_audit",
+ "locale": "vi",
+ "namespace": "mobile.doctor",
+ "round": 1,
+ "audit_date": "2026-11-14",
+ "verdict": "changes_requested",
+ "status": "changes_requested",
+ "source_sha256": "0ca00b276fdea066228394e3fee336042b1e149c9e7df3ea31be11a24f0beb72",
+ "target_sha256": "2642bc0c30738625eb8b2c99b4410f8d1a9ef1bbef7f20d6ea61bdd4c4042314",
+ "scope": "complete NEW namespace, all 23 keys judged",
+ "key_count": 23,
+ "keys_audited": 23,
+ "keys_reread_for_consistency": 0,
+ "source_audit_revision": "a3722be7dadacaf140a2587a0100bd3b26c2ab50",
+ "worktree": "~/local-operator/.worktrees/mobile-doctor",
+ "branch": "feat/mobile-doctor",
+ "translator": {
+  "agent": "i18n-translator subagent, session 398cdb26808f (English source drafted by coder session b0300e2c2c7f)",
+  "model": "anthropic/claude-opus-5-5",
+  "date": "2026-11-14"
+ },
+ "auditor": {
+  "agent": "i18n-auditor (C4 lane: vi, zh-CN), independent `task` subagent, session 2c1a73eaa6cd; did not translate or edit any value it judged",
+  "model": "anthropic/claude-opus-5-5 (served model of this session; no provider fallback occurred)",
+  "date": "2026-11-14",
+  "independent_from_translator": true
+ },
+ "input_hashes": {
+  "en": "0ca00b276fdea066228394e3fee336042b1e149c9e7df3ea31be11a24f0beb72",
+  "context": "c6baa99bc539ef2d2e03bf7b6b11e83edac37139eede8db82034f5fad98d4614",
+  "target": "2642bc0c30738625eb8b2c99b4410f8d1a9ef1bbef7f20d6ea61bdd4c4042314",
+  "glossary": "a576d5a4b2718ba79a70a42600e3b6233ea28d716b1e2d996a208ac8dd7fabdb",
+  "style_guide": "e4901497ed553e2b2ae4a2660bf776adb787b89e11d7eb0f8d08f3da4b227888"
+ },
+ "input_paths": {
+  "en": "local_operator/i18n/catalogues/en/mobile.doctor.json",
+  "context": "local_operator/i18n/catalogues/en/mobile.doctor.context.json",
+  "target": "local_operator/i18n/catalogues/vi/mobile.doctor.json",
+  "glossary": "i18n/glossary.md",
+  "style_guide": "i18n/style-guides/vi.md"
+ },
+ "findings": [
+  {
+   "id": "VI-D1",
+   "severity": "major",
+   "keys": [
+    "mobile.doctor.files.ok",
+    "mobile.doctor.files.near"
+   ],
+   "issue": "«đang mở {open} tệp trên giới hạn {limit}» reads most naturally as “{open} files open ABOVE the limit {limit}” («trên giới hạn» collocates as over/above the limit; the «X trên Y» = “X out of Y” reading needs the two numbers adjacent). On files.ok — a PASS line pasted into support threads — that inverts the meaning into an alarm; in files.near it contradicts the following «gần chạm giới hạn» (“close to the limit”).",
+   "fix": "files.ok: «Dịch vụ truy cập điện thoại đang mở {open} tệp (giới hạn {limit}).» · files.near: «Dịch vụ truy cập điện thoại đang mở {open} tệp (giới hạn {limit}), gần chạm giới hạn, nên các kết nối mới từ điện thoại và việc mở cơ sở dữ liệu có thể thất bại.» (alternative: «{open}/{limit} tệp»). Placeholders unchanged.",
+   "status": "unresolved"
+  },
+  {
+   "id": "VI-D2",
+   "severity": "nit",
+   "keys": [
+    "mobile.doctor.daemon.not_installed",
+    "mobile.doctor.daemon.not_running",
+    "mobile.doctor.daemon.state_not_running",
+    "mobile.doctor.files.not_running"
+   ],
+   "issue": "«chưa chạy» (not yet running) in the two daemon sentences vs «không chạy» in the label and files.not_running. Both are correct Vietnamese and «chưa» fits a service that is expected to start; noted only for consistency.",
+   "fix": "Optional: none required.",
+   "status": "accepted"
+  }
+ ],
+ "counts": {
+  "blocker": 0,
+  "major": 1,
+  "minor": 0,
+  "nit": 1
+ },
+ "unresolved_blocker_major_count": 1,
+ "translator_questions_answered": "Q6 (asleep): «đang ngủ» is the ordinary Vietnamese for a sleeping computer — accepted. Q1–Q5 concern other locales.",
+ "verified": [
+  "“phone service” rendered consistently as «dịch vụ truy cập điện thoại» in all 13 sentences that name it",
+  "no command named in any value; tone calm and factual; gate_open states the unprotected portal plainly without alarmism",
+  "Radient / Local Operator kept as product names; {state}/{reason} left as Latin machine words («đang ở trạng thái {state}»)",
+  "«tunnel» / «trình kết nối» match mobile.setup; «không phản hồi» matches the phone app's own vi label «Không phản hồi» (relay.chrome.session.subtitle.not_answering)",
+  "tunnel.duplicates: vi has only the plural category other; «{count} tunnel» is grammatical for any count",
+  "quotes “ ” per style guide; NFC verified"
+ ],
+ "limitations": [
+  "Independent LLM review on anthropic/claude-opus-5-5, not native-speaker certification.",
+  "Text renders via the product renderer only (audit.log); no terminal, desktop or device frame.",
+  "Phone-app catalogue (separate repo) not compared for the 'asleep' label.",
+  "generate.py / check.py not run by this lane."
+ ],
+ "artifacts": [
+  "record.json",
+  "report.md",
+  "audit.log",
+  "dryrun.log",
+  "receipt.json"
+ ],
+ "audit_ledger_row": {
+  "storage": "i18n/audit-history/vi/mobile.doctor.json (ordered suffix, appended with scripts/i18n/ledger.py append)",
+  "history_sha256_before_append": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+  "history_sha256_after_append": "9994c7b1e1af535a9ac3dc47f06f5706266d4b1bb32e6fb393f80d8f6fce75d4",
+  "ledger_status": "changes_requested",
+  "why_not_i18n_ledger_json": "i18n/ledger.json and i18n/ledger/<locale>.json are migration snapshots pinned by i18n/audit-history.json; a new audit is an appended row and the last row per (locale, namespace) wins."
+ },
+ "evidence_receipt": {
+  "path": "i18n/audits/evidence/vi/mobile.doctor/a1/receipt.json",
+  "self_hash_rule": "receipt.json hashes every other artifact in this directory and not itself"
+ }
+}
