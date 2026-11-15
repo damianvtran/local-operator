@@ -216,6 +216,28 @@ SUBAGENT_JOB_TYPE = "task"
 REPLAY_COUNT = 256
 REPLAY_BYTES = 8 * 1024 * 1024
 
+#: The internal frame type ``publish`` queues IN PLACE OF a frame no subscriber
+#: queue can carry (wire size above :data:`REPLAY_BYTES`). Never sent as such:
+#: ``events`` turns it into an in-band ``gap`` followed by a fresh ``snapshot``
+#: on the SAME connection.
+#:
+#: WHY A RESYNC AND NOT THE FRAME. A frame larger than the whole per-subscriber
+#: budget can never be queued, so the old path disconnected EVERY opened viewer
+#: at once (QA Q2 on #4012: one ~37 MB ``history_delta`` cut all three streams
+#: with ``subscriber overflow``), and the desktop relay would drop it anyway
+#: (``MAX_FRAME_BYTES``, 8 MiB, ``local-operator-ui`` ``src/main/desktop-stream.ts``).
+#: The snapshot already restates the state such a frame carries -- the bounded
+#: history page plus ``frontend`` -- and the paged history route serves the rest.
+#:
+#: WHY THE CURRENT APP NEEDS NO CHANGE: the renderer's ``gap`` arm
+#: (``use-canonical-session.ts``) clears the receipt mark and the painted frontend
+#: and shows "reconnecting" while keeping the transcript's rows; the ``snapshot``
+#: that follows is then accepted on the cleared mark and sets the pane ``live``.
+#: That is exactly the pair a reconnect after an overflow delivers, minus the
+#: ``open`` frame (which only re-states the subscription id this connection still
+#: holds) -- and without dropping presence, the dwell or the connection.
+RESYNC_MARKER = "resync"
+
 #: The largest frame a subscriber-queue fold may produce. A MERGE THAT WOULD
 #: NOT FIT IS REFUSED (both frames stay, in order), because a frame
 #: past this ceiling stops being one the stream's consumers are built to carry:
@@ -1644,6 +1666,11 @@ class DesktopSubscription:
     #: deadline is INSPECTABLE: a test asserts it and moves it past, instead of
     #: waiting ``RECONNECT_DWELL_S`` out.
     dwell_until: float = 0.0
+    #: True while an in-band RESYNC marker sits in this subscriber's queue (see
+    #: :data:`RESYNC_MARKER`). One pending marker covers every oversized frame
+    #: published before ``events`` dequeues it, because the snapshot it triggers
+    #: is captured only then -- so further markers would only repeat that work.
+    resync_pending: bool = False
 
 
 def _json_copy(value: Any) -> Any:
@@ -2878,7 +2905,17 @@ class DesktopSessionBridge:
             "payload": payload,
         }
         size = len(json.dumps(frame, separators=(",", ":")).encode())
-        if replay:
+        if replay and size > REPLAY_BYTES:
+            # A FRAME LARGER THAN THE WHOLE REPLAY BUDGET IS NEVER RETAINED.
+            # Appending it evicted every retained frame and then itself, so the
+            # observable result was already an empty replay; this states it
+            # without holding tens of MB for the length of the loop. An empty
+            # replay is what keeps reconnect honest: ``events`` computes
+            # ``first`` as ``sequence + 1``, so any cursor below this frame's
+            # seq is answered with ``gap`` and a snapshot, never a silent skip.
+            self.replay.clear()
+            self.replay_bytes = 0
+        elif replay:
             self.replay.append((frame, size))
             self.replay_bytes += size
             while self.replay and (
@@ -2927,6 +2964,13 @@ class DesktopSessionBridge:
                     stripped_frame = strip_history_delta_family(frame)
                     stripped_size = len(json.dumps(stripped_frame, separators=(",", ":")).encode())
                 wire_frame, wire_size = stripped_frame, stripped_size
+            if wire_size > REPLAY_BYTES:
+                # No queue can ever hold this frame, so it is never queued and
+                # never cuts the stream: the subscriber resyncs in band instead
+                # (see ``RESYNC_MARKER``). Per subscriber, because the stripped
+                # wire form may fit where the full one does not.
+                self._request_resync(sub, self.sequence)
+                continue
             if sub.queue.full() or sub.queued_bytes + wire_size > REPLAY_BYTES:
                 # ``captured``: the snapshot's watermark is already read and its
                 # frame is being built off the loop, so this queue now holds
@@ -2967,6 +3011,45 @@ class DesktopSessionBridge:
             else:
                 sub.queue.put_nowait((wire_frame, wire_size))
                 sub.queued_bytes += wire_size
+
+    def _request_resync(self, sub: DesktopSubscription, seq: int) -> None:
+        """Queue ONE small resync marker for ``sub`` in place of an unqueueable frame.
+
+        ORDER IS KEPT because the marker takes the oversized frame's own slot in
+        this subscriber's FIFO: everything published before it is delivered
+        first, and ``events`` captures the resync snapshot only when it reaches
+        the marker, so that snapshot's watermark is at or above ``seq`` and
+        frames queued behind the marker are split exactly as at open --
+        superseded at or below the watermark, delivered after it above.
+
+        ISOLATION IS KEPT because the marker is a few dozen bytes on THIS
+        subscriber's queue under the same fit test as any frame: a viewer whose
+        queue is already full of unfoldable frames meets the relief valve it
+        always met, and no other viewer waits on it.
+        """
+        if sub.resync_pending:
+            return
+        if not (sub.opened or sub.captured):
+            # The snapshot this subscriber is still waiting for has not read its
+            # watermark yet, so it will carry this frame's state: superseded,
+            # exactly like the pre-open eviction in ``publish``.
+            return
+        marker = {
+            "session_id": self.session_id,
+            "epoch": self.epoch,
+            "seq": seq,
+            "type": RESYNC_MARKER,
+            "payload": {},
+        }
+        size = len(json.dumps(marker, separators=(",", ":")).encode())
+        if (
+            sub.queue.full() or sub.queued_bytes + size > REPLAY_BYTES
+        ) and not self._compact_subscriber_queue(sub, size):
+            self._disconnect(sub)
+            return
+        sub.queue.put_nowait((marker, size))
+        sub.queued_bytes += size
+        sub.resync_pending = True
 
     def publish_to_subscription(
         self, kind: str, payload: dict[str, Any], *, subscription_id: str
@@ -7060,18 +7143,29 @@ class DesktopSessionBridge:
                         break
                     frame, size = item
                     sub.queued_bytes -= size
-                    # Source metadata is not folded into frontend and a bounded
-                    # snapshot need not carry its IDs. Preserve it through cutover
-                    # unless this exact frame is already in the initial replay;
-                    # ordinary frontend facts retain their existing supersession.
-                    order_fact = (
-                        sub.journal_order
-                        and frame.get("type") == "event"
-                        and frame.get("payload", {}).get("type") == JOURNAL_ORDER_EVENT
-                    )
-                    already_replayed = frame["seq"] in replayed_sequences
-                    if frame["seq"] > watermark or (order_fact and not already_replayed):
+                    if kept_past(frame, watermark):
                         pending_frames.append(frame)
+
+            def kept_past(frame: dict[str, Any], watermark: int) -> bool:
+                """Whether ``frame`` must still be delivered after a snapshot at ``watermark``."""
+                if frame["seq"] > watermark:
+                    return True
+                if frame.get("type") == RESYNC_MARKER:
+                    # The snapshot being cut already carries the state the
+                    # oversized frame described: the marker is superseded, and
+                    # the next oversized frame must be free to queue its own.
+                    sub.resync_pending = False
+                    return False
+                # Source metadata is not folded into frontend and a bounded
+                # snapshot need not carry its IDs. Preserve it through cutover
+                # unless this exact frame is already in the initial replay;
+                # ordinary frontend facts retain their existing supersession.
+                order_fact = (
+                    sub.journal_order
+                    and frame.get("type") == "event"
+                    and frame.get("payload", {}).get("type") == JOURNAL_ORDER_EVENT
+                )
+                return order_fact and frame["seq"] not in replayed_sequences
 
             def captured(watermark: int) -> None:
                 # THE CAPTURE INSTANT (``snapshot``'s ``on_capture``), still on the
@@ -7082,18 +7176,24 @@ class DesktopSessionBridge:
                 drain(watermark)
                 sub.captured = True
 
-            snapshot = await self.snapshot(
-                entry_times=entry_times,
-                open_frame=open_frame,
-                **({"journal_order": True, "order_ids": order_ids} if journal_order else {}),
-                peer_journal_source=peer_journal_source,
-                **supplement_read_options(sub.supplements),
-                **cast(
-                    "DiffBindingReadOptions",
-                    {"diff_bindings": True} if sub.diff_bindings else {},
-                ),
-                on_capture=captured,
-            )
+            async def cut_snapshot() -> dict[str, Any]:
+                # ONE argument list for the open snapshot and every in-band
+                # resync snapshot (``RESYNC_MARKER``), so a resync restates the
+                # world in exactly the shape this subscriber negotiated at open.
+                return await self.snapshot(
+                    entry_times=entry_times,
+                    open_frame=open_frame,
+                    **({"journal_order": True, "order_ids": order_ids} if journal_order else {}),
+                    peer_journal_source=peer_journal_source,
+                    **supplement_read_options(sub.supplements),
+                    **cast(
+                        "DiffBindingReadOptions",
+                        {"diff_bindings": True} if sub.diff_bindings else {},
+                    ),
+                    on_capture=captured,
+                )
+
+            snapshot = await cut_snapshot()
             if open_trace.enabled():
                 open_trace.mark(
                     "a.gen.snapshot",
@@ -7168,12 +7268,36 @@ class DesktopSessionBridge:
                     session=self.session_id,
                 )
             yield snapshot
-            for frame in pending_frames:
-                yield frame
-            if disconnected:
-                yield {"type": "gap", "session_id": self.session_id}
-                return
+            # Frames still to deliver, in queue order. A deque rather than the
+            # old straight iteration because an in-band resync (below) must be
+            # able to drop the ones its fresh snapshot supersedes.
+            outbox = deque(pending_frames)
+            pending_frames.clear()
             while True:
+                while outbox:
+                    frame = outbox.popleft()
+                    if frame.get("type") != RESYNC_MARKER:
+                        yield frame
+                        continue
+                    # IN-BAND RESYNC (see ``RESYNC_MARKER``): a frame no queue
+                    # could carry was published here. Mark the break, then cut a
+                    # fresh snapshot NOW -- its watermark is at or above the
+                    # marker's seq because it is read after this dequeue -- and
+                    # split everything behind the marker against it exactly as
+                    # the open path does.
+                    sub.resync_pending = False
+                    yield {"type": "gap", "session_id": self.session_id}
+                    resynced = await cut_snapshot()
+                    drain(resynced["seq"])
+                    outbox = deque(
+                        [prior for prior in outbox if kept_past(prior, resynced["seq"])]
+                        + pending_frames
+                    )
+                    pending_frames.clear()
+                    yield resynced
+                if disconnected:
+                    yield {"type": "gap", "session_id": self.session_id}
+                    return
                 try:
                     item = await asyncio.wait_for(sub.queue.get(), timeout=15)
                 except asyncio.TimeoutError:
@@ -7185,7 +7309,7 @@ class DesktopSessionBridge:
                 frame, size = item
                 sub.queued_bytes -= size
                 if frame["seq"] > cutoff:
-                    yield frame
+                    outbox.append(frame)
         finally:
             # ONE LINE PER ENDED SUBSCRIBER STREAM, NAMING THE REASON (C5).
             # The drop storm this fix addresses had no readable cause anywhere:
