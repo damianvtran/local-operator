@@ -47,6 +47,12 @@ DESKTOP_ONLY_FEATURES = frozenset(
         # client must not be told it can read the portal password it signs in
         # with (routes/desktop_mobile_password.py).
         "mobile_password_read",
+        # Same class: the phone relay serves no `/v1/desktop/mobile/doctor`, so
+        # advertising the key from the relay would point a phone client at a
+        # route that 404s. The doctor is the DESKTOP's "Copy diagnostics" button
+        # (routes/desktop_mobile_doctor.py); a phone reads `lop mobile doctor`
+        # output through the operator, never through the relay.
+        "mobile_doctor",
         "operator_setup",
     }
 )
@@ -904,6 +910,11 @@ def static_feature_flags() -> dict[str, Any]:
         # click only, never cached or prefetched (see the route's module doc
         # for why the desktop bearer may read this secret at all).
         "mobile_password_read": 1,
+        # `GET /v1/desktop/mobile/doctor`: the read-only, redacted phone-access
+        # diagnosis (`mobile/doctor.py`) behind the desktop's "Copy
+        # diagnostics" button. ABSENT => the renderer hides the button; an older
+        # backend has no route to call.
+        "mobile_doctor": 1,
         # Turning on phone approvals (operator authority) without a terminal
         # (design v2 §6, C3): `GET/POST /v1/desktop/operator/setup`. Its own
         # key so a renderer shows [Turn on phone approvals] only against a

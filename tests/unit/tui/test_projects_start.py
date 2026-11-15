@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from pathlib import Path
 from typing import Any
 
@@ -934,6 +935,11 @@ def test_the_start_hint_carries_the_specs_own_label() -> None:
 # -- the boot flow (the app's own handler) ----------------------------------
 
 
+# A permanent stall in the link thread: the old fixed-pause test fails under a
+# 1.0 s stall (RED, measured), the worker-completion wait passes (GREEN).
+_LINK_DELAY_S = 0.5
+
+
 async def _settle(pilot: Any, times: int = 8) -> None:
     for _ in range(times):
         await pilot.pause()
@@ -963,6 +969,30 @@ async def test_the_app_creates_links_kicks_off_and_hands_off(
     monkeypatch.setattr(app, "_create_project_session", fake_create)
     monkeypatch.setattr(app, "_kick_off_project_session", fake_kickoff)
     monkeypatch.setattr(app, "_resume_session", fake_resume)
+    # Capture the project-start worker through the product's own handle. The
+    # worker awaits two REAL threads (`asyncio.to_thread` for the project read
+    # and the link), so its finish time is wall-clock, not a count of event-loop
+    # yields: a fixed `pilot.pause()` budget lost that race on a loaded CI
+    # runner (create ran, kickoff/resume had not). `_LINK_DELAY_S` lets a
+    # discriminating run stretch the link thread to prove the wait is real.
+    started_workers: list[Any] = []
+    real_run_worker = app.run_worker
+    real_link = app._link_started_session
+
+    def capture_worker(*args: Any, **kwargs: Any) -> Any:
+        worker = real_run_worker(*args, **kwargs)
+        # Boot and engine workers go through the same door; only the project
+        # start's own coroutine is the one this test must wait on.
+        if getattr(args[0], "__qualname__", "").endswith("_start_project_session_worker"):
+            started_workers.append(worker)
+        return worker
+
+    def slow_link(*args: Any, **kwargs: Any) -> Any:
+        time.sleep(_LINK_DELAY_S)
+        return real_link(*args, **kwargs)
+
+    monkeypatch.setattr(app, "run_worker", capture_worker)
+    monkeypatch.setattr(app, "_link_started_session", slow_link)
 
     async with app.run_test(size=(100, 30)) as pilot:
         await _boot(pilot, app)
@@ -974,7 +1004,15 @@ async def test_the_app_creates_links_kicks_off_and_hands_off(
         assert card is not None
         card._index = 0
         card.action_choose()
-        await _settle(pilot)
+        # The card's message reaches the app on a later pump, which is when the
+        # worker is started; wait for the handle, then for the worker itself.
+        for _ in range(200):
+            if started_workers:
+                break
+            await pilot.pause()
+        assert started_workers, "the start card never started its worker"
+        await asyncio.wait_for(started_workers[-1].wait(), timeout=15)
+        await pilot.pause()
 
     assert [name for name, _ in calls] == ["create", "kickoff", "resume"]
     # The page closed before the hand-off (the mode must be gone before the

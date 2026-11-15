@@ -61,6 +61,7 @@ from local_operator.server.routes import (
     desktop_link_preview,
     desktop_mcp,
     desktop_mesh,
+    desktop_mobile_doctor,
     desktop_mobile_password,
     desktop_monitors,
     desktop_notifications,
@@ -1100,6 +1101,7 @@ app.include_router(desktop_tunnel_setup.router)
 # `/v1/desktop/mobile/password` (capability `features.mobile_password_read`):
 # a literal path, beside the tunnel block it serves ("Using your own tunnel?").
 app.include_router(desktop_mobile_password.router)
+app.include_router(desktop_mobile_doctor.router)
 # Turn on phone approvals (design v2 §6, capability `features.operator_setup`):
 # `/v1/desktop/operator/setup`, a fixed two-segment path no sibling template shadows.
 app.include_router(desktop_operator_setup.router)

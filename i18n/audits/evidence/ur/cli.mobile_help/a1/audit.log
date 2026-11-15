@@ -1,0 +1,113 @@
+# audit_checks.py ur (mechanical + resolver render; both namespaces)
+shipped_locales: ('en', 'fr', 'es', 'zh-CN', 'ru', 'vi', 'ur', 'hi') | direction: rtl
+
+== ur/mobile.doctor: en=23 target=23 keyset_equal=True
+  mobile.doctor.versions.ok (new) cells=54 en_cells=53 maxCells=None ok
+  mobile.doctor.daemon.not_installed (new) cells=67 en_cells=71 maxCells=None ok
+  mobile.doctor.daemon.not_running (new) cells=109 en_cells=105 maxCells=None ok
+  mobile.doctor.daemon.ok (new) cells=63 en_cells=53 maxCells=None ok
+  mobile.doctor.daemon.slow (new) cells=124 en_cells=103 maxCells=None ok
+  mobile.doctor.daemon.gate_open (new) cells=70 en_cells=92 maxCells=None ok
+  mobile.doctor.daemon.state_not_running (new) cells=11 en_cells=11 maxCells=None ok
+  mobile.doctor.files.ok (new) cells=59 en_cells=51 maxCells=None ok
+  mobile.doctor.files.near (new) cells=146 en_cells=125 maxCells=None ok
+  mobile.doctor.files.unknown (new) cells=61 en_cells=69 maxCells=None ok
+  mobile.doctor.files.status_line (new) cells=23 en_cells=22 maxCells=None ok
+  mobile.doctor.logs.clean (new) cells=87 en_cells=64 maxCells=None ok
+  mobile.doctor.logs.errors (new) cells=177 en_cells=141 maxCells=None ok
+  mobile.doctor.tunnel.not_configured (new) cells=56 en_cells=60 maxCells=None ok
+  mobile.doctor.tunnel.ok (new) cells=51 en_cells=50 maxCells=None ok
+  mobile.doctor.tunnel.problem (new) cells=63 en_cells=61 maxCells=None ok
+  mobile.doctor.tunnel.single (new) cells=51 en_cells=54 maxCells=None ok
+  mobile.doctor.tunnel.duplicates (new) cells=103 en_cells=106 maxCells=None ok
+  mobile.doctor.tunnel.list_unchecked (new) cells=76 en_cells=83 maxCells=None ok
+  mobile.doctor.login.ok (new) cells=24 en_cells=21 maxCells=None ok
+  mobile.doctor.login.missing (new) cells=29 en_cells=25 maxCells=None ok
+  mobile.doctor.files.not_running (new) cells=67 en_cells=67 maxCells=None ok
+  mobile.doctor.daemon.not_answering (new) cells=146 en_cells=129 maxCells=None ok
+
+== ur/cli.mobile_help: en=17 target=17 keyset_equal=True
+  cli.mobile_help.mobile (carried) cells=46 en_cells=49 maxCells=None ok
+  cli.mobile_help.install (carried) cells=41 en_cells=44 maxCells=None ok
+  cli.mobile_help.status (carried) cells=31 en_cells=37 maxCells=None ok
+  cli.mobile_help.daemon_action (carried) cells=108 en_cells=85 maxCells=None PLACEHOLDER ['Start', 'Stop', 'Restart', 'action'] vs ['action']; placeholder-order-differs
+  cli.mobile_help.logs (carried) cells=45 en_cells=40 maxCells=None ok
+  cli.mobile_help.logs_lines (carried) cells=48 en_cells=35 maxCells=None ok
+  cli.mobile_help.logs_follow (carried) cells=114 en_cells=107 maxCells=None ok
+  cli.mobile_help.password (carried) cells=35 en_cells=34 maxCells=None ok
+  cli.mobile_help.devices (carried) cells=70 en_cells=57 maxCells=None ok
+  cli.mobile_help.devices_command (carried) cells=58 en_cells=59 maxCells=None ok
+  cli.mobile_help.devices_device_id (carried) cells=76 en_cells=69 maxCells=None ok
+  cli.mobile_help.devices_port (carried) cells=49 en_cells=60 maxCells=None ok
+  cli.mobile_help.uninstall (carried) cells=18 en_cells=22 maxCells=None ok
+  cli.mobile_help.uninstall_purge (carried) cells=20 en_cells=24 maxCells=None ok
+  cli.mobile_help.serve (carried) cells=23 en_cells=27 maxCells=None ok
+  cli.mobile_help.doctor (new) cells=54 en_cells=54 maxCells=None ok
+  cli.mobile_help.doctor_json (new) cells=30 en_cells=29 maxCells=None ok
+
+active_locale: ur
+  [daemon_gate_open] فون رسائی سروس نے پاس ورڈ مانگے بغیر جواب دیا: فون پورٹل غیر محفوظ ہے۔
+  [daemon_not_answering] فون رسائی سروس چل رہی ہے لیکن جواب نہیں دے رہی؛ فون ایپ اس کمپیوٹر کو جواب نہ دینے والا دکھاتی ہے۔ ہو سکتا ہے یہ کھلی فائلوں کی حد تک پہنچ گئی ہو۔
+  [daemon_not_installed] فون رسائی سروس اس کمپیوٹر پر سیٹ اپ نہیں ہے، اس لیے یہ نہیں چل رہی۔
+  [daemon_not_running] فون رسائی سروس سیٹ اپ ہے لیکن نہیں چل رہی؛ جب تک یہ شروع نہ ہو، فون ایپ اس کمپیوٹر کو سلیپ موڈ میں دکھاتی ہے۔
+  [daemon_ok] فون رسائی سروس چل رہی ہے اور اس نے 42 ملی سیکنڈ میں جواب دیا۔
+  [daemon_slow] فون رسائی سروس چل رہی ہے لیکن جواب دینے میں 42 ملی سیکنڈ لگے، اس لیے فون ایپ اس کمپیوٹر کو جواب نہ دینے والا دکھا سکتی ہے۔
+  [daemon_state_not_running] نہیں چل رہا
+  [files_near] فون رسائی سروس نے 312 فائلیں کھول رکھی ہیں (حد 10240)، جو حد کے قریب ہے، اس لیے فون کے نئے کنکشن اور ڈیٹا بیس کھولنے کا عمل ناکام ہو سکتا ہے۔
+  [files_not_running] فون رسائی سروس نہیں چل رہی، اس لیے گننے کے لیے کوئی کھلی فائل نہیں۔
+  [files_ok] فون رسائی سروس نے 312 فائلیں کھول رکھی ہیں (حد 10240)۔
+  [files_status_line] 312 کھلی، حد 10240
+  [files_unknown] اس کمپیوٹر پر فون رسائی سروس کی کھلی فائلیں گنی نہیں جا سکیں۔
+  [login_missing] Radient میں سائن اِن نہیں ہیں۔
+  [login_ok] Radient میں سائن اِن ہیں۔
+  [logs_clean] پچھلے ایک دن کے لاگز میں “بہت زیادہ کھلی فائلیں” یا ڈیٹا بیس کھولنے کی کوئی خرابی نہیں۔
+  [logs_errors] پچھلے ایک دن کے لاگز میں “بہت زیادہ کھلی فائلیں” کی خرابیاں (3) اور ڈیٹا بیس کھولنے کی خرابیاں (2) ہیں؛ ہو سکتا ہے فون رسائی سروس کھلی فائلوں کی حد تک پہنچ رہی ہو۔
+  [tunnel_duplicates] اس Radient اکاؤنٹ میں اس کمپیوٹر کے لیے 2 ٹنل ہیں؛ ہو سکتا ہے فون ایپ کسی پرانے ٹنل سے جڑ رہی ہو۔
+  [tunnel_list_unchecked] اکاؤنٹ کی ٹنل فہرست پڑھی نہیں جا سکی، اس لیے ڈپلیکیٹ ٹنلز کی جانچ نہیں ہوئی۔
+  [tunnel_not_configured] اس کمپیوٹر پر Radient کے ذریعے فون رسائی سیٹ اپ نہیں ہے۔
+  [tunnel_ok] ٹنل سیٹ اپ ہے اور اس کا کنیکٹر stopped حالت میں ہے۔
+  [tunnel_problem] ٹنل سیٹ اپ ہے لیکن اس کا کنیکٹر stopped حالت میں ہے (login_required)۔
+  [tunnel_single] اس Radient اکاؤنٹ میں اس کمپیوٹر کے لیے ایک ٹنل ہے۔
+  [versions_ok] Local Operator 0.9.1، Python 3.14.9 (darwin-arm64) پر۔
+
+isolated_status_text(login_ok) codepoints head/tail: ['0x2067'] ['0x2069']
+  first-strong(login_ok) = 'L' 'R'
+  first-strong(versions_ok) = 'L' 'L'
+
+# real product path
+$ LOP_LANG=ur .venv/bin/lop mobile doctor
+overall: warn
+[pass] versions: Local Operator 0.102.4، Python 3.12.15 (Linux 6.18.54-121.166.amzn2023.x86_64 x86_64) پر۔
+[warn] daemon: فون رسائی سروس اس کمپیوٹر پر سیٹ اپ نہیں ہے، اس لیے یہ نہیں چل رہی۔
+[pass] files: فون رسائی سروس نہیں چل رہی، اس لیے گننے کے لیے کوئی کھلی فائل نہیں۔
+[pass] logs: پچھلے ایک دن کے لاگز میں “بہت زیادہ کھلی فائلیں” یا ڈیٹا بیس کھولنے کی کوئی خرابی نہیں۔
+[warn] tunnel: اس کمپیوٹر پر Radient کے ذریعے فون رسائی سیٹ اپ نہیں ہے۔
+[warn] login: Radient میں سائن اِن نہیں ہیں۔
+[exit 0]
+
+$ LOP_LANG=ur .venv/bin/lop mobile --help | grep -A1 doctor
+                  {install,status,doctor,start,stop,restart,logs,password,devices,uninstall,serve}
+                  ...
+--
+  {install,status,doctor,start,stop,restart,logs,password,devices,uninstall,serve}
+    install             ڈیمن، پاس ورڈ اور LaunchAgent انسٹال کریں
+--
+    doctor              فون رسائی کی صرف پڑھنے والی تشخیص (شیئر کرنا محفوظ ہے)
+    start               ڈیمن شروع کریں
+$ LOP_LANG=ur .venv/bin/lop mobile doctor --help
+usage: lop mobile doctor [-h] [--json] [--yolo] [--resume [SESSION_ID]]
+                         [--hosting HOSTING] [--model MODEL] [--run-in RUN_IN]
+
+options:
+  -h, --help            show this help message and exit
+  --json                تشخیص JSON کی صورت میں دکھائیں
+  --yolo                بغیر پوچھے تمام ٹول ایگزیکیوشنز (read/write/exec درجے)
+                        کی خودکار منظوری
+  --resume [SESSION_ID]
+                        پچھلا سیشن id سے دوبارہ شروع کریں۔ تازہ ترین کے لیے
+                        بغیر id کے دیں۔
+  --hosting HOSTING     اس رن کے لیے ہوسٹنگ پلیٹ فارم (مثلاً anthropic,
+                        openai, openrouter)
+  --model MODEL         اس رن کے لیے استعمال ہونے والا ماڈل
+  --run-in RUN_IN       وہ ورکنگ ڈائریکٹری جس میں آپریٹر چلانا ہے
+[exit 0]

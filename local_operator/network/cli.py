@@ -1222,6 +1222,42 @@ def add_parser(
         "--network", default="", help="Network name or id (default: the only one)"
     )
     cred_mark.add_argument("--json", action="store_true")
+    # The GitHub designation's own surface (operator decision 2026-11-12): with no
+    # explicit list, a share lends for every repo this device's GitHub login can
+    # push to MINUS these opt-outs. ONE leaf with an action positional, like
+    # ``mark``'s choice, so ``--json`` sits on the verb the agent path drives.
+    cred_github = credential_actions.add_parser(
+        "github",
+        help=(
+            "Show the GitHub repositories a share lends for, or opt one out of "
+            "(or back into) that list"
+        ),
+    )
+    cred_github.add_argument(
+        "action",
+        choices=("repos", "exclude", "include"),
+        help=(
+            "'repos' lists the effective repositories and where the list came from; "
+            "'exclude'/'include' opt one repository out of / back into it"
+        ),
+    )
+    cred_github.add_argument(
+        "repository", nargs="?", default="", help="owner/repo (for exclude/include)"
+    )
+    cred_github.add_argument(
+        "--refresh",
+        action="store_true",
+        help="Ask GitHub again now instead of using the cached list ('repos' only)",
+    )
+    cred_github.add_argument(
+        "--use-default",
+        action="store_true",
+        help=(
+            "Explicitly return to every pushable repository minus opt-outs, removing "
+            "the hand-picked list and its clear fence ('repos' only)"
+        ),
+    )
+    cred_github.add_argument("--json", action="store_true")
 
     install = actions.add_parser("install", help="Install the relay's restart-on-boot service")
     install.add_argument("--json", action="store_true")
@@ -3602,6 +3638,294 @@ def _delivery_lines(delivery: dict[str, Any], name: str, *, other_owner: str = "
     return ["usable there: not yet — it arrives on that device's next sync"]
 
 
+#: How many repository names the share RECEIPT prints before "and N more" (UX
+#: round 1, U2): the receipt confirms, ``credential github repos`` lists. The
+#: ``--json`` payloads always carry the whole list.
+_RECEIPT_SHOWN = 10
+
+#: The progress line a share prints when listing takes longer than this (N5):
+#: a fast listing stays silent, a slow one is not mistaken for a hang.
+_LISTING_PROGRESS_AFTER_S = 1.0
+
+
+def _github_designation_now(*, refresh: bool, progress: bool = False) -> tuple[Any, str]:
+    """THIS device's effective GitHub designation and the arm serving it.
+
+    The arm's credential is read the way the owner's serve reads it (the stored
+    App key, the stored token, or gh's login), and the list is computed by the
+    one function the serve uses, so the receipt cannot describe a different list
+    than a borrow would get. A credential that cannot be read here still answers
+    from the cache (``allow_fetch=False``) instead of failing the command.
+    """
+    import threading
+
+    from local_operator.network.credentials import github as github_mod
+
+    root = _config_dir()
+    source = github_mod.resolve_source(root)
+    token = ""
+    app = None
+    try:
+        if source == github_mod.SOURCE_APP:
+            app = github_mod.read_app_key(root)
+        elif source == github_mod.SOURCE_TOKEN:
+            token = github_mod.read_token_secret(root)
+        elif source == github_mod.SOURCE_GH:
+            token = github_mod.read_gh_token()
+    except (
+        github_mod.GithubAppKeyError,
+        github_mod.GithubTokenError,
+        github_mod.GithubGhError,
+    ):
+        return github_mod.designation(root, source=source, allow_fetch=False), source
+    if source not in (github_mod.SOURCE_APP, github_mod.SOURCE_TOKEN, github_mod.SOURCE_GH):
+        return github_mod.designation(root, source=source, allow_fetch=False), source
+    timer = None
+    if progress:
+        timer = threading.Timer(
+            _LISTING_PROGRESS_AFTER_S,
+            lambda: print(
+                "listing the repositories your GitHub login can push to…",
+                file=sys.stderr,
+                flush=True,
+            ),
+        )
+        timer.daemon = True
+        timer.start()
+    try:
+        designated = github_mod.designation(
+            root, source=source, token=token, app=app, refresh=refresh
+        )
+    finally:
+        if timer is not None:
+            timer.cancel()
+    return designated, source
+
+
+def _designation_payload(designated: Any) -> dict[str, Any]:
+    """The machine shape of a designation: the whole list, its origin and age."""
+    return {
+        "repositories": list(designated.repositories),
+        "count": len(designated.repositories),
+        "origin": designated.origin,
+        "fetched_at": designated.fetched_at or None,
+        "age_s": int(designated.age_s()) if designated.fetched_at else None,
+        "excluded": list(designated.excluded),
+        "excluded_count": designated.excluded_count,
+        "error": designated.error,
+    }
+
+
+def _github_ttl_words() -> str:
+    """How soon an opt-out reaches borrowers: the grant window, in minutes (N4).
+
+    A borrower keeps one GitHub grant at most ``grant_ttl_s``; the next one it
+    fetches carries the narrowed list, so that window is the honest upper bound.
+    """
+    from local_operator.network.credentials import grant_ttl_s
+
+    minutes = max(1, int((grant_ttl_s(_config_dir()) + 59) // 60))
+    return f"within {minutes} min"
+
+
+def _designation_source(designated: Any) -> str:
+    """Where the list came from, in the user's words (U3): no keys, no all-caps."""
+    from local_operator.network.credentials import github as github_mod
+
+    ago = github_mod.listed_ago(designated.age_s() if designated.fetched_at else None)
+    if designated.origin == github_mod.ORIGIN_EXPLICIT:
+        return "the list you chose by hand (the GitHub repositories setting)"
+    if designated.origin == github_mod.ORIGIN_LAST_GOOD:
+        why = f" ({designated.error})" if designated.error else ""
+        return (
+            f"the list fetched {ago} — GitHub repositories couldn't be listed "
+            f"just now{why}, so it may be out of date"
+        )
+    return f"every repository this device's GitHub login can push to, listed {ago}"
+
+
+def _opted_out_lines(designated: Any) -> list[str]:
+    """The opted-out NAMES and the way back (UX round 1, U1), or that there are none."""
+    names = list(designated.excluded)
+    if not names:
+        return ["opted out: none"]
+    return [
+        f"opted out ({len(names)}): {', '.join(names)} — bring one back: "
+        "lop network credential github include <owner/repo>"
+    ]
+
+
+def _designation_lines(designated: Any, source: str, *, receipt: bool) -> list[str]:
+    """The human lines: the repositories, where they came from, what is opted out.
+
+    ``receipt`` sizes the list for the share's confirmation (a short head and a
+    pointer); ``credential github repos`` prints every name (U2).
+    """
+    from local_operator.network.credentials import github as github_mod
+
+    names = list(designated.repositories)
+    whose = "this device's"
+    if not names:
+        reason = designated.reason(whose)
+        if receipt:
+            # The share WAS recorded; only its borrows are refused (U4.3).
+            head = (
+                "GitHub repositories: none yet — the share is in place, but every borrow "
+                f"is refused while {reason}; {designated.remedy()}"
+            )
+        else:
+            head = f"GitHub repositories: none — {reason}; {designated.remedy()}"
+        return [head, *_opted_out_lines(designated)]
+    opted = f", minus {designated.excluded_count} opted out" if designated.excluded_count else ""
+    lines = [
+        f"GitHub repositories lent for: {len(names)} — {_designation_source(designated)}{opted}"
+    ]
+    shown = names[:_RECEIPT_SHOWN] if receipt else names
+    lines.extend(f"  {name}" for name in shown)
+    if len(names) > len(shown):
+        lines.append(
+            f"  … and {len(names) - len(shown)} more — see them all: "
+            "lop network credential github repos"
+        )
+    carry = (
+        github_mod.APP_MINT_MAX_REPOSITORIES
+        if source == github_mod.SOURCE_APP
+        else github_mod.MAX_DESIGNATED_REPOSITORIES
+    )
+    if len(names) > carry:
+        lines.append(
+            f"this is more than the {carry} one share can carry, so every borrow is refused "
+            "until you pick the ones to lend with the GitHub repositories setting (search it "
+            "in /settings) or opt some out"
+        )
+    lines.extend(_opted_out_lines(designated))
+    lines.append(
+        "opt a repository out: lop network credential github exclude <owner/repo> — devices "
+        f"you share with lose push to it the next time they fetch the credential, "
+        f"{_github_ttl_words()}"
+    )
+    return lines
+
+
+def _cmd_credential_github(args: argparse.Namespace) -> int:
+    """``credential github repos [--refresh] [--use-default] | exclude|include <owner/repo>``.
+
+    LOCAL: the designation is this device's own (it is the owner that lends), so
+    nothing crosses the mesh. ``exclude`` takes effect at each borrower's next
+    borrow or refresh — the owner re-reads the opt-outs on every serve and the
+    grant carries the narrowed list — which is the security direction: no cache
+    can keep an opted-out repository pushable past one grant window.
+
+    A name ``exclude`` cannot find in the current list is STORED, with a warning
+    (UX round 1, U1): an opt-out is the security direction, and a repository the
+    login gains later must arrive already opted out. Refusing it would make the
+    operator wait for the repo to exist before they could keep it out.
+    """
+    from local_operator.network.credentials import github as github_mod
+    from local_operator.network.types import MeshRefusal
+
+    action = str(args.action)
+    root = _config_dir()
+    if action == "repos":
+        if args.repository:
+            raise MeshRefusal("bad_request", "'repos' takes no repository")
+        use_default = bool(getattr(args, "use_default", False))
+        if use_default:
+            try:
+                github_mod.use_default_repositories(root)
+            except OSError as exc:
+                raise MeshRefusal(
+                    "github_default_reset_failed",
+                    "could not complete the return to the automatic GitHub repository list "
+                    f"({exc.__class__.__name__}); check this device's data folder is writable, "
+                    "then retry lop network credential github repos --use-default",
+                ) from exc
+        designated, source = _github_designation_now(refresh=bool(args.refresh) or use_default)
+        payload = {"action": "repos", **_designation_payload(designated)}
+        return _emit(args, payload, _designation_lines(designated, source, receipt=False))
+    if getattr(args, "use_default", False):
+        raise MeshRefusal("bad_request", "--use-default applies to 'repos' only")
+    if args.refresh:
+        raise MeshRefusal("bad_request", "--refresh applies to 'repos' only")
+    entry = github_mod.normalise_repository(args.repository)
+    if not entry:
+        raise MeshRefusal(
+            "bad_request", f"{action} needs one repository as owner/repo, e.g. octo-org/website"
+        )
+    designated, _source = _github_designation_now(refresh=False)
+    known = bool(designated.listed) or designated.origin != github_mod.ORIGIN_UNAVAILABLE
+    in_list: bool | None = (
+        entry.lower() in {name.lower() for name in designated.listed} if known else None
+    )
+    which = (
+        "the list you chose by hand"
+        if designated.origin == github_mod.ORIGIN_EXPLICIT
+        else "the list this device's GitHub login can push to"
+    )
+    unchecked = f" ({designated.error})" if designated.error else ""
+    current = list(github_mod.excluded_repositories(root))
+    lowered = [name.lower() for name in current]
+    if action == "exclude":
+        changed = entry.lower() not in lowered
+        updated = current + [entry] if changed else current
+    else:
+        changed = entry.lower() in lowered
+        updated = [name for name in current if name.lower() != entry.lower()]
+    if changed:
+        github_mod.write_excluded(root, updated)
+    ttl = _github_ttl_words()
+    if action == "exclude" and not changed:
+        line = f"{entry} was already opted out"
+    elif action == "exclude" and in_list is False:
+        line = (
+            f"{entry} isn't in {which} — check the spelling; it's opted out anyway, in case "
+            "it's added later"
+        )
+    elif action == "exclude" and in_list is None:
+        line = (
+            f"{entry} is opted out; its spelling couldn't be checked because {which} "
+            f"couldn't be fetched{unchecked}"
+        )
+    elif action == "exclude":
+        line = (
+            f"{entry} is opted out — devices you share with lose push to it the next time "
+            f"they fetch the credential, {ttl}"
+        )
+    elif not changed:
+        line = f"{entry} was not opted out"
+    elif in_list is False:
+        line = (
+            f"{entry} is no longer opted out, but it isn't in {which}, so it still isn't "
+            "lent — check the spelling"
+        )
+    elif in_list is None:
+        line = (
+            f"{entry} is no longer opted out; whether it's in {which} couldn't be checked"
+            f"{unchecked}"
+        )
+    else:
+        line = (
+            f"{entry} is back in — devices you share with can push to it again the next time "
+            f"they fetch the credential, {ttl}"
+        )
+    payload = {
+        "action": action,
+        "repository": entry,
+        "changed": changed,
+        "in_list": in_list,
+        "excluded": updated,
+    }
+    remaining = _with_excluded(designated, updated)
+    return _emit(args, payload, [line, *_opted_out_lines(remaining)])
+
+
+def _with_excluded(designated: Any, excluded: list[str]) -> Any:
+    """``designated`` with the opt-out list as it stands AFTER this command."""
+    import dataclasses
+
+    return dataclasses.replace(designated, excluded=tuple(excluded))
+
+
 def _cmd_credential(args: argparse.Namespace) -> int:
     """``credential share|revoke <key> --with/--from <dev>``: the owner's own verb.
 
@@ -3863,6 +4187,15 @@ def _cmd_credential(args: argparse.Namespace) -> int:
         # narrowed server-side, and the share receipt must not promise narrowing
         # a token arm cannot deliver.
         lines.append(_github_share_disclosure(name, github_mod.resolve_source(_config_dir())))
+        # THE LIST IS SHOWN WHERE THE OPERATOR SHARES (operator decision
+        # 2026-11-12): the share is a moment the operator is looking, so the list
+        # is refreshed here and every repository it lends for is on the receipt,
+        # with how to opt one out.
+        designated, gh_source = _github_designation_now(
+            refresh=True, progress=not getattr(args, "json", False)
+        )
+        payload["repositories"] = _designation_payload(designated)
+        lines.extend(_designation_lines(designated, gh_source, receipt=True))
     if verb == "revoke":
         # THE TRUE REVOCATION LATENCY, said where the operator acts (QA round 1, Q5;
         # design §3.7). A revoke stops NEW grants at once, but no provider offers a
@@ -3901,14 +4234,18 @@ def _cmd_credential(args: argparse.Namespace) -> int:
             # which happened — a queued notice, an already-wiped copy, or no RECORDED copy —
             # and carries the ceiling after EVERY one of them (design review round 1, D1: the
             # state that claims the most used to be the only one without it).
-            copied, wiped = _copy_ledger_state(record.network_id, device, key)
+            copied, wiped, unacknowledged = _copy_ledger_state(record.network_id, device, key)
             payload["copy"] = {
                 "confirmed": copied,
                 "wiped": wiped,
-                "wipe": "done" if (copied and wiped) else ("queued" if copied else "none"),
+                "wipe": "done" if wiped else ("queued" if copied or unacknowledged else "none"),
             }
+            if unacknowledged:
+                payload["copy"]["unacknowledged"] = True
             lines.extend(
-                messages_mod.render_copy_revoke_notice(name, key, copied=copied, wiped=wiped)
+                messages_mod.render_copy_revoke_notice(
+                    name, key, copied=copied, wiped=wiped, unacknowledged=unacknowledged
+                )
             )
             lines.extend(messages_mod.COPY_CEILING_LINES)
             return _emit(args, payload, lines)
@@ -3918,13 +4255,17 @@ def _cmd_credential(args: argparse.Namespace) -> int:
         # exactly the case where the remedy matters most. Read from the entry the
         # revoke just wrote, so the receipt describes what was actually lent.
         static = str(entry_json.get("kind") or "") == "api-key-static"
-        copied, wiped = _copy_ledger_state(record.network_id, device, key)
-        if copied:
+        copied, wiped, unacknowledged = _copy_ledger_state(record.network_id, device, key)
+        if copied or unacknowledged:
             # The class-4 copy half, same vocabulary as class 2's (§4.3: the
             # receipt says which happened).
             payload["copy"] = {"confirmed": copied, "wiped": wiped}
+            if unacknowledged:
+                payload["copy"]["unacknowledged"] = True
             lines.extend(
-                messages_mod.render_copy_revoke_notice(name, key, copied=copied, wiped=wiped)
+                messages_mod.render_copy_revoke_notice(
+                    name, key, copied=copied, wiped=wiped, unacknowledged=unacknowledged
+                )
             )
         if github_mod.is_github_key(key):
             # THE M1-RESTATED COPY, to match the mechanism (mint-revoke at the
@@ -3964,8 +4305,8 @@ def _cmd_credential(args: argparse.Namespace) -> int:
     return _emit(args, payload, lines)
 
 
-def _copy_ledger_state(network_id: str, device: str, key: str) -> tuple[bool, bool]:
-    """``(confirmed, wiped)`` for one member's copy of ``key``, from the ledger.
+def _copy_ledger_state(network_id: str, device: str, key: str) -> tuple[bool, bool, bool]:
+    """``(confirmed, wiped, unacknowledged)`` for one member's copy of ``key``.
 
     The same document the listing's segments read, so the receipt and the
     listing cannot disagree about whether a copy is outstanding. An unreadable
@@ -3977,31 +4318,38 @@ def _copy_ledger_state(network_id: str, device: str, key: str) -> tuple[bool, bo
     try:
         state = SyncState.load(network_id)
     except Exception:  # noqa: BLE001 — an unreadable ledger confirms nothing
-        return False, False
+        return False, False, False
+    # Prefer the newest open copy, including a re-copy after a confirmed wipe.
+    # A dispatch is evidence of sending, NEVER evidence of confirmed delivery.
+    for row in state.open_copies(device):
+        if row["key"] == key:
+            pending = bool(row["unacknowledged"])
+            return not pending, False, pending
     row = state.ack_for(device, key)
     if not isinstance(row, dict):
-        return False, False
-    return True, bool(row.get("wiped"))
+        return False, False, False
+    return True, bool(row.get("wiped")), False
 
 
-def _unconfirmed_copies(network_id: str, device: str) -> int:
-    """How many ledger rows for ``device`` are still NOT ``wiped``.
+def _unconfirmed_copies(network_id: str, device: str) -> tuple[int, int]:
+    """``(open, unacknowledged)`` copy counts when the relay cannot run endings.
 
     The removal receipt's count when there is no relay to run the ending
     exchange (review round 1, Q1): every open row is a copy nothing confirmed
     deleted, so the receipt names the open state instead of a clean sweep. The
     same read ``_copy_ledger_state`` makes, summed over the member instead of
-    one key; an unreadable ledger counts zero rows and the receipt stays as it
-    was rather than inventing copies.
+    one key; an unreadable ledger derives neither count rather than inventing
+    copies. The second count preserves uncertainty about delivery, not deletion.
     """
     from local_operator.network.credentials.sync import SyncState
 
     try:
         state = SyncState.load(network_id)
     except Exception:  # noqa: BLE001 — an unreadable ledger confirms nothing
-        return 0
-    # Sent-but-unacknowledged copies are open too (``SyncState.dispatched``).
-    return len(state.open_copies(device))
+        return 0, 0
+    # The offline receipt must retain delivery uncertainty, just like the relay.
+    rows = state.open_copies(device)
+    return len(rows), sum(bool(row["unacknowledged"]) for row in rows)
 
 
 def _canonical_credential_key(raw: str) -> str:
@@ -4507,7 +4855,7 @@ def _cmd_member_rm(args: argparse.Namespace) -> int:
     # THE COPIES THIS PATH CANNOT CONTACT (review round 1, Q1): with no relay there
     # is no link, so nothing is confirmed deleted — but the receipt must still say
     # what the ledger shows, or a removal with live copies reads as a clean sweep.
-    copies = _unconfirmed_copies(record.network_id, device_id)
+    copies, unacknowledged = _unconfirmed_copies(record.network_id, device_id)
     outcome = imported.remove_member(record, state, device_id=device_id, by=record.self_device_id)
     for member in record.active_members():
         if member.device_id == record.self_device_id:
@@ -4544,12 +4892,16 @@ def _cmd_member_rm(args: argparse.Namespace) -> int:
             "copies": copies,
             "wiped": 0,
             "timed_out": 0,
+            "unacknowledged": unacknowledged,
         },
         [
             f"removed {args.device} from {record.name}; epoch is now {outcome.epoch}",
             "the relay is not running, so the rotation is queued for delivery",
             *messages_mod.render_removal_endings(
-                _member_name(record, device_id) or args.device, copies=copies, wiped=0
+                _member_name(record, device_id) or args.device,
+                copies=copies,
+                wiped=0,
+                unacknowledged=unacknowledged,
             ),
         ],
     )
@@ -10892,6 +11244,8 @@ def _guard_credential_subcommand(args: argparse.Namespace) -> int:
         return _cmd_credential_refresh(args)
     if verb == "inherit":
         return _cmd_credential_inherit(args)
+    if verb == "github":
+        return _cmd_credential_github(args)
     if verb in ("share", "revoke", "mark"):
         return _cmd_credential(args)
     print(
@@ -10902,6 +11256,8 @@ def _guard_credential_subcommand(args: argparse.Namespace) -> int:
         "       lop network credential revoke <provider|mcp:<url>> --from <device>\n"
         "       lop network credential mark   <secret> sync|local-only|default\n"
         "       lop network credential refresh <provider> [--json]\n"
+        "       lop network credential github repos [--refresh] [--use-default] [--json] | "
+        "exclude|include <owner/repo> [--json]\n"
         "       lop network credentials [--json]   # what is shared, and with whom",
         file=sys.stderr,
     )
@@ -12017,13 +12373,32 @@ def _cmd_definitions(args: argparse.Namespace) -> int:
                     else f"  custom instructions: {instructions.get('outcome')}"
                     + (f" ({why})" if why else "")
                 )
+            # The subagent model tiers: same reasoning, same line shape. A peer that
+            # kept its own map is why a pinned role runs on a different model there.
+            tiers = item.get(definitions.SUBAGENT_TIERS_KIND)
+            if isinstance(tiers, dict) and tiers.get("outcome") in (
+                "installed",
+                "updated",
+                "conflict",
+                "refused",
+                "withheld",
+            ):
+                tiers_notice = str(tiers.get("notice") or "")
+                tiers_why = str(tiers.get("reason") or "")
+                lines.append(
+                    f"  subagent model tiers: {tiers_notice}"
+                    if tiers_notice
+                    else f"  subagent model tiers: {tiers.get('outcome')}"
+                    + (f" ({tiers_why})" if tiers_why else "")
+                )
         return _emit(
             args, {"ok": bool(detail.get("ok")), "peers": rows}, lines or ["nothing to do"]
         )
 
     # ``state``: this device's own definitions, plus what was mirrored here.
     index = definitions.read_index(root)
-    state = definitions.definition_state(root)
+    # Local view: the tier values are shown here, never sent in the wire reply.
+    state = definitions.definition_state(root, include_tier_models=True)
     mirrored = {
         kind: {
             str(name): str(row.get("origin") or "")
@@ -12082,6 +12457,41 @@ def _cmd_definitions(args: argparse.Namespace) -> int:
             lines.append(f"failover routing {unit}: yours")
     if routing.get("status") == "unreadable":
         lines.append("failover routing: config.yml could not be read")
+    # The subagent model tiers (``subagents.models``): whose map this is, which
+    # model each tier runs on HERE, and the last peer revision kept out. Answers
+    # "why does effort=hi refuse / run on another model on this node" locally.
+    tiers = state.get(definitions.SUBAGENT_TIERS_KIND) or {}
+    tiers_status = str(tiers.get("status") or "absent")
+    tier_models = tiers.get("models") or {}
+    tier_text = ", ".join(
+        f"{tier}={value.get('model') if isinstance(value, dict) else value}"
+        for tier, value in tier_models.items()
+    )
+    tier_suffix = f" ({tier_text})" if tier_text else ""
+    if tiers_status == "mirror":
+        lines.append(
+            f"subagent model tiers: mirrored from {tiers.get('origin') or '?'}{tier_suffix}"
+        )
+    elif tiers_status == "edited":
+        lines.append(
+            "subagent model tiers: yours (edited after being mirrored from "
+            f"{tiers.get('origin') or '?'}){tier_suffix}"
+        )
+    elif tiers_status == "authored":
+        lines.append(f"subagent model tiers: yours{tier_suffix}")
+    elif tiers_status == "unreadable":
+        lines.append("subagent model tiers: the config could not be read")
+    tiers_conflict = tiers.get("conflict")
+    if isinstance(tiers_conflict, dict):
+        lines.append(
+            f"subagent model tiers from {tiers_conflict.get('origin') or '?'} not installed: "
+            f"{tiers_conflict.get('reason') or 'this device kept its own'}"
+            + (
+                "; clear subagents.models here to receive those"
+                if tiers_status in ("authored", "edited")
+                else ""
+            )
+        )
     if not lines:
         lines = ["no agent or team definitions on this device"]
     # Routing authority (review r2, m3), after the empty-state line so a bare
@@ -12112,6 +12522,7 @@ def _cmd_definitions(args: argparse.Namespace) -> int:
             "mirrored": mirrored,
             definitions.OPERATOR_INSTRUCTIONS_KIND: instructions,
             routing_sync.ROUTING_KIND: routing,
+            definitions.SUBAGENT_TIERS_KIND: tiers,
         },
         lines,
     )

@@ -1,0 +1,11 @@
+# ledger append dry-run for zh-CN/mobile.doctor a2 (.venv/bin/python scripts/i18n/ledger.py)
+$ ledger.py history-sha --locale zh-CN --namespace mobile.doctor
+d33efe9b8b788d0af8e799deae2778eb6ded2c4f0afac3112d914f8084d1936f
+$ ledger.py append --receipt $LOCAL_OPERATOR_SCRATCHPAD/ledger-receipt-zh-CN-mobile.doctor-a2.json --expected-history-sha d33efe9b8b788d0af8e799deae2778eb6ded2c4f0afac3112d914f8084d1936f --dry-run
+exit=0
+i18n/audit-history/zh-CN/mobile.doctor.json
+$ ledger.py append ... --apply
+exit=0
+i18n/audit-history/zh-CN/mobile.doctor.json
+$ ledger.py history-sha --locale zh-CN --namespace mobile.doctor   # after apply
+29061148b4d724e3404b7ef17ee00ecb61deab0e8f5c30eb4171c7c98585df71

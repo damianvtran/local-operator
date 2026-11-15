@@ -71,6 +71,11 @@ _AMBIENT_VARS = (
     # an operator's inherited ``=0`` would waive the refusal the admission cells
     # assert, so it is scrubbed; a cell that needs a floor sets its own.
     "LOCAL_OPERATOR_ADMISSION_FLOOR_MB",
+    # The SIGINFO sensor's off-switch (``siginfo``): an inherited ``off`` would
+    # disable the sensor in every cell, silently waiving what the sensor cells
+    # assert. Scrubbed; the sensor-specific cells set it explicitly via
+    # monkeypatch.
+    "LOCAL_OPERATOR_SIGINFO_SENSOR",
     # The open-frame trace names a real output file, read once at import.
     # Inheriting it could append test timings to the operator's trace; tests
     # that exercise tracing must opt in with their own isolated output path.

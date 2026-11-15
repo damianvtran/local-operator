@@ -69,6 +69,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, cast
 
+from local_operator.asks.surfaces import PROFILE_CONSENT_SURFACES
 from local_operator.compaction.carry import (
     is_carried_tier,
     read_recent_decisions,
@@ -381,6 +382,7 @@ if TYPE_CHECKING:
     # Type-only: the consent intent is a harness value, held without being
     # constructed here.
     from local_operator.harness.types import DurableWriteIntent
+    from local_operator.harness.verifier import VerifierLimits, VerifierVerdict
     from local_operator.mcp.manager import McpManager
 
     # Type-only: the contract itself is built by the host that installs it
@@ -474,7 +476,12 @@ def _profile_input_class(message: Any) -> str:
     if custom_type == "ask_response":
         details = getattr(message, "details", None) or {}
         by = details.get("answered_by") or {}
-        if ask_answer_is_person(message) and by.get("surface") in {"tui", "desktop", "chat"}:
+        # ``desktop``/``tui`` are consent only because the runtime now stamps
+        # every WIRE answer's surface from a per-connection capability proof
+        # (``asks/surfaces.stamp_answer_surface``): a frame's own ``by`` can no
+        # longer write them, so an unproven answer reads ``unverified``/``remote``
+        # and lands here as untrusted.
+        if ask_answer_is_person(message) and by.get("surface") in PROFILE_CONSENT_SURFACES:
             return "consent"
         return "untrusted"
     if custom_type is not None:
@@ -13561,6 +13568,164 @@ class Session:
             if isinstance(question, Mapping)
         )
 
+    @staticmethod
+    def _bridge_door_refusal(record: Mapping[str, Any] | None) -> str:
+        """The sentence a plain ask door refuses a bridge-carried record with.
+
+        PR #3938 U5: a headless node's ``site:v1:`` card is a bridge record too,
+        so it is refused here like any other — but the Team Bridge sentence
+        ("approve it from the request's own card … or a paired device") is wrong
+        for it. The caller reaching this door IS on the card: it is a desktop
+        app or client from before signed site approvals, whose answer route
+        still posts to ``ask_respond``/revise/per-question. The phone the
+        sentence offers is exactly what a site card cannot be answered from.
+        So a site card gets the old-signer refusal, the same keyed sentence the
+        runtime's challenge and ``bridge_decide`` doors give (update this
+        computer; the card stays open). The refusal itself is unchanged: these
+        doors carry no signature, so they still fail by construction.
+        """
+        from local_operator.browser_bridge.site_approval import is_site_question_id
+
+        if isinstance(record, Mapping) and any(
+            is_site_question_id(question.get("question_id"))
+            for question in (record.get("questions") or ())
+            if isinstance(question, Mapping)
+        ):
+            from local_operator.i18n.keys import browser_site_approval as _site_keys
+            from local_operator.i18n.messages import render_resolved
+
+            return render_resolved(_site_keys.refused_old_signer())
+        return Session.BRIDGE_DECISION_DOOR_REQUIRED
+
+    async def site_decide(
+        self,
+        ask_id: str,
+        question_id: str,
+        word: str,
+        *,
+        submit: Callable[[dict[str, Any]], Awaitable[Mapping[str, Any]]] | None = None,
+    ) -> dict[str, Any]:
+        """The ``site:v1:`` door: a headless node's per-site browser approval.
+
+        Reached from the runtime's ``bridge_decide`` op for a question id
+        carrying :data:`~local_operator.browser_bridge.site_approval.SITE_QUESTION_PREFIX`
+        — AHEAD of the Team Bridge door, because a site ask has nothing to do
+        with agent messages and must work on a node with no Team Bridge at all.
+        The authority seam already admitted the frame and minted the one-shot
+        grant; when the admission was a verified operator signature it also
+        stashed the signed proof beside it.
+
+        THE EFFECT HAPPENS FIRST, THE RECORD SECOND. The node's browser
+        extension re-verifies the operator's signature against its own
+        managed-policy anchor and decides exactly the entry the question id
+        binds; only when it reports ``applied`` is the grant consumed and the
+        answer recorded. Recording first would let the ask say "approved" for a
+        site the browser refused (bad signature, expired entry). A refusal
+        withdraws the grant (the S-R3-3 rule: a refused frame leaves nothing
+        spendable) and comes back typed, so the card can say why.
+
+        ``submit`` is injectable for tests; production sends
+        ``submit_signed_decision`` over the browser bridge of THIS host.
+        """
+        from local_operator.browser_bridge import site_approval
+        from local_operator.harness.approval import (
+            bridge_decide_grant_proof,
+            consume_bridge_decide_grant,
+            withdraw_bridge_decide_grant,
+        )
+        from local_operator.i18n.keys import browser_site_approval as _copy
+        from local_operator.i18n.messages import render_resolved
+
+        session_id = str(self.session_id)
+        ask_id = str(ask_id)
+        question_id = str(question_id)
+        decision_word = str(word or "").strip().lower()
+
+        def _refuse(text: str, code: str = "") -> dict[str, Any]:
+            withdraw_bridge_decide_grant(
+                session_id=session_id, ask_id=ask_id, question_id=question_id
+            )
+            answer: dict[str, Any] = {"ok": False, "error": text}
+            if code:
+                answer["code"] = code
+            return answer
+
+        queue = self.ask_queue()
+        if queue is None:
+            return _refuse("this session's runtime predates queued asks")
+        record = queue.find(ask_id)
+        if record is None:
+            return _refuse(_ask_refusal_copy(None))
+        question = next(
+            (
+                candidate
+                for candidate in (record.get("questions") or ())
+                if isinstance(candidate, Mapping)
+                and str(candidate.get("question_id") or "") == question_id
+            ),
+            None,
+        )
+        if question is None or not site_approval.is_site_question_id(question_id):
+            return _refuse("that request's question is not on this ask.")
+        if decision_word not in site_approval.SITE_WORDS:
+            return _refuse("that is not an answer this request accepts — choose Approve or Deny.")
+        refusal = _ask_refusal_copy(record)
+        if refusal:
+            return _refuse(refusal)
+        proof = (
+            bridge_decide_grant_proof(
+                session_id=session_id, ask_id=ask_id, question_id=question_id, word=decision_word
+            )
+            or {}
+        )
+        params = {
+            "session_id": session_id,
+            "ask_id": ask_id,
+            "question_id": question_id,
+            "word": decision_word,
+            # Empty when the frame was admitted WITHOUT a signature (the node's
+            # own console holds the spawn capability): the extension refuses
+            # that as ``unsigned_decision``, by design — see the module doc.
+            "challenge": proof.get("challenge", ""),
+            "sig": proof.get("operator_sig", ""),
+            "key_id": proof.get("operator_key_id", ""),
+        }
+        if submit is None:
+            from local_operator.browser_bridge.backend import BridgeClient
+
+            async def _bridge_submit(payload: dict[str, Any]) -> Mapping[str, Any]:
+                return await BridgeClient().call("submit_signed_decision", payload)
+
+            submit = _bridge_submit
+        try:
+            result = await submit(params)
+        except Exception:  # noqa: BLE001 — any transport failure: nothing was decided
+            logger.warning(
+                "site decide: the browser bridge did not take ask %s", ask_id, exc_info=True
+            )
+            return _refuse(render_resolved(_copy.refused_unreachable()), "site_unreachable")
+        if not result.get("applied"):
+            reason = str(result.get("reason") or "")
+            copy = {
+                "unsigned_decision": _copy.refused_unsigned(),
+                "no_approver": _copy.refused_no_approver(),
+                "wrong_key": _copy.refused_bad_signature(),
+                "bad_signature": _copy.refused_bad_signature(),
+            }.get(reason, _copy.refused_expired())
+            return _refuse(render_resolved(copy), reason or "no_live_request")
+        consume_bridge_decide_grant(
+            session_id=session_id, ask_id=ask_id, question_id=question_id, word=decision_word
+        )
+        slot = str(question.get("id") or "")
+        outcome = queue.respond(ask_id, {slot: [decision_word]}, by="operator")
+        if not outcome.get("ok"):
+            # The browser HAS the decision; only the record failed. Say so
+            # rather than claim nothing happened — await_access reads the
+            # browser, which is the truth for the agent.
+            logger.warning("site decide: ask %s decided in the browser but not recorded", ask_id)
+            return {"ok": True, "word": decision_word, "recorded": False}
+        return {"ok": True, "word": decision_word, "state": str(result.get("state") or "")}
+
     def bridge_decide(self, ask_id: str, question_id: str, word: str) -> dict[str, Any]:
         """TB-02 P1: the ONLY door a bridge request may be decided through.
 
@@ -13818,7 +13983,7 @@ class Session:
             # re-word a message from another organization. The refusal names
             # the door that works. Class-qualified because reduced stand-in
             # sessions (the ask-wire fixtures) drive the real method.
-            return {"ok": False, "error": Session.BRIDGE_DECISION_DOOR_REQUIRED}
+            return {"ok": False, "error": Session._bridge_door_refusal(record)}
         refusal = _ask_refusal_copy(record)
         if refusal:
             return {"ok": False, "error": refusal}
@@ -13907,7 +14072,7 @@ class Session:
             # and `answer_ask_question` — a bridge request is re-worded only
             # through the verified door (`bridge_decide`), never by a raw
             # revision this route carries no proof for.
-            return {"ok": False, "error": Session.BRIDGE_DECISION_DOOR_REQUIRED}
+            return {"ok": False, "error": Session._bridge_door_refusal(record)}
         # THE PROBE BEFORE THE HOP. Same decision the write path makes, asked
         # without writing; see the docstring for what doing it in the other order
         # costs. Nothing can interleave between the two — this method is sync and
@@ -13972,7 +14137,7 @@ class Session:
             # re-word a message from another organization. The refusal names
             # the door that works. Class-qualified because reduced stand-in
             # sessions (the ask-wire fixtures) drive the real method.
-            return {"ok": False, "error": Session.BRIDGE_DECISION_DOOR_REQUIRED}
+            return {"ok": False, "error": Session._bridge_door_refusal(record)}
         refusal = _ask_refusal_copy(record)
         if refusal:
             return {"ok": False, "error": refusal}
@@ -14276,6 +14441,104 @@ class Session:
         if queue is None:
             return {"ok": False, "error": "this session's runtime predates queued asks"}
         return queue.withdraw(ask_id, reason=reason, answers=answers, message_id=message_id, by=by)
+
+    def site_ask_lapses(self, origin: str) -> int:
+        """How many site cards for ``origin`` lapsed unanswered since the operator last spoke.
+
+        Review U15: a node's agent may re-raise a site card once after it
+        expires; the browser tool refuses a further card from this count, so the
+        bound lives in the queue (it survives compaction and an agent that lost
+        count) rather than in the model's memory. ``timed_out``/``expired``
+        count, and ``dismissed`` too — clearing a lapsed card from the screen
+        is not an answer, and must not reset the bound. A card the agent
+        withdrew itself (``cancel_access``, a superseded entry) or one the
+        operator answered or declined is not the operator ignoring it.
+
+        THE OPERATOR'S REPLY RE-OPENS THE BOUND (review R4-1). Counting the
+        whole session's history refused forever, so an operator who came back
+        and said "ask me again" could not be honoured. Only lapses that settled
+        AFTER the operator's last admitted chat message count, which gives one
+        fresh card plus one re-raise per operator reply. A card lapses at its
+        ``expires_at`` (a dismissal is only accepted on an already-lapsed card,
+        so that is its lapse moment too), compared in the same millisecond clock
+        as the message stamp.
+
+        "The operator spoke" is :meth:`latest_user_message_at`, deliberately:
+        it is stamped only by :meth:`_note_admitted_user_message`, i.e. a plain
+        ``Message(role="user")`` the turn or the steer drain handed to the
+        model, minus rows stamped harness-injected (``RENDERED_INJECTION_KEY``)
+        and harness chrome (goal/connectivity continuations, spooled prompts).
+        Wake and monitor deliveries, incidents, system notices, peer ``send``
+        cards, Team Bridge messages and subagent ``hub`` messages are
+        ``CustomMessage`` rows and never reach the stamp, so nothing another
+        local session or this agent sends can re-open the bound. A REMOTE prompt
+        (``REMOTE_PROMPT_KEY``: the operator's desktop attached over the mesh,
+        the relayed phone) is still a person's turn and counts — on a headless
+        node it is the operator's only way to chat at all.
+        """
+        from local_operator.asks import store as _ask_store
+        from local_operator.browser_bridge.site_approval import is_site_question_id
+
+        queue = self.ask_queue()
+        if queue is None:
+            return 0
+        lapsed_states = (
+            _ask_store.STATUS_TIMED_OUT,
+            _ask_store.STATUS_EXPIRED,
+            _ask_store.STATUS_DISMISSED,
+        )
+        spoke_at = self.latest_user_message_at() or 0
+        count = 0
+        for record in queue.records():
+            if record.get("status") not in lapsed_states:
+                continue
+            if int(record.get("expires_at") or 0) <= spoke_at:
+                continue
+            if any(
+                isinstance(question, Mapping)
+                and is_site_question_id(question.get("question_id"))
+                and isinstance(question.get("site"), Mapping)
+                and str(question["site"].get("origin") or "") == origin
+                for question in record.get("questions") or ()
+            ):
+                count += 1
+        return count
+
+    def withdraw_site_asks(self, origin: str, keep_question_id: str = "") -> list[str]:
+        """Settle this session's OPEN site cards for ``origin`` (review U3/Q1).
+
+        A headless node's site card is bound to ONE extension entry by its
+        ``site:v1:`` question id. Once that entry is gone — ``cancel_access``,
+        or a fresh request that the extension gave a new entry — the card can
+        only be refused when answered, and while it stays open the queue's
+        identical-text rule keeps the live entry from getting a card at all.
+        So the browser tool withdraws it (``moot``: nothing is injected, the
+        operator's surfaces drop it) and raises a card bound to the live entry.
+        ``keep_question_id`` spares the card that IS bound to the live entry.
+        """
+        from local_operator.browser_bridge.site_approval import is_site_question_id
+
+        queue = self.ask_queue()
+        if queue is None:
+            return []
+        withdrawn: list[str] = []
+        for record in queue.open_records():
+            for question in record.get("questions") or ():
+                if not isinstance(question, Mapping):
+                    continue
+                question_id = str(question.get("question_id") or "")
+                site = question.get("site")
+                if (
+                    is_site_question_id(question_id)
+                    and isinstance(site, Mapping)
+                    and str(site.get("origin") or "") == origin
+                    and question_id != keep_question_id
+                ):
+                    outcome = queue.withdraw(str(record.get("ask_id") or ""), reason="moot")
+                    if outcome.get("ok"):
+                        withdrawn.append(str(record.get("ask_id") or ""))
+                    break
+        return withdrawn
 
     def abort(self, reason: str = "interrupted") -> None:
         """Abort the running turn; the engine emits an aborted agent_end.
@@ -22946,6 +23209,16 @@ class Session:
             # the queue is absent, which is what keeps ``ask_withdraw`` off the
             # blocking arm's tool surface.
             withdraw_ask=self._ask_withdraw_callable(),
+            # A node's stale site cards (cancelled or superseded extension
+            # entries) are settled through the same engine, so the same
+            # condition binds it.
+            withdraw_site_asks=(
+                self.withdraw_site_asks if self._ask_withdraw_callable() is not None else None
+            ),
+            # The re-raise bound (review U15) reads the same queue.
+            site_ask_lapses=(
+                self.site_ask_lapses if self._ask_withdraw_callable() is not None else None
+            ),
             # THE ASK GATE'S DOOR (design docs/design/ask-gate.md §2.2): the
             # same two conditions as the two doors above, so its presence IS
             # "this ask would queue" — which is exactly the population the
@@ -23149,6 +23422,333 @@ class Session:
             effort=effort,
             model_selector=model,
         )
+
+    async def verify_completion(
+        self,
+        *,
+        request: str,
+        claim: str,
+        observation: str | None = None,
+        host_tools: "Sequence[AgentTool]" = (),
+        limits: "VerifierLimits | None" = None,
+        on_started: "Callable[[dict[str, Any]], None] | None" = None,
+        label: str = "Verify completion",
+        evidence: str | None = None,
+    ) -> "VerifierVerdict":
+        """Run the harness completion verifier against a claimed-finished task.
+
+        WHY A SESSION PRIMITIVE. The check must be independent of the model
+        that did the work (fresh context, read-only reach), and it must be the
+        HARNESS's decision to run it: the model that most needs checking is the
+        one that never delegates (``harness/verifier.py`` has the measurement).
+        It reuses the ordinary child machinery (``run_subagent``) so the
+        verifier is a real child session: its own transcript, its request rows
+        attributed by ``job_id`` and ``actor_role="verifier"`` into whatever
+        accounting the root tree feeds, its job cancelled with this session.
+
+        What differs from a ``task`` launch, and why:
+
+        * the role is code-defined (``verifier_profile``), never the registry's;
+        * a :class:`ChildSurface` ceiling of the verifier allowlist, so the
+          child gets no ``web_*`` floor, no ``hub``/``task``, no inherited MCP,
+          and ``readonly_shell``: its ``bash`` is write-confined by THIS launch,
+          not by the ``verifier`` name (an operator role of that name keeps
+          its own shell);
+        * ``host_tools`` -- whatever lets it SEE the deliverable -- exist in
+          that child only, wrapped to count against ``max_commands``. Their
+          presence means the deliverable is on a remote target, so the
+          child's LOCAL read/glob/grep/bash are withdrawn (``verifier_ceiling``:
+          main33's host-confused verdicts); with none, the local read-only set
+          is unchanged;
+        * ``evidence`` -- the worker's recorded tool calls, so the check starts
+          from the claims instead of rediscovering them. ``None`` reads this
+          session's own most recent answered calls (``recent_tool_evidence``);
+          ``""`` sends none;
+        * ``announce=False``: the result is returned here, never injected into
+          this session's conversation;
+        * bounded by :class:`VerifierLimits`: a spent command budget refuses
+          and asks for the verdict; the request cap cancels once a request
+          past it asks for more tools; the wall cancels. A verdict line in
+          the child's final assistant message wins over all three, even when
+          the job was cancelled before it settled (PR #3837 round 3).
+
+        Never raises for an expected refusal (closing session, memory
+        admission, no request observation to enforce the request cap): those
+        return ``INCONCLUSIVE`` with ``ended_by="refused"`` so the caller can
+        record a skip and carry on exactly as if no verifier existed. Blocks
+        until the verdict; the caller decides what the worker sees.
+        """
+
+        from local_operator import memory_guard
+        from local_operator.harness.subagent import ChildSurface, run_subagent
+        from local_operator.harness.verifier import (
+            CANCEL_JOIN_S,
+            REQUEST_BUDGET_REFUSAL,
+            VERIFIER_ROLE,
+            VerifierLimits,
+            VerifierVerdict,
+            build_verifier_prompt,
+            counted_host_tools,
+            find_verdict,
+            parse_verdict,
+            recent_tool_evidence,
+            verifier_ceiling,
+            verifier_profile,
+        )
+
+        limits = limits or VerifierLimits()
+        started = time.monotonic()
+
+        def refused(reason: str) -> VerifierVerdict:
+            return VerifierVerdict(
+                status="INCONCLUSIVE",
+                findings=reason,
+                ended_by="refused",
+                wall_s=time.monotonic() - started,
+            )
+
+        if self._disposed or self._owned_work_closing:
+            return refused("this session is shutting down")
+        # The same admission every child pays (``_launch_subagent``): a verifier
+        # is resident work in this process like any other child.
+        admission = memory_guard.admission_check("a completion verifier")
+        if not admission.admitted:
+            return refused(admission.reason or "memory admission refused")
+        # What the child is actually GIVEN, for ``verifier_started``/``tools``
+        # (review M5): the declaration lists ``bash``, but a confined child on
+        # a host that cannot sandbox gets no shell at all, by the same probe
+        # ``_readonly_shell_root`` asks (cached after the first spawn). Asked
+        # BEFORE the request subscription, so nothing awaits between that and
+        # the ``finally`` that removes it.
+        from local_operator.tools.confinement import (
+            shell_sandbox_unavailable_reason_async,
+        )
+
+        no_shell_sandbox = await shell_sandbox_unavailable_reason_async() is not None
+
+        cap_requests = limits.request_budget
+        state: dict[str, Any] = {
+            "job_id": None,
+            "requests": 0,
+            "assistant_messages": 0,
+            # The latest assistant message's text when it called NO tool --
+            # the child's answer -- else ``None`` (a later step supersedes it).
+            "answer": None,
+            "local_tools": 0,
+            "caps": [],
+        }
+        # Set only when a request PAST the cap asks for more tools: the child
+        # did not take its last request to answer, so it is cancelled now. A
+        # past-the-cap request that answers is the verdict and is waited for.
+        overshoot = asyncio.Event()
+        host_names = frozenset(tool.name for tool in host_tools)
+
+        def hit(cap: str) -> None:
+            if cap not in state["caps"]:
+                state["caps"].append(cap)
+
+        def observe(observation: Any) -> None:
+            # Request-final rows of the WHOLE root tree arrive here; only the
+            # verifier's own job counts. Synchronous, append-and-return.
+            if state["job_id"] is None or observation.job_id != state["job_id"]:
+                return
+            state["requests"] += 1
+            if state["requests"] >= cap_requests:
+                hit("requests")
+            if state["requests"] > cap_requests + 1:
+                # Backstop for requests that end without an assistant message
+                # (so ``on_message`` never judges them): the first past the
+                # cap cannot be told from one whose message is still on its
+                # way (row and message arrive in either order), so it is the
+                # SECOND past the cap that is cancelled -- at most two past
+                # the cap in this case, one in every other.
+                overshoot.set()
+
+        def on_message(text: str, tool_names: tuple[str, ...], stop_reason: str | None) -> None:
+            # From the child's relay, synchronously, at each finished
+            # assistant message (``ChildSurface.on_assistant_message``). Max
+            # of both counts: the request row and the message event of one
+            # request may arrive in either order.
+            state["assistant_messages"] += 1
+            # Only a message the provider FINISHED is an answer: a stream that
+            # errored (or was aborted, or hit its length) still ends the
+            # message with its partial text, whose last line may be a
+            # per-requirement ``Verdict: PASS`` written on the way to the real
+            # one (review round 3, M1: a failed job read as a PASS).
+            state["answer"] = None if tool_names or stop_reason != "stop" else text
+            state["local_tools"] += sum(1 for name in tool_names if name not in host_names)
+            if tool_names and max(state["assistant_messages"], state["requests"]) > cap_requests:
+                overshoot.set()
+
+        def request_budget_spent() -> str | None:
+            # Tool calls made by the cap's own request (its row has arrived by
+            # the time they run) -- host or the child's own -- are refused
+            # with the cue to answer, so the one request past the cap is spent
+            # on the verdict.
+            return REQUEST_BUDGET_REFUSAL if state["requests"] >= cap_requests else None
+
+        try:
+            unsubscribe = self.subscribe_requests(observe)
+        except RuntimeError:
+            # Without request observation the request cap cannot be enforced,
+            # and an uncapped verifier is not one this method may launch.
+            return refused("request observation unavailable; the request cap cannot be enforced")
+        wrapped, command_count = counted_host_tools(
+            host_tools,
+            limit=limits.max_commands,
+            on_call=lambda _count: None,
+            on_exhausted=lambda: hit("commands"),
+            refuse_when=request_budget_spent,
+        )
+        # ``readonly_shell`` confines this launch's ``bash`` by the launch
+        # itself, never by the ``verifier`` name (an operator's registry role
+        # of that name must keep its own shell: review R2 / QA Q1).
+        surface = ChildSurface(
+            # Grounding: a remote target channel withdraws the local tools.
+            ceiling=verifier_ceiling(host_names),
+            host_tools=wrapped,
+            readonly_shell=True,
+            on_assistant_message=on_message,
+            # The child's own tools (read/grep/bash) get the same cue on the
+            # cap's request as the host tools, so a child is never cancelled
+            # for a request past the cap it was not told to spend answering.
+            tool_gate=request_budget_spent,
+        )
+        job_id: str | None = None
+        settled: asyncio.Event | None = None
+        granted = surface.declaration(getattr(self, "_declared_tools", None)) or frozenset()
+        if no_shell_sandbox:
+            granted = granted - {"bash"}
+        granted_tools = tuple(sorted(granted))
+        if evidence is None:
+            # Read before launch, from this session's own context: the worker
+            # is parked (the caller awaits the verdict), so the list is stable.
+            evidence = recent_tool_evidence(list(self._context.messages))
+        prompt = build_verifier_prompt(
+            request=request,
+            claim=claim,
+            observation=observation,
+            evidence=evidence,
+            target_tools=tuple(sorted(host_names)),
+        )
+        try:
+            try:
+                job_id = run_subagent(
+                    label,
+                    prompt,
+                    parent_session=self,
+                    jobs_manager=self.jobs,
+                    agent=VERIFIER_ROLE,
+                    profile_override=verifier_profile(),
+                    surface=surface,
+                    announce=False,
+                )
+            except Exception as error:  # noqa: BLE001 -- a refused launch is a skip
+                logger.warning("completion verifier could not launch", exc_info=True)
+                return refused(f"launch refused: {error}")
+            # Set before the first await: the runner has not run yet, so no
+            # request of this job can have finished unobserved.
+            state["job_id"] = job_id
+            job = self.jobs.get(job_id)
+            if on_started is not None:
+                on_started(
+                    {
+                        "job_id": job_id,
+                        "model": getattr(job, "model_label", None),
+                        "tools": list(granted_tools),
+                        "limits": limits.as_record(),
+                    }
+                )
+            settled = self.jobs.settled_event(job_id)
+            deadline = started + float(limits.wall_s)
+
+            async def first_of(events: "tuple[asyncio.Event, ...]", timeout: float) -> None:
+                waiters = [asyncio.ensure_future(event.wait()) for event in events]
+                try:
+                    await asyncio.wait(
+                        waiters, timeout=max(0.0, timeout), return_when=asyncio.FIRST_COMPLETED
+                    )
+                finally:
+                    for waiter in waiters:
+                        waiter.cancel()
+
+            # No short settle grace any more: a spent command budget and the
+            # request cap both leave the child its answering request, and only
+            # a past-the-cap request asking for MORE tools (``overshoot``) or
+            # the wall ends it early. The worst case is still ``wall_s +
+            # CANCEL_JOIN_S``, the envelope embedders budget for.
+            await first_of((settled, overshoot), deadline - time.monotonic())
+            ended_by: str | None = None
+            if not settled.is_set():
+                ended_by = "requests" if overshoot.is_set() else "wall"
+                hit(ended_by)
+                await self.jobs.cancel(job_id)
+                with contextlib.suppress(asyncio.TimeoutError):
+                    await asyncio.wait_for(settled.wait(), timeout=CANCEL_JOIN_S)
+            job = self.jobs.get(job_id)
+            status_text = getattr(job, "status", None)
+            usage = getattr(job, "usage", None)
+            common: dict[str, Any] = {
+                "job_id": job_id,
+                "requests": state["requests"],
+                "commands": command_count(),
+                "wall_s": time.monotonic() - started,
+                "model": getattr(job, "model_label", None),
+                "tools": granted_tools,
+                "transcript_dir": (
+                    str(directory)
+                    if (comms := getattr(self, "subagent_comms", None)) is not None
+                    and (directory := comms.session_dir_of(job_id)) is not None
+                    else None
+                ),
+                "usage": usage.model_dump(mode="json") if usage is not None else None,
+                "caps_hit": tuple(state["caps"]),
+                "local_tools": state["local_tools"],
+            }
+            # A child that answered wins over any cap: the verdict exists, so
+            # use it. Settled ``completed`` is the ordinary case; otherwise the
+            # job was cancelled (or failed) AFTER its final assistant message,
+            # whose verdict line is still the answer -- the live t31v episode
+            # discarded a ``VERDICT: PASS`` exactly here.
+            if status_text == "completed" and job is not None:
+                verdict_status, findings = parse_verdict(job.result_text)
+                return VerifierVerdict(
+                    status=verdict_status, findings=findings, ended_by="verdict", **common
+                )
+            # Never from a job that FAILED: its last message is whatever the
+            # error left, and a failed check is INCONCLUSIVE, never a pass
+            # (M1). The rescue is for a job a cap cancelled after it answered.
+            rescued = (
+                find_verdict(state["answer"])
+                if status_text not in ("failed", "interrupted")
+                else None
+            )
+            if rescued is not None:
+                return VerifierVerdict(
+                    status=rescued[0], findings=rescued[1], ended_by="verdict", **common
+                )
+            ended_by = ended_by or "failed"
+            detail = (
+                (getattr(job, "error_text", None) or "the verifier did not finish")
+                if ended_by == "failed"
+                else f"the verifier was stopped by its {ended_by} cap before giving a verdict"
+            )
+            return VerifierVerdict(
+                status="INCONCLUSIVE", findings=detail, ended_by=ended_by, **common
+            )
+        except BaseException:
+            # The caller was cancelled (an Esc, a teardown) or a callback
+            # raised: the observer enforcing the request cap is about to be
+            # unsubscribed and the wall cap WAS the wait above, so a child left
+            # running here would run uncapped and, being consumed, never
+            # surface (review R3). Shielded so the cancel itself completes even
+            # though this task is being cancelled.
+            if job_id is not None and not (settled is not None and settled.is_set()):
+                with contextlib.suppress(Exception):
+                    await asyncio.shield(self.jobs.cancel(job_id))
+            raise
+        finally:
+            unsubscribe()
 
     def _record_divergence_notice(self, payload: dict[str, Any]) -> None:
         """Paint a divergence notice into the transcript, from the judge's callback.
@@ -23378,6 +23978,7 @@ class Session:
         """
         from local_operator.harness.subagent import (
             SubagentModelUnavailable,
+            local_missing_tier_remedy,
             resolve_member_model,
         )
 
@@ -23492,7 +24093,16 @@ class Session:
             # that would be noise about a default (the pre-strict code was
             # silent there too). Malformed or unreadable config still warns.
             if strict:
-                raise SubagentModelUnavailable(wanted, reason)
+                # ``quiet`` is exactly the "nothing configured at that tier"
+                # case (``resolve_member_model``), the one a mesh node with
+                # ``subagents: {}`` hits for every tier-pinned role; the refusal
+                # names the fix so the delegating model reports it instead of
+                # silently relaunching on ``model=inherit`` or as a session.
+                raise SubagentModelUnavailable(
+                    wanted,
+                    reason,
+                    remedy=local_missing_tier_remedy(str(wanted)) if quiet else "",
+                )
             if not quiet:
                 logger.warning("subagent model tier %r: %s; using session model", wanted, reason)
             return None

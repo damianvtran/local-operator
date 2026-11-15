@@ -50,6 +50,7 @@ from typing import (
     cast,
 )
 
+from local_operator.asks.surfaces import UNVERIFIED as UNVERIFIED_SURFACE
 from local_operator.buildwatch import UpdateLock
 from local_operator.buildwatch import wake_within_window as _wake_within_window
 from local_operator.harness.approval import (
@@ -530,7 +531,7 @@ _ANNOUNCE_FAILED = "failed"
 _display_watch_attached: set[str] = set()
 
 
-def _session_may_announce(session: Any) -> bool:
+def session_may_announce(session: Any) -> bool:
     """Whether ``session`` is one the operator's OWN listings would show.
 
     THE RULE, stated once: a session the operator's own listings HIDE must not
@@ -574,6 +575,14 @@ def _session_may_announce(session: Any) -> bool:
     except Exception:  # noqa: BLE001 — an unanswered question must not silence a toast
         logger.debug("could not read the session origin for the announce gate", exc_info=True)
         return True
+
+
+# PUBLIC since the mobile push worker asks the same question (push parity with
+# the desktop banner, PR #3989 review R2): a cross-module caller must not hang
+# off a private name in this module, where a rename would break pushes silently
+# inside a tick whose exceptions are only logged. The private alias stays so
+# this module's own call sites and existing tests keep reading unchanged.
+_session_may_announce = session_may_announce
 
 
 def _already_bounded(images: Any) -> bool:
@@ -7245,7 +7254,11 @@ class ServingSessionHandle(SessionHandle):
 
     @_on_session_loop
     async def ask_answer(
-        self, request_id: str, value: str, question_index: int | None = None
+        self,
+        request_id: str,
+        value: str,
+        question_index: int | None = None,
+        by: str = UNVERIFIED_SURFACE,
     ) -> str:
         # ``question_index`` is accepted for protocol parity with the TUI handle
         # (U8 guard). An owned session assigns a DISTINCT request_id per question
@@ -7259,7 +7272,11 @@ class ServingSessionHandle(SessionHandle):
         # synthetic id has to resolve onto the whole-ask queue rather than onto a
         # gate future that never existed. Nothing else is touched: every other
         # request id is an approval or a live picker and falls through unchanged.
-        mirrored = await self._mirror_ask_answer(request_id, value)
+        # ``by`` is the label the RUNTIME stamped for this connection
+        # (``asks/surfaces.stamp_answer_surface``): ``mirror`` only when the
+        # frame proved the operator capability. The fail-closed default is for
+        # a caller that never went through that seam.
+        mirrored = await self._mirror_ask_answer(request_id, value, by=by)
         if mirrored is not None:
             return mirrored
         # Resolve with the QUESTION id the harness asked under — never our
@@ -7272,7 +7289,9 @@ class ServingSessionHandle(SessionHandle):
             raise ValueError("that question was already answered") from exc
         return "answered"
 
-    async def _mirror_ask_answer(self, request_id: str, value: str | None) -> str | None:
+    async def _mirror_ask_answer(
+        self, request_id: str, value: str | None, *, by: str = UNVERIFIED_SURFACE
+    ) -> str | None:
         """Answer a queued ask through the legacy mirrored card id, or ``None``.
 
         ``None`` is "this is not a mirrored ask id" — the ordinary case on every
@@ -7296,7 +7315,7 @@ class ServingSessionHandle(SessionHandle):
         if not value:
             # An EMPTY value is today's Esc and settles the WHOLE ask: a decline
             # is not a step of the multi-step flow.
-            outcome = self._session.decline_ask(ask_id, by="mirror")
+            outcome = self._session.decline_ask(ask_id, by=by)
             if not outcome.get("ok"):
                 raise ValueError(str(outcome.get("error") or "the decline was refused"))
             return "declined"
@@ -7310,7 +7329,7 @@ class ServingSessionHandle(SessionHandle):
         # settle the ask in one atomic write. ``ask_respond`` stays atomic and
         # still refuses a partial map — a whole-ask client has no reason to send
         # one, and accepting it there would be a second, weaker contract.
-        outcome = self._session.answer_ask_question(ask_id, key, [value], by="mirror")
+        outcome = self._session.answer_ask_question(ask_id, key, [value], by=by)
         if not outcome.get("ok"):
             raise ValueError(str(outcome.get("error") or "the answer was refused"))
         if not outcome.get("settled"):
@@ -7370,7 +7389,24 @@ class ServingSessionHandle(SessionHandle):
         signature over the composite ask#question#word target) and which minted
         the one-shot grant the dispatcher consumes at the point of effect. A
         plain ``ask_respond`` on a bridge ask is refused by the session.
+
+        A ``site:v1:`` question (a headless node's per-site browser approval,
+        ``browser_bridge/site_approval.py``) takes the session's async site door
+        instead: its effect is a browser-bridge call, and it needs no Team
+        Bridge runtime. A refusal keeps its typed ``code`` in the message so
+        the surface can tell "unsigned" from "expired".
         """
+        from local_operator.browser_bridge.site_approval import is_site_question_id
+
+        site_door = getattr(self._session, "site_decide", None)
+        if is_site_question_id(question_id) and site_door is not None:
+            site_outcome = await cast(
+                Callable[[str, str, str], Awaitable[Mapping[str, Any]]], site_door
+            )(ask_id, question_id, word)
+            if not site_outcome.get("ok"):
+                raise ValueError(str(site_outcome.get("error") or "the decision was refused"))
+            await self._session.reconcile_asks()
+            return "decided"
         outcome = self._session.bridge_decide(ask_id, question_id, word)
         if not outcome.get("ok"):
             raise ValueError(str(outcome.get("error") or "the decision was refused"))
