@@ -817,7 +817,6 @@ class ForeignCreations:
         if live is None:
             return None
 
-
         def foreign(path: str) -> CreationRecord | None:
             owners, rec = live[path]
             return None if any(self._related(o) for o in owners) else rec
