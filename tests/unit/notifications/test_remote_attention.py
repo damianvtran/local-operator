@@ -69,6 +69,25 @@ def _no_banner_threads(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
     return calls
 
 
+@pytest.fixture(autouse=True)
+def _fresh_origin_memo(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Give every test an empty ``record_forwarding_origin`` memo.
+
+    The product remembers ``(str(root), device)`` process-wide so the origins
+    file is written once per origin, not on every catalogue read. In the suite
+    that memo outlives the ``tmp_path`` it names: this repo deletes a PASSING
+    test's ``tmp_path`` (``tmp_path_retention_policy = "failed"``), and the
+    pytest CI runs (8.x) numbers the next directory from the suffixes that still
+    EXIST, so a later parameter gets the earlier one's path back — with no
+    ``remote-attention-origins.json`` in it, yet a memo saying it was written.
+    CI run 43661997364, shards (3.12, 4) and (3.13, 4): ``[origin1-False]``
+    of ``test_default_deny_the_node_reply_matches_the_owner_forward_filter``
+    failed ``assert 'd_head' in {}`` that way. ``monkeypatch`` swaps in a fresh
+    set and restores the module's own afterwards, so no test sees another's.
+    """
+    monkeypatch.setattr(ra, "_recorded_origins", set())
+
+
 def _row(
     *,
     attention: tuple[str, str] | None = None,
@@ -1366,6 +1385,17 @@ def test_default_deny_the_node_reply_matches_the_owner_forward_filter(
         assert "will be forwarded" not in sentence, sentence
         assert "it stays on this device" in sentence and "moved, forked" in sentence
         assert keys == [], "the head inbox gets nothing from an unattested stamp"
+
+
+def test_a_reused_tmp_path_still_records_its_forwarding_origin(tmp_path: Path) -> None:
+    """Regression for the order-dependent CI failure: a root path handed out
+    again after its directory was deleted (pytest 8 renumbering a passing
+    test's removed ``tmp_path``) still gets its origins file, because no
+    test inherits another test's memo (``_fresh_origin_memo``)."""
+    assert ra._recorded_origins == set()
+    owner = _owner(tmp_path)
+    ra.stamp_rows_for_viewer(owner, [_catalog_row()], HEAD)
+    assert HEAD in ra.forwarding_origins(owner)
 
 
 def test_a_session_brought_home_keeps_its_reply_byte_for_byte(tmp_path: Path) -> None:
