@@ -58,7 +58,7 @@
   "cmd": "cd ~/minervaai; for r in infrastructure ..; do (cd $r; rm -rf .local-operator); done",
   "cwd": ".",
   "base": {
-   "unrelated": "LOW",
+   "unrelated": "HIGH",
    "owner": "LOW"
   }
  },
@@ -76,7 +76,7 @@
   "cmd": "cd ~/minervaai/infrastructure; for r in services terraform-cloud-bootstrap; do cd $r; rm -rf build; done",
   "cwd": ".",
   "base": {
-   "unrelated": "LOW",
+   "unrelated": "HIGH",
    "owner": "LOW"
   }
  },
@@ -94,7 +94,7 @@
   "cmd": "for r in terraform-cloud-bootstrap services; do git -C ~/minervaai/infrastructure/$r worktree remove ~/minervaai/infrastructure/$r/.worktrees/tfc-acm-sbx-auth; echo rc=$?; test -e ~/minervaai/infrastructure/$r/.worktrees/tfc-acm-sbx-auth && echo STILL || echo absent; git -C ~/minervaai/infrastructure/$r worktree list; git -C ~/minervaai/infrastructure/$r status --short | head; git -C ~/minervaai/infrastructure/$r branch --list feat/tfc-acm-sbx-auth; done",
   "cwd": ".",
   "base": {
-   "unrelated": "LOW",
+   "unrelated": "HIGH",
    "owner": "LOW"
   }
  },
@@ -112,7 +112,7 @@
   "cmd": "git -C {home}/minervaai/infrastructure/services worktree remove {home}/minervaai/infrastructure/services/.worktrees/tfc-acm-sbx-auth",
   "cwd": ".",
   "base": {
-   "unrelated": "LOW",
+   "unrelated": "HIGH",
    "owner": "LOW"
   }
  },
@@ -121,7 +121,7 @@
   "cmd": "rm -rf {home}/minervaai/infrastructure/services/.worktrees/tfc-acm-sbx-auth",
   "cwd": ".",
   "base": {
-   "unrelated": "LOW",
+   "unrelated": "HIGH",
    "owner": "LOW"
   }
  },
@@ -130,7 +130,7 @@
   "cmd": "git -C {home}/minervaai/infrastructure/services worktree remove --force {home}/minervaai/infrastructure/services/.worktrees/tfc-acm-sbx-auth",
   "cwd": ".",
   "base": {
-   "unrelated": "LOW",
+   "unrelated": "HIGH",
    "owner": "LOW"
   }
  },
@@ -148,7 +148,7 @@
   "cmd": "git -C {home}/minervaai/infrastructure/services/.worktrees worktree remove {home}/minervaai/infrastructure/services/.worktrees/box/t",
   "cwd": ".",
   "base": {
-   "unrelated": "LOW",
+   "unrelated": "HIGH",
    "owner": "LOW"
   }
  },
@@ -211,7 +211,7 @@
   "cmd": "cd /tmp; for r in ~/a ..; do cd $r; rm -rf .local-operator; done",
   "cwd": ".",
   "base": {
-   "unrelated": "LOW",
+   "unrelated": "HIGH",
    "owner": "LOW"
   }
  },
@@ -220,7 +220,7 @@
   "cmd": "git -C {home}/minervaai/infrastructure/services worktree remove --f {home}/minervaai/infrastructure/services/.worktrees/tfc-acm-sbx-auth",
   "cwd": ".",
   "base": {
-   "unrelated": "LOW",
+   "unrelated": "HIGH",
    "owner": "LOW"
   }
  },
@@ -229,7 +229,7 @@
   "cmd": "git -C {home}/minervaai/infrastructure/services worktree remove --fo {home}/minervaai/infrastructure/services/.worktrees/tfc-acm-sbx-auth",
   "cwd": ".",
   "base": {
-   "unrelated": "LOW",
+   "unrelated": "HIGH",
    "owner": "LOW"
   }
  },
@@ -238,7 +238,7 @@
   "cmd": "git -C {home}/minervaai/infrastructure/services worktree remove --for {home}/minervaai/infrastructure/services/.worktrees/tfc-acm-sbx-auth",
   "cwd": ".",
   "base": {
-   "unrelated": "LOW",
+   "unrelated": "HIGH",
    "owner": "LOW"
   }
  },
@@ -247,7 +247,7 @@
   "cmd": "git -C {home}/minervaai/infrastructure/services worktree remove --forc {home}/minervaai/infrastructure/services/.worktrees/tfc-acm-sbx-auth",
   "cwd": ".",
   "base": {
-   "unrelated": "LOW",
+   "unrelated": "HIGH",
    "owner": "LOW"
   }
  },
@@ -328,7 +328,7 @@
   "cmd": "cd ~/a; for r in . ..; do cd $r; cd /tmp; cd -; rm -rf .local-operator; done",
   "cwd": ".",
   "base": {
-   "unrelated": "LOW",
+   "unrelated": "HIGH",
    "owner": "LOW"
   }
  },
@@ -337,7 +337,7 @@
   "cmd": "cd ~/a; for r in . ..; do cd $r; cd /tmp; cd \"$OLDPWD\"; rm -rf .local-operator; done",
   "cwd": ".",
   "base": {
-   "unrelated": "LOW",
+   "unrelated": "HIGH",
    "owner": "LOW"
   }
  },
@@ -499,7 +499,7 @@
   "cmd": "cp -n {home}/.local-operator/sessions/cccccccccccc/scratchpad/r2/notes.md ~/work/new-copy.md",
   "cwd": "work",
   "base": {
-   "unrelated": "LOW",
+   "unrelated": "HIGH",
    "owner": "LOW"
   }
  },
@@ -508,7 +508,7 @@
   "cmd": "cp -n {home}/.local-operator/sessions/cccccccccccc/scratchpad/r2/notes.md {home}/work/new.md",
   "cwd": ".",
   "base": {
-   "unrelated": "LOW",
+   "unrelated": "HIGH",
    "owner": "LOW"
   }
  },
@@ -517,7 +517,7 @@
   "cmd": "cp -n {home}/.local-operator/sessions/cccccccccccc/scratchpad/r2/notes.md {home}/work/old.md",
   "cwd": ".",
   "base": {
-   "unrelated": "LOW",
+   "unrelated": "HIGH",
    "owner": "LOW"
   }
  },
@@ -526,7 +526,7 @@
   "cmd": "cp -nf {home}/.local-operator/sessions/cccccccccccc/scratchpad/r2/notes.md {home}/work/old.md",
   "cwd": ".",
   "base": {
-   "unrelated": "LOW",
+   "unrelated": "HIGH",
    "owner": "LOW"
   }
  },
@@ -535,7 +535,7 @@
   "cmd": "cp -n -i {home}/.local-operator/sessions/cccccccccccc/scratchpad/r2/notes.md {home}/work/old.md",
   "cwd": ".",
   "base": {
-   "unrelated": "LOW",
+   "unrelated": "HIGH",
    "owner": "LOW"
   }
  },
@@ -544,7 +544,7 @@
   "cmd": "cp  {home}/.local-operator/sessions/cccccccccccc/scratchpad/r2/notes.md {home}/work/old.md",
   "cwd": ".",
   "base": {
-   "unrelated": "LOW",
+   "unrelated": "HIGH",
    "owner": "LOW"
   }
  },
@@ -580,7 +580,7 @@
   "cmd": "cat {home}/.local-operator/sessions/bbbbbbbbbbbb/scratchpad/r2/agent-remediation-r1.md; git -C ~/work status --short; gh pr comment 3702 -R o/r -F {home}/.local-operator/sessions/bbbbbbbbbbbb/scratchpad/r2/agent-remediation-r1.md; gh pr comment 3702 -R o/r -F {home}/.local-operator/sessions/bbbbbbbbbbbb/scratchpad/r2/agent-remediation-r1.md; shasum -a 256 {home}/.local-operator/sessions/bbbbbbbbbbbb/scratchpad/r2/agent-remediation-r1.md; cp -n {home}/.local-operator/sessions/bbbbbbbbbbbb/scratchpad/r2/agent-remediation-r1.md ~/work/copied-aaaaaaaaaaaa.md",
   "cwd": "work",
   "base": {
-   "unrelated": "LOW",
+   "unrelated": "HIGH",
    "owner": "LOW"
   }
  },
@@ -589,7 +589,7 @@
   "cmd": "cat {home}/.local-operator/sessions/aaaaaaaaaaaa/scratchpad/r2/agent-remediation-r1.md; git -C ~/work status --short; gh pr comment 3702 -R o/r -F {home}/.local-operator/sessions/aaaaaaaaaaaa/scratchpad/r2/agent-remediation-r1.md; gh pr comment 3702 -R o/r -F {home}/.local-operator/sessions/aaaaaaaaaaaa/scratchpad/r2/agent-remediation-r1.md; shasum -a 256 {home}/.local-operator/sessions/aaaaaaaaaaaa/scratchpad/r2/agent-remediation-r1.md; cp -n {home}/.local-operator/sessions/aaaaaaaaaaaa/scratchpad/r2/agent-remediation-r1.md ~/work/copied-bbbbbbbbbbbb.md",
   "cwd": "work",
   "base": {
-   "unrelated": "LOW",
+   "unrelated": "HIGH",
    "owner": "LOW"
   }
  },
@@ -1435,7 +1435,7 @@
   "cmd": "sed -I .bak 's/a/b/' {home}/work/f.txt",
   "cwd": "work",
   "base": {
-   "unrelated": "LOW",
+   "unrelated": "HIGH",
    "owner": "LOW"
   }
  },
@@ -1444,7 +1444,7 @@
   "cmd": "sed -EI '' 's/a/b/' {home}/work/f.txt",
   "cwd": "work",
   "base": {
-   "unrelated": "LOW",
+   "unrelated": "HIGH",
    "owner": "LOW"
   }
  },
@@ -2002,7 +2002,7 @@
   "cmd": "cd ~; for r in a .; do for s in ~/a .; do (cd $r; cd $s; rm -rf .local-operator); done; done",
   "cwd": ".",
   "base": {
-   "unrelated": "LOW",
+   "unrelated": "HIGH",
    "owner": "LOW"
   }
  },

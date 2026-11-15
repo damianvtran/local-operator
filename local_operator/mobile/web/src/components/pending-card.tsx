@@ -75,7 +75,8 @@ import { cn } from "../lib/cn";
 import { PENDING_CARD_FRACTION, columnCap } from "../lib/column";
 import { NotPairedError, operatorFieldsFor } from "../lib/operator-device";
 import { setApprovalsPolicy, approvalPolicyLine, globalDefaultReceipt } from "../lib/approval-policy";
-import { PairPromptSheet } from "../screens/pair";
+import { markPairingActionGone, openPairingSheet } from "../screens/pair";
+import { rekeyAfterRevocation } from "../lib/pair-flow";
 import { messageRuntime } from "../store";
 import type { PendingRequest } from "../types";
 
@@ -104,6 +105,15 @@ function humanizeError(message: string): string {
 		return messageRuntime.t("relay.asks.error.session_timeout");
 	}
 	return message;
+}
+
+/** Thrown inside an answer when the pairing sheet opened instead: the answer did
+    not happen, and the card must stay answerable with no error line. */
+class PairingOpened extends Error {
+	constructor() {
+		super("pairing opened");
+		this.name = "PairingOpened";
+	}
 }
 
 /** Make a receipt read as a sentence before the card appends its own.
@@ -162,12 +172,14 @@ export function PendingCard({
 	const [freeText, setFreeText] = useState("");
 	const [busy, setBusy] = useState(false);
 	const [error, setError] = useState("");
-	/* The pairing prompt the AUTHORITY refusal raises on a phone that is not paired
-	   with the machine. Component-local, like the rest of this card's transient state,
-	   and keyed away with it by the render site's ``request_id`` key — a prompt that
-	   survived to the next question would offer a pairing for a card nobody is
-	   looking at any more. */
-	const [pairPrompt, setPairPrompt] = useState(false);
+	/* The pairing sheet this card may open lives at the app root (D15), because
+	   it must outlive the card: when this request is answered or expires
+	   elsewhere the card unmounts, and the sheet then says so instead of
+	   promising a "tap Approve again" there is nothing left to tap. */
+	useEffect(() => {
+		const actionId = pending.request_id;
+		return () => markPairingActionGone(actionId);
+	}, [pending.request_id]);
 
 	/* THE MODE LINKS' OWN TRANSIENT STATE, deliberately separate from
 	   `busy`/`error` above. Those two belong to the ANSWER, and `error !== ""`
@@ -217,8 +229,12 @@ export function PendingCard({
 		try {
 			await fn();
 		} catch (e) {
-			setError(humanizeError(String((e as Error).message ?? e)));
 			setBusy(false);
+			/* Pairing opened in place: the card stays answerable, with no error to
+			   grey it out (D7's inert rule), so the fresh tap after pairing works.
+			   Nothing is retried for the person — approving stays their gesture. */
+			if (e instanceof PairingOpened) return;
+			setError(humanizeError(String((e as Error).message ?? e)));
 		}
 		/* No local reset on the success path. For a single-question ask the
 		   next repaint clears `pending` and unmounts this card; for a
@@ -284,12 +300,19 @@ export function PendingCard({
 			await sendCommandWithProof(pid, { ...plain, ...fields });
 		} catch (failure) {
 			if (failure instanceof NotPairedError) {
-				/* Offer the remedy instead of naming it. The refusal copy tells the
-				   reader to authorise from a paired phone or the machine; a phone that
-				   is not paired is therefore ONE TAP from being able to, rather than
-				   being told to go and find a terminal — the dead end UX round 2
-				   raised against the old copy. */
-				setPairPrompt(true);
+				/* Ben's dead end (design v2 A1): an unpaired phone tapping Approve
+				   now gets the pairing flow IN PLACE, titled for this action, and
+				   comes back to this card afterwards. */
+				openPairingSheet({ purpose: "approve", actionId: pending.request_id });
+				throw new PairingOpened();
+			}
+			if (failure instanceof HttpError && failure.code === "operator_device_revoked") {
+				/* U15: the computer removed this phone. Discard its key, mint a
+				   fresh one, and offer "Pair again" — a new request needing a new
+				   approval on the computer. */
+				await rekeyAfterRevocation();
+				openPairingSheet({ purpose: "approve", actionId: pending.request_id, notice: "revoked" });
+				throw new PairingOpened();
 			}
 			throw failure;
 		}
@@ -363,8 +386,17 @@ export function PendingCard({
 			setPolicyNotice(`${said} ${messageRuntime.t("relay.approvals.card.still_needs_answer")}`);
 		} catch (failure) {
 			if (failure instanceof NotPairedError) {
-				setPairPrompt(true);
-				setPolicyError(messageRuntime.t("relay.asks.gate.not_paired_error"));
+				/* U4: the in-place pairing sheet IS the explanation, so no
+				   "not paired" line goes on the card. It used to, and nothing
+				   cleared it until the next tap, so after pairing the card still
+				   said in red that the phone was not paired while the sheet said
+				   it was. */
+				openPairingSheet({ purpose: "choose" });
+				return;
+			}
+			if (failure instanceof HttpError && failure.code === "operator_device_revoked") {
+				await rekeyAfterRevocation();
+				openPairingSheet({ purpose: "choose", notice: "revoked" });
 				return;
 			}
 			setPolicyError(humanizeError(String((failure as Error).message ?? failure)));
@@ -402,12 +434,6 @@ export function PendingCard({
 
 	return (
 		<>
-			<PairPromptSheet open={pairPrompt} onClose={() => setPairPrompt(false)} />
-			{/* The fragment is what lets the prompt ride beside the card. The sheet
-			    renders into the same in-flow column as every other picker on this
-			    phone (see ``ui/sheet.tsx``), so nothing here duplicates its modal
-			    handling — and the prompt is a SIBLING rather than a child so the
-			    card's own capped layout cannot clip it. */}
 			<div
 				data-testid="pending-card"
 			style={columnCap(PENDING_CARD_FRACTION)}

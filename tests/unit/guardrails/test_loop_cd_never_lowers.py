@@ -19,7 +19,14 @@ CURRENT ``classify`` (only ``resolve`` is swapped), so the property isolates
 the cwd model from the PR's intended ownership relaxations.
 
 Base ranks are PINNED in ``tests/fixtures/guardrails/loop_cd_base_ranks.json``
-because CI checks out with ``fetch-depth: 2`` and has no ``3bb7023`` object.
+because CI checks out with ``fetch-depth: 2`` and has no ``BASE`` object.
+
+``BASE`` is the PR's base, i.e. main as last merged into the branch, so "base"
+means "what main does without this PR". Merging main re-pins it: the pins were
+moved from ``3bb7023`` to ``673b54936a93`` when that main was merged in, where
+#3835's foreign-ledger rule raised 25 ``unrelated`` rows LOW -> HIGH under the
+base resolver and no row's pin fell. A re-pin may only RAISE a pin: if a newer
+main's live rank is below an existing pin, keep investigating, never lower it.
 Where the object is present (a developer checkout), base's ``resolve.py`` is
 also loaded from git in memory and the pins are checked against it, so a
 layout change cannot silently stale them. Regenerate pins with
@@ -45,7 +52,7 @@ from local_operator.guardrails import provenance as prov
 from local_operator.guardrails import resolve as resolve_mod
 from local_operator.guardrails.classify import Risk, classify_bash
 
-BASE = "3bb7023"
+BASE = "673b54936a93"
 OWNER = "aaaaaaaaaaaa"  # creates the layout's directories (and PARENT in the corpus)
 UNRELATED = "999999999999"
 REPO = Path(__file__).resolve().parents[3]
@@ -150,7 +157,7 @@ def _load_base() -> types.ModuleType | None:
         ).stdout
     except (OSError, subprocess.CalledProcessError):
         return None
-    module = types.ModuleType("_resolve_base_3bb7023")
+    module = types.ModuleType(f"_resolve_base_{BASE}")
     module.__file__ = f"<git {BASE}>"
     sys.modules[module.__name__] = module  # dataclasses look their module up
     exec(compile(src, module.__file__, "exec"), module.__dict__)  # noqa: S102

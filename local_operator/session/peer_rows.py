@@ -240,6 +240,31 @@ def peer_session_row(session_id: str, root: Path | None = None) -> SessionRow | 
     return None
 
 
+def peer_session_holders(session_id: str, root: Path | None = None) -> list[SessionRow]:
+    """EVERY cached remote row for ``session_id``, one per holding device.
+
+    Cache-only, like :func:`peer_session_row`, which answers "is it remote?"
+    with the FIRST match. A caller about to ACT on the answer — the ``send``
+    tool delivering to the holder without an explicit ``peer`` — needs to know
+    whether that first match is the only one: two devices reporting one id
+    (a stale row after a move, or a collision) is ambiguity it must refuse, not
+    a choice it may make. Rows without an owning device are not a holder
+    anyone could be routed to and are skipped.
+    """
+    cached = _CACHE.get("" if root is None else str(root))
+    if cached is None:
+        return []
+    holders: list[SessionRow] = []
+    seen: set[str] = set()
+    for row in cached[1]:
+        device = str(row.owner_device or "")
+        if row.id != session_id or not row.is_remote or not device or device in seen:
+            continue
+        seen.add(device)
+        holders.append(row)
+    return holders
+
+
 def seed_peer_row(root: Path | None, row: SessionRow) -> None:
     """Merge a KNOWINGLY-LIVE peer row into the cache, for resolutions to find.
 
@@ -468,6 +493,15 @@ def park_edges(
     for row in rows:
         kind = str(row.pending or "")
         if not kind or not row.live_state:
+            continue
+        if getattr(row, "pending_queued", False):
+            # The ask QUEUE's claim (``_sync_queued_ask_pending``), not a parked
+            # gate: a listing fact for the "needs" badge, never a park (PR #3934
+            # Q1). A park here paged EVERY member with a TUI for a question on
+            # a session it did not start; the origin is told instead by the
+            # forwarded ``remote-ask:`` rows, one per ask. Keyed on the owner's
+            # flag rather than on the forwarded notices so a BLOCKING gate that
+            # parks beside open queued asks still parks (R1-3).
             continue
         key = (str(row.owner_device or ""), row.id)
         current[key] = kind
@@ -772,6 +806,8 @@ def _read(
                 remote_attention=getattr(peer_row, "attention", None),
                 remote_notices=getattr(peer_row, "notices", None),
                 remote_attention_unknown=bool(getattr(peer_row, "attention_unknown", False)),
+                pending_queued=bool(getattr(peer_row, "pending_queued", False)),
+                remote_asks_unknown=bool(getattr(peer_row, "asks_unknown", False)),
             )
         )
     # THE PEERS THAT DID NOT ANSWER, and the exclusion is by DEVICE rather than

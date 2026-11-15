@@ -86,7 +86,7 @@ _ALWAYS_INFRA = (
 # request fails -- which is why 7 of 8 runs died in a 424-466s window on a clock
 # rather than on workload, and why changing the instance type fixed nothing.
 # Infra rather than a task field for the same content-hash reason.
-# See provisioning._resolve_root_volume_gb.
+# See provisioning._resolve_root_volume (a task's own volume_size wins).
 _OPTIONAL_INFRA = (
     "AWS_INSTANCE_TYPE",
     "AWS_ROOT_VOLUME_SIZE",

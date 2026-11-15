@@ -38,7 +38,7 @@ import sys
 import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from local_operator.guardrails.resolve import (
     Creation,
@@ -48,11 +48,22 @@ from local_operator.guardrails.resolve import (
     resolve_command,
 )
 
+if TYPE_CHECKING:
+    # Runtime import is deferred: ``provenance`` imports this module.
+    from local_operator.guardrails.provenance import ForeignCreations
+
 _STATE_DIRNAME = ".local-operator"
 _CONFIG_FILE = "config.yml"
 _SECRETS_DIRNAME = "secrets"
 _SESSIONS_DIRNAME = "sessions"
 _DESTROYING_OPS = frozenset({"delete", "move", "clean"})
+#: The ranking reason of a permission change that unlocks a tree for removal
+#: (``resolve._unprotected_operands``). It reaches the judge verbatim as the
+#: target's "ranked because" fact, so the judge is told it is a forced removal.
+FORCED_REMOVAL_REASON = (
+    "permission escalation that unlocks write-protected files for removal "
+    "(a forced removal of protected files the session did not create)"
+)
 # Spelled here rather than imported: ``provenance`` imports this module.
 _LEDGER_DIRNAME = "guardrails"
 _LEDGER_FILENAME = "created.sqlite"
@@ -1046,6 +1057,13 @@ def _high_reason(path: str, target: Target, prot: _Protected, *, link: bool = Fa
         return "git clean removes untracked work"
     if any(_under(path, own) for own in prot.own_session):
         return None
+    if target.op == "unprotect":
+        # Never LOW outside the session's own directory, even where removing
+        # the same path would be (incident 2026-11-14: ``chmod -R u+w`` of a
+        # deep benchmark tree forced ``rm -rf`` past its write-protected raw
+        # data). The creation ledger still lowers it for a tree the session
+        # made (``_owned_by_session`` in ``_rank``), as it does for a delete.
+        return FORCED_REMOVAL_REASON
     if target.op not in _DESTROYING_OPS:
         # S10: overwriting a file inside the state root (outside this session's
         # own directory) rewrites the harness's data — review it.
@@ -1228,7 +1246,16 @@ def _glob_reaches_git_dir(pattern: str) -> str | None:
 
 
 def _rank(
-    target: Target, prot: _Protected, session_id: str = "", globstar: bool = False
+    target: Target,
+    prot: _Protected,
+    session_id: str = "",
+    globstar: bool = False,
+    *,
+    # Keyword-only (convergence with #3802, which added ``globstar`` in the
+    # same slot): passed positionally, a ``ForeignCreations`` landed in
+    # ``globstar`` — truthy, so ``foreign`` was silently None and a foreign
+    # row ranked LOW. A keyword-only parameter makes that mix-up a TypeError.
+    foreign: ForeignCreations | None = None,
 ) -> RankedTarget:
     if target.landings:
         # An unpinned ``..``: rank the landing its missing and re-linked parts
@@ -1243,10 +1270,19 @@ def _rank(
                 prot,
                 session_id,
                 globstar,
+                foreign=foreign,
             )
             for p in target.landings
         ]
-        readings.append(_rank(dataclasses.replace(target, landings=()), prot, session_id, globstar))
+        readings.append(
+            _rank(
+                dataclasses.replace(target, landings=()),
+                prot,
+                session_id,
+                globstar,
+                foreign=foreign,
+            )
+        )
         return max(readings, key=lambda r: r.risk)
     path = target.path
     notes: list[str] = list(target.empty)
@@ -1494,6 +1530,14 @@ def _rank(
         return RankedTarget(target, Risk.HIGH, "; ".join([reason, *notes]))
     if target.selected:
         return RankedTarget(target, Risk.LOW, "find with a selecting predicate")
+    foreign_reason = _foreign_reason(target, path, foreign)
+    if foreign_reason is not None:
+        # Every LOW below is "nothing here is known to matter"; another
+        # session's ledger row says otherwise (``ForeignCreations``). Placed
+        # after the selecting-find LOW, which removes a regenerable subset
+        # (``-name '*.pyc'``) wherever it runs, and never above any CRITICAL
+        # or HIGH return, so this rule only ever raises a rank.
+        return RankedTarget(target, Risk.HIGH, "; ".join([foreign_reason, *notes]))
     if worktree_note:
         # Never discard the worktree state the branch above recorded.
         return RankedTarget(target, Risk.LOW, f"ordinary path; {worktree_note}")
@@ -1735,6 +1779,44 @@ def _reached_worktrees(
     return RankedTarget(target, Risk.HIGH, f"{head}: " + " | ".join(parts))
 
 
+#: Glob matches ``_foreign_reason`` compares one by one; past it the glob's
+#: literal directory stands in for them (an over-approximation: HIGH, judged).
+_FOREIGN_GLOB_MATCHES = 256
+
+
+def _foreign_reason(target: Target, path: str, foreign: ForeignCreations | None) -> str | None:
+    """Name the other session whose created directory ``target`` destroys, if any.
+
+    At, under or above: deleting the recorded directory, something inside it,
+    or a directory that holds it all destroy that session's work. ``None``
+    when nothing foreign relates or the ledger is unreadable.
+    """
+    if foreign is None:
+        return None
+    candidates = [path]
+    if target.pattern is not None:
+        import glob as _glob
+
+        try:
+            matches = _glob.glob(target.pattern)
+        except (OSError, ValueError):
+            matches = []
+        if 0 < len(matches) <= _FOREIGN_GLOB_MATCHES:
+            candidates = matches
+    # m2 (review of PR #3835): on case-insensitive APFS ``~/WORKTREES/x`` IS
+    # ``~/worktrees/x``, but ``realpath`` keeps the caller's case; ledger rows
+    # hold the on-disk spelling, so match that too.
+    reals = [os.path.realpath(c) for c in candidates]
+    cased = [c for c in map(_on_disk_case, reals) if c is not None]
+    hit = foreign.match([*reals, *cased])
+    if hit is None:
+        return None
+    rec = hit.record
+    when = time.strftime("%Y-%m-%d %H:%M", time.localtime(rec.created_at))
+    where = {"at": "", "inside": f"inside {rec.path}, ", "holds": f"holds {rec.path}, "}
+    return f"{where[hit.relation]}created by another session ({hit.owner}, {rec.kind}, {when})"
+
+
 def _owned_by_session(
     target: Target, path: str, prot: _Protected, session_id: str, *, kin: bool = False
 ) -> tuple[str, list[str], str] | None:
@@ -1905,7 +1987,15 @@ def classify_targets(
     if not targets and not opaque_reasons and not evidence_hits:
         return Verdict(Risk.LOW)
     prot = prot or _protected(env, scratchpad, session_id)
-    ranked = [_rank(t, prot, session_id, globstar) for t in targets]
+    from local_operator.guardrails.provenance import ForeignCreations
+
+    # One lazy ledger connection shared by every target of this call (opened
+    # only if some target reaches the LOW fallbacks in ``_rank``).
+    foreign = ForeignCreations(session_id)
+    try:
+        ranked = [_rank(t, prot, session_id, globstar, foreign=foreign) for t in targets]
+    finally:
+        foreign.close()
     # An alternate parse's word (GNU sed's reading of ``-i ''``) counts only
     # as CRITICAL: under the other reading it is the script, so a HIGH or LOW
     # row for it would invent a target (review M1 on PR #3816).

@@ -27,6 +27,13 @@ SAFE_DEFAULTS = {
     ("guardrails/check.py", "build_delete_case"): (
         "HOME expands ~ in delete targets for the judge brief; static resolution only"
     ),
+    # Ask-escalation (PR 3966): HOME only expands ~ in ask text and delete
+    # targets while matching them; ``ctx.cwd`` is passed through undefaulted,
+    # so an omitted cwd stays omitted. A match only raises risk, never spawns.
+    ("guardrails/check.py", "escalate_asked_targets"): (
+        "HOME expands ~ while matching asks against delete targets; static resolution "
+        "only, cwd passed through as-is, never a spawn cwd"
+    ),
     ("guardrails/check.py", "evidence_write_verdict"): (
         "resolves a write/edit path exactly as the file tools do (base or process cwd) "
         "to refuse evidence writes; never a spawn cwd"
@@ -45,6 +52,12 @@ SAFE_DEFAULTS = {
     ),
     ("guardrails/evidence.py", "_names_full_path"): (
         "HOME spells the ~-form of a target to compare against call text"
+    ),
+    # The killed call's spawn env may lack HOME, and the resolver still needs a
+    # root for ~. The follow-up git runs by --git-dir with no cwd argument.
+    ("guardrails/interrupted_worktree_add.py", "settle_after_kill"): (
+        "HOME expands ~ while re-resolving the killed call's own git worktree add "
+        "targets; static resolution only, never a spawn cwd or session metadata"
     ),
     ("harness/loop.py", "_guardrail_outcome"): (
         "execution-time cwd for inspecting an already-planned call; "

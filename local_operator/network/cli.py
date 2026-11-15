@@ -809,6 +809,31 @@ def add_parser(
     )
     definitions_state.add_argument("--json", action="store_true")
 
+    # `lop network skills`: what makes `skill://NAME` resolve on the OTHER device.
+    # The definitions/mcp pair's shape — `push` is the deliberate half of the sync
+    # the mesh-definitions cadence also performs; `state` is local and relay-free,
+    # and names every skill that will NOT travel (too large, unreadable) and why.
+    skills = actions.add_parser(
+        "skills",
+        help="Sync your user skills so a peer's sessions can load them",
+        description=(
+            "A session on another device reads the same skills a local one does only "
+            "when that device holds them. The mesh syncs this device's own skills "
+            "(~/.local-operator/skills) to every paired member each minute and before "
+            "a create; `push` does it now and reports per skill, `state` lists what "
+            "this device holds, where each copy came from, and what will not travel."
+        ),
+    )
+    skills_actions = skills.add_subparsers(dest="skills_command")
+    skills_push = skills_actions.add_parser("push", help="Send this device's skills to a peer")
+    skills_push.add_argument("--peer", default="", help="the device to send them to")
+    skills_push.add_argument("--all-peers", action="store_true", help="every linked peer")
+    skills_push.add_argument("--json", action="store_true")
+    skills_state = skills_actions.add_parser(
+        "state", help="What this device holds, what it mirrored, and what will not travel"
+    )
+    skills_state.add_argument("--json", action="store_true")
+
     # `lop network mcp`: what makes a peer able to RUN this device's MCP servers.
     # Two verbs, the definitions pair's shape and reasons — `push` is the
     # deliberate half of the sync the mesh-definitions cadence also performs, and
@@ -1197,6 +1222,42 @@ def add_parser(
         "--network", default="", help="Network name or id (default: the only one)"
     )
     cred_mark.add_argument("--json", action="store_true")
+    # The GitHub designation's own surface (operator decision 2026-11-12): with no
+    # explicit list, a share lends for every repo this device's GitHub login can
+    # push to MINUS these opt-outs. ONE leaf with an action positional, like
+    # ``mark``'s choice, so ``--json`` sits on the verb the agent path drives.
+    cred_github = credential_actions.add_parser(
+        "github",
+        help=(
+            "Show the GitHub repositories a share lends for, or opt one out of "
+            "(or back into) that list"
+        ),
+    )
+    cred_github.add_argument(
+        "action",
+        choices=("repos", "exclude", "include"),
+        help=(
+            "'repos' lists the effective repositories and where the list came from; "
+            "'exclude'/'include' opt one repository out of / back into it"
+        ),
+    )
+    cred_github.add_argument(
+        "repository", nargs="?", default="", help="owner/repo (for exclude/include)"
+    )
+    cred_github.add_argument(
+        "--refresh",
+        action="store_true",
+        help="Ask GitHub again now instead of using the cached list ('repos' only)",
+    )
+    cred_github.add_argument(
+        "--use-default",
+        action="store_true",
+        help=(
+            "Explicitly return to every pushable repository minus opt-outs, removing "
+            "the hand-picked list and its clear fence ('repos' only)"
+        ),
+    )
+    cred_github.add_argument("--json", action="store_true")
 
     install = actions.add_parser("install", help="Install the relay's restart-on-boot service")
     install.add_argument("--json", action="store_true")
@@ -3577,6 +3638,294 @@ def _delivery_lines(delivery: dict[str, Any], name: str, *, other_owner: str = "
     return ["usable there: not yet — it arrives on that device's next sync"]
 
 
+#: How many repository names the share RECEIPT prints before "and N more" (UX
+#: round 1, U2): the receipt confirms, ``credential github repos`` lists. The
+#: ``--json`` payloads always carry the whole list.
+_RECEIPT_SHOWN = 10
+
+#: The progress line a share prints when listing takes longer than this (N5):
+#: a fast listing stays silent, a slow one is not mistaken for a hang.
+_LISTING_PROGRESS_AFTER_S = 1.0
+
+
+def _github_designation_now(*, refresh: bool, progress: bool = False) -> tuple[Any, str]:
+    """THIS device's effective GitHub designation and the arm serving it.
+
+    The arm's credential is read the way the owner's serve reads it (the stored
+    App key, the stored token, or gh's login), and the list is computed by the
+    one function the serve uses, so the receipt cannot describe a different list
+    than a borrow would get. A credential that cannot be read here still answers
+    from the cache (``allow_fetch=False``) instead of failing the command.
+    """
+    import threading
+
+    from local_operator.network.credentials import github as github_mod
+
+    root = _config_dir()
+    source = github_mod.resolve_source(root)
+    token = ""
+    app = None
+    try:
+        if source == github_mod.SOURCE_APP:
+            app = github_mod.read_app_key(root)
+        elif source == github_mod.SOURCE_TOKEN:
+            token = github_mod.read_token_secret(root)
+        elif source == github_mod.SOURCE_GH:
+            token = github_mod.read_gh_token()
+    except (
+        github_mod.GithubAppKeyError,
+        github_mod.GithubTokenError,
+        github_mod.GithubGhError,
+    ):
+        return github_mod.designation(root, source=source, allow_fetch=False), source
+    if source not in (github_mod.SOURCE_APP, github_mod.SOURCE_TOKEN, github_mod.SOURCE_GH):
+        return github_mod.designation(root, source=source, allow_fetch=False), source
+    timer = None
+    if progress:
+        timer = threading.Timer(
+            _LISTING_PROGRESS_AFTER_S,
+            lambda: print(
+                "listing the repositories your GitHub login can push to…",
+                file=sys.stderr,
+                flush=True,
+            ),
+        )
+        timer.daemon = True
+        timer.start()
+    try:
+        designated = github_mod.designation(
+            root, source=source, token=token, app=app, refresh=refresh
+        )
+    finally:
+        if timer is not None:
+            timer.cancel()
+    return designated, source
+
+
+def _designation_payload(designated: Any) -> dict[str, Any]:
+    """The machine shape of a designation: the whole list, its origin and age."""
+    return {
+        "repositories": list(designated.repositories),
+        "count": len(designated.repositories),
+        "origin": designated.origin,
+        "fetched_at": designated.fetched_at or None,
+        "age_s": int(designated.age_s()) if designated.fetched_at else None,
+        "excluded": list(designated.excluded),
+        "excluded_count": designated.excluded_count,
+        "error": designated.error,
+    }
+
+
+def _github_ttl_words() -> str:
+    """How soon an opt-out reaches borrowers: the grant window, in minutes (N4).
+
+    A borrower keeps one GitHub grant at most ``grant_ttl_s``; the next one it
+    fetches carries the narrowed list, so that window is the honest upper bound.
+    """
+    from local_operator.network.credentials import grant_ttl_s
+
+    minutes = max(1, int((grant_ttl_s(_config_dir()) + 59) // 60))
+    return f"within {minutes} min"
+
+
+def _designation_source(designated: Any) -> str:
+    """Where the list came from, in the user's words (U3): no keys, no all-caps."""
+    from local_operator.network.credentials import github as github_mod
+
+    ago = github_mod.listed_ago(designated.age_s() if designated.fetched_at else None)
+    if designated.origin == github_mod.ORIGIN_EXPLICIT:
+        return "the list you chose by hand (the GitHub repositories setting)"
+    if designated.origin == github_mod.ORIGIN_LAST_GOOD:
+        why = f" ({designated.error})" if designated.error else ""
+        return (
+            f"the list fetched {ago} — GitHub repositories couldn't be listed "
+            f"just now{why}, so it may be out of date"
+        )
+    return f"every repository this device's GitHub login can push to, listed {ago}"
+
+
+def _opted_out_lines(designated: Any) -> list[str]:
+    """The opted-out NAMES and the way back (UX round 1, U1), or that there are none."""
+    names = list(designated.excluded)
+    if not names:
+        return ["opted out: none"]
+    return [
+        f"opted out ({len(names)}): {', '.join(names)} — bring one back: "
+        "lop network credential github include <owner/repo>"
+    ]
+
+
+def _designation_lines(designated: Any, source: str, *, receipt: bool) -> list[str]:
+    """The human lines: the repositories, where they came from, what is opted out.
+
+    ``receipt`` sizes the list for the share's confirmation (a short head and a
+    pointer); ``credential github repos`` prints every name (U2).
+    """
+    from local_operator.network.credentials import github as github_mod
+
+    names = list(designated.repositories)
+    whose = "this device's"
+    if not names:
+        reason = designated.reason(whose)
+        if receipt:
+            # The share WAS recorded; only its borrows are refused (U4.3).
+            head = (
+                "GitHub repositories: none yet — the share is in place, but every borrow "
+                f"is refused while {reason}; {designated.remedy()}"
+            )
+        else:
+            head = f"GitHub repositories: none — {reason}; {designated.remedy()}"
+        return [head, *_opted_out_lines(designated)]
+    opted = f", minus {designated.excluded_count} opted out" if designated.excluded_count else ""
+    lines = [
+        f"GitHub repositories lent for: {len(names)} — {_designation_source(designated)}{opted}"
+    ]
+    shown = names[:_RECEIPT_SHOWN] if receipt else names
+    lines.extend(f"  {name}" for name in shown)
+    if len(names) > len(shown):
+        lines.append(
+            f"  … and {len(names) - len(shown)} more — see them all: "
+            "lop network credential github repos"
+        )
+    carry = (
+        github_mod.APP_MINT_MAX_REPOSITORIES
+        if source == github_mod.SOURCE_APP
+        else github_mod.MAX_DESIGNATED_REPOSITORIES
+    )
+    if len(names) > carry:
+        lines.append(
+            f"this is more than the {carry} one share can carry, so every borrow is refused "
+            "until you pick the ones to lend with the GitHub repositories setting (search it "
+            "in /settings) or opt some out"
+        )
+    lines.extend(_opted_out_lines(designated))
+    lines.append(
+        "opt a repository out: lop network credential github exclude <owner/repo> — devices "
+        f"you share with lose push to it the next time they fetch the credential, "
+        f"{_github_ttl_words()}"
+    )
+    return lines
+
+
+def _cmd_credential_github(args: argparse.Namespace) -> int:
+    """``credential github repos [--refresh] [--use-default] | exclude|include <owner/repo>``.
+
+    LOCAL: the designation is this device's own (it is the owner that lends), so
+    nothing crosses the mesh. ``exclude`` takes effect at each borrower's next
+    borrow or refresh — the owner re-reads the opt-outs on every serve and the
+    grant carries the narrowed list — which is the security direction: no cache
+    can keep an opted-out repository pushable past one grant window.
+
+    A name ``exclude`` cannot find in the current list is STORED, with a warning
+    (UX round 1, U1): an opt-out is the security direction, and a repository the
+    login gains later must arrive already opted out. Refusing it would make the
+    operator wait for the repo to exist before they could keep it out.
+    """
+    from local_operator.network.credentials import github as github_mod
+    from local_operator.network.types import MeshRefusal
+
+    action = str(args.action)
+    root = _config_dir()
+    if action == "repos":
+        if args.repository:
+            raise MeshRefusal("bad_request", "'repos' takes no repository")
+        use_default = bool(getattr(args, "use_default", False))
+        if use_default:
+            try:
+                github_mod.use_default_repositories(root)
+            except OSError as exc:
+                raise MeshRefusal(
+                    "github_default_reset_failed",
+                    "could not complete the return to the automatic GitHub repository list "
+                    f"({exc.__class__.__name__}); check this device's data folder is writable, "
+                    "then retry lop network credential github repos --use-default",
+                ) from exc
+        designated, source = _github_designation_now(refresh=bool(args.refresh) or use_default)
+        payload = {"action": "repos", **_designation_payload(designated)}
+        return _emit(args, payload, _designation_lines(designated, source, receipt=False))
+    if getattr(args, "use_default", False):
+        raise MeshRefusal("bad_request", "--use-default applies to 'repos' only")
+    if args.refresh:
+        raise MeshRefusal("bad_request", "--refresh applies to 'repos' only")
+    entry = github_mod.normalise_repository(args.repository)
+    if not entry:
+        raise MeshRefusal(
+            "bad_request", f"{action} needs one repository as owner/repo, e.g. octo-org/website"
+        )
+    designated, _source = _github_designation_now(refresh=False)
+    known = bool(designated.listed) or designated.origin != github_mod.ORIGIN_UNAVAILABLE
+    in_list: bool | None = (
+        entry.lower() in {name.lower() for name in designated.listed} if known else None
+    )
+    which = (
+        "the list you chose by hand"
+        if designated.origin == github_mod.ORIGIN_EXPLICIT
+        else "the list this device's GitHub login can push to"
+    )
+    unchecked = f" ({designated.error})" if designated.error else ""
+    current = list(github_mod.excluded_repositories(root))
+    lowered = [name.lower() for name in current]
+    if action == "exclude":
+        changed = entry.lower() not in lowered
+        updated = current + [entry] if changed else current
+    else:
+        changed = entry.lower() in lowered
+        updated = [name for name in current if name.lower() != entry.lower()]
+    if changed:
+        github_mod.write_excluded(root, updated)
+    ttl = _github_ttl_words()
+    if action == "exclude" and not changed:
+        line = f"{entry} was already opted out"
+    elif action == "exclude" and in_list is False:
+        line = (
+            f"{entry} isn't in {which} — check the spelling; it's opted out anyway, in case "
+            "it's added later"
+        )
+    elif action == "exclude" and in_list is None:
+        line = (
+            f"{entry} is opted out; its spelling couldn't be checked because {which} "
+            f"couldn't be fetched{unchecked}"
+        )
+    elif action == "exclude":
+        line = (
+            f"{entry} is opted out — devices you share with lose push to it the next time "
+            f"they fetch the credential, {ttl}"
+        )
+    elif not changed:
+        line = f"{entry} was not opted out"
+    elif in_list is False:
+        line = (
+            f"{entry} is no longer opted out, but it isn't in {which}, so it still isn't "
+            "lent — check the spelling"
+        )
+    elif in_list is None:
+        line = (
+            f"{entry} is no longer opted out; whether it's in {which} couldn't be checked"
+            f"{unchecked}"
+        )
+    else:
+        line = (
+            f"{entry} is back in — devices you share with can push to it again the next time "
+            f"they fetch the credential, {ttl}"
+        )
+    payload = {
+        "action": action,
+        "repository": entry,
+        "changed": changed,
+        "in_list": in_list,
+        "excluded": updated,
+    }
+    remaining = _with_excluded(designated, updated)
+    return _emit(args, payload, [line, *_opted_out_lines(remaining)])
+
+
+def _with_excluded(designated: Any, excluded: list[str]) -> Any:
+    """``designated`` with the opt-out list as it stands AFTER this command."""
+    import dataclasses
+
+    return dataclasses.replace(designated, excluded=tuple(excluded))
+
+
 def _cmd_credential(args: argparse.Namespace) -> int:
     """``credential share|revoke <key> --with/--from <dev>``: the owner's own verb.
 
@@ -3838,6 +4187,15 @@ def _cmd_credential(args: argparse.Namespace) -> int:
         # narrowed server-side, and the share receipt must not promise narrowing
         # a token arm cannot deliver.
         lines.append(_github_share_disclosure(name, github_mod.resolve_source(_config_dir())))
+        # THE LIST IS SHOWN WHERE THE OPERATOR SHARES (operator decision
+        # 2026-11-12): the share is a moment the operator is looking, so the list
+        # is refreshed here and every repository it lends for is on the receipt,
+        # with how to opt one out.
+        designated, gh_source = _github_designation_now(
+            refresh=True, progress=not getattr(args, "json", False)
+        )
+        payload["repositories"] = _designation_payload(designated)
+        lines.extend(_designation_lines(designated, gh_source, receipt=True))
     if verb == "revoke":
         # THE TRUE REVOCATION LATENCY, said where the operator acts (QA round 1, Q5;
         # design §3.7). A revoke stops NEW grants at once, but no provider offers a
@@ -3876,14 +4234,18 @@ def _cmd_credential(args: argparse.Namespace) -> int:
             # which happened — a queued notice, an already-wiped copy, or no RECORDED copy —
             # and carries the ceiling after EVERY one of them (design review round 1, D1: the
             # state that claims the most used to be the only one without it).
-            copied, wiped = _copy_ledger_state(record.network_id, device, key)
+            copied, wiped, unacknowledged = _copy_ledger_state(record.network_id, device, key)
             payload["copy"] = {
                 "confirmed": copied,
                 "wiped": wiped,
-                "wipe": "done" if (copied and wiped) else ("queued" if copied else "none"),
+                "wipe": "done" if wiped else ("queued" if copied or unacknowledged else "none"),
             }
+            if unacknowledged:
+                payload["copy"]["unacknowledged"] = True
             lines.extend(
-                messages_mod.render_copy_revoke_notice(name, key, copied=copied, wiped=wiped)
+                messages_mod.render_copy_revoke_notice(
+                    name, key, copied=copied, wiped=wiped, unacknowledged=unacknowledged
+                )
             )
             lines.extend(messages_mod.COPY_CEILING_LINES)
             return _emit(args, payload, lines)
@@ -3893,13 +4255,17 @@ def _cmd_credential(args: argparse.Namespace) -> int:
         # exactly the case where the remedy matters most. Read from the entry the
         # revoke just wrote, so the receipt describes what was actually lent.
         static = str(entry_json.get("kind") or "") == "api-key-static"
-        copied, wiped = _copy_ledger_state(record.network_id, device, key)
-        if copied:
+        copied, wiped, unacknowledged = _copy_ledger_state(record.network_id, device, key)
+        if copied or unacknowledged:
             # The class-4 copy half, same vocabulary as class 2's (§4.3: the
             # receipt says which happened).
             payload["copy"] = {"confirmed": copied, "wiped": wiped}
+            if unacknowledged:
+                payload["copy"]["unacknowledged"] = True
             lines.extend(
-                messages_mod.render_copy_revoke_notice(name, key, copied=copied, wiped=wiped)
+                messages_mod.render_copy_revoke_notice(
+                    name, key, copied=copied, wiped=wiped, unacknowledged=unacknowledged
+                )
             )
         if github_mod.is_github_key(key):
             # THE M1-RESTATED COPY, to match the mechanism (mint-revoke at the
@@ -3939,8 +4305,8 @@ def _cmd_credential(args: argparse.Namespace) -> int:
     return _emit(args, payload, lines)
 
 
-def _copy_ledger_state(network_id: str, device: str, key: str) -> tuple[bool, bool]:
-    """``(confirmed, wiped)`` for one member's copy of ``key``, from the ledger.
+def _copy_ledger_state(network_id: str, device: str, key: str) -> tuple[bool, bool, bool]:
+    """``(confirmed, wiped, unacknowledged)`` for one member's copy of ``key``.
 
     The same document the listing's segments read, so the receipt and the
     listing cannot disagree about whether a copy is outstanding. An unreadable
@@ -3952,31 +4318,38 @@ def _copy_ledger_state(network_id: str, device: str, key: str) -> tuple[bool, bo
     try:
         state = SyncState.load(network_id)
     except Exception:  # noqa: BLE001 — an unreadable ledger confirms nothing
-        return False, False
+        return False, False, False
+    # Prefer the newest open copy, including a re-copy after a confirmed wipe.
+    # A dispatch is evidence of sending, NEVER evidence of confirmed delivery.
+    for row in state.open_copies(device):
+        if row["key"] == key:
+            pending = bool(row["unacknowledged"])
+            return not pending, False, pending
     row = state.ack_for(device, key)
     if not isinstance(row, dict):
-        return False, False
-    return True, bool(row.get("wiped"))
+        return False, False, False
+    return True, bool(row.get("wiped")), False
 
 
-def _unconfirmed_copies(network_id: str, device: str) -> int:
-    """How many ledger rows for ``device`` are still NOT ``wiped``.
+def _unconfirmed_copies(network_id: str, device: str) -> tuple[int, int]:
+    """``(open, unacknowledged)`` copy counts when the relay cannot run endings.
 
     The removal receipt's count when there is no relay to run the ending
     exchange (review round 1, Q1): every open row is a copy nothing confirmed
     deleted, so the receipt names the open state instead of a clean sweep. The
     same read ``_copy_ledger_state`` makes, summed over the member instead of
-    one key; an unreadable ledger counts zero rows and the receipt stays as it
-    was rather than inventing copies.
+    one key; an unreadable ledger derives neither count rather than inventing
+    copies. The second count preserves uncertainty about delivery, not deletion.
     """
     from local_operator.network.credentials.sync import SyncState
 
     try:
         state = SyncState.load(network_id)
     except Exception:  # noqa: BLE001 — an unreadable ledger confirms nothing
-        return 0
-    # Sent-but-unacknowledged copies are open too (``SyncState.dispatched``).
-    return len(state.open_copies(device))
+        return 0, 0
+    # The offline receipt must retain delivery uncertainty, just like the relay.
+    rows = state.open_copies(device)
+    return len(rows), sum(bool(row["unacknowledged"]) for row in rows)
 
 
 def _canonical_credential_key(raw: str) -> str:
@@ -4482,7 +4855,7 @@ def _cmd_member_rm(args: argparse.Namespace) -> int:
     # THE COPIES THIS PATH CANNOT CONTACT (review round 1, Q1): with no relay there
     # is no link, so nothing is confirmed deleted — but the receipt must still say
     # what the ledger shows, or a removal with live copies reads as a clean sweep.
-    copies = _unconfirmed_copies(record.network_id, device_id)
+    copies, unacknowledged = _unconfirmed_copies(record.network_id, device_id)
     outcome = imported.remove_member(record, state, device_id=device_id, by=record.self_device_id)
     for member in record.active_members():
         if member.device_id == record.self_device_id:
@@ -4519,12 +4892,16 @@ def _cmd_member_rm(args: argparse.Namespace) -> int:
             "copies": copies,
             "wiped": 0,
             "timed_out": 0,
+            "unacknowledged": unacknowledged,
         },
         [
             f"removed {args.device} from {record.name}; epoch is now {outcome.epoch}",
             "the relay is not running, so the rotation is queued for delivery",
             *messages_mod.render_removal_endings(
-                _member_name(record, device_id) or args.device, copies=copies, wiped=0
+                _member_name(record, device_id) or args.device,
+                copies=copies,
+                wiped=0,
+                unacknowledged=unacknowledged,
             ),
         ],
     )
@@ -7590,6 +7967,19 @@ async def _pilot_act(
                 "session_stored", f"{_stored_peek_sentence(session_id, peer)} ({fallback})"
             )
 
+    if verb == "send" and mailbox is not None:
+        # A MAILBOX SEND NEEDS NO VIEW, so it is not opened through one. See
+        # ``_pilot_mailbox_direct``: the viewer below asks the owner to prepare
+        # a canonical frontend sync first, and a busy owner holding a long
+        # transcript refuses that (``bind_failed``) before the message is ever
+        # written. ``None`` means only "this owner predates the mesh mailbox":
+        # the viewer path below then runs today's turn fallback unchanged.
+        direct = await _pilot_mailbox_direct(
+            row, session_id, device, text, mailbox, config_dir, peer=peer
+        )
+        if direct is not None:
+            return _pilot_named_receipt(*direct, named=named, session_id=session_id, device=device)
+
     async def _never() -> Any:
         # A remote viewer never takes over: a remote owner sets ``_can_go_cold``,
         # so owner loss leaves this viewer cold rather than making this device a
@@ -7699,15 +8089,162 @@ async def _pilot_act(
         except Exception:  # noqa: BLE001 — see above: the refusal outranks it
             logging.getLogger(__name__).debug("disposing the pilot viewer failed", exc_info=True)
 
+    return _pilot_named_receipt(payload, lines, named=named, session_id=session_id, device=device)
+
+
+def _pilot_named_receipt(
+    payload: dict[str, Any], lines: list[str], *, named: str, session_id: str, device: str
+) -> tuple[dict[str, Any], list[str]]:
+    """Note a ``--peer`` that named another device beside the act's receipt.
+
+    The typed string was NOT this device. The receipt keeps the answer (who ran
+    it) and carries the caller's own word beside it, in the payload and in the
+    lines, so both a script and a person can see the disagreement. One helper
+    because two act paths return a receipt (the viewer and the direct mailbox).
+    """
     if named:
-        # The typed string was NOT this device. The receipt keeps the answer (who
-        # ran it) and carries the caller's own word beside it, in the payload and in
-        # the lines, so both a script and a person can see the disagreement.
         payload["peer_named"] = named
         lines.append(
             f"you named {named}; {session_id} is held by {device}, which is where this ran"
         )
     return payload, lines
+
+
+async def _pilot_mailbox_direct(
+    row: Any,
+    session_id: str,
+    device: str,
+    text: str,
+    mode: "_MailboxMode",
+    config_dir: Path,
+    *,
+    peer: str,
+) -> tuple[dict[str, Any], list[str]] | None:
+    """Deliver a ``--send --mailbox`` WITHOUT opening a view of the session.
+
+    WHY THIS PATH EXISTS. The pilot's viewer (``open_remote_viewer`` +
+    ``bind_runtime``) attaches with ``frontend_state`` and ``display_window``, so
+    the owner starts a canonical frontend sync for it, and until that sync lands
+    the owner refuses every op outside ``_SYNC_PRIORITY_OPS`` — ``peer_message``
+    included (``server._on_request``). For a REMOTE viewer that sync has to
+    capture the history window on the session's own loop within
+    ``_REMOTE_HISTORY_BIND_WAIT_S`` (2.0 s); an owner mid-turn, or one whose
+    transcript is long enough that the capture itself is slow, misses it and
+    answers ``bind_failed``. The mesh send then bounced with "the dial … produced
+    no session (owner could not prepare this view …)" although the message needs
+    no view at all — measured live 2026-11-14 on 0.102.5: every send to one long,
+    usually mid-turn session bounced while sends to another session on the same
+    device, over the same link, delivered.
+
+    THE CONSTRAINT IT KEEPS: nothing changes on the owner. The client below is
+    the same ``RemoteSessionClient`` the viewer uses, over the same relay
+    ``stream_open`` carrier (``net_stream`` needs ``view``, the forwarded
+    ``peer_message`` needs ``prompt`` — the capabilities the viewer path already
+    spends), but it declares NO events, frontend state or display window. The
+    owner relay forwards only the auth fields it is given (``dial.AUTH_FIELDS``),
+    so the runtime sees an attach client with nothing to sync, never enters the
+    sync gate, and admits the message on its own merits. That is true of every
+    owner build that has the mesh mailbox, which is why this is a sender-side fix.
+
+    THE RECEIPT STAYS TRUTHFUL because delivery is the same helper the viewer
+    path uses (``_deliver_mailbox``): "delivered" only on the owner's admission
+    ack, "not confirmed" when that ack does not arrive in
+    ``PILOT_REPLY_TIMEOUT_S`` (the message id lets the owner drop a re-send as a
+    duplicate), and a dial that fails before the frame was written is reported
+    by the same ``_pilot_dial_refusal`` the viewer's dial uses — nothing landed.
+
+    Returns ``None`` ONLY for an owner without ``MESH_PEER_MESSAGE_CAPABILITY``:
+    its fallback is a TURN, which needs the viewer, so the caller runs the
+    viewer path exactly as before. ``--peek`` never comes here: a read of the
+    live display window is a view, and may still refuse honestly.
+    """
+    from local_operator.network.projection import (
+        PeerRow,
+        ProjectionRefusal,
+        remote_owner_for,
+    )
+    from local_operator.network.types import MeshRefusal
+    from local_operator.session.attached import (
+        _BIND_RETRY_ATTEMPTS,
+        _BIND_RETRY_INITIAL_S,
+    )
+
+    peer_row = PeerRow(
+        session_id=session_id,
+        device_id=str(getattr(row, "owner_device", "") or ""),
+        device_name=str(getattr(row, "owner_device_name", "") or ""),
+        conversation_name=str(getattr(row, "name", "") or ""),
+        reachable=bool(getattr(row, "reachable", True)),
+    )
+    owner = await asyncio.to_thread(
+        remote_owner_for, session_id, config_dir=config_dir, row=peer_row, root=config_dir
+    )
+
+    async def _refuse_dial(exc: BaseException) -> MeshRefusal:
+        code, sentence = await asyncio.to_thread(
+            _pilot_dial_refusal, session_id, peer, str(exc), config_dir
+        )
+        return MeshRefusal(code, sentence)
+
+    async def _locate() -> Any:
+        # ENGAGE, THEN LOCATE — the order ``AttachedSession._bind_under_lock``
+        # uses, for the same reason: a stored session on the peer gets its
+        # runtime here (the act is what warms it, §8.3 — a send is a write), and
+        # a warm one answers the engage at once. The short locate retry is the
+        # bind loop's own, by its constants rather than a copy of their values:
+        # a runtime that has just been spawned publishes its record a moment
+        # after the engage returns.
+        try:
+            await owner.engage(cwd="")
+        except ProjectionRefusal as exc:
+            raise MeshRefusal(exc.code, exc.sentence) from exc
+        delay = _BIND_RETRY_INITIAL_S
+        for attempt in range(_BIND_RETRY_ATTEMPTS):
+            record, _pid = await asyncio.to_thread(owner.locate)
+            if record is not None:
+                return record
+            if attempt < _BIND_RETRY_ATTEMPTS - 1:
+                await asyncio.sleep(delay)
+                delay *= 2
+        raise await _refuse_dial(ConnectionError("could not start a runtime for this session"))
+
+    try:
+        record = await asyncio.wait_for(_locate(), timeout=PILOT_BIND_TIMEOUT_S)
+    except TimeoutError as exc:
+        raise MeshRefusal(
+            "session_unreachable",
+            f"{peer} did not answer for {session_id} within "
+            f"{PILOT_BIND_TIMEOUT_S:.0f}s — its runtime may be starting, or wedged; "
+            f"`lop network doctor --peer {peer}` diagnoses the link",
+        ) from exc
+
+    # No projection or disconnect handling: this connection lives for ONE
+    # request, and its outcome is the reply to that request (a close before the
+    # reply fails the request's own future in the client's pump).
+    client = owner.make_client(lambda _projection: None, lambda _reason: None)
+    try:
+        try:
+            await asyncio.wait_for(client.connect(record, session_id), timeout=PILOT_BIND_TIMEOUT_S)
+        except TimeoutError as exc:
+            raise MeshRefusal(
+                "session_unreachable",
+                f"{peer} did not answer for {session_id} within "
+                f"{PILOT_BIND_TIMEOUT_S:.0f}s — its runtime may be starting, or wedged; "
+                f"`lop network doctor --peer {peer}` diagnoses the link",
+            ) from exc
+        except ConnectionError as exc:
+            raise await _refuse_dial(exc) from exc
+        if not client.mesh_peer_message_supported:
+            return None
+        return await _deliver_mailbox(client.peer_message, session_id, device, text, mode)
+    finally:
+        # The owner keeps its runtime: closing this connection is a detach, the
+        # same as the viewer path's dispose. A failed close never speaks for the
+        # act (the refusal or receipt above outranks it).
+        try:
+            await client.detach()
+        except Exception:  # noqa: BLE001 — see above
+            logging.getLogger(__name__).debug("closing the mailbox dial failed", exc_info=True)
 
 
 class _MailboxMode:
@@ -7750,11 +8287,10 @@ async def _pilot_mailbox(
     today's prompt path for a plain send, with ``fallback: "prompt"`` and that
     path's honest receipt. A quiet drop or a steer cannot be expressed as a turn
     — a turn always wakes — so those are refused rather than silently changed.
+
+    ``_pilot_act`` reaches this only when ``_pilot_mailbox_direct`` found such an
+    owner: an owner WITH the mailbox is delivered to without a viewer at all.
     """
-    from local_operator.mobile.peer_send import (
-        mint_peer_message_id,
-        peer_sender_identity_async,
-    )
     from local_operator.network.types import MeshRefusal
 
     if not viewer.owner_takes_mesh_peer_message():
@@ -7769,6 +8305,24 @@ async def _pilot_mailbox(
         payload, lines = await _pilot_send(viewer, session_id, peer, text)
         payload["fallback"] = "prompt"
         return payload, [*lines, prompt_fallback_line(peer)]
+    return await _deliver_mailbox(viewer.send_peer_message, session_id, peer, text, mode)
+
+
+async def _deliver_mailbox(
+    deliver: Any, session_id: str, peer: str, text: str, mode: _MailboxMode
+) -> tuple[dict[str, Any], list[str]]:
+    """Send ONE ``peer_message`` through ``deliver`` and render its receipt.
+
+    Shared by the viewer path (``_pilot_mailbox``, ``viewer.send_peer_message``)
+    and the view-free path (``_pilot_mailbox_direct``, ``client.peer_message``) so
+    the two cannot disagree about what "delivered" means: both take the same
+    keywords and return the owner's reply frame.
+    """
+    from local_operator.mobile.peer_send import (
+        mint_peer_message_id,
+        peer_sender_identity_async,
+    )
+    from local_operator.network.types import MeshRefusal
 
     identity = await peer_sender_identity_async(os.getpid())
     sender = {key: identity[key] for key in _MESH_SENDER_FIELDS if identity.get(key)}
@@ -7785,7 +8339,7 @@ async def _pilot_mailbox(
     }
     try:
         reply = await asyncio.wait_for(
-            viewer.send_peer_message(
+            deliver(
                 text, mode=wire_mode, wake=bool(mode.wake), sender=sender, message_id=message_id
             ),
             timeout=PILOT_REPLY_TIMEOUT_S,
@@ -8550,6 +9104,8 @@ def _cmd_sessions(args: argparse.Namespace) -> int:
         explicit_yolo = bool(getattr(args, "yolo", False))
         implied_yolo = (not explicit_yolo) and saved_tool_approval_is_auto()
 
+        from local_operator.network.relay import CREATE_CLIENT_BOUND_S
+
         def _create(yolo: bool) -> dict[str, Any]:
             # ONE BUILDER FOR BOTH ATTEMPTS, so the fallback differs in nothing
             # but ``yolo``. The retry is a CHANGED BODY — a changed intent — and
@@ -8584,7 +9140,10 @@ def _cmd_sessions(args: argparse.Namespace) -> int:
                 # which reserves nothing, so the key is still free for the second.
                 create_key=str(getattr(args, "create_key", "") or ""),
                 origin=_create_origin(args),
-                timeout=120.0,  # a spawn plus its first turn's admission
+                # A spawn plus its first turn's admission, plus the relay's bounded
+                # confirm-by-key window after a lost reply: a client that gave up
+                # first would lose the id the relay was about to confirm.
+                timeout=CREATE_CLIENT_BOUND_S,
             )
 
         unattended_notice = ""
@@ -8688,6 +9247,20 @@ def _cmd_sessions(args: argparse.Namespace) -> int:
             lines.append(
                 f"no copy of {names} on this device: that device's own revision of it is "
                 "what runs there"
+            )
+        # WHAT THIS CREATE DID ABOUT SKILLS (``skillsync.push_for_create``): printed
+        # only when this create's own push did not finish cleanly — still running in
+        # the background, or failed — so a clean create's receipt is unchanged.
+        # Standing facts (an oversize skill that never travels, a skill the peer keeps
+        # as its own) would repeat on every create; they are named by `lop network
+        # skills state|push` and `lop network ready` instead, and `--json` carries
+        # the whole block here (``**detail``).
+        skills_note = detail.get("skills")
+        if isinstance(skills_note, dict) and (
+            skills_note.get("background") or not skills_note.get("ok")
+        ):
+            lines.append(
+                f"skills: {skills_note.get('message') or skills_note.get('code') or 'not synced'}"
             )
         if prompt:
             # ONE FACT, SAID ONCE (UX round 3, U21). This printed the boolean
@@ -10671,6 +11244,8 @@ def _guard_credential_subcommand(args: argparse.Namespace) -> int:
         return _cmd_credential_refresh(args)
     if verb == "inherit":
         return _cmd_credential_inherit(args)
+    if verb == "github":
+        return _cmd_credential_github(args)
     if verb in ("share", "revoke", "mark"):
         return _cmd_credential(args)
     print(
@@ -10681,6 +11256,8 @@ def _guard_credential_subcommand(args: argparse.Namespace) -> int:
         "       lop network credential revoke <provider|mcp:<url>> --from <device>\n"
         "       lop network credential mark   <secret> sync|local-only|default\n"
         "       lop network credential refresh <provider> [--json]\n"
+        "       lop network credential github repos [--refresh] [--use-default] [--json] | "
+        "exclude|include <owner/repo> [--json]\n"
         "       lop network credentials [--json]   # what is shared, and with whom",
         file=sys.stderr,
     )
@@ -11796,13 +12373,32 @@ def _cmd_definitions(args: argparse.Namespace) -> int:
                     else f"  custom instructions: {instructions.get('outcome')}"
                     + (f" ({why})" if why else "")
                 )
+            # The subagent model tiers: same reasoning, same line shape. A peer that
+            # kept its own map is why a pinned role runs on a different model there.
+            tiers = item.get(definitions.SUBAGENT_TIERS_KIND)
+            if isinstance(tiers, dict) and tiers.get("outcome") in (
+                "installed",
+                "updated",
+                "conflict",
+                "refused",
+                "withheld",
+            ):
+                tiers_notice = str(tiers.get("notice") or "")
+                tiers_why = str(tiers.get("reason") or "")
+                lines.append(
+                    f"  subagent model tiers: {tiers_notice}"
+                    if tiers_notice
+                    else f"  subagent model tiers: {tiers.get('outcome')}"
+                    + (f" ({tiers_why})" if tiers_why else "")
+                )
         return _emit(
             args, {"ok": bool(detail.get("ok")), "peers": rows}, lines or ["nothing to do"]
         )
 
     # ``state``: this device's own definitions, plus what was mirrored here.
     index = definitions.read_index(root)
-    state = definitions.definition_state(root)
+    # Local view: the tier values are shown here, never sent in the wire reply.
+    state = definitions.definition_state(root, include_tier_models=True)
     mirrored = {
         kind: {
             str(name): str(row.get("origin") or "")
@@ -11861,6 +12457,41 @@ def _cmd_definitions(args: argparse.Namespace) -> int:
             lines.append(f"failover routing {unit}: yours")
     if routing.get("status") == "unreadable":
         lines.append("failover routing: config.yml could not be read")
+    # The subagent model tiers (``subagents.models``): whose map this is, which
+    # model each tier runs on HERE, and the last peer revision kept out. Answers
+    # "why does effort=hi refuse / run on another model on this node" locally.
+    tiers = state.get(definitions.SUBAGENT_TIERS_KIND) or {}
+    tiers_status = str(tiers.get("status") or "absent")
+    tier_models = tiers.get("models") or {}
+    tier_text = ", ".join(
+        f"{tier}={value.get('model') if isinstance(value, dict) else value}"
+        for tier, value in tier_models.items()
+    )
+    tier_suffix = f" ({tier_text})" if tier_text else ""
+    if tiers_status == "mirror":
+        lines.append(
+            f"subagent model tiers: mirrored from {tiers.get('origin') or '?'}{tier_suffix}"
+        )
+    elif tiers_status == "edited":
+        lines.append(
+            "subagent model tiers: yours (edited after being mirrored from "
+            f"{tiers.get('origin') or '?'}){tier_suffix}"
+        )
+    elif tiers_status == "authored":
+        lines.append(f"subagent model tiers: yours{tier_suffix}")
+    elif tiers_status == "unreadable":
+        lines.append("subagent model tiers: the config could not be read")
+    tiers_conflict = tiers.get("conflict")
+    if isinstance(tiers_conflict, dict):
+        lines.append(
+            f"subagent model tiers from {tiers_conflict.get('origin') or '?'} not installed: "
+            f"{tiers_conflict.get('reason') or 'this device kept its own'}"
+            + (
+                "; clear subagents.models here to receive those"
+                if tiers_status in ("authored", "edited")
+                else ""
+            )
+        )
     if not lines:
         lines = ["no agent or team definitions on this device"]
     # Routing authority (review r2, m3), after the empty-state line so a bare
@@ -11891,6 +12522,7 @@ def _cmd_definitions(args: argparse.Namespace) -> int:
             "mirrored": mirrored,
             definitions.OPERATOR_INSTRUCTIONS_KIND: instructions,
             routing_sync.ROUTING_KIND: routing,
+            definitions.SUBAGENT_TIERS_KIND: tiers,
         },
         lines,
     )
@@ -11996,6 +12628,77 @@ def _cmd_mcp(args: argparse.Namespace) -> int:
     if not lines:
         lines = ["no user-scope MCP servers on this device"]
     return _emit(args, {"ok": True, "servers": rows}, lines)
+
+
+def _cmd_skills(args: argparse.Namespace) -> int:
+    """``lop network skills push|state`` — user skills over the mesh (``skillsync.py``).
+
+    The same split as ``mcp push|state``: the cadence already carries skills, so
+    ``push`` is the deliberate, per-skill-reporting half, and ``state`` answers
+    "why is ``skill://x`` missing over there" on the side that can act, with no
+    relay needed.
+    """
+    from local_operator.network import skillsync
+    from local_operator.network.types import MeshRefusal
+    from local_operator.paths import config_dir
+
+    verb = str(getattr(args, "skills_command", None) or "state")
+    root = config_dir()
+    if verb == "push":
+        peer = str(getattr(args, "peer", "") or "")
+        if not peer and not bool(getattr(args, "all_peers", False)):
+            raise MeshRefusal(
+                "peer_required",
+                "name a device with --peer, or ask every device with --all-peers",
+            )
+        detail = _relay_answer("skills_sync", peer=peer, timeout=180.0)
+        rows = [item for item in (detail.get("peers") or []) if isinstance(item, dict)]
+        lines = [str(detail.get("message") or "")] if detail.get("message") else []
+        for item in rows:
+            # The member's NAME where the mesh knows one (QA round 1, Q-5): a raw
+            # ``d_…`` id is not what the operator typed or can recognise.
+            label = str(item.get("name") or item.get("device_id") or "?")
+            lines.append(f"{label}: {item.get('message') or item.get('code') or 'no answer'}")
+            for outcome in ("installed", "updated"):
+                for row in item.get(outcome) or []:
+                    if isinstance(row, dict):
+                        lines.append(f"  {outcome} skill {row.get('name')!r}")
+            for outcome in ("kept", "refused", "skipped"):
+                for row in item.get(outcome) or []:
+                    if isinstance(row, dict):
+                        lines.append(
+                            f"  {outcome} skill {row.get('name')!r}: "
+                            f"{row.get('reason') or outcome}"
+                        )
+        return _emit(
+            args, {"ok": bool(detail.get("ok")), "peers": rows}, lines or ["nothing to do"]
+        )
+
+    rows = skillsync.state_rows(root)
+    receipts = skillsync.read_receipts(root)
+    lines = []
+    for row in rows:
+        origin = str(row.get("origin") or "")
+        if origin:
+            source = _device_name_anywhere(origin) or origin
+            line = f"skill: {row.get('name')} (mirrored from {source}" + (
+                ", edited here)" if row.get("edited") else ")"
+            )
+        else:
+            line = f"skill: {row.get('name')} (yours)"
+        if row.get("status") != "ready" and (not origin or row.get("edited")):
+            line += f" — will not travel: {row.get('reason') or row.get('status')}"
+        lines.append(line)
+    if not lines:
+        lines = ["no user skills on this device"]
+    for device_id, receipt in sorted(receipts.items()):
+        if isinstance(receipt, dict):
+            target = str(receipt.get("name") or "") or _device_name_anywhere(device_id)
+            lines.append(
+                f"last push to {target or device_id}: "
+                f"{receipt.get('message') or receipt.get('code') or '?'}"
+            )
+    return _emit(args, {"ok": True, "skills": rows, "pushes": receipts}, lines)
 
 
 def _mcp_server_shape(server: Mapping[str, Any]) -> str:
@@ -12745,6 +13448,7 @@ _HANDLERS: dict[str, Callable[[argparse.Namespace], int]] = {
     "sessions": _cmd_sessions,
     "definitions": _cmd_definitions,
     "mcp": _cmd_mcp,
+    "skills": _cmd_skills,
     "serve": _cmd_serve,
     "start": _cmd_service("start"),
     "stop": _cmd_service("stop"),

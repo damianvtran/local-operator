@@ -115,7 +115,9 @@ async def test_quiet_tick_advances_counters_and_a_change_engages_without_writing
 
 @pytest.mark.asyncio
 async def test_a_tool_that_needs_a_session_engages(tmp_path: Path) -> None:
-    row = _row("mcp__slack__read_thread", {"thread": "x"}, str(tmp_path))
+    # web_search stays session-only by decision (``parked.SESSION_ONLY_TOOLS``);
+    # MCP rows are probed now (``test_parked_probe_mcp.py``).
+    row = _row("web_search", {"query": "x"}, str(tmp_path))
     _arm(tmp_path, row)
     monitor_state.write_counters(
         tmp_path,

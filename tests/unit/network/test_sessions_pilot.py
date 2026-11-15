@@ -143,6 +143,65 @@ class _FakeViewer:
         }
 
 
+class _FakeMailboxClient:
+    """The slice of ``RemoteSessionClient`` the VIEW-FREE mailbox send touches.
+
+    It answers from the same ``_FakeViewer`` state the viewer path reads
+    (``mailbox``, ``mailbox_error``, ``mailbox_sleep_s``, ``peer_messages``), so
+    one cell can say which of the two paths delivered and the other must not.
+    """
+
+    def __init__(self, viewer: _FakeViewer, owner: "_FakeOwner") -> None:
+        self._viewer = viewer
+        self._owner = owner
+        self.detached = False
+
+    async def connect(self, record: Any, session_id: str) -> None:
+        self._owner.connects.append(session_id)
+        if self._owner.connect_error is not None:
+            raise self._owner.connect_error
+
+    @property
+    def mesh_peer_message_supported(self) -> bool:
+        return self._viewer.mailbox
+
+    async def peer_message(self, text: str, **kwargs: Any) -> dict[str, Any]:
+        return await self._viewer.send_peer_message(text, **kwargs)
+
+    async def detach(self) -> None:
+        self.detached = True
+
+
+class _FakeOwner:
+    """``RemoteOwner`` for the view-free path: engage, locate, make a client."""
+
+    def __init__(self, viewer: _FakeViewer | None) -> None:
+        self._viewer = viewer or _FakeViewer()
+        self.engaged = 0
+        self.locates = 0
+        self.records_after: int = 0
+        self.engage_error: Exception | None = None
+        self.connect_error: Exception | None = None
+        self.connects: list[str] = []
+        self.clients: list[_FakeMailboxClient] = []
+
+    async def engage(self, *, cwd: str, **_kwargs: Any) -> None:
+        self.engaged += 1
+        if self.engage_error is not None:
+            raise self.engage_error
+
+    def locate(self) -> tuple[Any, int | None]:
+        self.locates += 1
+        if self.locates <= self.records_after:
+            return None, None
+        return object(), 4242
+
+    def make_client(self, on_projection: Any, on_disconnected: Any, **_kwargs: Any) -> Any:
+        client = _FakeMailboxClient(self._viewer, self)
+        self.clients.append(client)
+        return client
+
+
 class _Message:
     """The two fields ``_pilot_last_reply`` reads off a display row."""
 
@@ -154,6 +213,8 @@ class _Message:
 class _Opened:
     def __init__(self) -> None:
         self.calls = 0
+        #: The view-free mailbox path's owner seam (``_pilot_mailbox_direct``).
+        self.owner: _FakeOwner | None = None
         #: What the verb told the SEAM, per call. The viewer's declaration of the
         #: action receipts it consumes is made here and nowhere else, so asserting
         #: it needs the kwargs rather than the viewer's behaviour.
@@ -212,11 +273,17 @@ def _patch(monkeypatch: pytest.MonkeyPatch, viewer: _FakeViewer | None, row: Any
     wants name resolution overrides it via :func:`_patch_peer_rows`, and a cell
     that does not must never reach a live relay through this seam.
     """
+    import local_operator.network.projection as projection
     import local_operator.session.remote_open as remote_open
 
     opened = _Opened()
     monkeypatch.setattr(remote_open, "open_remote_viewer", opened(viewer, row))
     monkeypatch.setattr(remote_open, "remote_row_for", lambda _session_id, _root: row)
+    # The view-free mailbox send builds its owner here, from the same row: a
+    # cell that sends must never reach a live relay through this seam either.
+    owner = _FakeOwner(viewer)
+    opened.owner = owner
+    monkeypatch.setattr(projection, "remote_owner_for", lambda *_args, **_kwargs: owner)
     _patch_peer_rows(monkeypatch, [])
     return opened
 
@@ -590,11 +657,16 @@ def test_mailbox_send_delivers_a_peer_message_not_a_turn(
 ) -> None:
     viewer = _FakeViewer()
     viewer.mailbox = True
-    _patch(monkeypatch, viewer, _remote_row())
+    opened = _patch(monkeypatch, viewer, _remote_row())
     argv = ["sessions", "--json", "--peer", PEER, "--send", SESSION, "--mailbox", *flags, "hi"]
     assert _run(argv) == 0
     payload = ok(capsys.readouterr().out)
     assert payload["ok"] is True and payload["outcome"] == "delivered"
+    # NO VIEW WAS BUILT for it: the owner's frontend bind is what refused a busy,
+    # long session's sends (``bind_failed``), and a mailbox send needs none.
+    assert opened.calls == 0 and viewer.bound is False
+    assert opened.owner is not None and opened.owner.engaged == 1
+    assert [client.detached for client in opened.owner.clients] == [True]
     assert payload["mode"] == mode and payload["wake"] is wake
     assert viewer.waited == [] and viewer.prompts == [], "no turn was driven"
     (sent,) = viewer.peer_messages
@@ -609,11 +681,15 @@ def test_mailbox_send_to_an_old_owner_falls_back_to_a_turn(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     viewer = _FakeViewer(rows=[_Message("assistant", "the reply")])
-    _patch(monkeypatch, viewer, _remote_row())
+    opened = _patch(monkeypatch, viewer, _remote_row())
     assert _run(["sessions", "--json", "--peer", PEER, "--send", SESSION, "--mailbox", "hi"]) == 0
     payload = ok(capsys.readouterr().out)
     assert payload["fallback"] == "prompt" and payload["outcome"] == "finished"
     assert viewer.waited == ["hi"] and viewer.peer_messages == []
+    # The view-free dial learned the owner has no mailbox, closed, and handed
+    # the act to the viewer — the only path that can drive a turn.
+    assert opened.owner is not None and len(opened.owner.clients) == 1
+    assert opened.owner.clients[0].detached and opened.calls == 1 and viewer.bound
 
 
 @pytest.mark.parametrize("flag", ["--no-wake", "--now"])
@@ -632,15 +708,105 @@ def test_a_quiet_or_steer_send_to_an_old_owner_is_refused_not_run_as_a_turn(
 def test_a_mailbox_send_the_owner_cannot_confirm_is_a_failure(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
+    """DELIVERED MEANS THE OWNER'S ACK, never a dial or a connect that worked: the
+    view-free connection below SUCCEEDS and the frame is written, yet no ack
+    arrives, so the receipt is a failure that says it is unconfirmed."""
     viewer = _FakeViewer()
     viewer.mailbox = True
     viewer.mailbox_sleep_s = 30.0
-    _patch(monkeypatch, viewer, _remote_row())
+    opened = _patch(monkeypatch, viewer, _remote_row())
     monkeypatch.setattr(net_cli, "PILOT_REPLY_TIMEOUT_S", 0.05)
     assert _run(["sessions", "--json", "--peer", PEER, "--send", SESSION, "--mailbox", "hi"]) == 1
     payload = ok(capsys.readouterr().out)
     assert payload["code"] == "session_unreachable"
     assert "too busy to confirm" in payload["message"] and "not confirmed" in payload["message"]
+    assert payload.get("outcome") != "delivered" and payload.get("ok") is not True
+    assert opened.owner is not None and opened.owner.connects == [SESSION]
+    assert len(viewer.peer_messages) == 1 and opened.calls == 0
+
+
+def test_a_mailbox_connection_that_closes_before_the_ack_is_not_delivered(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The connect worked and the frame went out, then the owner's socket closed
+    with no ack (the pump fails the request's future with ``ConnectionError``):
+    nothing proves admission, so nothing claims it."""
+    viewer = _FakeViewer()
+    viewer.mailbox = True
+    viewer.mailbox_error = ConnectionError("owner connection lost")
+    opened = _patch(monkeypatch, viewer, _remote_row())
+    assert _run(["sessions", "--json", "--peer", PEER, "--send", SESSION, "--mailbox", "hi"]) == 1
+    payload = ok(capsys.readouterr().out)
+    assert payload["code"] == "session_unreachable"
+    assert payload.get("outcome") != "delivered" and payload.get("ok") is not True
+    assert opened.owner is not None and opened.owner.connects == [SESSION]
+
+
+def test_a_mailbox_send_whose_dial_fails_reports_nothing_delivered(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A connect that fails wrote no frame, so the receipt is the dial refusal —
+    and the act does NOT fall back to the viewer, which would only fail again
+    (or, worse, succeed at a view while the message was never sent)."""
+    viewer = _FakeViewer()
+    viewer.mailbox = True
+    opened = _patch(monkeypatch, viewer, _remote_row())
+    assert opened.owner is not None
+    opened.owner.connect_error = ConnectionError("the local relay did not answer")
+    monkeypatch.setattr("local_operator.network.store.find_own_relay", lambda _root: object())
+    assert _run(["sessions", "--json", "--peer", PEER, "--send", SESSION, "--mailbox", "hi"]) == 1
+    payload = ok(capsys.readouterr().out)
+    assert payload["code"] == "peer_unreachable"
+    assert "produced no session (the local relay did not answer)" in payload["message"]
+    assert viewer.peer_messages == [] and opened.calls == 0
+    assert [client.detached for client in opened.owner.clients] == [True]
+
+
+def test_a_mailbox_send_retries_locate_while_a_spawned_runtime_publishes(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A stored session is engaged by the send (a write warms it), and its record
+    appears a moment later — the bind loop's short locate retry, kept here."""
+    viewer = _FakeViewer()
+    viewer.mailbox = True
+    opened = _patch(monkeypatch, viewer, _remote_row(live_state=""))
+    assert opened.owner is not None
+    opened.owner.records_after = 2
+    assert _run(["sessions", "--json", "--peer", PEER, "--send", SESSION, "--mailbox", "hi"]) == 0
+    assert ok(capsys.readouterr().out)["outcome"] == "delivered"
+    assert opened.owner.locates == 3 and opened.calls == 0
+
+
+def test_a_mailbox_send_with_no_runtime_after_engage_is_refused(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    viewer = _FakeViewer()
+    viewer.mailbox = True
+    opened = _patch(monkeypatch, viewer, _remote_row())
+    assert opened.owner is not None
+    opened.owner.records_after = 99
+    monkeypatch.setattr("local_operator.network.store.find_own_relay", lambda _root: object())
+    assert _run(["sessions", "--json", "--peer", PEER, "--send", SESSION, "--mailbox", "hi"]) == 1
+    payload = ok(capsys.readouterr().out)
+    assert payload["code"] == "peer_unreachable"
+    assert "could not start a runtime for this session" in payload["message"]
+    assert opened.owner.connects == [] and viewer.peer_messages == []
+
+
+def test_a_mailbox_send_whose_engage_is_refused_keeps_the_peer_code(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from local_operator.network.projection import ProjectionRefusal
+
+    viewer = _FakeViewer()
+    viewer.mailbox = True
+    opened = _patch(monkeypatch, viewer, _remote_row())
+    assert opened.owner is not None
+    opened.owner.engage_error = ProjectionRefusal("peer_refused", "the peer said no")
+    assert _run(["sessions", "--json", "--peer", PEER, "--send", SESSION, "--mailbox", "hi"]) == 1
+    payload = ok(capsys.readouterr().out)
+    assert payload["code"] == "peer_refused" and payload["message"] == "the peer said no"
+    assert opened.owner.connects == [] and opened.calls == 0
 
 
 def test_no_wake_without_mailbox_is_a_usage_error(

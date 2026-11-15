@@ -35,7 +35,12 @@ into HIGH — a judge decision, never a pass. Rules only ADD restriction.
   `$HOME`, `/`, an ancestor of those, and a glob reaching such a name
   (`rm -rf ~/.local-op*`). Refused outright.
 - **HIGH** — another session's directory, any other path in the state root, a direct
-  child of `$HOME`, a repo root, `git clean` of untracked work, every linked
+  child of `$HOME`, a repo root, `git clean` of untracked work, a directory another
+  session created (its creation-ledger row at, under or above the target, still the
+  same inode, from a session outside your subagent tree — the reason names that
+  session; for a target inside recorded directories the deepest one decides, so
+  your own directory inside another session's stays yours; on Linux, where the
+  inode stamp is ctime, a row stops counting once its directory changes), every linked
   worktree a delete reaches that this session's ledger does not record — by its
   path, a glob match (`rm -rf <repo>/.worktrees/*`, or a loop over one) or an
   ancestor (`rm -rf <repo>/.worktrees`), however it is spelled (matched by
@@ -45,11 +50,37 @@ into HIGH — a judge decision, never a pass. Rules only ADD restriction.
   the resolver could not pin down** (opaque substitution, empty expansion, unknown
   cwd) — unless it lands on something already critical, as an empty expansion
   collapsing to `/` does. Goes to the judge.
+  Also HIGH, wherever the path is: unlocking write-protected files for removal
+  — `chmod -R u+w`/`+w`/`755`/`-N`, the same through `find -exec` or `xargs`,
+  `setfacl -R`, `chflags nouchg`/`noschg`, `chattr -i` — on anything outside
+  this session's own directory that its ledger does not record. That is a
+  forced removal, even where `rm -rf` of the same path alone would be LOW.
+- **Only an approving operator answer to an ask is consent.** An ask that
+  timed out, expired, was withdrawn, dismissed or declined, is still open, or
+  was "answered" by the agent itself, a relay or a declining pick never
+  authorises a delete. Asking about a path also ranks deleting, moving away or
+  unlocking it at least HIGH, however deep it is (a path equal to, under or
+  above one the ask names, in its question, labels or descriptions; globs and
+  brace lists included; asks from this session, its parents and its
+  subagents, up to 7 days old). Such a call is refused without the judge,
+  unless this session's creation ledger records the path or the operator
+  approved it; under a broad dir the ask names (a direct child of `~`, or one
+  with over 1000 entries) the judge decides instead. Once the operator gives a
+  real yes, that ask never refuses on its own: a question they answered is
+  read like consent (question and labels, never a description), a path their
+  pick covers keeps its usual rank, and one only an option they did not pick
+  names goes to the judge, where citing the ask for it never verifies.
+  Overwrites keep their usual rank. Leave the path in place and report it as
+  waiting for the operator's answer.
 - **LOW** — everything else: this session's scratchpad, deep paths, `/tmp`. Runs
   unexamined. A target derived from a secret is refused even with an approved
   override: consent cannot be shown for a secret you should never see.
   Also LOW: a HIGH path this session's family (see below) recorded
   creating, and `git worktree remove <path>` of a clean linked worktree.
+  Heredoc and quoted body arguments are data, not commands: a quoted-delimiter
+  body (`gh pr comment N --body "$(cat <<'EOF' … EOF)"`) is never read for
+  delete words or targets, while a body fed to a shell (`bash <<EOF`, `| sh`)
+  and the `$(…)` inside an unquoted `<<EOF` body are still walked.
 
 ## Cleaning up what you made
 
@@ -58,7 +89,8 @@ three routes the checkpoint can verify. Everything CRITICAL is still refused.
 
 - **Creation ledger.** After every bash call the loop records the directories it
   created: `mkdir [-p]` (the topmost new component), `mktemp -d TEMPLATE`,
-  `git worktree add <path>`, `git clone <url> [<dir>]`. Rows live in
+  `git worktree add <path>`, `git clone <url> [<dir>]` — inside a `for` loop, one
+  candidate per loop value (a `$(…)` or unknown loop list records nothing). Rows live in
   `<config_dir>/guardrails/created.sqlite`, keyed by session id + realpath +
   inode, written under the creator and every ancestor session, so a parent may
   delete what its subagents made. Overwriting or deleting the ledger is CRITICAL.
@@ -280,7 +312,15 @@ three routes the checkpoint can verify. Everything CRITICAL is still refused.
 session they opened (one the harness knows no parent or opener for — no
 in-process parent, no lineage-registry row, no `origin.json`; a missing or
 symlinked `origin.json` alone never makes a session operator-opened), or their answer to `ask` as recorded in the ask store
-(`sessions/<id>/asks.jsonl`, answered on the terminal, desktop or phone). In a
+(`sessions/<id>/asks.jsonl`) and answered on a local operator surface: the
+terminal or TUI, or the desktop app or its attached pane on a runtime it
+started. The runtime stamps who answered (`answered_by.surface`) itself and
+never takes the answering frame's `by`. A trusted surface is recorded only
+when the connection proved the in-memory operator capability on that frame.
+Answers from the phone portal, a mesh peer, or any process that merely read the
+session's `control_key` (your own `bash` included) are recorded as `remote` or
+`unverified`. They settle the ask but are never consent, so do not answer your
+own asks through the socket: it only sends the delete to the judge. In a
 subagent or an agent-opened workstream the user rows are the delegating agent's
 words, so there only store-verified asks count. An ask id (`a-xxxx`) cited by a
 peer message, the intent or the command is looked up only in this session's

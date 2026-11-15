@@ -37,7 +37,7 @@ import fnmatch
 import itertools
 import os
 import re
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 
@@ -48,8 +48,10 @@ from local_operator.tools.search_guard import (
     _WRAPPER_LONG_VALUE_FLAGS,
     _WRAPPER_OWN_LONG_VALUE_FLAGS,
     _WRAPPER_VALUE_FLAGS,
+    HEREDOC_UNREADABLE,
     WRAPPER_WORDS,
     _unquote,
+    heredoc_opener,
     lex,
 )
 
@@ -114,18 +116,76 @@ class _RawWord:
             self.parts.append(_Part(kind, text))
 
 
-def _read_sub(text: str, i: int) -> tuple[str, int, bool]:
+def _skip_heredoc_bodies(text: str, j: int, delimiters: list[str]) -> int:
+    """Index of the newline ending the last of ``delimiters``' bodies; -1 if any is missing.
+
+    ``text[j]`` is the newline after the opener line. Bodies follow in opener
+    order, each ending at a line equal to its delimiter (``<<-`` strips tabs;
+    the strip here matches :func:`lex`, so the two readers agree).
+
+    ``line.strip() == delim`` is deliberately looser in matching than bash
+    (which ends a body only on the exact line, or tab-stripped for ``<<-``),
+    so it can only end a body EARLIER than bash does. An early end exposes
+    body lines as commands to the walk, which is stricter, never a hidden
+    command. That holds because :func:`heredoc_opener` strips the word too
+    (round 2 M2/N1, PR #3962): before it did, a quoted word with outer
+    whitespace (``<<'EOF '``) or a trailing CR (``<<EOF\r`` in CRLF text)
+    never equalled a stripped line, so its body never ended at all — still
+    fail-closed (-1), but one rank lower than bash's real behaviour warrants.
+    """
+    pos = j + 1
+    n = len(text)
+    end = j
+    for delim in delimiters:
+        while True:
+            if pos > n:
+                return -1
+            end = text.find("\n", pos)
+            line = text[pos : end if end != -1 else n]
+            if line.strip() == delim:
+                break
+            if end == -1:
+                return -1
+            pos = end + 1
+        if end == -1:
+            return n
+        pos = end + 1
+    return end
+
+
+def _read_sub(text: str, i: int, *, heredocs: bool = True) -> tuple[str, int, bool]:
     """Body of a ``$(`` substitution starting at ``text[i]`` (just past ``$(``).
 
     Depth-counted and quote-aware so a nested substitution stays one word.
     Returns ``(body, index_after, balanced)``.
+
+    Heredoc-aware, like the shared :func:`lex`: a ``<<WORD`` opener's body
+    lines are data to this reader, so an apostrophe, paren or backtick in them
+    never opens a phantom quote or closes the substitution. Without this, the
+    field command ``gh pr comment N --body "$(cat <<'EOF' … it's … EOF)"``
+    (a reviewer's comment, PR #3960) left a phantom quote open, the body ran to
+    the end of the line, and the prose's word "remove" plus the open text made
+    the walk rank HIGH as an unresolvable delete. The body text is still
+    RETURNED, so the inner walk's :func:`lex` decides what it is: data for a
+    quoted heredoc fed to ``cat``, a script for ``bash <<EOF``, and live
+    ``$(…)`` for an unquoted heredoc. ``heredocs=False`` is for ``$((``
+    arithmetic, where ``<<`` is a shift.
     """
     depth = 1
     quote: str | None = None
+    pending: list[str] = []
     j = i
     n = len(text)
     while j < n:
         ch = text[j]
+        if not quote and ch == "\n" and pending:
+            end = _skip_heredoc_bodies(text, j, pending)
+            pending = []
+            if end == -1:
+                # No delimiter line: bash would keep reading (fail closed).
+                return text[i:], n, False
+            j = end + 1
+            continue
         if quote:
             if ch == "\\" and quote == '"':
                 j += 2
@@ -137,6 +197,25 @@ def _read_sub(text: str, i: int) -> tuple[str, int, bool]:
         elif ch == "\\":
             j += 2
             continue
+        elif ch == "$" and text.startswith("$[", j):
+            # Legacy arithmetic ``$[1<<E]`` (round 2 M1, PR #3962): ``<<`` is
+            # a shift, as in ``$((``, so the bracketed span is skipped whole
+            # rather than offered to the heredoc reader. Unbalanced: fail closed.
+            close = _match_bracket(text, j + 2)
+            if close == -1:
+                return text[i:], n, False
+            j = close + 1
+            continue
+        elif heredocs and ch == "<" and text.startswith("<<", j) and not text.startswith("<<<", j):
+            opener = heredoc_opener(text, j)
+            if opener is not None and opener[0] == HEREDOC_UNREADABLE:
+                # Delimiter word we will not guess at (R1, PR #3962): fail
+                # closed rather than skip a body bash may end elsewhere.
+                return text[i:], n, False
+            if opener is not None:
+                pending.append(opener[0])
+                j = opener[1]
+                continue
         elif ch == "(":
             depth += 1
         elif ch == ")":
@@ -158,7 +237,7 @@ def _read_dollar(text: str, i: int, word: _RawWord, kind: str) -> int:
         return j
     if nxt == "(":
         # $(( arithmetic )) — evaluates to a number, never a path we can know.
-        body, j, ok = _read_sub(text, i + 2)
+        body, j, ok = _read_sub(text, i + 2, heredocs=False)
         word.add("sub", "\x01arith")
         word.broken |= not ok
         return j
@@ -179,6 +258,22 @@ def _read_dollar(text: str, i: int, word: _RawWord, kind: str) -> int:
         return i + 2
     word.add(kind, "$")
     return i + 1
+
+
+def _match_bracket(text: str, i: int) -> int:
+    """Index of the ``]`` closing a ``$[`` whose body starts at ``i``; -1 if none.
+
+    Depth-counted so a subscript (``$[a[1]<<2]``) stays inside the span.
+    """
+    depth = 1
+    for j in range(i, len(text)):
+        if text[j] == "[":
+            depth += 1
+        elif text[j] == "]":
+            depth -= 1
+            if depth == 0:
+                return j
+    return -1
 
 
 def _match_brace(text: str, i: int) -> int:
@@ -863,7 +958,9 @@ class Target:
     #: ``sqlite3 FILE``, a copy INTO a directory). It is ranked only where the
     #: write itself is the danger: the guard's own evidence (transcripts,
     #: lineage, ask store, ledger) — see ``classify._evidence_reason``.
-    op: str  # "delete" | "move" | "overwrite" | "clean" | "append"
+    #: ``unprotect`` is a recursive write grant / immutable-flag clear that
+    #: unlocks a tree for removal (``_unprotected_operands``).
+    op: str  # "delete" | "move" | "overwrite" | "clean" | "append" | "unprotect"
     program: str
     pattern: str | None = None
     empty: list[str] = field(default_factory=list)
@@ -1507,6 +1604,130 @@ def _has_short(flags: list[str], letters: str) -> bool:
 #: Programs whose operands are removed. ``grm``/``gunlink`` are the GNU names on
 #: a Homebrew coreutils install.
 DELETE_PROGRAMS = frozenset({"rm", "grm", "rmdir", "unlink", "gunlink", "shred"})
+#: Permission changes that strip the protection a tree's owner put on it.
+#:
+#: WHY (incident 2026-11-14, session 1faad822298d): ``rm -rf`` of a deep
+#: benchmark tree failed with ``Permission denied`` on its write-protected raw
+#: results; the next call ran ``chmod -R u+w <tree>`` and then ``rm -rf`` again,
+#: and both ranked LOW because ``chmod`` was modelled as metadata only. Write
+#: protection is the owner saying "do not remove this", so unlocking it on a
+#: path the session did not create is a FORCED removal and is judged as one
+#: (``classify._high_reason``, op ``unprotect``).
+_UNPROTECT_PROGRAMS = frozenset({"chmod", "gchmod", "chflags", "chattr", "setfacl"})
+#: ``setfacl`` options that take the NEXT word as their value (an ACL spec or file).
+_SETFACL_VALUE_LETTERS = frozenset("mMxX")
+_SETFACL_VALUE_LONG = frozenset(
+    {"--modify", "--modify-file", "--remove", "--remove-file", "--set", "--set-file"}
+)
+#: ``chflags`` words that clear an immutable / append-only / no-unlink flag.
+_CHFLAGS_UNLOCK = frozenset(
+    {
+        "nouchg",
+        "nouchange",
+        "nouimmutable",
+        "noschg",
+        "noschange",
+        "nosimmutable",
+        "nouappnd",
+        "nouappend",
+        "nosappnd",
+        "nosappend",
+        "nouunlnk",
+        "nouunlink",
+        "nosunlnk",
+        "nosunlink",
+        "0",
+    }
+)
+#: chmod value flags (GNU ``--reference=F`` is glued; BSD has none).
+_CHMOD_VALUE_FLAGS: frozenset[str] = frozenset()
+#: A symbolic chmod clause that grants write: ``u+w``, ``+w``, ``a=rwX``, ``go+rw``.
+_CHMOD_GRANTS_WRITE_RE = re.compile(r"^[ugoa]*[+=][rwxXst]*w[rwxXst]*$")
+
+
+def _chmod_grants_write(mode: str) -> bool:
+    """Does ``mode`` give the OWNER write permission (symbolic or octal)?
+
+    Octal sets the whole mode, so ``755``/``644``/``777`` unlock a read-only
+    file exactly as ``u+w`` does; ``555``/``444`` do not. A symbolic mode is
+    read clause by clause (``u+w,go-w``); a clause naming only ``g``/``o``
+    does not reach the owner, whose permission is what blocks ``rm``.
+    """
+    if re.fullmatch(r"[0-7]{3,4}", mode):
+        return bool(int(mode[-3]) & 2)
+    for clause in mode.split(","):
+        if not _CHMOD_GRANTS_WRITE_RE.match(clause):
+            continue
+        who = re.match(r"^[ugoa]*", clause).group(0)  # type: ignore[union-attr]
+        if not who or "u" in who or "a" in who:
+            return True
+    return False
+
+
+def _unprotected_operands(
+    name: str, args: list[Expanded], *, recursive: bool = False
+) -> list[Expanded]:
+    """The paths a permission change UNLOCKS for removal, else ``[]``.
+
+    ``chmod`` counts only RECURSIVE (``-R``) grants of owner write: a
+    single-file ``chmod u+w f`` to edit it is routine, while unlocking a whole
+    tree is how the incident got past ``rm``'s refusal. ``chflags`` clearing
+    an immutable or append-only flag counts with or without ``-R``: nothing
+    but a removal or rewrite needs that. ``chattr -i``/``-a`` (Linux) the same.
+
+    Review R1-m2 (PR #3966), the same unlock spelled differently:
+    ``recursive=True`` is passed for ``find -exec chmod`` (find walks the
+    tree for it); macOS ``chmod -R -N`` strips every ACL entry, deny-delete
+    ones included, and takes no mode operand; ``setfacl -R`` rewrites the
+    ACLs of a whole tree.
+    """
+    if name in ("chmod", "gchmod"):
+        operands, flags = _operands(args, _CHMOD_VALUE_FLAGS)
+        if not (recursive or _has_short(flags, "R") or "--recursive" in flags):
+            return []
+        if _has_short(flags, "N"):
+            return operands
+        if len(operands) < 2:
+            return []
+        return operands[1:] if _chmod_grants_write(operands[0].text) else []
+    if name == "setfacl":
+        files: list[Expanded] = []
+        rec = recursive
+        skip = False
+        for w in args:
+            if skip:
+                skip = False
+                continue
+            t = w.text
+            if t.startswith("--"):
+                rec = rec or t == "--recursive"
+                skip = t in _SETFACL_VALUE_LONG
+                continue
+            if t.startswith("-") and len(t) > 1 and not w.opaque:
+                rec = rec or "R" in t[1:]
+                # ``-Rm spec``: a value letter LAST in the cluster takes the next word.
+                skip = t[-1] in _SETFACL_VALUE_LETTERS
+                continue
+            if not w.vanished:
+                files.append(w)
+        return files if rec else []
+    if name == "chflags":
+        operands, _ = _operands(args)
+        if len(operands) < 2:
+            return []
+        words = {f.strip().lower() for f in operands[0].text.split(",")}
+        return operands[1:] if words & _CHFLAGS_UNLOCK else []
+    if name == "chattr":
+        unlock = any(
+            w.text.startswith("-") and len(w.text) > 1 and set(w.text[1:]) & {"i", "a"}
+            for w in args
+        )
+        if not unlock:
+            return []
+        return [w for w in args if not w.text.startswith(("-", "+", "=")) and not w.vanished]
+    return []
+
+
 #: Words that run the REST of the segment as a command (beyond search_guard's list).
 _EXTRA_WRAPPERS = frozenset({"builtin", "exec", "doas", "caffeinate", "stdbuf", "ionice"})
 _RM_VALUE_FLAGS: frozenset[str] = frozenset()
@@ -2980,6 +3201,7 @@ class _Walker:
             for body in w.substitutions:
                 if body.strip() and body.strip() not in _EMPTY_BODIES:
                     self._isolated_walk(body, depth + 1)
+        self._walk_heredoc_substitutions(redirects, heredocs or [], depth)
         herestrings: list[str] = []
         for op, raw in redirects:
             if op in (">", ">|", ">>", ">&", "<>"):
@@ -3112,6 +3334,18 @@ class _Walker:
         if name in ("ln", "gln"):
             self._ln(args)
             return
+        if name in _UNPROTECT_PROGRAMS:
+            # No ``return``: a permission change keeps whatever other handling
+            # it had (the write-surface backstop); this only ADDS targets.
+            for w in _unprotected_operands(name, args):
+                self._add(w, "unprotect", name)
+            # ``… | xargs chmod u+w`` (review R1-m2): the files arrive on
+            # stdin, typically a whole ``find`` walk, so it is read as
+            # recursive; a stand-in operand asks "would this unlock its files?".
+            if stdin_fed and _unprotected_operands(
+                name, [*args, Expanded(text="{}")], recursive=True
+            ):
+                self._add_stdin(name, op="unprotect")
         if name in DELETE_PROGRAMS:
             flags_with_value = _SHRED_VALUE_FLAGS if name == "shred" else _RM_VALUE_FLAGS
             operands, _flags = _operands(args, flags_with_value)
@@ -3386,6 +3620,42 @@ class _Walker:
                 self._fetched_script(stdin_piped, feed)
                 return
         self._unseen_script(segment, stdin_piped, pipeline, feed)
+
+    def _walk_heredoc_substitutions(
+        self, redirects: list[tuple[str, _RawWord]], bodies: list[str], depth: int
+    ) -> None:
+        """Walk the ``$(…)``/backtick commands an UNQUOTED heredoc body runs.
+
+        Bash expands an unquoted-delimiter heredoc (``<<EOF``) before the reader
+        sees it, so ``cat <<EOF`` with ``$(rm -rf ~/x)`` in its body runs that
+        ``rm`` whatever ``cat`` does. A quoted delimiter (``<<'EOF'``,
+        ``<<"EOF"``, ``<<\\EOF``) makes the body literal data: never walked
+        here, so prose in a ``gh pr comment --body "$(cat <<'EOF' …)"`` is not
+        a command. Bodies pair with the segment's ``<<`` openers in order; if
+        the counts disagree (an opener sat inside a split substitution, R10)
+        the pairing is a guess, so every body is walked (fails toward scrutiny).
+        """
+        delimiters = [raw for op, raw in redirects if op in ("<<", "<<-")]
+        if not bodies:
+            return
+        if len(delimiters) == len(bodies):
+            active = [
+                body
+                for delimiter, body in zip(delimiters, bodies)
+                if all(part.kind == "bare" for part in delimiter.parts)
+            ]
+        else:
+            active = list(bodies)
+        st = self.state
+        for data in active:
+            if "$" not in data and "`" not in data:
+                continue
+            data_words, _ = scan(data, heredoc=True)
+            for w in data_words:
+                for exp in expand_all(w, st.env, st.home):
+                    for body in exp.substitutions:
+                        if body.strip() and body.strip() not in _EMPTY_BODIES:
+                            self._isolated_walk(body, depth + 1)
 
     def _walk_stdin_bodies(self, heredocs: list[str], herestrings: list[str], depth: int) -> None:
         for body in list(herestrings) + list(heredocs):
@@ -3869,7 +4139,7 @@ class _Walker:
             and not _cluster_value(args, "t", "--target-directory")
             and not link.text.endswith("/")
         ):
-            self._create("symlink", self._literal_dir(link))
+            self._create("symlink", link)
         # AFTER the provenance record, never before: ``_create`` calls
         # ``_name``, which drops any ``link_targets`` entry for the path it
         # names. Run second, it erased the target ``_record_link`` had just
@@ -3891,6 +4161,21 @@ class _Walker:
             i += 1
         rest = args[i:]
         texts = [w.text for w in rest]
+        # ``find <tree> -exec chmod u+w {} +`` (review R1-m2) unlocks every
+        # file find walks: the same forced removal as ``chmod -R u+w <tree>``.
+        for j, t in enumerate(texts):
+            if t not in _FIND_EXEC or j + 1 >= len(texts):
+                continue
+            prog = os.path.basename(texts[j + 1])
+            if prog not in _UNPROTECT_PROGRAMS:
+                continue
+            end = next(
+                (k for k in range(j + 2, len(texts)) if texts[k] in (";", "\\;", "+")),
+                len(texts),
+            )
+            if _unprotected_operands(prog, rest[j + 2 : end], recursive=True):
+                for w in roots or [Expanded(text=".")]:
+                    self._add(w, "unprotect", f"find -exec {prog}")
         destructive = "-delete" in texts
         for j, t in enumerate(texts):
             if t in _FIND_EXEC and j + 1 < len(texts):
@@ -4172,27 +4457,64 @@ class _Walker:
         path, _unknown = _absolute(exp.text, base if base is not None else self.state.cwd)
         return path
 
-    def _create(self, kind: str, path: str | None, *, word: Expanded | None = None) -> None:
-        if path is not None:
-            self.result.created.append(Creation(kind=kind, path=path))
-            self._name(path)
-        # ``word``: the RELATIVE-to-cwd word that named ``path``, passed only
-        # where the cwd is the base (not ``git -C``). Its later ``for``
-        # iterations land under ``state.cwd_fan`` (see ``_cwd_fan_for``).
-        if path is None or word is None or word.text.startswith(("/", "~")):
+    def _create(
+        self,
+        kind: str,
+        exp: Expanded,
+        base: str | None = None,
+        *,
+        name_of: Callable[[Expanded], Expanded | None] | None = None,
+        cwd_fan: bool = False,
+    ) -> None:
+        """Record a creation candidate for ``exp`` and every ``for`` value it takes.
+
+        A creation inside a loop makes one directory per loop value, so it
+        records one candidate per value, exactly as ``_add`` fans a delete
+        target out. Recording only the first value (session 3ef6295a5545:
+        ``for n in a b; do git worktree add .worktrees/i18n-$n; done`` got a
+        ledger row for ``i18n-a`` alone) sent the creator's own later removal
+        of ``i18n-b`` to the judge, which refused it. Over-listing is safe:
+        ``provenance.commit_creations`` records only paths absent before the
+        call and present as directories after it. An unenumerable loop
+        (``_iterations`` is ``None``) records nothing at all — fail-closed, an
+        unrecorded directory is merely judged rather than trusted. ``name_of``
+        derives the created word from each fanned-out word (clone's URL to
+        default directory name); ``None`` from it skips that value.
+
+        ``cwd_fan`` (PR #3964): the base is the walk's cwd (not ``git -C``),
+        so a RELATIVE word also lands under every later outer-loop iteration's
+        cwd in ``state.cwd_fan`` (see ``_cwd_fan_for``); those paths are
+        recorded too. A word that itself moves with a ``for`` loop is left to
+        the value fan above only — the cross product with the cwd fan is not
+        modelled, and recording fewer candidates is the fail-closed side.
+        """
+        iterations = self._iterations(exp)
+        if iterations is None:
             return
-        if word.refs and any(r[0] in self.for_lists for r in word.refs):
-            return  # the word itself moves with the loop: not modelled here
+        for word in [exp] + [_fan_out(exp, values) for _roots, values in iterations]:
+            named = name_of(word) if name_of is not None else word
+            path = self._literal_dir(named, base) if named is not None else None
+            if path is not None:
+                self.result.created.append(Creation(kind=kind, path=path))
+                self._name(path)
+        if not cwd_fan or (exp.refs and any(r[0] in self.for_lists for r in exp.refs)):
+            return
+        named = name_of(exp) if name_of is not None else exp
+        if named is None or named.text.startswith(("/", "~")):
+            return
+        first = self._literal_dir(named, base)
+        if first is None:
+            return
         for cwd in self.state.cwd_fan:
-            other = self._literal_dir(word, cwd)
-            if other is not None and other != path:
+            other = self._literal_dir(named, cwd)
+            if other is not None and other != first:
                 self.result.created.append(Creation(kind=kind, path=other))
                 self._name(other)
 
     def _mkdir(self, args: list[Expanded]) -> None:
         operands, _flags = _operands(args, _MKDIR_VALUE_FLAGS)
         for w in operands:
-            self._create("mkdir", self._literal_dir(w), word=w)
+            self._create("mkdir", w, cwd_fan=True)
 
     def _mktemp(self, args: list[Expanded]) -> None:
         operands, flags = _operands(args, _MKTEMP_VALUE_FLAGS)
@@ -4231,25 +4553,19 @@ class _Walker:
             if not operands:
                 return
             if len(operands) >= 2:
-                self._create(
-                    "clone",
-                    self._literal_dir(operands[1], base),
-                    word=operands[1] if cwd_override is None else None,
-                )
+                self._create("clone", operands[1], base, cwd_fan=cwd_override is None)
                 return
             url = operands[0]
             if url.opaque or url.pattern is not None:
                 return
-            # git's own default: the URL's last component minus ``.git``.
-            name = re.split(r"[/:]", url.text.rstrip("/"))[-1]
-            name = name[:-4] if name.endswith(".git") else name
-            if name and name not in (".", ".."):
-                named = Expanded(text=name)
-                self._create(
-                    "clone",
-                    self._literal_dir(named, base),
-                    word=named if cwd_override is None else None,
-                )
+
+            def default_name(word: Expanded) -> Expanded | None:
+                # git's own default: the URL's last component minus ``.git``.
+                name = re.split(r"[/:]", word.text.rstrip("/"))[-1]
+                name = name[:-4] if name.endswith(".git") else name
+                return Expanded(text=name) if name and name not in (".", "..") else None
+
+            self._create("clone", url, base, name_of=default_name, cwd_fan=cwd_override is None)
             return
         if len(args) < 2:
             return
@@ -4257,11 +4573,7 @@ class _Walker:
         if sub == "add":
             operands, _ = _operands(args[2:], _GIT_WORKTREE_ADD_VALUE_FLAGS)
             if operands:
-                self._create(
-                    "worktree",
-                    self._literal_dir(operands[0], base),
-                    word=operands[0] if cwd_override is None else None,
-                )
+                self._create("worktree", operands[0], base, cwd_fan=cwd_override is None)
         elif sub == "remove":
             operands, flags = _operands(args[2:])
             # git's parse-options accepts any unique prefix of a long option,
@@ -4707,11 +5019,11 @@ class _Walker:
                 self._add(Expanded(text=landed), "append", program)
                 self._carry_link(landed, state)
 
-    def _add_stdin(self, program: str) -> None:
+    def _add_stdin(self, program: str, op: str = "delete") -> None:
         self.result.targets.append(
             Target(
                 path=self.state.cwd,
-                op="delete",
+                op=op,
                 program=f"xargs {program}",
                 credential_derived=self.state.private_cwd,
                 opaque=True,

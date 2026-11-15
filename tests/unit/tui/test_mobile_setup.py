@@ -35,7 +35,21 @@ async def test_mobile_status_selected_owner_is_read_only(monkeypatch):
         await pilot.pause()
         monkeypatch.setattr(app, "_system_notice", notice)
         app._cmd_mobile("status --credential-id 17", notice)
-        await pilot.pause(0.2)
+        # Wait on the call itself, never on a delay. The status path runs
+        # ``observe`` on a ``to_thread`` + ``asyncio.run`` worker (tunnels/cli.py
+        # mobile_action, behind _cmd_mobile's run_worker), so a fixed
+        # ``pilot.pause(0.2)`` races thread start and a fresh event loop on a
+        # loaded shard (CI job 132259445723, PR #3940's gate: "Awaited 0
+        # times"). Joining the "mobile-setup" worker is safe here: the fake
+        # ``observe`` returns immediately, so nothing parks it, and it also
+        # guarantees the busy flag and notices asserted below are final. Extend
+        # the same way for any test asserting an awaited mock behind _cmd_mobile.
+        await settle(
+            pilot,
+            lambda: observe.await_count >= 1,
+            what="mobile status observe awaited",
+            workers=("mobile-setup",),
+        )
         observe.assert_awaited_once_with(17)
         apply.assert_not_awaited()
         assert not app._tunnel_action_busy
@@ -68,7 +82,21 @@ async def test_mobile_composer_does_not_offer_provider_arguments(monkeypatch, ty
         await pilot.pause()
         assert editor.picker.highlighted_name() not in {"radient", "openai", "anthropic"}
         await pilot.press("enter")
-        await pilot.pause(0.3)
+        # Wait on the call itself, never on a delay. The status path runs
+        # ``observe`` on a ``to_thread`` + ``asyncio.run`` worker (tunnels/cli.py
+        # mobile_action, behind _cmd_mobile's run_worker), so a fixed
+        # ``pilot.pause(0.3)`` races thread start and a fresh event loop on a
+        # loaded shard (CI job 132259445723, PR #3940's gate: "Awaited 0
+        # times"). Joining the "mobile-setup" worker is safe here: the fake
+        # ``observe`` returns immediately, so nothing parks it, and it also
+        # guarantees the busy flag and notices asserted below are final. Extend
+        # the same way for any test asserting an awaited mock behind _cmd_mobile.
+        await settle(
+            pilot,
+            lambda: observe.await_count >= 1,
+            what="mobile status observe awaited",
+            workers=("mobile-setup",),
+        )
         observe.assert_awaited_once_with(None)
         assert not app._tunnel_action_busy
         assert session.prompts == []

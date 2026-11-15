@@ -1,0 +1,45 @@
+$ git rev-parse HEAD
+1fce7ecb1f5fb587e7b91ef2f9c7fe658521e0d0
+$ git show --stat --format=%H HEAD -- local_operator/i18n/catalogues/hi local_operator/i18n/catalogues/ur local_operator/i18n/catalogues/en
+1fce7ecb1f5fb587e7b91ef2f9c7fe658521e0d0
+
+ .../i18n/catalogues/en/mobile.setup.context.json   | 35 +++++++++++++++++++
+ .../i18n/catalogues/en/mobile.setup.json           |  9 ++++-
+ .../i18n/catalogues/en/tunnel.status.context.json  | 40 ++++++++++++++++++++++
+ .../i18n/catalogues/en/tunnel.status.json          | 10 +++++-
+ .../catalogues/en/wire.phone_access.context.json   | 22 ++++++++++++
+ .../i18n/catalogues/en/wire.phone_access.json      |  6 ++++
+ .../i18n/catalogues/hi/mobile.setup.json           |  9 ++++-
+ .../i18n/catalogues/hi/tunnel.status.json          | 10 +++++-
+ .../i18n/catalogues/hi/wire.phone_access.json      |  6 ++++
+ .../i18n/catalogues/ur/mobile.setup.json           |  9 ++++-
+ .../i18n/catalogues/ur/tunnel.status.json          | 10 +++++-
+ .../i18n/catalogues/ur/wire.phone_access.json      |  6 ++++
+ 12 files changed, 166 insertions(+), 6 deletions(-)
+$ PYTHONPATH=$PWD .venv/bin/python scripts/i18n/check.py --catalogues-only
+check.py: catalogue checks: 0 problem(s)
+$ .venv/bin/python $SCRATCH/i18n-hiur/mech.py <worktree>
+hi tunnel.status en=b368acfb0cde tgt=99a18ff529bfecb384a65253205eaf5093d2fc6fb93e3951f58cdaa372ee54bf keys=21 new=8 -> OK
+   lengths: tunnel_inactive.label:15c tunnel_inactive.detail:232c tunnel_disabled.label:20c tunnel_disabled.detail:157c billing_inactive.label:18c billing_inactive.detail:183c billing_lapsed.label:13c billing_lapsed.detail:170c
+hi mobile.setup en=6883f92e94df tgt=27ccaa01afcd5f0f750e977b03b8a6f2baa0a615f54ca4cafa24f441c57e8a03 keys=86 new=7 -> OK
+   lengths: disabled:175c billing_lapsed:210c reconnect:124c network:164c radient_unavailable:157c reconnecting:127c login_offer:121c
+hi wire.phone_access en=2979b226db50 tgt=a33d5f2707c04bd20623eb5cf9a92b3fd51d69a0e01ea173d092742ee4182feb keys=4 new=4 -> OK
+   lengths: title:11c description:102c auto_setup.label:40c auto_setup.help:263c
+ur tunnel.status en=b368acfb0cde tgt=062bfd49e8fa46349a152a3904cd919f64dd80287c1846177951ff1d6172bfa4 keys=21 new=8 -> OK
+   lengths: tunnel_inactive.label:13c tunnel_inactive.detail:223c tunnel_disabled.label:20c tunnel_disabled.detail:151c billing_inactive.label:23c billing_inactive.detail:180c billing_lapsed.label:11c billing_lapsed.detail:173c
+ur mobile.setup en=6883f92e94df tgt=f3eed93e8e47535340535584b4e5320ec506e9f7d315dfb9655da4c2b1fb472d keys=86 new=7 -> OK
+   lengths: disabled:184c billing_lapsed:213c reconnect:126c network:175c radient_unavailable:154c reconnecting:132c login_offer:130c
+ur wire.phone_access en=2979b226db50 tgt=03f7b89870ad685fa5271d0004b426b85f5784a28eb9bf488b5bbe6d16f75fe4 keys=4 new=4 -> OK
+   lengths: title:9c description:106c auto_setup.label:43c auto_setup.help:273c
+$ python3 scripts/i18n/ledger.py history-sha --locale hi --namespace tunnel.status
+795381f5a96d0034d0a06dab5c3e71b6ea563cd16a9d3b8708667a2124cdac48
+$ python3 scripts/i18n/ledger.py history-sha --locale hi --namespace mobile.setup
+de7a77b5ad500bb585a20c837a19c2899444c6c0ed60f841de68a3e11a2c43b5
+$ python3 scripts/i18n/ledger.py history-sha --locale hi --namespace wire.phone_access
+4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945
+$ python3 scripts/i18n/ledger.py history-sha --locale ur --namespace tunnel.status
+a7c6b071cbd4855b80d88b71d6a40bb269d376e4203d559609e9efd7a916a2e4
+$ python3 scripts/i18n/ledger.py history-sha --locale ur --namespace mobile.setup
+d207c7d7d03554a5da35d31e1f0803b836eb42386f9ca798cc473ee1bd74a613
+$ python3 scripts/i18n/ledger.py history-sha --locale ur --namespace wire.phone_access
+4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945
