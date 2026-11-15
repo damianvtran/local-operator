@@ -11576,6 +11576,17 @@ def build_app(daemon: MobileDaemon):
             credential_expires_at=presented_cookie_expiry(request),
         )
         await _forward_registration(body, response)
+        lane = daemon.push_lane
+        if response.status_code == 200 and lane is not None:
+            # Old clients ignore the additive field. Only the authoritative
+            # bound emit transport may supply it: local registry IDs do not
+            # identify the computer in attention/completion pushes. A stale or
+            # disarmed lane deliberately leaves it absent, never guessed.
+            handle = await asyncio.to_thread(lane.transport.registration_computer_handle)
+            if handle is not None:
+                response = JSONResponse(
+                    {**json.loads(bytes(response.body)), "computer_handle": handle}
+                )
         return response
 
     async def _forward_registration(body: object, response: Response) -> None:
