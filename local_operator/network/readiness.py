@@ -122,6 +122,17 @@ CAPABILITY_SKILLS = "skills"
 #: desktop app or extension serves the device (the node-managed browser is for
 #: headless nodes only — guide://browser "Headless nodes").
 CAPABILITY_BROWSER = "browser"
+#: (n) the operator's subagent model tiers (``subagents.models``): did this peer
+#: keep its own map over another device's
+#: (``definitions._apply_subagent_tiers_locked``)? The (k) row's twin, for the
+#: same reason: a pinned role resolving against a different (or missing) tier on
+#: the node is the consequence, and the operator reads this report. Non-gating.
+CAPABILITY_SUBAGENT_TIERS = "subagent_tiers"
+#: (o) whether the model a session SELECTED (not the device default) has a
+#: usable credential on this peer. A named constant like every other row, so
+#: ``enrollment``'s capability allowlist — derived from these constants — can
+#: never miss it (it used to be the only row spelled as a literal).
+CAPABILITY_SELECTED_MODEL_CREDENTIAL = "selected_model_credential"
 
 #: The class a readiness row carries (F8 ruling, 2026-10-04). "The device is
 #: onboarded" and "the equipment on it is set up" are DIFFERENT questions:
@@ -179,6 +190,8 @@ NON_GATING_EQUIPMENT: frozenset[str] = frozenset(
         # use, and installing one needs the operator's authorisation, so the row
         # names the gap and the authorised remedy rather than gating.
         CAPABILITY_BROWSER,
+        # A node keeping its own tier map is the node operator's choice, never a gate.
+        CAPABILITY_SUBAGENT_TIERS,
     }
 )
 
@@ -240,6 +253,15 @@ CODE_SKILLS_NOT_SYNCED = "skills_not_synced"
 #: but a login session holds it (Linux: a ``session-*.scope``, not a unit).
 CODE_SERVE_STALE = "serve_stale"
 CODE_UNSUPERVISED = "unsupervised"
+#: Rows (k)/(n): the node kept its own custom instructions / tier map over a
+#: mirror. Named, like (j)'s and the MCP grant's below, because enrollment's
+#: receipt (``enrollment.public_report``) admits only ``CODE_*`` values — a
+#: literal code there made a mesh with such a peer fail enrollment verify.
+CODE_KEPT_OWN = "kept_own"
+#: Row (j): the peer borrows openai per session, so ``/model`` is refused there.
+CODE_SESSION_SCOPED_SHARE = "session_scoped_share"
+#: MCP credential: the stored grant is expired/tombstoned on this device.
+CODE_LOCAL_GRANT_UNAVAILABLE = "local_grant_unavailable"
 
 #: Rows read from the peer's own state carry ``source: "peer"``; rows about a
 #: fact that could not be established carry ``"unknown"``. ``"local"`` is kept
@@ -1406,10 +1428,31 @@ def default_model_fact(root: Path) -> dict[str, Any]:
     ``config.yml`` is checked for existence BEFORE ``ConfigManager`` is
     constructed: that constructor creates the config root on a device that has
     none, and a report must not be the reason a directory exists.
+
+    It is then parsed by the strict reader BEFORE construction too (PR #3869 QA
+    round 2, Q-2): ``ConfigManager`` never raises on a malformed file — it
+    renames it to ``config.yml.bad.<stamp>`` and loads defaults. This fact is
+    the first thing :func:`collect_peer_facts` reads, i.e. it runs on a PEER's
+    ``net_readiness`` probe, so without the guard a viewer's read-only question
+    moved this node's config aside — and every later reader (the subagent-tier
+    sync included) then saw defaults and installed over them.
     """
     config_file = root / "config.yml"
     if not config_file.exists():
         return {"hosting": "", "model_name": "", "resolved": False, "reason": "no config.yml"}
+    from local_operator import settings_io
+
+    try:
+        settings_io.require_readable_config_path(config_file)
+    except settings_io.ConfigUnreadableError:
+        # The same sentence the constructor-side failure below gives: to the
+        # viewer it is one problem, "this node's config cannot be read".
+        return {
+            "hosting": "",
+            "model_name": "",
+            "resolved": False,
+            "reason": "its config could not be read (ConfigUnreadableError)",
+        }
     try:
         from local_operator.bootstrap import resolve_hosting_model
         from local_operator.config import ConfigManager
@@ -1693,7 +1736,7 @@ def selected_model_row(
     row = _capability_row(
         device_id=member.device_id,
         device_name=peer_label,
-        capability="selected_model_credential",
+        capability=CAPABILITY_SELECTED_MODEL_CREDENTIAL,
         ok=fact.get("usable") is True and state in {"local", "effective_borrow", "held_offline"},
         code=state,
         detail=detail,
@@ -1820,6 +1863,8 @@ def collect_peer_facts(
         # build reads its ABSENCE (an older peer) as ``peer_too_old`` on the
         # browser row, never as "no browser".
         "browser": browser_fact(),
+        # Same additive contract as ``custom_instructions``.
+        "subagent_tiers": subagent_tiers_fact(root),
     }
 
 
@@ -1998,7 +2043,7 @@ def custom_instructions_row(
         device_name=peer_label,
         capability=CAPABILITY_CUSTOM_INSTRUCTIONS,
         ok=False,
-        code="kept_own",
+        code=CODE_KEPT_OWN,
         detail=definitions.instructions_conflict_notice(
             conflict,
             peer_label=peer_label,
@@ -2051,6 +2096,71 @@ def _attach_failover(row: dict[str, Any], facts: Mapping[str, Any], *, server: A
         if key in fact
     }
     row["observed"] = observed
+
+
+def subagent_tiers_fact(root: Path) -> dict[str, Any] | None:
+    """Whose subagent tier map this device holds, and the last revision it refused.
+
+    Status, origin and the refusal's ``code``/``reason`` only; ``None`` when the
+    state cannot be read, so a readiness answer never fails on it.
+    """
+    try:
+        from local_operator.network import definitions
+
+        state = definitions.subagent_tiers_state(root)
+    except Exception:  # noqa: BLE001 — a readiness answer must not fail on this
+        return None
+    conflict = state.get("conflict")
+    return {
+        "status": str(state.get("status") or ""),
+        "origin": str(state.get("origin") or ""),
+        "conflict": (
+            {
+                key: str(conflict.get(key) or "")
+                for key in ("origin", "code", "reason")
+                if conflict.get(key)
+            }
+            if isinstance(conflict, Mapping)
+            else None
+        ),
+    }
+
+
+def subagent_tiers_row(
+    member: Any, facts: Mapping[str, Any], *, peer_label: str
+) -> dict[str, Any] | None:
+    """(n) Did this peer keep its own subagent tier map over another device's?
+
+    :func:`custom_instructions_row`'s rules: no row for an older peer, a mirror,
+    no map, or a refusal about a map that is gone; a refusal still standing is a
+    non-gating ``warn`` row with the shared sentence
+    (:func:`definitions.tiers_conflict_notice`).
+    """
+    fact = facts.get("subagent_tiers")
+    if not isinstance(fact, Mapping):
+        return None
+    conflict = fact.get("conflict")
+    if not isinstance(conflict, Mapping) or str(fact.get("status") or "") not in (
+        "authored",
+        "edited",
+        "unreadable",
+    ):
+        return None
+    from local_operator.network import definitions
+
+    return _capability_row(
+        device_id=member.device_id,
+        device_name=peer_label,
+        capability=CAPABILITY_SUBAGENT_TIERS,
+        ok=False,
+        code=CODE_KEPT_OWN,
+        detail=definitions.tiers_conflict_notice(conflict, peer_label=peer_label),
+        source=SOURCE_PEER,
+        observed={
+            "status": str(fact.get("status") or ""),
+            "origin": str(conflict.get("origin") or ""),
+        },
+    )
 
 
 #: The RAM below which a swapless member is reported as a resilience risk. 4 GB
@@ -4465,7 +4575,7 @@ def model_switch_row(
         device_name=peer_label,
         capability=CAPABILITY_MODEL_SWITCH,
         ok=False,
-        code="session_scoped_share",
+        code=CODE_SESSION_SCOPED_SHARE,
         detail=(
             f"model switching on {peer_label} needs a device-scoped share of openai: "
             f"it borrows openai from this device per session, so turns run but a "
@@ -5021,7 +5131,7 @@ def _mcp_credential_row(
             device_name=peer_label,
             capability=CAPABILITY_MCP_CREDENTIAL,
             ok=False,
-            code="local_grant_unavailable",
+            code=CODE_LOCAL_GRANT_UNAVAILABLE,
             detail=(
                 f"{peer_label}'s stored login for {name} ({url}) is unavailable; "
                 f"sign in again on {peer_label}"
@@ -5157,7 +5267,7 @@ def _mcp_credential_row(
                     device_name=peer_label,
                     capability=CAPABILITY_MCP_CREDENTIAL,
                     ok=False,
-                    code="local_grant_unavailable",
+                    code=CODE_LOCAL_GRANT_UNAVAILABLE,
                     detail=(
                         f"this device's login for {name} is the source {peer_label} "
                         "borrows, but it is no longer valid: every borrow would tell "
@@ -6444,6 +6554,9 @@ def _fact_rows(
     )
     if instructions_row is not None:
         rows.append(instructions_row)
+    tiers_row = subagent_tiers_row(member, facts, peer_label=peer_label)
+    if tiers_row is not None:
+        rows.append(tiers_row)
     rows.append(serve_daemon_row(member, facts, peer_label=peer_label))
     rows.extend(
         mcp_credential_rows(
