@@ -148,6 +148,13 @@ EMIT_RETRY_ATTEMPTS = 3
 EMIT_RETRY_WINDOW_S = 2 * 60
 EMIT_RETRY_INTERVAL_S = EMIT_RETRY_WINDOW_S / (EMIT_RETRY_ATTEMPTS - 1)
 
+#: The most ``exclude`` ids the cloud accepts on one emit. Not a tuning knob: it
+#: mirrors agent-server's ``internal/sessionpush/wire.go`` ``validateExclude``,
+#: which refuses a longer list outright (``400 exclude/max_10``), so an emit
+#: carrying 11 ids is not narrowed by the cloud but lost. ``_preference_gate``
+#: keeps every body it sends within it.
+MAX_EXCLUDE_IDS = 10
+
 #: The three kinds of emit this worker composes. A DIGEST is the coalesced
 #: catch-up of more than ``BURST_LIMIT`` eligible rows (§2.1); an ATTENTION emit
 #: is a badge correction raised because a read moved somewhere on this machine.
@@ -1438,11 +1445,23 @@ class PushWorker:
         there the devices that do not want the emit are added to it, and the
         emit is skipped only when nobody is left.
 
+        THE EXCLUDE CAP: the cloud refuses more than ``MAX_EXCLUDE_IDS``
+        exclude ids. When widening would cross it, the emit falls back to the
+        per-computer rule above for that one emit: it goes out carrying only
+        the ack-hint excludes it already had (capped too), so a device that
+        opted out may be woken, rather than the whole emit being refused.
+
         Kept apart from ``_is_candidate`` and the count on purpose: those are
-        the store's gates, these are the device's, and a missing or unreadable
-        registry answers "everyone wants everything" (the pre-preferences
-        behaviour) rather than silencing the phone — gate 4 already decides
-        whether there is a device at all.
+        the store's gates, these are the device's. A missing or unreadable
+        registry imposes no preference (the pre-preferences behaviour) rather
+        than silencing the phone; gate 4's live list still decides whether
+        there is a device at all, and since that list reads the same registry,
+        an unreadable registry leaves it empty and the item resolves unsent.
+
+        Only rows in gate 4's live list are consulted: ``live`` comes from
+        :meth:`_live_device_ids`, which keeps ``STATE_LIVE`` rows alone, so a
+        row the unpair path tombstoned (``revoke_linked`` sets ``revoked_at``)
+        is never counted as a device that wants a push, whatever its switches.
         """
         preferences: dict[str, dict[str, bool]]
         try:
@@ -1480,6 +1499,19 @@ class PushWorker:
                 excluded.add(device)
         if not [device for device in live if device not in excluded]:
             return None
+        if len(excluded) > MAX_EXCLUDE_IDS:
+            # A body past the cloud's cap is refused whole (``exclude/max_10``),
+            # which would silence the devices that DO want it. Degrade instead to
+            # the per-computer rule the completion form already lives with: the
+            # gate above has proved some live device wants this emit, so send it
+            # with just the ack-hint excludes, themselves capped. The cost is an
+            # opted-out device possibly being woken, which beats dropping a
+            # wanted emit. Sorted before the cut so the kept ids are stable.
+            hinted = sorted({str(device) for device in payload.get("exclude") or ()})
+            trimmed = {key: value for key, value in payload.items() if key != "exclude"}
+            if hinted:
+                trimmed["exclude"] = hinted[:MAX_EXCLUDE_IDS]
+            return trimmed
         if excluded:
             # Sorted for a stable body: the body is kept across retries, but a
             # deterministic order keeps two composes of one item identical.

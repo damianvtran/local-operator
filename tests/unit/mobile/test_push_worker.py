@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import sqlite3
+import time
 import uuid
 from collections.abc import Mapping, Sequence
 from pathlib import Path
@@ -1698,11 +1699,20 @@ def test_errors_off_skips_an_error_but_still_emits_a_complete(harness: Harness) 
     assert [body["kind"] for _key, body in harness.plane.calls] == ["complete"]
 
 
-def test_interrupted_and_closed_ride_the_completions_switch(harness: Harness) -> None:
+def test_retired_rides_the_completions_switch(harness: Harness) -> None:
+    """``retired`` is a completion-category kind that is still a push candidate
+    (#3989 dropped ``interrupted``/``closed`` from the candidates): errors off
+    must not touch it, completions off must."""
     _devices_with(harness, {"errors": False})
-    harness.publish("stopped", kind="interrupted")
+    harness.publish("retired-run", kind="retired")
     harness.worker.tick()
-    assert [body["kind"] for _key, body in harness.plane.calls] == ["interrupted"]
+    assert [body["kind"] for _key, body in harness.plane.calls] == ["retired"]
+
+    harness.plane.calls.clear()
+    _devices_with(harness, {"completions": False})
+    harness.publish("retired-again", kind="retired")
+    harness.worker.tick()
+    assert harness.plane.calls == []
 
 
 def test_enabled_off_silences_everything_including_attention(harness: Harness) -> None:
@@ -1754,6 +1764,95 @@ def test_a_digest_excludes_devices_that_want_none_of_its_kinds(harness: Harness)
     ((_key, body),) = [call for call in harness.plane.calls if call[1]["type"] == "digest"]
     assert body["exclude"] == [errors_only]
     assert everything not in body["exclude"]
+
+
+def test_a_widened_exclude_past_the_cloud_cap_falls_back_to_the_hint_excludes(
+    harness: Harness,
+) -> None:
+    """R1: the cloud refuses more than 10 exclude ids (agent-server
+    ``wire.go`` ``validateExclude``: ``exclude/max_10``). Eleven opted-out
+    devices plus one wanting device would widen the attention correction to 11
+    ids; the emit must still go out, on the per-computer rule, within the cap."""
+    ids = _devices_with(harness, *([{"enabled": False}] * 11), None)
+    muted, wanting = ids[:11], ids[11]
+    token = harness.publish("crowded", kind="complete")
+    harness.worker.tick()
+    assert [body["type"] for _key, body in harness.plane.calls] == ["completion"]
+    # The ack is a muted device's own, so its hint is the one exclude that
+    # survives the fallback.
+    harness.route_ack("session/crowded", token, device_id=muted[0])
+    harness.worker.tick()
+    _key, body = harness.plane.calls[-1]
+    assert body["type"] == "attention"
+    assert len(body["exclude"]) <= worker_module.MAX_EXCLUDE_IDS
+    assert body["exclude"] == [muted[0]]
+    assert wanting not in body["exclude"]
+
+
+def test_a_widened_exclude_past_the_cap_with_no_hint_sends_no_exclude(
+    harness: Harness,
+) -> None:
+    ids = _devices_with(harness, *([{"enabled": False}] * 11), None)
+    token = harness.publish("crowded-desk", kind="complete")
+    harness.worker.tick()
+    harness.store.acknowledge("session/crowded-desk", token)
+    harness.worker.tick()
+    _key, body = harness.plane.calls[-1]
+    assert body["type"] == "attention"
+    assert "exclude" not in body, "a desk ack has no hint, so nothing is excluded"
+    assert len(ids) == 12
+
+
+def test_a_revoked_row_never_counts_as_a_device_that_wants_a_push(harness: Harness) -> None:
+    """Main's unpair path (``push_devices.revoke_linked``) tombstones the linked
+    push row with ``revoked_at``. Read through the REAL gate-4 list
+    (``_live_device_ids``, not the harness stub): the revoked row has every
+    switch on, the live one has completions off, so no completion goes out."""
+    import json
+
+    expires = int(time.time()) + 3600
+    revoked = str(
+        push_devices.register(
+            harness.root,
+            {
+                "platform": "ios",
+                "token": "ab" * 32,
+                "environment": "production",
+                "app_version": "1.0.0 (449)",
+                "install_id": str(uuid.UUID(int=1)),
+            },
+            credential_expires_at=expires,
+        )["device_id"]
+    )
+    live = str(
+        push_devices.register(
+            harness.root,
+            {
+                "platform": "ios",
+                "token": "cd" * 32,
+                "environment": "production",
+                "app_version": "1.0.0 (449)",
+                "install_id": str(uuid.UUID(int=2)),
+                "preferences": {"completions": False},
+            },
+            credential_expires_at=expires,
+        )["device_id"]
+    )
+    # Link the first row to an operator device as a proven register would, so
+    # the tombstone comes from the unpair path itself rather than a stand-in.
+    path = push_devices.store_path(harness.root)
+    store = json.loads(path.read_text())
+    for record in store["devices"]:
+        if record["device_id"] == revoked:
+            record["operator_device_id"] = "op-device-1"
+    path.write_text(json.dumps(store))
+    assert push_devices.revoke_linked(harness.root, "op-device-1") == [revoked]
+
+    harness.worker._live_devices = harness.worker._live_device_ids
+    assert harness.worker._live_devices() == [live]
+    harness.publish("after-unpair", kind="complete")
+    harness.worker.tick()
+    assert harness.plane.calls == [], "the revoked all-on row was counted as wanting it"
 
 
 def test_no_registry_means_every_device_wants_everything(harness: Harness) -> None:

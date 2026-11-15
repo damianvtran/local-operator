@@ -387,6 +387,7 @@ def link_message(
     parts = (str(at), operator_device_id, install_id, platform, digest)
     return LINK_LABEL + b"\n" + "\n".join(parts).encode("ascii")
 
+
 #: The per-device push preference switches, and the ONLY keys a ``preferences``
 #: object may carry (register body and stored row alike).
 #:
@@ -402,7 +403,11 @@ def link_message(
 #: - ``completions`` — run endings: ``complete`` and ``retired``, and also
 #:   ``interrupted`` and ``closed`` (a run that stopped without an error is
 #:   the same "your run is done" signal to the reader, so it rides this switch
-#:   rather than growing a fourth one the app does not render).
+#:   rather than growing a fourth one the app does not render). Since #3989
+#:   (the push worker's ``_desktop_would_announce`` gates on
+#:   ``desktop_sessions.BRIDGE_NOTIFIABLE_KINDS``) ``interrupted`` and ``closed``
+#:   are no longer push candidates at all; they stay mapped here so a kind the
+#:   worker starts pushing again lands on a defined switch.
 #: - ``errors`` — runs that ended in ``error``.
 #:
 #: A missing ``preferences`` object, or a missing key inside one, means
