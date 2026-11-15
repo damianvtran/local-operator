@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "ur",
   "namespace": "wire.settings",
-  "history_sha256": "8e25a38bd025a7803ce37d10fa56c57323d2184aae2c3facac7c224d4c76b1f2",
+  "history_sha256": "1d43e3e41a125be9892c74f44ecbf5dc7d16081203c78e6e446127fc2a7ce1b5",
   "entries": [
     {
       "locale": "ur",
@@ -265,6 +265,31 @@
       },
       "status": "passed",
       "note": "#3922 r1 2026-11-13 i18n-auditor d25b77f53a23 (anthropic/claude-opus-5-5, no fallback): 2 new offline_hold keys passed, 0 open blocker/major; findings I-ur-1. Rest byte-identical to f1e8d6410. Evidence: i18n/audits/evidence/ur/wire.settings/oh3922r1/record.json"
+    },
+    {
+      "locale": "ur",
+      "namespace": "wire.settings",
+      "source_sha256": "413b00d1f41ccf1377d2320cc7c7a4c375a675ad5c7985ba736c9030659bfb51",
+      "translator": {
+        "agent": "i18n-translator subagent (role task) under the radientdev manager (commit 66ce330dd739) — relayed by the manager, not independently verified",
+        "model": "anthropic/claude-opus-5-5",
+        "fallback": "none (as relayed by the manager)",
+        "date": "2026-11-15"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (radientdev team, role task), session d62d8ba8b744",
+        "session": "d62d8ba8b744",
+        "model": "anthropic/claude-opus-5-5",
+        "fallback": "none observed in this session",
+        "date": "2026-11-15",
+        "result": "passed",
+        "findings": 1,
+        "unresolved_blocker_major": 0,
+        "minor": 0,
+        "nit": 1
+      },
+      "status": "passed",
+      "note": "#3990 r1 2026-11-15 i18n-auditor d62d8ba8b744 (anthropic/claude-opus-5-5, no fallback): 1 changed key re-audited — wire.settings.display_notification_session_name.help against en 413b00d1f41c (en delta 2baf6804bc41→413b00d1f41c is exactly that key, 9b03f267dd87). Rest of the namespace byte-identical to the bytes that carried the passed 2baf6804bc41 receipt (2836bc0ee89f..9b03f267dd87 no diff; 9b03f267..66ce330d one line). Semantic fidelity: desktop banners, lock screen, paired phones' notifications, delivery through Radient's push service — all present. Terms: بینرز، لاک اسکرین، جوڑے ہوئے فونز کی اطلاعات، Radient کی push سروس (corpus 'push ڈیوائسز'); 'جو ... پہنچتی ہیں' agrees with اطلاعات; Urdu ، and ۔; Latin islands Radient/push; no manual bidi controls (U+200E/F, U+2066-2069, U+061C absent). No ICU placeholders (parity 0=0); length within the locale's wire.settings help range. Findings: nit (no change): stative 'جوڑے ہوئے فونز' vs the remote_park passive 'جوڑے گئے فون' — same verb, both natural; 'فونز' matches the corpus loanword plural (بینرز، ڈیوائسز). 0 open blocker/major. Target bytes sha256 8a0cf32c308b8bd59934eb2e0be97672e304e7e4935ed0599eda7a53d112946e. Single independent audit only: docs/I18N.md step 3 asks a second independent audit for high-visibility copy — not performed in this receipt."
     }
   ]
 }
