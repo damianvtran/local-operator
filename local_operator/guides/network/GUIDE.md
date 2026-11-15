@@ -682,14 +682,22 @@ acting on one (QA round 5, Q-R5-1):
 - `session_unreachable` — the peer accepted the act and then its runtime stopped
   answering WITHIN THE TIME THIS VERB ALLOWS: a bind that ran out of its own budget
   (that runtime may be starting, or wedged), the act as a whole running out of
-  `PILOT_ACT_TIMEOUT_S`, or a runtime that is ALIVE and too busy to answer (it
-  accepted the connection and did not produce its state in time, or said it could
-  not prepare it). The busy sentence says the act was not delivered and to retry;
-  it is not a link problem, so it does not point at `network doctor`. The peer's own sentence is carried verbatim, and nothing on
-  this side changed. A dial that produced NO stream at all is `peer_unreachable` (or
-  `relay_unavailable` with no local relay) even when the rung that noticed was the
-  bind: the two codes answer "which side of the open died", not "which sentence did
-  I get", because a stopped device and a stopped runtime look identical from here.
+  `PILOT_ACT_TIMEOUT_S`, or a runtime that is ALIVE and too busy to answer. The
+  sentence states that the act was not delivered before asking you to re-run the
+  command. An explicit connection refusal keeps the runtime's own reason, not an
+  invented timed load diagnosis. If the other device answers that it could not
+  reach or start this session's runtime, that is also `session_unreachable`:
+  the reason is shown and the next step is to re-run the command, not diagnose a
+  device that already answered.
+
+  A connection that goes quiet after it is accepted is different. The session's
+  initial state may have been lost in transit, or nothing may have answered after
+  it. Neither proves the runtime is busy. This is `peer_unreachable`; the sentence
+  says the act was not delivered and points to `lop network doctor --peer <peer>`
+  to distinguish a lost connection from a stopped runtime. It does not claim no
+  session was reached. A dial that produced NO stream at all remains
+  `peer_unreachable` (or `relay_unavailable` with no local relay), even when the
+  rung that noticed was the bind.
 - `session_ambiguous` — the named device ANSWERED and holds SEVERAL conversations
   the target matches (a conversation name is not unique by design): the sentence
   lists the candidate rows with the id each is retypeable as, and NOTHING was sent.
