@@ -27186,10 +27186,18 @@ async def _bridge_access(
         node_origin = str(result.get("origin") or node_origin)
         if state_value != "pending" and await_on_node:
             origin = str(result.get("origin", url))
+            # The extension's sweep reports an EXPIRED entry as "cancelled"
+            # (``approval-store.ts`` ``sweepQueue``), so the cancel_access wording
+            # ("your request ... was withdrawn") told an agent whose card lapsed
+            # that someone withdrew it (incident 2026-11-15, session
+            # 1c31cfff075b). From await, "cancelled" cannot tell expiry from a
+            # withdrawal, so it reads as "no live request", which names both and
+            # carries guide://browser's re-raise step.
+            text_state = "none" if state_value == "cancelled" else state_value
             return _text(
                 tool_call_id,
                 "browser",
-                _node_access_result_text(state_value, origin, url),
+                _node_access_result_text(text_state, origin, url),
                 details={"origin": origin, "state": state_value},
             )
         if state_value != "pending":
