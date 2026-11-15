@@ -484,13 +484,17 @@ def test_a_node_started_ask_and_notify_reach_the_operator_bound_by_its_signature
             return [PeerRow.from_json(row, device_id=owner)]
 
     monkeypatch.setattr(ra, "_deliver_async", lambda *_a, **_k: None)
+    # B's own root: the Mac raises a started-on-owner ``notify`` only from a node
+    # its records say it onboarded (``peer_rows._bound_nodes``).
     ra.RemoteAttentionWatcher(head).observe(
-        peer_rows.peer_session_rows(None, ttl_s=0, catalog=_Catalog())
+        peer_rows.peer_session_rows(server_b.root, ttl_s=0, catalog=_Catalog())
     )
     items, _ = NotificationStore(head).list_items(state="all", limit=10)
     assert sorted(item["key"] for item in items) == sorted(
         [ra.notice_key(owner, SID, "build"), ra.notice_key(owner, SID, ask_key_q9)]
     )
+    built = next(item for item in items if item["key"] == ra.notice_key(owner, SID, "build"))
+    assert built["title"] == "Build done", "the forwarded row carries the node's own text"
 
 
 def test_s1_a_peer_the_mac_did_not_onboard_gets_no_proof_bytes_on_the_wire(

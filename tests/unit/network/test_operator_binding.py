@@ -216,6 +216,89 @@ def test_an_ask_a_site_card_and_a_notify_reach_the_bound_operator_only(rig: Rig)
     )
 
 
+@pytest.mark.parametrize(
+    ("marker", "stamp_origin"),
+    [
+        # Local ``origin.json`` markers an AGENT's path writes on the node.
+        ('{"origin": "agent-workstream"}', None),
+        ('{"origin": "agent-shell"}', None),
+        ('{"origin": "subagent"}', None),
+        ('{"origin": "agent-config"}', None),
+        # A future value, and one that cannot be parsed: default-deny (#4001).
+        ('{"origin": "scheduled"}', None),
+        ('{"origin": "agent-wor', None),
+        # A stamp started on this node that says an agent asked for it.
+        (None, {"kind": "agent", "source_device": "", "source_session_id": ""}),
+        (None, {"kind": "user", "source_device": "", "started_by": "agent"}),
+    ],
+)
+def test_an_agent_started_node_session_keeps_notify_here_but_its_ask_travels(
+    rig: Rig, marker: str | None, stamp_origin: dict[str, Any] | None
+) -> None:
+    """Manager rule 2026-11-15: ``notify`` from an AGENT-started session stays on the
+    node (#4001, and "child/reviewer/QA sessions never notify the operator
+    directly", 2026-11-13); its ask still reaches the bound Mac; the result says so."""
+    _bind(rig)
+    _node_started_session(rig.node, origin=stamp_origin)
+    if marker is not None:
+        (rig.node / "sessions" / SID / "origin.json").write_text(marker, encoding="utf-8")
+    row = _listing(rig, rig.mac_id, origin=stamp_origin)
+    keys = [n["key"] for n in row.get("notices") or ()]
+    if stamp_origin is not None and stamp_origin.get("kind") == "agent":
+        # An agent's child reports to that agent: nothing at all on the wire.
+        assert keys == [], keys
+    else:
+        assert keys and all(k.startswith(ra.ASK_NOTICE_PREFIX) for k in keys), keys
+    assert "build" not in keys
+    assert ra.notice_forwarding(rig.node, SID) == (ra.LOCAL_ONLY, "")
+    assert ra.forwarded_notice_sentence(rig.node, SID) == (
+        f" Shown on {NODE}-box only; it was not forwarded to your other devices."
+    )
+
+
+def test_a_forked_node_session_is_the_humans_and_its_notify_travels(rig: Rig) -> None:
+    """``fork`` is the operator's own branch (``resume.USER_ORIGINS``): not an agent's."""
+    _bind(rig)
+    _node_started_session(rig.node)
+    (rig.node / "sessions" / SID / "origin.json").write_text(
+        '{"origin": "fork", "parent": "abc"}', encoding="utf-8"
+    )
+    keys = [n["key"] for n in _listing(rig, rig.mac_id)["notices"]]
+    assert "build" in keys
+    assert ra.notice_forwarding(rig.node, SID) == (ra.FORWARDED, rig.mac_id)
+
+
+def test_the_mac_raises_a_started_on_owner_notify_only_from_a_node_it_onboarded() -> None:
+    """Mac half (``peer_rows._attested_notices``): a stampless row's ``notify`` passes
+    only from a bound node and only if nothing on it says an agent started it;
+    asks always pass; a co-member it never onboarded raises only asks."""
+    from local_operator.session.peer_rows import _attested_notices
+
+    ask = (f"{ra.ASK_NOTICE_PREFIX}k1", 1, "high", "Which branch?", 5)
+    note = ("build", 1, "high", "Build done", 5)
+    bound = frozenset({NODE})
+    assert _attested_notices(SimpleNamespace(notices=(note, ask), origin={}), NODE, bound) == (
+        note,
+        ask,
+    )
+    self_origin = {"kind": "user", "source_device": NODE, "source_session_id": ""}
+    row = SimpleNamespace(notices=(note, ask), origin=self_origin)
+    assert _attested_notices(row, NODE, bound) == (note, ask)
+    # A co-member the Mac never onboarded: asks only.
+    assert _attested_notices(SimpleNamespace(notices=(note, ask), origin={}), CO, bound) == (ask,)
+    # Agent-started, even from the bound node: asks only.
+    for origin in (
+        {"kind": "agent", "source_device": NODE},
+        {"kind": "user", "started_by": "agent"},
+    ):
+        row = SimpleNamespace(notices=(note, ask), origin=origin)
+        assert _attested_notices(row, NODE, bound) == (ask,), origin
+    # A session another device placed on the node keeps #4001's rule untouched.
+    placed = {"kind": "user", "source_device": "d_elsewhere", "source_session_id": ""}
+    row = SimpleNamespace(notices=(note, ask), origin=placed)
+    assert _attested_notices(row, NODE, bound) == (ask,)
+
+
 def test_the_network_only_kind_is_a_proof_too(rig: Rig) -> None:
     from local_operator.network.onboard_approvals import request_device
 

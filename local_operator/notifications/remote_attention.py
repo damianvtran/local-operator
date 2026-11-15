@@ -77,7 +77,10 @@ A FORWARDED NOTICE MUST BE NEW AND THE OPERATOR'S. Three filters, same date:
   item travels only when the stamp positively says the operator started the
   session (``started_by: operator``, :data:`STARTED_BY_FIELD`) — the origin
   re-applies this to every listing (``session/peer_rows``), so an owner too old
-  to filter cannot reopen the flood. Open asks are exempt;
+  to filter cannot reopen the flood. A session STARTED on the node and bound to
+  the operator's device (``network.operator_binding``) carries its ``notify``
+  items only when no agent started it (:func:`is_non_agent_session`, 2026-11-15).
+  Open asks are exempt;
 * NO BACKFILL: the owner carries each notice's own ``updated_at`` (``at``, ms)
   and the origin raises only a notice newer than its persisted first-contact
   baseline for that device (:func:`origin_baseline_ms`), writing the row with
@@ -193,6 +196,64 @@ def origin_is_operator_started(origin: Any) -> bool:
     if str(origin.get("kind") or "") == AGENT_ORIGIN_KIND:
         return False
     return str(origin.get(STARTED_BY_FIELD) or "") == OPERATOR_STARTED
+
+
+def is_non_agent_session(root: Path, session_id: str, origin: Any, *, started_here: bool) -> bool:
+    """Whether ``session_id``'s ``notify`` items may reach the operator's devices.
+
+    THE ONE PREDICATE FOR "NOT AN AGENT'S SESSION" (manager rule, 2026-11-15,
+    confirming two operator rules): asks from any session always travel; a
+    ``notify`` item travels only from a session NO AGENT started, because
+    "child/reviewer/QA sessions never notify the operator directly"
+    (2026-11-13) and "remote mesh session turn-ends must not become
+    notifications" (#4001, 2026-11-14). There is no carve-out by notify kind:
+    the store's session-scoped, un-prefixed items ARE the ``notify`` tool's
+    (every other writer keys under :data:`NOT_FORWARDED_PREFIXES`), so this
+    decides by who started the session, nothing else. Kept in one place so the
+    pending operator decision (ask a-1075) can flip it here.
+
+    * STAMPED (placed here by another device): #4001's default-deny unchanged —
+      only a stamp attesting ``started_by: operator``
+      (:func:`origin_is_operator_started`).
+    * STARTED HERE (``started_here``: no foreign origin, bound to the operator's
+      device by :func:`notice_target`): no agent child (``origin.kind``), no
+      ``started_by: agent``, and the local ``origin.json`` marker absent (a
+      session a human opened) or ``fork`` (the human's own branch). Every other
+      marker — ``subagent``, ``agent-shell``, ``agent-workstream``,
+      ``agent-config``, a future value, or one that cannot be parsed — is an
+      agent's or unknown, and DENIES: the default-deny direction of #4001.
+      The marker is written by the session's creator on this device, before
+      the notify tool is ever offered (``session._session_was_agent_spawned``
+      reads the same marker to withhold the tool), so a stampless human
+      session and an agent-started one ARE distinguishable here.
+    """
+    if not started_here:
+        return origin_is_operator_started(origin)
+    if isinstance(origin, dict) and (
+        str(origin.get("kind") or "") == AGENT_ORIGIN_KIND
+        or str(origin.get(STARTED_BY_FIELD) or "") == AGENT_ORIGIN_KIND
+    ):
+        return False
+    import json
+
+    from local_operator.resume import ORIGIN_FORK, ORIGIN_NAME
+
+    if not session_id:
+        return False
+    marker = Path(root) / "sessions" / session_id / ORIGIN_NAME
+    try:
+        raw = marker.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return True
+    except OSError:
+        return False
+    try:
+        payload = json.loads(raw)
+    except ValueError:
+        return False
+    if not isinstance(payload, dict):
+        return False
+    return str(payload.get("origin") or "") in ("", ORIGIN_FORK)
 
 
 #: The OWNER-side key namespace of a forwarded open ask, inside the existing
@@ -397,9 +458,12 @@ def stamp_rows_for_viewer(
             # the row's revision never changes and re-raising it is a no-op.
             row["asks_unknown"] = True
         notices = list(asks or [])
-        # NOTIFY ITEMS ONLY FOR AN ATTESTED OPERATOR SESSION (default-deny, see
-        # ``STARTED_BY_FIELD``); the open asks above travel either way.
-        if store is not None and origin_is_operator_started(row["origin"]):
+        # NOTIFY ITEMS ONLY FROM A NON-AGENT SESSION (:func:`is_non_agent_session`:
+        # #4001's attestation for a stamped row, the local marker for one started
+        # here); the open asks above travel either way.
+        if store is not None and is_non_agent_session(
+            Path(root), session_id, row.get("origin"), started_here=session_id in via_operator
+        ):
             notices += _newest_notices(store, session_id)
         if notices:
             row["notices"] = notices[:NOTICES_ON_WIRE]
@@ -1156,7 +1220,9 @@ def notice_forwarding(root: Path, session_id: str, key: str = "") -> tuple[str, 
     notices on that device's link — a stored proof that still verifies against
     this node's root-owned anchor for an active member
     (``network.operator_binding.operator_device``), and that device recorded as
-    collecting forwarded items. Otherwise it stays ``LOCAL_ONLY``.
+    collecting forwarded items, and no agent started the session
+    (:func:`is_non_agent_session`, the catalogue leg's own predicate). Otherwise
+    it stays ``LOCAL_ONLY``.
     """
     verdict, device, _via_operator = _notice_decision(root, session_id, key)
     return verdict, device
@@ -1203,6 +1269,12 @@ def _notice_decision(root: Path, session_id: str, key: str = "") -> tuple[str, s
             target = ""
             via_operator = False
             source = ""
+        if via_operator and not is_non_agent_session(
+            Path(root), session_id, origin_map, started_here=True
+        ):
+            # Started here BY AN AGENT: its asks still reach the bound device,
+            # its notify items stay here (the catalogue leg's own predicate).
+            return LOCAL_ONLY, "", False
         if target:
             if target not in forwarding_origins(Path(root)):
                 if via_operator:
@@ -1213,7 +1285,7 @@ def _notice_decision(root: Path, session_id: str, key: str = "") -> tuple[str, s
                 # that does not collect gets the not-collecting sentence whatever
                 # the attestation (#4001's "brought home" test pins it).
                 return ORIGIN_NOT_COLLECTING, target, False
-            if not via_operator and not origin_is_operator_started(origin_map):
+            if not is_non_agent_session(Path(root), session_id, origin_map, started_here=via_operator):
                 # Mirrors #4001's default-deny in stamp_rows_for_viewer: notify
                 # items travel only for a stamp attesting ``started_by:
                 # operator`` — the SAME predicate on the SAME mapping.

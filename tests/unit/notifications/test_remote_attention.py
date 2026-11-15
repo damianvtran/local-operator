@@ -1625,6 +1625,7 @@ def test_default_deny_the_node_reply_matches_the_owner_forward_filter(
     """QA r2 Q1: the node's ``notify`` reply applies the owner's own forward
     predicate, so "will be forwarded" is said exactly when the item travels."""
     owner = _owner(tmp_path)
+    _join_mesh(owner)
     _restamp(owner, origin)
     # The head has read this node, so it IS recorded as collecting forwards:
     # the old reply said "will be forwarded" here regardless of the stamp.
@@ -1634,11 +1635,11 @@ def test_default_deny_the_node_reply_matches_the_owner_forward_filter(
     sentence = ra.forwarded_notice_sentence(owner, SID)
     keys = [n["key"] for n in rows[0].get("notices") or ()]
     if forwarded:
-        assert "will be forwarded to its origin device" in sentence, sentence
+        assert "will be forwarded to d_head-box" in sentence, sentence
         assert keys == ["deploy"]
     else:
         assert "will be forwarded" not in sentence, sentence
-        assert "it stays on this device" in sentence and "moved, forked" in sentence
+        assert "it stays on node-box" in sentence and "moved, forked" in sentence
         assert keys == [], "the head inbox gets nothing from an unattested stamp"
 
 
@@ -1656,11 +1657,14 @@ def test_a_reused_tmp_path_still_records_its_forwarding_origin(tmp_path: Path) -
 def test_a_session_brought_home_keeps_its_reply_byte_for_byte(tmp_path: Path) -> None:
     """A session moved HOME (its source device never reads this one, so it is not
     a recorded forwarding origin): the reply is unchanged from before Q1."""
-    owner = _owner(tmp_path, origin=NODE)
-    _restamp(owner, {"kind": "moved", "source_device": NODE, "source_session_id": ""})
-    assert NODE not in ra.forwarding_origins(owner)
+    # PR #4030 rebase: the origin must be an ACTIVE member here (#4029 R2-1),
+    # so the device it came home from is one; the wording is #4001's, unchanged.
+    owner = _owner(tmp_path, origin="d_away")
+    _join_mesh(owner, peers=(HEAD, "d_away"))
+    _restamp(owner, {"kind": "moved", "source_device": "d_away", "source_session_id": ""})
+    assert "d_away" not in ra.forwarding_origins(owner)
     assert ra.forwarded_notice_sentence(owner, SID) == (
-        " Posted on this device; it stays on this device, because its origin device,"
+        " Posted on node-box; it stays on node-box, because d_away-box,"
         " where this session started, is not known to collect forwarded notices."
     )
 
