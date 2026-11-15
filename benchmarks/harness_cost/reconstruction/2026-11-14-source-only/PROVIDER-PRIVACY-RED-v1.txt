@@ -1,0 +1,20 @@
+test_preserves_explicit_strict_privacy_on_prepared_dispatch (test_meter_privacy.ProviderPrivacyTests.test_preserves_explicit_strict_privacy_on_prepared_dispatch) ... FAIL
+
+======================================================================
+FAIL: test_preserves_explicit_strict_privacy_on_prepared_dispatch (test_meter_privacy.ProviderPrivacyTests.test_preserves_explicit_strict_privacy_on_prepared_dispatch)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "~/.local/share/uv/python/cpython-3.12.13-macos-aarch64-none/lib/python3.12/asyncio/runners.py", line 118, in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "~/.local/share/uv/python/cpython-3.12.13-macos-aarch64-none/lib/python3.12/asyncio/base_events.py", line 691, in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+  File "~/local-operator/.worktrees/benchmark-reconstruction-20261114/benchmarks/harness_cost/experimental/test_meter_privacy.py", line 27, in test_preserves_explicit_strict_privacy_on_prepared_dispatch
+    self.assertIs(provider.get("zdr"), True)
+AssertionError: None is not True
+
+----------------------------------------------------------------------
+Ran 1 test in 0.015s
+
+FAILED (failures=1)

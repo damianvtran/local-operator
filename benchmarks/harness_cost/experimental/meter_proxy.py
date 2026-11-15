@@ -83,6 +83,32 @@ _seen_runs: set[str] = set()
 client = httpx.AsyncClient(timeout=httpx.Timeout(600, connect=30))
 
 
+def provider_privacy(preferences: object) -> WireObject:
+    """Retain explicit caller privacy without transferring routing authority.
+
+    The benchmark owns Anthropic routing, fallback prohibition and price bounds.
+    Dropping a caller's no-collection/ZDR request silently weakens its processing
+    boundary, but accepting arbitrary provider extensions could do the same.
+    Fail closed on unsupported preferences; do not add a default privacy policy
+    or claim that an account/endpoint is qualified merely by forwarding flags.
+    """
+    if not isinstance(preferences, dict):
+        raise ValueError("provider preferences must be an object")
+    if set(preferences) - {"order", "allow_fallbacks", "max_price", "zdr", "data_collection"}:
+        raise ValueError("unsupported provider preference")
+    privacy: WireObject = {}
+    if "zdr" in preferences:
+        if type(preferences["zdr"]) is not bool:
+            raise ValueError("provider zdr must be boolean")
+        privacy["zdr"] = preferences["zdr"]
+    if "data_collection" in preferences:
+        value = preferences["data_collection"]
+        if type(value) is not str or value not in {"allow", "deny"}:
+            raise ValueError("provider data_collection must be allow or deny")
+        privacy["data_collection"] = value
+    return privacy
+
+
 async def upstream_key() -> str:
     """Never consult a private auth database or write the environment key to disk."""
     key = os.environ.get("OPENROUTER_API_KEY", "")
@@ -395,6 +421,9 @@ class BudgetGuard:
             self._void(data, run_id, reason)
 
     def validate(self, body: WireObject, raw: bytes) -> None:
+        # Validate before capture/key lookup/reservation, as well as on the final
+        # prepared body. Unknown privacy extensions must never reach upstream.
+        provider_privacy(body.get("provider", {}))
         self.rates_for(or_model(body.get("model")))
         tokens = body.get("max_tokens")
         if (
@@ -999,6 +1028,7 @@ async def proxy(guard: BudgetGuard, request: Request) -> Response:
         meta["upstream_model"] = body["model"] = or_model(body.get("model"))
         body["service_tier"] = "default"
         body["provider"] = {
+            **provider_privacy(body.get("provider", {})),
             "order": ["anthropic"],
             "allow_fallbacks": False,
             "max_price": {"prompt": guard.rates_for(body["model"])["prompt"],

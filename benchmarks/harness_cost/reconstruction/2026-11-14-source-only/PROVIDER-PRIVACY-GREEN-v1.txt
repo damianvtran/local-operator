@@ -1,0 +1,22 @@
+test_each_supported_privacy_field_and_combination_survives (test_meter_privacy.ProviderPrivacyTests.test_each_supported_privacy_field_and_combination_survives) ... ok
+test_false_allow_are_preserved_without_loosening_authority (test_meter_privacy.ProviderPrivacyTests.test_false_allow_are_preserved_without_loosening_authority) ... ok
+test_invalid_or_unknown_privacy_rejected_before_dispatch (test_meter_privacy.ProviderPrivacyTests.test_invalid_or_unknown_privacy_rejected_before_dispatch) ... ok
+test_no_policy_baseline_retains_exact_provider_object (test_meter_privacy.ProviderPrivacyTests.test_no_policy_baseline_retains_exact_provider_object) ... ok
+test_preserves_explicit_strict_privacy_on_prepared_dispatch (test_meter_privacy.ProviderPrivacyTests.test_preserves_explicit_strict_privacy_on_prepared_dispatch) ... ok
+test_privacy_does_not_bypass_existing_request_or_tool_guards (test_meter_privacy.ProviderPrivacyTests.test_privacy_does_not_bypass_existing_request_or_tool_guards) ... ok
+
+----------------------------------------------------------------------
+Ran 6 tests in 0.163s
+
+OK
+test_each_supported_privacy_field_and_combination_survives (test_meter_privacy.ProviderPrivacyTests.test_each_supported_privacy_field_and_combination_survives) ... ok
+test_false_allow_are_preserved_without_loosening_authority (test_meter_privacy.ProviderPrivacyTests.test_false_allow_are_preserved_without_loosening_authority) ... ok
+test_invalid_or_unknown_privacy_rejected_before_dispatch (test_meter_privacy.ProviderPrivacyTests.test_invalid_or_unknown_privacy_rejected_before_dispatch) ... ok
+test_no_policy_baseline_retains_exact_provider_object (test_meter_privacy.ProviderPrivacyTests.test_no_policy_baseline_retains_exact_provider_object) ... ok
+test_preserves_explicit_strict_privacy_on_prepared_dispatch (test_meter_privacy.ProviderPrivacyTests.test_preserves_explicit_strict_privacy_on_prepared_dispatch) ... ok
+test_privacy_does_not_bypass_existing_request_or_tool_guards (test_meter_privacy.ProviderPrivacyTests.test_privacy_does_not_bypass_existing_request_or_tool_guards) ... ok
+
+----------------------------------------------------------------------
+Ran 6 tests in 0.292s
+
+OK

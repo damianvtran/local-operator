@@ -1,0 +1,56 @@
+{
+  "authority": "benchmark Anthropic order/no fallback/max_price unchanged; unsupported provider keys/types rejected before key lookup or upstream dispatch",
+  "declared_product_source_delta": [
+    "benchmarks/harness_cost/experimental/meter_proxy.py",
+    "benchmarks/harness_cost/experimental/test_meter_privacy.py"
+  ],
+  "default_old_generation_future_admission_policy": "INELIGIBLE; enforcement/wiring not claimed by this focused source fix",
+  "evidence": {
+    "green": "PROVIDER-PRIVACY-GREEN-v1.txt",
+    "interpreter": "existing repo .venv; Python3.12.13; source/proxy proof, NOT Linux runtime qualification",
+    "modes": [
+      "normal",
+      "-O"
+    ],
+    "red": "PROVIDER-PRIVACY-RED-v1.txt",
+    "targeted_tests_per_mode": 6,
+    "transport": "actual ASGI -> httpx.MockTransport, no external HTTP"
+  },
+  "explicit_privacy_fields": {
+    "data_collection": "exact string allow/deny",
+    "zdr": "exact boolean true/false"
+  },
+  "financial17_or_account_privacy_qualified": false,
+  "future_build_or_admission_blocked": true,
+  "future_preflight_generation_selection_wired": false,
+  "generation_id": "reconstruction-20261114-source-v1-meter-privacy-v1",
+  "generation_validator_implemented": false,
+  "historical_bytes_verified_from_git_object": true,
+  "historical_meter_sha256": "e5d5d626e36e89dc7544eac3f826623fbd264e285dc35f2431fdf35540e7cc5a",
+  "historical_prereg_ratecards_receipts_rewritten": false,
+  "meter_path": "benchmarks/harness_cost/experimental/meter_proxy.py",
+  "native_attempts_consumed": "2/3 unchanged",
+  "new_defaults": false,
+  "old_runtime_and_paid_admission_reusable": false,
+  "owned_launch_and_resolver_sha256_unchanged": {
+    "darwin_process_identity.py": "36eeb136e4c3d34d1c4ffb241f1736f3bc870d9d3308624c489abfd1d96fd058",
+    "launch_services_broker.py": "a67a323555b37080de2ac35a73f73833d910bc169f0a2b611b32a596cdb22282",
+    "lifecycle_proposal.py": "d2255ee464dcd7d9eb8b15906f3c604e710542d630dce6ea205931ee729c17b5",
+    "owned_session_launch.py": "d9a6f462cb9f407007f903f017fcb5ee3431d45d4fda40ffc0ec757d44fc2ed8",
+    "resolver-pins.json": "ae50649e765833bf8a85009e70f6f858ce7556b07ffd21b9e047ee904123e756"
+  },
+  "previous_source_head": "9dee883473441bc1db300abb975cd11297c6ef01",
+  "prospective_meter_sha256": "23ee793b1c8a4ed71cba1a677bced86f7017899979e787f744ba4619f7270376",
+  "required_future_validation": [
+    "explicitly select independently reviewed prospective generation; no default old-generation admission",
+    "validate new meter/test hashes and exact old Git object",
+    "verify unchanged remainder against approved base/manifest; ONLY declared delta permitted",
+    "tamper new meter/new tests/unrelated runtime/restricted unchanged source: each must reject",
+    "wire this fail-closed validator into future build/preflight; do not suppress one historical drift"
+  ],
+  "resource_ask": "a-9509 / relay a-1ca7 OPEN",
+  "runtime_qualified": false,
+  "status": "SOURCE_ONLY_CANDIDATE_REQUIRES_INDEPENDENT_DELTA_REVIEW_AND_NEW_RUNTIME_BINDINGS",
+  "test_sha256": "972bad24e91a73e68fc3d0656699965b6b7818dc7afa6a91c16538df2b4bebcc",
+  "utc": "2026-11-15T12:25:47.839245+00:00"
+}
