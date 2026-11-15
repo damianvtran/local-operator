@@ -1,0 +1,65 @@
+{
+  "schema": 1,
+  "locale": "ru",
+  "namespace": "cli.config",
+  "history_sha256": "d435e32c5b92cdcbfbe088dfeb843f2b82f6d1bad49efe577cd83249d83eacb7",
+  "entries": [
+    {
+      "locale": "ru",
+      "namespace": "cli.config",
+      "source_sha256": "40649e7419d144f7e8a550d5ae3c6d48defa7bb0b23f4a20ceac35f2b0fda5ac",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-11"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (session e45ca4d0d71c; independent)",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-11-11",
+        "result": "passed",
+        "findings": 7
+      },
+      "status": "passed",
+      "note": "ru C1-A independent audit PASS: 15 keys, 0 blocker/major (4 minor, 4 nit in the PR thread); ICU/placeholder/backtick parity run with the repo runtime. Evidence: i18n/audits/evidence/ru/cli.config/c1a/record.json. Binds this EN source; target hash at catalogue landing."
+    },
+    {
+      "locale": "ru",
+      "namespace": "cli.config",
+      "source_sha256": "40649e7419d144f7e8a550d5ae3c6d48defa7bb0b23f4a20ceac35f2b0fda5ac",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-11"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-11-11",
+        "result": "passed",
+        "findings": 3,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "ru C1 `cli.config` FINAL: round-2 delta audit of the v2 bytes now shipped (target file sha256 69c22a7208f9), 0 BLOCKER/0 MAJOR/0 MINOR/3 NIT. Round 1: A deepseek 0M/5m/5n, B sonnet 0M/4m/4n; v2 revised 11 keys. Independent of translator openai/gpt-6.1-sol. Evidence: i18n/audits/evidence/ru/cli.config/c1r2/record.json. No rendered frame; no native review.",
+      "companions": [
+        {
+          "path": "i18n/audits/evidence/ru/cli.config/c1r2/record.json",
+          "sha256": "c33947c4b566588541c4486f18e30b89f75db1d2f67318690614e739594c25e6"
+        },
+        {
+          "path": "i18n/audits/evidence/ru/cli.config/c1r2/report.md",
+          "sha256": "0ad71e93d085f2ffa33c96544e56ff670fd368d1d88e4fbb1fed05d554f5c5d6"
+        },
+        {
+          "path": "i18n/audits/evidence/ru/cli.config/c1r2/round1-B-report.md",
+          "sha256": "eca39689b1103a1c8e8d86b420ad8c2a449a2ef3dd6487ec695a1baf3dbad525"
+        },
+        {
+          "path": "i18n/audits/evidence/ru/cli.config/c1r2/verify.log",
+          "sha256": "8784aa76e2044aac4f4d0cb8c743dec779492007ee6e99b0cf0e879ed155784a"
+        }
+      ]
+    }
+  ]
+}

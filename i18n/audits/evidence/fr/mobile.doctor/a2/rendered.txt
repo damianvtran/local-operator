@@ -1,0 +1,4 @@
+# fr/mobile.doctor a2: changed key rendered through local_operator.i18n.runtime.render_message(locale='fr') on the working tree (a3722be7dada + remediation) with sample args {"lop": "0.42.1", "python": "3.13.2", "platform": "macOS-15.1-arm64", "ms": "2400", "open": "231", "limit": "256", "emfile": "14", "sqlite": "3", "state": "stopped", "reason": "login_required", "count": 3}.
+# Text render only; no terminal or desktop frame captured.
+mobile.doctor.daemon.not_running
+  -> Le service d’accès téléphone est configuré mais n’est pas lancé ; l’application mobile affiche cet ordinateur en veille jusqu’au démarrage du service.

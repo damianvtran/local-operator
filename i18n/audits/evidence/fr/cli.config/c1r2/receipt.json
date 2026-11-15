@@ -1,0 +1,16 @@
+{
+  "schema": 1,
+  "audit_id": "c1r2",
+  "audit_round": 2,
+  "locale": "fr",
+  "namespace": "cli.config",
+  "files": {
+    "record.json": "9e36dd279fe849c4fb8b51db46d3895a98e614fb7e66ef697714e6625a2dd00d",
+    "report.md": "079115cdef9f0cf12ecc8d2bc4a186562c485ee0e35bc16665b8234e9233bc3d",
+    "round1-B-report.md": "c42758bf49fddadc633319ced5588f7dc850bb248da2bb72cbe2b2f9efbbdcc6",
+    "verify.log": "467f8075f051196e2d6b655a366458fb8436a79b55b8b048cbafdaa846b4188a"
+  },
+  "bundle": "i18n/audits/evidence/fr/cli.config/c1r2",
+  "generated_by": "integrator (coder, slice C1 phase 2); hashes of the files copied from the auditors' reports plus verify.log",
+  "generated_at": "2026-11-11"
+}

@@ -230,6 +230,13 @@ inputs; callers still receive a plain, **one-argument `SessionSpecError`** and
 read its human-readable text with `str(error)`. No public `{code, params, text}`
 exception envelope, new exception fields or locale parameter is introduced.
 
+Spec/input refusals (`wire.errors.sdk_spec`, raised by `SessionSpec`,
+`ApprovalPolicy`, `open_session` and `spawn_session` validation) render in the
+process's **active** locale, which `lop` moves at boot and on a language change.
+They never read configuration to choose a language — they fire before root
+isolation — so a bare SDK embedder that never boots a locale keeps the English
+source byte-for-byte. The exception shape is unchanged (one string argument).
+
 This describes that source revision, not a promise about an older installed SDK.
 The measured 2026-10-13 UTC installed 0.70.10 snapshot predates this slice; verify
 installation contains it before relying on localized SDK refusals. No provider

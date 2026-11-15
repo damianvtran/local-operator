@@ -1,0 +1,11 @@
+# ledger append dry-run for vi/cli.mobile_help (.venv/bin/python scripts/i18n/ledger.py)
+$ ledger.py history-sha --locale vi --namespace cli.mobile_help
+5d6747d2b3b9375dbf2ec47236739c0e612d23038406c32babb12e24857e7129
+$ ledger.py append --receipt <scratchpad>/c4/receipt-vi-cli.mobile_help.json --expected-history-sha 5d6747d2b3b9375dbf2ec47236739c0e612d23038406c32babb12e24857e7129 --dry-run
+exit=0
+i18n/audit-history/vi/cli.mobile_help.json
+$ ledger.py append ... --apply
+exit=0
+i18n/audit-history/vi/cli.mobile_help.json
+$ ledger.py history-sha --locale vi --namespace cli.mobile_help   # after apply
+18ead41010de3208894c80d3d75ab2c99b9a810335af72e9628d9a4aafec6315

@@ -73,6 +73,12 @@ _FS_MODULES = frozenset({"os", "shutil", "pathlib"})
 #: count with a reason, and a removed one fails as stale.
 _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
     (
+        "local_operator/network/credentials/github.py::use_default_repositories",
+        "<path>.unlink",
+        "Explicit owner opt-in removes only network/github-designation-delivered.json, "
+        "the fixed device-local clear marker, never a session member; unlink refuses directories.",
+    ),
+    (
         "local_operator/definition_transaction.py::_durable_json",
         "os.replace",
         "Publishes the O_EXCL-created regular JSON temp file; "
@@ -2058,6 +2064,18 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "local_operator/mcp/config.py::_write_bytes_atomic",
         "os.unlink",
         "that temp FILE, only while the write above is failing",
+    ),
+    # The daemon's file-descriptor limits record (`mobile/fdlimit.py`), read back
+    # by `lop mobile doctor`. `record` writes `<path>.tmp` then atomically replaces
+    # `limits_path()`, which takes NO arguments and is always
+    # `config_dir() / "mobile" / "daemon-limits.json"` — a fixed basename in the
+    # mobile config subdirectory, with no session id and no caller input, so
+    # neither the temp nor the target can name a path under `sessions/`.
+    (
+        "local_operator/mobile/fdlimit.py::record",
+        "os.replace",
+        "temp FILE -> <config_dir>/mobile/daemon-limits.json; both names are "
+        "config-root-derived with a fixed basename",
     ),
     ("local_operator/mobile/seen.py::SeenStore._persist_locked", "os.replace", "temp FILE"),
     ("local_operator/mobile/seen.py::SeenStore._persist_locked", "os.unlink", "temp FILE"),

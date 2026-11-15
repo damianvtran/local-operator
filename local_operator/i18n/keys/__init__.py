@@ -8,12 +8,14 @@ shape RFC §2.4 proved: a mistyped key or kwarg fails pyright.
 from __future__ import annotations
 
 from . import (
+    browser_site_approval,
     cli_agents_help,
     cli_agents_picture,
     cli_aida_help,
     cli_browser,
     cli_browser_help,
     cli_browser_node,
+    cli_config,
     cli_config_help,
     cli_credential_help,
     cli_exec_help,
@@ -56,6 +58,7 @@ from . import (
     cli_vault,
     cli_vault_help,
     cli_wake_help,
+    mobile_doctor,
     mobile_setup,
     operator_pairing,
     relay_account_policy,
@@ -99,6 +102,7 @@ from . import (
     tui_projects_edit,
     tui_review,
     tui_schedule,
+    tui_session_move,
     tui_setup_cues,
     tui_small,
     tui_sound,
@@ -165,12 +169,14 @@ from . import (
 )
 
 __all__ = [
+    "browser_site_approval",
     "cli_agents_help",
     "cli_agents_picture",
     "cli_aida_help",
     "cli_browser",
     "cli_browser_help",
     "cli_browser_node",
+    "cli_config",
     "cli_config_help",
     "cli_credential_help",
     "cli_exec_help",
@@ -213,6 +219,7 @@ __all__ = [
     "cli_vault",
     "cli_vault_help",
     "cli_wake_help",
+    "mobile_doctor",
     "mobile_setup",
     "operator_pairing",
     "relay_account_policy",
@@ -256,6 +263,7 @@ __all__ = [
     "tui_projects_edit",
     "tui_review",
     "tui_schedule",
+    "tui_session_move",
     "tui_setup_cues",
     "tui_small",
     "tui_sound",

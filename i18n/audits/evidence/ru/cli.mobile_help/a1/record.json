@@ -1,0 +1,162 @@
+{
+ "schema": 1,
+ "audit_id": "a1",
+ "audit_kind": "independent_translation_audit",
+ "locale": "ru",
+ "namespace": "cli.mobile_help",
+ "round": 1,
+ "audit_date": "2026-11-14",
+ "packaged_at_utc": "2026-11-14T01:38:35Z",
+ "verdict": "passed",
+ "status": "passed",
+ "scope": "whole namespace (17 keys) at the new English source hash: the 2 NEW keys (cli.mobile_help.doctor, cli.mobile_help.doctor_json) judged in full; the 15 previously audited keys re-read for consistency with the new keys and with mobile.doctor, and any defect seen is recorded",
+ "key_count": 17,
+ "keys_audited": 17,
+ "new_keys": [
+  "cli.mobile_help.doctor",
+  "cli.mobile_help.doctor_json"
+ ],
+ "source_sha256": "3e1aea77751a6a1286cd0bc525163ac6e90da2f81fd19fff1fc23ae247133267",
+ "target_sha256": "24ade01727f5e5fab0aaaf22dcfa48e82e2e06d63d36b761e1e02b91283aa50c",
+ "source_audit_revision": "a3722be7dadacaf140a2587a0100bd3b26c2ab50",
+ "worktree": "~/local-operator/.worktrees/mobile-doctor",
+ "branch": "feat/mobile-doctor",
+ "node": "lop-remote-node-2",
+ "translator": {
+  "agent": "i18n-translator subagent, session 398cdb26808f (English drafted by coder session b0300e2c2c7f)",
+  "model": "anthropic/claude-opus-5-5",
+  "date": "2026-11-14"
+ },
+ "auditor": {
+  "agent": "i18n-auditor, independent `task` subagent (C4 i18n-auditor es fr ru), session 5e5b8d070b27; did not translate or edit any value it judged",
+  "model": "anthropic/claude-opus-5-5 (served model reported by the session; no provider fallback observed)",
+  "date": "2026-11-14",
+  "independent_from_translator": true,
+  "independence": "Different session (5e5b8d070b27) from the translator (398cdb26808f) and the English drafter (b0300e2c2c7f); never edited a catalogue value. Translator and auditor ran the same model (anthropic/claude-opus-5-5) — disclosed; no native-speaker pass is claimed."
+ },
+ "input_hashes": {
+  "en": "3e1aea77751a6a1286cd0bc525163ac6e90da2f81fd19fff1fc23ae247133267",
+  "context": "dab85ceb9e4acf145e434179d866848912a0831bbf827ea196f82c28f855a869",
+  "target": "24ade01727f5e5fab0aaaf22dcfa48e82e2e06d63d36b761e1e02b91283aa50c",
+  "glossary": "a576d5a4b2718ba79a70a42600e3b6233ea28d716b1e2d996a208ac8dd7fabdb",
+  "style_guide": "f20e1cafaf70578c17ce072c71725628808d228e4be5604329f8da30386f1fb5"
+ },
+ "input_paths": {
+  "en": "local_operator/i18n/catalogues/en/cli.mobile_help.json",
+  "context": "local_operator/i18n/catalogues/en/cli.mobile_help.context.json",
+  "target": "local_operator/i18n/catalogues/ru/cli.mobile_help.json",
+  "glossary": "i18n/glossary.md",
+  "style_guide": "i18n/style-guides/ru.md"
+ },
+ "counts": {
+  "blocker": 0,
+  "major": 0,
+  "minor": 0,
+  "nit": 2
+ },
+ "unresolved_blocker_major": 0,
+ "findings": [
+  {
+   "id": "RU-H1",
+   "severity": "nit",
+   "keys": [
+    "cli.mobile_help.doctor"
+   ],
+   "issue": "«Диагностика доступа с телефона, только чтение (…)»: the appended «только чтение» reads like a list item; meaning (read-only, safe to share) survives.",
+   "suggested_fix": "Optional: «Диагностика доступа с телефона в режиме только для чтения (можно безопасно передать)».",
+   "status": "open (non-blocking)"
+  },
+  {
+   "id": "RU-H2",
+   "severity": "nit",
+   "keys": [
+    "cli.mobile_help.status"
+   ],
+   "issue": "Pre-existing value: «живые сессии» calques «live sessions».",
+   "suggested_fix": "Optional: «активные сессии».",
+   "status": "open (non-blocking)"
+  }
+ ],
+ "translator_questions": {
+  "Q2": {
+   "question": "ru tunnel.duplicates colon pattern",
+   "adjudication": "PASS — «туннелей для этого компьютера: {count}» is the established label-colon pattern that avoids plural agreement (same as files.ok «открыто файлов: {open} из {limit}»); natural for count ≥ 2."
+  },
+  "Q5": {
+   "question": "ru/es daemon.state_not_running fragment",
+   "adjudication": "PASS — «не запущен» (masculine) reads naturally after «auth gate:» (шлюз/демон are masculine)."
+  },
+  "Q6": {
+   "question": "«asleep» renderings",
+   "adjudication": "«в спящем режиме» idiomatic; not verified against the phone app's own label."
+  }
+ },
+ "per_key": {
+  "cli.mobile_help.mobile": "ok",
+  "cli.mobile_help.install": "ok",
+  "cli.mobile_help.status": "RU-H2",
+  "cli.mobile_help.daemon_action": "ok",
+  "cli.mobile_help.logs": "ok",
+  "cli.mobile_help.logs_lines": "ok",
+  "cli.mobile_help.logs_follow": "ok",
+  "cli.mobile_help.password": "ok",
+  "cli.mobile_help.devices": "ok",
+  "cli.mobile_help.devices_command": "ok",
+  "cli.mobile_help.devices_device_id": "ok",
+  "cli.mobile_help.devices_port": "ok",
+  "cli.mobile_help.uninstall": "ok",
+  "cli.mobile_help.uninstall_purge": "ok",
+  "cli.mobile_help.serve": "ok",
+  "cli.mobile_help.doctor": "RU-H1",
+  "cli.mobile_help.doctor_json": "ok"
+ },
+ "mechanical_checks": [
+  {
+   "check": "key parity (same set and order)",
+   "result": "pass"
+  },
+  {
+   "check": "ICU argument names identical",
+   "result": "pass"
+  },
+  {
+   "check": "select branch labels identical",
+   "result": "pass"
+  },
+  {
+   "check": "no command named that English does not name",
+   "result": "pass"
+  },
+  {
+   "check": "final period mirrors English",
+   "result": "pass"
+  },
+  {
+   "check": "rendered through Msg.envelope(locale=ru) without error (17/17 keys present in render)",
+   "result": "pass"
+  },
+  {
+   "check": "no silent English fallback in render",
+   "result": "pass"
+  }
+ ],
+ "must_survive": {
+  "no command named": "verified (no added `lop …`/backticks)",
+  "calm factual tone": "verified by reading",
+  "placeholders verbatim": "verified (ICU argument names identical)",
+  "read-only / safe to share": "verified in cli.mobile_help.doctor"
+ },
+ "evidence_files": [
+  "record.json",
+  "report.md",
+  "rendered.txt",
+  "audit.log",
+  "dryrun.log",
+  "receipt.json"
+ ],
+ "not_verified": [
+  "native-speaker review",
+  "terminal/desktop rendered frame (text render only)",
+  "the phone app's own localized 'asleep'/'not answering' labels (separate repository)"
+ ]
+}

@@ -21,6 +21,8 @@ import subprocess
 from dataclasses import dataclass
 from typing import Any
 
+from local_operator.i18n.keys import tui_session_move as _keys
+from local_operator.i18n.text import tr
 from local_operator.interpreter import python_argv
 from local_operator.tui.network_cli import _ANSI_RE, _reap_group
 
@@ -36,10 +38,20 @@ MOVE_PHASE_ORDER: tuple[str, ...] = ("prepared", "handing_off", "committed", "do
 #: larger so a working move is never reported as a timeout.
 MOVE_TIMEOUT_S = 360.0
 
-#: The sentence for the one ambiguous shape (``mesh-ui.md`` §1.6, "move ambiguous").
-AMBIGUOUS_MOVE = (
-    "Use /move <path> for a working directory, or /move <session> --to <peer> to move " "a session."
-)
+#: Resolved at CALL time, never at import: every user-visible sentence here is a
+#: keyed message, so a language change between two ``/move`` commands (and the
+#: locale the process is in when the command runs) decides the text. The
+#: flag names and commands INSIDE the sentences stay English tokens by design.
+_t = tr("tui.session_move")
+
+
+def ambiguous_move() -> str:
+    """The sentence for the one ambiguous shape (``mesh-ui.md`` §1.6, "move ambiguous").
+
+    A function, not the module constant it used to be: a constant would freeze
+    the language the process had at import.
+    """
+    return _t(_keys.ambiguous())
 
 
 @dataclass(frozen=True)
@@ -106,14 +118,14 @@ def parse_move_to(arg: str) -> MoveTo | None:
         token = tokens[index]
         if token == "--to":
             if index + 1 >= len(tokens) or tokens[index + 1].startswith("--"):
-                return MoveTo(error="--to needs a device: /move --to <peer|local>")
+                return MoveTo(error=_t(_keys.to_needs_device()))
             to = tokens[index + 1]
             index += 2
             continue
         if token.startswith("--to="):
             to = token[len("--to=") :]
             if not to:
-                return MoveTo(error="--to needs a device: /move --to <peer|local>")
+                return MoveTo(error=_t(_keys.to_needs_device()))
         elif token == "--keep":
             keep = True
         elif token == "--queue":
@@ -128,28 +140,18 @@ def parse_move_to(arg: str) -> MoveTo | None:
                 # until it answers, so it cannot wait — and a reader who types the
                 # flag here anyway gets the shell route rather than a dead end about
                 # an unknown option.
-                return MoveTo(
-                    error=(
-                        "this view cannot wait — from a shell: "
-                        "`lop sessions move <id> --to <to> --wait <seconds>`"
-                    )
-                )
-            return MoveTo(
-                error=(
-                    "/move --to takes only --keep, --queue and --drop-session-roles, "
-                    f"not {token!r}"
-                )
-            )
+                return MoveTo(error=_t(_keys.cannot_wait()))
+            return MoveTo(error=_t(_keys.unsupported_flag(flag=repr(token))))
         else:
             words.append(token)
         index += 1
     if len(words) > 1:
-        return MoveTo(error=AMBIGUOUS_MOVE)
+        return MoveTo(error=ambiguous_move())
     session_id = words[0] if words else ""
     if session_id and ("/" in session_id or session_id.startswith(("~", "."))):
         # A PATH WITH ``--to`` is the one shape the design refuses by name rather
         # than guessing (§1.7 table: "/move <path> --to … ⇒ refused").
-        return MoveTo(error=AMBIGUOUS_MOVE)
+        return MoveTo(error=ambiguous_move())
     return MoveTo(
         session_id=session_id,
         to=to,
@@ -201,7 +203,7 @@ def run_session_move(
             start_new_session=True,
         )
     except OSError as exc:
-        return _refusal(session_id, "cli_unavailable", f"could not start the CLI ({exc})")
+        return _refusal(session_id, "cli_unavailable", _t(_keys.cli_unavailable(reason=str(exc))))
     try:
         out, err = child.communicate(timeout=MOVE_TIMEOUT_S)
     except subprocess.TimeoutExpired:
@@ -210,8 +212,7 @@ def run_session_move(
         return _refusal(
             session_id,
             "deadline_exceeded",
-            "the move did not finish in time; `lop sessions move "
-            f"{session_id} --to {to}` again reports where it got to",
+            _t(_keys.deadline_exceeded(session=session_id, to=to)),
             changed=True,
         )
     text = (out or "").strip()
@@ -225,7 +226,7 @@ def run_session_move(
     return _refusal(
         session_id,
         "cli_failed",
-        lines[-1] if lines else f"the CLI exited {child.returncode} with no answer",
+        lines[-1] if lines else _t(_keys.cli_no_answer(code=str(child.returncode))),
     )
 
 

@@ -1,0 +1,129 @@
+{
+ "schema": 1,
+ "audit_id": "a2",
+ "audit_kind": "independent_translation_audit_remediation_delta",
+ "locale": "vi",
+ "namespace": "mobile.doctor",
+ "round": 2,
+ "audit_date": "2026-11-14",
+ "verdict": "passed",
+ "status": "passed",
+ "source_sha256": "0ca00b276fdea066228394e3fee336042b1e149c9e7df3ea31be11a24f0beb72",
+ "target_sha256": "a59dd28edf10bc1e03fcad07514cc18ac581d15c1a76d6b1fa1656ef0f87ca83",
+ "scope": "round 2: remediation delta only (2 changed keys); unchanged keys verified byte-identical to a1, not re-audited",
+ "key_count": 23,
+ "keys_audited": 2,
+ "keys_reread_for_consistency": 2,
+ "changed_keys": [
+  "mobile.doctor.files.ok",
+  "mobile.doctor.files.near"
+ ],
+ "source_audit_revision": "a3722be7dadacaf140a2587a0100bd3b26c2ab50 + uncommitted working-tree remediation of local_operator/i18n/catalogues/{vi,zh-CN,fr}/mobile.doctor.json",
+ "worktree": "~/local-operator/.worktrees/mobile-doctor",
+ "branch": "feat/mobile-doctor",
+ "node": "lop-remote-node-2",
+ "translator": {
+  "agent": "i18n-translator subagent, session 8dedc962f71a (remediation of a1 findings); original values by session 398cdb26808f (English source drafted by coder session b0300e2c2c7f)",
+  "model": "anthropic/claude-opus-5-5",
+  "date": "2026-11-14"
+ },
+ "auditor": {
+  "agent": "i18n-auditor round 2 (remediation delta: vi, zh-CN, fr mobile.doctor), independent `task` subagent, session 24933ff37418; did not translate round 1 or the remediation, did not audit round 1, and edited no catalogue value",
+  "model": "anthropic/claude-opus-5-5 (served model of this session; no provider fallback observed)",
+  "date": "2026-11-14",
+  "independent_from_translator": true,
+  "independence": "Different session (24933ff37418) from the remediation translator (8dedc962f71a), the original translator (398cdb26808f), the English drafter (b0300e2c2c7f) and the round-1 auditor (2c1a73eaa6cd); edited no catalogue value. Same model as the translator — disclosed; no native-speaker pass claimed."
+ },
+ "prior_audit": {
+  "audit_id": "a1",
+  "record": "i18n/audits/evidence/vi/mobile.doctor/a1/record.json",
+  "verdict": "changes_requested",
+  "target_sha256": "2642bc0c30738625eb8b2c99b4410f8d1a9ef1bbef7f20d6ea61bdd4c4042314",
+  "auditor_session": "2c1a73eaa6cd",
+  "ledger_row": "i18n/audit-history/vi/mobile.doctor.json entries[0] (round a1)"
+ },
+ "input_hashes": {
+  "en": "0ca00b276fdea066228394e3fee336042b1e149c9e7df3ea31be11a24f0beb72",
+  "context": "c6baa99bc539ef2d2e03bf7b6b11e83edac37139eede8db82034f5fad98d4614",
+  "target": "a59dd28edf10bc1e03fcad07514cc18ac581d15c1a76d6b1fa1656ef0f87ca83",
+  "glossary": "a576d5a4b2718ba79a70a42600e3b6233ea28d716b1e2d996a208ac8dd7fabdb",
+  "style_guide": "e4901497ed553e2b2ae4a2660bf776adb787b89e11d7eb0f8d08f3da4b227888"
+ },
+ "input_paths": {
+  "en": "local_operator/i18n/catalogues/en/mobile.doctor.json",
+  "context": "local_operator/i18n/catalogues/en/mobile.doctor.context.json",
+  "target": "local_operator/i18n/catalogues/vi/mobile.doctor.json",
+  "glossary": "i18n/glossary.md",
+  "style_guide": "i18n/style-guides/vi.md"
+ },
+ "findings": [],
+ "prior_findings_resolution": [
+  {
+   "id": "VI-D1",
+   "severity": "major",
+   "status": "resolved",
+   "verification": "files.ok, files.near changed exactly as the a1 suggested fix"
+  },
+  {
+   "id": "VI-D2",
+   "severity": "nit",
+   "status": "carried (accepted in a1; keys unchanged)"
+  }
+ ],
+ "counts": {
+  "blocker": 0,
+  "major": 0,
+  "minor": 0,
+  "nit": 0
+ },
+ "unresolved_blocker_major_count": 0,
+ "per_key": {
+  "mobile.doctor.files.ok": {
+   "old": "Dịch vụ truy cập điện thoại đang mở {open} tệp trên giới hạn {limit}.",
+   "new": "Dịch vụ truy cập điện thoại đang mở {open} tệp (giới hạn {limit}).",
+   "judgement": "ok",
+   "note": "Resolves VI-D1. «đang mở {open} tệp (giới hạn {limit})» = “has {open} files open (limit {limit})”; the parenthetical carries “of {limit}” with no above/over reading. Same shape as zh-CN «已打开{open}个文件（上限{limit}个）» and consistent with files.status_line «đang mở {open}/{limit}». ASCII parentheses are correct for Vietnamese (Latin script, style guide §Punctuation)."
+  },
+  "mobile.doctor.files.near": {
+   "old": "Dịch vụ truy cập điện thoại đang mở {open} tệp trên giới hạn {limit}, gần chạm giới hạn, nên các kết nối mới từ điện thoại và việc mở cơ sở dữ liệu có thể thất bại.",
+   "new": "Dịch vụ truy cập điện thoại đang mở {open} tệp (giới hạn {limit}), gần chạm giới hạn, nên các kết nối mới từ điện thoại và việc mở cơ sở dữ liệu có thể thất bại.",
+   "judgement": "ok",
+   "note": "Resolves VI-D1. Same parenthetical; «(giới hạn {limit}), gần chạm giới hạn» now agrees (“limit 256, close to the limit”) instead of contradicting. The repeated «giới hạn» mirrors English “of {limit} … close to its limit” and reads naturally. Rest of the sentence unchanged from a1."
+  }
+ },
+ "verified": [
+  "placeholder sets identical to English for every changed key; NFC; key set and order identical (audit.log)",
+  "only the 2 remediation key(s) differ from the a1-audited file; every other key byte-identical",
+  "each changed value matches the a1 suggested fix in meaning; no command named; calm factual tone kept",
+  "parenthetical «(giới hạn {limit})» consistent with files.status_line «{open}/{limit}» and zh-CN «（上限{limit}个）»"
+ ],
+ "limitations": [
+  "Independent LLM review on anthropic/claude-opus-5-5, not native-speaker certification; translator and auditor ran the same model (disclosed).",
+  "Text renders via the product renderer only (audit.log); no terminal, desktop or device frame.",
+  "Round-2 scope: only the remediation delta was judged; unchanged keys were confirmed byte-identical to the a1-audited values, not re-audited.",
+  "generate.py / check.py not run by this lane; nothing committed or pushed."
+ ],
+ "artifacts": [
+  "record.json",
+  "report.md",
+  "audit.log",
+  "dryrun.log",
+  "receipt.json"
+ ],
+ "audit_ledger_row": {
+  "storage": "i18n/audit-history/vi/mobile.doctor.json (ordered suffix, appended with scripts/i18n/ledger.py append)",
+  "history_sha256_before_append": "9994c7b1e1af535a9ac3dc47f06f5706266d4b1bb32e6fb393f80d8f6fce75d4",
+  "history_sha256_after_append": "91b5a9626fbdefc7304d4755f0a97e749ae24fce287ff537e997a05a5a424e94",
+  "ledger_status": "passed",
+  "round": "a2",
+  "why_not_i18n_ledger_json": "i18n/ledger.json and i18n/ledger/<locale>.json are migration snapshots pinned by i18n/audit-history.json; a new audit is an appended row and the last row per (locale, namespace) wins."
+ },
+ "evidence_receipt": {
+  "path": "i18n/audits/evidence/vi/mobile.doctor/a2/receipt.json",
+  "self_hash_rule": "receipt.json hashes every other artifact in this directory and not itself"
+ },
+ "consistency_neighbours": [
+  "mobile.doctor.files.status_line",
+  "mobile.doctor.files.unknown"
+ ]
+}

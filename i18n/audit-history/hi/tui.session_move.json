@@ -1,0 +1,86 @@
+{
+  "schema": 1,
+  "locale": "hi",
+  "namespace": "tui.session_move",
+  "history_sha256": "6d17cdc9fdf9c9e44c6326495ac5ca85db87855f0fa369e01112a2b9e125f357",
+  "entries": [
+    {
+      "locale": "hi",
+      "namespace": "tui.session_move",
+      "source_sha256": "f4dd682b3b50d64a4009eac5ac78a34f5734b5dd0a5ef379951065da326a913e",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-11"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (lopdev team)",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-11-11",
+        "result": "changes_requested",
+        "findings": 2,
+        "unresolved_blocker_major": 1
+      },
+      "status": "changes_requested",
+      "note": "hi C1 tui.session_move (7 keys): 1 major, 1 nit. Major: cli_no_answer coins निकास कोड for exit code where shipped hi uses एग्ज़िट कोड. Nit: ambiguous uses <पाथ>. Evidence: i18n/audits/evidence/hi/tui.session_move/c1a/record.json",
+      "companions": [
+        {
+          "path": "i18n/audits/evidence/hi/tui.session_move/c1a/record.json",
+          "sha256": "18ca1774c20101fce09b2aaa1a0f8f5367df838a3beab511304b57293fe084e5"
+        },
+        {
+          "path": "i18n/audits/evidence/hi/tui.session_move/c1a/report.md",
+          "sha256": "379112f662733023ea9c711471e6e3e5f597f069db438709b1e6cee5ed6d881b"
+        },
+        {
+          "path": "i18n/audits/evidence/hi/tui.session_move/c1a/audit.log",
+          "sha256": "a9b19e80550012f637a8f942c9efa85c70bd46f95dbb3b50868f11393794ddfe"
+        },
+        {
+          "path": "i18n/audits/evidence/hi/tui.session_move/c1a/target-candidate.json",
+          "sha256": "5076ea0da47639c58ce4b4f9311d3d4c4c76c796ab108c83f9256ab0fdc39229"
+        }
+      ]
+    },
+    {
+      "locale": "hi",
+      "namespace": "tui.session_move",
+      "source_sha256": "f4dd682b3b50d64a4009eac5ac78a34f5734b5dd0a5ef379951065da326a913e",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-11"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (lopdev team)",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-11-11",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0,
+        "session": "fb68c83d54be",
+        "actual_model_source": "harness-served model disclosed in the auditor session's own system prompt; no fallback claimed"
+      },
+      "status": "passed",
+      "note": "hi C1 tui.session_move (7 keys) round-2 delta audit passed: cli_no_answer एग्ज़िट fix and deadline_exceeded unknown-outcome verified; 0 findings. Judged d575bebe candidate (not in tree). Evidence: i18n/audits/evidence/hi/tui.session_move/c1a2/record.json",
+      "companions": [
+        {
+          "path": "i18n/audits/evidence/hi/tui.session_move/c1a2/record.json",
+          "sha256": "9bcacadda0c80d92eaf498d92752a4ec5b62c65d52c23545ea2b96b0b0fdc37b"
+        },
+        {
+          "path": "i18n/audits/evidence/hi/tui.session_move/c1a2/report.md",
+          "sha256": "42028b9a6fe5a9e47a719f583dae26502b9eaeb81075d9a711032c510c23b595"
+        },
+        {
+          "path": "i18n/audits/evidence/hi/tui.session_move/c1a2/audit.log",
+          "sha256": "515f6a69cbeae2416f6d26b8b0ffe4928519f07cf8d65bdc44cca1c397cac48d"
+        },
+        {
+          "path": "i18n/audits/evidence/hi/tui.session_move/c1a2/target-candidate.json",
+          "sha256": "d575bebe3038926f3b4eea6f17c945db3f4337f1d1e8de0d4b6a039edf6321c5"
+        }
+      ]
+    }
+  ]
+}

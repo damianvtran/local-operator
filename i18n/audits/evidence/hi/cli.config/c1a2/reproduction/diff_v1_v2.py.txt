@@ -1,0 +1,11 @@
+import json
+v1=json.load(open("v1.json"))
+v2=json.load(open("hi.v2.json"))
+changed=[k for k in v2 if v1.get(k)!=v2[k]]
+print("changed keys:", changed)
+print("unchanged:", len(v2)-len(changed), "of", len(v2))
+for k in changed:
+    print()
+    print("KEY", k)
+    print("  v1:", v1.get(k))
+    print("  v2:", v2[k])
