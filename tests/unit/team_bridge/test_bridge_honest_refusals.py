@@ -533,7 +533,13 @@ def test_a_non_ascii_digit_run_is_never_released(body: str) -> None:
 def test_a_scanner_fault_logs_its_qualified_type(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """Security N-3: ``re.error`` is logged as ``re.error``, not the bare word."""
+    """Security N-3: a scanner fault logs its module-qualified type, not the bare word.
+
+    The expectation is built FROM ``re.error`` (review R1-1 / QA Q-2): on 3.13+
+    ``re.error`` is an alias of ``re.PatternError``, so the logged name is
+    ``re.error`` on 3.12 and ``re.PatternError`` after; a literal pins one
+    interpreter and fails the full-suite 3.13 leg.
+    """
 
     from local_operator.team_bridge import secret_guard
 
@@ -544,7 +550,8 @@ def test_a_scanner_fault_logs_its_qualified_type(
     with caplog.at_level("WARNING"):
         refused = secret_guard.refuse_secret_in("dm", "an ordinary hello")
     assert refused is not None and refused["code"] == "secret_scan_unavailable"
-    assert "credential scan failed (re.error)" in caplog.text
+    qualified = f"{re.error.__module__}.{re.error.__qualname__}"
+    assert f"credential scan failed ({qualified})" in caplog.text
     assert "bad pattern" not in caplog.text
 
 
