@@ -122,19 +122,30 @@ jobs:
   # schedule is never gated: the nightly and every un-superseded main push
   # still run EVERY test, so skipped work here is only ever a redundant run.
   #
-  # The helper is downloaded from a TRUSTED tree (the PR's base commit, or the
-  # run's own SHA for non-PR events) rather than checked out from the PR merge
-  # ref, so a PR cannot rewrite its own gate while holding the token. If the
-  # base has no helper (first deploy) the download fails and the job goes RED:
-  # fail closed, never a vacuous pass.
+  # The helper is downloaded from a TRUSTED tree rather than checked out from
+  # the PR merge ref, so a PR cannot rewrite its own gate while holding the
+  # token. For a PR that tree is `needs.changes.outputs.gate_base`: the live
+  # main tip `changes` resolved and the heavy jobs will actually test against
+  # (NOT `pull_request.base.sha`, which is the stale base the PR was opened or
+  # last updated on and may predate the helper). `changes` runs no heavy tested
+  # code: it checks out, proves the merge base and classifies, and does not
+  # depend on this job (that would be a cycle). Other events use the run's own
+  # SHA. If the trusted tree has no helper the download fails and the job goes
+  # RED: fail closed, with no inline fallback and no future allowance.
+  #
+  # ROLLOUT (two steps, no workflow flag in between): (1) a tests-only PR adds
+  # scripts/fast_gate_check.py to main; (2) only then does a PR carrying this
+  # workflow pass its own gate, because its gate_base now contains the helper.
   #
   # Every heavy job below needs this job AND tests `outputs.ok == 'true'`: their
   # `!cancelled()` overrides the implicit success() of `needs`, so a failed
   # precondition would NOT stop them without the explicit output test.
   precondition:
+    needs: [changes]
     runs-on: ubuntu-latest
-    # Settle (300 s) plus API calls on a push; PR/dispatch paths finish in seconds.
-    timeout-minutes: 8
+    # Settle (300 s) plus bounded tag/API lookups (120 s tag budget) on a push;
+    # PR/dispatch paths finish in seconds.
+    timeout-minutes: 10
     permissions:
       contents: read
       actions: read
@@ -145,15 +156,34 @@ jobs:
       - name: Fetch the cost-gate helper from a trusted tree
         env:
           GH_TOKEN: ${{ github.token }}
-          TRUSTED_SHA: ${{ github.event.pull_request.base.sha || github.sha }}
+          TRUSTED_SHA: ${{ github.event_name == 'pull_request' && needs.changes.outputs.gate_base || github.sha }}
         run: |
           set -euo pipefail
+          if ! printf '%s' "$TRUSTED_SHA" | grep -Eq '^[0-9a-f]{40}$'; then
+            echo "::error title=Fast-CI precondition::no trusted 40-hex commit to fetch the helper from (gate_base unresolved); failing closed"
+            exit 1
+          fi
           curl -fsS --retry 3 --max-time 30 \
             -H "Authorization: Bearer $GH_TOKEN" \
             -H "Accept: application/vnd.github.raw" \
             -o "$RUNNER_TEMP/fast_gate_check.py" \
             "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/contents/scripts/fast_gate_check.py?ref=$TRUSTED_SHA" \
             || { echo "::error title=Fast-CI precondition::scripts/fast_gate_check.py is not at $TRUSTED_SHA; failing closed"; exit 1; }
+          # Provenance for the run log: the full trusted commit and the git
+          # blob id of the helper that decided (sha1 of "blob <n>\0<bytes>"),
+          # comparable with `git rev-parse <commit>:scripts/fast_gate_check.py`.
+          blob="$(python3 - "$RUNNER_TEMP/fast_gate_check.py" <<'PY'
+          import hashlib, sys
+          data = open(sys.argv[1], "rb").read()
+          print(hashlib.sha1(b"blob %d\0" % len(data) + data).hexdigest())
+          PY
+          )"
+          {
+            echo "### Fast-CI helper provenance"
+            echo
+            echo "trusted commit: \`$TRUSTED_SHA\`  helper blob: \`$blob\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "fast-gate helper trusted=$TRUSTED_SHA blob=$blob"
 
       - name: Decide whether the full suite may run
         id: gate

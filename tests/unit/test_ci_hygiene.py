@@ -3557,7 +3557,17 @@ def test_every_heavy_full_suite_job_is_gated_on_the_precondition() -> None:
     assert jobs["precondition"]["permissions"] == {"contents": "read", "actions": "read"}
     # The helper must come from a trusted tree, never from the PR checkout.
     assert "actions/checkout" not in str(jobs["precondition"])
-    assert "pull_request.base.sha" in str(jobs["precondition"])
+    # The trusted tree is the live main tip `changes` resolved, never the stale
+    # event base SHA (which can predate the helper). `changes` must not depend
+    # on `precondition` (a cycle) and must not be gated by it.
+    assert jobs["precondition"]["needs"] == ["changes"]
+    assert "precondition" not in jobs["changes"].get("needs", [])
+    assert "needs.changes.outputs.gate_base" in str(jobs["precondition"])
+    assert "pull_request.base.sha" not in str(jobs["precondition"])
+    # Every heavy job names both gates, and the aggregate sees both.
+    for job_id in ("test", "tui-e2e"):
+        assert "changes" in jobs[job_id]["needs"], job_id
+    assert {"changes", "precondition"} <= set(jobs["merge-gate"]["needs"])
 
 
 def test_nightly_schedule_has_its_own_concurrency_group() -> None:

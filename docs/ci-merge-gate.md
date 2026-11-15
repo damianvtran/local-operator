@@ -192,8 +192,31 @@ before any heavy job. Every heavy job needs it and tests `outputs.ok == 'true'`.
 | `schedule` | never gated or coalesced; own concurrency group `full-suite-nightly`. |
 
 There is no bypass input. The runner never waits for CI; use
-`make fast-gate PR=<n>` (one-shot, exits immediately) or `gh pr checks <n> --watch`
-before `make merge-gate PR=<n>`. Coverage is unchanged: every labeled PR head,
-the final main tip of each burst, every release/tagged commit and the nightly
-still run every test. The first deploy fails closed: until the base commit
-contains the helper, a PR-triggered gate is red by design.
+`make fast-gate PR=<n>` (one-shot client check of the same helper via `--local`;
+exits immediately) or `gh pr checks <n> --watch`, then `make merge-gate PR=<n>`
+to arm the full suite. `make merge-gate` does not itself call the helper.
+
+**Trusted helper.** For a PR the helper is fetched from `gate_base`, the live
+main tip `changes` resolved and the heavy jobs test against, not from the
+event's stale base SHA. The step summary logs the full trusted commit and the
+helper's git blob id. A trusted tree without the helper fails the job red.
+
+**Rollout is two steps; do not change flags in between.** (1) A tests-only PR
+lands `scripts/fast_gate_check.py` (+ its tests) on main with no workflow
+change. (2) Only then can the PR carrying the `full-suite.yml` change pass its
+own gate. Until step 1 is on main that PR's required check is red by design.
+
+**Coverage claims.** Every labeled PR head, the final main tip of each burst,
+every release/tagged commit and the nightly still run every test. A tag on a
+commit is found whatever its name or age: every tag ref is listed
+(`git/matching-refs/tags/`, `Link` followed on the same API origin only) and
+annotated tag objects are peeled to their commit; any cap, cycle, timeout or API
+error means UNKNOWN, which runs in full.
+
+**Limits.** The 300 s settle adds ~5 runner-minutes to a main run even when it
+turns out to be the final tip. The settle was chosen from 99 commit gaps among
+the last 100 main commits (61 < 5 min, 78 < 10 min, median 2 min): a sample, not
+fleet statistics, and no savings figure is claimed. A run cancelled by hand or
+lost to a startup failure can leave a main commit without a full verdict until
+the nightly run, which is the backstop; no extra daemon or cancel API exists.
+A red tip verdict is a legitimate result for superseded commits, not a gap.
