@@ -202,14 +202,16 @@ DISCLOSED_INFRA_METADATA_KEYS: Mapping[str, str] = MappingProxyType(
         # /var/lib/snapd/snaps, NOT the 4096-byte /var/lib/snapd/cache an
         # earlier revision named, and NOT the x11grab recorder the revision
         # before that named -- no ffmpeg process was ever found on a failing
-        # guest). The override is DISCLOSED but INERT as the adapter stands:
-        # the guest's filesystem measured 30,993,747,968 bytes in both a 40 GiB
-        # and a 120 GiB volume, because `DesktopEnv(...)` is constructed without
-        # `volume_size=`, so upstream's `expand_guest_volume` never runs. It is
-        # disclosed anyway, and deliberately: a run whose operator asked for
-        # different guest hardware must be identifiable from its bundle alone,
-        # and the disclosure is what makes a later adapter that DOES act on the
-        # size comparable to the runs before it.
+        # guest). The override is LIVE since PR #3867: the adapter grows the
+        # guest's root filesystem to the requested size, following upstream's
+        # precedence -- a task's own `volume_size` wins, and the override only
+        # sizes tasks that declare none. Upstream's documented run sets no
+        # override, so for those non-declaring tasks it grants disk upstream
+        # does not, and a run that sets it must disclose that as a deviation.
+        # (Before #3867 it was inert: the filesystem measured 30,993,747,968
+        # bytes in both a 40 GiB and a 120 GiB volume.) The disclosure is what
+        # makes a run whose operator asked for different guest hardware
+        # identifiable from its bundle alone.
         "AWS_ROOT_VOLUME_SIZE": "aws_root_volume_size_override",
         # Network policy changes comparability too: older adapters must refuse
         # this request rather than seal a disabled-policy claim while enabling it.
