@@ -3611,6 +3611,13 @@ class MeshCredentialClient:
             owner_name=self.owner_label(key),
             last_seen_s=self.owner_last_seen_s(error.owner_device or self.owner_of(key)),
         )
+        # A localized sentence can cross the relay/runtime hop twice. The
+        # existing optional reason carries presentation provenance only, never
+        # an authorization decision; its parser binds the marker to this code.
+        from local_operator.network.credentials.types import GITHUB_RENDERED_REASONS
+
+        if not error.reason and error.code in GITHUB_RENDERED_REASONS:
+            error.reason = GITHUB_RENDERED_REASONS[error.code]
         return error
 
     def _from_reply(

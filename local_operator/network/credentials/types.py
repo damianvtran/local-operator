@@ -621,7 +621,8 @@ CAUSES: frozenset[str] = frozenset(
 #: loop that asks a rate-limited owner on every provider call.
 DEFAULT_RETRY_AFTER_MS = 60_000
 
-#: ``BrokerError.reason`` values, a closed set (anything else reads as absent).
+#: Semantic ``BrokerError.reason`` values (anything else reads as absent,
+#: apart from the code-bound GitHub presentation provenance defined below).
 #:
 #: WHY A MARKER (review round 1 on #3108, m1): ``quota_blocked`` with no
 #: remainder used to have ONE producer, the owner's holder-exclusion arm, so a
@@ -634,6 +635,15 @@ QUOTA_REASON_POOL_DEPLETED = "pool_depleted"
 BROKER_ERROR_REASONS: frozenset[str] = frozenset(
     {QUOTA_REASON_HOLDER_EXCLUDED, QUOTA_REASON_POOL_DEPLETED}
 )
+
+
+# Presentation provenance on the existing optional reason field, bound to CODE.
+# Never accept these tags on quota/policy errors: that would change the legacy
+# holder-exclusion interpretation. They carry no credential or authority.
+GITHUB_RENDERED_REASONS: dict[str, str] = {
+    "github_repositories_unset": "github_repositories_unset_rendered",
+    "github_repositories_overflow": "github_repositories_overflow_rendered",
+}
 
 
 @dataclasses.dataclass
@@ -653,8 +663,9 @@ class BrokerError:
     owner_device: str = ""
     owner_device_name: str = ""
     retry_after_ms: int = 0
-    #: Which arm produced this refusal, from :data:`BROKER_ERROR_REASONS`; "" when
-    #: the producer did not say (every code but ``quota_blocked``, and older owners).
+    #: Producer semantic reason, or code-bound GitHub presentation provenance.
+    #: A renderer must preserve a populated semantic reason. Presentation tags
+    #: are accepted only for GitHub unset/overflow, never as quota/policy arms.
     reason: str = ""
     #: ``retry_after_ms`` is a FLOOR, not the owner's reset (#3108 review r2 m1): the
     #: owner stated a longer wait than ``MAX_PEER_RETRY_AFTER_MS``, which the boundary
@@ -714,7 +725,11 @@ class BrokerError:
             retry_after_is_floor=stated >= MAX_PEER_RETRY_AFTER_MS,
             reason=(
                 str(detail.get("reason"))
-                if str(detail.get("reason") or "") in BROKER_ERROR_REASONS
+                if (
+                    str(detail.get("reason") or "") in BROKER_ERROR_REASONS
+                    or str(detail.get("reason") or "")
+                    == GITHUB_RENDERED_REASONS.get(str(detail.get("code") or ""))
+                )
                 else ""
             ),
         )

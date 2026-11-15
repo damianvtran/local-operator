@@ -55,6 +55,10 @@ from typing import Any, Callable, Mapping, Sequence
 
 from local_operator.i18n.cli_help import help_text
 from local_operator.i18n.keys import cli_group_help as _gg
+from local_operator.i18n.keys import wire_github as _github_strings
+from local_operator.i18n.text import tr as _github_tr
+
+_github_text = _github_tr("wire.github")
 
 #: The default invite lifetime. A string flag parsed by :func:`_duration`, because
 #: ``--expires 10m`` is what a person types and ``600`` is what they would have to
@@ -3754,7 +3758,7 @@ def _github_designation_now(*, refresh: bool, progress: bool = False) -> tuple[A
         timer = threading.Timer(
             _LISTING_PROGRESS_AFTER_S,
             lambda: print(
-                "listing the repositories your GitHub login can push to…",
+                _github_text(_github_strings.progress()),
                 file=sys.stderr,
                 flush=True,
             ),
@@ -3786,75 +3790,79 @@ def _designation_payload(designated: Any) -> dict[str, Any]:
 
 
 def _github_ttl_words() -> str:
-    """How soon an opt-out reaches borrowers: the grant window, in minutes (N4).
-
-    A borrower keeps one GitHub grant at most ``grant_ttl_s``; the next one it
-    fetches carries the narrowed list, so that window is the honest upper bound.
-    """
+    """Format the existing grant-window bound, not a new timeout or authority."""
     from local_operator.network.credentials import grant_ttl_s
 
-    minutes = max(1, int((grant_ttl_s(_config_dir()) + 59) // 60))
-    return f"within {minutes} min"
+    return _github_text(
+        _github_strings.ttl(count=max(1, int((grant_ttl_s(_config_dir()) + 59) // 60)))
+    )
 
 
 def _designation_source(designated: Any) -> str:
-    """Where the list came from, in the user's words (U3): no keys, no all-caps."""
+    """Localized list provenance; account matching stays in github.designation."""
     from local_operator.network.credentials import github as github_mod
 
     ago = github_mod.listed_ago(designated.age_s() if designated.fetched_at else None)
     if designated.origin == github_mod.ORIGIN_EXPLICIT:
-        return "the list you chose by hand (the GitHub repositories setting)"
+        return _github_text(_github_strings.source_explicit())
     if designated.origin == github_mod.ORIGIN_LAST_GOOD:
-        why = f" ({designated.error})" if designated.error else ""
-        return (
-            f"the list fetched {ago} — GitHub repositories couldn't be listed "
-            f"just now{why}, so it may be out of date"
+        failure = (
+            f" ({github_mod.listing_failure_text(designated.error)})" if designated.error else ""
         )
-    return f"every repository this device's GitHub login can push to, listed {ago}"
+        return _github_text(_github_strings.source_last_good(ago=ago, failure=failure))
+    return _github_text(_github_strings.source_enumerated(ago=ago))
 
 
 def _opted_out_lines(designated: Any) -> list[str]:
-    """The opted-out NAMES and the way back (UX round 1, U1), or that there are none."""
+    """Name every opt-out, preserving the exact technical undo command."""
     names = list(designated.excluded)
     if not names:
-        return ["opted out: none"]
+        return [_github_text(_github_strings.opt_out_none())]
     return [
-        f"opted out ({len(names)}): {', '.join(names)} — bring one back: "
-        "lop network credential github include <owner/repo>"
+        _github_text(
+            _github_strings.opt_out_names(
+                count=len(names),
+                names=", ".join(names),
+                command="lop network credential github include <owner/repo>",
+            )
+        )
     ]
 
 
 def _designation_lines(designated: Any, source: str, *, receipt: bool) -> list[str]:
-    """The human lines: the repositories, where they came from, what is opted out.
-
-    ``receipt`` sizes the list for the share's confirmation (a short head and a
-    pointer); ``credential github repos`` prints every name (U2).
-    """
+    """Localized owner output; receipts stay short and repos still lists all."""
     from local_operator.network.credentials import github as github_mod
 
     names = list(designated.repositories)
-    whose = "this device's"
     if not names:
-        reason = designated.reason(whose)
-        if receipt:
-            # The share WAS recorded; only its borrows are refused (U4.3).
-            head = (
-                "GitHub repositories: none yet — the share is in place, but every borrow "
-                f"is refused while {reason}; {designated.remedy()}"
-            )
-        else:
-            head = f"GitHub repositories: none — {reason}; {designated.remedy()}"
-        return [head, *_opted_out_lines(designated)]
-    opted = f", minus {designated.excluded_count} opted out" if designated.excluded_count else ""
+        key = _github_strings.share_empty if receipt else _github_strings.repos_empty
+        return [
+            _github_text(
+                key(reason=designated.reason("this device's"), remedy=designated.remedy())
+            ),
+            *_opted_out_lines(designated),
+        ]
+    opted = (
+        _github_text(_github_strings.opted_suffix(count=designated.excluded_count))
+        if designated.excluded_count
+        else ""
+    )
     lines = [
-        f"GitHub repositories lent for: {len(names)} — {_designation_source(designated)}{opted}"
+        _github_text(
+            _github_strings.repos_head(
+                count=len(names), source=_designation_source(designated), opted=opted
+            )
+        )
     ]
     shown = names[:_RECEIPT_SHOWN] if receipt else names
     lines.extend(f"  {name}" for name in shown)
     if len(names) > len(shown):
         lines.append(
-            f"  … and {len(names) - len(shown)} more — see them all: "
-            "lop network credential github repos"
+            _github_text(
+                _github_strings.more(
+                    count=len(names) - len(shown), command="lop network credential github repos"
+                )
+            )
         )
     carry = (
         github_mod.APP_MINT_MAX_REPOSITORIES
@@ -3862,16 +3870,15 @@ def _designation_lines(designated: Any, source: str, *, receipt: bool) -> list[s
         else github_mod.MAX_DESIGNATED_REPOSITORIES
     )
     if len(names) > carry:
-        lines.append(
-            f"this is more than the {carry} one share can carry, so every borrow is refused "
-            "until you pick the ones to lend with the GitHub repositories setting (search it "
-            "in /settings) or opt some out"
-        )
+        lines.append(_github_text(_github_strings.capacity(count=carry)))
     lines.extend(_opted_out_lines(designated))
     lines.append(
-        "opt a repository out: lop network credential github exclude <owner/repo> — devices "
-        f"you share with lose push to it the next time they fetch the credential, "
-        f"{_github_ttl_words()}"
+        _github_text(
+            _github_strings.opt_out_step(
+                command="lop network credential github exclude <owner/repo>",
+                ttl=_github_ttl_words(),
+            )
+        )
     )
     return lines
 
@@ -3897,7 +3904,7 @@ def _cmd_credential_github(args: argparse.Namespace) -> int:
     root = _config_dir()
     if action == "repos":
         if args.repository:
-            raise MeshRefusal("bad_request", "'repos' takes no repository")
+            raise MeshRefusal("bad_request", _github_text(_github_strings.usage_repos_args()))
         use_default = bool(getattr(args, "use_default", False))
         if use_default:
             try:
@@ -3905,33 +3912,38 @@ def _cmd_credential_github(args: argparse.Namespace) -> int:
             except OSError as exc:
                 raise MeshRefusal(
                     "github_default_reset_failed",
-                    "could not complete the return to the automatic GitHub repository list "
-                    f"({exc.__class__.__name__}); check this device's data folder is writable, "
-                    "then retry lop network credential github repos --use-default",
+                    _github_text(
+                        _github_strings.reset_failed(
+                            error=exc.__class__.__name__,
+                            command="lop network credential github repos --use-default",
+                        )
+                    ),
                 ) from exc
-        designated, source = _github_designation_now(refresh=bool(args.refresh) or use_default)
+        designated, source = _github_designation_now(
+            refresh=bool(args.refresh) or use_default, progress=not bool(args.json)
+        )
         payload = {"action": "repos", **_designation_payload(designated)}
         return _emit(args, payload, _designation_lines(designated, source, receipt=False))
     if getattr(args, "use_default", False):
-        raise MeshRefusal("bad_request", "--use-default applies to 'repos' only")
+        raise MeshRefusal("bad_request", _github_text(_github_strings.usage_default()))
     if args.refresh:
-        raise MeshRefusal("bad_request", "--refresh applies to 'repos' only")
+        raise MeshRefusal("bad_request", _github_text(_github_strings.usage_refresh()))
     entry = github_mod.normalise_repository(args.repository)
     if not entry:
-        raise MeshRefusal(
-            "bad_request", f"{action} needs one repository as owner/repo, e.g. octo-org/website"
-        )
+        raise MeshRefusal("bad_request", _github_text(_github_strings.usage_repo(action=action)))
     designated, _source = _github_designation_now(refresh=False)
     known = bool(designated.listed) or designated.origin != github_mod.ORIGIN_UNAVAILABLE
     in_list: bool | None = (
         entry.lower() in {name.lower() for name in designated.listed} if known else None
     )
     which = (
-        "the list you chose by hand"
+        _github_text(_github_strings.which_explicit())
         if designated.origin == github_mod.ORIGIN_EXPLICIT
-        else "the list this device's GitHub login can push to"
+        else _github_text(_github_strings.which_enumerated())
     )
-    unchecked = f" ({designated.error})" if designated.error else ""
+    unchecked = (
+        f" ({github_mod.listing_failure_text(designated.error)})" if designated.error else ""
+    )
     current = list(github_mod.excluded_repositories(root))
     lowered = [name.lower() for name in current]
     if action == "exclude":
@@ -3944,39 +3956,25 @@ def _cmd_credential_github(args: argparse.Namespace) -> int:
         github_mod.write_excluded(root, updated)
     ttl = _github_ttl_words()
     if action == "exclude" and not changed:
-        line = f"{entry} was already opted out"
+        line = _github_text(_github_strings.exclude_already(repo=entry))
     elif action == "exclude" and in_list is False:
-        line = (
-            f"{entry} isn't in {which} — check the spelling; it's opted out anyway, in case "
-            "it's added later"
-        )
+        line = _github_text(_github_strings.exclude_typo(repo=entry, which=which))
     elif action == "exclude" and in_list is None:
-        line = (
-            f"{entry} is opted out; its spelling couldn't be checked because {which} "
-            f"couldn't be fetched{unchecked}"
+        line = _github_text(
+            _github_strings.exclude_unchecked(repo=entry, which=which, failure=unchecked)
         )
     elif action == "exclude":
-        line = (
-            f"{entry} is opted out — devices you share with lose push to it the next time "
-            f"they fetch the credential, {ttl}"
-        )
+        line = _github_text(_github_strings.exclude_added(repo=entry, ttl=ttl))
     elif not changed:
-        line = f"{entry} was not opted out"
+        line = _github_text(_github_strings.include_unchanged(repo=entry))
     elif in_list is False:
-        line = (
-            f"{entry} is no longer opted out, but it isn't in {which}, so it still isn't "
-            "lent — check the spelling"
-        )
+        line = _github_text(_github_strings.include_typo(repo=entry, which=which))
     elif in_list is None:
-        line = (
-            f"{entry} is no longer opted out; whether it's in {which} couldn't be checked"
-            f"{unchecked}"
+        line = _github_text(
+            _github_strings.include_unchecked(repo=entry, which=which, failure=unchecked)
         )
     else:
-        line = (
-            f"{entry} is back in — devices you share with can push to it again the next time "
-            f"they fetch the credential, {ttl}"
-        )
+        line = _github_text(_github_strings.include_added(repo=entry, ttl=ttl))
     payload = {
         "action": action,
         "repository": entry,

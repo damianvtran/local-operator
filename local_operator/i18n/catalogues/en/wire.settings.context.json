@@ -335,5 +335,10 @@
     "role": "settings row label",
     "tone": "plain",
     "note": "A 'temporary chat' is a conversation that is not kept: it is left out of history and deleted automatically once idle for this long. Followed by a duration choice."
+  },
+  "wire.settings.network_credentials_github_repositories.help": {
+    "role": "settings help for the GitHub repository list",
+    "tone": "plain, precise about authorization",
+    "note": "Two distinct states: NEVER configured uses the enumerated pushable repositories minus opt-outs; clearing a previously shared hand-picked list preserves the owner withdrawal marker and stops lending. Only the existing explicit --use-default command returns to automatic selection. Never imply clearing always widens access. owner/repo and the full lop command are technical literals and must not be translated. No new setting or authority is introduced."
   }
 }
