@@ -475,6 +475,50 @@ def _load_rows(
     return rows
 
 
+def _prove(
+    session_dir: Path, session_id: str, call_id: str, config_root: Path | None
+) -> tuple[str, list[str] | None]:
+    """The membership proof and the artifact read, ONCE: ``(state, rows)``.
+
+    Shared by :func:`load_page` (every page of the desktop routes) and
+    :func:`load_all_rows` (the terminal reader), so there is one proof and one
+    reader of the store. Raises :class:`DiffArchiveNotFound` for anything that
+    is not a persisted ``write``/``edit`` row of THIS session; ``rows`` is
+    ``None`` for every state that is not a readable archive.
+    """
+    try:
+        found = find_tool_details(session_dir, call_id, session_id)
+    except AmbiguousToolCall:
+        found = None
+        ambiguous = True
+    else:
+        ambiguous = False
+    if ambiguous:
+        return STATE_UNAVAILABLE, None
+    if found is None:
+        raise DiffArchiveNotFound(call_id)
+    tool_name, details = found
+    if tool_name not in _DIFF_TOOLS:
+        raise DiffArchiveNotFound(call_id)
+    desc = details.get(DIFF_FULL_KEY)
+    if not isinstance(desc, dict):
+        state = STATE_NOT_RECORDED if details.get("diff_truncated_rows") else STATE_INLINE
+    else:
+        state = desc.get("state")
+        if state not in _STORED_STATES:
+            state = STATE_UNAVAILABLE
+    # ``STATE_ARCHIVED`` is reachable only from the ``isinstance(desc, dict)``
+    # branch above, so the cast restates that proof for the checker; no new check.
+    rows = (
+        _load_rows(cast("dict[str, Any]", desc), session_id, call_id, config_root)
+        if state == STATE_ARCHIVED
+        else None
+    )
+    if state == STATE_ARCHIVED and rows is None:
+        state = STATE_EVICTED
+    return state, rows
+
+
 def load_page(
     session_dir: Path,
     session_id: str,
@@ -508,38 +552,7 @@ def load_page(
     """
     if start < 0 or offset < 0 or not 1 <= limit <= PAGE_MAX_ROWS:
         raise DiffPageRangeError("start/limit/offset out of range")
-    try:
-        found = find_tool_details(session_dir, call_id, session_id)
-    except AmbiguousToolCall:
-        found = None
-        ambiguous = True
-    else:
-        ambiguous = False
-    if ambiguous:
-        if start or offset:
-            raise DiffPageRangeError("start beyond the last row")
-        return _empty(STATE_UNAVAILABLE)
-    if found is None:
-        raise DiffArchiveNotFound(call_id)
-    tool_name, details = found
-    if tool_name not in _DIFF_TOOLS:
-        raise DiffArchiveNotFound(call_id)
-    desc = details.get(DIFF_FULL_KEY)
-    if not isinstance(desc, dict):
-        state = STATE_NOT_RECORDED if details.get("diff_truncated_rows") else STATE_INLINE
-    else:
-        state = desc.get("state")
-        if state not in _STORED_STATES:
-            state = STATE_UNAVAILABLE
-    # ``STATE_ARCHIVED`` is reachable only from the ``isinstance(desc, dict)``
-    # branch above, so the cast restates that proof for the checker; no new check.
-    rows = (
-        _load_rows(cast("dict[str, Any]", desc), session_id, call_id, config_root)
-        if state == STATE_ARCHIVED
-        else None
-    )
-    if state == STATE_ARCHIVED and rows is None:
-        state = STATE_EVICTED
+    state, rows = _prove(session_dir, session_id, call_id, config_root)
     if rows is None:
         if start or offset:
             raise DiffPageRangeError("start beyond the last row")
@@ -597,3 +610,33 @@ def load_page(
         "next_offset": next_offset if next_start is not None else None,
         "clipped_rows": [],
     }
+
+
+def load_all_rows(
+    session_dir: Path,
+    session_id: str,
+    call_id: str,
+    *,
+    config_root: Path | None = None,
+) -> list[str] | None:
+    """Every archived row of ``call_id``, or ``None`` when not archived.
+
+    The terminal reader's door (``tui/widgets/tool_card``). It runs
+    :func:`load_page`'s own proof (:func:`_prove`) ONCE -- the call is a
+    persisted write/edit row of THIS session's transcript and the artifact
+    names this session and call -- and returns the artifact's whole rows. The
+    page cursor is a wire budget for the desktop routes, not part of the
+    proof; walking it here redid the journal walk and the artifact decode
+    once per 200 rows (review round 1). Bounded by :data:`ARCHIVE_MAX_ROWS`:
+    an artifact claiming more rows than the writer can produce is refused, so
+    the terminal never paints an unbounded body. Any refusal -- unknown call,
+    another session's digest, eviction, an ambiguous id, a non-archived state
+    -- is ``None``: the caller keeps the redacted inline preview it already has.
+    """
+    try:
+        state, rows = _prove(session_dir, session_id, call_id, config_root)
+    except DiffArchiveNotFound:
+        return None
+    if state != STATE_ARCHIVED or rows is None or len(rows) > ARCHIVE_MAX_ROWS:
+        return None
+    return rows
