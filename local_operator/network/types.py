@@ -2005,6 +2005,14 @@ class PeerRecord:
     version: str = ""
     source_ref: str = ""
     install_root: str = ""
+    #: The file THIS relay's stdout/stderr actually append to, read from its own
+    #: fd 1 at start (``relay._own_output_path``). The supervisor opens that file,
+    #: not the relay, and from a path the reader's environment cannot recompute: a
+    #: CLI with its own ``LOCAL_OPERATOR_CONFIG_DIR`` derived ``<its config>/logs``
+    #: and printed a log that nothing writes. ``""`` when stdout is not a file (a
+    #: terminal, a journal socket) or from an older relay; a reader then falls
+    #: back. A location, not a secret, so it may ride a record dumped by status.
+    log_path: str = ""
     started_at: float = field(default_factory=time.time)
     heartbeat_at: float = field(default_factory=time.time)
 
