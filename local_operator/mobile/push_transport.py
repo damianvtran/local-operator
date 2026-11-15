@@ -223,9 +223,14 @@ class RadientPushTransport:
         the existing SESSION-PUSH computer identity, not a registry-derived ID
         or a new credential; learning it grants no authority.
         """
-        if self._disarmed or self._tunnel_key() != (self.tunnel_id, self.credential_id):
-            return None
-        return self.computer
+        key = self._tunnel_key()
+        # Config I/O must stay outside the lock, as in re-arm. The check below
+        # is the linearization point: a forward may disarm while that read is
+        # blocked, and re-arm may change the credential binding under this lock.
+        with self._disarm_lock:
+            if self._disarmed or key != (self.tunnel_id, self.credential_id):
+                return None
+            return self.computer
 
     @property
     def disarmed(self) -> bool:

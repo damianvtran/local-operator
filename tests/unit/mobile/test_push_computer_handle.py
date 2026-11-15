@@ -7,7 +7,9 @@ claim to exercise a hosted gateway or an APNs delivery.
 
 from __future__ import annotations
 
+import asyncio
 import json
+import threading
 from typing import Any
 
 import pytest
@@ -18,6 +20,7 @@ from local_operator.mobile.daemon import MobileDaemon, build_app
 from local_operator.mobile.push_transport import PushLane, RadientPushTransport
 from local_operator.mobile.push_worker import _PendingEmit
 from local_operator.paths import config_dir
+from local_operator.tunnels.errors import RecordNotFound
 
 HANDLE = "synthetic-account-a-tunnel"
 BODY = {
@@ -102,6 +105,43 @@ def test_disarmed_lane_does_not_expose_a_handle(bound_lane) -> None:
         response = client.post("/api/push/register", json=BODY)
         assert response.status_code == 200
         assert "computer_handle" not in response.json()
+
+
+def test_refusal_during_binding_read_does_not_expose_a_handle(monkeypatch) -> None:
+    reading_binding = threading.Event()
+    disarmed = threading.Event()
+
+    def read_binding() -> tuple[str, int]:
+        reading_binding.set()
+        assert disarmed.wait(5), "register forward did not disarm during config read"
+        return HANDLE, 17
+
+    transport = RadientPushTransport(
+        tunnel_id=HANDLE, credential_id=17, tunnel_key=read_binding
+    )
+    original_disarm = transport._disarm
+
+    def note_disarm(failure: Exception) -> None:
+        original_disarm(failure)
+        disarmed.set()
+
+    async def refuse_registration(**kwargs) -> None:
+        # The real route schedules the forward before reading the binding on
+        # a worker thread. Events pin the refusal inside that read, without
+        # sleeps or replacing the forward/scheduler that must actually disarm.
+        assert await asyncio.to_thread(reading_binding.wait, 5), "binding read never started"
+        raise RecordNotFound("synthetic registration refusal")
+
+    monkeypatch.setattr(transport, "_call", refuse_registration)
+    monkeypatch.setattr(transport, "_disarm", note_disarm)
+    lane = PushLane(transport, config_dir(), unread_count=lambda: 0)
+    with _client(lane) as client:
+        _login(client)
+        response = client.post("/api/push/register", json=BODY)
+        assert response.status_code == 200, response.text
+        assert disarmed.is_set()
+        assert transport._disarmed
+        assert set(response.json()) == {"ok", "device_id", "device_key", "registered_at"}
 
 
 def test_unauthenticated_invalid_and_revoked_device_refusals_have_no_handle(bound_lane) -> None:
