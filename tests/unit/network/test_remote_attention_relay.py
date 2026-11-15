@@ -719,7 +719,9 @@ def test_a_head_relay_of_a_forwarded_node_site_card_resurfaces_it_and_the_node_a
         node_queue = AskQueue(None, config_dir=server_a.root, session_id=SID)
         answered = node_queue.respond(ask_id, {"site-access": ["deny"]}, by="operator")
         assert answered.get("ok"), answered
-        assert node_queue.find(ask_id)["status"] == ask_store.STATUS_ANSWERED
+        found = node_queue.find(ask_id)
+        assert found is not None
+        assert found["status"] == ask_store.STATUS_ANSWERED
         row = _catalog_row(link)
     finally:
         link.close("test")
