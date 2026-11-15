@@ -152,6 +152,61 @@ channel to a new runtime child). The composition that works is the documented
 one: `open_session(..., mode="own")` → `dispose` → `spawn_session` the same
 id, or drive the session in-process.
 
+## Typed completion evidence
+
+An owning `Session` can independently check a completion claim with
+`await session.verify_completion(...)`. This is an explicit embedder action,
+not a tool the worker can invoke or a second provider loop. Its normal
+read-only child, request/inspection budgets and wall deadline still apply.
+
+```python
+from local_operator.sdk import VerifierEvidence, VerifierEvidenceItem
+from local_operator.harness.types import ImageContent, TextContent
+
+proof = VerifierEvidence(
+    items=(
+        VerifierEvidenceItem("current-screen", ImageContent(
+            data=screenshot_base64, mime_type="image/png",
+        )),
+        VerifierEvidenceItem("observed-text", TextContent(text=observed_text)),
+    ),
+    required_modalities=frozenset({"image"}),
+)
+verdict = await session.verify_completion(
+    request=original_request,
+    claim=worker_completion_claim,
+    typed_evidence=proof,
+    host_tools=read_only_target_tools,
+)
+```
+
+The envelope carries actual image blocks through `Session.prompt(images=...)`,
+not base64 in prompt text or tool details. IDs identify supplied content, never
+paths or URLs the checking model may open. Successful counted host inspections
+receive additional `inspection-N` evidence IDs; receipts are fresh for each
+verification, even when the caller reuses the envelope. The evaluation adapter's
+`inspect_command` also accepts **only** `artifact_id` (mutually exclusive with
+`command`/`timeout_s`) to return an already-registered frame as image content.
+It gains no screenshot/rendering/browser or arbitrary-file capability.
+
+With typed evidence, the child must return one strict JSON assessment containing
+`requirements`, each with `requirement`, `status` (`MET`, `UNMET`, `UNVERIFIED`),
+`modality` (`text`, `image`), `evidence_ids`, and `findings`. The outward
+`VerifierVerdict` remains unchanged: `UNMET` aggregates to `FAIL`; unverified,
+malformed or unavailable/mismatched evidence aggregates to `INCONCLUSIVE`;
+`PASS` requires valid `MET` rows citing evidence of their declared modality and
+covering every required modality. This validates the requirements the model
+identified, **not** a deterministic guarantee it enumerated every requirement.
+`UNMET:` findings continue through the existing worker repair challenge.
+
+Required images use the ordinary resize/request-fitting path, but cannot be
+silently replaced by text: missing/corrupt media, a fitting pass that sheds a
+required frame, provider rejection, or a serving model without explicitly
+stated vision support yields an inconclusive check. Capability is rechecked
+at actual failover dispatch. There is no extra model call or increased cap.
+Callers omitting `typed_evidence` keep the existing verdict-line contract;
+ordinary sessions do not run the typed decoder or required-image validation.
+
 ## Approval policies
 
 | Preset | Gate behaviour | Exec analogue |
