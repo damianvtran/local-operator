@@ -115,9 +115,24 @@ async def _check_one(
         # Never run a call the gate refuses now; the session will count it.
         return ENGAGE, f"no longer read-only: {reason}"
     from local_operator.session.session import _monitor_comparable_text
+    from local_operator.variables import VariableStore
 
     arguments = monitor_call_arguments(tool, spec.arguments)
-    context = ToolContext(cwd=spec.cwd or ".", monitor_check=True, session_id=session_id)
+    # A REDACTION LEDGER, because the lent github login rides on one. Bash hands
+    # a child the mesh-borrowed ``GH_TOKEN`` only when its context can scrub it
+    # (``github.lent_github_env``: no scrubber, no bearer), and this context used
+    # to carry no ``variables`` store at all — so every parked ``gh`` tick ran
+    # unauthenticated, failed with "set the GH_TOKEN environment variable", and
+    # engaged the session it was meant to leave parked. A fresh, empty store is
+    # the session's equivalent here: a parked session holds no session
+    # credentials (they are per-process memory), and this store's ``redact``
+    # masks the lent token in the tick's output before it is hashed.
+    context = ToolContext(
+        cwd=spec.cwd or ".",
+        monitor_check=True,
+        session_id=session_id,
+        variables=VariableStore(cwd=spec.cwd or None),
+    )
     signal = AbortSignal()
     try:
         result = await asyncio.wait_for(

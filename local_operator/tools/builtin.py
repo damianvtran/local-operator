@@ -4291,29 +4291,26 @@ async def _github_git_injections(context: ToolContext | None) -> dict[str, str]:
     Fetch-on-use, off the event loop (the borrow dials this device's relay and
     can sit through one bounded owner round trip), and never raising: a failed
     borrow makes the child behave exactly as it did before brokering existed.
-    The token is registered in the session's redaction ledger BEFORE the env is
-    returned — an injected bearer the session cannot scrub is a plaintext
-    result waiting to happen (design §D5; the T8e ``printenv`` invariant).
+    The borrow, the "no ledger, no injection" rule and the register-before-
+    return ordering all live in ``github.lent_github_env`` — the one door the
+    monitor ticks and the code-request resolver take too — so this only hands
+    it the session's ledger. Every bash child goes through here, including a
+    monitor's tick, in session or in the parked-session probe: a context that
+    must reach the lent login has to carry a ``variables`` store.
     """
     if context is None:
         return {}
     store = getattr(context, "variables", None)
-    register = getattr(store, "register_redaction", None)
-    if not callable(register):
-        # No ledger, no injection: the masking control is what makes the env
-        # deliverable, so a host without it gets the pre-brokering behaviour.
-        return {}
     try:
         from local_operator.network.credentials import github
 
-        env, token = await asyncio.to_thread(
-            github.borrowed_git_env, session_id=context.session_id or ""
+        env, _token = await asyncio.to_thread(
+            github.lent_github_env,
+            session_id=context.session_id or "",
+            register=getattr(store, "register_redaction", None),
         )
     except Exception:  # noqa: BLE001 — a broker fault must not fail a command
         return {}
-    if not env or not token:
-        return {}
-    register(token)
     return env
 
 
