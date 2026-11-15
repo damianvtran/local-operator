@@ -236,7 +236,8 @@ def run_lifecycle(ops, admission, pins, require_runtime_scope=True):
             for action in ([ops.stop_owned_resolver] if started else []):
                 try: action()
                 except BaseException as error: cleanup_errors.append(type(error).__name__+': '+str(error))
-            if owner is not None:
+            cleanup_authority=owner is not None or (hasattr(ops,'has_cleanup_authority') and ops.has_cleanup_authority())
+            if cleanup_authority:
                 try: ops.cleanup_owned_image()
                 except BaseException as error: cleanup_errors.append(type(error).__name__+': '+str(error))
                 try: ops.quit_owned(owner)
@@ -261,6 +262,7 @@ class NativeOps:
         self.pull_attempted=False;self.pull_complete=False;self.owned_image_id=None;self.foreign_asset_activity=False
         self.broker=None;self.owned_processes={};self.ownership_edges=[];self.verified_process_paths=set();self.startup_deadline=0
         self.startup_active=False;self.startup_guard_running=False
+        self.daemon_observed_available=False;self.engine_history_unknown=False;self.cleanup_engine_evidence={};self.ownership_journal_errors=[]
     def now(self): return time.monotonic()
     def sleep(self,seconds): time.sleep(seconds)
     def command(self,args,timeout=15,check=True):
@@ -358,6 +360,18 @@ class NativeOps:
         row=dict(event,recorded_at_utc=datetime.datetime.now(datetime.UTC).isoformat())
         with (self.directory/'startup-events.jsonl').open('a') as out:
             out.write(json.dumps(row,sort_keys=True)+'\n');out.flush();os.fsync(out.fileno())
+    def has_cleanup_authority(self):
+        # This is retained causal proof, not a substitute timestamp/singleton.
+        if self.broker is None or self.broker.ticket is None:return False
+        ticket=self.broker.ticket;known=self.owned_processes.get(ticket['pid'])
+        return bool(known and known['exe']==ticket['executable'] and known['pid'] not in {p['pid'] for p in self.before})
+    def ownership_event(self,event):
+        try:self.startup_event(event)
+        except BaseException as error:
+            self.ownership_journal_errors.append({'event':event,'error':type(error).__name__+': '+str(error)})
+            # Work must stop on failed durability, but teardown must continue
+            # from already validated in-memory authority. Never call it clean.
+            if self.cleanup_until is None:raise
     def verify_owned_path(self,path):
         p=Path(path);require(p.is_file() and p.resolve(strict=True)==p and path.startswith(self.app_root),'untrusted/escaping owned process path')
         if path not in self.verified_process_paths:
@@ -372,8 +386,8 @@ class NativeOps:
             require(root['pid'] not in old and root['exe']==ticket['executable'],'old/foreign launch-ticket process')
             if root['pid'] not in self.owned_processes:
                 self.verify_owned_path(root['exe']);self.owned_processes[root['pid']]=root
-                self.startup_event({'event':'causal-root-observed','process':root,'ticket':ticket})
-                if self.owner is None:self.owner=root
+                if self.owner is None:self.owner=root  # Before ANY fallible journal I/O.
+                self.ownership_event({'event':'causal-root-observed','process':root,'ticket':ticket})
         for pid,known in self.owned_processes.items():
             current=by_pid.get(pid)
             require(current is None or (current['start'],current['exe'])==(known['start'],known['exe']),'known owned PID reused; no adoption')
@@ -386,7 +400,7 @@ class NativeOps:
                 if parent is not None and parent['pid'] in self.owned_processes:
                     self.verify_owned_path(row['exe']);self.owned_processes[row['pid']]=row;changed=True
                     self.ownership_edges.append({'parent':parent,'child':row})
-                    self.startup_event({'event':'observed-owned-edge','parent':parent,'child':row})
+                    self.ownership_event({'event':'observed-owned-edge','parent':parent,'child':row})
         clients={p.pid for p in self.clients if p.poll() is None}
         unknown=[p for p in self.desktop_records(rows) if p['pid'] not in self.owned_processes and p['pid'] not in clients]
         require(not unknown,'foreign/unobserved Docker process; uniqueness/time is NOT ownership')
@@ -446,11 +460,13 @@ class NativeOps:
             code,out,err=self.command(self.d+['info','--format','{{json .}}'],timeout=min(10,remaining),check=False)
             self.startup_event({'event':'first-api-readiness-info','exit':code,'stderr':err[:300]})
             if code==0:
+                self.daemon_observed_available=True  # Over-cap is not permission to stop foreign work.
                 info=json.loads(out);verify_caps(info)  # Abort over-cap BEFORE other APIs/work.
                 self.startup_guard()
                 with (self.directory/'readiness.json').open('x') as output:output.write(json.dumps({'MemTotal':info.get('MemTotal'),'NCPU':info.get('NCPU'),'phase':'post-start-readiness-probe'},sort_keys=True))
                 self.startup_active=False
                 return info
+            if 'Cannot connect to the Docker daemon at unix:///var/run/docker.sock.' not in err:self.engine_history_unknown=True
             require('Cannot connect to the Docker daemon at unix:///var/run/docker.sock.' in err,'non-transient info failure; no readiness retry')
             self.startup_guard();self.broker.pump(min(0.5,max(0,self.startup_deadline-self.now())))
     def cleanup_pending_launch(self):
@@ -463,16 +479,27 @@ class NativeOps:
     def quit_broker_owned(self,owner):
         require(not self.foreign_asset_activity,'foreign asset activity; no Desktop quit')
         rows,live=self.observe_owned()
-        # With no admitted work, daemon availability cannot gate retirement of
-        # proven owned processes. Once work was admitted, preserve existing fence.
-        if self.pull_attempted or self.resolver is not None:
-            code,out,_=self.command(self.d+['ps','-q'],check=False)
-            require(code==0 and not out.strip(),'foreign workloads/unknown daemon; no automatic quit')
+        # Every RESPONDING engine must pass the foreign-work fence, including
+        # startup/over-cap aborts: it may have auto-restarted someone else's work.
+        # Only a positively recognized never-ready engine has a no-work exception.
+        code,out,err=self.command(self.d+['info','--format','{{json .}}'],check=False)
+        self.cleanup_engine_evidence={'info_exit':code,'info_stderr':err[:300],'state':'unknown'}
+        if code==0:
+            info=json.loads(out)
+            require(isinstance(info,dict) and isinstance(info.get('MemTotal'),int) and info['MemTotal']>0 and isinstance(info.get('NCPU'),int) and info['NCPU']>0,'unknown/malformed cleanup engine response')
+            self.daemon_observed_available=True;self.cleanup_engine_evidence['state']='available'
+            ps_code,ps_out,ps_err=self.command(self.d+['ps','-q'],check=False)
+            self.cleanup_engine_evidence.update(ps_exit=ps_code,foreign_container_ids=ps_out.split(),ps_stderr=ps_err[:300])
+            require(ps_code==0 and not ps_out.strip(),'foreign workloads/failed foreign-work probe; no automatic quit')
+        else:
+            unavailable='Cannot connect to the Docker daemon at unix:///var/run/docker.sock.' in err
+            require(unavailable and not self.daemon_observed_available and not self.engine_history_unknown and not self.pull_attempted and self.resolver is None,'unknown/previously available engine or admitted work; no daemon-unavailable quit')
+            self.cleanup_engine_evidence['state']='recognized-never-ready-unavailable'
         graceful_error=None
         try:self.broker.terminate()
         except BaseException as error:
             graceful_error=type(error).__name__+': '+str(error)
-            self.startup_event({'event':'causal-terminate-refused','error':graceful_error})
+            self.ownership_journal_errors.append({'event':'causal-terminate-refused','error':graceful_error})
         for known in reversed(live):
             current=next((p for p in self.snapshot() if p['pid']==known['pid']),None)
             if current is not None:
@@ -776,6 +803,8 @@ class NativeOps:
         except BaseException as error:final_swap_error=type(error).__name__+': '+str(error);value['status']='swap-final-unverified-or-over-limit'
         value.update(asset_ownership=self.asset_receipt,final_swap_error=final_swap_error,desktop_layout=getattr(self,'desktop_layout',None),
                      causal_launch={'dispatched':self.broker.dispatched,'ticket':self.broker.ticket,'error':self.broker.error,'done':self.broker.done,'observed_edges':self.ownership_edges} if self.broker else None)
+        value.update(cleanup_engine_evidence=self.cleanup_engine_evidence,ownership_journal_errors=self.ownership_journal_errors)
+        if self.ownership_journal_errors:value['status']='cleanup-unverified'
         fs=os.statvfs(self.root)
         if self.startup_uncertain:value['status']='cleanup-unverified-startup-identity'
         value.update(operator_ack_quote=ACK_QUOTE,source_head=self.a['full_scope_review']['source_commit'],samples=self.samples,after={'allocated_bytes':self.raw.stat().st_blocks*512 if self.raw.exists() else 0,'free_bytes':fs.f_bavail*fs.f_frsize})
@@ -784,6 +813,7 @@ class NativeOps:
         with (self.directory/'receipt.json').open('x') as out:out.write(json.dumps(value,sort_keys=True,indent=2)+'\n')
         require(not breached,'final disk fence crossed; retained failed receipt')
         require(final_swap_error is None,'final swap gate failed; retained failed receipt')
+        require(not self.ownership_journal_errors,'ownership journal/termination error; teardown attempted, receipt remains unverified')
 
 
 def main():

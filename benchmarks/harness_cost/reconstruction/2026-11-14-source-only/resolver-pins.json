@@ -28,6 +28,12 @@
     "unknown_completion": "UNRESOLVED; bounded cleanup capture; no guessed PID or automatic next attempt",
     "validation_executable_role": "R10 nested path validates both signed bundles; launch uses outer bundle API, never the UI leaf Popen"
   },
+  "cleanup_safety": {
+    "available_engine": "always successful empty foreign-container probe, including prework/overcap",
+    "journal_failure": "abort work, continue proven teardown, retain failed/unverified outcome",
+    "ownership": "in-memory signed causal proof before fallible journal; dispatch from retained authority",
+    "unavailable_exception": "exact recognized never-ready error, no available/unknown history and no admitted work"
+  },
   "cli_authentication": {
     "anonymous_config": "nonempty blank Docker Hub auth record; no store/helpers",
     "environment": "whitelist; no operator auth overrides",
@@ -46,7 +52,7 @@
     "minimum_free_gib_at_start": 30,
     "operator_ack_id": "a-7072",
     "optional_digest_pull_requires_new_full_scope_review": true,
-    "optional_pull_review_disposition": "R11 candidate requires independent review and NEW desk GO; native budget remains 1/3",
+    "optional_pull_review_disposition": "Round11 NOT CLEAN; R12/R13 remediation pending independent delta review; no optional-pull approval or runtime GO",
     "post_start_mem_total_max_bytes": 4300000000,
     "post_start_ncpu_max": 2,
     "prestart_cap_validation": "SKIPPED-with-operator-ack-NOT-verified",

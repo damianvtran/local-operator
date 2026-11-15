@@ -1,0 +1,25 @@
+test_available_overcap_engine_must_probe_foreign_containers (test_cleanup_fences.CleanupFenceTests.test_available_overcap_engine_must_probe_foreign_containers) ... FAIL
+test_root_journal_io_cannot_erase_in_memory_cleanup_owner (test_cleanup_fences.CleanupFenceTests.test_root_journal_io_cannot_erase_in_memory_cleanup_owner) ... FAIL
+
+======================================================================
+FAIL: test_available_overcap_engine_must_probe_foreign_containers (test_cleanup_fences.CleanupFenceTests.test_available_overcap_engine_must_probe_foreign_containers)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "~/local-operator/.worktrees/benchmark-reconstruction-20261114/benchmarks/harness_cost/reconstruction/2026-11-14-source-only/test_cleanup_fences.py", line 23, in test_available_overcap_engine_must_probe_foreign_containers
+    with self.assertRaises(RuntimeError):ops.quit_owned(ops.owner)
+         ~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^
+AssertionError: RuntimeError not raised
+
+======================================================================
+FAIL: test_root_journal_io_cannot_erase_in_memory_cleanup_owner (test_cleanup_fences.CleanupFenceTests.test_root_journal_io_cannot_erase_in_memory_cleanup_owner)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "~/local-operator/.worktrees/benchmark-reconstruction-20261114/benchmarks/harness_cost/reconstruction/2026-11-14-source-only/test_cleanup_fences.py", line 35, in test_root_journal_io_cannot_erase_in_memory_cleanup_owner
+    self.assertIsNotNone(ops.owner)
+    ~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^
+AssertionError: unexpectedly None
+
+----------------------------------------------------------------------
+Ran 2 tests in 0.006s
+
+FAILED (failures=2)

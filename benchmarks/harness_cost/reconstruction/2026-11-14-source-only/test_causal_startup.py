@@ -36,7 +36,7 @@ class CausalStartupTests(unittest.TestCase):
         ops.directory=Path(folder);ops.root=Path(folder);ops.deadline=840;ops.now=lambda:d.time
         ops.desktop_layout={'bundles':[{'entrypoint':'com.docker.backend'}]}
         ops.snapshot=lambda:copy.deepcopy(d.rows);ops.verify_owned_path=mock.Mock();ops.sample_swap=mock.Mock();ops.check_disk=mock.Mock()
-        ops.command=mock.Mock();ops.d=['NO-DOCKER']
+        ops.command=mock.Mock(return_value=(1,'','Cannot connect to the Docker daemon at unix:///var/run/docker.sock.'));ops.d=['NO-DOCKER']
         def factory(bundle,exe,before,emit):return CausalLaunch(bundle,exe,before,emit,driver=d)
         return ops,d,mock.patch.object(target,'CausalLaunch',side_effect=factory)
     def test_causal_ticket_root_and_observed_reparented_descendant_only(self):
@@ -108,7 +108,8 @@ class CausalStartupTests(unittest.TestCase):
             ops,d,patch=self.adapter(f)
             with patch:ops.start_owned()
             ops.begin_cleanup();ops.quit_owned(ops.owner)
-            self.assertTrue(d.terminated);ops.command.assert_not_called()
+            self.assertTrue(d.terminated)
+            self.assertEqual([c.args[0][1] for c in ops.command.call_args_list],['info'])
     def test_journal_failure_keeps_authority_for_cleanup(self):
         d=Driver()
         def emit(row):

@@ -63,6 +63,22 @@ Use NEW admissions/linux-amd64-02.json and matching exclusive lifecycle/resolver
 namespaces. Attempt 1 and its original admission/receipts are immutable. The old
 GO is closed; independent review and NEW GO are mandatory before native attempt 2.
 
+## R12/R13 unified safety remediation — source/stub proof only, NO GO
+
+A responding engine ALWAYS requires a successful empty foreign-container probe,
+including over-cap/pre-pull startup aborts. No-work admission is not a permission
+to kill auto-restarted foreign work. Only an exact recognized NEVER-ready daemon
+unavailable response, with no unknown/available history and no admitted work, has
+the causal-owned unavailable-cleanup exception. Unknown/malformed/failed probes
+preserve the engine/processes and remain unverified.
+
+Signed causal root ownership is established in memory BEFORE journal I/O. Cleanup
+dispatch also checks retained proven authority, not only the convenience owner
+attribute. Ownership journal errors abort work but cannot skip proven teardown;
+errors stay retained and the final receipt/exit cannot become clean success.
+See REMEDIATION-R12-R13.md and actual-adapter RED/GREEN tests. Optional pull is
+NOT signed off at this head; independent delta review and NEW GO remain required.
+
 ## Prerequisites and disk-desk packet — CONDITIONAL SLOT, NO GO
 
 The old 2026-11-14 17:00–18:15 UTC slot was RELEASED. No fresh slot or
