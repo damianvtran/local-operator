@@ -1811,6 +1811,40 @@ def test_only_a_site_question_is_an_operator_signed_card() -> None:
     assert not ra.is_operator_signed_card(None)
 
 
+def _forged_site_questions() -> list[tuple[str, dict[str, Any]]]:
+    """Site-prefixed questions whose id is NOT the digest of their own block."""
+    real = _site_question()
+    no_block = {k: v for k, v in real.items() if k != "site"}
+    return [
+        ("prefix-only id", {**real, "question_id": "site:v1:not-a-digest"}),
+        ("no site block", no_block),
+        (
+            "block for another origin",
+            {**real, "site": {**real["site"], "origin": "https://evil.test"}},
+        ),
+        ("block for another entry", {**real, "site": {**real["site"], "entry_id": "e-2"}}),
+        ("non-string block field", {**real, "site": {**real["site"], "scope": None}}),
+        ("block not a mapping", {**real, "site": "origin"}),
+    ]
+
+
+@pytest.mark.parametrize("case", [name for name, _ in _forged_site_questions()])
+def test_a_forged_site_id_is_not_an_operator_signed_card(case: str) -> None:
+    """Security review S1-1: the ``site:v1:`` prefix alone is mintable by any writer
+    of the node's ask log; only an id equal to its block's digest counts."""
+    question = dict(_forged_site_questions())[case]
+    assert not ra.is_operator_signed_card({"questions": [question]})
+
+
+@pytest.mark.parametrize("case", [name for name, _ in _forged_site_questions()])
+def test_a_forged_site_card_from_an_agent_child_never_forwards(tmp_path: Path, case: str) -> None:
+    """S1-1 end to end: the forged card stays on the node even over the binding."""
+    origin = _agent(HEAD)
+    node = _agent_child_node(tmp_path, origin, site_card=False)
+    _queue_raw(node, "a-forged", [dict(_forged_site_questions())[case]])
+    assert "notices" not in _wire(node, origin, HEAD, operator_viewer=True)
+
+
 @pytest.mark.parametrize("source", [HEAD, "", NODE, CO])
 def test_an_agent_childs_site_card_reaches_the_bound_operator_only(
     tmp_path: Path, source: str
@@ -1820,10 +1854,16 @@ def test_an_agent_childs_site_card_reaches_the_bound_operator_only(
     here, or placed by a co-member."""
     origin = _agent(source)
     node = _agent_child_node(tmp_path, origin)
+    # A REAL completion (review R1-1): without one, "no badge" holds vacuously.
+    AttentionStore(node / "attention.db").publish(f"session/{SID}", TOK1, "a1", "complete")
     row = _wire(node, origin, HEAD, operator_viewer=True)
     assert _keys(row) == [f"{ra.ASK_NOTICE_PREFIX}a-site"]
-    if source != HEAD:
-        # A child the operator's device did not place gets no completion badge here.
+    if source == HEAD:
+        # The Mac placed the child: its completion badge reaches the Mac, as before.
+        assert row["attention"] == {"token": TOK1, "outcome": "complete"}
+    else:
+        # A child the operator's device did not place: the site card rides the
+        # cards-only leg, and its completion stays here.
         assert "attention" not in row and "attention_unknown" not in row
     # The notify verdict is unchanged: the child's notify items stay on the node.
     assert ra.notice_forwarding(node, SID)[0] == ra.LOCAL_ONLY

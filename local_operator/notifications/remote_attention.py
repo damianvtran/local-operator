@@ -354,16 +354,47 @@ def is_operator_signed_card(record: Any) -> bool:
     ``verify_site_card`` and the signed ``bridge_decide`` door, so no agent —
     the session's own parent included — can answer it. Deliberately narrow:
     ``human_required`` alone is NOT this (any human at any surface may answer
-    such an ask), and no other signature-only card exists to include.
+    such an ask).
+
+    Team Bridge request asks (``asks/decision.py``'s module docstring) also
+    need the operator's signature, yet are left out on purpose: only the
+    designated chief-of-staff session receives inbound bridge requests and
+    raises their asks (``team_bridge/host.py``: "the designated CoS remains the
+    ONLY inbound recipient"; subagents inherit no bridge runtime), so they never
+    arise on a session an agent spawned on a node, and including them would
+    widen this exception for no row it could reach.
+
+    THE PREFIX IS NOT ENOUGH (security review S1-1): any writer of the node's
+    multi-writer ask log can mint ``site:v1:<anything>``, and this predicate is
+    what lets an agent child's ask past the "agent children notify nobody"
+    drop. So a question counts only when it carries the structured ``site``
+    block :func:`~local_operator.browser_bridge.site_approval.site_ask_question`
+    writes AND its ``question_id`` is the digest of that block's inputs — the
+    first check the signer's ``verify_site_card`` makes. A forged id, or a real
+    id beside a block it was not computed from, stays on the node.
     """
     if not isinstance(record, dict):
         return False
-    from local_operator.browser_bridge.site_approval import is_site_question_id
+    return any(_is_bound_site_question(question) for question in record.get("questions") or ())
 
-    return any(
-        isinstance(question, dict) and is_site_question_id(question.get("question_id"))
-        for question in record.get("questions") or ()
+
+def _is_bound_site_question(question: Any) -> bool:
+    """A site question whose ``question_id`` is the digest of its own ``site`` block."""
+    from local_operator.browser_bridge.site_approval import (
+        is_site_question_id,
+        site_question_id,
     )
+
+    if not isinstance(question, dict) or not is_site_question_id(question.get("question_id")):
+        return False
+    site = question.get("site")
+    if not isinstance(site, dict):
+        return False
+    raw = {key: site.get(key) for key in ("node_device_id", "entry_id", "origin", "scope")}
+    if not all(isinstance(value, str) for value in raw.values()):
+        return False
+    fields: dict[str, str] = {key: str(value) for key, value in raw.items()}
+    return question["question_id"] == site_question_id(**fields)
 
 
 def signed_card_target(origin: Any, *, operator_device_id: str = "") -> str:
@@ -386,6 +417,14 @@ def signed_card_target(origin: Any, *, operator_device_id: str = "") -> str:
     viewer the origin names": a co-member that placed the child here, even the
     origin itself, gets nothing unless it is the bound operator device. ``""``
     when the row is no agent child or no operator is verified.
+
+    DELIBERATE ASYMMETRY (decision 79bddc262663, security review S1-2): an
+    agent child a co-member placed here sends its site cards to the OPERATOR,
+    while that co-member's own non-agent session's cards (every ask of it) go
+    to the co-member, as :func:`notice_target` has always routed them. The
+    co-member's agent cannot sign a site card and its human may not be the
+    operator, whereas a session the co-member's human opened has that human to
+    answer it.
     """
     if not operator_device_id or not notice_origin(origin)[1]:
         return ""
@@ -455,7 +494,9 @@ def notice_origin(origin: Any) -> tuple[str, bool]:
     ``mode="local"`` with its old owner as ``source_device``, so its notices
     ARE forwarded to that owner. ``is_agent_child`` is the agent-origin drop
     (:data:`AGENT_ORIGIN_KIND`): such a row may still match a viewer for its
-    completion badge, but its notices are never put on the wire. A non-mapping
+    completion badge, but its notices are never put on the wire — save its
+    operator-signed site cards, which go to the verified operator link only
+    (:func:`signed_card_target`). A non-mapping
     (no stamp, no origin) is ``("", False)``.
     """
     if not isinstance(origin, dict):
@@ -1427,7 +1468,9 @@ def _notice_decision(root: Path, session_id: str, key: str = "") -> tuple[str, s
         )
         if agent_child:
             # Mirrors the drop in stamp_rows_for_viewer: an agent's child
-            # reports to that agent, so nothing is put on the wire.
+            # reports to that agent, so no notify item is put on the wire (its
+            # site cards are the one exception, and are asks, not notify items:
+            # signed_card_target).
             return LOCAL_ONLY, source, False
         if target and not _is_active_peer(Path(root), target):
             # PR #4029 review R2-1: an origin (or bound device) that is no longer

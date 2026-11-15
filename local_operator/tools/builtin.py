@@ -26542,11 +26542,17 @@ def _access_result_text(
 
 #: Where a headless node's site approval is decided, said once so the texts
 #: below cannot drift: the card reaches the operator's device through the
-#: forwarded-ask path, which covers sessions that device started.
+#: forwarded-ask path, which covers sessions that device started and — once the
+#: node has verified the operator's device (``network.operator_binding``, #4030)
+#: — sessions started on the node, an agent-spawned one included (#4035: its
+#: site cards only). guide://browser carries the same rule; keep them in step.
 _NODE_APPROVAL_REACH = (
     "The card reaches the operator's own device when this session was started "
-    "from it; a session started directly on the node shows it only on the node, "
-    "where nobody can sign — say so if that is your case."
+    "from it, or when the node has verified which linked device is the "
+    "operator's (a card they signed naming this node) — that also covers a "
+    "session started on the node, or spawned here by another agent. Without "
+    "that, the card shows only on the node, where nobody can sign — say so if "
+    "that is your case."
 )
 
 #: THE CARD IS THE NOTIFICATION (review U10): the tool description's generic
