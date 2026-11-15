@@ -4429,14 +4429,17 @@ def _copy_ledger_state(network_id: str, device: str, key: str) -> tuple[bool, bo
         return False, False, False
     # Prefer the newest open copy, including a re-copy after a confirmed wipe.
     # A dispatch is evidence of sending, NEVER evidence of confirmed delivery.
+    # A newer unacknowledged send does not erase an older live delivery ACK;
+    # report both facts without promoting that send or reusing a wiped ACK.
+    ack = state.ack_for(device, key)
     for row in state.open_copies(device):
         if row["key"] == key:
             pending = bool(row["unacknowledged"])
-            return not pending, False, pending
-    row = state.ack_for(device, key)
-    if not isinstance(row, dict):
+            confirmed = not pending or (isinstance(ack, dict) and not bool(ack.get("wiped")))
+            return confirmed, False, pending
+    if not isinstance(ack, dict):
         return False, False, False
-    return True, bool(row.get("wiped")), False
+    return True, bool(ack.get("wiped")), False
 
 
 def _unconfirmed_copies(network_id: str, device: str) -> tuple[int, int]:
