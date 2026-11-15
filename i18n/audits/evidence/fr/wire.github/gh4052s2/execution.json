@@ -1,0 +1,2972 @@
+{
+  "scope": "2afbb818b69074d9f11b0fc1a9a6360967218476..b06fbf62a7ccc9e4ae8aac59be70b046c7a5b4ee",
+  "head": "b06fbf62a7ccc9e4ae8aac59be70b046c7a5b4ee",
+  "initial_audit_head": "0b754ce89567ae158fe91db3ec0ed0b4a621f312",
+  "changed_values": [
+    {
+      "locale": "fr",
+      "namespace": "wire.github",
+      "key": "wire.github.failure_unknown",
+      "before": "échec de la liste des dépôts GitHub",
+      "after": "échec de la récupération de la liste des dépôts GitHub"
+    },
+    {
+      "locale": "es",
+      "namespace": "wire.github",
+      "key": "wire.github.share_empty",
+      "before": "Repositorios de GitHub: ninguno todavía — el acceso compartido está configurado, pero se rechaza todo préstamo mientras {reason}; {remedy}",
+      "after": "Repositorios de GitHub: ninguno todavía — el acceso compartido está configurado, pero todo préstamo sigue rechazándose por este motivo: {reason}; {remedy}"
+    },
+    {
+      "locale": "ru",
+      "namespace": "wire.github",
+      "key": "wire.github.share_empty",
+      "before": "Репозитории GitHub: пока нет — общий доступ настроен, но все запросы заимствования отклоняются, пока {reason}; {remedy}",
+      "after": "Репозитории GitHub: пока нет — общий доступ настроен, но все запросы заимствования отклоняются по следующей причине: {reason}; {remedy}"
+    },
+    {
+      "locale": "ru",
+      "namespace": "wire.github",
+      "key": "wire.github.opt_out_step",
+      "before": "исключить репозиторий: {command} — устройства, которым вы предоставили доступ, потеряют право отправлять в него изменения при следующем получении учётных данных, {ttl}",
+      "after": "исключить репозиторий: {command} — устройства, которым вы предоставили доступ, потеряют право выполнять push в него при следующем получении учётных данных, {ttl}"
+    },
+    {
+      "locale": "ru",
+      "namespace": "wire.github",
+      "key": "wire.github.exclude_added",
+      "before": "{repo} исключён — устройства, которым вы предоставили доступ, потеряют право отправлять в него изменения при следующем получении учётных данных, {ttl}",
+      "after": "{repo} исключён — устройства, которым вы предоставили доступ, потеряют право выполнять push в него при следующем получении учётных данных, {ttl}"
+    },
+    {
+      "locale": "ru",
+      "namespace": "wire.github",
+      "key": "wire.github.include_added",
+      "before": "{repo} возвращён — устройства, которым вы предоставили доступ, снова смогут отправлять в него изменения при следующем получении учётных данных, {ttl}",
+      "after": "{repo} возвращён — устройства, которым вы предоставили доступ, снова смогут выполнять push в него при следующем получении учётных данных, {ttl}"
+    },
+    {
+      "locale": "ru",
+      "namespace": "wire.github",
+      "key": "wire.github.wrapper_denied",
+      "before": "{repo} отсутствует в списке репозиториев, предоставленном устройством-кредитором (возможно, он исключён или выполнение push с того устройства недоступна). Проверьте {command} на устройстве-кредиторе. Только это устройство может изменить предоставляемый доступ.",
+      "after": "{repo} отсутствует в списке репозиториев, предоставленном устройством, которое делится доступом (возможно, репозиторий исключён или с этого устройства в него нельзя выполнить push). Проверьте {command} на устройстве, которое делится доступом. Только это устройство может изменить предоставляемый доступ."
+    },
+    {
+      "locale": "ru",
+      "namespace": "wire.settings",
+      "key": "wire.settings.network_credentials_github_repositories.help",
+      "before": "Записи owner/repo для предоставления доступа к GitHub взаймы. Если настройка никогда не задавалась, используются все репозитории, в которые учётная запись может выполнять push, за вычетом исключённых. Очистка ранее опубликованного списка, выбранного вручную, прекращает предоставление доступа; вернуться к автоматическому выбору можно командой lop network credential github repos --use-default.",
+      "after": "Записи owner/repo для предоставления доступа к GitHub взаймы. Если настройка никогда не задавалась, используются все репозитории, в которые учётная запись может выполнять push, за вычетом исключённых. Очистка ранее переданного списка, выбранного вручную, прекращает предоставление доступа; вернуться к автоматическому выбору можно командой lop network credential github repos --use-default."
+    },
+    {
+      "locale": "ur",
+      "namespace": "wire.github",
+      "key": "wire.github.wrapper_denied",
+      "before": "{repo}، مستعار دینے والے ڈیوائس کی فراہم کردہ ریپوزیٹری فہرست میں نہیں ہے (ممکن ہے یہ خارج ہو یا وہاں سے push ممکن نہ ہو)۔ مستعار دینے والے ڈیوائس پر {command} جانچیں۔ صرف وہی آلہ بدل سکتا ہے کہ وہ کیا مستعار دیتا ہے۔",
+      "after": "{repo}، مستعار دینے والی ڈیوائس کی فراہم کردہ ریپوزیٹری فہرست میں نہیں ہے (ممکن ہے یہ خارج ہو یا وہاں سے push ممکن نہ ہو)۔ مستعار دینے والی ڈیوائس پر {command} جانچیں۔ صرف وہی ڈیوائس یہ بدل سکتی ہے کہ وہ کیا مستعار دیتی ہے۔"
+    }
+  ],
+  "retained_value_hashes": [
+    {
+      "locale": "fr",
+      "key": "wire.github.progress",
+      "sha256": "269c45baa2128ce150ac76937fdf0a671bf4fd7140d6bbef7cae63f48316b597"
+    },
+    {
+      "locale": "fr",
+      "key": "wire.github.opt_out_none",
+      "sha256": "6a7ec51b8f7c3274fcae72f2b753c3f3838121b927f38db50fb179821e782cfb"
+    },
+    {
+      "locale": "fr",
+      "key": "wire.github.opt_out_names",
+      "sha256": "5338b8ce982a3f4609710ccdceb59dea2a5faf6415c7fe57886c83162d583f53"
+    },
+    {
+      "locale": "fr",
+      "key": "wire.github.share_empty",
+      "sha256": "ece2151e4d4608f6cef0457c147d84bea6e2e7dfa270af49bd69e7b396b862e7"
+    },
+    {
+      "locale": "fr",
+      "key": "wire.github.repos_empty",
+      "sha256": "21c0a4ce91f1fcaa96279f8391cdd7ae7dcb005abe263b33b09001dce87a324f"
+    },
+    {
+      "locale": "fr",
+      "key": "wire.github.repos_head",
+      "sha256": "22ea1fa5a77a0c5114b637aa4d3da600b3865a726422aef632a597f5b884bc36"
+    },
+    {
+      "locale": "fr",
+      "key": "wire.github.opted_suffix",
+      "sha256": "65334d73f3098d9b21bbcc688ec099515b5c0960530b23297634ef0ea531151d"
+    },
+    {
+      "locale": "fr",
+      "key": "wire.github.more",
+      "sha256": "9d7407c23a29d279681f1ecf5ffd4e7762d9860b2072d7897e58e25bddbbfc1a"
+    },
+    {
+      "locale": "fr",
+      "key": "wire.github.capacity",
+      "sha256": "cbd6071cf97451a06125fa172e19a83f77656d44cbb29c3982d1b1b81c8c9189"
+    },
+    {
+      "locale": "fr",
+      "key": "wire.github.opt_out_step",
+      "sha256": "2976f5273d7be62c7eb2711d1259820191c1671f1414a3010553c60ef5863f44"
+    },
+    {
+      "locale": "fr",
+      "key": "wire.github.source_explicit",
+      "sha256": "210b282194b734d2867b7639fa41aa08b2b3988aea95e207c1970c0a97c6d12a"
+    },
+    {
+      "locale": "fr",
+      "key": "wire.github.source_last_good",
+      "sha256": "efc00f38aca02fe3fa44f09e2f96587fe73269d93eb99fc46bb334c18993906e"
+    },
+    {
+      "locale": "fr",
+      "key": "wire.github.source_enumerated",
+      "sha256": "4a3774895f931e867b66ef8d7bf325df0d507c4df3d3282f02e59851d77f6ef5"
+    },
+    {
+      "locale": "fr",
+      "key": "wire.github.which_explicit",
+      "sha256": "1d42d126e435bc80b0924258b1752a9cca0582abd528211660484ea2d5ae584f"
+    },
+    {
+      "locale": "fr",
+      "key": "wire.github.which_enumerated",
+      "sha256": "ee2a52e426032cc98f7fc9cb5520f20bdfa122f2a9dde78dbb9639b260ad940c"
+    },
+    {
+      "locale": "fr",
+      "key": "wire.github.exclude_already",
+      "sha256": "59f032d60410929e4de6e54f1517d1a8d46f258e418e549eb91476d0a35d8df1"
+    },
+    {
+      "locale": "fr",
+      "key": "wire.github.exclude_typo",
+      "sha256": "0ddaeba49d25ae6af7c44744829e031fbcad203e2957533e6ab64a77bb9701bc"
+    },
+    {
+      "locale": "fr",
+      "key": "wire.github.exclude_unchecked",
+      "sha256": "9046fe416e3eb4cc114b5b404782def43ff83ac359c1eba0e96f5831e2ed883d"
+    },
+    {
+      "locale": "fr",
+      "key": "wire.github.exclude_added",
+      "sha256": "367f6f83c47e373630af3d98e5cc55fa33d4a37c59bde77d145b5989f975333a"
+    },
+    {
+      "locale": "fr",
+      "key": "wire.github.include_unchanged",
+      "sha256": "8d73331d130b22df8ca2c75075ac3e6b533408c9698c0903705ba6ac35fc7b99"
+    },
+    {
+      "locale": "fr",
+      "key": "wire.github.include_typo",
+      "sha256": "cf92620b047bfe8c3c945a80849097a397a261df2ad6bf33bb3167cdc4fd309b"
+    },
+    {
+      "locale": "fr",
+      "key": "wire.github.include_unchecked",
+      "sha256": "312dbc3ac4cdaea7f0b0adc7f27277a5ec5b056e1542b0a235e44f3178c9837a"
+    },
+    {
+      "locale": "fr",
+      "key": "wire.github.include_added",
+      "sha256": "d1affb4376f4f4d4bebde0b4c78711679cad8edbdae0616902ae3ac05af4ad2a"
+    },
+    {
+      "locale": "fr",
+      "key": "wire.github.reason_explicit",
+      "sha256": "db119abc78415e35606014f87d06d28a1c4e1ff8af0f7332486ff2d06ed485da"
+    },
+    {
+      "locale": "fr",
+      "key": "wire.github.reason_unavailable_local",
+      "sha256": "51dd8c15228e0e3b9de33da20caeeb720e7048ab4266f70596fc499426748838"
+    },
+    {
+      "locale": "fr",
+      "key": "wire.github.reason_unavailable_remote",
+      "sha256": "e1b6f95eda1f879953b4e26b7d593a52c6d759bf94bb51d640eee0fc7f0ceb56"
+    },
+    {
+      "locale": "fr",
+      "key": "wire.github.reason_excluded_local",
+      "sha256": "f5076ccd54bed5bd0be212b37bc0abc38dd49c2d9abb34c606fb5223b940c859"
+    },
+    {
+      "locale": "fr",
+      "key": "wire.github.reason_excluded_remote",
+      "sha256": "be282028ae508030253710081767fdc5ccab76dfa4afebf851b24e76cfa158bf"
+    },
+    {
+      "locale": "fr",
+      "key": "wire.github.reason_no_repos_local",
+      "sha256": "75cd240b2c91b040b9d42b68bada6ab0b435af53d58176b34fc5c90da81660c0"
+    },
+    {
+      "locale": "fr",
+      "key": "wire.github.reason_no_repos_remote",
+      "sha256": "54b385a976381b0fd308b0996f28faee2fb20f7228e83c904c8404989776659e"
+    },
+    {
+      "locale": "fr",
+      "key": "wire.github.remedy_explicit",
+      "sha256": "fc2eff7e149858350b6f2e2919f4e957ce8cce8a21f741ac1e35de3cb76bee6d"
+    },
+    {
+      "locale": "fr",
+      "key": "wire.github.remedy_unavailable",
+      "sha256": "caf966f0e790820768afa212a982b6a0ca34d4cd7a2ccc44c505674f7ad4bcc2"
+    },
+    {
+      "locale": "fr",
+      "key": "wire.github.remedy_excluded",
+      "sha256": "00cf1648e56899e54b0523b3cca0a3c9e5200db5c9249f8bcdbd48efde7de4bb"
+    },
+    {
+      "locale": "fr",
+      "key": "wire.github.remedy_no_repos",
+      "sha256": "352f20d9a84dd23c72a9b0e2c92b171638208e6212ee2a0239e21c06fb9358c9"
+    },
+    {
+      "locale": "fr",
+      "key": "wire.github.refusal_detail",
+      "sha256": "33384e6b62ab2daba286fc0862a2eef6dbbddf6fb4da1b764e9495119e25785a"
+    },
+    {
+      "locale": "fr",
+      "key": "wire.github.age_unknown",
+      "sha256": "41d62fb759e83c886655169e4ab333029e57cd97067a1daca79d1c1992d182c3"
+    },
+    {
+      "locale": "fr",
+      "key": "wire.github.age_now",
+      "sha256": "60bb92e984a4f2e3b3b7c06a798c97a7ed6e3c0ca10a4573a1fc5db45e18468f"
+    },
+    {
+      "locale": "fr",
+      "key": "wire.github.age_minutes",
+      "sha256": "0a3282b4379c7b0add8b1eb32c2507029eaa3b384e0c95e6b94fbe6646794f42"
+    },
+    {
+      "locale": "fr",
+      "key": "wire.github.age_hours",
+      "sha256": "108d04b7d0477776f985b7af934c6093ed228852fadb9c81bc4fbeec01a2e0df"
+    },
+    {
+      "locale": "fr",
+      "key": "wire.github.age_days",
+      "sha256": "f4969f4fb32571fe5a539cebd31ddd409c54f179f76e6c653239f968cd8cfeae"
+    },
+    {
+      "locale": "fr",
+      "key": "wire.github.ttl",
+      "sha256": "5e8b3c1b522b335512b065f356430304ed09f123fcf1c9d82af421a8501c75f1"
+    },
+    {
+      "locale": "fr",
+      "key": "wire.github.failure_auth",
+      "sha256": "3146c6e73fa0093e5ce125e6711463cd2a57a289a28d79b5cb69bdcdda8bbcfa"
+    },
+    {
+      "locale": "fr",
+      "key": "wire.github.failure_offline",
+      "sha256": "aeb2131b8513f30d5fb0f2d45027b59787b9a47a2fbab0268ee64f8b533dd9b2"
+    },
+    {
+      "locale": "fr",
+      "key": "wire.github.failure_server",
+      "sha256": "ff49c5f8a97b51553b65c56864881e144801e7e25341b7cd938451a128ee5a61"
+    },
+    {
+      "locale": "fr",
+      "key": "wire.github.failure_coverage",
+      "sha256": "afe615dc5dcf84ac088b879a961cbbba8ddc9507f84171e3ff8c7cf62329d9b6"
+    },
+    {
+      "locale": "fr",
+      "key": "wire.github.failure_unfetched",
+      "sha256": "f1a1f66df7e06cc878d4a13d440ca974d430e6ffd63390a8c93f857896338b1c"
+    },
+    {
+      "locale": "fr",
+      "key": "wire.github.failure_earlier_login",
+      "sha256": "e3460f2ceaa7685fb233def13a035cc07567666622a514455b7f2191b515a600"
+    },
+    {
+      "locale": "fr",
+      "key": "wire.github.failure_unknown_login",
+      "sha256": "e933754576f39e218075a5b99873b09f26f6814de778beea9474c8ed75e198ad"
+    },
+    {
+      "locale": "fr",
+      "key": "wire.github.readiness_unavailable",
+      "sha256": "1e4f6e6560914362f2966da4fd98c10b8058fe37724bb77a6ce238bbe524529b"
+    },
+    {
+      "locale": "fr",
+      "key": "wire.github.readiness_empty",
+      "sha256": "d4fb374f2380c1d79af8e7912c752ddeec168a2a9b5ad0b13a507526d4da1f06"
+    },
+    {
+      "locale": "fr",
+      "key": "wire.github.readiness_opted",
+      "sha256": "53cd1ad7d193b6794a61a4bcb1386bce819040763712b7bc2539b452d0b29220"
+    },
+    {
+      "locale": "fr",
+      "key": "wire.github.readiness_more",
+      "sha256": "4785210043687b8fc1b3d669cb195de8a23299f6d87f82a174f525da9f6dd317"
+    },
+    {
+      "locale": "fr",
+      "key": "wire.github.readiness_explicit",
+      "sha256": "72d0f267137447e68752bfe007ad93412554298594462acc89032cb2fe1a3d04"
+    },
+    {
+      "locale": "fr",
+      "key": "wire.github.readiness_last_good",
+      "sha256": "5efd13661c915bc2418268622c8917dbd87d2aaac4f57df7a66a1f8538a6a272"
+    },
+    {
+      "locale": "fr",
+      "key": "wire.github.readiness_enumerated",
+      "sha256": "6d4fd626cdcfd8cba3afa340ca43f883c06185bc89e834a63e4c06d59284d010"
+    },
+    {
+      "locale": "fr",
+      "key": "wire.github.readiness_pointer",
+      "sha256": "533e04e14182016c38e7c36419bb218ef5242115de31cd28be1749af12b7b0aa"
+    },
+    {
+      "locale": "fr",
+      "key": "wire.github.readiness_list",
+      "sha256": "48ae08dc91edb124876e7e135bf50282a987da5ac5a107d73cd13ffa3cca3dc8"
+    },
+    {
+      "locale": "fr",
+      "key": "wire.github.borrower_unset",
+      "sha256": "e0384345b4722b6ca70808450901dc131f82c2facdbfcace83eecb8c2edd49e9"
+    },
+    {
+      "locale": "fr",
+      "key": "wire.github.borrower_unset_default",
+      "sha256": "4f8d4eaccae706c73c6748335bdcac0001159e486137be54b9b81c1c22482a12"
+    },
+    {
+      "locale": "fr",
+      "key": "wire.github.borrower_overflow",
+      "sha256": "c9280ddcc1ebbe056f442c110c8211c2de072a2209144271120368404c33c04a"
+    },
+    {
+      "locale": "fr",
+      "key": "wire.github.wrapper_denied",
+      "sha256": "8aaef42fd605aa20799b19961cb4a6701f9815d1d3b31279cbb9b85ab24aaa9f"
+    },
+    {
+      "locale": "fr",
+      "key": "wire.github.usage_repo",
+      "sha256": "73fe2dd790c35a2db189f064c526decc4fa5264f2c69e2a289ddaf0a646a8abb"
+    },
+    {
+      "locale": "fr",
+      "key": "wire.github.usage_repos_args",
+      "sha256": "b7d9f504b81a1813970146647609855cd5236d69b24827ec4ba5f51e037ab3d9"
+    },
+    {
+      "locale": "fr",
+      "key": "wire.github.usage_default",
+      "sha256": "1c7b623d5f3b5fbd94216dc16fe414d218012033fecb5644e6361c7be1413b5b"
+    },
+    {
+      "locale": "fr",
+      "key": "wire.github.usage_refresh",
+      "sha256": "18b8644d9dfaf709dc79ba8654362b8794f43fd5e7ee5dce4f2b67f8d608aa07"
+    },
+    {
+      "locale": "fr",
+      "key": "wire.github.owner_overflow",
+      "sha256": "ac959615dbab48a339d7368056553b09cc396dbec6448a0e58e7398899a4810e"
+    },
+    {
+      "locale": "fr",
+      "key": "wire.github.reset_failed",
+      "sha256": "e4949bb013ecadc8397e1b992a3c6deb7d0311def2776aadfd04dfc6441030cf"
+    },
+    {
+      "locale": "fr",
+      "key": "wire.settings.network_credentials_github_repositories.help",
+      "sha256": "2288e47305fb0773b677ada8bf7df31708be0b055756913ac02a7bcda3f902c4"
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.progress",
+      "sha256": "bbc4de0de2c45da910723bda0dbb5bd91f743fcc187d0cf6c5cf8de5feea3aac"
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.opt_out_none",
+      "sha256": "17a5dc808377e2d18a4acfc6a23d7e0646e11999d770c34bf14bba1dbc7f170b"
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.opt_out_names",
+      "sha256": "a3fccdec7b918a3f45e9a1eb62a18b10f8bd8f1a24f034b235037e375e965460"
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.repos_empty",
+      "sha256": "2dc21aaecb68584064436b3292e8480f1431a9ba5ccbb9547ad263994ea1fbd3"
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.repos_head",
+      "sha256": "2a4ff0689fb8c5a71aade751f136c7f3fe08d9e8af0c0b09327483aec3973ee6"
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.opted_suffix",
+      "sha256": "47b928cc3480a571ae7e7719d627fa38c13fdad07728f327e4f378df1f3357d6"
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.more",
+      "sha256": "7b1119771d845a05b0e42e013df8aa4d41ae769622c6d98f7273bd961af875af"
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.capacity",
+      "sha256": "2cffe99919b8ce7dda63dd88011a0cf279aef1accd33237e6ee86b6277387b6d"
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.opt_out_step",
+      "sha256": "3a13bc1de984101967b1479a87a04f8bc669c92b5f68de72bc0469fbee748c27"
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.source_explicit",
+      "sha256": "2d77811ee390502e4118c3f6402c0072756c3627e00e5399731aaac434da54c9"
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.source_last_good",
+      "sha256": "4acfecd13df66ae8e61036a90cc755767d55de129cd7e46e74fc06040bf99b60"
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.source_enumerated",
+      "sha256": "65a7bc6f18402d4a53e0713980320a1a7165c9bf57f5936aaa54ebae297da4bc"
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.which_explicit",
+      "sha256": "8f9d72b9d6adb537b77b4f04e63a46dd8585ce61fb8c9a8bdd487d2db1046063"
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.which_enumerated",
+      "sha256": "b93680e6b024f835e07a6e3fffb2fce790fc86ee018f059a774fd1c7050ba9cb"
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.exclude_already",
+      "sha256": "12b3ee6fd152b126b479e66e3a6a4013d368c7712ee80ce563f904a443accff9"
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.exclude_typo",
+      "sha256": "ef4a07c1741a33fece961529b0dd8accbc471a7d5a04c9d9a148573fd25525d8"
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.exclude_unchecked",
+      "sha256": "2924fb67d3c2cd1e0e735406b24b86495331a9418a2235aa3730c885220a2343"
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.exclude_added",
+      "sha256": "0842ea6279e10f00c11fe68a59521e3c8aa7946ece2d1ff693818c42fd6c2f3d"
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.include_unchanged",
+      "sha256": "a71e2eaeb573b96fcab11c48e1db5e9fa3ba52887d309c3fe7e6d57c54286518"
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.include_typo",
+      "sha256": "05c4914e4508c13e7abf829b1c5d289026426b6a4589b807b3ef524316a51997"
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.include_unchecked",
+      "sha256": "02de49265e6828a0aaeabcaf14f94b1dd3fc82592587bb64db10e54ca3a5755f"
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.include_added",
+      "sha256": "5662329452c886c2a02a71f8814411e64b420ff890c14b7eebef0af73b4467bd"
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.reason_explicit",
+      "sha256": "96d220933359e1ed50905ae1840ffd0a7d37aa590311f95ccaae538342310617"
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.reason_unavailable_local",
+      "sha256": "dd73edd875504d58f86d0537e2c356875c9eebca86f8fbb6ca699aa093918ab8"
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.reason_unavailable_remote",
+      "sha256": "654b05fe5721390ae2804aeb525bba00d12a2200668dbea5c95f61448c825a6a"
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.reason_excluded_local",
+      "sha256": "9375b7344ede53c9adc262f0331138f6344704b415ff0f0f0463411cd21a4eb5"
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.reason_excluded_remote",
+      "sha256": "78dbcd8ad024580a70151fd48e4df34fd1795b29cb0b816f29bcd473bbf884fb"
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.reason_no_repos_local",
+      "sha256": "2fe8795a2921f49f768655f11b5d6c24be605e6cb4d12b26c65dca41b3a4dd77"
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.reason_no_repos_remote",
+      "sha256": "7d5646b583b3b1e365d065ffa8944ada7fd9a5f667c46d8fa6a59caa2054212b"
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.remedy_explicit",
+      "sha256": "f43c3498c0ed86be8020e9443902e975b6271def3e49bfe174fd73f561769415"
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.remedy_unavailable",
+      "sha256": "699123e0e7b64f393db4999dcfd12458ff7fe973eae4b91acdb8dd48a5f39cf9"
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.remedy_excluded",
+      "sha256": "6cf5e5eb9d85d78b79385e752e9eca19338b1d7315d4f443bfee7e0ed91fd38c"
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.remedy_no_repos",
+      "sha256": "6d1a7d288cf489cbf0d3301eeb98126550c77a9ec25e72be78445e30a14529c8"
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.refusal_detail",
+      "sha256": "33384e6b62ab2daba286fc0862a2eef6dbbddf6fb4da1b764e9495119e25785a"
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.age_unknown",
+      "sha256": "6a206e455caf2a6449ef9839cddd666264da4ce209137755bd93b7bfd93feeb7"
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.age_now",
+      "sha256": "da255ce0c2ee4fa8bac4c23191215b4acf8599debcf62a68e0b828bfbab73b75"
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.age_minutes",
+      "sha256": "8ba5cd81ace81ade15d648885ce993ecb1eb2f58c2fd7d8c3bdbc2bddc4a4b68"
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.age_hours",
+      "sha256": "03737d4fe7dc3492427cee68f74f31a7e6c5aef85f1781ffdb04e5a82d8c1973"
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.age_days",
+      "sha256": "2b5f6dac1ba6bfe3abe57ce5de09bb8ad50e9fc3b03103a3376f58f0c031388c"
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.ttl",
+      "sha256": "0254accb21cb24c929dc706f520b5b076789fc888146ce5ea5808b50b8b39dc1"
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.failure_auth",
+      "sha256": "74d79725969d8895ff5a722695e2ec58b6a5b5edcf3153e5e79941ab9b385272"
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.failure_offline",
+      "sha256": "8004e65a3696d69d1893c870fa4e03cb9952274df46bb4c141cbce7b48e9b6d4"
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.failure_server",
+      "sha256": "38637da236419300844f2b8866be7710c96c12de3d88c27139c528f1268b2358"
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.failure_coverage",
+      "sha256": "970ace7a2d88758d4ee455a7e441a638b793c10606c7dfdca49c94e03dbac84b"
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.failure_unknown",
+      "sha256": "b56adf2f2b67a75c98f877400d7a2fd0a7e3e501cf1cc7743737eb4e30f3e292"
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.failure_unfetched",
+      "sha256": "4d54538d97f25c1e11221c590b78011925ef78c07e2344a51d0e072bac672c11"
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.failure_earlier_login",
+      "sha256": "d65688b83ebb72e323c91046b580186fade8d1998ed2dcf55061be4a247e5325"
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.failure_unknown_login",
+      "sha256": "a065050a25770b0bdc6032989bccfbd12555380707b01cd4dd73beb3888f1408"
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.readiness_unavailable",
+      "sha256": "bc0d1e6cb9c34391e20ce01494e002533f10ac025b099e1be7448767282330b4"
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.readiness_empty",
+      "sha256": "bea2bf6d78edcef72dc57ce1b17104333934fe0e8113c5a2b265352907950b66"
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.readiness_opted",
+      "sha256": "e58d6d1bf5ed9c2afe707ba93ef1dab4b433c12fae3bc09bb270c8231a4756f9"
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.readiness_more",
+      "sha256": "aaaeb4da1c50d09c63c6d51ac6981d9d636b0d629bb19e14736a883d40a5480c"
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.readiness_explicit",
+      "sha256": "4bb1053e0297e1df72b2ca187a748197ec9e79156374e4307fec30461ea3884a"
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.readiness_last_good",
+      "sha256": "a30d2db3c726be69cd8c3cffec74a99d86bf4edfcc8c19e1f6892562c85323b7"
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.readiness_enumerated",
+      "sha256": "b03462901d8f0dc904efb4acee08e6ef62e03529d2f02e5a783b9ba8cea77367"
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.readiness_pointer",
+      "sha256": "f3a003c787abbf2e132f586d0b0bc801fd4f522caecd8b7a57c6b8426c1a07ef"
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.readiness_list",
+      "sha256": "f8b102d15a43666084458273afe0c4dbada905c0b6f92124da2242463765cda3"
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.borrower_unset",
+      "sha256": "f6d70d075ee96dd0dc647d990b82ecefd6bb1a0e10ed90d2fceeed3020efc5d1"
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.borrower_unset_default",
+      "sha256": "fce934a4cee4c90016ae7013a91647b818951825cbc9120cd38e88dda2ab8166"
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.borrower_overflow",
+      "sha256": "df56c31ecdbdf6ddf0b1420f6a8e07eaea4db8901719993c1385076c6c731bb8"
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.wrapper_denied",
+      "sha256": "494206a7589a6daf0f464b111191a152050e534770559a0c4fe0ecfd01c23e65"
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.usage_repo",
+      "sha256": "9c3f4ceaee79c58421d3e27711bdb87f2bec96623f683b830f5f916a1774631c"
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.usage_repos_args",
+      "sha256": "8b252f199e2e4217c346431b0bf435f9f419dd521507f346b97083da514213d9"
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.usage_default",
+      "sha256": "89443dcdc9cd3b893f7e3e68ae69ef8789746be6637d732201509225cf0aa803"
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.usage_refresh",
+      "sha256": "9c7ce1df39ff479712a50683be29632d8bd077c9c5020e35f8aea7ddbb8fbdf1"
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.owner_overflow",
+      "sha256": "23eb81920c0e662588e957d0ccc3315bb4518764aaa6610088bbaf0c63516d2f"
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.reset_failed",
+      "sha256": "439b1a816114abd253a54db74cd8765342bb78d88c300c483b6986a72bb184eb"
+    },
+    {
+      "locale": "es",
+      "key": "wire.settings.network_credentials_github_repositories.help",
+      "sha256": "d092410d6c239a840f5ed1af8f629faf80c9d35903735c6beef7cbd608af0ff2"
+    },
+    {
+      "locale": "zh-CN",
+      "key": "wire.github.progress",
+      "sha256": "32c9a45c061e388b8b876846196015ef5eeb4d67fe59012763e206fabf4a6861"
+    },
+    {
+      "locale": "zh-CN",
+      "key": "wire.github.opt_out_none",
+      "sha256": "6a5ba913d25d458a000a8b0a2ceb7a6ec8946f91f0b83ece1889a208b79672e7"
+    },
+    {
+      "locale": "zh-CN",
+      "key": "wire.github.opt_out_names",
+      "sha256": "ce03b6d92c71b4c2f201ff642336b4d05b2bce05606b26502263cc0a1b4885d9"
+    },
+    {
+      "locale": "zh-CN",
+      "key": "wire.github.share_empty",
+      "sha256": "216c93f2da95161dd70bcb71e12824388d8a3d33ae445bb46555832f3e7c3a0a"
+    },
+    {
+      "locale": "zh-CN",
+      "key": "wire.github.repos_empty",
+      "sha256": "4a4dd855417f4e595ce7d49a9bfc3702a0e70febdcd5b4b915c313bebd761994"
+    },
+    {
+      "locale": "zh-CN",
+      "key": "wire.github.repos_head",
+      "sha256": "789d30ceb5d46307802a9e86d2e18860f6dd13664dc1fc53f744da68196a3f7d"
+    },
+    {
+      "locale": "zh-CN",
+      "key": "wire.github.opted_suffix",
+      "sha256": "204d1f61468e790bcf1b9ae026d7cae5c69fc06de77fa237301061bd894a10e1"
+    },
+    {
+      "locale": "zh-CN",
+      "key": "wire.github.more",
+      "sha256": "df1072f102b553965c4c0744d868da9b1b0d3c76bb04a2d12259270f5785ad8a"
+    },
+    {
+      "locale": "zh-CN",
+      "key": "wire.github.capacity",
+      "sha256": "2e0788a6761a76ec6e714f676bb83309b1aff1bfdaeea4693debe5d90af141bf"
+    },
+    {
+      "locale": "zh-CN",
+      "key": "wire.github.opt_out_step",
+      "sha256": "88025559e73337d6bf28b1fd952acb2f75522c531476aad83e129c40e0e2770f"
+    },
+    {
+      "locale": "zh-CN",
+      "key": "wire.github.source_explicit",
+      "sha256": "0e6f41a0f045f70dbac77094c341bbaa8980e5790fddb4f516421eca947827c6"
+    },
+    {
+      "locale": "zh-CN",
+      "key": "wire.github.source_last_good",
+      "sha256": "5c57f290afb39433f50c41f552e575b5e586d31cf251c000909fd657893d4dc2"
+    },
+    {
+      "locale": "zh-CN",
+      "key": "wire.github.source_enumerated",
+      "sha256": "4e128352de419640819788a9b2119a815a317192e1e4486fbebf9fbb04b43a78"
+    },
+    {
+      "locale": "zh-CN",
+      "key": "wire.github.which_explicit",
+      "sha256": "20ab50390b808a6eb72af4b594c21807491edb165d14513711a1ca0c5d1c4df7"
+    },
+    {
+      "locale": "zh-CN",
+      "key": "wire.github.which_enumerated",
+      "sha256": "c8bd96718efd890af156aa18d80d10e0c01b5b687cba432504c88dae297befa7"
+    },
+    {
+      "locale": "zh-CN",
+      "key": "wire.github.exclude_already",
+      "sha256": "cf527a2a8b64307dea304571b9ff0d96d860596bcff5e53e5fdc20c90892fc11"
+    },
+    {
+      "locale": "zh-CN",
+      "key": "wire.github.exclude_typo",
+      "sha256": "d15e1ccc5dde3ee60f55c5265e75dcd9d2f57b10f391f872f256ba439a087f28"
+    },
+    {
+      "locale": "zh-CN",
+      "key": "wire.github.exclude_unchecked",
+      "sha256": "e3ba7572ff220e169ec3e7f63348beb1e646d068c68ebdcf2fae3e511ef461c1"
+    },
+    {
+      "locale": "zh-CN",
+      "key": "wire.github.exclude_added",
+      "sha256": "4f92dc2b48b1b8df29fcbbab8e73862463c71f7440cb3665875bc21b8342b463"
+    },
+    {
+      "locale": "zh-CN",
+      "key": "wire.github.include_unchanged",
+      "sha256": "e57b473f3dd8b6dd94c35b9a9945ccf1e0ca5996470a6f9bd7a7c5be580c3e9b"
+    },
+    {
+      "locale": "zh-CN",
+      "key": "wire.github.include_typo",
+      "sha256": "ec63a2da86c85755f391196e1d0a622a63ce677dbbe7493ebab686fac2267be7"
+    },
+    {
+      "locale": "zh-CN",
+      "key": "wire.github.include_unchecked",
+      "sha256": "3ab34c19d0c21e5d2d4c2bb0049854729cfdf37bc222e69df51667315dab322a"
+    },
+    {
+      "locale": "zh-CN",
+      "key": "wire.github.include_added",
+      "sha256": "01cc1cdb0f7adea827531531a417c3913e8bec320d3734f788ca000090e41d40"
+    },
+    {
+      "locale": "zh-CN",
+      "key": "wire.github.reason_explicit",
+      "sha256": "fd808f6b6ce840b86c37fb0a65a8b2d5bbfd82a9c35406201a6c7230b7d38ba5"
+    },
+    {
+      "locale": "zh-CN",
+      "key": "wire.github.reason_unavailable_local",
+      "sha256": "94c5eb8c2c54043a69f132c3fdf60e11c82654def59b88e7444104da24c3fceb"
+    },
+    {
+      "locale": "zh-CN",
+      "key": "wire.github.reason_unavailable_remote",
+      "sha256": "39c176f2baaba60bb0d3dca55297fa2b8f3739d553204191e76a600d0d0b220d"
+    },
+    {
+      "locale": "zh-CN",
+      "key": "wire.github.reason_excluded_local",
+      "sha256": "1feb36dce27761cfa751ea722ba7097ddf0a2b9a11fd29b5519c3ca6368cf4be"
+    },
+    {
+      "locale": "zh-CN",
+      "key": "wire.github.reason_excluded_remote",
+      "sha256": "a7354cbdf89c87768a1ad0f66702b51522df24824b0e294bd38261ae8fba4e48"
+    },
+    {
+      "locale": "zh-CN",
+      "key": "wire.github.reason_no_repos_local",
+      "sha256": "eb2c949b25469f98746d5c16e4546b8c07fe3775f51aa1ca9c2b5ab7d144b8b7"
+    },
+    {
+      "locale": "zh-CN",
+      "key": "wire.github.reason_no_repos_remote",
+      "sha256": "a688e5a7e839280811101ef9fe6365c7629ee77eafd0da2e10473ceb1695bfa3"
+    },
+    {
+      "locale": "zh-CN",
+      "key": "wire.github.remedy_explicit",
+      "sha256": "0cce7ebda37ae5f4ac0e704d98ee48fc6e640a98eb4cf3ada9123cf1de4a73cb"
+    },
+    {
+      "locale": "zh-CN",
+      "key": "wire.github.remedy_unavailable",
+      "sha256": "8a23952d429405c3e63270f662c9ddcc827348336dcf380f70e0841f268c7277"
+    },
+    {
+      "locale": "zh-CN",
+      "key": "wire.github.remedy_excluded",
+      "sha256": "72c3d407b8d781ee857b43bc73602c78669b98e01387cadecee2f949be3d03d0"
+    },
+    {
+      "locale": "zh-CN",
+      "key": "wire.github.remedy_no_repos",
+      "sha256": "b18f739e5815eb4ae6c5038ecb08d7573c5e0b6e6107d7ae20f341b012666b3f"
+    },
+    {
+      "locale": "zh-CN",
+      "key": "wire.github.refusal_detail",
+      "sha256": "3230c0a7d34095819c6de1ad6535d61fe86fd124736220c5329d83b5d82ddad6"
+    },
+    {
+      "locale": "zh-CN",
+      "key": "wire.github.age_unknown",
+      "sha256": "664939a1fa2ef75573f985fdab762c4be41d0c8897a62db56faf0396b2763dfd"
+    },
+    {
+      "locale": "zh-CN",
+      "key": "wire.github.age_now",
+      "sha256": "de6785d99e028971c6bfb19dc4f6d17d572d196038f7a5d904ffd4c29b148f5a"
+    },
+    {
+      "locale": "zh-CN",
+      "key": "wire.github.age_minutes",
+      "sha256": "7c92601e5a8ff02e841235072c2dd40501cc3f860f1f02f52927118d8a0da817"
+    },
+    {
+      "locale": "zh-CN",
+      "key": "wire.github.age_hours",
+      "sha256": "54c430110dc8e0782329083609b2cfbb9abc8a5847d871faf93ca495ab2f9ea4"
+    },
+    {
+      "locale": "zh-CN",
+      "key": "wire.github.age_days",
+      "sha256": "73c85539f1530c68e4226d4a98a10503c6fa58bf90b828dd45cebff92b0c5102"
+    },
+    {
+      "locale": "zh-CN",
+      "key": "wire.github.ttl",
+      "sha256": "06227ec697e3bc274cc722b2fcdf87269e97e799e1e2d0bf99281fcb380b7b70"
+    },
+    {
+      "locale": "zh-CN",
+      "key": "wire.github.failure_auth",
+      "sha256": "c4c054701e07309593059aefc26b861c0179a20f6bf5fb718be1c80a5e2b83ac"
+    },
+    {
+      "locale": "zh-CN",
+      "key": "wire.github.failure_offline",
+      "sha256": "b6653c2b8f9bb759d2a3dbcd2d5c884c805053aaaa12f02f0da5be6e932f1c0b"
+    },
+    {
+      "locale": "zh-CN",
+      "key": "wire.github.failure_server",
+      "sha256": "2eb93764263d085c56c3236e43dc8e02590be3cb1bab3de076510d885e8099b6"
+    },
+    {
+      "locale": "zh-CN",
+      "key": "wire.github.failure_coverage",
+      "sha256": "a6acee27a473d364f64797bb58cc4f81bd8a9e35364e1dbb43c995374b295a51"
+    },
+    {
+      "locale": "zh-CN",
+      "key": "wire.github.failure_unknown",
+      "sha256": "5662c899626025ef9641d365a8e3484ecee76aa5fd46e4ef4c3075caf40e1c9a"
+    },
+    {
+      "locale": "zh-CN",
+      "key": "wire.github.failure_unfetched",
+      "sha256": "16efe16ddba3edc174dc3d5834686798f393c6fdb5a59bd72476cea24cbe52d8"
+    },
+    {
+      "locale": "zh-CN",
+      "key": "wire.github.failure_earlier_login",
+      "sha256": "ccfddb5df1afc28acf8dc569063b7845aad2ceaf20598dea488842e53d80103f"
+    },
+    {
+      "locale": "zh-CN",
+      "key": "wire.github.failure_unknown_login",
+      "sha256": "0b15d4f9486a97ca13944cc3e58aed801c2990a4ab7cdf19e9fa31e40a041692"
+    },
+    {
+      "locale": "zh-CN",
+      "key": "wire.github.readiness_unavailable",
+      "sha256": "1a17e6aa8e8f4160419be3f58cd8859b5dcc3cc88bcfa737f06618aa7b8dfb4d"
+    },
+    {
+      "locale": "zh-CN",
+      "key": "wire.github.readiness_empty",
+      "sha256": "88b9b458674811b82f61687914461c2fad918dc1e37c0dbf40a46835472883f6"
+    },
+    {
+      "locale": "zh-CN",
+      "key": "wire.github.readiness_opted",
+      "sha256": "207e55ba07b3a03cc80c1f53c9c00d516ce9993c9ab2854c37659939c4b651c0"
+    },
+    {
+      "locale": "zh-CN",
+      "key": "wire.github.readiness_more",
+      "sha256": "0b3ad98ab8719f0facf726e743bbbeea9cb42455448d8bb97bd3feb020b609c4"
+    },
+    {
+      "locale": "zh-CN",
+      "key": "wire.github.readiness_explicit",
+      "sha256": "164e56d02dcd7a90cfa237255c56bf17f2bcc498c7921406451a7755112c0583"
+    },
+    {
+      "locale": "zh-CN",
+      "key": "wire.github.readiness_last_good",
+      "sha256": "7095e4f72a6cc5bd3d9f1b23d11a366d019701d065afd4026141a13ec34de914"
+    },
+    {
+      "locale": "zh-CN",
+      "key": "wire.github.readiness_enumerated",
+      "sha256": "5cf4cfdeaf11a48de5195bb4fc3b6be4127414bc46bed150a9cab7ebddf3783a"
+    },
+    {
+      "locale": "zh-CN",
+      "key": "wire.github.readiness_pointer",
+      "sha256": "a92b3a0a8cc7f881c2a3b348e7b26655e26a3251857ff4de20a232c77526875a"
+    },
+    {
+      "locale": "zh-CN",
+      "key": "wire.github.readiness_list",
+      "sha256": "e47992ff19c76efca6768342e0b25aeb576d4f1ed63dc6434f471181025d57a7"
+    },
+    {
+      "locale": "zh-CN",
+      "key": "wire.github.borrower_unset",
+      "sha256": "0acf7da12f6b87e9c6b7f0c270bc5e70a634a86bd976591fd0ee330f89b6cce9"
+    },
+    {
+      "locale": "zh-CN",
+      "key": "wire.github.borrower_unset_default",
+      "sha256": "d6e1f91ca6b7fe44cc7cb770b5d7cdc0b79445f2485d2d4017671ec3ef592f1f"
+    },
+    {
+      "locale": "zh-CN",
+      "key": "wire.github.borrower_overflow",
+      "sha256": "5fdbd1e7dba3a99344e69c689742a536bc208aef52b1adc833a9557408b6901a"
+    },
+    {
+      "locale": "zh-CN",
+      "key": "wire.github.wrapper_denied",
+      "sha256": "eedbbba26fb543d905c10c860c96457b37210324eb83bbfe3c053d4f2fbb8641"
+    },
+    {
+      "locale": "zh-CN",
+      "key": "wire.github.usage_repo",
+      "sha256": "f85988501e70892f0de9eee42ca1d3daf6256a96ef9e3e5681128b7228ec4fc2"
+    },
+    {
+      "locale": "zh-CN",
+      "key": "wire.github.usage_repos_args",
+      "sha256": "14db61239f353b147f83e8e5c89d32e88b7a2439de85b63a6ebbd5df45421fcc"
+    },
+    {
+      "locale": "zh-CN",
+      "key": "wire.github.usage_default",
+      "sha256": "8840520e81c6660ffc52cb8857f21dc1a158ba9f1bc26808b9281a1a17a053d7"
+    },
+    {
+      "locale": "zh-CN",
+      "key": "wire.github.usage_refresh",
+      "sha256": "47e9e1d9a47202503241837d1f8387c29ed00eb6d74c9e9338a1b98b741b5fc2"
+    },
+    {
+      "locale": "zh-CN",
+      "key": "wire.github.owner_overflow",
+      "sha256": "3139f4ff41c7d3f440f082b0730bc86902f3007605e193172c264400d81e5bd8"
+    },
+    {
+      "locale": "zh-CN",
+      "key": "wire.github.reset_failed",
+      "sha256": "00049b677ecd88005120c7aefbcc7aca12a27c75c615087340ef7fa2e2979433"
+    },
+    {
+      "locale": "zh-CN",
+      "key": "wire.settings.network_credentials_github_repositories.help",
+      "sha256": "fc3045dc7e5b3623577ff4c0c6f9d0d7d25dda4314b58c7149f741dc873f8ccb"
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.progress",
+      "sha256": "8fc4b1d2b136c7f44e256a44ab0f508ee493b034762306899dfb72265b5ad1dc"
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.opt_out_none",
+      "sha256": "125ebaff4f0ad50840da9f52e199e0b4d38cae25d799737d656c00069e6f85a4"
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.opt_out_names",
+      "sha256": "927a74392b059d6948b4b984caab2864a2a25d63f4cda47ca7623aeb64a612ec"
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.repos_empty",
+      "sha256": "593719c73e8fc3748f146c06b7a9ce0466012a0fe9e47f5cdc70a4da32450534"
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.repos_head",
+      "sha256": "c4ea477cb1f5f0550f43c9f844ad0c64b824c40bd55048c214bfb0def8e1b7d5"
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.opted_suffix",
+      "sha256": "ffc525bdd58e79127720313ff395511760d21e29f15469ea970346049996fc16"
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.more",
+      "sha256": "65d5d0aafd17a7d4b7d87c5a7333fa9ebb8bc1e6e4bab1112c576701909b654a"
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.capacity",
+      "sha256": "12364b67e3e3a0beadf548cb7b89a7d5dfa1a032aa07634b17ffba1f4ed8fe2f"
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.source_explicit",
+      "sha256": "f70b2caa889b89e425eb20e7468781ea685e1c24ce5e04007adcedc01bb95a35"
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.source_last_good",
+      "sha256": "e40a93ac58088a7df9a1d26f4ebff28627102ad3e6f9d7fa152496a1cd134656"
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.source_enumerated",
+      "sha256": "64c8fe7a898fb13e65a1ec6c2730ed11cf3daa9f4c5c88d8ef20ad96ac109830"
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.which_explicit",
+      "sha256": "6212cc6aa0de3d0f4d5a2d5fc7dbcbf6e0c5873276c6840b9d52c4356454e686"
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.which_enumerated",
+      "sha256": "35f9b68af00fc3a46b6c271b3d55ee5265e89ea558d6452518f41b2326e3ba70"
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.exclude_already",
+      "sha256": "c3ae8ebc84957e918f9d56d0042ce528896264fd5ca94857553597cfca4602b3"
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.exclude_typo",
+      "sha256": "bd506126837ca71669f233ef8729e28382980e18162d37ae1af12a1cf63e2683"
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.exclude_unchecked",
+      "sha256": "e2cc82a8e1099bfc70e1c0f95913f868d85fc7bd6f61d8db36d8cdf2230181cb"
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.include_unchanged",
+      "sha256": "6706ec6a7fddf7f5e3e8c830ff9f7d47e4cb6380bd00315f67e5c607da7c6f7a"
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.include_typo",
+      "sha256": "e95510cbcacb6b10c21e39e2c7774ffb7c2277d90ca244f81e5a25c2531783ba"
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.include_unchecked",
+      "sha256": "a74be67628684be5db97781ac544634e11bc62acfb46219a9f9960285532be3a"
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.reason_explicit",
+      "sha256": "6ea8c549170492318679ba92967d180ba8adb8a4a36e58fd5370a4c746e5a116"
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.reason_unavailable_local",
+      "sha256": "7b70afdc6d8b2c21c8314275a0a8d0de658ad8a82a55b3dd55b5dda1463e7c16"
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.reason_unavailable_remote",
+      "sha256": "801ceab3e1caa3697753ca073ab2b8b93cb821f8df88393926487804ae0fd4e1"
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.reason_excluded_local",
+      "sha256": "754f0e349ddba22c9edc216b9d18082796f3eb3fe675eec3b2db572e60daadb3"
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.reason_excluded_remote",
+      "sha256": "7534448fd404974609c1e2b9f82f3126cfda18425af8f2e650b82a982654edb2"
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.reason_no_repos_local",
+      "sha256": "27e2019dbbd56fc64dfb9d8f838266438c8023c80a592333b6b4340848ce7201"
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.reason_no_repos_remote",
+      "sha256": "f78a84eebb963a0e08a86cff54759ef6da3155f23fb98836cce17c70ed8c84ee"
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.remedy_explicit",
+      "sha256": "7ce075368954dbe61d4ef33ca3f07c9e25ce4c03b53cec2e7793338110758326"
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.remedy_unavailable",
+      "sha256": "1f8c8f645626202247f4e10033dc0b9035444da339fb6b9080980c3557e94c52"
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.remedy_excluded",
+      "sha256": "d675e152d28a1e11a4007d3614b492202ea7a716d34d4be5aeea6185a830d56a"
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.remedy_no_repos",
+      "sha256": "d44a694501dbaa678c3d26c00839553d010b75ca12f208ffa10f2b0669a8708f"
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.refusal_detail",
+      "sha256": "33384e6b62ab2daba286fc0862a2eef6dbbddf6fb4da1b764e9495119e25785a"
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.age_unknown",
+      "sha256": "054d440af5af1fdf68b214759496b4e2b1bea15101205683813a9a3f0dcaae8d"
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.age_now",
+      "sha256": "556f1e91d557953df79fe6f19358810ec587ea66cecdcfb8388642e469d7e995"
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.age_minutes",
+      "sha256": "2c45331ac7531d434cb3c3789f98950c79ffabce7702deef4b69346ddcb07087"
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.age_hours",
+      "sha256": "87e3811074f212b46f4be6149dc534ce50fe037e46ad5f35f0deb6a05ead6dae"
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.age_days",
+      "sha256": "ab02eeb6115740120a99af414ddd702eef6a7e8216119bb64aee65ad1d0f7e77"
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.ttl",
+      "sha256": "5c0de50f6e0070d67254b50074b7f298a0fd954d86348cd471945644286a7df3"
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.failure_auth",
+      "sha256": "5a35ba445701d9b9accacfdcfd8271b4bc88d973280b0ea1ffc85f07341ef847"
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.failure_offline",
+      "sha256": "27f847b532b2b2160999332b9d3214bef5ecaa0db44e49efc764a8af7329aa62"
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.failure_server",
+      "sha256": "ecc43f19f3aecdf6a5082ab3f1ed3c95a768ba607fb218b63f5c3b7327228a25"
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.failure_coverage",
+      "sha256": "6b0b4c7904c4b0bbbc380744ffae9d3b6aa07e8f2a0e7c59aa0e1689fe97d732"
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.failure_unknown",
+      "sha256": "25be1c672737167c58ef07b6ce7fcae8c28524d74563d18ee5d8ac3b76e2b55d"
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.failure_unfetched",
+      "sha256": "072f311584285128b5708a6d5f67b3e869eb05b23161750e650dd9e41b9d5bdd"
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.failure_earlier_login",
+      "sha256": "99f742f744b17c7b730345ae09d0fbcd700853f6790d03264e272d03d39fad9f"
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.failure_unknown_login",
+      "sha256": "76e5ec61261bc2be1b7b6b0f127d7de90e07f0b6866bdfb7b358f740732f945a"
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.readiness_unavailable",
+      "sha256": "1cf3433495445a20cc1914ffb1e1ee9c6215c674c10134c89ff9b816a4d81548"
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.readiness_empty",
+      "sha256": "5e33875374ab1059b9c888f5e0a3c14941c8c0e2bb9518afc8807e2b4721e2b5"
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.readiness_opted",
+      "sha256": "a7229ac6908c4f7ff57ffdfb777a582c210303f952cfdc8cbe426c4279fc1bf4"
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.readiness_more",
+      "sha256": "f415324a373b1afb3d1fc229ca50cbf312df595025778108b3aa3bc469f2e83e"
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.readiness_explicit",
+      "sha256": "4d0c4051ec1a4b6aa91ca02f6e6f5811a251d9c0209ff58afa9249feeec8d9c7"
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.readiness_last_good",
+      "sha256": "683618b48a71eaa6e0f70326188d7584335761f6c07d3052bacdc7f91b4a0961"
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.readiness_enumerated",
+      "sha256": "cfc9c3eeab2453c2117a60d6b566b436474ecc1f4fa367f652eabb198a4ef43e"
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.readiness_pointer",
+      "sha256": "9f5da281e389a793c0e5a3b1b09dda55d9b8d1dc5de68b4949f601cd9692f5a7"
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.readiness_list",
+      "sha256": "ffc82e5c296fce9d49ca2bd62c64e9c6470ed18e7896a274d1f482fc422d57d1"
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.borrower_unset",
+      "sha256": "5174f0b62464272480832a9fafb4fa25846e27c604a264cfdca4731ba0ab54c9"
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.borrower_unset_default",
+      "sha256": "ce9de5563771bfa8a4c3047662f77b9acd148bd0294afa1a126cd1f542248d9a"
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.borrower_overflow",
+      "sha256": "7e501e87dd5d1440938d1629b1628ae04a065b316661e99deee9ded59828a41a"
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.usage_repo",
+      "sha256": "2bfe8e3c646792bf41382e600fe20d3c3308c19a07f623fc50ed690b8275d754"
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.usage_repos_args",
+      "sha256": "dcd2b17f86812716c3b833de501812e099309871e0f535d201d2b1e6a69e828f"
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.usage_default",
+      "sha256": "d0cdf7d43931ab92b5bc6400ec73149799942c562ee8f160d6243ca6536e3529"
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.usage_refresh",
+      "sha256": "f1f0edc1dffc29ac0edf855b2e5b01a352a7356eb5ef7dc073353b74e6379938"
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.owner_overflow",
+      "sha256": "4ad51ce7eeb3e5b9963cfb749659fd56aa25602a52dabb68c96bceee5871faf1"
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.reset_failed",
+      "sha256": "808a397045334ce64c99fdf39e15aed626e4e63dcf15d3f383d1fe6073c36754"
+    },
+    {
+      "locale": "vi",
+      "key": "wire.github.progress",
+      "sha256": "48db88818c30523629d1c00a2fc35fcf1918c2810c1bb25e75c3d12a05494764"
+    },
+    {
+      "locale": "vi",
+      "key": "wire.github.opt_out_none",
+      "sha256": "a3f9b90ed19af5b6f3c51979f7a5b12de6d3c132f07322690c593ba47d634311"
+    },
+    {
+      "locale": "vi",
+      "key": "wire.github.opt_out_names",
+      "sha256": "64a2a9d4163fb05fd4f20767e0ea654ca85478fbe6ad957fba9746360fbb121e"
+    },
+    {
+      "locale": "vi",
+      "key": "wire.github.share_empty",
+      "sha256": "a7a47eea8f1ebb9781501f6294887fb9b4155928b9ba0bf4eb9a205300e8f674"
+    },
+    {
+      "locale": "vi",
+      "key": "wire.github.repos_empty",
+      "sha256": "afc470a0f247e2d51e97c89a7128d3bb8c054bfd0eb979bdff99ebadc40cddc8"
+    },
+    {
+      "locale": "vi",
+      "key": "wire.github.repos_head",
+      "sha256": "bfccb4f5899c8ab1c744c0e3e9c2626168fe76d36a0364bc25f525eddb21647d"
+    },
+    {
+      "locale": "vi",
+      "key": "wire.github.opted_suffix",
+      "sha256": "7daf4b523436d23ec4feb69bb7ea83b839d5918f65e34d9950fde4672223de8f"
+    },
+    {
+      "locale": "vi",
+      "key": "wire.github.more",
+      "sha256": "280fd1f05829ac61279ba6754c6aafcc36d5cd47eb20872b4a383d0ee1000f64"
+    },
+    {
+      "locale": "vi",
+      "key": "wire.github.capacity",
+      "sha256": "b129191de325b24451c00c8ed2c146ab4c3779deb8be3778adf19d15660f2297"
+    },
+    {
+      "locale": "vi",
+      "key": "wire.github.opt_out_step",
+      "sha256": "5e94c30188c1e3192d8d91f13ba7e4795fab7e633045fa38b3044577824cbc1d"
+    },
+    {
+      "locale": "vi",
+      "key": "wire.github.source_explicit",
+      "sha256": "8b11ed9d0db13e7367b8752be3f7941ec28975c3b8fca031f62348d23af410d7"
+    },
+    {
+      "locale": "vi",
+      "key": "wire.github.source_last_good",
+      "sha256": "5fa7a432ea261f875ffc6afd1202ab6cf6543be70f5b4040bc8d96836ce52e47"
+    },
+    {
+      "locale": "vi",
+      "key": "wire.github.source_enumerated",
+      "sha256": "04cc1d041029bac0a26b46750c2d4a130ffdb16dc9f8d31c1aa405a986d1dd72"
+    },
+    {
+      "locale": "vi",
+      "key": "wire.github.which_explicit",
+      "sha256": "6c33503332cfb9e8c691cfaf0aa98f09315b756460437830ef2c7dfc39c596f5"
+    },
+    {
+      "locale": "vi",
+      "key": "wire.github.which_enumerated",
+      "sha256": "96d3176a7d33c477446d4a6ff6afc163ac9667b0d7c1cfaf9f9ed963eb06f230"
+    },
+    {
+      "locale": "vi",
+      "key": "wire.github.exclude_already",
+      "sha256": "4cb7719e369bccec00db8ac2eb4dda4f372485bd9f3d98143e38bd890d9348b5"
+    },
+    {
+      "locale": "vi",
+      "key": "wire.github.exclude_typo",
+      "sha256": "0315b44d81439e24438db6d0d4e241a5e30fa85d4f704660b812c4e536740ecb"
+    },
+    {
+      "locale": "vi",
+      "key": "wire.github.exclude_unchecked",
+      "sha256": "622828615472313af245f666a36ede15c5b5a9e35661fcfffdb8d1cb813f0642"
+    },
+    {
+      "locale": "vi",
+      "key": "wire.github.exclude_added",
+      "sha256": "ba9c226ad50e58f7af711d236157873e87ad59ca0489fb65fdfe1f97817afc0d"
+    },
+    {
+      "locale": "vi",
+      "key": "wire.github.include_unchanged",
+      "sha256": "e2078dba0cfe30c9ab2f7cd982c0c55d8bf726176450bb51215726d73f66bbd9"
+    },
+    {
+      "locale": "vi",
+      "key": "wire.github.include_typo",
+      "sha256": "28c7c177f9acab0337990ff458070e7269dd7b779a4387188e9541b287cad844"
+    },
+    {
+      "locale": "vi",
+      "key": "wire.github.include_unchecked",
+      "sha256": "29c8d7d5e72ad9ba3aa8d09331af735fb69fe10d4c36b6b461a2ce888ac94ebb"
+    },
+    {
+      "locale": "vi",
+      "key": "wire.github.include_added",
+      "sha256": "b33b2e76e26fd78487a026b8e64120b7f499d69297a9e643629d4b793c6cf47d"
+    },
+    {
+      "locale": "vi",
+      "key": "wire.github.reason_explicit",
+      "sha256": "62ba559946e4489ad9d2e7366d593917c54bd60a47c163ad6ab1cdf9d4caf5c7"
+    },
+    {
+      "locale": "vi",
+      "key": "wire.github.reason_unavailable_local",
+      "sha256": "00ce29f9eec1bdb148b11b8ecb29385555eb55744a0c002cd62e6fd769cdb85b"
+    },
+    {
+      "locale": "vi",
+      "key": "wire.github.reason_unavailable_remote",
+      "sha256": "15d59a1ef783c6a160f50832180d6ab9e662168245fa862b1b0d7d2330247a08"
+    },
+    {
+      "locale": "vi",
+      "key": "wire.github.reason_excluded_local",
+      "sha256": "afec9b2701e14b0101cd028ea17086addc2d67f3f2fa59fad92c7c259af355e2"
+    },
+    {
+      "locale": "vi",
+      "key": "wire.github.reason_excluded_remote",
+      "sha256": "37d96eb0eda00afd18333e560af12a9cc111a027e688045aef59e66ea5e24332"
+    },
+    {
+      "locale": "vi",
+      "key": "wire.github.reason_no_repos_local",
+      "sha256": "b3fa28e6056fa2c8f09b50bd4dc3d2e71ee839fb5c0269db04c6466b7595bd17"
+    },
+    {
+      "locale": "vi",
+      "key": "wire.github.reason_no_repos_remote",
+      "sha256": "6e7c79006cc9666bc17cf6a8b2baeb05840ed6fdd616010fb67a611f42e93a4c"
+    },
+    {
+      "locale": "vi",
+      "key": "wire.github.remedy_explicit",
+      "sha256": "8d230d5f7f9b9327f081d970242aeeac7aab5b36cdfaa1d6774a7e61dc90fe0d"
+    },
+    {
+      "locale": "vi",
+      "key": "wire.github.remedy_unavailable",
+      "sha256": "1d5f83cfd455a1982efe24acaffdb6ee5f01e32ada04aa0375d442e0bba9426e"
+    },
+    {
+      "locale": "vi",
+      "key": "wire.github.remedy_excluded",
+      "sha256": "5ed4db38f7775682a7ff1fb3823b9b5ef5f74154b0f13eecc6096ff13de768bd"
+    },
+    {
+      "locale": "vi",
+      "key": "wire.github.remedy_no_repos",
+      "sha256": "cce58557c62fd03bfd1f9ac9c713d1f271f15d84b44871169078e1e61ebde2b6"
+    },
+    {
+      "locale": "vi",
+      "key": "wire.github.refusal_detail",
+      "sha256": "33384e6b62ab2daba286fc0862a2eef6dbbddf6fb4da1b764e9495119e25785a"
+    },
+    {
+      "locale": "vi",
+      "key": "wire.github.age_unknown",
+      "sha256": "c63b0510c52c473d5aa832127905737609d27e9b5b74e2f79f37c7668330cf9b"
+    },
+    {
+      "locale": "vi",
+      "key": "wire.github.age_now",
+      "sha256": "b46f7a2b0225ae23323c9ab498f9bee55f6ae4763072c53f9153d8f2c0ea17dc"
+    },
+    {
+      "locale": "vi",
+      "key": "wire.github.age_minutes",
+      "sha256": "f4dac61bddb2bbce1e1bd98c3897388876da2d9e38d69b70b546e08a12a86913"
+    },
+    {
+      "locale": "vi",
+      "key": "wire.github.age_hours",
+      "sha256": "38b78e58363a057ba8cd828d237dbaa56880956077083aabe9ef581febd3b8ab"
+    },
+    {
+      "locale": "vi",
+      "key": "wire.github.age_days",
+      "sha256": "53f2917146af45e2b3fff536c7ce88945fb5c2a8c5ba565536123a80d0492dee"
+    },
+    {
+      "locale": "vi",
+      "key": "wire.github.ttl",
+      "sha256": "f2c9dad9f1e2ff46a797a55000a48a0cd4557c91dc5d8c58967249d3daa76c33"
+    },
+    {
+      "locale": "vi",
+      "key": "wire.github.failure_auth",
+      "sha256": "d5082000e98ba06c40671250bdf62abd29977d69a87fccac73ac4142b93d09f1"
+    },
+    {
+      "locale": "vi",
+      "key": "wire.github.failure_offline",
+      "sha256": "40e993ada9dafbd3d5b4f8d6fd8558fe81b8d866346e78bcd392e25dede5f138"
+    },
+    {
+      "locale": "vi",
+      "key": "wire.github.failure_server",
+      "sha256": "9ee5984f9abd43d4982b4927f5fbc68ebf8c72373849d771fffa1e61b7286bdc"
+    },
+    {
+      "locale": "vi",
+      "key": "wire.github.failure_coverage",
+      "sha256": "a0339f0b3cd8a0eb7a57d343758e9cb4fa38c8bd1757c707622ceb2f280da7ae"
+    },
+    {
+      "locale": "vi",
+      "key": "wire.github.failure_unknown",
+      "sha256": "bff9a9e2a625855f2a38dd368899ffb7dbd9591375420d62f63e4446690e6f20"
+    },
+    {
+      "locale": "vi",
+      "key": "wire.github.failure_unfetched",
+      "sha256": "75eb53f6eff08dc8595ed6cd8b7f735a66e1e46973c59d3d8c8840b53b271c0e"
+    },
+    {
+      "locale": "vi",
+      "key": "wire.github.failure_earlier_login",
+      "sha256": "f3f2f1913a3f5cee0d9ab459bbcd173f7a60462951bdbd635be95cc5781e1b07"
+    },
+    {
+      "locale": "vi",
+      "key": "wire.github.failure_unknown_login",
+      "sha256": "8ca9212e9adceef13597904f3d8d3d923652cd0cf82f19af44985ec31cf196c3"
+    },
+    {
+      "locale": "vi",
+      "key": "wire.github.readiness_unavailable",
+      "sha256": "b4e73589b206f97991d5f1628a28d14e178f0ed115be07343ebb6a7abe1bbd55"
+    },
+    {
+      "locale": "vi",
+      "key": "wire.github.readiness_empty",
+      "sha256": "22c9f2ad3759058af460340a6b51c20cb7f15961aafdc47f0d222def77539829"
+    },
+    {
+      "locale": "vi",
+      "key": "wire.github.readiness_opted",
+      "sha256": "0611084da18f3ac3cb8ff22071c10090febb3cda21e2d86d3df8563491267119"
+    },
+    {
+      "locale": "vi",
+      "key": "wire.github.readiness_more",
+      "sha256": "85801e3ff516170f92e931b55ef951e302d1fc9950f8953d09f84bea26ac11be"
+    },
+    {
+      "locale": "vi",
+      "key": "wire.github.readiness_explicit",
+      "sha256": "15ad7a41f0fa2cb02c41b6b93e4186d9027e0378edaa79e536f97302e17f01c2"
+    },
+    {
+      "locale": "vi",
+      "key": "wire.github.readiness_last_good",
+      "sha256": "b8b524094523c1f75c340421d9c3f98eeed9317c85c86abbfa28573b595e3f29"
+    },
+    {
+      "locale": "vi",
+      "key": "wire.github.readiness_enumerated",
+      "sha256": "39853dfde1885cb2d46fd759bec108859f560554a5cf72085bb635736c810dcc"
+    },
+    {
+      "locale": "vi",
+      "key": "wire.github.readiness_pointer",
+      "sha256": "e9bef43468ec3b564de78dde6b513f7f1bbce8d9894010e798b98b7754cd774e"
+    },
+    {
+      "locale": "vi",
+      "key": "wire.github.readiness_list",
+      "sha256": "e4cd5ede4f2b98b48ac3dcc394cf276d29f5a89294ffdeae8352436a3d74caee"
+    },
+    {
+      "locale": "vi",
+      "key": "wire.github.borrower_unset",
+      "sha256": "41c2b1c351d0b3acdae2162279007d23cf59e0063b0e51c736b43e2ccdae4cdb"
+    },
+    {
+      "locale": "vi",
+      "key": "wire.github.borrower_unset_default",
+      "sha256": "1b1ea90bd82dfb4747b4b3a81802d37f70ee6d05bdab3a71f729b0f8f891afb4"
+    },
+    {
+      "locale": "vi",
+      "key": "wire.github.borrower_overflow",
+      "sha256": "17d599c35edbfc9fac0c1efe049935cee3c0dabb612d50e663102daa29f2b702"
+    },
+    {
+      "locale": "vi",
+      "key": "wire.github.wrapper_denied",
+      "sha256": "a1eb8d3d5bd38aa6f97065cd29d65b3f133f5fec3748622872c49791443fa44a"
+    },
+    {
+      "locale": "vi",
+      "key": "wire.github.usage_repo",
+      "sha256": "dfb0efa7148c3ecf91fbc87ec09ed0e8fd55891aa6958d562ddf2a4dfa9430ea"
+    },
+    {
+      "locale": "vi",
+      "key": "wire.github.usage_repos_args",
+      "sha256": "dc6bca838d41090890d309925068b66c2019bf8bcedca6a2001df0bc6561881f"
+    },
+    {
+      "locale": "vi",
+      "key": "wire.github.usage_default",
+      "sha256": "4b7cb1e0cd0baecda4b0d37659aadba69ac855fa22603df0b3b76b6be79c6689"
+    },
+    {
+      "locale": "vi",
+      "key": "wire.github.usage_refresh",
+      "sha256": "294d7234621c5c33946ee940a0b901b00baa5998d6a5ff7399eaa40995ff5f98"
+    },
+    {
+      "locale": "vi",
+      "key": "wire.github.owner_overflow",
+      "sha256": "d2f23925585151f4869062a05d89930fd6d2bc3dadc074e2808619628f072c97"
+    },
+    {
+      "locale": "vi",
+      "key": "wire.github.reset_failed",
+      "sha256": "5bd7aa6d55ba3e0845cc02be19cafb2b430dc40741fb18f989da6d0fed3b2323"
+    },
+    {
+      "locale": "vi",
+      "key": "wire.settings.network_credentials_github_repositories.help",
+      "sha256": "08bd93d82b9d1ffd1ad05cc23a2c97e5bd48b93a24ad338d064ef171ff57b010"
+    },
+    {
+      "locale": "ur",
+      "key": "wire.github.progress",
+      "sha256": "7e8836754337cbbdaef1729b43569e50d5a9e92e12c61b99f0a448723ccbcb18"
+    },
+    {
+      "locale": "ur",
+      "key": "wire.github.opt_out_none",
+      "sha256": "d4a93f6d881ccadc16b787358a47dad6b35094903d1ac9c7a56aeefdbb623313"
+    },
+    {
+      "locale": "ur",
+      "key": "wire.github.opt_out_names",
+      "sha256": "c4db83eacd291cccce1ec6c1f777d00d3f2ab59c762662dc171000b625d47aea"
+    },
+    {
+      "locale": "ur",
+      "key": "wire.github.share_empty",
+      "sha256": "7d7a2af4b99d26aec4fce7869eed6cbc87639f9ce6dc6b252c6dae254827aa6a"
+    },
+    {
+      "locale": "ur",
+      "key": "wire.github.repos_empty",
+      "sha256": "1b5e486bae4c3ee6f91f6841ae55a816116422fd15f2d822f6a715ffa3e5b6c2"
+    },
+    {
+      "locale": "ur",
+      "key": "wire.github.repos_head",
+      "sha256": "557d050390ed415487e513802a281469fd685e20ee8aed3f63ab50a883f8d9a1"
+    },
+    {
+      "locale": "ur",
+      "key": "wire.github.opted_suffix",
+      "sha256": "bd12e9dd09f28e099541c5497dda949bbdba8e99bf668a643842897b9934274c"
+    },
+    {
+      "locale": "ur",
+      "key": "wire.github.more",
+      "sha256": "5470e8c584259c41b304e5107d6519036977ea968c5c963749124d99dd02fe9a"
+    },
+    {
+      "locale": "ur",
+      "key": "wire.github.capacity",
+      "sha256": "3c151e0133b707ed0bf77920c5946e1f3f103ef465aad70d17e0d9af1c51d015"
+    },
+    {
+      "locale": "ur",
+      "key": "wire.github.opt_out_step",
+      "sha256": "19c97764694180d25b044d8ff36c345f7dec80181e0100c775ca41cfb1d96030"
+    },
+    {
+      "locale": "ur",
+      "key": "wire.github.source_explicit",
+      "sha256": "b4a99c690812cd3f13552db60cc9af4a3bb9cee12e082a4f5a0ee0ea60accae0"
+    },
+    {
+      "locale": "ur",
+      "key": "wire.github.source_last_good",
+      "sha256": "05190648be0da8d52ef2dd1310b0320a42b1a8786eaffe7ea9029943722f3912"
+    },
+    {
+      "locale": "ur",
+      "key": "wire.github.source_enumerated",
+      "sha256": "aefb4f350f14a4fe9fbbc7b43f213967c40efd9acef808848b311613f289c1a6"
+    },
+    {
+      "locale": "ur",
+      "key": "wire.github.which_explicit",
+      "sha256": "6e3f706e92cca5edb2f7a06c8f9152ba1495b3e6eceb1db4a085643e15c4443c"
+    },
+    {
+      "locale": "ur",
+      "key": "wire.github.which_enumerated",
+      "sha256": "8e703e4916516823c84ea4c92c479a0fbe28f56a7d00bd6654ef073d0befca0a"
+    },
+    {
+      "locale": "ur",
+      "key": "wire.github.exclude_already",
+      "sha256": "0f1b10ccdf52bc6c7dfb6625cd2b86db3ad1bbcd93b94e45c237be0c61aa8499"
+    },
+    {
+      "locale": "ur",
+      "key": "wire.github.exclude_typo",
+      "sha256": "1b1a2fcd23d6bdcc6103dd9cd878597a996a2284534b769a66d7edc8ba5ba518"
+    },
+    {
+      "locale": "ur",
+      "key": "wire.github.exclude_unchecked",
+      "sha256": "9c626cb51142d8439d80a9ca8a6dc47ba104d490dff5787652f8882a91653068"
+    },
+    {
+      "locale": "ur",
+      "key": "wire.github.exclude_added",
+      "sha256": "61fd457860156d6da970cc6c3a5bd8dd0f9661a800e4ecd2a2ccff72c0eb8ec3"
+    },
+    {
+      "locale": "ur",
+      "key": "wire.github.include_unchanged",
+      "sha256": "5bb2b1e08e627c3f2919d38f484af495c274854ce0d09ee94099ce2a131f7cd6"
+    },
+    {
+      "locale": "ur",
+      "key": "wire.github.include_typo",
+      "sha256": "c81aebc21e6ca5d4b41f46dd825c9338e269a513ad833967328195b40188edac"
+    },
+    {
+      "locale": "ur",
+      "key": "wire.github.include_unchecked",
+      "sha256": "0644bfa263a3065e50afc5d93175a6e7442b8420cd35e7b60f22ab43ca794ca1"
+    },
+    {
+      "locale": "ur",
+      "key": "wire.github.include_added",
+      "sha256": "39e9c56d59dc55a316adedbf94fd0e956f0f10e2110a8e632f14907bc172e4c2"
+    },
+    {
+      "locale": "ur",
+      "key": "wire.github.reason_explicit",
+      "sha256": "c6efca622fc3b1486d4ecbdf9c555088818f0ae4a41cc518bf153571652b00cc"
+    },
+    {
+      "locale": "ur",
+      "key": "wire.github.reason_unavailable_local",
+      "sha256": "3b3a1b1969385a83980a6b4e93992d54de8f185d41bab63063f5a0a74ecfdca1"
+    },
+    {
+      "locale": "ur",
+      "key": "wire.github.reason_unavailable_remote",
+      "sha256": "dd67d7a1f86ca45167a749608af338e70a206e284b2d8d4c33023f5371f77859"
+    },
+    {
+      "locale": "ur",
+      "key": "wire.github.reason_excluded_local",
+      "sha256": "dd8574c5a93662d5140ab6c47c7afbface5f05b585f0c057f7c316b1149b32d7"
+    },
+    {
+      "locale": "ur",
+      "key": "wire.github.reason_excluded_remote",
+      "sha256": "871a40b4b2869c3e1b190a6556c3aae8bb978652a35bf4699b745e51d474fd0c"
+    },
+    {
+      "locale": "ur",
+      "key": "wire.github.reason_no_repos_local",
+      "sha256": "c87adff0147092a41814af51956bb193e3cae3cddf3e8f17e9c452b3a6f44025"
+    },
+    {
+      "locale": "ur",
+      "key": "wire.github.reason_no_repos_remote",
+      "sha256": "3b7789c37d42c38ce8bd6df37194709f67e3e047acf69d3ba36b6d64d70451d1"
+    },
+    {
+      "locale": "ur",
+      "key": "wire.github.remedy_explicit",
+      "sha256": "6e6fa5a94749dc5c9fdf4db79afe6094c87fdcf5e9c5ac70768085aecb516207"
+    },
+    {
+      "locale": "ur",
+      "key": "wire.github.remedy_unavailable",
+      "sha256": "b22898590e473a19a33eda609636f6d6295a851ad75f5f25766ee3ab5eb5aa4c"
+    },
+    {
+      "locale": "ur",
+      "key": "wire.github.remedy_excluded",
+      "sha256": "e67694b79ebc3cae4d56139012902565bf4240cc366f6b43163b2f0405fb997b"
+    },
+    {
+      "locale": "ur",
+      "key": "wire.github.remedy_no_repos",
+      "sha256": "e4317ce1341d16e1ef1957c4d32606106c237f1082c7cc528708021c5926a858"
+    },
+    {
+      "locale": "ur",
+      "key": "wire.github.refusal_detail",
+      "sha256": "33384e6b62ab2daba286fc0862a2eef6dbbddf6fb4da1b764e9495119e25785a"
+    },
+    {
+      "locale": "ur",
+      "key": "wire.github.age_unknown",
+      "sha256": "e33fcd80fd68bc4d48c31292ef4f9bfbd008c0d7b15f737985db40d590d446fd"
+    },
+    {
+      "locale": "ur",
+      "key": "wire.github.age_now",
+      "sha256": "d77912956955f5e6a49b4fae6a8ab443abc6ebc6eeba8e85cdb5a02aeb2624f2"
+    },
+    {
+      "locale": "ur",
+      "key": "wire.github.age_minutes",
+      "sha256": "8746e557fab3260edc90c026adf809357894ce43bedb10bb757e793d3d530525"
+    },
+    {
+      "locale": "ur",
+      "key": "wire.github.age_hours",
+      "sha256": "63e5199c60c831a0ecb7a51d74c4ea52a73917228506a5d43a138bd249d4cde1"
+    },
+    {
+      "locale": "ur",
+      "key": "wire.github.age_days",
+      "sha256": "005a8c425fb568a2e4f977c6ab94fcaf21ec51dacd1d4e3aafa1649de1e06d9d"
+    },
+    {
+      "locale": "ur",
+      "key": "wire.github.ttl",
+      "sha256": "6cb0af0e41ee078f8c9423e72c705966124f1993cb6d1c2437bf59483938c22d"
+    },
+    {
+      "locale": "ur",
+      "key": "wire.github.failure_auth",
+      "sha256": "0c1cfd17ea7ee67fe9a95a6f1f21c6db3cecc7dc88202e41d4aac66c8f459500"
+    },
+    {
+      "locale": "ur",
+      "key": "wire.github.failure_offline",
+      "sha256": "93a75ba5cc781675099bbd4c25f5450b8c05e0bb1b72f1b477918192d1b986f5"
+    },
+    {
+      "locale": "ur",
+      "key": "wire.github.failure_server",
+      "sha256": "eca541d0dcffd7b3fdeafce9ed97124c913da556c38d9d9bef401f1610ce4e21"
+    },
+    {
+      "locale": "ur",
+      "key": "wire.github.failure_coverage",
+      "sha256": "d8a4c383196aef5bad6d42e5737dbf180e0b1c1dea581db28cdbde0c43bc18d0"
+    },
+    {
+      "locale": "ur",
+      "key": "wire.github.failure_unknown",
+      "sha256": "0ff9b5aaca1f75f731d683a901b5f9bb2bdc6b84b3c777187f38b41572f8939d"
+    },
+    {
+      "locale": "ur",
+      "key": "wire.github.failure_unfetched",
+      "sha256": "820deadf0f4a49684bd27bba1931bdf6b1f831f6f3a67a9d5017ab773d3a88c7"
+    },
+    {
+      "locale": "ur",
+      "key": "wire.github.failure_earlier_login",
+      "sha256": "c10c453258cdd7b4aa67a00fb59ffaa5e232d64a7eadedcd191d7c938f92bfed"
+    },
+    {
+      "locale": "ur",
+      "key": "wire.github.failure_unknown_login",
+      "sha256": "2989c05e4cb944640c173ac25554c4ccba4bf2525ca441699efbae8d1e3faca1"
+    },
+    {
+      "locale": "ur",
+      "key": "wire.github.readiness_unavailable",
+      "sha256": "bddcf88cc3b440f0db9f815f83250e307f276f73ac78458d371364462060d88f"
+    },
+    {
+      "locale": "ur",
+      "key": "wire.github.readiness_empty",
+      "sha256": "c04944793aec67d093eaa14c91ca7f5c3275c2b28b98be302535d2961640a084"
+    },
+    {
+      "locale": "ur",
+      "key": "wire.github.readiness_opted",
+      "sha256": "2f8ac7b6427fc44b0cc0a1410b6d5bd676bdd830e2af3c4a188399c6bf1edc9b"
+    },
+    {
+      "locale": "ur",
+      "key": "wire.github.readiness_more",
+      "sha256": "6ce70461e7140c57afd67c36dcbb78eb1423bd9de8559d078476f7f5f20b6558"
+    },
+    {
+      "locale": "ur",
+      "key": "wire.github.readiness_explicit",
+      "sha256": "4f52f3023167c4c52bbf9ce47e8945ac11dfb9ec1d8b6b3045ccebc90947c6a8"
+    },
+    {
+      "locale": "ur",
+      "key": "wire.github.readiness_last_good",
+      "sha256": "ef39f1941f6da1ca9bc29661e474a12c6fa6346e5c10bb06f38b78e46d63d747"
+    },
+    {
+      "locale": "ur",
+      "key": "wire.github.readiness_enumerated",
+      "sha256": "45cbeed48023ad636e4d9f35ee679e6322ac3cd79104cbd2cbc5dd7b7993c5fa"
+    },
+    {
+      "locale": "ur",
+      "key": "wire.github.readiness_pointer",
+      "sha256": "8681343ea58db6a0fa264e6ed3e61b1aba63990dbd83f7bd4ff96fef89f2fbae"
+    },
+    {
+      "locale": "ur",
+      "key": "wire.github.readiness_list",
+      "sha256": "92467b36b5178134a280452968d47695760fcf5c173b73913e6c5b690424f5e0"
+    },
+    {
+      "locale": "ur",
+      "key": "wire.github.borrower_unset",
+      "sha256": "10aec72e438bf68e62d148a57e5939f5e1d6b9b9f008139603dc040a3423549d"
+    },
+    {
+      "locale": "ur",
+      "key": "wire.github.borrower_unset_default",
+      "sha256": "034fe0cce0fda7da05b41b4d39c00eeb035655786b218918119758d05143dc59"
+    },
+    {
+      "locale": "ur",
+      "key": "wire.github.borrower_overflow",
+      "sha256": "b628a6b084e7478d435923b385bbdf4a440bb866d8b7ab83de9bec399c28e824"
+    },
+    {
+      "locale": "ur",
+      "key": "wire.github.usage_repo",
+      "sha256": "a4573fce6169c6860e6e2f9923177488e3ca08871bc83e366077b79939379568"
+    },
+    {
+      "locale": "ur",
+      "key": "wire.github.usage_repos_args",
+      "sha256": "a75e4080fc84fcdcfeb668fe531ce606ef8d9642237c6f6fb777044afb9459e2"
+    },
+    {
+      "locale": "ur",
+      "key": "wire.github.usage_default",
+      "sha256": "621f58da91b183baf52aaf2e2afed398ac9b143bc3c87a548d70eb653d9c2888"
+    },
+    {
+      "locale": "ur",
+      "key": "wire.github.usage_refresh",
+      "sha256": "e8bdc3293fe8a9a29a2c97986ca592cc1a68aa14081376e907bd253ecf1f0fe6"
+    },
+    {
+      "locale": "ur",
+      "key": "wire.github.owner_overflow",
+      "sha256": "34c107653b6bf48e1153cf04e17c4a918f0ec790523f0c8379ad26e949024b8e"
+    },
+    {
+      "locale": "ur",
+      "key": "wire.github.reset_failed",
+      "sha256": "bd0a3055210372d0c11bab71c3e2d4105c43f380bc40f1aeb45d837a609d67a2"
+    },
+    {
+      "locale": "ur",
+      "key": "wire.settings.network_credentials_github_repositories.help",
+      "sha256": "95d4b396c29178e6f46370647b31416b75634d5f69c1f132ac076c2c1182bbcd"
+    },
+    {
+      "locale": "hi",
+      "key": "wire.github.progress",
+      "sha256": "0431626f3ab05e7199b534f7240be4de6710dfd657341c05b0ee564f57a2f578"
+    },
+    {
+      "locale": "hi",
+      "key": "wire.github.opt_out_none",
+      "sha256": "85b0647296d3d9ee868901a29d5fa454ad2278b0e9123aa742ef6ff1f5f0907a"
+    },
+    {
+      "locale": "hi",
+      "key": "wire.github.opt_out_names",
+      "sha256": "3654b018ffc2760075e4426020020737f75edb7696af862929d551735ba3b3eb"
+    },
+    {
+      "locale": "hi",
+      "key": "wire.github.share_empty",
+      "sha256": "1a888a778ededaf2529fc78612cbf8cc11f940d1b2e0a88c4f13ca634ee591ac"
+    },
+    {
+      "locale": "hi",
+      "key": "wire.github.repos_empty",
+      "sha256": "b1d00e85302e765eeeb365494b96a68d208769c71febf96c2b33474b0e4b6361"
+    },
+    {
+      "locale": "hi",
+      "key": "wire.github.repos_head",
+      "sha256": "4128e7001eaab7c716a00f09e359d8c3555fb74bbd90357c21559cdb17658feb"
+    },
+    {
+      "locale": "hi",
+      "key": "wire.github.opted_suffix",
+      "sha256": "7588ad91e7acb8c24a9b44e9c44812a2b6af33e3e516e6af2ff4704b4498eb3a"
+    },
+    {
+      "locale": "hi",
+      "key": "wire.github.more",
+      "sha256": "1bfee2818d65669a653e7e30f3c0b9bb750a6a35bc3dd399bd9e30d96ed4f3e2"
+    },
+    {
+      "locale": "hi",
+      "key": "wire.github.capacity",
+      "sha256": "21ff478c0caa359e26a2e74ea057c41dabd18e772698843872fee5b81158c2cb"
+    },
+    {
+      "locale": "hi",
+      "key": "wire.github.opt_out_step",
+      "sha256": "1d4c10e985f973e9ce5d8038db1f325758a90c863a54e0de80692c5f11cecf45"
+    },
+    {
+      "locale": "hi",
+      "key": "wire.github.source_explicit",
+      "sha256": "d8e9d8df98ed925aff4cf1b0aad961f6e1f8b5570310a40d864155777cd9e271"
+    },
+    {
+      "locale": "hi",
+      "key": "wire.github.source_last_good",
+      "sha256": "ecd413c790663f9246d0534d8be2ee9fdb7b8b9d1bb8d532a2946576a5a86f21"
+    },
+    {
+      "locale": "hi",
+      "key": "wire.github.source_enumerated",
+      "sha256": "d48afe07d4828940f0dfe1554d8026d1dcc3df312105d9206bbe315fa7bb6ccb"
+    },
+    {
+      "locale": "hi",
+      "key": "wire.github.which_explicit",
+      "sha256": "9fa4387ef4fddb01b58ee2d8b7232159e529d6bfc0d385fb55b1a26559ce726b"
+    },
+    {
+      "locale": "hi",
+      "key": "wire.github.which_enumerated",
+      "sha256": "3d1e24b9497676f8b177817b7996ab603ee581caf91bcf9a1d29406f7e1c4d13"
+    },
+    {
+      "locale": "hi",
+      "key": "wire.github.exclude_already",
+      "sha256": "3cef1cf72fe4db0829f8ae32896ff97db8cd4b1d65560ffb186fa905f36e189b"
+    },
+    {
+      "locale": "hi",
+      "key": "wire.github.exclude_typo",
+      "sha256": "1cc5aa8bd6ba11dc06c337da96ababe1502d49284d0fa99e8d1fecadf86e2967"
+    },
+    {
+      "locale": "hi",
+      "key": "wire.github.exclude_unchecked",
+      "sha256": "03d2b6095f5debd67546b75c90ceaa0b04996374cf69a375deb87dd272b7eb79"
+    },
+    {
+      "locale": "hi",
+      "key": "wire.github.exclude_added",
+      "sha256": "9d15a3be37c2cd4c5b0657ec23c3922fb86fb7d742d801f97a9d5ac4cb86d2e8"
+    },
+    {
+      "locale": "hi",
+      "key": "wire.github.include_unchanged",
+      "sha256": "43d6cf72ea3db74c295f36484695db74c113413901b8ed8d801a9e772edfc3ee"
+    },
+    {
+      "locale": "hi",
+      "key": "wire.github.include_typo",
+      "sha256": "3689432582cd4e32134b697725fab063d8b02c01194397344711049b60caf497"
+    },
+    {
+      "locale": "hi",
+      "key": "wire.github.include_unchecked",
+      "sha256": "b6797545a9ac7ebe2d432a4f6263fc00f373ecd79f95e4da932775223d16f27a"
+    },
+    {
+      "locale": "hi",
+      "key": "wire.github.include_added",
+      "sha256": "bd0f7978d726d716a805e5926c8ed6e0782cd6344d17756fd49c9677bf9084e6"
+    },
+    {
+      "locale": "hi",
+      "key": "wire.github.reason_explicit",
+      "sha256": "7b4fcda6b6bf892eeb64537351e7e8a749a34064f72f83277efe07341ea52d48"
+    },
+    {
+      "locale": "hi",
+      "key": "wire.github.reason_unavailable_local",
+      "sha256": "a02e2e81d53759e9e13b2030f55f8a5a9aa873346664482b246e5545408b35e9"
+    },
+    {
+      "locale": "hi",
+      "key": "wire.github.reason_unavailable_remote",
+      "sha256": "6fb394de4db2831085c32d7c3442f7cb3f6fd6df3d4b4b7bfd854568804f2098"
+    },
+    {
+      "locale": "hi",
+      "key": "wire.github.reason_excluded_local",
+      "sha256": "ba6fdebe8793e9a98c33f2c9a73d450d3eb4db50d9bc3a7539648526a4ea4b83"
+    },
+    {
+      "locale": "hi",
+      "key": "wire.github.reason_excluded_remote",
+      "sha256": "b5adacbd2065e027835772156c2fc77658796ed1da7b13cb59d4febf498f54bc"
+    },
+    {
+      "locale": "hi",
+      "key": "wire.github.reason_no_repos_local",
+      "sha256": "cc42a3c359511e60dd7fbbc351c6a9b9d3ce083f6718abb946c5fae98bad4970"
+    },
+    {
+      "locale": "hi",
+      "key": "wire.github.reason_no_repos_remote",
+      "sha256": "3bdd82d04027409b4831475a3ffa8761ae8e3553a7dc1791b80a40f35b7333b4"
+    },
+    {
+      "locale": "hi",
+      "key": "wire.github.remedy_explicit",
+      "sha256": "b5f8fe360b2789b6ac99576bb6301d4e42b3a7876f87d99c13be834c5a500c10"
+    },
+    {
+      "locale": "hi",
+      "key": "wire.github.remedy_unavailable",
+      "sha256": "e3d2cbf5cdf333e9d670f02e51776b5f5bc7ed5db08aefa8498db8dee361691a"
+    },
+    {
+      "locale": "hi",
+      "key": "wire.github.remedy_excluded",
+      "sha256": "2ce59b54b48d568e619fcbc9d1787fd83dbf56fc39505631b7465b83278d2568"
+    },
+    {
+      "locale": "hi",
+      "key": "wire.github.remedy_no_repos",
+      "sha256": "7e2ce3bc2c8520ada7691dc4273a1dfa765afae816831b5d048ac8f0981d178d"
+    },
+    {
+      "locale": "hi",
+      "key": "wire.github.refusal_detail",
+      "sha256": "33384e6b62ab2daba286fc0862a2eef6dbbddf6fb4da1b764e9495119e25785a"
+    },
+    {
+      "locale": "hi",
+      "key": "wire.github.age_unknown",
+      "sha256": "cc3fac14b5fc8a018de3e3214281cb80acdd9694996a55167ea449403b91e245"
+    },
+    {
+      "locale": "hi",
+      "key": "wire.github.age_now",
+      "sha256": "8adf868173ae9bfe8c6993824ea9e91a1f725339e9fe95a0e517e5bdd453114d"
+    },
+    {
+      "locale": "hi",
+      "key": "wire.github.age_minutes",
+      "sha256": "cb7f95bfdeef53ef10813b46d9b42a4c8e832be4b3a850be164ab52e2fefd482"
+    },
+    {
+      "locale": "hi",
+      "key": "wire.github.age_hours",
+      "sha256": "24f93e20832a04ad7e4a49568a1cf3084a4fb9a352c98742de56a6e6d53c821f"
+    },
+    {
+      "locale": "hi",
+      "key": "wire.github.age_days",
+      "sha256": "fd0a6ad870181c41d16a2e86d6ab03e776e81c9d087fd0731d707631104f2ecb"
+    },
+    {
+      "locale": "hi",
+      "key": "wire.github.ttl",
+      "sha256": "b275faeef4610575d8d26a41b7a45c7b6d2b84f9960827d58c242a30ccf6062a"
+    },
+    {
+      "locale": "hi",
+      "key": "wire.github.failure_auth",
+      "sha256": "ef3fdf909282ee64ebe0e1ede7bbdc7fd8332ed3418fc00d81083ce10764d1ef"
+    },
+    {
+      "locale": "hi",
+      "key": "wire.github.failure_offline",
+      "sha256": "42d50cfcaa805f7899d2ddd5b9c8bf049a8e1d5a6ff67a2eb2ba73d65e524159"
+    },
+    {
+      "locale": "hi",
+      "key": "wire.github.failure_server",
+      "sha256": "b50fd38d521c47dbafeb9ce01313bac58a1ff55aacd64b95bb4e6ebd7a7afcd9"
+    },
+    {
+      "locale": "hi",
+      "key": "wire.github.failure_coverage",
+      "sha256": "ada95aabb96bfb31e6bbae8b15b57b0c149bc7f4e0dafc39ce6f88e050a5d3a5"
+    },
+    {
+      "locale": "hi",
+      "key": "wire.github.failure_unknown",
+      "sha256": "6d9a8c617f4ea5e989d1bb2d257de27b2a4ff62f57e5468ae51bcfc818f5ce4e"
+    },
+    {
+      "locale": "hi",
+      "key": "wire.github.failure_unfetched",
+      "sha256": "e426046868c451e704c9bbeea0e6f9b7973c369f300d7898329d0bbc20ec038b"
+    },
+    {
+      "locale": "hi",
+      "key": "wire.github.failure_earlier_login",
+      "sha256": "6f69ab9cfeb6064d6af2774410367dcc8e961940cee9f6257cf5d2ed426515ae"
+    },
+    {
+      "locale": "hi",
+      "key": "wire.github.failure_unknown_login",
+      "sha256": "b4994f112287b8e283540544b69759d8b276ccea3e015f02806c6b9f83fd35e6"
+    },
+    {
+      "locale": "hi",
+      "key": "wire.github.readiness_unavailable",
+      "sha256": "4c7bbc210e36daac5e3fcf57ad3de533e1032ef0934b1cd5e1b783a28fd0a4cc"
+    },
+    {
+      "locale": "hi",
+      "key": "wire.github.readiness_empty",
+      "sha256": "46fbc84baa6034952a5873a401d3bf0d83b882b8d80576e6730d67c30cbfa335"
+    },
+    {
+      "locale": "hi",
+      "key": "wire.github.readiness_opted",
+      "sha256": "a039fbb997bfa7cf55e13e4ff747ee6f80636aecbedc9006efed3617ac527b3f"
+    },
+    {
+      "locale": "hi",
+      "key": "wire.github.readiness_more",
+      "sha256": "3fb1eabfe53389c12c17f35ed15a4f34420c5bd2bb939f0de5aed0c21f34de1c"
+    },
+    {
+      "locale": "hi",
+      "key": "wire.github.readiness_explicit",
+      "sha256": "a3a408a9360ffb9bed691e01206d032ff8a699f07634c16684f62f4ad2f7b6ba"
+    },
+    {
+      "locale": "hi",
+      "key": "wire.github.readiness_last_good",
+      "sha256": "c20aeabbf04fc09af4cd9ab01a40b8b2cdf0b92876d150f9bc2b581eaeae9d17"
+    },
+    {
+      "locale": "hi",
+      "key": "wire.github.readiness_enumerated",
+      "sha256": "b652e82cbbce40b63fadeb0403395c68d5a364d4d56f7281debea5d602aad571"
+    },
+    {
+      "locale": "hi",
+      "key": "wire.github.readiness_pointer",
+      "sha256": "74f5375b150db6c931b5ead75bb0758d5a705df61fc6e183d7bd7b848efa21f1"
+    },
+    {
+      "locale": "hi",
+      "key": "wire.github.readiness_list",
+      "sha256": "8e0526e5eb8c00cb297aef9dc1e789f08d30a8dd7a1d402e8d4ad47a75826ed5"
+    },
+    {
+      "locale": "hi",
+      "key": "wire.github.borrower_unset",
+      "sha256": "fb1c90bd92cbd6f4dbd9adab81ea27adaa79080fa22c3e2c499499efa60dd173"
+    },
+    {
+      "locale": "hi",
+      "key": "wire.github.borrower_unset_default",
+      "sha256": "d2d6a280c29db162af8ea40605875126b7ff526dd687ae7f3b5e498e2b57b5b3"
+    },
+    {
+      "locale": "hi",
+      "key": "wire.github.borrower_overflow",
+      "sha256": "33fb4810a6a11d51f028c2d44ddfd4860c9c72e242c6379801967ae2ac4fe24d"
+    },
+    {
+      "locale": "hi",
+      "key": "wire.github.wrapper_denied",
+      "sha256": "39366e5ec9887f642ea92227ec89dcaa3071777604173dfe3b46d779bae85237"
+    },
+    {
+      "locale": "hi",
+      "key": "wire.github.usage_repo",
+      "sha256": "ac1badce2f2bb24828ce9e49b0ca9f89712b431702f78582772bdcb587bb407f"
+    },
+    {
+      "locale": "hi",
+      "key": "wire.github.usage_repos_args",
+      "sha256": "c4b17ab06d1c8106cc44c00ed672e78e40e5200675c51caf3ca890830ee44a95"
+    },
+    {
+      "locale": "hi",
+      "key": "wire.github.usage_default",
+      "sha256": "21633fb7131e3755fb1235b03653791a9360b4bca24b9acdd7aa7220bdeb29ac"
+    },
+    {
+      "locale": "hi",
+      "key": "wire.github.usage_refresh",
+      "sha256": "4c34aa82c6c77de413c36292521733b65b01aa06dead9afb3b9ddb877252e217"
+    },
+    {
+      "locale": "hi",
+      "key": "wire.github.owner_overflow",
+      "sha256": "392fa66ae5e36e9e14ee8f2044fbc8fd5e8304a1021bb51f2887f88baa4fec7c"
+    },
+    {
+      "locale": "hi",
+      "key": "wire.github.reset_failed",
+      "sha256": "25735e6bb6809903ef88c0b6cff2505b0d5b517738432a0027ec7e7ca24c43c6"
+    },
+    {
+      "locale": "hi",
+      "key": "wire.settings.network_credentials_github_repositories.help",
+      "sha256": "1a2e0340f93a354be246917ab425df3a53afe0e6794673e142a2d85ca93b11c1"
+    }
+  ],
+  "retained_count": 474,
+  "input_hashes": {
+    "local_operator/i18n/catalogues/en/wire.github.json": "241d2f9e57f611bbc0f2e4875584252ee34dadc14b1d2914d24de563b5cfbc62",
+    "local_operator/i18n/catalogues/en/wire.settings.json": "fa6a7d8e6a81ccf844c056a62226d8e6193279a712560291fd489f3c17a8a4b9",
+    "local_operator/i18n/catalogues/fr/wire.github.json": "62221c3f619ba434a4342457d5e06a5146efaee482e3b7bd0e04e3d8c87016e2",
+    "local_operator/i18n/catalogues/fr/wire.settings.json": "e773ea8aedb8b87586a4e0c8d72ed6e32cac39d6b522fd0f4b5ae34ac7315037",
+    "local_operator/i18n/catalogues/es/wire.github.json": "237f67c0d160ff0d11ab8dc192881f6382aa05dce48f19dbfa03942c15f5ad64",
+    "local_operator/i18n/catalogues/es/wire.settings.json": "b0a7ccd76e1cd8a180fcaa8519e3275812a7e42adfbfe4eddd3f7391f1c67e91",
+    "local_operator/i18n/catalogues/zh-CN/wire.github.json": "dc68606f6da5693a3c876b8a43c936f55dcb71ae4d219219cd505adc57993a69",
+    "local_operator/i18n/catalogues/zh-CN/wire.settings.json": "0bfb410cda210ef39d5109ffd1e4c826ac2edcdc1c19a510311f2f4dd0ac2345",
+    "local_operator/i18n/catalogues/ru/wire.github.json": "da0e24c21f461cf8a9dc277b6c9666178c87ee77455f98ef46ce0cb1f386875c",
+    "local_operator/i18n/catalogues/ru/wire.settings.json": "76ccba21dac8666e63540e58685103acba70c28c38d0b1ff64849c20500611c3",
+    "local_operator/i18n/catalogues/vi/wire.github.json": "4aafd3e2688a454b0f80f938f05ae8eac0f2e25735e4c55a92168f274e22d253",
+    "local_operator/i18n/catalogues/vi/wire.settings.json": "28d393b48281312b1d918d3af7826581890b01607addb9dae23a702ae12e26e4",
+    "local_operator/i18n/catalogues/ur/wire.github.json": "03892d99ab9c4906a90c4e0d439ffd98f42ad29c710303b749ce0d33a6a07d26",
+    "local_operator/i18n/catalogues/ur/wire.settings.json": "47981cc870a599caf1ec964295ed3123b87a2f345bdb324c166694125d959476",
+    "local_operator/i18n/catalogues/hi/wire.github.json": "21d945c15034e7ccd1ff1ef4682910a582a981df65df1e3098598073a1966c7f",
+    "local_operator/i18n/catalogues/hi/wire.settings.json": "f160e478a9465b9b775a975fc0895596eddb8530bb6ca2958a43102a9d63bce4",
+    "local_operator/i18n/catalogues/en/wire.github.context.json": "436438a01be9391308c24b52800a90975653082d6b1955ba14761a13da40a888",
+    "local_operator/i18n/catalogues/en/wire.settings.context.json": "4bc1bf5e9c05604f50822e4d04e2f8a380f85be94cf24c556e1ba528e63105f1"
+  },
+  "renders": [
+    {
+      "locale": "fr",
+      "key": "wire.github.failure_unknown",
+      "text": "échec de la récupération de la liste des dépôts GitHub",
+      "cell_width": 54
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.share_empty",
+      "text": "Repositorios de GitHub: ninguno todavía — el acceso compartido está configurado, pero todo préstamo sigue rechazándose por este motivo: REASON; REMEDY",
+      "cell_width": 150
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.share_empty",
+      "text": "Репозитории GitHub: пока нет — общий доступ настроен, но все запросы заимствования отклоняются по следующей причине: REASON; REMEDY",
+      "cell_width": 131
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.ttl",
+      "text": "в течение 5 мин",
+      "cell_width": 15
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.opt_out_step",
+      "text": "исключить репозиторий: lop network credential github exclude <owner/repo> — устройства, которым вы предоставили доступ, потеряют право выполнять push в него при следующем получении учётных данных, в течение 5 мин",
+      "cell_width": 212
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.ttl",
+      "text": "в течение 5 мин",
+      "cell_width": 15
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.exclude_added",
+      "text": "octo-org/website исключён — устройства, которым вы предоставили доступ, потеряют право выполнять push в него при следующем получении учётных данных, в течение 5 мин",
+      "cell_width": 164
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.ttl",
+      "text": "в течение 5 мин",
+      "cell_width": 15
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.include_added",
+      "text": "octo-org/website возвращён — устройства, которым вы предоставили доступ, снова смогут выполнять push в него при следующем получении учётных данных, в течение 5 мин",
+      "cell_width": 163
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.wrapper_denied",
+      "text": "octo-org/website отсутствует в списке репозиториев, предоставленном устройством, которое делится доступом (возможно, репозиторий исключён или с этого устройства в него нельзя выполнить push). Проверьте lop network credential github repos на устройстве, которое делится доступом. Только это устройство может изменить предоставляемый доступ.",
+      "cell_width": 339
+    },
+    {
+      "locale": "ru",
+      "key": "wire.settings.network_credentials_github_repositories.help",
+      "text": "Записи owner/repo для предоставления доступа к GitHub взаймы. Если настройка никогда не задавалась, используются все репозитории, в которые учётная запись может выполнять push, за вычетом исключённых. Очистка ранее переданного списка, выбранного вручную, прекращает предоставление доступа; вернуться к автоматическому выбору можно командой lop network credential github repos --use-default.",
+      "cell_width": 390
+    },
+    {
+      "locale": "ur",
+      "key": "wire.github.wrapper_denied",
+      "text": "octo-org/website، مستعار دینے والی ڈیوائس کی فراہم کردہ ریپوزیٹری فہرست میں نہیں ہے (ممکن ہے یہ خارج ہو یا وہاں سے push ممکن نہ ہو)۔ مستعار دینے والی ڈیوائس پر lop network credential github repos جانچیں۔ صرف وہی ڈیوائس یہ بدل سکتی ہے کہ وہ کیا مستعار دیتی ہے۔",
+      "cell_width": 259
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.failure_unknown_login",
+      "text": "se desconoce la cuenta de la lista de GitHub guardada",
+      "cell_width": 53
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.reason_explicit",
+      "text": "el ajuste de repositorios de GitHub elegidos a mano no contiene ningún repositorio tras aplicar las exclusiones",
+      "cell_width": 111
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.remedy_explicit",
+      "text": "añade repositorios al ajuste de repositorios de GitHub (búscalo en /settings), o vuelve explícitamente a todos los repositorios con permiso de push, menos los excluidos, con lop network credential github repos --use-default",
+      "cell_width": 223
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.share_empty",
+      "text": "Repositorios de GitHub: ninguno todavía — el acceso compartido está configurado, pero todo préstamo sigue rechazándose por este motivo: el ajuste de repositorios de GitHub elegidos a mano no contiene ningún repositorio tras aplicar las exclusiones; añade repositorios al ajuste de repositorios de GitHub (búscalo en /settings), o vuelve explícitamente a todos los repositorios con permiso de push, menos los excluidos, con lop network credential github repos --use-default",
+      "cell_width": 472
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.failure_unknown_login",
+      "text": "se desconoce la cuenta de la lista de GitHub guardada",
+      "cell_width": 53
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.reason_unavailable_local",
+      "text": "no se pudo obtener la lista de repositorios a los que la cuenta de GitHub de este dispositivo puede hacer push (se desconoce la cuenta de la lista de GitHub guardada) y no hay una lista anterior de respaldo",
+      "cell_width": 206
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.remedy_unavailable",
+      "text": "vuelve a intentarlo cuando GitHub esté accesible: lop network credential github repos --refresh",
+      "cell_width": 95
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.share_empty",
+      "text": "Repositorios de GitHub: ninguno todavía — el acceso compartido está configurado, pero todo préstamo sigue rechazándose por este motivo: no se pudo obtener la lista de repositorios a los que la cuenta de GitHub de este dispositivo puede hacer push (se desconoce la cuenta de la lista de GitHub guardada) y no hay una lista anterior de respaldo; vuelve a intentarlo cuando GitHub esté accesible: lop network credential github repos --refresh",
+      "cell_width": 439
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.failure_unknown_login",
+      "text": "se desconoce la cuenta de la lista de GitHub guardada",
+      "cell_width": 53
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.reason_unavailable_remote",
+      "text": "no se pudo obtener la lista de repositorios a los que su cuenta de GitHub puede hacer push (se desconoce la cuenta de la lista de GitHub guardada) y no hay una lista anterior de respaldo",
+      "cell_width": 186
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.remedy_unavailable",
+      "text": "vuelve a intentarlo cuando GitHub esté accesible: lop network credential github repos --refresh",
+      "cell_width": 95
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.share_empty",
+      "text": "Repositorios de GitHub: ninguno todavía — el acceso compartido está configurado, pero todo préstamo sigue rechazándose por este motivo: no se pudo obtener la lista de repositorios a los que su cuenta de GitHub puede hacer push (se desconoce la cuenta de la lista de GitHub guardada) y no hay una lista anterior de respaldo; vuelve a intentarlo cuando GitHub esté accesible: lop network credential github repos --refresh",
+      "cell_width": 419
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.failure_unknown_login",
+      "text": "se desconoce la cuenta de la lista de GitHub guardada",
+      "cell_width": 53
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.reason_excluded_local",
+      "text": "todos los repositorios a los que la cuenta de GitHub de este dispositivo puede hacer push (3) están excluidos",
+      "cell_width": 109
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.remedy_excluded",
+      "text": "vuelve a incluir uno con lop network credential github include octo-org/website",
+      "cell_width": 79
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.share_empty",
+      "text": "Repositorios de GitHub: ninguno todavía — el acceso compartido está configurado, pero todo préstamo sigue rechazándose por este motivo: todos los repositorios a los que la cuenta de GitHub de este dispositivo puede hacer push (3) están excluidos; vuelve a incluir uno con lop network credential github include octo-org/website",
+      "cell_width": 326
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.failure_unknown_login",
+      "text": "se desconoce la cuenta de la lista de GitHub guardada",
+      "cell_width": 53
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.reason_excluded_remote",
+      "text": "todos los repositorios a los que su cuenta de GitHub puede hacer push (3) están excluidos",
+      "cell_width": 89
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.remedy_excluded",
+      "text": "vuelve a incluir uno con lop network credential github include octo-org/website",
+      "cell_width": 79
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.share_empty",
+      "text": "Repositorios de GitHub: ninguno todavía — el acceso compartido está configurado, pero todo préstamo sigue rechazándose por este motivo: todos los repositorios a los que su cuenta de GitHub puede hacer push (3) están excluidos; vuelve a incluir uno con lop network credential github include octo-org/website",
+      "cell_width": 306
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.failure_unknown_login",
+      "text": "se desconoce la cuenta de la lista de GitHub guardada",
+      "cell_width": 53
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.reason_no_repos_local",
+      "text": "la cuenta de GitHub de este dispositivo no puede hacer push a ningún repositorio",
+      "cell_width": 80
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.remedy_no_repos",
+      "text": "concede a esa cuenta de GitHub permiso de push en un repositorio",
+      "cell_width": 64
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.share_empty",
+      "text": "Repositorios de GitHub: ninguno todavía — el acceso compartido está configurado, pero todo préstamo sigue rechazándose por este motivo: la cuenta de GitHub de este dispositivo no puede hacer push a ningún repositorio; concede a esa cuenta de GitHub permiso de push en un repositorio",
+      "cell_width": 282
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.failure_unknown_login",
+      "text": "se desconoce la cuenta de la lista de GitHub guardada",
+      "cell_width": 53
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.reason_no_repos_remote",
+      "text": "su cuenta de GitHub no puede hacer push a ningún repositorio",
+      "cell_width": 60
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.remedy_no_repos",
+      "text": "concede a esa cuenta de GitHub permiso de push en un repositorio",
+      "cell_width": 64
+    },
+    {
+      "locale": "es",
+      "key": "wire.github.share_empty",
+      "text": "Repositorios de GitHub: ninguno todavía — el acceso compartido está configurado, pero todo préstamo sigue rechazándose por este motivo: su cuenta de GitHub no puede hacer push a ningún repositorio; concede a esa cuenta de GitHub permiso de push en un repositorio",
+      "cell_width": 262
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.failure_unknown_login",
+      "text": "учётная запись сохранённого списка GitHub неизвестна",
+      "cell_width": 52
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.reason_explicit",
+      "text": "в настройке репозиториев GitHub, выбранных вручную, после применения исключений не осталось репозиториев",
+      "cell_width": 104
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.remedy_explicit",
+      "text": "добавьте репозитории в настройку репозиториев GitHub (найдите её в /settings) или явно вернитесь ко всем репозиториям с правом выполнения push за вычетом исключённых: lop network credential github repos --use-default",
+      "cell_width": 216
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.share_empty",
+      "text": "Репозитории GitHub: пока нет — общий доступ настроен, но все запросы заимствования отклоняются по следующей причине: в настройке репозиториев GitHub, выбранных вручную, после применения исключений не осталось репозиториев; добавьте репозитории в настройку репозиториев GitHub (найдите её в /settings) или явно вернитесь ко всем репозиториям с правом выполнения push за вычетом исключённых: lop network credential github repos --use-default",
+      "cell_width": 439
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.failure_unknown_login",
+      "text": "учётная запись сохранённого списка GitHub неизвестна",
+      "cell_width": 52
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.reason_unavailable_local",
+      "text": "не удалось получить список репозиториев, в которые учётная запись GitHub этого устройства может выполнять push (учётная запись сохранённого списка GitHub неизвестна), и нет предыдущего списка для замены",
+      "cell_width": 202
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.remedy_unavailable",
+      "text": "повторите, когда GitHub станет доступен: lop network credential github repos --refresh",
+      "cell_width": 86
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.share_empty",
+      "text": "Репозитории GitHub: пока нет — общий доступ настроен, но все запросы заимствования отклоняются по следующей причине: не удалось получить список репозиториев, в которые учётная запись GitHub этого устройства может выполнять push (учётная запись сохранённого списка GitHub неизвестна), и нет предыдущего списка для замены; повторите, когда GitHub станет доступен: lop network credential github repos --refresh",
+      "cell_width": 407
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.failure_unknown_login",
+      "text": "учётная запись сохранённого списка GitHub неизвестна",
+      "cell_width": 52
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.reason_unavailable_remote",
+      "text": "не удалось получить список репозиториев, в которые его учётная запись GitHub может выполнять push (учётная запись сохранённого списка GitHub неизвестна), и нет предыдущего списка для замены",
+      "cell_width": 189
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.remedy_unavailable",
+      "text": "повторите, когда GitHub станет доступен: lop network credential github repos --refresh",
+      "cell_width": 86
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.share_empty",
+      "text": "Репозитории GitHub: пока нет — общий доступ настроен, но все запросы заимствования отклоняются по следующей причине: не удалось получить список репозиториев, в которые его учётная запись GitHub может выполнять push (учётная запись сохранённого списка GitHub неизвестна), и нет предыдущего списка для замены; повторите, когда GitHub станет доступен: lop network credential github repos --refresh",
+      "cell_width": 394
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.failure_unknown_login",
+      "text": "учётная запись сохранённого списка GitHub неизвестна",
+      "cell_width": 52
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.reason_excluded_local",
+      "text": "все репозитории, в которые учётная запись GitHub этого устройства может выполнять push (3), исключены",
+      "cell_width": 101
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.remedy_excluded",
+      "text": "верните один из репозиториев командой lop network credential github include octo-org/website",
+      "cell_width": 92
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.share_empty",
+      "text": "Репозитории GitHub: пока нет — общий доступ настроен, но все запросы заимствования отклоняются по следующей причине: все репозитории, в которые учётная запись GitHub этого устройства может выполнять push (3), исключены; верните один из репозиториев командой lop network credential github include octo-org/website",
+      "cell_width": 312
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.failure_unknown_login",
+      "text": "учётная запись сохранённого списка GitHub неизвестна",
+      "cell_width": 52
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.reason_excluded_remote",
+      "text": "все репозитории, в которые его учётная запись GitHub может выполнять push (3), исключены",
+      "cell_width": 88
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.remedy_excluded",
+      "text": "верните один из репозиториев командой lop network credential github include octo-org/website",
+      "cell_width": 92
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.share_empty",
+      "text": "Репозитории GitHub: пока нет — общий доступ настроен, но все запросы заимствования отклоняются по следующей причине: все репозитории, в которые его учётная запись GitHub может выполнять push (3), исключены; верните один из репозиториев командой lop network credential github include octo-org/website",
+      "cell_width": 299
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.failure_unknown_login",
+      "text": "учётная запись сохранённого списка GitHub неизвестна",
+      "cell_width": 52
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.reason_no_repos_local",
+      "text": "учётная запись GitHub этого устройства не может выполнять push ни в один репозиторий",
+      "cell_width": 84
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.remedy_no_repos",
+      "text": "предоставьте этой учётной записи GitHub право выполнять push в репозиторий",
+      "cell_width": 74
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.share_empty",
+      "text": "Репозитории GitHub: пока нет — общий доступ настроен, но все запросы заимствования отклоняются по следующей причине: учётная запись GitHub этого устройства не может выполнять push ни в один репозиторий; предоставьте этой учётной записи GitHub право выполнять push в репозиторий",
+      "cell_width": 277
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.failure_unknown_login",
+      "text": "учётная запись сохранённого списка GitHub неизвестна",
+      "cell_width": 52
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.reason_no_repos_remote",
+      "text": "его учётная запись GitHub не может выполнять push ни в один репозиторий",
+      "cell_width": 71
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.remedy_no_repos",
+      "text": "предоставьте этой учётной записи GitHub право выполнять push в репозиторий",
+      "cell_width": 74
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.share_empty",
+      "text": "Репозитории GitHub: пока нет — общий доступ настроен, но все запросы заимствования отклоняются по следующей причине: его учётная запись GitHub не может выполнять push ни в один репозиторий; предоставьте этой учётной записи GitHub право выполнять push в репозиторий",
+      "cell_width": 264
+    },
+    {
+      "locale": "fr",
+      "key": "wire.github.failure_unknown",
+      "text": "échec de la récupération de la liste des dépôts GitHub",
+      "cell_width": 54
+    },
+    {
+      "locale": "fr",
+      "key": "wire.github.age_days",
+      "text": "il y a 2 jours",
+      "cell_width": 14
+    },
+    {
+      "locale": "fr",
+      "key": "wire.github.source_last_good",
+      "text": "la liste récupérée il y a 2 jours — impossible de lister les dépôts GitHub à l’instant (échec de la récupération de la liste des dépôts GitHub) ; elle peut donc être périmée",
+      "cell_width": 173
+    },
+    {
+      "locale": "fr",
+      "key": "wire.github.reason_unavailable_remote",
+      "text": "la liste des dépôts auxquels son compte GitHub peut envoyer des push n’a pas pu être récupérée (échec de la récupération de la liste des dépôts GitHub), sans liste antérieure de secours",
+      "cell_width": 185
+    },
+    {
+      "locale": "fr",
+      "key": "wire.github.remedy_unavailable",
+      "text": "réessayez quand GitHub est joignable : lop network credential github repos --refresh",
+      "cell_width": 84
+    },
+    {
+      "locale": "fr",
+      "key": "wire.github.refusal_detail",
+      "text": "la liste des dépôts auxquels son compte GitHub peut envoyer des push n’a pas pu être récupérée (échec de la récupération de la liste des dépôts GitHub), sans liste antérieure de secours — réessayez quand GitHub est joignable : lop network credential github repos --refresh",
+      "cell_width": 272
+    },
+    {
+      "locale": "fr",
+      "key": "wire.github.borrower_unset",
+      "text": "owner-device-7 n’a aucun dépôt GitHub dont il puisse prêter l’accès : la liste des dépôts auxquels son compte GitHub peut envoyer des push n’a pas pu être récupérée (échec de la récupération de la liste des dépôts GitHub), sans liste antérieure de secours — réessayez quand GitHub est joignable : lop network credential github repos --refresh. Corrigez cela sur owner-device-7 ; aucun accès n’a été prêté.",
+      "cell_width": 405
+    },
+    {
+      "locale": "ur",
+      "key": "wire.github.wrapper_denied",
+      "text": "synthetic-owner-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/synthetic-repository-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb، مستعار دینے والی ڈیوائس کی فراہم کردہ ریپوزیٹری فہرست میں نہیں ہے (ممکن ہے یہ خارج ہو یا وہاں سے push ممکن نہ ہو)۔ مستعار دینے والی ڈیوائس پر lop network credential github repos --refresh جانچیں۔ صرف وہی ڈیوائس یہ بدل سکتی ہے کہ وہ کیا مستعار دیتی ہے۔",
+      "cell_width": 396
+    },
+    {
+      "locale": "ru",
+      "key": "wire.github.wrapper_denied",
+      "text": "synthetic-owner-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/synthetic-repository-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb отсутствует в списке репозиториев, предоставленном устройством, которое делится доступом (возможно, репозиторий исключён или с этого устройства в него нельзя выполнить push). Проверьте lop network credential github repos --refresh на устройстве, которое делится доступом. Только это устройство может изменить предоставляемый доступ.",
+      "cell_width": 476
+    }
+  ],
+  "render_count": 77,
+  "negative_controls": {
+    "missing_command": "MessageFormatError",
+    "broken_icu": "MessageSyntaxError"
+  },
+  "production_eligibility_controls": {
+    "fr": {
+      "text": "listing the repositories your GitHub login can push to…",
+      "source_locale": "en"
+    },
+    "es": {
+      "text": "listing the repositories your GitHub login can push to…",
+      "source_locale": "en"
+    },
+    "zh-CN": {
+      "text": "listing the repositories your GitHub login can push to…",
+      "source_locale": "en"
+    },
+    "ru": {
+      "text": "listing the repositories your GitHub login can push to…",
+      "source_locale": "en"
+    },
+    "vi": {
+      "text": "listing the repositories your GitHub login can push to…",
+      "source_locale": "en"
+    },
+    "ur": {
+      "text": "listing the repositories your GitHub login can push to…",
+      "source_locale": "en"
+    },
+    "hi": {
+      "text": "listing the repositories your GitHub login can push to…",
+      "source_locale": "en"
+    }
+  },
+  "shipped_locales": [
+    "en"
+  ],
+  "mechanical_problems": [],
+  "limitations": [
+    "Explicit-locale real ICU candidate renders, not production locale activation.",
+    "Expanded technical parameters are fit probes only, not full pseudo-localization/layout proof.",
+    "No browser/native/app screenshot, terminal bidi or Arabic shaping certification.",
+    "No translation, ledger, generated-output or shared-worktree writes."
+  ]
+}
