@@ -1,0 +1,12 @@
+{
+  "audit_id": "c1a",
+  "locale": "hi",
+  "namespace": "cli.config",
+  "self_hash_rule": "receipt.json hashes every other artifact in this directory and not itself",
+  "artifacts": {
+    "record.json": "f7f5287ccbb480b298d7e63fc91b81bb0fd274a358297a6f9f28281f7bd55a11",
+    "report.md": "379112f662733023ea9c711471e6e3e5f597f069db438709b1e6cee5ed6d881b",
+    "audit.log": "a9b19e80550012f637a8f942c9efa85c70bd46f95dbb3b50868f11393794ddfe",
+    "target-candidate.json": "0ac41cb7253a92c63f4d852519182c5625d04e5c6bba12dbb1d338979d38feba"
+  }
+}

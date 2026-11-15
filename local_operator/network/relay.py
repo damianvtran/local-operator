@@ -145,6 +145,12 @@ from local_operator.network.types import (
     capabilities_for_role,
     trust_state,
 )
+from local_operator.notifications.remote_attention import (
+    AGENT_ORIGIN_KIND,
+    OPERATOR_STARTED,
+    STARTED_BY_FIELD,
+    started_by_for_origin,
+)
 from local_operator.paths import CONFIG_DIR_ENV, config_dir, log_dir
 from local_operator.session import open_trace
 from local_operator.session.runtime.types import (
@@ -5553,6 +5559,18 @@ def _model_credential_refusal(root: Path, model: Any, birth: Any) -> str:
     )
 
 
+def _started_by_claim(frame: dict[str, Any]) -> dict[str, str]:
+    """``{"started_by": <value>}`` when the create frame attested one, else ``{}``.
+
+    Only the two values ``remote_attention.started_by_for_origin`` writes are
+    kept; anything else (absent from an origin older than the attestation, or
+    garbage) stamps nothing, which the owner and the origin read as NOT
+    operator-started — the default-deny the operator rule asks for.
+    """
+    value = str(frame.get(STARTED_BY_FIELD) or "")
+    return {STARTED_BY_FIELD: value} if value in (OPERATOR_STARTED, AGENT_ORIGIN_KIND) else {}
+
+
 def _resolve_peer_cwd(cwd: str, *, owner: str) -> str:
     """The working directory a peer create names, or a refusal naming ``owner``.
 
@@ -9329,6 +9347,7 @@ class RelayServer:
         # block exits) and ``_rehandshake_network`` touches ``self.links`` alone, so
         # nothing it needed was being protected here.
         rehandshake = False
+        removed_here: list[str] = []
         with store.mutate(link.network_id, self.root) as record:
             if incoming == record.epoch and str(
                 frame.get("rotation_id") or ""
@@ -9389,6 +9408,11 @@ class RelayServer:
                     )
                 )
                 rehandshake = True
+                removed_here = [
+                    str(device)
+                    for device in frame.get("removed") or []
+                    if str(device) != record.self_device_id
+                ]
         if rehandshake:
             # THE LINK'S NETWORK ID, NOT THE RECORD'S, and deliberately: after the move
             # above this call sits OUTSIDE the ``store.mutate`` block, so a record bound
@@ -9401,6 +9425,10 @@ class RelayServer:
             # FROM that field), so the two are equal today and the link is the one that
             # stays right if they ever are not.
             self._rehandshake_network(link.network_id, reason="epoch_stale")
+            # A removal another admin made reaches this owner as the rotation that
+            # names it: revoke what this device lent the removed ones (#3947 M2).
+            if removed_here:
+                self._revoke_lent_on_removal(link.network_id, removed_here)
         return {
             "op": "ack",
             "req": frame.get("req"),
@@ -9526,6 +9554,8 @@ class RelayServer:
                 )
         if outcome is not None:
             self._broadcast_epoch(record, state, reason="member_left", removed=outcome.removed)
+        # A device that left keeps no lent GitHub token either (#3947 M2).
+        self._revoke_lent_on_removal(link.network_id, [link.device_id])
         return {"op": "ack", "req": frame.get("req"), "detail": {"left": link.device_id}}
 
     def _op_panic(self, link: PeerLink, frame: dict[str, Any]) -> dict[str, Any] | None:
@@ -10071,6 +10101,12 @@ class RelayServer:
                     "kind": str(frame.get("origin") or "user"),
                     "source_device": link.device_id,
                     "source_session_id": "",
+                    # THE ATTESTATION, copied only when the asking origin sent one
+                    # (``_ctl_peer_create``). Never defaulted: ``kind`` above defaults
+                    # to ``user`` for an origin that predates attribution, and a
+                    # default here would let that legacy guess forward ``notify``
+                    # items again (``remote_attention.STARTED_BY_FIELD``).
+                    **_started_by_claim(frame),
                 },
                 # CARRIED AUTO AUTHORITY (§6 defect 2): the accepted grant travels ON
                 # THE SESSION, so the runtime this create engages — and every runtime a
@@ -13912,6 +13948,8 @@ class RelayServer:
             )
         self._broadcast_epoch(record, state, reason="member_removed", removed=outcome.removed)
         self._rehandshake_network(record.network_id, reason="epoch_stale")
+        # The owner half of "membership loss ends a held GitHub token" (#3947 M2).
+        self._revoke_lent_on_removal(record.network_id, [device_id])
         return {
             "network_id": record.network_id,
             "removed": device_id,
@@ -14369,6 +14407,29 @@ class RelayServer:
             **tally,
             "peers": reports,
         }
+
+    def _revoke_lent_on_removal(self, network_id: str, device_ids: list[str]) -> threading.Thread:
+        """DELETE the GitHub tokens this owner lent to removed devices, off-thread.
+
+        The removal twin of :meth:`_revoke_lent_on_panic` (review #3947 M2): since the
+        offline hold the lender's scheduled DELETE fires at the hold end (an App
+        token's hour), so a removed node's token must be revoked here rather than
+        left to it. Off-thread for the same reasons — the received path runs on a
+        link reader and a receipt must not wait on GitHub's API. Never raises.
+        """
+        from local_operator.network.credentials import owner as owner_mod
+
+        thread = threading.Thread(
+            target=owner_mod.revoke_lent_on_removal,
+            args=(self, network_id, list(device_ids)),
+            name="mesh-removal-revoke",
+            daemon=True,
+        )
+        try:
+            thread.start()
+        except RuntimeError:
+            logger.warning("member removal: could not start the lent-token revoke", exc_info=True)
+        return thread
 
     def _revoke_lent_on_panic(self, network_id: str) -> threading.Thread:
         """DELETE the GitHub tokens this owner lent in ``network_id``, off-thread.
@@ -14864,6 +14925,12 @@ class RelayServer:
             "prompt": str(frame.get("prompt") or ""),
             "images": list(frame.get("images") or []),
             "origin": str(frame.get("origin") or "user"),
+            # WHO ASKED, attested HERE where it was decided: ``origin`` comes from
+            # ``network/cli._create_origin`` (agent shell / ``--origin``) or is
+            # absent for the desktop's operator route, which means ``user``. The
+            # owner stamps it verbatim and forwards ``notify`` items only for
+            # ``operator`` (default-deny, ``remote_attention.STARTED_BY_FIELD``).
+            "started_by": started_by_for_origin(str(frame.get("origin") or "user")),
             # THE REQUEST TRAVELS WITH THE FRAME, and the answer comes from the
             # owner: it accepts only against its own ``unattended`` grant
             # (``_op_session_create``), which is the fact this side cannot read.
@@ -18498,13 +18565,21 @@ def _names_the_shim(image: Path) -> bool:
     """
     from local_operator import update
 
-    shim = update.daemon_image_path()
-    if image == shim:
-        return True
-    try:
-        return image.resolve() == shim.resolve()
-    except OSError:
-        return False
+    # The signed launcher counts as the shim: it execs ``<bin>/python3`` with argv
+    # unchanged, and on a macOS wheel it is what the plist's ``Program`` names
+    # (``update.daemon_program``), so a restart through it resolves ``current`` too.
+    for stable in (
+        update.daemon_image_path(),
+        update.launcher_executable(update.launcher_bundle_path()),
+    ):
+        if image == stable:
+            return True
+        try:
+            if image.resolve() == stable.resolve():
+                return True
+        except OSError:
+            continue
+    return False
 
 
 def _named_generation(image: Path) -> Path | None:

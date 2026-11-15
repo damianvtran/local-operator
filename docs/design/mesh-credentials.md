@@ -749,9 +749,12 @@ panic ends it), only while the policy generation the grant was cached under is
 still current, and never for a login this device is resting for the requested
 model (that answers `quota_blocked`, so failover moves on). Each offline serve is
 counted in a `credential.held_served` audit record (first at once, then one per
-minute) and the end in `credential.held_lapsed`; neither carries the token. MCP
-keys, the `github` key and device-bound providers never take this path (the
-GitHub hold needs the window-end self-revoke moved first).
+minute) and the end in `credential.held_lapsed`; neither carries the token.
+Device-bound providers never take this path. MCP keys and the `github` key do
+since 2026-11-14 (`mesh-credential-renewal.md` §A): both scheduled GitHub App
+token DELETEs (the owner's lender and the borrower's belt) fire at the hold end
+instead of the grant window end, and a panic, a share revoke or a lost membership
+DELETEs a held App token on the borrower at once.
 
 **Coalescing is per resolve, not per turn.** Overlapping resolves for the same
 (key, session, force) share one dial (`_borrow`'s in-flight future). Sequential
@@ -1024,7 +1027,7 @@ does not surface, add it as a purely additive method there (§8 Q2).
   **As built, a bounded hold comes first** (§3.5's as-built note). While the
   owner is unreachable, a provider borrow is served this session's still-live
   cached grant, marked `held_offline`: never under `force_refresh`, and never
-  for MCP, `github` or device-bound keys. The hold ends at the grant's own
+  for device-bound keys (MCP and `github` are held since 2026-11-14). The hold ends at the grant's own
   expiry, at most `grant_ttl_s` after the owner last served it. If the owner
   is still unreachable then, `_held_or` drops the grant and returns the
   owner's refusal (`owner_offline` or `owner_unreachable`), and the session

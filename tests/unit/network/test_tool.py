@@ -2129,3 +2129,16 @@ def test_a_non_completing_send_keeps_its_receipt_and_marks_the_call(
     result = _call("sessions", peer="cloud-node-1", send="s_1", text="hello there")
     assert not result.is_error
     assert _text(result).endswith("on it")
+
+
+def test_the_tools_create_is_attributed_to_an_agent() -> None:
+    """The ``network`` tool is an AGENT's: its subprocess carries no agent-shell
+    marker, so without ``--origin agent`` the CLI read the create as the
+    operator's and the worker's ``notify`` items reached the inbox (operator rule
+    2026-11-14, ``remote_attention.STARTED_BY_FIELD``)."""
+    argv, problem = net_tool._argv_for(
+        NetworkParams(action="sessions", peer="device-b", create=True, prompt="hi")
+    )
+    assert problem == ""
+    at = argv.index("--origin")
+    assert argv[at + 1] == "agent", argv

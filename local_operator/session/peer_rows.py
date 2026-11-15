@@ -611,6 +611,34 @@ def notice_edges(
     return edges, state
 
 
+def _attested_notices(peer_row: Any) -> tuple[tuple[str, int, str, str, int], ...] | None:
+    """The row's forwarded notices, minus ``notify`` items it may not raise here.
+
+    THE ORIGIN RE-APPLIES THE OWNER'S DEFAULT-DENY (operator rule, 2026-11-14:
+    only a deliberate ``notify`` or an ask reaches the dashboard; agent/worker
+    session progress must not). The owner filters in
+    ``remote_attention.stamp_rows_for_viewer``, but the owner is another device
+    and may run a build older than that filter — which is exactly how five
+    agent-lane workers on lop-remote-node-2 reached this inbox after v0.103.0.
+    Applying the same predicate to the row's own ``origin`` here makes the rule
+    hold as soon as THIS device updates. Open asks (``remote-ask:``) always
+    pass: a question still waiting on the operator is never withheld.
+    """
+    notices = getattr(peer_row, "notices", None)
+    if not notices:
+        return notices
+    from local_operator.notifications.remote_attention import (
+        ASK_NOTICE_PREFIX,
+        origin_is_operator_started,
+    )
+
+    if origin_is_operator_started(getattr(peer_row, "origin", None)):
+        return notices
+    return tuple(
+        claim for claim in notices if claim and str(claim[0]).startswith(ASK_NOTICE_PREFIX)
+    )
+
+
 def _chosen_name(row: SessionRow) -> str:
     """The conversation's name, or ``""`` for the placeholder a peer never chose.
 
@@ -804,7 +832,7 @@ def _read(
                 # catalogue double or an older parse has neither attribute, which
                 # is no claim.
                 remote_attention=getattr(peer_row, "attention", None),
-                remote_notices=getattr(peer_row, "notices", None),
+                remote_notices=_attested_notices(peer_row),
                 remote_attention_unknown=bool(getattr(peer_row, "attention_unknown", False)),
                 pending_queued=bool(getattr(peer_row, "pending_queued", False)),
                 remote_asks_unknown=bool(getattr(peer_row, "asks_unknown", False)),

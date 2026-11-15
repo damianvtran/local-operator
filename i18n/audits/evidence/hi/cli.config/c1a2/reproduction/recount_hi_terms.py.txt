@@ -1,0 +1,74 @@
+"""Recount shipped hi catalogue term usage (values only, not context sidecars)."""
+from __future__ import annotations
+
+import json
+import re
+from collections import Counter
+from pathlib import Path
+
+ROOT = Path.home() / "local-operator" / ".worktrees" / "i18n-c1" / "local_operator" / "i18n" / "catalogues" / "hi"
+values: list[tuple[str, str, str]] = []
+for path in sorted(ROOT.glob("*.json")):
+    if path.name.endswith(".context.json"):
+        continue
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:  # pragma: no cover
+        print("BAD", path.name, exc)
+        continue
+    if not isinstance(data, dict):
+        continue
+    for key, val in data.items():
+        if isinstance(val, str):
+            values.append((path.name, key, val))
+
+print("files:", len({f for f, _, _ in values}), "values:", len(values))
+
+term = {
+    "path_translit पाथ": "पाथ",
+    "path_std पथ": "पथ",
+    "provider प्रोवाइडर": "प्रोवाइडर",
+    "provider प्रदाता": "प्रदाता",
+    "exit एग्ज़िट": "एग्ज़िट",
+    "exit निकास": "निकास",
+    "learnings लर्निंग्स": "लर्निंग्स",
+    "learned सीखी": "सीखी",
+    "autoadv अपने-आप": "अपने-आप",
+    "autoadv अपने आप": "अपने आप",
+    "move स्थानांतरण": "स्थानांतरण",
+    "move भेजें": "भेजें",
+    "move ले जाएँ": "ले जाएँ",
+    "set पर सेट": "पर सेट",
+    "specific खास": "खास",
+    "specific विशिष्ट": "विशिष्ट",
+    "smarthints स्मार्ट संकेत": "स्मार्ट संकेत",
+    "peer पीयर": "पीयर",
+    "device डिवाइस": "डिवाइस",
+    "shell शेल": "शेल",
+    "deprecated अप्रचलित": "अप्रचलित",
+    "compaction संपीडन": "संपीडन",
+    "approval स्वीकृति": "स्वीकृति",
+    "loosen ढीला": "ढीला",
+    "config कॉन्फ़िगरेशन": "कॉन्फ़िगरेशन",
+    "chat चैट": "चैट",
+    "history इतिहास": "इतिहास",
+    "platform प्लेटफ़ॉर्म": "प्लेटफ़ॉर्म",
+    "entries प्रविष्टि": "प्रविष्टि",
+}
+for label, needle in term.items():
+    hits = [(f, k) for f, k, v in values if needle in v]
+    files = {f for f, _ in hits}
+    print(f"{label:26s} {len(hits):4d} hits / {len(files):3d} files")
+    if len(hits) <= 6:
+        for f, k in hits:
+            v = next(v for ff, kk, v in values if ff == f and kk == k)
+            print("        ", f, k, "::", v[:150])
+
+# word-boundary variants (पथ inside पाथ is a substring risk)
+print("\n--- boundary recount ---")
+for label, needle in term.items():
+    if not needle.strip():
+        continue
+    pat = re.compile(r"(?<![\u0900-\u097F])" + re.escape(needle.strip()) + r"(?![\u0900-\u097F])")
+    hits = [(f, k) for f, k, v in values if pat.search(v)]
+    print(f"{label:26s} {len(hits):4d} hits / {len({f for f, _ in hits}):3d} files")

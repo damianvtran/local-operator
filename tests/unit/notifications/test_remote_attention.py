@@ -33,6 +33,7 @@ from typing import Any
 import pytest
 
 from local_operator.network.projection import PeerRow
+from local_operator.network.types import TrustState
 from local_operator.notifications import remote_attention as ra
 from local_operator.notifications import store as store_mod
 from local_operator.notifications.delivery import (
@@ -67,6 +68,25 @@ def _no_banner_threads(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
 
     monkeypatch.setattr(ra, "_deliver_async", capture)
     return calls
+
+
+@pytest.fixture(autouse=True)
+def _fresh_origin_memo(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Give every test an empty ``record_forwarding_origin`` memo.
+
+    The product remembers ``(str(root), device)`` process-wide so the origins
+    file is written once per origin, not on every catalogue read. In the suite
+    that memo outlives the ``tmp_path`` it names: this repo deletes a PASSING
+    test's ``tmp_path`` (``tmp_path_retention_policy = "failed"``), and the
+    pytest CI runs (8.x) numbers the next directory from the suffixes that still
+    EXIST, so a later parameter gets the earlier one's path back — with no
+    ``remote-attention-origins.json`` in it, yet a memo saying it was written.
+    CI run 43661997364, shards (3.12, 4) and (3.13, 4): ``[origin1-False]``
+    of ``test_default_deny_the_node_reply_matches_the_owner_forward_filter``
+    failed ``assert 'd_head' in {}`` that way. ``monkeypatch`` swaps in a fresh
+    set and restores the module's own afterwards, so no test sees another's.
+    """
+    monkeypatch.setattr(ra, "_recorded_origins", set())
 
 
 def _row(
@@ -232,7 +252,14 @@ def _owner(tmp_path: Path, *, origin: str = HEAD) -> Path:
             placement=SessionPlacement(
                 mode="peer", network_id="n_test", home_device=NODE, stamp_revision=1
             ),
-            origin={"kind": "user", "source_device": origin, "source_session_id": ""},
+            origin={
+                "kind": "user",
+                "source_device": origin,
+                "source_session_id": "",
+                # An ATTESTED operator create (``relay._ctl_peer_create``): only
+                # this forwards ``notify`` items under the default-deny rule.
+                ra.STARTED_BY_FIELD: ra.OPERATOR_STARTED,
+            },
         ),
     )
     AttentionStore(owner / "attention.db").publish(f"session/{SID}", TOK1, "a1", "complete")
@@ -244,7 +271,12 @@ def _catalog_row(origin: str = HEAD) -> dict[str, Any]:
     return {
         "session_id": SID,
         "state": "stored",
-        "origin": {"kind": "user", "source_device": origin, "source_session_id": ""},
+        "origin": {
+            "kind": "user",
+            "source_device": origin,
+            "source_session_id": "",
+            ra.STARTED_BY_FIELD: ra.OPERATOR_STARTED,
+        },
     }
 
 
@@ -408,6 +440,229 @@ def test_the_node_notify_sentence_promises_only_what_the_origin_collects(
     assert ra.forwarded_notice_sentence(owner, SID, "gate:approval:w1") == ""
     local = tmp_path / "local"
     assert ra.forwarded_notice_sentence(local, SID) == ""
+
+
+def _join_mesh(
+    root: Path, *, peers: tuple[str, ...] = (HEAD,), trust: TrustState = "active"
+) -> None:
+    """Save a network record making ``root`` (device NODE) a member beside ``peers``."""
+    from local_operator.network import store as net_store
+    from local_operator.network.types import MemberRecord, NetworkRecord
+
+    record = NetworkRecord(network_id="n_test", name="mesh", self_device_id=NODE, trust=trust)
+    record.members = [MemberRecord(device_id=NODE, name="node-box")] + [
+        MemberRecord(device_id=peer, name=f"{peer}-box") for peer in peers
+    ]
+    net_store.save(record, root)
+
+
+def test_a_session_started_on_a_mesh_node_says_its_notice_stayed_here(tmp_path: Path) -> None:
+    """2026-11-15: no stamp on a mesh node was "" — read as if the operator were told."""
+    node = tmp_path / "node"
+    (node / "sessions" / SID).mkdir(parents=True)
+    _join_mesh(node)
+    assert ra.notice_forwarding(node, SID) == (ra.LOCAL_ONLY, "")
+    sentence = ra.forwarded_notice_sentence(node, SID)
+    assert sentence == " Shown on node-box only; it was not forwarded to your other devices."
+    # A key this module never forwards keeps its empty clause.
+    assert ra.forwarded_notice_sentence(node, SID, "gate:approval:w1") == ""
+
+
+def test_a_device_in_no_mesh_keeps_the_bare_notify_result(tmp_path: Path) -> None:
+    """Single-device operators: no network, or a network nobody else has joined."""
+    alone = tmp_path / "alone"
+    (alone / "sessions" / SID).mkdir(parents=True)
+    assert ra.notice_forwarding(alone, SID) == (ra.NOT_APPLICABLE, "")
+    assert ra.forwarded_notice_sentence(alone, SID) == ""
+    _join_mesh(alone, peers=())
+    assert ra.forwarded_notice_sentence(alone, SID) == ""
+    untrusted = tmp_path / "untrusted"
+    _join_mesh(untrusted, trust="untrusted")
+    assert ra.forwarded_notice_sentence(untrusted, SID) == ""
+
+
+def test_a_forwarded_notice_keeps_its_sentence_on_a_mesh_node(tmp_path: Path) -> None:
+    owner = _owner(tmp_path)
+    _join_mesh(owner)
+    ra.stamp_rows_for_viewer(owner, [_catalog_row()], HEAD)
+    assert ra.notice_forwarding(owner, SID) == (ra.FORWARDED, HEAD)
+    assert ra.forwarded_notice_sentence(owner, SID) == (
+        " Posted on node-box; it will be forwarded to d_head-box, where this session started."
+    )
+
+
+def test_an_agent_child_on_a_node_is_told_its_notice_stays_here(tmp_path: Path) -> None:
+    """Mirrors stamp_rows_for_viewer: an agent-origin row is never put on the wire."""
+    owner = tmp_path / "node"
+    (owner / "sessions" / SID).mkdir(parents=True)
+    write_stamp(
+        owner,
+        MeshStamp(
+            session_id=SID,
+            network_id="n_test",
+            home_device=NODE,
+            placement=SessionPlacement(
+                mode="peer", network_id="n_test", home_device=NODE, stamp_revision=1
+            ),
+            origin={"kind": ra.AGENT_ORIGIN_KIND, "source_device": HEAD, "source_session_id": ""},
+        ),
+    )
+    _join_mesh(owner)
+    ra.record_forwarding_origin(owner, HEAD)
+    assert ra.notice_forwarding(owner, SID) == (ra.LOCAL_ONLY, HEAD)
+    assert "will be forwarded" not in ra.forwarded_notice_sentence(owner, SID)
+
+
+def _stamped_node(tmp_path: Path, mode: str | None, origin: dict[str, Any]) -> Path:
+    """A mesh node holding SID with one forwardable notice, stamped ``mode``/``origin``.
+
+    ``mode=None`` writes no stamp at all (a session started here).
+    """
+    node = tmp_path / "node"
+    (node / "sessions" / SID).mkdir(parents=True)
+    if mode is not None:
+        write_stamp(
+            node,
+            MeshStamp(
+                session_id=SID,
+                network_id="" if mode == "local" else "n_test",
+                home_device=NODE,
+                placement=SessionPlacement(
+                    mode=mode,  # type: ignore[arg-type]
+                    network_id="" if mode == "local" else "n_test",
+                    home_device=NODE,
+                    stamp_revision=1,
+                ),
+                origin=origin,
+            ),
+        )
+    NotificationStore(node).notify(SID, title="Deploy finished", priority="high", key="deploy")
+    _join_mesh(node)
+    return node
+
+
+#: The stamp ``sync.promote_replica`` writes: placement LOCAL, the origin the
+#: old owner (``REPLICA_ORIGIN_KIND`` = "fork") and NO ``started_by`` — a copy
+#: does not attest who started the original.
+_REPLICA_ORIGIN = {"kind": "fork", "source_device": HEAD, "source_session_id": "s_old"}
+
+#: ``started_by`` variants for the parity table (#4001's default-deny): the
+#: attested operator create, an attested agent create, and a legacy stamp.
+_ATTESTED = {ra.STARTED_BY_FIELD: ra.OPERATOR_STARTED}
+_AGENT_ATTESTED = {ra.STARTED_BY_FIELD: ra.AGENT_ORIGIN_KIND}
+_UNATTESTED: dict[str, str] = {}
+
+_STAY_UNATTESTED = (
+    " Posted on node-box; it stays on node-box, because only notices from sessions the"
+    " operator started on d_head-box are forwarded there, and this one was moved, forked"
+    " or placed here otherwise."
+)
+
+
+def test_a_recovered_replica_is_told_its_notice_stays_here(tmp_path: Path) -> None:
+    """R1-1 rebased onto #4001: a replica stamp carries no ``started_by``.
+
+    The catalogue now withholds its notify items (default-deny), so the verdict
+    must not promise forwarding even once HEAD collects. Mode-independence (the
+    original R1-1 point) is held by the parity table's attested ``local`` rows.
+    """
+    node = _stamped_node(tmp_path, "local", _REPLICA_ORIGIN)
+    assert ra.notice_forwarding(node, SID) == (ra.ORIGIN_NOT_COLLECTING, HEAD)
+    assert "will be forwarded" not in ra.forwarded_notice_sentence(node, SID)
+    ra.record_forwarding_origin(node, HEAD)
+    assert ra.notice_forwarding(node, SID) == (ra.NOT_OPERATOR_STARTED, HEAD)
+    assert ra.forwarded_notice_sentence(node, SID) == _STAY_UNATTESTED
+
+
+def test_an_attested_replica_is_still_forwarded_whatever_its_mode(tmp_path: Path) -> None:
+    """R1-1 kept: an attested origin is read the same under placement ``local``."""
+    node = _stamped_node(tmp_path, "local", {**_REPLICA_ORIGIN, **_ATTESTED})
+    assert ra.notice_forwarding(node, SID) == (ra.ORIGIN_NOT_COLLECTING, HEAD)
+    ra.record_forwarding_origin(node, HEAD)
+    assert ra.notice_forwarding(node, SID) == (ra.FORWARDED, HEAD)
+    assert "will be forwarded" in ra.forwarded_notice_sentence(node, SID)
+
+
+@pytest.mark.parametrize("attestation", [_AGENT_ATTESTED, _UNATTESTED], ids=["agent", "missing"])
+def test_an_unattested_user_stamp_says_it_stays_here(
+    tmp_path: Path, attestation: dict[str, str]
+) -> None:
+    """#4001 x #4029: no operator attestation -> never forwarded.
+
+    Main's precedence is kept: before the origin collects, the not-collecting
+    sentence (already "stays"); once it collects, #4001's attestation sentence.
+    """
+    origin = {"kind": "user", "source_device": HEAD, "source_session_id": "", **attestation}
+    node = _stamped_node(tmp_path, "peer", origin)
+    assert ra.notice_forwarding(node, SID) == (ra.ORIGIN_NOT_COLLECTING, HEAD)
+    assert ra.forwarded_notice_sentence(node, SID) == (
+        " Posted on node-box; it stays on node-box, because d_head-box, where this session"
+        " started, is not known to collect forwarded notices."
+    )
+    ra.record_forwarding_origin(node, HEAD)
+    assert ra.notice_forwarding(node, SID) == (ra.NOT_OPERATOR_STARTED, HEAD)
+    assert ra.forwarded_notice_sentence(node, SID) == _STAY_UNATTESTED
+
+
+def _origin(kind: str, source: str, attestation: dict[str, str]) -> dict[str, Any]:
+    return {"kind": kind, "source_device": source, "source_session_id": "", **attestation}
+
+
+_PARITY_MODES: tuple[str | None, ...] = ("peer", "local")
+_PARITY_ORIGINS: list[tuple[str | None, dict[str, Any]]] = [
+    (mode, _origin(kind, source, attestation))
+    for mode in _PARITY_MODES
+    for kind in ("user", ra.AGENT_ORIGIN_KIND, "fork", "moved")
+    for source in (HEAD, "d_other", "")
+    for attestation in (_ATTESTED, _AGENT_ATTESTED, _UNATTESTED)
+]
+_PARITY_ORIGINS += [("local", {}), (None, {})]
+
+
+@pytest.mark.parametrize(("mode", "origin"), _PARITY_ORIGINS)
+def test_the_notify_verdict_agrees_with_the_catalogue_leg(
+    tmp_path: Path, mode: str | None, origin: dict[str, Any]
+) -> None:
+    """Parity (R1-1, #4001): "forwarded to HEAD" iff the REAL catalogue leg puts it on HEAD's wire.
+
+    Modes x origin kinds x sources x ``started_by`` (operator / agent / missing):
+    the catalogue row is built from the same stamp origin, so any drift between
+    :func:`ra.notice_forwarding` and :func:`ra.stamp_rows_for_viewer` fails here.
+    """
+    node = _stamped_node(tmp_path, mode, origin)
+    # The row exactly as RelayServer._op_catalog builds it from the stamp.
+    row: dict[str, Any] = {"session_id": SID, "state": "stored", "origin": dict(origin) or None}
+    ra.stamp_rows_for_viewer(node, [row], HEAD)  # also records HEAD as collecting
+    on_wire = bool(row.get("notices"))
+    assert (ra.notice_forwarding(node, SID) == (ra.FORWARDED, HEAD)) is on_wire
+    # And the positive cell exists: an attested user/fork/moved origin of HEAD.
+    if origin.get("source_device") == HEAD and origin.get(ra.STARTED_BY_FIELD) == "operator":
+        assert on_wire is (origin["kind"] != ra.AGENT_ORIGIN_KIND)
+
+
+def test_a_network_whose_only_peer_was_removed_is_no_mesh(tmp_path: Path) -> None:
+    """R1-2: a removed member is a tombstone, not "another device" to mention."""
+    from local_operator.network import store as net_store
+
+    alone = tmp_path / "alone"
+    (alone / "sessions" / SID).mkdir(parents=True)
+    _join_mesh(alone)
+    record = net_store.list_networks(alone)[0]
+    for member in record.members:
+        if member.device_id == HEAD:
+            member.removed_at = time.time()
+    net_store.save(record, alone)
+    assert ra.notice_forwarding(alone, SID) == (ra.NOT_APPLICABLE, "")
+    assert ra.forwarded_notice_sentence(alone, SID) == ""
+
+
+def test_a_disconnected_network_is_no_mesh(tmp_path: Path) -> None:
+    """R1-2: a network this device left carries nothing to other devices."""
+    alone = tmp_path / "alone"
+    (alone / "sessions" / SID).mkdir(parents=True)
+    _join_mesh(alone, trust="disconnected")
+    assert ra.notice_forwarding(alone, SID) == (ra.NOT_APPLICABLE, "")
+    assert ra.forwarded_notice_sentence(alone, SID) == ""
 
 
 # ---------------------------------------------------------------------------
@@ -1267,3 +1522,163 @@ def test_q2_the_notify_tool_refuses_a_remote_ask_key() -> None:
     result = asyncio.run(notify())
     text = json.dumps(getattr(result, "content", str(result)), default=str)
     assert "reserved" in text and ra.ASK_NOTICE_PREFIX in text
+
+
+# ---------------------------------------------------------------------------
+# Default-deny (operator rule 2026-11-14): only an ATTESTED operator session's
+# ``notify`` items travel; open asks travel from any non-agent session.
+# ---------------------------------------------------------------------------
+
+#: The stamp every session placed on a peer before the attestation carries: the
+#: owner's create op defaulted a missing kind to ``user`` since the mesh core, so
+#: agent-lane workers on lop-remote-node-2 read exactly like this.
+LEGACY_ORIGIN = {"kind": "user", "source_device": HEAD, "source_session_id": ""}
+
+
+def _legacy_owner(tmp_path: Path) -> Path:
+    owner = _owner(tmp_path)
+    stamp_file = owner / "sessions" / SID / "mesh.json"
+    import json
+
+    data = json.loads(stamp_file.read_text(encoding="utf-8"))
+    data["origin"] = dict(LEGACY_ORIGIN)
+    stamp_file.write_text(json.dumps(data), encoding="utf-8")
+    return owner
+
+
+@pytest.mark.parametrize(
+    ("origin", "forwarded"),
+    [
+        (LEGACY_ORIGIN, False),
+        ({**LEGACY_ORIGIN, "started_by": "operator"}, True),
+        ({**LEGACY_ORIGIN, "kind": "agent", "started_by": "agent"}, False),
+        # A forged-looking mix still denies: ``agent`` kind wins.
+        ({**LEGACY_ORIGIN, "kind": "agent", "started_by": "operator"}, False),
+        ({**LEGACY_ORIGIN, "kind": "moved"}, False),
+        ({**LEGACY_ORIGIN, "started_by": "someone"}, False),
+    ],
+)
+def test_default_deny_forwards_notify_items_only_for_an_attested_operator_session(
+    tmp_path: Path, origin: dict[str, Any], forwarded: bool
+) -> None:
+    owner = _owner(tmp_path)
+    rows = [{**_catalog_row(), "origin": dict(origin)}]
+    ra.stamp_rows_for_viewer(owner, rows, HEAD)
+    keys = [n["key"] for n in rows[0].get("notices") or ()]
+    assert keys == (["deploy"] if forwarded else []), (origin, keys)
+
+
+def _restamp(owner: Path, origin: dict[str, Any]) -> None:
+    import json
+
+    stamp_file = owner / "sessions" / SID / "mesh.json"
+    data = json.loads(stamp_file.read_text(encoding="utf-8"))
+    data["origin"] = dict(origin)
+    stamp_file.write_text(json.dumps(data), encoding="utf-8")
+
+
+@pytest.mark.parametrize(
+    ("origin", "forwarded"),
+    [
+        # Moved / forked ONTO this node by the operator: no attestation, so the
+        # owner keeps its items, and the reply must say so (QA r2, Q1).
+        ({"kind": "moved", "source_device": HEAD, "source_session_id": ""}, False),
+        ({"kind": "fork", "source_device": HEAD, "source_session_id": ""}, False),
+        # An attested operator create: promised AND put on the wire.
+        ({**LEGACY_ORIGIN, "started_by": "operator"}, True),
+    ],
+)
+def test_default_deny_the_node_reply_matches_the_owner_forward_filter(
+    tmp_path: Path, origin: dict[str, Any], forwarded: bool
+) -> None:
+    """QA r2 Q1: the node's ``notify`` reply applies the owner's own forward
+    predicate, so "will be forwarded" is said exactly when the item travels."""
+    owner = _owner(tmp_path)
+    _restamp(owner, origin)
+    # The head has read this node, so it IS recorded as collecting forwards:
+    # the old reply said "will be forwarded" here regardless of the stamp.
+    rows = [{**_catalog_row(), "origin": dict(origin)}]
+    ra.stamp_rows_for_viewer(owner, rows, HEAD)
+    assert HEAD in ra.forwarding_origins(owner)
+    sentence = ra.forwarded_notice_sentence(owner, SID)
+    keys = [n["key"] for n in rows[0].get("notices") or ()]
+    if forwarded:
+        assert "will be forwarded to its origin device" in sentence, sentence
+        assert keys == ["deploy"]
+    else:
+        assert "will be forwarded" not in sentence, sentence
+        assert "it stays on this device" in sentence and "moved, forked" in sentence
+        assert keys == [], "the head inbox gets nothing from an unattested stamp"
+
+
+def test_a_reused_tmp_path_still_records_its_forwarding_origin(tmp_path: Path) -> None:
+    """Regression for the order-dependent CI failure: a root path handed out
+    again after its directory was deleted (pytest 8 renumbering a passing
+    test's removed ``tmp_path``) still gets its origins file, because no
+    test inherits another test's memo (``_fresh_origin_memo``)."""
+    assert ra._recorded_origins == set()
+    owner = _owner(tmp_path)
+    ra.stamp_rows_for_viewer(owner, [_catalog_row()], HEAD)
+    assert HEAD in ra.forwarding_origins(owner)
+
+
+def test_a_session_brought_home_keeps_its_reply_byte_for_byte(tmp_path: Path) -> None:
+    """A session moved HOME (its source device never reads this one, so it is not
+    a recorded forwarding origin): the reply is unchanged from before Q1."""
+    owner = _owner(tmp_path, origin=NODE)
+    _restamp(owner, {"kind": "moved", "source_device": NODE, "source_session_id": ""})
+    assert NODE not in ra.forwarding_origins(owner)
+    assert ra.forwarded_notice_sentence(owner, SID) == (
+        " Posted on this device; it stays on this device, because its origin device,"
+        " where this session started, is not known to collect forwarded notices."
+    )
+
+
+def test_default_deny_a_legacy_sessions_open_ask_still_reaches_the_origin(
+    tmp_path: Path,
+) -> None:
+    """The operator rule allows asks: a question waiting on the operator travels
+    from an unattested session; only its ``notify`` item is withheld."""
+    owner = _legacy_owner(tmp_path)
+    _queue_ask(owner, "k9", "Rotate the node's MCP token?")
+    rows = [{**_catalog_row(), "origin": dict(LEGACY_ORIGIN)}]
+    ra.stamp_rows_for_viewer(owner, rows, HEAD)
+    titles = [n["title"] for n in rows[0]["notices"]]
+    assert titles == ["Rotate the node's MCP token?"], titles
+    assert rows[0]["notices"][0]["key"].startswith(ra.ASK_NOTICE_PREFIX)
+
+
+def test_default_deny_the_origin_drops_a_legacy_owners_notify_but_keeps_its_ask(
+    root: Path,
+) -> None:
+    """An OWNER older than this filter still puts every notice on the wire; the
+    origin re-applies the rule to the row's ``origin`` (``peer_rows``), which is
+    what stops the lop-remote-node-2 rows the moment the head updates."""
+    from types import SimpleNamespace
+
+    from local_operator.session.peer_rows import _attested_notices
+
+    ask = (f"{ra.ASK_NOTICE_PREFIX}k1", 1, "high", "Which branch?", 5)
+    note = ("progress", 1, "normal", "#3842 convergence pushed; six PR commits preserved", 5)
+    legacy = SimpleNamespace(notices=(note, ask), origin=dict(LEGACY_ORIGIN))
+    assert _attested_notices(legacy) == (ask,)
+    attested = SimpleNamespace(
+        notices=(note, ask), origin={**LEGACY_ORIGIN, "started_by": "operator"}
+    )
+    assert _attested_notices(attested) == (note, ask)
+    assert _attested_notices(SimpleNamespace(notices=(note,), origin=None)) == ()
+    assert _attested_notices(SimpleNamespace(notices=None, origin=None)) is None
+
+
+def test_default_deny_the_create_attestation_is_never_defaulted() -> None:
+    """The owner copies ``started_by`` only from a frame that carried one; the
+    origin's control op derives it from the attributed ``origin``."""
+    from local_operator.network.relay import _started_by_claim
+
+    assert _started_by_claim({}) == {}, "a pre-attestation origin stamps nothing"
+    assert _started_by_claim({"origin": "user"}) == {}, "kind alone is not attestation"
+    assert _started_by_claim({"started_by": "operator"}) == {"started_by": "operator"}
+    assert _started_by_claim({"started_by": "agent"}) == {"started_by": "agent"}
+    assert _started_by_claim({"started_by": "root"}) == {}
+    assert ra.started_by_for_origin("user") == ra.OPERATOR_STARTED
+    assert ra.started_by_for_origin("agent") == ra.AGENT_ORIGIN_KIND

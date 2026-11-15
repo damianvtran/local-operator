@@ -441,10 +441,14 @@ def test_list_serves_the_settings_shape_and_omits_unknown_name() -> None:
         "device_id",
         "last_seen_at",
         "platform",
+        "preferences",
         "registered_at",
         "state",
     ]
     assert entry["credential_live"] is True, "the cookie it presented is alive"
+    # A register without ``preferences`` stores none; the list renders the
+    # RESOLVED answer, all on, because absence has a defined meaning there.
+    assert entry["preferences"] == {"enabled": True, "completions": True, "errors": True}
     assert "name" not in entry
     assert devices[1]["name"] == "Pixel"
     assert entry["platform"] == "ios" and devices[1]["platform"] == "android"
@@ -1654,3 +1658,102 @@ def test_unrevoke_does_not_clear_the_lapse_marker() -> None:
     assert "revoked_at" not in record, "the restorable marker went"
     assert record["expired_at"] == STAMP, "the lapse stands: only a register clears it"
     assert push_devices.device_state(record) == push_devices.STATE_EXPIRED
+
+
+# -- per-device push preferences (Settings → Notifications) -------------------
+#
+# The operator could not turn notifications off at all; the app now sends its
+# switches on register (only to a relay advertising ``push_preferences``), the
+# store keeps them per device, and the push worker gates emits on them. These
+# cells own the store half; ``test_push_worker.py`` owns the gate.
+
+ALL_ON = {"enabled": True, "completions": True, "errors": True}
+
+
+def test_register_stores_valid_preferences_and_the_list_returns_them() -> None:
+    client = _client()
+    chosen = {"enabled": True, "completions": False, "errors": True}
+    answer = client.post("/api/push/register", json={**PAYLOAD, "preferences": chosen})
+    assert answer.status_code == 200, answer.text
+    assert _stored_records()[0]["preferences"] == chosen
+    (row,) = client.get("/api/push/devices").json()["devices"]
+    assert row["preferences"] == chosen
+    assert push_devices.device_preferences(config_dir()) == {answer.json()["device_id"]: chosen}
+
+
+def test_a_partial_preferences_object_stores_the_missing_keys_as_on() -> None:
+    client = _client()
+    answer = client.post("/api/push/register", json={**PAYLOAD, "preferences": {"errors": False}})
+    assert answer.status_code == 200, answer.text
+    assert _stored_records()[0]["preferences"] == {**ALL_ON, "errors": False}
+
+
+@pytest.mark.parametrize(
+    ("preferences", "sentence"),
+    [
+        ([True], "preferences must be an object when provided"),
+        ("off", "preferences must be an object when provided"),
+        ({"enabled": True, "sounds": False}, "unknown preferences field(s): sounds"),
+        ({"enabled": "no"}, "preferences.enabled must be true or false"),
+        ({"errors": 0}, "preferences.errors must be true or false"),
+        ({"completions": None}, "preferences.completions must be true or false"),
+    ],
+)
+def test_a_bad_preferences_shape_refuses_and_writes_nothing(
+    preferences: object, sentence: str
+) -> None:
+    client = _client()
+    answer = client.post("/api/push/register", json={**PAYLOAD, "preferences": preferences})
+    assert answer.status_code == 422, answer.text
+    assert sentence in answer.text
+    assert not _store_path().exists(), "a refused register writes nothing"
+
+
+def test_an_unknown_preferences_key_is_echoed_bounded() -> None:
+    client = _client()
+    long_key = "x" * (push_devices.MAX_FIELD_CHARS * 2)
+    answer = client.post("/api/push/register", json={**PAYLOAD, "preferences": {long_key: True}})
+    assert answer.status_code == 422
+    assert len(answer.text) < push_devices.MAX_FIELD_CHARS + 200
+
+
+def test_a_re_register_replaces_the_stored_preferences() -> None:
+    client = _client()
+    first = client.post(
+        "/api/push/register",
+        json={**PAYLOAD, "preferences": {"enabled": False, "completions": False, "errors": False}},
+    ).json()
+    second = client.post(
+        "/api/push/register", json={**PAYLOAD, "preferences": {"completions": False}}
+    ).json()
+    assert first["device_id"] == second["device_id"], "same device, updated in place"
+    (record,) = _stored_records()
+    assert record["preferences"] == {**ALL_ON, "completions": False}
+    # Declarative like ``name``: a register without the field clears it (= all on).
+    client.post("/api/push/register", json=PAYLOAD)
+    (record,) = _stored_records()
+    assert "preferences" not in record
+    assert client.get("/api/push/devices").json()["devices"][0]["preferences"] == ALL_ON
+
+
+def test_a_row_without_preferences_means_all_on() -> None:
+    """A row an earlier build wrote has no ``preferences``: it loads, it lists
+    all-on, and the gate's read answers all-on — the pre-preferences behaviour."""
+    _plant([_record()])
+    assert "preferences" not in _stored_records()[0]
+    device_id = _VALID_RECORD["device_id"]
+    assert push_devices.device_preferences(config_dir()) == {device_id: ALL_ON}
+    (row,) = push_devices.list_devices(config_dir())["devices"]
+    assert row["preferences"] == ALL_ON
+
+
+@pytest.mark.parametrize(
+    "stored",
+    [[True], {"enabled": "yes"}, {"enabled": True, "vibrate": False}],
+)
+def test_a_stored_row_with_invalid_preferences_refuses_the_store(stored: object) -> None:
+    _plant([_record(preferences=stored)])
+    before = _store_path().read_bytes()
+    with pytest.raises(push_devices.PushRegistryCorrupt, match="invalid preferences"):
+        push_devices.list_devices(config_dir())
+    assert _store_path().read_bytes() == before

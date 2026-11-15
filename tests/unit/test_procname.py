@@ -1487,6 +1487,8 @@ class TestLaunchdJob:
         assert job == {
             "Program": str(shim),
             "ProgramArguments": [label, "-m", module, *extra],
+            # The desktop app, so System Settings can group the item under it.
+            "AssociatedBundleIdentifiers": [procname.APP_BUNDLE_ID],
         }, role
         assert procname.launchd_program(module, *extra) == [str(shim), "-m", module, *extra]
 
