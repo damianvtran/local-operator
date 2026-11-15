@@ -58,6 +58,7 @@ from typing import Any, Awaitable, Callable, cast
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from local_operator import procstate
+from local_operator.guardrails import spawned as guard_spawned
 from local_operator.harness.secret_sinks import refusal_text as _secret_sink_refusal
 from local_operator.harness.secret_sinks import scan_python as _scan_secret_cell
 from local_operator.harness.secret_sinks import steer_text as _secret_sink_steer
@@ -827,6 +828,9 @@ async def _spawn(
         "local_operator.tools.eval_worker",
         **spawn_options,
     )
+    # The kernel's spawning session, for the delete guard's holder attribution
+    # (review m1, PR #3987): every session's kernel shares the harness pid.
+    guard_spawned.record(process.pid, session_id, process)
     windows_job: int | None = None
     if procstate.is_windows():
         try:

@@ -110,6 +110,30 @@ def test_a_hidden_pid_counts_as_maybe_inside(fake_proc, tmp_path):
     assert prov._live_cwd_inside(tree) is False
 
 
+def test_a_hidden_pid_leaves_own_tree_holders_unknown_and_named(fake_proc, tmp_path):
+    """Merge of #3980 into #3987: the own-tree scan also fails closed on a hidden pid.
+
+    ``cwd_holders`` (PR #3987) attributes holders by pid; a hidden pid has no
+    cwd to test and no holder to name, so ownership is unknown (``None`` ->
+    ``busy``), and the judge-facing phrase names the pid instead of a bare
+    "busy".
+    """
+    tree = os.path.realpath(tmp_path / "tree")
+    entries = prov._cwd_entries(fresh=True)
+    assert entries is not None
+    assert sorted(entries, key=lambda e: e[0]) == [
+        (READABLE, os.path.realpath(fake_proc["elsewhere"])),
+        (HIDDEN, None),
+    ]
+    assert prov.cwd_holders(tree, "s") is None
+    assert prov.busy_phrase(tree, "s") == (
+        f"busy=unknown: process inventory unreadable (cwd of pid {HIDDEN} unreadable "
+        "(Permission denied)); a live process inside cannot be ruled out"
+    )
+    fake_proc["state"][HIDDEN] = ProcessLookupError  # it exited: nothing hidden
+    assert prov.cwd_holders(tree, "s") == ()
+
+
 def _git(*args: str, cwd: Path | None = None) -> str:
     return subprocess.run(
         ["git", *args], cwd=cwd, check=True, capture_output=True, text=True
