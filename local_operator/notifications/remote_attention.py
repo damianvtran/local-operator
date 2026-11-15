@@ -1285,7 +1285,9 @@ def _notice_decision(root: Path, session_id: str, key: str = "") -> tuple[str, s
                 # that does not collect gets the not-collecting sentence whatever
                 # the attestation (#4001's "brought home" test pins it).
                 return ORIGIN_NOT_COLLECTING, target, False
-            if not is_non_agent_session(Path(root), session_id, origin_map, started_here=via_operator):
+            if not is_non_agent_session(
+                Path(root), session_id, origin_map, started_here=via_operator
+            ):
                 # Mirrors #4001's default-deny in stamp_rows_for_viewer: notify
                 # items travel only for a stamp attesting ``started_by:
                 # operator`` — the SAME predicate on the SAME mapping.

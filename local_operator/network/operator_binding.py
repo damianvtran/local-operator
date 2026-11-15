@@ -344,6 +344,163 @@ def onboarded_devices(root: Path | None) -> dict[str, tuple[str, str]]:
     return out
 
 
+#: The invite step's own receipt sentence (``onboard.OnboardRun.step_invite``):
+#: "invite <id> minted for role <role>...". The id is THIS Mac's mint (Crockford,
+#: lowercase), written into this Mac's approval record by this Mac's runner.
+_INVITE_RECEIPT = re.compile(r"invite ([0-9a-z]{4,64}) minted for role ")
+
+#: Last logged backfill outcome per approval, so a link-up storm logs each
+#: resolution or skip once per process rather than once per link.
+_backfill_logged: dict[str, str] = {}
+
+
+def _invite_ids(record: Mapping[str, Any]) -> list[str]:
+    """Invite ids this approval's runs minted, from its OK ``invite`` receipts."""
+    out: list[str] = []
+    for receipt in record.get("receipts") or ():
+        if not isinstance(receipt, Mapping) or receipt.get("step") != "invite":
+            continue
+        if not receipt.get("ok"):
+            continue
+        match = _INVITE_RECEIPT.match(str(receipt.get("detail") or ""))
+        if match and match.group(1) not in out:
+            out.append(match.group(1))
+    return out
+
+
+def _backfill_one(root: Path | None, record: Mapping[str, Any], network_id: str) -> dict[str, Any]:
+    """Resolve one pre-feature onboarding to the mesh id it admitted, or say why not.
+
+    THE CHAIN, every link Mac-written and none node-writable: the approval's own
+    ``invite`` receipt (this Mac's runner, naming the invite this Mac minted) →
+    that invite in this Mac's network record → its ``redeemed_by``, which this
+    Mac's relay wrote from the HANDSHAKE-authenticated device id, on an invite
+    the relay consumed as ``admitted`` → still an active, unburned member. The
+    node's own reports (the join receipt's "joined … as <id>", ``identity
+    show``) are never read: a node could name a co-member there.
+    """
+    from local_operator.network import store as net_store
+
+    candidates: set[str] = set()
+    try:
+        network = net_store.load(network_id, root)
+    except Exception:  # noqa: BLE001 — no record of the network: nothing to tie
+        return {"result": "skipped", "reason": "network_record_unreadable"}
+    invites = _invite_ids(record)
+    if not invites:
+        return {"result": "skipped", "reason": "no_invite_receipt"}
+    for invite_id in invites:
+        invite = network.invite(invite_id)
+        if invite is None:
+            continue
+        if invite.state != "consumed" or invite.outcome != "admitted" or not invite.redeemed_by:
+            continue
+        candidates.add(invite.redeemed_by)
+    if not candidates:
+        return {"result": "skipped", "reason": "no_admitted_invite"}
+    if len(candidates) > 1:
+        return {"result": "skipped", "reason": "ambiguous", "candidates": sorted(candidates)}
+    [device_id] = candidates
+    if network.is_burned(device_id) or not any(
+        m.device_id == device_id for m in network.active_members()
+    ):
+        return {"result": "skipped", "reason": "not_an_active_member", "device_id": device_id}
+    return {"result": "resolved", "device_id": device_id}
+
+
+def backfill(root: Path | None, *, dry_run: bool = False) -> dict[str, Any]:
+    """Record the onboarded node for decisions made before the runner recorded it.
+
+    WHY (zero-friction rollout, 2026-11-15). :func:`own_proofs` presents only to
+    the node a decision's ``operator-onboarded`` record names, and the runner
+    writes that record only from this build on — so every node onboarded earlier
+    would never be presented to, and its asks would stay node-only. This derives
+    the record from handshake-authenticated records this Mac already holds
+    (:func:`_backfill_one`), and records NOTHING when it cannot be sure: an
+    unresolvable or ambiguous decision stays honestly node-only.
+
+    Idempotent and lazy: run from :func:`present` (link-up) and
+    :func:`retained_approval_ids` (the prune, so a decision the backfill can tie
+    to a node is not pruned first) — never at startup, so it cannot fail one. An
+    existing record is NEVER overwritten: the same id is ``already_recorded``, a
+    different one is a logged ``conflict`` and skipped.
+
+    ``dry_run`` writes nothing and logs nothing; the report is safe to print —
+    approval ids, network ids, kinds, mesh ids and reasons only, never the
+    request's SSH host/user or credential reference. Never raises.
+    """
+    report: dict[str, Any] = {"dry_run": dry_run, "networks": {}}
+    try:
+        recorded = onboarded_devices(root)
+        rows = _own_proofs_by_record(root)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("operator binding: backfill could not read records", exc_info=True)
+        # Said in the report, so a dry run never mistakes "could not read" for
+        # "nothing to backfill".
+        report["error"] = type(exc).__name__
+        return report
+    for record, proof in rows:
+        approval_id = proof["approval_id"]
+        network_id = _network_of(proof["request"])
+        entry: dict[str, Any] = {"approval_id": approval_id, "kind": proof["kind"]}
+        derived = _backfill_one(root, record, network_id)
+        entry.update(derived)
+        existing = recorded.get(approval_id)
+        if existing is not None:
+            if derived.get("result") == "resolved" and existing[1] != derived["device_id"]:
+                entry.update(result="conflict", recorded_device_id=existing[1])
+            else:
+                entry.update(result="already_recorded", device_id=existing[1])
+                entry.pop("reason", None)
+                entry.pop("candidates", None)
+        elif derived.get("result") == "resolved" and not dry_run:
+            if record_onboarded(
+                root, approval_id=approval_id, network_id=network_id, device_id=derived["device_id"]
+            ):
+                entry["result"] = "recorded"
+            else:
+                entry.update(result="skipped", reason="write_failed")
+        report["networks"].setdefault(network_id, []).append(entry)
+        if not dry_run:
+            _log_backfill(network_id, entry)
+    return report
+
+
+def _log_backfill(network_id: str, entry: Mapping[str, Any]) -> None:
+    """One log line per approval per outcome, per process (see ``_backfill_logged``)."""
+    outcome = f"{entry.get('result')}:{entry.get('reason', '')}:{entry.get('device_id', '')}"
+    approval_id = str(entry.get("approval_id") or "")
+    with _lock:
+        if _backfill_logged.get(approval_id) == outcome:
+            return
+        _backfill_logged[approval_id] = outcome
+    result = entry.get("result")
+    if result == "already_recorded":
+        return
+    if result == "conflict":
+        logger.warning(
+            "operator binding: backfill conflict for %s in %s: recorded %s, derived %s; kept",
+            approval_id,
+            network_id,
+            entry.get("recorded_device_id"),
+            entry.get("device_id"),
+        )
+    elif result == "recorded":
+        logger.info(
+            "operator binding: backfilled %s in %s -> %s",
+            approval_id,
+            network_id,
+            entry.get("device_id"),
+        )
+    else:
+        logger.info(
+            "operator binding: backfill skipped %s in %s: %s",
+            approval_id,
+            network_id,
+            entry.get("reason"),
+        )
+
+
 def _presentable(root: Path | None) -> dict[tuple[str, str], dict[str, Any]]:
     """The NEWEST own proof per ``(network, onboarded device)`` the runner recorded."""
     admitted = onboarded_devices(root)
@@ -369,6 +526,7 @@ def retained_approval_ids(root: Path | None) -> frozenset[str]:
     presented to anyone), prune as before: retention is bounded by the number
     of onboarded nodes.
     """
+    backfill(root)
     return frozenset(proof["approval_id"] for proof in _presentable(root).values())
 
 
@@ -420,6 +578,7 @@ def _reset_caches() -> None:
         _anchor_memo = None
         _verdicts.clear()
         _link_memo.clear()
+        _backfill_logged.clear()
 
 
 def _key_file_state(config_root: Path) -> str:
@@ -810,6 +969,8 @@ def present(server: "RelayServer", link: Any) -> dict[str, Any] | None:
 
     if wire.OPERATOR_BINDING_V1 not in getattr(link, "capabilities", ()):
         return None
+    # Lazily tie pre-feature onboardings to their node before choosing (idempotent).
+    backfill(server.root)
     proofs = own_proofs(
         server.root, str(link.network_id or ""), for_device=str(link.device_id or "")
     )

@@ -746,3 +746,130 @@ def test_r5_the_signature_is_verified_once_not_per_listing(
     for _ in range(20):
         assert ob.is_operator_link(rig.node, rig.link(rig.mac_id))
     assert len(calls) == 1
+
+
+# ---------------------------------------------------------------------------
+# Backfill: onboardings that predate the runner's ``operator-onboarded`` record
+# ---------------------------------------------------------------------------
+
+
+def _legacy_onboarding(
+    rig: Rig, invites: dict[str, str], *, outcome: str = "admitted", host: str = "node.test"
+) -> dict[str, Any]:
+    """A pre-feature onboarding: signed approval, the runner's ``invite`` receipts
+    and the Mac's own invite rows (``redeemed_by`` from the handshake) — but no
+    ``operator-onboarded`` record, exactly what an older build left behind."""
+    from local_operator.network.types import InviteRecord
+
+    approved = _onboard(rig, host=host, admitted="")
+    path = A.record_path(approved["approval_id"], rig.mac)
+    record = json.loads(path.read_text(encoding="utf-8"))
+    record.setdefault("receipts", [])
+    for invite_id in invites:
+        record["receipts"].append(
+            {
+                "run_id": "run_1",
+                "step": "invite",
+                "at": time.time(),
+                "ok": True,
+                "detail": f"invite {invite_id} minted for role drive; the approval"
+                " pre-answered the pairing confirm",
+                "digest": "",
+            }
+        )
+    # The node's OWN claim, which the backfill must never read: it names CO.
+    record["receipts"].append(
+        {
+            "run_id": "run_1",
+            "step": "join",
+            "at": time.time(),
+            "ok": True,
+            "detail": f"joined mesh as {CO}",
+            "digest": "",
+        }
+    )
+    path.write_text(json.dumps(record), encoding="utf-8")
+    network = net_store.load(NET, rig.mac)
+    for invite_id, redeemed_by in invites.items():
+        network.invites.append(
+            InviteRecord(
+                invite_id=invite_id, state="consumed", outcome=outcome, redeemed_by=redeemed_by
+            )
+        )
+    net_store.save(network, rig.mac)
+    return approved
+
+
+def test_backfill_ties_a_pre_feature_onboarding_to_its_node_only(rig: Rig) -> None:
+    approved = _legacy_onboarding(rig, {"abcd2345": NODE})
+    aid = approved["approval_id"]
+    assert ob.own_proofs(rig.mac, NET, for_device=NODE) == [], "nothing presented before"
+    dry = ob.backfill(rig.mac, dry_run=True)
+    assert dry["networks"][NET] == [
+        {"approval_id": aid, "kind": "device_onboard", "result": "resolved", "device_id": NODE}
+    ]
+    assert ob.onboarded_devices(rig.mac) == {}, "a dry run writes nothing"
+    # No SSH host, user or credential reference in the printable report.
+    text = json.dumps(dry)
+    assert "node.test" not in text and "ssh-node-ref" not in text and "ec2-user" not in text
+    real = ob.backfill(rig.mac)
+    assert real["networks"][NET][0]["result"] == "recorded"
+    assert ob.onboarded_devices(rig.mac) == {aid: (NET, NODE)}
+    [proof] = ob.own_proofs(rig.mac, NET, for_device=NODE)
+    assert proof["approval_id"] == aid
+    assert ob.own_proofs(rig.mac, NET, for_device=CO) == [], "the co-member still gets nothing"
+    # Idempotent.
+    again = ob.backfill(rig.mac)
+    assert again["networks"][NET][0]["result"] == "already_recorded"
+    assert ob.onboarded_devices(rig.mac) == {aid: (NET, NODE)}
+
+
+def test_backfill_runs_lazily_on_link_up_and_presents_to_that_node_only(rig: Rig) -> None:
+    approved = _legacy_onboarding(rig, {"abcd2345": NODE})
+    co = _WireLink(CO)
+    assert ob.present(_mac_server(rig), co) is None and co.frames == []
+    node = _WireLink(NODE)
+    ob.present(_mac_server(rig), node)
+    [frame] = node.frames
+    assert [p["approval_id"] for p in frame["proofs"]] == [approved["approval_id"]]
+
+
+def test_backfill_records_nothing_for_an_ambiguous_onboarding(rig: Rig) -> None:
+    approved = _legacy_onboarding(rig, {"abcd2345": NODE, "efgh6789": CO})
+    report = ob.backfill(rig.mac)
+    [entry] = report["networks"][NET]
+    assert entry["result"] == "skipped" and entry["reason"] == "ambiguous"
+    assert entry["approval_id"] == approved["approval_id"]
+    assert ob.onboarded_devices(rig.mac) == {}
+    assert ob.own_proofs(rig.mac, NET, for_device=NODE) == []
+    assert ob.own_proofs(rig.mac, NET, for_device=CO) == []
+
+
+@pytest.mark.parametrize(
+    ("invites", "outcome", "reason"),
+    [
+        # Only the node's own "joined … as <id>" claim: never read.
+        ({}, "admitted", "no_invite_receipt"),
+        # The invite was never admitted (a declined / wrong-device ceremony).
+        ({"abcd2345": NODE}, "declined", "no_admitted_invite"),
+        # Admitted, but that device is no member any more.
+        ({"abcd2345": "d_gone"}, "admitted", "not_an_active_member"),
+    ],
+)
+def test_backfill_skips_what_it_cannot_prove(
+    rig: Rig, invites: dict[str, str], outcome: str, reason: str
+) -> None:
+    _legacy_onboarding(rig, invites, outcome=outcome)
+    [entry] = ob.backfill(rig.mac)["networks"][NET]
+    assert (entry["result"], entry["reason"]) == ("skipped", reason)
+    assert ob.onboarded_devices(rig.mac) == {}
+
+
+def test_backfill_never_overwrites_a_recorded_node(rig: Rig) -> None:
+    approved = _legacy_onboarding(rig, {"abcd2345": CO})
+    aid = approved["approval_id"]
+    assert ob.record_onboarded(rig.mac, approval_id=aid, network_id=NET, device_id=NODE)
+    [entry] = ob.backfill(rig.mac)["networks"][NET]
+    assert entry["result"] == "conflict"
+    assert entry["recorded_device_id"] == NODE and entry["device_id"] == CO
+    assert ob.onboarded_devices(rig.mac) == {aid: (NET, NODE)}
