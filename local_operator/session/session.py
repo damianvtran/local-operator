@@ -4379,6 +4379,10 @@ class Session:
         #: :meth:`_persist_attachment`.
         self._unresolved_team: str = ""
         self._unresolved_agent: str = ""
+        #: Monotonic time of the last re-resolve attempt for those names (see
+        #: :meth:`_reresolve_unresolved_attachment`); ``None`` until the first.
+        self._attachment_reresolved_at: float | None = None
+        self._attachment_reresolve_fingerprint: tuple[int, ...] = ()
         # The conversation's title. A holder rather than a plain string for
         # the same reason the goal is one: the title arrives on a DETACHED
         # naming task after the host already built its status chrome, and
@@ -7179,6 +7183,12 @@ class Session:
         # conversation has an assistant reply — see
         # :meth:`_adopt_stored_attachment`.
         self._adopt_stored_attachment()
+        # A stored team/agent this runtime could NOT resolve when it opened (a
+        # moved session whose definitions landed after its runtime, or a mirror
+        # the cached registry snapshot predates) is retried here, so the brief
+        # joins the next prompt instead of waiting for a reopen. See
+        # :meth:`_reresolve_unresolved_attachment`.
+        self._reresolve_unresolved_attachment()
         desired = self._system_blocks(model)
         if inspect.isawaitable(desired):
             desired = await desired
@@ -9060,6 +9070,104 @@ class Session:
         if self._transcript_has_assistant_message():
             return
         self._restore_attachment()
+
+    #: Minimum seconds between two re-resolve attempts of an unresolved stored
+    #: attachment when the registries expose no root to fingerprint.
+    #: ``_prepare_system_blocks`` runs at every provider step, and a team that is
+    #: genuinely gone would otherwise force a registry rescan per step.
+    _ATTACHMENT_RERESOLVE_INTERVAL_S = 15.0
+
+    def _reresolve_unresolved_attachment(self) -> None:
+        """Re-apply a stored team/agent brief this LIVE runtime failed to resolve.
+
+        WHY (2026-11-13, PR #3937 round 1, session ce6fcb93c28a on
+        lop-remote-node-2): a session moved with ``attachment.json`` =
+        ``{team: "lopdev"}``, and the node listed ``lopdev`` as a mirrored team,
+        yet the moved conversation's system prompt had no ``[team: lopdev]``
+        brief. The brief is applied only by :meth:`_restore_attachment`, which
+        runs at construction (and, via :meth:`_adopt_stored_attachment`, once
+        more before an UNANSWERED conversation's first turn). A moved session is
+        answered by definition, so when its runtime opened before the team
+        resolved here — the definitions push landing after the runtime, or a
+        registry snapshot (5 s cache) taken before the mirror was installed —
+        the miss was recorded in ``_unresolved_team`` and nothing ever retried it.
+
+        The trigger is that recorded miss and nothing else: the name is still
+        this session's intended attachment (a ``/team`` or ``/agent`` mutation
+        clears it — see :meth:`_persist_attachment`), so re-applying it can never
+        resurrect something the user detached, which is the reason the late
+        adoption refuses answered conversations. Registries are force-refreshed
+        first (the cached snapshot is the stale-mirror case), then the ordinary
+        restore runs through the same resolvers ``/team`` uses, mirrored rows
+        included. A failed attempt is retried only once a registry root's mtime
+        moves (or, unfingerprintable, after :data:`_ATTACHMENT_RERESOLVE_INTERVAL_S`).
+
+        Each slot is cleared only once IT resolved (review r2 R2-M1); a slot still
+        missing keeps its marker and is retried on the next registry change.
+        Never raises: a turn must not fail over a brief.
+        """
+        pending_team = self._unresolved_team and self.active_team is None
+        pending_agent = self._unresolved_agent and not self._goal_state.agent_name
+        if not (pending_team or pending_agent):
+            return
+        # Retry only when something could have changed: a definitions install
+        # creates a row directory, which moves its registry root's mtime. Where a
+        # (scoped) registry does not expose its root, fall back to a time throttle.
+        fingerprint: list[int] = []
+        for registry, attr in (
+            (self.team_registry, "teams_dir"),
+            (self.agent_registry, "agents_dir"),
+        ):
+            root = getattr(registry, attr, None)
+            if root is None:
+                fingerprint = []
+                break
+            try:
+                fingerprint.append(os.stat(root).st_mtime_ns)
+            except OSError:
+                fingerprint.append(0)
+        now = time.monotonic()
+        last = self._attachment_reresolved_at
+        if last is not None:
+            if fingerprint and tuple(fingerprint) == self._attachment_reresolve_fingerprint:
+                return
+            if not fingerprint and now - last < self._ATTACHMENT_RERESOLVE_INTERVAL_S:
+                return
+        self._attachment_reresolved_at = now
+        self._attachment_reresolve_fingerprint = tuple(fingerprint)
+        for registry in (self.team_registry, self.agent_registry):
+            # BOTH registries must re-read disk NOW (review r2 R2-M1): the team
+            # registry spells it ``refresh`` but ``AgentRegistry`` /
+            # ``ScopedAgentRegistry`` spell it ``refresh_now``. Calling only the
+            # first left agent lookups (a team's specialist manager, an agent-only
+            # attachment) on the 5 s snapshot while the fingerprint above was
+            # already spent, so the miss was never retried.
+            refresh = getattr(registry, "refresh", None) or getattr(registry, "refresh_now", None)
+            if callable(refresh):
+                try:
+                    refresh()
+                except Exception:  # noqa: BLE001 — the restore reports a bad registry
+                    logger.debug("attachment re-resolve: refresh failed", exc_info=True)
+        try:
+            self._restore_attachment()
+        except Exception:  # noqa: BLE001 — see the docstring
+            logger.debug("attachment re-resolve failed", exc_info=True)
+        # Per slot: the restore records misses but never clears them (that is a
+        # user action's job), so a slot that now resolved is cleared here and one
+        # that did not keeps its name for the next attempt. An attached team also
+        # settles the agent slot: it owns that slot (issue #2014), so a stored
+        # agent beside it is superseded, not missing.
+        team_done = not pending_team or self.active_team is not None
+        agent_done = (
+            not pending_agent or bool(self._goal_state.agent_name) or self.active_team is not None
+        )
+        if team_done and pending_team:
+            self._unresolved_team = ""
+        if agent_done and pending_agent:
+            self._unresolved_agent = ""
+        if team_done and agent_done:
+            self.attachment_restore_notice = ""
+            logger.info("attachment re-resolve: applied the stored attachment")
 
     def _transcript_has_assistant_message(self) -> bool:
         """Whether the DURABLE conversation has produced any assistant reply.
@@ -30688,7 +30796,30 @@ class Session:
         if not details:
             return
         monitors: list[MonitorSpec] = []
-        for raw in details.get("monitors", []):
+        raw_rows = [row for row in details.get("monitors", []) if isinstance(row, dict)]
+        try:
+            # A MOVED SESSION'S MONITORS RUN WHERE THEY NOW ARE (2026-11-13: three
+            # monitors carried Mac → Linux kept ``cwd=/Users/damian`` and failed
+            # every first check). The transcript keeps the source host's value —
+            # the move verified it byte-for-byte — so the translation is applied
+            # here, at load, with the promote's own rule (``network/carry.py``);
+            # an untranslatable cwd re-arms at this session's cwd. A no-op for a
+            # session that never moved: every existing cwd is kept as-is.
+            from local_operator.network.carry import moved_in, translate_monitor_cwds
+
+            raw_rows, _counts = translate_monitor_cwds(
+                raw_rows,
+                session_cwd=os.path.abspath(self._cwd),
+                # This host's home, named here rather than defaulted inside the
+                # translator (cwd omission census).
+                home=os.path.expanduser("~"),
+                # A moved-in session's cwds may come from a device sharing this
+                # home path; only then is a missing path under home foreign.
+                moved=moved_in(self._transcript.directory),
+            )
+        except Exception:  # noqa: BLE001 — a load must not fail over a path mapping
+            logger.debug("monitor cwd translation failed", exc_info=True)
+        for raw in raw_rows:
             try:
                 monitors.append(MonitorSpec.model_validate(raw))
             except Exception:

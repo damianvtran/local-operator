@@ -1020,3 +1020,47 @@ def test_an_error_frame_before_the_commit_keeps_the_staging_and_loses_the_claim(
     assert not (server_b.root / "sessions" / SESSION).exists()
     assert _holders(server_a.root, server_b.root, SESSION) == [source]
     assert SESSION not in read_tombstones(server_a.root)
+
+
+# ---------------------------------------------------------------------------
+# 7 — the session's linked projects and its team travel (2026-11-13 parity)
+# ---------------------------------------------------------------------------
+
+
+def test_a_moved_session_carries_its_projects_and_names_an_unresolved_team(
+    pair: Devices, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A real two-relay move: the linked project lands in the destination's
+    per-device store (source row untouched) and a team the destination cannot
+    resolve is named on the receipt instead of silently missing from the prompt.
+    """
+    from local_operator.projects import ProjectEdit, ProjectRegistry
+    from local_operator.resume import write_session_attachment
+
+    server_a, server_b, _host, _port = pair
+    _pair_settled(pair, monkeypatch, role="admin")
+    _own_session_with_wake_and_cwd(server_a, os.path.expanduser("~"))
+    source_registry = ProjectRegistry(server_a.root)
+    project = source_registry.create_project(
+        ProjectEdit(name="secret-guardrails-relax"), sessions=[SESSION]
+    )
+    source_registry.update_project(
+        project.id, ProjectEdit(progress="carried line"), reporter=SESSION
+    )
+    write_session_attachment(
+        server_a.root / "sessions" / SESSION, team="team-nowhere", agent="", goal=""
+    )
+
+    result = _move(server_b, SESSION, monkeypatch=monkeypatch)
+
+    assert result["ok"] is True, result
+    carried = result.get("carry") or {}
+    assert carried.get("projects") == {"created": ["secret-guardrails-relax"]}, result
+    adopted = ProjectRegistry(server_b.root).get_project_by_name("secret-guardrails-relax")
+    assert adopted is not None and adopted.sessions == [SESSION]
+    assert adopted.progress == "carried line"
+    # The source row stays: other sessions on that device may still link it.
+    assert ProjectRegistry(server_a.root).get_project_by_name("secret-guardrails-relax") is not None
+    team = carried.get("team") or {}
+    assert team.get("name") == "team-nowhere" and team.get("resolved") is False, result
+    assert "not defined on this device" in str(team.get("notice")), team
