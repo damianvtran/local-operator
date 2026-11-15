@@ -2,7 +2,7 @@
 
 **SUPERSEDED ADMISSION POLICY, operator a-7072:** see FULL-SCOPE-LIFECYCLE.md.
 The only proposed public entry is `python3 -B lifecycle_proposal.py --execute
---admission ~/benchmark-runs/reconstruction-20261114-source-v1/desk-admission.json`,
+--admission ~/benchmark-runs/reconstruction-20261114-source-v1/admissions/linux-amd64-02.json`,
 after NEW full-scope CLEAN review and fresh desk GO/slot. No such GO exists now.
 This fenced stage is retained for its reviewed signal/deadline/resource controls;
 it must not be launched directly to omit owned Desktop lifecycle/VM-RSS checks.
@@ -45,6 +45,24 @@ unchanged. Readiness, reparenting, selected VM backend (including unqualified
 com.docker.krun), caps and cleanup remain native qualification gates.
 A fresh independent review and NEW desk GO are mandatory; prior GO is not reused.
 
+## R11 implemented candidate — causal broker, NO current GO
+
+The outer signed Docker.app is launched only by NSWorkspace's new-instance API,
+with activation/prompts/substitution disabled. The retained NSRunningApplication
+response, not timing or singleton discovery, establishes the root PID. The new
+launch_services_broker.py must be included in reviewed file hashes. See
+R11-IMPLEMENTATION.md and R11-BINDING-PROBE.json: the authorized NO-LAUNCH binding
+probe consumed no native attempt; the actual launch callback is NOT yet native-qualified.
+Only observed signed descendant edges may justify handoff. Unknown/old/foreign
+PIDs remain unowned. FIRST Docker API remains info, with transient-only retries
+inside one shared <=120 s startup/work/slot budget and monitored resource guards.
+Daemon-unavailable cleanup with no admitted pull/container retires only causally
+proven identities. Late callbacks are drained during bounded cleanup; never-returned
+OS authority is explicitly UNRESOLVED, never a guessed PID or clean result.
+Use NEW admissions/linux-amd64-02.json and matching exclusive lifecycle/resolver
+namespaces. Attempt 1 and its original admission/receipts are immutable. The old
+GO is closed; independent review and NEW GO are mandatory before native attempt 2.
+
 ## Prerequisites and disk-desk packet — CONDITIONAL SLOT, NO GO
 
 The old 2026-11-14 17:00–18:15 UTC slot was RELEASED. No fresh slot or
@@ -65,7 +83,7 @@ RSS is NOT footprint. Unknown/ambiguous attribution fails closed. Only its exact
 owned Desktop/process identities may be quit at abort/end; never other work.
 See FULL-SCOPE-LIFECYCLE.md for owner/probe/pull limits and unproven native behavior.
 
-The future desk-admission.json must contain go=true, attempt_id, valid_until_utc,
+The future exclusive admissions/<attempt_id>.json must contain go=true, attempt_id, valid_until_utc,
 fresh_memory_go, fleet_mb, operator_ack_id=a-7072, exact operator_ack_quote,
 prestart_cap_validation=skipped-with-operator-ack (NOT passed), full_scope_review,
 explicit fresh slot_start_utc/slot_end_utc and approved docker_raw_path,
@@ -186,13 +204,14 @@ S = pathlib.Path('/var/run/docker.sock')
 assert S.exists() and stat.S_ISSOCK(S.stat().st_mode), 'STOP: approved LOCAL daemon socket absent'
 # Docker CLI HOME stays isolated; campaign admission/artifacts use the explicit
 # native-account-anchored registered root, never a path derived from CLI HOME.
-from lifecycle_proposal import validated_registered_root
+from lifecycle_proposal import validated_registered_root, validated_admission_path
+import re
 ROOT = validated_registered_root(os.environ['BENCH_REGISTERED_ROOT'])
-admission=json.loads((ROOT/'desk-admission.json').read_text())
+admission=json.loads(validated_admission_path(os.environ['BENCH_ADMISSION_PATH'],ROOT,pathlib.Path(os.environ['BENCH_ADMISSION_PATH']).stem).read_text())
 now=datetime.datetime.now(datetime.UTC)
 begin=datetime.datetime.fromisoformat(admission['slot_start_utc'])
 end=datetime.datetime.fromisoformat(admission['slot_end_utc'])
-if not (admission.get('go') is True and admission.get('attempt_id')=='linux-amd64-01'
+if not (admission.get('go') is True and re.fullmatch(r'linux-amd64-[0-9]{2}',admission.get('attempt_id','')) is not None
         and begin <= now and now+datetime.timedelta(seconds=960) <= end
         and now <= datetime.datetime.fromisoformat(admission['valid_until_utc'])
         and admission['fleet_mb'] <= 26000 and admission.get('fresh_memory_go') is True
@@ -216,7 +235,7 @@ check_disk(initial_disk,raw_baseline)
 W = ROOT / 'artifacts' / pins['uv_wheel']['filename']
 assert W.is_file(), 'STOP: separately admitted uv wheel staging required'
 assert hashlib.sha256(W.read_bytes()).hexdigest() == pins['uv_wheel']['sha256']
-A = ROOT / 'resolver/linux-amd64-01'
+A = ROOT / 'resolver' / admission['attempt_id']
 A.parent.mkdir(parents=True, exist_ok=True)
 A.mkdir(mode=0o700)  # exclusive: an earlier attempt is never overwritten
 for name in ('input', 'output', 'docker-config', 'docker-home'):

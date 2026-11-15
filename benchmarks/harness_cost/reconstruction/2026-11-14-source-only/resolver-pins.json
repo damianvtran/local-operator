@@ -14,6 +14,20 @@
   "base_image": "docker.io/library/python@sha256:9bbb8720ae0a24a6ca8dd678bfdf57818fe70caf54c52a53ec01d8db43405056",
   "base_reported_compressed_bytes": 44588823,
   "base_tag_observed": "3.14.0-slim-bookworm",
+  "causal_startup": {
+    "activates": false,
+    "allows_substitution": false,
+    "api": "NSWorkspace.openApplicationAtURL:configuration:completionHandler:",
+    "authority": "retained returned NSRunningApplication plus exact new PID and actually observed signed descendant edges",
+    "binding_probe": "R11-BINDING-PROBE.json",
+    "broker": "launch_services_broker.py",
+    "creates_new_instance": true,
+    "launch_bundle": "/Applications/Docker.app",
+    "native_qualified": false,
+    "startup_budget_seconds": 120,
+    "unknown_completion": "UNRESOLVED; bounded cleanup capture; no guessed PID or automatic next attempt",
+    "validation_executable_role": "R10 nested path validates both signed bundles; launch uses outer bundle API, never the UI leaf Popen"
+  },
   "cli_authentication": {
     "anonymous_config": "nonempty blank Docker Hub auth record; no store/helpers",
     "environment": "whitelist; no operator auth overrides",
@@ -21,6 +35,7 @@
     "proof": "docker-anonymous-source.json"
   },
   "desk_admission": {
+    "admission_path": "~/benchmark-runs/reconstruction-20261114-source-v1/admissions/<attempt_id>.json",
     "default_pull": false,
     "docker_raw_growth_stop_gib": 5,
     "free_space_stop_gib": 25,
@@ -31,7 +46,7 @@
     "minimum_free_gib_at_start": 30,
     "operator_ack_id": "a-7072",
     "optional_digest_pull_requires_new_full_scope_review": true,
-    "optional_pull_review_disposition": "R9 patch invalidates predecessor GO/signoff; new independent review and NEW desk GO required",
+    "optional_pull_review_disposition": "R11 candidate requires independent review and NEW desk GO; native budget remains 1/3",
     "post_start_mem_total_max_bytes": 4300000000,
     "post_start_ncpu_max": 2,
     "prestart_cap_validation": "SKIPPED-with-operator-ack-NOT-verified",

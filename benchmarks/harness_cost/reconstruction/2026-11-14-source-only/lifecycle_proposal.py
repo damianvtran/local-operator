@@ -22,6 +22,8 @@ import signal
 import subprocess
 import time
 
+from launch_services_broker import CausalLaunch
+
 HERE = Path(__file__).resolve().parent
 ACK = 'a-7072'
 ACK_QUOTE = "Find a way around this that doesn't require my manual involvement, validate in other ways or skip that validation with acknowledgement but make sure the code analysis and review is thorough"
@@ -108,6 +110,14 @@ def validated_registered_root(raw):
     require(root.is_dir() and root.resolve(strict=True)==root,'registered root absent or symlink escape')
     require(root.stat().st_uid==os.getuid(),'registered root not owned by operator')
     return root
+
+
+def validated_admission_path(raw,root,attempt):
+    require(re.fullmatch(r'linux-amd64-[0-9]{2}',attempt) is not None,'invalid admission namespace')
+    path=Path(raw);expected=root/'admissions'/(attempt+'.json')
+    require(path==expected and path.is_file() and path.resolve(strict=True)==path,'unregistered/escaping admission path')
+    require(path.stat().st_uid==os.getuid(),'admission not owned by operator')
+    return path
 
 
 def write_anonymous_cli_config(directory):
@@ -219,6 +229,10 @@ def run_lifecycle(ops, admission, pins, require_runtime_scope=True):
             # that exact instance. Never interrupt cleanup with a second signal.
             owner=owner or getattr(ops,'owner',None)
             if hasattr(ops,'begin_cleanup'):ops.begin_cleanup()
+            if hasattr(ops,'cleanup_pending_launch'):
+                try:ops.cleanup_pending_launch()
+                except BaseException as error:cleanup_errors.append(type(error).__name__+': '+str(error))
+            owner=owner or getattr(ops,'owner',None)
             for action in ([ops.stop_owned_resolver] if started else []):
                 try: action()
                 except BaseException as error: cleanup_errors.append(type(error).__name__+': '+str(error))
@@ -245,6 +259,8 @@ class NativeOps:
         self.clients=[];self.monitor_enabled=False;self.monitoring=False;self.startup_uncertain=False;self.cleanup_until=None
         self.assets_before=None;self.asset_receipt={'policy':'exact new carrier ID only; never force/prune/layer/cache removal'}
         self.pull_attempted=False;self.pull_complete=False;self.owned_image_id=None;self.foreign_asset_activity=False
+        self.broker=None;self.owned_processes={};self.ownership_edges=[];self.verified_process_paths=set();self.startup_deadline=0
+        self.startup_active=False;self.startup_guard_running=False
     def now(self): return time.monotonic()
     def sleep(self,seconds): time.sleep(seconds)
     def command(self,args,timeout=15,check=True):
@@ -252,6 +268,9 @@ class NativeOps:
         if self.cleanup_until is not None:
             timeout=min(timeout,self.cleanup_until-self.now())
             require(timeout>0,'owned cleanup budget exhausted; do not claim clean shutdown')
+        if getattr(self,'startup_active',False):
+            timeout=min(timeout,self.startup_deadline-self.now(),self.deadline-self.now())
+            require(timeout>0,'startup/work command deadline exhausted')
         proc=None
         try:
             blocked={signal.SIGTERM,signal.SIGINT};mask=signal.pthread_sigmask(signal.SIG_BLOCK,blocked)
@@ -268,6 +287,7 @@ class NativeOps:
                     break
                 except subprocess.TimeoutExpired:
                     require(self.now()<limit,'owned command deadline exhausted')
+                    if getattr(self,'startup_active',False) and not self.startup_guard_running:self.startup_guard()
                     if self.cleanup_until is None and self.monitor_enabled and not self.monitoring:
                         self.check_disk()
                         if self.now()>=self.next_rss:
@@ -282,17 +302,18 @@ class NativeOps:
             if proc is not None and proc.poll() is None:
                 os.killpg(proc.pid,signal.SIGKILL);proc.communicate(timeout=5)
     def snapshot(self):
-        _,out,_=self.command(['/bin/ps','-axo','pid=,ppid=,rss=,lstart=,comm='])
+        _,out,_=self.command(['/bin/ps','-axo','pid=,ppid=,pgid=,rss=,lstart=,comm='])
         result=[]
         for line in out.splitlines():
-            fields=line.split(None,8)
-            if len(fields)!=9: continue
-            result.append({'pid':int(fields[0]),'ppid':int(fields[1]),'rss_kib':int(fields[2]),'start':' '.join(fields[3:8]),'exe':fields[8]})
+            fields=line.split(None,9)
+            if len(fields)!=10: continue
+            result.append({'pid':int(fields[0]),'ppid':int(fields[1]),'pgid':int(fields[2]),'rss_kib':int(fields[3]),'start':' '.join(fields[4:9]),'exe':fields[9]})
         return result
     def desktop_records(self, rows):
         return [p for p in rows if p['exe'].startswith(self.app_root) or Path(p['exe']).name in {'Docker Desktop','com.docker.backend'}]
     def preflight(self):
         validated_registered_root(str(self.root))  # Reject bad roots before any startup/work.
+        self.admission_path=validated_admission_path(self.a['_admission_path'],self.root,self.a['attempt_id'])
         self.sample_swap('PRE-startup')  # No Desktop starts when swap evidence fails.
         require(self.a.get('operator_ack_id')==ACK and self.a.get('operator_ack_quote')==ACK_QUOTE,'operator acknowledgement missing')
         require(self.a.get('prestart_cap_validation')=='skipped-with-operator-ack' and 'vm_caps_verified_before_start' not in self.a,'must not fabricate pre-start verification')
@@ -304,7 +325,7 @@ class NativeOps:
         review=self.a['full_scope_review'];head=self.command(['git','-C',str(HERE),'rev-parse','HEAD'])[1].strip()
         require(not self.command(['git','-C',str(HERE),'status','--porcelain'])[1].strip(),'dirty source cannot be admitted under an old reviewed head')
         require(review.get('clean') is True and review.get('source_commit')==head and review['reviewer']!='70ba7562e541','full-scope clean independent current-head review missing')
-        for name in ('lifecycle_proposal.py','RESOLVER-COMMAND.md','resolver-pins.json'):
+        for name in ('lifecycle_proposal.py','RESOLVER-COMMAND.md','resolver-pins.json','launch_services_broker.py'):
             require(review.get('file_sha256',{}).get(name)==hashlib.sha256((HERE/name).read_bytes()).hexdigest(),'reviewed file hash mismatch')
         self.desktop_layout=validate_desktop_layout(self.desktop,self.command)
         require(self.root.is_dir() and self.a.get('docker_raw_path') and self.raw.is_absolute() and self.raw.name=='Docker.raw','registered root/approved raw path missing')
@@ -323,47 +344,158 @@ class NativeOps:
         require(bool(self.a['attempt_id']) and all(c.isalnum() or c in '-_' for c in self.a['attempt_id']),'unsafe attempt id')
         require(self.a['attempt_id'] not in {'','.', '..'},'empty attempt id')
         self.directory.parent.mkdir(exist_ok=True);self.directory.mkdir(mode=0o700)
+        with (self.directory/'pre-start-processes.json').open('x') as out:out.write(json.dumps(self.before,sort_keys=True))
         (self.directory/'docker-config').mkdir()
         (self.directory/'docker-home').mkdir()
         write_anonymous_cli_config(self.directory/'docker-config')
         self.d=['docker','--config',str(self.directory/'docker-config'),'--host','unix:///var/run/docker.sock']
         self.deadline=self.now()+840
         self.samples.append({'phase':'PRE-startup','allocated_bytes':self.baseline,'free_bytes':fs.f_bavail*fs.f_frsize})
-        require(not (self.root/'resolver/linux-amd64-01').exists(),'resolver attempt already exists; no reuse or deletion')
+        require(re.fullmatch(r'linux-amd64-[0-9]{2}',self.a['attempt_id']) is not None,'invalid exclusive resolver attempt namespace')
+        require(not (self.root/'resolver'/self.a['attempt_id']).exists(),'resolver attempt already exists; no reuse or deletion')
     def existing_desktop(self): return bool(self.desktop_records(self.before))
+    def startup_event(self,event):
+        row=dict(event,recorded_at_utc=datetime.datetime.now(datetime.UTC).isoformat())
+        with (self.directory/'startup-events.jsonl').open('a') as out:
+            out.write(json.dumps(row,sort_keys=True)+'\n');out.flush();os.fsync(out.fileno())
+    def verify_owned_path(self,path):
+        p=Path(path);require(p.is_file() and p.resolve(strict=True)==p and path.startswith(self.app_root),'untrusted/escaping owned process path')
+        if path not in self.verified_process_paths:
+            self.command(['/usr/bin/codesign','--verify','--strict','-R','=anchor apple generic and certificate leaf[subject.OU] = "9BNSXJN65R"',path])
+            self.verified_process_paths.add(path)
+    def observe_owned(self):
+        require(self.broker is not None and self.broker.ticket is not None,'no causal launch ticket')
+        rows=self.snapshot();by_pid={p['pid']:p for p in rows};old={p['pid'] for p in self.before}
+        ticket=self.broker.ticket;root=by_pid.get(ticket['pid'])
+        if root is not None:
+            require(self.broker.driver.matches(ticket),'retained application instance no longer matches root')
+            require(root['pid'] not in old and root['exe']==ticket['executable'],'old/foreign launch-ticket process')
+            if root['pid'] not in self.owned_processes:
+                self.verify_owned_path(root['exe']);self.owned_processes[root['pid']]=root
+                self.startup_event({'event':'causal-root-observed','process':root,'ticket':ticket})
+                if self.owner is None:self.owner=root
+        for pid,known in self.owned_processes.items():
+            current=by_pid.get(pid)
+            require(current is None or (current['start'],current['exe'])==(known['start'],known['exe']),'known owned PID reused; no adoption')
+        changed=True
+        while changed:
+            changed=False
+            for row in rows:
+                if row['pid'] in self.owned_processes or row['pid'] in old or not row['exe'].startswith(self.app_root):continue
+                parent=by_pid.get(row['ppid'])
+                if parent is not None and parent['pid'] in self.owned_processes:
+                    self.verify_owned_path(row['exe']);self.owned_processes[row['pid']]=row;changed=True
+                    self.ownership_edges.append({'parent':parent,'child':row})
+                    self.startup_event({'event':'observed-owned-edge','parent':parent,'child':row})
+        clients={p.pid for p in self.clients if p.poll() is None}
+        unknown=[p for p in self.desktop_records(rows) if p['pid'] not in self.owned_processes and p['pid'] not in clients]
+        require(not unknown,'foreign/unobserved Docker process; uniqueness/time is NOT ownership')
+        live=[by_pid[pid] for pid in self.owned_processes if pid in by_pid]
+        return rows,live
+    def effective_owner(self,live):
+        original=next((p for p in live if p['pid']==self.broker.ticket['pid']),None)
+        if original:return original
+        # Only an ACTUALLY observed successor may survive reparenting. A new
+        # singleton group without a recorded edge is never adopted.
+        candidates=[p for p in live if p['pid']==p.get('pgid') and p['exe']==self.broker.ticket['executable']]
+        require(len(candidates)==1,'no unique causally observed live handoff root')
+        return candidates[0]
+    def startup_guard(self):
+        previous=self.monitoring;self.monitoring=True;self.startup_guard_running=True
+        try:self._startup_guard()
+        finally:self.monitoring=previous;self.startup_guard_running=False
+    def _startup_guard(self):
+        now=datetime.datetime.now(datetime.UTC)
+        require(self.now()<self.startup_deadline and self.now()<self.deadline,'startup/work deadline exhausted')
+        require(now+datetime.timedelta(seconds=60)<datetime.datetime.fromisoformat(self.a['slot_end_utc']),'slot must retain cleanup reserve')
+        require(now<=datetime.datetime.fromisoformat(self.a.get('valid_until_utc',self.a['slot_end_utc'])),'admission expired during startup')
+        self.sample_swap('startup')
+        self.check_disk()
+        if self.broker and self.broker.ticket:
+            rows,live=self.observe_owned();owner=self.effective_owner(live)
+            helpers=[p for p in rows if Path(p['exe']).name in HELPERS and p['pid'] not in {x['pid'] for x in self.before}]
+            require(all(p['pid'] in self.owned_processes for p in helpers),'unowned/unknown new VM helper during startup')
+            require(all(p['rss_kib']*1024<=CAP for p in helpers),'new startup VM RSS over cap')
+            if helpers and (not self.monitor_enabled or self.now()>=self.next_rss):
+                helper=self.vm_helper(owner);require(helper['rss_bytes']<=CAP,'attributed startup VM RSS over cap')
     def start_owned(self):
-        blocked={signal.SIGTERM,signal.SIGINT};mask=signal.pthread_sigmask(signal.SIG_BLOCK,blocked)
+        self.startup_active=True
+        now=datetime.datetime.now(datetime.UTC)
+        require(now<=datetime.datetime.fromisoformat(self.a.get('start_by_utc',self.a['slot_end_utc'])),'hard startup start-by expired')
+        slot_remaining=(datetime.datetime.fromisoformat(self.a['slot_end_utc'])-now).total_seconds()-60
+        valid_remaining=(datetime.datetime.fromisoformat(self.a.get('valid_until_utc',self.a['slot_end_utc']))-now).total_seconds()
+        self.startup_deadline=min(self.now()+120,self.deadline,self.now()+slot_remaining,self.now()+valid_remaining)
+        expected=DOCKER_BUNDLE/'Contents/MacOS'/self.desktop_layout['bundles'][0]['entrypoint']
+        self.broker=CausalLaunch(DOCKER_BUNDLE,expected,{p['pid'] for p in self.before},self.startup_event)
         try:
-            self.proc=subprocess.Popen([str(self.desktop)],stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,start_new_session=True,
-                                       preexec_fn=lambda:signal.pthread_sigmask(signal.SIG_UNBLOCK,blocked))
-            rows=self.snapshot();row=next((p for p in rows if p['pid']==self.proc.pid),None)
-            require(self.proc.poll() is None and row is not None and row['exe']==str(self.desktop),'Desktop startup identity unprovable')
-            self.owner=row
-            with (self.directory/'startup-owner.json').open('x') as out:out.write(json.dumps(row,sort_keys=True))
-            return row
+            self.startup_guard();self.broker.begin()
+            while not self.broker.done:
+                self.startup_guard();self.broker.pump(min(0.5,max(0,self.startup_deadline-self.now())))
+            require(not self.broker.error,self.broker.error or 'launch failed')
+            rows,live=self.observe_owned();owner=self.effective_owner(live)
+            with (self.directory/'startup-owner.json').open('x') as out:out.write(json.dumps(owner,sort_keys=True))
+            return self.owner
         except BaseException:
             self.startup_uncertain=True
-            # Popen itself proves ownership of this root child, even if process
-            # metadata cannot qualify a Desktop/helper identity. No name kill.
-            if self.proc is not None and self.proc.poll() is None:
-                self.proc.terminate()
-                try:self.proc.wait(timeout=10)
-                except subprocess.TimeoutExpired:self.proc.kill();self.proc.wait(timeout=5)
             raise
-        finally: signal.pthread_sigmask(signal.SIG_SETMASK,mask)
     def info(self):
-        # No polling loop/start/config fallback: one bounded readiness request.
-        info=json.loads(self.command(self.d+['info','--format','{{json .}}'],timeout=10)[1])
-        with (self.directory/'readiness.json').open('x') as out:out.write(json.dumps({'MemTotal':info.get('MemTotal'),'NCPU':info.get('NCPU'),'phase':'post-start-readiness-probe'},sort_keys=True))
-        return info
+        # FIRST Docker API stays info. Only the actual transient daemon-not-ready
+        # response is retried, within ONE shared 120 s startup/work/slot envelope.
+        while True:
+            self.startup_guard();remaining=self.startup_deadline-self.now()
+            code,out,err=self.command(self.d+['info','--format','{{json .}}'],timeout=min(10,remaining),check=False)
+            self.startup_event({'event':'first-api-readiness-info','exit':code,'stderr':err[:300]})
+            if code==0:
+                info=json.loads(out);verify_caps(info)  # Abort over-cap BEFORE other APIs/work.
+                self.startup_guard()
+                with (self.directory/'readiness.json').open('x') as output:output.write(json.dumps({'MemTotal':info.get('MemTotal'),'NCPU':info.get('NCPU'),'phase':'post-start-readiness-probe'},sort_keys=True))
+                self.startup_active=False
+                return info
+            require('Cannot connect to the Docker daemon at unix:///var/run/docker.sock.' in err,'non-transient info failure; no readiness retry')
+            self.startup_guard();self.broker.pump(min(0.5,max(0,self.startup_deadline-self.now())))
+    def cleanup_pending_launch(self):
+        if self.broker is None:return
+        while self.broker.dispatched and not self.broker.done and self.now()<self.cleanup_until:
+            self.broker.pump(min(0.5,self.cleanup_until-self.now()))
+        require(not self.broker.dispatched or self.broker.ticket is not None,'launch outcome UNRESOLVED after bounded capture; do not guess a PID')
+        if self.broker.ticket:
+            self.observe_owned()  # Capture a late authoritative callback before teardown.
+    def quit_broker_owned(self,owner):
+        require(not self.foreign_asset_activity,'foreign asset activity; no Desktop quit')
+        rows,live=self.observe_owned()
+        # With no admitted work, daemon availability cannot gate retirement of
+        # proven owned processes. Once work was admitted, preserve existing fence.
+        if self.pull_attempted or self.resolver is not None:
+            code,out,_=self.command(self.d+['ps','-q'],check=False)
+            require(code==0 and not out.strip(),'foreign workloads/unknown daemon; no automatic quit')
+        graceful_error=None
+        try:self.broker.terminate()
+        except BaseException as error:
+            graceful_error=type(error).__name__+': '+str(error)
+            self.startup_event({'event':'causal-terminate-refused','error':graceful_error})
+        for known in reversed(live):
+            current=next((p for p in self.snapshot() if p['pid']==known['pid']),None)
+            if current is not None:
+                require((current['start'],current['exe'])==(known['start'],known['exe']),'owned cleanup PID changed')
+                os.kill(known['pid'],signal.SIGTERM)
+        while self.now()<self.cleanup_until:
+            rows,live=self.observe_owned()
+            if not live:
+                require(graceful_error is None,'graceful termination failed; exact-PID recovery verified but original cleanup remains unverified')
+                return
+            self.broker.pump(min(0.5,self.cleanup_until-self.now()))
+        raise RuntimeError('proven owned processes remain; cleanup budget exhausted')
     def vm_helper(self,owner):
         rows=self.snapshot();holders=set()
+        if self.broker is not None:
+            rows,live=self.observe_owned();owner=self.effective_owner(live)
         for p in rows:
             if Path(p['exe']).name in HELPERS:
                 code,out,_=self.command(['/usr/sbin/lsof','-a','-p',str(p['pid']),'-Fn'],check=False)
                 if code==0 and ('n'+str(self.raw)) in out.splitlines():holders.add(p['pid'])
         require(any(p['pid']==owner['pid'] and (p['start'],p['exe'])==(owner['start'],owner['exe']) for p in rows),'Desktop owner identity no longer live')
         helper=choose_helper(self.before,rows,owner,holders)
+        if self.broker is not None:require(helper['pid'] in self.owned_processes,'VM helper lacks causal owned lineage')
         self.helpers[(helper['pid'],helper['start'],helper['exe'])]=helper
         self.samples.append(dict(helper,phase='VM-RSS',measurement_caveat='RSS is NOT footprint; no unrelated VM sum'))
         self.monitor_enabled=True;self.next_rss=self.now()+10
@@ -537,7 +669,7 @@ class NativeOps:
         require(not self.command(self.d+['ps','-q'])[1].strip(),'foreign running containers; resolver forbidden')
         code=(HERE/'RESOLVER-COMMAND.md').read_text().split('```python\n',1)[1].split('\n```',1)[0]
         path=self.directory/'resolver-supervisor.py';path.write_text(code)
-        env=dict(anonymous_cli_environment(self.directory),BENCH_REGISTERED_ROOT=str(registered),BENCH_LIFECYCLE_DIR=str(self.directory),PYTHONPATH=str(HERE))
+        env=dict(anonymous_cli_environment(self.directory),BENCH_REGISTERED_ROOT=str(registered),BENCH_ADMISSION_PATH=str(self.admission_path),BENCH_LIFECYCLE_DIR=str(self.directory),PYTHONPATH=str(HERE))
         blocked={signal.SIGTERM,signal.SIGINT};mask=signal.pthread_sigmask(signal.SIG_BLOCK,blocked)
         try:
             self.resolver=subprocess.Popen([sys.executable,'-B',str(path)],cwd=HERE,env=env,stdin=subprocess.DEVNULL,start_new_session=True,
@@ -548,12 +680,14 @@ class NativeOps:
         if code is None:return False
         require(code==0,'resolver failed');return True
     def begin_cleanup(self):
+        self.startup_active=False
         signal.alarm(0)  # Work alarm must not re-enter termination during cleanup.
         self.cleanup_until=self.now()+60
     def recover_owned_container(self):
         # Recovery is attempted even after monitor/client failures, but it may
         # never exceed the independent cleanup budget or touch an unknown CID.
-        cid=self.root/'resolver/linux-amd64-01/container.cid'
+        if self.resolver is None:return
+        cid=self.root/'resolver'/self.a['attempt_id']/'container.cid'
         if self.resolver is None or not cid.exists():return
         require(self.cleanup_until is not None,'cleanup budget not established; no unbounded recovery commands')
         owned=cid.read_text().strip()
@@ -597,6 +731,7 @@ class NativeOps:
             except BaseException as error:failures.append(type(error).__name__+': '+str(error))
         require(not failures,'owned cleanup incomplete/monitor failed: '+'; '.join(failures))
     def quit_owned(self,owner):
+        if getattr(self,'broker',None) is not None:return self.quit_broker_owned(owner)
         # No bundle-wide quit, pkill, settings route or unknown process takeover.
         self.monitor_enabled=False
         require(not self.foreign_asset_activity,'foreign asset activity; Desktop quit not safe')
@@ -639,7 +774,8 @@ class NativeOps:
         final_swap_error=None
         try:self.sample_swap('final')
         except BaseException as error:final_swap_error=type(error).__name__+': '+str(error);value['status']='swap-final-unverified-or-over-limit'
-        value.update(asset_ownership=self.asset_receipt,final_swap_error=final_swap_error,desktop_layout=getattr(self,'desktop_layout',None))
+        value.update(asset_ownership=self.asset_receipt,final_swap_error=final_swap_error,desktop_layout=getattr(self,'desktop_layout',None),
+                     causal_launch={'dispatched':self.broker.dispatched,'ticket':self.broker.ticket,'error':self.broker.error,'done':self.broker.done,'observed_edges':self.ownership_edges} if self.broker else None)
         fs=os.statvfs(self.root)
         if self.startup_uncertain:value['status']='cleanup-unverified-startup-identity'
         value.update(operator_ack_quote=ACK_QUOTE,source_head=self.a['full_scope_review']['source_commit'],samples=self.samples,after={'allocated_bytes':self.raw.stat().st_blocks*512 if self.raw.exists() else 0,'free_bytes':fs.f_bavail*fs.f_frsize})
@@ -658,8 +794,10 @@ def main():
     if not args.execute:
         print('PROPOSAL ONLY: no fresh slot/full-scope approval; no execution');return
     require(args.admission is not None,'explicit desk admission path required')
-    require(args.admission.resolve()==(Path.home()/'benchmark-runs/reconstruction-20261114-source-v1/desk-admission.json').resolve(),'only the registered desk admission path is accepted')
-    admission=json.loads(args.admission.read_text());pins=json.loads((HERE/'resolver-pins.json').read_text())
+    root=validated_registered_root(str(Path.home()/'benchmark-runs/reconstruction-20261114-source-v1'))
+    path=validated_admission_path(str(args.admission),root,args.admission.stem)
+    admission=json.loads(path.read_text());require(admission.get('attempt_id')==path.stem,'admission namespace mismatch')
+    admission['_admission_path']=str(path);pins=json.loads((HERE/'resolver-pins.json').read_text())
     def terminate(signum,frame):raise KeyboardInterrupt('termination requested')
     previous={s:signal.getsignal(s) for s in (signal.SIGTERM,signal.SIGINT,signal.SIGALRM)}
     for s in previous:signal.signal(s,terminate)

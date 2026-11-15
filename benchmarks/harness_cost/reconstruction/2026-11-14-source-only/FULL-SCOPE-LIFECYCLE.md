@@ -67,6 +67,24 @@ unchanged. Readiness, reparenting, selected VM backend (including unqualified
 com.docker.krun), caps and cleanup remain native qualification gates.
 A fresh independent review and NEW desk GO are mandatory; prior GO is not reused.
 
+## R11 implemented candidate — causal broker, NO current GO
+
+The outer signed Docker.app is launched only by NSWorkspace's new-instance API,
+with activation/prompts/substitution disabled. The retained NSRunningApplication
+response, not timing or singleton discovery, establishes the root PID. The new
+launch_services_broker.py must be included in reviewed file hashes. See
+R11-IMPLEMENTATION.md and R11-BINDING-PROBE.json: the authorized NO-LAUNCH binding
+probe consumed no native attempt; the actual launch callback is NOT yet native-qualified.
+Only observed signed descendant edges may justify handoff. Unknown/old/foreign
+PIDs remain unowned. FIRST Docker API remains info, with transient-only retries
+inside one shared <=120 s startup/work/slot budget and monitored resource guards.
+Daemon-unavailable cleanup with no admitted pull/container retires only causally
+proven identities. Late callbacks are drained during bounded cleanup; never-returned
+OS authority is explicitly UNRESOLVED, never a guessed PID or clean result.
+Use NEW admissions/linux-amd64-02.json and matching exclusive lifecycle/resolver
+namespaces. Attempt 1 and its original admission/receipts are immutable. The old
+GO is closed; independent review and NEW GO are mandatory before native attempt 2.
+
 ## Operator acknowledgement, not fabricated verification
 
 Operator answer **a-7072**, relayed via desk 5170, verbatim:

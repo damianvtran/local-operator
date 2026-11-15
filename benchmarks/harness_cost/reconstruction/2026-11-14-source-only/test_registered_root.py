@@ -22,10 +22,11 @@ class RegisteredRootTests(unittest.TestCase):
         directory=root/'lifecycle/linux-amd64-01';directory.mkdir(parents=True)
         (directory/'docker-home').mkdir()
         (directory/'startup-owner.json').write_text('{"kind":"source-only-fixture"}')
-        (root/'desk-admission.json').write_text('{"attempt_id":"linux-amd64-01","kind":"source-only-fixture"}')
+        (root/'admissions').mkdir();admission_path=root/'admissions/linux-amd64-01.json'
+        admission_path.write_text('{"attempt_id":"linux-amd64-01","kind":"source-only-fixture"}')
         (root/'artifacts').mkdir();(root/'artifacts/source-fixture.txt').write_bytes(b'not a wheel; source fixture only')
         pins={'uv_wheel':{'filename':'source-fixture.txt','sha256':hashlib.sha256(b'not a wheel; source fixture only').hexdigest()}}
-        ops=object.__new__(target.NativeOps);ops.root=root;ops.directory=directory;ops.d=['NO-DOCKER']
+        ops=object.__new__(target.NativeOps);ops.root=root;ops.directory=directory;ops.admission_path=admission_path;ops.d=['NO-DOCKER']
         ops.command=mock.Mock(return_value=(0,'',''))
         with mock.patch.object(target.subprocess,'Popen') as launch:
             ops.begin_resolver()
@@ -44,6 +45,7 @@ class RegisteredRootTests(unittest.TestCase):
     def run_fragment(self, fragment, env, pins):
         scope={'pathlib':__import__('pathlib'),'os':os,'json':json,'hashlib':hashlib,'pins':pins}
         if hasattr(target,'validated_registered_root'):scope['validated_registered_root']=target.validated_registered_root
+        scope['validated_admission_path']=target.validated_admission_path
         with mock.patch.dict(os.environ,env,clear=True):exec(fragment,scope)
         return scope
 
