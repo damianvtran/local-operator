@@ -44,7 +44,7 @@
   "wire.github.failure_offline": "GitHub est injoignable",
   "wire.github.failure_server": "GitHub a renvoyé une erreur",
   "wire.github.failure_coverage": "GitHub n’a pas pu lister tous les dépôts autorisant le push",
-  "wire.github.failure_unknown": "échec de la liste des dépôts GitHub",
+  "wire.github.failure_unknown": "échec de la récupération de la liste des dépôts GitHub",
   "wire.github.failure_unfetched": "la liste des dépôts n’a pas encore été récupérée",
   "wire.github.failure_earlier_login": "la liste enregistrée concerne un ancien compte GitHub",
   "wire.github.failure_unknown_login": "le compte associé à la liste GitHub enregistrée est inconnu",

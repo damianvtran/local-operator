@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "ru",
   "namespace": "wire.github",
-  "history_sha256": "41380b6961a0d74d334563fa666c4347efdb0717c714ee02ec8aa615a3c0296c",
+  "history_sha256": "d52c79d175ae6f1c94b7c6a4e00accd329a72dd76a4ff2ad50137863e44b45c9",
   "entries": [
     {
       "locale": "ru",
@@ -60,6 +60,24 @@
       },
       "status": "changes_requested",
       "note": "PR4052 r1; 3 unresolved MAJOR. Evidence: i18n/audits/evidence/ru/wire.github/gh4052r1/record.json; second pass gh4052s1 preserved; no eligibility restoration."
+    },
+    {
+      "locale": "ru",
+      "namespace": "wire.github",
+      "source_sha256": "241d2f9e57f611bbc0f2e4875584252ee34dadc14b1d2914d24de563b5cfbc62",
+      "translator": {
+        "agent": "lopdev translator remediation, session 9af0b0ea9021, round 1 unified remediation",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-15",
+        "fallback": "none observed in this resumed remediation turn; previous translation/audit Sol fallback provenance remains historical"
+      },
+      "auditor": {
+        "agent": null,
+        "model": null,
+        "result": "pending"
+      },
+      "status": "translated",
+      "note": "PR #4052 unified round-1 translation remediation against 2afbb818b69074d9f11b0fc1a9a6360967218476. IDs I-RU-PUSH, I-RU-WRAPPER, I2-RU-01, I-COMPOSE. Translator-only receipt, NOT independent audit or eligibility approval. Preserves every historical failed/auditor row and evidence artifact. Source hash covers full namespace; current target sha256 da0e24c21f461cf8a9dc277b6c9666178c87ee77455f98ef46ce0cb1f386875c. Only named values changed, other values remain byte-identical to baseline. Verified both full review comments 6896166510 and 6896056305 against current strings. Glossary: Latin push, Russian device-sharing wording rather than financial creditor, Urdu feminine ڈیوائس; Spanish/Russian share_empty introduces reasons without tense dependence; French failure names list retrieval; Russian settings says previously transferred rather than published list. ICU placeholders, literal commands, next-fetch timing, no borrower authority, no-widening and clear-marker semantics retained. Independent delta checks by BOTH auditors still required; no audit pass/visual or production activation claim."
     }
   ]
 }

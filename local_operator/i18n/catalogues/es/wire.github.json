@@ -2,7 +2,7 @@
   "wire.github.progress": "obteniendo los repositorios a los que tu cuenta de GitHub puede hacer push…",
   "wire.github.opt_out_none": "excluidos: ninguno",
   "wire.github.opt_out_names": "excluidos ({count, number}): {names} — volver a incluir uno: {command}",
-  "wire.github.share_empty": "Repositorios de GitHub: ninguno todavía — el acceso compartido está configurado, pero se rechaza todo préstamo mientras {reason}; {remedy}",
+  "wire.github.share_empty": "Repositorios de GitHub: ninguno todavía — el acceso compartido está configurado, pero todo préstamo sigue rechazándose por este motivo: {reason}; {remedy}",
   "wire.github.repos_empty": "Repositorios de GitHub: ninguno — {reason}; {remedy}",
   "wire.github.repos_head": "Repositorios de GitHub cuyo acceso se presta: {count, number} — {source}{opted}",
   "wire.github.opted_suffix": ", menos {count, number} excluidos",

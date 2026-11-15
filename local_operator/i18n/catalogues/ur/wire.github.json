@@ -60,7 +60,7 @@
   "wire.github.borrower_unset": "{owner} کے پاس کوئی GitHub ریپوزیٹری نہیں جس کی رسائی وہ مستعار دے سکے: {detail}۔ اسے {owner} پر درست کریں؛ کوئی رسائی مستعار نہیں دی گئی۔",
   "wire.github.borrower_unset_default": "{owner} کے پاس کوئی GitHub ریپوزیٹری نہیں جس کی رسائی وہ مستعار دے سکے۔ {owner} پر {command} جانچیں؛ کوئی رسائی مستعار نہیں دی گئی۔",
   "wire.github.borrower_overflow": "{owner} کے پاس ایک اشتراک کی گنجائش سے زیادہ GitHub ریپوزیٹریاں ہیں{detail}، اس لیے کوئی رسائی مستعار نہیں دی گئی۔ {owner} پر GitHub ریپوزیٹریوں کی ترتیبات میں مستعار دینے کے لیے کچھ منتخب کریں (/settings میں تلاش کریں)، یا lop network credential github exclude <owner/repo> سے کچھ کو خارج کریں۔",
-  "wire.github.wrapper_denied": "{repo}، مستعار دینے والے ڈیوائس کی فراہم کردہ ریپوزیٹری فہرست میں نہیں ہے (ممکن ہے یہ خارج ہو یا وہاں سے push ممکن نہ ہو)۔ مستعار دینے والے ڈیوائس پر {command} جانچیں۔ صرف وہی آلہ بدل سکتا ہے کہ وہ کیا مستعار دیتا ہے۔",
+  "wire.github.wrapper_denied": "{repo}، مستعار دینے والی ڈیوائس کی فراہم کردہ ریپوزیٹری فہرست میں نہیں ہے (ممکن ہے یہ خارج ہو یا وہاں سے push ممکن نہ ہو)۔ مستعار دینے والی ڈیوائس پر {command} جانچیں۔ صرف وہی ڈیوائس یہ بدل سکتی ہے کہ وہ کیا مستعار دیتی ہے۔",
   "wire.github.usage_repo": "{action} کے لیے owner/repo کی صورت میں ایک ریپوزیٹری درکار ہے، مثلاً octo-org/website",
   "wire.github.usage_repos_args": "repos کوئی ریپوزیٹری قبول نہیں کرتا",
   "wire.github.usage_default": "--use-default صرف repos پر لاگو ہوتا ہے",

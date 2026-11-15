@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "ru",
   "namespace": "wire.settings",
-  "history_sha256": "2b63f4f3aada674b9ea21b98d98f3d5707f0e57272f57e95f0f8fb2a54b877c2",
+  "history_sha256": "88b3318a43ad2438ff28c92502cd4cc54e79019cd80c44fbf2960b174f204bd3",
   "entries": [
     {
       "locale": "ru",
@@ -301,6 +301,24 @@
       },
       "status": "translated",
       "note": "PR #4052 FINAL translator-only handoff; independent audit pending, no pass claimed. Replaces earlier translator target hashes without removing history. Full carried namespace requires independent audit; changed scope is 68 new GitHub keys or one settings help key only. Read i18n/glossary.md and i18n/style-guides/ru.md. Shared wave-2 rule keeps push in Latin in ALL locales, including Chinese/Russian/Vietnamese/Hindi/Urdu; prose inflects around it. GitHub, owner/repo, /settings, command literals unchanged. French vous, Spanish tú, Chinese 你, Russian вы, Vietnamese bạn, Urdu آپ, Hindi आप. French narrow no-break punctuation spacing; Urdu glossary device term ڈیوائس; no manual bidi controls. CLDR days: fr/es one-many-other, ru one-few-many-other, zh-CN/vi other, hi/ur one-other; hi/ur hours upgrade number to lossless plural. Preserved no-widening and owner-only authority, next-credential-fetch timing, never-set versus previously shared list cleared, and literal --use-default remedy. Source hash covers full namespace, final target sha256 2b500c8786bdad052555f689678c28212384969512295b9d1cd495d90c0c57ee. Mechanical execution evidence is separate, not a native semantic audit or rendered/RTL sign-off. Actual model openai/gpt-6.1-sol following quota fallback before translation; independent agent from node99 English author despite same actual model."
+    },
+    {
+      "locale": "ru",
+      "namespace": "wire.settings",
+      "source_sha256": "fa6a7d8e6a81ccf844c056a62226d8e6193279a712560291fd489f3c17a8a4b9",
+      "translator": {
+        "agent": "lopdev translator remediation, session 9af0b0ea9021, round 1 unified remediation",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-15",
+        "fallback": "none observed in this resumed remediation turn; previous translation/audit Sol fallback provenance remains historical"
+      },
+      "auditor": {
+        "agent": null,
+        "model": null,
+        "result": "pending"
+      },
+      "status": "translated",
+      "note": "PR #4052 unified round-1 translation remediation against 2afbb818b69074d9f11b0fc1a9a6360967218476. IDs I-RU-02. Translator-only receipt, NOT independent audit or eligibility approval. Preserves every historical failed/auditor row and evidence artifact. Source hash covers full namespace; current target sha256 76ccba21dac8666e63540e58685103acba70c28c38d0b1ff64849c20500611c3. Only named values changed, other values remain byte-identical to baseline. Verified both full review comments 6896166510 and 6896056305 against current strings. Glossary: Latin push, Russian device-sharing wording rather than financial creditor, Urdu feminine ڈیوائس; Spanish/Russian share_empty introduces reasons without tense dependence; French failure names list retrieval; Russian settings says previously transferred rather than published list. ICU placeholders, literal commands, next-fetch timing, no borrower authority, no-widening and clear-marker semantics retained. Independent delta checks by BOTH auditors still required; no audit pass/visual or production activation claim."
     }
   ]
 }
