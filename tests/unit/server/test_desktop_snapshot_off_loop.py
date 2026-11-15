@@ -202,6 +202,10 @@ async def test_the_off_loop_frame_is_the_frame_the_cloning_build_served(tmp_path
             live_cursor=clone.history_cursor,
         )
     )
+    # The desktop plane then slims the roster rows (``DESKTOP_JOB_ROW_KEYS``);
+    # that step is pure over the dump, so applying it here keeps this a check
+    # of the clone-free dump rather than of the slimming.
+    module.slim_desktop_job_rows_in_place(expected["snapshot"])
     assert snapshot["payload"]["frontend"] == expected
     assert bridge.state() == expected
 

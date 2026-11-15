@@ -581,6 +581,12 @@ async def test_recovery_of_a_deferred_cold_facade_replays_no_already_painted_row
         assert [m.id for m in remote.history()] == [
             id_ for turn in range(6) for id_ in (f"u{turn}", f"a{turn}")
         ]
+        # #4023 R1-m1: the hydrate seeds the cold painted-id set for a replay
+        # this branch never runs. Left set (12 ids here before the fix), a later
+        # ``_load_frontend_history`` would re-emit rows painted live after this.
+        assert (
+            remote._cold_painted_ids is None
+        ), "recovery left the hydrate's cold painted-id set behind"
     finally:
         if remote is not None:
             await remote.dispose()
