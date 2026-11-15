@@ -333,6 +333,41 @@ def test_the_json_receipt_keeps_the_placement_key_and_the_copy_block(
     assert payload["copy"] == {"confirmed": confirmed, "wiped": wiped, "wipe": wipe}
 
 
+@pytest.mark.parametrize(
+    "older_wiped", [False, True, None], ids=["live-ack", "wiped-ack", "no-ack"]
+)
+def test_revoke_reports_an_older_live_ack_independently_of_a_newer_dispatch(
+    owner: SimpleNamespace,
+    capsys: pytest.CaptureFixture[str],
+    older_wiped: bool | None,
+) -> None:
+    _placement(owner, member_holds=True)
+    _ledger(owner, older_wiped)
+    with sync.mutate(NETWORK, owner.root) as state:
+        state.record_dispatch(MEMBER, KEY, gen=2, digest="sha256:" + "b" * 64, at=time.time())
+    code = _lop_network("credential", "revoke", SECRET, "--from", MEMBER_NAME, "--json")
+    receipt = json.loads(capsys.readouterr().out)
+    assert code == 0
+    # The older live copy was confirmed, but that says nothing about delivery
+    # of the newer send. A wiped historical ACK must not confirm a re-copy.
+    assert receipt["copy"] == {
+        "confirmed": older_wiped is False,
+        "wiped": False,
+        "wipe": "queued",
+        "unacknowledged": True,
+    }
+    state = sync.SyncState.load(NETWORK, owner.root)
+    assert (state.dispatch_for(MEMBER, KEY) or {}).get("gen") == 2
+    assert state.open_copies(MEMBER)
+    with capsys.disabled():
+        print("REVOKE_HISTORY", json.dumps({"older_wiped": older_wiped, "copy": receipt["copy"]}))
+    assert messages_mod.render_copy_revoke_notice(
+        MEMBER_NAME, KEY, copied=older_wiped is False, wiped=False, unacknowledged=True
+    ) == messages_mod.render_copy_revoke_notice(
+        MEMBER_NAME, KEY, copied=False, wiped=False, unacknowledged=True
+    )
+
+
 def test_one_secret_has_one_spelling_in_the_revoke_prose(
     owner: SimpleNamespace, capsys: pytest.CaptureFixture[str]
 ) -> None:
