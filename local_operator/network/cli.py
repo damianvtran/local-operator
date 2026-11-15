@@ -7615,6 +7615,19 @@ async def _pilot_act(
                 "session_stored", f"{_stored_peek_sentence(session_id, peer)} ({fallback})"
             )
 
+    if verb == "send" and mailbox is not None:
+        # A MAILBOX SEND NEEDS NO VIEW, so it is not opened through one. See
+        # ``_pilot_mailbox_direct``: the viewer below asks the owner to prepare
+        # a canonical frontend sync first, and a busy owner holding a long
+        # transcript refuses that (``bind_failed``) before the message is ever
+        # written. ``None`` means only "this owner predates the mesh mailbox":
+        # the viewer path below then runs today's turn fallback unchanged.
+        direct = await _pilot_mailbox_direct(
+            row, session_id, device, text, mailbox, config_dir, peer=peer
+        )
+        if direct is not None:
+            return _pilot_named_receipt(*direct, named=named, session_id=session_id, device=device)
+
     async def _never() -> Any:
         # A remote viewer never takes over: a remote owner sets ``_can_go_cold``,
         # so owner loss leaves this viewer cold rather than making this device a
@@ -7724,15 +7737,162 @@ async def _pilot_act(
         except Exception:  # noqa: BLE001 — see above: the refusal outranks it
             logging.getLogger(__name__).debug("disposing the pilot viewer failed", exc_info=True)
 
+    return _pilot_named_receipt(payload, lines, named=named, session_id=session_id, device=device)
+
+
+def _pilot_named_receipt(
+    payload: dict[str, Any], lines: list[str], *, named: str, session_id: str, device: str
+) -> tuple[dict[str, Any], list[str]]:
+    """Note a ``--peer`` that named another device beside the act's receipt.
+
+    The typed string was NOT this device. The receipt keeps the answer (who ran
+    it) and carries the caller's own word beside it, in the payload and in the
+    lines, so both a script and a person can see the disagreement. One helper
+    because two act paths return a receipt (the viewer and the direct mailbox).
+    """
     if named:
-        # The typed string was NOT this device. The receipt keeps the answer (who
-        # ran it) and carries the caller's own word beside it, in the payload and in
-        # the lines, so both a script and a person can see the disagreement.
         payload["peer_named"] = named
         lines.append(
             f"you named {named}; {session_id} is held by {device}, which is where this ran"
         )
     return payload, lines
+
+
+async def _pilot_mailbox_direct(
+    row: Any,
+    session_id: str,
+    device: str,
+    text: str,
+    mode: "_MailboxMode",
+    config_dir: Path,
+    *,
+    peer: str,
+) -> tuple[dict[str, Any], list[str]] | None:
+    """Deliver a ``--send --mailbox`` WITHOUT opening a view of the session.
+
+    WHY THIS PATH EXISTS. The pilot's viewer (``open_remote_viewer`` +
+    ``bind_runtime``) attaches with ``frontend_state`` and ``display_window``, so
+    the owner starts a canonical frontend sync for it, and until that sync lands
+    the owner refuses every op outside ``_SYNC_PRIORITY_OPS`` — ``peer_message``
+    included (``server._on_request``). For a REMOTE viewer that sync has to
+    capture the history window on the session's own loop within
+    ``_REMOTE_HISTORY_BIND_WAIT_S`` (2.0 s); an owner mid-turn, or one whose
+    transcript is long enough that the capture itself is slow, misses it and
+    answers ``bind_failed``. The mesh send then bounced with "the dial … produced
+    no session (owner could not prepare this view …)" although the message needs
+    no view at all — measured live 2026-11-14 on 0.102.5: every send to one long,
+    usually mid-turn session bounced while sends to another session on the same
+    device, over the same link, delivered.
+
+    THE CONSTRAINT IT KEEPS: nothing changes on the owner. The client below is
+    the same ``RemoteSessionClient`` the viewer uses, over the same relay
+    ``stream_open`` carrier (``net_stream`` needs ``view``, the forwarded
+    ``peer_message`` needs ``prompt`` — the capabilities the viewer path already
+    spends), but it declares NO events, frontend state or display window. The
+    owner relay forwards only the auth fields it is given (``dial.AUTH_FIELDS``),
+    so the runtime sees an attach client with nothing to sync, never enters the
+    sync gate, and admits the message on its own merits. That is true of every
+    owner build that has the mesh mailbox, which is why this is a sender-side fix.
+
+    THE RECEIPT STAYS TRUTHFUL because delivery is the same helper the viewer
+    path uses (``_deliver_mailbox``): "delivered" only on the owner's admission
+    ack, "not confirmed" when that ack does not arrive in
+    ``PILOT_REPLY_TIMEOUT_S`` (the message id lets the owner drop a re-send as a
+    duplicate), and a dial that fails before the frame was written is reported
+    by the same ``_pilot_dial_refusal`` the viewer's dial uses — nothing landed.
+
+    Returns ``None`` ONLY for an owner without ``MESH_PEER_MESSAGE_CAPABILITY``:
+    its fallback is a TURN, which needs the viewer, so the caller runs the
+    viewer path exactly as before. ``--peek`` never comes here: a read of the
+    live display window is a view, and may still refuse honestly.
+    """
+    from local_operator.network.projection import (
+        PeerRow,
+        ProjectionRefusal,
+        remote_owner_for,
+    )
+    from local_operator.network.types import MeshRefusal
+    from local_operator.session.attached import (
+        _BIND_RETRY_ATTEMPTS,
+        _BIND_RETRY_INITIAL_S,
+    )
+
+    peer_row = PeerRow(
+        session_id=session_id,
+        device_id=str(getattr(row, "owner_device", "") or ""),
+        device_name=str(getattr(row, "owner_device_name", "") or ""),
+        conversation_name=str(getattr(row, "name", "") or ""),
+        reachable=bool(getattr(row, "reachable", True)),
+    )
+    owner = await asyncio.to_thread(
+        remote_owner_for, session_id, config_dir=config_dir, row=peer_row, root=config_dir
+    )
+
+    async def _refuse_dial(exc: BaseException) -> MeshRefusal:
+        code, sentence = await asyncio.to_thread(
+            _pilot_dial_refusal, session_id, peer, str(exc), config_dir
+        )
+        return MeshRefusal(code, sentence)
+
+    async def _locate() -> Any:
+        # ENGAGE, THEN LOCATE — the order ``AttachedSession._bind_under_lock``
+        # uses, for the same reason: a stored session on the peer gets its
+        # runtime here (the act is what warms it, §8.3 — a send is a write), and
+        # a warm one answers the engage at once. The short locate retry is the
+        # bind loop's own, by its constants rather than a copy of their values:
+        # a runtime that has just been spawned publishes its record a moment
+        # after the engage returns.
+        try:
+            await owner.engage(cwd="")
+        except ProjectionRefusal as exc:
+            raise MeshRefusal(exc.code, exc.sentence) from exc
+        delay = _BIND_RETRY_INITIAL_S
+        for attempt in range(_BIND_RETRY_ATTEMPTS):
+            record, _pid = await asyncio.to_thread(owner.locate)
+            if record is not None:
+                return record
+            if attempt < _BIND_RETRY_ATTEMPTS - 1:
+                await asyncio.sleep(delay)
+                delay *= 2
+        raise await _refuse_dial(ConnectionError("could not start a runtime for this session"))
+
+    try:
+        record = await asyncio.wait_for(_locate(), timeout=PILOT_BIND_TIMEOUT_S)
+    except TimeoutError as exc:
+        raise MeshRefusal(
+            "session_unreachable",
+            f"{peer} did not answer for {session_id} within "
+            f"{PILOT_BIND_TIMEOUT_S:.0f}s — its runtime may be starting, or wedged; "
+            f"`lop network doctor --peer {peer}` diagnoses the link",
+        ) from exc
+
+    # No projection or disconnect handling: this connection lives for ONE
+    # request, and its outcome is the reply to that request (a close before the
+    # reply fails the request's own future in the client's pump).
+    client = owner.make_client(lambda _projection: None, lambda _reason: None)
+    try:
+        try:
+            await asyncio.wait_for(client.connect(record, session_id), timeout=PILOT_BIND_TIMEOUT_S)
+        except TimeoutError as exc:
+            raise MeshRefusal(
+                "session_unreachable",
+                f"{peer} did not answer for {session_id} within "
+                f"{PILOT_BIND_TIMEOUT_S:.0f}s — its runtime may be starting, or wedged; "
+                f"`lop network doctor --peer {peer}` diagnoses the link",
+            ) from exc
+        except ConnectionError as exc:
+            raise await _refuse_dial(exc) from exc
+        if not client.mesh_peer_message_supported:
+            return None
+        return await _deliver_mailbox(client.peer_message, session_id, device, text, mode)
+    finally:
+        # The owner keeps its runtime: closing this connection is a detach, the
+        # same as the viewer path's dispose. A failed close never speaks for the
+        # act (the refusal or receipt above outranks it).
+        try:
+            await client.detach()
+        except Exception:  # noqa: BLE001 — see above
+            logging.getLogger(__name__).debug("closing the mailbox dial failed", exc_info=True)
 
 
 class _MailboxMode:
@@ -7775,11 +7935,10 @@ async def _pilot_mailbox(
     today's prompt path for a plain send, with ``fallback: "prompt"`` and that
     path's honest receipt. A quiet drop or a steer cannot be expressed as a turn
     — a turn always wakes — so those are refused rather than silently changed.
+
+    ``_pilot_act`` reaches this only when ``_pilot_mailbox_direct`` found such an
+    owner: an owner WITH the mailbox is delivered to without a viewer at all.
     """
-    from local_operator.mobile.peer_send import (
-        mint_peer_message_id,
-        peer_sender_identity_async,
-    )
     from local_operator.network.types import MeshRefusal
 
     if not viewer.owner_takes_mesh_peer_message():
@@ -7794,6 +7953,24 @@ async def _pilot_mailbox(
         payload, lines = await _pilot_send(viewer, session_id, peer, text)
         payload["fallback"] = "prompt"
         return payload, [*lines, prompt_fallback_line(peer)]
+    return await _deliver_mailbox(viewer.send_peer_message, session_id, peer, text, mode)
+
+
+async def _deliver_mailbox(
+    deliver: Any, session_id: str, peer: str, text: str, mode: _MailboxMode
+) -> tuple[dict[str, Any], list[str]]:
+    """Send ONE ``peer_message`` through ``deliver`` and render its receipt.
+
+    Shared by the viewer path (``_pilot_mailbox``, ``viewer.send_peer_message``)
+    and the view-free path (``_pilot_mailbox_direct``, ``client.peer_message``) so
+    the two cannot disagree about what "delivered" means: both take the same
+    keywords and return the owner's reply frame.
+    """
+    from local_operator.mobile.peer_send import (
+        mint_peer_message_id,
+        peer_sender_identity_async,
+    )
+    from local_operator.network.types import MeshRefusal
 
     identity = await peer_sender_identity_async(os.getpid())
     sender = {key: identity[key] for key in _MESH_SENDER_FIELDS if identity.get(key)}
@@ -7810,7 +7987,7 @@ async def _pilot_mailbox(
     }
     try:
         reply = await asyncio.wait_for(
-            viewer.send_peer_message(
+            deliver(
                 text, mode=wire_mode, wake=bool(mode.wake), sender=sender, message_id=message_id
             ),
             timeout=PILOT_REPLY_TIMEOUT_S,
