@@ -1,12 +1,13 @@
 """The runtime gate under Team Bridge taint (team-bridge-egress.md: "Cards", "Grants",
 "bridge_ack").
 
-Rows: T22b (a parked card is not answered by a mode change), T22d (a pre-latch
-SESSION auto stops covering calls, also after resume), T22e (a post-latch
-``/approvals auto`` needs ``bridge_ack`` over the routed seam, is stamped and
-survives resume), T22f (GLOBAL auto is unchanged -- the recorded decision:
-closed for ask mode; accepted risk in auto/yolo), and the card's
-projection (``bridge_latched``/``taint_raised`` and the notice in the detail).
+Rows: T22b (a parked card is not answered by a mode change), T22d (a SESSION
+auto keeps covering calls once the session latches, also after resume --
+#3928), T22e (a post-latch ``/approvals auto`` needs ``bridge_ack`` over the
+routed seam and survives resume), T22f (GLOBAL auto covers a latched session,
+the same rule as T22d), the #3928 two-session repro and its ``ask`` negative
+controls, and the card's projection (``bridge_latched``/``taint_raised`` and
+the notice in the detail).
 """
 
 from __future__ import annotations
@@ -19,6 +20,7 @@ from typing import Any
 import pytest
 
 from local_operator.config_watch import _reset_for_tests
+from local_operator.harness.approval import ACCOUNT_PROFILE_GATE
 from local_operator.harness.bridge_egress import bridge_card_notice
 from local_operator.session.approval_policy import OVERRIDE_FILENAME
 from local_operator.session.frontend_state import SlashResult
@@ -54,19 +56,19 @@ async def _parks(handle, *, taint_raised: bool = False) -> bool:
 
 
 @pytest.mark.asyncio
-async def test_t22f_global_auto_still_answers_inline_accepted_risk(tmp_path: Path) -> None:
+async def test_t22f_global_auto_answers_a_latched_session_inline(tmp_path: Path) -> None:
     handle, session, _watcher, _emitted = _handle(tmp_path, auto_approve=True)
     setattr(session, "bridge_latched", True)
-    # No conversation record: the gate follows the machine default. This slice
-    # leaves it exactly as today -- this row documents the accepted risk.
+    # No conversation record: the gate follows the machine default.
     assert await _parks(handle) is False
     await handle.dispose()
 
 
 @pytest.mark.asyncio
-async def test_t22d_pre_latch_session_auto_is_void_after_the_latch_and_after_resume(
+async def test_t22d_pre_latch_session_auto_keeps_covering_after_the_latch_and_resume(
     tmp_path: Path,
 ) -> None:
+    """#3928: a conversation's own ``auto`` is honoured under the latch like global auto."""
     session_dir = tmp_path / "session"
     session_dir.mkdir()
     handle, session, _watcher, _emitted = _handle(
@@ -76,29 +78,37 @@ async def test_t22d_pre_latch_session_auto_is_void_after_the_latch_and_after_res
     handle._approvals_slash(session, "auto", SlashResult)  # typed BEFORE any bridge content
     assert handle._auto_approve is True
     record = json.loads((session_dir / OVERRIDE_FILENAME).read_text())
-    assert record == {"schema_version": 1, "override": "auto"}  # no stamp
+    assert record == {"schema_version": 1, "override": "auto"}
 
     setattr(session, "bridge_latched", True)  # a bridge card arrives
-    assert (
-        await _parks(handle, taint_raised=True) is True
-    ), "a pre-latch auto approved tainted egress"
-    # The band/policy line reports the EFFECTIVE mode.
-    assert handle._bridge_grant_suspended() is True
+    assert await _parks(handle, taint_raised=True) is False
+    # /approvals and the pending-gate state agree with the gate: auto. A card
+    # that still parks (an account profile save is never auto-approved)
+    # publishes the live mode, no longer an ``ask``/``suspended`` fold.
+    assert handle._approvals_slash(session, "", SlashResult).text.startswith("tool approvals: auto")
+    profile = asyncio.ensure_future(handle._approval_gate(ACCOUNT_PROFILE_GATE, "save"))
+    await asyncio.sleep(0)
+    gate = _published_gate(handle)
+    assert gate.get("approval_mode") == "auto"
+    assert "approval_suspended" not in gate
+    pending = handle._fold.projection.pending
+    assert pending is not None
+    await handle.approval_answer(pending.request_id, False, False)
+    assert await profile is False
     await handle.dispose()
 
-    # Resume: the record reads back without a stamp, so the latched session asks.
     resumed, resumed_session, _w, _e = _handle(
         tmp_path, auto_approve=False, session_dir=session_dir
     )
     setattr(resumed_session, "bridge_latched", True)
     resumed._adopt_persisted_approval_override()
     assert resumed._auto_approve is True
-    assert await _parks(resumed) is True
+    assert await _parks(resumed) is False
     await resumed.dispose()
 
 
 @pytest.mark.asyncio
-async def test_t22e_post_latch_auto_needs_bridge_ack_then_is_stamped_and_survives_resume(
+async def test_t22e_post_latch_auto_needs_bridge_ack_then_survives_resume(
     tmp_path: Path,
 ) -> None:
     session_dir = tmp_path / "session"
@@ -118,11 +128,13 @@ async def test_t22e_post_latch_auto_needs_bridge_ack_then_is_stamped_and_survive
     assert not (session_dir / OVERRIDE_FILENAME).exists()
     assert await _parks(handle) is True
 
-    # The picker / typed command (marked) is the deliberate loosening.
+    # The picker / typed command (marked) is the deliberate loosening. The
+    # record is just the mode: no latch stamp is needed for it to keep
+    # covering calls (#3928).
     handle._approvals_slash(session, "auto", SlashResult, bridge_ack=True)
     assert handle._auto_approve is True
     record = json.loads((session_dir / OVERRIDE_FILENAME).read_text())
-    assert record["granted_while_latched"] is True
+    assert record == {"schema_version": 1, "override": "auto"}
     assert await _parks(handle) is False
     await handle.dispose()
 
@@ -133,6 +145,76 @@ async def test_t22e_post_latch_auto_needs_bridge_ack_then_is_stamped_and_survive
     resumed._adopt_persisted_approval_override()
     assert await _parks(resumed) is False
     await resumed.dispose()
+
+
+def _published_gate(handle: Any) -> dict[str, Any]:
+    """The pending-gate payload ``_publish_pending_gate`` would push, captured."""
+    captured: dict[str, Any] = {}
+
+    class _Store:
+        def mutate(self, **fields: Any) -> None:
+            captured.update(fields)
+
+    handle._session._frontend_state_store = _Store()
+    handle._publish_pending_gate()
+    return captured.get("pending_gate") or {}
+
+
+async def _latched_session(tmp_path: Path, name: str, record: str | None, default_auto: bool):
+    """One conversation over its own config dir and session dir, then latched."""
+    root = tmp_path / name
+    root.mkdir()
+    session_dir = root / "session"
+    session_dir.mkdir()
+    if record is not None:
+        (session_dir / OVERRIDE_FILENAME).write_text(
+            json.dumps({"schema_version": 1, "override": record})
+        )
+    handle, session, _watcher, emitted = _handle(
+        root, auto_approve=default_auto, session_dir=session_dir
+    )
+    handle._adopt_persisted_approval_override()
+    setattr(session, "bridge_latched", True)
+    return handle, session, emitted
+
+
+@pytest.mark.asyncio
+async def test_3928_session_auto_and_machine_default_auto_get_the_same_outcome(
+    tmp_path: Path,
+) -> None:
+    """The issue's exact repro: same machine default auto, same latch, two sessions.
+
+    A has ``approvals.json`` override ``auto``; B rides the machine default.
+    Before #3928 A parked an Allow/Deny card on every tool call (and
+    published ``approval_mode: ask``) while B kept acting.
+    """
+    a, a_session, _ = await _latched_session(tmp_path, "a", "auto", True)
+    b, b_session, _ = await _latched_session(tmp_path, "b", None, True)
+    assert a._approval_grant().scope == "session" and b._approval_grant().scope == "global"
+    assert await _parks(a, taint_raised=True) is False
+    assert await _parks(b, taint_raised=True) is False
+    for handle, session in ((a, a_session), (b, b_session)):
+        report = handle._approvals_slash(session, "", SlashResult)
+        assert report.text.startswith("tool approvals: auto")
+        await handle.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("record", "default_auto"),
+    [
+        (None, False),  # a latched session in ask mode
+        ("ask", True),  # an ask session override under an auto machine default
+    ],
+)
+async def test_3928_negative_control_latched_ask_still_prompts(
+    tmp_path: Path, record: str | None, default_auto: bool
+) -> None:
+    handle, session, _ = await _latched_session(tmp_path, "c", record, default_auto)
+    assert await _parks(handle) is True
+    report = handle._approvals_slash(session, "", SlashResult)
+    assert report.text.startswith("tool approvals: ask")
+    await handle.dispose()
 
 
 @pytest.mark.asyncio

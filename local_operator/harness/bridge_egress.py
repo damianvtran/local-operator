@@ -16,8 +16,9 @@ put a secret into a URL with nobody asked. The rules, threat model and
 accepted risks are written down in ``docs/security/team-bridge-egress.md``.
 
 STATUS, IN THE ONLY WORDS ALLOWED: closed for ask mode; accepted risk in
-auto/yolo. A session running ``tool_approval_mode: auto`` (machine default) or
-``--yolo``, or one whose host declared an unattended ``--tools`` inventory
+auto/yolo. A session running auto -- the ``tool_approval_mode: auto`` machine
+default or its own ``/approvals auto`` (one rule since #3928) -- or ``--yolo``,
+or one whose host declared an unattended ``--tools`` inventory
 naming the tool, still runs these calls unattended. That is a recorded
 product decision, not an oversight; do not describe this module as closing
 S-38 outright.
@@ -39,9 +40,9 @@ WHAT IT DOES
   ONE tier decision (``harness/loop.py`` ``_runner_result``). It may only
   raise a tier, or refuse; it never lowers one.
 * **The card rules** (:func:`requires_person`, :func:`session_grant_covers`).
-  Every card raised in a latched session is Allow/Deny only, no mode change
-  answers a parked one, and a session-scoped auto granted BEFORE the latch no
-  longer covers calls after it.
+  Every card raised in a latched session is Allow/Deny only and no mode change
+  answers a parked one. An auto grant covers a latched session whichever
+  scope it came from (#3928): the latch suspends no grant.
 * **Propagation between sessions.** The latch follows bridge text wherever it
   is carried, in both directions:
 
@@ -1167,38 +1168,44 @@ GrantScope = Literal["session", "global"]
 
 @dataclass(frozen=True)
 class ApprovalGrant:
-    """Which auto a gate holder is running under, and when it was granted.
+    """Which auto a gate holder is running under, and where it came from.
 
-    ``granted_while_latched`` is True only for a session grant made while the
-    session was ALREADY latched (a deliberate post-latch ``/approvals auto``).
-    Absent/unknown decodes to False and an undetermined scope to ``session``:
-    both fail closed (§4.2.1).
+    ``scope`` is provenance: ``session`` for the conversation's own choice,
+    ``global`` for the machine default or a run pin. No rule reads it since
+    #3928 -- both scopes cover a latched session alike -- and the post-latch
+    ``granted_while_latched`` stamp it used to travel with is gone, because
+    the only thing it decided (a session grant surviving the latch) is now
+    true of every session grant.
     """
 
     auto: bool = False
     scope: GrantScope = "session"
-    granted_while_latched: bool = False
 
 
 NO_GRANT = ApprovalGrant()
 
 
-def session_grant_covers(grant: ApprovalGrant | None, *, title: str, bridge_latched: bool) -> bool:
+def session_grant_covers(grant: ApprovalGrant | None, *, title: str) -> bool:
     """Whether an auto grant answers a NEW call without a card (§4.2.1).
 
-    A session grant made before the latch is void once the session latches;
-    the call falls through to the card (not to the global default beneath).
-    Global auto is left exactly as today: that is the accepted auto/yolo risk.
+    Deliberately blind to the latch and to the grant's scope (#3928). Until
+    then a SESSION auto granted before the latch was void once the session
+    latched while the machine-default auto kept covering calls: two sessions
+    with the same taint got opposite outcomes, and a deliberate per-session
+    choice was trusted LESS than the machine default with no argument for
+    it. Voiding global auto too would gate every session on the machine
+    after any peer message. So both are honoured, and the latch's protection
+    stays where it does the work: the read-tier egress gate
+    (:func:`escalate_for_bridge_taint`), ``bridge_ack`` on a routed
+    loosening, the Allow/Deny-only latched card, and the dangerous-delete
+    guard's judge, which never takes bridge or peer text as consent. ``ask``
+    is untouched: no grant, so every latched call still reaches the card.
     """
     from local_operator.harness.approval import never_auto_approved
 
     if grant is None or not grant.auto:
         return False
-    if never_auto_approved(title):
-        return False
-    if bridge_latched and grant.scope != "global" and not grant.granted_while_latched:
-        return False
-    return True
+    return not never_auto_approved(title)
 
 
 # -- copy ---------------------------------------------------------------------------
@@ -1276,11 +1283,6 @@ def card_options_off_notice() -> str:
     ``bridge_ack`` yet) and ``/new``.
     """
     return _copy("card_options_off")
-
-
-def grant_suspended_notice(source: Any = None) -> str:
-    """The one-time notice when a pre-latch session auto stops covering calls."""
-    return _kind_copy("grant_suspended", source)
 
 
 def ack_refused_notice(source: Any = None) -> str:
