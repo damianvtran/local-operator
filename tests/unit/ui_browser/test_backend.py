@@ -926,7 +926,10 @@ def short_first_attempt(monkeypatch: pytest.MonkeyPatch) -> None:
 
 @pytest.fixture
 def small_budget(monkeypatch: pytest.MonkeyPatch) -> float:
+    # Both budgets shrink together so a hung host still costs ~2 * _BUDGET here;
+    # the longer production retry budget has its own tests below.
     monkeypatch.setattr(backend, "HEALTH_PROBE_TIMEOUT_S", _BUDGET)
+    monkeypatch.setattr(backend, "HEALTH_RETRY_TIMEOUT_S", _BUDGET)
     return _BUDGET
 
 
@@ -1372,3 +1375,142 @@ async def test_the_copy_is_exact_when_the_deadline_shortens_the_second_attempt(
         assert f"within {_BUDGET:.1f}s over" not in message
     finally:
         host.close()
+
+
+# --- The longer retry budget (2026-11-15 busy-machine failures) ------------------
+#
+# Measured: on a load-45 machine both 1.5 s attempts expired while the host
+# answered in 0-1 ms, because the retry was no longer than the attempt that had
+# just starved. These pin the policy: first attempt unchanged, retry longer and
+# deadline-clamped, a real backoff between them, and a failure that survives the
+# shared runtime.log's two-minute rotation in its own file.
+
+
+@pytest.fixture
+def health_log_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Point log_dir() at a scratch directory so the durable failure file is ours."""
+    config = tmp_path / "config"
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(config))
+    from local_operator.paths import log_dir
+
+    return log_dir()
+
+
+def _recording_timeouts(monkeypatch: pytest.MonkeyPatch) -> list[float]:
+    """Replace the GET with an instant TIMEOUT that records the budget it was given."""
+    budgets: list[float] = []
+
+    async def probe_once(current: Any, budget: float) -> Any:
+        budgets.append(budget)
+        return backend.HealthVerdict.TIMEOUT, "TimeoutError", ""
+
+    monkeypatch.setattr(backend, "_probe_once", probe_once)
+    return budgets
+
+
+@pytest.mark.asyncio
+async def test_a_retry_slower_than_the_first_budget_but_inside_the_retry_budget_is_healthy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, health_log_dir: Path
+) -> None:
+    """The defect itself: an answer later than ONE first budget must still acquit.
+
+    Under the old policy the retry also got the first budget, so a reply 1.0 s
+    late to a 0.3 s retry window failed exactly as the field incidents did.
+    """
+    monkeypatch.setattr(backend, "HEALTH_PROBE_TIMEOUT_S", 0.3)
+    # Generous on purpose: this fleet runs at load 70+, which stretches a 1.0 s
+    # reply well past 4 s; the assertion is "longer than the first budget acquits".
+    monkeypatch.setattr(backend, "HEALTH_RETRY_TIMEOUT_S", 20.0)
+    host = _Host(pid=os.getpid(), instance_id="instance-a", health_script=["hang", 1.0])
+    try:
+        current = publish(tmp_path, port=host.port, instance_id="instance-a")
+        probe = await backend.probe_health(current, site="preflight")
+        assert probe.ok, probe
+        assert probe.attempts == 2 and host.gets == 2
+        assert probe.retry_budget_s == pytest.approx(20.0)
+        assert probe.elapsed_s > 1.0, "the acquitting reply came later than the first budget"
+        # Healthy: nothing logged, nothing persisted.
+        assert not (health_log_dir / backend.HEALTH_FAILURE_LOG_NAME).exists()
+    finally:
+        host.close()
+
+
+@pytest.mark.asyncio
+async def test_the_retry_gets_the_longer_budget_after_the_backoff(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, health_log_dir: Path
+) -> None:
+    budgets = _recording_timeouts(monkeypatch)
+    current = publish(tmp_path, port=_dead_port(), instance_id="instance-a")
+    started = time.monotonic()
+    probe = await backend.probe_health(current, site="preflight")
+    elapsed = time.monotonic() - started
+    assert budgets == [backend.HEALTH_PROBE_TIMEOUT_S, backend.HEALTH_RETRY_TIMEOUT_S]
+    assert budgets == [1.5, 5.0], "production constants changed without new measurements"
+    assert probe.verdict is backend.HealthVerdict.TIMEOUT and probe.attempts == 2
+    assert probe.budget_s == 1.5 and probe.retry_budget_s == 5.0 and not probe.clamped
+    assert elapsed >= backend.HEALTH_RETRY_BACKOFF_S, "the backoff must actually be slept"
+
+
+@pytest.mark.asyncio
+async def test_the_longer_retry_budget_is_clamped_to_the_callers_deadline(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, health_log_dir: Path
+) -> None:
+    budgets = _recording_timeouts(monkeypatch)
+    current = publish(tmp_path, port=_dead_port(), instance_id="instance-a")
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + 2.0
+    probe = await backend.probe_health(
+        current, first_budget=1.5, deadline=deadline, site="preflight"
+    )
+    assert budgets[0] == 1.5
+    # Whatever time is left after the (instant) first attempt and the backoff,
+    # never the full 5 s: the deadline is a hard ceiling.
+    assert len(budgets) == 2
+    assert budgets[1] <= 2.0 - backend.HEALTH_RETRY_BACKOFF_S + 0.01
+    assert budgets[1] < backend.HEALTH_RETRY_TIMEOUT_S
+    assert probe.clamped and probe.retry_budget_s == budgets[1]
+
+
+@pytest.mark.asyncio
+async def test_a_failed_probe_is_persisted_outside_the_rotating_runtime_log(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, health_log_dir: Path
+) -> None:
+    """runtime.log rolls in ~2 minutes across the fleet; this file must keep the line."""
+    _recording_timeouts(monkeypatch)
+    current = publish(tmp_path, port=_dead_port(), instance_id="instance-a")
+    await backend.probe_health(current, site="preflight")
+    await backend.probe_health(current, site="preflight")
+    path = health_log_dir / backend.HEALTH_FAILURE_LOG_NAME
+    lines = path.read_text().splitlines()
+    assert len(lines) == 2, lines
+    for field in (
+        f"pid={os.getpid()} ui_host_health_probe_failed",
+        "site=preflight",
+        "outcome=timeout",
+        "budget_s=1.500",
+        "retry_budget_s=5.000",
+        "attempts=2",
+        "loop_lag_ms=",
+        "elapsed_s=",
+    ):
+        assert field in lines[0], (field, lines[0])
+    assert current.session_key not in path.read_text()
+    assert path.stat().st_mode & 0o777 == 0o600
+
+
+@pytest.mark.asyncio
+async def test_the_durable_failure_log_rolls_to_one_backup_and_never_raises(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, health_log_dir: Path
+) -> None:
+    _recording_timeouts(monkeypatch)
+    monkeypatch.setattr(backend, "HEALTH_FAILURE_LOG_MAX_BYTES", 10)
+    current = publish(tmp_path, port=_dead_port(), instance_id="instance-a")
+    await backend.probe_health(current, site="preflight")
+    await backend.probe_health(current, site="preflight")
+    path = health_log_dir / backend.HEALTH_FAILURE_LOG_NAME
+    assert len(path.read_text().splitlines()) == 1
+    assert len(path.with_name(path.name + ".1").read_text().splitlines()) == 1
+    # An unwritable destination degrades to "not persisted", never to an error.
+    monkeypatch.setattr("local_operator.paths.ensure_log_dir", lambda: tmp_path / "missing" / "x")
+    probe = await backend.probe_health(current, site="preflight")
+    assert probe.verdict is backend.HealthVerdict.TIMEOUT

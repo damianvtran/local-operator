@@ -22,6 +22,7 @@ from __future__ import annotations
 import asyncio
 import enum
 import logging
+import os
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -41,14 +42,47 @@ from local_operator.ui_browser import state as state_store
 
 logger = logging.getLogger(__name__)
 
+#: MEASURED BEFORE CAPPED (2026-11-15, 42 ``ui_host_health_probe_failed`` lines in
+#: ``~/.local-operator/logs/exec-*.log``, Nov 10-15, machine load 45-48):
+#:
+#: * 18 had the CHECKER starved: loop_lag 648-14129 ms, 17 of 18 at or under
+#:   5.24 s;
+#: * 16 had the checker on time (loop_lag 2-228 ms) yet BOTH 1.5 s attempts
+#:   expired (elapsed 3.05-3.10 s) — the request itself, not the loop, was
+#:   starved (thread/socket scheduling at load ~47);
+#: * 4 were reachable after one attempt, 4 were connection refused.
+#:
+#: Meanwhile the host side (the desktop app's synchronous ``/health``) answered
+#: in 0-1 ms during all three 2026-11-15 incidents (its main-loop delay: n=4777,
+#: median 1 ms, max 1125 ms). So almost every failure condemned a healthy host
+#: because a second 1.5 s window was no longer than the first. The first attempt
+#: stays at ``HEALTH_PROBE_TIMEOUT_S`` (the healthy path is unchanged and a
+#: refused port still fails at once); the ONE retry gets this longer budget,
+#: which covers 17/18 measured stalls, still clamped to the caller's deadline.
+HEALTH_RETRY_TIMEOUT_S = 5.0
+
 #: Pause between the two attempts of a probe whose first attempt TIMED OUT.
-#: Tiny on purpose: the retry exists to survive a checker that was starved, and
-#: starvation that ends has ended by the time the loop runs this sleep. It must
-#: stay well under one budget so the worst case stays ``2 * budget + backoff``.
-HEALTH_RETRY_BACKOFF_S = 0.05
+#: Long enough for a descheduled checker (and the thread pool / socket it
+#: needs) to get a turn before the retry's clock starts, instead of starting
+#: that clock inside the same stall; short against the 5 s retry budget. The
+#: worst case a hung host costs is ``first + backoff + retry`` (~7 s), never
+#: past the caller's deadline.
+HEALTH_RETRY_BACKOFF_S = 0.5
+
+#: Durable record of probe failures, in :func:`local_operator.paths.log_dir`.
+#: WHY a file of its own: the session runtimes log to the shared rotating
+#: ``runtime.log``, which ~25 concurrent sessions roll through all five
+#: generations in about two minutes (measured 2026-11-15: ``runtime.log`` ..
+#: ``runtime.log.4`` spanned 17:19:17-17:21:12). The WARNING was written and
+#: gone before anyone looked, so the three 2026-11-15 incidents had no
+#: ``loop_lag_ms``. Failures are rare, so this file holds weeks.
+HEALTH_FAILURE_LOG_NAME = "browser-health.log"
+#: Size at which the file is rolled to one ``.1`` backup (~1,000 lines each).
+HEALTH_FAILURE_LOG_MAX_BYTES = 256 * 1024
 
 #: Attempts a TIMED-OUT probe gets. One retry, never more: a host that is truly
-#: hung must still be reported within ~two budgets, and anything that is not a
+#: hung must still be reported within ``first + backoff + HEALTH_RETRY_TIMEOUT_S``
+#: (~7 s, deadline-clamped), and anything that is not a
 #: timeout (refused, mismatch, bad body) is a definite answer that a second GET
 #: cannot change.
 HEALTH_MAX_ATTEMPTS = 2
@@ -269,6 +303,8 @@ class HealthProbe:
     #: True when the caller's deadline shortened any attempt below the standard
     #: budget, so "within <budget>s" would overstate what was actually allowed.
     clamped: bool = False
+    #: The budget the retry was given (deadline-clamped); 0.0 when none ran.
+    retry_budget_s: float = 0.0
 
     @property
     def ok(self) -> bool:
@@ -393,10 +429,17 @@ async def probe_health(
     descheduled past the budget while the answer sat ready — and one fresh
     attempt, run once the loop is moving again, acquits a healthy host.
 
-    Policy (the bound a hung host can cost is ``2 * budget + backoff``, and never
-    past the caller's ``deadline``):
+    Policy (the bound a hung host can cost is ``budget + backoff +
+    HEALTH_RETRY_TIMEOUT_S``, and never past the caller's ``deadline``):
 
-    * only ``TIMEOUT`` is retried; refused / mismatch / bad body are definite and
+    * the retry's budget is ``min(HEALTH_RETRY_TIMEOUT_S, time left before
+      deadline)``, longer than the first: a retry no longer than the attempt
+      that just starved mostly starved too (see the measurements beside the
+      constant);
+    * only ``TIMEOUT`` is retried. A starved attempt (loop lag past its budget)
+      always surfaces as ``TIMEOUT`` — the outer ``asyncio.timeout`` fires as
+      soon as the loop runs — so no separate "starved" trigger is needed;
+      refused / mismatch / bad body are definite and
       fail on the first attempt, so a dead host is reported as fast as before;
     * a timeout whose pid is no longer alive is also definite (no retry);
     * the happy path is exactly one GET;
@@ -418,6 +461,7 @@ async def probe_health(
     attempts = 0
     clamped = first_budget < HEALTH_PROBE_TIMEOUT_S
     verdict, error, detail = HealthVerdict.TIMEOUT, "", ""
+    retry_budget = 0.0
     while True:
         attempts += 1
         canary.start()
@@ -434,15 +478,19 @@ async def probe_health(
         # The pause is clamped too: a caller's deadline is a hard ceiling, and the
         # backoff is part of what a retry costs.
         backoff = HEALTH_RETRY_BACKOFF_S
-        budget = HEALTH_PROBE_TIMEOUT_S
+        budget = HEALTH_RETRY_TIMEOUT_S
         if deadline is not None:
             backoff = min(backoff, max(0.0, deadline - loop.time()))
         await asyncio.sleep(backoff)
         if deadline is not None:
             budget = min(budget, deadline - loop.time())
             if budget <= 0:
+                # The deadline, not the host, denied the retry: "within <budget>s
+                # over 1 attempt" would hide that a second attempt was owed.
+                clamped = True
                 break
-            clamped = clamped or budget < HEALTH_PROBE_TIMEOUT_S
+            clamped = clamped or budget < HEALTH_RETRY_TIMEOUT_S
+        retry_budget = budget
     probe = HealthProbe(
         verdict=verdict,
         elapsed_s=time.monotonic() - started,
@@ -452,6 +500,7 @@ async def probe_health(
         loop_lag_ms=canary.max_lag_s * 1000.0,
         detail=detail,
         clamped=clamped,
+        retry_budget_s=retry_budget,
     )
     if not probe.ok:
         _log_probe_failure(current, probe, site)
@@ -475,10 +524,11 @@ def _log_probe_failure(current: Any, probe: HealthProbe, site: str) -> None:
         if last is not None and now - last < _REACHABLE_LOG_INTERVAL_S:
             return
         _reachable_last_logged[key] = now
-    logger.warning(
+    line = (
         "ui_host_health_probe_failed site=%s outcome=%s pid=%s port=%s instance_id=%s "
-        "generation=%s budget_s=%.3f elapsed_s=%.3f attempts=%d loop_lag_ms=%.1f "
-        "error=%s detail=%r pid_alive=%s",
+        "generation=%s budget_s=%.3f retry_budget_s=%.3f elapsed_s=%.3f attempts=%d "
+        "loop_lag_ms=%.1f error=%s detail=%r pid_alive=%s"
+    ) % (
         site,
         probe.verdict.value,
         current.pid,
@@ -486,6 +536,7 @@ def _log_probe_failure(current: Any, probe: HealthProbe, site: str) -> None:
         current.instance_id,
         getattr(current, "started_at", None),
         probe.budget_s,
+        probe.retry_budget_s,
         probe.elapsed_s,
         probe.attempts,
         probe.loop_lag_ms,
@@ -493,6 +544,43 @@ def _log_probe_failure(current: Any, probe: HealthProbe, site: str) -> None:
         probe.detail,
         state_store.pid_alive(current.pid),
     )
+    logger.warning("%s", line)
+    _persist_probe_failure(line)
+
+
+def _persist_probe_failure(line: str) -> None:
+    """Append one failure line to :data:`HEALTH_FAILURE_LOG_NAME`; never raises.
+
+    A plain ``O_APPEND`` write rather than a logging handler: several session
+    runtimes write this file at once, and a single short ``write`` on an
+    append-mode descriptor lands whole, without the cross-process rename races
+    a ``RotatingFileHandler`` per process would add. Rolling is a size check
+    and one rename; two processes rolling together at worst lose one backup of
+    a diagnostic, which is acceptable. The line carries no session key (see
+    :class:`HealthProbe`), so the file is safe to hand to support; it is 0600
+    anyway like every other log here.
+    """
+    try:
+        from local_operator.paths import ensure_log_dir
+
+        directory = ensure_log_dir()
+        if directory is None:
+            return
+        path = directory / HEALTH_FAILURE_LOG_NAME
+        try:
+            if path.stat().st_size >= HEALTH_FAILURE_LOG_MAX_BYTES:
+                os.replace(path, path.with_name(path.name + ".1"))
+        except FileNotFoundError:
+            pass
+        stamp = time.strftime("%Y-%m-%dT%H:%M:%S%z")
+        record = f"{stamp} pid={os.getpid()} {line}\n".encode("utf-8", "replace")
+        fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+        try:
+            os.write(fd, record)
+        finally:
+            os.close(fd)
+    except Exception:  # noqa: BLE001 - a diagnostic write may never fail the action
+        logger.debug("ui_host_health_failure_log_unwritable", exc_info=True)
 
 
 def _failure_copy(probe: HealthProbe, current: Any, copy: Any) -> str:
