@@ -22,6 +22,21 @@ Known trade-off: this isolates selection; it does not prove a test body cannot
 leak global state or that nothing imports the module dynamically. The full run
 on `main` and the nightly are that backstop.
 
+Whole-tree guards (round 2): two unit tests scan every test file's text, so any
+test-body edit can flip them although no changed file names them
+(`test_ask_tool.py::test_no_test_still_pins_the_retired_refusal_sentence`,
+`test_notification_isolation.py::test_no_test_nests_a_fixture_scoped_patch_under_the_opt_in`).
+The planner always appends those two nodes (`GLOBAL_READERS`) to the targets, so
+the run is "the changed files PLUS two named guard nodes", not "only the changed
+files". A catalog entry that no longer resolves, or a PR that edits a reader's
+own file, is FULL. Limits: the catalog is not a proof that no other whole-tree
+reader exists (the `main`/nightly full run is the backstop), and `skipif`
+condition strings are evaluated at runtime, not by the module-level check.
+The six serial controls do not run on an `affected` lane, and an empty or
+malformed target list fails the extract step rather than letting the test
+runner collect everything. In a 12-PR sample about 4/12 were eligible, so this
+is not a claim about the fleet's savings.
+
 Wiring: the `Plan the affected lane` step in `changes`; shard 0 runs the targets
 through the normal pytest step on both Pythons, shards 1-5 are idle,
 `coverage-report` skips, and `Merge gate (full suite)` (name unchanged) writes

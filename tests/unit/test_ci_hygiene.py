@@ -1168,7 +1168,9 @@ def _audit_unit_serial_wiring(steps: list[dict[str, Any]], env: dict[str, Any]) 
         problems.append("the ordinary run does not deselect $SERIAL_CONTROLS")
     if "--cov-append" in ordinary_run or ".coverage." in ordinary_run:
         problems.append("the ordinary run must not append or rename coverage data")
-    if serial.get("if") != "matrix.shard == 0":
+    # #4074: shard 0 only, and not on the affected lane (it would run six
+    # unrelated fixtures for up to 7 minutes beside a handful of targets).
+    if serial.get("if") != "matrix.shard == 0 && needs.changes.outputs.lane != 'affected'":
         problems.append(f"the serial step must run on shard 0 only, has if={serial.get('if')!r}")
     if serial.get("continue-on-error"):
         problems.append("the serial step must not continue-on-error")

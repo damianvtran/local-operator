@@ -471,7 +471,19 @@ jobs:
           LANE_TARGETS: ${{ needs.changes.outputs.lane_targets }}
         run: |
           if [ "$LANE" = affected ]; then
-            python3 -c 'import json,os; print("\n".join(json.loads(os.environ["LANE_TARGETS"])))' > shard_tests.txt
+            # A non-empty list of .py node ids is REQUIRED here: the test runner
+            # given no path arguments collects the WHOLE suite (exit 5 only when
+            # nothing is found), so an empty list would silently run
+            # everything on one leg under load instead of failing.
+            python3 -c '
+          import json, os, re, sys
+          t = json.loads(os.environ["LANE_TARGETS"])
+          ok = isinstance(t, list) and t and all(
+              isinstance(x, str) and re.fullmatch(r"tests/unit/[\w./\-]+\.py(::\w+)?", x) for x in t)
+          if not ok:
+              sys.exit("affected lane needs a non-empty list of unit test node ids")
+          print("\n".join(t))' > shard_tests.txt
+            [ -s shard_tests.txt ] || { echo "::error::affected lane produced no targets"; exit 1; }
             cat shard_tests.txt
           else
             python scripts/shard_tests.py \
@@ -556,7 +568,14 @@ jobs:
         # COVERAGE: the exact source of the ordinary run, appended to its data.
         # A bare `--cov` would reset the selection; `--cov-fail-under=0` and the
         # empty report keep the gate where it already is (the combine job).
-        if: matrix.shard == 0
+        #
+        # AFFECTED LANE (#4074): these six cases are unrelated to the planner's
+        # targets and cost up to 7 minutes, so an exact 'affected' skips them
+        # (the `serial_proof` step is already skipped when this one is). Empty/
+        # unknown/full lanes keep running them exactly as before. The ordinary
+        # step's `--deselect` still applies, so the affected targets never run
+        # a serial control either.
+        if: matrix.shard == 0 && needs.changes.outputs.lane != 'affected'
         timeout-minutes: 7
         # Same dump directory as the ordinary shard run, so an ENOMEM in this
         # -n0 stage lands in the one artifact the shard job uploads. `runner` is
@@ -1195,7 +1214,7 @@ jobs:
             echo "### Merge gate: AFFECTED lane (not the full suite)"
             echo "- reason: $REASON"
             echo "- targets: $TARGETS"
-            echo "- Python versions: 3.12, 3.13; shards run: 0 (shards 1-5 idle by design)"
+            echo "- Python versions: the configured matrix; shards run: 0 (shards 1-5 idle by design)"
             echo "- planner base: $PLANNER_BASE blob: $PLANNER_BLOB"
           } >> "$GITHUB_STEP_SUMMARY"
           # An affected lane that ran no tests is not a pass. `unit == false`

@@ -65,6 +65,22 @@ FIXTURE_SCOPES = {"function", "class", "module"}
 SHADOW = {"pytest", "re", "unittest", "TestCase"}
 
 
+# WHOLE-TREE READERS (R1-M1). A few unit tests scan every test file's text, so
+# editing ANY test body can flip them although no changed file names them. The
+# affected lane therefore always adds these nodes to its targets. Source-verified
+# roots: both walk the tests tree (test_ask_tool: parents[2] -> tests/, rglob;
+# test_notification_isolation: parents[1] -> tests/unit, rglob). They are a
+# CATALOG, not a proof that no other reader exists: a reader outside it is a
+# known limit of this planner, backstopped by the full run on main/nightly.
+# A catalog entry that no longer resolves to a function at HEAD is FULL, and a
+# PR that edits a reader's own file is FULL (it changes the guard itself).
+GLOBAL_READERS: tuple[str, ...] = (
+    "tests/unit/tools/test_ask_tool.py::test_no_test_still_pins_the_retired_refusal_sentence",
+    "tests/unit/test_notification_isolation.py"
+    "::test_no_test_nests_a_fixture_scoped_patch_under_the_opt_in",
+)
+
+
 class Full(Exception):
     """Raised with the reason a diff is not eligible; the lane is FULL."""
 
@@ -166,7 +182,13 @@ def _stmt_ok(stmt: ast.stmt, *, first: bool) -> bool:
         names = [t.id for t in targets if isinstance(t, ast.Name)]
         if len(names) != len(targets) or any(n in SHADOW or n.startswith("pytest_") for n in names):
             return False  # attribute/subscript writes, plugin hooks, alias rebinding
-        return stmt.value is None or _pure(stmt.value)
+        # The ANNOTATION is evaluated at import too (module/class scope, no
+        # `from __future__ import annotations` guarantee), so a call there is
+        # import-time code exactly like a value. Same annotation-aware rule as
+        # function annotations. Under the future import it is only stored as a
+        # string, but the planner stays conservative: a hazard is FULL anyway.
+        ann_ok = not isinstance(stmt, ast.AnnAssign) or _pure(stmt.annotation, annotation=True)
+        return ann_ok and (stmt.value is None or _pure(stmt.value))
     if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef)):
         if stmt.name in SHADOW or stmt.name.startswith("pytest_"):
             return False
@@ -269,6 +291,23 @@ def _dependents(root: Path, targets: list[str]) -> None:
             )
 
 
+def _global_readers(root: Path, head: str, paths: list[str]) -> list[str]:
+    """GLOBAL_READERS nodes to add; FULL if one is edited or no longer exists."""
+    out: list[str] = []
+    for node in GLOBAL_READERS:
+        rel, _, func = node.partition("::")
+        if rel in paths:
+            raise Full(f"{rel}: edits a whole-tree guard itself")
+        tree = _parse(root, head, rel)
+        if not any(
+            isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name == func
+            for n in ast.walk(tree)
+        ):
+            raise Full(f"{node}: whole-tree guard catalog entry not found at head")
+        out.append(node)
+    return out
+
+
 def plan(root: Path, *, event: str, base: str, head: str) -> tuple[str, list[str], str]:
     """`(lane, targets, reason)`; lane is `affected` or `full`."""
     try:
@@ -289,7 +328,13 @@ def plan(root: Path, *, event: str, base: str, head: str) -> tuple[str, list[str
             if not (_module_ok(old) and _module_ok(new)):
                 raise Full(f"{rel}: module level is outside the side-effect-free subset")
         _dependents(root, paths)
-        return "affected", paths, f"{len(paths)} existing unit test module(s), bodies only"
+        readers = _global_readers(root, head, paths)
+        return (
+            "affected",
+            [*paths, *readers],
+            f"{len(paths)} existing unit test module(s), bodies only, plus "
+            f"{len(readers)} whole-tree guard node(s)",
+        )
     except Full as why:
         return "full", [], str(why)
     except Exception as exc:  # any planner bug is FULL, never a skip
@@ -312,17 +357,19 @@ def main(argv: Sequence[str] | None = None) -> int:
     lines = [
         f"lane={lane}",
         f"targets={json.dumps(targets)}",
-        f"reason={reason}",
+        # One output line each: a CR/LF in a reason must not forge a key.
+        f"reason={reason.replace(chr(13), ' ').replace(chr(10), ' ')}",
         f"planner_base={ns.base}",
         f"planner_blob={ns.planner_blob}",
     ]
     if ns.github_output:
         with open(ns.github_output, "a", encoding="utf-8") as fh:
-            fh.write("\n".join(line.replace("\n", " ") for line in lines) + "\n")
+            fh.write("\n".join(line.replace("\r", " ").replace("\n", " ") for line in lines) + "\n")
     if ns.summary:
         with open(ns.summary, "a", encoding="utf-8") as fh:
             fh.write(
-                f"### Test lane: {lane.upper()}\n\n{reason}\n\nbase `{ns.base}` planner blob `{ns.planner_blob}`\n"
+                f"### Test lane: {lane.upper()}\n\n{reason}\n\n"
+                f"base `{ns.base}` planner blob `{ns.planner_blob}`\n"
             )
     print("\n".join(lines))
     return 0
