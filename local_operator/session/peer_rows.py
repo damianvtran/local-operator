@@ -56,6 +56,9 @@ from local_operator.session.catalog import live_state_from_flags
 #: that a session created on a peer (``/new remote``) surfaces while the user is
 #: still looking at the list it should appear in.
 _TTL_S = 20.0
+#: The same bound, public for callers that schedule their own refresh against
+#: :func:`listing_age_s` rather than letting a read dial inline.
+LISTING_TTL_S = _TTL_S
 
 #: ``config root`` → ``(monotonic read time, rows, unanswered peers, wall-clock
 #: read start in ms)``. The wall-clock half exists for ONE reader,
@@ -141,6 +144,22 @@ def read_listing(
     if cached is not None and ttl_s > 0 and moment - cached[0] < ttl_s:
         return cached[1], cached[2]
     return _read_all(root, catalog, moment, key)
+
+
+def listing_age_s(root: Path | None = None, *, now: float | None = None) -> float | None:
+    """Seconds since the cached listing for ``root`` was read; ``None`` when there is none.
+
+    A cache PEEK, never a read: it lets a caller that must not wait on a fan-out
+    (the mobile relay's list frames, ``mobile.daemon._PeerRowsRefresher``) decide
+    whether to refresh in the background and answer from the entry meanwhile.
+    An entry that only :func:`seed_peer_row` wrote answers ``inf``: it was never a
+    listing, so it must be treated exactly like no listing at all.
+    """
+    cached = _CACHE.get("" if root is None else str(root))
+    if cached is None:
+        return None
+    moment = time.monotonic() if now is None else now
+    return moment - cached[0]
 
 
 def listing_read_at_ms(root: Path | None, rows: object) -> int | None:
