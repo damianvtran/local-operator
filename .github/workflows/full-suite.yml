@@ -137,9 +137,12 @@ jobs:
   # scripts/fast_gate_check.py to main; (2) only then does a PR carrying this
   # workflow pass its own gate, because its gate_base now contains the helper.
   #
-  # Every heavy job below needs this job AND tests `outputs.ok == 'true'`: their
-  # `!cancelled()` overrides the implicit success() of `needs`, so a failed
-  # precondition would NOT stop them without the explicit output test.
+  # Every heavy job below needs this job AND tests BOTH `result == 'success'`
+  # and `outputs.ok == 'true'`: their `!cancelled()` overrides the implicit
+  # success() of `needs`, so a failed precondition would NOT stop them without
+  # the explicit tests, and `ok` alone could survive a late post-step failure.
+  # This is a COST GATE (scripts/ci_scope.py COST_GATES), deliberately
+  # FAIL-CLOSED, unlike the fail-open scope flags of `changes`.
   precondition:
     needs: [changes]
     runs-on: ubuntu-latest
@@ -344,6 +347,7 @@ jobs:
     needs: [changes, precondition]
     if: >-
       !cancelled() &&
+      needs.precondition.result == 'success' &&
       needs.precondition.outputs.ok == 'true' &&
       needs.changes.outputs.unit != 'false'
     runs-on: ubuntu-latest
@@ -1063,6 +1067,7 @@ jobs:
     # broken it.
     if: >-
       !cancelled() &&
+      needs.precondition.result == 'success' &&
       needs.precondition.outputs.ok == 'true' &&
       needs.changes.outputs.tui != 'false'
     # Generous relative to the ~11 s the stage takes when healthy (~14 s on a
@@ -1351,7 +1356,10 @@ jobs:
         run: |
           set -euo pipefail
           echo "$NEEDS" | jq -r 'to_entries[] | "\(.key): \(.value.result)"'
-          bad="$(echo "$NEEDS" | jq -r 'to_entries[] | select(.value.result != "success" and .value.result != "skipped") | "\(.key)=\(.value.result)"')"
+          # `precondition` is the cost gate, not a path-filtered job: only
+          # `success` is a pass for it. A skipped one would leave every heavy
+          # job skipped (`ok` unset) and the gate green with nothing run.
+          bad="$(echo "$NEEDS" | jq -r 'to_entries[] | select((.value.result != "success" and .value.result != "skipped") or (.key == "precondition" and .value.result != "success")) | "\(.key)=\(.value.result)"')"
           if [ -n "$bad" ]; then
             echo "::error title=Merge gate (full suite)::needed jobs not success or skipped: $(echo "$bad" | tr '\n' ' ')"
             exit 1
