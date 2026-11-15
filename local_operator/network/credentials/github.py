@@ -1914,6 +1914,61 @@ def borrowed_git_env(
     return git_env_for_token(token), token
 
 
+def lent_github_env(
+    *,
+    session_id: str,
+    register: Callable[[str], object] | None,
+    client: Any = None,
+) -> tuple[dict[str, str], str]:
+    """The ONE door a mesh-lent github bearer takes into a local consumer.
+
+    ``(env, token)`` for one child or read, or ``({}, "")``. Never raises.
+
+    WHY ONE DOOR. Three surfaces hand this device's borrowed github login to
+    something that runs: the bash spawn path (every ``gh``/``git`` the agent
+    runs), the monitor ticks that run those same commands unattended (in
+    session, and in the parked-session probe subprocess), and the code-request
+    credential resolver. Each used to make its own ``borrowed_git_env`` call
+    with its own idea of scrubbing, and the copies drifted: the parked probe
+    built a context with no redaction ledger, so the bash path's "no ledger, no
+    injection" rule silently gave its ``gh`` nothing and every tick failed with
+    "gh: To use GitHub CLI in automation, set the GH_TOKEN environment
+    variable." while the same command in the session worked.
+
+    THE CONTRACT, in order:
+
+    1. **No scrubber, no bearer.** ``register`` is the caller's redaction sink
+       (a session ``VariableStore.register_redaction``, or the process-wide
+       store). A caller that cannot mask the value does not get it: an
+       injected token nobody can scrub is a plaintext tool result or monitor
+       snapshot waiting to happen (design §D5; the T8e ``printenv`` invariant).
+    2. **The borrow is delegated, never re-implemented.** ``borrowed_git_env``
+       owns ``should_borrow`` (revoked share, withdrawn consent), the grant
+       cache and its per-session partition, the owner's narrowing and the
+       self-revoke at expiry; ``session_id`` is attribution only.
+    3. **Registered BEFORE it is returned.** The token is in the sink before any
+       child that could print it exists. A sink that raises is treated as no
+       sink (fail closed): the caller gets ``({}, "")``, which is exactly the
+       pre-brokering behaviour every caller already handles.
+
+    Blocking (one bounded owner round trip on a cache miss): async callers run
+    it off the event loop.
+    """
+    if not callable(register):
+        return {}, ""
+    try:
+        env, token = borrowed_git_env(session_id=session_id, client=client)
+    except Exception:  # noqa: BLE001 — borrowed_git_env never raises; belt and braces
+        return {}, ""
+    if not env or not token:
+        return {}, ""
+    try:
+        register(token)
+    except Exception:  # noqa: BLE001 — an unmaskable bearer is withheld, not raised
+        return {}, ""
+    return env, token
+
+
 #: Grant ids whose FRESH re-ask came back stale too (see :func:`_accept_stale`).
 #: Per process, bounded: ids are unique per serve, so the set only has to outlive
 #: one grant's cache lifetime, and the oldest are dropped first.
