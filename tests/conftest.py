@@ -235,6 +235,16 @@ _AMBIENT_VARS = (
     # and the cells would keep passing while testing a window nothing ships.
     "LOP_UPDATE_LOCK_S",
     "LOP_UPDATE_LOCK_HEARTBEAT_S",
+    # The daemon-refresh hand-off's process markers (``update._REFRESH_ROLE_ENV``
+    # and ``_REFRESH_HANDOFF_ENV``). ROLE=worker is a SWITCH: it makes
+    # ``_run_refresh_child`` skip the hand-off and run the refresh body
+    # in-process, so a value inherited from an update the operator has running
+    # would put every hand-off cell on the worker branch while it still looked
+    # like it tested the hand-off. HANDOFF_AT moves the instant a child hands off
+    # by. Cells that mean either set it through ``monkeypatch`` or an explicit
+    # env map.
+    "LOCAL_OPERATOR_REFRESH_ROLE",
+    "LOCAL_OPERATOR_REFRESH_HANDOFF_AT",
     # The runtime standby's own off switch (`session/runtime/standby.py`,
     # ``DISABLE_ENV``), which the suite SETS for the processes it starts
     # (``_PROCESS_DESKTOP_GATES`` below) and must therefore also SCRUB. An
