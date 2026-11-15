@@ -278,7 +278,7 @@ class PlacementState:
             # arm runs, so dropping the expiry here would erase the evidence.
             **{
                 field: self._observations.get(key, {})[field]
-                for field in self.GRANT_RECEIPT_FIELDS
+                for field in self.GRANT_RECEIPT_FIELDS + self.HELD_SERVE_FIELDS
                 if field in self._observations.get(key, {})
             },
         }
@@ -297,6 +297,21 @@ class PlacementState:
         "last_grant_expires_at_ms",
         "last_grant_hold_until_ms",
         "last_grant_held_offline",
+    )
+
+    #: The receipt of the LAST OFFLINE-HELD SERVE, as its own event naming its own
+    #: grant. WHY it is separate from :data:`GRANT_RECEIPT_FIELDS` (E01): those
+    #: describe the latest BORROW, and this device's sessions and the relay's
+    #: background renewal share one row, so the latest borrow (R) can differ from
+    #: the grant a session then served from the hold (G). Marking R "held" because
+    #: G was served left a mixed row (R's id and expiry with G's hold). These
+    #: fields say what was actually served; ``last_held_grant_id`` against
+    #: ``last_grant_id`` tells a reader whether the two are the same grant. Epoch
+    #: ms and an id only, never material. No authorisation reads them.
+    HELD_SERVE_FIELDS: tuple[str, ...] = (
+        "last_held_grant_id",
+        "last_held_grant_expires_at_ms",
+        "last_held_grant_hold_until_ms",
     )
 
     def note_grant(
@@ -320,8 +335,18 @@ class PlacementState:
         ``grant_expires_at_ms`` / ``hold_until_ms`` / ``held_offline`` are the
         :data:`GRANT_RECEIPT_FIELDS`; ``0``/``False`` from a caller that does not
         know them (an older call site) still writes the row, so the shape is stable.
+
+        :data:`HELD_SERVE_FIELDS` are CARRIED, not reset: a later borrow does not
+        make an earlier offline serve false (it names its own grant), and dropping
+        them would let a renewal that lands just after a held serve erase the only
+        receipt. :meth:`clear` still drops them.
         """
         self._observations[key] = {
+            **{
+                field: self._observations.get(key, {})[field]
+                for field in self.HELD_SERVE_FIELDS
+                if field in self._observations.get(key, {})
+            },
             **self._held_fence_fields(key),
             "held_authorized_fence": self.held_policy_fence(key, owner_device)[0],
             "key": key,
@@ -337,19 +362,44 @@ class PlacementState:
             "last_grant_held_offline": bool(held_offline),
         }
 
-    def note_held_serve(self, key: str, held_until_ms: int) -> None:
-        """Mark the last grant for ``key`` as now served from the offline hold.
+    def note_held_serve(
+        self,
+        key: str,
+        held_until_ms: int,
+        *,
+        grant_id: str = "",
+        grant_expires_at_ms: int = 0,
+    ) -> None:
+        """Record that a grant for ``key`` was served from the offline hold.
 
         Only updates an existing grant row (a hold serves a grant this device
         received, so one exists); the status and refusal fields are untouched,
         because a held serve is not an owner answer. Called at the coalesced
         ``credential.held_served`` cadence, never per serve.
+
+        ``grant_id`` is the grant ACTUALLY served. The row's ``last_grant_*``
+        describe the latest borrow, which a concurrent renewal can make a different
+        grant, so:
+
+        * an identified serve always writes :data:`HELD_SERVE_FIELDS`;
+        * the legacy ``last_grant_held_offline`` / ``last_grant_hold_until_ms`` are
+          updated only when the served id IS ``last_grant_id`` (or the caller gave
+          no id, the original two-argument behaviour), so they never describe a
+          grant other than the one the row names.
+
+        Known non-goal: ``save`` is a whole-file read-modify-write with no
+        cross-process lock, so a concurrent writer can still lose an update.
         """
         row = self._observations.get(key)
         if row is None or not row.get("last_grant_at"):
             return
-        row["last_grant_held_offline"] = True
-        row["last_grant_hold_until_ms"] = int(held_until_ms or 0)
+        if grant_id:
+            row["last_held_grant_id"] = grant_id
+            row["last_held_grant_expires_at_ms"] = int(grant_expires_at_ms or 0)
+            row["last_held_grant_hold_until_ms"] = int(held_until_ms or 0)
+        if not grant_id or grant_id == row.get("last_grant_id"):
+            row["last_grant_held_offline"] = True
+            row["last_grant_hold_until_ms"] = int(held_until_ms or 0)
 
     #: The fields a policy deny writes and ``held_policy_fence`` documents as
     #: DELIBERATELY outliving the retry cache. ``clear`` must not take them with it:
