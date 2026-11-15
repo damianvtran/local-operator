@@ -18801,6 +18801,14 @@ class OperatorApp(App[None]):
                 self._system_notice(warning.removeprefix("warning: "), "warning")
             if mobile.kind == "restarted":
                 self._system_notice("mobile daemon restarted — refresh the phone UI")
+            elif mobile.kind == "restarting":
+                # Slow, not failed: the refresh child handed the bounce to a
+                # background worker that outlives this update (update.py's
+                # ``_hand_off_when_slow``); `lop services status` reports its end.
+                self._system_notice(
+                    "mobile daemon still restarting — finishing in the background; "
+                    "lop services status shows when it lands"
+                )
             elif mobile.kind == "failed":
                 self._system_notice(
                     "updated, but the mobile daemon did not restart — run lop mobile restart",
