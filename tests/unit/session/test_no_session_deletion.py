@@ -3028,6 +3028,28 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
     ),
     ("local_operator/update.py::_write_cache", "<path>.replace", "temp FILE -> update cache FILE"),
     ("local_operator/update.py::_write_cache", "<path>.unlink", "temp FILE -> update cache FILE"),
+    # The background daemon-refresh hand-off (PR #4004). Its run directories live
+    # under ``_refresh_runs_root()`` = ``<config>/update/refresh``, created by
+    # ``tempfile.mkdtemp(dir=<that root>)``; no session id or caller-supplied path
+    # names either target. The rmtree is confined IN the function, not by its
+    # caller: it refuses a symlink, anything whose resolved parent is not the
+    # resolved runs root, and any name that is not ``<unit>-<stamp>-<suffix>``
+    # for the unit being pruned (``test_update_refresh_handoff.py`` pins each
+    # refusal with a crafted path).
+    (
+        "local_operator/update.py::_remove_refresh_run",
+        "shutil.rmtree",
+        "<config>/update/refresh/<unit>-<stamp>-<suffix> ENDED run dir only; refuses symlinks, "
+        "non-children of the resolved runs root and non-run names — never under sessions/",
+        1,
+    ),
+    (
+        "local_operator/update.py::_write_run_meta",
+        "os.replace",
+        "<run dir>/spec.json.tmp FILE -> <run dir>/spec.json FILE inside the refresh run dir "
+        "this update just mkdtemp'd under <config>/update/refresh; replace cannot remove a dir",
+        1,
+    ),
     # The install-provenance marker, written atomically after an upgrade. Both
     # calls are confined to the temp file this function itself created with
     # ``mkstemp`` inside the INSTALL prefix (a uv tool root), and the rename
