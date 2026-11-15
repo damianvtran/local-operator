@@ -245,6 +245,30 @@ def notice_key(device_id: str, session_id: str, key: str) -> str:
 # ---------------------------------------------------------------------------
 
 
+def notice_origin(origin: Any) -> tuple[str, bool]:
+    """``(source_device, is_agent_child)`` of a stamp's ``origin`` mapping.
+
+    THE ONE READING OF "WHO WOULD THIS SESSION'S NOTICES GO TO" (PR #4029
+    review R1-1). Both the owner's catalogue leg (:func:`stamp_rows_for_viewer`)
+    and the ``notify`` result (:func:`notice_forwarding`) decide on it, so the
+    tool can never say "not forwarded" about a row the catalogue does put on
+    the wire, or the reverse. It reads ``origin.source_device`` ONLY — never
+    ``placement.mode``: the catalogue row carries ``stamp.origin`` whatever the
+    mode, and a replica recovered by ``sync.promote_replica`` is stamped
+    ``mode="local"`` with its old owner as ``source_device``, so its notices
+    ARE forwarded to that owner. ``is_agent_child`` is the agent-origin drop
+    (:data:`AGENT_ORIGIN_KIND`): such a row may still match a viewer for its
+    completion badge, but its notices are never put on the wire. A non-mapping
+    (no stamp, no origin) is ``("", False)``.
+    """
+    if not isinstance(origin, dict):
+        return "", False
+    return (
+        str(origin.get("source_device") or ""),
+        str(origin.get("kind") or "") == AGENT_ORIGIN_KIND,
+    )
+
+
 def stamp_rows_for_viewer(
     root: Path, rows: Sequence[dict[str, Any]], viewer_device_id: str
 ) -> None:
@@ -269,8 +293,7 @@ def stamp_rows_for_viewer(
     mine = [
         row
         for row in rows
-        if isinstance(row.get("origin"), dict)
-        and str(row["origin"].get("source_device") or "") == viewer_device_id
+        if notice_origin(row.get("origin"))[0] == viewer_device_id
         and str(row.get("session_id") or "")
     ]
     if not mine:
@@ -307,7 +330,7 @@ def stamp_rows_for_viewer(
         # the attention contract): honoured here exactly as the local legs do.
         if token and state.get("unseen") and state.get("notify", True):
             row["attention"] = {"token": str(token), "outcome": str(state.get("kind") or "")}
-        if str(row["origin"].get("kind") or "") == AGENT_ORIGIN_KIND:
+        if notice_origin(row["origin"])[1]:
             # AN AGENT'S CHILD NEVER NOTIFIES THE OPERATOR (2026-11-13): a
             # session another agent created here (a reviewer, QA or probe run
             # spawned with ``peer=``) reports to that agent, so its ``notify``
@@ -1041,12 +1064,14 @@ def origin_baseline_ms(root: Path, device_id: str) -> int:
 
 
 #: :func:`notice_forwarding` verdicts. ``FORWARDED``: an origin known to collect
-#: forwarded items will raise it. ``ORIGIN_NOT_COLLECTING``: peer-placed, but the
-#: origin is not recorded as collecting. ``LOCAL_ONLY``: this device is a mesh
-#: node and nothing will carry the item to any other device. ``NOT_OPERATOR_STARTED``:
-#: the origin collects, but the stamp lacks the operator attestation
-#: (:func:`origin_is_operator_started`), so the owner's default-deny (#4001)
-#: keeps the item here. ``NOT_APPLICABLE``:
+#: forwarded items will raise it. ``ORIGIN_NOT_COLLECTING``: the session has an
+#: origin device (:func:`notice_origin`, any placement mode), but that origin is
+#: not recorded as collecting. ``LOCAL_ONLY``: nothing will carry the item to any
+#: other device — a session of an agent's child (its notices report to that
+#: agent, never the wire, whatever the mesh), or one with no origin device on a
+#: mesh node (started here). ``NOT_OPERATOR_STARTED``: the origin collects, but
+#: the stamp lacks the operator attestation (:func:`origin_is_operator_started`),
+#: so the owner's default-deny (#4001) keeps the item here. ``NOT_APPLICABLE``:
 #: no clause at all (no mesh here, or a key this module never forwards).
 FORWARDED = "forwarded"
 ORIGIN_NOT_COLLECTING = "origin_not_collecting"
@@ -1084,24 +1109,27 @@ def notice_forwarding(root: Path, session_id: str, key: str = "") -> tuple[str, 
         from local_operator.session.placement import read_stamp
 
         stamp = read_stamp(Path(root), session_id)
-        if stamp is not None and stamp.placement.mode == "peer":
-            origin = str((stamp.origin or {}).get("source_device") or "")
-            if str((stamp.origin or {}).get("kind") or "") == AGENT_ORIGIN_KIND:
-                # Mirrors the drop in stamp_rows_for_viewer: an agent's child
-                # reports to that agent, so nothing is put on the wire.
-                return LOCAL_ONLY, origin
-            if origin:
-                if origin not in forwarding_origins(Path(root)):
-                    # Main's precedence since #4001, kept byte for byte: an
-                    # origin that does not collect gets the not-collecting
-                    # sentence whatever the attestation.
-                    return ORIGIN_NOT_COLLECTING, origin
-                if not origin_is_operator_started(stamp.origin):
-                    # Mirrors #4001's default-deny in stamp_rows_for_viewer:
-                    # notify items travel only for a stamp attesting
-                    # ``started_by: operator`` — the SAME predicate.
-                    return NOT_OPERATOR_STARTED, origin
-                return FORWARDED, origin
+        # Decided on the origin exactly as the catalogue leg is (notice_origin),
+        # NOT on placement.mode: a promote_replica stamp is mode="local" yet
+        # its notices are forwarded to the old owner (PR #4029 review R1-1).
+        origin_map = stamp.origin if stamp is not None else None
+        origin, agent_child = notice_origin(origin_map)
+        if agent_child:
+            # Mirrors the drop in stamp_rows_for_viewer: an agent's child
+            # reports to that agent, so nothing is put on the wire.
+            return LOCAL_ONLY, origin
+        if origin:
+            if origin not in forwarding_origins(Path(root)):
+                # Main's precedence since #4001, kept byte for byte: an origin
+                # that does not collect gets the not-collecting sentence whatever
+                # the attestation (#4001's "brought home" test pins it).
+                return ORIGIN_NOT_COLLECTING, origin
+            if not origin_is_operator_started(origin_map):
+                # Mirrors #4001's default-deny in stamp_rows_for_viewer: notify
+                # items travel only for a stamp attesting ``started_by:
+                # operator`` — the SAME predicate on the SAME mapping.
+                return NOT_OPERATOR_STARTED, origin
+            return FORWARDED, origin
         if _is_mesh_node(Path(root)):
             # No usable stamp (started here, or a stamp with no origin): the
             # forwarding leg drops the row, so the item stays on this node.
