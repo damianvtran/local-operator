@@ -320,6 +320,10 @@ def test_http_gate_and_login_flow() -> None:
     # as the untouched build fact it is).
     assert capabilities["session_tags"] == {"available": True}
     assert capabilities["features"].get("session_tags") == 1
+    # Per-device push preferences: the app sends ``preferences`` on register
+    # only to a relay advertising this, because the register body refuses
+    # unknown fields (an older relay would refuse the whole registration).
+    assert capabilities["push_preferences"] == {"available": True}
     assert capabilities["i18n"] == {"catalogues": 1}
     assert isinstance(capabilities["features"], dict)
     stt = capabilities["stt"]

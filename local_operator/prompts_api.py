@@ -523,8 +523,10 @@ _NO_BROWSER_NOTE = (
 #: Round 1 (PR #3935) added three clauses, each closing a dead end measured in
 #: review: what counts as the operator's authorisation (U3 — it was never
 #: defined, so an agent would stall or author it itself); a fresh install runs
-#: for minutes, longer than a default `bash` timeout (U2); and no site can be
-#: opened yet, because a headless Chrome cannot present an approval (U1).
+#: for minutes, longer than a default `bash` timeout (U2); and how a site gets
+#: approved there, because a headless Chrome cannot present the popup (U1) —
+#: the operator answers a card on their own device instead, signed with their
+#: key (#3938).
 #: Round 2 (U14): the operator asked for agents to "be able to install a
 #: browser when needed for visual testing", so a STANDING instruction to that
 #: effect counts as well as one naming this node — quoted with its date, since
@@ -539,8 +541,8 @@ _NO_BROWSER_NODE_NOTE = (
     "and its date in `--authorised-by '<who, when>'`. A fresh install takes "
     "minutes: run it with a timeout of at least 900 s or in the background. A "
     "session started before setup never gets the tool, so start a new one after; "
-    "even then no site can be opened yet (this build cannot open sites on a "
-    "headless node; a later update adds operator approval from their device). "
+    "each site it opens then needs the operator's approval, which they answer on "
+    "their own device and sign (guide://browser 'On a headless node'). "
     "Never install or script any other browser engine (playwright, puppeteer, a "
     "downloaded Chromium)."
 )

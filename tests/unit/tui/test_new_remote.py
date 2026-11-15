@@ -399,6 +399,11 @@ async def test_remote_creates_the_session_on_the_peer(
             "--peer",
             "damian-mbp",
             "--create",
+            # The operator's own gesture, stated explicitly so the owner stamps
+            # ``started_by: operator`` and notify items still reach the inbox
+            # under #4001's default-deny.
+            "--origin",
+            "user",
         ]
         # AND NO ``--name``, which is the fix rather than an omission (UX round 3,
         # U19). It used to pass the peer's own label, so the session was TITLED

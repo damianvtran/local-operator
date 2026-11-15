@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!-- The bundle around launcher.c. It exists so Background Task Management names a
+       Local Operator LaunchAgent "Local Operator" under the signing developer, instead
+       of after an unsigned program's file name (see launcher.c for the measurement).
+
+       CFBundleIdentifier is a CHILD of the desktop app's `com.local-operator`, never
+       that id itself: the app (local-operator-ui, appId com.local-operator) owns it,
+       and two bundles claiming one identifier confuse LaunchServices and TCC about
+       which code a grant belongs to. The plists name the app's id separately, in
+       AssociatedBundleIdentifiers, which is the documented way to tie an agent to an
+       app. `local_operator/update.py` pins this identifier (LAUNCHER_BUNDLE_ID) and
+       refuses a planted bundle that reports another one.
+
+       The `.lopruntime` extension rather than `.app` follows the runtime image's
+       convention (procname.RUNTIME_BUNDLE_DIRNAME): LaunchServices does not register
+       or offer to open it, and nothing ever launches it through LaunchServices —
+       launchd execs Contents/MacOS/Local Operator directly. -->
+  <key>CFBundleIdentifier</key>
+  <string>com.local-operator.launcher</string>
+  <key>CFBundleExecutable</key>
+  <string>Local Operator</string>
+  <key>CFBundleName</key>
+  <string>Local Operator</string>
+  <key>CFBundleDisplayName</key>
+  <string>Local Operator</string>
+  <key>CFBundlePackageType</key>
+  <string>APPL</string>
+  <key>CFBundleShortVersionString</key>
+  <string>1.0.0</string>
+  <key>CFBundleVersion</key>
+  <string>1</string>
+  <key>CFBundleInfoDictionaryVersion</key>
+  <string>6.0</string>
+  <key>LSMinimumSystemVersion</key>
+  <string>11.0</string>
+  <!-- A background-only helper: no Dock icon, no menu bar, no window, ever. -->
+  <key>LSBackgroundOnly</key>
+  <true/>
+  <key>LSUIElement</key>
+  <true/>
+</dict>
+</plist>

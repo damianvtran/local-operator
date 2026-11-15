@@ -1,0 +1,24 @@
+{
+  "schema": 1,
+  "audit_id": "a1",
+  "locale": "vi",
+  "namespace": "mobile.doctor",
+  "source_sha256": "0ca00b276fdea066228394e3fee336042b1e149c9e7df3ea31be11a24f0beb72",
+  "target_sha256": "2642bc0c30738625eb8b2c99b4410f8d1a9ef1bbef7f20d6ea61bdd4c4042314",
+  "verdict": "changes_requested",
+  "auditor": {
+    "agent": "i18n-auditor (C4 lane: vi, zh-CN), independent `task` subagent, session 2c1a73eaa6cd; did not translate or edit any value it judged",
+    "model": "anthropic/claude-opus-5-5"
+  },
+  "translator": {
+    "agent": "i18n-translator subagent, session 398cdb26808f (English source drafted by coder session b0300e2c2c7f)",
+    "model": "anthropic/claude-opus-5-5",
+    "date": "2026-11-14"
+  },
+  "hashes": {
+    "audit.log": "3f11dcfb46f673c828cf959ff436eeb473094552203271a42f64425c963381c8",
+    "dryrun.log": "afd9782c3c3673bf053b24174d708109dbf1b84ec2d8ec5f7afa3d3262e5e8a7",
+    "record.json": "87f3da7d8d90b35afb95dc2784b0cf6b5de29bf541a6084988b9d5296e26462b",
+    "report.md": "84ebdf94acec0afe1a604464220f6d84931664d6a410126b438830eec5a2b45a"
+  }
+}

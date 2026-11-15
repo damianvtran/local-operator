@@ -83,6 +83,10 @@ from textual.worker import Worker
 from local_operator import keymap as _keymap
 from local_operator.ansi import strip_control_sequences
 
+# ``bridge_decision_target`` lives in ``asks/decision.py`` so the desktop answer
+# route can share it without importing the TUI; re-exported for existing callers.
+from local_operator.asks.decision import bridge_decision_target
+
 # The cross-session view filter's single predicate, shared with the phone fold
 # (`mobile/projection.py`). Import-cheap by construction — its only heavy
 # import, `tui.settings`, is function-local — so the boot path this module's
@@ -4714,45 +4718,6 @@ def _reload_setup_cues() -> None:
 register_refresh(_reload_setup_cues)
 
 
-def bridge_decision_target(
-    row: AskRow, answers: Mapping[str, Sequence[str]]
-) -> tuple[str, str, str] | None:
-    """The ``(ask_id, question_id, word)`` a BRIDGE card answer decides.
-
-    ``None`` for every ordinary ask: a decision exists only for a request whose
-    question carries the producer's ``question_id`` AND whose picked value
-    resolves to one of that question's own option ids. The word sent on the
-    wire is the OPTION ID (``approve``/``deny``), never the drawn label — the
-    door validates the word against the request's closed set, and a label is
-    display copy that can be re-worded without touching the decision.
-
-    Ambiguity is ``None`` rather than a guess: two picked request questions, or
-    a value that maps to no option id, must fall back to the ordinary door and
-    its refusal rather than decide something the human did not choose.
-    """
-
-    picked: list[tuple[str, str]] = []
-    for question in row.questions:
-        if not isinstance(question, Mapping):
-            continue
-        question_id = str(question.get("question_id") or "")
-        if not question_id:
-            continue
-        selected = answers.get(str(question.get("id") or "")) or ()
-        if len(selected) != 1:
-            continue
-        options = {
-            str(option.get("label") or "").strip().lower(): str(option.get("id") or "")
-            for option in (question.get("options") or ())
-            if isinstance(option, Mapping)
-        }
-        value = str(selected[0]).strip()
-        picked.append((question_id, options.get(value.lower()) or value.lower()))
-    if len(picked) != 1:
-        return None
-    return (row.ask_id, picked[0][0], picked[0][1])
-
-
 def _is_bridge_ask_row(row: Any) -> bool:
     """Whether an ask row is a Team Bridge carriage (D2).
 
@@ -4771,6 +4736,22 @@ def _is_bridge_ask_row(row: Any) -> bool:
         if str(question.get("question_id") or "").strip():
             return True
     return False
+
+
+def _is_site_ask_row(row: Any) -> bool:
+    """Whether an ask row is a headless node's per-site browser approval.
+
+    Structural, like :func:`_is_bridge_ask_row`: the ``site:v1:`` question id
+    is stamped only by the browser tool's node path (``site_approval.py``). It
+    rides the bridge DECISION door (signed ``bridge_decide``), so it is also a
+    "bridge row" for routing — this predicate only changes the words.
+    """
+    from local_operator.browser_bridge.site_approval import is_site_question_id
+
+    return any(
+        isinstance(question, Mapping) and is_site_question_id(question.get("question_id"))
+        for question in (getattr(row, "questions", ()) or ())
+    )
 
 
 def _carry_dict(result: dict[str, Any]) -> dict[str, Any]:
@@ -18820,6 +18801,14 @@ class OperatorApp(App[None]):
                 self._system_notice(warning.removeprefix("warning: "), "warning")
             if mobile.kind == "restarted":
                 self._system_notice("mobile daemon restarted — refresh the phone UI")
+            elif mobile.kind == "restarting":
+                # Slow, not failed: the refresh child handed the bounce to a
+                # background worker that outlives this update (update.py's
+                # ``_hand_off_when_slow``); `lop services status` reports its end.
+                self._system_notice(
+                    "mobile daemon still restarting — finishing in the background; "
+                    "lop services status shows when it lands"
+                )
             elif mobile.kind == "failed":
                 self._system_notice(
                     "updated, but the mobile daemon did not restart — run lop mobile restart",
@@ -20666,7 +20655,11 @@ class OperatorApp(App[None]):
         # names it or the owner's own auto-namer titles the first substantive
         # turn. Nothing is lost by it — the `↗` mark and the tooltip carry the
         # device, which is what the bogus name was duplicating.
-        argv = ["sessions", "--peer", addressing, "--create"]
+        # ``--origin user``: the operator's own gesture, stated rather than
+        # inferred from the environment, so the owner stamps the session
+        # ``started_by: operator`` and its ``notify`` items keep reaching the
+        # inbox under the default-deny rule (``remote_attention.STARTED_BY_FIELD``).
+        argv = ["sessions", "--peer", addressing, "--create", "--origin", "user"]
         if prompt:
             argv += ["--prompt", prompt]
         self._run_network_cli(
@@ -30174,6 +30167,7 @@ class OperatorApp(App[None]):
         from local_operator.asks.render import NOT_IN_QUEUE
         from local_operator.mobile.attach_client import engage_session_client
         from local_operator.paths import config_dir
+        from local_operator.session.attached import operator_ask_kwargs
         from local_operator.session.runtime.launch import AskErrand
 
         failed = ""
@@ -30206,11 +30200,23 @@ class OperatorApp(App[None]):
                             # answer (TB-02 wiring, PR #2378).
                             await client.bridge_decide(*target)
                         else:
-                            await client.ask_respond(row.ask_id, answers or {}, by="terminal")
+                            await client.ask_respond(
+                                row.ask_id,
+                                answers or {},
+                                by="terminal",
+                                **operator_ask_kwargs(client.ask_respond),
+                            )
                     elif op == "decline":
-                        await client.ask_decline(row.ask_id, by="terminal")
+                        await client.ask_decline(
+                            row.ask_id, by="terminal", **operator_ask_kwargs(client.ask_decline)
+                        )
                     else:
-                        await client.ask_dismiss(row.ask_id, by="terminal", reason=reason)
+                        await client.ask_dismiss(
+                            row.ask_id,
+                            by="terminal",
+                            reason=reason,
+                            **operator_ask_kwargs(client.ask_dismiss),
+                        )
                 finally:
                     client.close()
         except Exception as exc:  # noqa: BLE001 — the refusal is the message
@@ -30374,6 +30380,7 @@ class OperatorApp(App[None]):
         card = AskPickerScreen(
             questions,
             self._ask_settle_callback(row),
+            allow_free_text=self._ask_card_allows_free_text(row),
             widget_id=f"ask-queue-card-{row.ask_id}",
             title=self._ask_card_title(row),
             exit_hint=("esc", "collapse"),
@@ -30418,6 +30425,17 @@ class OperatorApp(App[None]):
             self._collapse_asks()
 
     @staticmethod
+    def _ask_card_allows_free_text(row: AskRow) -> bool:
+        """Whether the card offers its "Other (type your own)" row.
+
+        Not for a headless node's site card: it is a closed Approve/Deny
+        decision, a typed answer is refused downstream, and a dead-end row in a
+        security prompt costs a line at 80x24 (design D3) — the approval gate's
+        own rule. Every other ask keeps the row.
+        """
+        return not _is_site_ask_row(row)
+
+    @staticmethod
     def _ask_card_title(row: AskRow) -> str:
         """What the card says above the questions — honest about the agent.
 
@@ -30435,6 +30453,29 @@ class OperatorApp(App[None]):
         """
         from local_operator.tui.widgets.ask_queue import ASK_MARKER
 
+        if _is_site_ask_row(row):
+            # A headless node's per-site browser approval: not another member's
+            # request (the bridge copy below would say so), and the answer is
+            # verified by the node's browser, not merely delivered to an agent.
+            # The machine is named as THIS computer's mesh knows it, or as the
+            # node claims it, marked unconfirmed (review R2-1) — the node drew
+            # the question, the title is the signer's own words. A lapsed card
+            # has its own line: nothing was allowed, and there is no "sender"
+            # (design D4 / UX U13).
+            from local_operator.browser_bridge.site_approval import signer_node_label
+            from local_operator.i18n.keys import browser_site_approval as _site_copy
+            from local_operator.i18n.messages import render_resolved
+
+            if row.lapsed:
+                return f"{ASK_MARKER} {render_resolved(_site_copy.card_title_lapsed())}"
+            site: Mapping[str, Any] = {}
+            for question in row.questions:
+                block = question.get("site")
+                if isinstance(block, Mapping):
+                    site = block
+                    break
+            device = signer_node_label(site)
+            return f"{ASK_MARKER} {render_resolved(_site_copy.card_title(device=device))}"
         bridge = _is_bridge_ask_row(row)
         if row.lapsed:
             # D10: a lapsed card is READ-ONLY, so the title stops promising that an
@@ -30553,7 +30594,17 @@ class OperatorApp(App[None]):
         hands either to ``_handle_ask_outcome``, which reports an awaitable from
         the worker it raises rather than blocking the key.
         """
-        target = bridge_decision_target(row, answers or {}) if row is not None else None
+        try:
+            target = bridge_decision_target(row, answers or {}) if row is not None else None
+        except ValueError as refusal:
+            # The signer refused a site card it could not rebuild (R1-1,
+            # ``site_approval.verify_site_card``): nothing is signed or sent,
+            # and the refusal reaches the user in its own keyed words.
+            return {
+                "ok": False,
+                "error": str(refusal),
+                "code": str(getattr(refusal, "code", "") or "decision_refused"),
+            }
         decider: Any = getattr(session, "bridge_decide", None)
         if target is not None and callable(decider):
             try:

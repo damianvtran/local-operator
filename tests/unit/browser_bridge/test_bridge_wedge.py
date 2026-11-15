@@ -277,8 +277,23 @@ def test_silence_detector_does_not_fire_on_a_pinging_idle_extension(
     the detector fires. `LINK_SILENCE_TIMEOUT_S` is shrunk so the positive half
     does not cost a real 50 s.
     """
-    monkeypatch.setattr(daemon_module, "PING_INTERVAL_S", 0.05)
-    monkeypatch.setattr(daemon_module, "LINK_SILENCE_TIMEOUT_S", 0.25)
+    # The margin is DERIVED from one number, not tuned. The detector can only
+    # misfire on the pinging peer if the gap between two pongs the daemon READS
+    # exceeds SILENCE, so the headroom is SILENCE - PONG_EVERY = 90% of the
+    # window (0.9 s): the receive thread or test thread would have to stall for
+    # ~0.9 s to flip it. It was 0.25 s window / 0.1 s cadence (0.15 s headroom)
+    # and failed once on a loaded CI runner (`proven` False). Do NOT shrink
+    # SILENCE back: the headroom must stay a multiple of the cadence, and a
+    # shorter window only trades the 1 s positive-half wait for flakiness.
+    # PING_INTERVAL_S stays far below SILENCE so several ping ticks land inside
+    # every window; the product's late-tick check only logs, so it is unaffected.
+    SILENCE = 1.0
+    PONG_EVERY = SILENCE / 10
+    # Must span MORE than one silence window, or a detector that fires late
+    # would still pass the negative half.
+    PINGING_FOR = 1.5 * SILENCE
+    monkeypatch.setattr(daemon_module, "PING_INTERVAL_S", SILENCE / 20)
+    monkeypatch.setattr(daemon_module, "LINK_SILENCE_TIMEOUT_S", SILENCE)
     app = create_app(root=tmp_path)
     with TestClient(app) as client:
         service = app.state.bridge
@@ -294,15 +309,18 @@ def test_silence_detector_does_not_fire_on_a_pinging_idle_extension(
             )
             socket.receive_json()
             first_socket = service.link.websocket
-            # Negative: pong for several silence-windows' worth of ping ticks.
-            for _ in range(4):
+            # Negative: pong until an ELAPSED target, not a fixed count of
+            # sleeps, so a slow sleep cannot shorten the observed window.
+            negative_until = time.monotonic() + PINGING_FOR
+            while time.monotonic() < negative_until:
                 socket.send_json({"event": "pong"})
-                time.sleep(0.1)
+                time.sleep(PONG_EVERY)
             assert service.link.proven is True
             assert service.link.websocket is first_socket, "a pinging peer was torn down"
 
             # Positive: go silent. The supervised ping loop tears the link down.
-            deadline = time.monotonic() + 5.0
+            # Deadline = one silence window plus 4 s of slack for the ping loop.
+            deadline = time.monotonic() + SILENCE + 4.0
             while service.link.websocket is not None and time.monotonic() < deadline:
                 time.sleep(0.05)
             assert service.link.websocket is None, "a silent peer was never dropped"

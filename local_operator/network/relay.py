@@ -145,6 +145,12 @@ from local_operator.network.types import (
     capabilities_for_role,
     trust_state,
 )
+from local_operator.notifications.remote_attention import (
+    AGENT_ORIGIN_KIND,
+    OPERATOR_STARTED,
+    STARTED_BY_FIELD,
+    started_by_for_origin,
+)
 from local_operator.paths import CONFIG_DIR_ENV, config_dir, log_dir
 from local_operator.session import open_trace
 from local_operator.session.runtime.types import (
@@ -5553,6 +5559,18 @@ def _model_credential_refusal(root: Path, model: Any, birth: Any) -> str:
     )
 
 
+def _started_by_claim(frame: dict[str, Any]) -> dict[str, str]:
+    """``{"started_by": <value>}`` when the create frame attested one, else ``{}``.
+
+    Only the two values ``remote_attention.started_by_for_origin`` writes are
+    kept; anything else (absent from an origin older than the attestation, or
+    garbage) stamps nothing, which the owner and the origin read as NOT
+    operator-started — the default-deny the operator rule asks for.
+    """
+    value = str(frame.get(STARTED_BY_FIELD) or "")
+    return {STARTED_BY_FIELD: value} if value in (OPERATOR_STARTED, AGENT_ORIGIN_KIND) else {}
+
+
 def _resolve_peer_cwd(cwd: str, *, owner: str) -> str:
     """The working directory a peer create names, or a refusal naming ``owner``.
 
@@ -5684,6 +5702,23 @@ class _PeerNoReply(MeshRefusal):
     type so a caller whose op may have ACTED on the far side (a create) can tell
     "no answer" from "never asked".
     """
+
+
+#: Guards every relay's single-flight dial table (:meth:`RelayServer._ensure_link_with_probe`).
+#: Module-level, not per instance, because the table itself is created lazily: test
+#: rigs build a relay with ``object.__new__`` and never run ``__init__``. Held only
+#: to read or write the table — never across a dial.
+_DIAL_FLIGHTS_LOCK = threading.Lock()
+
+
+@dataclass
+class _DialFlight:
+    """One in-flight dial that concurrent same-peer callers share."""
+
+    deadline: float | None
+    done: threading.Event = field(default_factory=threading.Event)
+    result: tuple[Any, str, list[CandidateAttempt]] = field(default_factory=lambda: (None, "", []))
+    error: BaseException | None = None
 
 
 class RelayServer:
@@ -5953,6 +5988,10 @@ class RelayServer:
         #: metadata again on every heartbeat would be a per-15-seconds import for a
         #: string that cannot change while this process lives.
         self.build = build_stamp()
+        #: Where this process's output really goes, read once (fd 1 cannot be
+        #: re-pointed under a running relay), falling back to this process's own
+        #: config-derived path when stdout is not a file.
+        self.output_log = _own_output_path() or str(log_path())
 
     # -- lifecycle ----------------------------------------------------------
 
@@ -7231,6 +7270,7 @@ class RelayServer:
             capabilities=list(wire.LINK_CAPABILITIES),
             version=build.get("version", ""),
             source_ref=build.get("source_ref", ""),
+            log_path=self.output_log,
             started_at=self.started_at,
         )
 
@@ -9312,6 +9352,7 @@ class RelayServer:
         # block exits) and ``_rehandshake_network`` touches ``self.links`` alone, so
         # nothing it needed was being protected here.
         rehandshake = False
+        removed_here: list[str] = []
         with store.mutate(link.network_id, self.root) as record:
             if incoming == record.epoch and str(
                 frame.get("rotation_id") or ""
@@ -9372,6 +9413,11 @@ class RelayServer:
                     )
                 )
                 rehandshake = True
+                removed_here = [
+                    str(device)
+                    for device in frame.get("removed") or []
+                    if str(device) != record.self_device_id
+                ]
         if rehandshake:
             # THE LINK'S NETWORK ID, NOT THE RECORD'S, and deliberately: after the move
             # above this call sits OUTSIDE the ``store.mutate`` block, so a record bound
@@ -9384,6 +9430,10 @@ class RelayServer:
             # FROM that field), so the two are equal today and the link is the one that
             # stays right if they ever are not.
             self._rehandshake_network(link.network_id, reason="epoch_stale")
+            # A removal another admin made reaches this owner as the rotation that
+            # names it: revoke what this device lent the removed ones (#3947 M2).
+            if removed_here:
+                self._revoke_lent_on_removal(link.network_id, removed_here)
         return {
             "op": "ack",
             "req": frame.get("req"),
@@ -9509,6 +9559,8 @@ class RelayServer:
                 )
         if outcome is not None:
             self._broadcast_epoch(record, state, reason="member_left", removed=outcome.removed)
+        # A device that left keeps no lent GitHub token either (#3947 M2).
+        self._revoke_lent_on_removal(link.network_id, [link.device_id])
         return {"op": "ack", "req": frame.get("req"), "detail": {"left": link.device_id}}
 
     def _op_panic(self, link: PeerLink, frame: dict[str, Any]) -> dict[str, Any] | None:
@@ -9548,6 +9600,10 @@ class RelayServer:
                     root=self.root,
                 )
                 epoch_after = record.epoch
+                # A panic, trust change or disconnect ends this network's credentials NOW:
+                # the login the relay renewed on the owner's return must not outlive it in
+                # memory until the next ask (``renew_push``; PR #3946 review m1).
+                self._drop_renewed_logins()
             # The snapshot is taken HERE, inside the section that wrote the state.
             victims = [
                 other
@@ -9623,7 +9679,21 @@ class RelayServer:
         # writes inside the lock.
         with store.mutate(link.network_id, self.root) as record:
             set_trust(record, trust=trust, reason=f"set by {link.device_id}", root=self.root)
+            if record.trust != "active":
+                # A panic, trust change or disconnect ends this network's credentials NOW:
+                # the login the relay renewed on the owner's return must not outlive it in
+                # memory until the next ask (``renew_push``; PR #3946 review m1).
+                self._drop_renewed_logins()
         return {"op": "ack", "req": frame.get("req"), "detail": {"trust": trust}}
+
+    def _drop_renewed_logins(self) -> None:
+        """Forget every login this relay renewed for its sessions (best effort)."""
+        try:
+            from local_operator.network.credentials import renew_push
+
+            renew_push.drop_held(self)
+        except Exception:  # noqa: BLE001 — a trust change must never fail on this
+            logger.debug("mesh relay: dropping renewed logins failed", exc_info=True)
 
     def _op_identity_rotate(self, link: PeerLink, frame: dict[str, Any]) -> dict[str, Any]:
         record = self.store_view.network(link.network_id)
@@ -10036,6 +10106,12 @@ class RelayServer:
                     "kind": str(frame.get("origin") or "user"),
                     "source_device": link.device_id,
                     "source_session_id": "",
+                    # THE ATTESTATION, copied only when the asking origin sent one
+                    # (``_ctl_peer_create``). Never defaulted: ``kind`` above defaults
+                    # to ``user`` for an origin that predates attribution, and a
+                    # default here would let that legacy guess forward ``notify``
+                    # items again (``remote_attention.STARTED_BY_FIELD``).
+                    **_started_by_claim(frame),
                 },
                 # CARRIED AUTO AUTHORITY (§6 defect 2): the accepted grant travels ON
                 # THE SESSION, so the runtime this create engages — and every runtime a
@@ -12183,7 +12259,82 @@ class RelayServer:
         probe_timeout_s: float | None = None,
         network_id: str | None = None,
     ) -> tuple["PeerLink | None", str, list[CandidateAttempt]]:
-        """``_ensure_link`` plus WHY it failed, for a surface that must say so.
+        """``_ensure_link`` plus WHY it failed — SINGLE-FLIGHT per peer.
+
+        ONE DIAL PER PEER AT A TIME. Two callers that both found no live link used
+        to dial the same peer concurrently (the definitions syncer and the CLI's
+        ``definitions_sync``, say). The peer's duplicate-identity rule keeps the
+        NEWEST link and closes the other (``_admit_link``, ``"replaced"``), so the
+        caller holding the loser sent its request into a closing link and reported
+        ``no_answer`` for a peer that was up — measured 5 of 6 concurrent pushes
+        with no prior link (#3849's gate, ``test_two_config_roots_…``). So callers
+        for the SAME ``(device, network)`` share ONE in-flight dial and its result:
+        the link, or the same refusal code. Callers for DIFFERENT peers never wait
+        on each other — the table is keyed, and the lock guards only the table.
+
+        Constraints: a failed or timed-out dial releases every waiter with that
+        failure and leaves nothing behind, so the next call dials fresh; a waiter
+        with its own probe budget waits no longer than that budget
+        (``not_attempted``, as an unprobed member reads). A real session op (no
+        deadline) behind a budget-limited listing probe dials for itself after a
+        failure rather than inheriting a claim about someone else's clock.
+        """
+        found = self._link_for(device_id)
+        if found is not None:
+            return found, "", []
+        if probe_timeout_s is not None and probe_timeout_s <= 0:
+            return None, NOT_ATTEMPTED_REASON, []
+        deadline = None if probe_timeout_s is None else time.monotonic() + probe_timeout_s
+        key = (device_id, network_id)
+        while True:
+            with _DIAL_FLIGHTS_LOCK:
+                flights: dict[tuple[str, str | None], _DialFlight] = self.__dict__.setdefault(
+                    "_dial_flights", {}
+                )
+                flight = flights.get(key)
+                leading = flight is None
+                if leading:
+                    flight = _DialFlight(deadline=deadline)
+                    flights[key] = flight
+            assert flight is not None
+            if leading:
+                try:
+                    flight.result = self._dial_for_link(
+                        device_id, probe_timeout_s=probe_timeout_s, network_id=network_id
+                    )
+                except BaseException as exc:
+                    flight.error = exc
+                    raise
+                finally:
+                    with _DIAL_FLIGHTS_LOCK:
+                        if flights.get(key) is flight:
+                            del flights[key]
+                    flight.done.set()
+                return flight.result
+            # A WAITER. Unbounded only when the caller is: the leader's own dial
+            # is bounded (per-candidate connect cap plus the handshake timeout).
+            remaining = None if deadline is None else deadline - time.monotonic()
+            if not flight.done.wait(remaining):
+                return None, NOT_ATTEMPTED_REASON, []
+            if flight.error is not None:
+                raise flight.error
+            link, reason, attempts = flight.result
+            if link is not None:
+                # Prefer what the table holds NOW: the shared link may have been
+                # superseded by an inbound one while this caller was waking.
+                return self._link_for(device_id) or link, "", list(attempts)
+            if flight.deadline is not None and deadline is None:
+                continue  # a listing's budget ran out; this caller has none, so it dials
+            return None, reason, list(attempts)
+
+    def _dial_for_link(
+        self,
+        device_id: str,
+        *,
+        probe_timeout_s: float | None = None,
+        network_id: str | None = None,
+    ) -> tuple["PeerLink | None", str, list[CandidateAttempt]]:
+        """The dial behind :meth:`_ensure_link_with_probe`; call that, not this.
 
         A listing that reports ``reachable: false`` with no reason is the
         dead-instrument failure this repo warns about: it cannot be told from
@@ -13802,6 +13953,8 @@ class RelayServer:
             )
         self._broadcast_epoch(record, state, reason="member_removed", removed=outcome.removed)
         self._rehandshake_network(record.network_id, reason="epoch_stale")
+        # The owner half of "membership loss ends a held GitHub token" (#3947 M2).
+        self._revoke_lent_on_removal(record.network_id, [device_id])
         return {
             "network_id": record.network_id,
             "removed": device_id,
@@ -13876,6 +14029,11 @@ class RelayServer:
                 reason=str(frame.get("reason") or "operator"),
                 root=self.root,
             )
+            if record.trust != "active":
+                # A panic, trust change or disconnect ends this network's credentials NOW:
+                # the login the relay renewed on the owner's return must not outlive it in
+                # memory until the next ask (``renew_push``; PR #3946 review m1).
+                self._drop_renewed_logins()
             self.audit.record(
                 AuditEvent(
                     event="trust_changed",
@@ -14207,6 +14365,10 @@ class RelayServer:
                     reason="this device raised a panic",
                     root=self.root,
                 )
+                # A panic, trust change or disconnect ends this network's credentials NOW:
+                # the login the relay renewed on the owner's return must not outlive it in
+                # memory until the next ask (``renew_push``; PR #3946 review m1).
+                self._drop_renewed_logins()
                 self.audit.record(
                     AuditEvent(
                         event="panic_raised",
@@ -14250,6 +14412,29 @@ class RelayServer:
             **tally,
             "peers": reports,
         }
+
+    def _revoke_lent_on_removal(self, network_id: str, device_ids: list[str]) -> threading.Thread:
+        """DELETE the GitHub tokens this owner lent to removed devices, off-thread.
+
+        The removal twin of :meth:`_revoke_lent_on_panic` (review #3947 M2): since the
+        offline hold the lender's scheduled DELETE fires at the hold end (an App
+        token's hour), so a removed node's token must be revoked here rather than
+        left to it. Off-thread for the same reasons — the received path runs on a
+        link reader and a receipt must not wait on GitHub's API. Never raises.
+        """
+        from local_operator.network.credentials import owner as owner_mod
+
+        thread = threading.Thread(
+            target=owner_mod.revoke_lent_on_removal,
+            args=(self, network_id, list(device_ids)),
+            name="mesh-removal-revoke",
+            daemon=True,
+        )
+        try:
+            thread.start()
+        except RuntimeError:
+            logger.warning("member removal: could not start the lent-token revoke", exc_info=True)
+        return thread
 
     def _revoke_lent_on_panic(self, network_id: str) -> threading.Thread:
         """DELETE the GitHub tokens this owner lent in ``network_id``, off-thread.
@@ -14326,6 +14511,10 @@ class RelayServer:
                 reason="this device disconnected",
                 root=self.root,
             )
+            # A panic, trust change or disconnect ends this network's credentials NOW:
+            # the login the relay renewed on the owner's return must not outlive it in
+            # memory until the next ask (``renew_push``; PR #3946 review m1).
+            self._drop_renewed_logins()
             self.audit.record(
                 AuditEvent(
                     event="disconnect_initiated",
@@ -14741,6 +14930,12 @@ class RelayServer:
             "prompt": str(frame.get("prompt") or ""),
             "images": list(frame.get("images") or []),
             "origin": str(frame.get("origin") or "user"),
+            # WHO ASKED, attested HERE where it was decided: ``origin`` comes from
+            # ``network/cli._create_origin`` (agent shell / ``--origin``) or is
+            # absent for the desktop's operator route, which means ``user``. The
+            # owner stamps it verbatim and forwards ``notify`` items only for
+            # ``operator`` (default-deny, ``remote_attention.STARTED_BY_FIELD``).
+            "started_by": started_by_for_origin(str(frame.get("origin") or "user")),
             # THE REQUEST TRAVELS WITH THE FRAME, and the answer comes from the
             # owner: it accepts only against its own ``unattended`` grant
             # (``_op_session_create``), which is the fact this side cannot read.
@@ -15411,7 +15606,7 @@ class RelayServer:
             "audit_published_through": self.audit.published_through,
             "audit_recorded_through": self.audit.recorded_through,
             "audit_path": str(store.audit_path(self.root)),
-            "log_path": str(log_path()),
+            "log_path": self.output_log,
             "uptime_s": round(time.time() - self.started_at, 1),
         }
 
@@ -16232,6 +16427,48 @@ RELAY_OOM_POLICY = "continue"
 
 def log_path() -> Path:
     return log_dir() / "network.log"
+
+
+def _own_output_path() -> str:
+    """The regular file THIS process's stdout is appended to, or ``""``.
+
+    The ground truth for "where does the relay log": launchd's
+    ``StandardOutPath`` and systemd's ``StandardOutput=append:`` are opened by the
+    supervisor before exec, from whatever path was rendered into the unit at
+    install time, so neither this process's environment nor a reader's can be
+    trusted to recompute it. The kernel knows: ``/proc/self/fd/1`` on Linux,
+    ``F_GETPATH`` on macOS. Anything that is not a regular file (a terminal, the
+    journal's socket, a pipe) has no path a person could open, so it is ``""``.
+    Never raises: this is decoration on a status row.
+    """
+    import stat as stat_mod
+
+    try:
+        if not stat_mod.S_ISREG(os.fstat(1).st_mode):
+            return ""
+        if sys.platform.startswith("linux"):
+            return os.readlink("/proc/self/fd/1")
+        if sys.platform == "darwin":
+            import fcntl
+
+            raw = fcntl.fcntl(1, getattr(fcntl, "F_GETPATH", 50), b"\0" * 1024)
+            return bytes(raw).split(b"\0", 1)[0].decode("utf-8", "replace")
+    except (OSError, ValueError):
+        return ""
+    return ""
+
+
+def reported_log_path(live: Mapping[str, Any] | None, record: Any) -> str:
+    """The log path to SHOW: the running relay's own word first, then a guess.
+
+    Order: what the answering relay reports (its fd), what its record says (a
+    wedged relay still has one), and only then this READER's ``log_path()``,
+    which is right for a relay this process would start and wrong for one an
+    install with another config dir started.
+    """
+    told = str((live or {}).get("log_path") or "") if isinstance(live, Mapping) else ""
+    recorded = str(getattr(record, "log_path", "") or "") if record is not None else ""
+    return told or recorded or str(log_path())
 
 
 def ensure_log_parent(*, strict: bool = True) -> None:
@@ -18375,13 +18612,21 @@ def _names_the_shim(image: Path) -> bool:
     """
     from local_operator import update
 
-    shim = update.daemon_image_path()
-    if image == shim:
-        return True
-    try:
-        return image.resolve() == shim.resolve()
-    except OSError:
-        return False
+    # The signed launcher counts as the shim: it execs ``<bin>/python3`` with argv
+    # unchanged, and on a macOS wheel it is what the plist's ``Program`` names
+    # (``update.daemon_program``), so a restart through it resolves ``current`` too.
+    for stable in (
+        update.daemon_image_path(),
+        update.launcher_executable(update.launcher_bundle_path()),
+    ):
+        if image == stable:
+            return True
+        try:
+            if image.resolve() == stable.resolve():
+                return True
+        except OSError:
+            continue
+    return False
 
 
 def _named_generation(image: Path) -> Path | None:
@@ -18520,7 +18765,17 @@ def generation_reading(pid: int | None) -> dict[str, Any]:
                         update.generation_version(target_generation) or None
                     )
                 if isinstance(pid, int) and pid > 0:
-                    reading["relay_generation_stale"] = update.generation_staleness_of_process(pid)
+                    stale = update.generation_staleness_of_process(pid)
+                    if stale is True and update.process_build_matches_current(pid):
+                        # A DIFFERENT GENERATION OF THE SAME BUILD IS NOT BEHIND.
+                        # Reinstalling one wheel makes a new generation directory,
+                        # so the name comparison says "behind" and the row told the
+                        # operator to restart onto byte-identical code. Only the
+                        # SURFACE is corrected here: the repair and the reapers keep
+                        # the name comparison, which also moves a process off a
+                        # generation that pruning may remove.
+                        stale = False
+                    reading["relay_generation_stale"] = stale
             else:
                 reading["installed_build"] = update.version_of_image(target_image) or None
                 pinned = _named_generation(target_image)
@@ -18671,7 +18926,8 @@ def status(port: int = DEFAULT_PORT, *, refresh: bool = False) -> dict[str, Any]
         "relay": live,
         "record": record.to_json() if record is not None else None,
         "port": port,
-        "log": str(log_path()),
+        # THE RUNNING RELAY'S path, not this reader's: see ``reported_log_path``.
+        "log": reported_log_path(live, record),
         "listening": live.get("listen") if live else None,
         "identity_present": (store.network_root() / "identity" / "device.json").exists(),
         # Local records when no relay is running: this command is most useful

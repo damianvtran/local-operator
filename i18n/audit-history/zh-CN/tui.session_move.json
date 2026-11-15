@@ -1,0 +1,79 @@
+{
+  "schema": 1,
+  "locale": "zh-CN",
+  "namespace": "tui.session_move",
+  "history_sha256": "8b31205751f0eb45b67519c3f5219d019ef08b54c1f3daa129562a059f7cac33",
+  "entries": [
+    {
+      "locale": "zh-CN",
+      "namespace": "tui.session_move",
+      "source_sha256": "f4dd682b3b50d64a4009eac5ac78a34f5734b5dd0a5ef379951065da326a913e",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-11"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (lopdev team)",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-11-11",
+        "result": "passed",
+        "findings": 2
+      },
+      "status": "passed",
+      "note": "zh-CN C1 /move refusals (7 keys). Evidence: i18n/audits/evidence/zh-CN/tui.session_move/c1a/record.json. Independent auditor deepseek/deepseek-flash; 2 minor (迁移 vs shipped 移动, <设备> vs 对等设备); no blocker/major.",
+      "companions": [
+        {
+          "path": "i18n/audits/evidence/zh-CN/tui.session_move/c1a/record.json",
+          "sha256": "ef193fd1c06b6c33f1a23fa8fc18096e0506ebddab7effee37a3580c7dc557c5"
+        },
+        {
+          "path": "i18n/audits/evidence/zh-CN/tui.session_move/c1a/report.md",
+          "sha256": "04ea132d9eecb3d5cc8f4e38b60e0111bcb645b80155e2e7c28d60ed8650f677"
+        },
+        {
+          "path": "i18n/audits/evidence/zh-CN/tui.session_move/c1a/audit.log",
+          "sha256": "605c0c2d273ddbcfd991ab03aa81bb1449f18948e0a171be131b6a80f04b0dde"
+        }
+      ]
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "tui.session_move",
+      "source_sha256": "f4dd682b3b50d64a4009eac5ac78a34f5734b5dd0a5ef379951065da326a913e",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-11"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-11-11",
+        "result": "passed",
+        "findings": 2,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "zh-CN C1 `tui.session_move` FINAL: round-2 delta audit of the v2 bytes now shipped (target file sha256 e466889dd727), 0 BLOCKER/0 MAJOR/0 MINOR/2 NIT. Round 1: A deepseek 0M/6m/2n, B sonnet 0M/5m/3n; v2 revised 13 keys. Independent of translator openai/gpt-6.1-sol. Evidence: i18n/audits/evidence/zh-CN/tui.session_move/c1r2/record.json. No rendered frame; no native review.",
+      "companions": [
+        {
+          "path": "i18n/audits/evidence/zh-CN/tui.session_move/c1r2/record.json",
+          "sha256": "34700dbabf9e85f590f63688a0fa3d1deb2d43d8366cb05d93e512eef68e2c70"
+        },
+        {
+          "path": "i18n/audits/evidence/zh-CN/tui.session_move/c1r2/report.md",
+          "sha256": "f4871100e8a9836593daa01617598559cff012fe5baca79c0a4118ddd87d915b"
+        },
+        {
+          "path": "i18n/audits/evidence/zh-CN/tui.session_move/c1r2/round1-B-report.md",
+          "sha256": "cb7e62d60767cd1ea27d67e00f3070f691ae0dc02c208444f7568fbcbf00213f"
+        },
+        {
+          "path": "i18n/audits/evidence/zh-CN/tui.session_move/c1r2/verify.log",
+          "sha256": "5a16ebabfdbe724bba4dddc1153ed7efe80d35b0a62462cee8bb9f197455496c"
+        }
+      ]
+    }
+  ]
+}

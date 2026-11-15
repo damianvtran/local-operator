@@ -338,6 +338,33 @@ FLAVOR_TEAM = "team"
 FLAVOR_ADHOC = "adhoc"
 _FLAVORS = (FLAVOR_TEAM, FLAVOR_ADHOC)
 
+#: THE ONE DEVELOPER ID ANY LOCAL OPERATOR CODE MAY BE SIGNED WITH. The Apple
+#: developer account was converted from an individual to the Radient Inc.
+#: organization; the TEAM ID did not change (SHA2U6KT7V), only the leaf
+#: certificate's name did. That is exactly why a team-id check alone is not a
+#: policy: a binary signed by the retired individual certificate passes it. And
+#: the leaf NAME is user-visible — Background Task Management keys its developer
+#: group, and its "Software from "<name>" can run in the background" banner, on
+#: that string (measured 2026-11-14: the individually signed runtime image raised
+#: a group under the individual developer's personal name). So both the team
+#: and the organization leaf are pinned, here, for every reader: the CI-signed
+#: launcher check in
+#: :func:`local_operator.update.daemon_program` and the local team-signing opt-in
+#: below. A fork with its own organization changes these two values.
+SIGNING_TEAM_ID = "SHA2U6KT7V"
+SIGNING_AUTHORITY_ORG = "Radient Inc."
+SIGNING_AUTHORITY = f"Developer ID Application: {SIGNING_AUTHORITY_ORG} ({SIGNING_TEAM_ID})"
+
+
+def signing_authority_allowed(authority: object) -> bool:
+    """Is ``authority`` (a leaf ``Authority=``/identity name) the organization's?
+
+    Exact match, not a prefix: ``"Developer ID Application: Radient Inc. Evil
+    (SHA2U6KT7V)"`` is some other certificate, and a ``startswith`` would take it.
+    """
+    return isinstance(authority, str) and authority.strip() == SIGNING_AUTHORITY
+
+
 #: ``p_comm`` holds 31 characters. ``ps -o ucomm`` truncates at 16, so a label
 #: must already be distinguishable within its first 16 characters. Both limits
 #: only bind the BINARY NAME (``BRAND``, 14 chars — fine); the argv labels below
@@ -892,6 +919,33 @@ def _build_key(real: Path) -> str:
     return f"{real.parent.parent.name}-{hashlib.sha256(material.encode()).hexdigest()[:10]}"
 
 
+#: Written into a team tree by :func:`publish_team_runtime_result` once the
+#: signature's leaf authority has been read back and found to be
+#: :data:`SIGNING_AUTHORITY`. A team tree WITHOUT it predates the organization
+#: rule — on the operator's Mac, one signed by the retired individual
+#: certificate — and is never selected again; normal pruning reclaims it.
+_TEAM_SIGNER_MARKER = "signer"
+
+
+def _team_image(root: Path, key: str, real: Path) -> Path | None:
+    """The team image for ``key`` when it is healthy AND organization-signed, else ``None``.
+
+    The marker read is the only cost added to the session path, and it is paid
+    only where a team tree exists at all (absent on almost every host).
+    """
+    tree = _flavor_dir(root, key, FLAVOR_TEAM)
+    if not os.path.lexists(tree):
+        return None
+    try:
+        signer = (tree / _TEAM_SIGNER_MARKER).read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    if not signing_authority_allowed(signer):
+        return None
+    image = _bundle_image(root, key, FLAVOR_TEAM)
+    return image if _healthy_image(image, real) else None
+
+
 def runtime_image(real: Path) -> Path | None:
     """The image a venv link for ``real`` SHOULD name, whether or not it is planted.
 
@@ -914,8 +968,8 @@ def runtime_image(real: Path) -> Path | None:
     if root is None:
         return None
     key = _build_key(real)
-    team = _bundle_image(root, key, FLAVOR_TEAM)
-    if os.path.lexists(_flavor_dir(root, key, FLAVOR_TEAM)) and _healthy_image(team, real):
+    team = _team_image(root, key, real)
+    if team is not None:
         return team
     adhoc = _bundle_image(root, key, FLAVOR_ADHOC)
     if _healthy_image(adhoc, real):
@@ -1499,8 +1553,8 @@ def _plant_runtime(real: Path, root: Path | None) -> Path | None:
         if root is None:
             return None
         key = _build_key(real)
-        team = _bundle_image(root, key, FLAVOR_TEAM)
-        if os.path.lexists(_flavor_dir(root, key, FLAVOR_TEAM)) and _healthy_image(team, real):
+        team = _team_image(root, key, real)
+        if team is not None:
             # Published by ``publish_team_runtime`` after the operator opted in;
             # it shares the app's row, so it outranks anything planted here.
             return team
@@ -1876,13 +1930,59 @@ def read_signing_optin() -> dict[str, object] | None:
         return None
     if not isinstance(team, str) or not re.fullmatch(r"[A-Z0-9]{10}", team):
         return None
+    # THE ORGANIZATION RULE (see :data:`SIGNING_AUTHORITY`): a record whose
+    # identity is not the Radient Inc. leaf — including every record written
+    # before the name was recorded, such as one naming the retired individual
+    # certificate — is no opt-in at all, so runtimes fall back to ad-hoc.
+    # :func:`signing_optin_refusal` says why, for the callers that report it.
+    if not signing_authority_allowed(record.get("name")):
+        return None
     return record
 
 
-def write_signing_optin(identity: str, team: str, *, always_allow_confirmed: bool) -> Path:
-    """Record the opt-in. Called ONLY by ``lop permissions setup``; raises on failure."""
+def signing_optin_refusal() -> str | None:
+    """``"identity-not-allowed"`` when a recorded opt-in names a non-organization identity.
+
+    ``None`` when there is no record or the record is acceptable. A separate
+    question from :func:`read_signing_optin` so ``lop update`` and
+    ``lop permissions setup`` can say "your recorded identity is refused" instead
+    of the misleading "not opted in".
+    """
     import json
 
+    path = _optin_path()
+    if path is None:
+        return None
+    try:
+        record = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(record, dict) or signing_authority_allowed(record.get("name")):
+        return None
+    return "identity-not-allowed"
+
+
+class SigningIdentityRefused(ValueError):
+    """An opt-in naming an identity other than :data:`SIGNING_AUTHORITY`."""
+
+
+def write_signing_optin(
+    identity: str, team: str, *, always_allow_confirmed: bool, name: str = ""
+) -> Path:
+    """Record the opt-in. Called ONLY by ``lop permissions setup``; raises on failure.
+
+    ``name`` is the identity's certificate name as ``security find-identity``
+    lists it, and it must be the organization's (:data:`SIGNING_AUTHORITY`):
+    raises :class:`SigningIdentityRefused` otherwise, before anything is written,
+    so an individual Developer ID can never become the runtime's signer.
+    """
+    import json
+
+    if not signing_authority_allowed(name):
+        raise SigningIdentityRefused(
+            f"refusing to record signing identity {name!r}: only "
+            f"{SIGNING_AUTHORITY!r} may sign Local Operator code"
+        )
     path = _optin_path()
     if path is None:
         raise OSError("no passwd home")
@@ -1890,6 +1990,7 @@ def write_signing_optin(identity: str, team: str, *, always_allow_confirmed: boo
     payload = {
         "identity": identity.upper(),
         "team": team,
+        "name": name,
         "always_allow_confirmed": bool(always_allow_confirmed),
     }
     path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
@@ -2037,6 +2138,14 @@ def publish_team_runtime_result(
             return TeamPublish(None, reason=f"refused:{refusal}")
         record = read_signing_optin()
         if record is None:
+            refused = signing_optin_refusal()
+            if refused is not None:
+                logger.warning(
+                    "the recorded runtime-signing identity is not %s; runtimes stay ad-hoc. "
+                    "Re-run `lop permissions setup` with the organization identity.",
+                    SIGNING_AUTHORITY,
+                )
+                return TeamPublish(None, reason=refused)
             return TeamPublish(None, reason="not-opted-in")
         if not interactive and not record.get("always_allow_confirmed"):
             if not allow_prompt:
@@ -2052,8 +2161,19 @@ def publish_team_runtime_result(
             return TeamPublish(None, reason="unsupported-interpreter")
         key = _build_key(real)
         image = _bundle_image(root, key, FLAVOR_TEAM)
-        if os.path.lexists(_flavor_dir(root, key, FLAVOR_TEAM)) and _healthy_image(image, real):
-            return TeamPublish(image)
+        existing = _team_image(root, key, real)
+        if existing is not None:
+            return TeamPublish(existing)
+        team_tree = _flavor_dir(root, key, FLAVOR_TEAM)
+        if os.path.lexists(team_tree):
+            # A team tree with no organization signer marker (signed before the
+            # rule, e.g. by the retired individual certificate). ``_publish_tree``
+            # would adopt it as "already published", so it leaves first — by
+            # rename into the plant-scratch namespace the sweep reclaims, never
+            # an in-place delete (see ``_replace_corrupt`` for why).
+            os.rename(
+                team_tree, root / f"{team_tree.name}.dead.{os.getpid()}.{_temp_thread_token()}"
+            )
         app = installed_app()
         if app is None:
             return TeamPublish(None, reason="app-missing")
@@ -2075,7 +2195,20 @@ def publish_team_runtime_result(
             ok, error = _codesign_run("--verify", "--strict", f"-R={requirement}", str(bundle))
             if not ok:
                 attempts.append(error)
-            return ok
+                return False
+            # Read back WHO signed, not who the record says: the identity is a
+            # SHA-1, and a keychain can hold a different certificate under it
+            # after a re-import. The marker is what makes the tree selectable
+            # (:func:`_team_image`).
+            authority = code_identity(bundle).get("Authority")
+            if not signing_authority_allowed(authority):
+                attempts.append(
+                    # i18n: ignore machine reason code plus codesign's own Authority string
+                    f"identity-not-allowed: signed by {authority!r}"
+                )
+                return False
+            (bundle.parent / _TEAM_SIGNER_MARKER).write_text(f"{authority}\n", encoding="utf-8")
+            return True
 
         published = _publish_tree(
             real,
@@ -2683,13 +2816,21 @@ def supervised_image() -> Path | None:
     by design — pointing the operator's plists at a pointer a worktree does not
     own would be worse than the naming it buys.
 
+    ON A MACOS WHEEL THE ANSWER IS THE CI-SIGNED LAUNCHER, not the shim
+    (:func:`local_operator.update.daemon_program`): it execs the shim with argv
+    unchanged, so the unit runs the same interpreter, but Background Task
+    Management attributes the login item to the launcher's Radient Inc.
+    signature ("Local Operator") instead of the shim's file name ("python3").
+    Everywhere else — Linux, Windows, a pure wheel, an unverifiable launcher — it
+    is the shim, exactly as before.
+
     Function-local import: ``update`` reaches ``urllib`` and ``subprocess``, and
     this module is on every process's startup path.
     """
     try:
         from local_operator import update
 
-        return update.daemon_image()
+        return update.daemon_program()
     except Exception:  # noqa: BLE001 — a name is decoration, and never a failure
         logger.debug("stable supervised image unavailable", exc_info=True)
         return None
@@ -2717,15 +2858,21 @@ def launchd_job(module: str, *args: str, label: str | None = None) -> dict[str, 
         ps -o ucomm=                -> Local Operator
         ps -o args=                 -> Local Operator [label probe] role=test -c …
 
-    TRADE-OFF, recorded because it cannot be measured on a developer machine
-    (``sfltool dumpbtm`` needs admin) and was decided rather than discovered:
-    macOS Background Task Management names a login item by the basename of
-    ``ProgramArguments[0]``. With this shape the notification and the Login
-    Items row therefore read the ROLE label — "Local Operator [mobile daemon]
-    port=4098" — instead of a bare "Local Operator". That is strictly more
-    informative and still unmistakably ours; what it is not is verified against
-    BTM's own output. The alternative (keep element 0 an image path) is the
-    status quo that cannot tell two daemons apart.
+    WHAT MACOS NAMES THE LOGIN ITEM BY — corrected 2026-11-14, by measurement.
+    This docstring used to claim Background Task Management (BTM) names a login
+    item by the basename of ``ProgramArguments[0]``. It does not: probes on
+    macOS 27.2 (an unsigned ``Program`` with a label at element 0) produced a BTM
+    item named after the basename of ``Program``, and the six daemons whose
+    element 0 read "Local Operator [wakes]" etc. all listed as "python3" — the
+    shim's file name. A Developer-ID-signed ``Program`` is named after its bundle
+    and grouped under the certificate's developer instead. So element 0 is the
+    PROCESS label (``ps -o args``) and nothing more, and the login-item name is
+    decided by ``Program``: on a macOS wheel that is the CI-signed launcher
+    (:func:`local_operator.update.daemon_program`), which reads "Local Operator"
+    under "Radient Inc." and, once that developer has been notified, adds items
+    silently. ``AssociatedBundleIdentifiers`` names the desktop app so System
+    Settings can group the items under it; launchd ignores it when the app is
+    absent or of another team.
 
     ``label`` is a RENDERED argv[0] (``branded_argv0(LABEL_MOBILE, port=…)``),
     not a template; ``None`` degrades to the bare brand. Falls back to exactly
@@ -2738,8 +2885,8 @@ def launchd_job(module: str, *args: str, label: str | None = None) -> dict[str, 
     :func:`supervised_image`: a unit is re-executed on every restart, including
     after the tree it was installed from has been pruned, so naming a path
     inside one venv is what launchd respawned processes into on 2026-09-15.
-    ``ProgramArguments[0]`` is unchanged, so the name macOS shows for the login
-    item is the same in both shapes.
+    That stable ``Program`` is the signed launcher when one is planted and
+    verified, else the shim (:func:`supervised_image`).
     """
     try:
         link = ensure_branded_interpreter()
@@ -2748,14 +2895,16 @@ def launchd_job(module: str, *args: str, label: str | None = None) -> dict[str, 
     # The generation layout WINS over the branded link when this machine has it:
     # see :func:`supervised_image` for the crash that makes a per-venv image path
     # unsafe for a unit launchd may restart after the tree is gone. The label
-    # still rides at ``ProgramArguments[0]``, which is what macOS's Background
-    # Task Management names the login item by — so the row a person reads is
-    # unchanged either way.
+    # rides at ``ProgramArguments[0]`` for ``ps``; the login-item name comes from
+    # ``Program`` (see the docstring).
     stable = supervised_image()
     if stable is not None:
         return {
             "Program": str(stable),
             "ProgramArguments": [branded_argv0(label) if label else BRAND, "-m", module, *args],
+            # Only on this generation-layout rung: the two fallbacks below are
+            # the pre-layout shapes pip/source installs shipped, kept byte-stable.
+            "AssociatedBundleIdentifiers": [APP_BUNDLE_ID],
         }
     if link is None:
         return {"ProgramArguments": launchd_program(module, *args)}
@@ -2772,9 +2921,10 @@ def launchd_program(module: str, *args: str, label: str | None = None) -> list[s
     this project used before it: element 0 is a real image path, because
     without a ``Program`` key launchd uses it as both the image and argv[0].
 
-    macOS's Background Task Management names a non-bundle login item by the
-    **basename of ``ProgramArguments[0]``** — not ``Label``, not the plist
-    filename, not ``CFBundleName``. The documented anti-pattern is exactly what
+    With no ``Program`` key, element 0 IS the program, so macOS's Background
+    Task Management names the login item after its basename (BTM keys on the
+    executed program, not ``Label`` or the plist filename — see
+    :func:`launchd_job` for the 2026-11-14 measurement). The documented anti-pattern is exactly what
     these plists used to do, ``[sys.executable, "-m", module]``, which is why
     installing a daemon raised "python3 is running in the background" and why
     System Settings > Login Items listed a bare ``python3``. Pointing element 0

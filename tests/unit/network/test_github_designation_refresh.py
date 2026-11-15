@@ -434,11 +434,11 @@ def _repos(count: int) -> list[str]:
     return [f"acme/repo-{index:03d}" for index in range(count)]
 
 
-@pytest.mark.parametrize("count", [65, 500])
+@pytest.mark.parametrize("count", [65, 500, 501, 2000])
 def test_a_long_designation_crosses_the_peer_boundary_whole(tmp_path: Path, count: int) -> None:
     """Mesh m2: a list over 64 was cut at the boundary and then failed its digest
-    forever. Up to the App mint maximum (500) it now arrives whole and applies,
-    and the settings validator accepts exactly that many."""
+    forever. Token/gh lists up to the shared 2000-entry limit arrive whole and
+    apply; the separate 500-entry App mint limit must not truncate this boundary."""
     from local_operator.settings_io import _validate_github_repositories
 
     repositories = _repos(count)
@@ -453,20 +453,23 @@ def test_a_long_designation_crosses_the_peer_boundary_whole(tmp_path: Path, coun
 
 
 def test_a_designation_over_the_cap_is_refused_never_truncated(tmp_path: Path) -> None:
-    """Over 500: the validator refuses it where a person types it, and a
-    hand-edited owner list that the boundary cuts is REFUSED on the borrower with
-    a named reason — never applied as a partial list."""
+    """The merged 2000-entry cap rejects an oversized entry whole, never partly.
+
+    The settings seam refuses it before serving; a malformed peer grant loses
+    the entire list, so authoritative application refuses the unreadable field
+    and cannot overwrite the borrower's standing list with a truncated prefix.
+    """
     from local_operator.settings_io import _validate_github_repositories
 
-    too_many = _repos(501)
-    with pytest.raises(ValueError, match="at most 500"):
+    too_many = _repos(2001)
+    with pytest.raises(ValueError, match="at most 2000"):
         _validate_github_repositories(too_many)
     narrowing = github_mod.grant_narrowing(too_many, generation_ms=7)
     carried = Grant.from_detail({"access_token": "t", "narrowing": narrowing}).narrowing
-    assert len(carried["repositories"]) == 500
+    assert "repositories" not in carried
     node = _node(tmp_path, [SCRATCH])
     outcome = _deliver(node, carried)
-    assert outcome["error"] == "too_many_entries" and outcome["changed"] is False
+    assert outcome["error"] == "unreadable" and outcome["changed"] is False
     assert github_mod.repositories_for(node) == (SCRATCH,)
 
 

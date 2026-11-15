@@ -1,0 +1,218 @@
+"""Round-2 (C1-a2) independent mechanical validation of the hi v2 candidate.
+
+Reads: keys.json (en source + context), hi.v2.json (audited candidate).
+Never writes into the audited material. Run with the repo venv python, from this dir.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import re
+import sys
+import unicodedata
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent
+WORKTREE = Path.home() / "local-operator" / ".worktrees" / "i18n-c1"
+sys.path.insert(0, str(WORKTREE))
+
+from local_operator.i18n import catalogues  # noqa: E402
+from local_operator.i18n import runtime as msg_runtime  # noqa: E402
+from rich.cells import cell_len  # noqa: E402
+
+KEYS = json.loads((HERE / "keys.json").read_text(encoding="utf-8")) if (HERE / "keys.json").exists() else None
+if KEYS is None:
+    KEYS = json.loads(
+        (Path.home() / ".local-operator/sessions/3ef6295a5545/scratchpad/c1-prep/keys.json").read_text(
+            encoding="utf-8"
+        )
+    )
+CAND = json.loads((HERE / "hi.v2.json").read_text(encoding="utf-8"))
+V1 = json.loads(
+    (Path.home() / ".local-operator/sessions/3ef6295a5545/scratchpad/c1-prep/hi.json").read_text(
+        encoding="utf-8"
+    )
+)
+
+problems: list[str] = []
+notes: list[str] = []
+
+
+def p(msg: str) -> None:
+    problems.append(msg)
+
+
+# ---------------------------------------------------------------- 1. structure
+if list(CAND) != list(KEYS):
+    p(f"key set/order differs: missing={set(KEYS)-set(CAND)} extra={set(CAND)-set(KEYS)} order_ok={list(CAND)==list(KEYS)}")
+notes.append(f"keys={len(CAND)} order_identical={list(CAND)==list(KEYS)}")
+for key, val in CAND.items():
+    if not isinstance(val, str) or not val.strip():
+        p(f"{key}: empty/non-string value")
+    if val != val.strip():
+        p(f"{key}: leading/trailing whitespace")
+    if "  " in val:
+        p(f"{key}: double space")
+    if re.search(r"[\u200b\u200e\u200f\u202a-\u202e\u2066-\u2069\u200c\u200d]", val):
+        p(f"{key}: bidi/ZWJ control present")
+    if re.search(r"[०-९]", val):
+        p(f"{key}: Devanagari digits")
+    if "!" in val:
+        p(f"{key}: exclamation mark")
+    if "कृपया" in val or re.search(r"\bतुम\b|\bतू\b", val):
+        p(f"{key}: forbidden register (कृपया/तुम/तू)")
+
+# ------------------------------------------------- 2. ICU parse + placeholders
+for key, src in ((k, v["en"]) for k, v in KEYS.items()):
+    tgt = CAND[key]
+    try:
+        want = msg_runtime.message_arguments(src)
+    except Exception as exc:  # pragma: no cover
+        p(f"en {key}: source parse failed: {exc}")
+        continue
+    try:
+        got = msg_runtime.message_arguments(tgt)
+    except Exception as exc:
+        p(f"{key}: target ICU parse failed: {exc}")
+        continue
+    if got != want:
+        p(f"{key}: placeholder sets differ: got={sorted(got)} want={sorted(want)}")
+    # render both through the hi locale to exercise formatting/plurals
+    params = {name: "X" for name, _ in want}
+    try:
+        msg_runtime.render_message(src, params, "hi")
+        rendered = msg_runtime.render_message(tgt, params, "hi")
+    except Exception as exc:
+        p(f"{key}: render failed: {exc}")
+    else:
+        notes.append(f"render {key}: {rendered}")
+
+icu = [k for k, v in CAND.items() if re.search(r"\{\s*\w+\s*,\s*(plural|select|selectordinal)", v)]
+notes.append(f"icu_plural_select_keys={icu or 'none'}")
+
+# ----------------------------------------------------- 3. literals preserved
+BACKTICK = re.compile(r"`([^`]*)`")
+for key, src in ((k, v["en"]) for k, v in KEYS.items()):
+    tgt = CAND[key]
+    a, b = BACKTICK.findall(src), BACKTICK.findall(tgt)
+    if a != b:
+        p(f"{key}: backticked spans differ: en={a} hi={b}")
+
+TOKENS = [
+    "/approvals auto",
+    "/move",
+    "--to",
+    "--keep",
+    "--queue",
+    "--drop-session-roles",
+    "--wait",
+]
+for key, src in ((k, v["en"]) for k, v in KEYS.items()):
+    tgt = CAND[key]
+    for tok in TOKENS:
+        if re.search(r"(?<![A-Za-z0-9_-])" + re.escape(tok) + r"(?![A-Za-z0-9_-])", src):
+            if not re.search(r"(?<![A-Za-z0-9_-])" + re.escape(tok) + r"(?![A-Za-z0-9_-])", tgt):
+                p(f"{key}: typed token {tok!r} missing from target")
+    # the literal accepted value `local` inside a bracket hint must survive Latin
+    for m in re.finditer(r"<[^<>]*>", src):
+        if "local" in m.group(0):
+            if not any("local" in frag for frag in re.findall(r"<[^<>]*>", tgt)):
+                p(f"{key}: bracket hint lost literal `local`: {m.group(0)!r}")
+
+PROVIDERS = ["radient", "openai", "deepseek", "anthropic", "openrouter"]
+for prov in PROVIDERS:
+    if prov not in CAND["cli.config.list_desc_hosting"]:
+        p(f"list_desc_hosting: provider id {prov} missing")
+
+# ---------------------------------------- 4. English left / stray Latin check
+latin_run = re.compile(r"[A-Za-z][A-Za-z0-9_./-]*")
+for key, src in ((k, v["en"]) for k, v in KEYS.items()):
+    tgt = CAND[key]
+    src_latin = set(latin_run.findall(src))
+    tgt_latin = set(latin_run.findall(tgt))
+    stray = {t for t in tgt_latin if t not in src_latin}
+    if stray:
+        p(f"{key}: Latin runs not in source: {sorted(stray)}")
+    if tgt.strip() == src.strip():
+        p(f"{key}: identical to English source")
+# English sentence remnants: an English function word outside kept literals
+EN_WORDS = re.compile(r"\b(the|and|is|are|not|with|from|this|cannot|Opened|Created)\b")
+for key, tgt in CAND.items():
+    stripped = re.sub(r"`[^`]*`", "", tgt)
+    stripped = re.sub(r"--[A-Za-z-]+", "", stripped)
+    hit = EN_WORDS.search(stripped)
+    if hit:
+        p(f"{key}: possible untranslated English word {hit.group(0)!r}")
+
+# -------------------------------------------------- 5. width (maxCells hints)
+title_cells = cell_len(CAND["cli.config.list_title"])
+notes.append(
+    f"cli.config.list_title cells={title_cells} en={cell_len(KEYS['cli.config.list_title']['en'])} (cap ~30)"
+)
+if title_cells > 30:
+    p(f"cli.config.list_title overflow: {title_cells} > 30 cells")
+widths = sorted(((cell_len(v), k) for k, v in CAND.items()), reverse=True)[:4]
+notes.append("widest: " + ", ".join(f"{k}={c}" for c, k in widths))
+
+# --------------------------------------- 6. repo catalogue checker on temp root
+catroot = HERE / "catroot"
+cli_keys = {k: v for k, v in CAND.items() if k.startswith("cli.config.")}
+mv_keys = {k: v for k, v in CAND.items() if k.startswith("tui.session_move.")}
+shipped_cli = json.loads((catroot / "en" / "cli.config.json").read_text(encoding="utf-8"))
+shipped_mv = json.loads((catroot / "en" / "tui.session_move.json").read_text(encoding="utf-8"))
+notes.append(f"en/cli.config keys={len(shipped_cli)} en/tui.session_move keys={len(shipped_mv)}")
+if set(shipped_cli) != set(cli_keys):
+    p(f"en cli.config key set != candidate group: {sorted(set(shipped_cli) ^ set(cli_keys))}")
+if set(shipped_mv) != set(mv_keys):
+    p(f"en tui.session_move key set != candidate group: {sorted(set(shipped_mv) ^ set(mv_keys))}")
+
+orig_root = catalogues.catalogue_root()
+try:
+    # control: untouched shipped trees (candidate NOT installed)
+    catalogues._CATALOGUES = catroot
+    control = [x for x in __import__("scripts.i18n.check", fromlist=["check_catalogues"]).check_catalogues()]
+finally:
+    catalogues._CATALOGUES = orig_root
+notes.append(f"control check_catalogues problems={len(control)}")
+for c in control[:10]:
+    notes.append("control-problem: " + c)
+
+# candidate installed into the temp tree
+(catroot / "hi" / "cli.config.json").write_text(
+    json.dumps(dict(sorted(cli_keys.items())), ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+)
+(catroot / "hi" / "tui.session_move.json").write_text(
+    json.dumps(dict(sorted(mv_keys.items())), ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+)
+try:
+    catalogues._CATALOGUES = catroot
+    import scripts.i18n.check as checker
+
+    cand_problems = checker.check_catalogues()
+finally:
+    catalogues._CATALOGUES = orig_root
+    for name in ("cli.config.json", "tui.session_move.json"):
+        (catroot / "hi" / name).unlink(missing_ok=True)
+notes.append(f"candidate check_catalogues problems={len(cand_problems)}")
+for c in cand_problems[:20]:
+    notes.append("candidate-problem: " + c)
+
+# ---------------------------------------------------------------- 7. summary
+digest = {
+    "candidate_sha256": hashlib.sha256((HERE / "hi.v2.json").read_bytes()).hexdigest(),
+    "keys_json_sha256": hashlib.sha256((HERE / "keys.json").read_bytes()).hexdigest()
+    if (HERE / "keys.json").exists()
+    else "n/a",
+}
+print("=== NOTES ===")
+for n in notes:
+    print(" -", n)
+print("=== PROBLEMS ===")
+if not problems:
+    print("none")
+for x in problems:
+    print(" !", x)
+print("=== DIGEST ===")
+print(json.dumps(digest, indent=1))
+raise SystemExit(1 if problems else 0)

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+import time
 from types import SimpleNamespace
 from typing import Any, cast
 
@@ -59,6 +60,10 @@ def _provider(post: Any = None) -> AwsProvider:
         http_get=lambda _url, _timeout: 200,
         http_post_json=post or execute,
     )
+    # ``AwsProvider.__init__`` wires the budget clock and sleep; ``run_command``
+    # reads the clock to bound its lost-reply probe window.
+    provider._monotonic = time.monotonic
+    provider._sleep = time.sleep
     return provider
 
 
