@@ -29,12 +29,15 @@ session, the operator's registry or the operator's ledger.
 
 from __future__ import annotations
 
+import errno
 import os
+import re
 import signal
 import subprocess
 import time
 from collections.abc import Iterator
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -58,6 +61,31 @@ repo = field.repo
 #: The real implementation, captured before the shared ``home`` fixture swaps
 #: it for ``lambda _: False`` (that fixture keeps its synthetic trees idle).
 _REAL_LIVE_CWD_INSIDE = prov._live_cwd_inside
+#: Likewise for the inventory itself, which that fixture stubs to ``()``.
+_REAL_CWD_ENTRIES = prov._cwd_entries
+_REAL_READLINK = os.readlink
+_PROC_CWD = re.compile(r"/proc/\d+/cwd")
+
+
+def _readlink_skipping_unrelated_eacces(path: Any, *args: Any, **kwargs: Any) -> Any:
+    """``os.readlink``, with an EACCES on a ``/proc/<pid>/cwd`` read as "gone".
+
+    WHY (train t6, run 43665122262): GitHub's Linux runner has a same-uid
+    process whose ``cwd`` link this uid may not read (ptrace-read denied, e.g.
+    a process holding capabilities), so the REAL inventory fails closed on
+    every scan and no holder here is ever seen. These tests are about
+    attributing the ``sleep`` processes they spawn (same uid, readable), not
+    about that host process, so it is treated as vanished. The fail-closed
+    EACCES behaviour itself stays pinned by
+    ``test_unreadable_inventory_is_busy_unknown_and_named``'s stub.
+    """
+    try:
+        return _REAL_READLINK(path, *args, **kwargs)
+    except PermissionError:
+        if isinstance(path, str) and _PROC_CWD.fullmatch(path):
+            raise FileNotFoundError(errno.ENOENT, "unrelated unreadable cwd", path) from None
+        raise
+
 
 FIELD = [
     "cd ~/local-operator && git worktree remove --force .worktrees/attr3880-ci",
@@ -69,6 +97,8 @@ FIELD = [
 def live(monkeypatch: pytest.MonkeyPatch, home: Path) -> Iterator[list[int]]:
     """Real cwd inventory, fresh cache; every pid appended here is killed after."""
     monkeypatch.setattr(prov, "_live_cwd_inside", _REAL_LIVE_CWD_INSIDE)
+    monkeypatch.setattr(prov, "_cwd_entries", _REAL_CWD_ENTRIES)
+    monkeypatch.setattr(prov.os, "readlink", _readlink_skipping_unrelated_eacces)
     monkeypatch.setattr(prov, "_cwd_inventory_cache", None)
     pids: list[int] = []
     yield pids
