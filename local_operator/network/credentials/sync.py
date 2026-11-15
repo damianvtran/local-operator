@@ -1642,6 +1642,8 @@ class SyncEngine:
         have ended the copy on the member. The receipt carries which flavour
         this was; the ledger deliberately does not guess.
         """
+        from local_operator.network.credentials import placement as placement_mod
+
         document = self._placement()
         if document is None or not device_id:
             return {"copies": 0, "wiped": 0, "timed_out": 0, "unacknowledged": 0}
@@ -1652,30 +1654,30 @@ class SyncEngine:
         # Build the whole list AND its local identities in one transaction. A
         # dial or an earlier send may race a re-copy; neither may rebind a wipe
         # already planned. Legacy identities are durable before any frame leaves.
-        ledger_loaded = False
-        try:
-            with mutate(network_id, self._root) as state:
-                ledger_loaded = True
-                open_rows = state.open_copies(device_id)
-                unacknowledged = sum(1 for row in open_rows if row["unacknowledged"])
-                pending: list[dict[str, Any]] = [
-                    {
-                        "key": row["key"],
-                        "gen": row["gen"],
-                        "digest": row["digest"],
-                        "value_state": VALUE_STATE_ABSENT,
-                    }
-                    for row in open_rows
-                ]
-                for item in pending[:ANNOUNCE_CAP]:
-                    key = str(item["key"])
-                    endings[key] = state.prepare_ending(device_id, key)
-        except Exception:  # noqa: BLE001 — preserve the unreadable-ledger early receipt only
-            if ledger_loaded:
-                # Planning/persistence failures are not evidence of zero copies.
-                # Keep their original propagation; an unbound ending cannot leave.
-                raise
-            return {"copies": 0, "wiped": 0, "timed_out": 0, "unacknowledged": 0}
+        # Use mutate's exact lock/load/save transaction, but catch only the
+        # load itself. A lock/setup refusal is not an unreadable ledger: zero
+        # would let member removal strand copies without their final ending.
+        root = placement_mod._config_root(self._root)
+        with _sync_lock(sync_path(network_id, root), root=root):
+            try:
+                state = SyncState.load(network_id, root=root)
+            except Exception:  # noqa: BLE001 — only the unreadable-ledger early receipt
+                return {"copies": 0, "wiped": 0, "timed_out": 0, "unacknowledged": 0}
+            open_rows = state.open_copies(device_id)
+            unacknowledged = sum(1 for row in open_rows if row["unacknowledged"])
+            pending: list[dict[str, Any]] = [
+                {
+                    "key": row["key"],
+                    "gen": row["gen"],
+                    "digest": row["digest"],
+                    "value_state": VALUE_STATE_ABSENT,
+                }
+                for row in open_rows
+            ]
+            for item in pending[:ANNOUNCE_CAP]:
+                key = str(item["key"])
+                endings[key] = state.prepare_ending(device_id, key)
+            state.save()
         if not pending:
             return {"copies": 0, "wiped": 0, "timed_out": 0, "unacknowledged": 0}
         link, _reason = self._server._ensure_link_with_reason(  # noqa: SLF001 — the one dial seam

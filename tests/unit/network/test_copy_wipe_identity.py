@@ -421,3 +421,46 @@ def test_failed_legacy_identity_persistence_is_not_reported_as_zero_copies(
         with pytest.raises(OSError, match="synthetic identity persistence failure"):
             mesh.engine_a.deliver_removal_endings(mesh.member)
     assert sync.SyncState.load(mesh.network_id, mesh.a.root).open_copies(mesh.member)
+
+
+@pytest.mark.parametrize("failure", ["busy", "setup"])
+def test_removal_lock_failure_is_not_reported_as_zero_copies(
+    secret_mesh: Any, monkeypatch: pytest.MonkeyPatch, failure: str  # noqa: F811
+) -> None:
+    from local_operator.network.credentials import placement
+    from local_operator.network.types import MeshRefusal
+
+    mesh = secret_mesh
+    _deliver_without_ack(mesh, monkeypatch)
+    assert net.wait_for(lambda: mesh.member not in mesh.engine_a._inflight_members)
+    monkeypatch.setattr(mesh.engine_a, "enqueue_owner_exchange", lambda device: "scheduled")
+    state = sync.SyncState.load(mesh.network_id, mesh.a.root)
+    assert state.open_copies(mesh.member)
+    before = state.path.read_bytes()
+    refusal = (
+        MeshRefusal("busy", "synthetic sync ledger lock busy")
+        if failure == "busy"
+        else OSError("synthetic sync ledger lock setup failure")
+    )
+
+    def cannot_lock(*args: Any, **kwargs: Any) -> Any:
+        raise refusal
+
+    def no_load(*args: Any, **kwargs: Any) -> Any:
+        pytest.fail("the ledger must not be read without acquiring its lock")
+
+    def no_dial(*args: Any, **kwargs: Any) -> Any:
+        pytest.fail("a failed planning lock must not send an ending")
+
+    # A lock refusal is not an unreadable ledger: returning zero here lets the
+    # caller remove membership and lose the last opportunity to wipe this copy.
+    with monkeypatch.context() as patch:
+        patch.setattr(placement, "_cross_process_lock", cannot_lock)
+        patch.setattr(sync.SyncState, "load", no_load)
+        patch.setattr(mesh.a, "_ensure_link_with_reason", no_dial)
+        with pytest.raises(type(refusal)) as caught:
+            mesh.engine_a.deliver_removal_endings(mesh.member)
+        assert caught.value is refusal
+    assert state.path.read_bytes() == before
+    assert _member_has(mesh.b.root, SECRET_NAME)
+    assert sync.SyncState.load(mesh.network_id, mesh.a.root).open_copies(mesh.member)
