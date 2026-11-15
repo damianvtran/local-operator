@@ -1,5 +1,20 @@
 # Source-only build recipes — DRAFT, execution blocked
 
+## Mandatory source-generation gate — no old-default build admission
+
+Before ANY sequence below, run the exact independently reviewed standalone
+source-generation command in `GENERATION-VALIDATION-v2.md`, explicitly selecting
+`generation-overlay-v2.json` AND its review-supplied SHA256. Receipt presence,
+an old Git HEAD, or suppressing the historical verifier's failures is not a
+substitute. Actual lifecycle/resolver/container/legacy-runner preflights now
+revalidate current bytes, not a cached `verified` flag. Gate success is ONLY a
+source proof, not a build/runtime grant. Current native6h budget is exhausted:
+operator extension ask a-d2d2 AND resource ask a-9509/relay a-1ca7, independent
+manifest review and NEW desk GO remain mandatory. No commands here were built,
+installed or executed; candidate execution stays fail-closed. Previous command
+examples without explicit generation arguments are historical/ineligible.
+
+
 These recipes describe a **new LOCAL-only** qualification environment. Retain
 ONE benchmark task image at a time; obtain disk-desk >=30 GiB free admission and
 memory GO before heavy work. The PLAN's serial working-set assumptions, not the

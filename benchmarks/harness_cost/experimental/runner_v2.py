@@ -2318,8 +2318,19 @@ def main() -> None:
     mode.add_argument("--config-only", action="store_true")
     mode.add_argument("--preflight-only", action="store_true")
     mode.add_argument("--execute", action="store_true")
+    mode.add_argument("--verify-source", action="store_true")
+    parser.add_argument("--source-generation", type=Path)
+    parser.add_argument("--source-generation-sha256")
     mode.add_argument("--augment-public", type=Path)
     args = parser.parse_args()
+    # A standalone public kit has no Git checkout to consult. Select the exact
+    # reviewed source generation before configuration writes or account checks.
+    import runpy
+    gate=runpy.run_path(str(Path(__file__).resolve().parents[1]/'source_generation.py'))
+    source=gate['validate_selection'](args.source_generation,args.source_generation_sha256)
+    if args.verify_source:
+        print(json.dumps(source,sort_keys=True));return
+    if args.execute:gate['require_execution_authority']()
     if args.augment_public:
         augment_public_home(args.augment_public.resolve())
         print(json.dumps({"public_hook": "verified"}))

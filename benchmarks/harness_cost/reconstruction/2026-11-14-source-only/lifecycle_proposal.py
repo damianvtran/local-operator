@@ -349,6 +349,10 @@ class NativeOps:
     def desktop_records(self, rows):
         return [p for p in rows if p['exe'].startswith(self.app_root) or Path(p['exe']).name in {'Docker Desktop','com.docker.backend'}]
     def preflight(self):
+        import runpy
+        gate=runpy.run_path(str(HERE.parents[1]/'source_generation.py'))
+        self.source_generation=gate['validate_selection'](self.a.get('_source_generation'),self.a.get('_source_generation_sha256'))
+        gate['require_execution_authority']()
         validated_registered_root(str(self.root))  # Reject bad roots before any startup/work.
         self.admission_path=validated_admission_path(self.a['_admission_path'],self.root,self.a['attempt_id'])
         require(self.p.get('r15_topology_admission',{}).get('ready') is True and self.p.get('launch_authority')==SESSION_KIND,'R15 actual ancestor/sibling topology remains unproven without reviewed created-session authority')
@@ -361,9 +365,8 @@ class NativeOps:
         require(begin <= now and now+datetime.timedelta(seconds=960) <= end and now <= datetime.datetime.fromisoformat(self.a['valid_until_utc']),'no fresh explicit slot/lease')
         require(self.a.get('fresh_memory_go') is True and 0 <= self.a['fleet_mb'] <= 26000,'fleet/memory HOLD')
         require(self.a.get('exclusive_desktop_lease') is True,'exclusive Desktop lease not granted')
-        review=self.a['full_scope_review'];head=self.command(['git','-C',str(HERE),'rev-parse','HEAD'])[1].strip()
-        require(not self.command(['git','-C',str(HERE),'status','--porcelain'])[1].strip(),'dirty source cannot be admitted under an old reviewed head')
-        require(review.get('clean') is True and review.get('source_commit')==head and review['reviewer']!='70ba7562e541','full-scope clean independent current-head review missing')
+        review=self.a['full_scope_review']
+        require(review.get('clean') is True and review.get('source_generation_sha256')==self.source_generation['overlay_sha256'] and review['reviewer']!='70ba7562e541','full-scope clean independent source-generation review missing')
         for name in ('lifecycle_proposal.py','RESOLVER-COMMAND.md','resolver-pins.json','launch_services_broker.py','owned_session_launch.py','darwin_process_identity.py'):
             require(review.get('file_sha256',{}).get(name)==hashlib.sha256((HERE/name).read_bytes()).hexdigest(),'reviewed file hash mismatch')
         self.desktop_layout=validate_desktop_layout(self.desktop,self.command)
@@ -890,7 +893,7 @@ class NativeOps:
         require(not self.command(self.d+['ps','-q'])[1].strip(),'foreign running containers; resolver forbidden')
         code=(HERE/'RESOLVER-COMMAND.md').read_text().split('```python\n',1)[1].split('\n```',1)[0]
         path=self.directory/'resolver-supervisor.py';path.write_text(code)
-        env=dict(anonymous_cli_environment(self.directory),BENCH_REGISTERED_ROOT=str(registered),BENCH_ADMISSION_PATH=str(self.admission_path),BENCH_LIFECYCLE_DIR=str(self.directory),PYTHONPATH=str(HERE))
+        env=dict(anonymous_cli_environment(self.directory),BENCH_REGISTERED_ROOT=str(registered),BENCH_ADMISSION_PATH=str(self.admission_path),BENCH_LIFECYCLE_DIR=str(self.directory),PYTHONPATH=str(HERE),BENCH_SOURCE_GENERATION=str(self.a['_source_generation']),BENCH_SOURCE_GENERATION_SHA256=self.a['_source_generation_sha256'])
         blocked={signal.SIGTERM,signal.SIGINT};mask=signal.pthread_sigmask(signal.SIG_BLOCK,blocked)
         try:
             self.resolver=subprocess.Popen([sys.executable,'-B',str(path)],cwd=HERE,env=env,stdin=subprocess.DEVNULL,start_new_session=True,
@@ -1003,7 +1006,9 @@ class NativeOps:
         if self.ownership_journal_errors:value['status']='cleanup-unverified'
         fs=os.statvfs(self.root)
         if self.startup_uncertain:value['status']='cleanup-unverified-startup-identity'
-        value.update(operator_ack_quote=ACK_QUOTE,source_head=self.a['full_scope_review']['source_commit'],samples=self.samples,after={'allocated_bytes':self.raw.stat().st_blocks*512 if self.raw.exists() else 0,'free_bytes':fs.f_bavail*fs.f_frsize})
+        # Standalone source identity is the validated overlay, not a Git label.
+        source=getattr(self,'source_generation',None)
+        value.update(operator_ack_quote=ACK_QUOTE,source_head='generation:'+source['overlay_sha256'] if source else 'UNVERIFIED-source-generation',source_generation=source,review_source_commit=self.a['full_scope_review'].get('source_commit'),samples=self.samples,after={'allocated_bytes':self.raw.stat().st_blocks*512 if self.raw.exists() else 0,'free_bytes':fs.f_bavail*fs.f_frsize})
         breached=value['after']['allocated_bytes']-self.baseline>5*1024**3 or value['after']['free_bytes']<25*1024**3
         if breached:value['status']='disk-fence-failed-after-cleanup'
         with (self.directory/'receipt.json').open('x') as out:out.write(json.dumps(value,sort_keys=True,indent=2)+'\n')
@@ -1017,13 +1022,25 @@ def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--execute',action='store_true')
     parser.add_argument('--admission',type=Path)
+    parser.add_argument('--verify-source',action='store_true')
+    parser.add_argument('--source-generation',type=Path)
+    parser.add_argument('--source-generation-sha256')
     args=parser.parse_args()
+    if args.verify_source or args.execute:
+        import runpy
+        gate=runpy.run_path(str(HERE.parents[1]/'source_generation.py'))
+        verified=gate['validate_selection'](args.source_generation,args.source_generation_sha256)
+        require(not (args.verify_source and args.execute),'source-only verification cannot execute')
+        if args.verify_source:
+            print(json.dumps(verified,sort_keys=True));return
+        gate['require_execution_authority']()
     if not args.execute:
         print('PROPOSAL ONLY: no fresh slot/full-scope approval; no execution');return
     require(args.admission is not None,'explicit desk admission path required')
     root=validated_registered_root(str(Path.home()/'benchmark-runs/reconstruction-20261114-source-v1'))
     path=validated_admission_path(str(args.admission),root,args.admission.stem)
     admission=json.loads(path.read_text());require(admission.get('attempt_id')==path.stem,'admission namespace mismatch')
+    admission['_source_generation']=str(args.source_generation);admission['_source_generation_sha256']=args.source_generation_sha256
     admission['_admission_path']=str(path);pins=json.loads((HERE/'resolver-pins.json').read_text())
     def terminate(signum,frame):raise KeyboardInterrupt('termination requested')
     previous={s:signal.getsignal(s) for s in (signal.SIGTERM,signal.SIGINT,signal.SIGALRM)}

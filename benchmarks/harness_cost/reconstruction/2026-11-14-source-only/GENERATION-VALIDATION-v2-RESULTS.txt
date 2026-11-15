@@ -1,0 +1,30 @@
+SOURCE-ONLY targeted gate tests; no native/account/network/build execution.
+
+test_actual_driver_preflight_rejects_receipt_before_legacy_dispatch (test_source_generation.GenerationTests.test_actual_driver_preflight_rejects_receipt_before_legacy_dispatch) ... ok
+test_actual_extracted_supervisor_rejects_missing_gate_before_socket_or_commands (test_source_generation.GenerationTests.test_actual_extracted_supervisor_rejects_missing_gate_before_socket_or_commands) ... ok
+test_actual_extracted_supervisor_valid_source_still_stops_before_runtime (test_source_generation.GenerationTests.test_actual_extracted_supervisor_valid_source_still_stops_before_runtime) ... ok
+test_actual_native_preflight_ignores_forged_receipt_and_keeps_budget_hold (test_source_generation.GenerationTests.test_actual_native_preflight_ignores_forged_receipt_and_keeps_budget_hold) ... ok
+test_duplicate_json_and_unlisted_overlay_delta_reject (test_source_generation.GenerationTests.test_duplicate_json_and_unlisted_overlay_delta_reject) ... ok
+test_exact_standalone_source_without_git (test_source_generation.GenerationTests.test_exact_standalone_source_without_git) ... ok
+test_missing_file_unknown_inventory_or_derived_manifest_reject (test_source_generation.GenerationTests.test_missing_file_unknown_inventory_or_derived_manifest_reject) ... ok
+test_missing_unknown_selection_and_receipt_boolean_cannot_admit (test_source_generation.GenerationTests.test_missing_unknown_selection_and_receipt_boolean_cannot_admit) ... ok
+test_native_execute_is_stopped_by_exhausted_budget_before_admission (test_source_generation.GenerationTests.test_native_execute_is_stopped_by_exhausted_budget_before_admission) ... ok
+test_new_meter_new_tests_runtime_and_historical_tamper_reject (test_source_generation.GenerationTests.test_new_meter_new_tests_runtime_and_historical_tamper_reject) ... ok
+test_overlay_record_digest_unknown_version_generation_and_wrong_base_reject (test_source_generation.GenerationTests.test_overlay_record_digest_unknown_version_generation_and_wrong_base_reject) ... ok
+test_real_verify_only_clis_and_default_missing_selection (test_source_generation.GenerationTests.test_real_verify_only_clis_and_default_missing_selection) ... ok
+test_resealed_unrelated_runtime_and_restricted_source_still_reject (test_source_generation.GenerationTests.test_resealed_unrelated_runtime_and_restricted_source_still_reject) ... ok
+test_resealed_wiring_change_is_not_a_new_admission (test_source_generation.GenerationTests.test_resealed_wiring_change_is_not_a_new_admission) ... ok
+
+----------------------------------------------------------------------
+Ran 14 tests in 6.444s
+
+OK
+
+Historical verifier ACTUAL result: exit1 (not green)
+{"classified_public_fixtures": [{"classification": "exact-public-FAKE-canary-source", "path": "payloads/sanitize-git-repo/tests/test_outputs.py", "rules": ["aws-access-id", "github-token", "huggingface-token"]}], "errors": ["historical source changed: experimental/coding/driver.py", "historical source changed: experimental/coding/../meter_proxy.py", "historical source changed: experimental/coding/driver.py"], "file_statuses": {"exact_match": 381, "not_downloaded_non_source": 26}, "historical_checks": 37, "kind": "static-source-verification", "metadata_receipt_rows_checked": 86, "privacy_pattern_hits": [], "runtime_qualified": false}
+
+Frozen reviewed meter/test byte proof:
+experimental/meter_proxy.py 23ee793b1c8a4ed71cba1a677bced86f7017899979e787f744ba4619f7270376 UNCHANGED
+experimental/test_meter_privacy.py 972bad24e91a73e68fc3d0656699965b6b7818dc7afa6a91c16538df2b4bebcc UNCHANGED
+
+Privacy QA: zero introduced credential/PII-shape content matches. Broad publication-regex false positives classified by exact enclosing immutable baseline paths / unchanged reviewed status line: {"immutable_metadata_filename": 12, "unchanged_reviewed_status_label": 1}. These are sk- embedded inside disk-/task- identifiers, not new secret content; matching strings are not emitted. Historical verifier privacy indicators remain empty.

@@ -576,6 +576,10 @@ def container_plan(run_id, harness, image, *, meter_port, bridge_port, edge=None
 
 def preflight(args):
     """Fail closed before credentials, artifact reads or dispatch side effects."""
+    import runpy
+    gate=runpy.run_path(str(HERE.parents[1]/'source_generation.py'))
+    gate['validate_selection'](getattr(args,'source_generation',None),getattr(args,'source_generation_sha256',None))
+    if getattr(args,'execute',False):gate['require_execution_authority']()
     block_paid_coding(args)
     for value in (
         args.total_budget_usd,
@@ -1332,7 +1336,7 @@ def parser():
         "toolwire-attestation",
         "oracle-attestation",
     ):
-        ap.add_argument("--" + name, type=Path, required=True)
+        ap.add_argument("--" + name, type=Path, required="--verify-source" not in sys.argv[1:])
     for name in (
         "preregistration-sha256",
         "runtime-sha256",
@@ -1345,12 +1349,12 @@ def parser():
         "meter-url",
         "translator-url",
     ):
-        ap.add_argument("--" + name, required=True)
+        ap.add_argument("--" + name, required="--verify-source" not in sys.argv[1:])
     for name in ("total-budget-usd", "trial-budget-usd", "input-usd-per-m", "output-usd-per-m"):
-        ap.add_argument("--" + name, type=float, required=True)
-    ap.add_argument("--rep", type=int, required=True)
+        ap.add_argument("--" + name, type=float, required="--verify-source" not in sys.argv[1:])
+    ap.add_argument("--rep", type=int, required="--verify-source" not in sys.argv[1:])
     ap.add_argument(
-        "--meter-current-run-file", type=Path, required=True,
+        "--meter-current-run-file", type=Path, required="--verify-source" not in sys.argv[1:],
         help="absolute path of the meter's BENCH_CURRENT_RUN_FILE (Codex run tagging)",
     )
     ap.add_argument("--subset", type=Path, default=HERE / "subset.json")
@@ -1358,6 +1362,9 @@ def parser():
     ap.add_argument("--harbor", default="harbor")
     ap.add_argument("--coding-edge-evidence", type=Path)
     ap.add_argument("--execute", action="store_true")
+    ap.add_argument("--verify-source", action="store_true")
+    ap.add_argument("--source-generation", type=Path)
+    ap.add_argument("--source-generation-sha256")
     return ap
 
 
@@ -1366,6 +1373,12 @@ def main():
 
     ap = parser()
     args = ap.parse_args()
+    if args.verify_source:
+        import runpy
+        gate=runpy.run_path(str(HERE.parents[1]/'source_generation.py'))
+        if args.execute:raise ValueError('source-only verification cannot execute')
+        print(json.dumps(gate['validate_selection'](args.source_generation,args.source_generation_sha256),sort_keys=True))
+        return
     try:
         tasks, harnesses = preflight(args)
         if not args.execute:

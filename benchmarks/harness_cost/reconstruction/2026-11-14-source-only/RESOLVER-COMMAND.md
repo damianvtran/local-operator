@@ -228,8 +228,13 @@ def check_disk(sample, baseline):
         raise RuntimeError('STOP: Docker.raw growth/free-space desk fence crossed')
 
 R = pathlib.Path.cwd().resolve()
+import runpy
+source_gate=runpy.run_path(str(R.parents[1]/'source_generation.py'))
+source_generation=source_gate['validate_selection'](os.environ.get('BENCH_SOURCE_GENERATION'),os.environ.get('BENCH_SOURCE_GENERATION_SHA256'))
+source_gate['require_execution_authority']()
+# Exact standalone source identity, not an unavailable/moving Git HEAD.
+source_head='generation:'+source_generation['overlay_sha256']
 pins = json.loads((R / 'resolver-pins.json').read_text())
-source_head = subprocess.check_output(['git','rev-parse','HEAD'],cwd=R,text=True).strip()
 assert pins['platform'] == 'linux/amd64'
 S = pathlib.Path('/var/run/docker.sock')
 assert S.exists() and stat.S_ISSOCK(S.stat().st_mode), 'STOP: approved LOCAL daemon socket absent'
