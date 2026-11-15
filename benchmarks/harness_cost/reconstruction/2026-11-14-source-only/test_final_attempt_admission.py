@@ -29,7 +29,7 @@ class FinalAttemptTests(unittest.TestCase):
         self.home=Path(self.temp.name);self.root=self.home/'benchmark-runs/reconstruction-20261114-source-v1'
         self.root.mkdir(parents=True,mode=0o700);(self.root/'admissions').mkdir(mode=0o700)
         self.path=self.root/'admissions/linux-amd64-03.json'
-        self.manifest=HERE/'generation-overlay-v3.json';self.source_sha=os.environ['BENCH_TEST_GENERATION_SHA256'];self.head='a'*40
+        self.manifest=HERE/'generation-overlay-v4.json';self.source_sha=os.environ['BENCH_TEST_GENERATION_SHA256'];self.head='a'*40
         self.pwd=patch.object(auth.pwd,'getpwuid',return_value=types.SimpleNamespace(pw_dir=str(self.home)));self.pwd.start()
         now=auth.utc();end=now+datetime.timedelta(minutes=60)
         self.base={
@@ -50,6 +50,7 @@ class FinalAttemptTests(unittest.TestCase):
         self.effects=[];self.save(self.base)
 
     def tearDown(self):
+        for permit in list(auth._ACTIVE.values()):auth.retire_permit(permit)
         auth._ACTIVE.clear();self.pwd.stop();self.temp.cleanup()
 
     def save(self,data):
@@ -135,29 +136,25 @@ class FinalAttemptTests(unittest.TestCase):
         self.assertEqual(self.effects,[])
         self.assertFalse((self.root/'claims/linux-amd64-03.claim.json').exists())
 
-    def test_one_use_pipe_bound_to_controller_and_current_go(self):
-        data,permit=self.claim();auth.begin_controller(permit);auth.begin_native_start(permit);fd=auth.issue_resolver_handoff(permit);duplicate=os.dup(fd)
-        with self.assertRaises(ValueError):auth.issue_resolver_handoff(permit)
-        with patch.object(auth.os,'getppid',return_value=permit.pid):
-            result=auth.consume_resolver_handoff(fd,self.manifest,self.source_sha,self.path)
-            self.assertEqual(result['attempt_id'],auth.ATTEMPT)
-            with self.assertRaises((ValueError,json.JSONDecodeError)):
-                auth.consume_resolver_handoff(duplicate,self.manifest,self.source_sha,self.path)
-        regular=os.open(self.path,os.O_RDONLY)
-        with self.assertRaises(ValueError):auth.consume_resolver_handoff(regular,self.manifest,self.source_sha,self.path)
-        self.assertEqual(self.effects,[])
-
-    def test_unfilled_forged_pipe_is_nonblocking_and_wrong_parent_rejected(self):
-        readfd,writefd=os.pipe()
-        try:
-            with self.assertRaises(BlockingIOError):
-                auth.consume_resolver_handoff(readfd,self.manifest,self.source_sha,self.path)
-        finally:os.close(writefd)
+    def test_live_handoff_issue_is_monotone_and_claim_has_no_bearer(self):
         data,permit=self.claim();auth.begin_controller(permit);auth.begin_native_start(permit)
         fd=auth.issue_resolver_handoff(permit)
-        with patch.object(auth.os,'getppid',return_value=permit.pid+1):
-            with self.assertRaisesRegex(ValueError,'active claimed controller'):
-                auth.consume_resolver_handoff(fd,self.manifest,self.source_sha,self.path)
+        try:
+            with self.assertRaises(ValueError):auth.issue_resolver_handoff(permit)
+            self.assertNotIn(permit.secret.hex(),permit.path.read_text())
+            self.assertNotIn('secret',permit.path.read_text())
+        finally:os.close(fd)
+        auth.retire_permit(permit)
+        self.assertTrue(auth.marker_path(permit,'retired').exists())
+        self.assertEqual(self.effects,[])
+
+    def test_unfilled_or_regular_nonlive_descriptors_cannot_authorize(self):
+        readfd,writefd=os.pipe()
+        try:
+            with self.assertRaises(ValueError):auth.consume_resolver_handoff(readfd,self.manifest,self.source_sha,self.path)
+        finally:os.close(writefd)
+        fd=os.open(self.path,os.O_RDONLY)
+        with self.assertRaises(ValueError):auth.consume_resolver_handoff(fd,self.manifest,self.source_sha,self.path)
         self.assertEqual(self.effects,[])
 
     def test_actual_cli_with_inert_driver_claims_once_and_missing_go_never_constructs_native(self):

@@ -903,8 +903,8 @@ class NativeOps:
         code=(HERE/'RESOLVER-COMMAND.md').read_text().split('```python\n',1)[1].split('\n```',1)[0]
         path=self.directory/'resolver-supervisor.py';path.write_text(code)
         env=dict(anonymous_cli_environment(self.directory),BENCH_REGISTERED_ROOT=str(registered),BENCH_ADMISSION_PATH=str(self.admission_path),BENCH_LIFECYCLE_DIR=str(self.directory),PYTHONPATH=str(HERE),BENCH_SOURCE_GENERATION=str(self.a['_source_generation']),BENCH_SOURCE_GENERATION_SHA256=self.a['_source_generation_sha256'])
-        permit_fd=final_admission.issue_resolver_handoff(self.final_permit)
-        env['BENCH_FINAL_PERMIT_FD']=str(permit_fd)  # locator only; capability bytes stay in one-use pipe
+        permit_fd=final_admission.issue_resolver_handoff(self.final_permit,deadline=self.deadline)
+        env['BENCH_FINAL_PERMIT_FD']=str(permit_fd)  # locator only; anonymous live socket capability
         blocked={signal.SIGTERM,signal.SIGINT};mask=signal.pthread_sigmask(signal.SIG_BLOCK,blocked)
         try:
             self.resolver=subprocess.Popen([sys.executable,'-B',str(path)],cwd=HERE,env=env,stdin=subprocess.DEVNULL,start_new_session=True,pass_fds=(permit_fd,),
@@ -912,6 +912,14 @@ class NativeOps:
         finally:
             os.close(permit_fd)
             signal.pthread_sigmask(signal.SIG_SETMASK,mask)
+        def authority_guard():
+            require(self.now()<self.deadline,'resolver authority work deadline exhausted')
+            previous=self.monitoring;self.monitoring=True
+            try:
+                self.check_disk();self.sample_swap('resolver-authority')
+                require(self.vm_helper(self.owner)['rss_bytes']<=CAP,'attributed helper RSS exceeds4.3GB during authority exchange')
+            finally:self.monitoring=previous
+        final_admission.serve_resolver_handoff(self.final_permit,self.resolver.pid,authority_guard)
     def resolver_done(self):
         code=self.resolver.poll()
         if code is None:return False

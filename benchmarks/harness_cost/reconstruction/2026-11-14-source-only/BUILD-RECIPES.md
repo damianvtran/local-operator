@@ -1,6 +1,14 @@
 # Source-only build recipes — DRAFT, execution blocked
 
-## v3 scope clarification — general builds still HOLD
+## R20 v4 live-authority amendment — SOURCE ONLY, general builds still HOLD
+
+Current explicit source selection is generation-overlay-v4.json. R20-LIVE-AUTHORITY-v4.md
+supersedes the replayable v3 resolver handoff: live registry exchange, secret only
+in memory/inherited capability, atomic consumed/retired records and effect guards.
+No native/GO/registered03 claim was created by this remediation. All operator
+answers remain settled; NEW independent review and desk GO are still required.
+
+## Historical v3 scope clarification — general builds still HOLD
 
 The operator decisions authorize ONLY final resolver attempt linux-amd64-03,
 not any general recipe below. Current source proof uses generation-overlay-v3.json

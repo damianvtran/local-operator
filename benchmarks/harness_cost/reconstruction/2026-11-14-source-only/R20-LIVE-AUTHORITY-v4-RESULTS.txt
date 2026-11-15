@@ -1,0 +1,364 @@
+R20 — source-only actual child RED/GREEN, no native qualification/GO/registered03 claim.
+Base9d6884a06673959713494378d6013294049c8081. Only accepted MAJOR R20; operator decisions unchanged/settled.
+Trust boundary: approved source execution/live registry; NOT arbitrary malicious same-UID Python/root.
+Local anonymous IPC only, no engine/network/listening socket, native app/helper or model/account/paid call.
+
+RED (actual old verbatim child prefix; before any source fix):
+{
+  "base": "9d6884a06673959713494378d6013294049c8081",
+  "kind": "RED-actual-child-prefix",
+  "rows": [
+    {
+      "accepted": true,
+      "exit": 0,
+      "native_effects": [],
+      "scenario": "original"
+    },
+    {
+      "accepted": true,
+      "exit": 0,
+      "native_effects": [],
+      "scenario": "rebuilt-after-consume-retire-1"
+    },
+    {
+      "accepted": true,
+      "exit": 0,
+      "native_effects": [],
+      "scenario": "rebuilt-after-consume-retire-2"
+    },
+    {
+      "accepted": true,
+      "exit": 0,
+      "native_effects": [],
+      "scenario": "fabricated-no-live-issuer"
+    }
+  ]
+}
+GREEN commands (existing repo .venv; bounded test files ONLY):
+reconstruction cwd: python -B -W error::ResourceWarning -m unittest -v test_resolver_authority_r20 test_final_attempt_admission test_lifecycle_proposal
+test_actual_native_adapter_stages_prefix_and_services_live_issuer_with_monitors (test_resolver_authority_r20.ActualChildAuthority.test_actual_native_adapter_stages_prefix_and_services_live_issuer_with_monitors) ... ok
+test_changed_go_hash_and_wrong_actual_parent_reject (test_resolver_authority_r20.ActualChildAuthority.test_changed_go_hash_and_wrong_actual_parent_reject) ... ok
+test_child_exception_consumes_redemption_and_retires_issuer (test_resolver_authority_r20.ActualChildAuthority.test_child_exception_consumes_redemption_and_retires_issuer) ... ok
+test_concurrently_started_children_ephemeral_frame_copy_only_one_redemption (test_resolver_authority_r20.ActualChildAuthority.test_concurrently_started_children_ephemeral_frame_copy_only_one_redemption) ... ok
+test_consumed_live_issuer_cannot_authorize_fresh_socket_copy (test_resolver_authority_r20.ActualChildAuthority.test_consumed_live_issuer_cannot_authorize_fresh_socket_copy) ... ok
+test_expired_go_clock_rejects_actual_prefix (test_resolver_authority_r20.ActualChildAuthority.test_expired_go_clock_rejects_actual_prefix) ... ok
+test_fabricated_never_issued_claim_and_selfchosen_secret_no_live_registry (test_resolver_authority_r20.ActualChildAuthority.test_fabricated_never_issued_claim_and_selfchosen_secret_no_live_registry) ... ok
+test_original_actual_child_once_and_two_rebuilt_pipes_reject (test_resolver_authority_r20.ActualChildAuthority.test_original_actual_child_once_and_two_rebuilt_pipes_reject) ... ok
+test_partial_empty_regular_descriptors_and_exchange_deadline (test_resolver_authority_r20.ActualChildAuthority.test_partial_empty_regular_descriptors_and_exchange_deadline) ... ok
+test_postretire_old_real_frame_is_rejected (test_resolver_authority_r20.ActualChildAuthority.test_postretire_old_real_frame_is_rejected) ... ok
+test_revocation_after_authentication_before_effects (test_resolver_authority_r20.ActualChildAuthority.test_revocation_after_authentication_before_effects) ... ok
+test_revocation_marker_failure_still_closes_live_authority (test_resolver_authority_r20.ActualChildAuthority.test_revocation_marker_failure_still_closes_live_authority) ... ok
+test_selfchosen_secret_cannot_authenticate_against_actual_live_registry (test_resolver_authority_r20.ActualChildAuthority.test_selfchosen_secret_cannot_authenticate_against_actual_live_registry) ... ok
+test_stale_parent_birth_rejects (test_resolver_authority_r20.ActualChildAuthority.test_stale_parent_birth_rejects) ... ok
+test_wrong_actual_parent_rejects_verbatim_grandchild (test_resolver_authority_r20.ActualChildAuthority.test_wrong_actual_parent_rejects_verbatim_grandchild) ... ok
+test_wrong_child_birth_rejected_by_live_parent (test_resolver_authority_r20.ActualChildAuthority.test_wrong_child_birth_rejected_by_live_parent) ... ok
+test_actual_lifecycle_configured_overcap_and_rss_overcap_before_pull_or_container (test_final_attempt_admission.CapacityTests.test_actual_lifecycle_configured_overcap_and_rss_overcap_before_pull_or_container) ... ok
+test_configured_int_bounds_do_not_change_rss_cap (test_final_attempt_admission.CapacityTests.test_configured_int_bounds_do_not_change_rss_cap) ... ok
+test_exact_rss_boundary_allowed_with_larger_configured_capacity (test_final_attempt_admission.CapacityTests.test_exact_rss_boundary_allowed_with_larger_configured_capacity) ... ok
+test_actual_cli_missing_and_forged_go_have_zero_native_construction (test_final_attempt_admission.FinalAttemptTests.test_actual_cli_missing_and_forged_go_have_zero_native_construction) ... ok
+test_actual_cli_with_inert_driver_claims_once_and_missing_go_never_constructs_native (test_final_attempt_admission.FinalAttemptTests.test_actual_cli_with_inert_driver_claims_once_and_missing_go_never_constructs_native) ... ok
+test_cancellation_burns_claim_without_retry (test_final_attempt_admission.FinalAttemptTests.test_cancellation_burns_claim_without_retry) ... ok
+test_concurrent_claim_has_exactly_one_winner (test_final_attempt_admission.FinalAttemptTests.test_concurrent_claim_has_exactly_one_winner) ... ok
+test_existing_partial_claim_and_symlink_are_terminal (test_final_attempt_admission.FinalAttemptTests.test_existing_partial_claim_and_symlink_are_terminal) ... ok
+test_go_mutation_private_modes_and_forged_permit_reject (test_final_attempt_admission.FinalAttemptTests.test_go_mutation_private_modes_and_forged_permit_reject) ... ok
+test_invalid_go_decisions_namespace_scope_digest_head_expiry_no_effect (test_final_attempt_admission.FinalAttemptTests.test_invalid_go_decisions_namespace_scope_digest_head_expiry_no_effect) ... ok
+test_live_handoff_issue_is_monotone_and_claim_has_no_bearer (test_final_attempt_admission.FinalAttemptTests.test_live_handoff_issue_is_monotone_and_claim_has_no_bearer) ... ok
+test_one_correct_claim_once_across_restart_and_exception (test_final_attempt_admission.FinalAttemptTests.test_one_correct_claim_once_across_restart_and_exception) ... ok
+test_symlinked_admission_cannot_mint_claim (test_final_attempt_admission.FinalAttemptTests.test_symlinked_admission_cannot_mint_claim) ... ok
+test_unfilled_or_regular_nonlive_descriptors_cannot_authorize (test_final_attempt_admission.FinalAttemptTests.test_unfilled_or_regular_nonlive_descriptors_cannot_authorize) ... ok
+test_cleanup_ownership_failure_is_not_reported_success (test_lifecycle_proposal.LifecycleTests.test_cleanup_ownership_failure_is_not_reported_success) ... ok
+test_concrete_quit_refuses_changed_owner_before_any_signal (test_lifecycle_proposal.LifecycleTests.test_concrete_quit_refuses_changed_owner_before_any_signal) ... ok
+test_cpu_overcap_missing_wheel_and_work_deadline_abort (test_lifecycle_proposal.LifecycleTests.test_cpu_overcap_missing_wheel_and_work_deadline_abort) ... ok
+test_default_no_pull_and_missing_artifact_aborts (test_lifecycle_proposal.LifecycleTests.test_default_no_pull_and_missing_artifact_aborts) ... ok
+test_digest_and_wheel_hash_mismatch_never_installs (test_lifecycle_proposal.LifecycleTests.test_digest_and_wheel_hash_mismatch_never_installs) ... ok
+test_existing_desktop_is_neither_started_nor_quit (test_lifecycle_proposal.LifecycleTests.test_existing_desktop_is_neither_started_nor_quit) ... ok
+test_no_full_scope_review_has_no_effects (test_lifecycle_proposal.LifecycleTests.test_no_full_scope_review_has_no_effects) ... ok
+test_optional_digest_pull_requires_full_scope_signoff (test_lifecycle_proposal.LifecycleTests.test_optional_digest_pull_requires_full_scope_signoff) ... ok
+test_overcap_aborts_and_quits_only_owned_without_container (test_lifecycle_proposal.LifecycleTests.test_overcap_aborts_and_quits_only_owned_without_container) ... ok
+test_rss_overcap_and_termination_cleanup (test_lifecycle_proposal.LifecycleTests.test_rss_overcap_and_termination_cleanup) ... ok
+test_termination_during_resolver_start_still_requests_owned_cleanup (test_lifecycle_proposal.LifecycleTests.test_termination_during_resolver_start_still_requests_owned_cleanup) ... ok
+test_unidentified_vm_fails_closed (test_lifecycle_proposal.LifecycleTests.test_unidentified_vm_fails_closed) ... ok
+test_vm_attribution_excludes_unrelated_and_rejects_ambiguity (test_lifecycle_proposal.LifecycleTests.test_vm_attribution_excludes_unrelated_and_rejects_ambiguity) ... ok
+
+----------------------------------------------------------------------
+Ran 43 tests in 38.803s
+
+OK
+
+experimental cwd: python -B -m unittest -v test_source_generation
+test_actual_crlf_file_normalizes_in_old_read_text_but_new_gate_rejects (test_source_generation.GenerationTests.test_actual_crlf_file_normalizes_in_old_read_text_but_new_gate_rejects) ... ok
+test_actual_driver_preflight_rejects_receipt_before_legacy_dispatch (test_source_generation.GenerationTests.test_actual_driver_preflight_rejects_receipt_before_legacy_dispatch) ... ok
+test_actual_extracted_supervisor_rejects_missing_gate_before_socket_or_commands (test_source_generation.GenerationTests.test_actual_extracted_supervisor_rejects_missing_gate_before_socket_or_commands) ... ok
+test_actual_extracted_supervisor_valid_source_still_stops_before_runtime (test_source_generation.GenerationTests.test_actual_extracted_supervisor_valid_source_still_stops_before_runtime) ... ok
+test_actual_native_preflight_ignores_forged_receipt_and_requires_live_permit (test_source_generation.GenerationTests.test_actual_native_preflight_ignores_forged_receipt_and_requires_live_permit) ... ok
+test_duplicate_json_and_unlisted_overlay_delta_reject (test_source_generation.GenerationTests.test_duplicate_json_and_unlisted_overlay_delta_reject) ... ok
+test_exact_standalone_source_without_git (test_source_generation.GenerationTests.test_exact_standalone_source_without_git) ... ok
+test_missing_file_unknown_inventory_or_derived_manifest_reject (test_source_generation.GenerationTests.test_missing_file_unknown_inventory_or_derived_manifest_reject) ... ok
+test_missing_unknown_selection_and_receipt_boolean_cannot_admit (test_source_generation.GenerationTests.test_missing_unknown_selection_and_receipt_boolean_cannot_admit) ... ok
+test_native_execute_missing_protected_final_go_has_no_admission (test_source_generation.GenerationTests.test_native_execute_missing_protected_final_go_has_no_admission) ... ok
+test_new_meter_new_tests_runtime_and_historical_tamper_reject (test_source_generation.GenerationTests.test_new_meter_new_tests_runtime_and_historical_tamper_reject) ... ok
+test_overlay_record_digest_unknown_version_generation_and_wrong_base_reject (test_source_generation.GenerationTests.test_overlay_record_digest_unknown_version_generation_and_wrong_base_reject) ... ok
+test_real_verify_only_clis_and_default_missing_selection (test_source_generation.GenerationTests.test_real_verify_only_clis_and_default_missing_selection) ... ok
+test_resealed_unrelated_runtime_and_restricted_source_still_reject (test_source_generation.GenerationTests.test_resealed_unrelated_runtime_and_restricted_source_still_reject) ... ok
+test_resealed_wiring_change_is_not_a_new_admission (test_source_generation.GenerationTests.test_resealed_wiring_change_is_not_a_new_admission) ... ok
+
+----------------------------------------------------------------------
+Ran 15 tests in 3.121s
+
+OK
+
+Sanitized ACTUAL child-prefix exit/effect receipts from final targeted run:
+{
+  "children": 22,
+  "inert_admissions": 4,
+  "native_effects": 0,
+  "rows": [
+    {
+      "case": "test_actual_native_adapter_stages_prefix_and_services_live_issuer_with_monitors",
+      "exit": 0,
+      "inert_effects": 1,
+      "native_effects": [],
+      "verbatim_prefix_sha256": "bab8a20d1004ebcbae5b8ce99c9c80b68ff6226122da398842a21d840d47b1ee"
+    },
+    {
+      "case": "test_changed_go_hash_and_wrong_actual_parent_reject",
+      "exit": 1,
+      "inert_effects": 0,
+      "native_effects": [],
+      "verbatim_prefix_sha256": "bab8a20d1004ebcbae5b8ce99c9c80b68ff6226122da398842a21d840d47b1ee"
+    },
+    {
+      "case": "test_child_exception_consumes_redemption_and_retires_issuer",
+      "exit": 1,
+      "inert_effects": 0,
+      "native_effects": [],
+      "verbatim_prefix_sha256": "bab8a20d1004ebcbae5b8ce99c9c80b68ff6226122da398842a21d840d47b1ee"
+    },
+    {
+      "case": "test_concurrently_started_children_ephemeral_frame_copy_only_one_redemption",
+      "exit": 0,
+      "inert_effects": 1,
+      "native_effects": [],
+      "verbatim_prefix_sha256": "bab8a20d1004ebcbae5b8ce99c9c80b68ff6226122da398842a21d840d47b1ee"
+    },
+    {
+      "case": "test_concurrently_started_children_ephemeral_frame_copy_only_one_redemption",
+      "exit": 1,
+      "inert_effects": 0,
+      "native_effects": [],
+      "verbatim_prefix_sha256": "bab8a20d1004ebcbae5b8ce99c9c80b68ff6226122da398842a21d840d47b1ee"
+    },
+    {
+      "case": "test_consumed_live_issuer_cannot_authorize_fresh_socket_copy",
+      "exit": 0,
+      "inert_effects": 1,
+      "native_effects": [],
+      "verbatim_prefix_sha256": "bab8a20d1004ebcbae5b8ce99c9c80b68ff6226122da398842a21d840d47b1ee"
+    },
+    {
+      "case": "test_consumed_live_issuer_cannot_authorize_fresh_socket_copy",
+      "exit": 1,
+      "inert_effects": 0,
+      "native_effects": [],
+      "verbatim_prefix_sha256": "bab8a20d1004ebcbae5b8ce99c9c80b68ff6226122da398842a21d840d47b1ee"
+    },
+    {
+      "case": "test_expired_go_clock_rejects_actual_prefix",
+      "exit": 1,
+      "inert_effects": 0,
+      "native_effects": [],
+      "verbatim_prefix_sha256": "bab8a20d1004ebcbae5b8ce99c9c80b68ff6226122da398842a21d840d47b1ee"
+    },
+    {
+      "case": "test_fabricated_never_issued_claim_and_selfchosen_secret_no_live_registry",
+      "exit": 1,
+      "inert_effects": 0,
+      "native_effects": [],
+      "verbatim_prefix_sha256": "bab8a20d1004ebcbae5b8ce99c9c80b68ff6226122da398842a21d840d47b1ee"
+    },
+    {
+      "case": "test_original_actual_child_once_and_two_rebuilt_pipes_reject",
+      "exit": 0,
+      "inert_effects": 1,
+      "native_effects": [],
+      "verbatim_prefix_sha256": "bab8a20d1004ebcbae5b8ce99c9c80b68ff6226122da398842a21d840d47b1ee"
+    },
+    {
+      "case": "test_original_actual_child_once_and_two_rebuilt_pipes_reject",
+      "exit": 1,
+      "inert_effects": 0,
+      "native_effects": [],
+      "verbatim_prefix_sha256": "bab8a20d1004ebcbae5b8ce99c9c80b68ff6226122da398842a21d840d47b1ee"
+    },
+    {
+      "case": "test_original_actual_child_once_and_two_rebuilt_pipes_reject",
+      "exit": 1,
+      "inert_effects": 0,
+      "native_effects": [],
+      "verbatim_prefix_sha256": "bab8a20d1004ebcbae5b8ce99c9c80b68ff6226122da398842a21d840d47b1ee"
+    },
+    {
+      "case": "test_partial_empty_regular_descriptors_and_exchange_deadline",
+      "exit": 1,
+      "inert_effects": 0,
+      "native_effects": [],
+      "verbatim_prefix_sha256": "bab8a20d1004ebcbae5b8ce99c9c80b68ff6226122da398842a21d840d47b1ee"
+    },
+    {
+      "case": "test_partial_empty_regular_descriptors_and_exchange_deadline",
+      "exit": 1,
+      "inert_effects": 0,
+      "native_effects": [],
+      "verbatim_prefix_sha256": "bab8a20d1004ebcbae5b8ce99c9c80b68ff6226122da398842a21d840d47b1ee"
+    },
+    {
+      "case": "test_partial_empty_regular_descriptors_and_exchange_deadline",
+      "exit": 1,
+      "inert_effects": 0,
+      "native_effects": [],
+      "verbatim_prefix_sha256": "bab8a20d1004ebcbae5b8ce99c9c80b68ff6226122da398842a21d840d47b1ee"
+    },
+    {
+      "case": "test_partial_empty_regular_descriptors_and_exchange_deadline",
+      "exit": 1,
+      "inert_effects": 0,
+      "native_effects": [],
+      "verbatim_prefix_sha256": "bab8a20d1004ebcbae5b8ce99c9c80b68ff6226122da398842a21d840d47b1ee"
+    },
+    {
+      "case": "test_postretire_old_real_frame_is_rejected",
+      "exit": 1,
+      "inert_effects": 0,
+      "native_effects": [],
+      "verbatim_prefix_sha256": "bab8a20d1004ebcbae5b8ce99c9c80b68ff6226122da398842a21d840d47b1ee"
+    },
+    {
+      "case": "test_revocation_after_authentication_before_effects",
+      "exit": 1,
+      "inert_effects": 0,
+      "native_effects": [],
+      "verbatim_prefix_sha256": "bab8a20d1004ebcbae5b8ce99c9c80b68ff6226122da398842a21d840d47b1ee"
+    },
+    {
+      "case": "test_selfchosen_secret_cannot_authenticate_against_actual_live_registry",
+      "exit": 1,
+      "inert_effects": 0,
+      "native_effects": [],
+      "verbatim_prefix_sha256": "bab8a20d1004ebcbae5b8ce99c9c80b68ff6226122da398842a21d840d47b1ee"
+    },
+    {
+      "case": "test_stale_parent_birth_rejects",
+      "exit": 1,
+      "inert_effects": 0,
+      "native_effects": [],
+      "verbatim_prefix_sha256": "bab8a20d1004ebcbae5b8ce99c9c80b68ff6226122da398842a21d840d47b1ee"
+    },
+    {
+      "case": "test_wrong_actual_parent_rejects_verbatim_grandchild",
+      "exit": 1,
+      "inert_effects": 0,
+      "native_effects": [],
+      "verbatim_prefix_sha256": "bab8a20d1004ebcbae5b8ce99c9c80b68ff6226122da398842a21d840d47b1ee"
+    },
+    {
+      "case": "test_wrong_child_birth_rejected_by_live_parent",
+      "exit": 1,
+      "inert_effects": 0,
+      "native_effects": [],
+      "verbatim_prefix_sha256": "bab8a20d1004ebcbae5b8ce99c9c80b68ff6226122da398842a21d840d47b1ee"
+    }
+  ]
+}
+Retained source/guard proofs vs9d6884a:
+{
+  "all_child_cleanup_finally_bodies_unchanged": true,
+  "base": "9d6884a06673959713494378d6013294049c8081",
+  "byte_proofs": {
+    "experimental/coding/driver.py": "c74867dbe56502592a9510178728501f06c084608273672d8e745bfb33534c8a",
+    "experimental/meter_proxy.py": "23ee793b1c8a4ed71cba1a677bced86f7017899979e787f744ba4619f7270376",
+    "experimental/runner_v2.py": "0c398062d4f93815fd4a95187445f729b4e07d75d5c674f2533a55df5f935549",
+    "experimental/test_meter_privacy.py": "972bad24e91a73e68fc3d0656699965b6b7818dc7afa6a91c16538df2b4bebcc",
+    "reconstruction/2026-11-14-source-only/FINAL-ATTEMPT-ADMISSION-v3-RESULTS.txt": "a1f33058c3feaf5a518761c55c9e3785d47837d710929d47d87150e7f078737d",
+    "reconstruction/2026-11-14-source-only/FINAL-ATTEMPT-ADMISSION-v3.md": "9142b32fce60022b0707f3ad6db87d5f4f80ac4e3ac7838702dc9d3c8eb96d8c",
+    "reconstruction/2026-11-14-source-only/darwin_process_identity.py": "36eeb136e4c3d34d1c4ffb241f1736f3bc870d9d3308624c489abfd1d96fd058",
+    "reconstruction/2026-11-14-source-only/generation-baseline-v1.json": "a27405d15656ba385fed1c8b3bfb4752a7658a301483a950c9cb737fe3ad412b",
+    "reconstruction/2026-11-14-source-only/generation-overlay-v2.json": "a16417be430a644142072aa2893334208b776d0d356b69cac6a96bc9de846a73",
+    "reconstruction/2026-11-14-source-only/generation-overlay-v3.json": "2285c7ff2a81150860a25ca2d5c1d23b152201e32bf768f7ebf4e7297938eb28",
+    "reconstruction/2026-11-14-source-only/historical-meter-pre-privacy.py.txt": "e5d5d626e36e89dc7544eac3f826623fbd264e285dc35f2431fdf35540e7cc5a",
+    "reconstruction/2026-11-14-source-only/launch_services_broker.py": "a67a323555b37080de2ac35a73f73833d910bc169f0a2b611b32a596cdb22282",
+    "reconstruction/2026-11-14-source-only/owned_session_launch.py": "d9a6f462cb9f407007f903f017fcb5ee3431d45d4fda40ffc0ec757d44fc2ed8",
+    "reconstruction/2026-11-14-source-only/resolver-pins.json": "184ef7ffb66c0cb5a612f1d16645df015fedf9e0d57ec9d4129506e2e610932e"
+  },
+  "configured_caps_unchanged": [
+    8600000000,
+    14
+  ],
+  "container_flags": [
+    "--pull=never",
+    "--platform=linux/amd64",
+    "--cpus=1",
+    "--memory=2g",
+    "--memory-swap=2g",
+    "--pids-limit=128"
+  ],
+  "container_inner_code_unchanged": true,
+  "operator_decisions_and_limits_ast_unchanged": true,
+  "rss_cap_unchanged": 4300000000,
+  "run_lifecycle_and_verify_caps_unchanged": true,
+  "unchanged_native_method_count": 42,
+  "unchanged_native_methods": [
+    "__init__",
+    "now",
+    "sleep",
+    "command",
+    "snapshot",
+    "desktop_records",
+    "preflight",
+    "existing_desktop",
+    "startup_event",
+    "has_cleanup_authority",
+    "ownership_event",
+    "verify_owned_path",
+    "observe_owned",
+    "verify_session_path",
+    "_observe_owned_session",
+    "_observe_owned",
+    "effective_owner",
+    "startup_guard",
+    "startup_time_guard",
+    "startup_resource_guard",
+    "_startup_guard",
+    "start_owned",
+    "query_engine_info",
+    "info",
+    "cleanup_pending_launch",
+    "quit_broker_owned",
+    "vm_helper",
+    "sample_swap",
+    "check_disk",
+    "check_cleanup_resources",
+    "asset_inventory",
+    "snapshot_assets",
+    "cleanup_owned_image",
+    "cached_carrier",
+    "pull",
+    "wheel_hash",
+    "resolver_done",
+    "begin_cleanup",
+    "recover_owned_container",
+    "stop_owned_resolver",
+    "quit_owned",
+    "record"
+  ]
+}
+Historical verifier remains FAIL truthfully (NO suppression):
+{
+  "errors": [
+    "historical source changed: experimental/coding/driver.py",
+    "historical source changed: experimental/coding/../meter_proxy.py",
+    "historical source changed: experimental/coding/driver.py"
+  ],
+  "privacy_pattern_hits": [],
+  "returncode": 1
+}
+All58 targeted tests pass. Initial fixture-only socket warning was fixed by explicitly retaining/closing the original issued endpoint; final ResourceWarning-as-error run is clean. No real last-attempt claim/GO/native effect created. Source/v4 overlay is prospectively sealed after this receipt (acyclic), then final source-only commands are rechecked. Independent R20 closure and NEW desk GO remain REQUIRED.

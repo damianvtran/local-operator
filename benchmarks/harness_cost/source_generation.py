@@ -23,9 +23,9 @@ METER_SHA = '23ee793b1c8a4ed71cba1a677bced86f7017899979e787f744ba4619f7270376'
 METER_TEST_SHA = '972bad24e91a73e68fc3d0656699965b6b7818dc7afa6a91c16538df2b4bebcc'
 METER = 'experimental/meter_proxy.py'
 METER_TEST = 'experimental/test_meter_privacy.py'
-OVERLAY = R + 'generation-overlay-v3.json'
+OVERLAY = R + 'generation-overlay-v4.json'
 DERIVED = R + 'SHA256SUMS'
-GENERATION = 'reconstruction-20261114-source-v1-final-attempt-v3'
+GENERATION = 'reconstruction-20261114-source-v1-live-authority-v4'
 # These are the ONLY baseline edits: the reviewed meter fix and minimal gate
 # entrypoint/recipe wiring. All other baseline files must remain byte-identical.
 WIRING = frozenset({'experimental/coding/driver.py', 'experimental/runner_v2.py',
@@ -35,9 +35,9 @@ WIRING = frozenset({'experimental/coding/driver.py', 'experimental/runner_v2.py'
 # additional lifecycle/runner behavior beyond this independently reviewed delta.
 WIRING_SHA256 = {'experimental/coding/driver.py': 'c74867dbe56502592a9510178728501f06c084608273672d8e745bfb33534c8a',
  'experimental/runner_v2.py': '0c398062d4f93815fd4a95187445f729b4e07d75d5c674f2533a55df5f935549',
- 'reconstruction/2026-11-14-source-only/BUILD-RECIPES.md': 'b8c1d61905a48c363b7541210ec6a3da75ebe50e42e0b9ec082d2f19c399abca',
- 'reconstruction/2026-11-14-source-only/RESOLVER-COMMAND.md': 'e18912d08889a4adc2e2e893295084b816d0c904ab10bcff095044cd8ecfdd85',
- 'reconstruction/2026-11-14-source-only/lifecycle_proposal.py': 'e8b1fc846d7baf18c9ca43f6130c73ff969804474a4b0427f50c118ffce299b7',
+ 'reconstruction/2026-11-14-source-only/BUILD-RECIPES.md': 'abd483bd04178204af3295d1cb8d13caaab61c350e7ca8cc0e2bb2bf035270a0',
+ 'reconstruction/2026-11-14-source-only/RESOLVER-COMMAND.md': 'eade643e7c995399ed852496d7a8615f999ee24909dd719b5ebe941c1a024d94',
+ 'reconstruction/2026-11-14-source-only/lifecycle_proposal.py': 'a17547707db838e7f3a0562c3023421da51c36def31f73ee787489be8372af39',
  'reconstruction/2026-11-14-source-only/resolver-pins.json': '184ef7ffb66c0cb5a612f1d16645df015fedf9e0d57ec9d4129506e2e610932e',
  'reconstruction/2026-11-14-source-only/test_lifecycle_proposal.py': '32038b7ae3985c2ad3aef87e136bf907f50dacfd7a331387a35c38b230078744'}
 ADDITIONS = frozenset({METER_TEST, 'source_generation.py',
@@ -47,7 +47,9 @@ ADDITIONS = frozenset({METER_TEST, 'source_generation.py',
     R+'PROVIDER-PRIVACY-STATIC-v1.json', R+'GENERATION-VALIDATION-v2.md',
     R+'GENERATION-VALIDATION-v2-RESULTS.txt', R+'generation-overlay-v2.json',
     R+'final_attempt_admission.py', R+'test_final_attempt_admission.py',
-    R+'FINAL-ATTEMPT-ADMISSION-v3.md', R+'FINAL-ATTEMPT-ADMISSION-v3-RESULTS.txt'})
+    R+'FINAL-ATTEMPT-ADMISSION-v3.md', R+'FINAL-ATTEMPT-ADMISSION-v3-RESULTS.txt',
+    R+'generation-overlay-v3.json', R+'test_resolver_authority_r20.py',
+    R+'R20-LIVE-AUTHORITY-v4.md', R+'R20-LIVE-AUTHORITY-v4-RESULTS.txt'})
 PRIVATE_FIXTURE = R+'payloads/sanitize-git-repo/tests/test_outputs.py'
 PRIVATE_FIXTURE_SHA = '57e4904177acac5807b51f7c32444bde1968ba0445855fa4333d9eb73865b59e'
 
@@ -104,7 +106,7 @@ def validate(root, manifest, expected_sha256):
     require(type(overlay) is dict and set(overlay) == {'schema_version','generation','base_commit',
             'baseline_sha256','historical_meter_sha256','runtime_qualified',
             'execution_authorized','changes','files'}, 'unknown overlay record/schema')
-    require(type(overlay['schema_version']) is int and overlay['schema_version'] == 3,
+    require(type(overlay['schema_version']) is int and overlay['schema_version'] == 4,
             'unsupported generation schema')
     require(overlay['generation'] == GENERATION and overlay['base_commit'] == BASE_COMMIT,
             'unknown generation or wrong base')

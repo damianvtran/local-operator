@@ -231,7 +231,7 @@ R = pathlib.Path.cwd().resolve()
 import runpy
 source_gate=runpy.run_path(str(R.parents[1]/'source_generation.py'))
 source_generation=source_gate['validate_selection'](os.environ.get('BENCH_SOURCE_GENERATION'),os.environ.get('BENCH_SOURCE_GENERATION_SHA256'))
-from final_attempt_admission import consume_resolver_handoff
+from final_attempt_admission import consume_resolver_handoff, guard_resolver_effects
 fd_text=os.environ.get('BENCH_FINAL_PERMIT_FD','')
 if not fd_text.isdecimal():raise ValueError('final03 admission: inherited one-use pipe missing')
 admission=consume_resolver_handoff(int(fd_text),pathlib.Path(os.environ['BENCH_SOURCE_GENERATION']),os.environ['BENCH_SOURCE_GENERATION_SHA256'],pathlib.Path(os.environ['BENCH_ADMISSION_PATH']))
@@ -239,6 +239,7 @@ admission=consume_resolver_handoff(int(fd_text),pathlib.Path(os.environ['BENCH_S
 source_head='generation:'+source_generation['overlay_sha256']
 pins = json.loads((R / 'resolver-pins.json').read_text())
 assert pins['platform'] == 'linux/amd64'
+guard_resolver_effects()  # Revocation fence before engine/socket work, never owned cleanup.
 S = pathlib.Path('/var/run/docker.sock')
 assert S.exists() and stat.S_ISSOCK(S.stat().st_mode), 'STOP: approved LOCAL daemon socket absent'
 # Docker CLI HOME stays isolated; campaign admission/artifacts use the explicit
@@ -286,7 +287,9 @@ D = ['docker', '--config', str(A / 'docker-config'), '--host', 'unix:///var/run/
 # Explicit anonymous auth entry suppresses helper auto-detection; environment
 # whitelisting excludes DOCKER_AUTH_CONFIG and operator credential overrides.
 try:
+    guard_resolver_effects()
     verify_caps(json.loads(subprocess.check_output(D+['info','--format','{{json .}}'],timeout=10,env=CLI_ENV)))
+    guard_resolver_effects()
     image = json.loads(subprocess.check_output(D + ['image', 'inspect', pins['base_image']], timeout=15,env=CLI_ENV))[0]
     verify_carrier(image,pins)
     assert image['Architecture'] == 'amd64' and image['Os'] == 'linux'
@@ -363,6 +366,7 @@ with (A / 'stdout.log').open('xb') as log:
             def child_setup():
                 resource.setrlimit(resource.RLIMIT_FSIZE,(16777216,16777216))
                 signal.pthread_sigmask(signal.SIG_UNBLOCK,blocked)
+            guard_resolver_effects()
             proc=subprocess.Popen(cmd,stdout=log,stderr=subprocess.STDOUT,start_new_session=True,env=CLI_ENV,
                                   preexec_fn=child_setup)
         finally:
