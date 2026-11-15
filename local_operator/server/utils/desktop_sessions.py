@@ -3581,6 +3581,22 @@ class DesktopSessionBridge:
                 # too, so the pair brackets the outage rather than leaving a
                 # single warning of unknown duration.
                 failing += 1
+                # FORGET THE COMPARISON KEY, KEEP THE VISIBLE ATTENTION. A caught
+                # failure means the store may have been unreadable, dropped or
+                # recreated while we were blind, and `revision()` is a counter
+                # DERIVED FROM THE ROWS: a rebuilt store that publishes one
+                # completion reads `(1, 0, 0)` -- exactly what the cached key
+                # holds for the OLD store -- so the equality check would call the
+                # new body "unchanged" and keep showing the old completion until
+                # some later mutation moved the counters. Clearing the key makes
+                # the first SUCCESSFUL read after an error refresh once.
+                # `self.attention` is deliberately untouched, so a flapping store
+                # never blanks an unread mark. Only the failure path clears it:
+                # an unchanged revision with no error still costs nothing. A
+                # store-generation id in `revision()` was rejected as the wider
+                # change (it grows the cross-process token every caller compares)
+                # and would still miss a replacement we never failed across.
+                self.attention_poll_key = None
                 if failing == 1:
                     logger.warning(
                         "attention poll failed for %s (further failures quiet "

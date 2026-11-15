@@ -367,8 +367,59 @@ def _break_store(root) -> None:
         conn.commit()
 
 
+class _RevisionProbe:
+    """Records every REAL ``AttentionStore.revision`` outcome the poller sees.
+
+    A recording shim around the real method, never a replacement: the store, the
+    SQLite file and the poller are all real, so the failures below are SQLite's
+    own. It exists so the tests wait on EVENTS ("a read failed", "two reads
+    succeeded") instead of sleeping through a guess about the 1 s poll cadence --
+    the old 2.5 s wait plus a manual ``attention_poll_key = None`` is what let a
+    first refresh still in flight race the reset.
+    """
+
+    def __init__(self, monkeypatch) -> None:
+        self.ok: list[tuple[int, int, int]] = []
+        self.failed: list[BaseException] = []
+        original = AttentionStore.revision
+
+        def recording(store: AttentionStore) -> tuple[int, int, int]:
+            try:
+                value = original(store)
+            except BaseException as error:  # noqa: BLE001 -- recorded, then re-raised
+                self.failed.append(error)
+                raise
+            self.ok.append(value)
+            return value
+
+        monkeypatch.setattr(AttentionStore, "revision", recording)
+
+
+async def _wait_for(predicate, what: str) -> None:
+    """Poll ``predicate`` until true; the deadline is a deadlock backstop only."""
+    deadline = time.monotonic() + DEADLOCK_GUARD_S
+    while time.monotonic() < deadline:
+        if predicate():
+            return
+        await asyncio.sleep(0.01)
+    raise AssertionError(f"never observed: {what}")
+
+
+async def _first_poll_committed(bridge: DesktopSessionBridge, token: str) -> None:
+    """Wait for the body AND the comparison key of the first successful poll.
+
+    The key is committed AFTER the refresh lands, so "body present" alone leaves
+    the first refresh able to overwrite whatever the test does next.
+    """
+    await _wait_for(
+        lambda: bridge.attention.get("completion_token") == token
+        and bridge.attention_poll_key is not None,
+        "the first poll's body and comparison key",
+    )
+
+
 @pytest.mark.asyncio
-async def test_a_store_error_costs_one_poll_not_the_whole_loop(tmp_path):
+async def test_a_store_error_costs_one_poll_not_the_whole_loop(tmp_path, monkeypatch):
     """A transient store failure must not end cross-process read sync.
 
     The loop was a bare `while True`, so ONE `database is locked` stopped the
@@ -376,40 +427,144 @@ async def test_a_store_error_costs_one_poll_not_the_whole_loop(tmp_path):
     unread completion while the desktop kept showing it, forever and silently.
     That is a new way to hide an unread result -- the failure this feature
     exists to prevent.
+
+    The store is rebuilt from scratch after a REAL failed poll, so its counters
+    restart: the new completion B reads ``(1, 0, 0)``, the SAME revision the
+    bridge cached for the old completion A. Recovery must still show B with no
+    remount, no further publish and no manual reset of the poller's cache.
     """
+    probe = _RevisionProbe(monkeypatch)
     pool = DesktopSessions(tmp_path)
     sid = await pool.create(str(tmp_path))
     token = _publish(tmp_path, sid, "result-1")
     async with pool.session(sid) as bridge:
-        for _ in range(200):
-            if bridge.attention.get("completion_token"):
-                break
-            await asyncio.sleep(0.01)
+        await _first_poll_committed(bridge, token)
         assert bridge.attention["unseen"] is True
+        cached_revision, supported_before = bridge.attention_poll_key
+        assert cached_revision == (1, 0, 0)
 
         _break_store(tmp_path)
-        # The fixture must actually reach the failing branch, or this test
-        # passes while exercising nothing.
-        with pytest.raises(sqlite3.Error):
-            AttentionStore(tmp_path / "attention.db").state(f"session/{sid}")
-        bridge.attention_poll_key = None
-        await asyncio.sleep(2.5)
+        # A real failed poll, observed rather than slept through.
+        await _wait_for(lambda: bool(probe.failed), "a failed attention poll")
+        assert isinstance(probe.failed[0], sqlite3.Error)
         assert (
             bridge.attention_task is not None and not bridge.attention_task.done()
         ), "the poll loop died on a transient store error"
+        # Visible attention survives the outage; only the comparison key goes.
+        assert bridge.attention["completion_token"] == token
 
-        # Recovery is the point: once the store is healthy again the loop must
-        # pick the change up on its own, with no remount. Deleting the file is
-        # how the schema is rebuilt from scratch by the store itself.
+        # Deleting the file is how the schema is rebuilt from scratch by the
+        # store itself; B != A yet the counters collide with the cached key.
         (tmp_path / "attention.db").unlink()
         recovered = _publish(tmp_path, sid, "result-2")
-        for _ in range(300):
-            if bridge.attention.get("completion_token") == recovered:
-                break
-            await asyncio.sleep(0.01)
+        assert recovered != token
+        assert AttentionStore(tmp_path / "attention.db").revision() == cached_revision
+        seen = len(probe.ok)
+
+        # Two successful reads after recovery: the second can only start after
+        # the first poll's refresh finished, so the body is settled by then.
+        await _wait_for(lambda: len(probe.ok) >= seen + 2, "two post-recovery reads")
+        assert probe.ok[-2:] == [cached_revision] * 2
+        assert bridge.attention_poll_key is not None
+        assert bridge.attention_poll_key[1] == supported_before
+        assert bridge.attention_task is not None and not bridge.attention_task.done()
         assert bridge.attention["completion_token"] == recovered
         assert bridge.attention["unseen"] is True
-    assert token != recovered
+
+
+@pytest.mark.asyncio
+async def test_repeated_store_errors_keep_the_last_visible_attention_and_log_once(
+    tmp_path, monkeypatch, caplog
+):
+    """A flapping store neither blanks the unread mark nor floods the log."""
+    probe = _RevisionProbe(monkeypatch)
+    pool = DesktopSessions(tmp_path)
+    sid = await pool.create(str(tmp_path))
+    token = _publish(tmp_path, sid, "result-1")
+    async with pool.session(sid) as bridge:
+        await _first_poll_committed(bridge, token)
+        with caplog.at_level("INFO", logger="local_operator.server.utils.desktop_sessions"):
+            _break_store(tmp_path)
+            await _wait_for(lambda: len(probe.failed) >= 3, "three failed polls")
+            assert bridge.attention_task is not None and not bridge.attention_task.done()
+            assert bridge.attention["completion_token"] == token
+            assert bridge.attention["unseen"] is True
+        failures = [r for r in caplog.records if "attention poll failed" in r.getMessage()]
+        assert len(failures) == 1, "only the transition is logged, not every tick"
+
+
+@pytest.mark.asyncio
+async def test_an_unchanged_revision_without_an_error_never_refreshes_again(tmp_path, monkeypatch):
+    """Clearing the key on failure must not make the healthy steady state chatty."""
+    probe = _RevisionProbe(monkeypatch)
+    pool = DesktopSessions(tmp_path)
+    sid = await pool.create(str(tmp_path))
+    token = _publish(tmp_path, sid, "result-1")
+    async with pool.session(sid) as bridge:
+        await _first_poll_committed(bridge, token)
+        refreshes = 0
+        original = bridge._shared_attention_refresh
+
+        async def counting() -> None:
+            nonlocal refreshes
+            refreshes += 1
+            await original()
+
+        monkeypatch.setattr(bridge, "_shared_attention_refresh", counting)
+        seen = len(probe.ok)
+        await _wait_for(lambda: len(probe.ok) >= seen + 3, "three healthy reads")
+        assert not probe.failed
+        assert refreshes == 0
+
+
+@pytest.mark.asyncio
+async def test_a_remote_bridge_never_reads_the_local_revision_and_recovers_once(
+    tmp_path, monkeypatch
+):
+    """A peer's key is its state; an error there also costs exactly one refresh.
+
+    Only the PEER READ is stubbed (it is a network hop with no local analogue);
+    the poller is the real one. The local SQLite revision must not be consulted.
+    """
+    probe = _RevisionProbe(monkeypatch)
+    pool = DesktopSessions(tmp_path)
+    sid = await pool.create(str(tmp_path))
+    token = _publish(tmp_path, sid, "result-1")
+    async with pool.session(sid) as bridge:
+        await _first_poll_committed(bridge, token)
+        reads: list[str] = []
+        refreshes: list[str] = []
+        fail_next = False
+
+        async def peer_read() -> dict:
+            reads.append("read")
+            if fail_next:
+                raise ConnectionError("peer unreachable")
+            return {"completion_token": "peer-token"}
+
+        async def counting_refresh() -> None:
+            refreshes.append("refresh")
+
+        monkeypatch.setattr(bridge, "_read_attention", peer_read)
+        monkeypatch.setattr(bridge, "_shared_attention_refresh", counting_refresh)
+        monkeypatch.setattr(bridge, "remote_row", object())
+
+        # A poll already inside the thread may still record one local read; the
+        # first peer read proves the loop has switched, so baseline there.
+        await _wait_for(lambda: len(reads) >= 1, "the first peer read")
+        local_reads = len(probe.ok) + len(probe.failed)
+        await _wait_for(lambda: len(reads) >= 3, "two more peer reads")
+        assert len(probe.ok) + len(probe.failed) == local_reads
+        assert len(refreshes) == 1, "an unchanged peer state refreshes only on first sight"
+
+        fail_next = True
+        await _wait_for(lambda: bridge.attention_poll_key is None, "the error clearing the key")
+        fail_next = False
+        await _wait_for(lambda: len(refreshes) == 2, "one refresh after recovery")
+        mark = len(reads)
+        await _wait_for(lambda: len(reads) >= mark + 2, "two quiet peer reads")
+        assert len(refreshes) == 2
+        assert len(probe.ok) + len(probe.failed) == local_reads
 
 
 @pytest.mark.asyncio
