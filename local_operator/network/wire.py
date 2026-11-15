@@ -146,6 +146,14 @@ CREDENTIAL_SHARE_PUSH_V1 = "credential-share-push-v1"
 #: predates this one answers the pull exactly as it always did and is never sent a field
 #: it does not know.
 CREDENTIAL_PLACEMENT_DIGEST_V1 = "credential-placement-digest-v1"
+#: The owner's RENEW NUDGE on (re)connect (``credentials/renew_push.py``): when a link
+#: to a holder comes up, or the owner wakes with links that survived, the owner tells
+#: the holder "ask me again now" for the keys it lends it, and the holder's relay asks
+#: through its ordinary grant path. WHY: the 24 h offline hold restarts only on a fresh
+#: grant, and an idle node never asks, so a daily owner login did not keep it working.
+#: A distinct string (no shipped capability is reused for a new frame kind): a peer
+#: without it is not nudged and keeps counting from its last own ask, as before.
+CREDENTIAL_RENEW_PUSH_V1 = "credential-renew-push-v1"
 LINK_CAPABILITIES: tuple[str, ...] = (
     "mesh-net-v1",
     "session-mobility-v1",
@@ -165,6 +173,7 @@ LINK_CAPABILITIES: tuple[str, ...] = (
     CREDENTIAL_PLACEMENT_PUSH_V1,
     CREDENTIAL_SHARE_PUSH_V1,
     CREDENTIAL_PLACEMENT_DIGEST_V1,
+    CREDENTIAL_RENEW_PUSH_V1,
     "compute-pool-v1",
     "peer-readiness-v1",
     "mcp-defs-v1",
