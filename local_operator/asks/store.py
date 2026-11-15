@@ -46,6 +46,8 @@ import time
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
+from local_operator.asks.surfaces import weakest_surface
+
 logger = logging.getLogger(__name__)
 
 #: The event log inside ``sessions/<id>/``.
@@ -75,7 +77,10 @@ EVENT_DISMISSED = "dismissed"
 #: THE REVISION EVENT (design §10, #1936). It exists ONLY to SUPERSEDE an
 #: already-recorded, not-yet-delivered answer: :func:`fold` keeps status,
 #: ``answered_at`` and ``answered_by`` from the FIRST ``answered`` row and takes
-#: the effective ``answers`` from the LATEST ``revised`` one. A revision that
+#: the effective ``answers`` from the LATEST ``revised`` one — except that
+#: ``answered_by.surface`` becomes the WEAKEST across the answer and every
+#: revision (``asks.surfaces.weakest_surface``), so a revision can never inherit
+#: a more trusted label than its own write had. A revision that
 #: arrives before any answer is recorded degrades to a plain ``answered`` and
 #: never writes this kind (see ``AskQueue.revise``), so every ``revised`` row has
 #: an ``answered`` row to supersede — the fold never honours a revision alone.
@@ -836,9 +841,10 @@ def fold(
             if refs:
                 record["attachments"] = refs
             if revised is not None:
-                # The status, the stamp and the attribution stay the FIRST
-                # answer's (design §10: a revision does not rewrite who answered
-                # or when); only the ANSWERS move, and only to the newest
+                # The status and the stamp stay the FIRST answer's (design §10:
+                # a revision does not rewrite who answered or when), and so does
+                # the attribution save for the weakest-surface rule below; only
+                # the ANSWERS move, and only to the newest
                 # revision. ``revised_at`` is published beside them so the
                 # revision path can name the write it supersedes without a
                 # second read of the log.
@@ -848,6 +854,32 @@ def fold(
                     record["answers"] = {
                         str(k): [str(v) for v in (vals or ())] for k, vals in replacement.items()
                     }
+                # ...EXCEPT where the attribution would LAUNDER (agent review
+                # round 1, R1-1). Any connection may revise until delivery, so a
+                # proved "No, keep it" revised to "Yes" by an unproven dial must
+                # not keep the proved label over the unproven words: the guard
+                # and the profile classifier read ``answered_by`` as consent.
+                # The effective surface is the WEAKEST across the answer and
+                # EVERY revision (each row carries the runtime-stamped ``by``),
+                # so it is trusted only when every write was. Taking every
+                # revision, not just the newest, is deliberately fail-closed.
+                # When all writes share one label nothing changes, so design
+                # §10 ("a revision does not rewrite who answered") still holds
+                # for the honest case.
+                if isinstance(by, Mapping):
+                    surfaces = [str(by.get("surface") or "")]
+                    for event in events:
+                        if (
+                            event.get("kind") == EVENT_REVISED
+                            and str(event.get("ask_id")) == ask_id
+                        ):
+                            rev_by = event.get("by")
+                            surfaces.append(
+                                str(rev_by.get("surface") or "")
+                                if isinstance(rev_by, Mapping)
+                                else ""
+                            )
+                    record["answered_by"] = {**dict(by), "surface": weakest_surface(*surfaces)}
         records.append(record)
     return records
 

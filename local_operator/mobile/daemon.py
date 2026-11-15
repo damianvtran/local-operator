@@ -9127,7 +9127,12 @@ def build_app(daemon: MobileDaemon):
                 from local_operator.session.runtime.launch import AskErrand
 
                 ask_id = str(body.get("ask_id") or "")
-                by = str(body.get("by") or "")
+                # The body's ``by`` is NOT forwarded: anyone holding the portal
+                # cookie writes this body, and the runtime stamps the surface
+                # itself (``asks/surfaces``). This client never opts into the
+                # operator proof either, so a portal answer is recorded, never
+                # read as a local operator's consent.
+                by = ""
                 answers = {
                     str(key): [str(item) for item in (value or [])]
                     for key, value in (body.get("answers") or {}).items()
@@ -9147,8 +9152,11 @@ def build_app(daemon: MobileDaemon):
                     # nothing here may shorten it by dropping the engage, because
                     # a refusal that arrives without a runtime is the bug this
                     # arm exists to fix.
+                    # ``remote``: a portal answer is a relayed answer, so the
+                    # runtime records it as ``remote`` (``asks.surfaces``), the
+                    # label the live daemon route already gets — not consent.
                     client, _ = await engage_session_client(
-                        config_dir(), session_id, AskErrand(ask_id=ask_id)
+                        config_dir(), session_id, AskErrand(ask_id=ask_id), locality="remote"
                     )
                     try:
                         if op == "ask_respond":

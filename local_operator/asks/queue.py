@@ -58,6 +58,7 @@ from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
 from local_operator.asks import policy, render, store
+from local_operator.asks.surfaces import UNVERIFIED, weakest_surface
 from local_operator.harness.message_types import (
     ASK_RELAY_MESSAGE_TYPE,
     ASK_RESPONSE_MESSAGE_TYPE,
@@ -184,6 +185,15 @@ class AskQueue:
         #: a runtime death simply returns the ask to its open state, which is the
         #: truthful outcome for a partial answer nobody finished submitting.
         self._drafts: dict[str, dict[str, list[str]]] = {}
+        #: WHO WROTE EACH DRAFT CELL (agent review round 1, R1-2): question id
+        #: -> the runtime-stamped surface of the tap that answered it. The draft
+        #: settles as ONE row, so without this the last tap's label would cover
+        #: every earlier cell — an unproven tap on "Delete ~/X?" completed by a
+        #: proved tap on a harmless second question read as proved consent. The
+        #: settle stamps the WEAKEST (``asks.surfaces.weakest_surface``): whole-
+        #: ask, fail-closed, because the guard reads consent per ask, not per
+        #: question. Kept beside ``_drafts`` and dropped with it everywhere.
+        self._draft_surfaces: dict[str, dict[str, str]] = {}
 
     # -- paths -------------------------------------------------------------
 
@@ -1369,18 +1379,22 @@ class AskQueue:
                 "answer the questions still waiting.",
             }
         draft[key] = [str(item) for item in (values or ())]
+        self._draft_surfaces.setdefault(ask_id, {})[key] = str(by)
         waiting = [qid for qid in ids if qid not in draft]
         if waiting:
             # Publish the partial so the mirrored card advances to the next
             # question: the draft is what ``mirror_card`` reads to choose it.
             self._refresh(now)
             return {"ok": True, "settled": False, "waiting": waiting}
-        outcome = self.respond(ask_id, draft, by=by)
+        cells_by = self._draft_surfaces.get(ask_id, {})
+        settle_by = weakest_surface(*(cells_by.get(qid, UNVERIFIED) for qid in ids))
+        outcome = self.respond(ask_id, draft, by=settle_by)
         if not outcome.get("ok"):
             # A refusal at settle time (a lost race against another surface)
             # discards the draft with it: keeping it would let the next tap
             # settle an ask the log has already closed.
             self._drafts.pop(ask_id, None)
+            self._draft_surfaces.pop(ask_id, None)
             return outcome
         return {"ok": True, "settled": True, "waiting": []}
 
@@ -1716,6 +1730,7 @@ class AskQueue:
         # became the log's answers or the ask was declined/dismissed out from
         # under it, and keeping it would advance a card for a closed ask.
         self._drafts.pop(str(ask_id), None)
+        self._draft_surfaces.pop(str(ask_id), None)
         self._refresh()
         self._kick()
 
@@ -1734,6 +1749,7 @@ class AskQueue:
         for record in records:
             if record.get("status") != store.STATUS_OPEN:
                 self._drafts.pop(str(record.get("ask_id")), None)
+                self._draft_surfaces.pop(str(record.get("ask_id")), None)
 
     def _kick(self) -> None:
         """Ask the session to reconcile soon. Best-effort, no loop required.
