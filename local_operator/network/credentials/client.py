@@ -2506,11 +2506,36 @@ class MeshCredentialClient:
         are only known from that grant. Without an id there is nothing to hide —
         the owner's own first-row pick then stands, exactly as before.
         """
-        if credential_id <= 0:
-            return
         from local_operator.providers.auth_store import failure_block_window
         from local_operator.session.credential_binding import identity_label_for
 
+        # ROW IDS ARE LOCAL TO THE LENDER (#3066 review r2, m4). Placement can
+        # change after the serve but before this report, so the current owner is
+        # not provenance. Snapshot owner and label from the SAME matching grant;
+        # a newer session slot may differ, while the device slot still matches.
+        owner_device = ""
+        label = ""
+        for sid in dict.fromkeys((session_id, "")):
+            grant = self.grants.peek(key, sid)
+            if (
+                isinstance(grant, Grant)
+                and credential_id > 0
+                and grant.credential_ref.credential_id == credential_id
+                and grant.credential_ref.owner_device
+            ):
+                owner_device = grant.credential_ref.owner_device
+                label = identity_label_for(grant.identity)
+                break
+        if not owner_device:
+            # A forced re-borrow can already have removed the failing grant.
+            # Losing this best-effort rest is safer than hiding an unrelated
+            # current-owner row; the report itself still follows its old path.
+            logger.debug(
+                "skipping cooldown provenance: no matching lending grant for %s row %s",
+                key,
+                credential_id,
+            )
+            return
         scope, window_ms = failure_block_window(
             retry_after_ms, usage_limited=True, model_id=model_id
         )
@@ -2518,16 +2543,10 @@ class MeshCredentialClient:
             # The scope the caller actually observed (``configure``'s Fable-only
             # cap) wins over the one derived from the model, as on the owner.
             scope = block_scope
-        label = ""
-        for sid in dict.fromkeys((session_id, "")):
-            grant = self.grants.peek(key, sid)
-            if isinstance(grant, Grant):
-                label = identity_label_for(grant.identity)
-                break
         try:
             self.state.cool_down(
                 key,
-                owner_device=self.owner_of(key),
+                owner_device=owner_device,
                 credential_id=credential_id,
                 block_scope=scope,
                 until=time.time() + window_ms / 1000.0,
