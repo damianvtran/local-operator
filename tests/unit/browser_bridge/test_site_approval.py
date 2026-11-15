@@ -1094,8 +1094,12 @@ async def test_the_session_withdraws_only_stale_site_cards(
         ({"state": "allowed"}, "allowed in this node's browser"),
         ({"state": "none"}, "to raise it again"),
         ({"state": "denied"}, "Never run it on your own initiative"),
+        # The extension's sweep reports an EXPIRED entry as "cancelled"; from
+        # await it must read as "no live request", never "your request was
+        # withdrawn" (incident 2026-11-15, session 1c31cfff075b).
+        ({"state": "cancelled"}, "no live request for"),
     ],
-    ids=["allowed", "none", "denied"],
+    ids=["allowed", "none", "denied", "expired-reads-cancelled"],
 )
 async def test_await_access_on_a_node_names_no_popup(
     monkeypatch: pytest.MonkeyPatch, reply: dict[str, Any], expect: str
