@@ -33,6 +33,7 @@ from typing import Any
 import pytest
 
 from local_operator.network.projection import PeerRow
+from local_operator.network.types import TrustState
 from local_operator.notifications import remote_attention as ra
 from local_operator.notifications import store as store_mod
 from local_operator.notifications.delivery import (
@@ -439,6 +440,77 @@ def test_the_node_notify_sentence_promises_only_what_the_origin_collects(
     assert ra.forwarded_notice_sentence(owner, SID, "gate:approval:w1") == ""
     local = tmp_path / "local"
     assert ra.forwarded_notice_sentence(local, SID) == ""
+
+
+def _join_mesh(
+    root: Path, *, peers: tuple[str, ...] = (HEAD,), trust: TrustState = "active"
+) -> None:
+    """Save a network record making ``root`` (device NODE) a member beside ``peers``."""
+    from local_operator.network import store as net_store
+    from local_operator.network.types import MemberRecord, NetworkRecord
+
+    record = NetworkRecord(network_id="n_test", name="mesh", self_device_id=NODE, trust=trust)
+    record.members = [MemberRecord(device_id=NODE, name="node-box")] + [
+        MemberRecord(device_id=peer, name=f"{peer}-box") for peer in peers
+    ]
+    net_store.save(record, root)
+
+
+def test_a_session_started_on_a_mesh_node_says_its_notice_stayed_here(tmp_path: Path) -> None:
+    """2026-11-15: no stamp on a mesh node was "" — read as if the operator were told."""
+    node = tmp_path / "node"
+    (node / "sessions" / SID).mkdir(parents=True)
+    _join_mesh(node)
+    assert ra.notice_forwarding(node, SID) == (ra.LOCAL_ONLY, "")
+    sentence = ra.forwarded_notice_sentence(node, SID)
+    assert sentence == " Shown on node-box only; it was not forwarded to your other devices."
+    # A key this module never forwards keeps its empty clause.
+    assert ra.forwarded_notice_sentence(node, SID, "gate:approval:w1") == ""
+
+
+def test_a_device_in_no_mesh_keeps_the_bare_notify_result(tmp_path: Path) -> None:
+    """Single-device operators: no network, or a network nobody else has joined."""
+    alone = tmp_path / "alone"
+    (alone / "sessions" / SID).mkdir(parents=True)
+    assert ra.notice_forwarding(alone, SID) == (ra.NOT_APPLICABLE, "")
+    assert ra.forwarded_notice_sentence(alone, SID) == ""
+    _join_mesh(alone, peers=())
+    assert ra.forwarded_notice_sentence(alone, SID) == ""
+    untrusted = tmp_path / "untrusted"
+    _join_mesh(untrusted, trust="untrusted")
+    assert ra.forwarded_notice_sentence(untrusted, SID) == ""
+
+
+def test_a_forwarded_notice_keeps_its_sentence_on_a_mesh_node(tmp_path: Path) -> None:
+    owner = _owner(tmp_path)
+    _join_mesh(owner)
+    ra.stamp_rows_for_viewer(owner, [_catalog_row()], HEAD)
+    assert ra.notice_forwarding(owner, SID) == (ra.FORWARDED, HEAD)
+    assert ra.forwarded_notice_sentence(owner, SID) == (
+        " Posted on node-box; it will be forwarded to d_head-box, where this session started."
+    )
+
+
+def test_an_agent_child_on_a_node_is_told_its_notice_stays_here(tmp_path: Path) -> None:
+    """Mirrors stamp_rows_for_viewer: an agent-origin row is never put on the wire."""
+    owner = tmp_path / "node"
+    (owner / "sessions" / SID).mkdir(parents=True)
+    write_stamp(
+        owner,
+        MeshStamp(
+            session_id=SID,
+            network_id="n_test",
+            home_device=NODE,
+            placement=SessionPlacement(
+                mode="peer", network_id="n_test", home_device=NODE, stamp_revision=1
+            ),
+            origin={"kind": ra.AGENT_ORIGIN_KIND, "source_device": HEAD, "source_session_id": ""},
+        ),
+    )
+    _join_mesh(owner)
+    ra.record_forwarding_origin(owner, HEAD)
+    assert ra.notice_forwarding(owner, SID) == (ra.LOCAL_ONLY, HEAD)
+    assert "will be forwarded" not in ra.forwarded_notice_sentence(owner, SID)
 
 
 # ---------------------------------------------------------------------------

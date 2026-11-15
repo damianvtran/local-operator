@@ -1040,8 +1040,95 @@ def origin_baseline_ms(root: Path, device_id: str) -> int:
     return origin_baselines_ms(root, (device_id,)).get(device_id, int(time.time() * 1000))
 
 
+#: :func:`notice_forwarding` verdicts. ``FORWARDED``: an origin known to collect
+#: forwarded items will raise it. ``ORIGIN_NOT_COLLECTING``: peer-placed, but the
+#: origin is not recorded as collecting. ``LOCAL_ONLY``: this device is a mesh
+#: node and nothing will carry the item to any other device. ``NOT_OPERATOR_STARTED``:
+#: the origin collects, but the stamp lacks the operator attestation
+#: (:func:`origin_is_operator_started`), so the owner's default-deny (#4001)
+#: keeps the item here. ``NOT_APPLICABLE``:
+#: no clause at all (no mesh here, or a key this module never forwards).
+FORWARDED = "forwarded"
+ORIGIN_NOT_COLLECTING = "origin_not_collecting"
+NOT_OPERATOR_STARTED = "not_operator_started"
+LOCAL_ONLY = "local_only"
+NOT_APPLICABLE = "not_applicable"
+
+
+def notice_forwarding(root: Path, session_id: str, key: str = "") -> tuple[str, str]:
+    """Will a ``notify`` from ``session_id`` reach another of the operator's devices?
+
+    Returns ``(verdict, origin_device_id)``; the verdict is one of the module
+    constants above and the origin is ``""`` unless the session carries one.
+
+    THE ONE PLACE THIS IS DECIDED (2026-11-15). A ``notify`` always lands in
+    THIS device's inbox; whether it travels further is the forwarding leg's
+    business (:func:`stamp_rows_for_viewer` keeps only stamped, non-agent rows).
+    The ``notify`` tool result must say which happened, or the model tells the
+    operator they were told when the item never left this node — the bug this
+    fixes: a session STARTED on a mesh node has no stamp, so the old sentence
+    was empty and read as delivered. Keep every "will it be forwarded?" rule
+    here so the surfaces cannot drift; the operator-binding work extends THIS
+    function (e.g. ``FORWARDED`` only to a verified operator device, else
+    ``LOCAL_ONLY``) rather than adding a second predicate beside it.
+
+    A device in no mesh (no trusted network with another active member) gets
+    ``NOT_APPLICABLE``: a single-device operator has nowhere else to be told,
+    so their result stays byte-for-byte what it was. Never raises.
+    """
+    try:
+        if key and key.startswith(NOT_FORWARDED_PREFIXES):
+            # Parks, gates and this module's own rows travel by their own
+            # routes (or deliberately not at all); the clause is unchanged.
+            return NOT_APPLICABLE, ""
+        from local_operator.session.placement import read_stamp
+
+        stamp = read_stamp(Path(root), session_id)
+        if stamp is not None and stamp.placement.mode == "peer":
+            origin = str((stamp.origin or {}).get("source_device") or "")
+            if str((stamp.origin or {}).get("kind") or "") == AGENT_ORIGIN_KIND:
+                # Mirrors the drop in stamp_rows_for_viewer: an agent's child
+                # reports to that agent, so nothing is put on the wire.
+                return LOCAL_ONLY, origin
+            if origin:
+                if origin not in forwarding_origins(Path(root)):
+                    # Main's precedence since #4001, kept byte for byte: an
+                    # origin that does not collect gets the not-collecting
+                    # sentence whatever the attestation.
+                    return ORIGIN_NOT_COLLECTING, origin
+                if not origin_is_operator_started(stamp.origin):
+                    # Mirrors #4001's default-deny in stamp_rows_for_viewer:
+                    # notify items travel only for a stamp attesting
+                    # ``started_by: operator`` — the SAME predicate.
+                    return NOT_OPERATOR_STARTED, origin
+                return FORWARDED, origin
+        if _is_mesh_node(Path(root)):
+            # No usable stamp (started here, or a stamp with no origin): the
+            # forwarding leg drops the row, so the item stays on this node.
+            return LOCAL_ONLY, ""
+        return NOT_APPLICABLE, ""
+    except Exception:  # noqa: BLE001 — a tool result never fails on this
+        return NOT_APPLICABLE, ""
+
+
+def _is_mesh_node(root: Path) -> bool:
+    """This device is in a trusted network that has at least one OTHER active member.
+
+    Only then could the operator expect a notice on another device; a network
+    created here that nobody has joined yet has no "other devices" to mention.
+    """
+    from local_operator.network import store as net_store
+
+    for record in net_store.list_networks(root):
+        if record.trust != "active":
+            continue
+        if any(m.device_id != record.self_device_id for m in record.active_members()):
+            return True
+    return False
+
+
 def forwarded_notice_sentence(root: Path, session_id: str, key: str = "") -> str:
-    """The clause a peer-placed session's ``notify`` result adds, or ``""``.
+    """The clause a ``notify`` result adds on a mesh device, or ``""``.
 
     Model-facing English (a tool result, like the sentence it extends), so not
     catalogued. A bare "Notified" on the node read as if the operator had been
@@ -1053,35 +1140,28 @@ def forwarded_notice_sentence(root: Path, session_id: str, key: str = "") -> str
     "it stays on <this device>" (review round 1, m2), and so does a session whose
     stamp lacks the operator attestation (:func:`origin_is_operator_started`, the
     owner's own forward filter — QA round 2, Q1). ``""`` for every session
-    not placed here by another device, and for a ``key`` this module never
-    forwards — an ordinary local session's result is unchanged byte for byte.
+    on a device in no mesh, and for a ``key`` this module never forwards — a
+    single-device operator's result is unchanged byte for byte. A session on a
+    mesh node whose item goes nowhere else (started here, or an agent's child)
+    says so: "Notified" alone read as if the operator had been told (2026-11-15).
+    The decision is :func:`notice_forwarding`'s; this only words it.
     """
     try:
-        if key and key.startswith(NOT_FORWARDED_PREFIXES):
-            return ""
-        from local_operator.session.placement import read_stamp
-
-        stamp = read_stamp(Path(root), session_id)
-        if stamp is None or stamp.placement.mode != "peer":
-            return ""
-        origin = str((stamp.origin or {}).get("source_device") or "")
-        if not origin:
+        verdict, origin = notice_forwarding(Path(root), session_id, key)
+        if verdict == NOT_APPLICABLE:
             return ""
         here, there = _device_names(Path(root), origin)
-        collects = origin in forwarding_origins(Path(root))
-        if collects and not origin_is_operator_started(stamp.origin):
-            # THE SAME PREDICATE AS THE OWNER'S FORWARD FILTER
-            # (:func:`stamp_rows_for_viewer`), or the reply promises what the
-            # filter withholds (QA r2, Q1): a session the operator moved or forked
-            # ONTO this node carries no ``started_by`` attestation (a move is not
-            # a create, and does not prove who asked), so default-deny keeps its
-            # items here. Forwarding across a move is a declared deferral.
+        if verdict == LOCAL_ONLY:
+            return f" Shown on {here} only; it was not forwarded to your other devices."
+        if verdict == NOT_OPERATOR_STARTED:
+            # #4001's wording, byte for byte: the origin collects, so the
+            # reason the item stays is the missing operator attestation.
             return (
                 f" Posted on {here}; it stays on {here}, because only notices from"
                 f" sessions the operator started on {there} are forwarded there, and"
                 " this one was moved, forked or placed here otherwise."
             )
-        if collects:
+        if verdict == FORWARDED:
             return (
                 f" Posted on {here}; it will be forwarded to {there}, where this session started."
             )
