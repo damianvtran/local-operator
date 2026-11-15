@@ -1559,12 +1559,12 @@ class SyncEngine:
         costs one store read per candidate key, bounded by the ledger and only
         for keys the positive path is not already serving.
         """
-        rows = state.acks.get(device_id) or {}
+        # A lost delivery ACK does not end the owner's duty to wipe a copy it
+        # sent. Use the same conservative union as member removal, without ever
+        # letting a dispatch count as an ACK or bypass the serveability guard.
         wipes: list[dict[str, Any]] = []
-        for key in sorted(rows):
-            row = rows[key]
-            if not isinstance(row, dict) or row.get("wiped"):
-                continue
+        for row in state.open_copies(device_id):
+            key = str(row["key"])
             digest = str(row.get("digest") or "")
             gen = int(row.get("gen") or 0)
             if gen <= 0 or not digest:
@@ -1603,11 +1603,7 @@ class SyncEngine:
             state = SyncState.load(str(document.network_id), root=self._root)
         except Exception:  # noqa: BLE001 — unreadable state: nothing owed
             return False
-        rows = state.acks.get(device_id) or {}
-        for row in rows.values():
-            if isinstance(row, dict) and not row.get("wiped"):
-                return True
-        return False
+        return bool(state.open_copies(device_id))
 
     def deliver_removal_endings(self, device_id: str) -> dict[str, int]:
         """The endings a MEMBER REMOVAL owes, delivered while it is still contactable.
@@ -1648,27 +1644,38 @@ class SyncEngine:
         """
         document = self._placement()
         if document is None or not device_id:
-            return {"copies": 0, "wiped": 0, "timed_out": 0}
+            return {"copies": 0, "wiped": 0, "timed_out": 0, "unacknowledged": 0}
         network_id = str(document.network_id)
         endings: dict[str, tuple[int, str] | None] = {}
+        # ACKed and merely dispatched copies both remain owed an ending; a lost
+        # delivery ACK cannot remove that duty or turn dispatch into confirmation.
         # Build the whole list AND its local identities in one transaction. A
         # dial or an earlier send may race a re-copy; neither may rebind a wipe
         # already planned. Legacy identities are durable before any frame leaves.
-        with mutate(network_id, self._root) as state:
-            open_rows = state.open_copies(device_id)
-            unacknowledged = sum(1 for row in open_rows if row["unacknowledged"])
-            pending: list[dict[str, Any]] = [
-                {
-                    "key": row["key"],
-                    "gen": row["gen"],
-                    "digest": row["digest"],
-                    "value_state": VALUE_STATE_ABSENT,
-                }
-                for row in open_rows
-            ]
-            for item in pending[:ANNOUNCE_CAP]:
-                key = str(item["key"])
-                endings[key] = state.prepare_ending(device_id, key)
+        ledger_loaded = False
+        try:
+            with mutate(network_id, self._root) as state:
+                ledger_loaded = True
+                open_rows = state.open_copies(device_id)
+                unacknowledged = sum(1 for row in open_rows if row["unacknowledged"])
+                pending: list[dict[str, Any]] = [
+                    {
+                        "key": row["key"],
+                        "gen": row["gen"],
+                        "digest": row["digest"],
+                        "value_state": VALUE_STATE_ABSENT,
+                    }
+                    for row in open_rows
+                ]
+                for item in pending[:ANNOUNCE_CAP]:
+                    key = str(item["key"])
+                    endings[key] = state.prepare_ending(device_id, key)
+        except Exception:  # noqa: BLE001 — preserve the unreadable-ledger early receipt only
+            if ledger_loaded:
+                # Planning/persistence failures are not evidence of zero copies.
+                # Keep their original propagation; an unbound ending cannot leave.
+                raise
+            return {"copies": 0, "wiped": 0, "timed_out": 0, "unacknowledged": 0}
         if not pending:
             return {"copies": 0, "wiped": 0, "timed_out": 0, "unacknowledged": 0}
         link, _reason = self._server._ensure_link_with_reason(  # noqa: SLF001 — the one dial seam

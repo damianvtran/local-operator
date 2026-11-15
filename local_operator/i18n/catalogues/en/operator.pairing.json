@@ -1,0 +1,16 @@
+{
+  "operator.pairing.gesture.mac": "Your Mac will ask for Touch ID or its login password — that's your Mac confirming, not your Radient password.",
+  "operator.pairing.gesture.windows": "Windows will ask you to allow this — that's Windows confirming, not your Radient password.",
+  "operator.pairing.gesture.other": "Your computer will ask for its password — that's your computer confirming, not your Radient password.",
+  "operator.pairing.prompt.confirm": "Local Operator needs your approval to confirm a phone on this computer.",
+  "operator.pairing.prompt.remove": "Local Operator needs your approval to remove a phone from this computer.",
+  "operator.pairing.prompt.setup": "Local Operator needs your approval to turn on phone approvals on this computer.",
+  "operator.pairing.refusal.confirm_needs_code": "This phone did not ask through your Radient account, so this computer can't confirm it by comparing codes. Nothing was approved; type the six digits the phone shows instead.",
+  "operator.pairing.refusal.request_changed": "This pairing card changed since it was shown. Nothing was approved; review it again.",
+  "operator.pairing.refusal.unknown_request": "There is no pairing request with that id.",
+  "operator.pairing.refusal.withdraw_invalid": "A withdrawal needs exactly the phone's signature.",
+  "operator.pairing.refusal.withdraw_forbidden": "That signature is not from the phone that asked to pair. Nothing was withdrawn.",
+  "operator.pairing.refusal.in_progress": "Your computer is already confirming this pairing, so it can't be cancelled from the phone now. Deny it on the computer instead.",
+  "operator.pairing.refusal.bad_device_id": "That is not a device id this computer issues.",
+  "operator.pairing.revoke.unfinished": "This phone can no longer approve here or get notifications, but removing it from the operator list did not finish. Run the same command again to finish removing it."
+}

@@ -459,11 +459,21 @@ def test_ask_store_import_is_stdlib_only(ask_store_modules: set[str]) -> None:
     _assert_absent(ask_store_modules, "textual", "no front end")
     _assert_absent(ask_store_modules, "httpx", "no provider layer")
     _assert_absent(ask_store_modules, "requests", "no provider layer")
+    # ``asks.surfaces`` joins the closure because the fold stamps the WEAKEST
+    # surface across an ask's contributing writes (``weakest_surface``). It is
+    # admitted here rather than inlined into ``store`` or imported lazily
+    # because it imports nothing at all (constants plus two pure functions), so
+    # it cannot carry anything the checks above forbid — and they run on the
+    # whole transitive set, so a future import added to ``surfaces`` is caught
+    # here just as one added to ``store`` would be. Keeping one home for the
+    # labels also keeps the queue, the store and the runtime stamp on the same
+    # ordering instead of two copies that could drift.
     ours = sorted(m for m in ask_store_modules if m.startswith("local_operator"))
     assert ours == [
         "local_operator",
         "local_operator.asks",
         "local_operator.asks.store",
+        "local_operator.asks.surfaces",
     ], ours
 
 

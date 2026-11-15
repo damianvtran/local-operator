@@ -391,3 +391,33 @@ def test_a_legacy_copy_is_identified_when_planned_and_confirms_its_ending(
         receipt = json.loads(capsys.readouterr().out)
         assert receipt["copy"] == {"confirmed": True, "wiped": True, "wipe": "done"}, receipt
     print(f"LEGACY_ENDING {legacy=} {ending=} confirmed=true open_copies=0")
+
+
+def test_failed_legacy_identity_persistence_is_not_reported_as_zero_copies(
+    secret_mesh: Any, monkeypatch: pytest.MonkeyPatch  # noqa: F811
+) -> None:
+    mesh = secret_mesh
+    _deliver_without_ack(mesh, monkeypatch)
+    assert net.wait_for(lambda: mesh.member not in mesh.engine_a._inflight_members)
+    monkeypatch.setattr(mesh.engine_a, "enqueue_owner_exchange", lambda device: "scheduled")
+    state = sync.SyncState.load(mesh.network_id, mesh.a.root)
+    payload = state.to_json()
+    payload.pop("copy_versions", None)
+    state.path.write_text(json.dumps(payload), encoding="utf-8")
+    assert state.open_copies(mesh.member)
+
+    def cannot_save(self: sync.SyncState) -> None:
+        raise OSError("synthetic identity persistence failure")
+
+    def no_dial(*args: Any, **kwargs: Any) -> Any:
+        pytest.fail("an unpersisted ending must not reach the wire")
+
+    # The inherited unreadable-ledger receipt must not hide a failed legacy
+    # upgrade after a nonempty ledger was read. Preserve the old propagation
+    # boundary, and never send a wipe whose identity could not be persisted.
+    with monkeypatch.context() as patch:
+        patch.setattr(sync.SyncState, "save", cannot_save)
+        patch.setattr(mesh.a, "_ensure_link_with_reason", no_dial)
+        with pytest.raises(OSError, match="synthetic identity persistence failure"):
+            mesh.engine_a.deliver_removal_endings(mesh.member)
+    assert sync.SyncState.load(mesh.network_id, mesh.a.root).open_copies(mesh.member)

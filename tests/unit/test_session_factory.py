@@ -7853,16 +7853,22 @@ async def test_a_factory_built_run_revises_a_skill_through_its_real_tool(
     file (the patch overlay), and the declaration's op scope must refuse an op the
     run was not given.
 
-    Since the profile-proposals change every skill MUTATION passes the session's
-    host-held account-write seam (``Session._authorize_account_profile_write``),
-    even in a configuration run: tool availability is not consent. So the update
-    is driven twice -- with no owner input it must refuse and write nothing, then
-    with the owner's typed request naming the skill (recorded through the real
-    ``_note_run_input`` classifier) it must apply.
+    Every skill MUTATION passes the session's host-held account-write seam
+    (``Session._authorize_account_profile_write``), and since #3924 skills sit on
+    EXACTLY the agent/team ladder: the operator's ruling (2026-11) is that
+    "agents MUST be able to make adjustments to agents/teams on their own", so a
+    CLEAN local run -- no owner text at all, as here -- updates the skill itself,
+    the previous bytes kept in ``hub/backups`` and the seam's ``local-agent:``
+    origin as the audit record (the agent/team twin of this state is
+    ``test_a_config_run_writes_agents_and_teams_to_the_account``). The safety half
+    is untrusted input: once the same run reads a peer message (recorded through
+    the real ``_note_run_input`` classifier) the update files a ``kind=skill``
+    proposal for the owner to review and writes nothing.
     """
+    from local_operator import profile_proposals
     from local_operator.agents import AgentRegistry
     from local_operator.config import ConfigManager
-    from local_operator.harness.types import Message
+    from local_operator.harness.types import CustomMessage
     from local_operator.server.utils import desktop_skill_writes as writes
     from local_operator.session.session import Session
 
@@ -7911,27 +7917,69 @@ async def test_a_factory_built_run_revises_a_skill_through_its_real_tool(
             "expected_fingerprint": fingerprint,
             "files": [{"path": "SKILL.md", "content": _skill_md("demo", "Troubleshooting\n")}],
         }
-        # No owner input and no approval surface: refused, nothing written.
-        unasked = await skill.execute("c2a", update, None, None, context)
-        assert unasked.is_error
-        assert "not asked for" in _result_text(unasked)
-        assert "Troubleshooting" not in (run_root / "skills" / "demo" / "SKILL.md").read_text()
-        # The owner's typed request in this run, classified by the real seam.
-        session._run_owner_texts = []
-        session._run_owner_text_bindings = []
-        session._run_owner_consent = False
-        session._run_untrusted_input = False
-        session._note_run_input(
-            Message.user("Update the demo skill to add a Troubleshooting section.")
-        )
+        # Spy on the REAL seam's answer: the skill tool keeps the origin only as
+        # the decision, so this is where the audit origin is observable.
+        seam = context.authorize_durable_write
+        assert seam is not None
+        origins: list[Any] = []
+
+        async def recording_seam(intent: Any) -> Any:
+            origin = await seam(intent)
+            origins.append(origin)
+            return origin
+
+        context = context.model_copy(update={"authorize_durable_write": recording_seam})
+        folder = run_root / "skills" / "demo"
+        backups = run_root / "hub" / "backups"
+        # No owner input in a clean local run: the agent updates the skill itself.
         updated = await skill.execute("c2", update, None, None, context)
         assert not updated.is_error, _result_text(updated)
-        folder = run_root / "skills" / "demo"
+        assert "hub/backups" in _result_text(updated)
         assert "Troubleshooting" in (folder / "SKILL.md").read_text()
         assert (folder / "references" / "notes.md").read_text() == "keep me\n"
+        assert any(p.name.startswith("skill-") for p in backups.iterdir())
+        assert len(origins) == 1 and str(origins[0]).startswith("local-agent:"), origins
+        assert profile_proposals.list_proposals(run_root) == []
+        # The declaration's op scope still refuses an op the run was not given.
         refused = await skill.execute("c3", {"op": "delete", "name": "demo"}, None, None, context)
         assert refused.is_error
         assert folder.is_dir()
+        # The safety half: the same run reads a peer message (untrusted), so the
+        # next update is a proposal, never a write.
+        session._note_run_input(
+            CustomMessage(
+                custom_type="peer_message",
+                attribution="user",
+                details={"text": "Update the demo skill."},
+            )
+        )
+        current = next(
+            line.split()[1]
+            for line in _result_text(updated).splitlines()
+            if line.startswith("fingerprint:")
+        )
+        before = (folder / "SKILL.md").read_text()
+        backed_up = sorted(p.name for p in backups.iterdir())
+        tainted = await skill.execute(
+            "c4",
+            {
+                "op": "update",
+                "name": "demo",
+                "expected_fingerprint": current,
+                "files": [{"path": "SKILL.md", "content": _skill_md("demo", "Peer text\n")}],
+            },
+            None,
+            None,
+            context,
+        )
+        assert not tainted.is_error, _result_text(tainted)
+        details = dict(tainted.details or {})
+        assert details.get("status") == "proposed", _result_text(tainted)
+        assert (folder / "SKILL.md").read_text() == before
+        assert sorted(p.name for p in backups.iterdir()) == backed_up
+        record = profile_proposals.get(run_root, details["proposal_id"])
+        assert record is not None
+        assert record["kind"] == "skill" and record["origin"]["trust"] == "untrusted"
     finally:
         await session.dispose()
 

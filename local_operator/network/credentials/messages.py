@@ -101,6 +101,13 @@ def render_retry_after(ms: float | int | None) -> str:
     return f"{max(1, int(seconds / 60.0 + 0.5))} min"
 
 
+#: The fixed middles of the two GitHub-list sentences. They make rendering
+#: idempotent (see the ``github_repositories_unset`` arm) without comparing owner
+#: names, which the relay leg and the runtime client may spell differently.
+_GITHUB_UNSET_MARK = " has no GitHub repository it can lend access for"
+_GITHUB_OVERFLOW_MARK = " has more GitHub repositories than one share can carry"
+
+
 def render_waited(seconds: float) -> str:
     """``1 s`` / ``7 min 30 s``: how long a turn ACTUALLY waited, never rounded up.
 
@@ -203,10 +210,26 @@ def render_broker_error(
             "network guide has the App section). Nothing was lent."
         )
     if error.code == "github_repositories_unset":
+        # The owner sends a device-neutral REASON + REMEDY (``Designation.refusal``),
+        # wrapped here once. RENDERED ONCE (QA round 1, F1): the relay leg and the
+        # runtime client both pass a refusal through this function, so a message
+        # that is already this sentence is returned as it stands.
+        if _GITHUB_UNSET_MARK in error.message:
+            return error.message
+        if not error.message:
+            return (
+                f"{owner}{_GITHUB_UNSET_MARK}. Check lop network credential github repos on "
+                f"{owner}; nothing was lent."
+            )
+        return f"{owner}{_GITHUB_UNSET_MARK}: {error.message}. Fix it on {owner}; nothing was lent."
+    if error.code == "github_repositories_overflow":
+        if _GITHUB_OVERFLOW_MARK in error.message:
+            return error.message
+        detail = f" ({error.message})" if error.message else ""
         return (
-            f"{owner} has no repositories designated for GitHub brokering, so nothing "
-            f"was minted: set network.credentials.github.repositories on {owner} (the "
-            "network guide's checklist). Nothing was lent."
+            f"{owner}{_GITHUB_OVERFLOW_MARK}{detail}, so nothing was lent. On {owner}, pick "
+            "the ones to lend with the GitHub repositories setting (search it in /settings), "
+            "or opt some out with lop network credential github exclude <owner/repo>."
         )
     if error.code == "github_repo_refused":
         detail = f" ({error.message})" if error.message else ""
@@ -698,13 +721,16 @@ COPY_CEILING_LINES: tuple[str, str] = (
 COPY_CEILING_SENTENCE = " ".join(COPY_CEILING_LINES)
 
 
-def render_copy_revoke_notice(peer_name: str, key: str, *, copied: bool, wiped: bool) -> list[str]:
+def render_copy_revoke_notice(
+    peer_name: str, key: str, *, copied: bool, wiped: bool, unacknowledged: bool = False
+) -> list[str]:
     """What a revoke says about the COPY half, per state (§4.3, "which happened"), as lines.
 
     ``copied`` — the owner's ack ledger holds a row for this member's copy of ``key``;
-    ``wiped`` — that row has since been confirmed deleted. Both come from the same ledger
-    the owner's listing reads, so the receipt and the listing cannot disagree about whether
-    a copy is outstanding.
+    ``wiped`` — that row has since been confirmed deleted. ``unacknowledged``
+    means a durable dispatch without a confirming ACK; it is never promoted to
+    ``copied``. Both receipt and wipe selection use the same conservative open-copy
+    union, so losing a delivery ACK cannot make a known send disappear.
 
     A RECEIPT SAYS WHAT THE LEDGER HOLDS, NEVER WHAT THE WORLD HOLDS (design review round 1,
     D1). An absent record is not proof that a device holds nothing. Dispatch-aware callers
@@ -717,15 +743,21 @@ def render_copy_revoke_notice(peer_name: str, key: str, *, copied: bool, wiped: 
     (:func:`render_key_name`) and any other key as typed.
     """
     name = render_key_name(key)
-    if not copied:
+    if not copied and not unacknowledged:
         return [
             f"no copy of '{name}' is recorded on {peer_name}, so there is no wipe to send",
         ]
     if wiped:
         return [f"the copy of '{name}' on {peer_name} was already wiped"]
+    pending = (
+        [f"a copy of '{name}' was sent to {peer_name} but its delivery was never acknowledged"]
+        if unacknowledged
+        else []
+    )
     return [
+        *pending,
         f"a wipe notice for '{name}' is queued for {peer_name}: the copy is deleted on "
-        "its next contact"
+        "its next contact",
     ]
 
 
@@ -787,9 +819,11 @@ def render_removal_endings(
     # copy the member confirmed: it says which of the open ones that is.
     pending = min(max(0, unacknowledged), unconfirmed)
     if pending == 1:
-        lines.append("1 of them was sent but its delivery was never acknowledged")
+        lines.append(f"1 copy on {peer_name} was sent but its delivery was never acknowledged")
     elif pending > 1:
-        lines.append(f"{pending} of them were sent but their delivery was never acknowledged")
+        lines.append(
+            f"{pending} copies on {peer_name} were sent but their delivery was never acknowledged"
+        )
     lines.extend(COPY_CEILING_LINES)
     return lines
 

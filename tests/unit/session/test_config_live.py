@@ -1116,6 +1116,19 @@ HOST_OWNED_LIVE_SECTIONS = {
     # (``scripts/console-host.test.mjs``: the registry's admission against
     # ``policy.maxLive``/``userReserved``), the same split ``desktop`` uses.
     "console",
+    # ``phone_access`` is host-owned in the ``static`` shape: its one key,
+    # ``tunnel.auto_setup_after_login``, gates what a verified Radient SIGN-IN
+    # does next, not what a session does. ``tunnels.install.auto_setup_enabled``
+    # re-reads config.yml on EVERY call (``read_config_values``, no memo of its
+    # own), and ``auto_setup_after_login`` calls it once per sign-in — invoked by
+    # ``providers.auth_store`` after each verified credential write, in whichever
+    # process wrote it (``lop serve``, the desktop, the TUI). No ``Session``
+    # holds the switch, so a probe here could watch nothing move. Proven in
+    # ``tests/unit/test_tunnel_remedies.py::
+    # test_a_config_write_reaches_the_next_sign_in_without_a_restart`` (on → a
+    # ``write_setting`` false → the next sign-in declines → true → it runs, in
+    # one process with no reload).
+    "phone_access",
 }
 
 

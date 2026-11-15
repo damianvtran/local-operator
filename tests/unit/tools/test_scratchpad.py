@@ -1223,3 +1223,9 @@ def test_a_write_at_the_configured_boundary_is_allowed_and_one_over_is_refused(
         check_scratchpad_write(pad / "x.csv", pad, "scratchpad://x.csv", 4097)
 
     assert f"over the {cap:,}-byte ceiling" in str(excinfo.value)
+
+
+def test_the_worktree_alternative_names_its_site_not_any_path():
+    # A bare `git worktree add <path>` sent agents to make trees in the pad
+    # itself (33 by 2026-11-13); the long refusal tail now sites it.
+    assert "`git worktree add <repo>/.worktrees/<name>`, never in a pad" in SCRATCHPAD_ELSEWHERE

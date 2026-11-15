@@ -221,7 +221,10 @@ async def test_canonical_publisher_no_false_outage(mesh):
         assert final.effective_state == "effective_borrow"
         assert final.state == "ok"
         assert final.last_grant_at == gs[0].granted_at
-        assert final.last_grant_expires_at == gs[0].grant_expires_at_ms / 1000
+        # Since the 2026-11-13 offline hold a held serve publishes the HOLD's end
+        # (what the client will keep serving until), not the grant's.
+        assert result.held_until_ms > gs[0].grant_expires_at_ms
+        assert final.last_grant_expires_at == result.held_until_ms / 1000
     finally:
         remove()
         subscription.unsubscribe()

@@ -76,5 +76,9 @@
   "relay.asks.duration.less_than_minute": "<1 min",
   "relay.asks.duration.minutes": "{count, number} min",
   "relay.asks.duration.hours": "{count, number} h",
-  "relay.asks.duration.days": "{count, number} d"
+  "relay.asks.duration.days": "{count, number} d",
+  "relay.asks.card.command.label": "Comando sugerido",
+  "relay.asks.card.command.copy": "Copiar",
+  "relay.asks.card.command.copied": "Copiado",
+  "relay.asks.card.command.copy_failed": "No se pudo copiar — el comando está seleccionado; cópialo desde ahí"
 }

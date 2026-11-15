@@ -187,6 +187,7 @@ if TYPE_CHECKING:
     # (see ``DesktopSessionBridge._owner_connection``), and ``AttachedSession``
     # already reaches this module's graph through ``session.attached``.
     from local_operator.mobile.attach_client import AttachClient
+    from local_operator.tools.diff_archive import DiffBindingReadOptions
 
 #: The page ceiling one child read may ask for, in ONE place. The route declares
 #: it on the wire (FastAPI answers a bigger ``limit`` with 422 before the
@@ -416,6 +417,58 @@ BRIDGE_NOTIFIABLE_KINDS = frozenset({"complete", "error", "retired"})
 
 async def _no_takeover() -> None:
     raise RuntimeError("Desktop viewers cannot own a runtime")
+
+
+def _log_abandoned_frame_read(task: asyncio.Future[Any]) -> None:
+    """Retrieve, and log at debug, the outcome of a bounded open-frame index read.
+
+    WHY: ``_bounded_frame_read`` stops waiting for an ``index_read_model`` worker
+    hop (``summary`` or ``frame_facts``) at the first frame's deadline but never
+    cancels it mid-I/O -- a thread cannot be interrupted, and the SQLite read is
+    side-effect free, so letting it finish is cheaper than any abort. Nobody
+    else awaits an abandoned read, so without this its failure would surface
+    only as "Task exception was never retrieved" at garbage collection. Same
+    contract as ``_log_abandoned_proof_read``; a read awaited normally re-raises
+    to its caller as well.
+    """
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is not None:
+        logger.debug(
+            "Open-frame index read failed (abandoned at the open-frame deadline or "
+            "by a cancelled request; the frame answered runs_state='building')",
+            exc_info=exc,
+        )
+
+
+async def _bounded_frame_read(
+    deadline: float | None, func: Any, /, *args: Any, **kwargs: Any
+) -> tuple[bool, Any]:
+    """Run ``func`` on a worker thread, waiting at most until ``deadline``.
+
+    Returns ``(True, value)`` when the read finished in time and ``(False, None)``
+    when the deadline was already spent or passed while waiting. ``deadline=None``
+    (a standalone ``/history`` read) waits for the whole read: that request is
+    the follow-up the degraded first frame points the client at, so it must
+    carry the facts. Exceptions from a read that finished in time propagate
+    exactly as the bare ``asyncio.to_thread`` call did.
+    """
+    if deadline is None:
+        return True, await asyncio.to_thread(func, *args, **kwargs)
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        # Spent before the read began: starting a worker only to discard it
+        # would queue one more hop ahead of the next open.
+        return False, None
+    read = asyncio.ensure_future(asyncio.to_thread(func, *args, **kwargs))
+    # Attached BEFORE the wait so a request cancelled mid-wait (the viewer
+    # clicked elsewhere) also retrieves the abandoned read's exception.
+    read.add_done_callback(_log_abandoned_frame_read)
+    done, _pending = await asyncio.wait({read}, timeout=remaining)
+    if read not in done:
+        return False, None
+    return True, read.result()
 
 
 class _OpenFrameSteps:
@@ -1422,6 +1475,10 @@ class DesktopSubscription:
     #: negotiation the runtime's attach gate runs, with the query parameter as
     #: this transport's half).
     supplements: bool = False
+    #: Whether this subscriber declared ``?diff_bindings=1`` (QA F5 on #3762):
+    #: only then does its initial snapshot frame carry nested write/edit
+    #: binding rows. Default False keeps an older renderer's rows unchanged.
+    diff_bindings: bool = False
     journal_order: bool = False
     #: Whether this subscriber negotiated the COMPLETE peer-source contract
     #: (the events route's ``?peer_journal_source=1``): only then does the
@@ -3651,6 +3708,7 @@ class DesktopSessionBridge:
         order_ids: list[str] | None = None,
         peer_journal_source: bool = False,
         supplements: bool = False,
+        diff_bindings: bool = False,
     ) -> dict[str, Any]:
         # THE FRAME'S DEADLINE STARTS HERE, at the request, not at its own read:
         # everything this method does before the page (the attention glance, the
@@ -3766,6 +3824,9 @@ class DesktopSessionBridge:
                 **({"journal_order": True, "order_ids": order_ids} if journal_order else {}),
                 peer_journal_source=peer_journal_source,
                 **supplement_read_options(supplements),
+                # Only when declared, like supplements: a forwarding path that
+                # predates the flag keeps its exact call shape.
+                **cast("DiffBindingReadOptions", {"diff_bindings": True} if diff_bindings else {}),
                 # THE SNAPSHOT'S OWN BUDGET, measured from the request: the frame
                 # read may spend what REMAINS of it on facts and nothing more. See
                 # ``open_frame.OPEN_FRAME_SNAPSHOT_BUDGET_S`` for the figure and
@@ -3890,6 +3951,7 @@ class DesktopSessionBridge:
         source_read: str | None = None,
         expected_journal_generation: str | None = None,
         supplements: bool = False,
+        diff_bindings: bool = False,
         deadline: float | None = None,
     ) -> dict[str, Any]:
         """One page of the durable journal.
@@ -4051,6 +4113,10 @@ class DesktopSessionBridge:
                 journal_order=journal_order,
                 order_ids=order_ids,
                 supplements=self._can_paint_supplements(supplements),
+                # No runtime capability gate: the binding is durable host data
+                # the strip re-validates against THIS session; the viewer's
+                # declaration is the only input.
+                diff_bindings=diff_bindings,
                 # ONLY A CALLER-SUPPLIED DEADLINE bounds the display-only proof
                 # join: that is the snapshot's first frame. A standalone
                 # ``/history`` page keeps waiting for the join, because it is
@@ -4145,6 +4211,7 @@ class DesktopSessionBridge:
         journal_order: bool = False,
         order_ids: list[str] | None = None,
         supplements: bool = False,
+        diff_bindings: bool = False,
         paint_deadline: float | None = None,
     ) -> dict[str, Any]:
         """The paint-only, run-aligned page of ``docs/DESKTOP_API.md`` §"The open frame".
@@ -4187,6 +4254,9 @@ class DesktopSessionBridge:
         through one call, and splitting the parameter list per flag is how the two
         pages would come to disagree about the same rows.
         """
+        # The strip scopes binding rows to the VIEWED session id, never a row's
+        # own claim; ``None`` keeps the pre-flag allow-list exactly.
+        binding_view = self.session_id if diff_bindings else None
         directory = self.root / "sessions" / self.session_id
         if around_id is not None:
             try:
@@ -4204,14 +4274,23 @@ class DesktopSessionBridge:
                     "head_cut": False,
                 }
             anchored = self._wire_rows(page.entries, copy=False)
-            anchored_index = await self._frame_source(deadline, [page])
+            anchored_index = await self._frame_source(
+                deadline, [page], paint_deadline=paint_deadline
+            )
             anchored_index, facts = await self._resolve_frame_source(
-                anchored_index, anchored, [page], order_ids or [], False, deadline
+                anchored_index,
+                anchored,
+                [page],
+                order_ids or [],
+                False,
+                deadline,
+                paint_deadline=paint_deadline,
             )
             result = build_frame(
                 anchored,
                 supplements=supplements,
-                memo=StripMemo(supplements=supplements),
+                diff_bindings=binding_view,
+                memo=StripMemo(supplements=supplements, diff_bindings=binding_view),
                 index=anchored_index,
                 resolved_runs=facts.runs if facts is not None else None,
                 runs_state="building",
@@ -4276,7 +4355,7 @@ class DesktopSessionBridge:
         # strips it twice more. Safe because every row here is this request's own
         # row object built by ``_wire_rows`` (its payload may be shared with the
         # page cache, but the memo keys the request's own envelope dict).
-        strip_memo = StripMemo(supplements=supplements)
+        strip_memo = StripMemo(supplements=supplements, diff_bindings=binding_view)
         for attempt in range(OPEN_FRAME_MAX_RAW_PAGES):
             try:
                 page = await load_transcript_page(
@@ -4323,9 +4402,25 @@ class DesktopSessionBridge:
             page_rows.append((len(rows), page.has_more))
             if not collected:
                 break
-            kept, reached = align_page(collected, limit, supplements=supplements, memo=strip_memo)
-            paintable_rows = paintable(collected, supplements=supplements, memo=strip_memo)
-            if reached and len(paintable(kept, supplements=supplements, memo=strip_memo)) >= limit:
+            kept, reached = align_page(
+                collected,
+                limit,
+                supplements=supplements,
+                memo=strip_memo,
+                diff_bindings=binding_view,
+            )
+            paintable_rows = paintable(
+                collected, supplements=supplements, memo=strip_memo, diff_bindings=binding_view
+            )
+            if (
+                reached
+                and len(
+                    paintable(
+                        kept, supplements=supplements, memo=strip_memo, diff_bindings=binding_view
+                    )
+                )
+                >= limit
+            ):
                 break
             # THE INDEX IS FETCHED AFTER THE FIRST PAGE, DELIBERATELY: the page is
             # what the client asked for and it must not wait behind a scan, while
@@ -4350,7 +4445,9 @@ class DesktopSessionBridge:
                 and through_id is None
                 and around_id is None
             ):
-                index = await self._frame_source(deadline, order_pages)
+                index = await self._frame_source(
+                    deadline, order_pages, paint_deadline=paint_deadline
+                )
                 index_at_first_page = index is not None
             if (
                 index is not None
@@ -4378,7 +4475,7 @@ class DesktopSessionBridge:
                 break
         step("pages", pages=len(order_pages), rows=len(collected))
         if index is None:
-            index = await self._frame_source(deadline, order_pages)
+            index = await self._frame_source(deadline, order_pages, paint_deadline=paint_deadline)
             if tail_read and not index_at_first_page:
                 # THE INDEX LANDED DURING THE HUNT (#3037 QA, O1; the relay twin
                 # carries the same rule): the facts will say ``ready``, so the rows
@@ -4391,6 +4488,7 @@ class DesktopSessionBridge:
                     limit=limit,
                     supplements=supplements,
                     memo=strip_memo,
+                    diff_bindings=binding_view,
                 )
                 if stop is not None and stop < len(page_rows):
                     collected = collected[-sum(rows for rows, _more in page_rows[:stop]) :]
@@ -4405,14 +4503,27 @@ class DesktopSessionBridge:
         # not paid for, and ``runs`` carries that run's true size instead.
         step("frame_source", index=type(index).__name__)
         index, facts = await self._resolve_frame_source(
-            index, collected, order_pages, order_ids or [], tail_read, deadline
+            index,
+            collected,
+            order_pages,
+            order_ids or [],
+            tail_read,
+            deadline,
+            paint_deadline=paint_deadline,
         )
         step("resolve", facts=facts is not None)
-        kept, reached = align_page(collected, limit, supplements=supplements, memo=strip_memo)
+        kept, reached = align_page(
+            collected,
+            limit,
+            supplements=supplements,
+            memo=strip_memo,
+            diff_bindings=binding_view,
+        )
         result = build_frame(
             kept,
             supplements=supplements,
             memo=strip_memo,
+            diff_bindings=binding_view,
             index=index,
             resolved_runs=facts.runs if facts is not None else None,
             runs_state="building",
@@ -4492,11 +4603,24 @@ class DesktopSessionBridge:
             ]
         )
 
-    async def _frame_source(self, deadline: float, pages: list[Any]) -> Any:
+    async def _frame_source(
+        self, deadline: float, pages: list[Any], *, paint_deadline: float | None = None
+    ) -> Any:
         """Resident first, then witnessed tail summary; fallback keeps its wager.
 
         A summary only guides the head hunt. It never authorizes suppressing a
         refresh for a later failed selection or pretending the whole index exists.
+
+        THE SUMMARY READ IS BOUNDED BY THE FIRST FRAME'S DEADLINE (``paint_deadline``,
+        set only for the snapshot's embedded page). It is a SQLite read on a
+        worker thread and was awaited in full: on the operator's v0.102.2
+        desktop it measured up to 1,178 ms on one 3.2 s open (session
+        7c8130c573dd) against a 120 ms ``OPEN_FRAME_SNAPSHOT_BUDGET_S``. Past the
+        deadline the frame proceeds with no index -- the head hunt's existing
+        blind path and ``runs_state='building'`` -- and the follow-up ``/history``
+        (``paint_deadline=None``) waits for the summary and carries the facts.
+        No refresh is started on that timeout: the summary EXISTS, it was only
+        slow, and a full scan would cost far more than the read it replaces.
         """
         source = index_read_model.page_source(pages)
         resident = transcript_index.fresh_resident(self.root, self.session_id)
@@ -4508,9 +4632,12 @@ class DesktopSessionBridge:
             )
             return resident if source == expected else None
         step = _OpenFrameSteps(self.session_id)
-        projected = await asyncio.to_thread(
-            index_read_model.summary, self.root, self.session_id, source
+        finished, projected = await _bounded_frame_read(
+            paint_deadline, index_read_model.summary, self.root, self.session_id, source
         )
+        if not finished:
+            step("frame_source.summary", state="deadline")
+            return None
         step("frame_source.summary", state=projected.state)
         if projected.state == "ready":
             return projected.value
@@ -4526,11 +4653,28 @@ class DesktopSessionBridge:
         order_ids: list[str],
         reaches_eof: bool,
         deadline: float,
+        *,
+        paint_deadline: float | None = None,
     ) -> tuple[Any, Any]:
-        """Materialize selected facts before build_frame, on an existing worker hop."""
+        """Materialize selected facts before build_frame, on an existing worker hop.
+
+        THE ``frame_facts`` HOP IS BOUNDED BY THE FIRST FRAME'S DEADLINE, as
+        ``_frame_index`` and the proof join already are. It was the one
+        open-frame await with no bound: on the operator's v0.102.2 desktop
+        (21 sidebar opens, ``LOP_OPEN_TRACE``) ``a.hist.resolve`` on the summary
+        path measured median 88 ms and max 818 ms, against a 120 ms
+        ``OPEN_FRAME_SNAPSHOT_BUDGET_S`` it was supposed to share. Past the
+        deadline the frame answers with no facts -- the ``building`` shape it
+        already serves for a cold index -- and the standalone ``/history``
+        that follows (``paint_deadline=None``) waits for the read and carries
+        them. No ``_frame_index`` wait follows a timeout: the budget is spent,
+        and starting a full refresh scan for a summary that exists would cost
+        more than the read it abandons.
+        """
         source = index_read_model.page_source(pages)
         if isinstance(candidate, index_read_model.FrameSummary):
-            result = await asyncio.to_thread(
+            finished, result = await _bounded_frame_read(
+                paint_deadline,
                 index_read_model.frame_facts,
                 self.root,
                 self.session_id,
@@ -4539,6 +4683,8 @@ class DesktopSessionBridge:
                 order_ids=order_ids,
                 source=source,
             )
+            if not finished:
+                return None, None
             if result.state == "ready":
                 return None, result.value
             # Summary success is NOT selection success. Corruption/races use the
@@ -6526,6 +6672,7 @@ class DesktopSessionBridge:
         *,
         frontend_replace: bool = False,
         supplements: bool = False,
+        diff_bindings: bool = False,
         journal_order: bool = False,
         peer_journal_source: bool = False,
     ) -> DesktopSubscription:
@@ -6556,6 +6703,7 @@ class DesktopSessionBridge:
         sub = DesktopSubscription(
             frontend_replace=frontend_replace,
             supplements=supplements,
+            diff_bindings=diff_bindings,
             journal_order=journal_order,
             peer_journal_source=peer_journal_source,
         )
@@ -6609,6 +6757,10 @@ class DesktopSessionBridge:
                 **({"journal_order": True, "order_ids": order_ids} if journal_order else {}),
                 peer_journal_source=peer_journal_source,
                 **supplement_read_options(sub.supplements),
+                **cast(
+                    "DiffBindingReadOptions",
+                    {"diff_bindings": True} if sub.diff_bindings else {},
+                ),
             )
             if open_trace.enabled():
                 open_trace.mark(
@@ -7301,6 +7453,37 @@ def _persisted_children(
             return []
         payload = dict(entry.payload.get("details", {}))
     return list(roster_records(payload))
+
+
+def _diff_page(
+    session_dir: Path,
+    session_id: str,
+    call_id: str,
+    start: int,
+    limit: int,
+    offset: int,
+    root: Path,
+) -> dict[str, Any]:
+    """``diff_archive.load_page`` with its refusals mapped to the host's errors.
+
+    Not-found becomes ``KeyError`` (uniform 404 via ``errors()``); a bad page
+    request stays :class:`~local_operator.tools.diff_archive.DiffPageRangeError`
+    for the route to answer 422.
+    """
+    from local_operator.tools import diff_archive
+
+    try:
+        return diff_archive.load_page(
+            session_dir,
+            session_id,
+            call_id,
+            start=start,
+            limit=limit,
+            offset=offset,
+            config_root=root,
+        )
+    except diff_archive.DiffArchiveNotFound:
+        raise KeyError("Unknown tool call") from None
 
 
 def _contained_child_dir(root: Path, session_id: str, child_id: str) -> Path:
@@ -8857,6 +9040,67 @@ class DesktopSessions:
                 raise KeyError("Unknown attachment")
             data_b64, mime_type = resolved
             return base64.b64decode(data_b64), mime_type
+
+        return await asyncio.to_thread(read)
+
+    async def tool_call_diff(
+        self,
+        session_id: str,
+        call_id: str,
+        *,
+        start: int = 0,
+        limit: int = 200,
+        offset: int = 0,
+    ) -> dict[str, Any]:
+        """One page of a write/edit call's complete, source-redacted diff.
+
+        The durable read behind the tool card's "full diff" view: the inline
+        preview keeps 200 rows, and the rest lives in the redacted archive
+        (``tools/diff_archive``). Outside :meth:`session` for the same reason
+        as :meth:`attachment` -- reading a finished conversation's evidence
+        must not start a runtime. The id gate is the attachment route's (shape
+        first, then a USER conversation on this device), and membership is
+        then proved by ``diff_archive.load_page`` from this session's own
+        transcript: the call must be a persisted write/edit row and the
+        artifact header must name this session and call. Every refusal is a
+        ``KeyError`` so the route's 404 cannot tell an unknown session from a
+        foreign call. A peer's conversation has no local archive and refuses
+        the same way.
+        """
+
+        def read() -> dict[str, Any]:
+            if not SESSION_ID.fullmatch(session_id):
+                raise KeyError("Unknown session")
+            path = self.root / "sessions" / session_id
+            if not path.is_dir() or not is_user_session(path):
+                raise KeyError("Unknown session")
+            return _diff_page(path, session_id, call_id, start, limit, offset, self.root)
+
+        return await asyncio.to_thread(read)
+
+    async def child_tool_call_diff(
+        self,
+        session_id: str,
+        child_id: str,
+        call_id: str,
+        *,
+        start: int = 0,
+        limit: int = 200,
+        offset: int = 0,
+    ) -> dict[str, Any]:
+        """The child twin of :meth:`tool_call_diff`, behind the child containment proof.
+
+        The subagent reader is where the operator reported the missing rows,
+        so this is the primary door. ``_contained_child_dir`` refuses an
+        unknown parent, a child the parent never launched and a non-subagent
+        directory before the transcript is touched; the archive is then bound
+        to the CHILD'S own session id (its directory name, which is the id its
+        loop stamped on the artifact).
+        """
+
+        def read() -> dict[str, Any]:
+            child_dir = _contained_child_dir(self.root, session_id, child_id)
+            return _diff_page(child_dir, child_dir.name, call_id, start, limit, offset, self.root)
 
         return await asyncio.to_thread(read)
 

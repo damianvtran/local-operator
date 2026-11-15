@@ -204,6 +204,10 @@ def test_a_pending_lookup_names_the_full_retry_command(
     """R1-n1: the retry sentence is a command an agent can run as written."""
     owner, requester, wire = pair
     wire.drop = 1
+    # ``pending`` is now waited out for the confirm window; shrink it so an owner
+    # stuck at pending is reached in milliseconds rather than the production 60 s.
+    monkeypatch.setattr(relay, "CREATE_CONFIRM_WINDOW_S", 0.2)
+    monkeypatch.setattr(relay, "CREATE_CONFIRM_POLL_S", 0.01)
     monkeypatch.setattr(
         owner._create_keys, "lookup", lambda _device, _key: ("pending", "")  # noqa: SLF001
     )
@@ -293,3 +297,140 @@ def test_a_concurrent_replay_while_pending_creates_nothing(tmp_path: Path) -> No
     assert index.reserve("d", "k" * 16) == ("new", "")
     assert index.reserve("d", "k" * 16) == ("pending", "")
     assert index.lookup("d", "k" * 16) == ("pending", "")
+
+
+# ---------------------------------------------------------------------------
+# The confirm WINDOW (2026-11-14, 535b1f3bb8df): the reply was lost because the
+# link dropped, the one lookup ran while it was still down, and the caller gave
+# up on a session the owner had created and bound to its key.
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def flaky(
+    pair: tuple[Any, Any, _Wire], monkeypatch: pytest.MonkeyPatch
+) -> tuple[Any, Any, _Wire, dict[str, int]]:
+    """``pair`` whose link goes DOWN for ``link["down"]`` dials once a reply is lost.
+
+    Armed only by the lost reply, so the definitions push and the create itself
+    see a healthy link; every later ``_ensure_link`` (the lookups) finds no link
+    until the counter runs out — the drop-then-redial the owner's audit showed.
+    Windows are shrunk so the test spends milliseconds, not the production 60 s.
+    """
+    owner, requester, wire = pair
+    link = {"down": 0, "arm": 0, "dials_refused": 0}
+    original = wire.request
+
+    def request(frame: dict[str, Any], timeout: float | None = None) -> Any:
+        reply = original(frame, timeout)
+        if frame["op"] == "net_session_create" and reply is None:
+            link["down"] = link["arm"]
+        return reply
+
+    def ensure(_peer: str) -> Any:
+        if link["down"] > 0:
+            link["down"] -= 1
+            link["dials_refused"] += 1
+            return None
+        return wire
+
+    monkeypatch.setattr(wire, "request", request)
+    monkeypatch.setattr(requester, "_ensure_link", ensure)
+    monkeypatch.setattr(relay, "CREATE_CONFIRM_POLL_S", 0.01)
+    monkeypatch.setattr(relay, "CREATE_CONFIRM_WINDOW_S", 5.0)
+    return owner, requester, wire, link
+
+
+def _ops(wire: _Wire) -> list[str]:
+    return [frame["op"] for frame in wire.sent]
+
+
+def test_a_link_down_across_the_first_lookups_still_reports_the_created_id(
+    flaky: tuple[Any, Any, _Wire, dict[str, int]],
+) -> None:
+    """Link down for three asks, then back: the id is reported, nothing re-sent."""
+    owner, requester, wire, link = flaky
+    wire.drop = 1
+    link["arm"] = 3
+    detail = requester._ctl_peer_create({"peer": "node-2"})  # noqa: SLF001
+    minted = _sessions(owner)
+    assert len(minted) == 1
+    assert detail["session_id"] == minted[0], detail
+    assert detail["create_unconfirmed"] is True, detail
+    assert link["dials_refused"] == 3, link
+    # ONE create, ONE lookup (the first that could reach the owner): the window
+    # repeats only the read, and only while the owner could not be asked.
+    assert _ops(wire) == ["net_session_create", "net_session_create_lookup"]
+
+
+def test_an_owner_that_never_bound_the_key_is_honestly_unconfirmed(
+    flaky: tuple[Any, Any, _Wire, dict[str, int]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The create frame never reached the owner: once asked, it says so — no guess."""
+    owner, requester, wire, link = flaky
+    link["arm"] = 2
+    original = wire.request
+
+    def lose_the_create(frame: dict[str, Any], timeout: float | None = None) -> Any:
+        if frame["op"] == "net_session_create":
+            wire.sent.append(dict(frame))
+            link["down"] = link["arm"]
+            return None  # lost on the way: the owner never ran it
+        return original(frame, timeout)
+
+    monkeypatch.setattr(wire, "request", lose_the_create)
+    with pytest.raises(types.MeshRefusal) as refused:
+        requester._ctl_peer_create({"peer": "node-2"})  # noqa: SLF001
+    assert refused.value.code == "create_unconfirmed", refused.value
+    # The owner WAS asked once the link returned, and said it holds nothing.
+    assert "holds no session for it yet" in refused.value.sentence, refused.value
+    assert _sessions(owner) == []
+    assert _ops(wire) == ["net_session_create", "net_session_create_lookup"]
+
+
+def test_an_old_owner_is_asked_once_back_up_and_never_sent_the_create_again(
+    flaky: tuple[Any, Any, _Wire, dict[str, int]],
+) -> None:
+    """``unknown_op`` ends the window at once: re-asking (or re-creating) is wrong."""
+    owner, requester, wire, link = flaky
+    wire.drop = 1
+    wire.lookup = "unknown_op"
+    link["arm"] = 2
+    with pytest.raises(types.MeshRefusal) as refused:
+        requester._ctl_peer_create({"peer": "node-2"})  # noqa: SLF001
+    assert refused.value.code == "create_unconfirmed", refused.value
+    assert "could not be asked" in refused.value.sentence
+    # The owner was reached after the drop (the lookup went out) and its
+    # answer was taken as final: one create, one lookup, one session.
+    assert _ops(wire) == ["net_session_create", "net_session_create_lookup"]
+    assert len(_sessions(owner)) == 1
+
+
+def test_a_link_that_never_returns_gives_up_within_the_window(
+    flaky: tuple[Any, Any, _Wire, dict[str, int]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Bounded: a device gone for good costs the window, then "may have been created"."""
+    import time
+
+    _owner, requester, wire, link = flaky
+    monkeypatch.setattr(relay, "CREATE_CONFIRM_WINDOW_S", 0.3)
+    wire.drop = 1
+    link["arm"] = 10**6
+    started = time.monotonic()
+    with pytest.raises(types.MeshRefusal) as refused:
+        requester._ctl_peer_create({"peer": "node-2"})  # noqa: SLF001
+    elapsed = time.monotonic() - started
+    assert refused.value.code == "create_unconfirmed"
+    assert "may have been created" in refused.value.sentence
+    assert link["dials_refused"] > 1, "the window asked only once"
+    assert elapsed < 2.0, elapsed
+    assert _ops(wire) == ["net_session_create"]
+
+
+def test_the_client_bounds_outlast_the_relay_and_fit_the_tool_child() -> None:
+    """A client that gives up first loses the id its relay is still confirming."""
+    from local_operator.tools import builtin
+
+    relay_worst = relay.engage_hop_bound_s() + relay.CREATE_CONFIRM_WINDOW_S
+    assert relay.CREATE_CLIENT_BOUND_S > relay_worst
+    assert relay.CREATE_CLIENT_BOUND_S < builtin._MESH_CREATE_ENGAGE_TIMEOUT_S  # noqa: SLF001
