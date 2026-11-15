@@ -64,7 +64,7 @@ CI_YML = REPO / ".github" / "workflows" / "ci.yml"
 #: `_ci_jobs` for how the pins follow them.
 FULL_SUITE_YML = REPO / ".github" / "workflows" / "full-suite.yml"
 #: Jobs that live in full-suite.yml, not ci.yml. `changes` is in both.
-FULL_SUITE_JOBS = frozenset({"test", "coverage-report", "tui-e2e", "merge-gate"})
+FULL_SUITE_JOBS = frozenset({"test", "coverage-report", "tui-e2e", "merge-gate", "precondition"})
 PYPROJECT = REPO / "pyproject.toml"
 MAKEFILE = REPO / "Makefile"
 
@@ -3535,6 +3535,38 @@ def test_pull_requests_do_not_run_the_unit_suites() -> None:
 # ritual present: each is a way the gate could be made to *look* green.
 
 
+#: `always()` plus the ONE data-driven skip: `superseded` is only ever true on a
+#: push to main that a newer tested tip replaced (scripts/fast_gate_check.py).
+MERGE_GATE_IF = "always() && needs.precondition.outputs.superseded != 'true'"
+
+
+def test_every_heavy_full_suite_job_is_gated_on_the_precondition() -> None:
+    """GH #4074: `!cancelled()` overrides `needs` success, so the gate must be explicit.
+
+    A heavy job that forgot `needs.precondition.outputs.ok == 'true'` would run
+    ~380 runner-minutes after a red precondition. The aggregate must also need
+    the precondition so a red one turns the required check red.
+    """
+    jobs = yaml.safe_load(FULL_SUITE_YML.read_text())["jobs"]
+    for job_id in ("test", "tui-e2e"):
+        assert "precondition" in jobs[job_id]["needs"], job_id
+        assert "needs.precondition.outputs.ok == 'true'" in jobs[job_id]["if"], job_id
+    # coverage-report rides `needs: test`: a skipped test skips it by default.
+    assert jobs["coverage-report"]["needs"] == "test"
+    assert "precondition" in jobs["merge-gate"]["needs"]
+    assert jobs["precondition"]["permissions"] == {"contents": "read", "actions": "read"}
+    # The helper must come from a trusted tree, never from the PR checkout.
+    assert "actions/checkout" not in str(jobs["precondition"])
+    assert "pull_request.base.sha" in str(jobs["precondition"])
+
+
+def test_nightly_schedule_has_its_own_concurrency_group() -> None:
+    """A push must never replace a pending nightly (full coverage backstop)."""
+    group = yaml.safe_load(FULL_SUITE_YML.read_text())["concurrency"]["group"]
+    assert "github.event_name == 'schedule' && 'full-suite-nightly'" in group
+    assert group.index("full-suite-nightly") < group.index("full-suite-main")
+
+
 def test_merge_gate_aggregates_every_full_suite_job() -> None:
     """One stable required name, `always()`, unconditional, over every suite job.
 
@@ -3548,7 +3580,7 @@ def test_merge_gate_aggregates_every_full_suite_job() -> None:
         f"the required check name drifted to {gate['name']!r}: branch protection "
         "names this exact string, and a rename stops gating silently"
     )
-    assert gate["if"] == "always()", (
+    assert gate["if"] == MERGE_GATE_IF, (
         "the aggregate must report on EVERY run of this workflow, whatever event "
         "started it — a condition that can be false publishes `skipped`, which "
         f"satisfies a required check (if: {gate['if']!r})"
@@ -3623,8 +3655,8 @@ def test_no_full_suite_job_is_conditional_on_the_triggering_event() -> None:
             "(`needs.changes.outputs.*`), never by which event ran"
         )
     assert (
-        jobs["merge-gate"]["if"] == "always()"
-    ), "the aggregate is the required check: it must be unconditional"
+        jobs["merge-gate"]["if"] == MERGE_GATE_IF
+    ), "the aggregate is the required check: only the push-superseded data may skip it"
 
 
 def test_the_makefile_rearms_the_merge_gate_with_the_label_ritual() -> None:

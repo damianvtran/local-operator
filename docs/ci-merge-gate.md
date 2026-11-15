@@ -177,3 +177,23 @@ group on GitHub, and controlled repeated labels are needed to demonstrate pendin
 replacement. No duplicate live suites are armed just to obtain this evidence;
 CI must still prove the unchanged full matrix and required aggregate on the
 final head. Never report a dispatch or local YAML assertion as that proof.
+
+## Cost gate: fast CI first, superseded main runs skipped (GH #4074)
+
+The `precondition` job in `full-suite.yml` runs `scripts/fast_gate_check.py`
+(stdlib only, fetched from the PR's **base** commit, never the PR checkout)
+before any heavy job. Every heavy job needs it and tests `outputs.ok == 'true'`.
+
+| Event | Rule |
+|---|---|
+| `pull_request` (label arm) | newest `ci.yml` `pull_request` run bound to this PR number, head SHA and head repo; latest attempt; exactly one `CI Gate` job `success`. Pending, red, missing, fork/unbound, API error: the check goes **red in seconds**, no test job starts. |
+| `workflow_dispatch` (`train/*`, WIDE route) | newest `ci.yml` **push/dispatch** run on the same SHA, branch and repo, `CI Gate` green. A carrier PR's run tests `refs/pull/<n>/merge`, a different tree, and never counts. Train route: `gh workflow run ci.yml --ref train/<t>` -> wait for `CI Gate` on that SHA -> `gh workflow run full-suite.yml --ref train/<t>`. Always the **full** suite. |
+| `push` to `main` | after a 300 s settle, if a newer non-release, untagged tip descends from this SHA and has its own live full-suite run, this run is skipped and `Merge gate (full suite)` shows grey with `SUPERSEDED by <tip>`. Anything unknown runs in full. |
+| `schedule` | never gated or coalesced; own concurrency group `full-suite-nightly`. |
+
+There is no bypass input. The runner never waits for CI; use
+`make fast-gate PR=<n>` (one-shot, exits immediately) or `gh pr checks <n> --watch`
+before `make merge-gate PR=<n>`. Coverage is unchanged: every labeled PR head,
+the final main tip of each burst, every release/tagged commit and the nightly
+still run every test. The first deploy fails closed: until the base commit
+contains the helper, a PR-triggered gate is red by design.
