@@ -17,9 +17,9 @@ Three decisions shape this module, and each avoids a named trap:
   ``notifications/compose.py``. The operator then asked for the push to say
   which session finished and preview what it said, "similar to the UI
   notifications", so :func:`completion_alert` now renders through that same
-  composer — one formatter, one privacy rule (``display.notification_session_name``
-  gates the name and the snippet together), and the phone says what the desktop
-  says. The ``kind``, keys and every other field are still spelled here.
+  composer — one formatter, and the phone says what the desktop says. The
+  ``kind``, keys and every other field are still spelled here. WHETHER the
+  composer is asked at all is a two-switch consent rule, below.
 
 - **``kind`` is the STORE's vocabulary, not the composer's.** The composer's set
   lists ``retired`` and the gate kinds but NOT ``closed``, so a builder keyed to
@@ -52,15 +52,31 @@ The machine also never sends a badge — ``aps.badge`` is rejected by §1.5 — 
 ``tests/fixtures/push/payload-forbidden-fields.json`` names it as forbidden so a later edit
 cannot add it here without failing a test.
 
-**The alert text now carries conversation content when the user allows it,
-and that is a privacy decision, not a formatting one.** With
-``display.notification_session_name`` on, the session's name and a line of the
-model's reply (or, for ``error``, the provider's failure line) leave the machine:
-they transit Radient's cloud, which keeps emit records for up to 14 days, and the
-platform push service. With it off, the alert is ``APP_NAME`` over the house
-sentence, byte for byte what the desktop shows in that mode. Every string is
-clamped to the cloud's 1–200 code-point bound (:data:`ALERT_TEXT_MAX_CHARS`).
-The digest stays generic: it spans conversations, so it names none.
+**The alert text carries conversation content only when BOTH switches allow it,
+and that is a privacy decision, not a formatting one** (operator decision,
+2026-11-14, PR #3990 comment 6881635039: previews ON by default, "follow the
+precedent" of ChatGPT and Claude on mobile, with off switches for those who
+care). The session's name and a line of the model's reply (or, for ``error``,
+the provider's failure line) leave the machine only when:
+
+1. every LIVE phone of this computer resolves ``preferences.previews`` to true
+   (``push_devices.PREFERENCE_KEYS``; missing means true). It is "every", not
+   "any", because the cloud fans a completion out to all of the computer's
+   devices and has no per-device ``exclude`` for that form (§3.2): one phone
+   that turned previews off can only be honoured by a generic banner for all.
+   The push worker resolves this and passes ``previews``; and
+2. the desktop's ``display.notification_session_name`` is on — the composer
+   reads it on every call and fails CLOSED when it cannot.
+
+Either switch off: ``APP_NAME`` over the house sentence, byte for byte the
+pre-2026-11-14 generic banner minus the count line, and no name, snippet or
+error text anywhere in the emit. When allowed, the text transits Radient's
+cloud (agent-server ``session_push_emits`` keeps the alert for 14 days) and
+Apple's or Google's push service, so it is credential-scrubbed
+(``redaction_shapes.scrub_secrets``), stripped of bidi/zero-width spoofing
+characters and clamped to the cloud's 1–200 code-point bound
+(:data:`ALERT_TEXT_MAX_CHARS`) first. The digest stays generic: it spans
+conversations, so it names none.
 
 The keys are frozen here too, and they are deliberately different in kind
 (§3.4). A **completion** emit is keyed on the record's CONTENT, so a heal mints a
@@ -76,6 +92,7 @@ three ride one ``Idempotency-Key`` header on one route.
 from __future__ import annotations
 
 import hashlib
+import re
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
@@ -296,9 +313,29 @@ ALERT_TEXT_MAX_CHARS = 200
 #: costs is known exactly.
 _ELLIPSIS = "\u2026"
 
+#: Bidi overrides/isolates and zero-width characters (security review r1, S-3).
+#: ``sanitize_text`` strips only C0/C1 controls, so a model-written session name
+#: carrying U+202E could render reversed or spoofed text on a lock screen. Kept
+#: LOCAL rather than widening ``sanitize_text``: that helper also feeds terminal
+#: titles and argv on the desktop, whose behaviour this PR does not own.
+#: U+200C (ZWNJ) and U+200D (ZWJ) are deliberately KEPT, narrowing the review's
+#: suggested ``\u200b-\u200f``: ZWNJ is orthographic in Urdu, Hindi and Persian
+#: text (two of this product's locales), and ZWJ glues emoji sequences — a
+#: family emoji stripped of it renders as four people. Neither reorders text,
+#: which is the spoofing this guards; LRM/RLM (U+200E/F) can, and go.
+_INVISIBLE_FORMAT_CHARS = re.compile("[\u200b\u200e\u200f\u202a-\u202e\u2066-\u2069\ufeff]")
+
 
 def _bounded_alert_text(text: str, fallback: str) -> str:
-    """``text`` made safe for the cloud's 1–200 code-point rule.
+    """``text`` made safe to leave the machine and fit the cloud's 1–200 rule.
+
+    SCRUBBED FIRST (security review r1, S-2): this text is copied to Radient's
+    cloud for 14 days and through APNs/FCM, so a reply that quotes an API key or
+    a ``Bearer`` header must not carry it verbatim. ``scrub_secrets`` is the
+    repo's central credential-shape pass; it runs before the empty-check and the
+    clamp so a fully redacted string still falls back and a clamp can never cut
+    a redaction marker open to expose part of a value. The fallback (house
+    text) is scrubbed too, for uniformity — it is a catalogue string today.
 
     NEVER EMPTY: an empty (or whitespace-only) string is replaced by
     ``fallback``, the house sentence, because the cloud refuses an empty alert
@@ -314,11 +351,19 @@ def _bounded_alert_text(text: str, fallback: str) -> str:
     """
     from rich.cells import split_graphemes
 
-    # Re-sanitised even though compose already did it: this text now leaves the
-    # machine, and control characters are never wanted on a lock screen.
-    cleaned = sanitize_text(text, len(text) if text else 0)
+    from local_operator.redaction_shapes import scrub_secrets
+
+    def _clean(value: str) -> str:
+        # Re-sanitised even though compose already did it: this text now leaves
+        # the machine, and control characters are never wanted on a lock screen.
+        # Invisible format characters go first so ``sanitize_text`` collapses
+        # any whitespace their removal leaves behind.
+        value = _INVISIBLE_FORMAT_CHARS.sub("", scrub_secrets(value or ""))
+        return sanitize_text(value, len(value))
+
+    cleaned = _clean(text)
     if not cleaned:
-        cleaned = sanitize_text(fallback, len(fallback)) or APP_NAME
+        cleaned = _clean(fallback) or APP_NAME
     if len(cleaned) <= ALERT_TEXT_MAX_CHARS:
         return cleaned
     budget = ALERT_TEXT_MAX_CHARS - len(_ELLIPSIS)
@@ -334,7 +379,9 @@ def _bounded_alert_text(text: str, fallback: str) -> str:
     return f"{cut}{_ELLIPSIS}" if cut else _ELLIPSIS
 
 
-def completion_alert(kind: str, *, session_dir: Path | None = None) -> dict[str, str]:
+def completion_alert(
+    kind: str, *, session_dir: Path | None = None, previews: bool = False
+) -> dict[str, str]:
     """The alert for one completion: the session's name over a preview of the turn.
 
     WHY THIS CHANGED (operator, 2026-11-14): "the notification should be more
@@ -351,13 +398,18 @@ def completion_alert(kind: str, *, session_dir: Path | None = None) -> dict[str,
     sentence otherwise — ``closed`` included, which it renders through
     ``BODIES``) and, crucially, the privacy rule.
 
-    CONTENT NOW LEAVES THE MACHINE. When ``display.notification_session_name``
-    is on, the session's name and a line of the model's reply travel through
-    Radient's cloud (which keeps emit records for up to 14 days) and Apple's or
-    Google's push service to the phone. That switch is the user's one control,
-    for the name and the snippet together, exactly as on the desktop: when it is
-    off, compose answers ``APP_NAME`` and the house sentence, and nothing derived
-    from the conversation is in the emit at all.
+    CONTENT LEAVES THE MACHINE ONLY WITH BOTH CONSENTS (module docstring;
+    operator decision 2026-11-14). ``previews`` is the phones' half: the push
+    worker passes ``True`` only when every live device resolves
+    ``preferences.previews`` to true. It DEFAULTS FALSE so a caller that forgets
+    it sends the generic banner rather than a name. With ``previews`` false the
+    composer is never called and the transcript never read: the alert is
+    ``APP_NAME`` over the house sentence for the kind. With it true, compose
+    applies the desktop's half, ``display.notification_session_name`` (failing
+    closed), and gates the failure line of an ``error`` the same way. The text
+    then travels through Radient's cloud (``session_push_emits`` keeps it 14
+    days) and Apple's or Google's push service, scrubbed and clamped by
+    :func:`_bounded_alert_text`.
 
     ``session_dir`` is the conversation's directory; ``None`` (or a directory
     that cannot be read) degrades to compose's nameless fallback. The count is
@@ -367,6 +419,11 @@ def completion_alert(kind: str, *, session_dir: Path | None = None) -> dict[str,
     (the push worker's tick already does, via ``asyncio.to_thread``).
     """
     house_body = BODIES.get(kind, _notify.BODY_COMPLETE)
+    if not previews:
+        return {
+            ALERT_TITLE_FIELD: _bounded_alert_text(APP_NAME, APP_NAME),
+            ALERT_BODY_FIELD: _bounded_alert_text(house_body, house_body),
+        }
     try:
         # Through the PACKAGE, as ``notification_payload`` does, so a test or a
         # wrapper that patches ``notifications.compose`` patches this path too.
@@ -478,6 +535,7 @@ def completion_payload(
     sound: str,
     sound_custom: str | None = None,
     session_dir: Path | None = None,
+    previews: bool = False,
 ) -> dict[str, Any]:
     """One completion emit's payload — the ``data`` object of ADR §3.2 #2.
 
@@ -501,8 +559,10 @@ def completion_payload(
 
     ``session_dir`` is the conversation's directory, read by
     :func:`completion_alert` for the session's name and a preview of the turn
-    (subject to the desktop's notification privacy switch). It never becomes a
-    payload field. ``None`` yields compose's nameless fallback alert.
+    when ``previews`` (every live phone allows previews) is true and the
+    desktop's notification privacy switch is on. Neither is ever a payload
+    field. ``previews`` defaults False — the generic banner — so a caller has to
+    claim the phones' consent explicitly.
     """
     if kind not in PUSH_KINDS:
         raise ValueError(f"unknown completion kind: {kind!r}")
@@ -516,7 +576,7 @@ def completion_payload(
         "kind": kind,
         "emit_id": emit_id,
         "count": wire_count(count),
-        ALERT_FIELD: completion_alert(kind, session_dir=session_dir),
+        ALERT_FIELD: completion_alert(kind, session_dir=session_dir, previews=previews),
         SOUND_FIELD: sound,
     }
     if sound_custom is not None:

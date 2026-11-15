@@ -409,14 +409,28 @@ def link_message(
 #:   are no longer push candidates at all; they stay mapped here so a kind the
 #:   worker starts pushing again lands on a defined switch.
 #: - ``errors`` — runs that ended in ``error``.
+#: - ``previews`` — whether a completion banner may show the session's name and
+#:   a preview of the turn (or an error's failure line) instead of the generic
+#:   house text. ON by default (operator decision, 2026-11-14, PR #3990 comment
+#:   6881635039: "follow the precedent" of ChatGPT and Claude on mobile). Unlike
+#:   the three above it gates CONTENT, not delivery, and it is honoured per
+#:   COMPUTER: the cloud fans a completion out to every device with no
+#:   per-device ``exclude``, so one live phone with previews off makes the
+#:   banner generic for all of them (``push_worker._previews_allowed``). The
+#:   text it allows is kept by Radient's cloud (agent-server
+#:   ``session_push_emits``) for 14 days.
 #:
 #: A missing ``preferences`` object, or a missing key inside one, means
 #: ``True``: a phone that never sent preferences, and every row an earlier
 #: build wrote, keeps exactly the behaviour it had. The app only sends the
 #: field to a daemon advertising the ``push_preferences`` capability, because
 #: this register body refuses unknown fields and an older daemon would refuse
-#: the whole registration.
-PREFERENCE_KEYS = ("enabled", "completions", "errors")
+#: the whole registration — and, for the same reason, sends ``previews`` only
+#: to a daemon that also advertises ``push_previews`` (a ``push_preferences``-
+#: only daemon refuses the key). The one deliberate exception to "keeps the
+#: behaviour it had" is ``previews`` itself: an older row resolves it to true,
+#: so banners become descriptive on upgrade, which is the operator's decision.
+PREFERENCE_KEYS = ("enabled", "completions", "errors", "previews")
 
 
 class PushDeviceRefusal(Exception):
@@ -975,7 +989,7 @@ def _checked_sound_cache(stems: object) -> list[str]:
 
 
 def resolved_preferences(record: Mapping[str, Any]) -> dict[str, bool]:
-    """One row's three push switches, with absence resolved to ``True``.
+    """One row's push switches, with absence resolved to ``True``.
 
     A row written before preferences existed carries no ``preferences`` key,
     and a stored object may name only some keys; both mean "on" (see
@@ -1473,7 +1487,7 @@ def _checked_preferences(value: object) -> dict[str, bool]:
     Strict like the body around it: a non-object, an unknown key (echoed
     BOUNDED, the same rule as the body's own unknown-field refusal) or a
     non-bool value refuses the whole register. A key the app left out is
-    stored resolved to ``True``, so the row always holds all three switches
+    stored resolved to ``True``, so the row always holds every switch
     and a reader never re-derives the default.
     """
     if not isinstance(value, dict):

@@ -136,6 +136,28 @@ def _session(root: Path, *, assistant: str = "", title: str = "") -> Path:
     return session
 
 
+def _incident(session: Path, raw: str) -> None:
+    """Append the ``session_incident`` record a classified failure journals.
+
+    The shape ``incidents.py`` writes (as test_compose's helper): compose reads
+    ``details.raw`` as an ``error`` banner's failure line, which can quote a
+    prompt fragment, a path or an account id — the riskiest text a push can
+    carry (security review r1, S-4).
+    """
+    row = {
+        "id": "incident-1",
+        "ts": 3.0,
+        "type": "message",
+        "payload": {
+            "kind": "custom",
+            "custom_type": "session_incident",
+            "details": {"text": f"rendered: {raw}", "raw": raw},
+        },
+    }
+    with (session / "transcript.jsonl").open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(row) + "\n")
+
+
 #: Every string the PRIVATE alert may carry: the house vocabulary, nothing else.
 def _house_strings() -> set[str]:
     return (
@@ -501,7 +523,7 @@ def test_a_named_completion_is_the_desktop_composers_title_and_preview(
     session = _session(tmp_path, assistant="Migrated 14 tables.", title="Quota reporting fix")
     composed = compose("complete", session_dir=session)
 
-    alert = completion_alert("complete", session_dir=session)
+    alert = completion_alert("complete", session_dir=session, previews=True)
 
     assert alert == {ALERT_TITLE_FIELD: composed.title, ALERT_BODY_FIELD: composed.body}
     assert alert == {
@@ -513,28 +535,168 @@ def test_a_named_completion_is_the_desktop_composers_title_and_preview(
     assert "need" not in alert[ALERT_BODY_FIELD]
 
 
-def test_with_names_off_no_session_text_reaches_the_emit_bytes(
-    tmp_path: Path,
-) -> None:
-    """The privacy switch is one promise for name AND snippet, as on the desktop.
+#: Text the fixture session carries in every place a banner could quote it:
+#: the name, the last reply, and an ``error``'s incident ``details.raw``.
+_LEAK_NAME = "Project Falcon"
+_LEAK_REPLY = "Secret plan: rotate the keys"
+_LEAK_FAILURE = "quota exhausted for acct-7731 while reading /Users/alice/payroll.xlsx"
 
-    Off (the autouse default here): the alert is exactly what the desktop shows
-    in that mode — the app name and the house sentence — and neither the session
-    name nor the snippet appears ANYWHERE in the serialised emit.
-    """
-    session = _session(tmp_path, assistant="Secret plan: rotate the keys", title="Project Falcon")
-    composed = compose("complete", session_dir=session)
-    payload = completion_payload(**{**COMPLETION_INPUT, "session_dir": session})
+
+def _leaky_session(root: Path) -> Path:
+    session = _session(root, assistant=_LEAK_REPLY, title=_LEAK_NAME)
+    _incident(session, _LEAK_FAILURE)
+    return session
+
+
+def _emit_bytes(session: Path, kind: str, *, previews: bool) -> tuple[dict[str, Any], bytes]:
+    payload = completion_payload(
+        **{**COMPLETION_INPUT, "kind": kind, "session_dir": session, "previews": previews}
+    )
     raw = json.dumps(emit_body(payload, DEVICE_ROWS), ensure_ascii=False).encode("utf-8")
+    return payload, raw
 
+
+def _assert_generic(payload: dict[str, Any], raw: bytes, kind: str) -> None:
+    """The P2 guard, re-scoped (security review r1, S-1/S-4): GENERIC unless allowed.
+
+    The alert is the house constants for the kind — the product name over the
+    house sentence, no count line — and no name, reply snippet, failure text or
+    session id appears anywhere in the serialised emit.
+    """
+    assert payload[ALERT_FIELD] == {
+        ALERT_TITLE_FIELD: APP_NAME,
+        ALERT_BODY_FIELD: BODIES.get(kind, BODY_COMPLETE),
+    }
+    leaks = (_LEAK_NAME, _LEAK_REPLY, "rotate the keys", _LEAK_FAILURE, "acct-7731", "abcdef123456")
+    for leaked in leaks:
+        assert leaked.encode("utf-8") not in raw, (kind, leaked)
+
+
+@pytest.mark.parametrize("kind", PUSH_KINDS)
+def test_with_previews_off_no_session_text_reaches_the_emit_bytes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, kind: str
+) -> None:
+    """A phone with previews off: generic, even with the desktop switch ON.
+
+    ``previews=False`` is what the worker passes when any live phone resolves
+    ``preferences.previews`` to false; the desktop flag cannot override it.
+    """
+    _names_on(monkeypatch)
+    payload, raw = _emit_bytes(_leaky_session(tmp_path), kind, previews=False)
+    _assert_generic(payload, raw, kind)
+
+
+@pytest.mark.parametrize("kind", PUSH_KINDS)
+def test_with_names_off_no_session_text_reaches_the_emit_bytes(tmp_path: Path, kind: str) -> None:
+    """The desktop switch off (the autouse default here): generic, even with previews on.
+
+    Every kind, and ``error`` in particular: its failure line comes from the
+    incident's ``details.raw`` and is gated by the same desktop switch.
+    """
+    session = _leaky_session(tmp_path)
+    payload, raw = _emit_bytes(session, kind, previews=True)
+    _assert_generic(payload, raw, kind)
+    composed = compose(kind, session_dir=session)  # type: ignore[arg-type]
     assert payload[ALERT_FIELD] == {
         ALERT_TITLE_FIELD: composed.title,
         ALERT_BODY_FIELD: composed.body,
     }
-    assert payload[ALERT_FIELD] == {ALERT_TITLE_FIELD: APP_NAME, ALERT_BODY_FIELD: BODY_COMPLETE}
-    for leaked in (b"Project Falcon", b"Secret plan", b"rotate the keys", b"abcdef123456"):
-        assert leaked not in raw, leaked
-    assert _fixture("emit-completion.json")["alert_private"] == payload[ALERT_FIELD]
+    if kind == "complete":
+        assert _fixture("emit-completion.json")["alert_private"] == payload[ALERT_FIELD]
+
+
+def test_previews_default_to_generic_for_a_caller_that_does_not_claim_consent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``previews`` defaults False on both builders, so forgetting it cannot leak."""
+    _names_on(monkeypatch)
+    session = _leaky_session(tmp_path)
+    payload = completion_payload(**{**COMPLETION_INPUT, "session_dir": session})
+    raw = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    _assert_generic(payload, raw, COMPLETION_INPUT["kind"])
+    assert completion_alert("complete", session_dir=session) == {
+        ALERT_TITLE_FIELD: APP_NAME,
+        ALERT_BODY_FIELD: BODY_COMPLETE,
+    }
+
+
+def test_with_both_switches_on_an_error_carries_its_failure_line(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The positive control for the matrix above: the leak strings DO reach the
+    bytes when both consents hold, so their absence there is the gate's doing."""
+    _names_on(monkeypatch)
+    _payload, raw = _emit_bytes(_leaky_session(tmp_path), "error", previews=True)
+    assert _LEAK_NAME.encode() in raw
+    assert _LEAK_FAILURE.encode() in raw
+
+
+def test_the_generic_alert_is_the_house_text_and_nothing_else() -> None:
+    """The house-constant cell, restored for the generic form (S-1).
+
+    Every string a generic alert carries is the product's own: the app name and
+    the house sentence for the outcome. No count line (operator, 2026-11-14) —
+    the count rides the payload's ``count`` field only.
+    """
+    for kind in PUSH_KINDS:
+        alert = completion_alert(kind)
+        assert alert == {
+            ALERT_TITLE_FIELD: APP_NAME,
+            ALERT_BODY_FIELD: BODIES.get(kind, BODY_COMPLETE),
+        }
+        assert set(alert.values()) <= _house_strings()
+        assert "need" not in alert[ALERT_BODY_FIELD]
+    assert completion_alert("not-a-kind")[ALERT_BODY_FIELD] == BODY_COMPLETE
+    payload = completion_payload(**{**COMPLETION_INPUT, "count": None})
+    assert payload["count"] == 0, "an unknown count travels as 0 (wire_count)"
+
+
+#: A vendor-prefixed OpenAI-style key and a bearer token, assembled at runtime so
+#: this file does not itself carry a credential-shaped literal.
+_FAKE_KEY = "sk-" + "proj-" + "Z9" * 24
+_FAKE_BEARER = "eyJhbGciOiJIUzI1NiJ9." + "a1B2c3D4" * 5
+
+
+def test_credential_shaped_text_is_scrubbed_before_it_leaves_the_machine(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """S-2: a reply quoting a key or a Bearer header never reaches the emit bytes."""
+    _names_on(monkeypatch)
+    session = _session(
+        tmp_path,
+        assistant=f"Set OPENAI_API_KEY={_FAKE_KEY} then send Authorization: Bearer {_FAKE_BEARER}",
+        title=f"Key {_FAKE_KEY}",
+    )
+    payload, raw = _emit_bytes(session, "complete", previews=True)
+    assert _FAKE_KEY.encode() not in raw
+    assert _FAKE_BEARER.encode() not in raw
+    assert "[redacted]" in payload[ALERT_FIELD][ALERT_BODY_FIELD]
+    # The failure line goes through the same pass.
+    failing = _session(tmp_path / "e", assistant="x", title="Deploy")
+    _incident(failing, f"401 from provider: Authorization: Bearer {_FAKE_BEARER}")
+    _payload, raw = _emit_bytes(failing, "error", previews=True)
+    assert _FAKE_BEARER.encode() not in raw
+    # Scrubbed BEFORE the empty-check: a string that is only a secret still
+    # yields a non-empty alert string.
+    assert push_payload._bounded_alert_text(_FAKE_KEY, "house")
+
+
+def test_bidi_and_zero_width_characters_are_stripped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """S-3: no reordering/invisible format characters on a lock screen."""
+    spoofers = "\u200b\u200e\u200f\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069\ufeff"
+    cleaned = push_payload._bounded_alert_text(f"Title \u202eevil\u202c{spoofers}x", "house")
+    assert cleaned == "Title evilx"
+    assert not set(cleaned) & set(spoofers)
+    # ZWNJ (Urdu/Hindi orthography) and ZWJ (emoji sequences) are kept.
+    assert push_payload._bounded_alert_text("a\u200cb\u200dc", "house") == "a\u200cb\u200dc"
+    # Only spoofers: falls back rather than sending an empty string.
+    assert push_payload._bounded_alert_text(spoofers, "house") == "house"
+    _names_on(monkeypatch)
+    session = _session(tmp_path, assistant="done \u202egnp.exe\u202c", title="Name\u200b\u202e")
+    alert = completion_alert("complete", session_dir=session, previews=True)
+    assert not set("".join(alert.values())) & set(spoofers)
 
 
 def test_a_long_final_message_is_clamped_well_formed_and_under_the_cloud_bound(
@@ -546,7 +708,7 @@ def test_a_long_final_message_is_clamped_well_formed_and_under_the_cloud_bound(
     assert len(long_reply) >= 1999
     session = _session(tmp_path, assistant=long_reply, title="T" * 500)
 
-    alert = completion_alert("complete", session_dir=session)
+    alert = completion_alert("complete", session_dir=session, previews=True)
 
     for field in (ALERT_TITLE_FIELD, ALERT_BODY_FIELD):
         text = alert[field]
@@ -582,12 +744,14 @@ def test_an_empty_or_missing_preview_falls_back_and_is_never_empty(
     """Empty text is refused by the cloud, so every string falls back to house text."""
     _names_on(monkeypatch)
     session = _session(tmp_path, assistant=preview)
-    alert = completion_alert("complete", session_dir=session)
+    alert = completion_alert("complete", session_dir=session, previews=True)
     assert alert[ALERT_BODY_FIELD] == BODY_COMPLETE
     assert alert[ALERT_TITLE_FIELD] == BACKGROUND_FALLBACK_TITLE
 
     # No directory at all: compose's nameless fallback, still non-empty.
-    missing = completion_alert("complete", session_dir=tmp_path / "sessions" / "gone")
+    missing = completion_alert(
+        "complete", session_dir=tmp_path / "sessions" / "gone", previews=True
+    )
     assert all(missing.values())
     # And the clamp itself never returns "" whatever it is handed.
     assert push_payload._bounded_alert_text(preview, "") == APP_NAME
@@ -601,7 +765,7 @@ def test_a_compose_failure_degrades_to_the_house_alert(monkeypatch: pytest.Monke
         raise RuntimeError("compose exploded")
 
     monkeypatch.setattr("local_operator.notifications.compose", boom)
-    assert completion_alert("error") == {
+    assert completion_alert("error", previews=True) == {
         ALERT_TITLE_FIELD: APP_NAME,
         ALERT_BODY_FIELD: BODIES["error"],
     }
@@ -615,14 +779,14 @@ def test_other_kinds_take_whatever_compose_produces(
     session = _session(tmp_path, assistant="All 412 tests pass.", title="CI fix")
     for kind in PUSH_KINDS:
         composed = compose(kind, session_dir=session)  # type: ignore[arg-type]
-        alert = completion_alert(kind, session_dir=session)
+        alert = completion_alert(kind, session_dir=session, previews=True)
         assert alert == {ALERT_TITLE_FIELD: composed.title, ALERT_BODY_FIELD: composed.body}
         if kind != "complete":
             # Snippet is complete-only (compose's rule): an errored turn's last
             # line must not read as a success on a lock screen.
             assert "412" not in alert[ALERT_BODY_FIELD]
     # An unknown kind takes the composer's own default rather than inventing one.
-    assert completion_alert("not-a-kind")[ALERT_BODY_FIELD] == BODY_COMPLETE
+    assert completion_alert("not-a-kind", previews=True)[ALERT_BODY_FIELD] == BODY_COMPLETE
 
 
 def test_a_worst_case_emit_stays_well_under_the_apns_4kb_limit(
@@ -636,7 +800,12 @@ def test_a_worst_case_emit_stays_well_under_the_apns_4kb_limit(
     _names_on(monkeypatch)
     session = _session(tmp_path, assistant="\U0001f600" * 2000, title="\U0001f600" * 2000)
     payload = completion_payload(
-        **{**COMPLETION_INPUT, "session_dir": session, "sound_custom": "c_" + "0" * 16}
+        **{
+            **COMPLETION_INPUT,
+            "session_dir": session,
+            "previews": True,
+            "sound_custom": "c_" + "0" * 16,
+        }
     )
     size = len(json.dumps(emit_body(payload, DEVICE_ROWS), ensure_ascii=False).encode("utf-8"))
     assert size < 2048, size

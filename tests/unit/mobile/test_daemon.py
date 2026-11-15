@@ -324,6 +324,9 @@ def test_http_gate_and_login_flow() -> None:
     # only to a relay advertising this, because the register body refuses
     # unknown fields (an older relay would refuse the whole registration).
     assert capabilities["push_preferences"] == {"available": True}
+    # ``preferences.previews`` (descriptive banners) is accepted: a SEPARATE
+    # capability because a push_preferences-only daemon refuses the key.
+    assert capabilities["push_previews"] == {"available": True}
     assert capabilities["i18n"] == {"catalogues": 1}
     assert isinstance(capabilities["features"], dict)
     stt = capabilities["stt"]

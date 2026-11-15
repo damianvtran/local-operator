@@ -1183,12 +1183,15 @@ class PushWorker:
                 count=completion_count,
                 sound=sound,
                 sound_custom=sound_custom,
-                # The alert now names the session and previews the turn
-                # (operator request, 2026-11-14), composed by the desktop's own
-                # composer from this directory. This runs on the tick's worker
-                # thread, never the event loop, because compose reads the
-                # transcript. The privacy switch is applied inside compose.
+                # The alert names the session and previews the turn (operator
+                # request, 2026-11-14), composed by the desktop's own composer
+                # from this directory — only when every live phone allows
+                # previews (``_previews_allowed``) AND the desktop's privacy
+                # switch is on (applied inside compose). This runs on the tick's
+                # worker thread, never the event loop, because compose reads
+                # the transcript.
                 session_dir=_session_dir_of(self.config_dir, session_id),
+                previews=self._previews_allowed(),
             )
         elif item.kind == EVENT_DIGEST:
             # The coalesced catch-up: a set, so it names no conversation and
@@ -1523,6 +1526,35 @@ class PushWorker:
             # deterministic order keeps two composes of one item identical.
             return {**payload, "exclude": sorted(excluded)}
         return payload
+
+    def _previews_allowed(self) -> bool:
+        """Whether a completion banner may carry the session's name and a preview.
+
+        The PHONES' half of the two-switch consent rule (operator decision,
+        2026-11-14, PR #3990 comment 6881635039; the desktop's half,
+        ``display.notification_session_name``, is applied inside compose):
+        previews are on by default, and true here only when EVERY live device
+        resolves ``preferences.previews`` to true (missing means true, as for
+        every switch in ``push_devices.PREFERENCE_KEYS``).
+
+        Every, not any: the cloud fans a completion out to all of the
+        computer's devices and forbids ``exclude`` on that form (§3.2), so the
+        only way to honour one phone's "off" is a generic banner for all. What
+        is at stake is text Radient's cloud keeps for 14 days (agent-server
+        ``session_push_emits``) and that crosses APNs/FCM, so this fails CLOSED:
+        an unreadable registry, or no live device at all, answers False. (No
+        live device means the emit is not sent anyway; False keeps the answer
+        from being a vacuous "all of none agreed".)
+        """
+        try:
+            preferences = mobile_push_devices.device_preferences(self.config_dir)
+        except (mobile_push_devices.PushRegistryCorrupt, OSError):
+            return False
+        live = self._live_devices()
+        if not live:
+            return False
+        everything: dict[str, bool] = dict.fromkeys(mobile_push_devices.PREFERENCE_KEYS, True)
+        return all(preferences.get(str(device), everything)["previews"] for device in live)
 
     def _live_device_ids(self) -> list[str]:
         """Gate 4 of §2.3: which devices this machine may deliver to.

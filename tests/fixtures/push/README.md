@@ -73,8 +73,10 @@ there is one digest pin to follow.)
   `absent_fields` where a shape declares a field it must never carry. A field is
   either named in a shape block **or** in
   `payload-forbidden-fields.json` — never both, never neither. The literals'
-  alerts are the PRIVATE form (`display.notification_session_name` off: the app
-  name over the house sentence), the one form that is a fixed string. The
+  alerts are the PRIVATE (generic) form — the app name over the house sentence,
+  sent whenever previews are NOT allowed (any live phone with
+  `preferences.previews` off, or `display.notification_session_name` off) — the
+  one form that is a fixed string. The
   completion shape also files `alert_private` and `alert_named_example` (the
   session's name over a preview of the turn, what the desktop composer renders
   with the switch on); the digest files `alert_unreadable`. Since 2026-11-14 no
@@ -127,7 +129,8 @@ there is one digest pin to follow.)
   `aps.badge` is never sent at all (§1.5). The machine DOES compose the
   user-visible `alert` for the two visible types (the lane's ruling of
   2026-10-01; since 2026-11-14 the completion alert is the desktop composer's
-  output, gated by the session-name privacy switch), and the cloud delivers that
+  output when previews are allowed: every live phone's `preferences.previews`
+  AND the desktop's session-name switch), and the cloud delivers that
   text verbatim and wraps it; the
   attention form deliberately carries none, because it is a silent wake.
 - **The cloud's own route shapes** (`POST <cloud>/v1/push/register`, the

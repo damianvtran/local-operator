@@ -17,11 +17,11 @@
     "emit-digest.json"
   ],
   "forbidden": {
-    "name": "never a CONVERSATION name — not in the title, not in the body, not in any field (P2). The machine's own privacy flag gates LOCAL notifications only and is not a cloud-facing consent. (A device row's ``name`` in registry-list-response.json is the app's own label for a phone: a different field on a different shape, which is why this list is scoped to the payloads — see applies_to.)",
+    "name": "never a CONVERSATION name as a payload field, and never in the alert UNLESS previews are allowed (P2 as amended 2026-11-14, ADR 0006 amendment in local-operator-mobile PR #264): the completion alert's title may be the session's name only when every live phone resolves preferences.previews to true AND display.notification_session_name is on; otherwise it is APP_NAME. The cloud keeps an allowed alert for 14 days (agent-server session_push_emits). (A device row's ``name`` in registry-list-response.json is the app's own label for a phone: a different field on a different shape, which is why this list is scoped to the payloads — see applies_to.)",
     "conversation_name": "same rule as name",
-    "title": "the banner's title, composed by the machine inside the alert object (completion: the session's name when display.notification_session_name allows it, else APP_NAME; digest: APP_NAME) — never a PAYLOAD field. This entry forbids the KEY as a payload field; alert.title is the one place it may appear.",
-    "body": "same rule: inside the alert object the body is composed by the machine (completion: a preview of the turn when the privacy switch allows it, else the house sentence; digest: the set's house state); as a payload field it is forbidden outright, so the alert object stays the one place user-visible text travels, gated by the desktop's privacy switch.",
-    "snippet": "never sent; the desktop composer's body is a last-assistant-line snippet",
+    "title": "the banner's title, composed by the machine inside the alert object (completion: the session's name when previews are allowed — every live phone's preferences.previews AND display.notification_session_name — else APP_NAME; digest: APP_NAME) — never a PAYLOAD field. This entry forbids the KEY as a payload field; alert.title is the one place it may appear.",
+    "body": "same rule: inside the alert object the body is composed by the machine (completion: a credential-scrubbed preview of the turn, or an error's failure line, when previews are allowed, else the house sentence with no count; digest: the set's house state); as a payload field it is forbidden outright, so the alert object stays the one place user-visible text travels, gated by both switches.",
+    "snippet": "never a payload field; the alert body carries one only when previews are allowed (see body)",
     "content": "never sent",
     "transcript": "never sent",
     "prompt": "never sent",
@@ -43,7 +43,7 @@
   "notes": [
     "SCOPED TO THE PAYLOADS, not to every file in this tree: the list response is a relay response whose own forbidden array (registry-list-response.json) names its secrets, and it legitimately carries a device ``name`` — the label for a phone, never a conversation.",
     "One home for the payload deny list, referenced by each emit shape, so a field is either allowed by the shape block or forbidden here — never both.",
-    "THE ALERT OBJECT IS THE ONE EXCEPTION TO title/body, and it is an exception the scan is written to know about: the MACHINE composes the user-visible text, so alert.title and alert.body legitimately carry those two keys. Since 2026-11-14 (operator request) the completion alert is the desktop composer's output and may carry the session's name and a preview of the turn — but only when display.notification_session_name is on; with it off it is APP_NAME and the house sentence, and the content check asserts exactly that.",
+    "THE ALERT OBJECT IS THE ONE EXCEPTION TO title/body, and it is an exception the scan is written to know about: the MACHINE composes the user-visible text, so alert.title and alert.body legitimately carry those two keys. Since 2026-11-14 (operator request) the completion alert is the desktop composer's output and may carry the session's name and a preview of the turn — but only when every live phone allows previews (preferences.previews, default on) AND display.notification_session_name is on; with either off it is APP_NAME and the house sentence, and test_push_payload.py's generic-unless-allowed byte matrix asserts that for every kind, error's failure line included.",
     "The cloud's contract is extra=\"forbid\", so an unlisted field is refused rather than ignored; this file is the machine-side twin of that rule."
   ]
 }

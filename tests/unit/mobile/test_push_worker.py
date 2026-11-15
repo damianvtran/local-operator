@@ -496,7 +496,14 @@ def test_the_alert_rides_the_visible_types_and_never_the_silent_one(
     and an attention push carries none at all — it is a silent badge correction.
     """
     # Privacy switch off: the private form, whatever the developer's settings say.
-    monkeypatch.setattr("local_operator.tui.notify.settings_get", lambda key, default=None: False)
+    # Only THAT key: since #3989 the worker also reads ``display.notifications``
+    # through the same ``settings_get``, and a blanket False silences the push.
+    monkeypatch.setattr(
+        "local_operator.tui.notify.settings_get",
+        lambda key, default=None: (
+            False if key == "display.notification_session_name" else default
+        ),
+    )
     token = harness.publish("alert-me")
     assert [record.kind for record in harness.worker.tick()] == ["completion"]
     alert = harness.plane.calls[0][1][ALERT_FIELD]
@@ -1657,7 +1664,9 @@ def test_an_injected_listing_count_wins_over_the_store_census(tmp_path: Path) ->
     assert [record.kind for record in harness.worker.tick()] == ["completion"]
     body = harness.plane.calls[0][1]
     assert body["count"] == 3
-    assert body[ALERT_FIELD][ALERT_BODY_FIELD] == f"{BODIES['complete']} · 3 conversations need you"
+    # The banner prints no count since this PR (operator: descriptive banner,
+    # no count line); the number rides the payload's ``count`` field only.
+    assert "need" not in body[ALERT_FIELD][ALERT_BODY_FIELD]
     # The negative control: the census this replaces really is the big number.
     assert harness.worker._store_count() == 41
 
@@ -1827,6 +1836,108 @@ def test_a_widened_exclude_past_the_cloud_cap_falls_back_to_the_hint_excludes(
     assert len(body["exclude"]) <= worker_module.MAX_EXCLUDE_IDS
     assert body["exclude"] == [muted[0]]
     assert wanting not in body["exclude"]
+
+
+def test_exactly_ten_widened_excludes_are_all_sent(harness: Harness) -> None:
+    """#3991 R2-NIT: the cap's boundary. Ten opted-out devices plus one wanting
+    device widen the attention correction to exactly ``MAX_EXCLUDE_IDS`` ids,
+    which the cloud accepts, so every one is sent — no fallback below 11."""
+    ids = _devices_with(harness, *([{"enabled": False}] * 10), None)
+    muted, wanting = ids[:10], ids[10]
+    token = harness.publish("ten-muted", kind="complete")
+    harness.worker.tick()
+    harness.store.acknowledge("session/ten-muted", token)
+    harness.worker.tick()
+    _key, body = harness.plane.calls[-1]
+    assert body["type"] == "attention"
+    assert worker_module.MAX_EXCLUDE_IDS == 10
+    assert body["exclude"] == sorted(muted)
+    assert wanting not in body["exclude"]
+
+
+def _named_session(harness: Harness, name: str) -> None:
+    """A real session directory under the worker's config dir with a title and
+    a reply, so a named banner is distinguishable from the generic one."""
+    import json as _json
+
+    session = harness.root / "sessions" / name
+    session.mkdir(parents=True, exist_ok=True)
+    row = {
+        "id": "assistant-1",
+        "ts": 2.0,
+        "type": "message",
+        "payload": {"kind": "message", "role": "assistant", "content": [{"text": "Shipped v2."}]},
+    }
+    (session / "transcript.jsonl").write_text(_json.dumps(row) + "\n", encoding="utf-8")
+    (session / "title.json").write_text(
+        _json.dumps({"text": "Release prep", "user_set": True, "names": ["Release prep"]}),
+        encoding="utf-8",
+    )
+
+
+def test_previews_on_for_every_live_device_names_the_session(
+    harness: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Operator decision 2026-11-14: previews ON by default. One phone that never
+    sent ``previews`` and one that sent ``true``: the banner is descriptive."""
+    monkeypatch.setattr("local_operator.tui.notify.settings_get", lambda key, default=None: True)
+    _devices_with(harness, None, {"previews": True})
+    _named_session(harness, "both-on")
+    harness.publish("both-on")
+    harness.worker.tick()
+    ((_key, body),) = harness.plane.calls
+    assert body[ALERT_FIELD] == {ALERT_TITLE_FIELD: "Release prep", ALERT_BODY_FIELD: "Shipped v2."}
+
+
+def test_one_live_device_with_previews_off_makes_the_banner_generic_for_all(
+    harness: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The cloud fans a completion out to every device with no per-device
+    ``exclude``, so one phone's "off" is honoured only by a generic banner for
+    all of them — with the desktop switch ON, and the emit still sent."""
+    monkeypatch.setattr("local_operator.tui.notify.settings_get", lambda key, default=None: True)
+    _devices_with(harness, None, {"previews": False})
+    _named_session(harness, "one-off")
+    harness.publish("one-off")
+    harness.worker.tick()
+    ((_key, body),) = harness.plane.calls
+    assert body[ALERT_FIELD] == {ALERT_TITLE_FIELD: APP_NAME, ALERT_BODY_FIELD: BODIES["complete"]}
+    import json as _json
+
+    raw = _json.dumps(body, ensure_ascii=False)
+    assert "Release prep" not in raw and "Shipped v2." not in raw
+
+
+def test_a_revoked_device_with_previews_off_does_not_block_previews(
+    harness: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Only LIVE devices are consulted: a phone that is not in gate 4's list
+    receives nothing, so its switch does not decide the others' banner."""
+    monkeypatch.setattr("local_operator.tui.notify.settings_get", lambda key, default=None: True)
+    live, _gone = _devices_with(harness, None, {"previews": False})
+    harness.devices.ids = [live]
+    _named_session(harness, "live-only")
+    harness.publish("live-only")
+    harness.worker.tick()
+    ((_key, body),) = harness.plane.calls
+    assert body[ALERT_FIELD][ALERT_TITLE_FIELD] == "Release prep"
+
+
+def test_an_unreadable_registry_fails_closed_to_the_generic_banner(
+    harness: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``_previews_allowed`` answers False when the registry cannot be read: the
+    text at stake is kept by the cloud for 14 days, so consent is never assumed."""
+    monkeypatch.setattr("local_operator.tui.notify.settings_get", lambda key, default=None: True)
+
+    def corrupt(_config_dir: object) -> dict[str, dict[str, bool]]:
+        raise worker_module.mobile_push_devices.PushRegistryCorrupt("corrupt")
+
+    monkeypatch.setattr(worker_module.mobile_push_devices, "device_preferences", corrupt)
+    assert harness.worker._previews_allowed() is False
+    harness.devices.ids = []
+    monkeypatch.undo()
+    assert harness.worker._previews_allowed() is False, "no live device: never vacuously true"
 
 
 def test_a_widened_exclude_past_the_cap_with_no_hint_sends_no_exclude(
