@@ -6775,6 +6775,17 @@ def _job_lifecycle(jobs: Sequence[JobState]) -> tuple[tuple[str, str, bool], ...
     return tuple((job.id, job.status, job.queued) for job in jobs)
 
 
+def _process_cpu_s() -> float:
+    """Process CPU seconds, for the slow-apply diagnostic's wall-vs-CPU split.
+
+    The same quantity as :func:`time.process_time`, read through
+    ``clock_gettime`` because it is paid on EVERY apply, slow or not: on this
+    macOS host (load ~60) ``process_time`` measured ~2.2 us a read against
+    ~0.9 us for ``CLOCK_PROCESS_CPUTIME_ID`` (best of 5 x 200k).
+    """
+    return time.clock_gettime(time.CLOCK_PROCESS_CPUTIME_ID)
+
+
 class FrontendStateStore:
     """Atomic snapshot/update store shared by local and remote sessions.
 
@@ -7289,6 +7300,7 @@ class FrontendStateStore:
         freeze — and the section is taken on the serving loop by every joiner in
         that window.
         """
+        started, cpu_started = time.perf_counter(), _process_cpu_s()
         frozen = self._freeze_for_install(state)
         subscribers = self._install(frozen)
         self._rebuild_derived(state)
@@ -7297,8 +7309,105 @@ class FrontendStateStore:
             sequence=state.sequence,
             changes=state.model_dump(mode="json"),
         )
+        self._fan_out(subscribers, update, started, cpu_started, "replace")
+
+    # --- Slow-apply diagnostic -------------------------------------------------
+    #
+    # WHY: the 2026-11-15 delta fan-out study (lop-performance
+    # docs/2026-11-15-delta-fanout/report.md) found a freeze-once fan-out POC
+    # cut roster-replacement CPU from 91 ms to 13 ms at 8 subscribers, but it
+    # was NO-SHIP because the LIVE subscriber count per store is unknown, and
+    # the multi-second stalls it measured tracked host contention (wall
+    # 1,724 ms vs CPU 91 ms) rather than work. Its step 1 is "instrument
+    # first": this line records, only for a slow apply, how many subscribers
+    # the fan-out paid for and how wall time splits from process CPU, so the
+    # next decision rests on production numbers instead of a synthetic bench.
+    #
+    # CONSTRAINTS: zero behaviour change and no extra copies -- the timing
+    # wraps the existing loop and reads only names and counts off the update.
+    # The under-threshold cost is the clock reads alone (perf_counter at start,
+    # before and after the fan-out, plus one process-CPU read at start; ~1.1 us
+    # total, see ``_process_cpu_s``). The line carries changed-field NAMES and
+    # counts only, never values: changes hold conversation content. (Labelled
+    # ``fields=``, not ``change_keys=``: an agent reading this line through
+    # lop's tool output saw ``change_keys=<a>,<b>`` masked as a credential
+    # pair, which would hide the one field the line exists to show.)
+    # Rate-limited per store so a stalled
+    # host emitting a slow delta every tick yields one line per window with a
+    # suppressed count, not a log flood. Class attributes rather than
+    # ``__init__`` assignments so the first instance write shadows them and
+    # construction is untouched.
+    _SLOW_APPLY_THRESHOLD_S: Final[float] = 0.050
+    _SLOW_APPLY_LOG_INTERVAL_S: Final[float] = 5.0
+    _slow_apply_logged_at: float = float("-inf")
+    _slow_apply_suppressed: int = 0
+
+    def _fan_out(
+        self,
+        subscribers: list[Callable[[FrontendUpdate], None]],
+        update: FrontendUpdate,
+        started: float,
+        cpu_started: float,
+        site: str,
+    ) -> None:
+        """Deliver ``update`` to ``subscribers`` and log the apply if it was slow.
+
+        ``started``/``cpu_started`` are the ``perf_counter``/``_process_cpu_s``
+        readings taken when the caller's apply began, so "reducer" below is
+        everything from there to the fan-out (reduce, freeze, install) and
+        "fan-out" is the per-subscriber copy and callback loop.
+        """
+        fanout_started = time.perf_counter()
         for subscriber in subscribers:
             subscriber(update.model_copy(deep=True))
+        finished = time.perf_counter()
+        if finished - started > self._SLOW_APPLY_THRESHOLD_S:
+            self._log_slow_apply(
+                update,
+                site,
+                len(subscribers),
+                reducer_s=fanout_started - started,
+                fanout_s=finished - fanout_started,
+                cpu_s=_process_cpu_s() - cpu_started,
+                now=finished,
+            )
+
+    def _log_slow_apply(
+        self,
+        update: FrontendUpdate,
+        site: str,
+        subscriber_count: int,
+        *,
+        reducer_s: float,
+        fanout_s: float,
+        cpu_s: float,
+        now: float,
+    ) -> None:
+        if now - self._slow_apply_logged_at < self._SLOW_APPLY_LOG_INTERVAL_S:
+            self._slow_apply_suppressed += 1
+            return
+        suppressed, self._slow_apply_suppressed = self._slow_apply_suppressed, 0
+        self._slow_apply_logged_at = now
+        # Developer diagnostic, English and i18n-exempt (AGENTS.md: log lines
+        # are not user-visible copy). Keys of ``changes`` are state field names;
+        # job ids (``job_deltas`` keys) are deliberately counted, not listed.
+        logger.warning(
+            "frontend state: slow apply site=%s session=%s subscribers=%d "
+            "fields=%s job_deltas=%d appends=%d degraded=%s "
+            "wall_ms=%.1f reducer_ms=%.1f fanout_ms=%.1f cpu_ms=%.1f suppressed=%d",
+            site,
+            self._state.session_id,
+            subscriber_count,
+            ",".join(sorted(update.changes)) or "-",
+            len(update.job_deltas),
+            sum(len(rows) for rows in update.job_trajectory_appends.values()),
+            update.degraded,
+            (reducer_s + fanout_s) * 1000,
+            reducer_s * 1000,
+            fanout_s * 1000,
+            cpu_s * 1000,
+            suppressed,
+        )
 
     def apply_update(self, update: FrontendUpdate) -> FrontendSessionState:
         """Apply ``update`` and return a whole caller-owned clone of the result.
@@ -7340,6 +7449,7 @@ class FrontendStateStore:
         in-process subscriber and the resync path must see the same event, or
         the two disagree about whether state is trustworthy.
         """
+        started, cpu_started = time.perf_counter(), _process_cpu_s()
         if update.epoch != self._state.epoch or update.sequence != self._state.sequence + 1:
             raise ValueError("frontend update is not the next state sequence")
         if update.degraded:
@@ -7362,8 +7472,7 @@ class FrontendStateStore:
             subscribers = self._install(
                 self._state.model_copy(update={"sequence": update.sequence})
             )
-            for subscriber in subscribers:
-                subscriber(update.model_copy(deep=True))
+            self._fan_out(subscribers, update, started, cpu_started, "apply-degraded")
             return
         # The roster is copied PER ROW below, and only for rows that changed: a
         # whole-``changes`` deep copy was ~2.5 ms of a 252-row delta on its own,
@@ -7593,8 +7702,7 @@ class FrontendStateStore:
                 if job.id in bodies or (job.id in recorded and recorded[job.id][1] is job)
             }
         self._todo_sequences = todo_sequences
-        for subscriber in subscribers:
-            subscriber(update.model_copy(deep=True))
+        self._fan_out(subscribers, update, started, cpu_started, "apply")
 
     def _reusable_job(
         self, job_id: str, prior: JobState | None, received: Any, update: FrontendUpdate
@@ -7709,6 +7817,7 @@ class FrontendStateStore:
         return False
 
     def mutate(self, **changes: Any) -> FrontendUpdate | None:
+        started, cpu_started = time.perf_counter(), _process_cpu_s()
         normalized: dict[str, Any] = {}
         wire_changes: dict[str, Any] = {}
         trajectory_appends: dict[str, list[dict[str, Any]]] = {}
@@ -7888,8 +7997,7 @@ class FrontendStateStore:
             job_trajectory_replacements=trajectory_replacements,
             job_todo_updates=todo_updates,
         )
-        for subscriber in subscribers:
-            subscriber(update.model_copy(deep=True))
+        self._fan_out(subscribers, update, started, cpu_started, "mutate")
         return update
 
     def subscribe(self, callback: Callable[[FrontendUpdate], None]) -> FrontendSubscription:
