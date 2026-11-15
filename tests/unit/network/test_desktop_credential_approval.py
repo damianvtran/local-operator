@@ -1047,6 +1047,29 @@ def test_a_raw_reason_is_printable_path_free_and_bounded() -> None:
     assert len(reason) <= 300
 
 
+def test_changed_file_intent_reuses_scope_refusal_without_retry_authority() -> None:
+    """Changed intent needs a fresh approval, not raw intent data or a same-card retry."""
+    from local_operator.network.credentials import approval_copy
+
+    code = "file_approval_intent_changed"
+    result = approval_copy.outcome(code)
+    scope_result = approval_copy.outcome("finite_scope_mismatch")
+    assert code in approval_copy.KNOWN_CODES
+    assert result["code"] == code
+    assert approval_copy.is_refusal_code(code)
+    assert result["reason"] == scope_result["reason"]
+    assert result["reason"] != approval_copy.reason_for("unknown_code")
+    assert not result["retryable"] and not approval_copy.retryable(code)
+    assert result["remedy"] == scope_result["remedy"] == approval_copy.NEW_REQUEST_NEEDED
+    sentence = approval_copy.refusal_sentence(code)
+    assert sentence == result["reason"] + " " + result["remedy"]
+    assert sentence == approval_copy.refusal_sentence("finite_scope_mismatch")
+    assert (
+        approval_copy.last_failure({"state": "failed", "receipts": [{"ok": False, "detail": code}]})
+        == result
+    )
+
+
 def test_every_refusal_code_is_known() -> None:
     """The whitelist cannot rot: every refusal literal the credential path raises is listed.
 
