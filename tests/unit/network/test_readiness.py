@@ -4741,7 +4741,7 @@ def test_a_held_mcp_login_reads_held_until_its_end() -> None:
     """The MCP row says it is a hold, until when (UTC), and that nothing is renewed."""
     until = time.time() + 3600
     row = _held_mcp_row(until)
-    assert row["ok"] is True and row["code"] == "held_offline", row
+    assert row["ok"] is True and row["code"] == readiness.CODE_HELD_OFFLINE == "held_offline", row
     hhmm = time.strftime("%H:%M UTC", time.gmtime(until))
     assert row["detail"] == (
         f"node2 is using the linear sign-in Damian's MacBook lent before it went offline "

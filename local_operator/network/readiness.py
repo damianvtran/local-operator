@@ -280,6 +280,12 @@ CODE_SESSION_SCOPED_SHARE = "session_scoped_share"
 CODE_LOCAL_GRANT_UNAVAILABLE = "local_grant_unavailable"
 #: Subagent tier pins (2026-11-14): a role pins a tier the peer cannot resolve.
 CODE_TIER_UNAVAILABLE = "tier_unavailable"
+#: MCP credential (#3947, the offline hold for GitHub and MCP): the peer is using a
+#: sign-in its owner lent before going offline, until the hold ends. Named for the
+#: reason ``CODE_KEPT_OWN`` is: enrollment's receipt admits only ``CODE_*`` values,
+#: so a literal here made a mesh whose peer rode a held MCP login fail verify. The
+#: same word as the model row's effective state, on purpose — one name, one fact.
+CODE_HELD_OFFLINE = "held_offline"
 
 #: Rows read from the peer's own state carry ``source: "peer"``; rows about a
 #: fact that could not be established carry ``"unknown"``. ``"local"`` is kept
@@ -5422,7 +5428,7 @@ def _mcp_credential_row(
                 device_name=peer_label,
                 capability=CAPABILITY_MCP_CREDENTIAL,
                 ok=True,
-                code="held_offline",
+                code=CODE_HELD_OFFLINE,
                 detail=(
                     f"{peer_label} is using the {name} sign-in {owner_label} lent before "
                     f"it went offline{until}; nothing is renewed until {owner_label} is back"
