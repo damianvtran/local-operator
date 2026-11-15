@@ -4143,6 +4143,52 @@ class _StreamClient:
             pass
 
 
+def _await_frontend_sync(client: _StreamClient, *, cap_s: float = 60.0) -> dict[str, Any]:
+    """Read until THIS connection's canonical ``frontend_sync`` frame arrives.
+
+    WHY. The runtime refuses every non-priority op while a connection's canonical
+    sync is pending — "this viewer is still connecting to the session; the request
+    was not run — retry once the interface has connected" (the gate in
+    ``RuntimeServer``'s frame handler, ``server.py`` ~7008). The flag is set when
+    the connection asks for frontend state and is cleared in the ``finally`` of
+    ``RuntimeServer._serve_frontend_sync`` (~5025), the per-connection BIND task.
+    The welcome is sent before that task finishes, so a viewer that prompts the
+    instant the welcome lands races the bind; it lost once in a full CI run
+    (PR #3885's gate, job 132034534860).
+
+    WHY THIS FRAME, NOT A QUIET INTERVAL. While the bind runs nothing reaches the
+    connection — updates are parked in ``frontend_pending`` and events wait on
+    ``events_ready`` (~4976-4984) — so "the owner went quiet for 0.5 s" is exactly
+    what a SLOW bind looks like, and that heuristic sent the prompt early whenever
+    the bind outlasted its interval (measured red with 0.8 s and 1.0 s holds,
+    PR #3933's QA round 1). The ``frontend_sync`` frame is the bind's own
+    completion signal: built at ~4917 and written at ~4975, and the only await
+    between that write and the ``finally`` that clears the flag is the socket
+    ``drain``, which does not suspend unless the transport is paused. By the time
+    the frame has crossed both relays to this socket the gate is open. The real
+    client works the same way: its dial waits for ``frontend_sync`` before it
+    lets anyone act.
+
+    The cap only stops a broken bind from hanging the test; it is NOT the
+    synchronisation, so it is generous, and running out fails loudly naming every
+    op seen rather than letting the prompt race on.
+    """
+    deadline = time.monotonic() + cap_s
+    seen: list[str] = []
+    while (remaining := deadline - time.monotonic()) > 0:
+        frame = client.recv(timeout=remaining)
+        if frame is None:
+            break
+        op = str(frame.get("op"))
+        if op == "frontend_sync":
+            return frame
+        seen.append(op)
+    raise AssertionError(
+        f"no 'frontend_sync' frame within {cap_s:.0f}s on the stream "
+        f"(frames seen before giving up, by op: {seen})"
+    )
+
+
 def test_the_stream_is_a_pass_through_and_quitting_it_leaves_the_peer_running(
     peer_pair: Devices, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -4185,6 +4231,13 @@ def test_the_stream_is_a_pass_through_and_quitting_it_leaves_the_peer_running(
         welcome = client.recv()
         assert welcome is not None and welcome["op"] == "welcome", welcome
         assert welcome["data"]["session_id"] == SESSION
+        # The welcome is sent BEFORE the owner's bind task finishes, and until it
+        # does the runtime refuses a ``prompt`` ("this viewer is still connecting
+        # ..."). Wait for THIS connection's ``frontend_sync`` frame — written at
+        # server.py ~4975, just before the ``finally`` at ~5025 that clears the
+        # gate checked at ~7008 — exactly as the real client does, rather than
+        # betting on a quiet interval a slow bind also produces.
+        _await_frontend_sync(client)
 
         client.send(
             {
