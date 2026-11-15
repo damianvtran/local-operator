@@ -403,8 +403,25 @@ def _tree_digest(rows: Iterable[tuple[str, int, str]]) -> str:
     return digest.hexdigest()
 
 
-def _stat_source(path: Path, name: str) -> os.stat_result:
-    """``lstat`` one source entry and apply every "no executables, ever" rule."""
+#: The mode bits a source file may never carry. ``_EXEC_AS_DATA_FORBIDDEN`` is
+#: the narrower set for a caller that ships executables AS DATA (the mesh skill
+#: sync, ``network/skillsync.py``): the archive always records 0644 and the
+#: extractor always writes 0600, so a source ``+x`` changes nothing a receiver
+#: holds -- while setuid/setgid/sticky stay refused everywhere, because no caller
+#: has a reason to read a tree that carries them.
+_FORBIDDEN_SOURCE_BITS = 0o7111
+_EXEC_AS_DATA_FORBIDDEN = 0o7000
+
+
+def _forbidden_bits(executable_as_data: bool) -> int:
+    return _EXEC_AS_DATA_FORBIDDEN if executable_as_data else _FORBIDDEN_SOURCE_BITS
+
+
+def _stat_source(path: Path, name: str, *, executable_as_data: bool = False) -> os.stat_result:
+    """``lstat`` one source entry and apply every "no executables, ever" rule.
+
+    ``executable_as_data`` relaxes ONLY the exec bits (see ``_EXEC_AS_DATA_FORBIDDEN``).
+    """
 
     try:
         info = os.lstat(path)
@@ -426,7 +443,7 @@ def _stat_source(path: Path, name: str) -> os.stat_result:
         # operator never chose to publish that other path, but its content would
         # ship. Refuse and ask for a copy instead (design §6.1).
         raise _refuse("bundle-invalid", "source", f"source entry {name!r} is a hardlink")
-    if stat.S_IMODE(mode) & 0o7111:
+    if stat.S_IMODE(mode) & _forbidden_bits(executable_as_data):
         # exec/setuid/setgid/sticky; bundles are data, never programs (§6.1).
         raise _refuse(
             "bundle-invalid",
@@ -436,7 +453,9 @@ def _stat_source(path: Path, name: str) -> os.stat_result:
     return info
 
 
-def _iter_source_files(root: Path) -> Iterator[tuple[str, Path, os.stat_result]]:
+def _iter_source_files(
+    root: Path, *, executable_as_data: bool = False
+) -> Iterator[tuple[str, Path, os.stat_result]]:
     """Walk a source tree with the SAME rules ``tree_hash_of`` and the builder use.
 
     Dot-prefixed files AND directories are skipped (never published); every
@@ -474,12 +493,16 @@ def _iter_source_files(root: Path) -> Iterator[tuple[str, Path, os.stat_result]]
                 yield from walk(entry, relative)
                 continue
             validate_bundle_path(relative)
-            yield relative, entry, _stat_source(entry, relative)
+            yield relative, entry, _stat_source(
+                entry, relative, executable_as_data=executable_as_data
+            )
 
     yield from walk(root, "")
 
 
-def _read_source_file(path: Path, info: os.stat_result, name: str) -> bytes:
+def _read_source_file(
+    path: Path, info: os.stat_result, name: str, *, executable_as_data: bool = False
+) -> bytes:
     """Read one already-vetted source file, re-checking what ``lstat`` promised."""
 
     flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0)
@@ -492,7 +515,7 @@ def _read_source_file(path: Path, info: os.stat_result, name: str) -> bytes:
         if (
             not stat.S_ISREG(fresh.st_mode)
             or fresh.st_nlink > 1
-            or stat.S_IMODE(fresh.st_mode) & 0o7111
+            or stat.S_IMODE(fresh.st_mode) & _forbidden_bits(executable_as_data)
             or (fresh.st_dev, fresh.st_ino) != (info.st_dev, info.st_ino)
         ):
             # The path changed between the walk and the read: refuse rather than
@@ -506,7 +529,9 @@ def _read_source_file(path: Path, info: os.stat_result, name: str) -> bytes:
     return content
 
 
-def _hash_source_file(path: Path, info: os.stat_result, name: str) -> tuple[int, str]:
+def _hash_source_file(
+    path: Path, info: os.stat_result, name: str, *, executable_as_data: bool = False
+) -> tuple[int, str]:
     """Stream one source file to its (size, sha256), bounded by MAX_FILE_BYTES."""
 
     flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0)
@@ -521,7 +546,7 @@ def _hash_source_file(path: Path, info: os.stat_result, name: str) -> tuple[int,
         if (
             not stat.S_ISREG(fresh.st_mode)
             or fresh.st_nlink > 1
-            or stat.S_IMODE(fresh.st_mode) & 0o7111
+            or stat.S_IMODE(fresh.st_mode) & _forbidden_bits(executable_as_data)
             or (fresh.st_dev, fresh.st_ino) != (info.st_dev, info.st_ino)
         ):
             raise _refuse(
@@ -538,7 +563,7 @@ def _hash_source_file(path: Path, info: os.stat_result, name: str) -> tuple[int,
     return size, digest.hexdigest()
 
 
-def tree_hash_of(root: Path) -> str:
+def tree_hash_of(root: Path, *, executable_as_data: bool = False) -> str:
     """The §3.1 hash of a local directory, with the builder's exact refusals.
 
     This is the LOCAL side of classification: it refuses exactly what
@@ -551,10 +576,14 @@ def tree_hash_of(root: Path) -> str:
 
     rows: list[tuple[str, int, str]] = []
     total = 0
-    for relative, path, info in _iter_source_files(Path(root)):
+    for relative, path, info in _iter_source_files(
+        Path(root), executable_as_data=executable_as_data
+    ):
         if len(rows) >= MAX_FILES:
             raise _refuse_too_large("entry", "the skill directory holds more than 1024 files")
-        size, content_hash = _hash_source_file(path, info, relative)
+        size, content_hash = _hash_source_file(
+            path, info, relative, executable_as_data=executable_as_data
+        )
         total += size
         if total > MAX_UNCOMPRESSED_BYTES:
             raise _refuse_too_large("size", "the skill directory exceeds 96 MiB")
@@ -597,7 +626,9 @@ def _write_archive(path: Path, data: bytes) -> None:
         os.fsync(stream.fileno())
 
 
-def build_bundle(root: Path, *, dest: Path | None = None) -> BuiltBundle:
+def build_bundle(
+    root: Path, *, dest: Path | None = None, executable_as_data: bool = False
+) -> BuiltBundle:
     """Build the deterministic archive and manifest for one skill directory.
 
     A source may not contain a symlink, hardlink, device, FIFO/socket or any
@@ -610,10 +641,12 @@ def build_bundle(root: Path, *, dest: Path | None = None) -> BuiltBundle:
     source_root = Path(root).expanduser()
     rows: list[tuple[str, bytes]] = []
     total = 0
-    for relative, path, info in _iter_source_files(source_root):
+    for relative, path, info in _iter_source_files(
+        source_root, executable_as_data=executable_as_data
+    ):
         if len(rows) >= MAX_FILES:
             raise _refuse_too_large("entry", "the skill directory holds more than 1024 files")
-        content = _read_source_file(path, info, relative)
+        content = _read_source_file(path, info, relative, executable_as_data=executable_as_data)
         total += len(content)
         if total > MAX_UNCOMPRESSED_BYTES:
             raise _refuse_too_large("size", "the skill directory exceeds 96 MiB")

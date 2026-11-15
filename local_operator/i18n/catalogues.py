@@ -150,6 +150,17 @@ DEFERRED_NAMESPACES: dict[str, str] = {
         "bridge rows reach the phone as already-rendered text "
         '(harness/bridge_copy.py, _t = tr("wire.tool_rows.bridge"))'
     ),
+    # DEFERRED 2026-11-12 (session park, PR #3850, i18n finding I26): the
+    # audited park copy grew hi's wire.sessions from 3,895 B to 6,695 B and
+    # took hi's eager total to 67,987 B, over the 64 KiB per-locale ceiling.
+    # No client renders this namespace from the bundle: every key is resolved
+    # in-process by the sessions tool and leaves as finished text, so the
+    # bundle was carrying it for nobody.
+    "wire.sessions": (
+        "sessions tool receipts/approval prompts rendered in-process by "
+        'tools/builtin.py (_sessions_copy = tr("wire.sessions")) and returned '
+        "as finished tool text"
+    ),
 }
 
 

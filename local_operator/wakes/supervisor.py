@@ -1093,6 +1093,175 @@ async def _has_live_runtime(config_dir: Path, session_id: str) -> bool:
     return record is not None
 
 
+#: Ceiling on one parked-session monitor probe subprocess: the monitor
+#: scheduler's default per-check ``runTimeoutMs`` (120 s, ``monitors.settings``)
+#: plus headroom for the interpreter start and the tool-layer import. A probe
+#: that overruns is killed (its whole process group) and the session is engaged
+#: instead — the engaged session runs the check itself, so a slow probe costs a
+#: reopen, never a missed tick.
+PARKED_PROBE_TIMEOUT_S = 180.0
+
+#: What the probe holds back from that ceiling for its interpreter start and
+#: tool-layer import before the first check (``monitors.parked``'s
+#: ``--budget-s`` = ceiling − this): the probe stops starting work at its
+#: budget and exits on its own terms, closing its MCP transports, rather than
+#: being SIGKILLed mid-connect. The value is the design's (§1 "Bounds") and
+#: sits far above the measured start cost: interpreter start + import of the
+#: probe, tool, registry, MCP-manager and session modules, n=10 on the dev Mac
+#: (2026-11-12, warm disk), median 1.06 s, max 4.59 s (one cold-cache run).
+PARKED_PROBE_START_MARGIN_S = 15.0
+
+
+def _is_parked_monitor_entry(entry: Any) -> bool:
+    """A monitor entry stamped ``parked_at`` by a park (and not held)."""
+    return (
+        isinstance(entry, Mapping) and bool(entry.get("parked_at")) and not entry.get("stopped_at")
+    )
+
+
+async def _reap_probe(proc: Any) -> None:
+    """SIGKILL the probe's own process group and collect it.
+
+    The wait is shielded: on the cancellation path a second cancel arriving
+    mid-wait must not leave a zombie (or a still-running tool call) behind.
+    """
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except OSError:
+        pass
+    try:
+        await asyncio.shield(proc.wait())
+    except asyncio.CancelledError:
+        pass
+
+
+def _parked_probe_env(config_dir: Path) -> dict[str, str]:
+    """The probe child's environment: the supervisor's, re-rooted and de-owned.
+
+    ``CONFIG_DIR_ENV`` = the store being probed: the probe's monitor settings,
+    spill store, ``auth.db``, secret base and fetch caches all resolve from the
+    AMBIENT config dir, and the in-session hash was produced under the session's
+    root; a mismatch here breaks byte-for-byte hash parity (design §3).
+
+    ``OWNER_ENV``/``SUPERVISOR_PID_ENV`` are stripped: they mark runtimes THIS
+    supervisor forked as its own (``owned_runtimes``), and a probe — or a stdio
+    MCP server it spawns — is not a runtime and must never be swept or stamped
+    as one.
+    """
+    from local_operator.paths import CONFIG_DIR_ENV
+    from local_operator.wakes.owned_runtimes import OWNER_ENV, SUPERVISOR_PID_ENV
+
+    env = {
+        key: value
+        for key, value in os.environ.items()
+        if key not in (OWNER_ENV, SUPERVISOR_PID_ENV)
+    }
+    env[CONFIG_DIR_ENV] = str(config_dir)
+    return env
+
+
+def _sweep_probe_group(pid: int) -> None:
+    """SIGKILL whatever is left in an EXITED probe's process group.
+
+    The probe closes its stdio MCP servers itself before printing a verdict;
+    this is the backstop for one it could not (a server ignoring stdin EOF).
+    The group is the probe's own (``start_new_session=True``) and the manager
+    keeps stdio children in it (``detach_stdio=False``), so the group is
+    exactly the probe's tree. ``ESRCH`` (nothing left) is the normal answer.
+    """
+    try:
+        os.killpg(pid, signal.SIGKILL)
+    except OSError:
+        pass
+
+
+async def _parked_monitors_quiet(config_dir: Path, session_id: str, cwd: str = "") -> bool:
+    """Run a parked session's due monitor checks WITHOUT reopening it.
+
+    True only when the probe ran every due check and each was unchanged (it
+    advanced their counters itself); then the session stays parked. Every other
+    answer — a change, a tool that needs a session, a probe failure or timeout, a
+    runtime that came back meanwhile — is False and the caller engages the
+    session exactly as before parking existed, so the session's own scheduler
+    re-runs the check against its unchanged baseline and delivers the delta.
+
+    A SUBPROCESS, deliberately: the probe imports the tool layer (~100 MB RSS),
+    and this supervisor is the one process that stays up through memory
+    pressure; the probe's memory is returned the moment it exits. See
+    :mod:`local_operator.monitors.parked` for the quiet-or-engage contract.
+    """
+    import json
+    import subprocess
+
+    if await _has_live_runtime(config_dir, session_id):
+        return False
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            sys.executable,
+            "-m",
+            "local_operator.monitors.parked",
+            "--session",
+            session_id,
+            "--config-dir",
+            str(config_dir),
+            "--cwd",
+            cwd,
+            "--budget-s",
+            str(PARKED_PROBE_TIMEOUT_S - PARKED_PROBE_START_MARGIN_S),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+            env=_parked_probe_env(config_dir),
+        )
+    except OSError as exc:
+        logger.warning("parked monitors %s: probe could not start (%s); engaging", session_id, exc)
+        return False
+    try:
+        out, _ = await asyncio.wait_for(proc.communicate(), timeout=PARKED_PROBE_TIMEOUT_S)
+    except asyncio.TimeoutError:
+        await _reap_probe(proc)
+        logger.warning("parked monitors %s: probe timed out; engaging", session_id)
+        return False
+    except asyncio.CancelledError:
+        # SHUTDOWN, NOT A VERDICT (review round 1, R1-5). Swallowing the
+        # cancellation returned False, and the caller then went on to
+        # ``_engage_one`` — opening a parked session while the supervisor was
+        # stopping. Reap the probe's group so nothing outlives us, then let the
+        # cancellation propagate.
+        await _reap_probe(proc)
+        raise
+    _sweep_probe_group(proc.pid)
+    verdict: dict[str, Any] = {}
+    for line in reversed((out or b"").decode("utf-8", "replace").splitlines()):
+        try:
+            verdict = json.loads(line)
+            break
+        except ValueError:
+            continue
+    quiet = verdict.get("verdict") == "quiet"
+    raw_rss = verdict.get("maxrss_kib")
+    maxrss: dict[str, Any] = raw_rss if isinstance(raw_rss, dict) else {}
+    # maxrss is LOGGED, not capped. Measured on the isolated evidence rig
+    # (2026-11-12, stub stdio/HTTP MCP servers, web_fetch, code_requests, glob):
+    # probe self n=31, median 106 MiB, max 139 MiB; reaped stdio children max
+    # 67 MiB. No cap is set because (a) macOS refuses to lower RLIMIT_AS/
+    # RLIMIT_RSS below an interpreter's current limits ("current limit exceeds
+    # maximum limit"), so a cap would need a watcher, and (b) the distribution
+    # that matters — real servers such as Slack's — cannot be measured in
+    # isolation. A cap, if one is wanted, is derived from these log lines.
+    logger.info(
+        "parked monitors %s: %s (%s, %s checked, maxrss self=%s KiB children=%s KiB)",
+        session_id,
+        "quiet — left parked" if quiet else "engaging",
+        verdict.get("why", f"no verdict, probe exit {proc.returncode}"),
+        verdict.get("checked", 0),
+        maxrss.get("self", "?"),
+        maxrss.get("children", "?"),
+    )
+    return quiet
+
+
 def wedged_runtime(config_dir: Path, session_id: str) -> tuple[int, float] | None:
     """``(pid, heartbeat_age_s)`` when a runtime for ``session_id`` has gone quiet.
 
@@ -1736,8 +1905,30 @@ class _MachineMemorySweep:
         dragging the runtime stack in until a pass needs it.
         """
         from local_operator.session.runtime.machine_memory import machine_memory_pass
+        from local_operator.session.runtime.park_pressure import (
+            measure_disk_pressure,
+            park_idle_sessions_sync,
+        )
 
-        report = machine_memory_pass(self.config_dir, apply=apply, in_cooldown=self.in_cooldown)
+        def _relieve(reason: str) -> int:
+            # The fleet guard's first rung: park idle sessions before ending a
+            # fragment (see ``park_pressure``). Runs on this worker thread.
+            return len(park_idle_sessions_sync(self.config_dir, reason=f"memory: {reason}").parked)
+
+        report = machine_memory_pass(
+            self.config_dir, apply=apply, in_cooldown=self.in_cooldown, relieve=_relieve
+        )
+        if apply and getattr(report, "withheld_cause", "") != "parked":
+            # DISK PRESSURE is its own trigger: swap on the data volume grows
+            # into the same free space, so a fleet whose RAM sum is "ok" can
+            # still be filling the disk. Parking is the only remedy here — a
+            # disk reading never ends a fragment.
+            try:
+                disk = measure_disk_pressure(self.config_dir)
+                if disk.under_pressure:
+                    park_idle_sessions_sync(self.config_dir, reason=f"disk: {disk.reason}")
+            except Exception:  # noqa: BLE001 — the memory pass's report stands
+                logger.warning("disk-pressure park rung failed", exc_info=True)
         if getattr(report, "killed", None) is not None:
             self._ended.append(
                 (time.monotonic(), frozenset(getattr(report, "killed_lineage", frozenset())))
@@ -2070,8 +2261,15 @@ class _Sweeper:
         moment: int,
         *,
         schedule_id: str = "",
+        parked: bool = False,
     ) -> bool:
         """Start one engagement in the background. False when already running.
+
+        ``parked`` (monitor rows only): the session was PARKED, so its due
+        checks are first run by :func:`_parked_monitors_quiet` outside the
+        session, and the engagement happens only when one is not quiet. Shares
+        the engagement semaphore, so probes and engagements together stay
+        within ``_MAX_CONCURRENT_ENGAGES``.
 
         ``schedule_id`` is ``"monitor:<id>"`` for a monitors-pass row: that
         engagement shares this sweeper's semaphore (``_MAX_CONCURRENT_ENGAGES``)
@@ -2118,6 +2316,16 @@ class _Sweeper:
                 _note_trigger_attempt(config_dir, session_id, reason=reason)
 
             try:
+                if is_monitor and parked:
+                    # Inside the try so the in-flight key is popped by the
+                    # ``finally`` below on every path, quiet or not.
+                    async with self._semaphore:
+                        quiet = await _parked_monitors_quiet(config_dir, session_id, cwd)
+                    if quiet:
+                        # The checks ran and advanced; nothing to engage. Clears
+                        # any backoff the same way a hosted session does.
+                        _monitor_backoff.note(session_id, "live", now_ms=moment)
+                        return False
                 started = await _engage_one(
                     config_dir,
                     session_id,
@@ -2255,8 +2463,13 @@ class _Sweeper:
             origins=origins,
         ):
             origin = origins.get(session_id)
+            parked = bool(
+                origin and monitors and _is_parked_monitor_entry(monitors.get(session_id))
+            )
             engaged = (
-                self.engage(config_dir, session_id, cwd, due_ms, moment, schedule_id=origin)
+                self.engage(
+                    config_dir, session_id, cwd, due_ms, moment, schedule_id=origin, parked=parked
+                )
                 if origin
                 else self.engage(config_dir, session_id, cwd, due_ms, moment)
             )

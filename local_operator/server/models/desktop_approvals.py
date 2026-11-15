@@ -50,6 +50,10 @@ class ApprovalRow(BaseModel):
     typed_approval: dict[str, Any] | None = Field(
         default=None, exclude_if=lambda value: value is None
     )
+    #: The phone-pairing card block (``pair_op.row_pairing``, ``features.phone_pairing``):
+    #: present only on a describable ``pair_phone`` row, dropped from every other row by
+    #: the same ``exclude_if`` rule so the frozen §3.5 key set is unchanged elsewhere.
+    pairing: dict[str, Any] | None = Field(default=None, exclude_if=lambda value: value is None)
 
 
 class ApprovalList(BaseModel):
@@ -188,3 +192,20 @@ class OperationApprovalAcknowledgment(BaseModel):
     operation: str = Field(min_length=1, max_length=64, pattern=r"^[a-z][a-z0-9_]*$")
     request_digest: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
     disclosure_digest: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+
+
+class PairAcknowledgment(BaseModel):
+    """``POST /v1/desktop/approvals/{id}/pair-ack`` (pairing design v2 §2).
+
+    The person's decision on a phone pairing card, BEFORE any signer: both digests the
+    card was drawn from, plus the typed ``code`` in code mode. Omitting ``code`` is the
+    confirm-mode "Codes match" press, which the engine accepts only on an edge-attested
+    request. Closed and strict like its siblings; ``code`` is bounded loosely (spaces and
+    a paste's grouping are normalised by the engine, which refuses non-digits without a
+    strike).
+    """
+
+    model_config = {"extra": "forbid", "strict": True}
+    request_digest: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    disclosure_digest: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    code: str | None = Field(default=None, max_length=32)

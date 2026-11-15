@@ -475,6 +475,42 @@ def env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> _Env:
     return holder
 
 
+def _seed_borrower_network(root: Path, network_id: str) -> None:
+    """An active, trusted network record on ``root`` whose self member is the borrower.
+
+    A real borrower always holds its network record, and every no-dial cache serve
+    passes ``MeshCredentialClient.live_grant``, which fails CLOSED without one (no
+    record, an untrusted record or an inactive self row all refuse — the panic
+    fence, PR #3920). Tests that drive a bare client against a placement document
+    must therefore seed the record a paired device would have, as the ``mesh``
+    fixtures get from a real pairing; never weaken the fence to make them pass.
+    """
+    from local_operator.network import store
+    from local_operator.network import types as net_types
+
+    record = net_types.NetworkRecord(
+        network_id=network_id,
+        name="github-test",
+        created_by=OWNER_DEVICE,
+        self_device_id=BORROWER_DEVICE,
+        self_role="drive",
+        self_capabilities=sorted(net_types.capabilities_for_role("drive")),
+        listen={"address": "127.0.0.1", "port": 1, "advertised": []},
+    )
+    record.members.append(
+        net_types.MemberRecord(
+            device_id=BORROWER_DEVICE,
+            name="borrower",
+            kind="device",
+            lifecycle="active",
+            role="drive",
+            capabilities=sorted(net_types.capabilities_for_role("drive")),
+            endpoints=["127.0.0.1:1"],
+        )
+    )
+    store.save(record, root)
+
+
 def _seed_app_key(root: Path, pem: str, *, app_id: str = APP_ID) -> None:
     from local_operator.secrets.keys import load_master_key
     from local_operator.secrets.store import SecretStore
@@ -1675,6 +1711,7 @@ def test_after_the_window_the_next_command_gets_a_new_token_or_fails_clean(
     )
     document.grant(github_mod.GITHUB_KEY, BORROWER_DEVICE, scope="device", by=OWNER_DEVICE)
     document.save()
+    _seed_borrower_network(env.root, "n_gh_next")
     client = MeshCredentialClient(
         root=env.root,
         self_device=BORROWER_DEVICE,
@@ -1819,6 +1856,7 @@ def test_borrowed_git_env_materialises_the_narrowing_it_serves(tmp_path: Path) -
     )
     document.grant(github_mod.GITHUB_KEY, BORROWER_DEVICE, scope="device", by=OWNER_DEVICE)
     document.save()
+    _seed_borrower_network(root, "n_gh_env")
     client = MeshCredentialClient(
         root=root,
         self_device=BORROWER_DEVICE,

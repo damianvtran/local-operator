@@ -115,6 +115,7 @@ async def test_the_route_reports_the_park_rather_than_a_dead_gateway(desktop) ->
     # a new row and nothing re-points the configuration — issue #1711), so the
     # verdict's re-point command stands in.
     assert result["remedy"] == {
+        "kind": "restore_owner",
         "command": gateway.TERMINAL_REMEDY[gateway.OWNER_MISSING],
         "url": gateway.CONSOLE_URL,
     }
@@ -140,7 +141,13 @@ async def test_a_machine_with_no_tunnel_says_so_instead_of_stopped(desktop) -> N
     assert result["configured"] is False
     assert result["connector"]["state"] == "not configured"
     assert result["login"]["state"] == "unknown"
+    # Nothing is enrolled, so there is nothing to sign in for and no remedy (main
+    # 6f79d9a3's contract, kept on #3945): the setup OFFER, read from
+    # `tunnel.setup.read`, is what serves this machine (UI #1910).
     assert result["remedy"] is None
+    status = (await client.get("/v1/auth/status")).json()["result"]
+    assert status["radient_login"]["state"] == "unknown"
+    assert status["tunnel_remedy"] is None
 
 
 async def test_a_deliberately_stopped_tunnel_is_not_reported_as_parked(desktop) -> None:
@@ -168,6 +175,7 @@ async def test_the_account_status_carries_the_login_verdict(desktop) -> None:
     assert result["accounts"] == []
     assert result["radient_login"] == {"credential_id": 7, "state": "owner_missing"}
     assert result["tunnel_remedy"] == {
+        "kind": "restore_owner",
         "command": gateway.TERMINAL_REMEDY[gateway.OWNER_MISSING],
         "url": gateway.CONSOLE_URL,
     }

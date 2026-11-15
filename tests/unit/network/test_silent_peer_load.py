@@ -128,128 +128,47 @@ def test_a_writer_exception_outside_the_network_set_logs_and_closes_the_link(
 
 
 # ---------------------------------------------------------------------------
-# Single-flight dials
+# Single-flight dials: one silent peer never holds up another
 # ---------------------------------------------------------------------------
+#
+# The single-flight contract itself (N callers, one dial; waiter deadlines; failed
+# and raising leaders) is pinned by ``test_ensure_link_single_flight.py`` (#3885).
+# This file pins the silent-peer half: a dial stuck on a peer that has gone quiet
+# must never delay a dial to any OTHER peer.
 
 
-def _dial_server() -> Any:
+def test_a_dial_stuck_on_a_silent_peer_never_blocks_a_dial_to_another_peer() -> None:
     server: Any = object.__new__(relay.RelayServer)
-    server._dial_flights = {}
-    server._dial_flights_lock = threading.Lock()
-    return server
-
-
-def test_concurrent_ensure_link_calls_make_exactly_one_dial() -> None:
-    server = _dial_server()
-    table: dict[str, Any] = {}
-    link = SimpleNamespace(link_id="l_one")
-    dials: list[str] = []
-    started = threading.Event()
-    release = threading.Event()
-
-    def link_for(device_id: str, *, network_id: str | None = None) -> Any:
-        return table.get(device_id)
+    silent_started = threading.Event()
+    release_silent = threading.Event()
+    healthy = SimpleNamespace(link_id="l_healthy")
 
     def dial(device_id: str, **_kw: Any) -> Any:
-        dials.append(device_id)
-        started.set()
-        assert release.wait(5)
-        table[device_id] = link  # admitted: callers arriving from now see it
-        return link, "", []
-
-    server._link_for = link_for
-    server._dial_link_with_probe = dial
-    results: list[Any] = []
-
-    def caller() -> None:
-        results.append(server._ensure_link_with_probe("d_peer", network_id="n_x"))
-
-    threads = [threading.Thread(target=caller) for _ in range(8)]
-    threads[0].start()
-    assert started.wait(5)
-    for thread in threads[1:]:
-        thread.start()
-    release.set()
-    for thread in threads:
-        thread.join(5)
-        assert not thread.is_alive()
-
-    assert dials == ["d_peer"]
-    assert len(results) == 8 and all(r[0] is link and r[1] == "" for r in results)
-    assert server._dial_flights == {}
-
-
-def test_a_waiter_answers_within_its_own_deadline_without_dialling() -> None:
-    server = _dial_server()
-    dials: list[str] = []
-    started = threading.Event()
-    release = threading.Event()
-
-    def dial(device_id: str, **_kw: Any) -> Any:
-        dials.append(device_id)
-        started.set()
-        assert release.wait(5)
-        return None, "refused", []
-
-    server._link_for = lambda device_id, **_kw: None
-    server._dial_link_with_probe = dial
-    leader = threading.Thread(target=lambda: server._ensure_link_with_probe("d_peer"))
-    leader.start()
-    try:
-        assert started.wait(5)
-        link, reason, attempts = server._ensure_link_with_probe("d_peer", probe_timeout_s=0.05)
-        assert (link, reason, attempts) == (None, relay.NOT_ATTEMPTED_REASON, [])
-        assert dials == ["d_peer"]
-    finally:
-        release.set()
-        leader.join(5)
-
-
-def test_an_unbounded_waiter_does_not_inherit_a_listing_probes_capped_failure(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    server = _dial_server()
-    waiting = threading.Event()
-    real_flight = relay._DialFlight
-
-    class _ObservedDone(threading.Event):
-        def wait(self, timeout: float | None = None) -> bool:
-            waiting.set()  # a caller has joined the flight rather than dialling
-            return super().wait(timeout)
-
-    monkeypatch.setattr(
-        relay, "_DialFlight", lambda bounded: real_flight(bounded=bounded, done=_ObservedDone())
-    )
-    calls: list[float | None] = []
-    started = threading.Event()
-    release = threading.Event()
-    link = SimpleNamespace(link_id="l_full_budget")
-
-    def dial(device_id: str, *, probe_timeout_s: float | None = None, **_kw: Any) -> Any:
-        calls.append(probe_timeout_s)
-        if probe_timeout_s is not None:  # the listing probe: capped connects
-            started.set()
-            assert release.wait(5)
+        if device_id == "d_silent":
+            silent_started.set()
+            assert release_silent.wait(10)  # the handshake that never answers
             return None, "timeout", []
-        return link, "", []
+        return healthy, "", []
 
     server._link_for = lambda device_id, **_kw: None
-    server._dial_link_with_probe = dial
-    probe = threading.Thread(
-        target=lambda: server._ensure_link_with_probe("d_peer", probe_timeout_s=5.0)
-    )
-    probe.start()
-    assert started.wait(5)
-    got: list[Any] = []
-    op = threading.Thread(target=lambda: got.append(server._ensure_link_with_probe("d_peer")))
-    op.start()
-    assert waiting.wait(5), "the session op must join the in-flight probe first"
-    release.set()
-    probe.join(5)
-    op.join(5)
-
-    assert got and got[0][0] is link
-    assert len(calls) == 2 and calls[1] is None
+    server._dial_for_link = dial
+    stuck = threading.Thread(target=lambda: server._ensure_link_with_probe("d_silent"))
+    stuck.start()
+    try:
+        assert silent_started.wait(5)
+        got: list[Any] = []
+        other = threading.Thread(
+            target=lambda: got.append(server._ensure_link_with_probe("d_healthy"))
+        )
+        other.start()
+        other.join(2)
+        # Answered while the silent peer's dial is STILL in flight.
+        assert not other.is_alive(), "a dial to a healthy peer waited on a silent one"
+        assert got == [(healthy, "", [])]
+        assert stuck.is_alive()
+    finally:
+        release_silent.set()
+        stuck.join(5)
 
 
 # ---------------------------------------------------------------------------
@@ -268,6 +187,7 @@ class _Link:
         self.sent: list[dict[str, Any]] = []
         self.closed: list[str] = []
         self.started = False
+        self.outbound = False
 
     def send(self, frame: dict[str, Any]) -> None:
         self.sent.append(frame)
@@ -318,3 +238,22 @@ def test_the_outbound_fence_is_per_network_and_inbound_admission_is_not_fenced_h
 
     assert outbound.closed == [] and other_network.closed == [] and inbound.closed == []
     assert set(server.links) == {"l_out", "l_other", "l_inbound"}
+
+
+def test_a_simultaneous_cross_dial_keeps_the_link_the_peer_dialled() -> None:
+    """A dials B while B dials A: the outbound fence must not replace an INBOUND link.
+
+    The older link here is the one the PEER dialled. Its far end (the peer, as
+    dialler) is not about to evict it — the peer's own outbound fence is busy
+    replacing ITS copy of our link — so closing it here too would leave the pair
+    with no link at all. Inbound duplicates stay ``register_link``'s business.
+    """
+    server = _admit_server()
+    inbound = _Link("l_peer_dialled")
+    assert server._admit_link(inbound) == ""
+    ours = _Link("l_we_dialled")
+    assert server._admit_link(ours, outbound=True) == ""
+
+    assert inbound.closed == [] and inbound.sent == []
+    assert ours.outbound and not inbound.outbound
+    assert set(server.links) == {"l_peer_dialled", "l_we_dialled"}

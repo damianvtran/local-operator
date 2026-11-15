@@ -505,6 +505,7 @@ SLICE_PEER_OPS: frozenset[str] = frozenset(
         "net_definitions",
         "net_readiness",
         "net_mcp_defs",
+        "net_skills",
         "net_memory",
         # The single-peer update (meshupdate.py; S1 of mesh-rolling-updates.md
         # §8.2). Slow by registration below: the handler may run a real install
@@ -544,6 +545,7 @@ SLICE_LOCAL_OPS: frozenset[str] = frozenset(
         "definitions_sync",
         "peer_readiness",
         "mcp_defs_sync",
+        "skills_sync",
         # The single-peer update's local half — a viewer asking ITS OWN relay to
         # ask a peer (the ``peer_*`` boundary rule; the peer-scope half is
         # ``net_update``).
@@ -571,6 +573,8 @@ SLICE_MODULES: tuple[str, ...] = (
     # registers a tick step there), so it is installed after that module but
     # starts no thread of its own.
     "local_operator.network.mcpdefs",
+    # User skills ride the same definitions cadence (a tick step), no thread.
+    "local_operator.network.skillsync",
     "local_operator.network.memory",
     # S1 of the mesh rolling updates: the ``update`` capability's op halves. It
     # starts no thread of its own (the S3 rollout driver is a different slice).
@@ -899,33 +903,6 @@ class _AttemptOutcome:
     sock: socket.socket | None
     detail: str
     latency_ms: float
-
-
-@dataclass
-class _DialFlight:
-    """One in-flight dial to a ``(device_id, network_id)``, shared by every caller.
-
-    WHY SINGLE-FLIGHT (2026-11-13, lop-remote-node-2): every surface that needs a
-    peer — the 1 s redial tick, a listing probe, each viewer stream open, a
-    credential broker call — used to check :meth:`RelayServer._link_for` and then
-    dial on its own. Against a peer that had gone silent for 120 s that meant
-    several handshakes landing on a node that was already starving, each one, once
-    it succeeded, fanning out member pulls, link-up hooks and stream re-opens; the
-    Mac's log showed two links to the one peer idling out 5 s apart. A handshake is
-    the most expensive thing to ask of a struggling peer, so concurrent callers now
-    wait on ONE dial's answer instead of starting their own.
-
-    ``bounded`` records whether the leader dialled under a listing deadline (each
-    connect capped at :data:`PROBE_CONNECT_TIMEOUT_S`): a waiter with no deadline is
-    a real session op owed the full handshake budget, so it dials for itself rather
-    than inherit a failure the leader's short cap produced.
-    """
-
-    bounded: bool
-    done: threading.Event = field(default_factory=threading.Event)
-    #: Set by the leader before ``done``; ``None`` if the leader raised, in which
-    #: case a waiter dials for itself rather than invent a reason.
-    result: tuple["PeerLink | None", str, list[CandidateAttempt]] | None = None
 
 
 def probe_candidates(
@@ -4895,6 +4872,9 @@ class PeerLink:
         #: When the writer last sent a keepalive ``ping``. The cadence is measured from
         #: the LATER of this and ``last_frame_at`` — see ``_write_loop``.
         self.last_ping_sent_at = 0.0
+        #: True when THIS device dialled the link (set by ``_admit_link(outbound=True)``).
+        #: The dialler's duplicate fence replaces only such links: see ``_admit_link``.
+        self.outbound = False
         self.frames_in = 0
         #: When this link last ANSWERED a member-table pull (`net_member_list`).
         #: Zero means "never", and it is the whole of the due-gate in
@@ -5701,6 +5681,40 @@ def warm_open_frame_strip_now() -> None:
 #: the link round trip, not work — and the device just failed to answer once.
 CREATE_LOOKUP_TIMEOUT_S = 10.0
 
+#: How long a requester KEEPS TRYING to confirm a create by its key after the
+#: create's reply was lost, across every lookup, dial and pause inside it.
+#:
+#: WHY A WINDOW AND NOT ONE LOOKUP (2026-11-14, 535b1f3bb8df): a reply is most often
+#: lost because the LINK dropped — and a single lookup asked straight after the
+#: drop finds that same link still down, so the caller printed "could not be asked"
+#: for a session the owner had created AND bound to the caller's key. The owner's
+#: audit for that create: ``link_closed cause=error`` 38.5 s in, the link back
+#: 22.7 s later.
+#:
+#: MEASURED, NOT GUESSED: every ``link_closed`` -> next ``link_opened`` gap for the
+#: same peer in a long-running node's ``network/audit.jsonl`` (2026-11-05 ..
+#: 2026-11-14; n=155): median 2.1 s; 144 of 155 (93%) back within 60 s, the
+#: largest of those 44.4 s; the rest form a separate tail at 90 s, 119 s, 181 s
+#: and then 1100-5500 s (a device offline, ``cause=timeout``), which no bounded
+#: wait can cover. 60 s sits above the whole short-gap cluster with room for the
+#: redial and one lookup after the link returns, and fits the client bounds
+#: (``CREATE_CLIENT_BOUND_S`` below, the ``sessions`` tool's 180 s child).
+CREATE_CONFIRM_WINDOW_S = 60.0
+
+#: Pause between confirm attempts while the owner cannot be asked (link down) or
+#: says the create is still ``pending``. The measured median re-establishment is
+#: 2.1 s, so polling faster than this mostly re-dials a link not yet back.
+CREATE_CONFIRM_POLL_S = 2.0
+
+#: The control-socket budget a CLIENT gives ``peer_session_create`` (the CLI and
+#: the desktop surface). It was 120 s while the relay asked once for 10 s after a
+#: lost reply; it grows by EXACTLY what the confirm window added, so the client
+#: never gives up while its relay is still confirming — a client that gave up
+#: first would print "the relay did not answer" and lose the id the window found.
+#: Stays below the ``sessions`` tool's 180 s child bound
+#: (``tools.builtin._MESH_CREATE_ENGAGE_TIMEOUT_S``; a test pins the order).
+CREATE_CLIENT_BOUND_S = 120.0 + (CREATE_CONFIRM_WINDOW_S - CREATE_LOOKUP_TIMEOUT_S)
+
 
 class _PeerNoReply(MeshRefusal):
     """A peer op whose request was sent and whose reply never arrived.
@@ -5709,6 +5723,23 @@ class _PeerNoReply(MeshRefusal):
     type so a caller whose op may have ACTED on the far side (a create) can tell
     "no answer" from "never asked".
     """
+
+
+#: Guards every relay's single-flight dial table (:meth:`RelayServer._ensure_link_with_probe`).
+#: Module-level, not per instance, because the table itself is created lazily: test
+#: rigs build a relay with ``object.__new__`` and never run ``__init__``. Held only
+#: to read or write the table — never across a dial.
+_DIAL_FLIGHTS_LOCK = threading.Lock()
+
+
+@dataclass
+class _DialFlight:
+    """One in-flight dial that concurrent same-peer callers share."""
+
+    deadline: float | None
+    done: threading.Event = field(default_factory=threading.Event)
+    result: tuple[Any, str, list[CandidateAttempt]] = field(default_factory=lambda: (None, "", []))
+    error: BaseException | None = None
 
 
 class RelayServer:
@@ -5791,9 +5822,6 @@ class RelayServer:
         self._refusal_rows = redial.RefusalCoalescer()
         self.links: dict[str, PeerLink] = {}
         self._links_lock = threading.RLock()
-        #: In-flight dials keyed by ``(device_id, network_id)`` (see ``_DialFlight``).
-        self._dial_flights: dict[tuple[str, str | None], _DialFlight] = {}
-        self._dial_flights_lock = threading.Lock()
         self._listener: socket.socket | None = None
         self._control: socket.socket | None = None
         self._control_key = wire.b64u(os.urandom(32))
@@ -7827,7 +7855,27 @@ class RelayServer:
                 # keeping the older one here would leave both ends with none.
                 # Decided under the same lock as the insert so two admissions
                 # cannot each see the other as "no link yet".
-                displaced = self._link_for(link.device_id, network_id=link.network_id)
+                #
+                # ONLY A LINK THIS DEVICE DIALLED is displaced here. In a simultaneous
+                # cross-dial (A dials B while B dials A) the older link to the peer is
+                # the INBOUND one the peer dialled; the peer's own outbound fence is
+                # replacing ITS outbound copy of the other link at the same moment,
+                # so replacing the inbound one here too would close both links and
+                # leave the pair with none. Inbound duplicates stay the listener's
+                # business (``register_link``), as they were before this fence.
+                link.outbound = True
+                displaced = next(
+                    (
+                        held
+                        for held in self.links.values()
+                        if getattr(held, "outbound", False)
+                        and held.device_id == link.device_id
+                        and held.network_id == link.network_id
+                        and held.alive
+                        and not held.closing
+                    ),
+                    None,
+                )
             if not refusal:
                 self.links[link.link_id] = link
                 # Publish the connected transition BEFORE starting the reader and
@@ -8939,6 +8987,13 @@ class RelayServer:
                     "subagents_queued": record.subagents_queued,
                     "busy": record.busy,
                     "pending": record.pending if state == "live" else None,
+                    # Only when TRUE: an older viewer ignores the key, and its
+                    # absence means "a gate" (every older owner's meaning).
+                    **(
+                        {"pending_queued": True}
+                        if state == "live" and record.pending and record.pending_queued
+                        else {}
+                    ),
                     "detached": record.detached,
                     # THE RECORD'S EPOCH, NOT ITS ``started`` BOOL (operator
                     # report). ``record.started`` is "has run at
@@ -9595,6 +9650,10 @@ class RelayServer:
                     root=self.root,
                 )
                 epoch_after = record.epoch
+                # A panic, trust change or disconnect ends this network's credentials NOW:
+                # the login the relay renewed on the owner's return must not outlive it in
+                # memory until the next ask (``renew_push``; PR #3946 review m1).
+                self._drop_renewed_logins()
             # The snapshot is taken HERE, inside the section that wrote the state.
             victims = [
                 other
@@ -9655,6 +9714,7 @@ class RelayServer:
         for other in victims:
             other.send({"op": "net_bye", "reason": "untrusted"})
             other.close("we-closed")
+        self._revoke_lent_on_panic(record.network_id)
         # ``None`` rather than the frame above: the dispatcher's own ack would be a
         # second reply with the same ``req``, queued after the link is closed so it
         # can never be written, and a duplicate reply on the wire is the shape the
@@ -9669,7 +9729,21 @@ class RelayServer:
         # writes inside the lock.
         with store.mutate(link.network_id, self.root) as record:
             set_trust(record, trust=trust, reason=f"set by {link.device_id}", root=self.root)
+            if record.trust != "active":
+                # A panic, trust change or disconnect ends this network's credentials NOW:
+                # the login the relay renewed on the owner's return must not outlive it in
+                # memory until the next ask (``renew_push``; PR #3946 review m1).
+                self._drop_renewed_logins()
         return {"op": "ack", "req": frame.get("req"), "detail": {"trust": trust}}
+
+    def _drop_renewed_logins(self) -> None:
+        """Forget every login this relay renewed for its sessions (best effort)."""
+        try:
+            from local_operator.network.credentials import renew_push
+
+            renew_push.drop_held(self)
+        except Exception:  # noqa: BLE001 — a trust change must never fail on this
+            logger.debug("mesh relay: dropping renewed logins failed", exc_info=True)
 
     def _op_identity_rotate(self, link: PeerLink, frame: dict[str, Any]) -> dict[str, Any]:
         record = self.store_view.network(link.network_id)
@@ -12229,75 +12303,82 @@ class RelayServer:
         probe_timeout_s: float | None = None,
         network_id: str | None = None,
     ) -> tuple["PeerLink | None", str, list[CandidateAttempt]]:
-        """``_dial_link_with_probe``, SINGLE-FLIGHT per ``(device_id, network_id)``.
+        """``_ensure_link`` plus WHY it failed — SINGLE-FLIGHT per peer.
 
-        The first caller for a key dials; every caller that arrives while that dial
-        is in flight waits for its answer within ITS OWN deadline instead of starting
-        a second handshake (why: :class:`_DialFlight`). A waiter whose deadline runs
-        out first answers :data:`NOT_ATTEMPTED_REASON` — true of it, since this
-        caller never got to dial. A waiter is returned a COPY of the attempts so no
-        two callers share one mutable list.
+        ONE DIAL PER PEER AT A TIME. Two callers that both found no live link used
+        to dial the same peer concurrently (the definitions syncer and the CLI's
+        ``definitions_sync``, say). The peer's duplicate-identity rule keeps the
+        NEWEST link and closes the other (``_admit_link``, ``"replaced"``), so the
+        caller holding the loser sent its request into a closing link and reported
+        ``no_answer`` for a peer that was up — measured 5 of 6 concurrent pushes
+        with no prior link (#3849's gate, ``test_two_config_roots_…``). So callers
+        for the SAME ``(device, network)`` share ONE in-flight dial and its result:
+        the link, or the same refusal code. Callers for DIFFERENT peers never wait
+        on each other — the table is keyed, and the lock guards only the table.
+
+        Constraints: a failed or timed-out dial releases every waiter with that
+        failure and leaves nothing behind, so the next call dials fresh; a waiter
+        with its own probe budget waits no longer than that budget
+        (``not_attempted``, as an unprobed member reads). A real session op (no
+        deadline) behind a budget-limited listing probe dials for itself after a
+        failure rather than inheriting a claim about someone else's clock.
         """
         found = self._link_for(device_id)
         if found is not None:
             return found, "", []
-        flights = getattr(self, "_dial_flights", None)
-        if flights is None:
-            # A reduced stand-in server (unit tests build these from a namespace)
-            # has no registry and no bound method: call the body uncoalesced.
-            return RelayServer._dial_link_with_probe(
-                self, device_id, probe_timeout_s=probe_timeout_s, network_id=network_id
-            )
-        key = (device_id, network_id)
+        if probe_timeout_s is not None and probe_timeout_s <= 0:
+            return None, NOT_ATTEMPTED_REASON, []
         deadline = None if probe_timeout_s is None else time.monotonic() + probe_timeout_s
+        key = (device_id, network_id)
         while True:
-            with self._dial_flights_lock:
+            with _DIAL_FLIGHTS_LOCK:
+                flights: dict[tuple[str, str | None], _DialFlight] = self.__dict__.setdefault(
+                    "_dial_flights", {}
+                )
                 flight = flights.get(key)
-                leader = flight is None
-                if flight is None:
-                    flight = _DialFlight(bounded=probe_timeout_s is not None)
+                leading = flight is None
+                if leading:
+                    flight = _DialFlight(deadline=deadline)
                     flights[key] = flight
-            if leader:
-                remaining = None if deadline is None else max(0.0, deadline - time.monotonic())
+            assert flight is not None
+            if leading:
                 try:
-                    flight.result = self._dial_link_with_probe(
-                        device_id, probe_timeout_s=remaining, network_id=network_id
+                    flight.result = self._dial_for_link(
+                        device_id, probe_timeout_s=probe_timeout_s, network_id=network_id
                     )
-                    return flight.result
+                except BaseException as exc:
+                    flight.error = exc
+                    raise
                 finally:
-                    # Unregister BEFORE waking the waiters, so a waiter that decides
-                    # to dial for itself starts a new flight rather than re-joining
-                    # this finished one.
-                    with self._dial_flights_lock:
+                    with _DIAL_FLIGHTS_LOCK:
                         if flights.get(key) is flight:
                             del flights[key]
                     flight.done.set()
+                return flight.result
+            # A WAITER. Unbounded only when the caller is: the leader's own dial
+            # is bounded (per-candidate connect cap plus the handshake timeout).
             remaining = None if deadline is None else deadline - time.monotonic()
-            if (remaining is not None and remaining <= 0) or not flight.done.wait(remaining):
+            if not flight.done.wait(remaining):
                 return None, NOT_ATTEMPTED_REASON, []
-            result = flight.result
-            if result is not None and result[0] is not None:
-                return result[0], "", list(result[2])
-            if result is not None and not (flight.bounded and deadline is None):
-                return None, result[1], list(result[2])
-            # The leader raised, or failed under a listing's per-connect cap this
-            # unbounded caller was never subject to: dial for ourselves — unless a
-            # link arrived meanwhile (an inbound one, say).
-            found = self._link_for(device_id)
-            if found is not None:
-                return found, "", []
+            if flight.error is not None:
+                raise flight.error
+            link, reason, attempts = flight.result
+            if link is not None:
+                # Prefer what the table holds NOW: the shared link may have been
+                # superseded by an inbound one while this caller was waking.
+                return self._link_for(device_id) or link, "", list(attempts)
+            if flight.deadline is not None and deadline is None:
+                continue  # a listing's budget ran out; this caller has none, so it dials
+            return None, reason, list(attempts)
 
-    def _dial_link_with_probe(
+    def _dial_for_link(
         self,
         device_id: str,
         *,
         probe_timeout_s: float | None = None,
         network_id: str | None = None,
     ) -> tuple["PeerLink | None", str, list[CandidateAttempt]]:
-        """``_ensure_link`` plus WHY it failed, for a surface that must say so.
-
-        Call through :meth:`_ensure_link_with_probe`, which coalesces concurrent
-        dials to one peer; calling this directly starts a handshake unconditionally.
+        """The dial behind :meth:`_ensure_link_with_probe`; call that, not this.
 
         A listing that reports ``reachable: false`` with no reason is the
         dead-instrument failure this repo warns about: it cannot be told from
@@ -13990,6 +14071,11 @@ class RelayServer:
                 reason=str(frame.get("reason") or "operator"),
                 root=self.root,
             )
+            if record.trust != "active":
+                # A panic, trust change or disconnect ends this network's credentials NOW:
+                # the login the relay renewed on the owner's return must not outlive it in
+                # memory until the next ask (``renew_push``; PR #3946 review m1).
+                self._drop_renewed_logins()
             self.audit.record(
                 AuditEvent(
                     event="trust_changed",
@@ -14321,6 +14407,10 @@ class RelayServer:
                     reason="this device raised a panic",
                     root=self.root,
                 )
+                # A panic, trust change or disconnect ends this network's credentials NOW:
+                # the login the relay renewed on the owner's return must not outlive it in
+                # memory until the next ask (``renew_push``; PR #3946 review m1).
+                self._drop_renewed_logins()
                 self.audit.record(
                     AuditEvent(
                         event="panic_raised",
@@ -14355,6 +14445,7 @@ class RelayServer:
         self._audit_incident_delivery("panic", reports)
         for link in victims:
             link.close("we-closed")
+        self._revoke_lent_on_panic(resolved.network_id)
         tally = self._incident_tally(reports)
         return {
             "network_id": resolved.network_id,
@@ -14363,6 +14454,34 @@ class RelayServer:
             **tally,
             "peers": reports,
         }
+
+    def _revoke_lent_on_panic(self, network_id: str) -> threading.Thread:
+        """DELETE the GitHub tokens this owner lent in ``network_id``, off-thread.
+
+        BOTH panic paths call this after their trust latch (lease review M1): the
+        latch closes links, but a minted GitHub token keeps working on its holder
+        for up to its hour unless the issuer revokes it. ON ITS OWN THREAD because
+        the received-panic handler runs on the link's reader thread, which must stay
+        short, and the raised panic's receipt must not wait on GitHub's API. The
+        thread is returned so a test can join it; callers ignore it.
+        """
+        from local_operator.network.credentials import owner as owner_mod
+
+        thread = threading.Thread(
+            target=owner_mod.revoke_lent_on_panic,
+            args=(self, network_id),
+            name="mesh-panic-revoke",
+            daemon=True,
+        )
+        try:
+            thread.start()
+        except RuntimeError:
+            # Interpreter shutdown refuses new threads. The panic's latch and
+            # broadcast already ran; this hook promises never to raise into them
+            # (the received path is on a link reader). Each token's own hour still
+            # bounds it. Review #3920 n1.
+            logger.warning("mesh panic: could not start the lent-token revoke", exc_info=True)
+        return thread
 
     @staticmethod
     def _incident_fields(frame: dict[str, Any]) -> dict[str, Any]:
@@ -14411,6 +14530,10 @@ class RelayServer:
                 reason="this device disconnected",
                 root=self.root,
             )
+            # A panic, trust change or disconnect ends this network's credentials NOW:
+            # the login the relay renewed on the owner's return must not outlive it in
+            # memory until the next ask (``renew_push``; PR #3946 review m1).
+            self._drop_renewed_logins()
             self.audit.record(
                 AuditEvent(
                     event="disconnect_initiated",
@@ -14502,9 +14625,16 @@ class RelayServer:
         The owner may have created the session (observed live 2026-11-11, where
         "stopped answering before it replied" was printed for a session that
         existed), so "unreachable" is the one answer this must never give. Asks
-        the owner ONCE, by the key the create carried, on a short read-sized
-        bound: a device that just failed to answer is not given another full
-        create budget.
+        the owner by the key the create carried, each ask on a short read-sized
+        bound, and KEEPS ASKING for up to ``CREATE_CONFIRM_WINDOW_S`` while the
+        owner cannot be reached or still says ``pending``: a lost reply usually
+        means a dropped link, and the first ask lands while it is still down
+        (2026-11-14, 535b1f3bb8df — see ``CREATE_CONFIRM_WINDOW_S``).
+
+        NEVER RE-SENDS THE CREATE. Only the read-only lookup is repeated: an owner
+        older than create keys ignores the key, so a re-sent create would be a
+        second session there, and such an owner answers the lookup ``unknown_op``,
+        which ends this at once rather than being retried.
 
         Returns the detail of a confirmed create (the id, marked
         ``create_unconfirmed`` because the create's own reply — and with it the
@@ -14524,30 +14654,57 @@ class RelayServer:
             f"`lop network sessions --peer {peer} --create --create-key {create_key}` with "
             "the same options — returns that session instead of making a second one"
         )
-        try:
-            found = self._local_peer_call(
-                "net_session_create_lookup",
-                peer,
-                timeout=CREATE_LOOKUP_TIMEOUT_S,
-                create_key=create_key,
-            )
-        except MeshRefusal as refusal:
-            # An older owner answers ``unknown_op`` (and ignored the key, so a
-            # retry WOULD duplicate there); a dead link answers nothing. Either
-            # way nothing is known, and the sentence says exactly that.
-            logging.getLogger(__name__).info(
-                "create lookup on %s failed: %s %s",
-                peer,
-                refusal.code,
-                refusal.sentence,
-            )
-            raise MeshRefusal(
-                "create_unconfirmed",
-                f"{label} stopped answering before it replied to the create, and could "
-                f"not be asked whether it made the session — it may have been created; {check}",
-            ) from None
-        state = str(found.get("state") or "")
-        session_id = str(found.get("session_id") or "")
+        cannot_ask = MeshRefusal(
+            "create_unconfirmed",
+            f"{label} stopped answering before it replied to the create, and could "
+            f"not be asked whether it made the session — it may have been created; {check}",
+        )
+        deadline = time.monotonic() + CREATE_CONFIRM_WINDOW_S
+        found: dict[str, Any] | None = None
+        state = session_id = ""
+        while True:
+            remaining = deadline - time.monotonic()
+            try:
+                found = self._local_peer_call(
+                    "net_session_create_lookup",
+                    peer,
+                    timeout=max(0.1, min(CREATE_LOOKUP_TIMEOUT_S, remaining)),
+                    create_key=create_key,
+                )
+            except MeshRefusal as refusal:
+                logging.getLogger(__name__).info(
+                    "create lookup on %s failed: %s %s",
+                    peer,
+                    refusal.code,
+                    refusal.sentence,
+                )
+                # ONLY "COULD NOT BE ASKED" IS WORTH WAITING OUT: a link that is
+                # down (no link, or no answer on it) comes back within the window
+                # in 93% of measured drops. Any answer the owner DID give —
+                # ``unknown_op`` from an owner older than create keys (which also
+                # ignored the key, so nothing may be re-sent), a policy refusal —
+                # will not change by asking again.
+                if refusal.code != "peer_unreachable":
+                    raise cannot_ask from None
+                # ``found`` keeps the owner's LAST answer (a ``pending`` seen before
+                # the link dropped again still says more than "never asked").
+                # A dial inside ``_local_peer_call`` is bounded by the handshake
+                # budget, not by ``remaining``, so the window can overrun by one
+                # dial (10 s); ``CREATE_CLIENT_BOUND_S`` keeps slack above it.
+            else:
+                state = str(found.get("state") or "")
+                session_id = str(found.get("session_id") or "")
+                # ``pending`` is the owner between its reservation and its mkdir —
+                # the bind follows within that create — so it is waited out too.
+                # Anything else (created, or a key the owner never saw) is final.
+                if state != "pending":
+                    break
+            remaining = deadline - time.monotonic()
+            if remaining <= CREATE_CONFIRM_POLL_S:
+                break
+            time.sleep(CREATE_CONFIRM_POLL_S)
+        if found is None:
+            raise cannot_ask
         if state == "created" and session_id:
             return {
                 "session_id": session_id,
@@ -14767,6 +14924,24 @@ class RelayServer:
                 "pinned": {name: digest for name, digest in sorted(pinned_names.items())},
                 "unpinned": unpinned,
             }
+        # SKILLS TRAVEL BEFORE THE CREATE, so a brief that names ``skill://x`` resolves
+        # on the session's FIRST turn rather than after the next cadence tick (up to
+        # a minute later). Unconditional — unlike definitions, nothing in the frame
+        # names which skills a session will read — and BOUNDED
+        # (``skillsync.CREATE_PUSH_BUDGET_S``): a large first sync continues in the
+        # background and the receipt says so, so it can never stall the create.
+        # Best-effort: a peer that is unreachable or predates skill sync answers the
+        # create exactly as before, with the reason on the receipt.
+        skills_receipt: dict[str, Any] = {}
+        try:
+            from local_operator.network import skillsync
+
+            skills_receipt = skillsync.push_for_create(self, self._resolve_peer(peer))
+        except MeshRefusal:
+            skills_receipt = {}  # an unknown peer is refused by the create itself below
+        except Exception as exc:  # noqa: BLE001 — a skills push must never fail a create
+            logger.debug("peer create: skills push failed", exc_info=True)
+            skills_receipt = {"ok": False, "code": "failed", "message": str(exc)}
         fields: dict[str, Any] = {
             "cwd": str(frame.get("cwd") or ""),
             "model": frame.get("model"),
@@ -14821,11 +14996,14 @@ class RelayServer:
                 # half); ``message`` is the wire frame's name for it, not the exception's.
                 raise MeshRefusal(refusal.code, f"{refusal.sentence} ({push_reason})") from None
             raise
+        extra: dict[str, Any] = {}
         if instructions_notice:
-            detail = {**detail, "custom_instructions_notice": instructions_notice}
+            extra["custom_instructions_notice"] = instructions_notice
         if reconciliation:
-            return {**detail, "definitions": reconciliation}
-        return detail
+            extra["definitions"] = reconciliation
+        if skills_receipt:
+            extra["skills"] = skills_receipt
+        return {**detail, **extra} if extra else detail
 
     def _ctl_peer_engage(self, frame: dict[str, Any]) -> dict[str, Any]:
         return self._local_peer_call(

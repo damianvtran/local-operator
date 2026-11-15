@@ -2811,10 +2811,10 @@ class SessionRow(NamedTuple):
     #: ``None`` is no claim — every local row, every other member's row, and
     #: every row from an owner that predates ``wire.REMOTE_ATTENTION_V1``.
     remote_attention: tuple[str, str] | None = None
-    #: ``(key, revision, priority, title)`` of each of the owner's newest unread
+    #: ``(key, revision, priority, title, at_ms)`` of each of the owner's newest unread
     #: ``notify`` items for that session (newest first, bounded by
     #: ``remote_attention.NOTICES_ON_WIRE``), under the same origin-only rule.
-    remote_notices: tuple[tuple[str, int, str, str], ...] | None = None
+    remote_notices: tuple[tuple[str, int, str, str, int], ...] | None = None
     #: The owner could NOT read its completion store for this row (review round
     #: 2, R2-m2), so a missing ``remote_attention`` is not an acknowledgement:
     #: the origin's forwarder settles nothing on such a row.
@@ -2823,6 +2823,13 @@ class SessionRow(NamedTuple):
     #: read it. Only ever ``True`` on a listing that asked for temporary rows
     #: (``include_temporary``); appended last and defaulted, the file's rule.
     temporary: bool = False
+    #: A REMOTE row's ``pending`` is the owner's ask-QUEUE claim rather than a
+    #: parked gate (``PeerRow.pending_queued``): ``peer_rows.park_edges`` raises
+    #: no park row for it (PR #3934 Q1). Appended last and defaulted.
+    pending_queued: bool = False
+    #: The owner could not read this session's ask log (``PeerRow.asks_unknown``),
+    #: so the origin retires no forwarded ask on this row (PR #3934 R1-2).
+    remote_asks_unknown: bool = False
 
     @property
     def is_remote(self) -> bool:

@@ -1,0 +1,32 @@
+{
+  "schema": 1,
+  "locale": "hi",
+  "namespace": "cli.mobile_help",
+  "history_sha256": "0aea872bebb64d3de884a55f7e6d5a4dcb0f27ffaba932f49fb6c98abae67606",
+  "entries": [
+    {
+      "locale": "hi",
+      "namespace": "cli.mobile_help",
+      "source_sha256": "3e1aea77751a6a1286cd0bc525163ac6e90da2f81fd19fff1fc23ae247133267",
+      "translator": {
+        "agent": "i18n-translator subagent, session 398cdb26808f (values in commit a3722be7dada; English source drafted by coder session b0300e2c2c7f)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-14"
+      },
+      "auditor": {
+        "agent": "independent i18n-auditor (C4 hi/ur lane, `task` subagent), session f9d4556f4a66; did not translate, draft or edit any value it judged",
+        "model": "anthropic/claude-opus-5-5 (served model; no provider fallback observed)",
+        "date": "2026-11-14",
+        "independent_from_translator": true,
+        "result": "passed",
+        "findings": 1,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Independent audit a1 of cli.mobile_help (2 new keys (doctor, doctor_json) judged in full; the 15 carried keys (previously audited at source 88681bae…) re-read for consistency; this receipt covers the whole 17-key namespace at the new English source hash) at target sha256 4c9e958ae005… in a3722be7dada: PASSED, 0 blocker / 0 major / 0 minor / 1 nit (HI-H01; all adjudicated, none asks for a change). Real path exercised with LOP_LANG lop mobile doctor/--help; no native-speaker pass, no rendered frame. Evidence: i18n/audits/evidence/hi/cli.mobile_help/a1/record.json",
+      "evidence": "i18n/audits/evidence/hi/cli.mobile_help/a1/record.json",
+      "round": "a1",
+      "keys_audited": 17
+    }
+  ]
+}

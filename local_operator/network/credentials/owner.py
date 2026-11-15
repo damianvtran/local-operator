@@ -68,6 +68,7 @@ requirement exists to prevent. So a report may, at most:
 from __future__ import annotations
 
 import asyncio
+import functools
 import logging
 import os
 import secrets
@@ -77,7 +78,7 @@ from concurrent.futures import TimeoutError as FutureTimeoutError
 from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Sequence
 
 from local_operator.network.credentials import github as github_app
 from local_operator.network.credentials import placement as placement_mod
@@ -502,6 +503,20 @@ class MeshCredentialBroker:
                         "req": (frame or {}).get("req"),
                         "detail": share_push_mod.member_share_push(server, link, frame),
                     }
+                # THE RENEW NUDGE, same reason: it is addressed to a HOLDER, and the
+                # holder that most needs it (a borrower-only node) owns nothing. Its
+                # receiver re-asks only the authenticated sender, only for rows that
+                # name the sender owner and this device holder (``renew_push``).
+                if str((frame or {}).get("kind") or "") == "renew":
+                    from local_operator.network.credentials import (
+                        renew_push as renew_push_mod,
+                    )
+
+                    return {
+                        "op": "ack",
+                        "req": (frame or {}).get("req"),
+                        "detail": renew_push_mod.member_renew(server, link, frame),
+                    }
                 return refuse(link, frame)
             return broker.on_broker(link, frame)
 
@@ -599,6 +614,13 @@ class MeshCredentialBroker:
             detail = share_push_mod.member_share_push(self._server, link, frame)
         elif kind == "placement":
             detail = self.placement_frame(link, frame)
+        elif kind == "renew":
+            # Owner -> holder: "ask me again now" (``renew_push``). A device that
+            # both lends and borrows is a holder here too; a borrower-only one
+            # reaches the same receiver through ``relay_handler``'s pre-broker arm.
+            from local_operator.network.credentials import renew_push as renew_push_mod
+
+            detail = renew_push_mod.member_renew(self._server, link, frame)
         elif kind == "lifecycle_read":
             detail = self.lifecycle_read(link, frame)
         elif kind == "lifecycle_ack":
@@ -1441,6 +1463,7 @@ class MeshCredentialBroker:
             kind="bearer" if kind in ("oauth", "mcp-oauth") else "api_key",
             token_expires_at_ms=token_exp_ms,
             grant_expires_at_ms=grant_exp,
+            hold_until_ms=_offline_hold_until_ms(self.root, now_ms, token_exp_ms, grant_exp),
             credential_ref=CredentialRef(
                 owner_device=self.self_device,
                 owner_device_name=self.self_device_name,
@@ -1472,7 +1495,7 @@ class MeshCredentialBroker:
         if self._github_lender is None:
             minter = self._github_minter
             if minter is None:
-                minter = github_app.GithubMinter()
+                minter = github_app.default_minter()
             self._github_lender = github_app.GithubLender(minter=minter)
             self._github_lender.attach_loop(self._loop.loop())
             self._github_lender.attach_audit(self._github_audit_sink)
@@ -1513,6 +1536,22 @@ class MeshCredentialBroker:
         if lender is None or not github_app.is_github_key(key):
             return 0
         return lender.revoke_holder(holder, key=key, cause=cause)
+
+    def revoke_all_outstanding(self, *, cause: str = "panic") -> int:
+        """DELETE every outstanding lent GitHub token, for every holder, now.
+
+        The owner half of "a panic ends the hold" (lease review M1): a panic only
+        latches trust and closes links, which a minted GitHub installation token
+        outlives by up to its hour on the holder. ``GithubLender.revoke_all_holders``
+        is the existing primitive for exactly this; until this method it had no
+        caller. Zero without a lender: nothing was ever minted on this relay.
+        Provider (OAuth) grants have no issuer-side revoke — the borrower's trust
+        fence (``MeshCredentialClient._self_membership_active``) ends those.
+        """
+        lender = self._github_lender
+        if lender is None:
+            return 0
+        return lender.revoke_all_holders(key=github_app.GITHUB_KEY, cause=cause)
 
     def _github_scope_refusal(self, key: str, by: str) -> BrokerError | None:
         """No forge source supplies a verified read-only account identity today.
@@ -1621,13 +1660,40 @@ class MeshCredentialBroker:
                     else github_app.CODE_GH_UNUSABLE
                 )
                 return BrokerError(code=code, message=str(exc), **common)
+            # The token arms are narrowed by the borrower's helper ALONE (§3.4),
+            # so the list it enforces must be a real one: the explicit
+            # designation, or what THIS login can push to minus opt-outs. An
+            # unavailable list refuses here instead of lending a token whose
+            # helper would then refuse every push without saying why.
+            designated = await asyncio.get_running_loop().run_in_executor(
+                None,
+                functools.partial(
+                    github_app.designation,
+                    self.root,
+                    source=source,
+                    token=token,
+                    minter=self._lender().minter,
+                ),
+            )
+            refusal = self._github_designation_refusal(
+                designated,
+                limit=github_app.MAX_DESIGNATED_REPOSITORIES,
+                common=common,
+                allow_explicit_clear=True,
+            )
+            if refusal is not None:
+                return refusal
             # Extraction already in flight cannot be undone, but a newly
             # persisted reduction must prevent constructing/emitting its grant.
             scope_refusal = self._github_scope_refusal(key, by)
             if scope_refusal is not None:
                 return scope_refusal
             return self._grant_from_owner_token(
-                token=token, key=key, provider=provider, common=common
+                token=token,
+                key=key,
+                provider=provider,
+                common=common,
+                repositories=designated.repositories,
             )
         return BrokerError(
             code="no_local_credential", message=github_app.no_source_message(), **common
@@ -1659,17 +1725,27 @@ class MeshCredentialBroker:
                     **common,
                 )
             return BrokerError(code=github_app.CODE_APP_UNUSABLE, message=str(exc), **common)
-        repositories = github_app.repositories_for(self.root)
-        if not repositories:
-            return BrokerError(
-                code=github_app.CODE_REPOSITORIES_UNSET,
-                message=(
-                    "no repositories are designated for GitHub brokering on this device; "
-                    "set network.credentials.github.repositories (see the network "
-                    "guide) — nothing was lent"
-                ),
-                **common,
-            )
+        lender = self._lender()
+        # THE DESIGNATION IS ENUMERATED WHEN UNSET (operator decision 2026-11-12):
+        # every repository the installation covers, minus the operator's opt-outs,
+        # as an explicit list. It may walk GitHub's API, so it runs off this loop
+        # like the mint. The App mint below is narrowed to exactly this list.
+        designated = await asyncio.get_running_loop().run_in_executor(
+            None,
+            functools.partial(
+                github_app.designation,
+                self.root,
+                source=github_app.SOURCE_APP,
+                app=app,
+                minter=lender.minter,
+            ),
+        )
+        refusal = self._github_designation_refusal(
+            designated, limit=github_app.APP_MINT_MAX_REPOSITORIES, common=common
+        )
+        if refusal is not None:
+            return refusal
+        repositories = designated.repositories
         # Recheck after local configuration reads, immediately before external
         # work. A revoke racing an already-started mint cannot retract that
         # request; registration still arranges cleanup and final grant() denial
@@ -1677,7 +1753,6 @@ class MeshCredentialBroker:
         scope_refusal = self._github_scope_refusal(key, by)
         if scope_refusal is not None:
             return scope_refusal
-        lender = self._lender()
         try:
             minted = await asyncio.get_running_loop().run_in_executor(
                 None, lender.mint, app, repositories
@@ -1699,6 +1774,11 @@ class MeshCredentialBroker:
             kind="bearer",
             token_expires_at_ms=minted.expires_at_ms,
             grant_expires_at_ms=grant_exp,
+            # Stated for the github arm too, though PR-A's borrower does not hold
+            # github yet: the window-end self-revoke must move first (design §4.3).
+            hold_until_ms=_offline_hold_until_ms(
+                self.root, now_ms, minted.expires_at_ms, grant_exp
+            ),
             credential_ref=CredentialRef(
                 owner_device=self.self_device,
                 owner_device_name=self.self_device_name,
@@ -1731,8 +1811,58 @@ class MeshCredentialBroker:
         )
         return grant
 
+    def _github_designation_refusal(
+        self,
+        designated: Any,
+        *,
+        limit: int,
+        common: dict[str, Any],
+        allow_explicit_clear: bool = False,
+    ) -> Any:
+        """The refusal for a designation that cannot be lent, or ``None``.
+
+        Empty is refused with the designation's own reason (never "no
+        narrowing"). Over ``limit`` is refused rather than cut: the App mint
+        takes at most :data:`github.APP_MINT_MAX_REPOSITORIES`, the wire carries
+        at most :data:`github.MAX_DESIGNATED_REPOSITORIES`, and a truncated list
+        would lend for a different set than the one the operator was shown.
+        """
+        if not designated.repositories:
+            # Token arms retain #3841's explicit refuse-all delivery after a
+            # previously lent hand-picked list is cleared. Do not confuse that
+            # with all opt-outs (listed is nonempty), or let an App mint an
+            # installation-wide token: only token arms opt into this branch.
+            if (
+                allow_explicit_clear
+                and designated.origin == github_app.ORIGIN_EXPLICIT
+                and not designated.listed
+            ):
+                return None
+            return BrokerError(
+                code=github_app.CODE_REPOSITORIES_UNSET,
+                message=designated.refusal(),
+                **common,
+            )
+        count = len(designated.repositories)
+        if count > limit:
+            return BrokerError(
+                code=github_app.CODE_REPOSITORIES_OVERFLOW,
+                # A DETAIL, not a sentence: the borrower's catalogue wraps it in the
+                # remedy (messages.py), so it names no device and no remedy itself —
+                # the old self-contained sentence was rendered twice (QA F1).
+                message=f"{count} repositories; one share can carry at most {limit}",
+                **common,
+            )
+        return None
+
     def _grant_from_owner_token(
-        self, *, token: str, key: str, provider: str, common: dict[str, Any]
+        self,
+        *,
+        token: str,
+        key: str,
+        provider: str,
+        common: dict[str, Any],
+        repositories: Sequence[str],
     ) -> Any:
         """The Grant arms 2/3 serve: NO registration and no server-side revoke.
 
@@ -1753,6 +1883,7 @@ class MeshCredentialBroker:
             kind="bearer",
             token_expires_at_ms=0,
             grant_expires_at_ms=now_ms + ttl_ms,
+            hold_until_ms=_offline_hold_until_ms(self.root, now_ms, 0, now_ms + ttl_ms),
             credential_ref=CredentialRef(
                 owner_device=self.self_device,
                 owner_device_name=self.self_device_name,
@@ -1768,13 +1899,10 @@ class MeshCredentialBroker:
             identity={},
             # §3.4's bound for the token arms is the helper's allow-list ALONE,
             # so it must reach the helper's device too (see _serve_github_app's
-            # note on the delivery; read fresh per serve, like the token). An
-            # operator who CLEARED the list — which every settings surface does
-            # by deleting the key — sends an explicit empty designation once this
-            # owner has ever lent one (borrowers refuse all); one who never set
-            # it sends nothing, so a borrower's hand-set backstop survives
-            # (``github.owner_designation``).
-            narrowing=_token_arm_narrowing(self.root),
+            # note on delivery). Use the resolved enumeration/opt-out result,
+            # not a second config-only list, with #3841's digest/generation and
+            # explicit-clear bookkeeping preserved.
+            narrowing=_token_arm_narrowing(self.root, repositories),
             grant_id=f"g_{os.urandom(8).hex()}",
         )
 
@@ -3458,6 +3586,29 @@ def _caused_by_invalid_grant(exc: BaseException | None) -> bool:
     return False
 
 
+def revoke_lent_on_panic(server: Any, network_id: str) -> int:
+    """Revoke every token this relay lent in ``network_id`` because a panic latched.
+
+    Called by BOTH panic paths on the relay (raised: ``_ctl_panic``; received:
+    ``_op_panic``) after the trust write. It reads the EXISTING broker only and
+    never builds one: a relay that never brokered has minted nothing, and building
+    a broker (and its loop) inside an incident path would add work, not safety.
+    A broker for another network is left alone — the panic is per network. Never
+    raises: the panic's own latch and broadcast must not depend on GitHub answering.
+    """
+    broker = getattr(server, _BROKER_ATTR, None)
+    # An EMPTY ``network_id`` revokes this relay's broker network on purpose: an
+    # incident whose scope is unknown fails closed (revoke), never open. Only a
+    # NAMED other network is left alone. Review #3920 n2.
+    if broker is None or (network_id and broker.network_id != network_id):
+        return 0
+    try:
+        return broker.revoke_all_outstanding(cause="panic")
+    except Exception:  # noqa: BLE001 — the latch already holds; tokens still expire
+        logger.warning("panic: revoking lent GitHub tokens failed", exc_info=True)
+        return 0
+
+
 def broker_for_relay(server: Any) -> MeshCredentialBroker | None:
     """The broker for ``server``, built on first need and kept — or ``None``.
 
@@ -3580,12 +3731,30 @@ def _grant_ttl_s(root: Path | None) -> float:
     return float(grant_ttl_s(root))
 
 
-def _token_arm_narrowing(root: Path | None) -> dict[str, Any]:
-    """The token arms' delivery: the designation as set, or nothing if never set."""
+def _offline_hold_until_ms(
+    root: Path | None, now_ms: int, token_exp_ms: int, grant_exp_ms: int
+) -> int:
+    """The owner's stated offline hold: ``min(token expiry, now + offline_hold_s)``.
+
+    WHY THE OWNER STATES IT: only the owner knows the token's real expiry, and only
+    the owner's operator approved how long its logins may be used unasked (C5,
+    2026-11-13). Never below ``grant_exp_ms``, so a stated hold can only extend
+    the pre-existing ``held_offline`` window, never shrink it. ``token_exp_ms = 0``
+    (a static key, a PAT) has no known end, so the hold alone bounds it.
+    """
+    from local_operator.network.credentials import offline_hold_s
+
+    ceiling = now_ms + int(offline_hold_s(root) * 1000)
+    hold = min(token_exp_ms, ceiling) if token_exp_ms else ceiling
+    return max(hold, grant_exp_ms)
+
+
+def _token_arm_narrowing(root: Path | None, repositories: Sequence[str]) -> dict[str, Any]:
+    """Deliver the resolved list without losing explicit-clear ordering semantics."""
     from local_operator.network.credentials import github as github_app
 
-    repositories, explicit = github_app.owner_designation(root)
-    return github_app.grant_narrowing(repositories, explicit=explicit)
+    github_app.owner_designation(root)
+    return github_app.grant_narrowing(repositories, explicit=True)
 
 
 def _app_arm_narrowing(root: Path | None, repositories: Any) -> dict[str, Any]:
@@ -3596,6 +3765,8 @@ def _app_arm_narrowing(root: Path | None, repositories: Any) -> dict[str, Any]:
     """
     from local_operator.network.credentials import github as github_app
 
-    if repositories:
-        github_app.mark_designation_delivered(root)
+    # Only a hand-picked designation creates the legacy clear marker. Marking
+    # an enumerated default would misread its next unset config as a clear and
+    # disable automatic lending immediately after its first successful serve.
+    github_app.owner_designation(root)
     return github_app.grant_narrowing(repositories, explicit=True)

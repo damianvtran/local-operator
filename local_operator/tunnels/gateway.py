@@ -30,6 +30,7 @@ from starlette.websockets import WebSocket, WebSocketDisconnect
 
 from local_operator.mobile.auth import COOKIE_NAME, sign_cookie
 from local_operator.tunnels.config import validate_connection
+from local_operator.tunnels.request_log import RequestLog, note_reason
 
 MAX_BODY_BYTES = 10 * 1024 * 1024
 MAX_STREAM_SECONDS = 60
@@ -148,6 +149,14 @@ AUTHORIZATION_DEFERRED = "authorization_deferred"
 #: lock deadline, so no request was sent at all. Both clear by themselves.
 CONTROL_PLANE_TIMEOUT = "control_plane_timeout"
 CREDENTIAL_STORE_BUSY = "credential_store_busy"
+#: Radient ANSWERED, with a 5xx: the control plane is up enough to reply and
+#: failing on its side. It used to fall through to `REFUSED` (a field report on
+#: 0.96.5: a 503 from `/v1/tunnels` read as "authorization refused", which sends
+#: the operator to sign in again for a fault that is neither their login nor
+#: their network). Transient: the connector keeps its existing retry cadence (the
+#: poller's next pass, and the supervisor's documented 10 s restart floor on a
+#: cold start), so no new timing is introduced for it.
+SERVER_UNAVAILABLE = "server_unavailable"
 NOT_AUTHORIZED = "tunnel_not_authorized"
 LEASE_PENDING = "authorization_lease_pending"
 # The connector's own terminal states, not relay refusals: the connector exited
@@ -184,6 +193,37 @@ OWNER_MISSING = "owner_missing"
 #: this remedy is for when it could not (a stopped tunnel brought back, a build
 #: that predates the heal wrote the login).
 LOGIN_SUPERSEDED = "login_superseded"
+#: Radient ANSWERED and declined to serve this tunnel: `/connect` returns 403 for
+#: any tunnel whose status is not `active` (and 402 is reserved for billing), and
+#: the cold start finds the same thing in an inactive `/connect` record. These
+#: used to fall through to `REFUSED`, whose remedy is a sign-in — a field report
+#: (2026-11) had a freshly signed-in teammate's phone say the tunnel "isn't
+#: active" while every surface told him to sign in again, which can never clear a
+#: billing or console state. The connector refines the cloud's answer by reading
+#: `/billing` (and the tunnel record) the way `setup.observe` does, so the code
+#: names the ACTUAL blocker and each one maps to a fix a person can take:
+#:
+#: - `TUNNEL_INACTIVE`  suspended (or unrefined 403) with billing in order →
+#:   reconnect, no spend.
+#: - `TUNNEL_DISABLED`  switched off in the Radient console → the console.
+#: - `BILLING_INACTIVE` billing was never activated (or HTTP 402) → accept the
+#:   quote in setup.
+#: - `BILLING_LAPSED`   billing was activated but is no longer eligible (credit
+#:   ran out) → add credit.
+#:
+#: All four stay TRANSIENT on the supervisor's existing 10 s floor: each clears
+#: from outside this process (a top-up, a console toggle), and the connector must
+#: pick that up by itself rather than wait parked for a local command.
+TUNNEL_INACTIVE = "tunnel_inactive"
+TUNNEL_DISABLED = "tunnel_disabled"
+BILLING_INACTIVE = "billing_inactive"
+BILLING_LAPSED = "billing_lapsed"
+#: The reasons whose copy lives in the `tunnel.status` catalogue rather than the
+#: legacy English tables below (see `_localized`). Public because the TUI card
+#: (`report.retrying_notice`) raises on exactly these transient causes: each
+#: needs a person (or at least an explanation) yet never parks.
+INACTIVE_REASONS = (TUNNEL_INACTIVE, TUNNEL_DISABLED, BILLING_INACTIVE, BILLING_LAPSED)
+_INACTIVE_REASONS = INACTIVE_REASONS
 
 # What a phone is shown: self-contained, and carrying any link it needs, because
 # there is nothing to type on that surface.
@@ -359,6 +399,7 @@ TERMINAL_REMEDY = {
     # Self-clearing like `UNREACHABLE`, so they name the check, not a repair.
     CONTROL_PLANE_TIMEOUT: "lop tunnel status",
     CREDENTIAL_STORE_BUSY: "lop tunnel status",
+    SERVER_UNAVAILABLE: "lop tunnel status",
     REFUSED: "lop login radient",
     NOT_AUTHORIZED: "lop tunnel connect",
     LEASE_PENDING: "lop tunnel status",
@@ -385,7 +426,70 @@ TERMINAL_REMEDY = {
     # COMMAND the operator has to run is pinned in one place.
     LOCAL_PREREQUISITE: "lop tunnel install",
     REENROLMENT_REQUIRED: "lop tunnel connect",
+    # The guided setup reads fresh billing and names the one step that clears
+    # each of these (reconnect, accept the quote, add credit, or the console);
+    # never `lop login radient`, which is the misdirection these codes remove.
+    TUNNEL_INACTIVE: "lop tunnel setup",
+    TUNNEL_DISABLED: "lop tunnel setup",
+    BILLING_INACTIVE: "lop tunnel setup",
+    BILLING_LAPSED: "lop tunnel setup",
 }
+
+#: The ACTION a graphical surface offers for each reason: the `remedy.kind`
+#: vocabulary the desktop setup route already speaks (`sign_in`, `run`,
+#: `accept_quote`, `add_credit`, `restore_owner`, `check_status`, ...), extended
+#: with three kinds for states a button cannot fix:
+#:
+#: - `open_console` — the fix is a toggle in the Radient console (a link, no run).
+#: - `wait_network` — this computer could not reach Radient; it reconnects by
+#:   itself (no button). Relay backoff and the supervisor already recover from a
+#:   network change; what was missing was saying so.
+#: - `wait_radient` — Radient answered with its own error; nothing local to do.
+#:
+#: One table beside the reason codes, read by the gateway's 503 body (so a phone
+#: can render the action), `report.remedy` (`GET /v1/desktop/tunnel`) and the
+#: setup route, so a cause cannot map to two different buttons. A terminal surface
+#: keeps `TERMINAL_REMEDY`; this is its button-shaped twin.
+REMEDY_KIND = {
+    UNREACHABLE: "wait_network",
+    CONTROL_PLANE_TIMEOUT: "wait_network",
+    CREDENTIAL_STORE_BUSY: "check_status",
+    SERVER_UNAVAILABLE: "wait_radient",
+    AUTHORIZATION_DEFERRED: "wait_radient",
+    LEASE_PENDING: "check_status",
+    REFUSED: "sign_in",
+    NOT_AUTHORIZED: "open_console",
+    LOGIN_REQUIRED: "sign_in",
+    OWNER_MISSING: "restore_owner",
+    # The re-point and the local repairs are what the setup run performs, so
+    # they share its one primary action.
+    LOGIN_SUPERSEDED: "run",
+    LOCAL_PREREQUISITE: "run",
+    REENROLMENT_REQUIRED: "run",
+    TUNNEL_INACTIVE: "run",
+    TUNNEL_DISABLED: "open_console",
+    BILLING_INACTIVE: "accept_quote",
+    BILLING_LAPSED: "add_credit",
+}
+
+#: Kinds that render NO button: the state clears without anyone acting, and a
+#: control would invite a person to "fix" something that is not broken.
+WAITING_KINDS = frozenset({"wait_network", "wait_radient", "wait_reconnect"})
+
+#: Kinds whose whole fix is in the Radient console (a link): they carry NO setup
+#: command, because setup can neither add credit nor override an owner's console
+#: switch-off, and `lop tunnel setup` there only pointed back at the console
+#: (#3945 round 1, Q8).
+CONSOLE_KINDS = frozenset({"add_credit", "open_console"})
+
+
+def remedy_kind(reason: str) -> str | None:
+    """The `remedy.kind` for a reason code, or ``None`` for one this build lacks.
+
+    ``None`` rather than a guess: a daemon from another version naming a state
+    this build does not know must not be handed a button that may do nothing.
+    """
+    return REMEDY_KIND.get(reason)
 
 
 #: Readable forms of the reason codes, for surfaces that show a short state on
@@ -405,6 +509,13 @@ REASON_LABEL = {
     LOGIN_SUPERSEDED: "newer sign-in not in use",
     LOCAL_PREREQUISITE: "prerequisite missing",
     REENROLMENT_REQUIRED: "needs re-enrolment",
+    # English fallbacks only; the keyed `tunnel.status` copy wins (`_localized`).
+    # Not "tunnel not active": that is the phrase the field report asked to
+    # retire (#3945 round 1, D3/R5/Q7); it now matches the detail sentence.
+    TUNNEL_INACTIVE: "paused by Radient — reconnecting",
+    TUNNEL_DISABLED: "tunnel turned off in the console",
+    BILLING_INACTIVE: "billing not activated",
+    BILLING_LAPSED: "billing lapsed",
 }
 
 
@@ -415,6 +526,9 @@ def reason_label(reason: str) -> str:
     a daemon from another version naming its own state is more useful to an
     operator than a shrug, and `terminal_detail` already takes that position.
     """
+    localized = _localized(reason)
+    if localized is not None:
+        return localized[0]
     return REASON_LABEL.get(reason, reason)
 
 
@@ -425,7 +539,67 @@ def terminal_detail(reason: str, relay_detail: str) -> str:
     a daemon from another version — rather than saying nothing about a cause the
     daemon plainly named.
     """
+    localized = _localized(reason)
+    if localized is not None:
+        return localized[1]
     return TERMINAL_DETAIL.get(reason, relay_detail)
+
+
+def relay_detail(reason: str) -> str:
+    """The phone-facing sentence for a refusal reason (the 503 body's ``detail``)."""
+    localized = _localized(reason)
+    if localized is not None:
+        return localized[2]
+    return RELAY_DETAIL[reason]
+
+
+def _localized(reason: str) -> tuple[str, str, str] | None:
+    """``(label, terminal detail, relay detail)`` for a reason whose copy is keyed.
+
+    The tables above predate the i18n catalogues and are still English
+    literals; copy ADDED since then lives in the `tunnel.status` namespace
+    (AGENTS.md: new user-facing copy is keyed), so it is resolved here, at call
+    time — never at import, so a live language change is followed — and every
+    caller keeps reading one vocabulary through `reason_label`,
+    `terminal_detail` and `relay_detail`. Imported lazily to keep this module's
+    import graph (pinned in `tests/unit/test_import_graph.py`) unchanged.
+    """
+    if reason != SERVER_UNAVAILABLE and reason not in _INACTIVE_REASONS:
+        return None
+    from local_operator.i18n.keys import tunnel_status
+    from local_operator.i18n.text import tr
+
+    _t = tr("tunnel.status")
+    if reason == SERVER_UNAVAILABLE:
+        return (
+            _t(tunnel_status.server_unavailable_label()),
+            _t(tunnel_status.server_unavailable_terminal()),
+            _t(tunnel_status.server_unavailable_relay()),
+        )
+    # The four inactive-tunnel causes carry ONE surface-neutral sentence each:
+    # the remedy they name (reconnect, accept the price, add credit, the
+    # console) is the same action wherever it is read, and none of them names a
+    # command — the sentence reaches the phone, the desktop and the TUI card, and
+    # a non-technical reader must never be sent to a terminal.
+    label, detail = {
+        TUNNEL_INACTIVE: (
+            tunnel_status.tunnel_inactive_label(),
+            tunnel_status.tunnel_inactive_detail(url=CONSOLE_URL),
+        ),
+        TUNNEL_DISABLED: (
+            tunnel_status.tunnel_disabled_label(),
+            tunnel_status.tunnel_disabled_detail(url=CONSOLE_URL),
+        ),
+        BILLING_INACTIVE: (
+            tunnel_status.billing_inactive_label(),
+            tunnel_status.billing_inactive_detail(),
+        ),
+        BILLING_LAPSED: (
+            tunnel_status.billing_lapsed_label(),
+            tunnel_status.billing_lapsed_detail(url=CONSOLE_URL),
+        ),
+    }[reason]
+    return (_t(label), _t(detail), _t(detail))
 
 
 # Only presentation/protocol headers cross the boundary. In particular the
@@ -455,6 +629,11 @@ _REQUEST_HEADERS = {
 # local-operator credential and another harness has no use for it, and that
 # allowlist's own rule is that a harness may log what it is handed.
 _LOCAL_OPERATOR_DEVICE_HEADERS = ("x-lop-device", "x-lop-device-key")
+# The relay's pairing filing route and the gateway-owned header that carries the
+# edge assertion to it (``mobile.pair_requests.ASSERTION_HEADER`` names the same
+# string; restated here so the gateway does not import the relay's filer).
+_PAIR_FILING_PATH = "/api/pair/request"
+_PAIR_ASSERTION_HEADER = "x-lop-radient-assertion"
 _RESPONSE_HEADERS = {
     "content-type",
     "content-length",
@@ -633,7 +812,14 @@ class Gateway:
         terminal cannot disagree about the cause.
         """
         reason = self.refusal_reason()
-        return {"detail": RELAY_DETAIL[reason], "reason": reason}
+        body = {"detail": relay_detail(reason), "reason": reason}
+        # The action a phone can render beside the sentence (additive: older
+        # phones key on `reason`/`detail` and ignore it). Omitted for a code
+        # with no mapping rather than sent as null.
+        kind = remedy_kind(reason)
+        if kind is not None:
+            body["kind"] = kind
+        return body
 
     def unavailable_body(self) -> dict[str, str]:
         """The phone-facing 503 body.
@@ -721,11 +907,13 @@ class Gateway:
                 payload.update(self.refusal())
             return JSONResponse(payload)
         if self.revoked or time.monotonic() >= self.authorized_until:
+            note_reason(request.scope, self.refusal_reason())
             return JSONResponse(
                 self.unavailable_body(), status_code=503, headers=self.refusal_headers()
             )
         harness = self.harness(host)
         if harness is None:
+            note_reason(request.scope, "unknown_host")
             return JSONResponse({"error": "unknown tunnel host"}, status_code=404)
         expected_origin = "https://" + host
         origin = request.headers.get("origin")
@@ -745,13 +933,16 @@ class Gateway:
             )
             or (request.method not in {"GET", "HEAD", "OPTIONS"} and origin != expected_origin)
         ):
+            note_reason(request.scope, "cross_origin")
             return JSONResponse({"error": "same-origin request required"}, status_code=403)
         body = bytearray()
         async for chunk in request.stream():
             body.extend(chunk)
             if len(body) > MAX_BODY_BYTES:
+                note_reason(request.scope, "body_too_large")
                 return JSONResponse({"error": "request exceeds 10 MiB"}, status_code=413)
         if request.method in {"GET", "HEAD"} and body:
+            note_reason(request.scope, "unexpected_body")
             return JSONResponse({"error": "GET/HEAD bodies are not supported"}, status_code=400)
         try:
             await self.verifier.verify(
@@ -763,6 +954,7 @@ class Gateway:
                 body=bytes(body),
             )
         except (ValueError, KeyError, TypeError, jwt.PyJWTError, httpx.HTTPError):
+            note_reason(request.scope, "origin_proof_invalid")
             return JSONResponse(
                 {"error": "valid Radient origin assertion required"}, status_code=401
             )
@@ -771,6 +963,7 @@ class Gateway:
         # recheck after consuming/verifying its body, immediately before any
         # harness request or local side effect begins.
         if self.revoked or time.monotonic() >= self.authorized_until:
+            note_reason(request.scope, self.refusal_reason())
             return JSONResponse(
                 self.unavailable_body(), status_code=503, headers=self.refusal_headers()
             )
@@ -785,7 +978,22 @@ class Gateway:
         try:
             headers = self.headers(request.headers, host, harness)
         except ValueError:
+            note_reason(request.scope, "mobile_relay_not_installed")
             return JSONResponse({"error": "mobile relay is not installed"}, status_code=503)
+        if (
+            harness["id"] == "local-operator"
+            and request.method == "POST"
+            and request.url.path == _PAIR_FILING_PATH
+        ):
+            # PAIRING DESIGN v2 §1 item 1: the assertion this gateway JUST verified for
+            # this exact request rides to the relay under a gateway-owned name, so the
+            # relay can re-verify it and file the card as edge-attested (confirm mode).
+            # Only this one path: no other route has a use for it, and the allowlist's
+            # rule (a harness may log what it is handed) argues for the narrowest
+            # forward. An inbound header of this name never crosses -- ``headers()``
+            # copies an allowlist that does not contain it -- so the only value the
+            # relay can see is the one set here.
+            headers[_PAIR_ASSERTION_HEADER] = request.headers.get(PROOF_HEADER, "")
         target = httpx.URL(
             scheme="http",
             host="127.0.0.1",
@@ -801,7 +1009,11 @@ class Gateway:
                 stream=True,
                 follow_redirects=False,
             )
-        except httpx.HTTPError:
+        except httpx.HTTPError as failure:
+            # The class name only (never its text: httpx echoes the URL). It is
+            # the split the field report needed: a harness that refused the
+            # connection is down, one that timed out is up and stuck.
+            note_reason(request.scope, f"harness_{type(failure).__name__}")
             return JSONResponse({"error": "local harness unavailable"}, status_code=502)
         response_headers = {k: v for k, v in upstream.headers.items() if k in _RESPONSE_HEADERS}
         location = upstream.headers.get("location")
@@ -817,6 +1029,7 @@ class Gateway:
                 response_headers["location"] = location
             else:
                 await upstream.aclose()
+                note_reason(request.scope, "unsafe_redirect")
                 return JSONResponse({"error": "unsafe harness redirect"}, status_code=502)
         response_headers["cache-control"] = "no-store"
         response_headers["referrer-policy"] = "same-origin"
@@ -971,3 +1184,14 @@ class Gateway:
                 WebSocketRoute("/{path:path}", self.websocket),
             ]
         )
+
+    def logged_app(self, log: RequestLog) -> Any:
+        """`app()` wrapped in the bounded request log (`tunnels/request_log.py`).
+
+        A separate entry point so the bare app — what tests and the import-graph
+        pin construct — is unchanged, and only the supervised connector writes
+        a log file. The loopback health probe is skipped: `lop tunnel status`
+        and the desktop poll hit it, and they would crowd the phone's requests
+        out of the bounded tail the status surfaces read.
+        """
+        return log.middleware(self.app(), skip=frozenset({"/_lop_tunnel/health"}))

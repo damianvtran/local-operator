@@ -1,0 +1,20 @@
+{
+  "schema": 1,
+  "audit_id": "a1",
+  "locale": "ru",
+  "namespace": "mobile.doctor",
+  "source_sha256": "0ca00b276fdea066228394e3fee336042b1e149c9e7df3ea31be11a24f0beb72",
+  "target_sha256": "edc8a2061e4496bf731faa0106c044fb2bd2e8faa33b6356039b5551120a8e4a",
+  "verdict": "passed",
+  "auditor": {
+    "agent": "i18n-auditor, independent `task` subagent (C4 i18n-auditor es fr ru), session 5e5b8d070b27; did not translate or edit any value it judged",
+    "model": "anthropic/claude-opus-5-5 (served model reported by the session; no provider fallback observed)"
+  },
+  "hashes": {
+    "audit.log": "7a56ea036c0b74771ef16a829aa4002dc1effaf2ff91f39be6cf3b569b768386",
+    "dryrun.log": "9f306ef45482c353d00128362130f6ac1eaa45f383319e3865c4d66c11e51b17",
+    "record.json": "89adee60b57748ed602e4bf616f052845d3da88fa3a4dcf6836d3957d9960e8c",
+    "rendered.txt": "c7339e241c5a69363cf60ad46e1a6b350042f5d3c8802ec708470fb186d8f68c",
+    "report.md": "46e66695222d3561defb75c1cdb2c6f51ab1575302fb9c698878b98cce802cca"
+  }
+}

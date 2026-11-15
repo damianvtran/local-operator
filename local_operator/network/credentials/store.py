@@ -602,8 +602,8 @@ class MeshAwareAuthStore:
         credential generation (0385927ab9), so a provider key with no stored
         lifecycle observation for its owner still dials the owner on every resolve.
         ``MeshCredentialClient._held_or`` serves a still-live cached grant marked
-        ``held_offline`` when the owner is unreachable, which is why ``grant_ttl_s``
-        still bounds what this device can serve unasked.
+        ``held_offline`` when the owner is unreachable, until the owner-stated offline
+        hold (``offline_hold_s``, capped on this device's clocks) ends.
 
         ``test_native_hot_access.test_live_grant_and_old_login_refusal_do_not_short_circuit_owner``
         pins the uncovered dial-per-call and ``test_borrower_grant_reuse`` the

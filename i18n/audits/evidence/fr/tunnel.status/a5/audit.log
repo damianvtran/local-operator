@@ -1,0 +1,139 @@
+# Audit log — fr / tunnel.status / a5 (independent re-audit, session 5ac9acc2ba69, anthropic/claude-opus-5-5); worktree .worktrees/tunnel-remedies-auto-up; $SCRATCH = this session's $LOCAL_OPERATOR_SCRATCHPAD. Captured stdout/stderr of each command as run, in order.
+
+$ git rev-parse HEAD
+7c0fc7bf22aade04f78c367c906374b73a1914d7
+exit=0
+
+$ git diff HEAD --stat -- local_operator/i18n/catalogues/en/tunnel.status.json local_operator/i18n/catalogues/en/tunnel.status.context.json local_operator/i18n/catalogues/fr/tunnel.status.json
+ .../i18n/catalogues/en/tunnel.status.context.json       | 17 ++++++++++++++++-
+ local_operator/i18n/catalogues/en/tunnel.status.json    | 13 ++++++++-----
+ local_operator/i18n/catalogues/fr/tunnel.status.json    | 13 ++++++++-----
+ 3 files changed, 32 insertions(+), 11 deletions(-)
+exit=0
+
+$ git diff HEAD -U0 -- local_operator/i18n/catalogues/fr/tunnel.status.json
+diff --git a/local_operator/i18n/catalogues/fr/tunnel.status.json b/local_operator/i18n/catalogues/fr/tunnel.status.json
+index e279205ed..64e79cd5c 100644
+--- a/local_operator/i18n/catalogues/fr/tunnel.status.json
++++ b/local_operator/i18n/catalogues/fr/tunnel.status.json
+@@ -2 +2 @@
+-  "tunnel.status.billing_inactive.detail": "La facturation de ce tunnel n’a pas été activée, donc Radient ne le connectera pas. Ouvrez la configuration de l’accès téléphone dans Local Operator sur l’ordinateur qui l’héberge et acceptez le prix mensuel.",
++  "tunnel.status.billing_inactive.detail": "L’accès téléphone n’est pas encore activé pour ce compte Radient. Ouvrez la configuration de l’accès téléphone dans Local Operator sur l’ordinateur concerné et acceptez le prix mensuel.",
+@@ -4 +4 @@
+-  "tunnel.status.billing_lapsed.detail": "La facturation de ce tunnel est interrompue, car le solde Radient est épuisé ; Radient ne le connectera donc pas. Ajoutez du crédit sur {url} ; il se reconnecte de lui-même dès que le solde est rétabli.",
++  "tunnel.status.billing_lapsed.detail": "Votre solde Radient est épuisé, donc l’accès téléphone est suspendu. Ajoutez du crédit sur {url} ; il se reconnecte de lui-même dès que le solde est rétabli.",
+@@ -5,0 +6,3 @@
++  "tunnel.status.card_add_credit": "Ajoutez du crédit Radient pour l’accès téléphone",
++  "tunnel.status.card_open_console": "Activez l’accès téléphone sur la console Radient",
++  "tunnel.status.card_paused": "suspendu par Radient",
+@@ -19 +22 @@
+-  "tunnel.status.tunnel_disabled.detail": "Ce tunnel est désactivé dans la console Radient, donc l’accès à distance reste coupé tant que vous ne le réactivez pas sur {url}. Il se reconnecte de lui-même dès qu’il est réactivé.",
++  "tunnel.status.tunnel_disabled.detail": "L’accès téléphone de cet ordinateur est désactivé dans la console Radient. Réactivez-le sur {url} ; il se reconnecte de lui-même.",
+@@ -21,2 +24,2 @@
+-  "tunnel.status.tunnel_inactive.detail": "Radient a suspendu ce tunnel, mais sa facturation est en règle. Reconnectez l’accès téléphone dans Local Operator sur l’ordinateur qui l’héberge ; il continue aussi de réessayer de lui-même. S’il reste suspendu, vérifiez le tunnel sur {url}.",
+-  "tunnel.status.tunnel_inactive.label": "tunnel inactif"
++  "tunnel.status.tunnel_inactive.detail": "Radient a suspendu l’accès téléphone de cet ordinateur, mais la facturation est en règle. Reconnectez l’accès téléphone dans Local Operator sur l’ordinateur qui l’héberge ; il continue aussi de réessayer de lui-même. S’il reste suspendu, vérifiez-le dans la console Radient : {url}.",
++  "tunnel.status.tunnel_inactive.label": "suspendu par Radient — reconnexion en cours"
+exit=0
+
+$ .venv/bin/python $SCRATCH/reaudit-tsr/delta.py fr a4   # scope values vs the prior bundle's report table
+fr: 8 scope rows in a4/report.md; changed 2
+  tunnel.status.card_add_credit: «Ajoutez du crédit Radient pour rétablir l’accès» -> «Ajoutez du crédit Radient pour l’accès téléphone»
+  tunnel.status.card_open_console: «Activez l’accès dans la console Radient» -> «Activez l’accès téléphone sur la console Radient»
+exit=0
+
+$ sha256sum local_operator/i18n/catalogues/en/tunnel.status.json local_operator/i18n/catalogues/en/tunnel.status.context.json local_operator/i18n/catalogues/fr/tunnel.status.json i18n/glossary.md i18n/style-guides/fr.md
+e2bc8c63d3124c363252511306fd3951917ab9f93a2398c49cac8c79302aa8f9  local_operator/i18n/catalogues/en/tunnel.status.json
+78580b806d2acc2c0c84bcf2655b62ea5ae847bf206c43134762e288bba8695d  local_operator/i18n/catalogues/en/tunnel.status.context.json
+573d83c55aa20ae7c52235599b4ccb4220ff66013e6aa4b9e7863447788dff36  local_operator/i18n/catalogues/fr/tunnel.status.json
+a576d5a4b2718ba79a70a42600e3b6233ea28d716b1e2d996a208ac8dd7fabdb  i18n/glossary.md
+5315e1ac10c2ce57aac631ba653d08de680ee70c9a022ed3a8345ce2f9902ee7  i18n/style-guides/fr.md
+exit=0
+
+$ grep -h target_sha256 i18n/audits/evidence/fr/tunnel.status/a4/record.json
+ "target_sha256": "7d1f849749155980cccd2d9c219369cd18c280608b42e430cfeccae8b794a87c",
+exit=0
+
+$ .venv/bin/python scripts/i18n/check.py --catalogues-only
+check.py: catalogue checks: 0 problem(s)
+exit=0
+
+$ .venv/bin/python $SCRATCH/reaudit-tsr/mech.py . fr
+fr tunnel.status en=e2bc8c63d3124c363252511306fd3951917ab9f93a2398c49cac8c79302aa8f9 tgt=573d83c55aa20ae7c52235599b4ccb4220ff66013e6aa4b9e7863447788dff36 keys=24 json=ok -> OK
+   card/scope cells: tunnel_inactive.label:43 tunnel_inactive.detail:282 tunnel_disabled.detail:129 billing_lapsed.detail:157 billing_inactive.detail:185 card_paused:39 card_add_credit:50 card_open_console:50
+exit=0
+
+# Negative control: same mech.py on a scratch copy with injected faults (fr: {url}->{link}, ASCII ; spacing, ASCII apostrophe, dropped 'téléphone'; ur: Latin comma + U+2067). Proves the checker reports faults.
+$ .venv/bin/python $SCRATCH/reaudit-tsr/mech.py $SCRATCH/reaudit-tsr/negctl fr ur
+fr tunnel.status en=e2bc8c63d3124c363252511306fd3951917ab9f93a2398c49cac8c79302aa8f9 tgt=ef61bec3afb10edb91e23a3b78c8c040e13d4a64cc594fcad2369621665d01dd keys=24 json=ok -> PROBLEMS
+   card/scope cells: tunnel_inactive.label:43 tunnel_inactive.detail:282 tunnel_disabled.detail:130 billing_lapsed.detail:157 billing_inactive.detail:185 card_paused:39 card_add_credit:49 card_open_console:50
+   PROBLEM tunnel.status.card_add_credit: ASCII apostrophe
+   PROBLEM tunnel.status.tunnel_disabled.detail: placeholders ['{link}'] vs ['{url}']
+   PROBLEM tunnel.status.tunnel_disabled.detail: no U+202F before ';'
+   PROBLEM tunnel.status.card_add_credit: no explicit phone access (accès téléphone)
+ur tunnel.status en=e2bc8c63d3124c363252511306fd3951917ab9f93a2398c49cac8c79302aa8f9 tgt=0fcc0d16668b5a83e836d28da607d2c97cd1f6bd67738014d4cda5955db76f48 keys=24 json=ok -> PROBLEMS
+   card/scope cells: tunnel_inactive.label:40 tunnel_inactive.detail:240 tunnel_disabled.detail:110 billing_lapsed.detail:141 billing_inactive.detail:140 card_paused:39 card_add_credit:48 card_open_console:37
+   PROBLEM tunnel.status.card_add_credit: bidi control chars
+   PROBLEM tunnel.status.card_add_credit: Latin punctuation in Urdu prose: 'Radient کریڈٹ شامل کریں, فون رسائی بحال ہو گی \u2067'
+exit=1
+
+$ .venv/bin/python $SCRATCH/reaudit-tsr/render.py fr   # pre-ledger: real TUI card path
+fr tunnel_inactive: 36 cells OK | ! /mobile enable — paused by Radient
+fr billing_lapsed: 43 cells OK | ! Add Radient credit to resume phone access
+fr tunnel_disabled: 45 cells OK | ! Turn phone access on in the Radient console
+fr reason_label(tunnel_inactive): Connector: retrying — paused by Radient — reconnecting
+exit=0
+
+$ .venv/bin/python scripts/i18n/ledger.py history-sha --locale fr --namespace tunnel.status
+a9c647bed879100a1d86fc8d7a19af89b4a9bf8d1b28f4979f14b63e5d898a17
+exit=0
+
+# Ledger append (dry-run output is in dryrun.log)
+$ .venv/bin/python scripts/i18n/ledger.py append --receipt $SCRATCH/reaudit-tsr/fr.tunnel.status.json --expected-history-sha a9c647bed879100a1d86fc8d7a19af89b4a9bf8d1b28f4979f14b63e5d898a17 --apply
+i18n/audit-history/fr/tunnel.status.json
+exit=0
+
+# Post-append verification
+$ .venv/bin/python scripts/i18n/generate.py | grep -c '^wrote'  # generator ran; per-file list elided
+163
+exit=0
+
+$ .venv/bin/python scripts/i18n/check.py --catalogues-only
+check.py: catalogue checks: 0 problem(s)
+exit=0
+
+$ cat local_operator/i18n/data/shipped.json
+{
+  "locales": [
+    "en",
+    "fr",
+    "es",
+    "zh-CN",
+    "ru",
+    "vi",
+    "ur",
+    "hi"
+  ],
+  "schema": 1
+}
+exit=0
+
+$ git diff --stat HEAD -- local_operator/i18n/data/shipped.json local_operator/mobile/web/src/i18n/bundled.gen.ts; echo '(empty diff = identical to HEAD)'
+(empty diff = identical to HEAD)
+exit=0
+
+$ .venv/bin/python scripts/i18n/ledger.py validate --base HEAD
+audit history: valid and append-only
+exit=0
+
+$ .venv/bin/python $SCRATCH/reaudit-tsr/render.py fr   # post-generate: real TUI card path
+fr tunnel_inactive: 39 cells OK | ! /mobile enable — suspendu par Radient
+fr billing_lapsed: 50 cells OK | ! Ajoutez du crédit Radient pour l’accès téléphone
+fr tunnel_disabled: 50 cells OK | ! Activez l’accès téléphone sur la console Radient
+fr reason_label(tunnel_inactive): Connector: retrying — suspendu par Radient — reconnexion en cours
+exit=0
+
+$ .venv/bin/python $SCRATCH/reaudit-tsr/mech.py . fr   # post-generate: bytes unchanged
+fr tunnel.status en=e2bc8c63d3124c363252511306fd3951917ab9f93a2398c49cac8c79302aa8f9 tgt=573d83c55aa20ae7c52235599b4ccb4220ff66013e6aa4b9e7863447788dff36 keys=24 json=ok -> OK
+   card/scope cells: tunnel_inactive.label:43 tunnel_inactive.detail:282 tunnel_disabled.detail:129 billing_lapsed.detail:157 billing_inactive.detail:185 card_paused:39 card_add_credit:50 card_open_console:50
+exit=0

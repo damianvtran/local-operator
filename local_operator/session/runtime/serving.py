@@ -50,6 +50,7 @@ from typing import (
     cast,
 )
 
+from local_operator.asks.surfaces import UNVERIFIED as UNVERIFIED_SURFACE
 from local_operator.buildwatch import UpdateLock
 from local_operator.buildwatch import wake_within_window as _wake_within_window
 from local_operator.harness.approval import (
@@ -530,7 +531,7 @@ _ANNOUNCE_FAILED = "failed"
 _display_watch_attached: set[str] = set()
 
 
-def _session_may_announce(session: Any) -> bool:
+def session_may_announce(session: Any) -> bool:
     """Whether ``session`` is one the operator's OWN listings would show.
 
     THE RULE, stated once: a session the operator's own listings HIDE must not
@@ -574,6 +575,14 @@ def _session_may_announce(session: Any) -> bool:
     except Exception:  # noqa: BLE001 — an unanswered question must not silence a toast
         logger.debug("could not read the session origin for the announce gate", exc_info=True)
         return True
+
+
+# PUBLIC since the mobile push worker asks the same question (push parity with
+# the desktop banner, PR #3989 review R2): a cross-module caller must not hang
+# off a private name in this module, where a rename would break pushes silently
+# inside a tick whose exceptions are only logged. The private alias stays so
+# this module's own call sites and existing tests keep reading unchanged.
+_session_may_announce = session_may_announce
 
 
 def _already_bounded(images: Any) -> bool:
@@ -1203,6 +1212,15 @@ class ServingSessionHandle(SessionHandle):
         #: without this a gate opened under a watching terminal is never
         #: announced after that terminal closes (round 3, B2).
         self._parked_announcement: tuple[str, str, str] | None = None
+        #: Whether this conversation has an OPEN queued ask (the ask fold's
+        #: outstanding count, last seen by ``_ask_state_changed``). A queued ask
+        #: never parks a gate, so before this flag nothing set the record's
+        #: ``pending`` for it: a node session's question was invisible to every
+        #: device that reads ``pending`` off the peer listing (the Mac's
+        #: "needs" badge, ``lop sessions``), and the operator never learned a
+        #: remote agent was waiting on them (2026-11-13). See
+        #: ``_sync_queued_ask_pending``.
+        self._queued_asks_open = False
         #: In-flight MCP reloads after a `/mcp add|remove` wrote the config.
         #: Held only so a fire-and-forget task is not garbage-collected while
         #: it runs — asyncio keeps no strong reference of its own.
@@ -1917,9 +1935,49 @@ class ServingSessionHandle(SessionHandle):
             self._ask_fold_installed_at = time.monotonic()
         except Exception:  # noqa: BLE001 -- a repaint is never worth a turn
             logger.debug("ask: could not install the wire fold", exc_info=True)
+        self._sync_queued_ask_pending(outstanding_count)
         self._publish_pending_gate()
         if self._on_projection is not None:
             self._on_projection()
+
+    def _sync_queued_ask_pending(self, outstanding_count: Any) -> None:
+        """Claim (or drop) the record's ``pending="ask"`` for open QUEUED asks.
+
+        WHY: ``pending`` is the one field a PEER listing carries for "a person
+        is owed here" (``relay._op_catalog`` -> ``types.row_needs_claim``), and
+        until now only the BLOCKING gates set it (``_announce_pending``). A
+        queued ask -- the default since the ask queue shipped -- left it
+        ``None``, so a session running on a mesh node asked its question into
+        a void: no badge on the origin's sidebar, no row in ``lop sessions``.
+
+        CONSTRAINTS. The record write ONLY (``set_record_pending``), never
+        ``_announce_pending``: the queue already raised its own notification
+        through the ask path, and a second OS toast for the same question is
+        exactly the duplicate ``asks/dedupe.py`` exists to prevent. A parked
+        gate owns the field while it is parked (its kind is the more urgent
+        remedy); ``_announce_settled`` hands it back to this flag when the gate
+        resolves. ``"ask"`` is the existing ``NEEDS_ASK`` kind every consumer
+        already paints, so no surface needs a new vocabulary. No authority is
+        added: the claim is a FACT on the listing, and answering still travels
+        the permissioned ``ask_respond`` wire op.
+        """
+        try:
+            open_now = int(outstanding_count or 0) > 0
+        except (TypeError, ValueError):
+            open_now = False
+        self._queued_asks_open = open_now
+        if getattr(self, "_parked_announcement", None) is not None:
+            return
+        setter = getattr(getattr(self, "_registrant", None), "set_record_pending", None)
+        if not callable(setter):
+            return
+        try:
+            if open_now:
+                setter("ask", queued=True)
+            else:
+                setter(None)
+        except Exception:  # noqa: BLE001 -- a listing fact is never worth a turn
+            logger.debug("ask: could not publish the queued-ask pending state", exc_info=True)
 
     def _ask_reach_probe(self) -> list[str]:
         """Surface names something is attached as, for a queued ask's receipt.
@@ -7196,7 +7254,11 @@ class ServingSessionHandle(SessionHandle):
 
     @_on_session_loop
     async def ask_answer(
-        self, request_id: str, value: str, question_index: int | None = None
+        self,
+        request_id: str,
+        value: str,
+        question_index: int | None = None,
+        by: str = UNVERIFIED_SURFACE,
     ) -> str:
         # ``question_index`` is accepted for protocol parity with the TUI handle
         # (U8 guard). An owned session assigns a DISTINCT request_id per question
@@ -7210,7 +7272,11 @@ class ServingSessionHandle(SessionHandle):
         # synthetic id has to resolve onto the whole-ask queue rather than onto a
         # gate future that never existed. Nothing else is touched: every other
         # request id is an approval or a live picker and falls through unchanged.
-        mirrored = await self._mirror_ask_answer(request_id, value)
+        # ``by`` is the label the RUNTIME stamped for this connection
+        # (``asks/surfaces.stamp_answer_surface``): ``mirror`` only when the
+        # frame proved the operator capability. The fail-closed default is for
+        # a caller that never went through that seam.
+        mirrored = await self._mirror_ask_answer(request_id, value, by=by)
         if mirrored is not None:
             return mirrored
         # Resolve with the QUESTION id the harness asked under — never our
@@ -7223,7 +7289,9 @@ class ServingSessionHandle(SessionHandle):
             raise ValueError("that question was already answered") from exc
         return "answered"
 
-    async def _mirror_ask_answer(self, request_id: str, value: str | None) -> str | None:
+    async def _mirror_ask_answer(
+        self, request_id: str, value: str | None, *, by: str = UNVERIFIED_SURFACE
+    ) -> str | None:
         """Answer a queued ask through the legacy mirrored card id, or ``None``.
 
         ``None`` is "this is not a mirrored ask id" — the ordinary case on every
@@ -7247,7 +7315,7 @@ class ServingSessionHandle(SessionHandle):
         if not value:
             # An EMPTY value is today's Esc and settles the WHOLE ask: a decline
             # is not a step of the multi-step flow.
-            outcome = self._session.decline_ask(ask_id, by="mirror")
+            outcome = self._session.decline_ask(ask_id, by=by)
             if not outcome.get("ok"):
                 raise ValueError(str(outcome.get("error") or "the decline was refused"))
             return "declined"
@@ -7261,7 +7329,7 @@ class ServingSessionHandle(SessionHandle):
         # settle the ask in one atomic write. ``ask_respond`` stays atomic and
         # still refuses a partial map — a whole-ask client has no reason to send
         # one, and accepting it there would be a second, weaker contract.
-        outcome = self._session.answer_ask_question(ask_id, key, [value], by="mirror")
+        outcome = self._session.answer_ask_question(ask_id, key, [value], by=by)
         if not outcome.get("ok"):
             raise ValueError(str(outcome.get("error") or "the answer was refused"))
         if not outcome.get("settled"):
@@ -7321,7 +7389,24 @@ class ServingSessionHandle(SessionHandle):
         signature over the composite ask#question#word target) and which minted
         the one-shot grant the dispatcher consumes at the point of effect. A
         plain ``ask_respond`` on a bridge ask is refused by the session.
+
+        A ``site:v1:`` question (a headless node's per-site browser approval,
+        ``browser_bridge/site_approval.py``) takes the session's async site door
+        instead: its effect is a browser-bridge call, and it needs no Team
+        Bridge runtime. A refusal keeps its typed ``code`` in the message so
+        the surface can tell "unsigned" from "expired".
         """
+        from local_operator.browser_bridge.site_approval import is_site_question_id
+
+        site_door = getattr(self._session, "site_decide", None)
+        if is_site_question_id(question_id) and site_door is not None:
+            site_outcome = await cast(
+                Callable[[str, str, str], Awaitable[Mapping[str, Any]]], site_door
+            )(ask_id, question_id, word)
+            if not site_outcome.get("ok"):
+                raise ValueError(str(site_outcome.get("error") or "the decision was refused"))
+            await self._session.reconcile_asks()
+            return "decided"
         outcome = self._session.bridge_decide(ask_id, question_id, word)
         if not outcome.get("ok"):
             raise ValueError(str(outcome.get("error") or "the decision was refused"))
@@ -7933,7 +8018,13 @@ class ServingSessionHandle(SessionHandle):
         if not callable(setter):
             return
         try:
-            setter(None)
+            # An open QUEUED ask still owes the operator an answer after the
+            # gate settles: hand the claim back to it rather than clearing a
+            # fact that is still true (``_sync_queued_ask_pending``).
+            if getattr(self, "_queued_asks_open", False):
+                setter("ask", queued=True)
+            else:
+                setter(None)
         except Exception:  # noqa: BLE001
             logger.debug("could not clear the pending state", exc_info=True)
 

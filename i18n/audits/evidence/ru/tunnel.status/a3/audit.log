@@ -1,0 +1,33 @@
+$ git rev-parse HEAD
+7c0fc7bf22aade04f78c367c906374b73a1914d7
+exit=0
+$ git diff --stat -- local_operator/i18n/catalogues/en/tunnel.status.json local_operator/i18n/catalogues/en/tunnel.status.context.json local_operator/i18n/catalogues/ru/tunnel.status.json
+ .../i18n/catalogues/en/tunnel.status.context.json       | 17 ++++++++++++++++-
+ local_operator/i18n/catalogues/en/tunnel.status.json    | 13 ++++++++-----
+ local_operator/i18n/catalogues/ru/tunnel.status.json    | 13 ++++++++-----
+ 3 files changed, 32 insertions(+), 11 deletions(-)
+exit=0
+$ sha256sum local_operator/i18n/catalogues/en/tunnel.status.json local_operator/i18n/catalogues/en/tunnel.status.context.json local_operator/i18n/catalogues/ru/tunnel.status.json i18n/glossary.md i18n/style-guides/ru.md
+e2bc8c63d3124c363252511306fd3951917ab9f93a2398c49cac8c79302aa8f9  local_operator/i18n/catalogues/en/tunnel.status.json
+78580b806d2acc2c0c84bcf2655b62ea5ae847bf206c43134762e288bba8695d  local_operator/i18n/catalogues/en/tunnel.status.context.json
+b6b7cdba17644b965655dbf19c52cf0c42fd3b806a6026f3fce9e12e7e26d6e4  local_operator/i18n/catalogues/ru/tunnel.status.json
+a576d5a4b2718ba79a70a42600e3b6233ea28d716b1e2d996a208ac8dd7fabdb  i18n/glossary.md
+f20e1cafaf70578c17ce072c71725628808d228e4be5604329f8da30386f1fb5  i18n/style-guides/ru.md
+exit=0
+$ .venv/bin/python scripts/i18n/check.py --catalogues-only
+check.py: catalogue checks: 0 problem(s)
+exit=0
+$ .venv/bin/python scripts/i18n/ledger.py history-sha --locale ru --namespace tunnel.status
+e5b460825f62f10385462cf330e3f21d2216054b94482f977558cd183a485422
+exit=0
+$ .venv/bin/python $SCRATCH/audit-es-fr-ru/mech.py ru tunnel.status  # mechanical checks over the 8 in-scope keys
+keys en=24 ru=24 parity=OK
+tunnel.status.tunnel_inactive.label: placeholders=OK verbatim=Radient=OK barred_terms=none phone_access_term=n/a len_ratio=1.22
+tunnel.status.tunnel_inactive.detail: placeholders=OK verbatim=Radient=OK,Local Operator=OK barred_terms=none phone_access_term=OK len_ratio=1.22
+tunnel.status.tunnel_disabled.detail: placeholders=OK verbatim=Radient=OK barred_terms=none phone_access_term=OK len_ratio=1.00
+tunnel.status.billing_lapsed.detail: placeholders=OK verbatim=Radient=OK barred_terms=none phone_access_term=OK len_ratio=1.33
+tunnel.status.billing_inactive.detail: placeholders=OK verbatim=Radient=OK,Local Operator=OK barred_terms=none phone_access_term=OK len_ratio=1.11
+tunnel.status.card_paused: placeholders=OK verbatim=Radient=OK barred_terms=none phone_access_term=n/a len_ratio=1.24 card_cells=40/50 (en 36)
+tunnel.status.card_add_credit: placeholders=OK verbatim=Radient=OK barred_terms=none phone_access_term=ABSENT len_ratio=1.12 card_cells=48/50 (en 43)
+tunnel.status.card_open_console: placeholders=OK verbatim=Radient=OK barred_terms=none phone_access_term=OK len_ratio=1.02 card_cells=46/50 (en 45)
+exit=0

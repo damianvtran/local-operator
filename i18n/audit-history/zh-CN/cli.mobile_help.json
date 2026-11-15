@@ -1,0 +1,31 @@
+{
+  "schema": 1,
+  "locale": "zh-CN",
+  "namespace": "cli.mobile_help",
+  "history_sha256": "4279949766ccaa9805258a9c0b09df1dc878c454bd84be3e30801e2f0d0758b2",
+  "entries": [
+    {
+      "locale": "zh-CN",
+      "namespace": "cli.mobile_help",
+      "source_sha256": "3e1aea77751a6a1286cd0bc525163ac6e90da2f81fd19fff1fc23ae247133267",
+      "translator": {
+        "agent": "i18n-translator subagent, session 398cdb26808f (English source drafted by coder session b0300e2c2c7f)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-14"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (C4 lane: vi, zh-CN), independent `task` subagent, session 2c1a73eaa6cd; did not translate or edit any value it judged",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-14",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "2 new keys (doctor, doctor_json) in the 17-key namespace; other 15 re-read for consistency; round a1 independent audit PASSED, 0 blocker / 0 major / 0 minor / 0 nit: no findings. Placeholders, NFC and product-renderer output verified (audit.log). Not verified: native-speaker review, rendered frames. Evidence: i18n/audits/evidence/zh-CN/cli.mobile_help/a1/record.json",
+      "evidence": "i18n/audits/evidence/zh-CN/cli.mobile_help/a1/record.json",
+      "round": "a1",
+      "keys_audited": 2
+    }
+  ]
+}

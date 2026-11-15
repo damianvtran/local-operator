@@ -1,6 +1,6 @@
 ---
 name: sessions
-description: "Use the `sessions` tool to list, inspect, spawn, resume, stop or peek at other local lop sessions; `lop sessions` and `lop exec --workstream` remain the CLI fallback."
+description: "Use the `sessions` tool to list, inspect, spawn, resume, stop, park or peek at other local lop sessions; `lop sessions` and `lop exec --workstream` remain the CLI fallback."
 ---
 
 # The `sessions` tool — other local sessions, tool-first
@@ -24,7 +24,8 @@ the message protocol.
 | `info` | one session: state, directory, transcript path, origin, opener, sidebar visibility | read |
 | `spawn` | open a parallel session — a listed workstream by default | write |
 | `resume` | reopen a stored or stopped session headlessly | write |
-| `stop` | end a running session gracefully (no force in this version) | exec |
+| `stop` | end a running session gracefully (no force in this version); its wakes and monitors go DORMANT until it is reopened | exec |
+| `park` | end an idle session's runtime to free memory while its wakes and monitors stay ARMED; no address parks THIS session once the current turn ends | exec |
 | `peek` | a bounded transcript read — a window, a search, or a digest | read |
 | `help` | the full per-op reference — accepted inputs with types and defaults, one example and the refusals per op | read |
 
@@ -54,6 +55,19 @@ and the result's note names the reason and the dropped windows.
 Message delivery to a session on another device is `send` with `peer`;
 `guide://peer-messaging` carries it.
 
+A session on a mesh node delegates its OWN lane's review, QA, design and UX
+with `task` subagents (`agent='reviewer'`, `'qa-tester'`, `'designer'`,
+`'ux-reviewer'`), exactly as locally — never by spawning parallel sessions.
+`spawn` is only for work the user asked to run as its own session, or to host
+another manager's lane at their request, and then ONE host session per lane,
+never one per round or per reviewer. A role refused with "effort tier 'hi' is
+unavailable" is a node missing `subagents.models.<tier>`: run `lop network
+definitions push --peer <node>` (or `--all-peers`) from the operator's device —
+the one that signs for the operator, the only one that sends tiers — or set the
+tier on the node; a node keeping its own tier map needs the tier set there. It
+is never worked around with `model=inherit` or a session unless the operator
+asks.
+
 ## Visibility: `spawn` is listed by default
 
 `spawn` opens the run as a **workstream** by default: the operator's sidebar,
@@ -78,6 +92,51 @@ that cannot promise an idle-only stop is REFUSED, and the refusal names which.
 Restart is two auditable calls (`stop` + `resume`). There is no force option and
 no way to stop a session that is mid-run from this tool — the escalation stays
 the operator's, in the CLI.
+
+## Stop vs park
+
+Both end an idle runtime through the same idle-only ladder (never a signal,
+never a cut turn). They differ in what happens to the session's schedules:
+
+| | `stop` | `park` |
+| --- | --- | --- |
+| runtime process | ends | ends |
+| wakes | DORMANT (`stopped_at`) — will not fire until someone reopens it | ARMED (`parked_at`) — the wake supervisor fires them and reopens the session |
+| monitors | DORMANT | ARMED — the supervisor runs read-only checks (`bash` allow-listed commands, `read`, `grep`, `glob`, `web_fetch`, `code_requests`, read-only MCP tools) itself and reopens the session only when one changes, or when an unreachable MCP server's stall or give-up notice is due; `web_search` monitors reopen it on every due tick |
+| use it when | the session's work is over | you only want the memory back |
+
+The stop receipt says how many wakes and monitors it made dormant and names
+`park` as the alternative. Free memory with `park`; reserve `stop` for ending
+work. Reopening the session (any engage) clears either stamp.
+
+**A park lasts until the next reopen.** Once a wake or a monitor change brings
+the session back, it is an ordinary session again: when it later goes idle and
+its runtime exits on its own, nothing is stamped, and its monitors go back to
+reopening it on every due tick (the cold-session behaviour). Park it again if
+you want the memory back for longer. A `web_search` monitor reopens a parked
+session on every due tick, and so does an MCP monitor whose server needs a
+credential only a session can use (a passphrase-locked secret store, or a
+sign-in borrowed from another device); parking such a session saves little.
+An MCP server that is down or needs re-authentication does not reopen it: the
+supervisor records the retry and reopens it only to tell you, after 30 minutes.
+
+**Self-park.** `sessions(op='park')` with no address parks the calling session
+once the current turn ends: a detached helper waits for the owner's idle latch
+and then parks it, so the turn is never cut. It is refused (nothing scheduled)
+while this session has a running subagent, a background job or an open ask.
+Use it when you have nothing left to do until a wake or monitor fires.
+
+**Under pressure, the fleet guard parks first.** When the machine memory pass
+reaches its act line, or swap on the data volume outgrows the free space (or
+free space drops under 2 GiB), the wake supervisor parks idle, detached
+sessions — oldest-idle first, never a busy one, one a viewer is attached to,
+the chief of staff (Aida) or an engine duty session — before it would end a
+build. It also leaves alone a runtime inside its keep-alive window (just
+opened, reopened by a wake or monitor, warmed for a viewer, or just left by
+one; at least 5 minutes) and a session with an armed monitor the supervisor
+cannot check itself (the cases above), which parking would only reopen every
+tick. Each park logs one `pressure park:` line
+in the supervisor log, and so does each monitor-based skip.
 
 ## Resume — the canonical flow
 

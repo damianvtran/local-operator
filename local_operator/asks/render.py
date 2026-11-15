@@ -60,6 +60,20 @@ LATE_LEAD = (
     "the answer changes your work.\n\n"
 )
 
+#: Appended to every non-secret timeout notice. A timeout is the operator NOT
+#: answering, so it can settle only what is safe to get wrong: a reversible
+#: choice. Incident 2026-11-14 (session 1faad822298d, ask a-20fc): the notice
+#: said only "use your recommended option(s)", the recommendation was three
+#: delete buckets, and the session deleted them, an on-hold benchmark's only
+#: raw data included. The guardrail refuses such deletes too
+#: (``guardrails/check.py``, ``DeleteCase.lapsed_only``); this is the half that
+#: stops the agent trying.
+TIMEOUT_NOT_CONSENT = (
+    "A timeout is NOT consent: take your recommendation only where it is reversible. "
+    "Leave every delete, overwrite or otherwise irreversible option undone and report it "
+    "as awaiting the user's answer."
+)
+
 #: The timeout notice. "Proceed without it" is the actionable half — the point of
 #: the deadline is that the session must not stall forever. It used to end "The ask
 #: stays open for the user; if they answer later you will be told", which stopped
@@ -69,8 +83,8 @@ LATE_LEAD = (
 TIMEOUT_NOTICE = (
     "[Ask timed out] No reply to ask {ask_id} arrived within {waited} (asked {asked}). "
     "{questions}\n"
-    "Proceed without it: use your recommended option(s) or best judgment and state the "
-    "assumption in your report."
+    "Proceed without it: for a reversible choice, use your recommended option(s) or best "
+    "judgment and state the assumption in your report. " + TIMEOUT_NOT_CONSENT
 )
 
 #: Added when the ask was urgent (``timeout <= 15 min``). An urgent ask whose
@@ -111,8 +125,8 @@ TIMEOUT_NOTICE_DISMISSED = (
     "[Ask timed out] No reply to ask {ask_id} arrived within {waited} (asked {asked}). "
     "{questions}\n"
     "The user dismissed it without answering.\n"
-    "Proceed without it: use your recommended option(s) or best judgment and state the "
-    "assumption in your report."
+    "Proceed without it: for a reversible choice, use your recommended option(s) or best "
+    "judgment and state the assumption in your report. " + TIMEOUT_NOT_CONSENT
 )
 
 #: The same row for a SECRET ask: names the key and nothing else (see
@@ -395,7 +409,10 @@ def refusal_copy(record: Mapping[str, Any] | None) -> str:
         )
     if status == store.STATUS_ANSWERED:
         by = (record.get("answered_by") or {}).get("surface")
-        if not by or by in ROLE_BY_WORDS:
+        if not by or by in ROLE_BY_WORDS or by == "unverified":
+            # ``unverified`` is the runtime's stamp for an answer whose surface
+            # it could not prove (``asks/surfaces``) — a fact about the proof,
+            # not a place the user would recognise, so it reads unattributed.
             return "already answered."
         return f"already answered by {by}."
     return "this ask is no longer open."
@@ -833,6 +850,11 @@ def mirror_card(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any] | None:
         "secret": bool(question.get("secret")),
         "recommended": question.get("recommended"),
         "persist": bool(question.get("persist")),
+        # The suggested terminal command, only when the row carries one (the
+        # row already applied the rule in `queue._question_shape`), so a card
+        # for an ask without one keeps its exact prior keys. The legacy title
+        # folds it in (`mobile.types.ask_mirror_request`).
+        **({"command": question["command"]} if isinstance(question.get("command"), str) else {}),
     }
 
 
