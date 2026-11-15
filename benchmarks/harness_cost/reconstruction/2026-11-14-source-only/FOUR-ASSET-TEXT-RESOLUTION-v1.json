@@ -1,0 +1,43 @@
+{
+  "ars": {
+    "ciphertext_hash_inventory_authorized_and_complete": true,
+    "decrypted": false,
+    "extracted": false,
+    "grader_direct_decrypt_reference": "none in retained two grader files, static assessment only",
+    "omission_allowed": false,
+    "reference_solution_dependency": "protected archive is consumed through decryption of reference ars.R in pinned solution; not unused",
+    "remaining_action": "retain unchanged; no removal without prospective versioned science/oracle amendment"
+  },
+  "doom": {
+    "benchmark_use_cleared": false,
+    "reference_hash_inventory_authorized_and_complete": true,
+    "remaining_action": "bind exact screenshot/capture to actual shareware game-data rights; engine code grant is not WAD-picture grant"
+  },
+  "kind": "source-only-four-asset-text-resolution",
+  "parent_review": "091279299750 CLEAN/TERMINAL bounded text assessment, parent relay",
+  "pov22": {
+    "archive_bytes": 200563,
+    "archive_download_verification": "relayed parent verified; not redownloaded here",
+    "archive_sha256": "dfce19df76728b46895b555f5d9563ae26489d32a7b4ea7a07adf8772c2472ff",
+    "member": "POVLEGAL.DOC",
+    "member_sha256": "084e3157f5f560bd245afb416b4812f4a5c4ceb30f103626c9852dc389556fad",
+    "member_text_hash_independently_reproduced": true,
+    "official_archive_url": "https://www.povray.org/ftp/pub/povray/Old-Versions/Official-2.2/POVDOC.ZIP",
+    "operative_quotes": [
+      "Permission is granted to the user to use the Persistence of Vision Raytracer and all associated files in this package to create and render images. The use of this software for the purpose of creating images is free.",
+      "The user is also granted the right to use the scenes files and include files distributed in the INCLUDE and DEMO sub-directories of the POVDOC archive when creating their own scenes. Such permission does not extend to files in the POVSCN archive. POVSCN files are for your enjoyment and education but may not be the basis of any derivative works."
+    ],
+    "private_reference_acquired": true,
+    "raw_publication_cleared": false,
+    "scene_capture_binding": "exact benchmark illum1 scene/include lineage and derivative/publication scope remain to classify; original2.2 license is NOT missing"
+  },
+  "utc": "2026-11-15T11:28:28.691511+00:00",
+  "zork": {
+    "licensing": "oEmbed/title identify publisher, not a reuse grant; exact recording terms unresolved",
+    "original_recording_url": "https://www.youtube.com/watch?v=ZCbvyPbhRfA",
+    "original_video_bytes": 12216885,
+    "publisher": "swordsmankirby",
+    "raw_video_acquired": false,
+    "substitute_youtube_download_allowed": false
+  }
+}

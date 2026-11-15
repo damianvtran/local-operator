@@ -103,3 +103,7 @@ All alternatives are PROPOSED prospective amendments only; existing 28-task samp
 ## Frozen-runtime proof
 
 R16 clean/terminal dd54f8d (review b0e98ae596f9, parent relay). All six runtime/review-hashed files plus historical binary-eligibility.json are byte-identical; exact SHA256 map is in the new derivation. This is a license/provenance-only delta, not a native admission or new resource policy.
+
+## R17 clarification and subsequent authorized private inventory
+
+The initial proposal above remains historical. Unfinished inventory/notice/privacy auditing is NOT a demonstrated missing grant or an automatic bespoke-permission requirement. Parent subsequently authorized exact22 private acquisition, followed by3 separately authorized hash-only assets;25 exact files are now quarantined, video remains unfetched. See INPUT-QUARANTINE-AUDIT-v1.md and its sanitized matrix. No raw redistribution/benchmark execution is authorized by collection alone. Official2.2 POV terms are now resolved affirmatively; exact scene/capture scope still needs classification. ARS is used by the reference solution and must not be omitted as unused. No task/sample/amendment has been applied.
