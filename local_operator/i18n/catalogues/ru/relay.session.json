@@ -17,5 +17,18 @@
   "relay.session.model.filter_placeholder": "фильтр моделей",
   "relay.session.model.loading": "загрузка…",
   "relay.session.model.queued": "изменение в очереди — вступит в силу на следующем шаге",
-  "relay.session.model.refused": "{model} не применён: {reason}"
+  "relay.session.model.refused": "{model} не применён: {reason}",
+  "relay.session.temporary_toggle": "Временная сессия",
+  "relay.session.temporary_subtitle": "Временный · {status}",
+  "relay.session.temporary_keep": "Сохранить сессию",
+  "relay.session.temporary_make": "Сделать сессию временной…",
+  "relay.session.temporary_make_confirm": "Сделать временной",
+  "relay.session.temporary_confirm_title": "Сделать эту сессию временной?",
+  "relay.session.temporary_confirm_body": "Она сразу исчезнет из списка сессий и будет удалена после периода бездействия. Файлы, которые она изменила на вашем компьютере, останутся.",
+  "relay.session.temporary_deleted_title": "Эта временная сессия удалена",
+  "relay.session.temporary_deleted_detail": "Она удалена после периода бездействия, и открыть её снова нельзя. Файлы, которые она изменила на вашем компьютере, на месте.",
+  "relay.session.temporary_new": "Новая временная сессия",
+  "relay.session.back_to_chats": "Назад к сессиям",
+  "relay.session.keep_and_pin": "Сохранить и закрепить",
+  "relay.session.keep_and_link": "Сохранить и привязать"
 }

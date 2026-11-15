@@ -168,6 +168,8 @@ LINK_CAPABILITIES: tuple[str, ...] = (
     "compute-pool-v1",
     "peer-readiness-v1",
     "mcp-defs-v1",
+    # The mesh skill sync (``skillsync.py``); see SKILLS_SYNC_V1 below.
+    "skills-sync-v1",
     "memory-sync-v1",
     "memory-item-512",
     "pair-offer-v1",
@@ -182,13 +184,28 @@ LINK_CAPABILITIES: tuple[str, ...] = (
     # which a complete viewer must never mistake for a complete result. Named
     # here so the tuple, the ask condition and the tests read ONE spelling.
     "peer-journal-source-v1",
+    # The remote peek (``network/peek.py``): see SESSION_PEEK_V1 below.
+    "session-peek-v1",
     # Conditional member-table pull; see MEMBER_LIST_DIGEST_V1 below for why.
     "member-list-digest-v1",
     # Change-only member tables permit a long anti-entropy interval, without
     # sending optional fields to builds that still rely on the 30-second pull.
     "member-list-push-v1",
+    # The single-file pull (``files.py``'s ``net_file_get``); see MESH_FILE_V1.
+    "mesh-file-v1",
+    # Origin-only completion/notice fields on catalogue rows; see
+    # REMOTE_ATTENTION_V1 below.
+    "remote-attention-v1",
 )
 MESH_NET_V1 = "mesh-net-v1"
+#: Catalogue rows carry ``attention``/``notices`` (and ``attention_unknown`` when
+#: the owner's completion read failed) for the session's ORIGIN
+#: (``notifications/remote_attention``). An owner stamps them only on a link
+#: whose viewer advertised this, so an older viewer — which would parse the keys
+#: as nothing, or forbid them on a strict model — receives the exact row shape it
+#: always did. Named here so the tuple above, the owner's condition and the tests
+#: read ONE spelling of the string.
+REMOTE_ATTENTION_V1 = "remote-attention-v1"
 #: The complete peer-source stored-read capability (``relay.py``'s source
 #: purposes). The runtime-record half of the same promise lives in
 #: ``session/runtime/types.PEER_JOURNAL_SOURCE_CAPABILITY`` — one string, two
@@ -207,6 +224,18 @@ PEER_READINESS_V1 = "peer-readiness-v1"
 #: did not ask to make. Named here so the tuple above, the push's ask condition
 #: and the tests read ONE spelling of the string.
 MCP_DEFS_V1 = "mcp-defs-v1"
+#: The user-skill sync's capability (``skillsync.py``). Advertised by every build
+#: that serves ``net_skills``; the sender checks it BEFORE its first request, so a
+#: peer that predates skill sync is reported ``peer_too_old`` with its remedy and
+#: never asked an op it would have to refuse.
+SKILLS_SYNC_V1 = "skills-sync-v1"
+#: The remote peek's capability (``network/peek.py``: ``net_session_peek``).
+#: Advertised by every build that can answer a peek from its own journal with
+#: the local readers; a viewer's relay checks it BEFORE asking, and a peer
+#: without it is answered ``unsupported`` so the caller falls back to the
+#: live-display tail and names why, instead of composing a not-implemented
+#: refusal on the far side.
+SESSION_PEEK_V1 = "session-peek-v1"
 MEMORY_SYNC_V1 = "memory-sync-v1"
 #: The 512-content-token memory item cap (``memory.ITEM_TOKENS``). Advertised by
 #: every build whose ``validate_fact`` accepts it. A peer WITHOUT it still refuses a
@@ -228,6 +257,13 @@ MESH_UPDATE_V1 = "mesh-update-v1"
 #: feature: a peer that can install builds but predates this op must get a clear
 #: local-remedy refusal, never an unknown-op hang or a restart it cannot report.
 MESH_RESTART_V1 = "mesh-restart-v1"
+#: The single-file pull (``network/files.py``; mesh-file-transfer.md S1). Advertised
+#: by every build that serves ``net_file_get``; the puller checks it BEFORE its first
+#: request, so a peer that predates file transfer is answered with an update hint
+#: here rather than asked an op it would refuse as unknown — and never silently
+#: answered by some other route (the base64-through-the-model path this replaces is
+#: what corrupted bytes).
+MESH_FILE_V1 = "mesh-file-v1"
 #: The pair ceremony's share list (``handshake.pair_offer_frame``). Advertised by
 #: every build that SENDS or READS ``net_pair_offer``; the owner checks it against
 #: the joiner's hello before sending, and the joiner's bounded drain checks it

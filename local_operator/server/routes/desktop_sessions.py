@@ -12,7 +12,7 @@ import sqlite3
 import time
 from collections.abc import AsyncIterator, Mapping
 from contextlib import aclosing, asynccontextmanager
-from typing import Annotated, Any, Callable, Literal, NamedTuple
+from typing import TYPE_CHECKING, Annotated, Any, Callable, Literal, NamedTuple, cast
 
 from fastapi import (
     APIRouter,
@@ -82,6 +82,8 @@ from local_operator.server.models.desktop_sessions import (
     SessionSnapshot,
     StoredFile,
     SupplementReceipt,
+    TemporaryState,
+    ToolCallDiffPage,
     WarmReceipt,
     WatchReceipt,
 )
@@ -106,8 +108,10 @@ from local_operator.server.utils.desktop_sessions import (
     PeerSessionUnreachable,
     SessionDeletionRefused,
     SubagentChildUnavailable,
+    TemporaryRefusal,
     move_session,
     resolve_working_directory,
+    temporary_deleted_refusal,
 )
 from local_operator.server.utils.store_failures import (
     STORE_BUSY,
@@ -154,6 +158,11 @@ from local_operator.supplements.contract import (
     STEER_TEXT_MAX_CHARS,
     supplement_read_options,
 )
+
+if TYPE_CHECKING:
+    # Type-only: the ``cast`` on each ``diff_bindings`` unpack names it as a string, so
+    # this route module keeps its lazy ``tools.diff_archive`` import at runtime.
+    from local_operator.tools.diff_archive import DiffBindingReadOptions
 
 logger = logging.getLogger(__name__)
 
@@ -768,6 +777,12 @@ class Archive(Input):
     archived: StrictBool
 
 
+class TemporaryToggle(Input):
+    """The TEMPORARY state the caller wants: ``Archive``'s shape and reasons."""
+
+    temporary: StrictBool
+
+
 class ConfirmDeletion(Input):
     """The explicit confirmation a PERMANENT deletion requires.
 
@@ -950,6 +965,12 @@ class CreateSession(Input):
     #: ``Input`` is ``extra="forbid"``, so an OLDER backend answers this field with
     #: a 422 and the renderer must capability-gate before sending it.
     purpose: Literal["agents-config"] | None = None
+    #: Start a TEMPORARY chat (``session/temporary.py``): left out of every
+    #: history listing and deleted after its idle window. Capability-gated on
+    #: ``features.temporary_chats`` for the same release-skew reason as
+    #: ``purpose``. With ``peer`` it is refused (422 ``temporary_peer_unsupported``):
+    #: a temporary chat on another device is deferred.
+    temporary: StrictBool = False
 
     @model_validator(mode="after")
     def _a_local_create_still_names_a_folder(self) -> "CreateSession":
@@ -1397,6 +1418,14 @@ class Command(Input):
     command: str = Field(pattern=r"^/?[A-Za-z]+$", max_length=64)
     args: str = Field(default="", max_length=200_000)
     images: list[Image] = Field(default_factory=list, max_length=8)
+    #: Capability marker, not authority (team-bridge-egress.md: "bridge_ack"): set by a desktop
+    #: build
+    #: that knows Team Bridge taint, and only from the ``/approvals`` picker
+    #: after it rendered the latched sentence -- never from a card escape. A
+    #: loosening ``approvals auto`` for a latched conversation is refused
+    #: without it, which is what keeps an older build's "Set auto" from
+    #: re-loosening a latched session in one press.
+    bridge_ack: bool = False
 
     @model_validator(mode="after")
     def wire_budget(self):
@@ -2272,7 +2301,21 @@ async def errors(request: Request, copy: StoreRefusalCopy | None = None) -> Asyn
             503,
             _wd.conversations_unreadable().envelope(code=error.code),
         ) from None
+    except TemporaryRefusal as error:
+        raise HTTPException(error.status, error.envelope()) from None
     except KeyError:
+        # A DELETED TEMPORARY CHAT answers its own 404 code on every session
+        # route (snapshot, history, events, message, pin, archive, temporary),
+        # so a client can say "this temporary chat was deleted" rather than
+        # "not found". The tombstone is consulted only on the not-found path.
+        session_id = request.path_params.get("session_id")
+        if isinstance(session_id, str):
+            try:
+                tombstone = temporary_deleted_refusal(host(request).root, session_id)
+            except Exception:  # noqa: BLE001 — the generic 404 is still true
+                tombstone = None
+            if tombstone is not None:
+                raise HTTPException(tombstone.status, tombstone.envelope()) from None
         raise HTTPException(404, _wd.requested_not_found().envelope()) from None
     except MoveIndeterminate as error:
         # 503 with the same NAMED-CONDITION body ``DaemonRetiring`` and
@@ -2739,6 +2782,10 @@ async def list_sessions(
     request: Request,
     limit: int = Query(default=100, ge=1, le=500),
     include_archived: bool = Query(default=False),
+    # Temporary chats (``features.temporary_chats``): off by default, so an
+    # older client never sees one; the UI asks and partitions them into its
+    # ``Temporary · N`` group. Search deliberately has no such parameter.
+    include_temporary: bool = Query(default=False),
     include_peers: bool = Query(default=False),
     # THE SCOPED, PAGED PARAMETERS, all optional and all defaulted so that a
     # request which sends none of them is answered exactly as it was before this
@@ -2790,6 +2837,7 @@ async def list_sessions(
             limit,
             status_stamps=stamps,
             include_archived=include_archived,
+            include_temporary=include_temporary,
             include_peers=include_peers,
             scope=scope,
             cursor=cursor or None,
@@ -3063,6 +3111,9 @@ async def create_session(body: CreateSession, request: Request):
 
     No ``model`` ⇒ the body, the marker and the launch are byte-for-byte today's.
     """
+    if body.peer and body.temporary:
+        # Before any receipt or peer dial: a refusal leaves the store untouched.
+        raise HTTPException(422, TemporaryRefusal("temporary_peer_unsupported").envelope())
 
     async def create():
         if body.peer:
@@ -3215,6 +3266,7 @@ async def create_session(body: CreateSession, request: Request):
             # conversation is refused there with its own typed answer.
             draft_id=body.draft_id,
             purpose=body.purpose,
+            temporary=body.temporary,
         )
         return {"session_id": session_id, "binding": await pool.binding(session_id)}
 
@@ -3606,6 +3658,9 @@ async def snapshot(
     ] = None,
     peer_journal_source: Annotated[int, Query(ge=0, le=1)] = 0,
     supplements: int = Query(default=0, ge=0),
+    # Viewer-declared (QA F5 on #3762): a client that can paint nested
+    # write/edit binding rows sends 1; default 0 serves today's rows exactly.
+    diff_bindings: Annotated[int, Query(ge=0, le=1)] = 0,
 ):
     # READ: an existing but silent owner must not fail a read. The durable answer
     # is on disk in this same process, so the attempt is bounded
@@ -3654,15 +3709,25 @@ async def snapshot(
         errors(request),
         host(request).session(session_id, read=True, allow_draft=True) as bridge,
     ):
-        return reply(
-            await bridge.snapshot(
-                entry_times=bool(entry_ts),
-                open_frame=bool(open_frame),
-                **({"journal_order": True, "order_ids": order_ids} if journal_order else {}),
-                peer_journal_source=bool(peer_journal_source),
-                **supplement_read_options(bool(supplements)),
-            )
+        frame = await bridge.snapshot(
+            entry_times=bool(entry_ts),
+            open_frame=bool(open_frame),
+            **({"journal_order": True, "order_ids": order_ids} if journal_order else {}),
+            peer_journal_source=bool(peer_journal_source),
+            **supplement_read_options(bool(supplements)),
+            **cast("DiffBindingReadOptions", {"diff_bindings": True} if diff_bindings else {}),
         )
+        # The temporary-chat object rides on the snapshot so an open chat shows
+        # its pill and countdown without a list read. ``null`` for every other
+        # conversation (a peer's id has no local mark, so it reads ``null`` too).
+        payload = frame.get("payload") if isinstance(frame, dict) else None
+        if isinstance(payload, dict):
+            from local_operator.session.temporary import RowProjector
+
+            payload["temporary"] = await asyncio.to_thread(
+                RowProjector(host(request).root).info, session_id
+            )
+        return reply(frame)
 
 
 async def _remote_open_refusal(request: Request, session_id: str) -> None:
@@ -3723,6 +3788,9 @@ async def history(
     source_read: Annotated[str | None, Query(max_length=32)] = None,
     expected_journal_generation: Annotated[str | None, Query(max_length=128)] = None,
     supplements: int = Query(default=0, ge=0),
+    # Viewer-declared (QA F5 on #3762): a client that can paint nested
+    # write/edit binding rows sends 1; default 0 serves today's rows exactly.
+    diff_bindings: Annotated[int, Query(ge=0, le=1)] = 0,
 ):
     # READ, for the same reason as ``snapshot`` beside it — and on a draft the
     # empty page is the correct answer (the open frame's own ``history()``
@@ -3784,6 +3852,7 @@ async def history(
                 source_read=source_read,
                 expected_journal_generation=expected_journal_generation,
                 **supplement_read_options(bool(supplements)),
+                **cast("DiffBindingReadOptions", {"diff_bindings": True} if diff_bindings else {}),
             )
         )
 
@@ -4001,6 +4070,98 @@ async def child_trajectory_release(session_id: str, child_id: str, request: Requ
     """
     async with errors(request):
         return reply(await host(request).unload_child_trajectory(session_id, child_id))
+
+
+#: Tool-call ids are provider-minted opaque strings; the bound keeps a crafted
+#: path segment from costing more than one transcript prefilter.
+_TOOL_CALL_ID_MAX = 256
+
+
+def _diff_reply(page: dict[str, Any]) -> JSONResponse:
+    """The CRUD envelope with the headers this evidence must carry.
+
+    ``no-store`` is also applied by ``managed_desktop_boundary``; stating it
+    here keeps the contract true for any host that mounts the router alone.
+    """
+    body = reply(ToolCallDiffPage.model_validate(page)).model_dump(mode="json")
+    return JSONResponse(
+        body, headers={"X-Content-Type-Options": "nosniff", "Cache-Control": "no-store"}
+    )
+
+
+async def _diff_page_or_422(load: Any) -> dict[str, Any]:
+    from local_operator.tools.diff_archive import DiffPageRangeError
+
+    try:
+        return await load
+    except DiffPageRangeError:
+        # A start past the last row is the caller's request being wrong, not
+        # the resource being absent, so it is not folded into the uniform 404.
+        # The page is addressed by the server-issued (next_start, next_offset)
+        # cursor, so the audited paging-cursor refusal is the localized body.
+        raise HTTPException(422, _wd.session_files_bad_cursor().envelope()) from None
+
+
+@router.get(
+    "/v1/desktop/sessions/{session_id}/tool-calls/{call_id}/diff",
+    response_model=CRUDResponse[ToolCallDiffPage],
+)
+async def tool_call_diff(
+    session_id: str,
+    request: Request,
+    call_id: str = Path(min_length=1, max_length=_TOOL_CALL_ID_MAX),
+    start: int = Query(default=0, ge=0),
+    limit: int = Query(default=200, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+):
+    """One page of a write/edit call's COMPLETE, source-redacted diff.
+
+    The inline ``details['diff']`` keeps 200 rows; ``details['diff_full']``
+    names the archive that holds the rest (``tools/diff_archive``). The client
+    sends ids only -- never a digest: membership is proved server-side from
+    this session's own transcript row for ``call_id``. Unknown session,
+    foreign call or a non-write/edit call are one 404; bad paging is 422; a
+    captured-but-unservable diff (``oversized``/``withheld``/``unavailable``/
+    ``evicted``) and an old row (``not_recorded``) are 200 answers with no rows;
+    so is a call id that two distinct persisted rows share (``unavailable``:
+    serving either could be the wrong capture). ``offset`` is the opaque,
+    server-issued continuation into one row too large for a page (see
+    ``ToolCallDiffPage``); a client echoes ``next_offset`` and never computes it.
+    """
+    async with errors(request):
+        page = await _diff_page_or_422(
+            host(request).tool_call_diff(
+                session_id, call_id, start=start, limit=limit, offset=offset
+            )
+        )
+    return _diff_reply(page)
+
+
+@router.get(
+    "/v1/desktop/sessions/{session_id}/children/{child_id}/tool-calls/{call_id}/diff",
+    response_model=CRUDResponse[ToolCallDiffPage],
+)
+async def child_tool_call_diff(
+    session_id: str,
+    child_id: str,
+    request: Request,
+    call_id: str = Path(min_length=1, max_length=_TOOL_CALL_ID_MAX),
+    start: int = Query(default=0, ge=0),
+    limit: int = Query(default=200, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+):
+    """The child reader's twin of :func:`tool_call_diff`.
+
+    Same contract; the containment proof (``_contained_child_dir``) runs
+    before the child's transcript is read, and refusals are the same 404.
+    """
+    async with errors(request):
+        page = await _diff_page_or_422(
+            host(request).child_tool_call_diff(
+                session_id, child_id, call_id, start=start, limit=limit, offset=offset
+            )
+        )
+    return _diff_reply(page)
 
 
 @router.get(
@@ -4610,11 +4771,20 @@ async def command(session_id: str, body: Command, request: Request):
             await bridge.stage_ingested_images(
                 [{"data_b64": block.data, "mime_type": block.mime_type} for block in slash_images]
             )
-            outcome = await bridge.remote.route_shared_slash(
-                spec.name,
-                body.args,
-                images=slash_images,
-            )
+            # ``bridge_ack`` rides only when set (team-bridge-egress.md: "bridge_ack"):
+            # an unmarked command keeps the pre-taint call shape, so a remote
+            # whose ``route_shared_slash`` predates the keyword is not handed a
+            # TypeError for every ordinary slash. Omitting it is the fail-closed
+            # default — the owner reads absence as "not acknowledged" and still
+            # refuses a loosening ``approvals auto`` for a latched conversation.
+            if body.bridge_ack:
+                outcome = await bridge.remote.route_shared_slash(
+                    spec.name, body.args, images=slash_images, bridge_ack=True
+                )
+            else:
+                outcome = await bridge.remote.route_shared_slash(
+                    spec.name, body.args, images=slash_images
+                )
             if outcome is None or outcome.get("kind") == "noop":
                 return {"command": spec.name, "result": native_action(spec, session_id, body.args)}
             outcome = SlashResult.model_validate(outcome)
@@ -5221,6 +5391,23 @@ async def archive(session_id: str, body: Archive, request: Request):
         if remote is not None:
             return reply(remote)
         return reply(await host(request).set_archived(session_id, body.archived))
+
+
+@router.post(
+    "/v1/desktop/sessions/{session_id}/temporary", response_model=CRUDResponse[TemporaryState]
+)
+async def temporary(session_id: str, body: TemporaryToggle, request: Request):
+    """Make a conversation temporary, or keep it (desired state, like ``/archive``).
+
+    ``{"temporary": true}`` marks it: it leaves every history listing and is
+    deleted after its idle window. Refused 409 ``session_pinned`` /
+    ``session_in_project`` / ``session_not_user``. ``{"temporary": false}`` is
+    "Keep": always allowed, and idempotent. The UI owns the confirmation; the
+    server does not confirm. A deleted temporary chat answers 404
+    ``session_temporary_deleted`` with ``deleted_at``.
+    """
+    async with errors(request):
+        return reply(await host(request).set_temporary(session_id, body.temporary))
 
 
 @router.delete("/v1/desktop/sessions/{session_id}", response_model=CRUDResponse[DeletedSession])
@@ -6193,6 +6380,9 @@ async def events(
     ] = None,
     peer_journal_source: Annotated[int, Query(ge=0, le=1)] = 0,
     supplements: int = Query(default=0, ge=0),
+    # Viewer-declared (QA F5 on #3762): a client that can paint nested
+    # write/edit binding rows sends 1; default 0 serves today's rows exactly.
+    diff_bindings: Annotated[int, Query(ge=0, le=1)] = 0,
 ):
     # Acquire BEFORE returning response headers: invalid identity/capacity must
     # return JSON status, not a misleading 200 followed by a broken SSE stream.
@@ -6245,6 +6435,7 @@ async def events(
                 sub = bridge.subscribe(
                     frontend_replace=bool(frontend_replace),
                     supplements=bool(supplements),
+                    diff_bindings=bool(diff_bindings),
                     journal_order=bool(journal_order),
                     peer_journal_source=bool(peer_journal_source),
                 )

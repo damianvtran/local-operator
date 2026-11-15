@@ -1,0 +1,130 @@
+{
+  "schema": 1,
+  "audit_id": "secondary-dee255be2b29",
+  "audit_kind": "bounded_namespace_independent_semantic_audit",
+  "locale": "ru",
+  "namespace": "wire.bridge_taint",
+  "audit_date": "2026-11-11",
+  "audited_revision": "da78471c32bf748a1637981251e05d607e43f8a5",
+  "key_count": {
+    "en": 8,
+    "target": 8,
+    "context": 8
+  },
+  "auditor": {
+    "agent": "reviewer (radientdev team) / second independent safety i18n-auditor",
+    "session": "dee255be2b29",
+    "model": "deepseek/deepseek-flash",
+    "actual_model_source": "session model header",
+    "fallback": "none",
+    "independent_from_translator_session": true,
+    "independence": "No authorship or remediation of audited catalogue/context bytes. Different agent and different model from both the translator (coder lane, anthropic/claude-opus-5-5, commit 08e7c649eaca) and the first auditor (reviewer b854fe58034a, anthropic/claude-opus-5-5): model-independent as well as agent-independent."
+  },
+  "translator": {
+    "agent": "coder lane (radientdev), commit 08e7c649eaca",
+    "model": "anthropic/claude-opus-5-5",
+    "date": "2026-11-11"
+  },
+  "first_auditor": {
+    "agent": "reviewer (radientdev) / independent i18n-auditor",
+    "session": "b854fe58034a",
+    "model": "anthropic/claude-opus-5-5",
+    "evidence": "i18n/audits/evidence/ru/bridge-taint-primary-r2/record.json"
+  },
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/wire.bridge_taint.json",
+      "sha256": "330a111628350378ede70f1ec5d9a432239d59716b5ee1b0e668de39696ef4d9"
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/wire.bridge_taint.context.json",
+      "sha256": "bdc6e370fc801cc9aaaf9e70e837b4ac14e9ace9990bcecda28fd1f1d94f31cd"
+    },
+    "target": {
+      "path": "local_operator/i18n/catalogues/ru/wire.bridge_taint.json",
+      "sha256": "01d1056b2b52f9f8c234d0db696d14cfd8ac2a0c66b9066fb22324e4349d39f0"
+    }
+  },
+  "current_bytes_match_audited_hashes": true,
+  "current_report_verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "finding_ids": [],
+    "deferred_non_gating_finding_ids": [
+      "zh-CN-N1",
+      "vi-N1",
+      "vi-N2",
+      "zh-CN-N2"
+    ]
+  },
+  "keys_semantically_audited": [
+    "wire.bridge_taint.card_notice",
+    "wire.bridge_taint.card_options_off",
+    "wire.bridge_taint.full_request",
+    "wire.bridge_taint.grant_suspended",
+    "wire.bridge_taint.ack_refused",
+    "wire.bridge_taint.card_notice_other_session",
+    "wire.bridge_taint.grant_suspended_other_session",
+    "wire.bridge_taint.ack_refused_other_session"
+  ],
+  "per_key": {
+    "card_notice": {
+      "target": "В этой беседе есть сообщение от агента коллеги по команде (Сообщения агентов). Прежде чем разрешить, проверьте, что и куда это отправит.",
+      "verdict": "pass",
+      "reason": "teammate's agent = 'агента коллеги по команде' (a colleague on the team, another person); 'что и куда это отправит' keeps the check; вы."
+    },
+    "card_options_off": {
+      "target": "В этой беседе «Allow all» и auto отключены. Чтобы включить auto, введите /approvals auto в терминале или используйте /new, чтобы начать новую беседу.",
+      "verdict": "pass",
+      "reason": "'«Allow all»' quoted, Latin auto, 'в терминале' kept, both commands verbatim; no space before ':'."
+    },
+    "full_request": {
+      "target": "Полный запрос: {request}",
+      "verdict": "pass",
+      "reason": "'Полный запрос: {request}', placeholder intact."
+    },
+    "grant_suspended": {
+      "target": "Автоматическое одобрение в этой беседе приостановлено: теперь в ней есть сообщение от агента коллеги по команде (Сообщения агентов). Вызовы инструментов, которые могут отправить данные наружу или что-то изменить, будут сначала запрашивать ваше одобрение. Чтобы вернуться к auto, введите /approvals auto в терминале.",
+      "verdict": "pass",
+      "reason": "'приостановлено' = paused; 'теперь' = now; scope 'Вызовы инструментов, которые могут отправить данные наружу или что-то изменить' restrictive; 'будут сначала запрашивать ваше одобрение' = ask you first."
+    },
+    "ack_refused": {
+      "target": "Автоматическое одобрение по-прежнему отключено. В этой беседе есть сообщение от агента коллеги по команде (Сообщения агентов), поэтому включить auto отсюда нельзя. Каждый запрос вы всё равно можете одобрить в его карточке. Чтобы включить auto, введите /approvals auto в терминале или используйте /new, чтобы начать новую беседу.",
+      "verdict": "pass",
+      "reason": "'по-прежнему отключено' = still off; 'отсюда' = from here; 'одобрить' plain verb (glossary), nothing quoted."
+    },
+    "card_notice_other_session": {
+      "target": "В этой беседе есть содержимое из другой сессии или с другого устройства, в котором может быть сообщение от агента коллеги по команде. Прежде чем разрешить, проверьте, что и куда это отправит.",
+      "verdict": "pass",
+      "reason": "'из другой сессии или с другого устройства' = own session/device, no team word; 'может быть' possibility."
+    },
+    "grant_suspended_other_session": {
+      "target": "Автоматическое одобрение в этой беседе приостановлено: теперь в ней есть содержимое из другой сессии или с другого устройства, в котором может быть сообщение от агента коллеги по команде. Вызовы инструментов, которые могут отправить данные наружу или что-то изменить, будут сначала запрашивать ваше одобрение. Чтобы вернуться к auto, введите /approvals auto в терминале.",
+      "verdict": "pass",
+      "reason": "own-session/device; possibility; restrictive 'которые'; «Автоматическое одобрение» is the adjectival concept, the mode token 'auto' stays Latin."
+    },
+    "ack_refused_other_session": {
+      "target": "Автоматическое одобрение по-прежнему отключено. В этой беседе есть содержимое из другой сессии или с другого устройства, в котором может быть сообщение от агента коллеги по команде, поэтому включить auto отсюда нельзя. Каждый запрос вы всё равно можете одобрить в его карточке. Чтобы включить auto, введите /approvals auto в терминале или используйте /new, чтобы начать новую беседу.",
+      "verdict": "pass",
+      "reason": "own-session/device, possibility, 'отсюда', plain одобрить, терминале kept."
+    }
+  },
+  "agent_messages_title": {
+    "locale_value": "Сообщения агентов",
+    "matches_wire_settings_team_bridge_title": true
+  },
+  "mechanical": "key set and order = en (8/8); every string NFC; no bidi/zero-width controls; no ASCII apostrophe; {request}, /approvals auto and /new byte-identical with counts equal to en; 'auto' Latin everywhere; Agent-messages title byte-contained in the same three keys as en; only quoted span is the TUI label 'Allow all'; sentence-terminator counts equal to en per locale terminator; balanced quotes/parentheses; per-locale punctuation (fr U+202F before ':' and inside «»; hi danda; ur ۔/، with no danda; zh full-width with no CJK/Latin spacing; es/vi/ru no space before punctuation).",
+  "safety_classification": "high-visibility/safety copy (approval-gate egress latch); docs/I18N.md step 3 requires two independent audits — this record is the SECOND at source 330a1116.",
+  "artifacts": [
+    {
+      "path": "i18n/audits/evidence/ru/bridge-taint-secondary/report.md"
+    },
+    {
+      "path": "i18n/audits/evidence/ru/bridge-taint-secondary/audit.log"
+    },
+    {
+      "path": "i18n/audits/evidence/ru/bridge-taint-secondary/check.py.txt"
+    }
+  ],
+  "limitations": "Linguistic/copy audit only; judged by an LLM auditor, no native-speaker review (explicitly not a gate per the operator decision) and no rendered-frame/RTL paint proof for target locales."
+}

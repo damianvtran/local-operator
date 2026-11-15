@@ -28,5 +28,40 @@
     "tone": "plain, calm, reassuring: nothing went wrong",
     "width": "one sentence, shown in a toast or under the settings chip",
     "note": "409 generation_moved: the user picked again for the same setting after the change they tried to cancel, so the newer pick stands and there is nothing to cancel. 'change' means a requested settings change, not a code change. No placeholders."
+  },
+  "wire.errors.desktop.session_in_project": {
+    "role": "API refusal sentence (409)",
+    "tone": "plain",
+    "note": "Refuses making a project-linked conversation temporary. {session_id} is a 12-character id."
+  },
+  "wire.errors.desktop.session_pinned": {
+    "role": "API refusal sentence (409)",
+    "tone": "plain",
+    "note": "Refuses making a pinned conversation temporary. {session_id} is a 12-character id."
+  },
+  "wire.errors.desktop.session_temporary": {
+    "role": "API refusal sentence (409)",
+    "tone": "plain, lower-case start like its neighbours",
+    "note": "A 'temporary chat' is not kept: it is deleted after a period of inactivity. Pinning or linking it to a project is refused until the user chooses to keep the chat. {session_id} is a 12-character id."
+  },
+  "wire.errors.desktop.session_temporary_deleted": {
+    "role": "API not-found sentence (404)",
+    "tone": "plain, calm",
+    "note": "Shown when someone opens a temporary chat that was already deleted automatically for inactivity. Not an error the user caused."
+  },
+  "wire.errors.desktop.temporary_mark_failed": {
+    "role": "API refusal sentence (500/409)",
+    "tone": "plain, reassuring",
+    "note": "The temporary flag could not be written; the conversation is kept as a normal one (or, on create, not created). {session_id} is a 12-character id."
+  },
+  "wire.errors.desktop.temporary_not_user": {
+    "role": "API refusal sentence (409)",
+    "tone": "plain",
+    "note": "Refuses making an agent-started conversation (a delegated run or an agent workstream) temporary. {session_id} is a 12-character id."
+  },
+  "wire.errors.desktop.temporary_peer_unsupported": {
+    "role": "API refusal sentence (422)",
+    "tone": "plain",
+    "note": "Temporary chats are only available on this device for now."
   }
 }

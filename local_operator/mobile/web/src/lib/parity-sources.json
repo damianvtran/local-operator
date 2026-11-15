@@ -4,8 +4,10 @@
 		"repo": "damianvtran/local-operator-ui",
 		"path": "scripts/fixtures/condense.parity.json",
 		"manifest": "scripts/fixtures/condense.parity.manifest.json",
-		"sha256": "5f029f372f3c3e9d2ff5d370871663221a7b8a033edf74211b975da956007dfe",
-		"sourceHash": "0c813b32dce83e3deedea12ffd02aef7230065647bf22e78dc8a5ce2ae31e338"
+		"revision": "5acfe0a2d92365b7c9b029a9d870326d9b022d25",
+		"revisionNote": "External retrieval revision, verified against fixture, manifest and actual model-source bytes; not a generation-time self-SHA. Derived from relay repin b61040a28431 and verified at this UI commit.",
+		"sha256": "bf6f8d5bf8f6d6f99f033d84f9c6fd4c8f9a48db002fe23f1ff1bc05446cac17",
+		"sourceHash": "cccd5a264d710dc584b4a3453c1cf309ac084ea40be70415cd78f397a2be9e6d"
 	},
 	"quiet-groups.parity.json": {
 		"repo": "damianvtran/local-operator-ui",

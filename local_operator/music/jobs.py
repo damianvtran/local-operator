@@ -21,6 +21,7 @@ from local_operator.clients.radient_cost import (
 from local_operator.i18n.keys import wire_music as mk
 from local_operator.i18n.messages import render_resolved
 from local_operator.music.client import MusicClient
+from local_operator.music.digest import job_text
 from local_operator.session.channel_spend import new_record_id, now_ms
 from local_operator.video.rungs import VIDEO_POLL_INTERVAL_S
 
@@ -243,9 +244,13 @@ def runner(context: Any, initial: dict[str, Any], *, client_factory: Any = Music
                 "attribution": record.get("attribution", ""),
             }
             report({"music_receipt": receipt, "music": {**receipt, "stage": record["state"]}})
+            # The returned/raised text is what the model reads (the job
+            # completion delivery and ``wait``), so it carries the per-track
+            # outcome, saved files and costs, not a bare label. The failure
+            # code stays first: callers and logs match on it.
             if not record.get("artifacts"):
-                raise RuntimeError("music_no_playable_results")
-            return render_resolved(mk.ready(job=record["job"]))
+                raise RuntimeError(f"music_no_playable_results\n{job_text(record)}")
+            return job_text(record)
         except asyncio.CancelledError:
             disposed = context.session_disposed
             if disposed is None or not disposed():

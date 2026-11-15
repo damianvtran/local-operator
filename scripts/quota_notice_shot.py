@@ -89,7 +89,7 @@ async def main() -> None:
     # A neutral cwd before painting: the splash's cwd row and the composer
     # footer both name the process's working directory, and an evidence frame
     # must not carry the capturing worktree's path (the convention
-    # ``docs/evidence/model-receipt`` states). Nothing is written here.
+    # ``scripts/repro/model-receipt`` states). Nothing is written here.
     os.chdir("/private/tmp")
 
     app = frame_app(fixture)

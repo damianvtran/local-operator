@@ -1507,6 +1507,7 @@ def _band():
     # optional Saver badge to "". Mirror that real constructor state here;
     # the painter intentionally requires all its fields to be initialized.
     band._saver = ""
+    band._temporary = ""
     band._agent_profile = ""
     band._team = ""
     band._cwd = "/tmp"
@@ -1576,3 +1577,16 @@ def _title_written(band) -> str:
 
     StatusLine._sync_terminal_title(band)
     return band._title.current
+
+
+def test_a_fork_of_a_temporary_chat_is_retained(tmp_path: Path) -> None:
+    """The temporary mark never rides a fork (``EXCLUDED_SIDECARS``): forking is
+    how a user keeps a copy, so the copy must not inherit the deletion clock."""
+    from local_operator.session import temporary
+
+    _seed_parent(tmp_path)
+    assert temporary.write_mark(tmp_path, PARENT_ID, True, by="tui").ok
+    assert temporary.MARK_NAME in EXCLUDED_SIDECARS
+    fork_id = fork_session(tmp_path, PARENT_ID)
+    assert not temporary.is_marked(tmp_path, fork_id)
+    assert temporary.is_marked(tmp_path, PARENT_ID)

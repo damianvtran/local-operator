@@ -1,0 +1,53 @@
+{
+  "schema": 1,
+  "audit_id": "primary-58fe18b8416a",
+  "audit_kind": "bounded_namespace_independent_semantic_audit",
+  "locale": "zh-CN",
+  "namespace": "tui.boot_prompt",
+  "audit_date": "2026-11-11",
+  "audited_revision": "56e6248f5da248fa6748d1eb50f21ddbe8ecc00f",
+  "key_count": {
+    "en": 2,
+    "target": 2,
+    "context": 2
+  },
+  "auditor": {
+    "agent": "qa-tester / independent i18n-auditor",
+    "session": "58fe18b8416a",
+    "model": "anthropic/claude-opus-5-5",
+    "actual_model_source": "session model header",
+    "fallback": "none",
+    "independent_from_translator_session": true,
+    "independence": "No authorship or remediation of audited catalogue/context bytes; translator was coder session 5463be22cea4."
+  },
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/tui.boot_prompt.json",
+      "sha256": "23eb874bbb69dcf392648bd45b71e68b43027b7da583661d7b474fffdba09d7f"
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/tui.boot_prompt.context.json",
+      "sha256": "1ba56a565d3d03fbdbe793075f60f4a727ea450b51c096c119a44b4c461105cc"
+    },
+    "target": {
+      "path": "local_operator/i18n/catalogues/zh-CN/tui.boot_prompt.json",
+      "sha256": "132d1a5d65b12eec16cf2d1676c334eb5d14eec9bff77d29286e10e652fa165c"
+    }
+  },
+  "current_bytes_match_audited_hashes": true,
+  "current_report_verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "finding_ids": [],
+    "deferred_non_gating_finding_ids": []
+  },
+  "semantic_reason": "'启动时的提示词未发送，已放回输入框' = startup prompt not sent, put back in the input box; '输入框' matches existing TUI; glossary 提示词; full-width punctuation ，。：.",
+  "context_comparison": "passed; both keys read against tui.boot_prompt.context.json notes (not sent, returned unsent to composer / user draft kept, {prompt} verbatim after colon)",
+  "artifacts": [
+    {
+      "path": "~/.local-operator/sessions/58fe18b8416a/scratchpad/boot-prompt-audit/report.md",
+      "sha256": "f927e4d72642eccb9763ec1f3dc741ec5fdc1798ec4b26736cff53ae6c0b82e4"
+    }
+  ],
+  "limitations": "Linguistic/copy audit only; no native rendered-flow/RTL paint proof for target locales; classified not high-visibility/safety copy, so no second audit claimed or required by this auditor."
+}

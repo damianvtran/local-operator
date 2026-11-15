@@ -92,7 +92,7 @@ from collections import OrderedDict
 from typing import Any
 
 from local_operator.helpers import heif_image_module, pillow_image_module
-from local_operator.media import ImageInfo, sniff_image
+from local_operator.media import ImageInfo, png_structure_fault, sniff_image
 from local_operator.optional import missing_extra_error
 
 #: Long-edge ceiling in pixels for an image handed to a provider.
@@ -799,10 +799,23 @@ def bound_image_for_model(
         edge_cap = IMAGE_INGEST_MAX_EDGE if max_edge is None else max_edge
         if max_edge is None and _is_line_art(image):
             edge_cap = IMAGE_MAX_EDGE
+        # A PNG Pillow decoded is not thereby a PNG the provider will decode:
+        # Pillow skips the IDAT CRC and stops once it has its rows, so a file
+        # with a short IDAT length, junk after it and no IEND decodes here and
+        # is refused there as "unsupported image" (measured on DeepSeek; see
+        # ``media.png_structure_fault``). Such a file must NOT take the
+        # verbatim rung; falling through re-encodes the pixels Pillow did read
+        # into a clean PNG, deterministically, so the block is stable across
+        # renders. CRCs are checked here because this runs once per image and
+        # has just paid a full decode, so the extra pass is noise.
+        damage = (
+            png_structure_fault(data, verify_crc=True) if info.mime_type == "image/png" else None
+        )
         if (
             info.sendable
             and frames == 1
             and not rotated
+            and damage is None
             and long_edge <= edge_cap
             and len(data) <= IMAGE_MAX_BYTES
         ):
@@ -892,6 +905,12 @@ def bound_image_for_model(
             # model has to explain to itself — it is the only clue that the axes
             # it might derive coordinates from have been swapped.
             summary += " (EXIF-rotated)"
+    if damage is not None:
+        # Model-facing: the pixels are what a LENIENT decoder recovered from a
+        # damaged file, so they may be incomplete or wrong (the observed file
+        # decoded to a uniform white crop). Saying so stops the model reasoning
+        # from them as if they were the file's real content.
+        summary += f"; re-encoded from a damaged PNG ({damage}), pixels may be incomplete"
     return payload, wire_mime, summary
 
 
@@ -1012,7 +1031,17 @@ def rebound_oversize_image(data_b64: str) -> tuple[str, str] | None:
     # edge (review round 2, F9). Measured on the ENCODED text, because that is
     # what is actually sent and what the wall is expressed in.
     too_heavy = len(data_b64) > IMAGE_REFUSAL_MAX_B64_BYTES
-    if not oversized and not too_heavy:
+    # A STRUCTURALLY damaged PNG is the third refusal this repair can predict
+    # without waiting for the 400 (see ``media.png_structure_fault``). History
+    # written before the creation-time bound learned to re-encode such files
+    # still holds them verbatim, and replaying one fails every request. The
+    # walk here skips CRCs on purpose: it runs on every image every render, and
+    # the chunk walk alone is O(chunks) and catches every truncation; a
+    # CRC-only corruption is left to the client's reject-and-placeholder retry.
+    damaged = (
+        info.mime_type == "image/png" and png_structure_fault(raw, verify_crc=False) is not None
+    )
+    if not oversized and not too_heavy and not damaged:
         return None
     # Only oversized blocks reach the cache, so the common path never pays for
     # it. The digest covers the bytes alone, which is the whole key: the result

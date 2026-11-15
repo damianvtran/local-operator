@@ -105,6 +105,7 @@ from local_operator.harness.types import (
 )
 from local_operator.hub_sync.definition import DefinitionRevisionMismatch
 from local_operator.profile_scope import Scope
+from local_operator.profile_text_edits import TextEdit
 from local_operator.projects import truncate_row
 from local_operator.tools.builtin import (
     INHERIT_EFFORT,
@@ -196,6 +197,22 @@ class AgentParams(BaseModel):
         default=None,
         description="create/update: pin Radient Saver for this role; inherit clears it.",
     )
+    edits: list[TextEdit] | None = Field(
+        default=None,
+        description="update: patch/append long text losslessly.",
+    )
+    field: Literal["instructions", "description"] | None = Field(
+        default=None, description="show: read this field page by page"
+    )
+    part: int | None = Field(default=None, ge=1, description="show: page, 1-based")
+    base_revision: str | None = Field(
+        default=None,
+        description="show/update: show's revision (CAS).",
+    )
+    replace: bool = Field(
+        default=False,
+        description="update: confirm a rewrite dropping lines.",
+    )
 
     @field_validator("effort", mode="before")
     @classmethod
@@ -282,7 +299,7 @@ class AgentParams(BaseModel):
         default=None,
         description=(
             "Default: this conversation if it has a store, else the account. "
-            "'global': the account, needs confirmation."
+            "'global': the account."
         ),
     )
     # ``as`` is a Python keyword, so the field carrying the design's ``[as=Y]`` is
@@ -728,7 +745,47 @@ async def _op_list(context: ToolContext | None, tool_call_id: str) -> ToolResult
     return _text(tool_call_id, "agent", text, details=spill or None)
 
 
-async def _op_show(context: ToolContext | None, tool_call_id: str, name: str) -> ToolResult:
+def _paged_field(
+    tool_call_id: str,
+    values: dict[str, str],
+    revision: str,
+    field: str,
+    part: int | None,
+    base_revision: str | None,
+) -> ToolResult:
+    """One page of a long field (``profile_text_edits`` rule 1)."""
+    from local_operator.profile_text_edits import TextEditRefusal, render_field_page
+
+    try:
+        page = render_field_page(
+            field, values.get(field) or "", part or 1, revision, base_revision=base_revision
+        )
+    except TextEditRefusal as exc:
+        return _error(tool_call_id, "agent", str(exc))
+    return _text(tool_call_id, "agent", page, details={"complete": True, "field": field})
+
+
+def _inline_or_pointer(field: str, value: str, used: int) -> tuple[str, bool]:
+    """``(rendered, paged)``: the field whole while the result stays replay-safe."""
+    from local_operator.profile_text_edits import (
+        SHOW_RESULT_BUDGET_CHARS,
+        field_pointer,
+    )
+
+    if used + len(value) + 200 <= SHOW_RESULT_BUDGET_CHARS:
+        return value, False
+    return field_pointer(field, value), True
+
+
+async def _op_show(
+    context: ToolContext | None,
+    tool_call_id: str,
+    name: str,
+    *,
+    field: str | None = None,
+    part: int | None = None,
+    base_revision: str | None = None,
+) -> ToolResult:
     from local_operator.agent_profiles import resolve_profile
 
     registry = _registry(context)
@@ -739,20 +796,36 @@ async def _op_show(context: ToolContext | None, tool_call_id: str, name: str) ->
         except Exception:  # noqa: BLE001
             specialist = None
         if specialist is not None and is_specialist(specialist):
-            instructions = registry.get_agent_system_prompt(specialist.id) or "(none)"
+            stored = registry.get_agent_system_prompt(specialist.id) or ""
             from local_operator.profile_scope import row_scope, scope_words
 
-            body = (
+            revision = _agent_revision(registry, specialist)
+            if field is not None:
+                return _paged_field(
+                    tool_call_id,
+                    {"instructions": stored, "description": specialist.description or ""},
+                    revision,
+                    field,
+                    part,
+                    base_revision,
+                )
+            head = (
                 f"{identifier_text(context, specialist.name)} — registered specialist\n"
                 f"scope: {scope_words(row_scope(registry, specialist))}\n"
+                f"revision: {revision}\n"
                 f"when to use: {specialist.description or '(unstated)'}\n"
                 "tools: full inventory\n\n"
-                f"instructions:\n{instructions}\n\n"
-                f"launch with --agent {identifier_text(context, specialist.name)}, "
+            )
+            # Lossless authoring read (``profile_text_edits`` rule 1): whole
+            # while replay-safe, else a pointer to its pages -- never clipped.
+            rendered, paged = _inline_or_pointer("instructions", stored, len(head))
+            body = (
+                head
+                + (f"instructions:\n{rendered or '(none)'}" if not paged else rendered)
+                + f"\n\nlaunch with --agent {identifier_text(context, specialist.name)}, "
                 "or add it to a team roster."
             )
-            text, spill = spill_truncate(body, "agent", context)
-            return _text(tool_call_id, "agent", text, details=spill or None)
+            return _text(tool_call_id, "agent", body, details={"complete": not paged})
     if profile is None:
         return _error(
             tool_call_id,
@@ -764,12 +837,21 @@ async def _op_show(context: ToolContext | None, tool_call_id: str, name: str) ->
         )
     origin = "registered" if profile.agent_id else "packaged starter (not installed)"
     scope_line = ""
+    row_revision: str | None = None
+    stored_instructions: str | None = None
     if profile.agent_id and registry is not None:
         from local_operator.profile_scope import row_scope, scope_words
 
         try:
             row = registry.get_agent(profile.agent_id)
             scope_line = f"scope: {scope_words(row_scope(registry, row))}\n"
+            # The CAS token an intentional rewrite echoes (``profile_text_edits``).
+            row_revision = _agent_revision(registry, row)
+            scope_line += f"revision: {row_revision}\n"
+            # Page the SAME text ``edits`` patch (``_resolve_text_edits``).
+            stored_instructions = str(
+                registry.definition_revision_fields(str(row.id)).get("instructions") or ""
+            )
         except Exception:  # noqa: BLE001 — the scope line is enrichment only
             scope_line = ""
     # Identifier fields: the role name and label head the body; both are
@@ -786,7 +868,33 @@ async def _op_show(context: ToolContext | None, tool_call_id: str, name: str) ->
     )
     if profile.effort:
         header.append(f"effort: {profile.effort}")
-    body = "\n".join(header) + "\n\ninstructions:\n" + (profile.instructions or "(none)")
+    if field is not None:
+        if row_revision is None:
+            # A packaged starter (not installed) has no registry revision; its
+            # text is fixed by the release, so its digest pins the pages.
+            from local_operator.profile_text_edits import field_digest
+
+            row_revision = f"packaged:{field_digest(profile.instructions or '')}"
+        return _paged_field(
+            tool_call_id,
+            {
+                "instructions": (
+                    stored_instructions
+                    if stored_instructions is not None
+                    else profile.instructions or ""
+                ),
+                "description": profile.when_to_use or profile.description or "",
+            },
+            row_revision,
+            field,
+            part,
+            base_revision,
+        )
+    head = "\n".join(header) + "\n\n"
+    rendered, instructions_paged = _inline_or_pointer(
+        "instructions", profile.instructions or "", len(head)
+    )
+    body = head + (rendered if instructions_paged else "instructions:\n" + (rendered or "(none)"))
     # Once a packaged role is installed and edited, the SHIPPED guidance is
     # unreachable through every other op: `show` renders the registry copy and
     # `update` asks the reader to retype text they can no longer read. So when
@@ -846,8 +954,51 @@ async def _op_show(context: ToolContext | None, tool_call_id: str, name: str) ->
             "to apply the packaged values yourself"
         )
     body += "."
-    text, spill = spill_truncate(body, "agent", context)
-    return _text(tool_call_id, "agent", text, details=spill or None)
+    # LOSSLESS, never the generic head+tail preview: ``show`` is the read an
+    # ``update`` is written from, and a clipped middle read back as the whole
+    # text silently deletes it (``profile_text_edits``). Instructions too long
+    # for one replay-safe result were printed as a pointer to their pages
+    # above, and ``complete`` says which case this is.
+    return _text(tool_call_id, "agent", body, details={"complete": not instructions_paged})
+
+
+def _agent_revision(registry: Any, row: Any) -> str:
+    """The row's definition revision -- the same value ``_plan_account_save``
+    binds an account save to, so show/CAS/consent agree on one token."""
+    from local_operator.hub_sync.definition import definition_revision
+
+    fields = dict(registry.definition_revision_fields(str(row.id)))
+    fields["saver"] = profile_from_agent(registry, row).saver
+    return definition_revision("agent", str(row.id), fields)
+
+
+def _resolve_text_edits(registry: Any, existing: Any, params: AgentParams) -> AgentParams | str:
+    """Apply ``edits``/``base_revision``/``replace`` (``profile_text_edits``).
+
+    Returns ``params`` with ``instructions`` set to the resolved WHOLE value, so
+    the plan, proposal, backup and receipt all describe one before/after pair;
+    or the refusal sentence. Runs for every tool update, either store.
+    """
+    from local_operator.profile_text_edits import resolve_text_fields
+
+    try:
+        # The same source ``_plan_account_save`` diffs against.
+        fields = registry.definition_revision_fields(str(existing.id))
+        stored = str(fields.get("instructions") or "")
+        current = _agent_revision(registry, existing)
+    except Exception as error:  # noqa: BLE001 — an unreadable row is a refusal
+        return f"could not read {existing.name!r}: {error}"
+    resolved = resolve_text_fields(
+        {"instructions": stored},
+        whole={"instructions": params.instructions},
+        edits=params.edits,
+        base_revision=params.base_revision,
+        current_revision=current,
+        replace=params.replace,
+    )
+    if isinstance(resolved, str):
+        return resolved
+    return params.model_copy(update={**resolved, "edits": None})
 
 
 async def _ranked_names(index: Any, query: str) -> tuple[list[str], float]:
@@ -2146,22 +2297,23 @@ def _plan_account_save(registry: Any, existing: Any, params: AgentParams) -> _Ac
         base_revision = definition_revision("agent", str(existing.id), before)
     changes = tuple(field for field, _key in _SAVE_FIELDS if getattr(params, field) is not None)
     lines: list[str] = []
+    instruction_section = ""
     for field, key in _SAVE_FIELDS:
         new = getattr(params, field)
         if new is None:
             continue
         if field == "instructions":
-            rendered, is_diff = _instruction_diff(
-                str(before.get("instructions") or ""),
-                str(new or ""),
-                fromfile="before",
-                tofile="after",
+            from local_operator.profile_text_edits import stats_heading
+
+            old_text = str(before.get("instructions") or "")
+            rendered, _is_diff = _instruction_diff(
+                old_text, str(new or ""), fromfile="before", tofile="after"
             )
-            # ``_instruction_diff`` falls back to the whole body when a diff
-            # would not be shorter; say so, or a reader cannot tell a full new
-            # text from a two-line diff.
-            heading = "instructions" if is_diff else "instructions (replaced; new text)"
-            lines.append(f"{heading}:\n{rendered}")
+            # Canonical whole-field counts in the heading, and the section is
+            # appended LAST (below) so ``profile_diff_summary`` never counts
+            # the body's own ``-`` bullets as removed lines.
+            instruction_section = f"{stats_heading('instructions', old_text, str(new or ''))}:\n"
+            instruction_section += rendered
             continue
         old = before.get(key) if key is not None else None
         # THE POLICY FIELDS ARE NAMED EXPLICITLY (operator requirement): a
@@ -2173,6 +2325,8 @@ def _plan_account_save(registry: Any, existing: Any, params: AgentParams) -> _Ac
             "action_class": "class",
         }.get(field, field)
         lines.append(f"{label}: {_format_field(old)} -> {_format_field(new)}")
+    if instruction_section:
+        lines.append(instruction_section)
     return _AccountSave(
         agent_id=agent_id,
         changes=changes,
@@ -2392,22 +2546,24 @@ async def _op_revert(context: ToolContext | None, tool_call_id: str, backup_id: 
         key for key, _ in _SAVE_FIELDS if key in before and before[key] != fields.get(key)
     )
     from local_operator.profile_scope import profile_field_label
+    from local_operator.profile_text_edits import stats_heading
 
     summary_lines: list[str] = []
+    instruction_section = ""
     for key in changes:
         if key == "instructions":
-            rendered, _ = _instruction_diff(
-                str(fields.get(key) or ""),
-                str(before.get(key) or ""),
-                fromfile="before",
-                tofile="after",
-            )
-            summary_lines.append(f"instructions:\n{rendered}")
+            old_text, new_text = str(fields.get(key) or ""), str(before.get(key) or "")
+            rendered, _ = _instruction_diff(old_text, new_text, fromfile="before", tofile="after")
+            # Canonical counts, section last (see ``profile_diff_summary``).
+            instruction_section = f"{stats_heading('instructions', old_text, new_text)}:\n"
+            instruction_section += rendered
         else:
             summary_lines.append(
                 f"{profile_field_label(key)}: {_format_field(fields.get(key))} -> "
                 f"{_format_field(before.get(key))}"
             )
+    if instruction_section:
+        summary_lines.append(instruction_section)
     from local_operator.profile_approval import AgentImage
 
     before_image = {
@@ -2876,6 +3032,18 @@ async def _op_write(
                 ),
             )
     target = row_scope(registry, existing) if existing is not None else scope
+    if not creating and existing is not None and (is_role(existing) or is_specialist(existing)):
+        resolved = _resolve_text_edits(registry, existing, params)
+        if isinstance(resolved, str):
+            return _error(tool_call_id, "agent", resolved)
+        params = resolved
+    elif existing is None and (params.edits or params.base_revision or params.replace):
+        # A non-role row falls through: ``write_profile`` names it ("not a role").
+        return _error(
+            tool_call_id,
+            "agent",
+            "edits/base_revision/replace apply to op='update' of an existing role or specialist.",
+        )
     # A row that is not a role/specialist is refused by ``write_profile`` with its
     # own specific sentence ("... is not a role"); asking for durable consent
     # first would replace that answer with a scope question the caller did not ask
@@ -3178,7 +3346,14 @@ async def execute_agent(
     if params.op == "list":
         return await _op_list(context, tool_call_id)
     if params.op == "show":
-        return await _op_show(context, tool_call_id, str(params.name))
+        return await _op_show(
+            context,
+            tool_call_id,
+            str(params.name),
+            field=params.field,
+            part=params.part,
+            base_revision=params.base_revision,
+        )
     if params.op == "search":
         return await _op_search(context, tool_call_id, str(params.query))
     if params.op == "install":

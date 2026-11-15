@@ -273,7 +273,7 @@ def test_sidecar_list_names_every_bookkeeping_file_the_harness_writes() -> None:
     start counting as activity again."""
     from local_operator import resume
     from local_operator.asks import store
-    from local_operator.session import compression
+    from local_operator.session import compression, temporary
     from local_operator.session.auto_tag import AUTO_TAG_FILENAME
     from local_operator.session.creation import CREATED_AT_NAME
     from local_operator.session.runtime import registry
@@ -332,6 +332,9 @@ def test_sidecar_list_names_every_bookkeeping_file_the_harness_writes() -> None:
         # activity file: its mtime is the compression, and ranking by it would
         # float an old session to the top of the picker.
         compression.PREVIEW_SIDECAR_NAME,
+        # The temporary-chat mark: bookkeeping about retention, written with the
+        # directory mtime restored, never activity or content.
+        temporary.MARK_NAME,
     }
     assert retention._SIDECAR_NAMES == frozenset(expected)
 

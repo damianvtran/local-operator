@@ -1031,9 +1031,35 @@ class PendingRequest:
     #: because a session override and the file can hold the same word, and a
     #: viewer that derives "the other one" is wrong exactly then (U4).
     approval_global_mode: str = ""
+    #: Team Bridge taint (``harness/bridge_egress.py``, team-bridge-egress.md: "Cards"). Host-set,
+    #: never derived from the title. ``bridge_latched``: the conversation holds
+    #: Team Bridge content, so this card is Allow/Deny only and no mode change
+    #: or background approval may answer it (``requires_person``); a surface
+    #: must not offer a one-press auto escape on it. ``taint_raised``: the
+    #: taint seam is what made this call ask. Defaulted False for the same
+    #: version-skew reason as ``recommended``; an older runtime simply never
+    #: sets them.
+    taint_raised: bool = False
+    bridge_latched: bool = False
 
     def to_json(self) -> dict[str, Any]:
         return asdict(self)
+
+
+def _title_with_command(title: str, command: Any) -> str:
+    """The legacy single-slot ``title`` with the ask's suggested command folded in.
+
+    The legacy ``PendingRequest`` card has ONE text slot, and every client that
+    reads it (an old desktop app, the native app, the blocking
+    ``LOP_ASK_NONBLOCKING=0`` arm) predates ``AskQuestion.command``: without
+    this, a question like "Sign in to GitLab first?" would reach them with the
+    command that makes it answerable silently gone. Appending it as its own
+    paragraph keeps it visible and copyable on every one of them; newer
+    surfaces read the structured field instead.
+    """
+    if isinstance(command, str) and command.strip():
+        return f"{title}\n\n{command.strip()}"
+    return title
 
 
 def ask_mirror_request(card: Mapping[str, Any]) -> PendingRequest:
@@ -1056,7 +1082,9 @@ def ask_mirror_request(card: Mapping[str, Any]) -> PendingRequest:
     return PendingRequest(
         request_id=str(card.get("request_id") or ""),
         kind="ask",
-        title=str(card.get("title") or "the agent is asking"),
+        title=_title_with_command(
+            str(card.get("title") or "the agent is asking"), card.get("command")
+        ),
         detail="",
         options=[
             AskOptionWire(
@@ -1109,7 +1137,10 @@ def ask_pending_request(
     return PendingRequest(
         request_id=request_id,
         kind="ask",
-        title=str(getattr(question, "question", "") or "the agent is asking"),
+        title=_title_with_command(
+            str(getattr(question, "question", "") or "the agent is asking"),
+            getattr(question, "command", None),
+        ),
         detail="",
         options=options,
         secret=bool(getattr(question, "secret", False)),

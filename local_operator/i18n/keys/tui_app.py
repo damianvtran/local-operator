@@ -150,6 +150,10 @@ def providers_stale_named(*, names: str) -> Msg:
     return Msg("tui.app.providers.stale_named", {"names": names})
 
 
+def section_temporary(*, count: int | float) -> Msg:
+    return Msg("tui.app.section_temporary", {"count": count})
+
+
 def sidebar_why_left_screen() -> Msg:
     return Msg("tui.app.sidebar.why_left_screen", {})
 
@@ -204,3 +208,51 @@ def stop_all_repeat_hint(*, seconds: str) -> Msg:
 
 def stop_all_will_be_stopped(*, count: int | float, shown: str) -> Msg:
     return Msg("tui.app.stop_all.will_be_stopped", {"count": count, "shown": shown})
+
+
+def temporary_deletes_in(*, minutes: int | float) -> Msg:
+    return Msg("tui.app.temporary_deletes_in", {"minutes": minutes})
+
+
+def temporary_hold_armed_monitor() -> Msg:
+    return Msg("tui.app.temporary_hold_armed_monitor", {})
+
+
+def temporary_hold_armed_wake() -> Msg:
+    return Msg("tui.app.temporary_hold_armed_wake", {})
+
+
+def temporary_hold_cannot_verify() -> Msg:
+    return Msg("tui.app.temporary_hold_cannot_verify", {})
+
+
+def temporary_hold_linked() -> Msg:
+    return Msg("tui.app.temporary_hold_linked", {})
+
+
+def temporary_hold_on_screen() -> Msg:
+    return Msg("tui.app.temporary_hold_on_screen", {})
+
+
+def temporary_hold_open_ask() -> Msg:
+    return Msg("tui.app.temporary_hold_open_ask", {})
+
+
+def temporary_hold_operator_hold() -> Msg:
+    return Msg("tui.app.temporary_hold_operator_hold", {})
+
+
+def temporary_hold_running() -> Msg:
+    return Msg("tui.app.temporary_hold_running", {})
+
+
+def temporary_hold_unread_mail() -> Msg:
+    return Msg("tui.app.temporary_hold_unread_mail", {})
+
+
+def temporary_hold_unsaved_files() -> Msg:
+    return Msg("tui.app.temporary_hold_unsaved_files", {})
+
+
+def temporary_hold_unseen_result() -> Msg:
+    return Msg("tui.app.temporary_hold_unseen_result", {})

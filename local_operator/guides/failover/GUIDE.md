@@ -117,6 +117,14 @@ tried, in configured order. A fallback whose own provider is already at 0% is
 skipped rather than pinned — hopping onto a maxed provider costs a full prompt
 to learn what was already known.
 
+A login **borrowed** from another mesh device descends the same way. When the
+owner refuses with `quota_blocked` (its logins are resting, or this device's own
+cooldowns excluded each one), the owner has already picked among its accounts,
+so the turn records a `quota` failure carrying the owner's reset and walks on to
+the next target. The chain walked is the one in **this device's**
+`retry.fallbackChains`: chains are not synced between devices, so a remote node
+with an empty chain stops on the borrowed refusal.
+
 ## Pinned children (subagents launched on a resolved model)
 
 A subagent launched on an explicitly resolved model — a role's `effort` tier,

@@ -1,0 +1,28 @@
+{
+  "schema": 1,
+  "locale": "vi",
+  "namespace": "tui.boot_prompt",
+  "history_sha256": "dfbd6dbb36be31890671fa733d72c7db67746cb0ab1e56f8fa9266d2b77ca1d5",
+  "entries": [
+    {
+      "locale": "vi",
+      "namespace": "tui.boot_prompt",
+      "source_sha256": "23eb874bbb69dcf392648bd45b71e68b43027b7da583661d7b474fffdba09d7f",
+      "translator": {
+        "agent": "coder 5463be22cea4",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-11"
+      },
+      "auditor": {
+        "agent": "qa-tester / independent i18n-auditor 58fe18b8416a",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-11",
+        "result": "passed",
+        "findings": 1,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Independent full 2-key namespace audit; 0 unresolved blocker/major. Evidence: i18n/audits/evidence/vi/boot-prompt-primary/record.json (sha256 c73a085a26a9c3628bf441c2d948e577f702238768a483912581973e79e2db51). Non-gating findings ['N3'] deferred in PR #3787 thread; no wording changed. Not classified high-visibility/safety copy (reason in evidence report). Fallback: none."
+    }
+  ]
+}

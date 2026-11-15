@@ -341,6 +341,16 @@ export interface AskQuestion {
 	/** For a secret question, save it to the operator's long-term store rather
 	    than only session memory. The flag rides; the value never does. */
 	persist: boolean;
+	/** A suggested one-line terminal command (`AskQuestion.command`): present
+	    only when the agent supplied one, never on a bridge row, and already
+	    refused in core when it holds control/format characters. The phone has
+	    no terminal, so it only SHOWS and copies it — running it is a desktop
+	    action behind a confirmation. */
+	command?: string;
+	/** Which device `command` is meant for: `"agent"` (the machine the agent
+	    works on, the default core stamps) or `"user"` (the operator's own
+	    computer). Rides with `command`; the phone reads it for nothing yet. */
+	command_target?: "agent" | "user";
 }
 
 /** The effective approval mode a conversation is running under. */
@@ -552,6 +562,10 @@ export interface SpendChannels {
 export interface SessionProjection {
 	/** Absent on old owners; raw entry metadata alone never enables this. */
 	peer_cycles?: 1;
+	/** The temporary mark on the session events frame, when the relay sends
+	    it there (contract §2.3). Absent means "not said here": the screen then
+	    reads the list row's field, which the same relay always carries. */
+	temporary?: TemporaryInfo | null;
 	attention?: CompletionAttention;
 	session_id: string;
 	pid: number;
@@ -718,9 +732,40 @@ export interface SessionTagsResponse {
 	primary: string | null;
 }
 
+/** Why the temporary pass is holding a temporary chat's clock (closed enum,
+    frozen wire, contract §2.2). The client keys its copy off these codes. */
+export const TEMPORARY_HOLD_CODES = [
+	"running",
+	"on_screen",
+	"open_ask",
+	"armed_wake",
+	"armed_monitor",
+	"unread_mail",
+	"operator_hold",
+	"unseen_result",
+	"unsaved_files",
+	"linked",
+	"cannot_verify",
+] as const;
+export type TemporaryHoldCode = (typeof TEMPORARY_HOLD_CODES)[number];
+
+/** A temporary chat's state (contract §2.3, frozen). `deletes_at` is null
+    while the pass holds the chat; `hold` names why. Epoch seconds. */
+export interface TemporaryInfo {
+	marked_at: number;
+	idle_minutes: number;
+	deletes_at: number | null;
+	hold: TemporaryHoldCode | null;
+}
+
 export interface SessionSummary {
 	session_id: string;
 	section: "active" | "previous";
+	/** ALWAYS PRESENT on a relay with `features.temporary_chats`: `null` is
+	    the explicit "not temporary", the object the mark (contract §2.3). An
+	    older relay omits it; a reader gates on the capability, never on this
+	    key's presence (`lib/temporary.ts`). */
+	temporary?: TemporaryInfo | null;
 	/** True when this conversation is in the shared durable pin store
 	    (`sidebar-pins.json`) — the SAME pin the terminal's F10 and the desktop
 	    app's row action read and write, so the phone's ★ Pinned section and
@@ -818,6 +863,12 @@ export interface SessionSummary {
 	mtime: number;
 	/** Immutable conversation birth; absent on older daemons, never activity. */
 	created_at?: number;
+	/** Epoch seconds (same unit as `created_at`) of the person's own last
+	    message — the Running section's order clock, as on the desktop sidebar,
+	    which never moves while a reply streams. `null` when unknown: no user
+	    message yet, or a row that is not running (only running rows pay the
+	    transcript read). Absent on older daemons; fall back to `created_at`. */
+	last_user_at?: number | null;
 	/** Latest outcome; only unseen non-streaming outcomes affect list priority. */
 	completion_kind?: string;
 }

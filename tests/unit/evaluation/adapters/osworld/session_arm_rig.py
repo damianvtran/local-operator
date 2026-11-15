@@ -63,6 +63,13 @@ ACTION_TOOL = "mcp__episode_actions_apply_actions"
 #: row on the prose arm).
 CHALLENGE_MARKER = "That declaration is a CLAIM"
 
+#: The opening of the arm's text-only continuation (upstream OSWorld's
+#: ``DEFAULT_USER_RESPONSE``, ``session_arm.OSWORLD_DEFAULT_USER_RESPONSE``) --
+#: how the scripted client recognises the arm answered its prose turn. A
+#: literal, not an import: this module is loaded before the rig bootstraps
+#: the worktree it runs.
+CONTINUATION_MARKER = "I have no further information to provide."
+
 #: The terminal PROSE "Done" of ``--ending prose-claim``: a faithful slice of
 #: the message arm 1748's task_003 actually ended on (its final answer, written
 #: with no tool call -- the bypass this rig's case exists to pin).
@@ -359,17 +366,19 @@ class ScriptedClient:
         comes back through the MCP tool result, same as the finish script).
         After it the script ends the turn with TEXT, no tool call: the prose
         claim (``prose-claim``) or the mid-work narration (``narration``).
-        Once the gate has challenged (detected by the shared challenge text in
-        ANY row -- a user row on this channel), the script answers per
-        ``--challenge-reply``: ``refinish``/``act`` re-declare through the
-        action tool, ``prose`` claims again in prose (the duplicate the spent
-        budget accepts as final).
+        The arm answers EVERY such turn with the protocol's ASK_USER
+        continuation (``ActionBridge.text_only_continuation``; detected by the
+        default user response in ANY row -- a user row on this channel), and
+        the script then answers per ``--challenge-reply``: ``refinish``/``act``
+        go on through the action tool (a finish, which meets the finish-call
+        completion gate), ``prose`` replies with the same text again, every
+        time, so the run measures the continuation's bound.
         """
 
         text = PROSE_CLAIM_TEXT if self.ending == "prose-claim" else NARRATION_TEXT
         stage = len(tool_rows)
-        challenged = any(CHALLENGE_MARKER in ((getattr(m, "text", "") or "")) for m in messages)
-        if not challenged:
+        continued = any(CONTINUATION_MARKER in (getattr(m, "text", "") or "") for m in messages)
+        if not continued:
             if stage == 0:
                 return self._tool_call(
                     0, ACTION_TOOL, {"actions": [{"kind": "wait", "duration_ms": 50}]}

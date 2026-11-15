@@ -158,5 +158,55 @@
     "role": "TUI notice text (error)",
     "tone": "terse, operator-facing error",
     "note": "EN-only context sidecar; the session owner refused a model/effort change. {model} is a provider/model label; {reason} is the owner's own sentence, which may stay English."
+  },
+  "tui.notices.temporary_on": {
+    "role": "TUI notice line",
+    "tone": "plain, terse",
+    "note": "EN-only context sidecar; Shown when the current chat becomes temporary. {minutes} is a whole number (15, 30, 120 or 1440). '/temporary off' is a command; keep verbatim."
+  },
+  "tui.notices.temporary_off": {
+    "role": "TUI notice line",
+    "tone": "plain, reassuring",
+    "note": "EN-only context sidecar; Shown after the user keeps a temporary chat."
+  },
+  "tui.notices.temporary_status_on": {
+    "role": "TUI notice line",
+    "tone": "plain",
+    "note": "EN-only context sidecar; {deletes_in} is a complete phrase from tui.app: either 'deletes in N min' or a hold reason such as 'kept while it runs'. '/temporary off' is a command; keep verbatim."
+  },
+  "tui.notices.temporary_status_off": {
+    "role": "TUI notice line",
+    "tone": "plain",
+    "note": "EN-only context sidecar; Status answer for an ordinary chat."
+  },
+  "tui.notices.temporary_confirm": {
+    "role": "TUI confirmation prompt",
+    "tone": "plain, careful",
+    "note": "EN-only context sidecar; Asked before an existing chat with messages becomes temporary. '/temporary on' is a command; keep verbatim."
+  },
+  "tui.notices.temporary_refused_pinned": {
+    "role": "TUI warning line",
+    "tone": "plain",
+    "note": "EN-only context sidecar; Refusal with the remedy."
+  },
+  "tui.notices.temporary_refused_project": {
+    "role": "TUI warning line",
+    "tone": "plain",
+    "note": "EN-only context sidecar; Refusal with the remedy."
+  },
+  "tui.notices.temporary_deleted": {
+    "role": "CLI/TUI error line",
+    "tone": "plain, calm",
+    "note": "EN-only context sidecar; Shown when someone tries to resume a temporary chat that was deleted automatically. {session_id} is a 12-character id. 'lop --temporary' is a command; keep verbatim."
+  },
+  "tui.notices.temporary_new_hint": {
+    "role": "TUI hint line",
+    "tone": "plain, terse",
+    "note": "EN-only context sidecar; '/new temporary' is a command; keep verbatim. [message] means an optional first message."
+  },
+  "tui.notices.temporary_refused": {
+    "role": "TUI warning line",
+    "tone": "plain",
+    "note": "EN-only context sidecar; {reason} is a refusal sentence from the server catalogue (already translated)."
   }
 }

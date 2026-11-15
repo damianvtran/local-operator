@@ -47,5 +47,18 @@
   "tui.app.providers.no_live_list": "کوئی لائیو فہرست نہیں: {names}",
   "tui.app.compaction.idle_receipt": "فارغ سیشن میں سیاق و سباق کمپریس ہوا · {detail}",
   "tui.app.compaction.idle_receipt_bare": "فارغ سیشن میں سیاق و سباق کمپریس ہوا",
-  "tui.app.compaction.idle_skipped": "فارغ سیشن کمپریشن چھوڑ دی گئی · کچھ نہیں بدلا"
+  "tui.app.compaction.idle_skipped": "فارغ سیشن کمپریشن چھوڑ دی گئی · کچھ نہیں بدلا",
+  "tui.app.section_temporary": "{count, plural, one {عارضی · #} other {عارضی · #}}",
+  "tui.app.temporary_deletes_in": "{minutes, plural, one {# منٹ میں حذف} other {# منٹ میں حذف}}",
+  "tui.app.temporary_hold_running": "چلنے کے دوران رکھی گئی",
+  "tui.app.temporary_hold_on_screen": "اسکرین پر ہونے تک رکھی گئی",
+  "tui.app.temporary_hold_open_ask": "رکھی گئی: سوال کھلا ہے",
+  "tui.app.temporary_hold_armed_wake": "رکھی گئی: بیداری مقرر ہے",
+  "tui.app.temporary_hold_armed_monitor": "رکھی گئی: نگرانی فعال ہے",
+  "tui.app.temporary_hold_unread_mail": "رکھی گئی: ناپڑھا پیغام ہے",
+  "tui.app.temporary_hold_operator_hold": "رکھی گئی: حذف روکا گیا ہے",
+  "tui.app.temporary_hold_unseen_result": "نتیجہ دیکھنے تک رکھی گئی",
+  "tui.app.temporary_hold_unsaved_files": "رکھی گئی: غیر محفوظ فائلیں ہیں",
+  "tui.app.temporary_hold_linked": "رکھی گئی: پن یا منسلک ہے",
+  "tui.app.temporary_hold_cannot_verify": "رکھی گئی: جانچ نہیں ہو سکی"
 }

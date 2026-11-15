@@ -13,6 +13,7 @@ from local_operator.tools.agent_tool import execute_agent
 from local_operator.tools.team_tool import execute_team
 from tests.unit.session.test_account_profile_consent import (
     SEED_INSTRUCTIONS,
+    TAINT,
     _context,
     _session,
     _start_run,
@@ -21,6 +22,27 @@ from tests.unit.session.test_account_profile_consent import stores as consent_st
 
 stores = consent_stores
 _EVIDENCE_ROOT = os.environ.get("LOCAL_OPERATOR_SCRATCHPAD")
+
+
+async def deliberate_rewrite(execute, name, context) -> dict[str, Any]:
+    """Read ``name`` through the real ``op='show'`` and bind a whole-field rewrite.
+
+    Fixtures here replace a stored brief wholesale ON PURPOSE: they exercise
+    receipts, proposals, backups and revert of a landed save, not the
+    text-edit path. The lossless-edit guard (kept real, never mocked) refuses
+    a whole-field write that drops stored lines unless the caller proves it
+    read the current text, so the fixture does exactly what a model must: a
+    real show, then ``replace=True`` with that show's printed revision.
+    """
+    shown = await execute("show-call", {"op": "show", "name": name}, None, None, context)
+    assert not shown.is_error, shown.content
+    assert shown.details is not None and shown.details.get("complete") is True
+    text = "".join(part.text for part in shown.content if isinstance(part, TextContent))
+    revisions = [
+        line.split(":", 1)[1].strip() for line in text.splitlines() if line.startswith("revision: ")
+    ]
+    assert len(revisions) == 1 and revisions[0].startswith("definition-revision:"), text
+    return {"replace": True, "base_revision": revisions[0]}
 
 
 @overload
@@ -44,7 +66,12 @@ async def saved(stores, kind="agent", *, receipt=False):
     execute = execute_agent if kind == "agent" else execute_team
     result = await execute(
         "trusted-call",
-        {"op": "update", "name": name, "instructions": "Demand tests."},
+        {
+            "op": "update",
+            "name": name,
+            "instructions": "Demand tests.",
+            **await deliberate_rewrite(execute, name, context),
+        },
         None,
         None,
         context,
@@ -212,16 +239,23 @@ async def test_export_golden_profile_wires(stores, tmp_path, monkeypatch):
     import sys
 
     from local_operator import profile_proposals as PP
-    from local_operator.harness.types import CustomMessage
 
     session = _session(stores)
     context = _context(session, stores)
     context.register_profile_action = session._profile_actions.register
     try:
-        _start_run(session, CustomMessage(custom_type="wake_prompt", details={}))
+        # TAINT (untrusted peer input): since the 2026-11 ruling a clean wake run
+        # writes its own profiles directly, so only a run that read untrusted
+        # input still files the Agents proposal this test pins.
+        _start_run(session, TAINT)
         queued = await execute_agent(
             "queued-call",
-            {"op": "update", "name": "reviewer", "instructions": "Public queued fixture guidance."},
+            {
+                "op": "update",
+                "name": "reviewer",
+                "instructions": "Public queued fixture guidance.",
+                **await deliberate_rewrite(execute_agent, "reviewer", context),
+            },
             None,
             None,
             context,
@@ -242,6 +276,7 @@ async def test_export_golden_profile_wires(stores, tmp_path, monkeypatch):
                 "op": "update",
                 "name": "reviewer",
                 "instructions": "Public saved agent fixture guidance.",
+                **await deliberate_rewrite(execute_agent, "reviewer", context),
             },
             None,
             None,
@@ -254,6 +289,7 @@ async def test_export_golden_profile_wires(stores, tmp_path, monkeypatch):
                 "op": "update",
                 "name": "lopdev",
                 "instructions": "Public saved team fixture guidance.",
+                **await deliberate_rewrite(execute_team, "lopdev", context),
             },
             None,
             None,
@@ -418,23 +454,27 @@ async def test_real_metadata_write_failure_settles_terminal_without_retry(stores
 
 @pytest.mark.asyncio
 async def test_actual_queued_receipt_has_one_canonical_diff(stores):
-    from local_operator.harness.types import CustomMessage
     from local_operator.tools.agent_tool import execute_agent
     from local_operator.tui.widgets.tool_card import ToolCard
 
     session = _session(stores)
     try:
-        _start_run(session, CustomMessage(custom_type="wake_prompt", details={}))
+        # TAINT (untrusted peer input): since the 2026-11 ruling a clean wake run
+        # writes its own profiles directly, so only a run that read untrusted
+        # input still files the Agents proposal this test pins.
+        _start_run(session, TAINT)
+        context = _context(session, stores)
         result = await execute_agent(
             "queued-diff",
             {
                 "op": "update",
                 "name": "reviewer",
                 "instructions": SEED_INSTRUCTIONS.replace("Be terse.", "Demand tests."),
+                **await deliberate_rewrite(execute_agent, "reviewer", context),
             },
             None,
             None,
-            _context(session, stores),
+            context,
         )
         assert result.details is not None
         # Unrequested (wake-run) edits are filed as Agents proposals now.

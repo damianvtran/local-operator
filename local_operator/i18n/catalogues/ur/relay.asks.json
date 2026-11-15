@@ -76,5 +76,9 @@
   "relay.asks.duration.less_than_minute": "<1 منٹ",
   "relay.asks.duration.minutes": "{count, number} منٹ",
   "relay.asks.duration.hours": "{count, plural, one {# گھنٹہ} other {# گھنٹے}}",
-  "relay.asks.duration.days": "{count, number} دن"
+  "relay.asks.duration.days": "{count, number} دن",
+  "relay.asks.card.command.label": "تجویز کردہ کمانڈ",
+  "relay.asks.card.command.copy": "کاپی کریں",
+  "relay.asks.card.command.copied": "کاپی ہو گئی",
+  "relay.asks.card.command.copy_failed": "کاپی نہیں ہو سکی — کمانڈ منتخب کر دی گئی ہے، وہیں سے کاپی کریں"
 }

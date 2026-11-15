@@ -2103,6 +2103,45 @@ def _resume_context(directory: Path, facts: Mapping[str, Any] | None = None) -> 
     )
 
 
+def _snapshot_profile_lineage(parent_session: Any) -> tuple[bool, bool]:
+    """``(seam_inherited, untrusted)`` of the parent right now (host-only).
+
+    A parent that cannot say (an unknown host or test double) hands its child
+    no seam and a tainted lineage: unknown provenance fails closed.
+    """
+    lineage = getattr(parent_session, "profile_lineage", None)
+    if not callable(lineage):
+        return False, True
+    try:
+        snapshot = lineage()
+    except Exception:  # noqa: BLE001 — unknown provenance fails closed
+        return False, True
+    # Validate the shape at runtime instead of trusting the annotation: an
+    # unknown host may return anything, and anything else fails closed.
+    if not isinstance(snapshot, tuple) or len(snapshot) != 2:
+        return False, True
+    seam, untrusted = snapshot
+    return bool(seam), bool(untrusted)
+
+
+def _propagate_child_profile_taint(parent_session: Any, child: Any) -> None:
+    """Taint the parent's profile episode when its child ended tainted.
+
+    HOST metadata only (the child's own lineage), never a field of the child's
+    result text, so a model cannot claim a child was clean. A child whose
+    lineage cannot be read is treated as tainted; a parent without the hook
+    (a reduced host) has no autonomous profile writes to protect.
+    """
+    note = getattr(parent_session, "note_child_profile_taint", None)
+    if not callable(note):
+        return
+    if _snapshot_profile_lineage(child)[1]:
+        try:
+            note()
+        except Exception:  # noqa: BLE001 — must never fail the child's job
+            logger.warning("could not record the child's profile taint", exc_info=True)
+
+
 def _redact_child_result(parent_session: "Session", text: str) -> str:
     """``text`` through the session store's redactor (known values, then shapes).
 
@@ -2142,6 +2181,10 @@ def _make_runner(
     # accessors. ``_emit`` gives the parent's isolated handler fan-out.
     emit = parent_session._emit
     comms = getattr(parent_session, "subagent_comms", None)
+    # PROFILE TAINT IS SNAPSHOT AT DISPATCH, here, not when a queued child
+    # finally gets a slot: by then the parent's run may have ended and reset
+    # its flags, and a peer-tainted request would reach the child clean.
+    profile_lineage = _snapshot_profile_lineage(parent_session)
 
     async def runner(
         job_id: str, signal: Any, report_progress: Callable[[str], None]
@@ -2186,6 +2229,7 @@ def _make_runner(
                 profile=profile,
                 restricted=restricted,
                 target=target,
+                profile_lineage=profile_lineage,
             )
             try:
                 interval = float(os.environ.get("LOCAL_OPERATOR_SUBAGENT_WIP_INTERVAL_S", "30"))
@@ -2413,6 +2457,9 @@ def _make_runner(
                 bridge.cancel()
                 with contextlib.suppress(BaseException):
                     await bridge
+                # Upward, on every settle (completed, failed, cancelled): what
+                # the child read reaches the parent with its result.
+                _propagate_child_profile_taint(parent_session, child)
             if final["error"]:
                 # The child's loop reported a provider/turn error; the job
                 # must settle failed with it, not completed with the partial
@@ -2436,7 +2483,10 @@ def _make_runner(
                 job.wip_ref = ""
             if comms is not None:
                 comms.note_checkpoint(job_id, last_step=checkpoint.step)
-            await _finish_child_browser(child, comms, job_id, "completed")
+            browser_fates = await _finish_child_browser(
+                child, comms, job_id, "completed", parent_session=parent_session
+            )
+            result_text = _with_browser_fates(result_text, browser_fates)
             await _publish_terminal_outcome(
                 comms,
                 emit,
@@ -2469,9 +2519,20 @@ def _make_runner(
             if checkpoint is not None and take_checkpoint is not None:
                 await take_checkpoint(force=True)
             cancelled_cause = str(final.get("cut_off_cause") or "")
+            # The fate lines are discarded here on purpose (QA Q1, cancelled
+            # half): a cancelled job row has no parent-visible text — ``wait``/
+            # ``jobs`` render only ``[cancelled]`` (``tools.builtin._job_summary``
+            # prints result_text for completed and error_text for failed), and
+            # ``_run_job`` delivers nothing for a cancel. The handed tab still
+            # reaches the parent's ``handed`` list, so its ``tabs`` listing marks
+            # it its own and its dispose closes it; only the line is not shown.
             with contextlib.suppress(BaseException):
                 await _settle_child_cleanup(
-                    asyncio.create_task(_finish_child_browser(child, comms, job_id, "cancelled"))
+                    asyncio.create_task(
+                        _finish_child_browser(
+                            child, comms, job_id, "cancelled", parent_session=parent_session
+                        )
+                    )
                 )
                 await _publish_terminal_outcome(
                     comms,
@@ -2503,7 +2564,10 @@ def _make_runner(
             await stop_checkpoint_background()
             if checkpoint is not None and take_checkpoint is not None:
                 await take_checkpoint(force=True)
-            await _finish_child_browser(child, comms, job_id, "failed")
+            browser_fates = await _finish_child_browser(
+                child, comms, job_id, "failed", parent_session=parent_session
+            )
+            failed_text = _with_browser_fates(str(exc), browser_fates)
             await _publish_terminal_outcome(
                 comms,
                 emit,
@@ -2512,10 +2576,17 @@ def _make_runner(
                 label=label,
                 status="failed",
                 failure_evidence=str(final.get("error") or ""),
-                error_text=str(exc),
+                error_text=failed_text,
                 cut_off_cause=cut_off_cause,
                 cut_off=str(final.get("cut_off") or ""),
             )
+            if browser_fates:
+                # The job ROW is what the parent's `wait`/`jobs` read, and
+                # ``AsyncJobManager._run_job`` writes it as ``str(exc)`` from
+                # what this arm raises (QA Q1) — re-raising the original would
+                # drop the fate lines, leaving the parent unaware it now owns a
+                # handed tab. Chained, so the original stays in the traceback.
+                raise ChildFailedWithBrowserFates(failed_text) from exc
             raise
         finally:
             await stop_checkpoint_background()
@@ -2551,6 +2622,7 @@ def _make_runner(
                     # cancellation cleanup's final provider delta reaches the
                     # manager accumulator even when retention evicts its row.
                     await _dispose_child(child)
+                    await _hand_up_late_browser_surfaces(child, parent_session)
                 finally:
                     # Record the child's cleanup VERDICT on its owning ancestor
                     # BEFORE detaching the job edge (review round 2,
@@ -2674,17 +2746,59 @@ def _answered_prefix(messages: list[Any]) -> list[Any]:
     return messages[:cut]
 
 
+class ChildFailedWithBrowserFates(RuntimeError):
+    """A failed child's error, with the runner's browser fate lines appended.
+
+    Raised from the runner's failed arm in place of the original exception
+    (chained as ``__cause__``) only when the child held a browser surface, so
+    the parent-visible job error carries ``Browser: …`` like a completed
+    child's result does. Every other failure re-raises unchanged.
+    """
+
+
+def _with_browser_fates(text: str | None, fates: list[str]) -> str | None:
+    """Append the harness's browser fate lines to a child's result/error text.
+
+    Appended by the RUNNER, after the settle, so the parent reads what actually
+    happened to each tab rather than the child's claim about it — the claim is
+    how an operator was twice sent to a tab teardown had already closed.
+    """
+    if not fates:
+        return text
+    return f"{text or ''}\n\n" + "\n".join(fates)
+
+
 async def _finish_child_browser(
-    child: "Session | None", comms: Any, job_id: str, outcome: str
-) -> None:
+    child: "Session | None",
+    comms: Any,
+    job_id: str,
+    outcome: str,
+    *,
+    parent_session: Any = None,
+) -> list[str]:
     """Resource settlement precedes authoritative outcome publication.
 
     Pausing cancels the runner too, but is not task completion. Preserve that
     explicit lifecycle hold through dispose rather than classifying cancellation
     (or a dead process) as authority to close a suspended interaction.
+
+    A RETAINED surface (explicit ``retain``, or the retention a pending
+    ``request_access`` writes) is handed to ``parent_session`` instead of being
+    closed: it exists for a human, and the child's lifetime does not bound the
+    human's (see ``browser_bridge.handoff``). Everything else closes as before.
+
+    Returns one fate line per surface (``Browser: closed ui:N`` / ``Browser:
+    handed ui:N to parent <sid>`` / an honest "could not close"), derived from
+    the settle result, for the runner to append to the child's outcome.
     """
+    from local_operator.browser_bridge.handoff import (
+        close_handed_browser_surfaces,
+        hand_off,
+        public_surface_label,
+    )
+
     if child is None:
-        return
+        return []
     record = comms._record(job_id) if comms is not None else None
     resource = getattr(getattr(child, "_browser", None), "resource", None)
     if record is not None and record.paused and resource is not None:
@@ -2695,12 +2809,35 @@ async def _finish_child_browser(
                 resource.remember(child._browser.surface_id, state="retained")
             except (RuntimeError, OSError, ValueError):
                 logger.warning("paused browser ownership changed; retained successor untouched")
-        return
+        return []
     if resource is None or not callable(getattr(child, "finish_browser_scope", None)):
         # A host that built a BrowserSurface without a resource has no durable
         # ownership to settle. Reading the generation anyway raised straight
         # through the completed/failed paths, replacing the child's real outcome.
-        return
+        return []
+    browser = child._browser
+    fates: list[str] = []
+    parent_browser = getattr(parent_session, "_browser", None)
+    parent_sid = str(getattr(parent_session, "session_id", "") or "")
+    if parent_browser is not None and isinstance(getattr(parent_browser, "handed", None), list):
+        fates.extend(
+            hand_off(
+                browser,
+                parent_browser,
+                child_session_id=str(child.session_id),
+                parent_session_id=parent_sid,
+            )
+        )
+        # Grandchildren this child's dispose is about to cancel hand their tabs
+        # here late; the runner passes those up after dispose (review R1).
+        browser.late_handoff_to_parent = True
+    else:
+        # No live parent able to own a tab: whatever grandchildren handed to
+        # this child is closed with it, rather than stranded behind it.
+        fates.extend(await close_handed_browser_surfaces(browser, outcome=outcome))
+    if getattr(browser, "handed_to", ""):
+        return fates
+    surface = str(browser.surface_id or resource.record.get("surface_id", "") or "")
     result = await child.finish_browser_scope(
         scope_id=child.session_id,
         # Off the resource the branch has already proven non-None, not the
@@ -2710,13 +2847,68 @@ async def _finish_child_browser(
     )
     if result.state not in ("closed", "retained"):
         logger.warning("child browser cleanup %s: %s", result.state, result.detail)
+    if surface:
+        label = public_surface_label(surface)
+        if result.state == "closed":
+            fates.append(f"Browser: closed {label}")
+        elif result.state == "retained":
+            # Reachable only without a parent able to take it (a detached run):
+            # say so instead of implying anyone owns it.
+            fates.append(
+                f"Browser: {label} is retained but no parent session could take it; "
+                "'lop browser tabs' lists it"
+            )
+        else:
+            detail = f": {result.detail}" if result.detail else ""
+            fates.append(
+                f"Browser: could not close {label} ({result.state}{detail}); it may still be open"
+            )
+    return fates
+
+
+async def _hand_up_late_browser_surfaces(child: "Session", parent_session: Any) -> None:
+    """Pass up tabs handed to ``child`` AFTER its own handoff ran (review R1).
+
+    The terminal handoff (``_finish_child_browser``) runs before the child is
+    disposed, but disposal is what cancels the child's still-running children,
+    and each of those hands its retained tab to this child on the way out — into
+    a list nobody reads again, stranding a tab a human may still be using. With
+    ``late_handoff_to_parent`` set, dispose leaves them in place and this moves
+    them to the parent, the next session that outlives them. The fate lines were
+    already published with the child's result, so these are logged only; the
+    parent's ``tabs`` listing still marks them its own and its dispose closes
+    them. Teardown path: never raises.
+    """
+    from local_operator.browser_bridge.handoff import (
+        close_handed_browser_surfaces,
+        hand_off,
+    )
+
+    browser = getattr(child, "_browser", None)
+    if browser is None or not getattr(browser, "handed", None):
+        return
+    try:
+        parent_browser = getattr(parent_session, "_browser", None)
+        if parent_browser is not None and isinstance(getattr(parent_browser, "handed", None), list):
+            fates = hand_off(
+                browser,
+                parent_browser,
+                child_session_id=str(child.session_id),
+                parent_session_id=str(getattr(parent_session, "session_id", "") or ""),
+            )
+        else:
+            fates = await close_handed_browser_surfaces(browser, outcome="cancelled")
+        if fates:
+            logger.info("late browser handoff from %s: %s", child.session_id, "; ".join(fates))
+    except Exception:  # noqa: BLE001 - teardown reports, never raises
+        logger.warning("late browser handoff failed", exc_info=True)
 
 
 async def _dispose_child(child: "Session") -> None:
     await _settle_child_cleanup(asyncio.create_task(child.dispose()))
 
 
-async def _settle_child_cleanup(dispose_task: asyncio.Task[None]) -> None:
+async def _settle_child_cleanup(dispose_task: asyncio.Task[Any]) -> None:
     """Finish child teardown even while the runner itself is being cancelled.
 
     Shielding alone is insufficient here: it lets teardown continue but returns
@@ -3683,6 +3875,7 @@ async def _build_child_session(
     profile: "AgentProfile | None" = None,
     restricted: bool = False,
     target: LaunchTarget | None = None,
+    profile_lineage: tuple[bool, bool] | None = None,
 ) -> "Session":
     """Transfer child resource ownership only after construction succeeds.
 
@@ -3704,6 +3897,7 @@ async def _build_child_session(
             restricted=restricted,
             target=target,
             cleanup=cleanup,
+            profile_lineage=profile_lineage,
         )
     except BaseException:
         await _settle_child_cleanup(asyncio.create_task(cleanup.aclose()))
@@ -3926,6 +4120,7 @@ async def _construct_child_session(
     restricted: bool,
     cleanup: contextlib.AsyncExitStack,
     target: LaunchTarget | None = None,
+    profile_lineage: tuple[bool, bool] | None = None,
 ) -> "Session":
     """Compose the child Session directly (see module docstring for why the
     factory is not reused, and for the full inherit/do-not-inherit list).
@@ -4011,6 +4206,11 @@ async def _construct_child_session(
     language_line = preferred_language_line()
     cwd = parent_session._cwd
     request_approval = parent_session._request_approval
+    # A child of a Team-Bridge-latched parent is latched for life: the task
+    # prompt the parent writes can carry the hostile text. Read through the
+    # fail-closed property; a parent without one is a host that does not track
+    # taint. A parent that latches LATER is handled by the link below.
+    inherited_bridge_taint = bool(getattr(parent_session, "bridge_latched", False))
     # Whether this child runs on a role allowlist. Decided HERE, before the
     # ToolContext closes over the resolver, because the MCP surface is built
     # from it: a restricted child gets the read half (inherit + discover) and
@@ -4112,6 +4312,7 @@ async def _construct_child_session(
         job_label=label,
         has_ui=parent_session._has_ui,
         request_approval=request_approval,
+        inherited_bridge_taint=inherited_bridge_taint,
         # The parent's variable store. DEFENSIVE PARITY, not a bug fix: no
         # current ``TOOL_BUILDERS`` entry reads ``context.variables`` at
         # construction time (the variables readers are all execute-time, and
@@ -4402,7 +4603,21 @@ async def _construct_child_session(
     agent_pin = getattr(slot, "saver", None)
     if agent_pin is None and profile is not None:
         agent_pin = profile.saver
+    # PROFILE AUTHORITY rides down only as the host's own seam plus the taint
+    # snapshot of the whole ancestor chain at THIS moment (operator ruling
+    # 2026-11: a clean local agent edits its own agents/teams; a lineage that
+    # read untrusted input proposes). A parent whose seam is a host callback,
+    # or no seam, hands its child none: unknown hosts fail closed.
+    # ``profile_lineage`` is the DISPATCH-time snapshot (``_make_runner``); a
+    # caller that did not take one gets a snapshot now.
+    inherits_seam, spawn_untrusted = (
+        profile_lineage
+        if profile_lineage is not None
+        else _snapshot_profile_lineage(parent_session)
+    )
     child = Session(
+        owner_prompt_consent=inherits_seam,
+        spawn_untrusted=spawn_untrusted,
         model=model_spec if model_spec is not None else parent_session.model,
         # A child's model was chosen HERE (tier or parent), never by the
         # ``hosting``/``model_name`` keys, so a later edit to those must not
@@ -4434,6 +4649,7 @@ async def _construct_child_session(
         # so the executor wraps every command the ``read``-tier schema admitted.
         shell_write_root=shell_write_root,
         request_approval=request_approval,
+        inherited_bridge_taint=inherited_bridge_taint,
         # Which job the child's approvals belong to, so a host can scope a
         # denial to the work that provoked it. Reaches the executor through
         # ``Session._build_tool_context``; the construction-time context above
@@ -4493,6 +4709,21 @@ async def _construct_child_session(
         ),
     )
     cleanup.push_async_callback(child.dispose)
+    # Link the two latches for the child's life (review R1, S-67): a parent
+    # that latches after this spawn can still write into the child (``hub``
+    # send/steer are read-tier), and whatever a latched child reports reaches
+    # the parent. Unlinked at dispose so a settled child is not kept alive by
+    # the parent's callback list. See ``bridge_egress.link_latches``.
+    _parent_latch = getattr(parent_session, "bridge_taint_latch", None)
+    _child_latch = getattr(child, "bridge_taint_latch", None)
+    if _parent_latch is not None and _child_latch is not None:
+        from local_operator.harness.bridge_egress import link_latches
+
+        _unlink_latches = link_latches(_parent_latch, _child_latch)
+        # Both stacks: the rollback stack for a launch that fails after this
+        # line, the child's own dispose hooks for its normal lifetime.
+        cleanup.callback(_unlink_latches)
+        child.add_dispose_hook(_unlink_latches)
     # The LIVE half of the same link: an event this child records for an opened or
     # acted-on code request is propagated to the parent's transcript as it happens, so
     # the operator's conversation shows the PR its subagent opened without waiting for

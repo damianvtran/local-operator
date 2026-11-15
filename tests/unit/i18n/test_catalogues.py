@@ -57,6 +57,9 @@ def test_shipped_wire_namespaces_exist() -> None:
         # Receipt-bound skill adoption owns its preview/consent vocabulary.
         "wire.skill_adoption",
         "wire.errors.files",
+        # The phone access settings section (`tunnel.auto_setup_after_login`):
+        # the post-sign-in no-spend reconnect's reversible switch.
+        "wire.phone_access",
         # The owned "hosting is not configured" cause clause, composed INTO the
         # startup refusals above: without its own key a locale that translates
         # the frame still inherits that one English sentence mid-sentence.
@@ -145,6 +148,11 @@ def test_shipped_wire_namespaces_exist() -> None:
         # Its own namespace so no audited catalogue's hash moves; the
         # translation wave lands its seven locales in a follow-up.
         "wire.tool_rows.bridge",
+        # The Team Bridge egress latch (S-38, PR #3796): the latched approval
+        # card's caution, the missing-Allow-all line, the full-request label,
+        # the suspended-grant notice and the refused `approvals auto` receipt.
+        # Its own namespace so no audited catalogue's hash moves.
+        "wire.bridge_taint",
         # The reply guard's skipped double send (#3377 follow-up, design D1/D2):
         # a dedicated verb and expanded sentence as a CHILD of the bridge rows,
         # so the 85 audited `wire.tool_rows.bridge` bytes and their ledger

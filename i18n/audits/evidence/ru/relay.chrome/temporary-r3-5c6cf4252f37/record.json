@@ -1,0 +1,65 @@
+{
+  "schema": 1,
+  "audit_id": "temporary-r3-5c6cf4252f37",
+  "audit_kind": "independent semantic audit of the temporary-chat delta; unchanged keys carried by byte proof",
+  "locale": "ru",
+  "namespace": "relay.chrome",
+  "status": "passed",
+  "verdict": "passed",
+  "audit_task": "i18n-inpr-core",
+  "pr": "damianvtran/local-operator#3832",
+  "audited_revision": "367fbb857",
+  "catalogue_state": "catalogue bytes identical at 4f6f57986 (hashes recomputed from the shipped files)",
+  "scope": "all 13 key(s) the PR changed or added in relay.chrome, read against i18n/glossary.md and i18n/style-guides/ru.md; the other 85 key(s) are byte-identical to origin/main 27bfbdb21, whose last ledger row was passed and fresh",
+  "keys_audited": [
+    "relay.chrome.section_temporary",
+    "relay.chrome.temporary_deletes_in",
+    "relay.chrome.temporary_hold_armed_monitor",
+    "relay.chrome.temporary_hold_armed_wake",
+    "relay.chrome.temporary_hold_cannot_verify",
+    "relay.chrome.temporary_hold_linked",
+    "relay.chrome.temporary_hold_on_screen",
+    "relay.chrome.temporary_hold_open_ask",
+    "relay.chrome.temporary_hold_operator_hold",
+    "relay.chrome.temporary_hold_running",
+    "relay.chrome.temporary_hold_unread_mail",
+    "relay.chrome.temporary_hold_unsaved_files",
+    "relay.chrome.temporary_hold_unseen_result"
+  ],
+  "keys_total": 98,
+  "mechanical_checks": [
+    "placeholder parity",
+    "CLDR plural categories",
+    "vi NFC",
+    "no manual bidi controls",
+    "no ASCII ellipsis",
+    "fr U+202F before :;?!",
+    "maxCells via rich.cells.cell_len"
+  ],
+  "translator": {
+    "agent": "relay-web coder bbcd725a2ca0; round-1 remediation coder 1c07b39051ed (lopdev coder role) — relayed from PR #3832 i18n audit comments 6811281029/6812645445, not independently verified",
+    "model": "anthropic/claude-opus-5-5",
+    "fallback": "none reported in the relayed source",
+    "date": "2026-11-11..2026-11-12 (git: 09839b6de, 75606914f, eaff8c7a9)"
+  },
+  "auditor": {
+    "agent": "independent i18n auditor (lopdev reviewer role, task i18n-inpr-core, session 5c6cf4252f37; independent of the translators and of the round-1/2 auditors 506f24a144fa/2d1500d56d0e, whose artifacts were not read)",
+    "session": "5c6cf4252f37",
+    "model": "anthropic/claude-opus-5-5",
+    "fallback": "none observed in this session",
+    "date": "2026-11-12",
+    "result": "passed",
+    "findings": 0,
+    "unresolved_blocker_major": 0,
+    "minor": 0,
+    "nit": 0
+  },
+  "findings_note": "no findings.",
+  "report": "https://github.com/damianvtran/local-operator/pull/3832#issuecomment-6813468699",
+  "source_sha256": "10555fc5b4ec44a909ca3d9ddb7624c5eceedc3350599282428bbeeba5f55982",
+  "target_sha256": "070479279f0df5af37df04e284920d27f49ea5495774fba2d7c3af43c23a66d7",
+  "input_paths": {
+    "en": "local_operator/i18n/catalogues/en/relay.chrome.json",
+    "target": "local_operator/i18n/catalogues/ru/relay.chrome.json"
+  }
+}

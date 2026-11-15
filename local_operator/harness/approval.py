@@ -123,22 +123,65 @@ def _job_id_style(gate: ApprovalGate) -> _JobIdStyle:
     return "none"
 
 
+def _accepts_bridge_flags(gate: ApprovalGate) -> bool:
+    """Whether ``gate`` can receive the typed Team Bridge flags by keyword.
+
+    A gate qualifies when it names both ``taint_raised`` and ``bridge_latched``
+    as keyword-bindable parameters, or takes ``**kwargs``. An unreadable
+    signature does not qualify: guessing wide there would raise inside the
+    gate, and guessing narrow would drop the flag silently.
+    """
+    try:
+        parameters = list(inspect.signature(gate).parameters.values())
+    except (TypeError, ValueError):
+        return False
+    if any(p.kind is p.VAR_KEYWORD for p in parameters):
+        return True
+    names = {p.name for p in parameters if p.kind in (p.POSITIONAL_OR_KEYWORD, p.KEYWORD_ONLY)}
+    return {"taint_raised", "bridge_latched"} <= names
+
+
+#: The ``reason`` an :class:`ApprovalUnavailableError` carries when a gate
+#: cannot receive the Team Bridge flags. Model- and log-facing.
+BRIDGE_FLAGS_UNSUPPORTED_REASON = (  # i18n: ignore model-facing refusal reason
+    "this approval surface cannot show that the conversation holds Team Bridge content"
+)
+
+
 async def ask_approval(
     gate: ApprovalGate,
     tool_name: str,
     description: str,
     job_id: str | None = None,
+    *,
+    taint_raised: bool = False,
+    bridge_latched: bool = False,
 ) -> bool:
-    """Put one approval question to the host. ``True`` means proceed."""
+    """Put one approval question to the host. ``True`` means proceed.
+
+    ``taint_raised`` (the Team Bridge seam raised this call's tier) and
+    ``bridge_latched`` (the session holds Team Bridge content) are host-set
+    and reach the gate as KEYWORDS, through this adapter rather than as new
+    positional parameters, so every existing two/three-argument host keeps
+    working while neither flag is set. When either IS set and the gate cannot
+    receive them, the call is refused with :class:`ApprovalUnavailableError`
+    (team-bridge-egress.md: "Fail-closed"): a gate that cannot see the flag
+    might auto-answer a card that must reach a person.
+    """
+    flags: dict[str, bool] = {}
+    if taint_raised or bridge_latched:
+        if not _accepts_bridge_flags(gate):
+            raise ApprovalUnavailableError(tool_name, BRIDGE_FLAGS_UNSUPPORTED_REASON)
+        flags = {"taint_raised": bool(taint_raised), "bridge_latched": bool(bridge_latched)}
     style = _job_id_style(gate)
     if style == "positional":
-        wide = cast("Callable[[str, str, str | None], Awaitable[bool]]", gate)
-        return bool(await wide(tool_name, description, job_id))
+        wide = cast("Callable[..., Awaitable[bool]]", gate)
+        return bool(await wide(tool_name, description, job_id, **flags))
     if style == "keyword":
         by_keyword = cast("Callable[..., Awaitable[bool]]", gate)
-        return bool(await by_keyword(tool_name, description, job_id=job_id))
-    narrow = cast("Callable[[str, str], Awaitable[bool]]", gate)
-    return bool(await narrow(tool_name, description))
+        return bool(await by_keyword(tool_name, description, job_id=job_id, **flags))
+    narrow = cast("Callable[..., Awaitable[bool]]", gate)
+    return bool(await narrow(tool_name, description, **flags))
 
 
 #: The sentence every surface renders when a gate could NOT ask anyone and
@@ -374,6 +417,45 @@ OPERATOR_CAP_BYTES = 32
 #: believes the frame is ordinary" divergence ``AUTHORITY_OPS`` exists to
 #: prevent.
 APPROVALS_LOOSENING_WORDS = frozenset({"auto", "off", "yolo"})
+#: The ``/approvals [default] <word>`` spellings that resolve to ask.
+APPROVALS_TIGHTENING_WORDS = frozenset({"ask", "on", "prompt"})
+
+
+def approvals_default_target(word: str, *, current_auto: bool | None) -> bool | None:
+    """What ``/approvals default <word>`` writes: ``True`` auto, ``False`` ask, ``None`` unknown.
+
+    ONE resolver for every host that honours the persist form, so the hosts
+    that write and the latched refusal that guards the write read the same
+    table (security r1 S-1 on #3849: the TUI owner's refusal matched typed
+    words while the app resolved a bare ``default`` from state, and the gap
+    between the two wrote global auto from a latched conversation).
+
+    ``current_auto`` is the host's reading of a bare ``default``: the TUI app
+    keeps the mode it is in (pass its ``_approve_all``); the detached runtime
+    refuses the bare form outright (pass ``None``, and it resolves unknown).
+    """
+    word = str(word or "").strip().lower()
+    if word in APPROVALS_TIGHTENING_WORDS:
+        return False
+    if word in APPROVALS_LOOSENING_WORDS:
+        return True
+    if not word:
+        return current_auto
+    return None
+
+
+def approvals_default_may_loosen(word: str) -> bool:
+    """Whether ``/approvals default <word>`` can write auto on ANY host, in ANY state.
+
+    A latched conversation's refusal asks this rather than matching words, so
+    a bare ``default`` -- which resolves to auto whenever the host's current
+    mode is auto, e.g. a suspended pre-latch session auto -- is refused without
+    reading that state across threads, and a loosening word added to the table
+    above is refused with no second edit. Worst case is assumed: a bare
+    ``default`` on a latched conversation whose mode is ask is refused too; the
+    operator names ``default ask``, which always passes.
+    """
+    return approvals_default_target(word, current_auto=True) is True
 
 
 def transition_authority(command: str, args: str, *, approved: bool | None = None) -> Authority:

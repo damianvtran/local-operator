@@ -256,6 +256,12 @@ class StopOutcome:
     #: Set only for an engine-owned duty session (:func:`_engine_owner`);
     #: such a stop parks nothing, so ``wakes_dormant`` stays 0 for it.
     pass_still_runs: str = ""
+    #: Set by :func:`park_session` when the target was PARKED rather than
+    #: stopped: its wakes/monitors stay armed, counted in the two fields below
+    #: (and ``wakes_dormant``/``monitors_dormant`` stay 0 — nothing went dormant).
+    parked: bool = False
+    wakes_armed: int = 0
+    monitors_armed: int = 0
     #: The owner's own cause token for a refusal (``busy``/``wake``/
     #: ``old_owner``/``unanswered``), or ``""`` for every other outcome.
     #: ``method`` stays the stable machine category — a front end switches on
@@ -281,6 +287,18 @@ REASON_UNANSWERED = "unanswered"
 #: sent to retry a stop that is already happening (R3 / Q-1). The caller turns
 #: this into the same skip a record that says ``leaving`` earns.
 REASON_LEAVING = "leaving"
+
+#: The two index stamps a retirement can leave on a session's wake and monitor
+#: entries. ``stopped_at`` is a HOLD (``wakes.store.is_held``): the session's
+#: schedules go dormant until someone reopens it. ``parked_at`` is NOT a hold —
+#: it records that the runtime was ended to free memory while every wake and
+#: monitor stays armed, so the wake supervisor fires them and cold-engages the
+#: session exactly as for any session whose runtime idled out (field gap
+#: 2026-11-12: stopping idle sessions under swap pressure silently made a
+#: manager's 9 prod-window wakes and customer-thread monitors dormant). The
+#: open-time index rewrite clears both (``Session._rebuild_wake_index_entry``).
+STOP_MARKER = "stopped_at"
+PARK_MARKER = "parked_at"
 
 
 @dataclass(frozen=True, slots=True)
@@ -774,8 +792,13 @@ def _engine_owner(root: Path, session_id: str) -> str:
     return ""
 
 
-def _mark_wakes_dormant(record: SessionRecord, root: Path) -> int:
+def _mark_wakes_dormant(record: SessionRecord, root: Path, marker: str = STOP_MARKER) -> int:
     """Park a stopped session's wakes dormant by stamping ``stopped_at``.
+
+    ``marker`` is :data:`PARK_MARKER` for a PARK (:func:`park_session`): the
+    same index write, but the stamp is ``parked_at``, which is deliberately NOT
+    a hold (``wakes.store.is_held`` ignores it), so the supervisor keeps firing
+    the schedules and cold-engages the session exactly as for any cold session.
 
     Schedules are NEVER deleted by a stop: the transcript is the authority
     (``Session._persist_wake_schedules``) and a stop that edited the model's
@@ -793,10 +816,11 @@ def _mark_wakes_dormant(record: SessionRecord, root: Path) -> int:
     """
     from local_operator.wakes import store as wake_store
 
-    if _engine_owner(root, record.session_id):
+    if marker == STOP_MARKER and _engine_owner(root, record.session_id):
         # An engine-owned duty session keeps its recurring pass ARMED across a
         # stop — see :func:`_engine_owner`. Nothing is parked, so nothing is
-        # counted; the receipt says the pass still runs instead.
+        # counted; the receipt says the pass still runs instead. (A PARK keeps
+        # everything armed anyway, so it counts the rows like any session.)
         return 0
     entry = wake_store.read_entry(root, record.session_id)
     if entry is None:
@@ -809,7 +833,7 @@ def _mark_wakes_dormant(record: SessionRecord, root: Path) -> int:
         record.session_id,
         cwd=entry.get("cwd") or record.cwd,
         schedules=schedules,
-        preserve=dict(entry, stopped_at=int(time.time() * 1000)),
+        preserve={**entry, marker: int(time.time() * 1000)},
     )
     # The count is the receipt's "N wakes dormant" — a HUMAN-facing number, so
     # it counts SCHEDULED rows only through the one shared filter
@@ -823,17 +847,17 @@ def _mark_wakes_dormant(record: SessionRecord, root: Path) -> int:
     return len(scheduled_rows(schedules))
 
 
-async def _park_wakes(record: SessionRecord, root: Path) -> int:
+async def _park_wakes(record: SessionRecord, root: Path, marker: str = STOP_MARKER) -> int:
     """``_mark_wakes_dormant`` off the loop: two small file operations, but
     on the same TUI loop as the ladder, and a cold disk under load is enough
     to show as a dropped frame. Best-effort — the index is derived."""
     try:
-        return await asyncio.to_thread(_mark_wakes_dormant, record, root)
+        return await asyncio.to_thread(_mark_wakes_dormant, record, root, marker)
     except Exception:  # noqa: BLE001 — the index is derived; the stop is not
         return 0
 
 
-def _mark_monitors_dormant(record: SessionRecord, root: Path) -> int:
+def _mark_monitors_dormant(record: SessionRecord, root: Path, marker: str = STOP_MARKER) -> int:
     """Park a stopped session's monitors dormant by stamping ``stopped_at``.
 
     The ``_mark_wakes_dormant`` twin (§10.5). Monitors are NEVER deleted by a
@@ -860,15 +884,15 @@ def _mark_monitors_dormant(record: SessionRecord, root: Path) -> int:
         record.session_id,
         cwd=entry.get("cwd") or record.cwd,
         monitors=monitors,
-        preserve=dict(entry, stopped_at=int(time.time() * 1000)),
+        preserve={**entry, marker: int(time.time() * 1000)},
     )
     return len(monitors)
 
 
-async def _park_monitors(record: SessionRecord, root: Path) -> int:
+async def _park_monitors(record: SessionRecord, root: Path, marker: str = STOP_MARKER) -> int:
     """``_mark_monitors_dormant`` off the loop; best-effort like its twin."""
     try:
-        return await asyncio.to_thread(_mark_monitors_dormant, record, root)
+        return await asyncio.to_thread(_mark_monitors_dormant, record, root, marker)
     except Exception:  # noqa: BLE001 — the index is derived; the stop is not
         return 0
 
@@ -1450,8 +1474,14 @@ async def stop_session(
     graceful_only: bool = False,
     on_wait: Callable[[str], None] | None = None,
     _sweep_id: str = "",
+    _park: bool = False,
 ) -> StopOutcome:
     """Stop one live session by its discovery record. Never raises.
+
+    ``_park`` (set only by :func:`park_session`, which also forces
+    ``graceful_only``) swaps the dormant ``stopped_at`` stamp for the armed
+    ``parked_at`` one and the receipt for the park receipt; every rung and
+    refusal is otherwise the idle-only stop's, so a park can never cut work.
 
     The escalation ladder in order: a skip when the record says the runtime is
     ALREADY LEAVING a signal it received → graceful socket op → a skip when the
@@ -1509,6 +1539,7 @@ async def stop_session(
     """
     root = _root if _root is not None else config_dir()
     name = record.conversation_name or record.session_id
+    mark = PARK_MARKER if _park else STOP_MARKER
 
     # Agent tools promise a non-destructive stop, whereas the CLI owns an
     # explicit escalation ladder. Keep that authority in the caller's policy,
@@ -1655,11 +1686,22 @@ async def stop_session(
         graceful_args["graceful_only"] = True
     asked = await _graceful_stop(record, timeout_s, root, **graceful_args)
     if asked.exited:
-        wakes = await _park_wakes(record, root)
-        monitors = await _park_monitors(record, root)
+        wakes = await _park_wakes(record, root, mark)
+        monitors = await _park_monitors(record, root, mark)
         still_runs = _engine_owner(root, record.session_id)
         _recover_record(record, root)
         method: Method = "socket"
+        if _park:
+            return StopOutcome(
+                pid=record.pid,
+                session_id=record.session_id,
+                name=name,
+                method=method,
+                line=parked_line(name, wakes, monitors),
+                parked=True,
+                wakes_armed=wakes,
+                monitors_armed=monitors,
+            )
         return StopOutcome(
             pid=record.pid,
             session_id=record.session_id,
@@ -1682,10 +1724,25 @@ async def stop_session(
     # the marker is staged AFTER the graceful ack and not before the request:
     # a request the target never received is not a stop.
     if not registry.pid_alive(record.pid):
-        wakes = await _park_wakes(record, root)
-        monitors = await _park_monitors(record, root)
+        wakes = await _park_wakes(record, root, mark)
+        monitors = await _park_monitors(record, root, mark)
         _recover_record(record, root)
         method = "gone"
+        if _park:
+            # The stamps written above are ``parked_at`` (``mark``), so the
+            # wakes and monitors are ARMED: reporting this as a dormant stop
+            # painted a stop receipt and logged a refusal for a session that
+            # is in fact parked (review round 1, R1-4).
+            return StopOutcome(
+                pid=record.pid,
+                session_id=record.session_id,
+                name=name,
+                method=method,
+                line=parked_line(name, wakes, monitors),
+                parked=True,
+                wakes_armed=wakes,
+                monitors_armed=monitors,
+            )
         return StopOutcome(
             pid=record.pid,
             session_id=record.session_id,
@@ -1714,8 +1771,22 @@ async def stop_session(
             # runtime that is already leaving will not fire its schedules, so
             # leaving them armed is the difference between a wake that survives a
             # stop and one that is silently dropped.
-            wakes = await _park_wakes(record, root)
-            monitors = await _park_monitors(record, root)
+            wakes = await _park_wakes(record, root, mark)
+            monitors = await _park_monitors(record, root, mark)
+            if _park:
+                # Same as the ``gone`` rung (R1-4): the owner accepted the park
+                # and is leaving, and its entries carry ``parked_at`` — armed.
+                return StopOutcome(
+                    pid=record.pid,
+                    session_id=record.session_id,
+                    name=name,
+                    method="pending",
+                    line=f"{parked_line(name, wakes, monitors)} (it had not exited after "
+                    f"{bound_text(timeout_s)}; no signal was sent)",
+                    parked=True,
+                    wakes_armed=wakes,
+                    monitors_armed=monitors,
+                )
             return StopOutcome(
                 pid=record.pid,
                 session_id=record.session_id,
@@ -1923,8 +1994,8 @@ async def stop_session(
         signal.SIGTERM,
         SIGTERM_GRACE_S,
     ):
-        wakes = await _park_wakes(record, root)
-        monitors = await _park_monitors(record, root)
+        wakes = await _park_wakes(record, root, mark)
+        monitors = await _park_monitors(record, root, mark)
         still_runs = _engine_owner(root, record.session_id)
         _recover_record(record, root)
         method = "sigterm"
@@ -1956,8 +2027,8 @@ async def stop_session(
     # has always sent there — and None on Windows, where it selects the
     # terminate-the-tree path above instead of raising AttributeError.
     await _signal_and_confirm(record, procstate.hard_kill_signal(), SIGKILL_CONFIRM_S)
-    wakes = await _park_wakes(record, root)
-    monitors = await _park_monitors(record, root)
+    wakes = await _park_wakes(record, root, mark)
+    monitors = await _park_monitors(record, root, mark)
     still_runs = _engine_owner(root, record.session_id)
     _recover_record(record, root)
     method = "sigkill"
@@ -1972,6 +2043,91 @@ async def stop_session(
         wakes_dormant=wakes,
         monitors_dormant=monitors,
         pass_still_runs=still_runs,
+    )
+
+
+def parked_line(name: str, wakes: int, monitors: int) -> str:
+    """The English park receipt (the tool surface renders the keyed
+    ``wire.sessions.park_done`` instead; this is the catalogue-less degrade
+    path, mirroring :func:`_stopped_line`)."""
+    items: list[str] = []
+    if wakes:
+        items.append(f"{wakes} wake{'s' if wakes != 1 else ''}")
+    if monitors:
+        items.append(f"{monitors} monitor{'s' if monitors != 1 else ''}")
+    if not items:
+        return f'parked "{name}" — it has no wakes or monitors; open it to resume'
+    return (
+        f'parked "{name}" — {" and ".join(items)} stay armed; the supervisor '
+        "reopens it when one fires"
+    )
+
+
+def armed_counts(root: Path, session_id: str) -> tuple[int, int]:
+    """``(wakes, monitors)`` a stop would make dormant (a park keeps armed).
+
+    Read BEFORE the session's runtime ends: the self-park path
+    (``_sessions_park_self``) uses it to tell the caller what stays armed, since
+    its own park lands only after the turn ends. Same counting rules as the
+    dormant stamps themselves: scheduled wake rows only (patience timers are
+    internal), every monitor row; an entry already held counts 0 because a
+    stop changes nothing for it, and an engine-owned duty session counts 0
+    for wakes because its pass stays armed across a stop.
+    """
+    from local_operator.monitors import store as monitor_store
+    from local_operator.wakes import store as wake_store
+    from local_operator.wakes.store import is_held, scheduled_rows
+
+    wakes = 0
+    monitors = 0
+    try:
+        entry = wake_store.read_entry(root, session_id)
+        if entry is not None and not is_held(entry) and not _engine_owner(root, session_id):
+            wakes = len(scheduled_rows(entry.get("schedules") or []))
+    except Exception:  # noqa: BLE001 — a hint, never a reason to fail the stop
+        wakes = 0
+    try:
+        mentry = monitor_store.read_entry(root, session_id)
+        if mentry is not None and not monitor_store.is_held(mentry):
+            monitors = len(mentry.get("monitors") or [])
+    except Exception:  # noqa: BLE001
+        monitors = 0
+    return wakes, monitors
+
+
+async def park_session(
+    record: SessionRecord,
+    *,
+    timeout_s: float = DEFAULT_TIMEOUT_S,
+    _root: Path | None = None,
+    _command: str = "control.park_session",
+    _sweep_id: str = "",
+) -> StopOutcome:
+    """PARK one live session: end its runtime, keep its wakes/monitors armed.
+
+    WHY PARK EXISTS. A stop frees the runtime's memory but stamps
+    ``stopped_at``, which the supervisor treats as "do not fire until someone
+    reopens it". Under memory/disk pressure that is the wrong trade: the
+    operator wants the RAM back and the schedules kept, so the session should
+    come back by itself when a wake or monitor is due — exactly what already
+    happens to a session whose runtime idled out. Park is that state, entered
+    on purpose.
+
+    CONSTRAINTS. Always the idle-only ladder (``graceful_only``): the owner
+    refuses while a turn, approval, subagent or job is live, or a wake is due
+    inside the hold window, and no signal is ever sent — parking is a memory
+    optimisation and may never cost work. The receipt and ``StopOutcome.parked``
+    say what stayed armed; refusals are the stop's own outcomes, unchanged.
+    """
+    return await stop_session(
+        record,
+        timeout_s=timeout_s,
+        force=False,
+        _root=_root,
+        _command=_command,
+        graceful_only=True,
+        _sweep_id=_sweep_id,
+        _park=True,
     )
 
 

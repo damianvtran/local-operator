@@ -3520,7 +3520,12 @@ def _read_hub_profile_from_zip(zip_path: Path) -> Tuple[str, str]:
 
 
 def _fetch_hub_profile(
-    radient_client: Any, hub_id: str, *, with_credential: bool = False, timeout: float | None = None
+    radient_client: Any,
+    hub_id: str,
+    *,
+    with_credential: bool = False,
+    timeout: float | None = None,
+    credential_free: bool = False,
 ) -> Tuple[str, str]:
     """Download a marketplace listing into a temp file and read its text.
 
@@ -3528,11 +3533,18 @@ def _fetch_hub_profile(
     a file name and as a URL path segment. The download itself is the public
     endpoint the existing pull path uses; the caller decides whether a
     credential is present at all (see :func:`sync_hub_agents`).
+
+    ``credential_free`` is the hub-sync check's PUBLIC arm: no credential at
+    all, not even an ambient ``~/.netrc`` entry, and no redirect (see
+    ``RadientClient.download_agent_from_marketplace``). Interactive pulls leave
+    it off.
     """
 
     # Only forwarded when set: the background runner bounds each request (B3.3),
     # every other caller keeps the client's historical behaviour.
     extra: dict[str, Any] = {} if timeout is None else {"timeout": timeout}
+    if credential_free:
+        extra["credential_free"] = True
     with tempfile.TemporaryDirectory() as temp_dir:
         zip_path = Path(temp_dir) / f"{hub_id}.zip"
         if with_credential:

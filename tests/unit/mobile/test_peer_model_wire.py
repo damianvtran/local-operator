@@ -569,3 +569,41 @@ async def test_slash_result_deferred_acceptance_is_explicit_and_legacy_unchanged
     result = await client.slash_result("model", "test/legacy")
     assert result["text"] == "applied"
     assert "defer_ok" not in seen[-1][1] and "request_id" not in seen[-1][1]
+
+
+@pytest.mark.asyncio
+async def test_slash_result_carries_bridge_ack_beside_the_deferral_keys(monkeypatch) -> None:
+    """#3697 x #3796 merge: ``bridge_ack`` and ``defer_ok``/``request_id`` compose.
+
+    Both are additive, set-only keys on the same ``slash_result`` frame. A
+    resolution that kept one family and dropped the other would either strip
+    the Team Bridge marker from a deferred send (a picker's deliberate
+    loosening refused) or strip the deferral from a marked one; and neither may
+    appear on a frame whose caller never set it (byte-identical legacy frames).
+    """
+    from local_operator.mobile.attach_client import AttachClient
+
+    seen = []
+
+    async def frame(self, op, **fields):
+        seen.append((op, fields))
+        return {"op": "ack", "detail": "queued", "queued": True}
+
+    async def payload(self, op, **fields):
+        seen.append((op, fields))
+        return {"kind": "notice", "text": "applied"}
+
+    monkeypatch.setattr(AttachClient, "_request_frame", frame)
+    monkeypatch.setattr(AttachClient, "_request_payload", payload)
+    client = AttachClient(lambda p: None, lambda reason: None)
+
+    await client.slash_result("approvals", "auto", bridge_ack=True, defer_ok=True, request_id="r")
+    assert seen[-1][1]["bridge_ack"] is True
+    assert seen[-1][1]["defer_ok"] is True and seen[-1][1]["request_id"] == "r"
+
+    await client.slash_result("approvals", "auto", bridge_ack=True)
+    assert seen[-1][1]["bridge_ack"] is True
+    assert "defer_ok" not in seen[-1][1] and "request_id" not in seen[-1][1]
+
+    await client.slash_result("approvals", "auto")
+    assert not {"bridge_ack", "defer_ok", "request_id"} & set(seen[-1][1])

@@ -17,5 +17,18 @@
   "relay.session.model.filter_placeholder": "filtrar modelos",
   "relay.session.model.loading": "cargando…",
   "relay.session.model.queued": "cambio en cola — se aplicará en el siguiente paso",
-  "relay.session.model.refused": "No se aplicó {model}: {reason}"
+  "relay.session.model.refused": "No se aplicó {model}: {reason}",
+  "relay.session.temporary_toggle": "Sesión temporal",
+  "relay.session.temporary_subtitle": "Temporal · {status}",
+  "relay.session.temporary_keep": "Conservar sesión",
+  "relay.session.temporary_make": "Hacer temporal la sesión…",
+  "relay.session.temporary_make_confirm": "Hacer temporal",
+  "relay.session.temporary_confirm_title": "¿Hacer temporal esta sesión?",
+  "relay.session.temporary_confirm_body": "Sale ahora de tu lista de sesiones y se eliminará cuando lleve un tiempo sin actividad. Los archivos que modificó en tu ordenador se conservan.",
+  "relay.session.temporary_deleted_title": "Esta sesión temporal se eliminó",
+  "relay.session.temporary_deleted_detail": "Se eliminó tras un tiempo sin actividad y no se puede volver a abrir. Los archivos que modificó en tu ordenador siguen ahí.",
+  "relay.session.temporary_new": "Nueva sesión temporal",
+  "relay.session.back_to_chats": "Volver a las sesiones",
+  "relay.session.keep_and_pin": "Conservar y fijar",
+  "relay.session.keep_and_link": "Conservar y vincular"
 }

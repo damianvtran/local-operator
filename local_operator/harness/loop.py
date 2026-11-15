@@ -40,6 +40,11 @@ from pydantic import SecretStr, TypeAdapter, ValidationError
 from local_operator.ansi import sanitize_prompt_line
 from local_operator.harness import chrome_prompts as _chrome_prompts
 from local_operator.harness.approval import ApprovalUnavailableError, ask_approval
+from local_operator.harness.bridge_egress import (
+    escalate_for_bridge_taint,
+    latched_card_summary,
+    stamp_details,
+)
 from local_operator.harness.degeneration import (
     DegenerationTrip,
     StreamDegenerationGuard,
@@ -137,6 +142,9 @@ from local_operator.incidents import (
     REASONING_ECHO_MARKERS,
 )
 from local_operator.model.effort import real_rungs
+from local_operator.redaction_shapes import redaction_scope
+from local_operator.tools import diff_archive
+from local_operator.tools.diff_archive import DIFF_FULL_KEY
 from local_operator.tools.diff_limits import DIFF_WITHHELD_TEXT
 
 #: How often a still-composing tool call re-announces its size. Fast enough that
@@ -349,15 +357,74 @@ EMPTY_TOOL_RESULT_TEXT = "[tool returned no output]"
 _CONTENT_BEARING_DETAIL_KEYS = ("diff",)
 
 
-def _redact_nested_strings(value: Any, redact: Callable[[str], str]) -> Any:
-    """A copy of a JSON-shaped ``value`` with every string VALUE passed through ``redact``."""
+def _is_content_string(value: str) -> bool:
+    """Prose, output, a URL or a ``NAME=VALUE``/``name: value`` carrier — not a
+    bare identifier (see ``content_only``)."""
+    return "=" in value or ":" in value or any(char.isspace() for char in value)
+
+
+def _redact_nested_strings(
+    value: Any, redact: Callable[[str], str], *, content_only: bool = False
+) -> Any:
+    """A copy of a JSON-shaped ``value`` with every string VALUE passed through ``redact``.
+
+    Keys, numbers, booleans and container TYPES are kept (a tuple stays a
+    tuple), so a reader comparing a field it did not expect to change — a
+    counter, a flag, a ``job_ids`` tuple — sees exactly what it stored.
+
+    ``content_only`` gives a string with no whitespace, ``=`` or ``:`` only the
+    exact-value pass (``redaction_scope("values")``): that is an IDENTIFIER (a
+    question id, a model name, a path, a handle) that its reader matches
+    exactly. Measured on the 200 most recent sessions before the filter: the
+    shape pass masked ``questions[].id``, ``question_ids[]`` and ``model`` values
+    through the vendor-prefix rule — an ask answer keyed by that id could no
+    longer be matched. A value the session already holds as a credential carries
+    no such risk, so it is still masked there (PR #3789 review R3). Prose,
+    command output, URLs and ``KEY=value`` lines (where a credential actually
+    travels in details: ``rows``, ``text``, ``prompt``) get the full pass.
+    """
     if isinstance(value, str):
-        return redact(value) if value else value
+        if not value:
+            return value
+        if content_only and not _is_content_string(value):
+            with redaction_scope("values"):
+                return redact(value)
+        return redact(value)
     if isinstance(value, dict):
-        return {key: _redact_nested_strings(item, redact) for key, item in value.items()}
-    if isinstance(value, (list, tuple)):
-        return [_redact_nested_strings(item, redact) for item in value]
+        return {
+            key: _redact_nested_strings(item, redact, content_only=content_only)
+            for key, item in value.items()
+        }
+    if isinstance(value, tuple):
+        return tuple(
+            _redact_nested_strings(item, redact, content_only=content_only) for item in value
+        )
+    if isinstance(value, list):
+        return [_redact_nested_strings(item, redact, content_only=content_only) for item in value]
     return value
+
+
+#: Shortest string that can carry anything the redactor masks (a registered
+#: value or a shape); the same floor as ``redaction_shapes.DETECTED_COMPONENT_FLOOR``.
+_DETAIL_SCAN_MIN_CHARS = 8
+
+
+def _carries_scannable_string(value: Any, depth: int = 0) -> bool:
+    """Whether a JSON-shaped ``value`` holds a string long enough to need the redactor.
+
+    The cheap ON-loop gate for :meth:`AgentLoop._redact_details`: most results'
+    details are ids, modes, counters and flags, and must not pay a thread hop.
+    Past a nesting depth it answers ``True`` (scan it) rather than recursing.
+    """
+    if isinstance(value, str):
+        return len(value) >= _DETAIL_SCAN_MIN_CHARS
+    if depth > 32:
+        return True
+    if isinstance(value, dict):
+        return any(_carries_scannable_string(item, depth + 1) for item in value.values())
+    if isinstance(value, (list, tuple)):
+        return any(_carries_scannable_string(item, depth + 1) for item in value)
+    return False
 
 
 # The producer caps diffs at 200 rows; this independent publication budget leaves
@@ -467,8 +534,38 @@ def _source_affected_lines(text: str, redact: Callable[[str], str]) -> set[int]:
     return affected
 
 
+#: Character budget for the changed-counterpart containment checks in
+#: :func:`_mask_by_source_evidence`. Each check is one C-level ``in`` over two
+#: row bodies, linear in their combined length, so the total work of the pass
+#: is bounded by this figure, not by rows squared. 32 Mi characters covers a
+#: full-ceiling archive's change blocks (``ARCHIVE_REDACT_BYTES`` is 4 MiB)
+#: several times over; past it, every remaining unverified content row is
+#: masked -- the over-masking direction, never a leak.
+_COUNTERPART_CHECK_BUDGET = 32 * 1024 * 1024
+
+
+def _sensitive_line_texts(text: str, affected: set[int]) -> set[str]:
+    """The source TEXT of every line the whole-side judgement masked.
+
+    Index evidence proves a line position; this is what lets a COPY of that
+    line elsewhere in the diff (QA F1 on #3762: a duplicate of one line of a
+    registered 10-line literal, which the redactor alone does not match) be
+    recognised by :func:`_mask_by_source_evidence`. Whitespace-only lines are
+    left out: they carry no value bytes, and an over-masked gap often holds a
+    blank line, which would otherwise mask every blank row in the file.
+    Local to one settlement -- never registered with the redactor or stored.
+    """
+    if not affected:
+        return set()
+    lines = text.splitlines()
+    return {lines[index] for index in affected if index < len(lines) and lines[index].strip()}
+
+
 def _mask_by_source_evidence(
-    rows: Sequence[str], affected_old: set[int], affected_new: set[int]
+    rows: Sequence[str],
+    affected_old: set[int],
+    affected_new: set[int],
+    sensitive: set[str] | frozenset[str] = frozenset(),
 ) -> list[str]:
     """Mask every diff row whose source line the whole-side redaction touched.
 
@@ -478,37 +575,106 @@ def _mask_by_source_evidence(
     ``sign + REDACTION_MARKER``, the seam's own masked-row form, so counts and
     geometry are unchanged. Anything that is not a well-formed diff raises
     ``ValueError`` (the caller withholds).
+
+    Index evidence alone under-masks two shapes once the diff is long enough
+    that they leave the hunk that holds the value (QA F1 on #3762; the preview
+    hid them only because they fell past its 200 rows):
+
+    * a DUPLICATE -- a row whose text equals a masked source line (``sensitive``,
+      from :func:`_sensitive_line_texts` over the ORIGINAL sides) is masked
+      wherever it appears, on either side; and
+    * a COUNTERPART -- anywhere in the diff, a content row (context included) whose
+      stripped body contains, or is contained in, a sensitive source line or a
+      masked row's body (``SECRET-LINE`` edited to ``SECRET-LINE-X``, even in a
+      separate hunk from an unchanged original) is masked too.
+
+    One pass, not transitive: the seed set is frozen before the counterpart
+    check, so a masked counterpart never spreads further. Work is bounded by
+    :data:`_COUNTERPART_CHECK_BUDGET`; past it every remaining unverified
+    content row is masked (fail closed). With no seeds the rows pass through
+    byte-exact. Nothing is re-diffed.
     """
     from local_operator.redaction_shapes import REDACTION_MARKER
 
     if len(rows) < 2 or not rows[0].startswith("--- ") or not rows[1].startswith("+++ "):
         raise ValueError
     out = list(rows[:2])
+    masked = [False] * len(rows)
     old_line = new_line = -1
-    for row in rows[2:]:
+    for at in range(2, len(rows)):
+        row = rows[at]
         frame = _DIFF_HUNK.fullmatch(row)
         if frame is not None:
             old_count = int(frame[2]) if frame[2] is not None else 1
             new_count = int(frame[4]) if frame[4] is not None else 1
             old_line = int(frame[1]) - (1 if old_count else 0)
             new_line = int(frame[3]) - (1 if new_count else 0)
-            out.append(row)
             continue
         tag = row[:1]
         if old_line < 0 or new_line < 0 or tag not in (" ", "-", "+"):
             raise ValueError
-        hit = (tag in " -" and old_line in affected_old) or (
-            tag in " +" and new_line in affected_new
+        masked[at] = (
+            (tag in " -" and old_line in affected_old)
+            or (tag in " +" and new_line in affected_new)
+            or row[1:] in sensitive
         )
-        out.append(tag + REDACTION_MARKER if hit else row)
         if tag in " -":
             old_line += 1
         if tag in " +":
             new_line += 1
+    # GLOBAL counterpart closure (QA F1 round 2 on #3762): a block-local check
+    # missed an edited copy of an UNCHANGED literal line that landed in a
+    # separate hunk -- the literal never appears as a row, so no block held a
+    # seed. Seeds are therefore frozen once from every whole-side sensitive
+    # line PLUS every row already masked by index/duplicate evidence, and every
+    # unmasked content row anywhere in the diff is judged against them. Frozen
+    # before the pass, so a newly masked row never seeds (not transitive).
+    # Stripped bodies make re-indented copies match; only the judgement strips
+    # -- the published row is the marker or the original bytes.
+    # CONTEXT rows are judged too: the whole-side callback clearing a context
+    # position does not clear a derived copy of a registered value sitting
+    # there (an existing ``parts[3]+'-X'`` line left unchanged next to a
+    # changed region) -- skipping them leaks the same shape.
+    seeds = {line.strip() for line in sensitive if line.strip()}
+    seeds.update(
+        rows[i][1:].strip() for i in range(2, len(rows)) if masked[i] and rows[i][1:].strip()
+    )
+    if seeds:
+        budget = _COUNTERPART_CHECK_BUDGET
+        ordered = sorted(seeds)
+        exhausted = False
+        for i in range(2, len(rows)):
+            row = rows[i]
+            if masked[i] or row[:1] not in (" ", "-", "+") or _DIFF_HUNK.fullmatch(row):
+                continue
+            body = row[1:].strip()
+            if not body:
+                continue
+            if exhausted:
+                # Fail closed: an unverified content row is masked, never stored raw.
+                masked[i] = True
+                continue
+            for seed in ordered:
+                budget -= len(seed) + len(body)
+                if budget < 0:
+                    exhausted = True
+                    masked[i] = True
+                    break
+                if seed in body or body in seed:
+                    masked[i] = True
+                    break
+    for at in range(2, len(rows)):
+        out.append(rows[at][:1] + REDACTION_MARKER if masked[at] else rows[at])
     return out
 
 
-def _redact_diff_detail(value: Any, redact: Callable[[str], str]) -> Any:
+def _redact_diff_detail(
+    value: Any,
+    redact: Callable[[str], str],
+    *,
+    max_rows: int = _DIFF_DETAIL_ROWS,
+    max_bytes: int = _DIFF_DETAIL_BYTES,
+) -> Any:
     """Publish a bounded diff COPY without losing multiline credential proof.
 
     A line-at-a-time callback releases unknown PEM body rows. Joining the raw
@@ -554,22 +720,18 @@ def _redact_diff_detail(value: Any, redact: Callable[[str], str]) -> Any:
     def invoke(text: str) -> str:
         nonlocal calls, input_bytes, input_rows, output_bytes, output_rows
         calls += 1
-        input_bytes += byte_size(text, _DIFF_DETAIL_BYTES)
+        input_bytes += byte_size(text, max_bytes)
         input_rows += text.count("\n") + 1
-        if (
-            calls > 2 * _DIFF_DETAIL_ROWS
-            or input_bytes > 3 * _DIFF_DETAIL_BYTES
-            or input_rows > 3 * _DIFF_DETAIL_ROWS
-        ):
+        if calls > 2 * max_rows or input_bytes > 3 * max_bytes or input_rows > 3 * max_rows:
             raise ValueError
         result = redact(text)
         if not isinstance(result, str):
             raise ValueError
-        output_bytes += byte_size(result, 3 * _DIFF_DETAIL_BYTES - output_bytes)
+        output_bytes += byte_size(result, 3 * max_bytes - output_bytes)
         # Check population before splitting/materializing output rows. All other
         # splitlines separators are forbidden in projected nominal rows too.
         output_rows += result.count("\n") + 1
-        if output_rows > 3 * _DIFF_DETAIL_ROWS:
+        if output_rows > 3 * max_rows:
             raise ValueError
         return result
 
@@ -577,17 +739,17 @@ def _redact_diff_detail(value: Any, redact: Callable[[str], str]) -> Any:
 
     try:
         if scalar:
-            byte_size(value, _DIFF_DETAIL_BYTES)
-            if len(value.splitlines()) > _DIFF_DETAIL_ROWS:
+            byte_size(value, max_bytes)
+            if len(value.splitlines()) > max_rows:
                 raise ValueError
             return invoke(value)
-        if len(value) > _DIFF_DETAIL_ROWS:
+        if len(value) > max_rows:
             raise ValueError
         total = 0
         for item in value:
             if not isinstance(item, str):
                 raise ValueError  # a barrier cannot silently join two partial hunks
-            total += byte_size(item, _DIFF_DETAIL_BYTES - total)
+            total += byte_size(item, max_bytes - total)
             if any(char in _DIFF_ROW_BREAKS for char in item):
                 raise ValueError
         if len(value) < 3 or not value[0].startswith("--- ") or not value[1].startswith("+++ "):
@@ -640,7 +802,7 @@ def _redact_diff_detail(value: Any, redact: Callable[[str], str]) -> Any:
             if not saw_change:
                 raise ValueError
             hunks.append((old, new))
-            if len(hunks) > _DIFF_DETAIL_ROWS // 2:
+            if len(hunks) > max_rows // 2:
                 raise ValueError
         affected: set[int] = set()
         # All contextual judgements see ORIGINAL views, before a header/row mask
@@ -6168,12 +6330,38 @@ class AgentLoop:
             if tool.call_approval_tier is not None
             else tool.approval_tier
         )
+        # Team Bridge taint (finding S-38, ``harness/bridge_egress.py``): the
+        # ONE place a tier is chosen is the one place it is raised. In a
+        # session that has ever held bridge content, the egress-capable read
+        # tools and the durable writers' mutating ops move to ``write``; a
+        # search an approval could not make meaningful is refused here with no
+        # card, in every mode (S-58). Closed for ask mode; accepted risk in
+        # auto/yolo (docs/security/team-bridge-egress.md): the gate below still
+        # answers by mode there. The nested eval ``tool()`` path reaches this
+        # same method, so the seam stays singular.
+        # Review Y2: a pull made by a NESTED call (eval's ``tool()``) latches
+        # through this same method, but the row that persists is eval's own
+        # result, whose ``egress.pulled`` is False. So eval's row is stamped
+        # when the latch first set while it ran; see the stamp below.
+        _latch = getattr(tool_context, "bridge_taint", None) if tool_context is not None else None
+        latched_before_call = _latch is None or bool(getattr(_latch, "latched", True))
+        egress = escalate_for_bridge_taint(
+            tool.name, tier, call.arguments, tool_context, context.messages
+        )
+        if egress.refusal is not None:
+            return self._synthetic_result(call, egress.refusal, details={FAULT_KEY: FAULT_DENIED})
+        tier = egress.tier
         if (
             tier in ("write", "exec")
             and tool_context is not None
             and tool_context.request_approval is not None
         ):
             summary = self._approval_summary(tool, call, tool_context.cwd, tool_context)
+            if egress.bridge_latched:
+                # S-46: the full target, untruncated, on a latched card -- the
+                # ordinary summary's clip is where a hostile URL hides its tail.
+                # Only when the summary does not already show all of it.
+                summary = latched_card_summary(summary, tool.name, call.arguments)
             if context.one_turn_secret_leases:
                 try:
                     if config.redact_tool_result is None:
@@ -6194,6 +6382,8 @@ class AgentLoop:
                     sanitize_prompt_line(call.name, limit=120),
                     summary,
                     tool_context.job_id,
+                    taint_raised=egress.taint_raised,
+                    bridge_latched=egress.bridge_latched,
                 )
             except asyncio.CancelledError:
                 raise
@@ -6437,6 +6627,7 @@ class AgentLoop:
                         arguments=planned.args,
                         verdict=nested_verdict,
                     )
+                    await self._bind_nested_diff(config, call.id, nested.id, name, result)
                     if config.redact_tool_result is not None:
                         # The same off-loop seam the history path uses: this
                         # result crosses back into arbitrary Python, and the
@@ -6559,6 +6750,18 @@ class AgentLoop:
                 and (result.details or {}).get(QUIET_TURN_KEY) is True
             ):
                 context.quiet_request_roots.add(item.quiet_root_id)
+            if egress.pulled or (
+                tool.name == "eval"
+                and not latched_before_call
+                and bool(getattr(_latch, "latched", False))
+            ):
+                # Review S-70: this read/grep latched the session by pulling
+                # a latched session's content. Its result row carries the
+                # stamp, as a ``sessions`` peek's does, so the pulled text is
+                # never durable without a source row -- the latch's own row
+                # lands only on the next commit. Stamped last, after the hooks
+                # and the public copy, so no copy can drop it.
+                result = result.model_copy(update={"details": stamp_details(result.details, True)})
             return result
         except asyncio.CancelledError:
             # A CANCELLED call's result never reaches ``_append_results``, so the
@@ -7827,10 +8030,15 @@ class AgentLoop:
         carried = result.take_diff_source()
         if carried is None:
             return
-        before, after, preview = carried
+        before, after, preview, full = carried
         details = dict(result.details or {})
         if redact is None:
             details["diff"] = list(preview)
+            if full is not None:
+                # No redactor means nothing proves the archive safe for a
+                # durable store that outlives this process: archive nothing,
+                # and say so rather than leave a false "not recorded".
+                details[DIFF_FULL_KEY] = diff_archive.descriptor(diff_archive.STATE_UNAVAILABLE)
             result.details = details
             return
         call_id = result.tool_call_id
@@ -7845,16 +8053,32 @@ class AgentLoop:
             verdict = context.exempt_source_verdicts.get(call_id)
         cwd = _session_cwd(context)
 
+        tool_context = context.tool_context
+        session_id = (tool_context.session_id if tool_context is not None else "") or ""
+        affected: list[tuple[set[int], set[int], set[str]]] = []
+
         def _run() -> list[str]:
             with (
                 tool_source(tool_name, arguments),
                 exempt_from_escalation(tool_name, arguments, cwd, verdict),
             ):
-                masked = _mask_by_source_evidence(
-                    preview,
-                    _source_affected_lines(before, redact),
-                    _source_affected_lines(after, redact),
-                )
+                # Each complete ORIGINAL side is redacted exactly once; the
+                # projection is reused below for the full-diff archive, so the
+                # preview and every archived page share one judgement.
+                old = _source_affected_lines(before, redact)
+                new = _source_affected_lines(after, redact)
+                # The masked lines' original TEXT travels with their indices so
+                # a copy or an edited counterpart of one inherits the mask in
+                # the preview AND the archive alike (QA F1 on #3762).
+                sensitive = _sensitive_line_texts(before, old) | _sensitive_line_texts(after, new)
+                affected.append((old, new, sensitive))
+                if tuple(preview) == (_DIFF_DETAIL_WITHHELD,):
+                    # The producer had no preview row that fit (only the
+                    # archive can show this change); the receipt is already
+                    # the safe public form, and the projection above still
+                    # feeds the archive.
+                    return list(preview)
+                masked = _mask_by_source_evidence(preview, old, new, sensitive)
                 out = _redact_diff_detail(masked, redact)
             if not isinstance(out, list):
                 raise ValueError
@@ -7865,7 +8089,122 @@ class AgentLoop:
         except Exception:  # noqa: BLE001 - no proof, no publication
             logger.warning("write/edit diff source redaction failed for %s", tool_name)
             details["diff"] = [_DIFF_DETAIL_WITHHELD]
+        if full is not None:
+            details[DIFF_FULL_KEY] = await self._archive_full_diff(
+                full,
+                affected[0] if affected else None,
+                redact,
+                tool_name=tool_name,
+                call_id=call_id,
+                session_id=session_id,
+                arguments=arguments,
+                verdict=verdict,
+                cwd=cwd,
+            )
         result.details = details
+
+    @staticmethod
+    async def _bind_nested_diff(
+        config: LoopConfig,
+        outer_call_id: str,
+        call_id: str,
+        tool_name: str,
+        result: ToolResult,
+    ) -> None:
+        """Make a NESTED call's archived diff reachable, or stop advertising it.
+
+        Only the outer ``eval`` row is persisted, so a nested write/edit has no
+        tool row for the diff routes to prove membership with (QA F5 on #3762:
+        archived descriptor live and in the cell, GET 404). The host binding is
+        awaited HERE -- after the settle wrote the descriptor and before the
+        end event or the cell sees it -- so whatever later happens to the outer
+        call, nothing was offered that the journal cannot serve. The binding is
+        built from this host-settled result only, never from what the cell
+        returns. No binding (no host hook, a write failure) downgrades the
+        descriptor to ``unavailable``: an honest state, never a dead link.
+        """
+        if tool_name not in ("write", "edit") or result.is_error:
+            return
+        details = result.details or {}
+        desc = details.get(DIFF_FULL_KEY)
+        if not isinstance(desc, dict) or desc.get("state") != diff_archive.STATE_ARCHIVED:
+            return
+        bound = False
+        if config.bind_nested_diff is not None:
+            try:
+                bound = bool(
+                    await config.bind_nested_diff(outer_call_id, call_id, tool_name, dict(desc))
+                )
+            except Exception:  # noqa: BLE001 - an unbound archive is reported unavailable
+                logger.warning("nested diff binding raised for %s", tool_name)
+        if not bound:
+            result.details = {
+                **details,
+                DIFF_FULL_KEY: diff_archive.descriptor(diff_archive.STATE_UNAVAILABLE),
+            }
+
+    @staticmethod
+    async def _archive_full_diff(
+        full: tuple[str, ...] | str,
+        affected: tuple[set[int], set[int], set[str]] | None,
+        redact: Callable[[str], str],
+        *,
+        tool_name: str,
+        call_id: str,
+        session_id: str,
+        arguments: Mapping[str, Any],
+        verdict: bool | None,
+        cwd: str | None,
+    ) -> dict[str, Any]:
+        """Redact and store the COMPLETE diff; return its content-free descriptor.
+
+        Same evidence order as the preview (``tools/diff_archive`` step 3): the
+        whole-side projection ``affected`` (computed once by the caller from
+        the exact original sides) masks the full signed diff, then the per-hunk
+        seam runs with the archive's scaled budgets. Nothing is re-diffed, and
+        only the redacted rows are written. No source projection (the whole
+        side refused) means no proof, so nothing is stored (``withheld``); no
+        session to bind the artifact to means no reader could ever prove
+        membership, so nothing is stored either (``unavailable``).
+        """
+        if isinstance(full, str):
+            return diff_archive.descriptor(diff_archive.STATE_OVERSIZED)
+        if affected is None:
+            return diff_archive.descriptor(diff_archive.STATE_WITHHELD)
+        if not session_id:
+            return diff_archive.descriptor(diff_archive.STATE_UNAVAILABLE)
+        old, new, sensitive = affected
+
+        def _run() -> dict[str, Any]:
+            with (
+                tool_source(tool_name, arguments),
+                exempt_from_escalation(tool_name, arguments, cwd, verdict),
+            ):
+                masked = _mask_by_source_evidence(full, old, new, sensitive)
+                out = _redact_diff_detail(
+                    masked,
+                    redact,
+                    max_rows=diff_archive.ARCHIVE_REDACT_ROWS,
+                    max_bytes=diff_archive.ARCHIVE_REDACT_BYTES,
+                )
+            # The seam's refusal is a one-row receipt; a row-count change is a
+            # shape the pager could not address exactly. Either way: no proof.
+            if (
+                not isinstance(out, list)
+                or len(out) != len(full)
+                or out[:1] == [_DIFF_DETAIL_WITHHELD]
+                or not all(isinstance(row, str) for row in out)
+            ):
+                return diff_archive.descriptor(diff_archive.STATE_WITHHELD)
+            return diff_archive.write_archive(
+                out, session_id=session_id, call_id=call_id, tool_name=tool_name
+            )
+
+        try:
+            return await asyncio.to_thread(_run)
+        except Exception:  # noqa: BLE001 - never fail a tool result over its archive
+            logger.warning("write/edit full-diff archive failed for %s", tool_name)
+            return diff_archive.descriptor(diff_archive.STATE_WITHHELD)
 
     @staticmethod
     async def _redact_details(
@@ -7898,12 +8237,16 @@ class AgentLoop:
         UI are all untouched, while the stored copy, the replay and the
         transcript get the mask the result text already had.
 
-        **Only the content-bearing keys, and only their strings.**
-        :data:`_CONTENT_BEARING_DETAIL_KEYS` names them (the file tools' diff
-        today). The other keys in the same dict — ``added``/``removed``
-        counters, the ``path``, ``spill`` handles — keep their exact values,
-        because their readers parse and compare them (the diff badge, compaction
-        pruning, the spill reader).
+        **Every string, and only strings.** :data:`_CONTENT_BEARING_DETAIL_KEYS`
+        (the file tools' diff) gets the hunk-aware masking below; every other
+        key's strings go through ``redact`` in place, without registering what
+        they match (follow-up to PR #3756: a details string outside the diff was
+        persisted unmasked); identifier-shaped strings get only the exact-value
+        pass (see :func:`_redact_nested_strings`). Numbers,
+        booleans, keys and container types keep their exact values — the
+        ``added``/``removed`` counters the diff badge reads, compaction's flags —
+        and an ordinary string (a ``path``, a ``spill`` handle) carries no shape,
+        so the redactor returns it unchanged.
 
         **A sibling of :meth:`_redact_content`, not a fusion**, because the two
         fire at different rates: the content scan is every result's hot path,
@@ -7921,15 +8264,16 @@ class AgentLoop:
         # to mask. See the block in ``_redact_content``.
         if tool_name in PUBLIC_COPY_TOOLS:
             return details
-        has_server_result = details.get("server_result") is not None
-        if not has_server_result and not any(
-            isinstance(details.get(key), str)
-            or (
-                isinstance(details.get(key), (list, tuple))
-                and any(isinstance(item, str) for item in details[key])
-            )
-            for key in _CONTENT_BEARING_DETAIL_KEYS
-        ):
+        # EVERY string in details is masked, not only the diff and the MCP
+        # payload (follow-up to PR #3756). ``Message.tool_result`` lifts the
+        # whole dict into ``provider_payload['details']`` and that is written to
+        # transcript.jsonl as is, so any tool that echoes command output, a row
+        # or a URL into details (``rows``, ``jobs``, ``url`` …) persisted what
+        # the result text had masked. One walk at this seam covers every tool,
+        # present and future, instead of a list of keys that is wrong the day a
+        # tool adds one. Only strings change; keys, numbers and flags keep their
+        # exact values for the readers that parse them.
+        if not _carries_scannable_string(details):
             return details
 
         def _run() -> dict[str, Any]:
@@ -7937,7 +8281,23 @@ class AgentLoop:
                 tool_source(tool_name, arguments),
                 exempt_from_escalation(tool_name, arguments, session_cwd, exempt_verdict),
             ):
-                out = dict(details)
+                # IN PLACE, never registered (PR #3789 review R1): details is a
+                # copy of what the result's content already carried, and the
+                # content scan registered everything found there. A match only
+                # these strings show must not become a session-wide value: a
+                # details-only false positive would then mask the same bytes in
+                # every later, unrelated result. The diff keeps base behaviour.
+                with redaction_scope("uncontained"):
+                    out = {
+                        key: (
+                            value
+                            if key in _CONTENT_BEARING_DETAIL_KEYS
+                            else _redact_nested_strings(
+                                value, redact, content_only=key != "server_result"
+                            )
+                        )
+                        for key, value in details.items()
+                    }
                 for key in _CONTENT_BEARING_DETAIL_KEYS:
                     if key in details:
                         value = details[key]
@@ -7955,13 +8315,8 @@ class AgentLoop:
                             out[key] = tuple(masked) if isinstance(value, tuple) else masked
                         else:
                             out[key] = _redact_diff_detail(value, redact)
-                if has_server_result:
-                    # An MCP result's raw server payload
-                    # (``mcp/tool_bridge.py``) rides into the transcript
-                    # beside the masked text, so it was the copy that kept the
-                    # value (PR #3756, QA Q6). Every string in it is masked;
-                    # keys and non-string values keep theirs.
-                    out["server_result"] = _redact_nested_strings(details["server_result"], redact)
+                # ``server_result`` (an MCP result's raw payload, PR #3756 QA Q6)
+                # is covered by the walk above like every other key.
                 return out
 
         return await asyncio.to_thread(_run)

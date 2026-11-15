@@ -409,6 +409,8 @@
   "wire.settings.network_credentials_github_repositories.placeholder": "damianvtran/scratch, damianvtran/sandbox",
   "wire.settings.network_credentials_grant_ttl_s.help": "Thời gian dài nhất một thiết bị được dùng đăng nhập mượn từ chủ sở hữu trước khi phải hỏi lại, cũng là thời gian đăng nhập của chủ sở hữu đã thu hồi hoặc ngoại tuyến còn hoạt động ở nơi khác. Không bao giờ dài hơn chính token.",
   "wire.settings.network_credentials_grant_ttl_s.label": "Thời hạn đăng nhập mượn (giây)",
+  "wire.settings.network_credentials_offline_hold_s.help": "Thời gian một thiết bị khác tiếp tục dùng đăng nhập đã mượn trong lúc thiết bị sở hữu đăng nhập đó không liên lạc được (ở chế độ ngủ, ngoại tuyến). Không bao giờ dài hơn chính token; giá trị của chủ sở hữu và của thiết bị này đều áp dụng, giá trị ngắn hơn được dùng.",
+  "wire.settings.network_credentials_offline_hold_s.label": "Giữ đăng nhập mượn khi chủ sở hữu vắng (giây)",
   "wire.settings.network_listen_address.help": "127.0.0.1 = chỉ gọi ra; 0.0.0.0 = tất cả; hoặc một địa chỉ.",
   "wire.settings.network_listen_address.label": "Địa chỉ lắng nghe",
   "wire.settings.network_max_handshakes.help": "Số kết nối chưa xác thực mà relay này giữ cùng lúc. Một lần ghép nối giữ một kết nối trong vài giây cho đến khi mã được nhập; phần vượt trần bị loại ngay khi chấp nhận, không có khung hồi đáp.",
@@ -857,5 +859,11 @@
   "wire.settings.web_search_timeout_seconds.help": "Hết giờ cho mỗi yêu cầu nhà cung cấp. Được kẹp trong khoảng 1-120 khi đọc.",
   "wire.settings.web_search_timeout_seconds.label": "Hết giờ (giây)",
   "wire.settings.web_tools.description": "Liệu các công cụ tìm kiếm và fetch có được cung cấp và cho phép chạy hay không.",
-  "wire.settings.web_tools.title": "Công cụ web"
+  "wire.settings.web_tools.title": "Công cụ web",
+  "wire.settings.session_cleanup_temporary_idle_minutes.choice.15m.label": "15 phút",
+  "wire.settings.session_cleanup_temporary_idle_minutes.choice.30m.label": "30 phút",
+  "wire.settings.session_cleanup_temporary_idle_minutes.choice.2h.label": "2 giờ",
+  "wire.settings.session_cleanup_temporary_idle_minutes.choice.24h.label": "24 giờ",
+  "wire.settings.session_cleanup_temporary_idle_minutes.label": "Xóa cuộc trò chuyện tạm thời sau",
+  "wire.settings.session_cleanup_temporary_idle_minutes.help": "Thời gian một cuộc trò chuyện tạm thời có thể không hoạt động trước khi bị xóa. Thời gian hiển thị trên màn hình, tác vụ đang chạy hoặc câu hỏi đang mở không được tính là không hoạt động."
 }

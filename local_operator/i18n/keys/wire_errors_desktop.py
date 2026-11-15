@@ -317,6 +317,10 @@ def session_files_not_an_artifact() -> Msg:
     return Msg("wire.errors.desktop.session_files_not_an_artifact", {})
 
 
+def session_in_project(*, session_id: str) -> Msg:
+    return Msg("wire.errors.desktop.session_in_project", {"session_id": session_id})
+
+
 def session_is_remote_open(*, session_id: str, label: str) -> Msg:
     return Msg(
         "wire.errors.desktop.session_is_remote_open",
@@ -333,6 +337,18 @@ def session_is_remote_write(*, noun: str, session_id: str, label: str) -> Msg:
 
 def session_not_found(*, session_id: str) -> Msg:
     return Msg("wire.errors.desktop.session_not_found", {"session_id": session_id})
+
+
+def session_pinned(*, session_id: str) -> Msg:
+    return Msg("wire.errors.desktop.session_pinned", {"session_id": session_id})
+
+
+def session_temporary(*, session_id: str) -> Msg:
+    return Msg("wire.errors.desktop.session_temporary", {"session_id": session_id})
+
+
+def session_temporary_deleted() -> Msg:
+    return Msg("wire.errors.desktop.session_temporary_deleted", {})
 
 
 def settings_intent_generation_moved() -> Msg:
@@ -365,6 +381,18 @@ def sort_unknown(*, sorts: str) -> Msg:
 
 def start_after_end() -> Msg:
     return Msg("wire.errors.desktop.start_after_end", {})
+
+
+def temporary_mark_failed(*, session_id: str) -> Msg:
+    return Msg("wire.errors.desktop.temporary_mark_failed", {"session_id": session_id})
+
+
+def temporary_not_user(*, session_id: str) -> Msg:
+    return Msg("wire.errors.desktop.temporary_not_user", {"session_id": session_id})
+
+
+def temporary_peer_unsupported() -> Msg:
+    return Msg("wire.errors.desktop.temporary_peer_unsupported", {})
 
 
 def unknown_command() -> Msg:

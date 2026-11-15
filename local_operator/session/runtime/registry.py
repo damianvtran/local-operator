@@ -705,6 +705,7 @@ def scan(
     check_zombie: bool | None = None,
     reap: bool = True,
     unreadable_ttl_s: float = 0.0,
+    strict: bool = False,
 ) -> list[tuple[T, str]]:
     """Read every record in one namespace, classifying each as ``live`` /
     ``wedged`` / ``stale``.
@@ -794,8 +795,12 @@ def scan(
       one either: the record this KEEPS pins the generation prune to
       "incomplete", and the same reaper clears it once the window is out.
     """
+    # Strict is opt-in for consent: missing/unreadable inventories are unknown,
+    # while a successfully read empty directory positively proves no records.
     directory = run_dir(root, dirname)
     if not directory.is_dir():
+        if strict:
+            raise FileNotFoundError(directory)
         # A READ MUST NOT CREATE THE NAMESPACE IT READS (see :func:`run_dir`).
         # ``glob`` over an absent directory yields nothing, so this answers what
         # the caller would have got from an empty one, minus the mkdir — and it is
@@ -810,10 +815,14 @@ def scan(
     # a reaping scan still removes what it proves dead — because the two loops
     # walk the same sorted list.
     parsed: list[tuple[Path, T]] = []
-    for path in sorted(directory.glob("*.json")):
+    # Consent checks need a complete inventory; glob can hide unreadable roots.
+    paths = directory.iterdir() if strict else directory.glob("*.json")
+    for path in sorted(p for p in paths if p.suffix == ".json"):
         try:
             record = parse(json.loads(path.read_text()))
         except Exception as exc:  # noqa: BLE001 — one entry costs itself, never its neighbours
+            if strict:
+                raise
             # READER MODE REMOVES NOTHING (see ``reap`` below), including a file
             # it could not parse: a reader that deleted what it could not read
             # would be the only mutator on this path, and the record is the one

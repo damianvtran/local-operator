@@ -200,6 +200,7 @@ export function SessionHealthControl({
 	onOpenChange,
 	resume: { busy, error, notice, resume },
 	children,
+	temporary = false,
 }: {
 	projection: SessionProjection;
 	connected: boolean;
@@ -211,6 +212,9 @@ export function SessionHealthControl({
 	onOpenChange: (open: boolean) => void;
 	resume: ReturnType<typeof useResume>;
 	children: ReactNode;
+	/** The chat is temporary (`lib/temporary`, already capability-gated):
+	    the subtitle leads with the mark. */
+	temporary?: boolean;
 }) {
 	const health = sessionHealth(projection, connected);
 	const label = healthLabel(health);
@@ -239,7 +243,7 @@ export function SessionHealthControl({
 				    words and break label-in-name for speech users. */}
 				{health === "live" ? <span className="sr-only">{label} · </span> : null}
 				<span className="min-w-0">
-					<SessionSubtitle projection={projection} connected={connected} />
+					<SessionSubtitle projection={projection} connected={connected} temporary={temporary} />
 				</span>
 				</span>
 			</button>

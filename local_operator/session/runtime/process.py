@@ -6709,6 +6709,15 @@ def main() -> int:
     except Exception:  # noqa: BLE001 — a warm-up must never be the failure
         logger.debug("tokenizer prewarm unavailable at boot", exc_info=True)
 
+    # THIS RUNTIME HOSTS ITS OWN SESSION, so a ``LOCAL_OPERATOR_SESSION_ID`` it
+    # inherited (it was started from a tool's shell) names the parent and would
+    # misattribute this process's audit rows (#3436 review R1-1). Dropped before
+    # the log, the lease, the session and anything that can spawn; after the
+    # warm-start above only because ``secrets.access`` is not a stdlib import.
+    from local_operator.secrets import access as _secrets_access
+
+    _secrets_access.forget_inherited_session_id()
+
     # A child has no terminal and no inherited log stream — without this its
     # warnings (a failed prompt, a dead provider) vanish, which is how a
     # silently-dropped turn went undiagnosed. It writes a file of its own; why

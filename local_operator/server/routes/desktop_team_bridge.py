@@ -1049,9 +1049,12 @@ def _connector_state(config_dir: Path) -> str:
     installation belongs to the commit, opt-out and surface-start events.
     """
 
-    from local_operator.team_bridge.connector.install import connector_state
+    # CACHED (~5 s): this runs on every status poll and the ``launchctl print``
+    # under it was ~32 ms of each Team Bridge open. It is a display state, and
+    # in-process installs/removals invalidate it — ``cached_connector_state``.
+    from local_operator.team_bridge.connector.install import cached_connector_state
 
-    return connector_state(config_dir)
+    return cached_connector_state(config_dir)
 
 
 def _locally_enrolled(config_manager: ConfigManager, check: Any) -> bool:

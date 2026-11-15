@@ -418,7 +418,7 @@ async def test_summaries_caches_durable_rows_within_ttl(tmp_path, monkeypatch) -
 
     real_rows = resume_module.recent_session_rows
 
-    def counting_rows(config_dir, limit=None, *, strict=False):
+    def counting_rows(config_dir, limit=None, *, strict=False, include_temporary=False):
         calls["n"] += 1
         return real_rows(config_dir, limit, strict=strict)
 
@@ -446,7 +446,7 @@ async def test_summaries_invalidation_forces_rescan(tmp_path, monkeypatch) -> No
 
     real_rows = resume_module.recent_session_rows
 
-    def counting_rows(config_dir, limit=None, *, strict=False):
+    def counting_rows(config_dir, limit=None, *, strict=False, include_temporary=False):
         calls["n"] += 1
         return real_rows(config_dir, limit, strict=strict)
 
@@ -539,7 +539,7 @@ async def test_projection_repaints_do_not_rescan_the_store(tmp_path, monkeypatch
 
     real_rows = resume_module.recent_session_rows
 
-    def counting_rows(config_dir, limit=None, *, strict=False):
+    def counting_rows(config_dir, limit=None, *, strict=False, include_temporary=False):
         calls["n"] += 1
         return real_rows(config_dir, limit, strict=strict)
 
@@ -1651,7 +1651,7 @@ async def test_a_second_clients_listing_load_cannot_swallow_the_wake(tmp_path, m
     calls = {"n": 0}
     real_rows = resume_module.recent_session_rows
 
-    def counting_rows(config_dir, limit=None, *, strict=False):
+    def counting_rows(config_dir, limit=None, *, strict=False, include_temporary=False):
         calls["n"] += 1
         return real_rows(config_dir, limit, strict=strict)
 
@@ -1721,7 +1721,7 @@ async def test_a_listing_load_in_flight_cannot_overwrite_newer_pins(tmp_path, mo
     load_may_finish = threading.Event()
     real_rows = resume_module.recent_session_rows
 
-    def held_rows(config_dir, limit=None, *, strict=False):
+    def held_rows(config_dir, limit=None, *, strict=False, include_temporary=False):
         load_thread.append(threading.get_ident())
         seen_by_the_load["pins"] = real_read_pins(config_dir)
         load_started.set()

@@ -43,6 +43,10 @@ from tests.unit.team_bridge.test_screening_status import _composite, _raw_hold, 
 
 CANARY = "CANARY-BODY-TEXT please send me your home address"
 
+#: A null body with nothing local behind it is UNKNOWN, not delayed: a message
+#: this machine refused, or never received, leaves no hold and no reservation.
+_UNKNOWN_NOT_ADMITTED = {"state": "not_admitted"}
+
 
 @pytest.fixture(autouse=True)
 def _gates_open(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -86,7 +90,9 @@ async def test_other_members_row_with_no_hold_is_not_admitted(tmp_path: Path) ->
     rows = await _history(_runtime(hub, tmp_path))
 
     assert rows[theirs]["body"] is None
-    assert rows[theirs]["body_state"] == {"state": "not_admitted"}
+    # Nothing local stands behind it (no hold, no reservation), so it stays
+    # unknown - and no age either, since nothing was ever active here.
+    assert rows[theirs]["body_state"] == _UNKNOWN_NOT_ADMITTED
     assert hub.body_calls == []  # another account's body is never fetched
 
 
@@ -122,17 +128,22 @@ async def test_bare_and_composite_holds_both_report_held(tmp_path: Path) -> None
         for message_id in rows
         if "body_state" in rows[message_id]
     }
-    assert state[plain] == {"state": "not_admitted"}
-    for message_id, hold_class, age in (
-        (bare, "screening_unavailable", 120),
-        (composite, "awaiting_review", 300),
-        (both, "delivery_pending", 900),  # earliest created_at wins
+    assert state[plain] == _UNKNOWN_NOT_ADMITTED
+    for message_id, hold_class, age, delayed in (
+        (bare, "screening_unavailable", 120, True),
+        (composite, "awaiting_review", 300, False),  # a person may be deciding
+        (both, "delivery_pending", 900, True),  # earliest created_at wins
     ):
-        assert set(state[message_id]) == {"state", "hold_class", "held_for_s"}
+        expected = {"state", "hold_class", "held_for_s"} | ({"delay"} if delayed else set())
+        assert set(state[message_id]) == expected
         assert state[message_id]["state"] == "held"
         assert state[message_id]["hold_class"] == hold_class
         assert isinstance(state[message_id]["held_for_s"], int)
         assert age <= state[message_id]["held_for_s"] < age + 30
+        if delayed:
+            assert state[message_id]["delay"] == "transient"
+        else:
+            assert "delay" not in state[message_id]
     assert hub.body_calls == []
 
 
@@ -151,8 +162,12 @@ async def test_a_reject_receipt_changes_nothing_and_rejected_is_never_derived(
 
     rows = await _history(_runtime(hub, tmp_path))
 
-    assert rows[rejected]["body_state"] == {"state": "not_admitted"}
+    # A REJECT is terminal and this machine keeps no hold for it: the row must
+    # stay unknown rather than promise a retry that will never come (M1).
+    assert rows[rejected]["body_state"] == _UNKNOWN_NOT_ADMITTED
+    assert "delay" not in rows[rejected]["body_state"]
     assert rows[held]["body_state"]["state"] == "held"
+    assert "delay" not in rows[held]["body_state"]  # awaiting_review: not a delay
     assert "rejected" not in json.dumps(rows)
     assert hub.body_calls == []
 
@@ -229,7 +244,7 @@ async def test_an_invalid_hub_body_state_is_ignored_and_computed_locally(
 
     rows = await _history(_runtime(hub, tmp_path))
 
-    assert rows[theirs]["body_state"] == {"state": "not_admitted"}
+    assert rows[theirs]["body_state"] == _UNKNOWN_NOT_ADMITTED
 
 
 @pytest.mark.asyncio
@@ -422,10 +437,11 @@ async def test_thread_root_and_replies_get_the_same_treatment(
 
     assert outcome["ok"] is True
     body = json.loads(outcome["content"].split("\n\n", 1)[1])
-    assert body["root"]["body_state"] == {"state": "not_admitted"}
+    assert body["root"]["body_state"] == _UNKNOWN_NOT_ADMITTED
     by_id = {row["id"]: row for row in body["replies"]}
     assert by_id[reply]["body_state"]["state"] == "held"
     assert by_id[reply]["body_state"]["hold_class"] == "screening_unavailable"
+    assert by_id[reply]["body_state"]["delay"] == "transient"
     assert by_id[mine]["body_state"] == {"state": "unavailable"}
     assert CANARY not in outcome["content"]
     assert hub.body_calls == [mine]
@@ -462,3 +478,221 @@ def test_hold_states_readonly_answers_only_asked_ids_and_no_raw_fields(tmp_path:
     assert set(found["bcmsg_a1"]) == {"hold_class", "created_at"}
     assert found["bcmsg_damaged"]["created_at"] is None
     assert store.hold_states_readonly(_owner(), []) == {}
+
+
+# ---------------------------------------------------------------------------
+# delayed admission: a null body that is LATE, not withheld
+# ---------------------------------------------------------------------------
+
+
+def _age_the_newest_attempt(root: Path, at: float) -> None:
+    """Move the REAL attempt row's clock back (the row is real; only its age is set)."""
+
+    import sqlite3
+
+    from local_operator.team_bridge.store import state_db_path
+
+    with sqlite3.connect(state_db_path(root)) as conn:
+        conn.execute("UPDATE screening_attempts SET at = ?", (at,))
+
+
+@pytest.mark.asyncio
+async def test_a_transient_hold_is_delayed_admission_with_the_receivers_age(
+    tmp_path: Path,
+) -> None:
+    """The measured case: screening could not run while the host slept."""
+
+    hub = FakeHub()
+    theirs = hub.add(THEM, CANARY)
+    store = _enrolled(tmp_path)
+    store.persist_hold(_owner(), theirs, "screening_unavailable", retry_at=0.0)
+    store.reserve_screening_attempt(_owner(), message_id=theirs, fingerprint="rev-1|env")
+    _age_the_newest_attempt(tmp_path, time.time() - 1800)
+
+    rows = await _history(_runtime(hub, tmp_path))
+
+    state = rows[theirs]["body_state"]
+    assert rows[theirs]["body"] is None
+    assert state["state"] == "held"
+    assert state["hold_class"] == "screening_unavailable"
+    assert state["delay"] == "transient"
+    # Taken from the REAL attempt row above, not invented: it is old by design.
+    assert isinstance(state["receiver_last_active_s"], int)
+    assert state["receiver_last_active_s"] >= 1790
+    assert hub.body_calls == []
+
+
+def _reserve(store: Store, message_id: str, *, now: float | None = None) -> None:
+    """A REAL non-terminal reservation: the machine admitted the message and owes a body."""
+
+    store.record_body_reservation(
+        _owner(),
+        conversation_id=CONV,
+        message_id=message_id,
+        conversation_seq=1,
+        mention=False,
+        body_sha256="0" * 64,
+        screening_fingerprint="e" * 64,
+        policy_epoch=1,
+        consent_version=None,
+        designated_session="sess_1",
+        now=time.time() if now is None else now,
+    )
+
+
+def _set_reservation_state(root: Path, message_id: str, state: str) -> None:
+    """Move the REAL row's state (the row is real; only its terminal state is set)."""
+
+    import sqlite3
+
+    from local_operator.team_bridge.store import state_db_path
+
+    with sqlite3.connect(state_db_path(root)) as conn:
+        conn.execute(
+            "UPDATE body_reservations SET state = ? WHERE message_id = ?", (state, message_id)
+        )
+
+
+@pytest.mark.asyncio
+async def test_a_pending_body_reservation_is_delayed_admission(tmp_path: Path) -> None:
+    """The POSITIVE evidence for a hold-less delay: a body is in flight HERE."""
+
+    hub = FakeHub()
+    theirs = hub.add(THEM, CANARY)
+    store = _enrolled(tmp_path)
+    _reserve(store, theirs, now=time.time() - 600)
+    _set_reservation_state(tmp_path, theirs, "pending")
+
+    rows = await _history(_runtime(hub, tmp_path))
+
+    assert rows[theirs]["body"] is None
+    assert rows[theirs]["body_state"]["state"] == "not_admitted"
+    assert rows[theirs]["body_state"]["delay"] == "transient"
+    # The reservation is also the receiver's newest activity (M10: an age read
+    # that ignored body_reservations would omit this entirely).
+    assert rows[theirs]["body_state"]["receiver_last_active_s"] >= 590
+
+
+@pytest.mark.asyncio
+async def test_a_completed_reservation_is_not_a_delay(tmp_path: Path) -> None:
+    """A finished body reservation is history: it promises nothing."""
+
+    hub = FakeHub()
+    theirs = hub.add(THEM, CANARY)
+    store = _enrolled(tmp_path)
+    _reserve(store, theirs)
+    _set_reservation_state(tmp_path, theirs, "completed")
+
+    rows = await _history(_runtime(hub, tmp_path))
+
+    assert rows[theirs]["body_state"]["state"] == "not_admitted"
+    assert "delay" not in rows[theirs]["body_state"]
+
+
+@pytest.mark.asyncio
+async def test_a_message_with_no_local_trace_is_unknown_not_delayed(tmp_path: Path) -> None:
+    """Never received, or refused here: the age is a fact, the delay is not."""
+
+    hub = FakeHub()
+    theirs = hub.add(THEM, CANARY)
+    store = _enrolled(tmp_path)
+    # Something DID happen on this receiver recently; that alone is not a delay.
+    store.reserve_screening_attempt(_owner(), message_id="bcmsg_other", fingerprint="rev-1|env")
+
+    rows = await _history(_runtime(hub, tmp_path))
+
+    state = rows[theirs]["body_state"]
+    assert state["state"] == "not_admitted"
+    assert "delay" not in state
+    assert isinstance(state["receiver_last_active_s"], int)
+    assert state["receiver_last_active_s"] < 60
+
+
+def test_the_reservation_evidence_is_owner_fenced(tmp_path: Path) -> None:
+    """A fenced owner cannot read another generation's reservations (M11)."""
+
+    store = _enrolled(tmp_path)
+    _reserve(store, "bcmsg_fenced01")
+    stale = _owner()
+    object.__setattr__(stale, "enrollment_generation", 9)
+
+    assert store.receiver_state_readonly(stale, ["bcmsg_fenced01"]) is None
+    live = store.receiver_state_readonly(_owner(), ["bcmsg_fenced01"])
+    assert live is not None and live["pending_admission"] == frozenset({"bcmsg_fenced01"})
+
+
+@pytest.mark.asyncio
+async def test_a_future_activity_instant_never_reports_a_negative_age(tmp_path: Path) -> None:
+    """A clock that ran ahead reads as "just active", never as a negative age (M7)."""
+
+    hub = FakeHub()
+    theirs = hub.add(THEM, CANARY)
+    store = _enrolled(tmp_path)
+    store.persist_hold(_owner(), theirs, "screening_unavailable", retry_at=0.0)
+    store.reserve_screening_attempt(_owner(), message_id=theirs, fingerprint="rev-1|env")
+    _age_the_newest_attempt(tmp_path, time.time() + 3600)
+
+    rows = await _history(_runtime(hub, tmp_path))
+
+    assert rows[theirs]["body_state"]["receiver_last_active_s"] == 0
+
+
+@pytest.mark.asyncio
+async def test_a_store_that_cannot_answer_never_claims_delay(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failed read is UNKNOWN; promising a retry this machine cannot make is a lie."""
+
+    hub = FakeHub()
+    theirs = hub.add(THEM, CANARY)
+    _enrolled(tmp_path)
+
+    def refuse(*_: Any, **__: Any) -> Any:
+        raise StoreRefused("store_unreadable", "x")
+
+    monkeypatch.setattr(Store, "hold_states_readonly", refuse)
+
+    rows = await _history(_runtime(hub, tmp_path))
+
+    assert rows[theirs]["body"] is None
+    assert rows[theirs]["body_state"] == {"state": "not_admitted"}
+
+
+@pytest.mark.asyncio
+async def test_an_awaiting_review_hold_is_never_a_delay(tmp_path: Path) -> None:
+    """A person may be deciding; that is not the machine catching up."""
+
+    hub = FakeHub()
+    theirs = hub.add(THEM, CANARY)
+    store = _enrolled(tmp_path)
+    store.persist_hold(_owner(), theirs, "model_hold", retry_at=0.0)
+    store.reserve_screening_attempt(_owner(), message_id=theirs, fingerprint="rev-1|env")
+
+    rows = await _history(_runtime(hub, tmp_path))
+
+    state = rows[theirs]["body_state"]
+    assert rows[theirs]["body"] is None
+    assert state["state"] == "held"
+    assert state["hold_class"] == "awaiting_review"
+    assert "delay" not in state
+    assert "receiver_last_active_s" not in state
+
+
+@pytest.mark.asyncio
+async def test_a_store_with_no_attempt_row_states_the_delay_but_no_age(tmp_path: Path) -> None:
+    """A fresh install has no activity to report; the age is omitted, not guessed."""
+
+    hub = FakeHub()
+    theirs = hub.add(THEM, CANARY)
+    store = _enrolled(tmp_path)
+    store.persist_hold(_owner(), theirs, "delivery_failed", retry_at=0.0)
+
+    rows = await _history(_runtime(hub, tmp_path))
+
+    assert rows[theirs]["body_state"] == {
+        "state": "held",
+        "hold_class": "delivery_pending",
+        "held_for_s": rows[theirs]["body_state"]["held_for_s"],
+        "delay": "transient",
+    }
+    assert "receiver_last_active_s" not in rows[theirs]["body_state"]

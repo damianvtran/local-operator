@@ -146,6 +146,21 @@ def _reap(child: subprocess.Popen[bytes]) -> None:
             os.killpg(child.pid, signal.SIGKILL)
         except ProcessLookupError:
             pass
+        except PermissionError:
+            # Darwin can return EPERM if the child exits after poll() but is
+            # still an unreaped zombie. Popen.poll() reaps a newly exited child;
+            # wait() completes that ownership contract before checking the group.
+            # An exited leader alone is insufficient: descendants may still own
+            # the lease. Accept only ESRCH after reaping, never a denied probe or
+            # a group that remains alive, and do not retry an unowned group.
+            if child.poll() is None:
+                raise
+            child.wait(timeout=30)
+            try:
+                os.killpg(child.pid, 0)
+            except ProcessLookupError:
+                return
+            raise
     try:
         child.wait(timeout=30)
     except subprocess.TimeoutExpired:  # pragma: no cover — a wedged child is a failure

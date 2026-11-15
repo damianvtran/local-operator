@@ -4073,7 +4073,28 @@ def build_completion_challenge(
       operand otherwise (the instruction is never summarised away -- every
       compaction in the corpus is ``strategy="prune"`` with no summary);
     * re-attach the end state and say it is the only evidence that counts, so
-      "done" has to be defended against a picture rather than a memory.
+      "done" has to be defended against the world rather than a memory.
+
+    VERIFY AT THE SOURCE, NOT THE PICTURE (arm main29, local-operator
+    ``ad1aa4162a6e``). The earlier wording asked only whether the SCREENSHOT
+    showed each required outcome, and the sealed corpus measured what that
+    misses: in ``t29a-t010`` the model saved a document whose one wrong table
+    cell (a unit rate of 378.67 where 302.93 was required -- its own finish
+    text stated ``378.67 x 61 = 18,478.93``, which is false arithmetic) failed
+    an exact content check; the challenge sent it back to re-check how the
+    window LOOKED, and it re-confirmed the rendering. In ``t29a-t003`` the task
+    asked for 40% transparency and the model set 40% opacity -- the screen
+    looked finished either way. So the done-challenge now asks for the checks
+    a screenshot cannot answer: requirements re-read one by one in their exact
+    wording, saved files and changed state inspected for their actual
+    CONTENTS, derived numbers recomputed from their inputs, and quantities
+    checked against the one the task names (units, a quantity versus its
+    complement). The text is deliberately GENERIC: no task names, no benchmark-
+    or application-specific hints, because it is the shared builder for every
+    task on both channels and a hint would leak an answer into the protocol.
+    Constraint kept: the screenshot is still re-attached and still evidence;
+    "the only evidence that counts" now names the observation AND what the
+    model can inspect from it, never the model's own account.
 
     BOTH replies are named, including the one that changes nothing. Re-declaring
     the SAME finish is the correct answer when the observation already shows
@@ -4120,14 +4141,25 @@ def build_completion_challenge(
         "is complete.\n\n"
         "The task you were given was:\n"
         f"{_bounded_quote(instruction)}\n\n"
-        "The screenshot below is the state your LAST action produced. It is the only "
-        "evidence that counts. Read it, and for each thing the task requires, ask "
-        "whether THIS observation shows it. If any required outcome is not visible "
-        "here, the task is not finished.\n\n"
+        "The screenshot below is the state your LAST action produced. It and what you "
+        "can inspect from it are the only evidence that counts -- but how the screen "
+        "looks is not the same as what was saved or set. Verify at the source:\n"
+        "1. Re-read the task above and go through its requirements one by one, in "
+        "their exact wording.\n"
+        "2. For every file you saved and every setting or value you changed, inspect "
+        "the actual contents (open or read the saved file, read the exact cell, field "
+        "or property value), not only how it renders on screen.\n"
+        "3. Recompute every number you derived or entered from its inputs; do not "
+        "reuse your earlier result.\n"
+        "4. Confirm each requirement's exact wording is met: the units, the precise "
+        "quantity named (a quantity and its complement or opposite are not "
+        "interchangeable), names, formats and locations.\n"
+        "If any requirement is not met exactly, the task is not finished.\n\n"
         "Reply in exactly one of these two ways:\n"
-        "* the SAME finish action, unchanged, if this observation already shows every "
-        "required outcome; or\n"
-        "* a batch of actions that closes the gap you can see.\n\n"
+        "* the SAME finish action, unchanged, if you have verified every requirement "
+        "at the source; or\n"
+        "* a batch of actions that inspects what you have not yet verified, or closes "
+        "a gap you found.\n\n"
         "Do no optional extra work, and do not restate your plan. " + guidance
     )
 

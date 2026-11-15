@@ -503,5 +503,82 @@
     "tone": "Sentence case (the redesign's O1); no trailing period on a label.",
     "maxCells": 24,
     "note": "Owned relay SPA chrome for the borderless redesign (docs/design/mobile-relay-redesign.md). A row at the top of the model picker that opens the reasoning-effort picker; the current effort level (an untranslated provider word such as 'high') renders beside it as a trailing value."
+  },
+  "relay.chrome.section_temporary": {
+    "role": "conversation list group heading for temporary chats, with how many there are",
+    "tone": "Same register as the Pinned/Active/Previous headings. Keep ' · ' and the number.",
+    "note": "{count} is the number of temporary chats in the collapsed group at the head of the list."
+  },
+  "relay.chrome.temporary_deletes_in": {
+    "role": "temporary chat row meta: time left before the machine deletes it",
+    "tone": "Terse meta line, sentence case; 'min' is the minutes abbreviation.",
+    "note": "{minutes} is a whole number of minutes, at least 1. Plural arms per locale CLDR rules.",
+    "maxCells": 24
+  },
+  "relay.chrome.temporary_hold_running": {
+    "role": "temporary chat row meta: why the deletion clock is paused",
+    "tone": "Terse meta line, sentence case, starts with the idea 'kept'.",
+    "note": "Shown instead of the countdown while a turn, subagent or job is running in the chat. The chat is not deleted while this holds.",
+    "maxCells": 36
+  },
+  "relay.chrome.temporary_hold_on_screen": {
+    "role": "temporary chat row meta: why the deletion clock is paused",
+    "tone": "Terse meta line, sentence case, starts with the idea 'kept'.",
+    "note": "Shown instead of the countdown while the chat is open on screen on some device. The chat is not deleted while this holds.",
+    "maxCells": 36
+  },
+  "relay.chrome.temporary_hold_open_ask": {
+    "role": "temporary chat row meta: why the deletion clock is paused",
+    "tone": "Terse meta line, sentence case, starts with the idea 'kept'.",
+    "note": "Shown instead of the countdown while the chat has an open question waiting for the user. The chat is not deleted while this holds.",
+    "maxCells": 36
+  },
+  "relay.chrome.temporary_hold_armed_wake": {
+    "role": "temporary chat row meta: why the deletion clock is paused",
+    "tone": "Terse meta line, sentence case, starts with the idea 'kept'.",
+    "note": "Shown instead of the countdown while a scheduled wake-up (reminder) is armed in the chat. The chat is not deleted while this holds.",
+    "maxCells": 36
+  },
+  "relay.chrome.temporary_hold_armed_monitor": {
+    "role": "temporary chat row meta: why the deletion clock is paused",
+    "tone": "Terse meta line, sentence case, starts with the idea 'kept'.",
+    "note": "Shown instead of the countdown while a monitor (a watch that reports changes) is armed in the chat. The chat is not deleted while this holds.",
+    "maxCells": 36
+  },
+  "relay.chrome.temporary_hold_unread_mail": {
+    "role": "temporary chat row meta: why the deletion clock is paused",
+    "tone": "Terse meta line, sentence case, starts with the idea 'kept'.",
+    "note": "Shown instead of the countdown while the chat has unread messages from other sessions. The chat is not deleted while this holds.",
+    "maxCells": 36
+  },
+  "relay.chrome.temporary_hold_operator_hold": {
+    "role": "temporary chat row meta: why the deletion clock is paused",
+    "tone": "Terse meta line, sentence case, starts with the idea 'kept'.",
+    "note": "Shown instead of the countdown while the user or operator placed a hold on the chat. The chat is not deleted while this holds.",
+    "maxCells": 36
+  },
+  "relay.chrome.temporary_hold_unseen_result": {
+    "role": "temporary chat row meta: why the deletion clock is paused",
+    "tone": "Terse meta line, sentence case, starts with the idea 'kept'.",
+    "note": "Shown instead of the countdown while the chat finished work the user has not looked at yet (capped at 24 h). The chat is not deleted while this holds.",
+    "maxCells": 36
+  },
+  "relay.chrome.temporary_hold_unsaved_files": {
+    "role": "temporary chat row meta: why the deletion clock is paused",
+    "tone": "Terse meta line, sentence case, starts with the idea 'kept'.",
+    "note": "Shown instead of the countdown while the chat has files that are not saved yet. The chat is not deleted while this holds.",
+    "maxCells": 36
+  },
+  "relay.chrome.temporary_hold_linked": {
+    "role": "temporary chat row meta: why the deletion clock is paused",
+    "tone": "Terse meta line, sentence case, starts with the idea 'kept'.",
+    "note": "Shown instead of the countdown while something else references the chat, so it is not deleted yet. The chat is not deleted while this holds.",
+    "maxCells": 36
+  },
+  "relay.chrome.temporary_hold_cannot_verify": {
+    "role": "temporary chat row meta: why the deletion clock is paused",
+    "tone": "Terse meta line, sentence case, starts with the idea 'kept'.",
+    "note": "Shown instead of the countdown while the machine could not check whether it is safe to delete, so it keeps the chat (fail-safe). The chat is not deleted while this holds.",
+    "maxCells": 36
   }
 }

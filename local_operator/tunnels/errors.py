@@ -66,3 +66,42 @@ class RecordNotFound(ValueError):
     generic fixed literal, and this stays a ``ValueError`` subclass so every
     existing handler on this path keeps working unchanged.
     """
+
+
+class RequestFailed(ValueError):
+    """The control plane answered a non-404 error status; ``status`` carries it.
+
+    The sentence stays the fixed literal every tunnel command already prints
+    (provider error bodies are never surfaced — they may echo a bearer), and it
+    stays a ``ValueError`` so every existing handler keeps working. The status
+    is attached as DATA because the mobile push transport has to report it: the
+    push worker's refusal record (``push_worker.EmitRefused``) carries the
+    status as the whole of what its one drop line can say after the third try,
+    and parsing it back out of a sentence would couple that log to prose.
+    """
+
+    def __init__(self, message: str, *, status: int) -> None:
+        super().__init__(message)
+        self.status = status
+
+
+class TunnelInactive(ValueError):
+    """Radient declined to serve this tunnel, refined to the cause that blocks it.
+
+    Raised by the connector's cold start when `/connect` answers 402/403 or an
+    inactive record, AFTER it has read `/billing` (and the tunnel record) to tell
+    the four causes apart — see `gateway.TUNNEL_INACTIVE` and its siblings. The
+    refinement happens where an async client and the owner-pinned login are
+    already open, so the classifier that reads this (`service.classify_failure`,
+    which is synchronous and does no I/O) only has to read ``reason`` off the
+    chain.
+
+    The sentence stays a fixed literal (never a provider body), and the type stays
+    a ``ValueError`` so `service.main`'s existing retrying arm handles it: every
+    one of these causes clears from outside this process, so the connector keeps
+    its 10-second retry floor rather than parking.
+    """
+
+    def __init__(self, reason: str) -> None:
+        super().__init__("Radient is not serving this tunnel.")
+        self.reason = reason

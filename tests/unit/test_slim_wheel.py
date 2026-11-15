@@ -64,6 +64,24 @@ def _read(wheel: Path) -> dict[str, bytes]:
         return {name: zf.read(name) for name in zf.namelist()}
 
 
+def test_every_member_uses_maximum_lossless_deflate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ZipInfo writes must opt in too: ZipFile's default alone does not cover them."""
+    wheel = _build_wheel(tmp_path, {"demo/__init__.py": MODULE.encode()})
+    compressor = getattr(zipfile, "_get_compressor")
+    calls: list[tuple[int, int | None]] = []
+
+    def observed(compression: int, compresslevel: int | None = None) -> Any:
+        calls.append((compression, compresslevel))
+        return compressor(compression, compresslevel)
+
+    monkeypatch.setattr(zipfile, "_get_compressor", observed)
+    SLIM["slim_wheel"](wheel)
+    with zipfile.ZipFile(wheel) as archive:
+        assert calls == [(zipfile.ZIP_DEFLATED, 9)] * len(archive.infolist())
+
+
 def test_strips_comments_and_keeps_shebang_coding_pragmas_and_docstrings() -> None:
     slimmed = SLIM["strip_comments"](MODULE)
     lines = slimmed.split("\n")

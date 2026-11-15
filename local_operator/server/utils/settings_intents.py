@@ -17,6 +17,10 @@ THE SHAPE (design: "Durable background settings intents", PR2):
   every non-terminal slot in the background through the existing bridge, with
   the retry schedule below, and publishes each state change on the machine-wide
   desktop feed as a ``settings_intent`` frame.
+* A MESH PEER'S conversation has no ``sessions/<id>/`` here, so its file lives
+  in ``peer-session-intents/<id>/`` (see ``PEER_INTENTS_DIRNAME`` for why never
+  under ``sessions/``) and is applied through the same pool bridge, which opens
+  the id as the peer's remote viewer and sends the switch to the OWNER's runtime.
 * The FILE is the authority, not the renderer: the desktop backend does not
   reliably outlive an app restart (a self-spawned daemon is SIGTERMed on quit),
   so the applier resumes every non-terminal slot in ``lifespan``.
@@ -115,6 +119,16 @@ CONFIRM_WINDOW_S = 60.0
 
 _SESSION_ID = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 
+#: Where a MESH PEER's conversation keeps its pending picks on THIS device.
+#: Deliberately NOT ``sessions/<id>/``: a directory there is how every reader on
+#: this machine (the pool, ``remote_owner``, the sidebar) recognises a LOCAL
+#: conversation, so creating one for a peer's id would turn the peer's session
+#: into a local one wearing the same id — the two-writer case
+#: ``mesh-session-mobility.md`` §3.4 forbids. The intent is this device's
+#: request about somebody else's runtime, so it lives in this device's own
+#: namespace and is applied through the pool's peer bridge like any other act.
+PEER_INTENTS_DIRNAME = "peer-session-intents"
+
 
 def budget_seconds() -> float:
     raw = os.environ.get(BUDGET_ENV, "").strip()
@@ -169,16 +183,41 @@ class IntentStore:
     """
 
     def __init__(self, config_dir: Path) -> None:
-        self.root = Path(config_dir) / "sessions"
+        self.config_dir = Path(config_dir)
+        self.root = self.config_dir / "sessions"
+        self.peer_root = self.config_dir / PEER_INTENTS_DIRNAME
+
+    def local(self, session_id: str) -> bool:
+        """This device holds the conversation (its own ``sessions/<id>/``)."""
+        return valid_session_id(session_id) and (self.root / session_id).is_dir()
 
     def session_dir(self, session_id: str) -> Path:
-        return self.root / session_id
+        # The local directory wins whenever it exists, so a peer conversation
+        # that later MOVES HOME is served from its own directory from then on;
+        # a slot left in the peer namespace by then is stale by definition (the
+        # owner it was meant for is gone) and is only ever read, never applied
+        # twice, because this method stops pointing at it.
+        local = self.root / session_id
+        if local.is_dir():
+            return local
+        return self.peer_root / session_id
 
     def path(self, session_id: str) -> Path:
         return self.session_dir(session_id) / INTENT_FILE
 
     def exists(self, session_id: str) -> bool:
         return valid_session_id(session_id) and self.session_dir(session_id).is_dir()
+
+    def adopt_peer(self, session_id: str) -> None:
+        """Open the peer namespace for ``session_id``; the caller proved a peer owns it.
+
+        Only the POST does this, after ``remote_owner`` named the device — so the
+        namespace can never hold an id nobody claimed, and ``exists`` (which the
+        DELETE and the applier's resume read) stays a disk check with no relay.
+        """
+        if not valid_session_id(session_id):
+            raise ValueError(f"invalid session id {session_id!r}")
+        (self.peer_root / session_id).mkdir(parents=True, exist_ok=True, mode=0o700)
 
     def load(self, session_id: str) -> dict[str, Any]:
         try:
@@ -226,15 +265,22 @@ class IntentStore:
             raise
 
     def sessions_with_intents(self) -> list[str]:
-        """Every session with an intent file: a glob, ~200 stats at most."""
-        try:
-            return sorted(
-                path.parent.name
-                for path in self.root.glob(f"*/{INTENT_FILE}")
-                if valid_session_id(path.parent.name)
-            )
-        except OSError:
-            return []
+        """Every session with an intent file: a glob, ~200 stats at most.
+
+        Both namespaces: a restarted process must resume a pick made for a
+        peer's conversation exactly as it resumes a local one.
+        """
+        found: set[str] = set()
+        for root in (self.root, self.peer_root):
+            try:
+                found.update(
+                    path.parent.name
+                    for path in root.glob(f"*/{INTENT_FILE}")
+                    if valid_session_id(path.parent.name)
+                )
+            except OSError:
+                continue
+        return sorted(found)
 
 
 # -- the runtime side --------------------------------------------------------
@@ -287,6 +333,15 @@ class Outcome:
     status: Literal["applied", "queued", "retry", "waiting_idle", "exclusive", "terminal"]
     code: str = ""
     message: str = ""
+    #: ``applied`` from an OWNER that answered only once the switch landed, for a
+    #: conversation this device holds no journal for (a mesh peer's). The local
+    #: rule "a transport ACK is not proof; confirm from the durable selection"
+    #: cannot apply there — there is no durable selection on this disk, and the
+    #: peer bridge that carries the owner's state is released between acts — so
+    #: the owner's landed answer IS the confirmation (measured on the two-relay
+    #: rig: with the local rule the slot polled ``queued_next_step`` for the full
+    #: 60 s window and resent, although the owner had applied it in ~0.1 s).
+    owner_confirmed: bool = False
 
 
 class SettingsDriver(Protocol):
@@ -755,7 +810,7 @@ class SettingsApplier:
                 outcome = Outcome("retry", "runtime_unreachable", str(error))
             finally:
                 self.in_flight -= 1
-        if outcome.status == "applied":
+        if outcome.status == "applied" and not outcome.owner_confirmed:
             # A transport ACK is not proof: old runtimes can acknowledge before
             # their journal projection catches up. Confirm only from durable
             # selection (or the request-correlated result field below).
@@ -1130,6 +1185,12 @@ class BridgeDriver:
 
         pool = self._pool_of()
         directory = Path(pool.root) / "sessions" / session_id
+        if not directory.is_dir():
+            # A MESH PEER'S CONVERSATION has no journal or marker here, and the
+            # local fallback below (``configured_model_pair``) is THIS machine's
+            # default — answering it would validate an effort against the wrong
+            # model's ladder and never confirm a pick that landed on the owner.
+            return self._peer_current(pool, session_id)
 
         def read() -> Current:
             marker = read_desktop_marker(directory) or {}
@@ -1181,6 +1242,41 @@ class BridgeDriver:
         return current
 
     @staticmethod
+    def _peer_current(pool: Any, session_id: str) -> Current:
+        """The owner's own selection, as the attached peer bridge last received it.
+
+        Only an ALREADY resident bridge is read (the same rule as the local arm's
+        ``settings_result`` read): acquiring one would bind the peer's runtime
+        for a GET or a confirmation poll. No bridge, or one not yet synchronized,
+        is "no reading" — which the supersede rule never acts on and the
+        confirmation poll simply retries. ``cwd`` is always "no reading": the
+        owner's path is not comparable with anything validated on this disk, and
+        cwd picks are refused for peers at the POST.
+        """
+        bridge = getattr(pool, "bridges", {}).get(session_id)
+        remote = getattr(bridge, "remote", None)
+        if remote is None:
+            return Current()
+        try:
+            state = remote.frontend_state
+        except RuntimeError:
+            return Current()
+        spec = getattr(state, "selected_model", None) or getattr(state, "effective_model", None)
+        result = getattr(state, "settings_result", None)
+        if result is not None and hasattr(result, "model_dump"):
+            result = result.model_dump()
+        if spec is None:
+            return Current(settings_result=result)
+        effort = getattr(spec, "reasoning_effort", None)
+        fast = getattr(spec, "fast_mode", None)
+        return Current(
+            model=f"{spec.provider}/{spec.model_id}",
+            effort=str(effort) if effort else None,
+            fast=bool(fast) if fast is not None else None,
+            settings_result=result,
+        )
+
+    @staticmethod
     def _deferred(method: Any, request_id: str) -> dict[str, Any]:
         # PR1 is additive. Old Python clients don't accept these kwargs even
         # though old RUNTIMES ignore unknown wire fields, so probe the client
@@ -1210,6 +1306,9 @@ class BridgeDriver:
                 client = remote._client
                 if client is None:
                     return Outcome("retry", "runtime_unreachable", "")
+                if getattr(bridge, "remote_row", None) is not None:
+                    owner_call = True
+                    return await self._apply_on_peer(remote, client, kind, value, effort)
                 if kind == "model":
                     # Retain the routed model admission check (older owners may
                     # lack it), but send ONE set_model frame so effort lands
@@ -1255,9 +1354,8 @@ class BridgeDriver:
                 # model does not exist (``ModelSelectionRefused`` owns that code).
                 code = "effort_unsupported" if kind == "effort" else "refused"
                 return Outcome("terminal", code, str(error))
-            if (
-                isinstance(error, KeyError)
-                and not (Path(pool.root) / "sessions" / session_id).is_dir()
+            if isinstance(error, KeyError) and not await asyncio.to_thread(
+                _still_held, Path(pool.root), session_id
             ):
                 # Review m4: ``pool.session`` raises ``KeyError("Unknown
                 # session")`` for a session deleted after the POST. Retrying
@@ -1278,6 +1376,44 @@ class BridgeDriver:
             if kind == "effort" and isinstance(error, ValueError):
                 return Outcome("terminal", "effort_unsupported", str(error))
             return classify_exception(error)
+
+    @staticmethod
+    async def _apply_on_peer(
+        remote: Any, client: Any, kind: str, value: Any, effort: str | None
+    ) -> Outcome:
+        """A MESH PEER's conversation: the same setters, WITHOUT ``defer_ok``.
+
+        A deferred switch is answered ``queued`` at once and confirmed later from
+        this disk's journal or the bridge's request-correlated
+        ``settings_result`` — neither of which a peer's conversation has here
+        once the act ends (no journal, and the pool releases the peer facade
+        between acts). The historic contract — the owner replies when the switch
+        has LANDED — makes the reply itself the proof, so the outcome is
+        ``owner_confirmed``. A refusal still arrives as the owner's error frame
+        and is classified by the caller exactly as for a local session; an owner
+        busy past the client's ACK window raises the typed ``owner_alive``
+        ConnectionError, which is retried like any other transient.
+        """
+        if kind == "model":
+            remote._require_routed_model_admission(str(value))
+            provider, _, model_id = str(value).partition("/")
+            if effort is not None:
+                await client.set_model(provider, model_id, effort=effort)
+            else:
+                await client.set_model(provider, model_id)
+            return Outcome("applied", owner_confirmed=True)
+        if kind == "effort":
+            await client.set_effort(str(value))
+            return Outcome("applied", owner_confirmed=True)
+        if kind == "fast":
+            # ``route_shared_slash``: the routed seam the peer pilot test already
+            # drives, answered by the owner's typed ``SlashResult``.
+            payload = await remote.route_shared_slash("fast", "on" if value else "off")
+            outcome = _slash_outcome("fast", payload, requested=value)
+            if outcome.status == "applied":
+                return Outcome("applied", outcome.code, outcome.message, owner_confirmed=True)
+            return outcome
+        return Outcome("terminal", "unknown_kind", kind)
 
     async def _move(self, bridge: Any, target: str) -> Outcome:
         # SHIELDED: a cancelled move (server shutdown) must not release
@@ -1306,6 +1442,26 @@ class BridgeDriver:
                 return Outcome("exclusive", "move_exclusive", text)
             return Outcome("terminal", "move_refused", text)
         return Outcome("applied")
+
+
+def _still_held(root: Path, session_id: str) -> bool:
+    """Whether ANY device still holds ``session_id``: this disk, or a mesh peer.
+
+    The m4 terminal arm used to ask only this disk, so every KeyError on a
+    peer's conversation failed the pick at once as "not found". The peer arm is
+    ``desktop_mesh.remote_owner`` — the lookup the desktop routes use — which is
+    cache-first and only pays a relay read when no local directory exists.
+    Blocking: run it off the event loop.
+    """
+    if (root / "sessions" / session_id).is_dir():
+        return True
+    from local_operator.server.utils import desktop_mesh
+
+    try:
+        return desktop_mesh.remote_owner(root, session_id) is not None
+    except Exception:  # noqa: BLE001 — an unanswerable lookup is not proof of absence
+        logger.debug("settings intent: owner lookup failed for %s", session_id, exc_info=True)
+        return True
 
 
 def new_request_id() -> str:

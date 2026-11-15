@@ -517,22 +517,39 @@ def _record_run(
         path = base / f"{run_id}.{_safe_token(phase) or 'record'}.json"
         if time.monotonic() >= deadline:
             raise TimeoutError("record budget spent before open")
+        # ATOMIC PUBLICATION. The final name must never exist until its complete
+        # bytes do: creating it first and filling it later let a deadline/OSError
+        # between the two leave a ZERO-BYTE `exit.json` that a reader parsed as
+        # "Expecting value: line 1 column 1" (gate run 42785622232). The body is
+        # written and fsynced to a private temp in the SAME directory (so the link
+        # cannot cross filesystems), then hard-linked onto the final name -- link,
+        # not rename, so an existing record is never overwritten (same
+        # non-overwriting rule as completion publication). Any failure unlinks the
+        # temp and leaves no final artifact; the except below still reports it.
+        tmp = base / f".{run_id[:64]}.{_safe_token(phase) or 'record'}.{os.getpid()}.tmp"
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         try:
-            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        except FileExistsError:
-            # Same run id, same phase: a retry or two wrappers sharing a caller
-            # id. Keep both rather than overwrite one lane's evidence.
-            path = base / f"{run_id}.{_safe_token(phase)}.{os.getpid()}.json"
-            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        with os.fdopen(fd, "w") as handle:
-            if time.monotonic() >= deadline:
-                raise TimeoutError("record budget spent before write")
-            handle.write(body)
-            if time.monotonic() >= deadline:
-                raise TimeoutError("record budget spent before flush")
-            handle.flush()
-            if time.monotonic() < deadline:
-                os.fsync(handle.fileno())
+            with os.fdopen(fd, "w") as handle:
+                if time.monotonic() >= deadline:
+                    raise TimeoutError("record budget spent before write")
+                handle.write(body)
+                if time.monotonic() >= deadline:
+                    raise TimeoutError("record budget spent before flush")
+                handle.flush()
+                if time.monotonic() < deadline:
+                    os.fsync(handle.fileno())
+            try:
+                os.link(tmp, path)
+            except FileExistsError:
+                # Same run id, same phase: a retry or two wrappers sharing a caller
+                # id. Keep both rather than overwrite one lane's evidence.
+                path = base / f"{run_id}.{_safe_token(phase)}.{os.getpid()}.json"
+                os.link(tmp, path)
+        finally:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
         _report(stream, f"[run_bounded] record ({phase}) run_id={run_id} path={path}")
         return path
     except (OSError, TypeError, ValueError) as exc:

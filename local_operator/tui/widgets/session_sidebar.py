@@ -7,10 +7,12 @@ are separate identities, so a pending attach cannot pretend to have succeeded.
 
 from __future__ import annotations
 
+import logging
 import time
 from collections.abc import Mapping, Sequence
-from typing import TYPE_CHECKING, Self, cast
+from typing import TYPE_CHECKING, Any, Self, cast
 
+from rich.cells import cell_len
 from rich.segment import Segment
 from rich.style import Style
 from rich.text import Text
@@ -244,6 +246,8 @@ SIDEBAR_GUTTER = 3
 SIDEBAR_MIN_CONTENT_WIDTH = 24
 SIDEBAR_MAIN_MIN_WIDTH = 60
 
+logger = logging.getLogger(__name__)
+
 
 def sidebar_content_width(terminal_width: int) -> int:
     """How wide the list's CONTENT should be in a terminal this wide.
@@ -323,7 +327,12 @@ def _strip_dangling_separator(title: str) -> str:
 #: ``subagent`` keeps rank 4 rather than closing the gap the retired peer axis
 #: (rank 3) left: the rank is this widget's own sort key, and renumbering it
 #: would churn every test and comment for a hole nothing reads.
-_SECTION_NAMES = {0: "pinned", 1: "active", 2: "previous", 4: "subagent"}
+#:
+#: ``temporary`` (rank -1) heads the list: a TEMPORARY chat
+#: (``session/temporary.py``) is listed only here, in its own group, because
+#: it is left out of the ordinary sections by design and the group is where
+#: the user finds the chats that will be deleted when idle.
+_SECTION_NAMES = {-1: "temporary", 0: "pinned", 1: "active", 2: "previous", 4: "subagent"}
 
 
 class SessionSidebar(Widget, can_focus=True):
@@ -596,6 +605,11 @@ class SessionSidebar(Widget, can_focus=True):
         #: Her id for `AIDA_MARKER`; refreshed with the entries (`set_entries`),
         #: ``None`` until a list has been built.
         self._aida_id: str | None = None
+        #: Each TEMPORARY row's ``temporary`` object (``RowProjector.info``),
+        #: read once per list build in :meth:`set_entries`; the deletes-in text
+        #: is derived from it at paint time, so the countdown moves between
+        #: builds without another read.
+        self._temporary_infos: dict[str, dict[str, Any] | None] = {}
         self.current_id = ""
         self._requested_id = ""
         self._requested_at = 0.0
@@ -1066,6 +1080,8 @@ class SessionSidebar(Widget, can_focus=True):
         """
         if entry.subagent:
             return 4
+        if getattr(entry.row, "temporary", False):
+            return -1
         return 1 if entry.active else 2
 
     def _section_key(self, entry: CatalogEntry) -> tuple[int, str]:
@@ -1396,6 +1412,7 @@ class SessionSidebar(Widget, can_focus=True):
             self._deferred = ordered
             return
         self.entries = ordered
+        self._temporary_infos = self._read_temporary_infos(ordered)
         # Her id, read once per list build (see `session_picker.aida_row_id`)
         # so the row that names her can carry her mark and no other row's
         # geometry moves.
@@ -1607,6 +1624,41 @@ class SessionSidebar(Widget, can_focus=True):
         else:
             self._timer.pause()
 
+    @staticmethod
+    def _read_temporary_infos(entries: Sequence[CatalogEntry]) -> dict[str, dict[str, Any] | None]:
+        """The ``temporary`` objects for the temporary rows (few, short-lived)."""
+        ids = [entry.row.id for entry in entries if getattr(entry.row, "temporary", False)]
+        if not ids:
+            return {}
+        try:
+            from local_operator.paths import config_dir
+            from local_operator.session.temporary import RowProjector
+
+            projector = RowProjector(config_dir())
+            return {session_id: projector.info(session_id) for session_id in ids}
+        except Exception:  # noqa: BLE001 — a row without its hint still lists
+            logger.debug("sidebar: temporary row state unreadable", exc_info=True)
+            return {}
+
+    def _row_meta(self, entry: CatalogEntry, width: int = 0) -> tuple[str, bool]:
+        """The row's right-hand column: its age, or a temporary row's hint.
+
+        A row in ``Temporary · N`` shows its deletes-in countdown or why it is
+        held (design D2), never its age: in a group about deletion a bare "5m"
+        reads as five minutes LEFT. The hint may take at most half the row so
+        the title stays readable; ``alarm`` is the last-minutes rule the band
+        uses (amber), and every other row returns ``(age, False)``.
+        """
+        if self._section_of(entry) != -1:
+            return self._age(entry), False
+        from local_operator.tui import temporary_chat
+
+        text, alarm = temporary_chat.row_hint(self._temporary_infos.get(entry.row.id))
+        budget = max(0, (width or self.size.width) - _ROW_PREFIX_CELLS) // 2
+        if not text or budget < 4:
+            return "", False
+        return truncate_cells(text, budget), alarm
+
     def _age(self, entry: CatalogEntry) -> str:
         age = (
             format_age(max(0, time.time() - entry.row.mtime)).replace(" ago", "")
@@ -1631,7 +1683,7 @@ class SessionSidebar(Widget, can_focus=True):
             self.error,
             self._catalog_loading,
             self.size,
-            tuple(self._age(entry) for entry in self.visible_entries),
+            tuple(self._row_meta(entry) for entry in self.visible_entries),
             # Sectioning and the footer chip are paint inputs that do NOT live
             # in `entries`. Omit them and either the ctrl+a toggle does not
             # repaint, or `set_entries`' equality check passes on a frame whose
@@ -2714,6 +2766,23 @@ class SessionSidebar(Widget, can_focus=True):
                     style=theme_mod.semantic_color("muted"),
                 )
                 continue
+            if kind == "header:temporary":
+                # Keyed and counted (``Temporary · N``), unlike the four legacy
+                # headings below, because it is new copy and the count is what
+                # tells the user how many chats are on a deletion clock.
+                from local_operator.i18n.keys import tui_app as _ta
+                from local_operator.i18n.text import tr
+
+                count = sum(
+                    1 for _kind, row in rows if row is not None and self._section_of(row) == -1
+                )
+                result.append(
+                    truncate_cells(
+                        str(tr("tui.app")(_ta.section_temporary(count=count))), width
+                    ).ljust(width),
+                    style=theme_mod.semantic_color("muted"),
+                )
+                continue
             if kind.startswith("header:"):
                 # The four section names, and nothing else: sections are built
                 # from rows and named by `_SECTION_NAMES` alone, so the kind IS
@@ -2901,8 +2970,9 @@ class SessionSidebar(Widget, can_focus=True):
                     entry.completion_kind, COMPLETION_MARKERS["complete"]
                 )
             line.append(f"{mark or ' '} ", style=theme_mod.semantic_color(ink))
-            age = self._age(entry)
-            title_width = max(1, width - _ROW_PREFIX_CELLS - (len(age) + 1 if age else 0))
+            age, alarm = self._row_meta(entry, width)
+            age_cells = cell_len(age)
+            title_width = max(1, width - _ROW_PREFIX_CELLS - (age_cells + 1 if age else 0))
             # A subagent row is identified by what it was delegated to do
             # ("label · role"), not by the session name the runtime generated
             # for it. `sub_title` already degrades to either half alone, and
@@ -2922,8 +2992,8 @@ class SessionSidebar(Widget, can_focus=True):
                 # to `sub_title` itself.
                 title = _strip_dangling_separator(title)
             line.append(title)
-            line.pad_right(max(0, width - line.cell_len - len(age)))
-            line.append(age, style=theme_mod.semantic_color("dim"))
+            line.pad_right(max(0, width - line.cell_len - age_cells))
+            line.append(age, style=theme_mod.semantic_color("warning" if alarm else "dim"))
             result.append_text(line)
         if not self.entries:
             text = (

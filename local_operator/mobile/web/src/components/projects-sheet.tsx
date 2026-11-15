@@ -48,6 +48,7 @@ import {
 	getProjects,
 	HttpError,
 	linkProjectSession,
+	setSessionTemporary,
 	patchProject,
 	removeProjectMilestone,
 	setProjectMilestone,
@@ -66,6 +67,8 @@ import type {
 } from "../types";
 import { Button } from "./ui/button";
 import { Sheet } from "./ui/sheet";
+import { messageRuntime } from "../store";
+import { SESSION_TEMPORARY_CODE } from "../lib/temporary";
 
 /* The board's section order is GENERATED, not copied: `STATUS_ORDER` comes from
    `src/projects-status.generated.ts`, which `scripts/generate-projects-status.mjs`
@@ -673,11 +676,18 @@ export function ProjectsSheet({
 		}
 	};
 
-	const linkSession = async (key: string, sessionId: string) => {
+	/* KEEP AND LINK (temporary chats, contract §5): a temporary chat cannot be
+	   linked until the user keeps it, and the relay answers 409
+	   `session_temporary`. The refusal sentence stays the daemon's; this only
+	   offers the one-tap remedy beside it, for the session that was refused. */
+	const [keepAndLink, setKeepAndLink] = useState<{ key: string; sessionId: string } | null>(null);
+	const linkSession = async (key: string, sessionId: string, keepFirst = false) => {
 		if (busy) return;
 		setBusy(true);
 		setFormError("");
+		setKeepAndLink(null);
 		try {
+			if (keepFirst) await setSessionTemporary(sessionId, false);
 			await linkProjectSession(key, sessionId);
 			setNotice(`linked ${sessionId}`);
 			/* The link route answers with a SUMMARY — no linked-session rows — so
@@ -687,6 +697,9 @@ export function ProjectsSheet({
 			await loadList();
 		} catch (error) {
 			await refuseWrite(error, key);
+			if (error instanceof HttpError && error.code === SESSION_TEMPORARY_CODE) {
+				setKeepAndLink({ key, sessionId });
+			}
 		} finally {
 			setBusy(false);
 		}
@@ -1649,6 +1662,16 @@ export function ProjectsSheet({
 						<p role="alert" className="text-body-sm break-words text-danger">
 							{formError}
 						</p>
+					) : null}
+					{keepAndLink && keepAndLink.key === view.key ? (
+						<div>
+							<Button
+								disabled={busy}
+								onClick={() => void linkSession(keepAndLink.key, keepAndLink.sessionId, true)}
+							>
+								{messageRuntime.t("relay.session.keep_and_link")}
+							</Button>
+						</div>
 					) : null}
 				</div>
 			) : null}

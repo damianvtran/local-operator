@@ -21,6 +21,7 @@ from local_operator.harness.types import (
 from local_operator.i18n.keys import wire_music as mk
 from local_operator.i18n.messages import render_resolved
 from local_operator.music.client import MusicClient
+from local_operator.music.digest import job_text, models_text, started_text
 from local_operator.music.jobs import (
     TERMINAL,
     journal,
@@ -151,7 +152,9 @@ async def _start(
     return _text(
         call_id,
         name,
-        render_resolved(mk.started(job=job_id)),
+        # Model-facing (English by design): the quote and how to follow the job.
+        # ``details`` stays the UI contract, untouched.
+        started_text(job_id, record["params"], capabilities),
         details={
             "job_id": job_id,
             "stage": "queued",
@@ -204,7 +207,7 @@ async def execute_music_status(
         client = MusicClient()
         try:
             result = await client.request("models")
-            return _text(tool_call_id, "music_status", render_resolved(mk.label()), details=result)
+            return _text(tool_call_id, "music_status", models_text(result), details=result)
         finally:
             await client.close()
     if context is None or context.jobs is None:
@@ -242,10 +245,6 @@ async def execute_music_status(
     return _text(
         tool_call_id,
         "music_status",
-        (
-            render_resolved(mk.ready(job=record["job"]))
-            if record.get("state") == "completed"
-            else render_resolved(mk.label())
-        ),
+        job_text(record),
         details=record,
     )

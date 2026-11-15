@@ -86,7 +86,16 @@ class JobsOwner:
         self.answer = answer
         self.calls: list[tuple[str, str]] = []
 
-    async def slash_result(self, command: str, args: str, images: list[Any] | None = None) -> Any:
+    async def slash_result(
+        self,
+        command: str,
+        args: str,
+        images: list[Any] | None = None,
+        *,
+        bridge_ack: bool = False,
+    ) -> Any:
+        # ``bridge_ack`` mirrors ``AttachClient.slash_result``; /jobs never loosens
+        # approvals, so the marker is accepted and ignored here.
         self.calls.append((command, args))
         if self.answer is not _REAL:
             return self.answer

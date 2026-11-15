@@ -85,6 +85,7 @@ import os
 import shutil
 import stat
 import sys
+import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -371,6 +372,12 @@ class CleanupPolicy:
     #: indistinguishable from "nothing held", and guessing that direction would
     #: delete the very session the operator reserved.
     delegated_non_git_copy_holds_unreadable: bool = False
+    #: The TEMPORARY-CHAT pass (:func:`run_temporary_pass`). Like ``delegated_*``
+    #: it is not part of :attr:`has_any_limit`, and ``enabled`` does not gate it:
+    #: the per-session mark is the opt-in. ``temporary_enabled`` exists only so a
+    #: manager that cannot be read (a stub) runs nothing at all.
+    temporary_enabled: bool = True
+    temporary_idle_minutes: int = 30
 
     @property
     def has_any_limit(self) -> bool:
@@ -515,7 +522,8 @@ def policy_from_config(config_manager: Any) -> CleanupPolicy:
         # A manager that cannot be read is not a reason to run ANYTHING — and
         # the delegated switch defaults to ON, so the bare default would be a
         # reaper armed by a stub.
-        return CleanupPolicy(delegated_enabled=False)
+        # The temporary pass is disabled by the same rule: it deletes.
+        return CleanupPolicy(delegated_enabled=False, temporary_enabled=False)
 
     def leaf(name: str, default: Any) -> Any:
         try:
@@ -545,7 +553,22 @@ def policy_from_config(config_manager: Any) -> CleanupPolicy:
             leaf("max_total_bytes", DEFAULT_MAX_TOTAL_BYTES), DEFAULT_MAX_TOTAL_BYTES
         ),
         remove_empty=_coerce_bool(leaf("remove_empty", DEFAULT_REMOVE_EMPTY), DEFAULT_REMOVE_EMPTY),
+        temporary_idle_minutes=_temporary_idle_minutes(getter),
     )
+
+
+def _temporary_idle_minutes(getter: Callable[..., Any]) -> int:
+    """``session.cleanup.temporary.idle_minutes``, clamped UP to a preset."""
+    from local_operator.session.temporary import (
+        DEFAULT_IDLE_MINUTES,
+        clamp_idle_minutes,
+    )
+
+    try:
+        value = getter(CLEANUP_PATH + ("temporary", "idle_minutes"), DEFAULT_IDLE_MINUTES)
+    except Exception:  # noqa: BLE001 — unreadable config keeps the default window
+        value = DEFAULT_IDLE_MINUTES
+    return clamp_idle_minutes(value)
 
 
 def _delegated_leaf(getter: Callable[..., Any], name: str, default: Any) -> Any:
@@ -3330,7 +3353,14 @@ def _picker_rows(config_dir: Path) -> list[str]:
         return [
             name
             for name, _stamp in recent_sessions(
-                config_dir, limit=None, revalidate=True, include_archived=True
+                config_dir,
+                limit=None,
+                revalidate=True,
+                include_archived=True,
+                # Same reason as the archive flag: this listing is a deletion
+                # authority, and its view of the store must not change because
+                # the listings now leave temporary chats out.
+                include_temporary=True,
             )
         ]
     except Exception as exc:  # noqa: BLE001 — re-raised as the typed refusal
@@ -3806,7 +3836,7 @@ def write_last_cleanup(sessions_dir: Path, result: CleanupResult, *, actor: str)
     _write_record(sessions_dir / LAST_CLEANUP_NAME, payload)
 
 
-def _write_record(path: Path, payload: dict[str, Any]) -> bool:
+def _write_record(path: Path, payload: Any) -> bool:
     """tmp + ``os.replace``: a viewer never reads a half-written record.
 
     Same shape as ``resume._save_origin_cache``. The ``os.replace`` here is
@@ -3923,3 +3953,581 @@ def format_cleanup_notice(payload: Any) -> str:
             "turn off: /settings › Session cleanup",
         )
     )
+
+
+# ---------------------------------------------------------------------------
+# The temporary-chat pass
+# ---------------------------------------------------------------------------
+#
+# A temporary chat (``session/temporary.py``) is the user's own conversation,
+# marked to be deleted after a window of inactivity. The pass is modelled on
+# :func:`delete_session`, NOT on :func:`run_cleanup`: the mark is a per-session
+# opt-in, so neither ``CleanupPolicy.enabled`` nor ``RECENT_KEEP`` applies (a
+# temporary chat is usually among the ten most recent, so the parent-class
+# policy would never expire it). Every hard guard still applies, and every
+# removal still goes through :func:`remove_session_dir`.
+
+#: The cleanup-log ``policy`` for a temporary chat that expired, and for the
+#: settled subagent runs it launched (removed with it, see the cascade).
+TEMPORARY_POLICY = "temporary"
+TEMPORARY_CHILD_POLICY = "temporary-child"
+
+#: Per-pass bounds. A pass removes at most this many chats, so a clock jump or
+#: a mass-marked store degrades into several passes rather than one long one.
+TEMPORARY_PASS_CAP = 50
+TEMPORARY_CASCADE_DEPTH = 4
+TEMPORARY_CASCADE_MAX = 256
+
+#: Beside the store (not inside it: the store directory is listed as sessions),
+#: the same placement as the delegated sweep's lock.
+TEMPORARY_LOCK_NAME = "temporary-sweep.lock"
+
+#: A pass younger than this makes the next tick skip: every process hosts a
+#: sweeper, and the lock alone would let N processes each run a pass a minute.
+TEMPORARY_FRESH_S = 55.0
+
+#: ``_guard`` reasons → hold codes (the closed set in ``temporary.HOLD_CODES``).
+_TEMPORARY_GUARD_HOLDS: dict[str, str] = {
+    "held by the operator": "operator_hold",
+    "operator holds unreadable": "cannot_verify",
+    "claimed by a live process": "running",
+    "leased by a live process": "running",
+    "has an armed wake": "armed_wake",
+    "has an armed monitor": "armed_monitor",
+    "has unread spooled mail": "unread_mail",
+    "has an open ask": "open_ask",
+}
+
+#: An unseen completion holds a temporary chat at most this long after the
+#: chat's last activity, so a result nobody will ever look at cannot keep a
+#: "temporary" conversation forever.
+TEMPORARY_UNSEEN_CAP_S = 24 * 3600.0
+
+
+@dataclass
+class TemporaryPassResult:
+    """What one temporary pass decided. ``skipped`` is non-empty when it ran nothing."""
+
+    evaluated: int = 0
+    expired: list[str] = field(default_factory=list)
+    held: dict[str, str] = field(default_factory=dict)
+    children: list[str] = field(default_factory=list)
+    errors: int = 0
+    skipped: str = ""
+
+
+def _temporary_hold_for_reason(reason: str, directory: Path | None = None) -> str:
+    """Map a ``_guard`` reason to a hold code; anything unknown cannot be verified.
+
+    AN OPEN ASK OUTRANKS THE WAKE IT ARMED (QA Q5). The ``ask`` tool arms a
+    hidden ``ask_timeout`` wake for its deadline, and ``_guard`` probes wakes
+    (in :func:`_transcript_write_guard`) before it reaches the open-ask probe,
+    so a chat waiting on a question reported "kept while a wake is set" and
+    ``open_ask`` was unreachable for any ask with a deadline. The guard order
+    is left alone -- it is shared with ordinary cleanup and compression, and
+    either reason holds -- and only the WORD the user sees is corrected.
+    """
+    if reason == "has an armed wake" and directory is not None:
+        try:
+            if _has_open_asks(directory):
+                return "open_ask"
+        except Exception:  # noqa: BLE001 — the wake still holds; its word stands
+            logger.debug("temporary pass: open-ask probe failed", exc_info=True)
+    return _TEMPORARY_GUARD_HOLDS.get(reason, "cannot_verify")
+
+
+def _temporary_live_hold(directory: Path, config_dir: Path) -> str:
+    """``on_screen`` when a viewer is attached to this chat's runtime, else ``running``."""
+    try:
+        from local_operator.session.runtime import registry
+
+        for record, state in registry.scan(config_dir, reap=False):
+            if state == "stale" or getattr(record, "session_id", "") != directory.name:
+                continue
+            if getattr(record, "watching", False):
+                return "on_screen"
+    except Exception:  # noqa: BLE001 — either answer holds; running is the safe word
+        logger.debug("temporary pass: could not read the runtime registry", exc_info=True)
+    return "running"
+
+
+def _marked_temporary_dirs(sessions_dir: Path) -> list[Path]:
+    """Every session directory carrying a ``temporary.json`` (a stat each).
+
+    Existence only: the pass reads each mark with its OWN clock
+    (``read_mark(now=...)``), so a candidate is never decided here.
+    """
+    from local_operator.session.temporary import MARK_NAME
+
+    found: list[Path] = []
+    try:
+        with os.scandir(sessions_dir) as entries:
+            for entry in entries:
+                if entry.name.startswith("."):
+                    continue
+                try:
+                    if not entry.is_dir(follow_symlinks=False):
+                        continue
+                except OSError:
+                    continue
+                if os.path.exists(os.path.join(entry.path, MARK_NAME)):
+                    found.append(Path(entry.path))
+    except FileNotFoundError:
+        return []
+    found.sort(key=lambda path: path.name)
+    return found
+
+
+def _temporary_extra_hold(
+    directory: Path,
+    config_dir: Path,
+    now: float,
+    *,
+    activity: float | None,
+    attention: dict[str, dict[str, Any]] | None,
+    attention_failed: bool,
+    pinned: frozenset[str] | None,
+) -> str | None:
+    """The holds beyond ``_guard``, in the contract's order; ``None`` when free.
+
+    Every probe that cannot answer returns ``cannot_verify``: the pass deletes,
+    so "could not tell" keeps the chat.
+    """
+    from local_operator.session import delegated_retention as dr
+    from local_operator.session.attention import conversation_identity
+    from local_operator.session.runtime.presence import desktop_attending_session
+
+    session_id = directory.name
+    try:
+        if desktop_attending_session(session_id, config_dir):
+            return "on_screen"
+    except Exception:  # noqa: BLE001
+        return "cannot_verify"
+    roster = directory / dr.ROSTER_NAME
+    if roster.exists():
+        try:
+            if dr.roster_children(roster):
+                return "running"
+        except Exception:  # noqa: BLE001 — an unreadable roster may hide a live child
+            return "cannot_verify"
+    if attention_failed:
+        return "cannot_verify"
+    state = (attention or {}).get(conversation_identity(directory)) or {}
+    if state.get("unseen") and activity is not None and now - activity < TEMPORARY_UNSEEN_CAP_S:
+        return "unseen_result"
+    try:
+        if dr.scratchpad_git_hazard(directory):
+            return "unsaved_files"
+    except Exception:  # noqa: BLE001
+        return "cannot_verify"
+    if pinned is None:
+        return "cannot_verify"
+    if session_id in pinned:
+        return "linked"
+    try:
+        from local_operator.projects import ProjectRegistry
+
+        if ProjectRegistry(config_dir).projects_for_session(session_id):
+            return "linked"
+    except Exception:  # noqa: BLE001
+        return "cannot_verify"
+    return None
+
+
+def _append_temporary_tombstone(config_dir: Path, session_id: str, now: float) -> bool:
+    """Record ``session_id`` as a deleted temporary chat BEFORE it is removed.
+
+    Ids and times only — a tombstone carries no title or content. Pruned to 7
+    days and 1,000 rows on every write (and at every read). Returns whether the
+    write landed; the caller keeps the session when it did not, so a client
+    is never left with a "not found" for a chat it watched being deleted.
+    """
+    from local_operator.session.temporary import (
+        TOMBSTONE_CAP,
+        TOMBSTONES_NAME,
+        read_tombstones,
+    )
+
+    entries = [entry for entry in read_tombstones(config_dir, now=now) if entry["id"] != session_id]
+    entries.insert(0, {"id": session_id, "deleted_at": now})
+    return _write_record(
+        Path(config_dir) / SESSIONS_DIRNAME / TOMBSTONES_NAME, entries[:TOMBSTONE_CAP]
+    )
+
+
+def _withdraw_temporary_tombstone(config_dir: Path, session_id: str, now: float) -> bool:
+    """Remove ``session_id``'s tombstone: the chat was kept after it was written."""
+    from local_operator.session.temporary import (
+        TOMBSTONE_CAP,
+        TOMBSTONES_NAME,
+        read_tombstones,
+    )
+
+    entries = read_tombstones(config_dir, now=now)
+    kept = [entry for entry in entries if entry["id"] != session_id]
+    if len(kept) == len(entries):
+        return True
+    return _write_record(
+        Path(config_dir) / SESSIONS_DIRNAME / TOMBSTONES_NAME, kept[:TOMBSTONE_CAP]
+    )
+
+
+def _write_temporary_state(config_dir: Path, now: float, sessions: dict[str, Any]) -> bool:
+    """The pass's state file: the ONLY writer, under the pass lock."""
+    from local_operator.session.temporary import STATE_NAME
+
+    return _write_record(
+        Path(config_dir) / SESSIONS_DIRNAME / STATE_NAME,
+        {"v": 1, "evaluated_at": now, "sessions": sessions},
+    )
+
+
+def _temporary_cascade(
+    config_dir: Path, children: set[str], *, actor: str, now: float, dry_run: bool
+) -> list[str]:
+    """Remove the SETTLED subagent runs a deleted temporary chat launched.
+
+    Only origins in :func:`deletable_origins` (subagent, agent-shell) — never a
+    workstream or a fork, which are conversations in their own right — and only
+    a child that passes its own :func:`_guard` and has no in-flight child of its
+    own. Bounded in depth and count; a refused child is left for the delegated
+    class, which reaps it once its parent is gone.
+    """
+    from local_operator.resume import session_origin
+    from local_operator.session import delegated_retention as dr
+
+    sessions_dir = Path(config_dir) / SESSIONS_DIRNAME
+    removed: list[str] = []
+    frontier = sorted(children)
+    seen: set[str] = set()
+    for _depth in range(TEMPORARY_CASCADE_DEPTH):
+        next_frontier: list[str] = []
+        for child_id in frontier:
+            if child_id in seen or len(seen) >= TEMPORARY_CASCADE_MAX:
+                continue
+            seen.add(child_id)
+            child = sessions_dir / child_id
+            if child_id != Path(child_id).name or not child.is_dir():
+                continue
+            if session_origin(child) not in deletable_origins():
+                continue
+            grandchildren: set[str] = set()
+            roster = child / dr.ROSTER_NAME
+            if roster.exists():
+                try:
+                    actionable, settled = dr._roster_ledger(roster)
+                except Exception:  # noqa: BLE001 — unknowable roster keeps the subtree
+                    continue
+                if actionable:
+                    continue
+                grandchildren = settled
+            if _guard(child, config_dir, now) is not None:
+                continue
+            if remove_session_dir(
+                child,
+                config_dir=config_dir,
+                policy=TEMPORARY_CHILD_POLICY,
+                reason="subagent run of an expired temporary chat",
+                actor=actor,
+                title="",
+                dry_run=dry_run,
+            ):
+                removed.append(child_id)
+                if not dry_run:
+                    _forget_wake_entry(config_dir, child_id)
+                    _forget_monitor_entry(config_dir, child_id)
+                next_frontier.extend(sorted(grandchildren))
+        frontier = next_frontier
+        if not frontier:
+            break
+    return removed
+
+
+def run_temporary_pass(
+    config_dir: Path,
+    policy: CleanupPolicy,
+    *,
+    actor: str,
+    now: float | None = None,
+    should_stop: Callable[[], bool] | None = None,
+    dry_run: bool = False,
+) -> TemporaryPassResult:
+    """Expire temporary chats idle past their window. Each step fails closed.
+
+    Per marked session: the exact-schema mark, a user session, no hold (the
+    hard guards of :func:`_guard`, then desktop presence, in-flight children,
+    an unseen result, unsaved scratchpad work, a pin or project link), and an
+    idle window that has elapsed from ``max(activity, marked_at, held_at)``.
+    ``held_at`` is stamped every pass a hold is seen, so the window restarts
+    when the hold ends ("leaving the screen counts as activity").
+
+    An idle keep-alive runtime that alone holds the claim is asked to leave —
+    exactly :func:`delete_session`'s sequence, and only once the window has
+    otherwise elapsed, so a warm runtime inside the window is never preempted.
+    The mark is re-read immediately before removal, so a "Keep" that landed
+    during the preempt wait wins. The tombstone is written before the removal;
+    if it cannot be, the chat is kept and the next pass retries.
+    """
+    from local_operator.resume import is_user_session
+    from local_operator.session import temporary as temp
+    from local_operator.session.retention import session_activity
+
+    result = TemporaryPassResult()
+    if not policy.temporary_enabled:
+        result.skipped = "disabled"
+        return result
+    clock = time.time() if now is None else now
+    config_dir = Path(config_dir)
+    sessions_dir = config_dir / SESSIONS_DIRNAME
+    window_s = temp.clamp_idle_minutes(policy.temporary_idle_minutes) * 60.0
+    previous = temp.read_state(config_dir).get("sessions") or {}
+    marked = _marked_temporary_dirs(sessions_dir)
+    if not marked and not previous:
+        # Nothing marked and nothing to prune: an unmarked store is never written to.
+        result.skipped = "nothing marked"
+        return result
+
+    attention: dict[str, dict[str, Any]] | None = None
+    attention_failed = False
+    if marked:
+        try:
+            from local_operator.session.attention import (
+                AttentionStore,
+                conversation_identity,
+            )
+
+            attention = AttentionStore(config_dir / "attention.db").state_many(
+                [conversation_identity(directory) for directory in marked]
+            )
+        except Exception:  # noqa: BLE001 — unseen state unknown: hold every candidate
+            logger.warning("temporary pass: attention state unreadable", exc_info=True)
+            attention_failed = True
+    try:
+        pinned: frozenset[str] | None = pinned_session_ids(config_dir)
+    except GuardUnavailable:
+        pinned = None
+
+    state: dict[str, Any] = {}
+    unvisited = {directory.name for directory in marked}
+    for directory in marked:
+        if should_stop is not None and should_stop():
+            break
+        session_id = directory.name
+        unvisited.discard(session_id)
+        recorded = previous.get(session_id)
+        prior: dict[str, Any] = recorded if isinstance(recorded, dict) else {}
+        held_at = temp._finite(prior.get("held_at"))
+        mark = temp.read_mark(directory, now=clock)
+        if mark is None or not is_user_session(directory):
+            continue
+        result.evaluated += 1
+
+        def hold(code: str) -> None:
+            state[session_id] = {"held_at": clock, "hold": code}
+            result.held[session_id] = code
+
+        resident: object | None = None
+        reason = _guard(directory, config_dir, clock)
+        if reason is not None and reason in _KEEP_ALIVE_PREEMPTABLE_GUARDS:
+            resident = _keep_alive_resident(directory, config_dir)
+            if resident is None:
+                hold(_temporary_live_hold(directory, config_dir))
+                continue
+            # The rehearsal: with the idle resident gone, what else refuses?
+            reason = _guard(directory, config_dir, clock, live_owner_gone=True)
+        if reason is not None:
+            hold(_temporary_hold_for_reason(reason, directory))
+            continue
+        activity = session_activity(directory)
+        extra = _temporary_extra_hold(
+            directory,
+            config_dir,
+            clock,
+            activity=activity,
+            attention=attention,
+            attention_failed=attention_failed,
+            pinned=pinned,
+        )
+        if extra is not None:
+            hold(extra)
+            continue
+        idle_since = max(activity or 0.0, mark.marked_at, held_at or 0.0)
+        if clock < idle_since + window_s:
+            state[session_id] = {"held_at": held_at, "hold": None}
+            continue
+        if len(result.expired) >= TEMPORARY_PASS_CAP:
+            state[session_id] = {"held_at": held_at, "hold": None}
+            continue
+        if resident is not None and not dry_run:
+            from local_operator.session.runtime import registry
+
+            if not _ask_keep_alive_to_leave(resident, directory, actor=actor):
+                hold("running")
+                continue
+            reason = _guard(directory, config_dir, clock)
+            if reason is not None:
+                registry.remove_exit_request(directory)
+                hold(_temporary_hold_for_reason(reason, directory))
+                continue
+        children: set[str] = set()
+        roster = directory / "subagent-roster.v1.json"
+        if roster.exists():
+            try:
+                from local_operator.session import delegated_retention as dr
+
+                children = dr._roster_ledger(roster)[1]
+            except Exception:  # noqa: BLE001 — no cascade; the delegated class reaps them
+                children = set()
+        if not dry_run and not _append_temporary_tombstone(config_dir, session_id, clock):
+            logger.warning("temporary pass: tombstone not written for %s; keeping it", session_id)
+            result.errors += 1
+            state[session_id] = {"held_at": held_at, "hold": None}
+            continue
+        # A KEEP THAT LANDED WHILE WE WORKED WINS, and this is the LAST read
+        # before the remover (review R1-m3): after the runtime wait, the roster
+        # read and the tombstone write, so the only window left is the
+        # remover's own hold check. The tombstone just written for a chat the
+        # user kept is withdrawn, so a later deletion of the KEPT chat is never
+        # reported as "this temporary chat was deleted".
+        if temp.read_mark(directory, now=clock) is None:
+            if not dry_run and not _withdraw_temporary_tombstone(config_dir, session_id, clock):
+                # Harmless (the kept chat still opens), but leave a trace.
+                logger.debug("temporary: tombstone for kept %s not withdrawn", session_id)
+            continue
+        removed = remove_session_dir(
+            directory,
+            config_dir=config_dir,
+            policy=TEMPORARY_POLICY,
+            reason="temporary chat idle past its window",
+            actor=actor,
+            # Deliberately empty: the cleanup log is durable, and a title is
+            # conversation content the user asked not to keep.
+            title="",
+            dry_run=dry_run,
+        )
+        if not removed:
+            result.errors += 1
+            state[session_id] = {"held_at": held_at, "hold": None}
+            continue
+        result.expired.append(session_id)
+        if not dry_run:
+            _forget_wake_entry(config_dir, session_id)
+            _forget_monitor_entry(config_dir, session_id)
+            _forget_session_captures(config_dir, session_id)
+        result.children.extend(
+            _temporary_cascade(config_dir, children, actor=actor, now=clock, dry_run=dry_run)
+        )
+    # A pass cut short by ``should_stop`` keeps what it knew about the chats it
+    # did not reach; entries for ids no longer marked or gone are pruned.
+    for session_id in unvisited:
+        if isinstance(previous.get(session_id), dict):
+            state[session_id] = previous[session_id]
+    if not dry_run:
+        _write_temporary_state(config_dir, clock, state)
+    return result
+
+
+# -- hosting: one daemon thread per process ----------------------------------
+
+_TEMPORARY_SWEEPER_LOCK = threading.Lock()
+_TEMPORARY_SWEEPER: dict[str, Any] = {}
+
+
+def _temporary_tick(
+    config_dir: Path, policy_provider: Callable[[], CleanupPolicy], *, actor: str
+) -> TemporaryPassResult | None:
+    """One sweeper tick: cheap when nothing is marked, locked when something is."""
+    from local_operator.session import temporary as temp
+
+    config_dir = Path(config_dir)
+    policy = policy_provider()
+    if not policy.temporary_enabled:
+        return None
+    sessions_dir = config_dir / SESSIONS_DIRNAME
+    # No marks and no state: return before touching the lock, so a store that
+    # never used the feature is never written to by it.
+    if not (sessions_dir / temp.STATE_NAME).exists() and not _marked_temporary_dirs(sessions_dir):
+        return None
+    evaluated_at = temp.read_state(config_dir).get("evaluated_at")
+    if isinstance(evaluated_at, (int, float)) and time.time() - evaluated_at < TEMPORARY_FRESH_S:
+        return None
+    from local_operator.procstate import O_BINARY
+    from local_operator.wakes.lock import _try_lock, _unlock
+
+    fd = os.open(config_dir / TEMPORARY_LOCK_NAME, os.O_CREAT | os.O_RDWR | O_BINARY, 0o600)
+    try:
+        if not _try_lock(fd):
+            return None
+        try:
+            return run_temporary_pass(config_dir, policy, actor=actor)
+        finally:
+            try:
+                _unlock(fd)
+            except OSError:
+                pass
+    finally:
+        os.close(fd)
+
+
+def _machine_slept(wall_elapsed: float, mono_elapsed: float, cadence: float) -> bool:
+    """Whether the wall clock ran ahead of the monotonic clock by > 2 cadences.
+
+    The monotonic clock does not advance while the machine sleeps (Linux
+    ``CLOCK_MONOTONIC``, macOS ``mach_absolute_time``), so the gap is the sleep.
+    """
+    return wall_elapsed > mono_elapsed + 2 * cadence
+
+
+def start_temporary_sweeper(
+    config_manager: Any, config_dir: Path, *, actor: str = "temporary-sweeper"
+) -> bool:
+    """Start this process's temporary-chat sweeper; idempotent. Returns whether it started.
+
+    Every host runs one — session processes, the HTTP server and the phone
+    daemon — so a chat still expires when no runtime is left. The cross-process
+    lock and the state stamp keep that to one pass a minute per store.
+
+    THE SUSPEND GUARD: when the wall clock moved more than the monotonic clock
+    plus two cadences, the machine slept, and display presence (45 s TTL) has
+    not had a chance to re-beat. That tick is skipped, so a chat on screen when
+    the lid closed is not deleted on wake.
+    """
+    with _TEMPORARY_SWEEPER_LOCK:
+        thread = _TEMPORARY_SWEEPER.get("thread")
+        if thread is not None and thread.is_alive():
+            return False
+        from local_operator.session.delegated_retention import live_policy_provider
+        from local_operator.session.temporary import TEMPORARY_SWEEP_S
+
+        provider = live_policy_provider(config_manager, Path(config_dir))
+        stop = threading.Event()
+
+        def loop() -> None:
+            last_wall, last_mono = time.time(), time.monotonic()
+            while not stop.wait(TEMPORARY_SWEEP_S):
+                wall, mono = time.time(), time.monotonic()
+                slept = _machine_slept(wall - last_wall, mono - last_mono, TEMPORARY_SWEEP_S)
+                last_wall, last_mono = wall, mono
+                if slept:
+                    logger.info("temporary sweeper: the machine slept; skipping one pass")
+                    continue
+                try:
+                    _temporary_tick(Path(config_dir), provider, actor=actor)
+                except Exception:  # noqa: BLE001 — a failed pass keeps everything
+                    logger.warning("temporary sweeper: pass failed", exc_info=True)
+
+        thread = threading.Thread(target=loop, name="lop-temporary-sweeper", daemon=True)
+        _TEMPORARY_SWEEPER.update(thread=thread, stop=stop)
+        thread.start()
+        return True
+
+
+def stop_temporary_sweeper(timeout: float = 2.0) -> None:
+    """Stop this process's sweeper (shutdown and tests)."""
+    with _TEMPORARY_SWEEPER_LOCK:
+        stop = _TEMPORARY_SWEEPER.pop("stop", None)
+        thread = _TEMPORARY_SWEEPER.pop("thread", None)
+    if stop is not None:
+        stop.set()
+    if thread is not None and thread is not threading.current_thread():
+        thread.join(timeout)

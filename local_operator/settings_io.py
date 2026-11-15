@@ -70,6 +70,7 @@ from local_operator.i18n.keys import wire_guardrails as _gr
 from local_operator.i18n.keys import wire_host_speed as _hs
 from local_operator.i18n.keys import wire_memory as _mm
 from local_operator.i18n.keys import wire_notification_sound as _ns
+from local_operator.i18n.keys import wire_phone_access as _pa
 from local_operator.i18n.keys import wire_radient_saver as _rsv
 from local_operator.i18n.keys import wire_settings as _ws
 from local_operator.i18n.keys import wire_settings_account_policy as _ap
@@ -133,6 +134,11 @@ _CHILD_SETTINGS_NAMESPACES = (
     "wire.memory",
     "wire.radient_saver",
     "wire.notification_sound",
+    # The Phone access section (`tunnel.auto_setup_after_login`). Missing here,
+    # `_t` fell back to the message codes and Settings printed raw keys in every
+    # locale (#3945 review round 1, D1/Q1); `test_no_registry_string_is_its_own_code`
+    # now fails for any child namespace left out of this tuple.
+    "wire.phone_access",
 )
 
 
@@ -923,6 +929,9 @@ SECTIONS: tuple[Section, ...] = (
         Scope.LIVE,
         _t(_ws.desktop_description()),
     ),
+    # LIVE: the one key here is read by the credential-write hook at the moment
+    # a sign-in lands (`tunnels.install.auto_setup_enabled`), never cached.
+    Section("phone_access", _t(_pa.title()), Scope.LIVE, _t(_pa.description())),
     # The static file routes' served roots (``server/utils/static_roots.py``).
     # LIVE: the roots are rebuilt from the config on every request, so an edit
     # lands on the next thumbnail or preview with no restart.
@@ -1660,6 +1669,17 @@ def _validate_github_repositories(value: object) -> object:
     """
     if not isinstance(value, (list, tuple)):
         raise ValueError("GitHub repositories must be a list of owner/repo entries.")
+    # The SAME ceiling the mesh boundary carries (GitHub's App mint maximum): a
+    # longer designation could neither be minted nor delivered whole, so it is
+    # refused here, where a person can fix it, rather than truncated downstream.
+    # Lazy import: this module loads on every CLI start; the validator runs on write.
+    from local_operator.network.credentials.types import MAX_NARROWING_LIST_ENTRIES
+
+    if len(value) > MAX_NARROWING_LIST_ENTRIES:
+        raise ValueError(
+            f"at most {MAX_NARROWING_LIST_ENTRIES} GitHub repositories can be designated "
+            f"(GitHub's limit for one App token); got {len(value)}"
+        )
     for entry in value:
         text = str(entry).strip()
         owner, sep, repo = text.partition("/")
@@ -3563,6 +3583,28 @@ SETTINGS: tuple[Setting, ...] = (
         validate_value=_validate_delegated_max_age_hours,
         gated_by="session.cleanup.delegated.enabled",
         synonyms=("retention", "expiry", "purge"),
+    ),
+    # -- temporary chats -------------------------------------------------------
+    # The idle window of a TEMPORARY chat (``session/temporary.py``). Read LIVE
+    # by every pass (``cleanup.policy_from_config``), never gated by
+    # ``session.cleanup.enabled``: the per-chat mark is the opt-in. An ENUM of
+    # the four presets the clients offer; ``cleanup`` clamps any other stored
+    # value UP to the next preset (kept longer, the fail-closed side).
+    Setting(
+        key="session.cleanup.temporary.idle_minutes",
+        path=("session", "cleanup", "temporary", "idle_minutes"),
+        section="session_cleanup",
+        label=_t(_ws.session_cleanup_temporary_idle_minutes_label()),
+        kind=Kind.ENUM,
+        default=30,
+        help=_t(_ws.session_cleanup_temporary_idle_minutes_help()),
+        choices=(
+            Choice(15, _t(_ws.session_cleanup_temporary_idle_minutes_choice_15m_label())),
+            Choice(30, _t(_ws.session_cleanup_temporary_idle_minutes_choice_30m_label())),
+            Choice(120, _t(_ws.session_cleanup_temporary_idle_minutes_choice_2h_label())),
+            Choice(1440, _t(_ws.session_cleanup_temporary_idle_minutes_choice_24h_label())),
+        ),
+        synonyms=("retention", "expiry", "ephemeral"),
     ),
     Setting(
         key="runtime.unattended_gate_timeout",
@@ -5571,6 +5613,25 @@ SETTINGS: tuple[Setting, ...] = (
         help=(_t(_ws.network_credentials_grant_ttl_s_help())),
         synonyms=("auth", "expiry"),
     ),
+    # The offline hold (credentials/__init__.py ``OFFLINE_HOLD_S``; C5, approved by
+    # the operator 2026-11-13). Read on the owner (stated on each grant) and on the
+    # borrower (its own cap); the reader clamps to [grant_ttl_s, 24 h]. The minimum is
+    # the default grant TTL (900 s) rather than the TTL row's own 60 s floor (review
+    # R1-m3): a value below it was accepted and then silently read as the TTL, so the
+    # page offered a setting that did nothing. A TTL raised above 900 s still floors
+    # the hold at read time, which is the only side that can lengthen it.
+    Setting(
+        key="network.credentials.offline_hold_s",
+        path=("network", "credentials", "offline_hold_s"),
+        section="network",
+        label=_t(_ws.network_credentials_offline_hold_s_label()),
+        kind=Kind.FLOAT,
+        default=86400.0,
+        minimum=900.0,
+        maximum=86400.0,
+        help=(_t(_ws.network_credentials_offline_hold_s_help())),
+        synonyms=("auth", "expiry", "sleep", "lease"),
+    ),
     # The github adapter's allow-list (github.py's ``REPOSITORIES_PATH``; the same
     # key is read by the owner — the mint narrows to it and REFUSES when empty —
     # and by the borrower's git helper as its use-time backstop). Empty is a
@@ -6417,6 +6478,19 @@ SETTINGS: tuple[Setting, ...] = (
             _t(_ws.remote_compute_enabled_choice_false_description()),
         ),
     ),
+    Setting(
+        # The reversible switch for the post-sign-in no-spend setup run
+        # (`tunnels.install.auto_setup_after_login`). The literal mirrors
+        # `install.AUTO_SETUP_DEFAULT`; `test_every_default_matches_its_consumer`
+        # holds them equal (settings_io stays off the tunnels import path).
+        key="tunnel.auto_setup_after_login",
+        path=("tunnel", "auto_setup_after_login"),
+        section="phone_access",
+        label=_t(_pa.auto_setup_label()),
+        help=_t(_pa.auto_setup_help()),
+        kind=Kind.BOOL,
+        default=True,
+    ),
 )
 
 #: ``key -> Setting`` for the lookups the CLI and the page both do.
@@ -6656,6 +6730,13 @@ def coerce(setting: Setting, text: str) -> Any:
             raise ValueError(
                 'expected JSON, e.g. {"default": ["anthropic/claude-opus-5"]}'
             ) from None
+    if setting.kind is Kind.ENUM:
+        # An ENUM whose members are whole numbers (the temporary-chat window)
+        # stores ints, so typed text must become the member, not its digits.
+        for choice in setting.resolved_choices or ():
+            value = choice.value
+            if type(value) is int and text == str(value):
+                return value
     if setting.validate_value is validate_tier_value and text.startswith("{"):
         # A ``{model, effort}`` tier typed on the page or via ``lop config
         # edit`` (#2428): parsed here so the MAPPING is stored, never the JSON

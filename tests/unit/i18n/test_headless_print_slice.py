@@ -93,13 +93,33 @@ def render(event: AgentEvent) -> str:
     return buffer.getvalue()
 
 
+#: Keys ``cli.exec_runtime`` gained AFTER the slice, kept apart from the frozen
+#: fixture so ``GOLDEN`` stays the pre-slice print copy. These are the
+#: ``--temporary`` launch refusals (core #3832, ``cli.py``/``exec_startup.py``):
+#: NEW copy with no earlier literal, pinned at the bytes they ship with. They are
+#: refusal sentences, not PrintRenderer events, so ``cases()`` does not grow.
+SINCE_SLICE: dict[str, str] = {
+    "cli.exec_runtime.temporary_agent_shell_refused": (
+        "a temporary chat is something you start yourself; it cannot be started from "
+        "an agent's shell"
+    ),
+    "cli.exec_runtime.temporary_conflicts_resume": (
+        "--temporary starts a new chat, so it cannot be combined with --resume"
+    ),
+    "cli.exec_runtime.temporary_conflicts_workstream": (
+        "--temporary cannot be combined with --workstream: a workstream is kept"
+    ),
+}
+
+
 def test_inventory_and_context() -> None:
-    assert catalogues.load_catalogue("en", "cli.exec_runtime") == GOLDEN
+    assert catalogues.load_catalogue("en", "cli.exec_runtime") == {**GOLDEN, **SINCE_SLICE}
     assert len(GOLDEN) == 11
+    assert not set(GOLDEN) & set(SINCE_SLICE)
     context = json.loads(
         (catalogues.catalogue_root() / "en/cli.exec_runtime.context.json").read_text()
     )
-    assert set(context) == set(GOLDEN)
+    assert set(context) == set(GOLDEN) | set(SINCE_SLICE)
     assert all(all(row.get(k) for k in ("role", "tone", "note")) for row in context.values())
 
 

@@ -287,6 +287,33 @@ def test_a_legacy_greeted_at_stamp_reads_as_delivered(isolated_root: Path) -> No
     assert onboarding.first_run_pending(isolated_root) is False
 
 
+@pytest.mark.parametrize("settled", ["greeted_at", "skipped"])
+def test_a_settled_greeting_answers_first_run_without_scanning_the_store(
+    isolated_root: Path, monkeypatch: pytest.MonkeyPatch, settled: str
+) -> None:
+    """The ledger short-circuits the session scan (2026-11-11 loop-blocking fix).
+
+    ``GET /v1/desktop/aida`` polls ``first_run_pending``; the old order ran
+    ``fresh_install`` -- which opens every session transcript -- before reading
+    the ledger that already answered False, costing seconds per poll on a
+    2,506-session store. A counter, not a raising stub: the predicate swallows
+    exceptions into False, so a raise would pass on the old code too.
+    """
+    path = isolated_root / "aida" / "onboarding.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    ledger = (
+        {"greeted_at": 1234}
+        if settled == "greeted_at"
+        else {"greeting": {"state": onboarding.GREETING_SKIPPED}}
+    )
+    path.write_text(json.dumps(ledger), encoding="utf-8")
+    scans: list[object] = []
+    monkeypatch.setattr(onboarding, "other_user_sessions", lambda root: scans.append(root) or [])
+
+    assert onboarding.first_run_pending(isolated_root) is False
+    assert scans == []
+
+
 @pytest.mark.asyncio
 async def test_greet_refuses_without_a_provider_and_moves_nothing(isolated_root: Path) -> None:
     _root_with_session(isolated_root)

@@ -81,6 +81,7 @@ from local_operator.session.runtime.types import (
     DESKTOP_WATCH_CAPABILITY,
     EVENT_MUTE_CAPABILITY,
     EXCLUSIVE_MOVE_CAPABILITY,
+    MESH_PEER_MESSAGE_CAPABILITY,
     OPERATOR_SIGNATURE_CAPABILITY,
     drain_phrase_for_frame,
 )
@@ -180,6 +181,53 @@ MOVED_REASON = "owner moved this conversation to another device"
 #: nothing to do. Review round 3, UX U3.
 BIND_FAILED_REASON = "owner could not prepare this view; the session is alive — reconnect to retry"
 
+#: How much of the owner's ``bind_failed`` message a reason may carry. The owner
+#: already clips at 400; this is the VIEWER's own bound, because the sentence it
+#: lands in is printed by ``lop network --peek``/``--send`` refusals and the
+#: sessions tool, and an owner (older, or hostile) is untrusted input here.
+_BIND_FAILED_DETAIL_LIMIT = 300
+
+#: The head of a ``bind_failed`` reason that names the owner's cause. Named so
+#: :func:`_reset_reason` can recognise the announcement: the cause makes the
+#: sentence dynamic, so it can no longer sit in ``_ANNOUNCED_REASONS`` as an
+#: exact string. Only :func:`bind_failed_reason` builds a reason with this head.
+_BIND_FAILED_CAUSE_PREFIX = "owner could not prepare this view: "
+
+
+def bind_failed_reason(message: object) -> str:
+    """The disconnect reason for a ``bind_failed`` frame, naming the owner's cause.
+
+    WHY THE CAUSE RIDES ALONG (2026-11-12): a coordinator on a node dialing a
+    session on another Mac got "owner could not prepare this view" and nothing
+    else. The owner HAD sent the exception text, but this client dropped it, and
+    the owner's traceback lived only in a shared rotating ``runtime.log`` that
+    was overwritten within minutes — so the cause was unrecoverable from either
+    end. Every consumer (the pilot refusal in ``network/cli``, the sessions
+    tool, the attached host) prints this string verbatim, so carrying the cause
+    HERE is what reaches all of them without each learning a new field.
+
+    The message is untrusted text from another process (possibly another
+    device): credential SHAPES are masked (the owner scrubs too, but an older
+    owner did not), control sequences and newlines are flattened so it cannot
+    repaint a terminal or forge a second line, and it is clipped. Absent or
+    empty — an older owner, or a frame without the key — keeps the exact
+    historical sentence so nothing that already reads it changes.
+
+    This pass is NOT complete on its own: an owner on 0.101.x or older sends its
+    raw ``str(exc)``, which a new viewer now displays, and the viewer can mask
+    credential shapes but not that owner's retrieved-secret ledger values.
+    """
+    if not isinstance(message, str) or not message.strip():
+        return BIND_FAILED_REASON
+    from local_operator.ansi import sanitize_prompt_line
+    from local_operator.redaction_shapes import scrub_shapes
+
+    detail = sanitize_prompt_line(scrub_shapes(message), limit=_BIND_FAILED_DETAIL_LIMIT)
+    if not detail:
+        return BIND_FAILED_REASON
+    return f"{_BIND_FAILED_CAUSE_PREFIX}{detail}; the session is alive — reconnect to retry"
+
+
 #: Maximum bytes in one frame. Must equal the server's ``_MAX_LINE_BYTES``:
 #: the writer refuses to exceed it and the reader refuses to read past it, so
 #: two different numbers would mean a frame the owner considers sendable is one
@@ -213,6 +261,38 @@ def _settings_defer_fields(defer_ok: bool, request_id: str | None) -> dict[str, 
 #: what failed is our ability to parse what it sent. Kept a named constant so a
 #: host can tell the two apart rather than matching on prose.
 OVERSIZED_FRAME_REASON = "owner sent a frame too large to read"
+
+#: The reasons an owner ANNOUNCES on the wire before it closes the socket.
+#:
+#: A transport error that follows one of them must not replace it. The owner
+#: socket is loopback TCP, and an owner that closes while the viewer's own
+#: outbound bytes sit unread in its receive buffer can make the kernel send an
+#: RST rather than a FIN — the likely mechanism (RFC 2525 §2.17), inferred from
+#: the observed reset rather than established by a capture; the owner closes at
+#: ``RuntimeServer._drop_client``. What is observed: the pump reads the
+#: announced frame and, on its NEXT read, gets ``ConnectionResetError``, so the bare
+#: ``reason = "owner connection reset"`` assignment in :meth:`AttachClient._pump`
+#: overwrote a retirement the frame had already stated, and the viewer recovered
+#: a planned refresh as owner death.
+#: The announcement is the more specific fact, and the reset is only how the
+#: socket ended after it.
+_ANNOUNCED_REASONS = frozenset({STOPPED_REASON, RETIRING_REASON, MOVED_REASON, BIND_FAILED_REASON})
+
+
+def _reset_reason(announced: str) -> str:
+    """The disconnect reason for a transport reset, keeping an announced one.
+
+    A ``bind_failed`` frame that names its cause yields a reason built per
+    message (:func:`bind_failed_reason`), so it is matched by its head rather
+    than by the exact-string set. Without that, the same RST that the set
+    guards against for a bare ``bind_failed`` replaced a cause-bearing one with
+    ``"owner connection reset"`` — telling the person their session died and
+    discarding the very cause the owner sent.
+    """
+    if announced in _ANNOUNCED_REASONS or announced.startswith(_BIND_FAILED_CAUSE_PREFIX):
+        return announced
+    return "owner connection reset"
+
 
 logger = logging.getLogger(__name__)
 
@@ -1141,6 +1221,9 @@ class AttachClient:
         self._activity_supported = False
         self._exclusive_move_supported = False
         self._ask_attachments_supported = False
+        #: Whether the owner takes a relayed ``peer_message`` and stamps the
+        #: sending device (``MESH_PEER_MESSAGE_CAPABILITY``). False until a dial.
+        self._mesh_peer_message_supported = False
         self._connected = False
 
     @property
@@ -1281,6 +1364,9 @@ class AttachClient:
         # its neighbours. Unlike ``_input_mode_supported`` this gates a REFUSAL, not
         # a strip: see ``ask_respond``.
         self._ask_attachments_supported = ASK_ATTACHMENTS_CAPABILITY in record.capabilities
+        # Read on a local dial too, for symmetry with the remote one
+        # (``RemoteSessionClient.connect``); only the mesh pilot consults it.
+        self._mesh_peer_message_supported = MESH_PEER_MESSAGE_CAPABILITY in record.capabilities
         try:
             reader, writer = await asyncio.open_connection(
                 "127.0.0.1", record.control_port, limit=_READ_LIMIT_BYTES
@@ -1574,8 +1660,9 @@ class AttachClient:
                     # moments away and every consumer already reads that string.
                     # What it buys is the truth — without it the close fell
                     # through to the pump's default and the person was told
-                    # their session had died.
-                    reason = BIND_FAILED_REASON
+                    # their session had died. The owner's message names the
+                    # CAUSE (see ``bind_failed_reason`` for why it is kept).
+                    reason = bind_failed_reason(frame.get("message"))
                 elif op == "aside_delta":
                     # One chunk of an off-record aside's answer, streamed while the
                     # request that asked for it is still in flight. LIVE ONLY by
@@ -1621,7 +1708,14 @@ class AttachClient:
                 _READ_LIMIT_BYTES,
             )
         except (ConnectionResetError, BrokenPipeError):
-            reason = "owner connection reset"
+            # Keeps a reason a frame already announced; see _ANNOUNCED_REASONS.
+            # This covers a reset that arrives AFTER the frame was read. When
+            # the reset is queued first, ``StreamReader.readuntil`` raises the
+            # stored exception before it looks at its buffer (CPython
+            # asyncio/streams.py), so the frame is lost on this side. The
+            # viewer's recovery covers that case from the owner's exit record
+            # (``attached._lost_owner_retired_for_refresh``).
+            reason = _reset_reason(reason)
         except ConnectionError as exc:
             # A frame the owner sent was refused by this side — malformed, a
             # sequence gap, or a sync a host callback rejected. The socket is
@@ -1634,7 +1728,7 @@ class AttachClient:
             reason = str(exc) or "owner sent a frame this client refused"
             logger.warning("attach client: %s; the connection cannot continue", reason)
         except OSError:
-            reason = "owner connection reset"
+            reason = _reset_reason(reason)
         except Exception as exc:  # noqa: BLE001 — a callback failure must still report
             # A host callback raised something else (a store rejecting an
             # update, a validation error). Same treatment: the pump cannot
@@ -2429,6 +2523,7 @@ class AttachClient:
         args: str,
         images: list[dict[str, str]] | None = None,
         *,
+        bridge_ack: bool = False,
         defer_ok: bool = False,
         request_id: str | None = None,
     ) -> Any:
@@ -2439,6 +2534,12 @@ class AttachClient:
         Legacy calls omit both new keys and keep their original result shape.
         """
         fields = _settings_defer_fields(defer_ok, request_id)
+        # ``bridge_ack`` (team-bridge-egress.md: "bridge_ack") rides beside the
+        # deferral keys and, like them, only when set: an unmarked frame stays
+        # byte-identical, and a deferred ``approvals auto`` still carries the
+        # marker the owner re-checks when the queued body finally applies.
+        if bridge_ack is True:
+            fields["bridge_ack"] = True
         if not defer_ok:
             return await self._request_payload(
                 "slash_result", command=command, args=args, images=images or [], **fields
@@ -2835,6 +2936,41 @@ class AttachClient:
         if reason:
             fields["reason"] = reason
         return await self._request("ask_dismiss", **fields)
+
+    @property
+    def mesh_peer_message_supported(self) -> bool:
+        """Did this owner advertise ``MESH_PEER_MESSAGE_CAPABILITY`` on this dial?"""
+        return bool(getattr(self, "_mesh_peer_message_supported", False))
+
+    async def peer_message(
+        self,
+        text: str,
+        *,
+        mode: str,
+        wake: bool,
+        sender: dict[str, Any],
+        message_id: str,
+    ) -> dict[str, Any]:
+        """Deliver ``text`` to the owner's MAILBOX, as a local ``lop send`` does.
+
+        The mesh ``send`` (PR #3827 A1): unlike ``prompt``, a busy owner does not
+        park this behind its running turn — it is a ``peer_message`` row read at
+        the next tool-call boundary, with the sender's wake/steer choice, and the
+        ack arrives at mailbox admission. Returns the whole reply frame so the
+        caller can read the owner's ``delivery`` block; raises the owner's
+        refusal like every other op. The SENDING DEVICE is not ours to claim: the
+        owner stamps it from the link (``server._stamp_peer_sender``).
+        """
+        reply = await self._request_frame(
+            "peer_message",
+            text=text,
+            mode=mode,
+            wake=wake,
+            sender=sender,
+            message_id=message_id,
+        )
+        self._raise_for_reply_error(reply)
+        return reply
 
     async def recall_steer(self, command_id: str) -> str:
         """Unsend the queued steer submitted under ``command_id`` (v4)."""

@@ -181,8 +181,19 @@ def _break(store: Path, how: str) -> None:
         with open(log, "r+b") as handle:
             handle.write(b"X")
     elif how == "rotated":
-        log.unlink()
-        log.write_bytes(data)
+        # A real rotation must give the log a NEW (st_dev, st_ino): identical
+        # bytes mean identity is the only thing that can tell the files apart.
+        # unlink-then-write let ext4/tmpfs hand the freed inode number straight
+        # back, so CI run 43010912496 saw an "unchanged" log and excused s1
+        # (APFS never reuses one immediately, so it passed on macOS). Writing
+        # the replacement while the old inode is still held, then renaming it
+        # over the log, makes the two inodes coexist and therefore differ.
+        before = log.stat()
+        replacement = log.with_name(log.name + ".rotated")
+        replacement.write_bytes(data)
+        os.replace(replacement, log)
+        after = log.stat()
+        assert (after.st_dev, after.st_ino) != (before.st_dev, before.st_ino)
     elif how == "removed":
         log.unlink()
     elif how == "malformed":
@@ -199,6 +210,13 @@ def _break(store: Path, how: str) -> None:
 def test_untrustworthy_log_fails(tmp_path: Path, how: str) -> None:
     store, mark, started_at = _scenario(tmp_path)
     _break(store, how)
+    if how == "rotated":
+        # Precondition, not product behaviour: a "rotation" that kept the
+        # snapshot's identity is undetectable by design, so it must fail here
+        # loudly rather than as a misleading verdict (run 43010912496).
+        assert mark is not None
+        rotated = (store / rsa.CLEANUP_LOG_NAME).stat()
+        assert (rotated.st_dev, rotated.st_ino) != mark.identity
     verdict = _attribute(store, mark, started_at)
     assert verdict.explained == {}
     assert "cleanup log" in verdict.unexplained["s1"]

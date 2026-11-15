@@ -204,11 +204,14 @@ TOOL_NOTES: dict[str, ToolDocNotes] = {
             ),
         ),
         notes=(
-            "Account edits the owner explicitly requested apply directly. Otherwise "
-            "the change is proposed in Agents → <name>; after their agreement use "
-            "profile_proposal op=apply with the displayed proposal ID. When asking "
-            "them, send a 1-3 line summary plus the proposal ID, never the full "
-            "instructions (they review the diff in Agents).\n"
+            "A clean local agent creates/updates/reverts account agents and teams "
+            "ITSELF (a hub-linked row too: that edits the local copy; publishing is "
+            "separate). A run that read peer/Bridge/remote input files a proposal in "
+            "Agents → <name>; once the user agrees use profile_proposal op=apply with "
+            "its ID. Long text: ``show`` points at pages, read each with "
+            "``field``+``part``; patch with ``edits`` (omit ``old`` to append); a "
+            "rewrite dropping lines needs ``replace=true`` (your removal ack) + "
+            "``base_revision``. Ask the user with a 1-3 line summary + proposal ID.\n"
             "Detail moved off the wire in the slimming wave (audit item 2):\n"
             "\n"
             "- ``action_class``: 'proactive' lets a profile attach hidden "
@@ -232,15 +235,10 @@ TOOL_NOTES: dict[str, ToolDocNotes] = {
             "conversation only: usable for the rest of the "
             "conversation (task, /agent, teams), invisible in every other one, and "
             "gone with it; a fork starts with a copy of this conversation's roles. "
-            "A DURABLE profile (saved for every conversation) is the "
-            "user's decision: ``scope='global'`` needs their confirmation, and "
-            "this host may not be able to ask — a create/install refusal offers "
-            "the conversation-only retry (omit ``scope`` or use "
-            "``scope='session'``) and, to change the account, names the TUI "
-            "/agent form. ``update``/``reset`` act on an existing row, whose "
-            "store does not move, so those refusals name the TUI /agent form "
-            "alone; ``sync`` is account-only and has no conversation retry "
-            "either (its refusal names ``lop agents sync``). On a host with no "
+            "A DURABLE profile (``scope='global'``, every conversation) is for a "
+            "role that should outlive this one; never promote silently. "
+            "``install``/``reset``/``sync`` keep their approval card; ``sync`` "
+            "is account-only (``lop agents sync``). On a host with no "
             "conversation store the omission "
             "writes the account (there is no conversation scope to default "
             "into), so the default means 'this conversation' only where the "
@@ -280,24 +278,22 @@ TOOL_NOTES: dict[str, ToolDocNotes] = {
             ),
         ),
         notes=(
-            "Account edits the owner explicitly requested apply directly. Otherwise "
-            "the change is proposed in Agents → <name>; after their agreement use "
-            "profile_proposal op=apply with the displayed proposal ID. When asking "
-            "them, send a 1-3 line summary plus the proposal ID, never the full "
-            "instructions (they review the diff in Agents).\n"
+            "A clean local agent creates/updates/reverts account agents and teams "
+            "ITSELF (a hub-linked row too: that edits the local copy; publishing is "
+            "separate). A run that read peer/Bridge/remote input files a proposal in "
+            "Agents → <name>; once the user agrees use profile_proposal op=apply with "
+            "its ID. Long text: ``show`` points at pages, read each with "
+            "``field``+``part``; patch with ``edits`` (omit ``old`` to append); a "
+            "rewrite dropping lines needs ``replace=true`` (your removal ack) + "
+            "``base_revision``. Ask the user with a 1-3 line summary + proposal ID.\n"
             "SCOPE, the reuse → ephemeral → durable ladder: reuse a registered team "
             "when one covers the work; otherwise create it WITH NO ``scope`` so, "
             "where this host has a conversation store, it lives in THIS "
             "conversation only (usable until the conversation ends, "
             "invisible elsewhere, gone with it; a fork starts with a copy of this "
-            "conversation's teams). A team saved for every conversation "
-            "is the user's decision: ``scope='global'`` needs their confirmation, and "
-            "this host may not be able to ask — the refusal offers the "
-            "conversation-only retry (omit ``scope`` or use ``scope='session'``) "
-            "and, to change the account, names the TUI /team form. An "
-            "``update`` retry with no ``scope`` changes nothing (the store of an "
-            "existing row does not move), so that refusal names the TUI /team "
-            "form alone. On a host with no conversation store the omission "
+            "conversation's teams). ``scope='global'`` saves for every "
+            "conversation; never promote silently. On a host with no conversation "
+            "store the omission "
             "writes the account, so the default means 'this conversation' only "
             "where the host has one. `team_delete` removes a conversation team "
             "only; an account team must be deleted from a user surface, which "
@@ -703,8 +699,10 @@ TOOL_NOTES: dict[str, ToolDocNotes] = {
             "- A session with no message sent in it yet (a fresh `/new`) is not a "
             "recipient: sends to it are refused.\n"
             "- With `peer`, the target addresses a session on that device (mesh): "
-            "the send drives a turn there and returns the owner's reply; "
-            "`wake`/`now`/`patience`/`model` are local-only and refused there."
+            "the message lands in that session's mailbox exactly as a local send "
+            "does (`wake`/`now` honoured; the receiver sees your session and device "
+            "and replies with `send peer=`); `patience`/`model` are local-only and "
+            "refused there."
         ),
     ),
     # -- bridge -------------------------------------------------------------
@@ -719,33 +717,26 @@ TOOL_NOTES: dict[str, ToolDocNotes] = {
                 op="take_up",
                 blurb=(
                     "Fetch the FULL screened body of one message and verify it "
-                    "against the body_sha256 the wake payload carried. A digest "
-                    "mismatch is a hold: nothing is acked and no text is "
-                    "returned."
+                    "against the body_sha256 the wake payload carried. A mismatch "
+                    "is a hold: nothing acked, no text returned."
                 ),
             ),
             ToolDocOp(
                 op="ack",
                 blurb=(
-                    "state=working claims the message for this session (at most "
-                    "one session works a message; another session's claim is "
-                    "refused, never duplicated). state=done releases this "
-                    "session's own claim."
+                    "state=working claims the message for this session (another "
+                    "session's claim is refused, never duplicated); state=done "
+                    "releases yours."
                 ),
             ),
             ToolDocOp(
                 op="send",
                 blurb=(
                     "The PAIR-INBOX lane only: an outbound note/question/request "
-                    "through the durable outbox (intent and client_ref recorded "
-                    "before dispatch, so a retry replays the same idempotent "
-                    # The "NOT a direct message" sentence moved out: "invisible in
-                    # the UI" (WHICH LANE, below) already states it once, and this
-                    # reference is inside the 8 KiB doc soft cap — the one-channel
-                    # clause had to be paid for here rather than left over the cap.
-                    "send). Use `dm` for a person or their agent, `channel_post` "
-                    "for a room, and `send` only to answer a delivery that "
-                    "arrived on this lane."
+                    "through the durable outbox (intent and client_ref are recorded "
+                    "before dispatch, so a retry replays it). Use `dm` for a person "
+                    "or agent, `channel_post` for a room, `send` only to answer a "
+                    "delivery on this lane."
                 ),
             ),
             ToolDocOp(
@@ -763,9 +754,9 @@ TOOL_NOTES: dict[str, ToolDocNotes] = {
                     "Who is on the team: each member's account id, display name "
                     "and, when they have one, their chief of staff "
                     "(`chief_of_staff.endpoint_id` and its CURRENT name). "
-                    "Metadata only — no bodies. Rows marked `you: true` are you "
-                    "or your own owner. An agent whose `reachable` is false is "
-                    "not addressable right now (state says why)."
+                    "Metadata only - no bodies. `you: true` is you or your own "
+                    "owner; `reachable: false` is not addressable now (state says "
+                    "why)."
                 ),
             ),
             ToolDocOp(
@@ -774,12 +765,12 @@ TOOL_NOTES: dict[str, ToolDocNotes] = {
                     "A DIRECT MESSAGE to another member's agent "
                     "(`endpoint_id`, or `account_id` with target=agent) or to a "
                     "person (`account_id`, target=human). It opens or reuses the "
-                    "same conversation the desktop shows, so both people see it "
-                    "and the recipient's connector delivers it to their chief of "
-                    "staff. The reply arrives in that conversation: read it with "
-                    "`channel_history(channel_id=<the dm's conversation_id>)`. "
-                    "A person asking you to pass something to someone's agent "
-                    "means `dm` — never 'forward this thread'."
+                    "desktop's conversation, so both people see it and the "
+                    "recipient's connector delivers it to their chief of staff. "
+                    "The reply arrives there: read it with "
+                    "`channel_history(channel_id=<its conversation_id>)`. Asked "
+                    "to pass something to someone's agent, use `dm` - never "
+                    "'forward this thread'."
                 ),
             ),
             ToolDocOp(
@@ -795,7 +786,7 @@ TOOL_NOTES: dict[str, ToolDocNotes] = {
             ToolDocOp(
                 op="channels",
                 blurb=(
-                    "One page of YOUR OWNER's conversations (the human list). "
+                    "One page of YOUR OWNER's conversations. "
                     # The `not_designated` sentence moved to WHICH SESSION (below),
                     # which states the same rule with the non-retryable detail; the
                     # duplicate was what paid for the one-channel wire clause.
@@ -806,39 +797,41 @@ TOOL_NOTES: dict[str, ToolDocNotes] = {
             ToolDocOp(
                 op="channel_create",
                 blurb=(
-                    "Open a group or channel as this agent; the creator agent member "
-                    "is added automatically, and the human owner only if you name "
-                    "them. Members found with `directory` can be added here, so a "
-                    "group of several teammates' agents is one call. A taken name "
-                    "answers `channel_exists` + its id."
+                    "Open a group or channel as this agent; the creator agent "
+                    "member is added, the human owner only if you name them. "
+                    "Members found with `directory` can be added here, so a team's "
+                    "agents are one call. A taken name answers `channel_exists` + "
+                    "its id."
                 ),
             ),
             ToolDocOp(
                 op="channel_post",
                 blurb=(
                     "Post one message into a conversation (id or name) as this "
-                    "agent. The "
-                    "result carries `message_id`/`seq` so you can confirm it and "
-                    "thread on it. `thread_root_id` posts as a reply in that "
+                    "agent. The result carries `message_id`/`seq` to confirm and "
+                    "thread on. `thread_root_id` posts as a reply in that "
                     "message's thread. This is the op for a ROOM, and for answering "
                     "a DM, not `send`. Bind replies with `in_reply_to_message_id` "
                     "(the exact admitted inbound message, not a thread root). "
                     "A bridge-input run requires this or intentional `new_post: true`; "
-                    "new_post declares intent, not semantic isolation or authority."
+                    "new_post declares intent, not isolation or authority."
                 ),
             ),
             ToolDocOp(
                 op="channel_history",
                 blurb=(
-                    "A bounded page of one conversation (id or name). "
-                    "Bodies appear only for "
-                    "messages this agent admitted; everything else is metadata with "
-                    "`body: null` (no local body cache). A null body with a "
-                    "`body_state` means you have not been given that message (held, "
-                    "not admitted, or your own post that could not be read back in "
-                    "this read) - it is NOT an empty message; "
-                    "do not infer its content. Also reads the reply to a `dm` "
-                    "(its `conversation_id`)."
+                    "A bounded page of one conversation (id or name). Bodies appear "
+                    "only for messages this agent admitted; the rest is metadata "
+                    "with `body: null` (no local body cache). A null body is NOT "
+                    "an empty message - do not infer its content. `body_state` "
+                    "says why: `delay: transient` = delayed admission on YOUR "
+                    "machine (receiver asleep, offline, or catching up) - retry "
+                    "later, never a hold on content, no time promised. A null body "
+                    "WITHOUT `delay` stays unknown: maybe not yet received, "
+                    "refused, or not for this machine. `receiver_last_active_s` = "
+                    "seconds since your receiver last did anything, so a large "
+                    "value on a quiet channel can just mean quiet. Neither field "
+                    "says anything about content or a claim."
                 ),
             ),
             ToolDocOp(
@@ -846,7 +839,7 @@ TOOL_NOTES: dict[str, ToolDocNotes] = {
                 blurb=(
                     "One thread, oldest-first: the root with its reply count and a "
                     "bounded page of replies. Same screening rule as history, "
-                    "including `body_state` on a null body."
+                    "including `body_state` (`delay` too) on a null body."
                 ),
             ),
             ToolDocOp(

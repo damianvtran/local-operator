@@ -83,5 +83,10 @@
     "role": "global/root CLI flag help",
     "tone": "operator-facing, concise, preserves technical identifiers and safety distinctions",
     "note": "Propagated --run-in changes the operator working directory; flag spelling stays in code."
+  },
+  "cli.global_help.temporary": {
+    "role": "CLI --help text for a flag",
+    "tone": "plain, full sentence like neighbours",
+    "note": "Help for the --temporary flag of 'lop'."
   }
 }

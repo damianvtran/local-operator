@@ -409,6 +409,8 @@
   "wire.settings.network_credentials_github_repositories.placeholder": "damianvtran/scratch, damianvtran/sandbox",
   "wire.settings.network_credentials_grant_ttl_s.help": "El tiempo máximo que un dispositivo puede usar un inicio de sesión prestado por su propietario antes de volver a pedirlo, y por tanto cuánto sigue funcionando en otros lugares el inicio de sesión de un propietario revocado o desconectado. Nunca más que el propio token.",
   "wire.settings.network_credentials_grant_ttl_s.label": "Duración del inicio de sesión prestado (s)",
+  "wire.settings.network_credentials_offline_hold_s.help": "Mientras el dispositivo propietario de un inicio de sesión está inaccesible (en reposo, desconectado), cuánto tiempo sigue otro dispositivo usando el inicio de sesión que ya tomó prestado. Nunca más que el propio token; se aplican tanto el valor del propietario como el de este dispositivo, y prevalece el más corto.",
+  "wire.settings.network_credentials_offline_hold_s.label": "Inicio de sesión prestado: margen sin el propietario (s)",
   "wire.settings.network_listen_address.help": "127.0.0.1 = solo saliente; 0.0.0.0 = todas; o una dirección.",
   "wire.settings.network_listen_address.label": "Dirección de escucha",
   "wire.settings.network_max_handshakes.help": "Conexiones sin autenticar que este relé mantendrá a la vez. Un emparejamiento mantiene una durante los segundos hasta que se escribe el código; lo que supere el límite se descarta al aceptar, sin trama de respuesta.",
@@ -857,5 +859,11 @@
   "wire.settings.web_search_timeout_seconds.help": "Tiempo límite de petición por proveedor. Se limita al rango 1-120 al leerse.",
   "wire.settings.web_search_timeout_seconds.label": "Tiempo límite (s)",
   "wire.settings.web_tools.description": "Si las herramientas search y fetch se ofrecen y pueden ejecutarse.",
-  "wire.settings.web_tools.title": "Herramientas web"
+  "wire.settings.web_tools.title": "Herramientas web",
+  "wire.settings.session_cleanup_temporary_idle_minutes.choice.15m.label": "15 minutos",
+  "wire.settings.session_cleanup_temporary_idle_minutes.choice.30m.label": "30 minutos",
+  "wire.settings.session_cleanup_temporary_idle_minutes.choice.2h.label": "2 horas",
+  "wire.settings.session_cleanup_temporary_idle_minutes.choice.24h.label": "24 horas",
+  "wire.settings.session_cleanup_temporary_idle_minutes.label": "Eliminar los chats temporales tras",
+  "wire.settings.session_cleanup_temporary_idle_minutes.help": "Cuánto tiempo puede estar inactivo un chat temporal antes de eliminarse. El tiempo en pantalla, una tarea en curso o una pregunta abierta no cuentan como inactividad."
 }

@@ -9,5 +9,8 @@
   "cli.exec_runtime.model_returned": "[dim]{selector} पर वापस[/dim]",
   "cli.exec_runtime.compacting": "[dim]संदर्भ संपीड़ित हो रहा है…[/dim]",
   "cli.exec_runtime.error": "त्रुटि: {sentence}",
-  "cli.exec_runtime.aborted": "[red]निरस्त[/red]"
+  "cli.exec_runtime.aborted": "[red]निरस्त[/red]",
+  "cli.exec_runtime.temporary_agent_shell_refused": "अस्थायी चैट आप ख़ुद शुरू करते हैं; इसे किसी एजेंट के शेल से शुरू नहीं किया जा सकता",
+  "cli.exec_runtime.temporary_conflicts_resume": "--temporary नई चैट शुरू करता है, इसलिए इसे --resume के साथ नहीं जोड़ा जा सकता",
+  "cli.exec_runtime.temporary_conflicts_workstream": "--temporary को --workstream के साथ नहीं जोड़ा जा सकता: workstream रखा जाता है"
 }

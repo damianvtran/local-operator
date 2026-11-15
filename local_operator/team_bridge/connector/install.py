@@ -74,6 +74,7 @@ should be cross-platform and should work on Mac, Windows, Linux"):
 
 from __future__ import annotations
 
+import functools
 import hashlib
 import logging
 import os
@@ -82,14 +83,17 @@ import subprocess
 import sys
 import threading
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TypeVar
 
 from local_operator import launchd, procname, supervisors
 
 logger = logging.getLogger(__name__)
+
+_T = TypeVar("_T")
 
 #: The connector's own identity — a NEW label per the manager decision; the
 #: wake supervisor's ``com.local-operator.wakes`` is never reused or altered.
@@ -1198,7 +1202,10 @@ def sync_connector_service(config_dir: Path) -> ServiceOutcome:
     read or write), then the wanted state — decided again inside the lock.
     """
 
-    return _reconcile(Path(config_dir), force_off=False)
+    try:
+        return _reconcile(Path(config_dir), force_off=False)
+    finally:
+        invalidate_connector_state_cache()
 
 
 def remove_connector_service(config_dir: Path) -> ServiceOutcome:
@@ -1211,7 +1218,58 @@ def remove_connector_service(config_dir: Path) -> ServiceOutcome:
     CLI says so.
     """
 
-    return _reconcile(Path(config_dir), force_off=True)
+    try:
+        return _reconcile(Path(config_dir), force_off=True)
+    finally:
+        invalidate_connector_state_cache()
+
+
+# CONNECTOR-STATE CACHE (bridge-instant-load). The desktop status route reads
+# ``connector_state`` on every status poll, and on macOS that is one
+# ``launchctl print`` subprocess — measured ~32 ms median, 97 ms max — on the
+# path the Team Bridge page waits on when it opens. The value is a DISPLAY state
+# (the receiver badge), not an authority anything acts on, so a few seconds of
+# staleness is invisible; every in-process placement change (sync/remove, the
+# plist repair) invalidates it, so this process's own toggles show at once. A
+# change made by ANOTHER process (``lop team-bridge receiver install`` in a
+# terminal, launchd restarting the job) shows within the TTL. Per process, on
+# the monotonic clock so a wall-clock jump cannot pin or skip an entry.
+CONNECTOR_STATE_TTL_S = 5.0
+_STATE_CACHE: dict[str, tuple[float, str]] = {}
+_STATE_CACHE_LOCK = threading.Lock()
+#: Bumped by every invalidation. A read that started before an invalidation
+#: must not store its (possibly pre-change) answer after it.
+_STATE_CACHE_GENERATION = 0
+
+
+def invalidate_connector_state_cache() -> None:
+    """Drop every cached ``connector_state`` answer (placement just changed)."""
+
+    global _STATE_CACHE_GENERATION
+    with _STATE_CACHE_LOCK:
+        _STATE_CACHE.clear()
+        _STATE_CACHE_GENERATION += 1
+
+
+def cached_connector_state(config_dir: Path, *, ttl: float = CONNECTOR_STATE_TTL_S) -> str:
+    """:func:`connector_state`, reused for ``ttl`` seconds per config dir.
+
+    For DISPLAY reads only (the status route); anything that decides whether
+    to install or remove must call :func:`connector_state` or reconcile.
+    """
+
+    key = str(Path(config_dir))
+    now = time.monotonic()
+    with _STATE_CACHE_LOCK:
+        hit = _STATE_CACHE.get(key)
+        generation = _STATE_CACHE_GENERATION
+    if hit is not None and now - hit[0] < ttl:
+        return hit[1]
+    value = connector_state(config_dir)
+    with _STATE_CACHE_LOCK:
+        if generation == _STATE_CACHE_GENERATION:
+            _STATE_CACHE[key] = (now, value)
+    return value
 
 
 def connector_state(config_dir: Path) -> str:
@@ -1285,6 +1343,20 @@ def journal_hint() -> str | None:
     return None
 
 
+def _invalidates_connector_state(fn: Callable[[], _T]) -> Callable[[], _T]:
+    """Invalidate the display cache after ``fn``, however it exits."""
+
+    @functools.wraps(fn)
+    def wrapper() -> _T:
+        try:
+            return fn()
+        finally:
+            invalidate_connector_state_cache()
+
+    return wrapper
+
+
+@_invalidates_connector_state
 def refresh_plist_if_stale() -> launchd.PlistRefresh:
     """Repair the connector's LaunchAgent on the upgrade path, then restart it.
 

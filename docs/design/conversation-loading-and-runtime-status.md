@@ -100,7 +100,7 @@ Read this first, because it changes what the next phase should build:
   carries the before/after: a 642-byte session answered in **829 ms** while the
   261 MB open was in flight, against **24 requests completing inside the open**
   (median 70 ms, worst 308 ms) after. Its evidence is committed at
-  `docs/evidence/session-load-central-cache/`.
+  `scripts/repro/session-load-central-cache/`.
 * **The attach bind is off the owner's workload loop, for every attach.**
   `subscribe_frontend` carries `@_on_session_loop`
   (`session/runtime/serving.py:2536-2537,2549`), the serving plane gives it
@@ -253,7 +253,7 @@ documents the same cost and the mechanism that already avoids it:
   `Transcript.__init__` (`session/transcript.py:1087`) streams and JSON-decodes
   **every row of the journal** when the file exists (`:1161-1166`, one row at a
   time to keep the peak bounded). Recorded baselines: **2 286.7 ms on a 261 MB
-  journal, 248.2 ms on a 107.6 MB one** (`docs/evidence/session-load-central-cache/README.md`,
+  journal, 248.2 ms on a 107.6 MB one** (`scripts/repro/session-load-central-cache/README.md`,
   measured at load 176-312), and 1.37 s / 231 MB in
   `docs/design/full-history-audit-window.md:185-191`.
 

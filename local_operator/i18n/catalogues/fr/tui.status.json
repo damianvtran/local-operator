@@ -5,5 +5,6 @@
   "tui.status.jobs": "{count, plural, one {# tâche} many {# de tâches} other {# tâches}}",
   "tui.status.model.connecting": "connexion…",
   "tui.status.model.setup": "configuration",
-  "tui.status.tunnel.parked": "accès distant désactivé"
+  "tui.status.tunnel.parked": "accès distant désactivé",
+  "tui.status.temporary": "temporaire"
 }

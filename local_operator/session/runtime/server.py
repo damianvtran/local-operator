@@ -127,6 +127,9 @@ from local_operator.session.runtime.types import (
     HEARTBEAT_INTERVAL_S,
     INPUT_MODE_CAPABILITY,
     LIVE_INBOX_CAPABILITY,
+    MESH_PEER_MESSAGE_CAPABILITY,
+    MESH_SENDER_DEVICE_ID_KEY,
+    MESH_SENDER_DEVICE_NAME_KEY,
     OPERATOR_SIGNATURE_CAPABILITY,
     PEER_MESSAGE_ID_CAPABILITY,
     QUEUED_MOVE_CAPABILITY,
@@ -383,6 +386,14 @@ def document_blocks(
         out.append(block)
     return out
 
+
+#: How much of a bind failure's exception text (head of the message, tail of
+#: the traceback) is scrubbed for secrets before the final clips (400 / 4000
+#: characters). The scrub runs on the runtime's event loop and is linear in its
+#: input: measured in review round 1 of PR #3873, a 1 MB message held the loop
+#: ~0.2 s and the traceback pass about doubled it. 16 KiB is 40x the message
+#: clip and 4x the traceback clip, so nothing that could be kept is cut first.
+_BIND_FAILURE_SCRUB_WINDOW = 16 * 1024
 
 #: A prompt payload past 1 MB is a bug, not a prompt — the line limit the
 #: control socket reader enforces.
@@ -2084,6 +2095,40 @@ class _ConnectionAuthority:
 
     locality: ClientLocality = "local"
     capabilities: frozenset[str] = frozenset()
+    #: ``{"device_id", "name"}`` of the device a RELAYED connection speaks for,
+    #: from the auth frame the owner's own relay wrote off its authenticated link
+    #: (``relay._peer_block``) — empty for a local dial. ``peer_message`` stamps it
+    #: onto the card (``_stamp_peer_sender``) so the receiver knows which device
+    #: wrote and can answer with ``send peer=``.
+    peer: Mapping[str, Any] = field(default_factory=dict)
+
+
+def _stamp_peer_sender(raw: Any, authority: "_ConnectionAuthority") -> dict[str, Any]:
+    """The sender dict a ``peer_message`` card carries, device stamped by the OWNER.
+
+    The frame's sender is ADVISORY (a session id and name the sending side read
+    off its own registry): it is display only. The device is a different kind of
+    fact — it decides where a reply goes — so it comes from the connection, never
+    the frame. Any frame-supplied device key is dropped first, for a local dial
+    too (a local caller must not be able to dress a note up as a mesh peer's),
+    and a remote connection then gets the link's identity plus the
+    ``remote_origin`` stamp a relayed ``prompt`` already carries. ``pid`` and
+    ``cwd`` of a remote sender name things on ANOTHER machine, which nothing
+    here can act on, so they are dropped rather than shown as if local.
+    """
+    sender = dict(raw) if isinstance(raw, Mapping) else {}
+    sender.pop(MESH_SENDER_DEVICE_ID_KEY, None)
+    sender.pop(MESH_SENDER_DEVICE_NAME_KEY, None)
+    if authority.locality == "local":
+        return sender
+    sender.pop("pid", None)
+    sender.pop("cwd", None)
+    sender["remote_origin"] = True
+    device_id = str(authority.peer.get("device_id") or "")
+    if device_id:
+        sender[MESH_SENDER_DEVICE_ID_KEY] = device_id
+        sender[MESH_SENDER_DEVICE_NAME_KEY] = str(authority.peer.get("name") or "")
+    return sender
 
 
 #: What a dispatch under no connection at all is treated as: the pre-existing
@@ -2589,6 +2634,34 @@ def has_durable_history(session: Any) -> bool:
     return durable_conversation_path(path)
 
 
+def _accepts_keyword(fn: Any, name: str) -> bool:
+    """Whether ``fn`` takes keyword ``name`` (a handle kind may predate it)."""
+    try:
+        return name in inspect.signature(fn).parameters
+    except (TypeError, ValueError):
+        return False
+
+
+def _serve_peer_bounded_history(payload: dict[str, Any], sync: Any, locality: str) -> None:
+    """Swap in the bounded page for a NON-LOCAL viewer whose exact page escalated.
+
+    ``full_required`` means "replay the transcript locally": exact for a viewer
+    on this machine, impossible for one on another device, whose facade then
+    refused the bind — and with it every mesh ``send``/``peek`` riding that
+    viewer — because ONE newest row was larger than a page. The session captured
+    the same cut's bounded page beside the exact one
+    (``FrontendSync._peer_display_history``); a local connection never sees it,
+    so a local viewer's frame is byte-for-byte what it was. The caller's strip
+    helpers run after this, so capability gating applies to the swapped page too.
+    """
+    if locality == "local":
+        return
+    bounded = getattr(sync, "_peer_display_history", None)
+    if bounded is None:
+        return
+    payload["display_history"] = bounded.model_dump(mode="json")
+
+
 class RuntimeServer:
     """One per interactive process. Construct, ``start()``, ``close()``."""
 
@@ -2660,6 +2733,7 @@ class RuntimeServer:
         #: than read off the record so the publish is one assignment and the
         #: fields have a defined value before the record exists.
         self._pending: str | None = None
+        self._pending_queued = False
         #: True once this session has run at least one real turn. Starts
         #: False for every fresh boot (a ``/new`` session sitting in the
         #: composer) and flips True the first time a turn actually runs — the
@@ -2919,6 +2993,15 @@ class RuntimeServer:
                 # drop the id cannot dedupe that retry -- so an owner that does
                 # not take the keyword must not advertise it.
                 + ([PEER_MESSAGE_ID_CAPABILITY] if receives_message_id(handle) else [])
+                # A MESH ``send`` MAY USE THE MAILBOX, gated on the handle that
+                # can receive one at all: the dispatch below stamps the relayed
+                # device on every remote ``peer_message``. See
+                # ``MESH_PEER_MESSAGE_CAPABILITY`` for why the sender gates on it.
+                + (
+                    [MESH_PEER_MESSAGE_CAPABILITY]
+                    if callable(getattr(handle, "receive_peer_message", None))
+                    else []
+                )
                 # THE LIVE INBOX DRAIN, gated on the flag the runtime child sets
                 # when it starts the watcher (``process._watch_live_inbox``): a
                 # sender that sees it may queue a message to ``inbox.jsonl``
@@ -4814,6 +4897,7 @@ class RuntimeServer:
             # ``job_trajectory``; see ``sync_wire_payload`` for why the frame
             # cannot carry them.
             sync_payload = sync_wire_payload(sync)
+            _serve_peer_bounded_history(sync_payload, sync, conn.locality)
             # The sync frame carries the FIRST display page, so it is one of
             # the THREE places the audit fields reach the wire (the others are
             # the ``history_page`` and ``frontend_sync`` RPCs). All three strip
@@ -4962,10 +5046,105 @@ class RuntimeServer:
         Best-effort: a failure to announce must never stop the drop that
         follows, and the send path drops the client itself when the write fails.
         """
+        # EVERYTHING HERE IS GUARDED (review M1 / QA Q1): the caller drops the
+        # connection only after this returns, so a raise from rendering the
+        # exception (a broken ``__str__``) or from the scrub would skip that
+        # drop and leave the viewer on a dead, still-registered connection
+        # until its 15 s sync timeout. Each step degrades instead of raising.
+        message = self._bind_failure_message(exc)
+        # REMOTE COORDINATORS WERE BLIND HERE (2026-11-12): the viewer dropped
+        # this message and the traceback went only to the shared rotating
+        # runtime.log, gone within minutes. The client now surfaces the message;
+        # this keeps a durable per-session record on the owner as well. Written
+        # before the announce so it exists even when the socket write fails.
+        # ``_record_bind_failure`` never raises.
+        self._record_bind_failure(conn, exc, message)
         try:
-            await self._send_to(conn, {"op": "bind_failed", "message": str(exc)[:400]})
+            await self._send_to(conn, {"op": "bind_failed", "message": message})
         except Exception:  # noqa: BLE001 — announcing is best-effort
             logger.debug("bind-failure announcement write failed", exc_info=True)
+
+    def _bind_failure_message(self, exc: BaseException) -> str:
+        """The redacted, clipped message a bind failure is announced with. Never raises.
+
+        ``str(exc)`` can itself raise (an exception with bad args or a broken
+        override); the type name then stands in, which still tells the viewer
+        more than nothing. Should the scrub fail, the type name is sent too,
+        never the unscrubbed text.
+        """
+        try:
+            text = str(exc)
+        except Exception:  # noqa: BLE001 — an unprintable exception still gets named
+            logger.debug("bind-failure exception text unavailable", exc_info=True)
+            return type(exc).__name__
+        try:
+            # Pre-clipped HEAD first (review m1): the scrub is linear in its
+            # input and runs on the event loop — 1 MB held it ~0.2 s. Only the
+            # first 400 characters survive the final clip anyway.
+            return self._redacted_bind_failure_text(text[:_BIND_FAILURE_SCRUB_WINDOW])[:400]
+        except Exception:  # noqa: BLE001 — fall back to a name, never to raw text
+            logger.debug("bind-failure message scrub failed", exc_info=True)
+            return type(exc).__name__
+
+    def _redacted_bind_failure_text(self, text: str) -> str:
+        """``text`` with known secret values and credential shapes masked.
+
+        The exception text LEAVES THIS PROCESS (to a viewer, possibly on another
+        device) and lands on disk, so it gets the same side-effect-free passes
+        ``supplements._metadata_text`` uses: the runtime's retrieved-secret
+        ledger, then the shape scrubber. Not the session's tool-result redactor,
+        which also writes report rows into the transcript.
+        """
+        import sys
+
+        from local_operator.redaction_shapes import scrub_shapes
+
+        safe = text
+        runtime = sys.modules.get("local_operator.secrets.runtime")
+        if runtime is not None:
+            try:
+                safe = runtime.scrub(safe)
+            except Exception:  # noqa: BLE001 — the shape pass below still runs
+                logger.debug("bind-failure secret scrub failed", exc_info=True)
+        return scrub_shapes(safe)
+
+    def _record_bind_failure(self, conn: _ClientConn, exc: BaseException, message: str) -> None:
+        """Persist this bind failure beside ``runtime-exit.json`` (best-effort)."""
+        try:
+            import traceback
+            from pathlib import Path
+
+            from local_operator.session.runtime import journal
+
+            session = getattr(self._handle, "_session", None)
+            directory = getattr(getattr(session, "_transcript", None), "directory", None)
+            if directory is None:
+                return
+            from local_operator.ansi import sanitize_prompt_line
+
+            try:
+                tb = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
+                # The TAIL is what the record keeps (the raising frame and the
+                # exception line), so pre-clip to it before the on-loop scrub
+                # (review m1), as the message pre-clips its head.
+                tb = self._redacted_bind_failure_text(tb[-_BIND_FAILURE_SCRUB_WINDOW:])
+            except Exception:  # noqa: BLE001 — keep the row; the traceback is a bonus
+                logger.debug("bind-failure traceback render failed", exc_info=True)
+                tb = ""
+            journal.record_bind_failure(
+                Path(directory),
+                session_id=str(getattr(session, "session_id", "") or ""),
+                exc_type=type(exc).__name__,
+                # One line, control sequences stripped (QA Q2): a future reader
+                # printing the record must not be repainted or line-forged by
+                # it. The traceback stays multi-line by nature; its reader
+                # must render it as a block.
+                message=sanitize_prompt_line(message, limit=400),
+                traceback_text=tb,
+                surface=str(getattr(conn, "surface", "") or ""),
+            )
+        except Exception:  # noqa: BLE001 — an instrument never breaks the drop
+            logger.debug("bind-failure record write failed", exc_info=True)
 
     def _release_when_landed(self, bind_task: asyncio.Task[Any]) -> None:
         """Release a bind's eventual subscription once nothing will receive it.
@@ -5705,7 +5884,7 @@ class RuntimeServer:
         except Exception:  # noqa: BLE001
             pass
 
-    def set_record_pending(self, pending: str | None) -> None:
+    def set_record_pending(self, pending: str | None, *, queued: bool = False) -> None:
         """Record that this session is waiting for a PERSON (or no longer is).
 
         Named for the RECORD it writes, distinct from ``set_pending`` below,
@@ -5717,10 +5896,16 @@ class RuntimeServer:
         than waiting for the 15 s heartbeat, because the whole value of the
         field is that a user hunting for "what is that 283 MB process doing"
         finds the answer at once.
+
+        ``queued`` marks the claim as the ask QUEUE's (an open queued ask, no
+        gate parked): a peer badges it but raises no park row
+        (``SessionRecord.pending_queued``).
         """
-        if self._pending == pending:
+        queued = bool(queued and pending)
+        if self._pending == pending and getattr(self, "_pending_queued", False) == queued:
             return
         self._pending = pending
+        self._pending_queued = queued
         self._republish()
 
     def _republish_detached(self) -> None:
@@ -6035,6 +6220,7 @@ class RuntimeServer:
         try:
             publisher.heartbeat(
                 pending=self._pending,
+                pending_queued=getattr(self, "_pending_queued", False),
                 busy=self._busy,
                 leaving=self._leaving,
                 started=self._started,
@@ -8622,7 +8808,9 @@ class RuntimeServer:
         """
         kwargs: dict[str, Any] = {}
         if _accepts_kw(self._dispatch, "authority"):
-            kwargs["authority"] = _ConnectionAuthority(conn.locality, conn.capabilities)
+            kwargs["authority"] = _ConnectionAuthority(
+                conn.locality, conn.capabilities, dict(conn.peer)
+            )
         if deliver is not None and _accepts_kw(self._dispatch, "deliver"):
             kwargs["deliver"] = deliver
         return await self._dispatch(op, frame, **kwargs)
@@ -9167,7 +9355,9 @@ class RuntimeServer:
                 "text": frame["text"],
                 "mode": str(frame.get("mode", "mailbox")),
                 "wake": bool(frame.get("wake", False)),
-                "sender": frame.get("sender") or {},
+                # THE DEVICE COMES FROM THE LINK, not the frame — see
+                # ``_stamp_peer_sender`` (PR #3827 A1: mesh ``send`` lands here).
+                "sender": _stamp_peer_sender(frame.get("sender"), authority),
             }
             # SENDER-MINTED MESSAGE IDENTITY, probed exactly like ``command_id``
             # above: a handle from before the carriage never receives a keyword
@@ -9451,6 +9641,12 @@ class RuntimeServer:
                 # updated is not forced into a lockstep change, and one that
                 # cannot accept the set is left at the flat behaviour it had.
                 kwargs["capabilities"] = capabilities
+            if frame.get("bridge_ack") is True and _accepts_kw(run, "bridge_ack"):
+                # Team Bridge capability marker (team-bridge-egress.md: "bridge_ack"), forwarded
+                # only
+                # when literally ``true``. Absent means "not acknowledged",
+                # which refuses a loosening for a latched conversation.
+                kwargs["bridge_ack"] = True
             # The settings switch's identity, so the owner can publish its
             # outcome as ``settings_result`` (a ``defer_ok`` ack may have
             # answered before it landed). Same optional probe as above.
@@ -9655,6 +9851,7 @@ class RuntimeServer:
             )
             try:
                 payload = sync_wire_payload(subscription.sync)
+                _serve_peer_bounded_history(payload, subscription.sync, locality)
                 # The THIRD wire route, and the one an old viewer uses most:
                 # ``AttachedSession._refresh_display_history`` calls this op on
                 # every history refresh, which fires whenever the frontend's
@@ -9730,7 +9927,14 @@ class RuntimeServer:
                 raise ValueError("invalid history page request")
             if len(before) > 4096 or len(anchor) > 512:
                 raise ValueError("invalid history page request")
-            result = fetch(before, anchor)
+            if locality != "local" and _accepts_keyword(fetch, "bound_oversized"):
+                # A NON-LOCAL VIEWER cannot perform the local replay a
+                # ``full_required`` page asks for, so an oversized older group
+                # rides bounded and marked instead (see
+                # ``_serve_peer_bounded_history``).
+                result = fetch(before, anchor, bound_oversized=True)
+            else:
+                result = fetch(before, anchor)
             payload = await result if inspect.isawaitable(result) else result
             # Same contract as the sync frame: a viewer that did not negotiate
             # the audit capability must not be handed fields its page model

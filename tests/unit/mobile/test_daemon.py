@@ -2029,9 +2029,11 @@ async def test_the_store_failure_is_a_ttl_paced_retry_not_a_rescan_per_repaint(
     calls = {"n": 0}
     real_rows = resume_module.recent_session_rows
 
-    def counting_rows(directory, limit=None, *, strict=False):
+    # ``**kwargs`` forwards the listing predicates (``include_temporary``) the
+    # daemon's window passes; this double only counts walks.
+    def counting_rows(directory, limit=None, *, strict=False, **kwargs):
         calls["n"] += 1
-        return real_rows(directory, limit, strict=strict)
+        return real_rows(directory, limit, strict=strict, **kwargs)
 
     monkeypatch.setattr(resume_module, "recent_session_rows", counting_rows)
 

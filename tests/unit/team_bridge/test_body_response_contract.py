@@ -6,7 +6,7 @@ off the body response, and the first version of it believed a FAKE: `Wire` in
 not send, so the tests proved a shape that never reached production (round 6,
 M1). A fake is only worth its green when something pins it to the real wire.
 
-WHAT IS PINNED HERE. `fixtures/team_bridge/conversation-body-response.json` is
+WHAT IS PINNED HERE. `tests/fixtures/team_bridge/conversation-body-response.json` is
 built from `BridgeConversationBodyResponse`'s json tags at agent-server
 `2501f5b1` (origin/feat/bridge-wake-all-members), including the two fields #255
 adds. These tests hold the connector and the test fake to that file:
@@ -42,7 +42,7 @@ CONV = "bcv_bodyresp01"
 ROOT = "bcmsg_root0001"
 
 FIXTURE = (
-    Path(__file__).resolve().parents[3]
+    Path(__file__).resolve().parents[2]
     / "fixtures"
     / "team_bridge"
     / "conversation-body-response.json"

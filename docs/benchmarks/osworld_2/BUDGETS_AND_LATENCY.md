@@ -44,6 +44,40 @@ Our runner already counts steps the same way: `_steps_taken += 1` once per
 action batch, with `_guest_actions` tracked separately. So `--max-steps 500`
 is directly comparable to upstream.
 
+### Session-arm accounting: do not read screen epochs as total decisions
+
+The native typed-SDK session arm preserves its historical `steps` field for
+consumers: it counts admitted/bound-world screen epochs, **not** all completed
+root output groups. Command-only groups can spend the decision horizon while
+leaving `steps` unchanged. The reply-arm batch counter described above must not
+be used to interpret a session-arm record.
+
+Session-arm `outcome.json` and the `accounting` event now carry one typed
+`accounting` snapshot with separate clocks:
+
+- `decision_groups_used` / `decision_groups_limit`: the bridge's existing
+  attempted root output-group clock and configured horizon. A multi-call group
+  counts once; this is not a new enforcement mechanism.
+- `legacy_screen_epochs`: the preserved `steps` value, explicitly labelled.
+- `command_attempts`: invocations of the negotiated command bridge, including
+  invalid/refused calls. These are not necessarily target executions and are
+  not a second decision-step counter.
+- `logical_requests`: observed, deduplicated request-final rows across the
+  owning session tree, not provider wire attempts or an official step count.
+  `requests_complete` says whether close joined; false means a provisional
+  snapshot, not a final total.
+- `verifier_requests`: unknown (`null`) when no separately identified verifier
+  subset is available. Do not derive it from request totals or invent zero.
+
+Unavailable counters (including pre-launch failures) are `null`. Existing
+`steps` and `attempted_groups` fields remain unchanged for compatibility.
+For example, 2 screen epochs, 40 decision groups at a 500-group horizon, and
+37 command attempts must be reported as **40/500 decision groups; 2 legacy
+screen epochs; 37 command attempts**, never as “2/500 total steps.” This
+illustrates distinct clocks, not an assertion that harness groups equal the
+upstream benchmark's model calls. No startup prompt or budget enforcement is
+changed by this reporting contract.
+
 ### What the old 2400 s wall did
 
 At the cohort's median pace of 27.4 s per model call a 40-minute wall bought

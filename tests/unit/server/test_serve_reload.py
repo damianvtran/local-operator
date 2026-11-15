@@ -590,3 +590,88 @@ def test_a_dead_reload_task_is_reported_and_a_cancelled_one_is_not(
     messages = [record.message for record in caplog.records]
     assert len(messages) == 1
     assert "reload task died" in messages[0]
+
+
+# --- the loop watchdog's emergency restart (serve wedges 11196/9633, 2026-11-11) ---
+
+
+def test_emergency_restart_reexecs_onto_the_loaded_build(
+    install: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A restart is not a move: "already running it" is not a refusal here."""
+    install["current"] = Path(install["loaded"])
+    seen: dict[str, Any] = {}
+    monkeypatch.setattr(os, "set_inheritable", lambda fd, flag: None)
+    monkeypatch.setattr(os, "execve", lambda path, argv, env: seen.update(argv=argv))
+    reason = serve_reload.emergency_restart(_app(fd=13))
+    assert reason == "re-exec returned without replacing the process"  # stubbed exec
+    assert seen["argv"][-2:] == ["--listener-fd", "13"]
+
+
+def test_emergency_restart_without_a_pointer_uses_this_interpreter(
+    install: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import sys
+
+    install["interpreter"] = None
+    install["current"] = None
+    seen: dict[str, Any] = {}
+    monkeypatch.setattr(os, "set_inheritable", lambda fd, flag: None)
+    monkeypatch.setattr(os, "execve", lambda path, argv, env: seen.update(path=path))
+    serve_reload.emergency_restart(_app(fd=13))
+    assert seen["path"] == sys.executable
+
+
+def test_emergency_restart_refuses_without_a_listener(install: dict[str, Any]) -> None:
+    assert "listening socket" in (serve_reload.emergency_restart(_app(fd=None)) or "")
+
+
+def test_restart_blocker_ignores_in_flight_requests_but_not_spawns() -> None:
+    """The wedged loop's own requests cannot finish; a runtime mid-spawn still blocks."""
+    app = _capable_app()
+    setattr(app.state, serve_reload.REQUESTS_ATTR, 4)
+    assert serve_reload.work_blocker(app) == "4 daemon-owned request(s)"
+    assert serve_reload.restart_blocker(app) is None
+    app = _capable_app(pool=FakePool("a runtime is being started"))
+    assert serve_reload.restart_blocker(app) == "a runtime is being started"
+    setattr(app.state, serve_reload.ADMISSION_ATTR, True)
+    assert "reload" in (serve_reload.restart_blocker(app) or "")
+
+
+@NEEDS_SIGUSR1
+def test_exec_off_the_main_thread_ignores_the_reload_signal_and_restores_it(
+    install: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``signal.signal`` raises off the main thread; the watchdog execs from one."""
+    import ctypes
+    import threading
+
+    libc = ctypes.CDLL(None)
+    libc.signal.restype = ctypes.c_void_p
+    libc.signal.argtypes = (ctypes.c_int, ctypes.c_void_p)
+
+    def os_disposition() -> int | None:
+        # ``signal.getsignal`` reads Python's own table, not the kernel's; swap
+        # and swap back is the portable query (sigaction's struct layout is not).
+        raw = libc.signal(int(RELOAD_SIGNAL), 1)
+        libc.signal(int(RELOAD_SIGNAL), raw)
+        return raw
+
+    sentinel = os_disposition()
+    monkeypatch.setattr(os, "set_inheritable", lambda fd, flag: None)
+    during: list[Any] = []
+    monkeypatch.setattr(os, "execve", lambda path, argv, env: during.append(os_disposition()))
+    errors: list[BaseException] = []
+
+    def run() -> None:
+        try:
+            serve_reload.emergency_restart(_app(fd=13))
+        except BaseException as error:  # noqa: BLE001 - surfaced below
+            errors.append(error)
+
+    worker = threading.Thread(target=run)
+    worker.start()
+    worker.join(10)
+    assert errors == []
+    assert during == [1]  # SIG_IGN at the moment of the exec
+    assert os_disposition() == sentinel  # the failed (stubbed) exec put it back

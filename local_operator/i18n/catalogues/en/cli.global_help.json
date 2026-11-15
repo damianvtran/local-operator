@@ -15,5 +15,6 @@
   "cli.global_help.propagated_resume": "Resume a previous session by id. Pass with no id for the most recent.",
   "cli.global_help.propagated_hosting": "Hosting platform for this run (e.g. anthropic, openai, openrouter)",
   "cli.global_help.propagated_model": "Model to use for this run",
-  "cli.global_help.propagated_run_in": "Working directory to run the operator in"
+  "cli.global_help.propagated_run_in": "Working directory to run the operator in",
+  "cli.global_help.temporary": "Start a temporary chat: it is left out of history and deleted after it sits idle (30 minutes by default)."
 }

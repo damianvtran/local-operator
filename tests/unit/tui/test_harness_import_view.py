@@ -111,7 +111,6 @@ async def test_sessions_require_selection_preview_and_confirmation() -> None:
             pilot,
             lambda: view._state == "sessions",
             what="harness-import view reached _state == 'sessions'",
-            workers=("harness-import",),
         )
         await pilot.press("space")
         await pilot.press("enter")
@@ -127,13 +126,11 @@ async def test_sessions_require_selection_preview_and_confirmation() -> None:
             pilot,
             lambda: view._state in ("progress", "result"),
             what="harness-import view reached _state in ('progress', 'result')",
-            workers=("harness-import",),
         )
         await settle(
             pilot,
             lambda: view._state == "result",
             what="harness-import view reached _state == 'result'",
-            workers=("harness-import",),
         )
         result_text = _plain(view._body_text)
         assert "Result" in result_text
@@ -165,7 +162,6 @@ async def test_import_status_and_cancel_use_the_shared_job_registry() -> None:
             pilot,
             lambda: view._state in ("progress", "result"),
             what="harness-import view reached _state in ('progress', 'result')",
-            workers=("harness-import",),
         )
         if view._state == "progress":
             await pilot.press("c")
@@ -173,7 +169,6 @@ async def test_import_status_and_cancel_use_the_shared_job_registry() -> None:
             pilot,
             lambda: view._state == "result",
             what="harness-import view reached _state == 'result'",
-            workers=("harness-import",),
         )
         assert view._job is not None
 
@@ -242,7 +237,6 @@ async def test_cancel_in_the_queued_window_ends_cancelled_with_no_rows() -> None
             pilot,
             lambda: view._state == "result",
             what="harness-import view reached _state == 'result'",
-            workers=("harness-import",),
         )
         assert view._job is not None
         assert view._job.progress.state == "cancelled"
@@ -264,7 +258,6 @@ async def test_status_without_a_job_is_an_explicit_error(monkeypatch) -> None:
             pilot,
             lambda: view._state == "error",
             what="harness-import view reached _state == 'error'",
-            workers=("harness-import",),
         )
         assert "No import job found" in _plain(view._body_text)
 
@@ -364,7 +357,6 @@ async def test_cancel_command_reattaches_and_arms_the_poll(monkeypatch) -> None:
             pilot,
             lambda: view._state == "progress",
             what="harness-import view reached _state == 'progress'",
-            workers=("harness-import",),
         )
         app._close_import_view()
         await pilot.pause()
@@ -375,7 +367,6 @@ async def test_cancel_command_reattaches_and_arms_the_poll(monkeypatch) -> None:
             pilot,
             lambda: view._state == "result",
             what="harness-import view reached _state == 'result'",
-            workers=("harness-import",),
         )
         assert view._job is not None
         assert view._job.progress.state == "cancelled"
@@ -467,7 +458,6 @@ async def test_source_and_session_rows_are_clickable() -> None:
                     pilot,
                     lambda: view._state == "sources",
                     what="harness-import view reached _state == 'sources'",
-                    workers=("harness-import",),
                 )
 
         # Session title, meta and cwd lines all resolve to their own row.

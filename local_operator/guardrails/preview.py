@@ -52,6 +52,7 @@ from local_operator.guardrails.check import (
     _targets_text,
     build_delete_case,
     builtin_branch,
+    credential_refusal_text,
     evidence_write_verdict,
     read_settings,
     review_text,
@@ -333,9 +334,7 @@ def preview_tool_call(
             if effect == BUILTIN_REFUSE_CRITICAL:
                 builtin_text = _critical_text(verdict)
             elif effect == BUILTIN_REFUSE_CREDENTIAL:
-                builtin_text = review_text(
-                    DANGEROUS_DELETE_RULE, "an unresolvable target", _targets_text(verdict)
-                )
+                builtin_text = credential_refusal_text(command)
             elif effect == BUILTIN_JUDGE:
                 case = build_delete_case(verdict, context)
                 builtin_facts = (*case.facts, *case.evidence.describe())

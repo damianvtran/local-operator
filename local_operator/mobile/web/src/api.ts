@@ -34,6 +34,7 @@ import type {
 	SlashCommand,
 	SubagentDetail,
 	TagsResponse,
+	TemporaryInfo,
 	TranscriptEntry,
 } from "./types";
 
@@ -49,6 +50,11 @@ export class HttpError extends Error {
 		readonly status: number,
 		message: string,
 		readonly code = "",
+		/** The refusal's other machine fields (`same_key`, `request_id`,
+		    `retry_after_s` on the pairing routes). Kept whole rather than one
+		    typed field per route so a caller that keys on `code` can read its
+		    route's extras without this class learning every route. */
+		readonly body: Readonly<Record<string, unknown>> = {},
 	) {
 		super(message);
 		this.name = "HttpError";
@@ -100,14 +106,16 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 	if (!res.ok) {
 		let detail = `${res.status}`;
 		let code = "";
+		let extras: Record<string, unknown> = {};
 		try {
 			const body = (await res.json()) as { error?: string; code?: string };
 			if (body.error) detail = body.error;
 			if (typeof body.code === "string") code = body.code;
+			if (body && typeof body === "object") extras = body as Record<string, unknown>;
 		} catch {
 			/* A non-JSON error body carries no more than the status did. */
 		}
-		throw new HttpError(res.status, detail, code);
+		throw new HttpError(res.status, detail, code, extras);
 	}
 	return (await res.json()) as T;
 }
@@ -415,7 +423,10 @@ export function resumeSession(
     A caller with a directory in hand passes ``cwd``; nothing else about the
     request changes, so both callers share one route and one response shape. */
 export function startSession(
-	input: { cwd?: string; provider?: string; model_id?: string } = {},
+	/* `temporary` is sent ONLY by a caller that saw `features.temporary_chats`
+	   (lib/temporary): an older relay's start body is strict, so an ungated
+	   key would be a refusal rather than a quietly retained chat. */
+	input: { cwd?: string; provider?: string; model_id?: string; temporary?: boolean } = {},
 ): Promise<{ ok: boolean; pid: number; session_id: string }> {
 	return request("/api/sessions/start", {
 		method: "POST",
@@ -527,6 +538,24 @@ export function setSessionPin(
 		method: "POST",
 		headers: { "content-type": "application/json" },
 		body: JSON.stringify({ pinned }),
+	});
+}
+
+/** Mark or keep a chat (contract §2.3, `POST /api/sessions/{id}/temporary`).
+
+    DESIRED STATE, like the pin: the body names the state wanted, so a retry
+    after a dropped response lands on the same one. The reply is the mark the
+    daemon READ BACK (`null` = kept). Refusals: 409 `session_pinned`,
+    `session_in_project`, `session_not_user`; 404 `session_not_found` /
+    `session_temporary_deleted`. */
+export function setSessionTemporary(
+	sessionId: string,
+	temporary: boolean,
+): Promise<{ session_id: string; temporary: TemporaryInfo | null }> {
+	return request(`/api/sessions/${encodeURIComponent(sessionId)}/temporary`, {
+		method: "POST",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify({ temporary }),
 	});
 }
 
@@ -724,6 +753,106 @@ export function pairingStatus(deviceId: string): Promise<{
 	operator_spki?: string;
 }> {
 	return request(`/api/pair/${encodeURIComponent(deviceId)}`);
+}
+
+// ---------------------------------------------------------------------------
+// Terminal-free pairing (design v2 §2.2, A1): availability → claim → file →
+// status → certificate. The routes sit behind the same relay gate as the rest of
+// this module; every refusal is keyed on its `code` (see `HttpError.body` for the
+// extras), never on the English `error` sentence.
+// ---------------------------------------------------------------------------
+
+export type PairAvailability = {
+	available: boolean;
+	reason: "ok" | "no_operator_authority" | "unsupported" | string;
+};
+
+/** Whether the computer can approve a phone right now. A 404 here means a daemon
+    from before terminal-free pairing; the caller treats it as `unsupported`. */
+export function pairAvailability(): Promise<PairAvailability> {
+	return request("/api/pair/availability");
+}
+
+/** Step 1 (claim): the phone's public point plus `commit = sha256(np)`. The
+    computer answers with ITS nonce before the phone reveals its own, which is
+    what stops a relay from steering the six digits. */
+export function pairClaim(input: { spki: string; commit: string }): Promise<{
+	nd: string;
+	computer_id_pub: string;
+	anchor?: string;
+	expires_at?: number;
+}> {
+	return request("/api/pair/request", {
+		method: "POST",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify(input),
+	});
+}
+
+/** The filed request record, as far as the phone reads it. */
+export type PairRecord = {
+	approval_id: string;
+	request_id: string;
+	state: string;
+	expires_at?: number;
+	device?: { device_id?: string };
+	what?: {
+		pair_phone?: {
+			via?: { route?: string; account?: string; attested?: string };
+			computer_id_pub?: string;
+		};
+	};
+};
+
+/** Step 2 (reveal + file). Idempotent for the same body, so a retry after a
+    dropped response gets the same record back rather than a second request. */
+export function pairFile(input: {
+	request_id: string;
+	spki: string;
+	commit: string;
+	np: string;
+	name: string;
+	platform: "web";
+}): Promise<PairRecord> {
+	return request("/api/pair/request", {
+		method: "POST",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify(input),
+	});
+}
+
+export type PairReason =
+	| "waiting"
+	| "signing"
+	| "admin_prompt_open"
+	| "failed_retryable"
+	| "strikes_exhausted"
+	| "denied_by_user"
+	| "withdrawn"
+	| "expired"
+	| "paired";
+
+export type PairRequestStatus = {
+	state: string;
+	reason: PairReason | string;
+	mode?: "confirm" | "code";
+	device_id?: string;
+	expires_at?: number;
+};
+
+export function pairRequestStatus(requestId: string): Promise<PairRequestStatus> {
+	return request(`/api/pair/request/${encodeURIComponent(requestId)}`);
+}
+
+/** Cancel the phone's own request. `sig` is the device key's DER signature (hex)
+    over `"lop-pair-withdraw-v1" ‖ request_id`, so a relay cannot cancel a request
+    it merely observed. */
+export function pairWithdraw(requestId: string, sig: string): Promise<{ state: string }> {
+	return request(`/api/pair/request/${encodeURIComponent(requestId)}/withdraw`, {
+		method: "POST",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify({ sig }),
+	});
 }
 
 /** URL for one image attachment on a user turn. The bytes are served lazily

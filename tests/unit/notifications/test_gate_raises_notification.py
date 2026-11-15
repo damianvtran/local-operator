@@ -372,6 +372,52 @@ async def test_a_parked_gate_raises_exactly_one_banner(
     await handle.dispose()
 
 
+@pytest.mark.parametrize("spawner", ["workstream", "mesh-agent"])
+@pytest.mark.asyncio
+async def test_an_agent_spawned_session_still_raises_its_gate_rows(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, spawner: str
+) -> None:
+    """Review round 1, R1-2 / QA Q1: losing ``notify`` must not lose the asks.
+
+    The operator rule withholds the ``notify`` TOOL from a session another
+    agent started (a ``sessions spawn`` workstream, or a mesh session stamped
+    ``origin.kind == "agent"``). Its parked approvals and asks are still the
+    operator's to answer, so each park writes its ``gate:`` row exactly as on a
+    session the operator opened. Fails when the exclusion sits in the shared
+    door (``_notify_inbox_callable``) that ``raise_gate_item`` reuses.
+    """
+    import json
+
+    from local_operator.resume import ORIGIN_AGENT_WORKSTREAM, mark_session_origin
+    from local_operator.session.placement import MESH_STAMP_NAME
+
+    config_root = _inbox_root(tmp_path, monkeypatch)
+    session = make_session(tmp_path / "spawned", RecordingStream())
+    directory = Path(session.transcript.directory)
+    if spawner == "workstream":
+        mark_session_origin(directory, ORIGIN_AGENT_WORKSTREAM)
+    else:
+        (directory / MESH_STAMP_NAME).write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "session_id": "s",
+                    "home_device": "d_node",
+                    "origin": {"kind": "agent", "source_device": "d_head"},
+                }
+            ),
+            encoding="utf-8",
+        )
+    # The precondition: the tool is gone for this session.
+    assert session._build_tool_context().notify_inbox is None
+
+    await session.raise_gate_item("approval", "bash", "rm -rf build/", "wait-ws-approval")
+    await session.raise_gate_item("ask", "Which branch?", "main or dev", "wait-ws-ask")
+
+    keys = sorted(item["key"] for item in _all_items(config_root))
+    assert keys == ["gate:approval:wait-ws-approval", "gate:ask:wait-ws-ask"], keys
+
+
 @pytest.mark.asyncio
 async def test_one_wait_signalling_twice_updates_one_row(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch

@@ -112,7 +112,7 @@ def scope_store(registry: Any, scope: Scope) -> Any:
     raise ValueError(
         "this run has no conversation store, so a role or team cannot be kept for "
         "this conversation only. Save it for every conversation instead "
-        "(scope='global', which needs the user's confirmation), or create it in "
+        "(scope='global'), or create it in "
         "the desktop Profiles editor, the TUI /agent or /team form, or `lop agents` "
         "or `lop teams`."
     )
@@ -335,9 +335,27 @@ def profile_field_label(field: str) -> str:
 
 def profile_diff_summary(summary: str) -> str:
     """One line per changed field, keeping the revert line out of long prose."""
+    from local_operator.profile_text_edits import parse_stats_heading
+
     lines: list[str] = []
     instruction_lines: list[str] = []
+    #: Inside a section whose heading already carries canonical counts
+    #: (``profile_text_edits.stats_heading``): its body is display text, and
+    #: counting its ``-`` bullets as removed lines was the receipt-vs-proposal
+    #: disagreement. Those counts are final and the body is skipped. Renderers
+    #: put such sections LAST, so everything after the first one is either its
+    #: body or another counted heading -- a body line that reads like
+    #: ``field: value`` can never be mistaken for a row.
+    counted = False
     for line in summary.splitlines():
+        stats = parse_stats_heading(line)
+        if stats is not None:
+            field, added, removed = stats
+            lines.append(f"{field}: +{added}/-{removed} lines")
+            counted = True
+            continue
+        if counted:
+            continue
         if line.startswith("instructions"):
             instruction_lines = []
             lines.append("instructions: updated")

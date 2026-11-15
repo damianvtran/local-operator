@@ -180,6 +180,11 @@ class SessionDraftStore:
             "aside_main_images": self._encode_attachments(draft.aside_main_images),
             "aside_main_shell_mode": draft.aside_main_shell_mode,
             "approve_all": draft.approve_all,
+            # Round-tripped with the mode it qualifies (S-57): dropping these
+            # would restore every grant at its default scope.
+            "approve_scope": draft.approve_scope,
+            "approve_granted_while_latched": draft.approve_granted_while_latched,
+            "approve_global_issued_here": draft.approve_global_issued_here,
             "recoveries": [self._encode_draft(item) for item in draft.recoveries],
             "notices": draft.notices,
         }
@@ -269,6 +274,11 @@ class SessionDraftStore:
             aside_main_images=self._decode_attachments(data["aside_main_images"]),
             aside_main_shell_mode=data["aside_main_shell_mode"],
             approve_all=data.get("approve_all"),
+            # Fail-closed decode (S-57): anything but a literal "global" is a
+            # session grant; anything but a literal True is unstamped.
+            approve_scope="global" if data.get("approve_scope") == "global" else "session",
+            approve_granted_while_latched=data.get("approve_granted_while_latched") is True,
+            approve_global_issued_here=data.get("approve_global_issued_here") is True,
             recoveries=[self._decode_draft(item) for item in data.get("recoveries", [])],
             notices=notices,
         )

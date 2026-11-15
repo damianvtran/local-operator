@@ -358,6 +358,17 @@ round: they read `warn`, they are named, and they do NOT hold the verdict,
 because the thing that needs a server or a tool refuses at its OWN point of use
 rather than failing the device.
 
+- **browser** — would a session on the node get a `browser` tool? Same
+  non-gating shape as `tooling`. `warn` not installed: the remedy is `lop
+  browser setup --node --authorised-by '<who, when>'` ON the node, which
+  installs the node-managed headless browser and so needs the operator's
+  authorisation; `warn` installed but unusable (Chrome unit down, daemon down,
+  unpaired): `lop browser setup --node --repair --authorised-by '<who, when>'`;
+  `n/a` where a user's own browser host (desktop app or extension) serves the
+  device, or where the node-managed browser is unsupported (not Linux x86_64,
+  not dnf/rpm). Details: `guide://browser` "Headless nodes". Sessions started
+  before setup keep their old tool list.
+
 Bring the node's DEFINITIONS and MCP SERVERS across deliberately when a create
 will not: `lop network definitions push --peer <id>` (or `--all-peers`) and
 `lop network mcp push --peer <id>`. Both reconcile by name and carry no values,
@@ -1146,6 +1157,15 @@ device's own package-manager terms (`brew install …` on a Mac, `sudo apt-get
 install …` on a Debian node) rather than a description of one. The row reads
 `warn` on purpose: missing tooling does
 not make a device less onboarded — it makes lanes that need it fail there.
+
+### A browser does not travel
+
+A session offloaded to a node gets no `browser` tool from the device that sent
+it: the browser host is per device (the operator's desktop app or extension
+lives on their machine, with their logins, and nothing of it crosses the mesh).
+A node needs its own — the node-managed browser, `lop browser setup --node`,
+with the operator's authorisation (`guide://browser` "Headless nodes") — and
+`lop network ready`'s `browser` row says which state each node is in.
 
 ### The build gates the machinery
 

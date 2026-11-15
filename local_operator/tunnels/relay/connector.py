@@ -77,6 +77,11 @@ OPEN_TIMEOUT = 10.0
 #: window (C1.5/C1.6), so a supersede fight (each session ending within that
 #: window) always reads as consecutive failures.
 STABLE_SESSION_SECONDS = 120.0
+#: C1.3: the relay pools idle streams for HTTP keep-alive and closes them itself
+#: after this long. The gateway behind the pipe must keep an idle connection open
+#: LONGER than this, or it closes streams the relay still reuses (see
+#: ``tunnels.service.GATEWAY_KEEP_ALIVE_SECONDS``).
+RELAY_IDLE_CONN_TIMEOUT = 30.0
 #: The relay caps a session at 128 concurrent streams (C1.6); twice that bounds a
 #: misbehaving peer without ever refusing a legitimate request.
 MAX_PIPES = 256
@@ -195,17 +200,96 @@ def _refusal(failure: BaseException) -> HandshakeRefused | None:
     return HandshakeRefused(response.status_code, error, retry_after)
 
 
-async def pipe_to_gateway(stream: yamux.Stream, host: str, port: int) -> None:
+#: At most one device-reset line per this many seconds reaches the service log.
+RESET_LOG_SECONDS = 60.0
+
+
+class ResetLog:
+    """Name, rate-limited, every stream the DEVICE resets and why.
+
+    WHY. The relay logs a device RST as 502 ``relay_upstream_reset`` with only a
+    hashed tunnel id, and it logs a phone that abandoned its request the same
+    way, so its logs alone cannot say whether this device failed. Before this
+    the connector reset streams silently. One line per window, with the first
+    cause and a count of the rest, keeps a burst of resets diagnosable without
+    turning a bad minute into hundreds of log lines.
+    """
+
+    def __init__(self, announce: Announce, *, window: float = RESET_LOG_SECONDS) -> None:
+        self._announce = announce
+        self._window = window
+        self._last = -window
+        self._suppressed = 0
+
+    def __call__(self, cause: str) -> None:
+        now = time.monotonic()
+        if now - self._last < self._window:
+            self._suppressed += 1
+            return
+        extra = (
+            f" (+{self._suppressed} more in the previous {self._window:g} s)"
+            if self._suppressed
+            else ""
+        )
+        self._last, self._suppressed = now, 0
+        self._announce(f"relay stream reset by this device: {cause}{extra}")
+
+
+def _cause(failure: BaseException) -> str:
+    return f"{type(failure).__name__}: {failure}"[:200]
+
+
+def describe_failure(failure: BaseException) -> str:
+    """A log-safe name for a refresh/connect failure: never an empty string.
+
+    WHY: `str(TimeoutError())` and httpcore's timeouts are EMPTY, so the
+    service log of 2026-11-11 read `relay token refresh failed: ` with nothing
+    after the colon and the cause was unrecoverable. The TYPE is always named,
+    and so is every exception the failure was chained from, because
+    `RadientTunnels.request` wraps the real cause (a store lock timeout, a
+    transport error) in one shared ValueError sentence.
+
+    WHAT IS LEFT OUT, deliberately: the messages of the chained links. Only the
+    outermost message is shown. For `/connect` that is either one of the tunnel
+    client's fixed literals (which never echo a provider body, token or URL) or
+    an httpx/OS transport message that `RadientTunnels.request` lets escape
+    unwrapped (e.g. `[Errno 61] Connection refused`) — the same text this line
+    logged before it named types. An inner link could be a third-party exception
+    whose text carries a request URL or a server-supplied string, so the chain
+    is named by type alone.
+    """
+    message = str(failure).strip()
+    text = type(failure).__name__ + (f": {message}" if message else " (no message)")
+    seen = {id(failure)}
+    link = failure.__cause__ or failure.__context__
+    while link is not None and id(link) not in seen:
+        seen.add(id(link))
+        text += f" <- {type(link).__name__}"
+        link = link.__cause__ or link.__context__
+    return text[:300]
+
+
+async def pipe_to_gateway(
+    stream: yamux.Stream,
+    host: str,
+    port: int,
+    on_reset: Callable[[str], None] | None = None,
+) -> None:
     """One relay stream ⇄ one loopback gateway connection, bytes only (C1.3).
 
     Each direction half-closes independently: the relay's FIN becomes
     ``shutdown(SHUT_WR)`` on the gateway socket, and the gateway's EOF becomes
     our FIN. The stream is NOT closed when one response ends — the relay pools
-    idle streams for keep-alive and closes them itself.
+    idle streams for keep-alive and closes them itself, which is also why the
+    gateway's own keep-alive must outlast the relay's pool
+    (``RELAY_IDLE_CONN_TIMEOUT``). ``on_reset`` hears every reset THIS side
+    sends, with its cause; a reset the relay sent is not reported.
     """
     try:
         reader, writer = await asyncio.open_connection(host, port)
-    except OSError:
+    except OSError as failure:
+        if on_reset is not None:
+            on_reset(f"gateway dial failed: {_cause(failure)}")
         await stream.reset()
         return
 
@@ -225,9 +309,11 @@ async def pipe_to_gateway(stream: yamux.Stream, host: str, port: int) -> None:
     try:
         for finished in asyncio.as_completed(tasks):
             await finished
-    except (yamux.StreamReset, ConnectionError, OSError):
+    except (yamux.StreamReset, ConnectionError, OSError) as failure:
         # A reset on either side ends both: a half-dead pipe would hold a
         # gateway connection open with nobody left to answer.
+        if on_reset is not None and not stream.was_reset:
+            on_reset(f"gateway connection failed: {_cause(failure)}")
         await stream.reset()
     finally:
         for task in tasks:
@@ -433,10 +519,16 @@ class RelaySession:
         assert self.mux is not None
         while (stream := await self.mux.accept()) is not None:
             if len(self._pipes) >= MAX_PIPES:
+                self._connector.reset_log(f"{MAX_PIPES} pipes already open")
                 await stream.reset()
                 continue
             task = asyncio.create_task(
-                pipe_to_gateway(stream, self._connector.gateway_host, self._connector.gateway_port)
+                pipe_to_gateway(
+                    stream,
+                    self._connector.gateway_host,
+                    self._connector.gateway_port,
+                    self._connector.reset_log,
+                )
             )
             self._pipes.add(task)
             task.add_done_callback(self._pipes.discard)
@@ -469,6 +561,8 @@ class RelayConnector:
         self.gateway_host = gateway_host
         self.name = name[:64]
         self.announce = announce
+        #: Shared by every session, so rotation does not reset the rate limit.
+        self.reset_log = ResetLog(announce)
         self.ws_connect: Callable[..., Awaitable[Any]] = ws_connect
         self._refresh = refresh
         self._active: RelaySession | None = None
@@ -617,6 +711,13 @@ class RelayConnector:
         return backoff_delay(self._unstable_closes)
 
     async def _fresh_grant(self, *, force: bool = False) -> RelayGrant | None:
+        # Reconnect-without-/connect is exactly this branch, and the contract
+        # caps it (C1.6 "Token reuse"): a new session reuses the token only while
+        # it has >= TOKEN_REUSE_MARGIN left, else it MUST call /connect first.
+        # The token lives 600 s (C2.3 `exp = iat + 600`) and is refreshed only
+        # when a dial needs it, while sessions rotate every ~50 min (C1.5), so a
+        # drop late in a session normally finds it expired and /connect gates the
+        # redial by contract — not something to route around here.
         if not force and self.grant.fresh():
             return self.grant
         refreshed = await self._refresh()
@@ -634,7 +735,7 @@ class RelayConnector:
             try:
                 grant = await self._fresh_grant()
             except Exception as failure:  # noqa: BLE001 - a /connect blip is a retry
-                self.announce(f"relay token refresh failed: {failure}")
+                self.announce(f"relay token refresh failed: {describe_failure(failure)}")
                 await asyncio.sleep(backoff_delay(attempt))
                 return None
             if grant is None:
@@ -660,14 +761,14 @@ class RelayConnector:
                 await asyncio.sleep(backoff_delay(attempt))
                 return None
             except (OSError, ConnectionError, TimeoutError) as failure:
-                self.announce(f"relay connect failed: {type(failure).__name__}: {failure}")
+                self.announce(f"relay connect failed: {describe_failure(failure)}")
                 if session.close_code in (4400, 4408):
                     # C1.6: a 4400/4408 before `ready` (hello_mismatch: the token
                     # no longer matches this tunnel) is answered by /connect
                     # first, then backoff — never a retry with the same token.
                     self.grant = RelayGrant(grant.url, grant.token, 0.0, grant.protocol)
             except Exception as failure:  # noqa: BLE001 - websockets' own errors
-                self.announce(f"relay connect failed: {type(failure).__name__}: {failure}")
+                self.announce(f"relay connect failed: {describe_failure(failure)}")
             await asyncio.sleep(backoff_delay(attempt))
             return None
         return None

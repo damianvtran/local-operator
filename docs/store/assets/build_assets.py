@@ -58,9 +58,13 @@ SOURCES (all committed in the repo)
 * Brand glyph:        static/local-operator-icon-2-{light,dark}-clear.png
                       2048x750 RGBA; the only non-transparent artwork is the
                       icon glyph, alpha bbox (888,202)-(1206,550).
-* Rendered frames:    docs/evidence/browser-extension/*.png — the real popup,
-                      options page, and agent-driven page captured from the
-                      release build.
+* Rendered frames:    external historical browser-extension captures — the real
+                      popup and options page captured from the release build.
+                      They are NOT present in the current checkout. Restore the
+                      original input set from commit 39691ea0 for regeneration;
+                      see docs/store/assets.md. The legacy EVID path below is
+                      retained for that historical reproduction, not a request
+                      to commit testing screenshots back to this repository.
 * Fonts:              docs/store/assets/fonts/*.woff2 — the site's own
                       variable builds (Fraunces opsz, Figtree, JetBrains Mono).
 
