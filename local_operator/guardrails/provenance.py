@@ -1790,7 +1790,50 @@ def cwd_holders(real: str, session_id: str, *, own: bool = False) -> tuple[CwdHo
             for pid in hidden
             if pid not in definite_pids
         )
-    return tuple(holders)
+    # A non-family holder that has EXITED by now held nothing worth refusing
+    # for: re-check each one's existence before it can make the tree busy.
+    return tuple(h for h in holders if h.family or _still_exists(h.pid))
+
+
+def _still_exists(pid: int) -> bool:
+    """Whether ``pid`` names a process right now (``False`` only for ESRCH).
+
+    WHY (main Full Suite runs 43718276774 job 132827789967 and 43737923202
+    job 132897283649, ``test_a_field_shape_with_own_process_inside_is_low[rm
+    -rf …]``, Linux 3.13 shards): ``_reached_worktrees`` runs an own tree's
+    ``worktree_state`` and ``worktree_activity`` concurrently, and activity
+    spawns ``git -C <tree> …`` (and the forge CLI) whose cwd is INSIDE the
+    tree for a few milliseconds. :func:`cwd_holders` reads the cwd inventory
+    first and the process table second; a git child caught by the first and
+    gone by the second has no table row, so its ancestry walk stops at pid 0
+    and it reads "no session record; unknown process", family False — the
+    creator's clean own tree read busy and ``rm -rf`` of it went HIGH. The
+    displayed holder list (a second scan) then showed only the family
+    ``sleep``, because the git child had already exited. Reproduced on
+    Darwin with a lingering ``git symbolic-ref`` shim: 10/10 decision-time
+    holder sets carried two such pids, both dead when re-checked.
+
+    Constraint, fail closed: only a process that provably no longer exists
+    (``ProcessLookupError``) is dropped. One that still exists keeps its
+    unknown/foreign attribution — an orphan or another session's child stays
+    busy and named. ``EPERM`` (another uid) means it exists. A pid recycled
+    between the scan and this check reads as existing and keeps the tree
+    busy: the safe direction, so no start-time comparison is needed.
+
+    Read from the SAME source as :func:`_cwd_entries`: ``<_PROC_ROOT>/<pid>``
+    where that process table exists (Linux; tests point it at a fake tree),
+    ``kill(pid, 0)`` elsewhere. The inventory lists this uid's pids only, so
+    ``hidepid`` (which hides other uids) cannot make a holder look gone.
+    """
+    if os.path.isdir(os.path.join(_PROC_ROOT, "self")):
+        return os.path.lexists(os.path.join(_PROC_ROOT, str(pid)))
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except OSError:
+        return True  # EPERM and anything else: it may exist, so it may hold the tree
+    return True
 
 
 def _spawner_owner(session_id: str, spawner: str) -> tuple[str, bool]:
