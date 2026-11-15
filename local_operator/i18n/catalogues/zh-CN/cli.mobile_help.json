@@ -13,5 +13,7 @@
   "cli.mobile_help.devices_port": "mobile守护进程的端口（默认：守护进程自身的默认值）",
   "cli.mobile_help.uninstall": "移除LaunchAgent",
   "cli.mobile_help.uninstall_purge": "同时删除密码",
-  "cli.mobile_help.serve": "运行守护进程（前台）"
+  "cli.mobile_help.serve": "运行守护进程（前台）",
+  "cli.mobile_help.doctor": "手机访问的只读诊断（可放心分享）",
+  "cli.mobile_help.doctor_json": "以JSON格式输出诊断信息"
 }

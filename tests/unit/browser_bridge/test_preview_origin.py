@@ -83,34 +83,98 @@ async def test_public_family_repeat_siblings_nested_and_unrelated(tmp_path, back
 
 
 @pytest.mark.asyncio
-async def test_node_unavailable_does_not_consume_family_preview_origin(
-    tmp_path, backend, monkeypatch
+@pytest.mark.parametrize(
+    "capability", ["signed", "no_approver", "key_held", "no_enqueue", "old_extension"]
+)
+async def test_node_capabilities_retain_first_family_binding(
+    tmp_path, backend, monkeypatch, capability
 ):
-    """Convergence: an unreachable node prompt must not reserve a desktop origin.
+    """Signed nodes can notify once; unavailable approvals cannot rotate hosts.
 
-    The node guard and durable family fence both precede the approval RPC, but
-    only a request that can reach an approval surface should consume the pin.
-    Switching the synthetic host to desktop also checks the fence still applies.
+    Discovery and the remote response are synthetic, but public dispatch, durable
+    family pinning and the upstream signed-card builder/enqueue path are real.
+    Never touch a platform keystore: supply the anchor/key boundary explicitly.
     """
+    from types import SimpleNamespace
+
+    from local_operator.browser_bridge import node_host, site_approval
+
+    monkeypatch.setattr(node_host, "headless_node_once", lambda: True)
+    monkeypatch.setattr(
+        "local_operator.operator.trust.load_anchor",
+        lambda: SimpleNamespace(usable=True, anchor=SimpleNamespace(key_id="test-key")),
+    )
+    monkeypatch.setattr(
+        site_approval, "anchor_key_held_locally", lambda *a: capability == "key_held"
+    )
+    cards = []
+
+    def enqueue(questions, timeout=None, tool_call_id=""):
+        cards.append(questions)
+        return {"ok": True, "text": "queued", "details": {"ask_id": "ask_preview_test"}}
+
+    parent = session(tmp_path, "root")
+    if capability != "no_enqueue":
+        parent.enqueue_ask = enqueue
+    remote = {
+        "origin": "https://first.trycloudflare.com",
+        "state": "pending",
+        "entryId": "preview-entry",
+        "node_device_id": "preview-node",
+        "approval": "signed",
+    }
+    if capability == "no_approver":
+        remote.update(approval="no_approver", state="none")
+    if capability == "old_extension":
+        remote.pop("approval")
+    backend.return_value = (remote, None)
+    # Upstream withdrawal uses the client's door, not _bridge_call. Keep that
+    # independent RPC observable without ever connecting to the user's browser.
+    cancel = AsyncMock(return_value={"state": "cancelled"})
+    monkeypatch.setattr("local_operator.browser_bridge.backend.BridgeClient.call", cancel)
+    first = await request(parent, remote["origin"])
+    assert first.details is not None
+    assert sum(call.args[1] == "request_access" for call in backend.await_args_list) == 1
+    assert "Fixed-origin rule" in first.text
+    rpc_count = backend.await_count
+    assert rpc_count == (2 if capability == "old_extension" else 1)
+    assert len(cards) == (1 if capability == "signed" else 0)
+    cancel_count = cancel.await_count
+    if capability == "signed":
+        assert not first.is_error and first.details["approval"] == "signed"
+    elif capability != "old_extension":
+        assert first.is_error and first.details["approval"] == "no_approver"
+    else:
+        assert first.details["state"] == "unavailable_on_node"
+    for member in (
+        parent,
+        session(tmp_path, "child", "root"),
+        session(tmp_path, "sibling", "root"),
+    ):
+        refused = await request(member, "https://second.trycloudflare.com")
+        assert refused.details is not None
+        assert refused.is_error and refused.details["code"] == "preview_origin_changed"
+        assert backend.await_count == rpc_count
+        assert cancel.await_count == cancel_count
+        assert len(cards) == (1 if capability == "signed" else 0)
+    # Failure is not permission to rebind; only retrying the SAME origin can RPC.
+    if capability != "signed":
+        await request(parent, remote["origin"])
+        assert sum(call.args[1] == "request_access" for call in backend.await_args_list) == 2
+        assert cards == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("state", ["allowed", "denied"])
+async def test_nonquick_node_text_is_upstream_exact(tmp_path, backend, monkeypatch, state):
     from local_operator.browser_bridge import node_host
 
-    ctx = session(tmp_path, "root")
     monkeypatch.setattr(node_host, "headless_node_once", lambda: True)
-    unavailable = await request(ctx, "https://unavailable.trycloudflare.com")
-    assert unavailable.details is not None
-    assert unavailable.details["state"] == "unavailable_on_node"
-    assert "cannot open sites on a headless node" in unavailable.text
-    assert backend.await_count == 0
-
-    monkeypatch.setattr(node_host, "headless_node_once", lambda: False)
-    allowed = await request(ctx, "https://first.trycloudflare.com")
-    assert not allowed.is_error and "Fixed-origin rule" in allowed.text
-    assert backend.await_count == 1
-    refused = await request(ctx, "https://unavailable.trycloudflare.com")
-    assert refused.is_error and refused.details is not None
-    assert refused.details["code"] == "preview_origin_changed"
-    assert refused.details["pinned_origin"] == "https://first.trycloudflare.com"
-    assert backend.await_count == 1
+    origin = "https://example.com"
+    backend.return_value = ({"origin": origin, "state": state}, None)
+    result = await request(session(tmp_path, "root"), origin)
+    assert result.text == builtin._node_access_result_text(state, origin, origin)
+    assert "Fixed-origin rule" not in result.text
 
 
 @pytest.mark.asyncio

@@ -376,6 +376,7 @@ async def test_a_parked_monitor_is_probed_first_and_engaged_only_when_not_quiet(
 ) -> None:
     works: list[Any] = []
     probed: list[str] = []
+    cwds: list[str] = []
 
     async def fake_engage(session_id, cwd, work, **_kwargs):  # noqa: ANN001, ANN202
         works.append((session_id, work))
@@ -383,8 +384,9 @@ async def test_a_parked_monitor_is_probed_first_and_engaged_only_when_not_quiet(
     async def cold(config_dir, session_id):  # noqa: ANN001, ANN202
         return False
 
-    async def probe(config_dir, session_id):  # noqa: ANN001, ANN202
+    async def probe(config_dir, session_id, cwd=""):  # noqa: ANN001, ANN202
         probed.append(session_id)
+        cwds.append(cwd)
         return quiet
 
     monkeypatch.setattr("local_operator.session.runtime.launch.engage_runtime", fake_engage)
@@ -395,6 +397,8 @@ async def test_a_parked_monitor_is_probed_first_and_engaged_only_when_not_quiet(
 
     await fire_due_wakes(tmp_path, now_ms=NOW_MS)
     assert probed == ["parkedmon002"]
+    # The SESSION's cwd reaches the probe: MCP configs are discovered per cwd.
+    assert cwds and cwds[0], "the probe must be told the session's cwd"
     assert [sid for sid, _work in works] == ([] if quiet else ["parkedmon002"])
 
 
@@ -410,7 +414,7 @@ async def test_an_unparked_cold_monitor_is_never_probed(
     async def cold(config_dir, session_id):  # noqa: ANN001, ANN202
         return False
 
-    async def probe(config_dir, session_id):  # noqa: ANN001, ANN202
+    async def probe(config_dir, session_id, cwd=""):  # noqa: ANN001, ANN202
         raise AssertionError("an idle-exited session is engaged as before")
 
     monkeypatch.setattr("local_operator.session.runtime.launch.engage_runtime", fake_engage)
@@ -457,3 +461,20 @@ async def test_a_cancelled_parked_probe_is_reaped_and_the_cancellation_propagate
     assert proc.returncode == -signal.SIGKILL
     with pytest.raises(ProcessLookupError):
         os.kill(proc.pid, 0)
+
+
+def test_the_parked_probe_env_is_rerooted_and_carries_no_owner_stamp(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Hash parity needs the probe on the probed root; an owner stamp would let
+    the supervisor's ownership sweep treat a probe (or its stdio MCP server) as
+    one of its runtimes."""
+    from local_operator.paths import CONFIG_DIR_ENV
+    from local_operator.wakes.owned_runtimes import OWNER_ENV, SUPERVISOR_PID_ENV
+
+    monkeypatch.setenv(OWNER_ENV, "tok")
+    monkeypatch.setenv(SUPERVISOR_PID_ENV, "1")
+    monkeypatch.setenv(CONFIG_DIR_ENV, "/elsewhere")
+    env = sup._parked_probe_env(tmp_path)
+    assert env[CONFIG_DIR_ENV] == str(tmp_path)
+    assert OWNER_ENV not in env and SUPERVISOR_PID_ENV not in env

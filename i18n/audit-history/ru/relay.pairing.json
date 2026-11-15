@@ -1,0 +1,50 @@
+{
+  "schema": 1,
+  "locale": "ru",
+  "namespace": "relay.pairing",
+  "history_sha256": "ea9dafa58dbd06710acf17f4a9ecf856e0f90b5b798c1477162536598b4ef875",
+  "entries": [
+    {
+      "locale": "ru",
+      "namespace": "relay.pairing",
+      "source_sha256": "d3dd6f85d0689242ec5c84b1145d47acd584856f5b25b49e18ea90c2da31fce0",
+      "translator": {
+        "agent": "coder subagent (C2a PWA slice; lop session a2980a9d3820)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-14"
+      },
+      "auditor": {
+        "agent": "i18n-auditor subagent (independent of the translator; lop session 8b4290dc2e57, delegated by lopdev manager 97e3f00bc260)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-14",
+        "result": "passed",
+        "findings": 1,
+        "unresolved_blocker_major": 0,
+        "read_route_verified": false
+      },
+      "status": "passed",
+      "note": "Independent audit of all 61 relay.pairing keys at English source sha256 d3dd6f85… (current bytes; the implementer's identity-only rename relay.pairing.terminal.approvals -> relay.pairing.terminal.turn_on_approving was verified by the auditor: substituting the old key name back reproduces the drafted 6f356b22… hash byte-for-byte, so every value is unchanged and the renamed key's translation was audited under its new name). Checked: key parity, {countdown}/{digits}/{command}/{name} preserved byte-exactly, no `lop ` command in any value, no ICU plurals in source, safety meaning (computer's own password vs Radient, nothing approved yet, removed/re-pair, wrong-code strikes), Approve/Deny label agreement with relay.asks.pending.*, Settings/Phone access path vs local-operator-ui origin/main f49d62bd2 desktop labels, maxCells with rich.cells.cell_len. Findings (0 blocker/major): nit unavailable.waiting 'этот экран продолжит сам' -> 'этот экран продолжит работу автоматически'. вы register, «ёлочки», сопряжение consistent with cli.browser.*; Настройки/Доступ с телефона match desktop. Auditor edited no catalogue."
+    },
+    {
+      "locale": "ru",
+      "namespace": "relay.pairing",
+      "source_sha256": "f1808a94c40b906328743d9115514368b4103c09d73c3c0ed80d328943203fe8",
+      "translator": {
+        "agent": "coder subagent 3949-r2-remediation (job c6eae4851264, lop session 63949a7a87e3; host session 25fe8dfbf610)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-14"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team; independent of the translator; lop session 130807af6161)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-14",
+        "result": "passed",
+        "findings": 1,
+        "unresolved_blocker_major": 0,
+        "read_route_verified": false
+      },
+      "status": "passed",
+      "note": "Independent round-2 audit of PR #3949 relay.pairing at head dd9e9918e, English source sha256 f1808a94…: read all 64 keys side by side with en and the context sidecar; focus on the 12 changed/new keys (intro.body, denied, expired, withdrawn, strikes_exhausted, busy.other, return.approve, return.choose, busy.maybe_this_phone, error.refused, error.support_code, rate_limited_over) and confirmed relay.pairing.start_again is absent from every catalogue. Checked in bytes: {code} preserved exactly (no ICU plurals in source), typographic apostrophes, no manual bidi controls, no `lop ` literal in any value; denied/expired/withdrawn name pairing; busy.other keeps the deny-if-not-yours instruction with the same Deny verb as operator.pairing.refusal.in_progress; return.approve names the button exactly as relay.asks.pending.approve; no maxCells on these keys (wrapping body copy). Findings (0 blocker/major): minor busy.maybe_this_phone 'Возможно, это этот же телефон…' reads clumsy -> 'Возможно, это тот же телефон, только в другом браузере или в приложении с экрана «Домой».'. вы register, «» and Одобрить/отклонить terms consistent. Auditor edited no catalogue."
+    }
+  ]
+}

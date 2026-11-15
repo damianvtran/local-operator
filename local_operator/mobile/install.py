@@ -2406,6 +2406,8 @@ def status(port: int = DEFAULT_PORT) -> dict[str, object]:
         "healthy": probe is not None,
         "gate_closed": gate_closed(port),
         "health": probe,
+        # Open descriptors vs the daemon's soft limit (`mobile/fdlimit.py`).
+        "files": _daemon_files(port) if probe is not None else None,
         "port": port,
         "log": str(log_path()),
         # The last relayed requests and their status classes (bounded tail read),
@@ -2423,6 +2425,16 @@ def status(port: int = DEFAULT_PORT) -> dict[str, object]:
             for record, state in records
         ],
     }
+
+
+def _daemon_files(port: int) -> dict[str, object] | None:
+    """The running daemon's open-file count and limit, for `status` (never raises)."""
+    from local_operator.mobile import doctor
+
+    try:
+        return doctor.open_files(doctor.daemon_pid(port))
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return None
 
 
 def _registration_path() -> Path | None:

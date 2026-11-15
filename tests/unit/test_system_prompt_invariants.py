@@ -174,3 +174,82 @@ def test_guides_skills_and_mcp_are_read_through_their_schemes(queued: str) -> No
 def test_every_guide_the_moved_prose_now_lives_in_is_pointed_at(queued: str, guide: str) -> None:
     """A trim that moves detail into a guide must leave the pointer behind."""
     assert f"guide://{guide}" in queued
+
+
+def test_a_file_the_user_asked_to_change_is_edited_in_place(queued: str) -> None:
+    """The overwrite caution is for files the user did NOT ask to change. Read
+    without this sentence it pushed a model asked to "fill in the blank PDFs"
+    into writing ``*-filled.pdf`` siblings and leaving the named files blank
+    (DeepSeek V4.1 Flash sample, 2026-11-12) — the deliverable was missing.
+    Worded at its minimum because it rides every session's start context
+    (scripts/bench_context_budget.py); the elaboration is in guide://app-files."""
+    assert "Treat unknown files as the user's work" in queued
+    # "asks to change" covers edit, fill and fix alike.
+    assert "Edit files the user asks to change in place" in queued
+    # An edit that cannot be undone (lossy re-encode, flattening, a file with
+    # no other copy) leaves the only copy unprotected, so the backup is
+    # required there, not optional.
+    assert "(back up first if irreversible)" in queued
+    # The only escape is an explicit request for a copy. A looser "or the
+    # original isn't theirs" covered a downloaded blank form — the very case
+    # that produced the sibling files (PR #3857 review R2).
+    assert "no new copy unless asked." in queued
+    assert "isn't theirs" not in queued
+
+
+def test_verifying_the_end_state_demands_complete_computed_evidence(queued: str) -> None:
+    """Measured misses the end-state rule now names (same sample): "every box
+    is inside its card" proved by one example, required names judged by eye,
+    "match B" judged on looks while links/metadata differed, and an item left
+    untested on a false "can't resize" after one route. Merged into "Verify
+    results" (one bullet, one heading) to pay for itself in the start-context
+    budget; each clause is pinned so a later trim fails here by name."""
+    assert "read back the file or re-query the system" in queued
+    assert "check paths, names and counts by command" in queued
+    # A check over every element that reports the failures, not a dump of
+    # every element: printing 10k rows floods context (review R4).
+    assert '"Every X": check all, count failures' in queued
+    assert "per-element output" not in queued
+    # The examples (links, metadata, types) live in guide://app-files.
+    assert '"match B": diff its properties;' in queued
+    # "Safe": a second route to test an external effect must not be the
+    # irreversible action itself (send, pay, publish) — review R5. An item
+    # still untested after both is unmet, which the next sentence enforces.
+    assert '"can\'t test": try two safe routes first' in queued
+    assert "Claim success only when observable; otherwise state the uncertainty" in queued
+
+
+def test_success_may_not_be_forged_by_editing_the_evidence(queued: str) -> None:
+    """Forged completion: DeepSeek V4.1 Flash, asked to play a puzzle game, twice
+    rewrote the game's saved progress in the Wine registry and declared done.
+    The everyday form is editing test expectations, a log line or a status file
+    so a check passes without the work. Rides the "fix problems at the source"
+    bullet because the start-context budget has ~20 tokens of headroom (moved
+    here from PR #3868); pin it so a later trim cannot drop it silently."""
+    assert (
+        "no suppressed errors, special-cased inputs or success faked by editing tests,"
+        " state or logs, unless the user asks"
+    ) in queued
+
+
+def test_condensed_wording_keeps_the_rules_it_leaned_on(queued: str) -> None:
+    """PR #3857 paid for its additions by condensing existing wording (listed in
+    its "Condensed existing wording" section). Each cut was safe only because
+    another sentence or the tool's own schema still carries the rule, so those
+    carriers are pinned here: dropping "or deleting" from the overwrite caution
+    leans on the stricter delete rule; the intro's "read the matching guide
+    first" leans on the Resources MUST; the tags op list and the `i` example
+    live in the tool schemas, leaving the rules themselves here."""
+    assert (
+        "Never delete or move a path you did not create this session unless the user named it"
+    ) in queued
+    assert "you MUST `read guide://<name>` BEFORE acting or answering" in queued
+    assert "Trust code and guides, not memory." in queued
+    assert "Asking spends their attention on work they delegated." in queued
+    assert "`assign` takes existing category NAMES only — create missing ones first" in queued
+    assert "Name the goal, not the mechanism." in queued
+
+
+def test_hand_written_app_files_point_at_their_guide(queued: str) -> None:
+    # Bold lead-in like every neighbouring Working-principles bullet.
+    assert "- **Hand-writing an app's file format?** Read `guide://app-files` first." in queued

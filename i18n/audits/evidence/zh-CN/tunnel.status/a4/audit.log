@@ -1,0 +1,45 @@
+$ git rev-parse HEAD
+7c0fc7bf22aade04f78c367c906374b73a1914d7
+exit=0
+$ git status --short -- local_operator/i18n/catalogues/en/tunnel.status.json local_operator/i18n/catalogues/en/tunnel.status.context.json local_operator/i18n/catalogues/zh-CN/tunnel.status.json
+ M local_operator/i18n/catalogues/en/tunnel.status.context.json
+ M local_operator/i18n/catalogues/en/tunnel.status.json
+ M local_operator/i18n/catalogues/zh-CN/tunnel.status.json
+exit=0
+$ git diff --stat HEAD -- local_operator/i18n/catalogues/en/tunnel.status.json local_operator/i18n/catalogues/en/tunnel.status.context.json local_operator/i18n/catalogues/zh-CN/tunnel.status.json
+ .../i18n/catalogues/en/tunnel.status.context.json       | 17 ++++++++++++++++-
+ local_operator/i18n/catalogues/en/tunnel.status.json    | 13 ++++++++-----
+ local_operator/i18n/catalogues/zh-CN/tunnel.status.json | 13 ++++++++-----
+ 3 files changed, 32 insertions(+), 11 deletions(-)
+exit=0
+$ PYTHONPATH=$PWD .venv/bin/python scripts/i18n/check.py --catalogues-only
+check.py: catalogue checks: 0 problem(s)
+exit=0
+$ .venv/bin/python $LOCAL_OPERATOR_SCRATCHPAD/audit-vi-zh/mech.py $PWD zh-CN tunnel.status
+en tunnel.status sha256 e2bc8c63d3124c363252511306fd3951917ab9f93a2398c49cac8c79302aa8f9 keys 24
+context tunnel.status sha256 78580b806d2acc2c0c84bcf2655b62ea5ae847bf206c43134762e288bba8695d
+zh-CN tunnel.status sha256 01c73d767048955095b04b2874cd6473522375d9b74751726da1d1f6ee471b37 keys 24 valid_json OK
+missing keys: none | extra keys: none
+whole-namespace mechanical: OK
+scope tunnel.status.tunnel_inactive.label: cells=29 forbidden=none placeholders=[]
+scope tunnel.status.tunnel_inactive.detail: cells=171 forbidden=none placeholders=['{url}']
+scope tunnel.status.tunnel_disabled.detail: cells=82 forbidden=none placeholders=['{url}']
+scope tunnel.status.billing_lapsed.detail: cells=82 forbidden=none placeholders=['{url}']
+scope tunnel.status.billing_inactive.detail: cells=91 forbidden=none placeholders=[]
+scope tunnel.status.card_paused: cells=15 forbidden=none placeholders=[]
+scope tunnel.status.card_add_credit: cells=27 forbidden=none placeholders=[]
+scope tunnel.status.card_open_console: cells=29 forbidden=none placeholders=[]
+card line card_add_credit: 29 cells (budget 50; en 43)
+card line card_open_console: 31 cells (budget 50; en 45)
+card line card_paused: 34 cells (budget 50; en 36)
+exit=0
+$ .venv/bin/python scripts/i18n/ledger.py history-sha --locale zh-CN --namespace tunnel.status
+94d94ec9780d1b2e797784fd943e51cdb39f675e517ae35ae8be90029b63b1f8
+exit=0
+$ jq -c '.entries[-1] | {round, status, source_sha256, keys_audited, evidence}' i18n/audit-history/zh-CN/tunnel.status.json
+{"round":"a3","status":"passed","source_sha256":"b368acfb0cdee89c8de5a210fc9956251701a9f3f73c88b1096611d0c1f9063f","keys_audited":21,"evidence":"i18n/audits/evidence/zh-CN/tunnel.status/a3/record.json"}
+exit=0
+$ sha256sum i18n/glossary.md i18n/style-guides/zh-CN.md
+a576d5a4b2718ba79a70a42600e3b6233ea28d716b1e2d996a208ac8dd7fabdb  i18n/glossary.md
+8f95d89debbd0af848e72e4805e256ef9566632e520a5c6d9b37928cd617142c  i18n/style-guides/zh-CN.md
+exit=0

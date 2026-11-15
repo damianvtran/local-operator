@@ -8,6 +8,7 @@ shape RFC §2.4 proved: a mistyped key or kwarg fails pyright.
 from __future__ import annotations
 
 from . import (
+    browser_site_approval,
     cli_agents_help,
     cli_agents_picture,
     cli_aida_help,
@@ -56,7 +57,9 @@ from . import (
     cli_vault,
     cli_vault_help,
     cli_wake_help,
+    mobile_doctor,
     mobile_setup,
+    operator_pairing,
     relay_account_policy,
     relay_agent_avatar,
     relay_approvals,
@@ -69,6 +72,7 @@ from . import (
     relay_library,
     relay_login,
     relay_notifications,
+    relay_pairing,
     relay_session,
     relay_session_tags,
     relay_shell,
@@ -79,6 +83,7 @@ from . import (
     tui_app,
     tui_asks,
     tui_authoring,
+    tui_boot_prompt,
     tui_chrome_banners,
     tui_chrome_bindings,
     tui_chrome_remote_park,
@@ -138,6 +143,7 @@ from . import (
     wire_notices,
     wire_notification_sound,
     wire_outcome_notices,
+    wire_phone_access,
     wire_push_alert,
     wire_radient_saver,
     wire_remote_compute,
@@ -161,6 +167,7 @@ from . import (
 )
 
 __all__ = [
+    "browser_site_approval",
     "cli_agents_help",
     "cli_agents_picture",
     "cli_aida_help",
@@ -209,7 +216,9 @@ __all__ = [
     "cli_vault",
     "cli_vault_help",
     "cli_wake_help",
+    "mobile_doctor",
     "mobile_setup",
+    "operator_pairing",
     "relay_account_policy",
     "relay_agent_avatar",
     "relay_approvals",
@@ -222,6 +231,7 @@ __all__ = [
     "relay_library",
     "relay_login",
     "relay_notifications",
+    "relay_pairing",
     "relay_session",
     "relay_session_tags",
     "relay_shell",
@@ -232,6 +242,7 @@ __all__ = [
     "tui_app",
     "tui_asks",
     "tui_authoring",
+    "tui_boot_prompt",
     "tui_chrome_banners",
     "tui_chrome_bindings",
     "tui_chrome_remote_park",
@@ -291,6 +302,7 @@ __all__ = [
     "wire_notices",
     "wire_notification_sound",
     "wire_outcome_notices",
+    "wire_phone_access",
     "wire_push_alert",
     "wire_radient_saver",
     "wire_remote_compute",

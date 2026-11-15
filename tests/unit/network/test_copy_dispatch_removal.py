@@ -20,14 +20,16 @@ copy exchange, and the real ``lop network member rm`` control op.
 
 from __future__ import annotations
 
+import ipaddress
 import json
+import socket
 import threading
 from typing import Any
 
 import pytest
 
 from local_operator.network import store
-from local_operator.network.credentials import sync
+from local_operator.network.credentials import placement, sync
 from local_operator.network.credentials.messages import render_removal_endings
 from local_operator.network.credentials.sync import SyncState
 from tests.unit.network import conftest as net_fixtures
@@ -39,6 +41,29 @@ from tests.unit.network.test_secret_copies import (  # noqa: F401 — fixtures b
     _member_has,
     secret_mesh,
 )
+
+
+@pytest.fixture(autouse=True)
+def _loopback_only(monkeypatch: pytest.MonkeyPatch) -> None:
+    """These fixtures must never dial a provider or the operator's live mesh."""
+    connect = socket.socket.connect
+
+    def checked(sock: socket.socket, address: Any) -> Any:
+        if isinstance(address, tuple):
+            host = address[0]
+            assert (
+                host == "localhost" or ipaddress.ip_address(host).is_loopback
+            ), "copy-dispatch tests allow only loopback TCP"
+        return connect(sock, address)
+
+    monkeypatch.setattr(socket.socket, "connect", checked)
+
+
+def test_the_loopback_guard_is_wired_before_any_case() -> None:
+    # A documentation-only negative guard is not evidence: exercise it without
+    # ever reaching connect(2) for this reserved non-loopback address.
+    with socket.socket() as sock, pytest.raises(AssertionError, match="only loopback TCP"):
+        sock.connect(("192.0.2.1", 443))
 
 
 class _HeldAcks:
@@ -211,7 +236,7 @@ def test_the_receipt_names_unacknowledged_copies_without_calling_them_confirmed(
     lines = render_removal_endings("device-b", copies=2, wiped=0, unacknowledged=1)
     text = "\n".join(lines)
     assert "2 of 2 copies on device-b could NOT be confirmed deleted" in text, text
-    assert "1 of them was sent but its delivery was never acknowledged" in text, text
+    assert "1 copy on device-b was sent but its delivery was never acknowledged" in text, text
     confirmed = "\n".join(render_removal_endings("device-b", copies=1, wiped=1, unacknowledged=1))
     assert "never acknowledged" not in confirmed, confirmed
 
@@ -249,6 +274,155 @@ def test_refused_and_malformed_copy_requests_record_no_dispatch(
         assert detail.get("kind") == "error", (fields, reply)
     state = SyncState.load(mesh.network_id, mesh.a.root)
     assert state.dispatched == {}, state.dispatched
+
+
+@pytest.mark.parametrize("as_json", [False, True])
+def test_offline_owner_removal_reports_unacknowledged_dispatches(
+    secret_mesh: Any,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    as_json: bool,
+) -> None:
+    mesh = secret_mesh
+    _deliver_without_ack(mesh, monkeypatch)
+    mesh.a.stop()
+    capsys.readouterr()
+    args = ("--json",) if as_json else ()
+    record = store.load(mesh.network_id, mesh.a.root)
+    assert _lop_network("member", "rm", record.name, mesh.b.identity.name, *args) == 0
+    out = capsys.readouterr().out
+    assert _member_has(mesh.b.root, SECRET_NAME), "no owner relay means no wipe exchange"
+    if as_json:
+        receipt = json.loads(out)
+        assert receipt["copies"] == 1 and receipt["wiped"] == 0, receipt
+        assert receipt["unacknowledged"] == 1, receipt
+    else:
+        assert "could NOT be confirmed deleted" in out, out
+        assert "1 copy on " in out and "delivery was never acknowledged" in out, out
+
+
+def test_timeout_and_unconfirmed_lines_name_the_unacknowledged_set() -> None:
+    text = "\n".join(
+        render_removal_endings("device-b", copies=3, wiped=1, timed_out=1, unacknowledged=1)
+    )
+    assert "1 of 3 copies on device-b timed out" in text, text
+    assert "1 of 3 copies on device-b could NOT be confirmed deleted" in text, text
+    assert "1 copy on device-b was sent but its delivery was never acknowledged" in text, text
+    assert "of them" not in text, text
+    plural = "\n".join(render_removal_endings("device-b", copies=2, wiped=0, unacknowledged=2))
+    assert "2 copies on device-b were sent but their delivery was never acknowledged" in plural
+
+
+@pytest.mark.parametrize("failure", ["no_placement", "unreadable"])
+def test_early_removal_counts_include_unacknowledged(
+    secret_mesh: Any, monkeypatch: pytest.MonkeyPatch, failure: str  # noqa: F811
+) -> None:
+    mesh = secret_mesh
+    if failure == "no_placement":
+        monkeypatch.setattr(mesh.engine_a, "_placement", lambda: None)
+    else:
+
+        def unreadable(*_args: Any, **_kwargs: Any) -> Any:
+            raise OSError("synthetic unreadable copy ledger")
+
+        monkeypatch.setattr(SyncState, "load", unreadable)
+    assert mesh.engine_a.deliver_removal_endings(mesh.member) == {
+        "copies": 0,
+        "wiped": 0,
+        "timed_out": 0,
+        "unacknowledged": 0,
+    }
+
+
+@pytest.mark.parametrize("as_json", [False, True])
+def test_revoke_tracks_and_ends_a_dispatch_only_copy(
+    secret_mesh: Any,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    as_json: bool,
+) -> None:
+    mesh = secret_mesh
+    _deliver_without_ack(mesh, monkeypatch)
+    capsys.readouterr()
+    args = ("--json",) if as_json else ()
+    assert _lop_network("credential", "revoke", KEY, "--from", mesh.b.identity.name, *args) == 0
+    out = capsys.readouterr().out
+    if as_json:
+        receipt = json.loads(out)
+        assert receipt["copy"] == {
+            "confirmed": False,
+            "wiped": False,
+            "wipe": "queued",
+            "unacknowledged": True,
+        }, receipt
+    else:
+        assert "no copy" not in out, out
+        assert "delivery was never acknowledged" in out, out
+        assert "wipe notice" in out, out
+    document = mesh.engine_a._placement()  # noqa: SLF001 — the normal tick's cheap gate
+    assert mesh.engine_a._has_pending_wipes(document, mesh.member)  # noqa: SLF001
+    mesh.engine_a._exchange_blocking(mesh.member)  # noqa: SLF001 — normal exchange, real link
+    assert net_fixtures.wait_for(lambda: not _member_has(mesh.b.root, SECRET_NAME))
+    state = SyncState.load(mesh.network_id, mesh.a.root)
+    ending = state.ack_for(mesh.member, KEY)
+    assert ending is not None and ending["wiped"] is True
+    assert state.dispatch_for(mesh.member, KEY) is None
+    assert not mesh.engine_a._has_pending_wipes(document, mesh.member)  # noqa: SLF001
+
+
+@pytest.mark.parametrize("selector", ["gate", "frames"])
+def test_revoke_dispatch_is_selected_by_the_normal_tick(
+    secret_mesh: Any, monkeypatch: pytest.MonkeyPatch, selector: str  # noqa: F811
+) -> None:
+    mesh = secret_mesh
+    _deliver_without_ack(mesh, monkeypatch)
+    assert _lop_network("credential", "revoke", KEY, "--from", mesh.b.identity.name) == 0
+    document = mesh.engine_a._placement()  # noqa: SLF001
+    if selector == "gate":
+        assert mesh.engine_a._has_pending_wipes(document, mesh.member)  # noqa: SLF001
+    else:
+        _network, frames = mesh.engine_a._pending_announces(mesh.member)  # noqa: SLF001
+        assert any(frame["key"] == KEY and frame["value_state"] == "absent" for frame in frames)
+
+
+@pytest.mark.parametrize("reason", ["inactive", "local_only", "not_copyable", "no_value"])
+def test_each_copy_policy_refusal_over_the_link_records_no_dispatch(
+    secret_mesh: Any, reason: str  # noqa: F811
+) -> None:
+    mesh = secret_mesh
+    # Establish the authenticated link before changing standing, so the inactive
+    # case tests an already admitted request too, not just a refused handshake.
+    assert mesh.b._ensure_link(mesh.owner) is not None  # noqa: SLF001
+    if reason == "inactive":
+        with store.mutate(mesh.network_id, mesh.a.root) as record:
+            member = record.member(mesh.member)
+            assert member is not None
+            member.lifecycle = "expired"
+            store.save(record, mesh.a.root)
+    elif reason == "local_only":
+        with sync.mutate(mesh.network_id, mesh.a.root) as state:
+            state.record_mark(KEY, "local-only")
+    elif reason == "not_copyable":
+        with placement.mutate(mesh.network_id, mesh.a.root, self_device=mesh.owner) as document:
+            entry = document.entry(KEY)
+            assert entry is not None
+            entry.kind = "oauth-rotating"
+    else:
+        mesh.store_a.delete(SECRET_NAME)
+    reply = _member_copy_request(mesh, key=KEY, gen=1, held=0)
+    if reason == "inactive":
+        # The real transport refuses the now-inactive member before dispatching
+        # to owner_copy; do not bypass that stronger backstop to reach its guard.
+        assert reply.get("op") == "error", reply
+        assert "broker_credential" in str(reply.get("message")), reply
+    else:
+        detail = reply.get("detail") or {}
+        assert detail.get("kind") == "error", reply
+        assert detail.get("code") == reason, reply
+    state = SyncState.load(mesh.network_id, mesh.a.root)
+    assert state.dispatched == {}, state.dispatched
+    assert state.acks == {}, state.acks
+    assert not _member_has(mesh.b.root, SECRET_NAME)
 
 
 def test_a_wipe_ack_from_another_device_cannot_close_a_dispatch(tmp_path: Any) -> None:

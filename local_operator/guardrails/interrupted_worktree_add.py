@@ -28,11 +28,22 @@ CONSTRAINTS (fail closed: anything unproven is left alone):
 * ``<path>/.git`` names a registration whose ``gitdir`` points back at exactly
   that path. A path that is some other tree, or no tree, is not ours to touch.
 * The registration's ``locked`` file reads exactly ``initializing`` and was
-  written at or after the call's spawn: git wrote it during THIS call, so a
+  written at or after the call's spawn, read from the filesystem clock
+  (:func:`spawn_stamp`): git wrote it during THIS call, so a
   lock on a pre-existing tree, or a reason someone chose, is never touched.
   A command passing ``--lock`` asked to keep its lock, so it is skipped.
 * The process group is gone and no live process has its cwd inside the tree,
   so no escaped (``setsid``/``nohup``) add is still checking out.
+* When that cwd check cannot say "no" — a live cwd inside, or a process whose
+  cwd the kernel hides (Linux, non-dumpable: ``(sd-pam)`` on every host with
+  a systemd user session) — NOTHING is deleted. The settle only runs
+  ``git worktree unlock``, leaves the partial tree and its registration in
+  place, and the bash result tells the agent to remove its own path (see
+  :func:`left_in_place_notice`). PR #3980 rounds 1-3 showed no sound proof
+  that a hidden-cwd process is outside the tree (``State`` and the switch
+  counters lag a task that is about to run or has just run), so deletion
+  stays gated on a cwd inventory that can answer "no"; unlocking deletes no
+  working file and so needs no such proof.
 * Branches are never deleted. POSIX only. Never raises: a miss leaves exactly
   what the harness left before this module existed.
 """
@@ -42,7 +53,9 @@ from __future__ import annotations
 import contextlib
 import logging
 import os
+import shlex
 import subprocess
+import tempfile
 import threading
 import time
 from collections.abc import Mapping
@@ -59,6 +72,14 @@ GIT_ADD_LOCK_REASON = "initializing"
 _GROUP_GONE_TIMEOUT_S = 5.0
 #: Bound on each git invocation. ``worktree remove`` walks the partial tree.
 _GIT_TIMEOUT_S = 60.0
+#: How long the bash tool waits for the settle before returning its result,
+#: so a left-in-place notice can ride that result (``tools/builtin.py``). Covers
+#: the group-gone wait plus an unlock or a small remove; past it the result goes
+#: out without the notice and the settle still finishes on its thread.
+NOTICE_WAIT_S = _GROUP_GONE_TIMEOUT_S + 10.0
+#: Prefix of a ``settle_after_kill`` entry for a tree unlocked but kept because
+#: the cwd check could not clear it; :func:`left_in_place_notice` reads it.
+_LEFT_PREFIX = "unlocked, left in place: "
 
 
 def _read(path: str) -> str | None:
@@ -112,6 +133,42 @@ def _git(admin: str, env: Mapping[str, str], *args: str) -> bool:
     return proc.returncode == 0
 
 
+def spawn_stamp(command: str) -> float:
+    """The ``spawned_at`` to pass :func:`settle_after_kill`, taken just before spawn.
+
+    Why the filesystem clock, not ``time.time()``: the settle compares this
+    with the mtime git gives ``locked``, and the kernel stamps files from its
+    own (coarse) clock, which can trail the wall clock. Measured on Linux
+    6.18 / xfs + tmpfs (2026-11-14), a lock git wrote 5-12 ms AFTER a
+    ``time.time()`` read was stamped EARLIER than it in 39 of 40 adds (by up
+    to 1.3 ms), so the settle took the call's own lock for an older one and
+    left it locked ``initializing``. Stamping a fresh marker file and reading
+    its mtime puts both sides on the same clock and granularity: 0 of 80 locks
+    read earlier (40 with the marker in the temp dir, 40 on the repo's own
+    filesystem), so no threshold is needed and nothing older than the spawn
+    is admitted.
+
+    Only commands that could add a worktree pay for the marker (one create,
+    stat and unlink in the temp dir). If it cannot be written, the wall clock
+    is the fallback: the settle may then skip a lock it owns, which leaves
+    exactly what the harness left before this module existed.
+    """
+    if os.name != "posix" or "worktree" not in command:
+        return time.time()
+    try:
+        fd, path = tempfile.mkstemp(prefix=".lop-spawn-stamp-")
+    except OSError:
+        return time.time()
+    try:
+        return os.fstat(fd).st_mtime
+    except OSError:
+        return time.time()
+    finally:
+        os.close(fd)
+        with contextlib.suppress(OSError):
+            os.unlink(path)
+
+
 def settle_after_kill(
     command: str, *, cwd: str | None, env: Mapping[str, str], spawned_at: float
 ) -> list[str]:
@@ -136,14 +193,28 @@ def settle_after_kill(
             with contextlib.suppress(OSError):
                 if os.stat(locked).st_mtime < spawned_at:
                     continue  # a lock older than this call is not this call's
-            if not os.path.exists(locked) or _live_cwd_inside(tree) is not False:
+            if not os.path.exists(locked):
                 continue
             complete = os.path.isfile(os.path.join(admin, "index")) and not os.path.exists(
                 os.path.join(admin, "index.lock")
             )
             if complete:
+                # A finished checkout only missed git's own unlock: finish it,
+                # whoever may be using the tree (unlocking deletes nothing).
                 if _git(admin, env, "unlock", tree):
                     done.append(f"unlocked {tree}")
+            elif _live_cwd_inside(tree) is not False:
+                # Removal needs a cwd inventory that says "no"; this one could
+                # not (a live cwd inside, or a hidden one). Only drop the lock:
+                # `git worktree unlock` deletes the `locked` file and nothing
+                # else, and git itself (not a raw unlink) keeps doing the
+                # bookkeeping. Prune stays safe: `_registration` proved
+                # `<tree>/.git` exists and points back, so `git worktree prune`
+                # keeps the registration. Without the lock the dangerous-delete
+                # guard ranks the tree on its own state (a hidden pid is still
+                # `busy`), not `locked`.
+                if _git(admin, env, "unlock", tree):
+                    done.append(f"{_LEFT_PREFIX}{tree}")
             elif _git(admin, env, "remove", "-f", "-f", tree):
                 done.append(f"removed {tree}")
     except Exception as exc:  # noqa: BLE001 — cleanup is best-effort, never a crash
@@ -151,6 +222,28 @@ def settle_after_kill(
     if done:
         logger.info("interrupted git worktree add settled: %s", "; ".join(done))
     return done
+
+
+def left_in_place_notice(done: list[str]) -> str | None:
+    """The bash-result line for trees the settle unlocked but could not remove.
+
+    Model-facing tool output, so English by design (AGENTS.md i18n). It names
+    the exact command because the agent created the path in this very call and
+    is the one placed to clean it up; the harness deliberately did not.
+    """
+    trees = [entry[len(_LEFT_PREFIX) :] for entry in done if entry.startswith(_LEFT_PREFIX)]
+    if not trees:
+        return None
+    return "\n".join(
+        (  # i18n: ignore model-facing tool output
+            f"The interrupted `git worktree add` left a half-made worktree at {tree}. "
+            "It was unlocked but left in place, because a process's working "
+            "directory couldn't be checked (or is inside it). Clean up your own "
+            "path with: "
+            f"git worktree remove --force {shlex.quote(tree)}"
+        )
+        for tree in trees
+    )
 
 
 def _group_gone(pgid: int, timeout_s: float) -> bool:
@@ -172,6 +265,40 @@ def _group_gone(pgid: int, timeout_s: float) -> bool:
         time.sleep(0.05)
 
 
+class SettleThread(threading.Thread):
+    """The daemon thread running one call's settle; keeps what it did.
+
+    ``done`` is written once, by this thread, before it ends; read it only
+    after a ``join`` that returned with the thread dead (:meth:`notice`).
+    """
+
+    def __init__(
+        self,
+        command: str,
+        *,
+        cwd: str | None,
+        env: Mapping[str, str],
+        spawned_at: float,
+        pgid: int,
+    ) -> None:
+        super().__init__(name="interrupted-worktree-add", daemon=True)
+        self._args = (command, cwd, dict(env), spawned_at, pgid)
+        self.done: list[str] = []
+
+    def run(self) -> None:
+        command, cwd, env, spawned_at, pgid = self._args
+        if _group_gone(pgid, _GROUP_GONE_TIMEOUT_S):
+            self.done = settle_after_kill(command, cwd=cwd, env=env, spawned_at=spawned_at)
+
+    def notice(self, timeout_s: float = NOTICE_WAIT_S) -> str | None:
+        """Wait up to ``timeout_s`` for the settle; its notice, if any (blocking)."""
+        self.join(timeout_s)
+        if self.is_alive():
+            logger.debug("interrupted worktree add settle still running; no notice")
+            return None
+        return left_in_place_notice(self.done)
+
+
 def settle_in_background(
     command: str,
     *,
@@ -179,23 +306,19 @@ def settle_in_background(
     env: Mapping[str, str],
     spawned_at: float,
     pgid: int | None,
-) -> threading.Thread | None:
+) -> SettleThread | None:
     """Run :func:`settle_after_kill` off the event loop once ``pgid`` is gone.
 
     Called from the bash tool's ``_kill`` right after the group SIGKILL. A
     daemon thread: ``_kill`` is synchronous and its ~20 call sites assume it
     returns at once, and if ``lop`` exits first the lock simply stays (the
-    pre-existing behaviour). Returns the thread (tests join it) or ``None``
-    when there is nothing to do.
+    pre-existing behaviour). The bash tool's result tail waits on it, bounded
+    (:meth:`SettleThread.notice`), so a left-in-place notice reaches the
+    agent in the same result. Returns the thread or ``None`` when there is
+    nothing to do.
     """
     if pgid is None or os.name != "posix" or "worktree" not in command:
         return None
-    env_copy = dict(env)
-
-    def _run() -> None:
-        if _group_gone(pgid, _GROUP_GONE_TIMEOUT_S):
-            settle_after_kill(command, cwd=cwd, env=env_copy, spawned_at=spawned_at)
-
-    thread = threading.Thread(target=_run, name="interrupted-worktree-add", daemon=True)
+    thread = SettleThread(command, cwd=cwd, env=env, spawned_at=spawned_at, pgid=pgid)
     thread.start()
     return thread

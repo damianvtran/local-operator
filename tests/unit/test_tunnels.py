@@ -3461,6 +3461,7 @@ async def test_status_json_reports_the_park_the_login_and_the_remedy(
     # the command that re-points the device instead.
     assert payload["login"]["state"] == "owner_missing"
     assert payload["remedy"] == {
+        "kind": "restore_owner",
         "command": gateway.TERMINAL_REMEDY[gateway.OWNER_MISSING],
         "url": gateway.CONSOLE_URL,
     }
@@ -3481,6 +3482,7 @@ def test_the_remedy_for_a_gone_login_is_the_repoint_not_a_sign_in() -> None:
     missing = {"credential_id": 19, "state": gateway.OWNER_MISSING}
     refused = {"credential_id": 19, "state": "login_required"}
     repoint = {
+        "kind": "restore_owner",
         "command": gateway.TERMINAL_REMEDY[gateway.OWNER_MISSING],
         "url": gateway.CONSOLE_URL,
     }
@@ -3492,6 +3494,7 @@ def test_the_remedy_for_a_gone_login_is_the_repoint_not_a_sign_in() -> None:
     assert report.remedy({"stopped": False}, {"remedy": None}, missing) == repoint
     assert report.remedy({"stopped": False}, parked_sign_in, missing) == repoint
     assert report.remedy({"stopped": False}, parked_sign_in, refused) == {
+        "kind": "sign_in",
         "command": gateway.TERMINAL_REMEDY[LOGIN_REQUIRED],
         "url": CONSOLE_URL,
     }
@@ -3500,6 +3503,7 @@ def test_the_remedy_for_a_gone_login_is_the_repoint_not_a_sign_in() -> None:
         "remedy": {"command": "lop tunnel connect", "url": CONSOLE_URL},
     }
     assert report.remedy({"stopped": False}, parked_reconnect, missing) == {
+        "kind": "run",
         "command": "lop tunnel connect",
         "url": CONSOLE_URL,
     }
@@ -3556,6 +3560,7 @@ async def test_a_login_that_is_gone_is_never_reported_as_sign_in_expired(
     payload = json.loads(await dispatch(parser.parse_args(["tunnel", "status", "--json"])))
     assert payload["login"] == {"credential_id": 19, "state": "owner_missing"}
     assert payload["remedy"] == {
+        "kind": "restore_owner",
         "command": gateway.TERMINAL_REMEDY[gateway.OWNER_MISSING],
         "url": gateway.CONSOLE_URL,
     }
@@ -4490,3 +4495,57 @@ async def test_a_store_opened_for_a_cancelled_caller_is_closed(monkeypatch):
             break
         await asyncio.sleep(0.01)
     assert closed == [True]
+
+
+@pytest.mark.asyncio
+async def test_gateway_forwards_its_verified_assertion_only_to_the_pairing_filing(
+    connection, signing_key
+):
+    """Pairing design v2 §1 item 1: the relay re-verifies the edge's assertion.
+
+    The gateway sets ``x-lop-radient-assertion`` to the token it JUST verified, and only
+    on ``POST /api/pair/request`` to the local-operator relay. A phone-sent header of
+    that name never crosses (forged here), and no other path receives one.
+    """
+    from local_operator.tunnels import gateway as gateway_module
+
+    seen = []
+
+    def origin(request):
+        seen.append(request)
+        return httpx.Response(
+            200, stream=httpx.ByteStream(b"{}"), headers={"content-type": "application/json"}
+        )
+
+    body = b'{"np":"x"}'
+    async with httpx.AsyncClient(transport=httpx.MockTransport(origin)) as upstream:
+        gateway = Gateway(connection, upstream, mobile_password="pw")
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=gateway.app()), base_url="https://" + HOST
+        ) as client:
+            token = proof(signing_key, method="POST", target="/api/pair/request", body=body)
+            filed = await client.post(
+                "/api/pair/request",
+                content=body,
+                headers={
+                    PROOF_HEADER: token,
+                    "origin": "https://" + HOST,
+                    "x-lop-radient-assertion": "forged-by-the-phone",
+                },
+            )
+            other_body = b"{}"
+            other = await client.post(
+                "/api/sessions",
+                content=other_body,
+                headers={
+                    PROOF_HEADER: proof(
+                        signing_key, method="POST", target="/api/sessions", body=other_body
+                    ),
+                    "origin": "https://" + HOST,
+                    "x-lop-radient-assertion": "forged-by-the-phone",
+                },
+            )
+    assert filed.status_code == 200 and other.status_code == 200
+    assert seen[0].headers["x-lop-radient-assertion"] == token
+    assert "x-lop-radient-assertion" not in seen[1].headers
+    assert "x-lop-radient-assertion" not in gateway_module._REQUEST_HEADERS

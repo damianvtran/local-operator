@@ -73,6 +73,12 @@ _FS_MODULES = frozenset({"os", "shutil", "pathlib"})
 #: count with a reason, and a removed one fails as stale.
 _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
     (
+        "local_operator/network/credentials/github.py::use_default_repositories",
+        "<path>.unlink",
+        "Explicit owner opt-in removes only network/github-designation-delivered.json, "
+        "the fixed device-local clear marker, never a session member; unlink refuses directories.",
+    ),
+    (
         "local_operator/definition_transaction.py::_durable_json",
         "os.replace",
         "Publishes the O_EXCL-created regular JSON temp file; "
@@ -102,6 +108,15 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "local_operator/profile_scope.py::save_profile_backup",
         "<path>.unlink",
         "Cleans only this call's mkstemp .json FILE; unlink rejects directories.",
+    ),
+    # ``spawn_stamp`` reads the filesystem clock off a marker it creates with
+    # ``tempfile.mkstemp`` (no ``dir``: the temp dir) and removes it at once;
+    # the path is never caller-supplied and is always that regular FILE.
+    (
+        "local_operator/guardrails/interrupted_worktree_add.py::spawn_stamp",
+        "os.unlink",
+        "Unlinks only the .lop-spawn-stamp-* mkstemp FILE this call just created in the "
+        "temp dir; unlink rejects directories.",
     ),
     # Build output is the one `lop disk reclaim` category the module deletes
     # itself: no tool owns the removal of a `target`/`.next`/`build`/`dist`
@@ -2050,6 +2065,18 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "os.unlink",
         "that temp FILE, only while the write above is failing",
     ),
+    # The daemon's file-descriptor limits record (`mobile/fdlimit.py`), read back
+    # by `lop mobile doctor`. `record` writes `<path>.tmp` then atomically replaces
+    # `limits_path()`, which takes NO arguments and is always
+    # `config_dir() / "mobile" / "daemon-limits.json"` — a fixed basename in the
+    # mobile config subdirectory, with no session id and no caller input, so
+    # neither the temp nor the target can name a path under `sessions/`.
+    (
+        "local_operator/mobile/fdlimit.py::record",
+        "os.replace",
+        "temp FILE -> <config_dir>/mobile/daemon-limits.json; both names are "
+        "config-root-derived with a fixed basename",
+    ),
     ("local_operator/mobile/seen.py::SeenStore._persist_locked", "os.replace", "temp FILE"),
     ("local_operator/mobile/seen.py::SeenStore._persist_locked", "os.unlink", "temp FILE"),
     # The push device registry (`mobile/push_devices.py`): one JSON store at a fixed
@@ -3353,6 +3380,27 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "local_operator/tunnels/state.py::clear",
         "<path>.unlink",
         "Removes only the park FILE tunnel/state.json under the config dir; "
+        "never a directory, never under sessions/",
+    ),
+    # The tunnel remedies' own config-dir files (#3945, 2026-11-14). Both paths
+    # are the tunnel `config.directory()` plus a FIXED basename, exactly like
+    # `state.clear` above — never a session id, never caller input, never under
+    # `sessions/`. `invalidate_refinement` drops the cached inactive-cause FILE
+    # (`inactive-cause.json`) once a connect succeeds or setup runs, so a stale
+    # "suspended"/"billing" cause cannot outlive the state it described.
+    # `_bound_auto_setup_log` rotates `auto-setup.log` -> `.1` before each
+    # post-sign-in spawn (the child writes the file directly, so no logging
+    # handler can rotate it); source and target are both that fixed basename.
+    (
+        "local_operator/tunnels/service.py::invalidate_refinement",
+        "<path>.unlink",
+        "Removes only the inactive-cause.json cache FILE under the tunnel config dir; "
+        "never a directory, never under sessions/",
+    ),
+    (
+        "local_operator/tunnels/install.py::_bound_auto_setup_log",
+        "os.replace",
+        "Rotates the auto-setup.log FILE to auto-setup.log.N under the tunnel config dir; "
         "never a directory, never under sessions/",
     ),
     # The stall watchdog's own dump files (2026-09-20). `dump_path` composes

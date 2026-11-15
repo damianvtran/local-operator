@@ -192,6 +192,7 @@ from local_operator.scratchpad import (
 from local_operator.supplements.pins import DELIVER_DESCRIPTION, with_deliver_notice
 from local_operator.text_bounds import OUTPUT_TRUNCATION_MARKER, clip_head_tail
 from local_operator.tools import (
+    diff_archive,
     group_reaper,
     query_budget,
     search_guard,
@@ -4700,9 +4701,9 @@ async def execute_bash(
             return _error(tool_call_id, "bash", shell_write.spawn_refusal())
         shell_argv = wrapped
     spawn_options = detached_popen_kwargs()
-    # Wall clock, not monotonic: compared with the mtime of a lock git writes
-    # during this call (guardrails/interrupted_worktree_add.py).
-    spawned_at = time.time()
+    # Filesystem clock, not monotonic or wall: compared with the mtime of a
+    # lock git writes during this call (guardrails/interrupted_worktree_add.py).
+    spawned_at = interrupted_worktree_add.spawn_stamp(params.command)
     try:
         process = await asyncio.create_subprocess_exec(
             *shell_argv,
@@ -4965,7 +4966,9 @@ async def execute_bash(
     stderr_task = asyncio.create_task(_pump(process.stderr, stderr_chunks))
     readers = (stdout_task, stderr_task)
 
-    settle_started: list[bool] = []
+    # The one settle thread a stop path started (see _kill); the result tail
+    # waits on it so its notice reaches the agent in this result.
+    settle_started: list[interrupted_worktree_add.SettleThread | None] = []
 
     def _kill() -> None:
         # Kill the whole session group so children (sh -c spawns) die too.
@@ -4984,9 +4987,9 @@ async def execute_bash(
         # a daemon thread so no stop path waits. Once per call: several stop
         # paths can reach _kill for the same command.
         if not settle_started:
-            settle_started.append(True)
+            settle_started.append(None)
             with contextlib.suppress(Exception):
-                interrupted_worktree_add.settle_in_background(
+                settle_started[0] = interrupted_worktree_add.settle_in_background(
                     params.command, cwd=cwd, env=env, spawned_at=spawned_at, pgid=spawned_pgid
                 )
 
@@ -5682,6 +5685,18 @@ async def execute_bash(
         with contextlib.suppress(BaseException):
             await abort_waiter
 
+    # A killed `git worktree add` whose half-made tree the settle could only
+    # unlock (a process cwd it could not check) is the agent's to remove, so
+    # the settle's notice must ride THIS result, not a log line nobody reads.
+    # The settle runs on a daemon thread (`_kill` cannot block), so wait for
+    # it here, off the loop and bounded (NOTICE_WAIT_S); a settle still
+    # running past that just finishes without a notice.
+    worktree_notice: str | None = None
+    settle_thread = settle_started[0] if settle_started else None
+    if settle_thread is not None:
+        with contextlib.suppress(Exception):
+            worktree_notice = await asyncio.to_thread(settle_thread.notice)
+
     if aborted:
         partial = await asyncio.to_thread(_bash_partial_summary, stdout_chunks, stderr_chunks)
         # The missing-tool advisory is carried onto the ABORT path too (QA round
@@ -5705,7 +5720,8 @@ async def execute_bash(
             # of ``execute_bash`` had this one unredacted.
             f"{_redact_tool_text(params.command, context)}\n"
             f"{_redact_tool_text(partial, context)}"
-            + (f"\n{aborted_missing}" if aborted_missing else ""),
+            + (f"\n{aborted_missing}" if aborted_missing else "")
+            + (f"\n{worktree_notice}" if worktree_notice else ""),
             details={FAULT_KEY: FAULT_ABORTED},
         )
 
@@ -5740,6 +5756,10 @@ async def execute_bash(
         footer = ""
 
     parts = [f"exit code: {return_code}", _bash_output_summary(stdout, stderr)]
+    if worktree_notice:
+        # Under the exit code, not last: the tool card keeps the HEAD of a
+        # result, and this line is an instruction the agent must act on.
+        parts.insert(1, worktree_notice)
     if timed_out:
         parts.insert(0, f"TIMEOUT after {params.timeout}s (process killed)")
     if pad_exceeded:
@@ -11397,7 +11417,8 @@ def _edit_file_result_locked(
             )
         with path.open("w", encoding="utf-8", newline="") as stream:
             stream.write(current)
-    details = _with_diff_source(_diff_details(str(path), original, current), original, current)
+    details, full = _diff_details_and_full(str(path), original, current)
+    details = _with_diff_source(details, original, current, full)
     if pad_advisory:
         # The worker thread already returns ``details``; this private, popped key
         # carries the receipt line without changing that transaction's shape.
@@ -11555,7 +11576,22 @@ def _complete_pem_blocks(lines: Sequence[str]) -> list[tuple[int, int]]:
 
 
 def _diff_details(path: str, before: str, after: str) -> dict[str, Any]:
-    """The write/edit tool-result details: line counts + a rendered unified diff.
+    """The write/edit tool-result details (see :func:`_diff_details_and_full`)."""
+    return _diff_details_and_full(path, before, after)[0]
+
+
+def _diff_details_and_full(
+    path: str, before: str, after: str
+) -> tuple[dict[str, Any], list[str] | None]:
+    """The write/edit tool-result details, plus the COMPLETE raw diff when cut.
+
+    The second value is the whole rendered diff (after the PEM widening, before
+    the preview cut) and is only returned when the preview omitted rows: it is
+    the source of the redacted full-diff archive (``tools/diff_archive``) and
+    is RAW executor bytes, so callers hand it to :func:`_with_diff_source`,
+    which moves it onto the private carrier and never into ``details``.
+
+    Line counts + a rendered unified diff.
 
     Both write and edit funnel their before/after states through a real
     sequence match, so the UI's ``+N/-N`` counters and the expanded card's
@@ -11575,7 +11611,7 @@ def _diff_details(path: str, before: str, after: str) -> dict[str, Any]:
     """
     added, removed = _line_delta(before, after)
     if not added and not removed:
-        return {"path": str(path), "added": 0, "removed": 0}
+        return {"path": str(path), "added": 0, "removed": 0}, None
     before_lines = before.splitlines()
     after_lines = after.splitlines()
     # ONE matcher, addressed twice: ``unified_diff`` renders the diff, and the
@@ -11605,10 +11641,19 @@ def _diff_details(path: str, before: str, after: str) -> dict[str, Any]:
         details["diff"] = kept
     if omitted:
         details[DIFF_TRUNCATED_ROWS_KEY] = omitted
-    return details
+    # The complete diff only matters when the preview lost rows; an uncut
+    # preview IS the whole diff, so archiving it would store a duplicate. It is
+    # returned even when NO preview row fit (``kept is None``: a first/only row
+    # over the preview byte cap) -- that row can still be under the archive
+    # ceilings, and dropping it here left the change with no inline view AND
+    # no archive. ``omitted == 0`` (an uncut diff, or the PEM widening's own
+    # fail-closed marker) never yields one, so that geometry is unchanged.
+    return details, (diff if omitted else None)
 
 
-def _with_diff_source(details: dict[str, Any], before: str, after: str) -> dict[str, Any]:
+def _with_diff_source(
+    details: dict[str, Any], before: str, after: str, full: list[str] | None = None
+) -> dict[str, Any]:
     """Attach the complete sides as source evidence for the loop's seam.
 
     Called by the write/edit transactions with the exact bytes they diffed.
@@ -11617,12 +11662,31 @@ def _with_diff_source(details: dict[str, Any], before: str, after: str) -> dict[
     judgement alone is not enough). Over the bound no complete-side proof is
     possible, so the diff is withheld instead; counters and path stay exact.
     """
+    if full is not None and "diff" not in details:
+        # No preview row fit, but the complete diff exists: publish the fixed
+        # withheld receipt inline (never a raw prefix) so the result still
+        # carries the source carrier, and the archive descriptor the loop adds
+        # is what the reader follows to the whole change.
+        details["diff"] = [DIFF_WITHHELD_TEXT]
     if not isinstance(details.get("diff"), list):
         return details
     if fits_source_evidence(before, after):
-        details[_DIFF_SOURCE_KEY] = (before, after)
+        # ``full`` (the complete raw diff the preview was cut from) rides the
+        # SAME private carrier, so the archive is judged against the same
+        # complete source evidence as the preview. Over the archive ceiling no
+        # prefix is kept: the loop records ``oversized`` instead.
+        carried: tuple[str, ...] | str | None = None
+        if full is not None:
+            carried = tuple(full) if diff_archive.fits_archive(full) else "oversized"
+        details[_DIFF_SOURCE_KEY] = (before, after, carried)
     else:
         details["diff"] = [DIFF_WITHHELD_TEXT]
+        if full is not None:
+            # No complete-side proof is possible, so the full diff is withheld
+            # too; the descriptor says so instead of a false "not recorded".
+            details[diff_archive.DIFF_FULL_KEY] = diff_archive.descriptor(
+                diff_archive.STATE_WITHHELD
+            )
     return details
 
 
@@ -11645,8 +11709,8 @@ def _diff_text_result(
         details["diff"] = [DIFF_WITHHELD_TEXT]
     result = _text(tool_call_id, tool_name, text, details=details)
     if source is not None and isinstance(preview, list):
-        before, after = source
-        result._diff_source = (before, after, tuple(preview))
+        before, after, full = source
+        result._diff_source = (before, after, tuple(preview), full)
     return result
 
 
@@ -12408,7 +12472,8 @@ def _write_file_result_locked(path: Path, content: str) -> tuple[bool, dict[str,
         return _marker_introduced_refusal(introduced, "write")
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content, encoding="utf-8")
-    details = _with_diff_source(_diff_details(str(path), previous, content), previous, content)
+    details, full = _diff_details_and_full(str(path), previous, content)
+    details = _with_diff_source(details, previous, content, full)
     return existed, details
 
 
@@ -16873,6 +16938,36 @@ async def _execute_send_peer(
     return _text(tool_call_id, "send", text, details=details)
 
 
+async def _execute_send_routed(
+    tool_call_id: str, params: SendParams, holder: Any, context: ToolContext | None
+) -> ToolResult:
+    """Deliver an exact-id send to the ONE device that holds it.
+
+    The caller named no ``peer``; the peer catalogue named exactly one holder,
+    so this is ``send(peer=<that device>)`` with the receipt saying where it
+    went. The device is addressed by its ID, not its name: the relay refuses a
+    name two devices share, and the id is what the catalogue actually gave us.
+    Every mesh rule (local-only modes, body, refusals) is the explicit-peer
+    path's, unchanged — routing only fills in the argument.
+    """
+    device_id = str(holder.owner_device)
+    device_name = str(holder.owner_device_name or device_id)
+    routed = params.model_copy(update={"peer": device_id})
+    result = await _execute_send_peer(tool_call_id, routed, context)
+    # Identifier field: the session id the receipt names.
+    line = f"routed to {device_name} (it holds `{identifier_text(context, routed.session or '')}`)"
+    text = result.text
+    details = dict(result.details or {})
+    details["routed_to"] = device_name
+    details.setdefault("peer", device_id)
+    return result.model_copy(
+        update={
+            "content": [TextContent(text=f"{line}\n{text}" if text else line)],
+            "details": details,
+        }
+    )
+
+
 def _mesh_send_failed(payload: Mapping[str, Any]) -> bool:
     """Is a pilot ``send`` receipt a failure the TOOL result must flag?
 
@@ -17082,6 +17177,21 @@ async def execute_send(
         # (`session=`, and `target=` when the needle is a full id) are
         # covered; every other error form returns None before any read; see
         # _peer_holder_hint.
+        #
+        # AUTO-ROUTING (local/remote parity, 2026-11-13): when the address is
+        # an exact `session=` id and exactly ONE peer holds it, the refusal
+        # would only tell the caller to repeat itself with `peer=` — so deliver
+        # there instead, and say so. Deliberately NOT for `target=` (its
+        # substring semantics stay the resolver's; a full-id target keeps the
+        # hint) and never for several holders, which stay a refusal listing
+        # each candidate: picking one would be the wrong-recipient guess the
+        # mesh refuses everywhere else.
+        if params.session and _EXACT_ID_MISS in (error or ""):
+            holders = await asyncio.to_thread(_peer_holders, params.session.strip())
+            if len(holders) == 1:
+                return await _execute_send_routed(tool_call_id, params, holders[0], context)
+            routed_refusal = _peer_holders_sentence(params.session.strip(), holders, context)
+            return _error(tool_call_id, "send", routed_refusal or error or "no target resolved")
         hint = await _peer_holder_hint(
             params.session or "", params.target or "", error or "", context
         )
@@ -18538,20 +18648,56 @@ def _peer_holder_sentence(session_id: str, context: ToolContext | None = None) -
     ``owner_label``, whose fallback truncates the id to an 8-character
     fragment that would resolve nowhere.
     """
-    from local_operator.session.peer_rows import peer_session_row, peer_session_rows
+    return _peer_holders_sentence(session_id, _peer_holders(session_id), context)
+
+
+def _peer_holders(session_id: str) -> list[Any]:
+    """Every remote ``SessionRow`` holding ``session_id``, one per device.
+
+    Blocking; the lookup policy is :func:`_peer_holder_sentence`'s (cache
+    first, one bounded federated read on a miss). ``peer_session_row`` stays
+    the GATE — it is the entry point the zero-read guards poison, so a path
+    that must not touch the catalogue still fails loudly — and only once it
+    found a row does ``peer_session_holders`` widen the answer to every
+    device reporting the id, which is what tells "the holder" from "a holder".
+    """
+    from local_operator.session.peer_rows import (
+        peer_session_holders,
+        peer_session_row,
+        peer_session_rows,
+    )
 
     root = config_dir()
     row = peer_session_row(session_id, root)
     if row is None:
         peer_session_rows(root, ttl_s=0)
         row = peer_session_row(session_id, root)
-    if row is None or not row.is_remote or not row.owner_device:
+    if row is None:
+        return []
+    return peer_session_holders(session_id, root)
+
+
+def _peer_holders_sentence(
+    session_id: str, holders: Sequence[Any], context: ToolContext | None = None
+) -> str | None:
+    """The refusal naming ``holders`` of ``session_id``; ``None`` for none.
+
+    ONE holder keeps the original sentence byte for byte. SEVERAL holders list
+    each by DEVICE ID (with its name beside it): a name can repeat across
+    devices, so the id is the only ``peer=`` value guaranteed to pick exactly
+    the device the caller means.
+    """
+    if not holders:
         return None
-    device = row.owner_device_name or row.owner_device
     # Identifier field: the session id the caller must pass back.
-    return (
-        f"`{identifier_text(context, session_id)}` is held by {device} — " f"pass `peer={device}`"
-    )
+    shown = identifier_text(context, session_id)
+    if len(holders) == 1:
+        device = holders[0].owner_device_name or holders[0].owner_device
+        return f"`{shown}` is held by {device} — pass `peer={device}`"
+    lines = [f"`{shown}` is held by {len(holders)} devices — pass `peer=` with one of:"]
+    for row in holders:
+        lines.append(f"  peer={row.owner_device}  ({row.owner_device_name or row.owner_device})")
+    return "\n".join(lines)
 
 
 async def _peer_holder_hint(
@@ -26397,6 +26543,350 @@ def _access_result_text(
     )
 
 
+#: Where a headless node's site approval is decided, said once so the texts
+#: below cannot drift: the card reaches the operator's device through the
+#: forwarded-ask path, which covers sessions that device started.
+_NODE_APPROVAL_REACH = (
+    "The card reaches the operator's own device when this session was started "
+    "from it; a session started directly on the node shows it only on the node, "
+    "where nobody can sign — say so if that is your case."
+)
+
+#: THE CARD IS THE NOTIFICATION (review U10): the tool description's generic
+#: "request_access, NOTIFY the operator, then await_access" would otherwise make
+#: an agent add an ``ask`` of its own — a second card for one decision.
+_NODE_CARD_IS_NOTICE = "That card is the notification: do not also send an ask or a message for it."
+
+
+#: How many of this session's site cards for one origin may lapse unanswered
+#: before ``request_access`` stops raising another (review U15): the first
+#: card, plus the one re-raise the texts below offer.
+_NODE_SITE_LAPSE_LIMIT = 2
+
+
+def _node_wait_text(url: str, origin: str, *, reraised: bool = False) -> str:
+    """How to wait for a node site card, and the ONE bounded re-raise (review U2).
+
+    The desktop flow's popup and 15-minute re-request window do not exist on a
+    node: the entry lives 10 minutes, the card is on the operator's device, and
+    a re-raised card pings a person. So the agent may re-raise once after an
+    expiry, then must say so in chat and stop — never a card every ten minutes.
+    The limit is ENFORCED by :func:`_node_site_access` from the session's own
+    queue (review U15), so the text states it rather than relying on the agent
+    to count: an agent that lost count after compaction still cannot re-ping.
+    """
+    head = (
+        f"Call action='await_access' url={url} — each call waits at most 240s — until it "
+        "returns allowed or denied; the request stays open about 10 minutes."
+    )
+    if reraised:
+        return (
+            f"{head} This is your one re-raise: if this card also expires unanswered, "
+            f"tell the operator in chat that you need {origin} on this node, and stop "
+            "using it — request_access will not raise another card for it until the "
+            "operator replies in chat; if they ask for it, you may raise one new card "
+            "(plus one re-raise)."
+        )
+    return (
+        f"{head} If it then reports no live request (expired unanswered), you may "
+        "re-raise it with request_access one time; if that card also expires "
+        f"unanswered, tell the operator in chat that you need {origin} on this node, "
+        "and stop using it."
+    )
+
+
+def _node_denied_text(origin: str) -> str:
+    """The operator's sticky Deny, as the agent on the node reads it (R3-1/U14).
+
+    ``lop browser sites --revoke`` is unsigned by design (it only reduces what
+    is allowed), and the agent has a shell on the node — so whether a denial is
+    lifted must be stated as the OPERATOR's decision, or "no re-ask until they
+    revoke it" is a convention the agent can quietly undo itself.
+    """
+    return (
+        f"the operator denied {origin} on this node; do not ask again unless they tell "
+        "you to. Continue without this site. Only the operator decides to lift a "
+        "denial: if they tell you they changed their mind (quote them), run "
+        f"`lop browser sites --revoke {origin}` here — it approves nothing, it only "
+        "lets you ask again — then request_access. Never run it on your own initiative."
+    )
+
+
+def _node_access_result_text(state: str, origin: str, url: str, *, total_s: float = 0) -> str:
+    """``await_access``/``cancel_access`` on a headless node (review U2/Q3).
+
+    The desktop texts name the extension popup, a 15-minute budget and
+    ``backend='ui'`` — none of which exist on a node, so an agent following them
+    sends the operator to a surface that is not there. Every state the
+    extension reports gets its node wording here.
+    """
+    if state == "allowed":
+        return _wrap_receipt(
+            f"{origin} is allowed in this node's browser. 'open' or 'goto' the URL " "there now."
+        )
+    if state == "denied":
+        return _wrap_receipt(_node_denied_text(origin))
+    if state in ("pending", "await_timeout"):
+        waited = f" after {total_s:.0f}s" if total_s else ""
+        return _wrap_receipt(
+            f"still pending{waited}: the operator has not answered the card for "
+            f"{origin} yet. It is on their own device (the app or lop on their "
+            "computer) — there is no popup on this node.\n"
+            "- Keep calling action='await_access' — each call waits at most 240s — "
+            "while the request is open (about 10 minutes from when it was raised), "
+            "or do other work and come back.\n"
+            "- If await_access then reports no live request, you may re-raise it with "
+            "request_access; the tool allows one re-raise per site in this session and "
+            "says so when the operator has not answered twice — then tell them in chat "
+            f"that you need {origin} on this node, and stop.\n"
+            "AN UNANSWERED CARD IS NOT A REFUSAL."
+        )
+    if state == "cancelled":
+        return _wrap_receipt(f"your request for {origin} was withdrawn, and its card with it.")
+    return _wrap_receipt(
+        f"no live request for {origin} on this node (it expired unanswered, was "
+        f"withdrawn, or was never raised). You may call action='request_access' url={url} "
+        "to raise it again; if the tool says the operator has not answered twice, tell "
+        f"them in chat that you need {origin} on this node, and stop using it."
+    )
+
+
+def _node_no_approver_text(origin: str, why: str) -> str:
+    return _wrap_receipt(
+        f"no one can approve {origin} in this machine's browser: {why}\n"
+        "This is a headless mesh node; site approvals here are decided only by the "
+        "operator's signature from their own device. Do not retry request_access. "
+        "Tell the operator and continue without this site; guide://browser "
+        "'Headless nodes' has the setup step that fixes it."
+    )
+
+
+async def _node_site_access(
+    tool_call_id: str,
+    context: ToolContext | None,
+    result: Mapping[str, Any],
+    url: str,
+    origin: str,
+    *,
+    client: Any,
+) -> ToolResult:
+    """``request_access`` on a headless node: raise the operator's SIGNED card.
+
+    The extension queued its entry and reported ``approval: "signed"`` with the
+    entry id, scope and node id. This builds the ask question in CODE from the
+    origin the extension reported (never model text), binds it to that entry
+    with :func:`site_approval.site_question_id`, and queues it through the
+    session's own ask door. The operator answers it on their device; the answer
+    travels back as a signed ``bridge_decide`` and the extension re-verifies the
+    signature before it approves anything. ``await_access`` is unchanged: it
+    polls the extension, which is the truth.
+
+    ``no_approver`` (typed, never a wait): the extension has no usable anchor,
+    or THIS host holds the anchor's private key — then the agent could sign its
+    own approval, so a signature would prove nothing about a human.
+    """
+    from local_operator.browser_bridge import site_approval
+
+    identity_params = _browser_identity_params(context, tool_call_id)
+
+    async def _withdraw_entry() -> None:
+        # Best effort: an entry nobody can decide would otherwise sit in the
+        # extension until its TTL and dedupe the next request onto itself.
+        try:
+            from local_operator.browser_bridge.backend import BridgeClient
+
+            await (client if client is not None else BridgeClient()).call(
+                "cancel_access", {"url": url, **identity_params}
+            )
+        except Exception:  # noqa: BLE001 — the entry's own TTL is the floor
+            logger.debug("node site access: cancel_access failed", exc_info=True)
+
+    if str(result.get("state") or "") == "denied":
+        # D3 "ask me once per site" (review Q4): the operator's signed Deny is
+        # kept by the node's browser, which answers a later request for the same
+        # origin without queueing anything — so no card is raised either.
+        return _text(
+            tool_call_id,
+            "browser",
+            _wrap_receipt(_node_denied_text(origin)),
+            details={"origin": origin, "state": "denied", "approval": "signed", "sticky": True},
+        )
+    details: dict[str, Any] = {"origin": origin, "approval": site_approval.APPROVAL_NO_APPROVER}
+    if str(result.get("approval") or "") == site_approval.APPROVAL_NO_APPROVER:
+        return _error(
+            tool_call_id,
+            "browser",
+            _node_no_approver_text(
+                origin, "its managed policy carries no operator anchor to verify against."
+            ),
+            details={**details, "state": "none"},
+        )
+    from local_operator.operator.trust import load_anchor
+    from local_operator.paths import config_dir as _config_dir
+
+    loaded = load_anchor()
+    anchor = loaded.anchor if loaded.usable else None
+    if anchor is not None and site_approval.anchor_key_held_locally(_config_dir(), anchor.key_id):
+        await _withdraw_entry()
+        return _error(
+            tool_call_id,
+            "browser",
+            _node_no_approver_text(
+                origin,
+                "this machine holds the operator key's private half, so a signature "
+                "made here would not show that a person decided.",
+            ),
+            details={**details, "state": "none"},
+        )
+    enqueue: Any = getattr(context, "enqueue_ask", None) if context is not None else None
+    entry_id = str(result.get("entryId") or "")
+    if not callable(enqueue) or not entry_id:
+        await _withdraw_entry()
+        return _error(
+            tool_call_id,
+            "browser",
+            _node_no_approver_text(
+                origin,
+                "this session cannot queue an ask for the operator (no queued-ask "
+                "engine), so the card cannot be raised.",
+            ),
+            details={**details, "state": "none"},
+        )
+    question = site_approval.site_ask_question(
+        origin=origin,
+        node_name=_node_display_name(),
+        node_device_id=str(result.get("node_device_id") or ""),
+        entry_id=entry_id,
+        scope=str(result.get("scope") or site_approval.SITE_SCOPE),
+    )
+    question_id = str(question["question_id"])
+    # The ask lives no longer than the extension entry it binds (10-minute
+    # TTL): a card answered after the entry is gone could only be refused.
+    # Never below the queue's own floor, which refuses a shorter timeout.
+    from local_operator.asks.policy import MIN_TIMEOUT_S
+
+    expires_at_ms = result.get("expires_at")
+    remaining_s = (
+        int(float(expires_at_ms) / 1000.0 - time.time())
+        if isinstance(expires_at_ms, (int, float))
+        else 600
+    )
+    timeout_s = max(MIN_TIMEOUT_S, min(600, remaining_s))
+    # DEDUPE ONLY AGAINST A LIVE CARD (review U3/Q1). An open card for this
+    # origin bound to ANOTHER entry (cancelled, or replaced by the extension)
+    # can only be refused when answered, and its identical text would make the
+    # queue refuse the live entry's card. Settle it first; the card bound to
+    # THIS entry (the extension deduplicated onto it) is kept.
+    # THE RE-RAISE IS COUNTED, NOT REMEMBERED (review U15): the session queue
+    # already holds this origin's cards that lapsed unanswered, so the bound
+    # survives compaction and an agent that lost count. Cards the agent
+    # withdrew itself (cancel_access) or the operator answered do not count,
+    # and neither do lapses before the operator's last chat message (R4-1):
+    # their reply re-opens one card plus one re-raise.
+    lapses_of: Any = getattr(context, "site_ask_lapses", None) if context is not None else None
+    lapsed = 0
+    if callable(lapses_of):
+        try:
+            counted = lapses_of(origin)
+            lapsed = counted if isinstance(counted, int) else 0
+        except Exception:  # noqa: BLE001 — an uncounted history only loses the bound
+            logger.debug("node site access: counting lapsed cards failed", exc_info=True)
+    if lapsed >= _NODE_SITE_LAPSE_LIMIT:
+        await _withdraw_entry()
+        return _error(
+            tool_call_id,
+            "browser",
+            _wrap_receipt(
+                f"the operator hasn't answered twice ({lapsed} cards for {origin} expired "
+                "unanswered since their last chat message); tell them in chat that you "
+                f"need {origin} on this node, and stop. No new card was raised and the "
+                "request was withdrawn; do not call request_access for it again unless "
+                "the operator replies in chat asking for it — then you may raise one new "
+                "card (plus one re-raise)."
+            ),
+            details={"origin": origin, "state": "none", "approval": "unanswered", "lapsed": lapsed},
+        )
+    withdraw_site: Any = (
+        getattr(context, "withdraw_site_asks", None) if context is not None else None
+    )
+    if callable(withdraw_site):
+        try:
+            withdraw_site(origin, keep_question_id=question_id)
+        except Exception:  # noqa: BLE001 — the stale card's own timeout is the floor
+            logger.debug("node site access: withdrawing a stale card failed", exc_info=True)
+    outcome = enqueue([question], timeout_s, tool_call_id=tool_call_id)
+    receipt: Mapping[str, Any] = outcome if isinstance(outcome, Mapping) else {}
+    ask_details = receipt.get("details")
+    ask_id = str(ask_details.get("ask_id") or "") if isinstance(ask_details, Mapping) else ""
+    wait = _node_wait_text(url, origin, reraised=lapsed > 0)
+    if not receipt.get("ok"):
+        error = str(receipt.get("error") or "the ask was refused")
+        if "already carries that question" in error:
+            # This origin is already on the operator's card, bound to THIS
+            # entry: any card for another entry was withdrawn above, so the
+            # identical text the queue refuses is the live card's.
+            return _text(
+                tool_call_id,
+                "browser",
+                _wrap_receipt(
+                    f"the operator has already been asked to allow {origin} on this "
+                    f"node.\n{wait}"
+                ),
+                details={"origin": origin, "state": "pending", "approval": "signed"},
+            )
+        await _withdraw_entry()
+        # A next step, and a details code that says what happened rather than
+        # "no approver" (review U9): the queue refused this card for its own
+        # reason (a cap, a bound), which retrying in a loop will not change.
+        return _error(
+            tool_call_id,
+            "browser",
+            _wrap_receipt(
+                f"could not raise the operator's card for {origin}: {error}\n"
+                "The request was withdrawn. Tell the operator in chat which site you "
+                "need and why; do not retry request_access in a loop."
+            ),
+            details={**details, "approval": "card_refused", "state": "none"},
+        )
+    return _text(
+        tool_call_id,
+        "browser",
+        _wrap_receipt(
+            f"asked the operator to allow {origin} on this node (ask {ask_id}).\n"
+            "Nobody can click this headless browser: the operator approves or denies on "
+            "their own device, signed with their operator key, and the browser checks "
+            f"the signature itself.\n{_NODE_APPROVAL_REACH} {_NODE_CARD_IS_NOTICE}\n"
+            f"{wait}\n"
+            "Do other work meanwhile; while this card is open, do not request the site again."
+        ),
+        details={
+            "origin": origin,
+            "state": "pending",
+            "approval": "signed",
+            "ask_id": ask_id,
+            "question_id": question_id,
+            **({"expires_at": result["expires_at"]} if "expires_at" in result else {}),
+        },
+    )
+
+
+def _node_display_name() -> str:
+    """This node's mesh name for the card ("… in the browser on <node>"), falling
+    back to its device id, then the hostname: the operator must be able to tell
+    which machine is asking."""
+    try:
+        from local_operator.network import identity
+
+        device = identity.load()
+    except Exception:  # noqa: BLE001 — a name is cosmetic; never fail the request on it
+        device = None
+    if device is not None and (device.name or device.device_id):
+        return str(device.name or device.device_id)
+    import socket
+
+    return socket.gethostname()
+
+
 async def _bridge_access(
     tool_call_id: str,
     action: str,
@@ -26431,23 +26921,6 @@ async def _bridge_access(
     delegated = _delegated_here(context)
     if action == "request_access":
         from local_operator.browser_bridge import backend as _bridge_backend
-
-        # `host` is the handle spelling here (`bridge`/`ui`); a node's managed
-        # Chrome is always the bridge (extension) host. Check availability before
-        # pinning a preview origin: an unreachable approval must not consume the
-        # family's first usable origin when it later reaches a desktop host.
-        if host != HOST_UI_PREFIX and _bridge_backend._on_headless_node():  # noqa: SLF001
-            # On a headless node the prompt would queue in an extension popup
-            # nobody can reach, and its text tells the model to send the
-            # operator there (PR #3935 round 1, U1). Answer instead of queueing.
-            node_origin = _bridge_backend._origin(url)  # noqa: SLF001
-            return _text(
-                tool_call_id,
-                "browser",
-                _bridge_backend.node_approval_unavailable(node_origin),
-                details={"origin": node_origin, "state": "unavailable_on_node"},
-            )
-
         from local_operator.browser_bridge.preview_origin import (
             fixed_origin_instruction,
             pin_quick_tunnel,
@@ -26461,6 +26934,8 @@ async def _bridge_access(
             # Pin BEFORE the RPC: the remote host may notify the operator as soon
             # as it receives a request. Host-owned durable ancestry, never args,
             # binds manager, children and siblings even across runtime restarts.
+            # Remote unavailability retains this first binding: a failed approval
+            # must not let the family rotate hosts and raise another site card.
             host_name, requested_origin = quick_origin
             try:
                 if context is None or not context.session_id:
@@ -26521,6 +26996,49 @@ async def _bridge_access(
         assert result is not None
         state_value = str(result.get("state", ""))
         origin = str(result.get("origin", url))
+        if str(result.get("approval") or "") in ("signed", "no_approver"):
+            # A HEADLESS NODE's extension answered (``site_approval.py``): no
+            # person can click its popup, so the popup copy below would send the
+            # agent to wait on nothing.
+            node_result = await _node_site_access(
+                tool_call_id, context, result, url, origin, client=client
+            )
+            if instruction:
+                node_result.content.append(TextContent(text=f"\n\n{instruction}"))
+            return node_result
+        # `host` is the handle spelling here (`bridge`/`ui`); a node's managed
+        # Chrome is always the bridge (extension) host.
+        on_node = host != HOST_UI_PREFIX and _bridge_backend._on_headless_node()  # noqa: SLF001
+        if on_node and state_value != "pending":
+            # A CURRENT node extension answers an origin that is already allowed
+            # (or a "allow all" node) with ``{origin, state: "allowed"}`` and no
+            # ``approval`` field — that is not an old build (review R2-2 / U1 /
+            # Q2). Every non-pending state gets the node's own wording, and
+            # nothing is withdrawn.
+            return _text(
+                tool_call_id,
+                "browser",
+                _node_access_result_text(state_value, origin, url)
+                + (f"\n\n{instruction}" if instruction else ""),
+                details={"origin": origin, "state": state_value},
+            )
+        if on_node:
+            # A PENDING entry without an ``approval`` field: an extension that
+            # predates signed approvals, whose entry would wait in a popup nobody
+            # can reach (PR #3935 round 1, U1). Withdraw it and say why.
+            try:
+                await _bridge_call(
+                    tool_call_id, "cancel_access", {"url": url, **identity}, client=client
+                )
+            except Exception:  # noqa: BLE001 — the entry's own TTL is the floor
+                logger.debug("node request_access: cancel_access failed", exc_info=True)
+            return _text(
+                tool_call_id,
+                "browser",
+                _wrap_receipt(_bridge_backend.node_approval_unavailable(origin))
+                + (f"\n\n{instruction}" if instruction else ""),
+                details={"origin": origin, "state": "unavailable_on_node"},
+            )
         return _text(
             tool_call_id,
             "browser",
@@ -26558,6 +27076,36 @@ async def _bridge_access(
         assert result is not None
         state_value = str(result.get("state", "none"))
         origin = str(result.get("origin", url))
+        from local_operator.browser_bridge import backend as _cancel_backend
+
+        if host != HOST_UI_PREFIX and _cancel_backend._on_headless_node():  # noqa: SLF001
+            # The node's card goes with its entry (review U3/Q1): left open it
+            # would be refused when answered, and would block a re-request's card.
+            withdraw_site: Any = (
+                getattr(context, "withdraw_site_asks", None) if context is not None else None
+            )
+            withdrawn: list[str] = []
+            if callable(withdraw_site):
+                try:
+                    returned: Any = withdraw_site(origin)
+                    withdrawn = [str(ask_id) for ask_id in (returned or ())]
+                except Exception:  # noqa: BLE001 — the ask's own timeout is the floor
+                    logger.debug("node cancel_access: withdrawing cards failed", exc_info=True)
+            return _text(
+                tool_call_id,
+                "browser",
+                _node_access_result_text(state_value, origin, url),
+                details={
+                    "origin": origin,
+                    "state": state_value,
+                    "withdrawn_asks": withdrawn,
+                    **(
+                        {"pending_count": result["pending_count"]}
+                        if "pending_count" in result
+                        else {}
+                    ),
+                },
+            )
         return _text(
             tool_call_id,
             "browser",
@@ -26582,8 +27130,32 @@ async def _bridge_access(
     budget = params.timeout_s if params.timeout_s and params.timeout_s > 0 else None
     total_s = min(budget or BROWSER_AWAIT_ACCESS_DEFAULT_S, BROWSER_AWAIT_ACCESS_MAX_S)
     deadline = time.monotonic() + total_s
+    from local_operator.browser_bridge import backend as _await_backend
+
+    # A headless node's texts name the operator's card, not a popup (U2/Q3).
+    await_on_node = host != HOST_UI_PREFIX and _await_backend._on_headless_node()  # noqa: SLF001
+    # Every node text names the ORIGIN, the unit a grant covers (review U19/Q5):
+    # the extension's reported origin once a slice answered, the URL's own
+    # scheme://host[:port] before that.
+    from urllib.parse import urlsplit as _urlsplit
+
+    node_origin = url
+    try:
+        _parts = _urlsplit(url)
+        if _parts.scheme in ("http", "https") and _parts.hostname:
+            _port = f":{_parts.port}" if _parts.port else ""
+            node_origin = f"{_parts.scheme}://{_parts.hostname}{_port}"
+    except ValueError:  # a malformed port: name the URL as given
+        node_origin = url
     while True:
         remaining_ms = int((deadline - time.monotonic()) * 1000)
+        if remaining_ms <= 0 and await_on_node:
+            return _text(
+                tool_call_id,
+                "browser",
+                _node_access_result_text("await_timeout", node_origin, url, total_s=total_s),
+                details={"origin": node_origin, "state": "pending"},
+            )
         if remaining_ms <= 0:
             # RENDERED BY ``_access_result_text`` rather than inline: this arm and
             # the pending one must not give contradictory next steps, and they did
@@ -26614,6 +27186,15 @@ async def _bridge_access(
             return problem
         assert result is not None
         state_value = str(result.get("state", ""))
+        node_origin = str(result.get("origin") or node_origin)
+        if state_value != "pending" and await_on_node:
+            origin = str(result.get("origin", url))
+            return _text(
+                tool_call_id,
+                "browser",
+                _node_access_result_text(state_value, origin, url),
+                details={"origin": origin, "state": state_value},
+            )
         if state_value != "pending":
             origin = str(result.get("origin", url))
             return _text(
@@ -33449,12 +34030,22 @@ async def execute_task(
             # something it has to infer from a bare exception string.
             tier = getattr(exc, "tier", None)
             if tier is not None:
+                # "Launch without 'effort'" is an action only when THIS call
+                # passed one. A role- or roster-pinned tier (no ``effort`` here)
+                # refuses again without it, and the only other way round it is
+                # ``model=inherit``, which the sessions guide says a tier refusal
+                # is never worked around with unless the operator asks (QA Q-1).
+                alternative = (
+                    f"Either fix subagents.models.{tier} or launch without 'effort' "
+                    "and state that the child inherits this session's model."
+                    if item.effort is not None
+                    else f"The tier is pinned by the role or its roster slot: fix "
+                    f"subagents.models.{tier}, or report the refusal to the operator."
+                )
                 failures.append(
                     f"{item.label}: {exc}. Do NOT retry at a different effort tier — "
                     f"that runs the child on a different model than {tier!r} was "
-                    f"chosen for. Either fix subagents.models.{tier} or launch "
-                    f"without 'effort' and state that the child inherits this "
-                    f"session's model."
+                    f"chosen for. {alternative}"
                 )
             else:
                 failures.append(f"{item.label}: {exc}")
@@ -35753,7 +36344,8 @@ class AskParams(BaseModel):
 ASK_UNANSWERED_TEXT = (
     "The user closed the question without answering, so nothing was chosen. "
     "Do not ask again: decide yourself (take your recommended option(s) where you "
-    "gave any), then say in one line what you assumed and carry on."
+    "gave any), then say in one line what you assumed and carry on. Closing it is NOT "
+    "consent: leave any delete, overwrite or irreversible option undone and report it."
 )
 
 
@@ -35996,8 +36588,10 @@ _ASK_DESCRIPTION_QUEUED = (
     "anything the ask was meant to authorise until the answer arrives — continue "
     "other work, or end the turn saying what is queued. `timeout`: 1 h (3600) is "
     "routine, 5-10 minutes when someone should answer now, up to 24 h otherwise "
-    "(floor 2 min); on a timeout notice take your own recommendation and say what "
-    "you assumed. At most 8 asks can be open at once; duplicates are refused. "
+    "(floor 2 min); on a timeout notice take your own recommendation only where it is "
+    "reversible and say what you assumed — a timeout is never consent to delete or "
+    "overwrite. At most 8 asks can be open at once; "
+    "duplicates are refused. "
     "Settle one with `ask_withdraw` the moment it stops mattering. "
     "To re-raise another session's pending ask instead, pass that one ask's "
     "`relay` ref ('<session_id>/<ask_id>'; one answer settles both). "

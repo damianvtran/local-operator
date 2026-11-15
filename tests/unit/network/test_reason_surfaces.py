@@ -55,6 +55,16 @@ _GLOSSES = frozenset({"peer_reason_words", "doctor_detail_words", "table_reason_
 #: person's problem)``. The count is part of the key on purpose: a second raw read
 #: inside an already-declared function is a new site and must be looked at.
 _DECLARED_RAW_READS: dict[tuple[str, str, str], tuple[int, str]] = {
+    # This is a bound formatter CALL, not a read of a peer's reason field.
+    # Designation.reason() authors the empty-list clause locally (explicit list,
+    # unavailable enumeration, all opted out, or no push access); refusal() adds
+    # its remedy. The output is already words, like approval_copy below, and a
+    # transport-reason gloss would misinterpret that prose. Keep the exact site
+    # and count: another reason read still needs its own audit.
+    ("local_operator/network/credentials/github.py", "Designation.refusal", "reason"): (
+        1,
+        "Designation.reason() is the local human-prose formatter, not a raw mesh reason token",
+    ),
     # A failed credential card's "Why it stopped" line (UX review #3002 r1, U1). The value
     # is ``approval_copy.reason_for(code)`` -- this project's own sentence for a refusal code,
     # never a peer's raw token; ``approval_copy.last_failure`` maps the stored code first.
@@ -353,8 +363,10 @@ _DECLARED_RAW_READS: dict[tuple[str, str, str], tuple[int, str]] = {
     # stored as the receipt's ``receipt`` and printed as ``<peer>: <sentence>``. Kept
     # raw because an EMPTY reply must stay empty (``mailbox_receipt_lines`` prints
     # nothing then) and ``peer_reason_words`` never returns empty — it would print
-    # "it did not answer" under a message that was delivered.
-    ("local_operator/network/cli.py", "_pilot_mailbox", "detail"): (
+    # "it did not answer" under a message that was delivered. Read in
+    # ``_deliver_mailbox``, the one delivery helper both the viewer and the
+    # view-free mailbox paths share.
+    ("local_operator/network/cli.py", "_deliver_mailbox", "detail"): (
         1,
         "the owner's own mailbox-delivery sentence, attributed to the peer; empty "
         "stays empty, which the never-empty gloss cannot express",
@@ -469,8 +481,10 @@ _DECLARED_RAW_READS: dict[tuple[str, str, str], tuple[int, str]] = {
     # outcome line, and ``state``'s recorded custom-instructions conflict — every one
     # the peer's (or, for ``state``, this device's own apply's) conflict sentence,
     # printed verbatim so a person learns why the head's copy was not installed.
+    # Two more (the subagent-tiers singleton): the push's tiers outcome line and
+    # ``state``'s recorded tiers conflict, the same two classes as the instructions.
     ("local_operator/network/cli.py", "_cmd_definitions", "reason"): (
-        3,
+        5,
         "the peer's own conflict sentence, printed verbatim",
     ),
     # The custom-instructions singleton's report: the push copies the peer's apply
@@ -478,8 +492,13 @@ _DECLARED_RAW_READS: dict[tuple[str, str, str], tuple[int, str]] = {
     # revision (``_instructions_to_send``) into its per-peer result, which the CLI
     # line above renders. Relayed, never composed from a token.
     ("local_operator/network/definitions.py", "push_to_peer", "reason"): (
+        2,
+        "the peer's custom-instructions and subagent-tiers apply sentences, relayed "
+        "into the push report",
+    ),
+    ("local_operator/network/definitions.py", "_tiers_to_send", "reason"): (
         1,
-        "the peer's custom-instructions apply sentence, relayed into the push report",
+        "the peer's recorded subagent-tiers conflict sentence, relayed into the report",
     ),
     ("local_operator/network/definitions.py", "_instructions_to_send", "reason"): (
         1,
@@ -771,6 +790,17 @@ _DECLARED_RAW_READS: dict[tuple[str, str, str], tuple[int, str]] = {
         1,
         "the session's own compaction refusal token, journalled as bookkeeping, never rendered",
     ),
+    # A node site card's signed decision the browser bridge refused: ``reason`` is
+    # the bridge's machine refusal code (``unsigned_decision``/``no_approver``/
+    # ``wrong_key``/``bad_signature``/...). The ``str()`` coercion only keys a
+    # lookup into this project's own refusal copy (``browser_site_approval``),
+    # and the raw token travels on as the answer's machine ``code`` field —
+    # the person reads the mapped sentence, never the token.
+    ("local_operator/session/session.py", "Session.site_decide", "reason"): (
+        1,
+        "the bridge's refusal code, mapped to this project's own refusal copy and "
+        "returned as a machine code field, never rendered",
+    ),
     # The move queue's record projection: ``detail`` is the RECORD'S OWN phase
     # sentence, copied into the receipt payload a front end reads — the same
     # class as the ack's payload key above. Nothing renders it into a line in
@@ -809,6 +839,17 @@ _DECLARED_RAW_READS: dict[tuple[str, str, str], tuple[int, str]] = {
     # resource record's ``retention``, written only in this process: the browser
     # tool's ``retain`` action (the agent's own ``text``), "pending site
     # approval", or the subagent runner's "paused scope" — never a peer's prose.
+    # ``harness/subagent.py`` entered this scan when the tier-refusal remedy began
+    # reading this device's tier state (``keeps_own_tier_map`` imports
+    # ``local_operator.network.definitions``, PR #3951). Its two reads predate that
+    # and are the child's own provider-failover edge, not a peer value.
+    ("local_operator/harness/subagent.py", "_make_relay", "reason"): (
+        2,
+        "``ModelSwitchEvent.reason``: this process's own provider-failover reason "
+        "for a pinned child's model hop, recorded on the job row and rendered in "
+        "the fallback notice; authored by the local failover chain, never a mesh "
+        "or peer token",
+    ),
     ("local_operator/tools/builtin.py", "_format_bridge_tab", "reason"): (
         1,
         "the handed tab's retain reason — the child's own resource record "
