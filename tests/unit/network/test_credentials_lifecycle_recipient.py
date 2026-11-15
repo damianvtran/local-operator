@@ -422,6 +422,7 @@ def test_install_registers_the_tick_step_once():
 
 
 def test_every_advertised_op_capability_has_a_registered_handler(rig):
+    from local_operator.mobile import remote_sessions
     from local_operator.network import relay, wire
     from local_operator.network.credentials import owner
     from local_operator.network.types import OP_CAPABILITY
@@ -462,10 +463,17 @@ def test_every_advertised_op_capability_has_a_registered_handler(rig):
         wire.MESH_RESTART_V1: "net_restart",
         # The single-file pull (network/files.py; mesh-file-transfer.md S1).
         wire.MESH_FILE_V1: "net_file_get",
+        # A peer session's Files index (network/file_index.py; remote-files-parity §2).
+        wire.MESH_FILE_INDEX_V1: "net_session_files",
         "peer-journal-source-v1": "net_session_history",
         # The remote peek (network/peek.py) is a real new peer op, not a pure feature:
         # advertising it promises an owner that answers ``net_session_peek``.
         wire.SESSION_PEEK_V1: "net_session_peek",
+        # The owner-folded mobile read adds no op: it gates a ``mobile_session_read``
+        # mode on the existing history op (``RelayServer._op_session_history`` hands
+        # it to ``mobile.remote_sessions.owner_read``), so advertising it promises an
+        # owner whose ``net_session_history`` handler folds the projection itself.
+        remote_sessions.READ_CAPABILITY: "net_session_history",
         # Change pushes gate a receiving mode on the existing membership op;
         # advertising them promises that its handler understands bound snapshots.
         wire.MEMBER_LIST_PUSH_V1: "net_member_list",
@@ -473,6 +481,9 @@ def test_every_advertised_op_capability_has_a_registered_handler(rig):
         # fields on the existing catalogue answer (``RelayServer._rows_for_viewer``),
         # so advertising it promises an owner whose ``net_catalog`` handler stamps them.
         wire.REMOTE_ATTENTION_V1: "net_catalog",
+        # Advertising the binding promises verification/storage of the signed
+        # onboarding proof through this dedicated peer op, not just a wire feature.
+        wire.OPERATOR_BINDING_V1: "net_operator_binding",
     }
     pure_features = {
         # Reserved pool feature: no compute-pool op or dispatch contract exists yet.

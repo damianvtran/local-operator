@@ -368,6 +368,25 @@ async def test_field_case_sibling_cleanup_settles_without_the_judge(
     assert judge.prompts == []
 
 
+@pytest.mark.parametrize("force", [False, True], ids=["remove", "remove-force"])
+def test_field_case_cleanup_child_removes_running_parents_tree(
+    home: Path, infra: Path, monkeypatch: pytest.MonkeyPatch, force: bool
+) -> None:
+    """Field case d5188ee174d4: its cleanup subagent removing ``monitor-lent-env``,
+    which the parent created, was refused "owning session running: <parent>"
+    while the parent waited on it. Re-checked after converging onto #3992's
+    finished-foreign route (a2507222): family ownership is decided first, so
+    the running parent is the delegator, not a conflicting owner — while an
+    unrelated session, with the same parent running, still gets HIGH."""
+    wt = _add_tree(home, infra / "services", P, name="monitor-lent-env")
+    _set_running(monkeypatch, {P: str(home), C: str(home)})
+    verdict = _rank(home, _remove(wt, force=force), C)
+    assert verdict.risk is Risk.LOW, verdict.targets[0].reason
+    assert "owning session running" not in verdict.targets[0].reason
+    foreign = _rank(home, _remove(wt, force=force), U)
+    assert foreign.risk is Risk.HIGH, foreign.targets[0].reason
+
+
 # -- cause 2: ancestors and descendants share ownership ---------------------------
 
 
@@ -718,9 +737,15 @@ def test_family_gitfile_witness_cannot_revive_another_owners_stale_row(
             (prov.WORKTREE_GITFILE_KIND, str(wt)),
         )
         conn.execute("DELETE FROM created WHERE owner = ? AND kind = 'worktree'", (K,))
+        # A REUSED inode also means the tree's ``.git`` file is newer than the
+        # row. Without this, #4024's companion-less witness
+        # (``_gitfile_predates_row``: a ``.git`` older than the row proves the
+        # recorded generation) correctly reads the tree as P's own, and the
+        # fixture stops modelling reuse at all (convergence onto a2507222).
+        gitfile_ctime = os.lstat(wt / ".git").st_ctime_ns / 1e9
         conn.execute(
-            "UPDATE created SET stamp = ? WHERE owner = ? AND path = ?",
-            (prov.creation_stamp(os.stat(wt)) + 1, P, str(wt)),
+            "UPDATE created SET stamp = ?, created_at = ? WHERE owner = ? AND path = ?",
+            (prov.creation_stamp(os.stat(wt)) + 1, gitfile_ctime - 60, P, str(wt)),
         )
     assert prov.owned_record(str(wt), C, kin=True) is None
     assert prov.owned_record(str(wt), C, family=False) is None

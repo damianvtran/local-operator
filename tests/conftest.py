@@ -1359,6 +1359,24 @@ def restore_active_locale() -> Iterator[None]:
         text.set_active_locale("en")
 
 
+@pytest.fixture(autouse=True)
+def no_real_pkexec(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No test may launch the machine's real pkexec.
+
+    ``elevate.pkexec_path`` resolves pkexec from FIXED system paths, not ``PATH``
+    (agent review R1-5 on #3950), so the old way of hiding it — patching
+    ``shutil.which`` — no longer does, and on a host with ``/usr/bin/pkexec`` (and
+    passwordless sudo) a test that reached ``run_elevated`` would raise a real
+    privileged prompt. The test-launcher-only seam is pinned to a path that does
+    not exist; a test that wants a pkexec host points it at a shim of its own.
+    """
+    from local_operator.operator import elevate
+
+    monkeypatch.setattr(
+        elevate, "_PKEXEC_CANDIDATES_OVERRIDE", ("/nonexistent/lop-test-no-real-pkexec",)
+    )
+
+
 @pytest.fixture
 def monkeypatch(restore_active_locale: None) -> Iterator[pytest.MonkeyPatch]:
     """Keep pytest's standard patch API, but declare locale teardown ordering.
@@ -1447,6 +1465,27 @@ def isolate_environment(tmp_path_factory, monkeypatch):
     if escaped:
         del _RUNTIME_ROOT_ESCAPES[escapes_before:]
         pytest.fail("test reached the operator's real runtime root:\n" + "\n".join(escaped))
+
+
+@pytest.fixture(autouse=True)
+def neutralise_runtime_path_prime(monkeypatch):
+    """Keep ``launch._runtime_env`` from priming PATH through a real login shell.
+
+    ``_runtime_env`` primes the operator's login PATH (``launch._prime_login_path``)
+    because launchd/systemd daemons engage runtimes with a bare PATH. The suite
+    scrubs ``LOCAL_OPERATOR_PATH_PRIMED`` (see ``isolate_environment``), so
+    every cell that builds a runtime env would otherwise run a login shell AND
+    have ``os.environ["PATH"]`` rewritten under it, unrestored at teardown:
+    a cell that set a fake bin dir on PATH would silently lose it. Cells that
+    assert the prime itself put the real function back (the module attribute
+    captured at import time; ``test_runtime_env_login_path.py``).
+
+    Importing ``launch`` here costs about half a second ONCE per worker process
+    (measured with ``-X importtime``), not per test.
+    """
+    from local_operator.session.runtime import launch
+
+    monkeypatch.setattr(launch, "_prime_login_path", lambda: None)
 
 
 @pytest.fixture(autouse=True)

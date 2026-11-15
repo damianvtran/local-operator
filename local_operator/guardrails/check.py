@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import time
 from collections.abc import Callable, Mapping, Sequence
 from contextvars import ContextVar
@@ -55,6 +56,44 @@ logger = logging.getLogger(__name__)
 _OUTPUT_REDACTOR: ContextVar[Callable[[str], str] | None] = ContextVar(
     "guardrail_output_redactor", default=None
 )
+
+
+def credential_path_masks(env: Mapping[str, str]) -> list[tuple[re.Pattern[str], str]]:
+    """``(pattern, label)`` pairs hiding every path a credential-NAMED variable holds.
+
+    WHY (cleanup follow-on, item C): ``resolve.credential_path`` lets such a
+    variable's path value resolve and rank like a literal, so the RESOLVED
+    path (``realpath`` spelling, a ``.bak`` suffix, a child of it) can reach a
+    refusal, judge brief, journal line or preview — spellings the exact-value
+    scrubber does not know. Each pattern matches the value in its lexical,
+    normalised and physical spellings plus any path tail glued to it, and the
+    label names only the variable: ``$GOOGLE_APPLICATION_CREDENTIALS
+    <credential path>``. Over-masking a sibling that shares the prefix is the
+    accepted cost; the private path itself is never shown.
+    """
+    from local_operator.guardrails.resolve import credential_path
+    from local_operator.tools.shell_env import is_credential_shaped
+
+    home = env.get("HOME") or os.path.expanduser("~")
+    masks: list[tuple[str, str]] = []
+    for name, value in env.items():
+        path = credential_path(value, home) if is_credential_shaped(name) else None
+        if path is None:
+            continue
+        spellings = {path, os.path.normpath(path), os.path.realpath(path)}
+        head, tail = os.path.split(os.path.normpath(path))
+        spellings.add(os.path.join(os.path.realpath(head), tail))
+        masks.extend((s, f"${name} <credential path>") for s in spellings if len(s) > 1)
+    # Longest first, so a shorter spelling never leaves a longer one's tail.
+    masks.sort(key=lambda m: len(m[0]), reverse=True)
+    return [(re.compile(re.escape(s) + r"[^\s;,()'\"|]*"), label) for s, label in masks]
+
+
+def mask_credential_paths(text: str, masks: list[tuple[re.Pattern[str], str]]) -> str:
+    """``text`` with every :func:`credential_path_masks` match replaced by its label."""
+    for pattern, label in masks:
+        text = pattern.sub(lambda _m, lab=label: lab, text)
+    return text
 
 
 def _safe_text(text: str) -> str:
@@ -1290,7 +1329,11 @@ async def _dangerous_delete(
     if branch == BUILTIN_PASS:
         # Ordinary delete: runs with zero model calls. Still marked destructive
         # so a timeout mid-delete tells the agent to check before retrying.
-        return GuardOutcome(blocked=False, destructive=True) if verdict.targets else None
+        if not verdict.targets:
+            return None
+        # A LOW that rests on proven facts (a finished foreign worktree) says
+        # so, briefly, so the agent can see what was removed and why.
+        return GuardOutcome(blocked=False, destructive=True, warnings=list(verdict.warnings))
     targets = _targets_text(verdict)
     risk = verdict.risk
     if branch == BUILTIN_REFUSE_CRITICAL:
@@ -1457,9 +1500,12 @@ async def check_tool_call(
     from local_operator.tools.shell_env import is_credential_shaped
 
     values = [value for name, value in ctx.env.items() if is_credential_shaped(name)]
+    masks = credential_path_masks(ctx.env)
 
     def redact(text: str) -> str:
-        return scrub_values(scrub(text), values)
+        # Paths first: the value scrubber would otherwise mask only the exact
+        # value and leave a resolved spelling or tail of it behind.
+        return scrub_values(scrub(mask_credential_paths(text, masks)), values)
 
     def private(call: JudgeCall) -> JudgeCall:
         async def private_judge(system: str, prompt: str) -> str:

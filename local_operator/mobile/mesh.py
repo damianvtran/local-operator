@@ -144,6 +144,7 @@ def remote_session_rows(
     *,
     pinned: Collection[str],
     catalog: object | None = None,
+    ttl_s: float | None = None,
 ) -> list[dict[str, Any]]:
     """Every session another device holds, as rows the PHONE's list paints.
 
@@ -193,7 +194,11 @@ def remote_session_rows(
     from local_operator.session.peer_rows import peer_session_rows
 
     ranked: list[tuple[tuple[int, int, float, str], dict[str, Any]]] = []
-    for row in peer_session_rows(config_dir, catalog=catalog):
+    # ``ttl_s=None`` keeps the listing's own TTL (a stale cache dials). The relay
+    # passes ``math.inf`` to project whatever is cached without dialling, having
+    # scheduled the refresh itself (``daemon._PeerRowsRefresher``).
+    listing_kwargs: dict[str, Any] = {} if ttl_s is None else {"ttl_s": ttl_s}
+    for row in peer_session_rows(config_dir, catalog=catalog, **listing_kwargs):
         entry = entry_for(row, None)
         reachable = bool(getattr(row, "reachable", True))
         # The PEER's claim of its person's last message (``peer_rows`` carries

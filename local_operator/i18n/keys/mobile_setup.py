@@ -18,6 +18,10 @@ def account_failed() -> Msg:
     return Msg("mobile.setup.account_failed", {})
 
 
+def account_plain() -> Msg:
+    return Msg("mobile.setup.account_plain", {})
+
+
 def action_add_credit(*, url: str) -> Msg:
     return Msg("mobile.setup.action_add_credit", {"url": url})
 
@@ -36,6 +40,10 @@ def activating() -> Msg:
 
 def apply(*, command: str) -> Msg:
     return Msg("mobile.setup.apply", {"command": command})
+
+
+def apply_plain() -> Msg:
+    return Msg("mobile.setup.apply_plain", {})
 
 
 def applying() -> Msg:
@@ -62,6 +70,10 @@ def billing_lapsed() -> Msg:
     return Msg("mobile.setup.billing_lapsed", {})
 
 
+def billing_lapsed_resume() -> Msg:
+    return Msg("mobile.setup.billing_lapsed_resume", {})
+
+
 def billing_not_activated() -> Msg:
     return Msg("mobile.setup.billing_not_activated", {})
 
@@ -78,6 +90,10 @@ def checking() -> Msg:
     return Msg("mobile.setup.checking", {})
 
 
+def choose_account_plain() -> Msg:
+    return Msg("mobile.setup.choose_account_plain", {})
+
+
 def choose_login() -> Msg:
     return Msg("mobile.setup.choose_login", {})
 
@@ -86,12 +102,20 @@ def cloudflared() -> Msg:
     return Msg("mobile.setup.cloudflared", {})
 
 
+def cloudflared_plain() -> Msg:
+    return Msg("mobile.setup.cloudflared_plain", {})
+
+
 def cloudflared_tui() -> Msg:
     return Msg("mobile.setup.cloudflared_tui", {})
 
 
 def complete() -> Msg:
     return Msg("mobile.setup.complete", {})
+
+
+def complete_plain() -> Msg:
+    return Msg("mobile.setup.complete_plain", {})
 
 
 def complete_tui() -> Msg:
@@ -118,8 +142,16 @@ def disabled() -> Msg:
     return Msg("mobile.setup.disabled", {})
 
 
+def disabled_resume() -> Msg:
+    return Msg("mobile.setup.disabled_resume", {})
+
+
 def failed() -> Msg:
     return Msg("mobile.setup.failed", {})
+
+
+def failed_plain() -> Msg:
+    return Msg("mobile.setup.failed_plain", {})
 
 
 def failed_tui(*, command: str) -> Msg:
@@ -158,6 +190,10 @@ def login_offer() -> Msg:
     return Msg("mobile.setup.login_offer", {})
 
 
+def login_plain() -> Msg:
+    return Msg("mobile.setup.login_plain", {})
+
+
 def login_tui() -> Msg:
     return Msg("mobile.setup.login_tui", {})
 
@@ -166,12 +202,16 @@ def mobile_bundle() -> Msg:
     return Msg("mobile.setup.mobile_bundle", {})
 
 
-def mobile_bundle_tui() -> Msg:
-    return Msg("mobile.setup.mobile_bundle_tui", {})
+def mobile_bundle_plain() -> Msg:
+    return Msg("mobile.setup.mobile_bundle_plain", {})
 
 
 def network() -> Msg:
     return Msg("mobile.setup.network", {})
+
+
+def operation_failed_tui() -> Msg:
+    return Msg("mobile.setup.operation_failed_tui", {})
 
 
 def owner_mismatch() -> Msg:
@@ -180,6 +220,10 @@ def owner_mismatch() -> Msg:
 
 def owner_missing() -> Msg:
     return Msg("mobile.setup.owner_missing", {})
+
+
+def owner_missing_plain() -> Msg:
+    return Msg("mobile.setup.owner_missing_plain", {})
 
 
 def price(*, amount: str) -> Msg:
@@ -268,6 +312,14 @@ def stage_verification() -> Msg:
 
 def stopped() -> Msg:
     return Msg("mobile.setup.stopped", {})
+
+
+def stopped_plain() -> Msg:
+    return Msg("mobile.setup.stopped_plain", {})
+
+
+def supervisor_plain() -> Msg:
+    return Msg("mobile.setup.supervisor_plain", {})
 
 
 def supervisor_tui() -> Msg:
@@ -372,6 +424,10 @@ def usage() -> Msg:
 
 def verification() -> Msg:
     return Msg("mobile.setup.verification", {})
+
+
+def verification_plain() -> Msg:
+    return Msg("mobile.setup.verification_plain", {})
 
 
 def verification_tui() -> Msg:

@@ -9,8 +9,9 @@ session's own shell from a SIBLING subagent's: both read as family, and a
 sibling's live cwd inside the deleting session's worktree did not keep it
 busy.
 
-This map records, at the two spawn sites that run agent work (the bash tool
-and the eval kernel), which session started each direct child of the harness.
+This map records, at the spawn sites that run agent work (the bash tool, the
+eval kernel, the grep tool's ``rg`` and the sessions tool's launcher), which
+session started each direct child of the harness.
 ``cwd_holders`` consults it for the hop just below the harness pid and
 attributes that process to the recorded session instead of to "this
 process". Runtime records only: a process's environment or command line is
@@ -27,17 +28,57 @@ CONSTRAINTS
   processes have their own registry records and are attributed by those.
 - An unmapped direct child of the harness (an MCP server, a language server)
   keeps the previous attribution — the harness's own — because no session
-  spawned it as agent work.
+  spawned it as agent work. EXCEPT while an agent spawn is in flight
+  (:func:`spawning`, QA Q3 on PR #3987): between the fork inside
+  ``create_subprocess_exec`` and :func:`record`, the new child is unmapped
+  and would read as the harness's (family) for a few event-loop ticks, so a
+  sibling subagent's fresh shell inside the deleting session's tree did not
+  hold it (6/6 trials in QA's rig). While :func:`pending` is non-zero an
+  unmapped direct child counts as foreign instead — fail closed for that
+  window; an MCP server inside a tree reads foreign for those ticks too.
+- Reap-to-``returncode`` (review n1, PR #3987): on macOS the threaded child
+  watcher reaps in a thread and sets ``returncode`` later via
+  ``call_soon_threadsafe``, so a pid could be reissued before the entry
+  reads reaped. Not exploitable: the reused pid would also have to be a
+  direct child of the harness (only harness code spawns those), and a stale
+  sibling entry errs toward foreign.
 """
 
 from __future__ import annotations
 
+import contextlib
 import threading
+from collections.abc import Iterator
 from typing import Any
 
 _lock = threading.Lock()
 #: pid -> (session id, process object whose ``returncode`` proves liveness).
 _spawned: dict[int, tuple[str, Any]] = {}
+#: Agent spawns between "about to fork" and :func:`record` (see CONSTRAINTS).
+_pending = 0
+
+
+@contextlib.contextmanager
+def spawning() -> Iterator[None]:
+    """Mark an agent spawn in flight; wrap ``create_subprocess_exec`` AND ``record``.
+
+    Exited on every path (a failed spawn included), so the counter never
+    sticks: a stuck counter would only fail closed, but would do so forever.
+    """
+    global _pending
+    with _lock:
+        _pending += 1
+    try:
+        yield
+    finally:
+        with _lock:
+            _pending -= 1
+
+
+def pending() -> int:
+    """How many agent spawns are between fork and :func:`record` right now."""
+    with _lock:
+        return _pending
 
 
 def record(pid: int | None, session_id: object, process: Any) -> None:
