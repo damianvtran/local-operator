@@ -94,7 +94,10 @@ class Api:
                 if code == 200:
                     self.wfile.write(json.dumps(body).encode())
 
-            def log_message(self, *a):  # noqa: D401
+            # Signature mirrors BaseHTTPRequestHandler.log_message(self, format,
+            # *args): `format` is a keyword-capable parameter in the base, so a
+            # position-only `*a` override is a pyright reportIncompatibleMethodOverride.
+            def log_message(self, format: str, *args: object) -> None:  # noqa: D401
                 pass
 
         self.server = HTTPServer(("127.0.0.1", 0), H)
@@ -252,6 +255,21 @@ def test_pagination_overflow_fails_closed(serve, tmp_path):
     api = serve({WF: {"workflow_runs": [run_obj(i) for i in range(100)]}})
     code, out, _ = cli(api, tmp_path, *PR_ARGS)
     assert code == 1 and "refusing to guess" in out
+
+
+def test_fake_api_log_message_accepts_the_base_class_keyword_form(serve):
+    """The fake's override keeps `format` keyword-capable like the stdlib base.
+
+    A position-only `*a` override failed pyright (reportIncompatibleMethodOverride);
+    calling it by keyword is the discriminating runtime check of the same shape.
+    """
+    import inspect
+
+    handler = serve({}).server.RequestHandlerClass
+    params = inspect.signature(handler.log_message).parameters
+    assert params["format"].kind is inspect.Parameter.POSITIONAL_OR_KEYWORD
+    assert next(iter(params.values())).name == "self"
+    assert [p.kind for p in params.values()][-1] is inspect.Parameter.VAR_POSITIONAL
 
 
 DISPATCH = ("--event", "workflow_dispatch", "--ref-name", "train/t1", "--sha", SHA)
