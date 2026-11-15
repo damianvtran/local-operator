@@ -284,7 +284,9 @@ FRAME_CAP_ENTRY_TEXT_FLOOR = 200
 #: field of every row. Two real messages of 3,012 and 1,842 source characters
 #: therefore crossed to the phone as 200-character rows ending in "…" — the
 #: phone's rendering matched frame for frame — and nothing could get the text
-#: back: no surface reads ``text_complete``, and the row is never re-fetched.
+#: back: the flag is not a recovery path (its only reader, the peer-cycle
+#: restore predicate, uses it to refuse a drill-in) and the row is never
+#: re-fetched.
 #: The walk that did it cannot even buy the frame it is spent for: the tail is
 #: at most ``FRAME_CAP_TRANSCRIPT_FLOOR`` rows, so 4,000 chars/row is ~64 KB of
 #: a 700 KB budget, and a frame still over the cap at that point is over it for
@@ -1478,9 +1480,10 @@ def cap_projection_frame(
     # bound: their text is an expandable result's first line, the answer is the
     # answer. The old behaviour spent both equally, and a 3,012-character reply
     # reached the phone as 200 characters and an ellipsis with no way back
-    # (nothing reads ``text_complete``; nothing re-fetches the row) — usually in
-    # a frame that stayed over the cap anyway, because at the tail floor this
-    # tier's own budget is ~64 KB of 700 KB.
+    # (the flag is not a recovery path — its only reader refuses a drill-in —
+    # and nothing re-fetches the row) — usually in a frame that stayed over the
+    # cap anyway, because at the tail floor this tier's own budget is ~64 KB of
+    # 700 KB.
     #
     # ``len(value) > limit`` is the ONLY edit condition, so a row already inside
     # the bound is skipped rather than re-normalised: an answer row bounded on

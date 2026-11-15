@@ -1609,8 +1609,9 @@ def test_the_text_tier_never_walks_the_answer_down_to_the_floor(
     3,012 and 1,842 source characters crossed to the phone as 200-character
     rows ending in a "…" — reproduced over a real session, where the phone's
     rendering matched the frame character for character — and nothing could get
-    the text back: no surface reads ``text_complete``, and nothing re-fetches
-    the row.
+    the text back: the flag is not a recovery path (its only reader, the
+    peer-cycle restore predicate, refuses a drill-in over a clipped row) and
+    nothing re-fetches the row.
 
     The walk cannot even buy the frame it is spent for. The tail floor keeps at
     most ``FRAME_CAP_TRANSCRIPT_FLOOR`` rows, so 4,000 chars/row is ~64 KB of a
