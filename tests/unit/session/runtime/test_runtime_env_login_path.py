@@ -136,3 +136,32 @@ def test_a_systemd_user_unit_path_is_primed_on_linux(
 
     assert "/home/linuxbrew/.linuxbrew/bin" in _path_entries(env)
     assert env[helpers.PATH_PRIMED_ENV] == "1"
+
+
+def test_the_mobile_daemons_hand_built_start_spawn_is_primed_too(
+    bare_daemon: list[int], monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """``MobileDaemon._spawn_session`` builds its child env by hand, outside
+    ``_runtime_env``; a phone-started session from the launchd mobile service
+    must get the login PATH as well."""
+    import asyncio
+
+    import local_operator.mobile.daemon as daemon_module
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    daemon = daemon_module.MobileDaemon(port=0, password="fixture-password")
+    envs: list[dict[str, str]] = []
+
+    class Spawned(Exception):
+        pass
+
+    def capture(*_args: Any, env: dict[str, str], **_kwargs: Any) -> Any:
+        envs.append(dict(env))
+        raise Spawned
+
+    monkeypatch.setattr(daemon_module, "spawn_disclaimed", capture)
+    with pytest.raises(Spawned):
+        asyncio.run(daemon._spawn_session(str(tmp_path), None, None, "abcdef123456"))
+
+    assert "/opt/homebrew/bin" in envs[0]["PATH"].split(":")
+    assert bare_daemon == [1]
