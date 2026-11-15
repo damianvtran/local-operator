@@ -240,13 +240,15 @@ def test_every_revoke_state_prints_the_ceiling_after_its_state_line(
     assert "was confirmed on" not in text
 
 
-def test_the_no_row_arm_says_a_lost_confirmation_is_untracked(
+def test_the_no_row_arm_does_not_deny_current_dispatch_tracking(
     owner: SimpleNamespace, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """D1's second fact: what the ledger CANNOT see is named, not implied away."""
+    """No recorded copy is not a claim that sent copies are never tracked."""
     _placement(owner, member_holds=True)
     _code, lines, _err = _run(capsys, "credential", "revoke", SECRET, "--from", MEMBER_NAME)
-    assert "a copy whose confirmation never arrived is not tracked here" in lines, lines
+    assert "a copy whose confirmation never arrived is not tracked here" not in lines, lines
+    assert "no copy of 'CRM_API_KEY' is recorded on device-b, so there is no wipe to send" in lines
+    assert list(messages_mod.COPY_CEILING_LINES) == lines[-2:]
 
 
 def test_a_provider_key_revoke_keeps_its_own_closing_sentence_and_the_docs_say_so(
