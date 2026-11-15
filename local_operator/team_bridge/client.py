@@ -2889,7 +2889,12 @@ class TeamBridgeClient:
             # The one-click Turn off: the hub answered, so make the opt-out
             # sticky on this machine too (see _apply_local_opt_out).
             opted_account = getattr(access, "account_id", None) or expected_account_id
-            self._apply_local_opt_out(opted_account)
+            # OFF THE EVENT LOOP, like the connector sync below: both writes
+            # take the config writer's lock, reload and rewrite the config file
+            # (0.3-1 s under load), and inline they froze every route at the
+            # Turn off click. Awaited, so the opt-out is on disk BEFORE the
+            # connector sync reads it.
+            await asyncio.to_thread(self._apply_local_opt_out, opted_account)
         if state == "disabled" and self._config_dir is not None:
             # THE OFF EVENT, and the only reconcile this method owns. An
             # ENABLE is covered by the commit hook (``_commit_explicit_enable``
