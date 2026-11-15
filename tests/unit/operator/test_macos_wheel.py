@@ -195,3 +195,51 @@ def test_the_pure_wheel_is_left_alone(tmp_path: Path) -> None:
     make_macos_wheel.retag(wheel, _fake_app(tmp_path), tmp_path)
     assert wheel.read_bytes() == before
     assert wheel.name == WHEEL_NAME
+
+
+def _fake_launcher(tmp_path: Path, *, signed: bool = True) -> Path:
+    bundle = tmp_path / "Local Operator.lopruntime"
+    macos = bundle / "Contents" / "MacOS"
+    macos.mkdir(parents=True)
+    (macos / "Local Operator").write_bytes(b"\xcf\xfa\xed\xfe a launcher, in spirit\n")
+    (bundle / "Contents" / "Info.plist").write_bytes(b"<plist/>")
+    if signed:
+        seal = bundle / "Contents" / "_CodeSignature"
+        seal.mkdir()
+        (seal / "CodeResources").write_bytes(b"<plist/>")
+    return bundle
+
+
+def test_the_launcher_lands_where_update_plants_it_from_and_stays_executable(
+    tmp_path: Path,
+) -> None:
+    """``update.LAUNCHER_PACKAGE_PATH`` is where the install copies the launcher FROM.
+
+    A wheel that writes it anywhere else installs cleanly and every LaunchAgent keeps
+    naming the unsigned shim — the "python3" Login Items row this launcher removes.
+    """
+    from local_operator import update
+
+    wheel = make_macos_wheel.retag(
+        _toy_wheel(tmp_path), _fake_app(tmp_path), tmp_path, launcher=_fake_launcher(tmp_path)
+    )
+    assert make_macos_wheel.LAUNCHER_DEST == update.LAUNCHER_PACKAGE_PATH
+    executable = (
+        make_macos_wheel.LAUNCHER_DEST / "Contents" / "MacOS" / "Local Operator"
+    ).as_posix()
+    with zipfile.ZipFile(wheel) as zf:
+        infos = {info.filename: info for info in zf.infolist()}
+        assert executable in infos
+        assert (infos[executable].external_attr >> 16) & 0o777 == 0o755
+        seal = make_macos_wheel.LAUNCHER_DEST / "Contents" / "_CodeSignature" / "CodeResources"
+        assert (infos[seal.as_posix()].external_attr >> 16) & 0o777 == 0o644
+
+
+def test_an_unsigned_launcher_is_refused_rather_than_packaged(tmp_path: Path) -> None:
+    with pytest.raises(SystemExit, match="not a signed bundle"):
+        make_macos_wheel.retag(
+            _toy_wheel(tmp_path),
+            _fake_app(tmp_path),
+            tmp_path,
+            launcher=_fake_launcher(tmp_path, signed=False),
+        )
