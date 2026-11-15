@@ -31,7 +31,8 @@ from __future__ import annotations
 
 import logging
 import os
-from collections.abc import Callable, Mapping
+import time
+from collections.abc import Callable, Mapping, Sequence
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -526,6 +527,12 @@ class DeleteCase:
     session_id: str = ""
     #: Every protected state root (``ledger_record``'s refusal bar).
     state_roots: tuple[str, ...] = ()
+    #: path -> the not-consent sentence, for each path whose ONLY consent-like
+    #: fact is an ask the operator never approved (timed out, withdrawn,
+    #: dismissed, open, declined): no creating call, no ledger row, no trusted
+    #: operator row names it. ``_dangerous_delete`` refuses these before any
+    #: judge runs (incident 2026-11-14, ask a-20fc).
+    lapsed_only: Mapping[str, str] = field(default_factory=dict)
 
     def _named_by(self, path: str, words: Any) -> bool:
         from local_operator.guardrails.provenance import names_path
@@ -616,6 +623,7 @@ class DeleteCase:
         """
         import re
 
+        from local_operator.guardrails import provenance as prov
         from local_operator.guardrails.evidence import verify as verify_evidence
 
         first = (answer or "").strip().splitlines()[0] if (answer or "").strip() else ""
@@ -672,10 +680,16 @@ class DeleteCase:
                     w
                     for w in self.operator.words
                     if (
-                        (w.ask_id and w.ask_id in ask_ids)
-                        or (operator and w.label == "operator, direct")
+                        # An ask citation verifies only what the chosen
+                        # answer covers, never a path only an unpicked
+                        # option names (review R2-m6).
+                        w.ask_id
+                        and w.ask_id in ask_ids
+                        and prov.ask_citation_covers(
+                            w, path, home=self.home, cwd=self.cwd, protected=self.stop
+                        )
                     )
-                    and self._named_by(path, w)
+                    or (operator and w.label == "operator, direct" and self._named_by(path, w))
                 ),
                 None,
             )
@@ -703,6 +717,206 @@ class DeleteCase:
 _MAX_FACTS = 64
 
 
+#: Ops a non-consenting ask lifts out of LOW: the ones that destroy, move
+#: away or unlock what is there (``classify._DESTROYING_OPS`` plus unprotect).
+#: NOT overwrite (review R1-M2, PR #3966): an ask that merely mentions a dir
+#: must not hard-refuse every ``>``/``sed -i``/``truncate`` edit under it; an
+#: overwrite keeps today's ranking, and when it reaches HIGH on its own the
+#: judge still gets the not-consent fact (``build_delete_case``).
+_ASKED_OPS = frozenset({"delete", "move", "clean", "unprotect"})
+
+
+def _ask_block(
+    lapsed: Sequence[Any],
+    path: str,
+    *,
+    home: str,
+    cwd: str | None,
+    stop: Sequence[str],
+    escalating: bool,
+) -> tuple[Any, bool] | None:
+    """The non-consenting ask that blocks ``path``, and whether it refuses outright.
+
+    blocks = asks naming the path − asks whose trusted answer approves it
+    (``provenance.ask_consents``). ``escalating`` drops asks older than
+    ``provenance.ASK_ESCALATION_MAX_AGE_MS`` (they still reach the judge as a
+    fact, never as a rank lift or a refusal). The bool is False when the only
+    reach is UNDER a broad named dir (``provenance.broad_ask_dir``): that
+    target goes to the judge with the not-consent fact instead of the
+    deterministic refusal. A refusable hit wins over a judge-only one.
+
+    An ask the operator gave a trusted, non-declining answer never refuses
+    outright (review R2-M3): only an ask with no trusted yes may. When that
+    answer's ``ask=`` citation would verify the path or a dir above it
+    (``provenance.ask_answer_covers``: picked, not only an unpicked option's
+    label) it adds nothing, and the path keeps its base rank, as on main
+    (``node_modules`` inside a worktree the operator said to delete). When the
+    answer reaches the path only through an unpicked option, it goes to the
+    judge with the fact, and the verifier refuses the citation (review R2-m6).
+    """
+    from local_operator.guardrails import provenance as prov
+
+    now = int(time.time() * 1000)
+    judge_only = None
+    for a in lapsed:
+        if escalating and a.created_at and now - a.created_at > prov.ASK_ESCALATION_MAX_AGE_MS:
+            continue
+        reach = prov.ask_reach(a.text, path, home=home, cwd=cwd, protected=stop)
+        if reach is None:
+            continue
+        if prov.ask_consents(a, path, home=home, cwd=cwd, protected=stop):
+            continue
+        kind, named = reach
+        answered = a.answer is not None and (
+            prov.ask_reach(a.answer.text, path, home=home, cwd=cwd, protected=stop) is not None
+        )
+        # ``answered`` already implies ``a.answer is not None``; the repeat is
+        # for the type checker (narrowing does not flow through the bool) and
+        # keeps a missing answer as "no coverage", never consent.
+        if (
+            answered
+            and a.answer is not None
+            and prov.ask_answer_covers(a.answer, path, home=home, cwd=cwd, protected=stop)
+        ):
+            continue
+        if answered or (kind == "under" and prov.broad_ask_dir(named, home=home)):
+            judge_only = judge_only or (a, False)
+            continue
+        return a, True
+    return judge_only
+
+
+def escalate_asked_targets(verdict: Verdict, ctx: CallContext) -> Verdict:
+    """Rank HIGH every LOW destroying target a non-consenting ask in this family reaches.
+
+    WHY (incident 2026-11-14, ask a-20fc, rows 302/320/365): the refusal of a
+    timed-out ask only ran for HIGH targets, and the deletes that did the
+    damage (``~/hyperplane-cpp/build``, benchmark raw data) were deep paths
+    that ranked LOW and ran unexamined. Asking the operator about a path is the
+    agent's own admission that removing it needs them; an ask that timed out,
+    expired, was withdrawn, dismissed or is still open cannot lower that again.
+    Once HIGH, :func:`build_delete_case` marks the path ``lapsed_only`` (no
+    creation evidence, no ledger row, no trusted operator words) and
+    ``_dangerous_delete`` refuses it without a judge.
+
+    Exempt, as before: this session's own directory/scratchpad and anything its
+    creation ledger records (``classify._owned_by_session``). CRITICAL rows and
+    already-HIGH rows are left as they are. Matching is
+    :func:`provenance.ask_reaches` (equal, under or above a named path; globs
+    and brace lists expanded) — wide on purpose, since a match only refuses.
+    The ask store is read only when a LOW destroying target exists.
+    """
+    if not ctx.session_id:
+        return verdict
+    candidates = [
+        i
+        for i, r in enumerate(verdict.targets)
+        if r.risk is Risk.LOW
+        and r.target.path is not None
+        and r.target.op in _ASKED_OPS
+        and not r.target.opaque
+    ]
+    if not candidates:
+        return verdict
+    import dataclasses
+    import glob as _glob
+
+    from local_operator.guardrails import provenance as prov
+    from local_operator.guardrails.classify import _owned_by_session, _protected
+
+    lapsed = prov.unanswered_asks(ctx.session_id)
+    if not lapsed:
+        return verdict
+    home = ctx.env.get("HOME") or os.path.expanduser("~")
+    prot = _protected(ctx.env, ctx.scratchpad, ctx.session_id)
+    stop = tuple(sorted({*prot.homes, *prot.state_roots, *prot.install_roots, "/"}))
+    own = [*prot.own_session, *([ctx.scratchpad] if ctx.scratchpad else [])]
+    targets = list(verdict.targets)
+    reasons = list(verdict.reasons)
+    for i in candidates:
+        t = targets[i].target
+        assert t.path is not None  # filtered above
+        spelled = [t.path]
+        if t.pattern is not None:
+            try:
+                spelled += _glob.glob(t.pattern)
+            except (OSError, ValueError):
+                pass
+        # A bare symlink operand of ``rm``/``unlink`` removes only the link
+        # (review R1-m3): the own-dir exemption reads the link entry, not the
+        # pointee, so dropping one's own scratchpad link to a named path stays
+        # LOW. ``link_entry`` is None for ``link/``, globs and anything that
+        # may follow the link, which keep the pointee.
+        entry = link_entry(t)
+        reals = [entry] if entry is not None else [os.path.realpath(p) for p in spelled]
+        if any(r == o or r.startswith(o.rstrip("/") + "/") for r in reals for o in own):
+            continue
+        if _owned_by_session(t, t.path, prot, ctx.session_id) is not None:
+            continue
+        hit = next(
+            (
+                found
+                for p in spelled
+                if (
+                    found := _ask_block(
+                        lapsed, p, home=home, cwd=ctx.cwd, stop=stop, escalating=True
+                    )
+                )
+                is not None
+            ),
+            None,
+        )
+        if hit is None:
+            continue
+        why = (
+            f"named by ask {hit[0].ask_id}, which was {hit[0].label}: "
+            "the agent asked the operator about it, so removing it is not LOW"
+        )
+        targets[i] = dataclasses.replace(targets[i], risk=Risk.HIGH, reason=why)
+        reasons.append(why)
+    if len(reasons) == len(verdict.reasons):
+        return verdict
+    risk = max(verdict.risk, Risk.HIGH)
+    return dataclasses.replace(verdict, risk=risk, targets=targets, reasons=reasons)
+
+
+def _not_consent_fact(ask: Any) -> str:
+    """The judge fact / refusal sentence for a non-consenting ask."""
+    return (
+        f"ask {ask.ask_id} names it but was {ask.label}: NOT consent (a timeout, "
+        "withdrawal, decline, the agent's own or a relayed answer never authorises a delete)"
+    )
+
+
+def lapsed_refusal_reason(case: DeleteCase) -> str:
+    """The deterministic refusal for ``case.lapsed_only`` (checkpoint and preview).
+
+    The wording follows the ask's end state: a never-answered ask says to
+    wait for (or report as awaiting) an answer; an answer that is not consent
+    (declined, agent-recorded, relayed, not approving) says only the
+    operator's approving answer can authorise it.
+    """
+    from local_operator.guardrails.provenance import _UNANSWERED_LABEL
+
+    path, why = next(iter(case.lapsed_only.items()))
+    # ``unanswered_label("open")`` spells "still open, not yet answered".
+    still_open = "still open" in why
+    never = any(label in why for label in _UNANSWERED_LABEL.values())
+    head = (
+        f"{path}: {why}. You asked the operator about this path and got no answer; "
+        "a timeout or no answer is not consent; wait for an answer or leave it. "
+        if never
+        else f"{path}: {why}. You asked the operator about this path and have no "
+        "answer from them approving it; leave it in place. "
+    )
+    return head + (
+        "The ask is still open: wait for the operator's answer before touching it"
+        if still_open
+        else "Leave it in place and report it as awaiting the operator's answer; "
+        "only an answer they actually give can authorise it"
+    )
+
+
 def build_delete_case(verdict: Verdict, ctx: CallContext) -> DeleteCase:
     """Extract operator words, evidence and per-target facts for a HIGH delete."""
     import glob as _glob
@@ -717,6 +931,9 @@ def build_delete_case(verdict: Verdict, ctx: CallContext) -> DeleteCase:
     paths: list[str] = []
     unverifiable: list[str] = []
     operator_only: list[str] = []
+    #: Paths a destroying op reaches: only these may be refused outright by a
+    #: non-consenting ask; an overwrite that is HIGH anyway gets the fact only.
+    destroying: set[str] = set()
     for ranked in verdict.flagged_targets:
         t = ranked.target
         if ranked.risk is Risk.CRITICAL and t.path is not None and not t.opaque and not t.pattern:
@@ -748,12 +965,16 @@ def build_delete_case(verdict: Verdict, ctx: CallContext) -> DeleteCase:
             if not matches:
                 unverifiable.append(t.pattern)
             paths.extend(os.path.realpath(m) for m in matches)
+            if t.op in _ASKED_OPS:
+                destroying.update(os.path.realpath(m) for m in matches)
         else:
             # A bare symlink operand of ``rm``/``unlink`` removes only the
             # link, so its citation must cover the link entry, not the pointee
             # (q1029 incident: ``ln -s <pad> ~/q1029`` could never cover a pad
             # born before it). Anything else is verified on its realpath.
             paths.append(link_entry(t) or os.path.realpath(t.path))
+            if t.op in _ASKED_OPS:
+                destroying.add(paths[-1])
     paths = list(dict.fromkeys(paths))
     operator_only = [p for p in dict.fromkeys(operator_only) if p not in paths]
     operator = ctx.operator
@@ -781,6 +1002,11 @@ def build_delete_case(verdict: Verdict, ctx: CallContext) -> DeleteCase:
         for r in verdict.flagged_targets
         if r.target.path is not None and not r.target.pattern
     }
+    # Asks that are NOT consent, read only to SAY so (``unanswered_asks``):
+    # the judge must never infer consent from a timeout notice or from the
+    # agent's own "the ask timed out, proceeding" in the command or intent.
+    lapsed = prov.unanswered_asks(ctx.session_id) if ctx.session_id and paths else []
+    lapsed_only: dict[str, str] = {}
     facts: list[str] = []
     for path in [*paths, *operator_only][:_MAX_FACTS]:
         ids = [] if path in operator_only else (evidence.covers.get(path) or [])
@@ -797,6 +1023,19 @@ def build_delete_case(verdict: Verdict, ctx: CallContext) -> DeleteCase:
             if path in operator_only
             else ledger_record(path, ctx.session_id, stop, tuple(prot.state_roots))
         )
+        # The same reach and consent subtraction that ranked a deep path
+        # HIGH (``escalate_asked_targets``). The FACT is not age-bounded: it
+        # only informs a judge that runs anyway. The refusal is bounded, and
+        # limited to destroying ops and non-broad reaches (review R1-M2).
+        fact_hit = _ask_block(lapsed, path, home=home, cwd=ctx.cwd, stop=stop, escalating=False)
+        not_consent = _not_consent_fact(fact_hit[0]) if fact_hit is not None else ""
+        refusing = (
+            _ask_block(lapsed, path, home=home, cwd=ctx.cwd, stop=stop, escalating=True)
+            if not_consent and path in destroying
+            else None
+        )
+        if refusing is not None and refusing[1] and not ids and record is None and not named:
+            lapsed_only[path] = _not_consent_fact(refusing[0])
         tree = ""
         if not os.path.islink(path) and os.path.exists(os.path.join(path, ".git")):
             tree = f"; git: {prov.worktree_state(path, own=record is not None)}"
@@ -814,6 +1053,7 @@ def build_delete_case(verdict: Verdict, ctx: CallContext) -> DeleteCase:
             + f"; {record.ledger_fact() if record else 'ledger: no row for this session'}"
             + tree
             + f"; operator named it: {'yes (' + named + ')' if named else 'no'}"
+            + (f"; {not_consent}" if not_consent else "")
             # Last, the classifier's reason: it carries the branch's PR/MR
             # state and any running owner already looked up (no second lookup).
             + (f"; ranked because: {reasons[path]}" if path in reasons else "")
@@ -846,6 +1086,7 @@ def build_delete_case(verdict: Verdict, ctx: CallContext) -> DeleteCase:
         stop=stop,
         home=home,
         cwd=ctx.cwd,
+        lapsed_only=lapsed_only,
     )
 
 
@@ -988,6 +1229,7 @@ async def _dangerous_delete(
     verdict = classify_bash(
         command, cwd=ctx.cwd, env=ctx.env, scratchpad=ctx.scratchpad, session_id=ctx.session_id
     )
+    verdict = escalate_asked_targets(verdict, ctx)
     branch = builtin_branch(verdict, critical_override=settings.critical_override)
     if branch == BUILTIN_PASS:
         # Ordinary delete: runs with zero model calls. Still marked destructive
@@ -1028,6 +1270,21 @@ async def _dangerous_delete(
         )
         outcome.warnings.append(f"Guardrail {DANGEROUS_DELETE_RULE}: allowed — {proven}.")
         return outcome
+    if case.lapsed_only:
+        # Deterministic, before any model: the forked judge reads a prefix that
+        # holds the timeout notice and the agent's own "proceeding after the
+        # timeout" prose, and must not get the chance to read either as a yes.
+        reason = lapsed_refusal_reason(case)
+        _journal(DANGEROUS_DELETE_RULE, risk_name, "block", 0.0, targets, "lapsed ask")
+        return GuardOutcome(
+            blocked=True,
+            text=review_text(
+                DANGEROUS_DELETE_RULE, reason, targets, worktree=worktree_flagged(verdict)
+            ),
+            rule=DANGEROUS_DELETE_RULE,
+            risk=risk_name,
+            destructive=True,
+        )
     eligible = _scope_eligible(case, verdict, ctx) if forked_judge else {}
     result = await run_judge(
         JudgeBrief(
