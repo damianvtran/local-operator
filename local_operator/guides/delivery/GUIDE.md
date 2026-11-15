@@ -30,6 +30,9 @@ Coder children edit within ~10 calls; after ~40 without an edit, return the
 blocker. A repeat "explored, nothing landed" needs a smaller brief after checking
 for a harness cut-off.
 
+Your lane's review/QA/design/UX are `task` subagents, on mesh nodes too; when
+to `spawn` a session instead, and tier refusals: `guide://sessions`.
+
 ## Budgets
 
 Classify each lane at its start; record class and budget in the project.
