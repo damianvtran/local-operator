@@ -18909,7 +18909,8 @@ class Session:
             # A session ANOTHER device placed here: the row is in THIS device's
             # inbox and reaches the operator only when the origin forwards it
             # (``notifications/remote_attention``), so a bare "Notified" would
-            # tell the model the operator was told. Empty for every local session.
+            # tell the model the operator was told. A session started on a mesh
+            # node says its item stayed there; empty on a device in no mesh.
             #
             # READ BEFORE THE BANNER ROUTE, never after it: ``_route_item_banner``
             # spawns the held-banner task, and its hold must start only once this
