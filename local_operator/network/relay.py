@@ -10650,11 +10650,20 @@ class RelayServer:
             # OWNER so refs, compaction and forward cursors have local semantics.
             from local_operator.mobile.remote_sessions import (
                 READ_CAPABILITY,
+                SUPPLEMENTS_CAPABILITY,
                 owner_read,
             )
 
             if READ_CAPABILITY not in link.capabilities:
                 raise MeshRefusal("unsupported", READ_CAPABILITY)
+            # Supplement bytes are their own negotiated feature: checked HERE too,
+            # not only by the viewer, so a viewer that skipped its own check still
+            # cannot reach a purpose this link never agreed to.
+            if (
+                frame.get("mobile_session_read") == "supplement"
+                and SUPPLEMENTS_CAPABILITY not in link.capabilities
+            ):
+                raise MeshRefusal("unsupported", SUPPLEMENTS_CAPABILITY)
             return owner_read(self.root, session_id, frame)
         journal_order, order_ids = validate_journal_order(
             frame.get("journal_order"), frame.get("order_ids")
@@ -15202,6 +15211,15 @@ class RelayServer:
             link = self._ensure_link(self._resolve_peer(str(frame.get("peer") or "")))
             if link is not None and "mobile-session-read-v1" not in link.capabilities:
                 raise MeshRefusal("unsupported", "mobile-session-read-v1")
+            # An owner predating supplement bytes is NAMED (409 remote_unsupported,
+            # "Update <owner>") rather than asked a purpose it would refuse as a
+            # protocol error, which the phone could not tell from a real fault.
+            if (
+                mobile_read == "supplement"
+                and link is not None
+                and wire.MOBILE_SESSION_SUPPLEMENTS_V1 not in link.capabilities
+            ):
+                raise MeshRefusal("unsupported", wire.MOBILE_SESSION_SUPPLEMENTS_V1)
             return self._local_peer_call(
                 "net_session_history",
                 str(frame.get("peer") or ""),
@@ -15215,6 +15233,7 @@ class RelayServer:
                         "before_id",
                         "after_id",
                         "entry_id",
+                        "ref",
                         "index",
                         "kind",
                         "offset",
