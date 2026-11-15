@@ -440,6 +440,7 @@ async def test_a_store_error_costs_one_poll_not_the_whole_loop(tmp_path, monkeyp
     async with pool.session(sid) as bridge:
         await _first_poll_committed(bridge, token)
         assert bridge.attention["unseen"] is True
+        assert bridge.attention_poll_key is not None
         cached_revision, supported_before = bridge.attention_poll_key
         assert cached_revision == (1, 0, 0)
 
@@ -536,7 +537,7 @@ async def test_a_remote_bridge_never_reads_the_local_revision_and_recovers_once(
         refreshes: list[str] = []
         fail_next = False
 
-        async def peer_read() -> dict:
+        async def peer_read() -> dict[str, str]:
             reads.append("read")
             if fail_next:
                 raise ConnectionError("peer unreachable")

@@ -3593,9 +3593,11 @@ class DesktopSessionBridge:
                 # `self.attention` is deliberately untouched, so a flapping store
                 # never blanks an unread mark. Only the failure path clears it:
                 # an unchanged revision with no error still costs nothing. A
-                # store-generation id in `revision()` was rejected as the wider
-                # change (it grows the cross-process token every caller compares)
-                # and would still miss a replacement we never failed across.
+                # store-generation id in `revision()` would ALSO detect a
+                # replacement that never raised, but it was rejected as the wider
+                # change (it grows the cross-process token every caller compares).
+                # Known limit: a replacement with no failed poll between is not
+                # covered by this invalidate-on-failure fix.
                 self.attention_poll_key = None
                 if failing == 1:
                     logger.warning(
