@@ -161,6 +161,8 @@
   "wire.settings.desktop_launch_command.help": "留空则自动发现应用（先local-operator-ui，再macOS应用）。'{'session'}'为会话ID。",
   "wire.settings.desktop_launch_command.label": "启动命令",
   "wire.settings.desktop_launch_command.placeholder": "local-operator-ui --open-session '{'session'}'",
+  "wire.settings.desktop_remote_files_cache_bytes.help": "用于保存其他设备上对话中文件副本的磁盘空间，以便在此处快速打开。最旧的副本会最先删除。设为 0 时，显示后不保留任何副本。",
+  "wire.settings.desktop_remote_files_cache_bytes.label": "远程文件缓存（字节）",
   "wire.settings.detail_length.help": "已弃用。已被压缩引擎取代。",
   "wire.settings.detail_length.label": "详情长度",
   "wire.settings.display_comfortable_rows.choice.false.description": "紧凑，可容纳更多历史",
