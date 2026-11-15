@@ -1440,6 +1440,27 @@ def isolate_environment(tmp_path_factory, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def neutralise_runtime_path_prime(monkeypatch):
+    """Keep ``launch._runtime_env`` from priming PATH through a real login shell.
+
+    ``_runtime_env`` primes the operator's login PATH (``launch._prime_login_path``)
+    because launchd/systemd daemons engage runtimes with a bare PATH. The suite
+    scrubs ``LOCAL_OPERATOR_PATH_PRIMED`` (see ``isolate_environment``), so
+    every cell that builds a runtime env would otherwise run a login shell AND
+    have ``os.environ["PATH"]`` rewritten under it, unrestored at teardown:
+    a cell that set a fake bin dir on PATH would silently lose it. Cells that
+    assert the prime itself put the real function back (the module attribute
+    captured at import time; ``test_runtime_env_login_path.py``).
+
+    Importing ``launch`` here costs about half a second ONCE per worker process
+    (measured with ``-X importtime``), not per test.
+    """
+    from local_operator.session.runtime import launch
+
+    monkeypatch.setattr(launch, "_prime_login_path", lambda: None)
+
+
+@pytest.fixture(autouse=True)
 def refuse_real_notifier_spawn(monkeypatch):
     """Refuse to START a real notification helper from a unit test, except in dry-run.
 
