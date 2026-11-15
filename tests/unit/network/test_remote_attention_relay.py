@@ -352,3 +352,274 @@ def test_types_module_is_untouched_by_the_capability() -> None:
     """The capability is a LINK advertisement, never a role grant."""
     assert wire.REMOTE_ATTENTION_V1 in wire.LINK_CAPABILITIES
     assert wire.REMOTE_ATTENTION_V1 not in types.GRANTABLE_CAPABILITIES
+
+
+def test_a_node_started_ask_and_notify_reach_the_operator_bound_by_its_signature(
+    pair: Devices, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The operator binding over REAL relays (``network/operator_binding``).
+
+    B plays the operator's Mac: it files and SIGNS a real onboarding card for
+    the network (file-only key), and A — the node — has that key's anchor
+    installed root-owned (the one seam). B's link-up hook presents the signed
+    decision on its own; A verifies and stores it, and then a session STARTED on
+    A (no stamp, no origin) lists its open ask and its ``notify`` to B. Without a
+    verified proof the same row carries neither (the pre-binding control).
+    """
+    from local_operator.asks import store as ask_store
+    from local_operator.network import operator_binding as ob
+
+    ask_key_q9 = ra.ASK_NOTICE_PREFIX + "q9"
+    from local_operator.network.approvals import approve
+    from local_operator.network.onboard_approvals import request_device
+    from local_operator.network.store import list_networks
+    from local_operator.operator import trust
+    from tests.unit.network.test_approvals_store import _make_key, _sign_decision
+
+    server_a, server_b, _host, _port = pair
+    head = tmp_path / "operator-inbox"
+    # The operator's inbox first watched the node BEFORE anything was posted.
+    ra.origin_baseline_ms(head, server_a.identity.device_id)
+    time.sleep(0.002)
+    # The node-started session on A: no stamp at all, an open ask and a notify.
+    directory = server_a.root / "sessions" / SID
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / "transcript.jsonl").write_text("", encoding="utf-8")
+    NotificationStore(server_a.root).notify(SID, title="Build done", priority="high", key="build")
+    _ask_event(
+        server_a,
+        ask_store.EVENT_QUEUED,
+        "q9",
+        expires_at=ask_store.now_ms() + 3_600_000,
+        questions=[{"id": "q0", "question": "Allow example.com?", "options": []}],
+    )
+
+    # CONTROL: before any binding, B's listing of A's node-started row is bare.
+    _record, link = _live_link(pair, monkeypatch)
+    try:
+        bare = _catalog_row(link)
+    finally:
+        link.close("test")
+    assert "notices" not in bare and "attention" not in bare
+
+    # The operator signs one onboarding card on B, and A has that key installed
+    # (patched BEFORE the approval: the approve path reads the installed anchor
+    # first, and this host may carry a real one).
+    anchor = _make_key(server_b.root)
+
+    def installed(uid: Any = None) -> Any:
+        return trust.AnchorLoad(
+            anchor=anchor, path=trust.anchor_path(uid), root_owned=True, reason="", exists=True
+        )
+
+    monkeypatch.setattr(trust, "load_anchor", installed)
+    ob._reset_caches()
+    [network] = list_networks(server_b.root)
+    card = request_device(
+        host="node.test",
+        user="ec2-user",
+        host_key_fp="SHA256:fixture",
+        network=network.network_id,
+        credential_ref="ssh-node-ref",
+        root=server_b.root,
+    )
+    assert card["requested_by"]["device_id"] == server_b.identity.device_id
+    decided_at = time.time()
+    approve(
+        card["approval_id"],
+        signature_hex=_sign_decision(server_b.root, card, "approve", decided_at),
+        decided_at=decided_at,
+        root=server_b.root,
+    )
+
+    # The onboarding RUNNER on B records the mesh id that run admitted (S1):
+    # only that node is ever presented this proof.
+    assert ob.record_onboarded(
+        server_b.root,
+        approval_id=card["approval_id"],
+        network_id=network.network_id,
+        device_id=server_a.identity.device_id,
+    )
+    # A fresh link: B's link-up hook presents the proof by itself.
+    link = server_b.dial(network.network_id, host=f"{_host}:{_port}", epoch=network.epoch)[0]
+    assert link is not None
+    try:
+        stored = None
+        deadline = time.time() + 10.0
+        while time.time() < deadline and stored is None:
+            stored = ob.load_stored(server_a.root, network.network_id, server_b.identity.device_id)
+            time.sleep(0.05)
+        assert stored is not None, "the link-up presentation never reached the node"
+        assert wire.OPERATOR_BINDING_V1 in link.capabilities
+        row = _catalog_row(link)
+    finally:
+        link.close("test")
+    keys = [notice["key"] for notice in row["notices"]]
+    assert keys[0] == ra.ASK_NOTICE_PREFIX + "q9" and "build" in keys
+    # Notices only: a node-started session's completions are not forwarded.
+    assert "attention" not in row and "attention_unknown" not in row
+    # The node's notify result now says where it goes.
+    assert ra.notice_forwarding(server_a.root, SID) == (
+        ra.FORWARDED,
+        server_b.identity.device_id,
+    )
+    assert "the operator's device" in ra.forwarded_notice_sentence(server_a.root, SID)
+
+    # THE OPERATOR'S HALF, from the bytes that crossed: the production parse and
+    # watcher raise the ask and the notice in the bound device's own inbox.
+    owner = server_a.identity.device_id
+
+    class _Peer:
+        device_id = owner
+        name = "node"
+        network_id = network.network_id
+        reachable = True
+        reason = ""
+
+    class _Catalog:
+        def peers(self) -> list[Any]:
+            return [_Peer()]
+
+        def rows(self) -> list[Any]:
+            return [PeerRow.from_json(row, device_id=owner)]
+
+    monkeypatch.setattr(ra, "_deliver_async", lambda *_a, **_k: None)
+    # B's own root: the Mac raises a started-on-owner ``notify`` only from a node
+    # its records say it onboarded (``peer_rows._bound_nodes``).
+    ra.RemoteAttentionWatcher(head).observe(
+        peer_rows.peer_session_rows(server_b.root, ttl_s=0, catalog=_Catalog())
+    )
+    items, _ = NotificationStore(head).list_items(state="all", limit=10)
+    assert sorted(item["key"] for item in items) == sorted(
+        [ra.notice_key(owner, SID, "build"), ra.notice_key(owner, SID, ask_key_q9)]
+    )
+    built = next(item for item in items if item["key"] == ra.notice_key(owner, SID, "build"))
+    assert built["title"] == "Build done", "the forwarded row carries the node's own text"
+
+
+def test_s1_a_peer_the_mac_did_not_onboard_gets_no_proof_bytes_on_the_wire(
+    pair: Devices, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """PR #4030 security review S1, over REAL relays and the real link-up hook.
+
+    B (the operator's Mac) holds a signed onboarding decision for the network,
+    filed the way ``request_device`` files it (``device.device_id`` empty), but
+    its records show no onboarding that admitted A: to B, A is a co-member. Every
+    frame B's links SEAL for the wire is captured (``PeerLink._write``, the last
+    step before the codec): no ``net_operator_binding`` frame and none of the
+    preimage's bytes (SSH host, credential-ref name) may appear. Before the fix
+    the "newest proof for the network" fallback put them on A's link. The same
+    holds when the onboarding runner's already-active path was handed A's id by
+    the SSH node's own ``identity show``: that report alone records nothing.
+    """
+    import json
+    import threading
+
+    from local_operator.network import operator_binding as ob
+    from local_operator.network.approvals import approve
+    from local_operator.network.onboard_approvals import request_device
+    from local_operator.network.store import list_networks
+    from local_operator.operator import trust
+    from tests.unit.network.test_approvals_store import _make_key, _sign_decision
+
+    server_a, server_b, _host, _port = pair
+    _record, warm = _live_link(pair, monkeypatch)
+    warm.close("test")
+    anchor = _make_key(server_b.root)
+
+    def installed(uid: Any = None) -> Any:
+        return trust.AnchorLoad(
+            anchor=anchor, path=trust.anchor_path(uid), root_owned=True, reason="", exists=True
+        )
+
+    monkeypatch.setattr(trust, "load_anchor", installed)
+    ob._reset_caches()
+    [network] = list_networks(server_b.root)
+    card = request_device(
+        host="secret-node.test",
+        user="ec2-user",
+        host_key_fp="SHA256:fixture",
+        network=network.network_id,
+        credential_ref="ssh-secret-ref",
+        root=server_b.root,
+    )
+    assert card["device"]["device_id"] == ""
+    decided_at = time.time()
+    approve(
+        card["approval_id"],
+        signature_hex=_sign_decision(server_b.root, card, "approve", decided_at),
+        decided_at=decided_at,
+        root=server_b.root,
+    )
+    # The already-active path of B's onboarding runner, for a node that reports
+    # A's id in ``identity show`` (A IS an active member, so the step is
+    # satisfied) while no invite this approval minted was admitted for A. Before
+    # the fix that self-report alone was recorded, and the link-up hook below then
+    # presented the proof to A. Run through the runner's own recording method.
+    from types import SimpleNamespace
+
+    from local_operator.network.onboard import OnboardRun
+
+    runner: Any = SimpleNamespace(
+        root=server_b.root,
+        approval_id=card["approval_id"],
+        view=SimpleNamespace(what={"network_id": network.network_id}, receipts=[]),
+    )
+    OnboardRun._record_operator_binding_target(runner, member_id=server_a.identity.device_id)
+    assert ob.onboarded_devices(server_b.root) == {}
+    # R2-M1 ruling (b)/(g): B also holds a signed credential card for ANOTHER
+    # active member. Its signed recipient is not A, so A's link carries none of it.
+    from local_operator.network import store as net_store
+    from local_operator.network.types import MemberRecord
+    from tests.unit.network.test_operator_binding import CARD_SECRETS, file_card
+
+    third = "d_third_member"
+    record_b = net_store.load(network.network_id, server_b.root)
+    record_b.members.append(MemberRecord(device_id=third, name="third"))
+    net_store.save(record_b, server_b.root)
+    file_card(
+        server_b.root,
+        owner=server_b.identity.device_id,
+        recipient=third,
+        network=network.network_id,
+    )
+    assert len(ob.own_proofs(server_b.root, network.network_id, for_device=third)) == 1
+    assert (
+        ob.own_proofs(server_b.root, network.network_id, for_device=server_a.identity.device_id)
+        == []
+    )
+
+    sealed: list[dict[str, Any]] = []
+    real_write = relay.PeerLink._write
+
+    def capture(self: relay.PeerLink, frame: dict[str, Any]) -> None:
+        sealed.append(frame)
+        real_write(self, frame)
+
+    monkeypatch.setattr(relay.PeerLink, "_write", capture)
+    presented = threading.Event()
+    real_present = ob.present
+
+    def watched(server: Any, link: Any) -> Any:
+        try:
+            return real_present(server, link)
+        finally:
+            if server is server_b:
+                presented.set()
+
+    monkeypatch.setattr(ob, "present", watched)
+    link = server_b.dial(network.network_id, host=f"{_host}:{_port}", epoch=network.epoch)[0]
+    assert link is not None
+    try:
+        assert wire.OPERATOR_BINDING_V1 in link.capabilities
+        # B's link-up hook ran its presentation decision (off-thread).
+        assert presented.wait(10.0), "the link-up presenter never ran"
+        reply = link.request({"op": "net_catalog", "req": 41, "locality": "remote"})
+        assert reply is not None
+    finally:
+        link.close("test")
+    wire_text = json.dumps(sealed, default=str)
+    assert not [f for f in sealed if f.get("op") == ob.OP]
+    for secret in ("secret-node.test", "ssh-secret-ref", "SHA256:fixture", *CARD_SECRETS):
+        assert secret not in wire_text
+    assert ob.load_stored(server_a.root, network.network_id, server_b.identity.device_id) is None

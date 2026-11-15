@@ -1,0 +1,8 @@
+# mech.py output (scratch ~/.local-operator/sessions/b3a764eb5573/scratchpad/i18n-audit-3958-a4/mech.py), run at ~/local-operator/.worktrees/tunnel-remedy-no-commands @ 139bca903
+en sha256 d99fe54d374c3e0548c1c1f0775b99039a85c8b3085c097a443d12872e36429b
+en removed key absent: True | context absent: True
+== ru sha256 0d72276bf9e268e650e9a24dd1e8c7c1c7e2deceeca84a82f87d9bf0d01768a8
+  key parity with en: True (108 keys); mobile.setup.mobile_bundle_tui absent: True
+  operation_failed_tui: en_len=174 len=185 maxCells=None rendered==catalogue=True flags=none
+  disabled_resume: en_len=154 len=169 maxCells=None rendered==catalogue=True flags=none
+  billing_lapsed_resume: en_len=146 len=197 maxCells=None rendered==catalogue=True flags=none

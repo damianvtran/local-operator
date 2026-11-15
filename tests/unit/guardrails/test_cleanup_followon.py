@@ -339,6 +339,27 @@ def test_activity_facts_gate_the_route(
     assert _rank(home, f"rm -rf {wt}").risk >= Risk.HIGH
 
 
+def test_convergence_git_inferred_no_pr_never_earns_the_foreign_route(
+    home: Path, repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Integration conflict with PR #4024 (merge of origin/main into PR #3992).
+
+    #4024's ``_git_fallback`` turns a FAILED forge lookup into ``pr_state
+    "none"`` when git proves the branch merged, which is exactly this
+    fixture's tree. The foreign route needs the forge read positively
+    (unreadable foreign facts fail closed), so the git-inferred ``none``
+    must stay ``pr-unknown`` and the delete stays with the judge.
+    """
+    wt = _finished_tree(home, repo, "done")
+    monkeypatch.setattr(prov, "_gh_prs", lambda r, b: None)
+    got = prov.finished_foreign_worktree(str(wt), ME)
+    # The fallback really fired: without this the test would pass vacuously.
+    assert got.activity is not None and got.activity.pr_state == "none", got
+    assert got.activity.git_merged, got
+    assert (got.verdict, got.reasons) == ("unknown", ("pr-unknown",)), got
+    assert _rank(home, f"rm -rf {wt}").risk >= Risk.HIGH
+
+
 def test_unreadable_owner_inventory_is_unknown_not_idle(
     home: Path, repo: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

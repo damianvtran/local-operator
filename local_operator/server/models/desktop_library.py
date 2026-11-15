@@ -84,6 +84,15 @@ class LibraryPreview(BaseModel):
     pages: int | None = None
 
 
+class LibraryRemote(BaseModel):
+    """The device that holds an asset only a PEER session references (remote files §5)."""
+
+    model_config = ConfigDict(extra="allow")
+
+    device_id: str = ""
+    device_name: str = ""
+
+
 class LibraryRow(BaseModel):
     """One catalog row (§4's JSON, field for field)."""
 
@@ -119,6 +128,8 @@ class LibraryRow(BaseModel):
     locked: bool = False
     favorite: bool = False
     archived: bool = False
+    #: Set when EVERY occurrence is a peer session's; ``ref.path`` is then null.
+    remote: LibraryRemote | None = None
 
 
 class LibraryScan(BaseModel):

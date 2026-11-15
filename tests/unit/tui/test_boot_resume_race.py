@@ -458,3 +458,160 @@ async def test_reload_step_aside_keeps_users_draft_and_quotes_prompt(monkeypatch
         assert rig.submitted == []
         assert replacement.prompts == []
         assert rig.boot.prompts == []
+
+
+# ---------------------------------------------------------------------------
+# A cold ``/resume`` dispatched BEFORE boot reads its factory (QA Q12 on #3787).
+#
+# ``/resume`` rebinds ``_session_factory`` before it reloads. Boot used to read
+# that attribute only when it finally called it, after awaiting
+# ``_route_first_run_boot`` (which can wait out the launch hook's aida task) and
+# ``_warm_session_imports``. A resume landing in either window made boot call
+# the RESUME factory as well: two builds of ``s1``, the first-adopted one
+# replaced and never disposed, and — when the second build failed on the
+# lease the first already held — a false "session failed to start" over a
+# working conversation. Each window below is held on an event so the resume
+# lands inside it deterministically.
+# ---------------------------------------------------------------------------
+
+
+class _ResumeBuilds:
+    """A cold resume factory that builds a NEW ``s1`` per call and records each."""
+
+    def __init__(self, rig: _Rig, config_root: Path, *, second: str) -> None:
+        self.rig = rig
+        self.config_root = config_root
+        self.second = second
+        self.calls: list[str | None] = []
+        self.built: list[Any] = []
+
+    async def __call__(self, sid: str | None) -> Any:
+        from local_operator.session_lease import SessionLeaseHeldError
+
+        self.calls.append(sid)
+        if self.built and self.second == "lease_conflict":
+            # The real second build of a cold session fails exactly so: the
+            # first build already owns the transcript's execution lease.
+            raise SessionLeaseHeldError(self.config_root / "sessions" / "s1", 4242)
+
+        class Cold(FakeSession):
+            @property
+            def session_id(self) -> str:
+                return "s1"
+
+        session = Cold()
+        self.rig._spy_dispose(session, f"s1#{len(self.built) + 1}")
+        self.built.append(session)
+        return session
+
+
+def _hold_boot_window(rig: _Rig, monkeypatch: pytest.MonkeyPatch, window: str) -> tuple[Any, Any]:
+    """Hold boot inside ``window`` (before its factory read); return (entered, release)."""
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    app = rig.app
+    if window == "route":
+
+        async def held_route() -> bool:
+            entered.set()
+            await release.wait()
+            return False
+
+        monkeypatch.setattr(app, "_route_first_run_boot", held_route)
+    else:
+        # Only boot's warm is held: the resume's own reload warms through the
+        # same method and must not wait behind boot.
+        holds = [True]
+
+        async def held_warm() -> None:
+            if holds:
+                holds.pop()
+                entered.set()
+                await release.wait()
+
+        app._warm_factory_imports = True
+        monkeypatch.setattr(app, "_warm_session_imports", held_warm)
+    return entered, release
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("window", ["route", "warm"])
+@pytest.mark.parametrize("second", ["succeeds", "lease_conflict"])
+async def test_resume_before_boot_reads_factory_builds_once(
+    monkeypatch, tmp_path, window, second
+) -> None:
+    rig = _Rig(monkeypatch, tmp_path, live=False)
+    builds = _ResumeBuilds(rig, tmp_path, second=second)
+    rig.app._resume_factory = builds
+    rig.gate.set()  # boot's own factory answers at once; the WINDOW is the hold
+    entered, release = _hold_boot_window(rig, monkeypatch, window)
+    app = rig.app
+    async with app.run_test(size=(100, 30)) as pilot:
+        await settle(pilot, entered.is_set, what=f"boot held in {window}")
+        app._run_slash_command("/resume s1")
+        await settle(
+            pilot,
+            lambda: bool(builds.built) and app._session is builds.built[0],
+            what="/resume landed",
+        )
+        release.set()
+        await settle(pilot, lambda: True, what="boot finished", workers=("session",))
+        failures = [b for b in rig.notice_log if "failed to start" in b]
+        current, calls = app._session, list(builds.calls)
+    # One build per session id: boot built ITS session, not a second ``s1``.
+    assert calls == ["s1"]
+    assert current is builds.built[0]
+    assert failures == []
+    # Boot's session stepped aside unadopted; the resumed one stayed current
+    # until quit disposed it — nothing replaced it, nothing was leaked.
+    assert rig.events == ["boot.dispose adopted=False", "s1#1.dispose adopted=True"]
+
+
+@pytest.mark.asyncio
+async def test_resume_after_boot_reads_factory_builds_once(monkeypatch, tmp_path) -> None:
+    """Ordering C, the normal path: boot is already inside its own factory."""
+    rig = _Rig(monkeypatch, tmp_path, live=False)
+    builds = _ResumeBuilds(rig, tmp_path, second="lease_conflict")
+    rig.app._resume_factory = builds
+    app = rig.app
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot_released_after_resume_cold(rig, builds, pilot)
+        failures = [b for b in rig.notice_log if "failed to start" in b]
+        current, calls = app._session, list(builds.calls)
+    assert calls == ["s1"]
+    assert current is builds.built[0]
+    assert failures == []
+    assert rig.events == ["boot.dispose adopted=False", "s1#1.dispose adopted=True"]
+
+
+async def _boot_released_after_resume_cold(rig: _Rig, builds: _ResumeBuilds, pilot: Any) -> None:
+    app = rig.app
+    await settle(pilot, lambda: app._session is None, what="boot held in its factory")
+    app._run_slash_command("/resume s1")
+    await settle(
+        pilot,
+        lambda: bool(builds.built) and app._session is builds.built[0],
+        what="/resume landed",
+    )
+    rig.gate.set()
+    await settle(pilot, lambda: True, what="boot finished", workers=("session",))
+
+
+@pytest.mark.asyncio
+async def test_first_run_route_rebind_is_still_what_boot_builds(monkeypatch, tmp_path) -> None:
+    """The snapshot must not swallow the route's OWN rebind (her first-run session)."""
+    rig = _Rig(monkeypatch, tmp_path, live=False)
+    builds = _ResumeBuilds(rig, tmp_path, second="succeeds")
+    app = rig.app
+    app._resume_factory = builds
+
+    async def routed_to_her() -> bool:
+        app._session_factory = lambda: builds("her")
+        return True
+
+    monkeypatch.setattr(app, "_route_first_run_boot", routed_to_her)
+    async with app.run_test(size=(100, 30)) as pilot:
+        await settle(pilot, lambda: bool(builds.built), what="boot built", workers=("session",))
+        current, calls = app._session, list(builds.calls)
+    assert calls == ["her"]
+    assert current is builds.built[0]

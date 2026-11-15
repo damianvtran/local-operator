@@ -76,6 +76,9 @@ from local_operator.network.credentials.types import (
     GrantScope,
 )
 from local_operator.paths import CONFIG_DIR_ENV
+from tests.unit.network.self_revoke_guard import (  # noqa: F401 — autouse fixture by import
+    no_self_revoke_outlives_its_cell,
+)
 
 OWNER_DEVICE = "d_00000000000000000000000000000031"
 BORROWER_DEVICE = "d_00000000000000000000000000000032"

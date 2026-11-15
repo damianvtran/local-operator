@@ -2556,6 +2556,154 @@ def test_a_same_named_other_network_row_cannot_satisfy(
     assert len(join_calls) == 1
 
 
+@pytest.mark.parametrize("outcome", ["admitted", "aborted", ""])
+def test_the_runner_records_the_node_it_admitted_for_the_operator_binding(
+    isolated: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, outcome: str
+) -> None:
+    """PR #4030 S1: the Mac presents its signed onboarding only to the node it admitted.
+
+    The joining path records the invite's ``redeemed_by`` — written by this
+    device's relay from the handshake-authenticated id — NOT the node's own
+    report over SSH (here deliberately different), and only for an ACTIVE row.
+    Security S8: only an invite consumed as ``admitted`` counts (the backfill's
+    own predicate, ``operator_binding.admitted_redeemer``); any other outcome
+    records nothing.
+    """
+    from local_operator.network import operator_binding
+    from local_operator.network.types import InviteRecord, MemberRecord
+
+    _install_fakes(monkeypatch)
+    token = tmp_path / "invite.token"
+    _mint_token(token)
+    inviter = _inviter_record(member=False)
+    inviter.members.append(
+        MemberRecord(device_id="d_authenticated", public_key="pk", name="n", lifecycle="active")
+    )
+    inviter.invites.append(
+        InviteRecord(
+            invite_id="inv_1", state="consumed", outcome=outcome, redeemed_by="d_authenticated"
+        )
+    )
+    network_store.save(inviter, None)
+    fake = FakeApprovals(_record())
+    monkeypatch.setattr(onboard_approvals, "_module", lambda: fake)
+    payload = onboard.execute_approval(
+        "ap_aaaa1111",
+        transport=FakeTransport(outputs=list(HAPPY_OUTPUTS)),
+        resolve=lambda ref: onboard.ResolvedCredential(kind="file", label=ref["ref"]),
+        local_cli=["lop"],
+        run_local=_happy_run_local(token),
+    )
+    assert payload["state"] == "connected", payload
+    join = {row["step"]: row for row in payload["steps"]}["join"]
+    assert join["data"]["device_id"] == "d_node"  # the node's self-report
+    expected = {"ap_aaaa1111": ("n_1", "d_authenticated")} if outcome == "admitted" else {}
+    assert operator_binding.onboarded_devices(None) == expected
+
+
+def test_the_runner_records_nothing_without_an_authenticated_admission(
+    isolated: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """No ``redeemed_by`` (or not an active row): no record, so no proof is presented."""
+    from local_operator.network import operator_binding
+
+    _install_fakes(monkeypatch)
+    token = tmp_path / "invite.token"
+    _mint_token(token)
+    network_store.save(_inviter_record(member=False), None)
+    fake = FakeApprovals(_record())
+    monkeypatch.setattr(onboard_approvals, "_module", lambda: fake)
+    payload = onboard.execute_approval(
+        "ap_aaaa1111",
+        transport=FakeTransport(outputs=list(HAPPY_OUTPUTS)),
+        resolve=lambda ref: onboard.ResolvedCredential(kind="file", label=ref["ref"]),
+        local_cli=["lop"],
+        run_local=_happy_run_local(token),
+    )
+    assert payload["state"] == "connected", payload
+    assert operator_binding.onboarded_devices(None) == {}
+
+
+def _already_active_run(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, *, members: list[str], redeemed_by: str
+) -> dict[str, Any]:
+    """Run the already-active path; this approval's PRIOR run minted ``inv0001``,
+    which this Mac's relay consumed as ``admitted`` by ``redeemed_by``."""
+    from local_operator.network.types import InviteRecord, MemberRecord
+
+    token = tmp_path / "invite.token"
+    _mint_token(token)
+    inviter = _inviter_record()
+    for device_id in members:
+        inviter.members.append(
+            MemberRecord(device_id=device_id, public_key="pk", name=device_id, lifecycle="active")
+        )
+    inviter.invites.append(
+        InviteRecord(
+            invite_id="inv0001", state="consumed", outcome="admitted", redeemed_by=redeemed_by
+        )
+    )
+    network_store.save(inviter, None)
+    record = _record()
+    record["receipts"] = [
+        {"step": "invite", "ok": True, "detail": "invite inv0001 minted for role drive"}
+    ]
+    fake = FakeApprovals(record)
+    monkeypatch.setattr(onboard_approvals, "_module", lambda: fake)
+    return onboard.execute_approval(
+        "ap_aaaa1111",
+        transport=FakeTransport(
+            outputs=HAPPY_OUTPUTS + [("network status", _status_output(_status_row()))]
+        ),
+        resolve=lambda ref: onboard.ResolvedCredential(kind="file", label=ref["ref"]),
+        local_cli=["lop"],
+        run_local=_happy_run_local(token),
+    )
+
+
+def test_an_already_active_node_is_recorded_for_the_operator_binding(
+    isolated: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The re-onboard path records the id this approval's admitted invite resolves
+    to (Mac-written ``redeemed_by``), when the node's report agrees with it."""
+    from local_operator.network import operator_binding
+
+    _install_fakes(monkeypatch)
+    payload = _already_active_run(monkeypatch, tmp_path, members=[], redeemed_by="d_node")
+    assert payload["state"] == "connected", payload
+    assert operator_binding.onboarded_devices(None) == {"ap_aaaa1111": ("n_1", "d_node")}
+
+
+def test_an_already_active_node_naming_a_co_member_records_nothing(
+    isolated: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """PR #4030 S1 on the already-active path: the SSH node's ``identity show``
+    says ``d_node`` — an ACTIVE member, so the step is satisfied — but the
+    authenticated admission for this approval went to ``d_other``. The report
+    alone never decides where the proof goes, and a mismatch records nothing."""
+    from local_operator.network import operator_binding
+
+    _install_fakes(monkeypatch)
+    payload = _already_active_run(monkeypatch, tmp_path, members=["d_other"], redeemed_by="d_other")
+    assert payload["state"] == "connected", payload
+    join = {row["step"]: row for row in payload["steps"]}["join"]
+    assert join["data"]["device_id"] == "d_node"
+    assert operator_binding.onboarded_devices(None) == {}
+
+
+def test_an_already_active_node_without_an_admitted_invite_records_nothing(
+    isolated: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Before the fix the node's self-reported active id was recorded on its own:
+    with no Mac-written admission tying this approval to it, nothing is."""
+    from local_operator.network import operator_binding
+
+    _install_fakes(monkeypatch)
+    payload = _already_active_run(monkeypatch, tmp_path, members=[], redeemed_by="")
+    assert payload["state"] == "connected", payload
+    assert operator_binding.onboarded_devices(None) == {}
+
+
 def test_a_node_missing_from_the_inviters_table_still_joins(
     isolated: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

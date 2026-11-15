@@ -1383,7 +1383,13 @@ CODE_RELAY_UNAVAILABLE = "relay_unavailable"
 
 
 def _relay_call(
-    op: str, *, timeout: float = 5.0, allow_no_answer: bool = False, **fields: Any
+    op: str,
+    *,
+    timeout: float = 5.0,
+    allow_no_answer: bool = False,
+    allow_no_relay: bool = False,
+    no_answer_message: str | None = None,
+    **fields: Any,
 ) -> dict[str, Any] | None:
     """Run one op on the running relay, or REFUSE when no relay answers it.
 
@@ -1406,23 +1412,37 @@ def _relay_call(
 
     ``allow_no_answer`` is the deliberate opt-out for a caller that handles a
     missing answer ITSELF: either because the verb has a LOCAL spelling of the same
-    op (``ls``/``show``/``invite``/``member_rm``/``disconnect``/``panic``/``trust``/
+    op (``ls``/``show``/``invite``/``disconnect``/``panic``/``trust``/
     ``confirm``/``doctor``/``pending``, each of which does that work here and says so
     in its own payload), or because it emits the family's refusal document itself
     (``peers``). Taking it means accepting that no peer was asked. A verb whose whole
     contract is "did the relay/peer do it" must not take it — inventing an outcome
     for a thing that never happened is the defect this parameter exists to make
     visible.
+
+    ``allow_no_relay`` is narrower: member removal may run locally only when no
+    live relay record exists. Once a running relay was asked, silence can mean
+    its operation failed or partially completed, not permission to repeat the
+    destructive operation offline. Keep that distinction at this single lookup.
+    ``no_answer_message`` lets the caller name its already-resolved context;
+    it is display-only and never sent in the control frame or read back from disk.
     """
     from local_operator.network import relay, store
 
     record = store.find_own_relay()
     reply = relay.control_request(record, op, timeout=timeout, **fields) if record else None
     if reply is None:
-        if allow_no_answer:
+        if allow_no_answer or (allow_no_relay and record is None):
             return None
         from local_operator.network.types import MeshRefusal
 
+        if allow_no_relay:
+            raise MeshRefusal(
+                "relay_control_failed",
+                no_answer_message
+                or "the relay did not confirm the removal; the removal may be incomplete. "
+                "This command did not retry the removal. Wait a moment and retry.",
+            )
         raise MeshRefusal(CODE_RELAY_UNAVAILABLE, _relay_unavailable_message())
     if reply.get("op") == "error":
         from local_operator.network.types import MeshRefusal
@@ -4114,6 +4134,14 @@ def _cmd_credential(args: argparse.Namespace) -> int:
             {"credential_key": key},
             "owner-revoke:" + str(_clock.time_ns()),
         )
+        # A REVOKED NODE IS NO LONGER THE RENEWER (#3955 Q1): end the lend here, in
+        # this process, so the owner renews on its own at once — even with no relay
+        # running to hear about it.
+        from local_operator.network.credentials import renewal as renewal_mod
+
+        renewal_mod.end_lends(
+            _config_dir(), record.network_id, devices=[device], key=key, cause="revoked"
+        )
         entry_json = reduced["entry"] or {}
         action = "revoked"
     elif finite_result is not None:
@@ -4366,14 +4394,31 @@ def _cmd_credential(args: argparse.Namespace) -> int:
             if static
             else "valid at the provider until the token expires"
         )
+        # THE OFFLINE HOLD'S BOUND, NOT THE GRANT WINDOW (#3922 + #3947 M1's honesty
+        # class, carried into model and MCP keys here): a node keeps a lent grant
+        # while it cannot reach this device, and a revoke only stops a node that
+        # HEARS it. So the residual for a lost, stolen or offline node is the hold
+        # (``offline_hold_s``, 24 h by default) after its last grant — never past
+        # the token's own expiry, and with no expiry at all for a static key.
+        from local_operator.network.credentials import offline_hold_s
+
+        hold_s = int(offline_hold_s(_config_dir()))
         payload["revocation"] = {
             "new_grants": "refused now",
-            "lent_grant_max_s": ttl_s,
+            "lent_grant_max_s": hold_s,
+            "grant_window_s": ttl_s,
             "copied_bearer": copied,
         }
+        bound = (
+            f"for up to {_duration_words(hold_s)} after its last grant"
+            if static
+            else f"for up to {_duration_words(hold_s)} after its last grant, never past "
+            "the token's own expiry"
+        )
         lines.append(
-            f"new borrows by {name}: refused now; a grant already lent is dropped by "
-            f"{name} within {ttl_s} s"
+            f"new borrows by {name}: refused now; {name} drops a grant it already holds "
+            f"as soon as it hears this revoke, but if it cannot (lost, stolen or offline) "
+            f"it may keep using it {bound}"
         )
         if static:
             lines.append(
@@ -4404,14 +4449,17 @@ def _copy_ledger_state(network_id: str, device: str, key: str) -> tuple[bool, bo
         return False, False, False
     # Prefer the newest open copy, including a re-copy after a confirmed wipe.
     # A dispatch is evidence of sending, NEVER evidence of confirmed delivery.
+    # A newer unacknowledged send does not erase an older live delivery ACK;
+    # report both facts without promoting that send or reusing a wiped ACK.
+    ack = state.ack_for(device, key)
     for row in state.open_copies(device):
         if row["key"] == key:
             pending = bool(row["unacknowledged"])
-            return not pending, False, pending
-    row = state.ack_for(device, key)
-    if not isinstance(row, dict):
+            confirmed = not pending or (isinstance(ack, dict) and not bool(ack.get("wiped")))
+            return confirmed, False, pending
+    if not isinstance(ack, dict):
         return False, False, False
-    return True, bool(row.get("wiped")), False
+    return True, bool(ack.get("wiped")), False
 
 
 def _unconfirmed_copies(network_id: str, device: str) -> tuple[int, int]:
@@ -4889,23 +4937,34 @@ def _cmd_member_rm(args: argparse.Namespace) -> int:
             f"{args.device!r} is not a device in {record.name}; run 'lop network show' "
             "for the member list (a name, a device id, or an unambiguous tail of one)",
         )
-    # ``allow_no_answer``: a revocation HAS a local spelling — the tombstone, the
-    # epoch rotation and the queue write all happen here (below), and the payload
-    # says the rotation is queued rather than fanning out.
+    # ``allow_no_relay``: a revocation has a local spelling ONLY when no live
+    # relay record exists. That path tombstones, rotates and queues below. A
+    # running relay that gives no answer refuses; it never triggers a second write.
     #
     # ``timeout=REMOVAL_CLI_TIMEOUT_S``, not the 5 s default (review round 2, F1):
     # the relay's ending exchange is probe (3 s) + a 25 s frame budget by
-    # construction, and a CLI that gave up first would fall back to the LOCAL
-    # write while the relay was still mid-exchange — the double-write
-    # ``allow_no_answer`` exists to prevent, not to enable.
+    # construction. Keep that window so a slow ending can finish, while
+    # ``allow_no_relay`` still refuses a lost reply instead of writing twice.
+    import shlex
+
     from local_operator.network.credentials import messages as messages_mod
     from local_operator.network.credentials.sync import REMOVAL_CLI_TIMEOUT_S
 
+    device_name = _member_name(record, device_id) or args.device
+    show_command = shlex.join(["lop", "network", "show", args.network])
+    retry_command = shlex.join(["lop", "network", "member", "rm", args.network, args.device])
     live = _relay_call(
         "net_member_rm",
         network=args.network,
         device_id=device_id,
-        allow_no_answer=True,
+        allow_no_relay=True,
+        no_answer_message=(
+            f"the relay did not confirm removing {device_name!r} from {record.name!r}; "
+            "the removal may be incomplete. This command did not retry the removal. "
+            f"Run {show_command!r}: if {device_name!r} is still listed, "
+            f"run {retry_command!r} again. If the relay is stuck, "
+            "run 'lop network restart' first; if it has just stopped, wait a moment and retry."
+        ),
         timeout=REMOVAL_CLI_TIMEOUT_S,
     )
     if live is not None:
@@ -5131,7 +5190,7 @@ def _invite_locally(args: argparse.Namespace, hosts: list[str]) -> tuple[dict[st
         device_id=args.device,
     )
     # Same rule as the relay's mint: dead entries go with the write that adds one.
-    expired = store.prune_invites(record)
+    expired = store.prune_invites(record, keep=store.binding_invite_ids())
     record.invites.append(minted.record)
     store.save(record)
     store.forget_invite_tokens(expired)

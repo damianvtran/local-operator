@@ -39,6 +39,7 @@ import html
 import inspect
 import json
 import logging
+import math
 import os
 import re
 import secrets
@@ -298,6 +299,30 @@ MAX_RETAINED_SESSION_PROJECTIONS = 64
 #: heartbeat, wake, session death) invalidate the cache outright via
 #: ``notify_list_changed``, so the TTL is only what a quiet machine pays.
 SUMMARIES_CACHE_TTL_S = 1.0
+
+#: How long ONE built ``GET /api/models`` answer is reused outright.
+#:
+#: Every call used to open the credential store, build a ``ProviderController``,
+#: read each provider's cached catalogue, rank ~1,455 entries and serialise
+#: ~234 KB -- 140-500 ms of GIL-holding work per request on the operator's
+#: machine (tunnel request log, 2026-11-14: p50 281 ms, n=17), and the app asks
+#: twice per screen open (pairs logged 10-30 ms apart). Those pairs, and the
+#: re-opens minutes apart, are what this bound answers; the credential/config
+#: fingerprint (:func:`_models_fingerprint`) still rebuilds at once on a login,
+#: logout or default change, so the TTL is only a provider-side freshness bound.
+MODELS_FRESH_S = 60.0
+
+#: Past :data:`MODELS_FRESH_S`, an UNCHANGED fingerprint is answered from the
+#: last build while ONE background rebuild refreshes it (stale-while-revalidate).
+#:
+#: The build's live pass refetches a provider listing older than
+#: ``PICKER_TTL_S`` (15 min) ON THE REQUEST PATH, so the first sheet open after
+#: any 15-minute idle paid the provider round trips: 1,360 ms and 1,452 ms in
+#: the operator's log, both first-after-idle, against 140-500 ms otherwise.
+#: The bound is the catalogue's own discovery TTL
+#: (``model.catalogue.DEFAULT_TTL_S``, 24 h): older than that, the listing is
+#: rebuilt before answering, exactly as before.
+MODELS_STALE_S = 24 * 60 * 60.0
 
 #: The bound on ONE bulk receipt call (``POST /api/attention/seen``).
 #:
@@ -6301,7 +6326,14 @@ class MobileDaemon:
         # bearer from its launch environment as ``session.runtime.launch`` does
         # (PR #3022 QA round 1, Q1). Lazy for the same import-path reason.
         from local_operator.agent_shell import without_daemon_bearer
+        from local_operator.session.runtime.launch import _prime_login_path
 
+        # This hand-built spawn bypasses ``launch._runtime_env``, so it takes
+        # that builder's PATH prime explicitly: launchd starts this daemon with
+        # a bare PATH, and the child's bash tool must see the operator's login
+        # PATH (Homebrew ``gh`` et al.). Free once the daemon's lineage is
+        # primed; a thread because the first call runs a login shell.
+        await asyncio.to_thread(_prime_login_path)
         env = dict(os.environ)
         without_daemon_bearer(env)
         env["LOP_MOBILE_CHILD_CWD"] = cwd
@@ -6811,6 +6843,13 @@ def build_app(daemon: MobileDaemon):
                 await _cleanup_stream(getattr(self.body_iterator, "aclose", None))
                 await _cleanup_stream(self._release)
 
+    # One per app: the memo holds the model sheet's last build for THIS daemon,
+    # and a fresh app (every test's) starts cold.
+    models_memo = _ModelsMemo(_models_payload, _models_fingerprint)
+    # A finished background peer read rings the list, so an open stream repaints
+    # with the fresh remote rows instead of waiting for an unrelated ring.
+    peer_rows_refresher = _PeerRowsRefresher(daemon.table.notify_list_changed)
+
     # -- auth helpers -----------------------------------------------------------
 
     def authed(request: Request) -> bool:
@@ -7017,11 +7056,10 @@ def build_app(daemon: MobileDaemon):
         if not include_temporary:
             sessions = [row for row in sessions if row.get("temporary") is None]
         if include_peers:
-            peers = await asyncio.to_thread(
-                mobile_mesh.remote_session_rows,
-                config_dir(),
-                pinned=set(daemon.table.pins),
-            )
+            # Never waits on the mesh fan-out once a listing exists: see
+            # ``_PeerRowsRefresher`` (the 1.1-2.8 s read that made the phone's
+            # every resume wait).
+            peers = await peer_rows_refresher.rows(config_dir(), set(daemon.table.pins))
             for row in peers:
                 # Remote rows carry the local row's ALWAYS-PRESENT shape with
                 # the empty values, not an omitted key. Their assignment lives
@@ -11005,14 +11043,13 @@ def build_app(daemon: MobileDaemon):
         if denied is not None:
             return denied
         try:
-            models = await asyncio.to_thread(_list_models)
+            # Memoised, single-flight and stale-while-revalidate (see
+            # ``_ModelsMemo``); the payload is the same two keys as before, and
+            # a failed build is never memoised, so the 502 path is unchanged.
+            payload = await models_memo.get()
         except Exception as exc:  # noqa: BLE001
             return JSONResponse({"error": str(exc)[:200]}, status_code=502)
-        # Resolved after the listing, off the loop, and never able to fail the
-        # sheet: ``_configured_default`` answers ``None`` for any config it
-        # cannot resolve, which is what the phone renders as "unavailable".
-        default = await asyncio.to_thread(_configured_default)
-        return _maybe_gzip(request, JSONResponse({"models": models, "default": default}))
+        return _maybe_gzip(request, JSONResponse(payload))
 
     async def api_transcribe(request: Request) -> Response:
         """Record-then-upload speech-to-text for the phone's voice mic.
@@ -11978,6 +12015,11 @@ def build_app(daemon: MobileDaemon):
             # subresource it might try to load; keeping the disposition inline
             # preserves the phone's image preview (an <img> never executes it).
             headers["Content-Security-Policy"] = "sandbox; default-src 'none'"
+        if getattr(ref, "remote", False):
+            # Another device's file, already typed by ``mobile.library._as_served``:
+            # the phone opens it top-level on this origin (``target=_blank``), so it
+            # is sandboxed whatever its type (#3872 R3-1).
+            headers["Content-Security-Policy"] = "sandbox; default-src 'none'"
         if download:
             headers["Cache-Control"] = "no-store"
         else:
@@ -12522,20 +12564,10 @@ def _recent_directories(limit: int = 8) -> list[str]:
     the dead-tap property is a property of the SUGGESTION, not of the registry.
     """
     try:
-        from local_operator.agents import AgentRegistry
-        from local_operator.paths import config_dir
-
-        registry = AgentRegistry(config_dir=config_dir())
-        agents = sorted(
-            registry.list_agents(),
-            key=lambda agent: agent.last_message_datetime or "",
-            reverse=True,
-        )
         seen: list[str] = []
-        for agent in agents:
-            cwd = agent.current_working_directory
-            if not cwd or cwd in seen:
-                continue
+        # Filtered per call, never memoised: a directory deleted or moved since
+        # the registry was read must stop being offered at once.
+        for cwd in _ranked_agent_cwds():
             # The gate reads RESOLVED paths (the same way
             # ``api_start_session`` resolves what it is handed), while the list
             # keeps the registry's own spelling so the picker shows the
@@ -12548,6 +12580,76 @@ def _recent_directories(limit: int = 8) -> list[str]:
         return seen
     except Exception:  # noqa: BLE001
         return []
+
+
+#: ``(fingerprint, ranked cwds)`` of the last agent-registry read; see
+#: :func:`_ranked_agent_cwds`. Guarded by the lock because every caller runs on
+#: a worker thread (``asyncio.to_thread``) and two may overlap.
+_AGENT_CWDS_MEMO: tuple[Any, tuple[str, ...]] | None = None
+_AGENT_CWDS_LOCK = threading.Lock()
+
+
+def _agent_definitions_fingerprint(agents_dir: Path) -> tuple[Any, ...]:
+    """Every input ``AgentRegistry._scan_agents_metadata`` reads, by ``stat``.
+
+    The scan reads exactly one file per agent directory (``agent.yml``), and an
+    agent's cwd and ``last_message_datetime`` are both written there, so the
+    directory names plus each manifest's inode/mtime/size change whenever the
+    ranking could. A few ``stat`` calls, against ~290 ms for the YAML scan.
+    """
+    parts: list[Any] = [str(agents_dir)]
+    try:
+        children = sorted(os.scandir(agents_dir), key=lambda entry: entry.name)
+    except OSError:
+        return (str(agents_dir), None)
+    for child in children:
+        try:
+            if not child.is_dir():
+                continue
+            st = os.stat(Path(child.path) / "agent.yml")
+        except OSError:
+            parts.append((child.name, None))
+        else:
+            parts.append((child.name, st.st_ino, st.st_mtime_ns, st.st_size))
+    return tuple(parts)
+
+
+def _ranked_agent_cwds() -> tuple[str, ...]:
+    """Distinct agent cwds, most recently active agent first, UNFILTERED.
+
+    WHY MEMOISED: constructing ``AgentRegistry`` parses every ``agent.yml``
+    (measured ~290-430 ms for 74 agents in an isolated store), and
+    ``GET /api/directories`` paid it twice per request -- once for ``recent``
+    and again inside ``_default_start_cwd`` -- on a worker thread holding the
+    GIL against every other route of a phone's resume burst (the operator's
+    log: p50 269 ms, max 597 ms). The memo is keyed on
+    :func:`_agent_definitions_fingerprint`, so it is exact rather than
+    time-bounded: any manifest write is seen by the next call. The spawn-gate
+    and ``is_dir`` filtering stays in :func:`_recent_directories`, per call.
+    """
+    global _AGENT_CWDS_MEMO
+    from local_operator.agents import AgentRegistry
+    from local_operator.paths import config_dir
+
+    root = config_dir()
+    key = _agent_definitions_fingerprint(root / "agents")
+    with _AGENT_CWDS_LOCK:
+        memo = _AGENT_CWDS_MEMO
+        if memo is not None and memo[0] == key:
+            return memo[1]
+        registry = AgentRegistry(config_dir=root)
+        agents = sorted(
+            registry.list_agents(),
+            key=lambda agent: agent.last_message_datetime or "",
+            reverse=True,
+        )
+        ranked: list[str] = []
+        for agent in agents:
+            cwd = agent.current_working_directory
+            if cwd and cwd not in ranked:
+                ranked.append(cwd)
+        _AGENT_CWDS_MEMO = (key, tuple(ranked))
+        return _AGENT_CWDS_MEMO[1]
 
 
 def _default_start_cwd() -> str:
@@ -13427,6 +13529,260 @@ def _shipped_describes(key: str, model_id: str, shipped_ids: "frozenset[str]") -
         return False
     wanted = _anthropic_family(model_id)
     return wanted is not None and any(_anthropic_family(row) == wanted for row in shipped_ids)
+
+
+def _models_payload() -> dict[str, Any]:
+    """The whole ``GET /api/models`` body: the rows, then the default marker.
+
+    The default is resolved after the listing and can never fail the sheet:
+    ``_configured_default`` answers ``None`` for any config it cannot resolve,
+    which the phone renders as "unavailable". Raises whatever ``_list_models``
+    raises, which the route answers as a 502.
+    """
+    models = _list_models()
+    return {"models": models, "default": _configured_default()}
+
+
+def _file_stat(path: Path) -> tuple[int, int, int] | None:
+    try:
+        st = path.stat()
+    except OSError:
+        return None
+    return (st.st_ino, st.st_mtime_ns, st.st_size)
+
+
+#: ``(config root, auth.db stats) -> credential digest`` for the last read, so
+#: an untouched database answers from a stat. One entry: there is one config
+#: root per daemon. Written from worker threads; a whole-tuple assignment is
+#: atomic, and the worst race is one extra read-only query.
+_CREDENTIAL_DIGEST_MEMO: tuple[Any, Any] | None = None
+
+
+def _credential_digest(root: Path) -> tuple[Any, ...] | None:
+    """:meth:`AuthStore.credential_identity_digest` over a read-only open.
+
+    The stat pre-check only skips the query: the stats move on every lease
+    and block write (that is R1's whole problem), but the digest under them
+    then comes back equal, which is what keeps the memo key still.
+    """
+    global _CREDENTIAL_DIGEST_MEMO
+    db = root / "auth.db"
+    stats = (str(root), _file_stat(db), _file_stat(root / "auth.db-wal"))
+    memo = _CREDENTIAL_DIGEST_MEMO
+    if memo is not None and memo[0] == stats:
+        return memo[1]
+    from local_operator.providers.auth_store import AuthStore
+
+    try:
+        # ``open_read_only``: no mkdir, no O_CREAT, no WAL pragma, no DDL -- a
+        # key read on every request must never write the operator's store.
+        store = AuthStore.open_read_only(db)
+    except Exception:
+        logger.debug("mobile models: credential digest unreadable", exc_info=True)
+        return None
+    try:
+        digest = store.credential_identity_digest()
+    finally:
+        store.close()
+    if digest is not None:
+        _CREDENTIAL_DIGEST_MEMO = (stats, digest)
+    return digest
+
+
+def _models_fingerprint() -> tuple[Any, ...]:
+    """What, having changed, makes a memoised model sheet WRONG rather than old.
+
+    The listing is authorized by the persisted credentials and its default
+    comes from ``config.yml``. The credentials half is the digest of WHICH
+    credentials exist and can authorize (:func:`_credential_digest`), not the
+    ``auth.db`` file stats: the same database takes refresh leases, blocks and
+    token refreshes from every concurrent session, and keying on its bytes
+    rebuilt the sheet on nearly every open (PR #4020 agent review, R1). A
+    login, logout, disable or default change is still visible to the very next
+    request; only provider-side catalogue drift waits on the TTLs above.
+
+    When the digest cannot be read, the key falls back to the file stats --
+    churny, but never a reason to serve a sheet built under other credentials.
+    """
+    from local_operator.paths import config_dir
+
+    root = config_dir()
+    config = _file_stat(root / "config.yml")
+    digest = _credential_digest(root)
+    if digest is None:
+        auth = (_file_stat(root / "auth.db"), _file_stat(root / "auth.db-wal"))
+        return (str(root), "stat", auth, config)
+    return (str(root), "digest", digest, config)
+
+
+class _PeerRowsRefresher:
+    """Answer ``include_peers`` from the cached mesh listing; refresh it off-path.
+
+    WHY: the phone asks ``include_peers=true`` on BOTH list transports
+    (local-operator-mobile ``connection-provider``), and the federated listing
+    behind it (``session.peer_rows.read_listing``) is a blocking fan-out to
+    every peer device, cached for ``LISTING_TTL_S`` (20 s). Measured on the
+    operator's mesh, read-only, through that exact function: 2,796 / 1,187 /
+    1,098 / 1,296 ms for 202 rows. Every resume after 20 s of quiet therefore
+    waited on it inside ``GET /api/sessions`` (the operator's log: 1,974 ms and
+    3,930 ms, both on a resume), and an open stream stalled one repaint per TTL.
+
+    WHAT CHANGES, and the compatibility argument: the frame shape is untouched;
+    only WHEN remote rows are fresh moves. With a listing cached (any age), the
+    frame projects it at once and ONE background read refreshes it; when that
+    read lands it rings the list (``notify_list_changed``), so every open
+    ``/api/sessions/events`` stream -- which the phone opens beside the GET --
+    repaints with the fresh rows within the fan-out's own duration. A shipped
+    client already treats each frame as a full repaint, so an older-then-newer
+    pair of frames is the ordinary case for it. With NO listing yet (first
+    read since the daemon started, or only a seeded row), the frame waits for
+    the read exactly as before: there is nothing honest to show instead.
+
+    A refresh rings ONLY when its rows or unanswered set differ from the entry
+    it replaced (agent review R2). The entry is stamped with the read's start,
+    so a fan-out that takes the TTL (a black-holed member spends
+    ``LISTING_CLIENT_TIMEOUT_S`` = the TTL) lands already stale; an
+    unconditional ring made the open stream rebuild, see a stale entry and
+    start the next read -- back-to-back fan-outs on an idle machine.
+
+    One task per config root (R3): production has one root per daemon, but a
+    read for another root must never be answered by the first root's task.
+
+    SHUTDOWN (QA round 1, Q1 -- documented, not changed): a stop that lands
+    while a background refresh is in flight waits for that fan-out (at most
+    ``LISTING_CLIENT_TIMEOUT_S``), because ``asyncio.run`` joins the default
+    executor the read runs on. The task itself is cancelled cleanly and nothing
+    leaks. Not joining would mean a daemon thread abandoned mid-read at
+    interpreter exit; before this class an in-flight request's inline read
+    held exit the same way, so the bounded wait is the safer trade.
+
+    Loop-confined; the read and the projection run on worker threads.
+    """
+
+    def __init__(self, on_refreshed: Callable[[], None]) -> None:
+        self._on_refreshed = on_refreshed
+        self._tasks: dict[str, asyncio.Future[None]] = {}
+
+    async def rows(self, root: Path, pinned: set[str]) -> list[dict[str, Any]]:
+        from local_operator.session import peer_rows
+
+        age = peer_rows.listing_age_s(root)
+        if age is None or not math.isfinite(age):
+            # Cold: share one read with every concurrent frame (the phone's GET
+            # and its stream arrive together), shielded so a hung-up client
+            # cannot cancel the read the others wait on.
+            with contextlib.suppress(Exception):
+                await asyncio.shield(self._start(root))
+        elif age >= peer_rows.LISTING_TTL_S:
+            self._start(root)
+        # ``inf``: project the cache, never dial here. If the cold read failed
+        # and left no entry, this falls back to the listing's own inline read.
+        return await asyncio.to_thread(
+            mobile_mesh.remote_session_rows, root, pinned=pinned, ttl_s=math.inf
+        )
+
+    def _start(self, root: Path) -> "asyncio.Future[None]":
+        task = self._tasks.get(str(root))
+        if task is None or task.done():
+            task = asyncio.ensure_future(self._run(root))
+            task.add_done_callback(lambda done: done.cancelled() or done.exception())
+            self._tasks[str(root)] = task
+        return task
+
+    async def _run(self, root: Path) -> None:
+        from local_operator.session import peer_rows
+
+        before = peer_rows.cached_listing(root)
+        try:
+            # ``ttl_s=0``: the forced read; the age check above already decided.
+            after = await asyncio.to_thread(peer_rows.read_listing, root, ttl_s=0)
+        except Exception:
+            logger.warning("mobile list: peer listing refresh failed", exc_info=True)
+            raise
+        if after != before:
+            self._on_refreshed()
+
+
+class _ModelsMemo:
+    """Single-flight, stale-while-revalidate memo for the model sheet's body.
+
+    WHY: the build is 140-500 ms of GIL-holding work, plus provider round trips
+    when a listing is past ``PICKER_TTL_S`` (see :data:`MODELS_FRESH_S` and
+    :data:`MODELS_STALE_S` for the measurements). It ran per request, the app
+    asks twice per open, and the burst of a phone resuming (sessions list,
+    streams, asks, models, directories at once) contended for the same GIL, so
+    the whole resume -- not just this sheet -- paid it.
+
+    THE INVARIANT: a served body was built under the CURRENT fingerprint
+    (credentials + config, :func:`_models_fingerprint`). Within that, a body
+    younger than ``fresh_s`` is served outright; one younger than ``stale_s`` is
+    served while ONE background rebuild runs; anything else (no body, another
+    fingerprint, too old) waits for a build. Concurrent waiters share one
+    build, and a failed build is never stored, so an error stays a per-request
+    502 exactly as before and the next request retries.
+
+    Loop-confined: every method runs on the daemon's event loop; only the
+    builder and the fingerprint run on worker threads.
+    """
+
+    def __init__(
+        self,
+        build: Callable[[], dict[str, Any]],
+        fingerprint: Callable[[], Any],
+        *,
+        fresh_s: float | None = None,
+        stale_s: float | None = None,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        self._build = build
+        self._fingerprint = fingerprint
+        # Read at call time, not import time, so a test can patch the module
+        # constants without reaching into an instance.
+        self._fresh_s = fresh_s
+        self._stale_s = stale_s
+        self._clock = clock
+        self._value: dict[str, Any] | None = None
+        self._value_key: Any = None
+        self._value_at = 0.0
+        self._task: asyncio.Future[dict[str, Any]] | None = None
+        self._task_key: Any = None
+
+    async def get(self) -> dict[str, Any]:
+        key = await asyncio.to_thread(self._fingerprint)
+        fresh_s = MODELS_FRESH_S if self._fresh_s is None else self._fresh_s
+        stale_s = MODELS_STALE_S if self._stale_s is None else self._stale_s
+        if self._value is not None and self._value_key == key:
+            age = self._clock() - self._value_at
+            if age < fresh_s:
+                return self._value
+            if age < stale_s:
+                self._start(key)
+                return self._value
+        # Shielded: a phone that hangs up must not cancel the build every other
+        # waiter (and the memo) is sharing.
+        return await asyncio.shield(self._start(key))
+
+    def _start(self, key: Any) -> "asyncio.Future[dict[str, Any]]":
+        task = self._task
+        if task is not None and not task.done() and self._task_key == key:
+            return task
+        task = asyncio.ensure_future(self._run(key))
+        # A background refresh nobody awaits must not log "exception never
+        # retrieved"; the failure is already logged in ``_run``.
+        task.add_done_callback(lambda done: done.cancelled() or done.exception())
+        self._task, self._task_key = task, key
+        return task
+
+    async def _run(self, key: Any) -> dict[str, Any]:
+        try:
+            value = await asyncio.to_thread(self._build)
+        except Exception:
+            logger.warning("mobile models: catalogue build failed", exc_info=True)
+            raise
+        # The build began under ``key``; a credential change during it shows up
+        # as a different fingerprint on the next request, which rebuilds.
+        self._value, self._value_key, self._value_at = value, key, self._clock()
+        return value
 
 
 def _configured_default() -> dict[str, Any] | None:

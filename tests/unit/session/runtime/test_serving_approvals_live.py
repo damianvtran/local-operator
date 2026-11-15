@@ -419,16 +419,45 @@ async def test_a_bare_approvals_reports_a_divergence_against_the_file(
     # The report now names the levers that exist under this model, and the clause
     # it used to append is the missing-anchor state instead (UX round 6, U1/U2),
     # which on a host WITH an anchor is the empty string — asserted below.
+    #
+    # THE ANCHOR STATE IS PINNED, NOT READ FROM THE HOST. `operator_authority_unusable`
+    # reads the root-owned anchor under /etc, so this assertion used to pass on a
+    # developer machine with an installed anchor and fail on a CI runner without
+    # one (#3950 CI, run 43670980140) once U17 made the no-anchor state a whole
+    # keyed line (design round 1 on #3950, D2/D3) instead of a clause appended to
+    # this remedy. Both host states are asserted here, each with the divergence.
+    import local_operator.operator as operator_mod
+
+    monkeypatch.setattr(operator_mod, "operator_authority_unusable", lambda: False)
     follower = handle._approvals_slash(session, "", SlashResult, may_loosen=False)
     follower_text = getattr(follower, "text", "")
+    assert "tool approvals: ask (this session)" in follower_text, follower_text
+    assert "config.yml says auto" in follower_text, follower_text
     assert (
         "/approvals auto adopts it with the operator's own consent — authorise it from this "
         "machine (Touch ID) or from a paired phone" in follower_text
     ), follower_text
-    assert "typed in the terminal" not in follower_text, follower_text
-    assert "started this session" not in follower_text, follower_text
-    assert "retire and reopen" not in follower_text, follower_text
-    assert "the window that opens a runtime owns its gate" not in follower_text, follower_text
+    assert "aren't set up on this computer" not in follower_text, follower_text
+
+    # No usable anchor: the report is the ONE keyed line, and it still carries the
+    # session-vs-file divergence — U17 replaced the remedy's wording, not the
+    # disclosure the bare `/approvals` exists for.
+    monkeypatch.setattr(operator_mod, "operator_authority_unusable", lambda: True)
+    unanchored = handle._approvals_slash(session, "", SlashResult, may_loosen=False)
+    unanchored_text = getattr(unanchored, "text", "")
+    assert unanchored_text == ServingSessionHandle._uninstalled_anchor_report(
+        "ask", "auto"
+    ), unanchored_text
+    assert unanchored_text.startswith("tool approvals: ask (this session)"), unanchored_text
+    assert "config.yml says auto" in unanchored_text, unanchored_text
+    assert "aren't set up on this computer yet" in unanchored_text, unanchored_text
+    assert "Settings → Phone access" in unanchored_text, unanchored_text
+
+    for text_ in (follower_text, unanchored_text):
+        assert "typed in the terminal" not in text_, text_
+        assert "started this session" not in text_, text_
+        assert "retire and reopen" not in text_, text_
+        assert "the window that opens a runtime owns its gate" not in text_, text_
 
     # `/approvals default <mode>` USED TO BE REFUSED here and is now HONOURED:
     # the persistence path is exercised in
