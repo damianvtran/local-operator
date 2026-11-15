@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "es",
   "namespace": "wire.settings",
-  "history_sha256": "4cb56f3f43b1ccbcd9bb7c18b593271cf969642b9e786640126be815ffb3aae4",
+  "history_sha256": "a0ea769905b4811d3762519d546e2f638296546159cca5a0414d0e22e71247fe",
   "entries": [
     {
       "locale": "es",
@@ -344,6 +344,66 @@
         "evidence": "i18n/audits/evidence/es/wire.settings/merged-compat-187b766ab67d-84892ed59/record.json"
       },
       "note": "Genuine independent merged-source semantic/context compatibility audit, 2026-11-13, 187b766ab67d, openai/gpt-6.1-sol, no fallback in this audit. Exact disjoint parent key/value composition; 2 feature + 6 upstream keys semantically read; unchanged keys carried by current-byte parent evidence. Historical provenance preserved as reported, not relabelled. Evidence: i18n/audits/evidence/es/wire.settings/merged-compat-187b766ab67d-84892ed59/record.json"
+    },
+    {
+      "locale": "es",
+      "namespace": "wire.settings",
+      "source_sha256": "99abc7c2ebaaf0d498650af7f32e9ab51e4ee25dc79ae0285408314ad4453e64",
+      "target_sha256": "f3958b6d17300da2808d084e745c61ffc8a25b6a06d6c0330f83083eae77758f",
+      "translator": {
+        "agent": "coder (PR #3872 core implementer, lopdev)",
+        "session": "f4c08c15c058",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-12"
+      },
+      "composition_translators": [
+        {
+          "side": "feature",
+          "provenance": {
+            "agent": "coder (PR #3872 core implementer, lopdev)",
+            "session": "f4c08c15c058",
+            "model": "anthropic/claude-opus-5-5",
+            "date": "2026-11-12"
+          },
+          "additional_reported": null
+        },
+        {
+          "side": "main",
+          "provenance": {
+            "agent": "i18n-translator subagent, job d5aeddae9573 under manager session 79bddc262663 (commit 1c956878e5d3) — relayed by the manager, not independently verified; es label fix e2ea7efff2f6 by i18n-translator job 17c3e25545b7 (same model, no fallback, relayed)",
+            "model": "anthropic/claude-opus-5-5",
+            "fallback": "none (as relayed by the manager)",
+            "date": "2026-11-13"
+          },
+          "additional_reported": {
+            "job": "17c3e25545b7",
+            "model": null,
+            "source": "upstream audited report identifies translator job; actual model not independently supplied here"
+          }
+        }
+      ],
+      "auditor": {
+        "agent": "independent i18n compatibility auditor (existing PR3872 core-i18n stream; merged-source binding2)",
+        "session": "187b766ab67d",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-15",
+        "fallback": "none in this audit",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "composition_audit": {
+        "source_head": "da01272464c1ec3747d3ed18501d7c0e877f2fb7",
+        "parent_revisions": [
+          "801bdd93ff71c5d11209922ec9ba72393e826366",
+          "aa051d55925b483175388edcbae9dff315ca49f1"
+        ],
+        "common_base": "39b692a4bb7ec06e2305318d79b31a478661c87d",
+        "evidence": "i18n/audits/evidence/es/wire.settings/merged-compat2-187b766ab67d-da012724/record.json"
+      },
+      "retained_upstream_findings": [],
+      "note": "Independent merged-source binding2 audit 2026-11-15, 187b766ab67d, openai/gpt-6.1-sol, no fallback. Actual source 99abc7c2ebaaf0d498650af7f32e9ab51e4ee25dc79ae0285408314ad4453e64; exact disjoint parent-key composition (2 remote cache + 2 offline-hold keys), semantics/context freshly read, remaining 865 keys carried by verified fresh parent evidence. No translations/history rewritten. Evidence: i18n/audits/evidence/es/wire.settings/merged-compat2-187b766ab67d-da012724/record.json"
     }
   ]
 }
