@@ -2391,7 +2391,8 @@ class ProjectRegistry:
         listing paints, and it is why the sets built on this reading (the ◆
         membership, the completion check) are page-scoped too — an addressed
         read by name or id still resolves the row. Documented, not redesigned
-        (m2).
+        (m2). A surface that must show EVERY linked row (the chat view's
+        linked-projects tab) adds :meth:`projects_linked_off_page`.
         """
         self._refresh_if_needed()
         return sorted(
@@ -2402,6 +2403,67 @@ class ProjectRegistry:
             ),
             key=lambda project: project.name.casefold(),
         )
+
+    def projects_linked_off_page(self, session_id: str) -> list[Project]:
+        """The rows linked to ``session_id`` that the recency page did NOT load.
+
+        The complement of :meth:`projects_for_session`: together they answer
+        "every project this session is linked to", page or no page. Kept a
+        separate call rather than a flag on the page-scoped reading because the
+        ◆ membership and the completion check are deliberately page-scoped (see
+        that method), and a chat's linked-projects tab is not — the operator
+        asked for ANY linked project, and a dormant row a session filed months
+        ago is exactly the one a page cut hides.
+
+        Cost is bounded the way :meth:`_find_on_disk_by_name` bounds it: a stat
+        listing, then for each off-page row one raw read with a SUBSTRING
+        prefilter on the session id (a row that never mentions the id is skipped
+        without a ``json.loads``), and only a row that really carries the id in
+        ``sessions``/``coordination_sessions`` pays the model build. Callers run
+        it off the event loop and only when the page is truncated. The file
+        rules are ``_row_files``' (no dot names, no symlinks, regular ``.json``)
+        and a row whose id does not match its file name is refused, as on load.
+        Unreadable rows are skipped: an invalid row is invisible to every reader.
+        """
+        if not session_id:
+            return []
+        self._refresh_if_needed()
+        on_page = set(self._projects)
+        try:
+            row_files = self._row_files()
+        except OSError:
+            return []
+        found: list[Project] = []
+        for row in row_files:
+            stem = row.path.stem
+            if stem in on_page:
+                continue
+            try:
+                text = row.path.read_text(encoding="utf-8")
+            except OSError:
+                continue
+            if session_id not in text:
+                continue
+            try:
+                data = json.loads(text)
+            except ValueError:
+                continue
+            if not isinstance(data, dict):
+                continue
+            work = data.get("sessions")
+            filed = data.get("coordination_sessions")
+            if not (
+                (isinstance(work, list) and session_id in work)
+                or (isinstance(filed, list) and session_id in filed)
+            ):
+                continue
+            try:
+                project = Project.model_validate(data)
+            except Exception:  # noqa: BLE001 — an unreadable row is invisible
+                continue
+            if project.id == stem:
+                found.append(project)
+        return found
 
     @contextmanager
     def _persistence_lock(self, *, wait: float | None = None) -> Iterator[None]:

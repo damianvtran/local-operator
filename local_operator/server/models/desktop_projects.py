@@ -229,6 +229,33 @@ class LinkedSessionView(BaseModel):
     todos: dict[str, Any] | None = None
 
 
+class SessionProjects(BaseModel):
+    """``GET /v1/desktop/sessions/{session_id}/projects`` — one chat's projects.
+
+    The rows are the LISTING's own ``ProjectSummary`` shape, so the chat view's
+    linked-projects tab and the sidebar board paint one row type and open the
+    same detail view (``GET /v1/desktop/projects/{key}``) from it.
+
+    COMPLETE, unlike the board: every row linked to the session (work or
+    coordination link) is here, including a dormant one past the recency page —
+    the route reads off-page linked rows from disk when the page is truncated
+    (QA round 1, Q1). The page fields mirror :class:`ProjectList`'s so a client
+    can see the store was paged; they describe the store, not a gap in
+    ``projects``. An empty ``projects`` for a never-linked session — or an id
+    the store has never seen — is simply "none"; it is never a 404, because a
+    session is not a project-store object.
+    """
+
+    session_id: str
+    projects: list[ProjectSummary] = Field(default_factory=list)
+    #: Addressable rows the store holds (page plus beyond), as on the listing.
+    total_rows: int = 0
+    #: Rows the recency page holds, as on the listing.
+    loaded_rows: int = 0
+    #: True when the store is paged; ``projects`` still includes off-page links.
+    truncated: bool = False
+
+
 class ProjectList(BaseModel):
     """``GET /v1/desktop/projects`` — the page, plus what the page left out.
 
