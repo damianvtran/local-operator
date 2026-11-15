@@ -141,12 +141,15 @@ class _Rig:
         )
         return next(r for r in folded if r["ask_id"] == self.ask_id)
 
-    async def guard(self) -> tuple[Any, int]:
+    async def guard(self, *, verdict: str = "BLOCK: no consent (test judge)") -> tuple[Any, int]:
+        # ``verdict`` lets a positive control hand the guard a judge that would
+        # ALLOW, so an unblocked outcome cannot come from a judge that never ran
+        # being asked the wrong question; the default BLOCK judge is the probe's.
         calls: list[int] = []
 
         async def judge(system: str, user: str) -> str:
             calls.append(1)
-            return "BLOCK no consent (test judge)"
+            return verdict
 
         env = {
             "HOME": str(self.home),
@@ -195,11 +198,33 @@ _PROVED_DESKTOP = _ConnectionAuthority(
 )
 
 
-def _assert_judged_and_blocked(outcome: Any, judge_calls: int, victim: Path) -> None:
+#: The deterministic refusal #3966 (bd8755e8) writes for an ask that names the
+#: path but whose answer is not the operator's (``provenance._not_consent_label``).
+_NOT_BY_OPERATOR = "not by the operator"
+
+
+def _assert_refused_not_consent(outcome: Any, judge_calls: int, victim: Path) -> None:
+    """A forged/unproven answer never settles the delete; it is refused or judged.
+
+    WHY the judge is optional (the #3966 x #3993 interaction). #3993 (this file)
+    landed asserting ``judge_calls >= 1``: with the stamp in place a forged answer
+    no longer lifted the delete, so it fell through to the (BLOCK) judge. #3966
+    rode a different release train and made the guard STRICTER: an ask that
+    names the path but was answered on a surface outside
+    ``TRUSTED_ASK_SURFACES`` (``remote``/``unverified`` -- exactly what the stamp
+    writes) is "answered ... not by the operator" and refused deterministically
+    (``DeleteCase.lapsed_only``) before any judge. Both outcomes keep the victim;
+    what this file guards is the zero-judge ALLOW of scenarios D/E at 49af370.
+
+    So: blocked, victim intact, and EITHER a judge ran OR the block is #3966's
+    not-the-operator refusal -- never some unrelated zero-judge block that would
+    let a regression of the stamp hide behind another rule.
+    """
     assert outcome is not None
-    assert judge_calls >= 1, "the forged answer settled the delete before any judge"
     assert outcome.blocked is True, outcome
     assert victim.exists()
+    if judge_calls == 0:
+        assert _NOT_BY_OPERATOR in outcome.text, outcome
 
 
 # ---------------------------------------------------------------------------
@@ -224,7 +249,7 @@ async def test_scenario_d_remote_ask_respond_claiming_desktop_is_not_consent(
     # ...but its surface is the runtime's word, not the frame's.
     assert record["answered_by"] == {"surface": "remote"}
     outcome, judge_calls = await rig.guard()
-    _assert_judged_and_blocked(outcome, judge_calls, rig.victim)
+    _assert_refused_not_consent(outcome, judge_calls, rig.victim)
 
 
 @pytest.mark.asyncio
@@ -242,7 +267,7 @@ async def test_scenario_e_unproven_mirror_answer_is_not_consent(
     assert record["status"] == "answered"
     assert record["answered_by"] == {"surface": "unverified"}
     outcome, judge_calls = await rig.guard()
-    _assert_judged_and_blocked(outcome, judge_calls, rig.victim)
+    _assert_refused_not_consent(outcome, judge_calls, rig.victim)
 
 
 @pytest.mark.asyncio
@@ -266,7 +291,7 @@ async def test_a_local_key_holder_cannot_claim_desktop(home: tuple[Path, Path]) 
     )
     assert rig.record()["answered_by"] == {"surface": "unverified"}
     outcome, judge_calls = await rig.guard()
-    _assert_judged_and_blocked(outcome, judge_calls, rig.victim)
+    _assert_refused_not_consent(outcome, judge_calls, rig.victim)
 
 
 @pytest.mark.asyncio
@@ -287,6 +312,36 @@ async def test_decline_and_dismiss_record_the_stamped_surface(
 # ---------------------------------------------------------------------------
 # The legitimate paths still lift
 # ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("verdict", ["BLOCK: no consent (test judge)", "ALLOW"])
+async def test_positive_control_a_proved_answer_is_consent_not_the_3966_refusal(
+    home: tuple[Path, Path], verdict: str
+) -> None:
+    """The inverse of every refusal above, on the same ask and the same delete.
+
+    #3966 refuses an ask "answered ... not by the operator"; that predicate reads
+    ``answered_by.surface`` against ``TRUSTED_ASK_SURFACES``, and #3993's stamp
+    writes ``desktop`` only for a frame that proved the operator capability. If
+    the two ever disagree, operator approval itself stops working: a PROVED
+    "Yes" would read as unanswered and be refused. Pin it: the proved answer is
+    consent, lifts before the judge (so even a BLOCK judge cannot stop it, and
+    an ALLOW judge is never needed), and the refusal text never appears.
+    """
+    rig = _Rig(*home, tag="PC")
+    reply = await rig.dispatch(
+        "ask_respond",
+        {"ask_id": rig.ask_id, "answers": {"q1": ["Yes"]}, "by": "desktop"},
+        _PROVED_DESKTOP,
+    )
+    assert reply == "answered"
+    assert rig.record()["answered_by"] == {"surface": "desktop"}
+    outcome, judge_calls = await rig.guard(verdict=verdict)
+    assert outcome is None or outcome.blocked is False, outcome
+    assert outcome is None or _NOT_BY_OPERATOR not in (outcome.text or ""), outcome
+    assert judge_calls == 0
+    assert rig.victim.exists()  # the guard is only evaluated; nothing ran
 
 
 @pytest.mark.asyncio
@@ -594,7 +649,7 @@ async def test_the_real_socket_stamps_desktop_only_for_a_proved_frame(
         assert judge_calls == 0
     else:
         assert record["answered_by"] == {"surface": "unverified"}
-        _assert_judged_and_blocked(outcome, judge_calls, rig.victim)
+        _assert_refused_not_consent(outcome, judge_calls, rig.victim)
 
 
 @pytest.mark.asyncio
@@ -642,7 +697,7 @@ async def test_a_mesh_relayed_answer_is_remote_even_with_a_valid_proof(
         await live.close(config)
     assert rig.record()["answered_by"] == {"surface": "remote"}
     outcome, judge_calls = await rig.guard()
-    _assert_judged_and_blocked(outcome, judge_calls, rig.victim)
+    _assert_refused_not_consent(outcome, judge_calls, rig.victim)
 
 
 @pytest.mark.asyncio
@@ -728,7 +783,7 @@ async def test_scenario_r_an_unproven_revise_does_not_keep_the_proved_label(
     await _proved_no_then_revise(rig, _LOCAL_UNPROVEN)
     assert rig.record()["answered_by"] == {"surface": "unverified"}
     outcome, judge_calls = await rig.guard()
-    _assert_judged_and_blocked(outcome, judge_calls, rig.victim)
+    _assert_refused_not_consent(outcome, judge_calls, rig.victim)
 
 
 @pytest.mark.asyncio
@@ -740,7 +795,7 @@ async def test_scenario_r2_a_mesh_revise_does_not_keep_the_proved_label(
     await _proved_no_then_revise(rig, _REMOTE_PROMPT)
     assert rig.record()["answered_by"] == {"surface": "remote"}
     outcome, judge_calls = await rig.guard()
-    _assert_judged_and_blocked(outcome, judge_calls, rig.victim)
+    _assert_refused_not_consent(outcome, judge_calls, rig.victim)
 
 
 @pytest.mark.asyncio
@@ -767,7 +822,7 @@ async def test_a_proved_revise_cannot_wash_an_earlier_unproven_one(
     )
     assert rig.record()["answered_by"] == {"surface": "unverified"}
     outcome, judge_calls = await rig.guard()
-    _assert_judged_and_blocked(outcome, judge_calls, rig.victim)
+    _assert_refused_not_consent(outcome, judge_calls, rig.victim)
 
 
 @pytest.mark.asyncio
@@ -792,7 +847,7 @@ async def test_scenario_m_an_unproven_cell_is_not_settled_by_a_proved_tap(
     assert record["answers"] == {"q1": ["Yes"], "q2": ["No"]}
     assert record["answered_by"] == {"surface": "unverified"}
     outcome, judge_calls = await rig.guard()
-    _assert_judged_and_blocked(outcome, judge_calls, rig.victim)
+    _assert_refused_not_consent(outcome, judge_calls, rig.victim)
 
 
 @pytest.mark.asyncio
